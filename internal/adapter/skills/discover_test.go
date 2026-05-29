@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -240,6 +241,37 @@ func hasReasonContaining(skips []SkipError, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestDirSourceImplementsSource(t *testing.T) {
+	dir := t.TempDir()
+	writeSkill(t, dir, "commit-style", validSkill)
+	// DirSource is the concrete Source for one local directory; it must produce
+	// the same skills as the Discover wrapper, and carry its Label unchanged.
+	var src Source = DirSource{Dir: dir, Label: "project"}
+	got, skips, err := src.Skills(context.Background())
+	if err != nil {
+		t.Fatalf("DirSource.Skills: %v", err)
+	}
+	if len(skips) != 0 {
+		t.Fatalf("unexpected skips: %v", skips)
+	}
+	if len(got) != 1 || got[0].Name != "commit-style" {
+		t.Fatalf("DirSource produced %+v", got)
+	}
+}
+
+func TestDirSourceEmptyAndMissing(t *testing.T) {
+	// Empty Dir and a missing Dir both yield nothing, no error (opt-in).
+	for _, dir := range []string{"", filepath.Join(t.TempDir(), "nope")} {
+		got, skips, err := DirSource{Dir: dir}.Skills(context.Background())
+		if err != nil {
+			t.Errorf("Dir=%q: unexpected error %v", dir, err)
+		}
+		if len(got) != 0 || len(skips) != 0 {
+			t.Errorf("Dir=%q: expected nothing, got skills=%d skips=%d", dir, len(got), len(skips))
+		}
+	}
 }
 
 func TestDiscoverCRLFFrontmatter(t *testing.T) {

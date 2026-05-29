@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,9 +17,10 @@ import (
 // lives at <dir>/<name>/SKILL.md, mirroring the Agent Skills layout.
 const SkillFileName = "SKILL.md"
 
-// DefaultDir is the conventional skills directory, relative to the workspace. It
-// is NOT applied automatically — skills are opt-in, so discovery only runs when
-// an explicit directory is configured. It is exposed so the composition root can
+// DefaultDir is the conventional project-level skills directory, relative to the
+// workspace. It is one of the conventional locations the known-path resolver
+// (ResolveSources) searches; it is NOT applied automatically by an explicit
+// DirSource — skills are opt-in. It is exposed so the composition root can
 // surface the convention (e.g. in flag help text).
 const DefaultDir = ".mecatl/skills"
 
@@ -26,26 +28,10 @@ const DefaultDir = ".mecatl/skills"
 // ALWAYS-IN-CONTEXT metadata (it lives in the Skill tool's Spec().Description, on
 // every request), so an unbounded one would inflate every prompt and break the
 // byte-stable prompt-prefix caching the OpenAI adapter relies on. A skill
-// description is a single line; 800 bytes is generous for that. Discover truncates
-// (rune-safe, with an ellipsis) and records a non-fatal warning when it trims.
+// description is a single line; 800 bytes is generous for that. parseSkill
+// truncates (rune-safe, with an ellipsis) and records a non-fatal warning when it
+// trims.
 const maxDescriptionBytes = 800
-
-// SkipError records one diagnostic from discovery: either a skill that could not
-// be loaded (a fatal SKIP — the skill is excluded), or a non-fatal WARNING about
-// a skill that WAS kept (e.g. its description or body was truncated). In both
-// cases Discover keeps scanning rather than aborting, and returns the collected
-// diagnostics so the composition root can surface them. It is never returned as
-// Discover's fatal error.
-type SkipError struct {
-	// Path is the SKILL.md (or directory) the problem was found at.
-	Path string
-	// Reason is a short, human-readable description of the problem.
-	Reason string
-}
-
-func (e SkipError) Error() string {
-	return fmt.Sprintf("skipped skill at %q: %s", e.Path, e.Reason)
-}
 
 // frontmatter is the parsed YAML header of a SKILL.md file. Only name and
 // description are part of the always-in-context metadata; any other keys are
@@ -55,21 +41,40 @@ type frontmatter struct {
 	Description string `yaml:"description"`
 }
 
-// Discover scans dir for skills laid out as <dir>/<name>/SKILL.md, parses each
-// one's YAML frontmatter and markdown body, and returns the valid skills sorted
-// by name for deterministic output.
+// DirSource is the local-OS-filesystem implementation of Source: it produces the
+// skills laid out as <Dir>/<name>/SKILL.md under a single directory. It is the
+// default, conventional source; other Source implementations (embedded defaults,
+// a remote registry) reuse the same parsing (parseSkill/splitFrontmatter) without
+// touching the filesystem.
+type DirSource struct {
+	// Dir is the directory to scan. An empty Dir yields no skills (opt-in), as
+	// does a Dir that does not exist.
+	Dir string
+	// Label is an optional human-readable name for this source (e.g. "project",
+	// "user", "explicit"), surfaced in diagnostics and logs. It does not affect
+	// discovery or precedence.
+	Label string
+}
+
+// Skills implements Source for a single local directory. It scans Dir for skills
+// laid out as <Dir>/<name>/SKILL.md, parses each one's YAML frontmatter and
+// markdown body, and returns the valid skills sorted by name for deterministic
+// output.
 //
-// It is forgiving by design: a missing dir yields no skills and no error (skills
-// are opt-in); a malformed or frontmatter-less SKILL.md is SKIPPED and reported
-// via the returned []SkipError rather than aborting the scan. Discover returns a
-// non-nil error only for a genuine I/O fault reading the directory itself.
+// It is forgiving by design: an empty or missing Dir yields no skills and no
+// error (skills are opt-in); a malformed or frontmatter-less SKILL.md is SKIPPED
+// and reported via the returned []SkipError rather than aborting the scan. It
+// returns a non-nil error only for a genuine I/O fault reading the directory
+// itself.
 //
 // A skill whose frontmatter `name` disagrees with its directory name is accepted
 // using the FRONTMATTER name (the frontmatter is the source of truth for the
-// activation key); duplicate effective names are resolved by keeping the first in
-// sorted-path order and skipping the rest (reported as a SkipError).
-func Discover(dir string) ([]Skill, []SkipError, error) {
-	if strings.TrimSpace(dir) == "" {
+// activation key); duplicate effective names WITHIN this directory are resolved by
+// keeping the first in sorted-path order and skipping the rest (reported as a
+// SkipError). Cross-source collisions are resolved one level up, by MultiSource.
+func (s DirSource) Skills(_ context.Context) ([]Skill, []SkipError, error) {
+	dir := strings.TrimSpace(s.Dir)
+	if dir == "" {
 		return nil, nil, nil
 	}
 	entries, err := os.ReadDir(dir)
@@ -129,6 +134,14 @@ func Discover(dir string) ([]Skill, []SkipError, error) {
 	return out, skips, nil
 }
 
+// Discover scans dir for skills and returns them. It is a thin convenience
+// wrapper over DirSource preserved for backward compatibility and for callers
+// (and tests) that want single-directory discovery without composing a Source.
+// New code should construct a DirSource (and compose it with NewMultiSource).
+func Discover(dir string) ([]Skill, []SkipError, error) {
+	return DirSource{Dir: dir}.Skills(context.Background())
+}
+
 // parseSkill splits raw into YAML frontmatter and a markdown body and validates
 // the required header fields. It returns:
 //   - a fatal reason string (with a zero Skill) on any structural problem, so the
@@ -140,7 +153,8 @@ func Discover(dir string) ([]Skill, []SkipError, error) {
 // The description is capped HERE (at parse time) to maxDescriptionBytes because it
 // lives in the always-in-context tool spec; the body is NOT trimmed here (the
 // Skill tool truncates it on activation against the shared toolkit cap), but an
-// oversized body is flagged so the author knows it will be truncated.
+// oversized body is flagged so the author knows it will be truncated. parseSkill
+// is filesystem-free so every Source implementation can reuse it.
 func parseSkill(raw []byte, path string) (Skill, string, []string) {
 	fmText, body, ok := splitFrontmatter(string(raw))
 	if !ok {

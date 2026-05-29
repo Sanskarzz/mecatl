@@ -763,14 +763,33 @@ read-only `Skill` tool (`skills.NewTool`, catalog name `Skill`,
 discovered skill's name + one-line description** — the cheap, always-in-context,
 cache-stable metadata layer — while `Execute({name})` returns that skill's full
 **body** only when the model activates it (the load-on-activation layer). Because
-the tool is read-only it is also available in plan mode. It is **opt-in**:
-`mecated` wires it behind `--skills-dir`; discovery runs ONLY when that flag is
-set (there is no applied default), and `.mecatl/skills` (`skills.DefaultDir`) is
-the *conventional* directory to point it at. The tool is registered **only when at
-least one valid skill is discovered** — an empty inventory advertises nothing.
-Discovery (reading files, YAML parsing via `go.yaml.in/yaml/v3`) is an adapter
-concern; nothing in this package is imported by a domain package — it merely
-implements the domain `tool.Tool` interface.
+the tool is read-only it is also available in plan mode. The tool is registered
+**only when at least one valid skill is discovered** — an empty inventory
+advertises nothing.
+
+*Where skills come from* is itself a seam: `skills.Source`
+(`Skills(ctx) ([]Skill, []SkipError, error)`) is the **pluggable extensibility
+point**. `skills.DirSource{Dir, Label}` is the default local-filesystem
+implementation (the `<dir>/<name>/SKILL.md` layout); `skills.MultiSource`
+composes an **ordered** list of sources with a defined precedence — **earlier
+source wins** on name collisions, the loser dropped with a "shadowed by a
+higher-precedence source" `SkipError`. A future embedded-defaults or remote
+registry source just implements `Source` and slots into the `MultiSource`; the
+consumer (`skills.RegisterSource`) is unchanged. The Source seam lives in the
+**adapter** package, NOT the domain: nothing in the domain or the agent loop
+consumes skills (they are packaged into a `tool.Tool` at composition time), so a
+domain port would be the wrong home — the seam is scoped to where it is consumed,
+mirroring MCP, repo-map, and the TUI theme search-path.
+
+It stays **opt-in**: `mecated` wires it via a repeatable `--skills-dir`
+(highest precedence) and an opt-in `--skills-conventional` that adds Claude-Code-
+style **known paths** (`skills.ResolveSources`): project-level
+`<workspace>/.mecatl/skills` and `<workspace>/.claude/skills`, then user-level
+`$XDG_CONFIG_HOME/mecatl/skills` (or `~/.config/mecatl/skills`) and `~/.claude/skills`,
+with precedence **explicit > project > user**. With neither flag set, the resolver
+yields no sources and nothing is read. Discovery (reading files, YAML parsing via
+`go.yaml.in/yaml/v3`) is an adapter concern; nothing in this package is imported
+by a domain package — it merely implements the domain `tool.Tool` interface.
 
 ### Seam summary
 
@@ -787,6 +806,7 @@ changes when one is swapped:
 | `CommandExpander` | `prompt/command.go` | `NoopExpander` → `DirCommandExpander` (slash commands) |
 | `tool.Disclosable` + `ToolSearch` | `internal/tool` | always-listed → progressive disclosure |
 | `Skill` tool (skills) | `internal/adapter/skills` (impl) | off → opt-in `--skills-dir`; progressive disclosure of *instructions* (metadata always in context, body on activation) |
+| `skills.Source` | `internal/adapter/skills/source.go` | `DirSource` (one dir) → `MultiSource` (ordered, earlier-wins); known-path resolver (`--skills-conventional`: project `.mecatl`/`.claude`, user XDG/`~/.claude`); future embedded/remote sources slot in |
 | `tool.CommandRunner` | `internal/tool/tool.go` (impl `osfs`) | the command-execution chokepoint; an OS sandbox wraps here |
 | `tool.MemoryStore` | `internal/tool/tool.go` (impl `memory`) | cross-session memory + `dream` consolidation |
 | `tool.WorkspaceForker` | `tool/isolation.go` (impl `forker`) | fork-join isolated branches |

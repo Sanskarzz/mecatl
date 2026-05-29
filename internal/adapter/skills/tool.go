@@ -143,18 +143,23 @@ func (t Tool) availableHint() string {
 
 // --- Registration helpers -------------------------------------------------
 
-// Register discovers skills under dir and, when at least one valid skill is
+// RegisterSource discovers skills from src and, when at least one valid skill is
 // found, registers a single Skill tool into cat. It returns the discovered
-// skills, the per-skill skip diagnostics (malformed/duplicate entries), and the
-// first registration error (e.g. a name collision) or a discovery I/O fault.
+// skills, the aggregated skip diagnostics (malformed/duplicate/shadowed entries),
+// and the first registration error (e.g. a name collision) or a discovery fault.
+//
+// src is the EXTENSIBILITY POINT: pass a single DirSource for one directory, or a
+// MultiSource (built via ResolveSources + NewMultiSource) to aggregate the
+// conventional locations and explicit paths with precedence. The consumer here is
+// agnostic to where skills come from.
 //
 // Skills are OPT-IN and the tool is registered ONLY when there is something to
-// expose: if dir is empty or yields zero valid skills, Register registers
-// NOTHING and returns (nil, skips, nil) — there is no value in advertising a
-// Skill tool with an empty inventory. The composition root logs the skip
-// diagnostics and the enabled/disabled state.
-func Register(cat *tool.Catalog, dir string) ([]Skill, []SkipError, error) {
-	discovered, skips, err := Discover(dir)
+// expose: if src yields zero valid skills, RegisterSource registers NOTHING and
+// returns (nil, skips, nil) — there is no value in advertising a Skill tool with
+// an empty inventory. The composition root logs the skip diagnostics and the
+// enabled/disabled state.
+func RegisterSource(ctx context.Context, cat *tool.Catalog, src Source) ([]Skill, []SkipError, error) {
+	discovered, skips, err := src.Skills(ctx)
 	if err != nil {
 		return nil, skips, err
 	}
@@ -165,4 +170,12 @@ func Register(cat *tool.Catalog, dir string) ([]Skill, []SkipError, error) {
 		return discovered, skips, err
 	}
 	return discovered, skips, nil
+}
+
+// Register discovers skills under a single directory and registers the Skill
+// tool, exactly like RegisterSource with a DirSource{Dir: dir}. It is preserved
+// for backward compatibility; new wiring should use RegisterSource with a
+// composed Source.
+func Register(cat *tool.Catalog, dir string) ([]Skill, []SkipError, error) {
+	return RegisterSource(context.Background(), cat, DirSource{Dir: dir})
 }

@@ -172,6 +172,56 @@ func TestRegisterOptIn(t *testing.T) {
 	}
 }
 
+func TestRegisterSourceOptInAndMerge(t *testing.T) {
+	// An empty MultiSource registers nothing (preserved opt-in behaviour).
+	cat := tool.NewCatalog()
+	discovered, _, err := RegisterSource(context.Background(), cat, NewMultiSource())
+	if err != nil {
+		t.Fatalf("RegisterSource empty: %v", err)
+	}
+	if len(discovered) != 0 {
+		t.Errorf("empty source should discover nothing, got %d", len(discovered))
+	}
+	if _, ok := cat.Lookup(ToolName); ok {
+		t.Error("Skill tool must NOT be registered when no skills are discovered")
+	}
+
+	// Two filesystem sources with a colliding name: the EARLIER source wins, and a
+	// single Skill tool is registered over the merged set.
+	high := t.TempDir()
+	low := t.TempDir()
+	writeSkill(t, high, "dup", "---\nname: dup\ndescription: high wins\n---\nhigh body\n")
+	writeSkill(t, high, "only-high", "---\nname: only-high\ndescription: h\n---\nbody\n")
+	writeSkill(t, low, "dup", "---\nname: dup\ndescription: low loses\n---\nlow body\n")
+	writeSkill(t, low, "only-low", "---\nname: only-low\ndescription: l\n---\nbody\n")
+
+	cat2 := tool.NewCatalog()
+	src := NewMultiSource(DirSource{Dir: high, Label: "explicit"}, DirSource{Dir: low, Label: "project"})
+	discovered, skips, err := RegisterSource(context.Background(), cat2, src)
+	if err != nil {
+		t.Fatalf("RegisterSource: %v", err)
+	}
+	if len(discovered) != 3 {
+		t.Fatalf("merged set should hold 3 skills (dup once), got %d: %+v", len(discovered), discovered)
+	}
+	// The kept "dup" must be the high-precedence one.
+	var dup Skill
+	for _, s := range discovered {
+		if s.Name == "dup" {
+			dup = s
+		}
+	}
+	if dup.Description != "high wins" {
+		t.Errorf("colliding skill should keep the higher-precedence source, got %q", dup.Description)
+	}
+	if !hasReasonContaining(skips, "shadowed") {
+		t.Errorf("a shadow notice was expected for the dropped low-precedence dup, got %v", skips)
+	}
+	if _, ok := cat2.Lookup(ToolName); !ok {
+		t.Error("Skill tool should be registered when the merged set is non-empty")
+	}
+}
+
 func TestToolBodyTruncated(t *testing.T) {
 	big := strings.Repeat("x", 30_000)
 	tl := NewTool([]Skill{{Name: "big", Description: "huge", Body: big}})

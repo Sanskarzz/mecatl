@@ -153,9 +153,13 @@ type config struct {
 	// Memory: per-project memory store directory (empty disables memory tools).
 	memoryDir string
 
-	// Skills: directory of progressive-disclosure skill units laid out as
-	// <dir>/<name>/SKILL.md (empty disables the Skill tool).
-	skillsDir string
+	// Skills: explicit directories of progressive-disclosure skill units laid out
+	// as <dir>/<name>/SKILL.md (repeatable; highest precedence). Empty + no
+	// conventional set disables the Skill tool. skillsConventional adds the
+	// built-in conventional project/user locations (lower precedence), default OFF
+	// to keep skills strictly opt-in (a trust boundary — see resolve.go / usage.md).
+	skillsDirs         stringList
+	skillsConventional bool
 
 	// Memory consolidation (dream): background distillation interval. 0 disables.
 	// Only meaningful when memoryDir is set; a positive value with an empty
@@ -204,6 +208,18 @@ func (l *mcpServerList) Set(v string) error {
 		cfg.Headers = map[string]string{"Authorization": "Bearer " + tok}
 	}
 	*l = append(*l, cfg)
+	return nil
+}
+
+// stringList is a repeatable string flag.Value, preserving order across multiple
+// occurrences. A single occurrence behaves exactly like a plain StringVar, so a
+// flag using it stays backward-compatible with single-value invocations.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(v string) error {
+	*l = append(*l, v)
 	return nil
 }
 
@@ -329,7 +345,8 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "per-project memory store directory (empty disables the Remember/Recall tools)")
 	fs.DurationVar(&cfg.memoryConsolidateInterval, "memory-consolidate-interval", 0, "interval for background memory consolidation (dream); 0 disables. Only meaningful with --memory-dir")
 
-	fs.StringVar(&cfg.skillsDir, "skills-dir", "", "directory to discover progressive-disclosure skills from, laid out as <name>/SKILL.md (conventional: "+skills.DefaultDir+"); empty disables the Skill tool")
+	fs.Var(&cfg.skillsDirs, "skills-dir", "directory to discover progressive-disclosure skills from, laid out as <name>/SKILL.md (repeatable; highest precedence); empty disables the Skill tool unless --skills-conventional is set. TRUST BOUNDARY: a SKILL.md steers the model like AGENTS.md/CLAUDE.md — point this only at directories you trust")
+	fs.BoolVar(&cfg.skillsConventional, "skills-conventional", false, "also discover skills from the conventional locations: <workspace>/"+skills.ProjectDirMecatl+", <workspace>/"+skills.ProjectDirClaude+", $XDG_CONFIG_HOME/mecatl/skills (or ~/.config/mecatl/skills), and ~/.claude/skills (lower precedence than --skills-dir). Default OFF — opt in only for trusted locations (same trust class as AGENTS.md/CLAUDE.md)")
 
 	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "directory of slash-command templates (<name>.md); setting it enables command expansion. Empty + --enable-commands uses the defaults (.mecatl/commands, .claude/commands)")
 	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.mecatl/commands, .claude/commands) when --commands-dir is empty")
@@ -588,32 +605,7 @@ func buildCatalog(ctx context.Context, cfg config, provider port.LLMProvider, ho
 		}
 	}
 
-	// Skills (progressive-disclosure instruction units): opt-in, registered only
-	// when --skills-dir is set. A single Skill tool is added whose description
-	// enumerates the discovered skills' metadata (always in context); activating a
-	// skill returns its full body. Discovery is forgiving: a malformed or
-	// frontmatter-less SKILL.md is skipped and logged, not fatal. When zero valid
-	// skills are found, NO tool is registered (nothing worth advertising).
-	if cfg.skillsDir != "" {
-		discovered, skips, err := skills.Register(cat, cfg.skillsDir)
-		for _, s := range skips {
-			slog.Warn("skill skipped", "path", s.Path, "reason", s.Reason)
-		}
-		switch {
-		case err != nil:
-			slog.Warn("registering skills failed; Skill tool disabled", "dir", cfg.skillsDir, "err", err)
-		case len(discovered) == 0:
-			slog.Info("skills DISABLED (no valid SKILL.md found)", "dir", cfg.skillsDir)
-		default:
-			names := make([]string, 0, len(discovered))
-			for _, s := range discovered {
-				names = append(names, s.Name)
-			}
-			slog.Info("Skill tool ENABLED", "dir", cfg.skillsDir, "count", len(discovered), "skills", strings.Join(names, ","))
-		}
-	} else {
-		slog.Info("skills DISABLED (--skills-dir empty)")
-	}
+	registerSkills(ctx, cfg, cat)
 
 	// Repo-map tool (Aider-style ranked codebase overview). It parses source with
 	// tree-sitter compiled to WebAssembly and run via wazero — pure Go, no CGO —
@@ -655,6 +647,50 @@ func registerMCP(ctx context.Context, cfg config, cat *tool.Catalog) func() {
 		if err := mgr.Close(); err != nil {
 			slog.Warn("MCP manager close", "err", err)
 		}
+	}
+}
+
+// registerSkills wires the progressive-disclosure Skill tool. It builds an
+// ordered Source list (explicit --skills-dir paths, highest precedence; plus the
+// conventional project/user locations when --skills-conventional is set), composes
+// them into a MultiSource (earlier-wins on name collisions), discovers once, and
+// registers a single Skill tool whose description enumerates the discovered
+// skills' metadata (always in context); activating a skill returns its full body.
+//
+// Skills stay OPT-IN: with no explicit dir and --skills-conventional unset, the
+// resolver yields no sources and NOTHING is registered. Discovery is forgiving — a
+// malformed/frontmatter-less or shadowed SKILL.md is skipped and logged, never
+// fatal — and the tool is registered ONLY when at least one valid skill is found.
+func registerSkills(ctx context.Context, cfg config, cat *tool.Catalog) {
+	sources := skills.ResolveSources(skills.ResolveOptions{
+		Explicit:     cfg.skillsDirs,
+		Conventional: cfg.skillsConventional,
+		Workspace:    cfg.workspace,
+	})
+	if len(sources) == 0 {
+		slog.Info("skills DISABLED (no --skills-dir and --skills-conventional unset)")
+		return
+	}
+
+	discovered, skips, err := skills.RegisterSource(ctx, cat, skills.NewMultiSource(sources...))
+	for _, s := range skips {
+		slog.Warn("skill skipped", "path", s.Path, "reason", s.Reason)
+	}
+	switch {
+	case err != nil:
+		slog.Warn("registering skills failed; Skill tool disabled",
+			"dirs", strings.Join(cfg.skillsDirs, ","), "conventional", cfg.skillsConventional, "err", err)
+	case len(discovered) == 0:
+		slog.Info("skills DISABLED (no valid SKILL.md found in any source)",
+			"dirs", strings.Join(cfg.skillsDirs, ","), "conventional", cfg.skillsConventional)
+	default:
+		names := make([]string, 0, len(discovered))
+		for _, s := range discovered {
+			names = append(names, s.Name)
+		}
+		slog.Info("Skill tool ENABLED",
+			"dirs", strings.Join(cfg.skillsDirs, ","), "conventional", cfg.skillsConventional,
+			"count", len(discovered), "skills", strings.Join(names, ","))
 	}
 }
 

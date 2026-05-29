@@ -146,7 +146,8 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--openai-base-url` | `""` | override the OpenAI API base URL (compatible endpoints) |
 | `--mock` | `false` | use a canned offline mock provider (no network; smoke tests only) |
 | `--store-dir` | `""` | directory for the JSONL session store (empty → in-memory) |
-| `--skills-dir` | `""` | directory to discover progressive-disclosure skills from, laid out as `<name>/SKILL.md` (conventional: `.mecatl/skills`); empty disables the `Skill` tool. **See the skills trust note below.** |
+| `--skills-dir` | `""` | directory to discover progressive-disclosure skills from, laid out as `<name>/SKILL.md`. **Repeatable** (highest precedence, in the order given); empty disables the `Skill` tool unless `--skills-conventional` is set. **See the skills trust note below.** |
+| `--skills-conventional` | `false` | also discover skills from the conventional known paths: `<workspace>/.mecatl/skills`, `<workspace>/.claude/skills`, `$XDG_CONFIG_HOME/mecatl/skills` (or `~/.config/mecatl/skills`), and `~/.claude/skills` — lower precedence than `--skills-dir`. **OFF by default** (strict opt-in); only enable for trusted locations. **See the skills trust note below.** |
 
 ### Environment
 
@@ -181,17 +182,36 @@ level=WARN msg="API bound to a NON-loopback address: the mecated API is UNAUTHEN
 
 ### The skills directory trust note
 
-`--skills-dir` is an **operator-trust boundary**, the same trust class as the
+Skills are an **operator-trust boundary**, the same trust class as the
 `AGENTS.md` / `CLAUDE.md` instruction files. Every discovered skill's one-line
 description is injected into the model's context on **every** request (it lives in
 the `Skill` tool spec), and a skill's full body flows into context the moment the
 model **activates** it. Both are model-steering instructions, not sandboxed data:
 a malicious or careless skill can redirect the agent just as a tampered
-`CLAUDE.md` could. Point `--skills-dir` only at directories you control and trust
-(the conventional in-repo `.mecatl/skills`), and treat third-party skills as code
-to review — read the `SKILL.md` before adding it, exactly as you would a CI
-script. Skills are **opt-in**: with no `--skills-dir` the `Skill` tool is never
-registered and nothing is read. (An OS-level sandbox around tool execution remains
+`CLAUDE.md` could.
+
+Where skills are loaded from, in **precedence order** (highest first):
+
+1. **`--skills-dir`** (repeatable) — explicit, operator-configured directories.
+2. **Project-level** (only with `--skills-conventional`): `<workspace>/.mecatl/skills`
+   then `<workspace>/.claude/skills`.
+3. **User-level** (only with `--skills-conventional`): `$XDG_CONFIG_HOME/mecatl/skills`
+   (or `~/.config/mecatl/skills`) then `~/.claude/skills`.
+
+A higher-precedence skill **shadows** a same-named lower-precedence one (the drop
+is logged). The `.claude/skills` and user-home paths exist for Claude Code
+compatibility — they are convenient, but they **widen the surface** through which
+an untrusted `SKILL.md` body can enter model context. They are therefore the same
+trust class as `AGENTS.md`/`CLAUDE.md`: only enable `--skills-conventional` when
+**every** one of those locations is yours to trust, and treat third-party skills as
+code to review — read the `SKILL.md` before adding it, exactly as you would a CI
+script.
+
+Skills are **strict opt-in**: with no `--skills-dir` and `--skills-conventional`
+unset, the `Skill` tool is never registered and nothing is read — that is why the
+conventional set defaults OFF rather than auto-discovering. The always-in-context
+description cap and the on-activation body truncation apply to **every** source,
+including the conventional ones. (An OS-level sandbox around tool execution remains
 future work — see the deferral note in the architecture doc.)
 
 ### Graceful shutdown
