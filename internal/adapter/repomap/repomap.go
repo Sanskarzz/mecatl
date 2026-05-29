@@ -223,8 +223,14 @@ func discoverFiles(ctx context.Context, ws tool.Workspace) ([]string, error) {
 }
 
 // parseAll reads and parses each candidate file, returning the non-nil file
-// nodes plus a count of files skipped (read error or empty/unsupported parse).
+// nodes plus a count of files skipped (read error or empty/unsupported parse). A
+// single tree-sitter WASM session is created for the whole call and reused across
+// files (the parser is sequential, so the non-concurrent session is safe here).
 func parseAll(ctx context.Context, ws tool.Workspace, paths []string) (nodes []*fileNode, skipped int, err error) {
+	sess, err := newParseSession()
+	if err != nil {
+		return nil, 0, err
+	}
 	for _, p := range paths {
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, 0, cerr
@@ -234,7 +240,7 @@ func parseAll(ctx context.Context, ws tool.Workspace, paths []string) (nodes []*
 			skipped++
 			continue
 		}
-		node, perr := parseFile(ctx, p, data)
+		node, perr := sess.parseFile(ctx, p, data)
 		if perr != nil {
 			skipped++
 			continue

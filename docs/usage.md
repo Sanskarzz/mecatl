@@ -52,9 +52,11 @@ You do **not** need a network or an API key for `task build`, `task test`, or
 the offline demo.
 
 The default `ozzd` build is CGO-free and statically linkable (the ko image
-builds it with `CGO_ENABLED=0`). The optional tree-sitter-backed repo-map tool
-requires CGO and is gated behind a build tag — build with
-`CGO_ENABLED=1 go build -tags repomap ./cmd/ozzd` to include it.
+builds it with `CGO_ENABLED=0`). This includes the tree-sitter-backed repo-map
+tool: tree-sitter runs as WebAssembly via the pure-Go `wazero` runtime (the
+grammars are embedded, so it works fully offline), so the repo map ships in the
+default static binary with no build tag. It is registered by default; pass
+`--enable-repomap=false` to turn it off.
 
 ---
 

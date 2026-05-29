@@ -1,5 +1,7 @@
 # Compiled binaries
 /bin/
+/ozzd
+/ozzdemo
 *.exe
 
 # Test / coverage output

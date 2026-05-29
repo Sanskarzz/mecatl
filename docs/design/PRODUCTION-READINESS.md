@@ -74,7 +74,7 @@
 | Item | Status | Rationale |
 |---|---|---|
 | Multi-vendor model routing | 🟦 | `LLMProvider` port already abstracts it; a router is a convenience adapter |
-| Repo map (tree-sitter PageRank) | ✅ | `internal/adapter/repomap` read-only tool (Go/Python/TS/TSX, personalized PageRank). CGO; behind `-tags repomap` to keep the default binary static |
+| Repo map (tree-sitter PageRank) | ✅ | `internal/adapter/repomap` read-only tool (Go/Python/TS/TSX, personalized PageRank). CGO-free: tree-sitter runs as WebAssembly via `wazero` with embedded grammars, so it ships in the default static `CGO_ENABLED=0` binary (no build tag) |
 | Slash commands | ✅ | `prompt.CommandExpander` + `DirCommandExpander` (`.ozz/commands`/`.claude/commands` templates); `--commands-dir`/`--enable-commands`. (Full skill packaging still future.) |
 | Live OpenAI validation | ✅ | validated against Sonnet 4.5 via OpenRouter (full tool-calling loop) |
 | Fuzz tests (bash splitter, SSE decoder) | ✅ | native Go fuzzers + Taskfile `fuzz` target; security invariants asserted; no crashers found |

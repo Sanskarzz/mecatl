@@ -44,6 +44,7 @@ import (
 	"github.com/stacklok/ozzharness/internal/adapter/openai"
 	"github.com/stacklok/ozzharness/internal/adapter/osfs"
 	"github.com/stacklok/ozzharness/internal/adapter/permpolicy"
+	"github.com/stacklok/ozzharness/internal/adapter/repomap"
 	"github.com/stacklok/ozzharness/internal/adapter/server"
 	"github.com/stacklok/ozzharness/internal/adapter/store/jsonlstore"
 	"github.com/stacklok/ozzharness/internal/adapter/store/memstore"
@@ -164,6 +165,11 @@ type config struct {
 
 	// Fork: enable the Fork fan-out tool (parallel isolated child branches).
 	enableFork bool
+
+	// RepoMap: enable the Aider-style repo-map tool. It is CGO-free (tree-sitter
+	// runs as WebAssembly via wazero), so it is registered unconditionally by
+	// default; this flag lets operators turn it off without a rebuild.
+	enableRepoMap bool
 
 	// MCP: remote MCP servers to connect to and register tools from.
 	mcpServers mcpServerList
@@ -322,6 +328,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.ozz/commands, .claude/commands) when --commands-dir is empty")
 
 	fs.BoolVar(&cfg.enableFork, "enable-fork", true, "register the Fork fan-out tool (parallel isolated child branches)")
+	fs.BoolVar(&cfg.enableRepoMap, "enable-repomap", true, "register the Aider-style repo-map tool (CGO-free, tree-sitter via WebAssembly)")
 
 	fs.Var(&cfg.mcpServers, "mcp-server", "remote MCP server as name=URL (repeatable); auth token read from MCP_<NAME>_TOKEN")
 
@@ -574,11 +581,16 @@ func buildCatalog(ctx context.Context, cfg config, provider port.LLMProvider, ho
 		}
 	}
 
-	// Build-tagged optional tools. The default build registers nothing here
-	// (see repomap_disabled.go); a `-tags repomap` build (which requires CGO)
-	// registers the tree-sitter-backed repo-map tool (see repomap_enabled.go).
-	// This keeps the default static, CGO-free build (used by the ko image) green.
-	registerOptionalTools(cat)
+	// Repo-map tool (Aider-style ranked codebase overview). It parses source with
+	// tree-sitter compiled to WebAssembly and run via wazero — pure Go, no CGO —
+	// so it ships in the default static, CGO-free build (used by the ko image) with
+	// NO build tag. Enabled by default; --enable-repomap=false turns it off.
+	if cfg.enableRepoMap {
+		cat.MustRegister(repomap.NewTool())
+		slog.Info("repo map tool ENABLED (CGO-free tree-sitter via WebAssembly)")
+	} else {
+		slog.Info("repo map tool DISABLED (--enable-repomap=false)")
+	}
 
 	mcpClose := registerMCP(ctx, cfg, cat)
 	return cat, mcpClose

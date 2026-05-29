@@ -236,6 +236,36 @@ func TestRepoMap_BadArgs(t *testing.T) {
 	}
 }
 
+// TestRepoMap_EmbeddedGrammarLoadsOffline asserts the WebAssembly tree-sitter
+// runtime and grammars load from the embedded blob with no network access. The
+// grammar bytes are compiled into the binary (go:embed inside the dependency), so
+// a successful parse here proves the parser is fully offline: there is no code
+// path that reaches out to the network, and this test exercises the real WASM
+// runtime end to end (instantiate module, load the Go grammar, run the query).
+func TestRepoMap_EmbeddedGrammarLoadsOffline(t *testing.T) {
+	sess, err := newParseSession()
+	if err != nil {
+		t.Fatalf("creating parse session (embedded WASM runtime) failed: %v", err)
+	}
+	src := []byte("package app\nfunc Helper(x int) int { return Other(x) }\n")
+	node, err := sess.parseFile(context.Background(), "util.go", src)
+	if err != nil {
+		t.Fatalf("offline parse failed: %v", err)
+	}
+	if node == nil {
+		t.Fatal("expected a parsed file node, got nil")
+	}
+	if len(node.defs) != 1 || node.defs[0].name != "Helper" {
+		t.Fatalf("expected one def named Helper, got %+v", node.defs)
+	}
+	if node.defs[0].signature != "func Helper(x int) int" {
+		t.Errorf("unexpected signature %q", node.defs[0].signature)
+	}
+	if node.refs["Other"] == 0 {
+		t.Errorf("expected a reference to Other, got refs %v", node.refs)
+	}
+}
+
 func TestRepoMap_SpecAndReadOnly(t *testing.T) {
 	tl := NewTool()
 	if !tl.ReadOnly() {
