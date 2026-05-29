@@ -58,6 +58,11 @@ type Deps struct {
 	// the start of a run; nil → prompt.RootAssembler (root-only AGENTS.md /
 	// CLAUDE.md, the v1 default).
 	Instructions prompt.InstructionAssembler
+	// CommandExpander rewrites a raw user prompt into the text the model sees,
+	// expanding slash-command invocations (e.g. "/review foo.go") against the
+	// workspace before the prompt is recorded; nil → prompt.NoopExpander (no
+	// expansion, the v1 default).
+	CommandExpander prompt.CommandExpander
 	// PromptConfig seeds the cache-stable system prompt (role/tone/safety). The
 	// loop fills in Tools and the volatile Env per turn.
 	PromptConfig prompt.Config
@@ -101,6 +106,9 @@ func NewEngine(deps Deps) *Engine {
 	}
 	if deps.Instructions == nil {
 		deps.Instructions = prompt.RootAssembler{}
+	}
+	if deps.CommandExpander == nil {
+		deps.CommandExpander = prompt.NoopExpander{}
 	}
 	// Progressive disclosure: register the ToolSearch hydration tool so the model
 	// can fetch a full spec on demand. It is registered only when enabled and only
@@ -261,7 +269,16 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 // project instructions (via Deps.Instructions; default RootAssembler reads
 // AGENTS.md / CLAUDE.md at the workspace root), routing both through the session
 // root so all history mutation flows through the aggregate.
+//
+// Before recording, userText is run through Deps.CommandExpander, which expands a
+// slash-command invocation into its template body; the EXPANDED text is what is
+// recorded and ultimately sent to the model. The default NoopExpander leaves the
+// text unchanged, so the v1 behaviour is preserved. Expansion is best-effort: a
+// read fault is logged-as-unchanged rather than aborting the run.
 func (e *Engine) recordPrompt(ctx context.Context, sess *session.Session, ws tool.Workspace, userText string) error {
+	if expanded, ok, err := e.deps.CommandExpander.Expand(ctx, ws, userText); err == nil && ok {
+		userText = expanded
+	}
 	var instr []session.Message
 	if sess.Counters.Turns == 0 {
 		discovered, err := e.deps.Instructions.Assemble(ctx, ws)
