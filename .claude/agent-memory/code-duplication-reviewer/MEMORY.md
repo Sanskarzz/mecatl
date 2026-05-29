@@ -1,1 +1,0 @@
-- [Codebase conventions](conventions.md) — mecatl DRY stance, generated dirs, deliberately-kept-separate pairs

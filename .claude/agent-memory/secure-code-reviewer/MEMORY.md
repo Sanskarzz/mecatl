@@ -1,4 +1,0 @@
-- [Project: mecatl](project_mecatl.md) — from-scratch headless agentic coding harness (Go); threat model, trust boundaries, v1 boundary design.
-- [Permission/Bash gate internals](ref_bash_permission_gate.md) — how the deny→ask→allow gate, compound-split, and wrapper-canonicalization work and their gaps.
-- [Server security layer](ref_server_security_layer.md) — bearer auth, mTLS, rate limiting, resume id-safety, permclassify monotonicity (+ UNSAFE keyword bug), MCP, forker isolation.
-- [Wave-4 features](ref_wave4_features.md) — slash commands, repomap, dream consolidation: why path-traversal/key-injection/forget-cap defenses hold; the unbounded Workspace.Read gap.

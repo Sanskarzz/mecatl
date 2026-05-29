@@ -10,3 +10,6 @@ coverage.*
 
 # Local scratch
 /.scratch/
+
+# Per-session agent memory (local only)
+/.claude/agent-memory/
