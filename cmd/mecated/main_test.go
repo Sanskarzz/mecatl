@@ -64,6 +64,31 @@ func TestValidateSkillDraftConfig(t *testing.T) {
 	})
 }
 
+// TestValidateSkillDraftConfigSymlinkedWorkspace pins the fix for the symlink
+// divergence: validation must canonicalize the workspace the SAME way the osfs
+// Workspace does (abs + EvalSymlinks), not with filepath.Abs alone. Here the
+// workspace is a symlink whose target is an ANCESTOR of the quarantine — with plain
+// Abs the two look disjoint (false PASS) and the model's Write/Edit could reach the
+// quarantine through the resolved os.Root; with EvalSymlinks the quarantine is
+// correctly seen as inside the workspace and rejected.
+func TestValidateSkillDraftConfigSymlinkedWorkspace(t *testing.T) {
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	quar := filepath.Join(realDir, "quar")
+	if err := os.MkdirAll(quar, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wslink := filepath.Join(base, "wslink")
+	if err := os.Symlink(realDir, wslink); err != nil {
+		t.Skipf("symlinks unsupported on this platform/filesystem: %v", err)
+	}
+	cfg := config{workspace: wslink, skillsDraftDir: quar}
+	if err := validateSkillDraftConfig(cfg); err == nil {
+		t.Fatal("quarantine inside the symlink-resolved workspace must be fatal; " +
+			"validation must use EvalSymlinks like the enforcement layer, not filepath.Abs")
+	}
+}
+
 func TestDefaultRulesSkillDraftAsks(t *testing.T) {
 	policy := permpolicy.NewPolicy(defaultRules())
 	got := policy.Evaluate(context.Background(), session.ModeDefault,

@@ -241,6 +241,16 @@ func resolveRoot(root string) (string, error) {
 	return filepath.Clean(abs), nil
 }
 
+// ResolveRoot exposes the EXACT path canonicalization the Workspace uses to confine
+// Write/Edit (abs + EvalSymlinks, falling back to a cleaned abs path when the path
+// does not yet exist). Callers that reason about whether a directory is inside or
+// outside a workspace root (e.g. the SkillDraft quarantine trust-boundary check in
+// cmd/mecated) MUST canonicalize through this so their comparison matches the
+// enforcement layer — using filepath.Abs alone diverges on a symlinked workspace
+// and would let a dir validation believes is "outside" actually resolve inside the
+// os.Root.
+func ResolveRoot(path string) (string, error) { return resolveRoot(path) }
+
 // Workspace is the session-scoped seam over the real OS filesystem. It composes
 // a FileSystem, performs an in-Go recursive Grep, and carries the Edit
 // read-ledger. Command execution is NOT part of the Workspace: it lives behind

@@ -1094,11 +1094,15 @@ func validateSkillDraftConfig(cfg config) error {
 		return nil
 	}
 
-	quarantine, err := filepath.Abs(cfg.skillsDraftDir)
+	// Canonicalize through the SAME resolver the osfs Workspace uses to confine
+	// Write/Edit (abs + EvalSymlinks). filepath.Abs alone diverges on a symlinked
+	// workspace and would let a dir we deem "outside" actually resolve inside the
+	// model-writable os.Root — so this MUST match the enforcement layer exactly.
+	quarantine, err := osfs.ResolveRoot(cfg.skillsDraftDir)
 	if err != nil {
 		return fmt.Errorf("--skills-draft-dir %q: %w", cfg.skillsDraftDir, err)
 	}
-	workspace, err := filepath.Abs(cfg.workspace)
+	workspace, err := osfs.ResolveRoot(cfg.workspace)
 	if err != nil {
 		return fmt.Errorf("--workspace %q: %w", cfg.workspace, err)
 	}
@@ -1140,7 +1144,7 @@ func warnSkillDraftResiduals(cfg config) {
 	if !cfg.noBash && cfg.shell != "" {
 		slog.Warn("SkillDraft trust boundary is structural for Write/Edit only: Bash is enabled and (absent an OS sandbox) can write to any path, so it can reach the skills trees. For a fully structural boundary, run shell-less (--no-bash) or under an OS sandbox.")
 	}
-	workspace, err := filepath.Abs(cfg.workspace)
+	workspace, err := osfs.ResolveRoot(cfg.workspace)
 	if err != nil {
 		return
 	}
@@ -1165,7 +1169,13 @@ func activeSkillDirs(cfg config) []string {
 	var dirs []string
 	for _, s := range sources {
 		if ds, ok := s.(skills.DirSource); ok && ds.Dir != "" {
-			dirs = append(dirs, filepath.Clean(ds.Dir))
+			// Canonicalize identically to the Workspace confinement + the quarantine
+			// check (abs + EvalSymlinks) so overlap/containment comparisons can't drift.
+			if resolved, err := osfs.ResolveRoot(ds.Dir); err == nil {
+				dirs = append(dirs, resolved)
+			} else {
+				dirs = append(dirs, filepath.Clean(ds.Dir))
+			}
 		}
 	}
 	return dirs
