@@ -466,7 +466,17 @@ Per-tool placement (`dispatch.go`):
   every call (read-batch and serial). On a hook **block** it emits a `hook`
   event and substitutes an error `ToolResult` (the tool does not run). A hook
   execution error is surfaced to the model as a block annotation rather than
-  aborting the run; a cancelled context is the one case that ends the run.
+  aborting the run; a cancelled context is the one case that ends the run. A
+  non-empty `HookOutcome.Mutated` payload on an allow — interpreted symmetrically
+  with the PreToolUse `HookEvent.Input`, i.e. the tool's raw **arguments JSON** —
+  **rewrites the call's args before execution**: the loop builds a fresh
+  `session.ToolCall` (same CallID and tool Name, new Args) and executes that. A
+  malformed (non-JSON) mutation is ignored (original args stand) and a notice
+  event is emitted. **Permission ordering (trust):** the policy is evaluated on
+  the **original, pre-mutation** args; the mutated args are **not**
+  re-permission-checked. This is deliberate — a PreToolUse hook is
+  operator-deployed and more trusted than the model, so it may rewrite a call
+  past the policy that gated the model's request (matching Claude Code).
 - **PostToolUse** (`postHook`) runs best-effort after execution; a block there
   only annotates (the tool already ran).
 
@@ -491,8 +501,13 @@ fires `Stop`:
 Exit-code semantics live in the `hookexec` adapter
 (`internal/adapter/hookexec/hookexec.go`): the `HookEvent` is JSON-serialized to
 the hook process's **stdin**; **exit 0 = allow**, **exit 2 = block**
-(`HookOutcome.Block = true`, message from stdout/stderr). `HookOutcome.Mutated`
-can replace the action's input payload.
+(`HookOutcome.Block = true`, message from stdout/stderr). On an **allow**, if the
+hook's stdout is a JSON **object** it is parsed as a control envelope —
+`{"mutated": <raw payload>, "message": "..."}` — and `mutated` becomes
+`HookOutcome.Mutated` (the rewritten prompt/args payload the loop applies). Plain
+(non-JSON-object) stdout is treated as a message exactly as before, so existing
+hooks are unaffected. This is what lets **real shell hooks** emit mutations (not
+just custom Go `HookRunner` adapters).
 
 ## 8. Subagents (`internal/agent/subagent.go`)
 

@@ -526,6 +526,107 @@ func TestPreToolUseHookBlocks(t *testing.T) {
 	}
 }
 
+// argRecorder is a Tool that captures the Args of the last call it executed, so
+// a test can assert which arguments actually reached the tool.
+type argRecorder struct {
+	name     string
+	readOnly bool
+	mu       sync.Mutex
+	gotArgs  string
+}
+
+func (a *argRecorder) Spec() tool.ToolSpec {
+	return tool.ToolSpec{Name: a.name, Description: a.name, Schema: json.RawMessage(`{"type":"object"}`)}
+}
+func (a *argRecorder) ReadOnly() bool { return a.readOnly }
+func (a *argRecorder) Execute(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+	a.mu.Lock()
+	a.gotArgs = string(in.Args)
+	a.mu.Unlock()
+	return session.NewToolResult(in.ID, "ok"), nil
+}
+func (a *argRecorder) args() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.gotArgs
+}
+
+// TestPreToolUseHookMutatesArgs asserts a PreToolUse hook returning a non-empty
+// Mutated payload rewrites the tool call's args before execution: the tool runs
+// with the MUTATED args, and the CallID/Name are preserved.
+func TestPreToolUseHookMutatesArgs(t *testing.T) {
+	rec := &argRecorder{name: "Write", readOnly: false}
+	hooks := &mutatingHooks{mutate: map[governance.HookPhase]json.RawMessage{
+		governance.PhasePreToolUse: json.RawMessage(`{"path":"mutated.txt"}`),
+	}}
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("c1", "Write", `{"path":"original.txt"}`)),
+		mockllm.TextTurn("done"),
+	)
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, rec), Hooks: hooks})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+
+	var rewriteEv bool
+	for ev := range r.Events() {
+		if ev.Type == session.EvHook && strings.Contains(ev.Text, "rewrote tool arguments") {
+			rewriteEv = true
+		}
+	}
+	if got := rec.args(); got != `{"path":"mutated.txt"}` {
+		t.Fatalf("tool executed with args %q, want the mutated args", got)
+	}
+	if !rewriteEv {
+		t.Fatalf("expected a hook event noting the arg rewrite")
+	}
+}
+
+// TestPreToolUseHookMutationMalformedIgnored asserts a malformed (non-JSON)
+// Mutated payload is ignored: the tool runs with the ORIGINAL args and a notice
+// event is emitted.
+func TestPreToolUseHookMutationMalformedIgnored(t *testing.T) {
+	rec := &argRecorder{name: "Write", readOnly: false}
+	hooks := &mutatingHooks{mutate: map[governance.HookPhase]json.RawMessage{
+		governance.PhasePreToolUse: json.RawMessage(`not-json`),
+	}}
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("c1", "Write", `{"path":"original.txt"}`)),
+		mockllm.TextTurn("done"),
+	)
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, rec), Hooks: hooks})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+
+	var ignoredEv bool
+	for ev := range r.Events() {
+		if ev.Type == session.EvHook && strings.Contains(ev.Text, "malformed argument mutation") {
+			ignoredEv = true
+		}
+	}
+	if got := rec.args(); got != `{"path":"original.txt"}` {
+		t.Fatalf("tool executed with args %q, want the ORIGINAL args (malformed mutation ignored)", got)
+	}
+	if !ignoredEv {
+		t.Fatalf("expected a hook event noting the malformed mutation was ignored")
+	}
+}
+
+// TestPreToolUseHookNoMutationKeepsArgs asserts that with no Mutated payload the
+// tool runs with its original args (regression for the allow path).
+func TestPreToolUseHookNoMutationKeepsArgs(t *testing.T) {
+	rec := &argRecorder{name: "Write", readOnly: false}
+	hooks := newRecordingHooks(nil) // allows everything, no mutation
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("c1", "Write", `{"path":"original.txt"}`)),
+		mockllm.TextTurn("done"),
+	)
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, rec), Hooks: hooks})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+	drain(r)
+
+	if got := rec.args(); got != `{"path":"original.txt"}` {
+		t.Fatalf("tool executed with args %q, want the original args", got)
+	}
+}
+
 // TestUnknownToolError confirms an unknown tool yields an error result, not a
 // crash, and the loop keeps going.
 func TestUnknownToolError(t *testing.T) {

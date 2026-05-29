@@ -103,7 +103,7 @@ func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session
 			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(out[c.ID])})
 			continue
 		}
-		blocked, msg, herr := e.preHook(ctx, r, sess, turnIdx, c)
+		effective, blocked, msg, herr := e.preHook(ctx, r, sess, turnIdx, c)
 		if herr != nil {
 			return nil, true
 		}
@@ -112,7 +112,8 @@ func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session
 			e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(out[c.ID])})
 			continue
 		}
-		toRun = append(toRun, pending{call: c, t: t})
+		// Execute the EFFECTIVE call (args possibly rewritten by the hook).
+		toRun = append(toRun, pending{call: effective, t: t})
 	}
 
 	// Phase 2: execute the cleared read-only calls concurrently.
@@ -155,7 +156,7 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws t
 		return res, false
 	}
 
-	blocked, msg, herr := e.preHook(ctx, r, sess, turnIdx, c)
+	effective, blocked, msg, herr := e.preHook(ctx, r, sess, turnIdx, c)
 	if herr != nil {
 		return session.ToolResult{}, true
 	}
@@ -165,7 +166,8 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws t
 		return res, false
 	}
 
-	return e.execute(ctx, r, sess, ws, turnIdx, c, t), false
+	// Execute the EFFECTIVE call (args possibly rewritten by the PreToolUse hook).
+	return e.execute(ctx, r, sess, ws, turnIdx, effective, t), false
 }
 
 // authorize evaluates the permission policy for a call and, on Ask, pauses the
@@ -221,13 +223,30 @@ func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, t
 
 // preHook runs the PreToolUse hook. It returns blocked=true with the hook's
 // message when the hook vetoes the call (exit 2), and a non-nil error only when
-// ctx was cancelled (the hook ran under a cancelled context).
-func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, turnIdx int, c session.ToolCall) (blocked bool, msg string, err error) {
+// ctx was cancelled (the hook ran under a cancelled context). When the hook is
+// allowed, it returns the EFFECTIVE call to execute: identical to the input call
+// unless the hook returned a non-empty HookOutcome.Mutated payload, in which case
+// the call's Args are rewritten (see the mutation note below).
+//
+// The PreToolUse HookEvent.Input is the tool's raw arguments JSON (c.Args, no
+// wrapper). HookOutcome.Mutated is interpreted SYMMETRICALLY: it is the rewritten
+// arguments JSON, and it replaces c.Args while preserving the CallID and tool
+// Name. A malformed (non-JSON) mutation is ignored — the original args stand —
+// and a notice event is emitted.
+//
+// TRUST / ORDERING (security-relevant): the permission policy (authorize →
+// Policy.Evaluate) has ALREADY run on the ORIGINAL, pre-mutation args by the time
+// preHook is called. The mutated args are NOT re-permission-checked. This is
+// deliberate and matches the trust model: a PreToolUse hook is operator-deployed
+// and strictly more trusted than the model, so a hook is allowed to rewrite a
+// call past the policy that gated the model's original request (mirroring Claude
+// Code semantics). Callers MUST execute the returned call, not the input call.
+func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, turnIdx int, c session.ToolCall) (effective session.ToolCall, blocked bool, msg string, err error) {
 	if e.deps.Hooks == nil {
-		return false, "", nil
+		return c, false, "", nil
 	}
 	if ctx.Err() != nil {
-		return false, "", ctx.Err()
+		return c, false, "", ctx.Err()
 	}
 	ev := governance.HookEvent{
 		Phase:     governance.PhasePreToolUse,
@@ -238,11 +257,11 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 	outcome, herr := e.deps.Hooks.Run(ctx, ev)
 	if herr != nil {
 		if ctx.Err() != nil {
-			return false, "", ctx.Err()
+			return c, false, "", ctx.Err()
 		}
 		// A hook execution error is surfaced to the model as a block annotation
 		// rather than aborting the whole run.
-		return true, fmt.Sprintf("PreToolUse hook error: %v", herr), nil
+		return c, true, fmt.Sprintf("PreToolUse hook error: %v", herr), nil
 	}
 	if outcome.Block {
 		m := outcome.Message
@@ -250,9 +269,19 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 			m = "blocked by PreToolUse hook"
 		}
 		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: m})
-		return true, m, nil
+		return c, true, m, nil
 	}
-	return false, "", nil
+	if len(outcome.Mutated) > 0 {
+		// Apply the mutation: the payload is the rewritten args JSON. Validate it as
+		// JSON before adopting it; a malformed payload is ignored. The permission
+		// decision is NOT re-evaluated on these args — see the trust note above.
+		if json.Valid(outcome.Mutated) {
+			e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PreToolUse hook rewrote tool arguments for " + c.Name})
+			return session.NewToolCall(c.ID, c.Name, outcome.Mutated), false, "", nil
+		}
+		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PreToolUse hook returned a malformed argument mutation (ignored)"})
+	}
+	return c, false, "", nil
 }
 
 // execute runs the tool against the workspace, times it, logs it, and emits the

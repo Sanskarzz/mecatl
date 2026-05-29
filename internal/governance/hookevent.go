@@ -44,10 +44,14 @@ type HookOutcome struct {
 	// Message is the hook's explanation, surfaced to the model/client.
 	Message string
 	// Mutated, when non-empty, replaces the action's input payload, interpreted
-	// symmetrically with the phase's HookEvent.Input. The loop applies it for the
-	// UserPromptSubmit phase, where it rewrites the effective prompt ({"prompt":
-	// ...}) before the message is recorded and sent to the model. For tool phases
-	// (PreToolUse) the field is the rewrite-tool-arguments seam; it is not yet
-	// applied there.
+	// symmetrically with the phase's HookEvent.Input. The loop applies it for:
+	//   - UserPromptSubmit: rewrites the effective prompt ({"prompt": ...}) before
+	//     the message is recorded and sent to the model;
+	//   - PreToolUse: rewrites the tool call's arguments JSON before execution,
+	//     preserving the CallID and tool Name.
+	// A malformed (non-JSON) payload is ignored by the loop (the original payload
+	// stands). NOTE for PreToolUse: the permission policy has already been
+	// evaluated on the ORIGINAL, pre-mutation args; the mutated args are NOT
+	// re-permission-checked, reflecting that a hook is more trusted than the model.
 	Mutated json.RawMessage
 }

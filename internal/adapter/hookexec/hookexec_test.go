@@ -98,6 +98,45 @@ func TestStdinCarriesEventJSON(t *testing.T) {
 	}
 }
 
+// A hook may emit a JSON control envelope on stdout (exit 0) carrying a mutation
+// that the loop applies. The adapter must parse "mutated" into HookOutcome.Mutated.
+func TestExitZeroJSONEnvelopeCarriesMutation(t *testing.T) {
+	r := hookexec.New(map[governance.HookPhase]string{
+		governance.PhasePreToolUse: `echo '{"mutated":{"command":"ls"},"message":"rewrote"}'`,
+	})
+	out, err := r.Run(context.Background(), event())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Block {
+		t.Fatalf("exit 0 must not block")
+	}
+	if string(out.Mutated) != `{"command":"ls"}` {
+		t.Fatalf("Mutated = %q, want the rewritten args object", string(out.Mutated))
+	}
+	if out.Message != "rewrote" {
+		t.Fatalf("Message = %q, want 'rewrote'", out.Message)
+	}
+}
+
+// Plain (non-JSON-object) stdout on exit 0 remains a message, never a mutation —
+// the original contract is preserved.
+func TestExitZeroPlainStdoutIsMessageNotMutation(t *testing.T) {
+	r := hookexec.New(map[governance.HookPhase]string{
+		governance.PhasePreToolUse: `echo 'just a note'`,
+	})
+	out, err := r.Run(context.Background(), event())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Mutated != nil {
+		t.Fatalf("plain stdout must not produce a mutation; got %q", string(out.Mutated))
+	}
+	if out.Message != "just a note" {
+		t.Fatalf("Message = %q, want 'just a note'", out.Message)
+	}
+}
+
 func TestNoHookForPhaseAllows(t *testing.T) {
 	r := hookexec.New(map[governance.HookPhase]string{
 		governance.PhasePostToolUse: "exit 2", // different phase

@@ -8,6 +8,15 @@
 //	             stdout (preferred) or stderr
 //	other != 0 → error (the hook itself failed)
 //
+// Mutation: on an ALLOW (exit 0), if the hook's stdout is a JSON OBJECT it is
+// parsed as a control envelope: a "mutated" field (raw JSON) becomes
+// HookOutcome.Mutated — the rewritten action payload the loop applies (a
+// {"prompt": ...} object for UserPromptSubmit, the rewritten tool-args object for
+// PreToolUse) — and an optional "message" string becomes HookOutcome.Message.
+// Plain (non-JSON-object) stdout is treated as a message string exactly as
+// before, so existing hooks are unaffected. (A JSON object is detected only when
+// stdout begins with '{', so a hook printing arbitrary prose never trips it.)
+//
 // A nil or empty hook map means "no hooks configured": every event is allowed.
 // Execution honours the caller's context and a per-run timeout.
 package hookexec
@@ -127,15 +136,15 @@ func (r *Runner) Run(ctx context.Context, ev governance.HookEvent) (governance.H
 	}
 
 	if runErr == nil {
-		// Exit 0 → allow.
-		return governance.HookOutcome{Message: trimmed(stdout.String())}, nil
+		// Exit 0 → allow (possibly carrying a mutation envelope on stdout).
+		return allowOutcome(stdout.String()), nil
 	}
 
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
 		switch exitErr.ExitCode() {
 		case exitAllow:
-			return governance.HookOutcome{Message: trimmed(stdout.String())}, nil
+			return allowOutcome(stdout.String()), nil
 		case exitBlock:
 			return governance.HookOutcome{
 				Block:   true,
@@ -150,6 +159,27 @@ func (r *Runner) Run(ctx context.Context, ev governance.HookEvent) (governance.H
 
 	// Failure to start the process (e.g. bad shell): treat as an error.
 	return governance.HookOutcome{}, fmt.Errorf("hookexec: %s hook: %w", ev.Phase, runErr)
+}
+
+// allowOutcome builds the HookOutcome for an allowing hook (exit 0). When stdout
+// is a JSON object it is parsed as a control envelope ({"mutated": ..., "message":
+// ...}); otherwise the trimmed stdout is the message, preserving the original
+// plain-text contract.
+func allowOutcome(stdout string) governance.HookOutcome {
+	s := trimmed(stdout)
+	if !strings.HasPrefix(s, "{") {
+		return governance.HookOutcome{Message: s}
+	}
+	var env struct {
+		Mutated json.RawMessage `json:"mutated"`
+		Message string          `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(s), &env); err != nil {
+		// Looked like JSON but did not parse: fall back to treating it as a message
+		// so a malformed envelope is still surfaced rather than swallowed.
+		return governance.HookOutcome{Message: s}
+	}
+	return governance.HookOutcome{Message: trimmed(env.Message), Mutated: env.Mutated}
 }
 
 // blockMessage prefers stdout, falling back to stderr, for the human-readable
