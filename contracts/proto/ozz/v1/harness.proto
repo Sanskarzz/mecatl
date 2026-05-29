@@ -1,0 +1,246 @@
+// SPDX-FileCopyrightText: Copyright 2026 Stacklok, Inc.
+// SPDX-License-Identifier: LicenseRef-Stacklok-Proprietary
+
+// ozzharness public API surface (WP10).
+//
+// HarnessService is the network surface over the WP8 agent loop. The
+// primary RPC is the bidi `Converse` stream: the client sends a mandatory
+// first `Prompt` frame, then zero or more `ResumeApproval` / `Cancel`
+// control frames, while the server streams typed `Event` envelopes for the
+// lifetime of the run, terminating in a `result` event.
+//
+// The `Event` message mirrors the domain `session.Event` taxonomy
+// (internal/session/event.go) one-for-one: a string `type` plus the
+// structured submessages (ToolCall, ToolResult, PermissionAsk, Result,
+// Usage). It is the single, provider-neutral event schema shared by the
+// gRPC and HTTP/SSE adapters; it is never an OpenAI type.
+//
+// Validation: required-field annotations are authored with
+// `buf.validate.field` for documentation and future runtime enforcement.
+// V1 enforces the required-field checks in the Go server (see
+// internal/adapter/server); wiring the protovalidate runtime is a deferred
+// follow-up and is not required for the WP10 milestone.
+
+syntax = "proto3";
+
+package ozz.v1;
+
+import "buf/validate/validate.proto";
+
+// HarnessService is the ozzharness API: unary session setup/inspection plus
+// the bidi Converse stream that drives one agent run.
+service HarnessService {
+  // CreateSession allocates a new server-side session and returns its id.
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+
+  // GetSession returns a snapshot of an existing session.
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+
+  // Converse drives one run. The first frame MUST be `prompt`; subsequent
+  // frames are zero or more `resume_approval` / `cancel` control frames. The
+  // server streams `Event` envelopes until the terminal `result` event, then
+  // closes the stream. A context cancel from the client aborts the run.
+  rpc Converse(stream ConverseRequest) returns (stream ConverseResponse);
+}
+
+// PermissionMode is the session-wide permission posture, mirroring
+// session.PermissionMode. Plan mode exposes a read-only toolset; acceptEdits
+// auto-accepts edits.
+enum PermissionMode {
+  // PERMISSION_MODE_UNSPECIFIED defaults to DEFAULT at the server boundary.
+  PERMISSION_MODE_UNSPECIFIED = 0;
+  // PERMISSION_MODE_DEFAULT is the standard deny -> ask -> allow posture.
+  PERMISSION_MODE_DEFAULT = 1;
+  // PERMISSION_MODE_PLAN enforces a read-only toolset.
+  PERMISSION_MODE_PLAN = 2;
+  // PERMISSION_MODE_ACCEPT_EDITS auto-accepts edits.
+  PERMISSION_MODE_ACCEPT_EDITS = 3;
+}
+
+// Limits are the configured stop conditions for a session. A zero value in
+// any field disables that particular limit.
+message Limits {
+  // max_turns caps the number of model calls; 0 disables.
+  int32 max_turns = 1;
+  // max_tool_calls caps the total tool invocations; 0 disables.
+  int32 max_tool_calls = 2;
+  // max_consecutive_failures caps back-to-back tool failures; 0 disables.
+  int32 max_consecutive_failures = 3;
+}
+
+// CreateSessionRequest opens a new session.
+message CreateSessionRequest {
+  // workspace is the absolute session root tools operate against.
+  string workspace = 1 [(buf.validate.field).string.min_len = 1];
+  // mode is the permission posture; unspecified defaults to DEFAULT.
+  PermissionMode mode = 2;
+  // limits are the optional stop conditions.
+  Limits limits = 3;
+}
+
+// CreateSessionResponse carries the newly-allocated session id.
+message CreateSessionResponse {
+  // session_id is the id of the created session.
+  string session_id = 1;
+}
+
+// GetSessionRequest looks up an existing session by id.
+message GetSessionRequest {
+  // session_id is the id to look up.
+  string session_id = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+// GetSessionResponse wraps the session snapshot returned by GetSession.
+message GetSessionResponse {
+  // session is the snapshot of the requested session.
+  Session session = 1;
+}
+
+// Session is a snapshot of server-side session state.
+message Session {
+  // session_id is the session's id.
+  string session_id = 1;
+  // state is the lifecycle state (idle/running/awaiting/completed/...).
+  string state = 2;
+  // mode is the permission posture.
+  PermissionMode mode = 3;
+  // workspace is the session root.
+  string workspace = 4;
+  // limits are the configured stop conditions.
+  Limits limits = 5;
+  // turns is the number of model calls begun.
+  int32 turns = 6;
+  // tool_calls is the total number of tool invocations recorded.
+  int32 tool_calls = 7;
+  // created_at_unix is the creation timestamp in Unix seconds.
+  int64 created_at_unix = 8;
+}
+
+// ConverseRequest is a client-to-server frame on the Converse stream. The
+// first frame MUST be `prompt`. Field numbers 1-9 are reserved for the
+// start family; 10+ for the gate/cancellation family.
+message ConverseRequest {
+  oneof kind {
+    // prompt is the mandatory first frame; it names the session and the text.
+    Prompt prompt = 1;
+    // resume_approval resolves a paused permission.ask.
+    ResumeApproval resume_approval = 10;
+    // cancel aborts the in-flight run.
+    Cancel cancel = 11;
+  }
+}
+
+// ConverseResponse is a server-to-client frame: one Event envelope per
+// domain event, emitted in sequence order until the terminal result.
+message ConverseResponse {
+  // event is the domain event for this frame.
+  Event event = 1;
+}
+
+// Prompt is the mandatory first Converse frame. It names the session the run
+// executes against and the user text to process.
+message Prompt {
+  // session_id is the session this run belongs to.
+  string session_id = 1 [(buf.validate.field).string.min_len = 1];
+  // text is the user prompt to process.
+  string text = 2 [(buf.validate.field).string.min_len = 1];
+}
+
+// ResumeApproval releases a paused permission.ask, allowing or denying the
+// proposed tool call. The ask_id echoes the PermissionAsk.ask_id from the
+// event stream.
+message ResumeApproval {
+  // ask_id correlates the resolution with the paused ask.
+  string ask_id = 1 [(buf.validate.field).string.min_len = 1];
+  // allow permits the tool when true, denies it when false.
+  bool allow = 2;
+}
+
+// Cancel aborts the in-flight run. The loop observes the cancellation and
+// terminates with a result carrying stop = "cancelled".
+message Cancel {}
+
+// Event mirrors the domain session.Event one-for-one. `type` is the string
+// event kind; the structured submessages are populated per kind.
+message Event {
+  // type is the event kind (mirrors session.EventType: session.init,
+  // turn.start, message.delta, tool.call, tool.result, permission.ask, hook,
+  // compaction, result).
+  string type = 1;
+  // seq is the monotonically increasing sequence number within a run.
+  int64 seq = 2;
+  // turn is the turn index this event belongs to.
+  int32 turn = 3;
+  // text carries streamed or final text where applicable.
+  string text = 4;
+  // tool_call is set on tool.call events.
+  ToolCall tool_call = 5;
+  // tool_result is set on tool.result events.
+  ToolResult tool_result = 6;
+  // ask is set on permission.ask events; ask_id is echoed in ResumeApproval.
+  PermissionAsk ask = 7;
+  // result is set on the terminal result event.
+  Result result = 8;
+  // usage is set on usage-bearing events.
+  Usage usage = 9;
+}
+
+// ToolCall is a request from the model to invoke a named tool. Mirrors
+// session.ToolCall.
+message ToolCall {
+  // id pairs this call with its tool_result.
+  string id = 1;
+  // name is the tool name as registered in the catalog.
+  string name = 2;
+  // args is the raw, tool-specific JSON argument payload.
+  string args = 3;
+}
+
+// ToolResult is the outcome of executing a ToolCall. Mirrors
+// session.ToolResult.
+message ToolResult {
+  // call_id is the id of the ToolCall this result answers.
+  string call_id = 1;
+  // content is the result body, already token-shaped by the tool.
+  string content = 2;
+  // is_error reports whether the tool failed.
+  bool is_error = 3;
+}
+
+// PermissionAsk describes a permission prompt the loop is blocked on. The
+// client resolves it by sending ResumeApproval with the matching ask_id.
+// Mirrors session.PendingAsk.
+message PermissionAsk {
+  // ask_id correlates the ask with the client's resolution.
+  string ask_id = 1;
+  // tool is the name of the tool awaiting approval.
+  string tool = 2;
+  // args is the proposed tool-call argument payload (raw JSON).
+  string args = 3;
+  // reason explains why approval is required.
+  string reason = 4;
+}
+
+// Result is the terminal payload carried by a result event. Mirrors
+// session.ResultPayload.
+message Result {
+  // stop is the reason the run ended (end_turn, max_turns, cancelled, ...).
+  string stop = 1;
+  // text is the final assistant text, if any.
+  string text = 2;
+  // usage is the cumulative token accounting for the run.
+  Usage usage = 3;
+}
+
+// Usage accounts for the token cost of a model call (or an aggregate).
+// Mirrors session.Usage.
+message Usage {
+  // input_tokens is the number of prompt tokens billed (including cache).
+  int64 input_tokens = 1;
+  // output_tokens is the number of completion tokens generated.
+  int64 output_tokens = 2;
+  // cache_read_tokens is the number of input tokens served from cache.
+  int64 cache_read_tokens = 3;
+  // cache_write_tokens is the number of input tokens written into the cache.
+  int64 cache_write_tokens = 4;
+}

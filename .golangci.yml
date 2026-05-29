@@ -1,0 +1,174 @@
+# golangci-lint configuration for ozzharness.
+#
+# Schema: v2 (golangci-lint v2.x). Adapted from Stacklok house style
+# (toolhive, mkp) and calibrated for this early-stage, hexagonal codebase.
+#
+# Parallel-safe by design: run.allow-parallel-runners lets multiple work
+# packages run `task lint` concurrently against the same module without the
+# runners clobbering each other's lock/cache.
+version: "2"
+
+run:
+  # Permit concurrent golangci-lint invocations (required: multiple WPs lint
+  # the same checkout in parallel).
+  allow-parallel-runners: true
+  # 0 lets golangci-lint pick GOMAXPROCS; bound it so parallel runners do not
+  # oversubscribe the host.
+  concurrency: 4
+  timeout: 5m
+  issues-exit-code: 1
+  tests: true
+
+output:
+  formats:
+    text:
+      path: stdout
+      print-linter-name: true
+      print-issued-lines: true
+
+linters:
+  default: none
+  enable:
+    - depguard
+    - errcheck
+    - goconst
+    - gocyclo
+    - gosec
+    - govet
+    - ineffassign
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+  settings:
+    depguard:
+      rules:
+        deprecated:
+          list-mode: lax
+          files:
+            - $all
+            - '!$test'
+          deny:
+            - pkg: io/ioutil
+              desc: deprecated; use io and os
+    goconst:
+      ignore-tests: true
+      min-occurrences: 5
+    gocyclo:
+      # Bumped from the house default of 15: this codebase has a couple of
+      # legitimately branchy parsers (bash command splitting, snapshot restore)
+      # that are clearer as one function than artificially decomposed.
+      min-complexity: 20
+    gosec:
+      excludes:
+        - G601 # implicit memory aliasing of range var (fixed by Go 1.22 loopvar)
+        # The osfs/hookexec adapters exist precisely to read caller-supplied
+        # paths and run configured hook commands; flagging those as taint is
+        # noise here. Path-escape and command safety are enforced in the
+        # adapters' own logic and tests, not by gosec.
+        - G204 # subprocess launched with variable (hookexec runs configured hooks)
+        - G301 # directory permission (0755 is intentional for workspace dirs)
+        - G304 # file inclusion via variable (osfs reads caller-relative paths)
+        - G306 # WriteFile permission (0644 is intentional for workspace files)
+    # misspell is intentionally NOT enabled: the codebase mixes US and UK
+    # spellings in prose/comments (e.g. serialized/serialised, behavior/
+    # behaviour), so any single locale produces noise that fights the existing
+    # text rather than catching real typos. The Stacklok reference repos
+    # (toolhive, mkp) likewise do not run misspell.
+    revive:
+      severity: warning
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: duplicated-imports
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: exported
+          severity: error
+        - name: if-return
+        - name: identical-branches
+        - name: indent-error-flow
+        - name: import-shadowing
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: struct-tag
+        - name: time-naming
+        - name: unconditional-recursion
+        - name: unexported-return
+        - name: unnecessary-stmt
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: unused-receiver
+        - name: var-declaration
+  exclusions:
+    generated: lax
+    rules:
+      # Tests are allowed to be longer, denser, and to ignore errors on
+      # best-effort cleanup; do not let style linters fight test ergonomics.
+      - linters:
+          - gocyclo
+          - errcheck
+          - gosec
+          - goconst
+          - unparam
+        path: (.+)_test\.go
+      # fsconformance is a shared test-helper package (imports "testing" in a
+      # non-_test.go file, the conventional Go pattern à la testing/fstest). Its
+      # conformance table is dense like a test, so apply the same relaxations.
+      - linters:
+          - gocyclo
+          - errcheck
+          - gosec
+          - goconst
+          - unparam
+        path: internal/adapter/fsconformance/
+      - linters:
+          - revive
+        path: .golangci.yml
+      # SessionID and ToolSpec are deliberate, frozen domain names from the WP1
+      # ports that other packages depend on. revive flags them as "stutter"
+      # (session.SessionID / tool.ToolSpec) but renaming would break the public
+      # API the rest of the harness is built against. Suppress just that finding.
+      - linters:
+          - revive
+        text: 'type name will be used as (session\.SessionID|tool\.ToolSpec)'
+      # Generated proto/grpc code (WP10 will land contracts/gen). Never lint it.
+      - linters:
+          - errcheck
+          - gocyclo
+          - gosec
+          - revive
+          - staticcheck
+          - unconvert
+          - unparam
+          - unused
+        path: contracts/gen/
+    paths:
+      - contracts/gen
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+    - gci
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/stacklok/ozzharness)
+  exclusions:
+    generated: lax
+    paths:
+      - contracts/gen
+      - third_party$
+      - builtin$
+      - examples$

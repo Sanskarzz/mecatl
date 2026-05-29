@@ -1,0 +1,14 @@
+version: v2
+modules:
+  - path: contracts/proto
+deps:
+  # protovalidate annotations — `(buf.validate.field)` etc. Pulled in from
+  # the BSR. V1 authors the annotations for documentation + future runtime
+  # enforcement; required-field checks are enforced in the Go server adapter.
+  - buf.build/bufbuild/protovalidate
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

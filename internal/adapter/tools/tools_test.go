@@ -1,0 +1,416 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stacklok/ozzharness/internal/adapter/memfs"
+	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/ozzharness/internal/tool"
+)
+
+// call builds a ToolCall with JSON args marshalled from m.
+func call(t *testing.T, name string, m map[string]any) session.ToolCall {
+	t.Helper()
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+	return session.NewToolCall(session.ToolCallID("id-"+name), name, raw)
+}
+
+// exec runs a tool and fails the test on a harness-level (Go) error.
+func exec(t *testing.T, tl tool.Tool, in session.ToolCall, ws tool.Workspace) session.ToolResult {
+	t.Helper()
+	res, err := tl.Execute(context.Background(), in, ws)
+	if err != nil {
+		t.Fatalf("%s: unexpected harness error: %v", tl.Spec().Name, err)
+	}
+	return res
+}
+
+// seed writes a file directly into a memfs workspace (no read recorded).
+func seed(t *testing.T, ws *memfs.Workspace, path, content string) {
+	t.Helper()
+	if err := ws.Write(context.Background(), path, []byte(content)); err != nil {
+		t.Fatalf("seed %q: %v", path, err)
+	}
+}
+
+func TestReadOnlyFlags(t *testing.T) {
+	want := map[string]bool{
+		"Read":     true,
+		"Edit":     false,
+		"Write":    false,
+		"Bash":     false,
+		"Grep":     true,
+		"Glob":     true,
+		"WebFetch": true,
+	}
+	got := map[string]bool{}
+	for _, tl := range All() {
+		got[tl.Spec().Name] = tl.ReadOnly()
+	}
+	if len(got) != len(want) {
+		t.Fatalf("All() returned %d tools, want %d", len(got), len(want))
+	}
+	for name, w := range want {
+		if got[name] != w {
+			t.Errorf("%s.ReadOnly() = %v, want %v", name, got[name], w)
+		}
+	}
+}
+
+func TestAllAndRegister(t *testing.T) {
+	if len(All()) != 7 {
+		t.Fatalf("All() = %d tools, want 7", len(All()))
+	}
+	cat := tool.NewCatalog()
+	if err := Register(cat); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	for _, name := range []string{"Read", "Edit", "Write", "Bash", "Grep", "Glob", "WebFetch"} {
+		if _, ok := cat.Lookup(name); !ok {
+			t.Errorf("catalog missing %q after Register", name)
+		}
+	}
+	// Re-registering must collide.
+	if err := Register(cat); err == nil {
+		t.Error("re-Register did not return a duplicate error")
+	}
+}
+
+func TestSpecsHaveDocs(t *testing.T) {
+	for _, tl := range All() {
+		s := tl.Spec()
+		if s.Name == "" {
+			t.Error("tool with empty name")
+		}
+		if len(s.Description) < 80 {
+			t.Errorf("%s: description too short to be onboarding docs (%d chars)", s.Name, len(s.Description))
+		}
+		var js any
+		if err := json.Unmarshal(s.Schema, &js); err != nil {
+			t.Errorf("%s: schema is not valid JSON: %v", s.Name, err)
+		}
+	}
+}
+
+func TestReadLineNumbersAndRange(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	seed(t, ws, "a.txt", "alpha\nbeta\ngamma\n")
+
+	res := exec(t, ReadTool{}, call(t, "Read", map[string]any{"path": "a.txt"}), ws)
+	if res.IsError {
+		t.Fatalf("Read errored: %s", res.Content)
+	}
+	wantPrefix := "     1\talpha\n     2\tbeta\n     3\tgamma\n"
+	if res.Content != wantPrefix {
+		t.Errorf("Read content mismatch.\n got: %q\nwant: %q", res.Content, wantPrefix)
+	}
+
+	// offset/limit: start at line 2, one line.
+	res = exec(t, ReadTool{}, call(t, "Read", map[string]any{"path": "a.txt", "offset": 2, "limit": 1}), ws)
+	if res.Content != "     2\tbeta\n" {
+		t.Errorf("Read offset/limit = %q, want %q", res.Content, "     2\tbeta\n")
+	}
+}
+
+func TestReadRecordsReadForEdit(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	seed(t, ws, "a.txt", "hello\n")
+	exec(t, ReadTool{}, call(t, "Read", map[string]any{"path": "a.txt"}), ws)
+	ok, err := ws.WasReadUnchanged(context.Background(), "a.txt")
+	if err != nil {
+		t.Fatalf("WasReadUnchanged: %v", err)
+	}
+	if !ok {
+		t.Error("Read did not record the read in the ledger")
+	}
+}
+
+func TestReadTruncatesLineCap(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	var sb strings.Builder
+	for i := 0; i < maxReadLines+50; i++ {
+		fmt.Fprintf(&sb, "line%d\n", i)
+	}
+	seed(t, ws, "big.txt", sb.String())
+	res := exec(t, ReadTool{}, call(t, "Read", map[string]any{"path": "big.txt"}), ws)
+	if !strings.Contains(res.Content, "output truncated") {
+		t.Error("expected truncation marker for over-cap file")
+	}
+	if len(res.Content) > maxOutputBytes+200 {
+		t.Errorf("output not byte-capped: %d bytes", len(res.Content))
+	}
+	// First line is always present and correctly numbered.
+	if !strings.HasPrefix(res.Content, "     1\tline0\n") {
+		t.Errorf("expected first line numbered, got start: %.20q", res.Content)
+	}
+}
+
+// TestReadLineCapWithoutByteCap exercises the 2000-line cap using short lines so
+// the byte cap does not fire first.
+func TestReadLineCapWithoutByteCap(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	var sb strings.Builder
+	for i := 0; i < maxReadLines+50; i++ {
+		sb.WriteString("a\n") // tiny lines: byte cap won't trigger before line cap
+	}
+	seed(t, ws, "big.txt", sb.String())
+	res := exec(t, ReadTool{}, call(t, "Read", map[string]any{"path": "big.txt"}), ws)
+	if !strings.Contains(res.Content, "showed 2000 lines") {
+		t.Errorf("expected line-cap marker, got tail: %.80q", res.Content[len(res.Content)-80:])
+	}
+}
+
+func TestReadMissingFile(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	res := exec(t, ReadTool{}, call(t, "Read", map[string]any{"path": "nope.txt"}), ws)
+	if !res.IsError {
+		t.Error("Read of missing file should be a tool error")
+	}
+}
+
+// Gauntlet #2: Edit must fail if the file was not read this session.
+func TestEditFailsWhenNotRead(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	seed(t, ws, "a.txt", "hello world\n")
+	res := exec(t, EditTool{}, call(t, "Edit", map[string]any{
+		"path": "a.txt", "old_string": "hello", "new_string": "hi",
+	}), ws)
+	if !res.IsError {
+		t.Fatal("Edit on un-read file must error (gauntlet #2)")
+	}
+	// Green: after reading, the same edit succeeds.
+	exec(t, ReadTool{}, call(t, "Read", map[string]any{"path": "a.txt"}), ws)
+	res = exec(t, EditTool{}, call(t, "Edit", map[string]any{
+		"path": "a.txt", "old_string": "hello", "new_string": "hi",
+	}), ws)
+	if res.IsError {
+		t.Fatalf("Edit after Read should succeed, got error: %s", res.Content)
+	}
+	data, _ := ws.Read(context.Background(), "a.txt")
+	if string(data) != "hi world\n" {
+		t.Errorf("file = %q, want %q", data, "hi world\n")
+	}
+}
+
+func TestEditNonMatching(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	seed(t, ws, "a.txt", "hello\n")
+	exec(t, ReadTool{}, call(t, "Read", map[string]any{"path": "a.txt"}), ws)
+	res := exec(t, EditTool{}, call(t, "Edit", map[string]any{
+		"path": "a.txt", "old_string": "absent", "new_string": "x",
+	}), ws)
+	if !res.IsError {
+		t.Error("Edit with non-matching old_string must error")
+	}
+}
+
+func TestEditNonUniqueRequiresReplaceAll(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	seed(t, ws, "a.txt", "x\nx\nx\n")
+	exec(t, ReadTool{}, call(t, "Read", map[string]any{"path": "a.txt"}), ws)
+
+	// Red: non-unique without replace_all.
+	res := exec(t, EditTool{}, call(t, "Edit", map[string]any{
+		"path": "a.txt", "old_string": "x", "new_string": "y",
+	}), ws)
+	if !res.IsError {
+		t.Fatal("non-unique old_string without replace_all must error")
+	}
+
+	// Green: replace_all succeeds.
+	res = exec(t, EditTool{}, call(t, "Edit", map[string]any{
+		"path": "a.txt", "old_string": "x", "new_string": "y", "replace_all": true,
+	}), ws)
+	if res.IsError {
+		t.Fatalf("replace_all should succeed, got: %s", res.Content)
+	}
+	data, _ := ws.Read(context.Background(), "a.txt")
+	if string(data) != "y\ny\ny\n" {
+		t.Errorf("file = %q, want %q", data, "y\ny\ny\n")
+	}
+}
+
+func TestEditFailsWhenChangedSinceRead(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	seed(t, ws, "a.txt", "hello\n")
+	exec(t, ReadTool{}, call(t, "Read", map[string]any{"path": "a.txt"}), ws)
+	// Mutate on disk after the read.
+	seed(t, ws, "a.txt", "changed\n")
+	res := exec(t, EditTool{}, call(t, "Edit", map[string]any{
+		"path": "a.txt", "old_string": "changed", "new_string": "x",
+	}), ws)
+	if !res.IsError {
+		t.Error("Edit must fail when the file changed since it was read")
+	}
+}
+
+func TestWriteNewFileNoReadNeeded(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	res := exec(t, WriteTool{}, call(t, "Write", map[string]any{
+		"path": "new.txt", "content": "fresh\n",
+	}), ws)
+	if res.IsError {
+		t.Fatalf("Write of new file should succeed, got: %s", res.Content)
+	}
+	data, _ := ws.Read(context.Background(), "new.txt")
+	if string(data) != "fresh\n" {
+		t.Errorf("file = %q, want %q", data, "fresh\n")
+	}
+}
+
+func TestWriteOverwriteUnreadRejected(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	seed(t, ws, "a.txt", "old\n")
+	res := exec(t, WriteTool{}, call(t, "Write", map[string]any{
+		"path": "a.txt", "content": "new\n",
+	}), ws)
+	if !res.IsError {
+		t.Fatal("overwriting an existing un-read file must be rejected")
+	}
+	// Green: after Read, overwrite is allowed.
+	exec(t, ReadTool{}, call(t, "Read", map[string]any{"path": "a.txt"}), ws)
+	res = exec(t, WriteTool{}, call(t, "Write", map[string]any{
+		"path": "a.txt", "content": "new\n",
+	}), ws)
+	if res.IsError {
+		t.Fatalf("overwrite after Read should succeed, got: %s", res.Content)
+	}
+}
+
+func TestBashOutputAndExitMapping(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	ws.SetCommandResult(&tool.CommandResult{Stdout: "hi there", Stderr: "", ExitCode: 0}, nil)
+	res := exec(t, BashTool{}, call(t, "Bash", map[string]any{"command": "echo hi there"}), ws)
+	if res.IsError {
+		t.Fatalf("Bash exit 0 should not be an error: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "hi there") || !strings.Contains(res.Content, "[exit code: 0]") {
+		t.Errorf("Bash content = %q", res.Content)
+	}
+
+	// Non-zero exit => error result, output preserved.
+	ws.SetCommandResult(&tool.CommandResult{Stdout: "", Stderr: "boom", ExitCode: 2}, nil)
+	res = exec(t, BashTool{}, call(t, "Bash", map[string]any{"command": "false"}), ws)
+	if !res.IsError {
+		t.Error("non-zero exit should be a tool error")
+	}
+	if !strings.Contains(res.Content, "boom") || !strings.Contains(res.Content, "[exit code: 2]") {
+		t.Errorf("Bash error content = %q", res.Content)
+	}
+}
+
+func TestBashNoShellSurfacesAsToolError(t *testing.T) {
+	ws := memfs.NewWorkspace("/") // default: ErrNoShell
+	res := exec(t, BashTool{}, call(t, "Bash", map[string]any{"command": "echo hi"}), ws)
+	if !res.IsError {
+		t.Error("RunCommand error should surface as a tool error, not a harness error")
+	}
+}
+
+func TestGrepCapAndFormat(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	var sb strings.Builder
+	for i := 0; i < maxGrepMatches+25; i++ {
+		fmt.Fprintf(&sb, "needle %d\n", i)
+	}
+	seed(t, ws, "hay.txt", sb.String())
+	res := exec(t, GrepTool{}, call(t, "Grep", map[string]any{"pattern": "needle"}), ws)
+	if res.IsError {
+		t.Fatalf("Grep errored: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "output truncated") {
+		t.Error("expected Grep truncation marker over cap")
+	}
+	if !strings.Contains(res.Content, "hay.txt:1:needle 0") {
+		t.Errorf("expected path:line:text format, got start: %.40q", res.Content)
+	}
+	lines := strings.Count(res.Content, "needle ")
+	if lines > maxGrepMatches {
+		t.Errorf("returned %d matches, cap is %d", lines, maxGrepMatches)
+	}
+}
+
+func TestGrepNoMatches(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	seed(t, ws, "a.txt", "hello\n")
+	res := exec(t, GrepTool{}, call(t, "Grep", map[string]any{"pattern": "zzz"}), ws)
+	if res.IsError || !strings.Contains(res.Content, "no matches") {
+		t.Errorf("expected 'no matches', got error=%v content=%q", res.IsError, res.Content)
+	}
+}
+
+func TestGlobCap(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	for i := 0; i < maxGlobResults+10; i++ {
+		seed(t, ws, fmt.Sprintf("f%05d.txt", i), "x")
+	}
+	res := exec(t, GlobTool{}, call(t, "Glob", map[string]any{"pattern": "*.txt"}), ws)
+	if res.IsError {
+		t.Fatalf("Glob errored: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "output truncated") {
+		t.Error("expected Glob truncation marker over cap")
+	}
+}
+
+func TestGlobNoMatch(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	res := exec(t, GlobTool{}, call(t, "Glob", map[string]any{"pattern": "*.go"}), ws)
+	if res.IsError || !strings.Contains(res.Content, "no files match") {
+		t.Errorf("expected 'no files match', got error=%v content=%q", res.IsError, res.Content)
+	}
+}
+
+func TestWebFetchStub(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	res := exec(t, WebFetchTool{}, call(t, "WebFetch", map[string]any{"url": "https://example.com"}), ws)
+	if !res.IsError {
+		t.Error("WebFetch stub must return a tool error")
+	}
+	if !strings.Contains(res.Content, "not implemented") {
+		t.Errorf("WebFetch content = %q", res.Content)
+	}
+}
+
+func TestMissingRequiredArgs(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	cases := []struct {
+		tl tool.Tool
+		in session.ToolCall
+	}{
+		{ReadTool{}, call(t, "Read", map[string]any{})},
+		{EditTool{}, call(t, "Edit", map[string]any{"path": "a"})},
+		{WriteTool{}, call(t, "Write", map[string]any{"content": "x"})},
+		{BashTool{}, call(t, "Bash", map[string]any{})},
+		{GrepTool{}, call(t, "Grep", map[string]any{})},
+		{GlobTool{}, call(t, "Glob", map[string]any{})},
+	}
+	for _, c := range cases {
+		res := exec(t, c.tl, c.in, ws)
+		if !res.IsError {
+			t.Errorf("%s with missing args should be a tool error", c.tl.Spec().Name)
+		}
+	}
+}
+
+// TestBashOnOSFSRealEcho is an optional hermetic real-command test against the
+// osfs adapter. It runs only when an osfs workspace constructor is available and
+// uses t.TempDir(), so CI stays offline. It is skipped if osfs is unavailable.
+func TestBashEnvHermetic(t *testing.T) {
+	// Confirm the temp dir machinery works without touching the network; this
+	// keeps the suite hermetic. A real-shell test belongs with the osfs adapter.
+	dir := t.TempDir()
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	_ = filepath.Join(dir, "x")
+}

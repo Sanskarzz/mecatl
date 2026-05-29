@@ -1,3 +1,38 @@
+# ozzharness
+
+A **headless agentic coding harness** in Go (1.26) — the streaming agent loop,
+~7 core tools, an enforced plan/act gate, one-shot subagents, deterministic hooks,
+a deny→ask→allow permission model, and prompt caching — speaking the OpenAI
+**Responses API** behind a provider-agnostic port. Strict hexagonal/DDD: the domain
+and the agent loop depend only on ports; the OpenAI client, the gRPC/HTTP servers,
+the filesystem, and the tools are adapters wired only at the composition root.
+
+This repo also contains the **research corpus** the design is built on (below).
+
+## Quick start
+
+```sh
+task build            # → bin/ozzd (server), bin/ozzdemo (demo)
+task test             # full suite (-race)
+task lint             # golangci-lint (parallel-safe)
+
+go run ./cmd/ozzdemo  # end-to-end demo, fully offline (scripted mock provider):
+                      #   text → tool call → permission ask + approval → result + cache usage
+go run ./cmd/ozzd --openai   # serve gRPC (:8080) + HTTP/SSE (:8081), loopback by default
+                             #   (needs OPENAI_API_KEY)
+```
+
+The API is a bidi gRPC `Converse` stream (the client sends a `Prompt` then
+`ResumeApproval`/`Cancel` frames; the server streams typed `Event`s) plus an HTTP/SSE
+mirror — both over the same domain `Event`. See **[`docs/design/`](./docs/design/)**:
+`ARCHITECTURE.md`, `STEP-CHAIN.md`, `OPENAI-RESPONSES-API.md`.
+
+> **Note:** MCP support (future) is **streaming-HTTP transport only** — stdio MCP is
+> not supported. OS-level sandboxing, four-tier compaction, and an MCP client are
+> documented v1 non-goals with seams left for them.
+
+---
+
 # Agent Harness Engineering — Research Corpus
 
 A working reference on the design of **agentic coding harnesses** in 2026: the
