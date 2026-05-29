@@ -77,9 +77,10 @@ func RunScenario(ctx context.Context, provider port.LLMProvider) ([]session.Even
 	return events, nil
 }
 
-// buildEngine assembles the agent.Engine for the demo with the full tool catalog,
-// the default deny/ask/allow policy (Read auto-allowed, Write asks), no hooks,
-// an in-memory store, and a deterministic prompt config.
+// buildEngine assembles the agent.Engine for the demo with the always-available
+// tool catalog (the demo exercises only Read/Write, so it runs shell-less: no
+// Bash tool is registered), the default deny/ask/allow policy (Read auto-allowed,
+// Write asks), no hooks, an in-memory store, and a deterministic prompt config.
 func buildEngine(provider port.LLMProvider) *agent.Engine {
 	cat := tool.NewCatalog()
 	for _, t := range tools.All() {
@@ -91,7 +92,6 @@ func buildEngine(provider port.LLMProvider) *agent.Engine {
 		{Scope: governance.ScopeManaged, Tool: "Grep", Effect: governance.Allow},
 		{Scope: governance.ScopeManaged, Tool: "Glob", Effect: governance.Allow},
 		{Scope: governance.ScopeManaged, Tool: "Write", Effect: governance.Ask},
-		{Scope: governance.ScopeManaged, Tool: "Bash", Effect: governance.Ask},
 		{Scope: governance.ScopeManaged, Tool: "Edit", Effect: governance.Ask},
 	})
 

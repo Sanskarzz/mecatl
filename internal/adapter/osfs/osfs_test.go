@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stacklok/ozzharness/internal/adapter/fsconformance"
 	"github.com/stacklok/ozzharness/internal/adapter/osfs"
@@ -24,18 +25,24 @@ func TestConformance(t *testing.T) {
 	})
 }
 
-// --- osfs-specific tests (real disk, under t.TempDir) ---
+// --- osfs CommandRunner tests (real shell, under t.TempDir) ---
 
-func TestRunCommand(t *testing.T) {
-	ctx := context.Background()
-	ws, err := osfs.NewWorkspace(t.TempDir())
+func newRunner(t *testing.T, dir string) tool.CommandRunner {
+	t.Helper()
+	r, err := osfs.NewCommandRunner(dir)
 	if err != nil {
-		t.Fatalf("NewWorkspace: %v", err)
+		t.Fatalf("NewCommandRunner: %v", err)
 	}
+	return r
+}
 
-	res, err := ws.RunCommand(ctx, "echo hi && echo err >&2")
+func TestCommandRunnerRun(t *testing.T) {
+	ctx := context.Background()
+	r := newRunner(t, t.TempDir())
+
+	res, err := r.Run(ctx, "echo hi && echo err >&2")
 	if err != nil {
-		t.Fatalf("RunCommand: %v", err)
+		t.Fatalf("Run: %v", err)
 	}
 	if strings.TrimSpace(res.Stdout) != "hi" {
 		t.Errorf("Stdout = %q want hi", res.Stdout)
@@ -48,41 +55,57 @@ func TestRunCommand(t *testing.T) {
 	}
 }
 
-func TestRunCommandExitCode(t *testing.T) {
+func TestCommandRunnerExitCode(t *testing.T) {
 	ctx := context.Background()
-	ws, _ := osfs.NewWorkspace(t.TempDir())
-	res, err := ws.RunCommand(ctx, "exit 3")
+	r := newRunner(t, t.TempDir())
+	res, err := r.Run(ctx, "exit 3")
 	if err != nil {
-		t.Fatalf("RunCommand returned harness error for non-zero exit: %v", err)
+		t.Fatalf("Run returned harness error for non-zero exit: %v", err)
 	}
 	if res.ExitCode != 3 {
 		t.Errorf("ExitCode = %d want 3", res.ExitCode)
 	}
 }
 
-func TestRunCommandWorkingDir(t *testing.T) {
+func TestCommandRunnerWorkingDir(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	ws, _ := osfs.NewWorkspace(root)
-	if err := ws.Write(ctx, "marker.txt", []byte("x")); err != nil {
-		t.Fatalf("Write: %v", err)
+	if err := os.WriteFile(filepath.Join(root, "marker.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed marker: %v", err)
 	}
-	res, err := ws.RunCommand(ctx, "ls")
+	r := newRunner(t, root)
+	res, err := r.Run(ctx, "ls")
 	if err != nil {
-		t.Fatalf("RunCommand: %v", err)
+		t.Fatalf("Run: %v", err)
 	}
 	if !strings.Contains(res.Stdout, "marker.txt") {
 		t.Errorf("ls output %q does not contain marker.txt (wrong cwd?)", res.Stdout)
 	}
 }
 
-func TestRunCommandCancel(t *testing.T) {
+func TestCommandRunnerCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
-	ws, _ := osfs.NewWorkspace(t.TempDir())
-	_, err := ws.RunCommand(ctx, "echo hi")
+	r := newRunner(t, t.TempDir())
+	_, err := r.Run(ctx, "echo hi")
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("RunCommand with cancelled ctx err = %v want context.Canceled", err)
+		t.Fatalf("Run with cancelled ctx err = %v want context.Canceled", err)
+	}
+}
+
+func TestCommandRunnerTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	r := newRunner(t, t.TempDir())
+	_, err := r.Run(ctx, "sleep 5")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run with expired deadline err = %v want context.DeadlineExceeded", err)
+	}
+}
+
+func TestCommandRunnerEmptyShellRejected(t *testing.T) {
+	if _, err := osfs.NewCommandRunnerShell(t.TempDir(), ""); err == nil {
+		t.Fatal("NewCommandRunnerShell with empty shell = nil err, want error")
 	}
 }
 

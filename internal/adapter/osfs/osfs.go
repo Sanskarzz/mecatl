@@ -32,11 +32,11 @@ import (
 // Workspace root.
 var ErrPathEscape = errors.New("osfs: path escapes workspace root")
 
-// defaultCommandTimeout bounds RunCommand when the caller's context has no
-// deadline of its own.
+// defaultCommandTimeout bounds CommandRunner.Run when the caller's context has
+// no deadline of its own.
 const defaultCommandTimeout = 30 * time.Second
 
-// maxCommandOutput caps each of stdout/stderr captured by RunCommand.
+// maxCommandOutput caps each of stdout/stderr captured by CommandRunner.Run.
 const maxCommandOutput = 1 << 20 // 1 MiB
 
 // FileSystem implements tool.FileSystem over the real OS filesystem, rooted at a
@@ -222,8 +222,10 @@ func resolveRoot(root string) (string, error) {
 }
 
 // Workspace is the session-scoped seam over the real OS filesystem. It composes
-// a FileSystem, runs commands via /bin/sh, performs an in-Go recursive Grep, and
-// carries the Edit read-ledger.
+// a FileSystem, performs an in-Go recursive Grep, and carries the Edit
+// read-ledger. Command execution is NOT part of the Workspace: it lives behind
+// the separate CommandRunner type (see NewCommandRunner) so the harness can run
+// without any shell at all.
 type Workspace struct {
 	fs *FileSystem
 
@@ -349,12 +351,48 @@ func (w *Workspace) walkAll(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// RunCommand runs command via /bin/sh -c with the session root as the working
+// CommandRunner runs shell commands via /bin/sh -c with a fixed working
+// directory (the session root). It is the local implementation of
+// tool.CommandRunner; a Workspace no longer runs commands itself, so a
+// shell-less deployment simply omits this runner.
+type CommandRunner struct {
+	root  string
+	shell string
+}
+
+// NewCommandRunner returns a local tool.CommandRunner that executes commands via
+// /bin/sh -c, rooted at dir as the working directory. dir is resolved to an
+// absolute, symlink-evaluated path so the runner's cwd matches the Workspace
+// root. Use this from the composition root only when a shell is desired; omit it
+// (and the Bash tool) to run shell-less.
+func NewCommandRunner(dir string) (tool.CommandRunner, error) {
+	return NewCommandRunnerShell(dir, "/bin/sh")
+}
+
+// NewCommandRunnerShell is like NewCommandRunner but lets the caller pick the
+// shell binary (e.g. "/bin/bash"). An empty shell is rejected: a shell-less
+// deployment must omit the runner (and the Bash tool) entirely rather than
+// construct a runner with no shell.
+func NewCommandRunnerShell(dir, shell string) (tool.CommandRunner, error) {
+	if shell == "" {
+		return nil, errors.New("osfs: command runner requires a non-empty shell")
+	}
+	abs, err := resolveRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	return &CommandRunner{root: abs, shell: shell}, nil
+}
+
+// Compile-time assertion that CommandRunner satisfies the runner port.
+var _ tool.CommandRunner = (*CommandRunner)(nil)
+
+// Run runs command via /bin/sh -c with the configured root as the working
 // directory, capturing (and truncating) stdout/stderr and the exit code.
 // Cancellation and timeout are governed by ctx; when ctx has no deadline a
 // default timeout is applied. A non-zero exit is reported via the returned
 // CommandResult.ExitCode, not as an error.
-func (w *Workspace) RunCommand(ctx context.Context, command string) (tool.CommandResult, error) {
+func (r *CommandRunner) Run(ctx context.Context, command string) (tool.CommandResult, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, defaultCommandTimeout)
@@ -365,8 +403,8 @@ func (w *Workspace) RunCommand(ctx context.Context, command string) (tool.Comman
 	stdout.cap = maxCommandOutput
 	stderr.cap = maxCommandOutput
 
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
-	cmd.Dir = w.fs.root
+	cmd := exec.CommandContext(ctx, r.shell, "-c", command)
+	cmd.Dir = r.root
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

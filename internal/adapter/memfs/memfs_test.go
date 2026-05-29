@@ -88,45 +88,49 @@ func TestGlobDeterministic(t *testing.T) {
 	}
 }
 
-func TestRunCommandNoShell(t *testing.T) {
+func TestCommandRunnerNoShell(t *testing.T) {
 	ctx := context.Background()
-	ws := memfs.NewWorkspace("/ws")
-	_, err := ws.RunCommand(ctx, "echo hi")
+	r := memfs.NewCommandRunner()
+	_, err := r.Run(ctx, "echo hi")
 	if !errors.Is(err, memfs.ErrNoShell) {
-		t.Fatalf("RunCommand err = %v want ErrNoShell", err)
+		t.Fatalf("Run err = %v want ErrNoShell", err)
+	}
+	// ErrNoShell wraps the shared sentinel so either matches.
+	if !errors.Is(err, tool.ErrNoShell) {
+		t.Fatalf("Run err = %v want to wrap tool.ErrNoShell", err)
 	}
 }
 
-func TestRunCommandCanned(t *testing.T) {
+func TestCommandRunnerCanned(t *testing.T) {
 	ctx := context.Background()
-	ws := memfs.NewWorkspace("/ws")
-	ws.SetCommandResult(&tool.CommandResult{Stdout: "canned", ExitCode: 7}, nil)
-	res, err := ws.RunCommand(ctx, "anything")
+	r := memfs.NewCommandRunner()
+	r.SetResult(&tool.CommandResult{Stdout: "canned", ExitCode: 7}, nil)
+	res, err := r.Run(ctx, "anything")
 	if err != nil {
-		t.Fatalf("RunCommand: %v", err)
+		t.Fatalf("Run: %v", err)
 	}
 	if res.Stdout != "canned" || res.ExitCode != 7 {
-		t.Fatalf("RunCommand = %+v want canned/7", res)
+		t.Fatalf("Run = %+v want canned/7", res)
 	}
 }
 
-func TestRunCommandCannedError(t *testing.T) {
+func TestCommandRunnerCannedError(t *testing.T) {
 	ctx := context.Background()
-	ws := memfs.NewWorkspace("/ws")
+	r := memfs.NewCommandRunner()
 	sentinel := errors.New("boom")
-	ws.SetCommandResult(nil, sentinel)
-	if _, err := ws.RunCommand(ctx, "x"); !errors.Is(err, sentinel) {
-		t.Fatalf("RunCommand err = %v want sentinel", err)
+	r.SetResult(nil, sentinel)
+	if _, err := r.Run(ctx, "x"); !errors.Is(err, sentinel) {
+		t.Fatalf("Run err = %v want sentinel", err)
 	}
 }
 
-func TestRunCommandCancel(t *testing.T) {
+func TestCommandRunnerCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	ws := memfs.NewWorkspace("/ws")
-	ws.SetCommandResult(&tool.CommandResult{Stdout: "x"}, nil)
-	if _, err := ws.RunCommand(ctx, "x"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("RunCommand cancelled = %v want context.Canceled", err)
+	r := memfs.NewCommandRunner()
+	r.SetResult(&tool.CommandResult{Stdout: "x"}, nil)
+	if _, err := r.Run(ctx, "x"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run cancelled = %v want context.Canceled", err)
 	}
 }
 

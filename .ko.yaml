@@ -1,0 +1,29 @@
+# ko configuration for ozzharness (https://ko.build).
+#
+# ozzharness ships its server, ozzd, as a single static Go binary. ko builds it
+# straight from source (no Dockerfile) onto a minimal distroless base. The
+# resulting image runs as the non-root UID/GID baked into the chainguard static
+# base (65532) — see deploy/ for the matching Pod securityContext.
+#
+# The base image is pinned by digest for reproducibility. `cgr.dev/chainguard/static`
+# is a ~static, shell-less, scratch-like image: no package manager, no shell,
+# nonroot by default — the smallest sane home for a CGO_ENABLED=0 Go binary.
+# (Equivalent alternative: gcr.io/distroless/static-debian12:nonroot.)
+#
+# Build:   KO_DOCKER_REPO=ko.local ko build --local ./cmd/ozzd   (or `task ko:build`)
+# Publish: KO_DOCKER_REPO=<registry> ko build --push ./cmd/ozzd  (or `task ko:publish`)
+#
+# ozzd has no version stamping vars in cmd/ozzd/main.go, so no -X ldflags are set
+# here (add them under `ldflags` if/when a version package lands).
+
+defaultBaseImage: cgr.dev/chainguard/static@sha256:d6a97eb401cbc7c6d48be76ad81d7899b94303580859d396b52b67bc84ea7345
+
+builds:
+  - id: ozzd
+    main: ./cmd/ozzd
+    flags:
+      - -trimpath
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w

@@ -2,8 +2,9 @@
 // place where concrete adapters are wired to the ports the agent loop consumes.
 //
 // It builds an LLM provider (OpenAI Responses, or a canned mock for smoke
-// tests), the seven-tool catalog plus a read-only Task subagent, the permission
-// policy, lifecycle hooks, the session store, and the two-layer system prompt;
+// tests), the core tool catalog (with an OPTIONAL Bash tool, gated on a
+// configured shell) plus a read-only Task subagent, the permission policy,
+// lifecycle hooks, the session store, and the two-layer system prompt;
 // assembles them into an agent.Engine; and serves the resulting HarnessService
 // over gRPC and HTTP/SSE concurrently, with graceful shutdown on SIGINT/SIGTERM.
 package main
@@ -19,13 +20,18 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 
 	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
 	"github.com/stacklok/ozzharness/internal/adapter/hookexec"
+	"github.com/stacklok/ozzharness/internal/adapter/llmresilience"
+	"github.com/stacklok/ozzharness/internal/adapter/mcp"
 	"github.com/stacklok/ozzharness/internal/adapter/mockllm"
 	"github.com/stacklok/ozzharness/internal/adapter/openai"
 	"github.com/stacklok/ozzharness/internal/adapter/osfs"
@@ -33,6 +39,7 @@ import (
 	"github.com/stacklok/ozzharness/internal/adapter/server"
 	"github.com/stacklok/ozzharness/internal/adapter/store/jsonlstore"
 	"github.com/stacklok/ozzharness/internal/adapter/store/memstore"
+	"github.com/stacklok/ozzharness/internal/adapter/telemetry"
 	"github.com/stacklok/ozzharness/internal/adapter/tools"
 	"github.com/stacklok/ozzharness/internal/agent"
 	"github.com/stacklok/ozzharness/internal/governance"
@@ -67,6 +74,19 @@ const (
 	defaultMaxConsecutiveFailures = 5
 )
 
+// LLM resilience backoff bounds. These are not exposed as flags (the attempt
+// count, per-attempt timeout, and breaker knobs are): exponential backoff
+// between BaseBackoff and MaxBackoff is a sensible fixed envelope.
+const (
+	llmBaseBackoff = 200 * time.Millisecond
+	llmMaxBackoff  = 10 * time.Second
+)
+
+// defaultMetricsAddr is the loopback listen address for the Prometheus /metrics
+// endpoint. Unlike the harness API it is read-only and carries no secrets, but
+// it is still bound to loopback by default. An empty --metrics-addr disables it.
+const defaultMetricsAddr = "127.0.0.1:9090"
+
 // config is the parsed command-line / environment configuration for ozzd.
 type config struct {
 	grpcAddr      string
@@ -78,6 +98,47 @@ type config struct {
 	openAIKey     string
 	useMock       bool
 	storeDir      string
+	shell         string
+	noBash        bool
+
+	// LLM resilience knobs (see package internal/adapter/llmresilience).
+	llmMaxAttempts       int
+	llmPerAttemptTimeout time.Duration
+	llmBreakerThreshold  int
+	llmBreakerCooldown   time.Duration
+
+	// Observability: the Prometheus /metrics listen address (empty disables it).
+	metricsAddr string
+
+	// MCP: remote MCP servers to connect to and register tools from.
+	mcpServers mcpServerList
+}
+
+// mcpServerList is a repeatable flag.Value collecting --mcp-server name=URL
+// entries into a slice of mcp.ServerConfig.
+type mcpServerList []mcp.ServerConfig
+
+func (l *mcpServerList) String() string {
+	names := make([]string, 0, len(*l))
+	for _, c := range *l {
+		names = append(names, c.Name)
+	}
+	return strings.Join(names, ",")
+}
+
+// Set parses a single "name=URL" entry. A per-server bearer token is read from
+// the environment variable MCP_<NAME>_TOKEN (name upper-cased) when present.
+func (l *mcpServerList) Set(v string) error {
+	name, url, ok := strings.Cut(v, "=")
+	if !ok || name == "" || url == "" {
+		return fmt.Errorf("invalid --mcp-server %q: want name=URL", v)
+	}
+	cfg := mcp.ServerConfig{Name: name, URL: url}
+	if tok := os.Getenv("MCP_" + strings.ToUpper(name) + "_TOKEN"); tok != "" {
+		cfg.Headers = map[string]string{"Authorization": "Bearer " + tok}
+	}
+	*l = append(*l, cfg)
+	return nil
 }
 
 func main() {
@@ -98,6 +159,9 @@ func run() error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	provider, err := buildProvider(cfg)
 	if err != nil {
 		return err
@@ -108,7 +172,20 @@ func run() error {
 		return err
 	}
 
-	engine := buildEngine(cfg, provider)
+	// Observability: a private Prometheus registry feeds both the EventSink/
+	// Logger adapter and the /metrics handler. Tracing uses the global OTel
+	// TracerProvider, which is a no-op until a provider is installed (no OTLP
+	// exporter is wired in v1), so traces are inert by default.
+	reg := prometheus.NewRegistry()
+	metrics := telemetry.NewMetrics(reg)
+	tracing := telemetry.NewTracing(otel.GetTracerProvider())
+	sink := telemetry.NewSink(metrics, tracing)
+
+	// MCP: connect to any configured remote servers and register their tools
+	// into the parent catalog. A nil/failed manager is non-fatal; mcpClose is
+	// always safe to call.
+	engine, mcpClose := buildEngine(ctx, cfg, provider, sink, metrics)
+	defer mcpClose()
 
 	svc, err := server.NewService(server.Config{
 		Engine:        engine,
@@ -120,10 +197,7 @@ func run() error {
 		return fmt.Errorf("build service: %w", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	return serve(ctx, cfg, svc)
+	return serve(ctx, cfg, svc, reg)
 }
 
 // parseFlags turns argv into a config, resolving env-derived defaults.
@@ -143,6 +217,17 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL (compatible endpoints)")
 	fs.BoolVar(&cfg.useMock, "mock", false, "use a canned offline mock provider (no network; for smoke tests only)")
 	fs.StringVar(&cfg.storeDir, "store-dir", "", "directory for the JSONL session store (empty -> in-memory store)")
+	fs.StringVar(&cfg.shell, "shell", "/bin/sh", "shell used to execute Bash-tool commands; empty disables Bash (shell-less mode)")
+	fs.BoolVar(&cfg.noBash, "no-bash", false, "disable the Bash tool entirely (shell-less mode); overrides --shell")
+
+	fs.IntVar(&cfg.llmMaxAttempts, "llm-max-attempts", 3, "max LLM stream-establish attempts (initial call plus retries)")
+	fs.DurationVar(&cfg.llmPerAttemptTimeout, "llm-per-attempt-timeout", 30*time.Second, "per-attempt timeout for establishing an LLM stream (0 disables)")
+	fs.IntVar(&cfg.llmBreakerThreshold, "llm-breaker-threshold", 5, "consecutive LLM failures that open the circuit breaker (0 disables)")
+	fs.DurationVar(&cfg.llmBreakerCooldown, "llm-breaker-cooldown", 30*time.Second, "how long the LLM circuit breaker stays open before half-opening")
+
+	fs.StringVar(&cfg.metricsAddr, "metrics-addr", defaultMetricsAddr, "Prometheus /metrics listen address (empty disables the metrics endpoint)")
+
+	fs.Var(&cfg.mcpServers, "mcp-server", "remote MCP server as name=URL (repeatable); auth token read from MCP_<NAME>_TOKEN")
 
 	if err := fs.Parse(argv); err != nil {
 		return config{}, err
@@ -170,7 +255,26 @@ func buildProvider(cfg config) (port.LLMProvider, error) {
 			opts = append(opts, openai.WithBaseURL(cfg.openAIBaseURL))
 		}
 		slog.Info("LLM provider: openai", "model", cfg.model, "base_url", cfg.openAIBaseURL)
-		return openai.New(opts...), nil
+		// Wrap the real provider with the resilience decorator (bounded retries,
+		// per-attempt timeout, circuit breaker). Classifier/Clock are left nil so
+		// the production defaults (DefaultClassifier / time.Now) apply. The mock
+		// path below is intentionally left unwrapped: it never fails over the
+		// network, so resilience would be inert.
+		var llm port.LLMProvider = openai.New(opts...)
+		llm = llmresilience.Wrap(llm, llmresilience.Config{
+			MaxAttempts:       cfg.llmMaxAttempts,
+			BaseBackoff:       llmBaseBackoff,
+			MaxBackoff:        llmMaxBackoff,
+			PerAttemptTimeout: cfg.llmPerAttemptTimeout,
+			BreakerThreshold:  cfg.llmBreakerThreshold,
+			BreakerCooldown:   cfg.llmBreakerCooldown,
+		})
+		slog.Info("LLM resilience enabled",
+			"max_attempts", cfg.llmMaxAttempts,
+			"per_attempt_timeout", cfg.llmPerAttemptTimeout,
+			"breaker_threshold", cfg.llmBreakerThreshold,
+			"breaker_cooldown", cfg.llmBreakerCooldown)
+		return llm, nil
 	case cfg.useMock:
 		slog.Warn("LLM provider: mock (canned, offline) — for smoke tests only")
 		return mockllm.New(
@@ -196,14 +300,17 @@ func buildStore(cfg config) (port.SessionStore, error) {
 	return st, nil
 }
 
-// buildEngine assembles the parent agent.Engine: the full tool catalog (seven
-// tools plus a read-only Task subagent), the permission policy, hooks, prompt
-// config, and the shared provider/store.
-func buildEngine(cfg config, provider port.LLMProvider) *agent.Engine {
+// buildEngine assembles the parent agent.Engine: the core tool catalog (plus an
+// optional Bash tool and a read-only Task subagent), the permission policy,
+// hooks, prompt config, and the shared provider/store.
+// It also wires the telemetry Sink (EventSink) and Logger, and connects any
+// configured MCP servers, returning a close func that tears the MCP manager
+// down on shutdown (a no-op when no servers are configured).
+func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sink port.EventSink, logger port.Logger) (*agent.Engine, func()) {
 	policy := permpolicy.NewPolicy(defaultRules())
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
-	cat := buildCatalog(cfg, provider, hooks)
+	cat, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
 
 	deps := agent.Deps{
 		LLM:                 provider,
@@ -211,24 +318,100 @@ func buildEngine(cfg config, provider port.LLMProvider) *agent.Engine {
 		Policy:              policy,
 		Hooks:               hooks,
 		Store:               nil, // store is held by the Service; the engine need not persist twice
+		Sink:                sink,
+		Logger:              logger,
 		PromptConfig:        promptConfig(cfg),
 		Model:               cfg.model,
 		ContextWindowTokens: defaultContextWindowTokens,
 	}
-	return agent.NewEngine(deps)
+	return agent.NewEngine(deps), mcpClose
 }
 
-// buildCatalog registers the seven core tools and a Task subagent wired per WP9:
-// a scoped explorer child Engine (Read/Grep/Glob only, allow-all read-only
-// policy, the same provider/model) so a subagent never prompts a human and cannot
-// recurse.
-func buildCatalog(cfg config, provider port.LLMProvider, hooks port.HookRunner) *tool.Catalog {
+// buildCatalog registers the always-available core tools (Read, Edit, Write,
+// Grep, Glob, WebFetch), a Task subagent wired per WP9 (a scoped explorer child
+// Engine — Read/Grep/Glob only, allow-all read-only policy, the same
+// provider/model — so a subagent never prompts a human and cannot recurse), and
+// — only when a shell is configured — the optional Bash tool. With --no-bash or
+// --shell="" the catalog has no Bash and the agent runs shell-less.
+//
+// After the built-in tools are registered it connects any --mcp-server entries
+// and registers their (namespaced) tools. Connecting MCP is best-effort:
+// unreachable servers are logged and skipped, and a failed manager never aborts
+// startup. The returned close func tears down the MCP manager on shutdown.
+func buildCatalog(ctx context.Context, cfg config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, func()) {
 	cat := tool.NewCatalog()
 	for _, t := range tools.All() {
 		cat.MustRegister(t)
 	}
+	if runner := buildCommandRunner(cfg); runner != nil {
+		cat.MustRegister(tools.NewBashTool(runner))
+		slog.Info("Bash tool ENABLED", "shell", cfg.shell, "cwd", cfg.workspace)
+	} else {
+		slog.Info("Bash tool DISABLED (shell-less mode): the agent has no command execution",
+			"reason", bashDisabledReason(cfg))
+	}
 	cat.MustRegister(buildTaskTool(cfg, provider, hooks))
-	return cat
+
+	mcpClose := registerMCP(ctx, cfg, cat)
+	return cat, mcpClose
+}
+
+// registerMCP connects the configured MCP servers and registers their tools into
+// cat. It is non-fatal end to end: with no servers configured it does nothing;
+// individual unreachable servers are logged and skipped via the onError hook; a
+// manager that fails entirely is logged and skipped. It returns a close func
+// that shuts the manager down (a no-op when there is nothing to close).
+func registerMCP(ctx context.Context, cfg config, cat *tool.Catalog) func() {
+	if len(cfg.mcpServers) == 0 {
+		return func() {}
+	}
+	onError := func(sc mcp.ServerConfig, err error) {
+		slog.Warn("MCP server unreachable; skipping", "name", sc.Name, "url", sc.URL, "err", err)
+	}
+	mgr, err := mcp.NewManager(ctx, cfg.mcpServers, onError)
+	if err != nil {
+		slog.Warn("MCP manager construction failed; continuing without MCP tools", "err", err)
+		return func() {}
+	}
+	if err := mcp.Register(cat, mgr.Tools()); err != nil {
+		slog.Warn("registering MCP tools failed; some tools may be missing", "err", err)
+	}
+	slog.Info("MCP tools registered", "servers", len(cfg.mcpServers), "tools", len(mgr.Tools()))
+	return func() {
+		if err := mgr.Close(); err != nil {
+			slog.Warn("MCP manager close", "err", err)
+		}
+	}
+}
+
+// buildCommandRunner builds the local command runner the Bash tool executes
+// against, rooted at the default session workspace. It returns nil when command
+// execution is disabled (--no-bash, or an empty --shell), in which case the Bash
+// tool is not registered and the harness runs without a shell. A runner that
+// fails to construct also disables Bash rather than aborting startup.
+func buildCommandRunner(cfg config) tool.CommandRunner {
+	if cfg.noBash || cfg.shell == "" {
+		return nil
+	}
+	runner, err := osfs.NewCommandRunnerShell(cfg.workspace, cfg.shell)
+	if err != nil {
+		slog.Warn("could not build command runner; Bash tool disabled", "workspace", cfg.workspace, "err", err)
+		return nil
+	}
+	return runner
+}
+
+// bashDisabledReason returns a short human-readable reason Bash is disabled, for
+// the startup log line.
+func bashDisabledReason(cfg config) string {
+	switch {
+	case cfg.noBash:
+		return "--no-bash"
+	case cfg.shell == "":
+		return "--shell is empty"
+	default:
+		return "command runner unavailable"
+	}
 }
 
 // buildTaskTool constructs the Task subagent tool over a child Engine scoped to
@@ -313,9 +496,11 @@ func osfsWorkspaceFactory() server.WorkspaceFactory {
 	}
 }
 
-// serve starts the gRPC and HTTP servers concurrently and blocks until ctx is
-// cancelled (a signal) or a server fails, then shuts both down gracefully.
-func serve(ctx context.Context, cfg config, svc *server.Service) error {
+// serve starts the gRPC and HTTP servers (and, when --metrics-addr is set, the
+// Prometheus /metrics endpoint on its own listener) concurrently and blocks
+// until ctx is cancelled (a signal) or a server fails, then shuts them all down
+// gracefully.
+func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus.Registry) error {
 	grpcSrv := grpc.NewServer()
 	ozzv1.RegisterHarnessServiceServer(grpcSrv, server.NewHarnessServer(svc))
 
@@ -323,6 +508,20 @@ func serve(ctx context.Context, cfg config, svc *server.Service) error {
 		Addr:              cfg.httpAddr,
 		Handler:           server.NewHTTPHandler(svc),
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// The /metrics endpoint runs on a separate loopback listener: it is a
+	// read-only, secret-free surface kept apart from the harness API. An empty
+	// --metrics-addr disables it.
+	var metricsSrv *http.Server
+	if cfg.metricsAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", telemetry.MetricsHandler(reg))
+		metricsSrv = &http.Server{
+			Addr:              cfg.metricsAddr,
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
 	}
 
 	warnIfNonLoopback("grpc-addr", cfg.grpcAddr)
@@ -333,7 +532,7 @@ func serve(ctx context.Context, cfg config, svc *server.Service) error {
 		return fmt.Errorf("listen grpc %q: %w", cfg.grpcAddr, err)
 	}
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 
 	go func() {
 		slog.Info("gRPC server listening", "addr", grpcLis.Addr().String())
@@ -349,16 +548,27 @@ func serve(ctx context.Context, cfg config, svc *server.Service) error {
 		}
 	}()
 
+	if metricsSrv != nil {
+		go func() {
+			slog.Info("metrics server listening", "addr", cfg.metricsAddr, "path", "/metrics")
+			if serveErr := metricsSrv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("metrics serve: %w", serveErr)
+			}
+		}()
+	} else {
+		slog.Info("metrics endpoint DISABLED (--metrics-addr empty)")
+	}
+
 	select {
 	case <-ctx.Done():
 		slog.Info("shutdown signal received; stopping servers")
 	case err := <-errCh:
 		slog.Error("server failed; shutting down", "err", err)
-		shutdown(grpcSrv, httpSrv)
+		shutdown(grpcSrv, httpSrv, metricsSrv)
 		return err
 	}
 
-	shutdown(grpcSrv, httpSrv)
+	shutdown(grpcSrv, httpSrv, metricsSrv)
 	return nil
 }
 
@@ -382,12 +592,18 @@ func warnIfNonLoopback(flagName, addr string) {
 		"flag", flagName, "addr", addr)
 }
 
-// shutdown gracefully stops both servers, bounding the HTTP drain with a timeout.
-func shutdown(grpcSrv *grpc.Server, httpSrv *http.Server) {
+// shutdown gracefully stops the servers, bounding the HTTP drains with a
+// timeout. metricsSrv may be nil when the /metrics endpoint is disabled.
+func shutdown(grpcSrv *grpc.Server, httpSrv, metricsSrv *http.Server) {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("http graceful shutdown", "err", err)
+	}
+	if metricsSrv != nil {
+		if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("metrics graceful shutdown", "err", err)
+		}
 	}
 	grpcSrv.GracefulStop()
 }

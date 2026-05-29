@@ -8,11 +8,18 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"time"
 
 	"github.com/stacklok/ozzharness/internal/session"
 )
+
+// ErrNoShell is the sentinel a CommandRunner returns when it has no shell to
+// execute against (e.g. the in-memory runner, or a shell-less remote pod). The
+// Bash tool surfaces it to the model as a tool-level error rather than aborting
+// the harness.
+var ErrNoShell = errors.New("tool: no shell available")
 
 // ToolSpec is what the model sees for a tool: its name, a documentation-quality
 // description (when to use / when not / example / limits), and the JSON schema
@@ -60,7 +67,19 @@ type FileInfo struct {
 	IsDir bool
 }
 
-// CommandResult is the outcome of a Workspace.RunCommand invocation.
+// CommandRunner executes a shell command. Implementations may run it locally
+// (/bin/sh), in a remote environment, or refuse it (no shell available). The
+// agent loop never references this type — only the Bash tool depends on it,
+// which is what makes the Bash tool (and therefore any command execution)
+// optional in the catalog.
+type CommandRunner interface {
+	// Run executes command and returns its result. A non-zero exit is reported
+	// via CommandResult.ExitCode (not error); error is for execution faults
+	// (cancellation, timeout, or a missing shell — see ErrNoShell).
+	Run(ctx context.Context, command string) (CommandResult, error)
+}
+
+// CommandResult is the outcome of a CommandRunner.Run invocation.
 type CommandResult struct {
 	// Stdout is the captured standard output (already truncated by the adapter).
 	Stdout string
@@ -108,10 +127,6 @@ type Workspace interface {
 	// Grep returns the matches of a regular expression across files selected by
 	// an optional path glob. Results are capped/shaped by the adapter.
 	Grep(ctx context.Context, pattern, pathGlob string) ([]GrepMatch, error)
-	// RunCommand runs a shell command with the session root as its working
-	// directory, returning captured output and the exit code. Cancellation and
-	// timeout are governed by ctx.
-	RunCommand(ctx context.Context, command string) (CommandResult, error)
 
 	// RecordRead marks path as having been read at the given content version so
 	// the Edit tool can later assert read-before-edit. version is an opaque

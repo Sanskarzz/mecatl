@@ -43,11 +43,12 @@ func seed(t *testing.T, ws *memfs.Workspace, path, content string) {
 }
 
 func TestReadOnlyFlags(t *testing.T) {
+	// Bash is excluded from All() (it requires a CommandRunner); these are the
+	// always-available tools. Bash's ReadOnly is asserted separately.
 	want := map[string]bool{
 		"Read":     true,
 		"Edit":     false,
 		"Write":    false,
-		"Bash":     false,
 		"Grep":     true,
 		"Glob":     true,
 		"WebFetch": true,
@@ -64,20 +65,44 @@ func TestReadOnlyFlags(t *testing.T) {
 			t.Errorf("%s.ReadOnly() = %v, want %v", name, got[name], w)
 		}
 	}
+	// Bash is mutating.
+	if NewBashTool(memfs.NewCommandRunner()).ReadOnly() {
+		t.Error("Bash.ReadOnly() = true, want false")
+	}
+}
+
+// TestAllExcludesBash documents that the always-available catalog has NO Bash:
+// command execution is optional and added only when a runner is configured.
+func TestAllExcludesBash(t *testing.T) {
+	for _, tl := range All() {
+		if tl.Spec().Name == "Bash" {
+			t.Fatal("All() must not include Bash (it requires a CommandRunner)")
+		}
+	}
 }
 
 func TestAllAndRegister(t *testing.T) {
-	if len(All()) != 7 {
-		t.Fatalf("All() = %d tools, want 7", len(All()))
+	if len(All()) != 6 {
+		t.Fatalf("All() = %d tools, want 6", len(All()))
 	}
 	cat := tool.NewCatalog()
 	if err := Register(cat); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	for _, name := range []string{"Read", "Edit", "Write", "Bash", "Grep", "Glob", "WebFetch"} {
+	for _, name := range []string{"Read", "Edit", "Write", "Grep", "Glob", "WebFetch"} {
 		if _, ok := cat.Lookup(name); !ok {
 			t.Errorf("catalog missing %q after Register", name)
 		}
+	}
+	// Register does NOT add Bash; the catalog is shell-less until NewBashTool is
+	// registered explicitly.
+	if _, ok := cat.Lookup("Bash"); ok {
+		t.Error("Register added Bash; it must be opt-in via NewBashTool")
+	}
+	// Adding the optional Bash tool with a configured runner succeeds.
+	cat.MustRegister(NewBashTool(memfs.NewCommandRunner()))
+	if _, ok := cat.Lookup("Bash"); !ok {
+		t.Error("catalog missing Bash after explicit NewBashTool registration")
 	}
 	// Re-registering must collide.
 	if err := Register(cat); err == nil {
@@ -288,8 +313,11 @@ func TestWriteOverwriteUnreadRejected(t *testing.T) {
 
 func TestBashOutputAndExitMapping(t *testing.T) {
 	ws := memfs.NewWorkspace("/")
-	ws.SetCommandResult(&tool.CommandResult{Stdout: "hi there", Stderr: "", ExitCode: 0}, nil)
-	res := exec(t, BashTool{}, call(t, "Bash", map[string]any{"command": "echo hi there"}), ws)
+	runner := memfs.NewCommandRunner()
+	bash := NewBashTool(runner)
+
+	runner.SetResult(&tool.CommandResult{Stdout: "hi there", Stderr: "", ExitCode: 0}, nil)
+	res := exec(t, bash, call(t, "Bash", map[string]any{"command": "echo hi there"}), ws)
 	if res.IsError {
 		t.Fatalf("Bash exit 0 should not be an error: %s", res.Content)
 	}
@@ -298,8 +326,8 @@ func TestBashOutputAndExitMapping(t *testing.T) {
 	}
 
 	// Non-zero exit => error result, output preserved.
-	ws.SetCommandResult(&tool.CommandResult{Stdout: "", Stderr: "boom", ExitCode: 2}, nil)
-	res = exec(t, BashTool{}, call(t, "Bash", map[string]any{"command": "false"}), ws)
+	runner.SetResult(&tool.CommandResult{Stdout: "", Stderr: "boom", ExitCode: 2}, nil)
+	res = exec(t, bash, call(t, "Bash", map[string]any{"command": "false"}), ws)
 	if !res.IsError {
 		t.Error("non-zero exit should be a tool error")
 	}
@@ -309,11 +337,21 @@ func TestBashOutputAndExitMapping(t *testing.T) {
 }
 
 func TestBashNoShellSurfacesAsToolError(t *testing.T) {
-	ws := memfs.NewWorkspace("/") // default: ErrNoShell
-	res := exec(t, BashTool{}, call(t, "Bash", map[string]any{"command": "echo hi"}), ws)
+	ws := memfs.NewWorkspace("/")
+	bash := NewBashTool(memfs.NewCommandRunner()) // default runner: ErrNoShell
+	res := exec(t, bash, call(t, "Bash", map[string]any{"command": "echo hi"}), ws)
 	if !res.IsError {
-		t.Error("RunCommand error should surface as a tool error, not a harness error")
+		t.Error("runner error should surface as a tool error, not a harness error")
 	}
+}
+
+func TestNewBashToolNilRunnerPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("NewBashTool(nil) should panic")
+		}
+	}()
+	_ = NewBashTool(nil)
 }
 
 func TestGrepCapAndFormat(t *testing.T) {
@@ -390,7 +428,7 @@ func TestMissingRequiredArgs(t *testing.T) {
 		{ReadTool{}, call(t, "Read", map[string]any{})},
 		{EditTool{}, call(t, "Edit", map[string]any{"path": "a"})},
 		{WriteTool{}, call(t, "Write", map[string]any{"content": "x"})},
-		{BashTool{}, call(t, "Bash", map[string]any{})},
+		{NewBashTool(memfs.NewCommandRunner()), call(t, "Bash", map[string]any{})},
 		{GrepTool{}, call(t, "Grep", map[string]any{})},
 		{GlobTool{}, call(t, "Glob", map[string]any{})},
 	}

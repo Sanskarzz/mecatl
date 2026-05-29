@@ -38,10 +38,29 @@ Limits:
   if you need more.
 - Whether a given command is permitted is decided by the harness, not this tool.`
 
-// BashTool runs a shell command via the Workspace. It is statically classified
-// as non-read-only: deciding whether a specific command is read-only is
-// governance's job, not this tool's.
-type BashTool struct{}
+// BashTool runs a shell command via an injected tool.CommandRunner. It is
+// statically classified as non-read-only: deciding whether a specific command is
+// read-only is governance's job, not this tool's.
+//
+// The runner is injected at construction (NewBashTool) rather than taken from
+// the Workspace, because command execution is optional: a deployment with no
+// shell simply never constructs a BashTool. The frozen Tool.Execute signature
+// still receives a Workspace, but the Bash tool ignores it.
+type BashTool struct {
+	runner tool.CommandRunner
+}
+
+// NewBashTool constructs the Bash tool bound to runner, which performs the actual
+// command execution (locally via osfs.NewCommandRunner, in a remote environment,
+// or refusing with tool.ErrNoShell). The composition root registers the returned
+// tool ONLY when a runner is configured; without one, the catalog has no Bash and
+// the agent runs shell-less. runner must be non-nil.
+func NewBashTool(runner tool.CommandRunner) tool.Tool {
+	if runner == nil {
+		panic("tools: NewBashTool requires a non-nil CommandRunner")
+	}
+	return BashTool{runner: runner}
+}
 
 // Compile-time assertion that BashTool implements tool.Tool.
 var _ tool.Tool = BashTool{}
@@ -73,7 +92,7 @@ func (BashTool) ReadOnly() bool { return false }
 
 // Execute runs the command, honoring an optional timeout, and returns combined
 // output with the exit code.
-func (BashTool) Execute(ctx context.Context, in session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
+func (bt BashTool) Execute(ctx context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 	var args bashArgs
 	if msg, ok := parseArgs(in, &args); !ok {
 		return session.NewToolError(in.ID, msg), nil
@@ -91,7 +110,7 @@ func (BashTool) Execute(ctx context.Context, in session.ToolCall, ws tool.Worksp
 		defer cancel()
 	}
 
-	res, err := ws.RunCommand(ctx, args.Command)
+	res, err := bt.runner.Run(ctx, args.Command)
 	if err != nil {
 		// Surface command-execution failures (no shell, timeout, cancellation)
 		// to the model so it can adapt, rather than aborting the harness.

@@ -3,11 +3,11 @@
 // rejection and the same Edit read-ledger semantics as the osfs adapter, and
 // performs Grep over the in-memory contents.
 //
-// RunCommand has no real shell to execute against: there is no process model in
-// memory. By default it returns ErrNoShell so tests cannot accidentally depend
-// on shell behavior. A canned result may be programmed via SetCommandResult for
-// deterministic Bash-tool stubbing. In short: the mem Workspace is for FS-tool
-// testing, not for Bash.
+// memfs has no shell, so its Workspace deliberately does NOT execute commands.
+// For deterministic Bash-tool stubbing it exposes a separate, programmable
+// tool.CommandRunner (see CommandRunner / NewCommandRunner): by default Run
+// returns ErrNoShell so tests cannot accidentally depend on shell behavior, and
+// a canned result may be programmed via SetResult.
 package memfs
 
 import (
@@ -35,9 +35,10 @@ var ErrPathEscape = errors.New("memfs: path escapes workspace root")
 // ErrNotExist is returned when a file is not present in the in-memory store.
 var ErrNotExist = fs.ErrNotExist
 
-// ErrNoShell is returned by RunCommand when no canned result has been
-// programmed: memfs has no shell to run commands against.
-var ErrNoShell = errors.New("memfs: no shell available; program a result with SetCommandResult")
+// ErrNoShell is returned by CommandRunner.Run when no canned result has been
+// programmed: memfs has no shell to run commands against. It wraps
+// tool.ErrNoShell so callers can match either sentinel.
+var ErrNoShell = fmt.Errorf("memfs: %w; program a result with SetResult", tool.ErrNoShell)
 
 // node is a single in-memory file entry.
 type node struct {
@@ -185,15 +186,13 @@ func hasDotDot(p string) bool {
 }
 
 // Workspace is the in-memory session-scoped seam. It composes a FileSystem,
-// performs Grep over in-memory contents, returns a programmable/stub RunCommand,
-// and carries the Edit read-ledger.
+// performs Grep over in-memory contents, and carries the Edit read-ledger.
+// Command execution is not part of the Workspace; use CommandRunner for that.
 type Workspace struct {
 	fs *FileSystem
 
-	mu        sync.Mutex
-	ledger    map[string]string // path -> recorded fingerprint
-	cmdResult *tool.CommandResult
-	cmdErr    error
+	mu     sync.Mutex
+	ledger map[string]string // path -> recorded fingerprint
 }
 
 // NewWorkspace returns an empty in-memory Workspace with the given logical root.
@@ -201,7 +200,6 @@ func NewWorkspace(root string) *Workspace {
 	return &Workspace{
 		fs:     NewFileSystem(root),
 		ledger: make(map[string]string),
-		cmdErr: ErrNoShell,
 	}
 }
 
@@ -283,29 +281,46 @@ func (w *Workspace) Grep(ctx context.Context, pattern, pathGlob string) ([]tool.
 	return matches, nil
 }
 
-// SetCommandResult programs the deterministic result (and/or error) that the
-// next and subsequent RunCommand calls return. Passing a nil result with a nil
-// error makes RunCommand return an empty successful result; this is the only way
-// to get a non-error RunCommand from memfs, since it has no shell.
-func (w *Workspace) SetCommandResult(res *tool.CommandResult, err error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.cmdResult = res
-	w.cmdErr = err
+// CommandRunner is a programmable, in-memory tool.CommandRunner for
+// deterministic Bash-tool stubbing. memfs has no shell, so by default Run
+// returns ErrNoShell; program a canned result (or error) with SetResult.
+type CommandRunner struct {
+	mu     sync.Mutex
+	result *tool.CommandResult
+	err    error
 }
 
-// RunCommand returns the programmed canned result. memfs has no shell, so absent
-// a programmed result it returns ErrNoShell. It honors ctx cancellation. The
+// NewCommandRunner returns a programmable in-memory CommandRunner. Until
+// SetResult is called, Run returns ErrNoShell.
+func NewCommandRunner() *CommandRunner {
+	return &CommandRunner{err: ErrNoShell}
+}
+
+// Compile-time assertion that CommandRunner satisfies the runner port.
+var _ tool.CommandRunner = (*CommandRunner)(nil)
+
+// SetResult programs the deterministic result (and/or error) that the next and
+// subsequent Run calls return. Passing a nil result with a nil error makes Run
+// return an empty successful result; this is the only way to get a non-error Run
+// from memfs, since it has no shell.
+func (r *CommandRunner) SetResult(res *tool.CommandResult, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.result = res
+	r.err = err
+}
+
+// Run returns the programmed canned result. memfs has no shell, so absent a
+// programmed result it returns ErrNoShell. It honors ctx cancellation. The
 // command string is ignored beyond being a marker; this method exists for
-// interface conformance and deterministic Bash-tool stubbing, not real
-// execution.
-func (w *Workspace) RunCommand(ctx context.Context, _ string) (tool.CommandResult, error) {
+// deterministic Bash-tool stubbing, not real execution.
+func (r *CommandRunner) Run(ctx context.Context, _ string) (tool.CommandResult, error) {
 	if err := ctx.Err(); err != nil {
 		return tool.CommandResult{}, err
 	}
-	w.mu.Lock()
-	res, err := w.cmdResult, w.cmdErr
-	w.mu.Unlock()
+	r.mu.Lock()
+	res, err := r.result, r.err
+	r.mu.Unlock()
 	if err != nil {
 		return tool.CommandResult{}, err
 	}

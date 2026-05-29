@@ -35,6 +35,49 @@ tasks:
     cmds:
       - rm -rf bin/
 
+  # --- Container image / deploy (ko) ----------------------------------------
+  #
+  # These tasks package ozzd as a container image with ko (https://ko.build) —
+  # no Dockerfile. Install ko first: https://ko.build/install/. The image is
+  # built straight from ./cmd/ozzd onto the distroless base pinned in .ko.yaml.
+  #
+  # Required env for publish/resolve:
+  #   KO_DOCKER_REPO  destination registry/repo, e.g. ghcr.io/stacklok/ozzharness
+  #                   (ko:build hardcodes ko.local for a purely local image).
+
+  ko:build:
+    desc: Build the ozzd image locally with ko (no push; tagged under ko.local)
+    env:
+      KO_DOCKER_REPO: ko.local
+    cmds:
+      # --local loads the image into the local Docker/podman daemon; --bare
+      # keeps the repo path clean (no extra import-path suffix) and prints the
+      # fully-qualified image ref (with content-hash tag) on stdout.
+      - ko build --local --bare ./cmd/ozzd
+
+  ko:publish:
+    desc: Build and push the ozzd image with ko (honours KO_DOCKER_REPO)
+    cmds:
+      - cmd: |
+          if [ -z "${KO_DOCKER_REPO:-}" ]; then
+            echo "KO_DOCKER_REPO is required (e.g. export KO_DOCKER_REPO=ghcr.io/stacklok/ozzharness)"; exit 1
+          fi
+        silent: true
+      - ko build --push --bare ./cmd/ozzd
+
+  ko:resolve:
+    desc: Render deploy/ manifests with the ko-built image ref (honours KO_DOCKER_REPO)
+    cmds:
+      - cmd: |
+          if [ -z "${KO_DOCKER_REPO:-}" ]; then
+            echo "KO_DOCKER_REPO is required (e.g. export KO_DOCKER_REPO=ghcr.io/stacklok/ozzharness)"; exit 1
+          fi
+        silent: true
+      # ko resolve substitutes the ko://… image placeholder in deploy/ with the
+      # built+pushed ref and emits the rendered manifests on stdout. Pipe to
+      # kubectl: `task ko:resolve | kubectl apply -f -`.
+      - ko resolve -f deploy/
+
   test:
     desc: Run unit tests with the race detector
     cmds:

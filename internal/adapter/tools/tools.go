@@ -1,6 +1,11 @@
-// Package tools implements the seven core model-facing tools of the ozzharness
-// kit — Read, Edit, Write, Bash, Grep, Glob, and a WebFetch stub — as
+// Package tools implements the core model-facing tools of the ozzharness kit —
+// Read, Edit, Write, Grep, Glob, a WebFetch stub, and an OPTIONAL Bash tool — as
 // tool.Tool values executing against an injected tool.Workspace.
+//
+// All() and Register() cover the six always-available tools that need only a
+// Workspace. Bash is special: it needs a tool.CommandRunner and is therefore not
+// part of All(); construct it explicitly with NewBashTool(runner) and register it
+// only when a runner is configured. A deployment with no shell simply omits it.
 //
 // Each tool parses its session.ToolCall.Args (JSON), runs against the Workspace
 // seam, and returns a session.ToolResult. Recoverable, model-addressable
@@ -38,22 +43,26 @@ const (
 	maxGlobResults = 1000
 )
 
-// All returns the seven core tools as a fresh slice, ready for registration in
-// the composition root. The order is the canonical catalog order.
+// All returns the always-available core tools as a fresh slice, ready for
+// registration in the composition root. The order is the canonical catalog
+// order. Bash is NOT included: it requires a tool.CommandRunner and is optional
+// — add it separately via NewBashTool when a runner is configured.
 func All() []tool.Tool {
 	return []tool.Tool{
 		ReadTool{},
 		EditTool{},
 		WriteTool{},
-		BashTool{},
 		GrepTool{},
 		GlobTool{},
 		WebFetchTool{},
 	}
 }
 
-// Register adds all seven core tools to cat. It returns the first registration
-// error (e.g. a name collision) encountered, or nil on success.
+// Register adds the always-available core tools (everything in All(), i.e. NOT
+// Bash) to cat. It returns the first registration error (e.g. a name collision)
+// encountered, or nil on success. To enable command execution, additionally
+// register NewBashTool(runner), e.g.
+// cat.MustRegister(tools.NewBashTool(runner)).
 func Register(cat *tool.Catalog) error {
 	for _, t := range All() {
 		if err := cat.Register(t); err != nil {

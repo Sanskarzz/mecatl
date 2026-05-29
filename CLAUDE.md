@@ -10,8 +10,12 @@ behind a provider-agnostic port. Headless: driven over gRPC + HTTP, no TUI.
 
 ## Commands
 
+**Always build through the Taskfile** (`task build`) — not raw `go build`. It compiles to
+`bin/` with the right flags; a bare `go build` in the repo root drops stray binaries and is
+the wrong workflow here.
+
 ```sh
-task build              # → bin/ozzd, bin/ozzdemo  (NEVER `go build` to repo root)
+task build              # → bin/ozzd, bin/ozzdemo  (ALWAYS use this; never `go build` to repo root)
 task test               # full suite, -race
 task lint               # golangci-lint v2 (parallel-safe) + go vet
 task generate           # regenerate contracts/gen from contracts/proto via buf
