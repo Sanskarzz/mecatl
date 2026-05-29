@@ -89,6 +89,11 @@ func (h *HarnessServer) Converse(stream ozzv1.HarnessService_ConverseServer) err
 
 	// Relay events on this goroutine; the channel closes when the run ends.
 	for ev := range run.Events() {
+		// Persist when the run pauses awaiting approval so a restart leaves a
+		// loadable awaiting session a client can re-attach to.
+		if ev.Type == session.EvPermissionAsk {
+			h.svc.Persist(ctx, id)
+		}
 		if err := stream.Send(&ozzv1.ConverseResponse{Event: toProto(ev)}); err != nil {
 			run.Cancel()
 			return err
@@ -131,6 +136,8 @@ func toStatus(err error) error {
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, ErrNotFound):
 		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, ErrNoActiveRun):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())
 	}

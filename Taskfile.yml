@@ -83,6 +83,23 @@ tasks:
     cmds:
       - go test -race ./...
 
+  fuzz:
+    desc: |
+      Run the native Go fuzzers against the security-critical parsers for a
+      bounded time each (manual / CI-nightly target — NOT part of `task test`).
+      Each FuzzXxx also runs its seed corpus under plain `go test`, so the
+      regression cases are already covered by `task test`; this task is the
+      coverage-guided exploration pass. Override the per-target budget with
+      FUZZTIME, e.g. `FUZZTIME=2m task fuzz`.
+    vars:
+      FUZZTIME: '{{.FUZZTIME | default "30s"}}'
+    cmds:
+      # `go test` fuzzes only ONE target per invocation, so run them in sequence.
+      - go test ./internal/governance/ -run='^$' -fuzz='^FuzzSplitCommands$' -fuzztime={{.FUZZTIME}}
+      - go test ./internal/governance/ -run='^$' -fuzz='^FuzzCanonicalize$' -fuzztime={{.FUZZTIME}}
+      - go test ./internal/governance/ -run='^$' -fuzz='^FuzzReadOnlyBash$' -fuzztime={{.FUZZTIME}}
+      - go test ./internal/adapter/openai/ -run='^$' -fuzz='^FuzzDecodeSSE$' -fuzztime={{.FUZZTIME}}
+
   test:cover:
     desc: Run tests with coverage and write coverage/coverage.{out,html}
     cmds:

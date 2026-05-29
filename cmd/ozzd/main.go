@@ -11,6 +11,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,6 +29,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
 	"github.com/stacklok/ozzharness/internal/adapter/hookexec"
@@ -53,13 +58,14 @@ import (
 // when to compact. A conservative default that suits the common GPT-class models.
 const defaultContextWindowTokens = 128_000
 
-// v1 TRUST ASSUMPTION (security): the ozzd API is UNAUTHENTICATED. It exposes
-// command and file execution against the configured workspace with no caller
-// identity check. It is intended for LOCALHOST, SINGLE-USER use only, which is
-// why the default listen addresses below bind the loopback interface. Binding to
-// a non-loopback address (e.g. ":8080" / "0.0.0.0") exposes unauthenticated
-// command/file execution to the network and must not be done without an external
-// trust boundary. Authentication / mTLS is future work.
+// TRUST MODEL (security): the ozzd API exposes command and file execution
+// against the configured workspace. The default listen addresses below bind the
+// loopback interface (single-user localhost). Authentication is OPTIONAL and
+// OFF by default for that loopback case: enable a bearer token (--auth-token /
+// OZZ_AUTH_TOKEN) and/or TLS/mTLS (--tls-cert/--tls-key/--client-ca) before
+// binding a non-loopback address. Binding non-loopback with NO authentication
+// is permitted (an operator may front it with a mesh) but logs a prominent
+// WARNING, since it exposes command/file execution to the network.
 const (
 	defaultGRPCAddr = "127.0.0.1:8080"
 	defaultHTTPAddr = "127.0.0.1:8081"
@@ -100,6 +106,14 @@ type config struct {
 	storeDir      string
 	shell         string
 	noBash        bool
+
+	// Security: API authentication, transport security, and rate limiting.
+	authToken string  // bearer token required on every RPC/request (empty disables auth)
+	tlsCert   string  // PEM server certificate; enables TLS on gRPC + HTTP when set with tlsKey
+	tlsKey    string  // PEM server private key (paired with tlsCert)
+	clientCA  string  // PEM client CA bundle; enables mutual TLS (require+verify client certs)
+	rateLimit float64 // sustained per-client request rate (req/s); 0 disables rate limiting
+	rateBurst int     // token-bucket burst size; 0 -> derived from rateLimit
 
 	// LLM resilience knobs (see package internal/adapter/llmresilience).
 	llmMaxAttempts       int
@@ -184,7 +198,7 @@ func run() error {
 	// MCP: connect to any configured remote servers and register their tools
 	// into the parent catalog. A nil/failed manager is non-fatal; mcpClose is
 	// always safe to call.
-	engine, mcpClose := buildEngine(ctx, cfg, provider, sink, metrics)
+	engine, mcpClose := buildEngine(ctx, cfg, provider, sink, metrics, store)
 	defer mcpClose()
 
 	svc, err := server.NewService(server.Config{
@@ -208,9 +222,9 @@ func parseFlags(argv []string) (config, error) {
 	cwd, _ := os.Getwd()
 
 	fs.StringVar(&cfg.grpcAddr, "grpc-addr", defaultGRPCAddr,
-		"gRPC listen address (defaults to loopback; the API is UNAUTHENTICATED — see package doc before binding non-loopback)")
+		"gRPC listen address (defaults to loopback; set --auth-token and/or --tls-cert before binding non-loopback)")
 	fs.StringVar(&cfg.httpAddr, "http-addr", defaultHTTPAddr,
-		"HTTP/SSE listen address (defaults to loopback; the API is UNAUTHENTICATED — see package doc before binding non-loopback)")
+		"HTTP/SSE listen address (defaults to loopback; set --auth-token and/or --tls-cert before binding non-loopback)")
 	fs.StringVar(&cfg.workspace, "workspace", cwd, "default session workspace root")
 	fs.StringVar(&cfg.model, "model", "gpt-5", "model identifier sent to the provider")
 	fs.BoolVar(&cfg.useOpenAI, "openai", false, "use the OpenAI Responses provider (key from OPENAI_API_KEY)")
@@ -229,6 +243,13 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.Var(&cfg.mcpServers, "mcp-server", "remote MCP server as name=URL (repeatable); auth token read from MCP_<NAME>_TOKEN")
 
+	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token required on every gRPC/HTTP request (or OZZ_AUTH_TOKEN; empty disables auth)")
+	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "PEM server certificate; with --tls-key enables TLS on the gRPC + HTTP servers")
+	fs.StringVar(&cfg.tlsKey, "tls-key", "", "PEM server private key (paired with --tls-cert)")
+	fs.StringVar(&cfg.clientCA, "client-ca", "", "PEM client-CA bundle; enables mutual TLS (require + verify client certs)")
+	fs.Float64Var(&cfg.rateLimit, "rate-limit", 0, "sustained per-client request rate in req/s (0 disables rate limiting)")
+	fs.IntVar(&cfg.rateBurst, "rate-burst", 0, "rate-limit token-bucket burst size (0 derives a sane default from --rate-limit)")
+
 	if err := fs.Parse(argv); err != nil {
 		return config{}, err
 	}
@@ -237,6 +258,11 @@ func parseFlags(argv []string) (config, error) {
 	// An API key in the environment implies the user wants the real provider.
 	if cfg.openAIKey != "" {
 		cfg.useOpenAI = true
+	}
+	// An auth token from the environment is honored when the flag is unset, so a
+	// secret need not appear in the process argv.
+	if cfg.authToken == "" {
+		cfg.authToken = os.Getenv("OZZ_AUTH_TOKEN")
 	}
 	return cfg, nil
 }
@@ -306,18 +332,22 @@ func buildStore(cfg config) (port.SessionStore, error) {
 // It also wires the telemetry Sink (EventSink) and Logger, and connects any
 // configured MCP servers, returning a close func that tears the MCP manager
 // down on shutdown (a no-op when no servers are configured).
-func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sink port.EventSink, logger port.Logger) (*agent.Engine, func()) {
+func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sink port.EventSink, logger port.Logger, store port.SessionStore) (*agent.Engine, func()) {
 	policy := permpolicy.NewPolicy(defaultRules())
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
 	cat, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
 
 	deps := agent.Deps{
-		LLM:                 provider,
-		Catalog:             cat,
-		Policy:              policy,
-		Hooks:               hooks,
-		Store:               nil, // store is held by the Service; the engine need not persist twice
+		LLM:     provider,
+		Catalog: cat,
+		Policy:  policy,
+		Hooks:   hooks,
+		// Persist mid-run transitions (tool results, terminal state) so a durable
+		// store (--store-dir) holds current state. The Service additionally
+		// persists on entering awaiting and at run end; both share this store, so
+		// the latest snapshot is always current for auto-resume after a restart.
+		Store:               store,
 		Sink:                sink,
 		Logger:              logger,
 		PromptConfig:        promptConfig(cfg),
@@ -500,14 +530,51 @@ func osfsWorkspaceFactory() server.WorkspaceFactory {
 // Prometheus /metrics endpoint on its own listener) concurrently and blocks
 // until ctx is cancelled (a signal) or a server fails, then shuts them all down
 // gracefully.
+//
+// The harness API is protected by the server.Authenticator (bearer auth + rate
+// limiting, both off by default) and optionally by TLS / mutual TLS. The
+// liveness/readiness probes and the standard gRPC health service are mounted
+// OUTSIDE the auth/rate-limit layer so orchestrators can probe without
+// credentials.
 func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus.Registry) error {
-	grpcSrv := grpc.NewServer()
-	ozzv1.RegisterHarnessServiceServer(grpcSrv, server.NewHarnessServer(svc))
+	tlsCfg, err := buildTLSConfig(cfg)
+	if err != nil {
+		return err
+	}
 
+	auth := server.NewAuthenticator(server.SecurityConfig{
+		AuthToken: cfg.authToken,
+		RateLimit: cfg.rateLimit,
+		RateBurst: cfg.rateBurst,
+	})
+	logSecurityPosture(cfg, tlsCfg)
+
+	// --- gRPC: auth+rate interceptors, standard health service ---
+	grpcOpts := []grpc.ServerOption{
+		grpc.UnaryInterceptor(auth.UnaryInterceptor()),
+		grpc.StreamInterceptor(auth.StreamInterceptor()),
+	}
+	if tlsCfg != nil {
+		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+	}
+	grpcSrv := grpc.NewServer(grpcOpts...)
+	ozzv1.RegisterHarnessServiceServer(grpcSrv, server.NewHarnessServer(svc))
+	healthSrv := health.NewServer()
+	healthpb.RegisterHealthServer(grpcSrv, healthSrv)
+	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthSrv.SetServingStatus("ozz.v1.HarnessService", healthpb.HealthCheckResponse_SERVING)
+
+	// --- HTTP: health endpoints mounted OUTSIDE auth/rate-limit; the API mux
+	// wrapped in the auth middleware. The readiness probe reports ready as soon
+	// as the engine/service are wired (they are, by the time serve runs). ---
+	httpMux := http.NewServeMux()
+	server.NewHealthHandler(func() bool { return true }).RegisterHealth(httpMux)
+	httpMux.Handle("/", auth.Middleware(server.NewHTTPHandler(svc)))
 	httpSrv := &http.Server{
 		Addr:              cfg.httpAddr,
-		Handler:           server.NewHTTPHandler(svc),
+		Handler:           httpMux,
 		ReadHeaderTimeout: 10 * time.Second,
+		TLSConfig:         tlsCfg,
 	}
 
 	// The /metrics endpoint runs on a separate loopback listener: it is a
@@ -524,8 +591,9 @@ func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus
 		}
 	}
 
-	warnIfNonLoopback("grpc-addr", cfg.grpcAddr)
-	warnIfNonLoopback("http-addr", cfg.httpAddr)
+	authed := auth != nil && (cfg.authToken != "" || tlsCfg != nil)
+	warnIfNonLoopback("grpc-addr", cfg.grpcAddr, authed)
+	warnIfNonLoopback("http-addr", cfg.httpAddr, authed)
 
 	grpcLis, err := net.Listen("tcp", cfg.grpcAddr)
 	if err != nil {
@@ -542,8 +610,16 @@ func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus
 	}()
 
 	go func() {
-		slog.Info("HTTP/SSE server listening", "addr", cfg.httpAddr)
-		if serveErr := httpSrv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		slog.Info("HTTP/SSE server listening", "addr", cfg.httpAddr, "tls", tlsCfg != nil)
+		// ListenAndServeTLS with empty cert/key paths uses the certificate already
+		// loaded into TLSConfig.Certificates by buildTLSConfig.
+		var serveErr error
+		if tlsCfg != nil {
+			serveErr = httpSrv.ListenAndServeTLS("", "")
+		} else {
+			serveErr = httpSrv.ListenAndServe()
+		}
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("http serve: %w", serveErr)
 		}
 	}()
@@ -572,11 +648,13 @@ func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus
 	return nil
 }
 
-// warnIfNonLoopback logs the v1 unauthenticated-API trust assumption: when an
-// address binds something other than the loopback interface, it exposes
-// unauthenticated command/file execution to the network. It logs an info line
-// for the safe (loopback) case and a prominent warning otherwise.
-func warnIfNonLoopback(flagName, addr string) {
+// warnIfNonLoopback logs the API trust assumption for the given bind address.
+// Loopback binds are logged at info. A non-loopback bind WITH authentication
+// (bearer token and/or TLS, indicated by authed) is logged at info; a
+// non-loopback bind with NO authentication is logged as a prominent WARNING,
+// since it exposes command/file execution to the network. It never hard-fails:
+// an operator may legitimately front the server with a service mesh.
+func warnIfNonLoopback(flagName, addr string, authed bool) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
@@ -584,12 +662,77 @@ func warnIfNonLoopback(flagName, addr string) {
 	ip := net.ParseIP(host)
 	loopback := host == "localhost" || (ip != nil && ip.IsLoopback())
 	if loopback {
-		slog.Info("API bound to loopback (unauthenticated, single-user localhost trust model)",
+		slog.Info("API bound to loopback (single-user localhost trust model)",
+			"flag", flagName, "addr", addr, "authenticated", authed)
+		return
+	}
+	if authed {
+		slog.Info("API bound to a non-loopback address WITH authentication (bearer token and/or TLS)",
 			"flag", flagName, "addr", addr)
 		return
 	}
-	slog.Warn("API bound to a NON-loopback address: the ozzd API is UNAUTHENTICATED and exposes command/file execution; do not do this without an external trust boundary (auth/mTLS is future work)",
+	slog.Warn("API bound to a NON-loopback address with NO authentication: it exposes UNAUTHENTICATED command/file execution to the network — set --auth-token / --tls-cert (or front it with a trusted mesh) before doing this",
 		"flag", flagName, "addr", addr)
+}
+
+// buildTLSConfig assembles the *tls.Config for the gRPC + HTTP servers from the
+// TLS flags. It returns nil (plaintext) when neither --tls-cert nor --tls-key is
+// set. --tls-cert and --tls-key must be supplied together. When --client-ca is
+// set it enables mutual TLS: the server requires and verifies a client
+// certificate signed by the given CA bundle.
+func buildTLSConfig(cfg config) (*tls.Config, error) {
+	if cfg.tlsCert == "" && cfg.tlsKey == "" {
+		if cfg.clientCA != "" {
+			return nil, errors.New("--client-ca requires --tls-cert/--tls-key (mTLS needs server TLS)")
+		}
+		return nil, nil
+	}
+	if cfg.tlsCert == "" || cfg.tlsKey == "" {
+		return nil, errors.New("--tls-cert and --tls-key must be supplied together")
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.tlsCert, cfg.tlsKey)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS keypair: %w", err)
+	}
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	if cfg.clientCA != "" {
+		caPEM, err := os.ReadFile(cfg.clientCA)
+		if err != nil {
+			return nil, fmt.Errorf("read client CA: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("client CA %q: no certificates parsed", cfg.clientCA)
+		}
+		tlsCfg.ClientCAs = pool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return tlsCfg, nil
+}
+
+// logSecurityPosture logs the effective authentication / transport / rate-limit
+// posture once at startup so an operator can confirm what is enabled.
+func logSecurityPosture(cfg config, tlsCfg *tls.Config) {
+	mtls := tlsCfg != nil && tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert
+	slog.Info("API security posture",
+		"bearer_auth", cfg.authToken != "",
+		"tls", tlsCfg != nil,
+		"mutual_tls", mtls,
+		"rate_limit_rps", cfg.rateLimit,
+		"rate_burst", cfg.rateBurst,
+		"store", storeKind(cfg))
+}
+
+// storeKind returns a short label for the configured session store, noting the
+// auto-resume implication of an in-memory store.
+func storeKind(cfg config) string {
+	if cfg.storeDir == "" {
+		return "memory (no resume across restart)"
+	}
+	return "jsonl (resumable across restart)"
 }
 
 // shutdown gracefully stops the servers, bounding the HTTP drains with a

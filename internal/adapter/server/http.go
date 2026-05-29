@@ -166,6 +166,11 @@ func (h *HTTPHandler) prompt(w http.ResponseWriter, r *http.Request) {
 
 	enc := json.NewEncoder(w)
 	for ev := range run.Events() {
+		// Persist when the run pauses awaiting approval so a restart leaves a
+		// loadable awaiting session a client can re-attach to.
+		if ev.Type == session.EvPermissionAsk {
+			h.svc.Persist(r.Context(), id)
+		}
 		if _, err := w.Write([]byte("data: ")); err != nil {
 			run.Cancel()
 			return
@@ -195,24 +200,20 @@ func (h *HTTPHandler) approve(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ask_id is required")
 		return
 	}
-	run, ok := h.svc.LookupRun(id)
-	if !ok {
-		writeError(w, http.StatusNotFound, "no in-flight run for session")
+	if err := h.svc.Approve(r.Context(), id, body.AskID, body.Allow); err != nil {
+		writeServiceError(w, err)
 		return
 	}
-	run.Approve(body.AskID, body.Allow)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // cancel handles POST /v1/sessions/{id}/cancel, cancelling the in-flight run.
 func (h *HTTPHandler) cancel(w http.ResponseWriter, r *http.Request) {
 	id := session.SessionID(r.PathValue("id"))
-	run, ok := h.svc.LookupRun(id)
-	if !ok {
-		writeError(w, http.StatusNotFound, "no in-flight run for session")
+	if err := h.svc.Cancel(r.Context(), id); err != nil {
+		writeServiceError(w, err)
 		return
 	}
-	run.Cancel()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -252,6 +253,10 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrNoActiveRun):
+		// Known session, but its run is not live in this process (e.g. the
+		// stream was lost across a restart): nothing to deliver the control to.
+		writeError(w, http.StatusConflict, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}
