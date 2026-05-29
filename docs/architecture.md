@@ -25,6 +25,16 @@ isolated entirely inside `internal/adapter/openai`, so the core is
 provider-agnostic and unit-testable against fakes (`mockllm`, `memfs`,
 `memstore`).
 
+Around that core, every capability beyond the minimal loop is a **seam with a
+default and a swap-in adapter**, so the production build stays static and
+network-free unless you wire something in. The current adapters cover, grouped:
+**reliability** (`llmresilience` retry/breaker decorator), **observability**
+(`telemetry`: Prometheus, OTel spans, OTLP), **security** (server auth/mTLS, rate
+limiting, the `permclassify` model-based risk classifier), **context management**
+(`tokenizer` + the `CascadeCompactor`), **memory** (`memory` + `dream`),
+**parallelism** (`forker` fork-join), and **extensibility** (the `mcp`
+streaming-HTTP client and the `repomap` tool). Each is detailed below.
+
 ## 2. The big picture
 
 ```mermaid
@@ -34,14 +44,14 @@ flowchart LR
     demo["cmd/ozzdemo"]
   end
 
-  subgraph DRIVING["driving adapters"]
-    grpc["server.HarnessServer (gRPC)"]
-    http["server.HTTPHandler (HTTP/SSE)"]
-    svc["server.Service"]
+  subgraph DRIVING["driving adapters — internal/adapter/server"]
+    grpc["HarnessService (gRPC, bidi Converse)"]
+    http["HTTP/SSE handler"]
+    svc["Service (lifecycle + Run registry)\nauth/mTLS · rate limit · health"]
   end
 
   subgraph APP["application — internal/agent"]
-    engine["Engine / Run\nloop.go · dispatch.go\npermission.go · compaction.go · subagent.go"]
+    engine["Engine / Run\nloop · dispatch · permission · hooks\ncompaction · cascade · tokencount\nsubagent (Task) · fork (Fork)"]
   end
 
   subgraph PORTS["ports — internal/port"]
@@ -51,16 +61,23 @@ flowchart LR
   subgraph DOMAIN["domain (no infra imports)"]
     sess["internal/session\nSession · Conversation · Event\nToolCall · ToolResult · Usage"]
     gov["internal/governance\nEffect · Decision · Rule · Scope\nHookEvent · Evaluator · bash.go"]
-    tl["internal/tool\nTool · ToolSpec · Catalog\nFileSystem · Workspace"]
-    pr["internal/prompt\nLayered · Build · Env"]
+    tl["internal/tool\nTool · ToolSpec · Catalog · Disclosable\nFileSystem · Workspace · CommandRunner\nMemoryStore · WorkspaceForker · ToolSearch"]
+    pr["internal/prompt\nLayered · Build · Env\nInstructionAssembler · CommandExpander"]
+  end
+
+  subgraph DECOR["decorators (port → same port)"]
+    res["llmresilience (retry + breaker)"]
+    pc["permclassify (layer-2 classifier)"]
   end
 
   subgraph DRIVEN["driven adapters — internal/adapter"]
     oai["openai · mockllm"]
-    fs["osfs · memfs"]
+    fs["osfs (+CommandRunner) · memfs"]
     st["store/memstore · jsonlstore · sessnap"]
-    tools["tools (Read/Edit/Write/Bash/Grep/Glob/WebFetch)"]
+    tools["tools (Read/Edit/Write/Grep/Glob/WebFetch + optional Bash)"]
     pp["permpolicy · hookexec"]
+    tel["telemetry (Prometheus/OTel/OTLP)"]
+    ext["mcp (streaming-HTTP) · repomap\nmemory · dream · forker · tokenizer"]
   end
 
   ozzd --> svc --> engine
@@ -70,12 +87,19 @@ flowchart LR
   engine --> PORTS
   engine --> DOMAIN
   PORTS --> DOMAIN
+  res -.wraps.-> oai
+  res -.implements.-> p
+  pc -.wraps.-> pp
+  pc -.implements.-> p
   oai -.implements.-> p
   st -.implements.-> p
   pp -.implements.-> p
+  tel -.implements.-> p
   tools -.implements.-> tl
   fs -.implements.-> tl
+  ext -.implements.-> tl
   ozzd -. wires .-> DRIVEN
+  ozzd -. wires .-> DECOR
 ```
 
 **Dependency direction is inward only.** The allowed-imports rule, stated by the
@@ -259,18 +283,34 @@ level**: in `ModePlan` only `ReadOnly()` tools are exposed, ordered by name.
 `FileSystem` and `Workspace` live here (not in `port`) to break the
 `port↔tool` cycle. `Workspace` is the session-scoped seam every tool executes
 against: it scopes all paths to one root (rejecting `../` escapes), exposes
-`Read/Write/Stat/Glob/Grep/RunCommand`, and carries the Edit **read-ledger**
+`Root/Read/Write/Stat/Glob/Grep`, and carries the Edit **read-ledger**
 via `RecordRead(path, version)` / `WasReadUnchanged(ctx, path)`. The
 read-before-edit invariant is enforced inside the Edit tool against this ledger
 (`internal/adapter/tools/edit.go`: invariant #1 via `WasReadUnchanged`, #2
 exact match, #3 uniqueness unless `replace_all`).
 
+**Command execution is a separate seam, not part of `Workspace`.**
+`tool.CommandRunner` (`Run(ctx, command) (CommandResult, error)`) is the only
+chokepoint for shell execution; the agent loop never references it, and only the
+Bash tool depends on it. That makes Bash — and therefore *all* command
+execution — optional in the catalog: `NewBashTool(runner)` is registered only
+when a runner is configured (it panics on a nil runner), and `tools.Register`
+deliberately excludes it. The `osfs` adapter ships a local `/bin/sh`
+`CommandRunner` (output-capped, context-bounded); a runner may also execute
+remotely or refuse with `tool.ErrNoShell`. A shell-less deployment simply omits
+Bash, and an OS sandbox would wrap this seam. `tool.MemoryStore` and
+`tool.WorkspaceForker` live alongside it for the same layering reason (the tools
+that need them depend on the interface, not a `port`).
+
 ## 5. The agent loop (`internal/agent`)
 
-`Engine` is built from `Deps` (all ports + config) via `NewEngine`, which
-defaults the `Compactor` to `HeuristicCompactor{}` and `CompactionRatio` to
-`0.8`. `Engine.Run(ctx, sess, ws, userText)` returns a `*Run` handle
-immediately and drives the loop in a background goroutine; the `Run` exposes:
+`Engine` is built from `Deps` (all ports + the application seams + config) via
+`NewEngine`, which supplies network-free defaults for every optional seam:
+`Compactor`→`HeuristicCompactor{}`, `CompactionRatio`→`0.8`,
+`TokenCounter`→`HeuristicTokenCounter{}`, `Instructions`→`prompt.RootAssembler{}`,
+`CommandExpander`→`prompt.NoopExpander{}`. `Engine.Run(ctx, sess, ws, userText)`
+returns a `*Run` handle immediately and drives the loop in a background
+goroutine; the `Run` exposes:
 - `Events() <-chan session.Event` — the primary surface, closed exactly once
   when the run terminates.
 - `Approve(askID string, allow bool)` — resolves a `permission.ask`
@@ -279,9 +319,12 @@ immediately and drives the loop in a background goroutine; the `Run` exposes:
 
 `drive` (in `loop.go`) is the algorithm:
 
-1. **Record the prompt** (`recordPrompt`): on the first turn, discover project
-   instructions (`prompt.DiscoverInstructions`) and record them + the user text
-   through the aggregate root.
+1. **Record the prompt** (`recordPrompt`): expand the raw input through
+   `CommandExpander.Expand` (slash commands; the `NoopExpander` default leaves it
+   unchanged), fire the `SessionStart`/`UserPromptSubmit` hooks, and on the first
+   turn assemble project instructions via `Instructions.Assemble` (the
+   `RootAssembler` default reads AGENTS.md/CLAUDE.md), recording them + the user
+   text through the aggregate root.
 2. **Pre-turn stop guard**: if `sess.StopReason()` trips or `ctx` is cancelled,
    terminate.
 3. `BeginTurn`, emit `turn.start`.
@@ -395,11 +438,11 @@ keyed by session id so the verdict reaches the right run
 ## 7. Hooks
 
 Hook lifecycle phases (`governance/hookevent.go`): `SessionStart`,
-`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStop`. v1 the
-loop fires **PreToolUse** and **PostToolUse** (and the Task tool fires
-**SubagentStop**); the rest are defined for later.
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStop`. **All
+six now fire** — the per-tool pair from `dispatch.go`, the run-level trio from
+`agent/hooks.go`, and `SubagentStop` from the Task tool.
 
-Placement in `dispatch.go`:
+Per-tool placement (`dispatch.go`):
 - **PreToolUse** (`preHook`) runs after permission clears, before execution, for
   every call (read-batch and serial). On a hook **block** it emits a `hook`
   event and substitutes an error `ToolResult` (the tool does not run). A hook
@@ -407,6 +450,16 @@ Placement in `dispatch.go`:
   aborting the run; a cancelled context is the one case that ends the run.
 - **PostToolUse** (`postHook`) runs best-effort after execution; a block there
   only annotates (the tool already ran).
+
+Run-level placement (`agent/hooks.go`):
+- **SessionStart** (`fireSessionStart`) runs once at the start of a run; it is
+  advisory — a block is surfaced as a `hook` event but does **not** abort.
+- **UserPromptSubmit** (`fireUserPromptSubmit`) runs after the prompt is recorded;
+  a block (or a hook error) here **does** end the run before any model call. A
+  proposed prompt mutation is reported but not applied in v1.
+- **Stop** (`fireStop`) runs exactly once at the terminal end of any run path,
+  even if `ctx` is already cancelled (it is a terminal notification). The Task
+  subagent mirrors this with **SubagentStop**.
 
 Exit-code semantics live in the `hookexec` adapter
 (`internal/adapter/hookexec/hookexec.go`): the `HookEvent` is JSON-serialized to
@@ -531,6 +584,14 @@ error.
 - **Logger** (`port.Logger`) — `ToolCall(id, call, result, took)` records
   tool-execution timing, distinct from the model-visible conversation. The loop
   times execution via the injected `Clock` (`timeExecute`).
+- **Telemetry** (`internal/adapter/telemetry`) — one adapter that implements
+  **both** `port.EventSink` (deriving counters/gauges from the event stream) and
+  `port.Logger` (per-tool counters + a latency histogram). `telemetry.NewMetrics`
+  exposes Prometheus metrics for mounting at `/metrics`; `telemetry.NewSink` fans
+  one Engine `EventSink` out to several sinks; OTel spans model the run/turn/tool
+  hierarchy; and `telemetry.Setup` builds and installs an **OTLP** TracerProvider
+  (gRPC or HTTP transport), wired in `ozzd` via `--otlp-endpoint` /
+  `--otlp-protocol` / `--otlp-insecure` (a no-op when the endpoint is empty).
 - **SessionStore** — `memstore` (default, in-memory) and `jsonlstore`
   (append-only JSONL replay log: `<dir>/<id>.session.jsonl` snapshots +
   `<dir>/<id>.tools.jsonl` tool records; `jsonlstore` also implements `Logger`).
@@ -539,31 +600,146 @@ error.
   (so a session saved mid-`awaiting` reloads with its pending ask intact). It
   captures the terminal reason via `RecordedStopReason()` for exact round-trips.
 
-## 12. Extension points & v1 non-goals
+## 12. Reliability — provider resilience
 
-Designed-in seams (the interfaces where future work slots in without touching
-the core):
+The `port.LLMProvider` seam is wrapped by a **decorator**,
+`llmresilience.Wrap(inner, Config) port.LLMProvider`, so the loop is unchanged.
+It adds retry with exponential backoff and a circuit breaker, configured in
+`ozzd` via `--llm-max-attempts` / `--llm-per-attempt-timeout` /
+`--llm-breaker-threshold` / `--llm-breaker-cooldown`.
 
-| Seam | Where | What plugs in |
+Its load-bearing invariant is **no replay after the first chunk**: retries happen
+only while *establishing* the stream (connect + first chunk). Once the first
+`Chunk` has been yielded, the decorator never re-issues the call, so the model
+never re-sees a half-streamed turn. The breaker opens after N consecutive
+establishment failures and short-circuits with a `BreakerError` until its
+cooldown half-opens it; exhausted retries surface as an `ExhaustedError`. Both
+flow back to the client as a terminal `result` event — `session.ResultPayload`
+now carries an **`Error`** field, so a provider failure is reported to the caller
+rather than swallowed.
+
+Auto-resume complements this: `GetSession`/`Approve`/`Cancel` fall back to
+`SessionStore.Load`, and the service persists at create, on entering `awaiting`,
+and at run end. With `--store-dir` (jsonlstore) a session survives a restart and
+is loadable; the in-flight *stream* itself is not resumed (the `*agent.Run` is
+in-memory), and an approve/cancel against a stored-but-runless session returns
+`ErrNoActiveRun` (HTTP 409 / gRPC `FailedPrecondition`).
+
+## 13. Context management — tokens & the compaction cascade
+
+Two seams keep a long run inside the model's context window:
+
+- **`TokenCounter`** (`agent/tokencount.go`) estimates message-slice token cost.
+  The default `HeuristicTokenCounter` (≈chars/4) needs no dependencies; the
+  offline **`tokenizer.Counter`** (`internal/adapter/tokenizer`, tiktoken BPE
+  tables embedded — no network, no CGO) is the accurate swap-in, selected with
+  `--tokenizer=tiktoken`.
+- **`Compactor`** (`agent/compaction.go`) compresses the conversation once it
+  crosses the trigger ratio. The default `HeuristicCompactor` is single-summary:
+  it preserves the goal + touched file paths, truncates large tool bodies, and
+  keeps the last N messages. The swap-in `CascadeCompactor` (`agent/cascade.go`,
+  `--compaction=cascade`) runs a **cheapest-first tiered cascade** —
+  snip → strip tool bodies → collapse large file bodies → summarize — stopping as
+  soon as the slice fits the token budget, with trigger/target **hysteresis** so
+  it does not thrash near the threshold.
+
+## 14. Memory — cross-session recall & consolidation (pattern 3 / 4)
+
+`tool.MemoryStore` (`Remember`/`Recall`/`List`/`Forget`) is the seam for
+conservative, **per-project** memory. The file-backed `internal/adapter/memory`
+implementation persists entries scoped to a project directory and exposes them to
+the model as the **Remember** and **Recall** tools (opt-in via `memory.Register`,
+`--memory-dir`). On top of it, `internal/adapter/dream` is an opt-in background
+**consolidation** ("sleep") service: `dream.Consolidator` distills the stored
+memory with an LLM call — merging duplicates and dropping stale entries — but is
+deliberately conservative (it never invents keys and is fail-safe on error), run
+once or on a ticker via `RunPeriodically` (`--memory-consolidate-interval`).
+
+## 15. Parallelism — fork-join (pattern 8)
+
+`tool.WorkspaceForker` (`tool/isolation.go`) is the workspace-isolation seam:
+`Fork(ctx, base, label)` returns an isolated child `Workspace` plus a cleanup
+func. The default `internal/adapter/forker` picks its strategy per base —
+a **git worktree** (`git worktree add --detach … HEAD`) when the root is inside a
+repo, else a **recursive copy** — so a child can never write back into the
+parent's tree. `agent.NewForkTool(childEngine, forker, …)` is the fan-out tool
+(catalog name `Fork`): it runs several isolated child loops on independent
+branches and joins their results. It is opt-in via `--enable-fork`; like Task,
+the children's intermediate events are drained internally.
+
+## 16. Extensibility — MCP, tools & progressive disclosure
+
+The `tool.Catalog` is the single registration seam, so every tool — core, remote,
+or generated — is one uniform `tool.Tool`.
+
+**MCP client** (`internal/adapter/mcp`) — remote tools register here. The
+transport is **streaming-HTTP only** (the project's hard constraint): the
+stdio/command transport is never used, so no MCP server is ever `os/exec`-spawned.
+`mcp.Connect` / `mcp.NewManager` dial the configured servers, and the discovered
+tools are registered into the catalog **namespaced** `mcp__<server>__<tool>` so a
+remote tool can never collide with or shadow a built-in.
+
+**Repo map** (`internal/adapter/repomap`) — a **read-only** repo-map tool
+(`repomap.NewTool`, `ReadOnly()==true`). It parses source with **tree-sitter and
+ranks files by personalized PageRank** over the symbol-reference graph, producing
+a compact "where the important code lives" map. It is multi-language and needs
+**no CGO** (tree-sitter runs as pure-Go WASM via wazero), so it does not affect
+the static default build; it is wired in `ozzd` via `--enable-repomap`.
+
+**Progressive tool disclosure** (pattern 9) — a tool may optionally implement
+`tool.Disclosable`; the built-in `tool.Search` tool (catalog name `ToolSearch`,
+`tool.NewToolSearch`) hydrates hidden tools on demand by searching the catalog. A
+tool that does not implement `Disclosable` is always listed, so this is opt-in and
+backwards-compatible (gated by the `ProgressiveTools` flag on the Engine `Deps`).
+
+### Seam summary
+
+Every capability above is a default-on (or opt-in) interface; the core never
+changes when one is swapped:
+
+| Seam | Where | Default → swap-in |
 |---|---|---|
-| `Compactor` interface | `agent/compaction.go` | the default `HeuristicCompactor` (offline; preserves goal + touched file paths, truncates large tool bodies, keeps the last N messages) can be swapped for an LLM-backed summariser. |
-| `tool.Catalog` | `internal/tool/catalog.go` | new tools register here — including future **MCP tools over streaming-HTTP transport only; stdio MCP is explicitly never supported** (no `os/exec`-spawned servers). |
-| `Workspace.RunCommand` | `internal/tool/tool.go` (impl `osfs`) | the single command-execution chokepoint where an OS sandbox (Landlock/seccomp/Seatbelt) wraps later. |
-| `port.LLMProvider` | `internal/port/llm.go` | other vendors; v1 ships `openai` + `mockllm`. |
-| `prompt` volatile suffix | `internal/prompt` | slash commands / skills injection. |
-| `SessionStore` + AGENTS.md/CLAUDE.md discovery | `port` + `prompt/builder.go` | file-as-memory; AGENTS.md wins over CLAUDE.md, injected as a **user** message, never system. |
+| `port.LLMProvider` | `internal/port/llm.go` | `openai`/`mockllm`; decorated by `llmresilience`; other vendors slot in unchanged |
+| `port.PermissionPolicy` | `internal/port/permission.go` | `permpolicy` (layer-1 rules), optionally decorated by `permclassify` (layer-2 model classifier) |
+| `Compactor` | `agent/compaction.go` | `HeuristicCompactor` → `CascadeCompactor` |
+| `TokenCounter` | `agent/tokencount.go` | `HeuristicTokenCounter` → `tokenizer.Counter` |
+| `InstructionAssembler` | `prompt/instructions.go` | `RootAssembler` (AGENTS.md/CLAUDE.md) → scoped assembler |
+| `CommandExpander` | `prompt/command.go` | `NoopExpander` → `DirCommandExpander` (slash commands) |
+| `tool.Disclosable` + `ToolSearch` | `internal/tool` | always-listed → progressive disclosure |
+| `tool.CommandRunner` | `internal/tool/tool.go` (impl `osfs`) | the command-execution chokepoint; an OS sandbox wraps here |
+| `tool.MemoryStore` | `internal/tool/tool.go` (impl `memory`) | cross-session memory + `dream` consolidation |
+| `tool.WorkspaceForker` | `tool/isolation.go` (impl `forker`) | fork-join isolated branches |
+| `tool.Catalog` | `internal/tool/catalog.go` | core tools + MCP (streaming-HTTP) + repo map |
+| `SessionStore` + AGENTS.md/CLAUDE.md discovery | `port` + `prompt/builder.go` | file-as-memory; AGENTS.md wins over CLAUDE.md, injected as a **user** message, never system |
 
-**Documented v1 non-goals**: OS-level sandbox (seam only), four-tier compaction
-cascade (single heuristic impl), stdio MCP (never), repo map / embeddings,
-multi-vendor routing (one adapter), persistent cross-session memory beyond the
-store + instruction files, slash commands / skills. The guiding restraint: build
-the shape, instrument it, and resist features before the loop, tools,
-permissions, hooks, and cache all work.
+**Remaining non-goals / deliberate deferrals**: an **OS-level sandbox**
+(Landlock/seccomp/Seatbelt) is the one explicitly-deferred item — the
+`CommandRunner` seam is the place it wraps, and shell-less deploys avoid the
+surface entirely. **stdio MCP is never supported**. Embeddings, multi-vendor model
+routing (the `LLMProvider` port already abstracts it), and full skill packaging
+remain unbuilt. The guiding restraint still holds: build the shape, instrument it,
+and resist features before the loop, tools, permissions, hooks, and cache all work.
 
-**Security note** (`cmd/ozzd/main.go`): the ozzd API is **unauthenticated** and
-exposes command/file execution against the workspace. It defaults to binding the
-loopback interface (`127.0.0.1:8080` gRPC, `127.0.0.1:8081` HTTP) and warns
-loudly if bound to a non-loopback address. Auth/mTLS is future work.
+## 17. Deployment & server hardening
+
+The server (`internal/adapter/server`) is hardened for off-loopback operation,
+and `cmd/ozzd` wires the knobs:
+
+- **Authentication** — optional bearer token (`--auth-token` / `OZZ_AUTH_TOKEN`,
+  constant-time compared) enforced by a gRPC interceptor + HTTP middleware
+  (`server/authn.go`); optional **TLS / mTLS** (`--tls-cert` / `--tls-key` /
+  `--client-ca`). The server still **warns loudly** if it binds a non-loopback
+  address with no auth configured.
+- **Rate limiting** — per-client + global token-bucket (`--rate-limit` /
+  `--rate-burst`), bounded and idle-evicting.
+- **Health** — HTTP `/healthz` (liveness) + `/readyz` (readiness) mounted outside
+  auth/rate-limit, plus standard `grpc_health_v1` `SERVING` (`server/health.go`).
+- **Graceful shutdown** — gRPC `GracefulStop` + HTTP `Shutdown`.
+
+Deployment artifacts: a hardened **GitHub Actions** CI plus a **ko**-based release
+that signs images with **cosign** and emits an **SBOM** and **SLSA provenance**
+(`.github/workflows`, `.ko.yaml`); `deploy/` carries PSS-restricted manifests
+(health probes can switch TCP→httpGet against the endpoints above).
 
 ### Permission & bash governance details (`internal/governance`)
 

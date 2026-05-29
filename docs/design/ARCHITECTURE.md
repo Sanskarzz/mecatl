@@ -1,6 +1,12 @@
-# ozzharness — Architecture (v1)
+# ozzharness — Architecture
 
-> Status: design, pre-implementation.
+> Status: design + rationale, kept in step with the implementation. The v1 core
+> (loop, ~7 tools, permissions, hooks, cache, two API surfaces) shipped as
+> designed; this revision folds in the post-v1 capabilities (resilience,
+> telemetry, MCP, memory, fork-join, the context-management cascade, the pattern
+> seams, and server hardening). Where this doc names a package/type, the name
+> matches the current code. The authoritative status map is
+> `docs/design/PRODUCTION-READINESS.md`.
 > Module: `github.com/stacklok/ozzharness` · Go 1.26.3
 > Primary source: `docs/harnesses/08-design-considerations.md` (the 13 load-bearing
 > decisions and the 10-point gauntlet). Companions: `06-architecture-patterns.md`,
@@ -29,11 +35,11 @@ provider-agnostic and unit-testable against fakes.
                          │  (no infra imports, no provider imports)     │
   ┌───────────────┐      │                                             │   ┌────────────────────┐
   │ gRPC server   │──┐   │   agent  (the loop / use-cases)             │   │ OpenAI Responses   │
-  │ (connect-go)  │  │   │   ├─ orchestrates Session aggregate         │◀──│ adapter  (LLMPort) │
+  │ (grpc-go)     │  │   │   ├─ orchestrates Session aggregate         │◀──│ adapter  (LLMPort) │
   └───────────────┘  │   │   ├─ depends on PORTS only:                 │   └────────────────────┘
   ┌───────────────┐  ├──▶│   │    LLMProvider, Tool, PermissionPolicy, │   ┌────────────────────┐
-  │ HTTP/JSON+SSE │──┘   │   │    HookRunner, SessionStore, Clock,     │◀──│ tools adapter      │
-  │ (connect-go)  │      │   │    Logger, EventSink                    │   │ (Read/Edit/Bash..) │
+  │ HTTP/SSE      │──┘   │   │    HookRunner, SessionStore, Clock,     │◀──│ tools adapter      │
+  │ (hand-rolled) │      │   │    Logger, EventSink                    │   │ (Read/Edit/Bash..) │
   └───────────────┘      │   │                                         │   └────────────────────┘
   ┌───────────────┐      │   session  (aggregate: Session, Conversation│   ┌────────────────────┐
   │ demo CLI      │─────▶│   │           Turn, Message, ToolCall,      │◀──│ filesystem adapter │
@@ -48,7 +54,7 @@ provider-agnostic and unit-testable against fakes.
 The **domain** (`session`, `prompt`) holds entities, value objects, and the *port
 interfaces*. The **application** (`agent`) is the use-case layer: it is the agent loop
 and knows only ports. **Adapters** implement ports and depend inward on the domain;
-nothing in the domain imports an adapter, the OpenAI SDK, connect-go, or `os`.
+nothing in the domain imports an adapter, the OpenAI SDK, grpc-go, or `os`.
 
 Ports are defined **where they are consumed** (in `internal/port`, imported by `agent`),
 per Go idiom "accept interfaces". Adapters return concrete structs.
@@ -85,62 +91,86 @@ API, not Go symbols. (Re-evaluate `pkg/sdk` once an external Go consumer exists.
 
 ```
 github.com/stacklok/ozzharness
-├── api/
-│   ├── proto/ozz/v1/ozz.proto         # gRPC service + messages (source of truth)
-│   └── gen/ozz/v1/                     # generated Go (connect-go + protobuf)
+├── contracts/
+│   ├── proto/ozz/v1/harness.proto      # gRPC service + messages (source of truth)
+│   └── gen/go/                          # generated Go (grpc-go + protobuf, buf)
 ├── cmd/
-│   ├── ozzd/                           # the server binary (gRPC+HTTP on one port)
+│   ├── ozzd/                           # the server binary (gRPC + HTTP/SSE)
 │   └── ozzdemo/                        # the demo driver (fake provider default)
 ├── internal/
 │   ├── session/                        # DOMAIN: Session aggregate + value objects
-│   │   ├── session.go                  #   Session (root), state machine
+│   │   ├── session.go                  #   Session (root), state machine, StopReason
 │   │   ├── conversation.go             #   Conversation, Message, Turn
 │   │   ├── toolcall.go                 #   ToolCall, ToolResult (shared value objects)
 │   │   ├── usage.go                    #   Usage (value object)
-│   │   └── event.go                    #   Event taxonomy (domain-owned)
-│   ├── prompt/                         # DOMAIN: two-layer system prompt assembly
-│   │   ├── prompt.go                   #   StablePrefix / VolatileSuffix builder
-│   │   └── env.go                      #   <env> block, AGENTS.md/CLAUDE.md discovery
+│   │   └── event.go                    #   Event taxonomy + ResultPayload (now has Error)
+│   ├── prompt/                         # DOMAIN: two-layer system prompt assembly + seams
+│   │   ├── prompt.go                   #   Layered (stable prefix + volatile suffix)
+│   │   ├── builder.go                  #   Build; AGENTS.md/CLAUDE.md discovery
+│   │   ├── env.go                      #   <env> block
+│   │   ├── instructions.go             #   InstructionAssembler seam + RootAssembler
+│   │   └── command.go                  #   CommandExpander seam (slash commands) + DirCommandExpander
 │   ├── governance/                     # DOMAIN: permission + hook + plan-mode logic
-│   │   ├── permission.go               #   PermissionDecision, Rule, Scope, merge/eval
+│   │   ├── permission.go               #   PermissionDecision, Effect (deny/ask/allow)
+│   │   ├── evaluator.go                #   Evaluator: Rule, Scope precedence, merge/eval
 │   │   ├── bash.go                     #   compound-command split + wrapper canonicalization
-│   │   └── hookevent.go                #   HookEvent, HookOutcome, lifecycle enum
-│   ├── tool/                           # DOMAIN: Tool port + ToolSpec + catalog contract
-│   │   ├── tool.go                     #   Tool interface, ToolSpec, ReadOnly flag, FileSystem/Workspace
-│   │   └── catalog.go                  #   Catalog (name→Tool), plan-mode filtering
+│   │   └── hookevent.go                #   HookEvent, HookOutcome, lifecycle phases
+│   ├── tool/                           # DOMAIN: Tool contract + seams + catalog
+│   │   ├── tool.go                     #   Tool, ToolSpec, Disclosable, FileSystem,
+│   │   │                               #     Workspace, CommandRunner, MemoryStore
+│   │   ├── catalog.go                  #   Catalog (name→Tool), plan-mode filtering
+│   │   ├── toolsearch.go               #   Search (the ToolSearch progressive-disclosure tool)
+│   │   └── isolation.go                #   WorkspaceForker seam (fork-join)
 │   ├── port/                           # PORTS: interfaces the agent consumes
-│   │   ├── llm.go                      #   LLMProvider / Completer + stream chunk types
+│   │   ├── llm.go                      #   LLMProvider + stream chunk types
 │   │   ├── store.go                    #   SessionStore
 │   │   ├── hookrunner.go               #   HookRunner
+│   │   ├── permission.go               #   PermissionPolicy
 │   │   ├── clock.go                    #   Clock
 │   │   └── log.go                      #   Logger, EventSink
 │   ├── agent/                          # APPLICATION: the loop (use-case layer)
-│   │   ├── loop.go                     #   Run(ctx, Session) streaming the Event channel
-│   │   ├── dispatch.go                 #   read-parallel / mutate-serial tool dispatch
-│   │   ├── permission.go              #   ask-pause/resume wiring to EventSink
-│   │   ├── compaction.go               #   ~80% window single-summary seam
-│   │   └── subagent.go                 #   Task: fresh context, scoped tools, one-shot
-│   └── adapter/                        # ADAPTERS: implement ports
+│   │   ├── loop.go                     #   Engine/Deps, Run(...) streaming the Event channel
+│   │   ├── dispatch.go                 #   read-parallel / mutate-serial dispatch + hooks
+│   │   ├── permission.go               #   askRegistry: ask-pause/resume handshake
+│   │   ├── hooks.go                    #   SessionStart / UserPromptSubmit / Stop lifecycle
+│   │   ├── compaction.go               #   Compactor seam + HeuristicCompactor (default)
+│   │   ├── cascade.go                  #   CascadeCompactor (snip→strip→collapse→summarize)
+│   │   ├── tokencount.go               #   TokenCounter seam + HeuristicTokenCounter
+│   │   ├── subagent.go                 #   Task: fresh context, scoped tools, one-shot
+│   │   └── fork.go                     #   ForkTool: fork-join fan-out (NewForkTool)
+│   └── adapter/                        # ADAPTERS: implement ports / seams
 │       ├── openai/                     #   LLMProvider over OpenAI Responses API (SSE)
 │       ├── mockllm/                    #   scripted fake LLMProvider (no network)
-│       ├── tools/                      #   Read, Edit, Write, Bash, Grep, Glob, Task, WebFetch(stub)
-│       ├── osfs/                       #   FileSystem over the real OS
+│       ├── llmresilience/              #   retry/backoff + circuit-breaker decorator (LLMProvider)
+│       ├── permclassify/               #   model-based layer-2 risk classifier (PermissionPolicy)
+│       ├── tools/                      #   Read, Edit, Write, Grep, Glob, WebFetch + optional Bash
+│       ├── toolkit/                    #   shared tool mechanics (arg parse, output cap, schema)
+│       ├── osfs/                       #   FileSystem (os.Root-confined) + CommandRunner
 │       ├── memfs/                      #   in-memory FileSystem fake
-│       ├── store/                      #   memstore (default) + jsonlstore (replay log)
+│       ├── fsconformance/              #   shared FileSystem conformance suite
+│       ├── store/                      #   memstore (default) + jsonlstore + sessnap DTO
 │       ├── hookexec/                   #   shell-exec HookRunner (stdin JSON, exit-code)
-│       └── server/                     #   connect-go service implementing api/gen
-└── docs/design/                        # this file + STEP-CHAIN.md
+│       ├── permpolicy/                 #   PermissionPolicy over governance.Evaluator
+│       ├── memory/                     #   file-backed MemoryStore + Remember/Recall tools
+│       ├── dream/                      #   opt-in memory-consolidation (sleep) service
+│       ├── forker/                     #   WorkspaceForker (git-worktree / copy isolation)
+│       ├── tokenizer/                  #   offline tiktoken TokenCounter
+│       ├── mcp/                        #   MCP client (streaming-HTTP only) → namespaced tools
+│       ├── repomap/                    #   read-only repo-map tool (tree-sitter + PageRank)
+│       ├── telemetry/                  #   EventSink/Logger → Prometheus, OTel spans, OTLP
+│       └── server/                     #   gRPC + HTTP/SSE service, auth/mTLS, health, rate limit
+└── docs/design/                        # this file + STEP-CHAIN.md + PRODUCTION-READINESS.md
 ```
 
 **Allowed-imports matrix** (the contract; CI can enforce with `depguard`):
 
 | Package | May import |
 |---|---|
-| `session`, `prompt`, `governance`, `tool` (domain) | stdlib, other domain packages. **Never** `adapter`, `agent`, `api`, `os`, OpenAI SDK, connect-go. |
-| `port` | domain packages + stdlib (`context`, `io`, `time`). Nothing else. |
-| `agent` (application) | domain + `port`. **Never** `adapter` or `api`. |
-| `adapter/*` | domain + `port` + the specific external lib it adapts. Never `agent`. |
-| `api/gen` | generated; protobuf + connect runtime only. |
+| `session`, `prompt`, `governance`, `tool` (domain) | stdlib, other domain packages. **Never** `adapter`, `agent`, `contracts`, `os`, OpenAI SDK, grpc-go. |
+| `port` | domain packages + stdlib (`context`, `io`, `iter`, `time`). Nothing else. (`port` imports `tool` and `prompt` because `LLMRequest` carries `[]tool.ToolSpec` and `prompt.Layered`.) |
+| `agent` (application) | domain + `port` + stdlib. **Never** `adapter` or `contracts`. (Tests may import adapters.) |
+| `adapter/*` | domain + `port` + the specific external lib it adapts. The loop never imports an adapter; two driven adapters legitimately reference `agent` types they implement/drive — `tokenizer` satisfies `agent.TokenCounter`, and `server` drives `agent.Engine`/`agent.Run`. |
+| `contracts/gen` | generated; protobuf + grpc-go runtime only. |
 | `cmd/*` | everything — this is the composition root where wiring happens. |
 
 The only place concrete adapters meet ports is `cmd/` (dependency injection by hand;
@@ -262,8 +292,9 @@ type PermissionDecision struct {       // result of evaluating a ToolCall across
 
 type Scope int  // Managed > CLI > LocalProject > SharedProject > User  (doc 03 precedence)
 
-// HookEvent / lifecycle  (doc 03 hook table; v1 implements PreToolUse/PostToolUse,
-// designs in the rest)
+// HookEvent / lifecycle  (doc 03 hook table). All six phases now fire: the
+// per-tool PreToolUse/PostToolUse in agent/dispatch.go, and SessionStart /
+// UserPromptSubmit / Stop / SubagentStop in agent/hooks.go + agent/subagent.go.
 type HookPhase string
 const (
     PhaseSessionStart    HookPhase="SessionStart"
@@ -290,8 +321,8 @@ disk.
 The loop must never see an OpenAI type. The provider yields a stream of **provider-
 neutral chunks**; the loop assembles them into a domain `Message`. The OpenAI Responses
 API specifics (function_call / function_call_output items, reasoning items, automatic
-prompt caching, SSE framing) live entirely inside `adapter/openai`. A concurrent
-research agent is filling that adapter in; this port is what they target.
+prompt caching, SSE framing) live entirely inside `adapter/openai`. The same port is
+the seam the `llmresilience` decorator (§5.5) and the `permclassify` classifier wrap.
 
 ```go
 // internal/port
@@ -355,13 +386,32 @@ type FileSystem interface {
     Write(ctx context.Context, path string, data []byte) error
     Stat(ctx context.Context, path string) (FileInfo, error)
     Glob(ctx context.Context, pattern string) ([]string, error)
-    // Bash/Grep go through a Runner the FS exposes or a separate CommandRunner port.
+}
+
+// Workspace is the session-scoped seam every Tool executes against (Root, Read,
+// Write, Stat, Glob, Grep + the Edit read-ledger via RecordRead/WasReadUnchanged).
+// NOTE: Workspace no longer exposes RunCommand — command execution moved out to
+// the CommandRunner seam (below) so the whole surface is optional.
+```
+
+**Command execution is a separate, optional seam** (`tool.CommandRunner`, *not*
+`internal/port`). The agent loop never references it; only the Bash tool depends on
+it, which is what makes Bash — and therefore any command execution — optional in
+the catalog. The osfs adapter ships a local `/bin/sh` runner; an implementation may
+also run remotely or refuse with `tool.ErrNoShell`. A shell-less deploy simply omits
+the Bash tool. An OS sandbox (Landlock/seccomp/Seatbelt) slots in here as a wrapping
+`CommandRunner` adapter without touching the loop.
+
+```go
+// internal/tool
+type CommandRunner interface {
+    Run(ctx context.Context, command string) (CommandResult, error) // exit code in result; ErrNoShell if none
 }
 ```
 
 Edit's three invariants (read-before-edit, exact-match, uniqueness — doc 08 #3) are
-enforced **inside the Edit tool** against a per-session read-ledger the tool consults;
-the ledger is part of session state passed via `Workspace`.
+enforced **inside the Edit tool** against the per-session read-ledger the `Workspace`
+carries (`RecordRead`/`WasReadUnchanged`).
 
 ### 5.3 Remaining ports
 
@@ -383,6 +433,48 @@ type EventSink interface { Emit(Event) }           // loop → API stream
 type Clock interface { Now() time.Time }
 type Logger interface { ToolCall(session.SessionID, session.ToolCall, session.ToolResult, time.Duration) }
 ```
+
+### 5.4 Application seams (in `internal/agent` / `internal/prompt` / `internal/tool`)
+
+Beyond the seven core ports, the loop and the prompt layer expose small
+**default-on, swap-in** interfaces so each harness pattern is pluggable without a
+core change. Each ships a network-free default implementation:
+
+| Seam | Where | Default | Swap-in |
+|---|---|---|---|
+| `Compactor` | `agent/compaction.go` | `HeuristicCompactor` (single-summary) | `CascadeCompactor` (tiered) |
+| `TokenCounter` | `agent/tokencount.go` | `HeuristicTokenCounter` (chars/4) | `tokenizer.Counter` (offline tiktoken) |
+| `InstructionAssembler` | `prompt/instructions.go` | `RootAssembler` (AGENTS.md/CLAUDE.md discovery) | custom scoped-context assembly (pattern 2) |
+| `CommandExpander` | `prompt/command.go` | `NoopExpander` | `DirCommandExpander` (slash commands, pattern 9-ish) |
+| `Disclosable` + `tool.Search` (`ToolSearch`) | `tool/tool.go`, `tool/toolsearch.go` | always-listed tools | hide-until-searched progressive disclosure (pattern 9) |
+| `CommandRunner` | `tool/tool.go` | osfs local `/bin/sh` | remote / sandboxed / `ErrNoShell` |
+| `MemoryStore` | `tool/tool.go` | (off) | `memory.Store` (Remember/Recall, pattern 3) |
+| `WorkspaceForker` | `tool/isolation.go` | (off) | `forker` (git-worktree / copy, pattern 8) |
+
+### 5.5 Adapter inventory & the decorator idiom
+
+Adapters fall into three shapes:
+
+- **Port implementations** — `openai`/`mockllm` (`LLMProvider`), `osfs`/`memfs`
+  (`FileSystem`+`CommandRunner`), `store/memstore`+`jsonlstore` (`SessionStore`,
+  `jsonlstore` also `Logger`), `hookexec` (`HookRunner`), `permpolicy`
+  (`PermissionPolicy`), `telemetry` (`EventSink`+`Logger`), the `tools` catalog,
+  `memory`/`repomap`/`forker` (tools/seams).
+- **Decorators over a port** — both wrap an inner port and return the *same*
+  interface, so they compose transparently at the composition root:
+  - `llmresilience.Wrap(inner port.LLMProvider, cfg) port.LLMProvider` — retry/
+    exponential backoff + a circuit breaker. Key invariant: **no replay after the
+    first chunk** — it only retries while *establishing* the stream (connect +
+    first chunk); once bytes flow it never re-issues, so the model never sees a
+    duplicated partial turn. Surfaces `BreakerError`/`ExhaustedError`.
+  - `permclassify.Wrap(inner port.PermissionPolicy, llm, cfg) port.PermissionPolicy`
+    — an optional model-based **layer-2** risk classifier. It is **monotonic**
+    (can only tighten: an inner Allow may be raised to Ask/Deny, never relaxed) and
+    **fail-safe** (a classifier error keeps the inner decision). Layer-1 is the
+    deterministic `governance` rules; this is the second opinion on top.
+- **Background services** — `dream.Consolidator` (opt-in sleep/consolidation over a
+  `MemoryStore`: merges duplicates, drops stale entries, never invents keys,
+  fail-safe; `RunPeriodically`).
 
 ---
 
@@ -515,12 +607,12 @@ the run `ctx`, which the loop observes.
 | 1 | Loop can pause/resume/cancel | `agent/loop.go` (channel producer) + `agent/permission.go` (StateAwaiting) + `ctx` to `LLMProvider.Stream` |
 | 2 | Edit errors if file not read this session | `adapter/tools` Edit tool against the per-session read-ledger in `Workspace` |
 | 3 | Plan mode denies Edit/Write/non-RO Bash at harness level | `tool/catalog.go` plan-mode filter + `governance` PreToolUse, before dispatch |
-| 4 | Compaction preserves paths/decisions, drops file bodies | `agent/compaction.go` (single-summary seam; prompt template preserves plan/paths) |
-| 5 | PreToolUse hooks fire and block on exit 2 | `agent/dispatch.go` calls `HookRunner` before each tool; `adapter/hookexec` maps exit 2 → Block |
+| 4 | Compaction preserves paths/decisions, drops file bodies | `Compactor` seam (`agent/compaction.go`): `HeuristicCompactor` (default) preserves goal + touched paths; `CascadeCompactor` (`agent/cascade.go`) adds the tiered snip→strip→collapse→summarize cascade |
+| 5 | PreToolUse hooks fire and block on exit 2 | `agent/dispatch.go` calls `HookRunner` before each tool; `adapter/hookexec` maps exit 2 → Block. Full lifecycle (SessionStart/UserPromptSubmit/Stop/SubagentStop) fires from `agent/hooks.go` + `agent/subagent.go` |
 | 6 | Hour-long session stays cheap (cache hit > 0.7) | `prompt.Layered` stable prefix/volatile suffix + `adapter/openai` breakpoint placement; `Usage.CacheHitRate()` metric |
 | 7 | Subagent returns only its final string | `agent/subagent.go` — child loop, only final text folded as one ToolResult |
 | 8 | Permission denies across merged scopes | `governance/permission.go` `Evaluate` (deny→ask→allow, Scope precedence) |
-| 9 | Sandbox is a separate layer | **Seam only in v1** — `port` boundary around Bash execution (`CommandRunner`) is where an OS-sandbox adapter slots later; documented non-goal |
+| 9 | Sandbox is a separate layer | **Seam in place** — the `tool.CommandRunner` interface (in `internal/tool`, *not* `internal/port`) is the command-execution chokepoint where an OS-sandbox adapter wraps later; the OS sandbox itself is the one deliberately-deferred item (§9) |
 | 10 | Tool-description bug is diagnosable by reading it | `tool.ToolSpec.Description` convention (doc 07 §9); descriptions reviewed as onboarding docs |
 
 Also enforced: **read-parallel / mutate-serial** (doc 08 #4) in `agent/dispatch.go`,
@@ -529,17 +621,24 @@ keyed off `Tool.ReadOnly()`; **stop conditions** (`Limits`/`Counters` on Session
 
 ---
 
-## 9. Non-goals for v1 (designed-in seams, not built)
+## 9. What was deferred at v1 — and where it landed
 
-| Deferred | Seam left for it |
-|---|---|
-| OS-level sandbox (Landlock/seccomp/Seatbelt) | `CommandRunner` port around Bash; sandbox is a wrapping adapter |
-| Four-tier compaction cascade | `agent/compaction.go` is a `Compactor` interface; v1 ships single-summary impl |
-| MCP client (**streaming-HTTP transport ONLY — stdio MCP is explicitly NOT supported, ever**) | `tool.Catalog` is the registration seam; future MCP tools register as `Tool`s over a streaming-HTTP MCP client. No `os/exec`-spawned stdio servers. |
-| Repo map / embeddings | a future read-only `Tool`; no core change |
-| Multi-vendor model routing | `LLMProvider` port already abstracts this; v1 ships one adapter |
-| Persistent cross-session memory | `SessionStore` + AGENTS.md/CLAUDE.md discovery already cover the file-as-memory case |
-| Slash commands / skills | `prompt` volatile-suffix injection seam |
+Most of the v1 "designed-in seams, not built" list is now built behind the seam it
+was designed for. The authoritative tracker is
+`docs/design/PRODUCTION-READINESS.md`; the summary:
 
-The guiding restraint (doc 08): build the *shape*, instrument it, and resist features
-before the loop, tools, permissions, hooks, and cache all work.
+| Originally deferred | Status | Where it landed |
+|---|---|---|
+| Four-tier compaction cascade | **Done** | `CascadeCompactor` (`agent/cascade.go`) behind the `Compactor` seam — tiered snip→strip→collapse→summarize with trigger/target hysteresis. Default stays `HeuristicCompactor`; opt in with `--compaction=cascade`. |
+| Real tokenizer | **Done** | `TokenCounter` seam (`agent/tokencount.go`); offline tiktoken adapter `internal/adapter/tokenizer`. Default stays the heuristic counter. |
+| MCP client (**streaming-HTTP transport ONLY — stdio MCP is explicitly NOT supported, ever**) | **Done** | `internal/adapter/mcp`: streaming-HTTP transport only (no `os/exec`-spawned stdio server is ever created); registers remote tools into `tool.Catalog` namespaced `mcp__<server>__<tool>`. |
+| Repo map / embeddings | **Done (repo map)** | `internal/adapter/repomap`: a read-only, multi-language repo-map `Tool` (tree-sitter parsing + personalized PageRank over the symbol-reference graph), no CGO. Embeddings remain unbuilt. |
+| Persistent cross-session memory | **Done** | `tool.MemoryStore` seam + file-backed `internal/adapter/memory` (Remember/Recall tools, per-project), plus opt-in `dream` consolidation. The `SessionStore` + AGENTS.md/CLAUDE.md discovery still cover the file-as-memory case. |
+| Slash commands / skills | **Done (commands)** | `prompt.CommandExpander` seam + `DirCommandExpander` (`.ozz/commands` / `.claude/commands` templates). Skill packaging remains future. |
+| Fork-join parallelism (pattern 8) | **Done** | `tool.WorkspaceForker` seam + `internal/adapter/forker` (git-worktree / copy isolation) + `agent.NewForkTool`. |
+| Multi-vendor model routing | Optional, unbuilt | `LLMProvider` port already abstracts it; a router would be a convenience adapter. |
+| **OS-level sandbox (Landlock/seccomp/Seatbelt)** | **Deliberately deferred** | The `tool.CommandRunner` seam is the chokepoint; a Landlock(+seccomp) wrapper drops in as a `CommandRunner` adapter without touching the loop. Bash is also fully optional (shell-less deploys avoid the surface entirely), so this is not a blocker for those. |
+
+The guiding restraint (doc 08) still holds: build the *shape*, instrument it, and
+resist features before the loop, tools, permissions, hooks, and cache all work — the
+post-v1 work above only extended seams that the v1 shape already exposed.
