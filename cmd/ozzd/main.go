@@ -34,6 +34,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
+	"github.com/stacklok/ozzharness/internal/adapter/dream"
 	"github.com/stacklok/ozzharness/internal/adapter/forker"
 	"github.com/stacklok/ozzharness/internal/adapter/hookexec"
 	"github.com/stacklok/ozzharness/internal/adapter/llmresilience"
@@ -149,6 +150,17 @@ type config struct {
 
 	// Memory: per-project memory store directory (empty disables memory tools).
 	memoryDir string
+
+	// Memory consolidation (dream): background distillation interval. 0 disables.
+	// Only meaningful when memoryDir is set; a positive value with an empty
+	// memoryDir is a no-op (logged as a warning).
+	memoryConsolidateInterval time.Duration
+
+	// Slash commands: directory of <name>.md command templates, and an explicit
+	// enable switch. commandsDir set OR enableCommands true wires the
+	// DirCommandExpander; otherwise the default NoopExpander is left in place.
+	commandsDir    string
+	enableCommands bool
 
 	// Fork: enable the Fork fan-out tool (parallel isolated child branches).
 	enableFork bool
@@ -304,6 +316,10 @@ func parseFlags(argv []string) (config, error) {
 	fs.BoolVar(&cfg.otlpInsecure, "otlp-insecure", false, "skip TLS when dialing the OTLP collector (development only)")
 
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "per-project memory store directory (empty disables the Remember/Recall tools)")
+	fs.DurationVar(&cfg.memoryConsolidateInterval, "memory-consolidate-interval", 0, "interval for background memory consolidation (dream); 0 disables. Only meaningful with --memory-dir")
+
+	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "directory of slash-command templates (<name>.md); setting it enables command expansion. Empty + --enable-commands uses the defaults (.ozz/commands, .claude/commands)")
+	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.ozz/commands, .claude/commands) when --commands-dir is empty")
 
 	fs.BoolVar(&cfg.enableFork, "enable-fork", true, "register the Fork fan-out tool (parallel isolated child branches)")
 
@@ -424,8 +440,32 @@ func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sin
 		CompactionRatio:     defaultCompactionRatio,
 		TokenCounter:        counter,
 		Compactor:           buildCompactor(cfg, provider, counter),
+		CommandExpander:     buildCommandExpander(cfg),
 	}
 	return agent.NewEngine(deps), mcpClose
+}
+
+// buildCommandExpander selects the slash-command expander for the agent Deps.
+// Command expansion is OFF by default (the NoopExpander, leaving raw user text
+// untouched). It is turned ON when EITHER --commands-dir is set (use that
+// directory) OR --enable-commands is true (use the DirCommandExpander defaults
+// of .ozz/commands then .claude/commands). When --commands-dir is set it takes
+// precedence over the defaults; --enable-commands without a dir uses the
+// defaults. Templates are discovered through the session Workspace FS, so paths
+// are workspace-relative.
+func buildCommandExpander(cfg config) prompt.CommandExpander {
+	if cfg.commandsDir == "" && !cfg.enableCommands {
+		slog.Info("slash commands DISABLED (set --commands-dir or --enable-commands to enable)")
+		return prompt.NoopExpander{}
+	}
+	if cfg.commandsDir != "" {
+		slog.Info("slash commands ENABLED", "dir", cfg.commandsDir)
+		return prompt.NewDirCommandExpander(cfg.commandsDir)
+	}
+	// --enable-commands with no explicit dir: use the package defaults.
+	exp := prompt.NewDirCommandExpander()
+	slog.Info("slash commands ENABLED (default dirs)", "dirs", ".ozz/commands,.claude/commands")
+	return exp
 }
 
 // buildTokenCounter selects the TokenCounter from --tokenizer. The default
@@ -520,10 +560,25 @@ func buildCatalog(ctx context.Context, cfg config, provider port.LLMProvider, ho
 			slog.Warn("registering memory tools failed; some tools may be missing", "err", err)
 		} else {
 			slog.Info("memory tools ENABLED (Remember/Recall)", "dir", cfg.memoryDir)
+			// Dream consolidation (harness pattern 4): an opt-in background service
+			// that distills the memory store on a ticker. It shares the run's ctx
+			// (so it stops on shutdown) and the same LLM provider. Only started when
+			// both --memory-dir and a positive --memory-consolidate-interval are set.
+			startMemoryConsolidation(ctx, cfg, store, provider)
 		}
 	} else {
 		slog.Info("memory tools DISABLED (--memory-dir empty)")
+		if cfg.memoryConsolidateInterval > 0 {
+			slog.Warn("--memory-consolidate-interval is a no-op without --memory-dir (memory is disabled)",
+				"interval", cfg.memoryConsolidateInterval)
+		}
 	}
+
+	// Build-tagged optional tools. The default build registers nothing here
+	// (see repomap_disabled.go); a `-tags repomap` build (which requires CGO)
+	// registers the tree-sitter-backed repo-map tool (see repomap_enabled.go).
+	// This keeps the default static, CGO-free build (used by the ko image) green.
+	registerOptionalTools(cat)
 
 	mcpClose := registerMCP(ctx, cfg, cat)
 	return cat, mcpClose
@@ -555,6 +610,29 @@ func registerMCP(ctx context.Context, cfg config, cat *tool.Catalog) func() {
 			slog.Warn("MCP manager close", "err", err)
 		}
 	}
+}
+
+// startMemoryConsolidation launches the dream consolidator on a background
+// goroutine when --memory-consolidate-interval is positive. It shares the run's
+// ctx (so the loop exits on shutdown) and the same LLM provider as the agent.
+// A non-positive interval is a no-op. Per-run errors are logged at warn and do
+// not stop the loop.
+func startMemoryConsolidation(ctx context.Context, cfg config, store tool.MemoryStore, provider port.LLMProvider) {
+	if cfg.memoryConsolidateInterval <= 0 {
+		slog.Info("memory consolidation DISABLED (--memory-consolidate-interval=0)")
+		return
+	}
+	cons := dream.New(store, provider, dream.Config{Model: cfg.model})
+	slog.Info("memory consolidation ENABLED (dream)", "interval", cfg.memoryConsolidateInterval, "model", cfg.model)
+	go func() {
+		err := cons.RunPeriodically(ctx, cfg.memoryConsolidateInterval, func(err error) {
+			slog.Warn("memory consolidation", "err", err)
+		})
+		// RunPeriodically returns ctx.Err() on shutdown; that is expected, not a fault.
+		if err != nil && !errors.Is(err, context.Canceled) {
+			slog.Warn("memory consolidation loop stopped", "err", err)
+		}
+	}()
 }
 
 // buildCommandRunner builds the local command runner the Bash tool executes

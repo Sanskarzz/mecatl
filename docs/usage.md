@@ -51,6 +51,11 @@ Other handy targets (`task --list` for the full set):
 You do **not** need a network or an API key for `task build`, `task test`, or
 the offline demo.
 
+The default `ozzd` build is CGO-free and statically linkable (the ko image
+builds it with `CGO_ENABLED=0`). The optional tree-sitter-backed repo-map tool
+requires CGO and is gated behind a build tag — build with
+`CGO_ENABLED=1 go build -tags repomap ./cmd/ozzd` to include it.
+
 ---
 
 ## 2. The 60-second demo
