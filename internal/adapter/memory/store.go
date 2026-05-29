@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // memoryFileName is the JSON file, under the store's directory, that holds all

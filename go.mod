@@ -1,4 +1,4 @@
-module github.com/stacklok/ozzharness
+module github.com/stacklok/mecatl
 
 go 1.26.3
 

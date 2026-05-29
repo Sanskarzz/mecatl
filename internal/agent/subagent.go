@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/governance"
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // taskToolName is the catalog name of the subagent delegation tool.
@@ -68,7 +68,7 @@ var taskSchema = json.RawMessage(`{
 // back into the parent conversation. This keeps a noisy "search → read N files →
 // summarize" investigation from bloating the main context window.
 //
-// The child Engine is built by the composition root (cmd/ozzd, WP11) with a
+// The child Engine is built by the composition root (cmd/mecated, WP11) with a
 // read-only explorer catalog (Read, Grep, Glob) that NEVER includes the Task tool
 // itself — so a subagent cannot recurse — and an allow-all policy over those
 // read-only tools so the child never needs to prompt a human. See NewTaskTool.
@@ -127,7 +127,7 @@ func WithChildSessionPrefix(p string) TaskOption {
 
 // NewTaskTool constructs the Task subagent tool over a pre-built child *Engine.
 //
-// The composition root (cmd/ozzd, WP11) is responsible for building childEngine
+// The composition root (cmd/mecated, WP11) is responsible for building childEngine
 // with the SCOPED child catalog and policy. The recommended, deterministic wiring
 // is:
 //

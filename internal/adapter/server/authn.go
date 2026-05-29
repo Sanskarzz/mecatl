@@ -23,7 +23,7 @@ import (
 // rate limit is enforced.
 //
 // Both knobs compose with the loopback-default + off-loopback warning in the
-// composition root (cmd/ozzd): an empty AuthToken on a non-loopback bind is a
+// composition root (cmd/mecated): an empty AuthToken on a non-loopback bind is a
 // loud-but-not-fatal misconfiguration the operator is warned about.
 type SecurityConfig struct {
 	// AuthToken, when non-empty, requires every RPC/request to present

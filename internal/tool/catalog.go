@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // ErrDuplicateTool is returned by Catalog.Register when a tool with the same

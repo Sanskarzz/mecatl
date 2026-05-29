@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
-	"github.com/stacklok/ozzharness/internal/adapter/mockllm"
-	"github.com/stacklok/ozzharness/internal/adapter/server"
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/adapter/server"
 )
 
 // createHTTPSession POSTs /v1/sessions and returns the new session id.
@@ -42,15 +42,15 @@ func createHTTPSession(t *testing.T, srv *httptest.Server) string {
 
 // parseSSE reads an SSE body and returns the decoded proto Events from each
 // `data:` line until the stream ends.
-func parseSSE(t *testing.T, r *bufio.Reader) []*ozzv1.Event {
+func parseSSE(t *testing.T, r *bufio.Reader) []*mecatlv1.Event {
 	t.Helper()
-	var out []*ozzv1.Event
+	var out []*mecatlv1.Event
 	for {
 		line, err := r.ReadString('\n')
 		if len(line) > 0 {
 			trimmed := strings.TrimRight(line, "\r\n")
 			if data, ok := strings.CutPrefix(trimmed, "data: "); ok {
-				var ev ozzv1.Event
+				var ev mecatlv1.Event
 				if jerr := json.Unmarshal([]byte(data), &ev); jerr != nil {
 					t.Fatalf("decode SSE data %q: %v", data, jerr)
 				}
@@ -123,12 +123,12 @@ func TestHTTPApprove(t *testing.T) {
 
 	// Read the SSE stream incrementally; when the ask arrives, POST /approve.
 	r := bufio.NewReader(resp.Body)
-	var events []*ozzv1.Event
+	var events []*mecatlv1.Event
 	var approved bool
 	for {
 		line, rerr := r.ReadString('\n')
 		if data, ok := strings.CutPrefix(strings.TrimRight(line, "\r\n"), "data: "); ok {
-			var ev ozzv1.Event
+			var ev mecatlv1.Event
 			if err := json.Unmarshal([]byte(data), &ev); err != nil {
 				t.Fatalf("decode: %v", err)
 			}

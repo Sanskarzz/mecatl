@@ -1,50 +1,50 @@
-# Deploying ozzd
+# Deploying mecated
 
-Kubernetes manifests for the ozzharness server, `ozzd`. The container image is
-built with [`ko`](https://ko.build) directly from `./cmd/ozzd` — there is no
+Kubernetes manifests for the mecatl server, `mecated`. The container image is
+built with [`ko`](https://ko.build) directly from `./cmd/mecated` — there is no
 Dockerfile. Manifests reference the image via the `ko://…` placeholder, which
 `ko resolve` / `ko apply` substitutes with the real ref at deploy time.
 
-## ⚠️ Security: the ozzd API is auth-optional
+## ⚠️ Security: the mecated API is auth-optional
 
-ozzd exposes command and file execution over gRPC + HTTP. Authentication is
+mecated exposes command and file execution over gRPC + HTTP. Authentication is
 **opt-in**: it is **off by default**, so unless you enable it the API performs
-**no caller identity check** (see `cmd/ozzd/main.go`). The in-code default binds
+**no caller identity check** (see `cmd/mecated/main.go`). The in-code default binds
 loopback for exactly this reason. The Deployment overrides that to `0.0.0.0`
 because a pod's network namespace is isolated — but that only shifts the trust
 boundary to Kubernetes networking.
 
-- **Recommended in-pod control: enable `--auth-token`.** ozzd supports
+- **Recommended in-pod control: enable `--auth-token`.** mecated supports
   `--auth-token` (bearer-token auth) as well as TLS and mTLS. Turning on
   `--auth-token` gives you a caller-identity check that travels with the pod,
   independent of network topology. The `/healthz` and `/readyz` endpoints are
   mounted **outside** the auth boundary, so probes keep working when auth is on.
 - A default-deny ingress **`NetworkPolicy`** ships in `networkpolicy.yaml`
-  (wired into `kustomization.yaml`). It selects the ozzd pod and allows no
+  (wired into `kustomization.yaml`). It selects the mecated pod and allows no
   ingress until you add an explicit allow for your clients — defense-in-depth on
   top of (or in lieu of) `--auth-token`. See that file for a ready-to-adapt
-  client-allow block. Egress is intentionally left open because ozzd needs
+  client-allow block. Egress is intentionally left open because mecated needs
   cluster DNS and outbound HTTPS to OpenAI.
 - The `Service` is `ClusterIP` only. Do **not** expose it via
   LoadBalancer/NodePort/Ingress without an auth boundary in front.
 - For exposure beyond a trusted network, combine `--auth-token`/mTLS with the
-  NetworkPolicy, or front ozzd with an external auth proxy / mTLS gateway.
+  NetworkPolicy, or front mecated with an external auth proxy / mTLS gateway.
 
 ## Prerequisites
 
 - `ko` installed — https://ko.build/install/
 - A container registry, set via `KO_DOCKER_REPO`
-  (e.g. `export KO_DOCKER_REPO=ghcr.io/stacklok/ozzharness`).
+  (e.g. `export KO_DOCKER_REPO=ghcr.io/stacklok/mecatl`).
 - `kubectl` with access to the target cluster.
-- The `ozzd-openai` Secret containing `OPENAI_API_KEY` (see below).
+- The `mecated-openai` Secret containing `OPENAI_API_KEY` (see below).
 
 ## The OpenAI API key Secret
 
 The Deployment passes `--openai` and reads `OPENAI_API_KEY` from a Secret named
-`ozzd-openai`. Create it out-of-band — never commit a real key:
+`mecated-openai`. Create it out-of-band — never commit a real key:
 
 ```sh
-kubectl create secret generic ozzd-openai \
+kubectl create secret generic mecated-openai \
   --from-literal=OPENAI_API_KEY="sk-...your-key..."
 ```
 
@@ -64,7 +64,7 @@ fully-qualified ref (content-hash tag).
 ## Build, push, and deploy to a cluster
 
 ```sh
-export KO_DOCKER_REPO=ghcr.io/stacklok/ozzharness   # your registry
+export KO_DOCKER_REPO=ghcr.io/stacklok/mecatl   # your registry
 
 task ko:publish                          # build + push the image
 task ko:resolve | kubectl apply -f -      # render ko://… → real ref, then apply
@@ -80,7 +80,7 @@ emits the manifests with the `ko://…` placeholder replaced. Pipe straight into
 
 ## Probes: httpGet against /healthz and /readyz
 
-ozzd serves HTTP health endpoints on the `http` port (8081), mounted **outside**
+mecated serves HTTP health endpoints on the `http` port (8081), mounted **outside**
 the auth boundary so they work with or without `--auth-token`:
 
 - **`/readyz`** — readiness probe; gates Service traffic until the app can serve.

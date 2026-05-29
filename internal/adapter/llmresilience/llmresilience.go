@@ -34,7 +34,7 @@ import (
 
 	oai "github.com/openai/openai-go/v3"
 
-	"github.com/stacklok/ozzharness/internal/port"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // Config tunes the resilience decorator. The zero value is usable but inert

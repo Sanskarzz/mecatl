@@ -14,7 +14,7 @@
 | Workspace path-escape containment | ✅ | `osfs` via `os.Root` |
 | Model-based layer-2 risk classifier | ✅ | `permclassify` (opt-in, monotonic, fail-safe) |
 | Hooks (full lifecycle fired, exit 0/2) | ✅ | all 6 phases fire |
-| **API authentication + rate limiting** | ✅ | bearer (`--auth-token`/`OZZ_AUTH_TOKEN`, constant-time) + optional TLS/mTLS (`--tls-cert`/`--tls-key`/`--client-ca`) gRPC interceptors + HTTP middleware; per-client + global token-bucket rate limit (`--rate-limit`/`--rate-burst`, bounded/idle-evicting); off-loopback-no-auth WARNING (`server/authn.go`) |
+| **API authentication + rate limiting** | ✅ | bearer (`--auth-token`/`MECATL_AUTH_TOKEN`, constant-time) + optional TLS/mTLS (`--tls-cert`/`--tls-key`/`--client-ca`) gRPC interceptors + HTTP middleware; per-client + global token-bucket rate limit (`--rate-limit`/`--rate-burst`, bounded/idle-evicting); off-loopback-no-auth WARNING (`server/authn.go`) |
 | OS-level sandbox (process trust) | ⏸️ Deferred | Explicitly deferred (2026-05-29). The `CommandRunner` port is the seam; a Landlock(+seccomp) wrapper drops in later without touching the loop. Bash is also fully optional (shell-less deploys avoid the surface entirely), so this is not a blocker for those. |
 | Secrets handling (no key logging) | ✅ | key via env, never logged |
 | MCP transport restriction (no stdio) | ✅ | streaming-HTTP only |
@@ -36,7 +36,7 @@
 | Prometheus metrics + `/metrics` | ✅ | `telemetry` |
 | Per-tool logging + JSONL replay | ✅ | `Logger` + `jsonlstore` |
 | OTel span model (run/turn/tool) | ✅ | `telemetry` |
-| OTLP exporter wiring | ✅ | `telemetry.Setup` builds/installs an OTLP TracerProvider; wired in `ozzd` via `--otlp-endpoint`/`--otlp-protocol`/`--otlp-insecure` (no-op when empty) |
+| OTLP exporter wiring | ✅ | `telemetry.Setup` builds/installs an OTLP TracerProvider; wired in `mecated` via `--otlp-endpoint`/`--otlp-protocol`/`--otlp-insecure` (no-op when empty) |
 | **Health endpoints** (`/healthz`,`/readyz`, gRPC health) | ✅ | HTTP `/healthz` (liveness) + `/readyz` (readiness) mounted outside auth/rate-limit; standard `grpc_health_v1` SERVING (`server/health.go`). `deploy/` can switch TCP→httpGet probes |
 
 ## Context management
@@ -57,7 +57,7 @@
 | 10 command risk classification | ✅ | layer-1 rules + layer-2 `permclassify` |
 | 12 lifecycle hooks | ✅ | all phases fire |
 | 5 progressive compaction | ✅ | `Compactor` seam + `HeuristicCompactor` (default) and `CascadeCompactor` (tiered) |
-| 8 fork-join parallelism | ✅ | `tool.WorkspaceForker` + `internal/adapter/forker` (git-worktree/copy isolation) + `agent.NewForkTool` (parallel isolated branches, join); wired in `ozzd` (`--enable-fork`) |
+| 8 fork-join parallelism | ✅ | `tool.WorkspaceForker` + `internal/adapter/forker` (git-worktree/copy isolation) + `agent.NewForkTool` (parallel isolated branches, join); wired in `mecated` (`--enable-fork`) |
 | **3 tiered memory** | ✅ | `tool.MemoryStore` seam + file-backed `internal/adapter/memory` (Remember/Recall tools, per-project, conservative descriptions); opt-in via `memory.Register` |
 | 4 dream/sleep consolidation | ✅ | `internal/adapter/dream` — conservative MemoryStore+LLM consolidator (merge dupes / drop stale, never invents keys, fail-safe), `RunPeriodically`; opt-in via `--memory-consolidate-interval` |
 
@@ -75,7 +75,7 @@
 |---|---|---|
 | Multi-vendor model routing | 🟦 | `LLMProvider` port already abstracts it; a router is a convenience adapter |
 | Repo map (tree-sitter PageRank) | ✅ | `internal/adapter/repomap` read-only tool (Go/Python/TS/TSX, personalized PageRank). CGO-free: tree-sitter runs as WebAssembly via `wazero` with embedded grammars, so it ships in the default static `CGO_ENABLED=0` binary (no build tag) |
-| Slash commands | ✅ | `prompt.CommandExpander` + `DirCommandExpander` (`.ozz/commands`/`.claude/commands` templates); `--commands-dir`/`--enable-commands`. (Full skill packaging still future.) |
+| Slash commands | ✅ | `prompt.CommandExpander` + `DirCommandExpander` (`.mecatl/commands`/`.claude/commands` templates); `--commands-dir`/`--enable-commands`. (Full skill packaging still future.) |
 | Live OpenAI validation | ✅ | validated against Sonnet 4.5 via OpenRouter (full tool-calling loop) |
 | Fuzz tests (bash splitter, SSE decoder) | ✅ | native Go fuzzers + Taskfile `fuzz` target; security invariants asserted; no crashers found |
 

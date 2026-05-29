@@ -20,8 +20,8 @@ import (
 	"iter"
 	"sync"
 
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // Turn is one scripted model response: the ordered chunks Stream emits for a

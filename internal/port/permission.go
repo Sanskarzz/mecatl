@@ -3,8 +3,8 @@ package port
 import (
 	"context"
 
-	"github.com/stacklok/ozzharness/internal/governance"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // PermissionPolicy evaluates a tool call under a permission mode, resolving

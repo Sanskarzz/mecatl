@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // fakeTool is a minimal Tool used to exercise the Catalog.

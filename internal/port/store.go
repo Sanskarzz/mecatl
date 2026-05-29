@@ -3,7 +3,7 @@ package port
 import (
 	"context"
 
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // SessionStore persists and retrieves server-side session state, enabling

@@ -5,11 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stacklok/ozzharness/internal/adapter/memfs"
-	"github.com/stacklok/ozzharness/internal/adapter/mockllm"
-	"github.com/stacklok/ozzharness/internal/agent"
-	"github.com/stacklok/ozzharness/internal/prompt"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/adapter/memfs"
+	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/prompt"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // TestCommandExpanderExpandsRecordedPrompt verifies that, with a
@@ -18,7 +18,7 @@ import (
 // not the raw invocation.
 func TestCommandExpanderExpandsRecordedPrompt(t *testing.T) {
 	ws := memfs.NewWorkspace("/ws")
-	if err := ws.Write(context.Background(), ".ozz/commands/review.md",
+	if err := ws.Write(context.Background(), ".mecatl/commands/review.md",
 		[]byte("Please review $1 carefully.")); err != nil {
 		t.Fatalf("seed command: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestCommandExpanderLeavesNonCommandUnchanged(t *testing.T) {
 // NoopExpander) records the raw text, preserving v1 behaviour.
 func TestDefaultExpanderUnchanged(t *testing.T) {
 	ws := memfs.NewWorkspace("/ws")
-	if err := ws.Write(context.Background(), ".ozz/commands/review.md",
+	if err := ws.Write(context.Background(), ".mecatl/commands/review.md",
 		[]byte("Please review $1.")); err != nil {
 		t.Fatalf("seed command: %v", err)
 	}

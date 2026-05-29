@@ -1,7 +1,7 @@
-# Kustomize base for ozzd.
+# Kustomize base for mecated.
 #
 # secret.example.yaml is intentionally NOT listed here: it is a placeholder and
-# must not be applied with a dummy key. Provision the `ozzd-openai` Secret
+# must not be applied with a dummy key. Provision the `mecated-openai` Secret
 # out-of-band (see secret.example.yaml / deploy/README.md) before applying.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

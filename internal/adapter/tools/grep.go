@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // grepDescription is the model-facing documentation for the Grep tool.

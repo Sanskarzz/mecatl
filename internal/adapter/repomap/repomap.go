@@ -1,5 +1,5 @@
 // Package repomap implements an Aider-style, read-only "repo map" tool for the
-// ozzharness tool catalog. It walks the session Workspace, parses source files
+// mecatl tool catalog. It walks the session Workspace, parses source files
 // with tree-sitter to extract top-level definitions (functions, methods, types,
 // classes) and their signatures, builds a file-level symbol-reference graph, and
 // ranks files with personalized PageRank. The result is a compact, ranked map of
@@ -22,9 +22,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/stacklok/ozzharness/internal/adapter/toolkit"
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/adapter/toolkit"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // Tuning constants for the repo map. These bound both the work done and the

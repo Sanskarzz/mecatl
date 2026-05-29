@@ -1,4 +1,4 @@
-// Package agent is the use-case heart of ozzharness: the streaming agent loop
+// Package agent is the use-case heart of mecatl: the streaming agent loop
 // that ties the ports together. It records the user prompt, calls the
 // LLMProvider, streams assistant deltas, dispatches tool calls (read-parallel /
 // mutate-serial) through the permission policy and hook lifecycle, pauses on
@@ -17,10 +17,10 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/prompt"
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/prompt"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // defaultCompactionRatio is the fraction of the context window at which the loop

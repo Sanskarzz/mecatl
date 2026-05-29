@@ -1,4 +1,4 @@
-# CLAUDE.md — ozzharness
+# CLAUDE.md — mecatl
 
 A **headless agentic coding harness** in Go 1.26 (hexagonal/DDD). The streaming agent
 loop, ~7 tools, permissions, hooks, and subagents — speaking the OpenAI Responses API
@@ -15,12 +15,12 @@ behind a provider-agnostic port. Headless: driven over gRPC + HTTP, no TUI.
 the wrong workflow here.
 
 ```sh
-task build              # → bin/ozzd, bin/ozzdemo  (ALWAYS use this; never `go build` to repo root)
+task build              # → bin/mecated, bin/mecademo  (ALWAYS use this; never `go build` to repo root)
 task test               # full suite, -race
 task lint               # golangci-lint v2 (parallel-safe) + go vet
 task generate           # regenerate contracts/gen from contracts/proto via buf
 go test ./internal/agent/ -run TestFullCycle   # a single test
-go run ./cmd/ozzdemo    # end-to-end demo, fully offline (mock provider)
+go run ./cmd/mecademo    # end-to-end demo, fully offline (mock provider)
 ```
 
 ## Architecture (where things live)
@@ -32,8 +32,8 @@ go run ./cmd/ozzdemo    # end-to-end demo, fully offline (mock provider)
 - `internal/port/` — the PORT interfaces the loop consumes (`LLMProvider`, `SessionStore`, `HookRunner`, `PermissionPolicy`, `Clock`, `Logger`, `EventSink`).
 - `internal/agent/` — APPLICATION: the loop (`Engine`/`Run`), dispatch, permission pause/resume, compaction, the Task subagent.
 - `internal/adapter/` — ADAPTERS: `openai`, `mockllm`, `osfs`/`memfs`, `permpolicy`, `hookexec`, `store/*`, `tools`, `server`.
-- `contracts/proto/ozz/v1/` — gRPC contract (source of truth); `contracts/gen/` is generated — do not hand-edit.
-- `cmd/ozzd/` — the server (composition root); `cmd/ozzdemo/` — the demo.
+- `contracts/proto/mecatl/v1/` — gRPC contract (source of truth); `contracts/gen/` is generated — do not hand-edit.
+- `cmd/mecated/` — the server (composition root); `cmd/mecademo/` — the demo.
 
 ## The layering rule (the thing to get right)
 
@@ -60,7 +60,7 @@ Dependencies point **inward only** (verified by import review; not yet machine-e
 
 ## Verification
 
-After changes: `task lint && task test` must be green, and `go run ./cmd/ozzdemo` must still print a full offline session (turn → tool.call → permission.ask + approval → result). The 10 gauntlet items in `docs/harnesses/08-design-considerations.md` ("A closing test") each have a passing test — keep them passing.
+After changes: `task lint && task test` must be green, and `go run ./cmd/mecademo` must still print a full offline session (turn → tool.call → permission.ask + approval → result). The 10 gauntlet items in `docs/harnesses/08-design-considerations.md` ("A closing test") each have a passing test — keep them passing.
 
 ## Workflow
 

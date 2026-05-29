@@ -1,4 +1,4 @@
-// Package tools implements the core model-facing tools of the ozzharness kit —
+// Package tools implements the core model-facing tools of the mecatl kit —
 // Read, Edit, Write, Grep, Glob, a WebFetch stub, and an OPTIONAL Bash tool — as
 // tool.Tool values executing against an injected tool.Workspace.
 //
@@ -24,9 +24,9 @@ package tools
 import (
 	"encoding/json"
 
-	"github.com/stacklok/ozzharness/internal/adapter/toolkit"
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/adapter/toolkit"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // Output-shaping limits shared across the tools. These keep a single tool

@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/agent"
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // WorkspaceFactory builds the session-scoped tool.Workspace for a session root.

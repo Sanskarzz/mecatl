@@ -1,20 +1,20 @@
-# Service exposing ozzd's gRPC and HTTP/SSE ports inside the cluster.
+# Service exposing mecated's gRPC and HTTP/SSE ports inside the cluster.
 #
-# ClusterIP only — the ozzd API is UNAUTHENTICATED, so it must not be exposed
+# ClusterIP only — the mecated API is UNAUTHENTICATED, so it must not be exposed
 # beyond a trusted network. Do NOT switch this to LoadBalancer/NodePort without
 # an external auth boundary in front. See deploy/README.md.
 apiVersion: v1
 kind: Service
 metadata:
-  name: ozzd
+  name: mecated
   labels:
-    app.kubernetes.io/name: ozzharness
-    app.kubernetes.io/component: ozzd
+    app.kubernetes.io/name: mecatl
+    app.kubernetes.io/component: mecated
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: ozzharness
-    app.kubernetes.io/component: ozzd
+    app.kubernetes.io/name: mecatl
+    app.kubernetes.io/component: mecated
   ports:
     - name: grpc
       port: 8080

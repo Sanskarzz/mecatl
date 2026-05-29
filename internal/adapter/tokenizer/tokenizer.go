@@ -4,7 +4,7 @@
 // runtime download), so token counting is fully offline and deterministic — a
 // hard requirement for a harness that must run air-gapped and reproducibly.
 //
-// This adapter is wired only in the composition root (cmd/ozzd); the agent
+// This adapter is wired only in the composition root (cmd/mecated); the agent
 // package depends solely on the agent.TokenCounter interface, never on this
 // concrete tokenizer. The default counter remains the dependency-free heuristic
 // in internal/agent; this is the opt-in "real tokenizer" tier.
@@ -15,8 +15,8 @@ import (
 
 	"github.com/tiktoken-go/tokenizer"
 
-	"github.com/stacklok/ozzharness/internal/agent"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // Encoding identifies a tiktoken byte-pair-encoding table.

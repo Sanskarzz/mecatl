@@ -1,4 +1,4 @@
-# golangci-lint configuration for ozzharness.
+# golangci-lint configuration for mecatl.
 #
 # Schema: v2 (golangci-lint v2.x). Adapted from Stacklok house style
 # (toolhive, mkp) and calibrated for this early-stage, hexagonal codebase.
@@ -164,7 +164,7 @@ formatters:
       sections:
         - standard
         - default
-        - prefix(github.com/stacklok/ozzharness)
+        - prefix(github.com/stacklok/mecatl)
   exclusions:
     generated: lax
     paths:

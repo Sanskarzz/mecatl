@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/adapter/mockllm"
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // fakeStore is an in-memory tool.MemoryStore for offline tests. It records how

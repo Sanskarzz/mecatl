@@ -1,6 +1,6 @@
 package agent
 
-import "github.com/stacklok/ozzharness/internal/session"
+import "github.com/stacklok/mecatl/internal/session"
 
 // TokenCounter estimates how many model tokens a piece of text or a slice of
 // conversation messages occupies. It is a seam (ARCHITECTURE.md §8, gauntlet

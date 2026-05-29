@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
-	"github.com/stacklok/ozzharness/internal/session"
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // TestToProtoTable round-trips every EventType and each structured submessage
@@ -15,12 +15,12 @@ func TestToProtoTable(t *testing.T) {
 	cases := []struct {
 		name   string
 		in     session.Event
-		assert func(t *testing.T, got *ozzv1.Event)
+		assert func(t *testing.T, got *mecatlv1.Event)
 	}{
 		{
 			name: "session.init",
 			in:   session.Event{Type: session.EvSessionInit, Seq: 1, Turn: 0},
-			assert: func(t *testing.T, got *ozzv1.Event) {
+			assert: func(t *testing.T, got *mecatlv1.Event) {
 				if got.GetType() != "session.init" || got.GetSeq() != 1 {
 					t.Fatalf("got %+v", got)
 				}
@@ -29,7 +29,7 @@ func TestToProtoTable(t *testing.T) {
 		{
 			name: "turn.start",
 			in:   session.Event{Type: session.EvTurnStart, Seq: 2, Turn: 3},
-			assert: func(t *testing.T, got *ozzv1.Event) {
+			assert: func(t *testing.T, got *mecatlv1.Event) {
 				if got.GetType() != "turn.start" || got.GetTurn() != 3 {
 					t.Fatalf("got %+v", got)
 				}
@@ -38,7 +38,7 @@ func TestToProtoTable(t *testing.T) {
 		{
 			name: "message.delta",
 			in:   session.Event{Type: session.EvMessageDelta, Seq: 3, Turn: 1, Text: "hello"},
-			assert: func(t *testing.T, got *ozzv1.Event) {
+			assert: func(t *testing.T, got *mecatlv1.Event) {
 				if got.GetType() != "message.delta" || got.GetText() != "hello" {
 					t.Fatalf("got %+v", got)
 				}
@@ -48,7 +48,7 @@ func TestToProtoTable(t *testing.T) {
 			name: "tool.call",
 			in: session.Event{Type: session.EvToolCall, Seq: 4, Turn: 1,
 				ToolCall: &session.ToolCall{ID: "c1", Name: "Read", Args: json.RawMessage(`{"path":"a.go"}`)}},
-			assert: func(t *testing.T, got *ozzv1.Event) {
+			assert: func(t *testing.T, got *mecatlv1.Event) {
 				tc := got.GetToolCall()
 				if tc == nil || tc.GetId() != "c1" || tc.GetName() != "Read" || tc.GetArgs() != `{"path":"a.go"}` {
 					t.Fatalf("got %+v", got)
@@ -59,7 +59,7 @@ func TestToProtoTable(t *testing.T) {
 			name: "tool.result",
 			in: session.Event{Type: session.EvToolResult, Seq: 5, Turn: 1,
 				ToolResult: &session.ToolResult{CallID: "c1", Content: "body", IsError: true}},
-			assert: func(t *testing.T, got *ozzv1.Event) {
+			assert: func(t *testing.T, got *mecatlv1.Event) {
 				tr := got.GetToolResult()
 				if tr == nil || tr.GetCallId() != "c1" || tr.GetContent() != "body" || !tr.GetIsError() {
 					t.Fatalf("got %+v", got)
@@ -70,7 +70,7 @@ func TestToProtoTable(t *testing.T) {
 			name: "permission.ask",
 			in: session.Event{Type: session.EvPermissionAsk, Seq: 6, Turn: 1,
 				Ask: &session.PendingAsk{AskID: "a1", Tool: "Write", Args: json.RawMessage(`{"path":"x"}`), Reason: "needs approval"}},
-			assert: func(t *testing.T, got *ozzv1.Event) {
+			assert: func(t *testing.T, got *mecatlv1.Event) {
 				a := got.GetAsk()
 				if a == nil || a.GetAskId() != "a1" || a.GetTool() != "Write" ||
 					a.GetArgs() != `{"path":"x"}` || a.GetReason() != "needs approval" {
@@ -81,7 +81,7 @@ func TestToProtoTable(t *testing.T) {
 		{
 			name: "hook",
 			in:   session.Event{Type: session.EvHook, Seq: 7, Turn: 1, Text: "blocked-by-policy"},
-			assert: func(t *testing.T, got *ozzv1.Event) {
+			assert: func(t *testing.T, got *mecatlv1.Event) {
 				if got.GetType() != "hook" || got.GetText() != "blocked-by-policy" {
 					t.Fatalf("got %+v", got)
 				}
@@ -90,7 +90,7 @@ func TestToProtoTable(t *testing.T) {
 		{
 			name: "compaction",
 			in:   session.Event{Type: session.EvCompaction, Seq: 8, Turn: 2, Text: "summary"},
-			assert: func(t *testing.T, got *ozzv1.Event) {
+			assert: func(t *testing.T, got *mecatlv1.Event) {
 				if got.GetType() != "compaction" || got.GetText() != "summary" {
 					t.Fatalf("got %+v", got)
 				}
@@ -102,7 +102,7 @@ func TestToProtoTable(t *testing.T) {
 				Result: &session.ResultPayload{Stop: session.StopEndTurn, Text: "all done",
 					Usage: session.Usage{InputTokens: 15, OutputTokens: 5, CacheReadTokens: 3, CacheWriteTokens: 1}},
 				Usage: &session.Usage{InputTokens: 15, OutputTokens: 5}},
-			assert: func(t *testing.T, got *ozzv1.Event) {
+			assert: func(t *testing.T, got *mecatlv1.Event) {
 				res := got.GetResult()
 				if res == nil || res.GetStop() != "end_turn" || res.GetText() != "all done" {
 					t.Fatalf("result mismatch: %+v", got)
@@ -151,7 +151,7 @@ func TestSessionMapping(t *testing.T) {
 	if got.GetSessionId() != "s1" || got.GetState() != "idle" {
 		t.Fatalf("got %+v", got)
 	}
-	if got.GetMode() != ozzv1.PermissionMode_PERMISSION_MODE_PLAN {
+	if got.GetMode() != mecatlv1.PermissionMode_PERMISSION_MODE_PLAN {
 		t.Fatalf("mode = %v", got.GetMode())
 	}
 	if got.GetLimits().GetMaxTurns() != 4 || got.GetLimits().GetMaxToolCalls() != 8 {
@@ -169,7 +169,7 @@ func TestModeRoundTrip(t *testing.T) {
 			t.Fatalf("mode round-trip: %q -> %q", m, got)
 		}
 	}
-	if got := modeFromProto(ozzv1.PermissionMode_PERMISSION_MODE_UNSPECIFIED); got != session.ModeDefault {
+	if got := modeFromProto(mecatlv1.PermissionMode_PERMISSION_MODE_UNSPECIFIED); got != session.ModeDefault {
 		t.Fatalf("unspecified mode -> %q, want default", got)
 	}
 }

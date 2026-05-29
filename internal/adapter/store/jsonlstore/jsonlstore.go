@@ -24,9 +24,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/adapter/store/sessnap"
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/adapter/store/sessnap"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // ErrNotFound is returned by Load when no snapshot file exists for the id.

@@ -1,11 +1,11 @@
 ---
-name: project-ozzharness
-description: ozzharness — a from-scratch headless agentic coding harness in Go; trust boundaries, threat model, and v1 security-boundary design decisions.
+name: project-mecatl
+description: mecatl — a from-scratch headless agentic coding harness in Go; trust boundaries, threat model, and v1 security-boundary design decisions.
 metadata:
   type: project
 ---
 
-ozzharness is a headless agentic coding harness (Go). An LLM drives a streaming
+mecatl is a headless agentic coding harness (Go). An LLM drives a streaming
 tool loop that executes shell commands, reads/writes files, runs lifecycle
 hooks, and is exposed over a gRPC + HTTP/SSE API (`internal/adapter/server`).
 

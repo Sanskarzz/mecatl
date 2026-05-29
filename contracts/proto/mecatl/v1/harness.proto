@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Stacklok, Inc.
 // SPDX-License-Identifier: LicenseRef-Stacklok-Proprietary
 
-// ozzharness public API surface (WP10).
+// mecatl public API surface (WP10).
 //
 // HarnessService is the network surface over the WP8 agent loop. The
 // primary RPC is the bidi `Converse` stream: the client sends a mandatory
@@ -23,11 +23,11 @@
 
 syntax = "proto3";
 
-package ozz.v1;
+package mecatl.v1;
 
 import "buf/validate/validate.proto";
 
-// HarnessService is the ozzharness API: unary session setup/inspection plus
+// HarnessService is the mecatl API: unary session setup/inspection plus
 // the bidi Converse stream that drives one agent run.
 service HarnessService {
   // CreateSession allocates a new server-side session and returns its id.

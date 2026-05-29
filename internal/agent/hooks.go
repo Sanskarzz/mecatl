@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/governance"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // This file wires the run-lifecycle hook phases SessionStart, UserPromptSubmit,

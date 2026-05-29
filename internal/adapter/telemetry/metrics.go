@@ -7,8 +7,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // Metrics is a Prometheus-backed telemetry adapter. It implements both
@@ -39,36 +39,36 @@ var (
 func NewMetrics(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		events: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "ozz_events_total",
+			Name: "mecatl_events_total",
 			Help: "Total domain events observed, by event type.",
 		}, []string{"type"}),
 		runs: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "ozz_runs_total",
+			Name: "mecatl_runs_total",
 			Help: "Total runs finished, by stop reason.",
 		}, []string{"stop"}),
 		toolCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "ozz_tool_calls_total",
+			Name: "mecatl_tool_calls_total",
 			Help: "Total tool calls executed, by tool name and error outcome.",
 		}, []string{"tool", "error"}),
 		toolDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "ozz_tool_duration_seconds",
+			Name:    "mecatl_tool_duration_seconds",
 			Help:    "Tool execution wall-clock duration in seconds, by tool name.",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"tool"}),
 		tokens: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "ozz_tokens_total",
+			Name: "mecatl_tokens_total",
 			Help: "Total tokens accounted, by kind (input/output/cache_read/cache_write).",
 		}, []string{"kind"}),
 		cacheHit: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "ozz_cache_hit_ratio",
+			Name: "mecatl_cache_hit_ratio",
 			Help: "Prompt-cache hit ratio of the most recent run result.",
 		}),
 		permAsks: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "ozz_permission_asks_total",
+			Name: "mecatl_permission_asks_total",
 			Help: "Total permission.ask events observed.",
 		}),
 		activeRuns: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "ozz_active_runs",
+			Name: "mecatl_active_runs",
 			Help: "Number of runs currently in flight.",
 		}),
 	}

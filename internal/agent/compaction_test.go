@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/adapter/memfs"
-	"github.com/stacklok/ozzharness/internal/adapter/mockllm"
-	"github.com/stacklok/ozzharness/internal/agent"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/adapter/memfs"
+	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // TestHeuristicCompactorPreservesPaths checks the default compactor preserves the

@@ -1,11 +1,11 @@
 ---
 name: domain-language
-description: Canonical ubiquitous-language names for the ozzharness harness domain — use these, not Manager/Helper/Util mechanics names.
+description: Canonical ubiquitous-language names for the mecatl harness domain — use these, not Manager/Helper/Util mechanics names.
 metadata:
   type: project
 ---
 
-Ubiquitous language for ozzharness. Code names must match these; mechanics-names (Manager/Handler/Service/Util) are rejected.
+Ubiquitous language for mecatl. Code names must match these; mechanics-names (Manager/Handler/Service/Util) are rejected.
 
 - **Session** — aggregate root for one agent run. Holds Conversation, config, stop-condition counters, permission mode.
 - **Conversation** — ordered list of Messages (the model-visible history).
@@ -18,4 +18,4 @@ Ubiquitous language for ozzharness. Code names must match these; mechanics-names
 - **Usage** — token/cost/cache accounting for a Turn (value object).
 - **Event** — the streamed typed event emitted by the loop and surfaced over the API.
 
-Ports (interfaces, named for what they do): LLMProvider/Completer, Tool/ToolExecutor, PermissionPolicy, HookRunner, FileSystem, Clock, SessionStore. See [[project-ozzharness]] and [[design-decisions]].
+Ports (interfaces, named for what they do): LLMProvider/Completer, Tool/ToolExecutor, PermissionPolicy, HookRunner, FileSystem, Clock, SessionStore. See [[project-mecatl]] and [[design-decisions]].

@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stacklok/ozzharness/internal/adapter/memfs"
-	"github.com/stacklok/ozzharness/internal/adapter/toolkit"
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/adapter/memfs"
+	"github.com/stacklok/mecatl/internal/adapter/toolkit"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // call builds a ToolCall with JSON args marshalled from m.

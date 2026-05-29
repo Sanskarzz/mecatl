@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/governance"
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // forkToolName is the catalog name of the fork-join fan-out tool.

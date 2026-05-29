@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/adapter/hookexec"
-	"github.com/stacklok/ozzharness/internal/governance"
-	"github.com/stacklok/ozzharness/internal/port"
+	"github.com/stacklok/mecatl/internal/adapter/hookexec"
+	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // Compile-time assertion that Runner satisfies the frozen port interface.

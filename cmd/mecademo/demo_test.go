@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // TestRunScenarioOffline runs the demo's offline scenario against mockllm and

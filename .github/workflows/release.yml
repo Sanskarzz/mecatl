@@ -1,5 +1,5 @@
-# Release pipeline for ozzharness — builds, publishes, signs, and attests the
-# ozzd container image on every `v*` tag push.
+# Release pipeline for mecatl — builds, publishes, signs, and attests the
+# mecated container image on every `v*` tag push.
 #
 # Supply-chain properties this workflow gives a consumer:
 #   1. Image built reproducibly from source with ko (no Dockerfile) onto the
@@ -109,10 +109,10 @@ jobs:
             -t "${VERSION}" -t latest \
             --image-refs=image-refs.txt \
             --image-label=org.opencontainers.image.source=https://github.com/${{ github.repository }} \
-            --image-label=org.opencontainers.image.title=ozzd \
+            --image-label=org.opencontainers.image.title=mecated \
             --image-label=org.opencontainers.image.revision=${{ github.sha }} \
             --image-label=org.opencontainers.image.vendor=Stacklok \
-            ./cmd/ozzd
+            ./cmd/mecated
           # The digest ref is the same image regardless of tag; take the first.
           digest="$(head -n1 image-refs.txt)"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"

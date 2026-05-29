@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 func TestTruncate(t *testing.T) {

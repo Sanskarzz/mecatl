@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stacklok/ozzharness/internal/adapter/memfs"
-	"github.com/stacklok/ozzharness/internal/prompt"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/adapter/memfs"
+	"github.com/stacklok/mecatl/internal/prompt"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 func writeFile(t *testing.T, ws tool.Workspace, path, content string) {
@@ -39,7 +39,7 @@ func TestNoopExpanderReturnsInputUnchanged(t *testing.T) {
 // substitution against a seeded command file.
 func TestDirCommandExpanderSubstitutes(t *testing.T) {
 	ws := memfs.NewWorkspace("/proj")
-	writeFile(t, ws, ".ozz/commands/review.md",
+	writeFile(t, ws, ".mecatl/commands/review.md",
 		"Please review $1 and also $2.\nAll args: $ARGUMENTS")
 
 	exp := prompt.NewDirCommandExpander()
@@ -62,7 +62,7 @@ func TestDirCommandExpanderSubstitutes(t *testing.T) {
 // out-of-range positionals are handled: unknown left intact, out-of-range empty.
 func TestDirCommandExpanderLeavesUnknownPlaceholders(t *testing.T) {
 	ws := memfs.NewWorkspace("/proj")
-	writeFile(t, ws, ".ozz/commands/c.md", "keep $HOME but drop [$3] and use $1")
+	writeFile(t, ws, ".mecatl/commands/c.md", "keep $HOME but drop [$3] and use $1")
 
 	exp := prompt.NewDirCommandExpander()
 	out, ok, err := exp.Expand(context.Background(), ws, "/c only")
@@ -82,7 +82,7 @@ func TestDirCommandExpanderLeavesUnknownPlaceholders(t *testing.T) {
 // block is removed and never reaches the expanded body.
 func TestDirCommandExpanderStripsFrontmatter(t *testing.T) {
 	ws := memfs.NewWorkspace("/proj")
-	writeFile(t, ws, ".ozz/commands/review.md",
+	writeFile(t, ws, ".mecatl/commands/review.md",
 		"---\ndescription: Review a file\n---\nReview $1 now.")
 
 	exp := prompt.NewDirCommandExpander()
@@ -124,7 +124,7 @@ func TestDirCommandExpanderClaudeDir(t *testing.T) {
 // unchanged with expanded=false and no error (does not abort the run).
 func TestDirCommandExpanderUnknownCommand(t *testing.T) {
 	ws := memfs.NewWorkspace("/proj")
-	writeFile(t, ws, ".ozz/commands/review.md", "body")
+	writeFile(t, ws, ".mecatl/commands/review.md", "body")
 
 	exp := prompt.NewDirCommandExpander()
 	out, ok, err := exp.Expand(context.Background(), ws, "/nope foo")
@@ -143,7 +143,7 @@ func TestDirCommandExpanderUnknownCommand(t *testing.T) {
 // unchanged with expanded=false.
 func TestDirCommandExpanderNonCommand(t *testing.T) {
 	ws := memfs.NewWorkspace("/proj")
-	writeFile(t, ws, ".ozz/commands/review.md", "body")
+	writeFile(t, ws, ".mecatl/commands/review.md", "body")
 
 	exp := prompt.NewDirCommandExpander()
 	for _, in := range []string{"just chatting", "look at /etc/hosts", "/", "/ space"} {

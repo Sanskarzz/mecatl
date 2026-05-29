@@ -3,8 +3,8 @@ package prompt
 import (
 	"context"
 
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // InstructionAssembler resolves the ordered set of project-instruction messages

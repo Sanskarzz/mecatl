@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/prompt"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/prompt"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // Cascade tier defaults. Each is a knob on CascadeCompactor; the zero value of

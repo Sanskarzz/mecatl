@@ -7,8 +7,8 @@ import (
 	"io/fs"
 	"strings"
 
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // Config drives Build. It carries everything needed to assemble the two-layer
@@ -39,7 +39,7 @@ type Config struct {
 // empty. These are byte-constant so two builds with the same Config produce a
 // byte-identical StablePrefix.
 const (
-	defaultRole = "You are ozzharness, a headless agentic coding harness. " +
+	defaultRole = "You are mecatl, a headless agentic coding harness. " +
 		"You operate an agent loop: you call tools to inspect and modify a " +
 		"workspace, then report results."
 

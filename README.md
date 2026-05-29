@@ -1,4 +1,4 @@
-# ozzharness
+# mecatl
 
 A **headless agentic coding harness** in Go — the system around a model that lets it
 actually finish a software task: a streaming agent loop, a core tool kit, an enforced
@@ -8,7 +8,7 @@ production plumbing around them (auth, resilience, observability). It speaks the
 API. No TUI — it's a service and a library.
 
 > *A decent model with a great harness beats a great model with a bad harness.* The
-> leverage is in the harness. ozzharness is a small, strict, well-tested implementation of
+> leverage is in the harness. mecatl is a small, strict, well-tested implementation of
 > that idea, built from the research corpus in [`docs/harnesses/`](./docs/harnesses/).
 > Live-validated end-to-end against Claude Sonnet 4.5 (via an OpenAI-compatible endpoint).
 
@@ -47,28 +47,28 @@ Requires **Go 1.26.3** (the `go.mod` toolchain directive auto-fetches it) and
 [buf](https://buf.build) only to regenerate the proto.
 
 ```sh
-task build          # compile → bin/ozzd (server) and bin/ozzdemo (demo)
+task build          # compile → bin/mecated (server) and bin/mecademo (demo)
 task test           # full suite, with -race
 task lint           # golangci-lint (parallel-safe) + go vet
 ```
 
 ### Run the demo (fully offline)
 
-`ozzdemo` drives a real agent loop against a scripted mock provider — no network, no API
+`mecademo` drives a real agent loop against a scripted mock provider — no network, no API
 key — to show the whole shape: a tool call, a permission prompt with approval, and a final
 result with usage accounting.
 
 ```sh
-go run ./cmd/ozzdemo
+go run ./cmd/mecademo
 ```
 
 ```text
-=== ozzharness demo (offline / mockllm) ===
+=== mecatl demo (offline / mockllm) ===
 [001] turn=0 session.init
 [002] turn=0 turn.start
 [003] turn=0 message.delta  text="I'll read the greeting file first."
 [004] turn=0 tool.call      tool=Read args={"path":"greeting.txt"}
-[005] turn=0 tool.result    error=false result="     1\thello from the ozzharness demo workspace"
+[005] turn=0 tool.result    error=false result="     1\thello from the mecatl demo workspace"
 [006] turn=1 turn.start
 [007] turn=1 message.delta  text="Now I'll save a short note, which needs your approval."
 [008] turn=1 permission.ask ASK tool=Write reason="approval required by rule for Write (note.txt)"  -> client auto-approves
@@ -84,14 +84,14 @@ go run ./cmd/ozzdemo
 
 ```sh
 export OPENAI_API_KEY=sk-...
-go run ./cmd/ozzd --openai           # gRPC on 127.0.0.1:8080, HTTP/SSE on 127.0.0.1:8081
+go run ./cmd/mecated --openai           # gRPC on 127.0.0.1:8080, HTTP/SSE on 127.0.0.1:8081
 ```
 
 The server binds loopback by default and is unauthenticated unless you turn auth on.
 Common flags (full list in [`docs/usage.md`](./docs/usage.md)):
 
 ```sh
-go run ./cmd/ozzd --openai \
+go run ./cmd/mecated --openai \
   --openai-base-url https://openrouter.ai/api/v1 --model anthropic/claude-sonnet-4.5 \
   --auth-token "$TOKEN" \                 # bearer auth; --tls-cert/--tls-key/--client-ca for (m)TLS
   --rate-limit 10 \                       # per-client + global token bucket
@@ -100,10 +100,10 @@ go run ./cmd/ozzd --openai \
   --otlp-endpoint localhost:4317 \        # export OTel traces; /metrics is always on --metrics-addr
   --compaction cascade --tokenizer tiktoken \
   --enable-fork --enable-repomap \        # both default on; --no-bash for shell-less
-  --commands-dir .ozz/commands            # slash-command templates
+  --commands-dir .mecatl/commands            # slash-command templates
 ```
 
-If you bind a non-loopback address without auth, `ozzd` logs a prominent warning — put a
+If you bind a non-loopback address without auth, `mecated` logs a prominent warning — put a
 token or mTLS (or a NetworkPolicy) in front of it. See [`docs/usage.md`](./docs/usage.md)
 for every flag, the gRPC `Converse` flow, and `curl` examples for the HTTP/SSE routes.
 
@@ -111,7 +111,7 @@ for every flag, the gRPC `Converse` flow, and `curl` examples for the HTTP/SSE r
 
 Dependencies point inward only. The domain and the application (the loop) know nothing of
 OpenAI, gRPC, or the filesystem — those are adapters behind ports, wired together only in
-`cmd/ozzd`.
+`cmd/mecated`.
 
 ```
  driving adapters            domain + application                 driven adapters
@@ -120,13 +120,13 @@ OpenAI, gRPC, or the filesystem — those are adapters behind ports, wired toget
  │ HTTP / SSE  │      │        pause/resume, subagent)│      │ mock LLM           │
  └─────────────┘      │   ↓ depends only on ports     │      │ os / in-mem FS     │
  ┌─────────────┐      │ session · governance · tool · │◀─────│ permission policy  │
- │ ozzdemo CLI │─────▶│ prompt   (domain)             │      │ shell hooks        │
+ │ mecademo CLI │─────▶│ prompt   (domain)             │      │ shell hooks        │
  └─────────────┘      └──────────────────────────────┘      │ session stores     │
                                                              └────────────────────┘
 ```
 
 - **[`docs/architecture.md`](./docs/architecture.md)** — the system in depth: layers, the loop, ports, sequence diagrams, extension points.
-- **[`docs/usage.md`](./docs/usage.md)** — build/run, the demo, `ozzd` flags, the gRPC + HTTP/SSE APIs with examples, permissions, hooks, troubleshooting.
+- **[`docs/usage.md`](./docs/usage.md)** — build/run, the demo, `mecated` flags, the gRPC + HTTP/SSE APIs with examples, permissions, hooks, troubleshooting.
 - **[`docs/design/PRODUCTION-READINESS.md`](./docs/design/PRODUCTION-READINESS.md)** — the live status tracker (what's done, what's deferred).
 - **[`docs/design/`](./docs/design/)** — design rationale: `ARCHITECTURE.md`, `STEP-CHAIN.md`, `OPENAI-RESPONSES-API.md`, `TWELVE-PATTERNS-AUDIT.md`.
 - **[`CLAUDE.md`](./CLAUDE.md)** — orientation for agents working in this codebase.
@@ -140,7 +140,7 @@ OpenAI, gRPC, or the filesystem — those are adapters behind ports, wired toget
 | `internal/agent` | the agent loop, dispatch, permission pause/resume, compaction, subagent |
 | `internal/adapter/*` | adapters: `openai`, `mockllm`, `llmresilience`, `osfs`/`memfs`, `permpolicy`, `permclassify`, `hookexec`, `store/*`, `tools`, `toolkit`, `memory`, `dream`, `forker`, `repomap`, `tokenizer`, `telemetry`, `mcp`, `server` |
 | `contracts/proto`, `contracts/gen` | gRPC contract (source of truth) and generated Go |
-| `cmd/ozzd`, `cmd/ozzdemo` | the server (composition root) and the demo |
+| `cmd/mecated`, `cmd/mecademo` | the server (composition root) and the demo |
 
 ## Status
 

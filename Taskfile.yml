@@ -1,4 +1,4 @@
-# Taskfile for ozzharness (https://taskfile.dev).
+# Taskfile for mecatl (https://taskfile.dev).
 #
 # Required tools (assumed on PATH; install commands below):
 #   - go            >= 1.26.3   (the toolchain)
@@ -15,7 +15,7 @@
 version: '3'
 
 vars:
-  PKG: github.com/stacklok/ozzharness
+  PKG: github.com/stacklok/mecatl
 
 tasks:
   default:
@@ -27,8 +27,8 @@ tasks:
   build:
     desc: Compile binaries into bin/
     cmds:
-      - go build -o bin/ozzd ./cmd/ozzd
-      - go build -o bin/ozzdemo ./cmd/ozzdemo
+      - go build -o bin/mecated ./cmd/mecated
+      - go build -o bin/mecademo ./cmd/mecademo
 
   clean:
     desc: Remove the bin/ build output directory
@@ -37,40 +37,40 @@ tasks:
 
   # --- Container image / deploy (ko) ----------------------------------------
   #
-  # These tasks package ozzd as a container image with ko (https://ko.build) —
+  # These tasks package mecated as a container image with ko (https://ko.build) —
   # no Dockerfile. Install ko first: https://ko.build/install/. The image is
-  # built straight from ./cmd/ozzd onto the distroless base pinned in .ko.yaml.
+  # built straight from ./cmd/mecated onto the distroless base pinned in .ko.yaml.
   #
   # Required env for publish/resolve:
-  #   KO_DOCKER_REPO  destination registry/repo, e.g. ghcr.io/stacklok/ozzharness
+  #   KO_DOCKER_REPO  destination registry/repo, e.g. ghcr.io/stacklok/mecatl
   #                   (ko:build hardcodes ko.local for a purely local image).
 
   ko:build:
-    desc: Build the ozzd image locally with ko (no push; tagged under ko.local)
+    desc: Build the mecated image locally with ko (no push; tagged under ko.local)
     env:
       KO_DOCKER_REPO: ko.local
     cmds:
       # --local loads the image into the local Docker/podman daemon; --bare
       # keeps the repo path clean (no extra import-path suffix) and prints the
       # fully-qualified image ref (with content-hash tag) on stdout.
-      - ko build --local --bare ./cmd/ozzd
+      - ko build --local --bare ./cmd/mecated
 
   ko:publish:
-    desc: Build and push the ozzd image with ko (honours KO_DOCKER_REPO)
+    desc: Build and push the mecated image with ko (honours KO_DOCKER_REPO)
     cmds:
       - cmd: |
           if [ -z "${KO_DOCKER_REPO:-}" ]; then
-            echo "KO_DOCKER_REPO is required (e.g. export KO_DOCKER_REPO=ghcr.io/stacklok/ozzharness)"; exit 1
+            echo "KO_DOCKER_REPO is required (e.g. export KO_DOCKER_REPO=ghcr.io/stacklok/mecatl)"; exit 1
           fi
         silent: true
-      - ko build --push --bare ./cmd/ozzd
+      - ko build --push --bare ./cmd/mecated
 
   ko:resolve:
     desc: Render deploy/ manifests with the ko-built image ref (honours KO_DOCKER_REPO)
     cmds:
       - cmd: |
           if [ -z "${KO_DOCKER_REPO:-}" ]; then
-            echo "KO_DOCKER_REPO is required (e.g. export KO_DOCKER_REPO=ghcr.io/stacklok/ozzharness)"; exit 1
+            echo "KO_DOCKER_REPO is required (e.g. export KO_DOCKER_REPO=ghcr.io/stacklok/mecatl)"; exit 1
           fi
         silent: true
       # ko resolve substitutes the ko://… image placeholder in deploy/ with the

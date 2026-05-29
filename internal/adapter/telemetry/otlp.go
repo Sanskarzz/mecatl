@@ -26,7 +26,7 @@ const (
 
 // defaultServiceName is the resource service.name used when OTLPConfig leaves
 // ServiceName empty.
-const defaultServiceName = "ozzharness"
+const defaultServiceName = "mecatl"
 
 // OTLPConfig configures the OTLP trace exporter and the SDK TracerProvider that
 // Setup installs. A zero Endpoint disables tracing entirely.
@@ -41,7 +41,7 @@ type OTLPConfig struct {
 	// Insecure skips TLS when dialing the collector (development only).
 	Insecure bool
 	// ServiceName sets the resource service.name attribute. Defaults to
-	// "ozzharness" when empty.
+	// "mecatl" when empty.
 	ServiceName string
 	// Headers are sent with every export request (e.g. auth headers).
 	Headers map[string]string

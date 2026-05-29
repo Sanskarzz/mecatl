@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // Snapshot is the on-the-wire form of a session.Session. It is a plain data

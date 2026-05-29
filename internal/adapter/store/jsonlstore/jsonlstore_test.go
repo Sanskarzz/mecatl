@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/adapter/store/jsonlstore"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 func newStore(t *testing.T) (*jsonlstore.Store, string) {

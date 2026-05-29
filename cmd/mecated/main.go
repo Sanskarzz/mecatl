@@ -1,4 +1,4 @@
-// Command ozzd is the ozzharness server binary and the composition root: the one
+// Command mecated is the mecatl server binary and the composition root: the one
 // place where concrete adapters are wired to the ports the agent loop consumes.
 //
 // It builds an LLM provider (OpenAI Responses, or a canned mock for smoke
@@ -33,30 +33,30 @@ import (
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
-	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
-	"github.com/stacklok/ozzharness/internal/adapter/dream"
-	"github.com/stacklok/ozzharness/internal/adapter/forker"
-	"github.com/stacklok/ozzharness/internal/adapter/hookexec"
-	"github.com/stacklok/ozzharness/internal/adapter/llmresilience"
-	"github.com/stacklok/ozzharness/internal/adapter/mcp"
-	"github.com/stacklok/ozzharness/internal/adapter/memory"
-	"github.com/stacklok/ozzharness/internal/adapter/mockllm"
-	"github.com/stacklok/ozzharness/internal/adapter/openai"
-	"github.com/stacklok/ozzharness/internal/adapter/osfs"
-	"github.com/stacklok/ozzharness/internal/adapter/permpolicy"
-	"github.com/stacklok/ozzharness/internal/adapter/repomap"
-	"github.com/stacklok/ozzharness/internal/adapter/server"
-	"github.com/stacklok/ozzharness/internal/adapter/store/jsonlstore"
-	"github.com/stacklok/ozzharness/internal/adapter/store/memstore"
-	"github.com/stacklok/ozzharness/internal/adapter/telemetry"
-	"github.com/stacklok/ozzharness/internal/adapter/tokenizer"
-	"github.com/stacklok/ozzharness/internal/adapter/tools"
-	"github.com/stacklok/ozzharness/internal/agent"
-	"github.com/stacklok/ozzharness/internal/governance"
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/prompt"
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/dream"
+	"github.com/stacklok/mecatl/internal/adapter/forker"
+	"github.com/stacklok/mecatl/internal/adapter/hookexec"
+	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
+	"github.com/stacklok/mecatl/internal/adapter/mcp"
+	"github.com/stacklok/mecatl/internal/adapter/memory"
+	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/adapter/openai"
+	"github.com/stacklok/mecatl/internal/adapter/osfs"
+	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
+	"github.com/stacklok/mecatl/internal/adapter/repomap"
+	"github.com/stacklok/mecatl/internal/adapter/server"
+	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
+	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
+	"github.com/stacklok/mecatl/internal/adapter/telemetry"
+	"github.com/stacklok/mecatl/internal/adapter/tokenizer"
+	"github.com/stacklok/mecatl/internal/adapter/tools"
+	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/prompt"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // defaultContextWindowTokens is the model context window the loop uses to decide
@@ -73,11 +73,11 @@ const defaultCompactionRatio = 0.8
 // history could re-trip the trigger (and a tier-4 LLM summary) on every turn.
 const defaultCompactionTargetRatio = 0.6
 
-// TRUST MODEL (security): the ozzd API exposes command and file execution
+// TRUST MODEL (security): the mecated API exposes command and file execution
 // against the configured workspace. The default listen addresses below bind the
 // loopback interface (single-user localhost). Authentication is OPTIONAL and
 // OFF by default for that loopback case: enable a bearer token (--auth-token /
-// OZZ_AUTH_TOKEN) and/or TLS/mTLS (--tls-cert/--tls-key/--client-ca) before
+// MECATL_AUTH_TOKEN) and/or TLS/mTLS (--tls-cert/--tls-key/--client-ca) before
 // binding a non-loopback address. Binding non-loopback with NO authentication
 // is permitted (an operator may front it with a mesh) but logs a prominent
 // WARNING, since it exposes command/file execution to the network.
@@ -108,7 +108,7 @@ const (
 // it is still bound to loopback by default. An empty --metrics-addr disables it.
 const defaultMetricsAddr = "127.0.0.1:9090"
 
-// config is the parsed command-line / environment configuration for ozzd.
+// config is the parsed command-line / environment configuration for mecated.
 type config struct {
 	grpcAddr      string
 	httpAddr      string
@@ -204,7 +204,7 @@ func (l *mcpServerList) Set(v string) error {
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("ozzd exited with error", "err", err)
+		slog.Error("mecated exited with error", "err", err)
 		os.Exit(1)
 	}
 }
@@ -231,7 +231,7 @@ func run() error {
 		Endpoint:    cfg.otlpEndpoint,
 		Protocol:    cfg.otlpProtocol,
 		Insecure:    cfg.otlpInsecure,
-		ServiceName: "ozzharness",
+		ServiceName: "mecatl",
 	})
 	if err != nil {
 		return fmt.Errorf("setup tracing: %w", err)
@@ -289,7 +289,7 @@ func run() error {
 
 // parseFlags turns argv into a config, resolving env-derived defaults.
 func parseFlags(argv []string) (config, error) {
-	fs := flag.NewFlagSet("ozzd", flag.ContinueOnError)
+	fs := flag.NewFlagSet("mecated", flag.ContinueOnError)
 	var cfg config
 
 	cwd, _ := os.Getwd()
@@ -324,15 +324,15 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "per-project memory store directory (empty disables the Remember/Recall tools)")
 	fs.DurationVar(&cfg.memoryConsolidateInterval, "memory-consolidate-interval", 0, "interval for background memory consolidation (dream); 0 disables. Only meaningful with --memory-dir")
 
-	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "directory of slash-command templates (<name>.md); setting it enables command expansion. Empty + --enable-commands uses the defaults (.ozz/commands, .claude/commands)")
-	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.ozz/commands, .claude/commands) when --commands-dir is empty")
+	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "directory of slash-command templates (<name>.md); setting it enables command expansion. Empty + --enable-commands uses the defaults (.mecatl/commands, .claude/commands)")
+	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.mecatl/commands, .claude/commands) when --commands-dir is empty")
 
 	fs.BoolVar(&cfg.enableFork, "enable-fork", true, "register the Fork fan-out tool (parallel isolated child branches)")
 	fs.BoolVar(&cfg.enableRepoMap, "enable-repomap", true, "register the Aider-style repo-map tool (CGO-free, tree-sitter via WebAssembly)")
 
 	fs.Var(&cfg.mcpServers, "mcp-server", "remote MCP server as name=URL (repeatable); auth token read from MCP_<NAME>_TOKEN")
 
-	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token required on every gRPC/HTTP request (or OZZ_AUTH_TOKEN; empty disables auth)")
+	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token required on every gRPC/HTTP request (or MECATL_AUTH_TOKEN; empty disables auth)")
 	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "PEM server certificate; with --tls-key enables TLS on the gRPC + HTTP servers")
 	fs.StringVar(&cfg.tlsKey, "tls-key", "", "PEM server private key (paired with --tls-cert)")
 	fs.StringVar(&cfg.clientCA, "client-ca", "", "PEM client-CA bundle; enables mutual TLS (require + verify client certs)")
@@ -351,7 +351,7 @@ func parseFlags(argv []string) (config, error) {
 	// An auth token from the environment is honored when the flag is unset, so a
 	// secret need not appear in the process argv.
 	if cfg.authToken == "" {
-		cfg.authToken = os.Getenv("OZZ_AUTH_TOKEN")
+		cfg.authToken = os.Getenv("MECATL_AUTH_TOKEN")
 	}
 	return cfg, nil
 }
@@ -456,7 +456,7 @@ func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sin
 // Command expansion is OFF by default (the NoopExpander, leaving raw user text
 // untouched). It is turned ON when EITHER --commands-dir is set (use that
 // directory) OR --enable-commands is true (use the DirCommandExpander defaults
-// of .ozz/commands then .claude/commands). When --commands-dir is set it takes
+// of .mecatl/commands then .claude/commands). When --commands-dir is set it takes
 // precedence over the defaults; --enable-commands without a dir uses the
 // defaults. Templates are discovered through the session Workspace FS, so paths
 // are workspace-relative.
@@ -471,7 +471,7 @@ func buildCommandExpander(cfg config) prompt.CommandExpander {
 	}
 	// --enable-commands with no explicit dir: use the package defaults.
 	exp := prompt.NewDirCommandExpander()
-	slog.Info("slash commands ENABLED (default dirs)", "dirs", ".ozz/commands,.claude/commands")
+	slog.Info("slash commands ENABLED (default dirs)", "dirs", ".mecatl/commands,.claude/commands")
 	return exp
 }
 
@@ -799,11 +799,11 @@ func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus
 		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
 	}
 	grpcSrv := grpc.NewServer(grpcOpts...)
-	ozzv1.RegisterHarnessServiceServer(grpcSrv, server.NewHarnessServer(svc))
+	mecatlv1.RegisterHarnessServiceServer(grpcSrv, server.NewHarnessServer(svc))
 	healthSrv := health.NewServer()
 	healthpb.RegisterHealthServer(grpcSrv, healthSrv)
 	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
-	healthSrv.SetServingStatus("ozz.v1.HarnessService", healthpb.HealthCheckResponse_SERVING)
+	healthSrv.SetServingStatus("mecatl.v1.HarnessService", healthpb.HealthCheckResponse_SERVING)
 
 	// --- HTTP: health endpoints mounted OUTSIDE auth/rate-limit; the API mux
 	// wrapped in the auth middleware. The readiness probe reports ready as soon

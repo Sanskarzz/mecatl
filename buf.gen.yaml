@@ -3,7 +3,7 @@ managed:
   enabled: true
   override:
     - file_option: go_package_prefix
-      value: github.com/stacklok/ozzharness/contracts/gen/go
+      value: github.com/stacklok/mecatl/contracts/gen/go
   # protovalidate publishes its own canonical Go module path; managed-mode
   # go_package rewriting would clobber it. Keep managed mode on for our protos
   # and off for the protovalidate module.

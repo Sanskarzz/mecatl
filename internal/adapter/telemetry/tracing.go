@@ -8,12 +8,12 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // tracerName is the instrumentation scope name for spans this adapter creates.
-const tracerName = "github.com/stacklok/ozzharness/internal/adapter/telemetry"
+const tracerName = "github.com/stacklok/mecatl/internal/adapter/telemetry"
 
 // Tracing is an OpenTelemetry-backed telemetry adapter. It implements
 // port.EventSink and turns the event stream into spans:
@@ -94,7 +94,7 @@ func (t *Tracing) startRun() {
 	if t.runSpan != nil {
 		return
 	}
-	t.runCtx, t.runSpan = t.tracer.Start(context.Background(), "ozz.run")
+	t.runCtx, t.runSpan = t.tracer.Start(context.Background(), "mecatl.run")
 }
 
 // startTurn opens a per-turn child span, ending any previous turn span first.
@@ -102,8 +102,8 @@ func (t *Tracing) startTurn(turn int) {
 	if t.turnSpan != nil {
 		t.turnSpan.End()
 	}
-	_, t.turnSpan = t.tracer.Start(t.runCtx, "ozz.turn",
-		trace.WithAttributes(attribute.Int("ozz.turn", turn)))
+	_, t.turnSpan = t.tracer.Start(t.runCtx, "mecatl.turn",
+		trace.WithAttributes(attribute.Int("mecatl.turn", turn)))
 }
 
 // parent returns the most specific open parent context for a child span.
@@ -119,10 +119,10 @@ func (t *Tracing) startTool(call *session.ToolCall) {
 	if call == nil {
 		return
 	}
-	_, span := t.tracer.Start(t.parent(), "ozz.tool",
+	_, span := t.tracer.Start(t.parent(), "mecatl.tool",
 		trace.WithAttributes(
-			attribute.String("ozz.tool.name", call.Name),
-			attribute.String("ozz.tool.call_id", string(call.ID)),
+			attribute.String("mecatl.tool.name", call.Name),
+			attribute.String("mecatl.tool.call_id", string(call.ID)),
 		))
 	t.tools[call.ID] = span
 }
@@ -136,7 +136,7 @@ func (t *Tracing) endTool(res *session.ToolResult) {
 	if !ok {
 		return
 	}
-	span.SetAttributes(attribute.Bool("ozz.tool.error", res.IsError))
+	span.SetAttributes(attribute.Bool("mecatl.tool.error", res.IsError))
 	if res.IsError {
 		span.SetStatus(codes.Error, "tool returned error")
 	}
@@ -161,11 +161,11 @@ func (t *Tracing) endRun(r *session.ResultPayload) {
 	}
 	if r != nil {
 		t.runSpan.SetAttributes(
-			attribute.String("ozz.run.stop", string(r.Stop)),
-			attribute.Int("ozz.tokens.input", r.Usage.InputTokens),
-			attribute.Int("ozz.tokens.output", r.Usage.OutputTokens),
-			attribute.Int("ozz.tokens.cache_read", r.Usage.CacheReadTokens),
-			attribute.Int("ozz.tokens.cache_write", r.Usage.CacheWriteTokens),
+			attribute.String("mecatl.run.stop", string(r.Stop)),
+			attribute.Int("mecatl.tokens.input", r.Usage.InputTokens),
+			attribute.Int("mecatl.tokens.output", r.Usage.OutputTokens),
+			attribute.Int("mecatl.tokens.cache_read", r.Usage.CacheReadTokens),
+			attribute.Int("mecatl.tokens.cache_write", r.Usage.CacheWriteTokens),
 		)
 		switch r.Stop {
 		case session.StopError, session.StopMaxConsecutiveFailures:

@@ -12,7 +12,7 @@ import (
 	"io/fs"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // ErrNoShell is the sentinel a CommandRunner returns when it has no shell to

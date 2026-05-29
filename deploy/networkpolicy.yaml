@@ -1,33 +1,33 @@
-# Default-deny ingress NetworkPolicy for ozzd.
+# Default-deny ingress NetworkPolicy for mecated.
 #
-# RATIONALE: the ozzd API is auth-optional (--auth-token may be unset), exposing
+# RATIONALE: the mecated API is auth-optional (--auth-token may be unset), exposing
 # command/file execution with no caller identity check. A default-deny ingress
 # posture is therefore defense-in-depth: even if the Service is reachable on the
 # pod network, no peer can connect until an explicit allow is added below.
 #
 # policyTypes lists ONLY Ingress on purpose. Once a pod is selected by ANY
 # NetworkPolicy for a given direction, that direction is default-deny for it.
-# ozzd needs egress for cluster DNS resolution AND outbound HTTPS to the OpenAI
+# mecated needs egress for cluster DNS resolution AND outbound HTTPS to the OpenAI
 # API, so we deliberately do NOT lock egress here — adding a restrictive egress
 # policy is a follow-up that must explicitly allow:
 #   - UDP/TCP 53 to kube-dns (kube-system) for name resolution
 #   - TCP 443 to the OpenAI API endpoints
 # Leaving Egress out of policyTypes keeps egress open (cluster default).
 #
-# This empty `ingress: []` selects the ozzd pod and allows NOTHING in. To grant
+# This empty `ingress: []` selects the mecated pod and allows NOTHING in. To grant
 # access to a specific client, uncomment and adapt the placeholder block below.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: ozzd-default-deny-ingress
+  name: mecated-default-deny-ingress
   labels:
-    app.kubernetes.io/name: ozzharness
-    app.kubernetes.io/component: ozzd
+    app.kubernetes.io/name: mecatl
+    app.kubernetes.io/component: mecated
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: ozzharness
-      app.kubernetes.io/component: ozzd
+      app.kubernetes.io/name: mecatl
+      app.kubernetes.io/component: mecated
   policyTypes:
     - Ingress
   # Default-deny: no ingress is permitted.
@@ -35,7 +35,7 @@ spec:
   # ---------------------------------------------------------------------------
   # PLACEHOLDER — to allow a specific client, replace `ingress: []` above with a
   # block like this (the namespaceSelector + podSelector under a single `from`
-  # entry are ANDed, so this matches a pod labelled `role: ozzd-client` in a
+  # entry are ANDed, so this matches a pod labelled `role: mecated-client` in a
   # namespace labelled `kubernetes.io/metadata.name: trusted-clients`):
   #
   # ingress:
@@ -45,7 +45,7 @@ spec:
   #             kubernetes.io/metadata.name: trusted-clients
   #         podSelector:
   #           matchLabels:
-  #             role: ozzd-client
+  #             role: mecated-client
   #     ports:
   #       - protocol: TCP
   #         port: 8080   # grpc

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Stacklok, Inc.
 // SPDX-License-Identifier: LicenseRef-Stacklok-Proprietary
 
-// ozzharness public API surface (WP10).
+// mecatl public API surface (WP10).
 //
 // HarnessService is the network surface over the WP8 agent loop. The
 // primary RPC is the bidi `Converse` stream: the client sends a mandatory
@@ -25,9 +25,9 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             (unknown)
-// source: ozz/v1/harness.proto
+// source: mecatl/v1/harness.proto
 
-package ozzv1
+package mecatlv1
 
 import (
 	context "context"
@@ -42,16 +42,16 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	HarnessService_CreateSession_FullMethodName = "/ozz.v1.HarnessService/CreateSession"
-	HarnessService_GetSession_FullMethodName    = "/ozz.v1.HarnessService/GetSession"
-	HarnessService_Converse_FullMethodName      = "/ozz.v1.HarnessService/Converse"
+	HarnessService_CreateSession_FullMethodName = "/mecatl.v1.HarnessService/CreateSession"
+	HarnessService_GetSession_FullMethodName    = "/mecatl.v1.HarnessService/GetSession"
+	HarnessService_Converse_FullMethodName      = "/mecatl.v1.HarnessService/Converse"
 )
 
 // HarnessServiceClient is the client API for HarnessService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// HarnessService is the ozzharness API: unary session setup/inspection plus
+// HarnessService is the mecatl API: unary session setup/inspection plus
 // the bidi Converse stream that drives one agent run.
 type HarnessServiceClient interface {
 	// CreateSession allocates a new server-side session and returns its id.
@@ -110,7 +110,7 @@ type HarnessService_ConverseClient = grpc.BidiStreamingClient[ConverseRequest, C
 // All implementations must embed UnimplementedHarnessServiceServer
 // for forward compatibility.
 //
-// HarnessService is the ozzharness API: unary session setup/inspection plus
+// HarnessService is the mecatl API: unary session setup/inspection plus
 // the bidi Converse stream that drives one agent run.
 type HarnessServiceServer interface {
 	// CreateSession allocates a new server-side session and returns its id.
@@ -209,7 +209,7 @@ type HarnessService_ConverseServer = grpc.BidiStreamingServer[ConverseRequest, C
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var HarnessService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "ozz.v1.HarnessService",
+	ServiceName: "mecatl.v1.HarnessService",
 	HandlerType: (*HarnessServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -229,5 +229,5 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "ozz/v1/harness.proto",
+	Metadata: "mecatl/v1/harness.proto",
 }

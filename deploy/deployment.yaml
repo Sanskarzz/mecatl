@@ -1,10 +1,10 @@
-# Deployment for ozzd, the ozzharness server.
+# Deployment for mecated, the mecatl server.
 #
 # The image field is the ko placeholder `ko://<import-path>`; `ko resolve`
 # (or `ko apply`) replaces it with the built+pushed image ref. The Pod follows
 # the Pod Security Standards "restricted" profile in full.
 #
-# SECURITY: the ozzd API is UNAUTHENTICATED — it exposes command/file execution
+# SECURITY: the mecated API is UNAUTHENTICATED — it exposes command/file execution
 # with no caller identity check. Inside the pod we bind 0.0.0.0 (the pod netns is
 # isolated); reachability is gated entirely by the Service and (recommended) a
 # NetworkPolicy. Deploy only inside a trusted network / behind external auth.
@@ -12,21 +12,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ozzd
+  name: mecated
   labels:
-    app.kubernetes.io/name: ozzharness
-    app.kubernetes.io/component: ozzd
+    app.kubernetes.io/name: mecatl
+    app.kubernetes.io/component: mecated
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: ozzharness
-      app.kubernetes.io/component: ozzd
+      app.kubernetes.io/name: mecatl
+      app.kubernetes.io/component: mecated
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: ozzharness
-        app.kubernetes.io/component: ozzd
+        app.kubernetes.io/name: mecatl
+        app.kubernetes.io/component: mecated
     spec:
       # Pod-level securityContext. UID/GID 65532 matches the nonroot user baked
       # into the chainguard static base image (.ko.yaml). fsGroup makes any
@@ -38,15 +38,15 @@ spec:
         fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
-      # ozzd does not talk to the Kubernetes API, so it has no need for a
+      # mecated does not talk to the Kubernetes API, so it has no need for a
       # mounted ServiceAccount token. Disabling automount removes a blast-radius
       # amplifier if the (unauthenticated) workload is ever compromised.
       automountServiceAccountToken: false
       containers:
-        - name: ozzd
+        - name: mecated
           # ko substitutes this placeholder with the built image ref on
           # `ko resolve` / `ko apply`.
-          image: ko://github.com/stacklok/ozzharness/cmd/ozzd
+          image: ko://github.com/stacklok/mecatl/cmd/mecated
           args:
             # Bind 0.0.0.0 inside the pod (the in-code default is loopback).
             - --grpc-addr=0.0.0.0:8080
@@ -57,7 +57,7 @@ spec:
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: ozzd-openai
+                  name: mecated-openai
                   key: OPENAI_API_KEY
           ports:
             - name: grpc

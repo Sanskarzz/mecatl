@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // ToolSearchName is the catalog name of the built-in progressive-disclosure

@@ -3,8 +3,8 @@ package tokenizer_test
 import (
 	"testing"
 
-	"github.com/stacklok/ozzharness/internal/adapter/tokenizer"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/adapter/tokenizer"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // TestCountKnownStrings checks the tiktoken-backed counter returns the canonical

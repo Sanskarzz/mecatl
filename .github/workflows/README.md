@@ -1,4 +1,4 @@
-# GitHub Actions workflows for ozzharness
+# GitHub Actions workflows for mecatl
 
 Two workflows live here. Every third-party action is **SHA-pinned** with a
 `# vX.Y.Z` comment so a re-pointed tag from a compromised maintainer cannot
@@ -27,7 +27,7 @@ enabled; `GOTOOLCHAIN=local` prevents a surprise toolchain download.
 
 ## `release.yml` — `v*` tag push
 
-Builds and publishes the `ozzd` image and its supply-chain metadata. The
+Builds and publishes the `mecated` image and its supply-chain metadata. The
 workflow defaults to `contents: read`; the single publish job elevates to
 exactly:
 
@@ -41,7 +41,7 @@ permissions:
 
 Flow:
 
-1. **Build + push (ko)** — `ko build` straight from `./cmd/ozzd` onto the
+1. **Build + push (ko)** — `ko build` straight from `./cmd/mecated` onto the
    digest-pinned distroless base in `.ko.yaml`, multi-arch
    (`linux/amd64,linux/arm64`), `--bare`, tagged `<version>` and `latest`.
    `KO_DOCKER_REPO=ghcr.io/${{ github.repository }}`. The image **digest** is

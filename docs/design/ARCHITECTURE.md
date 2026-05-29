@@ -1,4 +1,4 @@
-# ozzharness — Architecture
+# mecatl — Architecture
 
 > Status: design + rationale, kept in step with the implementation. The v1 core
 > (loop, ~7 tools, permissions, hooks, cache, two API surfaces) shipped as
@@ -7,12 +7,12 @@
 > seams, and server hardening). Where this doc names a package/type, the name
 > matches the current code. The authoritative status map is
 > `docs/design/PRODUCTION-READINESS.md`.
-> Module: `github.com/stacklok/ozzharness` · Go 1.26.3
+> Module: `github.com/stacklok/mecatl` · Go 1.26.3
 > Primary source: `docs/harnesses/08-design-considerations.md` (the 13 load-bearing
 > decisions and the 10-point gauntlet). Companions: `06-architecture-patterns.md`,
 > `03-claude-code-architecture.md`, `07-context-and-mcp.md`.
 
-ozzharness is a **headless agentic coding-harness**: a service/library that runs the
+mecatl is a **headless agentic coding-harness**: a service/library that runs the
 agent loop, executes coding tools, enforces permissions and hooks, and streams typed
 events. There is no TUI. Clients drive it over gRPC or HTTP.
 
@@ -43,7 +43,7 @@ provider-agnostic and unit-testable against fakes.
   └───────────────┘      │   │                                         │   └────────────────────┘
   ┌───────────────┐      │   session  (aggregate: Session, Conversation│   ┌────────────────────┐
   │ demo CLI      │─────▶│   │           Turn, Message, ToolCall,      │◀──│ filesystem adapter │
-  │ (cmd/ozzdemo) │      │   │           Permission, Hook, Usage)      │   │ (OS fs / mem fake) │
+  │ (cmd/mecademo) │      │   │           Permission, Hook, Usage)      │   │ (OS fs / mem fake) │
   └───────────────┘      │                                             │   └────────────────────┘
                          │   prompt  (system-prompt assembly,          │   ┌────────────────────┐
                          │            cache-stable prefix + suffix)    │◀──│ session store      │
@@ -90,13 +90,13 @@ v1 — there is no third-party-stable surface yet; the public surface is the pro
 API, not Go symbols. (Re-evaluate `pkg/sdk` once an external Go consumer exists. YAGNI.)
 
 ```
-github.com/stacklok/ozzharness
+github.com/stacklok/mecatl
 ├── contracts/
-│   ├── proto/ozz/v1/harness.proto      # gRPC service + messages (source of truth)
+│   ├── proto/mecatl/v1/harness.proto      # gRPC service + messages (source of truth)
 │   └── gen/go/                          # generated Go (grpc-go + protobuf, buf)
 ├── cmd/
-│   ├── ozzd/                           # the server binary (gRPC + HTTP/SSE)
-│   └── ozzdemo/                        # the demo driver (fake provider default)
+│   ├── mecated/                           # the server binary (gRPC + HTTP/SSE)
+│   └── mecademo/                        # the demo driver (fake provider default)
 ├── internal/
 │   ├── session/                        # DOMAIN: Session aggregate + value objects
 │   │   ├── session.go                  #   Session (root), state machine, StopReason
@@ -538,11 +538,11 @@ a `session_id` and drives the run over the stream.
   server-streaming `Prompt` (SSE) plus unary `Approve`/`Cancel`. Both surfaces call the
   identical `agent` use-case; neither sees an OpenAI type.
 
-### 7.1 Proto sketch (`contracts/proto/ozz/v1/harness.proto`, go_package → `contracts/gen/go`)
+### 7.1 Proto sketch (`contracts/proto/mecatl/v1/harness.proto`, go_package → `contracts/gen/go`)
 
 ```proto
 syntax = "proto3";
-package ozz.v1;
+package mecatl.v1;
 import "buf/validate/validate.proto";
 
 service HarnessService {
@@ -634,7 +634,7 @@ was designed for. The authoritative tracker is
 | MCP client (**streaming-HTTP transport ONLY — stdio MCP is explicitly NOT supported, ever**) | **Done** | `internal/adapter/mcp`: streaming-HTTP transport only (no `os/exec`-spawned stdio server is ever created); registers remote tools into `tool.Catalog` namespaced `mcp__<server>__<tool>`. |
 | Repo map / embeddings | **Done (repo map)** | `internal/adapter/repomap`: a read-only, multi-language repo-map `Tool` (tree-sitter parsing + personalized PageRank over the symbol-reference graph), no CGO. Embeddings remain unbuilt. |
 | Persistent cross-session memory | **Done** | `tool.MemoryStore` seam + file-backed `internal/adapter/memory` (Remember/Recall tools, per-project), plus opt-in `dream` consolidation. The `SessionStore` + AGENTS.md/CLAUDE.md discovery still cover the file-as-memory case. |
-| Slash commands / skills | **Done (commands)** | `prompt.CommandExpander` seam + `DirCommandExpander` (`.ozz/commands` / `.claude/commands` templates). Skill packaging remains future. |
+| Slash commands / skills | **Done (commands)** | `prompt.CommandExpander` seam + `DirCommandExpander` (`.mecatl/commands` / `.claude/commands` templates). Skill packaging remains future. |
 | Fork-join parallelism (pattern 8) | **Done** | `tool.WorkspaceForker` seam + `internal/adapter/forker` (git-worktree / copy isolation) + `agent.NewForkTool`. |
 | Multi-vendor model routing | Optional, unbuilt | `LLMProvider` port already abstracts it; a router would be a convenience adapter. |
 | **OS-level sandbox (Landlock/seccomp/Seatbelt)** | **Deliberately deferred** | The `tool.CommandRunner` seam is the chokepoint; a Landlock(+seccomp) wrapper drops in as a `CommandRunner` adapter without touching the loop. Bash is also fully optional (shell-less deploys avoid the surface entirely), so this is not a blocker for those. |

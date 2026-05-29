@@ -3,7 +3,7 @@ package port
 import (
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // EventSink receives domain Events from the loop and relays them to the API

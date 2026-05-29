@@ -1,8 +1,8 @@
-// Package server is the API adapter for ozzharness: it exposes the WP8 agent
+// Package server is the API adapter for mecatl: it exposes the WP8 agent
 // loop over two network surfaces that share one domain Event taxonomy.
 //
 //   - gRPC (primary): HarnessServer implements the generated
-//     ozzv1.HarnessServiceServer. The bidi Converse stream carries a whole run:
+//     mecatlv1.HarnessServiceServer. The bidi Converse stream carries a whole run:
 //     a mandatory first Prompt frame, then zero or more ResumeApproval / Cancel
 //     control frames, while the server streams Event envelopes until the
 //     terminal result.

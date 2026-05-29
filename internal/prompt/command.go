@@ -6,7 +6,7 @@ import (
 	"io/fs"
 	"strings"
 
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // CommandExpander rewrites a raw user input into the prompt the model sees. If
@@ -45,13 +45,13 @@ func (NoopExpander) Expand(_ context.Context, _ tool.Workspace, input string) (s
 var _ CommandExpander = NoopExpander{}
 
 // defaultCommandDirs are the workspace-relative directories DirCommandExpander
-// searches, in order, for a command's <name>.md file. ".ozz/commands/" is the
+// searches, in order, for a command's <name>.md file. ".mecatl/commands/" is the
 // native location; ".claude/commands/" is accepted for familiarity. The first
 // directory that contains a matching file wins.
-var defaultCommandDirs = []string{".ozz/commands", ".claude/commands"}
+var defaultCommandDirs = []string{".mecatl/commands", ".claude/commands"}
 
 // DirCommandExpander discovers command templates as <name>.md files under one or
-// more workspace-relative directories (default ".ozz/commands/" and
+// more workspace-relative directories (default ".mecatl/commands/" and
 // ".claude/commands/"), read through the tool.Workspace FS port (never os, so
 // the type stays infra-free / domain-pure).
 //
@@ -82,7 +82,7 @@ type DirCommandExpander struct {
 // NewDirCommandExpander constructs a DirCommandExpander. Each dir is a
 // workspace-relative directory searched in order for "<name>.md"; a blank dir is
 // ignored. When no non-blank dir is given it falls back to the defaults
-// (".ozz/commands/" then ".claude/commands/").
+// (".mecatl/commands/" then ".claude/commands/").
 func NewDirCommandExpander(dirs ...string) *DirCommandExpander {
 	cleaned := make([]string, 0, len(dirs))
 	for _, d := range dirs {

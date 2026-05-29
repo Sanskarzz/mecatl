@@ -15,8 +15,8 @@ package permpolicy
 import (
 	"context"
 
-	"github.com/stacklok/ozzharness/internal/governance"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // Policy implements port.PermissionPolicy by delegating to a governance

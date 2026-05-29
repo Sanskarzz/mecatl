@@ -1,11 +1,11 @@
-# ozzharness — Usage & Operator Guide
+# mecatl — Usage & Operator Guide
 
-`ozzharness` is a headless, agentic coding harness. It owns its own context
+`mecatl` is a headless, agentic coding harness. It owns its own context
 window, tool loop, permission policy and lifecycle hooks, and talks to OpenAI
-(or any OpenAI-compatible `/v1/responses` endpoint). The server, `ozzd`, exposes
+(or any OpenAI-compatible `/v1/responses` endpoint). The server, `mecated`, exposes
 one agent run over **gRPC** and **HTTP/SSE** concurrently.
 
-> Security, up front: **the `ozzd` API is UNAUTHENTICATED.** It exposes command
+> Security, up front: **the `mecated` API is UNAUTHENTICATED.** It exposes command
 > and file execution against the configured workspace with no caller identity
 > check. It is intended for **localhost, single-user** use, which is why the
 > default listen addresses bind the loopback interface (`127.0.0.1`). Binding a
@@ -29,17 +29,17 @@ Build the binaries into `bin/`:
 
 ```console
 $ task build
-go build -o bin/ozzd ./cmd/ozzd
-go build -o bin/ozzdemo ./cmd/ozzdemo
+go build -o bin/mecated ./cmd/mecated
+go build -o bin/mecademo ./cmd/mecademo
 ```
 
-This produces `bin/ozzd` (the server) and `bin/ozzdemo` (the offline demo).
+This produces `bin/mecated` (the server) and `bin/mecademo` (the offline demo).
 
 Other handy targets (`task --list` for the full set):
 
 | Task | What it does |
 | --- | --- |
-| `task build` | compile `bin/ozzd`, `bin/ozzdemo` |
+| `task build` | compile `bin/mecated`, `bin/mecademo` |
 | `task test` | `go test -race ./...` |
 | `task test:cover` | tests + `coverage/coverage.{out,html}` |
 | `task lint` | `golangci-lint run` + `go vet` |
@@ -51,7 +51,7 @@ Other handy targets (`task --list` for the full set):
 You do **not** need a network or an API key for `task build`, `task test`, or
 the offline demo.
 
-The default `ozzd` build is CGO-free and statically linkable (the ko image
+The default `mecated` build is CGO-free and statically linkable (the ko image
 builds it with `CGO_ENABLED=0`). This includes the tree-sitter-backed repo-map
 tool: tree-sitter runs as WebAssembly via the pure-Go `wazero` runtime (the
 grammars are embedded, so it works fully offline), so the repo map ships in the
@@ -62,20 +62,20 @@ default static binary with no build tag. It is registered by default; pass
 
 ## 2. The 60-second demo
 
-`ozzdemo` drives a **real `agent.Engine`** through a scripted session against a
+`mecademo` drives a **real `agent.Engine`** through a scripted session against a
 canned offline provider (`mockllm`) — no network, no key. It proves the full
 shape of the loop: an auto-allowed tool call, a tool call that requires approval
 (and is approved), and a final assistant message with usage accounting.
 
 ```console
-$ go run ./cmd/ozzdemo
-=== ozzharness demo (offline / mockllm) ===
+$ go run ./cmd/mecademo
+=== mecatl demo (offline / mockllm) ===
 Driving a real agent.Engine: auto-allowed tool call -> permission ask + approval -> final result.
 
 [001] turn=0 turn.start
 [002] turn=0 message.delta  text="I'll read the greeting file first."
 [003] turn=0 tool.call      tool=Read args={"path":"greeting.txt"}
-[004] turn=0 tool.result    error=false result="     1\thello from the ozzharness demo workspace"
+[004] turn=0 tool.result    error=false result="     1\thello from the mecatl demo workspace"
 [005] turn=1 turn.start
 [006] turn=1 message.delta  text="Now I'll save a short note, which needs your approval."
 [007] turn=1 permission.ask ASK tool=Write reason="approval required by rule for Write (note.txt)"  -> client auto-approves
@@ -106,10 +106,10 @@ Drive the same scenario against a real model:
 
 ```console
 $ export OPENAI_API_KEY=sk-...
-$ go run ./cmd/ozzdemo --openai --model gpt-5
+$ go run ./cmd/mecademo --openai --model gpt-5
 ```
 
-Demo flags (`cmd/ozzdemo`):
+Demo flags (`cmd/mecademo`):
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -122,16 +122,16 @@ Without `--openai` the demo is fully offline. With `--openai` and no
 
 ---
 
-## 3. Running the server (`ozzd`)
+## 3. Running the server (`mecated`)
 
-`ozzd` is the composition root: it builds an LLM provider, the seven-tool
+`mecated` is the composition root: it builds an LLM provider, the seven-tool
 catalog plus a read-only `Task` subagent, the permission policy, lifecycle
 hooks, the session store, and the two-layer system prompt; then serves the
 `HarnessService` over gRPC and HTTP/SSE concurrently.
 
 ```console
 $ export OPENAI_API_KEY=sk-...
-$ go run ./cmd/ozzd --openai --workspace "$PWD"
+$ go run ./cmd/mecated --openai --workspace "$PWD"
 ```
 
 ### Flags
@@ -165,7 +165,7 @@ A provider is **required** — the server has nothing to do without one:
 
 ### The loopback / unauthenticated trust note
 
-On startup `ozzd` logs the trust posture for each listen address:
+On startup `mecated` logs the trust posture for each listen address:
 
 ```
 level=INFO msg="API bound to loopback (unauthenticated, single-user localhost trust model)" flag=grpc-addr addr=127.0.0.1:8080
@@ -175,12 +175,12 @@ level=INFO msg="API bound to loopback (unauthenticated, single-user localhost tr
 If you bind a **non-loopback** address you get a prominent warning instead:
 
 ```
-level=WARN msg="API bound to a NON-loopback address: the ozzd API is UNAUTHENTICATED and exposes command/file execution; do not do this without an external trust boundary (auth/mTLS is future work)" flag=http-addr addr=0.0.0.0:8081
+level=WARN msg="API bound to a NON-loopback address: the mecated API is UNAUTHENTICATED and exposes command/file execution; do not do this without an external trust boundary (auth/mTLS is future work)" flag=http-addr addr=0.0.0.0:8081
 ```
 
 ### Graceful shutdown
 
-`ozzd` traps `SIGINT` / `SIGTERM`, stops accepting new work, drains the HTTP
+`mecated` traps `SIGINT` / `SIGTERM`, stops accepting new work, drains the HTTP
 server (bounded by a 10 s timeout) and `GracefulStop`s the gRPC server:
 
 ```
@@ -191,7 +191,7 @@ level=INFO msg="shutdown signal received; stopping servers"
 
 ## 4. The gRPC API
 
-Service: `ozz.v1.HarnessService` (`contracts/proto/ozz/v1/harness.proto`).
+Service: `mecatl.v1.HarnessService` (`contracts/proto/mecatl/v1/harness.proto`).
 
 | RPC | Kind | Purpose |
 | --- | --- | --- |
@@ -249,7 +249,7 @@ message Event {
 
 ### Go client snippet
 
-`ozzd` does **not** register gRPC server reflection, so `grpcurl` must be
+`mecated` does **not** register gRPC server reflection, so `grpcurl` must be
 pointed at the proto (and its `buf.validate` import) explicitly. A generated Go
 client is the simplest path:
 
@@ -264,7 +264,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 )
 
 func main() {
@@ -274,12 +274,12 @@ func main() {
 		log.Fatal(err)
 	}
 	defer conn.Close()
-	client := ozzv1.NewHarnessServiceClient(conn)
+	client := mecatlv1.NewHarnessServiceClient(conn)
 
 	// 1. Create a session.
-	cs, err := client.CreateSession(context.Background(), &ozzv1.CreateSessionRequest{
+	cs, err := client.CreateSession(context.Background(), &mecatlv1.CreateSessionRequest{
 		Workspace: "/path/to/workspace",
-		Mode:      ozzv1.PermissionMode_PERMISSION_MODE_DEFAULT,
+		Mode:      mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -290,9 +290,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := stream.Send(&ozzv1.ConverseRequest{
-		Kind: &ozzv1.ConverseRequest_Prompt{
-			Prompt: &ozzv1.Prompt{SessionId: cs.GetSessionId(), Text: "List the Go files."},
+	if err := stream.Send(&mecatlv1.ConverseRequest{
+		Kind: &mecatlv1.ConverseRequest_Prompt{
+			Prompt: &mecatlv1.Prompt{SessionId: cs.GetSessionId(), Text: "List the Go files."},
 		},
 	}); err != nil {
 		log.Fatal(err)
@@ -311,9 +311,9 @@ func main() {
 		log.Printf("[%d] %s %s", ev.GetSeq(), ev.GetType(), ev.GetText())
 
 		if ev.GetType() == "permission.ask" {
-			_ = stream.Send(&ozzv1.ConverseRequest{
-				Kind: &ozzv1.ConverseRequest_ResumeApproval{
-					ResumeApproval: &ozzv1.ResumeApproval{
+			_ = stream.Send(&mecatlv1.ConverseRequest{
+				Kind: &mecatlv1.ConverseRequest_ResumeApproval{
+					ResumeApproval: &mecatlv1.ResumeApproval{
 						AskId: ev.GetAsk().GetAskId(),
 						Allow: true,
 					},
@@ -321,7 +321,7 @@ func main() {
 			})
 		}
 		// To abort instead, send a Cancel{} frame:
-		//   stream.Send(&ozzv1.ConverseRequest{Kind: &ozzv1.ConverseRequest_Cancel{Cancel: &ozzv1.Cancel{}}})
+		//   stream.Send(&mecatlv1.ConverseRequest{Kind: &mecatlv1.ConverseRequest_Cancel{Cancel: &mecatlv1.Cancel{}}})
 	}
 }
 ```
@@ -345,13 +345,13 @@ share one event shape.
 | `POST /v1/sessions/{id}/approve` | `{ask_id, allow}` | `204` |
 | `POST /v1/sessions/{id}/cancel` | — | `204` |
 
-All examples below were captured against a live `ozzd --mock`.
+All examples below were captured against a live `mecated --mock`.
 
 ### Create a session
 
 ```console
 $ curl -s -X POST http://127.0.0.1:8081/v1/sessions \
-       -d '{"workspace":"/tmp/ozzws"}'
+       -d '{"workspace":"/tmp/mecatlws"}'
 {"session_id":"8867bdea940108c1dd82d13d3fb7fc61"}
 ```
 
@@ -359,7 +359,7 @@ Optional fields:
 
 ```json
 {
-  "workspace": "/tmp/ozzws",
+  "workspace": "/tmp/mecatlws",
   "mode": "plan",
   "limits": { "max_turns": 20, "max_tool_calls": 80, "max_consecutive_failures": 3 }
 }
@@ -375,7 +375,7 @@ substituted (see §6). `workspace` is required — omitting it returns `400`
 
 ```console
 $ curl -s http://127.0.0.1:8081/v1/sessions/8867bdea940108c1dd82d13d3fb7fc61
-{"session_id":"8867bdea940108c1dd82d13d3fb7fc61","state":"idle","mode":"default","workspace":"/tmp/ozzws","turns":0,"tool_calls":0}
+{"session_id":"8867bdea940108c1dd82d13d3fb7fc61","state":"idle","mode":"default","workspace":"/tmp/mecatlws","turns":0,"tool_calls":0}
 ```
 
 A missing id returns `404` `{"error":"not found: \"...\""}`.
@@ -509,7 +509,7 @@ Resolution precedence:
 A `deny`/`ask` carries a human `reason`, surfaced to the model (on deny, so it
 can adapt) and to the client (on ask).
 
-### The default ruleset `ozzd` ships
+### The default ruleset `mecated` ships
 
 | Tool | Default effect |
 | --- | --- |
@@ -540,7 +540,7 @@ floored at **`ask`** — an allow rule for the outer literal can never silently
 approve a concealed destructive command.
 
 > Permission rules are configured in Go at the composition root
-> (`cmd/ozzd/main.go`, `defaultRules()`), via `permpolicy.NewPolicy([]governance.Rule{…})`.
+> (`cmd/mecated/main.go`, `defaultRules()`), via `permpolicy.NewPolicy([]governance.Rule{…})`.
 > There is no rules config file in v1; to change the shipped policy, edit
 > `defaultRules()` and rebuild.
 
@@ -564,7 +564,7 @@ a phase → shell-command map; each command is run as `<shell> -c <command>`
 | `SubagentStop` | when a subagent loop stops |
 
 > v1 fully implements `PreToolUse` and `PostToolUse`; the others are defined and
-> wired as the injection seam. **`ozzd` ships with no hooks configured by
+> wired as the injection seam. **`mecated` ships with no hooks configured by
 > default** (`hookexec.New(nil)`), so every event is allowed. Hooks are
 > configured in Go at the composition root by passing a populated
 > `map[governance.HookPhase]string` to `hookexec.New(...)`.
@@ -607,7 +607,7 @@ fi
 exit 0
 ```
 
-Wire it (in `cmd/ozzd/main.go`, where `hookexec.New(nil)` is today):
+Wire it (in `cmd/mecated/main.go`, where `hookexec.New(nil)` is today):
 
 ```go
 hooks := hookexec.New(map[governance.HookPhase]string{
@@ -632,10 +632,10 @@ resends the full input slice, carrying reasoning items forward.
 
 ```console
 # OpenAI
-$ OPENAI_API_KEY=sk-... go run ./cmd/ozzd --openai --model gpt-5
+$ OPENAI_API_KEY=sk-... go run ./cmd/mecated --openai --model gpt-5
 
 # An OpenAI-compatible endpoint (vLLM / LiteLLM / local proxy)
-$ OPENAI_API_KEY=token go run ./cmd/ozzd --openai \
+$ OPENAI_API_KEY=token go run ./cmd/mecated --openai \
     --openai-base-url http://127.0.0.1:8000/v1 --model my-model
 ```
 
@@ -661,14 +661,14 @@ before suspecting the harness.
 ## 10. Troubleshooting / FAQ
 
 **`no LLM provider configured: pass --openai (with OPENAI_API_KEY) or --mock`**
-You started `ozzd` with neither a provider flag nor a key. Set
+You started `mecated` with neither a provider flag nor a key. Set
 `OPENAI_API_KEY`, pass `--openai`, or pass `--mock` for an offline smoke test.
 
 **`--openai requires OPENAI_API_KEY to be set`**
 `--openai` was passed but no key is in the environment. `export OPENAI_API_KEY=…`.
 
 **`bind: address already in use`**
-Another `ozzd` (or process) holds the port. Pick free ports with
+Another `mecated` (or process) holds the port. Pick free ports with
 `--http-addr` / `--grpc-addr`, or stop the other process.
 
 **WARN: "API bound to a NON-loopback address …"**

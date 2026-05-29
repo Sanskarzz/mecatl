@@ -1,11 +1,11 @@
 ---
-name: project-ozzharness
-description: ozzharness is a NEW headless agentic coding-harness in Go (module github.com/stacklok/ozzharness, go 1.26.3); strict DDD/hexagonal, OpenAI Responses API behind an LLMProvider port.
+name: project-mecatl
+description: mecatl is a NEW headless agentic coding-harness in Go (module github.com/stacklok/mecatl, go 1.26.3); strict DDD/hexagonal, OpenAI Responses API behind an LLMProvider port.
 metadata:
   type: project
 ---
 
-ozzharness is a headless agentic coding-harness (no TUI) exposed as both a gRPC and HTTP service/library.
+mecatl is a headless agentic coding-harness (no TUI) exposed as both a gRPC and HTTP service/library.
 
 **Why:** Greenfield project; the repo started as only a research corpus under `docs/harnesses/` plus a bare `go.mod`. The architecture is distilled from that corpus, primarily `docs/harnesses/08-design-considerations.md` (the 13 load-bearing decisions + 10-point gauntlet).
 

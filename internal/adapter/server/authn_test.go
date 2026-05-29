@@ -16,22 +16,22 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
-	"github.com/stacklok/ozzharness/internal/adapter/mockllm"
-	"github.com/stacklok/ozzharness/internal/adapter/server"
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/adapter/server"
 )
 
 // dialGRPCSecure stands up an in-memory gRPC server with the given Authenticator
 // installed as interceptors, returning a client and cleanup. The returned client
 // sends no credentials; tests attach metadata per-call.
-func dialGRPCSecure(t *testing.T, svc *server.Service, auth *server.Authenticator) (ozzv1.HarnessServiceClient, func()) {
+func dialGRPCSecure(t *testing.T, svc *server.Service, auth *server.Authenticator) (mecatlv1.HarnessServiceClient, func()) {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	gs := grpc.NewServer(
 		grpc.UnaryInterceptor(auth.UnaryInterceptor()),
 		grpc.StreamInterceptor(auth.StreamInterceptor()),
 	)
-	ozzv1.RegisterHarnessServiceServer(gs, server.NewHarnessServer(svc))
+	mecatlv1.RegisterHarnessServiceServer(gs, server.NewHarnessServer(svc))
 	go func() { _ = gs.Serve(lis) }()
 
 	conn, err := grpc.NewClient("passthrough:///bufnet",
@@ -43,7 +43,7 @@ func dialGRPCSecure(t *testing.T, svc *server.Service, auth *server.Authenticato
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	return ozzv1.NewHarnessServiceClient(conn), func() {
+	return mecatlv1.NewHarnessServiceClient(conn), func() {
 		_ = conn.Close()
 		gs.Stop()
 		_ = lis.Close()
@@ -67,19 +67,19 @@ func TestGRPCAuthBearer(t *testing.T) {
 	defer cancel()
 
 	// No token -> Unauthenticated.
-	_, err := client.CreateSession(ctx, &ozzv1.CreateSessionRequest{Workspace: "/ws"})
+	_, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
 	if status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("no-token code = %v, want Unauthenticated", status.Code(err))
 	}
 
 	// Wrong token -> Unauthenticated.
-	_, err = client.CreateSession(bearerCtx(ctx, "nope"), &ozzv1.CreateSessionRequest{Workspace: "/ws"})
+	_, err = client.CreateSession(bearerCtx(ctx, "nope"), &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
 	if status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("wrong-token code = %v, want Unauthenticated", status.Code(err))
 	}
 
 	// Correct token -> OK.
-	if _, err := client.CreateSession(bearerCtx(ctx, "secret"), &ozzv1.CreateSessionRequest{Workspace: "/ws"}); err != nil {
+	if _, err := client.CreateSession(bearerCtx(ctx, "secret"), &mecatlv1.CreateSessionRequest{Workspace: "/ws"}); err != nil {
 		t.Fatalf("correct-token CreateSession: %v", err)
 	}
 }
@@ -93,7 +93,7 @@ func TestGRPCAuthDisabledAllows(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := client.CreateSession(ctx, &ozzv1.CreateSessionRequest{Workspace: "/ws"}); err != nil {
+	if _, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"}); err != nil {
 		t.Fatalf("auth-disabled CreateSession: %v", err)
 	}
 }
@@ -110,20 +110,20 @@ func TestGRPCRateLimit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if _, err := client.CreateSession(ctx, &ozzv1.CreateSessionRequest{Workspace: "/ws"}); err != nil {
+	if _, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"}); err != nil {
 		t.Fatalf("call 1: %v", err)
 	}
-	if _, err := client.CreateSession(ctx, &ozzv1.CreateSessionRequest{Workspace: "/ws"}); err != nil {
+	if _, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"}); err != nil {
 		t.Fatalf("call 2: %v", err)
 	}
-	_, err := client.CreateSession(ctx, &ozzv1.CreateSessionRequest{Workspace: "/ws"})
+	_, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
 	if status.Code(err) != codes.ResourceExhausted {
 		t.Fatalf("call 3 code = %v, want ResourceExhausted", status.Code(err))
 	}
 
 	// After ~1s a token refills and a call recovers.
 	time.Sleep(1100 * time.Millisecond)
-	if _, err := client.CreateSession(ctx, &ozzv1.CreateSessionRequest{Workspace: "/ws"}); err != nil {
+	if _, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"}); err != nil {
 		t.Fatalf("recovery call: %v", err)
 	}
 }
@@ -131,7 +131,7 @@ func TestGRPCRateLimit(t *testing.T) {
 // --- HTTP auth ---------------------------------------------------------------
 
 // secureHTTP mounts the API behind the auth middleware and the health endpoints
-// outside it, mirroring serve() in cmd/ozzd.
+// outside it, mirroring serve() in cmd/mecated.
 func secureHTTP(svc *server.Service, auth *server.Authenticator) http.Handler {
 	mux := http.NewServeMux()
 	server.NewHealthHandler(nil).RegisterHealth(mux)

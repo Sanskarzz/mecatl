@@ -12,24 +12,24 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
-	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
-	"github.com/stacklok/ozzharness/internal/adapter/memfs"
-	"github.com/stacklok/ozzharness/internal/adapter/mockllm"
-	"github.com/stacklok/ozzharness/internal/adapter/permpolicy"
-	"github.com/stacklok/ozzharness/internal/adapter/server"
-	"github.com/stacklok/ozzharness/internal/adapter/store/memstore"
-	"github.com/stacklok/ozzharness/internal/agent"
-	"github.com/stacklok/ozzharness/internal/governance"
-	"github.com/stacklok/ozzharness/internal/tool"
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/memfs"
+	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
+	"github.com/stacklok/mecatl/internal/adapter/server"
+	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
+	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // dialGRPC stands up an in-memory gRPC server backed by svc and returns a
 // connected client plus a cleanup func.
-func dialGRPC(t *testing.T, svc *server.Service) (ozzv1.HarnessServiceClient, func()) {
+func dialGRPC(t *testing.T, svc *server.Service) (mecatlv1.HarnessServiceClient, func()) {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	gs := grpc.NewServer()
-	ozzv1.RegisterHarnessServiceServer(gs, server.NewHarnessServer(svc))
+	mecatlv1.RegisterHarnessServiceServer(gs, server.NewHarnessServer(svc))
 	go func() { _ = gs.Serve(lis) }()
 
 	conn, err := grpc.NewClient("passthrough:///bufnet",
@@ -41,7 +41,7 @@ func dialGRPC(t *testing.T, svc *server.Service) (ozzv1.HarnessServiceClient, fu
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	return ozzv1.NewHarnessServiceClient(conn), func() {
+	return mecatlv1.NewHarnessServiceClient(conn), func() {
 		_ = conn.Close()
 		gs.Stop()
 		_ = lis.Close()
@@ -89,7 +89,7 @@ func TestGRPCConverseFullCycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cs, err := client.CreateSession(ctx, &ozzv1.CreateSessionRequest{Workspace: "/ws"})
+	cs, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -98,8 +98,8 @@ func TestGRPCConverseFullCycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Converse: %v", err)
 	}
-	if err := stream.Send(&ozzv1.ConverseRequest{
-		Kind: &ozzv1.ConverseRequest_Prompt{Prompt: &ozzv1.Prompt{SessionId: cs.GetSessionId(), Text: "look"}},
+	if err := stream.Send(&mecatlv1.ConverseRequest{
+		Kind: &mecatlv1.ConverseRequest_Prompt{Prompt: &mecatlv1.Prompt{SessionId: cs.GetSessionId(), Text: "look"}},
 	}); err != nil {
 		t.Fatalf("Send prompt: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestGRPCConversePermissionApprove(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cs, err := client.CreateSession(ctx, &ozzv1.CreateSessionRequest{Workspace: "/ws"})
+	cs, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -141,13 +141,13 @@ func TestGRPCConversePermissionApprove(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Converse: %v", err)
 	}
-	if err := stream.Send(&ozzv1.ConverseRequest{
-		Kind: &ozzv1.ConverseRequest_Prompt{Prompt: &ozzv1.Prompt{SessionId: cs.GetSessionId(), Text: "go"}},
+	if err := stream.Send(&mecatlv1.ConverseRequest{
+		Kind: &mecatlv1.ConverseRequest_Prompt{Prompt: &mecatlv1.Prompt{SessionId: cs.GetSessionId(), Text: "go"}},
 	}); err != nil {
 		t.Fatalf("Send prompt: %v", err)
 	}
 
-	var events []*ozzv1.Event
+	var events []*mecatlv1.Event
 	var sawAsk bool
 	for {
 		resp, err := stream.Recv()
@@ -161,9 +161,9 @@ func TestGRPCConversePermissionApprove(t *testing.T) {
 		events = append(events, ev)
 		if ev.GetType() == "permission.ask" {
 			sawAsk = true
-			if err := stream.Send(&ozzv1.ConverseRequest{
-				Kind: &ozzv1.ConverseRequest_ResumeApproval{
-					ResumeApproval: &ozzv1.ResumeApproval{AskId: ev.GetAsk().GetAskId(), Allow: true},
+			if err := stream.Send(&mecatlv1.ConverseRequest{
+				Kind: &mecatlv1.ConverseRequest_ResumeApproval{
+					ResumeApproval: &mecatlv1.ResumeApproval{AskId: ev.GetAsk().GetAskId(), Allow: true},
 				},
 			}); err != nil {
 				t.Fatalf("Send approve: %v", err)
@@ -196,7 +196,7 @@ func TestGRPCConverseCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cs, err := client.CreateSession(ctx, &ozzv1.CreateSessionRequest{Workspace: "/ws"})
+	cs, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -204,14 +204,14 @@ func TestGRPCConverseCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Converse: %v", err)
 	}
-	if err := stream.Send(&ozzv1.ConverseRequest{
-		Kind: &ozzv1.ConverseRequest_Prompt{Prompt: &ozzv1.Prompt{SessionId: cs.GetSessionId(), Text: "go"}},
+	if err := stream.Send(&mecatlv1.ConverseRequest{
+		Kind: &mecatlv1.ConverseRequest_Prompt{Prompt: &mecatlv1.Prompt{SessionId: cs.GetSessionId(), Text: "go"}},
 	}); err != nil {
 		t.Fatalf("Send prompt: %v", err)
 	}
 
 	// Wait for the first streamed delta, then cancel.
-	var events []*ozzv1.Event
+	var events []*mecatlv1.Event
 	for {
 		resp, err := stream.Recv()
 		if err != nil {
@@ -222,8 +222,8 @@ func TestGRPCConverseCancel(t *testing.T) {
 			break
 		}
 	}
-	if err := stream.Send(&ozzv1.ConverseRequest{
-		Kind: &ozzv1.ConverseRequest_Cancel{Cancel: &ozzv1.Cancel{}},
+	if err := stream.Send(&mecatlv1.ConverseRequest{
+		Kind: &mecatlv1.ConverseRequest_Cancel{Cancel: &mecatlv1.Cancel{}},
 	}); err != nil {
 		t.Fatalf("Send cancel: %v", err)
 	}
@@ -260,8 +260,8 @@ func TestGRPCConverseFirstFrameMustBePrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Converse: %v", err)
 	}
-	if err := stream.Send(&ozzv1.ConverseRequest{
-		Kind: &ozzv1.ConverseRequest_Cancel{Cancel: &ozzv1.Cancel{}},
+	if err := stream.Send(&mecatlv1.ConverseRequest{
+		Kind: &mecatlv1.ConverseRequest_Cancel{Cancel: &mecatlv1.Cancel{}},
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}

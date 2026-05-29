@@ -14,7 +14,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/test/bufconn"
 
-	"github.com/stacklok/ozzharness/internal/adapter/server"
+	"github.com/stacklok/mecatl/internal/adapter/server"
 )
 
 // TestHTTPHealthEndpoints checks /healthz is always 200 and /readyz reflects the

@@ -1,4 +1,4 @@
-// Package main (ozzdemo) is the ozzharness end-to-end demo driver. Its core,
+// Package main (mecademo) is the mecatl end-to-end demo driver. Its core,
 // RunScenario, drives the real agent.Engine through a scripted session that
 // proves the whole shape of the loop — an auto-allowed tool call, a tool call
 // that requires approval (and is approved), and a final assistant message — and
@@ -12,18 +12,18 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/adapter/hookexec"
-	"github.com/stacklok/ozzharness/internal/adapter/memfs"
-	"github.com/stacklok/ozzharness/internal/adapter/mockllm"
-	"github.com/stacklok/ozzharness/internal/adapter/permpolicy"
-	"github.com/stacklok/ozzharness/internal/adapter/store/memstore"
-	"github.com/stacklok/ozzharness/internal/adapter/tools"
-	"github.com/stacklok/ozzharness/internal/agent"
-	"github.com/stacklok/ozzharness/internal/governance"
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/prompt"
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/adapter/hookexec"
+	"github.com/stacklok/mecatl/internal/adapter/memfs"
+	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
+	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
+	"github.com/stacklok/mecatl/internal/adapter/tools"
+	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/prompt"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // demoWorkspaceRoot is the root the in-memory demo workspace is mounted at.
@@ -33,7 +33,7 @@ const demoWorkspaceRoot = "/workspace"
 const demoFilePath = "greeting.txt"
 
 // demoFileContent is the seeded file body, surfaced through the Read tool result.
-const demoFileContent = "hello from the ozzharness demo workspace\n"
+const demoFileContent = "hello from the mecatl demo workspace\n"
 
 // demoModel is the default model identifier stamped into requests and the
 // prompt env when the caller does not override it (the offline mockllm path).

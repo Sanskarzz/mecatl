@@ -3,7 +3,7 @@ package port
 import (
 	"context"
 
-	"github.com/stacklok/ozzharness/internal/governance"
+	"github.com/stacklok/mecatl/internal/governance"
 )
 
 // HookRunner executes a lifecycle hook for a HookEvent and returns its outcome.

@@ -35,7 +35,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // defaultConnectTimeout bounds the initialize handshake and initial tool
@@ -45,7 +45,7 @@ const defaultConnectTimeout = 30 * time.Second
 // clientName / clientVersion identify this harness to MCP servers in the
 // initialize handshake.
 const (
-	clientName    = "ozzharness"
+	clientName    = "mecatl"
 	clientVersion = "v0"
 )
 

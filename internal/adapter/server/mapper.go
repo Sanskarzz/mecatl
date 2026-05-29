@@ -3,8 +3,8 @@ package server
 import (
 	"math"
 
-	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
-	"github.com/stacklok/ozzharness/internal/session"
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // clampInt32 narrows a Go int (counter/index) to the proto int32 wire type,
@@ -27,8 +27,8 @@ func clampInt32(v int) int32 {
 // across every EventType and submessage. The string type field mirrors
 // session.EventType verbatim; the structured submessages are populated only
 // when the corresponding domain pointer is set.
-func toProto(ev session.Event) *ozzv1.Event {
-	out := &ozzv1.Event{
+func toProto(ev session.Event) *mecatlv1.Event {
+	out := &mecatlv1.Event{
 		Type: string(ev.Type),
 		Seq:  ev.Seq,
 		Turn: clampInt32(ev.Turn),
@@ -53,8 +53,8 @@ func toProto(ev session.Event) *ozzv1.Event {
 }
 
 // toProtoToolCall maps a session.ToolCall to its proto form.
-func toProtoToolCall(c session.ToolCall) *ozzv1.ToolCall {
-	return &ozzv1.ToolCall{
+func toProtoToolCall(c session.ToolCall) *mecatlv1.ToolCall {
+	return &mecatlv1.ToolCall{
 		Id:   string(c.ID),
 		Name: c.Name,
 		Args: string(c.Args),
@@ -62,8 +62,8 @@ func toProtoToolCall(c session.ToolCall) *ozzv1.ToolCall {
 }
 
 // toProtoToolResult maps a session.ToolResult to its proto form.
-func toProtoToolResult(r session.ToolResult) *ozzv1.ToolResult {
-	return &ozzv1.ToolResult{
+func toProtoToolResult(r session.ToolResult) *mecatlv1.ToolResult {
+	return &mecatlv1.ToolResult{
 		CallId:  string(r.CallID),
 		Content: r.Content,
 		IsError: r.IsError,
@@ -71,8 +71,8 @@ func toProtoToolResult(r session.ToolResult) *ozzv1.ToolResult {
 }
 
 // toProtoAsk maps a session.PendingAsk to its proto PermissionAsk form.
-func toProtoAsk(a session.PendingAsk) *ozzv1.PermissionAsk {
-	return &ozzv1.PermissionAsk{
+func toProtoAsk(a session.PendingAsk) *mecatlv1.PermissionAsk {
+	return &mecatlv1.PermissionAsk{
 		AskId:  a.AskID,
 		Tool:   a.Tool,
 		Args:   string(a.Args),
@@ -81,8 +81,8 @@ func toProtoAsk(a session.PendingAsk) *ozzv1.PermissionAsk {
 }
 
 // toProtoResult maps a session.ResultPayload to its proto Result form.
-func toProtoResult(p session.ResultPayload) *ozzv1.Result {
-	return &ozzv1.Result{
+func toProtoResult(p session.ResultPayload) *mecatlv1.Result {
+	return &mecatlv1.Result{
 		Stop:  string(p.Stop),
 		Text:  p.Text,
 		Usage: toProtoUsage(p.Usage),
@@ -91,8 +91,8 @@ func toProtoResult(p session.ResultPayload) *ozzv1.Result {
 }
 
 // toProtoUsage maps a session.Usage to its proto form.
-func toProtoUsage(u session.Usage) *ozzv1.Usage {
-	return &ozzv1.Usage{
+func toProtoUsage(u session.Usage) *mecatlv1.Usage {
+	return &mecatlv1.Usage{
 		InputTokens:      int64(u.InputTokens),
 		OutputTokens:     int64(u.OutputTokens),
 		CacheReadTokens:  int64(u.CacheReadTokens),
@@ -101,8 +101,8 @@ func toProtoUsage(u session.Usage) *ozzv1.Usage {
 }
 
 // toProtoSession maps a session.Session aggregate to its proto snapshot.
-func toProtoSession(s *session.Session) *ozzv1.Session {
-	return &ozzv1.Session{
+func toProtoSession(s *session.Session) *mecatlv1.Session {
+	return &mecatlv1.Session{
 		SessionId:     string(s.ID),
 		State:         string(s.State),
 		Mode:          modeToProto(s.Mode),
@@ -115,8 +115,8 @@ func toProtoSession(s *session.Session) *ozzv1.Session {
 }
 
 // limitsToProto maps session.Limits to the proto Limits message.
-func limitsToProto(l session.Limits) *ozzv1.Limits {
-	return &ozzv1.Limits{
+func limitsToProto(l session.Limits) *mecatlv1.Limits {
+	return &mecatlv1.Limits{
 		MaxTurns:               clampInt32(l.MaxTurns),
 		MaxToolCalls:           clampInt32(l.MaxToolCalls),
 		MaxConsecutiveFailures: clampInt32(l.MaxConsecutiveFailures),
@@ -125,7 +125,7 @@ func limitsToProto(l session.Limits) *ozzv1.Limits {
 
 // limitsFromProto maps the proto Limits message to session.Limits, treating a
 // nil message as the zero (all-disabled) value.
-func limitsFromProto(l *ozzv1.Limits) session.Limits {
+func limitsFromProto(l *mecatlv1.Limits) session.Limits {
 	if l == nil {
 		return session.Limits{}
 	}
@@ -137,28 +137,28 @@ func limitsFromProto(l *ozzv1.Limits) session.Limits {
 }
 
 // modeToProto maps a session.PermissionMode to its proto enum.
-func modeToProto(m session.PermissionMode) ozzv1.PermissionMode {
+func modeToProto(m session.PermissionMode) mecatlv1.PermissionMode {
 	switch m {
 	case session.ModePlan:
-		return ozzv1.PermissionMode_PERMISSION_MODE_PLAN
+		return mecatlv1.PermissionMode_PERMISSION_MODE_PLAN
 	case session.ModeAccept:
-		return ozzv1.PermissionMode_PERMISSION_MODE_ACCEPT_EDITS
+		return mecatlv1.PermissionMode_PERMISSION_MODE_ACCEPT_EDITS
 	case session.ModeDefault:
-		return ozzv1.PermissionMode_PERMISSION_MODE_DEFAULT
+		return mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT
 	default:
-		return ozzv1.PermissionMode_PERMISSION_MODE_DEFAULT
+		return mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT
 	}
 }
 
 // modeFromProto maps a proto enum to a session.PermissionMode, defaulting an
 // unspecified value to ModeDefault.
-func modeFromProto(m ozzv1.PermissionMode) session.PermissionMode {
+func modeFromProto(m mecatlv1.PermissionMode) session.PermissionMode {
 	switch m {
-	case ozzv1.PermissionMode_PERMISSION_MODE_PLAN:
+	case mecatlv1.PermissionMode_PERMISSION_MODE_PLAN:
 		return session.ModePlan
-	case ozzv1.PermissionMode_PERMISSION_MODE_ACCEPT_EDITS:
+	case mecatlv1.PermissionMode_PERMISSION_MODE_ACCEPT_EDITS:
 		return session.ModeAccept
-	case ozzv1.PermissionMode_PERMISSION_MODE_DEFAULT, ozzv1.PermissionMode_PERMISSION_MODE_UNSPECIFIED:
+	case mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT, mecatlv1.PermissionMode_PERMISSION_MODE_UNSPECIFIED:
 		return session.ModeDefault
 	default:
 		return session.ModeDefault

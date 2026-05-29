@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // Compactor compresses a Conversation that has grown past the context-window

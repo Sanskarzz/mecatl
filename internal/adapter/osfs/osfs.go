@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // ErrPathEscape is returned when a session-relative path resolves outside the

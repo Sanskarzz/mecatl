@@ -1,7 +1,7 @@
 # Compiled binaries
 /bin/
-/ozzd
-/ozzdemo
+/mecated
+/mecademo
 *.exe
 
 # Test / coverage output

@@ -1,6 +1,6 @@
 # Twelve Agentic-Harness Patterns — Pluggability Audit
 
-> Audits ozzharness against the 12 patterns catalogued in
+> Audits mecatl against the 12 patterns catalogued in
 > `docs/harnesses/02-twelve-patterns.md`. For each pattern: what it is, its
 > status in the code, whether it sits behind a DDD seam (a port/interface a new
 > adapter can implement) or is hardcoded, and the smallest DDD-correct seam to
@@ -10,7 +10,7 @@
 > Layering rules assumed (from `ARCHITECTURE.md` and verified by import audit):
 > `agent` imports only `session`/`port`/`tool`/`governance`/`prompt`+stdlib;
 > domain owns the interfaces the loop consumes; adapters are wired at
-> `cmd/ozzd`. `governance` imports nothing from `internal` (session-free).
+> `cmd/mecated`. `governance` imports nothing from `internal` (session-free).
 > `FileSystem`/`Workspace` live in `internal/tool` to break a `port↔tool` cycle.
 
 ## Summary table
@@ -238,7 +238,7 @@ guarantee. The child catalog excludes `Task` itself (no recursion) and is
 read-only (so `TaskTool.ReadOnly()==true` is sound for read-parallel dispatch).
 
 **Pluggable?** Yes — exemplary. The subagent is constructed at the composition
-root (`cmd/ozzd:buildTaskTool`) by injecting a child `*Engine`; the parent
+root (`cmd/mecated:buildTaskTool`) by injecting a child `*Engine`; the parent
 `Engine` is never mutated. Options (`WithChildLimits`, `WithChildMode`,
 `WithChildSessionPrefix`, `WithSubagentStopHook`) make the child configurable
 without changing the type. A forked-context subagent (inheriting the parent
@@ -312,7 +312,7 @@ skills) on demand, surfacing only metadata until invoked, to protect attention.
 
 **Status:** Partial. The default kit is small and correct (Read/Edit/Write/Grep/
 Glob/WebFetch/Bash/Task). But **all** tools — including MCP tools — are
-**eager-registered** into one `Catalog` at startup (`cmd/ozzd:buildCatalog`; MCP
+**eager-registered** into one `Catalog` at startup (`cmd/mecated:buildCatalog`; MCP
 via `registerMCP`), and the **full** spec of every available tool is rendered
 into the (cache-stable) system prompt every turn (`prompt.toolInventory`,
 `buildRequest` → `Catalog.Specs(mode)`). There is no metadata-only tier, no lazy
@@ -369,7 +369,7 @@ injection, untrusted infra).
 `Evaluator` (`governance/evaluator.go`) does deny→ask→allow across `Scope`
 precedence, plan-mode gating, **compound-Bash splitting** (every sub-command must
 pass; substitution/grouping floors at Ask), and glob matching. The default
-posture (`cmd/ozzd:defaultRules`) allows read-only tools and asks on
+posture (`cmd/mecated:defaultRules`) allows read-only tools and asks on
 Edit/Write/Bash, with unmatched calls defaulting to Ask (safe). Layer 2 (the
 model classifier) does not exist.
 

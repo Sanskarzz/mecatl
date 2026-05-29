@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/adapter/fsconformance"
-	"github.com/stacklok/ozzharness/internal/adapter/osfs"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/adapter/fsconformance"
+	"github.com/stacklok/mecatl/internal/adapter/osfs"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // TestConformance runs the shared Workspace conformance table against osfs.

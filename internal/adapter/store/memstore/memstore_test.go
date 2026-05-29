@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/adapter/store/memstore"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 func driven(t *testing.T) *session.Session {

@@ -43,7 +43,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // childRoot is the constructor the forker uses to build a child tool.Workspace
@@ -133,7 +133,7 @@ func (f *Forker) Fork(ctx context.Context, base tool.Workspace, label string) (t
 // folding a sanitized label in for observability.
 func (f *Forker) childDir(label string) (string, error) {
 	n := f.seq.Add(1)
-	pattern := fmt.Sprintf("ozzfork-%s-%d-*", sanitizeLabel(label), n)
+	pattern := fmt.Sprintf("mecatlfork-%s-%d-*", sanitizeLabel(label), n)
 	dir, err := os.MkdirTemp(f.tmpBase, pattern)
 	if err != nil {
 		return "", fmt.Errorf("forker: create child dir: %w", err)

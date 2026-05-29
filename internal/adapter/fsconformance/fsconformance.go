@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // Run executes the shared Workspace conformance table against the workspace

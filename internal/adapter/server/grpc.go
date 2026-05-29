@@ -8,16 +8,16 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
-	"github.com/stacklok/ozzharness/internal/agent"
-	"github.com/stacklok/ozzharness/internal/session"
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
-// HarnessServer implements the generated ozzv1.HarnessServiceServer over the
+// HarnessServer implements the generated mecatlv1.HarnessServiceServer over the
 // shared Service. It is the primary (gRPC) surface; the HTTP/SSE adapter wraps
 // the same Service.
 type HarnessServer struct {
-	ozzv1.UnimplementedHarnessServiceServer
+	mecatlv1.UnimplementedHarnessServiceServer
 	svc *Service
 }
 
@@ -27,10 +27,10 @@ func NewHarnessServer(svc *Service) *HarnessServer {
 }
 
 // compile-time assertion that HarnessServer satisfies the generated interface.
-var _ ozzv1.HarnessServiceServer = (*HarnessServer)(nil)
+var _ mecatlv1.HarnessServiceServer = (*HarnessServer)(nil)
 
 // CreateSession allocates a new session and returns its id.
-func (h *HarnessServer) CreateSession(ctx context.Context, req *ozzv1.CreateSessionRequest) (*ozzv1.CreateSessionResponse, error) {
+func (h *HarnessServer) CreateSession(ctx context.Context, req *mecatlv1.CreateSessionRequest) (*mecatlv1.CreateSessionResponse, error) {
 	if req.GetWorkspace() == "" {
 		return nil, status.Error(codes.InvalidArgument, "workspace is required")
 	}
@@ -38,11 +38,11 @@ func (h *HarnessServer) CreateSession(ctx context.Context, req *ozzv1.CreateSess
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	return &ozzv1.CreateSessionResponse{SessionId: string(sess.ID)}, nil
+	return &mecatlv1.CreateSessionResponse{SessionId: string(sess.ID)}, nil
 }
 
 // GetSession returns a snapshot of the requested session.
-func (h *HarnessServer) GetSession(ctx context.Context, req *ozzv1.GetSessionRequest) (*ozzv1.GetSessionResponse, error) {
+func (h *HarnessServer) GetSession(ctx context.Context, req *mecatlv1.GetSessionRequest) (*mecatlv1.GetSessionResponse, error) {
 	if req.GetSessionId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "session_id is required")
 	}
@@ -50,14 +50,14 @@ func (h *HarnessServer) GetSession(ctx context.Context, req *ozzv1.GetSessionReq
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	return &ozzv1.GetSessionResponse{Session: toProtoSession(sess)}, nil
+	return &mecatlv1.GetSessionResponse{Session: toProtoSession(sess)}, nil
 }
 
 // Converse drives one run over a bidi stream. The first frame MUST be a Prompt;
 // the server then relays the run's Events while concurrently reading
 // ResumeApproval / Cancel control frames, until the events channel closes (the
 // terminal result was delivered) or the stream context is cancelled.
-func (h *HarnessServer) Converse(stream ozzv1.HarnessService_ConverseServer) error {
+func (h *HarnessServer) Converse(stream mecatlv1.HarnessService_ConverseServer) error {
 	ctx := stream.Context()
 
 	first, err := stream.Recv()
@@ -94,7 +94,7 @@ func (h *HarnessServer) Converse(stream ozzv1.HarnessService_ConverseServer) err
 		if ev.Type == session.EvPermissionAsk {
 			h.svc.Persist(ctx, id)
 		}
-		if err := stream.Send(&ozzv1.ConverseResponse{Event: toProto(ev)}); err != nil {
+		if err := stream.Send(&mecatlv1.ConverseResponse{Event: toProto(ev)}); err != nil {
 			run.Cancel()
 			return err
 		}
@@ -104,7 +104,7 @@ func (h *HarnessServer) Converse(stream ozzv1.HarnessService_ConverseServer) err
 
 // readControl reads ResumeApproval / Cancel frames until the client closes its
 // send half or the context is cancelled, dispatching each onto run.
-func (*HarnessServer) readControl(ctx context.Context, stream ozzv1.HarnessService_ConverseServer, run *agent.Run) {
+func (*HarnessServer) readControl(ctx context.Context, stream mecatlv1.HarnessService_ConverseServer, run *agent.Run) {
 	for {
 		if ctx.Err() != nil {
 			return
@@ -116,11 +116,11 @@ func (*HarnessServer) readControl(ctx context.Context, stream ozzv1.HarnessServi
 			return
 		}
 		switch k := frame.GetKind().(type) {
-		case *ozzv1.ConverseRequest_ResumeApproval:
+		case *mecatlv1.ConverseRequest_ResumeApproval:
 			if k.ResumeApproval != nil {
 				run.Approve(k.ResumeApproval.GetAskId(), k.ResumeApproval.GetAllow())
 			}
-		case *ozzv1.ConverseRequest_Cancel:
+		case *mecatlv1.ConverseRequest_Cancel:
 			run.Cancel()
 		default:
 			// A second Prompt or an unknown frame is ignored: the run is

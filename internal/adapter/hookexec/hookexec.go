@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stacklok/ozzharness/internal/governance"
+	"github.com/stacklok/mecatl/internal/governance"
 )
 
 // DefaultTimeout bounds a single hook invocation when no timeout is supplied.

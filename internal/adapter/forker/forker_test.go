@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/stacklok/ozzharness/internal/adapter/forker"
-	"github.com/stacklok/ozzharness/internal/adapter/osfs"
-	"github.com/stacklok/ozzharness/internal/tool"
+	"github.com/stacklok/mecatl/internal/adapter/forker"
+	"github.com/stacklok/mecatl/internal/adapter/osfs"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // osfsWorkspace adapts osfs.NewWorkspace to the forker's constructor signature.

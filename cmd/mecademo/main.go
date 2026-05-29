@@ -7,9 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/stacklok/ozzharness/internal/adapter/openai"
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/adapter/openai"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 func main() {
@@ -20,17 +20,17 @@ func main() {
 
 	provider, label, err := selectProvider(*useOpenAI, *model, *baseURL)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ozzdemo:", err)
+		fmt.Fprintln(os.Stderr, "mecademo:", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("=== ozzharness demo (%s) ===\n", label)
+	fmt.Printf("=== mecatl demo (%s) ===\n", label)
 	fmt.Println("Driving a real agent.Engine: auto-allowed tool call -> permission ask + approval -> final result.")
 	fmt.Println()
 
 	events, err := RunScenario(context.Background(), provider, *model)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ozzdemo:", err)
+		fmt.Fprintln(os.Stderr, "mecademo:", err)
 		os.Exit(1)
 	}
 

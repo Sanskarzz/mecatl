@@ -1,4 +1,4 @@
-# CI for ozzharness — runs on every push to main and every pull_request.
+# CI for mecatl — runs on every push to main and every pull_request.
 #
 # Deliberately uses `pull_request` (NOT `pull_request_target`): these jobs check
 # out and execute untrusted PR code, so they must run WITHOUT access to repo

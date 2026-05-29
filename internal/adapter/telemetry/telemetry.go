@@ -21,8 +21,8 @@
 package telemetry
 
 import (
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // fanOut is a port.EventSink that relays each Event to every wrapped sink in

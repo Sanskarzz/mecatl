@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stacklok/ozzharness/internal/adapter/memfs"
-	"github.com/stacklok/ozzharness/internal/prompt"
+	"github.com/stacklok/mecatl/internal/adapter/memfs"
+	"github.com/stacklok/mecatl/internal/prompt"
 )
 
 // TestRootAssemblerMatchesDiscoverInstructions verifies the default assembler

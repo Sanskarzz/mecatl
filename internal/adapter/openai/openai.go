@@ -21,7 +21,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
 
-	"github.com/stacklok/ozzharness/internal/port"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // Provider is a port.LLMProvider backed by the OpenAI Responses API. Construct

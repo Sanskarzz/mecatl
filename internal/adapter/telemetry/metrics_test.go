@@ -11,7 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 func TestMetricsEventsTotal(t *testing.T) {
@@ -105,7 +105,7 @@ func TestMetricsToolCall(t *testing.T) {
 	if got := testutil.ToFloat64(m.toolCalls.WithLabelValues("bash", "true")); got != 1 {
 		t.Errorf("tool_calls_total{bash,true} = %v, want 1", got)
 	}
-	if n := testutil.CollectAndCount(m.toolDuration, "ozz_tool_duration_seconds"); n != 1 {
+	if n := testutil.CollectAndCount(m.toolDuration, "mecatl_tool_duration_seconds"); n != 1 {
 		t.Errorf("tool_duration series count = %d, want 1 (one tool)", n)
 	}
 }
@@ -131,7 +131,7 @@ func TestMetricsHandlerServesMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	for _, name := range []string{"ozz_events_total", "ozz_active_runs"} {
+	for _, name := range []string{"mecatl_events_total", "mecatl_active_runs"} {
 		if !strings.Contains(string(body), name) {
 			t.Errorf("metrics body missing %q", name)
 		}

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/stacklok/ozzharness/internal/session"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // HTTPHandler is the HTTP/SSE adapter over the shared Service. It serves the

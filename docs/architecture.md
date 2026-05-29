@@ -1,4 +1,4 @@
-# ozzharness — Architecture
+# mecatl — Architecture
 
 > Reader-facing architecture guide. This describes the **code as it exists** in
 > `internal/`, `cmd/`, and `contracts/`. Where the design notes in
@@ -7,7 +7,7 @@
 
 ## 1. What it is
 
-ozzharness is a **headless agentic coding harness**: a service (and library)
+mecatl is a **headless agentic coding harness**: a service (and library)
 that runs the agent loop — call the model, stream its output, execute coding
 tools, enforce permissions and hooks, and emit a single typed event stream.
 There is no TUI. Clients drive it over **gRPC** (a bidirectional `Converse`
@@ -40,8 +40,8 @@ streaming-HTTP client and the `repomap` tool). Each is detailed below.
 ```mermaid
 flowchart LR
   subgraph CMD["composition root — cmd/"]
-    ozzd["cmd/ozzd/main.go"]
-    demo["cmd/ozzdemo"]
+    mecated["cmd/mecated/main.go"]
+    demo["cmd/mecademo"]
   end
 
   subgraph DRIVING["driving adapters — internal/adapter/server"]
@@ -80,7 +80,7 @@ flowchart LR
     ext["mcp (streaming-HTTP) · repomap\nmemory · dream · forker · tokenizer"]
   end
 
-  ozzd --> svc --> engine
+  mecated --> svc --> engine
   demo --> engine
   grpc --> svc
   http --> svc
@@ -98,8 +98,8 @@ flowchart LR
   tools -.implements.-> tl
   fs -.implements.-> tl
   ext -.implements.-> tl
-  ozzd -. wires .-> DRIVEN
-  ozzd -. wires .-> DECOR
+  mecated -. wires .-> DRIVEN
+  mecated -. wires .-> DECOR
 ```
 
 **Dependency direction is inward only.** The allowed-imports rule, stated by the
@@ -484,7 +484,7 @@ Read-only-child invariants, enforced by construction and defended at runtime:
 - The composition root wires `childEngine` with a **read-only explorer catalog
   (Read, Grep, Glob only)** that **never includes `Task`** — so a subagent
   cannot recurse — and an **allow-all** policy so the child never prompts a
-  human (`cmd/ozzd/main.go`: `buildTaskTool`).
+  human (`cmd/mecated/main.go`: `buildTaskTool`).
 - `TaskTool.ReadOnly()` returns `true`, letting the parent run `Task`
   concurrently with other read-only tools. Its godoc states the invariant
   explicitly: this is safe only while the child catalog stays read-only.
@@ -534,10 +534,10 @@ type crosses the boundary. The fake `mockllm.Provider` (`adapter/mockllm`,
 
 **Compatible endpoints**: `WithBaseURL(url)` overrides the host (vLLM, LiteLLM,
 a local proxy); the SDK appends `/responses`. `WithAPIKey` and
-`WithRequestOption` round out the options. `cmd/ozzd` plumbs
+`WithRequestOption` round out the options. `cmd/mecated` plumbs
 `--openai-base-url` through to it.
 
-## 10. The API surface (`internal/adapter/server`, `contracts/proto/ozz/v1/harness.proto`)
+## 10. The API surface (`internal/adapter/server`, `contracts/proto/mecatl/v1/harness.proto`)
 
 One `Service` (`service.go`) backs two surfaces, both relaying the same domain
 `session.Event` mapped to one proto `Event` by `toProto` (`mapper.go`). The
@@ -590,7 +590,7 @@ error.
   exposes Prometheus metrics for mounting at `/metrics`; `telemetry.NewSink` fans
   one Engine `EventSink` out to several sinks; OTel spans model the run/turn/tool
   hierarchy; and `telemetry.Setup` builds and installs an **OTLP** TracerProvider
-  (gRPC or HTTP transport), wired in `ozzd` via `--otlp-endpoint` /
+  (gRPC or HTTP transport), wired in `mecated` via `--otlp-endpoint` /
   `--otlp-protocol` / `--otlp-insecure` (a no-op when the endpoint is empty).
 - **SessionStore** — `memstore` (default, in-memory) and `jsonlstore`
   (append-only JSONL replay log: `<dir>/<id>.session.jsonl` snapshots +
@@ -605,7 +605,7 @@ error.
 The `port.LLMProvider` seam is wrapped by a **decorator**,
 `llmresilience.Wrap(inner, Config) port.LLMProvider`, so the loop is unchanged.
 It adds retry with exponential backoff and a circuit breaker, configured in
-`ozzd` via `--llm-max-attempts` / `--llm-per-attempt-timeout` /
+`mecated` via `--llm-max-attempts` / `--llm-per-attempt-timeout` /
 `--llm-breaker-threshold` / `--llm-breaker-cooldown`.
 
 Its load-bearing invariant is **no replay after the first chunk**: retries happen
@@ -684,7 +684,7 @@ remote tool can never collide with or shadow a built-in.
 ranks files by personalized PageRank** over the symbol-reference graph, producing
 a compact "where the important code lives" map. It is multi-language and needs
 **no CGO** (tree-sitter runs as pure-Go WASM via wazero), so it does not affect
-the static default build; it is wired in `ozzd` via `--enable-repomap`.
+the static default build; it is wired in `mecated` via `--enable-repomap`.
 
 **Progressive tool disclosure** (pattern 9) — a tool may optionally implement
 `tool.Disclosable`; the built-in `tool.Search` tool (catalog name `ToolSearch`,
@@ -723,9 +723,9 @@ and resist features before the loop, tools, permissions, hooks, and cache all wo
 ## 17. Deployment & server hardening
 
 The server (`internal/adapter/server`) is hardened for off-loopback operation,
-and `cmd/ozzd` wires the knobs:
+and `cmd/mecated` wires the knobs:
 
-- **Authentication** — optional bearer token (`--auth-token` / `OZZ_AUTH_TOKEN`,
+- **Authentication** — optional bearer token (`--auth-token` / `MECATL_AUTH_TOKEN`,
   constant-time compared) enforced by a gRPC interceptor + HTTP middleware
   (`server/authn.go`); optional **TLS / mTLS** (`--tls-cert` / `--tls-key` /
   `--client-ca`). The server still **warns loudly** if it binds a non-loopback

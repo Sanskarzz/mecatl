@@ -1,11 +1,11 @@
 ---
 name: ref-bash-permission-gate
-description: How ozzharness's permission gate, compound-command splitting, and wrapper canonicalization work — and their known evasion gaps.
+description: How mecatl's permission gate, compound-command splitting, and wrapper canonicalization work — and their known evasion gaps.
 metadata:
   type: reference
 ---
 
-The permission gate is the v1 security boundary for Bash (see [[project-ozzharness]]).
+The permission gate is the v1 security boundary for Bash (see [[project-mecatl]]).
 
 **Flow (correct):** `internal/agent/dispatch.go` calls `authorize()` →
 `preHook()` → `execute()` in that order, for BOTH the serial mutating path
@@ -24,15 +24,19 @@ across compound subcommands.
    e.g. `echo $(rm -rf x)` evaluates the gate against `echo $(rm -rf x)` as one
    token, never against `rm`. ReadOnlyBash inherits the same gap (plan-mode
    read-only classifier can be fooled by `cat $(rm x)`).
-2. The DEFAULT ruleset (`cmd/ozzd/main.go defaultRules`) makes all of Bash =
+2. The DEFAULT ruleset (`cmd/mecated/main.go defaultRules`) makes all of Bash =
    Ask with no command-specific deny rules, so gap #1 only escalates once an
    operator adds a pattern-based Bash deny (the documented use case). Severity
    is therefore conditional on configuration.
-3. `cleanPath` (osfs.go) resolves symlinks only on the ROOT at construction
-   (`resolveRoot`/`EvalSymlinks`), not on the joined target path. A symlink
-   inside the workspace pointing outside it is followed on Read/Write (classic
-   TOCTOU symlink escape). The `..`/absolute-path lexical checks are sound; the
-   symlink case is the gap. v1 has no OS sandbox to backstop this.
+3. ~~`cleanPath` (osfs.go) symlink-escape TOCTOU~~ CLOSED as of the
+   da3dd2b..HEAD refactor. osfs.FileSystem now does all file ops through an
+   `*os.Root` (Go 1.24+) opened on the resolved root: Read/Write/Stat/Glob/
+   fingerprint route through it, and Glob/walkAll skip symlinks. os.Root refuses
+   both `..` and symlink traversal leaving the root. The model can still create a
+   symlink via Bash but it can no longer be followed out of root. The
+   CommandRunner was extracted to its own type but keeps `cmd.Dir = root` — cwd
+   rooting preserved (NB: a shell command can still `cat /etc/passwd` by absolute
+   path; os.Root only guards the FileSystem tool seam, not arbitrary shell).
 
 **Where the sandbox seam should later wrap:** `Workspace.RunCommand`
 (osfs.go:303) and the file ops — that's the process-trust boundary the v3

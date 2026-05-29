@@ -1,1 +1,1 @@
-- [Codebase conventions](conventions.md) — ozzharness DRY stance, generated dirs, deliberately-kept-separate pairs
+- [Codebase conventions](conventions.md) — mecatl DRY stance, generated dirs, deliberately-kept-separate pairs

@@ -8,10 +8,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
-	"github.com/stacklok/ozzharness/internal/port"
-	"github.com/stacklok/ozzharness/internal/session"
-	"github.com/stacklok/ozzharness/internal/tool"
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // scriptTool is a minimal Tool for the server tests: it records whether it ran
@@ -53,9 +53,9 @@ func blockingChunks() []port.Chunk {
 }
 
 // recvAll drains a Converse server stream until EOF.
-func recvAll(t *testing.T, stream ozzv1.HarnessService_ConverseClient) []*ozzv1.Event {
+func recvAll(t *testing.T, stream mecatlv1.HarnessService_ConverseClient) []*mecatlv1.Event {
 	t.Helper()
-	var out []*ozzv1.Event
+	var out []*mecatlv1.Event
 	for {
 		resp, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
@@ -69,7 +69,7 @@ func recvAll(t *testing.T, stream ozzv1.HarnessService_ConverseClient) []*ozzv1.
 }
 
 // hasType reports whether any event has the given type string.
-func hasType(evs []*ozzv1.Event, ty string) bool {
+func hasType(evs []*mecatlv1.Event, ty string) bool {
 	for _, e := range evs {
 		if e.GetType() == ty {
 			return true
@@ -79,7 +79,7 @@ func hasType(evs []*ozzv1.Event, ty string) bool {
 }
 
 // typesOf returns the type strings of the events, for failure messages.
-func typesOf(evs []*ozzv1.Event) []string {
+func typesOf(evs []*mecatlv1.Event) []string {
 	out := make([]string, len(evs))
 	for i, e := range evs {
 		out[i] = e.GetType()
@@ -88,7 +88,7 @@ func typesOf(evs []*ozzv1.Event) []string {
 }
 
 // lastResult returns the Result of the final result event, failing if none.
-func lastResult(t *testing.T, evs []*ozzv1.Event) *ozzv1.Result {
+func lastResult(t *testing.T, evs []*mecatlv1.Event) *mecatlv1.Result {
 	t.Helper()
 	for i := len(evs) - 1; i >= 0; i-- {
 		if evs[i].GetType() == "result" {

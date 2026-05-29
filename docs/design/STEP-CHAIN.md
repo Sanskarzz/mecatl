@@ -1,4 +1,4 @@
-# ozzharness — Implementation Step-Chain (v1)
+# mecatl — Implementation Step-Chain (v1)
 
 > Companion to `ARCHITECTURE.md`. Work packages (WPs) sized for one expert engineer
 > each. The sequencing rule (doc 08 discipline): **freeze the shared contracts first**,
@@ -65,7 +65,7 @@ the *implementations* — only on these interfaces.
                   └───────────────┬─────────────────┘
                                   ▼
                        ┌────────────────────────┐
-                       │ WP11  ozzd + ozzdemo    │   (composition root + e2e demo)
+                       │ WP11  mecated + mecademo    │   (composition root + e2e demo)
                        └────────────────────────┘
 ```
 
@@ -192,7 +192,7 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
 - **Done:** gauntlet #7 passes.
 
 ### WP10 — API: proto + connect-go server + SSE relay  *(after WP8)*
-- **Goal:** `api/proto/ozz/v1/ozz.proto`, generated `api/gen`, and the connect-go server
+- **Goal:** `api/proto/mecatl/v1/mecatl.proto`, generated `api/gen`, and the connect-go server
   adapter implementing `Harness`: CreateSession/SendPrompt(stream)/Approve/Cancel/
   GetSession. Relay loop `Event`s to the gRPC server-stream and to SSE for HTTP clients.
 - **Owns:** `api/`, `internal/adapter/server/`.
@@ -202,16 +202,16 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
   HTTP/JSON + SSE round-trip via `connect`'s test client.
 - **Done:** a unit test approves a permission prompt over the API and sees the loop resume.
 
-### WP11 — ozzd + ozzdemo (composition root + e2e demo)
-- **Goal:** `cmd/ozzd` wires concrete adapters to ports (the only place this happens).
-  `cmd/ozzdemo` drives a full session — proving the loop, a tool call, a permission ask
+### WP11 — mecated + mecademo (composition root + e2e demo)
+- **Goal:** `cmd/mecated` wires concrete adapters to ports (the only place this happens).
+  `cmd/mecademo` drives a full session — proving the loop, a tool call, a permission ask
   +approval, and a final result — against the **fake provider by default**, real OpenAI
   with `--openai`/`OPENAI_API_KEY`.
-- **Owns:** `cmd/ozzd/`, `cmd/ozzdemo/`.
+- **Owns:** `cmd/mecated/`, `cmd/mecademo/`.
 - **Honors:** imports everything; this is the composition root.
-- **Tests:** an e2e test runs `ozzdemo` against mockllm and asserts the printed event
+- **Tests:** an e2e test runs `mecademo` against mockllm and asserts the printed event
   sequence contains turn.start, tool.call, tool.result, permission.ask, result=success.
-- **Done:** `go run ./cmd/ozzdemo` prints a full streamed session offline; with `--openai`
+- **Done:** `go run ./cmd/mecademo` prints a full streamed session offline; with `--openai`
   it runs against the live Responses API; all 10 gauntlet items have a passing test
   somewhere in the tree.
 
