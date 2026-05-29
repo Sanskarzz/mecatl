@@ -46,6 +46,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/adapter/repomap"
 	"github.com/stacklok/mecatl/internal/adapter/server"
+	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
@@ -151,6 +152,10 @@ type config struct {
 
 	// Memory: per-project memory store directory (empty disables memory tools).
 	memoryDir string
+
+	// Skills: directory of progressive-disclosure skill units laid out as
+	// <dir>/<name>/SKILL.md (empty disables the Skill tool).
+	skillsDir string
 
 	// Memory consolidation (dream): background distillation interval. 0 disables.
 	// Only meaningful when memoryDir is set; a positive value with an empty
@@ -323,6 +328,8 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "per-project memory store directory (empty disables the Remember/Recall tools)")
 	fs.DurationVar(&cfg.memoryConsolidateInterval, "memory-consolidate-interval", 0, "interval for background memory consolidation (dream); 0 disables. Only meaningful with --memory-dir")
+
+	fs.StringVar(&cfg.skillsDir, "skills-dir", "", "directory to discover progressive-disclosure skills from, laid out as <name>/SKILL.md (conventional: "+skills.DefaultDir+"); empty disables the Skill tool")
 
 	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "directory of slash-command templates (<name>.md); setting it enables command expansion. Empty + --enable-commands uses the defaults (.mecatl/commands, .claude/commands)")
 	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.mecatl/commands, .claude/commands) when --commands-dir is empty")
@@ -579,6 +586,33 @@ func buildCatalog(ctx context.Context, cfg config, provider port.LLMProvider, ho
 			slog.Warn("--memory-consolidate-interval is a no-op without --memory-dir (memory is disabled)",
 				"interval", cfg.memoryConsolidateInterval)
 		}
+	}
+
+	// Skills (progressive-disclosure instruction units): opt-in, registered only
+	// when --skills-dir is set. A single Skill tool is added whose description
+	// enumerates the discovered skills' metadata (always in context); activating a
+	// skill returns its full body. Discovery is forgiving: a malformed or
+	// frontmatter-less SKILL.md is skipped and logged, not fatal. When zero valid
+	// skills are found, NO tool is registered (nothing worth advertising).
+	if cfg.skillsDir != "" {
+		discovered, skips, err := skills.Register(cat, cfg.skillsDir)
+		for _, s := range skips {
+			slog.Warn("skill skipped", "path", s.Path, "reason", s.Reason)
+		}
+		switch {
+		case err != nil:
+			slog.Warn("registering skills failed; Skill tool disabled", "dir", cfg.skillsDir, "err", err)
+		case len(discovered) == 0:
+			slog.Info("skills DISABLED (no valid SKILL.md found)", "dir", cfg.skillsDir)
+		default:
+			names := make([]string, 0, len(discovered))
+			for _, s := range discovered {
+				names = append(names, s.Name)
+			}
+			slog.Info("Skill tool ENABLED", "dir", cfg.skillsDir, "count", len(discovered), "skills", strings.Join(names, ","))
+		}
+	} else {
+		slog.Info("skills DISABLED (--skills-dir empty)")
 	}
 
 	// Repo-map tool (Aider-style ranked codebase overview). It parses source with

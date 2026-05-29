@@ -146,6 +146,7 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--openai-base-url` | `""` | override the OpenAI API base URL (compatible endpoints) |
 | `--mock` | `false` | use a canned offline mock provider (no network; smoke tests only) |
 | `--store-dir` | `""` | directory for the JSONL session store (empty → in-memory) |
+| `--skills-dir` | `""` | directory to discover progressive-disclosure skills from, laid out as `<name>/SKILL.md` (conventional: `.mecatl/skills`); empty disables the `Skill` tool. **See the skills trust note below.** |
 
 ### Environment
 
@@ -177,6 +178,21 @@ If you bind a **non-loopback** address you get a prominent warning instead:
 ```
 level=WARN msg="API bound to a NON-loopback address: the mecated API is UNAUTHENTICATED and exposes command/file execution; do not do this without an external trust boundary (auth/mTLS is future work)" flag=http-addr addr=0.0.0.0:8081
 ```
+
+### The skills directory trust note
+
+`--skills-dir` is an **operator-trust boundary**, the same trust class as the
+`AGENTS.md` / `CLAUDE.md` instruction files. Every discovered skill's one-line
+description is injected into the model's context on **every** request (it lives in
+the `Skill` tool spec), and a skill's full body flows into context the moment the
+model **activates** it. Both are model-steering instructions, not sandboxed data:
+a malicious or careless skill can redirect the agent just as a tampered
+`CLAUDE.md` could. Point `--skills-dir` only at directories you control and trust
+(the conventional in-repo `.mecatl/skills`), and treat third-party skills as code
+to review — read the `SKILL.md` before adding it, exactly as you would a CI
+script. Skills are **opt-in**: with no `--skills-dir` the `Skill` tool is never
+registered and nothing is read. (An OS-level sandbox around tool execution remains
+future work — see the deferral note in the architecture doc.)
 
 ### Graceful shutdown
 
@@ -328,6 +344,25 @@ func main() {
 
 `GetSession` returns a snapshot (`session_id`, `state`, `mode`, `workspace`,
 `limits`, `turns`, `tool_calls`, `created_at_unix`).
+
+### The terminal UI (`mecatui`)
+
+`mecatui` is an optional, flashy terminal UI that drives a running `mecated` over
+this same gRPC `Converse` stream — a thin client, not part of the server. After
+`task build` it lands at `bin/mecatui`. Point it at a server and a workspace:
+
+```sh
+bin/mecated --mock &                                   # or a real provider
+bin/mecatui --server 127.0.0.1:8080 --workspace "$PWD"
+```
+
+It streams the conversation (glamour markdown for assistant text, themed cards
+for tool I/O), shows a thinking spinner and a usage footer, and pops an inline
+modal for permission asks that you approve/deny without leaving the stream. It is
+themeable (Aztec default, plus `mono`/`solar`, plus drop-in JSON themes) and
+respects the same trust model: it refuses to send `--auth-token` in cleartext to
+a non-loopback server (use `--tls`). Full flag, key, and theming reference is in
+**`docs/tui.md`**.
 
 ---
 

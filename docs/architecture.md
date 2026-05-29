@@ -42,6 +42,7 @@ flowchart LR
   subgraph CMD["composition root — cmd/"]
     mecated["cmd/mecated/main.go"]
     demo["cmd/mecademo"]
+    tui["cmd/mecatui (gRPC client TUI)"]
   end
 
   subgraph DRIVING["driving adapters — internal/adapter/server"]
@@ -82,6 +83,7 @@ flowchart LR
 
   mecated --> svc --> engine
   demo --> engine
+  tui -. "gRPC Converse (client)" .-> grpc
   grpc --> svc
   http --> svc
   engine --> PORTS
@@ -113,6 +115,19 @@ per-package `doc.go` files and honoured by the code:
 | `adapter/*` | domain + `port` + the one external lib it adapts. Never `agent`. |
 | `contracts/gen` | generated; protobuf + gRPC runtime. |
 | `cmd/*` | everything — this is the only place concrete adapters meet ports. |
+| `cmd/mecatui/{client,ui,theme}` | a gRPC **client** of mecated. `contracts/gen` + grpc appear only in `client` (and the `cmd/mecatui` composition root); `ui` and `theme` import neither and **never** any `internal/...` package. |
+
+**mecatui — the terminal UI (`cmd/mecatui`).** A separate, optional gRPC *client*
+of a running `mecated`; it is not part of the server build. It dials the
+`HarnessService`, creates a session, opens the bidi `Converse` stream, and
+renders the streamed `Event` envelopes (glamour markdown for assistant text,
+themed lipgloss cards for user prompts and tool I/O), resolving permission asks
+inline by sending `ResumeApproval` on the same stream. It renders **purely from
+proto `Event`s** and is bound by the same inward-only layering rule: the
+`contracts/gen` + grpc surface lives only in `cmd/mecatui/client` and the
+`cmd/mecatui` main; the `ui` (Bubble Tea model/update/view) and `theme` (pure
+styling) packages import no `internal/...` package and no proto directly. Usage
+and theming are documented in `docs/tui.md`.
 
 Two deliberate cycle-breaks worth noting, documented in code:
 - `port` imports `tool` and `prompt` (because `LLMRequest` carries
@@ -692,6 +707,32 @@ the static default build; it is wired in `mecated` via `--enable-repomap`.
 tool that does not implement `Disclosable` is always listed, so this is opt-in and
 backwards-compatible (gated by the `ProgressiveTools` flag on the Engine `Deps`).
 
+**Skills** (`internal/adapter/skills`) — pattern 9 applied to *instructions*
+instead of tool schemas. A skill is a progressive-disclosure instruction unit: a
+`SKILL.md` file with YAML frontmatter (`name` + `description`) and a markdown
+body, laid out as `<skills-dir>/<name>/SKILL.md` (matching the Agent Skills
+ecosystem; see the format references under `docs/examples/skills/`).
+`skills.Discover` scans the directory and parses each file into a pure
+`skills.Skill` value object; discovery is forgiving — a malformed or
+frontmatter-less file is **skipped and reported** (`skills.SkipError`), never
+fatal, and a kept skill whose **always-in-context description** exceeds a cap
+(`maxDescriptionBytes`) is rune-safe truncated with a warning (so one oversized
+description cannot bloat every request and break the byte-stable prompt prefix);
+an oversized body is flagged too (it is truncated on activation). A single
+read-only `Skill` tool (`skills.NewTool`, catalog name `Skill`,
+`ReadOnly()==true`) exposes them: its `Spec().Description` **enumerates every
+discovered skill's name + one-line description** — the cheap, always-in-context,
+cache-stable metadata layer — while `Execute({name})` returns that skill's full
+**body** only when the model activates it (the load-on-activation layer). Because
+the tool is read-only it is also available in plan mode. It is **opt-in**:
+`mecated` wires it behind `--skills-dir`; discovery runs ONLY when that flag is
+set (there is no applied default), and `.mecatl/skills` (`skills.DefaultDir`) is
+the *conventional* directory to point it at. The tool is registered **only when at
+least one valid skill is discovered** — an empty inventory advertises nothing.
+Discovery (reading files, YAML parsing via `go.yaml.in/yaml/v3`) is an adapter
+concern; nothing in this package is imported by a domain package — it merely
+implements the domain `tool.Tool` interface.
+
 ### Seam summary
 
 Every capability above is a default-on (or opt-in) interface; the core never
@@ -706,6 +747,7 @@ changes when one is swapped:
 | `InstructionAssembler` | `prompt/instructions.go` | `RootAssembler` (AGENTS.md/CLAUDE.md) → scoped assembler |
 | `CommandExpander` | `prompt/command.go` | `NoopExpander` → `DirCommandExpander` (slash commands) |
 | `tool.Disclosable` + `ToolSearch` | `internal/tool` | always-listed → progressive disclosure |
+| `Skill` tool (skills) | `internal/adapter/skills` (impl) | off → opt-in `--skills-dir`; progressive disclosure of *instructions* (metadata always in context, body on activation) |
 | `tool.CommandRunner` | `internal/tool/tool.go` (impl `osfs`) | the command-execution chokepoint; an OS sandbox wraps here |
 | `tool.MemoryStore` | `internal/tool/tool.go` (impl `memory`) | cross-session memory + `dream` consolidation |
 | `tool.WorkspaceForker` | `tool/isolation.go` (impl `forker`) | fork-join isolated branches |
@@ -715,9 +757,10 @@ changes when one is swapped:
 **Remaining non-goals / deliberate deferrals**: an **OS-level sandbox**
 (Landlock/seccomp/Seatbelt) is the one explicitly-deferred item — the
 `CommandRunner` seam is the place it wraps, and shell-less deploys avoid the
-surface entirely. **stdio MCP is never supported**. Embeddings, multi-vendor model
-routing (the `LLMProvider` port already abstracts it), and full skill packaging
-remain unbuilt. The guiding restraint still holds: build the shape, instrument it,
+surface entirely. **stdio MCP is never supported**. Embeddings and multi-vendor model
+routing (the `LLMProvider` port already abstracts it) remain unbuilt; **skills**
+exist as progressive-disclosure instruction units (see above), though richer
+*packaging* (bundled scripts/resources alongside `SKILL.md`) is not yet built. The guiding restraint still holds: build the shape, instrument it,
 and resist features before the loop, tools, permissions, hooks, and cache all work.
 
 ## 17. Deployment & server hardening

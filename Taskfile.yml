@@ -29,6 +29,13 @@ tasks:
     cmds:
       - go build -o bin/mecated ./cmd/mecated
       - go build -o bin/mecademo ./cmd/mecademo
+      - go build -o bin/mecatui ./cmd/mecatui
+
+  test:golden:
+    desc: Refresh mecatui View/teatest golden files (-update) then re-run them
+    cmds:
+      - go test ./cmd/mecatui/ui/ -update
+      - go test ./cmd/mecatui/ui/
 
   clean:
     desc: Remove the bin/ build output directory

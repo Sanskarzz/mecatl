@@ -1,0 +1,97 @@
+package ui
+
+import (
+	"context"
+	"io"
+	"sync"
+
+	"github.com/stacklok/mecatl/cmd/mecatui/client"
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+)
+
+// fakeRecver replays a scripted slice of responses then returns io.EOF. It
+// optionally gates at a named event type so a test can hold the stream at the
+// permission.ask until it has driven the approval — then release the tail.
+type fakeRecver struct {
+	mu          sync.Mutex
+	script      []*mecatlv1.ConverseResponse
+	idx         int
+	gateType    string
+	gatedBefore bool
+	gate        chan struct{}
+	released    bool
+}
+
+func (f *fakeRecver) Recv() (*mecatlv1.ConverseResponse, error) {
+	f.mu.Lock()
+	if f.idx >= len(f.script) {
+		f.mu.Unlock()
+		return nil, io.EOF
+	}
+	r := f.script[f.idx]
+	f.idx++
+	// Gate AFTER yielding the gated event: the ask is delivered, then the next
+	// Recv blocks until the test approves, so the post-approval tail is held
+	// back. (Gating before would swallow the ask itself.)
+	gate := f.gateType != "" && f.gatedBefore
+	if !gate && f.gateType != "" && r.GetEvent().GetType() == f.gateType {
+		f.gatedBefore = true
+	}
+	f.mu.Unlock()
+	if gate {
+		<-f.gate
+	}
+	return r, nil
+}
+
+func (f *fakeRecver) release() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.released {
+		f.released = true
+		close(f.gate)
+	}
+}
+
+// fakeSender records sent frames so a test can assert the ResumeApproval round
+// trip, and releases the recv gate on approval so the post-approval tail flows.
+type fakeSender struct {
+	mu     sync.Mutex
+	sent   []*mecatlv1.ConverseRequest
+	onSend func(*mecatlv1.ConverseRequest)
+}
+
+func (f *fakeSender) Send(req *mecatlv1.ConverseRequest) error {
+	f.mu.Lock()
+	f.sent = append(f.sent, req)
+	cb := f.onSend
+	f.mu.Unlock()
+	if cb != nil {
+		cb(req)
+	}
+	return nil
+}
+
+func (f *fakeSender) frames() []*mecatlv1.ConverseRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*mecatlv1.ConverseRequest, len(f.sent))
+	copy(out, f.sent)
+	return out
+}
+
+// fakeConv is the ui's Converser+SessionCreator backed by a fakeRecver/Sender. It
+// builds a real client.Stream so the test exercises the production ReadLoop,
+// EventToMsg, and send path — the only thing faked is the transport.
+type fakeConv struct {
+	recv *fakeRecver
+	send *fakeSender
+}
+
+func (*fakeConv) CreateSession(_ context.Context) (string, error) {
+	return "sess-test-0001", nil
+}
+
+func (c *fakeConv) OpenConverse(_ context.Context) (*client.Stream, error) {
+	return client.NewStream(c.recv, c.send), nil
+}

@@ -15,8 +15,9 @@ behind a provider-agnostic port. Headless: driven over gRPC + HTTP, no TUI.
 the wrong workflow here.
 
 ```sh
-task build              # → bin/mecated, bin/mecademo  (ALWAYS use this; never `go build` to repo root)
+task build              # → bin/mecated, bin/mecademo, bin/mecatui  (ALWAYS use this; never `go build` to repo root)
 task test               # full suite, -race
+task test:golden        # refresh mecatui View/teatest goldens (-update) then re-run
 task lint               # golangci-lint v2 (parallel-safe) + go vet
 task generate           # regenerate contracts/gen from contracts/proto via buf
 go test ./internal/agent/ -run TestFullCycle   # a single test
@@ -34,6 +35,7 @@ go run ./cmd/mecademo    # end-to-end demo, fully offline (mock provider)
 - `internal/adapter/` — ADAPTERS: `openai`, `mockllm`, `osfs`/`memfs`, `permpolicy`, `hookexec`, `store/*`, `tools`, `server`.
 - `contracts/proto/mecatl/v1/` — gRPC contract (source of truth); `contracts/gen/` is generated — do not hand-edit.
 - `cmd/mecated/` — the server (composition root); `cmd/mecademo/` — the demo.
+- `cmd/mecatui/` — an optional gRPC **client** TUI (Bubble Tea v2). Bound by the no-internal layering rule: `contracts/gen` + grpc live only in `cmd/mecatui/client` (and the `cmd/mecatui` main); the `ui` and `theme` packages import no `internal/...` package and no proto directly — they render purely from proto `Event`s relayed by `client`. See `docs/tui.md`.
 
 ## The layering rule (the thing to get right)
 
