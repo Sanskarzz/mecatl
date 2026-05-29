@@ -59,7 +59,7 @@
 | 5 progressive compaction | ✅ | `Compactor` seam + `HeuristicCompactor` (default) and `CascadeCompactor` (tiered) |
 | 8 fork-join parallelism | ✅ | `tool.WorkspaceForker` + `internal/adapter/forker` (git-worktree/copy isolation) + `agent.NewForkTool` (parallel isolated branches, join); wired in `ozzd` (`--enable-fork`) |
 | **3 tiered memory** | ✅ | `tool.MemoryStore` seam + file-backed `internal/adapter/memory` (Remember/Recall tools, per-project, conservative descriptions); opt-in via `memory.Register` |
-| 4 dream/sleep consolidation | 🟦 | depends on (3); optional background consolidation |
+| 4 dream/sleep consolidation | ✅ | `internal/adapter/dream` — conservative MemoryStore+LLM consolidator (merge dupes / drop stale, never invents keys, fail-safe), `RunPeriodically`; opt-in via `--memory-consolidate-interval` |
 
 ## Deployment
 
@@ -74,8 +74,8 @@
 | Item | Status | Rationale |
 |---|---|---|
 | Multi-vendor model routing | 🟦 | `LLMProvider` port already abstracts it; a router is a convenience adapter |
-| Repo map (tree-sitter PageRank) | 🟦 | a future read-only tool; agentic grep works at current scale |
-| Slash commands / skills packaging | 🟦 | prompt volatile-suffix seam exists |
+| Repo map (tree-sitter PageRank) | ✅ | `internal/adapter/repomap` read-only tool (Go/Python/TS/TSX, personalized PageRank). CGO; behind `-tags repomap` to keep the default binary static |
+| Slash commands | ✅ | `prompt.CommandExpander` + `DirCommandExpander` (`.ozz/commands`/`.claude/commands` templates); `--commands-dir`/`--enable-commands`. (Full skill packaging still future.) |
 | Live OpenAI validation | ✅ | validated against Sonnet 4.5 via OpenRouter (full tool-calling loop) |
 | Fuzz tests (bash splitter, SSE decoder) | ✅ | native Go fuzzers + Taskfile `fuzz` target; security invariants asserted; no crashers found |
 
