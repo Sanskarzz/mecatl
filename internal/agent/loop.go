@@ -56,6 +56,10 @@ type Deps struct {
 	Sink port.EventSink
 	// Compactor compresses history at the threshold; nil → HeuristicCompactor.
 	Compactor Compactor
+	// Instructions assembles the project-instruction messages recorded once at
+	// the start of a run; nil → prompt.RootAssembler (root-only AGENTS.md /
+	// CLAUDE.md, the v1 default).
+	Instructions prompt.InstructionAssembler
 	// PromptConfig seeds the cache-stable system prompt (role/tone/safety). The
 	// loop fills in Tools and the volatile Env per turn.
 	PromptConfig prompt.Config
@@ -67,6 +71,14 @@ type Deps struct {
 	ContextWindowTokens int
 	// CompactionRatio overrides defaultCompactionRatio when in (0,1].
 	CompactionRatio float64
+
+	// ProgressiveTools, when true, enables progressive tool disclosure
+	// (pattern 9): the per-turn request advertises lightweight specs for tools
+	// implementing tool.Disclosable plus a built-in ToolSearch tool the model
+	// uses to hydrate a full spec on demand. The DEFAULT (false) sends every
+	// tool's full spec every turn, exactly as v1 does. The ToolSearch tool is
+	// registered into the catalog by NewEngine only when this is enabled.
+	ProgressiveTools bool
 }
 
 // Engine builds Runs from a fixed set of ports. It is safe for concurrent use:
@@ -85,6 +97,17 @@ func NewEngine(deps Deps) *Engine {
 	}
 	if deps.CompactionRatio <= 0 || deps.CompactionRatio > 1 {
 		deps.CompactionRatio = defaultCompactionRatio
+	}
+	if deps.Instructions == nil {
+		deps.Instructions = prompt.RootAssembler{}
+	}
+	// Progressive disclosure: register the ToolSearch hydration tool so the model
+	// can fetch a full spec on demand. It is registered only when enabled and only
+	// if a Catalog is present and does not already carry one (idempotent).
+	if deps.ProgressiveTools && deps.Catalog != nil {
+		if _, ok := deps.Catalog.Lookup(tool.ToolSearchName); !ok {
+			_ = deps.Catalog.Register(tool.NewToolSearch(deps.Catalog))
+		}
 	}
 	return &Engine{deps: deps}
 }
@@ -137,9 +160,24 @@ func (e *Engine) Run(ctx context.Context, sess *session.Session, ws tool.Workspa
 // drive runs the loop algorithm for one prompt. It always terminates the session
 // (Complete/Stop/Cancel/Fail) and emits exactly one terminal result Event.
 func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, userText string) {
-	// Step 1: record the user message and discover project instructions once.
+	// Step 0: fire SessionStart once before any work. Informational: a Block
+	// outcome is logged but does NOT abort the run (the phase is advisory; only
+	// PreToolUse and UserPromptSubmit are vetoing phases).
+	if sess.Counters.Turns == 0 {
+		e.fireSessionStart(ctx, r, sess)
+	}
+
+	// Step 1: record the user message and assemble project instructions once.
 	if err := e.recordPrompt(ctx, sess, ws, userText); err != nil {
 		e.terminate(ctx, r, sess, session.StopError, "", session.Usage{}, err)
+		return
+	}
+
+	// Step 1b: fire UserPromptSubmit AFTER recording the prompt but BEFORE the
+	// first model call. This is a BLOCKING phase: a Block outcome rejects the
+	// prompt and terminates the run without ever calling the model.
+	if blocked, reason := e.fireUserPromptSubmit(ctx, r, sess, userText); blocked {
+		e.terminate(ctx, r, sess, session.StopError, reason, session.Usage{}, fmt.Errorf("agent: prompt rejected by UserPromptSubmit hook: %s", reason))
 		return
 	}
 
@@ -211,15 +249,16 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 	}
 }
 
-// recordPrompt records the user prompt and, on the first turn, the discovered
-// project instructions (AGENTS.md / CLAUDE.md), routing both through the session
+// recordPrompt records the user prompt and, on the first turn, the assembled
+// project instructions (via Deps.Instructions; default RootAssembler reads
+// AGENTS.md / CLAUDE.md at the workspace root), routing both through the session
 // root so all history mutation flows through the aggregate.
-func (*Engine) recordPrompt(ctx context.Context, sess *session.Session, ws tool.Workspace, userText string) error {
+func (e *Engine) recordPrompt(ctx context.Context, sess *session.Session, ws tool.Workspace, userText string) error {
 	var instr []session.Message
 	if sess.Counters.Turns == 0 {
-		discovered, err := prompt.DiscoverInstructions(ctx, ws)
+		discovered, err := e.deps.Instructions.Assemble(ctx, ws)
 		if err != nil {
-			return fmt.Errorf("agent: discover instructions: %w", err)
+			return fmt.Errorf("agent: assemble instructions: %w", err)
 		}
 		instr = discovered
 	}
@@ -284,7 +323,15 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 // conversation history, and the mode-filtered tool specs.
 func (e *Engine) buildRequest(sess *session.Session) port.LLMRequest {
 	cfg := e.deps.PromptConfig
-	cfg.Tools = e.deps.Catalog.Specs(sess.Mode)
+	// Progressive disclosure (pattern 9): when enabled, advertise lightweight
+	// specs (full spec for non-disclosable tools, including the ToolSearch tool
+	// registered by NewEngine) so the model hydrates schemas on demand. When OFF
+	// (the default) send every tool's full spec exactly as v1 does.
+	if e.deps.ProgressiveTools {
+		cfg.Tools = e.deps.Catalog.AdvertisedSpecs(sess.Mode)
+	} else {
+		cfg.Tools = e.deps.Catalog.Specs(sess.Mode)
+	}
 	cfg.Env.Model = e.deps.Model
 	cfg.Env.Mode = string(sess.Mode)
 	if cfg.Env.Cwd == "" {
@@ -366,6 +413,7 @@ func (e *Engine) terminate(ctx context.Context, r *Run, sess *session.Session, r
 	if cause != nil {
 		errMsg = cause.Error()
 	}
+	e.fireStop(ctx, r, sess, reason)
 	e.emitResult(r, sess, reason, text, usage, errMsg)
 	e.save(ctx, sess)
 }
@@ -376,6 +424,7 @@ func (e *Engine) terminateComplete(ctx context.Context, r *Run, sess *session.Se
 	if !sess.State.IsTerminal() {
 		_ = sess.Stop(reason)
 	}
+	e.fireStop(ctx, r, sess, reason)
 	e.emitResult(r, sess, reason, text, usage, "")
 	e.save(ctx, sess)
 }

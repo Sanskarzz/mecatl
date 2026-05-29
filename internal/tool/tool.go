@@ -51,6 +51,20 @@ type Tool interface {
 	Execute(ctx context.Context, in session.ToolCall, ws Workspace) (session.ToolResult, error)
 }
 
+// Disclosable is the OPTIONAL capability a Tool MAY implement to participate in
+// progressive tool disclosure (pattern 9). A disclosable tool advertises a
+// lightweight, metadata-only ToolSpec (typically name + a one-line description,
+// with no or an empty Schema) until the model hydrates the full Spec() on demand
+// via the ToolSearch tool. A tool that does NOT implement Disclosable is always
+// advertised with its full Spec(), so the default catalog view is unchanged.
+type Disclosable interface {
+	Tool
+	// Advertised returns the cheap, metadata-only spec rendered into the per-turn
+	// tool inventory under progressive disclosure. Spec() remains the full,
+	// hydrate-on-demand specification.
+	Advertised() ToolSpec
+}
+
 // FileInfo is the minimal, provider-neutral file metadata the tools need. It is
 // a subset of io/fs.FileInfo carried as plain fields so adapters (osfs, memfs)
 // can populate it without leaking os types into the domain.

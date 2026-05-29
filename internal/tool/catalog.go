@@ -65,6 +65,25 @@ func (c *Catalog) Specs(mode session.PermissionMode) []ToolSpec {
 	return specs
 }
 
+// AdvertisedSpecs returns the per-turn tool inventory under progressive
+// disclosure: for each available tool (mode-filtered, ordered by name) it returns
+// the tool's Advertised() metadata spec when the tool implements Disclosable,
+// otherwise its full Spec(). Because a tool that does not implement Disclosable
+// falls back to its full Spec(), a catalog of only non-disclosable tools yields a
+// result identical to Specs(mode) — making full-spec disclosure the default.
+func (c *Catalog) AdvertisedSpecs(mode session.PermissionMode) []ToolSpec {
+	tools := c.Available(mode)
+	specs := make([]ToolSpec, len(tools))
+	for i, t := range tools {
+		if d, ok := t.(Disclosable); ok {
+			specs[i] = d.Advertised()
+			continue
+		}
+		specs[i] = t.Spec()
+	}
+	return specs
+}
+
 // Available returns the tools usable under the given permission mode, ordered by
 // name. In ModePlan, non-read-only tools are filtered out.
 func (c *Catalog) Available(mode session.PermissionMode) []Tool {
