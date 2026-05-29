@@ -2,7 +2,11 @@
 
 package main
 
-import "github.com/stacklok/ozzharness/internal/tool"
+import (
+	"log/slog"
+
+	"github.com/stacklok/ozzharness/internal/tool"
+)
 
 // registerOptionalTools is the DEFAULT (no-op) implementation, selected when the
 // binary is built WITHOUT the `repomap` build tag. It registers nothing, so the
@@ -11,4 +15,8 @@ import "github.com/stacklok/ozzharness/internal/tool"
 //
 // To include the tree-sitter-backed repo-map tool, build with `-tags repomap`
 // (which requires CGO); see repomap_enabled.go.
-func registerOptionalTools(_ *tool.Catalog) {}
+func registerOptionalTools(_ *tool.Catalog) {
+	// Logged so the disabled state is as legible as the enabled one (symmetry
+	// with every other optional capability's startup logging).
+	slog.Info("repo map tool DISABLED (build with -tags repomap to enable)")
+}

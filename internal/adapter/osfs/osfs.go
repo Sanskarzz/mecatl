@@ -109,10 +109,19 @@ func mapEscape(path string, err error) error {
 }
 
 // Read returns the entire contents of the file at the session-relative path.
+// maxReadBytes caps how much a single Read will pull into memory. It is far
+// larger than any realistic source file but guards against an OOM DoS from a
+// pathologically large file in the workspace (a tool reads the whole file before
+// the model-facing output is truncated).
+const maxReadBytes = 64 << 20 // 64 MiB
+
 func (f *FileSystem) Read(_ context.Context, path string) ([]byte, error) {
 	rel, err := rootRelative(path)
 	if err != nil {
 		return nil, err
+	}
+	if info, statErr := f.r.Stat(rel); statErr == nil && info.Size() > maxReadBytes {
+		return nil, fmt.Errorf("osfs: file %q is %d bytes, exceeds the %d-byte read limit", path, info.Size(), int64(maxReadBytes))
 	}
 	data, err := f.r.ReadFile(rel)
 	if err != nil {
