@@ -148,6 +148,8 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--store-dir` | `""` | directory for the JSONL session store (empty → in-memory) |
 | `--skills-dir` | `""` | directory to discover progressive-disclosure skills from, laid out as `<name>/SKILL.md`. **Repeatable** (highest precedence, in the order given); empty disables the `Skill` tool unless `--skills-conventional` is set. **See the skills trust note below.** |
 | `--skills-conventional` | `false` | also discover skills from the conventional known paths: `<workspace>/.mecatl/skills`, `<workspace>/.claude/skills`, `$XDG_CONFIG_HOME/mecatl/skills` (or `~/.config/mecatl/skills`), and `~/.claude/skills` — lower precedence than `--skills-dir`. **OFF by default** (strict opt-in); only enable for trusted locations. **See the skills trust note below.** |
+| `--skills-draft-dir` | `""` | enable the writable `SkillDraft` tool and set the **quarantine** directory for model-authored candidate skills. Empty disables the tool. Must be **outside the workspace root** (so the model's `Write`/`Edit` cannot reach it) and **disjoint** from every `--skills-dir` / conventional location — both fatal startup errors. **See the self-improving-skill loop note below.** |
+| `--skills-draft-similarity-threshold` | `0.5` | 2-gram Jaccard similarity above which `SkillDraft` warns of a near-duplicate existing skill (warn-only; it never blocks the draft). |
 
 ### Environment
 
@@ -213,6 +215,49 @@ conventional set defaults OFF rather than auto-discovering. The always-in-contex
 description cap and the on-activation body truncation apply to **every** source,
 including the conventional ones. (An OS-level sandbox around tool execution remains
 future work — see the deferral note in the architecture doc.)
+
+### The self-improving-skill loop (`SkillDraft` + `mecated skills promote`)
+
+`--skills-draft-dir <quarantine>` enables a **writable** `SkillDraft` tool so the
+agent can author a reusable skill from a procedure it just performed. This is the
+*only* tool that produces skills, and it is bounded by a hard trust boundary:
+
+- A drafted skill is **never active in the session that wrote it.** `SkillDraft`
+  validates and sanitizes the (untrusted) candidate — name regex, an
+  injection-marker scan on both the description and the body, size caps, atomic
+  write — and persists it to the **quarantine** directory. The quarantine is
+  **never** registered as a `Skill` catalog source, so its contents add **zero**
+  tokens to any context.
+- To make it active, an **operator** runs the gate (flags precede the `<name>`):
+
+  ```sh
+  mecated skills promote \
+    --skills-draft-dir <quarantine> \
+    --skills-dir <active-skills-dir> \
+    <name>            # add --yes to skip the interactive review (scripted/CI use)
+  ```
+
+  Promotion **prints the full candidate and asks for confirmation**, then verifies
+  `origin: model` provenance, re-runs structural validation and the injection scan,
+  refuses to overwrite an existing skill, and moves the candidate (provenance
+  frontmatter intact: `origin: model`, `drafted_at`) into the active tree. It takes
+  effect on the **next** server start — the convention is *author in session N →
+  operator promotes → active in N+1.*
+- **The trust boundary is structural.** The quarantine dir must live **outside the
+  workspace root** (fatal startup error otherwise): the model's `Write`/`Edit` are
+  confined to the workspace, so they cannot reach an out-of-workspace quarantine —
+  the `Drafter` is the only way a candidate gets there. It must also be **disjoint**
+  from every `--skills-dir` (fatal on overlap). `SkillDraft` itself defaults to
+  **ask**, and being a mutating tool it is unavailable in plan mode.
+- **Residual to know:** absent the (deferred) OS sandbox, the `Bash` tool can write
+  to any path, so the structural boundary covers `Write`/`Edit` only — `mecated`
+  warns when `SkillDraft` and `Bash` run together. For a fully structural boundary,
+  run shell-less (`--no-bash`) or under an OS sandbox, and place active `--skills-dir`
+  trees outside the workspace too (a startup warning flags an in-workspace one).
+
+When you promote, **read the body** — it is agent-authored, untrusted,
+instruction-like text that becomes trusted on promotion. The automated injection
+scan is a backstop, not a substitute for reading it.
 
 ### Graceful shutdown
 

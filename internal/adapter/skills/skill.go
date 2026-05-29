@@ -16,6 +16,27 @@
 // exactly like the memory adapter. A SKILL.md file is YAML frontmatter
 // (`name` + `description`) followed by a markdown body, matching the wider
 // Agent Skills ecosystem.
+//
+// TRUST BOUNDARY (the self-improving-skill loop): a skills.Source registered into
+// the catalog must serve ONLY operator-controlled content — a SKILL.md steers the
+// model like AGENTS.md/CLAUDE.md. The writable SkillDraft tool (DraftTool) lets the
+// model PROPOSE a skill, but its Drafter writes ONLY to a QUARANTINE directory that
+// is NEVER registered as a catalog Source. Two invariants hold the boundary:
+//   - The quarantine dir is required to live OUTSIDE the workspace root, so the
+//     model's workspace-confined Write/Edit cannot reach it (enforced by
+//     validateSkillDraftConfig in cmd/mecated; fatal on a misconfig). A drafted
+//     candidate therefore only ever enters quarantine via the Drafter.
+//   - Promotion from quarantine to an active skills dir is an OPERATOR action
+//     (`mecated skills promote`, which shows the full candidate, requires
+//     confirmation, and verifies `origin: model` provenance), outside the model's
+//     reach. The model can never activate its own proposal: author in session N ->
+//     operator reviews + promotes -> active in N+1.
+//
+// RESIDUAL (documented, not silently assumed): absent the deferred OS-level
+// sandbox, the Bash tool can write to any absolute path, so the structural boundary
+// covers Write/Edit only; cmd/mecated warns when SkillDraft and Bash are enabled
+// together. This mirrors mecatl's existing posture that the OS sandbox is the
+// deferred wrap point for the command-execution seam.
 package skills
 
 // Skill is a pure value object: one discovered skill's metadata and body. It

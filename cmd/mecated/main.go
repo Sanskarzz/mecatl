@@ -10,17 +10,20 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -162,6 +165,16 @@ type config struct {
 	skillsDirs         stringList
 	skillsConventional bool
 
+	// Skills self-improvement loop (opt-in): when skillsDraftDir is non-empty the
+	// writable SkillDraft tool is registered, writing model-authored candidate
+	// SKILL.md files into this QUARANTINE directory (NEVER a catalog Source). An
+	// operator promotes a candidate into an active --skills-dir with the
+	// `mecated skills promote` subcommand. Empty disables the tool (like
+	// --memory-dir gating Remember/Recall). The dir must be disjoint from every
+	// active skills dir (fatal config error on overlap — the trust boundary).
+	skillsDraftDir       string
+	skillsDraftThreshold float64
+
 	// Memory consolidation (dream): background distillation interval. 0 disables.
 	// Only meaningful when memoryDir is set; a positive value with an empty
 	// memoryDir is a no-op (logged as a warning).
@@ -243,10 +256,70 @@ func (l *stringList) Set(v string) error {
 }
 
 func main() {
+	// Subcommand dispatch: `mecated skills promote ...` is the OPERATOR gate that
+	// moves a model-authored candidate skill out of quarantine into an active
+	// skills dir. It is a one-shot offline CLI action (no daemon), kept here so it
+	// shares the binary and the skills adapter.
+	if len(os.Args) >= 3 && os.Args[1] == "skills" && os.Args[2] == "promote" {
+		if err := runSkillsPromote(os.Args[3:], os.Stdin, os.Stderr); err != nil {
+			slog.Error("skills promote failed", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("mecated exited with error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// runSkillsPromote implements `mecated skills promote --skills-draft-dir
+// <quarantine> --skills-dir <active> [--yes] <name>`: the operator-trust action that
+// shows the full candidate, asks for confirmation (unless --yes), re-validates it
+// (provenance + structure + injection scan), and moves it into the active skills
+// tree. It requires filesystem access the model does not have, so it is the only
+// path from model-authored quarantine to the trusted, live skill catalog. Flags
+// precede the positional <name> (Go's flag parser stops at the first positional).
+func runSkillsPromote(argv []string, in io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("mecated skills promote", flag.ContinueOnError)
+	fs.SetOutput(out)
+	var quarantine, active string
+	var assumeYes bool
+	fs.StringVar(&quarantine, "skills-draft-dir", "", "the QUARANTINE directory the candidate was drafted into")
+	fs.StringVar(&active, "skills-dir", "", "the ACTIVE skills directory to promote the candidate into")
+	fs.BoolVar(&assumeYes, "yes", false, "skip the interactive content review and promote without confirmation (scripted/CI use only)")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	name := fs.Arg(0)
+	if name == "" || quarantine == "" || active == "" {
+		return fmt.Errorf("usage: mecated skills promote --skills-draft-dir <quarantine> --skills-dir <active> [--yes] <name>")
+	}
+
+	// Show the operator the FULL untrusted candidate (frontmatter + body) before
+	// promoting: promotion is what makes model-authored text TRUSTED, so a human
+	// must actually read it. The injection scan in skills.Promote is a backstop,
+	// not a review.
+	raw, err := skills.ReadCandidate(quarantine, name)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(out, "\n--- candidate skill %q (model-authored, UNTRUSTED until promoted) ---\n%s\n--- end candidate ---\n\n", name, raw)
+
+	if !assumeYes {
+		_, _ = fmt.Fprintf(out, "Promote %q into %s? This makes the above content TRUSTED and loadable by every future session. [y/N]: ", name, active)
+		line, _ := bufio.NewReader(in).ReadString('\n')
+		if ans := strings.ToLower(strings.TrimSpace(line)); ans != "y" && ans != "yes" {
+			return fmt.Errorf("promotion of %q aborted by operator", name)
+		}
+	}
+
+	if err := skills.Promote(quarantine, active, name); err != nil {
+		return err
+	}
+	slog.Info("skill promoted to the active catalog (takes effect on next server start)",
+		"name", name, "from", quarantine, "to", active)
+	return nil
 }
 
 // run parses flags, builds the engine and service, and serves until a termination
@@ -314,7 +387,10 @@ func run() error {
 	// call. mcpInventory is the resolved source/server/diagnostic snapshot a future
 	// (Stage C) gRPC stage will hand to the server adapter; for now we log a summary
 	// so the resolution is observable.
-	engine, mcpProvider, mcpInventory, mcpClose := buildEngine(ctx, cfg, provider, sink, metrics, store)
+	engine, mcpProvider, mcpInventory, mcpClose, err := buildEngine(ctx, cfg, provider, sink, metrics, store)
+	if err != nil {
+		return err
+	}
 	defer mcpClose()
 	logMCPInventory(mcpInventory)
 
@@ -372,6 +448,9 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.Var(&cfg.skillsDirs, "skills-dir", "directory to discover progressive-disclosure skills from, laid out as <name>/SKILL.md (repeatable; highest precedence); empty disables the Skill tool unless --skills-conventional is set. TRUST BOUNDARY: a SKILL.md steers the model like AGENTS.md/CLAUDE.md — point this only at directories you trust")
 	fs.BoolVar(&cfg.skillsConventional, "skills-conventional", false, "also discover skills from the conventional locations: <workspace>/"+skills.ProjectDirMecatl+", <workspace>/"+skills.ProjectDirClaude+", $XDG_CONFIG_HOME/mecatl/skills (or ~/.config/mecatl/skills), and ~/.claude/skills (lower precedence than --skills-dir). Default OFF — opt in only for trusted locations (same trust class as AGENTS.md/CLAUDE.md)")
+
+	fs.StringVar(&cfg.skillsDraftDir, "skills-draft-dir", "", "enable the writable SkillDraft tool and set the QUARANTINE directory for model-authored candidate skills. Empty disables the tool. TRUST BOUNDARY: must be OUTSIDE the workspace root (so the model's workspace-confined Write/Edit cannot reach it; fatal otherwise) and disjoint from every --skills-dir (fatal on overlap). Drafts are quarantined (never live); an operator reviews and promotes one with `mecated skills promote --skills-draft-dir <dir> --skills-dir <active> <name>`")
+	fs.Float64Var(&cfg.skillsDraftThreshold, "skills-draft-similarity-threshold", skills.DefaultSimilarityThreshold, "2-gram Jaccard similarity above which a SkillDraft warns of a near-duplicate existing skill (warn-only, does not block)")
 
 	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "directory of slash-command templates (<name>.md); setting it enables command expansion. Empty + --enable-commands uses the defaults (.mecatl/commands, .claude/commands)")
 	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.mecatl/commands, .claude/commands) when --commands-dir is empty")
@@ -475,7 +554,15 @@ func buildStore(cfg config) (port.SessionStore, error) {
 // It also wires the telemetry Sink (EventSink) and Logger, and connects any
 // configured MCP servers, returning a close func that tears the MCP manager
 // down on shutdown (a no-op when no servers are configured).
-func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sink port.EventSink, logger port.Logger, store port.SessionStore) (*agent.Engine, mcp.Provider, []mcpsource.SourceInfo, func()) {
+func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sink port.EventSink, logger port.Logger, store port.SessionStore) (*agent.Engine, mcp.Provider, []mcpsource.SourceInfo, func(), error) {
+	// SkillDraft trust boundary: when enabled, the quarantine dir must live OUTSIDE
+	// the workspace root (so the model's workspace-confined Write/Edit cannot reach
+	// it) and be disjoint from every active skills dir. Fatal on a misconfig.
+	if err := validateSkillDraftConfig(cfg); err != nil {
+		return nil, nil, nil, func() {}, err
+	}
+	warnSkillDraftResiduals(cfg)
+
 	policy := permpolicy.NewPolicy(defaultRules())
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
@@ -503,7 +590,7 @@ func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sin
 		Compactor:           buildCompactor(cfg, provider, counter),
 		CommandExpander:     buildCommandExpander(cfg, mcpProvider),
 	}
-	return agent.NewEngine(deps), mcpProvider, mcpInventory, mcpClose
+	return agent.NewEngine(deps), mcpProvider, mcpInventory, mcpClose, nil
 }
 
 // buildCommandExpander selects the slash-command expander for the agent Deps.
@@ -805,6 +892,12 @@ func registerSkills(ctx context.Context, cfg config, cat *tool.Catalog) {
 		Conventional: cfg.skillsConventional,
 		Workspace:    cfg.workspace,
 	})
+	if len(sources) == 0 && cfg.skillsDraftDir != "" {
+		// No active Sources, but drafting is enabled: still register SkillDraft so the
+		// loop can be closed (author -> promote -> active next start).
+		registerSkillDraft(cfg, cat, nil)
+		return
+	}
 	if len(sources) == 0 {
 		slog.Info("skills DISABLED (no --skills-dir and --skills-conventional unset)")
 		return
@@ -830,6 +923,30 @@ func registerSkills(ctx context.Context, cfg config, cat *tool.Catalog) {
 			"dirs", strings.Join(cfg.skillsDirs, ","), "conventional", cfg.skillsConventional,
 			"count", len(discovered), "skills", strings.Join(names, ","))
 	}
+
+	// SkillDraft (the self-improving loop): opt-in via --skills-draft-dir. The
+	// novelty check is snapshotted against the skills just discovered (read-only).
+	registerSkillDraft(cfg, cat, discovered)
+}
+
+// registerSkillDraft registers the writable SkillDraft tool when --skills-draft-dir
+// is set, binding a DirDrafter to the quarantine dir and the snapshot of currently
+// active skills (for the offline novelty check). The structural trust boundary —
+// quarantine OUTSIDE the workspace root and disjoint from every active skills dir —
+// is enforced by validateSkillDraftConfig at engine-build time (a fatal config error
+// otherwise), so by the time this runs the quarantine is unreachable by the model's
+// workspace-confined Write/Edit.
+func registerSkillDraft(cfg config, cat *tool.Catalog, existing []skills.Skill) {
+	if cfg.skillsDraftDir == "" {
+		slog.Info("SkillDraft tool DISABLED (--skills-draft-dir empty)")
+		return
+	}
+	drafter := skills.NewDirDrafter(cfg.skillsDraftDir, existing,
+		skills.WithSimilarityThreshold(cfg.skillsDraftThreshold))
+	cat.MustRegister(skills.NewDraftTool(drafter))
+	slog.Info("SkillDraft tool ENABLED (model-authored skills -> quarantine -> operator promote)",
+		"quarantine", cfg.skillsDraftDir, "similarity_threshold", cfg.skillsDraftThreshold,
+		"snapshot_skills", len(existing))
 }
 
 // startMemoryConsolidation launches the dream consolidator on a background
@@ -935,7 +1052,10 @@ func promptConfig(cfg config) prompt.Config {
 
 // defaultRules is the built-in permission ruleset: read-only tools (Read, Grep,
 // Glob, the Task explorer) are allowed; mutating tools (Bash, Edit, Write) ask
-// for approval. Anything unmatched defaults to ask via the evaluator.
+// for approval; the writable SkillDraft tool asks for approval (a human reviews
+// authorship). Anything unmatched defaults to ask via the evaluator. The SkillDraft
+// trust boundary is structural (the quarantine lives outside the workspace, so
+// Write/Edit cannot reach it — see validateSkillDraftConfig), not a permission rule.
 func defaultRules() []governance.Rule {
 	return []governance.Rule{
 		{Scope: governance.ScopeManaged, Tool: "Read", Effect: governance.Allow},
@@ -946,7 +1066,126 @@ func defaultRules() []governance.Rule {
 		{Scope: governance.ScopeManaged, Tool: "Bash", Effect: governance.Ask},
 		{Scope: governance.ScopeManaged, Tool: "Edit", Effect: governance.Ask},
 		{Scope: governance.ScopeManaged, Tool: "Write", Effect: governance.Ask},
+		{Scope: governance.ScopeManaged, Tool: skills.DraftToolName, Effect: governance.Ask},
 	}
+}
+
+// validateSkillDraftConfig enforces the SkillDraft trust boundary at startup when
+// the feature is enabled (--skills-draft-dir set). It is fatal on a misconfig that
+// would let the model reach the quarantine through a tool, never a silent
+// degradation.
+//
+// The boundary is STRUCTURAL, not a permission rule. Write/Edit are confined by the
+// osfs Workspace to the workspace root, so a quarantine dir OUTSIDE that root is
+// unreachable by them. We therefore require the quarantine to live outside the
+// workspace (fatal otherwise) and to be disjoint from every active skills dir
+// (fatal on overlap — an overlapping quarantine would let a draft masquerade as a
+// promoted, trusted skill).
+//
+// NOTE on Bash: absent the deferred OS-level sandbox, the Bash tool can write to
+// ANY absolute path and so can reach any quarantine/skills dir regardless of
+// location. The structural boundary therefore covers Write/Edit only; the residual
+// Bash path is the same big-hammer capability Bash already grants (it can write any
+// file), gated by Ask, and is the wrap point for the deferred sandbox. run() logs a
+// loud warning when SkillDraft and Bash are enabled together so the operator knows
+// the boundary is fully structural only shell-less or sandboxed.
+func validateSkillDraftConfig(cfg config) error {
+	if cfg.skillsDraftDir == "" {
+		return nil
+	}
+
+	quarantine, err := filepath.Abs(cfg.skillsDraftDir)
+	if err != nil {
+		return fmt.Errorf("--skills-draft-dir %q: %w", cfg.skillsDraftDir, err)
+	}
+	workspace, err := filepath.Abs(cfg.workspace)
+	if err != nil {
+		return fmt.Errorf("--workspace %q: %w", cfg.workspace, err)
+	}
+
+	// The quarantine MUST be outside the workspace root, so the model's
+	// workspace-confined Write/Edit cannot reach it. Inside-workspace is fatal.
+	if quarantine == workspace || dirsOverlap(workspace, quarantine) {
+		return fmt.Errorf("--skills-draft-dir %q must be OUTSIDE the workspace root %q: "+
+			"Write/Edit are confined to the workspace, so an in-workspace quarantine would be model-writable, "+
+			"defeating the draft→promote trust boundary", quarantine, workspace)
+	}
+
+	// The quarantine MUST be disjoint from every active skills dir, else a draft
+	// could land in (or shadow) the trusted catalog without an operator promote.
+	for _, ad := range activeSkillDirs(cfg) {
+		if dirsOverlap(quarantine, ad) {
+			return fmt.Errorf("--skills-draft-dir %q overlaps an active skills dir %q: "+
+				"the quarantine must be disjoint from every --skills-dir / conventional skills location", quarantine, ad)
+		}
+	}
+	return nil
+}
+
+// warnSkillDraftResiduals logs the residual (non-structural) parts of the SkillDraft
+// trust boundary so an operator deploys it knowingly. It is advisory only —
+// validateSkillDraftConfig has already enforced the structural invariants. Two
+// residuals exist because mecatl has no OS-level sandbox yet:
+//   - Bash (when enabled) can write to ANY absolute path, so it can reach the
+//     quarantine or active catalog regardless of location — the structural boundary
+//     covers Write/Edit only.
+//   - An active --skills-dir INSIDE the workspace is reachable by the model's
+//     Write/Edit (Ask-gated), so the trusted catalog is not write-isolated from the
+//     model; placing active skills OUTSIDE the workspace makes that boundary
+//     structural too.
+func warnSkillDraftResiduals(cfg config) {
+	if cfg.skillsDraftDir == "" {
+		return
+	}
+	if !cfg.noBash && cfg.shell != "" {
+		slog.Warn("SkillDraft trust boundary is structural for Write/Edit only: Bash is enabled and (absent an OS sandbox) can write to any path, so it can reach the skills trees. For a fully structural boundary, run shell-less (--no-bash) or under an OS sandbox.")
+	}
+	workspace, err := filepath.Abs(cfg.workspace)
+	if err != nil {
+		return
+	}
+	for _, ad := range activeSkillDirs(cfg) {
+		if ad == workspace || dirsOverlap(workspace, ad) {
+			slog.Warn("an active skills dir is INSIDE the workspace and is reachable by the model's Write/Edit (Ask-gated); place active skills OUTSIDE the workspace so promoted skills cannot be planted directly by the model",
+				"active_skills_dir", ad, "workspace", workspace)
+		}
+	}
+}
+
+// activeSkillDirs returns the cleaned directory paths of every active skills
+// Source (explicit --skills-dir plus the conventional locations when
+// --skills-conventional is set), so the deny rules and the overlap check cover the
+// same trees the catalog serves.
+func activeSkillDirs(cfg config) []string {
+	sources := skills.ResolveSources(skills.ResolveOptions{
+		Explicit:     cfg.skillsDirs,
+		Conventional: cfg.skillsConventional,
+		Workspace:    cfg.workspace,
+	})
+	var dirs []string
+	for _, s := range sources {
+		if ds, ok := s.(skills.DirSource); ok && ds.Dir != "" {
+			dirs = append(dirs, filepath.Clean(ds.Dir))
+		}
+	}
+	return dirs
+}
+
+// dirsOverlap reports whether a and b are the same directory or one contains the
+// other. It compares cleaned paths via filepath.Rel so a nested relationship in
+// either direction counts as overlap.
+func dirsOverlap(a, b string) bool {
+	if a == b {
+		return true
+	}
+	contains := func(parent, child string) bool {
+		rel, err := filepath.Rel(parent, child)
+		if err != nil {
+			return false
+		}
+		return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "."
+	}
+	return contains(a, b) || contains(b, a)
 }
 
 // defaultLimits returns the non-zero stop limits injected for sessions created

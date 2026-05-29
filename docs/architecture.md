@@ -781,6 +781,42 @@ consumes skills (they are packaged into a `tool.Tool` at composition time), so a
 domain port would be the wrong home — the seam is scoped to where it is consumed,
 mirroring MCP, repo-map, and the TUI theme search-path.
 
+**The self-improving skill loop** (`skills.Drafter`, opt-in) closes the loop so
+durable skills can *come into being from the agent's own experience*. A single
+writable tool, **`SkillDraft`** (`skills.NewDraftTool`, catalog name `SkillDraft`,
+`ReadOnly()==false`), lets the model PROPOSE a skill; its `skills.Drafter` write
+seam (mirroring `Source`, in the adapter package — nothing in domain/agent consumes
+or produces skills) validates and sanitizes the untrusted candidate and writes it
+to a **quarantine directory that is NEVER registered as a catalog `Source`**. The
+default `DirDrafter` is fully offline: it reuses `parseSkill`/`validateName`, an
+exported injection scan (`ScanForInjection`, run on both the always-in-context
+description and the body), a name regex (lowercase Agent-Skills style, blocking
+traversal), the existing size caps, a path-containment assert, an atomic
+temp+rename write, and an offline **2-gram Jaccard** novelty check
+(`Jaccard2Gram`) that *warns* (never blocks) on near-duplicate descriptions. Every
+quarantined `SKILL.md` is provenance-stamped (`origin: model`, `drafted_at`) for the
+reviewer; `parseSkill` ignores those keys so they never reach context. **The trust
+boundary** (stated in `skills/doc.go`): the model can author a candidate but can
+never activate its own proposal in any session. It rests on two invariants, both
+enforced in `cmd/mecated` (`validateSkillDraftConfig`, fatal on a misconfig):
+(1) the quarantine dir must live **outside the workspace root**, so the model's
+workspace-confined `Write`/`Edit` structurally cannot reach it — a candidate only
+ever enters quarantine via the `Drafter`; and (2) the dir must be **disjoint from
+every active skills dir**. Promotion from quarantine to an active `--skills-dir` is
+an **operator** action (`skills.Promote`, the `mecated skills promote` subcommand),
+which **shows the full candidate, requires confirmation** (`--yes` for scripted use),
+**verifies `origin: model` provenance**, and re-runs structural validation + the
+injection scan before moving it (refusing to overwrite an existing name). The
+convention is **author in session N → operator promotes → active in N+1**: drafts
+never enter the live catalog or perturb the byte-stable prompt prefix (it is built
+once at startup from operator-trusted sources only). `SkillDraft` is opt-in via
+`--skills-draft-dir` (empty ⇒ tool not registered, like `--memory-dir` gating
+Remember). **Residual** (documented, not hidden): absent the deferred OS sandbox the
+`Bash` tool can write to any path, so the structural boundary covers `Write`/`Edit`
+only — `mecated` warns when `SkillDraft` and `Bash` are enabled together; the fully
+structural deployment is shell-less or sandboxed. `SkillDraft` itself defaults to **ask** so a
+human reviews authorship, and being mutating it is filtered out of plan mode.
+
 It stays **opt-in**: `mecated` wires it via a repeatable `--skills-dir`
 (highest precedence) and an opt-in `--skills-conventional` that adds Claude-Code-
 style **known paths** (`skills.ResolveSources`): project-level
@@ -807,6 +843,7 @@ changes when one is swapped:
 | `tool.Disclosable` + `ToolSearch` | `internal/tool` | always-listed → progressive disclosure |
 | `Skill` tool (skills) | `internal/adapter/skills` (impl) | off → opt-in `--skills-dir`; progressive disclosure of *instructions* (metadata always in context, body on activation) |
 | `skills.Source` | `internal/adapter/skills/source.go` | `DirSource` (one dir) → `MultiSource` (ordered, earlier-wins); known-path resolver (`--skills-conventional`: project `.mecatl`/`.claude`, user XDG/`~/.claude`); future embedded/remote sources slot in |
+| `skills.Drafter` (self-improving loop) | `internal/adapter/skills/drafter.go` | off → opt-in `--skills-draft-dir`; default `DirDrafter` (offline: validate/sanitize/2-gram-Jaccard novelty → out-of-workspace quarantine, NEVER a catalog Source). WRITE side is pluggable (a future LLM-vetting decorator slots in); promotion is filesystem-only in the MVP — operator `mecated skills promote` is the gate (shows content, confirms, verifies provenance; author N → promote → active N+1) |
 | `tool.CommandRunner` | `internal/tool/tool.go` (impl `osfs`) | the command-execution chokepoint; an OS sandbox wraps here |
 | `tool.MemoryStore` | `internal/tool/tool.go` (impl `memory`) | cross-session memory + `dream` consolidation |
 | `tool.WorkspaceForker` | `tool/isolation.go` (impl `forker`) | fork-join isolated branches |
