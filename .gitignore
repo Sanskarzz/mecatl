@@ -8,6 +8,3 @@ coverage.*
 
 # Local scratch
 /.scratch/
-
-# Local agent scratch memory (reviewer/architect subagents)
-/.claude/

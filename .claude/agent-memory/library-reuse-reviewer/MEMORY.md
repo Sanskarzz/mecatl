@@ -1,0 +1,1 @@
+- [Project: ozzharness](project_ozzharness.md) — Go 1.26 agentic harness; deps, governance constraints, hand-rolled-justified spots

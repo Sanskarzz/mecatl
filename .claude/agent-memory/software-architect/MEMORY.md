@@ -1,0 +1,3 @@
+- [Project: ozzharness](project_ozzharness.md) — headless agentic coding-harness in Go; strict DDD/hexagonal; OpenAI Responses API behind a port.
+- [Domain language](domain_language.md) — canonical names for the harness domain (Session, Turn, Conversation, ToolCall, Permission, Hook, etc.).
+- [Design decisions](design_decisions.md) — locked architecture judgment calls (connect-go, server-side state, edit format, etc.).

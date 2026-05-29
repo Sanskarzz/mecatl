@@ -24,8 +24,13 @@ go run ./cmd/ozzd --openai   # serve gRPC (:8080) + HTTP/SSE (:8081), loopback b
 
 The API is a bidi gRPC `Converse` stream (the client sends a `Prompt` then
 `ResumeApproval`/`Cancel` frames; the server streams typed `Event`s) plus an HTTP/SSE
-mirror — both over the same domain `Event`. See **[`docs/design/`](./docs/design/)**:
-`ARCHITECTURE.md`, `STEP-CHAIN.md`, `OPENAI-RESPONSES-API.md`.
+mirror — both over the same domain `Event`.
+
+## Docs
+
+- **[`docs/architecture.md`](./docs/architecture.md)** — how the harness is built: layers, the loop, ports, sequence diagrams, extension points.
+- **[`docs/usage.md`](./docs/usage.md)** — build/run, the demo, `ozzd` flags, the gRPC + HTTP/SSE APIs with examples, permissions, hooks, troubleshooting.
+- **[`docs/design/`](./docs/design/)** — design rationale: `ARCHITECTURE.md`, `STEP-CHAIN.md`, `OPENAI-RESPONSES-API.md`.
 
 > **Note:** MCP support (future) is **streaming-HTTP transport only** — stdio MCP is
 > not supported. OS-level sandboxing, four-tier compaction, and an MCP client are

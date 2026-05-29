@@ -1,0 +1,1 @@
+- [Codebase conventions](conventions.md) — ozzharness DRY stance, generated dirs, deliberately-kept-separate pairs

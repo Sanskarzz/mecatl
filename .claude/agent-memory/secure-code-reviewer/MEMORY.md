@@ -1,0 +1,2 @@
+- [Project: ozzharness](project_ozzharness.md) — from-scratch headless agentic coding harness (Go); threat model, trust boundaries, v1 boundary design.
+- [Permission/Bash gate internals](ref_bash_permission_gate.md) — how the deny→ask→allow gate, compound-split, and wrapper-canonicalization work and their gaps.
