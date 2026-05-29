@@ -176,23 +176,28 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 	// SessionStart hook events and the first turn.start.
 	e.emit(r, session.Event{Type: session.EvSessionInit})
 
-	// Step 0b: fire SessionStart once before any work. Informational: a Block
-	// outcome is logged but does NOT abort the run (the phase is advisory; only
-	// PreToolUse and UserPromptSubmit are vetoing phases).
+	// Step 0b: fire SessionStart once before any work, before the prompt is even
+	// recorded. This is a BLOCKING run-level gate (symmetric with
+	// UserPromptSubmit): a Block outcome (or a hook execution error) aborts the
+	// run before any prompt processing or model call.
 	if sess.Counters.Turns == 0 {
-		e.fireSessionStart(ctx, r, sess)
+		if blocked, reason := e.fireSessionStart(ctx, r, sess); blocked {
+			e.terminate(ctx, r, sess, session.StopError, reason, session.Usage{}, fmt.Errorf("agent: session rejected by SessionStart hook: %s", reason))
+			return
+		}
 	}
 
 	// Step 1: record the user message and assemble project instructions once.
-	if err := e.recordPrompt(ctx, sess, ws, userText); err != nil {
+	// recordPrompt expands the prompt, fires the BLOCKING UserPromptSubmit phase
+	// (applying any mutation to the effective prompt), and only then records the
+	// final text into the aggregate. A Block (or hook error) ends the run before
+	// any model call; ok=false signals that without recording anything.
+	ok, reason, err := e.recordPrompt(ctx, r, sess, ws, userText)
+	if err != nil {
 		e.terminate(ctx, r, sess, session.StopError, "", session.Usage{}, err)
 		return
 	}
-
-	// Step 1b: fire UserPromptSubmit AFTER recording the prompt but BEFORE the
-	// first model call. This is a BLOCKING phase: a Block outcome rejects the
-	// prompt and terminates the run without ever calling the model.
-	if blocked, reason := e.fireUserPromptSubmit(ctx, r, sess, userText); blocked {
+	if !ok {
 		e.terminate(ctx, r, sess, session.StopError, reason, session.Usage{}, fmt.Errorf("agent: prompt rejected by UserPromptSubmit hook: %s", reason))
 		return
 	}
@@ -265,32 +270,47 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 	}
 }
 
-// recordPrompt records the user prompt and, on the first turn, the assembled
-// project instructions (via Deps.Instructions; default RootAssembler reads
-// AGENTS.md / CLAUDE.md at the workspace root), routing both through the session
-// root so all history mutation flows through the aggregate.
+// recordPrompt produces the effective user prompt and records it (with, on the
+// first turn, the assembled project instructions via Deps.Instructions; default
+// RootAssembler reads AGENTS.md / CLAUDE.md at the workspace root) through the
+// session root so all history mutation flows through the aggregate.
 //
-// Before recording, userText is run through Deps.CommandExpander, which expands a
-// slash-command invocation into its template body; the EXPANDED text is what is
-// recorded and ultimately sent to the model. The default NoopExpander leaves the
-// text unchanged, so the v1 behaviour is preserved. Expansion is best-effort: a
-// read fault is logged-as-unchanged rather than aborting the run.
-func (e *Engine) recordPrompt(ctx context.Context, sess *session.Session, ws tool.Workspace, userText string) error {
-	if expanded, ok, err := e.deps.CommandExpander.Expand(ctx, ws, userText); err == nil && ok {
+// Ordering is load-bearing:
+//  1. Deps.CommandExpander expands a slash-command invocation into its template
+//     body; the EXPANDED text is the candidate prompt. The default NoopExpander
+//     leaves the text unchanged (v1 behaviour). Expansion is best-effort: a read
+//     fault is treated as unchanged rather than aborting the run.
+//  2. The BLOCKING UserPromptSubmit hook fires on that expanded text, BEFORE the
+//     prompt is recorded. A Block (or hook error) returns ok=false with a reason
+//     and records nothing — the caller ends the run before any model call. A
+//     non-empty Mutated payload REPLACES the effective prompt text.
+//  3. The final (possibly mutated) text is recorded via RecordUserPrompt, so it
+//     is exactly what the model receives.
+//
+// ok=false means the prompt was rejected (reason is set); a non-nil error means a
+// recording/assembly fault. Both paths leave the run to terminate.
+func (e *Engine) recordPrompt(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, userText string) (ok bool, reason string, err error) {
+	if expanded, exp, eerr := e.deps.CommandExpander.Expand(ctx, ws, userText); eerr == nil && exp {
 		userText = expanded
+	}
+	// UserPromptSubmit fires on the expanded text before recording so a mutation
+	// can rewrite the effective prompt and a block can reject it pre-record.
+	finalText, blocked, reason := e.fireUserPromptSubmit(ctx, r, sess, userText)
+	if blocked {
+		return false, reason, nil
 	}
 	var instr []session.Message
 	if sess.Counters.Turns == 0 {
-		discovered, err := e.deps.Instructions.Assemble(ctx, ws)
-		if err != nil {
-			return fmt.Errorf("agent: assemble instructions: %w", err)
+		discovered, aerr := e.deps.Instructions.Assemble(ctx, ws)
+		if aerr != nil {
+			return false, "", fmt.Errorf("agent: assemble instructions: %w", aerr)
 		}
 		instr = discovered
 	}
-	if err := sess.RecordUserPrompt(userText, instr); err != nil {
-		return fmt.Errorf("agent: record user prompt: %w", err)
+	if rerr := sess.RecordUserPrompt(finalText, instr); rerr != nil {
+		return false, "", fmt.Errorf("agent: record user prompt: %w", rerr)
 	}
-	return nil
+	return true, "", nil
 }
 
 // runTurn builds the LLMRequest, calls Stream, and assembles the chunk sequence

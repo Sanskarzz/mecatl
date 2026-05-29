@@ -334,23 +334,27 @@ goroutine; the `Run` exposes:
 
 `drive` (in `loop.go`) is the algorithm:
 
-1. **Record the prompt** (`recordPrompt`): expand the raw input through
+1. **SessionStart gate** (`fireSessionStart`, first turn only): fire the blocking
+   `SessionStart` hook before anything else; a block (or hook error) aborts the
+   run before the prompt is even recorded.
+2. **Record the prompt** (`recordPrompt`): expand the raw input through
    `CommandExpander.Expand` (slash commands; the `NoopExpander` default leaves it
-   unchanged), fire the `SessionStart`/`UserPromptSubmit` hooks, and on the first
-   turn assemble project instructions via `Instructions.Assemble` (the
-   `RootAssembler` default reads AGENTS.md/CLAUDE.md), recording them + the user
-   text through the aggregate root.
-2. **Pre-turn stop guard**: if `sess.StopReason()` trips or `ctx` is cancelled,
+   unchanged), fire the blocking `UserPromptSubmit` hook **on the expanded text**
+   (a block ends the run; a `Mutated` payload replaces the effective prompt), and
+   on the first turn assemble project instructions via `Instructions.Assemble`
+   (the `RootAssembler` default reads AGENTS.md/CLAUDE.md), recording them + the
+   final user text through the aggregate root.
+3. **Pre-turn stop guard**: if `sess.StopReason()` trips or `ctx` is cancelled,
    terminate.
-3. `BeginTurn`, emit `turn.start`.
-4. **Maybe compact** (`maybeCompact`).
-5. **Run the turn** (`runTurn`): build the `LLMRequest`, call `LLM.Stream`,
+4. `BeginTurn`, emit `turn.start`.
+5. **Maybe compact** (`maybeCompact`).
+6. **Run the turn** (`runTurn`): build the `LLMRequest`, call `LLM.Stream`,
    consume chunks, emit `message.delta` for text, accumulate reasoning, collect
    tool calls and usage, capture the stop reason; assemble one assistant
    `Message`. `ctx` cancellation mid-stream surfaces as a cancellation.
-6. `RecordAssistant`. If there are **no tool calls**, the model is done →
+7. `RecordAssistant`. If there are **no tool calls**, the model is done →
    complete the run.
-7. **Dispatch** the tool calls, `RecordToolResults`, `save`, loop back to (2).
+8. **Dispatch** the tool calls, `RecordToolResults`, `save`, loop back to (3).
 
 The loop terminates the session in exactly one of `Complete`/`Stop`/`Cancel`/
 `Fail` and emits exactly one terminal `result` event carrying cumulative usage.
@@ -466,12 +470,20 @@ Per-tool placement (`dispatch.go`):
 - **PostToolUse** (`postHook`) runs best-effort after execution; a block there
   only annotates (the tool already ran).
 
-Run-level placement (`agent/hooks.go`):
-- **SessionStart** (`fireSessionStart`) runs once at the start of a run; it is
-  advisory — a block is surfaced as a `hook` event but does **not** abort.
-- **UserPromptSubmit** (`fireUserPromptSubmit`) runs after the prompt is recorded;
-  a block (or a hook error) here **does** end the run before any model call. A
-  proposed prompt mutation is reported but not applied in v1.
+Run-level placement (`agent/hooks.go`). Both pre-prompt phases are **blocking
+run-level gates** that fail safe — a block, or a hook **execution error**, ends
+the run before any model call with `StopError`, emits a `hook` event, and still
+fires `Stop`:
+- **SessionStart** (`fireSessionStart`) runs once at the very start of a run,
+  before the prompt is recorded; a block (or hook error) **aborts** the run.
+- **UserPromptSubmit** (`fireUserPromptSubmit`) runs on the (command-expanded)
+  prompt text **before** `RecordUserPrompt`; a block (or hook error) ends the run.
+  A non-empty `HookOutcome.Mutated` payload — interpreted symmetrically with the
+  `{"prompt": ...}` `HookEvent.Input` — **replaces the effective prompt**: the
+  mutated text is what is recorded into the session and sent to the model (a
+  malformed mutation is ignored, original text stands). Ordering is preserved:
+  command expansion runs first, then the hook, then recording; first-turn
+  instruction assembly is unchanged.
 - **Stop** (`fireStop`) runs exactly once at the terminal end of any run path,
   even if `ctx` is already cancelled (it is a terminal notification). The Task
   subagent mirrors this with **SubagentStop**.

@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -137,6 +138,166 @@ func TestUserPromptSubmitBlockAbortsBeforeLLM(t *testing.T) {
 	// Stop still fires on the rejection (terminal) path.
 	if got := hooks.count(governance.PhaseStop); got != 1 {
 		t.Fatalf("Stop fired %d times on rejection, want 1", got)
+	}
+}
+
+// mutatingHooks is a port.HookRunner that returns a Mutated payload for a
+// configured phase (otherwise allows). It records phases like recordingHooks.
+type mutatingHooks struct {
+	mu     sync.Mutex
+	phases []governance.HookPhase
+	mutate map[governance.HookPhase]json.RawMessage
+}
+
+func (h *mutatingHooks) Run(_ context.Context, ev governance.HookEvent) (governance.HookOutcome, error) {
+	h.mu.Lock()
+	h.phases = append(h.phases, ev.Phase)
+	h.mu.Unlock()
+	if m, ok := h.mutate[ev.Phase]; ok {
+		return governance.HookOutcome{Mutated: m}, nil
+	}
+	return governance.HookOutcome{}, nil
+}
+
+// TestUserPromptSubmitMutationIsApplied asserts a UserPromptSubmit hook that
+// returns a mutated {"prompt": ...} payload rewrites the EFFECTIVE prompt: the
+// model receives the mutated text and the recorded conversation reflects it.
+// It reuses capturingProvider (disclosure_test.go), which records the first
+// LLMRequest and ends the turn.
+func TestUserPromptSubmitMutationIsApplied(t *testing.T) {
+	prov := &capturingProvider{}
+	mutated, _ := json.Marshal(struct {
+		Prompt string `json:"prompt"`
+	}{Prompt: "MUTATED PROMPT"})
+	hooks := &mutatingHooks{mutate: map[governance.HookPhase]json.RawMessage{
+		governance.PhaseUserPromptSubmit: mutated,
+	}}
+	cat := catalogWith(t, &fakeTool{name: "Read", readOnly: true, exec: okExec})
+	e := newEngine(agent.Deps{LLM: prov, Catalog: cat, Hooks: hooks})
+	sess := newSession(t, session.Limits{})
+	drain(e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "original prompt"))
+
+	// The model must have received the mutated text, never the original.
+	var userTexts []string
+	for _, m := range prov.req.Messages {
+		if m.Role == session.RoleUser {
+			userTexts = append(userTexts, m.Text)
+		}
+	}
+	foundMutated, foundOriginal := false, false
+	for _, txt := range userTexts {
+		if strings.Contains(txt, "MUTATED PROMPT") {
+			foundMutated = true
+		}
+		if strings.Contains(txt, "original prompt") {
+			foundOriginal = true
+		}
+	}
+	if !foundMutated {
+		t.Fatalf("model did not receive the mutated prompt; user texts = %v", userTexts)
+	}
+	if foundOriginal {
+		t.Fatalf("model received the ORIGINAL prompt; mutation was not applied: %v", userTexts)
+	}
+
+	// The recorded conversation must reflect the mutated text, not the original.
+	recMutated, recOriginal := false, false
+	for _, m := range sess.Conversation.Messages {
+		if m.Role == session.RoleUser && strings.Contains(m.Text, "MUTATED PROMPT") {
+			recMutated = true
+		}
+		if m.Role == session.RoleUser && strings.Contains(m.Text, "original prompt") {
+			recOriginal = true
+		}
+	}
+	if !recMutated {
+		t.Fatalf("recorded conversation does not contain the mutated prompt")
+	}
+	if recOriginal {
+		t.Fatalf("recorded conversation still contains the original prompt")
+	}
+}
+
+// TestUserPromptSubmitBlockAbortsBeforeRecordingAndLLM is a regression that a
+// Block on UserPromptSubmit ends the run before any model call AND before the
+// prompt is recorded (the prompt now fires pre-record).
+func TestUserPromptSubmitBlockAbortsBeforeRecordingAndLLM(t *testing.T) {
+	llm := mockllm.New(mockllm.TextTurn("should never run"))
+	hooks := newRecordingHooks(map[governance.HookPhase]string{
+		governance.PhaseUserPromptSubmit: "prompt rejected: policy violation",
+	})
+	cat := catalogWith(t, &fakeTool{name: "Read", readOnly: true, exec: okExec})
+	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Hooks: hooks})
+	sess := newSession(t, session.Limits{})
+	evs := drain(e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "blocked prompt"))
+
+	if llm.Calls() != 0 {
+		t.Fatalf("model was called %d times; want 0", llm.Calls())
+	}
+	if res := lastResult(t, evs); res.Stop != session.StopError {
+		t.Fatalf("stop = %q, want error", res.Stop)
+	}
+	if !containsType(evs, session.EvHook) {
+		t.Fatalf("expected a hook event explaining the rejection")
+	}
+	// Nothing should have been recorded into the conversation as a user prompt.
+	for _, m := range sess.Conversation.Messages {
+		if m.Role == session.RoleUser && strings.Contains(m.Text, "blocked prompt") {
+			t.Fatalf("blocked prompt was recorded into the conversation")
+		}
+	}
+}
+
+// TestSessionStartBlockAbortsRun asserts a SessionStart Block now ABORTS the run
+// with StopError, emits a hook event, and NEVER calls the model.
+func TestSessionStartBlockAbortsRun(t *testing.T) {
+	llm := mockllm.New(mockllm.TextTurn("should never run"))
+	hooks := newRecordingHooks(map[governance.HookPhase]string{
+		governance.PhaseSessionStart: "session rejected: disallowed environment",
+	})
+	cat := catalogWith(t, &fakeTool{name: "Read", readOnly: true, exec: okExec})
+	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Hooks: hooks})
+	sess := newSession(t, session.Limits{})
+	evs := drain(e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "hi"))
+
+	if llm.Calls() != 0 {
+		t.Fatalf("model was called %d times; want 0 (SessionStart should abort)", llm.Calls())
+	}
+	res := lastResult(t, evs)
+	if res.Stop != session.StopError {
+		t.Fatalf("stop = %q, want error", res.Stop)
+	}
+	if res.Error == "" {
+		t.Fatalf("expected a rejection error message")
+	}
+	if !containsType(evs, session.EvHook) {
+		t.Fatalf("expected a hook event explaining the SessionStart rejection")
+	}
+	// UserPromptSubmit must NEVER fire when SessionStart aborts first.
+	if got := hooks.count(governance.PhaseUserPromptSubmit); got != 0 {
+		t.Fatalf("UserPromptSubmit fired %d times after SessionStart abort, want 0", got)
+	}
+	// Stop still fires on the terminal path.
+	if got := hooks.count(governance.PhaseStop); got != 1 {
+		t.Fatalf("Stop fired %d times on SessionStart abort, want 1", got)
+	}
+}
+
+// TestSessionStartNoBlockProceeds is a regression that a non-blocking
+// SessionStart lets the run proceed normally (model is called, run completes).
+func TestSessionStartNoBlockProceeds(t *testing.T) {
+	llm := mockllm.New(mockllm.TextTurn("done"))
+	hooks := newRecordingHooks(nil) // no block on any phase
+	evs := runWithHooks(t, llm, hooks)
+
+	if got := hooks.count(governance.PhaseSessionStart); got != 1 {
+		t.Fatalf("SessionStart fired %d times, want 1", got)
+	}
+	if llm.Calls() != 1 {
+		t.Fatalf("model called %d times, want 1", llm.Calls())
+	}
+	if res := lastResult(t, evs); res.Stop != session.StopEndTurn {
+		t.Fatalf("stop = %q, want end_turn", res.Stop)
 	}
 }
 

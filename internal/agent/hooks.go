@@ -18,43 +18,64 @@ import (
 // site a clean no-op. The hookexec adapter likewise treats an empty phase map as
 // "allow", so firing these phases with no configured command never blocks.
 
-// fireSessionStart fires the SessionStart phase once at the start of a run. It is
-// informational: a Block outcome is surfaced as a hook Event for observability
-// but does NOT abort the run (SessionStart is advisory by design).
-func (e *Engine) fireSessionStart(ctx context.Context, r *Run, sess *session.Session) {
-	if e.deps.Hooks == nil || ctx.Err() != nil {
-		return
-	}
-	ev := governance.HookEvent{
-		Phase:     governance.PhaseSessionStart,
-		SessionID: string(sess.ID),
-	}
-	outcome, err := e.deps.Hooks.Run(ctx, ev)
-	if err == nil && outcome.Block && outcome.Message != "" {
-		e.emit(r, session.Event{Type: session.EvHook, Text: outcome.Message})
-	}
-}
-
-// fireUserPromptSubmit fires the UserPromptSubmit phase after the prompt has been
-// recorded but before the first model call. This is a BLOCKING phase: a Block
-// outcome (hookexec exit 2) rejects the prompt, and the caller terminates the run
-// without ever calling the model. It returns blocked=true with the rejection
-// reason in that case.
+// fireSessionStart fires the SessionStart phase once at the very start of a run,
+// before the prompt is recorded. This is a BLOCKING run-level gate, symmetric
+// with UserPromptSubmit: a Block outcome (hookexec exit 2) aborts the run before
+// any prompt processing or model call, and the caller terminates the run. It
+// returns blocked=true with the rejection reason in that case.
 //
-// Seam note: a hook MAY return a mutated payload to rewrite the prompt text
-// (HookOutcome.Mutated). v1 does not apply the mutation to the already-recorded
-// message; the mutation is detected and surfaced as a hook Event so the seam is
-// observable, leaving in-place prompt rewriting to a future loop change.
-func (e *Engine) fireUserPromptSubmit(ctx context.Context, r *Run, sess *session.Session, userText string) (blocked bool, reason string) {
+// Error-handling note: a hook execution fault is treated the SAME as a block
+// (fail-safe) — the run cannot proceed past a vetoing run-level phase whose
+// verdict is unknown. This mirrors UserPromptSubmit deliberately; see the report.
+func (e *Engine) fireSessionStart(ctx context.Context, r *Run, sess *session.Session) (blocked bool, reason string) {
 	if e.deps.Hooks == nil {
 		return false, ""
 	}
 	if ctx.Err() != nil {
 		return false, ""
 	}
-	input, _ := json.Marshal(struct {
-		Prompt string `json:"prompt"`
-	}{Prompt: userText})
+	ev := governance.HookEvent{
+		Phase:     governance.PhaseSessionStart,
+		SessionID: string(sess.ID),
+	}
+	outcome, err := e.deps.Hooks.Run(ctx, ev)
+	if err != nil {
+		// A hook execution fault aborts the run: a vetoing phase whose verdict is
+		// unknown cannot be assumed to allow.
+		return true, "SessionStart hook error: " + err.Error()
+	}
+	if outcome.Block {
+		msg := outcome.Message
+		if msg == "" {
+			msg = "session blocked by SessionStart hook"
+		}
+		e.emit(r, session.Event{Type: session.EvHook, Text: msg})
+		return true, msg
+	}
+	return false, ""
+}
+
+// fireUserPromptSubmit fires the UserPromptSubmit phase on the (command-expanded)
+// prompt text, BEFORE the prompt is recorded and before the first model call.
+// This is a BLOCKING phase: a Block outcome (hookexec exit 2) rejects the prompt,
+// and the caller terminates the run without ever calling the model — it returns
+// blocked=true with the rejection reason.
+//
+// Mutation: a hook MAY return a mutated payload (HookOutcome.Mutated) to rewrite
+// the prompt. The payload is interpreted SYMMETRICALLY with HookEvent.Input — a
+// JSON object {"prompt": "..."} — so the mutation replaces that same field. The
+// returned finalText is the effective prompt the caller records and the model
+// sees: the mutated text when a well-formed mutation is present, otherwise the
+// input userText unchanged. A malformed mutation payload is ignored (the original
+// text stands) and surfaced as a hook Event for observability.
+func (e *Engine) fireUserPromptSubmit(ctx context.Context, r *Run, sess *session.Session, userText string) (finalText string, blocked bool, reason string) {
+	if e.deps.Hooks == nil {
+		return userText, false, ""
+	}
+	if ctx.Err() != nil {
+		return userText, false, ""
+	}
+	input, _ := json.Marshal(promptPayload{Prompt: userText})
 	ev := governance.HookEvent{
 		Phase:     governance.PhaseUserPromptSubmit,
 		Input:     input,
@@ -64,7 +85,7 @@ func (e *Engine) fireUserPromptSubmit(ctx context.Context, r *Run, sess *session
 	if err != nil {
 		// A hook execution fault rejects the prompt: the run cannot proceed past a
 		// vetoing phase whose verdict is unknown.
-		return true, "UserPromptSubmit hook error: " + err.Error()
+		return userText, true, "UserPromptSubmit hook error: " + err.Error()
 	}
 	if outcome.Block {
 		msg := outcome.Message
@@ -72,13 +93,25 @@ func (e *Engine) fireUserPromptSubmit(ctx context.Context, r *Run, sess *session
 			msg = "prompt blocked by UserPromptSubmit hook"
 		}
 		e.emit(r, session.Event{Type: session.EvHook, Text: msg})
-		return true, msg
+		return userText, true, msg
 	}
 	if len(outcome.Mutated) > 0 {
-		// Mutation seam: a future change applies this to the recorded prompt.
-		e.emit(r, session.Event{Type: session.EvHook, Text: "UserPromptSubmit hook proposed a prompt mutation (not applied in v1)"})
+		// Apply the mutation symmetrically: decode the same {"prompt": ...} shape and
+		// use the rewritten text as the effective prompt.
+		var p promptPayload
+		if jerr := json.Unmarshal(outcome.Mutated, &p); jerr == nil {
+			e.emit(r, session.Event{Type: session.EvHook, Text: "UserPromptSubmit hook rewrote the prompt"})
+			return p.Prompt, false, ""
+		}
+		e.emit(r, session.Event{Type: session.EvHook, Text: "UserPromptSubmit hook returned a malformed prompt mutation (ignored)"})
 	}
-	return false, ""
+	return userText, false, ""
+}
+
+// promptPayload is the JSON shape of the UserPromptSubmit hook's Input and the
+// symmetric shape its Mutated payload is interpreted as.
+type promptPayload struct {
+	Prompt string `json:"prompt"`
 }
 
 // fireStop fires the Stop phase at the terminal end of a run (any terminal path:
