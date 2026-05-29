@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/internal/session"
 )
 
@@ -34,6 +35,12 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h.mux.HandleFunc("POST /v1/sessions/{id}/prompt", h.prompt)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/approve", h.approve)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/cancel", h.cancel)
+	h.mux.HandleFunc("GET /v1/mcp/resources", h.listMcpResources)
+	h.mux.HandleFunc("GET /v1/mcp/resources/read", h.readMcpResource)
+	h.mux.HandleFunc("GET /v1/mcp/prompts", h.listMcpPrompts)
+	h.mux.HandleFunc("POST /v1/mcp/prompts/get", h.getMcpPrompt)
+	h.mux.HandleFunc("GET /v1/mcp/sources", h.listMcpSources)
+	h.mux.HandleFunc("GET /v1/mcp/toolhive/groups", h.listToolHiveGroups)
 	return h
 }
 
@@ -217,6 +224,92 @@ func (h *HTTPHandler) cancel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// --- MCP inspection handlers -------------------------------------------------
+
+// getMcpPromptBody is the POST body for /v1/mcp/prompts/get.
+type getMcpPromptBody struct {
+	Server    string            `json:"server"`
+	Name      string            `json:"name"`
+	Arguments map[string]string `json:"arguments,omitempty"`
+}
+
+// listMcpResources handles GET /v1/mcp/resources?server=. The proto response is
+// JSON-encoded so the HTTP and gRPC surfaces share one shape.
+func (h *HTTPHandler) listMcpResources(w http.ResponseWriter, r *http.Request) {
+	res, err := h.svc.ListMcpResources(r.Context(), r.URL.Query().Get("server"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, &mecatlv1.ListMcpResourcesResponse{Resources: toProtoMcpResources(res)})
+}
+
+// readMcpResource handles GET /v1/mcp/resources/read?server=&uri=.
+func (h *HTTPHandler) readMcpResource(w http.ResponseWriter, r *http.Request) {
+	server := r.URL.Query().Get("server")
+	uri := r.URL.Query().Get("uri")
+	if server == "" || uri == "" {
+		writeError(w, http.StatusBadRequest, "server and uri are required")
+		return
+	}
+	c, err := h.svc.ReadMcpResource(r.Context(), server, uri)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, &mecatlv1.ReadMcpResourceResponse{
+		Contents: []*mecatlv1.McpResourceContents{toProtoMcpResourceContents(c)},
+	})
+}
+
+// listMcpPrompts handles GET /v1/mcp/prompts?server=.
+func (h *HTTPHandler) listMcpPrompts(w http.ResponseWriter, r *http.Request) {
+	ps, err := h.svc.ListMcpPrompts(r.Context(), r.URL.Query().Get("server"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, &mecatlv1.ListMcpPromptsResponse{Prompts: toProtoMcpPrompts(ps)})
+}
+
+// getMcpPrompt handles POST /v1/mcp/prompts/get.
+func (h *HTTPHandler) getMcpPrompt(w http.ResponseWriter, r *http.Request) {
+	var body getMcpPromptBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.Server == "" || body.Name == "" {
+		writeError(w, http.StatusBadRequest, "server and name are required")
+		return
+	}
+	res, err := h.svc.GetMcpPrompt(r.Context(), body.Server, body.Name, body.Arguments)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	msgs := make([]*mecatlv1.McpPromptMessage, 0, len(res.Messages))
+	for _, m := range res.Messages {
+		msgs = append(msgs, toProtoMcpPromptMessage(m))
+	}
+	writeJSON(w, http.StatusOK, &mecatlv1.GetMcpPromptResponse{Description: res.Description, Messages: msgs})
+}
+
+// listMcpSources handles GET /v1/mcp/sources.
+func (h *HTTPHandler) listMcpSources(w http.ResponseWriter, r *http.Request) {
+	infos := h.svc.ListMcpSources(r.Context())
+	out := make([]*mecatlv1.McpSource, 0, len(infos))
+	for _, s := range infos {
+		out = append(out, toProtoMcpSource(s))
+	}
+	writeJSON(w, http.StatusOK, &mecatlv1.ListMcpSourcesResponse{Sources: out})
+}
+
+// listToolHiveGroups handles GET /v1/mcp/toolhive/groups.
+func (h *HTTPHandler) listToolHiveGroups(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, &mecatlv1.ListToolHiveGroupsResponse{Groups: h.svc.ListToolHiveGroups(r.Context())})
+}
+
 // --- helpers ----------------------------------------------------------------
 
 // modeFromString maps a JSON mode string to a session.PermissionMode. Unknown
@@ -257,6 +350,13 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		// Known session, but its run is not live in this process (e.g. the
 		// stream was lost across a restart): nothing to deliver the control to.
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrNoMCPProvider):
+		// No MCP provider is wired: the precondition for read/get is unmet.
+		writeError(w, http.StatusPreconditionFailed, err.Error())
+	case errors.Is(err, ErrInternal):
+		// A downstream/transport fault on a connected MCP server — not the
+		// client's fault, so 500 rather than 400.
+		writeError(w, http.StatusInternalServerError, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}

@@ -165,3 +165,114 @@ var (
 	_ prompt.CommandExpander = prompt.NoopExpander{}
 	_ prompt.CommandExpander = (*prompt.DirCommandExpander)(nil)
 )
+
+// stubExpander is a controllable CommandExpander for MultiExpander tests. It
+// expands inputs equal to match into out (reporting expanded=true); otherwise it
+// passes the input through. err, when set, is returned for any input.
+type stubExpander struct {
+	match string
+	out   string
+	err   error
+}
+
+func (s stubExpander) Expand(_ context.Context, _ tool.Workspace, input string) (string, bool, error) {
+	if s.err != nil {
+		return input, false, s.err
+	}
+	if input == s.match {
+		return s.out, true, nil
+	}
+	return input, false, nil
+}
+
+func TestMultiExpanderFirstWins(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	// Both match "/x"; the first (highest precedence) should win and shadow the
+	// second.
+	exp := prompt.NewMultiExpander(
+		stubExpander{match: "/x", out: "FIRST"},
+		stubExpander{match: "/x", out: "SECOND"},
+	)
+	out, ok, err := exp.Expand(context.Background(), ws, "/x")
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if !ok || out != "FIRST" {
+		t.Errorf("Expand = (%q, %v), want (FIRST, true)", out, ok)
+	}
+}
+
+func TestMultiExpanderFallsThrough(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	// Only the second matches; the first passes through to it.
+	exp := prompt.NewMultiExpander(
+		stubExpander{match: "/a", out: "A"},
+		stubExpander{match: "/b", out: "B"},
+	)
+	out, ok, err := exp.Expand(context.Background(), ws, "/b")
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if !ok || out != "B" {
+		t.Errorf("Expand = (%q, %v), want (B, true)", out, ok)
+	}
+}
+
+func TestMultiExpanderNoneMatches(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	exp := prompt.NewMultiExpander(
+		stubExpander{match: "/a", out: "A"},
+		stubExpander{match: "/b", out: "B"},
+	)
+	out, ok, err := exp.Expand(context.Background(), ws, "/z")
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if ok {
+		t.Errorf("expected no expansion for /z")
+	}
+	if out != "/z" {
+		t.Errorf("input changed: %q", out)
+	}
+}
+
+func TestMultiExpanderDirShadowsLater(t *testing.T) {
+	// A file-backed DirCommandExpander command shadows a later expander that would
+	// also claim the same name — the file command wins because it is listed first.
+	ws := memfs.NewWorkspace("/proj")
+	writeFile(t, ws, ".mecatl/commands/dup.md", "FROM FILE")
+
+	exp := prompt.NewMultiExpander(
+		prompt.NewDirCommandExpander(), // highest precedence
+		stubExpander{match: "/dup", out: "FROM STUB"},
+	)
+	out, ok, err := exp.Expand(context.Background(), ws, "/dup")
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if !ok || out != "FROM FILE" {
+		t.Errorf("Expand = (%q, %v), want (FROM FILE, true) — file command must shadow the later expander", out, ok)
+	}
+}
+
+func TestMultiExpanderErrorStopsChain(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	sentinel := errStub("boom")
+	exp := prompt.NewMultiExpander(
+		stubExpander{err: sentinel},
+		stubExpander{match: "/x", out: "X"}, // never reached
+	)
+	_, ok, err := exp.Expand(context.Background(), ws, "/x")
+	if err == nil {
+		t.Fatalf("expected the chain to surface the first expander's error")
+	}
+	if ok {
+		t.Errorf("expected expanded=false on error")
+	}
+}
+
+type errStub string
+
+func (e errStub) Error() string { return string(e) }
+
+var _ prompt.CommandExpander = (*prompt.MultiExpander)(nil)

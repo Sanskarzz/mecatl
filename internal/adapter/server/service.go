@@ -6,9 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/stacklok/mecatl/internal/adapter/mcp"
+	"github.com/stacklok/mecatl/internal/adapter/mcp/source"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
@@ -49,6 +52,14 @@ type Config struct {
 	Now Clock
 	// NewID allocates session ids; defaults to a crypto-random hex generator.
 	NewID IDGenerator
+	// MCPProvider exposes the connected MCP servers' resources/prompts to the
+	// catalog-level inspection RPCs. Optional and nil-safe: when nil, the list
+	// RPCs return empty and the read/get RPCs return ErrNoMCPProvider.
+	MCPProvider mcp.Provider
+	// MCPSources is the resolved MCP source inventory snapshot taken at startup.
+	// It backs ListMcpSources and ListToolHiveGroups; both derive purely from
+	// this snapshot and perform no live discovery. May be empty.
+	MCPSources []source.SourceInfo
 }
 
 // ErrConfig is returned by NewService when a required dependency is missing.
@@ -261,4 +272,115 @@ func randomID() session.SessionID {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	return session.SessionID(hex.EncodeToString(b[:]))
+}
+
+// --- MCP inspection ----------------------------------------------------------
+//
+// These operations expose the connected MCP servers' resources/prompts and the
+// resolved source inventory over the network surface. They are catalog-level
+// (independent of any session/run). The provider is nil-safe: list operations
+// degrade to empty, and the two operations that genuinely require a live
+// provider (ReadMcpResource / GetMcpPrompt) return ErrNoMCPProvider.
+
+// ListMcpResources returns the resource snapshots for server (empty = union of
+// all servers). Returns nil with no provider configured.
+func (s *Service) ListMcpResources(ctx context.Context, server string) ([]mcp.Resource, error) {
+	if s.cfg.MCPProvider == nil {
+		return nil, nil
+	}
+	res, err := s.cfg.MCPProvider.ListResources(ctx, server)
+	if err != nil {
+		return nil, classifyMCPError(err)
+	}
+	return res, nil
+}
+
+// ReadMcpResource reads a single resource by URI from the named server. server
+// and uri must be non-empty; a nil provider yields ErrNoMCPProvider; an unknown
+// server name yields ErrInvalidArgument; a read/transport fault on a known
+// server yields ErrInternal.
+func (s *Service) ReadMcpResource(ctx context.Context, server, uri string) (mcp.ResourceContents, error) {
+	if server == "" || uri == "" {
+		return mcp.ResourceContents{}, fmt.Errorf("%w: server and uri are required", ErrInvalidArgument)
+	}
+	if s.cfg.MCPProvider == nil {
+		return mcp.ResourceContents{}, ErrNoMCPProvider
+	}
+	c, err := s.cfg.MCPProvider.ReadResource(ctx, server, uri)
+	if err != nil {
+		return mcp.ResourceContents{}, classifyMCPError(err)
+	}
+	return c, nil
+}
+
+// ListMcpPrompts returns the prompt snapshots for server (empty = union of all
+// servers). Returns nil with no provider configured.
+func (s *Service) ListMcpPrompts(ctx context.Context, server string) ([]mcp.Prompt, error) {
+	if s.cfg.MCPProvider == nil {
+		return nil, nil
+	}
+	ps, err := s.cfg.MCPProvider.ListPrompts(ctx, server)
+	if err != nil {
+		return nil, classifyMCPError(err)
+	}
+	return ps, nil
+}
+
+// GetMcpPrompt expands a named prompt with args on the named server. server and
+// name must be non-empty; a nil provider yields ErrNoMCPProvider; an unknown
+// server name yields ErrInvalidArgument; an unknown prompt, missing required
+// arg, or other expansion fault on a known server yields ErrInternal.
+func (s *Service) GetMcpPrompt(ctx context.Context, server, name string, args map[string]string) (mcp.PromptResult, error) {
+	if server == "" || name == "" {
+		return mcp.PromptResult{}, fmt.Errorf("%w: server and name are required", ErrInvalidArgument)
+	}
+	if s.cfg.MCPProvider == nil {
+		return mcp.PromptResult{}, ErrNoMCPProvider
+	}
+	res, err := s.cfg.MCPProvider.GetPrompt(ctx, server, name, args)
+	if err != nil {
+		return mcp.PromptResult{}, classifyMCPError(err)
+	}
+	return res, nil
+}
+
+// classifyMCPError maps a provider error to the right service sentinel so the
+// network surfaces can distinguish a client mistake from a downstream fault. An
+// unknown-server name (mcp.ErrUnknownServer) is genuinely a client error →
+// ErrInvalidArgument (InvalidArgument / HTTP 400). Anything else is a
+// transport/protocol fault on a connected server → ErrInternal (Internal /
+// HTTP 500). Empty-required-field validation is handled by the callers before
+// the provider is consulted and stays InvalidArgument.
+func classifyMCPError(err error) error {
+	if errors.Is(err, mcp.ErrUnknownServer) {
+		return fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+	}
+	return fmt.Errorf("%w: %v", ErrInternal, err)
+}
+
+// ListMcpSources returns the resolved source inventory snapshot (possibly
+// empty). It is a pure read of the injected snapshot; no live discovery.
+func (s *Service) ListMcpSources(_ context.Context) []source.SourceInfo {
+	return s.cfg.MCPSources
+}
+
+// ListToolHiveGroups derives the distinct, non-empty ToolHive groups from the
+// inventory snapshot. It considers only sources whose Kind is "toolhive" and
+// does NOT call ToolHive — the group set is whatever the startup resolution
+// recorded. Output is sorted for deterministic results.
+func (s *Service) ListToolHiveGroups(_ context.Context) []string {
+	seen := make(map[string]struct{})
+	var groups []string
+	for _, src := range s.cfg.MCPSources {
+		if src.Kind != "toolhive" || src.Group == "" {
+			continue
+		}
+		if _, ok := seen[src.Group]; ok {
+			continue
+		}
+		seen[src.Group] = struct{}{}
+		groups = append(groups, src.Group)
+	}
+	sort.Strings(groups)
+	return groups
 }

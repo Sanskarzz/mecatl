@@ -50,6 +50,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	default:
+		// MCP overlay result/error msgs (Stage D) are reduced first; if it's not
+		// one of those, fall through to the stream-event handler.
+		if mm, cmd, handled := m.updateMCPMsg(msg); handled {
+			return mm, cmd
+		}
 		// Stream events (session.init / turn.start / deltas / tool.* /
 		// permission.ask / hook / compaction / result) are handled separately to
 		// keep this reducer's branch count in check.
@@ -141,6 +146,12 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
+	// An open MCP overlay owns the keyboard (it only opens while idle). It steps
+	// back / closes on esc internally, so route here before the phase switch.
+	if mm, cmd, handled := m.onMCPKey(msg); handled {
+		return mm, cmd
+	}
+
 	switch m.phase {
 	case phaseAwaitingApproval:
 		return m.onApprovalKey(msg)
@@ -223,6 +234,12 @@ func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // ctrl+j) inserts a newline, everything else feeds the textarea (or scrolls).
 func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
+	case key.Matches(msg, m.keys.MCPPanel):
+		return m.openMCP(mcpPanel)
+	case key.Matches(msg, m.keys.Resources):
+		return m.openMCP(mcpResources)
+	case key.Matches(msg, m.keys.Prompts):
+		return m.openMCP(mcpPrompts)
 	case key.Matches(msg, m.keys.Newline):
 		m.ta.InsertRune('\n')
 		return m, nil

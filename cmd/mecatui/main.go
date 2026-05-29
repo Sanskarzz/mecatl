@@ -78,6 +78,7 @@ func run(args []string) error {
 	deps := ui.Deps{
 		Session:   &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: client.ModeFromString(cfg.mode)},
 		Conv:      cl,
+		MCP:       cl,
 		Theme:     th,
 		Server:    cfg.server,
 		Workspace: cfg.workspace,

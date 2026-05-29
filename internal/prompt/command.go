@@ -44,6 +44,57 @@ func (NoopExpander) Expand(_ context.Context, _ tool.Workspace, input string) (s
 // Compile-time assertion that NoopExpander satisfies the interface.
 var _ CommandExpander = NoopExpander{}
 
+// MultiExpander composes an ORDERED list of CommandExpanders into one with a
+// first-that-expands-wins rule. It is the seam that lets several expansion
+// sources (e.g. file-backed slash commands plus MCP prompts) be layered without
+// the agent loop knowing about any of them. It is pure domain composition: it
+// imports no infrastructure and only consumes the CommandExpander interface,
+// mirroring skills.MultiSource's earlier-wins semantics.
+//
+// PRECEDENCE: the expanders are tried in slice order; the FIRST one that returns
+// expanded=true wins and its rendered output is returned immediately. So an
+// earlier expander SHADOWS a later one on a name collision (order callers
+// highest-precedence-first). When no expander matches, the original input is
+// returned unchanged with expanded=false. A non-nil error from any expander is a
+// genuine read fault and is returned immediately (it stops the chain), matching
+// the single-expander contract that errors are reserved for real I/O faults, not
+// "not a command".
+type MultiExpander struct {
+	expanders []CommandExpander
+}
+
+// NewMultiExpander builds a MultiExpander over the given ordered expanders
+// (highest precedence first). nil entries are dropped so callers can assemble the
+// slice conditionally without nil checks.
+func NewMultiExpander(expanders ...CommandExpander) *MultiExpander {
+	filtered := make([]CommandExpander, 0, len(expanders))
+	for _, e := range expanders {
+		if e != nil {
+			filtered = append(filtered, e)
+		}
+	}
+	return &MultiExpander{expanders: filtered}
+}
+
+// Expand tries each composed expander in order and returns the first expansion
+// (expanded=true). If none expands, it returns the original input unchanged with
+// expanded=false. An error from any expander stops the chain and is returned.
+func (m *MultiExpander) Expand(ctx context.Context, ws tool.Workspace, input string) (string, bool, error) {
+	for _, e := range m.expanders {
+		out, expanded, err := e.Expand(ctx, ws, input)
+		if err != nil {
+			return input, false, err
+		}
+		if expanded {
+			return out, true, nil
+		}
+	}
+	return input, false, nil
+}
+
+// Compile-time assertion that *MultiExpander satisfies the interface.
+var _ CommandExpander = (*MultiExpander)(nil)
+
 // defaultCommandDirs are the workspace-relative directories DirCommandExpander
 // searches, in order, for a command's <name>.md file. ".mecatl/commands/" is the
 // native location; ".claude/commands/" is accepted for familiarity. The first

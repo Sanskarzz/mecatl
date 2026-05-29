@@ -42,9 +42,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	HarnessService_CreateSession_FullMethodName = "/mecatl.v1.HarnessService/CreateSession"
-	HarnessService_GetSession_FullMethodName    = "/mecatl.v1.HarnessService/GetSession"
-	HarnessService_Converse_FullMethodName      = "/mecatl.v1.HarnessService/Converse"
+	HarnessService_CreateSession_FullMethodName      = "/mecatl.v1.HarnessService/CreateSession"
+	HarnessService_GetSession_FullMethodName         = "/mecatl.v1.HarnessService/GetSession"
+	HarnessService_Converse_FullMethodName           = "/mecatl.v1.HarnessService/Converse"
+	HarnessService_ListMcpResources_FullMethodName   = "/mecatl.v1.HarnessService/ListMcpResources"
+	HarnessService_ReadMcpResource_FullMethodName    = "/mecatl.v1.HarnessService/ReadMcpResource"
+	HarnessService_ListMcpPrompts_FullMethodName     = "/mecatl.v1.HarnessService/ListMcpPrompts"
+	HarnessService_GetMcpPrompt_FullMethodName       = "/mecatl.v1.HarnessService/GetMcpPrompt"
+	HarnessService_ListMcpSources_FullMethodName     = "/mecatl.v1.HarnessService/ListMcpSources"
+	HarnessService_ListToolHiveGroups_FullMethodName = "/mecatl.v1.HarnessService/ListToolHiveGroups"
 )
 
 // HarnessServiceClient is the client API for HarnessService service.
@@ -63,6 +69,29 @@ type HarnessServiceClient interface {
 	// server streams `Event` envelopes until the terminal `result` event, then
 	// closes the stream. A context cancel from the client aborts the run.
 	Converse(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ConverseRequest, ConverseResponse], error)
+	// ListMcpResources returns the static resource snapshots advertised by the
+	// connected MCP servers. An empty `server` returns the union across every
+	// server; a specific name returns just that server's. Catalog-level
+	// inspection: unrelated to any in-flight Converse run.
+	ListMcpResources(ctx context.Context, in *ListMcpResourcesRequest, opts ...grpc.CallOption) (*ListMcpResourcesResponse, error)
+	// ReadMcpResource reads a single resource by URI from the named server.
+	ReadMcpResource(ctx context.Context, in *ReadMcpResourceRequest, opts ...grpc.CallOption) (*ReadMcpResourceResponse, error)
+	// ListMcpPrompts returns the static prompt snapshots advertised by the
+	// connected MCP servers. An empty `server` returns the union across every
+	// server.
+	ListMcpPrompts(ctx context.Context, in *ListMcpPromptsRequest, opts ...grpc.CallOption) (*ListMcpPromptsResponse, error)
+	// GetMcpPrompt expands a named prompt with the given arguments on the named
+	// server and returns the rendered messages.
+	GetMcpPrompt(ctx context.Context, in *GetMcpPromptRequest, opts ...grpc.CallOption) (*GetMcpPromptResponse, error)
+	// ListMcpSources returns the resolved MCP source inventory snapshot: each
+	// configured source (static / ToolHive), the servers it contributed, and any
+	// diagnostics it raised. Derived from the resolution snapshot taken at
+	// startup; it performs no live discovery.
+	ListMcpSources(ctx context.Context, in *ListMcpSourcesRequest, opts ...grpc.CallOption) (*ListMcpSourcesResponse, error)
+	// ListToolHiveGroups returns the distinct, non-empty ToolHive groups present
+	// in the resolved source inventory. Derived from the snapshot — it does NOT
+	// call ToolHive.
+	ListToolHiveGroups(ctx context.Context, in *ListToolHiveGroupsRequest, opts ...grpc.CallOption) (*ListToolHiveGroupsResponse, error)
 }
 
 type harnessServiceClient struct {
@@ -106,6 +135,66 @@ func (c *harnessServiceClient) Converse(ctx context.Context, opts ...grpc.CallOp
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type HarnessService_ConverseClient = grpc.BidiStreamingClient[ConverseRequest, ConverseResponse]
 
+func (c *harnessServiceClient) ListMcpResources(ctx context.Context, in *ListMcpResourcesRequest, opts ...grpc.CallOption) (*ListMcpResourcesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListMcpResourcesResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ListMcpResources_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) ReadMcpResource(ctx context.Context, in *ReadMcpResourceRequest, opts ...grpc.CallOption) (*ReadMcpResourceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadMcpResourceResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ReadMcpResource_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) ListMcpPrompts(ctx context.Context, in *ListMcpPromptsRequest, opts ...grpc.CallOption) (*ListMcpPromptsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListMcpPromptsResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ListMcpPrompts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) GetMcpPrompt(ctx context.Context, in *GetMcpPromptRequest, opts ...grpc.CallOption) (*GetMcpPromptResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetMcpPromptResponse)
+	err := c.cc.Invoke(ctx, HarnessService_GetMcpPrompt_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) ListMcpSources(ctx context.Context, in *ListMcpSourcesRequest, opts ...grpc.CallOption) (*ListMcpSourcesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListMcpSourcesResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ListMcpSources_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) ListToolHiveGroups(ctx context.Context, in *ListToolHiveGroupsRequest, opts ...grpc.CallOption) (*ListToolHiveGroupsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListToolHiveGroupsResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ListToolHiveGroups_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HarnessServiceServer is the server API for HarnessService service.
 // All implementations must embed UnimplementedHarnessServiceServer
 // for forward compatibility.
@@ -122,6 +211,29 @@ type HarnessServiceServer interface {
 	// server streams `Event` envelopes until the terminal `result` event, then
 	// closes the stream. A context cancel from the client aborts the run.
 	Converse(grpc.BidiStreamingServer[ConverseRequest, ConverseResponse]) error
+	// ListMcpResources returns the static resource snapshots advertised by the
+	// connected MCP servers. An empty `server` returns the union across every
+	// server; a specific name returns just that server's. Catalog-level
+	// inspection: unrelated to any in-flight Converse run.
+	ListMcpResources(context.Context, *ListMcpResourcesRequest) (*ListMcpResourcesResponse, error)
+	// ReadMcpResource reads a single resource by URI from the named server.
+	ReadMcpResource(context.Context, *ReadMcpResourceRequest) (*ReadMcpResourceResponse, error)
+	// ListMcpPrompts returns the static prompt snapshots advertised by the
+	// connected MCP servers. An empty `server` returns the union across every
+	// server.
+	ListMcpPrompts(context.Context, *ListMcpPromptsRequest) (*ListMcpPromptsResponse, error)
+	// GetMcpPrompt expands a named prompt with the given arguments on the named
+	// server and returns the rendered messages.
+	GetMcpPrompt(context.Context, *GetMcpPromptRequest) (*GetMcpPromptResponse, error)
+	// ListMcpSources returns the resolved MCP source inventory snapshot: each
+	// configured source (static / ToolHive), the servers it contributed, and any
+	// diagnostics it raised. Derived from the resolution snapshot taken at
+	// startup; it performs no live discovery.
+	ListMcpSources(context.Context, *ListMcpSourcesRequest) (*ListMcpSourcesResponse, error)
+	// ListToolHiveGroups returns the distinct, non-empty ToolHive groups present
+	// in the resolved source inventory. Derived from the snapshot — it does NOT
+	// call ToolHive.
+	ListToolHiveGroups(context.Context, *ListToolHiveGroupsRequest) (*ListToolHiveGroupsResponse, error)
 	mustEmbedUnimplementedHarnessServiceServer()
 }
 
@@ -140,6 +252,24 @@ func (UnimplementedHarnessServiceServer) GetSession(context.Context, *GetSession
 }
 func (UnimplementedHarnessServiceServer) Converse(grpc.BidiStreamingServer[ConverseRequest, ConverseResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method Converse not implemented")
+}
+func (UnimplementedHarnessServiceServer) ListMcpResources(context.Context, *ListMcpResourcesRequest) (*ListMcpResourcesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListMcpResources not implemented")
+}
+func (UnimplementedHarnessServiceServer) ReadMcpResource(context.Context, *ReadMcpResourceRequest) (*ReadMcpResourceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReadMcpResource not implemented")
+}
+func (UnimplementedHarnessServiceServer) ListMcpPrompts(context.Context, *ListMcpPromptsRequest) (*ListMcpPromptsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListMcpPrompts not implemented")
+}
+func (UnimplementedHarnessServiceServer) GetMcpPrompt(context.Context, *GetMcpPromptRequest) (*GetMcpPromptResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetMcpPrompt not implemented")
+}
+func (UnimplementedHarnessServiceServer) ListMcpSources(context.Context, *ListMcpSourcesRequest) (*ListMcpSourcesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListMcpSources not implemented")
+}
+func (UnimplementedHarnessServiceServer) ListToolHiveGroups(context.Context, *ListToolHiveGroupsRequest) (*ListToolHiveGroupsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListToolHiveGroups not implemented")
 }
 func (UnimplementedHarnessServiceServer) mustEmbedUnimplementedHarnessServiceServer() {}
 func (UnimplementedHarnessServiceServer) testEmbeddedByValue()                        {}
@@ -205,6 +335,114 @@ func _HarnessService_Converse_Handler(srv interface{}, stream grpc.ServerStream)
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type HarnessService_ConverseServer = grpc.BidiStreamingServer[ConverseRequest, ConverseResponse]
 
+func _HarnessService_ListMcpResources_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListMcpResourcesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ListMcpResources(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ListMcpResources_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ListMcpResources(ctx, req.(*ListMcpResourcesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_ReadMcpResource_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadMcpResourceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ReadMcpResource(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ReadMcpResource_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ReadMcpResource(ctx, req.(*ReadMcpResourceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_ListMcpPrompts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListMcpPromptsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ListMcpPrompts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ListMcpPrompts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ListMcpPrompts(ctx, req.(*ListMcpPromptsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_GetMcpPrompt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetMcpPromptRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).GetMcpPrompt(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_GetMcpPrompt_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).GetMcpPrompt(ctx, req.(*GetMcpPromptRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_ListMcpSources_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListMcpSourcesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ListMcpSources(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ListMcpSources_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ListMcpSources(ctx, req.(*ListMcpSourcesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_ListToolHiveGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListToolHiveGroupsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ListToolHiveGroups(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ListToolHiveGroups_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ListToolHiveGroups(ctx, req.(*ListToolHiveGroupsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // HarnessService_ServiceDesc is the grpc.ServiceDesc for HarnessService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -219,6 +457,30 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSession",
 			Handler:    _HarnessService_GetSession_Handler,
+		},
+		{
+			MethodName: "ListMcpResources",
+			Handler:    _HarnessService_ListMcpResources_Handler,
+		},
+		{
+			MethodName: "ReadMcpResource",
+			Handler:    _HarnessService_ReadMcpResource_Handler,
+		},
+		{
+			MethodName: "ListMcpPrompts",
+			Handler:    _HarnessService_ListMcpPrompts_Handler,
+		},
+		{
+			MethodName: "GetMcpPrompt",
+			Handler:    _HarnessService_GetMcpPrompt_Handler,
+		},
+		{
+			MethodName: "ListMcpSources",
+			Handler:    _HarnessService_ListMcpSources_Handler,
+		},
+		{
+			MethodName: "ListToolHiveGroups",
+			Handler:    _HarnessService_ListToolHiveGroups_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

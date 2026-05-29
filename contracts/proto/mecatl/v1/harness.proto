@@ -41,6 +41,35 @@ service HarnessService {
   // server streams `Event` envelopes until the terminal `result` event, then
   // closes the stream. A context cancel from the client aborts the run.
   rpc Converse(stream ConverseRequest) returns (stream ConverseResponse);
+
+  // ListMcpResources returns the static resource snapshots advertised by the
+  // connected MCP servers. An empty `server` returns the union across every
+  // server; a specific name returns just that server's. Catalog-level
+  // inspection: unrelated to any in-flight Converse run.
+  rpc ListMcpResources(ListMcpResourcesRequest) returns (ListMcpResourcesResponse);
+
+  // ReadMcpResource reads a single resource by URI from the named server.
+  rpc ReadMcpResource(ReadMcpResourceRequest) returns (ReadMcpResourceResponse);
+
+  // ListMcpPrompts returns the static prompt snapshots advertised by the
+  // connected MCP servers. An empty `server` returns the union across every
+  // server.
+  rpc ListMcpPrompts(ListMcpPromptsRequest) returns (ListMcpPromptsResponse);
+
+  // GetMcpPrompt expands a named prompt with the given arguments on the named
+  // server and returns the rendered messages.
+  rpc GetMcpPrompt(GetMcpPromptRequest) returns (GetMcpPromptResponse);
+
+  // ListMcpSources returns the resolved MCP source inventory snapshot: each
+  // configured source (static / ToolHive), the servers it contributed, and any
+  // diagnostics it raised. Derived from the resolution snapshot taken at
+  // startup; it performs no live discovery.
+  rpc ListMcpSources(ListMcpSourcesRequest) returns (ListMcpSourcesResponse);
+
+  // ListToolHiveGroups returns the distinct, non-empty ToolHive groups present
+  // in the resolved source inventory. Derived from the snapshot — it does NOT
+  // call ToolHive.
+  rpc ListToolHiveGroups(ListToolHiveGroupsRequest) returns (ListToolHiveGroupsResponse);
 }
 
 // PermissionMode is the session-wide permission posture, mirroring
@@ -245,4 +274,189 @@ message Usage {
   int64 cache_read_tokens = 3;
   // cache_write_tokens is the number of input tokens written into the cache.
   int64 cache_write_tokens = 4;
+}
+
+// --- MCP inspection surface --------------------------------------------------
+//
+// These messages back the catalog-level inspection RPCs. They mirror the
+// adapter value objects in internal/adapter/mcp (Resource, ResourceContents,
+// Prompt, PromptArgument, PromptResult, PromptMessage) and internal/adapter/
+// mcp/source (SourceInfo, ServerInfo) one-for-one; they are never SDK types.
+
+// McpResource is a single resource advertised by a connected MCP server.
+// Mirrors mcp.Resource.
+message McpResource {
+  // server is the connected server that owns the resource.
+  string server = 1;
+  // uri identifies the resource on its server.
+  string uri = 2;
+  // name is the resource's programmatic name.
+  string name = 3;
+  // title is the resource's human-facing title.
+  string title = 4;
+  // description summarizes the resource.
+  string description = 5;
+  // mime_type is the resource's media type.
+  string mime_type = 6;
+  // size is the resource size in bytes (0 when unknown).
+  int64 size = 7;
+  // read_only is always true: reading a resource never mutates the server.
+  bool read_only = 8;
+}
+
+// ListMcpResourcesRequest lists resource snapshots; an empty server returns the
+// union across every connected server.
+message ListMcpResourcesRequest {
+  // server scopes the listing to one connected server; empty returns all.
+  string server = 1;
+}
+
+// ListMcpResourcesResponse carries the resource snapshots.
+message ListMcpResourcesResponse {
+  // resources are the (possibly empty) resource snapshots.
+  repeated McpResource resources = 1;
+}
+
+// McpResourceContents is one chunk of a read resource's body. Text holds UTF-8
+// text; blob holds raw binary bytes. Mirrors mcp.ResourceContents.
+message McpResourceContents {
+  // uri identifies the chunk's resource.
+  string uri = 1;
+  // mime_type is the chunk's media type.
+  string mime_type = 2;
+  // text is the UTF-8 textual content, when the chunk is textual.
+  string text = 3;
+  // blob is the raw binary content, when the chunk is binary.
+  bytes blob = 4;
+}
+
+// ReadMcpResourceRequest reads one resource by URI from a named server.
+message ReadMcpResourceRequest {
+  // server is the connected server to read from.
+  string server = 1 [(buf.validate.field).string.min_len = 1];
+  // uri is the resource URI to read.
+  string uri = 2 [(buf.validate.field).string.min_len = 1];
+}
+
+// ReadMcpResourceResponse carries the read resource's content chunks.
+message ReadMcpResourceResponse {
+  // contents are the resource's content chunks.
+  repeated McpResourceContents contents = 1;
+}
+
+// McpPromptArgument describes one templating argument a prompt accepts.
+// Mirrors mcp.PromptArgument.
+message McpPromptArgument {
+  // name is the argument's programmatic name.
+  string name = 1;
+  // title is the argument's human-facing title.
+  string title = 2;
+  // description summarizes the argument.
+  string description = 3;
+  // required reports whether the argument must be supplied.
+  bool required = 4;
+}
+
+// McpPrompt is a prompt template advertised by a connected server. Mirrors
+// mcp.Prompt.
+message McpPrompt {
+  // server is the connected server that owns the prompt.
+  string server = 1;
+  // name is the prompt's programmatic name.
+  string name = 2;
+  // title is the prompt's human-facing title.
+  string title = 3;
+  // description summarizes the prompt.
+  string description = 4;
+  // arguments are the templating arguments the prompt accepts.
+  repeated McpPromptArgument arguments = 5;
+}
+
+// ListMcpPromptsRequest lists prompt snapshots; an empty server returns the
+// union across every connected server.
+message ListMcpPromptsRequest {
+  // server scopes the listing to one connected server; empty returns all.
+  string server = 1;
+}
+
+// ListMcpPromptsResponse carries the prompt snapshots.
+message ListMcpPromptsResponse {
+  // prompts are the (possibly empty) prompt snapshots.
+  repeated McpPrompt prompts = 1;
+}
+
+// GetMcpPromptRequest expands a named prompt with arguments on a named server.
+message GetMcpPromptRequest {
+  // server is the connected server that owns the prompt.
+  string server = 1 [(buf.validate.field).string.min_len = 1];
+  // name is the prompt to expand.
+  string name = 2 [(buf.validate.field).string.min_len = 1];
+  // arguments are the templating values keyed by argument name.
+  map<string, string> arguments = 3;
+}
+
+// McpPromptMessage is one role-tagged message of an expanded prompt. Mirrors
+// mcp.PromptMessage.
+message McpPromptMessage {
+  // role is the MCP role string ("user"/"assistant").
+  string role = 1;
+  // text is the flattened textual content of the message.
+  string text = 2;
+}
+
+// GetMcpPromptResponse carries the expanded prompt.
+message GetMcpPromptResponse {
+  // description is the prompt's optional description.
+  string description = 1;
+  // messages are the rendered, role-tagged messages.
+  repeated McpPromptMessage messages = 2;
+}
+
+// McpServerInfo is one resolved MCP server candidate within a source. Mirrors
+// source.ServerInfo.
+message McpServerInfo {
+  // name is the server's configured name.
+  string name = 1;
+  // url is the server's proxy/base URL.
+  string url = 2;
+  // transport is the wire transport (e.g. "streamable-http").
+  string transport = 3;
+  // group is the ToolHive group (empty for the static source).
+  string group = 4;
+}
+
+// McpSource is the inventory for one resolved MCP source. Mirrors
+// source.SourceInfo.
+message McpSource {
+  // name is the source's identity, e.g. "static" or "toolhive(default)".
+  string name = 1;
+  // kind is the coarse source kind: "static" or "toolhive".
+  string kind = 2;
+  // enabled reports whether the source was active in the resolution.
+  bool enabled = 3;
+  // group is the ToolHive group (empty for the static source).
+  string group = 4;
+  // servers are the configs this source contributed.
+  repeated McpServerInfo servers = 5;
+  // diagnostics are this source's per-server skip reasons.
+  repeated string diagnostics = 6;
+}
+
+// ListMcpSourcesRequest requests the resolved source inventory snapshot.
+message ListMcpSourcesRequest {}
+
+// ListMcpSourcesResponse carries the resolved source inventory.
+message ListMcpSourcesResponse {
+  // sources are the (possibly empty) resolved sources.
+  repeated McpSource sources = 1;
+}
+
+// ListToolHiveGroupsRequest requests the distinct ToolHive groups in the
+// resolved inventory.
+message ListToolHiveGroupsRequest {}
+
+// ListToolHiveGroupsResponse carries the distinct, non-empty ToolHive groups.
+message ListToolHiveGroupsResponse {
+  // groups are the distinct, non-empty ToolHive groups in the inventory.
+  repeated string groups = 1;
 }

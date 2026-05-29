@@ -39,6 +39,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
+	mcpsource "github.com/stacklok/mecatl/internal/adapter/mcp/source"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/openai"
@@ -182,6 +183,24 @@ type config struct {
 
 	// MCP: remote MCP servers to connect to and register tools from.
 	mcpServers mcpServerList
+
+	// MCP resources: register the ListMcpResources/ReadMcpResource meta-tools when
+	// a connected server exposes resources. Default ON — the tools are registered
+	// only when there is at least one resource to expose (so "on" is a no-op when
+	// nothing advertises resources).
+	mcpResourceTools bool
+	// MCP prompts: compose the MCP prompt expander so "/mcp__<server>__<prompt>"
+	// inputs expand to the server-rendered prompt. Default ON; expansion only fires
+	// when the MCP prompt namespace is actually used.
+	mcpPrompts bool
+
+	// ToolHive: discover MCP servers from the running ToolHive workloads (the
+	// embedded ToolHive library lists already-running workloads and reads their
+	// HTTP proxy URLs — mecatl never spawns a workload). Default ON; it fails soft
+	// to zero servers when no container runtime is reachable.
+	toolHiveEnabled bool
+	// toolHiveGroup is the ToolHive group to discover from (empty -> "default").
+	toolHiveGroup string
 }
 
 // mcpServerList is a repeatable flag.Value collecting --mcp-server name=URL
@@ -289,17 +308,23 @@ func run() error {
 	tracing := telemetry.NewTracing(otel.GetTracerProvider())
 	sink := telemetry.NewSink(metrics, tracing)
 
-	// MCP: connect to any configured remote servers and register their tools
-	// into the parent catalog. A nil/failed manager is non-fatal; mcpClose is
-	// always safe to call.
-	engine, mcpClose := buildEngine(ctx, cfg, provider, sink, metrics, store)
+	// MCP: resolve the server inventory (static --mcp-server entries + the live
+	// ToolHive workload source), connect them, and register their tools into the
+	// parent catalog. A nil/failed manager is non-fatal; mcpClose is always safe to
+	// call. mcpInventory is the resolved source/server/diagnostic snapshot a future
+	// (Stage C) gRPC stage will hand to the server adapter; for now we log a summary
+	// so the resolution is observable.
+	engine, mcpProvider, mcpInventory, mcpClose := buildEngine(ctx, cfg, provider, sink, metrics, store)
 	defer mcpClose()
+	logMCPInventory(mcpInventory)
 
 	svc, err := server.NewService(server.Config{
 		Engine:        engine,
 		Store:         store,
 		Workspaces:    osfsWorkspaceFactory(),
 		DefaultLimits: defaultLimits(),
+		MCPProvider:   mcpProvider,
+		MCPSources:    mcpInventory,
 	})
 	if err != nil {
 		return fmt.Errorf("build service: %w", err)
@@ -355,6 +380,11 @@ func parseFlags(argv []string) (config, error) {
 	fs.BoolVar(&cfg.enableRepoMap, "enable-repomap", true, "register the Aider-style repo-map tool (CGO-free, tree-sitter via WebAssembly)")
 
 	fs.Var(&cfg.mcpServers, "mcp-server", "remote MCP server as name=URL (repeatable); auth token read from MCP_<NAME>_TOKEN")
+	fs.BoolVar(&cfg.mcpResourceTools, "mcp-resource-tools", true, "register the ListMcpResources/ReadMcpResource meta-tools when a connected MCP server exposes resources (no-op when none do). TRUST BOUNDARY: a remote resource's contents enter the model context like any other MCP output — enable only for servers you trust")
+	fs.BoolVar(&cfg.mcpPrompts, "mcp-prompts", true, "expand \"/mcp__<server>__<prompt> key=value\" inputs into the server-rendered prompt (static snapshot taken at connect). TRUST BOUNDARY: an MCP prompt steers the model like a slash command — enable only for servers you trust")
+
+	fs.BoolVar(&cfg.toolHiveEnabled, "toolhive", true, "discover MCP servers from the running ToolHive workloads (the embedded ToolHive library lists already-running workloads and reads their HTTP proxy URLs; mecatl NEVER starts or spawns a workload). Fails soft to zero servers when no container runtime is reachable. TRUST BOUNDARY: registering tools from running workloads is the same trust class as --mcp-server — every discovered workload's tools enter the model context")
+	fs.StringVar(&cfg.toolHiveGroup, "toolhive-group", "", "ToolHive group to discover workloads from (empty -> the \"default\" group). Only consulted when --toolhive is set")
 
 	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token required on every gRPC/HTTP request (or MECATL_AUTH_TOKEN; empty disables auth)")
 	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "PEM server certificate; with --tls-key enables TLS on the gRPC + HTTP servers")
@@ -445,11 +475,11 @@ func buildStore(cfg config) (port.SessionStore, error) {
 // It also wires the telemetry Sink (EventSink) and Logger, and connects any
 // configured MCP servers, returning a close func that tears the MCP manager
 // down on shutdown (a no-op when no servers are configured).
-func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sink port.EventSink, logger port.Logger, store port.SessionStore) (*agent.Engine, func()) {
+func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sink port.EventSink, logger port.Logger, store port.SessionStore) (*agent.Engine, mcp.Provider, []mcpsource.SourceInfo, func()) {
 	policy := permpolicy.NewPolicy(defaultRules())
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
-	cat, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
+	cat, mcpProvider, mcpInventory, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
 
 	counter := buildTokenCounter(cfg)
 
@@ -471,9 +501,9 @@ func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sin
 		CompactionRatio:     defaultCompactionRatio,
 		TokenCounter:        counter,
 		Compactor:           buildCompactor(cfg, provider, counter),
-		CommandExpander:     buildCommandExpander(cfg),
+		CommandExpander:     buildCommandExpander(cfg, mcpProvider),
 	}
-	return agent.NewEngine(deps), mcpClose
+	return agent.NewEngine(deps), mcpProvider, mcpInventory, mcpClose
 }
 
 // buildCommandExpander selects the slash-command expander for the agent Deps.
@@ -484,19 +514,66 @@ func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sin
 // precedence over the defaults; --enable-commands without a dir uses the
 // defaults. Templates are discovered through the session Workspace FS, so paths
 // are workspace-relative.
-func buildCommandExpander(cfg config) prompt.CommandExpander {
+// It also composes an MCP prompt expander (highest precedence is the file-backed
+// DirCommandExpander, so a local command file shadows a same-named MCP prompt)
+// when --mcp-prompts is set and at least one connected server exposes a prompt.
+// The MultiExpander tries the file-backed expander first, then the MCP one, so
+// "/mcp__<server>__<prompt>" reaches MCP only when no file command matched.
+func buildCommandExpander(cfg config, mcpProvider mcp.Provider) prompt.CommandExpander {
+	dirExp := buildDirCommandExpander(cfg)
+	mcpExp := buildMCPPromptExpander(cfg, mcpProvider)
+
+	switch {
+	case dirExp == nil && mcpExp == nil:
+		return prompt.NoopExpander{}
+	case mcpExp == nil:
+		return dirExp
+	case dirExp == nil:
+		return mcpExp
+	default:
+		// File-backed commands win on a name collision (listed first).
+		return prompt.NewMultiExpander(dirExp, mcpExp)
+	}
+}
+
+// buildDirCommandExpander returns the file-backed slash-command expander, or nil
+// when command expansion is not enabled (so the caller can compose conditionally).
+func buildDirCommandExpander(cfg config) prompt.CommandExpander {
 	if cfg.commandsDir == "" && !cfg.enableCommands {
 		slog.Info("slash commands DISABLED (set --commands-dir or --enable-commands to enable)")
-		return prompt.NoopExpander{}
+		return nil
 	}
 	if cfg.commandsDir != "" {
 		slog.Info("slash commands ENABLED", "dir", cfg.commandsDir)
 		return prompt.NewDirCommandExpander(cfg.commandsDir)
 	}
 	// --enable-commands with no explicit dir: use the package defaults.
-	exp := prompt.NewDirCommandExpander()
 	slog.Info("slash commands ENABLED (default dirs)", "dirs", ".mecatl/commands,.claude/commands")
-	return exp
+	return prompt.NewDirCommandExpander()
+}
+
+// buildMCPPromptExpander returns the MCP prompt expander, or nil when MCP prompts
+// are disabled or no connected server exposes a prompt. It probes the provider's
+// static prompt snapshot so the expander is only wired when there is something to
+// expand (mirroring the resource-tool non-empty gating).
+func buildMCPPromptExpander(cfg config, p mcp.Provider) prompt.CommandExpander {
+	if !cfg.mcpPrompts || p == nil {
+		if !cfg.mcpPrompts {
+			slog.Info("MCP prompts DISABLED (--mcp-prompts=false)")
+		}
+		return nil
+	}
+	prompts, err := p.ListPrompts(context.Background(), "")
+	if err != nil {
+		slog.Warn("MCP prompt listing failed; prompt expansion disabled", "err", err)
+		return nil
+	}
+	if len(prompts) == 0 {
+		slog.Info("MCP prompts DISABLED (no connected server exposes a prompt)")
+		return nil
+	}
+	slog.Info("MCP prompt expansion ENABLED", "count", len(prompts))
+	return mcp.NewPromptExpander(p)
 }
 
 // buildTokenCounter selects the TokenCounter from --tokenizer. The default
@@ -554,7 +631,7 @@ func buildCompactor(cfg config, provider port.LLMProvider, counter agent.TokenCo
 // and registers their (namespaced) tools. Connecting MCP is best-effort:
 // unreachable servers are logged and skipped, and a failed manager never aborts
 // startup. The returned close func tears down the MCP manager on shutdown.
-func buildCatalog(ctx context.Context, cfg config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, func()) {
+func buildCatalog(ctx context.Context, cfg config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, mcp.Provider, []mcpsource.SourceInfo, func()) {
 	cat := tool.NewCatalog()
 	for _, t := range tools.All() {
 		cat.MustRegister(t)
@@ -618,35 +695,96 @@ func buildCatalog(ctx context.Context, cfg config, provider port.LLMProvider, ho
 		slog.Info("repo map tool DISABLED (--enable-repomap=false)")
 	}
 
-	mcpClose := registerMCP(ctx, cfg, cat)
-	return cat, mcpClose
+	mcpProvider, mcpInventory, mcpClose := registerMCP(ctx, cfg, cat)
+	return cat, mcpProvider, mcpInventory, mcpClose
 }
 
-// registerMCP connects the configured MCP servers and registers their tools into
-// cat. It is non-fatal end to end: with no servers configured it does nothing;
-// individual unreachable servers are logged and skipped via the onError hook; a
-// manager that fails entirely is logged and skipped. It returns a close func
-// that shuts the manager down (a no-op when there is nothing to close).
-func registerMCP(ctx context.Context, cfg config, cat *tool.Catalog) func() {
-	if len(cfg.mcpServers) == 0 {
-		return func() {}
+// registerMCP RESOLVES the MCP server inventory from the pluggable source list
+// (static --mcp-server entries first, then the live ToolHive workload source when
+// --toolhive is on), connects the merged set, and registers their tools into cat.
+// It is non-fatal end to end: with no servers resolved it does nothing; per-source
+// SkipErrors and per-server connect failures are logged and skipped; a manager
+// that fails entirely is logged and skipped.
+//
+// It returns:
+//   - the connected Manager as an mcp.Provider (nil when nothing was resolved or
+//     the manager could not be built) so later wiring — the resource/prompt
+//     expander here, and a future gRPC stage — can read the servers' resources and
+//     prompts;
+//   - the resolved source inventory ([]source.SourceInfo) so a later (Stage C)
+//     gRPC stage can report WHICH sources/servers/diagnostics were resolved
+//     without re-running discovery or importing the ToolHive library;
+//   - a close func that shuts the manager down (a no-op when there is nothing to
+//     close).
+func registerMCP(ctx context.Context, cfg config, cat *tool.Catalog) (mcp.Provider, []mcpsource.SourceInfo, func()) {
+	opts := mcpsource.ResolveOptions{
+		StaticServers:   cfg.mcpServers,
+		ToolHiveEnabled: cfg.toolHiveEnabled,
+		ToolHiveGroup:   cfg.toolHiveGroup,
 	}
+	sources := mcpsource.ResolveSources(opts)
+
+	// Resolve the sources ONCE: a single walk yields both the merged configs to
+	// connect (static shadows ToolHive on a name collision) AND the per-source
+	// inventory snapshot for Stage C — so the gRPC inventory and the connected
+	// servers come from the same snapshot, and the live ToolHive source is listed
+	// only once. Fail-soft: a source error becomes a diagnostic, never an abort.
+	configs, inventory, skips := mcpsource.Resolve(ctx, sources)
+	for _, s := range skips {
+		slog.Warn("MCP server skipped", "name", s.Server, "reason", s.Reason)
+	}
+	if len(configs) == 0 {
+		slog.Info("MCP DISABLED (no servers resolved from any source)",
+			"toolhive", cfg.toolHiveEnabled, "static", len(cfg.mcpServers))
+		return nil, inventory, func() {}
+	}
+
 	onError := func(sc mcp.ServerConfig, err error) {
 		slog.Warn("MCP server unreachable; skipping", "name", sc.Name, "url", sc.URL, "err", err)
 	}
-	mgr, err := mcp.NewManager(ctx, cfg.mcpServers, onError)
+	mgr, err := mcp.NewManager(ctx, configs, onError)
 	if err != nil {
 		slog.Warn("MCP manager construction failed; continuing without MCP tools", "err", err)
-		return func() {}
+		return nil, inventory, func() {}
 	}
 	if err := mcp.Register(cat, mgr.Tools()); err != nil {
 		slog.Warn("registering MCP tools failed; some tools may be missing", "err", err)
 	}
-	slog.Info("MCP tools registered", "servers", len(cfg.mcpServers), "tools", len(mgr.Tools()))
-	return func() {
+	slog.Info("MCP tools registered", "servers", len(configs), "tools", len(mgr.Tools()))
+
+	// Resource meta-tools: registered only when at least one server exposes a
+	// resource (RegisterResourceTools gates on non-empty). Non-fatal: a failure
+	// logs and continues with the proxied tools already registered.
+	if cfg.mcpResourceTools {
+		registered, rerr := mcp.RegisterResourceTools(cat, mgr)
+		switch {
+		case rerr != nil:
+			slog.Warn("registering MCP resource tools failed", "err", rerr)
+		case registered:
+			slog.Info("MCP resource tools ENABLED (ListMcpResources/ReadMcpResource)")
+		default:
+			slog.Info("MCP resource tools DISABLED (no connected server exposes a resource)")
+		}
+	} else {
+		slog.Info("MCP resource tools DISABLED (--mcp-resource-tools=false)")
+	}
+
+	return mgr, inventory, func() {
 		if err := mgr.Close(); err != nil {
 			slog.Warn("MCP manager close", "err", err)
 		}
+	}
+}
+
+// logMCPInventory logs a one-line-per-source summary of the resolved MCP source
+// inventory. It is the placeholder consumer of the inventory until Stage C threads
+// it to the gRPC server adapter; logging it keeps the resolution observable and
+// the inventory value live (not dead-coded) in the composition root.
+func logMCPInventory(inventory []mcpsource.SourceInfo) {
+	for _, src := range inventory {
+		slog.Info("MCP source resolved",
+			"source", src.Name, "kind", src.Kind, "group", src.Group,
+			"servers", len(src.Servers), "diagnostics", len(src.Diagnostics))
 	}
 }
 

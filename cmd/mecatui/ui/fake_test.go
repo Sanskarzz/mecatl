@@ -95,3 +95,64 @@ func (*fakeConv) CreateSession(_ context.Context) (string, error) {
 func (c *fakeConv) OpenConverse(_ context.Context) (*client.Stream, error) {
 	return client.NewStream(c.recv, c.send), nil
 }
+
+// fakeMCP is a scripted client.MCP for the overlay tests: each method returns its
+// canned data or a canned error. err, when set, is returned by every call so the
+// overlay's classified-error rendering can be exercised. It implements client.MCP
+// so the ui's MCP commands run with no proto and no network.
+type fakeMCP struct {
+	resources []client.MCPResource
+	contents  []client.MCPResourceContents
+	prompts   []client.MCPPrompt
+	promptDsc string
+	promptMsg []client.MCPPromptMessage
+	sources   []client.MCPSource
+	groups    []string
+
+	err error // when non-nil, every RPC returns it (already a gRPC status)
+
+	getPromptCalls int // how many times GetMCPPrompt was invoked (validation guard)
+}
+
+func (f *fakeMCP) ListMCPResources(_ context.Context, _ string) ([]client.MCPResource, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.resources, nil
+}
+
+func (f *fakeMCP) ReadMCPResource(_ context.Context, _, _ string) ([]client.MCPResourceContents, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.contents, nil
+}
+
+func (f *fakeMCP) ListMCPPrompts(_ context.Context, _ string) ([]client.MCPPrompt, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.prompts, nil
+}
+
+func (f *fakeMCP) GetMCPPrompt(_ context.Context, _, _ string, _ map[string]string) (string, []client.MCPPromptMessage, error) {
+	f.getPromptCalls++
+	if f.err != nil {
+		return "", nil, f.err
+	}
+	return f.promptDsc, f.promptMsg, nil
+}
+
+func (f *fakeMCP) ListMCPSources(_ context.Context) ([]client.MCPSource, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.sources, nil
+}
+
+func (f *fakeMCP) ListToolHiveGroups(_ context.Context) ([]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.groups, nil
+}

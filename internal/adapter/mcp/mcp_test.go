@@ -67,6 +67,8 @@ func newTestServer(t *testing.T, gotAuth *string) (string, func()) {
 		}, nil, nil
 	})
 
+	addTestResourcesAndPrompts(srv)
+
 	handler := mcpsdk.NewStreamableHTTPHandler(
 		func(*http.Request) *mcpsdk.Server { return srv },
 		nil,
@@ -289,6 +291,94 @@ func TestConnectValidatesConfig(t *testing.T) {
 			t.Errorf("Connect(%+v) = nil error, want validation error", cfg)
 		}
 	}
+}
+
+// addTestResourcesAndPrompts registers fixture resources (text + binary), a
+// resource template, and prompts (one with a required arg) on the test server.
+// Registering any resource/prompt makes the SDK advertise the matching server
+// capability, which is what the capability-gated connect path keys off.
+func addTestResourcesAndPrompts(srv *mcpsdk.Server) {
+	// Text resource.
+	srv.AddResource(&mcpsdk.Resource{
+		URI:         "test://text",
+		Name:        "text-doc",
+		Description: "a plain text resource",
+		MIMEType:    "text/plain",
+	}, func(_ context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
+		return &mcpsdk.ReadResourceResult{
+			Contents: []*mcpsdk.ResourceContents{
+				{URI: req.Params.URI, MIMEType: "text/plain", Text: "hello resource"},
+			},
+		}, nil
+	})
+
+	// Binary resource: returns a Blob, which the adapter must summarize (never dump).
+	srv.AddResource(&mcpsdk.Resource{
+		URI:      "test://binary",
+		Name:     "binary-blob",
+		MIMEType: "application/octet-stream",
+	}, func(_ context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
+		return &mcpsdk.ReadResourceResult{
+			Contents: []*mcpsdk.ResourceContents{
+				{URI: req.Params.URI, MIMEType: "image/png", Blob: []byte{0x89, 0x50, 0x4e, 0x47}},
+			},
+		}, nil
+	})
+
+	// Resource template (advertised; not required for the read tests).
+	srv.AddResourceTemplate(&mcpsdk.ResourceTemplate{
+		Name:        "by-id",
+		URITemplate: "test://item/{id}",
+		Description: "fetch an item by id",
+	}, func(_ context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
+		return &mcpsdk.ReadResourceResult{
+			Contents: []*mcpsdk.ResourceContents{
+				{URI: req.Params.URI, MIMEType: "text/plain", Text: "templated:" + req.Params.URI},
+			},
+		}, nil
+	})
+
+	// Prompt with a required argument; renders two role-tagged messages.
+	srv.AddPrompt(&mcpsdk.Prompt{
+		Name:        "greet",
+		Description: "greet someone",
+		Arguments: []*mcpsdk.PromptArgument{
+			{Name: "who", Description: "who to greet", Required: true},
+		},
+	}, func(_ context.Context, req *mcpsdk.GetPromptRequest) (*mcpsdk.GetPromptResult, error) {
+		who := ""
+		if req.Params != nil {
+			who = req.Params.Arguments["who"]
+		}
+		// Enforce the required argument server-side (the SDK does not), so a missing
+		// "who" surfaces as an error the client maps to a Go error.
+		if who == "" {
+			return nil, errors.New("missing required argument: who")
+		}
+		return &mcpsdk.GetPromptResult{
+			Description: "a greeting",
+			Messages: []*mcpsdk.PromptMessage{
+				{Role: "user", Content: &mcpsdk.TextContent{Text: "Say hi to " + who}},
+				{Role: "assistant", Content: &mcpsdk.TextContent{Text: "Hi, " + who + "!"}},
+			},
+		}, nil
+	})
+}
+
+// newToolsOnlyServer stands up an in-process MCP server that exposes a single
+// tool and NO resources or prompts, so its initialize handshake advertises
+// neither capability. Used to assert the capability-absent server is skipped
+// gracefully.
+func newToolsOnlyServer(t *testing.T) (string, func()) {
+	t.Helper()
+	srv := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "toolsonly", Version: "v1"}, nil)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{Name: "ping", Description: "ping"},
+		func(_ context.Context, _ *mcpsdk.CallToolRequest, _ noArgs) (*mcpsdk.CallToolResult, any, error) {
+			return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: "pong"}}}, nil, nil
+		})
+	handler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil)
+	httpSrv := httptest.NewServer(handler)
+	return httpSrv.URL, httpSrv.Close
 }
 
 func keys(m map[string]tool.Tool) []string {

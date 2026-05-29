@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -37,6 +38,13 @@ import (
 
 	"github.com/stacklok/mecatl/internal/tool"
 )
+
+// ErrUnknownServer is returned (wrapped) by the Provider routing methods when a
+// caller names a server that is not connected. It is a CLIENT error (the name is
+// wrong), distinct from a transport/protocol fault on a known server — callers
+// at the network surface map it to InvalidArgument, while other faults map to
+// Internal/Unavailable.
+var ErrUnknownServer = errors.New("mcp: unknown server")
 
 // defaultConnectTimeout bounds the initialize handshake and initial tool
 // listing so an unresponsive server cannot stall startup indefinitely.
@@ -85,11 +93,15 @@ func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 }
 
 // Server is a live connection to one remote MCP server. It owns the SDK client
-// session and the tool.Tool wrappers derived from the server's tool list.
+// session and the tool.Tool wrappers derived from the server's tool list, plus
+// the static snapshots of the server's resources and prompts captured once at
+// connect (v1 does NOT subscribe to list-changed notifications).
 type Server struct {
-	name    string
-	session *mcpsdk.ClientSession
-	tools   []tool.Tool
+	name      string
+	session   *mcpsdk.ClientSession
+	tools     []tool.Tool
+	resources []Resource
+	prompts   []Prompt
 }
 
 // Connect establishes a Streamable HTTP session to the configured MCP server,
@@ -157,7 +169,46 @@ func Connect(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("mcp: list tools on server %q: %w", cfg.Name, err)
 	}
 
-	return &Server{name: cfg.Name, session: sess, tools: tools}, nil
+	srv := &Server{name: cfg.Name, session: sess, tools: tools}
+
+	// Resources and prompts are STATIC SNAPSHOTS taken once here, and only when
+	// the server advertised the matching capability in the initialize handshake.
+	// A server that exposes tools but not resources/prompts is fine: we skip the
+	// absent capability so one limited server never breaks the harness. Listing
+	// is also non-fatal — a server that advertises the capability but errors the
+	// list is logged-and-skipped rather than failing the whole connect, since the
+	// tools are already usable.
+	caps := serverCapabilities(sess)
+	if caps != nil && caps.Resources != nil {
+		if res, rerr := srv.listResources(connectCtx); rerr != nil {
+			slog.Warn("mcp: listing resources failed; continuing without them",
+				"server", cfg.Name, "err", rerr)
+		} else {
+			srv.resources = res
+		}
+	}
+	if caps != nil && caps.Prompts != nil {
+		if pr, perr := srv.listPrompts(connectCtx); perr != nil {
+			slog.Warn("mcp: listing prompts failed; continuing without them",
+				"server", cfg.Name, "err", perr)
+		} else {
+			srv.prompts = pr
+		}
+	}
+
+	return srv, nil
+}
+
+// serverCapabilities returns the capabilities the server advertised in the
+// initialize handshake, or nil if unavailable. It is the single place this
+// adapter inspects negotiated capabilities, so the "skip absent capability"
+// policy lives in one spot.
+func serverCapabilities(sess *mcpsdk.ClientSession) *mcpsdk.ServerCapabilities {
+	init := sess.InitializeResult()
+	if init == nil {
+		return nil
+	}
+	return init.Capabilities
 }
 
 // listTools pages through the server's tools and wraps each as a tool.Tool.
@@ -181,6 +232,14 @@ func (s *Server) Name() string { return s.name }
 
 // Tools returns the wrapped remote tools exposed by this server.
 func (s *Server) Tools() []tool.Tool { return s.tools }
+
+// Resources returns the static snapshot of the server's resources captured at
+// connect (empty if the server advertised no resources capability).
+func (s *Server) Resources() []Resource { return s.resources }
+
+// Prompts returns the static snapshot of the server's prompts captured at
+// connect (empty if the server advertised no prompts capability).
+func (s *Server) Prompts() []Prompt { return s.prompts }
 
 // Close terminates the MCP session. It is safe to call once; subsequent calls
 // return the SDK's session-close result.
@@ -228,7 +287,8 @@ func NewManager(ctx context.Context, configs []ServerConfig, onError func(cfg Se
 	return m, nil
 }
 
-// Servers returns the successfully connected servers.
+// Servers returns the successfully connected *Server values, for callers that
+// need the live objects (tools/close), such as the composition root and tests.
 func (m *Manager) Servers() []*Server { return m.servers }
 
 // Tools returns the union of every connected server's wrapped tools.
@@ -238,6 +298,110 @@ func (m *Manager) Tools() []tool.Tool {
 		all = append(all, s.Tools()...)
 	}
 	return all
+}
+
+// Provider is the read-side seam over the connected MCP servers' resources and
+// prompts. It is what the resource/prompt meta-tools and the prompt expander are
+// built against, and is the surface a later (gRPC) stage consumes to expose
+// resources/prompts to clients. *Manager is the production implementation;
+// routing is by server name, with the empty server name meaning "all servers".
+//
+// LAYERING: this seam lives in the adapter package (not the domain) for the same
+// reason as skills.Source — resources/prompts are packaged at composition time;
+// no domain port consumes them. ReadResource/GetPrompt return Go errors only for
+// genuine faults (unknown server, transport failure); the tools/expander built
+// over a Provider translate those into model-facing tool errors, never aborting
+// a turn.
+type Provider interface {
+	// ListResources returns the static resource snapshots. server=="" returns the
+	// union across all servers; a specific name returns just that server's (or an
+	// error if the name is unknown).
+	ListResources(ctx context.Context, server string) ([]Resource, error)
+	// ReadResource reads a single resource by URI from the named server.
+	ReadResource(ctx context.Context, server, uri string) (ResourceContents, error)
+	// ListPrompts returns the static prompt snapshots. server=="" returns the
+	// union across all servers.
+	ListPrompts(ctx context.Context, server string) ([]Prompt, error)
+	// GetPrompt expands a named prompt with args on the named server.
+	GetPrompt(ctx context.Context, server, name string, args map[string]string) (PromptResult, error)
+}
+
+// Compile-time assertion that *Manager satisfies Provider.
+var _ Provider = (*Manager)(nil)
+
+// byName looks up a connected server by its configured name.
+func (m *Manager) byName(server string) (*Server, error) {
+	for _, s := range m.servers {
+		if s.name == server {
+			return s, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: %q", ErrUnknownServer, server)
+}
+
+// ListResources implements Provider. With an empty server name it returns the
+// union of every connected server's resource snapshot; otherwise it returns the
+// named server's snapshot (error if the name is unknown).
+func (m *Manager) ListResources(_ context.Context, server string) ([]Resource, error) {
+	if server == "" {
+		var all []Resource
+		for _, s := range m.servers {
+			all = append(all, s.Resources()...)
+		}
+		return all, nil
+	}
+	s, err := m.byName(server)
+	if err != nil {
+		return nil, err
+	}
+	return s.Resources(), nil
+}
+
+// ReadResource implements Provider by routing the read to the named server.
+func (m *Manager) ReadResource(ctx context.Context, server, uri string) (ResourceContents, error) {
+	s, err := m.byName(server)
+	if err != nil {
+		return ResourceContents{}, err
+	}
+	chunks, err := s.readResource(ctx, uri)
+	if err != nil {
+		return ResourceContents{}, err
+	}
+	// Collapse the chunks into a single contents value: the flattened text/blob
+	// summary is what model-facing callers want. URI/MIMEType are taken from the
+	// first chunk when present.
+	out := ResourceContents{URI: uri, Text: flattenResourceContents(chunks)}
+	if len(chunks) > 0 {
+		out.URI = chunks[0].URI
+		out.MIMEType = chunks[0].MIMEType
+	}
+	return out, nil
+}
+
+// ListPrompts implements Provider. With an empty server name it returns the
+// union of every connected server's prompt snapshot; otherwise the named one.
+func (m *Manager) ListPrompts(_ context.Context, server string) ([]Prompt, error) {
+	if server == "" {
+		var all []Prompt
+		for _, s := range m.servers {
+			all = append(all, s.Prompts()...)
+		}
+		return all, nil
+	}
+	s, err := m.byName(server)
+	if err != nil {
+		return nil, err
+	}
+	return s.Prompts(), nil
+}
+
+// GetPrompt implements Provider by routing the expansion to the named server.
+func (m *Manager) GetPrompt(ctx context.Context, server, name string, args map[string]string) (PromptResult, error) {
+	s, err := m.byName(server)
+	if err != nil {
+		return PromptResult{}, err
+	}
+	return s.getPrompt(ctx, name, args)
 }
 
 // Close closes every connected server, returning the first error encountered

@@ -15,6 +15,18 @@ type keyMap struct {
 	Deny    key.Binding
 	ScrollU key.Binding
 	ScrollD key.Binding
+
+	// MCP overlay bindings. MCPPanel toggles the read-only inventory panel;
+	// Resources / Prompts open the respective pickers. They are only live while
+	// idle (no run streaming), like Submit. Inside an overlay, navigation reuses
+	// the list keys below; esc closes the active overlay.
+	MCPPanel  key.Binding
+	Resources key.Binding
+	Prompts   key.Binding
+	Up        key.Binding
+	Down      key.Binding
+	Choose    key.Binding
+	Close     key.Binding
 }
 
 // defaultKeys returns the standard bindings.
@@ -51,6 +63,37 @@ func defaultKeys() keyMap {
 		ScrollD: key.NewBinding(
 			key.WithKeys("pgdown"),
 			key.WithHelp("pgdn", "scroll down"),
+		),
+		// ctrl+o / ctrl+r / ctrl+p: control-modified so they never collide with
+		// the textarea's printable input (a bare letter must still type into the
+		// prompt). 'o' = inventOry overview, 'r' = Resources, 'p' = Prompts.
+		MCPPanel: key.NewBinding(
+			key.WithKeys("ctrl+o"),
+			key.WithHelp("ctrl+o", "MCP inventory"),
+		),
+		Resources: key.NewBinding(
+			key.WithKeys("ctrl+r"),
+			key.WithHelp("ctrl+r", "MCP resources"),
+		),
+		Prompts: key.NewBinding(
+			key.WithKeys("ctrl+p"),
+			key.WithHelp("ctrl+p", "MCP prompts"),
+		),
+		Up: key.NewBinding(
+			key.WithKeys("up", "k"),
+			key.WithHelp("↑/k", "up"),
+		),
+		Down: key.NewBinding(
+			key.WithKeys("down", "j"),
+			key.WithHelp("↓/j", "down"),
+		),
+		Choose: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "select"),
+		),
+		Close: key.NewBinding(
+			key.WithKeys("esc"),
+			key.WithHelp("esc", "close"),
 		),
 	}
 }

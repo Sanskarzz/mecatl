@@ -4,6 +4,8 @@ import (
 	"math"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/mcp"
+	"github.com/stacklok/mecatl/internal/adapter/mcp/source"
 	"github.com/stacklok/mecatl/internal/session"
 )
 
@@ -147,6 +149,104 @@ func modeToProto(m session.PermissionMode) mecatlv1.PermissionMode {
 		return mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT
 	default:
 		return mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT
+	}
+}
+
+// --- MCP inspection mappers --------------------------------------------------
+
+// toProtoMcpResource maps an mcp.Resource value object to its proto form.
+func toProtoMcpResource(r mcp.Resource) *mecatlv1.McpResource {
+	return &mecatlv1.McpResource{
+		Server:      r.Server,
+		Uri:         r.URI,
+		Name:        r.Name,
+		Title:       r.Title,
+		Description: r.Description,
+		MimeType:    r.MIMEType,
+		Size:        r.Size,
+		ReadOnly:    r.ReadOnly,
+	}
+}
+
+// toProtoMcpResources maps a slice of mcp.Resource to proto.
+func toProtoMcpResources(rs []mcp.Resource) []*mecatlv1.McpResource {
+	out := make([]*mecatlv1.McpResource, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, toProtoMcpResource(r))
+	}
+	return out
+}
+
+// toProtoMcpResourceContents maps an mcp.ResourceContents chunk to its proto
+// form. Binary Blob passes through unchanged as proto bytes.
+func toProtoMcpResourceContents(c mcp.ResourceContents) *mecatlv1.McpResourceContents {
+	return &mecatlv1.McpResourceContents{
+		Uri:      c.URI,
+		MimeType: c.MIMEType,
+		Text:     c.Text,
+		Blob:     c.Blob,
+	}
+}
+
+// toProtoMcpPromptArgument maps an mcp.PromptArgument to proto.
+func toProtoMcpPromptArgument(a mcp.PromptArgument) *mecatlv1.McpPromptArgument {
+	return &mecatlv1.McpPromptArgument{
+		Name:        a.Name,
+		Title:       a.Title,
+		Description: a.Description,
+		Required:    a.Required,
+	}
+}
+
+// toProtoMcpPrompt maps an mcp.Prompt value object to its proto form.
+func toProtoMcpPrompt(p mcp.Prompt) *mecatlv1.McpPrompt {
+	args := make([]*mecatlv1.McpPromptArgument, 0, len(p.Arguments))
+	for _, a := range p.Arguments {
+		args = append(args, toProtoMcpPromptArgument(a))
+	}
+	return &mecatlv1.McpPrompt{
+		Server:      p.Server,
+		Name:        p.Name,
+		Title:       p.Title,
+		Description: p.Description,
+		Arguments:   args,
+	}
+}
+
+// toProtoMcpPrompts maps a slice of mcp.Prompt to proto.
+func toProtoMcpPrompts(ps []mcp.Prompt) []*mecatlv1.McpPrompt {
+	out := make([]*mecatlv1.McpPrompt, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, toProtoMcpPrompt(p))
+	}
+	return out
+}
+
+// toProtoMcpPromptMessage maps an mcp.PromptMessage to proto.
+func toProtoMcpPromptMessage(m mcp.PromptMessage) *mecatlv1.McpPromptMessage {
+	return &mecatlv1.McpPromptMessage{Role: m.Role, Text: m.Text}
+}
+
+// toProtoMcpSource maps a source.SourceInfo snapshot to its proto form.
+func toProtoMcpSource(s source.SourceInfo) *mecatlv1.McpSource {
+	servers := make([]*mecatlv1.McpServerInfo, 0, len(s.Servers))
+	for _, sv := range s.Servers {
+		servers = append(servers, &mecatlv1.McpServerInfo{
+			Name:      sv.Name,
+			Url:       sv.URL,
+			Transport: sv.Transport,
+			Group:     sv.Group,
+		})
+	}
+	diags := make([]string, len(s.Diagnostics))
+	copy(diags, s.Diagnostics)
+	return &mecatlv1.McpSource{
+		Name:        s.Name,
+		Kind:        s.Kind,
+		Enabled:     s.Enabled,
+		Group:       s.Group,
+		Servers:     servers,
+		Diagnostics: diags,
 	}
 }
 

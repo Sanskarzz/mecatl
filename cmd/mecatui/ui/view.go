@@ -26,9 +26,12 @@ func (m Model) View() tea.View {
 	footer := m.renderFooter()
 
 	var body string
-	if m.phase == phaseAwaitingApproval {
+	switch {
+	case m.phase == phaseAwaitingApproval:
 		body = renderPermissionModal(m.deps.Theme, m.ask, m.width, m.vp.Height())
-	} else {
+	case m.mcp.view != mcpNone:
+		body = renderMCPOverlay(m.deps.Theme, m.mcp, m.width, m.vp.Height())
+	default:
 		body = m.vp.View()
 	}
 
@@ -86,7 +89,7 @@ func (m Model) renderFooter() string {
 	usage := fmt.Sprintf("in %d · out %d · cache %d",
 		m.usage.InputTokens, m.usage.OutputTokens, m.usage.CacheReadTokens)
 
-	help := "enter send · shift+enter newline · esc cancel · ctrl+c quit"
+	help := "enter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · ctrl+c quit"
 
 	width := m.widthOr(80)
 	line := left

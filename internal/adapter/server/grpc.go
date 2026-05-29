@@ -129,6 +129,74 @@ func (*HarnessServer) readControl(ctx context.Context, stream mecatlv1.HarnessSe
 	}
 }
 
+// --- MCP inspection RPCs -----------------------------------------------------
+
+// ListMcpResources returns the resource snapshots for the requested server
+// (empty server = all). Nil provider yields an empty list.
+func (h *HarnessServer) ListMcpResources(ctx context.Context, req *mecatlv1.ListMcpResourcesRequest) (*mecatlv1.ListMcpResourcesResponse, error) {
+	res, err := h.svc.ListMcpResources(ctx, req.GetServer())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &mecatlv1.ListMcpResourcesResponse{Resources: toProtoMcpResources(res)}, nil
+}
+
+// ReadMcpResource reads a single resource by URI from the named server.
+func (h *HarnessServer) ReadMcpResource(ctx context.Context, req *mecatlv1.ReadMcpResourceRequest) (*mecatlv1.ReadMcpResourceResponse, error) {
+	if req.GetServer() == "" || req.GetUri() == "" {
+		return nil, status.Error(codes.InvalidArgument, "server and uri are required")
+	}
+	c, err := h.svc.ReadMcpResource(ctx, req.GetServer(), req.GetUri())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &mecatlv1.ReadMcpResourceResponse{
+		Contents: []*mecatlv1.McpResourceContents{toProtoMcpResourceContents(c)},
+	}, nil
+}
+
+// ListMcpPrompts returns the prompt snapshots for the requested server
+// (empty server = all). Nil provider yields an empty list.
+func (h *HarnessServer) ListMcpPrompts(ctx context.Context, req *mecatlv1.ListMcpPromptsRequest) (*mecatlv1.ListMcpPromptsResponse, error) {
+	ps, err := h.svc.ListMcpPrompts(ctx, req.GetServer())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &mecatlv1.ListMcpPromptsResponse{Prompts: toProtoMcpPrompts(ps)}, nil
+}
+
+// GetMcpPrompt expands a named prompt with arguments on the named server.
+func (h *HarnessServer) GetMcpPrompt(ctx context.Context, req *mecatlv1.GetMcpPromptRequest) (*mecatlv1.GetMcpPromptResponse, error) {
+	if req.GetServer() == "" || req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "server and name are required")
+	}
+	res, err := h.svc.GetMcpPrompt(ctx, req.GetServer(), req.GetName(), req.GetArguments())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	msgs := make([]*mecatlv1.McpPromptMessage, 0, len(res.Messages))
+	for _, m := range res.Messages {
+		msgs = append(msgs, toProtoMcpPromptMessage(m))
+	}
+	return &mecatlv1.GetMcpPromptResponse{Description: res.Description, Messages: msgs}, nil
+}
+
+// ListMcpSources returns the resolved MCP source inventory snapshot.
+func (h *HarnessServer) ListMcpSources(ctx context.Context, _ *mecatlv1.ListMcpSourcesRequest) (*mecatlv1.ListMcpSourcesResponse, error) {
+	infos := h.svc.ListMcpSources(ctx)
+	out := make([]*mecatlv1.McpSource, 0, len(infos))
+	for _, s := range infos {
+		out = append(out, toProtoMcpSource(s))
+	}
+	return &mecatlv1.ListMcpSourcesResponse{Sources: out}, nil
+}
+
+// ListToolHiveGroups returns the distinct, non-empty ToolHive groups derived
+// from the inventory snapshot.
+func (h *HarnessServer) ListToolHiveGroups(ctx context.Context, _ *mecatlv1.ListToolHiveGroupsRequest) (*mecatlv1.ListToolHiveGroupsResponse, error) {
+	return &mecatlv1.ListToolHiveGroupsResponse{Groups: h.svc.ListToolHiveGroups(ctx)}, nil
+}
+
 // toStatus maps service sentinel errors to gRPC status codes.
 func toStatus(err error) error {
 	switch {
@@ -138,6 +206,10 @@ func toStatus(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, ErrNoActiveRun):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, ErrNoMCPProvider):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, ErrInternal):
+		return status.Error(codes.Internal, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())
 	}
