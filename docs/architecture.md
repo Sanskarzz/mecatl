@@ -477,8 +477,20 @@ Per-tool placement (`dispatch.go`):
   re-permission-checked. This is deliberate — a PreToolUse hook is
   operator-deployed and more trusted than the model, so it may rewrite a call
   past the policy that gated the model's request (matching Claude Code).
-- **PostToolUse** (`postHook`) runs best-effort after execution; a block there
-  only annotates (the tool already ran).
+- **PostToolUse** (`postHook`) runs best-effort after execution and **before** the
+  `tool.result` event is emitted (the emit was moved after `postHook` for this
+  reason). A block there only annotates (the tool already ran; a block neither
+  undoes nor suppresses the result), and a hook execution error is ignored —
+  neither aborts. A non-empty `HookOutcome.Mutated` payload — interpreted
+  symmetrically with the PostToolUse `HookEvent.Input`, i.e. the result object
+  `{"content", "is_error"}` — **rewrites the result**: the loop builds a fresh
+  `session.ToolResult` (same CallID; `NewToolError` when `is_error`, else
+  `NewToolResult`). A malformed (non-JSON) mutation is ignored (original result
+  stands) with a notice event. Because the **effective** (rewritten) result is what
+  is both emitted and returned/recorded, the client stream and the model's history
+  agree — there is no hidden divergence. **Trust:** a PostToolUse hook is
+  operator-deployed and trusted, so it may rewrite what the model sees the tool
+  returned (e.g. redact secrets).
 
 Run-level placement (`agent/hooks.go`). Both pre-prompt phases are **blocking
 run-level gates** that fail safe — a block, or a hook **execution error**, ends

@@ -284,9 +284,17 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 	return c, false, "", nil
 }
 
-// execute runs the tool against the workspace, times it, logs it, and emits the
-// tool.call then tool.result events. The PostToolUse hook fires best-effort
-// afterwards (a block there annotates but the tool already ran).
+// execute runs the tool against the workspace, times it, logs it, runs the
+// PostToolUse hook, and emits the tool.call then tool.result events.
+//
+// Ordering note: PostToolUse runs BEFORE the tool.result event is emitted and
+// before the result is returned, so a PostToolUse result mutation is reflected
+// uniformly — the EFFECTIVE (possibly rewritten) result is what the client sees
+// on the event stream AND what the loop records for the model (RecordToolResults
+// records exactly what this returns). There is deliberately no divergence between
+// the two views. PostToolUse remains otherwise best-effort: a hook execution
+// error does not abort, and a block only annotates (the tool already ran; a block
+// neither undoes nor suppresses the result).
 func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool) session.ToolResult {
 	call := c
 	e.emit(r, session.Event{Type: session.EvToolCall, Turn: turnIdx, ToolCall: &call})
@@ -296,9 +304,12 @@ func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws 
 	if e.deps.Logger != nil {
 		e.deps.Logger.ToolCall(sess.ID, c, res, dur)
 	}
-	e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 
-	e.postHook(ctx, r, sess, turnIdx, c, res)
+	// PostToolUse may rewrite the result; the effective result is then emitted and
+	// returned so the client stream and the model's recorded history agree.
+	res = e.postHook(ctx, r, sess, turnIdx, c, res)
+
+	e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 	return res
 }
 
@@ -322,11 +333,32 @@ func (e *Engine) timeExecute(ctx context.Context, ws tool.Workspace, c session.T
 	return res, dur
 }
 
-// postHook runs the PostToolUse hook best-effort. A block here only annotates
-// (the tool already executed); execution errors are ignored.
-func (e *Engine) postHook(ctx context.Context, r *Run, sess *session.Session, turnIdx int, c session.ToolCall, res session.ToolResult) {
+// resultPayload is the JSON shape of the PostToolUse hook's view of a tool
+// result and the symmetric shape its Mutated payload is interpreted as.
+type resultPayload struct {
+	Content string `json:"content"`
+	IsError bool   `json:"is_error"`
+}
+
+// postHook runs the PostToolUse hook best-effort and returns the EFFECTIVE
+// result. It carries the result under review as the HookEvent.Input
+// ({"content", "is_error"}, plus the call args for context). A block only
+// annotates (the tool already executed; the result is neither undone nor
+// suppressed); a hook execution error is ignored — neither aborts the run.
+//
+// Mutation: a non-empty HookOutcome.Mutated is interpreted SYMMETRICALLY with the
+// result the hook saw — the same {"content", "is_error"} object — and, when valid
+// JSON, REPLACES the result (a fresh session.ToolResult preserving the CallID,
+// via NewToolError when is_error is true else NewToolResult). A malformed (non-
+// JSON) payload is ignored (the original result stands) and a notice is emitted.
+//
+// TRUST: a PostToolUse hook is operator-deployed and trusted, so it may rewrite
+// what the model sees the tool returned (e.g. redact secrets from output). Because
+// execute emits the EFFECTIVE result, the client stream shows the rewritten result
+// too — there is no hidden divergence between the client and model views.
+func (e *Engine) postHook(ctx context.Context, r *Run, sess *session.Session, turnIdx int, c session.ToolCall, res session.ToolResult) session.ToolResult {
 	if e.deps.Hooks == nil || ctx.Err() != nil {
-		return
+		return res
 	}
 	input, _ := json.Marshal(struct {
 		Args    json.RawMessage `json:"args"`
@@ -340,9 +372,30 @@ func (e *Engine) postHook(ctx context.Context, r *Run, sess *session.Session, tu
 		SessionID: string(sess.ID),
 	}
 	outcome, err := e.deps.Hooks.Run(ctx, ev)
-	if err == nil && outcome.Block && outcome.Message != "" {
+	if err != nil {
+		// Best-effort: a PostToolUse execution error never aborts and never alters
+		// the result.
+		return res
+	}
+	if outcome.Block && outcome.Message != "" {
 		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: outcome.Message})
 	}
+	if len(outcome.Mutated) > 0 {
+		// Apply the mutation: decode the same {"content", "is_error"} shape and
+		// rebuild the result via the value-object constructors, preserving CallID.
+		if json.Valid(outcome.Mutated) {
+			var p resultPayload
+			if jerr := json.Unmarshal(outcome.Mutated, &p); jerr == nil {
+				e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PostToolUse hook rewrote the tool result for " + c.Name})
+				if p.IsError {
+					return session.NewToolError(res.CallID, p.Content)
+				}
+				return session.NewToolResult(res.CallID, p.Content)
+			}
+		}
+		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PostToolUse hook returned a malformed result mutation (ignored)"})
+	}
+	return res
 }
 
 // emit assigns the next Seq via Run.emit, then mirrors the sequenced event to the

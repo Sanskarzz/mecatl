@@ -627,6 +627,155 @@ func TestPreToolUseHookNoMutationKeepsArgs(t *testing.T) {
 	}
 }
 
+// postMutResult finds the tool.result event and the recorded RoleTool message
+// for callID, returning their ToolResults so a test can assert both the client
+// (event) view and the model (recorded) view agree.
+func toolResultEvent(evs []session.Event) *session.ToolResult {
+	for _, ev := range evs {
+		if ev.Type == session.EvToolResult && ev.ToolResult != nil {
+			return ev.ToolResult
+		}
+	}
+	return nil
+}
+
+func recordedToolResult(sess *session.Session) *session.ToolResult {
+	for _, m := range sess.Conversation.Messages {
+		if m.Role == session.RoleTool && m.ToolResult != nil {
+			return m.ToolResult
+		}
+	}
+	return nil
+}
+
+// TestPostToolUseHookMutatesResult asserts a PostToolUse hook returning a Mutated
+// {"content","is_error"} payload rewrites the result: BOTH the emitted tool.result
+// event AND the result recorded for the model carry the rewritten content, and the
+// is_error flag is honoured (here flipping a success into an error).
+func TestPostToolUseHookMutatesResult(t *testing.T) {
+	tl := &fakeTool{name: "Read", readOnly: true,
+		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			return session.NewToolResult(in.ID, "SECRET=abc123"), nil
+		}}
+	hooks := &mutatingHooks{mutate: map[governance.HookPhase]json.RawMessage{
+		governance.PhasePostToolUse: json.RawMessage(`{"content":"[redacted]","is_error":true}`),
+	}}
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("c1", "Read", `{"path":"a"}`)),
+		mockllm.TextTurn("done"),
+	)
+	sess := newSession(t, session.Limits{})
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, tl), Hooks: hooks})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")
+	evs := drain(r)
+
+	evRes := toolResultEvent(evs)
+	if evRes == nil || evRes.Content != "[redacted]" || !evRes.IsError {
+		t.Fatalf("emitted tool.result = %+v, want content '[redacted]' is_error true", evRes)
+	}
+	recRes := recordedToolResult(sess)
+	if recRes == nil || recRes.Content != "[redacted]" || !recRes.IsError {
+		t.Fatalf("recorded result (model view) = %+v, want content '[redacted]' is_error true", recRes)
+	}
+	var rewriteEv bool
+	for _, ev := range evs {
+		if ev.Type == session.EvHook && strings.Contains(ev.Text, "rewrote the tool result") {
+			rewriteEv = true
+		}
+	}
+	if !rewriteEv {
+		t.Fatalf("expected a hook event noting the result rewrite")
+	}
+}
+
+// TestPostToolUseHookBlockLeavesResultUnchanged asserts a PostToolUse block still
+// only annotates: the result the model sees is unchanged (block does not mutate).
+func TestPostToolUseHookBlockLeavesResultUnchanged(t *testing.T) {
+	tl := &fakeTool{name: "Read", readOnly: true,
+		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			return session.NewToolResult(in.ID, "original output"), nil
+		}}
+	hooks := newRecordingHooks(map[governance.HookPhase]string{
+		governance.PhasePostToolUse: "post annotation",
+	})
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("c1", "Read", `{"path":"a"}`)),
+		mockllm.TextTurn("done"),
+	)
+	sess := newSession(t, session.Limits{})
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, tl), Hooks: hooks})
+	evs := drain(e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go"))
+
+	recRes := recordedToolResult(sess)
+	if recRes == nil || recRes.Content != "original output" || recRes.IsError {
+		t.Fatalf("recorded result = %+v, want unchanged 'original output'", recRes)
+	}
+	var annotated bool
+	for _, ev := range evs {
+		if ev.Type == session.EvHook && strings.Contains(ev.Text, "post annotation") {
+			annotated = true
+		}
+	}
+	if !annotated {
+		t.Fatalf("expected the PostToolUse block annotation hook event")
+	}
+}
+
+// TestPostToolUseHookMutationMalformedIgnored asserts a malformed (non-JSON)
+// Mutated payload is ignored: the original result stands + a notice is emitted.
+func TestPostToolUseHookMutationMalformedIgnored(t *testing.T) {
+	tl := &fakeTool{name: "Read", readOnly: true,
+		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			return session.NewToolResult(in.ID, "original output"), nil
+		}}
+	hooks := &mutatingHooks{mutate: map[governance.HookPhase]json.RawMessage{
+		governance.PhasePostToolUse: json.RawMessage(`not-json`),
+	}}
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("c1", "Read", `{"path":"a"}`)),
+		mockllm.TextTurn("done"),
+	)
+	sess := newSession(t, session.Limits{})
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, tl), Hooks: hooks})
+	evs := drain(e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go"))
+
+	recRes := recordedToolResult(sess)
+	if recRes == nil || recRes.Content != "original output" {
+		t.Fatalf("recorded result = %+v, want unchanged (malformed mutation ignored)", recRes)
+	}
+	var ignoredEv bool
+	for _, ev := range evs {
+		if ev.Type == session.EvHook && strings.Contains(ev.Text, "malformed result mutation") {
+			ignoredEv = true
+		}
+	}
+	if !ignoredEv {
+		t.Fatalf("expected a hook event noting the malformed result mutation was ignored")
+	}
+}
+
+// TestPostToolUseHookNoMutationKeepsResult asserts that with no Mutated payload
+// the result is unchanged (allow-path regression).
+func TestPostToolUseHookNoMutationKeepsResult(t *testing.T) {
+	tl := &fakeTool{name: "Read", readOnly: true,
+		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			return session.NewToolResult(in.ID, "original output"), nil
+		}}
+	hooks := newRecordingHooks(nil) // allow, no mutation
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("c1", "Read", `{"path":"a"}`)),
+		mockllm.TextTurn("done"),
+	)
+	sess := newSession(t, session.Limits{})
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, tl), Hooks: hooks})
+	drain(e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go"))
+
+	recRes := recordedToolResult(sess)
+	if recRes == nil || recRes.Content != "original output" || recRes.IsError {
+		t.Fatalf("recorded result = %+v, want unchanged 'original output'", recRes)
+	}
+}
+
 // TestUnknownToolError confirms an unknown tool yields an error result, not a
 // crash, and the loop keeps going.
 func TestUnknownToolError(t *testing.T) {

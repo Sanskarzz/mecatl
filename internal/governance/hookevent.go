@@ -48,10 +48,14 @@ type HookOutcome struct {
 	//   - UserPromptSubmit: rewrites the effective prompt ({"prompt": ...}) before
 	//     the message is recorded and sent to the model;
 	//   - PreToolUse: rewrites the tool call's arguments JSON before execution,
-	//     preserving the CallID and tool Name.
+	//     preserving the CallID and tool Name;
+	//   - PostToolUse: rewrites the tool result ({"content", "is_error"}) before it
+	//     is emitted and recorded, preserving the CallID (redact/transform output).
 	// A malformed (non-JSON) payload is ignored by the loop (the original payload
 	// stands). NOTE for PreToolUse: the permission policy has already been
 	// evaluated on the ORIGINAL, pre-mutation args; the mutated args are NOT
 	// re-permission-checked, reflecting that a hook is more trusted than the model.
+	// NOTE for PostToolUse: the loop emits the EFFECTIVE (rewritten) result, so the
+	// client stream and the model's recorded history agree — no hidden divergence.
 	Mutated json.RawMessage
 }
