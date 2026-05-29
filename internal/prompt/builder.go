@@ -103,7 +103,7 @@ func toolInventory(tools []tool.ToolSpec) string {
 		return b.String()
 	}
 	for _, t := range tools {
-		b.WriteString(fmt.Sprintf("\n- %s: %s", t.Name, firstLine(t.Description)))
+		fmt.Fprintf(&b, "\n- %s: %s", t.Name, firstLine(t.Description))
 	}
 	return b.String()
 }

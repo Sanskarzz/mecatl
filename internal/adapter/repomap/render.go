@@ -31,7 +31,7 @@ func render(g *graph, focus map[string]bool, maxFiles, skipped int) string {
 	var b strings.Builder
 	b.WriteString("Repo map (ranked by personalized PageRank over the symbol-reference graph).\n")
 	if len(focus) > 0 {
-		b.WriteString(fmt.Sprintf("Ranking biased toward %d focus file(s).\n", len(focus)))
+		fmt.Fprintf(&b, "Ranking biased toward %d focus file(s).\n", len(focus))
 	}
 	b.WriteString("Each entry is path followed by its key signatures (bodies elided).\n\n")
 
@@ -40,12 +40,12 @@ func render(g *graph, focus map[string]bool, maxFiles, skipped int) string {
 	}
 
 	b.WriteString("\n---\n")
-	b.WriteString(fmt.Sprintf("%d file(s) mapped", total))
+	fmt.Fprintf(&b, "%d file(s) mapped", total)
 	if len(shown) < total {
-		b.WriteString(fmt.Sprintf(" (showing top %d)", len(shown)))
+		fmt.Fprintf(&b, " (showing top %d)", len(shown))
 	}
 	if skipped > 0 {
-		b.WriteString(fmt.Sprintf("; %d file(s) skipped (unsupported language, unreadable, or no symbols)", skipped))
+		fmt.Fprintf(&b, "; %d file(s) skipped (unsupported language, unreadable, or no symbols)", skipped)
 	}
 	b.WriteString(".\n")
 	return b.String()
