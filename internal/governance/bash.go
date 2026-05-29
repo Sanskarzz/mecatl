@@ -239,19 +239,64 @@ func Canonicalize(cmd string) string {
 
 // readOnlyVerbs are first-token commands whose canonical use does not mutate the
 // workspace. `git` is handled specially (only read-only subcommands qualify).
+//
+// Deliberately EXCLUDED are general-purpose interpreters whose program argument
+// can execute arbitrary commands or write arbitrary files with no shell-level
+// redirection (which the top-level `>`/writeIndicators checks would catch):
+//   - awk: `awk 'BEGIN{system("…")}'`, `print | "cmd"`.
+//   - sed: `sed -i` (in-place edit), the `w`/`W` script commands.
+//
+// These cannot be soundly classified read-only without parsing their language,
+// so they are not listed and resolve to Ask (and are hard-denied under plan
+// mode). Verbs that are read-only in normal use but mutate via a finite,
+// well-defined set of flags (find, sort) ARE listed, and are guarded by
+// verbArgsMutate below.
 var readOnlyVerbs = map[string]bool{
 	"ls": true, "cat": true, "grep": true, "egrep": true, "fgrep": true,
 	"find": true, "rg": true, "head": true, "tail": true, "pwd": true,
 	"echo": true, "wc": true, "stat": true, "file": true, "which": true,
 	"whoami": true, "date": true, "tree": true, "diff": true, "sort": true,
-	"uniq": true, "awk": true, "sed": true, "cut": true, "true": true,
+	"uniq": true, "cut": true, "true": true,
 }
 
 // readOnlyGitSubcommands are the `git` subcommands that only inspect state.
+//
+// `config` is deliberately EXCLUDED: `git config` writes .git/config and can
+// persist values that execute shell on later (allow-listed) git operations —
+// e.g. an alias whose value starts with `!`, or core.pager/core.sshCommand/
+// core.fsmonitor. Its only read-only forms (--get/--list) are not worth that
+// bypass surface, so all `git config` resolves to Ask.
 var readOnlyGitSubcommands = map[string]bool{
 	"status": true, "log": true, "diff": true, "show": true, "branch": true,
 	"remote": true, "ls-files": true, "rev-parse": true, "blame": true,
-	"describe": true, "config": true, "tag": true, "shortlog": true,
+	"describe": true, "tag": true, "shortlog": true,
+}
+
+// verbArgsMutate reports whether a read-only verb's own arguments request a file
+// write or command execution that the top-level redirection/writeIndicators
+// checks miss. It guards verbs (find, sort) that are read-only in normal use but
+// can mutate through a finite set of flags/primaries with no shell redirection.
+func verbArgsMutate(verb string, args []string) bool {
+	switch verb {
+	case "find":
+		// Primaries that delete, execute, or write files.
+		for _, a := range args {
+			switch a {
+			case "-delete", "-exec", "-execdir", "-ok", "-okdir",
+				"-fprintf", "-fprint", "-fprint0", "-fls":
+				return true
+			}
+		}
+	case "sort":
+		// -o/--output writes results to a named file (no shell redirection).
+		for _, a := range args {
+			if a == "-o" || a == "--output" ||
+				strings.HasPrefix(a, "-o") || strings.HasPrefix(a, "--output=") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // writeIndicators are tokens that, anywhere in a command, mark it as mutating
@@ -314,5 +359,10 @@ func simpleReadOnly(cmd string) bool {
 		}
 		return readOnlyGitSubcommands[fields[1]]
 	}
-	return readOnlyVerbs[verb]
+	if !readOnlyVerbs[verb] {
+		return false
+	}
+	// A read-only verb can still mutate through its own arguments (e.g.
+	// `find -delete`, `sort -o`); reject those.
+	return !verbArgsMutate(verb, fields[1:])
 }

@@ -181,10 +181,21 @@ func (f *FileSystem) Glob(_ context.Context, pattern string) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		// Drop symlink matches: a symlink inside the root can still target a file
-		// outside it, and Glob must not be a channel for following links out of
-		// the workspace. os.Root would refuse a later Read anyway.
-		if fi, lerr := os.Lstat(m); lerr == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		// Confine matches the same way every other operation is confined: Lstat
+		// THROUGH the os.Root. This drops both (a) leaf symlinks — a symlink
+		// inside the root can still target a file outside it, and Glob must not
+		// be a channel for following links out of the workspace — and (b) matches
+		// reachable only via a symlinked intermediate directory component that
+		// leaves the root, which a raw os.Lstat(m) on the literal match path
+		// would NOT catch (filepath.Glob does not resolve such components, so the
+		// match looks like an in-root regular file). os.Root refuses to traverse
+		// an escaping component, so the Lstat errors and the match is dropped —
+		// closing an out-of-root filename-enumeration leak.
+		fi, lerr := f.r.Lstat(rel)
+		if lerr != nil {
+			continue
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
 			continue
 		}
 		rels = append(rels, rel)

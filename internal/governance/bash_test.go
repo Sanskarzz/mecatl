@@ -121,6 +121,27 @@ func TestReadOnlyBash(t *testing.T) {
 		{"unknown command", "frobnicate", false},
 		{"empty", "", false},
 
+		// Verbs that mutate or execute through their own arguments (no shell
+		// redirection) must NOT be classified read-only.
+		{"awk system exec", `awk 'BEGIN{system("rm -rf /")}' /dev/null`, false},
+		{"awk not read-only", "awk '{print $1}' f", false},
+		{"sed in-place", "sed -i s/a/b/ file", false},
+		{"sed in-place suffix", "sed -i.bak s/a/b/ secret.txt", false},
+		{"sed not read-only", "sed s/a/b/ f", false},
+		{"find -delete", "find . -name x -delete", false},
+		{"find -exec", "find . -exec echo {} +", false},
+		{"find -fprintf", "find . -fprintf out.txt %p", false},
+		{"find -fls", "find . -fls out.txt", false},
+		{"sort -o", "sort -o out.txt in.txt", false},
+		{"sort -o trailing", "sort file -o out.txt", false},
+		{"sort --output=", "sort --output=out.txt in.txt", false},
+		{"git config alias exec", "git config alias.x '!rm -rf /'", false},
+		{"git config pager", `git config core.pager '!sh -c "x"'`, false},
+
+		// Benign uses of the guarded verbs stay read-only.
+		{"find benign", "find . -name x", true},
+		{"sort benign", "sort file.txt", true},
+
 		// Finding 1: substitution / subshell grouping / newline / background
 		// must all defeat the read-only classification (fail safe).
 		{"command substitution", "cat $(rm x)", false},

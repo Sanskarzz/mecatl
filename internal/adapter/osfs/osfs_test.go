@@ -177,3 +177,62 @@ func TestWriteCreatesParents(t *testing.T) {
 		t.Fatalf("expected nested file on disk: %v", err)
 	}
 }
+
+// TestGlobDoesNotLeakThroughSymlink asserts Glob never returns paths reachable
+// only by traversing a symlink out of the workspace — neither a leaf symlink nor
+// a symlinked intermediate directory component. The latter is the filename
+// enumeration leak: filepath.Glob follows an in-root directory symlink to an
+// out-of-root target, and the match looks like an ordinary in-root regular file.
+func TestGlobDoesNotLeakThroughSymlink(t *testing.T) {
+	ctx := context.Background()
+
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("s"), 0o600); err != nil {
+		t.Fatalf("seed outside file: %v", err)
+	}
+
+	root := t.TempDir()
+	ws, err := osfs.NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	// An in-root regular file Glob must still find.
+	if err := ws.Write(ctx, "real.txt", []byte("ok")); err != nil {
+		t.Fatalf("Write real.txt: %v", err)
+	}
+	// (a) symlinked intermediate directory component: link/ -> outside/.
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Fatalf("symlink dir: %v", err)
+	}
+	// (b) leaf symlink to an out-of-root file.
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(root, "leaf.txt")); err != nil {
+		t.Fatalf("symlink leaf: %v", err)
+	}
+
+	for _, pattern := range []string{"link/*", "*", "*.txt"} {
+		got, err := ws.Glob(ctx, pattern)
+		if err != nil {
+			t.Fatalf("Glob(%q): %v", pattern, err)
+		}
+		for _, m := range got {
+			if strings.HasPrefix(m, "link/") || m == "leaf.txt" {
+				t.Errorf("Glob(%q) leaked out-of-root match %q", pattern, m)
+			}
+		}
+	}
+
+	// Sanity: the genuine in-root file is still matched.
+	got, err := ws.Glob(ctx, "*.txt")
+	if err != nil {
+		t.Fatalf("Glob(*.txt): %v", err)
+	}
+	var sawReal bool
+	for _, m := range got {
+		if m == "real.txt" {
+			sawReal = true
+		}
+	}
+	if !sawReal {
+		t.Errorf("Glob(*.txt) = %v, expected to contain real.txt", got)
+	}
+}
