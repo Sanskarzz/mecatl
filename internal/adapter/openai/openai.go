@@ -100,11 +100,18 @@ func (p *Provider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[p
 			default:
 			}
 			event := stream.Current()
-			chunks := translate(event, &st)
+			chunks, terr := translate(event, &st)
 			for _, c := range chunks {
 				if !yield(c, nil) {
 					return
 				}
+			}
+			if terr != nil {
+				// A terminal failure event (response.failed / error / incomplete)
+				// carries the provider's real message; surface it as the stream's
+				// error so the loop reports the reason rather than a bare stop.
+				yield(port.Chunk{}, terr)
+				return
 			}
 		}
 		if err := stream.Err(); err != nil {

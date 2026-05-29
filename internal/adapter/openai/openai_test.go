@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +29,18 @@ func decodeFixture(t *testing.T, name string) []port.Chunk {
 		t.Fatalf("decodeSSE: %v", err)
 	}
 	return chunks
+}
+
+// decodeFixtureErr decodes a fixture expecting a terminal error, returning the
+// chunks emitted before the error and the error itself.
+func decodeFixtureErr(t *testing.T, name string) ([]port.Chunk, error) {
+	t.Helper()
+	f, err := os.Open(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("open fixture: %v", err)
+	}
+	defer f.Close()
+	return decodeSSE(f)
 }
 
 func TestTranslateTextTurn(t *testing.T) {
@@ -65,6 +78,41 @@ func TestTranslateReasoningTurnWithCachedTokens(t *testing.T) {
 		{Kind: port.ChunkDone, Stop: session.StopEndTurn},
 	}
 	assertChunks(t, got, want)
+}
+
+// TestTranslateErrorEvent verifies a top-level "error" stream event surfaces a
+// non-nil error carrying the provider's code, message, and offending param,
+// rather than a bare StopError chunk that drops the reason.
+func TestTranslateErrorEvent(t *testing.T) {
+	chunks, err := decodeFixtureErr(t, "error_event.sse")
+	if err == nil {
+		t.Fatal("expected an error from the error event, got nil")
+	}
+	if len(chunks) != 0 {
+		t.Errorf("expected no chunks before the error, got %+v", chunks)
+	}
+	for _, want := range []string{"rate_limit_exceeded", "Rate limit reached for requests", "model"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err.Error(), want)
+		}
+	}
+}
+
+// TestTranslateResponseFailed verifies a "response.failed" event surfaces the
+// response.error code+message as a non-nil error.
+func TestTranslateResponseFailed(t *testing.T) {
+	chunks, err := decodeFixtureErr(t, "response_failed.sse")
+	if err == nil {
+		t.Fatal("expected an error from response.failed, got nil")
+	}
+	if len(chunks) != 0 {
+		t.Errorf("expected no chunks before the error, got %+v", chunks)
+	}
+	for _, want := range []string{"server_error", "The model produced an internal error"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err.Error(), want)
+		}
+	}
 }
 
 func assertChunks(t *testing.T, got, want []port.Chunk) {

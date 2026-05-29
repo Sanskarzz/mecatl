@@ -351,7 +351,7 @@ func (r *Run) emit(ev session.Event) session.Event {
 // terminate ends the run with a non-success terminal state. It moves the session
 // to the matching terminal state (Cancel for cancelled, Fail for error, Stop for
 // a tripped limit) and emits the terminal result Event.
-func (e *Engine) terminate(ctx context.Context, r *Run, sess *session.Session, reason session.StopReason, text string, usage session.Usage, _ error) {
+func (e *Engine) terminate(ctx context.Context, r *Run, sess *session.Session, reason session.StopReason, text string, usage session.Usage, cause error) {
 	switch reason {
 	case session.StopCancelled:
 		_ = sess.Cancel()
@@ -362,7 +362,11 @@ func (e *Engine) terminate(ctx context.Context, r *Run, sess *session.Session, r
 			_ = sess.Stop(reason)
 		}
 	}
-	e.emitResult(r, sess, reason, text, usage)
+	var errMsg string
+	if cause != nil {
+		errMsg = cause.Error()
+	}
+	e.emitResult(r, sess, reason, text, usage, errMsg)
 	e.save(ctx, sess)
 }
 
@@ -372,12 +376,13 @@ func (e *Engine) terminateComplete(ctx context.Context, r *Run, sess *session.Se
 	if !sess.State.IsTerminal() {
 		_ = sess.Stop(reason)
 	}
-	e.emitResult(r, sess, reason, text, usage)
+	e.emitResult(r, sess, reason, text, usage, "")
 	e.save(ctx, sess)
 }
 
-// emitResult publishes the single terminal result Event.
-func (e *Engine) emitResult(r *Run, _ *session.Session, reason session.StopReason, text string, usage session.Usage) {
+// emitResult publishes the single terminal result Event. errMsg carries the
+// failure detail on an error termination (empty for success/limit/cancel).
+func (e *Engine) emitResult(r *Run, _ *session.Session, reason session.StopReason, text string, usage session.Usage, errMsg string) {
 	u := usage
 	e.emit(r, session.Event{
 		Type: session.EvResult,
@@ -385,6 +390,7 @@ func (e *Engine) emitResult(r *Run, _ *session.Session, reason session.StopReaso
 			Stop:  reason,
 			Text:  text,
 			Usage: usage,
+			Error: errMsg,
 		},
 		Usage: &u,
 	})

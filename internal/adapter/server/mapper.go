@@ -86,6 +86,7 @@ func toProtoResult(p session.ResultPayload) *ozzv1.Result {
 		Stop:  string(p.Stop),
 		Text:  p.Text,
 		Usage: toProtoUsage(p.Usage),
+		Error: p.Error,
 	}
 }
 

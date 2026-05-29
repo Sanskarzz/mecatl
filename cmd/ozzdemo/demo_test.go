@@ -12,7 +12,7 @@ import (
 // boundary, a tool call, a tool result, a permission ask (then auto-approved),
 // and a successful terminal result.
 func TestRunScenarioOffline(t *testing.T) {
-	events, err := RunScenario(context.Background(), mockProvider())
+	events, err := RunScenario(context.Background(), mockProvider(), demoModel)
 	if err != nil {
 		t.Fatalf("RunScenario: %v", err)
 	}

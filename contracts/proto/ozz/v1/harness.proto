@@ -230,6 +230,8 @@ message Result {
   string text = 2;
   // usage is the cumulative token accounting for the run.
   Usage usage = 3;
+  // error carries the failure detail when stop is "error" (empty otherwise).
+  string error = 4;
 }
 
 // Usage accounts for the token cost of a model call (or an aggregate).

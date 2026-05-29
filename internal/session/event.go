@@ -34,6 +34,10 @@ type ResultPayload struct {
 	Text string
 	// Usage is the cumulative token accounting for the run.
 	Usage Usage
+	// Error carries the failure detail when Stop is StopError (empty otherwise).
+	// It surfaces the error the loop would otherwise drop so callers (the demo,
+	// API clients) can see why a run failed instead of an opaque "error".
+	Error string
 }
 
 // Event is the domain-owned, provider-neutral unit of the streaming model. The

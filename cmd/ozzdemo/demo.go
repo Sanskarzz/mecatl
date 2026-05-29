@@ -35,26 +35,31 @@ const demoFilePath = "greeting.txt"
 // demoFileContent is the seeded file body, surfaced through the Read tool result.
 const demoFileContent = "hello from the ozzharness demo workspace\n"
 
-// demoModel is the model identifier stamped into requests and the prompt env.
+// demoModel is the default model identifier stamped into requests and the
+// prompt env when the caller does not override it (the offline mockllm path).
 const demoModel = "mock-model"
 
 // RunScenario drives one full offline session against the provided LLMProvider
 // and returns every emitted session.Event in order. The caller supplies the
 // provider so the same scenario runs against mockllm (offline default) or the
-// real OpenAI adapter. It auto-approves the single permission ask the script
-// raises, simulating a client clicking "allow", so the loop resumes to a final
-// result.
+// real OpenAI adapter, plus the model identifier to stamp into requests (the
+// live adapter requires a real model ID; the offline mock ignores it). It
+// auto-approves the single permission ask the script raises, simulating a
+// client clicking "allow", so the loop resumes to a final result.
 //
 // It is the single source of truth for the demo: main prints these events, the
 // e2e test asserts over them.
-func RunScenario(ctx context.Context, provider port.LLMProvider) ([]session.Event, error) {
+func RunScenario(ctx context.Context, provider port.LLMProvider, model string) ([]session.Event, error) {
+	if model == "" {
+		model = demoModel
+	}
 	// Workspace: an in-memory FS seeded with one file so Read returns content.
 	ws := memfs.NewWorkspace(demoWorkspaceRoot)
 	if err := ws.Write(ctx, demoFilePath, []byte(demoFileContent)); err != nil {
 		return nil, fmt.Errorf("seed workspace: %w", err)
 	}
 
-	engine := buildEngine(provider)
+	engine := buildEngine(provider, model)
 
 	sess := session.New(
 		"demo-session",
@@ -81,7 +86,7 @@ func RunScenario(ctx context.Context, provider port.LLMProvider) ([]session.Even
 // tool catalog (the demo exercises only Read/Write, so it runs shell-less: no
 // Bash tool is registered), the default deny/ask/allow policy (Read auto-allowed,
 // Write asks), no hooks, an in-memory store, and a deterministic prompt config.
-func buildEngine(provider port.LLMProvider) *agent.Engine {
+func buildEngine(provider port.LLMProvider, model string) *agent.Engine {
 	cat := tool.NewCatalog()
 	for _, t := range tools.All() {
 		cat.MustRegister(t)
@@ -105,12 +110,12 @@ func buildEngine(provider port.LLMProvider) *agent.Engine {
 			Env: prompt.Env{
 				Cwd:   demoWorkspaceRoot,
 				OS:    "linux",
-				Model: demoModel,
+				Model: model,
 				Date:  "2026-05-29",
 				Mode:  string(session.ModeDefault),
 			},
 		},
-		Model: demoModel,
+		Model: model,
 	})
 }
 

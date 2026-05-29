@@ -28,7 +28,7 @@ func main() {
 	fmt.Println("Driving a real agent.Engine: auto-allowed tool call -> permission ask + approval -> final result.")
 	fmt.Println()
 
-	events, err := RunScenario(context.Background(), provider)
+	events, err := RunScenario(context.Background(), provider, *model)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ozzdemo:", err)
 		os.Exit(1)
@@ -86,6 +86,9 @@ func formatEvent(ev session.Event) string {
 	case session.EvResult:
 		if ev.Result != nil {
 			fmt.Fprintf(&b, " stop=%s text=%q", ev.Result.Stop, ev.Result.Text)
+			if ev.Result.Error != "" {
+				fmt.Fprintf(&b, " error=%q", ev.Result.Error)
+			}
 			u := ev.Result.Usage
 			fmt.Fprintf(&b, "\n      usage: in=%d out=%d cacheRead=%d cacheWrite=%d cacheHitRate=%.2f",
 				u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheWriteTokens, u.CacheHitRate())
