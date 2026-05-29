@@ -15,7 +15,7 @@
 | Model-based layer-2 risk classifier | ✅ | `permclassify` (opt-in, monotonic, fail-safe) |
 | Hooks (full lifecycle fired, exit 0/2) | ✅ | all 6 phases fire |
 | **API authentication + rate limiting** | ✅ | bearer (`--auth-token`/`OZZ_AUTH_TOKEN`, constant-time) + optional TLS/mTLS (`--tls-cert`/`--tls-key`/`--client-ca`) gRPC interceptors + HTTP middleware; per-client + global token-bucket rate limit (`--rate-limit`/`--rate-burst`, bounded/idle-evicting); off-loopback-no-auth WARNING (`server/authn.go`) |
-| **OS-level sandbox (process trust)** | ⛔ | Landlock(+seccomp) `CommandRunner` wrapper on Linux; the biggest process-trust delta |
+| OS-level sandbox (process trust) | ⏸️ Deferred | Explicitly deferred (2026-05-29). The `CommandRunner` port is the seam; a Landlock(+seccomp) wrapper drops in later without touching the loop. Bash is also fully optional (shell-less deploys avoid the surface entirely), so this is not a blocker for those. |
 | Secrets handling (no key logging) | ✅ | key via env, never logged |
 | MCP transport restriction (no stdio) | ✅ | streaming-HTTP only |
 
@@ -58,7 +58,7 @@
 | 12 lifecycle hooks | ✅ | all phases fire |
 | 5 progressive compaction | 🔨 | seam ✅; cascade impl under Context management above |
 | **8 fork-join parallelism** | ⛔ | `WorkspaceForker` + `ForkTool` (worktree/clone isolation) |
-| **3 tiered memory** | ⛔ | memory tool + store seam (recall/remember), conservative |
+| **3 tiered memory** | ✅ | `tool.MemoryStore` seam + file-backed `internal/adapter/memory` (Remember/Recall tools, per-project, conservative descriptions); opt-in via `memory.Register` |
 | 4 dream/sleep consolidation | 🟦 | depends on (3); optional background consolidation |
 
 ## Deployment
@@ -77,7 +77,7 @@
 | Repo map (tree-sitter PageRank) | 🟦 | a future read-only tool; agentic grep works at current scale |
 | Slash commands / skills packaging | 🟦 | prompt volatile-suffix seam exists |
 | Live OpenAI validation | ✅ | validated against Sonnet 4.5 via OpenRouter (full tool-calling loop) |
-| Fuzz tests (bash splitter, SSE decoder) | ⛔ | native Go fuzz for the security-critical parsers |
+| Fuzz tests (bash splitter, SSE decoder) | ✅ | native Go fuzzers + Taskfile `fuzz` target; security invariants asserted; no crashers found |
 
 ## Close-out plan (waves)
 

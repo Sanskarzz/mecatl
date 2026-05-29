@@ -155,6 +155,43 @@ type Workspace interface {
 	WasReadUnchanged(ctx context.Context, path string) (bool, error)
 }
 
+// MemoryEntry is a single cross-session memory record: an opaque key, its stored
+// value, and the wall-clock time it was last written. It is the unit returned by
+// MemoryStore.Recall and MemoryStore.List.
+type MemoryEntry struct {
+	// Key is the opaque lookup key (e.g. "pref/test-runner").
+	Key string
+	// Value is the stored text. The store treats it as opaque bytes.
+	Value string
+	// UpdatedAt is the wall-clock time the entry was last written.
+	UpdatedAt time.Time
+}
+
+// MemoryStore is the seam for conservative, cross-session ("tiered") memory
+// (harness pattern 3). It is defined here, alongside Workspace and CommandRunner,
+// for the same layering reason: the memory tools depend on it the way the Bash
+// tool depends on CommandRunner, and keeping the interface in internal/tool
+// avoids the port↔tool import cycle a separate package would risk.
+//
+// SCOPING: a MemoryStore is scoped per-PROJECT — the composition root constructs
+// one store instance per workspace/project directory, so entries written in one
+// session are visible to later sessions over the SAME project dir and are NOT
+// shared across unrelated projects. Implementations must be safe for concurrent
+// use and durable across process restarts.
+type MemoryStore interface {
+	// Remember stores value under key, overwriting any existing entry and
+	// bumping its UpdatedAt. An empty key is rejected.
+	Remember(ctx context.Context, key, value string) error
+	// Recall returns the entry for the exact key. The boolean reports whether an
+	// entry was found; a miss is (zero, false, nil), not an error.
+	Recall(ctx context.Context, key string) (MemoryEntry, bool, error)
+	// List returns all entries whose key has the given prefix, sorted by key for
+	// deterministic output. An empty prefix returns every entry.
+	List(ctx context.Context, prefix string) ([]MemoryEntry, error)
+	// Forget deletes the entry for key. Deleting a missing key is not an error.
+	Forget(ctx context.Context, key string) error
+}
+
 // GrepMatch is a single Workspace.Grep hit.
 type GrepMatch struct {
 	// Path is the session-relative file the match occurred in.
