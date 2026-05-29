@@ -45,7 +45,7 @@
 |---|---|---|
 | Compaction seam (`Compactor`) | ✅ | pluggable |
 | Single-summary heuristic compaction | ✅ | default |
-| **Real tokenizer + tiered compaction cascade** | ⛔ | replace 4-chars/token estimate; snip→strip→collapse→summarize behind `Compactor` |
+| Real tokenizer + tiered compaction cascade | ✅ | `TokenCounter` seam (heuristic default + offline `tiktoken` adapter); `CascadeCompactor` snip→strip→collapse→summarize behind the `Compactor` seam, with trigger/target hysteresis (0.8/0.6). Opt-in via `--compaction=cascade`/`--tokenizer=tiktoken`; defaults unchanged |
 
 ## Harness patterns (12) — pluggability
 
@@ -56,7 +56,7 @@
 | 9 progressive tool disclosure | ✅ | `Disclosable`+`ToolSearch` seam (default off) |
 | 10 command risk classification | ✅ | layer-1 rules + layer-2 `permclassify` |
 | 12 lifecycle hooks | ✅ | all phases fire |
-| 5 progressive compaction | 🔨 | seam ✅; cascade impl under Context management above |
+| 5 progressive compaction | ✅ | `Compactor` seam + `HeuristicCompactor` (default) and `CascadeCompactor` (tiered) |
 | 8 fork-join parallelism | ✅ | `tool.WorkspaceForker` + `internal/adapter/forker` (git-worktree/copy isolation) + `agent.NewForkTool` (parallel isolated branches, join); wired in `ozzd` (`--enable-fork`) |
 | **3 tiered memory** | ✅ | `tool.MemoryStore` seam + file-backed `internal/adapter/memory` (Remember/Recall tools, per-project, conservative descriptions); opt-in via `memory.Register` |
 | 4 dream/sleep consolidation | 🟦 | depends on (3); optional background consolidation |
