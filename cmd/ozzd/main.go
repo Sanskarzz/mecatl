@@ -47,6 +47,7 @@ import (
 	"github.com/stacklok/ozzharness/internal/adapter/store/jsonlstore"
 	"github.com/stacklok/ozzharness/internal/adapter/store/memstore"
 	"github.com/stacklok/ozzharness/internal/adapter/telemetry"
+	"github.com/stacklok/ozzharness/internal/adapter/tokenizer"
 	"github.com/stacklok/ozzharness/internal/adapter/tools"
 	"github.com/stacklok/ozzharness/internal/agent"
 	"github.com/stacklok/ozzharness/internal/governance"
@@ -59,6 +60,11 @@ import (
 // defaultContextWindowTokens is the model context window the loop uses to decide
 // when to compact. A conservative default that suits the common GPT-class models.
 const defaultContextWindowTokens = 128_000
+
+// defaultCompactionRatio mirrors the agent loop's default compaction trigger
+// fraction (0.8 of the context window). The cascade compactor reduces toward this
+// budget so its deterministic tiers target the same threshold the loop fires at.
+const defaultCompactionRatio = 0.8
 
 // TRUST MODEL (security): the ozzd API exposes command and file execution
 // against the configured workspace. The default listen addresses below bind the
@@ -108,6 +114,12 @@ type config struct {
 	storeDir      string
 	shell         string
 	noBash        bool
+
+	// Context management: the compaction strategy and the token counter. Both
+	// default to the current behaviour exactly (heuristic compactor + heuristic
+	// counter); "cascade"/"tiktoken" opt into the tiered cascade / real tokenizer.
+	compaction string
+	tokenizer  string
 
 	// Security: API authentication, transport security, and rate limiting.
 	authToken string  // bearer token required on every RPC/request (empty disables auth)
@@ -272,6 +284,9 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.shell, "shell", "/bin/sh", "shell used to execute Bash-tool commands; empty disables Bash (shell-less mode)")
 	fs.BoolVar(&cfg.noBash, "no-bash", false, "disable the Bash tool entirely (shell-less mode); overrides --shell")
 
+	fs.StringVar(&cfg.compaction, "compaction", "heuristic", "compaction strategy: \"heuristic\" (default, single-summary) or \"cascade\" (tiered snip→strip→collapse→summarize)")
+	fs.StringVar(&cfg.tokenizer, "tokenizer", "heuristic", "token counter for the compaction trigger: \"heuristic\" (default, dependency-free) or \"tiktoken\" (offline tiktoken vocab)")
+
 	fs.IntVar(&cfg.llmMaxAttempts, "llm-max-attempts", 3, "max LLM stream-establish attempts (initial call plus retries)")
 	fs.DurationVar(&cfg.llmPerAttemptTimeout, "llm-per-attempt-timeout", 30*time.Second, "per-attempt timeout for establishing an LLM stream (0 disables)")
 	fs.IntVar(&cfg.llmBreakerThreshold, "llm-breaker-threshold", 5, "consecutive LLM failures that open the circuit breaker (0 disables)")
@@ -384,6 +399,8 @@ func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sin
 
 	cat, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
 
+	counter := buildTokenCounter(cfg)
+
 	deps := agent.Deps{
 		LLM:     provider,
 		Catalog: cat,
@@ -399,8 +416,53 @@ func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sin
 		PromptConfig:        promptConfig(cfg),
 		Model:               cfg.model,
 		ContextWindowTokens: defaultContextWindowTokens,
+		TokenCounter:        counter,
+		Compactor:           buildCompactor(cfg, provider, counter),
 	}
 	return agent.NewEngine(deps), mcpClose
+}
+
+// buildTokenCounter selects the TokenCounter from --tokenizer. The default
+// ("heuristic") returns the dependency-free heuristic counter — byte-identical
+// behaviour to the pre-seam loop. "tiktoken" returns the offline tiktoken-backed
+// counter from internal/adapter/tokenizer, chosen for the configured model; if it
+// cannot be built it logs and falls back to the heuristic so startup never fails.
+func buildTokenCounter(cfg config) agent.TokenCounter {
+	switch cfg.tokenizer {
+	case "tiktoken":
+		tc, err := tokenizer.NewForModel(cfg.model)
+		if err != nil {
+			slog.Warn("tiktoken counter unavailable; falling back to heuristic", "model", cfg.model, "err", err)
+			return agent.HeuristicTokenCounter{}
+		}
+		slog.Info("token counter: tiktoken (offline vocab)", "model", cfg.model)
+		return tc
+	default:
+		slog.Info("token counter: heuristic (dependency-free)")
+		return agent.HeuristicTokenCounter{}
+	}
+}
+
+// buildCompactor selects the Compactor from --compaction. The default
+// ("heuristic") returns the single-summary HeuristicCompactor — the exact v1
+// behaviour. "cascade" returns the tiered CascadeCompactor (snip→strip→collapse,
+// plus an LLM summarize tier wired with the shared provider) targeting the
+// compaction threshold so its deterministic tiers reduce toward the same budget
+// the loop triggers at.
+func buildCompactor(cfg config, provider port.LLMProvider, counter agent.TokenCounter) agent.Compactor {
+	switch cfg.compaction {
+	case "cascade":
+		slog.Info("compaction strategy: cascade (snip→strip→collapse→summarize)")
+		return agent.CascadeCompactor{
+			Counter:      counter,
+			BudgetTokens: int(float64(defaultContextWindowTokens) * defaultCompactionRatio),
+			LLM:          provider,
+			Model:        cfg.model,
+		}
+	default:
+		slog.Info("compaction strategy: heuristic (single-summary)")
+		return agent.HeuristicCompactor{}
+	}
 }
 
 // buildCatalog registers the always-available core tools (Read, Edit, Write,

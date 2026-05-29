@@ -33,9 +33,10 @@ exactly:
 
 ```yaml
 permissions:
-  contents: read   # checkout
-  packages: write  # push image + SBOM to GHCR
-  id-token: write  # OIDC: GHCR login AND cosign keyless signing
+  contents: read       # checkout
+  packages: write      # push image + SBOM to GHCR
+  id-token: write      # OIDC: GHCR login, cosign keyless signing AND provenance
+  attestations: write  # SLSA build provenance (actions/attest-build-provenance)
 ```
 
 Flow:
@@ -55,6 +56,12 @@ Flow:
    this workflow's OIDC token (issuer
    `https://token.actions.githubusercontent.com`), recorded in the public Rekor
    transparency log. No long-lived signing keys.
+5. **SLSA build provenance** — `actions/attest-build-provenance` generates a
+   signed SLSA provenance predicate for the **image digest** (subject =
+   GHCR repo + `sha256:...`, never a tag) and, with `push-to-registry: true`,
+   stores it as an OCI referrer of the image. Keyless via the same Sigstore
+   (Fulcio/Rekor) machinery — no keys. This binds *how and where* the artifact
+   was built to the exact bytes that were published.
 
 ### Verifying a signed image (what a consumer runs)
 
@@ -81,15 +88,41 @@ cosign verify ghcr.io/<owner>/<repo>@sha256:... <flags as above>
 If you prefer an exact identity over the regexp, use
 `--certificate-identity 'https://github.com/<owner>/<repo>/.github/workflows/release.yml@refs/tags/<tag>'`.
 
-### Documented follow-up: SLSA provenance
+### Verifying SLSA build provenance
 
-The baseline above gives verifiable origin (keyless signature) and contents
-(signed SBOM). Full **SLSA Build L3 provenance** is the documented next step: it
-needs the `slsa-framework/slsa-github-generator` container generator as a
-separate reusable-workflow job keyed off the built image digest. It is left out
-of this first cut because it is a heavier, separately-versioned workflow with
-its own permission/secrets contract that warrants its own change and end-to-end
-verification. See <https://slsa.dev/>.
+The provenance attestation is stored as an OCI referrer of the image and is
+easiest to verify with the GitHub CLI, which knows the predicate type and the
+expected Sigstore identity:
+
+```sh
+# Simplest: gh resolves the digest and checks the provenance was produced by
+# this repo's workflow.
+gh attestation verify \
+  oci://ghcr.io/<owner>/<repo>:<tag> \
+  --repo <owner>/<repo>
+```
+
+Or with cosign, pin to the digest and pass the same keyless identity flags used
+for the signature (predicate type `https://slsa.dev/provenance/v1`):
+
+```sh
+cosign verify-attestation \
+  ghcr.io/<owner>/<repo>@sha256:... \
+  --type slsaprovenance1 \
+  --certificate-identity-regexp '^https://github.com/<owner>/<repo>/\.github/workflows/release\.yml@refs/tags/v.*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+### SLSA provenance — implemented
+
+Full **SLSA build provenance** is now generated for every published image via
+GitHub's native `actions/attest-build-provenance`, keyed off the immutable image
+digest (step 5 above). The native attestation was chosen over the
+`slsa-framework/slsa-github-generator` container generator: it integrates as a
+single hardened step in the existing publish job (only `attestations: write`
+added), reuses the digest already captured, and stores a verifiable provenance
+attestation with the image — no separate, separately-versioned reusable workflow
+with its own permission/secrets contract. See <https://slsa.dev/>.
 
 ## References
 

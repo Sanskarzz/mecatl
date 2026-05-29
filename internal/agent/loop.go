@@ -27,11 +27,6 @@ import (
 // triggers compaction when Deps.CompactionRatio is unset.
 const defaultCompactionRatio = 0.8
 
-// charsPerToken is the crude bytes→tokens estimate the loop uses to decide when
-// to compact. It is intentionally coarse: the threshold only needs to be in the
-// right ballpark, and an offline heuristic must not call a tokenizer service.
-const charsPerToken = 4
-
 // Deps are the injected ports and configuration a single Engine is built from.
 // Every field is a port (an interface) or plain config, so the agent package
 // never depends on a concrete adapter. The composition root wires real or fake
@@ -56,6 +51,9 @@ type Deps struct {
 	Sink port.EventSink
 	// Compactor compresses history at the threshold; nil → HeuristicCompactor.
 	Compactor Compactor
+	// TokenCounter estimates history size for the compaction trigger (and is
+	// shared with the Compactor); nil → HeuristicTokenCounter.
+	TokenCounter TokenCounter
 	// Instructions assembles the project-instruction messages recorded once at
 	// the start of a run; nil → prompt.RootAssembler (root-only AGENTS.md /
 	// CLAUDE.md, the v1 default).
@@ -92,6 +90,9 @@ type Engine struct {
 // NewEngine constructs an Engine from deps, applying defaults for the optional
 // Compactor and CompactionRatio.
 func NewEngine(deps Deps) *Engine {
+	if deps.TokenCounter == nil {
+		deps.TokenCounter = HeuristicTokenCounter{}
+	}
 	if deps.Compactor == nil {
 		deps.Compactor = HeuristicCompactor{}
 	}
@@ -360,7 +361,7 @@ func (e *Engine) maybeCompact(ctx context.Context, r *Run, sess *session.Session
 		return false
 	}
 	threshold := int(float64(e.deps.ContextWindowTokens) * e.deps.CompactionRatio)
-	if estimateTokens(sess.Conversation) < threshold {
+	if e.deps.TokenCounter.CountMessages(sess.Conversation.Messages) < threshold {
 		return false
 	}
 	compacted, summary, err := e.deps.Compactor.Compact(ctx, sess.Conversation)
@@ -376,22 +377,6 @@ func (e *Engine) maybeCompact(ctx context.Context, r *Run, sess *session.Session
 	}
 	e.emit(r, session.Event{Type: session.EvCompaction, Turn: turnIdx, Text: summary})
 	return true
-}
-
-// estimateTokens is the loop's coarse, offline history-size estimate, summing the
-// text/reasoning/tool bodies and dividing by charsPerToken. It never calls out.
-func estimateTokens(conv *session.Conversation) int {
-	chars := 0
-	for _, m := range conv.Messages {
-		chars += len(m.Text) + len(m.Reasoning)
-		for _, c := range m.ToolCalls {
-			chars += len(c.Name) + len(c.Args)
-		}
-		if m.ToolResult != nil {
-			chars += len(m.ToolResult.Content)
-		}
-	}
-	return chars / charsPerToken
 }
 
 // emit assigns the next monotonic Seq, publishes the event on the Run channel,

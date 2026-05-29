@@ -112,3 +112,57 @@ func TestCompactionTriggersAtThreshold(t *testing.T) {
 		t.Fatalf("no compaction event emitted")
 	}
 }
+
+// countingTokenCounter records invocations and reports a fixed huge count so the
+// loop's compaction trigger always trips through the injected counter.
+type countingTokenCounter struct {
+	calls int
+	fixed int
+}
+
+func (*countingTokenCounter) Count(string) int { return 0 }
+func (c *countingTokenCounter) CountMessages(_ []session.Message) int {
+	c.calls++
+	return c.fixed
+}
+
+// TestCompactionTriggerUsesInjectedCounter checks the loop drives its compaction
+// threshold through the injected TokenCounter (not a hard-coded estimate): a
+// counter reporting over-threshold trips compaction; one reporting under does not.
+func TestCompactionTriggerUsesInjectedCounter(t *testing.T) {
+	run := func(reported int) (compacted bool, counterCalls int) {
+		rc := &recordingCompactor{}
+		tc := &countingTokenCounter{fixed: reported}
+		llm := mockllm.New(mockllm.TextTurn("done"))
+		e := agent.NewEngine(agent.Deps{
+			LLM:                 llm,
+			Catalog:             catalogWith(t),
+			Policy:              allowAll(),
+			Model:               "m",
+			Compactor:           rc,
+			TokenCounter:        tc,
+			ContextWindowTokens: 100,
+			CompactionRatio:     0.8, // threshold = 80
+		})
+		sess := session.New("s", session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
+		r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "hi")
+		for range r.Events() {
+		}
+		return rc.called > 0, tc.calls
+	}
+
+	// Over threshold (90 >= 80): compaction trips, and the injected counter was used.
+	over, overCalls := run(90)
+	if !over {
+		t.Fatalf("compaction did not trigger when counter reported over threshold")
+	}
+	if overCalls == 0 {
+		t.Fatalf("injected counter was never consulted")
+	}
+
+	// Under threshold (10 < 80): compaction does not trip.
+	under, _ := run(10)
+	if under {
+		t.Fatalf("compaction triggered when counter reported under threshold")
+	}
+}
