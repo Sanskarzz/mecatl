@@ -36,7 +36,7 @@
 | Prometheus metrics + `/metrics` | ✅ | `telemetry` |
 | Per-tool logging + JSONL replay | ✅ | `Logger` + `jsonlstore` |
 | OTel span model (run/turn/tool) | ✅ | `telemetry` |
-| **OTLP exporter wiring** | ⛔ | spans are no-ops until a `TracerProvider` is installed — wire OTLP via flag |
+| OTLP exporter wiring | ✅ | `telemetry.Setup` builds/installs an OTLP TracerProvider; wired in `ozzd` via `--otlp-endpoint`/`--otlp-protocol`/`--otlp-insecure` (no-op when empty) |
 | **Health endpoints** (`/healthz`,`/readyz`, gRPC health) | ✅ | HTTP `/healthz` (liveness) + `/readyz` (readiness) mounted outside auth/rate-limit; standard `grpc_health_v1` SERVING (`server/health.go`). `deploy/` can switch TCP→httpGet probes |
 
 ## Context management
@@ -57,7 +57,7 @@
 | 10 command risk classification | ✅ | layer-1 rules + layer-2 `permclassify` |
 | 12 lifecycle hooks | ✅ | all phases fire |
 | 5 progressive compaction | 🔨 | seam ✅; cascade impl under Context management above |
-| **8 fork-join parallelism** | ⛔ | `WorkspaceForker` + `ForkTool` (worktree/clone isolation) |
+| 8 fork-join parallelism | ✅ | `tool.WorkspaceForker` + `internal/adapter/forker` (git-worktree/copy isolation) + `agent.NewForkTool` (parallel isolated branches, join); wired in `ozzd` (`--enable-fork`) |
 | **3 tiered memory** | ✅ | `tool.MemoryStore` seam + file-backed `internal/adapter/memory` (Remember/Recall tools, per-project, conservative descriptions); opt-in via `memory.Register` |
 | 4 dream/sleep consolidation | 🟦 | depends on (3); optional background consolidation |
 

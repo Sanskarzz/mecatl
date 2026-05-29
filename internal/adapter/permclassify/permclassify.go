@@ -365,20 +365,33 @@ func parseJSONVerdict(s string) (Verdict, bool) {
 
 func parseKeywordVerdict(s string) Verdict {
 	up := strings.ToUpper(s)
-	hasSafe := strings.Contains(up, "SAFE")
+
+	// SECURITY: "SAFE" is a substring of "UNSAFE". A model writing prose like
+	// "this command is UNSAFE" must NEVER be parsed as SAFE — that would fail
+	// open and relax a human Ask into an auto-Allow. So strip every "UNSAFE"
+	// occurrence out of the text BEFORE testing for the bare "SAFE" token, and
+	// track "unsafe" as its own negative signal.
 	hasDanger := strings.Contains(up, "DANGEROUS")
 	hasAmbig := strings.Contains(up, "AMBIGUOUS")
+	hasUnsafe := strings.Contains(up, "UNSAFE")
 
-	// Exactly one keyword present → trust it. Conflicting keywords are unsafe to
-	// guess, so fall back to Unknown (→ keep Ask).
+	// Remove "UNSAFE" so the remaining text cannot accidentally match "SAFE".
+	stripped := strings.ReplaceAll(up, "UNSAFE", "")
+	hasSafe := strings.Contains(stripped, "SAFE")
+
+	// Exactly one recognised keyword present → trust it. Conflicting keywords are
+	// unsafe to guess, so fall back to Unknown (→ keep Ask). A bare "unsafe" is a
+	// negative signal but not one of our three risk levels, so it can never yield
+	// VerdictSafe: when present it forces a not-safe reading (Unknown → keep Ask).
 	switch {
 	case hasDanger && !hasSafe && !hasAmbig:
 		return VerdictDangerous
 	case hasAmbig && !hasSafe && !hasDanger:
 		return VerdictAmbiguous
-	case hasSafe && !hasDanger && !hasAmbig:
+	case hasSafe && !hasUnsafe && !hasDanger && !hasAmbig:
 		return VerdictSafe
 	default:
+		// Empty, conflicting, "unsafe"-tainted, or unrecognised → Unknown.
 		return VerdictUnknown
 	}
 }

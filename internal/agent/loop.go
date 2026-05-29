@@ -160,7 +160,14 @@ func (e *Engine) Run(ctx context.Context, sess *session.Session, ws tool.Workspa
 // drive runs the loop algorithm for one prompt. It always terminates the session
 // (Complete/Stop/Cancel/Fail) and emits exactly one terminal result Event.
 func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, userText string) {
-	// Step 0: fire SessionStart once before any work. Informational: a Block
+	// Step 0a: emit the run-open signal exactly once per run, before any other
+	// event. Telemetry adapters (tracing/metrics) switch on session.init as the
+	// signal to open a run span/counter; emitting it here makes that contract
+	// honest rather than relying on their defensive fallback. It must precede the
+	// SessionStart hook events and the first turn.start.
+	e.emit(r, session.Event{Type: session.EvSessionInit})
+
+	// Step 0b: fire SessionStart once before any work. Informational: a Block
 	// outcome is logged but does NOT abort the run (the phase is advisory; only
 	// PreToolUse and UserPromptSubmit are vetoing phases).
 	if sess.Counters.Turns == 0 {

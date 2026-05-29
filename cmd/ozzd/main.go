@@ -34,9 +34,11 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	ozzv1 "github.com/stacklok/ozzharness/contracts/gen/go/ozz/v1"
+	"github.com/stacklok/ozzharness/internal/adapter/forker"
 	"github.com/stacklok/ozzharness/internal/adapter/hookexec"
 	"github.com/stacklok/ozzharness/internal/adapter/llmresilience"
 	"github.com/stacklok/ozzharness/internal/adapter/mcp"
+	"github.com/stacklok/ozzharness/internal/adapter/memory"
 	"github.com/stacklok/ozzharness/internal/adapter/mockllm"
 	"github.com/stacklok/ozzharness/internal/adapter/openai"
 	"github.com/stacklok/ozzharness/internal/adapter/osfs"
@@ -121,8 +123,18 @@ type config struct {
 	llmBreakerThreshold  int
 	llmBreakerCooldown   time.Duration
 
-	// Observability: the Prometheus /metrics listen address (empty disables it).
-	metricsAddr string
+	// Observability: the Prometheus /metrics listen address (empty disables it),
+	// plus the OTLP trace exporter knobs (empty endpoint disables tracing).
+	metricsAddr  string
+	otlpEndpoint string // OTLP collector endpoint (empty disables tracing)
+	otlpProtocol string // OTLP transport: "grpc" (default) or "http"
+	otlpInsecure bool   // skip TLS when dialing the OTLP collector (dev only)
+
+	// Memory: per-project memory store directory (empty disables memory tools).
+	memoryDir string
+
+	// Fork: enable the Fork fan-out tool (parallel isolated child branches).
+	enableFork bool
 
 	// MCP: remote MCP servers to connect to and register tools from.
 	mcpServers mcpServerList
@@ -176,6 +188,32 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Observability: install the OTLP trace exporter + global TracerProvider
+	// BEFORE building the tracing sink below, so NewTracing(otel.GetTracerProvider())
+	// picks up the installed provider. An empty --otlp-endpoint disables tracing
+	// (Setup installs nothing and returns a no-op shutdown).
+	traceShutdown, err := telemetry.Setup(ctx, telemetry.OTLPConfig{
+		Endpoint:    cfg.otlpEndpoint,
+		Protocol:    cfg.otlpProtocol,
+		Insecure:    cfg.otlpInsecure,
+		ServiceName: "ozzharness",
+	})
+	if err != nil {
+		return fmt.Errorf("setup tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if serr := traceShutdown(shutdownCtx); serr != nil {
+			slog.Warn("tracing shutdown", "err", serr)
+		}
+	}()
+	if cfg.otlpEndpoint == "" {
+		slog.Info("tracing disabled (--otlp-endpoint empty)")
+	} else {
+		slog.Info("tracing enabled (OTLP exporter installed)", "endpoint", cfg.otlpEndpoint, "protocol", cfg.otlpProtocol, "insecure", cfg.otlpInsecure)
+	}
+
 	provider, err := buildProvider(cfg)
 	if err != nil {
 		return err
@@ -188,8 +226,8 @@ func run() error {
 
 	// Observability: a private Prometheus registry feeds both the EventSink/
 	// Logger adapter and the /metrics handler. Tracing uses the global OTel
-	// TracerProvider, which is a no-op until a provider is installed (no OTLP
-	// exporter is wired in v1), so traces are inert by default.
+	// TracerProvider installed by telemetry.Setup above (a no-op when tracing is
+	// disabled), so the sink emits to the OTLP exporter when an endpoint is set.
 	reg := prometheus.NewRegistry()
 	metrics := telemetry.NewMetrics(reg)
 	tracing := telemetry.NewTracing(otel.GetTracerProvider())
@@ -240,6 +278,14 @@ func parseFlags(argv []string) (config, error) {
 	fs.DurationVar(&cfg.llmBreakerCooldown, "llm-breaker-cooldown", 30*time.Second, "how long the LLM circuit breaker stays open before half-opening")
 
 	fs.StringVar(&cfg.metricsAddr, "metrics-addr", defaultMetricsAddr, "Prometheus /metrics listen address (empty disables the metrics endpoint)")
+
+	fs.StringVar(&cfg.otlpEndpoint, "otlp-endpoint", "", "OTLP trace collector endpoint, e.g. localhost:4317 (empty disables tracing)")
+	fs.StringVar(&cfg.otlpProtocol, "otlp-protocol", telemetry.ProtocolGRPC, "OTLP transport: \"grpc\" (default) or \"http\"")
+	fs.BoolVar(&cfg.otlpInsecure, "otlp-insecure", false, "skip TLS when dialing the OTLP collector (development only)")
+
+	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "per-project memory store directory (empty disables the Remember/Recall tools)")
+
+	fs.BoolVar(&cfg.enableFork, "enable-fork", true, "register the Fork fan-out tool (parallel isolated child branches)")
 
 	fs.Var(&cfg.mcpServers, "mcp-server", "remote MCP server as name=URL (repeatable); auth token read from MCP_<NAME>_TOKEN")
 
@@ -382,6 +428,34 @@ func buildCatalog(ctx context.Context, cfg config, provider port.LLMProvider, ho
 	}
 	cat.MustRegister(buildTaskTool(cfg, provider, hooks))
 
+	// Fork fan-out tool (harness pattern 8): a scoped read-only child Engine (no
+	// Fork/Task, so a branch cannot recurse) run against an isolated forked
+	// workspace. Children write only to their own forks, so this is safe to enable
+	// by default. Gated behind --enable-fork.
+	if cfg.enableFork {
+		fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
+		forkChild := buildChildEngine(cfg, provider)
+		cat.MustRegister(agent.NewForkTool(forkChild, fk, agent.WithForkSubagentStopHook(hooks)))
+		slog.Info("Fork tool ENABLED (parallel isolated child branches)")
+	} else {
+		slog.Info("Fork tool DISABLED (--enable-fork=false)")
+	}
+
+	// Memory tools (harness pattern 3): opt-in, registered only when a per-project
+	// memory directory is configured via --memory-dir.
+	if cfg.memoryDir != "" {
+		store, err := memory.New(cfg.memoryDir)
+		if err != nil {
+			slog.Warn("could not open memory store; memory tools disabled", "dir", cfg.memoryDir, "err", err)
+		} else if err := memory.Register(cat, store); err != nil {
+			slog.Warn("registering memory tools failed; some tools may be missing", "err", err)
+		} else {
+			slog.Info("memory tools ENABLED (Remember/Recall)", "dir", cfg.memoryDir)
+		}
+	} else {
+		slog.Info("memory tools DISABLED (--memory-dir empty)")
+	}
+
 	mcpClose := registerMCP(ctx, cfg, cat)
 	return cat, mcpClose
 }
@@ -444,9 +518,12 @@ func bashDisabledReason(cfg config) string {
 	}
 }
 
-// buildTaskTool constructs the Task subagent tool over a child Engine scoped to
-// the read-only explorer toolset.
-func buildTaskTool(cfg config, provider port.LLMProvider, hooks port.HookRunner) tool.Tool {
+// buildChildEngine constructs a child *Engine scoped to the read-only explorer
+// toolset (Read/Grep/Glob ONLY — no Fork/Task, so a child can never recurse or
+// fan out further) under an allow-all, non-interactive policy. Both the Task
+// subagent and the Fork fan-out tool share this child shape: each runs one-shot
+// and must never produce a permission ask.
+func buildChildEngine(cfg config, provider port.LLMProvider) *agent.Engine {
 	childCat := tool.NewCatalog()
 	childCat.MustRegister(tools.ReadTool{})
 	childCat.MustRegister(tools.GrepTool{})
@@ -456,7 +533,7 @@ func buildTaskTool(cfg config, provider port.LLMProvider, hooks port.HookRunner)
 	// non-interactive, so it must never produce a permission ask.
 	childPolicy := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}})
 
-	childEngine := agent.NewEngine(agent.Deps{
+	return agent.NewEngine(agent.Deps{
 		LLM:                 provider,
 		Catalog:             childCat,
 		Policy:              childPolicy,
@@ -465,8 +542,12 @@ func buildTaskTool(cfg config, provider port.LLMProvider, hooks port.HookRunner)
 		Model:               cfg.model,
 		ContextWindowTokens: defaultContextWindowTokens,
 	})
+}
 
-	return agent.NewTaskTool(childEngine, agent.WithSubagentStopHook(hooks))
+// buildTaskTool constructs the Task subagent tool over a child Engine scoped to
+// the read-only explorer toolset.
+func buildTaskTool(cfg config, provider port.LLMProvider, hooks port.HookRunner) tool.Tool {
+	return agent.NewTaskTool(buildChildEngine(cfg, provider), agent.WithSubagentStopHook(hooks))
 }
 
 // promptConfig builds the system-prompt configuration. The volatile Env values

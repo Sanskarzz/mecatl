@@ -37,7 +37,7 @@ go run ./cmd/ozzdemo    # end-to-end demo, fully offline (mock provider)
 
 ## The layering rule (the thing to get right)
 
-Dependencies point **inward only**. Enforced by `.golangci.yml` depguard and by intent:
+Dependencies point **inward only** (verified by import review; not yet machine-enforced):
 
 - Domain packages (`session`, `prompt`, `governance`, `tool`) and `internal/agent` must **never** import an adapter, `internal/agent` (from domain), `contracts/gen`, `os`, the OpenAI SDK, or gRPC.
 - `internal/port` imports only domain packages + stdlib.

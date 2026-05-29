@@ -5,20 +5,30 @@ built with [`ko`](https://ko.build) directly from `./cmd/ozzd` — there is no
 Dockerfile. Manifests reference the image via the `ko://…` placeholder, which
 `ko resolve` / `ko apply` substitutes with the real ref at deploy time.
 
-## ⚠️ Security: the ozzd API is UNAUTHENTICATED
+## ⚠️ Security: the ozzd API is auth-optional
 
-ozzd exposes command and file execution over gRPC + HTTP with **no caller
-identity check** (see `cmd/ozzd/main.go`). The in-code default binds loopback
-for exactly this reason. The Deployment overrides that to `0.0.0.0` because a
-pod's network namespace is isolated — but that only shifts the trust boundary to
-Kubernetes networking.
+ozzd exposes command and file execution over gRPC + HTTP. Authentication is
+**opt-in**: it is **off by default**, so unless you enable it the API performs
+**no caller identity check** (see `cmd/ozzd/main.go`). The in-code default binds
+loopback for exactly this reason. The Deployment overrides that to `0.0.0.0`
+because a pod's network namespace is isolated — but that only shifts the trust
+boundary to Kubernetes networking.
 
-- Deploy **only inside a trusted network**, or **behind an external auth proxy /
-  mTLS gateway**. Authentication is future work.
+- **Recommended in-pod control: enable `--auth-token`.** ozzd supports
+  `--auth-token` (bearer-token auth) as well as TLS and mTLS. Turning on
+  `--auth-token` gives you a caller-identity check that travels with the pod,
+  independent of network topology. The `/healthz` and `/readyz` endpoints are
+  mounted **outside** the auth boundary, so probes keep working when auth is on.
+- A default-deny ingress **`NetworkPolicy`** ships in `networkpolicy.yaml`
+  (wired into `kustomization.yaml`). It selects the ozzd pod and allows no
+  ingress until you add an explicit allow for your clients — defense-in-depth on
+  top of (or in lieu of) `--auth-token`. See that file for a ready-to-adapt
+  client-allow block. Egress is intentionally left open because ozzd needs
+  cluster DNS and outbound HTTPS to OpenAI.
 - The `Service` is `ClusterIP` only. Do **not** expose it via
   LoadBalancer/NodePort/Ingress without an auth boundary in front.
-- Recommended: add a `NetworkPolicy` restricting ingress to ozzd to only the
-  clients that need it.
+- For exposure beyond a trusted network, combine `--auth-token`/mTLS with the
+  NetworkPolicy, or front ozzd with an external auth proxy / mTLS gateway.
 
 ## Prerequisites
 
@@ -68,13 +78,16 @@ emits the manifests with the `ko://…` placeholder replaced. Pipe straight into
 > is for `kubectl apply -k deploy/` (which does not do ko substitution). Use the
 > `ko resolve | kubectl apply -f -` flow for the ko-built image.
 
-## Probes: TCP-socket today, /healthz is a follow-up
+## Probes: httpGet against /healthz and /readyz
 
-ozzd has **no HTTP health endpoint** yet. The readiness/liveness probes are
-therefore **TCP-socket** probes against the gRPC port — they only confirm the
-listener accepts connections, not that the app is healthy. Once a real
-`/healthz` (and `/readyz`) lands, swap these to `httpGet` probes in
-`deployment.yaml`.
+ozzd serves HTTP health endpoints on the `http` port (8081), mounted **outside**
+the auth boundary so they work with or without `--auth-token`:
+
+- **`/readyz`** — readiness probe; gates Service traffic until the app can serve.
+- **`/healthz`** — liveness probe; detects a hung process so it gets restarted.
+
+Both are configured as `httpGet` probes in `deployment.yaml`. (gRPC clients can
+also use the standard `grpc_health_v1` health service on the `grpc` port.)
 
 ## Pod Security Standards: restricted
 

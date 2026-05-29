@@ -9,3 +9,4 @@ kind: Kustomization
 resources:
   - deployment.yaml
   - service.yaml
+  - networkpolicy.yaml

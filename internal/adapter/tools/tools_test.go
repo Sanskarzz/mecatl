@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stacklok/ozzharness/internal/adapter/memfs"
+	"github.com/stacklok/ozzharness/internal/adapter/toolkit"
 	"github.com/stacklok/ozzharness/internal/session"
 	"github.com/stacklok/ozzharness/internal/tool"
 )
@@ -170,7 +171,7 @@ func TestReadTruncatesLineCap(t *testing.T) {
 	if !strings.Contains(res.Content, "output truncated") {
 		t.Error("expected truncation marker for over-cap file")
 	}
-	if len(res.Content) > maxOutputBytes+200 {
+	if len(res.Content) > toolkit.MaxOutputBytes+200 {
 		t.Errorf("output not byte-capped: %d bytes", len(res.Content))
 	}
 	// First line is always present and correctly numbered.

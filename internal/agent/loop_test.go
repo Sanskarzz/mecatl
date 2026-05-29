@@ -541,3 +541,51 @@ func TestUnknownToolError(t *testing.T) {
 		t.Fatalf("stop = %q", res.Stop)
 	}
 }
+
+// TestSessionInitEmittedOncePerRunBeforeFirstTurn asserts the loop emits exactly
+// one session.init event per run, and that it precedes every turn.start. This is
+// the run-open signal telemetry adapters switch on; the loop must emit it (not
+// rely on telemetry's defensive fallback).
+func TestSessionInitEmittedOncePerRunBeforeFirstTurn(t *testing.T) {
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("c1", "Read", `{"path":"a.go"}`)),
+		mockllm.TextTurn("done"),
+	)
+	read := &fakeTool{name: "Read", readOnly: true,
+		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			return session.NewToolResult(in.ID, "ok"), nil
+		}}
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, read)})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+	evs := drain(r)
+
+	// Exactly one session.init.
+	var initCount, firstInitIdx, firstTurnIdx = 0, -1, -1
+	for i, ev := range evs {
+		switch ev.Type {
+		case session.EvSessionInit:
+			if firstInitIdx < 0 {
+				firstInitIdx = i
+			}
+			initCount++
+		case session.EvTurnStart:
+			if firstTurnIdx < 0 {
+				firstTurnIdx = i
+			}
+		}
+	}
+	if initCount != 1 {
+		t.Fatalf("session.init count = %d, want exactly 1 (events: %v)", initCount, typesOf(evs))
+	}
+	if firstTurnIdx < 0 {
+		t.Fatalf("no turn.start emitted (events: %v)", typesOf(evs))
+	}
+	if firstInitIdx > firstTurnIdx {
+		t.Fatalf("session.init (idx %d) must precede first turn.start (idx %d): %v",
+			firstInitIdx, firstTurnIdx, typesOf(evs))
+	}
+	// And it must be the very first event of the run.
+	if evs[0].Type != session.EvSessionInit {
+		t.Fatalf("first event = %q, want session.init: %v", evs[0].Type, typesOf(evs))
+	}
+}

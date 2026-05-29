@@ -38,6 +38,10 @@ spec:
         fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+      # ozzd does not talk to the Kubernetes API, so it has no need for a
+      # mounted ServiceAccount token. Disabling automount removes a blast-radius
+      # amplifier if the (unauthenticated) workload is ever compromised.
+      automountServiceAccountToken: false
       containers:
         - name: ozzd
           # ko substitutes this placeholder with the built image ref on
@@ -70,20 +74,28 @@ spec:
                 - ALL
             seccompProfile:
               type: RuntimeDefault
-          # ozzd has no HTTP health endpoint yet, so we use TCP-socket probes:
-          # they only confirm the listener is accepting connections, not that the
-          # app is healthy. A real /healthz (+ /readyz) is a follow-up; swap to
-          # httpGet probes once it lands. See deploy/README.md.
+          # HTTP health endpoints are mounted OUTSIDE the auth boundary, so
+          # these probes work regardless of --auth-token. /readyz gates Service
+          # traffic; /healthz detects a hung process. Both hit the `http` port.
           readinessProbe:
-            tcpSocket:
-              port: grpc
+            httpGet:
+              path: /readyz
+              port: http
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            tcpSocket:
-              port: grpc
+            httpGet:
+              path: /healthz
+              port: http
             initialDelaySeconds: 10
             periodSeconds: 20
+          volumeMounts:
+            # readOnlyRootFilesystem: true means the only writable path must be
+            # an explicit volume. The Go runtime, the OpenAI client, and SSE
+            # buffering all need scratch space under /tmp. sizeLimit caps a
+            # runaway write so it can't fill the node's ephemeral storage.
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 100m
@@ -91,3 +103,7 @@ spec:
             limits:
               cpu: 1000m
               memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

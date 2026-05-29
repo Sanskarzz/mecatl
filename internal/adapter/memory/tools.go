@@ -6,13 +6,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/stacklok/ozzharness/internal/adapter/toolkit"
 	"github.com/stacklok/ozzharness/internal/session"
 	"github.com/stacklok/ozzharness/internal/tool"
 )
-
-// maxMemoryOutputBytes caps a Recall result so a large memory listing cannot
-// blow the model's context window.
-const maxMemoryOutputBytes = 25_000
 
 // --- Descriptions ---------------------------------------------------------
 //
@@ -250,34 +247,22 @@ func Register(cat *tool.Catalog, store tool.MemoryStore) error {
 
 // --- helpers --------------------------------------------------------------
 
-// parseArgs unmarshals a tool call's JSON arguments into dst, mirroring the
-// tools package helper. An empty payload is treated as an empty object. It
-// returns a model-facing error string (not a Go error) on malformed JSON.
+// parseArgs unmarshals a tool call's JSON arguments into dst, delegating to the
+// shared toolkit helper. It returns a model-facing error string (not a Go
+// error) on malformed JSON.
 func parseArgs(in session.ToolCall, dst any) (string, bool) {
-	raw := in.Args
-	if len(raw) == 0 {
-		raw = json.RawMessage("{}")
-	}
-	if err := json.Unmarshal(raw, dst); err != nil {
-		return fmt.Sprintf("invalid arguments: %v", err), false
-	}
-	return "", true
+	return toolkit.ParseArgs(in, dst)
 }
 
-// schema wraps a static JSON-schema literal as json.RawMessage for a ToolSpec.
-func schema(s string) json.RawMessage { return json.RawMessage(s) }
+// schema wraps a static JSON-schema literal as json.RawMessage for a ToolSpec,
+// delegating to the shared toolkit helper.
+func schema(s string) json.RawMessage { return toolkit.Schema(s) }
 
-// truncateMemory trims s to at most maxMemoryOutputBytes on a rune boundary,
-// appending a marker when it trims.
+// truncateMemory trims s to at most toolkit.MaxOutputBytes on a rune boundary,
+// appending a marker when it trims. It delegates to the shared toolkit helper so
+// the cap stays in lockstep with the rest of the adapter layer.
 func truncateMemory(s string) string {
-	if len(s) <= maxMemoryOutputBytes {
-		return s
-	}
-	cut := maxMemoryOutputBytes
-	for cut > 0 && s[cut]&0xC0 == 0x80 {
-		cut--
-	}
-	return s[:cut] + "\n... [output truncated: exceeded 25000 bytes]"
+	return toolkit.Truncate(s, toolkit.MaxOutputBytes)
 }
 
 // plural returns "y" for one entry and "ies" otherwise, for "entr{y,ies}".

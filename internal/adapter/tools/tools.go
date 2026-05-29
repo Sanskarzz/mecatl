@@ -23,18 +23,17 @@ package tools
 
 import (
 	"encoding/json"
-	"fmt"
 
+	"github.com/stacklok/ozzharness/internal/adapter/toolkit"
 	"github.com/stacklok/ozzharness/internal/session"
 	"github.com/stacklok/ozzharness/internal/tool"
 )
 
 // Output-shaping limits shared across the tools. These keep a single tool
 // result from blowing the model's context window; each tool appends a clear
-// truncation marker when it trims output.
+// truncation marker when it trims output. The byte cap lives in toolkit as
+// toolkit.MaxOutputBytes (the single shared definition).
 const (
-	// maxOutputBytes caps the byte length of a single tool's textual result.
-	maxOutputBytes = 25_000
 	// maxReadLines caps how many lines the Read tool returns in one call.
 	maxReadLines = 2000
 	// maxGrepMatches caps how many Grep hits are returned in one call.
@@ -72,39 +71,19 @@ func Register(cat *tool.Catalog) error {
 	return nil
 }
 
-// parseArgs unmarshals a tool call's JSON arguments into dst. An empty payload
-// is treated as an empty object so tools with all-optional arguments work
-// without an explicit "{}". It returns a model-facing error string (not a Go
+// parseArgs unmarshals a tool call's JSON arguments into dst, delegating to the
+// shared toolkit helper. It returns a model-facing error string (not a Go
 // error) describing a malformed payload.
 func parseArgs(in session.ToolCall, dst any) (string, bool) {
-	raw := in.Args
-	if len(raw) == 0 {
-		raw = json.RawMessage("{}")
-	}
-	if err := json.Unmarshal(raw, dst); err != nil {
-		return fmt.Sprintf("invalid arguments: %v", err), false
-	}
-	return "", true
+	return toolkit.ParseArgs(in, dst)
 }
 
-// truncateBytes trims s to at most maxOutputBytes, appending a marker when it
-// does. It cuts on a rune boundary to avoid emitting invalid UTF-8.
+// truncateBytes trims s to at most toolkit.MaxOutputBytes on a rune boundary,
+// appending a marker when it does. It delegates to the shared toolkit helper.
 func truncateBytes(s string) string {
-	if len(s) <= maxOutputBytes {
-		return s
-	}
-	cut := maxOutputBytes
-	for cut > 0 && !utf8RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + "\n... [output truncated: exceeded 25000 bytes]"
+	return toolkit.Truncate(s, toolkit.MaxOutputBytes)
 }
 
-// utf8RuneStart reports whether b is the first byte of a UTF-8 rune (i.e. not a
-// continuation byte 0b10xxxxxx).
-func utf8RuneStart(b byte) bool { return b&0xC0 != 0x80 }
-
-// schema wraps a static JSON-schema literal as json.RawMessage for a ToolSpec.
-// The literals are authored by hand and are valid JSON; this is just a typed
-// convenience for the Spec methods.
-func schema(s string) json.RawMessage { return json.RawMessage(s) }
+// schema wraps a static JSON-schema literal as json.RawMessage for a ToolSpec,
+// delegating to the shared toolkit helper.
+func schema(s string) json.RawMessage { return toolkit.Schema(s) }

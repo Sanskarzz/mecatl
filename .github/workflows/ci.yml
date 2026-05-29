@@ -1,0 +1,130 @@
+# CI for ozzharness — runs on every push to main and every pull_request.
+#
+# Deliberately uses `pull_request` (NOT `pull_request_target`): these jobs check
+# out and execute untrusted PR code, so they must run WITHOUT access to repo
+# secrets. `pull_request` runs in the fork's context with a read-only token and
+# no secrets, which is exactly what we want here. `pull_request_target` would
+# run in the BASE repo's context WITH secrets — combining that with a checkout
+# of PR code is the classic "pwn request" RCE pattern. See:
+#   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+#   https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/
+#
+# All third-party actions are SHA-pinned (with a # vX.Y.Z comment) so a
+# re-pointed tag from a compromised maintainer cannot change what runs here.
+# Pins match the Stacklok house set used in a downstream consumer.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least-privilege default for the whole workflow. The CI jobs only read source.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref so a force-push doesn't pile up minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Fail loudly rather than silently downloading a different toolchain over the
+  # network if the local Go is older than go.mod requires. setup-go provisions
+  # the right version; this keeps the build deterministic against that pin.
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: go build
+        run: go build ./...
+
+  test:
+    name: Test (race)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      # `task test` == `go test -race ./...`. We run the underlying command
+      # directly rather than pulling in the Task binary for a single command;
+      # CI and local `task ci` stay in lockstep because the go command is
+      # identical.
+      - name: go test -race
+        run: go test -race ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      # golangci-lint-action manages its own cache and the linter binary. The
+      # Taskfile documents golangci-lint v2.x; pin to a concrete v2 release.
+      - uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
+        with:
+          version: v2.1.6
+          args: --timeout=5m
+
+      - name: go vet
+        run: go vet ./...
+
+  fuzz-smoke:
+    name: Fuzz smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # A short coverage-guided pass over the security-critical parsers. This is
+      # a smoke check (find shallow crashers fast), NOT the nightly deep fuzz —
+      # the seed corpora already run under `go test` in the test job. The
+      # Taskfile `fuzz` task runs the 4 FuzzXxx targets sequentially; at
+      # 20s/target that is ~80s plus build, comfortably under the timeout.
+      - name: task fuzz (short)
+        run: task fuzz FUZZTIME=20s
