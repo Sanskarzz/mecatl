@@ -2,8 +2,10 @@ package governance
 
 import "encoding/json"
 
-// HookPhase identifies the lifecycle point at which a hook fires. v1 implements
-// PreToolUse and PostToolUse; the remaining phases are designed in for later.
+// HookPhase identifies the lifecycle point at which a hook fires. All six
+// phases below fire: the run-level trio (SessionStart, UserPromptSubmit, Stop)
+// from internal/agent/hooks.go, the per-tool pair (PreToolUse, PostToolUse)
+// from internal/agent/dispatch.go, and SubagentStop from the Task subagent.
 type HookPhase string
 
 const (
