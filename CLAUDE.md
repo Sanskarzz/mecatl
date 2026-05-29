@@ -66,3 +66,4 @@ After changes: `task lint && task test` must be green, and `go run ./cmd/ozzdemo
 
 - Commit directly to `main` for this repo. End commit messages with the `Co-Authored-By` trailer.
 - Never `git add -A` — stage explicit paths.
+- For smoke tests / scratch files, use the repo-local `.scratch/` dir (gitignored) — **not** `/tmp` or `mktemp`. (`go run`/`go test` still use the Go build cache; that's fine.)
