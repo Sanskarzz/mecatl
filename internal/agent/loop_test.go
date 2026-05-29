@@ -83,14 +83,27 @@ func (c *fakeClock) Now() time.Time {
 
 // recordingLogger captures tool-call observability for assertions.
 type recordingLogger struct {
-	mu    sync.Mutex
-	calls int
+	mu      sync.Mutex
+	calls   int
+	results []session.ToolResult
 }
 
-func (l *recordingLogger) ToolCall(_ session.SessionID, _ session.ToolCall, _ session.ToolResult, _ time.Duration) {
+func (l *recordingLogger) ToolCall(_ session.SessionID, _ session.ToolCall, result session.ToolResult, _ time.Duration) {
 	l.mu.Lock()
 	l.calls++
+	l.results = append(l.results, result)
 	l.mu.Unlock()
+}
+
+// lastResult returns the most recently logged tool result. Call it after the run
+// completes (drain has returned), when no logging goroutine is still active.
+func (l *recordingLogger) lastResult() (session.ToolResult, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.results) == 0 {
+		return session.ToolResult{}, false
+	}
+	return l.results[len(l.results)-1], true
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -665,7 +678,8 @@ func TestPostToolUseHookMutatesResult(t *testing.T) {
 		mockllm.TextTurn("done"),
 	)
 	sess := newSession(t, session.Limits{})
-	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, tl), Hooks: hooks})
+	logger := &recordingLogger{}
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, tl), Hooks: hooks, Logger: logger})
 	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")
 	evs := drain(r)
 
@@ -676,6 +690,13 @@ func TestPostToolUseHookMutatesResult(t *testing.T) {
 	recRes := recordedToolResult(sess)
 	if recRes == nil || recRes.Content != "[redacted]" || !recRes.IsError {
 		t.Fatalf("recorded result (model view) = %+v, want content '[redacted]' is_error true", recRes)
+	}
+	// The audit Logger must see the EFFECTIVE (redacted) result too: a redacting
+	// PostToolUse hook must not leak the raw tool output ("SECRET=...") into the
+	// audit log / telemetry. This is the whole point of logging after the hook.
+	logged, ok := logger.lastResult()
+	if !ok || logged.Content != "[redacted]" || !logged.IsError {
+		t.Fatalf("logged result (audit view) = %+v ok=%v, want content '[redacted]' is_error true", logged, ok)
 	}
 	var rewriteEv bool
 	for _, ev := range evs {

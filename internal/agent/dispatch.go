@@ -284,30 +284,34 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 	return c, false, "", nil
 }
 
-// execute runs the tool against the workspace, times it, logs it, runs the
-// PostToolUse hook, and emits the tool.call then tool.result events.
+// execute runs the tool against the workspace, times it, runs the PostToolUse
+// hook, then logs and emits the effective result (tool.call is emitted first).
 //
-// Ordering note: PostToolUse runs BEFORE the tool.result event is emitted and
-// before the result is returned, so a PostToolUse result mutation is reflected
-// uniformly — the EFFECTIVE (possibly rewritten) result is what the client sees
-// on the event stream AND what the loop records for the model (RecordToolResults
-// records exactly what this returns). There is deliberately no divergence between
-// the two views. PostToolUse remains otherwise best-effort: a hook execution
-// error does not abort, and a block only annotates (the tool already ran; a block
-// neither undoes nor suppresses the result).
+// Ordering note: PostToolUse runs BEFORE the result is logged, emitted, or
+// returned, so a PostToolUse result mutation is reflected uniformly — the
+// EFFECTIVE (possibly rewritten) result is what the audit Logger records, what the
+// client sees on the event stream, AND what the loop records for the model
+// (RecordToolResults records exactly what this returns). There is deliberately no
+// divergence between the three views; in particular a redacting hook's redaction
+// reaches the audit log too rather than leaking the raw output. PostToolUse remains
+// otherwise best-effort: a hook execution error does not abort, and a block only
+// annotates (the tool already ran; a block neither undoes nor suppresses the
+// result).
 func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool) session.ToolResult {
 	call := c
 	e.emit(r, session.Event{Type: session.EvToolCall, Turn: turnIdx, ToolCall: &call})
 
 	res, dur := e.timeExecute(ctx, ws, c, t)
 
+	// PostToolUse may rewrite the result. The effective (possibly rewritten) result
+	// is what we log, emit, and return, so the audit log, the client event stream,
+	// and the model's recorded history all agree — in particular, a redacting hook's
+	// redaction reaches the audit log too rather than leaking the raw tool output.
+	res = e.postHook(ctx, r, sess, turnIdx, c, res)
+
 	if e.deps.Logger != nil {
 		e.deps.Logger.ToolCall(sess.ID, c, res, dur)
 	}
-
-	// PostToolUse may rewrite the result; the effective result is then emitted and
-	// returned so the client stream and the model's recorded history agree.
-	res = e.postHook(ctx, r, sess, turnIdx, c, res)
 
 	e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 	return res
