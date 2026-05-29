@@ -61,10 +61,15 @@ import (
 // when to compact. A conservative default that suits the common GPT-class models.
 const defaultContextWindowTokens = 128_000
 
-// defaultCompactionRatio mirrors the agent loop's default compaction trigger
-// fraction (0.8 of the context window). The cascade compactor reduces toward this
-// budget so its deterministic tiers target the same threshold the loop fires at.
+// defaultCompactionRatio is the agent loop's compaction TRIGGER fraction (0.8 of
+// the context window).
 const defaultCompactionRatio = 0.8
+
+// defaultCompactionTargetRatio is the fraction the cascade compactor reduces the
+// history TOWARD — deliberately below defaultCompactionRatio so there is
+// hysteresis between the trigger and the target. Without this gap a head/tail-heavy
+// history could re-trip the trigger (and a tier-4 LLM summary) on every turn.
+const defaultCompactionTargetRatio = 0.6
 
 // TRUST MODEL (security): the ozzd API exposes command and file execution
 // against the configured workspace. The default listen addresses below bind the
@@ -416,6 +421,7 @@ func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sin
 		PromptConfig:        promptConfig(cfg),
 		Model:               cfg.model,
 		ContextWindowTokens: defaultContextWindowTokens,
+		CompactionRatio:     defaultCompactionRatio,
 		TokenCounter:        counter,
 		Compactor:           buildCompactor(cfg, provider, counter),
 	}
@@ -446,16 +452,17 @@ func buildTokenCounter(cfg config) agent.TokenCounter {
 // buildCompactor selects the Compactor from --compaction. The default
 // ("heuristic") returns the single-summary HeuristicCompactor — the exact v1
 // behaviour. "cascade" returns the tiered CascadeCompactor (snip→strip→collapse,
-// plus an LLM summarize tier wired with the shared provider) targeting the
-// compaction threshold so its deterministic tiers reduce toward the same budget
-// the loop triggers at.
+// plus an LLM summarize tier wired with the shared provider). It reduces toward
+// defaultCompactionTargetRatio, which is BELOW the loop's trigger ratio so there
+// is hysteresis — compaction lands the history comfortably under the trigger
+// rather than right at it (avoiding per-turn re-compaction).
 func buildCompactor(cfg config, provider port.LLMProvider, counter agent.TokenCounter) agent.Compactor {
 	switch cfg.compaction {
 	case "cascade":
 		slog.Info("compaction strategy: cascade (snip→strip→collapse→summarize)")
 		return agent.CascadeCompactor{
 			Counter:      counter,
-			BudgetTokens: int(float64(defaultContextWindowTokens) * defaultCompactionRatio),
+			BudgetTokens: int(float64(defaultContextWindowTokens) * defaultCompactionTargetRatio),
 			LLM:          provider,
 			Model:        cfg.model,
 		}
@@ -603,6 +610,7 @@ func buildChildEngine(cfg config, provider port.LLMProvider) *agent.Engine {
 		PromptConfig:        promptConfig(cfg),
 		Model:               cfg.model,
 		ContextWindowTokens: defaultContextWindowTokens,
+		CompactionRatio:     defaultCompactionRatio,
 	})
 }
 
