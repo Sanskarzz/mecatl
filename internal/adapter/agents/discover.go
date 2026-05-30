@@ -47,8 +47,126 @@ type frontmatter struct {
 	MaxTurns        int               `yaml:"maxTurns"`
 	Color           string            `yaml:"color"`
 	Skills          stringOrSlice     `yaml:"skills"`
-	MCPServers      stringOrSlice     `yaml:"mcpServers"`
+	MCPServers      mcpServerList     `yaml:"mcpServers"`
 	Hooks           map[string]string `yaml:"hooks"`
+}
+
+// mcpServerList is the parsed `mcpServers` frontmatter. It accepts THREE forms
+// interchangeably (Claude-Code tolerance, extended for inline servers):
+//
+//   - a scalar string ("a, b") → references to configured main servers;
+//   - a YAML array of scalars (["a", "b"]) → references;
+//   - a YAML array of mappings ({name, url, headers, ...}) → inline servers (or a
+//     reference when the mapping carries only a name / no url).
+//
+// A mapping may also be MIXED with scalars in the same array. UnmarshalYAML
+// normalises every entry into an AgentMCPServer (empty URL = reference) and records
+// per-entry SKIP notes for entries it cannot use (an inline entry that is plainly a
+// non-HTTP/stdio transport, or a nameless entry). The notes ride alongside the
+// parsed servers so parseAgentDef can surface them as non-fatal diagnostics — a bad
+// MCP entry never fails the whole def.
+type mcpServerList struct {
+	servers []AgentMCPServer
+	notes   []string
+}
+
+// rawMCPMapping is one inline `mcpServers` mapping entry. Only name/url/headers are
+// used; type/transport/command are inspected solely to REJECT a non-HTTP (e.g.
+// stdio) entry with a diagnostic, per the streamable-HTTP-only constraint.
+type rawMCPMapping struct {
+	Name      string            `yaml:"name"`
+	URL       string            `yaml:"url"`
+	Headers   map[string]string `yaml:"headers"`
+	Type      string            `yaml:"type"`
+	Transport string            `yaml:"transport"`
+	Command   string            `yaml:"command"`
+}
+
+func (l *mcpServerList) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		for _, name := range splitList(node.Value) {
+			l.servers = append(l.servers, AgentMCPServer{Name: name})
+		}
+		return nil
+	case yaml.SequenceNode:
+		for _, item := range node.Content {
+			switch item.Kind {
+			case yaml.ScalarNode:
+				for _, name := range splitList(item.Value) {
+					l.servers = append(l.servers, AgentMCPServer{Name: name})
+				}
+			case yaml.MappingNode:
+				var m rawMCPMapping
+				if err := item.Decode(&m); err != nil {
+					return err
+				}
+				l.appendMapping(m)
+			default:
+				return fmt.Errorf("mcpServers entry: expected a string or a mapping, got YAML kind %d", item.Kind)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("mcpServers: expected a string, a list, or a list of mappings, got YAML kind %d", node.Kind)
+	}
+}
+
+// appendMapping normalises one inline mapping into an AgentMCPServer, recording a
+// skip note (and dropping the entry) when it is unusable: nameless, or an inline
+// server declaring a non-HTTP transport (stdio/command) — only streamable-HTTP is
+// supported (CLAUDE.md: no stdio MCP, ever).
+func (l *mcpServerList) appendMapping(m rawMCPMapping) {
+	name := strings.TrimSpace(m.Name)
+	url := strings.TrimSpace(m.URL)
+	transport := strings.ToLower(strings.TrimSpace(m.Transport))
+	typ := strings.ToLower(strings.TrimSpace(m.Type))
+	if name == "" {
+		l.notes = append(l.notes, "mcpServers entry skipped: missing a non-empty \"name\"")
+		return
+	}
+	// Reject any inline entry that names a non-HTTP transport, or supplies a
+	// command (the stdio shape), even if a url is also present — streamable-HTTP is
+	// the only supported transport.
+	if strings.TrimSpace(m.Command) != "" || isNonHTTPTransport(transport) || isNonHTTPTransport(typ) {
+		l.notes = append(l.notes, fmt.Sprintf(
+			"mcpServers entry %q skipped: only the streamable-HTTP transport is supported (stdio/command/non-HTTP transports are rejected)", name))
+		return
+	}
+	l.servers = append(l.servers, AgentMCPServer{Name: name, URL: url, Headers: normalizeHeaders(m.Headers)})
+}
+
+// isNonHTTPTransport reports whether a `type`/`transport` value names a transport
+// this harness refuses. Empty, "http", "streamable-http", "streamable_http", and
+// "sse" are accepted (all HTTP-family); anything else (notably "stdio") is rejected.
+func isNonHTTPTransport(v string) bool {
+	switch v {
+	case "", "http", "streamable-http", "streamable_http", "streamablehttp", "sse":
+		return false
+	default:
+		return true
+	}
+}
+
+// normalizeHeaders trims keys/values and drops empties, returning nil for an
+// empty/absent map so a server with no headers carries a nil Headers.
+func normalizeHeaders(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		key := strings.TrimSpace(k)
+		val := strings.TrimSpace(v)
+		if key == "" || val == "" {
+			continue
+		}
+		out[key] = val
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // stringOrSlice is a YAML field that accepts BOTH a sequence (["Read","Grep"])
@@ -218,6 +336,10 @@ func parseAgentDef(raw []byte, path string) (AgentDef, string, []string) {
 		trimmedBody = toolkit.TruncateRunes(trimmedBody, maxPromptBodyBytes)
 	}
 
+	// Per-entry mcpServers diagnostics (a skipped stdio/nameless entry) are
+	// non-fatal: the def is still kept, minus the unusable entry.
+	notes = append(notes, fm.MCPServers.notes...)
+
 	return AgentDef{
 		Name:            name,
 		Description:     desc,
@@ -228,7 +350,7 @@ func parseAgentDef(raw []byte, path string) (AgentDef, string, []string) {
 		MaxTurns:        fm.MaxTurns,
 		Color:           strings.TrimSpace(fm.Color),
 		Skills:          []string(fm.Skills),
-		MCPServers:      []string(fm.MCPServers),
+		MCPServers:      fm.MCPServers.servers,
 		Hooks:           normalizeHooks(fm.Hooks),
 		Body:            trimmedBody,
 		Path:            path,

@@ -9,6 +9,7 @@ import (
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
+	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
 	"github.com/stacklok/mecatl/internal/agent"
@@ -290,6 +291,91 @@ func preloadedSkillBodies(def agents.AgentDef, idx skillIndex) (bodies []string,
 	return bodies, missing
 }
 
+// defMCPTools resolves a def's mcpServers into the tools to add to its engine's
+// catalog, the tool NAMES (so the read-only backstop can exempt them), and a Close
+// that tears down any INLINE managers this def connected (nil when the def opened no
+// inline server). It is the SINGLE place both call sites (Task path and team-member
+// path) resolve per-agent MCP, so reference/inline semantics cannot drift.
+//
+//   - REFERENCE entries (URL empty) take the named server's tools out of mainMgr —
+//     NO new connection, so they contribute nothing to Close. An unknown reference is
+//     a clear diagnostic and is skipped.
+//   - INLINE entries connect a SCOPED mcp.NewManager for this def alone; their tools
+//     are added and their manager's Close is aggregated into the returned Close.
+//
+// It is forgiving end-to-end (the skills/teams philosophy): an unreachable inline
+// server or an unknown reference is logged and skipped, never fatal — the def is
+// still built with whatever MCP tools did resolve.
+func defMCPTools(ctx context.Context, def agents.AgentDef, mainMgr *mcp.Manager) (mcpTools []tool.Tool, names []string, closeFn func() error) {
+	if len(def.MCPServers) == 0 {
+		return nil, nil, nil
+	}
+
+	var inlineConfigs []mcp.ServerConfig
+	for _, entry := range def.MCPServers {
+		name := strings.TrimSpace(entry.Name)
+		if name == "" {
+			continue
+		}
+		if entry.IsReference() {
+			refTools, ok := mainServerTools(mainMgr, name)
+			if !ok {
+				slog.Warn("agent def references an unknown MCP server; not scoped (no such configured server)",
+					"agent", def.Name, "server", name, "path", def.Path)
+				continue
+			}
+			mcpTools = append(mcpTools, refTools...)
+			slog.Info("agent def scopes a referenced MCP server",
+				"agent", def.Name, "server", name, "tools", len(refTools), "path", def.Path)
+			continue
+		}
+		inlineConfigs = append(inlineConfigs, mcp.ServerConfig{
+			Name:    name,
+			URL:     strings.TrimSpace(entry.URL),
+			Headers: entry.Headers,
+		})
+	}
+
+	if len(inlineConfigs) > 0 {
+		onError := func(sc mcp.ServerConfig, err error) {
+			slog.Warn("agent def inline MCP server unreachable; skipping",
+				"agent", def.Name, "server", sc.Name, "url", sc.URL, "err", err)
+		}
+		mgr, err := mcp.NewManager(ctx, inlineConfigs, onError)
+		if err != nil {
+			slog.Warn("agent def inline MCP managers all failed; none scoped",
+				"agent", def.Name, "err", err)
+		}
+		if mgr != nil {
+			inlineTools := mgr.Tools()
+			mcpTools = append(mcpTools, inlineTools...)
+			closeFn = mgr.Close
+			slog.Info("agent def scopes inline MCP servers",
+				"agent", def.Name, "servers", len(mgr.Servers()), "tools", len(inlineTools), "path", def.Path)
+		}
+	}
+
+	for _, t := range mcpTools {
+		names = append(names, t.Spec().Name)
+	}
+	return mcpTools, names, closeFn
+}
+
+// mainServerTools returns the named main server's tools and true on a hit, or nil,
+// false when mainMgr is nil or has no such server. It is the reference-resolution
+// primitive defMCPTools uses.
+func mainServerTools(mainMgr *mcp.Manager, name string) ([]tool.Tool, bool) {
+	if mainMgr == nil {
+		return nil, false
+	}
+	for _, s := range mainMgr.Servers() {
+		if s.Name() == name {
+			return s.Tools(), true
+		}
+	}
+	return nil, false
+}
+
 // defHookRunner builds the HookRunner scoped to a def's engine from its `hooks:`
 // map. A def with no (valid) hooks returns the shared default runner (an inert
 // hookexec.New(nil)), so behaviour is unchanged for defs that scope no hooks.
@@ -336,14 +422,15 @@ func defHookRunner(cfg Config, def agents.AgentDef, fallback port.HookRunner) po
 // The skillIdx preloads each def's `skills:` bodies into its prompt; defaultHooks
 // is the inert fallback HookRunner a def with no scoped `hooks:` adopts (so the
 // default Task engine behaviour is unchanged).
-func buildAgentTaskEngines(cfg Config, provider port.LLMProvider, reg *agents.Registry, skillIdx skillIndex, defaultHooks port.HookRunner) (map[string]*agent.Engine, []agent.AgentMeta) {
+func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMProvider, reg *agents.Registry, skillIdx skillIndex, defaultHooks port.HookRunner, mainMgr *mcp.Manager) (map[string]*agent.Engine, []agent.AgentMeta, func() error) {
 	if reg == nil || reg.Len() == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	base := baseTaskTools(cfg)
 
 	engines := make(map[string]*agent.Engine, reg.Len())
 	meta := make([]agent.AgentMeta, 0, reg.Len())
+	var closeFn func() error
 
 	for _, def := range reg.List() {
 		names, diags := scopedToolNames(def, base)
@@ -356,6 +443,20 @@ func buildAgentTaskEngines(cfg Config, provider port.LLMProvider, reg *agents.Re
 		for _, name := range names {
 			cat.MustRegister(base[name])
 		}
+
+		// Per-agent MCP: a def's mcpServers add the referenced/inline servers' tools to
+		// THIS def's catalog (not the main conversation's). The inline managers' Close is
+		// aggregated into closeFn → Built.Close (process-lifetime engines, torn down on
+		// shutdown). MCP tool names are NOT relevant to a Task def's read-only backstop
+		// (Task defs are not team members), so the names return is ignored here.
+		mcpTools, _, mcpClose := defMCPTools(ctx, def, mainMgr)
+		for _, mt := range mcpTools {
+			if err := cat.Register(mt); err != nil {
+				slog.Warn("agent def MCP tool registration failed; skipped",
+					"agent", def.Name, "tool", mt.Spec().Name, "err", err)
+			}
+		}
+		closeFn = composeCloseErr(mcpClose, closeFn)
 
 		model := resolveModel(cfg, def)
 
@@ -379,7 +480,46 @@ func buildAgentTaskEngines(cfg Config, provider port.LLMProvider, reg *agents.Re
 
 	// meta in registry (name-sorted) order for a byte-stable Task spec.
 	sort.Slice(meta, func(i, j int) bool { return meta[i].Name < meta[j].Name })
-	return engines, meta
+	return engines, meta, closeFn
+}
+
+// composeCloseErr chains two optional error-returning close funcs into one (first
+// then second, both always run, first non-nil error returned), or nil when both are
+// nil. It is the app-layer analogue of agent.composeCleanup, used to aggregate the
+// per-def inline MCP managers' Close into one chain.
+func composeCloseErr(first, second func() error) func() error {
+	switch {
+	case first == nil:
+		return second
+	case second == nil:
+		return first
+	default:
+		return func() error {
+			err1 := first()
+			err2 := second()
+			if err1 != nil {
+				return err1
+			}
+			return err2
+		}
+	}
+}
+
+// composeClose adapts an error-returning close (the aggregated inline MCP teardown)
+// and a plain func() (the main MCP close) into ONE func() that runs both — MCP-def
+// teardown first, then the main manager. It is how buildCatalog folds the Task-def
+// inline managers into the single mcpClose that feeds Built.Close.
+func composeClose(errClose func() error, plainClose func()) func() {
+	return func() {
+		if errClose != nil {
+			if err := errClose(); err != nil {
+				slog.Warn("agent def inline MCP close", "err", err)
+			}
+		}
+		if plainClose != nil {
+			plainClose()
+		}
+	}
 }
 
 // agentPromptConfig is promptConfig with the def's body composed into the Role

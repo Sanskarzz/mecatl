@@ -477,3 +477,59 @@ func TestSupervisorAcceptsMutatingMemberWithMutatingTool(t *testing.T) {
 		t.Fatalf("mutating member with a workspace-mutating tool should be accepted: %v", err)
 	}
 }
+
+// TestSupervisorAcceptsReadOnlyMemberWithMCPTool asserts the per-agent-MCP backstop
+// exemption: a read-only member whose catalog holds a tool that reports
+// ReadOnly()==false but is named in MemberBuild.MCPToolNames (an MCP tool — never
+// touches the workspace) is ACCEPTED, exactly like a coordination tool.
+func TestSupervisorAcceptsReadOnlyMemberWithMCPTool(t *testing.T) {
+	tm := team.New("t")
+	mcpTool := fakeMutatingTool{name: "mcp__remote__do"}
+	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+		b := catalogFactory(t, tm, mcpTool)(spec)
+		b.MCPToolNames = []string{"mcp__remote__do"}
+		return b
+	}
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory)
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "ro"}); err != nil {
+		t.Fatalf("read-only member holding an exempt MCP tool should be accepted: %v", err)
+	}
+}
+
+// TestSupervisorStillRejectsRealMutatingDespiteMCPExempt asserts the exemption is
+// SCOPED to the named MCP tools: a read-only member that ALSO holds a genuine
+// workspace-mutating tool (not in MCPToolNames) is still rejected.
+func TestSupervisorStillRejectsRealMutatingDespiteMCPExempt(t *testing.T) {
+	tm := team.New("t")
+	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+		b := catalogFactory(t, tm, fakeMutatingTool{name: "mcp__remote__do"}, fakeMutatingTool{name: "Edit"})(spec)
+		b.MCPToolNames = []string{"mcp__remote__do"} // exempt the MCP tool only
+		return b
+	}
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory)
+	err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "ro"})
+	if err == nil || !strings.Contains(err.Error(), "Edit") {
+		t.Fatalf("read-only member with a real mutating tool must still be rejected naming Edit, got %v", err)
+	}
+}
+
+// TestSupervisorRunsMemberCloseOnCleanup asserts the MemberBuild.Close teardown seam:
+// the supervisor composes build.Close with the fork cleanup and runs it on Run's
+// cleanupAll, so a per-member inline MCP manager is torn down (no leak).
+func TestSupervisorRunsMemberCloseOnCleanup(t *testing.T) {
+	tm := team.New("t")
+	var closed int
+	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+		b := catalogFactory(t, tm)(spec)
+		b.Close = func() error { closed++; return nil }
+		return b
+	}
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory)
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "ro", InitialPrompt: "go"}); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+	sup.Run(context.Background(), nil)
+	if closed != 1 {
+		t.Fatalf("member Close should run exactly once on cleanup, ran %d times", closed)
+	}
+}

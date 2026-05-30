@@ -37,7 +37,7 @@ func TestMemberMutatingDefKeepsEditWhenMutating(t *testing.T) {
 	cfg := Config{Workspace: t.TempDir(), Model: "m"}
 	def := agents.AgentDef{Name: "writer", Description: "w", Tools: []string{"Read", "Edit"}}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil)
+	factory := buildMemberEngine(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
 		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) },
@@ -64,7 +64,7 @@ func TestMemberReadOnlyDefDropsMutating(t *testing.T) {
 	cfg := Config{Workspace: t.TempDir(), Model: "m"}
 	def := agents.AgentDef{Name: "reviewer", Description: "r", Tools: []string{"Read", "Edit", "Write"}}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil)
+	factory := buildMemberEngine(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
 		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
@@ -89,7 +89,7 @@ func TestMemberPerMemberPlanMode(t *testing.T) {
 	cfg := Config{Workspace: t.TempDir(), Model: "m"}
 	planDef := agents.AgentDef{Name: "planner", Description: "p", PermissionMode: "plan"}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(planDef), nil, nil)
+	factory := buildMemberEngine(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(planDef), nil, nil, nil)
 
 	build := factory(tm, agent.MemberSpec{Name: "planner", AgentType: "planner"})
 	if build.Mode != session.ModePlan {
@@ -110,7 +110,7 @@ func TestMemberPerMemberPlanMode(t *testing.T) {
 func TestMemberUnknownAgentTypeFallsBack(t *testing.T) {
 	cfg := Config{Workspace: t.TempDir(), Model: "m"}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(), nil, nil)
+	factory := buildMemberEngine(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(), nil, nil, nil)
 
 	build := factory(tm, agent.MemberSpec{Name: "ghost", AgentType: "does-not-exist"})
 	if build.Engine == nil {

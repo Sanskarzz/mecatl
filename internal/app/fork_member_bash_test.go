@@ -137,7 +137,7 @@ func TestMutatingMemberHasBashAndEdit(t *testing.T) {
 		t.Fatal("precondition: expected a non-nil command runner with Shell set")
 	}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner)
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, nil)
 	build := factory(tm, agent.MemberSpec{Name: "writer", Mutating: true})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -163,7 +163,7 @@ func TestReadOnlyMemberHasNoBashOrEdit(t *testing.T) {
 	cfg := teamCfg(t)
 	runner := buildCommandRunner(cfg)
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner)
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, nil)
 	build := factory(tm, agent.MemberSpec{Name: "reader", Mutating: false})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -187,7 +187,7 @@ func TestMutatingMemberDefCanScopeInBash(t *testing.T) {
 	runner := buildCommandRunner(cfg)
 	tm := team.New("t")
 	def := agents.AgentDef{Name: "writer", Description: "w", Tools: []string{"Read", "Edit", "Bash"}}
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner)
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, nil)
 	build := factory(tm, agent.MemberSpec{Name: "writer", AgentType: "writer", Mutating: true})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -214,7 +214,7 @@ func TestReadOnlyMemberDefCannotScopeInBash(t *testing.T) {
 	runner := buildCommandRunner(cfg)
 	tm := team.New("t")
 	def := agents.AgentDef{Name: "reader", Description: "r", Tools: []string{"Read", "Edit", "Bash"}}
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner)
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, nil)
 	build := factory(tm, agent.MemberSpec{Name: "reader", AgentType: "reader", Mutating: false})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")

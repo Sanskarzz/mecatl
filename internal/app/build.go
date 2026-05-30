@@ -206,7 +206,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, mcpProvider, mcpInventory, mcpClose, err := buildEngine(ctx, cfg, provider, store)
+	engine, mainMgr, mcpProvider, mcpInventory, mcpClose, err := buildEngine(ctx, cfg, provider, store)
 	if err != nil {
 		return nil, err
 	}
@@ -225,7 +225,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// cheap and keeps the snapshot a pure read at request time.
 		Agents: agentSnapshot(cfg, resolveAgentRegistry(ctx, cfg)),
 	}
-	applyTeamConfig(&svcCfg, cfg, provider)
+	applyTeamConfig(&svcCfg, cfg, provider, mainMgr)
 
 	svc, err := server.NewService(svcCfg)
 	if err != nil {
@@ -299,19 +299,19 @@ func buildStore(cfg Config) (port.SessionStore, error) {
 // prompt config, and the shared provider/store. It also connects any configured
 // MCP servers, returning a close func that tears the MCP manager down on shutdown
 // (a no-op when no servers are configured).
-func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, mcp.Provider, []mcpsource.SourceInfo, func(), error) {
+func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, func(), error) {
 	// SkillDraft trust boundary: when enabled, the quarantine dir must live OUTSIDE
 	// the workspace root (so the model's workspace-confined Write/Edit cannot reach
 	// it) and be disjoint from every active skills dir. Fatal on a misconfig.
 	if err := validateSkillDraftConfig(cfg); err != nil {
-		return nil, nil, nil, func() {}, err
+		return nil, nil, nil, nil, func() {}, err
 	}
 	warnSkillDraftResiduals(cfg)
 
 	policy := permpolicy.NewPolicy(defaultRules())
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
-	cat, mcpProvider, mcpInventory, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
+	cat, mainMgr, mcpProvider, mcpInventory, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
 
 	counter := buildTokenCounter(cfg)
 
@@ -335,7 +335,7 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 		Compactor:           buildCompactor(cfg, provider, counter),
 		CommandExpander:     buildCommandExpander(cfg, mcpProvider),
 	}
-	return agent.NewEngine(deps), mcpProvider, mcpInventory, mcpClose, nil
+	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, mcpClose, nil
 }
 
 // buildCommandExpander selects the slash-command expander for the agent Deps.
@@ -444,7 +444,7 @@ func buildCompactor(cfg Config, provider port.LLMProvider, counter agent.TokenCo
 // — the optional Bash tool. It then optionally registers Fork, memory, skills, the
 // repo map, and connects any MCP servers. The returned close func tears down the
 // MCP manager on shutdown.
-func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, mcp.Provider, []mcpsource.SourceInfo, func()) {
+func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, func()) {
 	cat := tool.NewCatalog()
 	for _, t := range tools.All() {
 		cat.MustRegister(t)
@@ -456,8 +456,20 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		slog.Info("Bash tool DISABLED (shell-less mode): the agent has no command execution",
 			"reason", bashDisabledReason(cfg))
 	}
+	// Connect the MAIN MCP servers FIRST, so the per-agent-def Task engines built by
+	// buildTaskTool can (a) pull a REFERENCED main server's tools out of this manager
+	// and (b) connect their own INLINE servers. The main manager is registered into
+	// the parent catalog here; the def engines get only the servers their mcpServers
+	// opts into. mainMgr is nil when no main servers are configured (reference
+	// entries then resolve to a clear "unknown server" diagnostic).
+	mainMgr, mcpProvider, mcpInventory, mcpClose := registerMCP(ctx, cfg, cat)
+
 	agentReg := resolveAgentRegistry(ctx, cfg)
-	cat.MustRegister(buildTaskTool(ctx, cfg, provider, hooks, agentReg))
+	taskTool, taskMCPClose := buildTaskTool(ctx, cfg, provider, hooks, agentReg, mainMgr)
+	cat.MustRegister(taskTool)
+	// Aggregate the per-def INLINE MCP managers' teardown into the main MCP close, so
+	// Built.Close tears them ALL down on shutdown (process-lifetime engines).
+	mcpClose = composeClose(taskMCPClose, mcpClose)
 
 	// Fork fan-out tool: a scoped child Engine (no Fork/Task/ToolSearch, so a branch
 	// cannot recurse) run against an ISOLATED forked workspace. Unlike the Task
@@ -524,8 +536,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		slog.Info("repo map tool DISABLED")
 	}
 
-	mcpProvider, mcpInventory, mcpClose := registerMCP(ctx, cfg, cat)
-	return cat, mcpProvider, mcpInventory, mcpClose
+	return cat, mainMgr, mcpProvider, mcpInventory, mcpClose
 }
 
 // registerMCP RESOLVES the MCP server inventory from the pluggable source list
@@ -533,7 +544,11 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 // ToolHiveEnabled), connects the merged set, and registers their tools into cat.
 // It is non-fatal end to end: per-source SkipErrors and per-server connect failures
 // are logged and skipped; a manager that fails entirely is logged and skipped.
-func registerMCP(ctx context.Context, cfg Config, cat *tool.Catalog) (mcp.Provider, []mcpsource.SourceInfo, func()) {
+//
+// It returns the concrete *mcp.Manager (nil when no servers connect) so the
+// per-agent-def wiring can pull a REFERENCED main server's tools out of it; the same
+// value is the mcp.Provider used for resources/prompts.
+func registerMCP(ctx context.Context, cfg Config, cat *tool.Catalog) (*mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, func()) {
 	opts := mcpsource.ResolveOptions{
 		StaticServers:   cfg.MCPServers,
 		ToolHiveEnabled: cfg.ToolHiveEnabled,
@@ -548,7 +563,7 @@ func registerMCP(ctx context.Context, cfg Config, cat *tool.Catalog) (mcp.Provid
 	if len(configs) == 0 {
 		slog.Info("MCP DISABLED (no servers resolved from any source)",
 			"toolhive", cfg.ToolHiveEnabled, "static", len(cfg.MCPServers))
-		return nil, inventory, func() {}
+		return nil, nil, inventory, func() {}
 	}
 
 	onError := func(sc mcp.ServerConfig, err error) {
@@ -557,7 +572,7 @@ func registerMCP(ctx context.Context, cfg Config, cat *tool.Catalog) (mcp.Provid
 	mgr, err := mcp.NewManager(ctx, configs, onError)
 	if err != nil {
 		slog.Warn("MCP manager construction failed; continuing without MCP tools", "err", err)
-		return nil, inventory, func() {}
+		return nil, nil, inventory, func() {}
 	}
 	if err := mcp.Register(cat, mgr.Tools()); err != nil {
 		slog.Warn("registering MCP tools failed; some tools may be missing", "err", err)
@@ -578,7 +593,7 @@ func registerMCP(ctx context.Context, cfg Config, cat *tool.Catalog) (mcp.Provid
 		slog.Info("MCP resource tools DISABLED")
 	}
 
-	return mgr, inventory, func() {
+	return mgr, mgr, inventory, func() {
 		if err := mgr.Close(); err != nil {
 			slog.Warn("MCP manager close", "err", err)
 		}
@@ -802,18 +817,23 @@ func buildForkJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 // explorer only); otherwise the model can route to a named specialist via the
 // Task `agent` arg, and the specialist names+descriptions are surfaced in the
 // Task spec for progressive disclosure.
-func buildTaskTool(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner, reg *agents.Registry) tool.Tool {
+// It also threads the MAIN MCP manager so a def's mcpServers can REFERENCE a
+// configured server's tools, and connects each def's INLINE servers; the returned
+// close func tears those inline managers down (it is aggregated into Built.Close —
+// these are process-lifetime engines). The close is nil when no def opens an inline
+// server.
+func buildTaskTool(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager) (tool.Tool, func() error) {
 	// Resolve the active skills once so a def's `skills:` can preload skill bodies
 	// into its engine prompt. The same index is the operator-controlled skill set
 	// the Skill tool serves. `hooks` is the inert default each def adopts unless its
 	// own `hooks:` map scopes lifecycle hooks to its engine.
 	skillIdx := resolveSkillIndex(ctx, cfg)
-	engines, meta := buildAgentTaskEngines(cfg, provider, reg, skillIdx, hooks)
+	engines, meta, mcpClose := buildAgentTaskEngines(ctx, cfg, provider, reg, skillIdx, hooks, mainMgr)
 	return agent.NewTaskTool(
 		buildChildEngine(cfg, provider),
 		agent.WithSubagentStopHook(hooks),
 		agent.WithAgentEngines(engines, meta),
-	)
+	), mcpClose
 }
 
 // applyTeamConfig wires the opt-in agent-teams capability into the server.Config.
@@ -824,7 +844,7 @@ func buildTaskTool(ctx context.Context, cfg Config, provider port.LLMProvider, h
 // BOTH the supervisor (TeammateIdle) and the member coordination tools (the
 // TaskCreated / TaskCompleted gates), so a team's lifecycle hooks all flow through
 // a single runner. MaxTeams is left at zero so the server applies its own default.
-func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvider) {
+func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvider, mainMgr *mcp.Manager) {
 	if !cfg.EnableTeams {
 		slog.Info("agent teams DISABLED (set --enable-teams to enable; experimental)")
 		return
@@ -840,7 +860,7 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvide
 	// scoped catalog/model/prompt/permissionMode.
 	agentReg := resolveAgentRegistry(context.Background(), cfg)
 	skillIdx := resolveSkillIndex(context.Background(), cfg)
-	svcCfg.MemberEngine = buildMemberEngine(cfg, provider, teamHooks, agentReg, skillIdx, buildCommandRunner(cfg))
+	svcCfg.MemberEngine = buildMemberEngine(cfg, provider, teamHooks, agentReg, skillIdx, buildCommandRunner(cfg), mainMgr)
 	// WithForceCopy: Mutating team members run Bash (incl. git) in their forks, so
 	// they get FULLY isolated forks (a full copy incl. .git — own object DB/refs)
 	// rather than a worktree that shares the base repo's .git, keeping a member's
@@ -882,13 +902,19 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvide
 // spawn, so a stale roster reference never wedges a team. (An unknown Task `agent`
 // arg, by contrast, is a model-addressable error — the model can retry; an operator
 // roster entry cannot.)
-func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner tool.CommandRunner) server.MemberEngineFactory {
+func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner tool.CommandRunner, mainMgr *mcp.Manager) server.MemberEngineFactory {
 	return func(t *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		var (
 			model = cfg.Model
 			pc    = promptConfig(cfg)
 			mode  session.PermissionMode
+			// mcpClose tears down any INLINE MCP managers this member connected (nil for a
+			// reference-only or MCP-less member); mcpNames are the def's MCP tool names the
+			// supervisor exempts from the read-only-member backstop (MCP tools report
+			// ReadOnly()==false but never touch the workspace).
+			mcpClose func() error
+			mcpNames []string
 			// memberHooks is the per-member engine HookRunner. It stays inert (the
 			// historical default-member shape) UNLESS the member adopts a def whose
 			// `hooks:` map scopes lifecycle hooks to its engine. teamHooks remains the
@@ -916,6 +942,19 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 			for _, name := range names {
 				cat.MustRegister(base[name])
 			}
+			// Per-agent MCP: add the def's referenced/inline servers' tools to THIS
+			// member's catalog. The inline managers' Close rides on the MemberBuild so the
+			// supervisor tears them down on member teardown; the MCP tool names are handed
+			// to the supervisor so the read-only-member backstop exempts them (they report
+			// ReadOnly()==false but never touch the workspace).
+			mcpTools, names2, cl := defMCPTools(context.Background(), def, mainMgr)
+			for _, mt := range mcpTools {
+				if err := cat.Register(mt); err != nil {
+					slog.Warn("team member agent def MCP tool registration failed; skipped",
+						"member", spec.Name, "agent", def.Name, "tool", mt.Spec().Name, "err", err)
+				}
+			}
+			mcpClose, mcpNames = cl, names2
 			model = resolveModel(cfg, def) // resolve ONCE; thread the id into agentPromptConfig
 			bodies, missing := preloadedSkillBodies(def, skillIdx)
 			for _, name := range missing {
@@ -962,7 +1001,7 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 		}
 
 		eng := newChildEngineWithHooks(provider, cat, model, pc, memberHooks)
-		return agent.MemberBuild{Engine: eng, Mode: mode}
+		return agent.MemberBuild{Engine: eng, Mode: mode, Close: mcpClose, MCPToolNames: mcpNames}
 	}
 }
 

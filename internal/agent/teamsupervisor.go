@@ -132,6 +132,18 @@ type MemberBuild struct {
 	Engine *Engine
 	// Mode is the optional per-member permission mode. Empty => the team default.
 	Mode session.PermissionMode
+	// Close, if non-nil, tears down resources the factory opened for THIS member —
+	// specifically the inline per-agent MCP manager(s) connected for the member's
+	// agent definition (a reference entry opens nothing, so it contributes no Close).
+	// The supervisor composes it with the member's fork cleanup so it runs on every
+	// teardown path (cleanupAll, a failed/stopped member, a rejected enrolment).
+	Close func() error
+	// MCPToolNames are the names of MCP tools the factory added to this member's
+	// catalog (from its def's mcpServers). MCP tools report ReadOnly()==false but
+	// touch only the remote server, never the workspace, so the supervisor EXEMPTS
+	// them from the read-only-member workspace-mutating-tool backstop — exactly like
+	// the team coordination tools. Empty when the def scopes no MCP servers.
+	MCPToolNames []string
 }
 
 // MemberEngine builds the per-member engine (and its optional permission mode) from
@@ -330,6 +342,11 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 
 	build := s.factory(spec)
 	eng := build.Engine
+	// The member teardown closes BOTH the factory's per-member resources (inline MCP
+	// managers) AND the fork cleanup, in that order (MCP first, then the workspace).
+	// composeCleanup tolerates nil on either side, so a read-only member with no
+	// inline MCP and no fork yields a nil cleanup exactly as before.
+	cleanup = composeCleanup(build.Close, cleanup)
 	if eng == nil {
 		if cleanup != nil {
 			_ = cleanup()
@@ -346,7 +363,7 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 	// with peers. Team coordination tools report ReadOnly() == false but only mutate
 	// TEAM state, so they are exempted by name.
 	if !spec.Mutating {
-		if bad := workspaceMutatingTools(eng.catalogTools()); len(bad) > 0 {
+		if bad := workspaceMutatingTools(eng.catalogTools(), build.MCPToolNames); len(bad) > 0 {
 			if cleanup != nil {
 				_ = cleanup()
 			}
@@ -574,24 +591,51 @@ func (s *Supervisor) sessionID(name string) session.SessionID {
 }
 
 // workspaceMutatingTools returns the names of tools in info that mutate the
-// WORKSPACE — i.e. report ReadOnly() == false and are NOT team coordination tools
-// (which mutate only team state). The names are sorted for a deterministic error
-// message. The coordination set is derived from MemberToolNames, so it stays in
-// lock-step with the tools MemberTools actually installs.
-func workspaceMutatingTools(info []catalogToolInfo) []string {
-	coord := MemberToolNames()
+// WORKSPACE — i.e. report ReadOnly() == false and are NOT exempt. Two exemption
+// classes exist: the team coordination tools (which mutate only team state, derived
+// from MemberToolNames so they stay in lock-step with MemberTools) and the def's MCP
+// tools (passed in via mcpExempt; an MCP tool reports ReadOnly()==false but touches
+// only the remote server, never the workspace, so a read-only member may safely hold
+// it). The names are sorted for a deterministic error message.
+func workspaceMutatingTools(info []catalogToolInfo, mcpExempt []string) []string {
+	exempt := MemberToolNames()
+	for _, n := range mcpExempt {
+		exempt[n] = struct{}{}
+	}
 	var bad []string
 	for _, t := range info {
 		if t.readOnly {
 			continue
 		}
-		if _, ok := coord[t.name]; ok {
+		if _, ok := exempt[t.name]; ok {
 			continue
 		}
 		bad = append(bad, t.name)
 	}
 	sort.Strings(bad)
 	return bad
+}
+
+// composeCleanup chains two optional cleanup funcs into one, running first then
+// second and returning the first non-nil error (both always run). It returns nil
+// when both are nil, so a member with no inline MCP and no fork carries a nil
+// cleanup exactly as before. first is the MCP teardown, second the fork cleanup —
+// MCP sessions are closed before the forked workspace is removed.
+func composeCleanup(first, second func() error) func() error {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func() error {
+		err1 := first()
+		err2 := second()
+		if err1 != nil {
+			return err1
+		}
+		return err2
+	}
 }
 
 // untrustedFence is the delimiter wrapping every untrusted block in a member's

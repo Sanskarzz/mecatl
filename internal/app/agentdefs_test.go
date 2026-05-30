@@ -226,9 +226,9 @@ func TestAgentSnapshotProjectsResolvedFields(t *testing.T) {
 }
 
 func TestBuildAgentTaskEnginesEmptyRegistry(t *testing.T) {
-	engines, meta := buildAgentTaskEngines(Config{}, mockllm.New(), agents.NewRegistry(nil), nil, nil)
-	if engines != nil || meta != nil {
-		t.Fatalf("empty registry must yield nil engines/meta, got %v / %v", engines, meta)
+	engines, meta, closeFn := buildAgentTaskEngines(context.Background(), Config{}, mockllm.New(), agents.NewRegistry(nil), nil, nil, nil)
+	if engines != nil || meta != nil || closeFn != nil {
+		t.Fatalf("empty registry must yield nil engines/meta/close, got engines=%v meta=%v close!=nil=%v", engines, meta, closeFn != nil)
 	}
 }
 
@@ -242,7 +242,7 @@ func TestBuildAgentTaskEnginesResolvedModelOnRequest(t *testing.T) {
 		{Name: "speedy", Description: "fast one", Model: "fast", Body: "Be quick."},
 	})
 
-	engines, meta := buildAgentTaskEngines(cfg, rec, reg, nil, nil)
+	engines, meta, _ := buildAgentTaskEngines(context.Background(), cfg, rec, reg, nil, nil, nil)
 	if len(engines) != 1 || len(meta) != 1 || meta[0].Name != "speedy" {
 		t.Fatalf("want 1 engine+meta for 'speedy', got engines=%d meta=%+v", len(engines), meta)
 	}

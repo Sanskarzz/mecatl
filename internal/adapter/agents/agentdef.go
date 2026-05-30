@@ -26,6 +26,8 @@
 // path in this tier.
 package agents
 
+import "strings"
+
 // AgentDef is a pure value object: one discovered agent definition's metadata
 // and system-prompt body. It carries no behaviour and no infrastructure types,
 // so it is safe to construct in tests and to pass across the adapter boundary.
@@ -73,12 +75,16 @@ type AgentDef struct {
 	// non-fatal composition-time diagnostic. Accepts a YAML array or a
 	// comma/space-separated scalar.
 	Skills []string
-	// MCPServers is an OPTIONAL list of MCP server names to scope to this def's
-	// engine (Claude Code-style per-agent MCP). PARSED and CARRIED but NOT YET
-	// wired into a per-def MCP connection lifecycle — see docs/design/
-	// AGENT-DEFINITIONS.md for the deferral rationale. Accepts a YAML array or a
-	// comma/space-separated scalar.
-	MCPServers []string
+	// MCPServers is an OPTIONAL list of MCP servers to scope to this def's engine
+	// (Claude Code-style per-agent MCP). Each entry is EITHER a REFERENCE (a bare
+	// server name — the def gets that already-configured main server's tools) OR an
+	// INLINE streamable-HTTP server spec (name + url + optional headers — the def
+	// connects its OWN server, whose tools never enter the main conversation). An
+	// inline entry with no URL collapses to a reference; a non-HTTP/stdio inline
+	// entry is rejected with a composition-time diagnostic (streamable-HTTP only).
+	// The frontmatter accepts a scalar ("a, b"), a YAML array of scalars, and a YAML
+	// array of mappings ({name,url,headers}) interchangeably.
+	MCPServers []AgentMCPServer
 	// Hooks is an OPTIONAL phase → shell-command map scoping lifecycle hooks to this
 	// def's engine. The composition layer builds the def's engine HookRunner from
 	// this map (instead of the default inert runner), so a specialist can enforce
@@ -93,3 +99,25 @@ type AgentDef struct {
 	// diagnostics and so a reviewer can trace a def back to its file.
 	Path string
 }
+
+// AgentMCPServer is one entry of a def's `mcpServers`. It is EITHER a reference to
+// an already-configured (main) server — Name set, URL empty — OR an inline
+// streamable-HTTP server the def connects on its own — Name + URL (+ optional
+// Headers). IsReference reports which. It carries no transport object and no
+// infrastructure type, so it is safe across the adapter boundary like AgentDef.
+type AgentMCPServer struct {
+	// Name is the server's identifier. For a reference it must match a configured
+	// main server's Name; for an inline server it becomes the mcp__<name>__ tool
+	// namespace. Required for both forms.
+	Name string
+	// URL is the inline server's streamable-HTTP endpoint. Empty => this entry is a
+	// REFERENCE to an already-configured main server (no new connection).
+	URL string
+	// Headers are extra HTTP headers for an inline server (e.g. Authorization).
+	// Ignored for a reference entry.
+	Headers map[string]string
+}
+
+// IsReference reports whether this entry references an already-configured main
+// server (URL empty) rather than describing an inline server to connect.
+func (s AgentMCPServer) IsReference() bool { return strings.TrimSpace(s.URL) == "" }

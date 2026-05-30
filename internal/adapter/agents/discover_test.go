@@ -102,8 +102,13 @@ body`)
 	if got, want := strings.Join(def.Skills, ","), "refactoring,testing"; got != want {
 		t.Fatalf("skills = %q, want %q", got, want)
 	}
-	if got, want := strings.Join(def.MCPServers, ","), "github,jira"; got != want {
+	if got, want := strings.Join(mcpServerNames(def.MCPServers), ","), "github,jira"; got != want {
 		t.Fatalf("mcpServers = %q, want %q", got, want)
+	}
+	for _, s := range def.MCPServers {
+		if !s.IsReference() {
+			t.Fatalf("scalar mcpServers entry %q should be a reference, got url=%q", s.Name, s.URL)
+		}
 	}
 	// Empty-command and empty-key hook entries are dropped; only PreToolUse survives.
 	if len(def.Hooks) != 1 || def.Hooks["PreToolUse"] != "echo pre" {
@@ -227,5 +232,85 @@ func TestDirSourceDuplicateNameWithinDir(t *testing.T) {
 	}
 	if len(skips) != 1 || !strings.Contains(skips[0].Reason, "duplicate") {
 		t.Fatalf("want duplicate skip, got %v", skips)
+	}
+}
+
+// mcpServerNames projects an mcpServers list to its names, for assertions.
+func mcpServerNames(in []AgentMCPServer) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		out = append(out, s.Name)
+	}
+	return out
+}
+
+// TestParseAgentDefMCPInlineAndReference asserts the extended mcpServers parsing:
+// a YAML array MIXING a bare scalar (reference) with mappings (inline HTTP server,
+// with and without headers), and that a nameless mapping and a stdio/non-HTTP entry
+// are SKIPPED with diagnostics while the def is still kept.
+func TestParseAgentDefMCPInlineAndReference(t *testing.T) {
+	raw := []byte(`---
+name: ops
+description: an operator
+mcpServers:
+  - github
+  - name: inline-http
+    url: https://example.test/mcp
+    headers:
+      Authorization: Bearer tok
+  - name: inline-bare
+  - url: https://nameless.test/mcp
+  - name: stdio-bad
+    command: ./some-server
+  - name: typed-bad
+    type: stdio
+---
+body`)
+	def, perr, notes := parseAgentDef(raw, "ops.md")
+	if perr != "" {
+		t.Fatalf("parse error: %s", perr)
+	}
+
+	byName := map[string]AgentMCPServer{}
+	for _, s := range def.MCPServers {
+		byName[s.Name] = s
+	}
+
+	// github = reference (no url).
+	if ref, ok := byName["github"]; !ok || !ref.IsReference() {
+		t.Fatalf("github should be a reference entry, got %+v (ok=%v)", ref, ok)
+	}
+	// inline-http = inline with url + header.
+	in, ok := byName["inline-http"]
+	if !ok || in.IsReference() || in.URL != "https://example.test/mcp" {
+		t.Fatalf("inline-http should be inline with its url, got %+v (ok=%v)", in, ok)
+	}
+	if in.Headers["Authorization"] != "Bearer tok" {
+		t.Fatalf("inline-http headers = %v, want Authorization header", in.Headers)
+	}
+	// inline-bare = mapping with only a name => reference.
+	if b, ok := byName["inline-bare"]; !ok || !b.IsReference() {
+		t.Fatalf("inline-bare (name only) should collapse to a reference, got %+v (ok=%v)", b, ok)
+	}
+
+	// The nameless, stdio-command, and typed-stdio entries must be skipped.
+	for _, bad := range []string{"stdio-bad", "typed-bad"} {
+		if _, ok := byName[bad]; ok {
+			t.Fatalf("entry %q should have been skipped (non-HTTP transport)", bad)
+		}
+	}
+	if len(def.MCPServers) != 3 {
+		t.Fatalf("want 3 usable mcpServers, got %d: %v", len(def.MCPServers), mcpServerNames(def.MCPServers))
+	}
+
+	// Diagnostics: one for the nameless entry, one per rejected stdio entry (3 total).
+	var mcpNotes int
+	for _, n := range notes {
+		if strings.Contains(n, "mcpServers") {
+			mcpNotes++
+		}
+	}
+	if mcpNotes != 3 {
+		t.Fatalf("want 3 mcpServers skip notes (nameless + stdio command + stdio type), got %d: %v", mcpNotes, notes)
 	}
 }

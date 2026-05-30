@@ -25,7 +25,11 @@ color: blue                    # OPTIONAL — UX hint only; never affects execut
 skills: [refactoring, testing] # OPTIONAL — skill names PRELOADED into this def's prompt (array or "a, b" string)
 hooks:                         # OPTIONAL — phase → shell-command map scoped to this def's engine
   PreToolUse: ./scripts/gate.sh
-mcpServers: [github]           # OPTIONAL — PARSED + CARRIED, but NOT yet wired (see "deferred" below)
+mcpServers:                    # OPTIONAL — per-agent MCP (reference an existing server OR inline a new one)
+  - github                     #   REFERENCE: a configured main server's name (gets its tools)
+  - name: jira                 #   INLINE: a streamable-HTTP server only THIS def connects
+    url: https://jira.example/mcp
+    headers: { Authorization: "Bearer ${TOKEN}" }
 ---
 You are a meticulous code reviewer. <full body = the specialist's system-prompt instructions>
 ```
@@ -64,6 +68,37 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   diagnostic (not preloaded). Wired in BOTH the per-def Task engine
   (`buildAgentTaskEngines`) and the team-member engine (`buildMemberEngine`) via
   `resolveSkillIndex` + `preloadedSkillBodies`.
+- **Per-agent MCP servers (`mcpServers:`).** A def's `mcpServers:` scopes specific MCP
+  servers' tools to THAT def's engine, in BOTH call sites (Task delegate and team
+  member). Two forms, mixable in one list:
+  - **REFERENCE** (a bare server name, or a mapping with only `name`): the def gets the
+    tools of an ALREADY-configured main server, pulled from the process MCP manager. No
+    new connection is opened, so there is nothing to tear down. An unknown reference is a
+    non-fatal startup diagnostic (skipped).
+  - **INLINE** (a mapping with `name` + `url` + optional `headers`): the def connects its
+    OWN streamable-HTTP server, whose tools are added to the def's catalog but NEVER
+    enter the main conversation's context. **Streamable-HTTP only** — a `command:`/stdio
+    or any non-HTTP `type`/`transport` inline entry is REJECTED with a diagnostic and
+    skipped (CLAUDE.md: no stdio MCP, ever).
+  - The MCP tools are added to the def's catalog directly (a def opting into a server
+    gets that server's tools); they do NOT go through the `tools:` core allowlist, and
+    `Task`/`Fork`/`ToolSearch` exclusion + the def's core `tools`/`disallowedTools`
+    semantics are unchanged.
+  - **Read-only backstop interaction.** MCP tools report `ReadOnly()==false` but never
+    touch the workspace, so they are EXEMPT from the supervisor's read-only-member
+    workspace-mutating-tool backstop (`ErrReadOnlyMemberMutating`) — the same way the
+    team coordination tools are exempt. A read-only member may therefore safely hold MCP
+    tools; a genuine workspace-mutating tool (Edit/Write/non-RO Bash) is still rejected.
+    The exemption is carried as `MemberBuild.MCPToolNames`, which the supervisor folds
+    into its exemption set.
+  - **Lifetime model.** A **Task-path** def engine is built once at composition
+    (`buildAgentTaskEngines`); its inline managers' `Close` is aggregated into
+    `Built.Close` (process-lifetime, torn down on shutdown). A **team-member** def engine
+    is built per spawn (the `MemberEngine` factory); its inline-MCP `Close` rides on
+    `MemberBuild.Close`, which the supervisor composes with the member's fork cleanup so
+    it runs on every teardown path (`cleanupAll`, a failed/stopped member, a rejected
+    enrolment). Reference entries open nothing, so they contribute no `Close`. See
+    `defMCPTools` (the single reference/inline resolver shared by both call sites).
 - **Per-def hooks (`hooks:`).** A def's `hooks:` phase→command map scopes lifecycle
   hooks to that def's engine: the engine's `HookRunner` is built from the def's map
   (via the `hookexec` adapter) instead of the default inert runner, so a specialist can
@@ -83,23 +118,12 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   mechanisms that already exist (member fork / Fork worktree). On the Task path the
   only thing a def adds over the anonymous explorer is a different prompt + model +
   read-only tool scope.
-- **No per-agent MCP tools (DEFERRED — parsed, not wired).** A def's `mcpServers:` is
-  PARSED and carried on `AgentDef.MCPServers`, but is NOT yet wired into a per-def MCP
-  connection lifecycle, and listing an MCP tool in `tools:` still yields an "unknown
-  tool" diagnostic (scoped catalogs see only **core** tools). **Why deferred, honestly:**
-  per-def MCP requires a per-engine connection lifecycle (connect on build → add the
-  server's tools to that def's catalog → disconnect on teardown). The current MCP
-  manager (`internal/adapter/mcp`) is **process-scoped**: it is built once in
-  `buildCatalog`, registered into the single parent catalog, and torn down only via the
-  top-level `Built.Close`. The per-def Task engines and the per-member engines have **no
-  teardown seam** today (they are built eagerly and live for the process / are rebuilt
-  per spawn with no Close hook), so wiring connect/disconnect cleanly would mean adding
-  an engine-lifetime/teardown abstraction and a per-def MCP sub-manager — substantial,
-  correctness-sensitive work (leaked connections, double-close, group scoping) that does
-  not fit the existing manager seam. Rather than half-implement a leaky version, the
-  field is parsed + carried (so the contract is stable and a future slice has the data)
-  and this is the dedicated follow-up. **Repo-map tools** remain parent-catalog-only for
-  the same scoped-catalog reason.
+- **Per-agent MCP `tools:` allowlisting still core-only.** A def's `mcpServers:` adds the
+  server's tools to the def's catalog directly (see "What v1 supports"), but listing an
+  MCP tool name in the `tools:` allowlist still yields an "unknown tool" diagnostic —
+  the `tools:`/`disallowedTools:` scope governs the **core** toolset only; MCP tools
+  arrive via `mcpServers:`, not the core allowlist. **Repo-map tools** remain
+  parent-catalog-only for the same scoped-catalog reason.
 - **No `--agents` inline JSON.** Definitions come only from `<name>.md` files under
   `--agents-dir` / the conventional dirs.
 - **No Agent-as-tool nesting.** A def cannot re-add `Task`/`Fork`/`ToolSearch`; a child
