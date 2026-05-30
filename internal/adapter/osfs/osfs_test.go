@@ -40,7 +40,7 @@ func TestCommandRunnerRun(t *testing.T) {
 	ctx := context.Background()
 	r := newRunner(t, t.TempDir())
 
-	res, err := r.Run(ctx, "echo hi && echo err >&2")
+	res, err := r.Run(ctx, "echo hi && echo err >&2", "")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestCommandRunnerRun(t *testing.T) {
 func TestCommandRunnerExitCode(t *testing.T) {
 	ctx := context.Background()
 	r := newRunner(t, t.TempDir())
-	res, err := r.Run(ctx, "exit 3")
+	res, err := r.Run(ctx, "exit 3", "")
 	if err != nil {
 		t.Fatalf("Run returned harness error for non-zero exit: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestCommandRunnerWorkingDir(t *testing.T) {
 		t.Fatalf("seed marker: %v", err)
 	}
 	r := newRunner(t, root)
-	res, err := r.Run(ctx, "ls")
+	res, err := r.Run(ctx, "ls", "")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -83,11 +83,60 @@ func TestCommandRunnerWorkingDir(t *testing.T) {
 	}
 }
 
+// TestCommandRunnerWorkdirOverride proves the runner runs in the per-call workdir
+// when one is supplied — including a workdir OUTSIDE the runner's configured root
+// (which is exactly the fork case: a fork lives under a temp base, not under the
+// configured workspace). It must NOT confine/reject the out-of-root workdir, and
+// an EMPTY workdir must fall back to the configured root.
+func TestCommandRunnerWorkdirOverride(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "base.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed base marker: %v", err)
+	}
+	// A SEPARATE directory, not under base — the runner's configured root is base.
+	other := t.TempDir()
+	if err := os.WriteFile(filepath.Join(other, "other.txt"), []byte("y"), 0o644); err != nil {
+		t.Fatalf("seed other marker: %v", err)
+	}
+	r := newRunner(t, base)
+
+	// Workdir == the out-of-root "other" dir: the command must run there.
+	res, err := r.Run(ctx, "ls", other)
+	if err != nil {
+		t.Fatalf("Run with out-of-root workdir: %v", err)
+	}
+	if !strings.Contains(res.Stdout, "other.txt") || strings.Contains(res.Stdout, "base.txt") {
+		t.Errorf("ls in out-of-root workdir = %q; want other.txt (not base.txt) — workdir not honored", res.Stdout)
+	}
+
+	// Writing a relative-path marker via the out-of-root workdir lands in THAT dir,
+	// not the configured root — the fork-isolation property the Bash fix needs.
+	if _, err := r.Run(ctx, "echo hi > written.txt", other); err != nil {
+		t.Fatalf("Run write in out-of-root workdir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(other, "written.txt")); err != nil {
+		t.Errorf("relative write did not land in the supplied workdir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "written.txt")); !os.IsNotExist(err) {
+		t.Errorf("relative write leaked into the configured root (escaped the workdir)")
+	}
+
+	// Empty workdir falls back to the configured root.
+	res, err = r.Run(ctx, "ls", "")
+	if err != nil {
+		t.Fatalf("Run with empty workdir: %v", err)
+	}
+	if !strings.Contains(res.Stdout, "base.txt") {
+		t.Errorf("empty workdir did not fall back to the configured root: %q", res.Stdout)
+	}
+}
+
 func TestCommandRunnerCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 	r := newRunner(t, t.TempDir())
-	_, err := r.Run(ctx, "echo hi")
+	_, err := r.Run(ctx, "echo hi", "")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run with cancelled ctx err = %v want context.Canceled", err)
 	}
@@ -97,7 +146,7 @@ func TestCommandRunnerTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	r := newRunner(t, t.TempDir())
-	_, err := r.Run(ctx, "sleep 5")
+	_, err := r.Run(ctx, "sleep 5", "")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Run with expired deadline err = %v want context.DeadlineExceeded", err)
 	}

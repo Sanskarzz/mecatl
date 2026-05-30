@@ -417,12 +417,17 @@ func NewCommandRunnerShell(dir, shell string) (tool.CommandRunner, error) {
 // Compile-time assertion that CommandRunner satisfies the runner port.
 var _ tool.CommandRunner = (*CommandRunner)(nil)
 
-// Run runs command via /bin/sh -c with the configured root as the working
-// directory, capturing (and truncating) stdout/stderr and the exit code.
-// Cancellation and timeout are governed by ctx; when ctx has no deadline a
-// default timeout is applied. A non-zero exit is reported via the returned
-// CommandResult.ExitCode, not as an error.
-func (r *CommandRunner) Run(ctx context.Context, command string) (tool.CommandResult, error) {
+// Run runs command via /bin/sh -c, capturing (and truncating) stdout/stderr and
+// the exit code. The working directory is workdir (the session/fork Workspace
+// root the Bash tool executes against); an EMPTY workdir falls back to the
+// runner's configured root, so the runner is usable standalone. workdir is used
+// as-is and is intentionally NOT confined to the runner's configured root: a
+// forked child lives under an isolated temp base OUTSIDE that root, and running
+// its Bash there (not in the shared parent base) is exactly what fork isolation
+// requires. Cancellation and timeout are governed by ctx; when ctx has no
+// deadline a default timeout is applied. A non-zero exit is reported via the
+// returned CommandResult.ExitCode, not as an error.
+func (r *CommandRunner) Run(ctx context.Context, command, workdir string) (tool.CommandResult, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, defaultCommandTimeout)
@@ -433,8 +438,12 @@ func (r *CommandRunner) Run(ctx context.Context, command string) (tool.CommandRe
 	stdout.cap = maxCommandOutput
 	stderr.cap = maxCommandOutput
 
+	dir := workdir
+	if dir == "" {
+		dir = r.root
+	}
 	cmd := exec.CommandContext(ctx, r.shell, "-c", command)
-	cmd.Dir = r.root
+	cmd.Dir = dir
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

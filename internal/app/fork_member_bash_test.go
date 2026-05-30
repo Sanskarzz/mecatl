@@ -16,13 +16,15 @@ import (
 	"github.com/stacklok/mecatl/internal/team"
 )
 
-// These tests cover FIX 1 (isolation): a forked/other-workspace child — a Fork
-// branch and a Mutating team member — must NOT be given Bash, because the Bash
-// runner is rooted at the PARENT base and would escape the fork. Edit/Write MUST
-// remain (a fork child can still implement). The cfg used by every test configures
-// a real shell so buildCommandRunner returns a non-nil runner; if the production
-// code wrongly registered Bash it WOULD be in the catalog, so these tests genuinely
-// prove the deliberate exclusion (not mere absence of a runner).
+// These tests cover the workspace-aware-Bash follow-up: a forked/other-workspace
+// child — a Fork branch and a Mutating team member — IS now given Bash when a
+// runner is configured, because BashTool.Execute passes the child's forked
+// Workspace.Root() to the runner as the working directory, so the command runs in
+// the fork, not the shared parent base. Edit/Write remain too (a fork child
+// implements). The cfg used by every test configures a real shell so
+// buildCommandRunner returns a non-nil runner; without one the child runs
+// shell-less (like the main session). A read-only (base-sharing) member still must
+// NOT get Bash — that assertion is kept below.
 
 // bashThenEdit scripts a child/member turn that first calls Bash, then Edit, then a
 // text turn. Whether each tool is in the catalog is observable from the resulting
@@ -84,36 +86,58 @@ func drainEngine(t *testing.T, eng *agent.Engine) []session.Event {
 	return events
 }
 
-// TestForkChildEngineHasEditNotBash proves buildForkChildEngine's catalog contains
-// Edit (a fork child can implement) but NOT Bash (Bash would escape the fork to the
-// parent base), even though a shell is configured.
-func TestForkChildEngineHasEditNotBash(t *testing.T) {
-	cfg := teamCfg(t) // configures Shell, so a runner exists and Bash COULD be wired
-	if buildCommandRunner(cfg) == nil {
+// TestForkChildEngineHasBashAndEdit proves buildForkChildEngine's catalog now
+// contains BOTH Edit and Bash when a runner is configured — Bash is workspace-aware
+// and runs in the branch's fork, so it is safe to re-enable.
+func TestForkChildEngineHasBashAndEdit(t *testing.T) {
+	cfg := teamCfg(t) // configures Shell, so a runner exists and Bash is wired
+	runner := buildCommandRunner(cfg)
+	if runner == nil {
 		t.Fatal("precondition: expected a non-nil command runner with Shell set")
 	}
-	eng := buildForkChildEngine(cfg, bashThenEdit())
+	eng := buildForkChildEngine(cfg, bashThenEdit(), runner)
 
 	events := drainEngine(t, eng)
 
-	if !unknownToolResult(events, "b1") {
-		t.Error("Fork child dispatched Bash; Bash MUST be excluded from a forked child (it would escape the fork to the parent base)")
+	if unknownToolResult(events, "b1") {
+		t.Error("Fork child did NOT have Bash; workspace-aware Bash must be re-enabled for a forked child")
+	}
+	if !sawDispatchedTool(events, "b1") {
+		t.Error("Fork child did not dispatch Bash; it must be present in the catalog")
 	}
 	if !sawDispatchedTool(events, "e1") {
 		t.Error("Fork child did not dispatch Edit; a fork child must keep Edit/Write to implement in its fork")
 	}
 }
 
-// TestMutatingMemberHasEditNotBash proves a default (no-def) Mutating team member's
-// engine contains Edit but NOT Bash, for the same isolation reason — Bash's runner
-// is rooted at the parent base and would escape the member's fork.
-func TestMutatingMemberHasEditNotBash(t *testing.T) {
+// TestForkChildEngineNoRunnerHasNoBash proves a shell-less deployment (nil runner)
+// still yields a Bash-less forked child — the runner gate is honored, exactly like
+// the main session.
+func TestForkChildEngineNoRunnerHasNoBash(t *testing.T) {
 	cfg := teamCfg(t)
-	if buildCommandRunner(cfg) == nil {
+	eng := buildForkChildEngine(cfg, bashThenEdit(), nil)
+
+	events := drainEngine(t, eng)
+
+	if !unknownToolResult(events, "b1") {
+		t.Error("Fork child with a nil runner dispatched Bash; without a runner there must be no Bash")
+	}
+	if !sawDispatchedTool(events, "e1") {
+		t.Error("Fork child did not dispatch Edit; Edit must be present regardless of the runner")
+	}
+}
+
+// TestMutatingMemberHasBashAndEdit proves a default (no-def) Mutating team member's
+// engine now contains BOTH Edit and Bash — Bash is workspace-aware and runs in the
+// member's fork.
+func TestMutatingMemberHasBashAndEdit(t *testing.T) {
+	cfg := teamCfg(t)
+	runner := buildCommandRunner(cfg)
+	if runner == nil {
 		t.Fatal("precondition: expected a non-nil command runner with Shell set")
 	}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil))
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), runner)
 	build := factory(tm, agent.MemberSpec{Name: "writer", Mutating: true})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -121,24 +145,26 @@ func TestMutatingMemberHasEditNotBash(t *testing.T) {
 
 	events := drainEngine(t, build.Engine)
 
-	if !unknownToolResult(events, "b1") {
-		t.Error("Mutating member dispatched Bash; Bash MUST be excluded from a Mutating (forked) member")
+	if unknownToolResult(events, "b1") {
+		t.Error("Mutating member did NOT have Bash; workspace-aware Bash must be re-enabled for a Mutating (forked) member")
+	}
+	if !sawDispatchedTool(events, "b1") {
+		t.Error("Mutating member did not dispatch Bash; it must be present in the catalog")
 	}
 	if !sawDispatchedTool(events, "e1") {
 		t.Error("Mutating member did not dispatch Edit; a Mutating member must keep Edit/Write to implement in its fork")
 	}
 }
 
-// TestMutatingMemberDefCannotScopeInBash proves the DEFINED-member path also excludes
-// Bash: even a Mutating member whose agent def explicitly allowlists Bash does NOT
-// get it (Bash is removed from the available base for forked members), while a
-// listed Edit survives.
-func TestMutatingMemberDefCannotScopeInBash(t *testing.T) {
+// TestReadOnlyMemberHasNoBashOrEdit proves a read-only (base-sharing) member gets
+// NEITHER Bash NOR Edit — the read-only-share / mutating-fork guarantee. A
+// read-only member shares the parent base, so it must never get a mutating tool.
+func TestReadOnlyMemberHasNoBashOrEdit(t *testing.T) {
 	cfg := teamCfg(t)
+	runner := buildCommandRunner(cfg)
 	tm := team.New("t")
-	def := agents.AgentDef{Name: "writer", Description: "w", Tools: []string{"Read", "Edit", "Bash"}}
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def))
-	build := factory(tm, agent.MemberSpec{Name: "writer", AgentType: "writer", Mutating: true})
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), runner)
+	build := factory(tm, agent.MemberSpec{Name: "reader", Mutating: false})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
 	}
@@ -146,9 +172,60 @@ func TestMutatingMemberDefCannotScopeInBash(t *testing.T) {
 	events := drainEngine(t, build.Engine)
 
 	if !unknownToolResult(events, "b1") {
-		t.Error("Mutating member def allowlisting Bash still got Bash; it must be excluded for forked members")
+		t.Error("read-only member dispatched Bash; a base-sharing member must NOT get Bash")
+	}
+	if !unknownToolResult(events, "e1") {
+		t.Error("read-only member dispatched Edit; a base-sharing member must NOT get Edit")
+	}
+}
+
+// TestMutatingMemberDefCanScopeInBash proves the DEFINED-member path now lets a
+// Mutating member's agent def scope Bash IN: a def that allowlists Bash gets it
+// (workspace-aware, fork-confined), alongside a listed Edit.
+func TestMutatingMemberDefCanScopeInBash(t *testing.T) {
+	cfg := teamCfg(t)
+	runner := buildCommandRunner(cfg)
+	tm := team.New("t")
+	def := agents.AgentDef{Name: "writer", Description: "w", Tools: []string{"Read", "Edit", "Bash"}}
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), runner)
+	build := factory(tm, agent.MemberSpec{Name: "writer", AgentType: "writer", Mutating: true})
+	if build.Engine == nil {
+		t.Fatal("factory returned a nil engine")
+	}
+
+	events := drainEngine(t, build.Engine)
+
+	if unknownToolResult(events, "b1") {
+		t.Error("Mutating member def allowlisting Bash did NOT get Bash; it must be scopable for forked members now")
+	}
+	if !sawDispatchedTool(events, "b1") {
+		t.Error("Mutating member did not dispatch Bash; a def listing Bash must yield it")
 	}
 	if !sawDispatchedTool(events, "e1") {
 		t.Error("Mutating member def listing Edit did not dispatch Edit; Edit must survive scoping")
+	}
+}
+
+// TestReadOnlyMemberDefCannotScopeInBash proves the DEFINED read-only-member path
+// still DROPS Bash (and Edit): scopedToolNamesMode drops mutating tools for a
+// base-sharing member regardless of the def allowlist.
+func TestReadOnlyMemberDefCannotScopeInBash(t *testing.T) {
+	cfg := teamCfg(t)
+	runner := buildCommandRunner(cfg)
+	tm := team.New("t")
+	def := agents.AgentDef{Name: "reader", Description: "r", Tools: []string{"Read", "Edit", "Bash"}}
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), runner)
+	build := factory(tm, agent.MemberSpec{Name: "reader", AgentType: "reader", Mutating: false})
+	if build.Engine == nil {
+		t.Fatal("factory returned a nil engine")
+	}
+
+	events := drainEngine(t, build.Engine)
+
+	if !unknownToolResult(events, "b1") {
+		t.Error("read-only member def allowlisting Bash got Bash; a base-sharing member must drop mutating tools")
+	}
+	if !unknownToolResult(events, "e1") {
+		t.Error("read-only member def allowlisting Edit got Edit; a base-sharing member must drop mutating tools")
 	}
 }

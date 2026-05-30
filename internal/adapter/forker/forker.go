@@ -24,12 +24,15 @@
 //
 // Limits: the git path isolates the WORKING TREE and INDEX but shares the object
 // database and refs — a child that created commits/refs would be visible to the
-// base repo. Forked children CAN now mutate their working tree (Edit/Write land in
-// the fork), but Bash and git are deliberately EXCLUDED from a forked child's
-// catalog (see app.buildForkChildEngine / buildMemberEngine): the Bash runner is
-// rooted at the parent base and would escape the fork, and with no shell a child
-// cannot run git either, so no shared-.git writes (commits/refs) ever occur. The
-// shared-object-DB caveat is thus latent, not reachable, in v1. The copy path is
+// base repo. Forked children CAN mutate their working tree: Edit/Write land in the
+// fork, and Bash is workspace-aware (its CommandRunner runs with the forked child's
+// Workspace.Root() as the working directory; see app.buildForkChildEngine /
+// buildMemberEngine and internal/adapter/tools/bash.go), so a child's Bash — and
+// any git it runs — defaults to the fork's working tree, not the parent base. Note
+// the shared-object-DB caveat is now REACHABLE: a child that runs `git commit` via
+// Bash in a worktree fork writes objects/refs into the shared .git. That is the
+// inherent git-worktree model; the no-auto-merge boundary still means nothing
+// updates the base working tree automatically. The copy path is
 // bounded only by available disk and the size of the base
 // tree; it copies regular files and directories and SKIPS symlinks (so a symlink
 // cannot smuggle the copy outside the base). Neither path auto-merges results

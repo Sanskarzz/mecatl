@@ -346,6 +346,41 @@ func TestBashNoShellSurfacesAsToolError(t *testing.T) {
 	}
 }
 
+// recordingRunner is a tool.CommandRunner fake that records the workdir of the
+// last Run call so a test can assert BashTool threads the Workspace.Root() through.
+type recordingRunner struct {
+	gotWorkdir  string
+	gotCommand  string
+	result      tool.CommandResult
+	returnError error
+}
+
+func (r *recordingRunner) Run(_ context.Context, command, workdir string) (tool.CommandResult, error) {
+	r.gotCommand = command
+	r.gotWorkdir = workdir
+	return r.result, r.returnError
+}
+
+// TestBashPassesWorkspaceRootAsWorkdir proves BashTool.Execute passes the per-call
+// Workspace.Root() to CommandRunner.Run as the working directory — the seam that
+// makes Bash run in the fork it executes against rather than a baked-in root.
+func TestBashPassesWorkspaceRootAsWorkdir(t *testing.T) {
+	ws := memfs.NewWorkspace("/fork/root")
+	rr := &recordingRunner{result: tool.CommandResult{Stdout: "ok", ExitCode: 0}}
+	bash := NewBashTool(rr)
+
+	res := exec(t, bash, call(t, "Bash", map[string]any{"command": "echo hi"}), ws)
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", res.Content)
+	}
+	if rr.gotWorkdir != ws.Root() {
+		t.Errorf("Bash passed workdir %q; want the Workspace root %q", rr.gotWorkdir, ws.Root())
+	}
+	if rr.gotCommand != "echo hi" {
+		t.Errorf("Bash passed command %q; want %q (command must be unchanged)", rr.gotCommand, "echo hi")
+	}
+}
+
 func TestNewBashToolNilRunnerPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {

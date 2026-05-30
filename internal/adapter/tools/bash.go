@@ -44,8 +44,18 @@ Limits:
 //
 // The runner is injected at construction (NewBashTool) rather than taken from
 // the Workspace, because command execution is optional: a deployment with no
-// shell simply never constructs a BashTool. The frozen Tool.Execute signature
-// still receives a Workspace, but the Bash tool ignores it.
+// shell simply never constructs a BashTool. Execute passes the per-call
+// Workspace.Root() to the runner as the working directory, so a SINGLE runner
+// serves both the main session (root == the configured workspace) and a forked
+// child (root == an isolated temp base): the command's DEFAULT cwd follows the
+// workspace the tool executes against, never the shared parent base.
+//
+// Residual: this fixes the runner's working DIRECTORY, not Bash's trust model.
+// Unlike path-scoped Edit/Write (confined by os.Root), Bash can still escape its
+// cwd via absolute paths or `cd` — that is inherent to running a shell, the same
+// as in the main session. The fix removes the ACCIDENTAL shared-base mutation
+// (a fork branch's relative-path Bash landing in the parent base), which is what
+// ForkTool.ReadOnly() / the read-only-share / mutating-fork isolation needs.
 type BashTool struct {
 	runner tool.CommandRunner
 }
@@ -92,7 +102,7 @@ func (BashTool) ReadOnly() bool { return false }
 
 // Execute runs the command, honoring an optional timeout, and returns combined
 // output with the exit code.
-func (bt BashTool) Execute(ctx context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+func (bt BashTool) Execute(ctx context.Context, in session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
 	var args bashArgs
 	if msg, ok := parseArgs(in, &args); !ok {
 		return session.NewToolError(in.ID, msg), nil
@@ -110,7 +120,7 @@ func (bt BashTool) Execute(ctx context.Context, in session.ToolCall, _ tool.Work
 		defer cancel()
 	}
 
-	res, err := bt.runner.Run(ctx, args.Command)
+	res, err := bt.runner.Run(ctx, args.Command, ws.Root())
 	if err != nil {
 		// Surface command-execution failures (no shell, timeout, cancellation)
 		// to the model so it can adapt, rather than aborting the harness.

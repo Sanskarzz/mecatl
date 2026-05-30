@@ -175,20 +175,17 @@ reused from Fork). So:
 This keeps the read-parallel/mutate-serial invariant intact: nothing mutates the
 shared base concurrently.
 
-> **Follow-up — workspace-aware Bash for forked children (fork-rooted CommandRunner).**
-> A Mutating teammate (and a Fork branch) currently gets **Edit/Write but NOT Bash**,
-> even when a shell is configured. The `BashTool`'s `CommandRunner` has its working
-> directory baked to the **parent base** at construction
-> (`internal/adapter/osfs` runner, `cmd.Dir = r.root`) and `BashTool.Execute` ignores
-> the per-branch/per-member forked `Workspace` it is handed — so a forked child that
-> ran Bash would mutate the **shared parent base**, escaping its fork and breaking the
-> isolation guarantee (and `ForkTool.ReadOnly()==true`). The ship-now fix is to simply
-> not register Bash for forked children (`app.buildForkChildEngine` and the Mutating
-> branch / DEFINED member path of `app.buildMemberEngine`). Making Bash workspace-aware
-> — a CommandRunner re-rooted at the forked child's `Workspace.Root()`, plumbed through
-> the frozen `Tool.Execute(ctx, in, ws)` signature without weakening the bash gate —
-> is a deliberate, separate follow-up; it touches the `CommandRunner` contract and the
-> command-canonicalisation gate, so it is out of scope for the isolation fix.
+> **Workspace-aware Bash (done).** A Mutating teammate (and a Fork branch) now gets
+> **Bash as well as Edit/Write** when a shell is configured. `BashTool.Execute` passes
+> the per-branch/per-member forked `Workspace.Root()` to `CommandRunner.Run` as the
+> working directory (the `CommandRunner` contract carries an explicit `workdir`; an
+> empty one falls back to the runner's configured root), so a forked child's Bash runs
+> in its OWN fork — its **default cwd is the fork, not the shared parent base** — and
+> the bash gate (`SplitCommands`/`ReadOnlyBash`) is unchanged. Residual: unlike
+> path-scoped Edit/Write, Bash can still escape its cwd via absolute paths or `cd` —
+> the inherent Bash trust model, the same as the main session; the fix removes the
+> accidental shared-base mutation, which is what the fork/`ForkTool.ReadOnly()`
+> isolation needs. A read-only (base-sharing) member still gets **no** Bash.
 
 ### 5.4 Quiescence & deadlock
 

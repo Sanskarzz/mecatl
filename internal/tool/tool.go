@@ -90,7 +90,16 @@ type CommandRunner interface {
 	// Run executes command and returns its result. A non-zero exit is reported
 	// via CommandResult.ExitCode (not error); error is for execution faults
 	// (cancellation, timeout, or a missing shell — see ErrNoShell).
-	Run(ctx context.Context, command string) (CommandResult, error)
+	//
+	// workdir is the absolute working directory the command runs in — the
+	// session/fork Workspace root the tool executes against, so a SINGLE runner
+	// can serve both the main session (rooted at the configured workspace) and a
+	// forked child (rooted at an isolated temp base OUTSIDE that configured root).
+	// Implementations MUST honor a workdir outside their configured root and MUST
+	// NOT confine/reject it — fork isolation depends on this. An EMPTY workdir
+	// falls back to the runner's own configured root, so a runner can still be
+	// used standalone.
+	Run(ctx context.Context, command, workdir string) (CommandResult, error)
 }
 
 // CommandResult is the outcome of a CommandRunner.Run invocation.
