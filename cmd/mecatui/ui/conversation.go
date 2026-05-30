@@ -16,6 +16,52 @@ type subToolChip struct {
 	isError bool
 }
 
+// maxTeamTrace caps how many trace entries a single team-member lane retains for
+// the expanded view, mirroring maxSubagentTrace. Older entries are dropped once
+// the cap is reached so a long-running member never unbounds the card.
+const maxTeamTrace = 12
+
+// teamTraceKind distinguishes the two flavours of a member-lane trace entry: a
+// forwarded message line versus a tool chip. The expanded view renders messages
+// as clamped prose and tools as glyph+name chips.
+type teamTraceKind int
+
+const (
+	teamTraceMessage teamTraceKind = iota // a forwarded member message line
+	teamTraceTool                         // a member tool call (name + ok/error glyph)
+)
+
+// teamTrace is one capped entry in a member lane's trace: either a message line
+// (kind=teamTraceMessage, text set) or a tool chip (kind=teamTraceTool, name +
+// detail + isError set). detail is the server-bounded arg/result preview shown
+// next to the chip in the expanded view. All text is bounded server-side; the ui
+// still sanitizes it.
+type teamTrace struct {
+	kind    teamTraceKind
+	text    string // message text (teamTraceMessage)
+	name    string // tool name (teamTraceTool)
+	detail  string // bounded arg/result preview (teamTraceTool)
+	isError bool   // tool errored (teamTraceTool)
+}
+
+// teamLane is the live projection of one team member's activity, accumulated from
+// the team.member events tagged with that member's name. It holds the member's
+// stable roster metadata (mutating / lead), its current tool or state label, a
+// running token usage, and a capped trace of message lines + tool chips. It never
+// holds unbounded member content — the server caps every preview and the trace is
+// capped at maxTeamTrace.
+type teamLane struct {
+	name     string
+	mutating bool
+	lead     bool
+
+	current   string // last tool name run, or "" when none yet
+	toolCount int
+	usage     client.Usage
+	trace     []teamTrace
+	done      bool // the member reported its terminal result
+}
+
 // blockKind classifies a scrollback block so the renderer knows how to style it.
 type blockKind int
 
@@ -71,6 +117,20 @@ type block struct {
 	subStop       string
 	subDurationMs int64
 	subDone       bool
+
+	// Team fields (attached to a Team tool block): the BOUNDED projection of an
+	// in-process team's run. team is true once a team.start has been attributed to
+	// this block; teamLanes are the per-member lanes in roster order (the order the
+	// model formed the team), looked up by name when routing team.member events;
+	// teamRounds/teamStop/teamUsage are the resolved end stats (teamDone gates
+	// them). Member content lives in each lane's capped trace; nothing here enters
+	// the parent conversation.
+	team       bool
+	teamLanes  []teamLane
+	teamRounds int
+	teamStop   string
+	teamUsage  client.Usage
+	teamDone   bool
 
 	// Hook-block fields (blockHook): the structured phase/tool/decision used to
 	// render a hook notice distinctly from a compaction notice and colour a
@@ -239,6 +299,155 @@ func (c *conversation) setSubagentEnd(parentCallID string, usage client.Usage, t
 	b.subToolCount = toolCount
 	b.subStop = stop
 	b.subDurationMs = durationMs
+	return true
+}
+
+// teamBlock returns the Team tool block whose toolID matches parentCallID, or nil
+// if none. Matching is by id only — the SAME contract as resolveTool/subagentBlock
+// — so a team.* event is attributed to its originating Team card even with several
+// tool cards interleaved. It scans from the end so the most recent match wins.
+func (c *conversation) teamBlock(parentCallID string) *block {
+	for i := len(c.blocks) - 1; i >= 0; i-- {
+		b := &c.blocks[i]
+		if b.kind == blockTool && b.toolID == parentCallID {
+			return b
+		}
+	}
+	return nil
+}
+
+// setTeamStart marks the Team block matching parentCallID as a team and seeds its
+// per-member lanes from the roster (in roster order). Returns false when no
+// matching block exists.
+func (c *conversation) setTeamStart(parentCallID string, roster []client.TeamMemberSpec) bool {
+	b := c.teamBlock(parentCallID)
+	if b == nil {
+		return false
+	}
+	b.team = true
+	b.teamLanes = make([]teamLane, 0, len(roster))
+	for _, m := range roster {
+		b.teamLanes = append(b.teamLanes, teamLane{
+			name:     m.Name,
+			mutating: m.Mutating,
+			lead:     m.Lead,
+		})
+	}
+	return true
+}
+
+// lane returns a pointer to the lane for member, creating one (appended in
+// arrival order) if the roster did not list it — so a team.member event is never
+// dropped just because team.start was missed or the roster was partial.
+func (b *block) lane(member string) *teamLane {
+	for i := range b.teamLanes {
+		if b.teamLanes[i].name == member {
+			return &b.teamLanes[i]
+		}
+	}
+	b.teamLanes = append(b.teamLanes, teamLane{name: member})
+	return &b.teamLanes[len(b.teamLanes)-1]
+}
+
+// addTeamMember routes one team.member projection to its member lane on the Team
+// block matching parentCallID, accumulating per the inner kind: a message.delta
+// appends/extends a message trace line; a tool.call sets the lane's current tool
+// and appends a (pending) tool chip; a tool.result finalises the chip's error
+// state; a turn.end/result carries usage and (for result) marks the lane done.
+// The trace is capped at maxTeamTrace (oldest entries dropped). Returns false when
+// no matching Team block exists.
+func (c *conversation) addTeamMember(msg client.TeamMsg) bool {
+	b := c.teamBlock(msg.ParentCallID)
+	if b == nil {
+		return false
+	}
+	b.team = true
+	ln := b.lane(msg.Member)
+	switch msg.InnerKind {
+	case "message.delta":
+		ln.appendMessage(msg.Text)
+	case "tool.call":
+		ln.current = msg.ToolName
+		ln.toolCount++
+		ln.appendTool(msg.ToolName, msg.Detail, false)
+	case "tool.result":
+		ln.markToolResult(msg.ToolName, msg.Detail, msg.IsError)
+	case "turn.end":
+		ln.usage = sumUsage(ln.usage, msg.Usage)
+	case "result":
+		ln.done = true
+		ln.current = ""
+		if msg.Usage != (client.Usage{}) {
+			ln.usage = sumUsage(ln.usage, msg.Usage)
+		}
+		if msg.Text != "" {
+			ln.appendMessage(msg.Text)
+		}
+	}
+	return true
+}
+
+// appendMessage adds a member message line to the lane trace. Consecutive
+// message.delta fragments coalesce onto the trailing message entry (so streamed
+// text reads as one line, not a chip storm); a new line is started when the last
+// entry is a tool chip. The trace stays capped at maxTeamTrace.
+func (ln *teamLane) appendMessage(text string) {
+	if text == "" {
+		return
+	}
+	if n := len(ln.trace); n > 0 && ln.trace[n-1].kind == teamTraceMessage {
+		ln.trace[n-1].text += text
+		return
+	}
+	ln.pushTrace(teamTrace{kind: teamTraceMessage, text: text})
+}
+
+// appendTool adds a tool chip (pending; error + result detail resolved later by
+// markToolResult). detail here is the call's bounded arg preview.
+func (ln *teamLane) appendTool(name, detail string, isError bool) {
+	ln.pushTrace(teamTrace{kind: teamTraceTool, name: name, detail: detail, isError: isError})
+}
+
+// markToolResult finalises the most recent matching pending tool chip's error
+// state, and replaces its detail with the result preview when one is provided (a
+// result preview is more informative than the call's arg preview; an empty result
+// detail keeps the arg preview). If no matching pending chip is found (e.g. a
+// dropped tool.call), it appends a resolved chip so a result is never silently lost.
+func (ln *teamLane) markToolResult(name, detail string, isError bool) {
+	for i := len(ln.trace) - 1; i >= 0; i-- {
+		t := &ln.trace[i]
+		if t.kind == teamTraceTool && t.name == name {
+			t.isError = isError
+			if detail != "" {
+				t.detail = detail
+			}
+			return
+		}
+	}
+	ln.appendTool(name, detail, isError)
+}
+
+// pushTrace appends a trace entry and enforces the per-lane cap, dropping the
+// oldest entries once it overflows.
+func (ln *teamLane) pushTrace(t teamTrace) {
+	ln.trace = append(ln.trace, t)
+	if len(ln.trace) > maxTeamTrace {
+		ln.trace = ln.trace[len(ln.trace)-maxTeamTrace:]
+	}
+}
+
+// setTeamEnd records the resolved end stats (rounds, stop, summed usage) on the
+// Team block matching parentCallID. Returns false when no match.
+func (c *conversation) setTeamEnd(parentCallID string, rounds int, stop string, usage client.Usage) bool {
+	b := c.teamBlock(parentCallID)
+	if b == nil {
+		return false
+	}
+	b.team = true
+	b.teamDone = true
+	b.teamRounds = rounds
+	b.teamStop = stop
+	b.teamUsage = usage
 	return true
 }
 

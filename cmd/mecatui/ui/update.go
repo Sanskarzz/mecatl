@@ -122,6 +122,9 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.SubagentMsg:
 		m.applySubagent(msg)
 		return m, m.afterEvent()
+	case client.TeamMsg:
+		m.applyTeam(msg)
+		return m, m.afterEvent()
 	case client.CompactionMsg:
 		m.conv.addNotice("history compacted" + suffix(msg.Text))
 		return m, m.afterEvent()
@@ -152,6 +155,21 @@ func (m *Model) applySubagent(msg client.SubagentMsg) {
 		m.conv.addSubagentTool(msg.ParentCallID, msg.ToolName, msg.IsError, msg.ToolCount)
 	case client.SubagentEnd:
 		m.conv.setSubagentEnd(msg.ParentCallID, msg.Usage, msg.ToolCount, msg.Stop, msg.DurationMs)
+	}
+}
+
+// applyTeam attributes a BOUNDED team projection to its Team tool card by
+// ParentCallID (id match, like applySubagent). A miss is silently dropped: the
+// member transcripts never enter the parent conversation either way, so a lost
+// team.* event only costs the lane trace, never correctness or isolation.
+func (m *Model) applyTeam(msg client.TeamMsg) {
+	switch msg.Kind {
+	case client.TeamStart:
+		m.conv.setTeamStart(msg.ParentCallID, msg.Roster)
+	case client.TeamMember:
+		m.conv.addTeamMember(msg)
+	case client.TeamEnd:
+		m.conv.setTeamEnd(msg.ParentCallID, msg.Rounds, msg.Stop, msg.Usage)
 	}
 }
 

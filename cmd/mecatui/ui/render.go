@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -281,7 +282,14 @@ func (r *renderer) renderTool(b *block, expand bool) string {
 	// JSON args: a goal title plus a live/expanded/resolved status region. The
 	// child's interior (args, results, message text) is isolated by design and is
 	// never shown — only metadata.
-	if b.subagent {
+	if b.team {
+		// A Team card renders its BOUNDED per-member lanes in place of raw JSON
+		// args: a team header plus a live/expanded/resolved region. Member content
+		// is server-bounded and never enters the parent conversation.
+		if tm := r.renderTeam(b, expand); tm != "" {
+			head += "\n" + tm
+		}
+	} else if b.subagent {
 		if sub := r.renderSubagent(b, expand); sub != "" {
 			head += "\n" + sub
 		}
@@ -450,6 +458,266 @@ func wrapChips(chips []string, width int) string {
 		}
 	}
 	return b.String()
+}
+
+// maxTeamMessageLen caps how many runes of a member's forwarded message line show
+// in the expanded lane trace; the server already bounds previews, this is a
+// belt-and-braces clamp so one verbose member can't dominate the card.
+const maxTeamMessageLen = 200
+
+// maxTeamDetailLen caps how many runes of a tool chip's arg/result preview show
+// next to it in the expanded trace. Server-bounded already; this keeps a single
+// chip line scannable.
+const maxTeamDetailLen = 80
+
+// maxTeamLanes caps how many member lanes render inline on the card. A larger
+// roster collapses the overflow into a "· +K more" roll-up line so a big team can
+// never grow the card without limit (a DoS-by-output guard) and stays legible.
+// The remaining members are not lost — they live in the conversation block and a
+// future ctrl+a overlay can surface them all.
+const maxTeamLanes = 6
+
+// maxTeamNameWidth caps the column width member names are padded to for the
+// collapsed lane lines, so the "· <state> · ↑in ↓out" columns line up without one
+// very long name blowing out the gutter.
+const maxTeamNameWidth = 16
+
+// teamGlyph is the per-member state glyph (glyph-not-colour-only): a hollow "○"
+// for a member that has finished its terminal result, a filled "◆" for one still
+// working.
+func teamGlyph(ln *teamLane) string {
+	if ln.done {
+		return "○"
+	}
+	return "◆"
+}
+
+// teamLaneOrder returns lane indices in render order: the lead member(s) first,
+// then the rest in roster (arrival) order. It is a stable sort over an index slice
+// so teamLanes itself is never reordered (event routing stays by name). The lead
+// is thus always anchored at the top regardless of the order the server sent the
+// roster.
+func teamLaneOrder(lanes []teamLane) []int {
+	order := make([]int, len(lanes))
+	for i := range lanes {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		return lanes[order[a]].lead && !lanes[order[b]].lead
+	})
+	return order
+}
+
+// renderTeam renders a Team card's BOUNDED per-member region. It has three states,
+// mirroring the subagent card's live/expanded/resolved language, and shows only
+// server-bounded member content (never the raw member transcript):
+//
+//   - LIVE collapsed (default, team not ended): a team header ("N members") plus a
+//     calm one-line-per-member lane (lead first, columns aligned) —
+//     "◆ <name>[lead] · <current tool or state>… · ↑<in> ↓<out>". Counts are
+//     monotonic and update only as events arrive (no ticker), so a lane never
+//     flickers; an active member's state carries a trailing "…" heartbeat. At most
+//     maxTeamLanes lanes render, with a "· +K more" roll-up for the rest.
+//   - EXPANDED (ctrl+t, same toggle): per member, the capped lane trace — message
+//     lines (clamped) and tool chips (✓/✗ name) with their bounded arg/result
+//     preview — separated by a blank line between members so boundaries are clear.
+//   - RESOLVED (team ended): a muted stat line
+//     "team · <rounds> rounds · ↑<in> ↓<out> · stop:<reason>". The Team tool's
+//     joined summary renders below via the normal result body path.
+//
+// All member-derived text (names, message lines, tool names, previews) is
+// terminal-sanitized before it reaches lipgloss.
+func (r *renderer) renderTeam(b *block, expand bool) string {
+	muted := r.th.Style("muted")
+	var out strings.Builder
+
+	if b.teamDone {
+		out.WriteString(muted.Render(teamResolvedLine(b)))
+		return out.String()
+	}
+
+	out.WriteString(muted.Render(teamHeader(b, expand)))
+
+	order := teamLaneOrder(b.teamLanes)
+	shown := order
+	if len(shown) > maxTeamLanes {
+		shown = order[:maxTeamLanes]
+	}
+	nameW := teamNameWidth(b.teamLanes, shown)
+	for n, idx := range shown {
+		ln := &b.teamLanes[idx]
+		if expand && n > 0 {
+			// A blank line between members' blocks so boundaries read clearly at 3+.
+			out.WriteString("\n")
+		}
+		out.WriteString("\n")
+		out.WriteString(muted.Render(teamLaneLine(ln, nameW)))
+		if expand {
+			if tr := r.renderTeamTrace(ln); tr != "" {
+				out.WriteString("\n")
+				out.WriteString(tr)
+			}
+		}
+	}
+	if extra := len(order) - len(shown); extra > 0 {
+		out.WriteString("\n")
+		out.WriteString(muted.Render(fmt.Sprintf("  · +%d more", extra)))
+	}
+	return out.String()
+}
+
+// teamHeader is the muted lead line summarising the team's shape: the member count
+// and the ctrl+t affordance, whose verb tracks the toggle (trace when collapsed,
+// collapse when expanded). The round count is carried only on team.end, so it is
+// shown on the resolved line rather than fabricated live.
+func teamHeader(b *block, expand bool) string {
+	verb := "ctrl+t trace"
+	if expand {
+		verb = "ctrl+t collapse"
+	}
+	return "team · " + plural(len(b.teamLanes), "member") + " · " + verb
+}
+
+// teamNameWidth is the column width member BARE names are padded to on the
+// collapsed lane lines: the longest shown bare name, capped at maxTeamNameWidth,
+// so the state/usage columns line up across members. The "[lead]" tag is appended
+// AFTER this padded column (never truncated away), so the lead is always
+// unambiguous even when its name is long.
+func teamNameWidth(lanes []teamLane, shown []int) int {
+	w := 0
+	for _, idx := range shown {
+		if n := len([]rune(truncate(sanitizeTerminal(lanes[idx].name), maxTeamNameWidth))); n > w {
+			w = n
+		}
+	}
+	return w
+}
+
+// teamLaneLine is one member's calm, monotonic collapsed status line: a state
+// glyph, a persistent mutating cue, the bare member name (truncated + column-
+// padded) with the "[lead]" tag appended after the column, then the current tool
+// or a derived state label (with a "…" heartbeat while active) and running token
+// totals. No elapsed clock, so it updates only as events arrive.
+func teamLaneLine(ln *teamLane, nameW int) string {
+	name := truncate(sanitizeTerminal(ln.name), maxTeamNameWidth)
+	if pad := nameW - len([]rune(name)); pad > 0 {
+		name += strings.Repeat(" ", pad)
+	}
+	if ln.lead {
+		name += " [lead]"
+	}
+	return fmt.Sprintf("%s %s %s · %s · ↑%s ↓%s",
+		teamGlyph(ln),
+		teamMutCue(ln),
+		name,
+		teamLaneState(ln),
+		humanizeTokens(ln.usage.InputTokens),
+		humanizeTokens(ln.usage.OutputTokens))
+}
+
+// teamMutCue is the PERSISTENT per-member mutating cue (stable roster metadata): a
+// "✎" for a mutating member (one running in an isolated fork with workspace-writing
+// tools) and a space-matched "·" for a read-only member, so a mutating member stays
+// visually distinct even while a tool name fills its state column. It is a fixed
+// glyph-not-colour cue, never derived from the transient state label.
+func teamMutCue(ln *teamLane) string {
+	if ln.mutating {
+		return "✎"
+	}
+	return "·"
+}
+
+// teamLaneState derives a member's current state label for the collapsed line: the
+// running tool name when one is active, "done" once the member reported its
+// terminal result, else "working". An ACTIVE member (not done) gets a trailing "…"
+// heartbeat so a quiet card reads as in-flight rather than stalled (mirroring the
+// "reasoning…" affordance); a done member has no ellipsis. The tool name is
+// sanitized (server-derived). The mutating signal lives in teamMutCue, not here, so
+// it persists once a tool name fills this label.
+func teamLaneState(ln *teamLane) string {
+	if ln.done {
+		return "done"
+	}
+	label := "working"
+	if ln.current != "" {
+		label = sanitizeTerminal(ln.current)
+	}
+	return label + "…"
+}
+
+// renderTeamTrace renders a member lane's expanded trace: message lines (clamped,
+// dim, prefixed "  ") interleaved with tool chips (✓/✗ name) carrying their bounded
+// arg/result preview, in arrival order. A chip with a preview gets its own line
+// ("  ✓ Grep — pattern: foo"); bare chips coalesce onto one wrapped row. Returns
+// "" for an empty trace. All text is sanitized.
+func (r *renderer) renderTeamTrace(ln *teamLane) string {
+	if len(ln.trace) == 0 {
+		return ""
+	}
+	muted := r.th.Style("muted")
+	okStyle := r.th.Style("toolOk")
+	errStyle := r.th.Style("toolErr")
+	nameStyle := r.th.Style("toolName")
+
+	var b strings.Builder
+	var chips []string
+	flush := func() {
+		if len(chips) == 0 {
+			return
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("  " + wrapChips(chips, r.chipContentWidth()))
+		chips = nil
+	}
+	writeLine := func(s string) {
+		flush()
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(s)
+	}
+	for i := range ln.trace {
+		t := &ln.trace[i]
+		switch t.kind {
+		case teamTraceTool:
+			glyph := okStyle.Render("✓")
+			if t.isError {
+				glyph = errStyle.Render("✗")
+			}
+			chip := glyph + " " + nameStyle.Render(sanitizeTerminal(t.name))
+			if detail := sanitizeTerminal(oneLine(t.detail)); detail != "" {
+				// A chip with a preview gets a dedicated line so its detail is readable.
+				writeLine("  " + chip + muted.Render(" — "+truncate(detail, maxTeamDetailLen)))
+			} else {
+				chips = append(chips, chip)
+			}
+		case teamTraceMessage:
+			writeLine("  " + muted.Render(truncate(sanitizeTerminal(oneLine(t.text)), maxTeamMessageLen)))
+		}
+	}
+	flush()
+	return b.String()
+}
+
+// teamResolvedLine is the muted one-line summary shown once the team run has
+// ended: the round count, summed team token totals, and the stop reason (reusing
+// the subagent stop-label mapping so labels stay consistent).
+func teamResolvedLine(b *block) string {
+	return fmt.Sprintf("team · %s · ↑%s ↓%s · stop:%s",
+		plural(b.teamRounds, "round"),
+		humanizeTokens(b.teamUsage.InputTokens),
+		humanizeTokens(b.teamUsage.OutputTokens),
+		subagentStopLabel(b.teamStop))
+}
+
+// oneLine collapses any internal newlines/tabs in a member message preview to
+// single spaces so a multi-line forwarded fragment stays a single lane line.
+func oneLine(s string) string {
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == '\t'
+	}), " ")
 }
 
 // subagentStopLabel maps a child run's raw stop reason to the compact label shown

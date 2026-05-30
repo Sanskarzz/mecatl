@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -92,6 +93,60 @@ func TestEventToMsg(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := EventToMsg(tc.ev)
 			if got != tc.want {
+				t.Errorf("EventToMsg(%s) = %#v, want %#v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEventToMsgTeam covers the three team.* mappers separately because TeamMsg
+// carries a roster slice and so is not comparable with == (the table test uses
+// !=). It asserts each kind's discriminant, attribution ids, and carried fields —
+// including the roster translation to plain TeamMemberSpec values (lead/mutating).
+func TestEventToMsgTeam(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   *mecatlv1.Event
+		want TeamMsg
+	}{
+		{
+			"team.start",
+			&mecatlv1.Event{Type: "team.start", Team: &mecatlv1.Team{
+				ParentCallId: "t1", TeamId: "team-t1", Roster: []*mecatlv1.TeamMemberSpec{
+					{Name: "lead", Role: "coordinator", Lead: true, Mutating: true},
+					{Name: "scout", Role: "researcher"},
+				}}},
+			TeamMsg{Kind: TeamStart, ParentCallID: "t1", TeamID: "team-t1", Roster: []TeamMemberSpec{
+				{Name: "lead", Role: "coordinator", Lead: true, Mutating: true},
+				{Name: "scout", Role: "researcher"},
+			}},
+		},
+		{
+			"team.member",
+			&mecatlv1.Event{Type: "team.member", Team: &mecatlv1.Team{
+				ParentCallId: "t1", TeamId: "team-t1", Member: "scout", InnerKind: "tool.call",
+				ToolName: "Grep", Detail: "pattern: foo", IsError: false,
+				Usage: &mecatlv1.Usage{InputTokens: 50, OutputTokens: 9}}},
+			TeamMsg{Kind: TeamMember, ParentCallID: "t1", TeamID: "team-t1", Member: "scout",
+				InnerKind: "tool.call", ToolName: "Grep", Detail: "pattern: foo",
+				Usage: Usage{InputTokens: 50, OutputTokens: 9}},
+		},
+		{
+			"team.end",
+			&mecatlv1.Event{Type: "team.end", Team: &mecatlv1.Team{
+				ParentCallId: "t1", TeamId: "team-t1", Rounds: 3, Stop: "end_turn",
+				Usage: &mecatlv1.Usage{InputTokens: 4200, OutputTokens: 350}}},
+			TeamMsg{Kind: TeamEnd, ParentCallID: "t1", TeamID: "team-t1", Rounds: 3, Stop: "end_turn",
+				Usage: Usage{InputTokens: 4200, OutputTokens: 350}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := EventToMsg(tc.ev).(TeamMsg)
+			if !ok {
+				t.Fatalf("EventToMsg(%s) = %T, want TeamMsg", tc.name, EventToMsg(tc.ev))
+			}
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("EventToMsg(%s) = %#v, want %#v", tc.name, got, tc.want)
 			}
 		})

@@ -123,6 +123,56 @@ type SubagentMsg struct {
 	DurationMs   int64
 }
 
+// TeamKind discriminates the three team.* event kinds carried by a TeamMsg, so
+// the ui switches on a plain value rather than re-deriving it from the proto.
+type TeamKind string
+
+const (
+	// TeamStart marks a Team run beginning (Roster set).
+	TeamStart TeamKind = "start"
+	// TeamMember marks one forwarded member-session event (Member/InnerKind set,
+	// plus the subset of Text/ToolName/Detail/IsError/Usage relevant to InnerKind).
+	TeamMember TeamKind = "member"
+	// TeamEnd marks a Team run finishing (Rounds/Stop/Usage set).
+	TeamEnd TeamKind = "end"
+)
+
+// TeamMemberSpec is one roster entry forwarded on team.start, as plain data.
+// Mirrors mecatlv1.TeamMemberSpec; carries only member metadata, never content.
+type TeamMemberSpec struct {
+	Name     string
+	Role     string
+	Mutating bool
+	Lead     bool
+}
+
+// TeamMsg is the BOUNDED projection of an in-process team's run, as plain data
+// the ui renders on the Team tool card. Unlike the metadata-only SubagentMsg, a
+// team.member event carries BOUNDED member CONTENT (Text / a capped Detail
+// preview) — the team is meant to be watched. It is still bounded and redacted
+// server-side, and never enters the parent conversation. ParentCallID attributes
+// the msg to the originating Team tool block.
+type TeamMsg struct {
+	Kind         TeamKind
+	ParentCallID string
+	TeamID       string
+	// Roster is set on TeamStart.
+	Roster []TeamMemberSpec
+	// Member / InnerKind and the per-event content are set on TeamMember.
+	Member    string
+	InnerKind string
+	Text      string
+	ToolName  string
+	Detail    string
+	IsError   bool
+	// Rounds / Stop are set on TeamEnd.
+	Rounds int
+	Stop   string
+	// Usage is a member's per-event usage (TeamMember turn.end/result) or, on
+	// TeamEnd, the summed team total.
+	Usage Usage
+}
+
 // CompactionMsg is a muted "history compacted" notice.
 type CompactionMsg struct{ Text string }
 
@@ -190,6 +240,35 @@ func subagentMsg(kind SubagentKind, s *mecatlv1.Subagent) SubagentMsg {
 	}
 }
 
+// teamMsg builds a TeamMsg of the given kind from a proto Team payload (nil-safe
+// via the generated getters). It is the single translation point for the three
+// team.* event kinds; the roster is converted to plain TeamMemberSpec values.
+func teamMsg(kind TeamKind, t *mecatlv1.Team) TeamMsg {
+	msg := TeamMsg{
+		Kind:         kind,
+		ParentCallID: t.GetParentCallId(),
+		TeamID:       t.GetTeamId(),
+		Member:       t.GetMember(),
+		InnerKind:    t.GetInnerKind(),
+		Text:         t.GetText(),
+		ToolName:     t.GetToolName(),
+		Detail:       t.GetDetail(),
+		IsError:      t.GetIsError(),
+		Rounds:       int(t.GetRounds()),
+		Stop:         t.GetStop(),
+		Usage:        usageFrom(t.GetUsage()),
+	}
+	for _, r := range t.GetRoster() {
+		msg.Roster = append(msg.Roster, TeamMemberSpec{
+			Name:     r.GetName(),
+			Role:     r.GetRole(),
+			Mutating: r.GetMutating(),
+			Lead:     r.GetLead(),
+		})
+	}
+	return msg
+}
+
 // usageFrom converts a proto Usage (nil-safe) to the plain struct.
 func usageFrom(u *mecatlv1.Usage) Usage {
 	if u == nil {
@@ -247,6 +326,12 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 		return subagentMsg(SubagentTool, ev.GetSubagent())
 	case "subagent.end":
 		return subagentMsg(SubagentEnd, ev.GetSubagent())
+	case "team.start":
+		return teamMsg(TeamStart, ev.GetTeam())
+	case "team.member":
+		return teamMsg(TeamMember, ev.GetTeam())
+	case "team.end":
+		return teamMsg(TeamEnd, ev.GetTeam())
 	case "compaction":
 		return CompactionMsg{Text: ev.GetText()}
 	case "result":
