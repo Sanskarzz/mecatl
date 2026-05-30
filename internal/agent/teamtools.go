@@ -42,6 +42,23 @@ func MemberTools(t *team.Team, self string, hooks port.HookRunner) []tool.Tool {
 	}
 }
 
+// MemberToolNames returns the set of coordination-tool names MemberTools installs
+// into every member's catalog. These tools report ReadOnly() == false because they
+// mutate TEAM state, but they NEVER touch the workspace, so they are safe for a
+// read-only (base-sharing) member. The supervisor uses this set to distinguish a
+// member's coordination tools from genuine WORKSPACE-mutating tools (Edit / Write /
+// non-read-only Bash) when it enforces the read-only-member invariant in AddMember.
+// It is kept in lock-step with MemberTools by construction: it derives the names
+// from MemberTools over a throwaway team.
+func MemberToolNames() map[string]struct{} {
+	tools := MemberTools(team.New(""), "", nil)
+	set := make(map[string]struct{}, len(tools))
+	for _, t := range tools {
+		set[t.Spec().Name] = struct{}{}
+	}
+	return set
+}
+
 // fireTeamGate fires a best-effort team lifecycle gate hook and reports whether the
 // action is vetoed (Block) along with the veto message. A nil runner or a hook
 // error never vetoes (fail-open: a broken hook must not wedge coordination).

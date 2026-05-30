@@ -122,6 +122,33 @@ func NewEngine(deps Deps) *Engine {
 	return &Engine{deps: deps}
 }
 
+// catalogToolInfo is a (name, read-only) summary of one tool in an Engine's
+// catalog. The supervisor uses it to verify a member's tool set without
+// type-asserting concrete tool types (which would require importing an adapter,
+// breaking the layering rule).
+type catalogToolInfo struct {
+	name     string
+	readOnly bool
+}
+
+// catalogTools returns a (name, read-only) summary of every tool in the Engine's
+// catalog, or nil if the Engine carries no catalog. It is the read-only seam the
+// Supervisor uses to enforce the read-only-member / workspace-mutating-tool
+// invariant (see Supervisor.AddMember). It deliberately exposes only the
+// name+ReadOnly bits, never the concrete tools, keeping the agent package free of
+// any adapter dependency.
+func (e *Engine) catalogTools() []catalogToolInfo {
+	if e.deps.Catalog == nil {
+		return nil
+	}
+	tools := e.deps.Catalog.Tools()
+	out := make([]catalogToolInfo, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, catalogToolInfo{name: t.Spec().Name, readOnly: t.ReadOnly()})
+	}
+	return out
+}
+
 // Run is the handle to one in-flight prompt. It exposes the Event stream plus the
 // out-of-band controls the bidi API needs (Approve resolves a permission.ask;
 // Cancel aborts the run). The Events channel is closed exactly once, when the run

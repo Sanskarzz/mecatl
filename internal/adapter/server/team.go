@@ -13,6 +13,25 @@ import (
 // in Config — agent teams are an opt-in capability the composition root enables.
 var ErrTeamsDisabled = errors.New("server: agent teams are not enabled")
 
+// ErrTeamRunning is returned when an operation is rejected because the team is
+// already running: a second concurrent RunTeam, or a SpawnTeammate after the team
+// has started. It maps to codes.FailedPrecondition.
+var ErrTeamRunning = errors.New("server: team is already running")
+
+// teamPhase is a team's lifecycle phase in the registry, guarded by Service.mu. A
+// team is created on CreateTeam, transitions atomically to running on RunTeam
+// (rejecting a second RunTeam and any SpawnTeammate), and to done when RunTeam
+// returns. The phase serialises access to the Supervisor's unsynchronised
+// members/order maps: only one RunTeam may drive a team, and no member may be
+// spawned once driving has begun.
+type teamPhase int
+
+const (
+	teamCreated teamPhase = iota
+	teamRunning
+	teamDone
+)
+
 // MemberEngineFactory builds a team member's Engine, binding it to the shared team
 // (so the member's catalog includes that team's coordination tools) and shaping it
 // from the member spec (read-only base vs mutating tools). The composition root
@@ -23,9 +42,10 @@ type MemberEngineFactory func(t *team.Team, spec agent.MemberSpec) *agent.Engine
 // teamState couples a team's shared coordination aggregate with the supervisor
 // that drives it and the base workspace it was created over.
 type teamState struct {
-	team *team.Team
-	sup  *agent.Supervisor
-	base string
+	team  *team.Team
+	sup   *agent.Supervisor
+	base  string
+	phase teamPhase
 }
 
 // CreateTeam allocates a new agent team over the given base workspace and returns
@@ -72,12 +92,20 @@ func (s *Service) lookupTeam(id string) (*teamState, error) {
 }
 
 // SpawnTeammate enrols a member in a team (before RunTeam) and returns its roster
-// entry. A Mutating member requires a configured Forker.
+// entry. A Mutating member requires a configured Forker. It is rejected with
+// ErrTeamRunning once the team has started running: AddMember mutates the
+// Supervisor's unsynchronised member maps, which the in-flight RunTeam is reading.
 func (s *Service) SpawnTeammate(ctx context.Context, teamID string, spec agent.MemberSpec) (team.Member, error) {
 	ts, err := s.lookupTeam(teamID)
 	if err != nil {
 		return team.Member{}, err
 	}
+	s.mu.Lock()
+	if ts.phase != teamCreated {
+		s.mu.Unlock()
+		return team.Member{}, fmt.Errorf("%w: cannot spawn into a team that has started", ErrTeamRunning)
+	}
+	s.mu.Unlock()
 	if err := ts.sup.AddMember(ctx, spec); err != nil {
 		return team.Member{}, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
@@ -113,6 +141,23 @@ func (s *Service) RunTeam(ctx context.Context, teamID string, sink func(agent.Te
 	if err != nil {
 		return agent.TeamOutcome{}, err
 	}
+	// Atomically claim the team for this run. A second concurrent RunTeam (or one
+	// after a completed run) is rejected — the Supervisor's member state is not safe
+	// to drive twice. The transition is guarded by Service.mu so two callers race to
+	// claim exactly one wins.
+	s.mu.Lock()
+	if ts.phase != teamCreated {
+		s.mu.Unlock()
+		return agent.TeamOutcome{}, fmt.Errorf("%w: %q", ErrTeamRunning, teamID)
+	}
+	ts.phase = teamRunning
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		ts.phase = teamDone
+		s.mu.Unlock()
+	}()
 	return ts.sup.Run(ctx, sink), nil
 }
 

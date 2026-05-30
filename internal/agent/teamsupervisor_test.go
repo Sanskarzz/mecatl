@@ -140,6 +140,141 @@ func TestSupervisorTwoMemberFlow(t *testing.T) {
 	}
 }
 
+// TestSupervisorStuckTaskQuiescesNoSpin asserts Fix E's stuck-task handling: a
+// worker claims a task but its mock NEVER calls CompleteTask and the run then ends
+// (the worker stops being scheduled). The team must NOT dead-spin to maxRounds; the
+// stopped worker's task is released back to pending and, with no member left to
+// claim it, the next round plans no work and the team stops well under the cap.
+func TestSupervisorStuckTaskQuiescesNoSpin(t *testing.T) {
+	tm := team.New("stuck")
+
+	// The lead adds one task in round 0, then only ever emits text.
+	addTask := session.NewToolCall("l1", "AddTask",
+		json.RawMessage(`{"description":"do the thing"}`))
+	leadProv := mockllm.New(
+		mockllm.ToolCallTurn(addTask),
+		mockllm.TextTurn("delegated"),
+		mockllm.TextTurn("idle"),
+		mockllm.TextTurn("idle"),
+		mockllm.TextTurn("idle"),
+	)
+	// The worker claims (auto-claimed by the supervisor) and just reports text —
+	// it NEVER calls CompleteTask, leaving its claimed task in_progress.
+	workerProv := mockllm.New(
+		mockllm.TextTurn("working but never completing"),
+		mockllm.TextTurn("still not done"),
+		mockllm.TextTurn("nope"),
+		mockllm.TextTurn("nope"),
+		mockllm.TextTurn("nope"),
+	)
+
+	providers := map[string]*mockllm.Provider{"lead": leadProv, "worker": workerProv}
+	maxRounds := 8
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		memberFactory(t, tm, providers), agent.WithMaxRounds(maxRounds))
+
+	ctx := context.Background()
+	if err := sup.AddMember(ctx, agent.MemberSpec{
+		Name: "lead", Lead: true, InitialPrompt: "delegate work",
+	}); err != nil {
+		t.Fatalf("AddMember(lead): %v", err)
+	}
+	if err := sup.AddMember(ctx, agent.MemberSpec{Name: "worker"}); err != nil {
+		t.Fatalf("AddMember(worker): %v", err)
+	}
+
+	out := sup.Run(ctx, nil)
+
+	// The team must not run the full cap: once the worker has claimed once and gone
+	// idle (no message, no new claimable task since it still holds one), rounds plan
+	// no work and the run stops.
+	if out.Rounds >= maxRounds {
+		t.Errorf("team spun to the round cap (rounds=%d, cap=%d); a stuck task should not dead-spin",
+			out.Rounds, maxRounds)
+	}
+	// A task left in_progress (never completed) means the team is NOT genuinely
+	// quiescent — Quiescent distinguishes completion from a stuck dependency.
+	if out.Quiescent {
+		t.Errorf("team reported quiescent, but a task was never completed: %+v", tm.Tasks())
+	}
+	tasks := tm.Tasks()
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %+v, want exactly one", tasks)
+	}
+	// The one task ends pending or in_progress — never completed (nobody completed
+	// it). It must not be stuck wedging the loop forever, which the round-cap check
+	// above guarantees.
+	if tasks[0].State == team.TaskCompleted {
+		t.Errorf("task state = %s, want it never completed", tasks[0].State)
+	}
+}
+
+// TestSupervisorMemberHoldsAtMostOneTask asserts Fix E's single-claim bound: a
+// worker that claims a task but does not complete it is NOT auto-claimed a second
+// task in a later round. The team has two tasks and one worker; with the worker
+// never completing, it must hold at most one in_progress task at a time, leaving
+// the second pending.
+func TestSupervisorMemberHoldsAtMostOneTask(t *testing.T) {
+	tm := team.New("oneclaim")
+	// Two independent tasks seeded directly on the team so the worker is the only
+	// claimant and there is no lead to interfere.
+	if _, err := tm.CreateTask("task A"); err != nil {
+		t.Fatalf("CreateTask A: %v", err)
+	}
+	if _, err := tm.CreateTask("task B"); err != nil {
+		t.Fatalf("CreateTask B: %v", err)
+	}
+
+	// The worker just emits text every round; it never completes its claim.
+	workerProv := mockllm.New(
+		mockllm.TextTurn("r1"),
+		mockllm.TextTurn("r2"),
+		mockllm.TextTurn("r3"),
+		mockllm.TextTurn("r4"),
+	)
+	providers := map[string]*mockllm.Provider{"worker": workerProv}
+
+	// A sink that, after each round's events, checks the team never has two
+	// in_progress tasks assigned to the worker. Run serialises sink calls.
+	var maxInProgress int
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		memberFactory(t, tm, providers), agent.WithMaxRounds(6))
+
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "worker"}); err != nil {
+		t.Fatalf("AddMember(worker): %v", err)
+	}
+
+	sup.Run(context.Background(), func(agent.TeamEvent) {
+		n := 0
+		for _, tk := range tm.Tasks() {
+			if tk.State == team.TaskInProgress && tk.Assignee == "worker" {
+				n++
+			}
+		}
+		if n > maxInProgress {
+			maxInProgress = n
+		}
+	})
+
+	if maxInProgress > 1 {
+		t.Errorf("worker held %d in-progress tasks at once, want at most 1", maxInProgress)
+	}
+	// Exactly one task should ever have been claimed (the worker never frees it), so
+	// the other stays pending.
+	var pending, inProgress int
+	for _, tk := range tm.Tasks() {
+		switch tk.State {
+		case team.TaskPending:
+			pending++
+		case team.TaskInProgress:
+			inProgress++
+		}
+	}
+	if inProgress != 1 || pending != 1 {
+		t.Errorf("task split = %d in_progress / %d pending, want 1/1 (single-claim bound)", inProgress, pending)
+	}
+}
+
 // recordingForker is a fake tool.WorkspaceForker that hands out in-memory
 // workspaces and records the fork labels and cleanup calls.
 type recordingForker struct {
@@ -204,5 +339,85 @@ func TestSupervisorRequiresForkerForMutatingMember(t *testing.T) {
 	err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "impl", Mutating: true})
 	if err == nil {
 		t.Fatal("AddMember of a Mutating member without a forker should fail")
+	}
+}
+
+// fakeMutatingTool is a stand-in workspace-mutating tool: it reports
+// ReadOnly()==false and carries an arbitrary name (e.g. "Edit"). It lets the team
+// tests assert the supervisor's catalog inspection without importing the
+// adapter-layer concrete tool types (which the layering rule forbids).
+type fakeMutatingTool struct{ name string }
+
+func (f fakeMutatingTool) Spec() tool.ToolSpec {
+	return tool.ToolSpec{Name: f.name, Description: f.name, Schema: json.RawMessage(`{"type":"object"}`)}
+}
+func (fakeMutatingTool) ReadOnly() bool { return false }
+func (fakeMutatingTool) Execute(_ context.Context, c session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+	return session.NewToolResult(c.ID, "ok"), nil
+}
+
+// catalogFactory builds a member Engine whose catalog is exactly the supplied
+// tools plus the member's coordination tools — the seam Fix A's tests drive.
+func catalogFactory(t *testing.T, tm *team.Team, extra ...tool.Tool) agent.MemberEngine {
+	t.Helper()
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}})
+	return func(spec agent.MemberSpec) *agent.Engine {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		for _, tl := range extra {
+			cat.MustRegister(tl)
+		}
+		return agent.NewEngine(agent.Deps{
+			LLM:     mockllm.New(mockllm.TextTurn("x")),
+			Catalog: cat,
+			Policy:  allow,
+			Model:   "mock",
+		})
+	}
+}
+
+// TestSupervisorRejectsReadOnlyMemberWithMutatingTool asserts Fix A: a read-only
+// (base-sharing) member whose factory hands back a WORKSPACE-mutating tool is
+// rejected by AddMember — the supervisor is authoritative and will not let a
+// base-sharing member corrupt the shared workspace.
+func TestSupervisorRejectsReadOnlyMemberWithMutatingTool(t *testing.T) {
+	tm := team.New("t")
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		catalogFactory(t, tm, fakeMutatingTool{name: "Edit"}))
+	err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "ro"})
+	if err == nil {
+		t.Fatal("AddMember of a read-only member with a workspace-mutating tool should be rejected")
+	}
+	if !strings.Contains(err.Error(), "Edit") {
+		t.Errorf("error %q should name the offending tool", err)
+	}
+	// The rejected member must not linger on the roster.
+	if got := tm.Members(); len(got) != 0 {
+		t.Errorf("roster = %v, want empty after rejection", got)
+	}
+}
+
+// TestSupervisorAcceptsReadOnlyMemberWithCoordinationTools asserts the CRUCIAL
+// nuance: the coordination tools report ReadOnly()==false but only mutate TEAM
+// state, so a read-only member carrying just those is ACCEPTED.
+func TestSupervisorAcceptsReadOnlyMemberWithCoordinationTools(t *testing.T) {
+	tm := team.New("t")
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), catalogFactory(t, tm))
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "ro"}); err != nil {
+		t.Fatalf("read-only member with only coordination tools should be accepted: %v", err)
+	}
+}
+
+// TestSupervisorAcceptsMutatingMemberWithMutatingTool asserts a Mutating member —
+// which runs in its own isolated fork — MAY carry the same workspace-mutating tool.
+func TestSupervisorAcceptsMutatingMemberWithMutatingTool(t *testing.T) {
+	tm := team.New("t")
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		catalogFactory(t, tm, fakeMutatingTool{name: "Edit"}),
+		agent.WithForker(&recordingForker{}))
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "impl", Mutating: true}); err != nil {
+		t.Fatalf("mutating member with a workspace-mutating tool should be accepted: %v", err)
 	}
 }

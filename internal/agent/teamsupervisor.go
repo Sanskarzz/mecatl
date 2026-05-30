@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
-	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/port"
@@ -40,6 +42,13 @@ import (
 
 // defaultMaxRounds bounds a team Run so a non-converging team cannot loop forever.
 const defaultMaxRounds = 24
+
+// defaultTeamConcurrency bounds how many member turns run at once within a single
+// scheduling round, mirroring fork.go's defaultForkConcurrency. Running every
+// planned member concurrently is the point of a round, but it is also N times the
+// resource cost, so a worker limit keeps it bounded. Override with
+// WithTeamConcurrency.
+const defaultTeamConcurrency = 4
 
 // TeamEvent tags a member session Event with the member that produced it, for the
 // multiplexed team event stream the caller observes.
@@ -85,11 +94,12 @@ type Supervisor struct {
 	forker  tool.WorkspaceForker
 	factory MemberEngine
 
-	limits    session.Limits
-	mode      session.PermissionMode
-	maxRounds int
-	idPrefix  string
-	hooks     port.HookRunner
+	limits      session.Limits
+	mode        session.PermissionMode
+	maxRounds   int
+	concurrency int
+	idPrefix    string
+	hooks       port.HookRunner
 
 	members map[string]*memberRT
 	order   []string
@@ -149,6 +159,17 @@ func WithTeamHooks(h port.HookRunner) SupervisorOption {
 	return func(s *Supervisor) { s.hooks = h }
 }
 
+// WithTeamConcurrency bounds how many member turns run simultaneously within a
+// scheduling round (default defaultTeamConcurrency). A non-positive value is
+// ignored.
+func WithTeamConcurrency(n int) SupervisorOption {
+	return func(s *Supervisor) {
+		if n > 0 {
+			s.concurrency = n
+		}
+	}
+}
+
 // WithMemberSessionPrefix sets the prefix used to derive member session ids
 // (default "team"). Ids are of the form "<prefix>-<member>".
 func WithMemberSessionPrefix(p string) SupervisorOption {
@@ -173,14 +194,15 @@ func NewSupervisor(t *team.Team, base tool.Workspace, factory MemberEngine, opts
 		panic("agent: NewSupervisor requires a non-nil member engine factory")
 	}
 	s := &Supervisor{
-		team:      t,
-		base:      base,
-		factory:   factory,
-		limits:    defaultChildLimits,
-		mode:      session.ModeDefault,
-		maxRounds: defaultMaxRounds,
-		idPrefix:  "team",
-		members:   make(map[string]*memberRT),
+		team:        t,
+		base:        base,
+		factory:     factory,
+		limits:      defaultChildLimits,
+		mode:        session.ModeDefault,
+		maxRounds:   defaultMaxRounds,
+		concurrency: defaultTeamConcurrency,
+		idPrefix:    "team",
+		members:     make(map[string]*memberRT),
 	}
 	for _, o := range opts {
 		o(s)
@@ -207,10 +229,12 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 	var cleanup func() error
 	if spec.Mutating {
 		if s.forker == nil {
+			s.team.RemoveMember(spec.Name)
 			return fmt.Errorf("agent: member %q is Mutating but no WorkspaceForker is configured", spec.Name)
 		}
 		child, cl, err := s.forker.Fork(ctx, s.base, spec.Name)
 		if err != nil {
+			s.team.RemoveMember(spec.Name)
 			return fmt.Errorf("agent: fork workspace for %q: %w", spec.Name, err)
 		}
 		ws, cleanup = child, cl
@@ -221,7 +245,27 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 		if cleanup != nil {
 			_ = cleanup()
 		}
+		s.team.RemoveMember(spec.Name)
 		return fmt.Errorf("agent: member factory returned a nil Engine for %q", spec.Name)
+	}
+
+	// The supervisor is authoritative on the read-only-share / mutating-fork stance:
+	// it chose ws above from spec.Mutating, but the factory builds the Engine's
+	// catalog independently. Verify they agree. A non-Mutating member shares the base
+	// workspace, so it must NOT be handed a WORKSPACE-mutating tool (Edit / Write /
+	// non-read-only Bash) — that would let it corrupt the shared base concurrently
+	// with peers. Team coordination tools report ReadOnly() == false but only mutate
+	// TEAM state, so they are exempted by name.
+	if !spec.Mutating {
+		if bad := workspaceMutatingTools(eng.catalogTools()); len(bad) > 0 {
+			if cleanup != nil {
+				_ = cleanup()
+			}
+			s.team.RemoveMember(spec.Name)
+			return fmt.Errorf("agent: read-only member %q was given workspace-mutating tool(s) %s; "+
+				"a base-sharing member must not be able to mutate the shared workspace (mark it Mutating to run in an isolated fork)",
+				spec.Name, strings.Join(bad, ", "))
+		}
 	}
 
 	sess := session.New(s.sessionID(spec.Name), s.mode, ws.Root(), s.limits, time.Now())
@@ -292,15 +336,19 @@ func (s *Supervisor) Run(ctx context.Context, sink func(TeamEvent)) TeamOutcome 
 			break
 		}
 		rounds++
-		var wg sync.WaitGroup
+		// Run the round's planned member turns concurrently, but bounded: a worker
+		// limit caps how many run at once (mirroring fork.go). runTurn returns no
+		// error — a member's failure is captured on its memberRT (stopped) — so the
+		// group's Wait error is always nil and ignored.
+		var g errgroup.Group
+		g.SetLimit(s.concurrency)
 		for _, ti := range plan {
-			wg.Add(1)
-			go func(ti turnInput) {
-				defer wg.Done()
+			g.Go(func() error {
 				s.runTurn(ctx, ti, evCh)
-			}(ti)
+				return nil
+			})
 		}
-		wg.Wait()
+		_ = g.Wait()
 	}
 
 	close(evCh)
@@ -327,7 +375,12 @@ func (s *Supervisor) planRound(r int) []turnInput {
 		}
 		msgs, _ := s.team.Drain(name)
 		var claimed *team.Task
-		if !m.spec.Lead {
+		// Auto-claim the next task only for a non-lead member that is NOT already
+		// holding an in-progress task. Without this guard a member would accumulate
+		// unbounded claims across rounds (one new task per round), starving peers and
+		// holding work it is not yet running. A member finishes (CompleteTask) or
+		// stops (its tasks are released) before it claims again.
+		if !m.spec.Lead && !s.team.InProgressFor(name) {
 			if task, ok, _ := s.team.ClaimNext(name); ok {
 				t := task
 				claimed = &t
@@ -411,6 +464,27 @@ func (s *Supervisor) cleanupAll() {
 // sessionID derives a stable session id for a member.
 func (s *Supervisor) sessionID(name string) session.SessionID {
 	return session.SessionID(fmt.Sprintf("%s-%s", s.idPrefix, name))
+}
+
+// workspaceMutatingTools returns the names of tools in info that mutate the
+// WORKSPACE — i.e. report ReadOnly() == false and are NOT team coordination tools
+// (which mutate only team state). The names are sorted for a deterministic error
+// message. The coordination set is derived from MemberToolNames, so it stays in
+// lock-step with the tools MemberTools actually installs.
+func workspaceMutatingTools(info []catalogToolInfo) []string {
+	coord := MemberToolNames()
+	var bad []string
+	for _, t := range info {
+		if t.readOnly {
+			continue
+		}
+		if _, ok := coord[t.name]; ok {
+			continue
+		}
+		bad = append(bad, t.name)
+	}
+	sort.Strings(bad)
+	return bad
 }
 
 // renderTurnPrompt composes the user-turn text a member sees for its next turn:

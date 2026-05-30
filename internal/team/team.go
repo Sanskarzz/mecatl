@@ -156,6 +156,27 @@ func (t *Team) AddMember(name, agentType string) error {
 	return nil
 }
 
+// RemoveMember drops a member from the roster, clearing its mailbox. It is used to
+// roll back a failed enrolment (e.g. the supervisor rejecting a member after
+// AddMember but before the member is wired). It is a no-op for an unknown member.
+// It does NOT reassign or release tasks the member may hold; a member rolled back
+// during enrolment holds none.
+func (t *Team) RemoveMember(name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.members[name]; !ok {
+		return
+	}
+	delete(t.members, name)
+	delete(t.inbox, name)
+	for i, n := range t.memOrder {
+		if n == name {
+			t.memOrder = append(t.memOrder[:i], t.memOrder[i+1:]...)
+			break
+		}
+	}
+}
+
 // SetMemberSession records the running session id backing a member.
 func (t *Team) SetMemberSession(name string, sid session.SessionID) error {
 	t.mu.Lock()
@@ -298,6 +319,21 @@ func (t *Team) ReleaseTasks(member string) {
 			task.Assignee = ""
 		}
 	}
+}
+
+// InProgressFor reports whether member currently holds at least one in-progress
+// task. The supervisor uses it to avoid auto-claiming a second task for a member
+// that is already working one — bounding a member to a single in-flight claim so a
+// single member cannot drain the whole task list into itself across rounds.
+func (t *Team) InProgressFor(member string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, task := range t.tasks {
+		if task.State == TaskInProgress && task.Assignee == member {
+			return true
+		}
+	}
+	return false
 }
 
 // Tasks returns a copy of the task list in creation order.
