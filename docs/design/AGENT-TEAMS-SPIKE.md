@@ -251,27 +251,30 @@ per member; only the member tag is new.
 Phases 1–4 are the substance and are all offline-testable. Phase 6 is the only one
 touching the generated contract.
 
-## 8a. Known gaps / deferred follow-ups
+## 8a. Status of earlier gaps / remaining follow-ups
 
-These are intentional v1 limitations, not oversights:
+Two gaps flagged in the original spike have since been **closed**:
 
-- **Team RPCs are gRPC-only in v1.** `CreateTeam` / `SpawnTeammate` /
-  `SendTeammateMessage` / `RunTeam` / `ListTeam` / `CleanupTeam` are exposed only on
-  the gRPC surface (`grpc_team.go`); the HTTP/SSE surface (`http.go`) has no team
-  routes. The streaming `RunTeam` fans a multiplexed, per-member-tagged event stream
-  that maps cleanly onto a gRPC server-stream but needs a deliberate SSE framing
-  (member tag per event) before it is worth exposing over HTTP. **HTTP/SSE parity
-  is a deferred follow-up.** (The shared service sentinels — `ErrTeamNotFound`,
-  `ErrFailedPrecondition` — are already mapped in the HTTP error writer so the
-  follow-up only has to add routes, not re-classify errors.)
-- **Roster is spawned after CreateTeam, before RunTeam.** Today the caller must
-  `CreateTeam` → N× `SpawnTeammate` → `RunTeam`, and `SpawnTeammate` is rejected
-  once the team is running (`ErrTeamRunning`). **Folding the initial roster into
-  `CreateTeam`** (an optional `members` field, enrolled atomically at creation) to
-  remove this spawn-after-create ordering requirement is a deferred follow-up; it is
-  a proto change and so out of scope for the polish batch.
+- **HTTP/SSE parity — DONE.** All six team RPCs now have HTTP routes
+  (`http.go`): `POST /v1/teams` (create + optional roster), `POST
+  /v1/teams/{id}/members`, `POST /v1/teams/{id}/messages`, `POST /v1/teams/{id}/run`
+  (a `text/event-stream` of per-member-tagged `TeamEvent` frames, mirroring the
+  `prompt` SSE handler), `GET /v1/teams/{id}`, `DELETE /v1/teams/{id}`. HTTP and gRPC
+  share one JSON wire shape (the same `mecatlv1.*` messages); `ErrTeamsDisabled` /
+  `ErrTeamRunning` → 412 and `ErrTooManyTeams` → 429 mirror the gRPC status codes.
+- **Roster-in-CreateTeam — DONE.** `CreateTeamRequest` carries an optional
+  `repeated TeammateSpec members`, enrolled **atomically** at creation (any member
+  failure abandons the whole team — never registered, no `MaxTeams` slot consumed);
+  `CreateTeamResponse` echoes the enrolled roster. The common path is now a single
+  `CreateTeam` → `RunTeam`. `SpawnTeammate` remains for incremental pre-run adds (and
+  is still rejected once the team is running, `ErrTeamRunning`).
+
+Still deferred (intentional, not oversights):
+
 - **(See also §8.7)** join strategies for mutating-teammate forks and a `TeamStore`
   for restart durability remain deferred.
+- Per-teammate model/agent-definition selection (the factory currently uses the
+  session model for every member) is a natural next step but out of scope here.
 
 ## 9. Risks / open questions
 
