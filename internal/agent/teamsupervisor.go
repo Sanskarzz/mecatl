@@ -118,14 +118,31 @@ type MemberSpec struct {
 	InitialPrompt string
 }
 
-// MemberEngine builds the per-member *Engine from its spec. The composition root
-// supplies it; it is expected to capture the shared *team.Team so the member's
-// catalog includes MemberTools(team, spec.Name) (always available to a member, even
-// under a restrictive agent definition) plus the member's scoped base tools, model,
-// and policy. It MUST consult spec.Mutating: a read-only member shares the base
-// workspace, so it must NOT be given mutating tools (Edit/Write/non-RO Bash) — only
-// a Mutating member (which runs in an isolated fork) may have them.
-type MemberEngine func(spec MemberSpec) *Engine
+// MemberBuild is what the per-member engine factory returns: the constructed
+// *Engine plus the OPTIONAL per-member permission mode resolved from the member's
+// agent definition. An empty Mode means "use the team-wide default" (WithTeamMode /
+// s.mode); a non-empty Mode (e.g. session.ModePlan from a def's permissionMode)
+// overrides it for THIS member's session only. The mode lives here, not on
+// MemberSpec, because the factory is the only place that resolves a def to a mode —
+// keeping the spec a pure request value and the supervisor agnostic of agent
+// definitions (the registry→mode mapping stays in the composition layer).
+type MemberBuild struct {
+	// Engine is the member's loop engine. It must be non-nil; AddMember rejects a
+	// nil Engine with ErrNilEngine.
+	Engine *Engine
+	// Mode is the optional per-member permission mode. Empty => the team default.
+	Mode session.PermissionMode
+}
+
+// MemberEngine builds the per-member engine (and its optional permission mode) from
+// its spec. The composition root supplies it; it is expected to capture the shared
+// *team.Team so the member's catalog includes MemberTools(team, spec.Name) (always
+// available to a member, even under a restrictive agent definition) plus the
+// member's scoped base tools, model, and policy. It MUST consult spec.Mutating: a
+// read-only member shares the base workspace, so it must NOT be given mutating tools
+// (Edit/Write/non-RO Bash) — only a Mutating member (which runs in an isolated fork)
+// may have them.
+type MemberEngine func(spec MemberSpec) MemberBuild
 
 // Supervisor orchestrates one agent team. Build it with NewSupervisor, enrol
 // members with AddMember (before Run), then call Run.
@@ -308,7 +325,8 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 		ws, cleanup = child, cl
 	}
 
-	eng := s.factory(spec)
+	build := s.factory(spec)
+	eng := build.Engine
 	if eng == nil {
 		if cleanup != nil {
 			_ = cleanup()
@@ -336,7 +354,16 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 		}
 	}
 
-	sess := session.New(s.sessionID(spec.Name), s.mode, ws.Root(), s.limits, time.Now())
+	// Per-member permission mode: a member's agent definition may pin a mode (e.g.
+	// permissionMode: plan) via build.Mode. An empty build.Mode falls back to the
+	// team-wide default (s.mode / WithTeamMode). Plan mode hard-denies mutations
+	// (existing invariant), so a plan member is effectively read-only regardless of
+	// its catalog.
+	mode := s.mode
+	if build.Mode != "" {
+		mode = build.Mode
+	}
+	sess := session.New(s.sessionID(spec.Name), mode, ws.Root(), s.limits, time.Now())
 	_ = s.team.SetMemberSession(spec.Name, sess.ID)
 
 	s.members[spec.Name] = &memberRT{spec: spec, engine: eng, ws: ws, cleanup: cleanup, sess: sess}

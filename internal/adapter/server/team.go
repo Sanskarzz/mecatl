@@ -38,12 +38,15 @@ const (
 	teamDone
 )
 
-// MemberEngineFactory builds a team member's Engine, binding it to the shared team
-// (so the member's catalog includes that team's coordination tools) and shaping it
-// from the member spec (read-only base vs mutating tools). The composition root
+// MemberEngineFactory builds a team member's engine (and its optional per-member
+// permission mode), binding it to the shared team (so the member's catalog includes
+// that team's coordination tools) and shaping it from the member spec (read-only
+// base vs mutating tools, the member's agent definition). The composition root
 // supplies it via Config.MemberEngine; CreateTeam adapts it to an agent.MemberEngine
-// by capturing the per-team aggregate.
-type MemberEngineFactory func(t *team.Team, spec agent.MemberSpec) *agent.Engine
+// by capturing the per-team aggregate. Returning agent.MemberBuild (rather than a
+// bare *Engine) is how a def's permissionMode reaches the supervisor's per-member
+// session.
+type MemberEngineFactory func(t *team.Team, spec agent.MemberSpec) agent.MemberBuild
 
 // teamState couples a team's shared coordination aggregate with the supervisor
 // that drives it and the base workspace it was created over.
@@ -78,7 +81,7 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name string, member
 
 	t := team.New(name)
 	base := s.cfg.Workspaces(workspace)
-	factory := func(spec agent.MemberSpec) *agent.Engine { return s.cfg.MemberEngine(t, spec) }
+	factory := func(spec agent.MemberSpec) agent.MemberBuild { return s.cfg.MemberEngine(t, spec) }
 
 	opts := []agent.SupervisorOption{}
 	if s.cfg.Forker != nil {

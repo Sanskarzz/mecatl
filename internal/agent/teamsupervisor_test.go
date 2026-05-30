@@ -24,7 +24,7 @@ import (
 func memberFactory(t *testing.T, tm *team.Team, providers map[string]*mockllm.Provider) agent.MemberEngine {
 	t.Helper()
 	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}})
-	return func(spec agent.MemberSpec) *agent.Engine {
+	return func(spec agent.MemberSpec) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
 			t.Fatalf("memberFactory: no provider scripted for member %q", spec.Name)
@@ -33,13 +33,13 @@ func memberFactory(t *testing.T, tm *team.Team, providers map[string]*mockllm.Pr
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
 		}
-		return agent.NewEngine(agent.Deps{
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
 			LLM:     prov,
 			Catalog: cat,
 			Policy:  allow,
 			Hooks:   hookexec.New(nil),
 			Model:   "mock",
-		})
+		})}
 	}
 }
 
@@ -417,7 +417,7 @@ func (fakeMutatingTool) Execute(_ context.Context, c session.ToolCall, _ tool.Wo
 func catalogFactory(t *testing.T, tm *team.Team, extra ...tool.Tool) agent.MemberEngine {
 	t.Helper()
 	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}})
-	return func(spec agent.MemberSpec) *agent.Engine {
+	return func(spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
@@ -425,12 +425,12 @@ func catalogFactory(t *testing.T, tm *team.Team, extra ...tool.Tool) agent.Membe
 		for _, tl := range extra {
 			cat.MustRegister(tl)
 		}
-		return agent.NewEngine(agent.Deps{
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
 			LLM:     mockllm.New(mockllm.TextTurn("x")),
 			Catalog: cat,
 			Policy:  allow,
 			Model:   "mock",
-		})
+		})}
 	}
 }
 

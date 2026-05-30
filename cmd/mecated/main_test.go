@@ -84,3 +84,75 @@ func TestParseFlagsSkillsDraft(t *testing.T) {
 		t.Errorf("default threshold = %v, want %v", cfg.skillsDraftThreshold, skills.DefaultSimilarityThreshold)
 	}
 }
+
+// TestParseFlagsAgentDefs asserts the Tier 1b agent-definition flags parse into the
+// config: repeatable --agents-dir, the conventional toggle (default ON), the global
+// --subagent-model, and repeatable key=value --model-alias.
+func TestParseFlagsAgentDefs(t *testing.T) {
+	// Defaults: conventional discovery ON (inert when absent), no explicit dirs.
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if !def.agentsConventional {
+		t.Errorf("agentsConventional default = false, want true (on-but-inert)")
+	}
+	if len(def.agentsDirs) != 0 {
+		t.Errorf("agentsDirs default = %v, want empty", def.agentsDirs)
+	}
+
+	cfg, err := parseFlags([]string{
+		"--agents-dir", "/a/one",
+		"--agents-dir", "/a/two",
+		"--agents-conventional=false",
+		"--subagent-model", "cheap-id",
+		"--model-alias", "fast=gpt-4o-mini",
+		"--model-alias", "smart=gpt-5",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if got := []string(cfg.agentsDirs); len(got) != 2 || got[0] != "/a/one" || got[1] != "/a/two" {
+		t.Errorf("agentsDirs = %v, want [/a/one /a/two]", got)
+	}
+	if cfg.agentsConventional {
+		t.Errorf("agentsConventional = true, want false (explicitly disabled)")
+	}
+	if cfg.subagentModel != "cheap-id" {
+		t.Errorf("subagentModel = %q, want cheap-id", cfg.subagentModel)
+	}
+	if cfg.modelAliases["fast"] != "gpt-4o-mini" || cfg.modelAliases["smart"] != "gpt-5" {
+		t.Errorf("modelAliases = %v, want fast=gpt-4o-mini smart=gpt-5", cfg.modelAliases)
+	}
+
+	// A malformed alias (no '=') is a parse error.
+	if _, err := parseFlags([]string{"--model-alias", "bogus"}); err == nil {
+		t.Error("parseFlags(--model-alias bogus) should error on a missing '='")
+	}
+}
+
+// TestAppConfigMapsAgentDefs asserts appConfig threads the agent-def fields onto the
+// shared app.Config.
+func TestAppConfigMapsAgentDefs(t *testing.T) {
+	cfg, err := parseFlags([]string{
+		"--agents-dir", "/x",
+		"--subagent-model", "sub",
+		"--model-alias", "fast=cheap",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	ac := appConfig(cfg, nil, nil)
+	if len(ac.AgentsDirs) != 1 || ac.AgentsDirs[0] != "/x" {
+		t.Errorf("AgentsDirs = %v", ac.AgentsDirs)
+	}
+	if !ac.AgentsConventional {
+		t.Errorf("AgentsConventional = false, want true (default)")
+	}
+	if ac.SubagentModel != "sub" {
+		t.Errorf("SubagentModel = %q", ac.SubagentModel)
+	}
+	if ac.ModelAliases["fast"] != "cheap" {
+		t.Errorf("ModelAliases = %v", ac.ModelAliases)
+	}
+}

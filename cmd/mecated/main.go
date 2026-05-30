@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -38,6 +39,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
@@ -118,6 +120,18 @@ type config struct {
 	// to keep skills strictly opt-in (a trust boundary — see resolve.go / usage.md).
 	skillsDirs         stringList
 	skillsConventional bool
+
+	// Agent definitions (Tier 1): named subagent specialists discovered from
+	// <dir>/<name>.md files. agentsDirs are explicit dirs (repeatable; highest
+	// precedence); agentsConventional adds the conventional project/user locations
+	// (.mecatl/agents, .claude/agents, XDG/user) — ON by default and INERT when no
+	// such dir exists, mirroring the teams/fork "on-but-inert" philosophy. subagentModel
+	// globally overrides the model of every Task/member child that does not pin its
+	// own; modelAliases maps short aliases (sonnet/opus/fast/...) to concrete ids.
+	agentsDirs         stringList
+	agentsConventional bool
+	subagentModel      string
+	modelAliases       keyValueList
 
 	// Skills self-improvement loop (opt-in): when skillsDraftDir is non-empty the
 	// writable SkillDraft tool is registered, writing model-authored candidate
@@ -208,6 +222,36 @@ func (l *stringList) String() string { return strings.Join(*l, ",") }
 
 func (l *stringList) Set(v string) error {
 	*l = append(*l, v)
+	return nil
+}
+
+// keyValueList is a repeatable "key=value" flag.Value collecting into an ordered
+// map. A later occurrence of the same key overrides an earlier one. It backs
+// --model-alias (e.g. --model-alias fast=gpt-4o-mini --model-alias smart=gpt-5).
+type keyValueList map[string]string
+
+func (m keyValueList) String() string {
+	if len(m) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(m))
+	for k, v := range m {
+		parts = append(parts, k+"="+v)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+func (m *keyValueList) Set(v string) error {
+	k, val, ok := strings.Cut(v, "=")
+	k = strings.TrimSpace(k)
+	if !ok || k == "" {
+		return fmt.Errorf("model alias must be key=value, got %q", v)
+	}
+	if *m == nil {
+		*m = keyValueList{}
+	}
+	(*m)[k] = strings.TrimSpace(val)
 	return nil
 }
 
@@ -361,6 +405,10 @@ func appConfig(cfg config, sink port.EventSink, logger port.Logger) app.Config {
 		SkillsConventional:        cfg.skillsConventional,
 		SkillsDraftDir:            cfg.skillsDraftDir,
 		SkillsDraftThreshold:      cfg.skillsDraftThreshold,
+		AgentsDirs:                cfg.agentsDirs,
+		AgentsConventional:        cfg.agentsConventional,
+		SubagentModel:             cfg.subagentModel,
+		ModelAliases:              cfg.modelAliases,
 		CommandsDir:               cfg.commandsDir,
 		EnableCommands:            cfg.enableCommands,
 		EnableFork:                cfg.enableFork,
@@ -418,6 +466,11 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.StringVar(&cfg.skillsDraftDir, "skills-draft-dir", "", "enable the writable SkillDraft tool and set the QUARANTINE directory for model-authored candidate skills. Empty disables the tool. TRUST BOUNDARY: must be OUTSIDE the workspace root (so the model's workspace-confined Write/Edit cannot reach it; fatal otherwise) and disjoint from every --skills-dir (fatal on overlap). Drafts are quarantined (never live); an operator reviews and promotes one with `mecated skills promote --skills-draft-dir <dir> --skills-dir <active> <name>`")
 	fs.Float64Var(&cfg.skillsDraftThreshold, "skills-draft-similarity-threshold", skills.DefaultSimilarityThreshold, "2-gram Jaccard similarity above which a SkillDraft warns of a near-duplicate existing skill (warn-only, does not block)")
+
+	fs.Var(&cfg.agentsDirs, "agents-dir", "directory to discover named agent definitions (subagent specialists) from, laid out as <name>.md with YAML frontmatter (repeatable; highest precedence). A def is reusable as a Task delegate (Task(agent=<name>)) and as a team-member role (AgentType). TRUST BOUNDARY: a def body steers the model like AGENTS.md/CLAUDE.md — point this only at directories you trust")
+	fs.BoolVar(&cfg.agentsConventional, "agents-conventional", true, "also discover agent definitions from the conventional locations: <workspace>/"+agents.ProjectDirMecatl+", <workspace>/"+agents.ProjectDirClaude+", $XDG_CONFIG_HOME/mecatl/agents (or ~/.config/mecatl/agents), and ~/.claude/agents (lower precedence than --agents-dir). ON by default and INERT when no such dir exists (like teams/fork). Pass --agents-conventional=false to disable. TRUST BOUNDARY: same trust class as AGENTS.md/CLAUDE.md")
+	fs.StringVar(&cfg.subagentModel, "subagent-model", "", "global model override applied to every Task/team-member child that does not pin its own model in its definition (the analogue of CLAUDE_CODE_SUBAGENT_MODEL). May be a concrete id or an alias from --model-alias. Empty inherits the parent --model")
+	fs.Var(&cfg.modelAliases, "model-alias", "model alias mapping as name=model-id (repeatable), e.g. --model-alias fast=gpt-4o-mini. Aliases are resolved only in the composition layer; an agent def's `model: <alias>` resolves through this map (then the built-in sonnet/opus/haiku aliases)")
 
 	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "directory of slash-command templates (<name>.md); setting it enables command expansion. Empty + --enable-commands uses the defaults (.mecatl/commands, .claude/commands)")
 	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.mecatl/commands, .claude/commands) when --commands-dir is empty")

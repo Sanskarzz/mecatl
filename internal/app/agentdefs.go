@@ -14,6 +14,7 @@ import (
 	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/prompt"
+	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
@@ -93,6 +94,30 @@ func resolveAlias(cfg Config, def agents.AgentDef, sel string) string {
 	return ""
 }
 
+// resolvePermissionMode maps a def's frontmatter permissionMode string to a
+// domain session.PermissionMode, in the composition layer (the domain never sees
+// the raw string). "default"/empty/unknown => "" (the caller's default — for a team
+// member that means the team-wide WithTeamMode). "plan" and "acceptEdits" map to
+// their domain constants. An unrecognised value warns and falls back to the default.
+//
+// Note (critique B2): plan mode hard-denies mutations (existing invariant), so a
+// plan member is effectively read-only even if Mutating. acceptEdits is meaningful
+// only for a Mutating member (a read-only member has no mutating tools to accept).
+func resolvePermissionMode(def agents.AgentDef) session.PermissionMode {
+	switch strings.TrimSpace(def.PermissionMode) {
+	case "", "default":
+		return "" // caller's default
+	case string(session.ModePlan):
+		return session.ModePlan
+	case string(session.ModeAccept):
+		return session.ModeAccept
+	default:
+		slog.Warn("agent def references an unknown permissionMode; using the default",
+			"agent", def.Name, "mode", def.PermissionMode, "path", def.Path)
+		return ""
+	}
+}
+
 // scopeDiag is one resolution-time diagnostic about a def's catalog scoping. Kind
 // distinguishes the cases the critique (M5) requires be DISTINCT so an operator
 // can tell a typo from a forbidden tool.
@@ -102,21 +127,33 @@ type scopeDiag struct {
 }
 
 // scopedToolNames computes a def's effective, read-only tool NAME set for a
-// Task-routed child, as a pure set operation over the AVAILABLE base tools:
+// Task-routed child (allowMutating == false), as a pure set operation over the
+// AVAILABLE base tools. It is the read-only shim over scopedToolNamesMode; see that
+// for the full algorithm. Task children are unconditionally read-only so
+// Task.ReadOnly() stays honestly true.
+func scopedToolNames(def agents.AgentDef, available map[string]tool.Tool) ([]string, []scopeDiag) {
+	return scopedToolNamesMode(def, available, false)
+}
+
+// scopedToolNamesMode computes a def's effective tool NAME set as a pure set
+// operation over the AVAILABLE base tools:
 //
 //  1. start from def.Tools if non-empty, else every available base tool name;
 //  2. subtract def.DisallowedTools;
-//  3. drop any name not in the available base set (DISTINCT "unknown tool"
+//  3. drop the always-excluded set (Task/Fork/ToolSearch) — the no-nesting /
+//     no-disclosure guard, applied AFTER the allowlist so a def cannot re-add them;
+//  4. drop any name not in the available base set (DISTINCT "unknown tool"
 //     diagnostic — a typo or an MCP/skills tool this Tier-1 call site can't see);
-//  4. drop any mutating (non-read-only) tool — Task children are unconditionally
-//     read-only so Task.ReadOnly() stays honestly true (DISTINCT "not permitted
-//     for Task (read-only)" diagnostic);
-//  5. the always-excluded set (Task/Fork/ToolSearch) is never in `available`, so
-//     it is structurally unreachable.
+//  5. when allowMutating is false, drop any mutating (non-read-only) tool with a
+//     DISTINCT "not permitted (read-only)" diagnostic. When allowMutating is true
+//     (a Mutating team member, which runs in an isolated fork) a def MAY keep
+//     Edit/Write/Bash, so mutating tools survive.
 //
 // available maps an available base tool name to its tool.Tool (used to read
-// ReadOnly()). It returns the kept names (sorted) and the diagnostics.
-func scopedToolNames(def agents.AgentDef, available map[string]tool.Tool) ([]string, []scopeDiag) {
+// ReadOnly()). It returns the kept names (sorted) and the diagnostics. The caller
+// (teams) still appends MemberTools AFTER this — coordination tools bypass the
+// allowlist and this filter entirely.
+func scopedToolNamesMode(def agents.AgentDef, available map[string]tool.Tool, allowMutating bool) ([]string, []scopeDiag) {
 	disallowed := make(map[string]struct{}, len(def.DisallowedTools))
 	for _, d := range def.DisallowedTools {
 		disallowed[d] = struct{}{}
@@ -158,9 +195,10 @@ func scopedToolNames(def agents.AgentDef, available map[string]tool.Tool) ([]str
 			diags = append(diags, scopeDiag{name, "unknown tool (not in the core base set; MCP/skills tools are not scopable in Tier 1); dropped"})
 			continue
 		}
-		if !t.ReadOnly() {
-			// Step 4: Task children are read-only, full stop.
-			diags = append(diags, scopeDiag{name, "tool is workspace-mutating but Task subagents are read-only; dropped"})
+		if !allowMutating && !t.ReadOnly() {
+			// Step 5: read-only call site (Task, or a base-sharing team member); a
+			// workspace-mutating tool is dropped, full stop.
+			diags = append(diags, scopeDiag{name, "tool is workspace-mutating but this call site is read-only; dropped"})
 			continue
 		}
 		kept = append(kept, name)

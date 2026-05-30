@@ -27,17 +27,17 @@ import (
 func teamService(t *testing.T, llm *mockllm.Provider) *server.Service {
 	t.Helper()
 	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}})
-	memberEngine := func(tm *team.Team, spec agent.MemberSpec) *agent.Engine {
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
 		}
-		return agent.NewEngine(agent.Deps{
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
 			LLM:     llm,
 			Catalog: cat,
 			Policy:  allow,
 			Model:   "mock",
-		})
+		})}
 	}
 	// A no-op engine for plain sessions (unused by these team tests).
 	engine := agent.NewEngine(agent.Deps{
@@ -249,12 +249,12 @@ func TestUnknownTeamNotFound(t *testing.T) {
 func teamServiceMaxTeams(t *testing.T, llm *mockllm.Provider, maxTeams int) *server.Service {
 	t.Helper()
 	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}})
-	memberEngine := func(tm *team.Team, spec agent.MemberSpec) *agent.Engine {
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
 			cat.MustRegister(tl)
 		}
-		return agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Model: "mock"})
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Model: "mock"})}
 	}
 	engine := agent.NewEngine(agent.Deps{
 		LLM: mockllm.New(mockllm.TextTurn("x")), Catalog: tool.NewCatalog(), Policy: allow, Model: "mock",

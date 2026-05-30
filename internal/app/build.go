@@ -726,54 +726,126 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvide
 	// is not yet wired from cfg anywhere, so this is an inert (no-op) runner today,
 	// but it is the injection seam once it is.
 	teamHooks := hookexec.New(nil)
-	svcCfg.MemberEngine = buildMemberEngine(cfg, provider, teamHooks)
+	// Resolve the agent-definition registry ONCE and share it with the member
+	// factory, exactly as buildCatalog shares it with the Task tool — ONE registry,
+	// TWO consumers. A member whose spec.AgentType names a def adopts that def's
+	// scoped catalog/model/prompt/permissionMode.
+	agentReg := resolveAgentRegistry(context.Background(), cfg)
+	svcCfg.MemberEngine = buildMemberEngine(cfg, provider, teamHooks, agentReg)
 	svcCfg.Forker = forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
 	svcCfg.TeamHooks = teamHooks
 	slog.Info("agent teams ENABLED (experimental; CreateTeam/SpawnTeammate/RunTeam)")
 }
 
 // buildMemberEngine returns the per-member engine factory the server uses to build
-// each team member's Engine. It mirrors buildChildEngine's allow-all, non-interactive
-// shape but shapes the catalog from the member spec:
+// each team member's engine (and its optional per-member permission mode). It
+// mirrors buildChildEngine's allow-all, non-interactive shape but shapes the catalog
+// from the member spec AND — Tier 1b — from the member's agent definition when
+// spec.AgentType names one in the shared registry.
 //
-//   - Base (always, read-only): Read, Grep, Glob.
-//   - Mutating member only: Edit, Write, and the Bash tool when a command runner is
-//     available. A read-only (base-sharing) member gets NONE of these — the
-//     supervisor's AddMember REJECTS a non-Mutating member whose catalog holds a
-//     workspace-mutating tool, so handing a read-only member Edit/Write/Bash would
-//     fail Spawn.
-//   - Always: the team coordination tools (MemberTools) bound to the shared team and
-//     this member's name, sharing teamHooks with the supervisor.
+// Catalog shaping:
 //
-// It NEVER includes Task or Fork: a member must not recurse or fan out further.
-func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.HookRunner) server.MemberEngineFactory {
-	return func(t *team.Team, spec agent.MemberSpec) *agent.Engine {
+//   - DEFAULT (no/unknown AgentType): the historical member catalog — Read, Grep,
+//     Glob always; plus Edit, Write, and the Bash tool (when a runner is available)
+//     for a Mutating member only.
+//   - DEFINED (known AgentType): the def's tools allowlist ∩ the member's AVAILABLE
+//     base toolset, minus disallowedTools, ALWAYS excluding Task/Fork/ToolSearch.
+//     The available base differs by spec.Mutating: a Mutating member (isolated fork)
+//     may keep Edit/Write/Bash, so the def MAY scope them in; a read-only
+//     (base-sharing) member has mutating tools DROPPED with a diagnostic, so the
+//     supervisor's AddMember backstop (ErrReadOnlyMemberMutating) is never tripped.
+//   - The member's model resolves def.Model > SubagentModel > parent; the def body
+//     composes into the system prompt as the Role; the def's permissionMode maps to
+//     a per-member session mode returned in the MemberBuild.
+//
+// In BOTH cases the team coordination tools (MemberTools) are ALWAYS appended after
+// scoping — they bypass the def allowlist — and Task/Fork are NEVER included (a
+// member must not recurse or fan out further).
+//
+// Unknown AgentType is FORGIVING (the skills/teams philosophy): it logs a warning
+// and falls back to the DEFAULT member catalog/model/mode rather than failing the
+// spawn, so a stale roster reference never wedges a team. (An unknown Task `agent`
+// arg, by contrast, is a model-addressable error — the model can retry; an operator
+// roster entry cannot.)
+func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.HookRunner, reg *agents.Registry) server.MemberEngineFactory {
+	return func(t *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
-		cat.MustRegister(tools.ReadTool{})
-		cat.MustRegister(tools.GrepTool{})
-		cat.MustRegister(tools.GlobTool{})
-		if spec.Mutating {
-			cat.MustRegister(tools.EditTool{})
-			cat.MustRegister(tools.WriteTool{})
-			if runner := buildCommandRunner(cfg); runner != nil {
-				cat.MustRegister(tools.NewBashTool(runner))
+		var (
+			model = cfg.Model
+			pc    = promptConfig(cfg)
+			mode  session.PermissionMode
+		)
+
+		def, defined := lookupMemberDef(reg, spec)
+		if defined {
+			// Scope the def over the member's AVAILABLE base, allowing mutating tools
+			// only for a Mutating member (it runs in an isolated fork).
+			base := baseTaskTools(cfg)
+			names, diags := scopedToolNamesMode(def, base, spec.Mutating)
+			for _, d := range diags {
+				slog.Warn("team member agent def tool scoping",
+					"member", spec.Name, "agent", def.Name, "tool", d.tool, "reason", d.reason, "path", def.Path)
+			}
+			for _, name := range names {
+				cat.MustRegister(base[name])
+			}
+			model = resolveModel(cfg, def)
+			pc = agentPromptConfig(cfg, def)
+			mode = resolvePermissionMode(def)
+			slog.Info("team member adopts agent def",
+				"member", spec.Name, "agent", def.Name, "tools", strings.Join(names, ","),
+				"model", model, "mode", mode, "mutating", spec.Mutating, "path", def.Path)
+		} else {
+			// Default member catalog: read-only base, plus mutating tools for a
+			// Mutating member only.
+			cat.MustRegister(tools.ReadTool{})
+			cat.MustRegister(tools.GrepTool{})
+			cat.MustRegister(tools.GlobTool{})
+			if spec.Mutating {
+				cat.MustRegister(tools.EditTool{})
+				cat.MustRegister(tools.WriteTool{})
+				if runner := buildCommandRunner(cfg); runner != nil {
+					cat.MustRegister(tools.NewBashTool(runner))
+				}
 			}
 		}
+
+		// Team coordination tools ALWAYS, in both branches: they bypass the def
+		// allowlist and are exempt from the read-only-member mutating-tool backstop.
 		for _, mt := range agent.MemberTools(t, spec.Name, teamHooks) {
 			cat.MustRegister(mt)
 		}
 
-		return agent.NewEngine(agent.Deps{
+		eng := agent.NewEngine(agent.Deps{
 			LLM:                 provider,
 			Catalog:             cat,
 			Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
 			Hooks:               hookexec.New(nil),
-			PromptConfig:        promptConfig(cfg),
-			Model:               cfg.Model,
+			PromptConfig:        pc,
+			Model:               model,
 			ContextWindowTokens: defaultContextWindowTokens,
 			CompactionRatio:     defaultCompactionRatio,
 		})
+		return agent.MemberBuild{Engine: eng, Mode: mode}
 	}
+}
+
+// lookupMemberDef resolves spec.AgentType against the registry, returning the def
+// and true on a hit. An empty AgentType or a miss returns false (the caller falls
+// back to the default member catalog); a miss on a NON-empty AgentType also warns,
+// so a stale roster reference is observable without failing the spawn.
+func lookupMemberDef(reg *agents.Registry, spec agent.MemberSpec) (agents.AgentDef, bool) {
+	name := strings.TrimSpace(spec.AgentType)
+	if name == "" || reg == nil {
+		return agents.AgentDef{}, false
+	}
+	def, ok := reg.Get(name)
+	if !ok {
+		slog.Warn("team member references an unknown agent def; using the default member catalog",
+			"member", spec.Name, "agent", name)
+		return agents.AgentDef{}, false
+	}
+	return def, true
 }
 
 // promptConfig builds the system-prompt configuration. The volatile Env values

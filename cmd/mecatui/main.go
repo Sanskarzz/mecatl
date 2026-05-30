@@ -146,10 +146,12 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 
 // embeddedConfig maps the TUI config onto the shared app.Config build contract for
 // the in-process server. It enables the standard default toolset (Bash unless
-// --no-bash, Fork, repo map) and the agent-teams capability (inert until a client
-// drives a team) but leaves the heavier opt-ins (MCP, ToolHive, skills, memory,
-// slash commands, telemetry) off — a focused single-user default. The provider is
-// OpenAI when OPENAI_API_KEY is set, else the offline mock (--mock).
+// --no-bash, Fork, repo map), the agent-teams capability (inert until a client
+// drives a team), and conventional agent-definition discovery (AgentsConventional:
+// true, also inert until a <name>.md exists under a conventional dir), but leaves
+// the heavier opt-ins (MCP, ToolHive, skills, memory, slash commands, telemetry)
+// off — a focused single-user default. The provider is OpenAI when OPENAI_API_KEY
+// is set, else the offline mock (--mock).
 func embeddedConfig(cfg config) app.Config {
 	return app.Config{
 		Workspace:            cfg.workspace,
@@ -169,6 +171,7 @@ func embeddedConfig(cfg config) app.Config {
 		EnableFork:           true,
 		EnableRepoMap:        true,
 		EnableTeams:          true,
+		AgentsConventional:   true,
 	}
 }
 

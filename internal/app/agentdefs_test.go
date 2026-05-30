@@ -99,7 +99,7 @@ func TestScopedToolNamesDropsMutatingForTask(t *testing.T) {
 	}
 	dropped := map[string]bool{}
 	for _, d := range diags {
-		if strings.Contains(d.reason, "Task subagents are read-only") {
+		if strings.Contains(d.reason, "this call site is read-only") {
 			dropped[d.tool] = true
 		}
 	}
