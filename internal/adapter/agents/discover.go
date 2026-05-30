@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	yaml "go.yaml.in/yaml/v3"
+
+	"github.com/stacklok/mecatl/internal/adapter/toolkit"
 )
 
 // AgentFileExt is the conventional extension of an agent-definition file. A def
@@ -180,7 +182,7 @@ func Discover(dir string) ([]AgentDef, []SkipError, error) {
 // catalog-free. An unknown tool name becomes a resolve-time diagnostic in
 // internal/app (against a concrete catalog), never a parse failure.
 func parseAgentDef(raw []byte, path string) (AgentDef, string, []string) {
-	fmText, body, ok := splitFrontmatter(string(raw))
+	fmText, body, ok := toolkit.SplitFrontmatter(string(raw))
 	if !ok {
 		return AgentDef{}, "missing YAML frontmatter (expected a leading '---' delimited block)", nil
 	}
@@ -202,7 +204,7 @@ func parseAgentDef(raw []byte, path string) (AgentDef, string, []string) {
 		notes = append(notes, fmt.Sprintf(
 			"description is %d bytes; truncated to the always-in-context cap of %d bytes",
 			len(desc), maxDescriptionBytes))
-		desc = truncateRunes(desc, maxDescriptionBytes)
+		desc = toolkit.TruncateRunes(desc, maxDescriptionBytes)
 	}
 
 	trimmedBody := strings.TrimSpace(body)
@@ -210,7 +212,7 @@ func parseAgentDef(raw []byte, path string) (AgentDef, string, []string) {
 		notes = append(notes, fmt.Sprintf(
 			"body is %d bytes; truncated to the prompt-body cap of %d bytes (it is in-context every turn)",
 			len(trimmedBody), maxPromptBodyBytes))
-		trimmedBody = truncateRunes(trimmedBody, maxPromptBodyBytes)
+		trimmedBody = toolkit.TruncateRunes(trimmedBody, maxPromptBodyBytes)
 	}
 
 	return AgentDef{
@@ -225,59 +227,4 @@ func parseAgentDef(raw []byte, path string) (AgentDef, string, []string) {
 		Body:            trimmedBody,
 		Path:            path,
 	}, "", notes
-}
-
-// truncateRunes trims s to at most maxBytes on a rune boundary and appends a
-// single-character ellipsis.
-func truncateRunes(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
-	}
-	const ellipsis = "…"
-	cut := maxBytes - len(ellipsis)
-	if cut < 0 {
-		cut = 0
-	}
-	for cut > 0 && !utf8RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + ellipsis
-}
-
-// utf8RuneStart reports whether b is the first byte of a UTF-8 rune.
-func utf8RuneStart(b byte) bool { return b&0xC0 != 0x80 }
-
-// splitFrontmatter separates a leading YAML frontmatter block, delimited by a
-// line containing only "---" at the very start and a matching closing "---" line,
-// from the markdown body that follows. A leading UTF-8 BOM is tolerated.
-func splitFrontmatter(s string) (fm, body string, ok bool) {
-	s = strings.TrimPrefix(s, "\ufeff")
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	if !strings.HasPrefix(s, "---\n") && s != "---" {
-		return "", "", false
-	}
-	rest := strings.TrimPrefix(s, "---\n")
-	idx := indexClosingDelim(rest)
-	if idx < 0 {
-		return "", "", false
-	}
-	fm = rest[:idx]
-	after := rest[idx:]
-	after = strings.TrimPrefix(after, "---")
-	after = strings.TrimPrefix(after, "\n")
-	return fm, after, true
-}
-
-// indexClosingDelim returns the byte offset, within s, of the start of the first
-// line that is exactly "---" (the closing frontmatter delimiter), or -1 if none.
-func indexClosingDelim(s string) int {
-	offset := 0
-	for _, line := range strings.SplitAfter(s, "\n") {
-		trimmed := strings.TrimSuffix(line, "\n")
-		if trimmed == "---" {
-			return offset
-		}
-		offset += len(line)
-	}
-	return -1
 }

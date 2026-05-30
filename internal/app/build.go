@@ -677,6 +677,26 @@ func bashDisabledReason(cfg Config) string {
 	}
 }
 
+// newChildEngine bakes in the shared shape every child/member engine assembles:
+// an allow-all (non-interactive) permission policy, an inert hook runner, and the
+// standard context-window / compaction-trigger settings. Call sites supply only
+// what actually varies between them — the scoped catalog, the resolved model, and
+// the prompt config. It is the single source of truth for that boilerplate so the
+// five child-engine builders (Task explorer, Fork branch, Fork judge, per-def Task
+// engine, team member) cannot drift apart.
+func newChildEngine(provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config) *agent.Engine {
+	return agent.NewEngine(agent.Deps{
+		LLM:                 provider,
+		Catalog:             cat,
+		Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
+		Hooks:               hookexec.New(nil),
+		PromptConfig:        pc,
+		Model:               model,
+		ContextWindowTokens: defaultContextWindowTokens,
+		CompactionRatio:     defaultCompactionRatio,
+	})
+}
+
 // buildChildEngine constructs a child *Engine scoped to the read-only explorer
 // toolset (Read/Grep/Glob ONLY — no Fork/Task, so a child can never recurse or fan
 // out further) under an allow-all, non-interactive policy. Both the Task subagent
@@ -687,18 +707,7 @@ func buildChildEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 	childCat.MustRegister(tools.GrepTool{})
 	childCat.MustRegister(tools.GlobTool{})
 
-	childPolicy := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}})
-
-	return agent.NewEngine(agent.Deps{
-		LLM:                 provider,
-		Catalog:             childCat,
-		Policy:              childPolicy,
-		Hooks:               hookexec.New(nil),
-		PromptConfig:        promptConfig(cfg),
-		Model:               cfg.Model,
-		ContextWindowTokens: defaultContextWindowTokens,
-		CompactionRatio:     defaultCompactionRatio,
-	})
+	return newChildEngine(provider, childCat, cfg.Model, promptConfig(cfg))
 }
 
 // buildForkChildEngine constructs the child *Engine each Fork branch runs. Unlike
@@ -733,16 +742,7 @@ func buildForkChildEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 	// running Bash would escape its fork and mutate the shared base. Workspace-aware
 	// Bash for forked children is a follow-up (see this function's doc comment).
 
-	return agent.NewEngine(agent.Deps{
-		LLM:                 provider,
-		Catalog:             childCat,
-		Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
-		Hooks:               hookexec.New(nil),
-		PromptConfig:        promptConfig(cfg),
-		Model:               cfg.Model,
-		ContextWindowTokens: defaultContextWindowTokens,
-		CompactionRatio:     defaultCompactionRatio,
-	})
+	return newChildEngine(provider, childCat, cfg.Model, promptConfig(cfg))
 }
 
 // buildForkJudgeEngine constructs the minimal, tool-less read-only child *Engine
@@ -752,16 +752,7 @@ func buildForkChildEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 // in tests, the judge's LLM calls never interleave with the branches'; with the
 // stateless OpenAI adapter this separation is naturally harmless.
 func buildForkJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
-	return agent.NewEngine(agent.Deps{
-		LLM:                 provider,
-		Catalog:             tool.NewCatalog(),
-		Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
-		Hooks:               hookexec.New(nil),
-		PromptConfig:        promptConfig(cfg),
-		Model:               cfg.Model,
-		ContextWindowTokens: defaultContextWindowTokens,
-		CompactionRatio:     defaultCompactionRatio,
-	})
+	return newChildEngine(provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg))
 }
 
 // buildTaskTool constructs the Task subagent tool over a default child Engine
@@ -900,16 +891,7 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 			cat.MustRegister(mt)
 		}
 
-		eng := agent.NewEngine(agent.Deps{
-			LLM:                 provider,
-			Catalog:             cat,
-			Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
-			Hooks:               hookexec.New(nil),
-			PromptConfig:        pc,
-			Model:               model,
-			ContextWindowTokens: defaultContextWindowTokens,
-			CompactionRatio:     defaultCompactionRatio,
-		})
+		eng := newChildEngine(provider, cat, model, pc)
 		return agent.MemberBuild{Engine: eng, Mode: mode}
 	}
 }

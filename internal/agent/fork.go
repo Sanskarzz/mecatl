@@ -621,16 +621,8 @@ func branchLabel(i int) string {
 // deterministic regardless of completion order. Each branch reports its status,
 // its isolated workspace path (the no-auto-merge artifact), and its summary.
 func joinBranches(results []branchResult) string {
-	sorted := make([]branchResult, len(results))
-	copy(sorted, results)
-	sort.Slice(sorted, func(a, b int) bool { return sorted[a].index < sorted[b].index })
-
-	ok := 0
-	for _, r := range sorted {
-		if !r.failed {
-			ok++
-		}
-	}
+	sorted := sortedByIndex(results)
+	ok := countOK(sorted)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Fork joined %d branch(es): %d succeeded, %d failed.\n",
@@ -665,6 +657,18 @@ func sortedByIndex(results []branchResult) []branchResult {
 	return sorted
 }
 
+// countOK counts the branches that did not fail, for the "succeeded/failed"
+// tally shared by joinBranches and joinJudgeResult.
+func countOK(results []branchResult) int {
+	ok := 0
+	for _, r := range results {
+		if !r.failed {
+			ok++
+		}
+	}
+	return ok
+}
+
 // joinFirstResult renders the join=first outcome: the winning branch's summary,
 // the preserved-workspace note, and a one-line tally of the also-rans. winner is
 // a real branchResult.index.
@@ -690,12 +694,7 @@ func joinFirstResult(results []branchResult, winner int) string {
 // scoreboard of the not-selected branches. winner is a real branchResult.index.
 func joinJudgeResult(results []branchResult, winner int, rationale string) string {
 	sorted := sortedByIndex(results)
-	ok := 0
-	for _, r := range sorted {
-		if !r.failed {
-			ok++
-		}
-	}
+	ok := countOK(sorted)
 	w := results[winner]
 
 	var b strings.Builder

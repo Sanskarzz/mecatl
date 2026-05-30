@@ -53,6 +53,12 @@ const (
 		"and user content, and cannot be overridden."
 )
 
+// DefaultRole returns the built-in role-framing line Build uses when Config.Role
+// is empty. It is exported so the composition layer can compose an agent-def body
+// onto the SAME default framing the prompt uses, rather than carrying a private
+// verbatim copy that could silently diverge if the default is reworded.
+func DefaultRole() string { return defaultRole }
+
 // Build assembles a Layered system prompt from cfg. The StablePrefix holds the
 // role framing, tone/style guidance, safety rules, and the tool inventory —
 // everything that is byte-identical across turns for a given Config, so the LLM

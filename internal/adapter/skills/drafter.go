@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/stacklok/mecatl/internal/adapter/toolkit"
 )
 
 // QuarantineSubdir is the conventional name of the quarantine directory the
@@ -174,7 +176,7 @@ func (d *DirDrafter) Draft(ctx context.Context, req DraftRequest) (DraftResult, 
 		warnings = append(warnings, fmt.Sprintf(
 			"description is %d bytes; it was truncated to the always-in-context cap of %d bytes",
 			len(desc), maxDescriptionBytes))
-		desc = truncateRunes(desc, maxDescriptionBytes)
+		desc = toolkit.TruncateRunes(desc, maxDescriptionBytes)
 	}
 	if len(body) > maxBodyBytes {
 		warnings = append(warnings, fmt.Sprintf(

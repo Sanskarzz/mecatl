@@ -156,7 +156,7 @@ func Discover(dir string) ([]Skill, []SkipError, error) {
 // oversized body is flagged so the author knows it will be truncated. parseSkill
 // is filesystem-free so every Source implementation can reuse it.
 func parseSkill(raw []byte, path string) (Skill, string, []string) {
-	fmText, body, ok := splitFrontmatter(string(raw))
+	fmText, body, ok := toolkit.SplitFrontmatter(string(raw))
 	if !ok {
 		return Skill{}, "missing YAML frontmatter (expected a leading '---' delimited block)", nil
 	}
@@ -178,7 +178,7 @@ func parseSkill(raw []byte, path string) (Skill, string, []string) {
 		notes = append(notes, fmt.Sprintf(
 			"description is %d bytes; truncated to the always-in-context cap of %d bytes (a skill description should be a single line)",
 			len(desc), maxDescriptionBytes))
-		desc = truncateRunes(desc, maxDescriptionBytes)
+		desc = toolkit.TruncateRunes(desc, maxDescriptionBytes)
 	}
 
 	trimmedBody := strings.TrimSpace(body)
@@ -194,67 +194,4 @@ func parseSkill(raw []byte, path string) (Skill, string, []string) {
 		Body:        trimmedBody,
 		Path:        path,
 	}, "", notes
-}
-
-// truncateRunes trims s to at most maxBytes on a rune boundary and appends a
-// single-character ellipsis. It is used for the always-in-context description cap;
-// the body has its own truncation (toolkit.Truncate) at activation time.
-func truncateRunes(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
-	}
-	const ellipsis = "…"
-	cut := maxBytes - len(ellipsis)
-	if cut < 0 {
-		cut = 0
-	}
-	for cut > 0 && !utf8RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + ellipsis
-}
-
-// utf8RuneStart reports whether b is the first byte of a UTF-8 rune (i.e. not a
-// continuation byte 0b10xxxxxx). It mirrors toolkit's internal helper, kept local
-// so this package does not need to export one from toolkit.
-func utf8RuneStart(b byte) bool { return b&0xC0 != 0x80 }
-
-// splitFrontmatter separates a leading YAML frontmatter block, delimited by a
-// line containing only "---" at the very start and a matching closing "---"
-// line, from the markdown body that follows. It returns the frontmatter text
-// (without the delimiters), the body, and whether a well-formed frontmatter
-// block was found. A leading UTF-8 BOM is tolerated.
-func splitFrontmatter(s string) (fm, body string, ok bool) {
-	s = strings.TrimPrefix(s, "\ufeff")
-	// Normalise CRLF so the delimiter match is line-ending agnostic.
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	if !strings.HasPrefix(s, "---\n") && s != "---" {
-		return "", "", false
-	}
-	rest := strings.TrimPrefix(s, "---\n")
-	// Find the closing delimiter: a line that is exactly "---".
-	idx := indexClosingDelim(rest)
-	if idx < 0 {
-		return "", "", false
-	}
-	fm = rest[:idx]
-	// Skip past the closing "---" line (and its trailing newline, if any).
-	after := rest[idx:]
-	after = strings.TrimPrefix(after, "---")
-	after = strings.TrimPrefix(after, "\n")
-	return fm, after, true
-}
-
-// indexClosingDelim returns the byte offset, within s, of the start of the first
-// line that is exactly "---" (the closing frontmatter delimiter), or -1 if none.
-func indexClosingDelim(s string) int {
-	offset := 0
-	for _, line := range strings.SplitAfter(s, "\n") {
-		trimmed := strings.TrimSuffix(line, "\n")
-		if trimmed == "---" {
-			return offset
-		}
-		offset += len(line)
-	}
-	return -1
 }

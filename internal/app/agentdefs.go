@@ -7,11 +7,8 @@ import (
 	"strings"
 
 	"github.com/stacklok/mecatl/internal/adapter/agents"
-	"github.com/stacklok/mecatl/internal/adapter/hookexec"
-	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
 	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/prompt"
 	"github.com/stacklok/mecatl/internal/session"
@@ -259,18 +256,10 @@ func buildAgentTaskEngines(cfg Config, provider port.LLMProvider, reg *agents.Re
 
 		model := resolveModel(cfg, def)
 
-		engines[def.Name] = agent.NewEngine(agent.Deps{
-			LLM:                 provider,
-			Catalog:             cat,
-			Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
-			Hooks:               hookexec.New(nil),
-			PromptConfig:        agentPromptConfig(cfg, def, model),
-			Model:               model,
-			ContextWindowTokens: defaultContextWindowTokens,
-			CompactionRatio:     defaultCompactionRatio,
-			// ProgressiveTools deliberately OFF: child catalogs are tiny and a
-			// ToolSearch tool would not be in the def allowlist.
-		})
+		// ProgressiveTools deliberately OFF: child catalogs are tiny and a ToolSearch
+		// tool would not be in the def allowlist. newChildEngine leaves it at its zero
+		// value (off), matching the original explicit omission.
+		engines[def.Name] = newChildEngine(provider, cat, model, agentPromptConfig(cfg, def, model))
 		meta = append(meta, agent.AgentMeta{Name: def.Name, Description: def.Description})
 
 		slog.Info("agent def engine built",
@@ -295,19 +284,9 @@ func agentPromptConfig(cfg Config, def agents.AgentDef, resolvedModel string) pr
 	pc.Env.Model = resolvedModel
 	if body := strings.TrimSpace(def.Body); body != "" {
 		// Compose into Role: default framing + the def's instructions.
-		pc.Role = defaultAgentRole() + "\n\nAgent definition (" + def.Name + "):\n\n" + body
+		pc.Role = prompt.DefaultRole() + "\n\nAgent definition (" + def.Name + "):\n\n" + body
 	}
 	return pc
-}
-
-// defaultAgentRole returns the built-in role-framing line that prompt.Build uses
-// when Config.Role is empty, so composing a def body onto it preserves the
-// default framing rather than dropping it. It is duplicated here (a single short
-// string) to avoid exporting the domain default purely for composition.
-func defaultAgentRole() string {
-	return "You are mecatl, a headless agentic coding harness. " +
-		"You operate an agent loop: you call tools to inspect and modify a " +
-		"workspace, then report results."
 }
 
 // resolveAgentRegistry resolves the agent-definition registry from cfg (explicit
