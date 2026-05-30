@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stacklok/mecatl/internal/adapter/forker"
@@ -170,6 +171,123 @@ func TestForkConcurrentCopiesAreDistinct(t *testing.T) {
 	}
 }
 
+// TestForkForceCopyIsFullyIsolatedRepo proves the WithForceCopy mode: forking a
+// git-repo base yields a SELF-CONTAINED repository (its own .git: HEAD/refs/objects)
+// so a branch that runs git commit / writes a ref / writes a file INSIDE the fork
+// does NOT touch the base repo's .git or working tree. This is the mutating-fork
+// isolation guarantee. Skipped when git is unavailable.
+func TestForkForceCopyIsFullyIsolatedRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	base := t.TempDir()
+	initGitRepo(t, base)
+	writeFile(t, filepath.Join(base, "tracked.txt"), "from base\n")
+	gitCommit(t, base)
+
+	// Snapshot the base repo's pre-fork state: HEAD commit, ref listing, object dir.
+	baseHeadBefore := gitOutput(t, base, "rev-parse", "HEAD")
+	baseRefsBefore := gitOutput(t, base, "show-ref")
+
+	baseWS, err := osfs.NewWorkspace(base)
+	if err != nil {
+		t.Fatalf("base workspace: %v", err)
+	}
+
+	f := forker.New(osfsWorkspace, forker.WithForceCopy())
+	child, cleanup, err := f.Fork(context.Background(), baseWS, "mutating-branch")
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	t.Cleanup(func() { _ = cleanup() })
+
+	if child.Root() == base {
+		t.Fatalf("child root must differ from base; both are %q", base)
+	}
+	// Force-copy of a repo carries .git as a real directory (NOT a worktree gitfile),
+	// so the fork is an independent repo with its own object DB/refs.
+	gitInfo, err := os.Stat(filepath.Join(child.Root(), ".git"))
+	if err != nil {
+		t.Fatalf("force-copy fork missing .git: %v", err)
+	}
+	if !gitInfo.IsDir() {
+		t.Fatalf("force-copy fork .git must be a directory (own object DB), got a file (worktree gitlink)")
+	}
+
+	// Mutate INSIDE the fork in every way a branch's Bash/git could: a new commit, a
+	// directly-written ref, and a new working-tree file.
+	writeFile(t, filepath.Join(child.Root(), "branch-only.txt"), "made in fork\n")
+	runGit(t, child.Root(), "add", "-A")
+	runGit(t, child.Root(), "commit", "-m", "fork commit")
+	runGit(t, child.Root(), "update-ref", "refs/heads/sneaky", "HEAD")
+
+	// The base repo's .git MUST be unchanged: same HEAD, same refs.
+	if got := gitOutput(t, base, "rev-parse", "HEAD"); got != baseHeadBefore {
+		t.Errorf("base HEAD changed after fork commit: before=%q after=%q", baseHeadBefore, got)
+	}
+	if got := gitOutput(t, base, "show-ref"); got != baseRefsBefore {
+		t.Errorf("base refs changed after fork ref write:\nbefore=%q\nafter=%q", baseRefsBefore, got)
+	}
+	if _, err := os.Stat(filepath.Join(base, "refs", "heads", "sneaky")); err == nil {
+		t.Errorf("fork's update-ref leaked into base .git (refs/heads/sneaky present)")
+	}
+	// The base working tree MUST be unchanged: the branch-only file did not appear.
+	if _, err := os.Stat(filepath.Join(base, "branch-only.txt")); !os.IsNotExist(err) {
+		t.Errorf("fork's working-tree file leaked into base (err=%v)", err)
+	}
+}
+
+// TestForkWorktreeSharesObjectDB is the CONTRAST: the DEFAULT (auto) path uses a
+// git worktree for a repo base, which SHARES the object DB and refs. A commit made
+// inside the worktree fork is visible in the BASE repo's object store — exactly the
+// isolation gap WithForceCopy closes. This documents why the default is unsafe for
+// mutating callers and that the base-unchanged assertion above would FAIL on this
+// path. Skipped when git is unavailable.
+func TestForkWorktreeSharesObjectDB(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	base := t.TempDir()
+	initGitRepo(t, base)
+	writeFile(t, filepath.Join(base, "tracked.txt"), "from base\n")
+	gitCommit(t, base)
+
+	baseWS, err := osfs.NewWorkspace(base)
+	if err != nil {
+		t.Fatalf("base workspace: %v", err)
+	}
+
+	// Default forker (no WithForceCopy) → worktree path for a repo.
+	f := forker.New(osfsWorkspace)
+	child, cleanup, err := f.Fork(context.Background(), baseWS, "wt")
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	t.Cleanup(func() { _ = cleanup() })
+
+	// A worktree's .git is a FILE (gitlink), not a directory — proof the object DB
+	// is shared with the base repo, not copied.
+	gitInfo, err := os.Stat(filepath.Join(child.Root(), ".git"))
+	if err != nil {
+		t.Fatalf("worktree fork missing .git: %v", err)
+	}
+	if gitInfo.IsDir() {
+		t.Fatalf("expected worktree .git to be a gitlink file (shared object DB), got a directory")
+	}
+
+	// Commit inside the worktree; the commit object lands in the SHARED object DB.
+	writeFile(t, filepath.Join(child.Root(), "wt-only.txt"), "x\n")
+	runGit(t, child.Root(), "add", "-A")
+	runGit(t, child.Root(), "commit", "-m", "worktree commit")
+	forkHead := gitOutput(t, child.Root(), "rev-parse", "HEAD")
+
+	// The base repo can resolve the worktree's commit object — they share .git.
+	// (This is the leak WithForceCopy prevents.)
+	if got := gitOutput(t, base, "cat-file", "-t", forkHead); got != "commit" {
+		t.Fatalf("expected worktree commit %s to be visible in base object DB, got type %q", forkHead, got)
+	}
+}
+
 // TestNewNilConstructorPanics asserts the composition-root contract.
 func TestNewNilConstructorPanics(t *testing.T) {
 	defer func() {
@@ -211,4 +329,16 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
+}
+
+// gitOutput runs a git subcommand in dir and returns its trimmed stdout, failing
+// the test on a non-zero exit.
+func gitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return strings.TrimSpace(string(out))
 }

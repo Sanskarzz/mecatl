@@ -12,31 +12,48 @@
 //     deletes the directory. This is the cheapest correct isolation for a repo:
 //     it copies no file contents.
 //
-//   - Recursive copy — when the base root is NOT a git repo (no `.git`), Fork
-//     recursively copies the whole base tree into a fresh temp directory. cleanup
-//     removes that directory. This is a full, independent copy: writes in the
-//     child never touch the base.
+//   - Recursive copy — when the base root is NOT a git repo (no `.git`), OR when
+//     the Forker was constructed WithForceCopy, Fork recursively copies the whole
+//     base tree into a fresh temp directory. cleanup removes that directory. This
+//     is a full, independent copy: writes in the child never touch the base. When
+//     the base IS a git repo, the copy INCLUDES its `.git` directory, so the fork
+//     is an independent repository with its OWN object database and refs.
 //
 // Isolation guarantees: a child Workspace returned by Fork is rooted at an
 // isolated directory; Write/Edit/Bash through the child affect ONLY that
 // directory. The base tree is never written. cleanup is idempotent-friendly (it
 // tolerates an already-removed child) and must be called when the child is done.
 //
-// Limits: the git path isolates the WORKING TREE and INDEX but shares the object
-// database and refs — a child that created commits/refs would be visible to the
-// base repo. Forked children CAN mutate their working tree: Edit/Write land in the
-// fork, and Bash is workspace-aware (its CommandRunner runs with the forked child's
-// Workspace.Root() as the working directory; see app.buildForkChildEngine /
-// buildMemberEngine and internal/adapter/tools/bash.go), so a child's Bash — and
-// any git it runs — defaults to the fork's working tree, not the parent base. Note
-// the shared-object-DB caveat is now REACHABLE: a child that runs `git commit` via
-// Bash in a worktree fork writes objects/refs into the shared .git. That is the
-// inherent git-worktree model; the no-auto-merge boundary still means nothing
-// updates the base working tree automatically. The copy path is
-// bounded only by available disk and the size of the base
-// tree; it copies regular files and directories and SKIPS symlinks (so a symlink
-// cannot smuggle the copy outside the base). Neither path auto-merges results
-// back — see the ForkTool docs (no-auto-merge boundary).
+// Worktree vs. full-copy isolation — the tradeoff:
+//
+// The git-worktree path isolates the WORKING TREE and INDEX but SHARES the object
+// database and refs. Forked children CAN mutate their working tree: Edit/Write land
+// in the fork, and Bash is workspace-aware (its CommandRunner runs with the forked
+// child's Workspace.Root() as the working directory; see app.buildForkChildEngine /
+// buildMemberEngine and internal/adapter/tools/bash.go), so a child's Bash — and any
+// git it runs — defaults to the fork's working tree, not the parent base. But in a
+// worktree, a child that runs `git commit` / `git push` / `git update-ref` via Bash
+// writes objects and refs into the SHARED `.git`, escaping isolation. That is the
+// inherent git-worktree model.
+//
+// To close that gap for MUTATING forks, construct the Forker WithForceCopy: it
+// forces the recursive-copy path even for a git repo and copies the `.git`
+// directory along with the tree, so the fork is a SELF-CONTAINED repository. A
+// branch's git/Bash writes (commits, refs, objects) then stay inside the fork and
+// CANNOT reach the base repo. The composition root wires WithForceCopy for the Fork
+// tool's branches and for mutating team members (see internal/app/build.go); the
+// default (no option) keeps the cheap auto worktree-vs-copy behaviour for read-only
+// callers.
+//
+// Cost: a full copy (including `.git`, which for an established repo is often the
+// bulk of the bytes) is HEAVIER than a worktree, which copies no file contents.
+// That is exactly why worktree is the default. For mutating branches the stronger
+// isolation is worth the extra copy.
+//
+// The copy path is bounded only by available disk and the size of the base tree; it
+// copies regular files and directories and SKIPS symlinks (so a symlink cannot
+// smuggle the copy outside the base). Neither path auto-merges results back — see
+// the ForkTool docs (no-auto-merge boundary).
 package forker
 
 import (
@@ -72,6 +89,10 @@ type Forker struct {
 	tmpBase string
 	// runGit executes a git subcommand in dir; injected so tests can avoid git.
 	runGit func(ctx context.Context, dir string, args ...string) error
+	// forceCopy, when true, makes Fork always take the recursive-copy path (copying
+	// .git too) instead of the git-worktree path, even for a git repo — giving the
+	// fork its OWN object DB/refs so a child's git/Bash writes stay inside the fork.
+	forceCopy bool
 	// seq disambiguates concurrently-created child directories for the same label.
 	seq atomic.Uint64
 }
@@ -84,6 +105,21 @@ type Option func(*Forker)
 // filesystem as the base for cheaper copies, or to scope them to a test dir.
 func WithTempBase(dir string) Option {
 	return func(f *Forker) { f.tmpBase = dir }
+}
+
+// WithForceCopy forces FULL isolation: Fork always takes the recursive-copy path
+// (copying the base tree INCLUDING its `.git` when present) instead of a git
+// worktree, even when the base is a git repo. The fork is then a self-contained
+// repository with its own object database and refs, so a child branch's git/Bash
+// writes (commits, refs, objects, working-tree edits) CANNOT reach the base repo.
+//
+// This is the mode for MUTATING forks (the Fork tool's branches and mutating team
+// members), where isolation matters more than speed: a full copy — `.git` and all
+// — is heavier than a worktree (which copies no file contents), which is why the
+// default leaves the cheaper auto worktree-vs-copy behaviour in place. Symlinks are
+// still skipped, so the copy cannot be smuggled outside the base.
+func WithForceCopy() Option {
+	return func(f *Forker) { f.forceCopy = true }
 }
 
 // New constructs the default Forker. newWorkspace builds a child tool.Workspace
@@ -121,6 +157,13 @@ func (f *Forker) Fork(ctx context.Context, base tool.Workspace, label string) (t
 	childDir, err := f.childDir(label)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// Force-copy mode: always take the full recursive copy (including .git), giving
+	// the fork its own object DB/refs. This is the MUTATING-fork isolation mode — a
+	// child's git/Bash writes can never reach the base repo.
+	if f.forceCopy {
+		return f.forkCopyInto(baseRoot, childDir)
 	}
 
 	repoRoot, isRepo := gitRepoRoot(ctx, baseRoot)
@@ -239,9 +282,11 @@ func runGit(ctx context.Context, dir string, args ...string) error {
 
 // copyTree recursively copies the directory tree rooted at src into dst (which
 // must already exist). It copies regular files and directories, preserves
-// permission bits, and deliberately SKIPS symlinks (and the repo's .git admin
-// dir is copied like any other dir on the copy path — there is no .git on the
-// copy path by construction, since that path is only taken for non-repos).
+// permission bits, and deliberately SKIPS symlinks. The repo's `.git` admin dir is
+// copied like any other directory: on the auto path it is only reached for a
+// non-repo (where there is no `.git`), but on the WithForceCopy path the base IS a
+// repo and copying `.git` is the POINT — it makes the fork a self-contained repo
+// with its own object DB/refs, so a child's git writes stay inside the fork.
 func copyTree(src, dst string) error {
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {

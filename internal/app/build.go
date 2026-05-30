@@ -456,7 +456,11 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 	// calls never interleave with the branches' (matters for the mockllm cursor in
 	// tests; harmless for the stateless OpenAI adapter).
 	if cfg.EnableFork {
-		fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
+		// WithForceCopy: Fork branches MUTATE and run Bash (incl. git), so they get
+		// FULLY isolated forks (a full copy incl. .git — own object DB/refs) rather
+		// than a worktree that shares the base repo's .git. This stops a branch's
+		// git commit/push/update-ref from escaping into the base repo.
+		fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }, forker.WithForceCopy())
 		forkChild := buildForkChildEngine(cfg, provider, buildCommandRunner(cfg))
 		judge := agent.NewEngineJudge(buildForkJudgeEngine(cfg, provider))
 		cat.MustRegister(agent.NewForkTool(forkChild, fk,
@@ -798,7 +802,12 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvide
 	// scoped catalog/model/prompt/permissionMode.
 	agentReg := resolveAgentRegistry(context.Background(), cfg)
 	svcCfg.MemberEngine = buildMemberEngine(cfg, provider, teamHooks, agentReg, buildCommandRunner(cfg))
-	svcCfg.Forker = forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
+	// WithForceCopy: Mutating team members run Bash (incl. git) in their forks, so
+	// they get FULLY isolated forks (a full copy incl. .git — own object DB/refs)
+	// rather than a worktree that shares the base repo's .git, keeping a member's
+	// git commit/push/update-ref from escaping into the base repo. (Read-only
+	// members share the base directly and never fork, so they're unaffected.)
+	svcCfg.Forker = forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }, forker.WithForceCopy())
 	svcCfg.TeamHooks = teamHooks
 	slog.Info("agent teams ENABLED (experimental; CreateTeam/SpawnTeammate/RunTeam)")
 }
