@@ -185,3 +185,145 @@ func TestTeamRunStateMachineDeterministic(t *testing.T) {
 	_, err = h.SpawnTeammate(ctx, newSpawn(teamID, "late", false, ""))
 	wantFailedPrecondition(t, err, "SpawnTeammate after completion")
 }
+
+// teamServiceMaxTeams builds a team-enabled Service with an explicit MaxTeams cap.
+func teamServiceMaxTeams(t *testing.T, llm *mockllm.Provider, maxTeams int) *server.Service {
+	t.Helper()
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}})
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec) *agent.Engine {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		return agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Model: "mock"})
+	}
+	engine := agent.NewEngine(agent.Deps{
+		LLM: mockllm.New(mockllm.TextTurn("x")), Catalog: tool.NewCatalog(), Policy: allow, Model: "mock",
+	})
+	svc, err := server.NewService(server.Config{
+		Engine:       engine,
+		Store:        memstore.New(),
+		Workspaces:   func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		Now:          func() time.Time { return time.Unix(0, 0) },
+		MemberEngine: memberEngine,
+		MaxTeams:     maxTeams,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	return svc
+}
+
+// TestCreateTeamMaxTeams asserts Fix D's registry cap: CreateTeam past MaxTeams is
+// rejected with ResourceExhausted, and cleaning up a (created) team frees a slot so
+// a subsequent CreateTeam succeeds again.
+func TestCreateTeamMaxTeams(t *testing.T) {
+	svc := teamServiceMaxTeams(t, mockllm.New(mockllm.TextTurn("x")), 2)
+	h := server.NewHarnessServer(svc)
+	ctx := context.Background()
+
+	r1, err := h.CreateTeam(ctx, newCreateTeam("/ws"))
+	if err != nil {
+		t.Fatalf("CreateTeam #1: %v", err)
+	}
+	if _, err := h.CreateTeam(ctx, newCreateTeam("/ws")); err != nil {
+		t.Fatalf("CreateTeam #2: %v", err)
+	}
+
+	// The registry is full; the third create is rejected with ResourceExhausted.
+	_, err = h.CreateTeam(ctx, newCreateTeam("/ws"))
+	if err == nil {
+		t.Fatal("CreateTeam past MaxTeams: expected an error, got nil")
+	}
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("CreateTeam past MaxTeams: code = %v, want ResourceExhausted (err=%v)", status.Code(err), err)
+	}
+	// And the Service returns the mapped sentinel.
+	if _, serr := svc.CreateTeam(ctx, "/ws", "x"); !errors.Is(serr, server.ErrTooManyTeams) {
+		t.Fatalf("Service.CreateTeam past cap: err = %v, want ErrTooManyTeams", serr)
+	}
+
+	// Cleaning up a created team frees a slot; the next CreateTeam succeeds.
+	if _, err := h.CleanupTeam(ctx, &mecatlv1.CleanupTeamRequest{TeamId: r1.GetTeamId()}); err != nil {
+		t.Fatalf("CleanupTeam: %v", err)
+	}
+	if _, err := h.CreateTeam(ctx, newCreateTeam("/ws")); err != nil {
+		t.Fatalf("CreateTeam after freeing a slot: %v", err)
+	}
+}
+
+// TestCleanupTeamRejectsRunning asserts Fix D: CleanupTeam on a running team is
+// rejected with FailedPrecondition (deleting it would orphan the live supervisor),
+// while a created or done team can be cleaned up and frees its slot.
+func TestCleanupTeamRejectsRunning(t *testing.T) {
+	// A member whose single turn blocks until ctx is cancelled keeps the team in the
+	// running phase for the duration of the probe.
+	llm := mockllm.New(mockllm.ChunksTurn(blockingChunks()...))
+	svc := teamService(t, llm)
+	h := server.NewHarnessServer(svc)
+	ctx := context.Background()
+
+	createResp, err := h.CreateTeam(ctx, newCreateTeam("/ws"))
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	teamID := createResp.GetTeamId()
+
+	// A created (not-yet-running) team can be cleaned up.
+	otherResp, err := h.CreateTeam(ctx, newCreateTeam("/ws"))
+	if err != nil {
+		t.Fatalf("CreateTeam #2: %v", err)
+	}
+	if _, err := h.CleanupTeam(ctx, &mecatlv1.CleanupTeamRequest{TeamId: otherResp.GetTeamId()}); err != nil {
+		t.Fatalf("CleanupTeam(created): %v", err)
+	}
+
+	if _, err := h.SpawnTeammate(ctx, newSpawn(teamID, "lead", true, "go")); err != nil {
+		t.Fatalf("SpawnTeammate: %v", err)
+	}
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	firstEvent := make(chan struct{}, 1)
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		_, _ = svc.RunTeam(runCtx, teamID, func(agent.TeamEvent) {
+			select {
+			case firstEvent <- struct{}{}:
+			default:
+			}
+		})
+	}()
+
+	select {
+	case <-firstEvent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the team run to start")
+	}
+
+	// CleanupTeam on the running team is rejected (FailedPrecondition).
+	_, err = h.CleanupTeam(ctx, &mecatlv1.CleanupTeamRequest{TeamId: teamID})
+	wantFailedPrecondition(t, err, "CleanupTeam(running)")
+	// And the Service returns the ErrTeamRunning sentinel.
+	if serr := svc.CleanupTeam(ctx, teamID); !errors.Is(serr, server.ErrTeamRunning) {
+		t.Fatalf("Service.CleanupTeam(running): err = %v, want ErrTeamRunning", serr)
+	}
+
+	cancelRun()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the cancelled run to return")
+	}
+
+	// Once done, the team can be cleaned up.
+	if _, err := h.CleanupTeam(ctx, &mecatlv1.CleanupTeamRequest{TeamId: teamID}); err != nil {
+		t.Fatalf("CleanupTeam(done): %v", err)
+	}
+	// And it is gone: a second cleanup is NotFound.
+	_, err = h.CleanupTeam(ctx, &mecatlv1.CleanupTeamRequest{TeamId: teamID})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("CleanupTeam(already gone): code = %v, want NotFound (err=%v)", status.Code(err), err)
+	}
+}

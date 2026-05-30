@@ -75,7 +75,17 @@ type Config struct {
 	// member coordination tools for the TaskCreated / TaskCompleted gates.
 	// Optional.
 	TeamHooks port.HookRunner
+	// MaxTeams caps the number of live (un-cleaned) teams the registry holds at
+	// once, bounding the leak when clients create teams but never CleanupTeam.
+	// CreateTeam returns ErrTooManyTeams (ResourceExhausted) when the cap is
+	// reached; cleaning up a created/done team frees a slot. Defaults to
+	// defaultMaxTeams when zero.
+	MaxTeams int
 }
+
+// defaultMaxTeams is the live-team registry cap applied when Config.MaxTeams is
+// zero. It bounds memory growth from teams that are created but never cleaned up.
+const defaultMaxTeams = 64
 
 // ErrConfig is returned by NewService when a required dependency is missing.
 var ErrConfig = errors.New("server: invalid config")
@@ -139,6 +149,9 @@ func NewService(cfg Config) (*Service, error) {
 	}
 	if cfg.NewID == nil {
 		cfg.NewID = randomID
+	}
+	if cfg.MaxTeams <= 0 {
+		cfg.MaxTeams = defaultMaxTeams
 	}
 	return &Service{
 		cfg:   cfg,

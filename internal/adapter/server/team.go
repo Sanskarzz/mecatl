@@ -14,9 +14,15 @@ import (
 var ErrTeamsDisabled = errors.New("server: agent teams are not enabled")
 
 // ErrTeamRunning is returned when an operation is rejected because the team is
-// already running: a second concurrent RunTeam, or a SpawnTeammate after the team
-// has started. It maps to codes.FailedPrecondition.
+// already running: a second concurrent RunTeam, a SpawnTeammate after the team has
+// started, or a CleanupTeam on a still-running team. It maps to
+// codes.FailedPrecondition.
 var ErrTeamRunning = errors.New("server: team is already running")
+
+// ErrTooManyTeams is returned by CreateTeam when the live-team registry is already
+// at Config.MaxTeams. It bounds the leak from teams created but never cleaned up.
+// It maps to codes.ResourceExhausted.
+var ErrTooManyTeams = errors.New("server: too many live teams")
 
 // teamPhase is a team's lifecycle phase in the registry, guarded by Service.mu. A
 // team is created on CreateTeam, transitions atomically to running on RunTeam
@@ -75,6 +81,13 @@ func (s *Service) CreateTeam(_ context.Context, workspace, name string) (string,
 
 	id := "team-" + string(s.cfg.NewID())
 	s.mu.Lock()
+	// Count only un-cleaned teams (the live registry) against the cap; CleanupTeam
+	// frees a slot. The check and the insert share the lock so concurrent CreateTeams
+	// cannot both slip past a full registry.
+	if len(s.teams) >= s.cfg.MaxTeams {
+		s.mu.Unlock()
+		return "", fmt.Errorf("%w: %d", ErrTooManyTeams, s.cfg.MaxTeams)
+	}
 	s.teams[id] = &teamState{team: t, sup: sup, base: workspace}
 	s.mu.Unlock()
 	return id, nil
@@ -118,14 +131,17 @@ func (s *Service) SpawnTeammate(ctx context.Context, teamID string, spec agent.M
 }
 
 // SendTeammateMessage posts a message into a member's inbox, delivered at that
-// member's next turn boundary. An empty from defaults to "operator".
+// member's next turn boundary. An empty from defaults to the reserved operator
+// identity (team.OperatorSender); a non-empty from is authenticated by team.Send,
+// which rejects any value that is neither a current member nor the operator
+// (ErrUnknownSender → InvalidArgument) so the wire path cannot forge a sender.
 func (s *Service) SendTeammateMessage(_ context.Context, teamID, from, to, body string) error {
 	ts, err := s.lookupTeam(teamID)
 	if err != nil {
 		return err
 	}
 	if from == "" {
-		from = "operator"
+		from = team.OperatorSender
 	}
 	if err := ts.team.Send(from, to, body); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidArgument, err)
@@ -171,14 +187,21 @@ func (s *Service) ListTeam(_ context.Context, teamID string) ([]team.Member, []t
 	return ts.team.Members(), ts.team.Tasks(), ts.team.Quiescent(), nil
 }
 
-// CleanupTeam drops a finished team from the registry. Forked member workspaces
-// are torn down by the supervisor when RunTeam returns; this releases the
-// registry entry. It returns ErrNotFound for an unknown team.
+// CleanupTeam drops a created or done team from the registry and frees its slot.
+// Forked member workspaces are torn down by the supervisor when RunTeam returns, so
+// a done team is safe to drop; this releases the registry entry. A team whose phase
+// is teamRunning is NOT dropped — deleting it out from under the in-flight RunTeam
+// would orphan the live supervisor — so it returns ErrTeamRunning
+// (FailedPrecondition) instead. It returns ErrNotFound for an unknown team.
 func (s *Service) CleanupTeam(_ context.Context, teamID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.teams[teamID]; !ok {
+	ts, ok := s.teams[teamID]
+	if !ok {
 		return fmt.Errorf("%w: team %q", ErrNotFound, teamID)
+	}
+	if ts.phase == teamRunning {
+		return fmt.Errorf("%w: %q", ErrTeamRunning, teamID)
 	}
 	delete(s.teams, teamID)
 	return nil

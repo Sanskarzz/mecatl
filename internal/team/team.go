@@ -25,6 +25,28 @@ import (
 	"github.com/stacklok/mecatl/internal/session"
 )
 
+// OperatorSender is the reserved sender identity for messages injected by the
+// out-of-band operator (the human/client on the wire, not a roster member). It is
+// the only non-member `from` Send accepts, and no member may be named it: this
+// keeps the message-provenance space partitioned into exactly "a real teammate"
+// and "the operator", so a teammate cannot impersonate the operator and the wire
+// path cannot impersonate a teammate. See Send and AddMember.
+const OperatorSender = "operator"
+
+// Aggregate resource caps. They bound a single team's coordination state so a
+// runaway (or adversarial) member cannot exhaust process memory by creating
+// unbounded tasks, queuing unbounded messages, or enrolling unbounded members.
+// The model sees a breach as a tool-result error (ErrTooMany*), not a crash.
+const (
+	// MaxTasks caps the total number of tasks one team may ever create.
+	MaxTasks = 512
+	// MaxInboxMessages caps the number of queued (undelivered) messages a single
+	// member's inbox may hold at once. Draining frees the budget again.
+	MaxInboxMessages = 256
+	// MaxMembers caps the roster size of one team.
+	MaxMembers = 32
+)
+
 // Errors returned by the Team aggregate.
 var (
 	// ErrMemberExists is returned by AddMember when name is already taken.
@@ -39,6 +61,21 @@ var (
 	// ErrTaskState is returned by CompleteTask when the task is not in progress
 	// or is completed by a member that does not own it.
 	ErrTaskState = errors.New("team: illegal task transition")
+	// ErrReservedName is returned by AddMember when name is the reserved operator
+	// identity (OperatorSender): a member must not be able to be named the operator
+	// and thereby impersonate out-of-band operator messages.
+	ErrReservedName = errors.New("team: name is reserved")
+	// ErrUnknownSender is returned by Send when from is neither a current roster
+	// member nor the reserved operator identity: a message's provenance must be a
+	// real teammate or the operator, never an arbitrary forged label.
+	ErrUnknownSender = errors.New("team: unknown sender")
+	// ErrTooManyTasks is returned by CreateTask when the team is at MaxTasks.
+	ErrTooManyTasks = errors.New("team: task limit reached")
+	// ErrTooManyMessages is returned by Send when the recipient's inbox is at
+	// MaxInboxMessages.
+	ErrTooManyMessages = errors.New("team: inbox limit reached")
+	// ErrTooManyMembers is returned by AddMember when the roster is at MaxMembers.
+	ErrTooManyMembers = errors.New("team: member limit reached")
 )
 
 // MemberState is the lifecycle state of a teammate (or the lead).
@@ -144,12 +181,20 @@ func New(name string) *Team {
 func (t *Team) Name() string { return t.name }
 
 // AddMember enrols a new member in MemberSpawning state. It returns ErrMemberExists
-// if name is already taken.
+// if name is already taken, ErrReservedName if name is the reserved operator
+// identity (so a member cannot impersonate the operator), and ErrTooManyMembers
+// if the roster is already at MaxMembers.
 func (t *Team) AddMember(name, agentType string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if name == OperatorSender {
+		return fmt.Errorf("%w: %q", ErrReservedName, name)
+	}
 	if _, ok := t.members[name]; ok {
 		return fmt.Errorf("%w: %q", ErrMemberExists, name)
+	}
+	if len(t.members) >= MaxMembers {
+		return fmt.Errorf("%w: %d", ErrTooManyMembers, MaxMembers)
 	}
 	t.members[name] = &Member{Name: name, AgentType: agentType, State: MemberSpawning}
 	t.memOrder = append(t.memOrder, name)
@@ -213,10 +258,14 @@ func (t *Team) Members() []Member {
 }
 
 // CreateTask appends a task with the given description and dependencies. Every dep
-// must already exist (ErrUnknownTask otherwise). It returns the new task id.
+// must already exist (ErrUnknownTask otherwise). It returns ErrTooManyTasks when
+// the team is already at MaxTasks. It returns the new task id.
 func (t *Team) CreateTask(description string, deps ...TaskID) (TaskID, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if len(t.tasks) >= MaxTasks {
+		return "", fmt.Errorf("%w: %d", ErrTooManyTasks, MaxTasks)
+	}
 	for _, d := range deps {
 		if _, ok := t.tasks[d]; !ok {
 			return "", fmt.Errorf("%w: dependency %q", ErrUnknownTask, d)
@@ -349,14 +398,26 @@ func (t *Team) Tasks() []Task {
 	return out
 }
 
-// Send posts a message from one member to another. The recipient must exist; the
-// sender is recorded verbatim (the lead or a teammate). Messages are delivered to
-// the recipient via Drain.
+// Send posts a message from one member to another. The recipient must exist
+// (ErrUnknownMember otherwise). The sender's identity is authenticated: from must
+// be either a current roster member or the reserved OperatorSender, else
+// ErrUnknownSender — this prevents a caller from forging a `from` (e.g.
+// impersonating the lead) on the wire path or in a coordination tool. The
+// recipient's inbox is bounded: a queued (undelivered) backlog at MaxInboxMessages
+// returns ErrTooManyMessages. Messages are delivered to the recipient via Drain.
 func (t *Team) Send(from, to, body string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if from != OperatorSender {
+		if _, ok := t.members[from]; !ok {
+			return fmt.Errorf("%w: %q", ErrUnknownSender, from)
+		}
+	}
 	if _, ok := t.members[to]; !ok {
 		return fmt.Errorf("%w: recipient %q", ErrUnknownMember, to)
+	}
+	if len(t.inbox[to]) >= MaxInboxMessages {
+		return fmt.Errorf("%w: %d for %q", ErrTooManyMessages, MaxInboxMessages, to)
 	}
 	t.nextMsg++
 	t.inbox[to] = append(t.inbox[to], Message{Seq: t.nextMsg, From: from, To: to, Body: body})

@@ -275,6 +275,62 @@ func TestSupervisorMemberHoldsAtMostOneTask(t *testing.T) {
 	}
 }
 
+// TestSupervisorMemberTurnBudgetStops asserts Fix F's lifetime turn budget: a
+// member that would otherwise loop forever — it re-queues a message to itself every
+// round, so it is always re-scheduled and never finishes — is stopped by the
+// cumulative per-member turn budget rather than running to the round cap. The
+// per-round Limits cannot do this because session.Reopen resets their counters each
+// round; only the lifetime budget, which accumulates across rounds, can.
+func TestSupervisorMemberTurnBudgetStops(t *testing.T) {
+	tm := team.New("loop")
+
+	// Each round the worker emits a tool call sending a message to ITSELF (so it is
+	// planned again next round) and then a line of text (ending the round's run
+	// cleanly via StopEndTurn — never an error). The script is long enough that,
+	// without a lifetime budget, the worker would be re-scheduled every round up to
+	// the (large) round cap. Two turns per round.
+	selfPing := session.NewToolCall("p", "SendMessage",
+		json.RawMessage(`{"to":"worker","body":"keep going"}`))
+	var turns []mockllm.Turn
+	for i := 0; i < 60; i++ {
+		turns = append(turns, mockllm.ToolCallTurn(selfPing), mockllm.TextTurn("still working"))
+	}
+	workerProv := mockllm.New(turns...)
+	providers := map[string]*mockllm.Provider{"worker": workerProv}
+
+	const maxRounds = 30
+	const budget = 5 // lifetime turns; ~2 turns/round → stops after ~3 rounds
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		memberFactory(t, tm, providers),
+		agent.WithMaxRounds(maxRounds),
+		agent.WithMemberTurnBudget(budget),
+	)
+
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{
+		Name: "worker", InitialPrompt: "begin the loop and ping yourself each round",
+	}); err != nil {
+		t.Fatalf("AddMember(worker): %v", err)
+	}
+
+	out := sup.Run(context.Background(), nil)
+
+	// The worker must have been stopped by the budget, well short of the round cap.
+	if out.Rounds >= maxRounds {
+		t.Errorf("team ran to the round cap (rounds=%d, cap=%d); the lifetime turn budget should have stopped the looping member",
+			out.Rounds, maxRounds)
+	}
+	if len(out.Members) != 1 || !out.Members[0].Stopped {
+		t.Fatalf("worker outcome = %+v, want it stopped by the budget", out.Members)
+	}
+	// It must not have consumed anywhere near maxRounds worth of turns: the budget is
+	// a hard ceiling the per-round-reset counters could not provide. Allow one extra
+	// round's worth of turns (the round in which the budget is crossed runs to
+	// completion before the member is marked stopped).
+	if got := workerProv.Calls(); got > budget+4 {
+		t.Errorf("worker consumed %d turns, want bounded near the budget %d", got, budget)
+	}
+}
+
 // recordingForker is a fake tool.WorkspaceForker that hands out in-memory
 // workspaces and records the fork labels and cleanup calls.
 type recordingForker struct {

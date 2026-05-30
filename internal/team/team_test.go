@@ -1,6 +1,8 @@
 package team_test
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -289,5 +291,88 @@ func TestReleaseTasksFreesInProgressForReclaim(t *testing.T) {
 	// The released task is claimable again, by anyone.
 	if claimed, ok, _ := tm.ClaimNext("bob"); !ok || claimed.ID != a {
 		t.Fatalf("released task not reclaimable: claimed=%q ok=%v", claimed.ID, ok)
+	}
+}
+
+// TestSendAuthenticatesSender asserts Send accepts a real member and the reserved
+// operator identity as `from`, but rejects any other forged sender (Fix C): a
+// caller must not be able to impersonate the lead or invent a sender label.
+func TestSendAuthenticatesSender(t *testing.T) {
+	tm := newTeamWith(t, "lead", "alice")
+
+	// A real member may send.
+	if err := tm.Send("alice", "lead", "status"); err != nil {
+		t.Fatalf("Send from a member: %v", err)
+	}
+	// The reserved operator identity may send (the out-of-band wire path).
+	if err := tm.Send(team.OperatorSender, "lead", "operator note"); err != nil {
+		t.Fatalf("Send from operator: %v", err)
+	}
+	// An arbitrary, non-member, non-operator sender is rejected.
+	err := tm.Send("ghost-lead", "lead", "you have been pwned")
+	if !errors.Is(err, team.ErrUnknownSender) {
+		t.Fatalf("Send from forged sender: err = %v, want ErrUnknownSender", err)
+	}
+}
+
+// TestAddMemberRejectsReservedName asserts a member cannot be named the reserved
+// operator identity (Fix C), which would let it impersonate operator messages.
+func TestAddMemberRejectsReservedName(t *testing.T) {
+	tm := team.New("spike")
+	err := tm.AddMember(team.OperatorSender, "")
+	if !errors.Is(err, team.ErrReservedName) {
+		t.Fatalf("AddMember(operator): err = %v, want ErrReservedName", err)
+	}
+	if got := tm.Members(); len(got) != 0 {
+		t.Fatalf("roster size = %d after rejected reserved name, want 0", len(got))
+	}
+}
+
+// TestCreateTaskCap asserts CreateTask returns ErrTooManyTasks at MaxTasks (Fix F).
+func TestCreateTaskCap(t *testing.T) {
+	tm := newTeamWith(t, "alice")
+	for i := 0; i < team.MaxTasks; i++ {
+		if _, err := tm.CreateTask("work"); err != nil {
+			t.Fatalf("CreateTask #%d: %v", i, err)
+		}
+	}
+	if _, err := tm.CreateTask("one too many"); !errors.Is(err, team.ErrTooManyTasks) {
+		t.Fatalf("CreateTask past cap: err = %v, want ErrTooManyTasks", err)
+	}
+}
+
+// TestSendInboxCap asserts Send returns ErrTooManyMessages once a recipient's
+// undelivered backlog reaches MaxInboxMessages (Fix F), and that draining the
+// inbox frees the budget again.
+func TestSendInboxCap(t *testing.T) {
+	tm := newTeamWith(t, "alice", "bob")
+	for i := 0; i < team.MaxInboxMessages; i++ {
+		if err := tm.Send("bob", "alice", "spam"); err != nil {
+			t.Fatalf("Send #%d: %v", i, err)
+		}
+	}
+	if err := tm.Send("bob", "alice", "overflow"); !errors.Is(err, team.ErrTooManyMessages) {
+		t.Fatalf("Send past inbox cap: err = %v, want ErrTooManyMessages", err)
+	}
+	// Draining frees the budget: a subsequent Send succeeds again.
+	if _, err := tm.Drain("alice"); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if err := tm.Send("bob", "alice", "after drain"); err != nil {
+		t.Fatalf("Send after drain: %v", err)
+	}
+}
+
+// TestAddMemberCap asserts AddMember returns ErrTooManyMembers at MaxMembers
+// (Fix F).
+func TestAddMemberCap(t *testing.T) {
+	tm := team.New("spike")
+	for i := 0; i < team.MaxMembers; i++ {
+		if err := tm.AddMember(fmt.Sprintf("m%d", i), ""); err != nil {
+			t.Fatalf("AddMember #%d: %v", i, err)
+		}
+	}
+	if err := tm.AddMember("one-too-many", ""); !errors.Is(err, team.ErrTooManyMembers) {
+		t.Fatalf("AddMember past cap: err = %v, want ErrTooManyMembers", err)
 	}
 }
