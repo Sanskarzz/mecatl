@@ -266,6 +266,13 @@ message Event {
   // result bodies) — only ids, a goal label, tool names/counts, usage, stop, and
   // duration — so the context-isolation guarantee is preserved.
   Subagent subagent = 12;
+  // team is set on the three team.* events (team.start / team.member / team.end):
+  // a BOUNDED projection of an in-process Team tool run. Unlike subagent (metadata
+  // only), it is fuller — team.member carries member message text and CAPPED
+  // tool-call/result previews — but it is STILL bounded (every preview is capped)
+  // and a member's permission.ask is DROPPED, never forwarded. The per-member
+  // transcripts never enter the parent conversation (only the joined summary does).
+  Team team = 13;
 }
 
 // HookDecision is the outcome a hook fire produced. Mirrors
@@ -327,6 +334,70 @@ message Subagent {
   // duration_ms is the child run's wall-clock duration in milliseconds
   // (subagent.end; best-effort).
   int64 duration_ms = 9;
+}
+
+// TeamMemberSpec is one roster entry forwarded on team.start. Mirrors
+// session.TeamMemberSpec. It carries ONLY model-supplied metadata about the team's
+// shape — never any member content (no prompt body, no transcript).
+message TeamMemberSpec {
+  // name is the member's unique handle.
+  string name = 1;
+  // role is the member's short role label.
+  string role = 2;
+  // mutating reports whether the member runs in an isolated fork with
+  // workspace-mutating tools (true) or shares the base read-only (false).
+  bool mutating = 3;
+  // lead marks the coordinating member.
+  bool lead = 4;
+}
+
+// Team is the BOUNDED observability projection carried by the three team.* events.
+// Mirrors session.TeamPayload. Unlike Subagent (metadata only), it is deliberately
+// FULLER — a team is meant to be watched — so team.member carries the member's
+// message text and CAPPED previews of its tool calls/results. It is STILL bounded:
+// every preview (text/detail) is capped, and a member's permission.ask is DROPPED
+// entirely (never projected). The per-member transcripts never enter the parent
+// conversation — only the Team tool's joined-summary result does.
+//
+// Which fields are set depends on the event kind:
+//   - team.start:  parent_call_id, team_id, roster.
+//   - team.member: parent_call_id, team_id, member, inner_kind, and the subset of
+//     {text, tool_name, detail, is_error, usage} relevant to inner_kind.
+//   - team.end:    parent_call_id, team_id, rounds, stop, usage (cumulative).
+message Team {
+  // parent_call_id is the parent's Team tool-call id, attributing the event to the
+  // originating Team card.
+  string parent_call_id = 1;
+  // team_id is the team id, distinguishing concurrent teams.
+  string team_id = 2;
+  // roster is the team's membership as the model formed it (team.start). Metadata
+  // only, never member content.
+  repeated TeamMemberSpec roster = 3;
+  // member is the name of the member whose activity this event projects
+  // (team.member).
+  string member = 4;
+  // inner_kind is the member's underlying session event kind being projected —
+  // e.g. message.delta, tool.call, tool.result, turn.end, result (team.member).
+  // permission.ask is never projected.
+  string inner_kind = 5;
+  // text is the member's message/result text or a CAPPED preview of it
+  // (team.member, for message.delta / result inner kinds).
+  string text = 6;
+  // tool_name is the name of a member tool that was called (team.member, for
+  // tool.call / tool.result inner kinds).
+  string tool_name = 7;
+  // detail is a CAPPED preview of a member tool call's args (tool.call) or result
+  // body (tool.result) — never the raw, unbounded body (team.member).
+  string detail = 8;
+  // is_error reports whether a member tool.result failed (team.member).
+  bool is_error = 9;
+  // rounds is the number of scheduling rounds that ran work (team.end).
+  int32 rounds = 10;
+  // stop is the team run's terminal stop reason (team.end).
+  string stop = 11;
+  // usage is the member's per-event usage (team.member turn.end/result) or, on
+  // team.end, the TEAM TOTAL — the sum of every member's per-turn usage.
+  Usage usage = 12;
 }
 
 // ToolCall is a request from the model to invoke a named tool. Mirrors

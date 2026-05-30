@@ -505,6 +505,29 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		slog.Info("Fork tool DISABLED")
 	}
 
+	// Team tool: forms a team of coordinating subagents in-process, driving a
+	// Supervisor over the SAME member-engine wiring the gRPC CreateTeam path uses
+	// (buildTeamWiring is the single source of that wiring truth, so the two paths
+	// cannot drift). Registered ONLY when teams are enabled. It is mutate-serial
+	// (unlike the read-parallel Task/Fork) and defaults to ASK (see defaultRules).
+	if cfg.EnableTeams {
+		// buildTeamWiring always returns a non-nil forker and hooks runner under
+		// EnableTeams, so they are wired unconditionally (no nil guards).
+		factory, fk, teamHooks := buildTeamWiring(ctx, cfg, provider, mainMgr)
+		// factory is a server.MemberEngineFactory; NewTeamTool wants the
+		// agent.TeamMemberEngineFactory of identical underlying shape — an explicit
+		// conversion bridges the two named types (both func(*team.Team, MemberSpec)
+		// MemberBuild), so a single wiring serves both team paths.
+		cat.MustRegister(agent.NewTeamTool(
+			agent.TeamMemberEngineFactory(factory),
+			agent.WithTeamToolForker(fk),
+			agent.WithTeamToolHooks(teamHooks),
+		))
+		slog.Info("Team tool ENABLED (in-process coordinating subagents; mutate-serial, ASK)")
+	} else {
+		slog.Info("Team tool DISABLED")
+	}
+
 	// Memory tools: opt-in, registered only when a per-project memory directory is
 	// configured via MemoryDir.
 	if cfg.MemoryDir != "" {
@@ -836,19 +859,26 @@ func buildTaskTool(ctx context.Context, cfg Config, provider port.LLMProvider, h
 	), mcpClose
 }
 
-// applyTeamConfig wires the opt-in agent-teams capability into the server.Config.
-// When cfg.EnableTeams is false it leaves MemberEngine nil (CreateTeam stays
-// ErrTeamsDisabled). When enabled it installs the per-member engine factory, the
-// workspace forker (so a Mutating member runs in an isolated fork — same wiring as
-// buildCatalog's Fork branch), and ONE shared team hooks runner threaded through
-// BOTH the supervisor (TeammateIdle) and the member coordination tools (the
-// TaskCreated / TaskCompleted gates), so a team's lifecycle hooks all flow through
-// a single runner. MaxTeams is left at zero so the server applies its own default.
-func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvider, mainMgr *mcp.Manager) {
-	if !cfg.EnableTeams {
-		slog.Info("agent teams DISABLED (set --enable-teams to enable; experimental)")
-		return
-	}
+// buildTeamWiring constructs the three agent-team dependencies — the unified
+// per-member engine factory, the workspace forker, and the shared team hooks runner
+// — that BOTH team entry points consume: the parent catalog's Team tool
+// (buildCatalog) and the gRPC CreateTeam path (applyTeamConfig → server.Config). It
+// is the single source of that wiring truth, so the two paths cannot drift; each
+// caller invokes it and gets a functionally identical factory. It is only ever
+// called under cfg.EnableTeams.
+//
+// The factory is server.MemberEngineFactory, which is the SAME shape as
+// agent.TeamMemberEngineFactory (both `func(*team.Team, MemberSpec) MemberBuild`), so
+// one factory value satisfies both the gRPC Config.MemberEngine and NewTeamTool.
+//
+// It resolves the agent-definition registry and skill index ONCE (exactly as
+// buildCatalog shares the registry with the Task tool), and uses
+// forker.WithForceCopy so a Mutating member runs in a FULLY isolated fork (own .git
+// object DB/refs), matching buildCatalog's Fork branch wiring. The single teamHooks
+// runner is threaded through both the supervisor (TeammateIdle) and the member
+// coordination tools (TaskCreated / TaskCompleted gates). mainMgr supplies the
+// per-agent MCP base manager so a member's agent definition can scope its MCP servers.
+func buildTeamWiring(ctx context.Context, cfg Config, provider port.LLMProvider, mainMgr *mcp.Manager) (server.MemberEngineFactory, tool.WorkspaceForker, port.HookRunner) {
 	// A single hooks runner shared by the supervisor and the member coordination
 	// tools. hookexec.New(nil) matches buildEngine's default: the configured-hook map
 	// is not yet wired from cfg anywhere, so this is an inert (no-op) runner today,
@@ -858,17 +888,35 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvide
 	// factory, exactly as buildCatalog shares it with the Task tool — ONE registry,
 	// TWO consumers. A member whose spec.AgentType names a def adopts that def's
 	// scoped catalog/model/prompt/permissionMode.
-	agentReg := resolveAgentRegistry(context.Background(), cfg)
-	skillIdx := resolveSkillIndex(context.Background(), cfg)
-	svcCfg.MemberEngine = buildMemberEngine(cfg, provider, teamHooks, agentReg, skillIdx, buildCommandRunner(cfg), mainMgr)
+	agentReg := resolveAgentRegistry(ctx, cfg)
+	skillIdx := resolveSkillIndex(ctx, cfg)
+	factory := buildMemberEngine(cfg, provider, teamHooks, agentReg, skillIdx, buildCommandRunner(cfg), mainMgr)
 	// WithForceCopy: Mutating team members run Bash (incl. git) in their forks, so
 	// they get FULLY isolated forks (a full copy incl. .git — own object DB/refs)
 	// rather than a worktree that shares the base repo's .git, keeping a member's
 	// git commit/push/update-ref from escaping into the base repo. (Read-only
 	// members share the base directly and never fork, so they're unaffected.)
-	svcCfg.Forker = forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }, forker.WithForceCopy())
+	fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }, forker.WithForceCopy())
+	return factory, fk, teamHooks
+}
+
+// applyTeamConfig wires the opt-in agent-teams capability into the server.Config.
+// When cfg.EnableTeams is false it leaves MemberEngine nil (CreateTeam stays
+// ErrTeamsDisabled). When enabled it installs the per-member engine factory, the
+// workspace forker, and the shared team hooks runner — all from buildTeamWiring, the
+// SAME wiring the Team tool uses (buildCatalog) — so the gRPC CreateTeam path and the
+// Team tool cannot drift. MaxTeams is left at zero so the server applies its own
+// default.
+func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvider, mainMgr *mcp.Manager) {
+	if !cfg.EnableTeams {
+		slog.Info("agent teams DISABLED (set --enable-teams to enable; experimental)")
+		return
+	}
+	factory, fk, teamHooks := buildTeamWiring(context.Background(), cfg, provider, mainMgr)
+	svcCfg.MemberEngine = factory
+	svcCfg.Forker = fk
 	svcCfg.TeamHooks = teamHooks
-	slog.Info("agent teams ENABLED (experimental; CreateTeam/SpawnTeammate/RunTeam)")
+	slog.Info("agent teams ENABLED (experimental; CreateTeam/SpawnTeammate/RunTeam + Team tool)")
 }
 
 // buildMemberEngine returns the per-member engine factory the server uses to build
@@ -1057,6 +1105,9 @@ func defaultRules() []governance.Rule {
 		{Scope: governance.ScopeManaged, Tool: "Edit", Effect: governance.Ask},
 		{Scope: governance.ScopeManaged, Tool: "Write", Effect: governance.Ask},
 		{Scope: governance.ScopeManaged, Tool: skills.DraftToolName, Effect: governance.Ask},
+		// Team spawns coordinating subagents that may mutate the workspace (Mutating
+		// members), so it ASKS — unlike the read-only Task explorer, which is allowed.
+		{Scope: governance.ScopeManaged, Tool: "Team", Effect: governance.Ask},
 	}
 }
 

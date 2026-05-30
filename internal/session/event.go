@@ -55,6 +55,25 @@ const (
 	// never any child content. The child's terminal summary still folds back into
 	// the parent conversation exclusively via the Task tool's ToolResult.
 	EvSubagentEnd EventType = "subagent.end"
+
+	// EvTeamStart is emitted when a Team tool run begins. It is a BOUNDED
+	// observability projection of an in-process team — it carries the parent call
+	// id, the team id, and the roster the model formed (member names/roles, never
+	// member content). See TeamPayload for the redaction contract.
+	EvTeamStart EventType = "team.start"
+	// EvTeamMember is emitted for each forwarded member-session event during a Team
+	// run. Unlike the metadata-only subagent.tool projection, it is deliberately
+	// FULLER — a team is meant to be watched — so it carries the member's message
+	// text and BOUNDED tool-call/result previews, tagged by member name. It is
+	// STILL bounded and redacted: every preview is capped, and a member's
+	// permission.ask is DROPPED entirely (never forwarded). See TeamPayload.
+	EvTeamMember EventType = "team.member"
+	// EvTeamEnd is emitted when a Team run terminates. It is a BOUNDED projection
+	// carrying only aggregate metadata — the number of rounds, the stop reason, and
+	// the team's cumulative usage — never member content. The team's joined summary
+	// folds back into the parent conversation exclusively via the Team tool's
+	// ToolResult.
+	EvTeamEnd EventType = "team.end"
 )
 
 // HookDecision is the outcome a hook fire produced, so a client can colour and
@@ -161,6 +180,84 @@ type SubagentPayload struct {
 	DurationMs int64
 }
 
+// TeamMemberSpec is one roster entry forwarded on EvTeamStart: the member name,
+// its role label, and the read-only/mutating and lead flags. It is a small value
+// type carrying ONLY model-supplied metadata about the team's shape — never any
+// member content (no prompt body, no transcript). It mirrors the proto
+// TeamMemberSpec.
+type TeamMemberSpec struct {
+	// Name is the member's unique handle.
+	Name string
+	// Role is the member's short role label (the model-supplied role string).
+	Role string
+	// Mutating reports whether the member runs in an isolated fork with
+	// workspace-mutating tools (true) or shares the base read-only (false).
+	Mutating bool
+	// Lead marks the coordinating member.
+	Lead bool
+}
+
+// TeamPayload is the BOUNDED observability projection carried by the three team.*
+// events (EvTeamStart / EvTeamMember / EvTeamEnd). It is the ONLY information
+// about an in-process team's run that surfaces to clients on the event stream.
+//
+// REDACTION CONTRACT — fuller-but-bounded. Unlike SubagentPayload (metadata only),
+// a team is meant to be WATCHED, so this payload deliberately forwards member
+// CONTENT on team.member events: the member's streamed/terminal message text and
+// BOUNDED previews of its tool calls (name + capped arg preview) and tool results
+// (error bool + capped body preview). Every such preview is CAPPED (see
+// maxTeamPreview) so an unbounded args/result body can never be copied verbatim,
+// and a member's permission.ask is DROPPED entirely — it is NEVER forwarded, so a
+// pending-ask reason (which can quote secrets or sensitive args) never reaches the
+// stream. This forwarding is orthogonal to the parent conversation: the team's
+// per-member transcripts NEVER enter the parent Session's Conversation; only the
+// Team tool's joined-summary ToolResult does. So the LLM's context still sees only
+// the summary, exactly like Task/Fork.
+//
+// Which fields are set depends on the event kind:
+//   - EvTeamStart:  ParentCallID, TeamID, Roster.
+//   - EvTeamMember: ParentCallID, TeamID, Member, InnerKind, and the subset of
+//     {Text, ToolName, Detail, IsError, Usage} relevant to InnerKind.
+//   - EvTeamEnd:    ParentCallID, TeamID, Rounds, Stop, Usage (cumulative).
+type TeamPayload struct {
+	// ParentCallID is the parent's Team tool-call id, attributing every team.*
+	// event to the originating Team card. Set on all three kinds.
+	ParentCallID string
+	// TeamID is the team id, distinguishing concurrent teams. Set on all kinds.
+	TeamID string
+	// Roster is the team's membership as the model formed it. Set on EvTeamStart
+	// only. It carries only member metadata, never member content.
+	Roster []TeamMemberSpec
+	// Member is the name of the member whose activity this event projects. Set on
+	// EvTeamMember only.
+	Member string
+	// InnerKind is the member's underlying session event kind being projected
+	// (e.g. "message.delta", "tool.call", "tool.result", "turn.end", "result").
+	// Set on EvTeamMember only. permission.ask is never projected.
+	InnerKind EventType
+	// Text is the member's message/result text or a BOUNDED preview of it. Set on
+	// EvTeamMember for message.delta / result inner kinds.
+	Text string
+	// ToolName is the name of a member tool that was called. Set on EvTeamMember
+	// for tool.call / tool.result inner kinds.
+	ToolName string
+	// Detail is a BOUNDED preview of a member tool call's args (tool.call) or
+	// result body (tool.result) — capped at maxTeamPreview runes. It is never the
+	// raw, unbounded args/result body. Set on EvTeamMember for tool.* inner kinds.
+	Detail string
+	// IsError reports whether a member tool.result failed. Set on EvTeamMember for
+	// the tool.result inner kind.
+	IsError bool
+	// Rounds is the number of scheduling rounds that ran work. Set on EvTeamEnd
+	// only.
+	Rounds int
+	// Stop is the team run's terminal stop reason. Set on EvTeamEnd only.
+	Stop StopReason
+	// Usage is the member's per-event usage (EvTeamMember turn.end/result) or, on
+	// EvTeamEnd, the TEAM TOTAL — the sum of every member's per-turn usage.
+	Usage Usage
+}
+
 // Event is the domain-owned, provider-neutral unit of the streaming model. The
 // loop runs as a producer writing Events to a channel; server adapters relay
 // them to the gRPC server-stream or HTTP SSE.
@@ -192,4 +289,8 @@ type Event struct {
 	// Subagent is set on the three subagent.* events: the REDACTED observability
 	// projection of a Task child run (metadata only, never child content).
 	Subagent *SubagentPayload
+	// Team is set on the three team.* events: the BOUNDED observability projection
+	// of an in-process team run (fuller-but-bounded; member content is capped and
+	// permission.ask is dropped, and never enters the parent conversation).
+	Team *TeamPayload
 }

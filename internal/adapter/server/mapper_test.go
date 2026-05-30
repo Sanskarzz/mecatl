@@ -184,6 +184,55 @@ func TestToProtoTable(t *testing.T) {
 			},
 		},
 		{
+			name: "team.start",
+			in: session.Event{Type: session.EvTeamStart, Seq: 30, Turn: 1,
+				Team: &session.TeamPayload{ParentCallID: "p1", TeamID: "team-p1",
+					Roster: []session.TeamMemberSpec{
+						{Name: "lead", Role: "coordinate", Lead: true},
+						{Name: "worker", Role: "investigate", Mutating: true},
+					}}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				tm := got.GetTeam()
+				if tm == nil || tm.GetParentCallId() != "p1" || tm.GetTeamId() != "team-p1" {
+					t.Fatalf("team.start ids mismatch: %+v", tm)
+				}
+				r := tm.GetRoster()
+				if len(r) != 2 || r[0].GetName() != "lead" || !r[0].GetLead() ||
+					r[1].GetName() != "worker" || !r[1].GetMutating() || r[1].GetLead() {
+					t.Fatalf("team.start roster mismatch: %+v", r)
+				}
+			},
+		},
+		{
+			name: "team.member",
+			in: session.Event{Type: session.EvTeamMember, Seq: 31, Turn: 1,
+				Team: &session.TeamPayload{ParentCallID: "p1", TeamID: "team-p1", Member: "worker",
+					InnerKind: session.EvToolResult, ToolName: "Read", Detail: "capped body", IsError: true}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				tm := got.GetTeam()
+				if tm == nil || tm.GetMember() != "worker" || tm.GetInnerKind() != "tool.result" ||
+					tm.GetToolName() != "Read" || tm.GetDetail() != "capped body" || !tm.GetIsError() {
+					t.Fatalf("team.member payload mismatch: %+v", tm)
+				}
+			},
+		},
+		{
+			name: "team.end",
+			in: session.Event{Type: session.EvTeamEnd, Seq: 32, Turn: 1,
+				Team: &session.TeamPayload{ParentCallID: "p1", TeamID: "team-p1", Rounds: 3,
+					Stop:  session.StopEndTurn,
+					Usage: session.Usage{InputTokens: 50, OutputTokens: 9}}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				tm := got.GetTeam()
+				if tm == nil || tm.GetRounds() != 3 || tm.GetStop() != "end_turn" {
+					t.Fatalf("team.end payload mismatch: %+v", tm)
+				}
+				if tm.GetUsage().GetInputTokens() != 50 || tm.GetUsage().GetOutputTokens() != 9 {
+					t.Fatalf("team.end usage mismatch: %+v", tm.GetUsage())
+				}
+			},
+		},
+		{
 			name: "compaction",
 			in:   session.Event{Type: session.EvCompaction, Seq: 8, Turn: 2, Text: "summary"},
 			assert: func(t *testing.T, got *mecatlv1.Event) {
@@ -233,7 +282,8 @@ func TestToProtoTable(t *testing.T) {
 func TestToProtoNoSubmessages(t *testing.T) {
 	got := toProto(session.Event{Type: session.EvTurnStart})
 	if got.GetToolCall() != nil || got.GetToolResult() != nil || got.GetAsk() != nil ||
-		got.GetResult() != nil || got.GetTurnEnd() != nil || got.GetUsage() != nil {
+		got.GetResult() != nil || got.GetTurnEnd() != nil || got.GetUsage() != nil ||
+		got.GetSubagent() != nil || got.GetTeam() != nil {
 		t.Fatalf("unexpected submessage on bare event: %+v", got)
 	}
 }

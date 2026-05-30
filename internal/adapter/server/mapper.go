@@ -61,7 +61,41 @@ func toProto(ev session.Event) *mecatlv1.Event {
 	if ev.Subagent != nil {
 		out.Subagent = toProtoSubagent(*ev.Subagent)
 	}
+	if ev.Team != nil {
+		out.Team = toProtoTeam(*ev.Team)
+	}
 	return out
+}
+
+// toProtoTeam maps a session.TeamPayload to its proto Team form: the bounded
+// observability projection of a Team tool run. Usage is always emitted (zero on the
+// start kind); the per-kind field population mirrors the domain payload's documented
+// contract. The previews are already capped in the domain (projectTeamEvent /
+// clampPreview); this mapper copies them verbatim — it adds no further redaction.
+func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
+	roster := make([]*mecatlv1.TeamMemberSpec, 0, len(p.Roster))
+	for _, m := range p.Roster {
+		roster = append(roster, &mecatlv1.TeamMemberSpec{
+			Name:     m.Name,
+			Role:     m.Role,
+			Mutating: m.Mutating,
+			Lead:     m.Lead,
+		})
+	}
+	return &mecatlv1.Team{
+		ParentCallId: p.ParentCallID,
+		TeamId:       p.TeamID,
+		Roster:       roster,
+		Member:       p.Member,
+		InnerKind:    string(p.InnerKind),
+		Text:         p.Text,
+		ToolName:     p.ToolName,
+		Detail:       p.Detail,
+		IsError:      p.IsError,
+		Rounds:       clampInt32(p.Rounds),
+		Stop:         string(p.Stop),
+		Usage:        toProtoUsage(p.Usage),
+	}
 }
 
 // toProtoSubagent maps a session.SubagentPayload to its proto Subagent form: the
