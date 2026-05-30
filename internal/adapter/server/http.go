@@ -1,12 +1,14 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/session"
 )
 
@@ -41,6 +43,12 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h.mux.HandleFunc("POST /v1/mcp/prompts/get", h.getMcpPrompt)
 	h.mux.HandleFunc("GET /v1/mcp/sources", h.listMcpSources)
 	h.mux.HandleFunc("GET /v1/mcp/toolhive/groups", h.listToolHiveGroups)
+	h.mux.HandleFunc("POST /v1/teams", h.createTeam)
+	h.mux.HandleFunc("POST /v1/teams/{id}/members", h.spawnTeammate)
+	h.mux.HandleFunc("POST /v1/teams/{id}/messages", h.sendTeammateMessage)
+	h.mux.HandleFunc("POST /v1/teams/{id}/run", h.runTeam)
+	h.mux.HandleFunc("GET /v1/teams/{id}", h.listTeam)
+	h.mux.HandleFunc("DELETE /v1/teams/{id}", h.cleanupTeam)
 	return h
 }
 
@@ -224,6 +232,202 @@ func (h *HTTPHandler) cancel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// --- team request bodies -----------------------------------------------------
+
+// teammateSpecBody is one member's enrolment fields, shared by createTeam's
+// roster and spawnTeammate. It mirrors the proto TeammateSpec (minus team_id)
+// and maps to agent.MemberSpec the same way fromProtoTeammateSpecs does.
+type teammateSpecBody struct {
+	Name          string `json:"name"`
+	AgentType     string `json:"agent_type,omitempty"`
+	Lead          bool   `json:"lead,omitempty"`
+	Mutating      bool   `json:"mutating,omitempty"`
+	InitialPrompt string `json:"initial_prompt,omitempty"`
+}
+
+// toMemberSpec maps a JSON spec body to the agent.MemberSpec the Service takes.
+func (b teammateSpecBody) toMemberSpec() agent.MemberSpec {
+	return agent.MemberSpec{
+		Name:          b.Name,
+		AgentType:     b.AgentType,
+		Lead:          b.Lead,
+		Mutating:      b.Mutating,
+		InitialPrompt: b.InitialPrompt,
+	}
+}
+
+type createTeamBody struct {
+	Workspace string             `json:"workspace"`
+	Name      string             `json:"name,omitempty"`
+	Members   []teammateSpecBody `json:"members,omitempty"`
+}
+
+type sendTeammateMessageBody struct {
+	From string `json:"from,omitempty"`
+	To   string `json:"to"`
+	Body string `json:"body"`
+}
+
+// --- team handlers -----------------------------------------------------------
+
+// createTeam handles POST /v1/teams, enrolling the optional initial roster
+// atomically. The proto CreateTeamResponse is JSON-encoded so the HTTP and gRPC
+// surfaces share one shape.
+func (h *HTTPHandler) createTeam(w http.ResponseWriter, r *http.Request) {
+	var body createTeamBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.Workspace == "" {
+		writeError(w, http.StatusBadRequest, "workspace is required")
+		return
+	}
+	var specs []agent.MemberSpec
+	if len(body.Members) > 0 {
+		specs = make([]agent.MemberSpec, 0, len(body.Members))
+		for _, m := range body.Members {
+			specs = append(specs, m.toMemberSpec())
+		}
+	}
+	id, enrolled, err := h.svc.CreateTeam(r.Context(), body.Workspace, body.Name, specs)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, &mecatlv1.CreateTeamResponse{
+		TeamId:  id,
+		Members: toProtoTeamMembers(enrolled),
+	})
+}
+
+// spawnTeammate handles POST /v1/teams/{id}/members.
+func (h *HTTPHandler) spawnTeammate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body teammateSpecBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	m, err := h.svc.SpawnTeammate(r.Context(), id, body.toMemberSpec())
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, &mecatlv1.SpawnTeammateResponse{Member: toProtoTeamMember(m)})
+}
+
+// sendTeammateMessage handles POST /v1/teams/{id}/messages.
+func (h *HTTPHandler) sendTeammateMessage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body sendTeammateMessageBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.To == "" || body.Body == "" {
+		writeError(w, http.StatusBadRequest, "to and body are required")
+		return
+	}
+	if err := h.svc.SendTeammateMessage(r.Context(), id, body.From, body.To, body.Body); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// runTeam handles POST /v1/teams/{id}/run, driving the team to quiescence and
+// streaming every member event (mapped to the proto TeamEvent, JSON-encoded) as
+// one SSE frame — mirroring the prompt handler. RunTeam serialises sink calls
+// through a single forwarder, so writing from the sink is safe. A write failure
+// flags and cancels the run so the team stops promptly.
+func (h *HTTPHandler) runTeam(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	// Deriving from r.Context() means a client disconnect already cancels the
+	// run; the explicit cancel lets a write failure stop the team promptly too.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	headersWritten := false
+	enc := json.NewEncoder(w)
+	var writeErr bool
+	_, err := h.svc.RunTeam(ctx, id, func(te agent.TeamEvent) {
+		if writeErr {
+			return
+		}
+		// Write the stream headers lazily on the first event so that an early
+		// lookup failure (returned below) can still surface as a JSON error.
+		if !headersWritten {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.WriteHeader(http.StatusOK)
+			flusher.Flush()
+			headersWritten = true
+		}
+		if _, e := w.Write([]byte("data: ")); e != nil {
+			writeErr = true
+			cancel()
+			return
+		}
+		if e := enc.Encode(&mecatlv1.TeamEvent{Member: te.Member, Event: toProto(te.Event)}); e != nil { // Encode appends a newline
+			writeErr = true
+			cancel()
+			return
+		}
+		if _, e := w.Write([]byte("\n")); e != nil {
+			writeErr = true
+			cancel()
+			return
+		}
+		flusher.Flush()
+	})
+	if err != nil {
+		// A lookup/precondition failure before any event: nothing has been
+		// written yet, so a JSON error is still well-formed.
+		if !headersWritten {
+			writeServiceError(w, err)
+		}
+		return
+	}
+}
+
+// listTeam handles GET /v1/teams/{id}. The proto ListTeamResponse is
+// JSON-encoded so the HTTP and gRPC surfaces share one shape.
+func (h *HTTPHandler) listTeam(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	members, tasks, quiescent, err := h.svc.ListTeam(r.Context(), id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, &mecatlv1.ListTeamResponse{
+		Members:   toProtoTeamMembers(members),
+		Tasks:     toProtoTeamTasks(tasks),
+		Quiescent: quiescent,
+	})
+}
+
+// cleanupTeam handles DELETE /v1/teams/{id}.
+func (h *HTTPHandler) cleanupTeam(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.svc.CleanupTeam(r.Context(), id); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // --- MCP inspection handlers -------------------------------------------------
 
 // getMcpPromptBody is the POST body for /v1/mcp/prompts/get.
@@ -350,6 +554,17 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrFailedPrecondition):
 		writeError(w, http.StatusPreconditionFailed, err.Error())
+	case errors.Is(err, ErrTeamsDisabled):
+		// Teams are not enabled (no MemberEngine wired): a precondition for any
+		// team RPC is unmet. The gRPC side maps it to FailedPrecondition.
+		writeError(w, http.StatusPreconditionFailed, err.Error())
+	case errors.Is(err, ErrTeamRunning):
+		// The team is already running: a second run, a late spawn, or a cleanup
+		// of a live team. FailedPrecondition, like the gRPC side.
+		writeError(w, http.StatusPreconditionFailed, err.Error())
+	case errors.Is(err, ErrTooManyTeams):
+		// The live-team registry is at MaxTeams (gRPC: ResourceExhausted).
+		writeError(w, http.StatusTooManyRequests, err.Error())
 	case errors.Is(err, ErrNoActiveRun):
 		// Known session, but its run is not live in this process (e.g. the
 		// stream was lost across a restart): nothing to deliver the control to.

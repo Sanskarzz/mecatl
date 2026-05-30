@@ -209,3 +209,186 @@ func TestHTTPGetSessionNotFound(t *testing.T) {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
 }
+
+// --- team HTTP/SSE parity ----------------------------------------------------
+
+// parseTeamSSE reads an SSE body and returns the decoded proto TeamEvents from
+// each `data:` line until the stream ends — the team analogue of parseSSE.
+func parseTeamSSE(t *testing.T, r *bufio.Reader) []*mecatlv1.TeamEvent {
+	t.Helper()
+	var out []*mecatlv1.TeamEvent
+	for {
+		line, err := r.ReadString('\n')
+		if len(line) > 0 {
+			trimmed := strings.TrimRight(line, "\r\n")
+			if data, ok := strings.CutPrefix(trimmed, "data: "); ok {
+				var te mecatlv1.TeamEvent
+				if jerr := json.Unmarshal([]byte(data), &te); jerr != nil {
+					t.Fatalf("decode SSE data %q: %v", data, jerr)
+				}
+				out = append(out, &te)
+			}
+		}
+		if err != nil {
+			return out
+		}
+	}
+}
+
+// TestHTTPTeamLifecycle drives the full team REST surface: create with a roster
+// (lead + read-only worker) → 201 with the enrolled members; GET lists them;
+// POST /run streams TeamEvents and closes; POST /messages → 204; DELETE → 204.
+func TestHTTPTeamLifecycle(t *testing.T) {
+	llm := mockllm.New(mockllm.TextTurn("done"))
+	svc := teamService(t, llm)
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+
+	// POST /v1/teams with an initial roster → 201, body has team_id + members.
+	createBody := `{"workspace":"/ws","name":"test","members":[` +
+		`{"name":"lead","lead":true,"initial_prompt":"go"},` +
+		`{"name":"worker"}]}`
+	resp, err := http.Post(srv.URL+"/v1/teams", "application/json", strings.NewReader(createBody))
+	if err != nil {
+		t.Fatalf("POST /v1/teams: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201", resp.StatusCode)
+	}
+	var created mecatlv1.CreateTeamResponse
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	teamID := created.GetTeamId()
+	if teamID == "" {
+		t.Fatal("empty team id")
+	}
+	if got := created.GetMembers(); len(got) != 2 || got[0].GetName() != "lead" || got[1].GetName() != "worker" {
+		t.Fatalf("create members = %v, want [lead worker]", created.GetMembers())
+	}
+
+	// GET /v1/teams/{id} → 200 lists both members.
+	gresp, err := http.Get(srv.URL + "/v1/teams/" + teamID)
+	if err != nil {
+		t.Fatalf("GET /v1/teams/{id}: %v", err)
+	}
+	defer gresp.Body.Close()
+	if gresp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, want 200", gresp.StatusCode)
+	}
+	var listed mecatlv1.ListTeamResponse
+	if err := json.NewDecoder(gresp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed.GetMembers()) != 2 {
+		t.Fatalf("list members = %d, want 2", len(listed.GetMembers()))
+	}
+
+	// POST /v1/teams/{id}/messages → 204 (operator → lead).
+	msgBody := `{"to":"lead","body":"ping"}`
+	mresp, err := http.Post(srv.URL+"/v1/teams/"+teamID+"/messages", "application/json", strings.NewReader(msgBody))
+	if err != nil {
+		t.Fatalf("POST messages: %v", err)
+	}
+	mresp.Body.Close()
+	if mresp.StatusCode != http.StatusNoContent {
+		t.Fatalf("messages status = %d, want 204", mresp.StatusCode)
+	}
+
+	// POST /v1/teams/{id}/run → 200 text/event-stream; at least the lead's events
+	// arrive (a result frame) and the stream closes.
+	rresp, err := http.Post(srv.URL+"/v1/teams/"+teamID+"/run", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("POST run: %v", err)
+	}
+	defer rresp.Body.Close()
+	if rresp.StatusCode != http.StatusOK {
+		t.Fatalf("run status = %d, want 200", rresp.StatusCode)
+	}
+	if ct := rresp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("run content-type = %q", ct)
+	}
+	events := parseTeamSSE(t, bufio.NewReader(rresp.Body))
+	var sawLeadResult bool
+	for _, te := range events {
+		if te.GetMember() == "lead" && te.GetEvent().GetType() == "result" {
+			sawLeadResult = true
+		}
+	}
+	if !sawLeadResult {
+		t.Fatalf("no lead result frame in stream of %d events", len(events))
+	}
+
+	// DELETE /v1/teams/{id} → 204.
+	dreq, _ := http.NewRequest(http.MethodDelete, srv.URL+"/v1/teams/"+teamID, nil)
+	dresp, err := http.DefaultClient.Do(dreq)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	dresp.Body.Close()
+	if dresp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want 204", dresp.StatusCode)
+	}
+}
+
+// TestHTTPTeamsDisabled asserts POST /v1/teams against a Service with no
+// MemberEngine → 412 Precondition Failed (ErrTeamsDisabled).
+func TestHTTPTeamsDisabled(t *testing.T) {
+	svc := newService(t, mockllm.New(), allowRules()) // no MemberEngine wired
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/teams", "application/json", strings.NewReader(`{"workspace":"/ws"}`))
+	if err != nil {
+		t.Fatalf("POST /v1/teams: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("status = %d, want 412", resp.StatusCode)
+	}
+}
+
+// TestHTTPTeamNotFound asserts GET /v1/teams/{id} on an unknown id → 404.
+func TestHTTPTeamNotFound(t *testing.T) {
+	svc := teamService(t, mockllm.New(mockllm.TextTurn("x")))
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/v1/teams/team-nope")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestHTTPTeamTooMany asserts CreateTeam past MaxTeams → 429 Too Many Requests
+// (ErrTooManyTeams).
+func TestHTTPTeamTooMany(t *testing.T) {
+	svc := teamServiceMaxTeams(t, mockllm.New(mockllm.TextTurn("x")), 1)
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+
+	// First create fills the only slot.
+	r1, err := http.Post(srv.URL+"/v1/teams", "application/json", strings.NewReader(`{"workspace":"/ws"}`))
+	if err != nil {
+		t.Fatalf("POST #1: %v", err)
+	}
+	r1.Body.Close()
+	if r1.StatusCode != http.StatusCreated {
+		t.Fatalf("create #1 status = %d, want 201", r1.StatusCode)
+	}
+
+	// Second create is over the cap → 429.
+	r2, err := http.Post(srv.URL+"/v1/teams", "application/json", strings.NewReader(`{"workspace":"/ws"}`))
+	if err != nil {
+		t.Fatalf("POST #2: %v", err)
+	}
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("create #2 status = %d, want 429", r2.StatusCode)
+	}
+}
