@@ -47,6 +47,7 @@ import (
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/prompt"
 	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/team"
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
@@ -134,6 +135,12 @@ type Config struct {
 	EnableFork    bool
 	EnableRepoMap bool
 
+	// EnableTeams turns on the agent-teams capability (the CreateTeam /
+	// SpawnTeammate / RunTeam RPCs). It is OPT-IN and EXPERIMENTAL: default off.
+	// When false, server.Config.MemberEngine stays nil and the team RPCs return
+	// ErrTeamsDisabled.
+	EnableTeams bool
+
 	// MCP: static servers, the resource meta-tools toggle, the prompt-expander
 	// toggle, and the live ToolHive workload source.
 	MCPServers       []mcp.ServerConfig
@@ -178,14 +185,17 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	}
 	logMCPInventory(mcpInventory)
 
-	svc, err := server.NewService(server.Config{
+	svcCfg := server.Config{
 		Engine:        engine,
 		Store:         store,
 		Workspaces:    osfsWorkspaceFactory(),
 		DefaultLimits: defaultLimits(),
 		MCPProvider:   mcpProvider,
 		MCPSources:    mcpInventory,
-	})
+	}
+	applyTeamConfig(&svcCfg, cfg, provider)
+
+	svc, err := server.NewService(svcCfg)
 	if err != nil {
 		mcpClose()
 		return nil, fmt.Errorf("build service: %w", err)
@@ -665,6 +675,74 @@ func buildChildEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 // read-only explorer toolset.
 func buildTaskTool(cfg Config, provider port.LLMProvider, hooks port.HookRunner) tool.Tool {
 	return agent.NewTaskTool(buildChildEngine(cfg, provider), agent.WithSubagentStopHook(hooks))
+}
+
+// applyTeamConfig wires the opt-in agent-teams capability into the server.Config.
+// When cfg.EnableTeams is false it leaves MemberEngine nil (CreateTeam stays
+// ErrTeamsDisabled). When enabled it installs the per-member engine factory, the
+// workspace forker (so a Mutating member runs in an isolated fork — same wiring as
+// buildCatalog's Fork branch), and ONE shared team hooks runner threaded through
+// BOTH the supervisor (TeammateIdle) and the member coordination tools (the
+// TaskCreated / TaskCompleted gates), so a team's lifecycle hooks all flow through
+// a single runner. MaxTeams is left at zero so the server applies its own default.
+func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvider) {
+	if !cfg.EnableTeams {
+		slog.Info("agent teams DISABLED (set --enable-teams to enable; experimental)")
+		return
+	}
+	// A single hooks runner shared by the supervisor and the member coordination
+	// tools. hookexec.New(nil) matches buildEngine's default: the configured-hook map
+	// is not yet wired from cfg anywhere, so this is an inert (no-op) runner today,
+	// but it is the injection seam once it is.
+	teamHooks := hookexec.New(nil)
+	svcCfg.MemberEngine = buildMemberEngine(cfg, provider, teamHooks)
+	svcCfg.Forker = forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
+	svcCfg.TeamHooks = teamHooks
+	slog.Info("agent teams ENABLED (experimental; CreateTeam/SpawnTeammate/RunTeam)")
+}
+
+// buildMemberEngine returns the per-member engine factory the server uses to build
+// each team member's Engine. It mirrors buildChildEngine's allow-all, non-interactive
+// shape but shapes the catalog from the member spec:
+//
+//   - Base (always, read-only): Read, Grep, Glob.
+//   - Mutating member only: Edit, Write, and the Bash tool when a command runner is
+//     available. A read-only (base-sharing) member gets NONE of these — the
+//     supervisor's AddMember REJECTS a non-Mutating member whose catalog holds a
+//     workspace-mutating tool, so handing a read-only member Edit/Write/Bash would
+//     fail Spawn.
+//   - Always: the team coordination tools (MemberTools) bound to the shared team and
+//     this member's name, sharing teamHooks with the supervisor.
+//
+// It NEVER includes Task or Fork: a member must not recurse or fan out further.
+func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.HookRunner) server.MemberEngineFactory {
+	return func(t *team.Team, spec agent.MemberSpec) *agent.Engine {
+		cat := tool.NewCatalog()
+		cat.MustRegister(tools.ReadTool{})
+		cat.MustRegister(tools.GrepTool{})
+		cat.MustRegister(tools.GlobTool{})
+		if spec.Mutating {
+			cat.MustRegister(tools.EditTool{})
+			cat.MustRegister(tools.WriteTool{})
+			if runner := buildCommandRunner(cfg); runner != nil {
+				cat.MustRegister(tools.NewBashTool(runner))
+			}
+		}
+		for _, mt := range agent.MemberTools(t, spec.Name, teamHooks) {
+			cat.MustRegister(mt)
+		}
+
+		return agent.NewEngine(agent.Deps{
+			LLM:                 provider,
+			Catalog:             cat,
+			Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
+			Hooks:               hookexec.New(nil),
+			PromptConfig:        promptConfig(cfg),
+			Model:               cfg.Model,
+			ContextWindowTokens: defaultContextWindowTokens,
+			CompactionRatio:     defaultCompactionRatio,
+		})
+	}
 }
 
 // promptConfig builds the system-prompt configuration. The volatile Env values
