@@ -13,16 +13,37 @@ import (
 // grpc_team.go implements the agent-team RPCs over the shared Service. Event
 // mapping reuses toProto (mapper.go); only the per-member tag is new.
 
-// CreateTeam allocates a new agent team and returns its id.
+// CreateTeam allocates a new agent team and returns its id, enrolling the optional
+// initial roster atomically (any member failure abandons the whole team). The
+// enrolled roster is echoed back so the caller need not follow up with ListTeam.
 func (h *HarnessServer) CreateTeam(ctx context.Context, req *mecatlv1.CreateTeamRequest) (*mecatlv1.CreateTeamResponse, error) {
 	if req.GetWorkspace() == "" {
 		return nil, status.Error(codes.InvalidArgument, "workspace is required")
 	}
-	id, err := h.svc.CreateTeam(ctx, req.GetWorkspace(), req.GetName())
+	id, enrolled, err := h.svc.CreateTeam(ctx, req.GetWorkspace(), req.GetName(), fromProtoTeammateSpecs(req.GetMembers()))
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	return &mecatlv1.CreateTeamResponse{TeamId: id}, nil
+	return &mecatlv1.CreateTeamResponse{TeamId: id, Members: toProtoTeamMembers(enrolled)}, nil
+}
+
+// fromProtoTeammateSpecs maps the proto initial-roster specs to agent.MemberSpec,
+// the per-member fields shared with SpawnTeammate (minus team_id).
+func fromProtoTeammateSpecs(specs []*mecatlv1.TeammateSpec) []agent.MemberSpec {
+	if len(specs) == 0 {
+		return nil
+	}
+	out := make([]agent.MemberSpec, 0, len(specs))
+	for _, sp := range specs {
+		out = append(out, agent.MemberSpec{
+			Name:          sp.GetName(),
+			AgentType:     sp.GetAgentType(),
+			Lead:          sp.GetLead(),
+			Mutating:      sp.GetMutating(),
+			InitialPrompt: sp.GetInitialPrompt(),
+		})
+	}
+	return out
 }
 
 // SpawnTeammate enrols a member in a team and returns its roster entry.

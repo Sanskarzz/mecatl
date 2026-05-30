@@ -41,7 +41,7 @@ func TestBuildMemberEngineReadOnlySpawnSucceeds(t *testing.T) {
 	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil))
 
 	ctx := context.Background()
-	teamID, err := svc.CreateTeam(ctx, t.TempDir(), "test")
+	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", nil)
 	if err != nil {
 		t.Fatalf("CreateTeam: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestBuildMemberEngineMutatingSpawnSucceeds(t *testing.T) {
 	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil))
 
 	ctx := context.Background()
-	teamID, err := svc.CreateTeam(ctx, t.TempDir(), "test")
+	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", nil)
 	if err != nil {
 		t.Fatalf("CreateTeam: %v", err)
 	}
@@ -82,15 +82,18 @@ func TestTeamsEnabledEndToEnd(t *testing.T) {
 	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil))
 
 	ctx := context.Background()
-	teamID, err := svc.CreateTeam(ctx, t.TempDir(), "test")
+	// Atomic create+populate: the initial roster is enrolled by CreateTeam itself, so
+	// no separate SpawnTeammate call is needed before RunTeam.
+	teamID, enrolled, err := svc.CreateTeam(ctx, t.TempDir(), "test",
+		[]agent.MemberSpec{{Name: "lead", Lead: true, InitialPrompt: "go"}})
 	if err != nil {
 		t.Fatalf("CreateTeam: %v", err)
 	}
 	if errors.Is(err, server.ErrTeamsDisabled) {
 		t.Fatal("CreateTeam returned ErrTeamsDisabled with a factory wired")
 	}
-	if _, err := svc.SpawnTeammate(ctx, teamID, agent.MemberSpec{Name: "lead", Lead: true, InitialPrompt: "go"}); err != nil {
-		t.Fatalf("SpawnTeammate: %v", err)
+	if len(enrolled) != 1 || enrolled[0].Name != "lead" {
+		t.Fatalf("CreateTeam enrolled roster = %+v, want one member named lead", enrolled)
 	}
 
 	outcome, err := svc.RunTeam(ctx, teamID, func(agent.TeamEvent) {})
@@ -118,7 +121,7 @@ func TestTeamsDisabledWhenNoFactory(t *testing.T) {
 	}
 	defer built.Close()
 
-	_, err = built.Service.CreateTeam(context.Background(), "/ws", "test")
+	_, _, err = built.Service.CreateTeam(context.Background(), "/ws", "test", nil)
 	if !errors.Is(err, server.ErrTeamsDisabled) {
 		t.Fatalf("CreateTeam (teams off): err = %v, want ErrTeamsDisabled", err)
 	}
@@ -141,7 +144,7 @@ func TestBuildEnableTeamsRunsTeam(t *testing.T) {
 	defer built.Close()
 
 	ctx := context.Background()
-	teamID, err := built.Service.CreateTeam(ctx, t.TempDir(), "test")
+	teamID, _, err := built.Service.CreateTeam(ctx, t.TempDir(), "test", nil)
 	if errors.Is(err, server.ErrTeamsDisabled) {
 		t.Fatal("CreateTeam returned ErrTeamsDisabled with EnableTeams:true")
 	}

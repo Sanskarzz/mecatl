@@ -80,8 +80,9 @@ service HarnessService {
   // client tagged with the producing member — the headless analogue of
   // Claude Code's split-pane teammates.
 
-  // CreateTeam allocates a new, empty agent team and returns its id. Members are
-  // added with SpawnTeammate, then the team is driven with RunTeam.
+  // CreateTeam allocates a new agent team and returns its id, optionally enrolling
+  // an initial roster in the same atomic call. Members may also be added afterwards
+  // with SpawnTeammate; the team is then driven with RunTeam.
   rpc CreateTeam(CreateTeamRequest) returns (CreateTeamResponse);
 
   // SpawnTeammate enrols a member in an existing team (before RunTeam). A
@@ -496,18 +497,41 @@ message ListToolHiveGroupsResponse {
 
 // --- Agent team messages ----------------------------------------------------
 
-// CreateTeamRequest creates a new agent team over a base workspace.
+// CreateTeamRequest creates a new agent team over a base workspace, optionally
+// with an initial roster enrolled in the same atomic call.
 message CreateTeamRequest {
   // workspace is the base workspace root the team operates against.
   string workspace = 1 [(buf.validate.field).string.min_len = 1];
   // name is an optional human label; the server assigns the canonical id.
   string name = 2;
+  // members is the optional initial roster, enrolled atomically: if any member
+  // fails to enrol the whole team is abandoned. It may be empty (the client can
+  // still SpawnTeammate before RunTeam).
+  repeated TeammateSpec members = 3;
 }
 
-// CreateTeamResponse returns the new team's id.
+// CreateTeamResponse returns the new team's id and the enrolled initial roster.
 message CreateTeamResponse {
   // team_id identifies the team in subsequent calls.
   string team_id = 1;
+  // members is the enrolled initial roster in enrolment order, so the caller need
+  // not follow up with ListTeam to see who was added.
+  repeated TeamMember members = 2;
+}
+
+// TeammateSpec describes a member to enrol — the per-member fields shared by
+// CreateTeamRequest's initial roster and SpawnTeammateRequest (minus team_id).
+message TeammateSpec {
+  // name is the unique member handle peers address messages to.
+  string name = 1 [(buf.validate.field).string.min_len = 1];
+  // agent_type is the optional agent-definition name this member adopts.
+  string agent_type = 2;
+  // lead marks the coordinating member (it is not auto-assigned tasks).
+  bool lead = 3;
+  // mutating requests an isolated forked workspace (the member may edit/write).
+  bool mutating = 4;
+  // initial_prompt is the member's first-turn input, run in round 0.
+  string initial_prompt = 5;
 }
 
 // SpawnTeammateRequest enrols a member in a team before it runs.

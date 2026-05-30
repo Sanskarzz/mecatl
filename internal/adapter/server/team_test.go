@@ -69,6 +69,12 @@ func newSpawn(teamID, name string, lead bool, initialPrompt string) *mecatlv1.Sp
 	}
 }
 
+// newCreateTeamWith builds a CreateTeamRequest carrying an initial roster — the
+// atomic create+populate path.
+func newCreateTeamWith(workspace string, members ...*mecatlv1.TeammateSpec) *mecatlv1.CreateTeamRequest {
+	return &mecatlv1.CreateTeamRequest{Workspace: workspace, Name: "test", Members: members}
+}
+
 // wantRunningSentinel asserts a Service-level method returned the ErrTeamRunning
 // sentinel (the Service returns raw sentinels; the gRPC layer maps them).
 func wantRunningSentinel(t *testing.T, err error, what string) {
@@ -292,7 +298,7 @@ func TestCreateTeamMaxTeams(t *testing.T) {
 		t.Fatalf("CreateTeam past MaxTeams: code = %v, want ResourceExhausted (err=%v)", status.Code(err), err)
 	}
 	// And the Service returns the mapped sentinel.
-	if _, serr := svc.CreateTeam(ctx, "/ws", "x"); !errors.Is(serr, server.ErrTooManyTeams) {
+	if _, _, serr := svc.CreateTeam(ctx, "/ws", "x", nil); !errors.Is(serr, server.ErrTooManyTeams) {
 		t.Fatalf("Service.CreateTeam past cap: err = %v, want ErrTooManyTeams", serr)
 	}
 
@@ -378,5 +384,117 @@ func TestCleanupTeamRejectsRunning(t *testing.T) {
 	_, err = h.CleanupTeam(ctx, &mecatlv1.CleanupTeamRequest{TeamId: teamID})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("CleanupTeam(already gone): code = %v, want NotFound (err=%v)", status.Code(err), err)
+	}
+}
+
+// TestCreateTeamWithRoster asserts the atomic create+populate path: CreateTeam with
+// an initial roster (a lead + a read-only worker) returns the team id AND the
+// enrolled members, ListTeam shows both, and RunTeam works without any separate
+// SpawnTeammate call.
+func TestCreateTeamWithRoster(t *testing.T) {
+	llm := mockllm.New(mockllm.TextTurn("done"))
+	svc := teamService(t, llm)
+	h := server.NewHarnessServer(svc)
+	ctx := context.Background()
+
+	createResp, err := h.CreateTeam(ctx, newCreateTeamWith("/ws",
+		&mecatlv1.TeammateSpec{Name: "lead", Lead: true, InitialPrompt: "go"},
+		&mecatlv1.TeammateSpec{Name: "worker"}, // read-only (Mutating defaults false)
+	))
+	if err != nil {
+		t.Fatalf("CreateTeam(roster): %v", err)
+	}
+	teamID := createResp.GetTeamId()
+	if teamID == "" {
+		t.Fatal("CreateTeam(roster): empty team id")
+	}
+
+	// The response echoes the enrolled roster in enrolment order — no follow-up
+	// ListTeam needed.
+	got := createResp.GetMembers()
+	if len(got) != 2 || got[0].GetName() != "lead" || got[1].GetName() != "worker" {
+		t.Fatalf("CreateTeam(roster) members = %v, want [lead worker]", got)
+	}
+
+	// ListTeam shows both members.
+	listResp, err := h.ListTeam(ctx, &mecatlv1.ListTeamRequest{TeamId: teamID})
+	if err != nil {
+		t.Fatalf("ListTeam: %v", err)
+	}
+	if len(listResp.GetMembers()) != 2 {
+		t.Fatalf("ListTeam members = %d, want 2", len(listResp.GetMembers()))
+	}
+
+	// RunTeam works with no separate SpawnTeammate call. The lead runs its initial
+	// prompt and reports back; the bare read-only worker (no task, no message) is never
+	// scheduled, which is fine — the run completes without error and the lead produced
+	// its terminal text.
+	outcome, err := svc.RunTeam(ctx, teamID, func(agent.TeamEvent) {})
+	if err != nil {
+		t.Fatalf("RunTeam: %v", err)
+	}
+	if len(outcome.Members) != 2 {
+		t.Fatalf("RunTeam outcome members = %d, want 2 (outcome=%+v)", len(outcome.Members), outcome)
+	}
+	if outcome.Members[0].Name != "lead" || outcome.Members[0].LastText != "done" {
+		t.Errorf("RunTeam lead outcome = %+v, want LastText=%q", outcome.Members[0], "done")
+	}
+}
+
+// TestCreateTeamWithRosterAtomicFailure asserts the atomicity guarantee: a roster
+// containing a member that cannot enrol (here a duplicate name within the roster)
+// fails the WHOLE CreateTeam, and the would-be team is never registered — a
+// subsequent ListTeam on no team exists, and the MaxTeams slot was NOT consumed (the
+// caller can still create up to the cap).
+func TestCreateTeamWithRosterAtomicFailure(t *testing.T) {
+	// MaxTeams=1 so we can prove the failed create did not consume the only slot.
+	svc := teamServiceMaxTeams(t, mockllm.New(mockllm.TextTurn("done")), 1)
+	h := server.NewHarnessServer(svc)
+	ctx := context.Background()
+
+	// A roster with a duplicate name: the second "dup" trips ErrMemberAlreadyAdded,
+	// which classifies to InvalidArgument. The whole team must be abandoned.
+	_, err := h.CreateTeam(ctx, newCreateTeamWith("/ws",
+		&mecatlv1.TeammateSpec{Name: "dup", Lead: true, InitialPrompt: "go"},
+		&mecatlv1.TeammateSpec{Name: "dup"},
+	))
+	if err == nil {
+		t.Fatal("CreateTeam(duplicate in roster): expected an error, got nil")
+	}
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("CreateTeam(duplicate in roster): code = %v, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+
+	// No team leaked: the registry is empty, so a fresh create against the MaxTeams=1
+	// cap succeeds (the failed create did not consume the slot).
+	createResp, err := h.CreateTeam(ctx, newCreateTeam("/ws"))
+	if err != nil {
+		t.Fatalf("CreateTeam after a failed atomic create: %v (the failed create must not consume a slot)", err)
+	}
+	if createResp.GetTeamId() == "" {
+		t.Fatal("CreateTeam after a failed atomic create: empty team id")
+	}
+}
+
+// TestCreateTeamWithRosterMutatingNoForkerAtomicFailure asserts the same atomicity
+// for a server-misconfiguration failure class: a Mutating member with no Forker
+// configured (teamServiceMaxTeams wires none) is a FailedPrecondition, and again the
+// team is abandoned — no id is returned and the MaxTeams slot is untouched.
+func TestCreateTeamWithRosterMutatingNoForkerAtomicFailure(t *testing.T) {
+	svc := teamServiceMaxTeams(t, mockllm.New(mockllm.TextTurn("done")), 1)
+	h := server.NewHarnessServer(svc)
+	ctx := context.Background()
+
+	_, err := h.CreateTeam(ctx, newCreateTeamWith("/ws",
+		&mecatlv1.TeammateSpec{Name: "lead", Lead: true, InitialPrompt: "go"},
+		&mecatlv1.TeammateSpec{Name: "writer", Mutating: true}, // no forker → ErrNoForker
+	))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("CreateTeam(Mutating, no forker): code = %v, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+
+	// The slot was not consumed: a fresh create succeeds under MaxTeams=1.
+	if _, err := h.CreateTeam(ctx, newCreateTeam("/ws")); err != nil {
+		t.Fatalf("CreateTeam after a failed atomic create: %v", err)
 	}
 }

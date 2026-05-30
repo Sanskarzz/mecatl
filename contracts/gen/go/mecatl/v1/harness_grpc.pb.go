@@ -98,8 +98,9 @@ type HarnessServiceClient interface {
 	// in the resolved source inventory. Derived from the snapshot — it does NOT
 	// call ToolHive.
 	ListToolHiveGroups(ctx context.Context, in *ListToolHiveGroupsRequest, opts ...grpc.CallOption) (*ListToolHiveGroupsResponse, error)
-	// CreateTeam allocates a new, empty agent team and returns its id. Members are
-	// added with SpawnTeammate, then the team is driven with RunTeam.
+	// CreateTeam allocates a new agent team and returns its id, optionally enrolling
+	// an initial roster in the same atomic call. Members may also be added afterwards
+	// with SpawnTeammate; the team is then driven with RunTeam.
 	CreateTeam(ctx context.Context, in *CreateTeamRequest, opts ...grpc.CallOption) (*CreateTeamResponse, error)
 	// SpawnTeammate enrols a member in an existing team (before RunTeam). A
 	// read-only member shares the base workspace; a mutating member runs in an
@@ -327,8 +328,9 @@ type HarnessServiceServer interface {
 	// in the resolved source inventory. Derived from the snapshot — it does NOT
 	// call ToolHive.
 	ListToolHiveGroups(context.Context, *ListToolHiveGroupsRequest) (*ListToolHiveGroupsResponse, error)
-	// CreateTeam allocates a new, empty agent team and returns its id. Members are
-	// added with SpawnTeammate, then the team is driven with RunTeam.
+	// CreateTeam allocates a new agent team and returns its id, optionally enrolling
+	// an initial roster in the same atomic call. Members may also be added afterwards
+	// with SpawnTeammate; the team is then driven with RunTeam.
 	CreateTeam(context.Context, *CreateTeamRequest) (*CreateTeamResponse, error)
 	// SpawnTeammate enrols a member in an existing team (before RunTeam). A
 	// read-only member shares the base workspace; a mutating member runs in an

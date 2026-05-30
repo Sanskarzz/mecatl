@@ -54,16 +54,26 @@ type teamState struct {
 	phase teamPhase
 }
 
-// CreateTeam allocates a new agent team over the given base workspace and returns
-// its server-assigned id. It builds the supervisor (binding the member-engine
-// factory to the shared team) but spawns no members; use SpawnTeammate then
-// RunTeam. It returns ErrTeamsDisabled when teams are not enabled.
-func (s *Service) CreateTeam(_ context.Context, workspace, name string) (string, error) {
+// CreateTeam allocates a new agent team over the given base workspace, enrols the
+// optional initial roster, and returns its server-assigned id together with the
+// enrolled roster. It builds the supervisor (binding the member-engine factory to
+// the shared team), then adds each member before the team is registered.
+//
+// Enrolment is ATOMIC: if any member fails to enrol the whole team is abandoned —
+// it is never registered (no partial team leaks) and does not consume a MaxTeams
+// slot. The supervisor's AddMember already cleans up a member's own fork on its own
+// failure, and an un-registered supervisor (with whatever members it did add) is
+// simply garbage-collected. The failing member's error is classified via
+// classifyAddMemberErr. members may be empty: the team is created empty and the
+// client can still SpawnTeammate before RunTeam.
+//
+// It returns ErrTeamsDisabled when teams are not enabled.
+func (s *Service) CreateTeam(ctx context.Context, workspace, name string, members []agent.MemberSpec) (string, []team.Member, error) {
 	if s.cfg.MemberEngine == nil {
-		return "", ErrTeamsDisabled
+		return "", nil, ErrTeamsDisabled
 	}
 	if workspace == "" {
-		return "", fmt.Errorf("%w: workspace is required", ErrInvalidArgument)
+		return "", nil, fmt.Errorf("%w: workspace is required", ErrInvalidArgument)
 	}
 
 	t := team.New(name)
@@ -79,6 +89,15 @@ func (s *Service) CreateTeam(_ context.Context, workspace, name string) (string,
 	}
 	sup := agent.NewSupervisor(t, base, factory, opts...)
 
+	// Enrol the initial roster BEFORE registering the team. A failure here abandons
+	// the whole team: we return without inserting it into s.teams, so it neither leaks
+	// nor counts against the cap, and the un-registered supervisor is GC'd.
+	for _, spec := range members {
+		if err := sup.AddMember(ctx, spec); err != nil {
+			return "", nil, classifyAddMemberErr(err)
+		}
+	}
+
 	id := "team-" + string(s.cfg.NewID())
 	s.mu.Lock()
 	// Count only un-cleaned teams (the live registry) against the cap; CleanupTeam
@@ -86,11 +105,11 @@ func (s *Service) CreateTeam(_ context.Context, workspace, name string) (string,
 	// cannot both slip past a full registry.
 	if len(s.teams) >= s.cfg.MaxTeams {
 		s.mu.Unlock()
-		return "", fmt.Errorf("%w: %d", ErrTooManyTeams, s.cfg.MaxTeams)
+		return "", nil, fmt.Errorf("%w: %d", ErrTooManyTeams, s.cfg.MaxTeams)
 	}
 	s.teams[id] = &teamState{team: t, sup: sup, base: workspace}
 	s.mu.Unlock()
-	return id, nil
+	return id, t.Members(), nil
 }
 
 // lookupTeam returns the registered team state for id, or ErrNotFound.
