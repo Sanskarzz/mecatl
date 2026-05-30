@@ -38,9 +38,31 @@ type taskArgs struct {
 	// Description is an optional short label for the delegated task (logging/UX
 	// only); it is not required and does not affect execution.
 	Description string `json:"description,omitempty"`
+	// Agent optionally routes the delegation to a NAMED agent definition (a
+	// specialist with its own prompt/model/scoped read-only catalog). When empty,
+	// the default anonymous read-only explorer runs (unchanged behaviour). An
+	// unknown name returns a model-addressable error listing the valid names.
+	Agent string `json:"agent,omitempty"`
 }
 
-// taskSchema is the JSON schema the model sees for the Task tool's arguments.
+// AgentMeta is the plain (name, description) summary of one registered agent
+// definition, surfaced in the Task tool's Spec().Description for progressive
+// disclosure. It is a layering-clean value type: the composition root translates
+// the agents adapter's Registry into a []AgentMeta + a map[string]*Engine and
+// injects both via WithAgentEngines, so internal/agent never imports the agents
+// adapter.
+type AgentMeta struct {
+	// Name is the agent def's routing key (the value the model passes as `agent`).
+	Name string
+	// Description is the one-line summary the model uses to choose a specialist.
+	Description string
+}
+
+// taskSchema is the JSON schema the model sees for the Task tool's arguments. The
+// `agent` property is always present (optional); the available agent NAMES are
+// enumerated in the tool's Spec().Description tail (progressive disclosure), not
+// baked into this schema, so the schema stays byte-stable regardless of how many
+// defs are configured.
 var taskSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -51,6 +73,10 @@ var taskSchema = json.RawMessage(`{
     "description": {
       "type": "string",
       "description": "Optional short label for the delegated task (for logs/UX only)."
+    },
+    "agent": {
+      "type": "string",
+      "description": "Optional name of a configured specialist agent to route this delegation to (see the list in the tool description). Omit to use the default read-only explorer."
     }
   },
   "required": ["prompt"]
@@ -76,8 +102,22 @@ type TaskTool struct {
 	// childEngine runs the subagent loop. It is pre-wired by the composition root
 	// with the scoped catalog, the (optionally cheaper) model, and an allow/deny
 	// policy appropriate for a non-interactive child. It is never the parent
-	// Engine: the parent Engine is not mutated.
+	// Engine: the parent Engine is not mutated. It is the fallback for the
+	// no-`agent` (default explorer) case.
 	childEngine *Engine
+
+	// agentEngines maps an agent-definition NAME to its pre-built, read-only child
+	// Engine. The composition root builds one per def (scoped catalog + resolved
+	// model + body→Role prompt) and injects the map via WithAgentEngines. A Task
+	// call with a known `agent` runs that engine instead of childEngine; an empty
+	// map (the default) means no specialists are configured and Task behaves
+	// exactly as before. nil/empty is valid.
+	agentEngines map[string]*Engine
+
+	// agentMeta is the (name, description) list surfaced in Spec().Description for
+	// progressive disclosure. It is sorted by the composition root for stable
+	// output and kept in lockstep with agentEngines.
+	agentMeta []AgentMeta
 
 	// limits bound a single child run. Defaults to defaultChildLimits.
 	limits session.Limits
@@ -125,6 +165,23 @@ func WithChildSessionPrefix(p string) TaskOption {
 	return func(t *TaskTool) { t.idPrefix = p }
 }
 
+// WithAgentEngines injects the per-definition child engines (keyed by agent name)
+// and their (name, description) metadata for progressive disclosure. The
+// composition root builds each engine with a SCOPED, read-only catalog (the Task
+// read-only invariant is preserved — see ReadOnly) and the def's resolved
+// model/prompt, then passes the map and a name-sorted meta slice here.
+//
+// engines and meta should describe the same set of names; meta drives the Spec
+// enumeration while engines drives routing. A nil/empty map leaves Task with only
+// the default explorer (no behaviour change). It is the agent-package boundary the
+// agents adapter never crosses: only plain map + structs flow in.
+func WithAgentEngines(engines map[string]*Engine, meta []AgentMeta) TaskOption {
+	return func(t *TaskTool) {
+		t.agentEngines = engines
+		t.agentMeta = meta
+	}
+}
+
 // NewTaskTool constructs the Task subagent tool over a pre-built child *Engine.
 //
 // The composition root (cmd/mecated, WP11) is responsible for building childEngine
@@ -164,18 +221,39 @@ func NewTaskTool(childEngine *Engine, opts ...TaskOption) tool.Tool {
 	return t
 }
 
-// Spec returns the model-facing specification for the Task tool.
-func (*TaskTool) Spec() tool.ToolSpec {
+// Spec returns the model-facing specification for the Task tool. When named agent
+// definitions are configured, their names+descriptions are appended to the
+// description (progressive disclosure, like the Skill tool enumerates skills) so
+// the model can choose a specialist via the optional `agent` arg.
+func (t *TaskTool) Spec() tool.ToolSpec {
+	desc := "Delegate a focused read-only investigation — 'search → summarize', " +
+		"'read N files → report findings' — to a subagent with its own fresh context. " +
+		"Returns only the subagent's final summary. Use when exploration would bloat the " +
+		"main context. The subagent cannot see this conversation, so put everything it " +
+		"needs in `prompt`; it runs read-only tools (Read/Grep/Glob), cannot make changes, " +
+		"and cannot delegate further."
+	desc += t.agentEnumeration()
 	return tool.ToolSpec{
-		Name: taskToolName,
-		Description: "Delegate a focused read-only investigation — 'search → summarize', " +
-			"'read N files → report findings' — to a subagent with its own fresh context. " +
-			"Returns only the subagent's final summary. Use when exploration would bloat the " +
-			"main context. The subagent cannot see this conversation, so put everything it " +
-			"needs in `prompt`; it runs read-only tools (Read/Grep/Glob), cannot make changes, " +
-			"and cannot delegate further.",
-		Schema: taskSchema,
+		Name:        taskToolName,
+		Description: desc,
+		Schema:      taskSchema,
 	}
+}
+
+// agentEnumeration renders the "Available agents:" tail listing each configured
+// def's "name: description", or "" when none are configured. The list is taken in
+// the (already name-sorted) order the composition root supplied, so the spec is
+// byte-stable across turns.
+func (t *TaskTool) agentEnumeration() string {
+	if len(t.agentMeta) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nAvailable specialist agents (pass the name as `agent`):")
+	for _, m := range t.agentMeta {
+		fmt.Fprintf(&b, "\n- %s: %s", m.Name, m.Description)
+	}
+	return b.String()
 }
 
 // ReadOnly reports that the Task tool is read-only, which lets the parent's
@@ -212,6 +290,19 @@ func (t *TaskTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 		return session.NewToolError(call.ID, "Task: 'prompt' is required and must be non-empty"), nil
 	}
 
+	// Route to a named specialist when requested; otherwise the default explorer.
+	// An unknown name is a model-addressable error listing the valid names, so the
+	// model can retry — it never silently falls back (which would run the wrong
+	// scope/prompt under the requested name).
+	engine := t.childEngine
+	if name := strings.TrimSpace(args.Agent); name != "" {
+		eng, ok := t.agentEngines[name]
+		if !ok {
+			return session.NewToolError(call.ID, "Task: "+t.unknownAgentHint(name)), nil
+		}
+		engine = eng
+	}
+
 	// A fresh child session: own conversation, own (tighter) Limits, scoped to the
 	// SAME workspace root as the parent so the subagent explores the same project.
 	child := session.New(
@@ -222,7 +313,7 @@ func (t *TaskTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 		time.Now(),
 	)
 
-	run := t.childEngine.Run(ctx, child, ws, args.Prompt)
+	run := engine.Run(ctx, child, ws, args.Prompt)
 
 	// Drain the child's Event stream entirely INSIDE the Task tool. Nothing from
 	// the child surfaces to the parent except the final summary string. Auto-deny
@@ -286,6 +377,20 @@ func (t *TaskTool) fireSubagentStop(ctx context.Context, child *session.Session)
 		Phase:     governance.PhaseSubagentStop,
 		SessionID: string(child.ID),
 	})
+}
+
+// unknownAgentHint builds the model-addressable error text for a Task call that
+// names an agent that is not registered. It lists the valid names so the model can
+// retry, mirroring the Skill tool's available-names hint.
+func (t *TaskTool) unknownAgentHint(name string) string {
+	if len(t.agentMeta) == 0 {
+		return fmt.Sprintf("unknown agent %q (no specialist agents are configured; omit `agent` to use the default explorer)", name)
+	}
+	names := make([]string, 0, len(t.agentMeta))
+	for _, m := range t.agentMeta {
+		names = append(names, m.Name)
+	}
+	return fmt.Sprintf("unknown agent %q; available agents: %s", name, strings.Join(names, ", "))
 }
 
 // childSessionID derives a stable, unique id for a child session from the parent

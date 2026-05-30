@@ -133,10 +133,13 @@ linters:
       # SessionID and ToolSpec are deliberate, frozen domain names from the WP1
       # ports that other packages depend on. revive flags them as "stutter"
       # (session.SessionID / tool.ToolSpec) but renaming would break the public
-      # API the rest of the harness is built against. Suppress just that finding.
+      # API the rest of the harness is built against. agent.AgentMeta is the
+      # same case: it is the deliberate, layering-clean boundary value the agents
+      # adapter is translated into (the agent package must NOT import the adapter),
+      # so the "agent" prefix names the role, not stutter. Suppress just those.
       - linters:
           - revive
-        text: 'type name will be used as (session\.SessionID|tool\.ToolSpec)'
+        text: 'type name will be used as (session\.SessionID|tool\.ToolSpec|agent\.AgentMeta)'
       # Generated proto/grpc code (WP10 will land contracts/gen). Never lint it.
       - linters:
           - errcheck

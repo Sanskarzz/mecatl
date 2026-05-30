@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/dream"
 	"github.com/stacklok/mecatl/internal/adapter/forker"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
@@ -125,6 +126,25 @@ type Config struct {
 	SkillsConventional   bool
 	SkillsDraftDir       string
 	SkillsDraftThreshold float64
+
+	// Agent definitions (Tier 1): named subagent specialists (prompt + scoped
+	// read-only catalog + per-def model) discovered from <name>.md files. Mirrors
+	// the Skills fields: explicit dirs (highest precedence) plus the conventional
+	// project/user locations when AgentsConventional is set. Strict opt-in — zero
+	// sources means Task keeps only the default explorer (no behaviour change).
+	AgentsDirs         []string
+	AgentsConventional bool
+
+	// SubagentModel is the global override applied to every Task/member child
+	// engine that does not pin its own model (the analogue of
+	// CLAUDE_CODE_SUBAGENT_MODEL). Resolution precedence per def is:
+	// def.Model > SubagentModel > parent Model. Empty disables the override. It is
+	// resolved (with ModelAliases) ONLY in this composition layer.
+	SubagentModel string
+	// ModelAliases maps a short alias (e.g. "sonnet"/"opus"/"haiku"/"fast") to a
+	// concrete provider model id. Resolved only here; the domain/agent always
+	// receives a concrete model string.
+	ModelAliases map[string]string
 
 	// Slash commands: directory of <name>.md templates; EnableCommands turns on the
 	// default directories when CommandsDir is empty.
@@ -424,7 +444,8 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		slog.Info("Bash tool DISABLED (shell-less mode): the agent has no command execution",
 			"reason", bashDisabledReason(cfg))
 	}
-	cat.MustRegister(buildTaskTool(cfg, provider, hooks))
+	agentReg := resolveAgentRegistry(ctx, cfg)
+	cat.MustRegister(buildTaskTool(cfg, provider, hooks, agentReg))
 
 	// Fork fan-out tool: a scoped read-only child Engine (no Fork/Task, so a branch
 	// cannot recurse) run against an isolated forked workspace.
@@ -671,10 +692,20 @@ func buildChildEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 	})
 }
 
-// buildTaskTool constructs the Task subagent tool over a child Engine scoped to the
-// read-only explorer toolset.
-func buildTaskTool(cfg Config, provider port.LLMProvider, hooks port.HookRunner) tool.Tool {
-	return agent.NewTaskTool(buildChildEngine(cfg, provider), agent.WithSubagentStopHook(hooks))
+// buildTaskTool constructs the Task subagent tool over a default child Engine
+// scoped to the read-only explorer toolset, PLUS the per-definition read-only
+// child engines resolved from the agent registry (Tier 1). When the registry is
+// empty the per-def map is nil and Task behaves exactly as before (default
+// explorer only); otherwise the model can route to a named specialist via the
+// Task `agent` arg, and the specialist names+descriptions are surfaced in the
+// Task spec for progressive disclosure.
+func buildTaskTool(cfg Config, provider port.LLMProvider, hooks port.HookRunner, reg *agents.Registry) tool.Tool {
+	engines, meta := buildAgentTaskEngines(cfg, provider, reg)
+	return agent.NewTaskTool(
+		buildChildEngine(cfg, provider),
+		agent.WithSubagentStopHook(hooks),
+		agent.WithAgentEngines(engines, meta),
+	)
 }
 
 // applyTeamConfig wires the opt-in agent-teams capability into the server.Config.
