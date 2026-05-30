@@ -346,6 +346,10 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrTeamNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrFailedPrecondition):
+		writeError(w, http.StatusPreconditionFailed, err.Error())
 	case errors.Is(err, ErrNoActiveRun):
 		// Known session, but its run is not live in this process (e.g. the
 		// stream was lost across a restart): nothing to deliver the control to.

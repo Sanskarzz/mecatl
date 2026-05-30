@@ -62,16 +62,24 @@ func MemberToolNames() map[string]struct{} {
 // fireTeamGate fires a best-effort team lifecycle gate hook and reports whether the
 // action is vetoed (Block) along with the veto message. A nil runner or a hook
 // error never vetoes (fail-open: a broken hook must not wedge coordination).
-func fireTeamGate(ctx context.Context, hooks port.HookRunner, phase governance.HookPhase, toolName, self string, payload any) (blocked bool, msg string) {
+//
+// The acting member's name travels in the Input payload (every team-phase payload
+// carries a "by" key), NEVER in HookEvent.SessionID. SessionID is a session
+// identifier, not an actor handle; the coordination tools are constructed before
+// the member's session exists (see MemberTools), so the real session id is not
+// available here. Smuggling the member name through SessionID — as an earlier
+// version did — was both a type abuse and inconsistent with fireTeammateIdle
+// (which has the real session id and sets it correctly). We leave SessionID empty
+// rather than misreport it; a hook that needs the actor reads payload "by".
+func fireTeamGate(ctx context.Context, hooks port.HookRunner, phase governance.HookPhase, toolName string, payload any) (blocked bool, msg string) {
 	if hooks == nil {
 		return false, ""
 	}
 	input, _ := json.Marshal(payload)
 	out, err := hooks.Run(ctx, governance.HookEvent{
-		Phase:     phase,
-		Tool:      toolName,
-		Input:     input,
-		SessionID: self,
+		Phase: phase,
+		Tool:  toolName,
+		Input: input,
 	})
 	if err != nil || !out.Block {
 		return false, ""
@@ -116,7 +124,7 @@ func (sendMessageTool) ReadOnly() bool { return false }
 
 func (t sendMessageTool) Execute(_ context.Context, call session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 	var args sendMessageArgs
-	if msg, ok := parseTeamArgs(call, &args); !ok {
+	if msg, ok := session.ParseArgs(call, &args); !ok {
 		return session.NewToolError(call.ID, msg), nil
 	}
 	if strings.TrimSpace(args.To) == "" {
@@ -166,13 +174,13 @@ func (addTaskTool) ReadOnly() bool { return false }
 
 func (t addTaskTool) Execute(ctx context.Context, call session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 	var args addTaskArgs
-	if msg, ok := parseTeamArgs(call, &args); !ok {
+	if msg, ok := session.ParseArgs(call, &args); !ok {
 		return session.NewToolError(call.ID, msg), nil
 	}
 	if strings.TrimSpace(args.Description) == "" {
 		return session.NewToolError(call.ID, "AddTask: 'description' is required"), nil
 	}
-	if blocked, msg := fireTeamGate(ctx, t.hooks, governance.PhaseTaskCreated, "AddTask", t.self,
+	if blocked, msg := fireTeamGate(ctx, t.hooks, governance.PhaseTaskCreated, "AddTask",
 		map[string]any{"description": args.Description, "deps": args.Deps, "by": t.self}); blocked {
 		return session.NewToolError(call.ID, "AddTask: "+msg), nil
 	}
@@ -219,7 +227,7 @@ func (claimTaskTool) ReadOnly() bool { return false }
 
 func (t claimTaskTool) Execute(_ context.Context, call session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 	var args claimTaskArgs
-	if msg, ok := parseTeamArgs(call, &args); !ok {
+	if msg, ok := session.ParseArgs(call, &args); !ok {
 		return session.NewToolError(call.ID, msg), nil
 	}
 	if id := strings.TrimSpace(args.TaskID); id != "" {
@@ -269,13 +277,13 @@ func (completeTaskTool) ReadOnly() bool { return false }
 
 func (t completeTaskTool) Execute(ctx context.Context, call session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 	var args completeTaskArgs
-	if msg, ok := parseTeamArgs(call, &args); !ok {
+	if msg, ok := session.ParseArgs(call, &args); !ok {
 		return session.NewToolError(call.ID, msg), nil
 	}
 	if strings.TrimSpace(args.TaskID) == "" {
 		return session.NewToolError(call.ID, "CompleteTask: 'task_id' is required"), nil
 	}
-	if blocked, msg := fireTeamGate(ctx, t.hooks, governance.PhaseTaskCompleted, "CompleteTask", t.self,
+	if blocked, msg := fireTeamGate(ctx, t.hooks, governance.PhaseTaskCompleted, "CompleteTask",
 		map[string]any{"task_id": args.TaskID, "by": t.self}); blocked {
 		return session.NewToolError(call.ID, "CompleteTask: "+msg), nil
 	}
@@ -327,20 +335,4 @@ func (t listTasksTool) Execute(_ context.Context, call session.ToolCall, _ tool.
 		fmt.Fprintf(&b, ": %s\n", task.Description)
 	}
 	return session.NewToolResult(call.ID, b.String()), nil
-}
-
-// --- helpers --------------------------------------------------------------
-
-// parseTeamArgs unmarshals a tool call's JSON arguments into dst. It returns a
-// model-facing error string (not a Go error) and ok=false on malformed JSON. It
-// mirrors the inline parsing in subagent.go rather than importing the adapter-layer
-// toolkit, since internal/agent must not depend on an adapter.
-func parseTeamArgs(call session.ToolCall, dst any) (string, bool) {
-	if len(call.Args) == 0 {
-		return "", true
-	}
-	if err := json.Unmarshal(call.Args, dst); err != nil {
-		return fmt.Sprintf("invalid arguments: %v", err), false
-	}
-	return "", true
 }

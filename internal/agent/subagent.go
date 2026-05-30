@@ -205,10 +205,8 @@ func (*TaskTool) ReadOnly() bool { return true }
 // best-effort.
 func (t *TaskTool) Execute(ctx context.Context, call session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
 	var args taskArgs
-	if len(call.Args) > 0 {
-		if err := json.Unmarshal(call.Args, &args); err != nil {
-			return session.NewToolError(call.ID, fmt.Sprintf("Task: invalid arguments: %v", err)), nil
-		}
+	if msg, ok := session.ParseArgs(call, &args); !ok {
+		return session.NewToolError(call.ID, "Task: "+msg), nil
 	}
 	if strings.TrimSpace(args.Prompt) == "" {
 		return session.NewToolError(call.ID, "Task: 'prompt' is required and must be non-empty"), nil

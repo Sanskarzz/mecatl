@@ -20,6 +20,7 @@ package team
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/stacklok/mecatl/internal/session"
@@ -273,8 +274,7 @@ func (t *Team) CreateTask(description string, deps ...TaskID) (TaskID, error) {
 	}
 	t.nextTaskN++
 	id := TaskID(fmt.Sprintf("task-%d", t.nextTaskN))
-	cp := append([]TaskID(nil), deps...)
-	t.tasks[id] = &Task{ID: id, Description: description, Deps: cp, State: TaskPending}
+	t.tasks[id] = &Task{ID: id, Description: description, Deps: slices.Clone(deps), State: TaskPending}
 	t.taskOrder = append(t.taskOrder, id)
 	return id, nil
 }
@@ -308,7 +308,12 @@ func (t *Team) ClaimNext(member string) (Task, bool, error) {
 		if t.claimableLocked(task) {
 			task.State = TaskInProgress
 			task.Assignee = member
-			return *task, true, nil
+			// Return a copy whose Deps slice does not alias the aggregate's backing
+			// array, so a caller cannot mutate team state outside the lock (Tasks()
+			// makes the same guarantee for its snapshots).
+			out := *task
+			out.Deps = slices.Clone(task.Deps)
+			return out, true, nil
 		}
 	}
 	return Task{}, false, nil
@@ -392,7 +397,7 @@ func (t *Team) Tasks() []Task {
 	out := make([]Task, 0, len(t.taskOrder))
 	for _, id := range t.taskOrder {
 		task := *t.tasks[id]
-		task.Deps = append([]TaskID(nil), task.Deps...)
+		task.Deps = slices.Clone(task.Deps)
 		out = append(out, task)
 	}
 	return out

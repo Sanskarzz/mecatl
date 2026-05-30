@@ -40,6 +40,37 @@ import (
 // workspace (via the injected tool.WorkspaceForker), so parallel writes are safe
 // because isolated — exactly like Fork. v1 does not auto-merge forks.
 
+// AddMember failure-class sentinels. They let a caller (e.g. the gRPC adapter)
+// classify an enrolment failure into the right wire status instead of collapsing
+// every failure to "invalid argument". The team-aggregate failures (duplicate /
+// reserved / too-many members) are NOT re-wrapped here — callers test those with
+// errors.Is against the team package's own sentinels (team.ErrMemberExists,
+// team.ErrReservedName, team.ErrTooManyMembers), which AddMember already wraps via
+// %w through s.team.AddMember.
+var (
+	// ErrMemberNameRequired is returned by AddMember when the spec name is empty.
+	// It is a bad-request (caller) error.
+	ErrMemberNameRequired = errors.New("agent: team member name is required")
+	// ErrMemberAlreadyAdded is returned by AddMember when the supervisor already
+	// holds a member of that name (a duplicate at the supervisor layer, distinct
+	// from team.ErrMemberExists at the aggregate layer). It is a bad-request error.
+	ErrMemberAlreadyAdded = errors.New("agent: member already added")
+	// ErrNoForker is returned by AddMember when a Mutating member is requested but
+	// no WorkspaceForker is configured. This is a server MISCONFIGURATION (the
+	// composition root did not wire a forker), not a bad client request.
+	ErrNoForker = errors.New("agent: Mutating member requires a configured WorkspaceForker")
+	// ErrForkWorkspace wraps a failure to fork a Mutating member's workspace. It is
+	// an I/O / internal fault.
+	ErrForkWorkspace = errors.New("agent: fork member workspace")
+	// ErrNilEngine is returned by AddMember when the member-engine factory returns
+	// a nil Engine. It is a server-internal fault (a broken factory).
+	ErrNilEngine = errors.New("agent: member engine factory returned nil")
+	// ErrReadOnlyMemberMutating is returned by AddMember when a non-Mutating
+	// (base-sharing) member's catalog contains a workspace-mutating tool. It is a
+	// server MISCONFIGURATION of the member's catalog, not a bad client request.
+	ErrReadOnlyMemberMutating = errors.New("agent: read-only member given workspace-mutating tool")
+)
+
 // defaultMaxRounds bounds a team Run so a non-converging team cannot loop forever.
 const defaultMaxRounds = 24
 
@@ -250,12 +281,15 @@ func NewSupervisor(t *team.Team, base tool.Workspace, factory MemberEngine, opts
 // called before Run. A Mutating member without a configured forker is an error.
 func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 	if strings.TrimSpace(spec.Name) == "" {
-		return errors.New("agent: team member name is required")
+		return ErrMemberNameRequired
 	}
 	if _, ok := s.members[spec.Name]; ok {
-		return fmt.Errorf("agent: member %q already added", spec.Name)
+		return fmt.Errorf("%w: %q", ErrMemberAlreadyAdded, spec.Name)
 	}
 	if err := s.team.AddMember(spec.Name, spec.AgentType); err != nil {
+		// The team aggregate's sentinels (ErrMemberExists / ErrReservedName /
+		// ErrTooManyMembers) flow through unchanged so a caller can classify them
+		// with errors.Is.
 		return fmt.Errorf("agent: enrol member: %w", err)
 	}
 
@@ -264,12 +298,12 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 	if spec.Mutating {
 		if s.forker == nil {
 			s.team.RemoveMember(spec.Name)
-			return fmt.Errorf("agent: member %q is Mutating but no WorkspaceForker is configured", spec.Name)
+			return fmt.Errorf("%w (member %q)", ErrNoForker, spec.Name)
 		}
 		child, cl, err := s.forker.Fork(ctx, s.base, spec.Name)
 		if err != nil {
 			s.team.RemoveMember(spec.Name)
-			return fmt.Errorf("agent: fork workspace for %q: %w", spec.Name, err)
+			return fmt.Errorf("%w for %q: %w", ErrForkWorkspace, spec.Name, err)
 		}
 		ws, cleanup = child, cl
 	}
@@ -280,7 +314,7 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 			_ = cleanup()
 		}
 		s.team.RemoveMember(spec.Name)
-		return fmt.Errorf("agent: member factory returned a nil Engine for %q", spec.Name)
+		return fmt.Errorf("%w for %q", ErrNilEngine, spec.Name)
 	}
 
 	// The supervisor is authoritative on the read-only-share / mutating-fork stance:
@@ -296,9 +330,9 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 				_ = cleanup()
 			}
 			s.team.RemoveMember(spec.Name)
-			return fmt.Errorf("agent: read-only member %q was given workspace-mutating tool(s) %s; "+
+			return fmt.Errorf("%w: read-only member %q was given workspace-mutating tool(s) %s; "+
 				"a base-sharing member must not be able to mutate the shared workspace (mark it Mutating to run in an isolated fork)",
-				spec.Name, strings.Join(bad, ", "))
+				ErrReadOnlyMemberMutating, spec.Name, strings.Join(bad, ", "))
 		}
 	}
 

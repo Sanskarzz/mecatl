@@ -8,7 +8,6 @@ import (
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/team"
 )
 
 // grpc_team.go implements the agent-team RPCs over the shared Service. Event
@@ -107,45 +106,4 @@ func (h *HarnessServer) CleanupTeam(ctx context.Context, req *mecatlv1.CleanupTe
 		return nil, toStatus(err)
 	}
 	return &mecatlv1.CleanupTeamResponse{}, nil
-}
-
-// --- proto mappers ----------------------------------------------------------
-
-func toProtoTeamMember(m team.Member) *mecatlv1.TeamMember {
-	return &mecatlv1.TeamMember{
-		Name:      m.Name,
-		AgentType: m.AgentType,
-		State:     string(m.State),
-		SessionId: string(m.Session),
-	}
-}
-
-func toProtoTeamMembers(ms []team.Member) []*mecatlv1.TeamMember {
-	out := make([]*mecatlv1.TeamMember, 0, len(ms))
-	for _, m := range ms {
-		out = append(out, toProtoTeamMember(m))
-	}
-	return out
-}
-
-func toProtoTeamTask(t team.Task) *mecatlv1.TeamTask {
-	deps := make([]string, 0, len(t.Deps))
-	for _, d := range t.Deps {
-		deps = append(deps, string(d))
-	}
-	return &mecatlv1.TeamTask{
-		Id:          string(t.ID),
-		Description: t.Description,
-		State:       string(t.State),
-		Assignee:    t.Assignee,
-		Deps:        deps,
-	}
-}
-
-func toProtoTeamTasks(ts []team.Task) []*mecatlv1.TeamTask {
-	out := make([]*mecatlv1.TeamTask, 0, len(ts))
-	for _, t := range ts {
-		out = append(out, toProtoTeamTask(t))
-	}
-	return out
 }

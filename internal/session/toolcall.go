@@ -1,6 +1,9 @@
 package session
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // ToolCallID uniquely identifies a tool invocation within a session. It is
 // produced by the LLM and used to pair a ToolCall with its ToolResult.
@@ -23,6 +26,28 @@ type ToolCall struct {
 // NewToolCall constructs a ToolCall value object.
 func NewToolCall(id ToolCallID, name string, args json.RawMessage) ToolCall {
 	return ToolCall{ID: id, Name: name, Args: args}
+}
+
+// ParseArgs unmarshals a ToolCall's JSON arguments into dst. It is the single
+// canonical implementation of the "decode a tool call's args, fail with a
+// model-facing string" mechanic that the agent loop and the adapter-layer tools
+// both repeat. It lives on the domain ToolCall (which both layers already import)
+// so neither has to depend on the other.
+//
+// An empty payload (no args) is treated as an empty object: dst is left at its
+// zero value and ok=true, so a tool with all-optional arguments works without the
+// model having to send an explicit "{}". On malformed JSON it returns a
+// model-facing error string (not a Go error) and ok=false; on success it returns
+// "" and true. The returned msg is intended to be fed straight back to the model
+// via NewToolError, so callers may prefix it with the tool name.
+func ParseArgs(call ToolCall, dst any) (msg string, ok bool) {
+	if len(call.Args) == 0 {
+		return "", true
+	}
+	if err := json.Unmarshal(call.Args, dst); err != nil {
+		return fmt.Sprintf("invalid arguments: %v", err), false
+	}
+	return "", true
 }
 
 // ToolResult is an immutable value object: the outcome of executing a ToolCall,

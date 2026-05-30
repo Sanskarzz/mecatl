@@ -251,6 +251,28 @@ per member; only the member tag is new.
 Phases 1–4 are the substance and are all offline-testable. Phase 6 is the only one
 touching the generated contract.
 
+## 8a. Known gaps / deferred follow-ups
+
+These are intentional v1 limitations, not oversights:
+
+- **Team RPCs are gRPC-only in v1.** `CreateTeam` / `SpawnTeammate` /
+  `SendTeammateMessage` / `RunTeam` / `ListTeam` / `CleanupTeam` are exposed only on
+  the gRPC surface (`grpc_team.go`); the HTTP/SSE surface (`http.go`) has no team
+  routes. The streaming `RunTeam` fans a multiplexed, per-member-tagged event stream
+  that maps cleanly onto a gRPC server-stream but needs a deliberate SSE framing
+  (member tag per event) before it is worth exposing over HTTP. **HTTP/SSE parity
+  is a deferred follow-up.** (The shared service sentinels — `ErrTeamNotFound`,
+  `ErrFailedPrecondition` — are already mapped in the HTTP error writer so the
+  follow-up only has to add routes, not re-classify errors.)
+- **Roster is spawned after CreateTeam, before RunTeam.** Today the caller must
+  `CreateTeam` → N× `SpawnTeammate` → `RunTeam`, and `SpawnTeammate` is rejected
+  once the team is running (`ErrTeamRunning`). **Folding the initial roster into
+  `CreateTeam`** (an optional `members` field, enrolled atomically at creation) to
+  remove this spawn-after-create ordering requirement is a deferred follow-up; it is
+  a proto change and so out of scope for the polish batch.
+- **(See also §8.7)** join strategies for mutating-teammate forks and a `TeamStore`
+  for restart durability remain deferred.
+
 ## 9. Risks / open questions
 
 - **Determinism in tests.** Free-running member goroutines + a shared mutex are

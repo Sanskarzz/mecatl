@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 
@@ -17,6 +18,7 @@ import (
 type teamHooks struct {
 	mu       sync.Mutex
 	phases   []governance.HookPhase
+	events   []governance.HookEvent
 	block    bool
 	blockMsg string
 }
@@ -24,11 +26,25 @@ type teamHooks struct {
 func (h *teamHooks) Run(_ context.Context, ev governance.HookEvent) (governance.HookOutcome, error) {
 	h.mu.Lock()
 	h.phases = append(h.phases, ev.Phase)
+	h.events = append(h.events, ev)
 	h.mu.Unlock()
 	if h.block {
 		return governance.HookOutcome{Block: true, Message: h.blockMsg}, nil
 	}
 	return governance.HookOutcome{}, nil
+}
+
+// eventFor returns the first recorded HookEvent for phase p (and whether one was
+// recorded).
+func (h *teamHooks) eventFor(p governance.HookPhase) (governance.HookEvent, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, ev := range h.events {
+		if ev.Phase == p {
+			return ev, true
+		}
+	}
+	return governance.HookEvent{}, false
 }
 
 func (h *teamHooks) fired(p governance.HookPhase) bool {
@@ -56,6 +72,38 @@ func TestAddTaskFiresTaskCreatedGate(t *testing.T) {
 	}
 	if len(tm.Tasks()) != 1 {
 		t.Fatalf("want 1 task created, got %d", len(tm.Tasks()))
+	}
+}
+
+// TestTeamGateActorInPayloadNotSessionID pins the actor-consistency choice: a
+// team-phase gate hook (TaskCreated/TaskCompleted) carries the acting member's
+// name in the Input payload's "by" key, and NEVER smuggles it through SessionID
+// (which is a session id, not an actor handle, and is unavailable when the
+// coordination tools are built). SessionID stays empty for these tool-driven
+// gates.
+func TestTeamGateActorInPayloadNotSessionID(t *testing.T) {
+	tm := team.New("t")
+	_ = tm.AddMember("alice", "")
+	hooks := &teamHooks{}
+	add := toolByName(t, agent.MemberTools(tm, "alice", hooks), "AddTask")
+
+	if res := call(t, add, `{"description":"do the thing"}`); res.IsError {
+		t.Fatalf("AddTask errored: %s", res.Content)
+	}
+
+	ev, ok := hooks.eventFor(governance.PhaseTaskCreated)
+	if !ok {
+		t.Fatal("TaskCreated hook was not recorded")
+	}
+	if ev.SessionID != "" {
+		t.Errorf("gate hook SessionID must not carry the member name; got %q", ev.SessionID)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(ev.Input, &payload); err != nil {
+		t.Fatalf("hook Input is not JSON: %v", err)
+	}
+	if payload["by"] != "alice" {
+		t.Errorf("actor should be in payload \"by\"; got %v (payload=%v)", payload["by"], payload)
 	}
 }
 

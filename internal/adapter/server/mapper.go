@@ -7,6 +7,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/mcp/source"
 	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/team"
 )
 
 // clampInt32 narrows a Go int (counter/index) to the proto int32 wire type,
@@ -248,6 +249,51 @@ func toProtoMcpSource(s source.SourceInfo) *mecatlv1.McpSource {
 		Servers:     servers,
 		Diagnostics: diags,
 	}
+}
+
+// --- team mappers ------------------------------------------------------------
+
+// toProtoTeamMember maps a team.Member roster entry to its proto form.
+func toProtoTeamMember(m team.Member) *mecatlv1.TeamMember {
+	return &mecatlv1.TeamMember{
+		Name:      m.Name,
+		AgentType: m.AgentType,
+		State:     string(m.State),
+		SessionId: string(m.Session),
+	}
+}
+
+// toProtoTeamMembers maps a slice of team.Member to proto.
+func toProtoTeamMembers(ms []team.Member) []*mecatlv1.TeamMember {
+	out := make([]*mecatlv1.TeamMember, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, toProtoTeamMember(m))
+	}
+	return out
+}
+
+// toProtoTeamTask maps a team.Task to its proto form.
+func toProtoTeamTask(t team.Task) *mecatlv1.TeamTask {
+	deps := make([]string, 0, len(t.Deps))
+	for _, d := range t.Deps {
+		deps = append(deps, string(d))
+	}
+	return &mecatlv1.TeamTask{
+		Id:          string(t.ID),
+		Description: t.Description,
+		State:       string(t.State),
+		Assignee:    t.Assignee,
+		Deps:        deps,
+	}
+}
+
+// toProtoTeamTasks maps a slice of team.Task to proto.
+func toProtoTeamTasks(ts []team.Task) []*mecatlv1.TeamTask {
+	out := make([]*mecatlv1.TeamTask, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, toProtoTeamTask(t))
+	}
+	return out
 }
 
 // modeFromProto maps a proto enum to a session.PermissionMode, defaulting an

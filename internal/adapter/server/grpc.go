@@ -204,6 +204,10 @@ func toStatus(err error) error {
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, ErrNotFound):
 		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, ErrTeamNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, ErrFailedPrecondition):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, ErrNoActiveRun):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, ErrNoMCPProvider):

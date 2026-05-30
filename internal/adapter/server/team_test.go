@@ -186,6 +186,59 @@ func TestTeamRunStateMachineDeterministic(t *testing.T) {
 	wantFailedPrecondition(t, err, "SpawnTeammate after completion")
 }
 
+// TestSpawnTeammateErrorClassification asserts finding J: SpawnTeammate no longer
+// collapses every AddMember failure to InvalidArgument. A Mutating member spawned
+// into a Service with no WorkspaceForker is a server misconfiguration the client
+// cannot fix by changing its args, so it must surface as FailedPrecondition (not
+// InvalidArgument). A duplicate-name spawn stays InvalidArgument (a real bad
+// request), confirming the classifier discriminates rather than blanket-remapping.
+func TestSpawnTeammateErrorClassification(t *testing.T) {
+	// teamService wires no Forker, so a Mutating member trips ErrNoForker.
+	svc := teamService(t, mockllm.New(mockllm.TextTurn("done")))
+	h := server.NewHarnessServer(svc)
+	ctx := context.Background()
+
+	createResp, err := h.CreateTeam(ctx, newCreateTeam("/ws"))
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	teamID := createResp.GetTeamId()
+
+	// Mutating member, no forker configured → FailedPrecondition, NOT InvalidArgument.
+	mutating := &mecatlv1.SpawnTeammateRequest{TeamId: teamID, Name: "writer", Mutating: true}
+	_, err = h.SpawnTeammate(ctx, mutating)
+	wantFailedPrecondition(t, err, "SpawnTeammate(Mutating, no forker)")
+
+	// A genuine bad request — duplicate name — still maps to InvalidArgument.
+	if _, err := h.SpawnTeammate(ctx, newSpawn(teamID, "lead", true, "go")); err != nil {
+		t.Fatalf("SpawnTeammate(lead): %v", err)
+	}
+	_, err = h.SpawnTeammate(ctx, newSpawn(teamID, "lead", false, ""))
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("SpawnTeammate(duplicate): code = %v, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+}
+
+// TestUnknownTeamNotFound asserts a lookup on an unknown team id returns the
+// team-specific ErrTeamNotFound sentinel (Service level) and maps to NotFound at
+// the gRPC boundary — not the session-flavoured ErrNotFound.
+func TestUnknownTeamNotFound(t *testing.T) {
+	svc := teamService(t, mockllm.New(mockllm.TextTurn("done")))
+	h := server.NewHarnessServer(svc)
+	ctx := context.Background()
+
+	if _, _, _, err := svc.ListTeam(ctx, "team-nope"); !errors.Is(err, server.ErrTeamNotFound) {
+		t.Errorf("ListTeam(unknown): err = %v, want ErrTeamNotFound", err)
+	}
+	if err := svc.CleanupTeam(ctx, "team-nope"); !errors.Is(err, server.ErrTeamNotFound) {
+		t.Errorf("CleanupTeam(unknown): err = %v, want ErrTeamNotFound", err)
+	}
+	_, err := h.ListTeam(ctx, &mecatlv1.ListTeamRequest{TeamId: "team-nope"})
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("ListTeam(unknown) gRPC: code = %v, want NotFound (err=%v)", status.Code(err), err)
+	}
+}
+
 // teamServiceMaxTeams builds a team-enabled Service with an explicit MaxTeams cap.
 func teamServiceMaxTeams(t *testing.T, llm *mockllm.Provider, maxTeams int) *server.Service {
 	t.Helper()

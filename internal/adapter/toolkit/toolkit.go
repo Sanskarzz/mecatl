@@ -14,7 +14,6 @@ package toolkit
 
 import (
 	"encoding/json"
-	"fmt"
 
 	"github.com/stacklok/mecatl/internal/session"
 )
@@ -26,18 +25,14 @@ import (
 const MaxOutputBytes = 25_000
 
 // ParseArgs unmarshals a tool call's JSON arguments into dst. An empty payload
-// is treated as an empty object so tools with all-optional arguments work
-// without an explicit "{}". On malformed JSON it returns a model-facing error
-// string (not a Go error) and false; on success it returns "" and true.
+// leaves dst at its zero value so tools with all-optional arguments work without
+// an explicit "{}". On malformed JSON it returns a model-facing error string (not
+// a Go error) and false; on success it returns "" and true.
+//
+// It delegates to session.ParseArgs — the single canonical implementation of this
+// mechanic — preserving toolkit's existing exported signature for its callers.
 func ParseArgs(in session.ToolCall, dst any) (string, bool) {
-	raw := in.Args
-	if len(raw) == 0 {
-		raw = json.RawMessage("{}")
-	}
-	if err := json.Unmarshal(raw, dst); err != nil {
-		return fmt.Sprintf("invalid arguments: %v", err), false
-	}
-	return "", true
+	return session.ParseArgs(in, dst)
 }
 
 // Schema wraps a static JSON-schema literal as json.RawMessage for a ToolSpec.

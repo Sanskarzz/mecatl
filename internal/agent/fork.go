@@ -237,10 +237,8 @@ type branchResult struct {
 // for a setup failure (invalid args / cap exceeded).
 func (t *ForkTool) Execute(ctx context.Context, call session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
 	var args forkArgs
-	if len(call.Args) > 0 {
-		if err := json.Unmarshal(call.Args, &args); err != nil {
-			return session.NewToolError(call.ID, fmt.Sprintf("Fork: invalid arguments: %v", err)), nil
-		}
+	if msg, ok := session.ParseArgs(call, &args); !ok {
+		return session.NewToolError(call.ID, "Fork: "+msg), nil
 	}
 	tasks := nonEmptyTasks(args.Tasks)
 	if len(tasks) == 0 {

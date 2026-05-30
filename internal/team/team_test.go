@@ -95,6 +95,48 @@ func TestDependencyGating(t *testing.T) {
 	}
 }
 
+// TestClaimDepsAreDeepCopied asserts the claim paths return a Task whose Deps
+// slice does not alias the aggregate's backing array, so a caller mutating the
+// returned slice cannot corrupt team state outside the lock (matching Tasks()).
+func TestClaimDepsAreDeepCopied(t *testing.T) {
+	tm := newTeamWith(t, "alice")
+	a, err := tm.CreateTask("A")
+	if err != nil {
+		t.Fatalf("CreateTask A: %v", err)
+	}
+	b, err := tm.CreateTask("B (needs A)", a)
+	if err != nil {
+		t.Fatalf("CreateTask B: %v", err)
+	}
+	if err := tm.CompleteTask(a, "alice"); err != nil {
+		// Claim+complete A so B is claimable.
+		if _, _, cerr := tm.ClaimNext("alice"); cerr != nil {
+			t.Fatalf("ClaimNext A: %v", cerr)
+		}
+		if err := tm.CompleteTask(a, "alice"); err != nil {
+			t.Fatalf("CompleteTask A: %v", err)
+		}
+	}
+
+	got, ok, err := tm.ClaimNext("alice")
+	if err != nil || !ok || got.ID != b {
+		t.Fatalf("ClaimNext B: got=%q ok=%v err=%v", got.ID, ok, err)
+	}
+	if len(got.Deps) != 1 || got.Deps[0] != a {
+		t.Fatalf("claimed B Deps = %v, want [%q]", got.Deps, a)
+	}
+
+	// Mutate the returned Deps; the aggregate snapshot must be unaffected.
+	got.Deps[0] = "tampered"
+	for _, task := range tm.Tasks() {
+		if task.ID == b {
+			if len(task.Deps) != 1 || task.Deps[0] != a {
+				t.Fatalf("aggregate B Deps were corrupted via the claimed copy: %v", task.Deps)
+			}
+		}
+	}
+}
+
 // TestCompleteTaskGuards asserts CompleteTask rejects wrong-state / wrong-owner.
 func TestCompleteTaskGuards(t *testing.T) {
 	tm := newTeamWith(t, "alice", "bob")

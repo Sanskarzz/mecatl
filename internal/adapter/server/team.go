@@ -99,7 +99,7 @@ func (s *Service) lookupTeam(id string) (*teamState, error) {
 	defer s.mu.Unlock()
 	ts, ok := s.teams[id]
 	if !ok {
-		return nil, fmt.Errorf("%w: team %q", ErrNotFound, id)
+		return nil, fmt.Errorf("%w: %q", ErrTeamNotFound, id)
 	}
 	return ts, nil
 }
@@ -120,7 +120,7 @@ func (s *Service) SpawnTeammate(ctx context.Context, teamID string, spec agent.M
 	}
 	s.mu.Unlock()
 	if err := ts.sup.AddMember(ctx, spec); err != nil {
-		return team.Member{}, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+		return team.Member{}, classifyAddMemberErr(err)
 	}
 	for _, m := range ts.team.Members() {
 		if m.Name == spec.Name {
@@ -128,6 +128,39 @@ func (s *Service) SpawnTeammate(ctx context.Context, teamID string, spec agent.M
 		}
 	}
 	return team.Member{}, fmt.Errorf("%w: member %q not found after spawn", ErrInternal, spec.Name)
+}
+
+// classifyAddMemberErr maps a Supervisor.AddMember failure to the server sentinel
+// whose wire status fits the failure CLASS, instead of collapsing every failure to
+// InvalidArgument (finding J). The original error message is preserved by wrapping
+// it with %v so the model/operator still sees the detail.
+//
+//   - Bad client request (the caller can fix it by changing the spawn args):
+//     empty/duplicate/reserved name, roster full → InvalidArgument.
+//   - Server misconfiguration (well-formed request, but the harness is wired wrong;
+//     the client cannot fix it): a Mutating member with no forker, or a read-only
+//     member handed a workspace-mutating tool → FailedPrecondition.
+//   - Server-internal fault: workspace fork I/O failure, or a factory that returned
+//     a nil Engine → Internal.
+func classifyAddMemberErr(err error) error {
+	switch {
+	case errors.Is(err, agent.ErrMemberNameRequired),
+		errors.Is(err, agent.ErrMemberAlreadyAdded),
+		errors.Is(err, team.ErrMemberExists),
+		errors.Is(err, team.ErrReservedName),
+		errors.Is(err, team.ErrTooManyMembers):
+		return fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+	case errors.Is(err, agent.ErrNoForker),
+		errors.Is(err, agent.ErrReadOnlyMemberMutating):
+		return fmt.Errorf("%w: %v", ErrFailedPrecondition, err)
+	case errors.Is(err, agent.ErrForkWorkspace),
+		errors.Is(err, agent.ErrNilEngine):
+		return fmt.Errorf("%w: %v", ErrInternal, err)
+	default:
+		// Unknown failure class: treat as a bad request, preserving the historical
+		// default rather than masking it as a server fault.
+		return fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+	}
 }
 
 // SendTeammateMessage posts a message into a member's inbox, delivered at that
@@ -198,7 +231,7 @@ func (s *Service) CleanupTeam(_ context.Context, teamID string) error {
 	defer s.mu.Unlock()
 	ts, ok := s.teams[teamID]
 	if !ok {
-		return fmt.Errorf("%w: team %q", ErrNotFound, teamID)
+		return fmt.Errorf("%w: %q", ErrTeamNotFound, teamID)
 	}
 	if ts.phase == teamRunning {
 		return fmt.Errorf("%w: %q", ErrTeamRunning, teamID)
