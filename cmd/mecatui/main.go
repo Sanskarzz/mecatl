@@ -1,15 +1,21 @@
 // Command mecatui is a flashy, themeable terminal UI for the mecatl headless
-// agentic coding harness. It is a gRPC CLIENT of a running mecated server: it
-// creates a session, opens the bidi Converse stream, renders the streamed Events
-// (glamour markdown for assistant text, themed lipgloss for user/tool blocks),
-// and resolves permission asks inline by sending ResumeApproval back on the same
-// stream.
+// agentic coding harness. It is a gRPC CLIENT of a mecated server: it creates a
+// session, opens the bidi Converse stream, renders the streamed Events (glamour
+// markdown for assistant text, themed lipgloss for user/tool blocks), and resolves
+// permission asks inline by sending ResumeApproval back on the same stream.
 //
-// Architectural boundary: this binary imports only contracts/gen (via the
-// client package), grpc, the charm libraries, and the local theme/ui/client
-// packages. It NEVER imports internal/agent, internal/session, internal/
-// governance, internal/prompt, internal/port, or any other internal/... package.
-// The UI renders purely from proto Events.
+// The server it talks to may be EXTERNAL (a separately-run mecated, via --server)
+// or, by default, one this process HOSTS in-process over a UNIX socket (see
+// cmd/mecatui/embed) — so a single `mecatui` binary "just works" with no daemon to
+// start and no TCP port. In AUTO mode (no --server) it first probes the loopback
+// default and reuses a server already running there; only if none answers does it
+// embed.
+//
+// Architectural boundary: the render packages (ui, theme) and the client package
+// import no internal/... package and no proto directly — they render purely from
+// proto Events. Hosting the embedded server makes the cmd/mecatui MAIN (and its
+// embed subpackage) a second composition root, alongside cmd/mecated; that import
+// of internal/app + the server adapter is confined HERE and to cmd/mecatui/embed.
 package main
 
 import (
@@ -19,13 +25,16 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
+	"github.com/stacklok/mecatl/cmd/mecatui/embed"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 	"github.com/stacklok/mecatl/cmd/mecatui/ui"
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/app"
 )
 
 func main() {
@@ -56,31 +65,33 @@ func run(args []string) error {
 		fmt.Fprintf(os.Stderr, "mecatui: unknown theme %q, using %q\n", cfg.theme, th.Name)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Resolve where to connect: an explicit external server, a server already
+	// running on the loopback default, or an embedded server we host in-process.
+	target, dial, cleanup, err := resolveTransport(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
 	if cfg.insecure {
 		fmt.Fprintln(os.Stderr, "mecatui: WARNING: --insecure skips TLS certificate verification (testing only)")
 	}
 
-	cl, err := client.Dial(client.DialConfig{
-		Server:    cfg.server,
-		AuthToken: cfg.authToken,
-		UseTLS:    cfg.useTLS,
-		TLSCAFile: cfg.tlsCA,
-		Insecure:  cfg.insecure,
-	})
+	cl, err := client.Dial(dial)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = cl.Close() }()
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	deps := ui.Deps{
 		Session:   &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: client.ModeFromString(cfg.mode)},
 		Conv:      cl,
 		MCP:       cl,
 		Theme:     th,
-		Server:    cfg.server,
+		Server:    target,
 		Workspace: cfg.workspace,
 		Mode:      cfg.mode,
 		Ctx:       ctx,
@@ -89,6 +100,67 @@ func run(args []string) error {
 	prog := tea.NewProgram(ui.New(deps), tea.WithContext(ctx))
 	_, err = prog.Run()
 	return err
+}
+
+// resolveTransport decides how mecatui reaches a server and returns the dial
+// target (for display + connection), the client.DialConfig to dial it with, and a
+// cleanup func to defer (a no-op unless an embedded server was started).
+//
+//   - --server set:     dial that external address with the TLS/auth flags.
+//   - --server empty:   AUTO — if a server already answers on the loopback default,
+//     reuse it (plaintext); otherwise host an embedded server over a UNIX socket.
+func resolveTransport(ctx context.Context, cfg config) (target string, dial client.DialConfig, cleanup func(), err error) {
+	noop := func() {}
+
+	if cfg.server != "" {
+		return cfg.server, client.DialConfig{
+			Server:    cfg.server,
+			AuthToken: cfg.authToken,
+			UseTLS:    cfg.useTLS,
+			TLSCAFile: cfg.tlsCA,
+			Insecure:  cfg.insecure,
+		}, noop, nil
+	}
+
+	if client.IsReachable(ctx, defaultProbeAddr) {
+		fmt.Fprintf(os.Stderr, "mecatui: using mecated already running at %s\n", defaultProbeAddr)
+		return defaultProbeAddr, client.DialConfig{Server: defaultProbeAddr}, noop, nil
+	}
+
+	srv, err := embed.Start(ctx, embeddedConfig(cfg))
+	if err != nil {
+		return "", client.DialConfig{}, noop, fmt.Errorf("start embedded server: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "mecatui: no server found; hosting an embedded mecated at %s\n", srv.Target())
+	// The embedded server has no auth/TLS — it is a private UNIX socket dialled
+	// plaintext, the same single-user loopback trust model mecated uses.
+	return srv.Target(), client.DialConfig{Server: srv.Target()}, func() { _ = srv.Close() }, nil
+}
+
+// embeddedConfig maps the TUI config onto the shared app.Config build contract for
+// the in-process server. It enables the standard default toolset (Bash unless
+// --no-bash, Fork, repo map) but leaves the heavier opt-ins (MCP, ToolHive, skills,
+// memory, slash commands, telemetry) off — a focused single-user default. The
+// provider is OpenAI when OPENAI_API_KEY is set, else the offline mock (--mock).
+func embeddedConfig(cfg config) app.Config {
+	return app.Config{
+		Workspace:            cfg.workspace,
+		Model:                cfg.model,
+		UseOpenAI:            cfg.openAIKey != "",
+		OpenAIKey:            cfg.openAIKey,
+		OpenAIBaseURL:        cfg.openAIBaseURL,
+		UseMock:              cfg.mock,
+		Shell:                "/bin/sh",
+		NoBash:               cfg.noBash,
+		Compaction:           "heuristic",
+		Tokenizer:            "heuristic",
+		LLMMaxAttempts:       3,
+		LLMPerAttemptTimeout: 30 * time.Second,
+		LLMBreakerThreshold:  5,
+		LLMBreakerCooldown:   30 * time.Second,
+		EnableFork:           true,
+		EnableRepoMap:        true,
+	}
 }
 
 // buildRegistry seeds the theme registry with built-ins and loads user theme

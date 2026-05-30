@@ -10,6 +10,9 @@ import (
 
 // config is the resolved CLI/env configuration for mecatui.
 type config struct {
+	// server is the external mecated gRPC address (host:port). Empty means AUTO:
+	// probe the loopback default and, if nothing answers, host an embedded server
+	// in-process over a UNIX socket (see cmd/mecatui/embed).
 	server     string
 	workspace  string
 	mode       string
@@ -20,10 +23,21 @@ type config struct {
 	tlsCA      string
 	insecure   bool
 	listThemes bool
+
+	// Embedded-server provider config (used only when no external server is
+	// dialled). The OpenAI key is read from OPENAI_API_KEY; --mock selects the
+	// canned offline provider instead (useful for a no-network smoke run).
+	model         string
+	openAIBaseURL string
+	openAIKey     string
+	mock          bool
+	noBash        bool
 }
 
-// defaultServer mirrors mecated's default loopback gRPC listen address.
-const defaultServer = "127.0.0.1:8080"
+// defaultProbeAddr is mecated's historical default loopback gRPC address. In AUTO
+// mode (no --server) mecatui probes this; if a server is already serving there it
+// connects, otherwise it hosts an embedded server instead.
+const defaultProbeAddr = "127.0.0.1:8080"
 
 // parseFlags parses argv into a config, applying env fallbacks. The workspace is
 // resolved to an absolute path (the server requires absolute). args excludes the
@@ -31,16 +45,21 @@ const defaultServer = "127.0.0.1:8080"
 func parseFlags(args []string) (config, error) {
 	var cfg config
 	fs := flag.NewFlagSet("mecatui", flag.ContinueOnError)
-	fs.StringVar(&cfg.server, "server", defaultServer, "mecated gRPC address (host:port)")
+	fs.StringVar(&cfg.server, "server", "", "external mecated gRPC address (host:port); empty = auto: reuse a server already running on "+defaultProbeAddr+", else host an embedded one over a UNIX socket")
 	fs.StringVar(&cfg.workspace, "workspace", "", "absolute workspace root for the session (default: cwd)")
 	fs.StringVar(&cfg.mode, "mode", "default", "permission mode: default | plan | accept-edits")
 	fs.StringVar(&cfg.theme, "theme", "", "theme name (default: aztec)")
 	fs.StringVar(&cfg.themeDir, "theme-dir", "", "extra directory of *.json themes to load")
-	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token (or MECATL_AUTH_TOKEN)")
-	fs.BoolVar(&cfg.useTLS, "tls", false, "use TLS transport")
-	fs.StringVar(&cfg.tlsCA, "tls-ca", "", "PEM CA bundle for server verification")
+	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token for an external server (or MECATL_AUTH_TOKEN)")
+	fs.BoolVar(&cfg.useTLS, "tls", false, "use TLS transport when dialling an external server")
+	fs.StringVar(&cfg.tlsCA, "tls-ca", "", "PEM CA bundle for external-server verification")
 	fs.BoolVar(&cfg.insecure, "insecure", false, "skip TLS verification (testing only)")
 	fs.BoolVar(&cfg.listThemes, "list-themes", false, "list available themes and exit")
+
+	fs.StringVar(&cfg.model, "model", "gpt-5", "model identifier for the embedded server (ignored when dialling an external server)")
+	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")
+	fs.BoolVar(&cfg.mock, "mock", false, "embedded server only: use the canned offline mock provider instead of OpenAI (no network)")
+	fs.BoolVar(&cfg.noBash, "no-bash", false, "embedded server only: disable the Bash tool (shell-less mode)")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -52,6 +71,7 @@ func parseFlags(args []string) (config, error) {
 	if cfg.theme == "" {
 		cfg.theme = os.Getenv("MECATUI_THEME")
 	}
+	cfg.openAIKey = os.Getenv("OPENAI_API_KEY")
 
 	if !cfg.listThemes {
 		ws, err := resolveWorkspace(cfg.workspace)
@@ -97,6 +117,13 @@ func (c config) validate() error {
 	case "default", "plan", "accept-edits":
 	default:
 		return fmt.Errorf("invalid --mode %q (want default|plan|accept-edits)", c.mode)
+	}
+	// When hosting an embedded server (no external --server) the provider must be
+	// resolvable: either an OpenAI key in the environment or the offline mock.
+	if c.server == "" && c.openAIKey == "" && !c.mock {
+		return errors.New("no external --server given and no OPENAI_API_KEY set: " +
+			"set OPENAI_API_KEY to host an embedded server, pass --mock for an offline run, " +
+			"or point --server at a running mecated")
 	}
 	return nil
 }

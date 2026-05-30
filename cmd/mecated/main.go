@@ -1,12 +1,15 @@
-// Command mecated is the mecatl server binary and the composition root: the one
-// place where concrete adapters are wired to the ports the agent loop consumes.
+// Command mecated is the standalone mecatl server binary and a composition root:
+// it parses the CLI/env configuration, builds the telemetry sink, delegates the
+// engine + service assembly to internal/app (the SHARED composition layer also
+// used by the embedded server in cmd/mecatui), and serves the resulting
+// HarnessService over gRPC and HTTP/SSE concurrently, with graceful shutdown on
+// SIGINT/SIGTERM.
 //
-// It builds an LLM provider (OpenAI Responses, or a canned mock for smoke
-// tests), the core tool catalog (with an OPTIONAL Bash tool, gated on a
-// configured shell) plus a read-only Task subagent, the permission policy,
-// lifecycle hooks, the session store, and the two-layer system prompt;
-// assembles them into an agent.Engine; and serves the resulting HarnessService
-// over gRPC and HTTP/SSE concurrently, with graceful shutdown on SIGINT/SIGTERM.
+// The agent loop, tool catalog, permission policy, provider, store, MCP and skills
+// wiring all live in internal/app so the TUI can host the same server in-process;
+// mecated owns only the things specific to a network daemon: flag parsing,
+// TLS/auth/rate-limit, the HTTP + metrics listeners, and the `skills promote`
+// operator subcommand.
 package main
 
 import (
@@ -23,8 +26,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -37,46 +38,13 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
-	"github.com/stacklok/mecatl/internal/adapter/dream"
-	"github.com/stacklok/mecatl/internal/adapter/forker"
-	"github.com/stacklok/mecatl/internal/adapter/hookexec"
-	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
-	mcpsource "github.com/stacklok/mecatl/internal/adapter/mcp/source"
-	"github.com/stacklok/mecatl/internal/adapter/memory"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/adapter/openai"
-	"github.com/stacklok/mecatl/internal/adapter/osfs"
-	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
-	"github.com/stacklok/mecatl/internal/adapter/repomap"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
-	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
-	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
-	"github.com/stacklok/mecatl/internal/adapter/tokenizer"
-	"github.com/stacklok/mecatl/internal/adapter/tools"
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/app"
 	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/prompt"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
 )
-
-// defaultContextWindowTokens is the model context window the loop uses to decide
-// when to compact. A conservative default that suits the common GPT-class models.
-const defaultContextWindowTokens = 128_000
-
-// defaultCompactionRatio is the agent loop's compaction TRIGGER fraction (0.8 of
-// the context window).
-const defaultCompactionRatio = 0.8
-
-// defaultCompactionTargetRatio is the fraction the cascade compactor reduces the
-// history TOWARD — deliberately below defaultCompactionRatio so there is
-// hysteresis between the trigger and the target. Without this gap a head/tail-heavy
-// history could re-trip the trigger (and a tier-4 LLM summary) on every turn.
-const defaultCompactionTargetRatio = 0.6
 
 // TRUST MODEL (security): the mecated API exposes command and file execution
 // against the configured workspace. The default listen addresses below bind the
@@ -91,29 +59,15 @@ const (
 	defaultHTTPAddr = "127.0.0.1:8081"
 )
 
-// Default session stop limits. A zero Limits value disables every stop condition
-// in package session, so the composition root supplies these non-zero defaults
-// to ensure a session created without explicit limits is still bounded.
-const (
-	defaultMaxTurns               = 50
-	defaultMaxToolCalls           = 200
-	defaultMaxConsecutiveFailures = 5
-)
-
-// LLM resilience backoff bounds. These are not exposed as flags (the attempt
-// count, per-attempt timeout, and breaker knobs are): exponential backoff
-// between BaseBackoff and MaxBackoff is a sensible fixed envelope.
-const (
-	llmBaseBackoff = 200 * time.Millisecond
-	llmMaxBackoff  = 10 * time.Second
-)
-
 // defaultMetricsAddr is the loopback listen address for the Prometheus /metrics
 // endpoint. Unlike the harness API it is read-only and carries no secrets, but
 // it is still bound to loopback by default. An empty --metrics-addr disables it.
 const defaultMetricsAddr = "127.0.0.1:9090"
 
-// config is the parsed command-line / environment configuration for mecated.
+// config is the parsed command-line / environment configuration for mecated. The
+// engine-build subset is mapped onto app.Config by appConfig; the rest (listen
+// addresses, TLS, auth, rate limiting, metrics, tracing) is serve-time state
+// owned by this binary.
 type config struct {
 	grpcAddr      string
 	httpAddr      string
@@ -169,9 +123,8 @@ type config struct {
 	// writable SkillDraft tool is registered, writing model-authored candidate
 	// SKILL.md files into this QUARANTINE directory (NEVER a catalog Source). An
 	// operator promotes a candidate into an active --skills-dir with the
-	// `mecated skills promote` subcommand. Empty disables the tool (like
-	// --memory-dir gating Remember/Recall). The dir must be disjoint from every
-	// active skills dir (fatal config error on overlap — the trust boundary).
+	// `mecated skills promote` subcommand. Empty disables the tool. The dir must be
+	// disjoint from every active skills dir (fatal config error on overlap).
 	skillsDraftDir       string
 	skillsDraftThreshold float64
 
@@ -199,8 +152,7 @@ type config struct {
 
 	// MCP resources: register the ListMcpResources/ReadMcpResource meta-tools when
 	// a connected server exposes resources. Default ON — the tools are registered
-	// only when there is at least one resource to expose (so "on" is a no-op when
-	// nothing advertises resources).
+	// only when there is at least one resource to expose.
 	mcpResourceTools bool
 	// MCP prompts: compose the MCP prompt expander so "/mcp__<server>__<prompt>"
 	// inputs expand to the server-rendered prompt. Default ON; expansion only fires
@@ -322,8 +274,9 @@ func runSkillsPromote(argv []string, in io.Reader, out io.Writer) error {
 	return nil
 }
 
-// run parses flags, builds the engine and service, and serves until a termination
-// signal arrives. It is separated from main so it can return errors cleanly.
+// run parses flags, builds the engine/service via internal/app, and serves until a
+// termination signal arrives. It is separated from main so it can return errors
+// cleanly.
 func run() error {
 	cfg, err := parseFlags(os.Args[1:])
 	if err != nil {
@@ -338,8 +291,7 @@ func run() error {
 
 	// Observability: install the OTLP trace exporter + global TracerProvider
 	// BEFORE building the tracing sink below, so NewTracing(otel.GetTracerProvider())
-	// picks up the installed provider. An empty --otlp-endpoint disables tracing
-	// (Setup installs nothing and returns a no-op shutdown).
+	// picks up the installed provider. An empty --otlp-endpoint disables tracing.
 	traceShutdown, err := telemetry.Setup(ctx, telemetry.OTLPConfig{
 		Endpoint:    cfg.otlpEndpoint,
 		Protocol:    cfg.otlpProtocol,
@@ -362,51 +314,61 @@ func run() error {
 		slog.Info("tracing enabled (OTLP exporter installed)", "endpoint", cfg.otlpEndpoint, "protocol", cfg.otlpProtocol, "insecure", cfg.otlpInsecure)
 	}
 
-	provider, err := buildProvider(cfg)
-	if err != nil {
-		return err
-	}
-
-	store, err := buildStore(cfg)
-	if err != nil {
-		return err
-	}
-
-	// Observability: a private Prometheus registry feeds both the EventSink/
-	// Logger adapter and the /metrics handler. Tracing uses the global OTel
-	// TracerProvider installed by telemetry.Setup above (a no-op when tracing is
-	// disabled), so the sink emits to the OTLP exporter when an endpoint is set.
+	// Observability: a private Prometheus registry feeds both the EventSink/Logger
+	// adapter and the /metrics handler. Tracing uses the global OTel TracerProvider
+	// installed by telemetry.Setup above (a no-op when tracing is disabled), so the
+	// sink emits to the OTLP exporter when an endpoint is set.
 	reg := prometheus.NewRegistry()
 	metrics := telemetry.NewMetrics(reg)
 	tracing := telemetry.NewTracing(otel.GetTracerProvider())
 	sink := telemetry.NewSink(metrics, tracing)
 
-	// MCP: resolve the server inventory (static --mcp-server entries + the live
-	// ToolHive workload source), connect them, and register their tools into the
-	// parent catalog. A nil/failed manager is non-fatal; mcpClose is always safe to
-	// call. mcpInventory is the resolved source/server/diagnostic snapshot a future
-	// (Stage C) gRPC stage will hand to the server adapter; for now we log a summary
-	// so the resolution is observable.
-	engine, mcpProvider, mcpInventory, mcpClose, err := buildEngine(ctx, cfg, provider, sink, metrics, store)
+	built, err := app.Build(ctx, appConfig(cfg, sink, metrics))
 	if err != nil {
 		return err
 	}
-	defer mcpClose()
-	logMCPInventory(mcpInventory)
+	defer built.Close()
 
-	svc, err := server.NewService(server.Config{
-		Engine:        engine,
-		Store:         store,
-		Workspaces:    osfsWorkspaceFactory(),
-		DefaultLimits: defaultLimits(),
-		MCPProvider:   mcpProvider,
-		MCPSources:    mcpInventory,
-	})
-	if err != nil {
-		return fmt.Errorf("build service: %w", err)
+	return serve(ctx, cfg, built.Service, reg)
+}
+
+// appConfig maps the CLI/env config onto the shared app.Config build contract,
+// threading the telemetry sink (EventSink) and metrics (Logger) into the engine.
+func appConfig(cfg config, sink port.EventSink, logger port.Logger) app.Config {
+	return app.Config{
+		Workspace:                 cfg.workspace,
+		Model:                     cfg.model,
+		UseOpenAI:                 cfg.useOpenAI,
+		OpenAIBaseURL:             cfg.openAIBaseURL,
+		OpenAIKey:                 cfg.openAIKey,
+		UseMock:                   cfg.useMock,
+		StoreDir:                  cfg.storeDir,
+		Shell:                     cfg.shell,
+		NoBash:                    cfg.noBash,
+		Compaction:                cfg.compaction,
+		Tokenizer:                 cfg.tokenizer,
+		LLMMaxAttempts:            cfg.llmMaxAttempts,
+		LLMPerAttemptTimeout:      cfg.llmPerAttemptTimeout,
+		LLMBreakerThreshold:       cfg.llmBreakerThreshold,
+		LLMBreakerCooldown:        cfg.llmBreakerCooldown,
+		MemoryDir:                 cfg.memoryDir,
+		MemoryConsolidateInterval: cfg.memoryConsolidateInterval,
+		SkillsDirs:                cfg.skillsDirs,
+		SkillsConventional:        cfg.skillsConventional,
+		SkillsDraftDir:            cfg.skillsDraftDir,
+		SkillsDraftThreshold:      cfg.skillsDraftThreshold,
+		CommandsDir:               cfg.commandsDir,
+		EnableCommands:            cfg.enableCommands,
+		EnableFork:                cfg.enableFork,
+		EnableRepoMap:             cfg.enableRepoMap,
+		MCPServers:                cfg.mcpServers,
+		MCPResourceTools:          cfg.mcpResourceTools,
+		MCPPrompts:                cfg.mcpPrompts,
+		ToolHiveEnabled:           cfg.toolHiveEnabled,
+		ToolHiveGroup:             cfg.toolHiveGroup,
+		Sink:                      sink,
+		Logger:                    logger,
 	}
-
-	return serve(ctx, cfg, svc, reg)
 }
 
 // parseFlags turns argv into a config, resolving env-derived defaults.
@@ -487,741 +449,6 @@ func parseFlags(argv []string) (config, error) {
 		cfg.authToken = os.Getenv("MECATL_AUTH_TOKEN")
 	}
 	return cfg, nil
-}
-
-// buildProvider constructs the LLMProvider per config: OpenAI when requested or
-// keyed, a canned mock when --mock is set, otherwise an error (the server needs a
-// real LLM to be useful).
-func buildProvider(cfg config) (port.LLMProvider, error) {
-	switch {
-	case cfg.useOpenAI:
-		if cfg.openAIKey == "" {
-			return nil, errors.New("--openai requires OPENAI_API_KEY to be set")
-		}
-		opts := []openai.Option{openai.WithAPIKey(cfg.openAIKey)}
-		if cfg.openAIBaseURL != "" {
-			opts = append(opts, openai.WithBaseURL(cfg.openAIBaseURL))
-		}
-		slog.Info("LLM provider: openai", "model", cfg.model, "base_url", cfg.openAIBaseURL)
-		// Wrap the real provider with the resilience decorator (bounded retries,
-		// per-attempt timeout, circuit breaker). Classifier/Clock are left nil so
-		// the production defaults (DefaultClassifier / time.Now) apply. The mock
-		// path below is intentionally left unwrapped: it never fails over the
-		// network, so resilience would be inert.
-		var llm port.LLMProvider = openai.New(opts...)
-		llm = llmresilience.Wrap(llm, llmresilience.Config{
-			MaxAttempts:       cfg.llmMaxAttempts,
-			BaseBackoff:       llmBaseBackoff,
-			MaxBackoff:        llmMaxBackoff,
-			PerAttemptTimeout: cfg.llmPerAttemptTimeout,
-			BreakerThreshold:  cfg.llmBreakerThreshold,
-			BreakerCooldown:   cfg.llmBreakerCooldown,
-		})
-		slog.Info("LLM resilience enabled",
-			"max_attempts", cfg.llmMaxAttempts,
-			"per_attempt_timeout", cfg.llmPerAttemptTimeout,
-			"breaker_threshold", cfg.llmBreakerThreshold,
-			"breaker_cooldown", cfg.llmBreakerCooldown)
-		return llm, nil
-	case cfg.useMock:
-		slog.Warn("LLM provider: mock (canned, offline) — for smoke tests only")
-		return mockllm.New(
-			mockllm.TextTurn("Mock provider: no real model is configured. Set --openai/OPENAI_API_KEY for live use."),
-		), nil
-	default:
-		return nil, errors.New("no LLM provider configured: pass --openai (with OPENAI_API_KEY) or --mock")
-	}
-}
-
-// buildStore constructs the SessionStore: a JSONL replay store under --store-dir,
-// or the in-memory store when the dir is empty.
-func buildStore(cfg config) (port.SessionStore, error) {
-	if cfg.storeDir == "" {
-		slog.Info("session store: in-memory")
-		return memstore.New(), nil
-	}
-	st, err := jsonlstore.New(cfg.storeDir)
-	if err != nil {
-		return nil, fmt.Errorf("open jsonl store %q: %w", cfg.storeDir, err)
-	}
-	slog.Info("session store: jsonl", "dir", cfg.storeDir)
-	return st, nil
-}
-
-// buildEngine assembles the parent agent.Engine: the core tool catalog (plus an
-// optional Bash tool and a read-only Task subagent), the permission policy,
-// hooks, prompt config, and the shared provider/store.
-// It also wires the telemetry Sink (EventSink) and Logger, and connects any
-// configured MCP servers, returning a close func that tears the MCP manager
-// down on shutdown (a no-op when no servers are configured).
-func buildEngine(ctx context.Context, cfg config, provider port.LLMProvider, sink port.EventSink, logger port.Logger, store port.SessionStore) (*agent.Engine, mcp.Provider, []mcpsource.SourceInfo, func(), error) {
-	// SkillDraft trust boundary: when enabled, the quarantine dir must live OUTSIDE
-	// the workspace root (so the model's workspace-confined Write/Edit cannot reach
-	// it) and be disjoint from every active skills dir. Fatal on a misconfig.
-	if err := validateSkillDraftConfig(cfg); err != nil {
-		return nil, nil, nil, func() {}, err
-	}
-	warnSkillDraftResiduals(cfg)
-
-	policy := permpolicy.NewPolicy(defaultRules())
-	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
-
-	cat, mcpProvider, mcpInventory, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
-
-	counter := buildTokenCounter(cfg)
-
-	deps := agent.Deps{
-		LLM:     provider,
-		Catalog: cat,
-		Policy:  policy,
-		Hooks:   hooks,
-		// Persist mid-run transitions (tool results, terminal state) so a durable
-		// store (--store-dir) holds current state. The Service additionally
-		// persists on entering awaiting and at run end; both share this store, so
-		// the latest snapshot is always current for auto-resume after a restart.
-		Store:               store,
-		Sink:                sink,
-		Logger:              logger,
-		PromptConfig:        promptConfig(cfg),
-		Model:               cfg.model,
-		ContextWindowTokens: defaultContextWindowTokens,
-		CompactionRatio:     defaultCompactionRatio,
-		TokenCounter:        counter,
-		Compactor:           buildCompactor(cfg, provider, counter),
-		CommandExpander:     buildCommandExpander(cfg, mcpProvider),
-	}
-	return agent.NewEngine(deps), mcpProvider, mcpInventory, mcpClose, nil
-}
-
-// buildCommandExpander selects the slash-command expander for the agent Deps.
-// Command expansion is OFF by default (the NoopExpander, leaving raw user text
-// untouched). It is turned ON when EITHER --commands-dir is set (use that
-// directory) OR --enable-commands is true (use the DirCommandExpander defaults
-// of .mecatl/commands then .claude/commands). When --commands-dir is set it takes
-// precedence over the defaults; --enable-commands without a dir uses the
-// defaults. Templates are discovered through the session Workspace FS, so paths
-// are workspace-relative.
-// It also composes an MCP prompt expander (highest precedence is the file-backed
-// DirCommandExpander, so a local command file shadows a same-named MCP prompt)
-// when --mcp-prompts is set and at least one connected server exposes a prompt.
-// The MultiExpander tries the file-backed expander first, then the MCP one, so
-// "/mcp__<server>__<prompt>" reaches MCP only when no file command matched.
-func buildCommandExpander(cfg config, mcpProvider mcp.Provider) prompt.CommandExpander {
-	dirExp := buildDirCommandExpander(cfg)
-	mcpExp := buildMCPPromptExpander(cfg, mcpProvider)
-
-	switch {
-	case dirExp == nil && mcpExp == nil:
-		return prompt.NoopExpander{}
-	case mcpExp == nil:
-		return dirExp
-	case dirExp == nil:
-		return mcpExp
-	default:
-		// File-backed commands win on a name collision (listed first).
-		return prompt.NewMultiExpander(dirExp, mcpExp)
-	}
-}
-
-// buildDirCommandExpander returns the file-backed slash-command expander, or nil
-// when command expansion is not enabled (so the caller can compose conditionally).
-func buildDirCommandExpander(cfg config) prompt.CommandExpander {
-	if cfg.commandsDir == "" && !cfg.enableCommands {
-		slog.Info("slash commands DISABLED (set --commands-dir or --enable-commands to enable)")
-		return nil
-	}
-	if cfg.commandsDir != "" {
-		slog.Info("slash commands ENABLED", "dir", cfg.commandsDir)
-		return prompt.NewDirCommandExpander(cfg.commandsDir)
-	}
-	// --enable-commands with no explicit dir: use the package defaults.
-	slog.Info("slash commands ENABLED (default dirs)", "dirs", ".mecatl/commands,.claude/commands")
-	return prompt.NewDirCommandExpander()
-}
-
-// buildMCPPromptExpander returns the MCP prompt expander, or nil when MCP prompts
-// are disabled or no connected server exposes a prompt. It probes the provider's
-// static prompt snapshot so the expander is only wired when there is something to
-// expand (mirroring the resource-tool non-empty gating).
-func buildMCPPromptExpander(cfg config, p mcp.Provider) prompt.CommandExpander {
-	if !cfg.mcpPrompts || p == nil {
-		if !cfg.mcpPrompts {
-			slog.Info("MCP prompts DISABLED (--mcp-prompts=false)")
-		}
-		return nil
-	}
-	prompts, err := p.ListPrompts(context.Background(), "")
-	if err != nil {
-		slog.Warn("MCP prompt listing failed; prompt expansion disabled", "err", err)
-		return nil
-	}
-	if len(prompts) == 0 {
-		slog.Info("MCP prompts DISABLED (no connected server exposes a prompt)")
-		return nil
-	}
-	slog.Info("MCP prompt expansion ENABLED", "count", len(prompts))
-	return mcp.NewPromptExpander(p)
-}
-
-// buildTokenCounter selects the TokenCounter from --tokenizer. The default
-// ("heuristic") returns the dependency-free heuristic counter — byte-identical
-// behaviour to the pre-seam loop. "tiktoken" returns the offline tiktoken-backed
-// counter from internal/adapter/tokenizer, chosen for the configured model; if it
-// cannot be built it logs and falls back to the heuristic so startup never fails.
-func buildTokenCounter(cfg config) agent.TokenCounter {
-	switch cfg.tokenizer {
-	case "tiktoken":
-		tc, err := tokenizer.NewForModel(cfg.model)
-		if err != nil {
-			slog.Warn("tiktoken counter unavailable; falling back to heuristic", "model", cfg.model, "err", err)
-			return agent.HeuristicTokenCounter{}
-		}
-		slog.Info("token counter: tiktoken (offline vocab)", "model", cfg.model)
-		return tc
-	default:
-		slog.Info("token counter: heuristic (dependency-free)")
-		return agent.HeuristicTokenCounter{}
-	}
-}
-
-// buildCompactor selects the Compactor from --compaction. The default
-// ("heuristic") returns the single-summary HeuristicCompactor — the exact v1
-// behaviour. "cascade" returns the tiered CascadeCompactor (snip→strip→collapse,
-// plus an LLM summarize tier wired with the shared provider). It reduces toward
-// defaultCompactionTargetRatio, which is BELOW the loop's trigger ratio so there
-// is hysteresis — compaction lands the history comfortably under the trigger
-// rather than right at it (avoiding per-turn re-compaction).
-func buildCompactor(cfg config, provider port.LLMProvider, counter agent.TokenCounter) agent.Compactor {
-	switch cfg.compaction {
-	case "cascade":
-		slog.Info("compaction strategy: cascade (snip→strip→collapse→summarize)")
-		return agent.CascadeCompactor{
-			Counter:      counter,
-			BudgetTokens: int(float64(defaultContextWindowTokens) * defaultCompactionTargetRatio),
-			LLM:          provider,
-			Model:        cfg.model,
-		}
-	default:
-		slog.Info("compaction strategy: heuristic (single-summary)")
-		return agent.HeuristicCompactor{}
-	}
-}
-
-// buildCatalog registers the always-available core tools (Read, Edit, Write,
-// Grep, Glob, WebFetch), a Task subagent wired per WP9 (a scoped explorer child
-// Engine — Read/Grep/Glob only, allow-all read-only policy, the same
-// provider/model — so a subagent never prompts a human and cannot recurse), and
-// — only when a shell is configured — the optional Bash tool. With --no-bash or
-// --shell="" the catalog has no Bash and the agent runs shell-less.
-//
-// After the built-in tools are registered it connects any --mcp-server entries
-// and registers their (namespaced) tools. Connecting MCP is best-effort:
-// unreachable servers are logged and skipped, and a failed manager never aborts
-// startup. The returned close func tears down the MCP manager on shutdown.
-func buildCatalog(ctx context.Context, cfg config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, mcp.Provider, []mcpsource.SourceInfo, func()) {
-	cat := tool.NewCatalog()
-	for _, t := range tools.All() {
-		cat.MustRegister(t)
-	}
-	if runner := buildCommandRunner(cfg); runner != nil {
-		cat.MustRegister(tools.NewBashTool(runner))
-		slog.Info("Bash tool ENABLED", "shell", cfg.shell, "cwd", cfg.workspace)
-	} else {
-		slog.Info("Bash tool DISABLED (shell-less mode): the agent has no command execution",
-			"reason", bashDisabledReason(cfg))
-	}
-	cat.MustRegister(buildTaskTool(cfg, provider, hooks))
-
-	// Fork fan-out tool (harness pattern 8): a scoped read-only child Engine (no
-	// Fork/Task, so a branch cannot recurse) run against an isolated forked
-	// workspace. Children write only to their own forks, so this is safe to enable
-	// by default. Gated behind --enable-fork.
-	if cfg.enableFork {
-		fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
-		forkChild := buildChildEngine(cfg, provider)
-		cat.MustRegister(agent.NewForkTool(forkChild, fk, agent.WithForkSubagentStopHook(hooks)))
-		slog.Info("Fork tool ENABLED (parallel isolated child branches)")
-	} else {
-		slog.Info("Fork tool DISABLED (--enable-fork=false)")
-	}
-
-	// Memory tools (harness pattern 3): opt-in, registered only when a per-project
-	// memory directory is configured via --memory-dir.
-	if cfg.memoryDir != "" {
-		store, err := memory.New(cfg.memoryDir)
-		if err != nil {
-			slog.Warn("could not open memory store; memory tools disabled", "dir", cfg.memoryDir, "err", err)
-		} else if err := memory.Register(cat, store); err != nil {
-			slog.Warn("registering memory tools failed; some tools may be missing", "err", err)
-		} else {
-			slog.Info("memory tools ENABLED (Remember/Recall)", "dir", cfg.memoryDir)
-			// Dream consolidation (harness pattern 4): an opt-in background service
-			// that distills the memory store on a ticker. It shares the run's ctx
-			// (so it stops on shutdown) and the same LLM provider. Only started when
-			// both --memory-dir and a positive --memory-consolidate-interval are set.
-			startMemoryConsolidation(ctx, cfg, store, provider)
-		}
-	} else {
-		slog.Info("memory tools DISABLED (--memory-dir empty)")
-		if cfg.memoryConsolidateInterval > 0 {
-			slog.Warn("--memory-consolidate-interval is a no-op without --memory-dir (memory is disabled)",
-				"interval", cfg.memoryConsolidateInterval)
-		}
-	}
-
-	registerSkills(ctx, cfg, cat)
-
-	// Repo-map tool (Aider-style ranked codebase overview). It parses source with
-	// tree-sitter compiled to WebAssembly and run via wazero — pure Go, no CGO —
-	// so it ships in the default static, CGO-free build (used by the ko image) with
-	// NO build tag. Enabled by default; --enable-repomap=false turns it off.
-	if cfg.enableRepoMap {
-		cat.MustRegister(repomap.NewTool())
-		slog.Info("repo map tool ENABLED (CGO-free tree-sitter via WebAssembly)")
-	} else {
-		slog.Info("repo map tool DISABLED (--enable-repomap=false)")
-	}
-
-	mcpProvider, mcpInventory, mcpClose := registerMCP(ctx, cfg, cat)
-	return cat, mcpProvider, mcpInventory, mcpClose
-}
-
-// registerMCP RESOLVES the MCP server inventory from the pluggable source list
-// (static --mcp-server entries first, then the live ToolHive workload source when
-// --toolhive is on), connects the merged set, and registers their tools into cat.
-// It is non-fatal end to end: with no servers resolved it does nothing; per-source
-// SkipErrors and per-server connect failures are logged and skipped; a manager
-// that fails entirely is logged and skipped.
-//
-// It returns:
-//   - the connected Manager as an mcp.Provider (nil when nothing was resolved or
-//     the manager could not be built) so later wiring — the resource/prompt
-//     expander here, and a future gRPC stage — can read the servers' resources and
-//     prompts;
-//   - the resolved source inventory ([]source.SourceInfo) so a later (Stage C)
-//     gRPC stage can report WHICH sources/servers/diagnostics were resolved
-//     without re-running discovery or importing the ToolHive library;
-//   - a close func that shuts the manager down (a no-op when there is nothing to
-//     close).
-func registerMCP(ctx context.Context, cfg config, cat *tool.Catalog) (mcp.Provider, []mcpsource.SourceInfo, func()) {
-	opts := mcpsource.ResolveOptions{
-		StaticServers:   cfg.mcpServers,
-		ToolHiveEnabled: cfg.toolHiveEnabled,
-		ToolHiveGroup:   cfg.toolHiveGroup,
-	}
-	sources := mcpsource.ResolveSources(opts)
-
-	// Resolve the sources ONCE: a single walk yields both the merged configs to
-	// connect (static shadows ToolHive on a name collision) AND the per-source
-	// inventory snapshot for Stage C — so the gRPC inventory and the connected
-	// servers come from the same snapshot, and the live ToolHive source is listed
-	// only once. Fail-soft: a source error becomes a diagnostic, never an abort.
-	configs, inventory, skips := mcpsource.Resolve(ctx, sources)
-	for _, s := range skips {
-		slog.Warn("MCP server skipped", "name", s.Server, "reason", s.Reason)
-	}
-	if len(configs) == 0 {
-		slog.Info("MCP DISABLED (no servers resolved from any source)",
-			"toolhive", cfg.toolHiveEnabled, "static", len(cfg.mcpServers))
-		return nil, inventory, func() {}
-	}
-
-	onError := func(sc mcp.ServerConfig, err error) {
-		slog.Warn("MCP server unreachable; skipping", "name", sc.Name, "url", sc.URL, "err", err)
-	}
-	mgr, err := mcp.NewManager(ctx, configs, onError)
-	if err != nil {
-		slog.Warn("MCP manager construction failed; continuing without MCP tools", "err", err)
-		return nil, inventory, func() {}
-	}
-	if err := mcp.Register(cat, mgr.Tools()); err != nil {
-		slog.Warn("registering MCP tools failed; some tools may be missing", "err", err)
-	}
-	slog.Info("MCP tools registered", "servers", len(configs), "tools", len(mgr.Tools()))
-
-	// Resource meta-tools: registered only when at least one server exposes a
-	// resource (RegisterResourceTools gates on non-empty). Non-fatal: a failure
-	// logs and continues with the proxied tools already registered.
-	if cfg.mcpResourceTools {
-		registered, rerr := mcp.RegisterResourceTools(cat, mgr)
-		switch {
-		case rerr != nil:
-			slog.Warn("registering MCP resource tools failed", "err", rerr)
-		case registered:
-			slog.Info("MCP resource tools ENABLED (ListMcpResources/ReadMcpResource)")
-		default:
-			slog.Info("MCP resource tools DISABLED (no connected server exposes a resource)")
-		}
-	} else {
-		slog.Info("MCP resource tools DISABLED (--mcp-resource-tools=false)")
-	}
-
-	return mgr, inventory, func() {
-		if err := mgr.Close(); err != nil {
-			slog.Warn("MCP manager close", "err", err)
-		}
-	}
-}
-
-// logMCPInventory logs a one-line-per-source summary of the resolved MCP source
-// inventory. It is the placeholder consumer of the inventory until Stage C threads
-// it to the gRPC server adapter; logging it keeps the resolution observable and
-// the inventory value live (not dead-coded) in the composition root.
-func logMCPInventory(inventory []mcpsource.SourceInfo) {
-	for _, src := range inventory {
-		slog.Info("MCP source resolved",
-			"source", src.Name, "kind", src.Kind, "group", src.Group,
-			"servers", len(src.Servers), "diagnostics", len(src.Diagnostics))
-	}
-}
-
-// registerSkills wires the progressive-disclosure Skill tool. It builds an
-// ordered Source list (explicit --skills-dir paths, highest precedence; plus the
-// conventional project/user locations when --skills-conventional is set), composes
-// them into a MultiSource (earlier-wins on name collisions), discovers once, and
-// registers a single Skill tool whose description enumerates the discovered
-// skills' metadata (always in context); activating a skill returns its full body.
-//
-// Skills stay OPT-IN: with no explicit dir and --skills-conventional unset, the
-// resolver yields no sources and NOTHING is registered. Discovery is forgiving — a
-// malformed/frontmatter-less or shadowed SKILL.md is skipped and logged, never
-// fatal — and the tool is registered ONLY when at least one valid skill is found.
-func registerSkills(ctx context.Context, cfg config, cat *tool.Catalog) {
-	sources := skills.ResolveSources(skills.ResolveOptions{
-		Explicit:     cfg.skillsDirs,
-		Conventional: cfg.skillsConventional,
-		Workspace:    cfg.workspace,
-	})
-	if len(sources) == 0 && cfg.skillsDraftDir != "" {
-		// No active Sources, but drafting is enabled: still register SkillDraft so the
-		// loop can be closed (author -> promote -> active next start).
-		registerSkillDraft(cfg, cat, nil)
-		return
-	}
-	if len(sources) == 0 {
-		slog.Info("skills DISABLED (no --skills-dir and --skills-conventional unset)")
-		return
-	}
-
-	discovered, skips, err := skills.RegisterSource(ctx, cat, skills.NewMultiSource(sources...))
-	for _, s := range skips {
-		slog.Warn("skill skipped", "path", s.Path, "reason", s.Reason)
-	}
-	switch {
-	case err != nil:
-		slog.Warn("registering skills failed; Skill tool disabled",
-			"dirs", strings.Join(cfg.skillsDirs, ","), "conventional", cfg.skillsConventional, "err", err)
-	case len(discovered) == 0:
-		slog.Info("skills DISABLED (no valid SKILL.md found in any source)",
-			"dirs", strings.Join(cfg.skillsDirs, ","), "conventional", cfg.skillsConventional)
-	default:
-		names := make([]string, 0, len(discovered))
-		for _, s := range discovered {
-			names = append(names, s.Name)
-		}
-		slog.Info("Skill tool ENABLED",
-			"dirs", strings.Join(cfg.skillsDirs, ","), "conventional", cfg.skillsConventional,
-			"count", len(discovered), "skills", strings.Join(names, ","))
-	}
-
-	// SkillDraft (the self-improving loop): opt-in via --skills-draft-dir. The
-	// novelty check is snapshotted against the skills just discovered (read-only).
-	registerSkillDraft(cfg, cat, discovered)
-}
-
-// registerSkillDraft registers the writable SkillDraft tool when --skills-draft-dir
-// is set, binding a DirDrafter to the quarantine dir and the snapshot of currently
-// active skills (for the offline novelty check). The structural trust boundary —
-// quarantine OUTSIDE the workspace root and disjoint from every active skills dir —
-// is enforced by validateSkillDraftConfig at engine-build time (a fatal config error
-// otherwise), so by the time this runs the quarantine is unreachable by the model's
-// workspace-confined Write/Edit.
-func registerSkillDraft(cfg config, cat *tool.Catalog, existing []skills.Skill) {
-	if cfg.skillsDraftDir == "" {
-		slog.Info("SkillDraft tool DISABLED (--skills-draft-dir empty)")
-		return
-	}
-	drafter := skills.NewDirDrafter(cfg.skillsDraftDir, existing,
-		skills.WithSimilarityThreshold(cfg.skillsDraftThreshold))
-	cat.MustRegister(skills.NewDraftTool(drafter))
-	slog.Info("SkillDraft tool ENABLED (model-authored skills -> quarantine -> operator promote)",
-		"quarantine", cfg.skillsDraftDir, "similarity_threshold", cfg.skillsDraftThreshold,
-		"snapshot_skills", len(existing))
-}
-
-// startMemoryConsolidation launches the dream consolidator on a background
-// goroutine when --memory-consolidate-interval is positive. It shares the run's
-// ctx (so the loop exits on shutdown) and the same LLM provider as the agent.
-// A non-positive interval is a no-op. Per-run errors are logged at warn and do
-// not stop the loop.
-func startMemoryConsolidation(ctx context.Context, cfg config, store tool.MemoryStore, provider port.LLMProvider) {
-	if cfg.memoryConsolidateInterval <= 0 {
-		slog.Info("memory consolidation DISABLED (--memory-consolidate-interval=0)")
-		return
-	}
-	cons := dream.New(store, provider, dream.Config{Model: cfg.model})
-	slog.Info("memory consolidation ENABLED (dream)", "interval", cfg.memoryConsolidateInterval, "model", cfg.model)
-	go func() {
-		err := cons.RunPeriodically(ctx, cfg.memoryConsolidateInterval, func(err error) {
-			slog.Warn("memory consolidation", "err", err)
-		})
-		// RunPeriodically returns ctx.Err() on shutdown; that is expected, not a fault.
-		if err != nil && !errors.Is(err, context.Canceled) {
-			slog.Warn("memory consolidation loop stopped", "err", err)
-		}
-	}()
-}
-
-// buildCommandRunner builds the local command runner the Bash tool executes
-// against, rooted at the default session workspace. It returns nil when command
-// execution is disabled (--no-bash, or an empty --shell), in which case the Bash
-// tool is not registered and the harness runs without a shell. A runner that
-// fails to construct also disables Bash rather than aborting startup.
-func buildCommandRunner(cfg config) tool.CommandRunner {
-	if cfg.noBash || cfg.shell == "" {
-		return nil
-	}
-	runner, err := osfs.NewCommandRunnerShell(cfg.workspace, cfg.shell)
-	if err != nil {
-		slog.Warn("could not build command runner; Bash tool disabled", "workspace", cfg.workspace, "err", err)
-		return nil
-	}
-	return runner
-}
-
-// bashDisabledReason returns a short human-readable reason Bash is disabled, for
-// the startup log line.
-func bashDisabledReason(cfg config) string {
-	switch {
-	case cfg.noBash:
-		return "--no-bash"
-	case cfg.shell == "":
-		return "--shell is empty"
-	default:
-		return "command runner unavailable"
-	}
-}
-
-// buildChildEngine constructs a child *Engine scoped to the read-only explorer
-// toolset (Read/Grep/Glob ONLY — no Fork/Task, so a child can never recurse or
-// fan out further) under an allow-all, non-interactive policy. Both the Task
-// subagent and the Fork fan-out tool share this child shape: each runs one-shot
-// and must never produce a permission ask.
-func buildChildEngine(cfg config, provider port.LLMProvider) *agent.Engine {
-	childCat := tool.NewCatalog()
-	childCat.MustRegister(tools.ReadTool{})
-	childCat.MustRegister(tools.GrepTool{})
-	childCat.MustRegister(tools.GlobTool{})
-
-	// Allow-all over the read-only explorer tools: the child is one-shot and
-	// non-interactive, so it must never produce a permission ask.
-	childPolicy := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}})
-
-	return agent.NewEngine(agent.Deps{
-		LLM:                 provider,
-		Catalog:             childCat,
-		Policy:              childPolicy,
-		Hooks:               hookexec.New(nil),
-		PromptConfig:        promptConfig(cfg),
-		Model:               cfg.model,
-		ContextWindowTokens: defaultContextWindowTokens,
-		CompactionRatio:     defaultCompactionRatio,
-	})
-}
-
-// buildTaskTool constructs the Task subagent tool over a child Engine scoped to
-// the read-only explorer toolset.
-func buildTaskTool(cfg config, provider port.LLMProvider, hooks port.HookRunner) tool.Tool {
-	return agent.NewTaskTool(buildChildEngine(cfg, provider), agent.WithSubagentStopHook(hooks))
-}
-
-// promptConfig builds the system-prompt configuration. The volatile Env values
-// (cwd/os/model/date/mode) are computed HERE in the composition root so the
-// domain stays infra-free; the loop fills in the per-turn Mode and Tools.
-func promptConfig(cfg config) prompt.Config {
-	return prompt.Config{
-		Env: prompt.Env{
-			Cwd:   cfg.workspace,
-			OS:    runtime.GOOS,
-			Model: cfg.model,
-			Date:  time.Now().Format("2006-01-02"),
-			Mode:  string(session.ModeDefault),
-		},
-	}
-}
-
-// defaultRules is the built-in permission ruleset: read-only tools (Read, Grep,
-// Glob, the Task explorer) are allowed; mutating tools (Bash, Edit, Write) ask
-// for approval; the writable SkillDraft tool asks for approval (a human reviews
-// authorship). Anything unmatched defaults to ask via the evaluator. The SkillDraft
-// trust boundary is structural (the quarantine lives outside the workspace, so
-// Write/Edit cannot reach it — see validateSkillDraftConfig), not a permission rule.
-func defaultRules() []governance.Rule {
-	return []governance.Rule{
-		{Scope: governance.ScopeManaged, Tool: "Read", Effect: governance.Allow},
-		{Scope: governance.ScopeManaged, Tool: "Grep", Effect: governance.Allow},
-		{Scope: governance.ScopeManaged, Tool: "Glob", Effect: governance.Allow},
-		{Scope: governance.ScopeManaged, Tool: "WebFetch", Effect: governance.Allow},
-		{Scope: governance.ScopeManaged, Tool: "Task", Effect: governance.Allow},
-		{Scope: governance.ScopeManaged, Tool: "Bash", Effect: governance.Ask},
-		{Scope: governance.ScopeManaged, Tool: "Edit", Effect: governance.Ask},
-		{Scope: governance.ScopeManaged, Tool: "Write", Effect: governance.Ask},
-		{Scope: governance.ScopeManaged, Tool: skills.DraftToolName, Effect: governance.Ask},
-	}
-}
-
-// validateSkillDraftConfig enforces the SkillDraft trust boundary at startup when
-// the feature is enabled (--skills-draft-dir set). It is fatal on a misconfig that
-// would let the model reach the quarantine through a tool, never a silent
-// degradation.
-//
-// The boundary is STRUCTURAL, not a permission rule. Write/Edit are confined by the
-// osfs Workspace to the workspace root, so a quarantine dir OUTSIDE that root is
-// unreachable by them. We therefore require the quarantine to live outside the
-// workspace (fatal otherwise) and to be disjoint from every active skills dir
-// (fatal on overlap — an overlapping quarantine would let a draft masquerade as a
-// promoted, trusted skill).
-//
-// NOTE on Bash: absent the deferred OS-level sandbox, the Bash tool can write to
-// ANY absolute path and so can reach any quarantine/skills dir regardless of
-// location. The structural boundary therefore covers Write/Edit only; the residual
-// Bash path is the same big-hammer capability Bash already grants (it can write any
-// file), gated by Ask, and is the wrap point for the deferred sandbox. run() logs a
-// loud warning when SkillDraft and Bash are enabled together so the operator knows
-// the boundary is fully structural only shell-less or sandboxed.
-func validateSkillDraftConfig(cfg config) error {
-	if cfg.skillsDraftDir == "" {
-		return nil
-	}
-
-	// Canonicalize through the SAME resolver the osfs Workspace uses to confine
-	// Write/Edit (abs + EvalSymlinks). filepath.Abs alone diverges on a symlinked
-	// workspace and would let a dir we deem "outside" actually resolve inside the
-	// model-writable os.Root — so this MUST match the enforcement layer exactly.
-	quarantine, err := osfs.ResolveRoot(cfg.skillsDraftDir)
-	if err != nil {
-		return fmt.Errorf("--skills-draft-dir %q: %w", cfg.skillsDraftDir, err)
-	}
-	workspace, err := osfs.ResolveRoot(cfg.workspace)
-	if err != nil {
-		return fmt.Errorf("--workspace %q: %w", cfg.workspace, err)
-	}
-
-	// The quarantine MUST be outside the workspace root, so the model's
-	// workspace-confined Write/Edit cannot reach it. Inside-workspace is fatal.
-	if quarantine == workspace || dirsOverlap(workspace, quarantine) {
-		return fmt.Errorf("--skills-draft-dir %q must be OUTSIDE the workspace root %q: "+
-			"Write/Edit are confined to the workspace, so an in-workspace quarantine would be model-writable, "+
-			"defeating the draft→promote trust boundary", quarantine, workspace)
-	}
-
-	// The quarantine MUST be disjoint from every active skills dir, else a draft
-	// could land in (or shadow) the trusted catalog without an operator promote.
-	for _, ad := range activeSkillDirs(cfg) {
-		if dirsOverlap(quarantine, ad) {
-			return fmt.Errorf("--skills-draft-dir %q overlaps an active skills dir %q: "+
-				"the quarantine must be disjoint from every --skills-dir / conventional skills location", quarantine, ad)
-		}
-	}
-	return nil
-}
-
-// warnSkillDraftResiduals logs the residual (non-structural) parts of the SkillDraft
-// trust boundary so an operator deploys it knowingly. It is advisory only —
-// validateSkillDraftConfig has already enforced the structural invariants. Two
-// residuals exist because mecatl has no OS-level sandbox yet:
-//   - Bash (when enabled) can write to ANY absolute path, so it can reach the
-//     quarantine or active catalog regardless of location — the structural boundary
-//     covers Write/Edit only.
-//   - An active --skills-dir INSIDE the workspace is reachable by the model's
-//     Write/Edit (Ask-gated), so the trusted catalog is not write-isolated from the
-//     model; placing active skills OUTSIDE the workspace makes that boundary
-//     structural too.
-func warnSkillDraftResiduals(cfg config) {
-	if cfg.skillsDraftDir == "" {
-		return
-	}
-	if !cfg.noBash && cfg.shell != "" {
-		slog.Warn("SkillDraft trust boundary is structural for Write/Edit only: Bash is enabled and (absent an OS sandbox) can write to any path, so it can reach the skills trees. For a fully structural boundary, run shell-less (--no-bash) or under an OS sandbox.")
-	}
-	workspace, err := osfs.ResolveRoot(cfg.workspace)
-	if err != nil {
-		return
-	}
-	for _, ad := range activeSkillDirs(cfg) {
-		if ad == workspace || dirsOverlap(workspace, ad) {
-			slog.Warn("an active skills dir is INSIDE the workspace and is reachable by the model's Write/Edit (Ask-gated); place active skills OUTSIDE the workspace so promoted skills cannot be planted directly by the model",
-				"active_skills_dir", ad, "workspace", workspace)
-		}
-	}
-}
-
-// activeSkillDirs returns the cleaned directory paths of every active skills
-// Source (explicit --skills-dir plus the conventional locations when
-// --skills-conventional is set), so the deny rules and the overlap check cover the
-// same trees the catalog serves.
-func activeSkillDirs(cfg config) []string {
-	sources := skills.ResolveSources(skills.ResolveOptions{
-		Explicit:     cfg.skillsDirs,
-		Conventional: cfg.skillsConventional,
-		Workspace:    cfg.workspace,
-	})
-	var dirs []string
-	for _, s := range sources {
-		if ds, ok := s.(skills.DirSource); ok && ds.Dir != "" {
-			// Canonicalize identically to the Workspace confinement + the quarantine
-			// check (abs + EvalSymlinks) so overlap/containment comparisons can't drift.
-			if resolved, err := osfs.ResolveRoot(ds.Dir); err == nil {
-				dirs = append(dirs, resolved)
-			} else {
-				dirs = append(dirs, filepath.Clean(ds.Dir))
-			}
-		}
-	}
-	return dirs
-}
-
-// dirsOverlap reports whether a and b are the same directory or one contains the
-// other. It compares cleaned paths via filepath.Rel so a nested relationship in
-// either direction counts as overlap.
-func dirsOverlap(a, b string) bool {
-	if a == b {
-		return true
-	}
-	contains := func(parent, child string) bool {
-		rel, err := filepath.Rel(parent, child)
-		if err != nil {
-			return false
-		}
-		return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "."
-	}
-	return contains(a, b) || contains(b, a)
-}
-
-// defaultLimits returns the non-zero stop limits injected for sessions created
-// without explicit limits, so a default session is always bounded (a zero
-// Limits value disables every stop condition in package session).
-func defaultLimits() session.Limits {
-	return session.Limits{
-		MaxTurns:               defaultMaxTurns,
-		MaxToolCalls:           defaultMaxToolCalls,
-		MaxConsecutiveFailures: defaultMaxConsecutiveFailures,
-	}
-}
-
-// osfsWorkspaceFactory returns a server.WorkspaceFactory that builds an osfs
-// Workspace rooted at the session's workspace dir. A root that cannot be opened
-// (e.g. it does not exist) yields a nil Workspace; tool calls against it return
-// errors the model can read.
-func osfsWorkspaceFactory() server.WorkspaceFactory {
-	return func(root string) tool.Workspace {
-		ws, err := osfs.NewWorkspace(root)
-		if err != nil {
-			slog.Error("workspace factory: cannot open root", "root", root, "err", err)
-			return nil
-		}
-		return ws
-	}
 }
 
 // serve starts the gRPC and HTTP servers (and, when --metrics-addr is set, the

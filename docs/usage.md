@@ -124,10 +124,12 @@ Without `--openai` the demo is fully offline. With `--openai` and no
 
 ## 3. Running the server (`mecated`)
 
-`mecated` is the composition root: it builds an LLM provider, the seven-tool
-catalog plus a read-only `Task` subagent, the permission policy, lifecycle
-hooks, the session store, and the two-layer system prompt; then serves the
-`HarnessService` over gRPC and HTTP/SSE concurrently.
+`mecated` is a composition root: it parses flags/env, then delegates the
+assembly — an LLM provider, the seven-tool catalog plus a read-only `Task`
+subagent, the permission policy, lifecycle hooks, the session store, and the
+two-layer system prompt — to the shared `internal/app` package (`app.Build`),
+and serves the resulting `HarnessService` over gRPC and HTTP/SSE concurrently.
+(The TUI reuses that same `app.Build` to host an embedded server — see below.)
 
 ```console
 $ export OPENAI_API_KEY=sk-...
@@ -412,14 +414,23 @@ func main() {
 
 ### The terminal UI (`mecatui`)
 
-`mecatui` is an optional, flashy terminal UI that drives a running `mecated` over
-this same gRPC `Converse` stream — a thin client, not part of the server. After
-`task build` it lands at `bin/mecatui`. Point it at a server and a workspace:
+`mecatui` is an optional, flashy terminal UI that drives a `mecated` over this
+same gRPC `Converse` stream. After `task build` it lands at `bin/mecatui`. It
+needs no separate server by default — with no `--server` it reuses a `mecated`
+already running on `127.0.0.1:8080`, or else **hosts one in-process** over a UNIX
+socket (built via `internal/app`, the same assembly `mecated` uses):
 
 ```sh
-bin/mecated --mock &                                   # or a real provider
+OPENAI_API_KEY=sk-... bin/mecatui --workspace "$PWD"   # embedded (default)
+bin/mecatui --mock --workspace "$PWD"                  # embedded, offline mock
+
+bin/mecated &                                          # …or an external server
 bin/mecatui --server 127.0.0.1:8080 --workspace "$PWD"
 ```
+
+The embedded server keeps the heavier opt-ins (MCP, ToolHive, skills, memory,
+slash commands) off; run a full `mecated` and use `--server` for those. See
+`docs/tui.md` for all flags.
 
 It streams the conversation (glamour markdown for assistant text, themed cards
 for tool I/O), shows a thinking spinner and a usage footer, and pops an inline
@@ -639,10 +650,11 @@ grouping (which could smuggle a hidden inner command past the splitter) is
 floored at **`ask`** — an allow rule for the outer literal can never silently
 approve a concealed destructive command.
 
-> Permission rules are configured in Go at the composition root
-> (`cmd/mecated/main.go`, `defaultRules()`), via `permpolicy.NewPolicy([]governance.Rule{…})`.
+> Permission rules are configured in Go in the shared composition layer
+> (`internal/app`, `defaultRules()`), via `permpolicy.NewPolicy([]governance.Rule{…})`.
 > There is no rules config file in v1; to change the shipped policy, edit
-> `defaultRules()` and rebuild.
+> `defaultRules()` and rebuild. (It lives in `internal/app` so both `mecated` and
+> the embedded `mecatui` server share one ruleset.)
 
 ---
 

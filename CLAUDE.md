@@ -33,9 +33,10 @@ go run ./cmd/mecademo    # end-to-end demo, fully offline (mock provider)
 - `internal/port/` — the PORT interfaces the loop consumes (`LLMProvider`, `SessionStore`, `HookRunner`, `PermissionPolicy`, `Clock`, `Logger`, `EventSink`).
 - `internal/agent/` — APPLICATION: the loop (`Engine`/`Run`), dispatch, permission pause/resume, compaction, the Task subagent.
 - `internal/adapter/` — ADAPTERS: `openai`, `mockllm`, `osfs`/`memfs`, `permpolicy`, `hookexec`, `store/*`, `tools`, `server`.
+- `internal/app/` — COMPOSITION (not domain): the single shared assembly of provider + catalog + policy + engine into a `server.Service` (`app.Build(ctx, Config)`). Both composition roots consume it — `cmd/mecated` (serves it over TCP) and `cmd/mecatui` (hosts it embedded over a UNIX socket). It MAY import adapters, `internal/agent`, and (via the `server` adapter) `contracts/gen`; nothing imports it except the `cmd/` mains.
 - `contracts/proto/mecatl/v1/` — gRPC contract (source of truth); `contracts/gen/` is generated — do not hand-edit.
-- `cmd/mecated/` — the server (composition root); `cmd/mecademo/` — the demo.
-- `cmd/mecatui/` — an optional gRPC **client** TUI (Bubble Tea v2). Bound by the no-internal layering rule: `contracts/gen` + grpc live only in `cmd/mecatui/client` (and the `cmd/mecatui` main); the `ui` and `theme` packages import no `internal/...` package and no proto directly — they render purely from proto `Event`s relayed by `client`. See `docs/tui.md`.
+- `cmd/mecated/` — the standalone server (composition root): flag parsing, TLS/auth/rate-limit, the HTTP + metrics listeners, the `skills promote` subcommand; delegates the engine/service build to `internal/app`. `cmd/mecademo/` — the demo.
+- `cmd/mecatui/` — an optional gRPC **client** TUI (Bubble Tea v2). It dials an external `mecated` (`--server`) or, by default, **hosts one in-process** over a UNIX socket (`embed.Start` → `app.Build`) — so a single binary "just works" with no daemon/port. The render packages (`ui`, `theme`) and the `client` package import no `internal/...` package and no proto directly — they render purely from proto `Event`s relayed by `client`. `contracts/gen` + grpc + `internal/app` are confined to `cmd/mecatui/client`, the new `cmd/mecatui/embed`, and the `cmd/mecatui` main. See `docs/tui.md`.
 
 ## The layering rule (the thing to get right)
 
@@ -44,7 +45,7 @@ Dependencies point **inward only** (verified by import review; not yet machine-e
 - Domain packages (`session`, `prompt`, `governance`, `tool`) and `internal/agent` must **never** import an adapter, `internal/agent` (from domain), `contracts/gen`, `os`, the OpenAI SDK, or gRPC.
 - `internal/port` imports only domain packages + stdlib.
 - `internal/agent` imports only domain + `port` — adapters are injected.
-- Concrete adapters meet ports **only in `cmd/`** (the composition root). No DI framework — explicit constructors.
+- Concrete adapters meet ports **only in the composition layer** — `internal/app` (the shared engine/service assembly) and the `cmd/` mains that consume it. No DI framework — explicit constructors. `internal/app` is the one composition package allowed to import adapters + `internal/agent`; keep that wiring there, not in domain/`port`/`agent`.
 
 ## Things That Will Bite You
 

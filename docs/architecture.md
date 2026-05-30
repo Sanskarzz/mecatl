@@ -39,10 +39,13 @@ streaming-HTTP client and the `repomap` tool). Each is detailed below.
 
 ```mermaid
 flowchart LR
-  subgraph CMD["composition root — cmd/"]
-    mecated["cmd/mecated/main.go"]
+  subgraph CMD["composition — internal/app + cmd/"]
+    app["internal/app (app.Build: shared engine+service assembly)"]
+    mecated["cmd/mecated/main.go (flags, serve, TLS/auth)"]
     demo["cmd/mecademo"]
-    tui["cmd/mecatui (gRPC client TUI)"]
+    tui["cmd/mecatui (gRPC client TUI; embeds app.Build when no --server)"]
+    mecated --> app
+    tui --> app
   end
 
   subgraph DRIVING["driving adapters — internal/adapter/server"]
@@ -114,20 +117,23 @@ per-package `doc.go` files and honoured by the code:
 | `agent` (application) | domain + `port` + stdlib only. Never an adapter or `contracts`. (Tests may import adapters.) |
 | `adapter/*` | domain + `port` + the one external lib it adapts. Never `agent`. |
 | `contracts/gen` | generated; protobuf + gRPC runtime. |
-| `cmd/*` | everything — this is the only place concrete adapters meet ports. |
-| `cmd/mecatui/{client,ui,theme}` | a gRPC **client** of mecated. `contracts/gen` + grpc appear only in `client` (and the `cmd/mecatui` composition root); `ui` and `theme` import neither and **never** any `internal/...` package. |
+| `app` (composition) | the shared engine/service assembly (`app.Build`). MAY import adapters + `agent` + (via `server`) `contracts/gen`. Nothing imports it but the `cmd/` mains. |
+| `cmd/*` | flags + serving; consumes `internal/app`. With `app`, the only places concrete adapters meet ports. |
+| `cmd/mecatui/{client,ui,theme}` | a gRPC **client**. `contracts/gen` + grpc + `internal/app` appear only in `client`, `embed`, and the `cmd/mecatui` main; `ui` and `theme` import none of them and **never** any `internal/...` package. |
 
-**mecatui — the terminal UI (`cmd/mecatui`).** A separate, optional gRPC *client*
-of a running `mecated`; it is not part of the server build. It dials the
-`HarnessService`, creates a session, opens the bidi `Converse` stream, and
+**mecatui — the terminal UI (`cmd/mecatui`).** An optional gRPC *client*. It dials
+the `HarnessService`, creates a session, opens the bidi `Converse` stream, and
 renders the streamed `Event` envelopes (glamour markdown for assistant text,
 themed lipgloss cards for user prompts and tool I/O), resolving permission asks
-inline by sending `ResumeApproval` on the same stream. It renders **purely from
-proto `Event`s** and is bound by the same inward-only layering rule: the
-`contracts/gen` + grpc surface lives only in `cmd/mecatui/client` and the
-`cmd/mecatui` main; the `ui` (Bubble Tea model/update/view) and `theme` (pure
-styling) packages import no `internal/...` package and no proto directly. Usage
-and theming are documented in `docs/tui.md`.
+inline by sending `ResumeApproval` on the same stream. The server it talks to is
+either an external `mecated` (`--server`) or one it **hosts in-process** over a
+UNIX socket (`cmd/mecatui/embed` → `app.Build`) when none is given — so a single
+binary works with no daemon. The render packages stay pure: they render **purely
+from proto `Event`s** and are bound by the inward-only layering rule. The
+`contracts/gen` + grpc + `internal/app` surface lives only in `cmd/mecatui/client`,
+`cmd/mecatui/embed`, and the `cmd/mecatui` main; the `ui` (Bubble Tea
+model/update/view) and `theme` (pure styling) packages import no `internal/...`
+package and no proto directly. Usage and theming are documented in `docs/tui.md`.
 
 Two deliberate cycle-breaks worth noting, documented in code:
 - `port` imports `tool` and `prompt` (because `LLMRequest` carries
@@ -535,10 +541,10 @@ read-only investigation to a **child agent loop**. Its `Execute`:
    summary string** as one `ToolResult` (gauntlet #7).
 
 Read-only-child invariants, enforced by construction and defended at runtime:
-- The composition root wires `childEngine` with a **read-only explorer catalog
+- The composition layer wires `childEngine` with a **read-only explorer catalog
   (Read, Grep, Glob only)** that **never includes `Task`** — so a subagent
   cannot recurse — and an **allow-all** policy so the child never prompts a
-  human (`cmd/mecated/main.go`: `buildTaskTool`).
+  human (`internal/app`: `buildTaskTool` / `buildChildEngine`).
 - `TaskTool.ReadOnly()` returns `true`, letting the parent run `Task`
   concurrently with other read-only tools. Its godoc states the invariant
   explicitly: this is safe only while the child catalog stays read-only.
