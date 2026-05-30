@@ -327,3 +327,68 @@ func TestExplicitStopReasonTakesPrecedence(t *testing.T) {
 		t.Fatalf("StopReason = %q, want explicit max_tool_calls", r)
 	}
 }
+
+func TestReopenFromCompletedReturnsToIdleAndResetsCounters(t *testing.T) {
+	s := newTestSession(Limits{MaxTurns: 5})
+	// Drive one turn and complete cleanly.
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	if err := s.RecordAssistant(NewAssistantMessage("first answer", "", nil)); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+	if err := s.Complete(); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if s.State != StateCompleted || s.Counters.Turns != 1 {
+		t.Fatalf("precondition: state=%q turns=%d, want completed/1", s.State, s.Counters.Turns)
+	}
+	convLen := len(s.Conversation.Messages)
+
+	if err := s.Reopen(); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	if s.State != StateIdle {
+		t.Fatalf("after Reopen state = %q, want idle", s.State)
+	}
+	if s.Counters != (Counters{}) {
+		t.Fatalf("after Reopen counters = %+v, want zero (per-prompt budget)", s.Counters)
+	}
+	if r, ok := s.RecordedStopReason(); ok {
+		t.Fatalf("after Reopen recorded stop reason = %q, want none", r)
+	}
+	if len(s.Conversation.Messages) != convLen {
+		t.Fatalf("Reopen dropped conversation history: len=%d, want %d", len(s.Conversation.Messages), convLen)
+	}
+	// The reopened session accepts a new prompt and another turn (continuation).
+	if err := s.RecordUserPrompt("second prompt", nil); err != nil {
+		t.Fatalf("RecordUserPrompt after Reopen: %v", err)
+	}
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn after Reopen: %v", err)
+	}
+	if s.Counters.Turns != 1 {
+		t.Fatalf("turns after reopened BeginTurn = %d, want 1 (counter was reset)", s.Counters.Turns)
+	}
+}
+
+func TestReopenIllegalFromNonCompletedStates(t *testing.T) {
+	for _, mk := range []struct {
+		name  string
+		setup func(*Session)
+	}{
+		{"idle", func(*Session) {}},
+		{"running", func(s *Session) { _ = s.BeginTurn() }},
+		{"awaiting", func(s *Session) { _ = s.BeginTurn(); _ = s.PauseForApproval(PendingAsk{}) }},
+		{"failed", func(s *Session) { _ = s.Fail() }},
+		{"cancelled", func(s *Session) { _ = s.Cancel() }},
+	} {
+		t.Run(mk.name, func(t *testing.T) {
+			s := newTestSession(Limits{})
+			mk.setup(s)
+			if err := s.Reopen(); !errors.Is(err, ErrIllegalTransition) {
+				t.Fatalf("Reopen from %s: err = %v, want ErrIllegalTransition", mk.name, err)
+			}
+		})
+	}
+}

@@ -256,43 +256,38 @@ func (t *TaskTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 // gauntlet #7.
 func drainChild(run *Run) (finalText string, stop session.StopReason) {
 	for ev := range run.Events() {
-		switch ev.Type {
-		case session.EvPermissionAsk:
-			// No human is attached to a subagent run: deny so it cannot block.
-			if ev.Ask != nil {
-				run.Approve(ev.Ask.AskID, false)
-			}
-		case session.EvResult:
-			if ev.Result != nil {
-				finalText = ev.Result.Text
-				stop = ev.Result.Stop
-			}
+		if text, st, ok := handleChildEvent(run, ev); ok {
+			finalText, stop = text, st
 		}
 	}
 	return finalText, stop
+}
+
+// handleChildEvent applies the non-interactive CHILD contract to a single event of
+// a child/member run: it auto-denies any permission ask (no human is attached to a
+// child loop, so it must never block) and, when the event is the terminal result,
+// reports its text and stop reason via isResult=true. It is the SINGLE definition
+// of that contract, shared by drainChild (which discards events) and the team
+// supervisor's runTurn (which forwards them) so the auto-deny rule and the
+// result/stop capture cannot drift between the two.
+func handleChildEvent(run *Run, ev session.Event) (text string, stop session.StopReason, isResult bool) {
+	if ev.Type == session.EvPermissionAsk && ev.Ask != nil {
+		run.Approve(ev.Ask.AskID, false)
+	}
+	if ev.Type == session.EvResult && ev.Result != nil {
+		return ev.Result.Text, ev.Result.Stop, true
+	}
+	return "", session.StopNone, false
 }
 
 // fireSubagentStop runs the SubagentStop lifecycle hook for a finished child run.
 // It is best-effort: a hook error or a block outcome is ignored (a subagent's
 // completion cannot be vetoed after the fact).
 func (t *TaskTool) fireSubagentStop(ctx context.Context, child *session.Session) {
-	if t.hooks == nil {
-		return
-	}
-	// Run the hook even if the parent ctx is already cancelled — SubagentStop is a
-	// terminal notification — but use a detached, short-lived context so a
-	// cancelled parent does not immediately abort the notification.
-	hookCtx := ctx
-	if ctx.Err() != nil {
-		var cancel context.CancelFunc
-		hookCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-	}
-	ev := governance.HookEvent{
+	fireNotify(ctx, t.hooks, governance.HookEvent{
 		Phase:     governance.PhaseSubagentStop,
 		SessionID: string(child.ID),
-	}
-	_, _ = t.hooks.Run(hookCtx, ev)
+	})
 }
 
 // childSessionID derives a stable, unique id for a child session from the parent

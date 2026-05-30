@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
 )
 
@@ -143,4 +144,23 @@ func (e *Engine) fireStop(ctx context.Context, r *Run, sess *session.Session, re
 	if err == nil && outcome.Block && outcome.Message != "" {
 		e.emit(r, session.Event{Type: session.EvHook, Text: outcome.Message})
 	}
+}
+
+// fireNotify runs a terminal, best-effort lifecycle NOTIFICATION hook — one that
+// cannot be vetoed (SubagentStop, TeammateIdle). A Block or error outcome is
+// ignored: the event being reported has already happened. Like fireStop, it
+// DETACHES from an already-cancelled ctx (with a short timeout) so a terminal
+// notification still reaches the runner even when the run was cancelled — this is
+// the single definition of that detach rule, which previously diverged across the
+// Task/Fork/team fire sites. A nil runner is a no-op.
+func fireNotify(ctx context.Context, hooks port.HookRunner, ev governance.HookEvent) {
+	if hooks == nil {
+		return
+	}
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+	}
+	_, _ = hooks.Run(ctx, ev)
 }

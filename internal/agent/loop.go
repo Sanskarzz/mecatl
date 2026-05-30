@@ -6,9 +6,10 @@
 // emits a single ordered stream of session.Events terminating in a result.
 //
 // Import rule: this package imports ONLY internal/session, internal/port,
-// internal/tool, internal/governance, internal/prompt, and the standard library.
-// Adapters are injected as ports; the loop never names a concrete adapter or the
-// api layer. (Tests may import adapters.)
+// internal/tool, internal/governance, internal/prompt, internal/team (the domain
+// coordination substrate for agent teams), and the standard library. Adapters are
+// injected as ports; the loop never names a concrete adapter or the api layer.
+// (Tests may import adapters.)
 package agent
 
 import (

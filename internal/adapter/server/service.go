@@ -60,6 +60,21 @@ type Config struct {
 	// It backs ListMcpSources and ListToolHiveGroups; both derive purely from
 	// this snapshot and perform no live discovery. May be empty.
 	MCPSources []source.SourceInfo
+
+	// MemberEngine builds a team member's Engine from the shared team and the
+	// member spec (see internal/agent.MemberEngine). It is the seam that wires
+	// the agent-team RPCs: when nil, those RPCs return ErrTeamsDisabled. The
+	// composition root supplies it (internal/app), capturing the per-member
+	// catalog (read-only base + MemberTools, plus mutating tools only for a
+	// Mutating member) and the provider/model.
+	MemberEngine MemberEngineFactory
+	// Forker isolates a Mutating team member's workspace. Optional; required only
+	// if a Mutating member is spawned.
+	Forker tool.WorkspaceForker
+	// TeamHooks fires the team lifecycle hooks (TeammateIdle) and is passed to
+	// member coordination tools for the TaskCreated / TaskCompleted gates.
+	// Optional.
+	TeamHooks port.HookRunner
 }
 
 // ErrConfig is returned by NewService when a required dependency is missing.
@@ -91,8 +106,9 @@ var ErrConfig = errors.New("server: invalid config")
 type Service struct {
 	cfg Config
 
-	mu   sync.Mutex
-	runs map[session.SessionID]*runState
+	mu    sync.Mutex
+	runs  map[session.SessionID]*runState
+	teams map[string]*teamState
 }
 
 // runState couples an in-flight *agent.Run with the live *session.Session the
@@ -124,7 +140,11 @@ func NewService(cfg Config) (*Service, error) {
 	if cfg.NewID == nil {
 		cfg.NewID = randomID
 	}
-	return &Service{cfg: cfg, runs: make(map[session.SessionID]*runState)}, nil
+	return &Service{
+		cfg:   cfg,
+		runs:  make(map[session.SessionID]*runState),
+		teams: make(map[string]*teamState),
+	}, nil
 }
 
 // ErrNoActiveRun is returned by Approve/Cancel when the session exists (possibly

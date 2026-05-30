@@ -42,15 +42,21 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	HarnessService_CreateSession_FullMethodName      = "/mecatl.v1.HarnessService/CreateSession"
-	HarnessService_GetSession_FullMethodName         = "/mecatl.v1.HarnessService/GetSession"
-	HarnessService_Converse_FullMethodName           = "/mecatl.v1.HarnessService/Converse"
-	HarnessService_ListMcpResources_FullMethodName   = "/mecatl.v1.HarnessService/ListMcpResources"
-	HarnessService_ReadMcpResource_FullMethodName    = "/mecatl.v1.HarnessService/ReadMcpResource"
-	HarnessService_ListMcpPrompts_FullMethodName     = "/mecatl.v1.HarnessService/ListMcpPrompts"
-	HarnessService_GetMcpPrompt_FullMethodName       = "/mecatl.v1.HarnessService/GetMcpPrompt"
-	HarnessService_ListMcpSources_FullMethodName     = "/mecatl.v1.HarnessService/ListMcpSources"
-	HarnessService_ListToolHiveGroups_FullMethodName = "/mecatl.v1.HarnessService/ListToolHiveGroups"
+	HarnessService_CreateSession_FullMethodName       = "/mecatl.v1.HarnessService/CreateSession"
+	HarnessService_GetSession_FullMethodName          = "/mecatl.v1.HarnessService/GetSession"
+	HarnessService_Converse_FullMethodName            = "/mecatl.v1.HarnessService/Converse"
+	HarnessService_ListMcpResources_FullMethodName    = "/mecatl.v1.HarnessService/ListMcpResources"
+	HarnessService_ReadMcpResource_FullMethodName     = "/mecatl.v1.HarnessService/ReadMcpResource"
+	HarnessService_ListMcpPrompts_FullMethodName      = "/mecatl.v1.HarnessService/ListMcpPrompts"
+	HarnessService_GetMcpPrompt_FullMethodName        = "/mecatl.v1.HarnessService/GetMcpPrompt"
+	HarnessService_ListMcpSources_FullMethodName      = "/mecatl.v1.HarnessService/ListMcpSources"
+	HarnessService_ListToolHiveGroups_FullMethodName  = "/mecatl.v1.HarnessService/ListToolHiveGroups"
+	HarnessService_CreateTeam_FullMethodName          = "/mecatl.v1.HarnessService/CreateTeam"
+	HarnessService_SpawnTeammate_FullMethodName       = "/mecatl.v1.HarnessService/SpawnTeammate"
+	HarnessService_SendTeammateMessage_FullMethodName = "/mecatl.v1.HarnessService/SendTeammateMessage"
+	HarnessService_RunTeam_FullMethodName             = "/mecatl.v1.HarnessService/RunTeam"
+	HarnessService_ListTeam_FullMethodName            = "/mecatl.v1.HarnessService/ListTeam"
+	HarnessService_CleanupTeam_FullMethodName         = "/mecatl.v1.HarnessService/CleanupTeam"
 )
 
 // HarnessServiceClient is the client API for HarnessService service.
@@ -92,6 +98,24 @@ type HarnessServiceClient interface {
 	// in the resolved source inventory. Derived from the snapshot — it does NOT
 	// call ToolHive.
 	ListToolHiveGroups(ctx context.Context, in *ListToolHiveGroupsRequest, opts ...grpc.CallOption) (*ListToolHiveGroupsResponse, error)
+	// CreateTeam allocates a new, empty agent team and returns its id. Members are
+	// added with SpawnTeammate, then the team is driven with RunTeam.
+	CreateTeam(ctx context.Context, in *CreateTeamRequest, opts ...grpc.CallOption) (*CreateTeamResponse, error)
+	// SpawnTeammate enrols a member in an existing team (before RunTeam). A
+	// read-only member shares the base workspace; a mutating member runs in an
+	// isolated fork so parallel writes are safe.
+	SpawnTeammate(ctx context.Context, in *SpawnTeammateRequest, opts ...grpc.CallOption) (*SpawnTeammateResponse, error)
+	// SendTeammateMessage posts a message into a member's inbox (e.g. from the
+	// operator), delivered at that member's next turn boundary.
+	SendTeammateMessage(ctx context.Context, in *SendTeammateMessageRequest, opts ...grpc.CallOption) (*SendTeammateMessageResponse, error)
+	// RunTeam drives the team to quiescence, streaming every member's events —
+	// each tagged with the member name — until the team finishes.
+	RunTeam(ctx context.Context, in *RunTeamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TeamEvent], error)
+	// ListTeam returns a snapshot of the team roster, the shared task list, and
+	// whether the team has reached quiescence.
+	ListTeam(ctx context.Context, in *ListTeamRequest, opts ...grpc.CallOption) (*ListTeamResponse, error)
+	// CleanupTeam tears down a finished team and releases its resources.
+	CleanupTeam(ctx context.Context, in *CleanupTeamRequest, opts ...grpc.CallOption) (*CleanupTeamResponse, error)
 }
 
 type harnessServiceClient struct {
@@ -195,6 +219,75 @@ func (c *harnessServiceClient) ListToolHiveGroups(ctx context.Context, in *ListT
 	return out, nil
 }
 
+func (c *harnessServiceClient) CreateTeam(ctx context.Context, in *CreateTeamRequest, opts ...grpc.CallOption) (*CreateTeamResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateTeamResponse)
+	err := c.cc.Invoke(ctx, HarnessService_CreateTeam_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) SpawnTeammate(ctx context.Context, in *SpawnTeammateRequest, opts ...grpc.CallOption) (*SpawnTeammateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SpawnTeammateResponse)
+	err := c.cc.Invoke(ctx, HarnessService_SpawnTeammate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) SendTeammateMessage(ctx context.Context, in *SendTeammateMessageRequest, opts ...grpc.CallOption) (*SendTeammateMessageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SendTeammateMessageResponse)
+	err := c.cc.Invoke(ctx, HarnessService_SendTeammateMessage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) RunTeam(ctx context.Context, in *RunTeamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TeamEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &HarnessService_ServiceDesc.Streams[1], HarnessService_RunTeam_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[RunTeamRequest, TeamEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type HarnessService_RunTeamClient = grpc.ServerStreamingClient[TeamEvent]
+
+func (c *harnessServiceClient) ListTeam(ctx context.Context, in *ListTeamRequest, opts ...grpc.CallOption) (*ListTeamResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListTeamResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ListTeam_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) CleanupTeam(ctx context.Context, in *CleanupTeamRequest, opts ...grpc.CallOption) (*CleanupTeamResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CleanupTeamResponse)
+	err := c.cc.Invoke(ctx, HarnessService_CleanupTeam_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HarnessServiceServer is the server API for HarnessService service.
 // All implementations must embed UnimplementedHarnessServiceServer
 // for forward compatibility.
@@ -234,6 +327,24 @@ type HarnessServiceServer interface {
 	// in the resolved source inventory. Derived from the snapshot — it does NOT
 	// call ToolHive.
 	ListToolHiveGroups(context.Context, *ListToolHiveGroupsRequest) (*ListToolHiveGroupsResponse, error)
+	// CreateTeam allocates a new, empty agent team and returns its id. Members are
+	// added with SpawnTeammate, then the team is driven with RunTeam.
+	CreateTeam(context.Context, *CreateTeamRequest) (*CreateTeamResponse, error)
+	// SpawnTeammate enrols a member in an existing team (before RunTeam). A
+	// read-only member shares the base workspace; a mutating member runs in an
+	// isolated fork so parallel writes are safe.
+	SpawnTeammate(context.Context, *SpawnTeammateRequest) (*SpawnTeammateResponse, error)
+	// SendTeammateMessage posts a message into a member's inbox (e.g. from the
+	// operator), delivered at that member's next turn boundary.
+	SendTeammateMessage(context.Context, *SendTeammateMessageRequest) (*SendTeammateMessageResponse, error)
+	// RunTeam drives the team to quiescence, streaming every member's events —
+	// each tagged with the member name — until the team finishes.
+	RunTeam(*RunTeamRequest, grpc.ServerStreamingServer[TeamEvent]) error
+	// ListTeam returns a snapshot of the team roster, the shared task list, and
+	// whether the team has reached quiescence.
+	ListTeam(context.Context, *ListTeamRequest) (*ListTeamResponse, error)
+	// CleanupTeam tears down a finished team and releases its resources.
+	CleanupTeam(context.Context, *CleanupTeamRequest) (*CleanupTeamResponse, error)
 	mustEmbedUnimplementedHarnessServiceServer()
 }
 
@@ -270,6 +381,24 @@ func (UnimplementedHarnessServiceServer) ListMcpSources(context.Context, *ListMc
 }
 func (UnimplementedHarnessServiceServer) ListToolHiveGroups(context.Context, *ListToolHiveGroupsRequest) (*ListToolHiveGroupsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListToolHiveGroups not implemented")
+}
+func (UnimplementedHarnessServiceServer) CreateTeam(context.Context, *CreateTeamRequest) (*CreateTeamResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateTeam not implemented")
+}
+func (UnimplementedHarnessServiceServer) SpawnTeammate(context.Context, *SpawnTeammateRequest) (*SpawnTeammateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SpawnTeammate not implemented")
+}
+func (UnimplementedHarnessServiceServer) SendTeammateMessage(context.Context, *SendTeammateMessageRequest) (*SendTeammateMessageResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SendTeammateMessage not implemented")
+}
+func (UnimplementedHarnessServiceServer) RunTeam(*RunTeamRequest, grpc.ServerStreamingServer[TeamEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method RunTeam not implemented")
+}
+func (UnimplementedHarnessServiceServer) ListTeam(context.Context, *ListTeamRequest) (*ListTeamResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListTeam not implemented")
+}
+func (UnimplementedHarnessServiceServer) CleanupTeam(context.Context, *CleanupTeamRequest) (*CleanupTeamResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CleanupTeam not implemented")
 }
 func (UnimplementedHarnessServiceServer) mustEmbedUnimplementedHarnessServiceServer() {}
 func (UnimplementedHarnessServiceServer) testEmbeddedByValue()                        {}
@@ -443,6 +572,107 @@ func _HarnessService_ListToolHiveGroups_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HarnessService_CreateTeam_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateTeamRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).CreateTeam(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_CreateTeam_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).CreateTeam(ctx, req.(*CreateTeamRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_SpawnTeammate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SpawnTeammateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).SpawnTeammate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_SpawnTeammate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).SpawnTeammate(ctx, req.(*SpawnTeammateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_SendTeammateMessage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendTeammateMessageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).SendTeammateMessage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_SendTeammateMessage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).SendTeammateMessage(ctx, req.(*SendTeammateMessageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_RunTeam_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(RunTeamRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(HarnessServiceServer).RunTeam(m, &grpc.GenericServerStream[RunTeamRequest, TeamEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type HarnessService_RunTeamServer = grpc.ServerStreamingServer[TeamEvent]
+
+func _HarnessService_ListTeam_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListTeamRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ListTeam(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ListTeam_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ListTeam(ctx, req.(*ListTeamRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_CleanupTeam_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CleanupTeamRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).CleanupTeam(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_CleanupTeam_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).CleanupTeam(ctx, req.(*CleanupTeamRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // HarnessService_ServiceDesc is the grpc.ServiceDesc for HarnessService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -482,6 +712,26 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "ListToolHiveGroups",
 			Handler:    _HarnessService_ListToolHiveGroups_Handler,
 		},
+		{
+			MethodName: "CreateTeam",
+			Handler:    _HarnessService_CreateTeam_Handler,
+		},
+		{
+			MethodName: "SpawnTeammate",
+			Handler:    _HarnessService_SpawnTeammate_Handler,
+		},
+		{
+			MethodName: "SendTeammateMessage",
+			Handler:    _HarnessService_SendTeammateMessage_Handler,
+		},
+		{
+			MethodName: "ListTeam",
+			Handler:    _HarnessService_ListTeam_Handler,
+		},
+		{
+			MethodName: "CleanupTeam",
+			Handler:    _HarnessService_CleanupTeam_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
@@ -489,6 +739,11 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 			Handler:       _HarnessService_Converse_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "RunTeam",
+			Handler:       _HarnessService_RunTeam_Handler,
+			ServerStreams: true,
 		},
 	},
 	Metadata: "mecatl/v1/harness.proto",

@@ -70,6 +70,39 @@ service HarnessService {
   // in the resolved source inventory. Derived from the snapshot — it does NOT
   // call ToolHive.
   rpc ListToolHiveGroups(ListToolHiveGroupsRequest) returns (ListToolHiveGroupsResponse);
+
+  // --- Agent teams (experimental) -----------------------------------------
+  //
+  // A team is a set of long-lived member sessions that coordinate through a
+  // shared task list and mailbox (see docs/design/AGENT-TEAMS-SPIKE.md). Unlike
+  // a Converse run (one session) or a Task/Fork subagent (one-shot, drained),
+  // team members are re-driven across rounds and their events stream to the
+  // client tagged with the producing member — the headless analogue of
+  // Claude Code's split-pane teammates.
+
+  // CreateTeam allocates a new, empty agent team and returns its id. Members are
+  // added with SpawnTeammate, then the team is driven with RunTeam.
+  rpc CreateTeam(CreateTeamRequest) returns (CreateTeamResponse);
+
+  // SpawnTeammate enrols a member in an existing team (before RunTeam). A
+  // read-only member shares the base workspace; a mutating member runs in an
+  // isolated fork so parallel writes are safe.
+  rpc SpawnTeammate(SpawnTeammateRequest) returns (SpawnTeammateResponse);
+
+  // SendTeammateMessage posts a message into a member's inbox (e.g. from the
+  // operator), delivered at that member's next turn boundary.
+  rpc SendTeammateMessage(SendTeammateMessageRequest) returns (SendTeammateMessageResponse);
+
+  // RunTeam drives the team to quiescence, streaming every member's events —
+  // each tagged with the member name — until the team finishes.
+  rpc RunTeam(RunTeamRequest) returns (stream TeamEvent);
+
+  // ListTeam returns a snapshot of the team roster, the shared task list, and
+  // whether the team has reached quiescence.
+  rpc ListTeam(ListTeamRequest) returns (ListTeamResponse);
+
+  // CleanupTeam tears down a finished team and releases its resources.
+  rpc CleanupTeam(CleanupTeamRequest) returns (CleanupTeamResponse);
 }
 
 // PermissionMode is the session-wide permission posture, mirroring
@@ -460,3 +493,122 @@ message ListToolHiveGroupsResponse {
   // groups are the distinct, non-empty ToolHive groups in the inventory.
   repeated string groups = 1;
 }
+
+// --- Agent team messages ----------------------------------------------------
+
+// CreateTeamRequest creates a new agent team over a base workspace.
+message CreateTeamRequest {
+  // workspace is the base workspace root the team operates against.
+  string workspace = 1 [(buf.validate.field).string.min_len = 1];
+  // name is an optional human label; the server assigns the canonical id.
+  string name = 2;
+}
+
+// CreateTeamResponse returns the new team's id.
+message CreateTeamResponse {
+  // team_id identifies the team in subsequent calls.
+  string team_id = 1;
+}
+
+// SpawnTeammateRequest enrols a member in a team before it runs.
+message SpawnTeammateRequest {
+  // team_id is the team to add the member to.
+  string team_id = 1 [(buf.validate.field).string.min_len = 1];
+  // name is the unique member handle peers address messages to.
+  string name = 2 [(buf.validate.field).string.min_len = 1];
+  // agent_type is the optional agent-definition name this member adopts.
+  string agent_type = 3;
+  // lead marks the coordinating member (it is not auto-assigned tasks).
+  bool lead = 4;
+  // mutating requests an isolated forked workspace (the member may edit/write).
+  bool mutating = 5;
+  // initial_prompt is the member's first-turn input, run in round 0.
+  string initial_prompt = 6;
+}
+
+// SpawnTeammateResponse returns the enrolled member.
+message SpawnTeammateResponse {
+  // member is the newly enrolled member.
+  TeamMember member = 1;
+}
+
+// SendTeammateMessageRequest posts a message into a member's inbox.
+message SendTeammateMessageRequest {
+  // team_id is the team the recipient belongs to.
+  string team_id = 1 [(buf.validate.field).string.min_len = 1];
+  // to is the recipient member name.
+  string to = 2 [(buf.validate.field).string.min_len = 1];
+  // from is the sender label (e.g. "operator"); empty defaults to "operator".
+  string from = 3;
+  // body is the message text.
+  string body = 4 [(buf.validate.field).string.min_len = 1];
+}
+
+// SendTeammateMessageResponse is the empty acknowledgement.
+message SendTeammateMessageResponse {}
+
+// RunTeamRequest drives a team to quiescence, streaming member events.
+message RunTeamRequest {
+  // team_id is the team to run.
+  string team_id = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+// TeamEvent is one member's session Event, tagged with the producing member —
+// the multiplexed team stream the client observes.
+message TeamEvent {
+  // member is the name of the member whose session produced the event.
+  string member = 1;
+  // event is the underlying session event.
+  Event event = 2;
+}
+
+// ListTeamRequest names the team to snapshot.
+message ListTeamRequest {
+  // team_id is the team to snapshot.
+  string team_id = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+// ListTeamResponse is the team roster, task list, and completion state.
+message ListTeamResponse {
+  // members is the roster in enrolment order.
+  repeated TeamMember members = 1;
+  // tasks is the shared task list in creation order.
+  repeated TeamTask tasks = 2;
+  // quiescent reports whether the team has reached completion.
+  bool quiescent = 3;
+}
+
+// TeamMember mirrors a team roster entry.
+message TeamMember {
+  // name is the member handle.
+  string name = 1;
+  // agent_type is the adopted agent-definition name, if any.
+  string agent_type = 2;
+  // state mirrors team.MemberState: spawning / working / idle / stopped.
+  string state = 3;
+  // session_id is the backing session's id.
+  string session_id = 4;
+}
+
+// TeamTask mirrors a shared task-list entry.
+message TeamTask {
+  // id is the stable task identifier.
+  string id = 1;
+  // description is the work to do.
+  string description = 2;
+  // state mirrors team.TaskState: pending / in_progress / completed.
+  string state = 3;
+  // assignee is the member that claimed the task, or empty.
+  string assignee = 4;
+  // deps are the task ids that must complete before this task is claimable.
+  repeated string deps = 5;
+}
+
+// CleanupTeamRequest names the finished team to tear down.
+message CleanupTeamRequest {
+  // team_id is the team to clean up.
+  string team_id = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+// CleanupTeamResponse is the empty acknowledgement.
+message CleanupTeamResponse {}

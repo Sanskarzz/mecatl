@@ -327,6 +327,33 @@ func (s *Session) Fail() error {
 	return nil
 }
 
+// Reopen returns a successfully-completed session to StateIdle so it can accept a
+// new user prompt and run another turn-loop, preserving the conversation history.
+// It is the multi-turn / long-lived-teammate continuation seam: the agent loop
+// always drives a session to a terminal state within a single Run, so a session
+// that must receive another prompt later — a team teammate awaiting a message, an
+// interactive multi-turn chat — needs an explicit, guarded re-open rather than a
+// fresh session that would lose its history.
+//
+// It is legal ONLY from StateCompleted (a clean end-of-run). A failed or cancelled
+// run is NOT resumable, and a non-terminal session is already runnable, so every
+// other state returns ErrIllegalTransition. Reopen clears the recorded stop reason
+// and any pending ask, and RESETS the per-run Counters to zero so the configured
+// Limits bound EACH prompt's work, matching their single-run meaning rather than
+// silently becoming a session-lifetime cap. A caller that wants a lifetime budget
+// (e.g. a team supervisor bounding total turns across a teammate's life) must
+// enforce it separately. Conversation, Mode, Limits, and Workspace are preserved.
+func (s *Session) Reopen() error {
+	if s.State != StateCompleted {
+		return fmt.Errorf("%w: Reopen from %q", ErrIllegalTransition, s.State)
+	}
+	s.State = StateIdle
+	s.stop = StopNone
+	s.pending = nil
+	s.Counters = Counters{}
+	return nil
+}
+
 // StopReason reports why the run should stop. It is a DERIVED predicate: it
 // returns the recorded terminal reason if one is set, otherwise it computes a
 // limit-tripped reason from the configured Limits and current Counters. It does

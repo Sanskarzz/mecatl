@@ -337,20 +337,10 @@ func (t *ForkTool) runBranch(ctx context.Context, callID session.ToolCallID, i i
 // fireSubagentStop runs the SubagentStop hook for a finished branch run
 // (best-effort; mirrors TaskTool.fireSubagentStop).
 func (t *ForkTool) fireSubagentStop(ctx context.Context, child *session.Session) {
-	if t.hooks == nil {
-		return
-	}
-	hookCtx := ctx
-	if ctx.Err() != nil {
-		var cancel context.CancelFunc
-		hookCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-	}
-	ev := governance.HookEvent{
+	fireNotify(ctx, t.hooks, governance.HookEvent{
 		Phase:     governance.PhaseSubagentStop,
 		SessionID: string(child.ID),
-	}
-	_, _ = t.hooks.Run(hookCtx, ev)
+	})
 }
 
 // childSessionID derives a stable, unique id for a branch's child session.

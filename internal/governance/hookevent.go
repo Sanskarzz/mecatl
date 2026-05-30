@@ -2,10 +2,12 @@ package governance
 
 import "encoding/json"
 
-// HookPhase identifies the lifecycle point at which a hook fires. All six
-// phases below fire: the run-level trio (SessionStart, UserPromptSubmit, Stop)
-// from internal/agent/hooks.go, the per-tool pair (PreToolUse, PostToolUse)
-// from internal/agent/dispatch.go, and SubagentStop from the Task subagent.
+// HookPhase identifies the lifecycle point at which a hook fires. The run-level
+// trio (SessionStart, UserPromptSubmit, Stop) fires from internal/agent/hooks.go,
+// the per-tool pair (PreToolUse, PostToolUse) from internal/agent/dispatch.go, and
+// SubagentStop from the Task subagent. The agent-team trio (TeammateIdle,
+// TaskCreated, TaskCompleted) fires from the team supervisor and coordination tools
+// (internal/agent/teamsupervisor.go, teamtools.go).
 type HookPhase string
 
 const (
@@ -21,6 +23,15 @@ const (
 	PhaseStop HookPhase = "Stop"
 	// PhaseSubagentStop fires when a subagent loop stops.
 	PhaseSubagentStop HookPhase = "SubagentStop"
+	// PhaseTeammateIdle fires when an agent-team member goes idle after a turn
+	// (best-effort notification; the team lead can use it to detect quiescence).
+	PhaseTeammateIdle HookPhase = "TeammateIdle"
+	// PhaseTaskCreated fires before a team task is created; a Block vetoes the
+	// creation (a quality gate on what work is allowed onto the shared list).
+	PhaseTaskCreated HookPhase = "TaskCreated"
+	// PhaseTaskCompleted fires before a team task is marked complete; a Block
+	// vetoes the completion (a quality gate, e.g. "tests must pass first").
+	PhaseTaskCompleted HookPhase = "TaskCompleted"
 )
 
 // HookEvent is the payload delivered to a hook. It is provider-neutral and
