@@ -5,9 +5,10 @@ type blockKind int
 
 const (
 	blockUser      blockKind = iota // a user prompt
-	blockAssistant                  // streamed assistant markdown
+	blockAssistant                  // streamed assistant markdown (+ optional reasoning summary)
 	blockTool                       // a tool call (+ its resolved result)
 	blockNotice                     // hook / compaction / muted info
+	blockTurnStat                   // muted per-turn usage + elapsed stat line
 	blockError                      // an error notice
 )
 
@@ -20,6 +21,16 @@ type block struct {
 	kind blockKind
 
 	raw string // user text, assistant markdown buffer, or notice text
+
+	// Reasoning is an ATTRIBUTE of the assistant block, not a sibling: a turn's
+	// reasoning-summary deltas and answer-text deltas can interleave on the wire
+	// (separate SSE events), so all of a turn's reasoning accumulates here and
+	// renders as one dim, collapsed header above the merged answer. reasoning is
+	// the accumulated summary text; reasoningStreaming is true while reasoning is
+	// still arriving and the answer text has not started (drives the live
+	// "reasoning…" affordance).
+	reasoning          string
+	reasoningStreaming bool
 
 	// Tool-block fields.
 	toolID      string
@@ -49,13 +60,59 @@ func (c *conversation) startAssistant() {
 
 // appendAssistant appends streamed text to the current assistant block, opening
 // one if the last block isn't an (unfinished) assistant block — defensive against
-// a delta arriving before turn.start.
+// a delta arriving before turn.start. The first answer text of a turn ends the
+// "reasoning…" live affordance (the reasoning summary, if any, freezes into its
+// static collapsed header).
 func (c *conversation) appendAssistant(text string) {
-	if n := len(c.blocks); n > 0 && c.blocks[n-1].kind == blockAssistant {
-		c.blocks[n-1].raw += text
+	if b := c.currentAssistant(); b != nil {
+		b.raw += text
+		b.reasoningStreaming = false
 		return
 	}
 	c.blocks = append(c.blocks, block{kind: blockAssistant, raw: text})
+}
+
+// appendReasoning accumulates streamed reasoning-summary text into the current
+// turn's assistant block. Reasoning is an attribute of that block (not a
+// reordered sibling) precisely because reasoning and answer deltas can interleave
+// within one turn — folding it in means a single reasoning region always renders,
+// above the merged answer, with a truthful line count. A reasoning delta arriving
+// before any assistant block (e.g. a delta racing turn.start) opens one rather
+// than dropping the text.
+func (c *conversation) appendReasoning(text string) {
+	b := c.currentAssistant()
+	if b == nil {
+		c.blocks = append(c.blocks, block{kind: blockAssistant})
+		b = &c.blocks[len(c.blocks)-1]
+	}
+	b.reasoning += text
+	// Reasoning is still "live" only while the answer text has not started.
+	if b.raw == "" {
+		b.reasoningStreaming = true
+	}
+}
+
+// endReasoningStream clears the live "reasoning…" affordance on the current
+// assistant block (called on turn.end), so a turn that streamed reasoning but no
+// answer text settles into the static collapsed header.
+func (c *conversation) endReasoningStream() {
+	if b := c.currentAssistant(); b != nil {
+		b.reasoningStreaming = false
+	}
+}
+
+// currentAssistant returns the trailing assistant block (the one being streamed
+// into this turn) or nil when the last block is not an assistant block.
+func (c *conversation) currentAssistant() *block {
+	if n := len(c.blocks); n > 0 && c.blocks[n-1].kind == blockAssistant {
+		return &c.blocks[n-1]
+	}
+	return nil
+}
+
+// addTurnStat appends a muted per-turn usage/elapsed stat line.
+func (c *conversation) addTurnStat(text string) {
+	c.blocks = append(c.blocks, block{kind: blockTurnStat, raw: text})
 }
 
 // addTool appends a running tool-call block.

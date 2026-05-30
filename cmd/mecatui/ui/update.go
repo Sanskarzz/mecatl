@@ -77,6 +77,18 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.conv.appendAssistant(msg.Text)
 		m.refreshView()
 		return m, m.waitCmd()
+	case client.ReasoningDeltaMsg:
+		m.conv.appendReasoning(msg.Text)
+		m.refreshView()
+		return m, m.waitCmd()
+	case client.TurnEndMsg:
+		// The turn's model exchange is done: freeze any live "reasoning…"
+		// affordance, then append a muted stat line unless the turn was trivial.
+		m.conv.endReasoningStream()
+		if !trivialTurn(msg) {
+			m.conv.addTurnStat(turnStatLine(msg))
+		}
+		return m, m.afterEvent()
 	case client.ToolCallMsg:
 		m.conv.addTool(msg.ID, msg.Name, msg.Args)
 		m.activeTool = msg.Name

@@ -27,4 +27,4 @@
 ┃
 ────────────────────────────────────────────────────────────────────────────────────────────────────
  connected                                                                   ctx 0 · ↑0 ↓0 cache 0%
-enter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · ctrl+t expand · ctrl+c quit
+enter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · ctrl+t details · ctrl+c quit

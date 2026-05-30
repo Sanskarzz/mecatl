@@ -243,6 +243,124 @@ func TestFullCycle(t *testing.T) {
 	}
 }
 
+// TestReasoningAndTurnEnd asserts the Tier B additive events: a ChunkReasoning
+// from the provider produces a reasoning.delta event (in ADDITION to the normal
+// assistant flow, which still records the reasoning for replay), and each
+// successful turn emits a turn.end carrying that turn's usage and a non-zero
+// elapsed duration (from the injected fakeClock).
+func TestReasoningAndTurnEnd(t *testing.T) {
+	llm := mockllm.New(
+		mockllm.ChunksTurn(
+			mockllm.ReasoningChunk("let me think about it"),
+			mockllm.TextChunk("here is the answer"),
+			mockllm.UsageChunk(session.Usage{InputTokens: 12, OutputTokens: 4}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+	)
+	clk := &fakeClock{t: time.Unix(0, 0)}
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t), Clock: clk})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+	evs := drain(r)
+
+	// reasoning.delta must be emitted, carrying the streamed reasoning text and
+	// no result/usage payload of its own.
+	var reasoning *session.Event
+	for i := range evs {
+		if evs[i].Type == session.EvReasoningDelta {
+			reasoning = &evs[i]
+			break
+		}
+	}
+	if reasoning == nil {
+		t.Fatalf("no reasoning.delta event in %v", typesOf(evs))
+	}
+	if reasoning.Text != "let me think about it" {
+		t.Fatalf("reasoning text = %q", reasoning.Text)
+	}
+
+	// The reasoning.delta must precede the message.delta of the same turn (it is
+	// the chain-of-thought that precedes the answer).
+	var ri, mi = -1, -1
+	for i := range evs {
+		switch evs[i].Type {
+		case session.EvReasoningDelta:
+			if ri < 0 {
+				ri = i
+			}
+		case session.EvMessageDelta:
+			if mi < 0 {
+				mi = i
+			}
+		}
+	}
+	if ri < 0 || mi < 0 || ri > mi {
+		t.Fatalf("reasoning.delta (%d) should precede message.delta (%d)", ri, mi)
+	}
+
+	// turn.end must carry this turn's usage and a positive elapsed duration.
+	var turnEnd *session.Event
+	for i := range evs {
+		if evs[i].Type == session.EvTurnEnd {
+			turnEnd = &evs[i]
+			break
+		}
+	}
+	if turnEnd == nil {
+		t.Fatalf("no turn.end event in %v", typesOf(evs))
+	}
+	// The per-turn data lives in the typed TurnEnd payload, NOT in Event.Usage
+	// (which is reserved for the cumulative-on-result semantics).
+	if turnEnd.Usage != nil {
+		t.Fatalf("turn.end must not set Event.Usage (reserved for result): %+v", turnEnd.Usage)
+	}
+	if turnEnd.TurnEnd == nil {
+		t.Fatalf("turn.end missing TurnEnd payload")
+	}
+	if turnEnd.TurnEnd.Usage.InputTokens != 12 || turnEnd.TurnEnd.Usage.OutputTokens != 4 {
+		t.Fatalf("turn.end usage = %+v, want {12,4}", turnEnd.TurnEnd.Usage)
+	}
+	if turnEnd.TurnEnd.DurationMs <= 0 {
+		t.Fatalf("turn.end duration = %dms, want > 0 (fakeClock injected)", turnEnd.TurnEnd.DurationMs)
+	}
+	// turn.end precedes the terminal result.
+	te, re := -1, -1
+	for i := range evs {
+		switch evs[i].Type {
+		case session.EvTurnEnd:
+			te = i
+		case session.EvResult:
+			re = i
+		}
+	}
+	if te < 0 || re < 0 || te > re {
+		t.Fatalf("turn.end (%d) should precede result (%d)", te, re)
+	}
+}
+
+// TestTurnEndNoClock asserts turn.end is still emitted without a Clock, with a
+// zero duration (the no-timing degradation).
+func TestTurnEndNoClock(t *testing.T) {
+	llm := mockllm.New(mockllm.TextTurn("hi"))
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t)}) // no Clock
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+	evs := drain(r)
+
+	if !containsType(evs, session.EvTurnEnd) {
+		t.Fatalf("no turn.end event in %v", typesOf(evs))
+	}
+	for i := range evs {
+		if evs[i].Type != session.EvTurnEnd {
+			continue
+		}
+		if evs[i].TurnEnd == nil {
+			t.Fatalf("turn.end missing TurnEnd payload")
+		}
+		if evs[i].TurnEnd.DurationMs != 0 {
+			t.Fatalf("turn.end duration = %dms without a Clock, want 0", evs[i].TurnEnd.DurationMs)
+		}
+	}
+}
+
 // TestReadParallel asserts that two read-only calls in one turn run concurrently.
 func TestReadParallel(t *testing.T) {
 	var tracker overlapTracker

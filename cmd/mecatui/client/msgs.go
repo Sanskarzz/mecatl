@@ -29,6 +29,22 @@ type AssistantDeltaMsg struct {
 	Text string
 }
 
+// ReasoningDeltaMsg is a streamed chunk of the model's human-readable reasoning
+// summary for a turn. Display-only and clearly subordinate to the assistant
+// text; the ui renders it collapsed by default.
+type ReasoningDeltaMsg struct {
+	Turn int32
+	Text string
+}
+
+// TurnEndMsg closes a turn's model exchange, carrying that turn's token usage
+// and the elapsed model-call time. DurationMs is 0 when the server had no clock.
+type TurnEndMsg struct {
+	Turn       int32
+	Usage      Usage
+	DurationMs int64
+}
+
 // ToolCallMsg announces a tool invocation (status: running until its result).
 type ToolCallMsg struct {
 	ID   string
@@ -117,8 +133,13 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 		return SessionInitMsg{Seq: ev.GetSeq()}
 	case "turn.start":
 		return TurnStartMsg{Turn: ev.GetTurn()}
+	case "turn.end":
+		te := ev.GetTurnEnd()
+		return TurnEndMsg{Turn: ev.GetTurn(), Usage: usageFrom(te.GetUsage()), DurationMs: te.GetDurationMs()}
 	case "message.delta":
 		return AssistantDeltaMsg{Turn: ev.GetTurn(), Text: ev.GetText()}
+	case "reasoning.delta":
+		return ReasoningDeltaMsg{Turn: ev.GetTurn(), Text: ev.GetText()}
 	case "tool.call":
 		tc := ev.GetToolCall()
 		return ToolCallMsg{ID: tc.GetId(), Name: tc.GetName(), Args: tc.GetArgs()}

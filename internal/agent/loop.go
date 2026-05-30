@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/prompt"
@@ -251,6 +252,13 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 		turnIdx := sess.Counters.Turns - 1
 		e.emit(r, session.Event{Type: session.EvTurnStart, Turn: turnIdx})
 
+		// Snapshot the turn start for the turn.end elapsed measurement. When no
+		// Clock is injected the duration is reported as 0 (guarded like dispatch).
+		var turnStart time.Time
+		if e.deps.Clock != nil {
+			turnStart = e.deps.Clock.Now()
+		}
+
 		// Step 3: compaction seam (mutates history in place when it triggers).
 		e.maybeCompact(ctx, r, sess, turnIdx)
 
@@ -268,6 +276,18 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 		if asst.Text != "" {
 			lastText = asst.Text
 		}
+
+		// Close the turn's model exchange with its own usage and elapsed time in a
+		// typed TurnEndPayload. Emitted only on the success path (never on the
+		// error/cancel returns above), before the assistant message is recorded.
+		// usage here is THIS turn's accounting; Event.Usage is left unset so it
+		// keeps its single cumulative-on-result meaning.
+		var durMs int64
+		if e.deps.Clock != nil {
+			durMs = e.deps.Clock.Now().Sub(turnStart).Milliseconds()
+		}
+		e.emit(r, session.Event{Type: session.EvTurnEnd, Turn: turnIdx,
+			TurnEnd: &session.TurnEndPayload{Usage: usage, DurationMs: durMs}})
 
 		if err := sess.RecordAssistant(asst); err != nil {
 			e.terminate(ctx, r, sess, session.StopError, lastText, total, err)
@@ -369,6 +389,10 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 			e.emit(r, session.Event{Type: session.EvMessageDelta, Turn: turnIdx, Text: chunk.Text})
 		case port.ChunkReasoning:
 			reasoning += chunk.Text
+			// Additive display-only event: surface the human-readable reasoning
+			// summary to clients. The accumulation above (replayed back to the
+			// provider as encrypted content) is unchanged.
+			e.emit(r, session.Event{Type: session.EvReasoningDelta, Turn: turnIdx, Text: chunk.Text})
 		case port.ChunkToolCall:
 			if chunk.ToolCall != nil {
 				calls = append(calls, *chunk.ToolCall)

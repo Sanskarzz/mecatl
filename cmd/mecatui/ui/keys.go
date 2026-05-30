@@ -28,8 +28,9 @@ type keyMap struct {
 	Choose    key.Binding
 	Close     key.Binding
 
-	// ExpandTools toggles full vs line-capped tool-result bodies (and Edit/Write
-	// diffs) globally. Control-modified so it never collides with textarea input.
+	// ExpandTools is the general "show details" toggle: full vs line-capped
+	// tool-result bodies + Edit/Write diffs, and collapsed vs expanded reasoning
+	// summaries. Control-modified so it never collides with textarea input.
 	ExpandTools key.Binding
 }
 
@@ -101,7 +102,7 @@ func defaultKeys() keyMap {
 		),
 		ExpandTools: key.NewBinding(
 			key.WithKeys("ctrl+t"),
-			key.WithHelp("ctrl+t", "expand/collapse tool output"),
+			key.WithHelp("ctrl+t", "expand/collapse details"),
 		),
 	}
 }

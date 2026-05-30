@@ -86,12 +86,11 @@ func (m Model) renderFooter() string {
 		}
 	}
 
-	expandHint := "ctrl+t expand"
-	if m.expandTools {
-		expandHint = "ctrl+t collapse"
-	}
+	// The footer help uses the terse "ctrl+t details"; the richer expand/collapse
+	// affordances live inline on each collapsible header (where discoverability
+	// belongs), not in this always-on status line.
 	help := "enter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · " +
-		expandHint + " · ctrl+c quit"
+		"ctrl+t details · ctrl+c quit"
 
 	width := m.widthOr(80)
 	line := m.fitFooter(left, width)

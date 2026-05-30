@@ -105,18 +105,73 @@ func (r *renderer) renderBlock(b *block, expand bool) string {
 		return label + "\n" + body
 	case blockAssistant:
 		// Assistant text is rendered through glamour, which neutralises escape
-		// sequences itself — do NOT sanitize here or markdown breaks.
+		// sequences itself — do NOT sanitize here or markdown breaks. The turn's
+		// reasoning summary (if any) renders dim and collapsed ABOVE the answer.
 		label := r.th.Style("assistantLabel").Render("mecatl")
-		return label + "\n" + r.markdown(b.raw)
+		out := label
+		if reasoning := r.renderReasoning(b, expand); reasoning != "" {
+			out += "\n" + reasoning
+		}
+		return out + "\n" + r.markdown(b.raw)
 	case blockTool:
 		return r.renderTool(b, expand)
 	case blockNotice:
 		return r.th.Style("muted").Render("• " + sanitizeTerminal(b.raw))
+	case blockTurnStat:
+		return r.th.Style("muted").Render(sanitizeTerminal(b.raw))
 	case blockError:
 		return r.th.Style("errorText").Render("✗ " + sanitizeTerminal(b.raw))
 	default:
 		return sanitizeTerminal(b.raw)
 	}
+}
+
+// maxReasoningLines caps how many lines of the reasoning summary show when the
+// global details toggle (ctrl+t) is on; the rest collapse with a neutral
+// "…(truncated)" tail so a long chain-of-thought never dominates the scrollback
+// even when expanded.
+const maxReasoningLines = 24
+
+// reasoningCaveat is the dim one-line disclaimer prepended to the EXPANDED
+// reasoning. It signals the prose is a lossy summary, not the model's actual
+// process — streamed chain-of-thought is often unfaithful and drives
+// over-reliance, so it must never read as ground truth.
+const reasoningCaveat = "— summary of the model's reasoning; may not reflect its actual process"
+
+// renderReasoning renders the dim, collapsed-by-default reasoning summary that
+// belongs to an assistant block. It returns "" when the block carries no
+// reasoning. Collapsed (the default) it is a single dim header: while reasoning
+// is still streaming and no answer text has begun it reads "reasoning…" (a live
+// "the model is working" affordance); otherwise it is the static
+// "reasoning summary · N lines · ctrl+t expand". When the global details toggle
+// (expand) is on, a dim caveat plus the full summary text are shown, line-capped
+// so they cannot drown the answer. Streamed reasoning is never a trust anchor:
+// hidden unless explicitly asked for, and clearly labelled as a lossy summary.
+func (r *renderer) renderReasoning(b *block, expand bool) string {
+	if b.reasoning == "" {
+		return ""
+	}
+	style := r.th.Style("reasoning")
+	text := sanitizeTerminal(strings.TrimRight(b.reasoning, "\n"))
+	n := lineCount(text)
+	if !expand {
+		if b.reasoningStreaming {
+			return style.Render("reasoning…")
+		}
+		return style.Render("reasoning summary · " + plural(n, "line") + " · ctrl+t expand")
+	}
+	header := style.Render("reasoning summary · " + plural(n, "line") + " · ctrl+t collapse")
+	body := truncateLinesTail(text, maxReasoningLines, "  …(truncated)")
+	return header + "\n" + style.Render(reasoningCaveat) + "\n" + style.Render(body)
+}
+
+// plural formats a count with a noun, pluralising with a trailing "s" for any
+// count other than 1 (e.g. 0 lines, 1 line, 3 lines).
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return strconv.Itoa(n) + " " + noun + "s"
 }
 
 // renderTool renders a tool-call card: status glyph + name + body, and, once
@@ -299,9 +354,20 @@ func prettyJSON(raw string) string {
 	return sanitizeTerminal(buf.String())
 }
 
-// truncateLines clamps s to max lines, appending a "+N more lines" affordance
-// when it overflows. The (server-derived) body is terminal-sanitized.
+// truncateLines clamps s to max lines, appending a "+N more lines · ctrl+t
+// expand" affordance when it overflows. Used for tool results and diff sides,
+// where ctrl+t is the way to see the rest.
 func truncateLines(s string, maxLines int) string {
+	return truncateLinesTail(s, maxLines, "")
+}
+
+// truncateLinesTail clamps s to maxLines lines, appending an overflow tail when
+// it overflows. An empty tail uses the default "+N more lines · ctrl+t expand"
+// collapse marker (the ctrl+t-referencing form for collapsible content); a
+// non-empty tail is used verbatim instead — e.g. a neutral "…(truncated)" for
+// already-expanded reasoning, which must NOT reference the toggle that revealed
+// it. The (server-derived) body is terminal-sanitized.
+func truncateLinesTail(s string, maxLines int, tail string) string {
 	s = sanitizeTerminal(strings.TrimRight(s, "\n"))
 	if s == "" {
 		return ""
@@ -311,8 +377,11 @@ func truncateLines(s string, maxLines int) string {
 		return s
 	}
 	kept := lines[:maxLines]
-	extra := len(lines) - maxLines
-	return strings.Join(kept, "\n") + "\n" + lipgloss.NewStyle().Render(collapseMarker(extra))
+	marker := tail
+	if marker == "" {
+		marker = collapseMarker(len(lines) - maxLines)
+	}
+	return strings.Join(kept, "\n") + "\n" + lipgloss.NewStyle().Render(marker)
 }
 
 // collapseMarker formats the "+N more line(s) · ctrl+t expand" affordance shown

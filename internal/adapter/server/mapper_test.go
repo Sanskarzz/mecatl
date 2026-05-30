@@ -45,6 +45,46 @@ func TestToProtoTable(t *testing.T) {
 			},
 		},
 		{
+			name: "reasoning.delta",
+			in:   session.Event{Type: session.EvReasoningDelta, Seq: 11, Turn: 1, Text: "thinking…"},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				if got.GetType() != "reasoning.delta" || got.GetText() != "thinking…" {
+					t.Fatalf("got %+v", got)
+				}
+				if got.GetTurnEnd() != nil {
+					t.Fatalf("reasoning.delta should not carry a turn_end payload: %+v", got)
+				}
+			},
+		},
+		{
+			name: "turn.end",
+			in: session.Event{Type: session.EvTurnEnd, Seq: 12, Turn: 2,
+				TurnEnd: &session.TurnEndPayload{DurationMs: 4100,
+					Usage: session.Usage{InputTokens: 1200, OutputTokens: 340, CacheReadTokens: 800, CacheWriteTokens: 100}}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				if got.GetType() != "turn.end" || got.GetTurn() != 2 {
+					t.Fatalf("got %+v", got)
+				}
+				// turn.end carries its per-turn data in the typed turn_end submessage,
+				// NOT in the shared Event.usage field (which is cumulative-on-result).
+				if got.GetUsage() != nil {
+					t.Fatalf("turn.end must not set the shared Event.usage field: %+v", got)
+				}
+				te := got.GetTurnEnd()
+				if te == nil {
+					t.Fatalf("turn.end missing turn_end payload: %+v", got)
+				}
+				if te.GetDurationMs() != 4100 {
+					t.Fatalf("duration_ms = %d, want 4100", te.GetDurationMs())
+				}
+				u := te.GetUsage()
+				if u.GetInputTokens() != 1200 || u.GetOutputTokens() != 340 ||
+					u.GetCacheReadTokens() != 800 || u.GetCacheWriteTokens() != 100 {
+					t.Fatalf("per-turn usage mismatch: %+v", u)
+				}
+			},
+		},
+		{
 			name: "tool.call",
 			in: session.Event{Type: session.EvToolCall, Seq: 4, Turn: 1,
 				ToolCall: &session.ToolCall{ID: "c1", Name: "Read", Args: json.RawMessage(`{"path":"a.go"}`)}},
@@ -137,7 +177,7 @@ func TestToProtoTable(t *testing.T) {
 func TestToProtoNoSubmessages(t *testing.T) {
 	got := toProto(session.Event{Type: session.EvTurnStart})
 	if got.GetToolCall() != nil || got.GetToolResult() != nil || got.GetAsk() != nil ||
-		got.GetResult() != nil || got.GetUsage() != nil {
+		got.GetResult() != nil || got.GetTurnEnd() != nil || got.GetUsage() != nil {
 		t.Fatalf("unexpected submessage on bare event: %+v", got)
 	}
 }

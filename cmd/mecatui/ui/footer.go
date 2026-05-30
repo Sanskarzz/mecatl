@@ -194,6 +194,50 @@ func ctxBar(frac float64) string {
 	return strings.Repeat(ctxGlyph(frac), filled) + strings.Repeat(ctxGlyphEmpty, ctxBarWidth-filled)
 }
 
+// trivialTurnTokens is the per-direction token count below which a turn's
+// input/output is considered negligible. A turn whose input AND output are both
+// at or under this AND has no measurable duration (sub-second or no clock) is a
+// near-empty turn whose stat line is pure noise, so it is suppressed entirely —
+// keeping a long multi-turn run scannable.
+const trivialTurnTokens = 50
+
+// turnStatLine formats the inline per-turn stat line shown after a turn's model
+// exchange closes. It leads with cost — the turn's input/output tokens
+// (humanised) — then the elapsed model-call time, e.g. "↑1.2K ↓340 · 4.1s". The
+// duration segment is omitted when the server reported 0ms (no clock), giving
+// just "↑1.2K ↓340". Users think in cost, not turn numbers, so no index is shown.
+func turnStatLine(msg client.TurnEndMsg) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "↑%s ↓%s",
+		humanizeTokens(msg.Usage.InputTokens), humanizeTokens(msg.Usage.OutputTokens))
+	if msg.DurationMs > 0 {
+		b.WriteString(" · " + formatDuration(msg.DurationMs))
+	}
+	return b.String()
+}
+
+// trivialTurn reports whether a turn's stats are too negligible to be worth a
+// scrollback line: both token directions at or below trivialTurnTokens AND no
+// sub-second-or-better duration signal. Such lines are suppressed.
+func trivialTurn(msg client.TurnEndMsg) bool {
+	return msg.Usage.InputTokens <= trivialTurnTokens &&
+		msg.Usage.OutputTokens <= trivialTurnTokens &&
+		msg.DurationMs < 1000
+}
+
+// formatDuration renders an elapsed millisecond count compactly: under one
+// second verbatim in ms ("840ms"), otherwise seconds to one decimal ("4.1s",
+// trailing ".0" trimmed → "2s"). Negative values clamp to 0.
+func formatDuration(ms int64) string {
+	if ms < 0 {
+		ms = 0
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return trimDecimal(float64(ms)/1000.0) + "s"
+}
+
 // renderUsageFacets renders the session-total facets surfaced from ALL usage
 // fields: input/output token arrows, the previously-dropped cache-WRITE total
 // (⊕), and the cache-hit rate. Format: "↑7.9K ↓345 ⊕1.2K cache 88%". The cache

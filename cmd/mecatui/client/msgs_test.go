@@ -25,7 +25,14 @@ func TestEventToMsg(t *testing.T) {
 		{"unknown", &mecatlv1.Event{Type: "future.kind"}, nil},
 		{"session.init", &mecatlv1.Event{Type: "session.init", Seq: 7}, SessionInitMsg{Seq: 7}},
 		{"turn.start", &mecatlv1.Event{Type: "turn.start", Turn: 2}, TurnStartMsg{Turn: 2}},
+		{
+			"turn.end",
+			&mecatlv1.Event{Type: "turn.end", Turn: 2, TurnEnd: &mecatlv1.TurnEnd{
+				DurationMs: 4100, Usage: &mecatlv1.Usage{InputTokens: 1200, OutputTokens: 340}}},
+			TurnEndMsg{Turn: 2, Usage: Usage{InputTokens: 1200, OutputTokens: 340}, DurationMs: 4100},
+		},
 		{"message.delta", &mecatlv1.Event{Type: "message.delta", Turn: 2, Text: "hi"}, AssistantDeltaMsg{Turn: 2, Text: "hi"}},
+		{"reasoning.delta", &mecatlv1.Event{Type: "reasoning.delta", Turn: 2, Text: "pondering"}, ReasoningDeltaMsg{Turn: 2, Text: "pondering"}},
 		{
 			"tool.call",
 			&mecatlv1.Event{Type: "tool.call", ToolCall: &mecatlv1.ToolCall{Id: "c1", Name: "Read", Args: `{"path":"x"}`}},

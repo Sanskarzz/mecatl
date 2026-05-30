@@ -49,6 +49,9 @@ func toProto(ev session.Event) *mecatlv1.Event {
 	if ev.Result != nil {
 		out.Result = toProtoResult(*ev.Result)
 	}
+	if ev.TurnEnd != nil {
+		out.TurnEnd = toProtoTurnEnd(*ev.TurnEnd)
+	}
 	if ev.Usage != nil {
 		out.Usage = toProtoUsage(*ev.Usage)
 	}
@@ -90,6 +93,14 @@ func toProtoResult(p session.ResultPayload) *mecatlv1.Result {
 		Text:  p.Text,
 		Usage: toProtoUsage(p.Usage),
 		Error: p.Error,
+	}
+}
+
+// toProtoTurnEnd maps a session.TurnEndPayload to its proto TurnEnd form.
+func toProtoTurnEnd(p session.TurnEndPayload) *mecatlv1.TurnEnd {
+	return &mecatlv1.TurnEnd{
+		Usage:      toProtoUsage(p.Usage),
+		DurationMs: p.DurationMs,
 	}
 }
 

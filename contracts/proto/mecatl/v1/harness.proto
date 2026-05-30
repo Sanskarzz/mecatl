@@ -227,12 +227,13 @@ message Cancel {}
 // event kind; the structured submessages are populated per kind.
 message Event {
   // type is the event kind (mirrors session.EventType: session.init,
-  // turn.start, message.delta, tool.call, tool.result, permission.ask, hook,
-  // compaction, result).
+  // turn.start, turn.end, message.delta, reasoning.delta, tool.call,
+  // tool.result, permission.ask, hook, compaction, result).
   string type = 1;
   // seq is the monotonically increasing sequence number within a run.
   int64 seq = 2;
-  // turn is the turn index this event belongs to.
+  // turn is the 0-based turn index this event belongs to (mirrors
+  // session.Event.Turn; clients add 1 for a human-facing "turn N").
   int32 turn = 3;
   // text carries streamed or final text where applicable.
   string text = 4;
@@ -244,8 +245,11 @@ message Event {
   PermissionAsk ask = 7;
   // result is set on the terminal result event.
   Result result = 8;
-  // usage is set on usage-bearing events.
+  // usage is set on usage-bearing events. On the result event it is the
+  // cumulative run total; turn.end carries its per-turn usage in turn_end.
   Usage usage = 9;
+  // turn_end is set on turn.end events (this turn's usage + elapsed time).
+  TurnEnd turn_end = 10;
 }
 
 // ToolCall is a request from the model to invoke a named tool. Mirrors
@@ -295,6 +299,18 @@ message Result {
   Usage usage = 3;
   // error carries the failure detail when stop is "error" (empty otherwise).
   string error = 4;
+}
+
+// TurnEnd is the payload carried by a turn.end event. Mirrors
+// session.TurnEndPayload. A typed envelope (like Result) so turn.end owns its
+// own usage semantics and can grow (finish reason, model id, retries) without
+// overloading the shared Event fields.
+message TurnEnd {
+  // usage is THIS turn's model-call token accounting (not the run total).
+  Usage usage = 1;
+  // duration_ms is the elapsed milliseconds for the turn's model call; 0 when
+  // the server had no clock.
+  int64 duration_ms = 2;
 }
 
 // Usage accounts for the token cost of a model call (or an aggregate).

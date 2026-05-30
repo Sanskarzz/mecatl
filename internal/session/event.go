@@ -8,10 +8,22 @@ type EventType string
 const (
 	// EvSessionInit is emitted once when a run starts.
 	EvSessionInit EventType = "session.init"
-	// EvTurnStart is emitted at the beginning of each turn.
+	// EvTurnStart is emitted at the beginning of each turn. Its Turn field is the
+	// 0-based turn index (turnIdx = Counters.Turns - 1); turn.end mirrors it. The
+	// 0-based wire contract is load-bearing — clients that surface a human-facing
+	// "turn N" must add 1 themselves; do not shift the wire value.
 	EvTurnStart EventType = "turn.start"
+	// EvTurnEnd closes a turn's model exchange, carrying the typed TurnEndPayload
+	// (this turn's Usage + elapsed model-call time). Emitted once per successful
+	// turn, before the assistant message is recorded; not emitted on error/cancel.
+	EvTurnEnd EventType = "turn.end"
 	// EvMessageDelta carries streamed assistant text.
 	EvMessageDelta EventType = "message.delta"
+	// EvReasoningDelta carries streamed, human-readable reasoning summary text.
+	// It is display-only and distinct from the opaque Message.Reasoning replay
+	// item: it is emitted in addition to (never in place of) the reasoning
+	// accumulation that is replayed back to the provider as encrypted content.
+	EvReasoningDelta EventType = "reasoning.delta"
 	// EvToolCall is emitted when a tool is about to run.
 	EvToolCall EventType = "tool.call"
 	// EvToolResult carries the result of a tool execution.
@@ -40,6 +52,19 @@ type ResultPayload struct {
 	Error string
 }
 
+// TurnEndPayload is the payload carried by an EvTurnEnd Event. It is a typed
+// envelope (mirroring ResultPayload) so turn.end owns its own usage semantics
+// and has room to grow (finish reason, model id, retries) without overloading
+// the shared Event fields. This keeps Event.Usage with a single meaning — the
+// cumulative run total on EvResult — rather than two semantics on one field.
+type TurnEndPayload struct {
+	// Usage is THIS turn's model-call usage (not the cumulative run total).
+	Usage Usage
+	// DurationMs is the elapsed milliseconds for the turn's model call; 0 when no
+	// Clock is injected.
+	DurationMs int64
+}
+
 // Event is the domain-owned, provider-neutral unit of the streaming model. The
 // loop runs as a producer writing Events to a channel; server adapters relay
 // them to the gRPC server-stream or HTTP SSE.
@@ -60,6 +85,9 @@ type Event struct {
 	Ask *PendingAsk
 	// Result is set on EvResult.
 	Result *ResultPayload
-	// Usage is set on usage-bearing events.
+	// TurnEnd is set on EvTurnEnd (this turn's usage + elapsed time).
+	TurnEnd *TurnEndPayload
+	// Usage is set on usage-bearing events. On EvResult it is the cumulative run
+	// total; turn.end carries its per-turn usage in TurnEnd, NOT here.
 	Usage *Usage
 }

@@ -183,9 +183,11 @@ func askFrameMsgs() []tea.Msg {
 	return []tea.Msg{
 		client.SessionInitMsg{Seq: 1},
 		client.TurnStartMsg{Turn: 1},
+		client.ReasoningDeltaMsg{Turn: 1, Text: "I should read the greeting first\nthen decide what to save"},
 		client.AssistantDeltaMsg{Turn: 1, Text: "Reading the greeting file."},
 		client.ToolCallMsg{ID: "call-read-1", Name: "Read", Args: `{"path":"greeting.txt"}`},
 		client.ToolResultMsg{CallID: "call-read-1", Content: "hello from the mecatl demo workspace"},
+		client.TurnEndMsg{Turn: 1, Usage: client.Usage{InputTokens: 1200, OutputTokens: 340}, DurationMs: 4100},
 		client.TurnStartMsg{Turn: 2},
 		client.AssistantDeltaMsg{Turn: 2, Text: "Now saving a note, which needs approval."},
 		client.PermissionAskMsg{AskID: "ask-write-1", Tool: "Write", Args: `{"path":"note.txt","content":"reviewed"}`, Reason: "Write requires approval"},

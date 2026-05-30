@@ -252,6 +252,12 @@ func (t *Theme) compile() {
 		"muted": lipgloss.NewStyle().
 			Foreground(col(p.TextMuted)).
 			Italic(true),
+		// Reasoning summary block: dim and subordinate to the answer. Muted +
+		// italic like a notice; it reads as secondary transparency, never a
+		// trust anchor.
+		"reasoning": lipgloss.NewStyle().
+			Foreground(col(p.TextMuted)).
+			Italic(true),
 		"errorText": lipgloss.NewStyle().
 			Foreground(col(p.Error)).
 			Bold(true),
