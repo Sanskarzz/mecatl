@@ -144,6 +144,46 @@ func TestToProtoTable(t *testing.T) {
 			},
 		},
 		{
+			name: "subagent.start",
+			in: session.Event{Type: session.EvSubagentStart, Seq: 20, Turn: 1,
+				Subagent: &session.SubagentPayload{ParentCallID: "p1", ChildID: "subagent-p1", Goal: "investigate main.go"}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				s := got.GetSubagent()
+				if s == nil || s.GetParentCallId() != "p1" || s.GetChildId() != "subagent-p1" || s.GetGoal() != "investigate main.go" {
+					t.Fatalf("subagent.start payload mismatch: %+v", s)
+				}
+			},
+		},
+		{
+			name: "subagent.tool",
+			in: session.Event{Type: session.EvSubagentTool, Seq: 21, Turn: 1,
+				Subagent: &session.SubagentPayload{ParentCallID: "p1", ChildID: "subagent-p1", ToolName: "Grep", IsError: true, ToolCount: 3}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				s := got.GetSubagent()
+				if s == nil || s.GetToolName() != "Grep" || !s.GetIsError() || s.GetToolCount() != 3 {
+					t.Fatalf("subagent.tool payload mismatch: %+v", s)
+				}
+			},
+		},
+		{
+			name: "subagent.end",
+			in: session.Event{Type: session.EvSubagentEnd, Seq: 22, Turn: 1,
+				Subagent: &session.SubagentPayload{ParentCallID: "p1", ChildID: "subagent-p1", ToolCount: 5,
+					Usage: session.Usage{InputTokens: 90, OutputTokens: 12, CacheReadTokens: 40, CacheWriteTokens: 8},
+					Stop:  session.StopMaxToolCalls, DurationMs: 1234}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				s := got.GetSubagent()
+				if s == nil || s.GetToolCount() != 5 || s.GetStop() != "max_tool_calls" || s.GetDurationMs() != 1234 {
+					t.Fatalf("subagent.end payload mismatch: %+v", s)
+				}
+				u := s.GetUsage()
+				if u.GetInputTokens() != 90 || u.GetOutputTokens() != 12 ||
+					u.GetCacheReadTokens() != 40 || u.GetCacheWriteTokens() != 8 {
+					t.Fatalf("subagent.end usage mismatch: %+v", u)
+				}
+			},
+		},
+		{
 			name: "compaction",
 			in:   session.Event{Type: session.EvCompaction, Seq: 8, Turn: 2, Text: "summary"},
 			assert: func(t *testing.T, got *mecatlv1.Event) {

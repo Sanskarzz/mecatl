@@ -16,6 +16,27 @@ import (
 // taskToolName is the catalog name of the subagent delegation tool.
 const taskToolName = "Task"
 
+// maxSubagentGoalLen caps the prompt-derived goal label forwarded on
+// EvSubagentStart when no explicit description is supplied. It keeps the
+// subagent card title compact and bounds how much of the (model-authored) prompt
+// is echoed to the event stream.
+const maxSubagentGoalLen = 60
+
+// observableTool is the agent-internal seam by which a tool may forward a
+// REDACTED, allowlisted projection of its internal activity to the parent run's
+// event stream WITHOUT widening the public tool.Tool interface. A tool that
+// implements it is given an emit closure (bound by the dispatcher to the parent
+// Run, so events are sequenced and mirrored to the sink exactly like the loop's
+// own emits); a tool that does not is executed via the ordinary Execute path.
+//
+// The Task subagent implements this to surface subagent.start/tool/end metadata.
+// Crucially, the emit closure only sequences and channels events — it NEVER
+// touches the parent's session.Conversation — so this observability is orthogonal
+// to the context-isolation guarantee (gauntlet #7).
+type observableTool interface {
+	ExecuteObserved(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error)
+}
+
 // defaultChildLimits are the (deliberately tight) stop conditions a subagent run
 // is bounded by when the caller does not override them via WithChildLimits. A
 // subagent is a one-shot, focused investigation: it must not run away. These
@@ -318,6 +339,28 @@ func (*TaskTool) ReadOnly() bool { return true }
 // non-interactive. When the child finishes, the SubagentStop hook fires
 // best-effort.
 func (t *TaskTool) Execute(ctx context.Context, call session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
+	// The plain Execute path forwards nothing: a nil emit makes the run silent, so
+	// existing callers (and the team supervisor's reuse of the drain contract) are
+	// unaffected by the observability seam.
+	return t.run(ctx, call, ws, nil)
+}
+
+// ExecuteObserved runs the subagent like Execute but, when emit is non-nil,
+// forwards a REDACTED, metadata-only projection of the child's activity to the
+// parent run's event stream via the three subagent.* events. emit only sequences
+// and channels events; it never touches the parent's Conversation, so this is
+// orthogonal to context isolation (gauntlet #7): the child's CONTENT still never
+// enters the parent context. It is the observableTool seam the dispatcher calls.
+func (t *TaskTool) ExecuteObserved(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
+	return t.run(ctx, call, ws, emit)
+}
+
+// run is the shared implementation behind Execute (emit == nil) and
+// ExecuteObserved (emit != nil). It builds a FRESH child session, runs the child
+// loop against the SAME workspace, drains the child's entire Event stream
+// internally, optionally forwards a redacted projection of that activity, and
+// returns only the child's final summary text as a single ToolResult.
+func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
 	var args taskArgs
 	if msg, ok := session.ParseArgs(call, &args); !ok {
 		return session.NewToolError(call.ID, "Task: "+msg), nil
@@ -349,21 +392,46 @@ func (t *TaskTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 	// SAME workspace root as the parent so the subagent explores the same project.
 	// When a named agent def pins limits, the child runs under THOSE; otherwise it
 	// uses the Task tool's default limits.
+	childID := t.childSessionID(call.ID)
 	child := session.New(
-		t.childSessionID(call.ID),
+		childID,
 		t.childMode,
 		ws.Root(),
 		limits,
 		time.Now(),
 	)
 
+	// Announce the subagent before it runs, carrying only the parent call id, the
+	// child id, and a short, plain-text goal label (sanitization happens in the
+	// UI). No child content.
+	if emit != nil {
+		emit(session.Event{Type: session.EvSubagentStart, Subagent: &session.SubagentPayload{
+			ParentCallID: string(call.ID),
+			ChildID:      string(childID),
+			Goal:         subagentGoal(args),
+		}})
+	}
+
+	start := time.Now()
 	run := engine.Run(ctx, child, ws, args.Prompt)
 
 	// Drain the child's Event stream entirely INSIDE the Task tool. Nothing from
-	// the child surfaces to the parent except the final summary string. Auto-deny
-	// any permission ask so the child can never block on a human (defensive: the
-	// recommended wiring is an allow-all read-only policy that never asks).
-	final, stop := drainChild(run)
+	// the child surfaces to the parent except the final summary string and, when
+	// observed, the redacted subagent.* metadata. Auto-deny any permission ask so
+	// the child can never block on a human (defensive: the recommended wiring is an
+	// allow-all read-only policy that never asks).
+	final, stop, usage, toolCount := drainChildObserved(run, emit, string(call.ID), string(childID))
+
+	if emit != nil {
+		emit(session.Event{Type: session.EvSubagentEnd, Subagent: &session.SubagentPayload{
+			ParentCallID: string(call.ID),
+			ChildID:      string(childID),
+			ToolCount:    toolCount,
+			Usage:        usage,
+			Stop:         stop,
+			DurationMs:   time.Since(start).Milliseconds(),
+		}})
+	}
 
 	// Fire SubagentStop best-effort, regardless of how the child ended.
 	t.fireSubagentStop(ctx, child)
@@ -381,19 +449,89 @@ func (t *TaskTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 	return session.NewToolResult(call.ID, final), nil
 }
 
+// subagentGoal derives the short, plain-text goal label forwarded on
+// EvSubagentStart: the explicit description when supplied, else the (model-
+// authored) prompt. It is metadata for the card title; it is NOT child content
+// (the prompt is the parent's own instruction to the child). Both paths are
+// clamped identically so the goal always stays a single, bounded line — an
+// explicit description is just as capable of being long or multi-line as a prompt.
+func subagentGoal(args taskArgs) string {
+	if g := strings.TrimSpace(args.Description); g != "" {
+		return truncateGoal(g)
+	}
+	return truncateGoal(strings.TrimSpace(args.Prompt))
+}
+
+// truncateGoal normalizes a goal label into a single bounded line: it collapses
+// any newlines (and tabs) to spaces so a multi-line value can't break the one-line
+// Task-card title, then clamps to maxSubagentGoalLen runes, appending an ellipsis
+// when it overflows. It is rune-aware so it never splits a multi-byte character.
+func truncateGoal(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		return r
+	}, s)
+	r := []rune(s)
+	if len(r) <= maxSubagentGoalLen {
+		return s
+	}
+	return strings.TrimRight(string(r[:maxSubagentGoalLen]), " ") + "…"
+}
+
+// drainChildObserved consumes the child Run's Event channel to completion,
+// applying the non-interactive child contract (auto-deny asks) via
+// handleChildEvent, and returns the terminal result text, stop reason, the
+// child's cumulative usage, and the number of child tool calls observed.
+//
+// When emit is non-nil it ALSO forwards a REDACTED projection of the child's
+// activity: on each child tool RESULT it emits an EvSubagentTool carrying ONLY
+// the tool name (looked up from the matching tool.call) + the error bool + a
+// running count. It forwards NO child tool args, NO child result content, and NO
+// child message.delta text. This keeps gauntlet #7 intact while giving the UI
+// metadata-only visibility. With a nil emit it discards every intermediate event
+// exactly as the original drainChild did.
+func drainChildObserved(run *Run, emit func(session.Event), parentCallID, childID string) (finalText string, stop session.StopReason, usage session.Usage, toolCount int) {
+	// Track child callID → tool name so a tool.result can be attributed to its
+	// tool.call name without forwarding the call's (redacted) args.
+	names := map[session.ToolCallID]string{}
+	for ev := range run.Events() {
+		if emit != nil {
+			switch {
+			case ev.Type == session.EvToolCall && ev.ToolCall != nil:
+				names[ev.ToolCall.ID] = ev.ToolCall.Name
+			case ev.Type == session.EvToolResult && ev.ToolResult != nil:
+				toolCount++
+				emit(session.Event{Type: session.EvSubagentTool, Subagent: &session.SubagentPayload{
+					ParentCallID: parentCallID,
+					ChildID:      childID,
+					ToolName:     names[ev.ToolResult.CallID],
+					IsError:      ev.ToolResult.IsError,
+					ToolCount:    toolCount,
+				}})
+			}
+		}
+		if text, st, ok := handleChildEvent(run, ev); ok {
+			finalText, stop = text, st
+			if ev.Result != nil {
+				usage = ev.Result.Usage
+			}
+		}
+	}
+	return finalText, stop, usage, toolCount
+}
+
 // drainChild consumes the child Run's Event channel to completion, auto-denying
 // any permission ask (subagents are non-interactive), and returns the terminal
 // result text and stop reason. It deliberately discards every intermediate event
 // (turn.start, message.delta, tool.call, tool.result, hook, compaction) so none
 // of them can reach the parent — this is the context-isolation guarantee of
-// gauntlet #7.
+// gauntlet #7. It is the silent variant used by fork.go and the team supervisor;
+// the observed Task path uses drainChildObserved.
 func drainChild(run *Run) (finalText string, stop session.StopReason) {
-	for ev := range run.Events() {
-		if text, st, ok := handleChildEvent(run, ev); ok {
-			finalText, stop = text, st
-		}
-	}
-	return finalText, stop
+	final, st, _, _ := drainChildObserved(run, nil, "", "")
+	return final, st
 }
 
 // handleChildEvent applies the non-interactive CHILD contract to a single event of
@@ -443,5 +581,9 @@ func (t *TaskTool) childSessionID(callID session.ToolCallID) session.SessionID {
 	return session.SessionID(fmt.Sprintf("%s-%s", t.idPrefix, callID))
 }
 
-// Compile-time assertion that TaskTool satisfies the Tool contract.
-var _ tool.Tool = (*TaskTool)(nil)
+// Compile-time assertion that TaskTool satisfies the Tool contract and the
+// agent-internal observableTool seam.
+var (
+	_ tool.Tool      = (*TaskTool)(nil)
+	_ observableTool = (*TaskTool)(nil)
+)

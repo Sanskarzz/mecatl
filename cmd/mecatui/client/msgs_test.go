@@ -59,6 +59,26 @@ func TestEventToMsg(t *testing.T) {
 			&mecatlv1.Event{Type: "hook", Text: "ran hook"},
 			HookMsg{Text: "ran hook", Decision: HookInfo},
 		},
+		{
+			"subagent.start",
+			&mecatlv1.Event{Type: "subagent.start", Subagent: &mecatlv1.Subagent{
+				ParentCallId: "p1", ChildId: "subagent-p1", Goal: "investigate main.go"}},
+			SubagentMsg{Kind: SubagentStart, ParentCallID: "p1", ChildID: "subagent-p1", Goal: "investigate main.go"},
+		},
+		{
+			"subagent.tool",
+			&mecatlv1.Event{Type: "subagent.tool", Subagent: &mecatlv1.Subagent{
+				ParentCallId: "p1", ChildId: "subagent-p1", ToolName: "Grep", IsError: true, ToolCount: 3}},
+			SubagentMsg{Kind: SubagentTool, ParentCallID: "p1", ChildID: "subagent-p1", ToolName: "Grep", IsError: true, ToolCount: 3},
+		},
+		{
+			"subagent.end",
+			&mecatlv1.Event{Type: "subagent.end", Subagent: &mecatlv1.Subagent{
+				ParentCallId: "p1", ChildId: "subagent-p1", ToolCount: 5, Stop: "max_tool_calls", DurationMs: 1234,
+				Usage: &mecatlv1.Usage{InputTokens: 90, OutputTokens: 12}}},
+			SubagentMsg{Kind: SubagentEnd, ParentCallID: "p1", ChildID: "subagent-p1", ToolCount: 5,
+				Stop: "max_tool_calls", DurationMs: 1234, Usage: Usage{InputTokens: 90, OutputTokens: 12}},
+		},
 		{"compaction", &mecatlv1.Event{Type: "compaction", Text: "compacted"}, CompactionMsg{Text: "compacted"}},
 		{
 			"result",

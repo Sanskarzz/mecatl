@@ -277,8 +277,16 @@ func (r *renderer) renderTool(b *block, expand bool) string {
 
 	head := glyph + " " + r.th.Style("toolName").Render(sanitizeTerminal(b.toolName))
 
-	// Edit/Write render their change as a diff in place of the raw JSON args.
-	if diff, ok := r.renderToolDiff(b.toolName, b.toolArgs, expand); ok {
+	// A subagent (Task) card renders its REDACTED child activity in place of raw
+	// JSON args: a goal title plus a live/expanded/resolved status region. The
+	// child's interior (args, results, message text) is isolated by design and is
+	// never shown — only metadata.
+	if b.subagent {
+		if sub := r.renderSubagent(b, expand); sub != "" {
+			head += "\n" + sub
+		}
+	} else if diff, ok := r.renderToolDiff(b.toolName, b.toolArgs, expand); ok {
+		// Edit/Write render their change as a diff in place of the raw JSON args.
 		if diff != "" {
 			head += "\n" + diff
 		}
@@ -302,6 +310,187 @@ func (r *renderer) renderTool(b *block, expand bool) string {
 		card = card.Width(r.width - 2)
 	}
 	return card.Render(head)
+}
+
+// renderSubagent renders a Task card's REDACTED subagent region. It has three
+// states, per the agreed UX, and shows only metadata — never the child's interior
+// (args/results/message text are isolated by design):
+//
+//   - LIVE collapsed (default, not resolved): a calm one-liner under the goal —
+//     "subagent · ↑<in> ↓<out> · N tools · ctrl+t trace". No live current-tool
+//     name, no elapsed clock: counts update as events arrive, no ticker.
+//   - EXPANDED (ctrl+t, not resolved): a wrapped row of glyph+name chips
+//     (✓/✗ per child tool), capped at maxSubagentTrace, under a muted
+//     "args/results hidden" honesty note.
+//   - RESOLVED: a single muted stat line —
+//     "subagent · <dur> · ↑<in> ↓<out> · N tools · stop:<reason>".
+//
+// The goal title always leads (a muted line) so a card is self-contained and
+// legible even with several concurrent subagents interleaved. All subagent-derived
+// strings (goal, tool names) are terminal-sanitized.
+func (r *renderer) renderSubagent(b *block, expand bool) string {
+	muted := r.th.Style("muted")
+	var out strings.Builder
+	if b.subGoal != "" {
+		out.WriteString(muted.Render("↳ " + sanitizeTerminal(b.subGoal)))
+		out.WriteString("\n")
+	}
+
+	if b.subDone {
+		out.WriteString(muted.Render(subagentResolvedLine(b)))
+		return strings.TrimRight(out.String(), "\n")
+	}
+
+	if expand {
+		out.WriteString(muted.Render("subagent · args/results hidden"))
+		if chips := r.renderSubagentChips(b); chips != "" {
+			out.WriteString("\n")
+			out.WriteString(chips)
+		}
+		return strings.TrimRight(out.String(), "\n")
+	}
+
+	out.WriteString(muted.Render(subagentLiveLine(b)))
+	return strings.TrimRight(out.String(), "\n")
+}
+
+// subagentLiveLine is the calm, monotonic collapsed status line: token totals and
+// a running tool count, plus the ctrl+t trace affordance. No current-tool name and
+// no elapsed clock, so it updates only as events arrive (no ticker).
+func subagentLiveLine(b *block) string {
+	return fmt.Sprintf("subagent · ↑%s ↓%s · %s · ctrl+t trace",
+		humanizeTokens(b.subUsage.InputTokens),
+		humanizeTokens(b.subUsage.OutputTokens),
+		plural(b.subToolCount, "tool"))
+}
+
+// subagentResolvedLine is the muted one-line summary shown once the child run has
+// finished: duration, token totals, final tool count, and the stop reason.
+func subagentResolvedLine(b *block) string {
+	return fmt.Sprintf("subagent · %s · ↑%s ↓%s · %s · stop:%s",
+		humanizeDuration(b.subDurationMs),
+		humanizeTokens(b.subUsage.InputTokens),
+		humanizeTokens(b.subUsage.OutputTokens),
+		plural(b.subToolCount, "tool"),
+		subagentStopLabel(b.subStop))
+}
+
+// chipSep is the two-space gap between adjacent child-tool chips in the expanded
+// trace row.
+const chipSep = "  "
+
+// renderSubagentChips renders the expanded child-tool trace as a wrapped row of
+// glyph+name chips (✓ ok / ✗ error), using the same status glyphs as the tool
+// card. Chips are packed greedily and wrapped BETWEEN chips at the card's content
+// width (measured by visible width, so ANSI styling and the chip glyphs don't
+// throw off the wrap), so a long trace never splits a chip mid-name. Names are
+// sanitized. Returns "" for an empty trace.
+func (r *renderer) renderSubagentChips(b *block) string {
+	if len(b.subTrace) == 0 {
+		return ""
+	}
+	okStyle := r.th.Style("toolOk")
+	errStyle := r.th.Style("toolErr")
+	nameStyle := r.th.Style("toolName")
+	chips := make([]string, 0, len(b.subTrace))
+	for _, c := range b.subTrace {
+		glyph := okStyle.Render("✓")
+		if c.isError {
+			glyph = errStyle.Render("✗")
+		}
+		chips = append(chips, glyph+" "+nameStyle.Render(sanitizeTerminal(c.name)))
+	}
+	return wrapChips(chips, r.chipContentWidth())
+}
+
+// chipContentWidth is the visible width available for the chip row inside the tool
+// card, accounting for the card's border (2) and horizontal padding (2). It floors
+// at a small positive value so a single chip per line is always attempted rather
+// than degenerating when the width is unknown/tiny (r.width 0 → no wrap).
+func (r *renderer) chipContentWidth() int {
+	if r.width <= 4 {
+		return 0 // width unknown/tiny: no wrapping (single row, as before)
+	}
+	w := r.width - 2 - 4 // card.Width(r.width-2) minus border(2)+padding(2)
+	if w < 1 {
+		w = 1
+	}
+	return w
+}
+
+// wrapChips packs already-rendered chips into rows separated by chipSep, breaking
+// to a new line BETWEEN chips when the next chip would overflow width (measured by
+// visible width via lipgloss.Width, which ignores ANSI). A width <= 0 disables
+// wrapping (all chips on one row). A chip wider than width still gets its own row
+// rather than being split.
+func wrapChips(chips []string, width int) string {
+	if len(chips) == 0 {
+		return ""
+	}
+	if width <= 0 {
+		return strings.Join(chips, chipSep)
+	}
+	sepW := lipgloss.Width(chipSep)
+	var b strings.Builder
+	lineW := 0
+	for i, chip := range chips {
+		cw := lipgloss.Width(chip)
+		switch {
+		case i == 0:
+			b.WriteString(chip)
+			lineW = cw
+		case lineW+sepW+cw > width:
+			b.WriteString("\n")
+			b.WriteString(chip)
+			lineW = cw
+		default:
+			b.WriteString(chipSep)
+			b.WriteString(chip)
+			lineW += sepW + cw
+		}
+	}
+	return b.String()
+}
+
+// subagentStopLabel maps a child run's raw stop reason to the compact label shown
+// on the resolved subagent line (done / max-tools / max-turns / error). An unknown
+// or empty reason passes through verbatim so a new stop reason is never hidden.
+func subagentStopLabel(stop string) string {
+	switch stop {
+	case "end_turn", "":
+		return "done"
+	case "max_tool_calls":
+		return "max-tools"
+	case "max_turns":
+		return "max-turns"
+	case "max_consecutive_failures":
+		return "max-failures"
+	case "cancelled":
+		return "cancelled"
+	case "error":
+		return "error"
+	default:
+		return sanitizeTerminal(stop)
+	}
+}
+
+// humanizeDuration renders a millisecond wall-clock duration compactly: sub-second
+// as "Nms", under a minute as "N.Ns", else "Nm Ns". A non-positive duration (no
+// clock) renders as "0ms".
+func humanizeDuration(ms int64) string {
+	if ms <= 0 {
+		return "0ms"
+	}
+	if ms < 1000 {
+		return strconv.FormatInt(ms, 10) + "ms"
+	}
+	secs := float64(ms) / 1000.0
+	if secs < 60 {
+		return trimDecimal(secs) + "s"
+	}
+	m := int64(secs) / 60
+	s := int64(secs) % 60
+	return strconv.FormatInt(m, 10) + "m " + strconv.FormatInt(s, 10) + "s"
 }
 
 // resultBody renders a tool result body: full when expanded, else line-capped.

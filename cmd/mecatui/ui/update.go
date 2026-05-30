@@ -119,6 +119,9 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.HookMsg:
 		m.conv.addHook(msg.Text, msg.Phase, msg.Tool, string(msg.Decision))
 		return m, m.afterEvent()
+	case client.SubagentMsg:
+		m.applySubagent(msg)
+		return m, m.afterEvent()
 	case client.CompactionMsg:
 		m.conv.addNotice("history compacted" + suffix(msg.Text))
 		return m, m.afterEvent()
@@ -134,6 +137,21 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.endRun(msg.Stop), m.refreshCmd()
 	default:
 		return m, nil
+	}
+}
+
+// applySubagent attributes a REDACTED subagent projection to its Task tool card by
+// ParentCallID (id match, like resolveTool). A miss is silently dropped: the card
+// carries no child content either way, so a lost subagent event only costs the
+// trace, never correctness or isolation.
+func (m *Model) applySubagent(msg client.SubagentMsg) {
+	switch msg.Kind {
+	case client.SubagentStart:
+		m.conv.setSubagentStart(msg.ParentCallID, msg.Goal)
+	case client.SubagentTool:
+		m.conv.addSubagentTool(msg.ParentCallID, msg.ToolName, msg.IsError, msg.ToolCount)
+	case client.SubagentEnd:
+		m.conv.setSubagentEnd(msg.ParentCallID, msg.Usage, msg.ToolCount, msg.Stop, msg.DurationMs)
 	}
 }
 

@@ -304,7 +304,7 @@ func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws 
 	call := c
 	e.emit(r, session.Event{Type: session.EvToolCall, Turn: turnIdx, ToolCall: &call})
 
-	res, dur := e.timeExecute(ctx, ws, c, t)
+	res, dur := e.timeExecute(ctx, r, ws, turnIdx, c, t)
 
 	// PostToolUse may rewrite the result. The effective (possibly rewritten) result
 	// is what we log, emit, and return, so the audit log, the client event stream,
@@ -324,12 +324,34 @@ func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws 
 // injected Clock (zero duration when no Clock is configured). A harness-level
 // execution error becomes an error ToolResult so the model can recover; the loop
 // never aborts on a single tool failure.
-func (e *Engine) timeExecute(ctx context.Context, ws tool.Workspace, c session.ToolCall, t tool.Tool) (session.ToolResult, time.Duration) {
+//
+// Observability seam: a tool that implements observableTool (the Task subagent)
+// is run via ExecuteObserved with an emit closure bound to THIS run, so it can
+// forward a redacted, metadata-only projection of its internal activity (the
+// subagent.* events) onto the same sequenced event stream the loop emits. The
+// closure stamps the current Turn and routes through e.emit (Seq + sink mirror),
+// matching every other dispatch emit. It is invoked from the (possibly
+// concurrent, read-parallel) tool goroutine — consistent with the existing
+// dispatch emits, which e.emit serialises. Tools that do not implement the seam
+// take the ordinary Execute path unchanged.
+func (e *Engine) timeExecute(ctx context.Context, r *Run, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool) (session.ToolResult, time.Duration) {
 	var start time.Time
 	if e.deps.Clock != nil {
 		start = e.deps.Clock.Now()
 	}
-	res, err := t.Execute(ctx, c, ws)
+	var (
+		res session.ToolResult
+		err error
+	)
+	if ot, ok := t.(observableTool); ok {
+		emit := func(ev session.Event) {
+			ev.Turn = turnIdx
+			e.emit(r, ev)
+		}
+		res, err = ot.ExecuteObserved(ctx, c, ws, emit)
+	} else {
+		res, err = t.Execute(ctx, c, ws)
+	}
 	if err != nil {
 		res = session.NewToolError(c.ID, fmt.Sprintf("tool %q failed: %v", c.Name, err))
 	}

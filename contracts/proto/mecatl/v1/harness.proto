@@ -260,6 +260,12 @@ message Event {
   // render hook notices distinctly (and colour blocked ones) instead of parsing
   // the free-text `text` field.
   Hook hook = 11;
+  // subagent is set on the three subagent.* events (subagent.start /
+  // subagent.tool / subagent.end): a REDACTED, metadata-only projection of a Task
+  // child run. It NEVER carries child content (no message text, tool args, or
+  // result bodies) — only ids, a goal label, tool names/counts, usage, stop, and
+  // duration — so the context-isolation guarantee is preserved.
+  Subagent subagent = 12;
 }
 
 // HookDecision is the outcome a hook fire produced. Mirrors
@@ -286,6 +292,41 @@ message Hook {
   string tool = 2;
   // decision is the hook outcome (info / blocked / modified).
   HookDecision decision = 3;
+}
+
+// Subagent is the REDACTED observability projection carried by the three
+// subagent.* events. Mirrors session.SubagentPayload. It carries metadata ONLY —
+// no child message text, tool args, or result bodies — so a client can render a
+// Task subagent's activity (a goal title, a trace of tool names, and final stats)
+// without ever seeing the child's content, preserving context isolation.
+//
+// Which fields are set depends on the event kind:
+//   - subagent.start: parent_call_id, child_id, goal.
+//   - subagent.tool:  parent_call_id, child_id, tool_name, is_error, tool_count.
+//   - subagent.end:   parent_call_id, child_id, tool_count, usage, stop, duration_ms.
+message Subagent {
+  // parent_call_id is the parent's Task tool-call id, attributing the event to
+  // the originating Task card.
+  string parent_call_id = 1;
+  // child_id is the child session id, distinguishing concurrent subagents.
+  string child_id = 2;
+  // goal is a short, plain-text label for the delegated task (subagent.start).
+  string goal = 3;
+  // tool_name is the name of a child tool that just ran (subagent.tool) — the
+  // name alone, never the child's args or result.
+  string tool_name = 4;
+  // is_error reports whether that child tool call failed (subagent.tool).
+  bool is_error = 5;
+  // tool_count is the running (subagent.tool) or final (subagent.end) child
+  // tool-call count.
+  int32 tool_count = 6;
+  // usage is the child run's cumulative token accounting (subagent.end).
+  Usage usage = 7;
+  // stop is the child run's terminal stop reason (subagent.end).
+  string stop = 8;
+  // duration_ms is the child run's wall-clock duration in milliseconds
+  // (subagent.end; best-effort).
+  int64 duration_ms = 9;
 }
 
 // ToolCall is a request from the model to invoke a named tool. Mirrors

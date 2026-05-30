@@ -36,6 +36,25 @@ const (
 	EvCompaction EventType = "compaction"
 	// EvResult is the terminal event: success / limit / error / cancelled.
 	EvResult EventType = "result"
+
+	// EvSubagentStart is emitted when a Task subagent run begins. It is a
+	// REDACTED observability projection of a child loop — never the child's
+	// content. It carries only the parent call id, the child session id, and a
+	// short goal label so a client can attribute and title the subagent card.
+	EvSubagentStart EventType = "subagent.start"
+	// EvSubagentTool is emitted each time a Task subagent's child tool call
+	// resolves. It is a REDACTED observability projection: it forwards ONLY the
+	// child tool's NAME and error bool plus a running count — never the child's
+	// tool args or result content, and never the child's message text. This keeps
+	// the context-isolation guarantee (gauntlet #7) intact: nothing the child
+	// produces enters the parent's conversation.
+	EvSubagentTool EventType = "subagent.tool"
+	// EvSubagentEnd is emitted when a Task subagent run terminates. It is a
+	// REDACTED observability projection carrying only aggregate metadata — the
+	// child's tool count, token usage, stop reason, and wall-clock duration —
+	// never any child content. The child's terminal summary still folds back into
+	// the parent conversation exclusively via the Task tool's ToolResult.
+	EvSubagentEnd EventType = "subagent.end"
 )
 
 // HookDecision is the outcome a hook fire produced, so a client can colour and
@@ -100,6 +119,48 @@ type TurnEndPayload struct {
 	DurationMs int64
 }
 
+// SubagentPayload is the REDACTED observability projection carried by the three
+// subagent.* events (EvSubagentStart / EvSubagentTool / EvSubagentEnd). It is the
+// ONLY information about a Task subagent's child run that surfaces to clients, and
+// it deliberately carries no child content — no message text, no tool args, no
+// tool result bodies — only metadata. This is orthogonal to the context-isolation
+// guarantee (gauntlet #7): forwarding metadata to the event stream never touches
+// the parent's Conversation, so the child's content still never enters the context
+// sent to the LLM.
+//
+// Which fields are set depends on the event kind:
+//   - EvSubagentStart: ParentCallID, ChildID, Goal.
+//   - EvSubagentTool:  ParentCallID, ChildID, ToolName, IsError, ToolCount.
+//   - EvSubagentEnd:   ParentCallID, ChildID, ToolCount, Usage, Stop, DurationMs.
+type SubagentPayload struct {
+	// ParentCallID is the parent's Task tool-call id, used by clients to attribute
+	// this event to the originating Task card. Set on all three kinds.
+	ParentCallID string
+	// ChildID is the child session id, distinguishing concurrent subagents. Set on
+	// all three kinds.
+	ChildID string
+	// Goal is a short, plain-text label for the delegated task (the Task call's
+	// description, or a truncation of its prompt). Set on EvSubagentStart only.
+	Goal string
+	// ToolName is the name of a child tool that just ran. Set on EvSubagentTool
+	// only. It is the tool NAME alone — never the child's tool args or result.
+	ToolName string
+	// IsError reports whether the child tool call failed. Set on EvSubagentTool
+	// only.
+	IsError bool
+	// ToolCount is the running (EvSubagentTool) or final (EvSubagentEnd) number of
+	// child tool calls observed.
+	ToolCount int
+	// Usage is the child run's cumulative token accounting. Set on EvSubagentEnd
+	// only.
+	Usage Usage
+	// Stop is the child run's terminal stop reason. Set on EvSubagentEnd only.
+	Stop StopReason
+	// DurationMs is the child run's wall-clock duration in milliseconds
+	// (best-effort). Set on EvSubagentEnd only.
+	DurationMs int64
+}
+
 // Event is the domain-owned, provider-neutral unit of the streaming model. The
 // loop runs as a producer writing Events to a channel; server adapters relay
 // them to the gRPC server-stream or HTTP SSE.
@@ -128,4 +189,7 @@ type Event struct {
 	// Usage is set on usage-bearing events. On EvResult it is the cumulative run
 	// total; turn.end carries its per-turn usage in TurnEnd, NOT here.
 	Usage *Usage
+	// Subagent is set on the three subagent.* events: the REDACTED observability
+	// projection of a Task child run (metadata only, never child content).
+	Subagent *SubagentPayload
 }

@@ -58,7 +58,28 @@ func toProto(ev session.Event) *mecatlv1.Event {
 	if ev.Usage != nil {
 		out.Usage = toProtoUsage(*ev.Usage)
 	}
+	if ev.Subagent != nil {
+		out.Subagent = toProtoSubagent(*ev.Subagent)
+	}
 	return out
+}
+
+// toProtoSubagent maps a session.SubagentPayload to its proto Subagent form: the
+// redacted, metadata-only projection of a Task child run. Usage is always emitted
+// (zero on the start/tool kinds); the per-kind field population mirrors the domain
+// payload's documented contract.
+func toProtoSubagent(p session.SubagentPayload) *mecatlv1.Subagent {
+	return &mecatlv1.Subagent{
+		ParentCallId: p.ParentCallID,
+		ChildId:      p.ChildID,
+		Goal:         p.Goal,
+		ToolName:     p.ToolName,
+		IsError:      p.IsError,
+		ToolCount:    clampInt32(p.ToolCount),
+		Usage:        toProtoUsage(p.Usage),
+		Stop:         string(p.Stop),
+		DurationMs:   p.DurationMs,
+	}
 }
 
 // toProtoToolCall maps a session.ToolCall to its proto form.

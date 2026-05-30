@@ -1,5 +1,21 @@
 package ui
 
+import "github.com/stacklok/mecatl/cmd/mecatui/client"
+
+// maxSubagentTrace caps how many child-tool chips a subagent block retains for
+// the expanded trace, mirroring the line-cap idiom used elsewhere (e.g.
+// maxToolResultLines). Older chips are dropped once the cap is reached so a long
+// investigation never unbounds the card.
+const maxSubagentTrace = 12
+
+// subToolChip is one entry in a subagent block's redacted child-tool trace: the
+// child tool's NAME and whether it errored. It deliberately holds no args or
+// result content — only the metadata forwarded by subagent.tool.
+type subToolChip struct {
+	name    string
+	isError bool
+}
+
 // blockKind classifies a scrollback block so the renderer knows how to style it.
 type blockKind int
 
@@ -40,6 +56,21 @@ type block struct {
 	resolved    bool
 	resultBody  string
 	resultError bool
+
+	// Subagent fields (attached to a Task tool block): the REDACTED,
+	// metadata-only projection of the Task's child run. They never carry child
+	// content. subagent is true once a subagent.start has been attributed to this
+	// block; subGoal is the card title; subTrace is a capped trace of child tool
+	// chips; subToolCount is the running/final child tool count; subUsage,
+	// subStop, and subDurationMs are the resolved end stats (subDone gates them).
+	subagent      bool
+	subGoal       string
+	subTrace      []subToolChip
+	subToolCount  int
+	subUsage      client.Usage
+	subStop       string
+	subDurationMs int64
+	subDone       bool
 
 	// Hook-block fields (blockHook): the structured phase/tool/decision used to
 	// render a hook notice distinctly from a compaction notice and colour a
@@ -148,6 +179,67 @@ func (c *conversation) resolveTool(callID, body string, isErr bool) bool {
 		}
 	}
 	return false
+}
+
+// subagentBlock returns the unresolved Task tool block whose toolID matches
+// parentCallID, or nil if none. Matching is by id only — the SAME contract as
+// resolveTool — so a subagent.* event is attributed to its originating Task card
+// even with several Task cards interleaved. It scans from the end so the most
+// recent matching call wins.
+func (c *conversation) subagentBlock(parentCallID string) *block {
+	for i := len(c.blocks) - 1; i >= 0; i-- {
+		b := &c.blocks[i]
+		if b.kind == blockTool && b.toolID == parentCallID {
+			return b
+		}
+	}
+	return nil
+}
+
+// setSubagentStart marks the Task block matching parentCallID as a subagent and
+// records its goal title. Returns false when no matching block exists.
+func (c *conversation) setSubagentStart(parentCallID, goal string) bool {
+	b := c.subagentBlock(parentCallID)
+	if b == nil {
+		return false
+	}
+	b.subagent = true
+	b.subGoal = goal
+	return true
+}
+
+// addSubagentTool appends a child-tool chip (name + error) to the matching Task
+// block's trace and bumps its running tool count. The trace is capped at
+// maxSubagentTrace (oldest chips dropped); the count is the authoritative running
+// total carried by the event, not len(trace). Returns false when no match.
+func (c *conversation) addSubagentTool(parentCallID, toolName string, isError bool, toolCount int) bool {
+	b := c.subagentBlock(parentCallID)
+	if b == nil {
+		return false
+	}
+	b.subagent = true
+	b.subToolCount = toolCount
+	b.subTrace = append(b.subTrace, subToolChip{name: toolName, isError: isError})
+	if len(b.subTrace) > maxSubagentTrace {
+		b.subTrace = b.subTrace[len(b.subTrace)-maxSubagentTrace:]
+	}
+	return true
+}
+
+// setSubagentEnd records the resolved end stats (usage, final tool count, stop,
+// duration) on the matching Task block. Returns false when no match.
+func (c *conversation) setSubagentEnd(parentCallID string, usage client.Usage, toolCount int, stop string, durationMs int64) bool {
+	b := c.subagentBlock(parentCallID)
+	if b == nil {
+		return false
+	}
+	b.subagent = true
+	b.subDone = true
+	b.subUsage = usage
+	b.subToolCount = toolCount
+	b.subStop = stop
+	b.subDurationMs = durationMs
+	return true
 }
 
 // addNotice appends a muted info block (compaction / permission verb).

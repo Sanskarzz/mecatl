@@ -92,6 +92,37 @@ type HookMsg struct {
 	Decision HookDecision
 }
 
+// SubagentKind discriminates the three subagent.* event kinds carried by a
+// SubagentMsg, so the ui switches on a plain value rather than re-deriving it.
+type SubagentKind string
+
+const (
+	// SubagentStart marks a Task subagent run beginning (Goal set).
+	SubagentStart SubagentKind = "start"
+	// SubagentTool marks a child tool call resolving (ToolName/IsError/ToolCount set).
+	SubagentTool SubagentKind = "tool"
+	// SubagentEnd marks a Task subagent run finishing (ToolCount/Usage/Stop/DurationMs set).
+	SubagentEnd SubagentKind = "end"
+)
+
+// SubagentMsg is the REDACTED, metadata-only projection of a Task subagent's
+// child run. It carries NO child content — only ids, a goal label, child tool
+// names/counts, usage, stop, and duration — so the ui can render a subagent's
+// activity under its Task card while the child's content stays isolated.
+// ParentCallID attributes the msg to the originating Task tool block.
+type SubagentMsg struct {
+	Kind         SubagentKind
+	ParentCallID string
+	ChildID      string
+	Goal         string
+	ToolName     string
+	IsError      bool
+	ToolCount    int
+	Usage        Usage
+	Stop         string
+	DurationMs   int64
+}
+
 // CompactionMsg is a muted "history compacted" notice.
 type CompactionMsg struct{ Text string }
 
@@ -138,6 +169,24 @@ func hookDecisionFrom(d mecatlv1.HookDecision) HookDecision {
 		return HookModified
 	default:
 		return HookInfo
+	}
+}
+
+// subagentMsg builds a SubagentMsg of the given kind from a proto Subagent
+// payload (nil-safe via the generated getters). It is the single translation
+// point for the three subagent.* event kinds.
+func subagentMsg(kind SubagentKind, s *mecatlv1.Subagent) SubagentMsg {
+	return SubagentMsg{
+		Kind:         kind,
+		ParentCallID: s.GetParentCallId(),
+		ChildID:      s.GetChildId(),
+		Goal:         s.GetGoal(),
+		ToolName:     s.GetToolName(),
+		IsError:      s.GetIsError(),
+		ToolCount:    int(s.GetToolCount()),
+		Usage:        usageFrom(s.GetUsage()),
+		Stop:         s.GetStop(),
+		DurationMs:   s.GetDurationMs(),
 	}
 }
 
@@ -192,6 +241,12 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 			Tool:     h.GetTool(),
 			Decision: hookDecisionFrom(h.GetDecision()),
 		}
+	case "subagent.start":
+		return subagentMsg(SubagentStart, ev.GetSubagent())
+	case "subagent.tool":
+		return subagentMsg(SubagentTool, ev.GetSubagent())
+	case "subagent.end":
+		return subagentMsg(SubagentEnd, ev.GetSubagent())
 	case "compaction":
 		return CompactionMsg{Text: ev.GetText()}
 	case "result":
