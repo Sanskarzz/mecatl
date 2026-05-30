@@ -50,7 +50,8 @@ func (e *Engine) fireSessionStart(ctx context.Context, r *Run, sess *session.Ses
 		if msg == "" {
 			msg = "session blocked by SessionStart hook"
 		}
-		e.emit(r, session.Event{Type: session.EvHook, Text: msg})
+		e.emit(r, session.Event{Type: session.EvHook, Text: msg,
+			Hook: &session.HookPayload{Phase: string(governance.PhaseSessionStart), Decision: session.HookBlocked}})
 		return true, msg
 	}
 	return false, ""
@@ -93,7 +94,8 @@ func (e *Engine) fireUserPromptSubmit(ctx context.Context, r *Run, sess *session
 		if msg == "" {
 			msg = "prompt blocked by UserPromptSubmit hook"
 		}
-		e.emit(r, session.Event{Type: session.EvHook, Text: msg})
+		e.emit(r, session.Event{Type: session.EvHook, Text: msg,
+			Hook: &session.HookPayload{Phase: string(governance.PhaseUserPromptSubmit), Decision: session.HookBlocked}})
 		return userText, true, msg
 	}
 	if len(outcome.Mutated) > 0 {
@@ -101,10 +103,12 @@ func (e *Engine) fireUserPromptSubmit(ctx context.Context, r *Run, sess *session
 		// use the rewritten text as the effective prompt.
 		var p promptPayload
 		if jerr := json.Unmarshal(outcome.Mutated, &p); jerr == nil {
-			e.emit(r, session.Event{Type: session.EvHook, Text: "UserPromptSubmit hook rewrote the prompt"})
+			e.emit(r, session.Event{Type: session.EvHook, Text: "UserPromptSubmit hook rewrote the prompt",
+				Hook: &session.HookPayload{Phase: string(governance.PhaseUserPromptSubmit), Decision: session.HookModified}})
 			return p.Prompt, false, ""
 		}
-		e.emit(r, session.Event{Type: session.EvHook, Text: "UserPromptSubmit hook returned a malformed prompt mutation (ignored)"})
+		e.emit(r, session.Event{Type: session.EvHook, Text: "UserPromptSubmit hook returned a malformed prompt mutation (ignored)",
+			Hook: &session.HookPayload{Phase: string(governance.PhaseUserPromptSubmit), Decision: session.HookInfo}})
 	}
 	return userText, false, ""
 }
@@ -142,7 +146,10 @@ func (e *Engine) fireStop(ctx context.Context, r *Run, sess *session.Session, re
 	}
 	outcome, err := e.deps.Hooks.Run(hookCtx, ev)
 	if err == nil && outcome.Block && outcome.Message != "" {
-		e.emit(r, session.Event{Type: session.EvHook, Text: outcome.Message})
+		// Stop is terminal — a Block can't veto an already-ended run, so this is an
+		// informational notice, not a blocking one.
+		e.emit(r, session.Event{Type: session.EvHook, Text: outcome.Message,
+			Hook: &session.HookPayload{Phase: string(governance.PhaseStop), Decision: session.HookInfo}})
 	}
 }
 

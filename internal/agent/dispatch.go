@@ -268,7 +268,8 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 		if m == "" {
 			m = "blocked by PreToolUse hook"
 		}
-		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: m})
+		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: m,
+			Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookBlocked}})
 		return c, true, m, nil
 	}
 	if len(outcome.Mutated) > 0 {
@@ -276,10 +277,12 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 		// JSON before adopting it; a malformed payload is ignored. The permission
 		// decision is NOT re-evaluated on these args — see the trust note above.
 		if json.Valid(outcome.Mutated) {
-			e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PreToolUse hook rewrote tool arguments for " + c.Name})
+			e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PreToolUse hook rewrote tool arguments for " + c.Name,
+				Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookModified}})
 			return session.NewToolCall(c.ID, c.Name, outcome.Mutated), false, "", nil
 		}
-		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PreToolUse hook returned a malformed argument mutation (ignored)"})
+		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PreToolUse hook returned a malformed argument mutation (ignored)",
+			Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookInfo}})
 	}
 	return c, false, "", nil
 }
@@ -382,7 +385,11 @@ func (e *Engine) postHook(ctx context.Context, r *Run, sess *session.Session, tu
 		return res
 	}
 	if outcome.Block && outcome.Message != "" {
-		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: outcome.Message})
+		// PostToolUse can't veto an already-run tool, but a Block message is the
+		// hook flagging the output — surface it as a blocked-severity notice so it
+		// reads distinctly from a benign annotation.
+		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: outcome.Message,
+			Hook: &session.HookPayload{Phase: string(governance.PhasePostToolUse), Tool: c.Name, Decision: session.HookBlocked}})
 	}
 	if len(outcome.Mutated) > 0 {
 		// Apply the mutation: decode the same {"content", "is_error"} shape and
@@ -390,14 +397,16 @@ func (e *Engine) postHook(ctx context.Context, r *Run, sess *session.Session, tu
 		if json.Valid(outcome.Mutated) {
 			var p resultPayload
 			if jerr := json.Unmarshal(outcome.Mutated, &p); jerr == nil {
-				e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PostToolUse hook rewrote the tool result for " + c.Name})
+				e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PostToolUse hook rewrote the tool result for " + c.Name,
+					Hook: &session.HookPayload{Phase: string(governance.PhasePostToolUse), Tool: c.Name, Decision: session.HookModified}})
 				if p.IsError {
 					return session.NewToolError(res.CallID, p.Content)
 				}
 				return session.NewToolResult(res.CallID, p.Content)
 			}
 		}
-		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PostToolUse hook returned a malformed result mutation (ignored)"})
+		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PostToolUse hook returned a malformed result mutation (ignored)",
+			Hook: &session.HookPayload{Phase: string(governance.PhasePostToolUse), Tool: c.Name, Decision: session.HookInfo}})
 	}
 	return res
 }

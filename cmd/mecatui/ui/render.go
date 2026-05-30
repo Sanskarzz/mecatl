@@ -11,6 +11,7 @@ import (
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
 
@@ -117,6 +118,8 @@ func (r *renderer) renderBlock(b *block, expand bool) string {
 		return r.renderTool(b, expand)
 	case blockNotice:
 		return r.th.Style("muted").Render("• " + sanitizeTerminal(b.raw))
+	case blockHook:
+		return r.renderHook(b)
 	case blockTurnStat:
 		return r.th.Style("muted").Render(sanitizeTerminal(b.raw))
 	case blockError:
@@ -174,6 +177,88 @@ func plural(n int, noun string) string {
 	return strconv.Itoa(n) + " " + noun + "s"
 }
 
+// renderHook renders a structured hook notice as a distinct one-liner: a hook
+// glyph + the lifecycle phase (and the related tool, for per-tool phases) + the
+// hook's message, with the OUTCOME driving colour and a leading severity glyph.
+// A blocked hook (which can abort a run) renders in the error style with a "✗"
+// so it is visually distinct from a benign informational/modified notice (a dim
+// "•" hook glyph) — never indistinguishable from a compaction notice. All text
+// is server-derived, so it is sanitized before reaching lipgloss.
+func (r *renderer) renderHook(b *block) string {
+	// Lead label: a phase tag, falling back to a generic "hook" when no phase.
+	// Every server-derived field (phase, tool, message) is sanitized before it
+	// reaches lipgloss — see the file's CWE-150 invariant.
+	label := "hook"
+	if b.hookPhase != "" {
+		label = "hook " + sanitizeTerminal(b.hookPhase)
+	}
+	if b.hookTool != "" {
+		label += " · " + sanitizeTerminal(b.hookTool)
+	}
+
+	switch b.hookDecision {
+	case string(client.HookBlocked):
+		// Blocked: error style + "✗", matching the error-block severity cue so an
+		// aborting hook can't be mistaken for a benign notice. The decision VERB is
+		// owned client-side ("blocked"), and the server Text rides as the trailing
+		// reason only — a redundant leading phase/verb echo is stripped so the phase
+		// appears exactly once (on the label).
+		return r.th.Style("errorText").Render("✗ " + label + ": blocked" + hookReason(b.raw, b.hookPhase))
+	case string(client.HookModified):
+		// Modified: info-coloured "✎" — an action was rewritten, notable but benign.
+		return r.th.Style("hookModified").Render("✎ " + label + ": modified" + hookReason(b.raw, b.hookPhase))
+	default:
+		// Info (the baseline): dim "•" hook notice — the server Text is the body.
+		line := label
+		if b.raw != "" {
+			line += ": " + sanitizeTerminal(b.raw)
+		}
+		return r.th.Style("muted").Render("• " + line)
+	}
+}
+
+// hookReason normalises a hook's server Text into a trailing " — <reason>" tail
+// for the client-owned verb (blocked/modified), stripping a redundant leading
+// phase/verb echo so the phase is never doubled. It drops boilerplate that adds
+// nothing beyond the label+verb (e.g. "blocked by PreToolUse hook",
+// "PreToolUse hook rewrote …") and otherwise appends the sanitized text as the
+// reason. An empty/fully-redundant Text yields "" (label + verb stand alone).
+func hookReason(raw, phase string) string {
+	reason := strings.TrimSpace(stripPhaseEcho(raw, phase))
+	if reason == "" {
+		return ""
+	}
+	return " — " + sanitizeTerminal(reason)
+}
+
+// stripPhaseEcho removes a leading phase/verb echo from a hook message so the
+// phase isn't repeated once on the label and again in the body. It folds away
+// the loop's own boilerplate forms:
+//
+//	"blocked by <Phase> hook"            → ""        (pure echo)
+//	"<Phase> hook rewrote tool arguments…" → "rewrote tool arguments…"
+//	"<Phase> hook returned a malformed…"   → "returned a malformed…"
+//
+// A leading "<Phase> hook " or "<Phase> " prefix is trimmed; anything else is
+// returned unchanged. Phase-free messages pass through verbatim.
+func stripPhaseEcho(raw, phase string) string {
+	s := strings.TrimSpace(raw)
+	if phase == "" {
+		return s
+	}
+	// The "blocked by <Phase> hook" form is a pure echo of label+verb → drop it.
+	if strings.EqualFold(s, "blocked by "+phase+" hook") {
+		return ""
+	}
+	// Trim a leading "<Phase> hook " or "<Phase> " prefix (case-insensitive).
+	for _, prefix := range []string{phase + " hook ", phase + " "} {
+		if len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix) {
+			return strings.TrimSpace(s[len(prefix):])
+		}
+	}
+	return s
+}
+
 // renderTool renders a tool-call card: status glyph + name + body, and, once
 // resolved, a truncated result body beneath it. For Edit/Write the args are
 // shown as a colourised diff instead of raw JSON (falling back to pretty JSON if
@@ -225,6 +310,52 @@ func resultBody(body string, expand bool) string {
 		return sanitizeTerminal(strings.TrimRight(body, "\n"))
 	}
 	return truncateLines(body, maxToolResultLines)
+}
+
+// renderChangedFiles renders the session's changed-files summary as a muted,
+// insertion-ordered list under a "✎ N files this session" header — the ctrl+t
+// expansion of the header indicator (sharing its "✎" pencil glyph). Returns ""
+// for an empty set. Paths are terminal-sanitized (they originate from
+// server-relayed tool args).
+func (r *renderer) renderChangedFiles(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	style := r.th.Style("muted")
+	var b strings.Builder
+	b.WriteString(style.Render("✎ " + plural(len(paths), "file") + " changed this session"))
+	for _, p := range paths {
+		b.WriteString("\n")
+		b.WriteString(style.Render("  " + sanitizeTerminal(p)))
+	}
+	return b.String()
+}
+
+// mutatedPath returns the workspace path a file-MUTATING tool call touches, and
+// ok=false for any read-only or unrecognised tool. It keys off the SAME arg
+// shapes the diff renderer mirrors (editDiffArgs/writeDiffArgs, both carrying a
+// "path" field — see the TestEditWriteArgKeysAreStable drift guard in
+// internal/adapter/tools). The set of mutating tools is intentionally explicit
+// (Edit, Write): adding a future mutating tool means adding a case here, not
+// blanket-trusting every tool's "path" arg. Malformed args / empty path yield
+// ("", false) so a garbled call never pollutes the changed-files set.
+func mutatedPath(name, rawArgs string) (string, bool) {
+	switch name {
+	case "Edit":
+		var args editDiffArgs
+		if err := json.Unmarshal([]byte(strings.TrimSpace(rawArgs)), &args); err != nil || args.Path == "" {
+			return "", false
+		}
+		return args.Path, true
+	case "Write":
+		var args writeDiffArgs
+		if err := json.Unmarshal([]byte(strings.TrimSpace(rawArgs)), &args); err != nil || args.Path == "" {
+			return "", false
+		}
+		return args.Path, true
+	default:
+		return "", false
+	}
 }
 
 // renderToolDiff renders a colourised diff for the Edit and Write tools. It

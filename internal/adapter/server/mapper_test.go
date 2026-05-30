@@ -120,10 +120,26 @@ func TestToProtoTable(t *testing.T) {
 		},
 		{
 			name: "hook",
-			in:   session.Event{Type: session.EvHook, Seq: 7, Turn: 1, Text: "blocked-by-policy"},
+			in: session.Event{Type: session.EvHook, Seq: 7, Turn: 1, Text: "blocked-by-policy",
+				Hook: &session.HookPayload{Phase: "PreToolUse", Tool: "Bash", Decision: session.HookBlocked}},
 			assert: func(t *testing.T, got *mecatlv1.Event) {
 				if got.GetType() != "hook" || got.GetText() != "blocked-by-policy" {
 					t.Fatalf("got %+v", got)
+				}
+				h := got.GetHook()
+				if h == nil || h.GetPhase() != "PreToolUse" || h.GetTool() != "Bash" ||
+					h.GetDecision() != mecatlv1.HookDecision_HOOK_DECISION_BLOCKED {
+					t.Fatalf("hook payload mismatch: %+v", h)
+				}
+			},
+		},
+		{
+			name: "hook info default",
+			in:   session.Event{Type: session.EvHook, Seq: 7, Turn: 1, Text: "ran", Hook: &session.HookPayload{Phase: "Stop"}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				h := got.GetHook()
+				if h == nil || h.GetDecision() != mecatlv1.HookDecision_HOOK_DECISION_INFO {
+					t.Fatalf("empty decision should map to INFO: %+v", h)
 				}
 			},
 		},

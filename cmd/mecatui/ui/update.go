@@ -92,6 +92,12 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.ToolCallMsg:
 		m.conv.addTool(msg.ID, msg.Name, msg.Args)
 		m.activeTool = msg.Name
+		// Accumulate the file path for the session changed-files summary. Tracked
+		// at call time (not on the result) so the header reflects intent the moment
+		// the mutation is announced; mutatedPath gates to Edit/Write + dedupes.
+		if p, ok := mutatedPath(msg.Name, msg.Args); ok {
+			m.recordFileChange(p)
+		}
 		return m, m.afterEvent()
 	case client.ToolResultMsg:
 		if !m.conv.resolveTool(msg.CallID, msg.Content, msg.IsError) {
@@ -111,7 +117,7 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.waitCmd()
 	case client.HookMsg:
-		m.conv.addNotice(msg.Text)
+		m.conv.addHook(msg.Text, msg.Phase, msg.Tool, string(msg.Decision))
 		return m, m.afterEvent()
 	case client.CompactionMsg:
 		m.conv.addNotice("history compacted" + suffix(msg.Text))
@@ -368,6 +374,14 @@ func (m Model) endRun(stop string) Model {
 // pinned to the bottom unless the user has scrolled up.
 func (m *Model) refreshView() {
 	content := m.rend.renderConversation(&m.conv, m.expandTools)
+	// When the global details toggle is on, fold the session's changed-files list
+	// in beneath the scrollback so the muted "Δ N files" header indicator has a
+	// discoverable, scannable expansion — without a dedicated key or overlay.
+	if m.expandTools {
+		if list := m.rend.renderChangedFiles(m.filesChanged); list != "" {
+			content += "\n" + list
+		}
+	}
 	atBottom := m.vp.AtBottom()
 	m.vp.SetContent(content)
 	if m.stuck || atBottom {

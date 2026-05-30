@@ -250,6 +250,36 @@ message Event {
   Usage usage = 9;
   // turn_end is set on turn.end events (this turn's usage + elapsed time).
   TurnEnd turn_end = 10;
+  // hook is set on hook events: the structured phase/tool/decision so clients
+  // render hook notices distinctly (and colour blocked ones) instead of parsing
+  // the free-text `text` field.
+  Hook hook = 11;
+}
+
+// HookDecision is the outcome a hook fire produced. Mirrors
+// session.HookDecision; lets a client colour/rank a hook notice without parsing
+// its prose.
+enum HookDecision {
+  // HOOK_DECISION_UNSPECIFIED defaults to INFO at the boundary.
+  HOOK_DECISION_UNSPECIFIED = 0;
+  // HOOK_DECISION_INFO is a benign, informational hook notice.
+  HOOK_DECISION_INFO = 1;
+  // HOOK_DECISION_BLOCKED means the hook vetoed the action (can abort a run).
+  HOOK_DECISION_BLOCKED = 2;
+  // HOOK_DECISION_MODIFIED means the hook rewrote the action's payload.
+  HOOK_DECISION_MODIFIED = 3;
+}
+
+// Hook is the structured payload carried by a hook event, in addition to the
+// human-readable Event.text. Mirrors session.HookPayload.
+message Hook {
+  // phase is the lifecycle point the hook fired at (e.g. "PreToolUse"); empty
+  // when not applicable.
+  string phase = 1;
+  // tool is the tool the hook relates to for per-tool phases; empty otherwise.
+  string tool = 2;
+  // decision is the hook outcome (info / blocked / modified).
+  HookDecision decision = 3;
 }
 
 // ToolCall is a request from the model to invoke a named tool. Mirrors

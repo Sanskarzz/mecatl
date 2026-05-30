@@ -68,8 +68,29 @@ type PermissionAskMsg struct {
 	Reason string
 }
 
-// HookMsg is a muted inline hook notice.
-type HookMsg struct{ Text string }
+// HookDecision is the outcome a hook fire produced, as plain data the ui colours
+// and ranks without touching proto. Mirrors mecatlv1.HookDecision.
+type HookDecision string
+
+const (
+	// HookInfo is a benign, informational hook notice (the default).
+	HookInfo HookDecision = "info"
+	// HookBlocked means the hook vetoed the action — the most severe notice.
+	HookBlocked HookDecision = "blocked"
+	// HookModified means the hook rewrote the action's payload without blocking.
+	HookModified HookDecision = "modified"
+)
+
+// HookMsg is an inline hook notice. Beyond the human-readable Text it carries the
+// structured Phase (lifecycle point, e.g. "PreToolUse"), the related Tool (for
+// per-tool phases), and the Decision (info/blocked/modified) so the ui can render
+// it distinctly from a compaction notice and colour a blocked hook.
+type HookMsg struct {
+	Text     string
+	Phase    string
+	Tool     string
+	Decision HookDecision
+}
 
 // CompactionMsg is a muted "history compacted" notice.
 type CompactionMsg struct{ Text string }
@@ -105,6 +126,20 @@ type StreamErrMsg struct{ Err error }
 // StreamClosedMsg reports a clean stream close (io.EOF) without a result event
 // (e.g. server closed early). Normal completion arrives as ResultMsg first.
 type StreamClosedMsg struct{}
+
+// hookDecisionFrom converts a proto HookDecision enum to the plain HookDecision
+// string the ui keys off. An unspecified/unknown value (including a nil Hook,
+// since GetDecision is nil-safe) maps to HookInfo, the benign baseline.
+func hookDecisionFrom(d mecatlv1.HookDecision) HookDecision {
+	switch d {
+	case mecatlv1.HookDecision_HOOK_DECISION_BLOCKED:
+		return HookBlocked
+	case mecatlv1.HookDecision_HOOK_DECISION_MODIFIED:
+		return HookModified
+	default:
+		return HookInfo
+	}
+}
 
 // usageFrom converts a proto Usage (nil-safe) to the plain struct.
 func usageFrom(u *mecatlv1.Usage) Usage {
@@ -150,7 +185,13 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 		a := ev.GetAsk()
 		return PermissionAskMsg{AskID: a.GetAskId(), Tool: a.GetTool(), Args: a.GetArgs(), Reason: a.GetReason()}
 	case "hook":
-		return HookMsg{Text: ev.GetText()}
+		h := ev.GetHook()
+		return HookMsg{
+			Text:     ev.GetText(),
+			Phase:    h.GetPhase(),
+			Tool:     h.GetTool(),
+			Decision: hookDecisionFrom(h.GetDecision()),
+		}
 	case "compaction":
 		return CompactionMsg{Text: ev.GetText()}
 	case "result":

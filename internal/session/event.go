@@ -38,6 +38,41 @@ const (
 	EvResult EventType = "result"
 )
 
+// HookDecision is the outcome a hook fire produced, so a client can colour and
+// rank a hook notice without parsing its prose. It is provider-neutral and maps
+// 1:1 to a proto enum.
+type HookDecision string
+
+const (
+	// HookInfo is a benign, informational hook notice (the default): the hook
+	// fired and allowed the action, or reported something non-blocking.
+	HookInfo HookDecision = "info"
+	// HookBlocked means the hook vetoed the action (a PreToolUse/UserPromptSubmit
+	// block, or a fail-safe hook error). These can abort a run and must read as
+	// the most severe hook notice.
+	HookBlocked HookDecision = "blocked"
+	// HookModified means the hook rewrote the action's payload (prompt rewrite,
+	// tool-arg or tool-result mutation) without blocking it.
+	HookModified HookDecision = "modified"
+)
+
+// HookPayload is the structured detail carried by an EvHook Event, in addition
+// to the human-readable Event.Text. It lets a client render a hook notice
+// distinctly from a compaction notice — labelling the lifecycle Phase and
+// colouring the Decision (e.g. a blocked hook in an error colour) — instead of
+// string-parsing the free text. All fields are optional; a zero value renders as
+// a generic informational hook.
+type HookPayload struct {
+	// Phase is the lifecycle point the hook fired at (e.g. "PreToolUse"); empty
+	// when not applicable.
+	Phase string
+	// Tool is the tool the hook relates to for the per-tool phases; empty
+	// otherwise.
+	Tool string
+	// Decision is the outcome (info / blocked / modified).
+	Decision HookDecision
+}
+
 // ResultPayload is the terminal payload carried by an EvResult Event.
 type ResultPayload struct {
 	// Stop is the reason the run ended.
@@ -87,6 +122,9 @@ type Event struct {
 	Result *ResultPayload
 	// TurnEnd is set on EvTurnEnd (this turn's usage + elapsed time).
 	TurnEnd *TurnEndPayload
+	// Hook is set on EvHook: the structured phase/tool/decision so clients render
+	// hook notices distinctly (and colour blocked ones) rather than parsing Text.
+	Hook *HookPayload
 	// Usage is set on usage-bearing events. On EvResult it is the cumulative run
 	// total; turn.end carries its per-turn usage in TurnEnd, NOT here.
 	Usage *Usage

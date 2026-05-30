@@ -262,6 +262,13 @@ func (t *Theme) compile() {
 			Foreground(col(p.Error)).
 			Bold(true),
 
+		// Hook notice — "modified" outcome: info-coloured (an action was
+		// rewritten by a hook — notable but benign, distinct from the muted info
+		// notice and the error-coloured blocked notice). Blocked hooks reuse
+		// errorText; informational hooks reuse muted.
+		"hookModified": lipgloss.NewStyle().
+			Foreground(col(p.Info)),
+
 		// Unified-diff slots for Edit/Write tool cards: added lines green,
 		// removed lines red, meta (path / "replace all") muted. Reuses the
 		// status palette so a new theme restyles diffs for free.

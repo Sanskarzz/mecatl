@@ -7,9 +7,10 @@ const (
 	blockUser      blockKind = iota // a user prompt
 	blockAssistant                  // streamed assistant markdown (+ optional reasoning summary)
 	blockTool                       // a tool call (+ its resolved result)
-	blockNotice                     // hook / compaction / muted info
+	blockNotice                     // compaction / muted info
 	blockTurnStat                   // muted per-turn usage + elapsed stat line
 	blockError                      // an error notice
+	blockHook                       // a structured hook notice (phase + decision)
 )
 
 // block is one entry in the conversation scrollback. Assistant blocks accumulate
@@ -39,6 +40,13 @@ type block struct {
 	resolved    bool
 	resultBody  string
 	resultError bool
+
+	// Hook-block fields (blockHook): the structured phase/tool/decision used to
+	// render a hook notice distinctly from a compaction notice and colour a
+	// blocked hook.
+	hookPhase    string
+	hookTool     string
+	hookDecision string // "info" | "blocked" | "modified"
 }
 
 // conversation is the ordered scrollback. It owns block creation/mutation so the
@@ -142,9 +150,23 @@ func (c *conversation) resolveTool(callID, body string, isErr bool) bool {
 	return false
 }
 
-// addNotice appends a muted info block (hook / compaction).
+// addNotice appends a muted info block (compaction / permission verb).
 func (c *conversation) addNotice(text string) {
 	c.blocks = append(c.blocks, block{kind: blockNotice, raw: text})
+}
+
+// addHook appends a structured hook-notice block carrying the lifecycle phase,
+// the related tool (per-tool phases), and the decision. The renderer styles it
+// distinctly from a plain notice — a hook glyph + phase, with the outcome
+// coloured (blocked stands out from a benign info/modified notice).
+func (c *conversation) addHook(text, phase, tool, decision string) {
+	c.blocks = append(c.blocks, block{
+		kind:         blockHook,
+		raw:          text,
+		hookPhase:    phase,
+		hookTool:     tool,
+		hookDecision: decision,
+	})
 }
 
 // addError appends an error block.

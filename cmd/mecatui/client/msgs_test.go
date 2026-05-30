@@ -48,7 +48,17 @@ func TestEventToMsg(t *testing.T) {
 			&mecatlv1.Event{Type: "permission.ask", Ask: &mecatlv1.PermissionAsk{AskId: "a1", Tool: "Write", Args: "{}", Reason: "why"}},
 			PermissionAskMsg{AskID: "a1", Tool: "Write", Args: "{}", Reason: "why"},
 		},
-		{"hook", &mecatlv1.Event{Type: "hook", Text: "ran hook"}, HookMsg{Text: "ran hook"}},
+		{
+			"hook blocked",
+			&mecatlv1.Event{Type: "hook", Text: "blocked by policy", Hook: &mecatlv1.Hook{
+				Phase: "PreToolUse", Tool: "Bash", Decision: mecatlv1.HookDecision_HOOK_DECISION_BLOCKED}},
+			HookMsg{Text: "blocked by policy", Phase: "PreToolUse", Tool: "Bash", Decision: HookBlocked},
+		},
+		{
+			"hook nil payload defaults to info",
+			&mecatlv1.Event{Type: "hook", Text: "ran hook"},
+			HookMsg{Text: "ran hook", Decision: HookInfo},
+		},
 		{"compaction", &mecatlv1.Event{Type: "compaction", Text: "compacted"}, CompactionMsg{Text: "compacted"}},
 		{
 			"result",

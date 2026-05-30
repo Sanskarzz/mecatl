@@ -52,6 +52,9 @@ func toProto(ev session.Event) *mecatlv1.Event {
 	if ev.TurnEnd != nil {
 		out.TurnEnd = toProtoTurnEnd(*ev.TurnEnd)
 	}
+	if ev.Hook != nil {
+		out.Hook = toProtoHook(*ev.Hook)
+	}
 	if ev.Usage != nil {
 		out.Usage = toProtoUsage(*ev.Usage)
 	}
@@ -101,6 +104,30 @@ func toProtoTurnEnd(p session.TurnEndPayload) *mecatlv1.TurnEnd {
 	return &mecatlv1.TurnEnd{
 		Usage:      toProtoUsage(p.Usage),
 		DurationMs: p.DurationMs,
+	}
+}
+
+// toProtoHook maps a session.HookPayload to its proto Hook form.
+func toProtoHook(h session.HookPayload) *mecatlv1.Hook {
+	return &mecatlv1.Hook{
+		Phase:    h.Phase,
+		Tool:     h.Tool,
+		Decision: hookDecisionToProto(h.Decision),
+	}
+}
+
+// hookDecisionToProto maps a session.HookDecision to its proto enum, defaulting
+// an empty/unknown decision to INFO (the benign baseline).
+func hookDecisionToProto(d session.HookDecision) mecatlv1.HookDecision {
+	switch d {
+	case session.HookBlocked:
+		return mecatlv1.HookDecision_HOOK_DECISION_BLOCKED
+	case session.HookModified:
+		return mecatlv1.HookDecision_HOOK_DECISION_MODIFIED
+	case session.HookInfo:
+		return mecatlv1.HookDecision_HOOK_DECISION_INFO
+	default:
+		return mecatlv1.HookDecision_HOOK_DECISION_INFO
 	}
 }
 

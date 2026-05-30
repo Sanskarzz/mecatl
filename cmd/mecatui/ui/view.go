@@ -61,7 +61,47 @@ func (m Model) renderHeader() string {
 		parts = append(parts, m.deps.Server)
 	}
 	line := strings.Join(parts, "  ·  ")
+	if delta := m.changedFilesIndicator(); delta != "" {
+		// Right-align the muted "Δ N files" indicator on the header line when it
+		// fits beside the identity segment; otherwise drop it (the header never
+		// wraps). The header is the least-crowded bar — the footer is already busy
+		// with the context meter and usage facets.
+		line = m.fitHeader(line, delta, m.widthOr(80))
+	}
 	return m.deps.Theme.Style("header").Width(m.widthOr(80)).Render(line)
+}
+
+// changedFilesIndicator returns the muted "✎ N files" header indicator
+// summarising how many distinct workspace files file-mutating tools have touched
+// this session, or "" when none have. The "✎" (pencil = "edited") is coherent
+// with the hook-modified glyph and avoids "Δ" colliding with the Edit/Write
+// "+N/-N" diff size signals. It is a compact count; the full path list is
+// revealed under ctrl+t (see renderChangedFiles).
+func (m Model) changedFilesIndicator() string {
+	n := len(m.filesChanged)
+	if n == 0 {
+		return ""
+	}
+	return "✎ " + plural(n, "file")
+}
+
+// headerGapPad is the minimum blank gap kept between the header identity segment
+// and the right-aligned changed-files indicator so they never touch. Mirrors the
+// footer's footerGapPad but is owned by the header path (naming honesty).
+const headerGapPad = 2
+
+// fitHeader right-aligns the muted indicator beside the identity line when there
+// is room (accounting for the header's 1-cell horizontal padding on each side),
+// and otherwise returns the identity line unchanged — the header is a single
+// non-wrapping row, so a too-narrow terminal simply sheds the indicator.
+func (m Model) fitHeader(line, indicator string, width int) string {
+	const headerPad = 2 // the "header" style pads 1 cell each side
+	styled := m.deps.Theme.Style("muted").Render(indicator)
+	gap := width - headerPad - lipgloss.Width(line) - lipgloss.Width(indicator) - headerGapPad
+	if gap < 0 {
+		return line
+	}
+	return line + strings.Repeat(" ", gap) + styled
 }
 
 // renderFooter is the status bar: spinner + active tool + status + usage.

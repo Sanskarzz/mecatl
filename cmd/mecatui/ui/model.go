@@ -113,6 +113,15 @@ type Model struct {
 	// the line-capped view and the full view. Flipped by ctrl+t.
 	expandTools bool
 
+	// filesChanged is the de-duplicated, insertion-ordered set of workspace paths
+	// touched by file-MUTATING tool calls (Edit/Write) this session, derived
+	// purely from observed tool.call events (no proto/server change). filesSeen is
+	// the membership set guarding the order-preserving slice against duplicates.
+	// Surfaced as a muted "Δ N files" header indicator, with the list folded into
+	// the ctrl+t details expansion.
+	filesChanged []string
+	filesSeen    map[string]struct{}
+
 	// streamCh is the current run's reader channel; WaitForMsg drains it.
 	streamCh chan tea.Msg
 }
@@ -144,6 +153,25 @@ func New(deps Deps) Model {
 		vp:    vp,
 		stuck: true,
 	}
+}
+
+// recordFileChange folds a workspace path touched by a file-mutating tool into
+// the session's changed-files set, preserving first-seen order and ignoring
+// duplicates. Non-mutating / unrecognised tools never reach here (the caller
+// gates on mutatedPath). Lazily initialises the membership set so a zero Model
+// needs no constructor wiring.
+func (m *Model) recordFileChange(path string) {
+	if path == "" {
+		return
+	}
+	if m.filesSeen == nil {
+		m.filesSeen = make(map[string]struct{})
+	}
+	if _, ok := m.filesSeen[path]; ok {
+		return
+	}
+	m.filesSeen[path] = struct{}{}
+	m.filesChanged = append(m.filesChanged, path)
 }
 
 // Init starts the spinner and kicks off the async CreateSession.
