@@ -155,6 +155,13 @@ type Config struct {
 	EnableFork    bool
 	EnableRepoMap bool
 
+	// ForkPreservedCap bounds how many PRESERVED winner forks (join=first /
+	// join=judge) survive at once across the process: a new winner beyond the cap
+	// LRU-reaps the oldest preserved fork. Zero uses agent.DefaultPreservedForkCap.
+	// Preserved forks remain the deliverable — they are inspectable/mergeable — but
+	// are capped so many Fork calls cannot grow disk without bound.
+	ForkPreservedCap int
+
 	// EnableTeams turns on the agent-teams capability (the CreateTeam /
 	// SpawnTeammate / RunTeam RPCs). It is OPT-IN and EXPERIMENTAL: default off.
 	// When false, server.Config.MemberEngine stays nil and the team RPCs return
@@ -212,6 +219,11 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		DefaultLimits: defaultLimits(),
 		MCPProvider:   mcpProvider,
 		MCPSources:    mcpInventory,
+		// ListAgents snapshot: resolve the agent registry once here and project it
+		// into the proto form. Discovery is idempotent file scanning (buildCatalog
+		// resolves the same registry for the Task tool), so this re-resolution is
+		// cheap and keeps the snapshot a pure read at request time.
+		Agents: agentSnapshot(cfg, resolveAgentRegistry(ctx, cfg)),
 	}
 	applyTeamConfig(&svcCfg, cfg, provider)
 
@@ -445,7 +457,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 			"reason", bashDisabledReason(cfg))
 	}
 	agentReg := resolveAgentRegistry(ctx, cfg)
-	cat.MustRegister(buildTaskTool(cfg, provider, hooks, agentReg))
+	cat.MustRegister(buildTaskTool(ctx, cfg, provider, hooks, agentReg))
 
 	// Fork fan-out tool: a scoped child Engine (no Fork/Task/ToolSearch, so a branch
 	// cannot recurse) run against an ISOLATED forked workspace. Unlike the Task
@@ -463,10 +475,20 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }, forker.WithForceCopy())
 		forkChild := buildForkChildEngine(cfg, provider, buildCommandRunner(cfg))
 		judge := agent.NewEngineJudge(buildForkJudgeEngine(cfg, provider))
+		// Bound the PRESERVED winner forks (join=first/judge): an LRU reaper keeps the
+		// most-recent N and tears down the oldest beyond the cap, so a long-lived
+		// process running many Fork calls cannot leak winner forks unboundedly. The
+		// winner stays inspectable until it falls off the LRU tail.
+		preservedCap := cfg.ForkPreservedCap
+		if preservedCap <= 0 {
+			preservedCap = agent.DefaultPreservedForkCap
+		}
 		cat.MustRegister(agent.NewForkTool(forkChild, fk,
 			agent.WithForkSubagentStopHook(hooks),
-			agent.WithForkJudge(judge)))
-		slog.Info("Fork tool ENABLED (parallel isolated MUTATING child branches; judge selection wired)")
+			agent.WithForkJudge(judge),
+			agent.WithWinnerReaper(agent.NewLRUForkReaper(preservedCap))))
+		slog.Info("Fork tool ENABLED (parallel isolated MUTATING child branches; judge selection wired)",
+			"preserved_fork_cap", preservedCap)
 	} else {
 		slog.Info("Fork tool DISABLED")
 	}
@@ -689,11 +711,22 @@ func bashDisabledReason(cfg Config) string {
 // five child-engine builders (Task explorer, Fork branch, Fork judge, per-def Task
 // engine, team member) cannot drift apart.
 func newChildEngine(provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config) *agent.Engine {
+	return newChildEngineWithHooks(provider, cat, model, pc, hookexec.New(nil))
+}
+
+// newChildEngineWithHooks is newChildEngine with an explicit HookRunner, so a
+// per-def Task/member engine can scope its own lifecycle hooks (from a def's
+// `hooks:` map) instead of the inert default. A nil hooks runner falls back to an
+// inert one, preserving the no-hooks contract.
+func newChildEngineWithHooks(provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config, hooks port.HookRunner) *agent.Engine {
+	if hooks == nil {
+		hooks = hookexec.New(nil)
+	}
 	return agent.NewEngine(agent.Deps{
 		LLM:                 provider,
 		Catalog:             cat,
 		Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
-		Hooks:               hookexec.New(nil),
+		Hooks:               hooks,
 		PromptConfig:        pc,
 		Model:               model,
 		ContextWindowTokens: defaultContextWindowTokens,
@@ -769,8 +802,13 @@ func buildForkJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 // explorer only); otherwise the model can route to a named specialist via the
 // Task `agent` arg, and the specialist names+descriptions are surfaced in the
 // Task spec for progressive disclosure.
-func buildTaskTool(cfg Config, provider port.LLMProvider, hooks port.HookRunner, reg *agents.Registry) tool.Tool {
-	engines, meta := buildAgentTaskEngines(cfg, provider, reg)
+func buildTaskTool(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner, reg *agents.Registry) tool.Tool {
+	// Resolve the active skills once so a def's `skills:` can preload skill bodies
+	// into its engine prompt. The same index is the operator-controlled skill set
+	// the Skill tool serves. `hooks` is the inert default each def adopts unless its
+	// own `hooks:` map scopes lifecycle hooks to its engine.
+	skillIdx := resolveSkillIndex(ctx, cfg)
+	engines, meta := buildAgentTaskEngines(cfg, provider, reg, skillIdx, hooks)
 	return agent.NewTaskTool(
 		buildChildEngine(cfg, provider),
 		agent.WithSubagentStopHook(hooks),
@@ -801,7 +839,8 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvide
 	// TWO consumers. A member whose spec.AgentType names a def adopts that def's
 	// scoped catalog/model/prompt/permissionMode.
 	agentReg := resolveAgentRegistry(context.Background(), cfg)
-	svcCfg.MemberEngine = buildMemberEngine(cfg, provider, teamHooks, agentReg, buildCommandRunner(cfg))
+	skillIdx := resolveSkillIndex(context.Background(), cfg)
+	svcCfg.MemberEngine = buildMemberEngine(cfg, provider, teamHooks, agentReg, skillIdx, buildCommandRunner(cfg))
 	// WithForceCopy: Mutating team members run Bash (incl. git) in their forks, so
 	// they get FULLY isolated forks (a full copy incl. .git — own object DB/refs)
 	// rather than a worktree that shares the base repo's .git, keeping a member's
@@ -843,13 +882,19 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvide
 // spawn, so a stale roster reference never wedges a team. (An unknown Task `agent`
 // arg, by contrast, is a model-addressable error — the model can retry; an operator
 // roster entry cannot.)
-func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.HookRunner, reg *agents.Registry, runner tool.CommandRunner) server.MemberEngineFactory {
+func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner tool.CommandRunner) server.MemberEngineFactory {
 	return func(t *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		var (
 			model = cfg.Model
 			pc    = promptConfig(cfg)
 			mode  session.PermissionMode
+			// memberHooks is the per-member engine HookRunner. It stays inert (the
+			// historical default-member shape) UNLESS the member adopts a def whose
+			// `hooks:` map scopes lifecycle hooks to its engine. teamHooks remains the
+			// separate runner the coordination tools use; it is the per-def fallback so a
+			// defined member with no scoped hooks behaves as before.
+			memberHooks port.HookRunner = hookexec.New(nil)
 		)
 
 		def, defined := lookupMemberDef(reg, spec)
@@ -872,11 +917,21 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 				cat.MustRegister(base[name])
 			}
 			model = resolveModel(cfg, def) // resolve ONCE; thread the id into agentPromptConfig
-			pc = agentPromptConfig(cfg, def, model)
+			bodies, missing := preloadedSkillBodies(def, skillIdx)
+			for _, name := range missing {
+				slog.Warn("team member agent def references an unknown skill; not preloaded",
+					"member", spec.Name, "agent", def.Name, "skill", name, "path", def.Path)
+			}
+			pc = agentPromptConfig(cfg, def, model, bodies...)
 			mode = resolvePermissionMode(def)
+			// A def's `hooks:` scope lifecycle hooks to this member's engine. A def that
+			// scopes none keeps the inert default (memberHooks unchanged), preserving the
+			// historical defined-member engine shape.
+			memberHooks = defHookRunner(cfg, def, memberHooks)
 			slog.Info("team member adopts agent def",
 				"member", spec.Name, "agent", def.Name, "tools", strings.Join(names, ","),
-				"model", model, "mode", mode, "mutating", spec.Mutating, "path", def.Path)
+				"model", model, "mode", mode, "mutating", spec.Mutating,
+				"preloaded_skills", len(bodies), "path", def.Path)
 		} else {
 			// Default member catalog: read-only base, plus Edit/Write (and Bash, when a
 			// runner is configured) for a Mutating member only. Bash is now
@@ -906,7 +961,7 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 			cat.MustRegister(mt)
 		}
 
-		eng := newChildEngine(provider, cat, model, pc)
+		eng := newChildEngineWithHooks(provider, cat, model, pc, memberHooks)
 		return agent.MemberBuild{Engine: eng, Mode: mode}
 	}
 }

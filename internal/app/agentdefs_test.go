@@ -176,8 +176,57 @@ func TestResolveModelUnknownAliasWarnsInherits(t *testing.T) {
 
 // --- buildAgentTaskEngines + end-to-end model on the request -----------------
 
+// --- agentSnapshot (ListAgents projection) -----------------------------------
+
+func TestAgentSnapshotEmptyRegistry(t *testing.T) {
+	if got := agentSnapshot(Config{}, agents.NewRegistry(nil)); got != nil {
+		t.Fatalf("empty registry must yield a nil snapshot, got %+v", got)
+	}
+	if got := agentSnapshot(Config{}, nil); got != nil {
+		t.Fatalf("nil registry must yield a nil snapshot, got %+v", got)
+	}
+}
+
+func TestAgentSnapshotProjectsResolvedFields(t *testing.T) {
+	cfg := Config{Model: "parent-model", ModelAliases: map[string]string{"fast": "cheap-id"}}
+	reg := agents.NewRegistry([]agents.AgentDef{
+		{
+			Name:           "speedy",
+			Description:    "fast one",
+			Model:          "fast",                                   // alias => resolves to cheap-id
+			Tools:          []string{"Read", "Grep", "Edit", "Task"}, // Edit mutating, Task excluded
+			PermissionMode: "plan",
+			Color:          "green",
+		},
+		{Name: "plain", Description: "no model"}, // model empty => inherit ("parent-model")
+	})
+
+	snap := agentSnapshot(cfg, reg)
+	if len(snap) != 2 {
+		t.Fatalf("snapshot len = %d, want 2", len(snap))
+	}
+	// Registry order is name-sorted: "plain" < "speedy".
+	plain, speedy := snap[0], snap[1]
+	if plain.GetName() != "plain" || speedy.GetName() != "speedy" {
+		t.Fatalf("snapshot order = %q,%q want plain,speedy", plain.GetName(), speedy.GetName())
+	}
+	if speedy.GetModel() != "cheap-id" {
+		t.Fatalf("speedy model = %q, want resolved alias cheap-id", speedy.GetModel())
+	}
+	if speedy.GetPermissionMode() != "plan" || speedy.GetColor() != "green" {
+		t.Fatalf("speedy mode/color = %q/%q", speedy.GetPermissionMode(), speedy.GetColor())
+	}
+	// Effective read-only Task scope: Edit (mutating) and Task (excluded) dropped.
+	if strings.Join(speedy.GetTools(), ",") != "Grep,Read" {
+		t.Fatalf("speedy tools = %v, want [Grep Read] (read-only scope)", speedy.GetTools())
+	}
+	if plain.GetModel() != "parent-model" {
+		t.Fatalf("plain model = %q, want inherited parent-model", plain.GetModel())
+	}
+}
+
 func TestBuildAgentTaskEnginesEmptyRegistry(t *testing.T) {
-	engines, meta := buildAgentTaskEngines(Config{}, mockllm.New(), agents.NewRegistry(nil))
+	engines, meta := buildAgentTaskEngines(Config{}, mockllm.New(), agents.NewRegistry(nil), nil, nil)
 	if engines != nil || meta != nil {
 		t.Fatalf("empty registry must yield nil engines/meta, got %v / %v", engines, meta)
 	}
@@ -193,7 +242,7 @@ func TestBuildAgentTaskEnginesResolvedModelOnRequest(t *testing.T) {
 		{Name: "speedy", Description: "fast one", Model: "fast", Body: "Be quick."},
 	})
 
-	engines, meta := buildAgentTaskEngines(cfg, rec, reg)
+	engines, meta := buildAgentTaskEngines(cfg, rec, reg, nil, nil)
 	if len(engines) != 1 || len(meta) != 1 || meta[0].Name != "speedy" {
 		t.Fatalf("want 1 engine+meta for 'speedy', got engines=%d meta=%+v", len(engines), meta)
 	}

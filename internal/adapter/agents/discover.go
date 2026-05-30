@@ -38,14 +38,17 @@ const maxPromptBodyBytes = 8 * 1024
 // real Claude-Code `.claude/agents` file ("tools: Read, Edit") parses the same as
 // the YAML-array form.
 type frontmatter struct {
-	Name            string        `yaml:"name"`
-	Description     string        `yaml:"description"`
-	Tools           stringOrSlice `yaml:"tools"`
-	DisallowedTools stringOrSlice `yaml:"disallowedTools"`
-	Model           string        `yaml:"model"`
-	PermissionMode  string        `yaml:"permissionMode"`
-	MaxTurns        int           `yaml:"maxTurns"`
-	Color           string        `yaml:"color"`
+	Name            string            `yaml:"name"`
+	Description     string            `yaml:"description"`
+	Tools           stringOrSlice     `yaml:"tools"`
+	DisallowedTools stringOrSlice     `yaml:"disallowedTools"`
+	Model           string            `yaml:"model"`
+	PermissionMode  string            `yaml:"permissionMode"`
+	MaxTurns        int               `yaml:"maxTurns"`
+	Color           string            `yaml:"color"`
+	Skills          stringOrSlice     `yaml:"skills"`
+	MCPServers      stringOrSlice     `yaml:"mcpServers"`
+	Hooks           map[string]string `yaml:"hooks"`
 }
 
 // stringOrSlice is a YAML field that accepts BOTH a sequence (["Read","Grep"])
@@ -224,7 +227,34 @@ func parseAgentDef(raw []byte, path string) (AgentDef, string, []string) {
 		PermissionMode:  strings.TrimSpace(fm.PermissionMode),
 		MaxTurns:        fm.MaxTurns,
 		Color:           strings.TrimSpace(fm.Color),
+		Skills:          []string(fm.Skills),
+		MCPServers:      []string(fm.MCPServers),
+		Hooks:           normalizeHooks(fm.Hooks),
 		Body:            trimmedBody,
 		Path:            path,
 	}, "", notes
+}
+
+// normalizeHooks trims each phase key and command value and drops any entry whose
+// key or value is empty, returning nil for an empty/absent map so a def with no
+// hooks carries a nil Hooks (not an empty non-nil map). It does NOT validate phase
+// names against the governance taxonomy — that is a composition-time concern, kept
+// out of this catalog-free parser (mirroring how tool names are not validated here).
+func normalizeHooks(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		phase := strings.TrimSpace(k)
+		cmd := strings.TrimSpace(v)
+		if phase == "" || cmd == "" {
+			continue
+		}
+		out[phase] = cmd
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

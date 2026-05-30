@@ -65,6 +65,26 @@ type AgentDef struct {
 	// Color is an OPTIONAL UX hint only (e.g. a TUI tag colour); it NEVER affects
 	// execution.
 	Color string
+	// Skills is an OPTIONAL list of skill names to PRELOAD into this def's engine.
+	// The composition layer resolves each name against the active skills registry
+	// and injects the matched skill's body into the def's system prompt (Claude
+	// Code-style skill preloading), so the specialist starts with those playbooks
+	// already in context rather than having to activate them. An unknown name is a
+	// non-fatal composition-time diagnostic. Accepts a YAML array or a
+	// comma/space-separated scalar.
+	Skills []string
+	// MCPServers is an OPTIONAL list of MCP server names to scope to this def's
+	// engine (Claude Code-style per-agent MCP). PARSED and CARRIED but NOT YET
+	// wired into a per-def MCP connection lifecycle — see docs/design/
+	// AGENT-DEFINITIONS.md for the deferral rationale. Accepts a YAML array or a
+	// comma/space-separated scalar.
+	MCPServers []string
+	// Hooks is an OPTIONAL phase → shell-command map scoping lifecycle hooks to this
+	// def's engine. The composition layer builds the def's engine HookRunner from
+	// this map (instead of the default inert runner), so a specialist can enforce
+	// its own PreToolUse/PostToolUse/etc. gates. Keys are governance hook phase
+	// names; an unknown phase is a non-fatal composition-time diagnostic.
+	Hooks map[string]string
 	// Body is the markdown content following the frontmatter: the specialist's
 	// full instructions, composed into the engine's system prompt by the
 	// composition layer.

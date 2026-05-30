@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/mcp/source"
 	"github.com/stacklok/mecatl/internal/agent"
@@ -60,6 +61,13 @@ type Config struct {
 	// It backs ListMcpSources and ListToolHiveGroups; both derive purely from
 	// this snapshot and perform no live discovery. May be empty.
 	MCPSources []source.SourceInfo
+	// Agents is the resolved agent-definition snapshot taken at startup. It backs
+	// ListAgents and is a pure read of this snapshot (no live discovery). The
+	// composition root (internal/app) resolves the registry once and projects each
+	// def into the proto form (name/description/resolved model/effective read-only
+	// tool scope/permission mode/color) so the server adapter never imports the
+	// agents adapter. May be empty (agent definitions disabled or none found).
+	Agents []*mecatlv1.AgentInfo
 
 	// MemberEngine builds a team member's Engine from the shared team and the
 	// member spec (see internal/agent.MemberEngine). It is the seam that wires
@@ -416,4 +424,10 @@ func (s *Service) ListToolHiveGroups(_ context.Context) []string {
 	}
 	sort.Strings(groups)
 	return groups
+}
+
+// ListAgents returns the resolved agent-definition snapshot (possibly empty).
+// It is a pure read of the injected snapshot; no live discovery.
+func (s *Service) ListAgents(_ context.Context) []*mecatlv1.AgentInfo {
+	return s.cfg.Agents
 }

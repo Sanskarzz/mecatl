@@ -71,6 +71,12 @@ service HarnessService {
   // call ToolHive.
   rpc ListToolHiveGroups(ListToolHiveGroupsRequest) returns (ListToolHiveGroupsResponse);
 
+  // ListAgents returns the resolved agent-definition registry snapshot: each
+  // discovered agent def's routing metadata (name/description), its resolved
+  // model, its effective read-only tool scope, permission mode, and UX color.
+  // Derived from the snapshot taken at startup; it performs no live discovery.
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+
   // --- Agent teams (experimental) -----------------------------------------
   //
   // A team is a set of long-lived member sessions that coordinate through a
@@ -539,6 +545,36 @@ message ListToolHiveGroupsRequest {}
 message ListToolHiveGroupsResponse {
   // groups are the distinct, non-empty ToolHive groups in the inventory.
   repeated string groups = 1;
+}
+
+// AgentInfo is the inventory for one resolved agent definition. It mirrors the
+// resolved registry snapshot (see internal/adapter/agents.AgentDef and the
+// composition-layer resolution in internal/app): the model and tools fields are
+// the RESOLVED outcome (model alias resolved, tool scope filtered to the
+// read-only Task call site), not the raw frontmatter.
+message AgentInfo {
+  // name is the def's stable routing identifier (the value passed to Task's
+  // `agent` arg).
+  string name = 1;
+  // description is the always-in-context one-line routing summary.
+  string description = 2;
+  // model is the resolved provider model id (empty means "inherit the parent").
+  string model = 3;
+  // tools is the def's effective read-only tool scope at the Task call site.
+  repeated string tools = 4;
+  // permission_mode is the raw frontmatter permission mode (empty / "default").
+  string permission_mode = 5;
+  // color is the optional UX hint; it never affects execution.
+  string color = 6;
+}
+
+// ListAgentsRequest requests the resolved agent-definition snapshot.
+message ListAgentsRequest {}
+
+// ListAgentsResponse carries the resolved agent definitions.
+message ListAgentsResponse {
+  // agents are the (possibly empty) resolved agent definitions, name-sorted.
+  repeated AgentInfo agents = 1;
 }
 
 // --- Agent team messages ----------------------------------------------------

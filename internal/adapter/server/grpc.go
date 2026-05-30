@@ -197,6 +197,11 @@ func (h *HarnessServer) ListToolHiveGroups(ctx context.Context, _ *mecatlv1.List
 	return &mecatlv1.ListToolHiveGroupsResponse{Groups: h.svc.ListToolHiveGroups(ctx)}, nil
 }
 
+// ListAgents returns the resolved agent-definition inventory snapshot.
+func (h *HarnessServer) ListAgents(ctx context.Context, _ *mecatlv1.ListAgentsRequest) (*mecatlv1.ListAgentsResponse, error) {
+	return &mecatlv1.ListAgentsResponse{Agents: h.svc.ListAgents(ctx)}, nil
+}
+
 // toStatus maps service sentinel errors to gRPC status codes.
 func toStatus(err error) error {
 	switch {

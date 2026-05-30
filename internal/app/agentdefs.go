@@ -6,9 +6,13 @@ import (
 	"sort"
 	"strings"
 
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
+	"github.com/stacklok/mecatl/internal/adapter/hookexec"
+	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
 	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/prompt"
 	"github.com/stacklok/mecatl/internal/session"
@@ -220,6 +224,102 @@ func baseTaskTools(cfg Config) map[string]tool.Tool {
 	return out
 }
 
+// knownHookPhases is the governance hook-phase taxonomy a def's `hooks:` map may
+// scope. A def hook keyed on a phase outside this set is dropped with a
+// composition-time diagnostic (the catalog-free parser cannot validate phases, so
+// it is done here, against the domain taxonomy).
+var knownHookPhases = map[governance.HookPhase]struct{}{
+	governance.PhaseSessionStart:     {},
+	governance.PhaseUserPromptSubmit: {},
+	governance.PhasePreToolUse:       {},
+	governance.PhasePostToolUse:      {},
+	governance.PhaseStop:             {},
+	governance.PhaseSubagentStop:     {},
+	governance.PhaseTeammateIdle:     {},
+	governance.PhaseTaskCreated:      {},
+	governance.PhaseTaskCompleted:    {},
+}
+
+// skillIndex is a name → body lookup over the active skills, built once at
+// composition time so each def's `skills:` preload is a cheap map read. It is the
+// SAME discovered-skill set the Skill tool serves (operator-controlled content), so
+// preloading a skill body into a def's prompt stays inside the skill trust boundary.
+type skillIndex map[string]string
+
+// resolveSkillIndex discovers the active skills (explicit + conventional, exactly
+// as registerSkills does) and indexes them by name → body. It is forgiving: any
+// discovery fault yields an empty index (a def's skills preload then no-ops with a
+// diagnostic) rather than failing the build. Returns nil when skills are disabled.
+func resolveSkillIndex(ctx context.Context, cfg Config) skillIndex {
+	sources := skills.ResolveSources(skills.ResolveOptions{
+		Explicit:     cfg.SkillsDirs,
+		Conventional: cfg.SkillsConventional,
+		Workspace:    cfg.Workspace,
+	})
+	if len(sources) == 0 {
+		return nil
+	}
+	discovered, _, err := skills.NewMultiSource(sources...).Skills(ctx)
+	if err != nil || len(discovered) == 0 {
+		return nil
+	}
+	idx := make(skillIndex, len(discovered))
+	for _, s := range discovered {
+		idx[s.Name] = s.Body
+	}
+	return idx
+}
+
+// preloadedSkillBodies resolves a def's `skills:` names against the index, returning
+// the matched bodies in def order. An unknown name is a non-fatal diagnostic (logged
+// by the caller via the returned missing list), never a failure — mirroring the
+// forgiving tool/model resolution. A nil index (skills disabled) makes every name
+// "missing".
+func preloadedSkillBodies(def agents.AgentDef, idx skillIndex) (bodies []string, missing []string) {
+	for _, name := range def.Skills {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if body, ok := idx[name]; ok && strings.TrimSpace(body) != "" {
+			bodies = append(bodies, "Skill ("+name+"):\n\n"+strings.TrimSpace(body))
+		} else {
+			missing = append(missing, name)
+		}
+	}
+	return bodies, missing
+}
+
+// defHookRunner builds the HookRunner scoped to a def's engine from its `hooks:`
+// map. A def with no (valid) hooks returns the shared default runner (an inert
+// hookexec.New(nil)), so behaviour is unchanged for defs that scope no hooks.
+// Unknown phases are dropped with a diagnostic. The runner uses cfg.Shell when set
+// so a def hook runs under the same interpreter as the main session's hooks.
+func defHookRunner(cfg Config, def agents.AgentDef, fallback port.HookRunner) port.HookRunner {
+	if len(def.Hooks) == 0 {
+		return fallback
+	}
+	hooks := make(map[governance.HookPhase]string, len(def.Hooks))
+	for rawPhase, cmd := range def.Hooks {
+		phase := governance.HookPhase(rawPhase)
+		if _, ok := knownHookPhases[phase]; !ok {
+			slog.Warn("agent def references an unknown hook phase; ignored",
+				"agent", def.Name, "phase", rawPhase, "path", def.Path)
+			continue
+		}
+		hooks[phase] = cmd
+	}
+	if len(hooks) == 0 {
+		return fallback
+	}
+	var opts []hookexec.Option
+	if cfg.Shell != "" {
+		opts = append(opts, hookexec.WithShell(cfg.Shell))
+	}
+	slog.Info("agent def scopes lifecycle hooks", "agent", def.Name, "phases", len(hooks), "path", def.Path)
+	return hookexec.New(hooks, opts...)
+}
+
 // buildAgentTaskEngines turns the registry into the per-def, read-only child
 // engines + metadata the Task tool routes over. Each engine gets:
 //   - a SCOPED catalog = (def.Tools allowlist ∩ available base tools) minus
@@ -233,7 +333,10 @@ func baseTaskTools(cfg Config) map[string]tool.Tool {
 // gets an engine with an empty-but-valid catalog; the diagnostics explain why,
 // and the model still receives a clear "no tools" inventory. Returns nil/empty
 // when the registry is empty so Task behaves exactly as before.
-func buildAgentTaskEngines(cfg Config, provider port.LLMProvider, reg *agents.Registry) (map[string]*agent.Engine, []agent.AgentMeta) {
+// The skillIdx preloads each def's `skills:` bodies into its prompt; defaultHooks
+// is the inert fallback HookRunner a def with no scoped `hooks:` adopts (so the
+// default Task engine behaviour is unchanged).
+func buildAgentTaskEngines(cfg Config, provider port.LLMProvider, reg *agents.Registry, skillIdx skillIndex, defaultHooks port.HookRunner) (map[string]*agent.Engine, []agent.AgentMeta) {
 	if reg == nil || reg.Len() == 0 {
 		return nil, nil
 	}
@@ -256,14 +359,22 @@ func buildAgentTaskEngines(cfg Config, provider port.LLMProvider, reg *agents.Re
 
 		model := resolveModel(cfg, def)
 
+		bodies, missing := preloadedSkillBodies(def, skillIdx)
+		for _, name := range missing {
+			slog.Warn("agent def references an unknown skill; not preloaded",
+				"agent", def.Name, "skill", name, "path", def.Path)
+		}
+		hooks := defHookRunner(cfg, def, defaultHooks)
+
 		// ProgressiveTools deliberately OFF: child catalogs are tiny and a ToolSearch
-		// tool would not be in the def allowlist. newChildEngine leaves it at its zero
-		// value (off), matching the original explicit omission.
-		engines[def.Name] = newChildEngine(provider, cat, model, agentPromptConfig(cfg, def, model))
+		// tool would not be in the def allowlist. newChildEngineWithHooks leaves it at
+		// its zero value (off), matching the original explicit omission.
+		engines[def.Name] = newChildEngineWithHooks(provider, cat, model, agentPromptConfig(cfg, def, model, bodies...), hooks)
 		meta = append(meta, agent.AgentMeta{Name: def.Name, Description: def.Description})
 
 		slog.Info("agent def engine built",
-			"agent", def.Name, "tools", strings.Join(names, ","), "model", model, "path", def.Path)
+			"agent", def.Name, "tools", strings.Join(names, ","), "model", model,
+			"preloaded_skills", len(bodies), "path", def.Path)
 	}
 
 	// meta in registry (name-sorted) order for a byte-stable Task spec.
@@ -279,14 +390,48 @@ func buildAgentTaskEngines(cfg Config, provider port.LLMProvider, reg *agents.Re
 // the caller's ALREADY-RESOLVED model id (threaded in, not re-resolved): resolving
 // it a second time here would re-run resolveModel and log the unknown-alias warning
 // a second time per def. The caller resolves the model ONCE and passes it.
-func agentPromptConfig(cfg Config, def agents.AgentDef, resolvedModel string) prompt.Config {
+func agentPromptConfig(cfg Config, def agents.AgentDef, resolvedModel string, skillBodies ...string) prompt.Config {
 	pc := promptConfig(cfg)
 	pc.Env.Model = resolvedModel
+	var parts []string
 	if body := strings.TrimSpace(def.Body); body != "" {
-		// Compose into Role: default framing + the def's instructions.
-		pc.Role = prompt.DefaultRole() + "\n\nAgent definition (" + def.Name + "):\n\n" + body
+		parts = append(parts, "Agent definition ("+def.Name+"):\n\n"+body)
+	}
+	// PRELOADED skills (def.Skills): inject each matched skill body so the specialist
+	// starts with those playbooks in context (Claude-Code-style skill preloading).
+	// They ride in the cache-stable StablePrefix alongside the def body.
+	parts = append(parts, skillBodies...)
+	if len(parts) > 0 {
+		pc.Role = prompt.DefaultRole() + "\n\n" + strings.Join(parts, "\n\n")
 	}
 	return pc
+}
+
+// agentSnapshot projects the resolved registry into the proto AgentInfo list the
+// server's ListAgents RPC returns. The model is RESOLVED (alias → concrete id,
+// "" meaning inherit) and the tools field is the def's EFFECTIVE read-only Task
+// scope (the same allowlist∩base, minus mutating/excluded, that Task children
+// get) so the snapshot reflects what the model can actually route to — not the
+// raw frontmatter. It is a pure projection: name-sorted (registry order), no I/O,
+// nil-safe (an empty/nil registry yields an empty slice, never nil-as-error).
+func agentSnapshot(cfg Config, reg *agents.Registry) []*mecatlv1.AgentInfo {
+	if reg == nil || reg.Len() == 0 {
+		return nil
+	}
+	base := baseTaskTools(cfg)
+	out := make([]*mecatlv1.AgentInfo, 0, reg.Len())
+	for _, def := range reg.List() {
+		names, _ := scopedToolNames(def, base)
+		out = append(out, &mecatlv1.AgentInfo{
+			Name:           def.Name,
+			Description:    def.Description,
+			Model:          resolveModel(cfg, def),
+			Tools:          names,
+			PermissionMode: strings.TrimSpace(def.PermissionMode),
+			Color:          def.Color,
+		})
+	}
+	return out
 }
 
 // resolveAgentRegistry resolves the agent-definition registry from cfg (explicit

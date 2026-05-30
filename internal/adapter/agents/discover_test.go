@@ -80,6 +80,50 @@ body`)
 	}
 }
 
+// TestParseAgentDefSkillsMCPHooks asserts the Claude-Code-parity frontmatter
+// fields parse: skills/mcpServers accept both array and scalar forms (like tools),
+// and hooks parses as a phase→command map with empty entries dropped.
+func TestParseAgentDefSkillsMCPHooks(t *testing.T) {
+	raw := []byte(`---
+name: specialist
+description: a specialist
+skills: refactoring, testing
+mcpServers: [github, jira]
+hooks:
+  PreToolUse: "echo pre"
+  PostToolUse: "  "
+  "": "echo orphan"
+---
+body`)
+	def, perr, _ := parseAgentDef(raw, "s.md")
+	if perr != "" {
+		t.Fatalf("parse error: %s", perr)
+	}
+	if got, want := strings.Join(def.Skills, ","), "refactoring,testing"; got != want {
+		t.Fatalf("skills = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(def.MCPServers, ","), "github,jira"; got != want {
+		t.Fatalf("mcpServers = %q, want %q", got, want)
+	}
+	// Empty-command and empty-key hook entries are dropped; only PreToolUse survives.
+	if len(def.Hooks) != 1 || def.Hooks["PreToolUse"] != "echo pre" {
+		t.Fatalf("hooks = %+v, want only PreToolUse=echo pre", def.Hooks)
+	}
+}
+
+// TestParseAgentDefNoExtraFieldsNil asserts a def without the new fields carries
+// nil slices/map (not empty non-nil), so the composition layer can treat absence
+// uniformly.
+func TestParseAgentDefNoExtraFieldsNil(t *testing.T) {
+	def, perr, _ := parseAgentDef([]byte("---\nname: n\ndescription: d\n---\nbody"), "n.md")
+	if perr != "" {
+		t.Fatalf("parse error: %s", perr)
+	}
+	if def.Skills != nil || def.MCPServers != nil || def.Hooks != nil {
+		t.Fatalf("absent fields should be nil: skills=%v mcp=%v hooks=%v", def.Skills, def.MCPServers, def.Hooks)
+	}
+}
+
 func TestParseAgentDefRequiredFields(t *testing.T) {
 	cases := []struct {
 		name string

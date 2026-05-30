@@ -39,7 +39,7 @@ func teamCfg(t *testing.T) Config {
 func TestBuildMemberEngineReadOnlySpawnSucceeds(t *testing.T) {
 	cfg := teamCfg(t)
 	provider := mockllm.New(mockllm.TextTurn("ok"))
-	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil))
+	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, nil))
 
 	ctx := context.Background()
 	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", nil)
@@ -60,7 +60,7 @@ func TestBuildMemberEngineReadOnlySpawnSucceeds(t *testing.T) {
 func TestBuildMemberEngineMutatingSpawnSucceeds(t *testing.T) {
 	cfg := teamCfg(t)
 	provider := mockllm.New(mockllm.TextTurn("ok"))
-	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil))
+	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, nil))
 
 	ctx := context.Background()
 	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", nil)
@@ -81,7 +81,7 @@ func TestBuildMemberEngineMutatingSpawnSucceeds(t *testing.T) {
 func TestTeamsEnabledEndToEnd(t *testing.T) {
 	cfg := teamCfg(t)
 	provider := mockllm.New(mockllm.TextTurn("all done"))
-	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil))
+	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, nil))
 
 	ctx := context.Background()
 	// Atomic create+populate: the initial roster is enrolled by CreateTeam itself, so

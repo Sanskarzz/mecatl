@@ -44,6 +44,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
+	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/app"
 	"github.com/stacklok/mecatl/internal/port"
 )
@@ -155,6 +156,9 @@ type config struct {
 
 	// Fork: enable the Fork fan-out tool (parallel isolated child branches).
 	enableFork bool
+	// forkPreservedCap bounds how many PRESERVED winner forks (join=first/judge)
+	// survive at once; the oldest beyond the cap is LRU-reaped. 0 => the default.
+	forkPreservedCap int
 
 	// RepoMap: enable the Aider-style repo-map tool. It is CGO-free (tree-sitter
 	// runs as WebAssembly via wazero), so it is registered unconditionally by
@@ -412,6 +416,7 @@ func appConfig(cfg config, sink port.EventSink, logger port.Logger) app.Config {
 		CommandsDir:               cfg.commandsDir,
 		EnableCommands:            cfg.enableCommands,
 		EnableFork:                cfg.enableFork,
+		ForkPreservedCap:          cfg.forkPreservedCap,
 		EnableRepoMap:             cfg.enableRepoMap,
 		EnableTeams:               cfg.enableTeams,
 		MCPServers:                cfg.mcpServers,
@@ -476,6 +481,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.mecatl/commands, .claude/commands) when --commands-dir is empty")
 
 	fs.BoolVar(&cfg.enableFork, "enable-fork", true, "register the Fork fan-out tool (parallel isolated child branches)")
+	fs.IntVar(&cfg.forkPreservedCap, "fork-preserved-cap", agent.DefaultPreservedForkCap, "max PRESERVED winner forks (join=first/judge) kept on disk at once; the oldest beyond this is LRU-reaped. Preserved forks stay inspectable until reaped")
 	fs.BoolVar(&cfg.enableRepoMap, "enable-repomap", true, "register the Aider-style repo-map tool (CGO-free, tree-sitter via WebAssembly)")
 	fs.BoolVar(&cfg.enableTeams, "enable-teams", true, "register the experimental agent-teams capability (CreateTeam/SpawnTeammate/RunTeam); on by default and inert until a client drives a team. Pass --enable-teams=false to disable")
 

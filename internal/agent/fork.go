@@ -144,6 +144,14 @@ type ForkTool struct {
 	// the "judge"/"best" strategy returns a model-addressable "judging unavailable"
 	// error; "all"/"first" never touch it.
 	judge BranchJudge
+
+	// winnerReaper bounds the PRESERVED winner forks (join=first / join=judge). When
+	// non-nil, a winner's fork cleanup is handed to the reaper instead of dropped, so
+	// the reaper can LRU-evict (and tear down) the oldest preserved fork once the cap
+	// is exceeded — bounding disk growth across many Fork calls while keeping the most
+	// recent winners inspectable. nil ⇒ the original behaviour: a winner fork is
+	// preserved indefinitely (its cleanup is simply never called).
+	winnerReaper PreservedForkStore
 }
 
 // ForkOption configures a ForkTool.
@@ -199,6 +207,14 @@ func WithForkChildSessionPrefix(p string) ForkOption {
 // child Engine; see internal/app.
 func WithForkJudge(j BranchJudge) ForkOption {
 	return func(t *ForkTool) { t.judge = j }
+}
+
+// WithWinnerReaper injects a bounded PreservedForkStore that caps how many
+// PRESERVED winner forks (join=first / join=judge) survive at once: a new winner
+// beyond the cap reaps the oldest. nil (the default) preserves winner forks
+// indefinitely. See NewLRUForkReaper for the default bounded implementation.
+func WithWinnerReaper(s PreservedForkStore) ForkOption {
+	return func(t *ForkTool) { t.winnerReaper = s }
 }
 
 // NewForkTool constructs the Fork fan-out tool over a pre-built child *Engine and
@@ -299,6 +315,18 @@ func (r branchResult) runCleanup() {
 	}
 }
 
+// preserveWinner hands a winning branch's PRESERVED fork to the bounded reaper (if
+// one is wired) so the oldest preserved fork can be LRU-reaped once the cap is
+// exceeded. With no reaper the winner's cleanup is simply not called (the original
+// behaviour: the fork survives for the operator and is never auto-deleted). The
+// winner's fork is the deliverable either way; the reaper only bounds how many
+// survive at once.
+func (t *ForkTool) preserveWinner(w branchResult) {
+	if t.winnerReaper != nil {
+		t.winnerReaper.Preserve(w.childRoot, w.cleanup)
+	}
+}
+
 // Execute forks N isolated child workspaces (one per task), runs a child loop in
 // each IN PARALLEL bounded by the worker limit, drains every child stream
 // internally, cleans up each fork, and returns ONE ToolResult that joins all
@@ -376,6 +404,7 @@ func (t *ForkTool) executeFirst(ctx context.Context, callID session.ToolCallID, 
 		}
 		results[i].runCleanup()
 	}
+	t.preserveWinner(results[winner])
 	return session.NewToolResult(callID, joinFirstResult(results, winner))
 }
 
@@ -418,6 +447,7 @@ func (t *ForkTool) executeJudge(ctx context.Context, callID session.ToolCallID, 
 		}
 		results[i].runCleanup()
 	}
+	t.preserveWinner(results[winner])
 	return session.NewToolResult(callID, joinJudgeResult(results, winner, rationale))
 }
 

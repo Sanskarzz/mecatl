@@ -22,6 +22,10 @@ disallowedTools: [Write]       # OPTIONAL — subtractive filter applied after t
 model: sonnet                  # OPTIONAL — alias | full id | inherit/empty (=> parent)
 permissionMode: plan           # OPTIONAL — default | plan | acceptEdits
 color: blue                    # OPTIONAL — UX hint only; never affects execution
+skills: [refactoring, testing] # OPTIONAL — skill names PRELOADED into this def's prompt (array or "a, b" string)
+hooks:                         # OPTIONAL — phase → shell-command map scoped to this def's engine
+  PreToolUse: ./scripts/gate.sh
+mcpServers: [github]           # OPTIONAL — PARSED + CARRIED, but NOT yet wired (see "deferred" below)
 ---
 You are a meticulous code reviewer. <full body = the specialist's system-prompt instructions>
 ```
@@ -52,6 +56,20 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   empty Mode falls back to the team-wide default (`WithTeamMode`). `plan` hard-denies
   mutations (existing invariant), so a `plan` member is effectively read-only;
   `acceptEdits` is only meaningful for a Mutating member.
+- **Preloaded skills (`skills:`).** A def's `skills:` names are resolved against the
+  active skills registry (the same operator-controlled set the `Skill` tool serves) and
+  the matched skill BODIES are injected into the def's system-prompt Role — Claude-Code-
+  style skill preloading, so the specialist starts with those playbooks in context
+  rather than having to activate them. An unknown skill name is a non-fatal startup
+  diagnostic (not preloaded). Wired in BOTH the per-def Task engine
+  (`buildAgentTaskEngines`) and the team-member engine (`buildMemberEngine`) via
+  `resolveSkillIndex` + `preloadedSkillBodies`.
+- **Per-def hooks (`hooks:`).** A def's `hooks:` phase→command map scopes lifecycle
+  hooks to that def's engine: the engine's `HookRunner` is built from the def's map
+  (via the `hookexec` adapter) instead of the default inert runner, so a specialist can
+  enforce its own `PreToolUse`/`PostToolUse`/etc. gates. Unknown phases are dropped with
+  a diagnostic; a def with no (valid) hooks keeps the inert default (no behaviour
+  change). See `defHookRunner` + `newChildEngineWithHooks`.
 - **Forgiving resolution.** Conventional discovery is on by default and **inert** when
   no dir exists. An unknown member `AgentType` falls back to the default member
   catalog (warn, never fail the spawn). An unknown Task `agent` arg is a
@@ -65,11 +83,23 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   mechanisms that already exist (member fork / Fork worktree). On the Task path the
   only thing a def adds over the anonymous explorer is a different prompt + model +
   read-only tool scope.
-- **No per-agent MCP / skills / repo-map tools.** Scoped catalogs see only **core**
-  tools. MCP/skills/repo-map tools are registered into the parent catalog at runtime
-  and are not constructable into a per-def child catalog in this tier; a def listing
-  one gets an "unknown tool" diagnostic (distinct from the read-only-drop diagnostic).
-- **No per-agent hooks.** Child/member engines run the default (inert) hook runner.
+- **No per-agent MCP tools (DEFERRED — parsed, not wired).** A def's `mcpServers:` is
+  PARSED and carried on `AgentDef.MCPServers`, but is NOT yet wired into a per-def MCP
+  connection lifecycle, and listing an MCP tool in `tools:` still yields an "unknown
+  tool" diagnostic (scoped catalogs see only **core** tools). **Why deferred, honestly:**
+  per-def MCP requires a per-engine connection lifecycle (connect on build → add the
+  server's tools to that def's catalog → disconnect on teardown). The current MCP
+  manager (`internal/adapter/mcp`) is **process-scoped**: it is built once in
+  `buildCatalog`, registered into the single parent catalog, and torn down only via the
+  top-level `Built.Close`. The per-def Task engines and the per-member engines have **no
+  teardown seam** today (they are built eagerly and live for the process / are rebuilt
+  per spawn with no Close hook), so wiring connect/disconnect cleanly would mean adding
+  an engine-lifetime/teardown abstraction and a per-def MCP sub-manager — substantial,
+  correctness-sensitive work (leaked connections, double-close, group scoping) that does
+  not fit the existing manager seam. Rather than half-implement a leaky version, the
+  field is parsed + carried (so the contract is stable and a future slice has the data)
+  and this is the dedicated follow-up. **Repo-map tools** remain parent-catalog-only for
+  the same scoped-catalog reason.
 - **No `--agents` inline JSON.** Definitions come only from `<name>.md` files under
   `--agents-dir` / the conventional dirs.
 - **No Agent-as-tool nesting.** A def cannot re-add `Task`/`Fork`/`ToolSearch`; a child

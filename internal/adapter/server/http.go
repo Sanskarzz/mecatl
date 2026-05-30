@@ -43,6 +43,7 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h.mux.HandleFunc("POST /v1/mcp/prompts/get", h.getMcpPrompt)
 	h.mux.HandleFunc("GET /v1/mcp/sources", h.listMcpSources)
 	h.mux.HandleFunc("GET /v1/mcp/toolhive/groups", h.listToolHiveGroups)
+	h.mux.HandleFunc("GET /v1/agents", h.listAgents)
 	h.mux.HandleFunc("POST /v1/teams", h.createTeam)
 	h.mux.HandleFunc("POST /v1/teams/{id}/members", h.spawnTeammate)
 	h.mux.HandleFunc("POST /v1/teams/{id}/messages", h.sendTeammateMessage)
@@ -512,6 +513,11 @@ func (h *HTTPHandler) listMcpSources(w http.ResponseWriter, r *http.Request) {
 // listToolHiveGroups handles GET /v1/mcp/toolhive/groups.
 func (h *HTTPHandler) listToolHiveGroups(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, &mecatlv1.ListToolHiveGroupsResponse{Groups: h.svc.ListToolHiveGroups(r.Context())})
+}
+
+// listAgents handles GET /v1/agents.
+func (h *HTTPHandler) listAgents(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, &mecatlv1.ListAgentsResponse{Agents: h.svc.ListAgents(r.Context())})
 }
 
 // --- helpers ----------------------------------------------------------------

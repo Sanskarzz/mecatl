@@ -51,6 +51,7 @@ const (
 	HarnessService_GetMcpPrompt_FullMethodName        = "/mecatl.v1.HarnessService/GetMcpPrompt"
 	HarnessService_ListMcpSources_FullMethodName      = "/mecatl.v1.HarnessService/ListMcpSources"
 	HarnessService_ListToolHiveGroups_FullMethodName  = "/mecatl.v1.HarnessService/ListToolHiveGroups"
+	HarnessService_ListAgents_FullMethodName          = "/mecatl.v1.HarnessService/ListAgents"
 	HarnessService_CreateTeam_FullMethodName          = "/mecatl.v1.HarnessService/CreateTeam"
 	HarnessService_SpawnTeammate_FullMethodName       = "/mecatl.v1.HarnessService/SpawnTeammate"
 	HarnessService_SendTeammateMessage_FullMethodName = "/mecatl.v1.HarnessService/SendTeammateMessage"
@@ -98,6 +99,11 @@ type HarnessServiceClient interface {
 	// in the resolved source inventory. Derived from the snapshot — it does NOT
 	// call ToolHive.
 	ListToolHiveGroups(ctx context.Context, in *ListToolHiveGroupsRequest, opts ...grpc.CallOption) (*ListToolHiveGroupsResponse, error)
+	// ListAgents returns the resolved agent-definition registry snapshot: each
+	// discovered agent def's routing metadata (name/description), its resolved
+	// model, its effective read-only tool scope, permission mode, and UX color.
+	// Derived from the snapshot taken at startup; it performs no live discovery.
+	ListAgents(ctx context.Context, in *ListAgentsRequest, opts ...grpc.CallOption) (*ListAgentsResponse, error)
 	// CreateTeam allocates a new agent team and returns its id, optionally enrolling
 	// an initial roster in the same atomic call. Members may also be added afterwards
 	// with SpawnTeammate; the team is then driven with RunTeam.
@@ -220,6 +226,16 @@ func (c *harnessServiceClient) ListToolHiveGroups(ctx context.Context, in *ListT
 	return out, nil
 }
 
+func (c *harnessServiceClient) ListAgents(ctx context.Context, in *ListAgentsRequest, opts ...grpc.CallOption) (*ListAgentsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListAgentsResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ListAgents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *harnessServiceClient) CreateTeam(ctx context.Context, in *CreateTeamRequest, opts ...grpc.CallOption) (*CreateTeamResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateTeamResponse)
@@ -328,6 +344,11 @@ type HarnessServiceServer interface {
 	// in the resolved source inventory. Derived from the snapshot — it does NOT
 	// call ToolHive.
 	ListToolHiveGroups(context.Context, *ListToolHiveGroupsRequest) (*ListToolHiveGroupsResponse, error)
+	// ListAgents returns the resolved agent-definition registry snapshot: each
+	// discovered agent def's routing metadata (name/description), its resolved
+	// model, its effective read-only tool scope, permission mode, and UX color.
+	// Derived from the snapshot taken at startup; it performs no live discovery.
+	ListAgents(context.Context, *ListAgentsRequest) (*ListAgentsResponse, error)
 	// CreateTeam allocates a new agent team and returns its id, optionally enrolling
 	// an initial roster in the same atomic call. Members may also be added afterwards
 	// with SpawnTeammate; the team is then driven with RunTeam.
@@ -383,6 +404,9 @@ func (UnimplementedHarnessServiceServer) ListMcpSources(context.Context, *ListMc
 }
 func (UnimplementedHarnessServiceServer) ListToolHiveGroups(context.Context, *ListToolHiveGroupsRequest) (*ListToolHiveGroupsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListToolHiveGroups not implemented")
+}
+func (UnimplementedHarnessServiceServer) ListAgents(context.Context, *ListAgentsRequest) (*ListAgentsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListAgents not implemented")
 }
 func (UnimplementedHarnessServiceServer) CreateTeam(context.Context, *CreateTeamRequest) (*CreateTeamResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateTeam not implemented")
@@ -574,6 +598,24 @@ func _HarnessService_ListToolHiveGroups_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HarnessService_ListAgents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ListAgents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ListAgents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ListAgents(ctx, req.(*ListAgentsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _HarnessService_CreateTeam_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateTeamRequest)
 	if err := dec(in); err != nil {
@@ -713,6 +755,10 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListToolHiveGroups",
 			Handler:    _HarnessService_ListToolHiveGroups_Handler,
+		},
+		{
+			MethodName: "ListAgents",
+			Handler:    _HarnessService_ListAgents_Handler,
 		},
 		{
 			MethodName: "CreateTeam",
