@@ -447,13 +447,22 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 	agentReg := resolveAgentRegistry(ctx, cfg)
 	cat.MustRegister(buildTaskTool(cfg, provider, hooks, agentReg))
 
-	// Fork fan-out tool: a scoped read-only child Engine (no Fork/Task, so a branch
-	// cannot recurse) run against an isolated forked workspace.
+	// Fork fan-out tool: a scoped child Engine (no Fork/Task/ToolSearch, so a branch
+	// cannot recurse) run against an ISOLATED forked workspace. Unlike the Task
+	// subagent, the Fork branch child MAY mutate (Edit/Write/Bash-if-configured):
+	// that is safe because every branch writes only to its own fork, never the
+	// parent base, so ForkTool.ReadOnly() stays true. The judge is a SEPARATE,
+	// tool-less read-only Engine built from a distinct provider concern so its LLM
+	// calls never interleave with the branches' (matters for the mockllm cursor in
+	// tests; harmless for the stateless OpenAI adapter).
 	if cfg.EnableFork {
 		fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
-		forkChild := buildChildEngine(cfg, provider)
-		cat.MustRegister(agent.NewForkTool(forkChild, fk, agent.WithForkSubagentStopHook(hooks)))
-		slog.Info("Fork tool ENABLED (parallel isolated child branches)")
+		forkChild := buildForkChildEngine(cfg, provider)
+		judge := agent.NewEngineJudge(buildForkJudgeEngine(cfg, provider))
+		cat.MustRegister(agent.NewForkTool(forkChild, fk,
+			agent.WithForkSubagentStopHook(hooks),
+			agent.WithForkJudge(judge)))
+		slog.Info("Fork tool ENABLED (parallel isolated MUTATING child branches; judge selection wired)")
 	} else {
 		slog.Info("Fork tool DISABLED")
 	}
@@ -684,6 +693,58 @@ func buildChildEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 		LLM:                 provider,
 		Catalog:             childCat,
 		Policy:              childPolicy,
+		Hooks:               hookexec.New(nil),
+		PromptConfig:        promptConfig(cfg),
+		Model:               cfg.Model,
+		ContextWindowTokens: defaultContextWindowTokens,
+		CompactionRatio:     defaultCompactionRatio,
+	})
+}
+
+// buildForkChildEngine constructs the child *Engine each Fork branch runs. Unlike
+// buildChildEngine (the read-only Task explorer), a Fork branch child MAY MUTATE:
+// it gets Read/Grep/Glob/Edit/Write plus Bash when a runner is configured, still
+// EXCLUDING Task/Fork/ToolSearch (a branch must not recurse or fan out further).
+//
+// This is the behavioural shift Tier 3 enables: Fork branches can now IMPLEMENT
+// (not merely explore). It is safe — and ForkTool.ReadOnly() stays true — because
+// every branch runs in its OWN isolated forked workspace, so a branch's writes land
+// in its fork and never touch the parent base (see ForkTool.ReadOnly's invariant).
+// The mutating winner's fork is what winner-preservation (join=first/judge) keeps.
+func buildForkChildEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
+	childCat := tool.NewCatalog()
+	childCat.MustRegister(tools.ReadTool{})
+	childCat.MustRegister(tools.GrepTool{})
+	childCat.MustRegister(tools.GlobTool{})
+	childCat.MustRegister(tools.EditTool{})
+	childCat.MustRegister(tools.WriteTool{})
+	if runner := buildCommandRunner(cfg); runner != nil {
+		childCat.MustRegister(tools.NewBashTool(runner))
+	}
+
+	return agent.NewEngine(agent.Deps{
+		LLM:                 provider,
+		Catalog:             childCat,
+		Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
+		Hooks:               hookexec.New(nil),
+		PromptConfig:        promptConfig(cfg),
+		Model:               cfg.Model,
+		ContextWindowTokens: defaultContextWindowTokens,
+		CompactionRatio:     defaultCompactionRatio,
+	})
+}
+
+// buildForkJudgeEngine constructs the minimal, tool-less read-only child *Engine
+// the Fork join=judge/best strategy runs to SELECT a winner. It scores text only,
+// so it gets an EMPTY catalog (no tools) under an allow-all policy. It is a DISTINCT
+// Engine instance from the branch child so, with the mockllm shared-cursor provider
+// in tests, the judge's LLM calls never interleave with the branches'; with the
+// stateless OpenAI adapter this separation is naturally harmless.
+func buildForkJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
+	return agent.NewEngine(agent.Deps{
+		LLM:                 provider,
+		Catalog:             tool.NewCatalog(),
+		Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
 		Hooks:               hookexec.New(nil),
 		PromptConfig:        promptConfig(cfg),
 		Model:               cfg.Model,

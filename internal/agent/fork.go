@@ -30,6 +30,15 @@ const defaultMaxBranches = 8
 // WithForkConcurrency.
 const defaultForkConcurrency = 4
 
+// Join strategies. join is normalised (trim + lower) before comparison; "" maps
+// to joinAll (today's default behaviour) and "best" is an alias of joinJudge.
+const (
+	joinAll   = "all"
+	joinFirst = "first"
+	joinJudge = "judge"
+	joinBest  = "best" // alias of joinJudge
+)
+
 // forkArgs is the argument payload the model supplies when calling the Fork tool.
 type forkArgs struct {
 	// Tasks is the list of self-contained branch prompts. Each runs in its OWN
@@ -41,6 +50,14 @@ type forkArgs struct {
 	// context all branches need). It is convenience only; it could equally be
 	// repeated into each task.
 	Shared string `json:"shared,omitempty"`
+	// Join selects how branch results are combined: "all" (default) returns every
+	// branch summary; "first" returns the first branch to SUCCEED (by completion
+	// order) and cancels the rest; "judge"/"best" runs an LLM judge that picks one
+	// winner against Criteria. "" normalises to "all".
+	Join string `json:"join,omitempty"`
+	// Criteria is optional free-text guidance for the "judge"/"best" strategy (e.g.
+	// "prefer the smallest diff"). It is ignored for "all"/"first".
+	Criteria string `json:"criteria,omitempty"`
 }
 
 // forkSchema is the JSON schema the model sees for the Fork tool's arguments.
@@ -56,6 +73,15 @@ var forkSchema = json.RawMessage(`{
     "shared": {
       "type": "string",
       "description": "Optional shared instruction prepended to every branch's prompt."
+    },
+    "join": {
+      "type": "string",
+      "enum": ["all", "first", "judge", "best"],
+      "description": "How to combine branch results. 'all' (default): return every branch summary so YOU pick. 'first': return the first branch that succeeds (others are cancelled) — only for genuinely interchangeable branches. 'judge'/'best': an LLM picks the single best branch against 'criteria'; its forked workspace is PRESERVED for inspection/merge."
+    },
+    "criteria": {
+      "type": "string",
+      "description": "Optional guidance for 'judge'/'best' selection (e.g. 'prefer the smallest diff', 'must keep the public API stable'). Ignored for 'all'/'first'."
     }
   },
   "required": ["tasks"]
@@ -111,6 +137,13 @@ type ForkTool struct {
 
 	// idPrefix seeds generated child SessionIDs.
 	idPrefix string
+
+	// judge selects a winner for the "judge"/"best" strategy. It is injected by the
+	// composition root via WithForkJudge (kept as an interface so internal/agent
+	// never imports an adapter, and so a non-LLM scorer can be substituted). nil ⇒
+	// the "judge"/"best" strategy returns a model-addressable "judging unavailable"
+	// error; "all"/"first" never touch it.
+	judge BranchJudge
 }
 
 // ForkOption configures a ForkTool.
@@ -160,6 +193,14 @@ func WithForkChildSessionPrefix(p string) ForkOption {
 	return func(t *ForkTool) { t.idPrefix = p }
 }
 
+// WithForkJudge injects the BranchJudge used by the "judge"/"best" join strategy
+// (nil disables judging — the strategy then returns a model-addressable error).
+// The default build wires an engineJudge over a dedicated, tool-less read-only
+// child Engine; see internal/app.
+func WithForkJudge(j BranchJudge) ForkOption {
+	return func(t *ForkTool) { t.judge = j }
+}
+
 // NewForkTool constructs the Fork fan-out tool over a pre-built child *Engine and
 // a WorkspaceForker. The composition root builds childEngine with the SCOPED
 // child catalog and a non-interactive policy (see NewTaskTool's guidance); the
@@ -196,10 +237,16 @@ func (*ForkTool) Spec() tool.ToolSpec {
 		Description: "Fan out several independent tasks to run in PARALLEL, each in its own " +
 			"isolated forked workspace and fresh context, then join their results into one " +
 			"summary. Use to explore multiple approaches at once or to split independent work. " +
+			"Each branch runs in an isolated fork, so a branch may IMPLEMENT (edit/write/run), " +
+			"not just explore — its changes land in its own fork and never touch this workspace. " +
 			"Each branch cannot see this conversation or the other branches, so make every " +
-			"task in `tasks` self-contained (use `shared` for common context). Returns one " +
-			"combined summary delimited per branch; branches do NOT auto-merge — their forked " +
-			"workspace paths are reported so you can inspect or merge them yourself.",
+			"task in `tasks` self-contained (use `shared` for common context). " +
+			"`join` controls the result: 'all' (default) returns every branch summary so YOU " +
+			"pick; 'first' returns the first branch that SUCCEEDS and cancels the rest (only for " +
+			"interchangeable branches); 'judge'/'best' has an LLM pick the single best branch " +
+			"against `criteria`. Branches do NOT auto-merge — forked workspace paths are reported " +
+			"so you can inspect or merge them yourself; for 'first'/'judge' the WINNER's fork is " +
+			"PRESERVED (not torn down) so its changes survive for inspection.",
 		Schema: forkSchema,
 	}
 }
@@ -226,6 +273,22 @@ type branchResult struct {
 	summary    string
 	failed     bool
 	failReason string
+
+	// cleanup tears down this branch's fork. Ownership is LIFTED out of runBranch's
+	// old defer (see runBranch) so Execute decides, per strategy, which forks to
+	// tear down and which to PRESERVE: for "all" every fork is cleaned (today's
+	// behaviour); for "first"/"judge" every LOSER is cleaned but the WINNER's
+	// cleanup is dropped (never called) so its tree survives. nil when the fork
+	// failed before producing a tree. Not serialized — orchestration state only.
+	cleanup func() error
+}
+
+// runCleanup invokes a branch's fork cleanup if present (idempotent-friendly; the
+// forker's cleanup tolerates an already-removed child).
+func (r branchResult) runCleanup() {
+	if r.cleanup != nil {
+		_ = r.cleanup()
+	}
 }
 
 // Execute forks N isolated child workspaces (one per task), runs a child loop in
@@ -250,12 +313,130 @@ func (t *ForkTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 			len(tasks), t.maxBranches)), nil
 	}
 
-	results := t.runBranches(ctx, call.ID, tasks, args.Shared, ws)
-	return session.NewToolResult(call.ID, joinBranches(results)), nil
+	join := normalizeJoin(args.Join)
+	switch join {
+	case joinAll, joinFirst, joinJudge:
+		// ok
+	default:
+		return session.NewToolError(call.ID, fmt.Sprintf(
+			"Fork: unknown join strategy %q; want all|first|judge|best", strings.TrimSpace(args.Join))), nil
+	}
+	if join == joinJudge && t.judge == nil {
+		return session.NewToolError(call.ID,
+			"Fork: judge selection is unavailable (no judge wired); use join=all and pick a branch yourself"), nil
+	}
+
+	switch join {
+	case joinFirst:
+		return t.executeFirst(ctx, call.ID, tasks, args.Shared, ws), nil
+	case joinJudge:
+		return t.executeJudge(ctx, call.ID, tasks, args.Shared, args.Criteria, ws), nil
+	default: // joinAll
+		// Today's behaviour, byte-for-byte: run every branch, clean EVERY fork,
+		// return the index-sorted per-branch summary.
+		results := t.runBranches(ctx, call.ID, tasks, args.Shared, ws)
+		for _, r := range results {
+			r.runCleanup()
+		}
+		return session.NewToolResult(call.ID, joinBranches(results)), nil
+	}
+}
+
+// executeFirst runs every branch, returns the FIRST to succeed by completion
+// order, cancels the remaining in-flight branches, cleans every loser fork, and
+// PRESERVES the winner's fork (its cleanup is dropped). With no success it
+// degrades to the all-failed report (every fork cleaned).
+func (t *ForkTool) executeFirst(ctx context.Context, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace) session.ToolResult {
+	// A per-call child context so we can cancel the losers the instant a winner
+	// finishes, without disturbing the parent ctx. Cancelled in all paths.
+	branchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results, winner := t.runBranchesFirst(branchCtx, cancel, callID, tasks, shared, ws)
+
+	if winner < 0 {
+		// No branch succeeded: clean everything and report the failures.
+		for _, r := range results {
+			r.runCleanup()
+		}
+		return session.NewToolResult(callID, joinBranches(results))
+	}
+	// Preserve the winner's fork; clean every loser.
+	for i := range results {
+		if i == winner {
+			continue
+		}
+		results[i].runCleanup()
+	}
+	return session.NewToolResult(callID, joinFirstResult(results, winner))
+}
+
+// executeJudge runs every branch, then (when ≥2 succeeded) asks the injected
+// BranchJudge to pick a winner from the branch SUMMARIES only (never transcripts).
+// Degradations: 0 successes → all-failed report (all forks cleaned); exactly 1
+// success → that branch wins with no judge call. The winner's fork is PRESERVED;
+// every loser's fork is cleaned. A misbehaving judge falls back to the first
+// successful branch — Fork never hard-fails because the judge erred.
+func (t *ForkTool) executeJudge(ctx context.Context, callID session.ToolCallID, tasks []string, shared, criteria string, ws tool.Workspace) session.ToolResult {
+	results := t.runBranches(ctx, callID, tasks, shared, ws)
+
+	// Successful branches in index order (so "first successful" is deterministic).
+	var succeeded []int
+	for i := range results {
+		if !results[i].failed {
+			succeeded = append(succeeded, i)
+		}
+	}
+
+	if len(succeeded) == 0 {
+		for _, r := range results {
+			r.runCleanup()
+		}
+		return session.NewToolResult(callID, joinBranches(results))
+	}
+
+	winner := succeeded[0]
+	rationale := ""
+	switch {
+	case len(succeeded) == 1:
+		rationale = "only one branch succeeded; selected without judging"
+	default:
+		winner, rationale = t.judgeWinner(ctx, results, succeeded, criteria)
+	}
+
+	for i := range results {
+		if i == winner {
+			continue
+		}
+		results[i].runCleanup()
+	}
+	return session.NewToolResult(callID, joinJudgeResult(results, winner, rationale))
+}
+
+// judgeWinner asks the injected judge to pick among the SUCCESSFUL branches. It
+// maps the judge's position-within-candidates back to the real branchResult.index
+// and falls back to the first successful branch on any judge error / out-of-range
+// verdict (the judge sees only summaries — never transcripts — preserving
+// isolation).
+func (t *ForkTool) judgeWinner(ctx context.Context, results []branchResult, succeeded []int, criteria string) (winner int, rationale string) {
+	candidates := make([]BranchSummary, 0, len(succeeded))
+	for _, idx := range succeeded {
+		candidates = append(candidates, BranchSummary{
+			Label:   results[idx].label,
+			Summary: results[idx].summary,
+			Failed:  false,
+		})
+	}
+	pos, why, err := t.judge.Judge(ctx, candidates, criteria)
+	if err != nil || pos < 0 || pos >= len(succeeded) {
+		return succeeded[0], "judge unavailable or returned an invalid verdict; selected the first successful branch"
+	}
+	return succeeded[pos], why
 }
 
 // runBranches forks and runs every branch in parallel under a worker-limited
-// semaphore, returning the per-branch results in branch order.
+// semaphore, returning the per-branch results in branch order. The caller owns
+// cleanup of every returned branchResult.cleanup (lifted out of runBranch).
 func (t *ForkTool) runBranches(ctx context.Context, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace) []branchResult {
 	results := make([]branchResult, len(tasks))
 	sem := make(chan struct{}, t.concurrency)
@@ -279,10 +460,72 @@ func (t *ForkTool) runBranches(ctx context.Context, callID session.ToolCallID, t
 	return results
 }
 
+// runBranchesFirst runs every branch in parallel under the worker semaphore and
+// signals each completion on a channel so the orchestrator can pick the FIRST
+// successful branch by completion order and cancel the losers (via cancel). It
+// always waits for every goroutine to exit before returning, so no branch goroutine
+// outlives the call and every fork is captured in results for cleanup (no leak):
+// a loser cancelled mid-flight still returns its (possibly partial) branchResult
+// with its cleanup attached. The returned winner is the index of the first
+// successful branch, or -1 if none succeeded.
+func (t *ForkTool) runBranchesFirst(ctx context.Context, cancel context.CancelFunc, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace) ([]branchResult, int) {
+	results := make([]branchResult, len(tasks))
+	sem := make(chan struct{}, t.concurrency)
+	done := make(chan int, len(tasks)) // carries the index of each finished branch
+	var wg sync.WaitGroup
+
+	for i, task := range tasks {
+		wg.Add(1)
+		go func(i int, task string) {
+			defer wg.Done()
+			defer func() { done <- i }()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[i] = branchResult{index: i, label: branchLabel(i), failed: true, failReason: "cancelled before start"}
+				return
+			}
+			results[i] = t.runBranch(ctx, callID, i, task, shared, ws)
+		}(i, task)
+	}
+
+	// Wait for the first SUCCESS by completion order, then cancel the rest. We keep
+	// reading `done` until every branch has reported so wg.Wait below cannot block
+	// behind an unread send (done is buffered to len(tasks), so this is also safe).
+	winner := -1
+	for range tasks {
+		i := <-done
+		if winner < 0 && !results[i].failed {
+			winner = i
+			cancel() // tell the still-in-flight losers to stop
+		}
+	}
+	wg.Wait()
+	return results, winner
+}
+
+// normalizeJoin trims, lower-cases, maps "" → "all" and "best" → "judge".
+func normalizeJoin(join string) string {
+	j := strings.ToLower(strings.TrimSpace(join))
+	switch j {
+	case "":
+		return joinAll
+	case joinBest:
+		return joinJudge
+	default:
+		return j
+	}
+}
+
 // runBranch forks an isolated workspace, runs one child loop in it, drains the
-// child stream internally, fires SubagentStop, cleans up the fork, and returns the
-// branch's joined result. A fork or child failure is captured in the result, never
-// propagated as a harness error (one failing branch must not kill the others).
+// child stream internally, fires SubagentStop, and returns the branch's joined
+// result WITH its fork cleanup attached (res.cleanup). Cleanup ownership is
+// deliberately LIFTED out of this function: unlike the original (which deferred
+// cleanup here), the caller (Execute and its strategy helpers) decides which forks
+// to tear down and which to preserve, so a winning branch's fork can survive the
+// call. A fork or child failure is captured in the result, never propagated as a
+// harness error (one failing branch must not kill the others).
 func (t *ForkTool) runBranch(ctx context.Context, callID session.ToolCallID, i int, task, shared string, ws tool.Workspace) branchResult {
 	label := branchLabel(i)
 	res := branchResult{index: i, label: label}
@@ -293,11 +536,7 @@ func (t *ForkTool) runBranch(ctx context.Context, callID session.ToolCallID, i i
 		res.failReason = fmt.Sprintf("fork failed: %v", err)
 		return res
 	}
-	defer func() {
-		if cleanup != nil {
-			_ = cleanup()
-		}
-	}()
+	res.cleanup = cleanup
 	res.childRoot = child.Root()
 
 	childSess := session.New(
@@ -408,6 +647,99 @@ func joinBranches(results []branchResult) string {
 		}
 	}
 	return b.String()
+}
+
+// sortedByIndex returns a copy of results sorted by branch index, so rendered
+// output is deterministic regardless of completion order.
+func sortedByIndex(results []branchResult) []branchResult {
+	sorted := make([]branchResult, len(results))
+	copy(sorted, results)
+	sort.Slice(sorted, func(a, b int) bool { return sorted[a].index < sorted[b].index })
+	return sorted
+}
+
+// joinFirstResult renders the join=first outcome: the winning branch's summary,
+// the preserved-workspace note, and a one-line tally of the also-rans. winner is
+// a real branchResult.index.
+func joinFirstResult(results []branchResult, winner int) string {
+	w := results[winner]
+	var b strings.Builder
+	fmt.Fprintf(&b, "Fork (join=first): %s succeeded first of %d branch(es).\n", w.label, len(results))
+	writeWinnerWorkspace(&b, w)
+	fmt.Fprintf(&b, "\n=== %s [WINNER] ===\n", w.label)
+	if w.summary != "" {
+		b.WriteString(w.summary)
+		b.WriteString("\n")
+	}
+	others := len(results) - 1
+	if others > 0 {
+		fmt.Fprintf(&b, "\n(%d other branch(es) cancelled or not selected.)\n", others)
+	}
+	return b.String()
+}
+
+// joinJudgeResult renders the join=judge outcome: the winner's summary, the
+// judge's rationale, the preserved-workspace note, and a compact index-sorted
+// scoreboard of the not-selected branches. winner is a real branchResult.index.
+func joinJudgeResult(results []branchResult, winner int, rationale string) string {
+	sorted := sortedByIndex(results)
+	ok := 0
+	for _, r := range sorted {
+		if !r.failed {
+			ok++
+		}
+	}
+	w := results[winner]
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Fork (join=judge): selected %s of %d branch(es) (%d succeeded, %d failed).\n",
+		w.label, len(results), ok, len(results)-ok)
+	if rationale != "" {
+		fmt.Fprintf(&b, "rationale: %s\n", rationale)
+	}
+	writeWinnerWorkspace(&b, w)
+	fmt.Fprintf(&b, "\n=== %s [WINNER] ===\n", w.label)
+	if w.summary != "" {
+		b.WriteString(w.summary)
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n--- not selected ---\n")
+	for _, r := range sorted {
+		if r.index == winner {
+			continue
+		}
+		if r.failed {
+			fmt.Fprintf(&b, "%s [FAILED]: %s\n", r.label, firstLine(r.failReason))
+		} else {
+			fmt.Fprintf(&b, "%s [OK]: %s\n", r.label, firstLine(r.summary))
+		}
+	}
+	return b.String()
+}
+
+// writeWinnerWorkspace renders the preserved-workspace note for a selected winner.
+// LIFETIME / OWNERSHIP: the winner's fork is intentionally NOT auto-deleted — its
+// contents (a branch that may have IMPLEMENTED changes in its isolated fork) are
+// the deliverable. The harness does not reap it; the CALLER/OPERATOR owns it and
+// must clean it up when done. There is no auto-merge to the base (that would mutate
+// the parent and break ForkTool.ReadOnly()==true); merge is a manual follow-up
+// against this path.
+func writeWinnerWorkspace(b *strings.Builder, w branchResult) {
+	if w.childRoot != "" {
+		fmt.Fprintf(b, "winner workspace (PRESERVED — not auto-deleted; yours to inspect/merge/clean): %s\n", w.childRoot)
+	}
+}
+
+// firstLine returns the first non-empty line of s (trimmed), for the compact
+// scoreboard in joinJudgeResult.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // Compile-time assertion that ForkTool satisfies the Tool contract.
