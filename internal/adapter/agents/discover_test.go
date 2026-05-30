@@ -29,6 +29,7 @@ disallowedTools: [Write]
 model: sonnet
 permissionMode: plan
 maxTurns: 9
+maxToolCalls: 25
 color: blue
 ---
 You are a meticulous code reviewer.
@@ -50,7 +51,7 @@ Inspect the change and report findings.`)
 	if got, want := strings.Join(def.DisallowedTools, ","), "Write"; got != want {
 		t.Fatalf("disallowedTools = %q, want %q", got, want)
 	}
-	if def.Model != "sonnet" || def.PermissionMode != "plan" || def.MaxTurns != 9 || def.Color != "blue" {
+	if def.Model != "sonnet" || def.PermissionMode != "plan" || def.MaxTurns != 9 || def.MaxToolCalls != 25 || def.Color != "blue" {
 		t.Fatalf("optional fields mismatch: %+v", def)
 	}
 	if !strings.HasPrefix(def.Body, "You are a meticulous code reviewer.") {

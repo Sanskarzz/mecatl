@@ -132,6 +132,14 @@ type MemberBuild struct {
 	Engine *Engine
 	// Mode is the optional per-member permission mode. Empty => the team default.
 	Mode session.PermissionMode
+	// Limits are the OPTIONAL per-member, per-round stop conditions resolved from the
+	// member's agent definition (its maxTurns/maxToolCalls). A zero Limits field means
+	// "use the supervisor's team default" (s.limits / WithTeamLimits) for THAT field,
+	// exactly as an empty Mode falls back to s.mode — the factory is the only place
+	// that resolves a def to limits, so the mapping stays in the composition layer and
+	// the supervisor stays agnostic of agent definitions. A wholly zero Limits leaves
+	// the member on the team default, unchanged.
+	Limits session.Limits
 	// Close, if non-nil, tears down resources the factory opened for THIS member —
 	// specifically the inline per-agent MCP manager(s) connected for the member's
 	// agent definition (a reference entry opens nothing, so it contributes no Close).
@@ -383,7 +391,14 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 	if build.Mode != "" {
 		mode = build.Mode
 	}
-	sess := session.New(s.sessionID(spec.Name), mode, ws.Root(), s.limits, time.Now())
+	// Per-member limits: a member's agent definition may pin per-round stop conditions
+	// (maxTurns/maxToolCalls) via build.Limits. Each ZERO field falls back to the
+	// team-wide default (s.limits / WithTeamLimits) for that field, exactly as
+	// build.Mode falls back to s.mode — so a member that pins only maxTurns keeps the
+	// team's tool-call/failure caps, and a member that pins nothing runs on s.limits
+	// unchanged.
+	limits := mergeLimits(s.limits, build.Limits)
+	sess := session.New(s.sessionID(spec.Name), mode, ws.Root(), limits, time.Now())
 	_ = s.team.SetMemberSession(spec.Name, sess.ID)
 
 	s.members[spec.Name] = &memberRT{spec: spec, engine: eng, ws: ws, cleanup: cleanup, sess: sess}
@@ -614,6 +629,27 @@ func workspaceMutatingTools(info []catalogToolInfo, mcpExempt []string) []string
 	}
 	sort.Strings(bad)
 	return bad
+}
+
+// mergeLimits overlays a member's per-def override onto the team default,
+// per-field: each NON-zero field of override wins, each zero field inherits the
+// matching field of base. It is how AddMember resolves build.Limits against
+// s.limits so a def that pins only some fields keeps the team default for the rest
+// (mirroring the empty-Mode → s.mode fallback). MaxConsecutiveFailures is not a def
+// field, so it is carried from override only if a caller sets it; otherwise it stays
+// on base.
+func mergeLimits(base, override session.Limits) session.Limits {
+	out := base
+	if override.MaxTurns > 0 {
+		out.MaxTurns = override.MaxTurns
+	}
+	if override.MaxToolCalls > 0 {
+		out.MaxToolCalls = override.MaxToolCalls
+	}
+	if override.MaxConsecutiveFailures > 0 {
+		out.MaxConsecutiveFailures = override.MaxConsecutiveFailures
+	}
+	return out
 }
 
 // composeCleanup chains two optional cleanup funcs into one, running first then

@@ -331,6 +331,122 @@ func TestSupervisorMemberTurnBudgetStops(t *testing.T) {
 	}
 }
 
+// limitedMemberFactory builds a member factory that returns the given per-member
+// Limits on every MemberBuild (the composition-layer analogue: a def's
+// maxTurns/maxToolCalls mapped onto MemberBuild.Limits). The engine carries only
+// the member's coordination tools.
+func limitedMemberFactory(t *testing.T, tm *team.Team, providers map[string]*mockllm.Provider, limits session.Limits) agent.MemberEngine {
+	t.Helper()
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}})
+	return func(spec agent.MemberSpec) agent.MemberBuild {
+		prov, ok := providers[spec.Name]
+		if !ok {
+			t.Fatalf("limitedMemberFactory: no provider scripted for member %q", spec.Name)
+		}
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		return agent.MemberBuild{
+			Engine: agent.NewEngine(agent.Deps{LLM: prov, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "mock"}),
+			Limits: limits,
+		}
+	}
+}
+
+// TestSupervisorMemberLimitsBindSession proves a member's per-def Limits
+// (MemberBuild.Limits) bound its per-round session: with MaxTurns=2 the member makes
+// exactly 2 model calls in round 0, even though its script and the team-wide default
+// (WithTeamLimits) would allow many more. WithMaxRounds(1) isolates a single round.
+func TestSupervisorMemberLimitsBindSession(t *testing.T) {
+	tm := team.New("limits")
+
+	// A self-pinging worker that would loop indefinitely; two turns per round.
+	selfPing := session.NewToolCall("p", "SendMessage", json.RawMessage(`{"to":"worker","body":"again"}`))
+	var turns []mockllm.Turn
+	for i := 0; i < 12; i++ {
+		turns = append(turns, mockllm.ToolCallTurn(selfPing))
+	}
+	workerProv := mockllm.New(turns...)
+	providers := map[string]*mockllm.Provider{"worker": workerProv}
+
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		limitedMemberFactory(t, tm, providers, session.Limits{MaxTurns: 2, MaxToolCalls: 40, MaxConsecutiveFailures: 3}),
+		agent.WithMaxRounds(1),
+		// A deliberately LOOSE team default, so the per-member override (2) is what bites.
+		agent.WithTeamLimits(session.Limits{MaxTurns: 20, MaxToolCalls: 200, MaxConsecutiveFailures: 5}),
+	)
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "worker", InitialPrompt: "loop"}); err != nil {
+		t.Fatalf("AddMember(worker): %v", err)
+	}
+
+	sup.Run(context.Background(), nil)
+
+	if got := workerProv.Calls(); got != 2 {
+		t.Fatalf("member made %d model calls in one round, want 2 (MemberBuild.Limits MaxTurns=2 should bind the session)", got)
+	}
+}
+
+// TestSupervisorMemberZeroLimitsUsesTeamDefault proves a member with a ZERO
+// MemberBuild.Limits runs under the team-wide default (WithTeamLimits), per-field:
+// with the team default MaxTurns=3 the member makes 3 model calls in round 0.
+func TestSupervisorMemberZeroLimitsUsesTeamDefault(t *testing.T) {
+	tm := team.New("default")
+
+	selfPing := session.NewToolCall("p", "SendMessage", json.RawMessage(`{"to":"worker","body":"again"}`))
+	var turns []mockllm.Turn
+	for i := 0; i < 12; i++ {
+		turns = append(turns, mockllm.ToolCallTurn(selfPing))
+	}
+	workerProv := mockllm.New(turns...)
+	providers := map[string]*mockllm.Provider{"worker": workerProv}
+
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		limitedMemberFactory(t, tm, providers, session.Limits{}), // zero => team default
+		agent.WithMaxRounds(1),
+		agent.WithTeamLimits(session.Limits{MaxTurns: 3, MaxToolCalls: 200, MaxConsecutiveFailures: 5}),
+	)
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "worker", InitialPrompt: "loop"}); err != nil {
+		t.Fatalf("AddMember(worker): %v", err)
+	}
+
+	sup.Run(context.Background(), nil)
+
+	if got := workerProv.Calls(); got != 3 {
+		t.Fatalf("member made %d model calls in one round, want 3 (zero MemberBuild.Limits falls back to the team default MaxTurns=3)", got)
+	}
+}
+
+// TestSupervisorMemberPartialLimitsMergePerField proves the per-field merge: a
+// member that pins ONLY MaxTurns keeps the team default for the other fields. With a
+// per-member MaxTurns=2 over a team default MaxTurns=9, the member is bounded to 2.
+func TestSupervisorMemberPartialLimitsMergePerField(t *testing.T) {
+	tm := team.New("merge")
+
+	selfPing := session.NewToolCall("p", "SendMessage", json.RawMessage(`{"to":"worker","body":"again"}`))
+	var turns []mockllm.Turn
+	for i := 0; i < 12; i++ {
+		turns = append(turns, mockllm.ToolCallTurn(selfPing))
+	}
+	workerProv := mockllm.New(turns...)
+	providers := map[string]*mockllm.Provider{"worker": workerProv}
+
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		limitedMemberFactory(t, tm, providers, session.Limits{MaxTurns: 2}), // only MaxTurns pinned
+		agent.WithMaxRounds(1),
+		agent.WithTeamLimits(session.Limits{MaxTurns: 9, MaxToolCalls: 200, MaxConsecutiveFailures: 5}),
+	)
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "worker", InitialPrompt: "loop"}); err != nil {
+		t.Fatalf("AddMember(worker): %v", err)
+	}
+
+	sup.Run(context.Background(), nil)
+
+	if got := workerProv.Calls(); got != 2 {
+		t.Fatalf("member made %d model calls, want 2 (per-member MaxTurns=2 overrides the team default 9)", got)
+	}
+}
+
 // recordingForker is a fake tool.WorkspaceForker that hands out in-memory
 // workspaces and records the fork labels and cleanup calls.
 type recordingForker struct {

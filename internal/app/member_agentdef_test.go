@@ -104,6 +104,56 @@ func TestMemberPerMemberPlanMode(t *testing.T) {
 	}
 }
 
+// TestMemberDefLimitsOnBuild proves a member def's maxTurns/maxToolCalls flow onto
+// MemberBuild.Limits (only the def-set fields are non-zero; AddMember merges the
+// rest with the team default), and a def with no limits yields a zero MemberBuild
+// Limits (the supervisor then uses its team default).
+func TestMemberDefLimitsOnBuild(t *testing.T) {
+	cfg := Config{Workspace: t.TempDir(), Model: "m"}
+	boundedDef := agents.AgentDef{Name: "bounded", Description: "b", MaxTurns: 2, MaxToolCalls: 9}
+	plainDef := agents.AgentDef{Name: "plain", Description: "p"}
+	tm := team.New("t")
+	factory := buildMemberEngine(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(boundedDef, plainDef), nil, nil, nil)
+
+	bounded := factory(tm, agent.MemberSpec{Name: "bounded", AgentType: "bounded"})
+	if bounded.Limits != (session.Limits{MaxTurns: 2, MaxToolCalls: 9}) {
+		t.Fatalf("bounded MemberBuild.Limits = %+v, want only the def-set fields {MaxTurns:2 MaxToolCalls:9}", bounded.Limits)
+	}
+
+	plain := factory(tm, agent.MemberSpec{Name: "plain", AgentType: "plain"})
+	if plain.Limits != (session.Limits{}) {
+		t.Fatalf("plain MemberBuild.Limits = %+v, want zero (use the team default)", plain.Limits)
+	}
+}
+
+// TestMemberRepoMapDefAcceptedReadOnly proves a READ-ONLY member whose def
+// allowlists RepoMap is accepted (RepoMap is read-only, so the AddMember
+// workspace-mutating backstop is not tripped) and dispatches a RepoMap tool.call.
+func TestMemberRepoMapDefAcceptedReadOnly(t *testing.T) {
+	cfg := Config{Workspace: t.TempDir(), Model: "m", EnableRepoMap: true}
+	def := agents.AgentDef{Name: "mapper", Description: "m", Tools: []string{"RepoMap"}}
+	tm := team.New("t")
+	mapCall := mockllm.New(
+		mockllm.ToolCallTurn(session.NewToolCall("c1", "RepoMap", json.RawMessage(`{}`))),
+		mockllm.TextTurn("done"),
+	)
+	factory := buildMemberEngine(cfg, mapCall, hookexec.New(nil), regOf(def), nil, nil, nil)
+
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{
+		Name: "mapper", AgentType: "mapper", InitialPrompt: "map it",
+	}); err != nil {
+		t.Fatalf("read-only member allowlisting RepoMap should be accepted, got %v", err)
+	}
+
+	var events []agent.TeamEvent
+	sup.Run(context.Background(), func(ev agent.TeamEvent) { events = append(events, ev) })
+	if !sawToolCall(events, "mapper", "RepoMap") {
+		t.Fatalf("member with a def listing RepoMap should dispatch a RepoMap tool.call; events=%d", len(events))
+	}
+}
+
 // TestMemberUnknownAgentTypeFallsBack asserts an unknown AgentType is forgiving: the
 // factory falls back to the default member catalog (read-only base) and the spawn
 // succeeds rather than failing.

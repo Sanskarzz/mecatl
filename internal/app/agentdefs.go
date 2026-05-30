@@ -10,6 +10,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
+	"github.com/stacklok/mecatl/internal/adapter/repomap"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
 	"github.com/stacklok/mecatl/internal/agent"
@@ -120,6 +121,25 @@ func resolvePermissionMode(def agents.AgentDef) session.PermissionMode {
 	}
 }
 
+// defLimits maps a def's frontmatter maxTurns/maxToolCalls into a session.Limits,
+// in the composition layer (the domain stays free of the def-int → Limits mapping).
+// It is per-field forgiving: a zero def field inherits the corresponding field of
+// the supplied fallback (the call site's default limits — the Task tool's
+// agent.DefaultChildLimits or the team's WithTeamLimits), so a def that pins only
+// maxTurns keeps the default tool-call / failure caps, and a def that pins nothing
+// yields the fallback unchanged. MaxConsecutiveFailures is never set by a def, so it
+// always comes from the fallback.
+func defLimits(def agents.AgentDef, fallback session.Limits) session.Limits {
+	out := fallback
+	if def.MaxTurns > 0 {
+		out.MaxTurns = def.MaxTurns
+	}
+	if def.MaxToolCalls > 0 {
+		out.MaxToolCalls = def.MaxToolCalls
+	}
+	return out
+}
+
 // scopeDiag is one resolution-time diagnostic about a def's catalog scoping. Kind
 // distinguishes the cases the critique (M5) requires be DISTINCT so an operator
 // can tell a typo from a forbidden tool.
@@ -221,6 +241,17 @@ func baseTaskTools(cfg Config) map[string]tool.Tool {
 	if runner := buildCommandRunner(cfg); runner != nil {
 		bt := tools.NewBashTool(runner)
 		out[bt.Spec().Name] = bt
+	}
+	// Repo-map (RepoMap) is allowlistable by a def ONLY when --enable-repomap is on:
+	// it is read-only, so it survives the read-only Task / read-only-member scope, and
+	// a def that allowlists it then gets it in its engine catalog. A def that does NOT
+	// list it never receives it (allowlist semantics); the default (no `tools:`) =
+	// every available base tool, which now includes RepoMap when enabled — consistent
+	// with how the core tools default in. When --enable-repomap is OFF, RepoMap is not
+	// in the base, so a def listing it gets the DISTINCT "unknown tool" diagnostic.
+	if cfg.EnableRepoMap {
+		rm := repomap.NewTool()
+		out[rm.Spec().Name] = rm
 	}
 	return out
 }
@@ -471,7 +502,14 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 		// tool would not be in the def allowlist. newChildEngineWithHooks leaves it at
 		// its zero value (off), matching the original explicit omission.
 		engines[def.Name] = newChildEngineWithHooks(provider, cat, model, agentPromptConfig(cfg, def, model, bodies...), hooks)
-		meta = append(meta, agent.AgentMeta{Name: def.Name, Description: def.Description})
+		// Per-def limits ride on AgentMeta so the Task tool bounds THIS def's child
+		// session by them (per-field falling back to the Task default child limits for
+		// any zero field). A def that sets neither yields the default, unchanged.
+		meta = append(meta, agent.AgentMeta{
+			Name:        def.Name,
+			Description: def.Description,
+			Limits:      defLimits(def, agent.DefaultChildLimits()),
+		})
 
 		slog.Info("agent def engine built",
 			"agent", def.Name, "tools", strings.Join(names, ","), "model", model,

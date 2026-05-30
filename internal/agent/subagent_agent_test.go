@@ -122,6 +122,75 @@ func TestTaskSpecEnumeratesAgents(t *testing.T) {
 	}
 }
 
+// readLoopChild builds a child engine + its mockllm whose script ALWAYS emits
+// another Read tool call (never a terminal text turn), so an unbounded run would
+// keep issuing model calls. The number of model calls it actually makes equals the
+// child session's MaxTurns, which lets a test assert the per-def turn cap bites.
+// turns is the number of scripted tool-call turns (must exceed any limit under
+// test so the cap, not script exhaustion, is what stops the run).
+func readLoopChild(t *testing.T, turns int) (*agent.Engine, *mockllm.Provider) {
+	t.Helper()
+	read := &fakeTool{name: "Read", readOnly: true,
+		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			return session.NewToolResult(in.ID, "read ok"), nil
+		}}
+	script := make([]mockllm.Turn, 0, turns)
+	for i := 0; i < turns; i++ {
+		script = append(script, mockllm.ToolCallTurn(toolCall("k", "Read", `{"path":"x"}`)))
+	}
+	llm := mockllm.New(script...)
+	return childEngineWith(llm, catalogWith(t, read)), llm
+}
+
+// TestTaskNamedAgentLimitsBindChildSession proves a def's per-run limits (carried
+// on AgentMeta.Limits) bound the child session: a def with MaxTurns=2 makes exactly
+// 2 model calls even though the child would otherwise loop far longer.
+func TestTaskNamedAgentLimitsBindChildSession(t *testing.T) {
+	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
+	boundedEngine, boundedLLM := readLoopChild(t, 8)
+
+	task := agent.NewTaskTool(defaultEngine, agent.WithAgentEngines(
+		map[string]*agent.Engine{"bounded": boundedEngine},
+		[]agent.AgentMeta{{
+			Name:        "bounded",
+			Description: "a tightly-bounded specialist",
+			Limits:      session.Limits{MaxTurns: 2, MaxToolCalls: 40, MaxConsecutiveFailures: 3},
+		}},
+	))
+
+	taskParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"loop","agent":"bounded"}`)),
+		mockllm.TextTurn("parent done"),
+	)
+	if got := boundedLLM.Calls(); got != 2 {
+		t.Fatalf("bounded child made %d model calls, want 2 (MaxTurns=2 should bind the child session)", got)
+	}
+}
+
+// TestTaskNamedAgentNoLimitsUsesDefault proves a def with NO per-run limits (a zero
+// AgentMeta.Limits) runs under the Task tool's DEFAULT child limits, unchanged: the
+// child loops past 2 turns up to the default MaxTurns (12).
+func TestTaskNamedAgentNoLimitsUsesDefault(t *testing.T) {
+	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
+	// Script more turns than the default MaxTurns (12) so the DEFAULT cap, not script
+	// exhaustion, is what stops the run.
+	looseEngine, looseLLM := readLoopChild(t, 20)
+
+	task := agent.NewTaskTool(defaultEngine, agent.WithAgentEngines(
+		map[string]*agent.Engine{"loose": looseEngine},
+		[]agent.AgentMeta{{Name: "loose", Description: "no pinned limits"}}, // zero Limits
+	))
+
+	taskParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"loop","agent":"loose"}`)),
+		mockllm.TextTurn("parent done"),
+	)
+	if got := looseLLM.Calls(); got != agent.DefaultChildLimits().MaxTurns {
+		t.Fatalf("loose child made %d model calls, want the default MaxTurns=%d (no per-def override)",
+			got, agent.DefaultChildLimits().MaxTurns)
+	}
+}
+
 // TestTaskNoAgentsNoEnumeration proves the spec is unchanged when no specialists
 // are configured (the default-explorer-only case).
 func TestTaskNoAgentsNoEnumeration(t *testing.T) {

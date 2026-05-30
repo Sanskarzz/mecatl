@@ -232,6 +232,89 @@ func TestBuildAgentTaskEnginesEmptyRegistry(t *testing.T) {
 	}
 }
 
+// TestDefLimitsPerFieldFallback proves defLimits maps a def's maxTurns/maxToolCalls
+// into session.Limits, with each ZERO def field inheriting the fallback's field.
+func TestDefLimitsPerFieldFallback(t *testing.T) {
+	fallback := session.Limits{MaxTurns: 12, MaxToolCalls: 40, MaxConsecutiveFailures: 3}
+
+	// No def limits => the fallback unchanged.
+	if got := defLimits(agents.AgentDef{}, fallback); got != fallback {
+		t.Fatalf("no def limits = %+v, want the fallback %+v", got, fallback)
+	}
+	// Only maxTurns set => MaxTurns overridden, the rest inherited.
+	if got := defLimits(agents.AgentDef{MaxTurns: 2}, fallback); got != (session.Limits{MaxTurns: 2, MaxToolCalls: 40, MaxConsecutiveFailures: 3}) {
+		t.Fatalf("maxTurns-only = %+v, want MaxTurns=2 with the rest inherited", got)
+	}
+	// Both set => both overridden, MaxConsecutiveFailures still inherited.
+	if got := defLimits(agents.AgentDef{MaxTurns: 5, MaxToolCalls: 7}, fallback); got != (session.Limits{MaxTurns: 5, MaxToolCalls: 7, MaxConsecutiveFailures: 3}) {
+		t.Fatalf("both = %+v, want MaxTurns=5 MaxToolCalls=7 failures inherited", got)
+	}
+}
+
+// TestBuildAgentTaskEnginesCarriesPerDefLimits proves a def's maxTurns/maxToolCalls
+// flow onto AgentMeta.Limits (per-field over the Task default child limits), and a
+// def with no limits carries the default unchanged.
+func TestBuildAgentTaskEnginesCarriesPerDefLimits(t *testing.T) {
+	cfg := Config{Model: "parent-model"}
+	reg := agents.NewRegistry([]agents.AgentDef{
+		{Name: "bounded", Description: "b", MaxTurns: 2, MaxToolCalls: 9},
+		{Name: "plain", Description: "p"},
+	})
+	_, meta, _ := buildAgentTaskEngines(context.Background(), cfg, mockllm.New(), reg, nil, nil, nil)
+
+	byName := map[string]agent.AgentMeta{}
+	for _, m := range meta {
+		byName[m.Name] = m
+	}
+	def := agent.DefaultChildLimits()
+	wantBounded := session.Limits{MaxTurns: 2, MaxToolCalls: 9, MaxConsecutiveFailures: def.MaxConsecutiveFailures}
+	if got := byName["bounded"].Limits; got != wantBounded {
+		t.Fatalf("bounded meta limits = %+v, want %+v", got, wantBounded)
+	}
+	if got := byName["plain"].Limits; got != def {
+		t.Fatalf("plain meta limits = %+v, want the default child limits %+v", got, def)
+	}
+}
+
+// TestBaseTaskToolsRepoMapGate proves RepoMap is in the def-scoping base ONLY when
+// EnableRepoMap is set (FIX B): with it on a def can allowlist RepoMap; with it off
+// the name is unknown to the base.
+func TestBaseTaskToolsRepoMapGate(t *testing.T) {
+	if _, ok := baseTaskTools(Config{})["RepoMap"]; ok {
+		t.Fatal("RepoMap must NOT be in the base when EnableRepoMap is off")
+	}
+	base := baseTaskTools(Config{EnableRepoMap: true})
+	rm, ok := base["RepoMap"]
+	if !ok {
+		t.Fatal("RepoMap must be in the base when EnableRepoMap is on")
+	}
+	if !rm.ReadOnly() {
+		t.Fatal("RepoMap must report read-only so it survives read-only Task/member scoping")
+	}
+}
+
+// TestScopedToolNamesRepoMapAllowlist proves a def can allowlist RepoMap when
+// EnableRepoMap is on (it survives read-only Task scoping), and that listing it
+// WITHOUT EnableRepoMap yields the DISTINCT "unknown tool" diagnostic.
+func TestScopedToolNamesRepoMapAllowlist(t *testing.T) {
+	def := agents.AgentDef{Name: "mapper", Description: "m", Tools: []string{"RepoMap"}}
+
+	// Enabled: RepoMap is kept (read-only Task scope), no diagnostic.
+	names, diags := scopedToolNames(def, baseTaskTools(Config{EnableRepoMap: true}))
+	if len(names) != 1 || names[0] != "RepoMap" {
+		t.Fatalf("with EnableRepoMap a def allowlisting RepoMap should keep it, got names=%v diags=%v", names, diags)
+	}
+
+	// Disabled: RepoMap is unknown to the base => dropped with an "unknown tool" diag.
+	names2, diags2 := scopedToolNames(def, baseTaskTools(Config{}))
+	if len(names2) != 0 {
+		t.Fatalf("without EnableRepoMap RepoMap must be dropped, got %v", names2)
+	}
+	if len(diags2) != 1 || diags2[0].tool != "RepoMap" || !strings.Contains(diags2[0].reason, "unknown tool") {
+		t.Fatalf("without EnableRepoMap RepoMap should yield an 'unknown tool' diagnostic, got %+v", diags2)
+	}
+}
+
 // TestBuildAgentTaskEnginesResolvedModelOnRequest builds per-def engines, runs one
 // via the Task tool, and asserts the recorded LLMRequest.Model equals the
 // resolved per-def model (def.Model alias > parent).

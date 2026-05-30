@@ -21,6 +21,8 @@ tools: [Read, Grep, Glob]      # OPTIONAL — allowlist of CORE tool names (arra
 disallowedTools: [Write]       # OPTIONAL — subtractive filter applied after tools/default
 model: sonnet                  # OPTIONAL — alias | full id | inherit/empty (=> parent)
 permissionMode: plan           # OPTIONAL — default | plan | acceptEdits
+maxTurns: 9                    # OPTIONAL — per-run turn cap (0/absent => call-site default)
+maxToolCalls: 25               # OPTIONAL — per-run tool-call cap (0/absent => call-site default)
 color: blue                    # OPTIONAL — UX hint only; never affects execution
 skills: [refactoring, testing] # OPTIONAL — skill names PRELOADED into this def's prompt (array or "a, b" string)
 hooks:                         # OPTIONAL — phase → shell-command map scoped to this def's engine
@@ -55,6 +57,16 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   Aliases (`--model-alias name=id`, plus built-in `sonnet`/`opus`/`haiku`→inherit)
   resolve only in the composition layer; the domain always gets a concrete id. An
   unknown alias warns and inherits.
+- **Per-def run limits (`maxTurns`/`maxToolCalls`).** A def's `maxTurns`/`maxToolCalls`
+  map to the child session's `session.Limits`, **per-field** over the call site's
+  default (the Task tool's `agent.DefaultChildLimits()` / the team's `WithTeamLimits`):
+  a def that pins only `maxTurns` keeps the default tool-call/failure caps, and a def
+  that pins neither runs on the default unchanged. Wired on BOTH paths — the Task path
+  carries the limits on `agent.AgentMeta.Limits` (the Task tool builds the routed
+  child session under them), and the member path carries them on
+  `agent.MemberBuild.Limits` (the supervisor's `AddMember` per-field merges them onto
+  the team default `s.limits`). The int→`Limits` mapping (`defLimits`) lives in the
+  composition layer; the domain stays free of agent-def types.
 - **Per-member permission mode.** A team member's `permissionMode` maps to its session
   mode via the `MemberEngine` factory returning `agent.MemberBuild{Engine, Mode}`; an
   empty Mode falls back to the team-wide default (`WithTeamMode`). `plan` hard-denies
@@ -122,14 +134,16 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   server's tools to the def's catalog directly (see "What v1 supports"), but listing an
   MCP tool name in the `tools:` allowlist still yields an "unknown tool" diagnostic —
   the `tools:`/`disallowedTools:` scope governs the **core** toolset only; MCP tools
-  arrive via `mcpServers:`, not the core allowlist. **Repo-map tools** remain
-  parent-catalog-only for the same scoped-catalog reason.
+  arrive via `mcpServers:`, not the core allowlist. (The **repo-map** tool, `RepoMap`,
+  is the one non-core exception: when `--enable-repomap` is on it joins the def-scoping
+  base, so a def can allowlist it like a core tool — it is read-only, so it survives the
+  read-only Task / read-only-member scope. With `--enable-repomap` off, listing it
+  yields the same "unknown tool" diagnostic.)
 - **No `--agents` inline JSON.** Definitions come only from `<name>.md` files under
   `--agents-dir` / the conventional dirs.
 - **No Agent-as-tool nesting.** A def cannot re-add `Task`/`Fork`/`ToolSearch`; a child
   never recurses or fans out further.
-- **No file-path scoping** (Roo's file allowlist) and **no maxTurns/maxToolCalls**
-  per-def limit wiring yet.
+- **No file-path scoping** (Roo's file allowlist) yet.
 
 ## Flags
 

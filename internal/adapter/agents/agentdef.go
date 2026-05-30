@@ -64,6 +64,11 @@ type AgentDef struct {
 	PermissionMode string
 	// MaxTurns is the OPTIONAL per-run turn cap. Zero => the caller default.
 	MaxTurns int
+	// MaxToolCalls is the OPTIONAL per-run tool-call cap. Zero => the caller
+	// default. It mirrors MaxTurns: the composition layer maps it into the def's
+	// session.Limits so a def's Task-routed child (and its team-member session) is
+	// bounded by it; a zero field falls back to the call site's default limit.
+	MaxToolCalls int
 	// Color is an OPTIONAL UX hint only (e.g. a TUI tag colour); it NEVER affects
 	// execution.
 	Color string

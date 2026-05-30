@@ -26,6 +26,14 @@ var defaultChildLimits = session.Limits{
 	MaxConsecutiveFailures: 3,
 }
 
+// DefaultChildLimits returns the default per-child/per-member stop conditions a
+// Task subagent (and a team member, via WithTeamLimits) runs under when the
+// caller does not override them. The composition layer uses it as the per-field
+// FALLBACK when deriving a def's session.Limits from its maxTurns/maxToolCalls:
+// a zero def field inherits the matching default here, so a def that sets neither
+// is bounded exactly as before.
+func DefaultChildLimits() session.Limits { return defaultChildLimits }
+
 // taskArgs is the argument payload the model supplies when calling the Task tool.
 // A subagent gets a single, self-contained instruction (its whole prompt — it has
 // no shared context with the parent) and an optional short description used only
@@ -56,6 +64,13 @@ type AgentMeta struct {
 	Name string
 	// Description is the one-line summary the model uses to choose a specialist.
 	Description string
+	// Limits are the per-def session stop conditions the child session runs under
+	// when this agent is selected. The composition root derives them from the def's
+	// maxTurns/maxToolCalls (per-field falling back to the Task tool's default
+	// limits), so a def with no limits carries the same bound as the default
+	// explorer. A zero Limits value is treated as "no per-def override" — Execute
+	// then uses the Task tool's default limits, exactly as the no-`agent` path does.
+	Limits session.Limits
 }
 
 // taskSchema is the JSON schema the model sees for the Task tool's arguments. The
@@ -119,6 +134,13 @@ type TaskTool struct {
 	// output and kept in lockstep with agentEngines.
 	agentMeta []AgentMeta
 
+	// agentLimits maps an agent-definition NAME to the per-def session.Limits the
+	// child session runs under when that agent is selected. It is derived from
+	// agentMeta in WithAgentEngines so it stays in lockstep with agentEngines. A
+	// name absent from the map (or a zero Limits) means "use t.limits" — the same
+	// default the no-`agent` explorer path uses.
+	agentLimits map[string]session.Limits
+
 	// limits bound a single child run. Defaults to defaultChildLimits.
 	limits session.Limits
 
@@ -179,6 +201,20 @@ func WithAgentEngines(engines map[string]*Engine, meta []AgentMeta) TaskOption {
 	return func(t *TaskTool) {
 		t.agentEngines = engines
 		t.agentMeta = meta
+		// Index each def's per-run limits by name so Execute can bound the child
+		// session with THAT def's limits (instead of the default t.limits) when the
+		// agent is selected. A zero Limits is skipped — the name then falls back to
+		// t.limits in Execute, identical to the no-`agent` path.
+		t.agentLimits = nil
+		for _, m := range meta {
+			if m.Limits == (session.Limits{}) {
+				continue
+			}
+			if t.agentLimits == nil {
+				t.agentLimits = make(map[string]session.Limits, len(meta))
+			}
+			t.agentLimits[m.Name] = m.Limits
+		}
 	}
 }
 
@@ -295,21 +331,29 @@ func (t *TaskTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 	// model can retry — it never silently falls back (which would run the wrong
 	// scope/prompt under the requested name).
 	engine := t.childEngine
+	// limits default to the Task tool's own (the no-`agent` explorer bound); a named
+	// agent with per-def limits overrides them below.
+	limits := t.limits
 	if name := strings.TrimSpace(args.Agent); name != "" {
 		eng, ok := t.agentEngines[name]
 		if !ok {
 			return session.NewToolError(call.ID, "Task: "+t.unknownAgentHint(name)), nil
 		}
 		engine = eng
+		if l, ok := t.agentLimits[name]; ok {
+			limits = l
+		}
 	}
 
 	// A fresh child session: own conversation, own (tighter) Limits, scoped to the
 	// SAME workspace root as the parent so the subagent explores the same project.
+	// When a named agent def pins limits, the child runs under THOSE; otherwise it
+	// uses the Task tool's default limits.
 	child := session.New(
 		t.childSessionID(call.ID),
 		t.childMode,
 		ws.Root(),
-		t.limits,
+		limits,
 		time.Now(),
 	)
 

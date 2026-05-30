@@ -909,6 +909,9 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 			model = cfg.Model
 			pc    = promptConfig(cfg)
 			mode  session.PermissionMode
+			// memberLimits carries ONLY the def-set per-round stop conditions (zero =
+			// unset); AddMember per-field merges them onto the team default (s.limits).
+			memberLimits session.Limits
 			// mcpClose tears down any INLINE MCP managers this member connected (nil for a
 			// reference-only or MCP-less member); mcpNames are the def's MCP tool names the
 			// supervisor exempts from the read-only-member backstop (MCP tools report
@@ -955,7 +958,8 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 				}
 			}
 			mcpClose, mcpNames = cl, names2
-			model = resolveModel(cfg, def) // resolve ONCE; thread the id into agentPromptConfig
+			memberLimits = defLimits(def, session.Limits{}) // only def-set fields; AddMember merges with the team default
+			model = resolveModel(cfg, def)                  // resolve ONCE; thread the id into agentPromptConfig
 			bodies, missing := preloadedSkillBodies(def, skillIdx)
 			for _, name := range missing {
 				slog.Warn("team member agent def references an unknown skill; not preloaded",
@@ -1001,7 +1005,7 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 		}
 
 		eng := newChildEngineWithHooks(provider, cat, model, pc, memberHooks)
-		return agent.MemberBuild{Engine: eng, Mode: mode, Close: mcpClose, MCPToolNames: mcpNames}
+		return agent.MemberBuild{Engine: eng, Mode: mode, Limits: memberLimits, Close: mcpClose, MCPToolNames: mcpNames}
 	}
 }
 

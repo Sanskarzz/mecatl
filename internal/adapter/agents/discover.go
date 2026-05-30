@@ -45,6 +45,7 @@ type frontmatter struct {
 	Model           string            `yaml:"model"`
 	PermissionMode  string            `yaml:"permissionMode"`
 	MaxTurns        int               `yaml:"maxTurns"`
+	MaxToolCalls    int               `yaml:"maxToolCalls"`
 	Color           string            `yaml:"color"`
 	Skills          stringOrSlice     `yaml:"skills"`
 	MCPServers      mcpServerList     `yaml:"mcpServers"`
@@ -348,6 +349,7 @@ func parseAgentDef(raw []byte, path string) (AgentDef, string, []string) {
 		Model:           strings.TrimSpace(fm.Model),
 		PermissionMode:  strings.TrimSpace(fm.PermissionMode),
 		MaxTurns:        fm.MaxTurns,
+		MaxToolCalls:    fm.MaxToolCalls,
 		Color:           strings.TrimSpace(fm.Color),
 		Skills:          []string(fm.Skills),
 		MCPServers:      fm.MCPServers.servers,
