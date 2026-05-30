@@ -106,6 +106,9 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.afterEvent()
 	case client.ResultMsg:
 		m.usage = sumUsage(m.usage, msg.Usage)
+		// The latest turn's prompt size is the current context occupancy
+		// (InputTokens already includes cache-served tokens).
+		m.contextTokens = msg.Usage.InputTokens
 		if msg.Stop == "error" && msg.Error != "" {
 			m.conv.addError(msg.Error)
 		}
@@ -150,6 +153,14 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// back / closes on esc internally, so route here before the phase switch.
 	if mm, cmd, handled := m.onMCPKey(msg); handled {
 		return mm, cmd
+	}
+
+	// ctrl+t is a global render toggle (full vs capped tool output); it works in
+	// any phase and never feeds the textarea.
+	if key.Matches(msg, m.keys.ExpandTools) {
+		m.expandTools = !m.expandTools
+		m.refreshView()
+		return m, nil
 	}
 
 	switch m.phase {
@@ -344,7 +355,7 @@ func (m Model) endRun(stop string) Model {
 // refreshView re-renders the conversation into the viewport, keeping the view
 // pinned to the bottom unless the user has scrolled up.
 func (m *Model) refreshView() {
-	content := m.rend.renderConversation(&m.conv)
+	content := m.rend.renderConversation(&m.conv, m.expandTools)
 	atBottom := m.vp.AtBottom()
 	m.vp.SetContent(content)
 	if m.stuck || atBottom {

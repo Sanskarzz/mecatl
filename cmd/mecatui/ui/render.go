@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,10 @@ import (
 // rest collapse into a "+N more lines" affordance so a giant Read result doesn't
 // drown the scrollback.
 const maxToolResultLines = 12
+
+// maxDiffLines caps how many lines of each diff side (Edit old/new, Write
+// content) show inline when collapsed; ctrl+t expands to the full diff.
+const maxDiffLines = 12
 
 // renderer turns conversation blocks into the viewport string. It owns the
 // glamour TermRenderer cache (keyed by wrap width) and the active theme. glamour
@@ -75,14 +80,16 @@ func (r *renderer) markdown(src string) string {
 	return strings.TrimRight(out, "\n")
 }
 
-// renderConversation joins every block into the viewport content string.
-func (r *renderer) renderConversation(c *conversation) string {
+// renderConversation joins every block into the viewport content string. expand
+// is the global tool-output toggle (ctrl+t): when true, tool result bodies and
+// Edit/Write diffs render in full instead of line-capped.
+func (r *renderer) renderConversation(c *conversation, expand bool) string {
 	var b strings.Builder
 	for i := range c.blocks {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(r.renderBlock(&c.blocks[i]))
+		b.WriteString(r.renderBlock(&c.blocks[i], expand))
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -90,7 +97,7 @@ func (r *renderer) renderConversation(c *conversation) string {
 
 // renderBlock renders one block per its kind. Assistant text goes through
 // glamour; everything else is plain themed lipgloss.
-func (r *renderer) renderBlock(b *block) string {
+func (r *renderer) renderBlock(b *block, expand bool) string {
 	switch b.kind {
 	case blockUser:
 		label := r.th.Style("userLabel").Render("you")
@@ -102,7 +109,7 @@ func (r *renderer) renderBlock(b *block) string {
 		label := r.th.Style("assistantLabel").Render("mecatl")
 		return label + "\n" + r.markdown(b.raw)
 	case blockTool:
-		return r.renderTool(b)
+		return r.renderTool(b, expand)
 	case blockNotice:
 		return r.th.Style("muted").Render("• " + sanitizeTerminal(b.raw))
 	case blockError:
@@ -112,9 +119,12 @@ func (r *renderer) renderBlock(b *block) string {
 	}
 }
 
-// renderTool renders a tool-call card: status glyph + name + pretty args, and,
-// once resolved, a truncated result body beneath it.
-func (r *renderer) renderTool(b *block) string {
+// renderTool renders a tool-call card: status glyph + name + body, and, once
+// resolved, a truncated result body beneath it. For Edit/Write the args are
+// shown as a colourised diff instead of raw JSON (falling back to pretty JSON if
+// the args don't parse as the expected shape). expand removes the line cap on
+// the result body and the diff.
+func (r *renderer) renderTool(b *block, expand bool) string {
 	var glyph string
 	switch {
 	case !b.resolved:
@@ -126,13 +136,18 @@ func (r *renderer) renderTool(b *block) string {
 	}
 
 	head := glyph + " " + r.th.Style("toolName").Render(sanitizeTerminal(b.toolName))
-	args := prettyJSON(b.toolArgs)
-	if args != "" {
+
+	// Edit/Write render their change as a diff in place of the raw JSON args.
+	if diff, ok := r.renderToolDiff(b.toolName, b.toolArgs, expand); ok {
+		if diff != "" {
+			head += "\n" + diff
+		}
+	} else if args := prettyJSON(b.toolArgs); args != "" {
 		head += "\n" + r.th.Style("toolArgs").Render(args)
 	}
 
 	if b.resolved {
-		body := truncateLines(b.resultBody, maxToolResultLines)
+		body := resultBody(b.resultBody, expand)
 		if body != "" {
 			style := r.th.Style("toolArgs")
 			if b.resultError {
@@ -147,6 +162,126 @@ func (r *renderer) renderTool(b *block) string {
 		card = card.Width(r.width - 2)
 	}
 	return card.Render(head)
+}
+
+// resultBody renders a tool result body: full when expanded, else line-capped.
+func resultBody(body string, expand bool) string {
+	if expand {
+		return sanitizeTerminal(strings.TrimRight(body, "\n"))
+	}
+	return truncateLines(body, maxToolResultLines)
+}
+
+// renderToolDiff renders a colourised diff for the Edit and Write tools. It
+// returns (rendered, true) when name is a diff-capable tool AND its args parse
+// into the expected shape; otherwise (",", false) so the caller falls back to
+// the existing pretty-JSON rendering. All server-derived text is sanitized
+// before it reaches lipgloss.
+func (r *renderer) renderToolDiff(name, rawArgs string, expand bool) (string, bool) {
+	switch name {
+	case "Edit":
+		return r.renderEditDiff(rawArgs, expand)
+	case "Write":
+		return r.renderWriteDiff(rawArgs, expand)
+	default:
+		return "", false
+	}
+}
+
+// editDiffArgs mirrors internal/adapter/tools/edit.go's editArgs JSON shape.
+type editDiffArgs struct {
+	Path       string `json:"path"`
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all"`
+}
+
+// renderEditDiff renders an Edit as a red/green unified-style diff:
+// removed (old_string) lines prefixed "-", added (new_string) lines prefixed
+// "+", under a muted path header (with a "(replace all)" tag when set). Returns
+// false on malformed/empty args so the caller falls back to JSON.
+func (r *renderer) renderEditDiff(rawArgs string, expand bool) (string, bool) {
+	var args editDiffArgs
+	if err := json.Unmarshal([]byte(strings.TrimSpace(rawArgs)), &args); err != nil {
+		return "", false
+	}
+	if args.Path == "" || (args.OldString == "" && args.NewString == "") {
+		return "", false
+	}
+
+	// Size signal: removed/added line counts (empty side = 0 lines).
+	removed := lineCount(args.OldString)
+	added := lineCount(args.NewString)
+	header := fmt.Sprintf("%s  -%d +%d", args.Path, removed, added)
+	if args.ReplaceAll {
+		header += " (replace all)"
+	}
+	var b strings.Builder
+	b.WriteString(r.th.Style("diffMeta").Render(sanitizeTerminal(header)))
+	b.WriteString("\n")
+	b.WriteString(r.diffSide(args.OldString, "-", "diffRemove", expand))
+	b.WriteString(r.diffSide(args.NewString, "+", "diffAdd", expand))
+	return strings.TrimRight(b.String(), "\n"), true
+}
+
+// writeDiffArgs mirrors internal/adapter/tools/write.go's writeArgs JSON shape.
+type writeDiffArgs struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+// renderWriteDiff renders a Write as an all-green "new content" block under a
+// muted path header. Returns false on malformed args so the caller falls back.
+func (r *renderer) renderWriteDiff(rawArgs string, expand bool) (string, bool) {
+	var args writeDiffArgs
+	if err := json.Unmarshal([]byte(strings.TrimSpace(rawArgs)), &args); err != nil {
+		return "", false
+	}
+	if args.Path == "" {
+		return "", false
+	}
+	n := lineCount(args.Content)
+	noun := "lines"
+	if n == 1 {
+		noun = "line"
+	}
+	header := fmt.Sprintf("%s (new file, %d %s)", args.Path, n, noun)
+	var b strings.Builder
+	b.WriteString(r.th.Style("diffMeta").Render(sanitizeTerminal(header)))
+	if args.Content != "" {
+		b.WriteString("\n")
+		b.WriteString(r.diffSide(args.Content, "+", "diffAdd", expand))
+	}
+	return strings.TrimRight(b.String(), "\n"), true
+}
+
+// diffSide renders one side of a diff (all-removed or all-added): every line of
+// text gets the prefix and the themed style, line-capped unless expanded. An
+// empty side renders nothing. The text is sanitized (these go through lipgloss).
+func (r *renderer) diffSide(text, prefix, slot string, expand bool) string {
+	text = sanitizeTerminal(strings.TrimRight(text, "\n"))
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	var marker string
+	if !expand && len(lines) > maxDiffLines {
+		extra := len(lines) - maxDiffLines
+		lines = lines[:maxDiffLines]
+		marker = collapseMarker(extra)
+	}
+	style := r.th.Style(slot)
+	var b strings.Builder
+	for _, ln := range lines {
+		b.WriteString(style.Render(prefix + " " + ln))
+		b.WriteString("\n")
+	}
+	if marker != "" {
+		// The collapse marker is muted, not coloured as a diff line.
+		b.WriteString(lipgloss.NewStyle().Render(marker))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // prettyJSON indents a raw JSON args string for display; non-JSON is returned
@@ -177,13 +312,28 @@ func truncateLines(s string, maxLines int) string {
 	}
 	kept := lines[:maxLines]
 	extra := len(lines) - maxLines
-	return strings.Join(kept, "\n") + "\n" + lipgloss.NewStyle().Render(plural(extra))
+	return strings.Join(kept, "\n") + "\n" + lipgloss.NewStyle().Render(collapseMarker(extra))
 }
 
-// plural formats the "+N more line(s)" affordance.
-func plural(n int) string {
+// collapseMarker formats the "+N more line(s) · ctrl+t expand" affordance shown
+// when a tool result or diff side is line-capped. The verb matches the footer
+// help line's collapsed-state hint ("ctrl+t expand") — the expand/collapse pair
+// is used consistently across help line, keybinding help, and this marker.
+func collapseMarker(n int) string {
+	noun := "lines"
 	if n == 1 {
-		return "  … +1 more line"
+		noun = "line"
 	}
-	return "  … +" + strconv.Itoa(n) + " more lines"
+	return "  … +" + strconv.Itoa(n) + " more " + noun + " · ctrl+t expand"
+}
+
+// lineCount returns the number of text lines in s (0 for empty, otherwise one
+// more than the number of newlines, ignoring a single trailing newline). Used
+// for the diff header size signals.
+func lineCount(s string) int {
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
 }

@@ -52,7 +52,7 @@ func (m Model) renderHeader() string {
 		"session " + short(sid),
 	}
 	if m.deps.Model != "" {
-		parts = append(parts, m.deps.Model)
+		parts = append(parts, truncate(m.deps.Model, maxModelLen))
 	}
 	if m.deps.Mode != "" {
 		parts = append(parts, "mode "+m.deps.Mode)
@@ -86,20 +86,52 @@ func (m Model) renderFooter() string {
 		}
 	}
 
-	usage := fmt.Sprintf("in %d · out %d · cache %d",
-		m.usage.InputTokens, m.usage.OutputTokens, m.usage.CacheReadTokens)
-
-	help := "enter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · ctrl+c quit"
+	expandHint := "ctrl+t expand"
+	if m.expandTools {
+		expandHint = "ctrl+t collapse"
+	}
+	help := "enter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · " +
+		expandHint + " · ctrl+c quit"
 
 	width := m.widthOr(80)
-	line := left
-	// Right-align usage when there's room.
-	gap := width - lipgloss.Width(left) - lipgloss.Width(usage) - 2
-	if gap > 0 {
-		line = left + strings.Repeat(" ", gap) + usage
-	}
+	line := m.fitFooter(left, width)
 	footer := m.deps.Theme.Style("footer").Width(width).Render(line)
 	return footer + "\n" + m.deps.Theme.Style("muted").Render(help)
+}
+
+// footerGapPad is the minimum blank gap kept between the left status and the
+// right-aligned usage segment so they never touch.
+const footerGapPad = 2
+
+// fitFooter right-aligns the richest usage segment that fits beside the left
+// status, shedding facets before the context signal — context % is the single
+// most valuable signal, so it survives longest. Tiers, richest to poorest:
+//
+//	full:    "ctx ▒▒▒▒▒·· 70% · 140K/200K · ↑7.9K ↓345 ⊕1.2K cache 88%"
+//	meter:   "ctx ▒▒▒▒▒·· 70% · 140K/200K"   (drop io/cache facets first)
+//	compact: "ctx ▒▒▒▒▒·· 70%"               (drop used/total)
+//	minimal: "ctx 70%"                        (drop the bar)
+//	nothing: left status alone
+//
+// When the window is unknown every meter tier collapses to "ctx 7.9K", so the
+// tiers naturally narrow to just that, then to nothing.
+func (m Model) fitFooter(left string, width int) string {
+	th := m.deps.Theme
+	meter := renderContextMeter(th, m.contextTokens, m.deps.ContextWindow)
+	candidates := []string{
+		meter + " · " + renderUsageFacets(m.usage),
+		meter,
+		renderContextMeterCompact(th, m.contextTokens, m.deps.ContextWindow),
+		renderContextMeterMinimal(th, m.contextTokens, m.deps.ContextWindow),
+	}
+	leftW := lipgloss.Width(left)
+	for _, seg := range candidates {
+		gap := width - leftW - lipgloss.Width(seg) - footerGapPad
+		if gap >= 0 {
+			return left + strings.Repeat(" ", gap) + seg
+		}
+	}
+	return left
 }
 
 // renderInput renders the textarea, dimmed while a run is active.
@@ -125,6 +157,24 @@ func short(s string) string {
 		return s
 	}
 	return s[:12]
+}
+
+// maxModelLen caps the model name shown in the header so a long provider-scoped
+// id (e.g. "anthropic/claude-opus-4-...") can't blow out the header width.
+const maxModelLen = 24
+
+// truncate clamps s to at most limit display runes, appending an ellipsis when
+// it overflows (the "…" counts toward limit). Rune-safe so multibyte model ids
+// aren't split mid-character. limit <= 1 yields the raw ellipsis.
+func truncate(s string, limit int) string {
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	if limit <= 1 {
+		return "…"
+	}
+	return string(r[:limit-1]) + "…"
 }
 
 // widthOr returns the terminal width or a fallback when unset (pre-first-resize).

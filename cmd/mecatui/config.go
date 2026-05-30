@@ -24,6 +24,11 @@ type config struct {
 	insecure   bool
 	listThemes bool
 
+	// contextWindow is the model's context-window size in tokens, used as the
+	// footer meter denominator. 0 = unknown (meter shows just the current size).
+	// Honoured verbatim; never inferred from the model name.
+	contextWindow int64
+
 	// Embedded-server provider config (used only when no external server is
 	// dialled). The OpenAI key is read from OPENAI_API_KEY; --mock selects the
 	// canned offline provider instead (useful for a no-network smoke run).
@@ -55,6 +60,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.tlsCA, "tls-ca", "", "PEM CA bundle for external-server verification")
 	fs.BoolVar(&cfg.insecure, "insecure", false, "skip TLS verification (testing only)")
 	fs.BoolVar(&cfg.listThemes, "list-themes", false, "list available themes and exit")
+	fs.Int64Var(&cfg.contextWindow, "context-window", 0, "model context-window size in tokens for the footer meter (0 = unknown; not inferred from the model name)")
 
 	fs.StringVar(&cfg.model, "model", "gpt-5", "model identifier for the embedded server (ignored when dialling an external server)")
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")

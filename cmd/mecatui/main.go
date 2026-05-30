@@ -87,14 +87,21 @@ func run(args []string) error {
 	defer func() { _ = cl.Close() }()
 
 	deps := ui.Deps{
-		Session:   &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: client.ModeFromString(cfg.mode)},
-		Conv:      cl,
-		MCP:       cl,
-		Theme:     th,
-		Server:    target,
-		Workspace: cfg.workspace,
-		Mode:      cfg.mode,
-		Ctx:       ctx,
+		Session: &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: client.ModeFromString(cfg.mode)},
+		Conv:    cl,
+		MCP:     cl,
+		Theme:   th,
+		Server:  target,
+		// Model is best-effort display only. For an EXTERNAL --server it reflects
+		// the locally-configured --model flag and may NOT match the server's actual
+		// model (the server owns provider config); for an embedded server it is
+		// authoritative. The context window comes only from an explicit
+		// --context-window flag (0 = unknown) — never inferred from the model name.
+		Model:         cfg.model,
+		ContextWindow: cfg.contextWindow,
+		Workspace:     cfg.workspace,
+		Mode:          cfg.mode,
+		Ctx:           ctx,
 	}
 
 	prog := tea.NewProgram(ui.New(deps), tea.WithContext(ctx))

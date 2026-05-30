@@ -27,6 +27,10 @@ type keyMap struct {
 	Down      key.Binding
 	Choose    key.Binding
 	Close     key.Binding
+
+	// ExpandTools toggles full vs line-capped tool-result bodies (and Edit/Write
+	// diffs) globally. Control-modified so it never collides with textarea input.
+	ExpandTools key.Binding
 }
 
 // defaultKeys returns the standard bindings.
@@ -94,6 +98,10 @@ func defaultKeys() keyMap {
 		Close: key.NewBinding(
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "close"),
+		),
+		ExpandTools: key.NewBinding(
+			key.WithKeys("ctrl+t"),
+			key.WithHelp("ctrl+t", "expand/collapse tool output"),
 		),
 	}
 }

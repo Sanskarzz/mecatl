@@ -255,5 +255,27 @@ func (t *Theme) compile() {
 		"errorText": lipgloss.NewStyle().
 			Foreground(col(p.Error)).
 			Bold(true),
+
+		// Unified-diff slots for Edit/Write tool cards: added lines green,
+		// removed lines red, meta (path / "replace all") muted. Reuses the
+		// status palette so a new theme restyles diffs for free.
+		"diffAdd": lipgloss.NewStyle().
+			Foreground(col(p.Success)),
+		"diffRemove": lipgloss.NewStyle().
+			Foreground(col(p.Error)),
+		"diffMeta": lipgloss.NewStyle().
+			Foreground(col(p.TextMuted)).
+			Bold(true),
+
+		// Context-window pressure slots for the footer meter: success when the
+		// context is comfortably below the compaction band, warning approaching
+		// it, danger once over it.
+		"ctxOk": lipgloss.NewStyle().
+			Foreground(col(p.Success)),
+		"ctxWarn": lipgloss.NewStyle().
+			Foreground(col(p.Warning)),
+		"ctxDanger": lipgloss.NewStyle().
+			Foreground(col(p.Error)).
+			Bold(true),
 	}
 }

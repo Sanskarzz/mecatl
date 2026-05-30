@@ -47,6 +47,12 @@ type Deps struct {
 	Mode      string
 	Model     string
 
+	// ContextWindow is the model's context-window size in tokens, used as the
+	// denominator of the footer context meter. 0 means unknown (the meter then
+	// shows just the current context size, no bar/percentage). Computed in main
+	// from an explicit --context-window flag; never inferred from the model name.
+	ContextWindow int64
+
 	// Ctx is the program-level context; per-run stream contexts derive from it.
 	Ctx context.Context //nolint:containedctx // stored to parent per-run stream cancels
 
@@ -96,6 +102,16 @@ type Model struct {
 
 	// usage accumulates across the session for the footer.
 	usage client.Usage
+
+	// contextTokens is the latest turn's prompt size (its Usage.InputTokens,
+	// which already includes cache-served tokens) — i.e. the CURRENT context
+	// size, the numerator of the footer context meter. Distinct from usage,
+	// which is the cumulative session total.
+	contextTokens int64
+
+	// expandTools toggles all tool-result bodies (and Edit/Write diffs) between
+	// the line-capped view and the full view. Flipped by ctrl+t.
+	expandTools bool
 
 	// streamCh is the current run's reader channel; WaitForMsg drains it.
 	streamCh chan tea.Msg
