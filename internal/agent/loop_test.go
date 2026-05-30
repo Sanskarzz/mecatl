@@ -243,15 +243,18 @@ func TestFullCycle(t *testing.T) {
 	}
 }
 
-// TestReasoningAndTurnEnd asserts the Tier B additive events: a ChunkReasoning
-// from the provider produces a reasoning.delta event (in ADDITION to the normal
-// assistant flow, which still records the reasoning for replay), and each
-// successful turn emits a turn.end carrying that turn's usage and a non-zero
-// elapsed duration (from the injected fakeClock).
+// TestReasoningAndTurnEnd asserts the Tier B additive events and the
+// display/replay reasoning split: a ChunkReasoning (human-readable summary)
+// produces a reasoning.delta DISPLAY event but is NOT what gets stored for
+// replay, while a ChunkReasoningItem (the opaque encrypted_content blob) is what
+// lands on Message.Reasoning to be replayed verbatim. Each successful turn also
+// emits a turn.end carrying that turn's usage and a non-zero elapsed duration
+// (from the injected fakeClock).
 func TestReasoningAndTurnEnd(t *testing.T) {
 	llm := mockllm.New(
 		mockllm.ChunksTurn(
 			mockllm.ReasoningChunk("let me think about it"),
+			mockllm.ReasoningItemChunk("ENCRYPTED_REPLAY_BLOB"),
 			mockllm.TextChunk("here is the answer"),
 			mockllm.UsageChunk(session.Usage{InputTokens: 12, OutputTokens: 4}),
 			mockllm.DoneChunk(session.StopEndTurn),
@@ -259,11 +262,12 @@ func TestReasoningAndTurnEnd(t *testing.T) {
 	)
 	clk := &fakeClock{t: time.Unix(0, 0)}
 	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t), Clock: clk})
-	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+	sess := newSession(t, session.Limits{})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")
 	evs := drain(r)
 
-	// reasoning.delta must be emitted, carrying the streamed reasoning text and
-	// no result/usage payload of its own.
+	// reasoning.delta must be emitted, carrying the human-readable SUMMARY text
+	// and no result/usage payload of its own.
 	var reasoning *session.Event
 	for i := range evs {
 		if evs[i].Type == session.EvReasoningDelta {
@@ -276,6 +280,22 @@ func TestReasoningAndTurnEnd(t *testing.T) {
 	}
 	if reasoning.Text != "let me think about it" {
 		t.Fatalf("reasoning text = %q", reasoning.Text)
+	}
+
+	// The REPLAY blob — not the display summary — must be stored on the recorded
+	// assistant message's Reasoning for verbatim replay to the provider.
+	var asst *session.Message
+	for i := range sess.Conversation.Messages {
+		if sess.Conversation.Messages[i].Role == session.RoleAssistant {
+			asst = &sess.Conversation.Messages[i]
+			break
+		}
+	}
+	if asst == nil {
+		t.Fatalf("no assistant message recorded")
+	}
+	if asst.Reasoning != "ENCRYPTED_REPLAY_BLOB" {
+		t.Fatalf("Message.Reasoning = %q, want the encrypted replay blob (not the display summary)", asst.Reasoning)
 	}
 
 	// The reasoning.delta must precede the message.delta of the same turn (it is

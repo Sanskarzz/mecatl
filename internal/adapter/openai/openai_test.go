@@ -71,8 +71,11 @@ func TestTranslateFunctionCallTurn(t *testing.T) {
 func TestTranslateReasoningTurnWithCachedTokens(t *testing.T) {
 	got := decodeFixture(t, "reasoning_turn.sse")
 	want := []port.Chunk{
+		// Human-readable summary deltas: DISPLAY-only.
 		{Kind: port.ChunkReasoning, Text: "Let me think"},
 		{Kind: port.ChunkReasoning, Text: " about this."},
+		// The assembled reasoning item's encrypted_content: the opaque REPLAY blob.
+		{Kind: port.ChunkReasoningItem, Text: "ENCRYPTED_BLOB"},
 		{Kind: port.ChunkText, Text: "Answer."},
 		{Kind: port.ChunkUsage, Usage: &session.Usage{InputTokens: 100, OutputTokens: 50, CacheReadTokens: 80}},
 		{Kind: port.ChunkDone, Stop: session.StopEndTurn},

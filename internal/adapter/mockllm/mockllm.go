@@ -142,9 +142,15 @@ func ChunksTurn(chunks ...port.Chunk) Turn {
 // TextChunk builds a ChunkText.
 func TextChunk(text string) port.Chunk { return port.Chunk{Kind: port.ChunkText, Text: text} }
 
-// ReasoningChunk builds a ChunkReasoning.
+// ReasoningChunk builds a ChunkReasoning (human-readable DISPLAY summary).
 func ReasoningChunk(text string) port.Chunk {
 	return port.Chunk{Kind: port.ChunkReasoning, Text: text}
+}
+
+// ReasoningItemChunk builds a ChunkReasoningItem carrying the opaque REPLAY blob
+// (the analogue of OpenAI's reasoning-item encrypted_content).
+func ReasoningItemChunk(blob string) port.Chunk {
+	return port.Chunk{Kind: port.ChunkReasoningItem, Text: blob}
 }
 
 // ToolCallChunk builds a ChunkToolCall.

@@ -33,8 +33,16 @@ type ChunkKind int
 const (
 	// ChunkText is an assistant text delta.
 	ChunkText ChunkKind = iota
-	// ChunkReasoning is a reasoning-item delta (opaque, replayed back verbatim).
+	// ChunkReasoning is a human-readable reasoning summary delta. It is
+	// DISPLAY-ONLY: clients render it for visibility into the model's thinking;
+	// it is NOT the blob replayed to the provider. (See ChunkReasoningItem.)
 	ChunkReasoning
+	// ChunkReasoningItem carries the provider's opaque reasoning REPLAY blob
+	// (OpenAI's reasoning-item encrypted_content), emitted once the reasoning
+	// output item is assembled. The Text field holds the encrypted blob, which
+	// the loop stores on Message.Reasoning and the adapter sends back verbatim on
+	// subsequent stateless calls. It is never displayed or interpreted.
+	ChunkReasoningItem
 	// ChunkToolCall is a fully-assembled tool call, emitted once complete.
 	ChunkToolCall
 	// ChunkUsage is the terminal usage/cache accounting.
@@ -50,7 +58,9 @@ const (
 type Chunk struct {
 	// Kind discriminates the payload.
 	Kind ChunkKind
-	// Text carries text on ChunkText and reasoning on ChunkReasoning.
+	// Text carries the assistant text on ChunkText, the human-readable reasoning
+	// summary on ChunkReasoning (display-only), and the opaque reasoning replay
+	// blob on ChunkReasoningItem (encrypted_content, never displayed).
 	Text string
 	// ToolCall is set on ChunkToolCall.
 	ToolCall *session.ToolCall

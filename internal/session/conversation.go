@@ -26,8 +26,11 @@ type Message struct {
 	ToolCalls []ToolCall
 	// ToolResult holds the result carried by a tool-role message; nil otherwise.
 	ToolResult *ToolResult
-	// Reasoning is the provider's opaque reasoning item, replayed back verbatim
-	// on subsequent calls and never interpreted by the harness.
+	// Reasoning is the provider's opaque reasoning REPLAY blob (OpenAI's
+	// reasoning-item encrypted_content), replayed back verbatim on subsequent
+	// calls and never interpreted or displayed by the harness. It is distinct
+	// from the human-readable reasoning SUMMARY surfaced via reasoning.delta
+	// events for display: that prose is never stored here.
 	Reasoning string
 }
 

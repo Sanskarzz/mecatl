@@ -42,12 +42,19 @@ type streamState struct {
 //
 // Mapping:
 //   - response.output_text.delta            -> ChunkText (event.Delta)
-//   - response.reasoning_summary_text.delta -> ChunkReasoning (event.Delta)
-//   - response.reasoning_text.delta         -> ChunkReasoning (event.Delta)
+//   - response.reasoning_summary_text.delta -> ChunkReasoning (event.Delta, DISPLAY summary)
+//   - response.reasoning_text.delta         -> ChunkReasoning (event.Delta, DISPLAY summary)
+//   - response.output_item.done (reasoning)     -> ChunkReasoningItem (encrypted_content, REPLAY blob)
 //   - response.output_item.done (function_call) -> ChunkToolCall
 //   - response.completed                    -> ChunkUsage then ChunkDone(end_turn)
 //   - response.incomplete                   -> ChunkUsage then ChunkDone(error)
 //   - response.failed / error               -> non-nil error (provider message)
+//
+// The reasoning summary deltas (ChunkReasoning) and the reasoning replay blob
+// (ChunkReasoningItem) are deliberately distinct: the summary is human-readable
+// prose for display, whereas the replay blob is OpenAI's opaque encrypted_content
+// token that must be sent back verbatim (request.go) for stateless multi-turn
+// reasoning continuity. They MUST NOT be conflated.
 func translate(event responses.ResponseStreamEventUnion, st *streamState) ([]port.Chunk, error) {
 	switch event.Type {
 	case "response.output_text.delta":
@@ -57,25 +64,41 @@ func translate(event responses.ResponseStreamEventUnion, st *streamState) ([]por
 		return []port.Chunk{{Kind: port.ChunkText, Text: event.Delta}}, nil
 
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		// Human-readable reasoning summary deltas: DISPLAY-only. They are NOT the
+		// blob replayed to the provider (that arrives on the reasoning output item;
+		// see response.output_item.done below).
 		if event.Delta == "" {
 			return nil, nil
 		}
 		return []port.Chunk{{Kind: port.ChunkReasoning, Text: event.Delta}}, nil
 
 	case "response.output_item.done":
-		// The assembled function_call carries call_id, name, and the final
-		// arguments JSON string. Act on the .done payload, not concatenated
-		// deltas (per the brief's assembly rule).
+		// Act on the .done payload, not concatenated deltas (per the brief's
+		// assembly rule). Two assembled item types matter here:
 		item := event.Item
-		if item.Type != "function_call" {
+		switch item.Type {
+		case "reasoning":
+			// The reasoning item carries encrypted_content (requested via
+			// Include: reasoning.encrypted_content) — the opaque REPLAY blob that
+			// must be sent back verbatim for stateless reasoning continuity. An
+			// empty blob (non-reasoning models, or encryption not honoured) yields
+			// no chunk, so replay is a no-op.
+			if item.EncryptedContent == "" {
+				return nil, nil
+			}
+			return []port.Chunk{{Kind: port.ChunkReasoningItem, Text: item.EncryptedContent}}, nil
+		case "function_call":
+			// The assembled function_call carries call_id, name, and the final
+			// arguments JSON string.
+			call := session.ToolCall{
+				ID:   session.ToolCallID(item.CallID),
+				Name: item.Name,
+				Args: json.RawMessage(item.Arguments.OfString),
+			}
+			return []port.Chunk{{Kind: port.ChunkToolCall, ToolCall: &call}}, nil
+		default:
 			return nil, nil
 		}
-		call := session.ToolCall{
-			ID:   session.ToolCallID(item.CallID),
-			Name: item.Name,
-			Args: json.RawMessage(item.Arguments.OfString),
-		}
-		return []port.Chunk{{Kind: port.ChunkToolCall, ToolCall: &call}}, nil
 
 	case "response.completed":
 		if st.done {

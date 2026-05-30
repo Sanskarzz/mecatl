@@ -371,7 +371,11 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 		return session.Message{}, session.Usage{}, session.StopNone, fmt.Errorf("agent: start stream: %w", err)
 	}
 
-	var text, reasoning string
+	// text is the visible assistant text. reasoningBlob is the opaque
+	// encrypted_content replayed back to the provider on subsequent turns (stored
+	// on Message.Reasoning); it is distinct from the human-readable reasoning
+	// summary, which only drives display-only reasoning.delta events.
+	var text, reasoningBlob string
 	var calls []session.ToolCall
 	var usage session.Usage
 	stop := session.StopNone
@@ -388,11 +392,16 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 			text += chunk.Text
 			e.emit(r, session.Event{Type: session.EvMessageDelta, Turn: turnIdx, Text: chunk.Text})
 		case port.ChunkReasoning:
-			reasoning += chunk.Text
-			// Additive display-only event: surface the human-readable reasoning
-			// summary to clients. The accumulation above (replayed back to the
-			// provider as encrypted content) is unchanged.
+			// Display-only: surface the human-readable reasoning summary to
+			// clients. This text is NOT what gets replayed to the provider (see
+			// ChunkReasoningItem below); it must not be stored on Message.Reasoning.
 			e.emit(r, session.Event{Type: session.EvReasoningDelta, Turn: turnIdx, Text: chunk.Text})
+		case port.ChunkReasoningItem:
+			// The opaque encrypted_content replay blob. Stored on Message.Reasoning
+			// and sent back verbatim next turn for stateless reasoning continuity.
+			// The provider emits at most one per turn; concatenation is harmless if
+			// it ever splits.
+			reasoningBlob += chunk.Text
 		case port.ChunkToolCall:
 			if chunk.ToolCall != nil {
 				calls = append(calls, *chunk.ToolCall)
@@ -412,7 +421,7 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 		return session.Message{}, usage, stop, context.Canceled
 	}
 
-	return session.NewAssistantMessage(text, reasoning, calls), usage, stop, nil
+	return session.NewAssistantMessage(text, reasoningBlob, calls), usage, stop, nil
 }
 
 // buildRequest assembles the provider-neutral LLMRequest for the current turn:
