@@ -140,8 +140,10 @@ type MemberBuild struct {
 // available to a member, even under a restrictive agent definition) plus the
 // member's scoped base tools, model, and policy. It MUST consult spec.Mutating: a
 // read-only member shares the base workspace, so it must NOT be given mutating tools
-// (Edit/Write/non-RO Bash) — only a Mutating member (which runs in an isolated fork)
-// may have them.
+// (Edit/Write) — only a Mutating member (which runs in an isolated fork) may have
+// them. Bash is NOT given to ANY member regardless of spec.Mutating: its runner is
+// rooted at the parent base and would escape a Mutating member's fork to mutate the
+// shared base (workspace-aware Bash for forked members is a follow-up).
 type MemberEngine func(spec MemberSpec) MemberBuild
 
 // Supervisor orchestrates one agent team. Build it with NewSupervisor, enrol

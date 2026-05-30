@@ -166,7 +166,7 @@ reused from Fork). So:
 
 - a `code-reviewer`/`researcher` teammate (read-only) shares the base — cheap, no
   copy;
-- an `implementer` teammate (Edit/Write/Bash) gets its own fork — parallel writes
+- an `implementer` teammate (Edit/Write) gets its own fork — parallel writes
   are safe because isolated;
 - **merge/selection stays manual in v1** (consistent with Fork's no-auto-merge):
   the team reports each mutating teammate's fork path; a later phase can add a
@@ -174,6 +174,21 @@ reused from Fork). So:
 
 This keeps the read-parallel/mutate-serial invariant intact: nothing mutates the
 shared base concurrently.
+
+> **Follow-up — workspace-aware Bash for forked children (fork-rooted CommandRunner).**
+> A Mutating teammate (and a Fork branch) currently gets **Edit/Write but NOT Bash**,
+> even when a shell is configured. The `BashTool`'s `CommandRunner` has its working
+> directory baked to the **parent base** at construction
+> (`internal/adapter/osfs` runner, `cmd.Dir = r.root`) and `BashTool.Execute` ignores
+> the per-branch/per-member forked `Workspace` it is handed — so a forked child that
+> ran Bash would mutate the **shared parent base**, escaping its fork and breaking the
+> isolation guarantee (and `ForkTool.ReadOnly()==true`). The ship-now fix is to simply
+> not register Bash for forked children (`app.buildForkChildEngine` and the Mutating
+> branch / DEFINED member path of `app.buildMemberEngine`). Making Bash workspace-aware
+> — a CommandRunner re-rooted at the forked child's `Workspace.Root()`, plumbed through
+> the frozen `Tool.Execute(ctx, in, ws)` signature without weakening the bash gate —
+> is a deliberate, separate follow-up; it touches the `CommandRunner` contract and the
+> command-canonicalisation gate, so it is out of scope for the isolation fix.
 
 ### 5.4 Quiescence & deadlock
 

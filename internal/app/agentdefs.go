@@ -264,7 +264,7 @@ func buildAgentTaskEngines(cfg Config, provider port.LLMProvider, reg *agents.Re
 			Catalog:             cat,
 			Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
 			Hooks:               hookexec.New(nil),
-			PromptConfig:        agentPromptConfig(cfg, def),
+			PromptConfig:        agentPromptConfig(cfg, def, model),
 			Model:               model,
 			ContextWindowTokens: defaultContextWindowTokens,
 			CompactionRatio:     defaultCompactionRatio,
@@ -286,11 +286,13 @@ func buildAgentTaskEngines(cfg Config, provider port.LLMProvider, reg *agents.Re
 // (Option C from the critique: compose, do not replace, and keep the domain
 // prompt.Config untouched). The default role line is preserved and the def body
 // is appended after it, so the specialist's playbook rides in the cache-stable
-// StablePrefix while the standard mecatl framing remains. The Env model is also
-// set to the def's resolved model so the volatile <env> block is accurate.
-func agentPromptConfig(cfg Config, def agents.AgentDef) prompt.Config {
+// StablePrefix while the standard mecatl framing remains. The Env model is set to
+// the caller's ALREADY-RESOLVED model id (threaded in, not re-resolved): resolving
+// it a second time here would re-run resolveModel and log the unknown-alias warning
+// a second time per def. The caller resolves the model ONCE and passes it.
+func agentPromptConfig(cfg Config, def agents.AgentDef, resolvedModel string) prompt.Config {
 	pc := promptConfig(cfg)
-	pc.Env.Model = resolveModel(cfg, def)
+	pc.Env.Model = resolvedModel
 	if body := strings.TrimSpace(def.Body); body != "" {
 		// Compose into Role: default framing + the def's instructions.
 		pc.Role = defaultAgentRole() + "\n\nAgent definition (" + def.Name + "):\n\n" + body

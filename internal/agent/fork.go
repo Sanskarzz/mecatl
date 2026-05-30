@@ -237,8 +237,10 @@ func (*ForkTool) Spec() tool.ToolSpec {
 		Description: "Fan out several independent tasks to run in PARALLEL, each in its own " +
 			"isolated forked workspace and fresh context, then join their results into one " +
 			"summary. Use to explore multiple approaches at once or to split independent work. " +
-			"Each branch runs in an isolated fork, so a branch may IMPLEMENT (edit/write/run), " +
-			"not just explore — its changes land in its own fork and never touch this workspace. " +
+			"Each branch runs in an isolated fork, so a branch may IMPLEMENT by editing and " +
+			"writing files, not just explore — its changes land in its own fork and never touch " +
+			"this workspace. (A branch cannot run shell/Bash: workspace-scoped Bash for forked " +
+			"branches is a follow-up, so use Edit/Write to implement.) " +
 			"Each branch cannot see this conversation or the other branches, so make every " +
 			"task in `tasks` self-contained (use `shared` for common context). " +
 			"`join` controls the result: 'all' (default) returns every branch summary so YOU " +
@@ -257,12 +259,17 @@ func (*ForkTool) Spec() tool.ToolSpec {
 //
 // INVARIANT — this is the same invariant TaskTool documents, but Fork makes it
 // strictly safer: every child branch runs in its OWN forked workspace, never the
-// shared base. So even if the child catalog includes mutating tools (Edit / Write
-// / non-RO Bash), those writes land in the isolated fork and CANNOT race on, or
-// mutate, the parent's shared base. The parent base is therefore untouched by a
-// Fork call regardless of the child catalog, which is why ReadOnly() can safely
-// return true even for mutating children — unlike TaskTool, where a mutating
-// child shares the base and would force ReadOnly() to false.
+// shared base. So the child's filesystem-mutating tools (Edit / Write) land in the
+// isolated fork and CANNOT race on, or mutate, the parent's shared base. Bash is
+// deliberately EXCLUDED from the child catalog (see app.buildForkChildEngine):
+// because its CommandRunner is rooted at the PARENT base and ignores the per-branch
+// forked Workspace, a branch running Bash WOULD escape its fork and mutate the
+// shared base — which is exactly what would make this ReadOnly()==true a lie.
+// Excluding Bash (until a fork-rooted, workspace-aware CommandRunner exists — a
+// deliberate follow-up) keeps the parent base untouched by a Fork call, which is
+// why ReadOnly() can safely return true even for mutating (Edit/Write) children —
+// unlike TaskTool, where a mutating child shares the base and would force
+// ReadOnly() to false.
 func (*ForkTool) ReadOnly() bool { return true }
 
 // branchResult is the joined outcome of one branch.

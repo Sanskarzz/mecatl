@@ -53,9 +53,10 @@ func TestBuildMemberEngineReadOnlySpawnSucceeds(t *testing.T) {
 }
 
 // TestBuildMemberEngineMutatingSpawnSucceeds asserts a Mutating member (which the
-// factory gives Edit/Write/Bash) is accepted when a Forker is configured — it runs
-// in an isolated fork, so the workspace-mutating tools are permitted. This proves
-// the Mutating branch of buildMemberEngine produces a catalog the supervisor admits.
+// factory gives Edit/Write — but NOT Bash; see TestMutatingMemberHasEditNotBash) is
+// accepted when a Forker is configured — it runs in an isolated fork, so the
+// filesystem-mutating tools are permitted. This proves the Mutating branch of
+// buildMemberEngine produces a catalog the supervisor admits.
 func TestBuildMemberEngineMutatingSpawnSucceeds(t *testing.T) {
 	cfg := teamCfg(t)
 	provider := mockllm.New(mockllm.TextTurn("ok"))

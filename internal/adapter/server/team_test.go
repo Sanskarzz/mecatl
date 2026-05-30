@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -496,5 +497,79 @@ func TestCreateTeamWithRosterMutatingNoForkerAtomicFailure(t *testing.T) {
 	// The slot was not consumed: a fresh create succeeds under MaxTeams=1.
 	if _, err := h.CreateTeam(ctx, newCreateTeam("/ws")); err != nil {
 		t.Fatalf("CreateTeam after a failed atomic create: %v", err)
+	}
+}
+
+// TestSpawnTeammateRaceWithRunTeam is the FIX 2 (-race) test: for each of many
+// freshly-created teams it fires SpawnTeammate and RunTeam CONCURRENTLY. Before the
+// fix, SpawnTeammate checked the phase under Service.mu, released it, then called
+// AddMember — letting a RunTeam win the teamCreated→teamRunning transition in the gap
+// and start sup.Run (which iterates the supervisor's unsynchronised member/order
+// maps) while AddMember was writing them: a concurrent map write/iterate panic that
+// `go test -race` flags.
+//
+// The per-team `run` mutex serialises the two, so the test asserts:
+//   - no race / panic (the point under -race);
+//   - a CONSISTENT outcome per team: the spawn either WINS the race (returns nil, and
+//     the member is on the final roster) or LOSES it (returns ErrTeamRunning) — never
+//     a torn intermediate. RunTeam always succeeds (a created team is runnable).
+func TestSpawnTeammateRaceWithRunTeam(t *testing.T) {
+	const teams = 50
+	svc := teamService(t, mockllm.New(mockllm.TextTurn("done")))
+	ctx := context.Background()
+
+	for i := 0; i < teams; i++ {
+		teamID, _, err := svc.CreateTeam(ctx, "/ws", "race", nil)
+		if err != nil {
+			t.Fatalf("CreateTeam #%d: %v", i, err)
+		}
+		// A lead is enrolled up front so RunTeam has work to plan and actually starts
+		// iterating the member maps (the read side of the race).
+		if _, err := svc.SpawnTeammate(ctx, teamID, agent.MemberSpec{Name: "lead", Lead: true, InitialPrompt: "go"}); err != nil {
+			t.Fatalf("SpawnTeammate(lead) #%d: %v", i, err)
+		}
+
+		var (
+			spawnErr error
+			runErr   error
+			wg       sync.WaitGroup
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, spawnErr = svc.SpawnTeammate(ctx, teamID, agent.MemberSpec{Name: "late", InitialPrompt: "x"})
+		}()
+		go func() {
+			defer wg.Done()
+			_, runErr = svc.RunTeam(ctx, teamID, func(agent.TeamEvent) {})
+		}()
+		wg.Wait()
+
+		if runErr != nil {
+			t.Fatalf("RunTeam #%d: unexpected error %v", i, runErr)
+		}
+		// The spawn either won (nil) or was cleanly rejected as the team had started.
+		if spawnErr != nil && !errors.Is(spawnErr, server.ErrTeamRunning) {
+			t.Fatalf("SpawnTeammate #%d: err = %v, want nil or ErrTeamRunning", i, spawnErr)
+		}
+
+		// Consistency: if the spawn reported success, the member must be on the roster;
+		// if it reported ErrTeamRunning, it must NOT be — no torn half-enrolment.
+		members, _, _, err := svc.ListTeam(ctx, teamID)
+		if err != nil {
+			t.Fatalf("ListTeam #%d: %v", i, err)
+		}
+		hasLate := false
+		for _, m := range members {
+			if m.Name == "late" {
+				hasLate = true
+			}
+		}
+		switch {
+		case spawnErr == nil && !hasLate:
+			t.Fatalf("team #%d: spawn succeeded but member 'late' is not on the roster", i)
+		case spawnErr != nil && hasLate:
+			t.Fatalf("team #%d: spawn was rejected (%v) but member 'late' is on the roster", i, spawnErr)
+		}
 	}
 }

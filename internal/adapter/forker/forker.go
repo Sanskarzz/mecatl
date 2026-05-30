@@ -23,9 +23,14 @@
 // tolerates an already-removed child) and must be called when the child is done.
 //
 // Limits: the git path isolates the WORKING TREE and INDEX but shares the object
-// database and refs — a child that creates commits/refs would be visible to the
-// base repo (the default ForkTool wiring is read-only, so this does not arise in
-// v1). The copy path is bounded only by available disk and the size of the base
+// database and refs — a child that created commits/refs would be visible to the
+// base repo. Forked children CAN now mutate their working tree (Edit/Write land in
+// the fork), but Bash and git are deliberately EXCLUDED from a forked child's
+// catalog (see app.buildForkChildEngine / buildMemberEngine): the Bash runner is
+// rooted at the parent base and would escape the fork, and with no shell a child
+// cannot run git either, so no shared-.git writes (commits/refs) ever occur. The
+// shared-object-DB caveat is thus latent, not reachable, in v1. The copy path is
+// bounded only by available disk and the size of the base
 // tree; it copies regular files and directories and SKIPS symlinks (so a symlink
 // cannot smuggle the copy outside the base). Neither path auto-merges results
 // back — see the ForkTool docs (no-auto-merge boundary).

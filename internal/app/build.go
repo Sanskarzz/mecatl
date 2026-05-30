@@ -702,15 +702,26 @@ func buildChildEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 }
 
 // buildForkChildEngine constructs the child *Engine each Fork branch runs. Unlike
-// buildChildEngine (the read-only Task explorer), a Fork branch child MAY MUTATE:
-// it gets Read/Grep/Glob/Edit/Write plus Bash when a runner is configured, still
-// EXCLUDING Task/Fork/ToolSearch (a branch must not recurse or fan out further).
+// buildChildEngine (the read-only Task explorer), a Fork branch child MAY MUTATE
+// its OWN fork: it gets Read/Grep/Glob/Edit/Write, still EXCLUDING Task/Fork/
+// ToolSearch (a branch must not recurse or fan out further).
+//
+// Bash is deliberately NOT registered. The Bash tool runs through a CommandRunner
+// whose working directory is baked to the PARENT base at construction; it ignores
+// the per-branch forked Workspace it is handed (see internal/adapter/tools/bash.go).
+// A branch that ran Bash would therefore mutate the SHARED PARENT BASE — escaping
+// its fork and breaking ForkTool.ReadOnly()==true. Until Bash is made
+// workspace-aware (a fork-rooted CommandRunner — a deliberate follow-up; see
+// docs/design/AGENT-TEAMS-SPIKE.md), a fork branch can Edit/Write within its own
+// fork (enough to IMPLEMENT) but cannot run shell.
 //
 // This is the behavioural shift Tier 3 enables: Fork branches can now IMPLEMENT
-// (not merely explore). It is safe — and ForkTool.ReadOnly() stays true — because
-// every branch runs in its OWN isolated forked workspace, so a branch's writes land
-// in its fork and never touch the parent base (see ForkTool.ReadOnly's invariant).
-// The mutating winner's fork is what winner-preservation (join=first/judge) keeps.
+// (via Edit/Write), not merely explore. It is safe — and ForkTool.ReadOnly() stays
+// true — because every branch runs in its OWN isolated forked workspace, so a
+// branch's Edit/Write land in its fork and never touch the parent base (see
+// ForkTool.ReadOnly's invariant), and Bash (which would escape the fork) is
+// excluded. The mutating winner's fork is what winner-preservation
+// (join=first/judge) keeps.
 func buildForkChildEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 	childCat := tool.NewCatalog()
 	childCat.MustRegister(tools.ReadTool{})
@@ -718,9 +729,9 @@ func buildForkChildEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 	childCat.MustRegister(tools.GlobTool{})
 	childCat.MustRegister(tools.EditTool{})
 	childCat.MustRegister(tools.WriteTool{})
-	if runner := buildCommandRunner(cfg); runner != nil {
-		childCat.MustRegister(tools.NewBashTool(runner))
-	}
+	// NOTE: no Bash — its runner is rooted at the PARENT base, so a forked branch
+	// running Bash would escape its fork and mutate the shared base. Workspace-aware
+	// Bash for forked children is a follow-up (see this function's doc comment).
 
 	return agent.NewEngine(agent.Deps{
 		LLM:                 provider,
@@ -840,8 +851,16 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 		def, defined := lookupMemberDef(reg, spec)
 		if defined {
 			// Scope the def over the member's AVAILABLE base, allowing mutating tools
-			// only for a Mutating member (it runs in an isolated fork).
+			// only for a Mutating member (it runs in an isolated fork). Bash is removed
+			// from the available base unconditionally: its runner is rooted at the
+			// PARENT base and ignores the member's forked Workspace (see
+			// internal/adapter/tools/bash.go), so even a Mutating member's def must not
+			// scope it in — running Bash would escape the fork and mutate the shared
+			// base. Dropping it from `base` yields the DISTINCT "unknown tool (not in
+			// base set)" diagnostic if a def allowlists it. Workspace-aware Bash for
+			// forked members is a follow-up (see docs/design/AGENT-TEAMS-SPIKE.md).
 			base := baseTaskTools(cfg)
+			delete(base, "Bash")
 			names, diags := scopedToolNamesMode(def, base, spec.Mutating)
 			for _, d := range diags {
 				slog.Warn("team member agent def tool scoping",
@@ -850,24 +869,28 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 			for _, name := range names {
 				cat.MustRegister(base[name])
 			}
-			model = resolveModel(cfg, def)
-			pc = agentPromptConfig(cfg, def)
+			model = resolveModel(cfg, def) // resolve ONCE; thread the id into agentPromptConfig
+			pc = agentPromptConfig(cfg, def, model)
 			mode = resolvePermissionMode(def)
 			slog.Info("team member adopts agent def",
 				"member", spec.Name, "agent", def.Name, "tools", strings.Join(names, ","),
 				"model", model, "mode", mode, "mutating", spec.Mutating, "path", def.Path)
 		} else {
-			// Default member catalog: read-only base, plus mutating tools for a
-			// Mutating member only.
+			// Default member catalog: read-only base, plus Edit/Write for a Mutating
+			// member only. Bash is deliberately NOT registered even for a Mutating
+			// member: the Bash runner's working dir is baked to the PARENT base at
+			// construction and ignores the member's forked Workspace (see
+			// internal/adapter/tools/bash.go), so a Mutating member running Bash would
+			// escape its isolated fork and mutate the shared base — breaking the
+			// read-only-share / mutating-fork isolation guarantee. A Mutating member can
+			// still Edit/Write within its own fork (enough to IMPLEMENT); workspace-aware
+			// Bash for forked members is a follow-up (see docs/design/AGENT-TEAMS-SPIKE.md).
 			cat.MustRegister(tools.ReadTool{})
 			cat.MustRegister(tools.GrepTool{})
 			cat.MustRegister(tools.GlobTool{})
 			if spec.Mutating {
 				cat.MustRegister(tools.EditTool{})
 				cat.MustRegister(tools.WriteTool{})
-				if runner := buildCommandRunner(cfg); runner != nil {
-					cat.MustRegister(tools.NewBashTool(runner))
-				}
 			}
 		}
 

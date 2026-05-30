@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/team"
@@ -50,11 +51,34 @@ type MemberEngineFactory func(t *team.Team, spec agent.MemberSpec) agent.MemberB
 
 // teamState couples a team's shared coordination aggregate with the supervisor
 // that drives it and the base workspace it was created over.
+//
+// Two locks guard a teamState, with DISTINCT jobs (do not collapse them):
+//
+//   - Service.mu guards the registry MAP (s.teams) and is the only lock taken to
+//     read/write the `phase` field. It is held only briefly — never across the
+//     fork I/O that AddMember performs.
+//   - run is a PER-TEAM mutex serialising the two operations that drive the
+//     Supervisor's UNSYNCHRONISED members/order maps against each other:
+//     SpawnTeammate's AddMember (a writer) and RunTeam's start (a reader, via
+//     sup.Run). Without it, SpawnTeammate's TOCTOU — it checks phase under
+//     Service.mu, releases it, THEN calls AddMember — let a concurrent RunTeam win
+//     the teamCreated→teamRunning transition in the gap and start iterating the
+//     member maps while AddMember was writing them (a concurrent map write/iterate
+//     panic). Both SpawnTeammate (across its phase-check AND AddMember) and RunTeam
+//     (across its phase-check AND transition) hold `run`, so a spawn and a run-start
+//     can no longer interleave. `run` is never held across the whole Supervisor.Run
+//     (that would deadlock CleanupTeam-style introspection); RunTeam releases it the
+//     instant the phase has flipped to teamRunning, after which the phase check in any
+//     later SpawnTeammate rejects the spawn cleanly.
 type teamState struct {
 	team  *team.Team
 	sup   *agent.Supervisor
 	base  string
 	phase teamPhase
+
+	// run serialises a SpawnTeammate (AddMember writes the supervisor's member maps)
+	// against a RunTeam start (sup.Run reads them). See the type doc above.
+	run sync.Mutex
 }
 
 // CreateTeam allocates a new agent team over the given base workspace, enrols the
@@ -135,12 +159,22 @@ func (s *Service) SpawnTeammate(ctx context.Context, teamID string, spec agent.M
 	if err != nil {
 		return team.Member{}, err
 	}
+	// Hold the per-team `run` mutex across BOTH the phase check AND the AddMember
+	// call, so a concurrent RunTeam (which also takes `run` to flip the phase) cannot
+	// start sup.Run in the gap and iterate the supervisor's member maps while
+	// AddMember is writing them. Service.mu is taken only to READ the phase, briefly,
+	// and released before AddMember's fork I/O (we must not hold the global registry
+	// lock across that). The ordering is `run` then `s.mu` here and in RunTeam, so the
+	// two never deadlock.
+	ts.run.Lock()
+	defer ts.run.Unlock()
+
 	s.mu.Lock()
-	if ts.phase != teamCreated {
-		s.mu.Unlock()
+	started := ts.phase != teamCreated
+	s.mu.Unlock()
+	if started {
 		return team.Member{}, fmt.Errorf("%w: cannot spawn into a team that has started", ErrTeamRunning)
 	}
-	s.mu.Unlock()
 	if err := ts.sup.AddMember(ctx, spec); err != nil {
 		return team.Member{}, classifyAddMemberErr(err)
 	}
@@ -214,15 +248,24 @@ func (s *Service) RunTeam(ctx context.Context, teamID string, sink func(agent.Te
 	}
 	// Atomically claim the team for this run. A second concurrent RunTeam (or one
 	// after a completed run) is rejected — the Supervisor's member state is not safe
-	// to drive twice. The transition is guarded by Service.mu so two callers race to
-	// claim exactly one wins.
+	// to drive twice. The transition is guarded by Service.mu so that of two callers
+	// racing to claim, exactly one wins. The per-team `run` mutex is ALSO held across
+	// the check+transition so an in-flight SpawnTeammate (which holds `run` across its
+	// own AddMember) cannot be mid-write to the supervisor's member maps when we flip
+	// to teamRunning and hand them to sup.Run. We release `run` the instant the phase
+	// has flipped — NOT across sup.Run itself — so a spawn that arrives after the flip
+	// sees teamRunning and is rejected cleanly, with no map race. Lock order is `run`
+	// then `s.mu`, matching SpawnTeammate, so the two cannot deadlock.
+	ts.run.Lock()
 	s.mu.Lock()
 	if ts.phase != teamCreated {
 		s.mu.Unlock()
+		ts.run.Unlock()
 		return agent.TeamOutcome{}, fmt.Errorf("%w: %q", ErrTeamRunning, teamID)
 	}
 	ts.phase = teamRunning
 	s.mu.Unlock()
+	ts.run.Unlock()
 
 	defer func() {
 		s.mu.Lock()
