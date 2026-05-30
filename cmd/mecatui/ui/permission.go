@@ -4,8 +4,6 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-
-	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
 
 // pendingAsk holds the state of an open permission modal. AskID is the exact
@@ -21,18 +19,34 @@ type pendingAsk struct {
 
 // renderPermissionModal renders the centred approval card. It is drawn with
 // lipgloss.Place over the available area so it reads as a modal overlay. The
-// warning border + accent on the focused button make it unmissable.
-func renderPermissionModal(th theme.Theme, ask pendingAsk, width, height int) string {
+// warning border + accent on the focused button make it unmissable. It is a
+// method on renderer so it can reuse renderToolDiff: for an Edit/Write ask the
+// concrete colourised diff of the change is shown in place of the raw JSON args,
+// so the operator approves a real edit rather than an opaque blob. expand is the
+// global details toggle (ctrl+t): when on, the diff renders in full instead of
+// line-capped, so the collapse marker's "ctrl+t expand" hint is truthful — the
+// operator can genuinely reveal every line being authorized before deciding.
+func (r *renderer) renderPermissionModal(ask pendingAsk, expand bool, width, height int) string {
+	th := r.th
 	title := th.Style("askTitle").Render("Permission required")
 
 	// All ask.* fields are server-derived and rendered via lipgloss, so they MUST
 	// be terminal-sanitized: an attacker who controls a tool result could
 	// otherwise embed escapes to redraw/spoof this very approval modal. (Args is
-	// sanitized inside prettyJSON.)
+	// sanitized inside prettyJSON; the diff path sanitizes internally.)
 	var b strings.Builder
 	b.WriteString(title + "\n\n")
 	b.WriteString(th.Style("toolName").Render(sanitizeTerminal(ask.Tool)) + "\n")
-	if args := prettyJSON(ask.Args); args != "" {
+	// Prefer a concrete diff for Edit/Write. Collapsed by default (line-capped, so
+	// a huge Write can't grow the modal off-screen); ctrl+t (expand) reveals the
+	// full diff right here at the gate. Fall back to pretty JSON for any other
+	// tool, or when the Edit/Write args don't parse into the expected shape.
+	if diff, ok := r.renderToolDiff(ask.Tool, ask.Args, expand); ok {
+		if diff != "" {
+			b.WriteString(th.Style("muted").Render("changes:") + "\n")
+			b.WriteString(diff + "\n")
+		}
+	} else if args := prettyJSON(ask.Args); args != "" {
 		b.WriteString(th.Style("toolArgs").Render(args) + "\n")
 	}
 	if ask.Reason != "" {

@@ -28,7 +28,7 @@ func (m Model) View() tea.View {
 	var body string
 	switch {
 	case m.phase == phaseAwaitingApproval:
-		body = renderPermissionModal(m.deps.Theme, m.ask, m.width, m.vp.Height())
+		body = m.rend.renderPermissionModal(m.ask, m.expandTools, m.width, m.vp.Height())
 	case m.mcp.view != mcpNone:
 		body = renderMCPOverlay(m.deps.Theme, m.mcp, m.width, m.vp.Height())
 	default:

@@ -52,7 +52,7 @@ func TestRenderWriteDiff(t *testing.T) {
 		t.Fatal("Write diff should render")
 	}
 	plain := stripANSIstr(out)
-	if !strings.Contains(plain, "notes/todo.txt (new file, 2 lines)") {
+	if !strings.Contains(plain, "notes/todo.txt · 2 lines (overwrites if it exists)") {
 		t.Errorf("expected path header with line count, got %q", plain)
 	}
 	if !strings.Contains(plain, "+ buy milk") || !strings.Contains(plain, "+ eggs") {

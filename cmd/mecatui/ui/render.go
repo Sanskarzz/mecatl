@@ -287,6 +287,11 @@ type writeDiffArgs struct {
 
 // renderWriteDiff renders a Write as an all-green "new content" block under a
 // muted path header. Returns false on malformed args so the caller falls back.
+//
+// The header does NOT claim "new file": at ask time the harness doesn't know
+// whether the path already exists, and a silent overwrite is MORE dangerous than
+// a create — asserting "new file" would understate the risk at the approval gate.
+// So it says "(overwrites if it exists)" instead, which holds in both cases.
 func (r *renderer) renderWriteDiff(rawArgs string, expand bool) (string, bool) {
 	var args writeDiffArgs
 	if err := json.Unmarshal([]byte(strings.TrimSpace(rawArgs)), &args); err != nil {
@@ -295,12 +300,7 @@ func (r *renderer) renderWriteDiff(rawArgs string, expand bool) (string, bool) {
 	if args.Path == "" {
 		return "", false
 	}
-	n := lineCount(args.Content)
-	noun := "lines"
-	if n == 1 {
-		noun = "line"
-	}
-	header := fmt.Sprintf("%s (new file, %d %s)", args.Path, n, noun)
+	header := fmt.Sprintf("%s · %s (overwrites if it exists)", args.Path, plural(lineCount(args.Content), "line"))
 	var b strings.Builder
 	b.WriteString(r.th.Style("diffMeta").Render(sanitizeTerminal(header)))
 	if args.Content != "" {
