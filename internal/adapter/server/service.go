@@ -112,6 +112,11 @@ var ErrConfig = errors.New("server: invalid config")
 // (jsonlstore via --store-dir) the latest snapshot therefore survives a process
 // restart.
 //
+// A registered run is removed by the wire adapter that owns the stream: each
+// adapter `defer`s FinishRun(id, run) after it finishes draining run.Events()
+// (the channel closes when the run terminates). The Service does not deregister
+// runs on its own — there is no internal relay goroutine that does so.
+//
 // GetSession, Approve and Cancel for a session id NOT in the in-memory run
 // registry fall back to SessionStore.Load, so a session created (or last
 // persisted) before a restart is still observable and its terminal/awaiting
@@ -206,9 +211,10 @@ func (s *Service) GetSession(ctx context.Context, id session.SessionID) (*sessio
 
 // StartRun loads the session, builds its workspace, starts a run on the shared
 // engine and registers the *agent.Run so Approve/Cancel can reach it. The
-// caller is responsible for draining run.Events(); the run is automatically
-// de-registered when its event channel closes (see relay). It returns
-// ErrNotFound if the session does not exist.
+// caller is responsible for draining run.Events() AND, once the channel closes,
+// for calling FinishRun(id, run) to remove the run from the registry (each wire
+// adapter `defer`s FinishRun after the drain — see grpc.go/http.go/the ACP
+// adapter). It returns ErrNotFound if the session does not exist.
 func (s *Service) StartRun(ctx context.Context, id session.SessionID, text string) (*agent.Run, error) {
 	if text == "" {
 		return nil, fmt.Errorf("%w: prompt text is required", ErrInvalidArgument)
@@ -306,6 +312,16 @@ func (s *Service) deregister(id session.SessionID, run *agent.Run) {
 		delete(s.runs, id)
 	}
 	s.mu.Unlock()
+}
+
+// FinishRun removes run from the in-flight registry for id. It is the EXPORTED
+// counterpart of register that every wire adapter must call (typically via
+// `defer`) once it has finished draining run.Events(), so a completed run does
+// not leak in the registry. It is idempotent and only removes the entry if run
+// is still the one recorded (a later run for the same session is never
+// clobbered), so it is safe to call unconditionally after a drain.
+func (s *Service) FinishRun(id session.SessionID, run *agent.Run) {
+	s.deregister(id, run)
 }
 
 // randomID returns a 128-bit random hex session id.

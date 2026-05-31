@@ -181,6 +181,11 @@ type config struct {
 	// when the MCP prompt namespace is actually used.
 	mcpPrompts bool
 
+	// ACP: serve the Agent Client Protocol over stdio instead of the TCP/HTTP
+	// listeners. When set, mecated speaks JSON-RPC 2.0 to an ACP editor (Zed, etc.)
+	// that spawned it as a subprocess; the normal network daemon path is skipped.
+	acp bool
+
 	// ToolHive: discover MCP servers from the running ToolHive workloads (the
 	// embedded ToolHive library lists already-running workloads and reads their
 	// HTTP proxy URLs — mecatl never spawns a workload). Default ON; it fails soft
@@ -381,6 +386,14 @@ func run() error {
 	}
 	defer built.Close()
 
+	// ACP mode: serve the Agent Client Protocol over stdio instead of the network
+	// daemon. The same engine/service assembly (app.Build) backs it; only the wire
+	// surface differs. No TLS/auth/rate-limit — stdio is a local parent-process
+	// boundary. Logs still go to stderr (set above), keeping stdout pure JSON-RPC.
+	if cfg.acp {
+		return serveACP(ctx, built.Service)
+	}
+
 	return serve(ctx, cfg, built.Service, reg)
 }
 
@@ -491,6 +504,8 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.BoolVar(&cfg.toolHiveEnabled, "toolhive", true, "discover MCP servers from the running ToolHive workloads (the embedded ToolHive library lists already-running workloads and reads their HTTP proxy URLs; mecatl NEVER starts or spawns a workload). Fails soft to zero servers when no container runtime is reachable. TRUST BOUNDARY: registering tools from running workloads is the same trust class as --mcp-server — every discovered workload's tools enter the model context")
 	fs.StringVar(&cfg.toolHiveGroup, "toolhive-group", "", "ToolHive group to discover workloads from (empty -> the \"default\" group). Only consulted when --toolhive is set")
+
+	fs.BoolVar(&cfg.acp, "acp", false, "serve the Agent Client Protocol (ACP) over stdio for an editor that spawned mecated as a subprocess (JSON-RPC 2.0 on stdin/stdout). Skips the TCP/HTTP listeners; the single session workspace is the editor-provided cwd. No TLS/auth/rate-limit (stdio is a local, parent-process trust boundary)")
 
 	fs.StringVar(&cfg.authToken, "auth-token", "", "bearer token required on every gRPC/HTTP request (or MECATL_AUTH_TOKEN; empty disables auth)")
 	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "PEM server certificate; with --tls-key enables TLS on the gRPC + HTTP servers")
