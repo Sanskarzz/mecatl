@@ -27,6 +27,13 @@ type keyMap struct {
 	Down      key.Binding
 	Choose    key.Binding
 	Close     key.Binding
+	// Refresh re-issues the active overlay's primary fetch. It is a BARE 'r'
+	// (not control-modified): it is only consulted while an overlay owns the
+	// keyboard (onMCPKey intercepts before the idle ctrl+o/ctrl+r/ctrl+p open
+	// keys), so it never collides with the global ctrl+r resources binding nor
+	// with the textarea (blurred while an overlay is open). Used by the inventory
+	// panel to re-probe LIVE MCP source status.
+	Refresh key.Binding
 
 	// Jump bindings for the windowed agent-team roster (tedious to traverse with
 	// ↑/↓ at the 20–32-member scale the overlay exists for): home/g jump to the
@@ -117,6 +124,10 @@ func defaultKeys() keyMap {
 		Close: key.NewBinding(
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "close"),
+		),
+		Refresh: key.NewBinding(
+			key.WithKeys("r"),
+			key.WithHelp("r", "refresh"),
 		),
 		JumpTop: key.NewBinding(
 			key.WithKeys("home", "g"),

@@ -219,6 +219,12 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		DefaultLimits: defaultLimits(),
 		MCPProvider:   mcpProvider,
 		MCPSources:    mcpInventory,
+		// Live re-probe: ListMcpSources re-consults the resolved sources on each call
+		// so a TUI panel refresh (ctrl+o → ctrl+r) reflects CURRENT source status,
+		// not just this startup snapshot. nil when MCP is unconfigured (keeps the
+		// empty snapshot). Resolution is idempotent + read-only, like the agent
+		// registry re-resolution below.
+		MCPSourceProber: mcpSourceProber(cfg),
 		// ListAgents snapshot: resolve the agent registry once here and project it
 		// into the proto form. Discovery is idempotent file scanning (buildCatalog
 		// resolves the same registry for the Task tool), so this re-resolution is
@@ -571,12 +577,39 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 // It returns the concrete *mcp.Manager (nil when no servers connect) so the
 // per-agent-def wiring can pull a REFERENCED main server's tools out of it; the same
 // value is the mcp.Provider used for resources/prompts.
-func registerMCP(ctx context.Context, cfg Config, cat *tool.Catalog) (*mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, func()) {
-	opts := mcpsource.ResolveOptions{
+// mcpResolveOptions derives the source-resolver options purely from cfg, so the
+// startup wiring (registerMCP) and the live re-probe (mcpSourceProber) resolve
+// the SAME ordered source list. Keeping this in one place stops the two paths
+// from drifting on which sources exist.
+func mcpResolveOptions(cfg Config) mcpsource.ResolveOptions {
+	return mcpsource.ResolveOptions{
 		StaticServers:   cfg.MCPServers,
 		ToolHiveEnabled: cfg.ToolHiveEnabled,
 		ToolHiveGroup:   cfg.ToolHiveGroup,
 	}
+}
+
+// mcpSourceProber builds the live-inventory prober wired into the server.Service.
+// It re-runs source.InspectSources over the SAME resolved sources on every call,
+// so a client refresh reflects CURRENT source status/diagnostics (a ToolHive
+// workload that crashed or appeared after startup), not the startup snapshot.
+// Resolution is read-only (the ToolHive source queries the container runtime; the
+// static source is in-memory) and fail-soft, matching the rest of MCP wiring. It
+// returns nil when MCP is not configured (no static servers, ToolHive off) so the
+// Service simply keeps using the (empty) startup snapshot.
+func mcpSourceProber(cfg Config) func(ctx context.Context) []mcpsource.SourceInfo {
+	opts := mcpResolveOptions(cfg)
+	if len(opts.StaticServers) == 0 && !opts.ToolHiveEnabled {
+		return nil
+	}
+	sources := mcpsource.ResolveSources(opts)
+	return func(ctx context.Context) []mcpsource.SourceInfo {
+		return mcpsource.InspectSources(ctx, sources, opts)
+	}
+}
+
+func registerMCP(ctx context.Context, cfg Config, cat *tool.Catalog) (*mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, func()) {
+	opts := mcpResolveOptions(cfg)
 	sources := mcpsource.ResolveSources(opts)
 
 	configs, inventory, skips := mcpsource.Resolve(ctx, sources)

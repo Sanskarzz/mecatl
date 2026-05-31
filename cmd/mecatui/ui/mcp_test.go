@@ -184,6 +184,105 @@ func TestMCPPanelGroupsDegradeQuietly(t *testing.T) {
 	}
 }
 
+// TestMCPPanelRefreshPicksUpLiveStatus asserts the panel's r-refresh re-issues
+// the inventory fetch and renders the CURRENT server status — a server that
+// reconnected (a diagnostic cleared) since the panel first opened — rather than
+// the stale first snapshot. The footer flips to the "updated" wording.
+func TestMCPPanelRefreshPicksUpLiveStatus(t *testing.T) {
+	fm := samplePanelMCP()
+	// After the first fetch the toolhive source had a skipped server; on the live
+	// re-probe it has reconnected (no diagnostics) and a new server appeared.
+	fm.nextSources = []client.MCPSource{
+		{
+			Name: "toolhive", Kind: "toolhive", Enabled: true, Group: "dev",
+			Servers: []client.MCPServerInfo{
+				{Name: "fetch", URL: "http://127.0.0.1:9001", Transport: "streamable-http", Group: "dev"},
+				{Name: "github", URL: "http://127.0.0.1:9002", Transport: "streamable-http", Group: "dev"},
+				{Name: "legacy", URL: "http://127.0.0.1:9003", Transport: "streamable-http", Group: "dev"},
+			},
+		},
+		{Name: "static", Kind: "static", Enabled: false},
+	}
+	m := newMCPModel(t, aztec(), fm)
+	m = openOverlay(t, m, ctrlKey('o'))
+	if m.mcp.view != mcpPanel {
+		t.Fatalf("view = %v, want mcpPanel", m.mcp.view)
+	}
+	// Initial snapshot: the toolhive source carries its skip diagnostic.
+	if len(m.mcp.sources) == 0 || len(m.mcp.sources[0].Diagnostics) != 1 {
+		t.Fatalf("initial sources lack the diagnostic: %#v", m.mcp.sources)
+	}
+	if m.mcp.refreshed {
+		t.Fatalf("panel marked refreshed before any refresh")
+	}
+
+	// Press r → re-issues the fetch; feed the batched cmds back.
+	mm, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatalf("refresh did not issue a fetch cmd")
+	}
+	m = feedCmd(t, m, cmd)
+
+	if fm.sourcesCalls != 2 {
+		t.Fatalf("ListMCPSources called %d times, want 2 (open + refresh)", fm.sourcesCalls)
+	}
+	// The panel now shows the LIVE status: 3 servers, diagnostic cleared.
+	if got := len(m.mcp.sources[0].Servers); got != 3 {
+		t.Fatalf("after refresh servers = %d, want 3 (live re-probe)", got)
+	}
+	if len(m.mcp.sources[0].Diagnostics) != 0 {
+		t.Fatalf("after refresh diagnostics = %#v, want cleared", m.mcp.sources[0].Diagnostics)
+	}
+	if m.mcp.refreshing {
+		t.Fatalf("refreshing flag stuck on after result landed")
+	}
+	if !m.mcp.refreshed {
+		t.Fatalf("panel not marked refreshed after a successful re-probe")
+	}
+	// The footer advertises the updated state and the refresh key.
+	view := string(stripANSI([]byte(m.View().Content)))
+	if !strings.Contains(view, "updated") || !strings.Contains(view, "r refresh") {
+		t.Fatalf("footer missing updated/refresh hint:\n%s", view)
+	}
+	if !strings.Contains(view, "legacy") {
+		t.Fatalf("refreshed server 'legacy' not rendered:\n%s", view)
+	}
+}
+
+// TestMCPPanelRefreshIndicatorWhileInFlight asserts that while a refresh is in
+// flight the footer reads "refreshing…" and a second r is a no-op (no duplicate
+// fetch), without clearing the already-shown sources.
+func TestMCPPanelRefreshIndicatorWhileInFlight(t *testing.T) {
+	fm := samplePanelMCP()
+	m := newMCPModel(t, aztec(), fm)
+	m = openOverlay(t, m, ctrlKey('o'))
+
+	// Press r but DON'T feed the result yet: the panel is mid-refresh.
+	mm, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	m = mm.(Model)
+	if !m.mcp.refreshing {
+		t.Fatalf("refreshing flag not set after r")
+	}
+	if cmd == nil {
+		t.Fatalf("refresh issued no cmd")
+	}
+	if len(m.mcp.sources) == 0 {
+		t.Fatalf("sources cleared during refresh (should stay visible)")
+	}
+	view := string(stripANSI([]byte(m.View().Content)))
+	if !strings.Contains(view, "refreshing") {
+		t.Fatalf("footer missing refreshing indicator:\n%s", view)
+	}
+	// A second r while in flight is a no-op.
+	mm, cmd2 := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	m = mm.(Model)
+	if cmd2 != nil {
+		t.Fatalf("second r issued a duplicate fetch")
+	}
+	_ = m
+}
+
 // --- resource picker --------------------------------------------------------
 
 func TestMCPResourceListGolden(t *testing.T) {

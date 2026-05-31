@@ -45,6 +45,15 @@ type mcpState struct {
 	groupsErr  bool     // the groups fetch failed — degrade quietly, panel still works
 	groupsDone bool     // a groups result (success or error) has arrived
 
+	// Panel live-refresh indicator. refreshing is set while a manual re-probe is
+	// in flight (distinct from the initial loading so already-shown sources stay
+	// on screen); refreshed becomes true once a re-probe result has landed, so the
+	// footer can read "updated" instead of the startup-snapshot caveat. No
+	// wall-clock is used (keeps the View golden-stable): the indicator is purely
+	// state-driven (refreshing… → updated).
+	refreshing bool
+	refreshed  bool
+
 	// Resource picker.
 	resources []client.MCPResource
 	resCursor int
@@ -139,12 +148,36 @@ func (m Model) onMCPKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	}
 }
 
-// onPanelKey: the panel is read-only — esc closes it.
+// onPanelKey: the panel is read-only — esc closes it, r re-probes LIVE source
+// status. r is a bare key safe here because the open overlay intercepts keys
+// before the global ctrl+o/ctrl+r/ctrl+p open bindings (see keyMap.Refresh).
 func (m Model) onPanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Close) {
+	switch {
+	case key.Matches(msg, m.keys.Close):
 		return m.closeMCP()
+	case key.Matches(msg, m.keys.Refresh):
+		return m.refreshPanel()
 	}
 	return m, nil
+}
+
+// refreshPanel re-issues the inventory + groups fetch so the panel reflects the
+// server's CURRENT MCP source status/diagnostics rather than the data last shown.
+// It keeps the existing sources on screen (no flicker to empty) and flips the
+// refreshing indicator; updateMCPMsg clears it and marks the panel "updated" when
+// the fresh result lands. A second refresh while one is in flight is a no-op.
+func (m Model) refreshPanel() (tea.Model, tea.Cmd) {
+	if m.mcp.refreshing {
+		return m, nil
+	}
+	m.mcp.refreshing = true
+	m.mcp.errMsg = ""
+	m.mcp.groupsDone = false
+	m.mcp.groupsErr = false
+	return m, tea.Batch(
+		client.ListMcpSourcesCmd(m.deps.Ctx, m.deps.MCP),
+		client.ListToolHiveGroupsCmd(m.deps.Ctx, m.deps.MCP),
+	)
 }
 
 // onResourceKey handles the resource list and its preview. In the list, up/down
@@ -322,6 +355,10 @@ func (m Model) updateMCPMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case client.MCPSourcesMsg:
 		m.mcp.loading = false
+		if m.mcp.refreshing {
+			m.mcp.refreshing = false
+			m.mcp.refreshed = true // panel now shows live-re-probed state, not the startup snapshot
+		}
 		m.mcp.sources = msg.Sources
 		return m, nil, true
 	case client.MCPGroupsMsg:
@@ -362,6 +399,7 @@ func (m Model) updateMCPMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			return m, nil, true
 		}
 		m.mcp.loading = false
+		m.mcp.refreshing = false // a failed re-probe clears the indicator; the error is shown instead
 		m.mcp.errCls = msg.Class
 		m.mcp.errMsg = msg.Op + ": " + msg.Err.Error()
 		return m, nil, true
@@ -465,9 +503,24 @@ func renderMCPPanel(th theme.Theme, st mcpState) string {
 		}
 	}
 	b.WriteString(renderGroupsLine(th, st))
-	b.WriteString("\n" + th.Style("muted").Render(
-		"snapshot from mecated startup — servers started later won't appear · esc close"))
+	b.WriteString("\n" + th.Style("muted").Render(mcpPanelFooter(st)))
 	return b.String()
+}
+
+// mcpPanelFooter is the panel's footer hint. Before any manual refresh it carries
+// the startup-snapshot caveat; after a successful re-probe it reads "updated" so
+// the user knows the panel reflects LIVE source status. Both forms advertise the
+// r-refresh and esc-close keys. No wall-clock — the wording is state-driven so the
+// View stays golden-stable.
+func mcpPanelFooter(st mcpState) string {
+	switch {
+	case st.refreshing:
+		return "refreshing… · r refresh · esc close"
+	case st.refreshed:
+		return "updated — live MCP source status · r refresh · esc close"
+	default:
+		return "snapshot from mecated startup — servers started later won't appear · r refresh · esc close"
+	}
 }
 
 // renderGroupsLine renders the best-effort ToolHive-groups line for the panel. It

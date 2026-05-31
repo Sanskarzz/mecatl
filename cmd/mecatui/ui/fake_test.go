@@ -112,6 +112,14 @@ type fakeMCP struct {
 	err error // when non-nil, every RPC returns it (already a gRPC status)
 
 	getPromptCalls int // how many times GetMCPPrompt was invoked (validation guard)
+
+	// nextSources, when non-nil, is returned by the SECOND (and later)
+	// ListMCPSources call — modelling a server whose live MCP status changed since
+	// the first fetch, so a panel refresh can be asserted to pick it up. Likewise
+	// nextGroups for ListToolHiveGroups. sourcesCalls counts ListMCPSources calls.
+	nextSources  []client.MCPSource
+	nextGroups   []string
+	sourcesCalls int
 }
 
 func (f *fakeMCP) ListMCPResources(_ context.Context, _ string) ([]client.MCPResource, error) {
@@ -144,8 +152,12 @@ func (f *fakeMCP) GetMCPPrompt(_ context.Context, _, _ string, _ map[string]stri
 }
 
 func (f *fakeMCP) ListMCPSources(_ context.Context) ([]client.MCPSource, error) {
+	f.sourcesCalls++
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.sourcesCalls > 1 && f.nextSources != nil {
+		return f.nextSources, nil
 	}
 	return f.sources, nil
 }
@@ -153,6 +165,9 @@ func (f *fakeMCP) ListMCPSources(_ context.Context) ([]client.MCPSource, error) 
 func (f *fakeMCP) ListToolHiveGroups(_ context.Context) ([]string, error) {
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.sourcesCalls > 1 && f.nextGroups != nil {
+		return f.nextGroups, nil
 	}
 	return f.groups, nil
 }
