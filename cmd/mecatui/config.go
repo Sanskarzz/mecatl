@@ -24,6 +24,13 @@ type config struct {
 	insecure   bool
 	listThemes bool
 
+	// noAltScreen renders mecatui INLINE in the terminal's normal buffer instead
+	// of the alternate screen. Off by default (full-screen TUI on the alt screen);
+	// the first-class opt-out for users who want the session streamed into native
+	// scrollback so it stays searchable/scrollable after exit. Wired to
+	// ui.Deps.NoAltScreen.
+	noAltScreen bool
+
 	// contextWindow is the model's context-window size in tokens, used as the
 	// footer meter denominator. 0 = unknown (meter shows just the current size).
 	// Honoured verbatim; never inferred from the model name.
@@ -60,6 +67,8 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.tlsCA, "tls-ca", "", "PEM CA bundle for external-server verification")
 	fs.BoolVar(&cfg.insecure, "insecure", false, "skip TLS verification (testing only)")
 	fs.BoolVar(&cfg.listThemes, "list-themes", false, "list available themes and exit")
+	fs.BoolVar(&cfg.noAltScreen, "no-alt-screen", false, "render inline in the terminal's normal buffer instead of the alternate screen, preserving native scrollback/search")
+	fs.BoolVar(&cfg.noAltScreen, "inline", false, "alias for --no-alt-screen: render inline in the normal buffer, preserving native scrollback/search")
 	fs.Int64Var(&cfg.contextWindow, "context-window", 0, "model context-window size in tokens for the footer meter (0 = unknown; not inferred from the model name)")
 
 	fs.StringVar(&cfg.model, "model", "gpt-5", "model identifier for the embedded server (ignored when dialling an external server)")

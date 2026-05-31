@@ -56,9 +56,12 @@ type Deps struct {
 	// Ctx is the program-level context; per-run stream contexts derive from it.
 	Ctx context.Context //nolint:containedctx // stored to parent per-run stream cancels
 
-	// NoAltScreen disables the alternate screen buffer. Production leaves this
-	// false (full-screen TUI); golden tests set it true so the final rendered
-	// frame persists in the captured output instead of being cleared on exit.
+	// NoAltScreen disables the alternate screen buffer, rendering inline in the
+	// terminal's normal buffer. Default false (full-screen TUI on the alt screen).
+	// Set true by the --no-alt-screen/--inline flag — a first-class user opt-out
+	// for streaming the session into native scrollback (so it stays
+	// searchable/scrollable after exit) — and by golden tests so the final frame
+	// persists in the captured output instead of being cleared on exit.
 	NoAltScreen bool
 }
 

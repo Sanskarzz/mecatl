@@ -238,6 +238,42 @@ func formatDuration(ms int64) string {
 	return trimDecimal(float64(ms)/1000.0) + "s"
 }
 
+// stopError is the "error" terminal stop reason (proto Result.stop /
+// session.StopError). Named once so the few sites that branch on it — the footer
+// label, the subagent label, and the ResultMsg/teardown paths — share one
+// spelling rather than scattering the literal.
+const stopError = "error"
+
+// stopReasonLabel maps a run's terminal stop reason (client.ResultMsg.Stop, the
+// proto Result.stop / session.StopReason vocabulary) to the human footer status
+// text and the theme style slot it should carry. The non-error LIMIT stops
+// (turn / tool-call / repeated-failure) are styled with the warning slot
+// ("ctxWarn") — they aren't failures but are worth noticing; a clean end_turn is
+// the unobtrusive muted "done"; cancelled is muted; error is the error slot (the
+// error block already carries the detail). An unknown/empty reason passes through
+// sanitized under the muted slot so a new server stop reason is never hidden.
+//
+// It is a pure function (no Model, no terminal) so it is unit-tested over every
+// reason; renderFooter / Update apply the returned slot.
+func stopReasonLabel(stop string) (text, slot string) {
+	switch stop {
+	case "end_turn", "":
+		return "done", "muted"
+	case "max_turns":
+		return "stopped · turn limit", "ctxWarn"
+	case "max_tool_calls":
+		return "stopped · tool-call limit", "ctxWarn"
+	case "max_consecutive_failures":
+		return "stopped · repeated failures", "ctxWarn"
+	case "cancelled":
+		return "cancelled", "muted"
+	case stopError:
+		return "error", "errorText"
+	default:
+		return sanitizeTerminal(stop), "muted"
+	}
+}
+
 // renderUsageFacets renders the session-total facets surfaced from ALL usage
 // fields: input/output token arrows, the previously-dropped cache-WRITE total
 // (⊕), and the cache-hit rate. Format: "↑7.9K ↓345 ⊕1.2K cache 88%". The cache

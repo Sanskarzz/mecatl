@@ -122,7 +122,7 @@ func TestFullCycleProgram(t *testing.T) {
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("stop: end_turn"))
+		return bytes.Contains(stripANSI(b), []byte("done"))
 	}, teatest.WithDuration(5*time.Second))
 
 	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})

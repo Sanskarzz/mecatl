@@ -184,3 +184,43 @@ func TestRenderUsageFacetsOmitsZeroCacheWrite(t *testing.T) {
 
 // stripANSIstr is a string convenience over stripANSI for assertions.
 func stripANSIstr(s string) string { return string(stripANSI([]byte(s))) }
+
+// TestStopReasonLabel locks the human phrasing + style slot for every stop
+// reason in the session.StopReason / proto Result.stop vocabulary, plus the
+// empty and unknown fallbacks. The limit stops carry the warning slot; a clean
+// end_turn / cancelled is muted; error is the error slot.
+func TestStopReasonLabel(t *testing.T) {
+	cases := []struct {
+		stop string
+		text string
+		slot string
+	}{
+		{"end_turn", "done", "muted"},
+		{"", "done", "muted"},
+		{"max_turns", "stopped · turn limit", "ctxWarn"},
+		{"max_tool_calls", "stopped · tool-call limit", "ctxWarn"},
+		{"max_consecutive_failures", "stopped · repeated failures", "ctxWarn"},
+		{"cancelled", "cancelled", "muted"},
+		{"error", "error", "errorText"},
+		{"some_future_reason", "some_future_reason", "muted"},
+	}
+	for _, c := range cases {
+		text, slot := stopReasonLabel(c.stop)
+		if text != c.text {
+			t.Errorf("stopReasonLabel(%q) text = %q, want %q", c.stop, text, c.text)
+		}
+		if slot != c.slot {
+			t.Errorf("stopReasonLabel(%q) slot = %q, want %q", c.stop, slot, c.slot)
+		}
+	}
+}
+
+// TestStopReasonLabelSanitizesUnknown asserts an unknown reason carrying an ESC
+// byte is stripped before it reaches the footer (it is rendered via lipgloss,
+// which would otherwise pass the escape through).
+func TestStopReasonLabelSanitizesUnknown(t *testing.T) {
+	text, _ := stopReasonLabel("evil\x1b[2Jreason")
+	if strings.ContainsRune(text, 0x1b) {
+		t.Errorf("unknown stop reason should be sanitized, got %q", text)
+	}
+}

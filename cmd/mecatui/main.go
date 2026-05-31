@@ -102,6 +102,9 @@ func run(args []string) error {
 		Workspace:     cfg.workspace,
 		Mode:          cfg.mode,
 		Ctx:           ctx,
+		// First-class opt-out: render inline in the normal buffer (preserving
+		// native scrollback) instead of the alternate screen. Default false.
+		NoAltScreen: cfg.noAltScreen,
 	}
 
 	prog := tea.NewProgram(ui.New(deps), tea.WithContext(ctx))

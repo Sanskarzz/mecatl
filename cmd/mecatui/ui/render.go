@@ -738,7 +738,7 @@ func subagentStopLabel(stop string) string {
 		return "max-failures"
 	case "cancelled":
 		return "cancelled"
-	case "error":
+	case stopError:
 		return "error"
 	default:
 		return sanitizeTerminal(stop)

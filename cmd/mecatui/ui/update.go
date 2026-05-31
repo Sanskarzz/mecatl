@@ -40,7 +40,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case client.StreamErrMsg:
 		m.conv.addError("stream error: " + msg.Err.Error())
-		return m.endRun("error"), m.refreshCmd()
+		return m.endRun(stopError), m.refreshCmd()
 	case client.StreamClosedMsg:
 		// Clean close. If a run was still active (no terminal result seen),
 		// finalise it; otherwise it's the expected post-result close (no-op).
@@ -133,10 +133,9 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The latest turn's prompt size is the current context occupancy
 		// (InputTokens already includes cache-served tokens).
 		m.contextTokens = msg.Usage.InputTokens
-		if msg.Stop == "error" && msg.Error != "" {
+		if msg.Stop == stopError && msg.Error != "" {
 			m.conv.addError(msg.Error)
 		}
-		m.statusMsg = "stop: " + msg.Stop
 		return m.endRun(msg.Stop), m.refreshCmd()
 	default:
 		return m, nil
@@ -353,7 +352,7 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	if err != nil {
 		cancel()
 		m.conv.addError("open run: " + err.Error())
-		return m.endRun("error"), nil
+		return m.endRun(stopError), nil
 	}
 	ch := make(chan tea.Msg, 64)
 	m.stream = stream
@@ -409,7 +408,8 @@ func (m Model) endRun(stop string) Model {
 	// the blink anyway.
 	_ = m.ta.Focus()
 	if stop != "" {
-		m.statusMsg = "stop: " + stop
+		text, slot := stopReasonLabel(stop)
+		m.statusMsg = m.deps.Theme.Style(slot).Render(text)
 	}
 	m.refreshView()
 	return m

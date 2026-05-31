@@ -44,6 +44,27 @@ func TestParseFlagsWorkspaceAbs(t *testing.T) {
 	}
 }
 
+// TestParseFlagsNoAltScreen asserts the inline opt-out is off by default and is
+// set by either --no-alt-screen or its --inline alias.
+func TestParseFlagsNoAltScreen(t *testing.T) {
+	cfg, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.noAltScreen {
+		t.Error("noAltScreen = true by default, want false (full-screen alt screen)")
+	}
+	for _, flag := range []string{"-no-alt-screen", "-inline"} {
+		cfg, err := parseFlags([]string{flag})
+		if err != nil {
+			t.Fatalf("parseFlags(%q): %v", flag, err)
+		}
+		if !cfg.noAltScreen {
+			t.Errorf("%s did not set noAltScreen", flag)
+		}
+	}
+}
+
 // TestParseFlagsAuthEnv asserts MECATL_AUTH_TOKEN is picked up when the flag is
 // unset.
 func TestParseFlagsAuthEnv(t *testing.T) {
