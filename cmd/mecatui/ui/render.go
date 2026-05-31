@@ -560,8 +560,11 @@ func (r *renderer) renderTeam(b *block, expand bool) string {
 		}
 	}
 	if extra := len(order) - len(shown); extra > 0 {
+		// The inline card caps at maxTeamLanes; the rest live in the ctrl+a overlay.
+		// Advertise it on the roll-up so a capped card is the discovery point for the
+		// full, windowed roster.
 		out.WriteString("\n")
-		out.WriteString(muted.Render(fmt.Sprintf("  · +%d more", extra)))
+		out.WriteString(muted.Render(fmt.Sprintf("  · +%d more · ctrl+a", extra)))
 	}
 	return out.String()
 }

@@ -1,0 +1,24 @@
+ mecatui  ·  session sess-test-00  ·  mock-model  ·  mode default  ·  127.0.0.1:8080
+────────────────────────────────────────────────────────────────────────────────────────────────────
+                               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+                               ┃                                    ┃
+                               ┃  agent · scout                     ┃
+                               ┃  ◆ · scout [lead] · Read… · ↑0 ↓0  ┃
+                               ┃                                    ┃
+                               ┃    ✓ Read — 100 lines              ┃
+                               ┃    ✓ Read — 101 lines              ┃
+                               ┃    ✓ Read — 102 lines              ┃
+                               ┃    ✓ Read — 103 lines              ┃
+                               ┃    ✓ Read — 104 lines              ┃
+                               ┃    ✓ Read — 105 lines              ┃
+                               ┃    … +6 more lines                 ┃
+                               ┃                                    ┃
+                               ┃  esc back                          ┃
+                               ┃                                    ┃
+                               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline)
+┃
+┃
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ connected                                                                   ctx 0 · ↑0 ↓0 cache 0%
+enter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · ctrl+a team · ctrl+t details · ctrl+c quit

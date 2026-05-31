@@ -52,6 +52,7 @@ type teamTrace struct {
 // capped at maxTeamTrace.
 type teamLane struct {
 	name     string
+	role     string // the member's roster role (e.g. "researcher"); shown in the ctrl+a overlay roster, omitted from the calm inline card
 	mutating bool
 	lead     bool
 
@@ -329,6 +330,7 @@ func (c *conversation) setTeamStart(parentCallID string, roster []client.TeamMem
 	for _, m := range roster {
 		b.teamLanes = append(b.teamLanes, teamLane{
 			name:     m.Name,
+			role:     m.Role,
 			mutating: m.Mutating,
 			lead:     m.Lead,
 		})
@@ -449,6 +451,23 @@ func (c *conversation) setTeamEnd(parentCallID string, rounds int, stop string, 
 	b.teamStop = stop
 	b.teamUsage = usage
 	return true
+}
+
+// latestTeamBlock returns the most-recent tool block that carries team lanes (a
+// Team card with at least one member lane), or nil if no team has been seen this
+// session. It scans from the end so a fresh team supersedes an earlier one — the
+// ctrl+a overlay always reflects the latest team. The block is returned by
+// pointer so the overlay reads the live, accumulating lane state (it never
+// mutates it). A team card with no lanes yet (team.start not seen, or empty
+// roster) is skipped so the overlay never opens onto an empty roster.
+func (c *conversation) latestTeamBlock() *block {
+	for i := len(c.blocks) - 1; i >= 0; i-- {
+		b := &c.blocks[i]
+		if b.kind == blockTool && b.team && len(b.teamLanes) > 0 {
+			return b
+		}
+	}
+	return nil
 }
 
 // addNotice appends a muted info block (compaction / permission verb).

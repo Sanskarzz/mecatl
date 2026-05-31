@@ -31,6 +31,8 @@ func (m Model) View() tea.View {
 		body = m.rend.renderPermissionModal(m.ask, m.expandTools, m.width, m.vp.Height())
 	case m.mcp.view != mcpNone:
 		body = renderMCPOverlay(m.deps.Theme, m.mcp, m.width, m.vp.Height())
+	case m.agents.view != agentsNone:
+		body = renderAgentsOverlay(m.deps.Theme, m.agents, m.conv.latestTeamBlock(), m.width, m.vp.Height())
 	default:
 		body = m.vp.View()
 	}
@@ -130,7 +132,7 @@ func (m Model) renderFooter() string {
 	// affordances live inline on each collapsible header (where discoverability
 	// belongs), not in this always-on status line.
 	help := "enter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · " +
-		"ctrl+t details · ctrl+c quit"
+		"ctrl+a team · ctrl+t details · ctrl+c quit"
 
 	width := m.widthOr(80)
 	line := m.fitFooter(left, width)

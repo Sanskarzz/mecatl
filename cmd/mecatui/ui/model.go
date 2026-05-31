@@ -97,6 +97,7 @@ type Model struct {
 	activeTool string         // tool name in flight, shown beside the spinner
 	ask        pendingAsk     // current permission modal (when phaseAwaitingApproval)
 	mcp        mcpState       // MCP overlay state (view==mcpNone when closed)
+	agents     agentsState    // agent-team overlay state (view==agentsNone when closed)
 	stream     *client.Stream // current run's stream
 	cancelRun  context.CancelFunc
 

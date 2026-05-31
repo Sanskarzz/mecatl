@@ -27,4 +27,4 @@
 [38;5;240m[37m┃ [m[m[30m [m
 [38;2;46;64;57m────────────────────────────────────────────────────────────────────────────────────────────────────[m
  [38;2;138;153;143m[1;38;2;233;185;73m⚠ awaiting approval[m                                                         ctx 0 · ↑0 ↓0 cache 0%[m
-[3;38;2;138;153;143menter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · ctrl+t details · ctrl+c quit[m
+[3;38;2;138;153;143menter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · ctrl+a team · ctrl+t details · ctrl+c quit[m

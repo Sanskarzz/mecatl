@@ -28,6 +28,19 @@ type keyMap struct {
 	Choose    key.Binding
 	Close     key.Binding
 
+	// Jump bindings for the windowed agent-team roster (tedious to traverse with
+	// ↑/↓ at the 20–32-member scale the overlay exists for): home/g jump to the
+	// first member, end/G to the last. Page up/down reuse ScrollU/ScrollD (pgup/
+	// pgdown) inside the overlay to move the selection by a window's worth.
+	JumpTop key.Binding
+	JumpEnd key.Binding
+
+	// Agents opens the agent-team hierarchy overlay: the FULL (uncapped) roster
+	// of the most-recent Team tool card, with per-member focus. Like the MCP
+	// bindings it is control-modified so it never collides with textarea input,
+	// and is only live while idle.
+	Agents key.Binding
+
 	// ExpandTools is the general "show details" toggle: full vs line-capped
 	// tool-result bodies + Edit/Write diffs, and collapsed vs expanded reasoning
 	// summaries. Control-modified so it never collides with textarea input.
@@ -84,6 +97,11 @@ func defaultKeys() keyMap {
 			key.WithKeys("ctrl+p"),
 			key.WithHelp("ctrl+p", "MCP prompts"),
 		),
+		// ctrl+a: the Agent-team hierarchy overlay (full roster + per-member focus).
+		Agents: key.NewBinding(
+			key.WithKeys("ctrl+a"),
+			key.WithHelp("ctrl+a", "agent team"),
+		),
 		Up: key.NewBinding(
 			key.WithKeys("up", "k"),
 			key.WithHelp("↑/k", "up"),
@@ -99,6 +117,14 @@ func defaultKeys() keyMap {
 		Close: key.NewBinding(
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "close"),
+		),
+		JumpTop: key.NewBinding(
+			key.WithKeys("home", "g"),
+			key.WithHelp("home/g", "first"),
+		),
+		JumpEnd: key.NewBinding(
+			key.WithKeys("end", "G"),
+			key.WithHelp("end/G", "last"),
 		),
 		ExpandTools: key.NewBinding(
 			key.WithKeys("ctrl+t"),

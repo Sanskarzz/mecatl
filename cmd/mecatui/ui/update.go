@@ -209,6 +209,13 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return mm, cmd
 	}
 
+	// An open agent-team overlay likewise owns the keyboard (idle-only). It steps
+	// back from focus → roster → closed on esc internally, so route here before the
+	// phase switch (and before the ctrl+t toggle, so esc/enter belong to it).
+	if mm, cmd, handled := m.onAgentsKey(msg); handled {
+		return mm, cmd
+	}
+
 	// ctrl+t is a global render toggle (full vs capped tool output); it works in
 	// any phase and never feeds the textarea.
 	if key.Matches(msg, m.keys.ExpandTools) {
@@ -305,6 +312,8 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openMCP(mcpResources)
 	case key.Matches(msg, m.keys.Prompts):
 		return m.openMCP(mcpPrompts)
+	case key.Matches(msg, m.keys.Agents):
+		return m.openAgents()
 	case key.Matches(msg, m.keys.Newline):
 		m.ta.InsertRune('\n')
 		return m, nil
