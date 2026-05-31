@@ -38,7 +38,7 @@ func NewAgent(svc *server.Service) *Agent {
 	return &Agent{
 		svc:      svc,
 		inFlight: make(map[string]struct{}),
-		info:     implementation{Name: "mecatl", Version: "acp-phase1"},
+		info:     implementation{Name: "mecatl", Version: "acp-phase2"},
 	}
 }
 

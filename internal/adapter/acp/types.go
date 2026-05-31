@@ -188,17 +188,36 @@ const (
 	toolStatusFailed     = "failed"
 )
 
-// toolCallContent is the ToolCallContent union; this phase emits only the
-// "content" variant wrapping a text ContentBlock (diff/terminal are deferred).
+// toolCallContent is the ToolCallContent union. Two variants are emitted:
+//   - the "content" variant wraps a text ContentBlock (results, progress lines);
+//   - the "diff" variant carries a file path + old/new text so the editor renders
+//     a native inline diff for an Edit/Write (Phase 2).
+//
+// The two variants carry mutually-exclusive fields, so the unused ones are
+// omitempty and a single struct expresses both. (terminal is still deferred.)
 type toolCallContent struct {
-	Type    string       `json:"type"`
-	Content contentBlock `json:"content"`
+	Type string `json:"type"`
+	// Content is set on the "content" variant only.
+	Content *contentBlock `json:"content,omitempty"`
+	// Path/OldText/NewText are set on the "diff" variant only. OldText is a pointer
+	// so it is OMITTED for a new/overwritten file (ACP: absent oldText means the
+	// file did not exist / is fully replaced) rather than serialized as "".
+	Path    string  `json:"path,omitempty"`
+	OldText *string `json:"oldText,omitempty"`
+	NewText string  `json:"newText,omitempty"`
 }
 
 // textToolContent wraps result text as a single ToolCallContent of the content
 // variant.
 func textToolContent(text string) []toolCallContent {
-	return []toolCallContent{{Type: "content", Content: textBlock(text)}}
+	cb := textBlock(text)
+	return []toolCallContent{{Type: "content", Content: &cb}}
+}
+
+// diffToolContent builds a single "diff" ToolCallContent. oldText is a pointer so
+// the caller can omit it (nil) for a new/overwritten file.
+func diffToolContent(path string, oldText *string, newText string) []toolCallContent {
+	return []toolCallContent{{Type: "diff", Path: path, OldText: oldText, NewText: newText}}
 }
 
 // --- session/request_permission (agent -> client) ----------------------------

@@ -2,7 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-05-30
-- Scope: Phase 1 (core loop). Phases 2–3 remain (see "Deferred").
+- Scope: Phase 1 (core loop) + Phase 2 (fidelity — diff blocks, subagent/team/hook
+  projection). Phase 3 remains (see "Deferred to Phase 3").
 
 ## Context
 
@@ -57,8 +58,9 @@ outbound `request_permission` and correlates the reply).
    - **`allow_always` behaves as `allow_once`.** There is no rule persistence
      yet, so every approval is one-shot. The four ACP option kinds are still
      offered; `allow_always`/`allow_once` both map to `run.Approve(askID, true)`.
-   - **diff content blocks DEFERRED.** `tool_call_update` carries the tool result
-     as a plain-text `content` block, not a structured `diff` for edits.
+   - **diff content blocks** (DONE in Phase 2 — see below). Phase 1 carried only
+     plain-text `content`; Phase 2 attaches a structured `diff` block to Edit/Write
+     tool calls.
    - **entry = `mecated --acp`.** (Not a separate binary.)
 
 ## Capabilities advertised (`initialize`)
@@ -75,14 +77,17 @@ outbound `request_permission` and correlates the reply).
   the current mode is always `default` on a fresh session this phase (switching
   is deferred).
 
-## Event projection (Phase 1)
+## Event projection (Phase 1 + Phase 2)
 
 | domain `session.Event`        | ACP                                                            |
 |-------------------------------|----------------------------------------------------------------|
 | `EvMessageDelta`              | `session/update` `agent_message_chunk{content:text}`           |
 | `EvReasoningDelta`            | `session/update` `agent_thought_chunk{content:text}` (summary only — never the encrypted replay blob) |
-| `EvToolCall`                  | `session/update` `tool_call{toolCallId,title,kind,rawInput,status:pending}` |
+| `EvToolCall`                  | `session/update` `tool_call{toolCallId,title,kind,rawInput,status:pending}` — for Edit/Write a `diff` content block is attached (Phase 2) |
 | `EvToolResult`                | `session/update` `tool_call_update{toolCallId,status:completed\|failed,content:[text]}` |
+| `EvHook`                      | `session/update` `agent_thought_chunk{content:reason}` (Phase 2) |
+| `EvSubagentTool`/`EvSubagentEnd` | `session/update` `tool_call_update` on the PARENT Task call id (Phase 2) |
+| `EvTeamMember`/`EvTeamEnd`    | `session/update` `tool_call_update` on the PARENT Team call id (Phase 2) |
 | `EvPermissionAsk`             | OUTBOUND `session/request_permission` (4 options); reply → `run.Approve` |
 | `EvResult`                    | the prompt's return `{stopReason}` |
 
@@ -91,9 +96,52 @@ limit reasons (`StopMaxTurns`/`StopMaxToolCalls`/`StopMaxConsecutiveFailures`)�
 `max_turn_requests`; `StopError→end_turn` (a clean terminal — the error text
 still reaches the editor via the preceding message chunks).
 
-**Dropped / folded this phase** (no clean ACP mapping yet; full fidelity is a
-later phase): `session.init`, `turn.start`, `turn.end`, `compaction`, `hook`,
-`subagent.*`, `team.*`. These are dropped (not surfaced) for now.
+**Dropped / folded**: `session.init`, `turn.start`, `turn.end`, `compaction`,
+`subagent.start`, `team.start`. The two `.start` events are dropped because the
+parent `tool_call` (Task / Team) already names the delegated work; the roster/goal
+would add noise before the first progress line.
+
+## Phase 2 fidelity
+
+1. **Diff content blocks.** An Edit or Write `tool_call` carries an ACP `diff`
+   content block `{type:"diff", path, oldText?, newText}` synthesized from the
+   tool-call args, so editors render a native inline diff at the moment the call is
+   shown (before it even runs). Mapping: **Edit** → `oldText=old_string`,
+   `newText=new_string`, `path=path`; **Write** → `newText=content`, `oldText`
+   OMITTED (ACP: an absent `oldText` means a new/overwritten file). The Edit/Write
+   arg shapes are mirrored as tiny local structs in `projector.go` — the projector
+   must not import the tools adapter. **Malformed args (bad JSON, or no `path`) →
+   no diff (nil content)**, and the editor still gets the plain-text result on the
+   later `tool_call_update` (graceful fallback). The tool-`kind` mapping
+   (`toolKindFor`) covers Read/Grep/Glob→`read`, Edit/Write→`edit`, Bash→`execute`,
+   WebFetch→`fetch`, Task/Team/Fork→`think`, everything else (incl. MCP)→`other`.
+
+2. **Subagent + team fidelity.** Phase 1 DROPPED `subagent.*`/`team.*`. Phase 2
+   projects them as `tool_call_update` **progress on the PARENT tool_call** keyed by
+   `SubagentPayload.ParentCallID` / `TeamPayload.ParentCallID`: each `subagent.tool`
+   / `team.member` appends an `in_progress` content line (the child tool name, or
+   the bounded member activity — already redacted/bounded at source), and
+   `subagent.end`/`team.end` finalize the parent call (`failed` if the child stopped
+   on error, else `in_progress` — the parent's own `tool_call_update` carries the
+   terminal `completed`). A `subagent.tool`/`team.member` with no parent id, or a
+   `team.member` with nothing to show, is dropped.
+
+3. **Hook events.** `EvHook` projects to an `agent_thought_chunk` carrying the
+   hook's reason (a blocked PreToolUse veto, a prompt/arg rewrite, a Stop notice).
+   It is deliberately NOT a `failed` `tool_call_update` on the related tool: ACP
+   keys a `tool_call_update` by `toolCallId`, but `HookPayload` carries only the
+   tool NAME, never the originating tool-call id — so this package cannot address
+   the real tool_call without fabricating a phantom card. The blocked call's own
+   `EvToolResult` (which DOES carry the real id) still projects to a `failed`
+   `tool_call_update`. Surfacing the veto ON the tool card needs the call id added
+   to `HookPayload` (an event-taxonomy change) — deferred to Phase 3.
+
+4. **Modes + commands DEFERRED to Phase 3.** `current_mode_update` /
+   `session/set_mode` need a Service seam to change a session's `PermissionMode`
+   mid-session; `*server.Service` exposes none today (only Create/Get/Start/Approve/
+   Cancel), and adding one is outside this adapter's package. `available_commands_update`
+   needs a wired slash-command registry, which mecatl does not expose. Both were
+   scoped out to keep Phase 2 confined to `internal/adapter/acp/`.
 
 ## Permission round-trip
 
@@ -110,7 +158,7 @@ awaiting session is loadable for re-attach after a restart. The ACP adapter
 deliberately SKIPS that this phase — there is no re-attach surface yet
 (`loadSession:false`, no `session/load`), and the prompt blocks for the whole
 turn on the same connection, so a persisted awaiting snapshot would be unused. It
-becomes a `Persist` call if Phase 2 adds `session/load`.
+becomes a `Persist` call when a later phase adds `session/load`.
 
 ## Concurrency / serialization
 
@@ -121,12 +169,15 @@ interleave a frame. Inbound requests are handled on their own goroutines so a
 handler that issues an outbound `Call` (a `session/prompt` issuing
 `request_permission`) cannot deadlock the single read loop.
 
-## Deferred to later phases (Phases 2–3)
+## Deferred to Phase 3
 
 - fs/\* delegation (`readTextFile`/`writeTextFile`).
-- `allow_always` rule persistence.
-- `diff` content blocks for edits.
-- Full-fidelity projection of `turn.*`/`hook`/`compaction`/`subagent.*`/`team.*`
-  (ACP plan + nested-tool modelling).
-- `session/load` (resume), session mode switching, slash commands / config
-  options, client-provided MCP servers, image/audio prompt content.
+- `allow_always` rule persistence (still maps to `allow_once`).
+- `session/load` (resume).
+- Session **mode switching** (`current_mode_update` / `session/set_mode`) — needs
+  a Service seam to mutate a session's `PermissionMode` mid-session.
+- **Slash commands** (`available_commands_update`) — needs a wired command registry.
+- Keying a hook veto onto the related tool card — needs the tool-call id added to
+  `HookPayload` (an event-taxonomy change).
+- Client-provided MCP servers, image/audio prompt content.
+- Richer projection of `turn.*` / `compaction` (ACP plan modelling).

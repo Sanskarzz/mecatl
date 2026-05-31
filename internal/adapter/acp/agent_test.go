@@ -370,6 +370,72 @@ func assertHasToolStatus(t *testing.T, updates []map[string]any, kind, status st
 	t.Fatalf("missing %s update with status %q in %v", kind, status, updates)
 }
 
+// TestEndToEndEditDiffBlock drives a prompt whose model emits an Edit tool call
+// (auto-allowed), and asserts the streamed tool_call carries an ACP diff content
+// block synthesized from the Edit args (oldText/newText/path) so the editor can
+// render a native inline diff.
+func TestEndToEndEditDiffBlock(t *testing.T) {
+	edit := &scriptTool{name: "Edit", readOnly: false, content: "edited"}
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(call("c1", "Edit", `{"path":"main.go","old_string":"foo","new_string":"bar"}`)),
+		mockllm.TextTurn("done"),
+	)
+	svc := newService(t, llm, allowRules(), edit) // allow => no permission ask
+
+	agentStdinR, editorToAgentW := io.Pipe()
+	agentStdoutR, agentStdoutW := io.Pipe()
+	a := acp.NewAgent(svc)
+	conn := acp.NewConn(agentStdinR, agentStdoutW, a.Handle)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = a.Serve(ctx, conn) }()
+
+	e := &editor{t: t, toAgent: editorToAgentW, fromAgnt: bufio.NewReader(agentStdoutR),
+		pend: map[int64]chan rpcMsg{}, notes: make(chan rpcMsg, 64), reqs: make(chan rpcMsg, 8)}
+	go e.readLoop()
+
+	res := e.call("session/new", map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}})
+	var ns struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(res, &ns)
+
+	out := e.call("session/prompt", map[string]any{"sessionId": ns.SessionID,
+		"prompt": []any{map[string]any{"type": "text", "text": "edit it"}}})
+	var pr struct {
+		StopReason string `json:"stopReason"`
+	}
+	if err := json.Unmarshal(out, &pr); err != nil || pr.StopReason != "end_turn" {
+		t.Fatalf("prompt stopReason %q err %v", pr.StopReason, err)
+	}
+
+	updates := drainUpdates(e.notes)
+	// Find the Edit tool_call and assert its content carries a diff block.
+	var found bool
+	for _, u := range updates {
+		if u["sessionUpdate"] != "tool_call" || u["title"] != "Edit" {
+			continue
+		}
+		content, ok := u["content"].([]any)
+		if !ok || len(content) == 0 {
+			t.Fatalf("Edit tool_call has no content array: %v", u)
+		}
+		block := content[0].(map[string]any)
+		if block["type"] != "diff" {
+			t.Fatalf("Edit content block type = %v, want diff", block["type"])
+		}
+		if block["path"] != "main.go" || block["oldText"] != "foo" || block["newText"] != "bar" {
+			t.Fatalf("diff block = %v", block)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("no Edit tool_call with a diff block in %v", updates)
+	}
+
+	_ = editorToAgentW.Close()
+}
+
 // TestSessionNewRejectsStdioMCP asserts a client-provided stdio MCP server is
 // rejected (mecatl is streaming-HTTP MCP only).
 func TestSessionNewRejectsStdioMCP(t *testing.T) {

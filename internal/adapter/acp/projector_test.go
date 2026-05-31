@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stacklok/mecatl/internal/session"
@@ -95,20 +96,18 @@ func TestProjectUpdateToolResult(t *testing.T) {
 }
 
 // TestProjectUpdateDropped asserts the events with no session/update projection
-// this phase are dropped (folding/fidelity is a later phase).
+// this phase are dropped. subagent.start/team.start are dropped (the parent
+// tool_call already names the work); subagent.tool/end and team.member/end DO
+// project (see their dedicated tests below). EvHook with a nil payload is also
+// dropped (a well-formed EvHook projects — see TestProjectHook).
 func TestProjectUpdateDropped(t *testing.T) {
 	dropped := []session.EventType{
 		session.EvSessionInit,
 		session.EvTurnStart,
 		session.EvTurnEnd,
 		session.EvCompaction,
-		session.EvHook,
 		session.EvSubagentStart,
-		session.EvSubagentTool,
-		session.EvSubagentEnd,
 		session.EvTeamStart,
-		session.EvTeamMember,
-		session.EvTeamEnd,
 		session.EvResult,        // handled out of band (stopReason)
 		session.EvPermissionAsk, // handled out of band (request_permission)
 	}
@@ -116,6 +115,228 @@ func TestProjectUpdateDropped(t *testing.T) {
 		if _, ok := projectUpdate(session.Event{Type: et}); ok {
 			t.Errorf("event %q should not project to a session/update", et)
 		}
+	}
+	// An EvHook / EvSubagentTool / EvTeamMember with no payload (or no parent id)
+	// has nothing to project and is dropped.
+	if _, ok := projectUpdate(session.Event{Type: session.EvHook}); ok {
+		t.Error("EvHook with nil payload should not project")
+	}
+	if _, ok := projectUpdate(session.Event{Type: session.EvSubagentTool, Subagent: &session.SubagentPayload{}}); ok {
+		t.Error("subagent.tool with empty ParentCallID should not project")
+	}
+	if _, ok := projectUpdate(session.Event{Type: session.EvTeamMember, Team: &session.TeamPayload{}}); ok {
+		t.Error("team.member with empty ParentCallID should not project")
+	}
+}
+
+// TestProjectUpdateEditDiff asserts an Edit tool.call carries an ACP diff content
+// block synthesized from the args (oldText=old_string, newText=new_string).
+func TestProjectUpdateEditDiff(t *testing.T) {
+	call := session.NewToolCall("c-edit", "Edit",
+		json.RawMessage(`{"path":"main.go","old_string":"old","new_string":"new"}`))
+	got, ok := projectUpdate(session.Event{Type: session.EvToolCall, ToolCall: &call})
+	if !ok {
+		t.Fatal("expected a projection")
+	}
+	tc := got.(toolCallUpdate)
+	if tc.Kind != "edit" {
+		t.Errorf("kind = %q, want edit", tc.Kind)
+	}
+	if len(tc.Content) != 1 || tc.Content[0].Type != "diff" {
+		t.Fatalf("content = %+v, want one diff block", tc.Content)
+	}
+	d := tc.Content[0]
+	if d.Path != "main.go" || d.OldText == nil || *d.OldText != "old" || d.NewText != "new" {
+		t.Errorf("diff = path=%q oldText=%v newText=%q", d.Path, d.OldText, d.NewText)
+	}
+}
+
+// TestProjectUpdateWriteDiff asserts a Write tool.call carries a diff block with
+// newText=content and NO oldText (a new/overwritten file).
+func TestProjectUpdateWriteDiff(t *testing.T) {
+	call := session.NewToolCall("c-write", "Write",
+		json.RawMessage(`{"path":"new.txt","content":"hello\n"}`))
+	got, _ := projectUpdate(session.Event{Type: session.EvToolCall, ToolCall: &call})
+	tc := got.(toolCallUpdate)
+	if len(tc.Content) != 1 || tc.Content[0].Type != "diff" {
+		t.Fatalf("content = %+v, want one diff block", tc.Content)
+	}
+	d := tc.Content[0]
+	if d.Path != "new.txt" || d.NewText != "hello\n" {
+		t.Errorf("diff = path=%q newText=%q", d.Path, d.NewText)
+	}
+	if d.OldText != nil {
+		t.Errorf("oldText = %v, want nil (omitted) for a Write", *d.OldText)
+	}
+	// And it must marshal with no "oldText" key at all.
+	b, _ := json.Marshal(d)
+	if strings.Contains(string(b), "oldText") {
+		t.Errorf("Write diff marshalled with oldText key: %s", b)
+	}
+}
+
+// TestProjectUpdateEditMalformedArgsFallsBack asserts that an Edit with malformed
+// args produces NO diff (nil content), so the loop falls back to text content.
+func TestProjectUpdateEditMalformedArgsFallsBack(t *testing.T) {
+	tests := []struct {
+		name string
+		args string
+	}{
+		{"not json", `{not json`},
+		{"missing path", `{"old_string":"a","new_string":"b"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			call := session.NewToolCall("c", "Edit", json.RawMessage(tc.args))
+			got, ok := projectUpdate(session.Event{Type: session.EvToolCall, ToolCall: &call})
+			if !ok {
+				t.Fatal("expected a projection (tool_call) even with bad args")
+			}
+			if u := got.(toolCallUpdate); u.Content != nil {
+				t.Errorf("expected nil content (text fallback), got %+v", u.Content)
+			}
+		})
+	}
+}
+
+// TestProjectUpdateNonEditNoDiff asserts a read/execute tool call carries no diff.
+func TestProjectUpdateNonEditNoDiff(t *testing.T) {
+	call := session.NewToolCall("c", "Bash", json.RawMessage(`{"cmd":"ls"}`))
+	got, _ := projectUpdate(session.Event{Type: session.EvToolCall, ToolCall: &call})
+	if u := got.(toolCallUpdate); u.Content != nil {
+		t.Errorf("Bash call should have no diff content, got %+v", u.Content)
+	}
+}
+
+// TestProjectHook asserts a hook event projects to an agent_thought_chunk carrying
+// the reason (a blocked hook with no addressable tool-call id cannot key a
+// tool_call_update — see projectHook).
+func TestProjectHook(t *testing.T) {
+	ev := session.Event{
+		Type: session.EvHook,
+		Text: "blocked by PreToolUse hook",
+		Hook: &session.HookPayload{Phase: "PreToolUse", Tool: "Bash", Decision: session.HookBlocked},
+	}
+	got, ok := projectUpdate(ev)
+	if !ok {
+		t.Fatal("expected a projection")
+	}
+	cu, isChunk := got.(chunkUpdate)
+	if !isChunk {
+		t.Fatalf("want chunkUpdate, got %T", got)
+	}
+	if cu.SessionUpdate != updateAgentThoughtChunk {
+		t.Errorf("sessionUpdate = %q, want thought chunk", cu.SessionUpdate)
+	}
+	if cu.Content.Text != "blocked by PreToolUse hook" {
+		t.Errorf("text = %q", cu.Content.Text)
+	}
+}
+
+// TestProjectHookNoText asserts a hook with no Text falls back to a phase/decision
+// summary line.
+func TestProjectHookNoText(t *testing.T) {
+	got, _ := projectUpdate(session.Event{
+		Type: session.EvHook,
+		Hook: &session.HookPayload{Phase: "PreToolUse", Tool: "Bash", Decision: session.HookBlocked},
+	})
+	cu := got.(chunkUpdate)
+	if cu.Content.Text != "PreToolUse Bash: blocked" {
+		t.Errorf("summary = %q", cu.Content.Text)
+	}
+}
+
+// TestProjectSubagent asserts subagent.tool/end project as tool_call_update on the
+// PARENT Task call id.
+func TestProjectSubagent(t *testing.T) {
+	toolEv := session.Event{
+		Type:     session.EvSubagentTool,
+		Subagent: &session.SubagentPayload{ParentCallID: "task-1", ChildID: "child-9", ToolName: "Read", ToolCount: 2},
+	}
+	got, ok := projectUpdate(toolEv)
+	if !ok {
+		t.Fatal("expected a projection")
+	}
+	u := got.(toolCallUpdate)
+	if u.SessionUpdate != updateToolCallUpdate || u.ToolCallID != "task-1" {
+		t.Errorf("update = %+v, want tool_call_update on task-1", u)
+	}
+	if u.Status != toolStatusInProgress {
+		t.Errorf("status = %q, want in_progress", u.Status)
+	}
+	if len(u.Content) != 1 || !strings.Contains(u.Content[0].Content.Text, "Read") {
+		t.Errorf("content = %+v, want a line mentioning Read", u.Content)
+	}
+
+	endEv := session.Event{
+		Type:     session.EvSubagentEnd,
+		Subagent: &session.SubagentPayload{ParentCallID: "task-1", ToolCount: 3, Stop: session.StopEndTurn},
+	}
+	endGot, _ := projectUpdate(endEv)
+	eu := endGot.(toolCallUpdate)
+	if eu.ToolCallID != "task-1" || eu.Status != toolStatusInProgress {
+		t.Errorf("end update = %+v", eu)
+	}
+}
+
+// TestProjectSubagentEndError asserts a subagent that ended in error marks the
+// parent Task call failed.
+func TestProjectSubagentEndError(t *testing.T) {
+	got, _ := projectUpdate(session.Event{
+		Type:     session.EvSubagentEnd,
+		Subagent: &session.SubagentPayload{ParentCallID: "task-2", Stop: session.StopError},
+	})
+	if u := got.(toolCallUpdate); u.Status != toolStatusFailed {
+		t.Errorf("status = %q, want failed", u.Status)
+	}
+}
+
+// TestProjectTeam asserts team.member/end project as tool_call_update on the
+// PARENT Team call id.
+func TestProjectTeam(t *testing.T) {
+	memberEv := session.Event{
+		Type: session.EvTeamMember,
+		Team: &session.TeamPayload{
+			ParentCallID: "team-1", TeamID: "t9", Member: "alice",
+			InnerKind: session.EvToolCall, ToolName: "Grep", Detail: "{q}",
+		},
+	}
+	got, ok := projectUpdate(memberEv)
+	if !ok {
+		t.Fatal("expected a projection")
+	}
+	u := got.(toolCallUpdate)
+	if u.ToolCallID != "team-1" || u.Status != toolStatusInProgress {
+		t.Errorf("update = %+v", u)
+	}
+	if len(u.Content) != 1 || !strings.Contains(u.Content[0].Content.Text, "alice") {
+		t.Errorf("content = %+v, want a line mentioning alice", u.Content)
+	}
+
+	// A message.delta member event surfaces the member's text.
+	msgEv := session.Event{
+		Type: session.EvTeamMember,
+		Team: &session.TeamPayload{ParentCallID: "team-1", Member: "bob", InnerKind: session.EvMessageDelta, Text: "hi"},
+	}
+	mg, _ := projectUpdate(msgEv)
+	if mu := mg.(toolCallUpdate); !strings.Contains(mu.Content[0].Content.Text, "hi") {
+		t.Errorf("message member line = %+v", mu.Content)
+	}
+
+	// An empty-text non-tool member event is dropped (nothing to show).
+	if _, ok := projectUpdate(session.Event{
+		Type: session.EvTeamMember,
+		Team: &session.TeamPayload{ParentCallID: "team-1", Member: "bob", InnerKind: session.EvTurnEnd},
+	}); ok {
+		t.Error("empty member event should not project")
+	}
+
+	endGot, _ := projectUpdate(session.Event{
+		Type: session.EvTeamEnd,
+		Team: &session.TeamPayload{ParentCallID: "team-1", Rounds: 2, Stop: session.StopEndTurn},
+	})
+	if eu := endGot.(toolCallUpdate); eu.ToolCallID != "team-1" {
+		t.Errorf("team end update = %+v", eu)
 	}
 }
 

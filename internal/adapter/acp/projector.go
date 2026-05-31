@@ -1,6 +1,10 @@
 package acp
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
 	"github.com/stacklok/mecatl/internal/session"
 )
 
@@ -10,27 +14,34 @@ import (
 // table-testable, and it is the single place that decides which events map, which
 // fold, and which drop this phase.
 //
-// PROJECTION TABLE (Phase 1):
+// PROJECTION TABLE (Phase 2):
 //
 //	EvMessageDelta   -> agent_message_chunk{ content: text }
 //	EvReasoningDelta -> agent_thought_chunk{ content: text }   (display summary
 //	                    only — NEVER the encrypted_content replay blob, which the
 //	                    loop never emits as a reasoning.delta anyway)
-//	EvToolCall       -> tool_call{ toolCallId, title, kind, rawInput, status: pending }
+//	EvToolCall       -> tool_call{ toolCallId, title, kind, rawInput, status: pending,
+//	                    content: [diff] for Edit/Write (synthesized from the args) }
 //	EvToolResult     -> tool_call_update{ toolCallId, status: completed|failed,
 //	                    content: [text] }
+//	EvHook           -> for a blocked hook on a known tool, a tool_call_update marking
+//	                    that tool's call FAILED with the reason; otherwise an
+//	                    agent_thought_chunk note.
+//	EvSubagentTool/  -> tool_call_update on the PARENT Task call (keyed by
+//	  EvSubagentEnd      SubagentPayload.ParentCallID): progress content lines while
+//	                     the child runs; completed/failed on end.
+//	EvTeamMember/    -> tool_call_update on the PARENT Team call (keyed by
+//	  EvTeamEnd          TeamPayload.ParentCallID): member activity lines; on end.
 //	EvPermissionAsk  -> handled out of band (an OUTBOUND request_permission), not a
 //	                    session/update; see permissionRequest below.
 //	EvResult         -> the prompt's terminal stopReason (see stopReasonFor).
 //
-//	DROPPED/FOLDED this phase (no clean ACP mapping yet; full fidelity is a later
-//	phase, see the ADR):
+//	DROPPED/FOLDED this phase (no clean ACP mapping yet, see the ADR):
 //	  - turn.start / turn.end      -> dropped (lifecycle bookkeeping).
 //	  - compaction                 -> dropped.
-//	  - hook                       -> dropped.
-//	  - subagent.* / team.*        -> dropped (these are redacted child projections;
-//	                                  surfacing them faithfully needs ACP plan/
-//	                                  nested-tool modelling deferred to a later phase).
+//	  - subagent.start / team.start -> dropped (the parent tool_call already names
+//	                                   the delegated work; the roster/goal would add
+//	                                   noise before the first progress line).
 //	  - session.init               -> dropped.
 
 // projectUpdate maps a domain Event to the session/update variant value to send,
@@ -63,6 +74,11 @@ func projectUpdate(ev session.Event) (any, bool) {
 			Kind:          toolKindFor(ev.ToolCall.Name),
 			RawInput:      rawInput(ev.ToolCall.Args),
 			Status:        toolStatusPending,
+			// For Edit/Write, synthesize an ACP diff block from the call's args so the
+			// editor can render a native inline diff at the moment the call is shown
+			// (before it even runs). Malformed args -> no diff (nil), and the
+			// tool_call_update result will still carry the text content later.
+			Content: diffContentFor(ev.ToolCall.Name, ev.ToolCall.Args),
 		}, true
 
 	case session.EvToolResult:
@@ -80,10 +96,210 @@ func projectUpdate(ev session.Event) (any, bool) {
 			Content:       textToolContent(ev.ToolResult.Content),
 		}, true
 
+	case session.EvHook:
+		return projectHook(ev)
+
+	case session.EvSubagentTool, session.EvSubagentEnd:
+		return projectSubagent(ev)
+
+	case session.EvTeamMember, session.EvTeamEnd:
+		return projectTeam(ev)
+
 	default:
-		// turn.*, compaction, hook, subagent.*, team.*, session.init, result,
+		// turn.*, compaction, session.init, subagent.start, team.start, result,
 		// permission.ask: no session/update projection here.
 		return nil, false
+	}
+}
+
+// editArgs / writeArgs mirror the JSON arg shapes of internal/adapter/tools'
+// Edit and Write tools (path/old_string/new_string and path/content). They are
+// duplicated here deliberately — the projector is a domain-adjacent adapter that
+// must NOT import the tools adapter — and kept minimal (only the fields a diff
+// needs).
+type editArgs struct {
+	Path      string `json:"path"`
+	OldString string `json:"old_string"`
+	NewString string `json:"new_string"`
+}
+
+type writeArgs struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+// diffContentFor synthesizes an ACP "diff" ToolCallContent for an Edit/Write tool
+// call from its raw JSON args, so an editor renders a native inline diff. For any
+// other tool, or when the args are malformed or missing the path, it returns nil
+// (the caller falls back to the plain-text result content). Mapping:
+//
+//	Edit  -> oldText = old_string, newText = new_string, path = path.
+//	Write -> newText = content,    oldText omitted (a new/overwritten file).
+func diffContentFor(name string, args []byte) []toolCallContent {
+	switch name {
+	case "Edit":
+		var a editArgs
+		if err := json.Unmarshal(args, &a); err != nil || a.Path == "" {
+			return nil
+		}
+		old := a.OldString
+		return diffToolContent(a.Path, &old, a.NewString)
+	case "Write":
+		var a writeArgs
+		if err := json.Unmarshal(args, &a); err != nil || a.Path == "" {
+			return nil
+		}
+		// A Write creates or fully replaces the file; ACP models "no prior content"
+		// as an absent oldText, so we pass nil.
+		return diffToolContent(a.Path, nil, a.Content)
+	default:
+		return nil
+	}
+}
+
+// projectHook maps an EvHook to an agent_thought_chunk note carrying the hook's
+// reason (a blocked PreToolUse veto, a prompt/arg rewrite, a Stop notice, …).
+//
+// WHY a thought chunk and NOT a failed tool_call_update on the related tool: ACP
+// keys a tool_call_update by the toolCallId, but HookPayload carries only the tool
+// NAME (Phase.Tool), never the originating tool-call id — so an adapter confined
+// to this package cannot address the real tool_call. Emitting a tool_call_update
+// keyed by the name would fabricate a phantom card the editor never opened. The
+// blocked-hook reason still reaches the editor inline (as a thought), and the
+// blocked call's own EvToolResult — which DOES carry the real call id — already
+// projects to a FAILED tool_call_update. Surfacing the veto ON the tool card needs
+// the call id added to HookPayload (an event-taxonomy change), deferred to Phase 3.
+func projectHook(ev session.Event) (any, bool) {
+	if ev.Hook == nil {
+		return nil, false
+	}
+	return chunkUpdate{SessionUpdate: updateAgentThoughtChunk, Content: textBlock(hookNote(ev.Hook, ev.Text))}, true
+}
+
+// hookNote renders a short, human-readable line for a hook event, preferring the
+// event's own Text and falling back to a phase/decision summary.
+func hookNote(h *session.HookPayload, text string) string {
+	if strings.TrimSpace(text) != "" {
+		return text
+	}
+	phase := h.Phase
+	if phase == "" {
+		phase = "hook"
+	}
+	if h.Tool != "" {
+		return fmt.Sprintf("%s %s: %s", phase, h.Tool, h.Decision)
+	}
+	return fmt.Sprintf("%s: %s", phase, h.Decision)
+}
+
+// projectSubagent maps a subagent.tool / subagent.end event to a tool_call_update
+// on the PARENT Task tool call (keyed by SubagentPayload.ParentCallID), so the
+// child's redacted activity surfaces as progress on the editor's Task card.
+// subagent.tool appends an in_progress progress line (the child tool name); the
+// terminal subagent.end finalizes the Task call status. Nothing here carries child
+// content beyond the already-redacted metadata on the payload.
+func projectSubagent(ev session.Event) (any, bool) {
+	p := ev.Subagent
+	if p == nil || p.ParentCallID == "" {
+		return nil, false
+	}
+	switch ev.Type {
+	case session.EvSubagentTool:
+		line := fmt.Sprintf("subagent: %s (call #%d)", p.ToolName, p.ToolCount)
+		if p.IsError {
+			line += " [error]"
+		}
+		return toolCallUpdate{
+			SessionUpdate: updateToolCallUpdate,
+			ToolCallID:    p.ParentCallID,
+			Status:        toolStatusInProgress,
+			Content:       textToolContent(line),
+		}, true
+	case session.EvSubagentEnd:
+		status := toolStatusInProgress
+		if p.Stop == session.StopError {
+			status = toolStatusFailed
+		}
+		line := fmt.Sprintf("subagent finished: %d tool call(s), %s", p.ToolCount, p.Stop)
+		return toolCallUpdate{
+			SessionUpdate: updateToolCallUpdate,
+			ToolCallID:    p.ParentCallID,
+			Status:        status,
+			Content:       textToolContent(line),
+		}, true
+	default:
+		return nil, false
+	}
+}
+
+// projectTeam maps a team.member / team.end event to a tool_call_update on the
+// PARENT Team tool call (keyed by TeamPayload.ParentCallID), surfacing the team's
+// bounded member activity as progress on the editor's Team card. team.member
+// appends an in_progress line tagged by member name; team.end finalizes. Every
+// preview is already bounded/redacted at source (see TeamPayload).
+func projectTeam(ev session.Event) (any, bool) {
+	p := ev.Team
+	if p == nil || p.ParentCallID == "" {
+		return nil, false
+	}
+	switch ev.Type {
+	case session.EvTeamMember:
+		line := teamMemberLine(p)
+		if line == "" {
+			return nil, false
+		}
+		return toolCallUpdate{
+			SessionUpdate: updateToolCallUpdate,
+			ToolCallID:    p.ParentCallID,
+			Status:        toolStatusInProgress,
+			Content:       textToolContent(line),
+		}, true
+	case session.EvTeamEnd:
+		status := toolStatusInProgress
+		if p.Stop == session.StopError {
+			status = toolStatusFailed
+		}
+		line := fmt.Sprintf("team finished: %d round(s), %s", p.Rounds, p.Stop)
+		return toolCallUpdate{
+			SessionUpdate: updateToolCallUpdate,
+			ToolCallID:    p.ParentCallID,
+			Status:        status,
+			Content:       textToolContent(line),
+		}, true
+	default:
+		return nil, false
+	}
+}
+
+// teamMemberLine renders one progress line for a team.member event from the
+// already-bounded payload, choosing the relevant fields by the inner kind. It
+// returns "" when there is nothing to show (so the caller drops the update).
+func teamMemberLine(p *session.TeamPayload) string {
+	switch p.InnerKind {
+	case session.EvToolCall:
+		if p.ToolName == "" {
+			return ""
+		}
+		line := fmt.Sprintf("%s: %s", p.Member, p.ToolName)
+		if p.Detail != "" {
+			line += " " + p.Detail
+		}
+		return line
+	case session.EvToolResult:
+		line := fmt.Sprintf("%s: %s ->", p.Member, p.ToolName)
+		if p.IsError {
+			line += " [error]"
+		}
+		if p.Detail != "" {
+			line += " " + p.Detail
+		}
+		return line
+	default:
+		// message.delta / result / turn.end: surface the member's text if any.
+		if strings.TrimSpace(p.Text) == "" {
+			return ""
+		}
+		return fmt.Sprintf("%s: %s", p.Member, p.Text)
 	}
 }
 
