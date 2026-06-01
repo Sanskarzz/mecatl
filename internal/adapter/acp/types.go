@@ -21,6 +21,8 @@ const (
 	methodSessionCancel     = "session/cancel"
 	methodSessionUpdate     = "session/update"             // agent -> client notification
 	methodRequestPermission = "session/request_permission" // agent -> client request
+	methodSessionSetMode    = "session/set_mode"           // client -> agent request
+	methodSessionLoad       = "session/load"               // client -> agent request
 )
 
 // --- initialize --------------------------------------------------------------
@@ -89,8 +91,9 @@ type newSessionResponse struct {
 }
 
 // sessionModeState reflects mecatl's permission modes (default/plan/acceptEdits)
-// to the client. The current mode is always "default" on a fresh session this
-// phase (mode switching is deferred).
+// to the client, advertising the available modes and the session's CURRENT mode.
+// It is returned on session/new and session/load so the editor's mode picker is
+// seeded with the right selection; session/set_mode then switches between them.
 type sessionModeState struct {
 	CurrentModeID  string        `json:"currentModeId"`
 	AvailableModes []sessionMode `json:"availableModes"`
@@ -128,6 +131,36 @@ type cancelNotification struct {
 	SessionID string `json:"sessionId"`
 }
 
+// --- session/set_mode (client -> agent) --------------------------------------
+
+// setModeRequest is the inbound session/set_mode params: switch the session to
+// the named modeId (one of the availableModes' ids advertised on session/new).
+type setModeRequest struct {
+	SessionID string `json:"sessionId"`
+	ModeID    string `json:"modeId"`
+}
+
+// setModeResponse is the (empty) session/set_mode result. ACP models it as an
+// object with only an optional _meta, so an empty struct serializes to "{}".
+type setModeResponse struct{}
+
+// --- session/load (client -> agent) ------------------------------------------
+
+// loadSessionRequest is the inbound session/load params: resume the persisted
+// session under sessionId, rooted at cwd. mcpServers mirrors session/new and is
+// rejected the same way (mecatl connects only its own streaming-HTTP MCP).
+type loadSessionRequest struct {
+	SessionID  string      `json:"sessionId"`
+	Cwd        string      `json:"cwd"`
+	McpServers []mcpServer `json:"mcpServers"`
+}
+
+// loadSessionResponse echoes the resumed session's mode state so the editor can
+// seed its mode picker, mirroring session/new. configOptions is omitted.
+type loadSessionResponse struct {
+	Modes *sessionModeState `json:"modes,omitempty"`
+}
+
 // --- content blocks ----------------------------------------------------------
 
 // contentBlock is the ACP ContentBlock. This phase models only the text variant
@@ -160,7 +193,33 @@ const (
 	updateAgentThoughtChunk = "agent_thought_chunk"
 	updateToolCall          = "tool_call"
 	updateToolCallUpdate    = "tool_call_update"
+	updateAvailableCommands = "available_commands_update"
+	updateCurrentMode       = "current_mode_update"
 )
+
+// availableCommandsUpdate is the available_commands_update session/update
+// variant: it lists the slash commands the editor should offer in its input
+// palette. An empty list clears the palette.
+type availableCommandsUpdate struct {
+	SessionUpdate     string             `json:"sessionUpdate"`
+	AvailableCommands []availableCommand `json:"availableCommands"`
+}
+
+// availableCommand is one ACP AvailableCommand (name + human description). The
+// input.hint field is omitted — mecatl commands take free-form text, so there is
+// no structured input schema to advertise this phase.
+type availableCommand struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// currentModeUpdate is the current_mode_update session/update variant: it tells
+// the editor the session's mode changed (e.g. after session/set_mode took
+// effect) so its mode picker reflects the new selection.
+type currentModeUpdate struct {
+	SessionUpdate string `json:"sessionUpdate"`
+	CurrentModeID string `json:"currentModeId"`
+}
 
 // chunkUpdate is the *_chunk session/update variant (a single ContentBlock).
 type chunkUpdate struct {

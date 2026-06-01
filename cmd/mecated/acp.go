@@ -19,9 +19,15 @@ import (
 //
 // stdout MUST carry only JSON-RPC frames — slog is configured to stderr in run()
 // before this is called, so log lines never corrupt the protocol stream.
-func serveACP(ctx context.Context, svc *server.Service) error {
-	slog.Info("serving Agent Client Protocol over stdio (JSON-RPC 2.0); TCP/HTTP listeners skipped")
-	agent := acp.NewAgent(svc)
+//
+// resume reports whether a durable session store is configured (mecated
+// --store-dir). It gates ACP session/load: the agent advertises loadSession only
+// when resume is true, so an editor never attempts to resume a session that the
+// in-memory store would lose across a restart.
+func serveACP(ctx context.Context, svc *server.Service, resume bool) error {
+	slog.Info("serving Agent Client Protocol over stdio (JSON-RPC 2.0); TCP/HTTP listeners skipped",
+		"resume", resume)
+	agent := acp.NewAgent(svc, acp.WithResume(resume))
 	conn := acp.NewConn(os.Stdin, os.Stdout, agent.Handle)
 	return agent.Serve(ctx, conn)
 }

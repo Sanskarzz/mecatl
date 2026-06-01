@@ -30,16 +30,36 @@ type Agent struct {
 
 	// info is the agent identity returned on initialize.
 	info implementation
+
+	// resume reports whether session/load is supported (a session store is
+	// configured). When false, loadSession is advertised false in initialize and
+	// session/load returns an error. The composition root sets it via WithResume.
+	resume bool
+}
+
+// AgentOption configures an Agent at construction.
+type AgentOption func(*Agent)
+
+// WithResume advertises session/load support (loadSession:true) and enables the
+// session/load handler. The composition root passes true only when a durable
+// session store is configured (mecated --store-dir), so resume is offered only
+// when it can actually work.
+func WithResume(enabled bool) AgentOption {
+	return func(a *Agent) { a.resume = enabled }
 }
 
 // NewAgent constructs an Agent over svc. The Conn is set by Serve so the Agent
 // can issue outbound request_permission calls and session/update notifications.
-func NewAgent(svc *server.Service) *Agent {
-	return &Agent{
+func NewAgent(svc *server.Service, opts ...AgentOption) *Agent {
+	a := &Agent{
 		svc:      svc,
 		inFlight: make(map[string]struct{}),
-		info:     implementation{Name: "mecatl", Version: "acp-phase2"},
+		info:     implementation{Name: "mecatl", Version: "acp-phase3"},
 	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
 }
 
 // Serve runs the ACP stdio session over conn and blocks until the input stream
@@ -69,6 +89,10 @@ func (a *Agent) Handle(ctx context.Context, method string, params json.RawMessag
 		return a.handleSessionNew(ctx, params)
 	case methodSessionPrompt:
 		return a.handleSessionPrompt(ctx, params)
+	case methodSessionLoad:
+		return a.handleSessionLoad(ctx, params)
+	case methodSessionSetMode:
+		return a.handleSetMode(ctx, params)
 	case methodSessionCancel:
 		a.handleSessionCancel(ctx, params)
 		return nil, nil
@@ -83,8 +107,9 @@ func (a *Agent) Handle(ctx context.Context, method string, params json.RawMessag
 // handleInitialize negotiates capabilities. mecatl advertises NO image/audio/
 // embeddedContext prompt support (text only this phase), NO MCP transports
 // (client-provided MCP servers are rejected — mecatl connects its own
-// streaming-HTTP MCP, never a client stdio server), loadSession:false, and echoes
-// the protocol version it implements.
+// streaming-HTTP MCP, never a client stdio server), loadSession reflecting
+// whether a session store is configured (WithResume), and echoes the protocol
+// version it implements.
 func (a *Agent) handleInitialize(params json.RawMessage) (any, error) {
 	var req initializeRequest
 	if len(params) > 0 {
@@ -95,7 +120,7 @@ func (a *Agent) handleInitialize(params json.RawMessage) (any, error) {
 	return initializeResponse{
 		ProtocolVersion: protocolVersion,
 		AgentCapabilities: agentCapabilities{
-			LoadSession:        false,
+			LoadSession:        a.resume,
 			McpCapabilities:    mcpCapabilities{HTTP: false, SSE: false},
 			PromptCapabilities: promptCapabilities{Audio: false, EmbeddedContext: false, Image: false},
 		},
@@ -115,52 +140,157 @@ func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (a
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, newMethodErr(codeInvalidParams, "acp: session/new: "+err.Error())
 	}
-	// Validate cwd: ACP contracts it as an ABSOLUTE path, and CreateSession ->
-	// osfs would silently CREATE a missing dir. We fail loudly instead, so a
-	// non-absolute or typo'd/nonexistent cwd is rejected rather than spawning a
-	// session rooted at an accidentally-created directory. (os.Root confines tool
-	// I/O, so this is not an escape — it is input validation, CWE-20.)
-	if strings.TrimSpace(req.Cwd) == "" {
-		return nil, newMethodErr(codeInvalidParams, "acp: session/new: cwd is required (absolute path)")
+	if err := validateCwd(req.Cwd, "session/new"); err != nil {
+		return nil, err
 	}
-	if !filepath.IsAbs(req.Cwd) {
-		return nil, newMethodErr(codeInvalidParams,
-			fmt.Sprintf("acp: session/new: cwd %q must be an absolute path", req.Cwd))
-	}
-	if info, statErr := os.Stat(req.Cwd); statErr != nil || !info.IsDir() {
-		return nil, newMethodErr(codeInvalidParams,
-			fmt.Sprintf("acp: session/new: cwd %q must be an existing directory", req.Cwd))
-	}
-	if len(req.McpServers) > 0 {
-		// A stdio MCP server (a command, no URL) is hard-rejected: mecatl never
-		// spawns stdio MCP. A URL server is also rejected this phase — client MCP
-		// delegation is deferred — but the message distinguishes the two so the gap
-		// is observable. We reject on the FIRST entry (any client MCP server is
-		// unsupported this phase).
-		m := req.McpServers[0]
-		if m.URL == "" {
-			return nil, newMethodErr(codeInvalidParams,
-				fmt.Sprintf("acp: session/new: stdio MCP server %q rejected (mecatl is streaming-HTTP MCP only)", m.Name))
-		}
-		return nil, newMethodErr(codeInvalidParams,
-			fmt.Sprintf("acp: session/new: client-provided MCP server %q not supported yet (deferred)", m.Name))
+	if err := rejectClientMCP(req.McpServers, "session/new"); err != nil {
+		return nil, err
 	}
 
 	sess, err := a.svc.CreateSession(ctx, req.Cwd, session.ModeDefault, session.Limits{})
 	if err != nil {
 		return nil, newMethodErr(codeInvalidParams, "acp: session/new: "+err.Error())
 	}
+	// Advertise the slash commands for this workspace as an available_commands_update
+	// so the editor can offer them in its input palette. Best-effort: a discovery
+	// fault or an empty list simply means no (or an empty) update — it must not fail
+	// session creation. Sent AFTER the session exists so the notification's
+	// sessionId is valid.
+	a.notifyAvailableCommands(ctx, string(sess.ID), sess.Workspace)
+
 	return newSessionResponse{
 		SessionID: string(sess.ID),
-		Modes: &sessionModeState{
-			CurrentModeID: string(session.ModeDefault),
-			AvailableModes: []sessionMode{
-				{ID: string(session.ModeDefault), Name: "Default", Description: "Standard deny/ask/allow permissions"},
-				{ID: string(session.ModePlan), Name: "Plan", Description: "Read-only planning (no mutations)"},
-				{ID: string(session.ModeAccept), Name: "Accept Edits", Description: "Auto-accept edits"},
-			},
-		},
+		Modes:     modeStateFor(sess.Mode),
 	}, nil
+}
+
+// modeStateFor builds the ACP sessionModeState advertising mecatl's three
+// permission modes with current as the session's CURRENT mode. It is shared by
+// session/new and session/load so both seed the editor's mode picker identically.
+func modeStateFor(current session.PermissionMode) *sessionModeState {
+	return &sessionModeState{
+		CurrentModeID: string(current),
+		AvailableModes: []sessionMode{
+			{ID: string(session.ModeDefault), Name: "Default", Description: "Standard deny/ask/allow permissions"},
+			{ID: string(session.ModePlan), Name: "Plan", Description: "Read-only planning (no mutations)"},
+			{ID: string(session.ModeAccept), Name: "Accept Edits", Description: "Auto-accept edits"},
+		},
+	}
+}
+
+// notifyAvailableCommands lists the slash commands for the workspace via the
+// Service seam and, when any are found, pushes an available_commands_update. A
+// nil lister, an empty result, or a discovery fault yields NO update (the palette
+// stays empty) — command discovery must never break the session.
+func (a *Agent) notifyAvailableCommands(ctx context.Context, sessionID, workspace string) {
+	cmds, err := a.svc.ListCommands(ctx, workspace)
+	if err != nil {
+		slog.Debug("acp: list commands failed", "session", sessionID, "err", err)
+		return
+	}
+	if len(cmds) == 0 {
+		return
+	}
+	out := make([]availableCommand, 0, len(cmds))
+	for _, c := range cmds {
+		out = append(out, availableCommand{Name: c.Name, Description: c.Description})
+	}
+	a.notifyUpdate(sessionID, availableCommandsUpdate{
+		SessionUpdate:     updateAvailableCommands,
+		AvailableCommands: out,
+	})
+}
+
+// handleSessionLoad resumes a previously-persisted session so the next
+// session/prompt continues it. It validates cwd exactly like session/new, rejects
+// any client-provided MCP server the same way, then loads (and, if the session
+// had cleanly completed, reopens) the session via Service.LoadSession. It does NOT
+// replay prior turns' events: a full conversation replay is bounded only by
+// history size and would re-issue every tool_call/diff/result the editor already
+// rendered; mecatl restores the session state so the NEXT prompt continues with
+// the full conversation context, and the editor keeps whatever transcript it
+// persisted. (Replay-on-load is documented as a remaining nice-to-have in the
+// ADR.) It returns the resumed mode state so the editor seeds its mode picker.
+//
+// When resume is disabled (no session store — WithResume(false)), the handler is
+// effectively unreachable because loadSession is advertised false; we still guard
+// it so a client that calls it anyway gets a clean method error rather than a
+// surprising load against an in-memory store.
+func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (any, error) {
+	if !a.resume {
+		return nil, newMethodErr(codeMethodNotFound, "acp: session/load: not supported (no session store configured)")
+	}
+	var req loadSessionRequest
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, newMethodErr(codeInvalidParams, "acp: session/load: "+err.Error())
+	}
+	if req.SessionID == "" {
+		return nil, newMethodErr(codeInvalidParams, "acp: session/load: sessionId is required")
+	}
+	if err := validateCwd(req.Cwd, "session/load"); err != nil {
+		return nil, err
+	}
+	if err := rejectClientMCP(req.McpServers, "session/load"); err != nil {
+		return nil, err
+	}
+
+	sess, err := a.svc.LoadSession(ctx, session.SessionID(req.SessionID))
+	if err != nil {
+		// An unknown/never-persisted session (incl. the in-memory store after a
+		// restart) is a client error: the id does not resolve.
+		return nil, newMethodErr(codeInvalidParams, "acp: session/load: "+err.Error())
+	}
+	return loadSessionResponse{Modes: modeStateFor(sess.Mode)}, nil
+}
+
+// handleSetMode applies a session/set_mode by mapping the ACP modeId to a mecatl
+// PermissionMode and calling Service.SetMode. On a successful change it emits a
+// current_mode_update so the editor's picker reflects the new selection. An
+// unknown modeId is rejected; a mid-turn change is rejected by the aggregate
+// (Service.SetMode wraps the illegal transition) — the client must defer it to
+// the next prompt. The ACP result is the empty SetSessionModeResponse.
+func (a *Agent) handleSetMode(ctx context.Context, params json.RawMessage) (any, error) {
+	var req setModeRequest
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, newMethodErr(codeInvalidParams, "acp: session/set_mode: "+err.Error())
+	}
+	if req.SessionID == "" {
+		return nil, newMethodErr(codeInvalidParams, "acp: session/set_mode: sessionId is required")
+	}
+	mode, ok := modeFromACP(req.ModeID)
+	if !ok {
+		return nil, newMethodErr(codeInvalidParams,
+			fmt.Sprintf("acp: session/set_mode: unknown modeId %q", req.ModeID))
+	}
+	sess, err := a.svc.SetMode(ctx, session.SessionID(req.SessionID), mode)
+	if err != nil {
+		return nil, newMethodErr(codeInvalidParams, "acp: session/set_mode: "+err.Error())
+	}
+	// Confirm the change to the editor. SetMode is a no-op when the mode is
+	// unchanged, but emitting the update unconditionally keeps the picker
+	// authoritative and is harmless (the editor sets the value it already has).
+	a.notifyUpdate(req.SessionID, currentModeUpdate{
+		SessionUpdate: updateCurrentMode,
+		CurrentModeID: string(sess.Mode),
+	})
+	return setModeResponse{}, nil
+}
+
+// modeFromACP maps an ACP modeId to a mecatl PermissionMode. The ids are mecatl's
+// own mode strings (advertised verbatim as the availableModes ids on
+// session/new), so this is an identity-with-validation map: an unrecognized id
+// yields ok=false so the handler can reject it.
+func modeFromACP(modeID string) (session.PermissionMode, bool) {
+	switch session.PermissionMode(modeID) {
+	case session.ModeDefault:
+		return session.ModeDefault, true
+	case session.ModePlan:
+		return session.ModePlan, true
+	case session.ModeAccept:
+		return session.ModeAccept, true
+	default:
+		return "", false
+	}
 }
 
 // handleSessionPrompt runs one prompt to completion. It enforces one in-flight
@@ -201,6 +331,10 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, params json.RawMessage)
 		switch ev.Type {
 		case session.EvPermissionAsk:
 			if ev.Ask != nil {
+				// Persist the awaiting snapshot so a session/load after a restart can
+				// re-attach to a paused session (mirrors the gRPC/HTTP adapters). With
+				// session/load now landed this is no longer a dead snapshot.
+				a.svc.Persist(ctx, session.SessionID(req.SessionID))
 				// Out-of-band: ask the editor, then resolve the run. Run on its own
 				// goroutine so draining the event channel never blocks behind the
 				// editor's reply (the loop is paused awaiting Approve anyway, but
@@ -217,6 +351,13 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, params json.RawMessage)
 			}
 		}
 	}
+	// The event channel has closed, so the run reached a terminal state. Persist
+	// the final snapshot (conversation + counters + terminal state) BEFORE the
+	// deferred FinishRun deregisters the run — Persist is a no-op once the run is
+	// gone. This is what makes session/load resume a continuable session: the
+	// engine mutates the session in place, and only this Save captures the
+	// completed turn's history durably.
+	a.svc.Persist(ctx, session.SessionID(req.SessionID))
 	return promptResponse{StopReason: stop}, nil
 }
 
@@ -278,6 +419,47 @@ func (a *Agent) release(sessionID string) {
 // narrowed so requestPermission is unit-testable with a fake.
 type runApprover interface {
 	Approve(askID string, allow bool)
+}
+
+// validateCwd enforces ACP's absolute-existing-directory cwd contract, shared by
+// session/new and session/load. ACP contracts cwd as an ABSOLUTE path, and
+// CreateSession -> osfs would silently CREATE a missing dir; we fail loudly
+// instead, so a non-absolute or typo'd/nonexistent cwd is rejected rather than
+// spawning a session rooted at an accidentally-created directory. (os.Root
+// confines tool I/O, so this is input validation, CWE-20, not an escape.) method
+// is the ACP method name for the error prefix.
+func validateCwd(cwd, method string) error {
+	if strings.TrimSpace(cwd) == "" {
+		return newMethodErr(codeInvalidParams, "acp: "+method+": cwd is required (absolute path)")
+	}
+	if !filepath.IsAbs(cwd) {
+		return newMethodErr(codeInvalidParams,
+			fmt.Sprintf("acp: %s: cwd %q must be an absolute path", method, cwd))
+	}
+	if info, statErr := os.Stat(cwd); statErr != nil || !info.IsDir() {
+		return newMethodErr(codeInvalidParams,
+			fmt.Sprintf("acp: %s: cwd %q must be an existing directory", method, cwd))
+	}
+	return nil
+}
+
+// rejectClientMCP rejects any client-provided MCP server, shared by session/new
+// and session/load. A stdio server (a command, no URL) is hard-rejected (mecatl
+// never spawns stdio MCP); a URL server is also rejected this phase (client MCP
+// delegation is deferred) but the message distinguishes the two so the gap is
+// observable. It rejects on the FIRST entry — any client MCP server is
+// unsupported this phase.
+func rejectClientMCP(servers []mcpServer, method string) error {
+	if len(servers) == 0 {
+		return nil
+	}
+	m := servers[0]
+	if m.URL == "" {
+		return newMethodErr(codeInvalidParams,
+			fmt.Sprintf("acp: %s: stdio MCP server %q rejected (mecatl is streaming-HTTP MCP only)", method, m.Name))
+	}
+	return newMethodErr(codeInvalidParams,
+		fmt.Sprintf("acp: %s: client-provided MCP server %q not supported yet (deferred)", method, m.Name))
 }
 
 // flattenPrompt concatenates the text of every text ContentBlock with newlines,

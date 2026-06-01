@@ -3,7 +3,9 @@
 - Status: Accepted
 - Date: 2026-05-30
 - Scope: Phase 1 (core loop) + Phase 2 (fidelity — diff blocks, subagent/team/hook
-  projection). Phase 3 remains (see "Deferred to Phase 3").
+  projection) + Phase 3 bounded pieces (commands, set_mode, load — see "Phase 3
+  (bounded)"). The Phase 3 long-tail (fs/\* delegation, governance-rule persistence,
+  image/audio, hook-call-id) remains (see "Deferred").
 
 ## Context
 
@@ -72,10 +74,13 @@ outbound `request_permission` and correlates the reply).
   only** (CLAUDE.md: "No stdio MCP, ever"); client-provided MCP servers in
   `session/new` are REJECTED — a stdio server (command, no URL) is hard-rejected,
   and even an HTTP one is rejected pending the deferred client-MCP work.
-- `loadSession: false`.
-- `modes`: the session reflects mecatl's `default`/`plan`/`acceptEdits` modes;
-  the current mode is always `default` on a fresh session this phase (switching
-  is deferred).
+- `loadSession`: reflects whether a durable session store is configured. `mecated
+  --acp` sets it `true` only when `--store-dir` is given (the in-memory store would
+  lose snapshots across a restart); otherwise `false`. The flag is threaded into the
+  adapter via `acp.WithResume(bool)` (Phase 3).
+- `modes`: the session reflects mecatl's `default`/`plan`/`acceptEdits` modes; the
+  `currentModeId` is the session's CURRENT mode (Phase 3 — was always `default`),
+  and `session/set_mode` switches between them.
 
 ## Event projection (Phase 1 + Phase 2)
 
@@ -136,12 +141,71 @@ would add noise before the first progress line.
    `tool_call_update`. Surfacing the veto ON the tool card needs the call id added
    to `HookPayload` (an event-taxonomy change) — deferred to Phase 3.
 
-4. **Modes + commands DEFERRED to Phase 3.** `current_mode_update` /
-   `session/set_mode` need a Service seam to change a session's `PermissionMode`
-   mid-session; `*server.Service` exposes none today (only Create/Get/Start/Approve/
-   Cancel), and adding one is outside this adapter's package. `available_commands_update`
-   needs a wired slash-command registry, which mecatl does not expose. Both were
-   scoped out to keep Phase 2 confined to `internal/adapter/acp/`.
+4. **Modes + commands.** Phase 2 deferred these; the bounded pieces landed in
+   Phase 3 below (`available_commands_update`, `session/set_mode` +
+   `current_mode_update`, `session/load`).
+
+## Phase 3 (bounded)
+
+Three bounded pieces landed, each reusing an existing `*server.Service` seam — NO
+proto change (ACP is its own JSON), confined to `internal/adapter/acp/`, a small
+`server.Service` seam, one `session.Session` method, and the `mecated --acp`
+wiring.
+
+1. **`available_commands_update` on `session/new`.** After creating the session the
+   adapter calls `Service.ListCommands(ctx, cwd)` (the SAME seam the gRPC
+   `ListCommands` RPC uses — a composition-injected `CommandLister` that closes over
+   the run-path command expander) and maps each `{name, description}` to an ACP
+   `AvailableCommand`, sent as a single `available_commands_update` session/update.
+   It is best-effort: a nil lister, an empty result, or a discovery fault yields NO
+   update (the palette stays empty) — command discovery never breaks session
+   creation. The `input.hint` field is omitted (mecatl commands take free-form text).
+
+2. **`session/set_mode` + `current_mode_update`.** Inbound `session/set_mode
+   {sessionId, modeId}` maps the modeId (mecatl's own `default`/`plan`/`acceptEdits`
+   strings, advertised verbatim as the `availableModes` ids) to a `PermissionMode`
+   and applies it via the new `Service.SetMode(ctx, id, mode)` seam, which mutates
+   the session through a new guarded aggregate method `Session.SetMode` and
+   persists. On success the adapter emits a `current_mode_update` so the editor's
+   picker reflects the new selection; the result is the empty `SetSessionModeResponse`
+   (`{}`). The `currentModeId` on `session/new`/`session/load` now reflects the
+   session's actual mode.
+
+   **Constraint — mid-turn switch scoped out.** `Session.SetMode` is legal only when
+   the session is NOT actively progressing a turn (idle or terminal), NOT while
+   `running`/`awaiting`: changing the posture mid-turn would race the loop's own
+   permission evaluation (plan hard-denies mutations; acceptEdits auto-allows them)
+   against dispatch already in flight. A mid-turn `set_mode` is therefore rejected
+   (`ErrIllegalTransition`, surfaced as an `InvalidParams` error); a client must
+   defer it to the next prompt. `Service.SetMode` applies to the LIVE session when a
+   run is registered (so an idle-between-prompts session held in the registry is
+   updated in place) and otherwise to the stored snapshot.
+
+3. **`session/load` (resume).** Inbound `session/load {sessionId, cwd}` validates
+   cwd and rejects client MCP exactly like `session/new`, then resumes the persisted
+   session via the new `Service.LoadSession(ctx, id)` seam: it loads the latest
+   snapshot from the store and, if the session had cleanly `completed`, `Reopen`s it
+   to `idle` (preserving conversation history) and re-persists, so the next
+   `session/prompt`'s `BeginTurn` is legal. A failed/cancelled session is NOT
+   resumable (`Reopen` rejects it). `loadSession` is advertised `true` ONLY when a
+   durable store is configured (`--store-dir`); without one it is `false` and
+   `session/load` returns a method error. An unknown/never-persisted id (incl. the
+   in-memory store after a restart) is an `InvalidParams` error.
+
+   **Persistence wiring.** Phase 1/2's ACP adapter never persisted (the ADR noted
+   it would become a `Persist` call when `session/load` landed). It now calls
+   `Service.Persist` on `EvPermissionAsk` (awaiting snapshot, for re-attach) and at
+   run end (the completed turn's history) — BEFORE the deferred `FinishRun`
+   deregisters the run, since `Persist` is a no-op once the run is gone. Without the
+   run-end `Persist`, a loaded session would have an empty conversation.
+
+   **Constraint — replay scoped out.** ACP's `session/load` optionally streams the
+   prior conversation back as `session/update` notifications. mecatl does
+   restore-WITHOUT-replay: a full replay is bounded only by history size and would
+   re-issue every `tool_call`/`diff`/`result` the editor already rendered. The
+   session state is restored so the NEXT prompt continues with full conversation
+   context, and the editor keeps whatever transcript it persisted. Replay-on-load is
+   a remaining nice-to-have (see "Deferred").
 
 ## Permission round-trip
 
@@ -153,12 +217,10 @@ paused run: a `selected` `allow_*` → `run.Approve(askID, true)`; `reject_*` or
 `cancelled` outcome → `run.Approve(askID, false)`. A transport error or context
 cancellation denies the ask (fail-safe), so the run never hangs.
 
-Note: the gRPC/HTTP adapters call `Service.Persist` on `EvPermissionAsk` so an
-awaiting session is loadable for re-attach after a restart. The ACP adapter
-deliberately SKIPS that this phase — there is no re-attach surface yet
-(`loadSession:false`, no `session/load`), and the prompt blocks for the whole
-turn on the same connection, so a persisted awaiting snapshot would be unused. It
-becomes a `Persist` call when a later phase adds `session/load`.
+Note: with Phase 3's `session/load`, the ACP adapter now calls `Service.Persist`
+on `EvPermissionAsk` (awaiting snapshot, for re-attach) and at run end (the
+completed turn's history), matching the gRPC/HTTP adapters. Phase 1/2 deliberately
+skipped this because there was no re-attach surface; that is no longer true.
 
 ## Concurrency / serialization
 
@@ -169,15 +231,26 @@ interleave a frame. Inbound requests are handled on their own goroutines so a
 handler that issues an outbound `Call` (a `session/prompt` issuing
 `request_permission`) cannot deadlock the single read loop.
 
-## Deferred to Phase 3
+## Done in Phase 3 (bounded)
 
-- fs/\* delegation (`readTextFile`/`writeTextFile`).
-- `allow_always` rule persistence (still maps to `allow_once`).
-- `session/load` (resume).
-- Session **mode switching** (`current_mode_update` / `session/set_mode`) — needs
-  a Service seam to mutate a session's `PermissionMode` mid-session.
-- **Slash commands** (`available_commands_update`) — needs a wired command registry.
+- **Slash commands** (`available_commands_update` on `session/new`) — via
+  `Service.ListCommands`.
+- **Mode switching** (`session/set_mode` + `current_mode_update`, current mode in
+  `session/new`/`session/load`) — via `Service.SetMode` + `Session.SetMode`;
+  mid-turn switch scoped to "defer to next prompt".
+- **`session/load` (resume)** — via `Service.LoadSession` (reopen-if-completed);
+  `loadSession:true` only with a durable store; restore-without-replay.
+
+## Deferred (Phase 3 long-tail)
+
+- **fs/\* delegation** (`readTextFile`/`writeTextFile`) — a client-backed
+  `tool.Workspace`. mecatl still uses its OWN `osfs` rooted at the session `cwd`.
+- **`allow_always` governance-rule persistence** (still maps to `allow_once` — no
+  rule is recorded, so every approval is one-shot).
+- **`session/load` history replay** — restore-without-replay is implemented; full
+  conversation replay back to the client as `session/update`s is the nice-to-have.
+- **Image/audio prompt content** (`promptCapabilities` stays text-only).
 - Keying a hook veto onto the related tool card — needs the tool-call id added to
   `HookPayload` (an event-taxonomy change).
-- Client-provided MCP servers, image/audio prompt content.
+- Client-provided MCP servers.
 - Richer projection of `turn.*` / `compaction` (ACP plan modelling).

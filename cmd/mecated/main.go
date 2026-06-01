@@ -391,7 +391,10 @@ func run() error {
 	// surface differs. No TLS/auth/rate-limit — stdio is a local parent-process
 	// boundary. Logs still go to stderr (set above), keeping stdout pure JSON-RPC.
 	if cfg.acp {
-		return serveACP(ctx, built.Service)
+		// session/load (resume) is offered only when a durable session store is
+		// configured: the in-memory store would lose snapshots across a restart, so
+		// loadSession stays false there.
+		return serveACP(ctx, built.Service, cfg.storeDir != "")
 	}
 
 	return serve(ctx, cfg, built.Service, reg)

@@ -231,6 +231,76 @@ func (s *Service) GetSession(ctx context.Context, id session.SessionID) (*sessio
 	return sess, nil
 }
 
+// SetMode changes the permission posture of the session under id and persists
+// the change, returning the updated session. It is the out-of-band mode-switch
+// seam (ACP session/set_mode). It applies to the LIVE session when a run is
+// registered (so the change takes effect immediately for an idle-between-prompts
+// session held in the registry) and otherwise to the stored snapshot.
+//
+// It returns ErrNotFound for an unknown session, ErrInvalidArgument for an empty
+// mode, and propagates session.ErrIllegalTransition (wrapped as ErrInvalidArgument)
+// when the session is mid-turn (running/awaiting) — the aggregate refuses a mode
+// change while a turn is in flight, so the caller must defer it to the next
+// prompt. A change to the mode the session already has is a no-op success.
+func (s *Service) SetMode(ctx context.Context, id session.SessionID, mode session.PermissionMode) (*session.Session, error) {
+	if mode == "" {
+		return nil, fmt.Errorf("%w: mode is required", ErrInvalidArgument)
+	}
+	// Prefer the live session the engine drives (if registered) so the change is
+	// observed by the same object; otherwise operate on the stored snapshot.
+	s.mu.Lock()
+	st, live := s.runs[id]
+	s.mu.Unlock()
+
+	var sess *session.Session
+	if live {
+		sess = st.sess
+	} else {
+		loaded, err := s.GetSession(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		sess = loaded
+	}
+
+	if err := sess.SetMode(mode); err != nil {
+		// A mid-turn refusal from the aggregate is a client-sequencing error.
+		return nil, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+	}
+	if err := s.cfg.Store.Save(ctx, sess); err != nil {
+		return nil, fmt.Errorf("server: persist session: %w", err)
+	}
+	return sess, nil
+}
+
+// LoadSession resumes a previously-persisted session so a subsequent StartRun
+// continues it. It loads the latest snapshot from the store and, if the session
+// is in a terminal-but-resumable state (StateCompleted — a clean end-of-run),
+// REOPENS it to StateIdle (preserving the conversation history) and re-persists,
+// so the next prompt's BeginTurn is legal. A session already idle is returned
+// unchanged; a failed/cancelled session is NOT resumable (Reopen rejects it) and
+// the prior state is returned as-is so the next StartRun surfaces the illegal
+// transition rather than silently continuing a broken session.
+//
+// It returns ErrNotFound when the store has no snapshot for id (including the
+// in-memory store after a process restart, or when no store-dir is configured
+// and the id was never created in this process).
+func (s *Service) LoadSession(ctx context.Context, id session.SessionID) (*session.Session, error) {
+	sess, err := s.GetSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if sess.State == session.StateCompleted {
+		if rerr := sess.Reopen(); rerr != nil {
+			return nil, fmt.Errorf("server: reopen session: %w", rerr)
+		}
+		if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
+			return nil, fmt.Errorf("server: persist reopened session: %w", serr)
+		}
+	}
+	return sess, nil
+}
+
 // StartRun loads the session, builds its workspace, starts a run on the shared
 // engine and registers the *agent.Run so Approve/Cancel can reach it. The
 // caller is responsible for draining run.Events() AND, once the channel closes,

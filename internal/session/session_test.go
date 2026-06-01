@@ -55,6 +55,53 @@ func TestValidLifecycle_IdleRunningAwaitingRunningCompleted(t *testing.T) {
 	}
 }
 
+func TestSetMode(t *testing.T) {
+	// Idle: a mode change is legal and takes effect.
+	s := newTestSession(Limits{})
+	if err := s.SetMode(ModePlan); err != nil {
+		t.Fatalf("SetMode idle: %v", err)
+	}
+	if s.Mode != ModePlan {
+		t.Fatalf("mode = %q, want plan", s.Mode)
+	}
+
+	// Running: a mid-turn change is rejected.
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	if err := s.SetMode(ModeAccept); !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("SetMode running = %v, want ErrIllegalTransition", err)
+	}
+	if s.Mode != ModePlan {
+		t.Fatalf("mode changed mid-run to %q", s.Mode)
+	}
+
+	// Awaiting: also rejected.
+	if err := s.RecordAssistant(NewAssistantMessage("hi", "", nil)); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+	if err := s.PauseForApproval(PendingAsk{AskID: "a1", Tool: "Edit"}); err != nil {
+		t.Fatalf("PauseForApproval: %v", err)
+	}
+	if err := s.SetMode(ModeDefault); !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("SetMode awaiting = %v, want ErrIllegalTransition", err)
+	}
+
+	// Terminal (completed): legal again (applies to the next reopened run).
+	if _, err := s.ResumeWith(); err != nil {
+		t.Fatalf("ResumeWith: %v", err)
+	}
+	if err := s.Complete(); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if err := s.SetMode(ModeDefault); err != nil {
+		t.Fatalf("SetMode completed: %v", err)
+	}
+	if s.Mode != ModeDefault {
+		t.Fatalf("mode = %q, want default", s.Mode)
+	}
+}
+
 func TestIllegalTransitions(t *testing.T) {
 	tests := []struct {
 		name  string

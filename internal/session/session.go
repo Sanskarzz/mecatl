@@ -354,6 +354,27 @@ func (s *Session) Reopen() error {
 	return nil
 }
 
+// SetMode changes the session's permission posture. It is the intention-revealing
+// seam an out-of-band control surface (e.g. ACP session/set_mode) uses to switch
+// between default/plan/acceptEdits, so the change flows through the aggregate
+// rather than poking the public Mode field.
+//
+// It is legal ONLY while the session is NOT actively progressing a turn — i.e.
+// from StateIdle or any terminal state, but NOT from StateRunning or
+// StateAwaiting. Changing the permission posture mid-turn would race the loop's
+// own permission evaluation (plan mode hard-denies mutations; acceptEdits
+// auto-allows them) against tool dispatch already in flight, so a mid-run switch
+// is rejected with ErrIllegalTransition. A control surface that receives a
+// set_mode while running must defer it (apply on the next prompt). Setting the
+// mode it already has is a no-op success.
+func (s *Session) SetMode(mode PermissionMode) error {
+	if s.State == StateRunning || s.State == StateAwaiting {
+		return fmt.Errorf("%w: SetMode from %q", ErrIllegalTransition, s.State)
+	}
+	s.Mode = mode
+	return nil
+}
+
 // StopReason reports why the run should stop. It is a DERIVED predicate: it
 // returns the recorded terminal reason if one is set, otherwise it computes a
 // limit-tripped reason from the configured Limits and current Counters. It does
