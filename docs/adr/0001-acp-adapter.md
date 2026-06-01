@@ -102,6 +102,12 @@ outbound `request_permission` and correlates the reply).
   --acp` sets it `true` only when `--store-dir` is given (the in-memory store would
   lose snapshots across a restart); otherwise `false`. The flag is threaded into the
   adapter via `acp.WithResume(bool)` (Phase 3).
+- `sessionCapabilities.close`: **`true` UNCONDITIONALLY** (Slice B — DONE). mecatl can
+  always end a session (cancel any in-flight run + free per-session resources), so —
+  unlike `loadSession`, which is store-gated — `session/close` needs no backing
+  resource and is always advertised. It is the spec's first-class mid-session teardown
+  hook (see "Client streaming-HTTP MCP"). `list`/`resume` are not advertised (absent →
+  their `false` default).
 - `modes`: the session reflects mecatl's `default`/`plan`/`acceptEdits` modes; the
   `currentModeId` is the session's CURRENT mode (Phase 3 — was always `default`),
   and `session/set_mode` switches between them.
@@ -453,8 +459,25 @@ accepted and **mounted per-session**, never globally.
   not a count cap.
 - **Slice B — `session/load` re-mount (DONE).** A resumed session re-mounts the
   client's re-supplied streaming-HTTP servers via `Service.LoadSessionWithMCP`, the
-  symmetric sibling of `CreateSessionWithMCP` (see "Per-session, not global"). The
-  remaining Slice B item, **mid-session teardown**, is DEFERRED — see "Deferred".
+  symmetric sibling of `CreateSessionWithMCP` (see "Per-session, not global").
+- **Slice B — mid-session teardown via `session/close` (DONE).** `handleSessionClose`
+  implements the ACP `session/close` request (capability-advertised at `initialize`
+  as `sessionCapabilities.close:true`): it cancels any in-flight run (`Service.Cancel`,
+  best-effort), UNTRACKS the session, then runs the SAME `Service.EndSession` teardown
+  STEP the gRPC `CloseSession` RPC and HTTP `DELETE /v1/sessions/{id}` use. The three
+  session-end surfaces SHARE that teardown step but are NOT behaviorally identical:
+  `session/close` additionally cancels (the ACP spec mandates "MUST cancel ongoing
+  work, then free resources"), whereas gRPC `CloseSession` / HTTP `DELETE` call
+  `EndSession` ONLY and deliberately do NOT cancel an in-flight run (cancel is a
+  separate endpoint there). Composing `Cancel` + `EndSession` AT THE ACP ADAPTER —
+  rather than baking cancel into `EndSession` — is deliberate: it keeps the shared
+  core minimal and leaves the gRPC/HTTP contract (close ≠ cancel) unchanged.
+  Editor-disconnect (`closeTrackedSessions`) and process-exit (`Service.Close`) remain
+  BACKSTOPS for sessions the client never explicitly closes; the untrack makes the
+  disconnect backstop skip an already-closed session (no double-close). The
+  `ErrNotFound` → `codeInvalidParams` mapping mirrors this adapter's OWN `session/load`
+  unknown-id handling (ACP JSON-RPC has no not-found code), NOT the gRPC/HTTP close
+  path (which map `ErrNotFound` to `codes.NotFound` / HTTP 404).
 
 ## Permission round-trip
 
@@ -581,12 +604,19 @@ handler that issues an outbound `Call` (a `session/prompt` issuing
   resume) — now **DONE** (Slice B; see "Client streaming-HTTP MCP"), alongside the
   already-DONE `session/new` client streaming-HTTP MCP.
 - **Mid-session teardown** (tearing down ONE session's per-session MCP manager when
-  that session ends BEFORE the editor disconnects) — deliberately **DEFERRED**.
-  Today a per-session MCP manager lives until editor disconnect (`Serve` loop end →
-  `CloseSession` for each tracked session) or process exit (`Service.Close`), and an
-  escape hatch already exists (`Service.EndSession`, reachable over gRPC/HTTP). Build
-  it ONLY when one of two triggers fires: (a) the ACP spec adds a per-session-end RPC
-  the adapter can hook, or (b) telemetry / a bug report shows a real long-lived
-  connection accumulating unbounded per-session MCP managers. This mirrors the repo's
-  existing "defer TTL eviction pending telemetry" precedent for learned rules.
+  that session ends BEFORE the editor disconnects) — now **DONE** via ACP
+  `session/close` (see "Client streaming-HTTP MCP" → Slice B). The earlier premise
+  here — "build it only if the ACP spec adds a per-session-end RPC" — was WRONG, not
+  the trigger: `session/close` was ALREADY in the spec (a first-class client→agent
+  request, `sessionCapabilities.close`-gated, semantics: cancel ongoing work then free
+  the session's resources). `handleSessionClose` wires it: `Service.Cancel`
+  (best-effort) → `untrackSession` → `Service.EndSession`. It shares the `EndSession`
+  teardown STEP with the gRPC `CloseSession` RPC and HTTP `DELETE /v1/sessions/{id}`,
+  but is NOT behaviorally identical: only `session/close` cancels (spec-mandated); the
+  gRPC/HTTP surfaces call `EndSession` ONLY and do NOT cancel (close ≠ cancel there).
+  Editor-disconnect (`closeTrackedSessions`) and
+  process-exit (`Service.Close`) remain BACKSTOPS for sessions the client never
+  explicitly closes; no TTL/LRU heuristic was built (the spec hook is the right
+  mechanism). Telemetry-driven idle eviction, if ever needed, stays a separate
+  follow-up.
 - Richer projection of `turn.*` / `compaction` (ACP plan modelling).

@@ -32,10 +32,12 @@ type Agent struct {
 	// session is rejected.
 	//
 	// mcpSessions records the session ids created with a PER-SESSION engine (i.e.
-	// the client supplied streaming-HTTP MCP servers). When the Serve loop ends
-	// (editor disconnect) the Agent calls svc.CloseSession for each, tearing down
-	// that session's client MCP manager so it does not outlive the connection. Both
-	// maps are guarded by mu.
+	// the client supplied streaming-HTTP MCP servers). Mid-session teardown is
+	// handled by session/close (handleSessionClose untracks the id, then runs the
+	// same EndSession teardown). When the Serve loop ends (editor disconnect) the
+	// Agent calls svc.CloseSession for each STILL-tracked id as a BACKSTOP, tearing
+	// down any session's client MCP manager the client never explicitly closed so
+	// it does not outlive the connection. Both maps are guarded by mu.
 	mu          sync.Mutex
 	inFlight    map[string]struct{}
 	mcpSessions map[string]struct{}
@@ -107,11 +109,12 @@ func NewAgent(svc *server.Service, opts ...AgentOption) *Agent {
 func (a *Agent) Serve(ctx context.Context, conn *Conn) error {
 	a.conn = conn
 	// On disconnect (the input stream ends or ctx is cancelled), tear down every
-	// per-session engine this connection created so a session's client-provided MCP
-	// manager does not outlive the editor. A clean per-disconnect hook does not
-	// otherwise exist, so this is the cleanest point: Serve is the connection's
-	// lifetime. Mid-session teardown (a single session ending before disconnect) is
-	// a tracked follow-up (Slice B).
+	// STILL-tracked per-session engine this connection created so a session's
+	// client-provided MCP manager does not outlive the editor. This is the BACKSTOP
+	// for sessions the client never explicitly ended: mid-session teardown is
+	// handled by session/close (handleSessionClose, which untracks the id), and
+	// process exit by Service.Close — this defer catches the rest, since Serve is
+	// the connection's lifetime.
 	defer a.closeTrackedSessions()
 	return conn.Serve(ctx)
 }
@@ -121,6 +124,17 @@ func (a *Agent) Serve(ctx context.Context, conn *Conn) error {
 func (a *Agent) trackSession(sessionID string) {
 	a.mu.Lock()
 	a.mcpSessions[sessionID] = struct{}{}
+	a.mu.Unlock()
+}
+
+// untrackSession removes a session id from the tracked set, symmetric to
+// trackSession. It is called by handleSessionClose after a mid-session
+// teardown so the eventual closeTrackedSessions on disconnect does NOT
+// double-close that session's per-session engine. delete on an absent key is a
+// no-op, so untracking a never-tracked (shared-engine) session is harmless.
+func (a *Agent) untrackSession(sessionID string) {
+	a.mu.Lock()
+	delete(a.mcpSessions, sessionID)
 	a.mu.Unlock()
 }
 
@@ -154,6 +168,8 @@ func (a *Agent) Handle(ctx context.Context, method string, params json.RawMessag
 		return a.handleSessionLoad(ctx, params)
 	case methodSessionSetMode:
 		return a.handleSetMode(ctx, params)
+	case methodSessionClose:
+		return a.handleSessionClose(ctx, params)
 	case methodSessionCancel:
 		a.handleSessionCancel(ctx, params)
 		return nil, nil
@@ -177,7 +193,9 @@ func (a *Agent) Handle(ctx context.Context, method string, params json.RawMessag
 // servers on session/new, which are mounted per-session; sse:false and stdio is
 // hard-rejected (mecatl connects only streaming-HTTP MCP, never spawns a server
 // process) — loadSession reflecting whether a session store is configured
-// (WithResume), and echoes the protocol version it implements.
+// (WithResume), and sessionCapabilities.close:true UNCONDITIONALLY (mecatl can
+// always end a session via session/close — see handleSessionClose), and echoes
+// the protocol version it implements.
 func (a *Agent) handleInitialize(params json.RawMessage) (any, error) {
 	var req initializeRequest
 	if len(params) > 0 {
@@ -202,6 +220,11 @@ func (a *Agent) handleInitialize(params json.RawMessage) (any, error) {
 				EmbeddedContext: a.caps.EmbeddedContext,
 				Image:           a.caps.Image,
 			},
+			// close is advertised UNCONDITIONALLY: mecatl can always end a session
+			// (cancel any in-flight run + free per-session resources) — unlike
+			// loadSession, which is store-gated, session/close needs no backing
+			// resource. It is the mid-session teardown hook (see handleSessionClose).
+			SessionCapabilities: sessionCapabilities{Close: true},
 		},
 		AuthMethods: []any{},
 		AgentInfo:   &a.info,
@@ -524,6 +547,59 @@ func (a *Agent) handleSessionCancel(ctx context.Context, params json.RawMessage)
 	if err := a.svc.Cancel(ctx, session.SessionID(n.SessionID)); err != nil {
 		slog.Debug("acp: session/cancel", "session", n.SessionID, "err", err)
 	}
+}
+
+// handleSessionClose implements the ACP session/close request: the first-class
+// mid-session-end hook. Per spec it MUST cancel ongoing work, THEN free the
+// session's resources, so the adapter COMPOSES svc.Cancel + svc.EndSession.
+//
+// This is NOT behaviorally identical to the gRPC CloseSession RPC / HTTP DELETE:
+// those call svc.EndSession ONLY and deliberately do NOT cancel an in-flight run
+// (cancel is a separate endpoint there — see service.go EndSession + http.go).
+// The three surfaces share the EndSession TEARDOWN STEP, not the full behaviour.
+// Composing Cancel + EndSession at the ADAPTER (rather than baking cancel into
+// EndSession) is deliberate: it keeps the shared core minimal and leaves the
+// gRPC/HTTP contract (close ≠ cancel) unchanged.
+//
+//  1. svc.Cancel drives any in-flight run to its terminal EvResult (the blocked
+//     handleSessionPrompt then returns stopReason "cancelled"). It is
+//     best-effort: ErrNoActiveRun/ErrNotFound (no run in flight — the common
+//     case) are ignored. Cancelling FIRST (rather than yanking the engine from
+//     under a live run) lets the run unwind so its deferred FinishRun
+//     deregisters it before teardown closes the engine — the same documented
+//     concurrency-safe race profile as the disconnect path.
+//  2. untrackSession removes the id from the tracked set so the eventual
+//     closeTrackedSessions on disconnect does NOT double-close this session's
+//     per-session engine (the load-bearing guard — see TestSessionClose_*).
+//  3. svc.EndSession runs the precondition-checked teardown (the step shared with
+//     the gRPC/HTTP surfaces): ErrNotFound for a never-created id maps to
+//     codeInvalidParams — mirroring this adapter's OWN session/load unknown-id
+//     mapping (ACP JSON-RPC has no not-found code), NOT the gRPC/HTTP close path
+//     (which map ErrNotFound to codes.NotFound / HTTP 404). A created session
+//     tears down idempotently (a repeated session/close succeeds because the
+//     persisted snapshot still resolves).
+func (a *Agent) handleSessionClose(ctx context.Context, params json.RawMessage) (any, error) {
+	var req closeSessionRequest
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, newMethodErr(codeInvalidParams, "acp: session/close: "+err.Error())
+	}
+	if req.SessionID == "" {
+		return nil, newMethodErr(codeInvalidParams, "acp: session/close: sessionId is required")
+	}
+	id := session.SessionID(req.SessionID)
+	// Cancel ongoing work first (best-effort: no live run is the common case).
+	if err := a.svc.Cancel(ctx, id); err != nil &&
+		!errors.Is(err, server.ErrNoActiveRun) && !errors.Is(err, server.ErrNotFound) {
+		slog.Debug("acp: session/close: cancel", "session", req.SessionID, "err", err)
+	}
+	// Untrack BEFORE teardown so a later closeTrackedSessions on disconnect skips
+	// this id (no double-close). delete on an absent key is a no-op, so untracking
+	// a never-tracked (shared-engine) session is harmless.
+	a.untrackSession(req.SessionID)
+	if err := a.svc.EndSession(ctx, id); err != nil {
+		return nil, newMethodErr(codeInvalidParams, "acp: session/close: "+err.Error())
+	}
+	return closeSessionResponse{}, nil
 }
 
 // requestPermission issues the outbound session/request_permission, awaits the

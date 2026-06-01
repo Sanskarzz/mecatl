@@ -1709,3 +1709,230 @@ func TestSessionLoadUnknownSession(t *testing.T) {
 		t.Fatal("expected session/load error for unknown session")
 	}
 }
+
+// newSessionWithHTTPMCP creates a session over the pipe harness carrying one
+// streaming-HTTP MCP server, so the per-session engine factory is invoked. It
+// returns the new session id. Shared by the session/close teardown tests.
+func newSessionWithHTTPMCP(t *testing.T, e *editor) string {
+	t.Helper()
+	res := e.call("session/new", map[string]any{
+		"cwd": t.TempDir(),
+		"mcpServers": []any{
+			map[string]any{"type": "http", "name": "docs", "url": "https://example.test/mcp"},
+		},
+	})
+	var ns struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(res, &ns); err != nil || ns.SessionID == "" {
+		t.Fatalf("session/new: %s err=%v", res, err)
+	}
+	return ns.SessionID
+}
+
+// TestSessionClose_TearsDownPerSessionEngine asserts the ACP session/close
+// request tears down a session's per-session engine: with a streaming-HTTP MCP
+// server mounted, session/close returns {} and fires the engine's close exactly
+// once (the mid-session twin of the gRPC CloseSession RPC / HTTP DELETE).
+func TestSessionClose_TearsDownPerSessionEngine(t *testing.T) {
+	fake := &closingSessionEngine{engine: stubEngine(t)}
+	svc := newServiceCfg(t, mockllm.New(mockllm.TextTurn("done")), allowRules(), func(c *server.Config) {
+		c.SessionEngine = fake.factory
+	})
+	e, cleanup := startAgent(t, svc)
+	defer cleanup()
+
+	sid := newSessionWithHTTPMCP(t, e)
+	if fake.calls() != 1 {
+		t.Fatalf("factory called %d times on session/new, want 1", fake.calls())
+	}
+
+	res := e.call("session/close", map[string]any{"sessionId": sid})
+	// The result is the empty object.
+	var empty map[string]any
+	if err := json.Unmarshal(res, &empty); err != nil || len(empty) != 0 {
+		t.Fatalf("session/close result = %s err=%v, want {}", res, err)
+	}
+	if fake.closes() != 1 {
+		t.Fatalf("per-session engine close called %d times after session/close, want 1", fake.closes())
+	}
+}
+
+// TestSessionClose_NoDoubleCloseOnDisconnect is the load-bearing guard: after a
+// session/close, ending the Serve loop (disconnect) must NOT close the engine
+// again — untrackSession removed it from the tracked set, so closeTrackedSessions
+// skips it. The close callback fires EXACTLY ONCE total.
+func TestSessionClose_NoDoubleCloseOnDisconnect(t *testing.T) {
+	fake := &closingSessionEngine{engine: stubEngine(t)}
+	svc := newServiceCfg(t, mockllm.New(mockllm.TextTurn("done")), allowRules(), func(c *server.Config) {
+		c.SessionEngine = fake.factory
+	})
+	e, cleanup := startAgent(t, svc)
+
+	sid := newSessionWithHTTPMCP(t, e)
+	_ = e.call("session/close", map[string]any{"sessionId": sid})
+	if fake.closes() != 1 {
+		t.Fatalf("close after session/close = %d, want 1", fake.closes())
+	}
+
+	// End the Serve loop. The backstop closeTrackedSessions must skip the already
+	// closed (and untracked) session: no second close.
+	cleanup()
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if fake.closes() != 1 {
+			t.Fatalf("double-close: engine close fired %d times after disconnect, want exactly 1", fake.closes())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fake.closes() != 1 {
+		t.Fatalf("engine close fired %d times total, want exactly 1", fake.closes())
+	}
+}
+
+// TestSessionClose_CancelsInFlightRun asserts session/close cancels a blocked
+// in-flight run: a prompt paused on a permission ask resolves with stopReason
+// "cancelled" once session/close cancels it, and the per-session engine tears
+// down afterwards.
+func TestSessionClose_CancelsInFlightRun(t *testing.T) {
+	// A mutating tool with default (nil) rules => Ask, so the prompt blocks on the
+	// permission ask we never answer — keeping the run in flight until cancelled.
+	write := &scriptTool{name: "Write", content: "x"}
+	cat := tool.NewCatalog()
+	cat.MustRegister(write)
+	perSession := agent.NewEngine(agent.Deps{
+		LLM:     mockllm.New(mockllm.ToolCallTurn(call("c1", "Write", `{}`)), mockllm.TextTurn("done")),
+		Catalog: cat,
+		Policy:  permpolicy.NewPolicy(nil, nil), // nil rules => Ask
+		Model:   "test-model",
+	})
+	fake := &closingSessionEngine{engine: perSession}
+	svc := newServiceCfg(t, mockllm.New(), nil, func(c *server.Config) {
+		c.SessionEngine = fake.factory
+	}, write)
+	e, cleanup := startAgent(t, svc)
+	defer cleanup()
+
+	sid := newSessionWithHTTPMCP(t, e)
+
+	// Start the prompt; it blocks on the permission ask (never answered).
+	promptDone := make(chan json.RawMessage, 1)
+	go func() {
+		promptDone <- e.call("session/prompt", map[string]any{
+			"sessionId": sid,
+			"prompt":    []any{map[string]any{"type": "text", "text": "write it"}},
+		})
+	}()
+
+	// Wait until the agent asks for permission (the run is now in flight + paused).
+	select {
+	case req := <-e.reqs:
+		if req.Method != "session/request_permission" {
+			t.Fatalf("expected request_permission, got %q", req.Method)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no permission ask; run never went in flight")
+	}
+
+	// session/close cancels the in-flight run, then tears the session down.
+	res := e.call("session/close", map[string]any{"sessionId": sid})
+	var empty map[string]any
+	if err := json.Unmarshal(res, &empty); err != nil || len(empty) != 0 {
+		t.Fatalf("session/close result = %s err=%v, want {}", res, err)
+	}
+
+	// The blocked prompt resolves with stopReason "cancelled".
+	select {
+	case out := <-promptDone:
+		var pr struct {
+			StopReason string `json:"stopReason"`
+		}
+		if err := json.Unmarshal(out, &pr); err != nil {
+			t.Fatalf("prompt result: %v", err)
+		}
+		if pr.StopReason != "cancelled" {
+			t.Fatalf("stopReason = %q, want cancelled", pr.StopReason)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("prompt did not resolve after session/close")
+	}
+
+	// The per-session engine tore down (after the run unwound).
+	if fake.closes() != 1 {
+		t.Fatalf("per-session engine close called %d times after session/close, want 1", fake.closes())
+	}
+}
+
+// TestSessionClose_UnknownSession asserts session/close for a never-created id is
+// rejected with a method error (from EndSession's ErrNotFound -> invalidParams),
+// mirroring the gRPC unknown-id behaviour.
+func TestSessionClose_UnknownSession(t *testing.T) {
+	svc := newService(t, mockllm.New(), nil)
+	a := acp.NewAgent(svc)
+	_, err := a.Handle(context.Background(), "session/close", json.RawMessage(`{"sessionId":"never-created"}`), true)
+	if err == nil || !strings.Contains(err.Error(), "session/close") {
+		t.Fatalf("expected session/close error for unknown id, got %v", err)
+	}
+}
+
+// TestSessionClose_Idempotent asserts two session/close for the same created id
+// both succeed: the persisted snapshot still resolves, so EndSession returns nil
+// on the second. Mirrors the gRPC double-close test.
+func TestSessionClose_Idempotent(t *testing.T) {
+	svc := newService(t, mockllm.New(), nil)
+	a := acp.NewAgent(svc)
+	sid := e2eSessionID(t, a) // a plain (shared-engine) session is enough here
+
+	for i := 0; i < 2; i++ {
+		out, err := a.Handle(context.Background(), "session/close",
+			json.RawMessage(fmt.Sprintf(`{"sessionId":%q}`, sid)), true)
+		if err != nil {
+			t.Fatalf("session/close #%d: %v", i+1, err)
+		}
+		b, _ := json.Marshal(out)
+		if string(b) != "{}" {
+			t.Fatalf("session/close #%d result = %s, want {}", i+1, b)
+		}
+	}
+}
+
+// TestSessionClose_EmptySessionID asserts an empty sessionId is rejected with
+// codeInvalidParams, mirroring handleSetMode's validation.
+func TestSessionClose_EmptySessionID(t *testing.T) {
+	svc := newService(t, mockllm.New(), nil)
+	a := acp.NewAgent(svc)
+	_, err := a.Handle(context.Background(), "session/close", json.RawMessage(`{"sessionId":""}`), true)
+	if err == nil || !strings.Contains(err.Error(), "sessionId is required") {
+		t.Fatalf("expected sessionId-required rejection, got %v", err)
+	}
+}
+
+// TestInitialize_AdvertisesCloseCapability asserts the initialize response carries
+// sessionCapabilities.close=true at the confirmed JSON path (unconditionally —
+// mecatl can always end a session), even with resume disabled.
+func TestInitialize_AdvertisesCloseCapability(t *testing.T) {
+	svc := newService(t, mockllm.New(), nil)
+	a := acp.NewAgent(svc) // resume disabled => loadSession false, close still true
+	out, err := a.Handle(context.Background(), "initialize", json.RawMessage(`{"protocolVersion":1}`), true)
+	if err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	b, _ := json.Marshal(out)
+	var init struct {
+		AgentCapabilities struct {
+			LoadSession         bool `json:"loadSession"`
+			SessionCapabilities struct {
+				Close bool `json:"close"`
+			} `json:"sessionCapabilities"`
+		} `json:"agentCapabilities"`
+	}
+	if jerr := json.Unmarshal(b, &init); jerr != nil {
+		t.Fatalf("initialize result: %v", jerr)
+	}
+	if !init.AgentCapabilities.SessionCapabilities.Close {
+		t.Fatalf("sessionCapabilities.close = false, want true; result=%s", b)
+	}
+	if init.AgentCapabilities.LoadSession {
+		t.Fatalf("loadSession advertised true with resume disabled")
+	}
+}

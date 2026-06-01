@@ -23,6 +23,7 @@ const (
 	methodRequestPermission = "session/request_permission" // agent -> client request
 	methodSessionSetMode    = "session/set_mode"           // client -> agent request
 	methodSessionLoad       = "session/load"               // client -> agent request
+	methodSessionClose      = "session/close"              // client -> agent request
 	methodFSReadTextFile    = "fs/read_text_file"          // agent -> client request
 	methodFSWriteTextFile   = "fs/write_text_file"         // agent -> client request
 )
@@ -69,9 +70,22 @@ type implementation struct {
 }
 
 type agentCapabilities struct {
-	LoadSession        bool               `json:"loadSession"`
-	McpCapabilities    mcpCapabilities    `json:"mcpCapabilities"`
-	PromptCapabilities promptCapabilities `json:"promptCapabilities"`
+	LoadSession         bool                `json:"loadSession"`
+	McpCapabilities     mcpCapabilities     `json:"mcpCapabilities"`
+	PromptCapabilities  promptCapabilities  `json:"promptCapabilities"`
+	SessionCapabilities sessionCapabilities `json:"sessionCapabilities"`
+}
+
+// sessionCapabilities advertises the session-lifecycle requests the agent
+// supports. The ACP schema (protocolVersion 1) nests them under
+// agentCapabilities.sessionCapabilities as booleans — confirmed against the
+// canonical schema $defs/SessionCapabilities
+// (raw.githubusercontent.com/zed-industries/agent-client-protocol/main/schema/schema.json),
+// which defines close / list / resume. mecatl advertises only "close"
+// (session/close); list and resume are not modelled (absent → their false
+// default), so they are simply not emitted.
+type sessionCapabilities struct {
+	Close bool `json:"close"`
 }
 
 // mcpCapabilities advertises which MCP transports the agent accepts from the
@@ -194,6 +208,22 @@ type loadSessionRequest struct {
 type loadSessionResponse struct {
 	Modes *sessionModeState `json:"modes,omitempty"`
 }
+
+// --- session/close (client -> agent) -----------------------------------------
+
+// closeSessionRequest is the inbound session/close params: cancel any ongoing
+// work for sessionId (as session/cancel would) and free the session's
+// resources. It is the spec's first-class per-session-end hook (the mid-session
+// twin of the gRPC CloseSession RPC / HTTP DELETE), capability-gated by
+// sessionCapabilities.close.
+type closeSessionRequest struct {
+	SessionID string `json:"sessionId"`
+}
+
+// closeSessionResponse is the (empty) session/close result. ACP models it as an
+// object with only an optional _meta, so an empty struct serializes to "{}" —
+// symmetric with setModeResponse{}.
+type closeSessionResponse struct{}
 
 // --- content blocks ----------------------------------------------------------
 
