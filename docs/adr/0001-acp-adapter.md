@@ -93,10 +93,11 @@ outbound `request_permission` and correlates the reply).
   MCP servers in `session/new`; they are validated and mounted **per-session** (see
   "Client streaming-HTTP MCP" below). A **stdio** entry (`type:"stdio"`, or a
   command-shaped entry) and an **sse** entry are hard-rejected — mecatl never spawns
-  an MCP server process and does not speak the SSE transport. **Asymmetry:**
-  `session/load` still rejects ANY client MCP (re-mount on resume is a tracked
-  follow-up), so a resumed session does not silently lose, or silently re-mount, the
-  servers the client passed.
+  an MCP server process and does not speak the SSE transport. **`session/load` now
+  RE-MOUNTS client streaming-HTTP MCP too** (Slice B — see "Client streaming-HTTP
+  MCP"): a resumed session re-mounts the servers the client re-supplies, through the
+  SAME `partitionClientMCP` validation + per-session engine path as `session/new`,
+  with the same stdio/sse reject, SSRF allowlist, cap, and connect timeout.
 - `loadSession`: reflects whether a durable session store is configured. `mecated
   --acp` sets it `true` only when `--store-dir` is given (the in-memory store would
   lose snapshots across a restart); otherwise `false`. The flag is threaded into the
@@ -255,10 +256,10 @@ wiring.
    updated in place) and otherwise to the stored snapshot.
 
 3. **`session/load` (resume).** Inbound `session/load {sessionId, cwd}` validates
-   cwd and rejects ANY client MCP (unlike `session/new`, which now accepts
-   streaming-HTTP servers — re-mounting them on resume is a tracked follow-up), then
-   resumes the persisted
-   session via the new `Service.LoadSession(ctx, id)` seam: it loads the latest
+   cwd and — like `session/new` — accepts client-provided streaming-HTTP MCP servers,
+   re-mounting them per-session via `Service.LoadSessionWithMCP` (Slice B — see
+   "Client streaming-HTTP MCP"); with no client MCP it resumes the persisted
+   session via the `Service.LoadSession(ctx, id)` seam: it loads the latest
    snapshot from the store and, if the session had cleanly `completed`, `Reopen`s it
    to `idle` (preserving conversation history) and re-persists, so the next
    `session/prompt`'s `BeginTurn` is legal. A failed/cancelled session is NOT
@@ -372,14 +373,16 @@ wiring.
 
    - **Asymmetry: `session/load` uses osfs, NOT fs/\*.** The fs delegation override is
      per-session connection state established at `session/new`; a loaded session does
-     not (yet) re-establish it, so a resumed session uses the `osfs` fallback. This
-     mirrors the existing client-MCP-on-load asymmetry (load rejects client MCP).
-     Only `session/new` delegates; fs/\* on resume is a tracked follow-up.
+     not (yet) re-establish it, so a resumed session uses the `osfs` fallback. (Client
+     MCP, by contrast, IS now re-mounted on `session/load` — Slice B; fs/\* on resume
+     is the remaining load-path asymmetry.) Only `session/new` delegates; fs/\* on
+     resume is a tracked follow-up.
 
 ## Client streaming-HTTP MCP
 
-A client may declare **streaming-HTTP** MCP servers in `session/new {mcpServers}`.
-They are accepted and **mounted per-session**, never globally.
+A client may declare **streaming-HTTP** MCP servers in `session/new {mcpServers}`
+AND re-supply them on `session/load {mcpServers}` (Slice B). In both cases they are
+accepted and **mounted per-session**, never globally.
 
 - **Per-session, not global — the seam.** Each accepted session gets its OWN engine,
   built by a `server.SessionEngineFactory` (`func(ctx, []mcp.ServerConfig) (*agent.Engine,
@@ -400,7 +403,16 @@ They are accepted and **mounted per-session**, never globally.
   stop expanding — was the [High] review finding; `baseEngineDeps` is the single
   source that prevents it.) `StartRun` routes a session with a registered per-session
   engine to it; every other session uses the shared engine with zero overhead (no
-  specs → no factory call → no entry).
+  specs → no factory call → no entry). **`session/load` is symmetric** —
+  `Service.LoadSessionWithMCP` mirrors `CreateSessionWithMCP` (a shared
+  `loadAndReopen` body backs both `LoadSession` and `LoadSessionWithMCP` so they
+  cannot drift): it loads + reopens-if-completed FIRST (an unknown id fails fast with
+  `ErrNotFound`, no wasted MCP connect), then builds + registers the per-session
+  engine. A re-load of the same id closes any prior per-session engine before
+  replacing it (leak guard). The one deliberate asymmetry from the create path: if the
+  engine build fails AFTER a successful reopen, the reopen is NOT rolled back — the
+  session is simply an idle, no-MCP load (acceptable), so there is no closeFn cleanup
+  branch.
 - **WHY not global-mount.** Registering a client's servers into the one shared catalog
   would leak that editor's tools — and its **auth headers** — into every other
   session/run on the process. A per-session engine confines the tools and the
@@ -428,18 +440,21 @@ They are accepted and **mounted per-session**, never globally.
   `session/new` by at most that bound, not the operator budget × count.
 - **Best-effort mount lifecycle.** A down/unreachable client server is logged-and-
   skipped (like `defMCPTools`), never fatal — the session still gets a usable engine
-  (core tools, plus whatever MCP servers did connect). The per-session MCP manager is
-  torn down when the editor disconnects (the ACP `Serve` loop ends → `Service.CloseSession`
-  for each tracked session) and, as a backstop, by `Service.Close` on process exit.
+  (core tools, plus whatever MCP servers did connect). The per-session MCP manager —
+  whether mounted at `session/new` OR re-mounted at `session/load` — is torn down when
+  the editor disconnects (the ACP `Serve` loop ends → `Service.CloseSession` for each
+  tracked session; `session/load` tracks the resumed session exactly like
+  `session/new`) and, as a backstop, by `Service.Close` on process exit.
   `CloseSession` is SAFE under an in-flight run with no run-cancel guard: `mgr.Close`
   is the go-sdk's GRACEFUL session close, which prevents new requests and WAITS for
   ongoing ones to return before terminating the connection (idempotent +
   concurrency-safe), so a disconnect racing a live MCP tool call cannot yank the
   connection mid-call. The per-session registry is bounded by connection lifetime,
   not a count cap.
-- **Follow-up (Slice B).** `session/load` re-mount of client MCP, and mid-session
-  teardown (a single session ending before the connection closes), are tracked
-  separately.
+- **Slice B — `session/load` re-mount (DONE).** A resumed session re-mounts the
+  client's re-supplied streaming-HTTP servers via `Service.LoadSessionWithMCP`, the
+  symmetric sibling of `CreateSessionWithMCP` (see "Per-session, not global"). The
+  remaining Slice B item, **mid-session teardown**, is DEFERRED — see "Deferred".
 
 ## Permission round-trip
 
@@ -563,6 +578,15 @@ handler that issues an outbound `Call` (a `session/prompt` issuing
   asking) shipped. Option 3 (TTL / idle-based eviction) is deliberately DEFERRED pending
   telemetry on real long-lived-session rule accumulation.
 - **Client MCP on `session/load`** (re-mount the client's streaming-HTTP servers on
-  resume) + **mid-session teardown** — tracked follow-up (Slice B). `session/new`
-  client streaming-HTTP MCP is now DONE (see "Client streaming-HTTP MCP").
+  resume) — now **DONE** (Slice B; see "Client streaming-HTTP MCP"), alongside the
+  already-DONE `session/new` client streaming-HTTP MCP.
+- **Mid-session teardown** (tearing down ONE session's per-session MCP manager when
+  that session ends BEFORE the editor disconnects) — deliberately **DEFERRED**.
+  Today a per-session MCP manager lives until editor disconnect (`Serve` loop end →
+  `CloseSession` for each tracked session) or process exit (`Service.Close`), and an
+  escape hatch already exists (`Service.EndSession`, reachable over gRPC/HTTP). Build
+  it ONLY when one of two triggers fires: (a) the ACP spec adds a per-session-end RPC
+  the adapter can hook, or (b) telemetry / a bug report shows a real long-lived
+  connection accumulating unbounded per-session MCP managers. This mirrors the repo's
+  existing "defer TTL eviction pending telemetry" precedent for learned rules.
 - Richer projection of `turn.*` / `compaction` (ACP plan modelling).

@@ -313,11 +313,13 @@ func (a *Agent) notifyAvailableCommands(ctx context.Context, sessionID, workspac
 }
 
 // handleSessionLoad resumes a previously-persisted session so the next
-// session/prompt continues it. It validates cwd exactly like session/new, but —
-// unlike session/new — rejects ANY client-provided MCP server (re-mounting client
-// MCP on resume is a tracked follow-up), then loads (and, if the session
-// had cleanly completed, reopens) the session via Service.LoadSession. It then
-// REPLAYS the persisted conversation as session/update notifications (see
+// session/prompt continues it. It validates cwd exactly like session/new and —
+// like session/new — ACCEPTS client-provided streaming-HTTP MCP servers: they are
+// validated (via the SAME partitionClientMCP helper, so stdio/sse reject, the SSRF
+// allowlist, the server cap, and the bounded connect timeout all apply identically)
+// and RE-MOUNTED PER-SESSION via Service.LoadSessionWithMCP. It then loads (and, if
+// the session had cleanly completed, reopens) the session and REPLAYS the persisted
+// conversation as session/update notifications (see
 // replayHistory): a re-attaching editor would otherwise see an empty transcript,
 // so we re-project the stored Conversation through the same projectUpdate path the
 // live loop uses, rebuilding the message chunks, tool_call cards, and their
@@ -347,20 +349,30 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 	if err := validateCwd(req.Cwd, "session/load"); err != nil {
 		return nil, err
 	}
-	// session/load does NOT (yet) re-mount client MCP servers — re-mounting on
-	// resume is a tracked follow-up (Slice B). Reject ANY non-empty mcpServers
-	// (including http, which session/new now accepts) so the asymmetry is loud
-	// rather than silently dropping the client's servers.
-	if len(req.McpServers) > 0 {
-		return nil, newMethodErr(codeInvalidParams,
-			"acp: session/load: client MCP on session/load is not supported (re-mount on resume is a follow-up)")
+	// Re-mount any client-provided streaming-HTTP MCP servers PER-SESSION, exactly as
+	// session/new does — the SAME partitionClientMCP helper enforces stdio/sse reject,
+	// the SSRF allowlist, the server cap, and the bounded connect timeout (its method
+	// param drives the error prefix).
+	specs, err := partitionClientMCP(req.McpServers, "session/load")
+	if err != nil {
+		return nil, err
 	}
+	// NOTE: session/load deliberately does NOT register an fs/* workspace override; a
+	// resumed session stays on osfs (fs/* delegation on load is a separate deferred
+	// item — see ADR 0001 "Deferred").
 
-	sess, err := a.svc.LoadSession(ctx, session.SessionID(req.SessionID))
+	sess, err := a.svc.LoadSessionWithMCP(ctx, session.SessionID(req.SessionID), specs)
 	if err != nil {
 		// An unknown/never-persisted session (incl. the in-memory store after a
 		// restart) is a client error: the id does not resolve.
 		return nil, newMethodErr(codeInvalidParams, "acp: session/load: "+err.Error())
+	}
+	// Track sessions resumed with a per-session engine so the Serve loop tears them
+	// down (and their re-mounted client MCP managers) on editor disconnect — identical
+	// to session/new. A session resumed with no client MCP uses the shared engine and
+	// is not tracked.
+	if len(specs) > 0 {
+		a.trackSession(string(sess.ID))
 	}
 	// Rebuild the editor's transcript from the persisted history BEFORE returning,
 	// so a re-attaching editor sees the prior turns rather than an empty session.

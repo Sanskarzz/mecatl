@@ -475,6 +475,15 @@ func (s *Service) SetMode(ctx context.Context, id session.SessionID, mode sessio
 // in-memory store after a process restart, or when no store-dir is configured
 // and the id was never created in this process).
 func (s *Service) LoadSession(ctx context.Context, id session.SessionID) (*session.Session, error) {
+	return s.loadAndReopen(ctx, id)
+}
+
+// loadAndReopen is the shared load + reopen-if-completed body of LoadSession and
+// LoadSessionWithMCP, factored out so the two cannot drift: it loads the latest
+// snapshot, and if the session cleanly completed REOPENS it to idle (preserving
+// history) and re-persists. ErrNotFound propagates from GetSession; Reopen rejects
+// a failed/cancelled session and that prior state is returned as-is.
+func (s *Service) loadAndReopen(ctx context.Context, id session.SessionID) (*session.Session, error) {
 	sess, err := s.GetSession(ctx, id)
 	if err != nil {
 		return nil, err
@@ -487,6 +496,59 @@ func (s *Service) LoadSession(ctx context.Context, id session.SessionID) (*sessi
 			return nil, fmt.Errorf("server: persist reopened session: %w", serr)
 		}
 	}
+	return sess, nil
+}
+
+// LoadSessionWithMCP resumes a previously-persisted session AND re-mounts the
+// client-provided streaming-HTTP MCP servers (specs) for the lifetime of that
+// session, via a PER-SESSION engine. It is the ACP session/load entry for an editor
+// that re-supplies mcpServers on resume — the symmetric sibling of
+// CreateSessionWithMCP (session/new).
+//
+//   - With NO specs it delegates to LoadSession: the resumed session uses the SHARED
+//     engine, with zero per-session overhead and no registry entry.
+//   - With specs it REQUIRES Config.SessionEngine (else ErrInvalidArgument: "client
+//     MCP not supported"); it loads + reopens-if-completed FIRST (so an unknown id
+//     fails fast — ErrNotFound — without a wasted MCP connect), then builds the
+//     per-session engine via that factory and, on success, registers it under the
+//     session id so StartRun routes the session's runs to it. A factory error is
+//     returned as-is (the caller maps it).
+//
+// The per-session engine's MCP manager is torn down by CloseSession (editor
+// disconnect) or by the Service's Close.
+func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, specs []mcp.ServerConfig) (*session.Session, error) {
+	if len(specs) == 0 {
+		return s.LoadSession(ctx, id)
+	}
+	if s.cfg.SessionEngine == nil {
+		return nil, fmt.Errorf("%w: client MCP not supported (no per-session engine configured)", ErrInvalidArgument)
+	}
+	// Load + reopen-if-completed BEFORE building the engine, so an unknown id fails
+	// fast (ErrNotFound) without a wasted MCP connect. The reopen's Store.Save runs
+	// here too.
+	sess, err := s.loadAndReopen(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	eng, closeFn, err := s.cfg.SessionEngine(ctx, specs)
+	if err != nil {
+		// The session was loaded + (if needed) reopened and re-persisted, but the
+		// per-session engine could not be built. We deliberately do NOT roll that
+		// back: the session is now just an idle session with no per-session engine —
+		// exactly a no-MCP load — which is acceptable, so there is no closeFn cleanup
+		// branch here (the asymmetry from CreateSessionWithMCP, where a persist
+		// failure tears the freshly-built engine down).
+		return nil, err
+	}
+	s.mu.Lock()
+	// Re-load leak guard: if a per-session engine is already registered for this id
+	// (e.g. a re-load of the same session on the same connection), close the prior
+	// one before replacing it so its MCP manager is not orphaned.
+	if prior, ok := s.sessionEngines[id]; ok && prior.close != nil {
+		_ = prior.close()
+	}
+	s.sessionEngines[id] = &sessionEngine{engine: eng, close: closeFn}
+	s.mu.Unlock()
 	return sess, nil
 }
 

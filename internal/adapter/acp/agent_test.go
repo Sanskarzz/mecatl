@@ -1305,6 +1305,229 @@ func TestSessionLoadDisabledWithoutStore(t *testing.T) {
 	}
 }
 
+// closingSessionEngine is a SessionEngineFactory that hands back a stub engine and
+// a close func that increments a counter, so the disconnect-teardown test can assert
+// the re-mounted client MCP manager is drained on disconnect (the no-op
+// fakeSessionEngine cannot prove teardown).
+type closingSessionEngine struct {
+	mu     sync.Mutex
+	called int
+	closed int
+	engine *agent.Engine
+}
+
+func (f *closingSessionEngine) factory(_ context.Context, _ []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+	f.mu.Lock()
+	f.called++
+	f.mu.Unlock()
+	return f.engine, func() error {
+		f.mu.Lock()
+		f.closed++
+		f.mu.Unlock()
+		return nil
+	}, nil
+}
+
+func (f *closingSessionEngine) calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.called
+}
+
+func (f *closingSessionEngine) closes() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed
+}
+
+// TestSessionLoadAcceptsHTTPMCP asserts session/load (resume enabled) RE-MOUNTS a
+// client-provided streaming-HTTP MCP server: the per-session engine factory is
+// invoked on load, the resumed session runs on it, and disconnect tears it down.
+func TestSessionLoadAcceptsHTTPMCP(t *testing.T) {
+	fake := &closingSessionEngine{engine: stubEngine(t)}
+	store := memstore.New()
+	svc := newServiceCfg(t, mockllm.New(mockllm.TextTurn("done")), allowRules(), func(c *server.Config) {
+		c.Store = store
+		c.SessionEngine = fake.factory
+	})
+
+	// Connection 1: create a session (no MCP) + run one prompt to completion so a
+	// persisted, resumable snapshot exists.
+	e1, cleanup1 := startAgent(t, svc, acp.WithResume(true))
+	res := e1.call("session/new", map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}})
+	var ns struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(res, &ns)
+	out := e1.call("session/prompt", map[string]any{"sessionId": ns.SessionID,
+		"prompt": []any{map[string]any{"type": "text", "text": "first"}}})
+	var pr struct {
+		StopReason string `json:"stopReason"`
+	}
+	if err := json.Unmarshal(out, &pr); err != nil || pr.StopReason != "end_turn" {
+		t.Fatalf("first prompt stopReason %q err %v", pr.StopReason, err)
+	}
+	cleanup1()
+
+	// Connection 2: load the session WITH a streaming-HTTP MCP server. The factory
+	// must be invoked exactly once to build the re-mounted per-session engine.
+	e2, cleanup2 := startAgent(t, svc, acp.WithResume(true))
+	loadRes := e2.call("session/load", map[string]any{
+		"sessionId": ns.SessionID,
+		"cwd":       t.TempDir(),
+		"mcpServers": []any{
+			map[string]any{"type": "http", "name": "docs", "url": "https://example.test/mcp"},
+		},
+	})
+	var lr struct {
+		Modes *struct {
+			CurrentModeID string `json:"currentModeId"`
+		} `json:"modes"`
+	}
+	if err := json.Unmarshal(loadRes, &lr); err != nil || lr.Modes == nil {
+		t.Fatalf("session/load result: %s err=%v", loadRes, err)
+	}
+	if fake.calls() != 1 {
+		t.Fatalf("factory called %d times on load with MCP, want 1", fake.calls())
+	}
+
+	// The resumed session runs on the re-mounted per-session engine.
+	out2 := e2.call("session/prompt", map[string]any{"sessionId": ns.SessionID,
+		"prompt": []any{map[string]any{"type": "text", "text": "second"}}})
+	var pr2 struct {
+		StopReason string `json:"stopReason"`
+	}
+	if err := json.Unmarshal(out2, &pr2); err != nil || pr2.StopReason != "end_turn" {
+		t.Fatalf("second prompt stopReason %q err %v", pr2.StopReason, err)
+	}
+
+	// Disconnect tears the re-mounted per-session MCP manager down (the session was
+	// tracked on load exactly like session/new).
+	cleanup2()
+	deadline := time.Now().Add(3 * time.Second)
+	for fake.closes() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fake.closes() != 1 {
+		t.Fatalf("per-session engine close called %d times after disconnect, want 1", fake.closes())
+	}
+}
+
+// TestSessionLoadRejectsStdioMCP asserts a stdio client MCP server on session/load
+// is rejected (mecatl is streaming-HTTP MCP only), via the SAME partitionClientMCP
+// guard session/new uses — now with the "session/load" error prefix.
+func TestSessionLoadRejectsStdioMCP(t *testing.T) {
+	a := acp.NewAgent(newService(t, mockllm.New(), nil), acp.WithResume(true))
+	cwd := t.TempDir()
+	cases := []string{
+		fmt.Sprintf(`{"sessionId":"s","cwd":%q,"mcpServers":[{"name":"local","command":"some-bin"}]}`, cwd),
+		fmt.Sprintf(`{"sessionId":"s","cwd":%q,"mcpServers":[{"name":"local","type":"stdio","command":"some-bin"}]}`, cwd),
+	}
+	for _, params := range cases {
+		_, err := a.Handle(context.Background(), "session/load", json.RawMessage(params), true)
+		if err == nil || !strings.Contains(err.Error(), "stdio MCP") || !strings.Contains(err.Error(), "session/load") {
+			t.Fatalf("expected stdio MCP rejection with session/load prefix, got %v (params=%s)", err, params)
+		}
+	}
+}
+
+// TestSessionLoadRejectsSSEMCP asserts a type:"sse" client MCP server on session/load
+// is rejected (streaming-HTTP only).
+func TestSessionLoadRejectsSSEMCP(t *testing.T) {
+	a := acp.NewAgent(newService(t, mockllm.New(), nil), acp.WithResume(true))
+	params := fmt.Sprintf(`{"sessionId":"s","cwd":%q,"mcpServers":[{"name":"stream","type":"sse","url":"https://example.test/sse"}]}`, t.TempDir())
+	_, err := a.Handle(context.Background(), "session/load", json.RawMessage(params), true)
+	if err == nil || !strings.Contains(err.Error(), "sse") {
+		t.Fatalf("expected sse rejection, got %v", err)
+	}
+}
+
+// TestSessionLoadRejectsBadScheme asserts an http MCP server with a non-allowed URL
+// scheme on session/load is rejected by the SSRF scheme allowlist.
+func TestSessionLoadRejectsBadScheme(t *testing.T) {
+	a := acp.NewAgent(newService(t, mockllm.New(), nil), acp.WithResume(true))
+	params := fmt.Sprintf(`{"sessionId":"s","cwd":%q,"mcpServers":[{"name":"bad","type":"http","url":"file:///etc/passwd"}]}`, t.TempDir())
+	_, err := a.Handle(context.Background(), "session/load", json.RawMessage(params), true)
+	if err == nil || !strings.Contains(err.Error(), "rejected") {
+		t.Fatalf("expected bad-scheme rejection, got %v", err)
+	}
+}
+
+// TestSessionLoadRejectsTooManyMCP asserts a client declaring more than the cap of
+// MCP servers on session/load is rejected (CWE-400), BEFORE the factory is consulted.
+func TestSessionLoadRejectsTooManyMCP(t *testing.T) {
+	fake := &fakeSessionEngine{engine: stubEngine(t)}
+	svc := newServiceCfg(t, mockllm.New(), nil, func(c *server.Config) { c.SessionEngine = fake.factory })
+	a := acp.NewAgent(svc, acp.WithResume(true))
+
+	var entries []string
+	for i := 0; i < 9; i++ { // 9 > the cap of 8
+		entries = append(entries, fmt.Sprintf(`{"type":"http","name":"s%d","url":"https://s%d.test/mcp"}`, i, i))
+	}
+	params := fmt.Sprintf(`{"sessionId":"s","cwd":%q,"mcpServers":[%s]}`, t.TempDir(), strings.Join(entries, ","))
+	_, err := a.Handle(context.Background(), "session/load", json.RawMessage(params), true)
+	if err == nil || !strings.Contains(err.Error(), "too many MCP servers") {
+		t.Fatalf("expected too-many-servers rejection, got %v", err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.called != 0 {
+		t.Fatalf("factory called %d times; the cap must reject before any connect", fake.called)
+	}
+}
+
+// TestSessionLoadClientMCPTornDownOnDisconnect asserts that a session resumed with
+// client MCP is tracked, so when the Serve loop ends (editor disconnect) the
+// re-mounted per-session MCP manager is drained via CloseSession. It is the load-path
+// twin of the session/new disconnect-teardown behaviour.
+func TestSessionLoadClientMCPTornDownOnDisconnect(t *testing.T) {
+	fake := &closingSessionEngine{engine: stubEngine(t)}
+	store := memstore.New()
+	svc := newServiceCfg(t, mockllm.New(mockllm.TextTurn("done")), allowRules(), func(c *server.Config) {
+		c.Store = store
+		c.SessionEngine = fake.factory
+	})
+
+	// Persist a resumable session.
+	e1, cleanup1 := startAgent(t, svc, acp.WithResume(true))
+	res := e1.call("session/new", map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}})
+	var ns struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(res, &ns)
+	out := e1.call("session/prompt", map[string]any{"sessionId": ns.SessionID,
+		"prompt": []any{map[string]any{"type": "text", "text": "first"}}})
+	var pr struct {
+		StopReason string `json:"stopReason"`
+	}
+	if err := json.Unmarshal(out, &pr); err != nil || pr.StopReason != "end_turn" {
+		t.Fatalf("first prompt stopReason %q err %v", pr.StopReason, err)
+	}
+	cleanup1()
+
+	// Resume WITH client MCP, then end the Serve loop.
+	e2, cleanup2 := startAgent(t, svc, acp.WithResume(true))
+	_ = e2.call("session/load", map[string]any{
+		"sessionId": ns.SessionID,
+		"cwd":       t.TempDir(),
+		"mcpServers": []any{
+			map[string]any{"type": "http", "name": "docs", "url": "https://example.test/mcp"},
+		},
+	})
+	if fake.calls() != 1 {
+		t.Fatalf("factory called %d times on load, want 1", fake.calls())
+	}
+	cleanup2() // ends Serve -> closeTrackedSessions -> CloseSession drains the manager.
+
+	deadline := time.Now().Add(3 * time.Second)
+	for fake.closes() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fake.closes() != 1 {
+		t.Fatalf("per-session engine close called %d times after disconnect, want 1", fake.closes())
+	}
+}
+
 // callErr issues an editor->agent request and returns the JSON-RPC error (failing
 // if the call succeeded instead). It mirrors call but for the loud-reject paths.
 func (e *editor) callErr(method string, params any) json.RawMessage {
