@@ -109,6 +109,12 @@ type HookPayload struct {
 	Tool string
 	// Decision is the outcome (info / blocked / modified).
 	Decision HookDecision
+	// CallID is the id of the tool call this hook fired against, for the per-tool
+	// phases (PreToolUse / PostToolUse); empty for non-tool phases (e.g. Stop,
+	// SessionStart) and for tool phases where no call is in scope. It lets a client
+	// address the hook notice to the originating tool card (e.g. mark that exact
+	// tool_call as failed) instead of falling back to a free-standing note.
+	CallID ToolCallID
 }
 
 // ResultPayload is the terminal payload carried by an EvResult Event.

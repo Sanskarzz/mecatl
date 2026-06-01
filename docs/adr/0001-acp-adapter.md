@@ -5,7 +5,8 @@
 - Scope: Phase 1 (core loop) + Phase 2 (fidelity — diff blocks, subagent/team/hook
   projection) + Phase 3 bounded pieces (commands, set_mode, load — see "Phase 3
   (bounded)"). The Phase 3 long-tail (fs/\* delegation, governance-rule persistence,
-  image/audio, hook-call-id) remains (see "Deferred").
+  image/audio) remains (see "Deferred"). The hook-call-id veto (issue #6) is now
+  DONE — a blocked PreToolUse veto keys a `failed` `tool_call_update` onto its card.
 
 ## Context
 
@@ -90,7 +91,7 @@ outbound `request_permission` and correlates the reply).
 | `EvReasoningDelta`            | `session/update` `agent_thought_chunk{content:text}` (summary only — never the encrypted replay blob) |
 | `EvToolCall`                  | `session/update` `tool_call{toolCallId,title,kind,rawInput,status:pending}` — for Edit/Write a `diff` content block is attached (Phase 2) |
 | `EvToolResult`                | `session/update` `tool_call_update{toolCallId,status:completed\|failed,content:[text]}` |
-| `EvHook`                      | `session/update` `agent_thought_chunk{content:reason}` (Phase 2) |
+| `EvHook`                      | blocked **PreToolUse** w/ call id → `tool_call_update{toolCallId,status:failed,content:reason}` on the card opened before the gate (issue #6); PostToolUse blocks + all others → `agent_thought_chunk{content:reason}` |
 | `EvSubagentTool`/`EvSubagentEnd` | `session/update` `tool_call_update` on the PARENT Task call id (Phase 2) |
 | `EvTeamMember`/`EvTeamEnd`    | `session/update` `tool_call_update` on the PARENT Team call id (Phase 2) |
 | `EvPermissionAsk`             | OUTBOUND `session/request_permission` (4 options); reply → `run.Approve` |
@@ -131,15 +132,21 @@ would add noise before the first progress line.
    terminal `completed`). A `subagent.tool`/`team.member` with no parent id, or a
    `team.member` with nothing to show, is dropped.
 
-3. **Hook events.** `EvHook` projects to an `agent_thought_chunk` carrying the
-   hook's reason (a blocked PreToolUse veto, a prompt/arg rewrite, a Stop notice).
-   It is deliberately NOT a `failed` `tool_call_update` on the related tool: ACP
-   keys a `tool_call_update` by `toolCallId`, but `HookPayload` carries only the
-   tool NAME, never the originating tool-call id — so this package cannot address
-   the real tool_call without fabricating a phantom card. The blocked call's own
-   `EvToolResult` (which DOES carry the real id) still projects to a `failed`
-   `tool_call_update`. Surfacing the veto ON the tool card needs the call id added
-   to `HookPayload` (an event-taxonomy change) — deferred to Phase 3.
+3. **Hook events.** A blocked **PreToolUse** veto that carries the originating
+   tool-call id (`HookPayload.CallID`, added for issue #6) projects to a `failed`
+   `tool_call_update` keyed by that id, so the veto lands ON the tool card. This is
+   safe because the loop now opens the `tool_call` card BEFORE the permission/hook
+   gate (`openCard` in `internal/agent/dispatch.go`), so the id is always one the
+   client has already seen — the earlier "phantom card" risk (an update for an
+   unopened id) is gone. The PreToolUse block also emits a synthesized error
+   `EvToolResult` on the same id, which projects to its own `failed` update; both
+   settle the same already-open card harmlessly. A blocked **PostToolUse** hook
+   stays an `agent_thought_chunk` annotation by domain semantics: the tool already
+   ran and its (successful) `EvToolResult` settles the card, so failing the card
+   would wrongly overwrite a completed result. Every other hook (a prompt/arg
+   rewrite, a Stop notice, a hook with no call id) is likewise a thought chunk.
+   Because the acp package must not import `internal/governance`, the phase guard
+   compares `HookPayload.Phase` against the string `"PreToolUse"`.
 
 4. **Modes + commands.** Phase 2 deferred these; the bounded pieces landed in
    Phase 3 below (`available_commands_update`, `session/set_mode` +
@@ -250,7 +257,5 @@ handler that issues an outbound `Call` (a `session/prompt` issuing
 - **`session/load` history replay** — restore-without-replay is implemented; full
   conversation replay back to the client as `session/update`s is the nice-to-have.
 - **Image/audio prompt content** (`promptCapabilities` stays text-only).
-- Keying a hook veto onto the related tool card — needs the tool-call id added to
-  `HookPayload` (an event-taxonomy change).
 - Client-provided MCP servers.
 - Richer projection of `turn.*` / `compaction` (ACP plan modelling).

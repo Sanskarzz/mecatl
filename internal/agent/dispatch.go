@@ -93,7 +93,12 @@ func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session
 	}
 	var toRun []pending
 	for _, c := range batch {
+		c := c // local copy: openCard takes &c, and this loop variable is reused.
 		t, _ := e.deps.Catalog.Lookup(c.Name)
+		// Open the tool card BEFORE the permission/hook gate so any synthesized
+		// failure (a deny result or a PreToolUse veto) lands on a card the client has
+		// already seen — see openCard.
+		e.openCard(r, turnIdx, c)
 		decision, cancelled := e.authorize(ctx, r, sess, turnIdx, c)
 		if cancelled {
 			return nil, true
@@ -145,6 +150,12 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws t
 		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, false
 	}
+
+	// Open the tool card BEFORE the permission/hook gate so any synthesized failure
+	// (a deny result or a PreToolUse veto) lands on a card the client has already
+	// seen. Only known tools get a card; the unknown-tool branch above emits only
+	// its error result, since there is no real tool to open a card for.
+	e.openCard(r, turnIdx, c)
 
 	decision, cancelled := e.authorize(ctx, r, sess, turnIdx, c)
 	if cancelled {
@@ -269,7 +280,7 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 			m = "blocked by PreToolUse hook"
 		}
 		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: m,
-			Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookBlocked}})
+			Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookBlocked, CallID: c.ID}})
 		return c, true, m, nil
 	}
 	if len(outcome.Mutated) > 0 {
@@ -278,17 +289,23 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 		// decision is NOT re-evaluated on these args — see the trust note above.
 		if json.Valid(outcome.Mutated) {
 			e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PreToolUse hook rewrote tool arguments for " + c.Name,
-				Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookModified}})
+				Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookModified, CallID: c.ID}})
 			return session.NewToolCall(c.ID, c.Name, outcome.Mutated), false, "", nil
 		}
 		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PreToolUse hook returned a malformed argument mutation (ignored)",
-			Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookInfo}})
+			Hook: &session.HookPayload{Phase: string(governance.PhasePreToolUse), Tool: c.Name, Decision: session.HookInfo, CallID: c.ID}})
 	}
 	return c, false, "", nil
 }
 
 // execute runs the tool against the workspace, times it, runs the PostToolUse
-// hook, then logs and emits the effective result (tool.call is emitted first).
+// hook, then logs and emits the effective result.
+//
+// The EvToolCall "open card" event is NOT emitted here — it is emitted by openCard
+// BEFORE the permission/hook gate (in runReadBatch Phase 1 and runOne), so a
+// synthesized failure on the gated paths (a deny result or a PreToolUse veto) lands
+// on a card the client has already opened. execute is only ever reached AFTER the
+// gate, so the card always exists by the time the result is emitted.
 //
 // Ordering note: PostToolUse runs BEFORE the result is logged, emitted, or
 // returned, so a PostToolUse result mutation is reflected uniformly — the
@@ -301,9 +318,6 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 // annotates (the tool already ran; a block neither undoes nor suppresses the
 // result).
 func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool) session.ToolResult {
-	call := c
-	e.emit(r, session.Event{Type: session.EvToolCall, Turn: turnIdx, ToolCall: &call})
-
 	res, dur := e.timeExecute(ctx, r, ws, turnIdx, c, t)
 
 	// PostToolUse may rewrite the result. The effective (possibly rewritten) result
@@ -411,7 +425,7 @@ func (e *Engine) postHook(ctx context.Context, r *Run, sess *session.Session, tu
 		// hook flagging the output — surface it as a blocked-severity notice so it
 		// reads distinctly from a benign annotation.
 		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: outcome.Message,
-			Hook: &session.HookPayload{Phase: string(governance.PhasePostToolUse), Tool: c.Name, Decision: session.HookBlocked}})
+			Hook: &session.HookPayload{Phase: string(governance.PhasePostToolUse), Tool: c.Name, Decision: session.HookBlocked, CallID: c.ID}})
 	}
 	if len(outcome.Mutated) > 0 {
 		// Apply the mutation: decode the same {"content", "is_error"} shape and
@@ -420,7 +434,7 @@ func (e *Engine) postHook(ctx context.Context, r *Run, sess *session.Session, tu
 			var p resultPayload
 			if jerr := json.Unmarshal(outcome.Mutated, &p); jerr == nil {
 				e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PostToolUse hook rewrote the tool result for " + c.Name,
-					Hook: &session.HookPayload{Phase: string(governance.PhasePostToolUse), Tool: c.Name, Decision: session.HookModified}})
+					Hook: &session.HookPayload{Phase: string(governance.PhasePostToolUse), Tool: c.Name, Decision: session.HookModified, CallID: c.ID}})
 				if p.IsError {
 					return session.NewToolError(res.CallID, p.Content)
 				}
@@ -428,9 +442,24 @@ func (e *Engine) postHook(ctx context.Context, r *Run, sess *session.Session, tu
 			}
 		}
 		e.emit(r, session.Event{Type: session.EvHook, Turn: turnIdx, Text: "PostToolUse hook returned a malformed result mutation (ignored)",
-			Hook: &session.HookPayload{Phase: string(governance.PhasePostToolUse), Tool: c.Name, Decision: session.HookInfo}})
+			Hook: &session.HookPayload{Phase: string(governance.PhasePostToolUse), Tool: c.Name, Decision: session.HookInfo, CallID: c.ID}})
 	}
 	return res
+}
+
+// openCard emits the EvToolCall "open card" event for a call. It is called BEFORE
+// the permission/hook gate (not inside execute) so the card exists before any
+// synthesized failure — a permission-deny result or a PreToolUse veto — is emitted
+// against its id; otherwise a client (e.g. the ACP adapter) would receive a
+// failed/error update for a tool_call it never opened and could silently drop it.
+//
+// The card carries the ORIGINAL call args as received. A PreToolUse hook that
+// rewrites the args emits its own HookModified notice; the card is not re-opened
+// with the rewritten args (accepted tradeoff: the original args are shown, the
+// modified-notice flags the rewrite).
+func (e *Engine) openCard(r *Run, turnIdx int, c session.ToolCall) {
+	call := c
+	e.emit(r, session.Event{Type: session.EvToolCall, Turn: turnIdx, ToolCall: &call})
 }
 
 // emit assigns the next Seq via Run.emit, then mirrors the sequenced event to the

@@ -24,9 +24,10 @@ import (
 //	                    content: [diff] for Edit/Write (synthesized from the args) }
 //	EvToolResult     -> tool_call_update{ toolCallId, status: completed|failed,
 //	                    content: [text] }
-//	EvHook           -> for a blocked hook on a known tool, a tool_call_update marking
-//	                    that tool's call FAILED with the reason; otherwise an
-//	                    agent_thought_chunk note.
+//	EvHook           -> for a blocked PreToolUse hook carrying the originating
+//	                    tool-call id, a tool_call_update marking that exact call
+//	                    FAILED with the reason (the card was opened before the gate);
+//	                    PostToolUse blocks and all others -> an agent_thought_chunk note.
 //	EvSubagentTool/  -> tool_call_update on the PARENT Task call (keyed by
 //	  EvSubagentEnd      SubagentPayload.ParentCallID): progress content lines while
 //	                     the child runs; completed/failed on end.
@@ -157,21 +158,34 @@ func diffContentFor(name string, args []byte) []toolCallContent {
 	}
 }
 
-// projectHook maps an EvHook to an agent_thought_chunk note carrying the hook's
-// reason (a blocked PreToolUse veto, a prompt/arg rewrite, a Stop notice, …).
+// projectHook maps an EvHook to the right ACP surface:
 //
-// WHY a thought chunk and NOT a failed tool_call_update on the related tool: ACP
-// keys a tool_call_update by the toolCallId, but HookPayload carries only the tool
-// NAME (Phase.Tool), never the originating tool-call id — so an adapter confined
-// to this package cannot address the real tool_call. Emitting a tool_call_update
-// keyed by the name would fabricate a phantom card the editor never opened. The
-// blocked-hook reason still reaches the editor inline (as a thought), and the
-// blocked call's own EvToolResult — which DOES carry the real call id — already
-// projects to a FAILED tool_call_update. Surfacing the veto ON the tool card needs
-// the call id added to HookPayload (an event-taxonomy change), deferred to Phase 3.
+//   - A BLOCKED PreToolUse hook that carries the originating tool-call id marks that
+//     exact tool_call_update FAILED with the veto reason. The veto lands ON the tool
+//     card the loop opened BEFORE the permission/hook gate (see openCard in
+//     internal/agent/dispatch.go), so the id is always one the client has seen. The
+//     PreToolUse block also emits a synthesized error EvToolResult on the same id,
+//     which projects to its own FAILED update — two `failed` updates settle the same
+//     already-open card, which is harmless (the hook update carries the veto reason,
+//     the result update the synthesized error body).
+//   - Every other hook projects to an agent_thought_chunk note carrying the reason.
+//     In particular a PostToolUse block is annotate-only by domain semantics — the
+//     tool already ran and its (successful) EvToolResult settles the card; surfacing
+//     the block as a thought avoids overwriting that with a spurious `failed`.
+//
+// The phase guard is a STRING compare against "PreToolUse" because the acp package
+// must not import internal/governance; that value is string(governance.PhasePreToolUse).
 func projectHook(ev session.Event) (any, bool) {
 	if ev.Hook == nil {
 		return nil, false
+	}
+	if ev.Hook.Decision == session.HookBlocked && ev.Hook.CallID != "" && ev.Hook.Phase == "PreToolUse" {
+		return toolCallUpdate{
+			SessionUpdate: updateToolCallUpdate,
+			ToolCallID:    string(ev.Hook.CallID),
+			Status:        toolStatusFailed,
+			Content:       textToolContent(hookNote(ev.Hook, ev.Text)),
+		}, true
 	}
 	return chunkUpdate{SessionUpdate: updateAgentThoughtChunk, Content: textBlock(hookNote(ev.Hook, ev.Text))}, true
 }

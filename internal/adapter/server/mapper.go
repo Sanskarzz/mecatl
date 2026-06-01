@@ -168,6 +168,7 @@ func toProtoHook(h session.HookPayload) *mecatlv1.Hook {
 		Phase:    h.Phase,
 		Tool:     h.Tool,
 		Decision: hookDecisionToProto(h.Decision),
+		CallId:   string(h.CallID),
 	}
 }
 

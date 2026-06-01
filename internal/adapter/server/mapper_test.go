@@ -121,14 +121,15 @@ func TestToProtoTable(t *testing.T) {
 		{
 			name: "hook",
 			in: session.Event{Type: session.EvHook, Seq: 7, Turn: 1, Text: "blocked-by-policy",
-				Hook: &session.HookPayload{Phase: "PreToolUse", Tool: "Bash", Decision: session.HookBlocked}},
+				Hook: &session.HookPayload{Phase: "PreToolUse", Tool: "Bash", Decision: session.HookBlocked, CallID: "call-7"}},
 			assert: func(t *testing.T, got *mecatlv1.Event) {
 				if got.GetType() != "hook" || got.GetText() != "blocked-by-policy" {
 					t.Fatalf("got %+v", got)
 				}
 				h := got.GetHook()
 				if h == nil || h.GetPhase() != "PreToolUse" || h.GetTool() != "Bash" ||
-					h.GetDecision() != mecatlv1.HookDecision_HOOK_DECISION_BLOCKED {
+					h.GetDecision() != mecatlv1.HookDecision_HOOK_DECISION_BLOCKED ||
+					h.GetCallId() != "call-7" {
 					t.Fatalf("hook payload mismatch: %+v", h)
 				}
 			},
@@ -140,6 +141,9 @@ func TestToProtoTable(t *testing.T) {
 				h := got.GetHook()
 				if h == nil || h.GetDecision() != mecatlv1.HookDecision_HOOK_DECISION_INFO {
 					t.Fatalf("empty decision should map to INFO: %+v", h)
+				}
+				if h.GetCallId() != "" {
+					t.Errorf("a non-tool (Stop) hook should carry no call id, got %q", h.GetCallId())
 				}
 			},
 		},

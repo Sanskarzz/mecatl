@@ -246,6 +246,82 @@ func TestProjectHookNoText(t *testing.T) {
 	}
 }
 
+// TestProjectHookBlockedWithCallID asserts a blocked hook carrying the originating
+// tool-call id projects to a FAILED tool_call_update keyed by that id (the veto
+// lands ON the tool card the editor already opened), not a thought chunk.
+func TestProjectHookBlockedWithCallID(t *testing.T) {
+	ev := session.Event{
+		Type: session.EvHook,
+		Text: "blocked by PreToolUse hook",
+		Hook: &session.HookPayload{Phase: "PreToolUse", Tool: "Bash", Decision: session.HookBlocked, CallID: "call-7"},
+	}
+	got, ok := projectUpdate(ev)
+	if !ok {
+		t.Fatal("expected a projection")
+	}
+	u, isUpdate := got.(toolCallUpdate)
+	if !isUpdate {
+		t.Fatalf("want toolCallUpdate, got %T", got)
+	}
+	if u.SessionUpdate != updateToolCallUpdate {
+		t.Errorf("sessionUpdate = %q, want tool_call_update", u.SessionUpdate)
+	}
+	if u.ToolCallID != "call-7" {
+		t.Errorf("toolCallId = %q, want call-7", u.ToolCallID)
+	}
+	if u.Status != toolStatusFailed {
+		t.Errorf("status = %q, want failed", u.Status)
+	}
+	if len(u.Content) != 1 || u.Content[0].Content.Text != "blocked by PreToolUse hook" {
+		t.Errorf("content = %+v, want the veto reason", u.Content)
+	}
+}
+
+// TestProjectHookModifiedWithCallID asserts a NON-blocked hook (a modified/info
+// notice) still projects to a thought chunk even when it carries a call id — only a
+// BLOCKED hook fails the card.
+func TestProjectHookModifiedWithCallID(t *testing.T) {
+	ev := session.Event{
+		Type: session.EvHook,
+		Text: "PreToolUse hook rewrote tool arguments for Bash",
+		Hook: &session.HookPayload{Phase: "PreToolUse", Tool: "Bash", Decision: session.HookModified, CallID: "call-7"},
+	}
+	got, ok := projectUpdate(ev)
+	if !ok {
+		t.Fatal("expected a projection")
+	}
+	cu, isChunk := got.(chunkUpdate)
+	if !isChunk {
+		t.Fatalf("want chunkUpdate (a modified hook must not fail the card), got %T", got)
+	}
+	if cu.SessionUpdate != updateAgentThoughtChunk {
+		t.Errorf("sessionUpdate = %q, want thought chunk", cu.SessionUpdate)
+	}
+}
+
+// TestProjectHookPostToolUseBlockedWithCallID asserts a blocked PostToolUse hook —
+// even carrying a call id — projects to a thought chunk, NOT a failed
+// tool_call_update. PostToolUse is annotate-only (the tool already ran and its
+// successful EvToolResult settles the card); failing the card would overwrite that.
+func TestProjectHookPostToolUseBlockedWithCallID(t *testing.T) {
+	ev := session.Event{
+		Type: session.EvHook,
+		Text: "PostToolUse flagged the output",
+		Hook: &session.HookPayload{Phase: "PostToolUse", Tool: "Bash", Decision: session.HookBlocked, CallID: "call-7"},
+	}
+	got, ok := projectUpdate(ev)
+	if !ok {
+		t.Fatal("expected a projection")
+	}
+	cu, isChunk := got.(chunkUpdate)
+	if !isChunk {
+		t.Fatalf("want chunkUpdate (a PostToolUse block is annotate-only), got %T", got)
+	}
+	if cu.SessionUpdate != updateAgentThoughtChunk {
+		t.Errorf("sessionUpdate = %q, want thought chunk", cu.SessionUpdate)
+	}
+}
+
 // TestProjectSubagent asserts subagent.tool/end project as tool_call_update on the
 // PARENT Task call id.
 func TestProjectSubagent(t *testing.T) {

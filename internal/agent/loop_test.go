@@ -510,19 +510,37 @@ func TestPermissionDeny(t *testing.T) {
 	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")
 
 	var denyResult *session.ToolResult
+	// Track the order of the c1 events: the card (EvToolCall) must open BEFORE the
+	// synthesized deny result, so the failed update lands on an already-open card.
+	i, cardIdx, denyIdx := 0, -1, -1
 	for ev := range r.Events() {
 		switch ev.Type {
+		case session.EvToolCall:
+			if ev.ToolCall != nil && ev.ToolCall.ID == "c1" && cardIdx == -1 {
+				cardIdx = i
+			}
 		case session.EvPermissionAsk:
 			r.Approve(ev.Ask.AskID, false)
 		case session.EvToolResult:
 			denyResult = ev.ToolResult
+			if ev.ToolResult != nil && ev.ToolResult.CallID == "c1" && denyIdx == -1 {
+				denyIdx = i
+			}
 		}
+		i++
 	}
 	if executed.Load() {
 		t.Fatalf("denied tool was executed")
 	}
 	if denyResult == nil || !denyResult.IsError {
 		t.Fatalf("expected an error tool result for the deny, got %+v", denyResult)
+	}
+	// Ordering: the card opens before the denial result (issue #6).
+	if cardIdx == -1 {
+		t.Fatalf("no EvToolCall opened for c1 (the card must open before the gate)")
+	}
+	if cardIdx >= denyIdx {
+		t.Fatalf("event order = card@%d, deny@%d; want card < deny", cardIdx, denyIdx)
 	}
 	if !strings.Contains(denyResult.Content, "denied") {
 		t.Fatalf("deny result does not carry a reason: %q", denyResult.Content)
@@ -656,14 +674,29 @@ func TestPreToolUseHookBlocks(t *testing.T) {
 	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, write), Hooks: hooks})
 	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
 
+	evs := drain(r)
+
 	var hookEv, blockRes bool
-	for ev := range r.Events() {
-		if ev.Type == session.EvHook && strings.Contains(ev.Text, "blocked-by-policy") {
+	var hookCallID session.ToolCallID
+	// Indices of the three c1 events, to assert ordering: the card must open BEFORE
+	// the veto (issue #6 — otherwise the failed update keys an unopened card).
+	cardIdx, hookIdx, resultIdx := -1, -1, -1
+	for i, ev := range evs {
+		switch {
+		case ev.Type == session.EvToolCall && ev.ToolCall != nil && ev.ToolCall.ID == "c1":
+			if cardIdx == -1 {
+				cardIdx = i
+			}
+		case ev.Type == session.EvHook && strings.Contains(ev.Text, "blocked-by-policy"):
 			hookEv = true
-		}
-		if ev.Type == session.EvToolResult && ev.ToolResult.IsError &&
-			strings.Contains(ev.ToolResult.Content, "blocked-by-policy") {
+			hookIdx = i
+			if ev.Hook != nil {
+				hookCallID = ev.Hook.CallID
+			}
+		case ev.Type == session.EvToolResult && ev.ToolResult.IsError &&
+			strings.Contains(ev.ToolResult.Content, "blocked-by-policy"):
 			blockRes = true
+			resultIdx = i
 		}
 	}
 	if executed.Load() {
@@ -672,8 +705,22 @@ func TestPreToolUseHookBlocks(t *testing.T) {
 	if !hookEv {
 		t.Fatalf("no hook event emitted")
 	}
+	// The blocked EvHook must carry the originating tool-call id so a client can
+	// address the veto to the exact tool card (issue #6).
+	if hookCallID != "c1" {
+		t.Fatalf("blocked hook CallID = %q, want c1", hookCallID)
+	}
 	if !blockRes {
 		t.Fatalf("block message not fed to the model as a tool result")
+	}
+	// Ordering: the card (EvToolCall) opens first, THEN the veto (EvHook), THEN the
+	// synthesized error result — so both failure events land on an already-open card.
+	if cardIdx == -1 {
+		t.Fatalf("no EvToolCall opened for c1 (the card must open before the gate); events=%v", typesOf(evs))
+	}
+	if cardIdx >= hookIdx || hookIdx >= resultIdx {
+		t.Fatalf("event order = card@%d, hook@%d, result@%d; want card < hook < result; events=%v",
+			cardIdx, hookIdx, resultIdx, typesOf(evs))
 	}
 }
 
