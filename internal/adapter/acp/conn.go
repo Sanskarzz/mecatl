@@ -2,6 +2,7 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,24 +16,31 @@ import (
 // jsonrpcVersion is the only JSON-RPC version this codec emits or accepts.
 const jsonrpcVersion = "2.0"
 
-// maxFrameBytes caps a single inbound frame's Content-Length. A frame larger
-// than this is rejected in readHeaders BEFORE the body buffer is allocated, so a
-// malicious or buggy peer cannot trigger an unbounded make([]byte, length)
-// allocation (CWE-789, memory exhaustion). 16 MiB is far above any legitimate
-// ACP message (a prompt + tool results) while bounding the worst case.
+// maxFrameBytes caps a single inbound ndjson LINE (one JSON message). The reader
+// (readLine) enforces it INCREMENTALLY — it accumulates fixed-size fragments and
+// rejects the line as an error (never truncates) the moment the accumulator would
+// exceed the cap, BEFORE the over-limit bytes are buffered. So worst-case
+// resident memory is O(maxFrameBytes) regardless of what the peer streams: a
+// malicious or buggy peer sending a huge line with no newline cannot drive an
+// unbounded buffer (CWE-789, memory exhaustion). 16 MiB is far above any
+// legitimate ACP message (a prompt + tool results) while bounding the worst case.
 const maxFrameBytes = 16 << 20 // 16 MiB
 
-// FRAMING — Content-Length headers (the LSP / ACP norm), NOT line-delimited
-// JSON. Each message on the wire is:
+// FRAMING — newline-delimited JSON (ndjson), NOT Content-Length headers. Each
+// message on the wire is one JSON object on its own line, terminated by a single
+// '\n':
 //
-//	Content-Length: <N>\r\n
-//	\r\n
-//	<N bytes of UTF-8 JSON>
+//	{"jsonrpc":"2.0",...}\n
+//	{"jsonrpc":"2.0",...}\n
 //
-// Content-Length is chosen over newline-delimited framing because it is what the
-// reference ACP implementations (and LSP, which ACP mirrors) use, and because a
-// JSON body may legitimately contain raw newlines. The reader tolerates and
-// ignores any other headers (e.g. Content-Type) and requires a Content-Length.
+// This is what the ACP spec mandates (transports.mdx: "Messages are delimited by
+// newlines (\n), and MUST NOT contain embedded newlines"), what the reference TS
+// SDK (ndJsonStream) emits, and what coder/acp-go-sdk reads. An earlier comment
+// here claimed "ACP mirrors LSP" and used Content-Length framing — that was
+// WRONG and could not interoperate with a real Zed/ACP client. json.Marshal
+// never emits a raw newline in its output, so a marshalled message is always a
+// single safe line; the writer appends exactly one '\n' terminator. The reader
+// tolerates a stray trailing '\r' (CRLF peers) and skips bare blank lines.
 
 // message is the union JSON-RPC envelope covering requests, responses, and
 // notifications. The discriminators the codec uses:
@@ -294,73 +302,93 @@ func (c *Conn) shutdown() {
 
 // --- framing -----------------------------------------------------------------
 
-// readMessage reads one Content-Length-framed JSON-RPC frame.
+// readMessage reads one newline-delimited JSON-RPC message (ndjson), skipping
+// bare blank lines between messages, tolerating a stray trailing '\r', and
+// decoding the line. A clean EOF (empty final line) propagates io.EOF so Serve
+// returns nil; a non-empty final line without a trailing '\n' (peer closed
+// mid-stream) is still decoded as a complete message.
 func (c *Conn) readMessage() (*message, error) {
-	length, err := c.readHeaders()
-	if err != nil {
-		return nil, err
+	for {
+		line, err := c.readLine()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				// readLine returns the bytes read so far plus io.EOF when the stream
+				// ends without a trailing newline. A non-empty final line is a complete
+				// message the peer sent before closing; decode it. An empty line means a
+				// clean EOF — propagate it so Serve returns nil.
+				if line = trimFrame(line); len(line) == 0 {
+					return nil, io.EOF
+				}
+				return decodeFrame(line)
+			}
+			return nil, err
+		}
+		if line = trimFrame(line); len(line) == 0 {
+			continue // bare blank line between messages; skip it.
+		}
+		return decodeFrame(line)
 	}
-	body := make([]byte, length)
-	if _, err := io.ReadFull(c.r, body); err != nil {
-		return nil, err
+}
+
+// readLine reads one '\n'-terminated line off c.r, bounding memory DURING the
+// read: it accumulates the fixed-size fragments bufio.Reader.ReadSlice yields
+// (each ≤ the bufio buffer, ~4 KiB) and rejects the line BEFORE the accumulator
+// can exceed maxFrameBytes — so a peer streaming a huge line with no newline can
+// never drive resident memory past ~maxFrameBytes (+ one bufio-buffer slack),
+// restoring the bounded-by-construction guarantee the old length-prefixed reader
+// had (CWE-789). The returned bytes include the trailing '\n' (trimFrame strips
+// it). On a final line with no '\n', the accumulated bytes are returned with
+// io.EOF.
+func (c *Conn) readLine() ([]byte, error) {
+	var buf []byte
+	for {
+		frag, err := c.r.ReadSlice('\n')
+		if len(buf)+len(frag) > maxFrameBytes {
+			return nil, fmt.Errorf("acp: frame too large: exceeds cap %d bytes", maxFrameBytes)
+		}
+		buf = append(buf, frag...) // append copies; the bufio-buffer aliasing is safe.
+		switch {
+		case err == nil:
+			return buf, nil // found '\n' — line complete.
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue // line longer than the bufio buffer; keep accumulating fragments.
+		default:
+			return buf, err // io.EOF (final line, maybe no '\n') or a read error.
+		}
 	}
+}
+
+// trimFrame strips the trailing '\n' and a defensive trailing '\r' (tolerating a
+// CRLF peer), returning the bare JSON bytes.
+func trimFrame(line []byte) []byte {
+	line = bytes.TrimSuffix(line, []byte("\n"))
+	return bytes.TrimSuffix(line, []byte("\r"))
+}
+
+// decodeFrame unmarshals one ndjson line into a message envelope.
+func decodeFrame(line []byte) (*message, error) {
 	var msg message
-	if err := json.Unmarshal(body, &msg); err != nil {
+	if err := json.Unmarshal(line, &msg); err != nil {
 		return nil, fmt.Errorf("acp: decode frame: %w", err)
 	}
 	return &msg, nil
 }
 
-// readHeaders consumes the header block up to the blank line, returning the
-// Content-Length. Unknown headers are ignored; a missing/invalid Content-Length
-// is an error. A Content-Length exceeding maxFrameBytes is rejected HERE, before
-// readMessage allocates the body buffer, so an oversized length can never trigger
-// a giant allocation (CWE-789).
-func (c *Conn) readHeaders() (int, error) {
-	length := -1
-	for {
-		line, err := c.r.ReadString('\n')
-		if err != nil {
-			return 0, err
-		}
-		trimmed := strings.TrimRight(line, "\r\n")
-		if trimmed == "" {
-			break // end of headers
-		}
-		name, value, ok := strings.Cut(trimmed, ":")
-		if !ok {
-			return 0, fmt.Errorf("acp: malformed header %q", trimmed)
-		}
-		if strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
-			n, perr := strconv.Atoi(strings.TrimSpace(value))
-			if perr != nil || n < 0 {
-				return 0, fmt.Errorf("acp: invalid Content-Length %q", value)
-			}
-			if n > maxFrameBytes {
-				return 0, fmt.Errorf("acp: frame too large: Content-Length %d exceeds cap %d", n, maxFrameBytes)
-			}
-			length = n
-		}
-	}
-	if length < 0 {
-		return 0, errors.New("acp: missing Content-Length header")
-	}
-	return length, nil
-}
-
-// writeFrame marshals msg and writes it with a Content-Length header. Writes are
-// serialized so concurrent notifications/responses never interleave a frame.
+// writeFrame marshals msg as a single ndjson line: the JSON object followed by
+// one '\n' terminator. The terminator is appended to the marshalled bytes BEFORE
+// the write so the whole frame goes out in one c.w.Write under writeMu — atomic,
+// with no torn body/newline and no interleave with a concurrent frame.
+// json.Marshal never emits a raw newline, so the line never contains an embedded
+// '\n' (per the ACP spec).
 func (c *Conn) writeFrame(msg *message) error {
 	msg.JSONRPC = jsonrpcVersion
 	body, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
+	body = append(body, '\n')
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if _, err := fmt.Fprintf(c.w, "Content-Length: %d\r\n\r\n", len(body)); err != nil {
-		return err
-	}
 	_, err = c.w.Write(body)
 	return err
 }

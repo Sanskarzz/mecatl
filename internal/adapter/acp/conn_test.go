@@ -1,82 +1,42 @@
 package acp
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// frame builds a Content-Length-framed JSON-RPC wire message from a raw body.
+// frame builds a newline-delimited (ndjson) JSON-RPC wire message from a raw
+// body: the body followed by a single '\n' terminator.
 func frame(body string) string {
-	return fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body), body)
+	return body + "\n"
 }
 
-// readFrames parses every Content-Length frame out of a buffer, returning the
-// decoded message envelopes in order.
+// readFrames parses every ndjson frame out of a buffer, returning the decoded
+// message envelopes in order. It splits on '\n' and unmarshals each non-empty
+// line (skipping bare blank lines).
 func readFrames(t *testing.T, raw []byte) []message {
 	t.Helper()
-	br := bufio.NewReader(bytes.NewReader(raw))
 	var out []message
-	for {
-		length, err := readTestHeaders(br)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("headers: %v", err)
-		}
-		body := make([]byte, length)
-		if _, err := io.ReadFull(br, body); err != nil {
-			t.Fatalf("read body: %v", err)
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		if len(line) == 0 {
+			continue
 		}
 		var m message
-		if err := json.Unmarshal(body, &m); err != nil {
-			t.Fatalf("unmarshal frame %q: %v", body, err)
+		if err := json.Unmarshal(line, &m); err != nil {
+			t.Fatalf("unmarshal frame %q: %v", line, err)
 		}
 		out = append(out, m)
 	}
 	return out
-}
-
-// readTestHeaders mirrors Conn.readHeaders for the test parser.
-func readTestHeaders(br *bufio.Reader) (int, error) {
-	length := -1
-	for {
-		line, err := br.ReadString('\n')
-		if err != nil {
-			if err == io.EOF && line == "" {
-				return 0, io.EOF
-			}
-			return 0, err
-		}
-		trimmed := strings.TrimRight(line, "\r\n")
-		if trimmed == "" {
-			break
-		}
-		name, value, ok := strings.Cut(trimmed, ":")
-		if !ok {
-			return 0, fmt.Errorf("bad header %q", trimmed)
-		}
-		if strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
-			n, perr := strconv.Atoi(strings.TrimSpace(value))
-			if perr != nil {
-				return 0, perr
-			}
-			length = n
-		}
-	}
-	if length < 0 {
-		return 0, fmt.Errorf("missing content-length")
-	}
-	return length, nil
 }
 
 func TestReadMessageClassification(t *testing.T) {
@@ -129,67 +89,233 @@ func TestReadMessageClassification(t *testing.T) {
 	}
 }
 
-func TestReadHeadersErrors(t *testing.T) {
-	tests := []struct {
-		name string
-		wire string
-	}{
-		{"missing content-length", "X-Foo: bar\r\n\r\n{}"},
-		{"bad content-length", "Content-Length: notanumber\r\n\r\n{}"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			c := NewConn(strings.NewReader(tc.wire), &bytes.Buffer{}, nil)
-			if _, err := c.readMessage(); err == nil {
-				t.Fatalf("expected error, got nil")
-			}
-		})
-	}
+// TestReadFrameDecodeErrors asserts the ndjson decode-error and blank-line
+// behaviour: an invalid JSON line surfaces the "acp: decode frame" error, while a
+// bare blank line is skipped (no error) and the reader advances to the next frame.
+func TestReadFrameDecodeErrors(t *testing.T) {
+	t.Run("invalid json line errors", func(t *testing.T) {
+		c := NewConn(strings.NewReader("{not json}\n"), &bytes.Buffer{}, nil)
+		_, err := c.readMessage()
+		if err == nil || !strings.Contains(err.Error(), "acp: decode frame") {
+			t.Fatalf("expected decode-frame error, got %v", err)
+		}
+	})
+
+	t.Run("blank lines skipped, next frame decodes", func(t *testing.T) {
+		// Two bare blank lines (one empty, one CRLF) precede a real message; the
+		// reader must skip them and decode the message without error.
+		wire := "\n\r\n" + `{"jsonrpc":"2.0","method":"x"}` + "\n"
+		c := NewConn(strings.NewReader(wire), &bytes.Buffer{}, nil)
+		msg, err := c.readMessage()
+		if err != nil {
+			t.Fatalf("readMessage: %v", err)
+		}
+		if msg.Method != "x" {
+			t.Errorf("method = %q, want x", msg.Method)
+		}
+	})
 }
 
-// TestReadMessageRejectsOversizedFrame asserts a Content-Length above the cap is
-// rejected in readHeaders BEFORE the body buffer is allocated (CWE-789): we feed
-// only the header (no giant body) and expect an error, proving no huge alloc /
-// full-body read was attempted.
+// TestReadMessageRejectsOversizedFrame asserts an ndjson line longer than the cap
+// is rejected as an error (CWE-789) — not silently truncated, and not a hang — and
+// that a valid line padded to exactly maxFrameBytes does NOT trip the cap.
 func TestReadMessageRejectsOversizedFrame(t *testing.T) {
-	tests := []struct {
-		name      string
-		length    int
-		cappedErr bool // true => rejected by the cap; false => passes cap, fails later (EOF)
-	}{
-		{"at cap passes the cap check", maxFrameBytes, false},
-		{"one over cap rejected", maxFrameBytes + 1, true},
-		{"absurd length rejected", 1 << 40, true},
+	t.Run("over-cap line errors", func(t *testing.T) {
+		// A single line (terminated by '\n') larger than the cap.
+		over := make([]byte, maxFrameBytes+1)
+		for i := range over {
+			over[i] = 'a'
+		}
+		wire := append(over, '\n')
+		c := NewConn(bytes.NewReader(wire), &bytes.Buffer{}, nil)
+		_, err := c.readMessage()
+		if err == nil || !strings.Contains(err.Error(), "frame too large") {
+			t.Fatalf("expected frame-too-large error, got %v", err)
+		}
+	})
+
+	t.Run("at-cap valid line does not trip the cap", func(t *testing.T) {
+		// Build valid JSON padded with spaces to exactly maxFrameBytes (including the
+		// '\n' terminator); the cap compares len(line) including the '\n', so the body
+		// is maxFrameBytes-1 and the framed line is exactly maxFrameBytes.
+		const prefix = `{"jsonrpc":"2.0","method":"x","params":{"pad":"`
+		const suffix = `"}}`
+		padLen := (maxFrameBytes - 1) - len(prefix) - len(suffix)
+		body := prefix + strings.Repeat(" ", padLen) + suffix
+		wire := body + "\n"
+		if len(wire) != maxFrameBytes {
+			t.Fatalf("test setup: framed line is %d bytes, want exactly %d", len(wire), maxFrameBytes)
+		}
+		c := NewConn(strings.NewReader(wire), &bytes.Buffer{}, nil)
+		msg, err := c.readMessage()
+		if err != nil {
+			t.Fatalf("at-cap line should decode, got error: %v", err)
+		}
+		if msg.Method != "x" {
+			t.Errorf("method = %q, want x", msg.Method)
+		}
+	})
+}
+
+// TestWriteFrameWireBytes is an anti-regression guard for the framing blind spot:
+// it asserts the bytes mecatl PUTS ON THE WIRE are ndjson — no "Content-Length"
+// substring, terminated by exactly one '\n', with no embedded '\n' other than the
+// terminator — for both a Notify (notification) and a writeResult (response).
+func TestWriteFrameWireBytes(t *testing.T) {
+	assertNDJSON := func(t *testing.T, raw []byte) {
+		t.Helper()
+		if bytes.Contains(raw, []byte("Content-Length")) {
+			t.Fatalf("wire bytes contain a Content-Length header: %q", raw)
+		}
+		if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+			t.Fatalf("wire bytes must end with a '\\n' terminator: %q", raw)
+		}
+		// Splitting on '\n' yields exactly one non-empty segment (the single message)
+		// plus a trailing empty segment from the terminator: no embedded newline.
+		segs := bytes.Split(raw, []byte("\n"))
+		nonEmpty := 0
+		for _, s := range segs {
+			if len(s) > 0 {
+				nonEmpty++
+			}
+		}
+		if nonEmpty != 1 {
+			t.Fatalf("wire bytes have %d non-empty newline-delimited segments, want 1: %q", nonEmpty, raw)
+		}
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			// Header only — no body bytes follow. An oversized length must error on
-			// the header alone (the cap check), before any body allocation; an at-cap
-			// length passes the cap check and then fails on the missing body (EOF).
-			wire := fmt.Sprintf("Content-Length: %d\r\n\r\n", tc.length)
-			c := NewConn(strings.NewReader(wire), &bytes.Buffer{}, nil)
-			_, err := c.readMessage()
-			if err == nil {
-				t.Fatalf("expected an error (no body provided)")
-			}
-			gotCapped := strings.Contains(err.Error(), "frame too large")
-			if gotCapped != tc.cappedErr {
-				t.Fatalf("cap-rejection = %v (err %v), want %v", gotCapped, err, tc.cappedErr)
-			}
-		})
+
+	t.Run("Notify", func(t *testing.T) {
+		var buf bytes.Buffer
+		c := NewConn(strings.NewReader(""), &buf, nil)
+		if err := c.Notify("session/update", map[string]any{"sessionId": "s1"}); err != nil {
+			t.Fatalf("Notify: %v", err)
+		}
+		assertNDJSON(t, buf.Bytes())
+	})
+
+	t.Run("writeResult", func(t *testing.T) {
+		var buf bytes.Buffer
+		c := NewConn(strings.NewReader(""), &buf, nil)
+		c.writeResult(json.RawMessage("7"), map[string]any{"ok": true})
+		assertNDJSON(t, buf.Bytes())
+	})
+}
+
+// TestReadMessageNDJSONConformance feeds HAND-WRITTEN canonical ndjson bytes (NOT
+// produced by mecatl's own writer) into a Conn reader, proving interop with a real
+// peer's framing: two newline-delimited messages decode correctly, then a third
+// read reports io.EOF.
+func TestReadMessageNDJSONConformance(t *testing.T) {
+	wire := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}` + "\n" +
+		`{"jsonrpc":"2.0","method":"session/cancel"}` + "\n"
+	c := NewConn(strings.NewReader(wire), &bytes.Buffer{}, nil)
+
+	m1, err := c.readMessage()
+	if err != nil {
+		t.Fatalf("first readMessage: %v", err)
+	}
+	if m1.Method != "initialize" || strings.TrimSpace(string(m1.ID)) != "1" {
+		t.Fatalf("first message = method %q id %q, want initialize/1", m1.Method, m1.ID)
+	}
+	m2, err := c.readMessage()
+	if err != nil {
+		t.Fatalf("second readMessage: %v", err)
+	}
+	if m2.Method != "session/cancel" || len(m2.ID) != 0 {
+		t.Fatalf("second message = method %q id %q, want session/cancel/none", m2.Method, m2.ID)
+	}
+	if _, err := c.readMessage(); !errors.Is(err, io.EOF) {
+		t.Fatalf("third readMessage err = %v, want io.EOF", err)
 	}
 }
 
-func TestReadHeadersIgnoresUnknown(t *testing.T) {
-	body := `{"jsonrpc":"2.0","method":"x"}`
-	wire := fmt.Sprintf("Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+// TestReadMessageFinalLineNoTrailingNewline asserts the EOF-with-final-line path:
+// a peer that closes WITHOUT a trailing '\n' on its last message still has that
+// message decoded (not dropped), and the following read reports io.EOF.
+func TestReadMessageFinalLineNoTrailingNewline(t *testing.T) {
+	wire := `{"jsonrpc":"2.0","id":1,"method":"a"}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"b"}` // no trailing newline
 	c := NewConn(strings.NewReader(wire), &bytes.Buffer{}, nil)
-	msg, err := c.readMessage()
+
+	m1, err := c.readMessage()
 	if err != nil {
-		t.Fatalf("readMessage: %v", err)
+		t.Fatalf("first readMessage: %v", err)
 	}
-	if msg.Method != "x" {
-		t.Errorf("method = %q, want x", msg.Method)
+	if m1.Method != "a" {
+		t.Fatalf("first method = %q, want a", m1.Method)
+	}
+	m2, err := c.readMessage()
+	if err != nil {
+		t.Fatalf("second readMessage (final line, no newline): %v", err)
+	}
+	if m2.Method != "b" || strings.TrimSpace(string(m2.ID)) != "2" {
+		t.Fatalf("final message = method %q id %q, want b/2", m2.Method, m2.ID)
+	}
+	if _, err := c.readMessage(); !errors.Is(err, io.EOF) {
+		t.Fatalf("read after final line err = %v, want io.EOF", err)
+	}
+}
+
+// TestServeOverLimitFrameErrorsNotHang asserts a Serve loop fed an over-limit line
+// returns the error promptly (within a short context timeout) rather than hanging.
+func TestServeOverLimitFrameErrorsNotHang(t *testing.T) {
+	over := make([]byte, maxFrameBytes+1)
+	for i := range over {
+		over[i] = 'a'
+	}
+	wire := append(over, '\n')
+	c := NewConn(bytes.NewReader(wire), &bytes.Buffer{}, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.Serve(ctx) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "frame too large") {
+			t.Fatalf("Serve err = %v, want a frame-too-large error", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Serve hung on an over-limit frame instead of returning the error")
+	}
+}
+
+// countingReader yields an effectively endless run of a single byte (never a
+// '\n'), recording how many bytes were pulled from it.
+type countingReader struct {
+	fill byte
+	read int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = r.fill
+	}
+	r.read += int64(len(p))
+	return len(p), nil
+}
+
+// TestReadMessageBoundsMemoryDuringRead proves the MEMORY BOUND (not just
+// liveness): against an endless newline-less stream, readMessage must reject with
+// "frame too large" after pulling at most ~maxFrameBytes (plus a small bufio-buffer
+// slack), NOT after buffering the whole run. A regression (the old ReadBytes path)
+// would pull unboundedly before the guard could fire.
+func TestReadMessageBoundsMemoryDuringRead(t *testing.T) {
+	cr := &countingReader{fill: 'a'}
+	c := NewConn(cr, &bytes.Buffer{}, nil)
+
+	_, err := c.readMessage()
+	if err == nil || !strings.Contains(err.Error(), "frame too large") {
+		t.Fatalf("expected frame-too-large error, got %v", err)
+	}
+	// The reader must have stopped near the cap. Allow generous slack for one bufio
+	// buffer plus a fragment, but well under, say, 2x the cap — a regression to
+	// unbounded ReadBytes would have consumed far more before erroring (it only
+	// stops at '\n' or EOF, neither of which this stream ever provides).
+	const slack = 1 << 20 // 1 MiB headroom for bufio buffering
+	if cr.read > maxFrameBytes+slack {
+		t.Fatalf("readMessage pulled %d bytes before erroring; want <= %d (cap %d + slack %d) — memory is not bounded during the read",
+			cr.read, maxFrameBytes+slack, maxFrameBytes, slack)
 	}
 }
 

@@ -96,7 +96,7 @@ func (f fakeLister) List(_ context.Context, _ string) ([]server.Command, error) 
 
 // editor is the scripted ACP CLIENT side of the test: it owns the agent's stdin
 // (it writes requests/responses there) and reads the agent's stdout (the agent's
-// requests/notifications/responses). It speaks Content-Length framing.
+// requests/notifications/responses). It speaks newline-delimited JSON (ndjson).
 type editor struct {
 	t        *testing.T
 	toAgent  *io.PipeWriter // editor -> agent stdin
@@ -130,8 +130,8 @@ type rpcMsg struct {
 
 func (e *editor) writeFrame(m any) {
 	body, _ := json.Marshal(m)
-	_, err := fmt.Fprintf(e.toAgent, "Content-Length: %d\r\n\r\n%s", len(body), body)
-	if err != nil {
+	body = append(body, '\n')
+	if _, err := e.toAgent.Write(body); err != nil {
 		e.t.Errorf("editor write: %v", err)
 	}
 }
@@ -200,16 +200,16 @@ func (e *editor) fsCounts() (reads, writes int) {
 // to the notes channel, and agent requests to the reqs channel.
 func (e *editor) readLoop() {
 	for {
-		length, err := readHdr(e.fromAgnt)
-		if err != nil {
-			return
-		}
-		body := make([]byte, length)
-		if _, err := io.ReadFull(e.fromAgnt, body); err != nil {
-			return
+		raw, err := e.fromAgnt.ReadBytes('\n')
+		line := strings.TrimRight(string(raw), "\r\n")
+		if line == "" {
+			if err != nil {
+				return // EOF / closed pipe on a blank trailing line
+			}
+			continue // bare blank line between messages
 		}
 		var m rpcMsg
-		if err := json.Unmarshal(body, &m); err != nil {
+		if uerr := json.Unmarshal([]byte(line), &m); uerr != nil {
 			return
 		}
 		switch {
@@ -232,27 +232,6 @@ func (e *editor) readLoop() {
 			e.notes <- m
 		}
 	}
-}
-
-func readHdr(br *bufio.Reader) (int, error) {
-	length := -1
-	for {
-		line, err := br.ReadString('\n')
-		if err != nil {
-			return 0, err
-		}
-		t := strings.TrimRight(line, "\r\n")
-		if t == "" {
-			break
-		}
-		if name, val, ok := strings.Cut(t, ":"); ok && strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
-			length, _ = strconv.Atoi(strings.TrimSpace(val))
-		}
-	}
-	if length < 0 {
-		return 0, fmt.Errorf("missing content-length")
-	}
-	return length, nil
 }
 
 // TestEndToEndPromptWithPermission drives the full Phase 1 loop over an in-memory

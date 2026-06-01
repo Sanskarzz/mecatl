@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,7 +23,7 @@ import (
 // agent's outbound fs/read_text_file / fs/write_text_file requests against an
 // in-memory buffer map (the editor's "buffers"), so a test can assert that
 // Read/Write delegate (and never touch disk) and count the fs/* calls issued.
-// It speaks Content-Length framing over a pipe, the same as a real editor.
+// It speaks newline-delimited JSON (ndjson) over a pipe, the same as a real editor.
 type fsPeer struct {
 	t *testing.T
 
@@ -92,20 +91,20 @@ func (p *fsPeer) set(abs, content string) {
 // loop reads the agent's fs/* requests and answers them from the buffer map.
 func (p *fsPeer) loop() {
 	for {
-		length, err := readHeadersTest(p.fromConn)
-		if err != nil {
-			return
-		}
-		body := make([]byte, length)
-		if _, err := io.ReadFull(p.fromConn, body); err != nil {
-			return
+		raw, err := p.fromConn.ReadBytes('\n')
+		line := strings.TrimRight(string(raw), "\r\n")
+		if line == "" {
+			if err != nil {
+				return // EOF / closed pipe on a blank trailing line
+			}
+			continue // bare blank line between messages
 		}
 		var m struct {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 			Params json.RawMessage `json:"params"`
 		}
-		if err := json.Unmarshal(body, &m); err != nil {
+		if uerr := json.Unmarshal([]byte(line), &m); uerr != nil {
 			return
 		}
 		if p.hang.Load() {
@@ -155,33 +154,11 @@ func (p *fsPeer) respondErr(id json.RawMessage, msg string) {
 
 func (p *fsPeer) writeFrame(m any) {
 	body, _ := json.Marshal(m)
-	if _, err := fmt.Fprintf(p.toConn, "Content-Length: %d\r\n\r\n%s", len(body), body); err != nil {
+	body = append(body, '\n')
+	if _, err := p.toConn.Write(body); err != nil {
 		// The conn may have closed (test teardown); ignore.
 		return
 	}
-}
-
-// readHeadersTest reads a Content-Length framed header block, returning the body
-// length. It mirrors the production reader.
-func readHeadersTest(br *bufio.Reader) (int, error) {
-	length := -1
-	for {
-		line, err := br.ReadString('\n')
-		if err != nil {
-			return 0, err
-		}
-		t := strings.TrimRight(line, "\r\n")
-		if t == "" {
-			break
-		}
-		if name, val, ok := strings.Cut(t, ":"); ok && strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
-			length, _ = strconv.Atoi(strings.TrimSpace(val))
-		}
-	}
-	if length < 0 {
-		return 0, fmt.Errorf("missing content-length")
-	}
-	return length, nil
 }
 
 // newTestFSWorkspace builds an fsWorkspace over a peer-backed Conn, rooted at a
