@@ -30,7 +30,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -75,21 +77,103 @@ type ServerConfig struct {
 	Timeout time.Duration
 }
 
-// headerRoundTripper injects static headers onto every outbound request. It is
-// how per-server auth headers reach the Streamable HTTP transport, which only
-// exposes an *http.Client seam.
+// ValidateClientURL validates a CLIENT-PROVIDED Streamable HTTP MCP endpoint
+// before it is mounted per-session (e.g. an editor's session/new mcpServers
+// entry). It is a deliberate SSRF backstop applied ONLY to the untrusted client
+// path — the operator-configured Connect/NewManager path is intentionally NOT
+// gated this way, since an operator may legitimately point a server at an
+// internal host.
+//
+// The contract: the URL must be absolute and carry a host, and the scheme must be
+// "https" — OR "http" only when the host is an explicit loopback address
+// ("127.0.0.1", "::1", "localhost"). Everything else (file/ftp/gopher/etc., a
+// relative URL, a hostless URL, or plaintext http to a non-loopback host) is
+// rejected. Note this is a SCHEME/host-shape allowlist, not metadata-IP
+// filtering: the editor is a local-trusted process, so we filter the obviously
+// dangerous shapes rather than resolving and blocking link-local/metadata IPs.
+func ValidateClientURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return errors.New("mcp: client MCP URL is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("mcp: invalid client MCP URL %q: %w", raw, err)
+	}
+	if !u.IsAbs() {
+		return fmt.Errorf("mcp: client MCP URL %q must be absolute", raw)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("mcp: client MCP URL %q has no host", raw)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(host) {
+			return nil
+		}
+		return fmt.Errorf("mcp: client MCP URL %q uses plaintext http to a non-loopback host; use https", raw)
+	default:
+		return fmt.Errorf("mcp: client MCP URL %q scheme %q not allowed (https, or http to loopback only)", raw, u.Scheme)
+	}
+}
+
+// isLoopbackHost reports whether host is an explicit loopback address that
+// plaintext http is permitted to reach. It accepts the literal "localhost" name
+// and the loopback IPs (127.0.0.0/8, ::1).
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// headerRoundTripper injects static headers onto outbound requests whose origin
+// (scheme+host) MATCHES the configured server's origin. It is how per-server auth
+// headers reach the Streamable HTTP transport, which only exposes an *http.Client
+// seam.
+//
+// The origin check is a deliberate SSRF/credential-leak backstop (CWE-918/601):
+// the standard library follows redirects on the same client, and a server that
+// 302s to a DIFFERENT origin would otherwise have this RoundTripper re-apply the
+// caller's Authorization (and any other) header on the redirected hop — leaking the
+// credential cross-origin, to a host ValidateClientURL never vetted. By gating on
+// origin we send the headers ONLY to the host they were configured for; a
+// cross-origin hop carries none of them. (Go's own redirect handling already
+// strips sensitive headers set on the original *Request across origins, but headers
+// a RoundTripper injects bypass that, so we enforce it here.)
 type headerRoundTripper struct {
 	base    http.RoundTripper
 	headers map[string]string
+	// origin is the lowercased scheme://host the headers are scoped to.
+	origin string
 }
 
 func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Clone so we never mutate a request the caller may reuse.
 	req = req.Clone(req.Context())
-	for k, v := range h.headers {
-		req.Header.Set(k, v)
+	if requestOrigin(req.URL) == h.origin {
+		for k, v := range h.headers {
+			req.Header.Set(k, v)
+		}
 	}
 	return h.base.RoundTrip(req)
+}
+
+// requestOrigin returns the lowercased scheme://host origin of u (host includes the
+// port). It is the comparison key headerRoundTripper uses to decide whether the
+// per-server headers may ride on a request — a redirected cross-origin hop yields a
+// different origin and so receives none of the injected headers.
+func requestOrigin(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
 }
 
 // Server is a live connection to one remote MCP server. It owns the SDK client
@@ -137,9 +221,17 @@ func Connect(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		for k, v := range cfg.Headers {
 			headers[k] = v
 		}
+		// Scope the headers to the configured endpoint's origin so a cross-origin
+		// redirect never re-sends the auth header to an unvetted host. A malformed URL
+		// yields an empty origin, so the headers simply never match (fail-closed).
+		origin := ""
+		if u, perr := url.Parse(cfg.URL); perr == nil {
+			origin = requestOrigin(u)
+		}
 		httpClient.Transport = &headerRoundTripper{
 			base:    http.DefaultTransport,
 			headers: headers,
+			origin:  origin,
 		}
 	}
 

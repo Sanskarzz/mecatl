@@ -53,10 +53,10 @@ type agentCapabilities struct {
 
 // mcpCapabilities advertises which MCP transports the agent accepts from the
 // client's session/new mcpServers. mecatl is streaming-HTTP MCP ONLY (see
-// CLAUDE.md: "No stdio MCP, ever"), so http is the only transport we could ever
-// accept; sse is false. This phase rejects all client-provided MCP servers (see
-// session/new handling), so both are conservatively advertised false until that
-// is wired in a later phase.
+// CLAUDE.md: "No stdio MCP, ever"), so http is the only transport we accept; an
+// http client server is mounted per-session (see session/new handling). sse is
+// false (the SSE transport is not supported), and a stdio (command-shaped) entry
+// is hard-rejected — mecatl never spawns an MCP server process.
 type mcpCapabilities struct {
 	HTTP bool `json:"http"`
 	SSE  bool `json:"sse"`
@@ -75,14 +75,25 @@ type newSessionRequest struct {
 	McpServers []mcpServer `json:"mcpServers"`
 }
 
-// mcpServer is a client-provided MCP server entry. We model only the transport
-// discriminant fields enough to REJECT a stdio server (no URL) this phase.
+// mcpServer is a client-provided MCP server entry. We model the transport
+// discriminant fields (type/command/url) enough to classify each entry:
+// stdio (command-shaped) and sse are rejected; an http entry is accepted and
+// mounted per-session, carrying its optional auth Headers.
 type mcpServer struct {
 	Name    string          `json:"name"`
 	Command string          `json:"command,omitempty"`
 	URL     string          `json:"url,omitempty"`
 	Type    string          `json:"type,omitempty"`
+	Headers []mcpHeader     `json:"headers,omitempty"`
 	Raw     json.RawMessage `json:"-"`
+}
+
+// mcpHeader is one HTTP header (name/value) the client supplies for an http MCP
+// server — typically an Authorization header. It mirrors the ACP HttpHeader
+// shape (a {name,value} object), distinct from a JSON map.
+type mcpHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type newSessionResponse struct {

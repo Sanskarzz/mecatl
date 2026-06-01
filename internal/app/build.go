@@ -206,7 +206,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, mainMgr, mcpProvider, mcpInventory, mcpClose, err := buildEngine(ctx, cfg, provider, store)
+	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, mcpClose, err := buildEngine(ctx, cfg, provider, store)
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +238,10 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// ListCommands palette discovery: a workspace-aware lister over the same
 		// command expander build the engine uses. nil disables the RPC (empty list).
 		Commands: commandLister,
+		// Per-session client MCP (ACP session/new mcpServers): builds a scoped engine
+		// over the client's streaming-HTTP servers, mounted for that session only. Built
+		// in buildEngine so it shares the main engine's exact collaborators.
+		SessionEngine: sessFactory,
 	}
 	applyTeamConfig(&svcCfg, cfg, provider, mainMgr)
 
@@ -246,7 +250,76 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		mcpClose()
 		return nil, fmt.Errorf("build service: %w", err)
 	}
-	return &Built{Service: svc, Close: mcpClose}, nil
+	// Close tears down the main MCP manager AND any per-session client-MCP engines
+	// still registered (svc.Close), so a process exit leaks neither.
+	closeAll := func() {
+		svc.Close()
+		mcpClose()
+	}
+	return &Built{Service: svc, Close: closeAll}, nil
+}
+
+// sessionEngineFactory returns the server.SessionEngineFactory that builds a
+// PER-SESSION engine over the client-provided streaming-HTTP MCP servers (the ACP
+// session/new mcpServers). Each call connects a SCOPED mcp.NewManager for that one
+// session (best-effort, exactly like defMCPTools: a down server is logged-and-
+// skipped, never fatal), registers the CORE tools (registerCoreTools — the same
+// core toolset the main engine gets) PLUS those MCP tools into a fresh catalog, and
+// builds an engine whose every collaborator MATCHES the main engine via
+// baseEngineDeps (so a per-session engine compacts, expands commands, persists, and
+// emits telemetry exactly like the shared one — only the catalog differs).
+//
+// It captures the SAME store/policy/hooks/token-counter the main engine was built
+// with (threaded from Build, where they are already in scope), so the two engines
+// cannot drift on their Deps. The mcpProvider passed to baseEngineDeps is the MAIN
+// provider, so a client-MCP session's CommandExpander mirrors main's command source
+// (file commands + main MCP prompts); per-session MCP prompts-as-commands is a
+// future refinement, not required here.
+//
+// It returns the engine and the manager's Close so the Service can tear that
+// session's MCP connections down on disconnect. The factory is wired into
+// server.Config.SessionEngine in Build, so the ACP adapter can mount client MCP
+// without app having to leak mcp/agent wiring into the server or acp layers.
+func sessionEngineFactory(
+	cfg Config,
+	provider port.LLMProvider,
+	store port.SessionStore,
+	policy port.PermissionPolicy,
+	hooks port.HookRunner,
+	counter agent.TokenCounter,
+	mcpProvider mcp.Provider,
+) server.SessionEngineFactory {
+	return func(ctx context.Context, specs []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+		onError := func(sc mcp.ServerConfig, err error) {
+			slog.Warn("client MCP server unreachable; skipping for this session",
+				"server", sc.Name, "url", sc.URL, "err", err)
+		}
+		mgr, err := mcp.NewManager(ctx, specs, onError)
+		if err != nil {
+			// Best-effort: every server failed. The session still gets a usable engine
+			// (core tools only) rather than failing session creation outright.
+			slog.Warn("client MCP: no servers connected for this session; mounting core tools only", "err", err)
+		}
+
+		cat := tool.NewCatalog()
+		registerCoreTools(cfg, cat, false)
+		closeFn := func() error { return nil }
+		if mgr != nil {
+			if rerr := mcp.Register(cat, mgr.Tools()); rerr != nil {
+				slog.Warn("client MCP: registering tools failed; some may be missing", "err", rerr)
+			}
+			closeFn = mgr.Close
+			slog.Info("client MCP mounted for session",
+				"servers", len(mgr.Servers()), "tools", len(mgr.Tools()))
+		}
+
+		// Identical to the main engine in every Deps field except the catalog (which
+		// carries the extra client MCP tools): baseEngineDeps is the single source of
+		// that shared wiring, so no collaborator is silently dropped.
+		deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, mcpProvider)
+		deps.Catalog = cat
+		return agent.NewEngine(deps), closeFn, nil
+	}
 }
 
 // buildProvider constructs the LLMProvider per config: OpenAI when requested or
@@ -312,13 +385,16 @@ func buildStore(cfg Config) (port.SessionStore, error) {
 // optional Bash tool and a read-only Task subagent), the permission policy, hooks,
 // prompt config, and the shared provider/store. It also connects any configured
 // MCP servers, returning a close func that tears the MCP manager down on shutdown
-// (a no-op when no servers are configured).
-func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, func(), error) {
+// (a no-op when no servers are configured), and the per-session client-MCP engine
+// factory (built HERE because store/policy/hooks/counter/mcpProvider — the exact
+// collaborators a per-session engine must share with the main one — are all in
+// scope here, so the factory cannot drift from the main engine's Deps).
+func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, func(), error) {
 	// SkillDraft trust boundary: when enabled, the quarantine dir must live OUTSIDE
 	// the workspace root (so the model's workspace-confined Write/Edit cannot reach
 	// it) and be disjoint from every active skills dir. Fatal on a misconfig.
 	if err := validateSkillDraftConfig(cfg); err != nil {
-		return nil, nil, nil, nil, func() {}, err
+		return nil, nil, nil, nil, nil, func() {}, err
 	}
 	warnSkillDraftResiduals(cfg)
 
@@ -329,11 +405,38 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 
 	counter := buildTokenCounter(cfg)
 
-	deps := agent.Deps{
-		LLM:     provider,
-		Catalog: cat,
-		Policy:  policy,
-		Hooks:   hooks,
+	deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, mcpProvider)
+	deps.Catalog = cat
+	sessFactory := sessionEngineFactory(cfg, provider, store, policy, hooks, counter, mcpProvider)
+	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, mcpClose, nil
+}
+
+// baseEngineDeps assembles the agent.Deps SHARED by the main engine (buildEngine)
+// and every per-session client-MCP engine (sessionEngineFactory): identical
+// provider/store/sink/logger/policy/hooks/prompt/model/context-window/token-counter/
+// compactor/command-expander wiring. ONLY the Catalog differs between the two sites
+// (the per-session engine adds the client's MCP tools), so the caller sets Catalog
+// after this returns. Centralising every other field here is the drift guard the
+// [High] review called for: adding a new Deps field updates THIS one helper, so a
+// per-session engine can never silently lose a collaborator (compactor, token
+// counter, command expander, store, sink, logger) the main engine has.
+//
+// Policy is shared deliberately: a client-MCP session must resolve permissions
+// through the SAME interactive defaultRules the main engine uses (NOT the allow-all
+// child-engine policy), so an MCP-mounted session is governed identically.
+func baseEngineDeps(
+	cfg Config,
+	provider port.LLMProvider,
+	store port.SessionStore,
+	policy port.PermissionPolicy,
+	hooks port.HookRunner,
+	counter agent.TokenCounter,
+	mcpProvider mcp.Provider,
+) agent.Deps {
+	return agent.Deps{
+		LLM:    provider,
+		Policy: policy,
+		Hooks:  hooks,
 		// Persist mid-run transitions (tool results, terminal state) so a durable
 		// store (StoreDir) holds current state. The Service additionally persists on
 		// entering awaiting and at run end; both share this store, so the latest
@@ -349,7 +452,6 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 		Compactor:           buildCompactor(cfg, provider, counter),
 		CommandExpander:     buildCommandExpander(cfg, mcpProvider),
 	}
-	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, mcpClose, nil
 }
 
 // buildCommandExpander selects the slash-command expander for the agent Deps.
@@ -498,6 +600,30 @@ func buildCompactor(cfg Config, provider port.LLMProvider, counter agent.TokenCo
 	}
 }
 
+// registerCoreTools registers the always-available core tools (Read, Edit, Write,
+// Grep, Glob, WebFetch) plus the optional Bash tool when a shell is configured,
+// into cat. It is the single source of truth for the CORE toolset shared by its TWO
+// call sites — the main catalog (buildCatalog) and the per-session MCP engine
+// (sessionEngineFactory) — so the two cannot drift on which core tools a session
+// gets. (The agent-def / team / fork child catalogs deliberately register a
+// NARROWER toolset and do NOT call this, so they are not call sites.) It logs the
+// Bash enable/disable decision only when log is true, so the per-session path (which
+// runs per session/new) stays quiet while the once-at-startup main path narrates.
+func registerCoreTools(cfg Config, cat *tool.Catalog, log bool) {
+	for _, t := range tools.All() {
+		cat.MustRegister(t)
+	}
+	if runner := buildCommandRunner(cfg); runner != nil {
+		cat.MustRegister(tools.NewBashTool(runner))
+		if log {
+			slog.Info("Bash tool ENABLED", "shell", cfg.Shell, "cwd", cfg.Workspace)
+		}
+	} else if log {
+		slog.Info("Bash tool DISABLED (shell-less mode): the agent has no command execution",
+			"reason", bashDisabledReason(cfg))
+	}
+}
+
 // buildCatalog registers the always-available core tools (Read, Edit, Write, Grep,
 // Glob, WebFetch), a read-only Task subagent, and — only when a shell is configured
 // — the optional Bash tool. It then optionally registers Fork, memory, skills, the
@@ -505,16 +631,7 @@ func buildCompactor(cfg Config, provider port.LLMProvider, counter agent.TokenCo
 // MCP manager on shutdown.
 func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, func()) {
 	cat := tool.NewCatalog()
-	for _, t := range tools.All() {
-		cat.MustRegister(t)
-	}
-	if runner := buildCommandRunner(cfg); runner != nil {
-		cat.MustRegister(tools.NewBashTool(runner))
-		slog.Info("Bash tool ENABLED", "shell", cfg.Shell, "cwd", cfg.Workspace)
-	} else {
-		slog.Info("Bash tool DISABLED (shell-less mode): the agent has no command execution",
-			"reason", bashDisabledReason(cfg))
-	}
+	registerCoreTools(cfg, cat, true)
 	// Connect the MAIN MCP servers FIRST, so the per-agent-def Task engines built by
 	// buildTaskTool can (a) pull a REFERENCED main server's tools out of this manager
 	// and (b) connect their own INLINE servers. The main manager is registered into

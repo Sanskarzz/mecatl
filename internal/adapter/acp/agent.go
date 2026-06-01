@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/session"
 )
@@ -25,8 +27,15 @@ type Agent struct {
 	// inFlight guards the "one in-flight prompt per session" rule: a session id is
 	// present while its session/prompt is running, so a second prompt for the same
 	// session is rejected.
-	mu       sync.Mutex
-	inFlight map[string]struct{}
+	//
+	// mcpSessions records the session ids created with a PER-SESSION engine (i.e.
+	// the client supplied streaming-HTTP MCP servers). When the Serve loop ends
+	// (editor disconnect) the Agent calls svc.CloseSession for each, tearing down
+	// that session's client MCP manager so it does not outlive the connection. Both
+	// maps are guarded by mu.
+	mu          sync.Mutex
+	inFlight    map[string]struct{}
+	mcpSessions map[string]struct{}
 
 	// info is the agent identity returned on initialize.
 	info implementation
@@ -52,9 +61,10 @@ func WithResume(enabled bool) AgentOption {
 // can issue outbound request_permission calls and session/update notifications.
 func NewAgent(svc *server.Service, opts ...AgentOption) *Agent {
 	a := &Agent{
-		svc:      svc,
-		inFlight: make(map[string]struct{}),
-		info:     implementation{Name: "mecatl", Version: "acp-phase3"},
+		svc:         svc,
+		inFlight:    make(map[string]struct{}),
+		mcpSessions: make(map[string]struct{}),
+		info:        implementation{Name: "mecatl", Version: "acp-phase3"},
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -75,7 +85,37 @@ func NewAgent(svc *server.Service, opts ...AgentOption) *Agent {
 // move the assignment after conn.Serve, and call Serve exactly once per Agent.
 func (a *Agent) Serve(ctx context.Context, conn *Conn) error {
 	a.conn = conn
+	// On disconnect (the input stream ends or ctx is cancelled), tear down every
+	// per-session engine this connection created so a session's client-provided MCP
+	// manager does not outlive the editor. A clean per-disconnect hook does not
+	// otherwise exist, so this is the cleanest point: Serve is the connection's
+	// lifetime. Mid-session teardown (a single session ending before disconnect) is
+	// a tracked follow-up (Slice B).
+	defer a.closeTrackedSessions()
 	return conn.Serve(ctx)
+}
+
+// trackSession records a session id created with a per-session engine, so the
+// Serve loop tears it down on disconnect.
+func (a *Agent) trackSession(sessionID string) {
+	a.mu.Lock()
+	a.mcpSessions[sessionID] = struct{}{}
+	a.mu.Unlock()
+}
+
+// closeTrackedSessions closes every per-session engine this connection created,
+// draining the tracking set so a second call is a no-op.
+func (a *Agent) closeTrackedSessions() {
+	a.mu.Lock()
+	ids := make([]string, 0, len(a.mcpSessions))
+	for id := range a.mcpSessions {
+		ids = append(ids, id)
+	}
+	a.mcpSessions = make(map[string]struct{})
+	a.mu.Unlock()
+	for _, id := range ids {
+		a.svc.CloseSession(session.SessionID(id))
+	}
 }
 
 // Handle is the JSON-RPC Handler: it routes inbound ACP methods. A request
@@ -105,11 +145,12 @@ func (a *Agent) Handle(ctx context.Context, method string, params json.RawMessag
 }
 
 // handleInitialize negotiates capabilities. mecatl advertises NO image/audio/
-// embeddedContext prompt support (text only this phase), NO MCP transports
-// (client-provided MCP servers are rejected — mecatl connects its own
-// streaming-HTTP MCP, never a client stdio server), loadSession reflecting
-// whether a session store is configured (WithResume), and echoes the protocol
-// version it implements.
+// embeddedContext prompt support (text only this phase), the streaming-HTTP MCP
+// transport (http:true) — a client may supply http MCP servers on session/new,
+// which are mounted per-session; sse:false and stdio is hard-rejected (mecatl
+// connects only streaming-HTTP MCP, never spawns a server process), loadSession
+// reflecting whether a session store is configured (WithResume), and echoes the
+// protocol version it implements.
 func (a *Agent) handleInitialize(params json.RawMessage) (any, error) {
 	var req initializeRequest
 	if len(params) > 0 {
@@ -121,7 +162,7 @@ func (a *Agent) handleInitialize(params json.RawMessage) (any, error) {
 		ProtocolVersion: protocolVersion,
 		AgentCapabilities: agentCapabilities{
 			LoadSession:        a.resume,
-			McpCapabilities:    mcpCapabilities{HTTP: false, SSE: false},
+			McpCapabilities:    mcpCapabilities{HTTP: true, SSE: false},
 			PromptCapabilities: promptCapabilities{Audio: false, EmbeddedContext: false, Image: false},
 		},
 		AuthMethods: []any{},
@@ -130,11 +171,12 @@ func (a *Agent) handleInitialize(params json.RawMessage) (any, error) {
 }
 
 // handleSessionNew creates a mecatl session rooted at the client's cwd via
-// Service.CreateSession (the SAME entry the gRPC CreateSession RPC uses), and
-// returns its id. It REJECTS any client-provided MCP server: mecatl connects only
-// its own streaming-HTTP MCP servers (CLAUDE.md: no stdio MCP, ever), and client
-// MCP delegation is deferred. The session mode is always default this phase; the
-// available modes are reflected so the editor can show them.
+// Service.CreateSessionWithMCP, and returns its id. It ACCEPTS client-provided
+// streaming-HTTP MCP servers — they are validated and mounted PER-SESSION (so
+// their tools and auth never leak into other sessions). A stdio (command-shaped)
+// entry and an sse entry are hard-rejected (CLAUDE.md: no stdio MCP, ever; mecatl
+// never spawns a server process). The session mode is always default this phase;
+// the available modes are reflected so the editor can show them.
 func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (any, error) {
 	var req newSessionRequest
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -143,13 +185,20 @@ func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (a
 	if err := validateCwd(req.Cwd, "session/new"); err != nil {
 		return nil, err
 	}
-	if err := rejectClientMCP(req.McpServers, "session/new"); err != nil {
+	specs, err := partitionClientMCP(req.McpServers, "session/new")
+	if err != nil {
 		return nil, err
 	}
 
-	sess, err := a.svc.CreateSession(ctx, req.Cwd, session.ModeDefault, session.Limits{})
+	sess, err := a.svc.CreateSessionWithMCP(ctx, req.Cwd, session.ModeDefault, session.Limits{}, specs)
 	if err != nil {
 		return nil, newMethodErr(codeInvalidParams, "acp: session/new: "+err.Error())
+	}
+	// Track sessions created with a per-session engine so the Serve loop can tear
+	// them down (and their client MCP managers) on editor disconnect. A session
+	// with no client MCP uses the shared engine and is not tracked.
+	if len(specs) > 0 {
+		a.trackSession(string(sess.ID))
 	}
 	// Advertise the slash commands for this workspace as an available_commands_update
 	// so the editor can offer them in its input palette. Best-effort: a discovery
@@ -202,8 +251,9 @@ func (a *Agent) notifyAvailableCommands(ctx context.Context, sessionID, workspac
 }
 
 // handleSessionLoad resumes a previously-persisted session so the next
-// session/prompt continues it. It validates cwd exactly like session/new, rejects
-// any client-provided MCP server the same way, then loads (and, if the session
+// session/prompt continues it. It validates cwd exactly like session/new, but —
+// unlike session/new — rejects ANY client-provided MCP server (re-mounting client
+// MCP on resume is a tracked follow-up), then loads (and, if the session
 // had cleanly completed, reopens) the session via Service.LoadSession. It then
 // REPLAYS the persisted conversation as session/update notifications (see
 // replayHistory): a re-attaching editor would otherwise see an empty transcript,
@@ -235,8 +285,13 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 	if err := validateCwd(req.Cwd, "session/load"); err != nil {
 		return nil, err
 	}
-	if err := rejectClientMCP(req.McpServers, "session/load"); err != nil {
-		return nil, err
+	// session/load does NOT (yet) re-mount client MCP servers — re-mounting on
+	// resume is a tracked follow-up (Slice B). Reject ANY non-empty mcpServers
+	// (including http, which session/new now accepts) so the asymmetry is loud
+	// rather than silently dropping the client's servers.
+	if len(req.McpServers) > 0 {
+		return nil, newMethodErr(codeInvalidParams,
+			"acp: session/load: client MCP on session/load is not supported (re-mount on resume is a follow-up)")
 	}
 
 	sess, err := a.svc.LoadSession(ctx, session.SessionID(req.SessionID))
@@ -451,23 +506,92 @@ func validateCwd(cwd, method string) error {
 	return nil
 }
 
-// rejectClientMCP rejects any client-provided MCP server, shared by session/new
-// and session/load. A stdio server (a command, no URL) is hard-rejected (mecatl
-// never spawns stdio MCP); a URL server is also rejected this phase (client MCP
-// delegation is deferred) but the message distinguishes the two so the gap is
-// observable. It rejects on the FIRST entry — any client MCP server is
-// unsupported this phase.
-func rejectClientMCP(servers []mcpServer, method string) error {
+// maxClientMCPServers caps how many MCP servers one client may declare on
+// session/new. The factory connects them SERIALLY, each bounded by
+// clientMCPConnectTimeout, so an uncapped count would let a client stall a single
+// session/new for count × timeout (CWE-400, resource exhaustion). 8 is generous for
+// a real editor while bounding the worst-case connect wall-clock.
+const maxClientMCPServers = 8
+
+// clientMCPConnectTimeout bounds the connect handshake + tool listing for ONE
+// client-provided MCP server, deliberately shorter than the operator-path
+// defaultConnectTimeout (30s): a slow client server must not hold session/new open
+// for the full operator budget. It rides on each spec's ServerConfig.Timeout seam.
+const clientMCPConnectTimeout = 10 * time.Second
+
+// partitionClientMCP classifies client-provided MCP server entries and returns
+// the streaming-HTTP ones as mcp.ServerConfig specs to mount per-session. It is
+// FAIL-LOUD: the first bad entry rejects the whole request, so a session never
+// silently drops a server the client asked for.
+//
+// Classification per entry:
+//
+//   - STDIO — type=="stdio", or type=="" with a non-empty Command: hard-rejected
+//     with a "stdio MCP" message (mecatl never spawns an MCP server process).
+//   - SSE — type=="sse": rejected ("sse transport not supported").
+//   - HTTP — type=="http", or type=="" with a non-empty URL: validated via
+//     mcp.ValidateClientURL (SSRF scheme allowlist) and, on success, appended as a
+//     mcp.ServerConfig carrying the entry's Name, URL, mapped Headers, and a
+//     bounded per-server connect Timeout (clientMCPConnectTimeout).
+//
+// It rejects a request declaring more than maxClientMCPServers (CWE-400: the
+// servers connect serially, so an unbounded count could stall session/new). It
+// returns nil specs (no error) for an empty server list, so a session/new with no
+// mcpServers takes the shared-engine path. Header VALUES are never logged.
+func partitionClientMCP(servers []mcpServer, method string) ([]mcp.ServerConfig, error) {
 	if len(servers) == 0 {
+		return nil, nil
+	}
+	if len(servers) > maxClientMCPServers {
+		return nil, newMethodErr(codeInvalidParams,
+			fmt.Sprintf("acp: %s: too many MCP servers (%d > %d max)", method, len(servers), maxClientMCPServers))
+	}
+	specs := make([]mcp.ServerConfig, 0, len(servers))
+	for _, m := range servers {
+		switch {
+		case m.Type == "stdio" || (m.Type == "" && m.Command != ""):
+			return nil, newMethodErr(codeInvalidParams,
+				fmt.Sprintf("acp: %s: stdio MCP server %q rejected (mecatl is streaming-HTTP MCP only)", method, m.Name))
+		case m.Type == "sse":
+			return nil, newMethodErr(codeInvalidParams,
+				fmt.Sprintf("acp: %s: sse transport not supported for MCP server %q (streaming-HTTP only)", method, m.Name))
+		case m.Type == "http" || (m.Type == "" && m.URL != ""):
+			if verr := mcp.ValidateClientURL(m.URL); verr != nil {
+				return nil, newMethodErr(codeInvalidParams,
+					fmt.Sprintf("acp: %s: MCP server %q rejected: %v", method, m.Name, verr))
+			}
+			specs = append(specs, mcp.ServerConfig{
+				Name:    m.Name,
+				URL:     m.URL,
+				Headers: headerMap(m.Headers),
+				Timeout: clientMCPConnectTimeout,
+			})
+		default:
+			return nil, newMethodErr(codeInvalidParams,
+				fmt.Sprintf("acp: %s: MCP server %q has no recognized transport (need http url)", method, m.Name))
+		}
+	}
+	return specs, nil
+}
+
+// headerMap collapses the ACP []mcpHeader list into the map[string]string shape
+// mcp.ServerConfig.Headers expects. An empty/absent list yields nil so a server
+// with no headers carries no transport headers. Empty header names are dropped.
+func headerMap(headers []mcpHeader) map[string]string {
+	if len(headers) == 0 {
 		return nil
 	}
-	m := servers[0]
-	if m.URL == "" {
-		return newMethodErr(codeInvalidParams,
-			fmt.Sprintf("acp: %s: stdio MCP server %q rejected (mecatl is streaming-HTTP MCP only)", method, m.Name))
+	out := make(map[string]string, len(headers))
+	for _, h := range headers {
+		if h.Name == "" {
+			continue
+		}
+		out[h.Name] = h.Value
 	}
-	return newMethodErr(codeInvalidParams,
-		fmt.Sprintf("acp: %s: client-provided MCP server %q not supported yet (deferred)", method, m.Name))
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // flattenPrompt concatenates the text of every text ContentBlock with newlines,

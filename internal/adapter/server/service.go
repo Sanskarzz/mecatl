@@ -32,6 +32,18 @@ type Clock func() time.Time
 // id when nil; tests may inject a deterministic generator.
 type IDGenerator func() session.SessionID
 
+// SessionEngineFactory builds a PER-SESSION agent engine over the client-provided
+// streaming-HTTP MCP servers (specs), returning the engine, a close func that
+// tears down that session's MCP manager, and an error. It is the seam the ACP
+// adapter uses to mount an editor's session/new mcpServers for the lifetime of
+// one session, WITHOUT leaking those tools (or their auth) into the shared engine
+// every other session uses. The composition root (internal/app) supplies it via
+// Config.SessionEngine; when nil, CreateSessionWithMCP rejects any non-empty
+// specs with ErrInvalidArgument. It mirrors MemberEngineFactory: the Service
+// references the type in its signatures but never builds managers itself — the
+// app layer is the only place mcp + agent are wired together.
+type SessionEngineFactory func(ctx context.Context, specs []mcp.ServerConfig) (*agent.Engine, func() error, error)
+
 // Config wires the server adapter to the WP8 engine and its collaborators.
 type Config struct {
 	// Engine is the shared agent engine that drives every run. Required.
@@ -90,6 +102,14 @@ type Config struct {
 	// tool scope/permission mode/color) so the server adapter never imports the
 	// agents adapter. May be empty (agent definitions disabled or none found).
 	Agents []*mecatlv1.AgentInfo
+
+	// SessionEngine builds a PER-SESSION engine over client-provided streaming-HTTP
+	// MCP servers (the ACP session/new mcpServers). It is the seam that lets a
+	// session mount its OWN MCP tools without leaking them into the shared Engine
+	// every other session uses. When nil, CreateSessionWithMCP rejects any non-empty
+	// MCP specs with ErrInvalidArgument; a session with no client MCP always uses the
+	// shared Engine (zero overhead). The composition root (internal/app) supplies it.
+	SessionEngine SessionEngineFactory
 
 	// MemberEngine builds a team member's Engine from the shared team and the
 	// member spec (see internal/agent.MemberEngine). It is the seam that wires
@@ -154,6 +174,22 @@ type Service struct {
 	mu    sync.Mutex
 	runs  map[session.SessionID]*runState
 	teams map[string]*teamState
+	// sessionEngines holds the per-session client-MCP engines. Unlike teams (capped
+	// by MaxTeams), it is bounded by CONNECTION LIFETIME, not a count: the ACP
+	// adapter calls CloseSession for each tracked session when the editor
+	// disconnects (closeTrackedSessions), and Service.Close drains the rest on
+	// shutdown — so no speculative cap is warranted.
+	sessionEngines map[session.SessionID]*sessionEngine
+}
+
+// sessionEngine couples a per-session engine (built over that session's
+// client-provided MCP servers) with the close func that tears down its MCP
+// manager. It is registered by CreateSessionWithMCP and released by CloseSession
+// (and by the Service's own Close). StartRun prefers it over the shared engine
+// for the owning session id.
+type sessionEngine struct {
+	engine *agent.Engine
+	close  func() error
 }
 
 // runState couples an in-flight *agent.Run with the live *session.Session the
@@ -189,9 +225,10 @@ func NewService(cfg Config) (*Service, error) {
 		cfg.MaxTeams = defaultMaxTeams
 	}
 	return &Service{
-		cfg:   cfg,
-		runs:  make(map[session.SessionID]*runState),
-		teams: make(map[string]*teamState),
+		cfg:            cfg,
+		runs:           make(map[session.SessionID]*runState),
+		teams:          make(map[string]*teamState),
+		sessionEngines: make(map[session.SessionID]*sessionEngine),
 	}, nil
 }
 
@@ -220,6 +257,97 @@ func (s *Service) CreateSession(ctx context.Context, workspace string, mode sess
 		return nil, fmt.Errorf("server: persist session: %w", err)
 	}
 	return sess, nil
+}
+
+// CreateSessionWithMCP creates a session that mounts the client-provided
+// streaming-HTTP MCP servers (specs) for the lifetime of that session, via a
+// PER-SESSION engine. It is the ACP session/new entry for an editor that supplies
+// mcpServers.
+//
+//   - With NO specs it delegates to CreateSession: the session uses the SHARED
+//     engine, with zero per-session overhead and no registry entry.
+//   - With specs it REQUIRES Config.SessionEngine (else ErrInvalidArgument: "client
+//     MCP not supported"); it builds the per-session engine via that factory, and
+//     on success registers it under the new session id so StartRun routes the
+//     session's runs to it. A factory error is returned as-is (the caller maps it).
+//
+// The per-session engine's MCP manager is torn down by CloseSession (editor
+// disconnect) or by the Service's Close.
+func (s *Service) CreateSessionWithMCP(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, specs []mcp.ServerConfig) (*session.Session, error) {
+	if len(specs) == 0 {
+		return s.CreateSession(ctx, workspace, mode, limits)
+	}
+	if s.cfg.SessionEngine == nil {
+		return nil, fmt.Errorf("%w: client MCP not supported (no per-session engine configured)", ErrInvalidArgument)
+	}
+	if workspace == "" {
+		return nil, fmt.Errorf("%w: workspace is required", ErrInvalidArgument)
+	}
+	eng, closeFn, err := s.cfg.SessionEngine(ctx, specs)
+	if err != nil {
+		return nil, err
+	}
+	if mode == "" {
+		mode = s.cfg.DefaultMode
+	}
+	if limits == (session.Limits{}) {
+		limits = s.cfg.DefaultLimits
+	}
+	sess := session.New(s.cfg.NewID(), mode, workspace, limits, s.cfg.Now())
+	if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
+		// The engine was built but the session could not be persisted: tear the
+		// per-session MCP manager down so a failed create never leaks it.
+		if closeFn != nil {
+			_ = closeFn()
+		}
+		return nil, fmt.Errorf("server: persist session: %w", serr)
+	}
+	s.mu.Lock()
+	s.sessionEngines[sess.ID] = &sessionEngine{engine: eng, close: closeFn}
+	s.mu.Unlock()
+	return sess, nil
+}
+
+// CloseSession tears down the per-session engine registered for id (if any) and
+// removes it from the registry. It is idempotent: an id with no per-session
+// engine is a no-op. The ACP adapter calls it when an editor disconnects so a
+// session's client-provided MCP manager does not outlive the session.
+//
+// SAFE under an in-flight run (so it needs no run-aware guard like the team path):
+// the close func is the MCP manager's Close, a GRACEFUL shutdown — the underlying
+// go-sdk ClientSession.Close "prevents new requests from being handled, and WAITS
+// for ongoing requests to return" before terminating the connection, and is
+// documented idempotent + concurrency-safe. A disconnect that races a live
+// engine.Run dispatching an MCP tool call therefore does NOT yank the connection
+// mid-call: Close blocks until that CallTool returns (or the jsonrpc2 layer retires
+// it with an error response the remoteTool maps to a model-facing error). The
+// editor disconnect already implies the run is being abandoned, so blocking briefly
+// for the in-flight call to unwind is the correct, leak-free behaviour.
+func (s *Service) CloseSession(id session.SessionID) {
+	s.mu.Lock()
+	se, ok := s.sessionEngines[id]
+	if ok {
+		delete(s.sessionEngines, id)
+	}
+	s.mu.Unlock()
+	if ok && se.close != nil {
+		_ = se.close()
+	}
+}
+
+// Close tears down all per-session engines' MCP managers. It is the Service's
+// shutdown hook so a process exit does not leak any per-session MCP connection.
+// It is safe to call multiple times.
+func (s *Service) Close() {
+	s.mu.Lock()
+	engines := s.sessionEngines
+	s.sessionEngines = make(map[session.SessionID]*sessionEngine)
+	s.mu.Unlock()
+	for _, se := range engines {
+		if se.close != nil {
+			_ = se.close()
+		}
+	}
 }
 
 // GetSession returns the persisted session under id, or ErrNotFound.
@@ -316,7 +444,15 @@ func (s *Service) StartRun(ctx context.Context, id session.SessionID, text strin
 		return nil, err
 	}
 	ws := s.cfg.Workspaces(sess.Workspace)
-	run := s.cfg.Engine.Run(ctx, sess, ws, text)
+	// Prefer a per-session engine (built over the session's client-provided MCP
+	// servers) when one is registered; otherwise drive the shared engine.
+	engine := s.cfg.Engine
+	s.mu.Lock()
+	if se, ok := s.sessionEngines[id]; ok {
+		engine = se.engine
+	}
+	s.mu.Unlock()
+	run := engine.Run(ctx, sess, ws, text)
 	s.register(id, run, sess)
 	return run, nil
 }

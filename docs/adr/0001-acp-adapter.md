@@ -71,10 +71,15 @@ outbound `request_permission` and correlates the reply).
 - `protocolVersion: 1`.
 - `promptCapabilities`: `image:false`, `audio:false`, `embeddedContext:false`
   (text content blocks only this phase).
-- `mcpCapabilities`: `http:false`, `sse:false`. mecatl is **streaming-HTTP MCP
-  only** (CLAUDE.md: "No stdio MCP, ever"); client-provided MCP servers in
-  `session/new` are REJECTED — a stdio server (command, no URL) is hard-rejected,
-  and even an HTTP one is rejected pending the deferred client-MCP work.
+- `mcpCapabilities`: `http:true`, `sse:false`. mecatl is **streaming-HTTP MCP
+  only** (CLAUDE.md: "No stdio MCP, ever"). A client may supply **streaming-HTTP**
+  MCP servers in `session/new`; they are validated and mounted **per-session** (see
+  "Client streaming-HTTP MCP" below). A **stdio** entry (`type:"stdio"`, or a
+  command-shaped entry) and an **sse** entry are hard-rejected — mecatl never spawns
+  an MCP server process and does not speak the SSE transport. **Asymmetry:**
+  `session/load` still rejects ANY client MCP (re-mount on resume is a tracked
+  follow-up), so a resumed session does not silently lose, or silently re-mount, the
+  servers the client passed.
 - `loadSession`: reflects whether a durable session store is configured. `mecated
   --acp` sets it `true` only when `--store-dir` is given (the in-memory store would
   lose snapshots across a restart); otherwise `false`. The flag is threaded into the
@@ -189,7 +194,9 @@ wiring.
    updated in place) and otherwise to the stored snapshot.
 
 3. **`session/load` (resume).** Inbound `session/load {sessionId, cwd}` validates
-   cwd and rejects client MCP exactly like `session/new`, then resumes the persisted
+   cwd and rejects ANY client MCP (unlike `session/new`, which now accepts
+   streaming-HTTP servers — re-mounting them on resume is a tracked follow-up), then
+   resumes the persisted
    session via the new `Service.LoadSession(ctx, id)` seam: it loads the latest
    snapshot from the store and, if the session had cleanly `completed`, `Reopen`s it
    to `idle` (preserving conversation history) and re-persists, so the next
@@ -223,6 +230,71 @@ wiring.
    NOT replayed. Replay is synchronous within the load handler, so the notifications
    are flushed before the load response returns, and it is idempotent — a repeated
    load simply re-streams the same transcript, keyed by tool-call id.
+
+## Client streaming-HTTP MCP
+
+A client may declare **streaming-HTTP** MCP servers in `session/new {mcpServers}`.
+They are accepted and **mounted per-session**, never globally.
+
+- **Per-session, not global — the seam.** Each accepted session gets its OWN engine,
+  built by a `server.SessionEngineFactory` (`func(ctx, []mcp.ServerConfig) (*agent.Engine,
+  func() error, error)`) the composition root (`internal/app`) supplies via
+  `server.Config.SessionEngine`. This **mirrors `MemberEngineFactory`** (the team
+  seam): the `server.Service` and the ACP adapter reference `mcp.ServerConfig` /
+  `*agent.Engine` in signatures but **build no managers themselves** — `internal/app`
+  is the only layer that wires `mcp` + `agent` into an engine. The factory connects a
+  scoped `mcp.NewManager` for that one session, registers the SAME core tools the main
+  engine gets (`registerCoreTools`, factored out so its TWO call sites — the main build
+  and the per-session factory — cannot drift; the narrower agent-def/team/fork child
+  catalogs deliberately do not use it) plus the session's MCP tools, and builds its
+  `agent.Deps` through the SHARED `baseEngineDeps` helper so EVERY collaborator matches
+  the main engine — same provider, policy (interactive `defaultRules`), hooks, store,
+  sink, logger, token counter, **compactor**, and **command expander**. (The per-session
+  engine is exactly the long-running kind, so silently dropping the compactor/token
+  counter — it would never compact — or the command expander — slash commands would
+  stop expanding — was the [High] review finding; `baseEngineDeps` is the single
+  source that prevents it.) `StartRun` routes a session with a registered per-session
+  engine to it; every other session uses the shared engine with zero overhead (no
+  specs → no factory call → no entry).
+- **WHY not global-mount.** Registering a client's servers into the one shared catalog
+  would leak that editor's tools — and its **auth headers** — into every other
+  session/run on the process. A per-session engine confines the tools and the
+  credentials to the session that supplied them.
+- **SSRF stance + editor-trust model.** The client URL is validated by
+  `mcp.ValidateClientURL` (a scheme/host-shape **allowlist**): `https` always, `http`
+  ONLY for an explicit loopback host (`127.0.0.1`/`::1`/`localhost`);
+  `file`/`ftp`/`gopher`/relative/hostless are rejected. This is applied ONLY to the
+  untrusted client path — the operator-configured `Connect`/`NewManager` path is NOT
+  gated (an operator may legitimately target an internal host). We deliberately do
+  **NOT** do metadata-IP / link-local filtering: the editor is a local-trusted process
+  (it spawned us over stdio), so we block the obviously dangerous URL shapes rather
+  than resolving and filtering IPs. Header VALUES are never logged.
+- **Cross-origin redirect header stripping.** `ValidateClientURL` only vets the
+  INITIAL URL, and the HTTP client follows redirects — so the per-server header
+  injector (`headerRoundTripper`) is **origin-scoped**: it applies the auth (and any
+  other) header ONLY to requests whose `scheme://host` matches the configured
+  endpoint. A server that `302`s to a different origin therefore never re-receives
+  the Bearer token (CWE-918/601). This hardening covers the operator path too.
+- **Connect-time DoS bound (CWE-400).** `mcp.NewManager` connects servers SERIALLY,
+  each bounded by a timeout, so `session/new` caps the client at
+  `maxClientMCPServers` (8; rejected loudly if exceeded) and sets each spec's
+  `ServerConfig.Timeout` to a shorter client-path value (`clientMCPConnectTimeout`,
+  10s, vs the operator path's 30s) — an unreachable client server can stall
+  `session/new` by at most that bound, not the operator budget × count.
+- **Best-effort mount lifecycle.** A down/unreachable client server is logged-and-
+  skipped (like `defMCPTools`), never fatal — the session still gets a usable engine
+  (core tools, plus whatever MCP servers did connect). The per-session MCP manager is
+  torn down when the editor disconnects (the ACP `Serve` loop ends → `Service.CloseSession`
+  for each tracked session) and, as a backstop, by `Service.Close` on process exit.
+  `CloseSession` is SAFE under an in-flight run with no run-cancel guard: `mgr.Close`
+  is the go-sdk's GRACEFUL session close, which prevents new requests and WAITS for
+  ongoing ones to return before terminating the connection (idempotent +
+  concurrency-safe), so a disconnect racing a live MCP tool call cannot yank the
+  connection mid-call. The per-session registry is bounded by connection lifetime,
+  not a count cap.
+- **Follow-up (Slice B).** `session/load` re-mount of client MCP, and mid-session
+  teardown (a single session ending before the connection closes), are tracked
+  separately.
 
 ## Permission round-trip
 
@@ -270,5 +342,7 @@ handler that issues an outbound `Call` (a `session/prompt` issuing
 - **`allow_always` governance-rule persistence** (still maps to `allow_once` — no
   rule is recorded, so every approval is one-shot).
 - **Image/audio prompt content** (`promptCapabilities` stays text-only).
-- Client-provided MCP servers.
+- **Client MCP on `session/load`** (re-mount the client's streaming-HTTP servers on
+  resume) + **mid-session teardown** — tracked follow-up (Slice B). `session/new`
+  client streaming-HTTP MCP is now DONE (see "Client streaming-HTTP MCP").
 - Richer projection of `turn.*` / `compaction` (ACP plan modelling).

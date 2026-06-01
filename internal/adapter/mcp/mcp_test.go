@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"testing"
 	"time"
 
@@ -234,6 +235,50 @@ func TestAuthHeaderInjected(t *testing.T) {
 	}
 }
 
+// TestHeaderRoundTripperStripsHeadersCrossOrigin asserts the per-server headers
+// (e.g. Authorization) ride only on requests to the CONFIGURED origin: a server
+// that redirects to a DIFFERENT origin must not see the credential on the second
+// hop. This is the CWE-918/601 backstop — ValidateClientURL only vets the initial
+// URL, so the RoundTripper enforces origin scoping on every redirected hop.
+func TestHeaderRoundTripperStripsHeadersCrossOrigin(t *testing.T) {
+	// origin2 is the redirect target on a DIFFERENT origin; it records whether it
+	// received the Authorization header.
+	var origin2Auth string
+	origin2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin2Auth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer origin2.Close()
+
+	// origin1 is the configured endpoint; it records its own Authorization header,
+	// then 302s to origin2.
+	var origin1Auth string
+	origin1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin1Auth = r.Header.Get("Authorization")
+		http.Redirect(w, r, origin2.URL, http.StatusFound)
+	}))
+	defer origin1.Close()
+
+	u, _ := neturl.Parse(origin1.URL)
+	client := &http.Client{Transport: &headerRoundTripper{
+		base:    http.DefaultTransport,
+		headers: map[string]string{"Authorization": "Bearer secret-token"},
+		origin:  requestOrigin(u),
+	}}
+	resp, err := client.Get(origin1.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if origin1Auth != "Bearer secret-token" {
+		t.Errorf("origin1 Authorization = %q, want the injected token", origin1Auth)
+	}
+	if origin2Auth != "" {
+		t.Errorf("origin2 (cross-origin redirect target) saw Authorization = %q, want it stripped", origin2Auth)
+	}
+}
+
 func TestRegisterIntoCatalog(t *testing.T) {
 	url, stop := newTestServer(t, nil)
 	defer stop()
@@ -290,6 +335,38 @@ func TestConnectValidatesConfig(t *testing.T) {
 		if _, err := Connect(ctx, cfg); err == nil {
 			t.Errorf("Connect(%+v) = nil error, want validation error", cfg)
 		}
+	}
+}
+
+func TestValidateClientURL(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		ok   bool
+	}{
+		{"https", "https://example.test/mcp", true},
+		{"https with port", "https://example.test:8443/mcp", true},
+		{"http loopback ip", "http://127.0.0.1:9000/mcp", true},
+		{"http ipv6 loopback", "http://[::1]:9000/mcp", true},
+		{"http localhost", "http://localhost:9000/mcp", true},
+		{"http remote rejected", "http://example.test/mcp", false},
+		{"file rejected", "file:///etc/passwd", false},
+		{"ftp rejected", "ftp://example.test/x", false},
+		{"gopher rejected", "gopher://example.test/x", false},
+		{"empty rejected", "", false},
+		{"relative rejected", "/just/a/path", false},
+		{"hostless rejected", "https:///mcp", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateClientURL(tc.url)
+			if tc.ok && err != nil {
+				t.Fatalf("ValidateClientURL(%q) = %v, want ok", tc.url, err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("ValidateClientURL(%q) = nil, want rejection", tc.url)
+			}
+		})
 	}
 }
 

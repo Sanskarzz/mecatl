@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/internal/adapter/acp"
+	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
@@ -458,17 +459,188 @@ func TestEndToEndEditDiffBlock(t *testing.T) {
 	_ = editorToAgentW.Close()
 }
 
+// fakeSessionEngine records the specs it received and returns a stub engine plus
+// a no-op close, so the accept-path tests can assert the factory was called with
+// the right URL+headers WITHOUT connecting a real MCP server (offline).
+type fakeSessionEngine struct {
+	mu     sync.Mutex
+	called int
+	specs  []mcp.ServerConfig
+	engine *agent.Engine
+}
+
+func (f *fakeSessionEngine) factory(_ context.Context, specs []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+	f.mu.Lock()
+	f.called++
+	f.specs = specs
+	f.mu.Unlock()
+	return f.engine, func() error { return nil }, nil
+}
+
+// stubEngine builds a minimal mockllm-backed engine the fake factory hands back as
+// the per-session engine (it never has to actually run in the accept tests).
+func stubEngine(t *testing.T) *agent.Engine {
+	t.Helper()
+	return agent.NewEngine(agent.Deps{
+		LLM:     mockllm.New(mockllm.TextTurn("done")),
+		Catalog: tool.NewCatalog(),
+		Policy:  permpolicy.NewPolicy(allowRules()),
+		Model:   "test-model",
+	})
+}
+
+// TestSessionNewAcceptsHTTPMCP asserts a client-provided streaming-HTTP MCP server
+// is accepted on session/new: the per-session engine factory is invoked with one
+// spec whose URL and headers map correctly, and a session id is returned.
+func TestSessionNewAcceptsHTTPMCP(t *testing.T) {
+	fake := &fakeSessionEngine{engine: stubEngine(t)}
+	svc := newServiceCfg(t, mockllm.New(), nil, func(c *server.Config) { c.SessionEngine = fake.factory })
+	a := acp.NewAgent(svc)
+
+	params := fmt.Sprintf(`{"cwd":%q,"mcpServers":[{"type":"http","name":"docs","url":"https://example.test/mcp","headers":[{"name":"Authorization","value":"Bearer x"}]}]}`, t.TempDir())
+	out, err := a.Handle(context.Background(), "session/new", json.RawMessage(params), true)
+	if err != nil {
+		t.Fatalf("session/new with http MCP: %v", err)
+	}
+	b, _ := json.Marshal(out)
+	var ns struct {
+		SessionID string `json:"sessionId"`
+	}
+	if jerr := json.Unmarshal(b, &ns); jerr != nil || ns.SessionID == "" {
+		t.Fatalf("session/new result: %s err=%v", b, jerr)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.called != 1 {
+		t.Fatalf("factory called %d times, want 1", fake.called)
+	}
+	if len(fake.specs) != 1 {
+		t.Fatalf("factory got %d specs, want 1: %+v", len(fake.specs), fake.specs)
+	}
+	spec := fake.specs[0]
+	if spec.Name != "docs" || spec.URL != "https://example.test/mcp" {
+		t.Fatalf("spec name/url = %q/%q", spec.Name, spec.URL)
+	}
+	if spec.Headers["Authorization"] != "Bearer x" {
+		t.Fatalf("spec headers = %v, want Authorization: Bearer x", spec.Headers)
+	}
+}
+
 // TestSessionNewRejectsStdioMCP asserts a client-provided stdio MCP server is
-// rejected (mecatl is streaming-HTTP MCP only).
+// rejected (mecatl is streaming-HTTP MCP only), in both the command-shaped and the
+// explicit type:"stdio" forms.
 func TestSessionNewRejectsStdioMCP(t *testing.T) {
 	svc := newService(t, mockllm.New(), nil)
 	a := acp.NewAgent(svc)
-	// A valid existing cwd so the stdio-MCP rejection (not cwd validation) is the
-	// reason the call fails.
-	params := fmt.Sprintf(`{"cwd":%q,"mcpServers":[{"name":"local","command":"some-bin"}]}`, t.TempDir())
+	cwd := t.TempDir()
+	cases := []string{
+		// command-shaped, no type.
+		fmt.Sprintf(`{"cwd":%q,"mcpServers":[{"name":"local","command":"some-bin"}]}`, cwd),
+		// explicit type:"stdio".
+		fmt.Sprintf(`{"cwd":%q,"mcpServers":[{"name":"local","type":"stdio","command":"some-bin"}]}`, cwd),
+	}
+	for _, params := range cases {
+		_, err := a.Handle(context.Background(), "session/new", json.RawMessage(params), true)
+		if err == nil || !strings.Contains(err.Error(), "stdio MCP") {
+			t.Fatalf("expected stdio MCP rejection, got %v (params=%s)", err, params)
+		}
+	}
+}
+
+// TestSessionNewRejectsSSEMCP asserts a type:"sse" client MCP server is rejected
+// (streaming-HTTP only).
+func TestSessionNewRejectsSSEMCP(t *testing.T) {
+	svc := newService(t, mockllm.New(), nil)
+	a := acp.NewAgent(svc)
+	params := fmt.Sprintf(`{"cwd":%q,"mcpServers":[{"name":"stream","type":"sse","url":"https://example.test/sse"}]}`, t.TempDir())
 	_, err := a.Handle(context.Background(), "session/new", json.RawMessage(params), true)
-	if err == nil || !strings.Contains(err.Error(), "stdio MCP") {
-		t.Fatalf("expected stdio MCP rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "sse") {
+		t.Fatalf("expected sse rejection, got %v", err)
+	}
+}
+
+// TestSessionNewRejectsBadScheme asserts an http MCP server with a non-allowed URL
+// scheme (file://) is rejected by the SSRF scheme allowlist.
+func TestSessionNewRejectsBadScheme(t *testing.T) {
+	svc := newService(t, mockllm.New(), nil)
+	a := acp.NewAgent(svc)
+	params := fmt.Sprintf(`{"cwd":%q,"mcpServers":[{"name":"bad","type":"http","url":"file:///etc/passwd"}]}`, t.TempDir())
+	_, err := a.Handle(context.Background(), "session/new", json.RawMessage(params), true)
+	if err == nil || !strings.Contains(err.Error(), "rejected") {
+		t.Fatalf("expected bad-scheme rejection, got %v", err)
+	}
+}
+
+// TestSessionNewRejectsTooManyMCP asserts a client declaring more than the cap of
+// MCP servers is rejected (CWE-400: the servers connect serially, so an unbounded
+// count could stall session/new). It is rejected BEFORE the factory is consulted.
+func TestSessionNewRejectsTooManyMCP(t *testing.T) {
+	fake := &fakeSessionEngine{engine: stubEngine(t)}
+	svc := newServiceCfg(t, mockllm.New(), nil, func(c *server.Config) { c.SessionEngine = fake.factory })
+	a := acp.NewAgent(svc)
+
+	var entries []string
+	for i := 0; i < 9; i++ { // 9 > the cap of 8
+		entries = append(entries, fmt.Sprintf(`{"type":"http","name":"s%d","url":"https://s%d.test/mcp"}`, i, i))
+	}
+	params := fmt.Sprintf(`{"cwd":%q,"mcpServers":[%s]}`, t.TempDir(), strings.Join(entries, ","))
+	_, err := a.Handle(context.Background(), "session/new", json.RawMessage(params), true)
+	if err == nil || !strings.Contains(err.Error(), "too many MCP servers") {
+		t.Fatalf("expected too-many-servers rejection, got %v", err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.called != 0 {
+		t.Fatalf("factory called %d times; the cap must reject before any connect", fake.called)
+	}
+}
+
+// TestSessionNewSetsClientMCPTimeout asserts each accepted spec carries the bounded
+// per-server connect timeout (so a slow client server cannot hold session/new for
+// the full operator budget).
+func TestSessionNewSetsClientMCPTimeout(t *testing.T) {
+	fake := &fakeSessionEngine{engine: stubEngine(t)}
+	svc := newServiceCfg(t, mockllm.New(), nil, func(c *server.Config) { c.SessionEngine = fake.factory })
+	a := acp.NewAgent(svc)
+
+	params := fmt.Sprintf(`{"cwd":%q,"mcpServers":[{"type":"http","name":"docs","url":"https://example.test/mcp"}]}`, t.TempDir())
+	if _, err := a.Handle(context.Background(), "session/new", json.RawMessage(params), true); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.specs) != 1 {
+		t.Fatalf("got %d specs, want 1", len(fake.specs))
+	}
+	if fake.specs[0].Timeout <= 0 || fake.specs[0].Timeout >= 30*time.Second {
+		t.Fatalf("spec Timeout = %v, want a bounded client-path value (< operator 30s)", fake.specs[0].Timeout)
+	}
+}
+
+// TestInitializeAdvertisesHTTPMCP asserts initialize advertises http:true / sse:false
+// so an editor offers its streaming-HTTP MCP servers.
+func TestInitializeAdvertisesHTTPMCP(t *testing.T) {
+	svc := newService(t, mockllm.New(), nil)
+	a := acp.NewAgent(svc)
+	out, err := a.Handle(context.Background(), "initialize", json.RawMessage(`{"protocolVersion":1}`), true)
+	if err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	b, _ := json.Marshal(out)
+	var init struct {
+		AgentCapabilities struct {
+			McpCapabilities struct {
+				HTTP bool `json:"http"`
+				SSE  bool `json:"sse"`
+			} `json:"mcpCapabilities"`
+		} `json:"agentCapabilities"`
+	}
+	if jerr := json.Unmarshal(b, &init); jerr != nil {
+		t.Fatalf("initialize result: %v", jerr)
+	}
+	if !init.AgentCapabilities.McpCapabilities.HTTP || init.AgentCapabilities.McpCapabilities.SSE {
+		t.Fatalf("mcpCapabilities = %+v, want http:true sse:false", init.AgentCapabilities.McpCapabilities)
 	}
 }
 
