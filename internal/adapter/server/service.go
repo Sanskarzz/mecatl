@@ -131,6 +131,14 @@ type Config struct {
 	// reached; cleaning up a created/done team frees a slot. Defaults to
 	// defaultMaxTeams when zero.
 	MaxTeams int
+
+	// OnCloseSession, when non-nil, is invoked by CloseSession with the closing
+	// session id BEFORE the per-session engine teardown. It is the composition
+	// seam for releasing session-scoped state the Service does not own — currently
+	// the per-session LEARNED permission rules (issue #3), evicted via
+	// permstore.Memory.Forget so they do not outlive the session. Optional and
+	// nil-safe.
+	OnCloseSession func(session.SessionID)
 }
 
 // defaultMaxTeams is the live-team registry cap applied when Config.MaxTeams is
@@ -324,6 +332,12 @@ func (s *Service) CreateSessionWithMCP(ctx context.Context, workspace string, mo
 // editor disconnect already implies the run is being abandoned, so blocking briefly
 // for the in-flight call to unwind is the correct, leak-free behaviour.
 func (s *Service) CloseSession(id session.SessionID) {
+	// Release composition-owned session-scoped state first (e.g. the per-session
+	// learned permission rules) so it never outlives the session, even if the
+	// per-session engine teardown below is a no-op for this id.
+	if s.cfg.OnCloseSession != nil {
+		s.cfg.OnCloseSession(id)
+	}
 	s.mu.Lock()
 	se, ok := s.sessionEngines[id]
 	if ok {
@@ -469,14 +483,15 @@ func (s *Service) LookupRun(id session.SessionID) (*agent.Run, bool) {
 	return st.run, true
 }
 
-// Approve resolves the paused permission ask on the session's in-flight run. If
-// no run is registered in this process it consults the store: a missing session
-// yields ErrNotFound; an existing-but-runless session yields ErrNoActiveRun
-// (the stream was not resumable, e.g. across a restart).
-func (s *Service) Approve(ctx context.Context, id session.SessionID, askID string, allow bool) error {
+// Approve resolves the paused permission ask on the session's in-flight run with
+// the client's three-way verdict (deny / allow-once / allow-always). If no run is
+// registered in this process it consults the store: a missing session yields
+// ErrNotFound; an existing-but-runless session yields ErrNoActiveRun (the stream
+// was not resumable, e.g. across a restart).
+func (s *Service) Approve(ctx context.Context, id session.SessionID, askID string, verdict session.ApprovalVerdict) error {
 	run, ok := s.LookupRun(id)
 	if ok {
-		run.Approve(askID, allow)
+		run.Approve(askID, verdict)
 		return nil
 	}
 	return s.noActiveRun(ctx, id)

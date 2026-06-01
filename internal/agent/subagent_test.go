@@ -51,7 +51,7 @@ func childEngineWith(llm port.LLMProvider, cat *tool.Catalog) *agent.Engine {
 	return agent.NewEngine(agent.Deps{
 		LLM:     llm,
 		Catalog: cat,
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
+		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
 		Model:   "child-model",
 	})
 }
@@ -493,7 +493,7 @@ func TestSubagentAutoDeniesAsk(t *testing.T) {
 			mockllm.TextTurn("child finished after denial"),
 		),
 		Catalog: catalogWith(t, childTool),
-		Policy:  permpolicy.NewPolicy(nil),
+		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "child-model",
 	})
 

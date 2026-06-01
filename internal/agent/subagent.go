@@ -543,7 +543,7 @@ func drainChild(run *Run) (finalText string, stop session.StopReason) {
 // result/stop capture cannot drift between the two.
 func handleChildEvent(run *Run, ev session.Event) (text string, stop session.StopReason, isResult bool) {
 	if ev.Type == session.EvPermissionAsk && ev.Ask != nil {
-		run.Approve(ev.Ask.AskID, false)
+		run.Approve(ev.Ask.AskID, session.VerdictDeny)
 	}
 	if ev.Type == session.EvResult && ev.Result != nil {
 		return ev.Result.Text, ev.Result.Stop, true

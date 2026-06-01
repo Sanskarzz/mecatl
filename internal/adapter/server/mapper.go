@@ -413,3 +413,27 @@ func modeFromProto(m mecatlv1.PermissionMode) session.PermissionMode {
 		return session.ModeDefault
 	}
 }
+
+// verdictFromResumeApproval derives the session.ApprovalVerdict from a
+// ResumeApproval frame, preferring the explicit `verdict` enum and falling back
+// to the legacy `allow` bool for clients that predate it (BACK-COMPAT). The
+// mapping is fail-safe: an UNSPECIFIED verdict with allow=false, and any
+// unrecognized value, resolve to VerdictDeny.
+func verdictFromResumeApproval(verdict mecatlv1.ApprovalVerdict, allow bool) session.ApprovalVerdict {
+	switch verdict {
+	case mecatlv1.ApprovalVerdict_APPROVAL_VERDICT_ALLOW_ALWAYS:
+		return session.VerdictAllowAlways
+	case mecatlv1.ApprovalVerdict_APPROVAL_VERDICT_ALLOW_ONCE:
+		return session.VerdictAllowOnce
+	case mecatlv1.ApprovalVerdict_APPROVAL_VERDICT_DENY:
+		return session.VerdictDeny
+	case mecatlv1.ApprovalVerdict_APPROVAL_VERDICT_UNSPECIFIED:
+		// Legacy clients send only the bool. true -> allow once; false -> deny.
+		if allow {
+			return session.VerdictAllowOnce
+		}
+		return session.VerdictDeny
+	default:
+		return session.VerdictDeny
+	}
+}

@@ -229,8 +229,33 @@ message Prompt {
 message ResumeApproval {
   // ask_id correlates the resolution with the paused ask.
   string ask_id = 1 [(buf.validate.field).string.min_len = 1];
-  // allow permits the tool when true, denies it when false.
+  // allow permits the tool when true, denies it when false. LEGACY: kept for
+  // back-compat with clients that predate `verdict`. When `verdict` is set
+  // (!= APPROVAL_VERDICT_UNSPECIFIED) it takes precedence and this bool is
+  // ignored; otherwise true maps to ALLOW_ONCE and false to DENY.
   bool allow = 2;
+  // verdict is the three-way resolution: deny, allow this call once, or allow
+  // always (which additionally LEARNS a per-session allow rule for the matching
+  // tool + exact pattern). Preferred over `allow`; UNSPECIFIED falls back to it.
+  ApprovalVerdict verdict = 3;
+}
+
+// ApprovalVerdict is the client's three-way resolution of a permission.ask,
+// mirroring session.ApprovalVerdict. ALLOW_ALWAYS both permits the current call
+// and asks the harness to learn a per-session allow rule for the same tool +
+// exact canonical pattern; it NEVER overrides a deny and NEVER bypasses plan-mode
+// mutation denial.
+enum ApprovalVerdict {
+  // APPROVAL_VERDICT_UNSPECIFIED falls back to the legacy `allow` bool at the
+  // server boundary (true -> ALLOW_ONCE, false -> DENY).
+  APPROVAL_VERDICT_UNSPECIFIED = 0;
+  // APPROVAL_VERDICT_DENY refuses the proposed tool call.
+  APPROVAL_VERDICT_DENY = 1;
+  // APPROVAL_VERDICT_ALLOW_ONCE permits this call only; nothing is learned.
+  APPROVAL_VERDICT_ALLOW_ONCE = 2;
+  // APPROVAL_VERDICT_ALLOW_ALWAYS permits this call and learns a per-session
+  // allow rule for the matching tool + exact pattern.
+  APPROVAL_VERDICT_ALLOW_ALWAYS = 3;
 }
 
 // Cancel aborts the in-flight run. The loop observes the cancellation and

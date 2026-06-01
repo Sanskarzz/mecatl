@@ -16,6 +16,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
+	"github.com/stacklok/mecatl/internal/adapter/permstore"
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
 	"github.com/stacklok/mecatl/internal/agent"
@@ -75,8 +76,10 @@ func RunScenario(ctx context.Context, provider port.LLMProvider, model string) (
 	for ev := range run.Events() {
 		events = append(events, ev)
 		// Simulate a client approving the permission ask so the loop resumes.
+		// AllowAlways exercises the learned-permission path: the policy records a
+		// per-session allow for this exact tool+pattern, so a repeat would not ask.
 		if ev.Type == session.EvPermissionAsk && ev.Ask != nil {
-			run.Approve(ev.Ask.AskID, true)
+			run.Approve(ev.Ask.AskID, session.VerdictAllowAlways)
 		}
 	}
 	return events, nil
@@ -98,7 +101,7 @@ func buildEngine(provider port.LLMProvider, model string) *agent.Engine {
 		{Scope: governance.ScopeManaged, Tool: "Glob", Effect: governance.Allow},
 		{Scope: governance.ScopeManaged, Tool: "Write", Effect: governance.Ask},
 		{Scope: governance.ScopeManaged, Tool: "Edit", Effect: governance.Ask},
-	})
+	}, permstore.New())
 
 	return agent.NewEngine(agent.Deps{
 		LLM:     provider,

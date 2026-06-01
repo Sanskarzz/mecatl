@@ -59,7 +59,7 @@ func newService(t *testing.T, llm *mockllm.Provider, rules []governance.Rule, to
 	engine := agent.NewEngine(agent.Deps{
 		LLM:     llm,
 		Catalog: cat,
-		Policy:  permpolicy.NewPolicy(rules),
+		Policy:  permpolicy.NewPolicy(rules, nil),
 		Model:   "test-model",
 	})
 	svc, err := server.NewService(server.Config{

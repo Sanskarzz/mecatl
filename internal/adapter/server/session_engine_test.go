@@ -26,7 +26,7 @@ func newMCPService(t *testing.T, sharedReply string, factory server.SessionEngin
 	shared := agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(mockllm.TextTurn(sharedReply)),
 		Catalog: tool.NewCatalog(),
-		Policy:  permpolicy.NewPolicy(nil),
+		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "test-model",
 	})
 	svc, err := server.NewService(server.Config{
@@ -101,7 +101,7 @@ func TestStartRunRoutesToPerSessionEngine(t *testing.T) {
 	perSession := agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(mockllm.TextTurn("per-session reply")),
 		Catalog: tool.NewCatalog(),
-		Policy:  permpolicy.NewPolicy(nil),
+		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "test-model",
 	})
 	factory := func(_ context.Context, specs []mcp.ServerConfig) (*agent.Engine, func() error, error) {
@@ -147,7 +147,7 @@ func TestServiceCloseTearsDownSessionEngines(t *testing.T) {
 		eng := agent.NewEngine(agent.Deps{
 			LLM:     mockllm.New(mockllm.TextTurn("x")),
 			Catalog: tool.NewCatalog(),
-			Policy:  permpolicy.NewPolicy(nil),
+			Policy:  permpolicy.NewPolicy(nil, nil),
 			Model:   "test-model",
 		})
 		return eng, func() error { closed.Add(1); return nil }, nil

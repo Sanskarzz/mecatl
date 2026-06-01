@@ -92,7 +92,13 @@ type promptBody struct {
 
 type approveBody struct {
 	AskID string `json:"ask_id"`
-	Allow bool   `json:"allow"`
+	// Allow is the LEGACY boolean (back-compat): true -> allow once, false -> deny.
+	// It is used only when Verdict is empty/unspecified.
+	Allow bool `json:"allow"`
+	// Verdict is the preferred three-way resolution: "deny", "allow_once", or
+	// "allow_always" (allow_always additionally learns a per-session rule). An
+	// empty/unknown value falls back to Allow.
+	Verdict string `json:"verdict,omitempty"`
 }
 
 // --- handlers ---------------------------------------------------------------
@@ -217,11 +223,33 @@ func (h *HTTPHandler) approve(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ask_id is required")
 		return
 	}
-	if err := h.svc.Approve(r.Context(), id, body.AskID, body.Allow); err != nil {
+	if err := h.svc.Approve(r.Context(), id, body.AskID, verdictFromHTTP(body.Verdict, body.Allow)); err != nil {
 		writeServiceError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// verdictFromHTTP maps the HTTP approve body's string verdict to the domain
+// ApprovalVerdict, preferring an explicit verdict and falling back to the legacy
+// allow bool. It is fail-safe: an empty verdict with allow=false, and any
+// unrecognized string, resolve to VerdictDeny.
+func verdictFromHTTP(verdict string, allow bool) session.ApprovalVerdict {
+	switch verdict {
+	case "allow_always":
+		return session.VerdictAllowAlways
+	case "allow_once":
+		return session.VerdictAllowOnce
+	case "deny":
+		return session.VerdictDeny
+	case "":
+		if allow {
+			return session.VerdictAllowOnce
+		}
+		return session.VerdictDeny
+	default:
+		return session.VerdictDeny
+	}
 }
 
 // cancel handles POST /v1/sessions/{id}/cancel, cancelling the in-flight run.

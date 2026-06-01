@@ -118,7 +118,8 @@ func (*HarnessServer) readControl(ctx context.Context, stream mecatlv1.HarnessSe
 		switch k := frame.GetKind().(type) {
 		case *mecatlv1.ConverseRequest_ResumeApproval:
 			if k.ResumeApproval != nil {
-				run.Approve(k.ResumeApproval.GetAskId(), k.ResumeApproval.GetAllow())
+				ra := k.ResumeApproval
+				run.Approve(ra.GetAskId(), verdictFromResumeApproval(ra.GetVerdict(), ra.GetAllow()))
 			}
 		case *mecatlv1.ConverseRequest_Cancel:
 			run.Cancel()

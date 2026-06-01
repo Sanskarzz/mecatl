@@ -438,14 +438,14 @@ func TestStopReasonFor(t *testing.T) {
 func TestApprovalFor(t *testing.T) {
 	tests := []struct {
 		outcome permissionOutcome
-		want    bool
+		want    session.ApprovalVerdict
 	}{
-		{permissionOutcome{Outcome: outcomeSelected, OptionID: permAllowOnce}, true},
-		{permissionOutcome{Outcome: outcomeSelected, OptionID: permAllowAlways}, true},
-		{permissionOutcome{Outcome: outcomeSelected, OptionID: permRejectOnce}, false},
-		{permissionOutcome{Outcome: outcomeSelected, OptionID: permRejectAlways}, false},
-		{permissionOutcome{Outcome: outcomeCancelled}, false},
-		{permissionOutcome{Outcome: "weird"}, false},
+		{permissionOutcome{Outcome: outcomeSelected, OptionID: permAllowOnce}, session.VerdictAllowOnce},
+		{permissionOutcome{Outcome: outcomeSelected, OptionID: permAllowAlways}, session.VerdictAllowAlways},
+		{permissionOutcome{Outcome: outcomeSelected, OptionID: permRejectOnce}, session.VerdictDeny},
+		{permissionOutcome{Outcome: outcomeSelected, OptionID: permRejectAlways}, session.VerdictDeny},
+		{permissionOutcome{Outcome: outcomeCancelled}, session.VerdictDeny},
+		{permissionOutcome{Outcome: "weird"}, session.VerdictDeny},
 	}
 	for _, tc := range tests {
 		if got := approvalFor(tc.outcome); got != tc.want {

@@ -198,7 +198,7 @@ func noopEngine() *agent.Engine {
 	return agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(mockllm.TextTurn("x")),
 		Catalog: tool.NewCatalog(),
-		Policy:  permpolicy.NewPolicy(defaultRules()),
+		Policy:  permpolicy.NewPolicy(defaultRules(), nil),
 		Model:   "mock",
 	})
 }

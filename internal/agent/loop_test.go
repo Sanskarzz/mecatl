@@ -128,7 +128,7 @@ func catalogWith(t *testing.T, tools ...tool.Tool) *tool.Catalog {
 
 // allowAll returns a policy that allows every tool call.
 func allowAll() *permpolicy.Policy {
-	return permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}})
+	return permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
 }
 
 // drain collects events until the channel closes, returning them in order.
@@ -460,7 +460,7 @@ func TestPermissionApprove(t *testing.T) {
 		}}
 	cat := catalogWith(t, write)
 	// Default policy (no rule) → Ask.
-	policy := permpolicy.NewPolicy(nil)
+	policy := permpolicy.NewPolicy(nil, nil)
 
 	llm := mockllm.New(
 		mockllm.ToolCallTurn(toolCall("c1", "Write", `{"path":"a"}`)),
@@ -475,7 +475,7 @@ func TestPermissionApprove(t *testing.T) {
 		collected = append(collected, ev)
 		if ev.Type == session.EvPermissionAsk {
 			ask = ev.Ask
-			r.Approve(ask.AskID, true)
+			r.Approve(ask.AskID, session.VerdictAllowOnce)
 		}
 	}
 	if ask == nil {
@@ -499,7 +499,7 @@ func TestPermissionDeny(t *testing.T) {
 			return session.NewToolResult(in.ID, "wrote"), nil
 		}}
 	cat := catalogWith(t, write)
-	policy := permpolicy.NewPolicy(nil) // Ask by default
+	policy := permpolicy.NewPolicy(nil, nil) // Ask by default
 
 	llm := mockllm.New(
 		mockllm.ToolCallTurn(toolCall("c1", "Write", `{"path":"a"}`)),
@@ -520,7 +520,7 @@ func TestPermissionDeny(t *testing.T) {
 				cardIdx = i
 			}
 		case session.EvPermissionAsk:
-			r.Approve(ev.Ask.AskID, false)
+			r.Approve(ev.Ask.AskID, session.VerdictDeny)
 		case session.EvToolResult:
 			denyResult = ev.ToolResult
 			if ev.ToolResult != nil && ev.ToolResult.CallID == "c1" && denyIdx == -1 {

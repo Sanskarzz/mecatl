@@ -446,7 +446,7 @@ func (a *Agent) requestPermission(ctx context.Context, sessionID string, run run
 		err := a.conn.Call(ctx, methodRequestPermission, permissionRequestFor(sessionID, ask), &resp)
 		if err != nil {
 			slog.Debug("acp: request_permission failed; denying", "session", sessionID, "ask", ask.AskID, "err", err)
-			run.Approve(ask.AskID, false)
+			run.Approve(ask.AskID, session.VerdictDeny)
 			return
 		}
 		run.Approve(ask.AskID, approvalFor(resp.Outcome))
@@ -481,7 +481,7 @@ func (a *Agent) release(sessionID string) {
 // runApprover is the subset of *agent.Run the permission round-trip needs,
 // narrowed so requestPermission is unit-testable with a fake.
 type runApprover interface {
-	Approve(askID string, allow bool)
+	Approve(askID string, verdict session.ApprovalVerdict)
 }
 
 // validateCwd enforces ACP's absolute-existing-directory cwd contract, shared by

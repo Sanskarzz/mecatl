@@ -21,7 +21,7 @@ func newLimitsService(t *testing.T, def session.Limits) *server.Service {
 	engine := agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(),
 		Catalog: tool.NewCatalog(),
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
+		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
 		Model:   "test-model",
 	})
 	svc, err := server.NewService(server.Config{

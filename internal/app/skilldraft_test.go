@@ -88,8 +88,8 @@ func TestValidateSkillDraftConfigSymlinkedWorkspace(t *testing.T) {
 }
 
 func TestDefaultRulesSkillDraftAsks(t *testing.T) {
-	policy := permpolicy.NewPolicy(defaultRules())
-	got := policy.Evaluate(context.Background(), session.ModeDefault,
+	policy := permpolicy.NewPolicy(defaultRules(), nil)
+	got := policy.Evaluate(context.Background(), "s1", session.ModeDefault,
 		session.NewToolCall("id", skills.DraftToolName, json.RawMessage(`{}`)))
 	if got.Effect != governance.Ask {
 		t.Fatalf("SkillDraft should default to Ask, got %v", got.Effect)

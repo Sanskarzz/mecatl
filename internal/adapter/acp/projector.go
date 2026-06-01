@@ -392,18 +392,22 @@ func permissionRequestFor(sessionID string, ask session.PendingAsk) requestPermi
 	}
 }
 
-// approvalFor maps a request_permission outcome to the boolean run.Approve takes.
-// A "selected" allow_once/allow_always approves; reject_* denies; a "cancelled"
-// outcome (the editor aborted the turn) denies. allow_always behaves as
-// allow_once this phase — there is no rule persistence yet (documented gap).
-func approvalFor(outcome permissionOutcome) bool {
+// approvalFor maps a request_permission outcome to the three-way verdict
+// run.Approve takes. A "selected" allow_once approves this call only;
+// allow_always approves AND asks the harness to LEARN a per-session rule for the
+// matching tool + exact pattern (issue #3); reject_* and a "cancelled" outcome
+// (the editor aborted the turn) deny. An unknown/unselected outcome fails safe to
+// deny (the zero value).
+func approvalFor(outcome permissionOutcome) session.ApprovalVerdict {
 	if outcome.Outcome != outcomeSelected {
-		return false // cancelled (or unknown) -> deny
+		return session.VerdictDeny // cancelled (or unknown) -> deny
 	}
 	switch outcome.OptionID {
-	case permAllowOnce, permAllowAlways:
-		return true
+	case permAllowAlways:
+		return session.VerdictAllowAlways
+	case permAllowOnce:
+		return session.VerdictAllowOnce
 	default:
-		return false
+		return session.VerdictDeny
 	}
 }

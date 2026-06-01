@@ -36,6 +36,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/openai"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
+	"github.com/stacklok/mecatl/internal/adapter/permstore"
 	"github.com/stacklok/mecatl/internal/adapter/repomap"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
@@ -206,7 +207,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, mcpClose, err := buildEngine(ctx, cfg, provider, store)
+	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, mcpClose, err := buildEngine(ctx, cfg, provider, store)
 	if err != nil {
 		return nil, err
 	}
@@ -242,6 +243,18 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// over the client's streaming-HTTP servers, mounted for that session only. Built
 		// in buildEngine so it shares the main engine's exact collaborators.
 		SessionEngine: sessFactory,
+		// Evict a session's LEARNED permission rules when the session is closed
+		// (issue #3): the rules are per-session and non-durable, so they must not
+		// outlive the session that learned them.
+		//
+		// CAVEAT: CloseSession is currently only invoked by the ACP adapter (on
+		// editor disconnect). The gRPC and HTTP transports have no session-end
+		// signal, so on a long-lived mecated served over gRPC/HTTP a session's
+		// learned rules are NOT evicted until process exit — a bounded,
+		// per-session-isolated accumulation (each rule still requires a human
+		// allow-always approval). Giving gRPC/HTTP a session-end hook is tracked as
+		// a follow-up; see docs/adr/0001-acp-adapter.md.
+		OnCloseSession: learned.Forget,
 	}
 	applyTeamConfig(&svcCfg, cfg, provider, mainMgr)
 
@@ -389,16 +402,24 @@ func buildStore(cfg Config) (port.SessionStore, error) {
 // factory (built HERE because store/policy/hooks/counter/mcpProvider — the exact
 // collaborators a per-session engine must share with the main one — are all in
 // scope here, so the factory cannot drift from the main engine's Deps).
-func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, func(), error) {
+func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, func(), error) {
 	// SkillDraft trust boundary: when enabled, the quarantine dir must live OUTSIDE
 	// the workspace root (so the model's workspace-confined Write/Edit cannot reach
 	// it) and be disjoint from every active skills dir. Fatal on a misconfig.
 	if err := validateSkillDraftConfig(cfg); err != nil {
-		return nil, nil, nil, nil, nil, func() {}, err
+		return nil, nil, nil, nil, nil, nil, func() {}, err
 	}
 	warnSkillDraftResiduals(cfg)
 
-	policy := permpolicy.NewPolicy(defaultRules())
+	// Per-session learned-rule store (issue #3): an ACP "allow always" verdict
+	// records a narrow tool+exact-pattern allow here, scoped to the session; the
+	// policy merges it in at the lowest scope on every evaluation. In-memory and
+	// non-durable by design — rules are dropped on CloseSession (Forget) and on
+	// process restart. Returned to Build so it can wire Forget into CloseSession.
+	// The SAME policy (and thus store) is shared with every per-session client-MCP
+	// engine via sessionEngineFactory, so an MCP-mounted session learns identically.
+	learned := permstore.New()
+	policy := permpolicy.NewPolicy(defaultRules(), learned)
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
 	cat, mainMgr, mcpProvider, mcpInventory, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
@@ -408,7 +429,7 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 	deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, mcpProvider)
 	deps.Catalog = cat
 	sessFactory := sessionEngineFactory(cfg, provider, store, policy, hooks, counter, mcpProvider)
-	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, mcpClose, nil
+	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, mcpClose, nil
 }
 
 // baseEngineDeps assembles the agent.Deps SHARED by the main engine (buildEngine)
@@ -964,9 +985,11 @@ func newChildEngineWithHooks(provider port.LLMProvider, cat *tool.Catalog, model
 		hooks = hookexec.New(nil)
 	}
 	return agent.NewEngine(agent.Deps{
-		LLM:                 provider,
-		Catalog:             cat,
-		Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
+		LLM:     provider,
+		Catalog: cat,
+		// Child/member engines are non-interactive (allow-all) and never learn:
+		// nil store disables Learn entirely for them.
+		Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
 		Hooks:               hooks,
 		PromptConfig:        pc,
 		Model:               model,

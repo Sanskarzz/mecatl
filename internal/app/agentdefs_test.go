@@ -343,7 +343,7 @@ func TestBuildAgentTaskEnginesResolvedModelOnRequest(t *testing.T) {
 	e := agent.NewEngine(agent.Deps{
 		LLM:     parent,
 		Catalog: parentCat,
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
+		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
 		Model:   "parent-model",
 	})
 	r := e.Run(context.Background(),

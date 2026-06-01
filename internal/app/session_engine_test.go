@@ -44,7 +44,7 @@ func TestBaseEngineDepsCarriesFullCollaboratorSet(t *testing.T) {
 	cfg := configWithCollaborators()
 	provider := mockllm.New(mockllm.TextTurn("x"))
 	store := memstore.New()
-	policy := permpolicy.NewPolicy(defaultRules())
+	policy := permpolicy.NewPolicy(defaultRules(), nil)
 	hooks := hookexec.New(nil)
 	counter := buildTokenCounter(cfg)
 
@@ -94,7 +94,7 @@ func TestSessionEngineFactoryBuildsUsableEngine(t *testing.T) {
 	cfg := configWithCollaborators()
 	provider := mockllm.New(mockllm.TextTurn("x"))
 	store := memstore.New()
-	policy := permpolicy.NewPolicy(defaultRules())
+	policy := permpolicy.NewPolicy(defaultRules(), nil)
 	hooks := hookexec.New(nil)
 	counter := buildTokenCounter(cfg)
 

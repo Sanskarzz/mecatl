@@ -26,7 +26,7 @@ func newServiceWithStore(t *testing.T, store port.SessionStore) *server.Service 
 	engine := agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(),
 		Catalog: tool.NewCatalog(),
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}),
+		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
 		Model:   "test-model",
 		Store:   store,
 	})
@@ -100,7 +100,7 @@ func TestApproveFallsBackToStore(t *testing.T) {
 	svc2 := newServiceWithStore(t, store2)
 
 	// Known session, no live run -> ErrNoActiveRun.
-	if err := svc2.Approve(context.Background(), sess.ID, "ask-1", true); !errors.Is(err, server.ErrNoActiveRun) {
+	if err := svc2.Approve(context.Background(), sess.ID, "ask-1", session.VerdictAllowOnce); !errors.Is(err, server.ErrNoActiveRun) {
 		t.Fatalf("Approve known/runless = %v, want ErrNoActiveRun", err)
 	}
 	if err := svc2.Cancel(context.Background(), sess.ID); !errors.Is(err, server.ErrNoActiveRun) {
@@ -108,7 +108,7 @@ func TestApproveFallsBackToStore(t *testing.T) {
 	}
 
 	// Unknown session -> ErrNotFound.
-	if err := svc2.Approve(context.Background(), "does-not-exist", "ask-1", true); !errors.Is(err, server.ErrNotFound) {
+	if err := svc2.Approve(context.Background(), "does-not-exist", "ask-1", session.VerdictAllowOnce); !errors.Is(err, server.ErrNotFound) {
 		t.Fatalf("Approve unknown = %v, want ErrNotFound", err)
 	}
 }

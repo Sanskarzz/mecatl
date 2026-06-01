@@ -58,9 +58,11 @@ outbound `request_permission` and correlates the reply).
      unused and rely on mecatl's OWN `osfs` workspace rooted at the session
      `cwd`; the agent does not call the client's `fs/read_text_file` /
      `fs/write_text_file`. (We do not depend on the client filesystem at all.)
-   - **`allow_always` behaves as `allow_once`.** There is no rule persistence
-     yet, so every approval is one-shot. The four ACP option kinds are still
-     offered; `allow_always`/`allow_once` both map to `run.Approve(askID, true)`.
+   - **`allow_always` LEARNS a per-session rule** (issue #3 — see "Learned
+     permissions" below). It maps to `VerdictAllowAlways`, distinct from
+     `allow_once` (`VerdictAllowOnce`); the harness records a narrow
+     tool+exact-pattern allow scoped to the session so the same call does not ask
+     again. (Earlier phases mapped both to a bare `allow`; that is superseded.)
    - **diff content blocks** (DONE in Phase 2 — see below). Phase 1 carried only
      plain-text `content`; Phase 2 attaches a structured `diff` block to Edit/Write
      tool calls.
@@ -302,14 +304,67 @@ On `EvPermissionAsk` the adapter issues an outbound `session/request_permission`
 carrying the tool call (title/kind/rawInput) and four options
 (`allow_once`/`allow_always`/`reject_once`/`reject_always`). It awaits the reply
 on a goroutine (so draining the event channel never blocks), then resolves the
-paused run: a `selected` `allow_*` → `run.Approve(askID, true)`; `reject_*` or a
-`cancelled` outcome → `run.Approve(askID, false)`. A transport error or context
-cancellation denies the ask (fail-safe), so the run never hangs.
+paused run with a three-way `session.ApprovalVerdict` (`approvalFor`):
+`allow_once` → `VerdictAllowOnce`; `allow_always` → `VerdictAllowAlways` (which
+additionally LEARNS — see below); `reject_*`, a `cancelled` outcome, a transport
+error, or context cancellation → `VerdictDeny` (fail-safe), so the run never hangs.
 
 Note: with Phase 3's `session/load`, the ACP adapter now calls `Service.Persist`
 on `EvPermissionAsk` (awaiting snapshot, for re-attach) and at run end (the
 completed turn's history), matching the gRPC/HTTP adapters. Phase 1/2 deliberately
 skipped this because there was no re-attach surface; that is no longer true.
+
+## Learned permissions (`allow_always`, issue #3)
+
+`allow_always` now records a per-session permission rule so an approved call is
+not re-asked. The slice is deliberately CONSERVATIVE; the invariants below are the
+whole point and have tests that fail on regression.
+
+**Verdict enum, end to end.** The old allow/deny bool is widened to a three-way
+verdict — `session.ApprovalVerdict` (`VerdictDeny` = zero value / fail-safe,
+`VerdictAllowOnce`, `VerdictAllowAlways`), mirrored in proto as the
+`ApprovalVerdict` enum on `ResumeApproval.verdict`. It threads: ACP `approvalFor`
+/ gRPC `verdictFromResumeApproval` / HTTP `verdictFromHTTP` →
+`Service.Approve(…, verdict)` → `Run.Approve(askID, verdict)` →
+`askRegistry`/`await` → `dispatch.authorize`. The loop owns the askID→tool+args
+correlation, so it is the loop — via the policy PORT — that records the rule, not
+the adapter.
+
+**Proto back-compat.** `ResumeApproval` keeps `bool allow = 2` and adds
+`ApprovalVerdict verdict = 3`. When `verdict != UNSPECIFIED` it wins; otherwise the
+legacy bool is honoured (`true` → `ALLOW_ONCE`, `false` → `DENY`). `task generate`
+stays idempotent.
+
+**Granularity: tool + EXACT canonical pattern, never broader.** On
+`VerdictAllowAlways`, `dispatch.authorize` calls `Policy.Learn(sess.ID, c)` as a
+SIDE EFFECT (it governs future calls only; the current call proceeds one-shot via
+the Allow it already resolved, never re-evaluated). `governance.LearnableRule`
+derives the rule using the SAME pattern derivation the evaluator matches against
+(`nonBashPattern` for non-Bash; `SplitCommands`+`Canonicalize` for Bash) and
+returns `{Tool, Pattern, Effect: Allow, Exact: true, Scope: ScopeUser}` (lowest
+scope). `Rule.Exact` forces LITERAL matching — a learned pattern is never
+glob-expanded, so a stray `*` cannot escalate.
+
+**Refuse-to-learn.** `LearnableRule` returns "do not learn" when: a Bash command
+splits into ≠1 segment (compound `a && b` / `a; b`), or contains
+substitution/grouping (`$(…)`, backticks, `(…)`), or is empty; or the derived
+pattern is empty for ANY tool (no targetable field). So `git status` is learnable
+but `git status; rm -rf /` is not, and we NEVER learn a tool-wide allow.
+
+**The seam.** `governance.Evaluator` stays immutable and session-free: it gains
+`EvaluateWith(tool, args, planMode, extra []Rule)` (the plan-mode gate runs FIRST,
+THEN the deny→ask→allow fold over `static ++ extra`) and `LearnableRule`, but never
+stores anything. The mutable, per-session, in-memory, NON-durable
+`adapter/permstore.Memory` (implementing the new `port.PermissionStore`) keys
+learned rules by session; `adapter/permpolicy.NewPolicy(rules, store)` merges this
+session's learned rules in on every `Evaluate`. Rules are dropped on
+`Service.CloseSession` (`OnCloseSession` → `Memory.Forget`) and on process restart.
+
+**Security invariants preserved.** A learned allow can NEVER override a deny (the
+fold is deny-dominant across the WHOLE merged set, learned rules sit at the lowest
+scope), NEVER beat an ask (same reason), and NEVER bypass plan-mode mutation
+denial (the plan gate runs before any learned rule is consulted). Cross-session
+isolation holds: session A's learned rule is invisible to session B.
 
 ## Concurrency / serialization
 
@@ -339,8 +394,17 @@ handler that issues an outbound `Call` (a `session/prompt` issuing
 
 - **fs/\* delegation** (`readTextFile`/`writeTextFile`) — a client-backed
   `tool.Workspace`. mecatl still uses its OWN `osfs` rooted at the session `cwd`.
-- **`allow_always` governance-rule persistence** (still maps to `allow_once` — no
-  rule is recorded, so every approval is one-shot).
+- **DURABLE learned permissions** (cross-restart) — the `allow_always` rule store
+  is in-memory and per-session today (issue #3, see "Learned permissions"); a
+  durable store that survives process restart is a tracked follow-up.
+- **Broader learned-rule granularity** (glob / prefix / tool-wide grants) — today
+  a learned rule is tool + EXACT canonical pattern only, by design; richer
+  granularity (e.g. "allow always for `git *`") is a tracked follow-up.
+- **Learned-rule eviction over gRPC/HTTP** — `Forget` runs from
+  `Service.CloseSession`, which only the ACP adapter calls (on editor disconnect).
+  gRPC/HTTP have no session-end signal, so learned rules there persist until
+  process exit (bounded, per-session-isolated). A gRPC/HTTP session-end hook and a
+  per-session learned-rule cap are tracked follow-ups (issue #3 review).
 - **Image/audio prompt content** (`promptCapabilities` stays text-only).
 - **Client MCP on `session/load`** (re-mount the client's streaming-HTTP servers on
   resume) + **mid-session teardown** — tracked follow-up (Slice B). `session/new`

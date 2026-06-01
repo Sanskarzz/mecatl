@@ -61,4 +61,11 @@ type Rule struct {
 	Pattern string
 	// Effect is the effect this rule yields on a match.
 	Effect Effect
+	// Exact, when true, requires Pattern to match the (canonicalized) argument
+	// string LITERALLY — never via glob expansion. It is the safety floor for a
+	// LEARNED allow (LearnableRule sets it): a learned allow for `git status`
+	// must match only `git status`, never let a stray `*`/`?` in the learned text
+	// widen into a glob that green-lights commands the user never approved
+	// (glob-escalation). Static config rules leave it false and keep glob matching.
+	Exact bool
 }

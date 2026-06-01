@@ -183,9 +183,11 @@ type classifyingPolicy struct {
 	classifier Classifier
 }
 
-// Evaluate implements port.PermissionPolicy. See Wrap for the full semantics.
-func (p *classifyingPolicy) Evaluate(ctx context.Context, mode session.PermissionMode, c session.ToolCall) governance.PermissionDecision {
-	base := p.inner.Evaluate(ctx, mode, c)
+// Evaluate implements port.PermissionPolicy. See Wrap for the full semantics. It
+// forwards sessionID to the inner policy unchanged so per-session learned rules
+// are honoured by the layer it decorates.
+func (p *classifyingPolicy) Evaluate(ctx context.Context, sessionID session.SessionID, mode session.PermissionMode, c session.ToolCall) governance.PermissionDecision {
+	base := p.inner.Evaluate(ctx, sessionID, mode, c)
 
 	// Monotonicity invariant, enforced unconditionally: an inner Deny is sacred
 	// and is NEVER consulted nor relaxed, regardless of how ClassifyOn is
@@ -236,6 +238,14 @@ func (p *classifyingPolicy) Evaluate(ctx context.Context, mode session.Permissio
 	default:
 		return base
 	}
+}
+
+// Learn forwards an "allow always" verdict to the inner policy, which owns the
+// learned-rule store. The classifier decorator holds no learning state of its
+// own; it only ever gates the live decision (and never relaxes an inner Deny), so
+// delegating Learn keeps a single source of learned rules.
+func (p *classifyingPolicy) Learn(sessionID session.SessionID, c session.ToolCall) {
+	p.inner.Learn(sessionID, c)
 }
 
 // Compile-time assertion that the decorator satisfies the port.

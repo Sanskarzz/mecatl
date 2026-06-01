@@ -187,7 +187,7 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws t
 // cancelled Ask becomes Deny) and a cancelled flag set only when ctx was
 // cancelled while awaiting.
 func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, turnIdx int, c session.ToolCall) (governance.PermissionDecision, bool) {
-	decision := e.deps.Policy.Evaluate(ctx, sess.Mode, c)
+	decision := e.deps.Policy.Evaluate(ctx, sess.ID, sess.Mode, c)
 	if decision.Effect != governance.Ask {
 		return decision, false
 	}
@@ -210,7 +210,7 @@ func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, t
 	a := ask
 	e.emit(r, session.Event{Type: session.EvPermissionAsk, Turn: turnIdx, Ask: &a})
 
-	allow, ok := r.asks.await(ctx, askID, ch)
+	verdict, ok := r.asks.await(ctx, askID, ch)
 
 	// Resume the session regardless of verdict; the loop (below) owns acting on
 	// the decision, so the aggregate only reconciles its own lifecycle.
@@ -223,13 +223,28 @@ func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, t
 		// ctx cancelled while awaiting.
 		return governance.PermissionDecision{Effect: governance.Deny, Reason: "cancelled"}, true
 	}
-	if allow {
+
+	switch verdict {
+	case session.VerdictAllowAlways:
+		// Learn a per-session allow rule for this exact tool+pattern as a SIDE
+		// EFFECT — it governs FUTURE calls only and never blocks or re-evaluates the
+		// current one (which proceeds one-shot via the Allow below). Learn is itself
+		// a no-op when the call is not safely learnable (compound/substituted Bash,
+		// no targetable pattern). It can NEVER override a deny or bypass plan mode:
+		// the rule is consulted by Evaluate at the lowest scope, behind the
+		// deny-dominant fold and the plan-mode gate.
+		e.deps.Policy.Learn(sess.ID, c)
 		return governance.PermissionDecision{Effect: governance.Allow}, false
+	case session.VerdictAllowOnce:
+		// Permit THIS call only; nothing learned.
+		return governance.PermissionDecision{Effect: governance.Allow}, false
+	default:
+		// VerdictDeny (incl. the zero value / fail-safe).
+		return governance.PermissionDecision{
+			Effect: governance.Deny,
+			Reason: fmt.Sprintf("denied by user: %s", decision.Reason),
+		}, false
 	}
-	return governance.PermissionDecision{
-		Effect: governance.Deny,
-		Reason: fmt.Sprintf("denied by user: %s", decision.Reason),
-	}, false
 }
 
 // preHook runs the PreToolUse hook. It returns blocked=true with the hook's

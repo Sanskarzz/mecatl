@@ -166,10 +166,11 @@ type Run struct {
 func (r *Run) Events() <-chan session.Event { return r.events }
 
 // Approve resolves the permission.ask identified by askID with the client's
-// verdict (allow true permits the tool, false denies it). It is non-blocking and
-// safe to call from another goroutine; an unknown or already-resolved askID is
-// ignored.
-func (r *Run) Approve(askID string, allow bool) { r.asks.resolve(askID, allow) }
+// verdict: VerdictDeny refuses the call, VerdictAllowOnce permits this call only,
+// and VerdictAllowAlways permits it AND asks the policy to learn a per-session
+// allow rule for the matching tool+pattern. It is non-blocking and safe to call
+// from another goroutine; an unknown or already-resolved askID is ignored.
+func (r *Run) Approve(askID string, v session.ApprovalVerdict) { r.asks.resolve(askID, v) }
 
 // Cancel aborts the in-flight run by cancelling its context. The loop observes
 // the cancellation (mid-stream, mid-tool, or while awaiting an approval) and

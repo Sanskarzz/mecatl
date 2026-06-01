@@ -39,7 +39,7 @@ func commandsService(t *testing.T, lister server.CommandLister) *server.Service 
 	engine := agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(),
 		Catalog: tool.NewCatalog(),
-		Policy:  permpolicy.NewPolicy(allowRules()),
+		Policy:  permpolicy.NewPolicy(allowRules(), nil),
 		Model:   "test-model",
 	})
 	svc, err := server.NewService(server.Config{

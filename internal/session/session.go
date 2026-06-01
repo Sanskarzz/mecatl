@@ -57,6 +57,28 @@ const (
 	ModeAccept PermissionMode = "acceptEdits"
 )
 
+// ApprovalVerdict is the client's resolution of a permission.ask. It widens the
+// historical allow/deny boolean into three outcomes so a client can ask the
+// harness to LEARN an allow for the matching tool+pattern (allow_always) versus
+// permitting only the current call (allow_once).
+//
+// VerdictDeny is the ZERO VALUE deliberately: a verdict that is never set, or a
+// resolution path that abandons the ask (ctx cancel, transport error), fails
+// SAFE to deny. A learned allow (VerdictAllowAlways) NEVER overrides a deny and
+// NEVER bypasses plan-mode mutation denial — it only adds a narrow,
+// session-scoped allow rule the Evaluator consults at the lowest precedence.
+type ApprovalVerdict int
+
+const (
+	// VerdictDeny denies the call. It is the zero value (fail-safe default).
+	VerdictDeny ApprovalVerdict = iota
+	// VerdictAllowOnce allows the current call only; nothing is learned.
+	VerdictAllowOnce
+	// VerdictAllowAlways allows the current call AND asks the harness to learn a
+	// per-session allow rule for the same tool + exact canonical pattern.
+	VerdictAllowAlways
+)
+
 // StopReason explains why a run stopped. It is carried on terminal events and
 // in the LLM provider's terminal chunk.
 type StopReason string

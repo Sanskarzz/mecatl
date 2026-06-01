@@ -3,11 +3,16 @@ package agent
 import (
 	"context"
 	"sync"
+
+	"github.com/stacklok/mecatl/internal/session"
 )
 
-// approval is a client's resolution of a permission.ask: allow or deny.
+// approval is a client's resolution of a permission.ask. It carries the full
+// three-way verdict (deny / allow-once / allow-always) rather than a bool, so
+// the loop can both authorize the current call AND, on allow-always, ask the
+// policy to LEARN a rule. session.VerdictDeny is the zero value (fail-safe).
 type approval struct {
-	allow bool
+	verdict session.ApprovalVerdict
 }
 
 // askRegistry brokers the blocking-and-resume handshake between the loop
@@ -40,7 +45,7 @@ func (r *askRegistry) register(askID string) <-chan approval {
 // idempotent: a second resolution (or one for an unknown ask) is dropped. It
 // removes the ask from the registry so a stale Approve cannot resolve a later,
 // distinct ask that happens to reuse an id.
-func (r *askRegistry) resolve(askID string, allow bool) {
+func (r *askRegistry) resolve(askID string, v session.ApprovalVerdict) {
 	r.mu.Lock()
 	ch, ok := r.pending[askID]
 	if ok {
@@ -52,7 +57,7 @@ func (r *askRegistry) resolve(askID string, allow bool) {
 	}
 	// ch is buffered (cap 1) and only ever written once per ask, so this never
 	// blocks.
-	ch <- approval{allow: allow}
+	ch <- approval{verdict: v}
 }
 
 // discard drops a pending ask without resolving it. The loop calls this when an
@@ -64,15 +69,16 @@ func (r *askRegistry) discard(askID string) {
 }
 
 // await blocks until the client resolves askID via resolve, or ctx is cancelled.
-// It reports the allow verdict and ok=true on resolution; ok=false means the
-// wait was abandoned (ctx cancelled), in which case the caller should end the
-// run as cancelled. The ask is removed from the registry on either path.
-func (r *askRegistry) await(ctx context.Context, askID string, ch <-chan approval) (allow bool, ok bool) {
+// It reports the verdict and ok=true on resolution; ok=false means the wait was
+// abandoned (ctx cancelled), in which case the verdict is the zero value
+// (VerdictDeny, fail-safe) and the caller should end the run as cancelled. The
+// ask is removed from the registry on either path.
+func (r *askRegistry) await(ctx context.Context, askID string, ch <-chan approval) (verdict session.ApprovalVerdict, ok bool) {
 	select {
 	case a := <-ch:
-		return a.allow, true
+		return a.verdict, true
 	case <-ctx.Done():
 		r.discard(askID)
-		return false, false
+		return session.VerdictDeny, false
 	}
 }

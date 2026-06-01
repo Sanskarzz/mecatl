@@ -63,7 +63,7 @@ func newServiceCfg(t *testing.T, llm *mockllm.Provider, rules []governance.Rule,
 	engine := agent.NewEngine(agent.Deps{
 		LLM:     llm,
 		Catalog: cat,
-		Policy:  permpolicy.NewPolicy(rules),
+		Policy:  permpolicy.NewPolicy(rules, nil),
 		Model:   "test-model",
 	})
 	cfg := server.Config{
@@ -484,7 +484,7 @@ func stubEngine(t *testing.T) *agent.Engine {
 	return agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(mockllm.TextTurn("done")),
 		Catalog: tool.NewCatalog(),
-		Policy:  permpolicy.NewPolicy(allowRules()),
+		Policy:  permpolicy.NewPolicy(allowRules(), nil),
 		Model:   "test-model",
 	})
 }
