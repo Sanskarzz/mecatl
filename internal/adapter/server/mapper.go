@@ -344,6 +344,15 @@ func toProtoMcpSource(s source.SourceInfo) *mecatlv1.McpSource {
 	}
 }
 
+// toProtoCommands maps a slice of Service Commands to their proto form.
+func toProtoCommands(cs []Command) []*mecatlv1.Command {
+	out := make([]*mecatlv1.Command, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, &mecatlv1.Command{Name: c.Name, Description: c.Description})
+	}
+	return out
+}
+
 // --- team mappers ------------------------------------------------------------
 
 // toProtoTeamMember maps a team.Member roster entry to its proto form.

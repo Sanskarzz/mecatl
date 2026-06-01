@@ -202,6 +202,15 @@ func (h *HarnessServer) ListAgents(ctx context.Context, _ *mecatlv1.ListAgentsRe
 	return &mecatlv1.ListAgentsResponse{Agents: h.svc.ListAgents(ctx)}, nil
 }
 
+// ListCommands returns the available slash commands for the requested workspace.
+func (h *HarnessServer) ListCommands(ctx context.Context, req *mecatlv1.ListCommandsRequest) (*mecatlv1.ListCommandsResponse, error) {
+	cmds, err := h.svc.ListCommands(ctx, req.GetWorkspace())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &mecatlv1.ListCommandsResponse{Commands: toProtoCommands(cmds)}, nil
+}
+
 // toStatus maps service sentinel errors to gRPC status codes.
 func toStatus(err error) error {
 	switch {

@@ -77,6 +77,14 @@ service HarnessService {
   // Derived from the snapshot taken at startup; it performs no live discovery.
   rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
 
+  // ListCommands returns the available slash commands (name + short
+  // description) discovered under the configured command directories of the
+  // requested workspace. It powers the client's in-input command palette; it is
+  // DISCOVERY only — expanding a command remains a run-path concern (the server's
+  // CommandExpander handles it when a "/<cmd> args" prompt is submitted). An
+  // empty workspace, or a server with no command expander, returns an empty list.
+  rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
+
   // --- Agent teams (experimental) -----------------------------------------
   //
   // A team is a set of long-lived member sessions that coordinate through a
@@ -687,6 +695,33 @@ message ListAgentsRequest {}
 message ListAgentsResponse {
   // agents are the (possibly empty) resolved agent definitions, name-sorted.
   repeated AgentInfo agents = 1;
+}
+
+// --- Slash command discovery -------------------------------------------------
+
+// Command is one discovered slash command's listing metadata. Mirrors
+// prompt.Command: the invocation name (without the leading "/") and a short,
+// human-facing description for the palette. It carries NO body — discovery is
+// metadata-only; expansion (which reads the body) is a separate run-path concern.
+message Command {
+  // name is the command's invocation name (the "<name>" of "/<name>").
+  string name = 1;
+  // description is a short one-line summary derived from the command file (a
+  // frontmatter description: field, else the first non-blank body line), capped.
+  string description = 2;
+}
+
+// ListCommandsRequest requests the available slash commands for a workspace.
+message ListCommandsRequest {
+  // workspace is the session root whose command directories are scanned. Empty
+  // returns an empty list (there is no workspace to discover commands under).
+  string workspace = 1;
+}
+
+// ListCommandsResponse carries the discovered slash commands.
+message ListCommandsResponse {
+  // commands are the (possibly empty) discovered commands, name-sorted.
+  repeated Command commands = 1;
 }
 
 // --- Agent team messages ----------------------------------------------------

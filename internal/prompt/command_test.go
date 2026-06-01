@@ -275,4 +275,132 @@ type errStub string
 
 func (e errStub) Error() string { return string(e) }
 
+// listerStub is a stubExpander that ALSO implements CommandLister, so the
+// MultiExpander aggregation tests can exercise a child that enumerates.
+type listerStub struct {
+	cmds []prompt.Command
+	err  error
+}
+
+func (listerStub) Expand(_ context.Context, _ tool.Workspace, input string) (string, bool, error) {
+	return input, false, nil
+}
+
+func (s listerStub) List(_ context.Context, _ tool.Workspace) ([]prompt.Command, error) {
+	return s.cmds, s.err
+}
+
+// TestNoopExpanderListsNothing verifies the default expander enumerates no
+// commands.
+func TestNoopExpanderListsNothing(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	got, err := prompt.NoopExpander{}.List(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("NoopExpander.List = %v, want empty", got)
+	}
+}
+
+// TestDirCommandExpanderListDescriptions verifies List discovers names and
+// derives descriptions from both a frontmatter description: field and the
+// first-non-blank-line fallback, sorted by name.
+func TestDirCommandExpanderListDescriptions(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	writeFile(t, ws, ".mecatl/commands/review.md",
+		"---\ndescription: Review a pull request\nmodel: opus\n---\nPlease review $ARGUMENTS")
+	writeFile(t, ws, ".mecatl/commands/fix.md",
+		"Fix the failing test in $1\nmore body")
+
+	cmds, err := prompt.NewDirCommandExpander().List(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(cmds) != 2 {
+		t.Fatalf("List returned %d commands, want 2: %+v", len(cmds), cmds)
+	}
+	// Sorted by name: fix, review.
+	if cmds[0].Name != "fix" || cmds[0].Description != "Fix the failing test in $1" {
+		t.Errorf("cmds[0] = %+v, want {fix, first-line fallback}", cmds[0])
+	}
+	if cmds[1].Name != "review" || cmds[1].Description != "Review a pull request" {
+		t.Errorf("cmds[1] = %+v, want {review, frontmatter description}", cmds[1])
+	}
+}
+
+// TestDirCommandExpanderListDedupesAcrossDirs verifies a name present in the
+// first dir shadows the same name in a later dir (matching Expand precedence).
+func TestDirCommandExpanderListDedupesAcrossDirs(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	writeFile(t, ws, ".mecatl/commands/dup.md", "from mecatl")
+	writeFile(t, ws, ".claude/commands/dup.md", "from claude")
+	writeFile(t, ws, ".claude/commands/only.md", "claude-only command")
+
+	cmds, err := prompt.NewDirCommandExpander().List(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(cmds) != 2 {
+		t.Fatalf("List returned %d commands, want 2 (dup de-duped + only): %+v", len(cmds), cmds)
+	}
+	byName := map[string]prompt.Command{}
+	for _, c := range cmds {
+		byName[c.Name] = c
+	}
+	if got := byName["dup"].Description; got != "from mecatl" {
+		t.Errorf("dup description = %q, want \"from mecatl\" (.mecatl dir wins)", got)
+	}
+	if _, ok := byName["only"]; !ok {
+		t.Errorf("expected claude-only command to be listed")
+	}
+}
+
+// TestDirCommandExpanderListEmptyWhenNoDirs verifies a workspace with no command
+// files yields no commands and no error.
+func TestDirCommandExpanderListEmptyWhenNoDirs(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	cmds, err := prompt.NewDirCommandExpander().List(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(cmds) != 0 {
+		t.Errorf("List = %+v, want empty", cmds)
+	}
+}
+
+// TestMultiExpanderListAggregatesAndDedupes verifies MultiExpander.List merges
+// its children's lists, applies first-wins de-dup, sorts, and skips children
+// that do not implement CommandLister.
+func TestMultiExpanderListAggregatesAndDedupes(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	exp := prompt.NewMultiExpander(
+		listerStub{cmds: []prompt.Command{{Name: "b", Description: "first b"}, {Name: "a", Description: "a"}}},
+		stubExpander{match: "/x"}, // not a lister; contributes nothing
+		listerStub{cmds: []prompt.Command{{Name: "b", Description: "second b (shadowed)"}, {Name: "c", Description: "c"}}},
+	)
+	cmds, err := exp.List(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(cmds) != 3 {
+		t.Fatalf("List returned %d, want 3 (a,b,c): %+v", len(cmds), cmds)
+	}
+	if cmds[0].Name != "a" || cmds[1].Name != "b" || cmds[2].Name != "c" {
+		t.Errorf("not sorted by name: %+v", cmds)
+	}
+	if cmds[1].Description != "first b" {
+		t.Errorf("b description = %q, want \"first b\" (earlier child wins)", cmds[1].Description)
+	}
+}
+
+// TestMultiExpanderListErrorStops verifies a child List error stops aggregation.
+func TestMultiExpanderListErrorStops(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	exp := prompt.NewMultiExpander(listerStub{err: errStub("boom")})
+	if _, err := exp.List(context.Background(), ws); err == nil {
+		t.Fatalf("expected the child List error to surface")
+	}
+}
+
 var _ prompt.CommandExpander = (*prompt.MultiExpander)(nil)

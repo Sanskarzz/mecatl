@@ -49,6 +49,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case client.CommandsMsg:
+		// Slash-command discovery landed: store the set (a failure degrades quietly
+		// to an empty palette) and re-sync so the palette reflects it immediately if
+		// the input is still a command line.
+		m.palette.commands = msg.Commands
+		mm, cmd := m.syncPalette()
+		return mm, cmd
+
 	default:
 		// MCP overlay result/error msgs (Stage D) are reduced first; if it's not
 		// one of those, fall through to the stream-event handler.
@@ -303,7 +311,20 @@ func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // onIdleKey handles keys while idle: enter submits the prompt, shift+enter (and
 // ctrl+j) inserts a newline, everything else feeds the textarea (or scrolls).
+//
+// The slash-command palette is woven in BEFORE the textarea path: while it is
+// open it claims ↑/↓ (move selection), tab/enter (complete), and esc (dismiss)
+// so those keys drive completion instead of the normal idle bindings. When it is
+// closed every key falls through unchanged, and after any key that may have
+// edited the input the palette is re-synced (open/filter/fetch) from the new
+// content — so it appears the moment the input becomes "/…" and tracks the
+// typed prefix.
 func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.palette.open {
+		if mm, handled := m.onPaletteKey(msg); handled {
+			return mm, nil
+		}
+	}
 	switch {
 	case key.Matches(msg, m.keys.MCPPanel):
 		return m.openMCP(mcpPanel)
@@ -315,7 +336,7 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openAgents()
 	case key.Matches(msg, m.keys.Newline):
 		m.ta.InsertRune('\n')
-		return m, nil
+		return m.afterInputEdit(nil)
 	case key.Matches(msg, m.keys.Submit):
 		return m.submitPrompt()
 	case key.Matches(msg, m.keys.ScrollU), key.Matches(msg, m.keys.ScrollD):
@@ -325,8 +346,45 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	default:
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
-		return m, cmd
+		return m.afterInputEdit(cmd)
 	}
+}
+
+// onPaletteKey handles keys while the slash-command palette is open. It returns
+// handled=false for keys the palette does not claim, so the caller falls through
+// to the normal idle handling (and the key still reaches the textarea). None of
+// the palette's actions issue a command (they only mutate model state), so it
+// returns no tea.Cmd.
+func (m Model) onPaletteKey(msg tea.KeyPressMsg) (Model, bool) {
+	switch msg.String() {
+	case "up":
+		m.paletteMoveUp()
+		return m, true
+	case "down":
+		m.paletteMoveDown()
+		return m, true
+	case "tab", "enter":
+		return m.paletteComplete(), true
+	case "esc":
+		return m.paletteDismiss(), true
+	}
+	return m, false
+}
+
+// afterInputEdit re-syncs the palette from the (possibly changed) textarea
+// content and batches the palette's fetch command with cmd (the textarea's own
+// command, e.g. a cursor blink). It is the single funnel every idle key path that
+// edits the input runs through, so the palette can never get out of step with the
+// input.
+func (m Model) afterInputEdit(cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	mm, fetch := m.syncPalette()
+	if fetch == nil {
+		return mm, cmd
+	}
+	if cmd == nil {
+		return mm, fetch
+	}
+	return mm, tea.Batch(cmd, fetch)
 }
 
 // submitPrompt opens a fresh Converse run for the textarea text, sends the

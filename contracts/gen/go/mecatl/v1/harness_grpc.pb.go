@@ -52,6 +52,7 @@ const (
 	HarnessService_ListMcpSources_FullMethodName      = "/mecatl.v1.HarnessService/ListMcpSources"
 	HarnessService_ListToolHiveGroups_FullMethodName  = "/mecatl.v1.HarnessService/ListToolHiveGroups"
 	HarnessService_ListAgents_FullMethodName          = "/mecatl.v1.HarnessService/ListAgents"
+	HarnessService_ListCommands_FullMethodName        = "/mecatl.v1.HarnessService/ListCommands"
 	HarnessService_CreateTeam_FullMethodName          = "/mecatl.v1.HarnessService/CreateTeam"
 	HarnessService_SpawnTeammate_FullMethodName       = "/mecatl.v1.HarnessService/SpawnTeammate"
 	HarnessService_SendTeammateMessage_FullMethodName = "/mecatl.v1.HarnessService/SendTeammateMessage"
@@ -104,6 +105,13 @@ type HarnessServiceClient interface {
 	// model, its effective read-only tool scope, permission mode, and UX color.
 	// Derived from the snapshot taken at startup; it performs no live discovery.
 	ListAgents(ctx context.Context, in *ListAgentsRequest, opts ...grpc.CallOption) (*ListAgentsResponse, error)
+	// ListCommands returns the available slash commands (name + short
+	// description) discovered under the configured command directories of the
+	// requested workspace. It powers the client's in-input command palette; it is
+	// DISCOVERY only — expanding a command remains a run-path concern (the server's
+	// CommandExpander handles it when a "/<cmd> args" prompt is submitted). An
+	// empty workspace, or a server with no command expander, returns an empty list.
+	ListCommands(ctx context.Context, in *ListCommandsRequest, opts ...grpc.CallOption) (*ListCommandsResponse, error)
 	// CreateTeam allocates a new agent team and returns its id, optionally enrolling
 	// an initial roster in the same atomic call. Members may also be added afterwards
 	// with SpawnTeammate; the team is then driven with RunTeam.
@@ -236,6 +244,16 @@ func (c *harnessServiceClient) ListAgents(ctx context.Context, in *ListAgentsReq
 	return out, nil
 }
 
+func (c *harnessServiceClient) ListCommands(ctx context.Context, in *ListCommandsRequest, opts ...grpc.CallOption) (*ListCommandsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListCommandsResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ListCommands_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *harnessServiceClient) CreateTeam(ctx context.Context, in *CreateTeamRequest, opts ...grpc.CallOption) (*CreateTeamResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateTeamResponse)
@@ -349,6 +367,13 @@ type HarnessServiceServer interface {
 	// model, its effective read-only tool scope, permission mode, and UX color.
 	// Derived from the snapshot taken at startup; it performs no live discovery.
 	ListAgents(context.Context, *ListAgentsRequest) (*ListAgentsResponse, error)
+	// ListCommands returns the available slash commands (name + short
+	// description) discovered under the configured command directories of the
+	// requested workspace. It powers the client's in-input command palette; it is
+	// DISCOVERY only — expanding a command remains a run-path concern (the server's
+	// CommandExpander handles it when a "/<cmd> args" prompt is submitted). An
+	// empty workspace, or a server with no command expander, returns an empty list.
+	ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error)
 	// CreateTeam allocates a new agent team and returns its id, optionally enrolling
 	// an initial roster in the same atomic call. Members may also be added afterwards
 	// with SpawnTeammate; the team is then driven with RunTeam.
@@ -407,6 +432,9 @@ func (UnimplementedHarnessServiceServer) ListToolHiveGroups(context.Context, *Li
 }
 func (UnimplementedHarnessServiceServer) ListAgents(context.Context, *ListAgentsRequest) (*ListAgentsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListAgents not implemented")
+}
+func (UnimplementedHarnessServiceServer) ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListCommands not implemented")
 }
 func (UnimplementedHarnessServiceServer) CreateTeam(context.Context, *CreateTeamRequest) (*CreateTeamResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateTeam not implemented")
@@ -616,6 +644,24 @@ func _HarnessService_ListAgents_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HarnessService_ListCommands_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListCommandsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ListCommands(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ListCommands_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ListCommands(ctx, req.(*ListCommandsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _HarnessService_CreateTeam_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateTeamRequest)
 	if err := dec(in); err != nil {
@@ -759,6 +805,10 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListAgents",
 			Handler:    _HarnessService_ListAgents_Handler,
+		},
+		{
+			MethodName: "ListCommands",
+			Handler:    _HarnessService_ListCommands_Handler,
 		},
 		{
 			MethodName: "CreateTeam",

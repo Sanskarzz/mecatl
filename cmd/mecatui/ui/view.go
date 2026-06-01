@@ -39,7 +39,17 @@ func (m Model) View() tea.View {
 
 	input := m.renderInput()
 
-	v.Content = strings.Join([]string{header, body, input, footer}, "\n")
+	// The slash-command palette is an inline dropdown shown just ABOVE the input
+	// (not an overlay over the conversation): it appears only while idle and the
+	// input is a command line, so it never competes with the permission modal or
+	// the MCP/agents overlays.
+	regions := []string{header, body}
+	if pal := renderPalette(m.deps.Theme, m.palette, m.width); pal != "" {
+		regions = append(regions, pal)
+	}
+	regions = append(regions, input, footer)
+
+	v.Content = strings.Join(regions, "\n")
 	return v
 }
 

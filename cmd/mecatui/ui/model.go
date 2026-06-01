@@ -38,7 +38,8 @@ type Converser interface {
 type Deps struct {
 	Session SessionCreator
 	Conv    Converser
-	MCP     client.MCP // MCP/ToolHive inventory + resources/prompts; nil disables the overlay
+	MCP     client.MCP       // MCP/ToolHive inventory + resources/prompts; nil disables the overlay
+	Cmds    client.Commander // slash-command discovery for the input palette; nil disables it
 	Theme   theme.Theme
 
 	// Display-only context for the header bar.
@@ -100,6 +101,7 @@ type Model struct {
 	activeTool string         // tool name in flight, shown beside the spinner
 	ask        pendingAsk     // current permission modal (when phaseAwaitingApproval)
 	mcp        mcpState       // MCP overlay state (view==mcpNone when closed)
+	palette    paletteState   // slash-command palette (open when the input starts with "/")
 	agents     agentsState    // agent-team overlay state (view==agentsNone when closed)
 	stream     *client.Stream // current run's stream
 	cancelRun  context.CancelFunc

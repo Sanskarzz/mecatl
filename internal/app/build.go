@@ -212,6 +212,11 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	}
 	logMCPInventory(mcpInventory)
 
+	// The command lister backs ListCommands (the TUI palette). It reuses the SAME
+	// expander build the engine consumes, so the palette offers exactly the
+	// commands a "/<cmd>" prompt would expand. nil when commands are disabled.
+	commandLister := buildCommandLister(cfg, mcpProvider)
+
 	svcCfg := server.Config{
 		Engine:        engine,
 		Store:         store,
@@ -230,6 +235,9 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// resolves the same registry for the Task tool), so this re-resolution is
 		// cheap and keeps the snapshot a pure read at request time.
 		Agents: agentSnapshot(cfg, resolveAgentRegistry(ctx, cfg)),
+		// ListCommands palette discovery: a workspace-aware lister over the same
+		// command expander build the engine uses. nil disables the RPC (empty list).
+		Commands: commandLister,
 	}
 	applyTeamConfig(&svcCfg, cfg, provider, mainMgr)
 
@@ -365,6 +373,51 @@ func buildCommandExpander(cfg Config, mcpProvider mcp.Provider) prompt.CommandEx
 		// File-backed commands win on a name collision (listed first).
 		return prompt.NewMultiExpander(dirExp, mcpExp)
 	}
+}
+
+// buildCommandLister builds the server.CommandLister backing the ListCommands
+// RPC (the TUI palette). It reuses buildCommandExpander — the SAME expander the
+// engine consumes on the run path — so the palette enumerates exactly the
+// commands a "/<cmd>" prompt would expand. It returns nil (RPC yields an empty
+// list) when the expander cannot enumerate, i.e. it is the NoopExpander (commands
+// disabled) or does not implement prompt.CommandLister. The lister opens a fresh
+// osfs Workspace per request rooted at the requested workspace, so discovery
+// reflects the CURRENT command files on disk (not a startup snapshot).
+func buildCommandLister(cfg Config, mcpProvider mcp.Provider) server.CommandLister {
+	exp := buildCommandExpander(cfg, mcpProvider)
+	lister, ok := exp.(prompt.CommandLister)
+	if !ok {
+		return nil
+	}
+	if _, isNoop := exp.(prompt.NoopExpander); isNoop {
+		// The NoopExpander lists nothing; skip the RPC wiring entirely so the
+		// palette stays empty without a per-request workspace open.
+		return nil
+	}
+	return commandListerFunc(func(ctx context.Context, root string) ([]server.Command, error) {
+		ws, err := osfs.NewWorkspace(root)
+		if err != nil {
+			return nil, fmt.Errorf("open workspace %q: %w", root, err)
+		}
+		cmds, err := lister.List(ctx, ws)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]server.Command, 0, len(cmds))
+		for _, c := range cmds {
+			out = append(out, server.Command{Name: c.Name, Description: c.Description})
+		}
+		return out, nil
+	})
+}
+
+// commandListerFunc adapts a function to the server.CommandLister interface, the
+// same lightweight-adapter idiom mcpSourceProber uses for its prober closure.
+type commandListerFunc func(ctx context.Context, root string) ([]server.Command, error)
+
+// List implements server.CommandLister.
+func (f commandListerFunc) List(ctx context.Context, root string) ([]server.Command, error) {
+	return f(ctx, root)
 }
 
 // buildDirCommandExpander returns the file-backed slash-command expander, or nil

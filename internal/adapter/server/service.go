@@ -73,6 +73,16 @@ type Config struct {
 	// process) and fail-soft: on any failure the Service falls back to the cached
 	// snapshot so the panel always renders.
 	MCPSourceProber func(ctx context.Context) []source.SourceInfo
+	// Commands lists the available slash commands for a workspace, backing the
+	// ListCommands RPC (the client's in-input command palette). It is the
+	// composition-injected discovery seam: the composition root (internal/app)
+	// closes over the SAME command expander it builds for the run path and the
+	// workspace factory, so the palette offers exactly the commands a "/<cmd>"
+	// prompt would expand. Optional and nil-safe: when nil (command expansion
+	// disabled, or no expander enumerates), ListCommands returns an empty list.
+	// It is read-only and called per request (discovery is cheap file scanning).
+	Commands CommandLister
+
 	// Agents is the resolved agent-definition snapshot taken at startup. It backs
 	// ListAgents and is a pure read of this snapshot (no live discovery). The
 	// composition root (internal/app) resolves the registry once and projects each
@@ -475,4 +485,43 @@ func (s *Service) ListToolHiveGroups(ctx context.Context) []string {
 // It is a pure read of the injected snapshot; no live discovery.
 func (s *Service) ListAgents(_ context.Context) []*mecatlv1.AgentInfo {
 	return s.cfg.Agents
+}
+
+// --- Slash command discovery -------------------------------------------------
+
+// Command is the surface-agnostic listing metadata for one slash command (name +
+// short description), mirroring prompt.Command. The Service exposes its own type
+// so the wire adapters and the composition seam (CommandLister) need not import
+// the prompt domain package directly.
+type Command struct {
+	// Name is the command's invocation name (without the leading "/").
+	Name string
+	// Description is a short, capped one-line summary for the palette.
+	Description string
+}
+
+// CommandLister enumerates the slash commands available under a workspace root.
+// It is the composition-injected discovery seam backing ListCommands: the
+// composition root supplies an implementation that closes over the run-path
+// command expander and the workspace factory, so the palette and the run path
+// agree on which commands exist. It is read-only.
+type CommandLister interface {
+	// List returns the commands discovered under root, de-duplicated by name and
+	// name-sorted, or an error on a genuine discovery fault.
+	List(ctx context.Context, root string) ([]Command, error)
+}
+
+// ListCommands returns the available slash commands for the given workspace
+// root. An empty root, a nil lister (command expansion disabled), or a lister
+// that enumerates nothing all yield an empty slice. A discovery fault from the
+// lister is returned as ErrInternal so the wire adapters surface it distinctly.
+func (s *Service) ListCommands(ctx context.Context, workspace string) ([]Command, error) {
+	if s.cfg.Commands == nil || workspace == "" {
+		return nil, nil
+	}
+	cmds, err := s.cfg.Commands.List(ctx, workspace)
+	if err != nil {
+		return nil, fmt.Errorf("%w: list commands: %v", ErrInternal, err)
+	}
+	return cmds, nil
 }

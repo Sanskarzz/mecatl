@@ -90,6 +90,7 @@ func run(args []string) error {
 		Session: &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: client.ModeFromString(cfg.mode)},
 		Conv:    cl,
 		MCP:     cl,
+		Cmds:    cl,
 		Theme:   th,
 		Server:  target,
 		// Model is best-effort display only. For an EXTERNAL --server it reflects
