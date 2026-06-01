@@ -3,10 +3,13 @@
 - Status: Accepted
 - Date: 2026-05-30
 - Scope: Phase 1 (core loop) + Phase 2 (fidelity — diff blocks, subagent/team/hook
-  projection) + Phase 3 bounded pieces (commands, set_mode, load — see "Phase 3
-  (bounded)"). The Phase 3 long-tail (fs/\* delegation, governance-rule persistence,
-  image/audio) remains (see "Deferred"). The hook-call-id veto (issue #6) is now
-  DONE — a blocked PreToolUse veto keys a `failed` `tool_call_update` onto its card.
+  projection) + Phase 3 bounded pieces (commands, set_mode, load, **fs/\* file-I/O
+  delegation** — see "Phase 3 (bounded)"). The Phase 3 long-tail
+  (governance-rule persistence, image/audio, grep-over-buffers, fs/\* on resume)
+  remains (see "Deferred"). The hook-call-id veto (issue #6) is now DONE — a blocked
+  PreToolUse veto keys a `failed` `tool_call_update` onto its card. **fs/\* delegation
+  (issue #2) is now DONE (bounded hybrid)** — file Read/Write flow through the editor's
+  buffers when the client advertises the capability.
 
 ## Context
 
@@ -54,10 +57,13 @@ outbound `request_permission` and correlates the reply).
    response correlation (a pending-id → channel map) for `request_permission`.
 
 4. **Four scoping decisions taken this phase:**
-   - **fs/\* delegation DEFERRED.** We advertise `clientCapabilities` are
-     unused and rely on mecatl's OWN `osfs` workspace rooted at the session
-     `cwd`; the agent does not call the client's `fs/read_text_file` /
-     `fs/write_text_file`. (We do not depend on the client filesystem at all.)
+   - **fs/\* delegation** — DEFERRED in Phase 1; **now DONE as a bounded hybrid in
+     Phase 3** (issue #2 — see "Phase 3 (bounded)" §4). The client's
+     `clientCapabilities` are now DECODED and consulted: when the client advertises
+     BOTH `fs.readTextFile` && `fs.writeTextFile`, a per-session workspace routes file
+     Read/Write through the editor's buffers (`fs/read_text_file` /
+     `fs/write_text_file`); otherwise the OWN `osfs` workspace rooted at the session
+     `cwd` is used (the pre-delegation behavior, still the fallback).
    - **`allow_always` LEARNS a per-session rule** (issue #3 — see "Learned
      permissions" below). It maps to `VerdictAllowAlways`, distinct from
      `allow_once` (`VerdictAllowOnce`); the harness records a narrow
@@ -89,6 +95,12 @@ outbound `request_permission` and correlates the reply).
 - `modes`: the session reflects mecatl's `default`/`plan`/`acceptEdits` modes; the
   `currentModeId` is the session's CURRENT mode (Phase 3 — was always `default`),
   and `session/set_mode` switches between them.
+- **CLIENT capabilities are now decoded + consulted** (Phase 3 — `clientCapabilities`
+  was previously an unused `json.RawMessage`). The agent reads
+  `clientCapabilities.fs.readTextFile` and `.writeTextFile` from the `initialize`
+  REQUEST to decide whether to delegate file I/O. This is a property of the request,
+  NOT something the agent advertises back, so it does NOT appear in the response's
+  `agentCapabilities`. BOTH must be true to delegate (see "Phase 3 (bounded)" §4).
 
 ## Event projection (Phase 1 + Phase 2)
 
@@ -232,6 +244,90 @@ wiring.
    NOT replayed. Replay is synchronous within the load handler, so the notifications
    are flushed before the load response returns, and it is idempotent — a repeated
    load simply re-streams the same transcript, keyed by tool-call id.
+
+4. **fs/\* file-I/O delegation (issue #2) — a bounded HYBRID.** When the client
+   advertises BOTH `fs.readTextFile` && `fs.writeTextFile` at `initialize`, file
+   Read/Write for that connection's sessions flow through the editor's buffers
+   (`fs/read_text_file` / `fs/write_text_file`) instead of touching disk directly — so
+   a model edit lands in the editor's in-memory buffer (including unsaved changes) and
+   the agent's view and the editor's view never diverge **on the mutation path**.
+
+   - **Why a hybrid, not "everything through fs/\*".** ACP's filesystem surface is
+     ONLY `fs/read_text_file` / `fs/write_text_file` — there is no `fs/list`,
+     `fs/stat`, or `fs/grep`. So the per-session `fsWorkspace` (in
+     `internal/adapter/acp/fsworkspace.go`, implementing `tool.Workspace`) is a hybrid:
+     **Read/Write are DELEGATED** through fs/\*; **Root/Stat/Glob/Grep are COMPOSED**
+     from an `osfs.Workspace` rooted at the SAME session cwd (they read the local
+     on-disk tree); the **Edit read-ledger** (`RecordRead`/`WasReadUnchanged`) is
+     SYNTHESIZED locally over the delegated reads — the fingerprint is the sha256 of
+     the `fs/read` content, so Edit's read-before-edit-and-unchanged invariant tracks
+     the editor's BUFFER (strictly better than osfs for an editor session). The
+     ledger has its OWN mutex (read-only dispatch fires concurrent fs/read Calls; the
+     ACP `Conn` is already concurrency-safe, as `request_permission` proves).
+
+   - **Require BOTH read AND write.** A read-only-delegating workspace would read the
+     editor's buffers but still write to disk — re-introducing exactly the buffer/disk
+     divergence delegation exists to remove. Both-or-neither → otherwise `osfs`.
+
+   - **Path confinement BEFORE delegation (stated honestly — NOT os.Root-grade).**
+     The model is UNTRUSTED even though the editor is trusted, so a session-relative
+     tool path is confined BEFORE it is joined onto the EvalSymlinks-resolved `Root()`
+     and handed to the editor. Two layers: (1) LEXICAL — reject absolute paths and any
+     `..` that climbs out of root after `Clean` (the same lexical rule osfs applies);
+     (2) SYMLINK (best-effort, on the on-disk tree) — `EvalSymlinks` the deepest
+     EXISTING ancestor of the joined target (resolving the existing parent for a
+     buffer-only/new leaf) and re-verify the resolved real path is still within
+     `Root()`, rejecting if it escapes. This defends against a model creating an
+     in-workspace symlink (`ln -s /etc/passwd evil` via Bash) and then reading/writing
+     `evil`. It is NOT os.Root-grade and does NOT "mirror osfs": osfs routes every op
+     through `*os.Root`, which refuses symlink traversal at the kernel level on a real
+     path; this is a best-effort filesystem-side re-confinement (the fs/\* target may be
+     a buffer-only path with no real leaf to open as an os.Root). The editor is a
+     trusted-local process and owns final filesystem policy; this layer rejects the
+     obviously-escaping shapes the untrusted model can construct. Each fs/\* `conn.Call`
+     (read AND write) is also bounded by a per-call timeout (`fsCallTimeout`, 30s) so a
+     wedged editor cannot hang the turn indefinitely (CWE-400).
+
+   - **Write integrity — Stat is buffer-aware for EXISTENCE.** The Write tool uses a
+     not-exist `Stat` to mean "new file, no read-before-overwrite required". A file may
+     exist ONLY as an unsaved editor buffer (never written to disk), so a disk-only Stat
+     would report it not-exist and Write would CLOBBER the unsaved buffer through
+     `fs/write_text_file` with NO unchanged-since check — the exact divergence this
+     feature exists to prevent. So `fsWorkspace.Stat` is disk-primary but, when disk
+     reports not-exist, probes the editor via `fs/read_text_file`: a successful read →
+     report EXISTS (Write's read-before-overwrite gate engages); a CLEAN editor
+     not-found → `ErrNotExist` (genuinely new, Write allowed); an AMBIGUOUS fs/read
+     fault → FAIL SAFE to EXISTS (force the gate rather than allow an unguarded write).
+     ACP defines no canonical not-found code for fs/read, so the clean-not-found
+     classification matches conservative message markers (`no such file`, `not found`,
+     `does not exist`, `enoent`, `cannot find`) and treats everything else — including a
+     timeout — as ambiguous.
+
+   - **The wiring seam — a per-session Workspace OVERRIDE registry.** The shared
+     `server.WorkspaceFactory func(root) tool.Workspace` has no per-connection/-session
+     context (and is consumed by gRPC/HTTP too), so it was NOT widened. Instead the
+     `Service` gained `SetSessionWorkspace(id, ws)` + a `sessionWorkspaces` map that
+     `StartRun` PREFERS over the factory, evicted by `CloseSession`/`Close` — mirroring
+     the existing per-session-engine registry EXACTLY. The ACP adapter registers an
+     `fsWorkspace` (closing over the ACP `Conn` + `sessionId`) at `session/new` when the
+     capability is present, and tracks the session for teardown on disconnect. gRPC/HTTP
+     never call `SetSessionWorkspace`, so their behavior is unchanged.
+
+   - **Residual divergence (ACCEPTED + documented).** Grep/Glob read DISK, not unsaved
+     buffers (Stat's EXISTENCE check is buffer-aware — see above — but its metadata is
+     still disk). So a model can grep stale (on-disk) text. This is acceptable because
+     the Edit invariant forces a re-read-THROUGH-fs/\* before any edit, so a stale grep
+     hit can never become a stale EDIT — the divergence is confined to search/discovery
+     and never reaches the mutation path. This matches reference ACP agents (which grep
+     the filesystem and delegate read/write to buffers); eliminating it would need an
+     ACP file-list capability that does not exist, or an O(files) `fs/read` storm per
+     Grep. Grep-over-buffers is a tracked follow-up.
+
+   - **Asymmetry: `session/load` uses osfs, NOT fs/\*.** The fs delegation override is
+     per-session connection state established at `session/new`; a loaded session does
+     not (yet) re-establish it, so a resumed session uses the `osfs` fallback. This
+     mirrors the existing client-MCP-on-load asymmetry (load rejects client MCP).
+     Only `session/new` delegates; fs/\* on resume is a tracked follow-up.
 
 ## Client streaming-HTTP MCP
 
@@ -389,11 +485,21 @@ handler that issues an outbound `Call` (a `session/prompt` issuing
   so a re-attaching editor rebuilds the transcript. Open-before-update preserved by
   history order; user prompts / reasoning blob / permission-ask deliberately not
   replayed; idempotent re-stream keyed by tool-call id.
+- **fs/\* file-I/O delegation (issue #2)** — a bounded hybrid: Read/Write delegated
+  through `fs/read_text_file`/`fs/write_text_file` (gated on the client advertising
+  BOTH caps), the Edit read-ledger synthesized buffer-keyed over the delegated reads,
+  Stat/Glob/Grep composed from an osfs view at the same root; per-session
+  `Service.SetSessionWorkspace` override (no `WorkspaceFactory` signature change);
+  osfs fallback when caps absent or on `session/load`. See "Phase 3 (bounded)" §4.
 
 ## Deferred (Phase 3 long-tail)
 
-- **fs/\* delegation** (`readTextFile`/`writeTextFile`) — a client-backed
-  `tool.Workspace`. mecatl still uses its OWN `osfs` rooted at the session `cwd`.
+- **Grep/Glob over editor buffers** — the fs/\* hybrid (issue #2, DONE) delegates
+  Read/Write but searches DISK (ACP has no `fs/list`/`fs/grep`). Search-over-unsaved-
+  buffers is a tracked follow-up; the mutation path is already buffer-consistent.
+- **fs/\* delegation on `session/load`** — a resumed session uses the osfs fallback;
+  re-establishing the per-session fs override on resume is a tracked follow-up
+  (parallels the client-MCP-on-load asymmetry).
 - **DURABLE learned permissions** (cross-restart) — the `allow_always` rule store
   is in-memory and per-session today (issue #3, see "Learned permissions"); a
   durable store that survives process restart is a tracked follow-up.

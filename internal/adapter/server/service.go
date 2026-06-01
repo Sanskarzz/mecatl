@@ -188,6 +188,15 @@ type Service struct {
 	// disconnects (closeTrackedSessions), and Service.Close drains the rest on
 	// shutdown — so no speculative cap is warranted.
 	sessionEngines map[session.SessionID]*sessionEngine
+	// sessionWorkspaces holds per-session Workspace OVERRIDES. When an entry is
+	// present for a session id, StartRun uses it instead of building one from the
+	// shared Workspaces factory. It mirrors sessionEngines exactly: registered by a
+	// surface adapter (the ACP adapter, to route file I/O through the editor's
+	// fs/* buffers), preferred by StartRun, and evicted by CloseSession (editor
+	// disconnect) / drained by Close (shutdown). It is bounded by connection
+	// lifetime, not a count — same rationale as sessionEngines. The gRPC/HTTP
+	// surfaces never register an override, so their behavior is unchanged.
+	sessionWorkspaces map[session.SessionID]tool.Workspace
 }
 
 // sessionEngine couples a per-session engine (built over that session's
@@ -233,10 +242,11 @@ func NewService(cfg Config) (*Service, error) {
 		cfg.MaxTeams = defaultMaxTeams
 	}
 	return &Service{
-		cfg:            cfg,
-		runs:           make(map[session.SessionID]*runState),
-		teams:          make(map[string]*teamState),
-		sessionEngines: make(map[session.SessionID]*sessionEngine),
+		cfg:               cfg,
+		runs:              make(map[session.SessionID]*runState),
+		teams:             make(map[string]*teamState),
+		sessionEngines:    make(map[session.SessionID]*sessionEngine),
+		sessionWorkspaces: make(map[session.SessionID]tool.Workspace),
 	}, nil
 }
 
@@ -316,6 +326,20 @@ func (s *Service) CreateSessionWithMCP(ctx context.Context, workspace string, mo
 	return sess, nil
 }
 
+// SetSessionWorkspace registers a per-session Workspace OVERRIDE for id, so a
+// subsequent StartRun uses ws instead of building one from the shared Workspaces
+// factory. It is the seam the ACP adapter uses to route a session's file I/O
+// through the editor's fs/* buffers. A second call for the same id replaces the
+// override. The override is evicted by CloseSession (and drained by Close), so
+// the caller MUST pair it with CloseSession on the owning connection's teardown
+// (the ACP adapter tracks the session and does this on disconnect). The
+// gRPC/HTTP surfaces never call this, so their workspace path is unchanged.
+func (s *Service) SetSessionWorkspace(id session.SessionID, ws tool.Workspace) {
+	s.mu.Lock()
+	s.sessionWorkspaces[id] = ws
+	s.mu.Unlock()
+}
+
 // CloseSession tears down the per-session engine registered for id (if any) and
 // removes it from the registry. It is idempotent: an id with no per-session
 // engine is a no-op. The ACP adapter calls it when an editor disconnects so a
@@ -343,6 +367,9 @@ func (s *Service) CloseSession(id session.SessionID) {
 	if ok {
 		delete(s.sessionEngines, id)
 	}
+	// Drop any per-session workspace override too: it closes over the (now
+	// disconnecting) connection, so it must not outlive the session.
+	delete(s.sessionWorkspaces, id)
 	s.mu.Unlock()
 	if ok && se.close != nil {
 		_ = se.close()
@@ -356,6 +383,10 @@ func (s *Service) Close() {
 	s.mu.Lock()
 	engines := s.sessionEngines
 	s.sessionEngines = make(map[session.SessionID]*sessionEngine)
+	// Drop all per-session workspace overrides on shutdown; they hold no resources
+	// of their own (the underlying connection is closed separately) but must not
+	// linger past the Service.
+	s.sessionWorkspaces = make(map[session.SessionID]tool.Workspace)
 	s.mu.Unlock()
 	for _, se := range engines {
 		if se.close != nil {
@@ -457,15 +488,20 @@ func (s *Service) StartRun(ctx context.Context, id session.SessionID, text strin
 	if err != nil {
 		return nil, err
 	}
-	ws := s.cfg.Workspaces(sess.Workspace)
-	// Prefer a per-session engine (built over the session's client-provided MCP
+	// Prefer a per-session workspace override (e.g. the ACP fs/* buffer workspace)
+	// when one is registered; otherwise build one from the shared factory. AND
+	// prefer a per-session engine (built over the session's client-provided MCP
 	// servers) when one is registered; otherwise drive the shared engine.
 	engine := s.cfg.Engine
 	s.mu.Lock()
 	if se, ok := s.sessionEngines[id]; ok {
 		engine = se.engine
 	}
+	ws := s.sessionWorkspaces[id]
 	s.mu.Unlock()
+	if ws == nil {
+		ws = s.cfg.Workspaces(sess.Workspace)
+	}
 	run := engine.Run(ctx, sess, ws, text)
 	s.register(id, run, sess)
 	return run, nil

@@ -17,13 +17,23 @@
 // composition root (cmd/mecated, behind --acp). It never imports contracts/gen:
 // ACP carries its own JSON, decoupled from the proto.
 //
-// SCOPE — this is Phase 1 (the core loop). The following are DEFERRED to later
-// phases and documented in docs/adr/0001-acp-adapter.md:
-//   - fs/* delegation (readTextFile/writeTextFile) — we advertise both false and
-//     use mecatl's own osfs workspace rooted at the session cwd.
-//   - allow_always behaves as allow_once (no rule persistence yet).
-//   - diff content blocks for edits (we send plain text tool_call_update content).
-//   - session/load (loadSession:false), session modes/config, slash commands.
-//   - full-fidelity projection of turn.*/hook/compaction/subagent.*/team.* events
-//     (these are dropped or folded into a thought/message chunk this phase).
+// fs/* DELEGATION (issue #2) — when the CLIENT advertises BOTH fs.readTextFile and
+// fs.writeTextFile at initialize, a per-session workspace (fsworkspace.go) routes
+// file Read/Write through the editor's buffers (fs/read_text_file /
+// fs/write_text_file) instead of disk; Stat/Glob/Grep are composed from a local
+// osfs view at the same root, and the Edit read-ledger is synthesized buffer-keyed
+// over the delegated reads. When the caps are absent (or on session/load) it falls
+// back to the osfs workspace rooted at the session cwd. See the ADR for the bounded
+// hybrid's residual (grep sees disk) and the load asymmetry.
+//
+// SCOPE — the following are DEFERRED to later phases and documented in
+// docs/adr/0001-acp-adapter.md (Phase 2/3 landed diff blocks, allow_always rule
+// learning, session/load + replay, modes, and slash commands — see the ADR):
+//   - grep/glob over editor BUFFERS (the fs/* hybrid searches disk) and fs/*
+//     delegation on session/load (a resumed session uses osfs).
+//   - DURABLE / broader-granularity learned permissions (today: in-memory,
+//     per-session, tool + exact-pattern only).
+//   - image/audio prompt content (promptCapabilities stays text-only).
+//   - full-fidelity projection of turn.*/compaction events (dropped or folded
+//     into a thought/message chunk).
 package acp

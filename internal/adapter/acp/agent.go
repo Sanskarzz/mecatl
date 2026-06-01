@@ -44,6 +44,15 @@ type Agent struct {
 	// configured). When false, loadSession is advertised false in initialize and
 	// session/load returns an error. The composition root sets it via WithResume.
 	resume bool
+
+	// fsDelegation records whether the CLIENT advertised BOTH fs.readTextFile and
+	// fs.writeTextFile at initialize. When true, session/new registers a per-session
+	// workspace that routes file Read/Write through the editor's buffers (fs/* calls)
+	// instead of touching disk; when false (or initialize omitted), sessions use the
+	// shared osfs workspace (the pre-delegation behavior). It is set once in
+	// handleInitialize, which the ACP handshake guarantees precedes any session/new,
+	// and only read thereafter on the same dispatch path — no lock needed.
+	fsDelegation bool
 }
 
 // AgentOption configures an Agent at construction.
@@ -158,6 +167,13 @@ func (a *Agent) handleInitialize(params json.RawMessage) (any, error) {
 			return nil, newMethodErr(codeInvalidParams, "acp: initialize: "+err.Error())
 		}
 	}
+	// Decide file-I/O delegation from the CLIENT's advertised capabilities. Require
+	// BOTH read and write: a read-only-delegating workspace would read the editor's
+	// buffers but still write to disk, re-introducing exactly the buffer/disk
+	// divergence delegation exists to remove. Absent caps leave this false (osfs).
+	// This is a property of the request, NOT something the agent advertises back —
+	// so it does not appear in the initialize response's agentCapabilities.
+	a.fsDelegation = req.ClientCapabilities.FS.ReadTextFile && req.ClientCapabilities.FS.WriteTextFile
 	return initializeResponse{
 		ProtocolVersion: protocolVersion,
 		AgentCapabilities: agentCapabilities{
@@ -199,6 +215,30 @@ func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (a
 	// with no client MCP uses the shared engine and is not tracked.
 	if len(specs) > 0 {
 		a.trackSession(string(sess.ID))
+	}
+	// When the client advertised fs.readTextFile && fs.writeTextFile, register a
+	// per-session workspace that routes file Read/Write through the editor's
+	// buffers (fs/* calls) for THIS session. It composes an osfs workspace rooted
+	// at the same cwd for Root/Stat/Glob/Grep and overrides Read/Write plus the
+	// read-ledger to delegate. The override is keyed by session id on the shared
+	// Service (mirroring the per-session engine registry) and torn down on
+	// disconnect alongside the engines. Registration is independent of client MCP:
+	// it applies to every session/new while delegating, so we also track the
+	// session for teardown even when it carries no MCP servers.
+	if a.fsDelegation {
+		ws, werr := newFSWorkspace(a.conn, string(sess.ID), sess.Workspace)
+		if werr != nil {
+			// A bad cwd (osfs could not root there) is a session-creation failure: the
+			// session exists but its workspace cannot be built, so fail loudly rather
+			// than silently falling back to disk under a client that asked for buffers.
+			return nil, newMethodErr(codeInvalidParams, "acp: session/new: "+werr.Error())
+		}
+		a.svc.SetSessionWorkspace(sess.ID, ws)
+		if len(specs) == 0 {
+			// Not already tracked via the MCP path; track now so the override is
+			// evicted on disconnect.
+			a.trackSession(string(sess.ID))
+		}
 	}
 	// Advertise the slash commands for this workspace as an available_commands_update
 	// so the editor can offer them in its input palette. Best-effort: a discovery

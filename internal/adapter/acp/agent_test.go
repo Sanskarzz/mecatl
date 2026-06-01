@@ -21,6 +21,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
+	toolsadapter "github.com/stacklok/mecatl/internal/adapter/tools"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/port"
@@ -106,6 +107,17 @@ type editor struct {
 	pend  map[int64]chan rpcMsg
 	notes chan rpcMsg // session/update notifications
 	reqs  chan rpcMsg // agent-initiated requests (request_permission)
+
+	// fsBuffers is the editor's in-memory buffer store for fs/* delegation tests.
+	// When non-nil, the readLoop answers fs/read_text_file / fs/write_text_file
+	// requests from it (instead of routing them to reqs) and records the call
+	// counts, so a test can assert delegation happened and disk was untouched. A
+	// fs/read for an unseeded path returns fsDefault (a stable body) so the Edit
+	// read-ledger has consistent content across its RecordRead + re-read.
+	fsBuffers map[string]string
+	fsDefault string
+	fsReads   int
+	fsWrites  int
 }
 
 type rpcMsg struct {
@@ -149,6 +161,41 @@ func (e *editor) respond(id json.RawMessage, result any) {
 	e.writeFrame(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 }
 
+// handleFS answers an agent fs/read_text_file or fs/write_text_file request from
+// the editor's in-memory buffers, recording the call. fs/read returns the stored
+// buffer (or fsDefault if unseeded); fs/write stores the content.
+func (e *editor) handleFS(m rpcMsg) {
+	var req struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	_ = json.Unmarshal(m.Params, &req)
+	e.mu.Lock()
+	switch m.Method {
+	case "fs/read_text_file":
+		e.fsReads++
+		content, ok := e.fsBuffers[req.Path]
+		if !ok {
+			content = e.fsDefault
+		}
+		e.mu.Unlock()
+		e.respond(m.ID, map[string]any{"content": content})
+	case "fs/write_text_file":
+		e.fsWrites++
+		e.fsBuffers[req.Path] = req.Content
+		e.mu.Unlock()
+		e.respond(m.ID, map[string]any{})
+	default:
+		e.mu.Unlock()
+	}
+}
+
+func (e *editor) fsCounts() (reads, writes int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.fsReads, e.fsWrites
+}
+
 // readLoop reads agent frames, routing responses to pending calls, notifications
 // to the notes channel, and agent requests to the reqs channel.
 func (e *editor) readLoop() {
@@ -176,6 +223,10 @@ func (e *editor) readLoop() {
 				ch <- m
 			}
 		case m.Method != "" && len(m.ID) > 0: // agent request
+			if e.fsBuffers != nil && (m.Method == "fs/read_text_file" || m.Method == "fs/write_text_file") {
+				e.handleFS(m)
+				continue
+			}
 			e.reqs <- m
 		case m.Method != "": // notification
 			e.notes <- m
@@ -457,6 +508,100 @@ func TestEndToEndEditDiffBlock(t *testing.T) {
 	}
 
 	_ = editorToAgentW.Close()
+}
+
+// TestEndToEndFSDelegation drives the capability-gated fs/* delegation end to
+// end. With clientCapabilities.fs.{readTextFile,writeTextFile}=true at
+// initialize, a Read-then-Edit turn must flow through the editor's buffers
+// (fs/read_text_file + fs/write_text_file) and NOT touch disk. With the caps
+// absent, the same turn must issue NO fs/* calls (the osfs fallback).
+func TestEndToEndFSDelegation(t *testing.T) {
+	const seed = "package x\nvar A = 1\n"
+
+	runScenario := func(t *testing.T, caps bool) (reads, writes int, diskTouched bool, root string) {
+		t.Helper()
+		// Real Read + Edit tools so the engine exercises the Workspace contract
+		// (RecordRead on Read, WasReadUnchanged/Read/Write on Edit).
+		llm := mockllm.New(
+			mockllm.ToolCallTurn(call("c1", "Read", `{"path":"main.go"}`)),
+			mockllm.ToolCallTurn(call("c2", "Edit", `{"path":"main.go","old_string":"var A = 1","new_string":"var A = 2"}`)),
+			mockllm.TextTurn("done"),
+		)
+		svc := newService(t, llm, allowRules(), toolsadapter.ReadTool{}, toolsadapter.EditTool{})
+		root = t.TempDir()
+		// Seed the file on DISK so that, in the caps-absent (osfs) scenario, Read+Edit
+		// have a real file to operate on. In the caps-present scenario the editor
+		// buffer (fsDefault) supplies the content and disk must stay as-is.
+		if err := os.WriteFile(filepath.Join(root, "main.go"), []byte(seed), 0o644); err != nil {
+			t.Fatalf("seed disk: %v", err)
+		}
+
+		agentStdinR, editorToAgentW := io.Pipe()
+		agentStdoutR, agentStdoutW := io.Pipe()
+		a := acp.NewAgent(svc)
+		conn := acp.NewConn(agentStdinR, agentStdoutW, a.Handle)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		go func() { _ = a.Serve(ctx, conn) }()
+
+		e := &editor{t: t, toAgent: editorToAgentW, fromAgnt: bufio.NewReader(agentStdoutR),
+			pend: map[int64]chan rpcMsg{}, notes: make(chan rpcMsg, 64), reqs: make(chan rpcMsg, 8),
+			fsBuffers: map[string]string{}, fsDefault: seed}
+		go e.readLoop()
+
+		initParams := map[string]any{"protocolVersion": 1}
+		if caps {
+			initParams["clientCapabilities"] = map[string]any{
+				"fs": map[string]any{"readTextFile": true, "writeTextFile": true},
+			}
+		}
+		e.call("initialize", initParams)
+
+		res := e.call("session/new", map[string]any{"cwd": root, "mcpServers": []any{}})
+		var ns struct {
+			SessionID string `json:"sessionId"`
+		}
+		if err := json.Unmarshal(res, &ns); err != nil || ns.SessionID == "" {
+			t.Fatalf("session/new: %s err=%v", res, err)
+		}
+
+		out := e.call("session/prompt", map[string]any{"sessionId": ns.SessionID,
+			"prompt": []any{map[string]any{"type": "text", "text": "fix it"}}})
+		var pr struct {
+			StopReason string `json:"stopReason"`
+		}
+		if err := json.Unmarshal(out, &pr); err != nil || pr.StopReason != "end_turn" {
+			t.Fatalf("prompt stopReason %q err %v", pr.StopReason, err)
+		}
+
+		reads, writes = e.fsCounts()
+		// Did disk change? In the caps-present case the edit went to the buffer, so
+		// disk must still equal seed.
+		onDisk, _ := os.ReadFile(filepath.Join(root, "main.go"))
+		diskTouched = string(onDisk) != seed
+		_ = editorToAgentW.Close()
+		return reads, writes, diskTouched, root
+	}
+
+	t.Run("caps present -> delegate, disk untouched", func(t *testing.T) {
+		reads, writes, diskTouched, root := runScenario(t, true)
+		if reads == 0 {
+			t.Errorf("expected fs/read_text_file calls, got 0")
+		}
+		if writes == 0 {
+			t.Errorf("expected fs/write_text_file calls, got 0")
+		}
+		if diskTouched {
+			t.Errorf("disk file %s was modified; the edit must flow through the editor buffer", filepath.Join(root, "main.go"))
+		}
+	})
+
+	t.Run("caps absent -> osfs fallback, no fs/* calls", func(t *testing.T) {
+		reads, writes, _, _ := runScenario(t, false)
+		if reads != 0 || writes != 0 {
+			t.Errorf("expected no fs/* calls without caps, got reads=%d writes=%d", reads, writes)
+		}
+	})
 }
 
 // fakeSessionEngine records the specs it received and returns a stub engine plus

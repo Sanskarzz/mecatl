@@ -23,14 +23,37 @@ const (
 	methodRequestPermission = "session/request_permission" // agent -> client request
 	methodSessionSetMode    = "session/set_mode"           // client -> agent request
 	methodSessionLoad       = "session/load"               // client -> agent request
+	methodFSReadTextFile    = "fs/read_text_file"          // agent -> client request
+	methodFSWriteTextFile   = "fs/write_text_file"         // agent -> client request
 )
 
 // --- initialize --------------------------------------------------------------
 
 type initializeRequest struct {
-	ProtocolVersion    int             `json:"protocolVersion"`
-	ClientCapabilities json.RawMessage `json:"clientCapabilities,omitempty"`
-	ClientInfo         *implementation `json:"clientInfo,omitempty"`
+	ProtocolVersion    int                `json:"protocolVersion"`
+	ClientCapabilities clientCapabilities `json:"clientCapabilities"`
+	ClientInfo         *implementation    `json:"clientInfo,omitempty"`
+}
+
+// clientCapabilities is the subset of the ACP ClientCapabilities the agent
+// consults. The ACP schema nests the filesystem methods the client implements
+// under "fs": clientCapabilities.fs.readTextFile / .writeTextFile. mecatl reads
+// these to decide whether to DELEGATE file Read/Write through the editor's
+// buffers (fs/read_text_file, fs/write_text_file) instead of touching disk
+// directly. Unmodelled capability fields (e.g. terminal) decode to their zero
+// value and are ignored. An absent clientCapabilities (a non-conformant or
+// minimal client) leaves FS all-false, so the agent falls back to osfs.
+type clientCapabilities struct {
+	FS fsCapabilities `json:"fs"`
+}
+
+// fsCapabilities advertises which fs/* methods the CLIENT implements. The agent
+// delegates file I/O only when BOTH are true (read-only delegation would read
+// buffers but write disk, re-introducing the very divergence the delegation
+// fixes); otherwise it uses its own osfs workspace.
+type fsCapabilities struct {
+	ReadTextFile  bool `json:"readTextFile"`
+	WriteTextFile bool `json:"writeTextFile"`
 }
 
 type initializeResponse struct {
@@ -327,3 +350,37 @@ const (
 	outcomeSelected  = "selected"
 	outcomeCancelled = "cancelled"
 )
+
+// --- fs/read_text_file, fs/write_text_file (agent -> client) -----------------
+//
+// These are the outbound filesystem-delegation requests: when the client
+// advertised fs.readTextFile && fs.writeTextFile, the agent's per-session
+// workspace routes file Read/Write through the editor (so edits flow through its
+// in-memory buffers, including unsaved changes) instead of touching disk. The
+// path is ABSOLUTE — the ACP fs/* contract addresses real files — and the agent
+// confines a session-relative tool path under the session root BEFORE issuing
+// the call (the editor is trusted, the model is not). See fsworkspace.go.
+
+// fsReadTextFileRequest is the fs/read_text_file params. line/limit are omitted
+// (the agent reads whole-file; the Read tool does its own line slicing), so the
+// pointers are nil and elided.
+type fsReadTextFileRequest struct {
+	SessionID string `json:"sessionId"`
+	Path      string `json:"path"`
+	Line      *int   `json:"line,omitempty"`
+	Limit     *int   `json:"limit,omitempty"`
+}
+
+// fsReadTextFileResponse is the fs/read_text_file result: the file's text
+// content (the editor's buffer view).
+type fsReadTextFileResponse struct {
+	Content string `json:"content"`
+}
+
+// fsWriteTextFileRequest is the fs/write_text_file params: replace the file's
+// content via the editor. The response is empty/null.
+type fsWriteTextFileRequest struct {
+	SessionID string `json:"sessionId"`
+	Path      string `json:"path"`
+	Content   string `json:"content"`
+}
