@@ -107,8 +107,9 @@ func projectUpdate(ev session.Event) (any, bool) {
 		return projectTeam(ev)
 
 	default:
-		// turn.*, compaction, session.init, subagent.start, team.start, result,
-		// permission.ask: no session/update projection here.
+		// turn.*, compaction, session.init, subagent.start, team.start, team.tasks,
+		// result, permission.ask: no session/update projection here. (The shared task
+		// list is a TUI-overlay affordance, not an ACP editor card line.)
 		return nil, false
 	}
 }

@@ -140,6 +140,23 @@ func TestEventToMsgTeam(t *testing.T) {
 			TeamMsg{Kind: TeamEnd, ParentCallID: "t1", TeamID: "team-t1", Rounds: 3, Stop: "end_turn",
 				Usage: Usage{InputTokens: 4200, OutputTokens: 350}},
 		},
+		{
+			// The first-class team.tasks event carries the shared task list (no Member)
+			// and maps directly to the TeamTasks discriminant; the tasks decode
+			// id/state/assignee/deps.
+			"team.tasks snapshot",
+			&mecatlv1.Event{Type: "team.tasks", Team: &mecatlv1.Team{
+				ParentCallId: "t1", TeamId: "team-t1",
+				Tasks: []*mecatlv1.TeamTask{
+					{Id: "task-1", Description: "investigate", State: "completed", Assignee: "scout"},
+					{Id: "task-2", Description: "fix", State: "pending", Deps: []string{"task-1"}},
+				}}},
+			TeamMsg{Kind: TeamTasks, ParentCallID: "t1", TeamID: "team-t1",
+				Tasks: []TeamTask{
+					{ID: "task-1", Description: "investigate", State: "completed", Assignee: "scout"},
+					{ID: "task-2", Description: "fix", State: "pending", Deps: []string{"task-1"}},
+				}},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

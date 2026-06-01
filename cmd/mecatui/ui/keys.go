@@ -35,6 +35,13 @@ type keyMap struct {
 	// panel to re-probe LIVE MCP source status.
 	Refresh key.Binding
 
+	// Tasks flips the ctrl+a agents overlay from the roster to the shared team task
+	// sub-view (and back). Like Refresh it is a BARE 't' consulted ONLY inside the
+	// overlay (onAgentsRosterKey / the agentsTasks branch intercept before any idle
+	// open key), so it never collides with the textarea (blurred while the overlay
+	// is open) nor with any global control binding.
+	Tasks key.Binding
+
 	// Jump bindings for the windowed agent-team roster (tedious to traverse with
 	// ↑/↓ at the 20–32-member scale the overlay exists for): home/g jump to the
 	// first member, end/G to the last. Page up/down reuse ScrollU/ScrollD (pgup/
@@ -128,6 +135,10 @@ func defaultKeys() keyMap {
 		Refresh: key.NewBinding(
 			key.WithKeys("r"),
 			key.WithHelp("r", "refresh"),
+		),
+		Tasks: key.NewBinding(
+			key.WithKeys("t"),
+			key.WithHelp("t", "tasks"),
 		),
 		JumpTop: key.NewBinding(
 			key.WithKeys("home", "g"),

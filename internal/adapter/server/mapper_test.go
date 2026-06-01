@@ -253,6 +253,36 @@ func TestToProtoTable(t *testing.T) {
 			},
 		},
 		{
+			name: "team.tasks snapshot",
+			in: session.Event{Type: session.EvTeamTasks, Seq: 34, Turn: 1,
+				Team: &session.TeamPayload{ParentCallID: "p1", TeamID: "team-p1",
+					Tasks: []session.TeamTaskSnapshot{
+						{ID: "task-1", Description: "investigate", State: "completed", Assignee: "scout"},
+						{ID: "task-2", Description: "fix", State: "pending", Deps: []string{"task-1"}},
+					}}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				if got.GetType() != "team.tasks" {
+					t.Fatalf("event type = %q, want team.tasks", got.GetType())
+				}
+				tm := got.GetTeam()
+				if tm == nil || tm.GetMember() != "" {
+					t.Fatalf("team.tasks must carry no member: %+v", tm)
+				}
+				tasks := tm.GetTasks()
+				if len(tasks) != 2 {
+					t.Fatalf("tasks len = %d, want 2: %+v", len(tasks), tasks)
+				}
+				if tasks[0].GetId() != "task-1" || tasks[0].GetState() != "completed" ||
+					tasks[0].GetAssignee() != "scout" {
+					t.Errorf("task-1 mapping mismatch: %+v", tasks[0])
+				}
+				if tasks[1].GetId() != "task-2" || len(tasks[1].GetDeps()) != 1 ||
+					tasks[1].GetDeps()[0] != "task-1" {
+					t.Errorf("task-2 deps not preserved: %+v", tasks[1])
+				}
+			},
+		},
+		{
 			name: "compaction",
 			in:   session.Event{Type: session.EvCompaction, Seq: 8, Turn: 2, Text: "summary"},
 			assert: func(t *testing.T, got *mecatlv1.Event) {

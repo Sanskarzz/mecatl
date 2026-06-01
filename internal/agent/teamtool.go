@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/stacklok/mecatl/internal/port"
@@ -252,6 +253,7 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	// goroutine, so both the accumulation and emit run one-at-a-time even though
 	// member turns run concurrently — total needs no lock.
 	var total session.Usage
+	var lastTasks []session.TeamTaskSnapshot
 	sink := func(te TeamEvent) {
 		total = total.Add(memberEventUsage(te.Event))
 		if emit == nil {
@@ -259,6 +261,16 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 		}
 		if ev, ok := projectTeamEvent(string(call.ID), teamID, te); ok {
 			emit(ev)
+		}
+		// Project the shared task list as a first-class team.tasks event, but only
+		// when it CHANGED since the last snapshot. The de-dup is load-bearing:
+		// the sink fires for every member event (deltas, tool calls, turn ends), so
+		// emitting an unchanged task snapshot on each would flood the wire. A team
+		// has at most MaxTasks tasks, so the equality scan is cheap.
+		snap := projectTeamTasksSnapshot(tm.Tasks())
+		if !tasksEqual(snap, lastTasks) {
+			lastTasks = snap
+			emit(projectTeamTasks(string(call.ID), teamID, snap))
 		}
 	}
 
@@ -274,6 +286,10 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 			Rounds:       outcome.Rounds,
 			Stop:         teamStop(outcome),
 			Usage:        total,
+			// The terminal task snapshot always lands on team.end, so the task
+			// sub-view reflects the final state even if no member event followed the
+			// last task transition.
+			Tasks: projectTeamTasksSnapshot(tm.Tasks()),
 		}})
 	}
 
@@ -405,8 +421,9 @@ func projectTeamEvent(parentCallID, teamID string, te TeamEvent) (session.Event,
 	return session.Event{Type: session.EvTeamMember, Team: base}, true
 }
 
-// clampPreview normalises a forwarded text/preview into a single bounded line: it
-// collapses newlines/tabs to spaces (so a multi-line member body cannot break the
+// clampPreview normalises a forwarded text/preview (a member tool-call/result
+// Detail, a member's message Text, or a task Description) into a single bounded
+// line: it collapses newlines/tabs to spaces (so a multi-line body cannot break the
 // one-line stream rendering) and clamps to maxTeamPreview runes, appending an
 // ellipsis on overflow. It is rune-aware, so it never splits a multi-byte
 // character. This is the cap that keeps the fuller member content BOUNDED.
@@ -422,6 +439,62 @@ func clampPreview(s string) string {
 		return s
 	}
 	return strings.TrimRight(string(r[:maxTeamPreview]), " ") + "…"
+}
+
+// projectTeamTasksSnapshot maps the team's shared task list (team.Task copies) onto
+// the domain TeamTaskSnapshot projection carried on the event stream. The mapping
+// lives HERE (internal/agent), not in session: session must not import internal/team
+// (team imports session, never the reverse), so the team.Task→session.TeamTaskSnapshot
+// bridge belongs in the application layer. Descriptions pass through clampPreview
+// (the same cap every member-derived preview uses), and Deps are copied as []string.
+func projectTeamTasksSnapshot(tasks []team.Task) []session.TeamTaskSnapshot {
+	out := make([]session.TeamTaskSnapshot, 0, len(tasks))
+	for _, tk := range tasks {
+		deps := make([]string, 0, len(tk.Deps))
+		for _, d := range tk.Deps {
+			deps = append(deps, string(d))
+		}
+		out = append(out, session.TeamTaskSnapshot{
+			ID:          string(tk.ID),
+			Description: clampPreview(tk.Description),
+			State:       string(tk.State),
+			Assignee:    tk.Assignee,
+			Deps:        deps,
+		})
+	}
+	return out
+}
+
+// projectTeamTasks wraps a task snapshot in a first-class EvTeamTasks event — the
+// team-WIDE projection the client routes to the ctrl+a task sub-view. It carries no
+// Member (the task list is team-wide, not per-member), so it does not borrow the
+// per-member EvTeamMember envelope.
+func projectTeamTasks(parentCallID, teamID string, tasks []session.TeamTaskSnapshot) session.Event {
+	return session.Event{Type: session.EvTeamTasks, Team: &session.TeamPayload{
+		ParentCallID: parentCallID,
+		TeamID:       teamID,
+		Tasks:        tasks,
+	}}
+}
+
+// tasksEqual reports whether two task snapshots are equal on the fields that drive
+// the task sub-view (id / state / assignee / deps). It is the de-dup guard in run's
+// sink: a snapshot equal to the last emitted one is NOT re-sent, bounding wire
+// volume (the sink fires per member event). Description is excluded — it never
+// changes after CreateTask, so it cannot drive a spurious re-emit.
+func tasksEqual(a, b []session.TeamTaskSnapshot) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID || a[i].State != b[i].State || a[i].Assignee != b[i].Assignee {
+			return false
+		}
+		if !slices.Equal(a[i].Deps, b[i].Deps) {
+			return false
+		}
+	}
+	return true
 }
 
 // teamStop maps the team outcome to a terminal StopReason for EvTeamEnd: a

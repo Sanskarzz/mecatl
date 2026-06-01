@@ -150,6 +150,10 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 			Lead:     m.Lead,
 		})
 	}
+	tasks := make([]*mecatlv1.TeamTask, 0, len(p.Tasks))
+	for _, tk := range p.Tasks {
+		tasks = append(tasks, toProtoTeamTaskSnapshot(tk))
+	}
 	return &mecatlv1.Team{
 		ParentCallId:  p.ParentCallID,
 		TeamId:        p.TeamID,
@@ -165,6 +169,24 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 		Usage:         toProtoUsage(p.Usage),
 		ContextUsed:   p.ContextUsed,
 		ContextWindow: p.ContextWindow,
+		Tasks:         tasks,
+	}
+}
+
+// toProtoTeamTaskSnapshot maps a session.TeamTaskSnapshot (the task-list projection
+// carried on the team event stream) to its proto TeamTask form. It is distinct from
+// toProtoTeamTask, which takes a team.Task off the ListTeam RPC path: a TeamPayload
+// carries the already-projected snapshot (session must not import internal/team), so
+// the snapshot's Deps are already []string and copied verbatim here.
+func toProtoTeamTaskSnapshot(t session.TeamTaskSnapshot) *mecatlv1.TeamTask {
+	deps := make([]string, len(t.Deps))
+	copy(deps, t.Deps)
+	return &mecatlv1.TeamTask{
+		Id:          t.ID,
+		Description: t.Description,
+		State:       t.State,
+		Assignee:    t.Assignee,
+		Deps:        deps,
 	}
 }
 

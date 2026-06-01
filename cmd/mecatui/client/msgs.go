@@ -135,7 +135,22 @@ const (
 	TeamMember TeamKind = "member"
 	// TeamEnd marks a Team run finishing (Rounds/Stop/Usage set).
 	TeamEnd TeamKind = "end"
+	// TeamTasks marks a snapshot of the team's shared task list (Tasks set). It maps
+	// 1:1 from the first-class team.tasks proto Event.Type — a team-wide event with no
+	// Member — so the ui switches on a clean discriminant.
+	TeamTasks TeamKind = "tasks"
 )
+
+// TeamTask is one entry in the team's shared task list, as plain data the ctrl+a
+// agents task sub-view renders. Mirrors mecatlv1.TeamTask; carries only task
+// metadata, never member content. Deps are the task ids this task waits on.
+type TeamTask struct {
+	ID          string
+	Description string
+	State       string
+	Assignee    string
+	Deps        []string
+}
 
 // TeamMemberSpec is one roster entry forwarded on team.start, as plain data.
 // Mirrors mecatlv1.TeamMemberSpec; carries only member metadata, never content.
@@ -178,6 +193,10 @@ type TeamMsg struct {
 	// agents overlay.
 	ContextUsed   int64
 	ContextWindow int64
+	// Tasks is the team's shared task-list snapshot, set on a TeamTasks msg (the
+	// first-class team.tasks event) and on TeamEnd. It feeds the ctrl+a agents task
+	// sub-view.
+	Tasks []TeamTask
 }
 
 // CompactionMsg is a muted "history compacted" notice.
@@ -248,8 +267,9 @@ func subagentMsg(kind SubagentKind, s *mecatlv1.Subagent) SubagentMsg {
 }
 
 // teamMsg builds a TeamMsg of the given kind from a proto Team payload (nil-safe
-// via the generated getters). It is the single translation point for the three
-// team.* event kinds; the roster is converted to plain TeamMemberSpec values.
+// via the generated getters). It is the single translation point for the team.*
+// event kinds; the roster is converted to plain TeamMemberSpec values and the task
+// snapshot to plain TeamTask values.
 func teamMsg(kind TeamKind, t *mecatlv1.Team) TeamMsg {
 	msg := TeamMsg{
 		Kind:          kind,
@@ -273,6 +293,15 @@ func teamMsg(kind TeamKind, t *mecatlv1.Team) TeamMsg {
 			Role:     r.GetRole(),
 			Mutating: r.GetMutating(),
 			Lead:     r.GetLead(),
+		})
+	}
+	for _, tk := range t.GetTasks() {
+		msg.Tasks = append(msg.Tasks, TeamTask{
+			ID:          tk.GetId(),
+			Description: tk.GetDescription(),
+			State:       tk.GetState(),
+			Assignee:    tk.GetAssignee(),
+			Deps:        tk.GetDeps(),
 		})
 	}
 	return msg
@@ -339,6 +368,8 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 		return teamMsg(TeamStart, ev.GetTeam())
 	case "team.member":
 		return teamMsg(TeamMember, ev.GetTeam())
+	case "team.tasks":
+		return teamMsg(TeamTasks, ev.GetTeam())
 	case "team.end":
 		return teamMsg(TeamEnd, ev.GetTeam())
 	case "compaction":

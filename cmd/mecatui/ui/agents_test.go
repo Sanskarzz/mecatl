@@ -503,6 +503,122 @@ func TestAgentsFocusContextMeter(t *testing.T) {
 	}
 }
 
+// --- task sub-view ---------------------------------------------------------
+
+// tasksTeam builds a team whose shared task list exercises every state the task
+// sub-view distinguishes: a completed task, an in-progress task with an assignee,
+// a pending task blocked by the incomplete task, and a pending-unblocked task.
+func tasksTeam(c *conversation) {
+	c.setTeamStart("t1", roster())
+	c.setTeamTasks("t1", []client.TeamTask{
+		{ID: "task-1", Description: "investigate", State: "completed", Assignee: "scout"},
+		{ID: "task-2", Description: "implement fix", State: "in_progress", Assignee: "lead"},
+		{ID: "task-3", Description: "review", State: "pending", Deps: []string{"task-2"}},
+		{ID: "task-4", Description: "lint", State: "pending"},
+	})
+}
+
+// TestSetTeamTasksAttribution asserts setTeamTasks attributes the snapshot to the
+// matching Team block (returns true) and is a no-op miss (returns false) for an
+// unknown parent call id — the same attribution contract setTeamEnd has.
+func TestSetTeamTasksAttribution(t *testing.T) {
+	c := &conversation{}
+	c.addTool("t1", "Team", `{}`)
+	if !c.setTeamTasks("t1", []client.TeamTask{{ID: "task-1", State: "pending"}}) {
+		t.Fatal("setTeamTasks should attribute to the Team card and return true")
+	}
+	if got := c.blocks[0].teamTasks; len(got) != 1 || got[0].id != "task-1" {
+		t.Errorf("task snapshot not stored on the block: %+v", got)
+	}
+	if c.setTeamTasks("nope", []client.TeamTask{{ID: "x"}}) {
+		t.Error("setTeamTasks should return false for an unknown parent call id")
+	}
+}
+
+// TestAgentsTasksToggle asserts t flips the roster to the task sub-view, and t/esc
+// both return to the roster; esc from the roster still closes the overlay.
+func TestAgentsTasksToggle(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, tasksTeam)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.agents.view != agentsRoster {
+		t.Fatalf("view = %v, want agentsRoster", m.agents.view)
+	}
+
+	// t → task sub-view.
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
+	m = mm.(Model)
+	if m.agents.view != agentsTasks {
+		t.Fatalf("t did not open the task sub-view: %v", m.agents.view)
+	}
+
+	// t → back to roster.
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
+	m = mm.(Model)
+	if m.agents.view != agentsRoster {
+		t.Fatalf("t did not toggle back to the roster: %v", m.agents.view)
+	}
+
+	// t → tasks, then esc → back to roster.
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = mm.(Model)
+	if m.agents.view != agentsRoster {
+		t.Fatalf("esc from tasks should return to the roster, got %v", m.agents.view)
+	}
+
+	// esc from the roster closes the overlay.
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = mm.(Model)
+	if m.agents.view != agentsNone {
+		t.Fatalf("esc from roster did not close: %v", m.agents.view)
+	}
+}
+
+// TestAgentsTasksEmpty asserts a team with no tasks reads as a muted "(no tasks)"
+// with a zeroed summary and never panics.
+func TestAgentsTasksEmpty(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", roster()) })
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
+	m = mm.(Model)
+	if m.agents.view != agentsTasks {
+		t.Fatalf("view = %v, want agentsTasks", m.agents.view)
+	}
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "(no tasks)") {
+		t.Errorf("empty task list should show '(no tasks)', got %q", out)
+	}
+	if !strings.Contains(out, "0 done · 0 in-progress · 0 pending") {
+		t.Errorf("empty summary should report zero counts, got %q", out)
+	}
+}
+
+// TestAgentsTasksSummary asserts the summary line counts each state and flags the
+// blocked subset of pending tasks.
+func TestAgentsTasksSummary(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, tasksTeam)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
+	m = mm.(Model)
+	out := stripANSIstr(m.View().Content)
+	// 1 completed, 1 in-progress, 2 pending of which 1 (task-3, dep on the
+	// in-progress task-2) is blocked.
+	if !strings.Contains(out, "1 done · 1 in-progress · 2 pending(1 blocked)") {
+		t.Errorf("task summary mismatch, got %q", out)
+	}
+	// The blocked pending task uses the ⊘ glyph (survives ANSI strip).
+	if !strings.Contains(out, "⊘") {
+		t.Errorf("a blocked pending task should render the ⊘ glyph, got %q", out)
+	}
+}
+
 // --- goldens ---------------------------------------------------------------
 
 // agentsGoldenTeam builds a representative team for the overlay goldens: a lead +
@@ -536,6 +652,23 @@ func TestAgentsRosterGolden(t *testing.T) {
 	}
 	got := stripANSI([]byte(m.View().Content))
 	compareGolden(t, "agents_roster.golden", got)
+}
+
+// TestAgentsTasksView locks the task sub-view golden: a team with completed,
+// in-progress (assignee), pending-blocked (deps), and pending-unblocked tasks; the
+// summary line with counts + the blocked annotation; one glyphed row per task.
+func TestAgentsTasksView(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, tasksTeam)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
+	m = mm.(Model)
+	if m.agents.view != agentsTasks {
+		t.Fatalf("view = %v, want agentsTasks", m.agents.view)
+	}
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "agents_tasks.golden", got)
 }
 
 // TestAgentsRosterWindowedGolden locks a 20-member roster WINDOWED at a ~24-row

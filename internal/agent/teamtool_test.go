@@ -230,6 +230,119 @@ func TestTeamToolFormsTeamAndIsolatesContent(t *testing.T) {
 	}
 }
 
+// TestTeamToolStreamsTaskSnapshots drives a real task transition through a full
+// team run (lead creates a task, worker completes it) and asserts the task-snapshot
+// stream contract: first-class team.tasks events carry the shared task list (no
+// Member); the snapshot is DE-DUPED (an unchanged list is not re-emitted, so distinct
+// snapshots are bounded by the number of real transitions, not by member-event
+// volume); and the terminal team.end carries the final, completed task list.
+func TestTeamToolStreamsTaskSnapshots(t *testing.T) {
+	// The lead creates the task on its first turn, then idles. The worker's first
+	// turn is a no-op (the task does not exist yet in round 1); the supervisor then
+	// auto-claims task-1 for the idle worker, and the worker COMPLETES it on a later
+	// turn — so the stream observes the full pending → in_progress → completed
+	// transition.
+	addTask := session.NewToolCall("l1", "AddTask",
+		json.RawMessage(`{"description":"investigate the reported bug"}`))
+	leadProv := mockllm.New(
+		mockllm.ChunksTurn(
+			mockllm.ToolCallChunk(addTask),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+		mockllm.TextTurn("delegated, waiting for worker"),
+		mockllm.TextTurn("worker reported; team complete"),
+		mockllm.TextTurn("team complete"),
+	)
+	complete := session.NewToolCall("w1", "CompleteTask", json.RawMessage(`{"task_id":"task-1"}`))
+	workerProv := mockllm.New(
+		mockllm.TextTurn("standing by"),
+		mockllm.ChunksTurn(
+			mockllm.ToolCallChunk(complete),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+		mockllm.TextTurn("investigation complete"),
+	)
+	providers := map[string]*mockllm.Provider{"lead": leadProv, "worker": workerProv}
+
+	teamTool := agent.NewTeamTool(teamToolFactory(t, providers))
+	parentCat := catalogWith(t, teamTool)
+	parentLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("p1", "Team",
+			`{"goal":"fix the bug","members":[{"name":"lead","role":"coordinate"},{"name":"worker","role":"investigate"}]}`)),
+		mockllm.TextTurn("parent received the team summary"),
+	)
+	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: parentCat})
+	sess := newSession(t, session.Limits{})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "fix the bug")
+	evs := drain(r)
+
+	// Collect the task-snapshot projections (the first-class team.tasks event).
+	var snapshots [][]session.TeamTaskSnapshot
+	for _, ev := range evs {
+		if ev.Type == session.EvTeamTasks {
+			if ev.Team.Member != "" {
+				t.Errorf("a task snapshot must carry no Member, got %q", ev.Team.Member)
+			}
+			snapshots = append(snapshots, ev.Team.Tasks)
+		}
+	}
+	if len(snapshots) == 0 {
+		t.Fatalf("no task-snapshot (team.tasks) events streamed")
+	}
+	// De-dup: every consecutive snapshot must differ from its predecessor (the sink
+	// only emits on change). Equal adjacent snapshots would prove the guard is dead.
+	for i := 1; i < len(snapshots); i++ {
+		if tasksSnapshotEqual(snapshots[i-1], snapshots[i]) {
+			t.Errorf("snapshot %d duplicates snapshot %d (de-dup guard failed): %+v", i, i-1, snapshots[i])
+		}
+	}
+	// A real state transition was observed: the task appears non-completed in an
+	// early snapshot and completed in the last (the sink emitted on each change).
+	last := snapshots[len(snapshots)-1]
+	if len(last) != 1 || last[0].ID != "task-1" || last[0].State != string(team.TaskCompleted) {
+		t.Errorf("last snapshot should show task-1 completed, got %+v", last)
+	}
+	if snapshots[0][0].State == string(team.TaskCompleted) {
+		t.Errorf("the task should not already be completed in the first snapshot (no transition observed): %+v", snapshots[0])
+	}
+
+	// team.end carries the terminal task snapshot (the final, completed list).
+	var end *session.TeamPayload
+	for _, ev := range evs {
+		if ev.Type == session.EvTeamEnd {
+			end = ev.Team
+		}
+	}
+	if end == nil {
+		t.Fatal("no team.end event")
+	}
+	if len(end.Tasks) != 1 || end.Tasks[0].State != string(team.TaskCompleted) {
+		t.Errorf("team.end should carry the final completed task list, got %+v", end.Tasks)
+	}
+}
+
+// tasksSnapshotEqual is the test-side mirror of teamtool.go's tasksEqual, comparing
+// two task snapshots on the fields the de-dup guard keys off (id/state/assignee/deps).
+func tasksSnapshotEqual(a, b []session.TeamTaskSnapshot) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID || a[i].State != b[i].State || a[i].Assignee != b[i].Assignee {
+			return false
+		}
+		if len(a[i].Deps) != len(b[i].Deps) {
+			return false
+		}
+		for j := range a[i].Deps {
+			if a[i].Deps[j] != b[i].Deps[j] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // TestTeamToolReadOnlyIsFalse pins the mutate-serial contract: unlike the
 // read-parallel Task/Fork tools, the Team tool reports ReadOnly() == false so the
 // dispatcher serialises it.

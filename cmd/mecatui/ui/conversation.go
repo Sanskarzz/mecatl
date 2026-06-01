@@ -72,6 +72,17 @@ type teamLane struct {
 	ctxWindow int64
 }
 
+// teamTask is the ui-local projection of one entry in the team's shared task list,
+// rendered by the ctrl+a agents task sub-view. It mirrors client.TeamTask; it holds
+// only task metadata (id / state / assignee / deps), never member content.
+type teamTask struct {
+	id       string
+	desc     string
+	state    string
+	assignee string
+	deps     []string
+}
+
 // blockKind classifies a scrollback block so the renderer knows how to style it.
 type blockKind int
 
@@ -145,6 +156,7 @@ type block struct {
 	// the parent conversation.
 	team       bool
 	teamLanes  []teamLane
+	teamTasks  []teamTask // the team's shared task list (ctrl+a task sub-view)
 	teamRounds int
 	teamStop   string
 	teamUsage  client.Usage
@@ -484,6 +496,32 @@ func (c *conversation) setTeamEnd(parentCallID string, rounds int, stop string, 
 	b.teamRounds = rounds
 	b.teamStop = stop
 	b.teamUsage = usage
+	return true
+}
+
+// setTeamTasks replaces the shared task-list snapshot on the Team block matching
+// parentCallID. The server emits a fresh full snapshot on every task transition
+// (de-duped on change), so a replace is correct — the latest snapshot is the whole
+// truth. Returns false when no match. Member content is never touched.
+func (c *conversation) setTeamTasks(parentCallID string, tasks []client.TeamTask) bool {
+	b := c.teamBlock(parentCallID)
+	if b == nil {
+		return false
+	}
+	b.team = true
+	out := make([]teamTask, 0, len(tasks))
+	for _, tk := range tasks {
+		deps := make([]string, len(tk.Deps))
+		copy(deps, tk.Deps)
+		out = append(out, teamTask{
+			id:       tk.ID,
+			desc:     tk.Description,
+			state:    tk.State,
+			assignee: tk.Assignee,
+			deps:     deps,
+		})
+	}
+	b.teamTasks = out
 	return true
 }
 

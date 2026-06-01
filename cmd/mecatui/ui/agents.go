@@ -26,6 +26,7 @@ const (
 	agentsNone   agentsView = iota // overlay closed
 	agentsRoster                   // the full (uncapped) member roster
 	agentsFocus                    // one selected member's full trace
+	agentsTasks                    // the shared team task list (id · state · assignee · deps)
 )
 
 // agentsState holds the agent-team overlay state on the Model. It is value-
@@ -92,6 +93,15 @@ func (m Model) onAgentsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		}
 		return m, nil, true
 	}
+	if m.agents.view == agentsTasks {
+		// Task sub-view: BOTH esc and 't' return to the roster (t toggles, esc steps
+		// back). It is a calm read-only surface like the focus pane — no other key is
+		// consumed (the list is height-windowed, no live viewport).
+		if key.Matches(msg, m.keys.Close) || key.Matches(msg, m.keys.Tasks) {
+			m.agents.view = agentsRoster
+		}
+		return m, nil, true
+	}
 	mm, cmd := m.onAgentsRosterKey(msg, b)
 	return mm, cmd, true
 }
@@ -109,6 +119,9 @@ func (m Model) onAgentsRosterKey(msg tea.KeyPressMsg, b *block) (tea.Model, tea.
 	switch {
 	case key.Matches(msg, m.keys.Close):
 		return m.closeAgents()
+	case key.Matches(msg, m.keys.Tasks):
+		m.agents.view = agentsTasks
+		return m, nil
 	case key.Matches(msg, m.keys.Up):
 		m.agents.cursor = clampCursor(m.agents.cursor-1, n)
 		return m, nil
@@ -211,6 +224,8 @@ func renderAgentsOverlay(th theme.Theme, st agentsState, b *block, width, height
 		body = renderAgentsRoster(th, st, b, height)
 	case agentsFocus:
 		body = renderAgentsFocus(th, b, st.member, height)
+	case agentsTasks:
+		body = renderAgentsTasks(th, b, height)
 	default:
 		return ""
 	}
@@ -315,7 +330,7 @@ func renderAgentsRoster(th theme.Theme, st agentsState, b *block, height int) st
 		out.WriteString(muted.Render(fmt.Sprintf("  · +%d below", below)) + "\n")
 	}
 
-	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/end jump · enter focus · esc close"))
+	out.WriteString("\n" + muted.Render("↑/↓ select · enter focus member · t tasks · esc close"))
 	return out.String()
 }
 
@@ -434,4 +449,162 @@ func agentsFindLane(b *block, member string) *teamLane {
 		}
 	}
 	return nil
+}
+
+// Task-list state strings (mirror team.TaskState / TeamTask.State on the wire).
+const (
+	taskStatePending    = "pending"
+	taskStateInProgress = "in_progress"
+	taskStateCompleted  = "completed"
+)
+
+// agentsTasksChromeLines is the number of NON-row lines the task sub-view always
+// spends: the title, the summary sub-head, the blank line under it, the blank line
+// above the footer, and the footer (5). It mirrors the roster's chrome accounting
+// so the height-window math stays consistent.
+const agentsTasksChromeLines = 5
+
+// agentsTasksRows is how many task rows fit in the task sub-view for a card of the
+// given OUTER height. It mirrors agentsRosterRows: subtract the card border+padding
+// and the fixed chrome, reserve one line for the "+N more" tail, floor at
+// agentsMinRosterRows. A non-positive height (size unknown) shows all rows.
+func agentsTasksRows(height int) int {
+	if height <= 0 {
+		return 0
+	}
+	const cardChrome = 4 // border (2) + vertical padding (2)
+	const tailReserve = 1
+	rows := height - cardChrome - agentsTasksChromeLines - tailReserve
+	if rows < agentsMinRosterRows {
+		return agentsMinRosterRows
+	}
+	return rows
+}
+
+// taskBlocked reports whether a PENDING task is blocked: at least one of its
+// dependencies is not yet completed. byID maps task id → state for the lookup. A
+// missing dependency id counts as not-completed (it cannot be satisfied), so the
+// task reads as blocked rather than silently claimable. Non-pending tasks are never
+// "blocked" by this predicate (in-progress/completed have moved past the gate).
+func taskBlocked(t teamTask, byID map[string]string) bool {
+	if t.state != taskStatePending {
+		return false
+	}
+	for _, d := range t.deps {
+		if byID[d] != taskStateCompleted {
+			return true
+		}
+	}
+	return false
+}
+
+// taskGlyph maps a task's state (and blocked-ness, for pending tasks) to a single
+// ANSI-strip-safe glyph — colour is never the sole signal, so the sub-view reads
+// the same through a golden's stripANSI:
+//   - completed            → ✓ (done)
+//   - in_progress          → ◆ (claimed, being worked; same glyph as a working lane)
+//   - pending, unblocked   → ○ (claimable, waiting for a worker)
+//   - pending, blocked     → ⊘ (waiting on an unmet dependency)
+func taskGlyph(state string, blocked bool) string {
+	switch state {
+	case taskStateCompleted:
+		return "✓"
+	case taskStateInProgress:
+		return "◆"
+	default: // pending (or any unknown state — treat as not-yet-done)
+		if blocked {
+			return "⊘"
+		}
+		return "○"
+	}
+}
+
+// renderAgentsTasks draws the shared team task list: a title, a one-line summary
+// (N done · N in-progress · N pending(N blocked)), then one height-windowed row per
+// task (glyph · id · state · assignee · deps). An empty list reads as a muted
+// "(no tasks)". All task-derived strings are terminal-sanitized. It mirrors the
+// roster's height-window math so a long task list never clips the footer.
+func renderAgentsTasks(th theme.Theme, b *block, height int) string {
+	muted := th.Style("muted")
+	var out strings.Builder
+
+	out.WriteString(th.Style("askTitle").Render("tasks"))
+	out.WriteString("\n")
+	out.WriteString(muted.Render(agentsTasksSummary(b.teamTasks)))
+	out.WriteString("\n\n")
+
+	if len(b.teamTasks) == 0 {
+		out.WriteString(muted.Render("(no tasks)"))
+		out.WriteString("\n\n" + muted.Render("t roster · esc close"))
+		return out.String()
+	}
+
+	byID := make(map[string]string, len(b.teamTasks))
+	for _, t := range b.teamTasks {
+		byID[t.id] = t.state
+	}
+
+	// Window the rows to the available height (cursor-free: the task sub-view has no
+	// selection, so it always anchors at the top, surfacing only a "+N more" tail).
+	rows := agentsTasksRows(height)
+	start, end, _, below := agentsWindow(0, len(b.teamTasks), rows)
+	for i := start; i < end; i++ {
+		out.WriteString("  " + muted.Render(taskRow(b.teamTasks[i], byID)) + "\n")
+	}
+	if below > 0 {
+		out.WriteString(muted.Render(fmt.Sprintf("  · +%d more", below)) + "\n")
+	}
+
+	out.WriteString("\n" + muted.Render("t roster · esc close"))
+	return out.String()
+}
+
+// taskRow renders one task row: glyph · id · state · assignee (or "—") · deps. All
+// task-derived strings are sanitized (the description is not shown — the row keys
+// off id/state to stay scannable; the description rides the focus/inline surfaces).
+func taskRow(t teamTask, byID map[string]string) string {
+	assignee := "—"
+	if t.assignee != "" {
+		assignee = sanitizeTerminal(t.assignee)
+	}
+	deps := "—"
+	if len(t.deps) > 0 {
+		sane := make([]string, 0, len(t.deps))
+		for _, d := range t.deps {
+			sane = append(sane, sanitizeTerminal(d))
+		}
+		deps = strings.Join(sane, ",")
+	}
+	return fmt.Sprintf("%s %s · %s · %s · deps:%s",
+		taskGlyph(t.state, taskBlocked(t, byID)),
+		sanitizeTerminal(t.id),
+		sanitizeTerminal(t.state),
+		assignee,
+		deps)
+}
+
+// agentsTasksSummary renders the one-line task roll-up: "N done · N in-progress ·
+// N pending(N blocked)". The blocked count is the subset of pending tasks with an
+// unmet dependency. It is the at-a-glance header of the task sub-view.
+func agentsTasksSummary(tasks []teamTask) string {
+	byID := make(map[string]string, len(tasks))
+	for _, t := range tasks {
+		byID[t.id] = t.state
+	}
+	var done, inProgress, pending, blocked int
+	for _, t := range tasks {
+		switch t.state {
+		case taskStateCompleted:
+			done++
+		case taskStateInProgress:
+			inProgress++
+		default:
+			pending++
+			if taskBlocked(t, byID) {
+				blocked++
+			}
+		}
+	}
+	return fmt.Sprintf("%d done · %d in-progress · %d pending(%d blocked)",
+		done, inProgress, pending, blocked)
 }

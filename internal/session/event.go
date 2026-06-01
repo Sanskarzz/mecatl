@@ -64,10 +64,19 @@ const (
 	// EvTeamMember is emitted for each forwarded member-session event during a Team
 	// run. Unlike the metadata-only subagent.tool projection, it is deliberately
 	// FULLER — a team is meant to be watched — so it carries the member's message
-	// text and BOUNDED tool-call/result previews, tagged by member name. It is
-	// STILL bounded and redacted: every preview is capped, and a member's
-	// permission.ask is DROPPED entirely (never forwarded). See TeamPayload.
+	// text and BOUNDED tool-call/result previews, tagged by member name. It ALWAYS
+	// sets Member (the member whose activity it projects) and InnerKind (that
+	// member's underlying session event type). It is STILL bounded and redacted:
+	// every preview is capped, and a member's permission.ask is DROPPED entirely
+	// (never forwarded). See TeamPayload.
 	EvTeamMember EventType = "team.member"
+	// EvTeamTasks is emitted when the team's SHARED TASK LIST changes during a Team
+	// run (and as a terminal snapshot on EvTeamEnd's payload). It is a team-WIDE
+	// projection — NOT per-member — so it carries no Member; only TeamPayload.Tasks
+	// (the id/state/assignee/deps snapshot in creation order). It is the discriminant
+	// the client routes to the ctrl+a agents task sub-view. Snapshots are emitted
+	// only on change (de-duped) to bound wire volume.
+	EvTeamTasks EventType = "team.tasks"
 	// EvTeamEnd is emitted when a Team run terminates. It is a BOUNDED projection
 	// carrying only aggregate metadata — the number of rounds, the stop reason, and
 	// the team's cumulative usage — never member content. The team's joined summary
@@ -203,8 +212,28 @@ type TeamMemberSpec struct {
 	Lead bool
 }
 
-// TeamPayload is the BOUNDED observability projection carried by the three team.*
-// events (EvTeamStart / EvTeamMember / EvTeamEnd). It is the ONLY information
+// TeamTaskSnapshot is one entry in the team's shared task list, projected onto the
+// event stream so the ctrl+a agents task sub-view can render the team's task state
+// (id · state · assignee · deps) without an out-of-band ListTeam RPC — the team is
+// a Team-tool-local object the TUI cannot address. It is a plain value type
+// mirroring the proto TeamTask; it carries only task metadata (no member content).
+// Deps are the task ids this task depends on (it is blocked until they complete).
+type TeamTaskSnapshot struct {
+	// ID is the stable task identifier.
+	ID string
+	// Description is a BOUNDED preview of the work to do (capped like every other
+	// member-derived preview).
+	Description string
+	// State mirrors team.TaskState: "pending" / "in_progress" / "completed".
+	State string
+	// Assignee is the member name that claimed the task, or empty if unclaimed.
+	Assignee string
+	// Deps lists the task ids that must complete before this task is claimable.
+	Deps []string
+}
+
+// TeamPayload is the BOUNDED observability projection carried by the team.* events
+// (EvTeamStart / EvTeamMember / EvTeamTasks / EvTeamEnd). It is the ONLY information
 // about an in-process team's run that surfaces to clients on the event stream.
 //
 // REDACTION CONTRACT — fuller-but-bounded. Unlike SubagentPayload (metadata only),
@@ -225,7 +254,10 @@ type TeamMemberSpec struct {
 //   - EvTeamMember: ParentCallID, TeamID, Member, InnerKind, and the subset of
 //     {Text, ToolName, Detail, IsError, Usage, ContextUsed, ContextWindow}
 //     relevant to InnerKind.
-//   - EvTeamEnd:    ParentCallID, TeamID, Rounds, Stop, Usage (cumulative).
+//   - EvTeamTasks:  ParentCallID, TeamID, Tasks (the team-wide task snapshot; no
+//     Member).
+//   - EvTeamEnd:    ParentCallID, TeamID, Rounds, Stop, Usage (cumulative), Tasks
+//     (the terminal task snapshot).
 type TeamPayload struct {
 	// ParentCallID is the parent's Team tool-call id, attributing every team.*
 	// event to the originating Team card. Set on all three kinds.
@@ -273,6 +305,12 @@ type TeamPayload struct {
 	// meter's denominator). Set on EvTeamMember turn.end; 0 when unknown (no meter
 	// is drawn in that case).
 	ContextWindow int64
+	// Tasks is a snapshot of the team's SHARED TASK LIST in creation order. It is
+	// set on an EvTeamTasks event (emitted on change, de-duped, from the Team tool's
+	// member-event sink) and on EvTeamEnd (the terminal snapshot, so the final task
+	// state always lands). It feeds the ctrl+a agents task sub-view; it carries only
+	// task metadata, never member content.
+	Tasks []TeamTaskSnapshot
 }
 
 // Event is the domain-owned, provider-neutral unit of the streaming model. The
@@ -306,8 +344,9 @@ type Event struct {
 	// Subagent is set on the three subagent.* events: the REDACTED observability
 	// projection of a Task child run (metadata only, never child content).
 	Subagent *SubagentPayload
-	// Team is set on the three team.* events: the BOUNDED observability projection
-	// of an in-process team run (fuller-but-bounded; member content is capped and
-	// permission.ask is dropped, and never enters the parent conversation).
+	// Team is set on the team.* events (start / member / tasks / end): the BOUNDED
+	// observability projection of an in-process team run (fuller-but-bounded; member
+	// content is capped and permission.ask is dropped, and never enters the parent
+	// conversation).
 	Team *TeamPayload
 }
