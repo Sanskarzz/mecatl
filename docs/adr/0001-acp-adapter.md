@@ -206,13 +206,23 @@ wiring.
    deregisters the run, since `Persist` is a no-op once the run is gone. Without the
    run-end `Persist`, a loaded session would have an empty conversation.
 
-   **Constraint — replay scoped out.** ACP's `session/load` optionally streams the
-   prior conversation back as `session/update` notifications. mecatl does
-   restore-WITHOUT-replay: a full replay is bounded only by history size and would
-   re-issue every `tool_call`/`diff`/`result` the editor already rendered. The
-   session state is restored so the NEXT prompt continues with full conversation
-   context, and the editor keeps whatever transcript it persisted. Replay-on-load is
-   a remaining nice-to-have (see "Deferred").
+   **Transcript replay.** ACP's `session/load` optionally streams the prior
+   conversation back as `session/update` notifications so a re-attaching editor
+   rebuilds the transcript rather than seeing an empty session. mecatl now does
+   this: on load it re-projects the persisted `Conversation` through the SAME
+   `projectUpdate` path the live loop uses (`replay.go`'s pure `historyEvents`
+   synthesizes the domain events; `replayHistory` drives them through
+   `projectUpdate` → `notifyUpdate`), rebuilding the message chunks, `tool_call`
+   cards, and their `tool_call_update`s. The **open-before-update** invariant holds
+   naturally from history order — the assistant message (with its `ToolCalls`) is
+   stored before the tool-role result, so each `tool_call` is replayed before its
+   `tool_call_update`. The user's own prompts (no `user_message_chunk`; the editor
+   renders those locally), the opaque reasoning replay blob (`Message.Reasoning` is
+   `encrypted_content`, not display text), and historical `permission.ask`s (an
+   out-of-band `request_permission`, never re-prompted on load) are deliberately
+   NOT replayed. Replay is synchronous within the load handler, so the notifications
+   are flushed before the load response returns, and it is idempotent — a repeated
+   load simply re-streams the same transcript, keyed by tool-call id.
 
 ## Permission round-trip
 
@@ -246,7 +256,12 @@ handler that issues an outbound `Call` (a `session/prompt` issuing
   `session/new`/`session/load`) — via `Service.SetMode` + `Session.SetMode`;
   mid-turn switch scoped to "defer to next prompt".
 - **`session/load` (resume)** — via `Service.LoadSession` (reopen-if-completed);
-  `loadSession:true` only with a durable store; restore-without-replay.
+  `loadSession:true` only with a durable store.
+- **`session/load` transcript replay** — on load the persisted `Conversation` is
+  re-projected through the same `projectUpdate` path as the live loop (`replay.go`),
+  so a re-attaching editor rebuilds the transcript. Open-before-update preserved by
+  history order; user prompts / reasoning blob / permission-ask deliberately not
+  replayed; idempotent re-stream keyed by tool-call id.
 
 ## Deferred (Phase 3 long-tail)
 
@@ -254,8 +269,6 @@ handler that issues an outbound `Call` (a `session/prompt` issuing
   `tool.Workspace`. mecatl still uses its OWN `osfs` rooted at the session `cwd`.
 - **`allow_always` governance-rule persistence** (still maps to `allow_once` — no
   rule is recorded, so every approval is one-shot).
-- **`session/load` history replay** — restore-without-replay is implemented; full
-  conversation replay back to the client as `session/update`s is the nice-to-have.
 - **Image/audio prompt content** (`promptCapabilities` stays text-only).
 - Client-provided MCP servers.
 - Richer projection of `turn.*` / `compaction` (ACP plan modelling).

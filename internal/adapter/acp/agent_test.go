@@ -874,6 +874,82 @@ func TestSessionLoadRestoresPersistedSession(t *testing.T) {
 	}
 }
 
+// TestSessionLoadReplaysTranscript asserts session/load re-streams the persisted
+// conversation as session/update notifications so a re-attaching editor rebuilds
+// the transcript: it sees the assistant message chunk, the tool_call card (c1),
+// and its tool_call_update (completed), with the tool_call arriving BEFORE the
+// update (open-before-update). It also asserts no request_permission is issued
+// during load (replay must never re-prompt for a historical, already-resolved
+// approval).
+func TestSessionLoadReplaysTranscript(t *testing.T) {
+	read := &scriptTool{name: "Read", readOnly: true, content: "body"}
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(call("c1", "Read", `{"path":"a"}`)),
+		mockllm.TextTurn("first done"),
+	)
+	store := memstore.New()
+	svc := newServiceCfg(t, llm, allowRules(), func(c *server.Config) { c.Store = store }, read)
+
+	// Connection 1: create + run a prompt that produces a tool_call(c1) + result +
+	// final message, then disconnect.
+	e1, cleanup1 := startAgent(t, svc, acp.WithResume(true))
+	res := e1.call("session/new", map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}})
+	var ns struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(res, &ns)
+	out := e1.call("session/prompt", map[string]any{"sessionId": ns.SessionID,
+		"prompt": []any{map[string]any{"type": "text", "text": "first"}}})
+	var pr struct {
+		StopReason string `json:"stopReason"`
+	}
+	if err := json.Unmarshal(out, &pr); err != nil || pr.StopReason != "end_turn" {
+		t.Fatalf("first prompt stopReason %q err %v", pr.StopReason, err)
+	}
+	cleanup1()
+
+	// Connection 2: load the session and collect the replayed notifications, in
+	// arrival order.
+	e2, cleanup2 := startAgent(t, svc, acp.WithResume(true))
+	defer cleanup2()
+	_ = e2.call("session/load", map[string]any{"sessionId": ns.SessionID, "cwd": t.TempDir(), "mcpServers": []any{}})
+
+	updates := drainUpdates(e2.notes)
+
+	// Security assertion: no request_permission was received during load.
+	select {
+	case req := <-e2.reqs:
+		t.Fatalf("unexpected agent request during load: %s", req.Method)
+	default:
+	}
+
+	// At least one agent_message_chunk (the "first done" reply).
+	assertHasUpdate(t, updates, "agent_message_chunk", "")
+	// A tool_call card for c1 and a completed tool_call_update for c1.
+	callIdx, updateIdx := -1, -1
+	for i, u := range updates {
+		switch u["sessionUpdate"] {
+		case "tool_call":
+			if u["toolCallId"] == "c1" && callIdx < 0 {
+				callIdx = i
+			}
+		case "tool_call_update":
+			if u["toolCallId"] == "c1" && u["status"] == "completed" && updateIdx < 0 {
+				updateIdx = i
+			}
+		}
+	}
+	if callIdx < 0 {
+		t.Fatalf("no tool_call for c1 in replayed updates %v", updates)
+	}
+	if updateIdx < 0 {
+		t.Fatalf("no completed tool_call_update for c1 in replayed updates %v", updates)
+	}
+	if callIdx >= updateIdx {
+		t.Fatalf("tool_call (idx %d) must arrive before tool_call_update (idx %d) for c1", callIdx, updateIdx)
+	}
+}
+
 // TestSessionLoadDisabledWithoutStore asserts that when resume is disabled (no
 // durable store), initialize advertises loadSession:false and session/load
 // returns a method error.

@@ -204,13 +204,18 @@ func (a *Agent) notifyAvailableCommands(ctx context.Context, sessionID, workspac
 // handleSessionLoad resumes a previously-persisted session so the next
 // session/prompt continues it. It validates cwd exactly like session/new, rejects
 // any client-provided MCP server the same way, then loads (and, if the session
-// had cleanly completed, reopens) the session via Service.LoadSession. It does NOT
-// replay prior turns' events: a full conversation replay is bounded only by
-// history size and would re-issue every tool_call/diff/result the editor already
-// rendered; mecatl restores the session state so the NEXT prompt continues with
-// the full conversation context, and the editor keeps whatever transcript it
-// persisted. (Replay-on-load is documented as a remaining nice-to-have in the
-// ADR.) It returns the resumed mode state so the editor seeds its mode picker.
+// had cleanly completed, reopens) the session via Service.LoadSession. It then
+// REPLAYS the persisted conversation as session/update notifications (see
+// replayHistory): a re-attaching editor would otherwise see an empty transcript,
+// so we re-project the stored Conversation through the same projectUpdate path the
+// live loop uses, rebuilding the message chunks, tool_call cards, and their
+// updates. The replay runs synchronously here, so the notifications are flushed
+// BEFORE this load response returns. It is idempotent — a repeated load simply
+// re-streams the same transcript, keyed by tool-call id, so each card is reopened
+// and re-settled identically (no dedupe guard needed). The user's own prompts, the
+// opaque reasoning replay blob, and any historical permission.ask are deliberately
+// NOT replayed (see replay.go). It returns the resumed mode state so the editor
+// seeds its mode picker.
 //
 // When resume is disabled (no session store — WithResume(false)), the handler is
 // effectively unreachable because loadSession is advertised false; we still guard
@@ -240,6 +245,9 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 		// restart) is a client error: the id does not resolve.
 		return nil, newMethodErr(codeInvalidParams, "acp: session/load: "+err.Error())
 	}
+	// Rebuild the editor's transcript from the persisted history BEFORE returning,
+	// so a re-attaching editor sees the prior turns rather than an empty session.
+	a.replayHistory(req.SessionID, sess.Conversation)
 	return loadSessionResponse{Modes: modeStateFor(sess.Mode)}, nil
 }
 
