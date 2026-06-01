@@ -4,9 +4,11 @@
 - Date: 2026-05-30
 - Scope: Phase 1 (core loop) + Phase 2 (fidelity — diff blocks, subagent/team/hook
   projection) + Phase 3 bounded pieces (commands, set_mode, load, **fs/\* file-I/O
-  delegation** — see "Phase 3 (bounded)"). The Phase 3 long-tail
-  (governance-rule persistence, image/audio, grep-over-buffers, fs/\* on resume)
-  remains (see "Deferred"). The hook-call-id veto (issue #6) is now DONE — a blocked
+  delegation** — see "Phase 3 (bounded)"). **Multimodal prompt content (issue #5)
+  is now DONE** — image/audio prompt blocks are parsed, validated, and gated on the
+  configured provider's `ProviderCapabilities` (see "Multimodal prompt content").
+  The Phase 3 long-tail (governance-rule persistence, grep-over-buffers, fs/\* on
+  resume) remains (see "Deferred"). The hook-call-id veto (issue #6) is now DONE — a blocked
   PreToolUse veto keys a `failed` `tool_call_update` onto its card. **fs/\* delegation
   (issue #2) is now DONE (bounded hybrid)** — file Read/Write flow through the editor's
   buffers when the client advertises the capability.
@@ -77,8 +79,15 @@ outbound `request_permission` and correlates the reply).
 ## Capabilities advertised (`initialize`)
 
 - `protocolVersion: 1`.
-- `promptCapabilities`: `image:false`, `audio:false`, `embeddedContext:false`
-  (text content blocks only this phase).
+- `promptCapabilities`: now REFLECT THE CONFIGURED PROVIDER, via the
+  `port.ProviderCapabilities` seam read once at `NewAgent` from
+  `Service.ProviderCapabilities()`. `image`/`audio` mirror what the provider can
+  consume; `embeddedContext` mirrors the provider's `EmbeddedContext` (the adapter
+  accepts inline-text `resource` blocks by flattening them into the prompt text).
+  The OpenAI Responses provider declares `image:true`, `embeddedContext:true`,
+  `audio:false` (its input content union has NO audio member — see "Multimodal
+  prompt content"), so a typical `mecated --acp` advertises image but not audio; a
+  text-only provider (e.g. the `mockllm` default) advertises all three `false`.
 - `mcpCapabilities`: `http:true`, `sse:false`. mecatl is **streaming-HTTP MCP
   only** (CLAUDE.md: "No stdio MCP, ever"). A client may supply **streaming-HTTP**
   MCP servers in `session/new`; they are validated and mounted **per-session** (see
@@ -101,6 +110,44 @@ outbound `request_permission` and correlates the reply).
   REQUEST to decide whether to delegate file I/O. This is a property of the request,
   NOT something the agent advertises back, so it does NOT appear in the response's
   `agentCapabilities`. BOTH must be true to delegate (see "Phase 3 (bounded)" §4).
+
+## Multimodal prompt content (provider-capability-gated)
+
+Inbound `session/prompt` content is no longer text-only. `buildPromptContent`
+(replacing `flattenPrompt`) translates the ACP ContentBlock list into mecatl's
+multimodal prompt shape — the flattened text PLUS `[]session.Content` media parts —
+and `Service.StartRunContent(ctx, id, text, parts)` carries them into the run.
+
+- **Block → content mapping.** `text` appends to the flattened text. A `resource`
+  with inline **text** contents flattens into the text (an embedded-text resource —
+  no Part; this is why `embeddedContext` is advertised when the provider supports
+  it). A `resource` with a **blob** + image/audio mime becomes that media Part.
+  `image`/`audio` blocks become media Parts (inline base64 `data`, or a `uri`).
+  `resource_link` is **rejected loudly** (a URI mecatl cannot fetch).
+- **No silent drops — the honesty fix.** Every non-text block becomes prompt text,
+  a media Part, or a LOUD `codeInvalidParams` error. An unknown/unsupported block
+  type, a `resource` with neither text nor blob, a blob with a non-media mime, or a
+  base64-decode failure are all rejected — never silently dropped (the previous
+  `flattenPrompt` silently discarded every non-text block).
+- **Validator reuse — one validation path.** The ACP boundary uses the SAME
+  validating constructors (`session.NewImageContent` / `NewImageURLContent` /
+  `NewAudioContent` / `NewAudioURLContent` via `session.NewContent`) and the SAME
+  per-prompt size caps (`session.ValidateMediaParts`) as the gRPC/HTTP surfaces, so
+  the URL-SSRF (CWE-918), mime-consistency, exactly-one-of(data,url), and size
+  (CWE-770) guarantees hold for ACP-supplied media exactly as elsewhere. There is
+  NO second validation path in the adapter.
+- **Capability-gated loud reject.** After building the parts and BEFORE
+  `StartRunContent`, an image Part with `!caps.Image` (or audio with `!caps.Audio`)
+  is rejected (`"image/audio content not supported by the configured provider"`),
+  so `StartRunContent` is never reached for content the provider cannot consume. An
+  image-only prompt against a text-only provider therefore errors and starts no run.
+  This is defense-in-depth: `initialize` already advertised the caps, but a
+  non-conformant client gets a clear error rather than a silent drop.
+- **Audio is wired-but-dormant.** The full audio path (ACP block parsing,
+  `session.MediaAudio`) is built end-to-end, but the OpenAI Responses input content
+  union has no audio member, so the OpenAI provider declares `Audio:false`,
+  `initialize` advertises `audio:false`, and an audio prompt is loud-rejected. Audio
+  lights up with no further ACP code the day a provider declares `Audio:true`.
 
 ## Event projection (Phase 1 + Phase 2)
 
@@ -511,7 +558,6 @@ handler that issues an outbound `Call` (a `session/prompt` issuing
   gRPC/HTTP have no session-end signal, so learned rules there persist until
   process exit (bounded, per-session-isolated). A gRPC/HTTP session-end hook and a
   per-session learned-rule cap are tracked follow-ups (issue #3 review).
-- **Image/audio prompt content** (`promptCapabilities` stays text-only).
 - **Client MCP on `session/load`** (re-mount the client's streaming-HTTP servers on
   resume) + **mid-session teardown** — tracked follow-up (Slice B). `session/new`
   client streaming-HTTP MCP is now DONE (see "Client streaming-HTTP MCP").

@@ -2,7 +2,9 @@ package acp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/server"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
 )
 
@@ -39,6 +42,14 @@ type Agent struct {
 
 	// info is the agent identity returned on initialize.
 	info implementation
+
+	// caps is the configured LLM provider's multimodal input support, read ONCE
+	// from the Service at construction. handleInitialize advertises it as the
+	// promptCapabilities (image/audio/embeddedContext), and handleSessionPrompt
+	// consults it to loud-reject prompt content the provider cannot consume — so a
+	// non-conformant client that ignores the advertised caps still gets a clear
+	// error instead of a silent drop.
+	caps port.ProviderCapabilities
 
 	// resume reports whether session/load is supported (a session store is
 	// configured). When false, loadSession is advertised false in initialize and
@@ -74,6 +85,7 @@ func NewAgent(svc *server.Service, opts ...AgentOption) *Agent {
 		inFlight:    make(map[string]struct{}),
 		mcpSessions: make(map[string]struct{}),
 		info:        implementation{Name: "mecatl", Version: "acp-phase3"},
+		caps:        svc.ProviderCapabilities(),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -153,13 +165,19 @@ func (a *Agent) Handle(ctx context.Context, method string, params json.RawMessag
 	}
 }
 
-// handleInitialize negotiates capabilities. mecatl advertises NO image/audio/
-// embeddedContext prompt support (text only this phase), the streaming-HTTP MCP
-// transport (http:true) — a client may supply http MCP servers on session/new,
-// which are mounted per-session; sse:false and stdio is hard-rejected (mecatl
-// connects only streaming-HTTP MCP, never spawns a server process), loadSession
-// reflecting whether a session store is configured (WithResume), and echoes the
-// protocol version it implements.
+// handleInitialize negotiates capabilities. The promptCapabilities now reflect
+// the CONFIGURED PROVIDER (via the ProviderCapabilities seam read once at
+// construction): image/audio mirror what the provider can consume, and
+// embeddedContext mirrors EmbeddedContext (the adapter accepts inline-text
+// resource blocks by flattening them into the prompt text). The OpenAI Responses
+// provider declares image:true, embeddedContext:true, audio:false (its input
+// content union has no audio member), so a typical mecated advertises image but
+// not audio; a text-only provider advertises all three false. It also advertises
+// the streaming-HTTP MCP transport (http:true) — a client may supply http MCP
+// servers on session/new, which are mounted per-session; sse:false and stdio is
+// hard-rejected (mecatl connects only streaming-HTTP MCP, never spawns a server
+// process) — loadSession reflecting whether a session store is configured
+// (WithResume), and echoes the protocol version it implements.
 func (a *Agent) handleInitialize(params json.RawMessage) (any, error) {
 	var req initializeRequest
 	if len(params) > 0 {
@@ -177,9 +195,13 @@ func (a *Agent) handleInitialize(params json.RawMessage) (any, error) {
 	return initializeResponse{
 		ProtocolVersion: protocolVersion,
 		AgentCapabilities: agentCapabilities{
-			LoadSession:        a.resume,
-			McpCapabilities:    mcpCapabilities{HTTP: true, SSE: false},
-			PromptCapabilities: promptCapabilities{Audio: false, EmbeddedContext: false, Image: false},
+			LoadSession:     a.resume,
+			McpCapabilities: mcpCapabilities{HTTP: true, SSE: false},
+			PromptCapabilities: promptCapabilities{
+				Audio:           a.caps.Audio,
+				EmbeddedContext: a.caps.EmbeddedContext,
+				Image:           a.caps.Image,
+			},
 		},
 		AuthMethods: []any{},
 		AgentInfo:   &a.info,
@@ -397,11 +419,16 @@ func modeFromACP(modeID string) (session.PermissionMode, bool) {
 }
 
 // handleSessionPrompt runs one prompt to completion. It enforces one in-flight
-// prompt per session, flattens the text content blocks into the prompt text,
-// starts a run via Service.StartRun, drains the run's Events projecting each to a
-// session/update notification (and handling permission.ask out of band as an
-// outbound request_permission), and returns {stopReason} only when the terminal
-// EvResult arrives. It BLOCKS for the whole turn, exactly as ACP requires.
+// prompt per session, translates the content blocks into the prompt's flattened
+// text PLUS media parts (buildPromptContent — text/inline-text-resource flatten,
+// image/audio become Parts, resource_link/unknown reject loudly), CAPABILITY-GATES
+// the media (an image/audio Part the configured provider cannot consume is
+// rejected loudly BEFORE the run starts, so StartRunContent is never reached for
+// unsupported content), starts a run via Service.StartRunContent, drains the run's
+// Events projecting each to a session/update notification (and handling
+// permission.ask out of band as an outbound request_permission), and returns
+// {stopReason} only when the terminal EvResult arrives. It BLOCKS for the whole
+// turn, exactly as ACP requires.
 func (a *Agent) handleSessionPrompt(ctx context.Context, params json.RawMessage) (any, error) {
 	var req promptRequest
 	if err := json.Unmarshal(params, &req); err != nil {
@@ -410,9 +437,20 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, params json.RawMessage)
 	if req.SessionID == "" {
 		return nil, newMethodErr(codeInvalidParams, "acp: session/prompt: sessionId is required")
 	}
-	text := flattenPrompt(req.Prompt)
-	if strings.TrimSpace(text) == "" {
-		return nil, newMethodErr(codeInvalidParams, "acp: session/prompt: prompt has no text content")
+	text, parts, err := buildPromptContent(req.Prompt)
+	if err != nil {
+		return nil, err
+	}
+	// Capability-gate the media BEFORE starting the run: reject loudly any part the
+	// configured provider cannot consume, so a non-conformant client that ignores
+	// the advertised promptCapabilities gets a clear error rather than a silent
+	// drop, and StartRunContent is never reached for unsupported content.
+	// (resource_link is already rejected in buildPromptContent.)
+	if cerr := a.rejectUnsupportedMedia(parts); cerr != nil {
+		return nil, cerr
+	}
+	if strings.TrimSpace(text) == "" && len(parts) == 0 {
+		return nil, newMethodErr(codeInvalidParams, "acp: session/prompt: prompt has no content")
 	}
 
 	if !a.acquire(req.SessionID) {
@@ -420,7 +458,7 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, params json.RawMessage)
 	}
 	defer a.release(req.SessionID)
 
-	run, err := a.svc.StartRun(ctx, session.SessionID(req.SessionID), text)
+	run, err := a.svc.StartRunContent(ctx, session.SessionID(req.SessionID), text, parts)
 	if err != nil {
 		return nil, newMethodErr(codeInvalidParams, "acp: session/prompt: "+err.Error())
 	}
@@ -634,14 +672,172 @@ func headerMap(headers []mcpHeader) map[string]string {
 	return out
 }
 
-// flattenPrompt concatenates the text of every text ContentBlock with newlines,
-// dropping non-text blocks (image/audio/resource are unsupported this phase).
-func flattenPrompt(blocks []contentBlock) string {
-	parts := make([]string, 0, len(blocks))
-	for _, b := range blocks {
-		if b.Type == "text" && b.Text != "" {
-			parts = append(parts, b.Text)
+// buildPromptContent translates an inbound ACP prompt — a list of ContentBlocks —
+// into mecatl's multimodal prompt shape: the flattened text PLUS the non-text
+// media parts. It is the wire→domain choke point for ACP-supplied content, so it
+// reuses the SAME validating constructors (session.NewImageContent / NewImageURLContent
+// / NewAudioContent / NewAudioURLContent) and the SAME per-prompt size caps
+// (session.ValidateMediaParts) as the gRPC/HTTP surfaces — the SSRF (CWE-918),
+// mime-consistency, exactly-one-of(data,url), and size (CWE-770) guarantees hold
+// at the ACP boundary exactly as elsewhere; there is no second validation path.
+//
+// It is FAIL-LOUD by design (the honesty fix this issue exists for): NO block is
+// ever silently dropped. Each block becomes prompt text, a media Part, or a loud
+// error:
+//
+//   - text                          → appended to the flattened text.
+//   - resource (inline TEXT)        → flattened into the text (an embedded-text
+//     resource; no Part).
+//   - resource (blob+image/audio mime) → a media Part via the constructors.
+//   - resource_link                 → REJECTED (a URI mecatl cannot fetch).
+//   - image / audio                 → a media Part (inline base64 Data, or a URL).
+//   - any other / unsupported type  → REJECTED.
+//
+// Errors are returned as codeInvalidParams MethodErrors so the caller surfaces
+// them verbatim to the editor.
+func buildPromptContent(blocks []contentBlock) (text string, parts []session.Content, err error) {
+	var textParts []string
+	for i, b := range blocks {
+		switch b.Type {
+		case "text":
+			if b.Text != "" {
+				textParts = append(textParts, b.Text)
+			}
+		case "resource":
+			rtext, part, rerr := resourceToContent(i, b.Resource)
+			if rerr != nil {
+				return "", nil, rerr
+			}
+			if rtext != "" {
+				textParts = append(textParts, rtext)
+			}
+			if part != nil {
+				parts = append(parts, *part)
+			}
+		case "resource_link":
+			return "", nil, newMethodErr(codeInvalidParams,
+				fmt.Sprintf("acp: session/prompt: prompt[%d] is a resource_link (%q) — a URI mecatl cannot fetch", i, b.URI))
+		case "image":
+			c, cerr := mediaContent(i, session.MediaImage, b.MimeType, b.Data, b.URI)
+			if cerr != nil {
+				return "", nil, cerr
+			}
+			parts = append(parts, c)
+		case "audio":
+			c, cerr := mediaContent(i, session.MediaAudio, b.MimeType, b.Data, b.URI)
+			if cerr != nil {
+				return "", nil, cerr
+			}
+			parts = append(parts, c)
+		default:
+			return "", nil, newMethodErr(codeInvalidParams,
+				fmt.Sprintf("acp: session/prompt: prompt[%d] has unsupported content type %q", i, b.Type))
 		}
 	}
-	return strings.Join(parts, "\n")
+	if verr := session.ValidateMediaParts(parts); verr != nil {
+		return "", nil, newMethodErr(codeInvalidParams, "acp: session/prompt: "+verr.Error())
+	}
+	return strings.Join(textParts, "\n"), parts, nil
+}
+
+// resourceToContent handles a "resource" ContentBlock. An inline-TEXT resource is
+// flattened into the prompt text (returned as rtext, no Part — the EmbeddedContext
+// path). A binary (blob) resource whose mime names image/* or audio/* becomes that
+// media Part. A resource with neither text nor blob, or a blob with a non-media
+// mime, is a loud error (never silent-dropped).
+func resourceToContent(idx int, r *resourceContents) (rtext string, part *session.Content, err error) {
+	if r == nil {
+		return "", nil, newMethodErr(codeInvalidParams,
+			fmt.Sprintf("acp: session/prompt: prompt[%d] resource has no contents", idx))
+	}
+	switch {
+	case r.Text != "" && r.Blob != "":
+		// Ambiguous: ACP resource contents are text XOR blob. Reject loudly rather
+		// than silently picking one (this issue's whole point is no silent drop).
+		return "", nil, newMethodErr(codeInvalidParams,
+			fmt.Sprintf("acp: session/prompt: prompt[%d] resource has both text and blob contents (expected one)", idx))
+	case r.Text != "":
+		// Embedded-text resource: flatten into the prompt text, no media Part.
+		return r.Text, nil, nil
+	case r.Blob != "":
+		kind, kerr := mediaKindForMIME(r.MimeType)
+		if kerr != nil {
+			return "", nil, newMethodErr(codeInvalidParams,
+				fmt.Sprintf("acp: session/prompt: prompt[%d] resource blob mime %q is not image/* or audio/*", idx, r.MimeType))
+		}
+		c, cerr := mediaContent(idx, kind, r.MimeType, r.Blob, "")
+		if cerr != nil {
+			return "", nil, cerr
+		}
+		return "", &c, nil
+	default:
+		return "", nil, newMethodErr(codeInvalidParams,
+			fmt.Sprintf("acp: session/prompt: prompt[%d] resource has neither text nor blob contents", idx))
+	}
+}
+
+// mediaContent builds one validated media Content from an ACP image/audio block:
+// inline base64 data XOR a URL, with mime. It base64-decodes Data (a decode
+// failure is a loud error) and routes through the session.NewContent validating
+// constructors so the exactly-one-of, mime, and URL-SSRF invariants are enforced
+// once, identically to the gRPC/HTTP mappers. A block carrying BOTH data and uri,
+// or NEITHER, is rejected by the constructor's exactly-one-of check.
+func mediaContent(idx int, kind session.MediaKind, mime, b64Data, rawURL string) (session.Content, error) {
+	if b64Data != "" {
+		raw, derr := base64.StdEncoding.DecodeString(b64Data)
+		if derr != nil {
+			return session.Content{}, newMethodErr(codeInvalidParams,
+				fmt.Sprintf("acp: session/prompt: prompt[%d] %s data is not valid base64: %v", idx, kind, derr))
+		}
+		c, cerr := session.NewContent(kind, mime, raw, "")
+		if cerr != nil {
+			return session.Content{}, newMethodErr(codeInvalidParams,
+				fmt.Sprintf("acp: session/prompt: prompt[%d]: %v", idx, cerr))
+		}
+		return c, nil
+	}
+	c, cerr := session.NewContent(kind, mime, nil, rawURL)
+	if cerr != nil {
+		return session.Content{}, newMethodErr(codeInvalidParams,
+			fmt.Sprintf("acp: session/prompt: prompt[%d]: %v", idx, cerr))
+	}
+	return c, nil
+}
+
+// mediaKindForMIME maps an IANA mime prefix to the media kind for a blob resource.
+// Only image/* and audio/* are recognized; anything else is an error so a blob
+// resource of an unsupported type is rejected loudly rather than dropped.
+func mediaKindForMIME(mime string) (session.MediaKind, error) {
+	switch {
+	case strings.HasPrefix(strings.ToLower(mime), "image/"):
+		return session.MediaImage, nil
+	case strings.HasPrefix(strings.ToLower(mime), "audio/"):
+		return session.MediaAudio, nil
+	default:
+		return "", errors.New("unsupported media mime")
+	}
+}
+
+// rejectUnsupportedMedia loud-rejects any media Part the configured provider
+// cannot consume, consulting the capabilities read once at construction. It is
+// defense-in-depth: handleInitialize already advertised the provider's caps, but a
+// non-conformant client may send an image/audio block anyway — it gets a clear
+// codeInvalidParams error here, never a silent drop. resource_link is already
+// rejected upstream in buildPromptContent.
+func (a *Agent) rejectUnsupportedMedia(parts []session.Content) error {
+	for _, p := range parts {
+		switch p.Kind {
+		case session.MediaImage:
+			if !a.caps.Image {
+				return newMethodErr(codeInvalidParams,
+					"acp: session/prompt: image content not supported by the configured provider")
+			}
+		case session.MediaAudio:
+			if !a.caps.Audio {
+				return newMethodErr(codeInvalidParams,
+					"acp: session/prompt: audio content not supported by the configured provider")
+			}
+		}
+	}
+	return nil
 }

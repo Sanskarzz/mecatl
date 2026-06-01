@@ -104,7 +104,15 @@ func (r *renderer) renderBlock(b *block, expand bool) string {
 	case blockUser:
 		label := r.th.Style("userLabel").Render("you")
 		body := r.th.Style("userBlock").Render(sanitizeTerminal(b.raw))
-		return label + "\n" + body
+		out := label + "\n" + body
+		// Render one muted placeholder line per attached media part, so a multimodal
+		// prompt is never silently shown as text-only. The TUI has no media-attach
+		// input yet (the ACP editor is the headline multimodal client); this is the
+		// render contract for when media IS present.
+		for _, m := range b.media {
+			out += "\n" + r.th.Style("muted").Render("📎 "+sanitizeTerminal(m))
+		}
+		return out
 	case blockAssistant:
 		// Assistant text is rendered through glamour, which neutralises escape
 		// sequences itself — do NOT sanitize here or markdown breaks. The turn's

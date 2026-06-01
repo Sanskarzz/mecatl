@@ -197,12 +197,45 @@ type loadSessionResponse struct {
 
 // --- content blocks ----------------------------------------------------------
 
-// contentBlock is the ACP ContentBlock. This phase models only the text variant
-// (the baseline every agent must support); other variants decode with Type set
-// and Text empty, so a non-text block contributes no text when flattened.
+// contentBlock is the ACP ContentBlock. It models the variants mecatl consumes
+// on an inbound session/prompt: text, image, audio, resource (an embedded
+// resource carrying inline text or a binary blob), and resource_link (a URI
+// reference). The variants share one struct — a Type discriminant plus the union
+// of their fields, each omitempty — because Go cannot express a JSON sum type on
+// one tag; buildPromptContent dispatches on Type and reads only that variant's
+// fields. The media fields mirror the ACP schema's camelCase names:
+//
+//   - text          → Text
+//   - image / audio → Data (base64) XOR URI, plus MimeType
+//   - resource      → Resource (embedded contents: text XOR blob+mimeType)
+//   - resource_link → URI (a reference mecatl cannot fetch — rejected loudly)
 type contentBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
+	// Data is the base64-encoded inline bytes of an image/audio block. ACP carries
+	// media inline as base64 in "data" alongside "mimeType".
+	Data string `json:"data,omitempty"`
+	// MimeType is the IANA media type of an image/audio block (e.g. "image/png").
+	MimeType string `json:"mimeType,omitempty"`
+	// URI is the reference on a resource_link block (and the optional URI on an
+	// image/audio block sourced from a URL rather than inline bytes).
+	URI string `json:"uri,omitempty"`
+	// Resource is the embedded resource contents on a "resource" block.
+	Resource *resourceContents `json:"resource,omitempty"`
+}
+
+// resourceContents is the embedded payload of an ACP "resource" ContentBlock. The
+// ACP EmbeddedResourceResource is itself a union: a TEXT resource carries Text (+
+// MimeType), a BINARY resource carries Blob (base64) + MimeType; both carry the
+// source Uri. mecatl flattens an inline-text resource into the prompt text and
+// treats a blob resource as image/audio per its MimeType (see buildPromptContent).
+type resourceContents struct {
+	URI      string `json:"uri,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
+	// Text is set on a text resource (the inline text contents).
+	Text string `json:"text,omitempty"`
+	// Blob is the base64-encoded bytes of a binary resource.
+	Blob string `json:"blob,omitempty"`
 }
 
 // textBlock constructs a text ContentBlock for an outbound chunk.

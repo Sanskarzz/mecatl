@@ -1305,6 +1305,176 @@ func TestSessionLoadDisabledWithoutStore(t *testing.T) {
 	}
 }
 
+// callErr issues an editor->agent request and returns the JSON-RPC error (failing
+// if the call succeeded instead). It mirrors call but for the loud-reject paths.
+func (e *editor) callErr(method string, params any) json.RawMessage {
+	e.mu.Lock()
+	e.next++
+	id := e.next
+	ch := make(chan rpcMsg, 1)
+	e.pend[id] = ch
+	e.mu.Unlock()
+	e.writeFrame(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+	select {
+	case m := <-ch:
+		if len(m.Error) == 0 {
+			e.t.Fatalf("%s should have errored, got result %s", method, m.Result)
+		}
+		return m.Error
+	case <-time.After(5 * time.Second):
+		e.t.Fatalf("%s timed out", method)
+		return nil
+	}
+}
+
+// initCaps issues initialize and returns the advertised promptCapabilities.
+func initCaps(t *testing.T, e *editor) (image, audio, embedded bool) {
+	t.Helper()
+	res := e.call("initialize", map[string]any{"protocolVersion": 1})
+	var init struct {
+		AgentCapabilities struct {
+			PromptCapabilities struct {
+				Image           bool `json:"image"`
+				Audio           bool `json:"audio"`
+				EmbeddedContext bool `json:"embeddedContext"`
+			} `json:"promptCapabilities"`
+		} `json:"agentCapabilities"`
+	}
+	if err := json.Unmarshal(res, &init); err != nil {
+		t.Fatalf("initialize result: %v", err)
+	}
+	pc := init.AgentCapabilities.PromptCapabilities
+	return pc.Image, pc.Audio, pc.EmbeddedContext
+}
+
+var pngBlockB64 = "iVBORw0KGgo=" // any valid base64; validators check the mime, not the bytes
+
+// TestInitializeTextOnlyProviderAdvertisesNoMedia asserts a text-only provider
+// (the mockllm default) advertises image:false / audio:false / embeddedContext:false.
+func TestInitializeTextOnlyProviderAdvertisesNoMedia(t *testing.T) {
+	svc := newService(t, mockllm.New(), nil)
+	e, cleanup := startAgent(t, svc)
+	defer cleanup()
+	image, audio, embedded := initCaps(t, e)
+	if image || audio || embedded {
+		t.Fatalf("text-only provider advertised media: image=%v audio=%v embedded=%v", image, audio, embedded)
+	}
+}
+
+// TestInitializeImageCapableProviderAdvertisesImage asserts an image-capable
+// provider advertises image:true (and embeddedContext:true), audio:false.
+func TestInitializeImageCapableProviderAdvertisesImage(t *testing.T) {
+	llm := mockllm.NewWith([]mockllm.Option{
+		mockllm.WithCapabilities(port.ProviderCapabilities{Image: true, EmbeddedContext: true}),
+	})
+	svc := newServiceCfg(t, llm, nil, nil)
+	e, cleanup := startAgent(t, svc)
+	defer cleanup()
+	image, audio, embedded := initCaps(t, e)
+	if !image || audio || !embedded {
+		t.Fatalf("image-capable provider: image=%v audio=%v embedded=%v, want true/false/true", image, audio, embedded)
+	}
+}
+
+// TestPromptImageWithImageCapableProvider drives a full prompt carrying an image
+// block against an image-capable provider: the run starts and completes (proving
+// StartRunContent was called with the part and the loop consumed the prompt).
+func TestPromptImageWithImageCapableProvider(t *testing.T) {
+	llm := mockllm.NewWith([]mockllm.Option{
+		mockllm.WithCapabilities(port.ProviderCapabilities{Image: true, EmbeddedContext: true}),
+	}, mockllm.TextTurn("saw the image"))
+	svc := newServiceCfg(t, llm, allowRules(), nil)
+	e, cleanup := startAgent(t, svc)
+	defer cleanup()
+
+	res := e.call("session/new", map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}})
+	var ns struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(res, &ns)
+
+	out := e.call("session/prompt", map[string]any{
+		"sessionId": ns.SessionID,
+		"prompt": []any{
+			map[string]any{"type": "text", "text": "what is this"},
+			map[string]any{"type": "image", "mimeType": "image/png", "data": pngBlockB64},
+		},
+	})
+	var pr struct {
+		StopReason string `json:"stopReason"`
+	}
+	if err := json.Unmarshal(out, &pr); err != nil || pr.StopReason != "end_turn" {
+		t.Fatalf("prompt: stopReason %q err %v", pr.StopReason, err)
+	}
+	if llm.Calls() == 0 {
+		t.Fatalf("provider.Stream was never called; the image prompt did not start a run")
+	}
+}
+
+// TestPromptImageWithTextOnlyProviderRejected asserts an image block against a
+// text-only provider is loud-rejected and NO run is ever started.
+func TestPromptImageWithTextOnlyProviderRejected(t *testing.T) {
+	llm := mockllm.New(mockllm.TextTurn("should not run"))
+	svc := newService(t, llm, allowRules())
+	e, cleanup := startAgent(t, svc)
+	defer cleanup()
+
+	res := e.call("session/new", map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}})
+	var ns struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(res, &ns)
+
+	errBody := e.callErr("session/prompt", map[string]any{
+		"sessionId": ns.SessionID,
+		"prompt": []any{
+			map[string]any{"type": "image", "mimeType": "image/png", "data": pngBlockB64},
+		},
+	})
+	if !strings.Contains(string(errBody), "image content not supported") {
+		t.Fatalf("error should say image unsupported, got %s", errBody)
+	}
+	// The run was never started: the provider's Stream must not have been called and
+	// no run leaked in the registry.
+	if _, ok := svc.LookupRun(session.SessionID(ns.SessionID)); ok {
+		t.Fatalf("a run was started for a rejected image prompt")
+	}
+	if llm.Calls() != 0 {
+		t.Fatalf("provider.Stream was called %d times for a rejected prompt; want 0", llm.Calls())
+	}
+}
+
+// TestPromptAudioWithAudioIncapableProviderRejected asserts an audio block against
+// an image-only (audio:false) provider is loud-rejected before the run — proving
+// audio is wired but provider-gated off.
+func TestPromptAudioWithAudioIncapableProviderRejected(t *testing.T) {
+	llm := mockllm.NewWith([]mockllm.Option{
+		mockllm.WithCapabilities(port.ProviderCapabilities{Image: true, EmbeddedContext: true}),
+	}, mockllm.TextTurn("should not run"))
+	svc := newServiceCfg(t, llm, allowRules(), nil)
+	e, cleanup := startAgent(t, svc)
+	defer cleanup()
+
+	res := e.call("session/new", map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}})
+	var ns struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(res, &ns)
+
+	errBody := e.callErr("session/prompt", map[string]any{
+		"sessionId": ns.SessionID,
+		"prompt": []any{
+			map[string]any{"type": "audio", "mimeType": "audio/wav", "data": pngBlockB64},
+		},
+	})
+	if !strings.Contains(string(errBody), "audio content not supported") {
+		t.Fatalf("error should say audio unsupported, got %s", errBody)
+	}
+	if llm.Calls() != 0 {
+		t.Fatalf("provider.Stream was called %d times for a rejected audio prompt; want 0", llm.Calls())
+	}
+}
+
 // TestSessionLoadUnknownSession asserts session/load with resume enabled errors
 // cleanly for a session id the store has never seen.
 func TestSessionLoadUnknownSession(t *testing.T) {

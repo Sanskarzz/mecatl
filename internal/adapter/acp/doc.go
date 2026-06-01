@@ -33,7 +33,16 @@
 //     delegation on session/load (a resumed session uses osfs).
 //   - DURABLE / broader-granularity learned permissions (today: in-memory,
 //     per-session, tool + exact-pattern only).
-//   - image/audio prompt content (promptCapabilities stays text-only).
 //   - full-fidelity projection of turn.*/compaction events (dropped or folded
 //     into a thought/message chunk).
+//
+// MULTIMODAL PROMPT CONTENT (issue #5) is DONE: session/prompt content blocks are
+// translated by buildPromptContent into the prompt's flattened text PLUS media
+// Parts (image/audio), reusing the session.NewContent validating constructors and
+// per-prompt size caps at the ACP boundary. promptCapabilities now reflect the
+// configured provider (ProviderCapabilities seam): image when the provider
+// supports it, embeddedContext (inline-text resources flatten to text), audio
+// wired-but-provider-gated (OpenAI Responses has no audio input member, so
+// advertised false). A resource_link, an unsupported block type, or a media part
+// the provider cannot consume is REJECTED loudly — never silently dropped.
 package acp
