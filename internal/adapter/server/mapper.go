@@ -151,18 +151,20 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 		})
 	}
 	return &mecatlv1.Team{
-		ParentCallId: p.ParentCallID,
-		TeamId:       p.TeamID,
-		Roster:       roster,
-		Member:       p.Member,
-		InnerKind:    string(p.InnerKind),
-		Text:         p.Text,
-		ToolName:     p.ToolName,
-		Detail:       p.Detail,
-		IsError:      p.IsError,
-		Rounds:       clampInt32(p.Rounds),
-		Stop:         string(p.Stop),
-		Usage:        toProtoUsage(p.Usage),
+		ParentCallId:  p.ParentCallID,
+		TeamId:        p.TeamID,
+		Roster:        roster,
+		Member:        p.Member,
+		InnerKind:     string(p.InnerKind),
+		Text:          p.Text,
+		ToolName:      p.ToolName,
+		Detail:        p.Detail,
+		IsError:       p.IsError,
+		Rounds:        clampInt32(p.Rounds),
+		Stop:          string(p.Stop),
+		Usage:         toProtoUsage(p.Usage),
+		ContextUsed:   p.ContextUsed,
+		ContextWindow: p.ContextWindow,
 	}
 }
 

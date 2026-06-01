@@ -61,6 +61,15 @@ type teamLane struct {
 	usage     client.Usage
 	trace     []teamTrace
 	done      bool // the member reported its terminal result
+
+	// ctxUsed / ctxWindow back the per-member context meter in the ctrl+a agents
+	// overlay. ctxUsed is the CURRENT context occupancy — the most recent turn's
+	// input-token count (ASSIGNED, not summed, each turn.end, mirroring the main
+	// meter's m.contextTokens = turn input tokens) — and ctxWindow is the member
+	// engine's context window (sticky: kept across turns, only overwritten by a
+	// positive value). When ctxWindow is 0 no meter is drawn for the lane.
+	ctxUsed   int64
+	ctxWindow int64
 }
 
 // blockKind classifies a scrollback block so the renderer knows how to style it.
@@ -393,6 +402,14 @@ func (c *conversation) addTeamMember(msg client.TeamMsg) bool {
 		ln.markToolResult(msg.ToolName, msg.Detail, msg.IsError)
 	case "turn.end":
 		ln.usage = sumUsage(ln.usage, msg.Usage)
+		// The context meter tracks CURRENT occupancy, not cumulative cost: assign the
+		// most recent turn's input tokens (matching the main meter's
+		// m.contextTokens = msg.Usage.InputTokens), and keep the window sticky so a
+		// later turn.end that omits it (0) does not erase a known denominator.
+		ln.ctxUsed = msg.Usage.InputTokens
+		if msg.ContextWindow > 0 {
+			ln.ctxWindow = msg.ContextWindow
+		}
 	case "result":
 		ln.done = true
 		ln.current = ""

@@ -383,6 +383,12 @@ func projectTeamEvent(parentCallID, teamID string, te TeamEvent) (session.Event,
 	case session.EvTurnEnd:
 		if ev.TurnEnd != nil {
 			base.Usage = ev.TurnEnd.Usage
+			// The per-member context meter (ctrl+a overlay) reads the CURRENT context
+			// occupancy — this turn's input-token count — as its numerator, and the
+			// producing member engine's window as its denominator. Both ride the
+			// turn.end projection so a client can draw a band bar per member lane.
+			base.ContextUsed = int64(ev.TurnEnd.Usage.InputTokens)
+			base.ContextWindow = int64(te.ContextWindow)
 		}
 	case session.EvResult:
 		if ev.Result != nil {

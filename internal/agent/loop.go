@@ -130,6 +130,12 @@ func (e *Engine) Capabilities() port.ProviderCapabilities {
 	return e.deps.LLM.Capabilities()
 }
 
+// ContextWindow reports the model's context window in tokens (Deps.ContextWindowTokens),
+// or 0 when unknown/unset. The team supervisor reads it from each member's engine
+// so a forwarded turn.end can carry the denominator for the per-member context
+// meter in the ctrl+a agents overlay (the window lives in private deps).
+func (e *Engine) ContextWindow() int { return e.deps.ContextWindowTokens }
+
 // catalogToolInfo is a (name, read-only) summary of one tool in an Engine's
 // catalog. The supervisor uses it to verify a member's tool set without
 // type-asserting concrete tool types (which would require importing an adapter,

@@ -171,6 +171,13 @@ type TeamMsg struct {
 	// Usage is a member's per-event usage (TeamMember turn.end/result) or, on
 	// TeamEnd, the summed team total.
 	Usage Usage
+	// ContextUsed / ContextWindow are the per-member context-meter numerator
+	// (current context occupancy — the most recent turn's input tokens) and
+	// denominator (the member engine's context window), set on TeamMember turn.end;
+	// 0 when unknown. They drive the band bar on each member lane in the ctrl+a
+	// agents overlay.
+	ContextUsed   int64
+	ContextWindow int64
 }
 
 // CompactionMsg is a muted "history compacted" notice.
@@ -245,18 +252,20 @@ func subagentMsg(kind SubagentKind, s *mecatlv1.Subagent) SubagentMsg {
 // team.* event kinds; the roster is converted to plain TeamMemberSpec values.
 func teamMsg(kind TeamKind, t *mecatlv1.Team) TeamMsg {
 	msg := TeamMsg{
-		Kind:         kind,
-		ParentCallID: t.GetParentCallId(),
-		TeamID:       t.GetTeamId(),
-		Member:       t.GetMember(),
-		InnerKind:    t.GetInnerKind(),
-		Text:         t.GetText(),
-		ToolName:     t.GetToolName(),
-		Detail:       t.GetDetail(),
-		IsError:      t.GetIsError(),
-		Rounds:       int(t.GetRounds()),
-		Stop:         t.GetStop(),
-		Usage:        usageFrom(t.GetUsage()),
+		Kind:          kind,
+		ParentCallID:  t.GetParentCallId(),
+		TeamID:        t.GetTeamId(),
+		Member:        t.GetMember(),
+		InnerKind:     t.GetInnerKind(),
+		Text:          t.GetText(),
+		ToolName:      t.GetToolName(),
+		Detail:        t.GetDetail(),
+		IsError:       t.GetIsError(),
+		Rounds:        int(t.GetRounds()),
+		Stop:          t.GetStop(),
+		Usage:         usageFrom(t.GetUsage()),
+		ContextUsed:   t.GetContextUsed(),
+		ContextWindow: t.GetContextWindow(),
 	}
 	for _, r := range t.GetRoster() {
 		msg.Roster = append(msg.Roster, TeamMemberSpec{

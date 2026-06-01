@@ -223,7 +223,8 @@ type TeamMemberSpec struct {
 // Which fields are set depends on the event kind:
 //   - EvTeamStart:  ParentCallID, TeamID, Roster.
 //   - EvTeamMember: ParentCallID, TeamID, Member, InnerKind, and the subset of
-//     {Text, ToolName, Detail, IsError, Usage} relevant to InnerKind.
+//     {Text, ToolName, Detail, IsError, Usage, ContextUsed, ContextWindow}
+//     relevant to InnerKind.
 //   - EvTeamEnd:    ParentCallID, TeamID, Rounds, Stop, Usage (cumulative).
 type TeamPayload struct {
 	// ParentCallID is the parent's Team tool-call id, attributing every team.*
@@ -262,6 +263,16 @@ type TeamPayload struct {
 	// Usage is the member's per-event usage (EvTeamMember turn.end/result) or, on
 	// EvTeamEnd, the TEAM TOTAL — the sum of every member's per-turn usage.
 	Usage Usage
+	// ContextUsed is the member's CURRENT context occupancy — the most recent
+	// turn's input-token count (Usage.InputTokens of the turn just ended), i.e.
+	// what the next turn would carry into the model, not a cumulative sum. Set on
+	// EvTeamMember turn.end; 0 when unknown. It feeds the per-member context meter
+	// in the ctrl+a agents overlay (the team analogue of the main context meter).
+	ContextUsed int64
+	// ContextWindow is the producing member engine's context window in tokens (the
+	// meter's denominator). Set on EvTeamMember turn.end; 0 when unknown (no meter
+	// is drawn in that case).
+	ContextWindow int64
 }
 
 // Event is the domain-owned, provider-neutral unit of the streaming model. The

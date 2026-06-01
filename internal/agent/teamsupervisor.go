@@ -98,6 +98,11 @@ type TeamEvent struct {
 	Member string
 	// Event is the underlying session Event (turn.start, tool.call, result, ...).
 	Event session.Event
+	// ContextWindow is the producing member engine's context window in tokens
+	// (Engine.ContextWindow), the denominator for the per-member context meter. It
+	// is the same for every event of a given member; projectTeamEvent forwards it
+	// onto the turn.end projection (0 when the member's engine has no window set).
+	ContextWindow int
 }
 
 // MemberSpec describes a member to enrol before running the team.
@@ -541,7 +546,7 @@ func (s *Supervisor) runTurn(ctx context.Context, ti turnInput, evCh chan<- Team
 				m.lastText = text
 			}
 		}
-		evCh <- TeamEvent{Member: m.spec.Name, Event: ev}
+		evCh <- TeamEvent{Member: m.spec.Name, Event: ev, ContextWindow: m.engine.ContextWindow()}
 	}
 
 	// Accumulate this member's LIFETIME turn spend before Reopen zeroes the per-round

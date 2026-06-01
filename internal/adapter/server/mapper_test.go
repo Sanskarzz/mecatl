@@ -221,6 +221,22 @@ func TestToProtoTable(t *testing.T) {
 			},
 		},
 		{
+			name: "team.member turn.end context meter",
+			in: session.Event{Type: session.EvTeamMember, Seq: 33, Turn: 1,
+				Team: &session.TeamPayload{ParentCallID: "p1", TeamID: "team-p1", Member: "worker",
+					InnerKind:     session.EvTurnEnd,
+					Usage:         session.Usage{InputTokens: 40000, OutputTokens: 80},
+					ContextUsed:   40000,
+					ContextWindow: 200000}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				tm := got.GetTeam()
+				if tm == nil || tm.GetContextUsed() != 40000 || tm.GetContextWindow() != 200000 {
+					t.Fatalf("team.member context-meter fields mismatch: used=%d window=%d",
+						tm.GetContextUsed(), tm.GetContextWindow())
+				}
+			},
+		},
+		{
 			name: "team.end",
 			in: session.Event{Type: session.EvTeamEnd, Seq: 32, Turn: 1,
 				Team: &session.TeamPayload{ParentCallID: "p1", TeamID: "team-p1", Rounds: 3,

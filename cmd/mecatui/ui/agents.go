@@ -304,7 +304,7 @@ func renderAgentsRoster(th theme.Theme, st agentsState, b *block, height int) st
 	}
 	for row := start; row < end; row++ {
 		ln := &b.teamLanes[order[row]]
-		line := teamRosterLine(ln, nameW)
+		line := teamRosterLine(th, ln, nameW)
 		if row == cursor {
 			out.WriteString(th.Style("askButtonActive").Render("› "+line) + "\n")
 		} else {
@@ -320,12 +320,20 @@ func renderAgentsRoster(th theme.Theme, st agentsState, b *block, height int) st
 }
 
 // teamRosterLine is one roster row: the inline lane line (state glyph + mutating
-// cue + name + [lead] + current tool/state + usage) with the member's ROLE
+// cue + name + [lead] + current tool/state + usage), then the per-member context
+// meter band (only when the member's window is known), then the member's ROLE
 // appended as a dim suffix when present — the detail the calm inline card omits,
-// surfaced here in the dedicated deep view. The role is sanitized (roster-derived)
-// and truncated so a long role can't blow out the row.
-func teamRosterLine(ln *teamLane, nameW int) string {
+// surfaced here in the dedicated deep view. The context meter reuses the footer's
+// renderContextMeter so the band/percentage/⚠ vocabulary matches the main meter
+// exactly. It is GATED on a known window (ctxWindow>0): with no window there is no
+// denominator, so a bare "ctx <size>" with no band is suppressed entirely. The
+// role is sanitized (roster-derived) and truncated so a long role can't blow out
+// the row.
+func teamRosterLine(th theme.Theme, ln *teamLane, nameW int) string {
 	line := teamLaneLine(ln, nameW)
+	if ln.ctxWindow > 0 {
+		line += " · " + renderContextMeter(th, ln.ctxUsed, ln.ctxWindow)
+	}
 	if ln.role != "" {
 		line += " · " + truncate(sanitizeTerminal(ln.role), maxAgentsRoleLen)
 	}
@@ -375,8 +383,13 @@ func renderAgentsFocus(th theme.Theme, b *block, member string, height int) stri
 	out.WriteString("\n")
 	// The member's own lane line (reusing the inline vocabulary) as a sub-header so
 	// the focus pane is self-describing: glyph, mutating cue, name, [lead], state,
-	// usage.
-	out.WriteString(muted.Render(teamLaneLine(ln, 0)))
+	// usage — plus the per-member context meter band when the member's window is
+	// known (same gating as the roster row: no window → no meter).
+	subhead := teamLaneLine(ln, 0)
+	if ln.ctxWindow > 0 {
+		subhead += " · " + renderContextMeter(th, ln.ctxUsed, ln.ctxWindow)
+	}
+	out.WriteString(muted.Render(subhead))
 	out.WriteString("\n\n")
 
 	r := &renderer{th: th} // a width-0 renderer: chips don't wrap, traces render full

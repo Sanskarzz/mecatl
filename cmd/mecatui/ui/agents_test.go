@@ -408,6 +408,101 @@ func TestInlineTeamRollupAdvertisesOverlay(t *testing.T) {
 	}
 }
 
+// ctxTurnEnd builds a turn.end team.member msg carrying the per-member context
+// meter fields (used input tokens + the engine window) for member name on team t1.
+func ctxTurnEnd(name string, used, window int64) client.TeamMsg {
+	return member(name, "turn.end", client.TeamMsg{
+		Usage:         client.Usage{InputTokens: used},
+		ContextUsed:   used,
+		ContextWindow: window,
+	})
+}
+
+// TestAgentsRosterContextMeter asserts each roster lane shows the per-member
+// context band (the footer's renderContextMeter vocabulary) once a turn.end has
+// carried a known window: a low-pressure member reads "ctx … NN%" with no ⚠, a
+// danger-band member appends the ⚠ marker (which survives ANSI stripping), and a
+// member whose window is still unknown shows its ↑/↓ usage but NO ctx/% meter.
+func TestAgentsRosterContextMeter(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(c *conversation) {
+		c.setTeamStart("t1", []client.TeamMemberSpec{
+			{Name: "lead", Role: "coordinator", Lead: true, Mutating: true},
+			{Name: "low", Role: "worker"},
+			{Name: "danger", Role: "worker"},
+			{Name: "nowin", Role: "worker"},
+		})
+		c.addTeamMember(ctxTurnEnd("low", 40000, 200000))     // 20% → ok, no ⚠
+		c.addTeamMember(ctxTurnEnd("danger", 190000, 200000)) // 95% → danger ⚠
+		// "nowin" gets a turn.end with a 0 window: usage lands, but no meter.
+		c.addTeamMember(member("nowin", "turn.end", client.TeamMsg{
+			Usage: client.Usage{InputTokens: 1200}}))
+	})
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	out := stripANSIstr(m.View().Content)
+
+	rosterLine := func(name string) string {
+		for _, ln := range strings.Split(out, "\n") {
+			if strings.Contains(ln, name) {
+				return ln
+			}
+		}
+		return ""
+	}
+
+	low := rosterLine("low")
+	if !strings.Contains(low, "ctx ") || !strings.Contains(low, "20%") {
+		t.Errorf("low-pressure lane should show 'ctx … 20%%', got %q", low)
+	}
+	if strings.Contains(low, ctxDangerMark) {
+		t.Errorf("low-pressure lane must NOT show the ⚠ marker, got %q", low)
+	}
+	if !strings.Contains(low, "40K/200K") {
+		t.Errorf("low lane should show used/window, got %q", low)
+	}
+
+	danger := rosterLine("danger")
+	if !strings.Contains(danger, "95%") || !strings.Contains(danger, ctxDangerMark) {
+		t.Errorf("danger lane should show '95%% ⚠' (⚠ surviving ANSI strip), got %q", danger)
+	}
+	if !strings.Contains(danger, ctxGlyphDanger) {
+		t.Errorf("danger lane should use the danger fill glyph, got %q", danger)
+	}
+
+	nowin := rosterLine("nowin")
+	if strings.Contains(nowin, "ctx ") || strings.Contains(nowin, "%") {
+		t.Errorf("unknown-window lane must NOT draw a ctx meter, got %q", nowin)
+	}
+	if !strings.Contains(nowin, "↑") || !strings.Contains(nowin, "↓") {
+		t.Errorf("unknown-window lane should still show ↑/↓ usage, got %q", nowin)
+	}
+}
+
+// TestAgentsFocusContextMeter asserts the per-member focus pane sub-header also
+// carries the context band when the member's window is known.
+func TestAgentsFocusContextMeter(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(c *conversation) {
+		c.setTeamStart("t1", []client.TeamMemberSpec{{Name: "scout", Role: "researcher", Lead: true}})
+		c.addTeamMember(ctxTurnEnd("scout", 176000, 200000)) // 88% → warn band
+	})
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if m.agents.view != agentsFocus {
+		t.Fatalf("view = %v, want agentsFocus", m.agents.view)
+	}
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "ctx ") || !strings.Contains(out, "88%") {
+		t.Errorf("focus sub-header should carry the context meter (88%%), got %q", out)
+	}
+	if !strings.Contains(out, "176K/200K") {
+		t.Errorf("focus meter should show used/window, got %q", out)
+	}
+}
+
 // --- goldens ---------------------------------------------------------------
 
 // agentsGoldenTeam builds a representative team for the overlay goldens: a lead +

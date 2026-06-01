@@ -481,6 +481,14 @@ message Team {
   // usage is the member's per-event usage (team.member turn.end/result) or, on
   // team.end, the TEAM TOTAL — the sum of every member's per-turn usage.
   Usage usage = 12;
+  // context_used is the member's CURRENT context occupancy — the most recent
+  // turn's input-token count (team.member turn.end). It is the numerator of the
+  // per-member context meter in the ctrl+a agents overlay; 0 when unknown.
+  int64 context_used = 13;
+  // context_window is the producing member engine's context window in tokens —
+  // the meter's denominator (team.member turn.end). 0 when unknown (no meter is
+  // drawn in that case).
+  int64 context_window = 14;
 }
 
 // ToolCall is a request from the model to invoke a named tool. Mirrors

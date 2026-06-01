@@ -124,12 +124,13 @@ func TestEventToMsgTeam(t *testing.T) {
 		{
 			"team.member",
 			&mecatlv1.Event{Type: "team.member", Team: &mecatlv1.Team{
-				ParentCallId: "t1", TeamId: "team-t1", Member: "scout", InnerKind: "tool.call",
-				ToolName: "Grep", Detail: "pattern: foo", IsError: false,
-				Usage: &mecatlv1.Usage{InputTokens: 50, OutputTokens: 9}}},
+				ParentCallId: "t1", TeamId: "team-t1", Member: "scout", InnerKind: "turn.end",
+				Usage:       &mecatlv1.Usage{InputTokens: 40000, OutputTokens: 80},
+				ContextUsed: 40000, ContextWindow: 200000}},
 			TeamMsg{Kind: TeamMember, ParentCallID: "t1", TeamID: "team-t1", Member: "scout",
-				InnerKind: "tool.call", ToolName: "Grep", Detail: "pattern: foo",
-				Usage: Usage{InputTokens: 50, OutputTokens: 9}},
+				InnerKind:   "turn.end",
+				Usage:       Usage{InputTokens: 40000, OutputTokens: 80},
+				ContextUsed: 40000, ContextWindow: 200000},
 		},
 		{
 			"team.end",
