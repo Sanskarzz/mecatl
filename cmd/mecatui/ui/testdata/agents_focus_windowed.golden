@@ -20,5 +20,5 @@
 ┃
 ┃
 ────────────────────────────────────────────────────────────────────────────────────────────────────
- connected                                                                   ctx 0 · ↑0 ↓0 cache 0%
+ connected                                           ⟳ 1/1 working · ctrl+a  ctx 0 · ↑0 ↓0 cache 0%
 enter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · ctrl+a team · ctrl+t details · ctrl+c quit

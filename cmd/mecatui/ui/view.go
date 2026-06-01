@@ -156,25 +156,64 @@ const footerGapPad = 2
 
 // fitFooter right-aligns the richest usage segment that fits beside the left
 // status, shedding facets before the context signal — context % is the single
-// most valuable signal, so it survives longest. Tiers, richest to poorest:
+// most valuable signal, so it survives longest. When a team is LIVE a team-summary
+// segment is PREPENDED to the right side; it is LOWER priority than the context
+// meter (it's an advertisement, context % is the headline safety signal), so it is
+// the FIRST thing dropped as width tightens. Tiers, richest to poorest:
 //
-//	full:    "ctx ▒▒▒▒▒·· 70% · 140K/200K · ↑7.9K ↓345 ⊕1.2K cache 88%"
-//	meter:   "ctx ▒▒▒▒▒·· 70% · 140K/200K"   (drop io/cache facets first)
-//	compact: "ctx ▒▒▒▒▒·· 70%"               (drop used/total)
-//	minimal: "ctx 70%"                        (drop the bar)
-//	nothing: left status alone
+//	"⟳ team-x · 2/3 working · ctrl+a agents  ctx ▒▒▒▒▒·· 70% · 140K/200K · ↑7.9K ↓345 cache 88%"
+//	"⟳ team-x · 2/3 working · ctrl+a agents  ctx ▒▒▒▒▒·· 70% · 140K/200K"
+//	"⟳ 2/3 working · ctrl+a  ctx ▒▒▒▒▒·· 70%"   (team→medium, ctx→compact)
+//	"⟳ 2/3  ctx 70%"                            (team→compact, ctx→minimal)
+//	"ctx 70%"                                    (team DROPPED, ctx wins)
+//	then the existing ctx-only fallbacks, then left status alone.
+//
+// When no team is live the team segment is empty and the candidate list collapses
+// to EXACTLY the historical ctx-only list — keeping the no-team footer
+// byte-identical (existing goldens unaffected).
 //
 // When the window is unknown every meter tier collapses to "ctx 7.9K", so the
 // tiers naturally narrow to just that, then to nothing.
 func (m Model) fitFooter(left string, width int) string {
 	th := m.deps.Theme
 	meter := renderContextMeter(th, m.contextTokens, m.deps.ContextWindow)
-	candidates := []string{
-		meter + " · " + renderUsageFacets(m.usage),
-		meter,
-		renderContextMeterCompact(th, m.contextTokens, m.deps.ContextWindow),
-		renderContextMeterMinimal(th, m.contextTokens, m.deps.ContextWindow),
+	meterCompact := renderContextMeterCompact(th, m.contextTokens, m.deps.ContextWindow)
+	meterMinimal := renderContextMeterMinimal(th, m.contextTokens, m.deps.ContextWindow)
+
+	// The team segment is non-empty ONLY for a LIVE team — liveTeamBlock returns the
+	// latest team that is still running (not teamDone). This DELIBERATELY differs
+	// from the ctrl+a overlay's gate: the footer is a live-activity advertisement
+	// and hides once the team is done, whereas openAgents opens on the last-seen
+	// team done-or-not (so the user can still review a finished roster). The two are
+	// meant to disagree in the done state — do not unify them.
+	var teamFull, teamMedium, teamCompact string
+	if b := m.conv.liveTeamBlock(); b != nil {
+		working, total := teamWorkingCounts(b.teamLanes)
+		teamFull = teamFooterFull(th, b.teamID, working, total)
+		teamMedium = th.Style("spinner").Render(teamFooterMedium(b.teamID, working, total))
+		teamCompact = th.Style("spinner").Render(teamFooterCompact(working, total))
 	}
+
+	const sep = "  " // gap between the team segment and the ctx segment
+
+	var candidates []string
+	if teamFull != "" {
+		// Richest-to-poorest cross-product. The team segment sheds before the ctx
+		// meter: the last team-bearing tier (team-compact + ctx-minimal) is followed
+		// by the team-LESS ctx-minimal so context wins when width is tight.
+		candidates = append(candidates,
+			teamFull+sep+meter+" · "+renderUsageFacets(m.usage),
+			teamFull+sep+meter,
+			teamMedium+sep+meterCompact,
+			teamCompact+sep+meterMinimal,
+		)
+	}
+	candidates = append(candidates,
+		meter+" · "+renderUsageFacets(m.usage),
+		meter,
+		meterCompact,
+		meterMinimal,
+	)
 	leftW := lipgloss.Width(left)
 	for _, seg := range candidates {
 		gap := width - leftW - lipgloss.Width(seg) - footerGapPad

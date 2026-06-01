@@ -40,6 +40,17 @@ const (
 // textual cue so "over budget" reads even with ANSI stripped.
 const ctxDangerMark = " ⚠"
 
+// teamLiveGlyph leads the footer team-summary segment when a team is LIVE. It is a
+// STATIC literal (the issue mockup's "⟳"), deliberately NOT the animated m.sp
+// spinner — the footer team segment is an advertisement, not a per-frame activity
+// indicator, so it must not force the model to re-render every tick.
+const teamLiveGlyph = "⟳"
+
+// teamFooterIDLimit caps the rune-length of the team id shown in the full footer
+// segment so a long id can't blow out the footer width before fitFooter even tiers
+// it. Rune-safe via truncate.
+const teamFooterIDLimit = 16
+
 // humanizeTokens renders a token count compactly: < 1000 verbatim, thousands as
 // "7.9K", millions as "1.2M". One decimal place, trailing ".0" trimmed
 // (e.g. 2000 → "2K", 7903 → "7.9K", 1200000 → "1.2M"). Negatives are clamped to
@@ -286,4 +297,45 @@ func renderUsageFacets(u client.Usage) string {
 	}
 	fmt.Fprintf(&b, " cache %s", pctString(cacheHitRate(u)))
 	return b.String()
+}
+
+// teamWorkingCounts classifies a team's member lanes into (working, total). total
+// is the lane count; working is the number of lanes NOT yet done. It reuses the
+// EXACT same !ln.done predicate that teamGlyph/teamLaneState use to render the
+// per-member roster glyph (◆ working / ○ done), so the footer's "k/N working"
+// can never disagree with the glyphs in the ctrl+a panel.
+func teamWorkingCounts(lanes []teamLane) (working, total int) {
+	total = len(lanes)
+	for i := range lanes {
+		if !lanes[i].done {
+			working++
+		}
+	}
+	return working, total
+}
+
+// teamFooterFull is the richest footer team-summary tier:
+// "⟳ team-<id> · k/N working · ctrl+a agents". The id is sanitized and rune-safe
+// truncated; when it is empty (team.start missed) the id-less medium form is used
+// instead of showing a bare "team-". The segment carries the spinner (accent) slot
+// so the live team reads as active without animation.
+func teamFooterFull(th theme.Theme, teamID string, working, total int) string {
+	id := truncate(sanitizeTerminal(teamID), teamFooterIDLimit)
+	if id == "" {
+		return th.Style("spinner").Render(teamFooterMedium(teamID, working, total))
+	}
+	seg := fmt.Sprintf("%s %s · %d/%d working · ctrl+a agents", teamLiveGlyph, id, working, total)
+	return th.Style("spinner").Render(seg)
+}
+
+// teamFooterMedium drops the id and the "agents" word: "⟳ k/N working · ctrl+a".
+// It carries no theme styling itself so it composes when called from
+// teamFooterFull (which styles the whole segment); fitFooter styles standalone uses.
+func teamFooterMedium(_ string, working, total int) string {
+	return fmt.Sprintf("%s %d/%d working · ctrl+a", teamLiveGlyph, working, total)
+}
+
+// teamFooterCompact is the poorest team tier: "⟳ k/N" — just the glyph + counts.
+func teamFooterCompact(working, total int) string {
+	return fmt.Sprintf("%s %d/%d", teamLiveGlyph, working, total)
 }

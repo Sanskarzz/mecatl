@@ -155,6 +155,7 @@ type block struct {
 	// them). Member content lives in each lane's capped trace; nothing here enters
 	// the parent conversation.
 	team       bool
+	teamID     string // the team's stable id (e.g. "team-p1"), shown in the live footer summary segment
 	teamLanes  []teamLane
 	teamTasks  []teamTask // the team's shared task list (ctrl+a task sub-view)
 	teamRounds int
@@ -355,15 +356,20 @@ func (c *conversation) teamBlock(parentCallID string) *block {
 	return nil
 }
 
-// setTeamStart marks the Team block matching parentCallID as a team and seeds its
-// per-member lanes from the roster (in roster order). Returns false when no
-// matching block exists.
-func (c *conversation) setTeamStart(parentCallID string, roster []client.TeamMemberSpec) bool {
+// setTeamStart marks the Team block matching parentCallID as a team, records its
+// stable team id (for the live footer summary segment), and seeds its per-member
+// lanes from the roster (in roster order). teamID is set only when non-empty so a
+// later defensive set from a team.member/team.end event never erases a known id.
+// Returns false when no matching block exists.
+func (c *conversation) setTeamStart(parentCallID, teamID string, roster []client.TeamMemberSpec) bool {
 	b := c.teamBlock(parentCallID)
 	if b == nil {
 		return false
 	}
 	b.team = true
+	if teamID != "" {
+		b.teamID = teamID
+	}
 	b.teamLanes = make([]teamLane, 0, len(roster))
 	for _, m := range roster {
 		b.teamLanes = append(b.teamLanes, teamLane{
@@ -402,6 +408,12 @@ func (c *conversation) addTeamMember(msg client.TeamMsg) bool {
 		return false
 	}
 	b.team = true
+	// Defensively backfill the team id: team.start can be missed (the same race the
+	// lane() fallback guards against), so a team.member carrying the id seeds it.
+	// Only overwrite when non-empty so a known id is never erased.
+	if msg.TeamID != "" {
+		b.teamID = msg.TeamID
+	}
 	ln := b.lane(msg.Member)
 	switch msg.InnerKind {
 	case "message.delta":
@@ -485,13 +497,17 @@ func (ln *teamLane) pushTrace(t teamTrace) {
 }
 
 // setTeamEnd records the resolved end stats (rounds, stop, summed usage) on the
-// Team block matching parentCallID. Returns false when no match.
-func (c *conversation) setTeamEnd(parentCallID string, rounds int, stop string, usage client.Usage) bool {
+// Team block matching parentCallID, defensively backfilling the team id (only when
+// non-empty) in case team.start was missed. Returns false when no match.
+func (c *conversation) setTeamEnd(parentCallID, teamID string, rounds int, stop string, usage client.Usage) bool {
 	b := c.teamBlock(parentCallID)
 	if b == nil {
 		return false
 	}
 	b.team = true
+	if teamID != "" {
+		b.teamID = teamID
+	}
 	b.teamDone = true
 	b.teamRounds = rounds
 	b.teamStop = stop
@@ -540,6 +556,18 @@ func (c *conversation) latestTeamBlock() *block {
 		}
 	}
 	return nil
+}
+
+// liveTeamBlock returns the latest team block that is still RUNNING (not
+// teamDone) — the footer's live-activity signal. Distinct from latestTeamBlock,
+// which returns the most-recent team done-or-not so the ctrl+a overlay can still
+// review a finished roster.
+func (c *conversation) liveTeamBlock() *block {
+	b := c.latestTeamBlock()
+	if b == nil || b.teamDone {
+		return nil
+	}
+	return b
 }
 
 // addNotice appends a muted info block (compaction / permission verb).

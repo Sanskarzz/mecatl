@@ -44,7 +44,7 @@ func bigRoster(n int) []client.TeamMemberSpec {
 func TestAgentsOpensRoster(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
 	m = seedTeam(m, func(c *conversation) {
-		c.setTeamStart("t1", roster())
+		c.setTeamStart("t1", "", roster())
 		c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Grep"}))
 	})
 	mm, _ := m.Update(ctrlKey('a'))
@@ -82,7 +82,7 @@ func TestAgentsNoTeamIsNoOp(t *testing.T) {
 // mid-run), like the MCP overlays.
 func TestAgentsGatedWhileRunning(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
-	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", roster()) })
+	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", "", roster()) })
 	m.phase = phaseRunning
 	mm, _ := m.openAgents()
 	if mm.(Model).agents.view != agentsNone {
@@ -96,7 +96,7 @@ func TestAgentsGatedWhileRunning(t *testing.T) {
 func TestAgentsSelectionAndFocus(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
 	m = seedTeam(m, func(c *conversation) {
-		c.setTeamStart("t1", roster())
+		c.setTeamStart("t1", "", roster())
 		c.addTeamMember(member("scout", "message.delta", client.TeamMsg{Text: "searching the codebase"}))
 		c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Grep", Detail: "pattern: handleErr"}))
 		c.addTeamMember(member("scout", "tool.result", client.TeamMsg{ToolName: "Grep", Detail: "3 matches"}))
@@ -153,7 +153,7 @@ func TestAgentsRosterUncapped(t *testing.T) {
 	}
 	big := bigRoster(n)
 	m := newMCPModel(t, aztec(), nil)
-	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", big) })
+	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", "", big) })
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
 	out := stripANSIstr(m.View().Content)
@@ -191,7 +191,7 @@ func TestAgentsRosterLeadFirst(t *testing.T) {
 		{Name: "lead", Lead: true, Mutating: true},
 	}
 	m := newMCPModel(t, aztec(), nil)
-	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", leadLast) })
+	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", "", leadLast) })
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
 	out := stripANSIstr(m.View().Content)
@@ -211,9 +211,9 @@ func TestAgentsRosterLeadFirst(t *testing.T) {
 func TestAgentsShowsLatestTeam(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
 	m.conv.addTool("ta", "Team", `{}`)
-	m.conv.setTeamStart("ta", []client.TeamMemberSpec{{Name: "alpha", Lead: true}})
+	m.conv.setTeamStart("ta", "", []client.TeamMemberSpec{{Name: "alpha", Lead: true}})
 	m.conv.addTool("tb", "Team", `{}`)
-	m.conv.setTeamStart("tb", []client.TeamMemberSpec{{Name: "bravo", Lead: true}})
+	m.conv.setTeamStart("tb", "", []client.TeamMemberSpec{{Name: "bravo", Lead: true}})
 	m.refreshView()
 
 	mm, _ := m.Update(ctrlKey('a'))
@@ -232,8 +232,8 @@ func TestAgentsShowsLatestTeam(t *testing.T) {
 func TestAgentsResolvedSubhead(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
 	m = seedTeam(m, func(c *conversation) {
-		c.setTeamStart("t1", roster())
-		c.setTeamEnd("t1", 4, "end_turn", client.Usage{InputTokens: 5200, OutputTokens: 410})
+		c.setTeamStart("t1", "", roster())
+		c.setTeamEnd("t1", "", 4, "end_turn", client.Usage{InputTokens: 5200, OutputTokens: 410})
 	})
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
@@ -274,7 +274,7 @@ func TestAgentsRosterWindowed(t *testing.T) {
 	big := bigRoster(n)
 	m := newMCPModel(t, aztec(), nil)
 	m = resize(m, 100, 24) // vp height 16 → ~6 lane rows
-	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", big) })
+	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", "", big) })
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
 	out := stripANSIstr(m.View().Content)
@@ -307,7 +307,7 @@ func TestAgentsWindowFollowsCursor(t *testing.T) {
 	big := bigRoster(n)
 	m := newMCPModel(t, aztec(), nil)
 	m = resize(m, 100, 24)
-	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", big) })
+	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", "", big) })
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
 
@@ -352,7 +352,7 @@ func TestAgentsPageKeys(t *testing.T) {
 	big := bigRoster(n)
 	m := newMCPModel(t, aztec(), nil)
 	m = resize(m, 100, 24)
-	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", big) })
+	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", "", big) })
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
 
@@ -374,7 +374,7 @@ func TestAgentsPageKeys(t *testing.T) {
 func TestAgentsRosterShowsRole(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
 	m = seedTeam(m, func(c *conversation) {
-		c.setTeamStart("t1", []client.TeamMemberSpec{
+		c.setTeamStart("t1", "", []client.TeamMemberSpec{
 			{Name: "lead", Role: "coordinator", Lead: true, Mutating: true},
 			{Name: "scout", Role: "researcher"},
 		})
@@ -396,13 +396,13 @@ func TestInlineTeamRollupAdvertisesOverlay(t *testing.T) {
 	for i := 0; i < maxTeamLanes+2; i++ {
 		big = append(big, client.TeamMemberSpec{Name: "m" + string(rune('a'+i))})
 	}
-	out := teamCard(t, false, func(c *conversation) { c.setTeamStart("t1", big) })
+	out := teamCard(t, false, func(c *conversation) { c.setTeamStart("t1", "", big) })
 	if !strings.Contains(out, "more · ctrl+a") {
 		t.Errorf("inline roll-up should advertise the ctrl+a overlay, got %q", out)
 	}
 
 	// A small team (no roll-up) must NOT carry the hint — it has nothing to overflow.
-	small := teamCard(t, false, func(c *conversation) { c.setTeamStart("t1", roster()) })
+	small := teamCard(t, false, func(c *conversation) { c.setTeamStart("t1", "", roster()) })
 	if strings.Contains(small, "ctrl+a") {
 		t.Errorf("a non-overflowing inline card should not advertise ctrl+a, got %q", small)
 	}
@@ -426,7 +426,7 @@ func ctxTurnEnd(name string, used, window int64) client.TeamMsg {
 func TestAgentsRosterContextMeter(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
 	m = seedTeam(m, func(c *conversation) {
-		c.setTeamStart("t1", []client.TeamMemberSpec{
+		c.setTeamStart("t1", "", []client.TeamMemberSpec{
 			{Name: "lead", Role: "coordinator", Lead: true, Mutating: true},
 			{Name: "low", Role: "worker"},
 			{Name: "danger", Role: "worker"},
@@ -484,7 +484,7 @@ func TestAgentsRosterContextMeter(t *testing.T) {
 func TestAgentsFocusContextMeter(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
 	m = seedTeam(m, func(c *conversation) {
-		c.setTeamStart("t1", []client.TeamMemberSpec{{Name: "scout", Role: "researcher", Lead: true}})
+		c.setTeamStart("t1", "", []client.TeamMemberSpec{{Name: "scout", Role: "researcher", Lead: true}})
 		c.addTeamMember(ctxTurnEnd("scout", 176000, 200000)) // 88% → warn band
 	})
 	mm, _ := m.Update(ctrlKey('a'))
@@ -509,7 +509,7 @@ func TestAgentsFocusContextMeter(t *testing.T) {
 // sub-view distinguishes: a completed task, an in-progress task with an assignee,
 // a pending task blocked by the incomplete task, and a pending-unblocked task.
 func tasksTeam(c *conversation) {
-	c.setTeamStart("t1", roster())
+	c.setTeamStart("t1", "", roster())
 	c.setTeamTasks("t1", []client.TeamTask{
 		{ID: "task-1", Description: "investigate", State: "completed", Assignee: "scout"},
 		{ID: "task-2", Description: "implement fix", State: "in_progress", Assignee: "lead"},
@@ -581,7 +581,7 @@ func TestAgentsTasksToggle(t *testing.T) {
 // with a zeroed summary and never panics.
 func TestAgentsTasksEmpty(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
-	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", roster()) })
+	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", "", roster()) })
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
 	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
@@ -626,7 +626,7 @@ func TestAgentsTasksSummary(t *testing.T) {
 // tester), so the roster exercises lead-first ordering, the ✎/· mutating cue, and
 // the … heartbeat.
 func agentsGoldenTeam(c *conversation) {
-	c.setTeamStart("t1", []client.TeamMemberSpec{
+	c.setTeamStart("t1", "", []client.TeamMemberSpec{
 		{Name: "lead", Role: "coordinator", Lead: true, Mutating: true},
 		{Name: "scout", Role: "researcher", Mutating: false},
 		{Name: "builder", Role: "implementer", Mutating: true},
@@ -678,7 +678,7 @@ func TestAgentsRosterWindowedGolden(t *testing.T) {
 	big := bigRoster(20)
 	m := newMCPModel(t, aztec(), nil)
 	m = resize(m, 100, 24)
-	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", big) })
+	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", "", big) })
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
 	// Move the cursor down past the first window so both "+K above" and "+K below"
@@ -714,7 +714,7 @@ func TestAgentsFocusGolden(t *testing.T) {
 // (many tool chips, each with a Detail preview so each is its own line) — enough
 // to overflow a short terminal's focus pane and exercise the height bound.
 func verboseFocusTeam(c *conversation) {
-	c.setTeamStart("t1", []client.TeamMemberSpec{{Name: "scout", Role: "researcher", Lead: true}})
+	c.setTeamStart("t1", "", []client.TeamMemberSpec{{Name: "scout", Role: "researcher", Lead: true}})
 	c.addTeamMember(member("scout", "message.delta", client.TeamMsg{Text: "investigating the whole subsystem"}))
 	for i := 0; i < maxTeamTrace; i++ {
 		c.addTeamMember(member("scout", "tool.call", client.TeamMsg{

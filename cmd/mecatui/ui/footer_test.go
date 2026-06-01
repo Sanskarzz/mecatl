@@ -224,3 +224,28 @@ func TestStopReasonLabelSanitizesUnknown(t *testing.T) {
 		t.Errorf("unknown stop reason should be sanitized, got %q", text)
 	}
 }
+
+// TestTeamWorkingCounts locks the (working, total) classification the footer
+// k/N segment derives from a team's lanes: total is the lane count, working is the
+// count of lanes NOT done — the SAME !ln.done predicate the roster glyphs use.
+func TestTeamWorkingCounts(t *testing.T) {
+	cases := []struct {
+		name            string
+		lanes           []teamLane
+		wantWk, wantTot int
+	}{
+		{"empty", nil, 0, 0},
+		{"all working", []teamLane{{}, {}, {}}, 3, 3},
+		{"all done", []teamLane{{done: true}, {done: true}}, 0, 2},
+		{"mixed", []teamLane{{done: true}, {}, {done: true}, {}}, 2, 4},
+		{"single working", []teamLane{{}}, 1, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wk, tot := teamWorkingCounts(tc.lanes)
+			if wk != tc.wantWk || tot != tc.wantTot {
+				t.Errorf("teamWorkingCounts = (%d, %d), want (%d, %d)", wk, tot, tc.wantWk, tc.wantTot)
+			}
+		})
+	}
+}
