@@ -139,6 +139,79 @@ func TestStartRunRoutesToPerSessionEngine(t *testing.T) {
 	}
 }
 
+// TestEndSessionUnknownReturnsNotFound asserts EndSession on a never-created id
+// surfaces ErrNotFound (so the gRPC/HTTP surfaces return NotFound / 404), rather
+// than the void CloseSession's silent success.
+func TestEndSessionUnknownReturnsNotFound(t *testing.T) {
+	svc := newMCPService(t, "shared", nil)
+	if err := svc.EndSession(context.Background(), "never-created"); !errors.Is(err, server.ErrNotFound) {
+		t.Fatalf("EndSession unknown id err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestEndSessionEvictsLearnedAndTearsDown asserts EndSession fires OnCloseSession
+// with the closing id AND tears the per-session engine down exactly once; a second
+// EndSession on the (now released but still persisted) session returns nil and does
+// NOT double-close — the surface-facing session-end is idempotent past first close.
+func TestEndSessionEvictsLearnedAndTearsDown(t *testing.T) {
+	var closed atomic.Int32
+	var forgot []session.SessionID
+	perSession := agent.NewEngine(agent.Deps{
+		LLM:     mockllm.New(mockllm.TextTurn("per-session reply")),
+		Catalog: tool.NewCatalog(),
+		Policy:  permpolicy.NewPolicy(nil, nil),
+		Model:   "test-model",
+	})
+	factory := func(_ context.Context, _ []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+		return perSession, func() error { closed.Add(1); return nil }, nil
+	}
+	shared := agent.NewEngine(agent.Deps{
+		LLM:     mockllm.New(mockllm.TextTurn("shared")),
+		Catalog: tool.NewCatalog(),
+		Policy:  permpolicy.NewPolicy(nil, nil),
+		Model:   "test-model",
+	})
+	svc, err := server.NewService(server.Config{
+		Engine:        shared,
+		Store:         memstore.New(),
+		Workspaces:    func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		DefaultLimits: session.Limits{MaxTurns: 10, MaxToolCalls: 20},
+		Now:           func() time.Time { return time.Unix(0, 0) },
+		SessionEngine: factory,
+		OnCloseSession: func(id session.SessionID) {
+			forgot = append(forgot, id)
+		},
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	sess, err := svc.CreateSessionWithMCP(context.Background(), "/ws", session.ModeDefault, session.Limits{},
+		[]mcp.ServerConfig{{Name: "docs", URL: "https://example.test/mcp"}})
+	if err != nil {
+		t.Fatalf("CreateSessionWithMCP: %v", err)
+	}
+
+	if err := svc.EndSession(context.Background(), sess.ID); err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+	if len(forgot) != 1 || forgot[0] != sess.ID {
+		t.Fatalf("OnCloseSession fired with %+v, want exactly [%q]", forgot, sess.ID)
+	}
+	if closed.Load() != 1 {
+		t.Fatalf("per-session engine close called %d times, want 1", closed.Load())
+	}
+
+	// Second EndSession: the snapshot is still persisted (close != delete), so it
+	// returns nil; teardown is idempotent, so the engine is not double-closed.
+	if err := svc.EndSession(context.Background(), sess.ID); err != nil {
+		t.Fatalf("second EndSession: %v", err)
+	}
+	if closed.Load() != 1 {
+		t.Fatalf("per-session engine close called %d times after second EndSession, want 1", closed.Load())
+	}
+}
+
 // TestServiceCloseTearsDownSessionEngines asserts Service.Close closes every
 // registered per-session engine.
 func TestServiceCloseTearsDownSessionEngines(t *testing.T) {

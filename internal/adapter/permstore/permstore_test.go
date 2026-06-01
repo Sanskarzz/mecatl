@@ -1,6 +1,7 @@
 package permstore
 
 import (
+	"strconv"
 	"sync"
 	"testing"
 
@@ -61,6 +62,48 @@ func TestForgetEviction(t *testing.T) {
 		t.Fatalf("expected eviction to clear the session, got %+v", got)
 	}
 	m.Forget("unknown") // idempotent no-op
+}
+
+func TestRecordCapsPerSession(t *testing.T) {
+	m := New()
+	// Record well past the cap with DISTINCT rules (each pattern differs so dedup
+	// does not collapse them). The slice must saturate at maxRulesPerSession.
+	for i := 0; i < maxRulesPerSession+50; i++ {
+		m.Record("s1", rule("Bash", "cmd-"+strconv.Itoa(i)))
+	}
+	if got := len(m.Rules("s1")); got != maxRulesPerSession {
+		t.Fatalf("expected slice capped at %d distinct rules, got %d", maxRulesPerSession, got)
+	}
+}
+
+func TestRecordDedupAtCap(t *testing.T) {
+	m := New()
+	// Fill exactly to the cap with distinct rules.
+	for i := 0; i < maxRulesPerSession; i++ {
+		m.Record("s1", rule("Bash", "cmd-"+strconv.Itoa(i)))
+	}
+	if got := len(m.Rules("s1")); got != maxRulesPerSession {
+		t.Fatalf("setup: expected %d rules, got %d", maxRulesPerSession, got)
+	}
+	// Re-Record an identical EXISTING rule at the cap: dedup wins over the cap, so
+	// the count is unchanged and the rule is still present (idempotent no-op, not a
+	// cap-drop that loses the rule).
+	existing := rule("Bash", "cmd-0")
+	m.Record("s1", existing)
+	got := m.Rules("s1")
+	if len(got) != maxRulesPerSession {
+		t.Fatalf("re-record at cap changed count to %d, want %d", len(got), maxRulesPerSession)
+	}
+	found := false
+	for _, r := range got {
+		if r == existing {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("re-recorded existing rule missing after dedup-at-cap")
+	}
 }
 
 func TestConcurrentAccess(t *testing.T) {

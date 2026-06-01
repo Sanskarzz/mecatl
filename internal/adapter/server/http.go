@@ -16,11 +16,12 @@ import (
 // HTTPHandler is the HTTP/SSE adapter over the shared Service. It serves the
 // thin REST surface from ARCHITECTURE §7.2:
 //
-//	POST /v1/sessions               -> CreateSession (JSON)
-//	GET  /v1/sessions/{id}          -> GetSession (JSON snapshot)
-//	POST /v1/sessions/{id}/prompt   -> start a run; text/event-stream of Events
-//	POST /v1/sessions/{id}/approve  -> resolve the paused ask on the run
-//	POST /v1/sessions/{id}/cancel   -> cancel the in-flight run
+//	POST   /v1/sessions               -> CreateSession (JSON)
+//	GET    /v1/sessions/{id}          -> GetSession (JSON snapshot)
+//	DELETE /v1/sessions/{id}          -> CloseSession (release session resources; 204)
+//	POST   /v1/sessions/{id}/prompt   -> start a run; text/event-stream of Events
+//	POST   /v1/sessions/{id}/approve  -> resolve the paused ask on the run
+//	POST   /v1/sessions/{id}/cancel   -> cancel the in-flight run
 //
 // Every Event is emitted as one SSE `data:` line carrying the proto Event
 // marshalled to JSON, so the HTTP and gRPC surfaces share one event shape.
@@ -35,6 +36,7 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h := &HTTPHandler{svc: svc, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/sessions", h.createSession)
 	h.mux.HandleFunc("GET /v1/sessions/{id}", h.getSession)
+	h.mux.HandleFunc("DELETE /v1/sessions/{id}", h.closeSession)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/prompt", h.prompt)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/approve", h.approve)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/cancel", h.cancel)
@@ -321,6 +323,19 @@ func verdictFromHTTP(verdict string, allow bool) session.ApprovalVerdict {
 	default:
 		return session.VerdictDeny
 	}
+}
+
+// closeSession handles DELETE /v1/sessions/{id}, ending the session and releasing
+// its server-side resources. Unknown (never-created) id -> 404; an already-released
+// session succeeds (204, idempotent). It does NOT delete the persisted snapshot or
+// cancel an in-flight run.
+func (h *HTTPHandler) closeSession(w http.ResponseWriter, r *http.Request) {
+	id := session.SessionID(r.PathValue("id"))
+	if err := h.svc.EndSession(r.Context(), id); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // cancel handles POST /v1/sessions/{id}/cancel, cancelling the in-flight run.

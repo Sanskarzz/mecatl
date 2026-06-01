@@ -53,6 +53,20 @@ func (h *HarnessServer) GetSession(ctx context.Context, req *mecatlv1.GetSession
 	return &mecatlv1.GetSessionResponse{Session: toProtoSession(sess)}, nil
 }
 
+// CloseSession ends a session and releases its server-side resources. It returns
+// NotFound only for a never-created id; an already-released session succeeds
+// (idempotent). It calls Service.EndSession, NOT the void Service.CloseSession, so
+// an unknown id surfaces as NotFound rather than a silent success.
+func (h *HarnessServer) CloseSession(ctx context.Context, req *mecatlv1.CloseSessionRequest) (*mecatlv1.CloseSessionResponse, error) {
+	if req.GetSessionId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "session_id is required")
+	}
+	if err := h.svc.EndSession(ctx, session.SessionID(req.GetSessionId())); err != nil {
+		return nil, toStatus(err)
+	}
+	return &mecatlv1.CloseSessionResponse{}, nil
+}
+
 // Converse drives one run over a bidi stream. The first frame MUST be a Prompt;
 // the server then relays the run's Events while concurrently reading
 // ResumeApproval / Cancel control frames, until the events channel closes (the

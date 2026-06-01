@@ -247,13 +247,14 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// (issue #3): the rules are per-session and non-durable, so they must not
 		// outlive the session that learned them.
 		//
-		// CAVEAT: CloseSession is currently only invoked by the ACP adapter (on
-		// editor disconnect). The gRPC and HTTP transports have no session-end
-		// signal, so on a long-lived mecated served over gRPC/HTTP a session's
-		// learned rules are NOT evicted until process exit — a bounded,
-		// per-session-isolated accumulation (each rule still requires a human
-		// allow-always approval). Giving gRPC/HTTP a session-end hook is tracked as
-		// a follow-up; see docs/adr/0001-acp-adapter.md.
+		// CloseSession is now reachable over all three surfaces (issue #10): the ACP
+		// adapter (on editor disconnect), the gRPC CloseSession RPC, and HTTP DELETE
+		// /v1/sessions/{id}. So a well-behaved client evicts a session's learned rules
+		// at session end across every transport. As a client-independent backstop, the
+		// learned-rule slice is also capped (permstore.maxRulesPerSession) so a
+		// pathological long-lived session that never signals end cannot grow it without
+		// bound (each rule still requires a human allow-always approval). TTL/idle
+		// eviction remains a follow-up; see docs/adr/0001-acp-adapter.md.
 		OnCloseSession: learned.Forget,
 	}
 	applyTeamConfig(&svcCfg, cfg, provider, mainMgr)

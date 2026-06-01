@@ -553,11 +553,15 @@ handler that issues an outbound `Call` (a `session/prompt` issuing
 - **Broader learned-rule granularity** (glob / prefix / tool-wide grants) — today
   a learned rule is tool + EXACT canonical pattern only, by design; richer
   granularity (e.g. "allow always for `git *`") is a tracked follow-up.
-- **Learned-rule eviction over gRPC/HTTP** — `Forget` runs from
-  `Service.CloseSession`, which only the ACP adapter calls (on editor disconnect).
-  gRPC/HTTP have no session-end signal, so learned rules there persist until
-  process exit (bounded, per-session-isolated). A gRPC/HTTP session-end hook and a
-  per-session learned-rule cap are tracked follow-ups (issue #3 review).
+- **Learned-rule eviction over gRPC/HTTP** — DONE (issue #10). `Forget` runs from
+  `Service.CloseSession`, now reachable over all three surfaces: the ACP adapter (on
+  editor disconnect), the gRPC `CloseSession` RPC, and HTTP `DELETE /v1/sessions/{id}`
+  (both via `Service.EndSession`, which verifies the session exists then runs the same
+  idempotent teardown — NotFound only for a never-created id; close ≠ delete-snapshot ≠
+  cancel-run). Option 1 (symmetric session-end across transports) + Option 2 (a
+  client-independent per-session cap, `permstore.maxRulesPerSession`, fail-safe toward
+  asking) shipped. Option 3 (TTL / idle-based eviction) is deliberately DEFERRED pending
+  telemetry on real long-lived-session rule accumulation.
 - **Client MCP on `session/load`** (re-mount the client's streaming-HTTP servers on
   resume) + **mid-session teardown** — tracked follow-up (Slice B). `session/new`
   client streaming-HTTP MCP is now DONE (see "Client streaming-HTTP MCP").

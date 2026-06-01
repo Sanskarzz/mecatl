@@ -210,6 +210,40 @@ func TestHTTPGetSessionNotFound(t *testing.T) {
 	}
 }
 
+// TestHTTPCloseSession asserts DELETE /v1/sessions/{id}: a created session closes
+// with 204, a second DELETE is idempotent (still 204, since close != delete-snapshot),
+// and a never-created id returns 404.
+func TestHTTPCloseSession(t *testing.T) {
+	svc := newService(t, mockllm.New(), allowRules())
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+
+	id := createHTTPSession(t, srv)
+
+	del := func(path string) int {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodDelete, srv.URL+path, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("DELETE %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := del("/v1/sessions/" + id); code != http.StatusNoContent {
+		t.Fatalf("first DELETE status = %d, want 204", code)
+	}
+	// Idempotent: the snapshot still persists, so a second DELETE is also 204.
+	if code := del("/v1/sessions/" + id); code != http.StatusNoContent {
+		t.Fatalf("second DELETE status = %d, want 204", code)
+	}
+	// Unknown id -> 404.
+	if code := del("/v1/sessions/never-created"); code != http.StatusNotFound {
+		t.Fatalf("unknown id DELETE status = %d, want 404", code)
+	}
+}
+
 // --- team HTTP/SSE parity ----------------------------------------------------
 
 // parseTeamSSE reads an SSE body and returns the decoded proto TeamEvents from

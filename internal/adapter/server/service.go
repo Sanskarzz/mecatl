@@ -376,6 +376,22 @@ func (s *Service) CloseSession(id session.SessionID) {
 	}
 }
 
+// EndSession is the precondition-checked sibling of CloseSession: the
+// surface-facing session-end entry for the gRPC/HTTP transports (the ACP adapter
+// calls the void CloseSession directly on disconnect). It verifies the session
+// exists, then runs the same teardown as CloseSession (OnCloseSession ->
+// learned-rule Forget, per-session engine + workspace eviction). It returns
+// ErrNotFound for a never-created id; teardown is idempotent, so closing an
+// already-released (but still persisted) session succeeds. It does NOT delete the
+// persisted snapshot and does NOT cancel an in-flight run (orthogonal to Cancel).
+func (s *Service) EndSession(ctx context.Context, id session.SessionID) error {
+	if _, err := s.GetSession(ctx, id); err != nil {
+		return err
+	}
+	s.CloseSession(id)
+	return nil
+}
+
 // Close tears down all per-session engines' MCP managers. It is the Service's
 // shutdown hook so a process exit does not leak any per-session MCP connection.
 // It is safe to call multiple times.

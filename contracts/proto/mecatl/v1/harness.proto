@@ -36,6 +36,12 @@ service HarnessService {
   // GetSession returns a snapshot of an existing session.
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
 
+  // CloseSession ends a session and releases its server-side resources (per-session
+  // learned permission rules, per-session engine/workspace). Idempotent: closing an
+  // unknown or already-closed session via the wire returns NotFound only for a
+  // never-created id; an already-released session succeeds.
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+
   // Converse drives one run. The first frame MUST be `prompt`; subsequent
   // frames are zero or more `resume_approval` / `cancel` control frames. The
   // server streams `Event` envelopes until the terminal `result` event, then
@@ -172,6 +178,15 @@ message GetSessionResponse {
   // session is the snapshot of the requested session.
   Session session = 1;
 }
+
+// CloseSessionRequest names the session to end.
+message CloseSessionRequest {
+  // session_id is the session to close.
+  string session_id = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+// CloseSessionResponse is the empty acknowledgement.
+message CloseSessionResponse {}
 
 // Session is a snapshot of server-side session state.
 message Session {

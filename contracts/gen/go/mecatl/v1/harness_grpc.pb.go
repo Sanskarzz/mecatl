@@ -44,6 +44,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	HarnessService_CreateSession_FullMethodName       = "/mecatl.v1.HarnessService/CreateSession"
 	HarnessService_GetSession_FullMethodName          = "/mecatl.v1.HarnessService/GetSession"
+	HarnessService_CloseSession_FullMethodName        = "/mecatl.v1.HarnessService/CloseSession"
 	HarnessService_Converse_FullMethodName            = "/mecatl.v1.HarnessService/Converse"
 	HarnessService_ListMcpResources_FullMethodName    = "/mecatl.v1.HarnessService/ListMcpResources"
 	HarnessService_ReadMcpResource_FullMethodName     = "/mecatl.v1.HarnessService/ReadMcpResource"
@@ -72,6 +73,11 @@ type HarnessServiceClient interface {
 	CreateSession(ctx context.Context, in *CreateSessionRequest, opts ...grpc.CallOption) (*CreateSessionResponse, error)
 	// GetSession returns a snapshot of an existing session.
 	GetSession(ctx context.Context, in *GetSessionRequest, opts ...grpc.CallOption) (*GetSessionResponse, error)
+	// CloseSession ends a session and releases its server-side resources (per-session
+	// learned permission rules, per-session engine/workspace). Idempotent: closing an
+	// unknown or already-closed session via the wire returns NotFound only for a
+	// never-created id; an already-released session succeeds.
+	CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error)
 	// Converse drives one run. The first frame MUST be `prompt`; subsequent
 	// frames are zero or more `resume_approval` / `cancel` control frames. The
 	// server streams `Event` envelopes until the terminal `result` event, then
@@ -155,6 +161,16 @@ func (c *harnessServiceClient) GetSession(ctx context.Context, in *GetSessionReq
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetSessionResponse)
 	err := c.cc.Invoke(ctx, HarnessService_GetSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CloseSessionResponse)
+	err := c.cc.Invoke(ctx, HarnessService_CloseSession_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -334,6 +350,11 @@ type HarnessServiceServer interface {
 	CreateSession(context.Context, *CreateSessionRequest) (*CreateSessionResponse, error)
 	// GetSession returns a snapshot of an existing session.
 	GetSession(context.Context, *GetSessionRequest) (*GetSessionResponse, error)
+	// CloseSession ends a session and releases its server-side resources (per-session
+	// learned permission rules, per-session engine/workspace). Idempotent: closing an
+	// unknown or already-closed session via the wire returns NotFound only for a
+	// never-created id; an already-released session succeeds.
+	CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error)
 	// Converse drives one run. The first frame MUST be `prompt`; subsequent
 	// frames are zero or more `resume_approval` / `cancel` control frames. The
 	// server streams `Event` envelopes until the terminal `result` event, then
@@ -408,6 +429,9 @@ func (UnimplementedHarnessServiceServer) CreateSession(context.Context, *CreateS
 }
 func (UnimplementedHarnessServiceServer) GetSession(context.Context, *GetSessionRequest) (*GetSessionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetSession not implemented")
+}
+func (UnimplementedHarnessServiceServer) CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CloseSession not implemented")
 }
 func (UnimplementedHarnessServiceServer) Converse(grpc.BidiStreamingServer[ConverseRequest, ConverseResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method Converse not implemented")
@@ -507,6 +531,24 @@ func _HarnessService_GetSession_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(HarnessServiceServer).GetSession(ctx, req.(*GetSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_CloseSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CloseSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).CloseSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_CloseSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).CloseSession(ctx, req.(*CloseSessionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -777,6 +819,10 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSession",
 			Handler:    _HarnessService_GetSession_Handler,
+		},
+		{
+			MethodName: "CloseSession",
+			Handler:    _HarnessService_CloseSession_Handler,
 		},
 		{
 			MethodName: "ListMcpResources",

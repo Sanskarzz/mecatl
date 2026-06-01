@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
@@ -112,6 +114,36 @@ func TestGRPCConverseFullCycle(t *testing.T) {
 	res := lastResult(t, events)
 	if res.GetStop() != "end_turn" || res.GetText() != "all done" {
 		t.Fatalf("result = %+v", res)
+	}
+}
+
+// TestGRPCCloseSession asserts the session-end RPC: a created session closes ok,
+// a second close is idempotent (still ok, since close != delete-snapshot), and a
+// never-created id surfaces as codes.NotFound.
+func TestGRPCCloseSession(t *testing.T) {
+	svc := newService(t, mockllm.New(), allowRules())
+	client, cleanup := dialGRPC(t, svc)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cs, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	if _, err := client.CloseSession(ctx, &mecatlv1.CloseSessionRequest{SessionId: cs.GetSessionId()}); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+	// Idempotent: the snapshot still persists, so a second close succeeds.
+	if _, err := client.CloseSession(ctx, &mecatlv1.CloseSessionRequest{SessionId: cs.GetSessionId()}); err != nil {
+		t.Fatalf("second CloseSession: %v", err)
+	}
+	// Unknown id -> NotFound.
+	_, err = client.CloseSession(ctx, &mecatlv1.CloseSessionRequest{SessionId: "never-created"})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("CloseSession unknown id code = %v, want NotFound", status.Code(err))
 	}
 }
 

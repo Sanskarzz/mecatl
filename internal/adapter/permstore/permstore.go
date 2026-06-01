@@ -14,13 +14,14 @@
 //   - IN-MEMORY / NON-DURABLE: rules are lost on process restart and on
 //     Forget(sessionID) (wired into Service.CloseSession). Durable cross-restart
 //     persistence is a tracked follow-up, not this slice.
-//   - EVICTION is best-effort: Forget runs from Service.CloseSession, which today
-//     only the ACP adapter calls (on editor disconnect). Over gRPC/HTTP (no
-//     session-end signal) a session's rules persist until process exit — bounded
-//     and per-session-isolated, but not reclaimed mid-process. There is no cap on
-//     the number of distinct rules per session; each one still requires a human
-//     allow-always approval. A per-session cap and a gRPC/HTTP session-end hook
-//     are tracked follow-ups.
+//   - EVICTION runs from Service.CloseSession, reachable over all three surfaces:
+//     the ACP adapter (on editor disconnect) and now the gRPC CloseSession RPC /
+//     HTTP DELETE /v1/sessions/{id} session-end entries (issue #10). A well-behaved
+//     client therefore reclaims a session's rules at session end. As a
+//     client-independent backstop, the per-session learned-rule slice is also CAPPED
+//     (maxRulesPerSession) so a pathological long-lived session that never signals
+//     end cannot grow it without bound; each rule still requires a human
+//     allow-always approval. TTL/idle eviction remains a tracked follow-up.
 //
 // It implements port.PermissionStore and is safe for concurrent use.
 package permstore
@@ -31,6 +32,14 @@ import (
 	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/session"
 )
+
+// maxRulesPerSession caps a single session's learned-rule slice as a backstop
+// against unbounded growth when no session-end signal arrives (issue #10). Each
+// rule still requires a human allow-always; this only bounds a pathological
+// long-lived session. At the cap a new DISTINCT rule is dropped, so the session
+// keeps asking for that call rather than learning it — fail-safe toward asking,
+// never toward a silent allow.
+const maxRulesPerSession = 256
 
 // Memory is the in-memory per-session learned-rule store. The zero value is NOT
 // usable; construct it with New.
@@ -46,7 +55,8 @@ func New() *Memory {
 
 // Record appends rule to sessionID's learned set, deduping identical rules so a
 // repeated "allow always" for the same call does not grow the slice unbounded.
-// It is concurrency-safe.
+// Distinct rules are capped at maxRulesPerSession: at the cap a new distinct rule
+// is dropped (the session keeps asking for it). It is concurrency-safe.
 func (m *Memory) Record(sessionID session.SessionID, rule governance.Rule) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -54,6 +64,11 @@ func (m *Memory) Record(sessionID session.SessionID, rule governance.Rule) {
 		if existing == rule {
 			return // idempotent: identical rule already learned
 		}
+	}
+	// Dedup runs first (above), so an identical re-learn at the cap stays a no-op;
+	// only a new DISTINCT rule is dropped here. Fail-safe toward asking.
+	if len(m.bySession[sessionID]) >= maxRulesPerSession {
+		return
 	}
 	m.bySession[sessionID] = append(m.bySession[sessionID], rule)
 }
