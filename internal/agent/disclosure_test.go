@@ -21,6 +21,10 @@ type capturingProvider struct {
 	n   int
 }
 
+func (*capturingProvider) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{}
+}
+
 func (p *capturingProvider) Stream(_ context.Context, req port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
 	if p.n == 0 {
 		p.req = req

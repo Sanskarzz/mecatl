@@ -29,6 +29,8 @@ type branchProvider struct {
 	summary string
 }
 
+func (*branchProvider) Capabilities() port.ProviderCapabilities { return port.ProviderCapabilities{} }
+
 func (p *branchProvider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
 	hasToolResult := false
 	for _, m := range req.Messages {

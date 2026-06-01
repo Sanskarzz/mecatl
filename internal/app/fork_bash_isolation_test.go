@@ -28,6 +28,10 @@ type bashWriteProvider struct {
 	marker  string
 }
 
+func (*bashWriteProvider) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{}
+}
+
 func (p *bashWriteProvider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
 	hasToolResult := false
 	for _, m := range req.Messages {

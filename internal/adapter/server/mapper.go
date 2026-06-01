@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"math"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
@@ -9,6 +10,73 @@ import (
 	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/team"
 )
+
+// contentFromProto maps the proto Content parts of a multimodal prompt into the
+// domain []session.Content. It is the wire→domain choke point: each part is
+// constructed through session.NewContent, which enforces the structural
+// invariants (kind set, mime consistent with kind, exactly-one-of(data,url)) AND
+// validates a URL source as an absolute https URL to a non-internal host (the
+// SSRF backstop, CWE-918). The whole slice is then size-capped via
+// session.ValidateMediaParts (CWE-770). Any violation is returned as an error the
+// wire adapter maps to InvalidArgument — never silently dropped. An empty/nil
+// input yields nil parts.
+func contentFromProto(parts []*mecatlv1.Content) ([]session.Content, error) {
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	out := make([]session.Content, 0, len(parts))
+	for i, p := range parts {
+		if p == nil {
+			return nil, fmt.Errorf("prompt parts[%d]: nil part", i)
+		}
+		var kind session.MediaKind
+		switch p.GetKind() {
+		case mecatlv1.Content_KIND_IMAGE:
+			kind = session.MediaImage
+		case mecatlv1.Content_KIND_AUDIO:
+			kind = session.MediaAudio
+		case mecatlv1.Content_KIND_UNSPECIFIED:
+			return nil, fmt.Errorf("prompt parts[%d]: kind is required (KIND_UNSPECIFIED)", i)
+		default:
+			return nil, fmt.Errorf("prompt parts[%d]: unknown kind %v", i, p.GetKind())
+		}
+		c, err := session.NewContent(kind, p.GetMimeType(), p.GetData(), p.GetUrl())
+		if err != nil {
+			return nil, fmt.Errorf("prompt parts[%d]: %w", i, err)
+		}
+		out = append(out, c)
+	}
+	if err := session.ValidateMediaParts(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// contentToProto maps domain []session.Content back to proto Content parts (the
+// inverse of contentFromProto), for any surface that projects a recorded
+// multimodal user message back to a client. A nil/empty input yields nil.
+func contentToProto(parts []session.Content) []*mecatlv1.Content {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]*mecatlv1.Content, 0, len(parts))
+	for _, p := range parts {
+		kind := mecatlv1.Content_KIND_UNSPECIFIED
+		switch p.Kind {
+		case session.MediaImage:
+			kind = mecatlv1.Content_KIND_IMAGE
+		case session.MediaAudio:
+			kind = mecatlv1.Content_KIND_AUDIO
+		}
+		out = append(out, &mecatlv1.Content{
+			Kind:     kind,
+			MimeType: p.MIMEType,
+			Data:     p.Data,
+			Url:      p.URL,
+		})
+	}
+	return out
+}
 
 // clampInt32 narrows a Go int (counter/index) to the proto int32 wire type,
 // saturating at the int32 bounds rather than wrapping. These values (turn

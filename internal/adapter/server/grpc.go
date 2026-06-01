@@ -71,12 +71,19 @@ func (h *HarnessServer) Converse(stream mecatlv1.HarnessService_ConverseServer) 
 	if prompt == nil {
 		return status.Error(codes.InvalidArgument, "converse: first frame must be a prompt")
 	}
-	if prompt.GetSessionId() == "" || prompt.GetText() == "" {
-		return status.Error(codes.InvalidArgument, "converse: prompt session_id and text are required")
+	if prompt.GetSessionId() == "" {
+		return status.Error(codes.InvalidArgument, "converse: prompt session_id is required")
+	}
+	if prompt.GetText() == "" && len(prompt.GetParts()) == 0 {
+		return status.Error(codes.InvalidArgument, "converse: prompt text or parts is required")
+	}
+	parts, perr := contentFromProto(prompt.GetParts())
+	if perr != nil {
+		return status.Error(codes.InvalidArgument, perr.Error())
 	}
 
 	id := session.SessionID(prompt.GetSessionId())
-	run, err := h.svc.StartRun(ctx, id, prompt.GetText())
+	run, err := h.svc.StartRunContent(ctx, id, prompt.GetText(), parts)
 	if err != nil {
 		return toStatus(err)
 	}

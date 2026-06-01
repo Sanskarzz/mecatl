@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -88,6 +89,53 @@ type sessionResp struct {
 
 type promptBody struct {
 	Text string `json:"text"`
+	// Parts carries non-text media (image/audio) alongside the text. Each part
+	// names its kind ("image"/"audio"), mime type, and EITHER base64 data OR a url.
+	Parts []promptContentBody `json:"parts,omitempty"`
+}
+
+// promptContentBody is the JSON form of one multimodal prompt part. data is
+// standard base64 (Go's encoding/json decodes a JSON string into []byte as
+// base64 automatically); exactly one of data/url is set.
+type promptContentBody struct {
+	Kind     string `json:"kind"`
+	MimeType string `json:"mime_type,omitempty"`
+	Data     []byte `json:"data,omitempty"`
+	URL      string `json:"url,omitempty"`
+}
+
+// toContentParts maps the HTTP prompt parts into the domain []session.Content.
+// It is the HTTP wire→domain choke point: each part is built through
+// session.NewContent (structural invariants + https/non-internal URL SSRF
+// backstop) and the slice is size-capped via session.ValidateMediaParts — the
+// SAME validation the gRPC mapper applies. An empty input yields nil.
+func toContentParts(parts []promptContentBody) ([]session.Content, error) {
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	out := make([]session.Content, 0, len(parts))
+	for i, p := range parts {
+		var kind session.MediaKind
+		switch p.Kind {
+		case string(session.MediaImage):
+			kind = session.MediaImage
+		case string(session.MediaAudio):
+			kind = session.MediaAudio
+		case "":
+			return nil, fmt.Errorf("parts[%d]: kind is required", i)
+		default:
+			return nil, fmt.Errorf("parts[%d]: unknown kind %q", i, p.Kind)
+		}
+		c, err := session.NewContent(kind, p.MimeType, p.Data, p.URL)
+		if err != nil {
+			return nil, fmt.Errorf("parts[%d]: %w", i, err)
+		}
+		out = append(out, c)
+	}
+	if err := session.ValidateMediaParts(out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 type approveBody struct {
@@ -148,18 +196,41 @@ func (h *HTTPHandler) getSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxPromptBodyBytes bounds the POST /prompt request body so an oversized
+// payload is rejected before it is buffered into memory (CWE-770), rather than
+// relying on the post-decode size cap alone. It is sized above the decoded
+// inline-media cap (session.MaxPromptMediaBytes) to allow a legitimate maximal
+// prompt: media arrives base64-encoded (~4/3 expansion) plus the JSON envelope
+// and prompt text, so the wire body can exceed the decoded byte budget. 32 MiB
+// comfortably covers the 20 MiB decoded cap (~27 MiB base64) with headroom while
+// still bounding the read.
+const maxPromptBodyBytes = 32 << 20 // 32 MiB
+
 // prompt handles POST /v1/sessions/{id}/prompt, streaming the run's events as
 // Server-Sent Events. It starts a run on the shared engine and relays each
 // session.Event (mapped to the proto Event, JSON-encoded) as one SSE frame.
 func (h *HTTPHandler) prompt(w http.ResponseWriter, r *http.Request) {
 	id := session.SessionID(r.PathValue("id"))
+	// Bound the body read so an oversized payload cannot exhaust memory; a body
+	// that exceeds the limit surfaces as a decode error → 400 (not an OOM).
+	r.Body = http.MaxBytesReader(w, r.Body, maxPromptBodyBytes)
 	var body promptBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if body.Text == "" {
-		writeError(w, http.StatusBadRequest, "text is required")
+	if body.Text == "" && len(body.Parts) == 0 {
+		writeError(w, http.StatusBadRequest, "text or parts is required")
+		return
+	}
+	parts, perr := toContentParts(body.Parts)
+	if perr != nil {
+		writeError(w, http.StatusBadRequest, perr.Error())
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -168,7 +239,7 @@ func (h *HTTPHandler) prompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := h.svc.StartRun(r.Context(), id, body.Text)
+	run, err := h.svc.StartRunContent(r.Context(), id, body.Text, parts)
 	if err != nil {
 		writeServiceError(w, err)
 		return

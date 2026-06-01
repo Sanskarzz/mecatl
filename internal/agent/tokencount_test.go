@@ -57,3 +57,23 @@ func TestHeuristicTokenCounterMessagesOverhead(t *testing.T) {
 		t.Fatalf("CountMessages not deterministic: %d vs %d", a, b)
 	}
 }
+
+// TestCountMessagesCountsMediaBytes asserts a multimodal message's inline media
+// bytes are counted, so a multimodal message is not undercounted vs the same
+// text alone.
+func TestCountMessagesCountsMediaBytes(t *testing.T) {
+	c := agent.HeuristicTokenCounter{}
+	textOnly := []session.Message{session.NewUserMessage("hello")}
+	withMedia := []session.Message{session.NewUserMessageWithParts("hello", []session.Content{
+		{Kind: session.MediaImage, MIMEType: "image/png", Data: make([]byte, 8000)},
+	})}
+	base := c.CountMessages(textOnly)
+	media := c.CountMessages(withMedia)
+	if media <= base {
+		t.Fatalf("media count %d not greater than text-only %d — media not counted", media, base)
+	}
+	// 8000 bytes at 4 chars/token ~ 2000 tokens.
+	if media-base < 1500 {
+		t.Fatalf("media delta %d too small; image bytes undercounted", media-base)
+	}
+}

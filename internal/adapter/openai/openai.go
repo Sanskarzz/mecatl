@@ -125,5 +125,15 @@ func (p *Provider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[p
 	}, nil
 }
 
+// Capabilities reports the provider's multimodal input support. The OpenAI
+// Responses input-message content union supports text + image + file but has NO
+// audio member (openai-go v3.37.0), so Audio is false: audio is wired end-to-end
+// through the harness but gated off at this provider until one declares it.
+// Image is true; EmbeddedContext is true because inline text flattens into the
+// input_text content part.
+func (*Provider) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{Image: true, Audio: false, EmbeddedContext: true}
+}
+
 // Compile-time assertion that Provider satisfies the port.
 var _ port.LLMProvider = (*Provider)(nil)

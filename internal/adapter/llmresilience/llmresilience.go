@@ -126,6 +126,13 @@ type resilientProvider struct {
 	breaker breakerState
 }
 
+// Capabilities forwards the wrapped provider's capabilities unchanged: the
+// resilience decorator adds retries/breaker behaviour only and never alters what
+// kinds of prompt input the underlying provider consumes.
+func (p *resilientProvider) Capabilities() port.ProviderCapabilities {
+	return p.inner.Capabilities()
+}
+
 // allow checks the breaker before an attempt. It returns a *BreakerError if the
 // breaker is open and the cooldown has not elapsed. When the cooldown has
 // elapsed it transitions to half-open and admits the call.

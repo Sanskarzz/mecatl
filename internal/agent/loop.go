@@ -123,6 +123,13 @@ func NewEngine(deps Deps) *Engine {
 	return &Engine{deps: deps}
 }
 
+// Capabilities reports the multimodal input capabilities of the Engine's LLM
+// provider, so a surface adapter can advertise them and gate unsupported prompt
+// content. It is a pure pass-through to the injected provider.
+func (e *Engine) Capabilities() port.ProviderCapabilities {
+	return e.deps.LLM.Capabilities()
+}
+
 // catalogToolInfo is a (name, read-only) summary of one tool in an Engine's
 // catalog. The supervisor uses it to verify a member's tool set without
 // type-asserting concrete tool types (which would require importing an adapter,
@@ -180,8 +187,18 @@ func (r *Run) Cancel() { r.cancel() }
 // Run starts processing userText against sess in a background goroutine and
 // returns immediately with a Run handle. The loop runs until it produces a
 // terminal result Event, then closes the Events channel. ws is the session-scoped
-// workspace tools execute against.
+// workspace tools execute against. It is the text-only entry; for a multimodal
+// prompt use RunContent.
 func (e *Engine) Run(ctx context.Context, sess *session.Session, ws tool.Workspace, userText string) *Run {
+	return e.RunContent(ctx, sess, ws, userText, nil)
+}
+
+// RunContent is the multimodal sibling of Run: it processes userText PLUS
+// non-text media parts (image/audio) against sess. userText may be empty when
+// parts carries the content. Command expansion and the UserPromptSubmit hook
+// operate on the TEXT only; the media parts pass through untouched and are
+// recorded verbatim on the user message. Run delegates here with nil parts.
+func (e *Engine) RunContent(ctx context.Context, sess *session.Session, ws tool.Workspace, userText string, parts []session.Content) *Run {
 	ctx, cancel := context.WithCancel(ctx)
 	r := &Run{
 		events: make(chan session.Event, 64),
@@ -191,14 +208,15 @@ func (e *Engine) Run(ctx context.Context, sess *session.Session, ws tool.Workspa
 	go func() {
 		defer close(r.events)
 		defer cancel()
-		e.drive(ctx, r, sess, ws, userText)
+		e.drive(ctx, r, sess, ws, userText, parts)
 	}()
 	return r
 }
 
 // drive runs the loop algorithm for one prompt. It always terminates the session
-// (Complete/Stop/Cancel/Fail) and emits exactly one terminal result Event.
-func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, userText string) {
+// (Complete/Stop/Cancel/Fail) and emits exactly one terminal result Event. parts
+// carries any non-text media riding alongside userText (nil for a text prompt).
+func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, userText string, parts []session.Content) {
 	// Step 0a: emit the run-open signal exactly once per run, before any other
 	// event. Telemetry adapters (tracing/metrics) switch on session.init as the
 	// signal to open a run span/counter; emitting it here makes that contract
@@ -222,7 +240,7 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 	// (applying any mutation to the effective prompt), and only then records the
 	// final text into the aggregate. A Block (or hook error) ends the run before
 	// any model call; ok=false signals that without recording anything.
-	ok, reason, err := e.recordPrompt(ctx, r, sess, ws, userText)
+	ok, reason, err := e.recordPrompt(ctx, r, sess, ws, userText, parts)
 	if err != nil {
 		e.terminate(ctx, r, sess, session.StopError, "", session.Usage{}, err)
 		return
@@ -338,7 +356,11 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 //
 // ok=false means the prompt was rejected (reason is set); a non-nil error means a
 // recording/assembly fault. Both paths leave the run to terminate.
-func (e *Engine) recordPrompt(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, userText string) (ok bool, reason string, err error) {
+// parts (non-text media) ride alongside the text untouched: command expansion
+// and the UserPromptSubmit hook see and may rewrite only the TEXT; the media is
+// neither expanded nor mutated by a hook and is recorded verbatim on the user
+// message via RecordUserPromptWithParts.
+func (e *Engine) recordPrompt(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, userText string, parts []session.Content) (ok bool, reason string, err error) {
 	if expanded, exp, eerr := e.deps.CommandExpander.Expand(ctx, ws, userText); eerr == nil && exp {
 		userText = expanded
 	}
@@ -356,7 +378,7 @@ func (e *Engine) recordPrompt(ctx context.Context, r *Run, sess *session.Session
 		}
 		instr = discovered
 	}
-	if rerr := sess.RecordUserPrompt(finalText, instr); rerr != nil {
+	if rerr := sess.RecordUserPromptWithParts(finalText, parts, instr); rerr != nil {
 		return false, "", fmt.Errorf("agent: record user prompt: %w", rerr)
 	}
 	return true, "", nil

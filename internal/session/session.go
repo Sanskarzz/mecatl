@@ -239,13 +239,24 @@ func (s *Session) RecordToolResults(results []ToolResult) error {
 // through the root. It is legal from any non-terminal state (a prompt may be the
 // first message while idle, or a follow-up while running).
 func (s *Session) RecordUserPrompt(text string, instructions []Message) error {
+	return s.RecordUserPromptWithParts(text, nil, instructions)
+}
+
+// RecordUserPromptWithParts is the multimodal sibling of RecordUserPrompt: it
+// records a user prompt carrying flattened text PLUS non-text media parts
+// (image/audio), optionally preceded by discovered project-instruction messages.
+// text may be empty when parts carries the content. It shares
+// RecordUserPrompt's state guard and instruction-prepend behaviour; the only
+// difference is the recorded user message carries Parts. It is legal from any
+// non-terminal state.
+func (s *Session) RecordUserPromptWithParts(text string, parts []Content, instructions []Message) error {
 	if s.State.IsTerminal() {
 		return fmt.Errorf("%w: RecordUserPrompt from %q", ErrIllegalTransition, s.State)
 	}
 	for _, m := range instructions {
 		s.Conversation.Append(m)
 	}
-	s.Conversation.Append(NewUserMessage(text))
+	s.Conversation.Append(NewUserMessageWithParts(text, parts))
 	return nil
 }
 

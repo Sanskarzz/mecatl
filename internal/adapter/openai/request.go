@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
@@ -94,8 +95,20 @@ func buildInput(msgs []session.Message) (responses.ResponseInputParam, error) {
 			items = append(items, responses.ResponseInputItemParamOfMessage(
 				m.Text, responses.EasyInputMessageRoleSystem))
 		case session.RoleUser:
+			// Text-only fast path: keep the EXACT simple-string message form so the
+			// byte-stable prompt prefix and every existing fixture are unchanged.
+			if len(m.Parts) == 0 {
+				items = append(items, responses.ResponseInputItemParamOfMessage(
+					m.Text, responses.EasyInputMessageRoleUser))
+				break
+			}
+			// Multimodal: build a content-list message (input_text + per-part media).
+			content, perr := userContentList(m)
+			if perr != nil {
+				return nil, perr
+			}
 			items = append(items, responses.ResponseInputItemParamOfMessage(
-				m.Text, responses.EasyInputMessageRoleUser))
+				content, responses.EasyInputMessageRoleUser))
 		case session.RoleAssistant:
 			items = append(items, assistantItems(m)...)
 		case session.RoleTool:
@@ -108,6 +121,48 @@ func buildInput(msgs []session.Message) (responses.ResponseInputParam, error) {
 		}
 	}
 	return items, nil
+}
+
+// userContentList builds the Responses input-message content list for a
+// multimodal user message: an input_text part (only when Text is non-empty)
+// followed by one part per media Part. An image Part becomes an input_image
+// whose image_url is the part's URL or a base64 data URL of its inline bytes
+// (the Responses API accepts both in the same field). An audio Part is an honest
+// hard error: the Responses input-message content union has no audio member
+// (openai-go v3.37.0), and the provider declares Audio:false, so a surface
+// adapter rejects audio upstream — this is the belt-and-suspenders guard for a
+// part that slips through.
+func userContentList(m session.Message) (responses.ResponseInputMessageContentListParam, error) {
+	content := responses.ResponseInputMessageContentListParam{}
+	if m.Text != "" {
+		content = append(content, responses.ResponseInputContentUnionParam{
+			OfInputText: &responses.ResponseInputTextParam{Text: m.Text},
+		})
+	}
+	for _, p := range m.Parts {
+		switch p.Kind {
+		case session.MediaImage:
+			url := p.URL
+			if url == "" {
+				url = dataURL(p.MIMEType, p.Data)
+			}
+			content = append(content, responses.ResponseInputContentUnionParam{
+				OfInputImage: &responses.ResponseInputImageParam{ImageURL: oai.String(url)},
+			})
+		case session.MediaAudio:
+			return nil, fmt.Errorf("openai: audio input not supported by Responses API")
+		default:
+			return nil, fmt.Errorf("openai: unsupported media kind %q", p.Kind)
+		}
+	}
+	return content, nil
+}
+
+// dataURL renders inline media bytes as an RFC 2397 base64 data URL
+// ("data:<mime>;base64,<...>"), the form the Responses API accepts in an
+// input_image image_url field.
+func dataURL(mime string, data []byte) string {
+	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)
 }
 
 // assistantItems expands an assistant message into its ordered input items:

@@ -26,6 +26,9 @@ type fakeProvider struct {
 	mu    sync.Mutex
 	calls int32
 	steps []step
+	// caps is the capability set this fake advertises, so the forwarding test can
+	// assert the decorator returns the inner provider's value verbatim.
+	caps port.ProviderCapabilities
 	// onAttempt, if set, is invoked at the start of each Stream call with the
 	// (zero-based) call index, before the step is evaluated. Useful to observe
 	// timing / ctx state.
@@ -41,6 +44,8 @@ type step struct {
 	block    bool
 	blockErr error // error returned after block unblocks (default ctx.Err()).
 }
+
+func (f *fakeProvider) Capabilities() port.ProviderCapabilities { return f.caps }
 
 func (f *fakeProvider) Stream(ctx context.Context, _ port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
 	n := int(atomic.AddInt32(&f.calls, 1)) - 1
@@ -478,5 +483,17 @@ func TestBackoffDurationRespectsMaxAndJitter(t *testing.T) {
 		if d <= 0 || d > p.cfg.MaxBackoff {
 			t.Fatalf("attempt %d: backoff %s out of (0, %s]", attempt, d, p.cfg.MaxBackoff)
 		}
+	}
+}
+
+// TestCapabilitiesForwarded asserts the resilience decorator returns the wrapped
+// provider's capabilities verbatim (it adds retries/breaker only, never alters
+// what input the provider consumes).
+func TestCapabilitiesForwarded(t *testing.T) {
+	want := port.ProviderCapabilities{Image: true, Audio: false, EmbeddedContext: true}
+	inner := &fakeProvider{caps: want}
+	wrapped := Wrap(inner, Config{MaxAttempts: 1})
+	if got := wrapped.Capabilities(); got != want {
+		t.Fatalf("Capabilities() = %+v, want %+v", got, want)
 	}
 }

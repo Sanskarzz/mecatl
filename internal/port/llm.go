@@ -70,11 +70,32 @@ type Chunk struct {
 	Stop session.StopReason
 }
 
+// ProviderCapabilities declares which non-text prompt input a provider can
+// consume. The capability seam is the single switch that gates multimodal
+// prompt content: a surface adapter (e.g. ACP) consults it to advertise its
+// promptCapabilities and to loud-reject unsupported content rather than
+// silently dropping it. The zero value is text-only (every field false).
+type ProviderCapabilities struct {
+	// Image reports whether the provider consumes image parts.
+	Image bool
+	// Audio reports whether the provider consumes audio parts.
+	Audio bool
+	// EmbeddedContext reports whether the provider ADVERTISES embedded-context
+	// support. Inline-text resources always flatten into the prompt text
+	// regardless; this gates whether the adapter declares the capability.
+	EmbeddedContext bool
+}
+
 // LLMProvider is the provider-agnostic seam for model calls. Stream yields
 // provider-neutral chunks until ctx is cancelled or the model stops; ctx
 // cancellation is how the API "cancel" verb interrupts an in-flight turn. The
 // returned iter.Seq2 yields (Chunk, error) pairs; a non-nil error terminates the
 // stream. The outer error reports a failure to start the stream.
+//
+// Capabilities reports which non-text prompt input the provider can consume, so
+// a surface adapter can advertise it and gate unsupported content. A decorator
+// MUST forward the inner provider's Capabilities.
 type LLMProvider interface {
 	Stream(ctx context.Context, req LLMRequest) (iter.Seq2[Chunk, error], error)
+	Capabilities() ProviderCapabilities
 }

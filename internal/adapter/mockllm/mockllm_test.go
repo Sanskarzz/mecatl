@@ -139,3 +139,18 @@ func TestCancelBeforeIterationYieldsNothing(t *testing.T) {
 		t.Fatalf("got %d chunks with pre-cancelled ctx, want 0", n)
 	}
 }
+
+func TestCapabilitiesDefaultTextOnly(t *testing.T) {
+	p := New()
+	if got := p.Capabilities(); got != (port.ProviderCapabilities{}) {
+		t.Fatalf("default Capabilities() = %+v, want zero (text-only)", got)
+	}
+}
+
+func TestWithCapabilities(t *testing.T) {
+	want := port.ProviderCapabilities{Image: true, EmbeddedContext: true}
+	p := NewWith([]Option{WithCapabilities(want)})
+	if got := p.Capabilities(); got != want {
+		t.Fatalf("Capabilities() = %+v, want %+v", got, want)
+	}
+}

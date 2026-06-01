@@ -323,3 +323,112 @@ func TestModeRoundTrip(t *testing.T) {
 		t.Fatalf("unspecified mode -> %q, want default", got)
 	}
 }
+
+func TestContentFromProto(t *testing.T) {
+	parts, err := contentFromProto([]*mecatlv1.Content{
+		{Kind: mecatlv1.Content_KIND_IMAGE, MimeType: "image/png", Data: []byte{1, 2}},
+		{Kind: mecatlv1.Content_KIND_AUDIO, MimeType: "audio/wav", Url: "https://media.example.com/a.wav"},
+	})
+	if err != nil {
+		t.Fatalf("contentFromProto: %v", err)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want 2", len(parts))
+	}
+	if parts[0].Kind != session.MediaImage || string(parts[0].Data) != string([]byte{1, 2}) {
+		t.Fatalf("part 0 = %+v", parts[0])
+	}
+	if parts[1].Kind != session.MediaAudio || parts[1].URL != "https://media.example.com/a.wav" {
+		t.Fatalf("part 1 = %+v", parts[1])
+	}
+}
+
+func TestContentFromProtoEmpty(t *testing.T) {
+	if got, err := contentFromProto(nil); err != nil || got != nil {
+		t.Fatalf("contentFromProto(nil) = %v, %v; want nil, nil", got, err)
+	}
+}
+
+func TestContentFromProtoRejectsUnspecifiedKind(t *testing.T) {
+	_, err := contentFromProto([]*mecatlv1.Content{{Kind: mecatlv1.Content_KIND_UNSPECIFIED, MimeType: "image/png", Data: []byte{1}}})
+	if err == nil {
+		t.Fatal("expected reject for KIND_UNSPECIFIED")
+	}
+}
+
+func TestContentFromProtoRejectsBothDataAndURL(t *testing.T) {
+	_, err := contentFromProto([]*mecatlv1.Content{{
+		Kind: mecatlv1.Content_KIND_IMAGE, MimeType: "image/png",
+		Data: []byte{1}, Url: "https://x/y.png",
+	}})
+	if err == nil {
+		t.Fatal("expected reject for both data and url set")
+	}
+}
+
+func TestContentToProtoRoundTrip(t *testing.T) {
+	in := []session.Content{
+		{Kind: session.MediaImage, MIMEType: "image/png", Data: []byte{9}},
+		{Kind: session.MediaAudio, MIMEType: "audio/wav", URL: "https://media.example.com/a.wav"},
+	}
+	out := contentToProto(in)
+	back, err := contentFromProto(out)
+	if err != nil {
+		t.Fatalf("round-trip decode: %v", err)
+	}
+	if len(back) != 2 || back[0].Kind != session.MediaImage || back[1].URL != "https://media.example.com/a.wav" {
+		t.Fatalf("round-trip mismatch: %+v", back)
+	}
+}
+
+func TestContentFromProtoRejectsSSRFURL(t *testing.T) {
+	for _, bad := range []string{
+		"http://media.example.com/a.png",           // plaintext http
+		"https://169.254.169.254/latest/meta-data", // metadata IP
+		"https://127.0.0.1/a.png",                  // loopback
+		"https://10.0.0.5/a.png",                   // RFC1918
+		"https://localhost/a.png",                  // internal name
+		"file:///etc/passwd",                       // file scheme
+	} {
+		_, err := contentFromProto([]*mecatlv1.Content{
+			{Kind: mecatlv1.Content_KIND_IMAGE, MimeType: "image/png", Url: bad},
+		})
+		if err == nil {
+			t.Fatalf("contentFromProto with url %q: expected reject, got nil", bad)
+		}
+	}
+}
+
+func TestContentFromProtoRejectsOversizedPart(t *testing.T) {
+	_, err := contentFromProto([]*mecatlv1.Content{
+		{Kind: mecatlv1.Content_KIND_IMAGE, MimeType: "image/png", Data: make([]byte, session.MaxMediaBytes+1)},
+	})
+	if err == nil {
+		t.Fatal("expected reject for oversized inline part")
+	}
+}
+
+func TestContentFromProtoRejectsTooManyParts(t *testing.T) {
+	parts := make([]*mecatlv1.Content, session.MaxPromptMediaParts+1)
+	for i := range parts {
+		parts[i] = &mecatlv1.Content{Kind: mecatlv1.Content_KIND_IMAGE, MimeType: "image/png", Data: []byte{1}}
+	}
+	if _, err := contentFromProto(parts); err == nil {
+		t.Fatal("expected reject for too many parts")
+	}
+}
+
+func TestContentFromProtoRejectsMimeKindMismatch(t *testing.T) {
+	_, err := contentFromProto([]*mecatlv1.Content{
+		{Kind: mecatlv1.Content_KIND_IMAGE, MimeType: "audio/wav", Data: []byte{1}},
+	})
+	if err == nil {
+		t.Fatal("expected reject for image kind with audio mime")
+	}
+	_, err = contentFromProto([]*mecatlv1.Content{
+		{Kind: mecatlv1.Content_KIND_IMAGE, MimeType: "", Data: []byte{1}},
+	})
+	if err == nil {
+		t.Fatal("expected reject for empty mime")
+	}
+}

@@ -51,6 +51,19 @@ type messageDTO struct {
 	ToolCalls  []session.ToolCall  `json:"tool_calls,omitempty"`
 	ToolResult *session.ToolResult `json:"tool_result,omitempty"`
 	Reasoning  string              `json:"reasoning,omitempty"`
+	// Parts carries non-text media on a user message. It is omitempty so a v1
+	// snapshot with no "parts" key decodes to nil Parts — a text-only message,
+	// exactly correct; the field is purely additive and needs no version bump.
+	Parts []contentDTO `json:"parts,omitempty"`
+}
+
+// contentDTO mirrors session.Content with JSON tags. Data []byte marshals as
+// base64 automatically. Exactly one of data/url is set on a well-formed part.
+type contentDTO struct {
+	Kind     session.MediaKind `json:"kind"`
+	MIMEType string            `json:"mime_type,omitempty"`
+	Data     []byte            `json:"data,omitempty"`
+	URL      string            `json:"url,omitempty"`
 }
 
 // ErrNilSession is returned by Of when given a nil session.
@@ -183,6 +196,7 @@ func toDTO(m session.Message) messageDTO {
 		ToolCalls:  m.ToolCalls,
 		ToolResult: m.ToolResult,
 		Reasoning:  m.Reasoning,
+		Parts:      contentToDTO(m.Parts),
 	}
 }
 
@@ -193,5 +207,28 @@ func fromDTO(dto messageDTO) session.Message {
 		ToolCalls:  dto.ToolCalls,
 		ToolResult: dto.ToolResult,
 		Reasoning:  dto.Reasoning,
+		Parts:      contentFromDTO(dto.Parts),
 	}
+}
+
+func contentToDTO(parts []session.Content) []contentDTO {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]contentDTO, len(parts))
+	for i, p := range parts {
+		out[i] = contentDTO{Kind: p.Kind, MIMEType: p.MIMEType, Data: p.Data, URL: p.URL}
+	}
+	return out
+}
+
+func contentFromDTO(parts []contentDTO) []session.Content {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]session.Content, len(parts))
+	for i, p := range parts {
+		out[i] = session.Content{Kind: p.Kind, MIMEType: p.MIMEType, Data: p.Data, URL: p.URL}
+	}
+	return out
 }

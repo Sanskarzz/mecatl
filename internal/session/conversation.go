@@ -32,11 +32,25 @@ type Message struct {
 	// from the human-readable reasoning SUMMARY surfaced via reasoning.delta
 	// events for display: that prose is never stored here.
 	Reasoning string
+	// Parts carries non-text media (image/audio) on a USER message; it is nil for
+	// assistant/tool/system messages. Text remains the flattened text body
+	// (embedded-text resources collapse into it); Parts carries only the binary or
+	// URL-referenced media that rides alongside the text. Do not mutate Parts (or a
+	// Part's Data) after construction.
+	Parts []Content
 }
 
 // NewUserMessage constructs a user-role message.
 func NewUserMessage(text string) Message {
 	return Message{Role: RoleUser, Text: text}
+}
+
+// NewUserMessageWithParts constructs a user-role message carrying flattened
+// text plus non-text media parts. text may be empty when parts carries the
+// content; parts may be nil for a text-only message (equivalent to
+// NewUserMessage).
+func NewUserMessageWithParts(text string, parts []Content) Message {
+	return Message{Role: RoleUser, Text: text, Parts: parts}
 }
 
 // NewSystemMessage constructs a system-role message.

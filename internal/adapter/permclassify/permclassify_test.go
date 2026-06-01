@@ -325,6 +325,8 @@ func TestTimeoutFailsSafe(t *testing.T) {
 // the per-classification timeout path.
 type blockingProvider struct{}
 
+func (blockingProvider) Capabilities() port.ProviderCapabilities { return port.ProviderCapabilities{} }
+
 func (blockingProvider) Stream(ctx context.Context, _ port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
 	return func(_ func(port.Chunk, error) bool) {
 		<-ctx.Done()

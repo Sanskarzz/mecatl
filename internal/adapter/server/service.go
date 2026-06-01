@@ -481,8 +481,20 @@ func (s *Service) LoadSession(ctx context.Context, id session.SessionID) (*sessi
 // adapter `defer`s FinishRun after the drain — see grpc.go/http.go/the ACP
 // adapter). It returns ErrNotFound if the session does not exist.
 func (s *Service) StartRun(ctx context.Context, id session.SessionID, text string) (*agent.Run, error) {
-	if text == "" {
-		return nil, fmt.Errorf("%w: prompt text is required", ErrInvalidArgument)
+	return s.StartRunContent(ctx, id, text, nil)
+}
+
+// StartRunContent is the multimodal sibling of StartRun: it starts a run with a
+// prompt carrying flattened text PLUS non-text media parts (image/audio). text
+// may be "" when parts carries the content; at least one of text/parts must be
+// non-empty (else ErrInvalidArgument). StartRun delegates here with nil parts.
+// The media passes through to the engine untouched — command expansion and the
+// UserPromptSubmit hook operate on the TEXT only (see Engine.RunContent). All
+// other behaviour (workspace/engine selection, registration, drain contract) is
+// identical to StartRun.
+func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, text string, parts []session.Content) (*agent.Run, error) {
+	if text == "" && len(parts) == 0 {
+		return nil, fmt.Errorf("%w: prompt text or parts is required", ErrInvalidArgument)
 	}
 	sess, err := s.GetSession(ctx, id)
 	if err != nil {
@@ -502,9 +514,17 @@ func (s *Service) StartRun(ctx context.Context, id session.SessionID, text strin
 	if ws == nil {
 		ws = s.cfg.Workspaces(sess.Workspace)
 	}
-	run := engine.Run(ctx, sess, ws, text)
+	run := engine.RunContent(ctx, sess, ws, text, parts)
 	s.register(id, run, sess)
 	return run, nil
+}
+
+// ProviderCapabilities reports the configured LLM provider's multimodal input
+// support, so a surface adapter can advertise it (e.g. ACP promptCapabilities)
+// and loud-reject unsupported prompt content. It reads the capabilities through
+// the engine's provider seam.
+func (s *Service) ProviderCapabilities() port.ProviderCapabilities {
+	return s.cfg.Engine.Capabilities()
 }
 
 // LookupRun returns the in-flight run for a session and true, or false if no

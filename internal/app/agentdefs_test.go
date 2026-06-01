@@ -31,6 +31,10 @@ type recordingProvider struct {
 	model string
 }
 
+func (*recordingProvider) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{}
+}
+
 func (p *recordingProvider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
 	p.mu.Lock()
 	p.model = req.Model

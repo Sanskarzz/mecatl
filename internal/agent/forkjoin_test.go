@@ -81,6 +81,10 @@ type routingBranchProvider struct {
 	summaries map[string]string
 }
 
+func (*routingBranchProvider) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{}
+}
+
 func (p *routingBranchProvider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
 	prompt := lastUserText(req)
 	text := "generic branch summary"
@@ -511,6 +515,10 @@ func TestForkJoinUnknownStrategyErrors(t *testing.T) {
 // for the Read tool once (so the gated child tool runs), then summarizes "ok" once a
 // tool result is present.
 type firstBranchProvider struct{}
+
+func (firstBranchProvider) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{}
+}
 
 func (firstBranchProvider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
 	for _, m := range req.Messages {

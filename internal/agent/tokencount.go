@@ -76,6 +76,13 @@ func (h HeuristicTokenCounter) CountMessages(msgs []session.Message) int {
 		if m.ToolResult != nil {
 			total += len(m.ToolResult.Content) / cpt
 		}
+		// Media parts are not free: a multimodal message carries image/audio bytes
+		// that the provider bills. Count each part's inline byte length (URL-sourced
+		// parts contribute only their reference length) so a multimodal message is
+		// not undercounted and the compaction budget is not silently blown.
+		for _, p := range m.Parts {
+			total += (len(p.Data) + len(p.URL) + len(p.MIMEType)) / cpt
+		}
 	}
 	return total
 }

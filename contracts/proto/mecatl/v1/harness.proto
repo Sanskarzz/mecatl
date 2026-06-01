@@ -214,13 +214,44 @@ message ConverseResponse {
   Event event = 1;
 }
 
+// Content is one non-text part of a multimodal user prompt. EXACTLY ONE of
+// data/url is set: data carries inline bytes, url a remote reference. mime_type
+// is the IANA media type (e.g. "image/png", "audio/wav"). The "data XOR url" and
+// "kind != UNSPECIFIED" rules are enforced by the server (the mapper rejects a
+// malformed part), not at the wire layer.
+message Content {
+  // Kind discriminates the media kind of the part.
+  enum Kind {
+    // KIND_UNSPECIFIED is rejected by the server: every part must name its kind.
+    KIND_UNSPECIFIED = 0;
+    // KIND_IMAGE is an image part.
+    KIND_IMAGE = 1;
+    // KIND_AUDIO is an audio part.
+    KIND_AUDIO = 2;
+  }
+  // kind is the media kind (image / audio); UNSPECIFIED is rejected.
+  Kind kind = 1;
+  // mime_type is the IANA media type of the part.
+  string mime_type = 2;
+  // data is the inline content bytes; empty when url-sourced.
+  bytes data = 3;
+  // url is the remote reference; empty when inline.
+  string url = 4;
+}
+
 // Prompt is the mandatory first Converse frame. It names the session the run
-// executes against and the user text to process.
+// executes against and the user prompt to process. The prompt is text and/or
+// media: at least one of text/parts must be non-empty. The "text or parts
+// non-empty" rule is a CROSS-FIELD constraint enforced by the server (the proto
+// only carries per-field constraints), which is why text no longer carries a
+// min_len — it is optional when parts is set.
 message Prompt {
   // session_id is the session this run belongs to.
   string session_id = 1 [(buf.validate.field).string.min_len = 1];
-  // text is the user prompt to process.
-  string text = 2 [(buf.validate.field).string.min_len = 1];
+  // text is the flattened user prompt text; optional when parts is set.
+  string text = 2;
+  // parts carries non-text media (image/audio) alongside the text.
+  repeated Content parts = 3;
 }
 
 // ResumeApproval releases a paused permission.ask, allowing or denying the

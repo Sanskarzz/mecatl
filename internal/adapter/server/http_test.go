@@ -392,3 +392,80 @@ func TestHTTPTeamTooMany(t *testing.T) {
 		t.Fatalf("create #2 status = %d, want 429", r2.StatusCode)
 	}
 }
+
+// TestHTTPPromptRejectsSSRFURL asserts a prompt part carrying a disallowed media
+// URL (cloud metadata IP) is rejected at the HTTP choke point with 400, never
+// reaching the run.
+func TestHTTPPromptRejectsSSRFURL(t *testing.T) {
+	svc := newService(t, mockllm.New(mockllm.TextTurn("x")), allowRules())
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+	id := createHTTPSession(t, srv)
+
+	body := `{"text":"look","parts":[{"kind":"image","mime_type":"image/png","url":"https://169.254.169.254/latest/meta-data/"}]}`
+	resp, err := http.Post(srv.URL+"/v1/sessions/"+id+"/prompt", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST prompt: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for SSRF url", resp.StatusCode)
+	}
+}
+
+// TestHTTPPromptRejectsOversizedBody asserts an over-limit request body is
+// rejected with 413 (Request Entity Too Large), not buffered into memory / OOM.
+func TestHTTPPromptRejectsOversizedBody(t *testing.T) {
+	svc := newService(t, mockllm.New(mockllm.TextTurn("x")), allowRules())
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+	id := createHTTPSession(t, srv)
+
+	// A body just over the wire cap (37 MiB > 32 MiB maxPromptBodyBytes).
+	huge := bytes.Repeat([]byte("A"), 37<<20)
+	body := append([]byte(`{"text":"`), huge...)
+	body = append(body, []byte(`"}`)...)
+	resp, err := http.Post(srv.URL+"/v1/sessions/"+id+"/prompt", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST prompt: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 for oversized body", resp.StatusCode)
+	}
+}
+
+// TestHTTPPromptRejectsOversizedPart asserts a part exceeding the per-part inline
+// cap (but within the body limit) is rejected with 400 at the choke point.
+func TestHTTPPromptRejectsOversizedPart(t *testing.T) {
+	svc := newService(t, mockllm.New(mockllm.TextTurn("x")), allowRules())
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+	id := createHTTPSession(t, srv)
+
+	// 11 MiB of raw bytes > MaxMediaBytes (10 MiB); base64 (~14.7 MiB) stays under
+	// the 32 MiB body cap so the per-part size check (not the body reader) trips.
+	raw := bytes.Repeat([]byte{0xAB}, 11<<20)
+	part := promptPartJSON{Kind: "image", MimeType: "image/png", Data: raw}
+	reqBody, err := json.Marshal(map[string]any{"text": "look", "parts": []promptPartJSON{part}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	resp, err := http.Post(srv.URL+"/v1/sessions/"+id+"/prompt", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("POST prompt: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for oversized part", resp.StatusCode)
+	}
+}
+
+// promptPartJSON mirrors the server's HTTP prompt part JSON shape for test
+// request construction ([]byte marshals as base64, matching the handler decode).
+type promptPartJSON struct {
+	Kind     string `json:"kind"`
+	MimeType string `json:"mime_type,omitempty"`
+	Data     []byte `json:"data,omitempty"`
+	URL      string `json:"url,omitempty"`
+}

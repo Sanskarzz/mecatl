@@ -431,6 +431,8 @@ func TestRunPeriodicallyStopsOnCtxCancel(t *testing.T) {
 // blockingProvider blocks until ctx is done, then yields nothing.
 type blockingProvider struct{}
 
+func (blockingProvider) Capabilities() port.ProviderCapabilities { return port.ProviderCapabilities{} }
+
 func (blockingProvider) Stream(ctx context.Context, _ port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
 	return func(_ func(port.Chunk, error) bool) {
 		<-ctx.Done()

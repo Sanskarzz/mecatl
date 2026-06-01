@@ -207,9 +207,13 @@ func (c CascadeCompactor) summarize(ctx context.Context, head, middle []session.
 			"decisions made and why, unresolved questions and known errors, and every file path touched. " +
 			"DROP: raw file contents, verbose tool output, and old stack traces. Respond with the summary only.",
 	)
+	// Tier-4 summary is a TEXT-only call: substitute a text placeholder for any
+	// media part so we NEVER ship image/audio bytes to the summary model. The
+	// synthesized summary message is text-only (see Compact, where middle becomes a
+	// single NewUserMessage).
 	reqMsgs := make([]session.Message, 0, len(head)+len(middle)+1)
-	reqMsgs = append(reqMsgs, head...)
-	reqMsgs = append(reqMsgs, middle...)
+	reqMsgs = append(reqMsgs, deMediaMessages(head)...)
+	reqMsgs = append(reqMsgs, deMediaMessages(middle)...)
 	reqMsgs = append(reqMsgs, instruction)
 
 	seq, err := c.LLM.Stream(ctx, port.LLMRequest{
@@ -234,6 +238,54 @@ func (c CascadeCompactor) summarize(ctx context.Context, head, middle []session.
 		out = "[compaction summary unavailable]"
 	}
 	return "[earlier turns summarised]\n" + out, nil
+}
+
+// deMediaMessages returns msgs with every media-bearing user message rewritten
+// to a text-only message: each media Part is replaced by a compact textual
+// placeholder (e.g. "[image: image/png, 24KB]") appended to the text, and Parts
+// is cleared. It is the guard that keeps the tier-4 summary call text-only — no
+// image/audio bytes are ever sent to the summariser. Messages with no Parts pass
+// through unchanged (no allocation).
+func deMediaMessages(msgs []session.Message) []session.Message {
+	hasMedia := false
+	for _, m := range msgs {
+		if len(m.Parts) > 0 {
+			hasMedia = true
+			break
+		}
+	}
+	if !hasMedia {
+		return msgs
+	}
+	out := make([]session.Message, len(msgs))
+	for i, m := range msgs {
+		if len(m.Parts) == 0 {
+			out[i] = m
+			continue
+		}
+		var b strings.Builder
+		b.WriteString(m.Text)
+		for _, p := range m.Parts {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(mediaPlaceholder(p))
+		}
+		nm := m
+		nm.Text = b.String()
+		nm.Parts = nil
+		out[i] = nm
+	}
+	return out
+}
+
+// mediaPlaceholder renders a single media Part as a compact text note for the
+// summariser: kind, mime type, and approximate inline size (or a url marker).
+func mediaPlaceholder(p session.Content) string {
+	if p.URL != "" {
+		return fmt.Sprintf("[%s: %s, url]", p.Kind, p.MIMEType)
+	}
+	return fmt.Sprintf("[%s: %s, %dKB]", p.Kind, p.MIMEType, (len(p.Data)+1023)/1024)
 }
 
 // preservedHead returns the leading system messages plus the first user goal,

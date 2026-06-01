@@ -38,12 +38,38 @@ type Provider struct {
 	mu     sync.Mutex
 	turns  []Turn
 	cursor int
+	caps   port.ProviderCapabilities
+}
+
+// Option configures a Provider.
+type Option func(*Provider)
+
+// WithCapabilities sets the capabilities the mock advertises. The default is
+// text-only (the zero ProviderCapabilities). Tests use it to flip the mock to
+// image- or audio-capable without reaching for the OpenAI adapter.
+func WithCapabilities(caps port.ProviderCapabilities) Option {
+	return func(p *Provider) { p.caps = caps }
 }
 
 // New constructs a Provider that replays the given turns in order, one per
-// Stream call.
+// Stream call. It advertises text-only capabilities unless NewWith is used.
 func New(turns ...Turn) *Provider {
 	return &Provider{turns: turns}
+}
+
+// NewWith constructs a Provider with the given options (e.g. WithCapabilities)
+// and scripted turns.
+func NewWith(opts []Option, turns ...Turn) *Provider {
+	p := &Provider{turns: turns}
+	for _, o := range opts {
+		o(p)
+	}
+	return p
+}
+
+// Capabilities reports the configured capabilities (text-only by default).
+func (p *Provider) Capabilities() port.ProviderCapabilities {
+	return p.caps
 }
 
 // Calls reports how many times Stream has been invoked (i.e. the current cursor

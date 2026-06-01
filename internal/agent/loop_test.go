@@ -585,6 +585,8 @@ type blockingProvider struct {
 	once    sync.Once
 }
 
+func (*blockingProvider) Capabilities() port.ProviderCapabilities { return port.ProviderCapabilities{} }
+
 func (b *blockingProvider) Stream(ctx context.Context, _ port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
 	return func(yield func(port.Chunk, error) bool) {
 		b.once.Do(func() { close(b.started) })
