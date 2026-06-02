@@ -10,6 +10,13 @@ import (
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
+// BashToolName is the catalog name of the Bash tool. It is the single authority
+// for the name the Bash tool registers under (used in its Spec().Name) so a
+// consumer can probe the catalog for bash enablement by referencing the constant
+// rather than a local literal that could drift on a rename (see
+// internal/adapter/server.Service.capabilities).
+const BashToolName = "Bash"
+
 // bashDescription is the model-facing documentation for the Bash tool.
 const bashDescription = `Run a shell command in the workspace root and return its combined output and exit code.
 
@@ -84,7 +91,7 @@ type bashArgs struct {
 // Spec returns the model-facing specification of the Bash tool.
 func (BashTool) Spec() tool.ToolSpec {
 	return tool.ToolSpec{
-		Name:        "Bash",
+		Name:        BashToolName,
 		Description: bashDescription,
 		Schema: schema(`{
   "type": "object",

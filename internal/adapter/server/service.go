@@ -13,7 +13,9 @@ import (
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/mcp/source"
+	"github.com/stacklok/mecatl/internal/adapter/memory"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
+	"github.com/stacklok/mecatl/internal/adapter/tools"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
@@ -278,27 +280,17 @@ func (s *Service) CreateSession(ctx context.Context, workspace string, mode sess
 	return sess, nil
 }
 
-// Tool names probed by capabilities() to report feature enablement from the
-// BUILT catalog. They MUST match the registered names of the owning tools:
-//   - toolNameRemember → internal/adapter/memory.NewRememberTool (Name: "Remember")
-//   - toolNameBash     → internal/adapter/tools.NewBash         (Name: "Bash")
-//
-// The Skill tool is probed via skills.ToolName (exported by its package). These
-// two are bare literals because their packages do not export a name constant;
-// TestCapabilities is the backstop that fails if a tool is renamed and these
-// drift from the real registration.
-const (
-	toolNameRemember = "Remember"
-	toolNameBash     = "Bash"
-)
-
 // capabilities reports which optional features THIS service has actually built,
 // for the CreateSession response. It is the single source of truth for the
 // client's honest-UI affordances; it reads the wired Config seams and the engine
 // catalog (NOT a static list) so it can never claim a feature the server did not
-// register. Tool presence is checked by the tools' registered names (Remember /
-// Skill / Bash) via Engine.HasTool, which is nil-safe (a nil engine/catalog
-// yields the tool caps as false).
+// register. Tool presence is checked by the tools' registered names via
+// Engine.HasTool, which is nil-safe (a nil engine/catalog yields the tool caps as
+// false). The names are referenced from each owning package's exported constant
+// — memory.RememberToolName (internal/adapter/memory.NewRememberTool),
+// skills.ToolName (internal/adapter/skills.NewTool), tools.BashToolName
+// (internal/adapter/tools.NewBashTool) — so the cap links to the registered name
+// at COMPILE time and cannot drift on a rename.
 func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 	has := func(name string) bool {
 		return s.cfg.Engine != nil && s.cfg.Engine.HasTool(name)
@@ -307,9 +299,9 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 		Mcp:           s.cfg.MCPProvider != nil,
 		SlashCommands: s.cfg.Commands != nil,
 		Teams:         s.cfg.MemberEngine != nil,
-		Memory:        has(toolNameRemember),
-		Skills:        has(skills.ToolName), // "Skill"
-		Bash:          has(toolNameBash),
+		Memory:        has(memory.RememberToolName),
+		Skills:        has(skills.ToolName),
+		Bash:          has(tools.BashToolName),
 	}
 }
 

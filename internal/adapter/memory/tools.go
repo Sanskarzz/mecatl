@@ -11,6 +11,18 @@ import (
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
+// Tool names of the memory tools. They are the single authority for the names
+// the tools register under (used in each tool's Spec().Name) so a consumer can
+// probe the catalog for memory enablement by referencing the constant rather
+// than a local literal that could drift on a rename (see
+// internal/adapter/server.Service.capabilities).
+const (
+	// RememberToolName is the catalog name of the Remember tool.
+	RememberToolName = "Remember"
+	// RecallToolName is the catalog name of the Recall tool.
+	RecallToolName = "Recall"
+)
+
 // --- Descriptions ---------------------------------------------------------
 //
 // The descriptions below are the model's onboarding manual for memory. They
@@ -111,7 +123,7 @@ type rememberArgs struct {
 // Spec returns the model-facing specification of the Remember tool.
 func (RememberTool) Spec() tool.ToolSpec {
 	return tool.ToolSpec{
-		Name:        "Remember",
+		Name:        RememberToolName,
 		Description: rememberDescription,
 		Schema: schema(`{
   "type": "object",
@@ -183,7 +195,7 @@ type recallArgs struct {
 // Spec returns the model-facing specification of the Recall tool.
 func (RecallTool) Spec() tool.ToolSpec {
 	return tool.ToolSpec{
-		Name:        "Recall",
+		Name:        RecallToolName,
 		Description: recallDescription,
 		Schema: schema(`{
   "type": "object",
