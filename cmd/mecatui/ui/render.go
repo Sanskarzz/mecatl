@@ -59,6 +59,26 @@ func (r *renderer) markdown(src string) string {
 	if w <= 0 {
 		w = 80
 	}
+	// Reserve the terminal's FINAL column: word-wrap one column short of the
+	// viewport width so no rendered glyph ever lands in the last column. A glyph
+	// there arms the terminal's pending-wrap (DECAWM) state, which desyncs the
+	// differential renderer during a reflowing stream — the stale-cell scramble
+	// where earlier-frame text bleeds into the middle of a line (e.g. "Perfect!"
+	// surfacing as "…Perfect…"). trimTrailingSpaces already strips glamour's
+	// STYLED padding (which would otherwise fill the last column with real SGR
+	// cells), but real wrapped CONTENT can itself fill a line to the full width
+	// and re-arm the trigger; wrapping short closes that gap. This mirrors the
+	// two-column inset tool cards get from Width(r.width-2), which is why cards
+	// never scramble. The viewport's own lipgloss padding to full width is
+	// unstyled (emitted as clear-to-EOL, not last-column glyphs), so it is safe.
+	// This is deliberately scoped to the assistant block: it is the only region
+	// re-rendered on EVERY delta, so it is the only one whose reflow can desync the
+	// differential renderer. A static block (user/notice/error) painted once can
+	// land in the final column without scrambling — it does not reflow — so they
+	// need no equivalent inset.
+	if w > 1 {
+		w--
+	}
 	r.mu.Lock()
 	tr, ok := r.cache[w]
 	if !ok {

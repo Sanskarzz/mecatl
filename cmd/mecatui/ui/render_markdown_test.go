@@ -3,6 +3,8 @@ package ui
 import (
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
 )
 
 // TestMarkdownNoTrailingPadding locks the trimTrailingSpaces mitigation: glamour
@@ -22,6 +24,37 @@ func TestMarkdownNoTrailingPadding(t *testing.T) {
 	for i, ln := range strings.Split(out, "\n") {
 		if ln != strings.TrimRight(ln, " ") {
 			t.Errorf("line %d has trailing padding spaces: %q", i, stripANSIstr(ln))
+		}
+	}
+}
+
+// TestMarkdownReservesFinalColumn locks the streaming-scramble fix: no rendered
+// markdown line may occupy the terminal's FINAL column. A glyph in the last
+// column arms the terminal's pending-wrap (DECAWM) state, which desyncs the
+// differential renderer during a reflowing stream — the stale-cell scramble
+// where earlier-frame text bleeds mid-line ("Perfect!" → "…Perfect…").
+// trimTrailingSpaces removes glamour's styled padding, but real wrapped CONTENT
+// can fill a line to the full width; markdown() must wrap one column short so the
+// last column always stays empty (mirroring the Width(r.width-2) inset that keeps
+// tool cards from scrambling).
+func TestMarkdownReservesFinalColumn(t *testing.T) {
+	r := newTestRenderer() // width 100
+	// Long single paragraph with no hard breaks, so glamour greedily fills lines
+	// right up to the wrap boundary — the case where a wrapped line would otherwise
+	// reach the full width and re-arm the pending-wrap trigger.
+	src := strings.TrimSpace(strings.Repeat(
+		"Perfect now I have a comprehensive understanding of the mecatl repository and "+
+			"will save this knowledge before continuing with the next implementation step. ",
+		6))
+	out := r.markdown(src)
+	lines := strings.Split(out, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected the prose to wrap to multiple lines, got %d", len(lines))
+	}
+	for i, ln := range lines {
+		if w := lipgloss.Width(ln); w >= r.width {
+			t.Errorf("line %d reaches the final column (visible width %d >= %d): %q",
+				i, w, r.width, stripANSIstr(ln))
 		}
 	}
 }
