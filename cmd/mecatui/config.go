@@ -53,6 +53,15 @@ type config struct {
 	// embeddedConfig (resolveMemoryDir), not here.
 	memoryDir string
 	noMemory  bool
+
+	// Embedded-server slash-command config (used only when hosting an in-process
+	// server). Command expansion is ON by default, expanding "/<name>" inputs from
+	// the conventional workspace dirs (.mecatl/commands, .claude/commands). An
+	// explicit commandsDir overrides the directory; noCommands disables expansion
+	// entirely and wins. Precedence is applied in embeddedConfig (resolveCommands),
+	// not here.
+	commandsDir string
+	noCommands  bool
 }
 
 // defaultProbeAddr is mecated's historical default loopback gRPC address. In AUTO
@@ -86,6 +95,8 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.noBash, "no-bash", false, "embedded server only: disable the Bash tool (shell-less mode)")
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "embedded server only: per-project memory store directory (empty = a per-project default under $XDG_DATA_HOME/mecatui/memory)")
 	fs.BoolVar(&cfg.noMemory, "no-memory", false, "embedded server only: disable cross-session memory (Remember/Recall) entirely")
+	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "embedded server only: directory of slash-command templates (<name>.md); empty = the conventional dirs (.mecatl/commands, .claude/commands)")
+	fs.BoolVar(&cfg.noCommands, "no-commands", false, "embedded server only: disable slash-command expansion entirely")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err

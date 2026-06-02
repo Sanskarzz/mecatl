@@ -156,11 +156,13 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 // drives a team), conventional agent-definition discovery (AgentsConventional:
 // true, also inert until a <name>.md exists under a conventional dir), and
 // cross-session memory (Remember/Recall) scoped per-project (see resolveMemoryDir;
-// disable with --no-memory or relocate with --memory-dir). It leaves the heavier
-// opt-ins (MCP, ToolHive, skills, slash commands, telemetry) off — a focused
-// single-user default. The provider is OpenAI when OPENAI_API_KEY is set, else the
-// offline mock (--mock).
+// disable with --no-memory or relocate with --memory-dir), and slash-command
+// expansion from the conventional dirs (.mecatl/commands, .claude/commands; disable
+// with --no-commands or relocate with --commands-dir). It leaves the heavier opt-ins
+// (MCP, ToolHive, skills, telemetry) off — a focused single-user default. The
+// provider is OpenAI when OPENAI_API_KEY is set, else the offline mock (--mock).
 func embeddedConfig(cfg config) app.Config {
+	cmdDir, enableCmds := resolveCommands(cfg)
 	return app.Config{
 		Workspace:            cfg.workspace,
 		Model:                cfg.model,
@@ -187,7 +189,29 @@ func embeddedConfig(cfg config) app.Config {
 		// calls the real provider on a timer, so a default-on interval would
 		// silently spend tokens on an idle TUI. mecated defaults it to 0 too.
 		MemoryDir: resolveMemoryDir(cfg),
+		// Slash commands ON by default (the .mecatl/commands + .claude/commands
+		// convention); --no-commands disables, --commands-dir overrides. File-backed
+		// commands are local, user-authored prompt templates — no network/trust cost,
+		// unlike MCP prompts (which stay off with MCP).
+		CommandsDir:    cmdDir,
+		EnableCommands: enableCmds,
 	}
+}
+
+// resolveCommands applies the embedded-server slash-command precedence: --no-commands
+// disables expansion entirely (returns "", false → the NoopExpander); an explicit
+// --commands-dir overrides the directory; otherwise commands are ON by default using
+// the conventional workspace dirs (.mecatl/commands, .claude/commands → "", true).
+// The returned (dir, enable) pair feeds app.Config.{CommandsDir,EnableCommands};
+// buildCommandExpander turns expansion on when either is set.
+func resolveCommands(cfg config) (dir string, enable bool) {
+	if cfg.noCommands {
+		return "", false
+	}
+	if cfg.commandsDir != "" {
+		return cfg.commandsDir, true
+	}
+	return "", true
 }
 
 // resolveMemoryDir applies the embedded-server memory precedence: --no-memory

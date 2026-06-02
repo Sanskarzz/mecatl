@@ -62,19 +62,23 @@ func TestStartServesOverSocket(t *testing.T) {
 // gate (build.go: MemoryDir != "" ⇒ memory.New + memory.Register) end to end
 // without network. A bad/empty dir would surface as a build error or a CreateSession
 // failure; a clean session id proves the gate ran and registered without blowing up.
+// It also exercises the slash-command gate (EnableCommands ⇒ a command lister ⇒
+// caps.SlashCommands) over the same wire, since the embedded server now enables both
+// opt-ins by default.
 func TestStartWithMemoryDirServes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	workspace := t.TempDir()
 	srv, err := embed.Start(ctx, app.Config{
-		Workspace:  workspace,
-		Model:      "mock-model",
-		UseMock:    true, // offline: no network, no OPENAI_API_KEY needed
-		Shell:      "/bin/sh",
-		Compaction: "heuristic",
-		Tokenizer:  "heuristic",
-		MemoryDir:  t.TempDir(), // turns on the Remember/Recall registration gate
+		Workspace:      workspace,
+		Model:          "mock-model",
+		UseMock:        true, // offline: no network, no OPENAI_API_KEY needed
+		Shell:          "/bin/sh",
+		Compaction:     "heuristic",
+		Tokenizer:      "heuristic",
+		MemoryDir:      t.TempDir(), // turns on the Remember/Recall registration gate
+		EnableCommands: true,        // turns on the slash-command lister (caps.SlashCommands)
 	})
 	if err != nil {
 		t.Fatalf("embed.Start with MemoryDir: %v", err)
@@ -100,6 +104,9 @@ func TestStartWithMemoryDirServes(t *testing.T) {
 	// the BUILT catalog through the wire to the client (not a static guess).
 	if !caps.Memory {
 		t.Errorf("caps.Memory = false, want true (MemoryDir configured ⇒ Remember registered)")
+	}
+	if !caps.SlashCommands {
+		t.Errorf("caps.SlashCommands = false, want true (EnableCommands ⇒ command lister wired)")
 	}
 }
 

@@ -73,14 +73,24 @@ absolute path (the server requires absolute).
 | `--no-bash` | off | **embedded** server: disable the Bash tool (shell-less) |
 | `--memory-dir` | – (auto) | **embedded** server: per-project memory store dir; empty = a default under `$XDG_DATA_HOME/mecatui/memory` |
 | `--no-memory` | off | **embedded** server: disable cross-session memory (Remember/Recall) |
+| `--commands-dir` | – (auto) | **embedded** server: slash-command template dir; empty = the conventional `.mecatl/commands`, `.claude/commands` |
+| `--no-commands` | off | **embedded** server: disable slash-command expansion |
 
 The embedded server has no auth/TLS — it is a private, user-owned UNIX socket
 (the same single-user loopback trust model `mecated` uses for `127.0.0.1`, with a
 tighter blast radius). The `--auth-token` / `--tls*` flags apply only when dialling
 an external `--server`; loopback is unauthenticated plaintext by default, matching
 mecated's trust model. The embedded server keeps the heavier opt-ins (MCP,
-ToolHive, skills, slash commands) **off** — for those, run a full `mecated` and
-point `--server` at it.
+ToolHive, skills) **off** — for those, run a full `mecated` and point `--server`
+at it.
+
+**Slash commands are ON by default**, expanding `/<name>` inputs from the
+conventional workspace dirs `.mecatl/commands` and `.claude/commands` (`<name>.md`
+templates — the Claude Code convention). They're local, user-authored prompt
+templates, so there's no network or trust cost (unlike MCP prompts, which stay off
+with MCP). Pass `--no-commands` to disable expansion, or `--commands-dir` to point
+at a different directory. When neither command dir exists the palette is simply
+empty (the `?` overlay and footer reflect that honestly).
 
 **Cross-session memory (Remember/Recall) is ON by default**, scoped per-project
 under `~/.local/share/mecatui/memory/<path-slug>/` (or `$XDG_DATA_HOME/...` when

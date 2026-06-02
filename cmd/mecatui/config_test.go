@@ -98,6 +98,69 @@ func TestParseFlagsMemoryFlags(t *testing.T) {
 	}
 }
 
+// TestParseFlagsCommandDefaults asserts slash commands are on by default (no flags
+// set) — the resolution to "enabled with the conventional dirs" happens in
+// embeddedConfig, so the raw config fields are empty/false here.
+func TestParseFlagsCommandDefaults(t *testing.T) {
+	cfg, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.commandsDir != "" {
+		t.Errorf("commandsDir = %q, want \"\" (default resolved in embeddedConfig)", cfg.commandsDir)
+	}
+	if cfg.noCommands {
+		t.Error("noCommands = true by default, want false (commands on)")
+	}
+}
+
+// TestParseFlagsCommandFlags asserts --commands-dir and --no-commands map onto the
+// config fields.
+func TestParseFlagsCommandFlags(t *testing.T) {
+	cfg, err := parseFlags([]string{"-commands-dir", "/tmp/cmds", "-no-commands"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.commandsDir != "/tmp/cmds" {
+		t.Errorf("commandsDir = %q, want /tmp/cmds", cfg.commandsDir)
+	}
+	if !cfg.noCommands {
+		t.Error("--no-commands did not set noCommands")
+	}
+}
+
+// TestResolveCommands covers the slash-command precedence: --no-commands disables
+// (wins over an explicit dir); an explicit --commands-dir overrides; otherwise
+// commands are on with the conventional dirs (empty dir, enabled).
+func TestResolveCommands(t *testing.T) {
+	t.Parallel()
+	// --no-commands wins, even with a dir set.
+	if dir, enable := resolveCommands(config{commandsDir: "/x", noCommands: true}); dir != "" || enable {
+		t.Errorf("no-commands: got (%q, %v), want (\"\", false)", dir, enable)
+	}
+	// explicit dir overrides.
+	if dir, enable := resolveCommands(config{commandsDir: "/x"}); dir != "/x" || !enable {
+		t.Errorf("commands-dir: got (%q, %v), want (\"/x\", true)", dir, enable)
+	}
+	// default: on with the conventional dirs (empty dir).
+	if dir, enable := resolveCommands(config{}); dir != "" || !enable {
+		t.Errorf("default: got (%q, %v), want (\"\", true)", dir, enable)
+	}
+}
+
+// TestEmbeddedConfigCommands asserts embeddedConfig turns slash commands ON by
+// default and that --no-commands turns them fully off.
+func TestEmbeddedConfigCommands(t *testing.T) {
+	on := embeddedConfig(config{workspace: "/ws", model: "m", mock: true})
+	if !on.EnableCommands || on.CommandsDir != "" {
+		t.Errorf("default: EnableCommands=%v CommandsDir=%q, want (true, \"\")", on.EnableCommands, on.CommandsDir)
+	}
+	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, noCommands: true})
+	if off.EnableCommands || off.CommandsDir != "" {
+		t.Errorf("--no-commands: EnableCommands=%v CommandsDir=%q, want (false, \"\")", off.EnableCommands, off.CommandsDir)
+	}
+}
+
 // TestDefaultMemoryDir is a pure table test of defaultMemoryDir: it reads no
 // globals (the dataHome base is injected), so it needs no env/xdg.Reload dance and
 // is safe to run in parallel. Covers the path-slug encoding, per-project
