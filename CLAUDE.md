@@ -61,6 +61,7 @@ Dependencies point **inward only** (verified by import review; not yet machine-e
 - **Tests are offline.** Use `mockllm` + `memfs`; never hit a live model/network in tests. The OpenAI SSE→Chunk path is tested from fixtures.
 - **The OpenAI adapter is stateless:** `store:false`, no `previous_response_id`, reasoning items carried back via `encrypted_content`, byte-stable prompt prefix for caching. Don't switch to server-side conversation state.
 - **`Session` is an aggregate** — mutate it through its methods (`RecordUserPrompt`, `RecordAssistant`, `ReplaceHistory`, …), not by poking `Conversation` directly.
+- **Every run-entry path must reopen-if-completed.** A turn drives the session to a terminal state (`completed`) within a single `Engine.Run`; the engine deliberately does NOT reopen (the team supervisor owns its own `Reopen` so it can accumulate lifetime counters across rounds). So any path that hands a *reused* session to `Engine.Run`/`RunContent` for a follow-up prompt must reopen it first, or the engine's `RecordUserPrompt` rejects the terminal state (`illegal state transition: RecordUserPrompt from "completed"`). In the service layer that means **`loadAndReopen`, never `GetSession`, before a run** — `GetSession` is for read-only snapshots only. All wire surfaces (gRPC/HTTP/ACP) funnel through `Service.StartRunContent`, which reopens; the supervisor reopens between rounds; subagent/fork/judge create fresh single-shot sessions. `TestStartRunContentReopensCompletedSession` guards the in-process multi-turn path.
 
 ## Verification
 
