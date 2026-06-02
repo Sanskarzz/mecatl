@@ -148,24 +148,12 @@ func (rt RememberTool) Execute(ctx context.Context, in session.ToolCall, _ tool.
 		return session.NewToolError(in.ID, fmt.Sprintf("could not remember %q: %v", args.Key, err)), nil
 	}
 	// Echo the exact index line the write just produced (explicit description, else
-	// the value's first line). This is the in-run feedback that lets the model see
-	// its own write immediately, even though the tier-0 index itself is computed
-	// once at run start and does not refresh mid-run.
-	return session.NewToolResult(in.ID, fmt.Sprintf("Remembered %q — %s", args.Key, indexLine(args.Description, args.Value))), nil
-}
-
-// indexLine renders the one-line index description for a freshly written entry:
-// the explicit description if given, else the first non-empty line of value.
-func indexLine(description, value string) string {
-	if d := strings.TrimSpace(description); d != "" {
-		return d
-	}
-	for _, line := range strings.Split(value, "\n") {
-		if t := strings.TrimSpace(line); t != "" {
-			return t
-		}
-	}
-	return ""
+	// the value's first line) via the SAME derivation the store's Index uses, so the
+	// echo can never drift from what the next session's index will show. This is the
+	// in-run feedback that lets the model see its own write immediately, even though
+	// the tier-0 index itself is computed once at run start and does not refresh
+	// mid-run.
+	return session.NewToolResult(in.ID, fmt.Sprintf("Remembered %q — %s", args.Key, descriptionOrFirstLine(args.Description, args.Value))), nil
 }
 
 // --- Recall tool ----------------------------------------------------------

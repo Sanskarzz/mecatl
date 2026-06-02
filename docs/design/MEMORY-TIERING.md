@@ -154,6 +154,21 @@ recomputed every turn, and it does NOT touch `prompt.Build`.
 
 **How the index reaches `prompt` without a domain→adapter edge (see §7).**
 
+**Data fence.** The rendered entry list is content the model previously stored, so
+`renderMemoryIndex` wraps it in explicit `<memory-index>...</memory-index>`
+delimiters (matching the house style of the `<env>` block in `env.go`), and the
+header instructs the model to treat the fenced contents as DATA, never as
+instructions. This is a cheap prompt-injection fence around the one injected block
+that carries model-authored, persisted text.
+
+**Trust model.** The index assumes a SINGLE-USER, SINGLE-TRUST-ZONE memory dir:
+everything in `memory.json` was written by this user's own sessions, so injecting it
+(fenced) is safe. A SHARED or MULTI-TENANT memory dir would change that — another
+party's entries could carry adversarial text — and would need per-entry
+provenance/author labeling (and likely per-author trust gating) before the index is
+safe to inject. That is out of scope here; the data fence is the cheap hardening for
+the single-user case, not a substitute for provenance in a shared store.
+
 ---
 
 ## 3. Interface impact — `tool.MemoryStore`
@@ -345,6 +360,17 @@ from indirect to direct):
 `TestCrossProcessRememberNoLostUpdates` proves it: N goroutines each open a FRESH
 `Store` over one dir (distinct flock fds == distinct "processes") and Remember a
 distinct key concurrently; all N survive.
+
+**Constraint / future work — one `*Store` per dir per process.** `gofrs/flock` uses
+BSD `flock(2)`, which contends across file descriptors *even within a single
+process*. So opening TWO `*Store` values over the same dir in the SAME process
+would self-deadlock (the second writer blocks on the first's lock until the
+`lockTimeout` fires). The composition root upholds this by sharing ONE `*Store` per
+project (`internal/app`). If per-session memory is ever needed, share a single
+`*Store` keyed by absolute dir (the way the session-engine map is keyed) rather than
+calling `memory.New` per session — do not open a second `*Store` over an
+already-owned dir. No process-wide registry is built today (YAGNI); the invariant is
+documented on `memory.New` and the `Store` type instead.
 
 ## 7. Layering proof (no domain→adapter edge)
 

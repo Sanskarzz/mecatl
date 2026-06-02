@@ -75,6 +75,17 @@ const (
 // bounded TryLockContext/TryRLockContext (lockRetryDelay / lockTimeout, also
 // honouring ctx cancellation) so a stuck holder fails loud instead of deadlocking,
 // and released (Unlock) before return on every path including errors.
+//
+// INVARIANT — at most ONE *Store per directory per process. gofrs/flock uses BSD
+// flock(2), which contends across file descriptors even WITHIN a single process.
+// Two *Store values opened over the SAME dir in the SAME process therefore hold
+// DISTINCT fds on the sentinel and would self-deadlock: the second writer's
+// exclusive acquire blocks on the first's lock until the lockTimeout expires (a
+// loud error, but a needless one). The composition root upholds this today by
+// constructing one shared *Store per project (see internal/app). If per-session
+// memory is ever needed, SHARE a single *Store keyed by absolute dir (the way the
+// session-engine map is keyed) rather than calling New per session — do NOT open a
+// second *Store over a dir already owned in-process.
 type Store struct {
 	mu   sync.Mutex
 	path string
@@ -88,6 +99,13 @@ var _ tool.MemoryStore = (*Store)(nil)
 // if it does not exist. The store is scoped to dir: it owns <dir>/memory.json and
 // the cross-process lock sentinel <dir>/memory.lock. Pass a per-project directory
 // so memory is isolated per project.
+//
+// Construct AT MOST ONE *Store per dir per process. Because the cross-process lock
+// uses BSD flock(2) (per-fd, cross-fd-contending even in one process), a SECOND
+// *Store opened over the same dir in this process would self-deadlock its own lock
+// acquisition until the lockTimeout, since the two *Store values hold separate fds
+// on the sentinel. Share one *Store keyed by absolute dir instead. See the Store
+// type doc for the full rationale.
 func New(dir string) (*Store, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, fmt.Errorf("memory: New requires a non-empty dir")
@@ -132,7 +150,7 @@ func (s *Store) withExclusiveLock(ctx context.Context, fn func(data *persisted) 
 		return fmt.Errorf("memory: acquire write lock %q: %w", s.lock.Path(), err)
 	}
 	if !locked {
-		return fmt.Errorf("memory: could not acquire write lock %q within %s (held by another process?)", s.lock.Path(), lockTimeout)
+		return fmt.Errorf("memory: could not acquire write lock %q within %s (held by another process?)", s.lock.Path(), lockBudget(ctx))
 	}
 	defer func() { _ = s.lock.Unlock() }()
 
@@ -158,7 +176,7 @@ func (s *Store) withSharedLock(ctx context.Context, fn func(data persisted) erro
 		return fmt.Errorf("memory: acquire read lock %q: %w", s.lock.Path(), err)
 	}
 	if !locked {
-		return fmt.Errorf("memory: could not acquire read lock %q within %s (held by another process?)", s.lock.Path(), lockTimeout)
+		return fmt.Errorf("memory: could not acquire read lock %q within %s (held by another process?)", s.lock.Path(), lockBudget(ctx))
 	}
 	defer func() { _ = s.lock.Unlock() }()
 
@@ -170,9 +188,24 @@ func (s *Store) withSharedLock(ctx context.Context, fn func(data persisted) erro
 }
 
 // lockCtx derives a context with the lock timeout from the caller's ctx, so the
-// flock wait is bounded even when the caller passes context.Background().
+// flock wait is bounded even when the caller passes context.Background(). If the
+// caller's ctx already has a shorter deadline, that shorter deadline wins (the
+// timeout is a CEILING, not a floor).
 func lockCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, lockTimeout)
+}
+
+// lockBudget reports the effective wait budget remaining on ctx, for use in the
+// timeout error message so it reflects the ACTUAL deadline (which may be shorter
+// than lockTimeout if the caller passed a tighter ctx) rather than hardcoding the
+// ceiling. It returns the rounded time until ctx's deadline, falling back to the
+// lockTimeout ceiling when ctx carries no deadline.
+func lockBudget(ctx context.Context) time.Duration {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return lockTimeout
+	}
+	return time.Until(dl).Round(time.Millisecond)
 }
 
 // RememberEntry stores e, overwriting any existing entry under e.Key and bumping
@@ -272,14 +305,23 @@ func (s *Store) Index(ctx context.Context) ([]tool.MemoryEntry, error) {
 	return out, nil
 }
 
-// deriveDescription returns r.Description if set, else the first non-empty line of
-// the value (the migration / no-explicit-description fallback). It never returns
-// the full value — just the first line — so the index stays one line per entry.
+// deriveDescription returns r's tier-0 one-line description, delegating to the
+// shared derivation: explicit Description if set, else the value's first non-empty
+// line.
 func deriveDescription(r record) string {
-	if d := strings.TrimSpace(r.Description); d != "" {
+	return descriptionOrFirstLine(r.Description, r.Value)
+}
+
+// descriptionOrFirstLine is the single source of truth for the tier-0 one-liner
+// derivation rule, shared by the store's Index (deriveDescription) and the
+// Remember tool's index-line echo (tools.go). It returns the explicit description
+// (trimmed) if non-empty, else the value's first non-empty line. It never returns
+// more than one line, so the index stays one line per entry.
+func descriptionOrFirstLine(description, value string) string {
+	if d := strings.TrimSpace(description); d != "" {
 		return d
 	}
-	for _, line := range strings.Split(r.Value, "\n") {
+	for _, line := range strings.Split(value, "\n") {
 		if t := strings.TrimSpace(line); t != "" {
 			return t
 		}

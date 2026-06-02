@@ -50,6 +50,23 @@ func TestMemoryIndexAssemblerRendersUserMessage(t *testing.T) {
 			t.Errorf("rendered index missing %q:\n%s", want, msg.Text)
 		}
 	}
+	// The entry body is fenced as DATA in matching <memory-index> delimiters on
+	// their OWN lines, and every entry line sits BETWEEN them (a prompt-injection
+	// guard). The fence tokens are matched line-anchored so the mention of
+	// "<memory-index>" inside the header prose is not mistaken for the open fence.
+	open := strings.Index(msg.Text, "\n<memory-index>\n")
+	closeIdx := strings.Index(msg.Text, "\n</memory-index>")
+	if open < 0 || closeIdx < 0 || open >= closeIdx {
+		t.Fatalf("index body not wrapped in matching <memory-index>...</memory-index> fence:\n%s", msg.Text)
+	}
+	if i := strings.Index(msg.Text, "pref/test-runner"); i < open || i > closeIdx {
+		t.Errorf("entry line escaped the data fence:\n%s", msg.Text)
+	}
+	// The header (everything before the open fence) must instruct the model to
+	// treat the fenced block as data.
+	if !strings.Contains(msg.Text[:open], "DATA") {
+		t.Errorf("header should tell the model to treat the fenced block as data:\n%s", msg.Text)
+	}
 }
 
 func TestMemoryIndexAssemblerOmitsValues(t *testing.T) {
@@ -173,5 +190,41 @@ func TestMemoryIndexNotInStablePrefix(t *testing.T) {
 	// And Build is independent of memory: the StablePrefix is stable across builds.
 	if again := prompt.Build(cfg).StablePrefix; again != base {
 		t.Errorf("StablePrefix not byte-stable across builds")
+	}
+}
+
+// TestStablePrefixIdenticalWithAndWithoutMemoryIndex is the DIRECT gauntlet #6
+// assertion the reviewers asked for: assembling a non-empty memory index alongside
+// the prompt must NOT perturb prompt.Build's StablePrefix by a single byte. The
+// "with index" prefix and the "without index" prefix are compared verbatim. They
+// are equal because the index rides as a turn-0 user message AFTER the cache
+// breakpoint and the StablePrefix is computed by Build alone, which never sees the
+// index — this test fails loudly if anyone ever routes the index into Build.
+func TestStablePrefixIdenticalWithAndWithoutMemoryIndex(t *testing.T) {
+	cfg := prompt.Config{
+		Role:  "You are a test harness.",
+		Tools: []tool.ToolSpec{{Name: "Recall", Description: "load memory"}},
+	}
+
+	// "Without index": empty source → no index message at all.
+	withoutPrefix := prompt.Build(cfg).StablePrefix
+	emptyIdx, _ := prompt.MemoryIndexAssembler{Src: fakeIndexSource{}}.Assemble(context.Background(), nil)
+	if len(emptyIdx) != 0 {
+		t.Fatalf("empty source should yield no index message, got %d", len(emptyIdx))
+	}
+
+	// "With index": a non-empty index is assembled (it would be recorded as turn-0
+	// conversation content). The StablePrefix from the SAME cfg must be byte-identical.
+	withIdx, _ := prompt.MemoryIndexAssembler{Src: fakeIndexSource{entries: []tool.MemoryEntry{
+		{Key: "pref/a", Description: "first pref"},
+		{Key: "pref/b", Description: "second pref"},
+	}}}.Assemble(context.Background(), nil)
+	if len(withIdx) != 1 {
+		t.Fatalf("non-empty source should yield exactly one index message, got %d", len(withIdx))
+	}
+	withPrefix := prompt.Build(cfg).StablePrefix
+
+	if withPrefix != withoutPrefix {
+		t.Fatalf("StablePrefix changed when a memory index was present (gauntlet #6 broken):\nwith:    %q\nwithout: %q", withPrefix, withoutPrefix)
 	}
 }
