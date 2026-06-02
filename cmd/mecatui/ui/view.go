@@ -6,7 +6,23 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
+
+// centerCard frames body in the askCard style and centers it over the
+// conversation region; an unknown size (width/height <= 0) returns the bare card.
+// It is the shared framing tail for every askCard-style overlay (permission
+// modal, MCP, agents, help, zero-state) — the body builders stay separate, only
+// this Place-based framing is shared. The palette deliberately does NOT use it
+// (it is an inline MaxWidth dropdown, not a centered overlay).
+func centerCard(th theme.Theme, body string, width, height int) string {
+	card := th.Style("askCard").Render(body)
+	if width <= 0 || height <= 0 {
+		return card
+	}
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, card)
+}
 
 // View assembles the three-region layout (header / viewport / input / footer)
 // into a tea.View. While a permission modal is open it overlays the modal,

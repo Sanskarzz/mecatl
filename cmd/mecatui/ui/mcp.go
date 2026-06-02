@@ -7,7 +7,6 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
@@ -463,11 +462,7 @@ func renderMCPOverlay(th theme.Theme, st mcpState, caps client.Capabilities, wid
 	default:
 		return ""
 	}
-	card := th.Style("askCard").Render(body)
-	if width <= 0 || height <= 0 {
-		return card
-	}
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, card)
+	return centerCard(th, body, width, height)
 }
 
 // mcpDisabledNote is the empty-inventory copy for an MCP overlay when MCP is NOT

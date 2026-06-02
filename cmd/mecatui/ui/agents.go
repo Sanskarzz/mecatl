@@ -6,7 +6,6 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
@@ -229,11 +228,7 @@ func renderAgentsOverlay(th theme.Theme, st agentsState, b *block, width, height
 	default:
 		return ""
 	}
-	card := th.Style("askCard").Render(body)
-	if width <= 0 || height <= 0 {
-		return card
-	}
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, card)
+	return centerCard(th, body, width, height)
 }
 
 // agentsRosterChromeLines is the number of NON-lane lines the roster card always

@@ -102,6 +102,12 @@ spends tokens) stays **off** on the embedded server.
 | in the permission modal: `d`/`n`/`esc` | deny |
 | in the permission modal: `←`/`→`/`tab` | toggle the focused button |
 | `pgup` / `pgdn` | scroll the conversation |
+| `?` | help overlay (on an empty prompt) |
+
+The `?` overlay enumerates the rest of the chords — `ctrl+o`/`ctrl+r`/`ctrl+p`
+(MCP inventory / resources / prompts), `ctrl+a` (agent team), `ctrl+t`
+(expand/collapse details) — and greys out any whose feature the connected server
+has not enabled (driven by the server's relayed capabilities).
 
 ## Theming
 

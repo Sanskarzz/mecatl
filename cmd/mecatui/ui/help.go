@@ -3,8 +3,6 @@ package ui
 import (
 	"strings"
 
-	"charm.land/lipgloss/v2"
-
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
@@ -37,11 +35,7 @@ const helpKeyWidth = 14
 // (not a ui-local guess), so the same overlay honestly reflects an embedded
 // default (mcp/commands/skills off) and an external mecated with everything on.
 func renderHelpOverlay(th theme.Theme, caps client.Capabilities, width, height int) string {
-	card := th.Style("askCard").Render(helpBody(th, caps))
-	if width <= 0 || height <= 0 {
-		return card
-	}
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, card)
+	return centerCard(th, helpBody(th, caps), width, height)
 }
 
 // helpBody builds the overlay's text: a title, grouped chord sections (each row
@@ -127,11 +121,7 @@ func renderZeroState(th theme.Theme, caps client.Capabilities, width, height int
 			"  Cross-session memory is on — I'll remember context across runs.") + "\n")
 	}
 
-	card := th.Style("askCard").Render(b.String())
-	if width <= 0 || height <= 0 {
-		return card
-	}
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, card)
+	return centerCard(th, b.String(), width, height)
 }
 
 // zeroStateRows is the caps-tailored affordance list on the welcome card: always

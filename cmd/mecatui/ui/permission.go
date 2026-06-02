@@ -63,10 +63,5 @@ func (r *renderer) renderPermissionModal(ask pendingAsk, expand bool, width, hei
 	buttons := lipgloss.JoinHorizontal(lipgloss.Top, allow, "  ", deny)
 	b.WriteString("\n" + buttons)
 
-	card := th.Style("askCard").Render(b.String())
-
-	if width <= 0 || height <= 0 {
-		return card
-	}
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, card)
+	return centerCard(th, b.String(), width, height)
 }
