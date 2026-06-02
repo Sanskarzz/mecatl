@@ -79,7 +79,26 @@ func (r *renderer) markdown(src string) string {
 	if err != nil {
 		return src
 	}
-	return strings.TrimRight(out, "\n")
+	return trimTrailingSpaces(strings.TrimRight(out, "\n"))
+}
+
+// trimTrailingSpaces strips the per-line right-padding glamour adds to fill every
+// wrapped line out to the full wrap width. That padding is invisible but harmful:
+// it pushes every conversation row out to the terminal's final column, and a row
+// whose last cell sits in the last column is the classic trigger for the
+// differential terminal renderer's pending-wrap (DECAWM) handling to desync —
+// leaving stale cells from an earlier frame interleaved with new text during a
+// reflowing stream. Trimming the bare trailing spaces (only the unstyled padding
+// after glamour's final reset; an in-band styled space ends before its reset, so
+// TrimRight never touches it) keeps each row at its natural width without the
+// last-column pressure, and drops the wasted bytes. The cell renderer still pads
+// to the terminal width internally, so the on-screen result is unchanged.
+func trimTrailingSpaces(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, ln := range lines {
+		lines[i] = strings.TrimRight(ln, " ")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderConversation joins every block into the viewport content string. expand

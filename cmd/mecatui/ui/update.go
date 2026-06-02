@@ -460,9 +460,14 @@ func (m Model) waitCmd() tea.Cmd {
 	return client.WaitForMsg(m.streamCh)
 }
 
-// refreshCmd is a no-op command used where Update must return a Cmd after a
-// refreshView already mutated the viewport.
-func (Model) refreshCmd() tea.Cmd { return nil }
+// refreshCmd is the command returned on the run-completion paths, after endRun +
+// refreshView have already settled the final frame. It forces a full repaint
+// (tea.ClearScreen erases and redraws from scratch) so the terminating frame the
+// user is left reading is always reconciled cleanly — healing any stale cells the
+// differential renderer left behind while diffing a fast, reflowing stream (see
+// trimTrailingSpaces for the other half of that mitigation). It fires once per
+// run end, never per delta, so the cost is a single repaint when a turn settles.
+func (Model) refreshCmd() tea.Cmd { return tea.ClearScreen }
 
 // endRun tears down the current run: clears the stream/channel/cancel, returns to
 // idle, and re-focuses input. The stop reason updates the status line.
