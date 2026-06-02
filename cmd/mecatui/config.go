@@ -62,6 +62,17 @@ type config struct {
 	// not here.
 	commandsDir string
 	noCommands  bool
+
+	// Embedded-server skills config (used only when hosting an in-process server).
+	// Conventional skill discovery is ON by default: the progressive-disclosure
+	// Skill tool activates SKILL.md units from the conventional dirs (e.g.
+	// .claude/skills) when present — consistent with AgentsConventional. An explicit
+	// skillsDir overrides with a single vetted directory; noSkills disables skill
+	// discovery entirely and wins. Only read-only discovery is wired here, never the
+	// writable SkillDraft quarantine. Precedence is applied in embeddedConfig
+	// (resolveSkills), not here.
+	skillsDir string
+	noSkills  bool
 }
 
 // defaultProbeAddr is mecated's historical default loopback gRPC address. In AUTO
@@ -97,6 +108,8 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.noMemory, "no-memory", false, "embedded server only: disable cross-session memory (Remember/Recall) entirely")
 	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "embedded server only: directory of slash-command templates (<name>.md); empty = the conventional dirs (.mecatl/commands, .claude/commands)")
 	fs.BoolVar(&cfg.noCommands, "no-commands", false, "embedded server only: disable slash-command expansion entirely")
+	fs.StringVar(&cfg.skillsDir, "skills-dir", "", "embedded server only: directory of skill units (<name>/SKILL.md); empty = the conventional dirs (e.g. .claude/skills)")
+	fs.BoolVar(&cfg.noSkills, "no-skills", false, "embedded server only: disable skill discovery (the Skill tool) entirely")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err

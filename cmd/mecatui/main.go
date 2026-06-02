@@ -156,13 +156,16 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 // drives a team), conventional agent-definition discovery (AgentsConventional:
 // true, also inert until a <name>.md exists under a conventional dir), and
 // cross-session memory (Remember/Recall) scoped per-project (see resolveMemoryDir;
-// disable with --no-memory or relocate with --memory-dir), and slash-command
-// expansion from the conventional dirs (.mecatl/commands, .claude/commands; disable
-// with --no-commands or relocate with --commands-dir). It leaves the heavier opt-ins
-// (MCP, ToolHive, skills, telemetry) off — a focused single-user default. The
+// disable with --no-memory or relocate with --memory-dir), slash-command expansion
+// from the conventional dirs (.mecatl/commands, .claude/commands; disable with
+// --no-commands or relocate with --commands-dir), and conventional skill discovery
+// (the read-only Skill tool over .claude/skills etc.; disable with --no-skills or
+// scope with --skills-dir). It leaves the heavier opt-ins (MCP, ToolHive, telemetry,
+// the writable SkillDraft quarantine) off — a focused single-user default. The
 // provider is OpenAI when OPENAI_API_KEY is set, else the offline mock (--mock).
 func embeddedConfig(cfg config) app.Config {
 	cmdDir, enableCmds := resolveCommands(cfg)
+	skillDirs, skillsConv := resolveSkills(cfg)
 	return app.Config{
 		Workspace:            cfg.workspace,
 		Model:                cfg.model,
@@ -195,7 +198,30 @@ func embeddedConfig(cfg config) app.Config {
 		// unlike MCP prompts (which stay off with MCP).
 		CommandsDir:    cmdDir,
 		EnableCommands: enableCmds,
+		// Skills ON by default via conventional discovery (.claude/skills etc.),
+		// consistent with AgentsConventional. Only the read-only Skill tool — the
+		// writable SkillDraft quarantine stays off (SkillsDraftDir unset). Opt out
+		// with --no-skills; scope to one vetted dir with --skills-dir.
+		SkillsDirs:         skillDirs,
+		SkillsConventional: skillsConv,
 	}
+}
+
+// resolveSkills applies the embedded-server skill-discovery precedence: --no-skills
+// disables it (nil dirs, no conventional discovery → the Skill tool isn't
+// registered); an explicit --skills-dir scopes discovery to that single vetted
+// directory; otherwise conventional discovery is ON by default (nil dirs, true).
+// The returned (dirs, conventional) pair feeds app.Config.{SkillsDirs,
+// SkillsConventional}; registerSkills registers the Skill tool only when the
+// resolved sources contain at least one SKILL.md (opt-in by presence).
+func resolveSkills(cfg config) (dirs []string, conventional bool) {
+	if cfg.noSkills {
+		return nil, false
+	}
+	if cfg.skillsDir != "" {
+		return []string{cfg.skillsDir}, false
+	}
+	return nil, true
 }
 
 // resolveCommands applies the embedded-server slash-command precedence: --no-commands

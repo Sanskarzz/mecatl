@@ -75,14 +75,28 @@ absolute path (the server requires absolute).
 | `--no-memory` | off | **embedded** server: disable cross-session memory (Remember/Recall) |
 | `--commands-dir` | – (auto) | **embedded** server: slash-command template dir; empty = the conventional `.mecatl/commands`, `.claude/commands` |
 | `--no-commands` | off | **embedded** server: disable slash-command expansion |
+| `--skills-dir` | – (auto) | **embedded** server: skill-unit dir (`<name>/SKILL.md`); empty = the conventional dirs (e.g. `.claude/skills`) |
+| `--no-skills` | off | **embedded** server: disable skill discovery (the Skill tool) |
 
 The embedded server has no auth/TLS — it is a private, user-owned UNIX socket
 (the same single-user loopback trust model `mecated` uses for `127.0.0.1`, with a
 tighter blast radius). The `--auth-token` / `--tls*` flags apply only when dialling
 an external `--server`; loopback is unauthenticated plaintext by default, matching
 mecated's trust model. The embedded server keeps the heavier opt-ins (MCP,
-ToolHive, skills) **off** — for those, run a full `mecated` and point `--server`
-at it.
+ToolHive, the writable SkillDraft quarantine) **off** — for those, run a full
+`mecated` and point `--server` at it.
+
+**Skill discovery is ON by default**, via conventional discovery (the read-only
+`Skill` tool activates progressive-disclosure `<name>/SKILL.md` units from the
+conventional dirs, e.g. `.claude/skills`, when present) — consistent with
+agent-definition discovery. Skills register only when at least one `SKILL.md` is
+found (opt-in by presence), so with none, `caps.Skills` is false and the `?`
+overlay reflects that. Pass `--no-skills` to disable discovery entirely, or
+`--skills-dir` to scope it to a single vetted directory. Note the trust boundary:
+a skill auto-activates from its always-in-context metadata, so a `SKILL.md` in a
+workspace you didn't author (e.g. a cloned repo's `.claude/skills`) can steer the
+model — use `--no-skills` for untrusted workspaces. Only read-only discovery is
+wired; the writable SkillDraft self-improvement loop stays off.
 
 **Slash commands are ON by default**, expanding `/<name>` inputs from the
 conventional workspace dirs `.mecatl/commands` and `.claude/commands` (`<name>.md`

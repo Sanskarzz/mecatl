@@ -161,6 +161,68 @@ func TestEmbeddedConfigCommands(t *testing.T) {
 	}
 }
 
+// TestParseFlagsSkillDefaults asserts skill discovery is on by default (no flags) —
+// the resolution to conventional discovery happens in embeddedConfig, so the raw
+// config fields are empty/false here.
+func TestParseFlagsSkillDefaults(t *testing.T) {
+	cfg, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.skillsDir != "" {
+		t.Errorf("skillsDir = %q, want \"\" (default resolved in embeddedConfig)", cfg.skillsDir)
+	}
+	if cfg.noSkills {
+		t.Error("noSkills = true by default, want false (skills on)")
+	}
+}
+
+// TestParseFlagsSkillFlags asserts --skills-dir and --no-skills map onto the config.
+func TestParseFlagsSkillFlags(t *testing.T) {
+	cfg, err := parseFlags([]string{"-skills-dir", "/tmp/skills", "-no-skills"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.skillsDir != "/tmp/skills" {
+		t.Errorf("skillsDir = %q, want /tmp/skills", cfg.skillsDir)
+	}
+	if !cfg.noSkills {
+		t.Error("--no-skills did not set noSkills")
+	}
+}
+
+// TestResolveSkills covers the skill precedence: --no-skills disables (wins over an
+// explicit dir); an explicit --skills-dir scopes to that one dir (no conventional);
+// otherwise conventional discovery is on (nil dirs, true).
+func TestResolveSkills(t *testing.T) {
+	t.Parallel()
+	// --no-skills wins, even with a dir set.
+	if dirs, conv := resolveSkills(config{skillsDir: "/x", noSkills: true}); dirs != nil || conv {
+		t.Errorf("no-skills: got (%v, %v), want (nil, false)", dirs, conv)
+	}
+	// explicit dir scopes discovery, no conventional.
+	if dirs, conv := resolveSkills(config{skillsDir: "/x"}); len(dirs) != 1 || dirs[0] != "/x" || conv {
+		t.Errorf("skills-dir: got (%v, %v), want ([/x], false)", dirs, conv)
+	}
+	// default: conventional discovery on, no explicit dirs.
+	if dirs, conv := resolveSkills(config{}); dirs != nil || !conv {
+		t.Errorf("default: got (%v, %v), want (nil, true)", dirs, conv)
+	}
+}
+
+// TestEmbeddedConfigSkills asserts embeddedConfig turns conventional skill discovery
+// ON by default and that --no-skills turns it off (no dirs, no conventional).
+func TestEmbeddedConfigSkills(t *testing.T) {
+	on := embeddedConfig(config{workspace: "/ws", model: "m", mock: true})
+	if !on.SkillsConventional || on.SkillsDirs != nil {
+		t.Errorf("default: SkillsConventional=%v SkillsDirs=%v, want (true, nil)", on.SkillsConventional, on.SkillsDirs)
+	}
+	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, noSkills: true})
+	if off.SkillsConventional || off.SkillsDirs != nil {
+		t.Errorf("--no-skills: SkillsConventional=%v SkillsDirs=%v, want (false, nil)", off.SkillsConventional, off.SkillsDirs)
+	}
+}
+
 // TestDefaultMemoryDir is a pure table test of defaultMemoryDir: it reads no
 // globals (the dataHome base is injected), so it needs no env/xdg.Reload dance and
 // is safe to run in parallel. Covers the path-slug encoding, per-project
