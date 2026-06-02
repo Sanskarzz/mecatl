@@ -330,7 +330,7 @@ func renderAgentsRoster(th theme.Theme, st agentsState, b *block, height int) st
 		out.WriteString(muted.Render(fmt.Sprintf("  · +%d below", below)) + "\n")
 	}
 
-	out.WriteString("\n" + muted.Render("↑/↓ select · enter focus member · t tasks · esc close"))
+	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · t tasks · esc close"))
 	return out.String()
 }
 

@@ -235,11 +235,14 @@ func TestExpandToolsToggle(t *testing.T) {
 	if !m.expandTools {
 		t.Error("ctrl+t should set expandTools true")
 	}
-	// The footer help is the terse, state-independent "ctrl+t details"; the
-	// expand/collapse affordances live inline on each collapsible header instead.
+	// The footer is now the minimal "? help · … · ctrl+c quit" line; the full
+	// chord list (including "ctrl+t … details") moved into the "?" help overlay.
 	footer := stripANSIstr(m.renderFooter())
-	if !strings.Contains(footer, "ctrl+t details") {
-		t.Errorf("footer help should carry the terse details hint:\n%s", footer)
+	if !strings.Contains(footer, "? help") || !strings.Contains(footer, "ctrl+c quit") {
+		t.Errorf("footer should carry the minimal help line:\n%s", footer)
+	}
+	if strings.Contains(footer, "ctrl+t details") {
+		t.Errorf("footer should no longer carry the full chord list:\n%s", footer)
 	}
 	m = applyAll(m, tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	if m.expandTools {

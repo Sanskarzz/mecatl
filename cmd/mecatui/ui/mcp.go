@@ -447,17 +447,17 @@ func joinPromptMessages(ms []client.MCPPromptMessage) string {
 // renderMCPOverlay draws the active overlay centred over the conversation region.
 // It mirrors the permission modal's overlay treatment (a bordered card via
 // lipgloss.Place). All server-derived strings are terminal-sanitized.
-func renderMCPOverlay(th theme.Theme, st mcpState, width, height int) string {
+func renderMCPOverlay(th theme.Theme, st mcpState, caps client.Capabilities, width, height int) string {
 	var body string
 	switch st.view {
 	case mcpPanel:
-		body = renderMCPPanel(th, st)
+		body = renderMCPPanel(th, st, caps)
 	case mcpResources:
-		body = renderResourceList(th, st)
+		body = renderResourceList(th, st, caps)
 	case mcpResourcePrev:
 		body = renderResourcePreview(th, st)
 	case mcpPrompts:
-		body = renderPromptList(th, st)
+		body = renderPromptList(th, st, caps)
 	case mcpPromptArgs:
 		body = renderPromptArgs(th, st)
 	default:
@@ -470,9 +470,25 @@ func renderMCPOverlay(th theme.Theme, st mcpState, width, height int) string {
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, card)
 }
 
+// mcpDisabledNote is the empty-inventory copy for an MCP overlay when MCP is NOT
+// enabled on the connected server (caps.MCP == false), with the remedy. This is
+// the Option-C payoff: the relayed caps let the ui distinguish "not enabled" from
+// "enabled but empty", which a ui-local guess never could for an external server.
+const mcpDisabledNote = "MCP is not enabled on this server.\n" +
+	"Run a full mecated with MCP configured (or pass --server to one) to use it."
+
+// mcpEmptyCopy returns the empty-state line for an MCP list: the "not enabled"
+// note (with remedy) when caps.MCP is false, else the "enabled but empty" note.
+func mcpEmptyCopy(caps client.Capabilities, emptyNote string) string {
+	if !caps.MCP {
+		return mcpDisabledNote
+	}
+	return emptyNote
+}
+
 // renderMCPPanel renders the read-only inventory: sources → servers → diagnostics.
 // It also carries the startup-snapshot caveat in its footer copy.
-func renderMCPPanel(th theme.Theme, st mcpState) string {
+func renderMCPPanel(th theme.Theme, st mcpState, caps client.Capabilities) string {
 	var b strings.Builder
 	b.WriteString(th.Style("askTitle").Render("MCP inventory") + "\n")
 	if footer := mcpStatusLine(th, st); footer != "" {
@@ -480,7 +496,7 @@ func renderMCPPanel(th theme.Theme, st mcpState) string {
 	}
 	b.WriteString("\n")
 	if !st.loading && len(st.sources) == 0 && st.errMsg == "" {
-		b.WriteString(th.Style("muted").Render("no MCP sources") + "\n")
+		b.WriteString(th.Style("muted").Render(mcpEmptyCopy(caps, "No MCP sources configured on this server.")) + "\n")
 	}
 	for _, s := range st.sources {
 		state := "enabled"
@@ -543,7 +559,7 @@ func renderGroupsLine(th theme.Theme, st mcpState) string {
 }
 
 // renderResourceList renders the scrollable resource picker.
-func renderResourceList(th theme.Theme, st mcpState) string {
+func renderResourceList(th theme.Theme, st mcpState, caps client.Capabilities) string {
 	var b strings.Builder
 	b.WriteString(th.Style("askTitle").Render("MCP resources") + "\n")
 	if footer := mcpStatusLine(th, st); footer != "" {
@@ -551,7 +567,7 @@ func renderResourceList(th theme.Theme, st mcpState) string {
 	}
 	b.WriteString("\n")
 	if !st.loading && len(st.resources) == 0 && st.errMsg == "" {
-		b.WriteString(th.Style("muted").Render("no resources") + "\n")
+		b.WriteString(th.Style("muted").Render(mcpEmptyCopy(caps, "No resources advertised by the connected MCP servers.")) + "\n")
 	}
 	for i, r := range st.resources {
 		label := r.Name
@@ -575,7 +591,7 @@ func renderResourcePreview(th theme.Theme, st mcpState) string {
 }
 
 // renderPromptList renders the scrollable prompt picker.
-func renderPromptList(th theme.Theme, st mcpState) string {
+func renderPromptList(th theme.Theme, st mcpState, caps client.Capabilities) string {
 	var b strings.Builder
 	b.WriteString(th.Style("askTitle").Render("MCP prompts") + "\n")
 	if footer := mcpStatusLine(th, st); footer != "" {
@@ -583,7 +599,7 @@ func renderPromptList(th theme.Theme, st mcpState) string {
 	}
 	b.WriteString("\n")
 	if !st.loading && len(st.prompts) == 0 && st.errMsg == "" {
-		b.WriteString(th.Style("muted").Render("no prompts") + "\n")
+		b.WriteString(th.Style("muted").Render(mcpEmptyCopy(caps, "No prompts advertised by the connected MCP servers.")) + "\n")
 	}
 	for i, p := range st.prompts {
 		marker := ""

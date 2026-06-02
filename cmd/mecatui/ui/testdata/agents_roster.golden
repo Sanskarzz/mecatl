@@ -4,27 +4,27 @@
 
 
 
-                ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-                ┃                                                                  ┃
-                ┃  agents · 4 members                                              ┃
-                ┃                                                                  ┃
-                ┃  ╭────────────────────────────────────────────────────────────╮  ┃
-                ┃  │  › ◆ ✎ lead    [lead] · working… · ↑900 ↓40 · coordinator  │  ┃
-                ┃  ╰────────────────────────────────────────────────────────────╯  ┃
-                ┃    ◆ · scout   · Grep… · ↑1.2K ↓80 · researcher                  ┃
-                ┃    ◆ ✎ builder · Edit… · ↑3.4K ↓220 · implementer                ┃
-                ┃    ◆ ✎ tester  · working… · ↑0 ↓0 · verifier                     ┃
-                ┃                                                                  ┃
-                ┃  ↑/↓ select · enter focus member · t tasks · esc close           ┃
-                ┃                                                                  ┃
-                ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃                                                                                             ┃
+  ┃  agents · 4 members                                                                         ┃
+  ┃                                                                                             ┃
+  ┃  ╭────────────────────────────────────────────────────────────╮                             ┃
+  ┃  │  › ◆ ✎ lead    [lead] · working… · ↑900 ↓40 · coordinator  │                             ┃
+  ┃  ╰────────────────────────────────────────────────────────────╯                             ┃
+  ┃    ◆ · scout   · Grep… · ↑1.2K ↓80 · researcher                                             ┃
+  ┃    ◆ ✎ builder · Edit… · ↑3.4K ↓220 · implementer                                           ┃
+  ┃    ◆ ✎ tester  · working… · ↑0 ↓0 · verifier                                                ┃
+  ┃                                                                                             ┃
+  ┃  ↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · t tasks · esc close  ┃
+  ┃                                                                                             ┃
+  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 
 
 
-┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline)
+┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
 ┃
 ┃
 ────────────────────────────────────────────────────────────────────────────────────────────────────
  connected                                           ⟳ 4/4 working · ctrl+a  ctx 0 · ↑0 ↓0 cache 0%
-enter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · ctrl+a team · ctrl+t details · ctrl+c quit
+? help · ctrl+c quit

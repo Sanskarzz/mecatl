@@ -27,12 +27,20 @@ func (m Model) View() tea.View {
 
 	var body string
 	switch {
+	case m.showHelp:
+		// Help wins among the overlays (they don't coexist in practice, but help is
+		// the keyboard-owning one when set).
+		body = renderHelpOverlay(m.deps.Theme, m.caps, m.width, m.vp.Height())
 	case m.phase == phaseAwaitingApproval:
 		body = m.rend.renderPermissionModal(m.ask, m.expandTools, m.width, m.vp.Height())
 	case m.mcp.view != mcpNone:
-		body = renderMCPOverlay(m.deps.Theme, m.mcp, m.width, m.vp.Height())
+		body = renderMCPOverlay(m.deps.Theme, m.mcp, m.caps, m.width, m.vp.Height())
 	case m.agents.view != agentsNone:
 		body = renderAgentsOverlay(m.deps.Theme, m.agents, m.conv.latestTeamBlock(), m.width, m.vp.Height())
+	case m.phase == phaseIdle && m.conv.isEmpty():
+		// First-run zero-state: a welcome card in the empty viewport. Not an overlay
+		// (claims no keyboard); typing flows over it and it vanishes on the first block.
+		body = renderZeroState(m.deps.Theme, m.caps, m.width, m.vp.Height())
 	default:
 		body = m.vp.View()
 	}
@@ -44,7 +52,7 @@ func (m Model) View() tea.View {
 	// input is a command line, so it never competes with the permission modal or
 	// the MCP/agents overlays.
 	regions := []string{header, body}
-	if pal := renderPalette(m.deps.Theme, m.palette, m.width); pal != "" {
+	if pal := renderPalette(m.deps.Theme, m.palette, m.caps, m.ta.Value(), m.width); pal != "" {
 		regions = append(regions, pal)
 	}
 	regions = append(regions, input, footer)
@@ -144,11 +152,14 @@ func (m Model) renderFooter() string {
 		}
 	}
 
-	// The footer help uses the terse "ctrl+t details"; the richer expand/collapse
-	// affordances live inline on each collapsible header (where discoverability
-	// belongs), not in this always-on status line.
-	help := "enter send · shift+enter newline · esc cancel · ctrl+o/r/p MCP · " +
-		"ctrl+a team · ctrl+t details · ctrl+c quit"
+	// The full decompressed chord list now lives in the "?" help overlay, so the
+	// footer carries only the two entry points and quit. "/ commands" is dropped
+	// when slash commands are not enabled, so the footer never advertises a
+	// disabled entry point (an honest touch the relayed caps now afford).
+	help := "? help · / commands · ctrl+c quit"
+	if !m.caps.SlashCommands {
+		help = "? help · ctrl+c quit"
+	}
 
 	width := m.widthOr(80)
 	line := m.fitFooter(left, width)

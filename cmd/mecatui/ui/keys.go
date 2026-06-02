@@ -59,6 +59,14 @@ type keyMap struct {
 	// tool-result bodies + Edit/Write diffs, and collapsed vs expanded reasoning
 	// summaries. Control-modified so it never collides with textarea input.
 	ExpandTools key.Binding
+
+	// Help opens the "?" keys-&-features overlay. Unlike the control-modified
+	// open keys, "?" is a PRINTABLE rune, so onIdleKey opens help only when the
+	// prompt input is EMPTY (otherwise "?" types into the textarea); inside the
+	// overlay, "?" (or esc) closes it. An open MCP/agents overlay intercepts keys
+	// before this binding is ever consulted, so "?" never opens help over another
+	// overlay.
+	Help key.Binding
 }
 
 // defaultKeys returns the standard bindings.
@@ -151,6 +159,10 @@ func defaultKeys() keyMap {
 		ExpandTools: key.NewBinding(
 			key.WithKeys("ctrl+t"),
 			key.WithHelp("ctrl+t", "expand/collapse details"),
+		),
+		Help: key.NewBinding(
+			key.WithKeys("?"),
+			key.WithHelp("?", "help"),
 		),
 	}
 }

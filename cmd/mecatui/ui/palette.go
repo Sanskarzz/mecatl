@@ -159,12 +159,25 @@ func (m Model) paletteDismiss() Model {
 	return m
 }
 
-// renderPalette draws the command dropdown as a bordered card. It returns "" when
-// the palette is closed. The selected row is highlighted; descriptions are dim.
-// All server-derived strings are terminal-sanitized. The list windows to
-// maxPaletteRows around the selection so a large set never overruns the input.
-func renderPalette(th theme.Theme, st paletteState, width int) string {
+// renderPalette draws the command dropdown as a bordered card. The selected row
+// is highlighted; descriptions are dim. All server-derived strings are
+// terminal-sanitized. The list windows to maxPaletteRows around the selection so
+// a large set never overruns the input.
+//
+// When the palette is NOT showing rows but the input IS a command line ("/…"),
+// it renders a single honest muted note instead of "": caps-aware, it
+// distinguishes "slash commands are not enabled on this server" (caps off) from
+// "no slash commands found in this workspace" (caps on but nothing matched). It
+// returns "" only when the input is not a command line at all.
+func renderPalette(th theme.Theme, st paletteState, caps client.Capabilities, input string, width int) string {
 	if !st.open || len(st.filtered) == 0 {
+		if note := paletteEmptyNote(th, st, caps, input); note != "" {
+			card := th.Style("askCard").Render(note)
+			if width > 0 {
+				return lipgloss.NewStyle().MaxWidth(width).Render(card)
+			}
+			return card
+		}
 		return ""
 	}
 	start, end := paletteWindow(st.cursor, len(st.filtered), maxPaletteRows)
@@ -192,6 +205,24 @@ func renderPalette(th theme.Theme, st paletteState, width int) string {
 		return lipgloss.NewStyle().MaxWidth(width).Render(card)
 	}
 	return card
+}
+
+// paletteEmptyNote returns the one-line honest note shown when the input is a
+// command line ("/…") but the palette has no rows to offer — distinguishing, via
+// the relayed caps, the "not enabled" case from the "enabled but empty" case. It
+// returns "" when the input is not a command line, or when the user dismissed the
+// palette with esc (so esc still fully hides it without the note popping back).
+func paletteEmptyNote(th theme.Theme, st paletteState, caps client.Capabilities, input string) string {
+	if _, isCmd := commandPrefix(input); !isCmd {
+		return ""
+	}
+	if st.dismissed {
+		return ""
+	}
+	if !caps.SlashCommands {
+		return th.Style("muted").Render("slash commands are not enabled on this server")
+	}
+	return th.Style("muted").Render("no slash commands found in this workspace")
 }
 
 // paletteWindow returns the [start,end) slice bounds of a scrolling window of

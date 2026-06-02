@@ -253,15 +253,24 @@ func TestPaletteEscDismisses(t *testing.T) {
 	}
 }
 
-// TestPaletteNoCommandsNoPalette verifies an empty command set yields no palette.
+// TestPaletteNoCommandsNoPalette verifies an empty command set yields no palette
+// DROPDOWN (no rows). With the input on a command line ("/"), renderPalette now
+// shows a single honest muted note instead of "" — caps-aware. When the input is
+// NOT a command line it still returns "".
 func TestPaletteNoCommandsNoPalette(t *testing.T) {
 	m := newPaletteModel(t, &fakeCommander{cmds: nil})
 	m = typeRune(t, m, '/')
 	if m.palette.open {
 		t.Fatalf("palette opened with no commands")
 	}
-	if renderPalette(m.deps.Theme, m.palette, 100) != "" {
-		t.Fatalf("renderPalette non-empty with no commands")
+	// Input is a command line ("/") with no rows: a caps-aware note renders.
+	note := renderPalette(m.deps.Theme, m.palette, m.caps, m.ta.Value(), 100)
+	if note == "" {
+		t.Fatalf("renderPalette returned empty for a command line with no rows; want a caps-aware note")
+	}
+	// Not a command line: no palette and no note.
+	if renderPalette(m.deps.Theme, m.palette, m.caps, "hello", 100) != "" {
+		t.Fatalf("renderPalette non-empty for a non-command input")
 	}
 }
 

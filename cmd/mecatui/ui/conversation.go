@@ -177,6 +177,12 @@ type conversation struct {
 	blocks []block
 }
 
+// isEmpty reports whether the conversation has no blocks yet — the first-run
+// state, before any prompt is sent. The zero-state welcome card renders in the
+// empty viewport while this holds (and vanishes the instant the first block,
+// e.g. the user prompt, is appended).
+func (c *conversation) isEmpty() bool { return len(c.blocks) == 0 }
+
 // addUser appends a text-only user-prompt block.
 func (c *conversation) addUser(text string) {
 	c.blocks = append(c.blocks, block{kind: blockUser, raw: text})

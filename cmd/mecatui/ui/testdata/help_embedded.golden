@@ -1,0 +1,37 @@
+ mecatui  ·  session sess-test-00  ·  mock-model  ·  mode default  ·  127.0.0.1:8080
+────────────────────────────────────────────────────────────────────────────────────────────────────
+             ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+             ┃                                                                        ┃
+             ┃  mecatui — keys & features                                             ┃
+             ┃                                                                        ┃
+             ┃  Prompting                                                             ┃
+             ┃    enter         send the prompt                                       ┃
+             ┃    shift+enter   newline (also ctrl+j)                                 ┃
+             ┃    /             slash-command palette  [not enabled]                  ┃
+             ┃    esc           cancel the running turn                               ┃
+             ┃                                                                        ┃
+             ┃  Inspect (while idle)                                                  ┃
+             ┃    ctrl+o        MCP inventory  [not enabled]                          ┃
+             ┃    ctrl+r        MCP resources  [not enabled]                          ┃
+             ┃    ctrl+p        MCP prompts  [not enabled]                            ┃
+             ┃    ctrl+a        agent team                                            ┃
+             ┃    ctrl+t        expand/collapse details                               ┃
+             ┃                                                                        ┃
+             ┃  General                                                               ┃
+             ┃    pgup/pgdn     scroll the conversation                               ┃
+             ┃    ?             this help (on an empty prompt)                        ┃
+             ┃    ctrl+c        quit                                                  ┃
+             ┃                                                                        ┃
+             ┃  Skills run automatically when the model needs them — not a browsable  ┃
+             ┃  list; watch the transcript for Skill tool calls.                      ┃
+             ┃  Cross-session memory is on — context carries across runs.             ┃
+             ┃                                                                        ┃
+             ┃  esc or ? to close                                                     ┃
+             ┃                                                                        ┃
+             ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
+┃
+┃
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ connected                                                                   ctx 0 · ↑0 ↓0 cache 0%
+? help · ctrl+c quit

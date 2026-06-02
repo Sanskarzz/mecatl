@@ -239,6 +239,19 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return mm, cmd
 	}
 
+	// An open help overlay owns the keyboard: "?" or esc closes it, everything
+	// else is swallowed. Routed AFTER the MCP/agents overlays (they never coexist;
+	// those handlers return handled=false when closed) and BEFORE the ctrl+t
+	// toggle and the phase switch — so a "?" pressed while help is up closes it
+	// rather than reopening or leaking to the textarea.
+	if m.showHelp {
+		if key.Matches(msg, m.keys.Help) || key.Matches(msg, m.keys.Close) {
+			m.showHelp = false
+			_ = m.ta.Focus()
+		}
+		return m, nil
+	}
+
 	// ctrl+t is a global render toggle (full vs capped tool output); it works in
 	// any phase and never feeds the textarea.
 	if key.Matches(msg, m.keys.ExpandTools) {
@@ -342,6 +355,13 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch {
+	case key.Matches(msg, m.keys.Help) && strings.TrimSpace(m.ta.Value()) == "":
+		// "?" is printable: open help only on an empty prompt so "?" in prose still
+		// inserts literally. The overlay claims the keyboard via the m.showHelp gate
+		// in onKey; blur the input while it is up.
+		m.showHelp = true
+		m.ta.Blur()
+		return m, nil
 	case key.Matches(msg, m.keys.MCPPanel):
 		return m.openMCP(mcpPanel)
 	case key.Matches(msg, m.keys.Resources):

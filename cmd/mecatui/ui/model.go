@@ -107,6 +107,7 @@ type Model struct {
 	mcp          mcpState       // MCP overlay state (view==mcpNone when closed)
 	palette      paletteState   // slash-command palette (open when the input starts with "/")
 	agents       agentsState    // agent-team overlay state (view==agentsNone when closed)
+	showHelp     bool           // the "?" keys-&-features overlay is open (caps-driven; see help.go)
 	stream       *client.Stream // current run's stream
 	cancelRun    context.CancelFunc
 
@@ -153,7 +154,7 @@ func New(deps Deps) Model {
 	th := deps.Theme
 
 	ta := textarea.New()
-	ta.Placeholder = "Ask mecatl to do something…  (enter to send · shift+enter for newline)"
+	ta.Placeholder = "Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)"
 	ta.SetHeight(3)
 	ta.Focus()
 
