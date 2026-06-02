@@ -1,19 +1,22 @@
 # AGENTS.md
 
-This repository is a **research corpus on agentic coding-harness engineering** —
-the design of everything wrapped around a model so it can finish a software task
-(system prompt, tools, context policy, memory, sandboxes, permissions, subagents,
-hooks, plan/act gating, observability).
+This repository is **mecatl** — a headless agentic coding harness in Go, plus the
+**research corpus** that informed its design. The corpus documents patterns for
+everything wrapped around a model so it can finish a software task: system prompt,
+tools, context policy, memory, sandboxes, permissions, subagents, hooks, plan/act
+gating, and observability.
 
 ## Start here
 
-**→ [`docs/harnesses/INDEX.md`](./docs/harnesses/INDEX.md)** is the master router.
+- **Using or modifying the harness?** → [`README.md`](./README.md) for architecture,
+  quick start, and API reference.
+- **Researching harness design patterns?** → [`docs/harnesses/INDEX.md`](./docs/harnesses/INDEX.md)
+  is the master router into the corpus.
 
-Do not read the whole corpus. The INDEX is a Tier-0 routing index: find your need
-by **goal**, **question**, **concept**, or **source project**, then open only the
-file and section it names. Each of the 8 content files is independently readable
-and opens with YAML frontmatter (`keywords`, `answers`, `related`) so any grep hit
-is self-describing.
+The INDEX is a Tier-0 routing index: find your need by **goal**, **question**,
+**concept**, or **source project**, then open only the file and section it names.
+Each of the 8 content files is independently readable and opens with YAML frontmatter
+(`keywords`, `answers`, `related`) so any grep hit is self-describing.
 
 ## What's here
 
