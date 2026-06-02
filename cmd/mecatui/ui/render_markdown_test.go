@@ -5,13 +5,15 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
-// TestMarkdownNoTrailingPadding locks the trimTrailingSpaces mitigation: glamour
-// right-pads every wrapped line out to the full wrap width, which pushes each
-// conversation row to the terminal's final column and feeds the differential
-// renderer's pending-wrap desync (the stale-cell scramble seen during streaming).
-// markdown() must strip that padding so no rendered line carries trailing spaces.
+// TestMarkdownNoTrailingPadding locks the trimTrailingSpaces hygiene: glamour
+// right-pads every wrapped line out to the full wrap width. That padding is wasted
+// bytes and pushes each row to the terminal's final column; trimTrailingSpaces
+// strips it (retained as hygiene, not as the scramble fix — see the width-method
+// note on TestMarkdownWidthMethodAgreement). markdown() must leave no rendered line
+// carrying trailing spaces.
 func TestMarkdownNoTrailingPadding(t *testing.T) {
 	r := newTestRenderer() // width 100
 	// A short paragraph (would otherwise pad to ~100 cols) plus inline code and an
@@ -28,20 +30,19 @@ func TestMarkdownNoTrailingPadding(t *testing.T) {
 	}
 }
 
-// TestMarkdownReservesFinalColumn locks the streaming-scramble fix: no rendered
-// markdown line may occupy the terminal's FINAL column. A glyph in the last
-// column arms the terminal's pending-wrap (DECAWM) state, which desyncs the
-// differential renderer during a reflowing stream — the stale-cell scramble
-// where earlier-frame text bleeds mid-line ("Perfect!" → "…Perfect…").
-// trimTrailingSpaces removes glamour's styled padding, but real wrapped CONTENT
-// can fill a line to the full width; markdown() must wrap one column short so the
-// last column always stays empty (mirroring the Width(r.width-2) inset that keeps
-// tool cards from scrambling).
+// TestMarkdownReservesFinalColumn locks the reserve-final-column hygiene: no
+// rendered markdown line may occupy the terminal's FINAL column, measured under
+// BOTH width methods. This is retained hygiene (mirroring the Width(r.width-2)
+// inset on tool cards), not the scramble fix — that root cause is the width-method
+// disagreement guarded by TestMarkdownWidthMethodAgreement. markdown() wraps one
+// column short, so each line stays below the width under lipgloss/GraphemeWidth AND
+// under WcWidth (the method the renderer actually paints with on terminals that do
+// not confirm DEC mode 2027).
 func TestMarkdownReservesFinalColumn(t *testing.T) {
 	r := newTestRenderer() // width 100
 	// Long single paragraph with no hard breaks, so glamour greedily fills lines
 	// right up to the wrap boundary — the case where a wrapped line would otherwise
-	// reach the full width and re-arm the pending-wrap trigger.
+	// reach the full width.
 	src := strings.TrimSpace(strings.Repeat(
 		"Perfect now I have a comprehensive understanding of the mecatl repository and "+
 			"will save this knowledge before continuing with the next implementation step. ",
@@ -53,8 +54,111 @@ func TestMarkdownReservesFinalColumn(t *testing.T) {
 	}
 	for i, ln := range lines {
 		if w := lipgloss.Width(ln); w >= r.width {
-			t.Errorf("line %d reaches the final column (visible width %d >= %d): %q",
+			t.Errorf("line %d reaches the final column (GraphemeWidth %d >= %d): %q",
 				i, w, r.width, stripANSIstr(ln))
+		}
+		if w := ansi.StringWidthWc(ln); w >= r.width {
+			t.Errorf("line %d reaches the final column (WcWidth %d >= %d): %q",
+				i, w, r.width, stripANSIstr(ln))
+		}
+	}
+}
+
+// emojiWidthFixtures is the realistic set used by the width-agreement tests: the
+// bare and VS16 forms of common emoji, a ZWJ family, a regional-indicator flag,
+// and the two markdown shapes from the scramble screenshot (a heading and a
+// numbered list) — both now carrying a VS16-bearing width-1 emoji so the
+// screenshot shapes genuinely diverge on pre-fix code, not just the isolated heart.
+// Fixtures tagged "load-bearing: diverges pre-fix" actually fail before
+// normalizeEmojiWidth is applied; the rest already agree and guard against a
+// regression that would START mangling them.
+var emojiWidthFixtures = []struct {
+	name string
+	src  string
+}{
+	{"bare-check", "✅"},  // already width-2 both ways (agrees)
+	{"check-vs16", "✅️"}, // ✅ + VS16 already agrees (width 2 both ways); guards no-regression
+	{"heart-vs16", "❤️"}, // load-bearing: diverges pre-fix (❤ + VS16, WcWidth 1 / GraphemeWidth 2)
+	{"flag", "🇺🇸 ja"},    // load-bearing: diverges pre-fix (regional-indicator flag; first-scalar can not rescue -> placeholder)
+	{"zwj-family", "\U0001F468\u200d\U0001F469\u200d\U0001F467"},       // man-ZWJ-woman-ZWJ-girl (agrees)
+	{"heading", "## mecatl ⚠️"},                                        // load-bearing: diverges pre-fix (heading shape + VS16 warning)
+	{"numbered-list", "1. ✅ first item ❤️\n2. ✅️ second item ⚠️ here"}, // load-bearing: diverges pre-fix (list shape + VS16 emoji)
+}
+
+// TestMarkdownWidthMethodAgreement is the AUTHORITATIVE guard for the streaming
+// scramble. The bug is a width-method disagreement: glamour's word-wrap measures
+// cells with GraphemeWidth (ansi.StringWidth) while Bubble Tea v2's differential
+// renderer paints with WcWidth (ansi.StringWidthWc) on terminals that do not
+// confirm DEC mode 2027. When the two disagree on an emoji cluster, every cell to
+// its right is offset and the line scrambles ("mecatl" → "mec##atl", "1. ✅" losing
+// its ". "), and it persists because the renderer's width method is fixed for the
+// session. markdown() must normalise emoji presentation so that, for EVERY rendered
+// line, the two methods agree. This test fails on the un-normalised code (the
+// VS16 fixtures diverge) and passes once normalizeEmojiWidth is applied.
+func TestMarkdownWidthMethodAgreement(t *testing.T) {
+	r := newTestRenderer()
+	for _, f := range emojiWidthFixtures {
+		out := r.markdown(f.src)
+		for i, ln := range strings.Split(out, "\n") {
+			gw := ansi.StringWidth(ln)   // GraphemeWidth — glamour's wrap method
+			wc := ansi.StringWidthWc(ln) // WcWidth — the renderer's paint method
+			if gw != wc {
+				t.Errorf("%s: line %d width methods disagree (GraphemeWidth %d != WcWidth %d): %q",
+					f.name, i, gw, wc, stripANSIstr(ln))
+			}
+		}
+	}
+}
+
+// TestNormalizeEmojiWidthAgreement exercises normalizeEmojiWidth directly (below
+// glamour) so a regression is pinned to the helper, not the renderer: every
+// fixture's output must have WcWidth == GraphemeWidth per line.
+func TestNormalizeEmojiWidthAgreement(t *testing.T) {
+	for _, f := range emojiWidthFixtures {
+		out := normalizeEmojiWidth(f.src)
+		for i, ln := range strings.Split(out, "\n") {
+			if gw, wc := ansi.StringWidth(ln), ansi.StringWidthWc(ln); gw != wc {
+				t.Errorf("%s: line %d width methods disagree after normalize (gw %d != wc %d): %q",
+					f.name, i, gw, wc, ln)
+			}
+		}
+	}
+}
+
+// TestNormalizeEmojiWidthPreservesContent guards that the normalizer touches ONLY
+// width-divergent presentation artifacts (VS16 selectors / residual divergent
+// clusters) and leaves every other rune, its order, and all surrounding text and
+// whitespace intact. Plain prose must pass through byte-identical; a string with a
+// VS16 must lose only the VS16; an already-agreeing emoji (bare ✅, the ZWJ family)
+// must survive whole.
+func TestNormalizeEmojiWidthPreservesContent(t *testing.T) {
+	const vs16 = "️"
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain-ascii", "First line.\n\nSecond paragraph — em dash, `code`.", "First line.\n\nSecond paragraph — em dash, `code`."},
+		{"bare-check-untouched", "1. ✅ done", "1. ✅ done"},
+		{"zwj-family-untouched", "team \U0001F468\u200d\U0001F469\u200d\U0001F467 here", "team \U0001F468\u200d\U0001F469\u200d\U0001F467 here"},
+		// A letter + combining accent (a + U+0301) is one width-1 cluster under both
+		// methods; the normalizer must never strip or mangle the combining mark.
+		{"combining-accent-untouched", "a\u0301 cafe\u0301", "a\u0301 cafe\u0301"},
+		// ❤+VS16 diverges (WcWidth 1 / GraphemeWidth 2), so its VS16 is stripped.
+		{"strip-only-vs16", "I " + "❤" + vs16 + " it", "I ❤ it"},
+		// The normalizer is least-lossy: it touches a cluster ONLY when it diverges.
+		// ❤+VS16 diverges → VS16 stripped; ✅+VS16 already AGREES (width 2 both ways) →
+		// left byte-for-byte intact, VS16 and all. So only the heart loses its VS16.
+		{"mixed", "a " + "❤" + vs16 + " b ✅ c ✅" + vs16 + " d", "a ❤ b ✅ c ✅" + vs16 + " d"},
+		// A regional-indicator flag stays divergent after VS16-strip AND first-scalar
+		// (its first scalar U+1F1FA is itself GraphemeWidth 2 / WcWidth 1), so the
+		// whole cluster collapses to the U+FFFD placeholder, pinning the item-1
+		// fallback. The surrounding ASCII is untouched.
+		{"flag-to-placeholder", "\U0001F1FA\U0001F1F8 ja", "\uFFFD ja"},
+	}
+	for _, c := range cases {
+		if got := normalizeEmojiWidth(c.in); got != c.want {
+			t.Errorf("%s: normalizeEmojiWidth(%q) = %q, want %q", c.name, c.in, got, c.want)
 		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
@@ -81,27 +82,42 @@ func (r *renderer) markdown(src string) string {
 	if strings.TrimSpace(src) == "" {
 		return ""
 	}
+	// Normalise emoji presentation BEFORE glamour wraps or renders. This is the
+	// real fix for the streaming-scramble bug. The two layers measure cell width
+	// with DIFFERENT methods:
+	//
+	//   - glamour's word-wrap (lipgloss.Wrap → ansi.Wrap) is hard-wired to
+	//     GraphemeWidth (clipperhouse/displaywidth): a VS16 (U+FE0F) presentation
+	//     selector promotes its base char to a width-2 cluster, a ZWJ sequence is
+	//     one cluster.
+	//   - Bubble Tea v2's differential renderer (cursedRenderer → ultraviolet)
+	//     defaults to WcWidth (mattn/go-runewidth, summing each rune), and only
+	//     upgrades to GraphemeWidth if the terminal CONFIRMS DEC mode 2027 — which
+	//     Apple Terminal, most SSH sessions, and non-allowlisted terminals never
+	//     reply to.
+	//
+	// So glamour lays a line out on one column grid and the renderer paints/diffs
+	// it on another. On a cluster where the two widths differ (e.g. "❤️" is
+	// GraphemeWidth 2 / WcWidth 1) every cell to the right is offset — the
+	// scramble ("mecatl" → "mec##atl", "1. ✅" losing its ". "). It PERSISTS after
+	// the stream settles because the renderer's width method is a fixed terminal
+	// property, so the end-of-turn ClearScreen just re-paints the same wrong
+	// layout. normalizeEmojiWidth strips VS16 and collapses any residual divergent
+	// cluster so WcWidth == GraphemeWidth for every cluster — the two layers then
+	// agree without depending on the terminal upgrading the renderer. It sits
+	// below the markdownAt memo (which keys on the original src), so the memo stays
+	// consistent.
+	src = normalizeEmojiWidth(src)
 	w := r.width
 	if w <= 0 {
 		w = 80
 	}
 	// Reserve the terminal's FINAL column: word-wrap one column short of the
-	// viewport width so no rendered glyph ever lands in the last column. A glyph
-	// there arms the terminal's pending-wrap (DECAWM) state, which desyncs the
-	// differential renderer during a reflowing stream — the stale-cell scramble
-	// where earlier-frame text bleeds into the middle of a line (e.g. "Perfect!"
-	// surfacing as "…Perfect…"). trimTrailingSpaces already strips glamour's
-	// STYLED padding (which would otherwise fill the last column with real SGR
-	// cells), but real wrapped CONTENT can itself fill a line to the full width
-	// and re-arm the trigger; wrapping short closes that gap. This mirrors the
-	// two-column inset tool cards get from Width(r.width-2), which is why cards
-	// never scramble. The viewport's own lipgloss padding to full width is
-	// unstyled (emitted as clear-to-EOL, not last-column glyphs), so it is safe.
-	// This is deliberately scoped to the assistant block: it is the only region
-	// re-rendered on EVERY delta, so it is the only one whose reflow can desync the
-	// differential renderer. A static block (user/notice/error) painted once can
-	// land in the final column without scrambling — it does not reflow — so they
-	// need no equivalent inset.
+	// viewport width. Retained as harmless hygiene (and to mirror the two-column
+	// inset tool cards get from Width(r.width-2)), NOT as the scramble fix — the
+	// width-method disagreement above, not a last-column pending-wrap, is the root
+	// cause, and normalizeEmojiWidth is what closes it. trimTrailingSpaces likewise
+	// just drops glamour's styled right-padding so rows sit at their natural width.
 	if w > 1 {
 		w--
 	}
@@ -147,22 +163,146 @@ func (r *renderer) markdownAt(idx int, src string) string {
 }
 
 // trimTrailingSpaces strips the per-line right-padding glamour adds to fill every
-// wrapped line out to the full wrap width. That padding is invisible but harmful:
-// it pushes every conversation row out to the terminal's final column, and a row
-// whose last cell sits in the last column is the classic trigger for the
-// differential terminal renderer's pending-wrap (DECAWM) handling to desync —
-// leaving stale cells from an earlier frame interleaved with new text during a
-// reflowing stream. Trimming the bare trailing spaces (only the unstyled padding
-// after glamour's final reset; an in-band styled space ends before its reset, so
-// TrimRight never touches it) keeps each row at its natural width without the
-// last-column pressure, and drops the wasted bytes. The cell renderer still pads
-// to the terminal width internally, so the on-screen result is unchanged.
+// wrapped line out to the full wrap width. Retained as harmless hygiene, NOT as
+// the scramble fix: the streaming scramble is a width-method disagreement between
+// glamour's GraphemeWidth wrap and the renderer's WcWidth paint (see markdown and
+// normalizeEmojiWidth), which trailing-space trimming does not touch. Trimming
+// the bare trailing spaces (only the unstyled padding after glamour's final reset;
+// an in-band styled space ends before its reset, so TrimRight never touches it)
+// keeps each row at its natural width and drops the wasted bytes. The cell
+// renderer still pads to the terminal width internally, so the on-screen result is
+// unchanged.
 func trimTrailingSpaces(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, ln := range lines {
 		lines[i] = strings.TrimRight(ln, " ")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// variationSelector16 is U+FE0F, the emoji-presentation variation selector. It
+// carries no text of its own; its only effect is to request the emoji (width-2)
+// presentation of the preceding character. GraphemeWidth honours it (promoting the
+// base to a width-2 cluster) while WcWidth ignores it, so it is the single biggest
+// source of the width-method disagreement that scrambles streamed markdown.
+const variationSelector16 = '️'
+
+// widthDivergentPlaceholder replaces any grapheme cluster that still has
+// WcWidth != GraphemeWidth after the cheaper rescues (VS16-strip, first-scalar).
+// It is U+FFFD REPLACEMENT CHARACTER, verified width-1 under BOTH methods (a
+// .scratch probe confirmed WcWidth==GraphemeWidth==1), so substituting it
+// GUARANTEES the per-cluster postcondition. The classic trigger is a
+// regional-indicator FLAG (🇺🇸): one cluster, GraphemeWidth 2 / WcWidth 1, whose
+// first scalar (🇺) is ALSO 2/1 — so first-scalar can't rescue it and emitting a
+// partial cluster would both corrupt the flag and still violate the invariant.
+const widthDivergentPlaceholder = "�"
+
+// normalizeEmojiWidth rewrites src so that, for every grapheme cluster, the two
+// cell-width methods agree (WcWidth == GraphemeWidth). It is the production fix for
+// the streaming-scramble bug documented on markdown(): glamour wraps on
+// GraphemeWidth and Bubble Tea's renderer paints on WcWidth on terminals that do
+// not confirm DEC mode 2027, so any width-divergent cluster offsets every cell to
+// its right.
+//
+// Clustering uses ansi.FirstGraphemeCluster — the SAME segmentation engine glamour
+// and lipgloss use for their width math — so the normalizer can never disagree
+// with the layout layer about where a cluster begins, which is the exact class of
+// disagreement this whole fix is about.
+//
+// The transform is pure and minimally lossy. Per grapheme cluster, the agreement is
+// restored by the FIRST of these steps whose result actually agrees (re-checked
+// after each step), so a cluster is never mangled more than necessary:
+//
+//  1. As-is. Already-agreeing clusters (bare ✅ U+2705, the ZWJ family 👨‍👩‍👧,
+//     a letter + combining accent like á — all width-stable) pass through
+//     byte-for-byte.
+//  2. Strip U+FE0F (VS16). Reconciles the common divergent clusters (❤️, ⚠️, ℹ️
+//     all go from WcWidth 1 / GraphemeWidth 2 to a stable width 1) and the keycap
+//     form (1️⃣ → 1⃣, width 1 both ways).
+//  3. First scalar of the (VS16-stripped) cluster, when that scalar agrees.
+//  4. Otherwise, substitute U+FFFD — a width-stable placeholder both methods size
+//     identically. This is the only step that guarantees the postcondition for a
+//     cluster (like a flag) whose every prefix still diverges; emitting a partial
+//     cluster there would re-arm the scramble.
+//
+// Every already-agreeing rune and all surrounding text, order, and whitespace are
+// preserved exactly. The helper short-circuits when src has no clusters needing
+// work, so the common all-ASCII / agreeing-emoji case allocates nothing.
+func normalizeEmojiWidth(src string) string {
+	if !needsEmojiWidthNorm(src) {
+		return src
+	}
+	var b strings.Builder
+	b.Grow(len(src))
+	rest := src
+	for len(rest) > 0 {
+		// Cluster boundaries from the same engine glamour/lipgloss use; the width is
+		// taken via the StringWidth helpers so both methods are measured consistently.
+		cl, _ := ansi.FirstGraphemeCluster(rest, ansi.GraphemeWidth)
+		rest = rest[len(cl):]
+		b.WriteString(reconcileClusterWidth(cl))
+	}
+	return b.String()
+}
+
+// reconcileClusterWidth returns a rendering of the single grapheme cluster cl for
+// which WcWidth == GraphemeWidth, trying the least-lossy rescue first (see
+// normalizeEmojiWidth's step list). cl MUST be exactly one cluster.
+func reconcileClusterWidth(cl string) string {
+	if widthMethodsAgree(cl) {
+		return cl
+	}
+	if stripped := stripVS16(cl); stripped != cl && widthMethodsAgree(stripped) {
+		return stripped
+	} else if stripped != cl {
+		cl = stripped // carry the VS16-stripped form into the first-scalar attempt
+	}
+	if first := firstScalar(cl); first != "" && widthMethodsAgree(first) {
+		return first
+	}
+	return widthDivergentPlaceholder
+}
+
+// widthMethodsAgree reports whether s has the same display width under WcWidth
+// (the renderer's paint method) and GraphemeWidth (glamour's wrap method).
+func widthMethodsAgree(s string) bool {
+	return ansi.StringWidthWc(s) == ansi.StringWidth(s)
+}
+
+// firstScalar returns the first Unicode scalar of s as a string (the rune that
+// anchors a grapheme cluster), or "" for an empty string.
+func firstScalar(s string) string {
+	for _, r := range s {
+		return string(r)
+	}
+	return ""
+}
+
+// needsEmojiWidthNorm reports whether src contains any rune that could make a
+// grapheme cluster's WcWidth differ from its GraphemeWidth — i.e. a VS16 selector
+// or any non-ASCII rune (ASCII is always width-1 under both methods). It lets the
+// hot path skip the grapheme walk entirely for the overwhelmingly common
+// plain-text case.
+func needsEmojiWidthNorm(src string) bool {
+	for _, r := range src {
+		if r == variationSelector16 || r > 0x7F {
+			return true
+		}
+	}
+	return false
+}
+
+// stripVS16 removes every U+FE0F variation selector from s.
+func stripVS16(s string) string {
+	if !strings.ContainsRune(s, variationSelector16) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r == variationSelector16 {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // renderConversation joins every block into the viewport content string. expand

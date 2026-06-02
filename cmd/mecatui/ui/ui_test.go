@@ -392,3 +392,105 @@ func TestHelpBuiltinProgram(t *testing.T) {
 		t.Error("help overlay body should be gone from the final frame after esc")
 	}
 }
+
+// scrambleScript streams an assistant turn whose markdown carries the exact shapes
+// that scrambled in the bug report: an "## mecatl" heading and a numbered list with
+// ✅ markers (one bare, one VS16-decorated). No permission gate — it runs straight
+// to result so the end-of-turn repaint settles. The deltas arrive in fragments so
+// the live block reflows mid-cluster, the condition under which the width-method
+// disagreement used to scramble the layout.
+func scrambleScript() []*mecatlv1.ConverseResponse {
+	const heading = "## mecatl\n\n"
+	const item1 = "1. ✅ first task is done\n"
+	const item2 = "2. ✅️ second task is done too\n" // VS16-decorated check
+	return []*mecatlv1.ConverseResponse{
+		ev(&mecatlv1.Event{Type: "session.init", Seq: 1}),
+		ev(&mecatlv1.Event{Type: "turn.start", Seq: 2, Turn: 1}),
+		ev(&mecatlv1.Event{Type: "message.delta", Seq: 3, Turn: 1, Text: "## mec"}),
+		ev(&mecatlv1.Event{Type: "message.delta", Seq: 4, Turn: 1, Text: "atl\n\n1. "}),
+		ev(&mecatlv1.Event{Type: "message.delta", Seq: 5, Turn: 1, Text: "✅ first task is done\n2. "}),
+		ev(&mecatlv1.Event{Type: "message.delta", Seq: 6, Turn: 1, Text: "✅️ second task is done too\n"}),
+		ev(&mecatlv1.Event{Type: "result", Seq: 7, Turn: 1, Result: &mecatlv1.Result{
+			Stop: "end_turn", Text: heading + item1 + item2,
+			Usage: &mecatlv1.Usage{InputTokens: 100, OutputTokens: 20},
+		}}),
+	}
+}
+
+// newScrambleModel wires a Model to the ungated scrambleScript (mirrors
+// newTestModel but without the approval gate).
+func newScrambleModel(t *testing.T, th theme.Theme) Model {
+	t.Helper()
+	recv := &fakeRecver{script: scrambleScript(), gate: make(chan struct{})}
+	conv := &fakeConv{recv: recv, send: &fakeSender{}}
+	return New(Deps{
+		Session:     conv,
+		Conv:        conv,
+		Theme:       th,
+		Server:      "127.0.0.1:8080",
+		Workspace:   "/workspace",
+		Mode:        "default",
+		Model:       "mock-model",
+		Ctx:         context.Background(),
+		NoAltScreen: true,
+	})
+}
+
+// TestStreamedEmojiMarkdownNotScrambled is the e2e regression guard for the
+// streaming scramble. It streams an assistant turn whose markdown is the bug's
+// shape — an "## mecatl" heading and a "1. ✅ … 2. ✅️ …" numbered list — in
+// fragments, then asserts the FINAL frame (FinalModel().View(), since the
+// cumulative tm.Output() byte stream is append-only and so unsound for
+// absence-matching) renders the heading text un-mangled ("mecatl", never the
+// "mec##atl" scramble) and keeps each list item's prose intact and in order.
+//
+// Note on the list markers: glamour reformats an ordered-list marker (the literal
+// "1. " becomes a styled "1" gutter), so this asserts on the ITEM PROSE, not the
+// literal "1." — the scramble symptom is mangled prose / interleaved heading, not
+// glamour's own marker styling.
+//
+// Honest caveat: teatest's emulator may measure cell width with the same method as
+// glamour's wrap, so a passing emulator frame does not by itself prove the fix on a
+// WcWidth terminal. This is a content/regression guard; the AUTHORITATIVE assertion
+// is the per-line width-agreement unit test (TestMarkdownWidthMethodAgreement),
+// which fails on the un-normalised code and passes after normalizeEmojiWidth.
+func TestStreamedEmojiMarkdownNotScrambled(t *testing.T) {
+	m := newScrambleModel(t, theme.New("aztec", theme.AztecPalette()))
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(stripANSI(b), []byte("session sess-test"))
+	}, teatest.WithDuration(3*time.Second))
+
+	tm.Type("show me the status")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	// Gate the quit on a stable end-of-turn signal so the final frame is settled
+	// before we snapshot it (avoids racing the repaint; same pattern as the other
+	// teatest cases, which guards the known ~1/3 teatest flake under -race).
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(stripANSI(b), []byte("second task is done too"))
+	}, teatest.WithDuration(5*time.Second))
+
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	frame := stripANSIstr(tm.FinalModel(t).(Model).View().Content)
+	if !strings.Contains(frame, "mecatl") {
+		t.Errorf("final frame missing the heading text 'mecatl':\n%s", frame)
+	}
+	if strings.Contains(frame, "mec##atl") || strings.Contains(frame, "mec ##atl") {
+		t.Errorf("final frame shows the scrambled heading 'mec##atl':\n%s", frame)
+	}
+	first := strings.Index(frame, "first task is done")
+	second := strings.Index(frame, "second task is done too")
+	if first < 0 {
+		t.Errorf("final frame missing the first list item prose:\n%s", frame)
+	}
+	if second < 0 {
+		t.Errorf("final frame missing the second list item prose:\n%s", frame)
+	}
+	if first >= 0 && second >= 0 && first > second {
+		t.Errorf("list items rendered out of order (first=%d second=%d):\n%s", first, second, frame)
+	}
+}

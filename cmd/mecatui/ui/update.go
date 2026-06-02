@@ -530,10 +530,14 @@ func (m Model) waitCmd() tea.Cmd {
 // refreshCmd is the command returned on the run-completion paths, after endRun +
 // refreshView have already settled the final frame. It forces a full repaint
 // (tea.ClearScreen erases and redraws from scratch) so the terminating frame the
-// user is left reading is always reconciled cleanly — healing any stale cells the
-// differential renderer left behind while diffing a fast, reflowing stream (see
-// trimTrailingSpaces for the other half of that mitigation). It fires once per
-// run end, never per delta, so the cost is a single repaint when a turn settles.
+// user is left reading is reconciled cleanly against any genuine diff dirt the
+// differential renderer left behind while diffing a fast, reflowing stream. It does
+// NOT heal the streaming scramble: that is a deterministic width-method layout
+// error (glamour wraps on GraphemeWidth, the renderer paints on WcWidth — see
+// render.go's normalizeEmojiWidth), so a re-paint just reproduces the same wrong
+// layout. The scramble is fixed at the source by normalizeEmojiWidth; this repaint
+// is retained only for ordinary stale cells. It fires once per run end, never per
+// delta, so the cost is a single repaint when a turn settles.
 func (Model) refreshCmd() tea.Cmd { return tea.ClearScreen }
 
 // endRun tears down the current run: clears the stream/channel/cancel, returns to

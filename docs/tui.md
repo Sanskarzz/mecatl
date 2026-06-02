@@ -195,6 +195,20 @@ Select it with `--theme midnight` (or set `theme` / `MECATUI_THEME`).
 - `cmd/mecatui/theme/` — pure styling: palette, derived styles, glamour config,
   registry, JSON loading. No `contracts/gen`, no `ui`, no grpc.
 
+**The emoji width-method invariant.** Assistant markdown is wrapped by glamour and
+painted by Bubble Tea's differential renderer, and the two measure cell width with
+DIFFERENT methods: glamour wraps on GraphemeWidth (a VS16 selector promotes a
+cluster to width 2), while the renderer paints on WcWidth on any terminal that does
+not confirm DEC mode 2027 (Apple Terminal, most SSH sessions). When the two
+disagree on an emoji cluster, every cell to its right is offset and the line
+scrambles ("mecatl" → "mec##atl"), persisting after the stream settles. `render.go`
+normalises emoji presentation (`normalizeEmojiWidth`, strips VS16 + collapses any
+residual divergent cluster) BEFORE glamour, so for every rendered line
+`WcWidth == GraphemeWidth` — the two layers agree without relying on the terminal
+upgrading the renderer. The invariant is guarded by
+`TestMarkdownWidthMethodAgreement`. `trimTrailingSpaces` and the reserve-final-column
+wrap are retained as harmless hygiene, not the fix.
+
 Tests are fully offline and deterministic: the stream is driven from a scripted
 fake behind the `Recv()` interface (no gRPC, no network), and whole-program /
 View goldens are captured with teatest at a fixed terminal size. Refresh the
