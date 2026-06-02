@@ -38,7 +38,10 @@ func (h *HarnessServer) CreateSession(ctx context.Context, req *mecatlv1.CreateS
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	return &mecatlv1.CreateSessionResponse{SessionId: string(sess.ID)}, nil
+	return &mecatlv1.CreateSessionResponse{
+		SessionId:    string(sess.ID),
+		Capabilities: h.svc.capabilities(),
+	}, nil
 }
 
 // GetSession returns a snapshot of the requested session.

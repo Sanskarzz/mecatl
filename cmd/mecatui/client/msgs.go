@@ -230,8 +230,13 @@ type Usage struct {
 
 // Transport / lifecycle msgs (NOT from the proto stream).
 
-// SessionReadyMsg carries the session id from the async CreateSession.
-type SessionReadyMsg struct{ SessionID string }
+// SessionReadyMsg carries the session id AND the server's capabilities from the
+// async CreateSession. Capabilities drives the ui's honest discoverability
+// affordances; an older server yields the all-false zero value.
+type SessionReadyMsg struct {
+	SessionID    string
+	Capabilities Capabilities
+}
 
 // ConnectErrMsg reports a dial/CreateSession failure.
 type ConnectErrMsg struct{ Err error }

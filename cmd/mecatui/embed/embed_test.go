@@ -48,7 +48,7 @@ func TestStartServesOverSocket(t *testing.T) {
 	}
 	defer func() { _ = cl.Close() }()
 
-	sessID, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"))
+	sessID, _, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"))
 	if err != nil {
 		t.Fatalf("CreateSession over embedded socket: %v", err)
 	}
@@ -87,12 +87,19 @@ func TestStartWithMemoryDirServes(t *testing.T) {
 	}
 	defer func() { _ = cl.Close() }()
 
-	sessID, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"))
+	sessID, caps, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"))
 	if err != nil {
 		t.Fatalf("CreateSession over embedded socket (memory enabled): %v", err)
 	}
 	if sessID == "" {
 		t.Fatal("CreateSession returned an empty session id")
+	}
+	// The capabilities ride the create response over the embedded socket: with a
+	// MemoryDir configured, app.Build registers the Remember tool, so the server
+	// must report memory=true. This is the end-to-end proof that caps flow from
+	// the BUILT catalog through the wire to the client (not a static guess).
+	if !caps.Memory {
+		t.Errorf("caps.Memory = false, want true (MemoryDir configured ⇒ Remember registered)")
 	}
 }
 

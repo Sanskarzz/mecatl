@@ -161,10 +161,42 @@ message CreateSessionRequest {
   Limits limits = 3;
 }
 
+// ServerCapabilities reports which optional features this server has ENABLED,
+// so a client can present an honest UI (advertise only reachable features, and
+// explain an empty inventory as "not enabled" vs "enabled but empty"). Each
+// field reflects the BUILT service state (registered tools / wired seams), never
+// a static guess — see internal/adapter/server.Service.capabilities(). All
+// fields default false, so a client talking to an OLDER server (no caps field)
+// degrades safely to "nothing advertised" rather than over-promising. The set is
+// designed to grow additively: a new feature adds a new `bool field = N;` that
+// old clients ignore and new clients reading an old server see as false.
+message ServerCapabilities {
+  // mcp is true when MCP inventory/resources/prompts are available (an MCP
+  // provider is wired). Gates ctrl+o / ctrl+r / ctrl+p.
+  bool mcp = 1;
+  // slash_commands is true when slash-command discovery is available (a command
+  // lister is wired). Gates the / palette.
+  bool slash_commands = 2;
+  // memory is true when cross-session memory tools (Remember/Recall) are
+  // registered. Agent-side: no overlay, surfaced as prose only.
+  bool memory = 3;
+  // skills is true when the Skill tool is registered. Agent-side: never a
+  // browsable list; surfaced as the "skills run automatically" clarification.
+  bool skills = 4;
+  // teams is true when agent teams are enabled (a member-engine factory is
+  // wired). Gates the ctrl+a deep view's relevance.
+  bool teams = 5;
+  // bash is true when the Bash tool is registered (i.e. NOT --no-bash).
+  bool bash = 6;
+}
+
 // CreateSessionResponse carries the newly-allocated session id.
 message CreateSessionResponse {
   // session_id is the id of the created session.
   string session_id = 1;
+  // capabilities reports which optional features this server has enabled, for an
+  // honest client UI. Nil/absent from an older server → treat as all-false.
+  ServerCapabilities capabilities = 2;
 }
 
 // GetSessionRequest looks up an existing session by id.

@@ -136,6 +136,21 @@ func (e *Engine) Capabilities() port.ProviderCapabilities {
 // meter in the ctrl+a agents overlay (the window lives in private deps).
 func (e *Engine) ContextWindow() int { return e.deps.ContextWindowTokens }
 
+// HasTool reports whether a tool with the given registered name is present in
+// the Engine's catalog. It is the read-only seam a surface adapter uses to
+// report capabilities (e.g. memory/skills/bash availability) from the BUILT
+// catalog rather than a static config flag, so the report can never claim a
+// feature the engine did not register. It is nil-safe: a nil catalog yields
+// false. It exposes only presence, never the concrete tool, keeping the agent
+// package free of any adapter dependency.
+func (e *Engine) HasTool(name string) bool {
+	if e.deps.Catalog == nil {
+		return false
+	}
+	_, ok := e.deps.Catalog.Lookup(name)
+	return ok
+}
+
 // catalogToolInfo is a (name, read-only) summary of one tool in an Engine's
 // catalog. The supervisor uses it to verify a member's tool set without
 // type-asserting concrete tool types (which would require importing an adapter,

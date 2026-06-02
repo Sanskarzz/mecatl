@@ -86,10 +86,11 @@ func (f *fakeSender) frames() []*mecatlv1.ConverseRequest {
 type fakeConv struct {
 	recv *fakeRecver
 	send *fakeSender
+	caps client.Capabilities // capabilities returned from CreateSession (zero = all-false)
 }
 
-func (*fakeConv) CreateSession(_ context.Context) (string, error) {
-	return "sess-test-0001", nil
+func (c *fakeConv) CreateSession(_ context.Context) (string, client.Capabilities, error) {
+	return "sess-test-0001", c.caps, nil
 }
 
 func (c *fakeConv) OpenConverse(_ context.Context) (*client.Stream, error) {

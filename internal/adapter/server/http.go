@@ -77,7 +77,36 @@ type limitsIn struct {
 }
 
 type createSessionResp struct {
-	SessionID string `json:"session_id"`
+	SessionID    string                  `json:"session_id"`
+	Capabilities *serverCapabilitiesJSON `json:"capabilities,omitempty"`
+}
+
+// serverCapabilitiesJSON mirrors mecatlv1.ServerCapabilities for the JSON
+// surface, so an HTTP client receives the same honest feature flags the gRPC
+// client gets. Populated from the shared Service.capabilities() so the two
+// surfaces cannot drift.
+type serverCapabilitiesJSON struct {
+	MCP           bool `json:"mcp"`
+	SlashCommands bool `json:"slash_commands"`
+	Memory        bool `json:"memory"`
+	Skills        bool `json:"skills"`
+	Teams         bool `json:"teams"`
+	Bash          bool `json:"bash"`
+}
+
+// capabilitiesJSON projects the shared proto capabilities onto the JSON shape.
+func capabilitiesJSON(c *mecatlv1.ServerCapabilities) *serverCapabilitiesJSON {
+	if c == nil {
+		return nil
+	}
+	return &serverCapabilitiesJSON{
+		MCP:           c.GetMcp(),
+		SlashCommands: c.GetSlashCommands(),
+		Memory:        c.GetMemory(),
+		Skills:        c.GetSkills(),
+		Teams:         c.GetTeams(),
+		Bash:          c.GetBash(),
+	}
 }
 
 type sessionResp struct {
@@ -177,7 +206,10 @@ func (h *HTTPHandler) createSession(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, createSessionResp{SessionID: string(sess.ID)})
+	writeJSON(w, http.StatusCreated, createSessionResp{
+		SessionID:    string(sess.ID),
+		Capabilities: capabilitiesJSON(h.svc.capabilities()),
+	})
 }
 
 // getSession handles GET /v1/sessions/{id}.

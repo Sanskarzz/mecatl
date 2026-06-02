@@ -18,11 +18,14 @@ import (
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
 
-// SessionCreator creates a server-side session and returns its id. *client.Client
-// satisfies it; tests supply a fake. Keeping it an interface lets the ui be
-// driven entirely offline.
+// SessionCreator creates a server-side session and returns its id together with
+// the server's advertised capabilities. *client.Client satisfies it (via the
+// sessionAdapter); tests supply a fake. Keeping it an interface lets the ui be
+// driven entirely offline. Capabilities is the proto-free relayed truth the ui
+// stores for its honest discoverability affordances (Phase B); an older server
+// yields the all-false zero value.
 type SessionCreator interface {
-	CreateSession(ctx context.Context) (string, error)
+	CreateSession(ctx context.Context) (string, client.Capabilities, error)
 }
 
 // Converser opens one Converse run as a *client.Stream. *client.Client satisfies
@@ -106,6 +109,14 @@ type Model struct {
 	agents       agentsState    // agent-team overlay state (view==agentsNone when closed)
 	stream       *client.Stream // current run's stream
 	cancelRun    context.CancelFunc
+
+	// caps is the connected server's advertised capabilities, delivered once on
+	// SessionReadyMsg. It drives the honest discoverability affordances (which
+	// chords the help overlay annotates as available, and whether an empty
+	// MCP/commands box reads "not enabled" vs "none configured"). Zero value
+	// (all-false) until connect and for an older server. STORED, UNRENDERED in
+	// Phase A — Phase B consumes it.
+	caps client.Capabilities
 
 	// usage accumulates across the session for the footer.
 	usage client.Usage

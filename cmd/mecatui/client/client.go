@@ -95,16 +95,19 @@ func (c *Client) Close() error {
 }
 
 // CreateSession allocates a server-side session against an absolute workspace and
-// returns its id. mode is the proto PermissionMode (see ModeFromString).
-func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecatlv1.PermissionMode) (string, error) {
+// returns its id together with the server's advertised Capabilities. mode is the
+// proto PermissionMode (see ModeFromString). The Capabilities are the proto-free
+// mirror of the create response's ServerCapabilities; an older server that omits
+// the field yields the all-false zero value (see capabilitiesFrom).
+func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecatlv1.PermissionMode) (string, Capabilities, error) {
 	resp, err := c.svc.CreateSession(ctx, &mecatlv1.CreateSessionRequest{
 		Workspace: workspace,
 		Mode:      mode,
 	})
 	if err != nil {
-		return "", fmt.Errorf("create session: %w", err)
+		return "", Capabilities{}, fmt.Errorf("create session: %w", err)
 	}
-	return resp.GetSessionId(), nil
+	return resp.GetSessionId(), capabilitiesFrom(resp.GetCapabilities()), nil
 }
 
 // OpenConverse opens a fresh bidi Converse stream and wraps it in a Stream

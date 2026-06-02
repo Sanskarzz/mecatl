@@ -31,6 +31,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Lifecycle / transport.
 	case client.SessionReadyMsg:
 		m.sessionID = msg.SessionID
+		m.caps = msg.Capabilities // stored for Phase B; unrendered this phase
 		m.phase = phaseIdle
 		m.statusMsg = "connected"
 		return m, nil
@@ -535,10 +536,10 @@ func sumUsage(a, b client.Usage) client.Usage {
 func (m Model) createSessionCmd() tea.Cmd {
 	deps := m.deps
 	return func() tea.Msg {
-		id, err := deps.Session.CreateSession(deps.Ctx)
+		id, caps, err := deps.Session.CreateSession(deps.Ctx)
 		if err != nil {
 			return client.ConnectErrMsg{Err: err}
 		}
-		return client.SessionReadyMsg{SessionID: id}
+		return client.SessionReadyMsg{SessionID: id, Capabilities: caps}
 	}
 }

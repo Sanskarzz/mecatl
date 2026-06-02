@@ -1,0 +1,201 @@
+package server_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/memfs"
+	"github.com/stacklok/mecatl/internal/adapter/memory"
+	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
+	"github.com/stacklok/mecatl/internal/adapter/server"
+	"github.com/stacklok/mecatl/internal/adapter/skills"
+	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
+	"github.com/stacklok/mecatl/internal/adapter/tools"
+	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/team"
+	"github.com/stacklok/mecatl/internal/tool"
+)
+
+// noopRunner is a do-nothing tool.CommandRunner used only to construct a real
+// Bash tool (NewBashTool panics on a nil runner). The test never executes it; it
+// only needs the tool registered under its real catalog name so capabilities()
+// reports bash=true. Driving caps from the REAL tool constructors (rather than a
+// stub named "Bash") is what makes TestCapabilities a rename-drift backstop.
+type noopRunner struct{}
+
+func (noopRunner) Run(context.Context, string, string) (tool.CommandResult, error) {
+	return tool.CommandResult{}, nil
+}
+
+// noopMemStore is a do-nothing tool.MemoryStore used only to construct the real
+// Remember tool, so it registers under its real catalog name ("Remember").
+type noopMemStore struct{}
+
+func (noopMemStore) RememberEntry(context.Context, tool.MemoryEntry) error { return nil }
+func (noopMemStore) Remember(context.Context, string, string) error        { return nil }
+func (noopMemStore) Recall(context.Context, string) (tool.MemoryEntry, bool, error) {
+	return tool.MemoryEntry{}, false, nil
+}
+func (noopMemStore) List(context.Context, string) ([]tool.MemoryEntry, error) { return nil, nil }
+func (noopMemStore) Forget(context.Context, string) error                     { return nil }
+func (noopMemStore) Index(context.Context) ([]tool.MemoryEntry, error)        { return nil, nil }
+
+// stubMemberEngine satisfies Config.MemberEngine (MemberEngineFactory) just
+// enough to be non-nil; the Service only nil-checks it for the teams cap. It is
+// never invoked.
+func stubMemberEngine(*team.Team, agent.MemberSpec) agent.MemberBuild {
+	return agent.MemberBuild{}
+}
+
+// buildCapsService constructs a Service whose engine catalog holds exactly the
+// named tools, with the given optional seams wired, then returns it. The caps
+// table test drives capabilities() through the gRPC CreateSession response (the
+// shared create path) so it ALSO verifies population happens at that path, not
+// per-surface.
+func buildCapsService(
+	t *testing.T,
+	catalogTools []tool.Tool,
+	mcpProvider bool,
+	commands bool,
+	teams bool,
+) *server.Service {
+	t.Helper()
+	cat := tool.NewCatalog()
+	for _, tl := range catalogTools {
+		cat.MustRegister(tl)
+	}
+	engine := agent.NewEngine(agent.Deps{
+		LLM:     mockllm.New(mockllm.TextTurn("x")),
+		Catalog: cat,
+		Policy:  permpolicy.NewPolicy(nil, nil),
+		Model:   "test-model",
+	})
+	cfg := server.Config{
+		Engine:     engine,
+		Store:      memstore.New(),
+		Workspaces: func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		Now:        func() time.Time { return time.Unix(0, 0) },
+	}
+	if mcpProvider {
+		cfg.MCPProvider = &fakeProvider{}
+	}
+	if commands {
+		cfg.Commands = &stubCommandLister{}
+	}
+	if teams {
+		cfg.MemberEngine = stubMemberEngine
+	}
+	svc, err := server.NewService(cfg)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	return svc
+}
+
+// capsFromCreate drives CreateSession over gRPC and returns the relayed proto
+// capabilities. Going through the wire confirms the shared create path populates
+// them (design test #2).
+func capsFromCreate(t *testing.T, svc *server.Service) *mecatlv1.ServerCapabilities {
+	t.Helper()
+	client, cleanup := dialGRPC(t, svc)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	return resp.GetCapabilities()
+}
+
+// TestCapabilities asserts that the create response's capabilities reflect the
+// BUILT catalog and wired seams, NOT a static list. It is the correctness guard:
+// the tool caps are driven by the REAL tool constructors, so it fails if a tool
+// is ever renamed (the spelling the Service probes would drift from the
+// registration), and the seam caps flip with the nil-checks the feature RPCs use.
+func TestCapabilities(t *testing.T) {
+	remember := memory.NewRememberTool(noopMemStore{})
+	skill := skills.NewTool(nil)
+	bash := tools.NewBashTool(noopRunner{})
+
+	tests := []struct {
+		name  string
+		tools []tool.Tool
+		mcp   bool
+		cmds  bool
+		teams bool
+		want  *mecatlv1.ServerCapabilities
+	}{
+		{
+			name: "all off (empty catalog, no seams)",
+			want: &mecatlv1.ServerCapabilities{},
+		},
+		{
+			name:  "all on",
+			tools: []tool.Tool{remember, skill, bash},
+			mcp:   true,
+			cmds:  true,
+			teams: true,
+			want: &mecatlv1.ServerCapabilities{
+				Mcp:           true,
+				SlashCommands: true,
+				Memory:        true,
+				Skills:        true,
+				Teams:         true,
+				Bash:          true,
+			},
+		},
+		{
+			name:  "embedded default (memory on; mcp/commands/skills off; teams on; bash on)",
+			tools: []tool.Tool{remember, bash},
+			teams: true,
+			want: &mecatlv1.ServerCapabilities{
+				Memory: true,
+				Bash:   true,
+				Teams:  true,
+			},
+		},
+		{
+			name:  "no-bash (bash tool absent)",
+			tools: []tool.Tool{remember, skill},
+			want: &mecatlv1.ServerCapabilities{
+				Memory: true,
+				Skills: true,
+			},
+		},
+		{
+			name:  "mcp wired only",
+			tools: nil,
+			mcp:   true,
+			want:  &mecatlv1.ServerCapabilities{Mcp: true},
+		},
+		{
+			name:  "skills only",
+			tools: []tool.Tool{skill},
+			want:  &mecatlv1.ServerCapabilities{Skills: true},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := buildCapsService(t, tc.tools, tc.mcp, tc.cmds, tc.teams)
+			got := capsFromCreate(t, svc)
+			if got == nil {
+				t.Fatalf("capabilities not populated on CreateSession response")
+			}
+			if got.GetMcp() != tc.want.GetMcp() ||
+				got.GetSlashCommands() != tc.want.GetSlashCommands() ||
+				got.GetMemory() != tc.want.GetMemory() ||
+				got.GetSkills() != tc.want.GetSkills() ||
+				got.GetTeams() != tc.want.GetTeams() ||
+				got.GetBash() != tc.want.GetBash() {
+				t.Fatalf("capabilities mismatch\n got: mcp=%v cmds=%v mem=%v skills=%v teams=%v bash=%v\nwant: mcp=%v cmds=%v mem=%v skills=%v teams=%v bash=%v",
+					got.GetMcp(), got.GetSlashCommands(), got.GetMemory(), got.GetSkills(), got.GetTeams(), got.GetBash(),
+					tc.want.GetMcp(), tc.want.GetSlashCommands(), tc.want.GetMemory(), tc.want.GetSkills(), tc.want.GetTeams(), tc.want.GetBash())
+			}
+		})
+	}
+}
