@@ -15,7 +15,7 @@ import (
 // renderHookBlock is a small helper that renders a single hook block.
 func renderHookBlock(r *renderer, text, phase, tool, decision string) string {
 	b := block{kind: blockHook, raw: text, hookPhase: phase, hookTool: tool, hookDecision: decision}
-	return r.renderBlock(&b, false)
+	return r.renderBlock(0, &b, false)
 }
 
 // TestRenderHookBlocked asserts a blocked hook reads distinctly: it carries the

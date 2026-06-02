@@ -31,7 +31,7 @@ func teamCard(t *testing.T, expand bool, build func(c *conversation)) string {
 	c := &conversation{}
 	c.addTool("t1", "Team", `{"goal":"ship the feature"}`)
 	build(c)
-	return stripANSIstr(r.renderBlock(&c.blocks[0], expand))
+	return stripANSIstr(r.renderBlock(0, &c.blocks[0], expand))
 }
 
 // member builds a TeamMember msg for the canonical team t1.

@@ -37,11 +37,37 @@ type renderer struct {
 
 	mu    sync.Mutex
 	cache map[int]*glamour.TermRenderer
+
+	// blockMD memoizes the glamour render of each assistant block, keyed by the
+	// block's (stable, append-only) conversation index. refreshView re-renders the
+	// WHOLE scrollback on every streamed delta; without this, every prior assistant
+	// turn is re-parsed through glamour on every token of the live turn — O(turns ×
+	// tokens) glamour work that grows with session length. Memoising collapses each
+	// SETTLED block to one render: only the live (last) block, whose src grows each
+	// token, misses and re-renders. markdown() is a pure function of (src, width,
+	// theme) and the theme is fixed for the renderer's life, so the cached entry is
+	// valid whenever its (src, width) still match — index is just the bucket that
+	// bounds memory to one entry per block and lets the live block overwrite in
+	// place. Touched only on the Bubble Tea update goroutine (same invariant as the
+	// glamour cache), so it needs no lock.
+	blockMD map[int]mdEntry
+}
+
+// mdEntry is one memoized assistant-block render: the source text and wrap width
+// it was produced from (the validity key) plus the rendered ANSI output.
+type mdEntry struct {
+	src   string
+	width int
+	out   string
 }
 
 // newRenderer builds a renderer for a theme.
 func newRenderer(th theme.Theme) *renderer {
-	return &renderer{th: th, cache: map[int]*glamour.TermRenderer{}}
+	return &renderer{
+		th:      th,
+		cache:   map[int]*glamour.TermRenderer{},
+		blockMD: map[int]mdEntry{},
+	}
 }
 
 // setWidth records the current wrap width. Width changes are handled by the
@@ -102,6 +128,24 @@ func (r *renderer) markdown(src string) string {
 	return trimTrailingSpaces(strings.TrimRight(out, "\n"))
 }
 
+// markdownAt is the memoized form of markdown used by the conversation render
+// path. idx is the block's stable conversation index (blocks are append-only, so
+// an index always denotes the same logical block). It returns the cached render
+// when the block's (src, width) are unchanged — the common case for every SETTLED
+// block on each streamed delta — and otherwise renders fresh and stores the
+// result, overwriting the index's entry in place (so the live, growing block
+// keeps exactly one entry rather than accumulating one per token). Correctness
+// rests on markdown() being pure in (src, width, theme) with a fixed theme; the
+// cache therefore can never return a stale render. Update-goroutine-only.
+func (r *renderer) markdownAt(idx int, src string) string {
+	if e, ok := r.blockMD[idx]; ok && e.src == src && e.width == r.width {
+		return e.out
+	}
+	out := r.markdown(src)
+	r.blockMD[idx] = mdEntry{src: src, width: r.width, out: out}
+	return out
+}
+
 // trimTrailingSpaces strips the per-line right-padding glamour adds to fill every
 // wrapped line out to the full wrap width. That padding is invisible but harmful:
 // it pushes every conversation row out to the terminal's final column, and a row
@@ -130,15 +174,17 @@ func (r *renderer) renderConversation(c *conversation, expand bool) string {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(r.renderBlock(&c.blocks[i], expand))
+		b.WriteString(r.renderBlock(i, &c.blocks[i], expand))
 		b.WriteString("\n")
 	}
 	return b.String()
 }
 
 // renderBlock renders one block per its kind. Assistant text goes through
-// glamour; everything else is plain themed lipgloss.
-func (r *renderer) renderBlock(b *block, expand bool) string {
+// glamour; everything else is plain themed lipgloss. idx is the block's stable
+// conversation index, used to memoize the (expensive) assistant glamour render
+// across the per-delta full-scrollback re-render — see markdownAt.
+func (r *renderer) renderBlock(idx int, b *block, expand bool) string {
 	switch b.kind {
 	case blockUser:
 		label := r.th.Style("userLabel").Render("you")
@@ -161,7 +207,7 @@ func (r *renderer) renderBlock(b *block, expand bool) string {
 		if reasoning := r.renderReasoning(b, expand); reasoning != "" {
 			out += "\n" + reasoning
 		}
-		return out + "\n" + r.markdown(b.raw)
+		return out + "\n" + r.markdownAt(idx, b.raw)
 	case blockTool:
 		return r.renderTool(b, expand)
 	case blockNotice:

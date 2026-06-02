@@ -59,6 +59,36 @@ func TestMarkdownReservesFinalColumn(t *testing.T) {
 	}
 }
 
+// TestMarkdownAtNeverStale locks the per-block memoization (markdownAt): the
+// cached render must always equal a fresh markdown() of the CURRENT src, never a
+// stale earlier one. It walks a growing src (a streaming turn) through one index,
+// asserting every step matches the uncached render — so the live block re-renders
+// on change — and that a repeated identical src is byte-identical (a cache hit,
+// not a re-render that could diverge). A second index with different content must
+// not be contaminated by the first.
+func TestMarkdownAtNeverStale(t *testing.T) {
+	r := newTestRenderer()
+	steps := []string{"Perfect", "Perfect! Now", "Perfect! Now I have a full picture."}
+	for _, src := range steps {
+		got := r.markdownAt(0, src)
+		want := r.markdown(src)
+		if got != want {
+			t.Errorf("markdownAt(0, %q) returned stale render:\n got %q\nwant %q",
+				src, stripANSIstr(got), stripANSIstr(want))
+		}
+	}
+	// Repeated identical src is a cache hit — must be byte-identical.
+	if a, b := r.markdownAt(0, steps[2]), r.markdownAt(0, steps[2]); a != b {
+		t.Errorf("repeated markdownAt diverged: %q vs %q", stripANSIstr(a), stripANSIstr(b))
+	}
+	// A different index with different content is independent.
+	other := "A separate block with its own text."
+	if got, want := r.markdownAt(1, other), r.markdown(other); got != want {
+		t.Errorf("index 1 contaminated by index 0:\n got %q\nwant %q",
+			stripANSIstr(got), stripANSIstr(want))
+	}
+}
+
 // TestMarkdownPreservesContent guards that stripping trailing padding never eats
 // the visible text or its order (the regression we were chasing was scrambled,
 // not merely padded, text — this keeps the content path honest).

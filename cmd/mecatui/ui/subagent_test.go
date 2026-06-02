@@ -23,7 +23,7 @@ func subagentCard(t *testing.T, expand bool, build func(c *conversation)) string
 	c := &conversation{}
 	c.addTool("p1", "Task", `{"prompt":"investigate the loop"}`)
 	build(c)
-	return stripANSIstr(r.renderBlock(&c.blocks[0], expand))
+	return stripANSIstr(r.renderBlock(0, &c.blocks[0], expand))
 }
 
 // TestSubagentLiveCollapsed asserts the default (collapsed, unresolved) card: the
@@ -128,7 +128,7 @@ func TestSubagentExpandedWrapsNarrow(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		c.addSubagentTool("p1", "Read", false, i+1)
 	}
-	out := stripANSIstr(r.renderBlock(&c.blocks[0], true))
+	out := stripANSIstr(r.renderBlock(0, &c.blocks[0], true))
 	// The chip region must occupy more than one visual line (it wrapped).
 	if strings.Count(out, "✓") != 6 {
 		t.Fatalf("want all 6 chips present, got %q", out)
