@@ -48,12 +48,24 @@ one maintained library rather than leaving one hand-rolled and one not. `adrg/xd
 (MIT, maintained, widely adopted) was already an indirect dependency; importing it
 in our own code promotes it to a direct `require` (via `go mod tidy`).
 
-Caveat the tests pin down: `adrg/xdg` snapshots the environment at package init, so
-`xdg.DataHome`/`xdg.ConfigHome` do NOT reflect a later `t.Setenv` until
-`xdg.Reload()` re-reads the env. And `xdg.DataHome` is practically never `""` (it
-falls back to `~/.local/share`, and to a root-anchored `/.local/share` even with no
-`HOME`) — so the empty-`DataHome` guard in `defaultMemoryDir` is defensive belt; the
-live degraded path is an empty workspace.
+**The global read is isolated to the composition boundary.** `defaultMemoryDir`
+takes the base as a parameter (`dataHome string`) and reads no globals — it is a
+pure function of its arguments. The single read of the `xdg.DataHome` package-global
+happens in `resolveMemoryDir` (main is the composition root, so the one global read
+belongs there), which calls `defaultMemoryDir(xdg.DataHome, cfg.workspace)`. This
+keeps the unit under test pure: its table test passes literal `dataHome` strings, so
+it needs no env manipulation, no `xdg.Reload()`, and is parallel-safe; the
+empty-base degraded branch is reachable simply by passing `""`.
+
+Caveat that survives only at the integration layer: `adrg/xdg` snapshots the
+environment at package init, so `xdg.DataHome`/`xdg.ConfigHome` do NOT reflect a
+later `t.Setenv` until `xdg.Reload()` re-reads the env. That dance is now confined to
+the ONE test that exercises the real `resolveMemoryDir(cfg)` global-reading path
+(`TestResolveMemoryDirPrecedence`, via a `setDataHome` helper). `xdg.DataHome` is
+practically never `""` (it falls back to `~/.local/share`, and to a root-anchored
+`/.local/share` even with no `HOME`), so the empty-`dataHome` guard in
+`defaultMemoryDir` is a defensive belt; the live degraded path is an empty
+workspace.
 
 ### Workspace → leaf mapping (full path-slug, NO hash)
 
@@ -173,21 +185,24 @@ func resolveMemoryDir(cfg config) string {
     if cfg.memoryDir != "" {
         return cfg.memoryDir
     }
-    return defaultMemoryDir(cfg.workspace)
+    // The single place that reads the xdg.DataHome global; defaultMemoryDir
+    // stays pure (the base is injected).
+    return defaultMemoryDir(xdg.DataHome, cfg.workspace)
 }
 
-func defaultMemoryDir(workspace string) string {
-    if xdg.DataHome == "" || workspace == "" {
+func defaultMemoryDir(dataHome, workspace string) string {
+    if dataHome == "" || workspace == "" {
         return ""
     }
     leaf := strings.ReplaceAll(workspace, string(filepath.Separator), "-")
-    return filepath.Join(xdg.DataHome, "mecatui", "memory", leaf)
+    return filepath.Join(dataHome, "mecatui", "memory", leaf)
 }
 ```
 
 The bespoke `dataBase` helper (env + `os.UserHomeDir` dance) is gone — `xdg.DataHome`
-does that. Imports: `github.com/adrg/xdg` plus stdlib `path/filepath`, `strings`
-(`fmt`, `os`, `time` already imported). No `crypto/sha256`.
+does that, read once in `resolveMemoryDir` and injected into the pure
+`defaultMemoryDir`. Imports: `github.com/adrg/xdg` plus stdlib `path/filepath`,
+`strings` (`fmt`, `os`, `time` already imported). No `crypto/sha256`.
 
 `themeDirs` keeps its precedence order unchanged (XDG config → workspace
 `.mecatui/themes` → cwd `.mecatui/themes` → `--theme-dir`); only its first entry
@@ -233,8 +248,9 @@ unused flag is surface to maintain. A future opt-in can mirror `mecated`.
   consolidation is deliberately left at 0.
 - Update the `embeddedConfig` doc comment: memory moves from the "left off" list to
   "enabled by default (per-project)".
-- Add the two unexported helpers `resolveMemoryDir` and `defaultMemoryDir` (the
-  latter built on `xdg.DataHome`; no bespoke `dataBase`).
+- Add the two unexported helpers `resolveMemoryDir(cfg) string` (reads the
+  `xdg.DataHome` global once) and `defaultMemoryDir(dataHome, workspace string)
+  string` (pure — the base is injected; no bespoke `dataBase`).
 - Consolidate `themeDirs`'s first entry onto `xdg.ConfigHome` (was a hand-rolled
   `XDG_CONFIG_HOME`/`~/.config` lookup); precedence order unchanged.
 - New imports: `github.com/adrg/xdg`, `strings` (`fmt`, `os`, `path/filepath`,
@@ -269,22 +285,21 @@ All offline (no provider/network), consistent with `config_test.go` and the
   `cfg.memoryDir == ""` and `cfg.noMemory == false`.
 - **`TestParseFlagsMemoryFlags`** — `-memory-dir /tmp/mem` sets `memoryDir`;
   `-no-memory` sets `noMemory`.
-- **`TestResolveMemoryDirPrecedence`** — `--no-memory` beats an explicit
-  `--memory-dir`; `--memory-dir` alone is taken verbatim; neither → the computed
-  default under a `setDataHome(t, "/xdg/data")` base.
-- **`TestDefaultMemoryDirPathSlug`** — the leaf is the full path-slug
-  (`/` → `-`, leading `-` preserved) under `xdg.DataHome/mecatui/memory`.
-- **`TestDefaultMemoryDirIsPerProject`** — `/a/proj` and `/b/proj` (same basename)
-  yield **different** leaves; the same workspace yields a **stable** leaf.
-- **`TestDefaultMemoryDirUsesLocalShareFallback`** — `XDG_DATA_HOME` unset +
-  `HOME=/home/tester` (+ `xdg.Reload()`) → base `~/.local/share`.
-- **`TestDefaultMemoryDirDegrades`** — empty workspace → `""`; and the defensive
-  empty-`xdg.DataHome` branch → `""` (never a root-anchored path). The empty-`HOME`
-  case is NOT used: `adrg/xdg` resolves a non-empty `DataHome` regardless.
-
-All tests that read `xdg.DataHome` go through `setDataHome(t, dir)`, a helper that
-`t.Setenv`s `XDG_DATA_HOME` and calls `xdg.Reload()` (and re-reloads on cleanup), so
-the library re-reads the synthetic env rather than its init-time snapshot.
+- **`TestDefaultMemoryDir`** — a single PURE table test of
+  `defaultMemoryDir(dataHome, workspace)`. Because the base is injected, every row
+  passes literal strings (no env, no `xdg.Reload`) and the test is `t.Parallel()`.
+  Rows cover: the full path-slug encoding (`/` → `-`, leading `-` preserved) under a
+  given base; a `~/.local/share`-shaped base (the caller's fallback) flowing
+  through unchanged; two same-basename workspaces (`/a/proj`, `/b/proj`) →
+  **distinct** leaves; both degraded guards reachable directly — empty `dataHome` →
+  `""`, empty workspace → `""`; plus a determinism check (same inputs → same path).
+- **`TestResolveMemoryDirPrecedence`** — the ONE integration test that drives the
+  real `resolveMemoryDir(cfg)` (which reads the `xdg.DataHome` global): `--no-memory`
+  beats an explicit `--memory-dir`; `--memory-dir` alone is taken verbatim; neither
+  → the computed default. It uses `setDataHome(t, "/xdg/data")` — a helper that
+  `t.Setenv`s `XDG_DATA_HOME` + calls `xdg.Reload()` (and re-reloads on cleanup),
+  because `adrg/xdg` snapshots the env at init. This is now the only place the
+  Reload dance is needed.
 
 ### `cmd/mecatui/embed/embed_test.go`
 

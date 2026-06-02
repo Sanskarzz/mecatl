@@ -201,23 +201,27 @@ func resolveMemoryDir(cfg config) string {
 	if cfg.memoryDir != "" {
 		return cfg.memoryDir
 	}
-	return defaultMemoryDir(cfg.workspace)
+	// The single place that reads the xdg.DataHome global — main is the
+	// composition root, so the one global read lives here, and defaultMemoryDir
+	// stays a pure function of its arguments (cheap to table-test).
+	return defaultMemoryDir(xdg.DataHome, cfg.workspace)
 }
 
 // defaultMemoryDir derives a stable, per-project memory directory under the XDG
-// data base (xdg.DataHome — $XDG_DATA_HOME, else ~/.local/share). The leaf is the
-// resolved absolute workspace path with the OS separator replaced by '-'
-// (preserving the leading separator as a leading '-'), e.g.
-// "/var/home/ozz/dev/mecatl" → "-var-home-ozz-dev-mecatl". Encoding the FULL path
-// keeps it deterministic, human-legible, and collision-free across same-named
-// projects. Returns "" when xdg.DataHome is empty or workspace is empty — in that
-// degraded case memory stays off rather than anchoring a store at a bogus path.
-func defaultMemoryDir(workspace string) string {
-	if xdg.DataHome == "" || workspace == "" {
+// data base dataHome ($XDG_DATA_HOME, else ~/.local/share — resolved by the caller
+// via xdg.DataHome). The leaf is the resolved absolute workspace path with the OS
+// separator replaced by '-' (preserving the leading separator as a leading '-'),
+// e.g. "/var/home/ozz/dev/mecatl" → "-var-home-ozz-dev-mecatl". Encoding the FULL
+// path keeps it deterministic, human-legible, and collision-free across same-named
+// projects. Returns "" when dataHome or workspace is empty — in that degraded case
+// memory stays off rather than anchoring a store at a bogus path. Pure in its
+// arguments: it reads no globals.
+func defaultMemoryDir(dataHome, workspace string) string {
+	if dataHome == "" || workspace == "" {
 		return ""
 	}
 	leaf := strings.ReplaceAll(workspace, string(filepath.Separator), "-")
-	return filepath.Join(xdg.DataHome, "mecatui", "memory", leaf)
+	return filepath.Join(dataHome, "mecatui", "memory", leaf)
 }
 
 // buildRegistry seeds the theme registry with built-ins and loads user theme

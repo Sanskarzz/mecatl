@@ -98,12 +98,82 @@ func TestParseFlagsMemoryFlags(t *testing.T) {
 	}
 }
 
-// TestResolveMemoryDirPrecedence covers the precedence table: --no-memory wins,
-// then an explicit --memory-dir, then the computed per-project default.
+// TestDefaultMemoryDir is a pure table test of defaultMemoryDir: it reads no
+// globals (the dataHome base is injected), so it needs no env/xdg.Reload dance and
+// is safe to run in parallel. Covers the path-slug encoding, per-project
+// disambiguation, determinism, and both degraded guards (empty base, empty
+// workspace).
+func TestDefaultMemoryDir(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		dataHome, ws string
+		want         string
+	}{
+		{
+			name:     "path slug under data home",
+			dataHome: "/xdg/data",
+			ws:       "/var/home/jaosorior/Development/stacklok/mecatl",
+			want:     filepath.Join("/xdg/data", "mecatui", "memory", "-var-home-jaosorior-Development-stacklok-mecatl"),
+		},
+		{
+			name:     "local-share fallback base (resolved by the caller)",
+			dataHome: "/home/tester/.local/share",
+			ws:       "/ws/proj",
+			want:     filepath.Join("/home/tester/.local/share", "mecatui", "memory", "-ws-proj"),
+		},
+		{
+			name:     "distinct parents, same basename -> distinct leaves (a)",
+			dataHome: "/xdg/data",
+			ws:       "/a/proj",
+			want:     filepath.Join("/xdg/data", "mecatui", "memory", "-a-proj"),
+		},
+		{
+			name:     "distinct parents, same basename -> distinct leaves (b)",
+			dataHome: "/xdg/data",
+			ws:       "/b/proj",
+			want:     filepath.Join("/xdg/data", "mecatui", "memory", "-b-proj"),
+		},
+		{
+			name:     "empty data home degrades to disabled",
+			dataHome: "",
+			ws:       "/ws/proj",
+			want:     "",
+		},
+		{
+			name:     "empty workspace degrades to disabled",
+			dataHome: "/xdg/data",
+			ws:       "",
+			want:     "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := defaultMemoryDir(tc.dataHome, tc.ws)
+			if got != tc.want {
+				t.Errorf("defaultMemoryDir(%q, %q) = %q, want %q", tc.dataHome, tc.ws, got, tc.want)
+			}
+			// The leaf must preserve the leading separator as a leading '-'.
+			if tc.want != "" && !strings.HasPrefix(filepath.Base(got), "-") {
+				t.Errorf("leaf %q should preserve the leading separator as a leading '-'", filepath.Base(got))
+			}
+		})
+	}
+
+	// Determinism: the same inputs always produce the same path.
+	a1 := defaultMemoryDir("/xdg/data", "/a/proj")
+	a2 := defaultMemoryDir("/xdg/data", "/a/proj")
+	if a1 != a2 {
+		t.Errorf("defaultMemoryDir is not deterministic: %q != %q", a1, a2)
+	}
+}
+
 // setDataHome points adrg/xdg's DataHome at dir for the duration of the test.
 // adrg/xdg snapshots the environment at package init, so a bare t.Setenv is NOT
 // reflected — Reload() must re-read the env. The cleanup re-reads it again so the
-// global does not leak a synthetic path into a later test.
+// global does not leak a synthetic path into a later test. Only the
+// resolveMemoryDir integration test needs this; defaultMemoryDir is pure.
 func setDataHome(t *testing.T, dir string) {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", dir)
@@ -111,6 +181,10 @@ func setDataHome(t *testing.T, dir string) {
 	t.Cleanup(xdg.Reload)
 }
 
+// TestResolveMemoryDirPrecedence covers the precedence table on the real
+// resolveMemoryDir path (which legitimately reads the xdg.DataHome global, hence
+// setDataHome): --no-memory wins, then an explicit --memory-dir, then the computed
+// per-project default under the resolved data base.
 func TestResolveMemoryDirPrecedence(t *testing.T) {
 	setDataHome(t, "/xdg/data")
 
@@ -122,76 +196,11 @@ func TestResolveMemoryDirPrecedence(t *testing.T) {
 	if got := resolveMemoryDir(config{workspace: "/ws", memoryDir: "/x"}); got != "/x" {
 		t.Errorf("explicit --memory-dir: got %q, want /x", got)
 	}
-	// neither -> computed default under XDG data.
+	// neither -> computed default under the resolved XDG data base.
 	got := resolveMemoryDir(config{workspace: "/var/home/ozz/dev/mecatl"})
 	want := filepath.Join("/xdg/data", "mecatui", "memory", "-var-home-ozz-dev-mecatl")
 	if got != want {
 		t.Errorf("default: got %q, want %q", got, want)
-	}
-}
-
-// TestDefaultMemoryDirPathSlug asserts the leaf is the full path-slug (separator
-// replaced by '-', leading separator preserved as a leading '-'), under
-// xdg.DataHome/mecatui/memory.
-func TestDefaultMemoryDirPathSlug(t *testing.T) {
-	setDataHome(t, "/xdg/data")
-	got := defaultMemoryDir("/var/home/jaosorior/Development/stacklok/mecatl")
-	want := filepath.Join("/xdg/data", "mecatui", "memory",
-		"-var-home-jaosorior-Development-stacklok-mecatl")
-	if got != want {
-		t.Errorf("defaultMemoryDir: got %q, want %q", got, want)
-	}
-	if !strings.HasPrefix(filepath.Base(got), "-") {
-		t.Errorf("leaf %q should preserve the leading separator as a leading '-'", filepath.Base(got))
-	}
-}
-
-// TestDefaultMemoryDirIsPerProject asserts distinct workspaces (even same
-// basename) map to distinct leaves, while the same workspace is deterministic.
-func TestDefaultMemoryDirIsPerProject(t *testing.T) {
-	setDataHome(t, "/xdg/data")
-	a := defaultMemoryDir("/a/proj")
-	b := defaultMemoryDir("/b/proj")
-	if a == b {
-		t.Errorf("same-basename workspaces in different parents collided: %q == %q", a, b)
-	}
-	if again := defaultMemoryDir("/a/proj"); again != a {
-		t.Errorf("defaultMemoryDir is not deterministic: %q != %q", again, a)
-	}
-}
-
-// TestDefaultMemoryDirUsesLocalShareFallback asserts that with XDG_DATA_HOME
-// unset, adrg/xdg falls back to ~/.local/share under a resolvable HOME.
-func TestDefaultMemoryDirUsesLocalShareFallback(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", "")
-	t.Setenv("HOME", "/home/tester")
-	xdg.Reload()
-	t.Cleanup(xdg.Reload)
-	got := defaultMemoryDir("/ws/proj")
-	want := filepath.Join("/home/tester", ".local", "share", "mecatui", "memory", "-ws-proj")
-	if got != want {
-		t.Errorf("fallback base: got %q, want %q", got, want)
-	}
-}
-
-// TestDefaultMemoryDirDegrades asserts the degraded guards return "" (memory off)
-// rather than anchoring a store at a bogus path: an empty workspace, and (as a
-// defensive belt) an empty xdg.DataHome. Note adrg/xdg practically always resolves
-// a non-empty DataHome (it falls back to ~/.local/share, and to "/.local/share"
-// even with no HOME), so the empty-DataHome branch is defensive; the empty-
-// workspace branch is the live degraded path.
-func TestDefaultMemoryDirDegrades(t *testing.T) {
-	setDataHome(t, "/xdg/data")
-	if got := defaultMemoryDir(""); got != "" {
-		t.Errorf("empty workspace should yield \"\", got %q", got)
-	}
-
-	// Defensive: an empty DataHome disables memory rather than producing a
-	// root-anchored "/mecatui/memory/..." path.
-	setDataHome(t, "")
-	xdg.DataHome = "" // adrg/xdg never yields "" itself; force the guard's input.
-	if got := defaultMemoryDir("/ws/proj"); got != "" {
-		t.Errorf("empty DataHome should yield \"\" (disabled), got %q", got)
 	}
 }
 
