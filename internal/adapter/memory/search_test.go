@@ -93,6 +93,50 @@ func TestBM25RankDerivesDescriptionFromValue(t *testing.T) {
 	}
 }
 
+// TestBM25RankScoresValueOnlyTerm proves the Value contributes to scoring, not
+// just the key and description. The query term "approval" appears ONLY in the
+// value of entry "k" (not in its key or derived description, and not anywhere in
+// the unrelated entries). If `+ " " + e.Value` were dropped from the scoring
+// corpus in search.go, "k" would score zero and be filtered out, leaving no
+// results. We assert exactly one result, and that it is "k".
+func TestBM25RankScoresValueOnlyTerm(t *testing.T) {
+	entries := []tool.MemoryEntry{
+		{Key: "k", Description: "deploy gate", Value: "staging needs manual approval"},
+		{Key: "pref/editor", Description: "favourite editor", Value: "vim"},
+		{Key: "project/tracker", Description: "issue tracker", Value: "issues live in Linear"},
+	}
+	got := bm25Rank(entries, "approval", 10)
+	if len(got) != 1 {
+		t.Fatalf("got %d results, want exactly 1 (the value-only match); keys %v", len(got), keysOf(got))
+	}
+	if got[0].Key != "k" {
+		t.Errorf("match = %q, want k (the value-only term must be scored)", got[0].Key)
+	}
+}
+
+// TestBM25RankUniversalTermNonNegative guards the deliberate non-negative IDF
+// form (log(1 + (N-df+0.5)/(df+0.5))) against a regression to the classic
+// log((N-df+0.5)/(df+0.5)) form, which goes NEGATIVE when a term appears in more
+// than half the corpus (and is exactly zero when it appears in every entry). A
+// term present in EVERY entry must still yield a positive score so the `s > 0`
+// gate keeps every entry rather than silently dropping them all.
+func TestBM25RankUniversalTermNonNegative(t *testing.T) {
+	entries := []tool.MemoryEntry{
+		{Key: "a/one", Description: "alpha", Value: "project alpha notes"},
+		{Key: "b/two", Description: "beta", Value: "project beta notes"},
+		{Key: "c/three", Description: "gamma", Value: "project gamma notes"},
+		{Key: "d/four", Description: "delta", Value: "project delta notes"},
+	}
+	got := bm25Rank(entries, "project", 10)
+	if len(got) == 0 {
+		t.Fatal("a term present in every entry was dropped (IDF went non-positive)")
+	}
+	if len(got) != len(entries) {
+		t.Errorf("got %d results, want all %d entries returned for a universal term; keys %v",
+			len(got), len(entries), keysOf(got))
+	}
+}
+
 func TestBM25RankZeroOverlapDropped(t *testing.T) {
 	got := bm25Rank(sampleEntries(), "kubernetes helm operator", 10)
 	if len(got) != 0 {

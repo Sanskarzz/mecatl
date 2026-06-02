@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -341,6 +342,40 @@ func TestStoreSearchRanksAndOmitsValues(t *testing.T) {
 	for _, e := range got {
 		if e.Value != "" {
 			t.Errorf("Search result %q leaked a value: %q", e.Key, e.Value)
+		}
+	}
+}
+
+// TestStoreSearchDeterministicAcrossRuns pins the map-order→stable-output
+// contract. Several entries score EQUALLY for the query (each value is the bare
+// query term, with keys that differ only in their namespace), so the only thing
+// that makes the result order total is bm25Rank's (score desc, key asc)
+// tie-break. Because the store iterates a Go map (randomised order) to build its
+// entry slice, a missing tie-break would surface here as a flaky order. We run
+// the search many times and assert the returned keys are byte-identical every
+// iteration AND in ascending-key order.
+func TestStoreSearchDeterministicAcrossRuns(t *testing.T) {
+	st, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	for _, key := range []string{"a/x", "b/x", "c/x"} {
+		if err := st.RememberEntry(ctx, tool.MemoryEntry{Key: key, Value: "topic"}); err != nil {
+			t.Fatalf("RememberEntry %q: %v", key, err)
+		}
+	}
+
+	wantKeys := []string{"a/x", "b/x", "c/x"} // ascending-key tie-break order
+	const runs = 20
+	for i := 0; i < runs; i++ {
+		got, err := st.Search(ctx, "topic", 10)
+		if err != nil {
+			t.Fatalf("Search run %d: %v", i, err)
+		}
+		gotKeys := keysOf(got)
+		if !reflect.DeepEqual(gotKeys, wantKeys) {
+			t.Fatalf("run %d: keys = %v, want %v (deterministic ascending-key order)", i, gotKeys, wantKeys)
 		}
 	}
 }
