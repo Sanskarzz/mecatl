@@ -8,14 +8,23 @@
 
 ## DECISION — local BM25 lexical search first; semantic deferred
 
+> **STATUS: BM25 lexical search SHIPPED** ([#12](https://github.com/stacklok/mecatl/issues/12),
+> commit `ea1dd69`). The `SearchMemory` tool is implemented and on by default
+> whenever memory is enabled. Semantic / embedding recall remains **deferred** —
+> the buildable design below is retained as the future path. One divergence from
+> the increment design in this doc: ranking is **store-owned** (a `Search` method
+> on `tool.MemoryStore`, ranking under the existing shared flock), not the
+> tool-over-`List` shape the "Recommended increment" section first proposed — see
+> the updated note in that section for why the "Future option" was taken from the
+> start.
+
 The decision evolved past the embeddings path. The maintainer's binding
 constraint is **no extra API / lighter / local**, and neural/embedding semantic
 recall meets none of those: it needs a cloud embeddings call, a heavy in-process
 model (CGo/ONNX — the class of dependency that burned this repo with
 tree-sitter-WASM), or a local server (Ollama, still an out-of-process API). So the
-near-term plan is a **pure-Go BM25 / TF-IDF lexical search** — no API, no model,
-no server, no new dependency, instant at this scale, fully offline-testable —
-tracked in **[stacklok/mecatl#12](https://github.com/stacklok/mecatl/issues/12)**.
+shipped near-term path is a **pure-Go BM25 / TF-IDF lexical search** — no API, no
+model, no server, no new dependency, instant at this scale, fully offline-testable.
 Its accepted tradeoff is lexical-not-semantic: it ranks by term relevance, not
 meaning (no synonym matching), which is sufficient for a curated set of the user's
 own one-line facts.
@@ -239,20 +248,27 @@ values across ALL entries**, ranked, returning the matches as
 it wants. It is the search counterpart to the always-in-context index: the index
 shows the newest 200; `SearchMemory` reaches the rest by meaning-bearing tokens.
 
-### Interface impact — NONE
+### Interface impact — one store method (as shipped)
 
-**No new `tool.MemoryStore` method.** `SearchMemory` is implemented entirely in
-the tool over the **existing** `List(ctx, "")` (`store.go:260-280`), which
-already returns every entry with key + description + value. The tool filters and
-ranks in memory. This keeps the domain interface untouched — the cheapest
-possible interface impact, and it means no adapter beyond the store already
-written needs to change.
+> **AS SHIPPED (#12):** the "Future option" below was taken from the start —
+> `Search(ctx, query, k)` is a method on `tool.MemoryStore`, implemented by the
+> memory adapter, ranking under the existing **shared flock**. The reason the
+> as-built code diverged from the "NONE" design here: ranking server-side keeps
+> the read atomic against concurrent writers (subagents / cross-process), instead
+> of `List`-then-rank-in-the-tool which reads outside the lock. BM25 itself lives
+> in a pure adapter helper (`internal/adapter/memory/search.go`); the domain
+> interface gains exactly one method and no algorithm leaks across the seam.
 
-> Future option, NOT now: if `List(ctx,"")`-then-filter is ever shown to be too
-> costly (it will not be at hundreds of entries — it is already what `dream` and
-> `Index` do every run), add `Search(ctx, query, limit)` to the store so the
-> filter can run under the read lock without materialising all values. Do **not**
-> add it on spec; the in-tool filter over `List` is correct until proven slow.
+The original design (retained for the record): no new `tool.MemoryStore` method —
+`SearchMemory` implemented entirely in the tool over the **existing**
+`List(ctx, "")` (`store.go:260-280`), which already returns every entry with
+key + description + value, with the tool filtering and ranking in memory.
+
+> Future option (TAKEN — see the "AS SHIPPED" note above): if
+> `List(ctx,"")`-then-filter is ever shown to be too costly (it will not be at
+> hundreds of entries — it is already what `dream` and `Index` do every run), add
+> `Search(ctx, query, limit)` to the store so the filter can run under the read
+> lock without materialising all values.
 
 ### Tool surface
 

@@ -766,7 +766,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 			slog.Warn("registering memory tools failed; some tools may be missing", "err", err)
 		} else {
 			memStore = store
-			slog.Info("memory tools ENABLED (Remember/Recall)", "dir", cfg.MemoryDir)
+			slog.Info("memory tools ENABLED (Remember/Recall/SearchMemory)", "dir", cfg.MemoryDir)
 			startMemoryConsolidation(ctx, cfg, store, provider)
 		}
 	} else {
