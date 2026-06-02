@@ -1,0 +1,362 @@
+# Memory enabled by default on the embedded mecatui server
+
+## Summary
+
+`mecatui`'s embedded server never set `app.Config.MemoryDir`
+(`cmd/mecatui/main.go` `embeddedConfig`), so `internal/app/build.go:731` took the
+disabled branch and the `Remember`/`Recall` tools were absent — a "store this in
+memory" prompt silently produced a chat reply with no persistence and no feedback.
+This change computes a **per-project default memory directory** under XDG **data**,
+wires it into `embeddedConfig`, and adds two opt-out/override flags
+(`--memory-dir`, `--no-memory`) mirroring `mecated`'s existing `--memory-dir`. All
+changes stay in the `cmd/mecatui` composition root (`config.go` + `main.go`); the
+`ui`/`theme`/`client` packages are untouched. Consolidation stays **off by
+default** (token cost). The directory is treated as an opaque store-owned location
+so Task 2's tiering rework can change the on-disk format without touching this
+wiring.
+
+---
+
+## The default-dir strategy
+
+### Concrete path
+
+```
+$XDG_DATA_HOME/mecatui/memory/<path-slug>
+```
+
+falling back, when `XDG_DATA_HOME` is unset or empty, to:
+
+```
+~/.local/share/mecatui/memory/<path-slug>
+```
+
+**Why DATA, not STATE/config/cache.** Memory is **curated user data** worth backing
+up and migrating — the model persists durable facts the user wants to survive. That
+fails `XDG_STATE_HOME`'s "data that should persist but is not important or portable
+enough" test, and it is obviously not config (the user never hand-edits it) nor
+cache (cache dirs are routinely wiped; memory must survive that). `XDG_DATA_HOME`
+(`~/.local/share`) is the correct base.
+
+**Base resolution uses `github.com/adrg/xdg`**, not a hand-rolled
+`os.Getenv("XDG_DATA_HOME")` / `os.UserHomeDir` dance: `xdg.DataHome` resolves
+`$XDG_DATA_HOME` when set, else `~/.local/share`, with the library's proper
+fallbacks. The same change also consolidated the OTHER hand-rolled XDG spot in
+`main.go` — `themeDirs`'s first entry now uses `xdg.ConfigHome` (`$XDG_CONFIG_HOME`
+→ `~/.config`) instead of its own env/home dance — so both XDG lookups go through
+one maintained library rather than leaving one hand-rolled and one not. `adrg/xdg`
+(MIT, maintained, widely adopted) was already an indirect dependency; importing it
+in our own code promotes it to a direct `require` (via `go mod tidy`).
+
+Caveat the tests pin down: `adrg/xdg` snapshots the environment at package init, so
+`xdg.DataHome`/`xdg.ConfigHome` do NOT reflect a later `t.Setenv` until
+`xdg.Reload()` re-reads the env. And `xdg.DataHome` is practically never `""` (it
+falls back to `~/.local/share`, and to a root-anchored `/.local/share` even with no
+`HOME`) — so the empty-`DataHome` guard in `defaultMemoryDir` is defensive belt; the
+live degraded path is an empty workspace.
+
+### Workspace → leaf mapping (full path-slug, NO hash)
+
+The store is scoped **per-project** (`internal/tool/tool.go`: "one store instance
+per workspace/project directory ... NOT shared across unrelated projects"). The
+embedded server already resolves the workspace to an absolute path
+(`config.go` `resolveWorkspace`, called in `parseFlags`). The leaf is that absolute
+path with the OS path separator replaced by `-`, **preserving the leading separator
+as a leading `-`**:
+
+```
+/var/home/jaosorior/Development/stacklok/mecatl
+  → -var-home-jaosorior-Development-stacklok-mecatl
+```
+
+i.e. `strings.ReplaceAll(workspace, string(filepath.Separator), "-")`.
+
+**Why the full path-slug and not slug+hash:**
+
+- Encoding the **full** absolute path makes the leaf inherently collision-free:
+  two same-named checkouts (`/a/proj` vs `/b/proj`) get distinct leaves
+  (`-a-proj` vs `-b-proj`) with no hash needed.
+- It is **deterministic** (same workspace → same leaf, every run) and
+  **human-legible**: a user inspecting `~/.local/share/mecatui/memory/` reads the
+  originating path directly and can `rm` the right one.
+- It is **exactly the convention the user's own Claude memory already uses**
+  (`~/.claude/projects/-var-home-...`), so it is familiar and consistent.
+
+No `sha256`, no `<slug>-<hash8>`. The earlier draft of this doc proposed a STATE
+base and a slug+hash leaf; that was superseded by the DATA + path-slug decision
+recorded here.
+
+### Who creates it
+
+**Nobody in `main` `MkdirAll`s.** `memory.New(dir)` creates the dir and parents
+(`internal/adapter/memory/store.go` `New`), and `app.Build` calls
+`memory.New(cfg.MemoryDir)` in the registration gate (`build.go:732`). So
+`embeddedConfig` only **computes the path string** and assigns it to
+`app.Config.MemoryDir`; the store owns creation. This keeps it forward-compatible
+(see Task 2 notes): `main` never touches the filesystem layout.
+
+### Permissions
+
+`memory.New` now `MkdirAll`s the store dir at **`0o700`** (was `0o755`). Memory can
+hold sensitive curated facts; the per-project store has no reason to be
+group/other-readable, and tightening it in the adapter benefits `mecated`
+identically. No test asserts the old `0o755`.
+
+---
+
+## Flag surface
+
+Two flags on `cmd/mecatui`, both "embedded server only" (like `--mock`,
+`--no-bash`), added to the `config` struct in `config.go` and the flag set in
+`parseFlags`:
+
+| Flag | Type | Default | Meaning |
+|---|---|---|---|
+| `--memory-dir` | string | `""` | Override the per-project default memory directory. Empty = use the computed default. |
+| `--no-memory` | bool | `false` | Disable memory entirely (no Remember/Recall tools). |
+
+### `config` struct additions (`config.go`)
+
+```go
+// Embedded-server memory config (used only when hosting an in-process
+// server). An empty memoryDir means "compute the per-project default under
+// $XDG_DATA_HOME/mecatui/memory"; an explicit path overrides it. noMemory
+// disables cross-session memory (Remember/Recall) entirely and wins over
+// both (the resolved MemoryDir becomes ""). Precedence is applied in
+// embeddedConfig (resolveMemoryDir), not here.
+memoryDir string
+noMemory  bool
+```
+
+### Flag registration (`parseFlags`, alongside `--no-bash`)
+
+```go
+fs.StringVar(&cfg.memoryDir, "memory-dir", "",
+    "embedded server only: per-project memory store directory "+
+        "(empty = a per-project default under $XDG_DATA_HOME/mecatui/memory)")
+fs.BoolVar(&cfg.noMemory, "no-memory", false,
+    "embedded server only: disable cross-session memory (Remember/Recall) entirely")
+```
+
+### Precedence (resolved in `embeddedConfig`, not `parseFlags`)
+
+```
+--no-memory       → MemoryDir = ""              (wins over everything)
+--memory-dir=X    → MemoryDir = X               (explicit override)
+neither           → MemoryDir = defaultMemoryDir(cfg.workspace)
+```
+
+`defaultMemoryDir` returns `""` if `xdg.DataHome` is empty (defensive — see the
+caveat above) or the workspace is empty — in that degraded case memory is simply off
+rather than anchoring a store at a bogus path. The split is kept: `parseFlags` is
+argv→struct, `embeddedConfig` is struct→`app.Config`.
+
+### Mapping onto `app.Config`
+
+`embeddedConfig` gains one assignment:
+
+```go
+return app.Config{
+    // ... existing fields ...
+    MemoryDir: resolveMemoryDir(cfg),
+    // MemoryConsolidateInterval intentionally left 0 — see below.
+}
+```
+
+### Helpers (`main.go`, near `themeDirs`)
+
+```go
+func resolveMemoryDir(cfg config) string {
+    if cfg.noMemory {
+        return ""
+    }
+    if cfg.memoryDir != "" {
+        return cfg.memoryDir
+    }
+    return defaultMemoryDir(cfg.workspace)
+}
+
+func defaultMemoryDir(workspace string) string {
+    if xdg.DataHome == "" || workspace == "" {
+        return ""
+    }
+    leaf := strings.ReplaceAll(workspace, string(filepath.Separator), "-")
+    return filepath.Join(xdg.DataHome, "mecatui", "memory", leaf)
+}
+```
+
+The bespoke `dataBase` helper (env + `os.UserHomeDir` dance) is gone — `xdg.DataHome`
+does that. Imports: `github.com/adrg/xdg` plus stdlib `path/filepath`, `strings`
+(`fmt`, `os`, `time` already imported). No `crypto/sha256`.
+
+`themeDirs` keeps its precedence order unchanged (XDG config → workspace
+`.mecatui/themes` → cwd `.mecatui/themes` → `--theme-dir`); only its first entry
+switched from a hand-rolled `XDG_CONFIG_HOME`/`~/.config` lookup to
+`filepath.Join(xdg.ConfigHome, "mecatui", "themes")`.
+
+---
+
+## Consolidation-interval default
+
+**Leave it OFF (`MemoryConsolidateInterval = 0`).**
+
+- `startMemoryConsolidation` (`build.go`) spawns a **background goroutine that
+  calls the LLM provider** on every tick. On the embedded server that provider is
+  the user's real OpenAI key — a default-on interval would silently spend tokens on
+  a TUI the user may have left open. Surprising default for a single-user tool.
+- `mecated` itself defaults it to `0` (`cmd/mecated/main.go`). Diverging the
+  embedded server would gratuitously break from the shared build contract.
+- Memory still works fully without consolidation: Remember/Recall persist and
+  survive restarts. Consolidation is an optimization (distill/dedup), not a
+  correctness requirement.
+
+No `--memory-consolidate-interval` flag is added now — no caller asks for it, and an
+unused flag is surface to maintain. A future opt-in can mirror `mecated`.
+
+---
+
+## File-by-file change list
+
+### 1. `cmd/mecatui/config.go`
+
+- Add `memoryDir string` and `noMemory bool` to the `config` struct (after
+  `noBash`), with the doc comment above.
+- Register the two flags in `parseFlags` after the `--no-bash` line.
+- **No change to `validate()`** — memory has no validation invariant (an
+  unresolvable default just disables it; an explicit `--memory-dir` is taken
+  verbatim, and `memory.New` surfaces a bad path as a logged warning that disables
+  the tools — non-fatal, matching mecated).
+
+### 2. `cmd/mecatui/main.go`
+
+- In `embeddedConfig`, add `MemoryDir: resolveMemoryDir(cfg),` and a comment noting
+  consolidation is deliberately left at 0.
+- Update the `embeddedConfig` doc comment: memory moves from the "left off" list to
+  "enabled by default (per-project)".
+- Add the two unexported helpers `resolveMemoryDir` and `defaultMemoryDir` (the
+  latter built on `xdg.DataHome`; no bespoke `dataBase`).
+- Consolidate `themeDirs`'s first entry onto `xdg.ConfigHome` (was a hand-rolled
+  `XDG_CONFIG_HOME`/`~/.config` lookup); precedence order unchanged.
+- New imports: `github.com/adrg/xdg`, `strings` (`fmt`, `os`, `path/filepath`,
+  `time` already imported).
+
+### 3. `internal/adapter/memory/store.go`
+
+- `New` `MkdirAll` tightened from `0o755` to `0o700`.
+
+### 4. `internal/app/build.go`
+
+**No change.** The registration gate (`MemoryDir != ""`), `memory.New`, and
+`startMemoryConsolidation` already do the right thing for a non-empty `MemoryDir`
+and a zero interval. This change only feeds the gate a non-empty dir.
+
+### 5. `go.mod`
+
+- `github.com/adrg/xdg v0.5.3` promoted from the `// indirect` block to the direct
+  `require` block (via `go mod tidy`, now that our own code imports it). No version
+  change; `go.sum` untouched.
+
+---
+
+## Test plan
+
+All offline (no provider/network), consistent with `config_test.go` and the
+`UseMock` pattern in `embed_test.go`.
+
+### `cmd/mecatui/config_test.go`
+
+- **`TestParseFlagsMemoryDefaults`** — `parseFlags(nil)` leaves
+  `cfg.memoryDir == ""` and `cfg.noMemory == false`.
+- **`TestParseFlagsMemoryFlags`** — `-memory-dir /tmp/mem` sets `memoryDir`;
+  `-no-memory` sets `noMemory`.
+- **`TestResolveMemoryDirPrecedence`** — `--no-memory` beats an explicit
+  `--memory-dir`; `--memory-dir` alone is taken verbatim; neither → the computed
+  default under a `setDataHome(t, "/xdg/data")` base.
+- **`TestDefaultMemoryDirPathSlug`** — the leaf is the full path-slug
+  (`/` → `-`, leading `-` preserved) under `xdg.DataHome/mecatui/memory`.
+- **`TestDefaultMemoryDirIsPerProject`** — `/a/proj` and `/b/proj` (same basename)
+  yield **different** leaves; the same workspace yields a **stable** leaf.
+- **`TestDefaultMemoryDirUsesLocalShareFallback`** — `XDG_DATA_HOME` unset +
+  `HOME=/home/tester` (+ `xdg.Reload()`) → base `~/.local/share`.
+- **`TestDefaultMemoryDirDegrades`** — empty workspace → `""`; and the defensive
+  empty-`xdg.DataHome` branch → `""` (never a root-anchored path). The empty-`HOME`
+  case is NOT used: `adrg/xdg` resolves a non-empty `DataHome` regardless.
+
+All tests that read `xdg.DataHome` go through `setDataHome(t, dir)`, a helper that
+`t.Setenv`s `XDG_DATA_HOME` and calls `xdg.Reload()` (and re-reloads on cleanup), so
+the library re-reads the synthetic env rather than its init-time snapshot.
+
+### `cmd/mecatui/embed/embed_test.go`
+
+- **`TestStartWithMemoryDirServes`** — `embed.Start` with
+  `app.Config{..., MemoryDir: t.TempDir()}` (mock provider) builds and serves, and
+  `CreateSession` succeeds over the socket — proving the `build.go` memory gate
+  (`memory.New` + `memory.Register`) runs end-to-end without network. There is no
+  list-tools RPC, so this is the lightest honest wire-level proof the gate fires;
+  the catalog-population assertion proper lives in `internal/adapter/memory`'s
+  `tools_test.go` (which already tests `memory.Register`).
+
+No consolidation test — the default leaves it off and no flag is added.
+
+---
+
+## Doc updates (`docs/tui.md`)
+
+- Flags table gains `--memory-dir` and `--no-memory` rows (after `--no-bash`).
+- The "embedded keeps opt-ins off" paragraph drops `memory` from the off-by-default
+  list and gains a paragraph: memory is **ON by default**, per-project under
+  `~/.local/share/mecatui/memory/<path-slug>/`, with `--no-memory` to disable and
+  `--memory-dir` to relocate; consolidation stays off.
+
+---
+
+## Forward-compatibility notes for Task 2 (true tiering)
+
+Task 2 will replace the flat-KV store internals, likely the on-disk format, and may
+inject a tier-0 index into the prompt. This Task-1 design keeps that free by
+treating the directory as **opaque and store-owned**:
+
+- **`main`/`embeddedConfig` compute only a *directory path string*** and hand it to
+  `app.Config.MemoryDir`. They never reference `memory.json`, never read or write
+  the layout, never `MkdirAll` the leaf (the store does). The single file
+  `memory.json` lives entirely inside the adapter; Task 2 can change it to shards,
+  a SQLite file, whatever — no change to mecatui wiring.
+- **The flag contract is `--memory-dir` = "where the store lives", not "the memory
+  file".** Same semantics `mecated` already documents. Task 2 inherits it unchanged.
+- **Do NOT hardcode in this change:** the `memory.json` filename, any single-file
+  assumption, any parse of the store contents in `main`, or any tier/index notion.
+  Everything stays behind the `tool.MemoryStore` interface and `memory.New(dir)`.
+- **The enabled/disabled signal for Task 3's honest empty-states** should travel via
+  the existing capabilities/event path (the server already advertises provider
+  capabilities at `handleInitialize`). When Task 3 needs the UI to know memory is
+  on, expose it as a server-advertised capability the `client` relays as a proto
+  field — **never** by having `ui`/`client` import `internal/...` or learn the
+  memory dir. Reserve the channel; do not implement it now.
+
+---
+
+## Risks / open questions
+
+1. **`adrg/xdg` almost never yields an empty base.** With no `XDG_DATA_HOME` and no
+   `HOME`, `xdg.DataHome` resolves to a root-anchored `/.local/share` rather than
+   `""`, so the `xdg.DataHome == ""` guard in `defaultMemoryDir` is a defensive belt
+   that is effectively unreachable in practice; the live degraded path is an empty
+   workspace. We accept the library's behavior here rather than re-deriving a base
+   ourselves (the whole point of adopting `adrg/xdg`). A pathological no-HOME no-XDG
+   environment would get a `/.local/share/...` store; that is an exotic, broken host
+   and not worth a bespoke guard that re-introduces the hand-rolled dance.
+
+2. **Per-worktree memory.** The leaf is the absolute workspace path, so each git
+   worktree of the same repo gets its own memory store. That is the correct
+   per-*directory* scoping per the contract, but a user who thinks "my mecatl
+   memory" may be surprised that a worktree starts empty. Acceptable and consistent
+   with the documented scoping. No action.
+
+3. **No machine-enforced layering check** exists yet (CLAUDE.md: "verified by
+   import review"). The new helpers in `main.go` import only stdlib (`os`,
+   `path/filepath`, `strings`); nothing new leaks into `ui`/`theme`/`client`.
+
+4. **Default-on changes disk footprint.** Every project opened in mecatui now gets
+   a (small, lazily-created) directory under `~/.local/share`. The store file is
+   written only on the first `Remember`, so an unused project leaves at most an
+   empty `0o700` dir. Acceptable.

@@ -71,14 +71,24 @@ absolute path (the server requires absolute).
 | `--openai-base-url` | – | OpenAI base URL override for the **embedded** server |
 | `--mock` | off | **embedded** server: use the offline mock provider (no network) |
 | `--no-bash` | off | **embedded** server: disable the Bash tool (shell-less) |
+| `--memory-dir` | – (auto) | **embedded** server: per-project memory store dir; empty = a default under `$XDG_DATA_HOME/mecatui/memory` |
+| `--no-memory` | off | **embedded** server: disable cross-session memory (Remember/Recall) |
 
 The embedded server has no auth/TLS — it is a private, user-owned UNIX socket
 (the same single-user loopback trust model `mecated` uses for `127.0.0.1`, with a
 tighter blast radius). The `--auth-token` / `--tls*` flags apply only when dialling
 an external `--server`; loopback is unauthenticated plaintext by default, matching
 mecated's trust model. The embedded server keeps the heavier opt-ins (MCP,
-ToolHive, skills, memory, slash commands) **off** — for those, run a full `mecated`
-and point `--server` at it.
+ToolHive, skills, slash commands) **off** — for those, run a full `mecated` and
+point `--server` at it.
+
+**Cross-session memory (Remember/Recall) is ON by default**, scoped per-project
+under `~/.local/share/mecatui/memory/<path-slug>/` (or `$XDG_DATA_HOME/...` when
+set), where `<path-slug>` is the absolute workspace path with `/` replaced by `-`
+(e.g. `-var-home-ozz-dev-mecatl`) — deterministic, human-legible, and collision-free
+across same-named checkouts. Pass `--no-memory` to disable it or `--memory-dir` to
+relocate the store. Background memory consolidation (the "dream" distiller, which
+spends tokens) stays **off** on the embedded server.
 
 ## Keys
 

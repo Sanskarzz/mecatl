@@ -24,10 +24,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/adrg/xdg"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/embed"
@@ -151,11 +153,13 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 // embeddedConfig maps the TUI config onto the shared app.Config build contract for
 // the in-process server. It enables the standard default toolset (Bash unless
 // --no-bash, Fork, repo map), the agent-teams capability (inert until a client
-// drives a team), and conventional agent-definition discovery (AgentsConventional:
-// true, also inert until a <name>.md exists under a conventional dir), but leaves
-// the heavier opt-ins (MCP, ToolHive, skills, memory, slash commands, telemetry)
-// off — a focused single-user default. The provider is OpenAI when OPENAI_API_KEY
-// is set, else the offline mock (--mock).
+// drives a team), conventional agent-definition discovery (AgentsConventional:
+// true, also inert until a <name>.md exists under a conventional dir), and
+// cross-session memory (Remember/Recall) scoped per-project (see resolveMemoryDir;
+// disable with --no-memory or relocate with --memory-dir). It leaves the heavier
+// opt-ins (MCP, ToolHive, skills, slash commands, telemetry) off — a focused
+// single-user default. The provider is OpenAI when OPENAI_API_KEY is set, else the
+// offline mock (--mock).
 func embeddedConfig(cfg config) app.Config {
 	return app.Config{
 		Workspace:            cfg.workspace,
@@ -178,7 +182,42 @@ func embeddedConfig(cfg config) app.Config {
 		EnableRepoMap:      false,
 		EnableTeams:        true,
 		AgentsConventional: true,
+		// Memory is ON by default, per-project. MemoryConsolidateInterval is left
+		// at 0 (off) deliberately: the "dream" distiller spawns a goroutine that
+		// calls the real provider on a timer, so a default-on interval would
+		// silently spend tokens on an idle TUI. mecated defaults it to 0 too.
+		MemoryDir: resolveMemoryDir(cfg),
 	}
+}
+
+// resolveMemoryDir applies the embedded-server memory precedence: --no-memory
+// disables it (""), an explicit --memory-dir overrides, otherwise a per-project
+// default under XDG data (see defaultMemoryDir). The store owns creating the dir;
+// main only computes a path string and treats the location as opaque.
+func resolveMemoryDir(cfg config) string {
+	if cfg.noMemory {
+		return ""
+	}
+	if cfg.memoryDir != "" {
+		return cfg.memoryDir
+	}
+	return defaultMemoryDir(cfg.workspace)
+}
+
+// defaultMemoryDir derives a stable, per-project memory directory under the XDG
+// data base (xdg.DataHome — $XDG_DATA_HOME, else ~/.local/share). The leaf is the
+// resolved absolute workspace path with the OS separator replaced by '-'
+// (preserving the leading separator as a leading '-'), e.g.
+// "/var/home/ozz/dev/mecatl" → "-var-home-ozz-dev-mecatl". Encoding the FULL path
+// keeps it deterministic, human-legible, and collision-free across same-named
+// projects. Returns "" when xdg.DataHome is empty or workspace is empty — in that
+// degraded case memory stays off rather than anchoring a store at a bogus path.
+func defaultMemoryDir(workspace string) string {
+	if xdg.DataHome == "" || workspace == "" {
+		return ""
+	}
+	leaf := strings.ReplaceAll(workspace, string(filepath.Separator), "-")
+	return filepath.Join(xdg.DataHome, "mecatui", "memory", leaf)
 }
 
 // buildRegistry seeds the theme registry with built-ins and loads user theme
@@ -200,10 +239,8 @@ func buildRegistry(workspace, extraDir string) *theme.Registry {
 // then any explicit --theme-dir (highest).
 func themeDirs(workspace, extraDir string) []string {
 	var dirs []string
-	if base := os.Getenv("XDG_CONFIG_HOME"); base != "" {
-		dirs = append(dirs, filepath.Join(base, "mecatui", "themes"))
-	} else if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".config", "mecatui", "themes"))
+	if xdg.ConfigHome != "" {
+		dirs = append(dirs, filepath.Join(xdg.ConfigHome, "mecatui", "themes"))
 	}
 	if workspace != "" {
 		dirs = append(dirs, filepath.Join(workspace, ".mecatui", "themes"))

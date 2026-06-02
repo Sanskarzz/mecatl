@@ -57,6 +57,45 @@ func TestStartServesOverSocket(t *testing.T) {
 	}
 }
 
+// TestStartWithMemoryDirServes asserts the embedded server builds and serves when
+// a memory directory is configured — exercising app.Build's memory-registration
+// gate (build.go: MemoryDir != "" ⇒ memory.New + memory.Register) end to end
+// without network. A bad/empty dir would surface as a build error or a CreateSession
+// failure; a clean session id proves the gate ran and registered without blowing up.
+func TestStartWithMemoryDirServes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	workspace := t.TempDir()
+	srv, err := embed.Start(ctx, app.Config{
+		Workspace:  workspace,
+		Model:      "mock-model",
+		UseMock:    true, // offline: no network, no OPENAI_API_KEY needed
+		Shell:      "/bin/sh",
+		Compaction: "heuristic",
+		Tokenizer:  "heuristic",
+		MemoryDir:  t.TempDir(), // turns on the Remember/Recall registration gate
+	})
+	if err != nil {
+		t.Fatalf("embed.Start with MemoryDir: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	cl, err := client.Dial(client.DialConfig{Server: srv.Target()})
+	if err != nil {
+		t.Fatalf("dial embedded server: %v", err)
+	}
+	defer func() { _ = cl.Close() }()
+
+	sessID, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"))
+	if err != nil {
+		t.Fatalf("CreateSession over embedded socket (memory enabled): %v", err)
+	}
+	if sessID == "" {
+		t.Fatal("CreateSession returned an empty session id")
+	}
+}
+
 // TestStartProviderError asserts Start surfaces app.Build's provider error (and
 // leaks nothing) when neither OpenAI nor the mock is configured.
 func TestStartProviderError(t *testing.T) {

@@ -44,6 +44,15 @@ type config struct {
 	openAIKey     string
 	mock          bool
 	noBash        bool
+
+	// Embedded-server memory config (used only when hosting an in-process
+	// server). An empty memoryDir means "compute the per-project default under
+	// $XDG_DATA_HOME/mecatui/memory"; an explicit path overrides it. noMemory
+	// disables cross-session memory (Remember/Recall) entirely and wins over
+	// both (the resolved MemoryDir becomes ""). Precedence is applied in
+	// embeddedConfig (resolveMemoryDir), not here.
+	memoryDir string
+	noMemory  bool
 }
 
 // defaultProbeAddr is mecated's historical default loopback gRPC address. In AUTO
@@ -75,6 +84,8 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")
 	fs.BoolVar(&cfg.mock, "mock", false, "embedded server only: use the canned offline mock provider instead of OpenAI (no network)")
 	fs.BoolVar(&cfg.noBash, "no-bash", false, "embedded server only: disable the Bash tool (shell-less mode)")
+	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "embedded server only: per-project memory store directory (empty = a per-project default under $XDG_DATA_HOME/mecatui/memory)")
+	fs.BoolVar(&cfg.noMemory, "no-memory", false, "embedded server only: disable cross-session memory (Remember/Recall) entirely")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err

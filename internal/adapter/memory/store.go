@@ -52,7 +52,9 @@ func New(dir string) (*Store, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, fmt.Errorf("memory: New requires a non-empty dir")
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0o700: memory can hold sensitive curated facts; the per-project store has
+	// no reason to be group/other-readable.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("memory: create dir %q: %w", dir, err)
 	}
 	return &Store{path: filepath.Join(dir, memoryFileName)}, nil

@@ -8,6 +8,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.6
 	charm.land/glamour/v2 v2.0.0
 	charm.land/lipgloss/v2 v2.0.3
+	github.com/adrg/xdg v0.5.3
 	github.com/charmbracelet/x/exp/teatest/v2 v2.0.0-20260527151214-009e6338d40d
 	github.com/malivvan/tree-sitter v0.0.2-0.20250125152656-46b39a70b658
 	github.com/modelcontextprotocol/go-sdk v1.6.1
@@ -33,7 +34,6 @@ require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/1password/onepassword-sdk-go v0.3.1 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/alecthomas/chroma/v2 v2.14.0 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
