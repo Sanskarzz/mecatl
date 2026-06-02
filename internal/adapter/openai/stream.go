@@ -21,6 +21,18 @@ type streamState struct {
 	// done guards against emitting a second ChunkDone if both response.completed
 	// and a later terminal event arrive.
 	done bool
+
+	// The identity (item_id, output_index, content_index) of the single visible
+	// assistant text part currently being assembled. The harness's domain
+	// Message.Text is one string, so a turn may carry exactly one visible text
+	// part; a second distinct text item/content part is a loud error rather than
+	// a silent fusion (see translate's "response.output_text.delta" case). These
+	// are per-stream only — no payload buffering, so the adapter stays
+	// effectively stateless.
+	textItemID       string
+	textOutputIndex  int64
+	textContentIndex int64
+	textIndexSet     bool
 }
 
 // translate converts a single Responses SSE event into zero or more
@@ -55,13 +67,23 @@ type streamState struct {
 // prose for display, whereas the replay blob is OpenAI's opaque encrypted_content
 // token that must be sent back verbatim (request.go) for stateless multi-turn
 // reasoning continuity. They MUST NOT be conflated.
+//
+// Single visible text part assumption: the harness assembles exactly ONE visible
+// assistant text part per turn, because the domain Message.Text is a single
+// string with no boundary to separate distinct parts. The first output_text.delta
+// pins the part identity (item_id, output_index, content_index) into streamState;
+// any subsequent output_text.delta carrying a DIFFERENT identity (a second message
+// item, or a second output_text content part on the same item) is a LOUD error
+// rather than a silent fusion into one buffer. Ordering is not at risk — the SSE
+// stream is serial and sequence_number-monotonic — only part identity is; this
+// guard is a tripwire for a shape that essentially never occurs in current usage.
+// Reasoning summary deltas are EXEMPT: they are display-only, keyed by
+// summary_index (not content_index), and multiple summary parts legitimately
+// concatenate.
 func translate(event responses.ResponseStreamEventUnion, st *streamState) ([]port.Chunk, error) {
 	switch event.Type {
 	case "response.output_text.delta":
-		if event.Delta == "" {
-			return nil, nil
-		}
-		return []port.Chunk{{Kind: port.ChunkText, Text: event.Delta}}, nil
+		return translateTextDelta(event, st)
 
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 		// Human-readable reasoning summary deltas: DISPLAY-only. They are NOT the
@@ -143,6 +165,35 @@ func translate(event responses.ResponseStreamEventUnion, st *streamState) ([]por
 	default:
 		return nil, nil
 	}
+}
+
+// translateTextDelta handles a response.output_text.delta event. It enforces the
+// single-visible-text-part assumption: the first delta pins the part identity
+// (item_id, output_index, content_index) into streamState; any later delta with a
+// DIFFERENT identity (a second message item, or a second output_text content part)
+// is a loud error rather than a silent fusion (the domain Message.Text is one
+// string and cannot represent two distinct visible parts). See translate's doc
+// comment.
+func translateTextDelta(event responses.ResponseStreamEventUnion, st *streamState) ([]port.Chunk, error) {
+	if event.Delta == "" {
+		return nil, nil
+	}
+	if !st.textIndexSet {
+		st.textItemID = event.ItemID
+		st.textOutputIndex = event.OutputIndex
+		st.textContentIndex = event.ContentIndex
+		st.textIndexSet = true
+	} else if event.ItemID != st.textItemID ||
+		event.OutputIndex != st.textOutputIndex ||
+		event.ContentIndex != st.textContentIndex {
+		return nil, fmt.Errorf(
+			"openai: multiple assistant text parts in one turn not supported "+
+				"(first item %q part out=%d/content=%d, then item %q part out=%d/content=%d); "+
+				"the harness models a single visible text part per turn",
+			st.textItemID, st.textOutputIndex, st.textContentIndex,
+			event.ItemID, event.OutputIndex, event.ContentIndex)
+	}
+	return []port.Chunk{{Kind: port.ChunkText, Text: event.Delta}}, nil
 }
 
 // responseErrorString renders a Responses ResponseError (on a failed response)

@@ -118,6 +118,47 @@ func TestTranslateResponseFailed(t *testing.T) {
 	}
 }
 
+// TestTranslateMultipleTextPartsErrors verifies that a turn emitting a SECOND
+// distinct visible text part (here, a different content_index on the same
+// message item) is a loud error rather than a silent fusion into one buffer.
+// The first part's text must still be emitted as a chunk before the error.
+func TestTranslateMultipleTextPartsErrors(t *testing.T) {
+	chunks, err := decodeFixtureErr(t, "multi_text_part_turn.sse")
+	if err == nil {
+		t.Fatal("expected an error from the second distinct text part, got nil")
+	}
+	if !strings.Contains(err.Error(), "multiple assistant text parts") {
+		t.Errorf("error %q does not mention the multi-part condition", err.Error())
+	}
+	var sawPartOne bool
+	for _, c := range chunks {
+		if c.Kind == port.ChunkText && c.Text == "Part one" {
+			sawPartOne = true
+		}
+	}
+	if !sawPartOne {
+		t.Errorf("expected the first part %q among chunks before the error, got %+v", "Part one", chunks)
+	}
+}
+
+// TestTranslateMultipleReasoningSummariesNoError pins the reasoning EXEMPTION
+// from the single-visible-text-part guard: multiple reasoning_summary_text.delta
+// events with DIFFERING summary_index must NOT trip the multi-text-part guard —
+// reasoning is display-only and keyed by summary_index (not content_index), so
+// distinct summary parts legitimately concatenate. Structurally this holds today
+// because reasoning deltas route to the separate response.reasoning_summary_text.delta
+// case and never reach translateTextDelta; this test documents the exemption so a
+// future refactor that unified the text/reasoning delta handling can't silently
+// start erroring on multi-part reasoning.
+func TestTranslateMultipleReasoningSummariesNoError(t *testing.T) {
+	got := decodeFixture(t, "multi_reasoning_summary.sse")
+	want := []port.Chunk{
+		{Kind: port.ChunkReasoning, Text: "First summary."},
+		{Kind: port.ChunkReasoning, Text: "Second summary."},
+	}
+	assertChunks(t, got, want)
+}
+
 func assertChunks(t *testing.T, got, want []port.Chunk) {
 	t.Helper()
 	if len(got) != len(want) {

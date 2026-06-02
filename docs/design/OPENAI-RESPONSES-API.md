@@ -28,6 +28,8 @@ Response: `id`, `status` (`completed`/`incomplete`/`failed`), `output[]`, `usage
 
 **Assembly rule:** stream deltas to the client for responsiveness, but act on `.done`/`response.completed` payloads as authoritative (especially before invoking a tool). `usage` appears ONLY on `response.completed`.
 
+**Single visible text part:** the harness assembles exactly ONE visible assistant text part per turn, matching `session.Message.Text` being a single string. The adapter pins the part identity (`item_id`/`output_index`/`content_index`) on the first `response.output_text.delta` and **loud-errors** on any later text delta with a different identity (a second message item, or a second `output_text` content part) rather than silently fusing two distinct parts into one buffer. Ordering is not at risk (the stream is serial and `sequence_number`-monotonic) — only part identity is, so this is a tripwire for a shape that essentially never occurs. Reasoning summary deltas are exempt (display-only, keyed by `summary_index`, legitimately concatenated).
+
 **Cancellation:** (a) cancel the `context.Context`/close the stream (normal foreground path; abandons partial output); (b) server-side `POST /v1/responses/{id}/cancel` (only meaningful with `store:true`/background).
 
 ## 3. Function / Tool Calling
