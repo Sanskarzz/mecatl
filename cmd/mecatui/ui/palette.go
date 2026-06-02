@@ -64,14 +64,59 @@ func commandPrefix(s string) (prefix string, ok bool) {
 	return t, true
 }
 
+// builtinRows returns the caps-filtered built-in commands as client.Command rows
+// (Builtin:true) for the palette. They always exist (at minimum /clear and
+// /help), independent of any Commander or server slash-command support; the
+// caps-gated ones (/mcp, /agents) appear only when reachable.
+func (m Model) builtinRows() []client.Command {
+	bs := builtinCommands(m.caps, m.deps.MCP != nil)
+	rows := make([]client.Command, 0, len(bs))
+	for _, b := range bs {
+		rows = append(rows, client.Command{Name: b.name, Description: b.desc, Builtin: true})
+	}
+	return rows
+}
+
+// mergeCommands merges the always-present built-in rows with the server-
+// discovered workspace rows into the palette's command set. PRECEDENCE: a
+// built-in WINS a name collision — the colliding discovered row is dropped, so a
+// workspace "/clear" can never shadow the client-side /clear. Built-ins come
+// first (in their fixed order), then the discovered rows (already name-sorted by
+// the server), de-duplicated. The result feeds filterCommands unchanged.
+func mergeCommands(builtins, discovered []client.Command) []client.Command {
+	seen := make(map[string]struct{}, len(builtins)+len(discovered))
+	out := make([]client.Command, 0, len(builtins)+len(discovered))
+	for _, b := range builtins {
+		if _, ok := seen[b.Name]; ok {
+			continue
+		}
+		seen[b.Name] = struct{}{}
+		out = append(out, b)
+	}
+	for _, d := range discovered {
+		if _, ok := seen[d.Name]; ok {
+			// Either a built-in already owns this name (built-in wins) or it is a
+			// duplicate discovered row; drop it.
+			continue
+		}
+		seen[d.Name] = struct{}{}
+		out = append(out, d)
+	}
+	return out
+}
+
 // syncPalette recomputes the palette's open/filtered state from the current
 // textarea content. It is called after every idle keystroke that may have changed
 // the input. It returns the (possibly) updated model and a command — the latter
 // is the ListCommands fetch, fired lazily the first time the input enters command
 // mode (and only when a Commander is wired).
+//
+// The palette opens for ANY command line, even with no Commander wired, because
+// the built-in commands always exist; the lazy server fetch fires only when a
+// Commander IS wired.
 func (m Model) syncPalette() (Model, tea.Cmd) {
 	prefix, isCmd := commandPrefix(m.ta.Value())
-	if !isCmd || m.deps.Cmds == nil {
+	if !isCmd {
 		// Left command mode: reset the palette (including the esc-dismiss latch) so a
 		// later "/" opens it afresh.
 		m.palette.open = false
@@ -82,9 +127,10 @@ func (m Model) syncPalette() (Model, tea.Cmd) {
 	}
 
 	var fetch tea.Cmd
-	if !m.palette.fetched {
+	if !m.palette.fetched && m.deps.Cmds != nil {
 		// Fetch once on first entry into command mode; the result arrives as a
-		// CommandsMsg and re-syncs the palette.
+		// CommandsMsg and re-syncs the palette. Only when a Commander is wired —
+		// built-ins need no fetch.
 		m.palette.fetched = true
 		fetch = client.ListCommandsCmd(m.deps.Ctx, m.deps.Cmds, m.deps.Workspace)
 	}
@@ -95,7 +141,8 @@ func (m Model) syncPalette() (Model, tea.Cmd) {
 		return m, fetch
 	}
 
-	m.palette.filtered = filterCommands(m.palette.commands, prefix)
+	merged := mergeCommands(m.builtinRows(), m.palette.commands)
+	m.palette.filtered = filterCommands(merged, prefix)
 	m.palette.open = len(m.palette.filtered) > 0
 	if m.palette.cursor >= len(m.palette.filtered) {
 		m.palette.cursor = 0
@@ -165,10 +212,10 @@ func (m Model) paletteDismiss() Model {
 // a large set never overruns the input.
 //
 // When the palette is NOT showing rows but the input IS a command line ("/…"),
-// it renders a single honest muted note instead of "": caps-aware, it
-// distinguishes "slash commands are not enabled on this server" (caps off) from
-// "no slash commands found in this workspace" (caps on but nothing matched). It
-// returns "" only when the input is not a command line at all.
+// it renders a single neutral muted note instead of "". Built-ins always exist,
+// so the only way to reach this note is a typed prefix matching neither a
+// built-in nor a workspace command (e.g. "/zzz"); the note reads "no matching
+// command". It returns "" only when the input is not a command line at all.
 func renderPalette(th theme.Theme, st paletteState, caps client.Capabilities, input string, width int) string {
 	if !st.open || len(st.filtered) == 0 {
 		if note := paletteEmptyNote(th, st, caps, input); note != "" {
@@ -207,22 +254,22 @@ func renderPalette(th theme.Theme, st paletteState, caps client.Capabilities, in
 	return card
 }
 
-// paletteEmptyNote returns the one-line honest note shown when the input is a
-// command line ("/…") but the palette has no rows to offer — distinguishing, via
-// the relayed caps, the "not enabled" case from the "enabled but empty" case. It
-// returns "" when the input is not a command line, or when the user dismissed the
-// palette with esc (so esc still fully hides it without the note popping back).
-func paletteEmptyNote(th theme.Theme, st paletteState, caps client.Capabilities, input string) string {
+// paletteEmptyNote returns the one-line neutral note shown when the input is a
+// command line ("/…") but the palette has no rows to offer. Because built-ins
+// always exist, the caps-based "not enabled"/"enabled but empty" distinction is
+// no longer meaningful here — the only way to land on it is a typed prefix that
+// matches no command at all — so it is a single neutral "no matching command".
+// It returns "" when the input is not a command line, or when the user dismissed
+// the palette with esc (so esc still fully hides it without the note popping
+// back). caps is retained in the signature for call-site symmetry but unused.
+func paletteEmptyNote(th theme.Theme, st paletteState, _ client.Capabilities, input string) string {
 	if _, isCmd := commandPrefix(input); !isCmd {
 		return ""
 	}
 	if st.dismissed {
 		return ""
 	}
-	if !caps.SlashCommands {
-		return th.Style("muted").Render("slash commands are not enabled on this server")
-	}
-	return th.Style("muted").Render("no slash commands found in this workspace")
+	return th.Style("muted").Render("no matching command")
 }
 
 // paletteWindow returns the [start,end) slice bounds of a scrolling window of

@@ -350,8 +350,8 @@ func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // typed prefix.
 func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.palette.open {
-		if mm, handled := m.onPaletteKey(msg); handled {
-			return mm, nil
+		if mm, cmd, handled := m.onPaletteKey(msg); handled {
+			return mm, cmd
 		}
 	}
 	switch {
@@ -388,23 +388,57 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // onPaletteKey handles keys while the slash-command palette is open. It returns
 // handled=false for keys the palette does not claim, so the caller falls through
-// to the normal idle handling (and the key still reaches the textarea). None of
-// the palette's actions issue a command (they only mutate model state), so it
-// returns no tea.Cmd.
-func (m Model) onPaletteKey(msg tea.KeyPressMsg) (Model, bool) {
+// to the normal idle handling (and the key still reaches the textarea). Most of
+// the palette's actions only mutate model state (no command); the exception is
+// enter/tab over a BUILT-IN row, which runs the built-in directly (it may issue
+// a command, e.g. opening an overlay).
+func (m Model) onPaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	switch msg.String() {
 	case "up":
 		m.paletteMoveUp()
-		return m, true
+		return m, nil, true
 	case "down":
 		m.paletteMoveDown()
-		return m, true
+		return m, nil, true
 	case "tab", "enter":
-		return m.paletteComplete(), true
+		if mm, cmd, ran := m.runSelectedBuiltin(); ran {
+			return mm, cmd, true
+		}
+		return m.paletteComplete(), nil, true
 	case "esc":
-		return m.paletteDismiss(), true
+		return m.paletteDismiss(), nil, true
 	}
-	return m, false
+	return m, nil, false
+}
+
+// runSelectedBuiltin runs the currently-selected palette row IF it is a built-in
+// command, closing the palette and resetting the input first, and reports ran=
+// true. For a non-built-in (workspace) row it reports ran=false so the caller
+// falls back to paletteComplete (text-completion). Running built-ins directly on
+// palette-enter — rather than text-completing them — is deliberate:
+// paletteComplete writes "/<name> " with a TRAILING SPACE, which makes
+// commandPrefix false and would slip the line past the submitPrompt built-in
+// intercept; for /clear the user expects enter to act, not to pre-fill the input.
+func (m Model) runSelectedBuiltin() (tea.Model, tea.Cmd, bool) {
+	if !m.palette.open || m.palette.cursor >= len(m.palette.filtered) {
+		return m, nil, false
+	}
+	row := m.palette.filtered[m.palette.cursor]
+	if !row.Builtin {
+		return m, nil, false
+	}
+	b, found := builtinByName(m.caps, m.deps.MCP != nil, row.Name)
+	if !found {
+		return m, nil, false
+	}
+	// Close the palette and clear the input before acting (mirrors the bare-line
+	// submit intercept), then dispatch.
+	m.palette.open = false
+	m.palette.filtered = nil
+	m.palette.cursor = 0
+	m.ta.Reset()
+	mm, cmd := b.run(m)
+	return mm, cmd, true
 }
 
 // afterInputEdit re-syncs the palette from the (possibly changed) textarea
@@ -429,6 +463,18 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.ta.Value())
 	if text == "" || m.sessionID == "" {
 		return m, nil
+	}
+	// A BARE built-in command line ("/clear", "/help", …) is intercepted here —
+	// before addUser / stream-open — and dispatched to its Model action, so the
+	// built-in text never reaches the model. A non-built-in "/…" falls through to
+	// the normal send (preserving bare workspace-command invocation), and a
+	// "/name arg" line has a space → commandPrefix is false → also falls through
+	// (workspace commands expand server-side from the full line).
+	if name, ok := commandPrefix(text); ok {
+		if b, found := builtinByName(m.caps, m.deps.MCP != nil, name); found {
+			m.ta.Reset()
+			return b.run(m)
+		}
 	}
 	m.conv.addUser(text)
 	m.ta.Reset()

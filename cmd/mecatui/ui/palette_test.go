@@ -106,12 +106,18 @@ func TestPaletteOpensOnSlash(t *testing.T) {
 	if !m.palette.open {
 		t.Fatalf("palette did not open on '/'")
 	}
-	if len(m.palette.filtered) != 3 {
-		t.Fatalf("filtered = %d, want 3", len(m.palette.filtered))
+	// Merged set: 2 built-ins (clear, help) + 3 workspace rows (fix, review,
+	// refactor) = 5. (caps are zero here, so /mcp,/agents are not registered.)
+	if len(m.palette.filtered) != 5 {
+		t.Fatalf("filtered = %d, want 5 (2 built-ins + 3 workspace)", len(m.palette.filtered))
 	}
 	view := m.View().Content
 	if !strings.Contains(view, "/fix") || !strings.Contains(view, "fix a failing test") {
 		t.Fatalf("palette view missing command name/description:\n%s", view)
+	}
+	// Built-ins lead and render too.
+	if !strings.Contains(view, "/clear") || !strings.Contains(view, "/help") {
+		t.Fatalf("palette view missing built-in commands:\n%s", view)
 	}
 }
 
@@ -134,8 +140,9 @@ func TestPaletteFetchesOnce(t *testing.T) {
 	if fc.gotWS != "/workspace" {
 		t.Fatalf("fetch workspace = %q, want /workspace", fc.gotWS)
 	}
-	if !m.palette.open || len(m.palette.filtered) != 3 {
-		t.Fatalf("palette not populated from fetch: open=%v filtered=%d", m.palette.open, len(m.palette.filtered))
+	// Merged: 2 built-ins + 3 fetched workspace rows = 5.
+	if !m.palette.open || len(m.palette.filtered) != 5 {
+		t.Fatalf("palette not populated from fetch: open=%v filtered=%d (want 5)", m.palette.open, len(m.palette.filtered))
 	}
 
 	// A second keystroke must NOT re-fetch (the latch holds).
@@ -185,20 +192,26 @@ func TestPalettePrefixFilters(t *testing.T) {
 }
 
 // TestPaletteNavigateAndComplete verifies ↓ moves the selection and enter
-// completes the chosen command into the input as "/<name> ", closing the palette.
+// completes a WORKSPACE command into the input as "/<name> ", closing the
+// palette. The merged order is [clear, help, fix, review, refactor], so three ↓
+// land on "review" (index 3, a workspace row → text-completed, not run).
 func TestPaletteNavigateAndComplete(t *testing.T) {
 	m := newPaletteModel(t, sampleCommands())
-	m = typeRune(t, m, '/') // open with fix, review, refactor (server order)
+	m = typeRune(t, m, '/') // open with [clear, help, fix, review, refactor]
 
-	// ↓ selects the second row.
-	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	m = mm.(Model)
-	if m.palette.cursor != 1 {
-		t.Fatalf("cursor = %d, want 1 after ↓", m.palette.cursor)
+	for i := 0; i < 3; i++ {
+		mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		m = mm.(Model)
+	}
+	if m.palette.cursor != 3 {
+		t.Fatalf("cursor = %d, want 3 after 3×↓", m.palette.cursor)
+	}
+	if m.palette.filtered[3].Name != "review" || m.palette.filtered[3].Builtin {
+		t.Fatalf("row 3 = %+v, want workspace 'review'", m.palette.filtered[3])
 	}
 
-	// enter completes the selected command.
-	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	// enter completes the selected WORKSPACE command (text-completion).
+	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = mm.(Model)
 	if got := m.ta.Value(); got != "/review " {
 		t.Fatalf("input = %q, want \"/review \" after complete", got)
@@ -208,11 +221,19 @@ func TestPaletteNavigateAndComplete(t *testing.T) {
 	}
 }
 
-// TestPaletteCompleteWithTab verifies tab also completes (the first row by
-// default).
-func TestPaletteCompleteWithTab(t *testing.T) {
+// TestPaletteCompleteWorkspaceWithTab verifies tab text-completes a WORKSPACE
+// row (not a built-in). With built-ins leading, the first workspace row "fix" is
+// at index 2.
+func TestPaletteCompleteWorkspaceWithTab(t *testing.T) {
 	m := newPaletteModel(t, sampleCommands())
 	m = typeRune(t, m, '/')
+	for i := 0; i < 2; i++ {
+		mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		m = mm.(Model)
+	}
+	if m.palette.filtered[m.palette.cursor].Name != "fix" {
+		t.Fatalf("selected = %q, want 'fix'", m.palette.filtered[m.palette.cursor].Name)
+	}
 
 	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = mm.(Model)
@@ -253,20 +274,33 @@ func TestPaletteEscDismisses(t *testing.T) {
 	}
 }
 
-// TestPaletteNoCommandsNoPalette verifies an empty command set yields no palette
-// DROPDOWN (no rows). With the input on a command line ("/"), renderPalette now
-// shows a single honest muted note instead of "" — caps-aware. When the input is
-// NOT a command line it still returns "".
-func TestPaletteNoCommandsNoPalette(t *testing.T) {
+// TestPaletteUnknownPrefixShowsNote verifies a bare "/" NOW opens (built-ins are
+// always present), while an unknown prefix matching neither a built-in nor a
+// workspace command shows the neutral "no matching command" note instead of a
+// dropdown.
+func TestPaletteUnknownPrefixShowsNote(t *testing.T) {
 	m := newPaletteModel(t, &fakeCommander{cmds: nil})
+
+	// Bare "/" opens: the built-ins (clear, help) are always present.
 	m = typeRune(t, m, '/')
-	if m.palette.open {
-		t.Fatalf("palette opened with no commands")
+	if !m.palette.open {
+		t.Fatalf("bare '/' should open the palette (built-ins always exist)")
 	}
-	// Input is a command line ("/") with no rows: a caps-aware note renders.
-	note := renderPalette(m.deps.Theme, m.palette, m.caps, m.ta.Value(), 100)
-	if note == "" {
-		t.Fatalf("renderPalette returned empty for a command line with no rows; want a caps-aware note")
+	if len(m.palette.filtered) != 2 {
+		t.Fatalf("bare '/' filtered = %d, want 2 built-ins (clear, help)", len(m.palette.filtered))
+	}
+
+	// Typing a prefix that matches no command closes the dropdown and the input
+	// renders the neutral note.
+	m = typeRune(t, m, 'z')
+	m = typeRune(t, m, 'z')
+	m = typeRune(t, m, 'z') // "/zzz" matches no built-in or workspace command
+	if m.palette.open {
+		t.Fatalf("palette should not open for an unmatched prefix '/zzz'")
+	}
+	note := stripANSIstr(renderPalette(m.deps.Theme, m.palette, m.caps, m.ta.Value(), 100))
+	if !strings.Contains(note, "no matching command") {
+		t.Fatalf("want neutral 'no matching command' note for '/zzz':\n%s", note)
 	}
 	// Not a command line: no palette and no note.
 	if renderPalette(m.deps.Theme, m.palette, m.caps, "hello", 100) != "" {
@@ -274,14 +308,23 @@ func TestPaletteNoCommandsNoPalette(t *testing.T) {
 	}
 }
 
-// TestPaletteNilCommanderDisabled verifies the palette never fetches or opens
-// when no Commander is wired.
-func TestPaletteNilCommanderDisabled(t *testing.T) {
+// TestPaletteNilCommanderShowsBuiltins verifies the palette opens with the
+// built-in commands even when NO Commander is wired (built-ins act on the Model,
+// not the server), and that no server fetch fires.
+func TestPaletteNilCommanderShowsBuiltins(t *testing.T) {
 	m := newPaletteModel(t, nil)
 	m.deps.Cmds = nil
 	m = typeRune(t, m, '/')
-	if m.palette.open {
-		t.Fatalf("palette opened with nil Commander")
+	if !m.palette.open {
+		t.Fatalf("palette should open with built-ins even with nil Commander")
+	}
+	if len(m.palette.filtered) != 2 {
+		t.Fatalf("filtered = %d, want 2 built-ins (clear, help)", len(m.palette.filtered))
+	}
+	// With no Commander, the fetch latch is never even consulted; assert the rows
+	// are the built-ins.
+	if m.palette.filtered[0].Name != "clear" || !m.palette.filtered[0].Builtin {
+		t.Fatalf("first row = %+v, want built-in 'clear'", m.palette.filtered[0])
 	}
 }
 

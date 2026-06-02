@@ -429,8 +429,11 @@ bin/mecatui --server 127.0.0.1:8080 --workspace "$PWD"
 ```
 
 The embedded server keeps the heavier opt-ins (MCP, ToolHive, skills, memory,
-slash commands) off; run a full `mecated` and use `--server` for those. See
-`docs/tui.md` for all flags.
+server-side slash-command expansion) off; run a full `mecated` and use `--server`
+for those. Note the TUI's **built-in slash commands** (`/clear`, `/help`, and the
+caps-gated `/mcp`/`/agents`) still work regardless — they act on the TUI itself,
+not the server, so typing `/` always opens a useful palette even with workspace
+slash-command expansion off. See `docs/tui.md` for all flags.
 
 It streams the conversation (glamour markdown for assistant text, themed cards
 for tool I/O), shows a thinking spinner and a usage footer, and pops an inline

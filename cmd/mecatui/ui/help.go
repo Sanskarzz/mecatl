@@ -50,7 +50,7 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 	writeHelpRows(&b, th, []helpRow{
 		{key: "enter", action: "send the prompt"},
 		{key: "shift+enter", action: "newline (also ctrl+j)"},
-		{key: "/", action: "slash-command palette", available: caps.SlashCommands, gated: true},
+		{key: "/", action: "slash-command palette (built-ins always; workspace commands when enabled)"},
 		{key: "esc", action: "cancel the running turn"},
 	})
 
@@ -125,13 +125,13 @@ func renderZeroState(th theme.Theme, caps client.Capabilities, width, height int
 }
 
 // zeroStateRows is the caps-tailored affordance list on the welcome card: always
-// "?", "/" only when slash commands are enabled, "ctrl+a" only when teams are
+// "?", always "/" (built-in commands always exist), "ctrl+a" only when teams are
 // enabled, and the always-available "ctrl+t". They are rendered as ungated rows
 // (no [not enabled] tags on the welcome card — it advertises only what's on).
 func zeroStateRows(caps client.Capabilities) []helpRow {
-	rows := []helpRow{{key: "?", action: "keys & features"}}
-	if caps.SlashCommands {
-		rows = append(rows, helpRow{key: "/", action: "slash commands"})
+	rows := []helpRow{
+		{key: "?", action: "keys & features"},
+		{key: "/", action: "slash commands"},
 	}
 	if caps.Teams {
 		rows = append(rows, helpRow{key: "ctrl+a", action: "agent team (when running)"})

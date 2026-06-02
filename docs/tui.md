@@ -98,13 +98,26 @@ workspace you didn't author (e.g. a cloned repo's `.claude/skills`) can steer th
 model — use `--no-skills` for untrusted workspaces. Only read-only discovery is
 wired; the writable SkillDraft self-improvement loop stays off.
 
-**Slash commands are ON by default**, expanding `/<name>` inputs from the
-conventional workspace dirs `.mecatl/commands` and `.claude/commands` (`<name>.md`
-templates — the Claude Code convention). They're local, user-authored prompt
-templates, so there's no network or trust cost (unlike MCP prompts, which stay off
-with MCP). Pass `--no-commands` to disable expansion, or `--commands-dir` to point
-at a different directory. When neither command dir exists the palette is simply
-empty (the `?` overlay and footer reflect that honestly).
+**Built-in client-side slash commands always appear.** Typing `/` opens the
+palette with a set of commands the TUI itself ships — independent of workspace
+dirs and even when server slash-command expansion is off. `/clear` (reset the
+conversation and scrollback) and `/help` (open the keys-&-features overlay) are
+*always* available because they act purely on the TUI's own state; `/mcp` (browse
+the MCP inventory) and `/agents` (the agent-team overlay) appear only when the
+connected server advertises those capabilities. These never reach the model — a
+bare built-in line is intercepted and run locally. (`/compact` is a planned
+follow-up: it needs a server RPC that does not exist yet.)
+
+**Workspace slash commands are ON by default** on top of the built-ins, expanding
+`/<name>` inputs from the conventional workspace dirs `.mecatl/commands` and
+`.claude/commands` (`<name>.md` templates — the Claude Code convention). They're
+local, user-authored prompt templates, so there's no network or trust cost (unlike
+MCP prompts, which stay off with MCP). Pass `--no-commands` to disable expansion,
+or `--commands-dir` to point at a different directory. Built-ins and workspace
+commands merge in the palette (a built-in wins a name collision). When no
+workspace command dir exists the palette is **not** empty — the built-ins are
+still there; a typed prefix that matches nothing shows a muted "no matching
+command" note.
 
 **Cross-session memory (Remember/Recall) is ON by default**, scoped per-project
 under `~/.local/share/mecatui/memory/<path-slug>/` (or `$XDG_DATA_HOME/...` when
@@ -127,6 +140,7 @@ spends tokens) stays **off** on the embedded server.
 | in the permission modal: `←`/`→`/`tab` | toggle the focused button |
 | `pgup` / `pgdn` | scroll the conversation |
 | `?` | help overlay (on an empty prompt) |
+| `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`; plus workspace commands) |
 
 The `?` overlay enumerates the rest of the chords — `ctrl+o`/`ctrl+r`/`ctrl+p`
 (MCP inventory / resources / prompts), `ctrl+a` (agent team), `ctrl+t`

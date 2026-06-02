@@ -50,19 +50,26 @@ func TestMCPEmptyStateCapsAware(t *testing.T) {
 	}
 }
 
-// TestPaletteEmptyNoteCapsAware asserts the "/" palette note distinguishes
-// "not enabled" from "none found", and is empty for a non-command input.
-func TestPaletteEmptyNoteCapsAware(t *testing.T) {
+// TestPaletteEmptyNoteNeutral asserts the "/" palette note is a single neutral
+// "no matching command" (built-ins always exist, so the old caps-based "not
+// enabled"/"none found" distinction is gone), and is empty for a non-command
+// input or while dismissed. The note is independent of caps.
+func TestPaletteEmptyNoteNeutral(t *testing.T) {
 	th := aztec()
 	var st paletteState // closed, no rows
 
+	// caps OFF, a "/" command line with no matching rows → neutral note.
 	off := stripANSIstr(renderPalette(th, st, client.Capabilities{}, "/", 100))
-	if !strings.Contains(off, "slash commands are not enabled on this server") {
-		t.Errorf("palette (commands off) should say 'not enabled':\n%s", off)
+	if !strings.Contains(off, "no matching command") {
+		t.Errorf("palette note should be neutral 'no matching command' (caps off):\n%s", off)
 	}
+	if strings.Contains(off, "not enabled") {
+		t.Errorf("palette note must NOT carry the old caps-based 'not enabled' copy:\n%s", off)
+	}
+	// caps ON, an unmatched prefix → same neutral note.
 	on := stripANSIstr(renderPalette(th, st, client.Capabilities{SlashCommands: true}, "/foo", 100))
-	if !strings.Contains(on, "no slash commands found in this workspace") {
-		t.Errorf("palette (commands on, empty) should say 'none found':\n%s", on)
+	if !strings.Contains(on, "no matching command") {
+		t.Errorf("palette note should be neutral 'no matching command' (caps on):\n%s", on)
 	}
 	// Non-command input: no note.
 	if renderPalette(th, st, client.Capabilities{}, "hello", 100) != "" {

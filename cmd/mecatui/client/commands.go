@@ -15,10 +15,15 @@ import (
 // msgs below, and the mapping is exercised offline against a fake client.
 
 // Command is one discovered slash command (proto Command, proto-free): its
-// invocation name (without the leading "/") and a short description.
+// invocation name (without the leading "/") and a short description. Builtin
+// marks a CLIENT-SIDE command (e.g. /clear, /help) injected by the ui rather
+// than discovered from the server; it stays false for every server row (the
+// zero value). The ui uses it to dispatch the row to a Model action instead of
+// expanding it server-side, and to win name collisions with workspace commands.
 type Command struct {
 	Name        string
 	Description string
+	Builtin     bool
 }
 
 // CommandsMsg carries a ListCommands success (the palette's command set). Err is

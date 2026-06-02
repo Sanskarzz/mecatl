@@ -193,6 +193,32 @@ func (m *Model) recordFileChange(path string) {
 	m.filesChanged = append(m.filesChanged, path)
 }
 
+// resetSession is the single seam that owns "the session-derived state of the
+// Model": the conversation transcript plus everything accumulated FROM the stream
+// over a session (changed-files set, cumulative usage, current context size, and
+// the in-flight tool affordances). It is co-located with the field declarations
+// it zeroes (see the Model struct above) so that ANY future session-derived field
+// added there has an obvious, single place to be reset — keeping /clear honest
+// without each call site re-listing fields.
+//
+// It deliberately does NOT touch the per-RUN transport teardown (stream /
+// streamCh / cancelRun / phase / textarea focus) — that is endRun's concern and
+// its semantics are relied on by the idle-guard. The only overlap is the in-flight
+// tool affordances (activeTool/toolProgress), which are genuinely both
+// "session-derived display state" and "cleared at run end"; resetSession owns
+// them here, endRun continues to clear activeTool on its own teardown path. The
+// caller is responsible for re-rendering (refreshView) after calling this.
+func (m Model) resetSession() Model {
+	m.conv = conversation{}
+	m.filesChanged = nil
+	m.filesSeen = nil
+	m.usage = client.Usage{}
+	m.contextTokens = 0
+	m.activeTool = ""
+	m.toolProgress = ""
+	return m
+}
+
 // Init starts the spinner and kicks off the async CreateSession.
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(m.sp.Tick, m.createSessionCmd())

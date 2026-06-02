@@ -169,13 +169,11 @@ func (m Model) renderFooter() string {
 	}
 
 	// The full decompressed chord list now lives in the "?" help overlay, so the
-	// footer carries only the two entry points and quit. "/ commands" is dropped
-	// when slash commands are not enabled, so the footer never advertises a
-	// disabled entry point (an honest touch the relayed caps now afford).
+	// footer carries only the two entry points and quit. "/ commands" is ALWAYS
+	// shown: the TUI ships built-in client-side commands (/clear, /help, and the
+	// caps-gated /mcp,/agents), so "/" is a live entry point even when the server
+	// has slash-command expansion disabled.
 	help := "? help · / commands · ctrl+c quit"
-	if !m.caps.SlashCommands {
-		help = "? help · ctrl+c quit"
-	}
 
 	width := m.widthOr(80)
 	line := m.fitFooter(left, width)

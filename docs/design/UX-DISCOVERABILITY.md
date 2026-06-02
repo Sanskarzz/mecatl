@@ -484,16 +484,35 @@ To thread caps into the renderers: `renderMCPOverlay` is called from `View`
 `renderMCPPanel`/`renderResourceList`/`renderPromptList`). These are pure
 functions taking `client.Capabilities` — still proto-free, still unit-testable.
 
-**Commands palette** (`palette.go`): today an empty/closed palette shows
-nothing when the user types `/`. Add a one-line note when the input is a command
-line but there are zero commands, branched on caps:
+**Commands palette** (`palette.go`): when the user types `/` but there are zero
+matching commands, `renderPalette` shows a one-line muted note instead of "".
+
+> **Update — built-in client-side commands.** The palette is no longer ever
+> empty: the TUI ships **built-in** commands (`builtins.go`) that always exist,
+> independent of the server's `slash_commands` capability and even with no
+> `Commander` wired. `/clear` (reset conversation + scrollback) and `/help` (open
+> the keys-&-features overlay) are always registered (they act purely on the
+> Model); `/mcp` and `/agents` are caps-gated (`caps.MCP && MCP-wired`, and
+> `caps.Teams`). `syncPalette` filters over `mergeCommands(m.builtinRows(),
+> m.palette.commands)` — built-ins lead, then the discovered workspace rows, with
+> a built-in winning any name collision. A bare built-in line (e.g. `/clear`) is
+> intercepted in `submitPrompt` and run locally, so it never reaches the model;
+> palette-enter over a built-in row runs it directly (rather than text-completing,
+> which would write a trailing space and slip past that intercept). Because
+> built-ins always exist, the old caps-based empty-state copy ("not enabled" vs
+> "none found") is no longer meaningful — the only way to reach the note is a
+> typed prefix matching nothing (e.g. `/zzz`), so `paletteEmptyNote` now renders a
+> single neutral **"no matching command"**. The footer always shows
+> "`/ commands`" and the help/zero-state always advertise `/`. (`/compact` is a
+> deliberate follow-up: it needs a server RPC that does not yet exist.)
+
+Superseded original design (kept for context): a one-line note branched on caps:
 - `!caps.SlashCommands` → muted "slash commands are not enabled on this server"
 - `caps.SlashCommands` + zero → muted "no slash commands found in this workspace"
 
-`renderPalette` (`palette.go:166`) returns `""` when closed; add a sibling path
-(or extend `syncPalette` to set a `paletteState.note`) that renders the one
-muted line when `commandPrefix` is true and `filtered` is empty. Thread `m.caps`
-into `renderPalette` (called from `view.go:47`).
+`renderPalette` (`palette.go:166`) returns `""` when closed; a sibling path
+renders the one muted line when `commandPrefix` is true and `filtered` is empty.
+`m.caps` is threaded into `renderPalette` (called from `view.go`).
 
 **Memory needs no empty-state** — agent-side, no overlay; surfaced only as the
 help-overlay prose line gated on `caps.Memory`.

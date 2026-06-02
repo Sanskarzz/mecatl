@@ -86,12 +86,14 @@ func TestHelpSwallowsOtherKeysWhileOpen(t *testing.T) {
 	}
 }
 
-// TestFooterDropsCommandsWhenDisabled asserts the footer omits "/ commands" when
-// slash commands are not enabled, and includes it when they are.
-func TestFooterDropsCommandsWhenDisabled(t *testing.T) {
+// TestFooterAlwaysShowsCommands asserts the footer ALWAYS advertises
+// "/ commands": the TUI ships built-in client-side commands (/clear, /help) that
+// exist independent of server slash-command support, so "/" is a live entry
+// point whether or not the server enables slash-command expansion.
+func TestFooterAlwaysShowsCommands(t *testing.T) {
 	off := footerHelpLine(t, client.Capabilities{})
-	if strings.Contains(off, "/ commands") {
-		t.Errorf("footer should drop '/ commands' when slash commands are off:\n%s", off)
+	if !strings.Contains(off, "/ commands") {
+		t.Errorf("footer should carry '/ commands' even when server slash commands are off (built-ins always exist):\n%s", off)
 	}
 	if !strings.Contains(off, "? help") {
 		t.Errorf("footer should always carry '? help':\n%s", off)

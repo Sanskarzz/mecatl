@@ -3,7 +3,6 @@
 
 
 
-
               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
               ┃                                                                     ┃
               ┃  Welcome to mecatui                                                 ┃
@@ -11,6 +10,7 @@
               ┃    Type a request below and press enter.                            ┃
               ┃                                                                     ┃
               ┃    ?             keys & features                                    ┃
+              ┃    /             slash commands                                     ┃
               ┃    ctrl+a        agent team (when running)                          ┃
               ┃    ctrl+t        details                                            ┃
               ┃                                                                     ┃
@@ -27,4 +27,4 @@
 ┃
 ────────────────────────────────────────────────────────────────────────────────────────────────────
  connected                                                                   ctx 0 · ↑0 ↓0 cache 0%
-? help · ctrl+c quit
+? help · / commands · ctrl+c quit

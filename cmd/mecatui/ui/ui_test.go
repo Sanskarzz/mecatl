@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -283,4 +284,111 @@ func normalizeTrailing(b []byte) []byte {
 	}
 	out := bytes.Join(lines, []byte("\n"))
 	return bytes.TrimRight(out, "\n")
+}
+
+// TestClearBuiltinProgram drives the /clear built-in through the real program
+// loop: run a turn to completion, see assistant text in the scrollback, then
+// "/clear"+enter and assert the transcript text is GONE and the zero-state
+// welcome card is back — the whole-program behavioural proof of the built-in.
+func TestClearBuiltinProgram(t *testing.T) {
+	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(stripANSI(b), []byte("session sess-test"))
+	}, teatest.WithDuration(5*time.Second))
+
+	tm.Type("Read greeting.txt and save a note")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	// Approve the Write so the run reaches its terminal result and returns to idle
+	// (/clear is idle-only). Mirror TestFullCycleProgram: approve, then wait for
+	// the footer stop label "done", which only renders after endRun lands the model
+	// in phaseIdle — the reliable signal that the run is fully complete.
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(stripANSI(b), []byte("Permission required"))
+	}, teatest.WithDuration(5*time.Second))
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(stripANSI(b), []byte("done"))
+	}, teatest.WithDuration(5*time.Second))
+
+	// /clear + enter: the bare built-in line is intercepted and clears the conv.
+	// Wait for the full "/clear" prefix to land (palette shows the built-in's
+	// description) before enter — tm.Type is async, so an eager enter could submit
+	// a partial line and fall through to a normal send.
+	tm.Type("/clear")
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(stripANSI(b), []byte("clear the conversation and scrollback"))
+	}, teatest.WithDuration(5*time.Second))
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	// Wait until the zero-state welcome card is back on screen — it only renders
+	// when the conversation is empty, so its return proves the clear took effect.
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(stripANSI(b), []byte("Welcome to mecatui"))
+	}, teatest.WithDuration(5*time.Second))
+
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	// Final-model assertion (robust to cumulative output): the conversation is
+	// empty and the assistant transcript text is gone from the live frame.
+	fm := tm.FinalModel(t).(Model)
+	if !fm.conv.isEmpty() {
+		t.Error("/clear should have emptied the conversation")
+	}
+	if strings.Contains(stripANSIstr(fm.View().Content), "Reading the greeting file.") {
+		t.Error("assistant transcript text should be gone from the final frame after /clear")
+	}
+	if !strings.Contains(stripANSIstr(fm.View().Content), "Welcome to mecatui") {
+		t.Error("zero-state welcome card should be back after /clear")
+	}
+}
+
+// TestHelpBuiltinProgram drives the /help built-in through the real program
+// loop: "/help"+enter opens the keys-&-features overlay; esc closes it.
+func TestHelpBuiltinProgram(t *testing.T) {
+	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(stripANSI(b), []byte("session sess-test"))
+	}, teatest.WithDuration(5*time.Second))
+
+	tm.Type("/help")
+	// Wait until the FULL "/help" prefix has landed and the palette shows the
+	// built-in's description before pressing enter. tm.Type is asynchronous, so
+	// sending enter eagerly can race ahead of the last rune and submit a partial
+	// line ("/hel"), which would fall through to a normal send instead of running
+	// the built-in. The palette description is distinctive to the open palette.
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(stripANSI(b), []byte("show keys & features"))
+	}, teatest.WithDuration(5*time.Second))
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	// The help overlay's distinctive body row only renders while the overlay is
+	// open. (The title line is positioned with ANSI cursor moves the virtual
+	// terminal splits, so we match a stable body string, not the title.)
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return bytes.Contains(stripANSI(b), []byte("this help (on an empty prompt)"))
+	}, teatest.WithDuration(5*time.Second))
+
+	// esc closes the overlay.
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	// Final-model assertion (robust to cumulative output): the overlay opened then
+	// closed, so the final frame no longer shows the help title.
+	fm := tm.FinalModel(t).(Model)
+	if fm.showHelp {
+		t.Error("/help overlay should be closed after esc")
+	}
+	// The overlay's distinctive body row (not shared with the zero-state card) is
+	// gone once the overlay is closed.
+	if strings.Contains(stripANSIstr(fm.View().Content), "this help (on an empty prompt)") {
+		t.Error("help overlay body should be gone from the final frame after esc")
+	}
 }
