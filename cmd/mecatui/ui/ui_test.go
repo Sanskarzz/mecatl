@@ -559,6 +559,110 @@ func TestHelpBuiltinProgram(t *testing.T) {
 	}
 }
 
+// simpleRunScript is a minimal ungated run: a turn that streams a one-line tail
+// then a clean end_turn result. label distinguishes the two runs the queue-drain
+// e2e serves so the final frame can assert both prompts' turns rendered.
+func simpleRunScript(label string) []*mecatlv1.ConverseResponse {
+	return []*mecatlv1.ConverseResponse{
+		ev(&mecatlv1.Event{Type: "session.init", Seq: 1}),
+		ev(&mecatlv1.Event{Type: "turn.start", Seq: 2, Turn: 1}),
+		ev(&mecatlv1.Event{Type: "message.delta", Seq: 3, Turn: 1, Text: "handled " + label}),
+		ev(&mecatlv1.Event{Type: "result", Seq: 4, Turn: 1, Result: &mecatlv1.Result{
+			Stop: "end_turn", Text: "handled " + label,
+			Usage: &mecatlv1.Usage{InputTokens: 100, OutputTokens: 10},
+		}}),
+	}
+}
+
+// TestQueuedPromptAutoSendsProgram drives the type-while-running + queued-message
+// feature through the real program loop: prompt "first" (run 1), then type "second"
+// + enter MID-RUN to enqueue it, let run 1 complete cleanly, and assert run 2
+// auto-fires from the queue. Each submitPrompt opens a NEW stream (one stream per
+// prompt, as in production), so the fake serves TWO scripted recvers round-robin —
+// without that, run 2 would replay run 1's script. Sequencing is on the
+// run-completion counter (reducer-side, starvation-robust), never tm.Output().
+func TestQueuedPromptAutoSendsProgram(t *testing.T) {
+	th := theme.New("aztec", theme.AztecPalette())
+	// Two recvers, one per run; the fakeConv hands a fresh one per OpenConverse
+	// (round-robin) so each prompt streams its own script. Run 1 is GATED at its
+	// "result": its terminal event is physically held in the fake's Recv until the
+	// test releases it, so the enqueue keypress is guaranteed to be reduced WHILE run
+	// 1 is still streaming (phaseRunning) — deterministically winning the race the
+	// plan warns about, without polling output. Run 2 is ungated (auto-streams to its
+	// own result once the drain fires it).
+	run1 := &fakeRecver{script: simpleRunScript("first"), gateType: "message.delta", gate: make(chan struct{}), reachedGate: make(chan struct{})}
+	run2 := &fakeRecver{script: simpleRunScript("second")}
+	send := &fakeSender{}
+	conv := &fakeConv{recv: run1, send: send, recvers: []*fakeRecver{run1, run2}, sessionReady: make(chan struct{})}
+	prog := newProgress()
+	model := New(Deps{
+		Session:     conv,
+		Conv:        conv,
+		Theme:       th,
+		Server:      "127.0.0.1:8080",
+		Workspace:   "/workspace",
+		Mode:        "default",
+		Model:       "mock-model",
+		Ctx:         context.Background(),
+		NoAltScreen: true,
+		onPhase:     prog.record,
+	})
+	tm := teatest.NewTestModel(t, model, teatest.WithInitialTermSize(100, 30))
+
+	// Connect: wait for the reducer to settle idle (so the prompt isn't dropped by
+	// submitPrompt's sessionID guard).
+	prog.wait(t, phaseIdle, 3*time.Second)
+
+	// Run 1: prompt "first". It streams its delta then BLOCKS before the result (the
+	// gate is after the delta), so the result is physically held in the fake.
+	tm.Type("first")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	prog.wait(t, phaseRunning, 5*time.Second)
+	waitClosed(t, "run 1 streamed its delta (result gated)", run1.reachedGate, 5*time.Second)
+
+	// Mid-run (run 1 is provably still streaming — its result is gated): type "second"
+	// + enter to ENQUEUE it. Keys are delivered FIFO via program.Send and reduced
+	// strictly after the prompt above; run 1's result cannot have been processed yet
+	// (it's blocked in the fake's Recv), so the reducer is in phaseRunning and enter
+	// enqueues.
+	tm.Type("second")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	// Release run 1's result → endRun + drain. The drain coalesces run 1's completion
+	// with run 2's submit in ONE reducer step (so onPhase never surfaces the
+	// intervening idle); thus run 1's end is NOT a separate runDone. Run 2 then streams
+	// ungated to its own result, which IS an observable completion: waitRunComplete(1)
+	// fires only after the WHOLE chain (run 1 done → drained → run 2 done) has settled.
+	run1.release()
+	prog.waitRunComplete(t, 1, 5*time.Second)
+
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
+
+	// Deterministic final-model assertions (never tm.Output): the queue drained, two
+	// Prompt frames were sent in order, and both prompts' turns rendered.
+	fm := tm.FinalModel(t).(Model)
+	if len(fm.queued) != 0 {
+		t.Errorf("queue should be empty after the drain, got %v", fm.queued)
+	}
+	var prompts []string
+	for _, fr := range send.frames() {
+		if p := fr.GetPrompt(); p != nil {
+			prompts = append(prompts, p.GetText())
+		}
+	}
+	if len(prompts) != 2 || prompts[0] != "first" || prompts[1] != "second" {
+		t.Fatalf("prompt frames = %v, want [first second] in order", prompts)
+	}
+	frame := stripANSIstr(fm.View().Content)
+	if !strings.Contains(frame, "first") {
+		t.Errorf("final frame missing the first prompt:\n%s", frame)
+	}
+	if !strings.Contains(frame, "second") {
+		t.Errorf("final frame missing the auto-sent second prompt:\n%s", frame)
+	}
+}
+
 // scrambleScript streams an assistant turn whose markdown carries the exact shapes
 // that scrambled in the bug report: an "## mecatl" heading and a numbered list with
 // ✅ markers (one bare, one VS16-decorated). No permission gate — it runs straight

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -123,13 +124,20 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fatalErr = msg.Err.Error()
 		return m, nil
 	case client.StreamErrMsg:
+		// An error PAUSES the queue (shouldDrain(stopError) is false): the staged
+		// follow-ups are kept intact, not auto-sent into a broken run. drainQueue is a
+		// no-op here, but routed through it so the policy lives in one place.
 		m.conv.addError("stream error: " + msg.Err.Error())
-		return m.endRun(stopError), m.refreshCmd()
+		m = m.endRun(stopError)
+		mm, drainCmd := m.drainQueue(stopError)
+		return mm, tea.Batch(m.refreshCmd(), drainCmd)
 	case client.StreamClosedMsg:
 		// Clean close. If a run was still active (no terminal result seen),
 		// finalise it; otherwise it's the expected post-result close (no-op).
 		if m.phase == phaseRunning || m.phase == phaseAwaitingApproval {
-			return m.endRun("closed"), m.refreshCmd()
+			m = m.endRun("closed")
+			mm, drainCmd := m.drainQueue("closed")
+			return mm, tea.Batch(m.refreshCmd(), drainCmd)
 		}
 		return m, nil
 
@@ -250,7 +258,9 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Stop == stopError && msg.Error != "" {
 			m.conv.addError(msg.Error)
 		}
-		return m.endRun(msg.Stop), m.refreshCmd()
+		m = m.endRun(msg.Stop)
+		mm, drainCmd := m.drainQueue(msg.Stop)
+		return mm, tea.Batch(m.refreshCmd(), drainCmd)
 	default:
 		return m, nil
 	}
@@ -414,11 +424,58 @@ func (m Model) resolveAsk(allow bool) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(send, m.waitCmd())
 }
 
-// onRunningKey handles keys while a run streams: esc sends Cancel (the run ends
-// with stop "cancelled"; we keep the stream open until that result). Other keys
-// scroll the viewport.
+// onRunningKey handles keys while a run streams. Type-while-running: the textarea
+// stays focused so the user can compose and ENQUEUE a follow-up. It mirrors
+// onIdleKey's precedence so the input behaves the same mid-run as at idle, with
+// two differences — enter ENQUEUES (instead of submitting), and esc has a layered
+// meaning before it falls through to cancel:
+//
+//	(1) an open palette claims its NAVIGATION keys (↑/↓/tab/esc) so /-typing shows
+//	    the dropdown while running — but NOT enter: mid-run enter must always ENQUEUE
+//	    uniformly (the locked decision). So a "/clear" line composed mid-run is staged
+//	    as the literal text "/clear" and dispatched as a built-in at DRAIN time (where
+//	    the phase is idle and /clear's idle-guard is satisfied) via submitPrompt's
+//	    existing intercept — never run immediately mid-run via the palette;
+//	(2) esc/Cancel: non-empty input → clear the input (and resync the palette);
+//	    else non-empty queue → clear the queue (status "queue cleared"); else →
+//	    SendCancel (today's behaviour: the run ends with stop "cancelled");
+//	(3) shift+enter (Newline) → insert a newline;
+//	(4) enter (Submit) → enqueuePrompt (the locked decision: enter mid-run stages a
+//	    follow-up, it does not submit a second concurrent run);
+//	(5) pgup/pgdn → scroll the viewport;
+//	(6) anything else → feed the textarea (+ palette resync via afterInputEdit).
+//
+// ctrl+t (expand) and ctrl+c (quit) are handled globally in onKey before this.
 func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Cancel) {
+	// Let the palette claim its navigation keys while running, but NOT enter — enter
+	// mid-run always enqueues (uniform), so it must fall through to the Submit case
+	// below rather than completing/running a palette row. (esc is handled by the
+	// Cancel branch below, which layers clear-input/clear-queue/cancel — the palette's
+	// own esc-dismiss would shadow that, so it is excluded here too.)
+	if m.palette.open && !key.Matches(msg, m.keys.Submit) && !key.Matches(msg, m.keys.Cancel) {
+		if mm, cmd, handled := m.onPaletteKey(msg); handled {
+			return mm, cmd
+		}
+	}
+	switch {
+	case key.Matches(msg, m.keys.Cancel):
+		if strings.TrimSpace(m.ta.Value()) != "" {
+			// Staged-but-unsent input: esc clears it first (mirrors a text editor's
+			// "esc clears the line"), leaving the queue and the run untouched.
+			m.ta.Reset()
+			return m.afterInputEdit(nil)
+		}
+		if len(m.queued) > 0 {
+			// No live input but staged follow-ups: esc drops the queue before it would
+			// cancel the run, so a user who changed their mind can clear the backlog
+			// without killing the in-flight turn.
+			m.queued = nil
+			m.statusMsg = m.deps.Theme.Style("muted").Render("queue cleared")
+			m.refreshView()
+			return m, nil
+		}
+		// Nothing staged: esc cancels the run (today's behaviour — the run ends with
+		// stop "cancelled"; the stream stays open until that terminal result).
 		stream := m.stream
 		m.statusMsg = "cancelling…"
 		return m, func() tea.Msg {
@@ -427,10 +484,48 @@ func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return nil
 		}
+	case key.Matches(msg, m.keys.Newline):
+		m.ta.InsertRune('\n')
+		return m.afterInputEdit(nil)
+	case key.Matches(msg, m.keys.Submit):
+		return m.enqueuePrompt()
+	case key.Matches(msg, m.keys.ScrollU), key.Matches(msg, m.keys.ScrollD):
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
+	default:
+		var cmd tea.Cmd
+		m.ta, cmd = m.ta.Update(msg)
+		return m.afterInputEdit(cmd)
 	}
-	var cmd tea.Cmd
-	m.vp, cmd = m.vp.Update(msg)
-	return m, cmd
+}
+
+// enqueuePrompt stages the current textarea text as a follow-up to drain when the
+// running turn ends (see drainQueue). It trims the input; an empty line is a no-op
+// (so enter on a blank prompt mid-run does nothing). At the cap it rejects with a
+// muted "queue full" status and KEEPS the input (the user can edit it down or wait
+// for a drain to free a slot). Otherwise it appends, resets the input, sets a
+// "queued (N)" status, and re-syncs the palette (afterInputEdit) so the dropdown
+// closes now that the "/" line is gone.
+//
+// Crucially it does NOT open a stream or send anything — the queued text becomes a
+// real prompt only when drainQueue later hands it to submitPrompt (the existing
+// send path, which maps to the server-side StartRunContent reopen). There is no
+// second send path.
+func (m Model) enqueuePrompt() (tea.Model, tea.Cmd) {
+	text := strings.TrimSpace(m.ta.Value())
+	if text == "" {
+		return m, nil
+	}
+	if len(m.queued) >= maxQueued {
+		m.statusMsg = m.deps.Theme.Style("muted").Render(fmt.Sprintf("queue full (%d)", maxQueued))
+		return m, nil
+	}
+	m.queued = append(m.queued, text)
+	m.ta.Reset()
+	m.statusMsg = m.deps.Theme.Style("muted").Render(fmt.Sprintf("queued (%d)", len(m.queued)))
+	m.refreshView()
+	return m.afterInputEdit(nil)
 }
 
 // onIdleKey handles keys while idle: enter submits the prompt, shift+enter (and
@@ -573,7 +668,9 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	}
 	m.conv.addUser(text)
 	m.ta.Reset()
-	m.ta.Blur() // input is disabled while running; reflect it visually
+	// The textarea stays FOCUSED while running so the user can type a follow-up and
+	// enqueue it (see enqueuePrompt / onRunningKey). It used to Blur here to signal
+	// "input disabled while running"; type-while-running supersedes that.
 	m.phase = phaseRunning
 	m.statusMsg = "running…"
 	m.refreshView()
@@ -657,10 +754,11 @@ func (m Model) endRun(stop string) Model {
 	m.streamCh = nil
 	m.activeTool = ""
 	m.phase = phaseIdle
-	// Re-enable input now the run is done. Focus() returns a cursor-blink cmd we
-	// don't thread back here; the focus state itself is what matters for the
-	// "input disabled while running" affordance, and the next keypress re-arms
-	// the blink anyway.
+	// Ensure the input is focused now the run is done. With type-while-running the
+	// input is already focused during a run, so this is a no-op on the common path;
+	// it still matters as the single re-focus point after a blur the run may have
+	// crossed (e.g. an overlay that blurred the textarea). Focus() returns a
+	// cursor-blink cmd we don't thread back here; the next keypress re-arms the blink.
 	_ = m.ta.Focus()
 	if stop != "" {
 		text, slot := stopReasonLabel(stop)
@@ -690,6 +788,53 @@ func (m *Model) refreshView() {
 	m.vp.SetContent(content)
 	if m.stuck || atBottom {
 		m.vp.GotoBottom()
+	}
+}
+
+// drainQueue pops the oldest staged follow-up and submits it, one at a time. It is
+// called on every run-completion path (ResultMsg / StreamErrMsg / StreamClosedMsg)
+// AFTER endRun has settled the model back to idle.
+//
+// It only fires on a CLEAN stop (shouldDrain): a normal end_turn/stop. On an error,
+// a user-cancel ("cancelled"), or a stream close it returns a no-op and KEEPS the
+// queue — the locked policy is "pause & keep on anything but a clean stop", so a
+// broken or cancelled run never silently fires the next staged prompt; the user can
+// resend or clear the queue with esc. The phase==phaseIdle guard is belt-and-braces
+// (endRun always lands idle on these paths) so a future caller can't drain into a
+// still-running model.
+//
+// The submit goes through the EXISTING submitPrompt path — the same one a typed
+// prompt uses — so the queued prompt reopens the completed session server-side
+// (StartRunContent) exactly like a manual follow-up; there is no separate send
+// path. submitPrompt sets phaseRunning and opens a fresh stream whose own ResultMsg
+// re-enters drainQueue, giving a one-at-a-time FIFO drain.
+func (m Model) drainQueue(stop string) (tea.Model, tea.Cmd) {
+	if !shouldDrain(stop) || len(m.queued) == 0 || m.phase != phaseIdle {
+		return m, nil
+	}
+	next := m.queued[0]
+	m.queued = m.queued[1:]
+	m.ta.SetValue(next)
+	return m.submitPrompt()
+}
+
+// shouldDrain reports whether a terminal stop reason should auto-fire the next
+// staged follow-up. Only a CLEAN/normal stop drains: an explicit end_turn or the
+// empty reason (treated as a clean end_turn throughout, cf. stopReasonLabel — these
+// two members match its "done" case exactly so the two switches agree on the
+// clean-stop vocabulary). The vocabulary is the session.StopReason set ("" /
+// end_turn / max_turns / max_tool_calls / max_consecutive_failures / cancelled /
+// error). Everything else — stopError, a user-cancel ("cancelled"), the "closed"
+// StreamClosed sentinel, and the limit stops (max_turns / max_tool_calls /
+// max_consecutive_failures) — PAUSES the drain and keeps the queue: a limit stop is
+// not clean (the harness stopped the run for a reason), so firing the next follow-up
+// into a model that just hit a guardrail would be surprising.
+func shouldDrain(stop string) bool {
+	switch stop {
+	case "", "end_turn":
+		return true
+	default:
+		return false
 	}
 }
 

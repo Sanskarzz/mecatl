@@ -10,6 +10,10 @@
   ┃    /             slash-command palette (built-ins always; workspace commands when enabled)  ┃
   ┃    esc           cancel the running turn                                                    ┃
   ┃                                                                                             ┃
+  ┃  While a run is streaming                                                                   ┃
+  ┃    enter         queue a follow-up (sends when the turn ends)                               ┃
+  ┃    esc           clear staged input / queue, else cancel run                                ┃
+  ┃                                                                                             ┃
   ┃  Inspect (while idle)                                                                       ┃
   ┃    ctrl+o        MCP inventory                                                              ┃
   ┃    ctrl+r        MCP resources                                                              ┃

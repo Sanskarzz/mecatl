@@ -54,6 +54,12 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 		{key: "esc", action: "cancel the running turn"},
 	})
 
+	b.WriteString("\n" + muted.Render("While a run is streaming") + "\n")
+	writeHelpRows(&b, th, []helpRow{
+		{key: "enter", action: "queue a follow-up (sends when the turn ends)"},
+		{key: "esc", action: "clear staged input / queue, else cancel run"},
+	})
+
 	b.WriteString("\n" + muted.Render("Inspect (while idle)") + "\n")
 	writeHelpRows(&b, th, []helpRow{
 		{key: "ctrl+o", action: "MCP inventory", available: caps.MCP, gated: true},

@@ -120,6 +120,17 @@ type fakeConv struct {
 	// sessionID == "" guard in submitPrompt). See fakeRecver's doc for why the
 	// teatest cases sequence on signals like this rather than on rendered output.
 	sessionReady chan struct{}
+
+	// recvers, when non-nil, makes OpenConverse hand a FRESH scripted fakeRecver per
+	// call, round-robin over this slice (the last entry repeats once exhausted). The
+	// queue-drain e2e needs this because each submitPrompt — the manual prompt AND the
+	// auto-drained follow-up — opens a NEW Converse stream (one stream per prompt, as
+	// in production), so a single shared recv would replay run 1's script into run 2.
+	// All recvers share the one send (the sender just records frames). When recvers is
+	// nil OpenConverse falls back to the single shared recv (the original behaviour the
+	// approval cases rely on). recvIdx tracks the round-robin position.
+	recvers []*fakeRecver
+	recvIdx int
 }
 
 func (c *fakeConv) CreateSession(_ context.Context) (string, client.Capabilities, error) {
@@ -134,6 +145,14 @@ func (c *fakeConv) CreateSession(_ context.Context) (string, client.Capabilities
 }
 
 func (c *fakeConv) OpenConverse(_ context.Context) (*client.Stream, error) {
+	if len(c.recvers) > 0 {
+		i := c.recvIdx
+		if i >= len(c.recvers) {
+			i = len(c.recvers) - 1 // repeat the last script once exhausted
+		}
+		c.recvIdx++
+		return client.NewStream(c.recvers[i], c.send), nil
+	}
 	return client.NewStream(c.recv, c.send), nil
 }
 

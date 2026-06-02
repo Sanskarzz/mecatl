@@ -131,9 +131,10 @@ spends tokens) stays **off** on the embedded server.
 
 | Key | Action |
 |---|---|
-| `enter` | send the prompt |
+| `enter` (idle) | send the prompt |
+| `enter` (while a run streams) | **queue a follow-up** (staged, sent when the turn ends) |
 | `shift+enter` (or `ctrl+j`) | newline in the input |
-| `esc` | cancel the in-flight run (sends `Cancel`; waits for the terminal result) |
+| `esc` (while a run streams) | clear staged input → else clear the queue → else cancel the in-flight run (sends `Cancel`; waits for the terminal result) |
 | `ctrl+c` | quit |
 | in the permission modal: `a`/`y`/`enter` | allow |
 | in the permission modal: `d`/`n`/`esc` | deny |
@@ -146,6 +147,31 @@ The `?` overlay enumerates the rest of the chords — `ctrl+o`/`ctrl+r`/`ctrl+p`
 (MCP inventory / resources / prompts), `ctrl+a` (agent team), `ctrl+t`
 (expand/collapse details) — and greys out any whose feature the connected server
 has not enabled (driven by the server's relayed capabilities).
+
+### Type-while-running and queued follow-ups
+
+The input stays **focused while a run streams**, so you can compose the next
+request without waiting. Pressing `enter` mid-run **enqueues** the (trimmed,
+non-empty) line rather than starting a second concurrent run — the queue is capped
+at 16; an over-cap `enter` is rejected with a muted `queue full (16)` status and the
+input is kept. A muted card above the input shows `⏳ N queued` with up to three
+previews (`+K more` over that).
+
+When the turn ends **cleanly** (`end_turn`/`stop`), the queue drains **one at a time,
+FIFO**: the oldest staged line is submitted through the ordinary prompt path (so it
+reopens the session server-side exactly like a manual follow-up), and that run's
+completion drives the next. The drain **pauses and keeps** the queue on anything that
+is *not* a clean stop — an error, a user cancel, a stream close, or a limit stop
+(`max_turns`/`max_tool_calls`/…) — so a broken or cancelled run never silently fires
+the backlog; resend or clear it with `esc`.
+
+A built-in (`/clear`, `/help`) typed mid-run is enqueued like any other line and
+dispatched **at drain time**, when the phase is idle and the built-in's idle-guard is
+satisfied (so a queued `/clear` clears the transcript instead of sending a prompt).
+`/clear` itself empties the queue along with the rest of the session-derived state.
+
+Queueing is **running-only**: while a permission modal is open the modal keys own the
+keyboard unchanged (no mid-approval queueing).
 
 ## Theming
 

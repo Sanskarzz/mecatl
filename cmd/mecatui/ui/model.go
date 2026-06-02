@@ -96,6 +96,13 @@ type Deps struct {
 	onPhase func(phase)
 }
 
+// maxQueued caps the number of follow-up prompts that may be staged while a run
+// streams. A further enqueue over the cap is rejected with a muted "queue full"
+// status and the input is kept, so a typo'd burst can't grow the queue without
+// bound. The drain is one-at-a-time FIFO (see drainQueue), so the cap is the only
+// backpressure the queue needs.
+const maxQueued = 16
+
 // phase is the model's coarse state machine.
 type phase int
 
@@ -149,6 +156,7 @@ type Model struct {
 	ask          pendingAsk     // current permission modal (when phaseAwaitingApproval)
 	mcp          mcpState       // MCP overlay state (view==mcpNone when closed)
 	palette      paletteState   // slash-command palette (open when the input starts with "/")
+	queued       []string       // follow-up prompts staged while a run streams; drained FIFO on a clean stop (see drainQueue)
 	agents       agentsState    // agent-team overlay state (view==agentsNone when closed)
 	showHelp     bool           // the "?" keys-&-features overlay is open (caps-driven; see help.go)
 	stream       *client.Stream // current run's stream
@@ -251,6 +259,10 @@ func (m *Model) recordFileChange(path string) {
 // "session-derived display state" and "cleared at run end"; resetSession owns
 // them here, endRun continues to clear activeTool on its own teardown path. The
 // caller is responsible for re-rendering (refreshView) after calling this.
+//
+// It also drops any staged follow-up prompts (queued): /clear wipes the
+// session-derived state, and a queue of as-yet-unsent follow-ups is part of that
+// state — leaving them to drain into a freshly-cleared transcript would surprise.
 func (m Model) resetSession() Model {
 	m.conv = conversation{}
 	m.filesChanged = nil
@@ -259,6 +271,7 @@ func (m Model) resetSession() Model {
 	m.contextTokens = 0
 	m.activeTool = ""
 	m.toolProgress = ""
+	m.queued = nil
 	return m
 }
 

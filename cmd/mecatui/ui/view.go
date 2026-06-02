@@ -71,6 +71,14 @@ func (m Model) View() tea.View {
 	if pal := renderPalette(m.deps.Theme, m.palette, m.caps, m.ta.Value(), m.width); pal != "" {
 		regions = append(regions, pal)
 	}
+	// Staged follow-ups (queued while a run streams) are summarised in a muted card
+	// just above the input — between the body/palette and the input — so the user can
+	// see what will run next. Shown in any phase whenever the queue is non-empty (it
+	// only fills mid-run, but it survives an error/cancel pause, so it must render at
+	// idle too until it drains or is cleared).
+	if q := m.renderQueue(); q != "" {
+		regions = append(regions, q)
+	}
 	regions = append(regions, input, footer)
 
 	v.Content = strings.Join(regions, "\n")
@@ -172,8 +180,13 @@ func (m Model) renderFooter() string {
 	// footer carries only the two entry points and quit. "/ commands" is ALWAYS
 	// shown: the TUI ships built-in client-side commands (/clear, /help, and the
 	// caps-gated /mcp,/agents), so "/" is a live entry point even when the server
-	// has slash-command expansion disabled.
+	// has slash-command expansion disabled. While a run streams the line is extended
+	// with the type-while-running affordance (enter queues a follow-up; esc clears
+	// the staged input/queue or cancels the run).
 	help := "? help · / commands · ctrl+c quit"
+	if m.phase == phaseRunning {
+		help = "enter queue · esc cancel/clear · " + help
+	}
 
 	width := m.widthOr(80)
 	line := m.fitFooter(left, width)
@@ -255,7 +268,39 @@ func (m Model) fitFooter(left string, width int) string {
 	return left
 }
 
-// renderInput renders the textarea, dimmed while a run is active.
+// queuePreviewLimit is the number of staged follow-ups previewed in the queue
+// card; the rest are summarised as a "+K more" line so a deep queue stays compact.
+const queuePreviewLimit = 3
+
+// queuePreviewWidth caps each preview line's display width so a long staged prompt
+// can't blow out the card; truncate appends an ellipsis past the cap.
+const queuePreviewWidth = 60
+
+// renderQueue draws the muted "staged follow-ups" card shown just above the input
+// whenever the queue is non-empty. It reuses existing theme slots only (muted for
+// the frame text, toolArgs for the previews) — no new slots — so it inherits the
+// palette/card visual language. Returns "" for an empty queue (View omits it then).
+func (m Model) renderQueue() string {
+	n := len(m.queued)
+	if n == 0 {
+		return ""
+	}
+	th := m.deps.Theme
+	muted := th.Style("muted")
+	var b strings.Builder
+	b.WriteString(muted.Render(fmt.Sprintf("⏳ %d queued", n)))
+	shown := min(n, queuePreviewLimit)
+	for i := 0; i < shown; i++ {
+		b.WriteString("\n" + th.Style("toolArgs").Render("  "+truncate(oneLine(m.queued[i]), queuePreviewWidth)))
+	}
+	if rest := n - shown; rest > 0 {
+		b.WriteString("\n" + muted.Render(fmt.Sprintf("  +%d more", rest)))
+	}
+	return th.Style("askCard").Render(b.String())
+}
+
+// renderInput renders the textarea (now always focused — it stays editable while a
+// run streams so a follow-up can be composed and enqueued).
 func (m Model) renderInput() string {
 	return m.ta.View()
 }

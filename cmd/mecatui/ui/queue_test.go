@@ -1,0 +1,539 @@
+package ui
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/stacklok/mecatl/cmd/mecatui/client"
+	"github.com/stacklok/mecatl/cmd/mecatui/theme"
+)
+
+// newQueueModel builds a connected, idle Model wired to a fakeConv whose
+// OpenConverse hands a FRESH recver per call (round-robin), so each submitPrompt —
+// the manual one and any auto-drained follow-up — opens its own stream as in
+// production. The recvers default to a single empty script (an immediate EOF →
+// StreamClosed), which is enough for the queue tests that drive ResultMsg/Stream*
+// msgs by hand. applyAll discards the per-update commands, so the SendPrompt frame
+// only fires when a test runs the returned command via runBatchLeaves.
+func newQueueModel(t *testing.T, recvers ...*fakeRecver) (Model, *fakeConv) {
+	t.Helper()
+	if len(recvers) == 0 {
+		recvers = []*fakeRecver{{}}
+	}
+	send := &fakeSender{}
+	conv := &fakeConv{recv: recvers[0], send: send, recvers: recvers}
+	m := New(Deps{
+		Session:     conv,
+		Conv:        conv,
+		Theme:       theme.New("aztec", theme.AztecPalette()),
+		Ctx:         context.Background(),
+		NoAltScreen: true,
+	})
+	m = applyAll(m,
+		tea.WindowSizeMsg{Width: 100, Height: 30},
+		client.SessionReadyMsg{SessionID: "sess-test-0001"},
+	)
+	return m, conv
+}
+
+// startRunning drives the model into phaseRunning by submitting an initial prompt
+// through the real submitPrompt path (mirrors production: a run is already
+// streaming before the user can enqueue a follow-up). It runs the returned batch so
+// the first SendPrompt frame fires.
+func startRunning(t *testing.T, m Model, prompt string) Model {
+	t.Helper()
+	m = typeText(t, m, prompt)
+	mm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+	if m.phase != phaseRunning {
+		t.Fatalf("expected phaseRunning after submit, got %d", m.phase)
+	}
+	return m
+}
+
+// enqueue types text and presses enter while running, returning the updated model.
+func enqueue(t *testing.T, m Model, text string) Model {
+	t.Helper()
+	m = typeText(t, m, text)
+	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	return mm.(Model)
+}
+
+// TestEnqueueWhileRunning: enter mid-run stages the trimmed input, clears the
+// textarea, and sets the "queued (N)" status — it does NOT submit a second run.
+func TestEnqueueWhileRunning(t *testing.T) {
+	m, _ := newQueueModel(t)
+	m = startRunning(t, m, "first")
+
+	m = enqueue(t, m, "  second  ")
+	if len(m.queued) != 1 || m.queued[0] != "second" {
+		t.Fatalf("queued = %v, want [second] (trimmed)", m.queued)
+	}
+	if strings.TrimSpace(m.ta.Value()) != "" {
+		t.Errorf("textarea should be reset after enqueue, got %q", m.ta.Value())
+	}
+	if m.phase != phaseRunning {
+		t.Errorf("enqueue must not change phase, got %d", m.phase)
+	}
+	if !strings.Contains(stripANSIstr(m.statusMsg), "queued (1)") {
+		t.Errorf("status = %q, want it to contain 'queued (1)'", stripANSIstr(m.statusMsg))
+	}
+}
+
+// TestEnqueueEmptyRejected: enter on a blank (or whitespace-only) line mid-run is a
+// no-op — nothing is staged.
+func TestEnqueueEmptyRejected(t *testing.T) {
+	m, _ := newQueueModel(t)
+	m = startRunning(t, m, "first")
+
+	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}) // blank input
+	m = mm.(Model)
+	if len(m.queued) != 0 {
+		t.Fatalf("blank enter should stage nothing, got %v", m.queued)
+	}
+
+	m = typeText(t, m, "   ")
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if len(m.queued) != 0 {
+		t.Fatalf("whitespace-only enter should stage nothing, got %v", m.queued)
+	}
+}
+
+// TestEnqueueCapEnforced: at maxQueued the next enqueue is rejected with a "queue
+// full" status and the input is KEPT (not reset, not staged).
+func TestEnqueueCapEnforced(t *testing.T) {
+	m, _ := newQueueModel(t)
+	m = startRunning(t, m, "first")
+
+	for i := 0; i < maxQueued; i++ {
+		m = enqueue(t, m, "item")
+	}
+	if len(m.queued) != maxQueued {
+		t.Fatalf("expected %d staged at cap, got %d", maxQueued, len(m.queued))
+	}
+
+	m = typeText(t, m, "overflow")
+	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if len(m.queued) != maxQueued {
+		t.Fatalf("over-cap enqueue grew the queue to %d, want %d", len(m.queued), maxQueued)
+	}
+	if m.ta.Value() != "overflow" {
+		t.Errorf("over-cap enqueue should KEEP the input, got %q", m.ta.Value())
+	}
+	if !strings.Contains(stripANSIstr(m.statusMsg), "queue full") {
+		t.Errorf("status = %q, want 'queue full'", stripANSIstr(m.statusMsg))
+	}
+}
+
+// TestEnqueueAllowsDuplicates: identical follow-ups are staged independently (no
+// de-dup — the user may legitimately want the same prompt twice).
+func TestEnqueueAllowsDuplicates(t *testing.T) {
+	m, _ := newQueueModel(t)
+	m = startRunning(t, m, "first")
+
+	m = enqueue(t, m, "again")
+	m = enqueue(t, m, "again")
+	if len(m.queued) != 2 || m.queued[0] != "again" || m.queued[1] != "again" {
+		t.Fatalf("queued = %v, want two identical 'again' entries", m.queued)
+	}
+}
+
+// promptTexts extracts the text of every Prompt frame recorded by the sender.
+func promptTexts(send *fakeSender) []string {
+	var out []string
+	for _, fr := range send.frames() {
+		if p := fr.GetPrompt(); p != nil {
+			out = append(out, p.GetText())
+		}
+	}
+	return out
+}
+
+// TestDrainOneOnCompletion: a clean ResultMsg{end_turn} pops one staged item and
+// submits it, producing a Prompt frame with the queued text.
+func TestDrainOneOnCompletion(t *testing.T) {
+	m, conv := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+
+	mm, cmd := m.Update(client.ResultMsg{Stop: "end_turn"})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+
+	if len(m.queued) != 0 {
+		t.Fatalf("drain should have popped the only item, queued = %v", m.queued)
+	}
+	if m.phase != phaseRunning {
+		t.Errorf("drain should reopen a run (phaseRunning), got %d", m.phase)
+	}
+	got := promptTexts(conv.send)
+	if len(got) != 2 || got[0] != "first" || got[1] != "second" {
+		t.Fatalf("prompt frames = %v, want [first second]", got)
+	}
+}
+
+// TestDrainMultipleSequential: two staged follow-ups drain ONE AT A TIME in FIFO
+// order, each clean ResultMsg{end_turn} firing the next.
+func TestDrainMultipleSequential(t *testing.T) {
+	m, conv := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+	m = enqueue(t, m, "third")
+
+	// First completion drains "second".
+	mm, cmd := m.Update(client.ResultMsg{Stop: "end_turn"})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+	if len(m.queued) != 1 || m.queued[0] != "third" {
+		t.Fatalf("after first drain queued = %v, want [third]", m.queued)
+	}
+
+	// Second completion drains "third".
+	mm, cmd = m.Update(client.ResultMsg{Stop: "end_turn"})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+	if len(m.queued) != 0 {
+		t.Fatalf("after second drain queued = %v, want empty", m.queued)
+	}
+
+	got := promptTexts(conv.send)
+	if len(got) != 3 || got[0] != "first" || got[1] != "second" || got[2] != "third" {
+		t.Fatalf("prompt frames = %v, want [first second third] FIFO", got)
+	}
+}
+
+// TestNoDrainOnError: an error stop (ResultMsg{Stop:"error"} AND StreamErrMsg) must
+// PAUSE the drain — the queue is kept intact and no new prompt frame is sent.
+func TestNoDrainOnError(t *testing.T) {
+	t.Run("result error", func(t *testing.T) {
+		m, conv := newQueueModel(t)
+		m = startRunning(t, m, "first")
+		m = enqueue(t, m, "second")
+
+		mm, cmd := m.Update(client.ResultMsg{Stop: stopError, Error: "boom"})
+		m = mm.(Model)
+		runBatchLeaves(cmd)
+
+		if len(m.queued) != 1 || m.queued[0] != "second" {
+			t.Fatalf("error must keep the queue, got %v", m.queued)
+		}
+		if got := promptTexts(conv.send); len(got) != 1 {
+			t.Fatalf("error must not auto-submit, prompt frames = %v", got)
+		}
+	})
+	t.Run("stream error", func(t *testing.T) {
+		m, conv := newQueueModel(t)
+		m = startRunning(t, m, "first")
+		m = enqueue(t, m, "second")
+
+		mm, cmd := m.Update(client.StreamErrMsg{Err: errors.New("transport down")})
+		m = mm.(Model)
+		runBatchLeaves(cmd)
+
+		if len(m.queued) != 1 || m.queued[0] != "second" {
+			t.Fatalf("stream error must keep the queue, got %v", m.queued)
+		}
+		if got := promptTexts(conv.send); len(got) != 1 {
+			t.Fatalf("stream error must not auto-submit, prompt frames = %v", got)
+		}
+	})
+}
+
+// TestNoDrainOnCancel: a user-cancel terminal result (Stop:"cancelled") PAUSES the
+// drain — the queue is retained, no auto-submit.
+func TestNoDrainOnCancel(t *testing.T) {
+	m, conv := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+
+	mm, cmd := m.Update(client.ResultMsg{Stop: "cancelled"})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+
+	if len(m.queued) != 1 || m.queued[0] != "second" {
+		t.Fatalf("cancel must keep the queue, got %v", m.queued)
+	}
+	if got := promptTexts(conv.send); len(got) != 1 {
+		t.Fatalf("cancel must not auto-submit, prompt frames = %v", got)
+	}
+}
+
+// TestNoDrainOnLimitStop: the LIMIT stop reasons (max_turns / max_tool_calls /
+// max_consecutive_failures) PAUSE the drain — the queue is retained and no new
+// prompt frame is sent. This pins shouldDrain's "limit stops are not clean" branch,
+// which is otherwise exercised only by footer label-rendering tests: a regression
+// that wrongly added a limit stop to the drain set would pass silently without this.
+func TestNoDrainOnLimitStop(t *testing.T) {
+	for _, stop := range []string{"max_turns", "max_tool_calls", "max_consecutive_failures"} {
+		t.Run(stop, func(t *testing.T) {
+			m, conv := newQueueModel(t)
+			m = startRunning(t, m, "first")
+			m = enqueue(t, m, "second")
+
+			mm, cmd := m.Update(client.ResultMsg{Stop: stop})
+			m = mm.(Model)
+			runBatchLeaves(cmd)
+
+			if len(m.queued) != 1 || m.queued[0] != "second" {
+				t.Fatalf("%s must keep the queue, got %v", stop, m.queued)
+			}
+			if got := promptTexts(conv.send); len(got) != 1 {
+				t.Fatalf("%s must not auto-submit, prompt frames = %v", stop, got)
+			}
+		})
+	}
+}
+
+// TestEscWhitespaceInputClearsQueue pins the esc whitespace boundary: a
+// whitespace-only input ("   ") + esc while running with a non-empty queue must NOT
+// be treated as "clear input" — both enqueuePrompt and the esc-clear-input branch
+// gate on strings.TrimSpace(...) != "", so a blank-but-present input falls through
+// to CLEAR THE QUEUE. A second esc (now input and queue both empty) then cancels.
+func TestEscWhitespaceInputClearsQueue(t *testing.T) {
+	m, conv := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+	m = typeText(t, m, "   ") // whitespace-only "input"
+
+	// First esc: trimmed input is empty → falls through to clear the queue.
+	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = mm.(Model)
+	if len(m.queued) != 0 {
+		t.Fatalf("whitespace input + esc should clear the queue, got %v", m.queued)
+	}
+	if m.phase != phaseRunning {
+		t.Errorf("clearing the queue must NOT cancel the run, phase=%d", m.phase)
+	}
+	if !strings.Contains(stripANSIstr(m.statusMsg), "queue cleared") {
+		t.Errorf("status = %q, want 'queue cleared'", stripANSIstr(m.statusMsg))
+	}
+	for _, fr := range conv.send.frames() {
+		if fr.GetCancel() != nil {
+			t.Fatal("queue-clear esc must not send a Cancel frame")
+		}
+	}
+
+	// Second esc: input is whitespace-only and the queue is now empty → cancel.
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	runBatchLeaves(cmd)
+	var sawCancel bool
+	for _, fr := range conv.send.frames() {
+		if fr.GetCancel() != nil {
+			sawCancel = true
+		}
+	}
+	if !sawCancel {
+		t.Error("a follow-up esc with empty queue + blank input must cancel the run")
+	}
+}
+
+// TestEscClearsQueueWhenInputEmpty: with no live input but a non-empty queue, esc
+// drops the queue (status "queue cleared") and does NOT cancel the run.
+func TestEscClearsQueueWhenInputEmpty(t *testing.T) {
+	m, conv := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+
+	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = mm.(Model)
+
+	if len(m.queued) != 0 {
+		t.Fatalf("esc should clear the queue, got %v", m.queued)
+	}
+	if m.phase != phaseRunning {
+		t.Errorf("esc on a non-empty queue must NOT cancel the run, phase=%d", m.phase)
+	}
+	if !strings.Contains(stripANSIstr(m.statusMsg), "queue cleared") {
+		t.Errorf("status = %q, want 'queue cleared'", stripANSIstr(m.statusMsg))
+	}
+	// No Cancel frame should have been sent (only the initial Prompt).
+	for _, fr := range conv.send.frames() {
+		if fr.GetCancel() != nil {
+			t.Error("esc-clears-queue must not send a Cancel frame")
+		}
+	}
+}
+
+// TestEscClearsInputBeforeQueue: with BOTH live input and a queue, esc clears the
+// input first (the queue and run survive).
+func TestEscClearsInputBeforeQueue(t *testing.T) {
+	m, _ := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+	m = typeText(t, m, "draft follow-up")
+
+	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = mm.(Model)
+
+	if strings.TrimSpace(m.ta.Value()) != "" {
+		t.Errorf("esc should clear the live input first, got %q", m.ta.Value())
+	}
+	if len(m.queued) != 1 {
+		t.Errorf("esc should leave the queue intact when input was non-empty, got %v", m.queued)
+	}
+	if m.phase != phaseRunning {
+		t.Errorf("esc must not cancel here, phase=%d", m.phase)
+	}
+}
+
+// TestEscCancelsWhenEmptyEmpty: with no input and no queue, esc cancels the run (a
+// Cancel frame is sent).
+func TestEscCancelsWhenEmptyEmpty(t *testing.T) {
+	m, conv := newQueueModel(t)
+	m = startRunning(t, m, "first")
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	runBatchLeaves(cmd)
+
+	var sawCancel bool
+	for _, fr := range conv.send.frames() {
+		if fr.GetCancel() != nil {
+			sawCancel = true
+		}
+	}
+	if !sawCancel {
+		t.Error("esc with empty input + empty queue must send a Cancel frame")
+	}
+}
+
+// TestCtrlCStillQuits: ctrl+c quits while running (the global quit wins, unchanged).
+func TestCtrlCStillQuits(t *testing.T) {
+	m, _ := newQueueModel(t)
+	m = startRunning(t, m, "first")
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("ctrl+c should return a command (tea.Quit)")
+	}
+	if msg := cmd(); msg == nil {
+		t.Fatal("ctrl+c command yielded nil, want a QuitMsg")
+	} else if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Fatalf("ctrl+c yielded %T, want tea.QuitMsg", msg)
+	}
+}
+
+// TestBuiltinQueuedThenRunsAtDrain: a "/clear" staged mid-run is dispatched as a
+// built-in at DRAIN time (phase is idle then, satisfying /clear's idle-guard) — the
+// conversation empties and NO prompt frame is sent for it.
+func TestBuiltinQueuedThenRunsAtDrain(t *testing.T) {
+	m, conv := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	// Seed some assistant content so /clear has something to wipe.
+	m = applyAll(m, client.AssistantDeltaMsg{Turn: 1, Text: "some assistant prose"})
+	m = enqueue(t, m, "/clear")
+	if len(m.queued) != 1 || m.queued[0] != "/clear" {
+		t.Fatalf("expected /clear staged, got %v", m.queued)
+	}
+
+	mm, cmd := m.Update(client.ResultMsg{Stop: "end_turn"})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+
+	if !m.conv.isEmpty() {
+		t.Error("queued /clear should have emptied the conversation at drain")
+	}
+	if len(m.queued) != 0 {
+		t.Errorf("queue should be empty after draining /clear, got %v", m.queued)
+	}
+	// Only the initial "first" prompt frame — /clear is a built-in, never a Prompt.
+	got := promptTexts(conv.send)
+	if len(got) != 1 || got[0] != "first" {
+		t.Fatalf("prompt frames = %v, want only [first] (/clear must not send a prompt)", got)
+	}
+}
+
+// TestClearEmptiesQueue: /clear (via runClear → resetSession) drops any staged
+// follow-ups, so they don't drain into a freshly-cleared transcript.
+func TestClearEmptiesQueue(t *testing.T) {
+	m, _ := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+	m = enqueue(t, m, "third")
+
+	// Finish the run cleanly so /clear's idle-guard passes — but the drain will
+	// reopen a run for "second". Instead, exercise resetSession directly (the seam
+	// /clear funnels through) to assert the queue is dropped.
+	m = m.resetSession()
+	if len(m.queued) != 0 {
+		t.Fatalf("resetSession should drop the queue, got %v", m.queued)
+	}
+}
+
+// TestDrainDoesNotBreakTick: after a drain re-enters phaseRunning, a streamed delta
+// still arms EXACTLY ONE one-shot tick (the ITEM-3 coalescing is intact across a
+// drain boundary). Mirrors TestTickArmedOneShotPerBurst's assertions.
+func TestDrainDoesNotBreakTick(t *testing.T) {
+	m, _ := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+
+	mm, cmd := m.Update(client.ResultMsg{Stop: "end_turn"})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+	if m.phase != phaseRunning {
+		t.Fatalf("expected a reopened run after drain, phase=%d", m.phase)
+	}
+	if m.tickArmed {
+		t.Fatal("precondition: tickArmed should be false right after the drain reopen")
+	}
+
+	// First delta arms the one-shot.
+	m.conv.appendAssistant("a")
+	m, _ = m.markDirty()
+	if !m.tickArmed {
+		t.Fatal("first delta after drain should arm the tick")
+	}
+	// Subsequent deltas in the burst must NOT arm a second.
+	for i := 0; i < 5; i++ {
+		m.conv.appendAssistant("b")
+		m, _ = m.markDirty()
+		if !m.tickArmed {
+			t.Fatalf("delta %d cleared tickArmed unexpectedly", i)
+		}
+	}
+	// The tick fires: handler disarms and flushes.
+	mm2, _ := m.Update(renderTickMsg{})
+	m = mm2.(Model)
+	if m.tickArmed {
+		t.Error("renderTickMsg should disarm tickArmed when the burst settled")
+	}
+	if m.viewDirty {
+		t.Error("renderTickMsg should have flushed the dirty view")
+	}
+}
+
+// TestNoQueueDuringApproval: enter during phaseAwaitingApproval does NOT enqueue
+// (the modal owns the keyboard — locked: queueing is running-only) and the modal
+// still resolves the focused choice.
+func TestNoQueueDuringApproval(t *testing.T) {
+	m, _ := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = applyAll(m, client.PermissionAskMsg{
+		AskID: "ask-1", Tool: "Write", Args: `{"path":"note.txt"}`, Reason: "approval required",
+	})
+	if m.phase != phaseAwaitingApproval {
+		t.Fatalf("expected phaseAwaitingApproval, got %d", m.phase)
+	}
+
+	// Typing then enter must NOT stage anything — the modal claims enter (resolves
+	// the default-focused "allow"), returning to phaseRunning. The probe text avoids
+	// the modal's own keys (a/y/d/n) so it can't accidentally resolve the modal
+	// mid-typing; the modal swallows it regardless (it owns the keyboard).
+	m = typeText(t, m, "wxqz")
+	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+
+	if len(m.queued) != 0 {
+		t.Fatalf("approval-phase enter must not enqueue, got %v", m.queued)
+	}
+	if m.phase != phaseRunning {
+		t.Errorf("enter on the modal should resolve it (back to running), phase=%d", m.phase)
+	}
+}
