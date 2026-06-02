@@ -498,7 +498,7 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.BoolVar(&cfg.enableFork, "enable-fork", true, "register the Fork fan-out tool (parallel isolated child branches)")
 	fs.IntVar(&cfg.forkPreservedCap, "fork-preserved-cap", agent.DefaultPreservedForkCap, "max PRESERVED winner forks (join=first/judge) kept on disk at once; the oldest beyond this is LRU-reaped. Preserved forks stay inspectable until reaped")
-	fs.BoolVar(&cfg.enableRepoMap, "enable-repomap", true, "register the Aider-style repo-map tool (CGO-free, tree-sitter via WebAssembly)")
+	fs.BoolVar(&cfg.enableRepoMap, "enable-repomap", false, "register the Aider-style repo-map tool. OFF by default: the WASM tree-sitter binding leaks and hangs after ~160 files, freezing the in-process TUI (see docs/design/REPOMAP-TREE-SITTER.md). Pass --enable-repomap to opt in until the extraction is reworked")
 	fs.BoolVar(&cfg.enableTeams, "enable-teams", true, "register the experimental agent-teams capability (CreateTeam/SpawnTeammate/RunTeam); on by default and inert until a client drives a team. Pass --enable-teams=false to disable")
 
 	fs.Var(&cfg.mcpServers, "mcp-server", "remote MCP server as name=URL (repeatable); auth token read from MCP_<NAME>_TOKEN")

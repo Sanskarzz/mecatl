@@ -173,9 +173,11 @@ func embeddedConfig(cfg config) app.Config {
 		LLMBreakerThreshold:  5,
 		LLMBreakerCooldown:   30 * time.Second,
 		EnableFork:           true,
-		EnableRepoMap:        true,
-		EnableTeams:          true,
-		AgentsConventional:   true,
+		// EnableRepoMap OFF: the WASM tree-sitter binding leaks and hangs after
+		// ~160 files, freezing the in-process TUI. See docs/design/REPOMAP-TREE-SITTER.md.
+		EnableRepoMap:      false,
+		EnableTeams:        true,
+		AgentsConventional: true,
 	}
 }
 
