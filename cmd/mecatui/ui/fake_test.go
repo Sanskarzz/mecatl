@@ -12,6 +12,19 @@ import (
 // fakeRecver replays a scripted slice of responses then returns io.EOF. It
 // optionally gates at a named event type so a test can hold the stream at the
 // permission.ask until it has driven the approval — then release the tail.
+//
+// It also exposes a DETERMINISTIC, output-independent progress signal the teatest
+// cases use to sequence input without polling the rendered output: reachedGate
+// closes the instant the gated event (the permission.ask) has been yielded to the
+// production ReadLoop, i.e. the moment the ui will receive it.
+//
+// This fires on the reader goroutine (which keeps getting scheduled even under a
+// CPU-starved -race run) and does NOT depend on Bubble Tea's 60fps flush ticker
+// reaching teatest's output buffer — the ticker is what starves under `task test`'s
+// parallel `go test -race ./...`, making a WaitFor(tm.Output()) deadline fire
+// before any frame is flushed. Gating on this (plus the reducer phase observer, then
+// asserting on FinalModel) makes the cases robust to that starvation without
+// weakening them.
 type fakeRecver struct {
 	mu          sync.Mutex
 	script      []*mecatlv1.ConverseResponse
@@ -20,6 +33,9 @@ type fakeRecver struct {
 	gatedBefore bool
 	gate        chan struct{}
 	released    bool
+
+	reachedGate chan struct{} // closed when the gated event has been yielded
+	gateSignal  bool          // guards reachedGate's one-shot close
 }
 
 func (f *fakeRecver) Recv() (*mecatlv1.ConverseResponse, error) {
@@ -36,12 +52,22 @@ func (f *fakeRecver) Recv() (*mecatlv1.ConverseResponse, error) {
 	gate := f.gateType != "" && f.gatedBefore
 	if !gate && f.gateType != "" && r.GetEvent().GetType() == f.gateType {
 		f.gatedBefore = true
+		f.signalGateLocked()
 	}
 	f.mu.Unlock()
 	if gate {
 		<-f.gate
 	}
 	return r, nil
+}
+
+// signalGateLocked closes reachedGate once (the gated event has been yielded to
+// the ReadLoop). Caller holds f.mu.
+func (f *fakeRecver) signalGateLocked() {
+	if !f.gateSignal && f.reachedGate != nil {
+		f.gateSignal = true
+		close(f.reachedGate)
+	}
 }
 
 func (f *fakeRecver) release() {
@@ -87,9 +113,23 @@ type fakeConv struct {
 	recv *fakeRecver
 	send *fakeSender
 	caps client.Capabilities // capabilities returned from CreateSession (zero = all-false)
+
+	// sessionReady closes when CreateSession has returned the id to the ui command
+	// goroutine — a deterministic, output-independent signal that the SessionReadyMsg
+	// is on its way to the reducer (so a follow-up prompt won't be dropped by the
+	// sessionID == "" guard in submitPrompt). See fakeRecver's doc for why the
+	// teatest cases sequence on signals like this rather than on rendered output.
+	sessionReady chan struct{}
 }
 
 func (c *fakeConv) CreateSession(_ context.Context) (string, client.Capabilities, error) {
+	if c.sessionReady != nil {
+		select {
+		case <-c.sessionReady:
+		default:
+			close(c.sessionReady)
+		}
+	}
 	return "sess-test-0001", c.caps, nil
 }
 

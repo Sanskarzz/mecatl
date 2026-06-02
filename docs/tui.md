@@ -209,6 +209,24 @@ upgrading the renderer. The invariant is guarded by
 `TestMarkdownWidthMethodAgreement`. `trimTrailingSpaces` and the reserve-final-column
 wrap are retained as harmless hygiene, not the fix.
 
+**Streaming render coalescing.** Streamed assistant/reasoning deltas arrive far
+faster than the eye can see, and a full conversation re-render per token would
+re-run glamour on the live (growing) block every token — O(n²) over a turn. So a
+delta only appends to the conversation and marks the view dirty (`m.viewDirty`); it
+does NOT re-render. The first delta of a burst arms a single one-shot frame-cadence
+tick (`renderTickMsg`, ~16ms ≈ one 60fps frame, guarded by `tickArmed` so a burst
+schedules exactly one tick, not one per delta); the tick flushes the dirty view,
+disarms, and re-arms only if more deltas arrived — so it idles to zero when the
+stream goes quiet and never free-runs. Every turn/tool/result/error boundary still
+force-flushes (via `afterEvent`/`endRun`, both of which call `refreshView`, which
+clears `viewDirty`), so no flush depends on the tick: a dropped or late tick can
+never lose the tail, and the final frame and event ordering are unchanged — only the
+per-token re-render churn is coalesced. This does NOT touch the emoji
+width-normalization path above.
+The `renderer.mdRenders` counter (incremented only at the real `glamour` call site)
+is the test seam: N coalesced deltas leave it unchanged, one flush bumps it by one
+(`coalesce_test.go`).
+
 Tests are fully offline and deterministic: the stream is driven from a scripted
 fake behind the `Recv()` interface (no gRPC, no network), and whole-program /
 View goldens are captured with teatest at a fixed terminal size. Refresh the

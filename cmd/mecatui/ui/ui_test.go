@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,131 @@ import (
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 )
+
+// raceWaitScale multiplies the teatest WaitFinished deadline (and the few
+// remaining content waits) when the binary is built with the race detector. The
+// detector adds a documented 2–20× slowdown, and `task test` runs `go test -race
+// ./...` with every package's tests in parallel; non-race builds keep the tight
+// deadlines (raceEnabled == false → scale 1).
+const raceWaitScale = 6
+
+// scaleWait applies raceWaitScale under -race and is identity otherwise.
+func scaleWait(d time.Duration) time.Duration {
+	if raceEnabled {
+		return d * raceWaitScale
+	}
+	return d
+}
+
+// progress records the phases the reducer has passed through, fed by Deps.onPhase
+// on the update goroutine. The *Program teatest cases sequence input on it instead
+// of on rendered output: under `task test`'s parallel -race load Bubble Tea's 60fps
+// flush ticker is CPU-starved and the captured output stalls for seconds (so a
+// WaitFor(tm.Output()) deadline fires before any frame is flushed), but the reducer
+// goroutine keeps getting scheduled — making phase-observation starvation-robust.
+type progress struct {
+	mu   sync.Mutex
+	cond *sync.Cond
+	seen map[phase]bool
+	last phase // most recently observed phase
+	// runDone counts completed runs: a phaseRunning→…→phaseIdle return. It lets a
+	// case wait for a run to FINISH even though phaseIdle was already seen at connect
+	// time (so a plain seen[phaseIdle] can't distinguish "connected" from "run done").
+	runDone   int
+	wasActive bool // true once phaseRunning/awaitingApproval seen since last idle
+}
+
+func newProgress() *progress {
+	p := &progress{seen: map[phase]bool{}, last: phaseConnecting}
+	p.cond = sync.NewCond(&p.mu)
+	return p
+}
+
+// record is the Deps.onPhase callback: it marks a phase seen, advances the
+// run-completion counter on an active→idle return, and wakes any waiter.
+func (p *progress) record(ph phase) {
+	p.mu.Lock()
+	p.seen[ph] = true
+	p.last = ph
+	switch ph {
+	case phaseRunning, phaseAwaitingApproval:
+		p.wasActive = true
+	case phaseIdle:
+		if p.wasActive {
+			p.runDone++
+			p.wasActive = false
+		}
+	}
+	p.mu.Unlock()
+	p.cond.Broadcast()
+}
+
+// wait blocks until the reducer has been observed in phase target, or fails after
+// a (race-scaled) deadline. A background goroutine broadcasts on the deadline so a
+// genuinely-stuck reducer surfaces as a clear failure rather than a hang.
+func (p *progress) wait(t *testing.T, target phase, d time.Duration) {
+	t.Helper()
+	p.waitFunc(t, d, func() bool { return p.seen[target] },
+		func() string { return "reach phase " + phaseName(target) })
+}
+
+// waitRunComplete blocks until at least n runs have completed (phaseRunning →
+// phaseIdle), the deterministic "the run fully streamed and the reducer settled
+// back to idle, force-flushing the tail at the result boundary" signal.
+func (p *progress) waitRunComplete(t *testing.T, n int, d time.Duration) {
+	t.Helper()
+	p.waitFunc(t, d, func() bool { return p.runDone >= n },
+		func() string { return "complete a run (idle after running)" })
+}
+
+// waitFunc is the shared wait body: block until ok() under the lock, failing after
+// the race-scaled deadline. desc names the awaited condition for the failure.
+func (p *progress) waitFunc(t *testing.T, d time.Duration, ok func() bool, desc func() string) {
+	t.Helper()
+	deadline := time.Now().Add(scaleWait(d))
+	timer := time.AfterFunc(time.Until(deadline), func() { p.cond.Broadcast() })
+	defer timer.Stop()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for !ok() {
+		if time.Now().After(deadline) {
+			t.Fatalf("reducer did not %s within %s (last=%s seen=%v runDone=%d)",
+				desc(), scaleWait(d), phaseName(p.last), p.seen, p.runDone)
+		}
+		p.cond.Wait()
+	}
+}
+
+// phaseName renders a phase for failure messages.
+func phaseName(p phase) string {
+	switch p {
+	case phaseConnecting:
+		return "connecting"
+	case phaseIdle:
+		return "idle"
+	case phaseRunning:
+		return "running"
+	case phaseAwaitingApproval:
+		return "awaitingApproval"
+	case phaseFatal:
+		return "fatal"
+	default:
+		return "unknown"
+	}
+}
+
+// waitClosed blocks until ch is closed or the (race-scaled) deadline elapses,
+// failing on timeout. Used to gate on the fake's reader-goroutine signals
+// (reachedGate / drained / sessionReady), which are output-flush-independent.
+func waitClosed(t *testing.T, what string, ch <-chan struct{}, d time.Duration) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(scaleWait(d)):
+		t.Fatalf("timed out after %s waiting for %s", scaleWait(d), what)
+	}
+}
 
 // updateGolden reports whether goldens should be refreshed. It reuses the
 // -update flag that teatest already registers (defining our own would collide),
@@ -73,7 +199,8 @@ func preApprovalScript() []*mecatlv1.ConverseResponse {
 // newTestModel builds a Model wired to a gated fake stream. The recver gates
 // after the permission.ask; the sender releases the gate when a ResumeApproval is
 // sent, so the approval drives the post-approval tail (mirrors mecademo). Alt
-// screen is disabled so direct View() snapshots are clean.
+// screen is disabled so direct View() snapshots are clean. Used by the synchronous
+// golden/render tests (driveTo, TestRenderStripsServerEscapes).
 func newTestModel(t *testing.T, th theme.Theme) (Model, *fakeRecver, *fakeSender) {
 	t.Helper()
 	recv := &fakeRecver{script: preApprovalScript(), gateType: "permission.ask", gate: make(chan struct{})}
@@ -98,6 +225,53 @@ func newTestModel(t *testing.T, th theme.Theme) (Model, *fakeRecver, *fakeSender
 	return m, recv, send
 }
 
+// programDeps bundles the fakes + the deterministic progress observer a *Program
+// teatest case drives the real program loop with. The fake exposes reader-goroutine
+// signals (sessionReady / reachedGate / drained) and the model an onPhase observer,
+// all of which are independent of Bubble Tea's CPU-starved output flush — so the
+// cases sequence input on real reducer/stream progress, not on rendered bytes.
+type programDeps struct {
+	recv  *fakeRecver
+	send  *fakeSender
+	conv  *fakeConv
+	prog  *progress
+	model Model
+}
+
+// newProgramModel builds the gated fake stream PLUS the deterministic signals and
+// the onPhase observer the *Program teatest cases sequence on. The script is
+// configurable so the scramble case can supply its own ungated stream.
+func newProgramModel(t *testing.T, th theme.Theme, script []*mecatlv1.ConverseResponse, gateType string) programDeps {
+	t.Helper()
+	recv := &fakeRecver{
+		script:      script,
+		gateType:    gateType,
+		gate:        make(chan struct{}),
+		reachedGate: make(chan struct{}),
+	}
+	send := &fakeSender{}
+	send.onSend = func(req *mecatlv1.ConverseRequest) {
+		if req.GetResumeApproval() != nil {
+			recv.release()
+		}
+	}
+	conv := &fakeConv{recv: recv, send: send, sessionReady: make(chan struct{})}
+	prog := newProgress()
+	m := New(Deps{
+		Session:     conv,
+		Conv:        conv,
+		Theme:       th,
+		Server:      "127.0.0.1:8080",
+		Workspace:   "/workspace",
+		Mode:        "default",
+		Model:       "mock-model",
+		Ctx:         context.Background(),
+		NoAltScreen: true,
+		onPhase:     prog.record,
+	})
+	return programDeps{recv: recv, send: send, conv: conv, prog: prog, model: m}
+}
+
 // TestFullCycleProgram drives the whole three-act scenario through the real
 // program loop (teatest): connect → prompt → stream Read+result → approve the
 // Write ask → stream the tail → terminal result → quit. It asserts the live
@@ -105,32 +279,40 @@ func newTestModel(t *testing.T, th theme.Theme) (Model, *fakeRecver, *fakeSender
 // carried the exact ask_id on the SAME stream. This is the whole-program offline
 // behavioural test; the pixel-exact lock lives in the View() goldens below.
 func TestFullCycleProgram(t *testing.T) {
-	m, _, send := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+	pd := newProgramModel(t, theme.New("aztec", theme.AztecPalette()), preApprovalScript(), "permission.ask")
+	tm := teatest.NewTestModel(t, pd.model, teatest.WithInitialTermSize(100, 30))
 
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("session sess-test"))
-	}, teatest.WithDuration(3*time.Second))
+	// Connect: wait until the reducer has actually processed SessionReadyMsg and is
+	// idle, so the follow-up prompt is not dropped by submitPrompt's sessionID guard.
+	// (Gating on reducer phase, not rendered output — see progress's doc.)
+	pd.prog.wait(t, phaseIdle, 3*time.Second)
 
+	// Prompt: every key is delivered via program.Send → the eventLoop's FIFO msg
+	// channel (teatest.Type sends KeyPressMsgs, it does not touch the input buffer),
+	// so these are reduced strictly after the SessionReadyMsg above.
 	tm.Type("Read greeting.txt and save a note")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("Permission required"))
-	}, teatest.WithDuration(5*time.Second))
+	// The run streams up to the gated permission.ask: the reducer reaches
+	// phaseAwaitingApproval and the fake confirms the ask was yielded to the loop.
+	waitClosed(t, "permission.ask delivered", pd.recv.reachedGate, 5*time.Second)
+	pd.prog.wait(t, phaseAwaitingApproval, 5*time.Second)
 
-	// Allow is focused by default → enter approves.
+	// Allow is focused by default → enter approves; the sender releases the gate so
+	// the post-approval tail streams to the terminal result.
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("done"))
-	}, teatest.WithDuration(5*time.Second))
+	// The run completes: the reducer streams the tail, processes the terminal result
+	// (force-flushing the conversation at the result boundary), and settles back to
+	// idle — the deterministic completion signal.
+	pd.prog.waitRunComplete(t, 1, 5*time.Second)
 
 	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
 
+	// The approval round-trip carried the exact ask_id on the SAME stream.
 	var sawApproval bool
-	for _, fr := range send.frames() {
+	for _, fr := range pd.send.frames() {
 		if ra := fr.GetResumeApproval(); ra != nil {
 			sawApproval = true
 			if ra.GetAskId() != "ask-write-1" || !ra.GetAllow() {
@@ -140,6 +322,18 @@ func TestFullCycleProgram(t *testing.T) {
 	}
 	if !sawApproval {
 		t.Error("no ResumeApproval frame sent")
+	}
+
+	// Whole-program final-state proof on the deterministic FinalModel (the live
+	// frames assertion is the pixel-exact View() golden below; here we confirm the
+	// run reached its terminal result and settled to idle).
+	fm := tm.FinalModel(t).(Model)
+	if fm.phase != phaseIdle {
+		t.Errorf("final phase = %d, want phaseIdle (run settled)", fm.phase)
+	}
+	frame := stripANSIstr(fm.View().Content)
+	if !strings.Contains(frame, "Done.") {
+		t.Errorf("final frame missing the streamed tail 'Done.':\n%s", frame)
 	}
 }
 
@@ -291,50 +485,36 @@ func normalizeTrailing(b []byte) []byte {
 // "/clear"+enter and assert the transcript text is GONE and the zero-state
 // welcome card is back — the whole-program behavioural proof of the built-in.
 func TestClearBuiltinProgram(t *testing.T) {
-	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+	pd := newProgramModel(t, theme.New("aztec", theme.AztecPalette()), preApprovalScript(), "permission.ask")
+	tm := teatest.NewTestModel(t, pd.model, teatest.WithInitialTermSize(100, 30))
 
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("session sess-test"))
-	}, teatest.WithDuration(5*time.Second))
+	pd.prog.wait(t, phaseIdle, 5*time.Second)
 
 	tm.Type("Read greeting.txt and save a note")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	// Approve the Write so the run reaches its terminal result and returns to idle
-	// (/clear is idle-only). Mirror TestFullCycleProgram: approve, then wait for
-	// the footer stop label "done", which only renders after endRun lands the model
-	// in phaseIdle — the reliable signal that the run is fully complete.
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("Permission required"))
-	}, teatest.WithDuration(5*time.Second))
+	// (/clear is idle-only). Gate on the reducer reaching awaiting-approval and the
+	// fake yielding the ask, then approve and wait for the whole script to drain —
+	// all output-flush-independent signals (see progress's doc).
+	waitClosed(t, "permission.ask delivered", pd.recv.reachedGate, 5*time.Second)
+	pd.prog.wait(t, phaseAwaitingApproval, 5*time.Second)
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	pd.prog.waitRunComplete(t, 1, 5*time.Second)
 
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("done"))
-	}, teatest.WithDuration(5*time.Second))
-
-	// /clear + enter: the bare built-in line is intercepted and clears the conv.
-	// Wait for the full "/clear" prefix to land (palette shows the built-in's
-	// description) before enter — tm.Type is async, so an eager enter could submit
-	// a partial line and fall through to a normal send.
+	// /clear + enter: every key is delivered FIFO via program.Send, so enter is
+	// reduced strictly after the full "/clear" line lands — no need to poll output
+	// for the palette description. The bare built-in line is intercepted and clears
+	// the conversation.
 	tm.Type("/clear")
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("clear the conversation and scrollback"))
-	}, teatest.WithDuration(5*time.Second))
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
-
-	// Wait until the zero-state welcome card is back on screen — it only renders
-	// when the conversation is empty, so its return proves the clear took effect.
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("Welcome to mecatui"))
-	}, teatest.WithDuration(5*time.Second))
 
 	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
 
-	// Final-model assertion (robust to cumulative output): the conversation is
-	// empty and the assistant transcript text is gone from the live frame.
+	// Final-model assertion (deterministic, output-flush-independent): the
+	// conversation is empty and the assistant transcript text is gone from the live
+	// frame, with the zero-state welcome card back.
 	fm := tm.FinalModel(t).(Model)
 	if !fm.conv.isEmpty() {
 		t.Error("/clear should have emptied the conversation")
@@ -350,38 +530,24 @@ func TestClearBuiltinProgram(t *testing.T) {
 // TestHelpBuiltinProgram drives the /help built-in through the real program
 // loop: "/help"+enter opens the keys-&-features overlay; esc closes it.
 func TestHelpBuiltinProgram(t *testing.T) {
-	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+	pd := newProgramModel(t, theme.New("aztec", theme.AztecPalette()), preApprovalScript(), "permission.ask")
+	tm := teatest.NewTestModel(t, pd.model, teatest.WithInitialTermSize(100, 30))
 
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("session sess-test"))
-	}, teatest.WithDuration(5*time.Second))
+	pd.prog.wait(t, phaseIdle, 5*time.Second)
 
+	// "/help"+enter opens the overlay; esc closes it. Every key is delivered FIFO via
+	// program.Send (teatest.Type sends KeyPressMsgs, not buffered bytes), so enter is
+	// reduced strictly after the full "/help" line lands and esc strictly after the
+	// overlay opens — no need to poll the (CPU-starved) output for the intermediate
+	// frames; the deterministic final-model assertion proves the open→close cycle.
 	tm.Type("/help")
-	// Wait until the FULL "/help" prefix has landed and the palette shows the
-	// built-in's description before pressing enter. tm.Type is asynchronous, so
-	// sending enter eagerly can race ahead of the last rune and submit a partial
-	// line ("/hel"), which would fall through to a normal send instead of running
-	// the built-in. The palette description is distinctive to the open palette.
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("show keys & features"))
-	}, teatest.WithDuration(5*time.Second))
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
-
-	// The help overlay's distinctive body row only renders while the overlay is
-	// open. (The title line is positioned with ANSI cursor moves the virtual
-	// terminal splits, so we match a stable body string, not the title.)
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("this help (on an empty prompt)"))
-	}, teatest.WithDuration(5*time.Second))
-
-	// esc closes the overlay.
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
 
-	// Final-model assertion (robust to cumulative output): the overlay opened then
-	// closed, so the final frame no longer shows the help title.
+	// Final-model assertion (deterministic): the overlay opened then closed, so the
+	// final frame no longer shows the help body.
 	fm := tm.FinalModel(t).(Model)
 	if fm.showHelp {
 		t.Error("/help overlay should be closed after esc")
@@ -417,25 +583,6 @@ func scrambleScript() []*mecatlv1.ConverseResponse {
 	}
 }
 
-// newScrambleModel wires a Model to the ungated scrambleScript (mirrors
-// newTestModel but without the approval gate).
-func newScrambleModel(t *testing.T, th theme.Theme) Model {
-	t.Helper()
-	recv := &fakeRecver{script: scrambleScript(), gate: make(chan struct{})}
-	conv := &fakeConv{recv: recv, send: &fakeSender{}}
-	return New(Deps{
-		Session:     conv,
-		Conv:        conv,
-		Theme:       th,
-		Server:      "127.0.0.1:8080",
-		Workspace:   "/workspace",
-		Mode:        "default",
-		Model:       "mock-model",
-		Ctx:         context.Background(),
-		NoAltScreen: true,
-	})
-}
-
 // TestStreamedEmojiMarkdownNotScrambled is the e2e regression guard for the
 // streaming scramble. It streams an assistant turn whose markdown is the bug's
 // shape — an "## mecatl" heading and a "1. ✅ … 2. ✅️ …" numbered list — in
@@ -455,25 +602,24 @@ func newScrambleModel(t *testing.T, th theme.Theme) Model {
 // is the per-line width-agreement unit test (TestMarkdownWidthMethodAgreement),
 // which fails on the un-normalised code and passes after normalizeEmojiWidth.
 func TestStreamedEmojiMarkdownNotScrambled(t *testing.T) {
-	m := newScrambleModel(t, theme.New("aztec", theme.AztecPalette()))
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+	// Ungated stream (no permission.ask): it runs straight to the terminal result.
+	pd := newProgramModel(t, theme.New("aztec", theme.AztecPalette()), scrambleScript(), "")
+	tm := teatest.NewTestModel(t, pd.model, teatest.WithInitialTermSize(100, 30))
 
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("session sess-test"))
-	}, teatest.WithDuration(3*time.Second))
+	pd.prog.wait(t, phaseIdle, 3*time.Second)
 
 	tm.Type("show me the status")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	// Gate the quit on a stable end-of-turn signal so the final frame is settled
-	// before we snapshot it (avoids racing the repaint; same pattern as the other
-	// teatest cases, which guards the known ~1/3 teatest flake under -race).
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(stripANSI(b), []byte("second task is done too"))
-	}, teatest.WithDuration(5*time.Second))
+	// Gate the quit on the run completing: the reducer streams the fragments,
+	// processes the terminal result (force-flushing the conversation at the result
+	// boundary), and settles back to idle — so the final frame is settled before we
+	// snapshot it. This is the deterministic, output-flush-independent replacement
+	// for polling the rendered tail, which is what flaked under -race CPU starvation.
+	pd.prog.waitRunComplete(t, 1, 5*time.Second)
 
 	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
 
 	frame := stripANSIstr(tm.FinalModel(t).(Model).View().Content)
 	if !strings.Contains(frame, "mecatl") {

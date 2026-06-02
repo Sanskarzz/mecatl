@@ -67,6 +67,33 @@ type Deps struct {
 	// searchable/scrollable after exit) — and by golden tests so the final frame
 	// persists in the captured output instead of being cleared on exit.
 	NoAltScreen bool
+
+	// onPhase is a test-only observer (nil in production, unexported so no external
+	// caller can set it) invoked by Update on the SINGLE update goroutine after each
+	// reduced message, with the model's current phase. The teatest cases use it to
+	// sequence input on the program's ACTUAL reducer progress instead of on rendered
+	// output: under `task test`'s parallel `go test -race ./...` the Bubble Tea 60fps
+	// flush ticker is CPU-starved and the captured output stalls for seconds, so a
+	// WaitFor(tm.Output()) deadline fires before any frame is flushed (the historical
+	// "~1/3 -race flake", in truth far worse under load). The reducer goroutine keeps
+	// getting scheduled, so observing it directly is starvation-robust.
+	//
+	// Why the cleaner alternatives don't cover what this serves — a future maintainer
+	// may want to drop it, so the tradeoff is recorded honestly:
+	//   - tm.FinalModel() exposes only the FINAL model after the program exits. It
+	//     cannot gate an INTERMEDIATE step mid-run — e.g. "the reducer has reached
+	//     phaseAwaitingApproval, now send the approval keypress". The approval
+	//     round-trip must be driven WHILE the program runs, before quit.
+	//   - The fake-side reachedGate signal (fakeRecver) fires when the permission.ask
+	//     is YIELDED to the ReadLoop — the input side of the gate. It does NOT observe
+	//     the reducer actually entering phaseAwaitingApproval, nor the reducer
+	//     RETURNING to idle after the terminal result (waitRunComplete's
+	//     running→idle transition) — both reducer-side facts the fake cannot see
+	//     because the fake has no handle on the model. onPhase is the minimal seam
+	//     that surfaces exactly those reducer transitions.
+	// (An all-fake-side scheme that also signals run-completion would remove this
+	// field; that rework is deferred. For now: nil ⇒ zero cost, zero behaviour change.)
+	onPhase func(phase)
 }
 
 // phase is the model's coarse state machine.
@@ -100,6 +127,22 @@ type Model struct {
 	ta    textarea.Model
 	sp    spinner.Model
 	stuck bool // viewport pinned to bottom
+
+	// viewDirty is set when a streamed delta mutated the conversation but
+	// refreshView has not yet re-rendered it into the viewport. A one-shot
+	// frame-cadence tick (renderTickCmd) flushes it at most once per frame,
+	// coalescing the per-token re-renders into one render per visible frame.
+	// refreshView clears it, so "rendered ⟺ not dirty" is invariant.
+	viewDirty bool
+
+	// tickArmed is true while a renderTickMsg is in flight (a flush tick has been
+	// scheduled but not yet handled). A delta arms the tick ONLY when none is
+	// pending, and the tick disarms itself when handled — so the ticker is a single
+	// self-disarming one-shot driven by delta activity, not a free-running 60fps
+	// loop. That bounds the extra render churn to actual streaming bursts (idle gaps
+	// and the post-run tail cost no ticks), keeping the teatest frame cadence — and
+	// thus its known ~1/3 -race flake — no worse than before.
+	tickArmed bool
 
 	activeTool   string         // tool name in flight, shown beside the spinner
 	toolProgress string         // transient progress line for the in-flight tool (cleared on result/turn boundary)

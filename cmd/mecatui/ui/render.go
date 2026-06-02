@@ -41,17 +41,25 @@ type renderer struct {
 
 	// blockMD memoizes the glamour render of each assistant block, keyed by the
 	// block's (stable, append-only) conversation index. refreshView re-renders the
-	// WHOLE scrollback on every streamed delta; without this, every prior assistant
-	// turn is re-parsed through glamour on every token of the live turn — O(turns ×
-	// tokens) glamour work that grows with session length. Memoising collapses each
+	// WHOLE scrollback on every flushed frame (deltas are coalesced to frame cadence;
+	// see update.go's renderTickMsg). Without this, every prior assistant turn is
+	// re-parsed through glamour on every flushed frame of the live turn — O(turns ×
+	// frames) glamour work that grows with session length. Memoising collapses each
 	// SETTLED block to one render: only the live (last) block, whose src grows each
-	// token, misses and re-renders. markdown() is a pure function of (src, width,
+	// frame, misses and re-renders. markdown() is a pure function of (src, width,
 	// theme) and the theme is fixed for the renderer's life, so the cached entry is
 	// valid whenever its (src, width) still match — index is just the bucket that
 	// bounds memory to one entry per block and lets the live block overwrite in
 	// place. Touched only on the Bubble Tea update goroutine (same invariant as the
 	// glamour cache), so it needs no lock.
 	blockMD map[int]mdEntry
+
+	// mdRenders counts REAL glamour invocations (cache misses) — incremented at the
+	// tr.Render call site in markdown(), not in markdownAt's hit path. It is the test
+	// seam proving the delta-coalescing actually elides per-token renders: N streamed
+	// deltas with no frame flush leave it unchanged, and one flush bumps it by exactly
+	// one (the live block re-renders once). Touched only on the update goroutine.
+	mdRenders int
 }
 
 // mdEntry is one memoized assistant-block render: the source text and wrap width
@@ -137,6 +145,10 @@ func (r *renderer) markdown(src string) string {
 	}
 	r.mu.Unlock()
 
+	// Count the real glamour invocation (cache miss). markdownAt's hit path returns
+	// before reaching here, so this counts only genuine renders — the test seam for
+	// the delta-coalescing (see the mdRenders field).
+	r.mdRenders++
 	out, err := tr.Render(src)
 	if err != nil {
 		return src
