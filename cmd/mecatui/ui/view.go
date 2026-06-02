@@ -122,9 +122,15 @@ func (m Model) renderFooter() string {
 	switch m.phase {
 	case phaseRunning:
 		spin := m.sp.View()
-		if m.activeTool != "" {
+		switch {
+		case m.activeTool != "" && m.toolProgress != "":
+			// A long-running tool forwarded a transient progress line: show it in
+			// place of the bare "Running X…" so the footer reflects live activity
+			// instead of looking frozen. Cleared on the next tool.result/turn boundary.
+			left = fmt.Sprintf("%s %s…", spin, m.toolProgress)
+		case m.activeTool != "":
 			left = fmt.Sprintf("%s Running %s…", spin, m.activeTool)
-		} else {
+		default:
 			left = spin + " thinking…"
 		}
 	case phaseAwaitingApproval:

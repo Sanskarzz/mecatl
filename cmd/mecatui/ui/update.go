@@ -80,6 +80,7 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.TurnStartMsg:
 		m.conv.startAssistant()
 		m.activeTool = ""
+		m.toolProgress = ""
 		return m, m.afterEvent()
 	case client.AssistantDeltaMsg:
 		m.conv.appendAssistant(msg.Text)
@@ -100,6 +101,7 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.ToolCallMsg:
 		m.conv.addTool(msg.ID, msg.Name, msg.Args)
 		m.activeTool = msg.Name
+		m.toolProgress = ""
 		// Accumulate the file path for the session changed-files summary. Tracked
 		// at call time (not on the result) so the header reflects intent the moment
 		// the mutation is announced; mutatedPath gates to Edit/Write + dedupes.
@@ -112,10 +114,18 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.conv.addNotice("orphan tool result for " + msg.CallID)
 		}
 		m.activeTool = ""
+		m.toolProgress = ""
+		return m, m.afterEvent()
+	case client.ToolProgressMsg:
+		// Transient advisory line from a long-running tool: show it beside the
+		// spinner while the tool runs. It is cleared on the next tool.result or
+		// turn boundary; it never enters the transcript.
+		m.toolProgress = msg.Text
 		return m, m.afterEvent()
 	case client.PermissionAskMsg:
 		m.phase = phaseAwaitingApproval
 		m.activeTool = ""
+		m.toolProgress = ""
 		m.ask = pendingAsk{
 			AskID:        msg.AskID,
 			Tool:         msg.Tool,

@@ -28,6 +28,13 @@ const (
 	EvToolCall EventType = "tool.call"
 	// EvToolResult carries the result of a tool execution.
 	EvToolResult EventType = "tool.result"
+	// EvToolProgress is transient progress for a long-running tool: it carries a
+	// human-readable Text line (e.g. "repo map: parsed 128/512 files") emitted at a
+	// tool's phase boundaries via the observability seam so a slow call does not
+	// look dead. It is ADVISORY — NOT persisted to a SessionStore and NOT recorded
+	// to the model's conversation history; clients render it as a transient status
+	// line, cleared on the next tool.result (or turn end).
+	EvToolProgress EventType = "tool.progress"
 	// EvPermissionAsk is emitted when the loop pauses for client approval.
 	EvPermissionAsk EventType = "permission.ask"
 	// EvHook is emitted when a hook fires (e.g. PreToolUse blocked).

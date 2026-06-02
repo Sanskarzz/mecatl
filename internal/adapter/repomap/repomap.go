@@ -19,6 +19,7 @@ package repomap
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -42,6 +43,12 @@ const (
 	// maxScannedFiles bounds how many candidate files are read+parsed, guarding
 	// against pathologically large workspaces. Files past the cap are skipped.
 	maxScannedFiles = 5000
+	// maxFileBytes caps the size of a single file the repo map will parse. This
+	// bounds worst-case single-file tree-sitter parse time: the WASM ParseString is
+	// uninterruptible, so one pathologically large file can stall the whole call.
+	// Huge generated/minified files add little to a structural symbol map, so
+	// skipping them costs almost nothing.
+	maxFileBytes = 256 << 10 // 256 KiB
 	// pageRankDamping is the standard PageRank damping factor.
 	pageRankDamping = 0.85
 	// pageRankIters is the iteration cap for the power method (with an L1
@@ -51,6 +58,33 @@ const (
 
 // supportedExts are the file extensions the repo map parses.
 var supportedExts = []string{".go", ".py", ".ts", ".tsx"}
+
+// ignoredDirs is the denylist of path segments whose subtrees the repo map never
+// descends into: vendored/installed dependency trees that duplicate or balloon
+// the map without adding first-party structure.
+var ignoredDirs = map[string]bool{
+	"node_modules": true,
+	"vendor":       true,
+}
+
+// isIgnoredPath reports whether a candidate path falls under an ignored directory.
+// A path is ignored if any of its "/"-separated segments is in ignoredDirs OR
+// begins with "." (a dotfile/dotdir). This matters because filepath.Glob's "*"
+// metacharacter MATCHES dotfiles, so without this guard discovery descends into
+// .git/, .claude/worktrees/<agent>/ (a full duplicate of the repo), and vendor/
+// node_modules — over-scanning the workspace and, in the in-process TUI, stalling
+// the whole call on the duplicate tree.
+func isIgnoredPath(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" {
+			continue
+		}
+		if ignoredDirs[seg] || strings.HasPrefix(seg, ".") {
+			return true
+		}
+	}
+	return false
+}
 
 // maxGlobDepth is how many nested directory levels the discovery globs reach.
 // The tool.Workspace.Glob seam matches with path.Match semantics, which does
@@ -151,11 +185,42 @@ func (RepoMap) Spec() tool.ToolSpec {
 // ReadOnly reports that the repo map only reads the workspace.
 func (RepoMap) ReadOnly() bool { return true }
 
+// progressEvery is how often parseAll emits a "parsed K/N files" progress line:
+// frequent enough that a long scan visibly advances, infrequent enough not to
+// flood the event stream.
+const progressEvery = 64
+
 // Execute walks the workspace, parses supported source files, ranks them with
-// personalized PageRank, and returns a compact ranked map. Recoverable problems
-// (no source files found) are returned as tool results, not Go errors; a Go
-// error is reserved for harness-level faults (e.g. context cancellation).
-func (RepoMap) Execute(ctx context.Context, in session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
+// personalized PageRank, and returns a compact ranked map. It is the ordinary
+// (non-observed) entry point: it delegates to ExecuteObserved with a nil emit, so
+// its behaviour is byte-identical to the observed path minus the transient
+// progress events.
+func (r RepoMap) Execute(ctx context.Context, in session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
+	return r.ExecuteObserved(ctx, in, ws, nil)
+}
+
+// ExecuteObserved is the observability seam (matching internal/agent's
+// observableTool): when the dispatcher supplies a non-nil emit closure, the repo
+// map forwards transient, human-readable progress lines at its phase boundaries
+// (discovery, periodic parse, ranking) so a long-running scan does not look dead
+// in the TUI/editor. The events are advisory — EvToolProgress is never persisted
+// or recorded to model history. With emit == nil (the Execute path) no progress
+// is emitted and the result is byte-identical to before. Recoverable problems (no
+// source files found) are returned as tool results, not Go errors; a Go error is
+// reserved for harness-level faults (e.g. context cancellation).
+//
+// This adapter must NOT import internal/agent (import cycle): the dispatcher's
+// observableTool assertion is structural, so matching this method set is enough.
+func (RepoMap) ExecuteObserved(ctx context.Context, in session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
+	// progress is a nil-safe local: with emit == nil it is a no-op, so the Execute
+	// path emits nothing. We do NOT set Turn/Seq here — the dispatcher's closure
+	// stamps Turn and e.emit assigns Seq.
+	progress := func(text string) {
+		if emit != nil {
+			emit(session.Event{Type: session.EvToolProgress, Text: text})
+		}
+	}
+
 	var args repoMapArgs
 	if msg, ok := toolkit.ParseArgs(in, &args); !ok {
 		return session.NewToolError(in.ID, msg), nil
@@ -176,8 +241,9 @@ func (RepoMap) Execute(ctx context.Context, in session.ToolCall, ws tool.Workspa
 	if len(paths) == 0 {
 		return session.NewToolResult(in.ID, "no supported source files found (looked for Go, Python, TypeScript/TSX)"), nil
 	}
+	progress(fmt.Sprintf("repo map: scanning %d candidate files", len(paths)))
 
-	nodes, skipped, err := parseAll(ctx, ws, paths)
+	nodes, skipped, err := parseAll(ctx, ws, paths, progress)
 	if err != nil {
 		return session.ToolResult{}, err
 	}
@@ -185,6 +251,7 @@ func (RepoMap) Execute(ctx context.Context, in session.ToolCall, ws tool.Workspa
 		return session.NewToolResult(in.ID, "no parseable definitions found in the workspace"), nil
 	}
 
+	progress(fmt.Sprintf("repo map: ranking %d files", len(nodes)))
 	g := newGraph(nodes)
 	focus := resolveFocus(g, args.Focus)
 	g.pageRank(focus, pageRankDamping, pageRankIters)
@@ -209,6 +276,12 @@ func discoverFiles(ctx context.Context, ws tool.Workspace) ([]string, error) {
 			continue
 		}
 		for _, m := range matches {
+			// Skip matches under ignored directories before recording them:
+			// filepath.Glob's "*" matches dotfiles, and worktrees/vendor/node_modules
+			// duplicate or balloon the map (see isIgnoredPath).
+			if isIgnoredPath(m) {
+				continue
+			}
 			if !seen[m] {
 				seen[m] = true
 				paths = append(paths, m)
@@ -223,20 +296,35 @@ func discoverFiles(ctx context.Context, ws tool.Workspace) ([]string, error) {
 }
 
 // parseAll reads and parses each candidate file, returning the non-nil file
-// nodes plus a count of files skipped (read error or empty/unsupported parse). A
-// single tree-sitter WASM session is created for the whole call and reused across
-// files (the parser is sequential, so the non-concurrent session is safe here).
-func parseAll(ctx context.Context, ws tool.Workspace, paths []string) (nodes []*fileNode, skipped int, err error) {
+// nodes plus a count of files skipped (read error, oversized, or empty/unsupported
+// parse). A single tree-sitter WASM session is created for the whole call and
+// reused across files (the parser is sequential, so the non-concurrent session is
+// safe here). progress is a nil-safe callback the caller threads in to surface
+// periodic "parsed K/N files" lines; it is never called when emit was nil.
+func parseAll(ctx context.Context, ws tool.Workspace, paths []string, progress func(string)) (nodes []*fileNode, skipped int, err error) {
 	sess, err := newParseSession()
 	if err != nil {
 		return nil, 0, err
 	}
-	for _, p := range paths {
+	total := len(paths)
+	for i, p := range paths {
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, 0, cerr
 		}
+		// Surface progress every progressEvery files (and never on the very first
+		// iteration, which the "scanning N candidate files" line already covers).
+		if progress != nil && i > 0 && i%progressEvery == 0 {
+			progress(fmt.Sprintf("repo map: parsed %d/%d files", i, total))
+		}
 		data, rerr := ws.Read(ctx, p)
 		if rerr != nil {
+			skipped++
+			continue
+		}
+		// Skip files larger than maxFileBytes: this bounds worst-case single-file
+		// tree-sitter parse time (ParseString is uninterruptible), and huge
+		// generated/minified files add little to a structural symbol map.
+		if len(data) > maxFileBytes {
 			skipped++
 			continue
 		}

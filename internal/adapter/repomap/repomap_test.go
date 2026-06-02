@@ -217,6 +217,66 @@ func TestRepoMap_NestedDirectories(t *testing.T) {
 	}
 }
 
+func TestRepoMap_DiscoverFilesExcludesIgnoredDirs(t *testing.T) {
+	// One real first-party file plus several under ignored subtrees: vendored deps,
+	// a .git/ dotdir, and a .claude/worktrees/<agent>/ duplicate of the repo. Only
+	// the first-party file may survive discovery.
+	ws := seedWorkspace(t, map[string]string{
+		"keep.go":                                 "package app\nfunc Keep() {}\n",
+		"node_modules/dep/index.ts":               "export function dep(): void {}\n",
+		"vendor/github.com/x/y/y.go":              "package y\nfunc Y() {}\n",
+		".git/hooks/sample.py":                    "def sample():\n    return 1\n",
+		".claude/worktrees/agent-x/internal/a.go": "package app\nfunc Dup() {}\n",
+	})
+
+	paths, err := discoverFiles(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("discoverFiles: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "keep.go" {
+		t.Fatalf("expected only [keep.go], got %v", paths)
+	}
+
+	// And the rendered map must not mention any ignored path.
+	res := run(t, ws, "{}")
+	for _, bad := range []string{"node_modules", "vendor", ".git", ".claude", "worktrees"} {
+		if strings.Contains(res.Content, bad) {
+			t.Errorf("map leaked ignored path %q:\n%s", bad, res.Content)
+		}
+	}
+	if !strings.Contains(res.Content, "keep.go") {
+		t.Errorf("first-party file missing from map:\n%s", res.Content)
+	}
+}
+
+func TestRepoMap_ParseAllSkipsOversizedFile(t *testing.T) {
+	// A small valid file plus one whose body exceeds maxFileBytes. parseAll must
+	// parse the small one and skip (count) the oversized one.
+	big := "package app\nfunc Big() {}\n" + strings.Repeat("// filler comment line\n", (maxFileBytes/23)+1)
+	ws := seedWorkspace(t, map[string]string{
+		"small.go": "package app\nfunc Small() int { return 1 }\n",
+		"huge.go":  big,
+	})
+	if len(big) <= maxFileBytes {
+		t.Fatalf("test setup: huge.go (%d bytes) must exceed maxFileBytes (%d)", len(big), maxFileBytes)
+	}
+
+	paths, err := discoverFiles(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("discoverFiles: %v", err)
+	}
+	nodes, skipped, err := parseAll(context.Background(), ws, paths, nil)
+	if err != nil {
+		t.Fatalf("parseAll: %v", err)
+	}
+	if skipped != 1 {
+		t.Errorf("expected 1 skipped (oversized) file, got %d", skipped)
+	}
+	if len(nodes) != 1 || nodes[0].path != "small.go" {
+		t.Fatalf("expected only small.go parsed, got %v", nodes)
+	}
+}
+
 func TestRepoMap_EmptyWorkspace(t *testing.T) {
 	ws := seedWorkspace(t, map[string]string{})
 	res := run(t, ws, "{}")
@@ -263,6 +323,52 @@ func TestRepoMap_EmbeddedGrammarLoadsOffline(t *testing.T) {
 	}
 	if node.refs["Other"] == 0 {
 		t.Errorf("expected a reference to Other, got refs %v", node.refs)
+	}
+}
+
+// TestRepoMap_ExecuteObservedEmitsProgress asserts the observability seam: with a
+// non-nil emit, ExecuteObserved forwards EvToolProgress lines at its phase
+// boundaries (scanning, ranking) and the result is otherwise identical to Execute.
+func TestRepoMap_ExecuteObservedEmitsProgress(t *testing.T) {
+	ws := seedWorkspace(t, hubFiles())
+	call := session.NewToolCall("call-1", "RepoMap", []byte("{}"))
+
+	var events []session.Event
+	emit := func(ev session.Event) { events = append(events, ev) }
+	res, err := (RepoMap{}).ExecuteObserved(context.Background(), call, ws, emit)
+	if err != nil {
+		t.Fatalf("ExecuteObserved: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error result: %s", res.Content)
+	}
+
+	if len(events) == 0 {
+		t.Fatal("expected at least one progress event, got none")
+	}
+	var sawScan, sawRank bool
+	for _, ev := range events {
+		if ev.Type != session.EvToolProgress {
+			t.Errorf("unexpected event type %q (want only tool.progress)", ev.Type)
+		}
+		if strings.Contains(ev.Text, "scanning") {
+			sawScan = true
+		}
+		if strings.Contains(ev.Text, "ranking") {
+			sawRank = true
+		}
+	}
+	if !sawScan || !sawRank {
+		t.Errorf("missing phase-boundary progress (scan=%v rank=%v): %+v", sawScan, sawRank, events)
+	}
+
+	// The non-observed Execute path must be byte-identical and emit nothing.
+	plain, err := (RepoMap{}).Execute(context.Background(), call, ws)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if plain.Content != res.Content {
+		t.Errorf("Execute and ExecuteObserved differ:\n--plain--\n%s\n--observed--\n%s", plain.Content, res.Content)
 	}
 }
 

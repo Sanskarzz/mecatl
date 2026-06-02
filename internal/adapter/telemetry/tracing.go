@@ -76,7 +76,9 @@ func (t *Tracing) Emit(ev session.Event) {
 		t.endTool(ev.ToolResult)
 	case session.EvResult:
 		t.endRun(ev.Result)
-	case session.EvMessageDelta, session.EvPermissionAsk, session.EvHook, session.EvCompaction:
+	case session.EvMessageDelta, session.EvPermissionAsk, session.EvHook, session.EvCompaction, session.EvToolProgress:
+		// EvToolProgress is a transient advisory line with no span of its own; it
+		// only ensures the run span exists, like the other in-run lifecycle events.
 		t.ensureRun()
 	}
 }

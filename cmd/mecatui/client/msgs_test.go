@@ -45,6 +45,11 @@ func TestEventToMsg(t *testing.T) {
 			ToolResultMsg{CallID: "c1", Content: "ok", IsError: true},
 		},
 		{
+			"tool.progress",
+			&mecatlv1.Event{Type: "tool.progress", Text: "repo map: parsed 64/512 files"},
+			ToolProgressMsg{Text: "repo map: parsed 64/512 files"},
+		},
+		{
 			"permission.ask",
 			&mecatlv1.Event{Type: "permission.ask", Ask: &mecatlv1.PermissionAsk{AskId: "a1", Tool: "Write", Args: "{}", Reason: "why"}},
 			PermissionAskMsg{AskID: "a1", Tool: "Write", Args: "{}", Reason: "why"},

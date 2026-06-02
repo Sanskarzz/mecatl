@@ -101,9 +101,11 @@ func (m *Metrics) Emit(ev session.Event) {
 		session.EvMessageDelta,
 		session.EvToolCall,
 		session.EvToolResult,
+		session.EvToolProgress,
 		session.EvHook,
 		session.EvCompaction:
-		// Counted by events_total above; no further metric.
+		// Counted by events_total above; no further metric. EvToolProgress is a
+		// transient advisory line — the events_total bump is all it warrants.
 	}
 }
 

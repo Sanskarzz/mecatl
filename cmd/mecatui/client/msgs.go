@@ -59,6 +59,15 @@ type ToolResultMsg struct {
 	IsError bool
 }
 
+// ToolProgressMsg is a transient, human-readable progress line from a
+// long-running tool (proto type "tool.progress"). It carries no call id and no
+// content — only advisory Text. The ui shows it as a transient status line while
+// a tool runs and clears it on the next tool.result (or turn boundary); it is
+// never persisted and never enters the conversation transcript.
+type ToolProgressMsg struct {
+	Text string
+}
+
 // PermissionAskMsg opens the approval modal; AskID is the exact correlation key
 // echoed back in ResumeApproval — never inferred from the tool name.
 type PermissionAskMsg struct {
@@ -347,6 +356,8 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 	case "tool.result":
 		tr := ev.GetToolResult()
 		return ToolResultMsg{CallID: tr.GetCallId(), Content: tr.GetContent(), IsError: tr.GetIsError()}
+	case "tool.progress":
+		return ToolProgressMsg{Text: ev.GetText()}
 	case "permission.ask":
 		a := ev.GetAsk()
 		return PermissionAskMsg{AskID: a.GetAskId(), Tool: a.GetTool(), Args: a.GetArgs(), Reason: a.GetReason()}
@@ -358,6 +369,34 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 			Tool:     h.GetTool(),
 			Decision: hookDecisionFrom(h.GetDecision()),
 		}
+	case "compaction":
+		return CompactionMsg{Text: ev.GetText()}
+	case "result":
+		r := ev.GetResult()
+		return ResultMsg{
+			Stop:  r.GetStop(),
+			Text:  r.GetText(),
+			Error: r.GetError(),
+			Usage: usageFrom(r.GetUsage()),
+		}
+	default:
+		// The subagent.* / team.* delegation projections are mapped by
+		// delegationEventToMsg (a second switch) to keep this dispatcher under the
+		// cyclomatic-complexity bound. The two switches are total over the documented
+		// type strings ONLY together: a new delegation case must be added there, not
+		// here. An unknown/empty type returns nil so future event kinds are ignored,
+		// not fatal.
+		return delegationEventToMsg(ev)
+	}
+}
+
+// delegationEventToMsg maps the subagent.* and team.* delegation-projection event
+// types to their tea.Msg. It is the second half of EventToMsg, split out only so
+// neither dispatcher grows past the cyclomatic-complexity bound; together they
+// remain a total function over the documented type strings. An unmatched type
+// returns nil (skipped by the reader).
+func delegationEventToMsg(ev *mecatlv1.Event) tea.Msg {
+	switch ev.GetType() {
 	case "subagent.start":
 		return subagentMsg(SubagentStart, ev.GetSubagent())
 	case "subagent.tool":
@@ -372,16 +411,6 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 		return teamMsg(TeamTasks, ev.GetTeam())
 	case "team.end":
 		return teamMsg(TeamEnd, ev.GetTeam())
-	case "compaction":
-		return CompactionMsg{Text: ev.GetText()}
-	case "result":
-		r := ev.GetResult()
-		return ResultMsg{
-			Stop:  r.GetStop(),
-			Text:  r.GetText(),
-			Error: r.GetError(),
-			Usage: usageFrom(r.GetUsage()),
-		}
 	default:
 		return nil
 	}

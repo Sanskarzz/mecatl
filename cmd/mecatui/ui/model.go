@@ -98,13 +98,14 @@ type Model struct {
 	sp    spinner.Model
 	stuck bool // viewport pinned to bottom
 
-	activeTool string         // tool name in flight, shown beside the spinner
-	ask        pendingAsk     // current permission modal (when phaseAwaitingApproval)
-	mcp        mcpState       // MCP overlay state (view==mcpNone when closed)
-	palette    paletteState   // slash-command palette (open when the input starts with "/")
-	agents     agentsState    // agent-team overlay state (view==agentsNone when closed)
-	stream     *client.Stream // current run's stream
-	cancelRun  context.CancelFunc
+	activeTool   string         // tool name in flight, shown beside the spinner
+	toolProgress string         // transient progress line for the in-flight tool (cleared on result/turn boundary)
+	ask          pendingAsk     // current permission modal (when phaseAwaitingApproval)
+	mcp          mcpState       // MCP overlay state (view==mcpNone when closed)
+	palette      paletteState   // slash-command palette (open when the input starts with "/")
+	agents       agentsState    // agent-team overlay state (view==agentsNone when closed)
+	stream       *client.Stream // current run's stream
+	cancelRun    context.CancelFunc
 
 	// usage accumulates across the session for the footer.
 	usage client.Usage

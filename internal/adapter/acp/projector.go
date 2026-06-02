@@ -44,6 +44,10 @@ import (
 //	                                   the delegated work; the roster/goal would add
 //	                                   noise before the first progress line).
 //	  - session.init               -> dropped.
+//	  - tool.progress              -> dropped (transient, no clean ACP surface: it
+//	                                   carries no call id, and the tool's own
+//	                                   tool_call already shows it as pending/running;
+//	                                   a benign drop, never an error).
 
 // projectUpdate maps a domain Event to the session/update variant value to send,
 // or (nil,false) when the event has no session/update projection this phase
@@ -108,8 +112,9 @@ func projectUpdate(ev session.Event) (any, bool) {
 
 	default:
 		// turn.*, compaction, session.init, subagent.start, team.start, team.tasks,
-		// result, permission.ask: no session/update projection here. (The shared task
-		// list is a TUI-overlay affordance, not an ACP editor card line.)
+		// tool.progress, result, permission.ask: no session/update projection here.
+		// (The shared task list is a TUI-overlay affordance, not an ACP editor card
+		// line; tool.progress is a transient advisory drop, never an error.)
 		return nil, false
 	}
 }
