@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
+	"github.com/stacklok/mecatl/internal/adapter/memory"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/governance"
@@ -381,6 +382,59 @@ func TestLoopUsesInjectedAssembler(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("injected instruction message not recorded in conversation")
+	}
+}
+
+// TestTurn0InjectsMemoryIndexAfterAgentsMD is the D2 end-to-end proof: with a
+// non-empty per-project memory store and the composed MultiAssembler
+// (RootAssembler + MemoryIndexAssembler), the turn-0 conversation contains the
+// memory index as a USER message, ordered AFTER the AGENTS.md instruction message
+// and before the user prompt — and the index is conversation content, never the
+// system prefix (proven separately in internal/prompt).
+func TestTurn0InjectsMemoryIndexAfterAgentsMD(t *testing.T) {
+	ctx := context.Background()
+	store, err := memory.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("memory.New: %v", err)
+	}
+	if err := store.RememberEntry(ctx, tool.MemoryEntry{
+		Key: "pref/test-runner", Value: "gotestsum", Description: "preferred test runner",
+	}); err != nil {
+		t.Fatalf("RememberEntry: %v", err)
+	}
+
+	llm := mockllm.New(mockllm.TextTurn("done"))
+	cat := catalogWith(t, &fakeTool{name: "Read", readOnly: true, exec: okExec})
+	asm := prompt.NewMultiAssembler(prompt.RootAssembler{}, prompt.MemoryIndexAssembler{Src: store})
+	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Instructions: asm})
+
+	ws := memfs.NewWorkspace("/ws")
+	if err := ws.Write(ctx, "AGENTS.md", []byte("project rule")); err != nil {
+		t.Fatalf("seed AGENTS.md: %v", err)
+	}
+	sess := newSession(t, session.Limits{})
+	drain(e.Run(ctx, sess, ws, "the user prompt"))
+
+	// Find the order of the three turn-0 user messages.
+	var agentsIdx, memoryIdx, promptIdx = -1, -1, -1
+	for i, m := range sess.Conversation.Messages {
+		if m.Role != session.RoleUser {
+			continue
+		}
+		switch {
+		case strings.Contains(m.Text, "project rule"):
+			agentsIdx = i
+		case strings.Contains(m.Text, "pref/test-runner") && strings.Contains(m.Text, "preferred test runner"):
+			memoryIdx = i
+		case strings.Contains(m.Text, "the user prompt"):
+			promptIdx = i
+		}
+	}
+	if agentsIdx < 0 || memoryIdx < 0 || promptIdx < 0 {
+		t.Fatalf("missing a turn-0 message: agents=%d memory=%d prompt=%d", agentsIdx, memoryIdx, promptIdx)
+	}
+	if agentsIdx >= memoryIdx || memoryIdx >= promptIdx {
+		t.Fatalf("turn-0 order wrong: agents=%d memory=%d prompt=%d (want agents < memory < prompt)", agentsIdx, memoryIdx, promptIdx)
 	}
 }
 

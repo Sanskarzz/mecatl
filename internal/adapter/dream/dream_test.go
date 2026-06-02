@@ -29,10 +29,24 @@ func newFakeStore(kv map[string]string) *fakeStore {
 	return s
 }
 
-func (s *fakeStore) Remember(_ context.Context, key, value string) error {
+func (s *fakeStore) RememberEntry(_ context.Context, e tool.MemoryEntry) error {
 	s.remember++
-	s.entries[key] = tool.MemoryEntry{Key: key, Value: value, UpdatedAt: time.Now().UTC()}
+	e.UpdatedAt = time.Now().UTC()
+	s.entries[e.Key] = e
 	return nil
+}
+
+func (s *fakeStore) Remember(ctx context.Context, key, value string) error {
+	return s.RememberEntry(ctx, tool.MemoryEntry{Key: key, Value: value})
+}
+
+func (s *fakeStore) Index(_ context.Context) ([]tool.MemoryEntry, error) {
+	out := make([]tool.MemoryEntry, 0, len(s.entries))
+	for k, e := range s.entries {
+		out = append(out, tool.MemoryEntry{Key: k, Description: e.Description, UpdatedAt: e.UpdatedAt})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
 }
 
 func (s *fakeStore) Recall(_ context.Context, key string) (tool.MemoryEntry, bool, error) {

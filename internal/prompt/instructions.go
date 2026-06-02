@@ -37,3 +37,42 @@ func (RootAssembler) Assemble(ctx context.Context, ws tool.Workspace) ([]session
 
 // Compile-time assertion that RootAssembler satisfies the interface.
 var _ InstructionAssembler = RootAssembler{}
+
+// MultiAssembler composes several InstructionAssemblers, concatenating their
+// messages in order. It lets the composition root layer turn-0 context — e.g.
+// RootAssembler (AGENTS.md/CLAUDE.md) THEN MemoryIndexAssembler (the tier-0 memory
+// index) — so the conversation opens with project instructions followed by the
+// memory index, all as user-role messages recorded once at turn 0 (and so, by
+// construction, AFTER the cache-stable system prefix — never in StablePrefix).
+//
+// A nil child is skipped. The first child to return an error aborts (so a genuine
+// read fault still surfaces); children that fail soft (return nil, nil) simply
+// contribute nothing.
+type MultiAssembler struct {
+	Assemblers []InstructionAssembler
+}
+
+// NewMultiAssembler builds a MultiAssembler from the given children (nil children
+// are tolerated and skipped at Assemble time).
+func NewMultiAssembler(assemblers ...InstructionAssembler) MultiAssembler {
+	return MultiAssembler{Assemblers: assemblers}
+}
+
+// Assemble runs each child in order and concatenates their messages.
+func (m MultiAssembler) Assemble(ctx context.Context, ws tool.Workspace) ([]session.Message, error) {
+	var out []session.Message
+	for _, a := range m.Assemblers {
+		if a == nil {
+			continue
+		}
+		msgs, err := a.Assemble(ctx, ws)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, msgs...)
+	}
+	return out, nil
+}
+
+// Compile-time assertion that MultiAssembler satisfies the interface.
+var _ InstructionAssembler = MultiAssembler{}

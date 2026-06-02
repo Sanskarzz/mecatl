@@ -3,9 +3,13 @@ package memory
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 func TestStoreRememberRecallRoundTrip(t *testing.T) {
@@ -126,6 +130,145 @@ func TestStorePersistenceAcrossReopen(t *testing.T) {
 	}
 	if got.Value != "vim" {
 		t.Errorf("reopened value = %q, want vim", got.Value)
+	}
+}
+
+func TestIndexOmitsValuesAndDerivesDescription(t *testing.T) {
+	st, _ := New(t.TempDir())
+	ctx := context.Background()
+	// One entry WITH an explicit description, one WITHOUT (derive from value).
+	if err := st.RememberEntry(ctx, tool.MemoryEntry{
+		Key: "pref/test-runner", Value: "gotestsum --format dots", Description: "preferred test runner",
+	}); err != nil {
+		t.Fatalf("RememberEntry: %v", err)
+	}
+	if err := st.Remember(ctx, "project/deploy-gate", "staging deploy needs manual approval\nsecond line ignored"); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+
+	idx, err := st.Index(ctx)
+	if err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	if len(idx) != 2 {
+		t.Fatalf("Index returned %d entries, want 2", len(idx))
+	}
+	// Sorted by key lexically: "pref/..." < "project/...".
+	if idx[0].Key != "pref/test-runner" || idx[1].Key != "project/deploy-gate" {
+		t.Fatalf("Index not sorted by key: %q, %q", idx[0].Key, idx[1].Key)
+	}
+	// Values are OMITTED in the index.
+	for _, e := range idx {
+		if e.Value != "" {
+			t.Errorf("Index entry %q leaked a value: %q", e.Key, e.Value)
+		}
+	}
+	// Explicit description preserved.
+	if idx[0].Description != "preferred test runner" {
+		t.Errorf("explicit description = %q, want it preserved", idx[0].Description)
+	}
+	// Derived description = first non-empty line of the value.
+	if idx[1].Description != "staging deploy needs manual approval" {
+		t.Errorf("derived description = %q, want first line of value", idx[1].Description)
+	}
+}
+
+func TestRememberEntryRoundTripsDescription(t *testing.T) {
+	st, _ := New(t.TempDir())
+	ctx := context.Background()
+	if err := st.RememberEntry(ctx, tool.MemoryEntry{
+		Key: "k", Value: "the full value", Description: "short summary",
+	}); err != nil {
+		t.Fatalf("RememberEntry: %v", err)
+	}
+	// Recall returns the FULL value AND the description.
+	got, ok, err := st.Recall(ctx, "k")
+	if err != nil || !ok {
+		t.Fatalf("Recall: ok=%v err=%v", ok, err)
+	}
+	if got.Value != "the full value" {
+		t.Errorf("Recall value = %q, want full value", got.Value)
+	}
+	if got.Description != "short summary" {
+		t.Errorf("Recall description = %q, want it round-tripped", got.Description)
+	}
+	// Index shows the description, omits the value.
+	idx, _ := st.Index(ctx)
+	if len(idx) != 1 || idx[0].Description != "short summary" || idx[0].Value != "" {
+		t.Errorf("Index = %+v, want one entry with description and no value", idx)
+	}
+}
+
+func TestMigrationReadsTask1FlatFile(t *testing.T) {
+	dir := t.TempDir()
+	// A literal Task-1 memory.json: records carry only value + updated_at, NO
+	// description key. The additive omitempty schema must read it cleanly.
+	flat := `{
+  "entries": {
+    "pref/editor": {"value": "vim is my editor\nignored", "updated_at": "2024-01-02T03:04:05Z"}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(dir, memoryFileName), []byte(flat), 0o600); err != nil {
+		t.Fatalf("seed flat file: %v", err)
+	}
+	st, err := New(dir)
+	if err != nil {
+		t.Fatalf("New over flat file: %v", err)
+	}
+	ctx := context.Background()
+	// Recall returns the value (proving the old format decodes).
+	got, ok, err := st.Recall(ctx, "pref/editor")
+	if err != nil || !ok {
+		t.Fatalf("Recall flat entry: ok=%v err=%v", ok, err)
+	}
+	if got.Value != "vim is my editor\nignored" {
+		t.Errorf("flat Recall value = %q", got.Value)
+	}
+	// Index derives a description from the value's first line.
+	idx, err := st.Index(ctx)
+	if err != nil {
+		t.Fatalf("Index over flat file: %v", err)
+	}
+	if len(idx) != 1 || idx[0].Description != "vim is my editor" {
+		t.Errorf("flat-file index = %+v, want derived first-line description", idx)
+	}
+}
+
+// TestCrossProcessRememberNoLostUpdates simulates several PROCESSES (distinct
+// Store instances over one dir, each with its own flock handle) concurrently
+// Remembering distinct keys. The flock-guarded read-modify-write must let every
+// write survive — the lost-update bug the bare temp+rename did not prevent.
+func TestCrossProcessRememberNoLostUpdates(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	const n = 40
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// A FRESH Store per goroutine == a distinct process's view (its own
+			// flock fd), so this exercises the cross-process lock, not just s.mu.
+			st, err := New(dir)
+			if err != nil {
+				t.Errorf("New: %v", err)
+				return
+			}
+			if err := st.Remember(ctx, fmt.Sprintf("k/%03d", i), fmt.Sprintf("v%d", i)); err != nil {
+				t.Errorf("Remember: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	st, _ := New(dir)
+	all, err := st.List(ctx, "k/")
+	if err != nil {
+		t.Fatalf("List after concurrent cross-process writes: %v", err)
+	}
+	if len(all) != n {
+		t.Errorf("after %d cross-process writes, got %d entries (lost updates!)", n, len(all))
 	}
 }
 

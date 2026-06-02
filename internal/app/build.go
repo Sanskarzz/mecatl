@@ -302,6 +302,7 @@ func sessionEngineFactory(
 	hooks port.HookRunner,
 	counter agent.TokenCounter,
 	mcpProvider mcp.Provider,
+	instructions prompt.InstructionAssembler,
 ) server.SessionEngineFactory {
 	return func(ctx context.Context, specs []mcp.ServerConfig) (*agent.Engine, func() error, error) {
 		onError := func(sc mcp.ServerConfig, err error) {
@@ -330,7 +331,7 @@ func sessionEngineFactory(
 		// Identical to the main engine in every Deps field except the catalog (which
 		// carries the extra client MCP tools): baseEngineDeps is the single source of
 		// that shared wiring, so no collaborator is silently dropped.
-		deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, mcpProvider)
+		deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, mcpProvider, instructions)
 		deps.Catalog = cat
 		return agent.NewEngine(deps), closeFn, nil
 	}
@@ -423,14 +424,38 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 	policy := permpolicy.NewPolicy(defaultRules(), learned)
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
-	cat, mainMgr, mcpProvider, mcpInventory, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
+	cat, mainMgr, mcpProvider, mcpInventory, memStore, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
 
 	counter := buildTokenCounter(cfg)
 
-	deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, mcpProvider)
+	// Instructions seam: RootAssembler (AGENTS.md/CLAUDE.md) always; when a memory
+	// store is wired, also the tier-0 MemoryIndexAssembler so the model sees its
+	// saved-memory index at turn 0. The adapter (*memory.Store) meets the
+	// prompt-defined MemoryIndexSource port HERE, in the composition layer — prompt
+	// never imports the memory adapter. The index rides as a turn-0 user message
+	// (after the cache breakpoint), so it never enters prompt.Build's StablePrefix.
+	instructions := buildInstructionAssembler(memStore)
+
+	deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, mcpProvider, instructions)
 	deps.Catalog = cat
-	sessFactory := sessionEngineFactory(cfg, provider, store, policy, hooks, counter, mcpProvider)
+	sessFactory := sessionEngineFactory(cfg, provider, store, policy, hooks, counter, mcpProvider, instructions)
 	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, mcpClose, nil
+}
+
+// buildInstructionAssembler composes the turn-0 instruction assembler: always the
+// RootAssembler (project instruction files), plus the tier-0 MemoryIndexAssembler
+// when a memory store is wired (memStore non-nil). When memStore is nil the
+// MemoryIndexAssembler is omitted entirely, so a memory-disabled deployment adds
+// no index machinery. The store satisfies prompt.MemoryIndexSource structurally;
+// this is the one place the adapter meets the port.
+func buildInstructionAssembler(memStore *memory.Store) prompt.InstructionAssembler {
+	if memStore == nil {
+		return prompt.RootAssembler{}
+	}
+	return prompt.NewMultiAssembler(
+		prompt.RootAssembler{},
+		prompt.MemoryIndexAssembler{Src: memStore},
+	)
 }
 
 // baseEngineDeps assembles the agent.Deps SHARED by the main engine (buildEngine)
@@ -454,11 +479,13 @@ func baseEngineDeps(
 	hooks port.HookRunner,
 	counter agent.TokenCounter,
 	mcpProvider mcp.Provider,
+	instructions prompt.InstructionAssembler,
 ) agent.Deps {
 	return agent.Deps{
-		LLM:    provider,
-		Policy: policy,
-		Hooks:  hooks,
+		LLM:          provider,
+		Policy:       policy,
+		Hooks:        hooks,
+		Instructions: instructions,
 		// Persist mid-run transitions (tool results, terminal state) so a durable
 		// store (StoreDir) holds current state. The Service additionally persists on
 		// entering awaiting and at run end; both share this store, so the latest
@@ -651,9 +678,12 @@ func registerCoreTools(cfg Config, cat *tool.Catalog, log bool) {
 // — the optional Bash tool. It then optionally registers Fork, memory, skills, the
 // repo map, and connects any MCP servers. The returned close func tears down the
 // MCP manager on shutdown.
-func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, func()) {
+func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, *memory.Store, func()) {
 	cat := tool.NewCatalog()
 	registerCoreTools(cfg, cat, true)
+	// memStore is the per-project memory store, returned so the caller can bind it
+	// to the prompt tier-0 index source. It stays nil when memory is disabled.
+	var memStore *memory.Store
 	// Connect the MAIN MCP servers FIRST, so the per-agent-def Task engines built by
 	// buildTaskTool can (a) pull a REFERENCED main server's tools out of this manager
 	// and (b) connect their own INLINE servers. The main manager is registered into
@@ -735,6 +765,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		} else if err := memory.Register(cat, store); err != nil {
 			slog.Warn("registering memory tools failed; some tools may be missing", "err", err)
 		} else {
+			memStore = store
 			slog.Info("memory tools ENABLED (Remember/Recall)", "dir", cfg.MemoryDir)
 			startMemoryConsolidation(ctx, cfg, store, provider)
 		}
@@ -757,7 +788,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		slog.Info("repo map tool DISABLED")
 	}
 
-	return cat, mainMgr, mcpProvider, mcpInventory, mcpClose
+	return cat, mainMgr, mcpProvider, mcpInventory, memStore, mcpClose
 }
 
 // registerMCP RESOLVES the MCP server inventory from the pluggable source list

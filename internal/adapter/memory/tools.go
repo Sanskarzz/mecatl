@@ -23,6 +23,10 @@ import (
 // rememberDescription is the model-facing documentation for the Remember tool.
 const rememberDescription = `Save a small, durable fact to cross-session project memory so it survives into future sessions.
 
+Your saved memory is summarised for you as an INDEX (every key + a one-line
+description) shown automatically at the start of each session, so a fact you save
+here is something future sessions can see at a glance and load with Recall.
+
 When to use (be conservative):
 - Durable USER PREFERENCES the user stated explicitly, e.g. "always run tests
   with gotestsum", "I prefer table-driven tests", "use conventional commits".
@@ -43,34 +47,34 @@ Behavior:
 - Use short, namespaced keys, e.g. "pref/test-runner", "project/deploy-gate".
 
 Arguments:
-- key   (required): a short, stable, namespaced identifier.
-- value (required): the concise fact to remember.
+- key         (required): a short, stable, namespaced identifier.
+- value       (required): the concise fact to remember.
+- description (optional): a one-line summary shown in your memory index. If
+  omitted, the first line of value is used. Keep it short and specific — this is
+  what future sessions see at a glance before deciding to Recall the full value.
 
 Example:
-  {"key": "pref/test-runner", "value": "Run tests with: gotestsum --format dots"}`
+  {"key": "pref/test-runner", "value": "Run tests with: gotestsum --format dots", "description": "preferred test runner"}`
 
 // recallDescription is the model-facing documentation for the Recall tool.
-const recallDescription = `Look up previously saved cross-session memory by exact key or by key prefix.
-
-When to use:
-- Early in a session to retrieve durable user preferences and project facts you
-  saved before (e.g. recall the "pref/" prefix to see all stated preferences).
-- Before asking the user something they may have already told you in a past
-  session.
-
-When NOT to use:
-- To discover facts about the current code: use Read, Grep, and Glob instead.
-  Memory holds only what was deliberately saved with Remember; it is not an index
-  of the repository.
+const recallDescription = `Load the full value of a saved memory entry by exact key (or list entries by key prefix).
 
 Behavior:
-- A key that exactly matches an entry returns that entry's value.
+- Your current memory INDEX (every saved key + a one-line description, value
+  omitted) is shown to you automatically at the start of each session. Use Recall
+  to load the FULL value of a key you see in that index.
+- A key that exactly matches an entry returns that entry's full value.
 - A key that matches no exact entry is treated as a PREFIX and returns every
   entry whose key starts with it (sorted by key).
 - A lookup that finds nothing returns a clear "not found" result, NOT an error.
 
+When NOT to use:
+- To discover facts about the current code: use Read, Grep, and Glob instead.
+  Memory holds only what was deliberately saved with Remember; use the code as the
+  source of truth for the code.
+
 Arguments:
-- key (required): the exact key, or a prefix such as "pref/".
+- key (required): the exact key (from your index), or a prefix such as "pref/".
 
 Example:
   {"key": "pref/"}   lists every saved preference.`
@@ -99,8 +103,9 @@ var _ tool.Tool = RememberTool{}
 
 // rememberArgs is the JSON argument shape for the Remember tool.
 type rememberArgs struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
+	Key         string `json:"key"`
+	Value       string `json:"value"`
+	Description string `json:"description"`
 }
 
 // Spec returns the model-facing specification of the Remember tool.
@@ -112,7 +117,8 @@ func (RememberTool) Spec() tool.ToolSpec {
   "type": "object",
   "properties": {
     "key": {"type": "string", "description": "Short, stable, namespaced key, e.g. \"pref/test-runner\"."},
-    "value": {"type": "string", "description": "Concise, durable fact to remember."}
+    "value": {"type": "string", "description": "Concise, durable fact to remember."},
+    "description": {"type": "string", "description": "Optional one-line summary shown in your memory index; defaults to the first line of value."}
   },
   "required": ["key", "value"]
 }`),
@@ -134,10 +140,32 @@ func (rt RememberTool) Execute(ctx context.Context, in session.ToolCall, _ tool.
 	if args.Value == "" {
 		return session.NewToolError(in.ID, "the \"value\" argument is required"), nil
 	}
-	if err := rt.store.Remember(ctx, args.Key, args.Value); err != nil {
+	if err := rt.store.RememberEntry(ctx, tool.MemoryEntry{
+		Key:         args.Key,
+		Value:       args.Value,
+		Description: args.Description,
+	}); err != nil {
 		return session.NewToolError(in.ID, fmt.Sprintf("could not remember %q: %v", args.Key, err)), nil
 	}
-	return session.NewToolResult(in.ID, fmt.Sprintf("Remembered %q.", args.Key)), nil
+	// Echo the exact index line the write just produced (explicit description, else
+	// the value's first line). This is the in-run feedback that lets the model see
+	// its own write immediately, even though the tier-0 index itself is computed
+	// once at run start and does not refresh mid-run.
+	return session.NewToolResult(in.ID, fmt.Sprintf("Remembered %q — %s", args.Key, indexLine(args.Description, args.Value))), nil
+}
+
+// indexLine renders the one-line index description for a freshly written entry:
+// the explicit description if given, else the first non-empty line of value.
+func indexLine(description, value string) string {
+	if d := strings.TrimSpace(description); d != "" {
+		return d
+	}
+	for _, line := range strings.Split(value, "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // --- Recall tool ----------------------------------------------------------

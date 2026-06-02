@@ -25,29 +25,69 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gofrs/flock"
+
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
-// memoryFileName is the JSON file, under the store's directory, that holds all
-// entries for one project.
-const memoryFileName = "memory.json"
+const (
+	// memoryFileName is the JSON file, under the store's directory, that holds
+	// all entries for one project.
+	memoryFileName = "memory.json"
+	// lockFileName is a STABLE sentinel co-located with the data file, used only
+	// for cross-process advisory locking (flock). It is deliberately NOT the data
+	// file itself: every save renames a temp file over memory.json, which would
+	// break a flock held against the old inode. The sentinel is never renamed, so
+	// the flock association is stable for the store's lifetime.
+	lockFileName = "memory.lock"
+	// lockRetryDelay is how often TryLock(Context)/TryRLock(Context) re-probes a
+	// contended lock while waiting. Small enough to feel instant under light
+	// contention.
+	lockRetryDelay = 5 * time.Millisecond
+	// lockTimeout bounds how long any single read-modify-write waits for the
+	// cross-process lock before giving up with a clear error, so a stuck or
+	// crashed holder cannot deadlock a run indefinitely.
+	lockTimeout = 5 * time.Second
+)
 
-// Store is a file-backed, concurrency-safe tool.MemoryStore. It persists entries
-// as a single JSON document at <dir>/memory.json. All writes are serialized by a
-// mutex and committed atomically (temp file + rename) so a crash mid-write cannot
-// corrupt or truncate the on-disk file. A fresh Store opened over the same dir
-// sees previously written entries, giving durability across process restarts.
+// Store is a file-backed, cross-process-safe tool.MemoryStore. It persists
+// entries as a single JSON document at <dir>/memory.json and commits every write
+// atomically (temp file + rename) so a crash mid-write cannot corrupt or truncate
+// the on-disk file. A fresh Store opened over the same dir sees previously written
+// entries, giving durability across process restarts.
+//
+// Concurrency / locking. The store is safe for both in-process and cross-process
+// concurrent use, and — critically — does not LOSE updates under either:
+//
+//   - In-process: s.mu serialises every method on a single Store, and is also
+//     held across the full read-modify-write of a mutation. This is the only lock
+//     that protects the flock handle, which is NOT goroutine-safe when shared
+//     across goroutines on one fd.
+//   - Cross-process (several mecated/mecatui instances, agent-team / subagent runs
+//     sharing one memory.json): a gofrs/flock advisory lock on the STABLE sentinel
+//     <dir>/memory.lock guards the read-modify-write. Writes (RememberEntry,
+//     Remember, Forget) take an EXCLUSIVE lock; reads (Recall, List, Index) take a
+//     SHARED lock. The lock spans the whole load→mutate→save sequence, so two
+//     processes can no longer interleave read-modify-write and clobber each other
+//     (the lost-update bug the bare temp+rename did not prevent).
+//
+// Acquisition order is always s.mu THEN flock; the flock is acquired with a
+// bounded TryLockContext/TryRLockContext (lockRetryDelay / lockTimeout, also
+// honouring ctx cancellation) so a stuck holder fails loud instead of deadlocking,
+// and released (Unlock) before return on every path including errors.
 type Store struct {
 	mu   sync.Mutex
 	path string
+	lock *flock.Flock
 }
 
 // Compile-time assertion that *Store implements tool.MemoryStore.
 var _ tool.MemoryStore = (*Store)(nil)
 
 // New constructs a file-backed Store rooted at dir, creating dir (and parents)
-// if it does not exist. The store is scoped to dir: it owns <dir>/memory.json.
-// Pass a per-project directory so memory is isolated per project.
+// if it does not exist. The store is scoped to dir: it owns <dir>/memory.json and
+// the cross-process lock sentinel <dir>/memory.lock. Pass a per-project directory
+// so memory is isolated per project.
 func New(dir string) (*Store, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, fmt.Errorf("memory: New requires a non-empty dir")
@@ -57,7 +97,10 @@ func New(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("memory: create dir %q: %w", dir, err)
 	}
-	return &Store{path: filepath.Join(dir, memoryFileName)}, nil
+	return &Store{
+		path: filepath.Join(dir, memoryFileName),
+		lock: flock.New(filepath.Join(dir, lockFileName)),
+	}, nil
 }
 
 // persisted is the on-disk JSON shape: a map from key to its record. A map keeps
@@ -66,84 +109,197 @@ type persisted struct {
 	Entries map[string]record `json:"entries"`
 }
 
-// record is one stored entry on disk.
+// record is one stored entry on disk. Description is additive: Task-1 files have
+// no "description" key, and omitempty + Go's zero-value decode means they load
+// cleanly with Description == "" (the index then derives one from the value). So
+// migration from the flat Task-1 format is a no-op read — no version bump, no
+// rewrite pass.
 type record struct {
-	Value     string    `json:"value"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Value       string    `json:"value"`
+	Description string    `json:"description,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-// Remember stores value under key, overwriting any existing entry and bumping
-// UpdatedAt to now. An empty key is rejected.
-func (s *Store) Remember(_ context.Context, key, value string) error {
-	if strings.TrimSpace(key) == "" {
-		return fmt.Errorf("memory: Remember requires a non-empty key")
-	}
+// withExclusiveLock acquires s.mu THEN the cross-process EXCLUSIVE flock, runs fn
+// against the loaded store, and saves only if fn returns no error. The flock is
+// released before return on every path. ctx bounds the lock wait.
+func (s *Store) withExclusiveLock(ctx context.Context, fn func(data *persisted) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	locked, err := s.lock.TryLockContext(ctx, lockRetryDelay)
+	if err != nil {
+		return fmt.Errorf("memory: acquire write lock %q: %w", s.lock.Path(), err)
+	}
+	if !locked {
+		return fmt.Errorf("memory: could not acquire write lock %q within %s (held by another process?)", s.lock.Path(), lockTimeout)
+	}
+	defer func() { _ = s.lock.Unlock() }()
 
 	data, err := s.load()
 	if err != nil {
 		return err
 	}
-	data.Entries[key] = record{Value: value, UpdatedAt: time.Now().UTC()}
+	if err := fn(&data); err != nil {
+		return err
+	}
 	return s.save(data)
 }
 
-// Recall returns the entry for the exact key. A miss is (zero, false, nil).
-func (s *Store) Recall(_ context.Context, key string) (tool.MemoryEntry, bool, error) {
+// withSharedLock acquires s.mu THEN the cross-process SHARED flock and runs fn
+// against the loaded store. The flock is released before return on every path.
+// ctx bounds the lock wait.
+func (s *Store) withSharedLock(ctx context.Context, fn func(data persisted) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	locked, err := s.lock.TryRLockContext(ctx, lockRetryDelay)
+	if err != nil {
+		return fmt.Errorf("memory: acquire read lock %q: %w", s.lock.Path(), err)
+	}
+	if !locked {
+		return fmt.Errorf("memory: could not acquire read lock %q within %s (held by another process?)", s.lock.Path(), lockTimeout)
+	}
+	defer func() { _ = s.lock.Unlock() }()
+
 	data, err := s.load()
+	if err != nil {
+		return err
+	}
+	return fn(data)
+}
+
+// lockCtx derives a context with the lock timeout from the caller's ctx, so the
+// flock wait is bounded even when the caller passes context.Background().
+func lockCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, lockTimeout)
+}
+
+// RememberEntry stores e, overwriting any existing entry under e.Key and bumping
+// UpdatedAt to now. e.Description is stored as-is (empty is allowed; the index
+// derives one). An empty key is rejected.
+func (s *Store) RememberEntry(ctx context.Context, e tool.MemoryEntry) error {
+	if strings.TrimSpace(e.Key) == "" {
+		return fmt.Errorf("memory: RememberEntry requires a non-empty key")
+	}
+	lctx, cancel := lockCtx(ctx)
+	defer cancel()
+	return s.withExclusiveLock(lctx, func(data *persisted) error {
+		data.Entries[e.Key] = record{
+			Value:       e.Value,
+			Description: strings.TrimSpace(e.Description),
+			UpdatedAt:   time.Now().UTC(),
+		}
+		return nil
+	})
+}
+
+// Remember stores value under key with no explicit description, overwriting any
+// existing entry and bumping UpdatedAt to now. An empty key is rejected. It is a
+// convenience wrapper over RememberEntry.
+func (s *Store) Remember(ctx context.Context, key, value string) error {
+	return s.RememberEntry(ctx, tool.MemoryEntry{Key: key, Value: value})
+}
+
+// Recall returns the entry for the exact key. A miss is (zero, false, nil).
+func (s *Store) Recall(ctx context.Context, key string) (tool.MemoryEntry, bool, error) {
+	lctx, cancel := lockCtx(ctx)
+	defer cancel()
+	var (
+		out   tool.MemoryEntry
+		found bool
+	)
+	err := s.withSharedLock(lctx, func(data persisted) error {
+		r, ok := data.Entries[key]
+		if !ok {
+			return nil
+		}
+		out = tool.MemoryEntry{Key: key, Value: r.Value, Description: r.Description, UpdatedAt: r.UpdatedAt}
+		found = true
+		return nil
+	})
 	if err != nil {
 		return tool.MemoryEntry{}, false, err
 	}
-	r, ok := data.Entries[key]
-	if !ok {
-		return tool.MemoryEntry{}, false, nil
-	}
-	return tool.MemoryEntry{Key: key, Value: r.Value, UpdatedAt: r.UpdatedAt}, true, nil
+	return out, found, nil
 }
 
 // List returns all entries whose key has the given prefix, sorted by key. An
 // empty prefix returns every entry.
-func (s *Store) List(_ context.Context, prefix string) ([]tool.MemoryEntry, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, err := s.load()
+func (s *Store) List(ctx context.Context, prefix string) ([]tool.MemoryEntry, error) {
+	lctx, cancel := lockCtx(ctx)
+	defer cancel()
+	var out []tool.MemoryEntry
+	err := s.withSharedLock(lctx, func(data persisted) error {
+		out = make([]tool.MemoryEntry, 0, len(data.Entries))
+		for k, r := range data.Entries {
+			if strings.HasPrefix(k, prefix) {
+				out = append(out, tool.MemoryEntry{Key: k, Value: r.Value, Description: r.Description, UpdatedAt: r.UpdatedAt})
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]tool.MemoryEntry, 0, len(data.Entries))
-	for k, r := range data.Entries {
-		if strings.HasPrefix(k, prefix) {
-			out = append(out, tool.MemoryEntry{Key: k, Value: r.Value, UpdatedAt: r.UpdatedAt})
+	return out, nil
+}
+
+// Index returns the tier-0 routing table: every entry with the VALUE OMITTED and
+// Description filled (explicit, else derived from the value's first line), sorted
+// by key. It applies NO size cap — the consumer (the prompt assembler) caps and
+// renders. It is the cheap, always-in-context summary view.
+func (s *Store) Index(ctx context.Context) ([]tool.MemoryEntry, error) {
+	lctx, cancel := lockCtx(ctx)
+	defer cancel()
+	var out []tool.MemoryEntry
+	err := s.withSharedLock(lctx, func(data persisted) error {
+		out = make([]tool.MemoryEntry, 0, len(data.Entries))
+		for k, r := range data.Entries {
+			out = append(out, tool.MemoryEntry{
+				Key:         k,
+				Description: deriveDescription(r),
+				UpdatedAt:   r.UpdatedAt,
+			})
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// deriveDescription returns r.Description if set, else the first non-empty line of
+// the value (the migration / no-explicit-description fallback). It never returns
+// the full value — just the first line — so the index stays one line per entry.
+func deriveDescription(r record) string {
+	if d := strings.TrimSpace(r.Description); d != "" {
+		return d
+	}
+	for _, line := range strings.Split(r.Value, "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			return t
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
-	return out, nil
+	return ""
 }
 
 // Forget deletes the entry for key. Deleting a missing key is a no-op (not an
 // error).
-func (s *Store) Forget(_ context.Context, key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, err := s.load()
-	if err != nil {
-		return err
-	}
-	if _, ok := data.Entries[key]; !ok {
+func (s *Store) Forget(ctx context.Context, key string) error {
+	lctx, cancel := lockCtx(ctx)
+	defer cancel()
+	return s.withExclusiveLock(lctx, func(data *persisted) error {
+		delete(data.Entries, key)
 		return nil
-	}
-	delete(data.Entries, key)
-	return s.save(data)
+	})
 }
 
 // load reads and decodes the on-disk file. A missing file is an empty store, not
-// an error. The caller must hold s.mu.
+// an error. The caller must hold s.mu AND the (shared or exclusive) flock.
 func (s *Store) load() (persisted, error) {
 	raw, err := os.ReadFile(s.path)
 	if err != nil {
@@ -164,7 +320,7 @@ func (s *Store) load() (persisted, error) {
 
 // save atomically writes data: it encodes to a temp file in the same directory,
 // fsyncs it, then renames over the target so a reader never sees a partial file.
-// The caller must hold s.mu.
+// The caller must hold s.mu AND the exclusive flock.
 func (s *Store) save(data persisted) error {
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {

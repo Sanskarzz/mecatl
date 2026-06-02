@@ -48,8 +48,11 @@ func TestBaseEngineDepsCarriesFullCollaboratorSet(t *testing.T) {
 	hooks := hookexec.New(nil)
 	counter := buildTokenCounter(cfg)
 
-	deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, nil)
+	deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, nil, prompt.RootAssembler{})
 
+	if deps.Instructions == nil {
+		t.Fatal("Instructions is nil — turn-0 project instructions / memory index would not assemble")
+	}
 	if deps.Compactor == nil {
 		t.Fatal("Compactor is nil — per-session engine would never compact")
 	}
@@ -98,7 +101,7 @@ func TestSessionEngineFactoryBuildsUsableEngine(t *testing.T) {
 	hooks := hookexec.New(nil)
 	counter := buildTokenCounter(cfg)
 
-	factory := sessionEngineFactory(cfg, provider, store, policy, hooks, counter, nil)
+	factory := sessionEngineFactory(cfg, provider, store, policy, hooks, counter, nil, prompt.RootAssembler{})
 
 	eng, closeFn, err := factory(context.Background(), []mcp.ServerConfig{})
 	if err != nil {

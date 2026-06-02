@@ -165,13 +165,21 @@ type Workspace interface {
 }
 
 // MemoryEntry is a single cross-session memory record: an opaque key, its stored
-// value, and the wall-clock time it was last written. It is the unit returned by
-// MemoryStore.Recall and MemoryStore.List.
+// value, an optional one-line description, and the wall-clock time it was last
+// written. It is the unit returned by MemoryStore.Recall, MemoryStore.List and
+// MemoryStore.Index.
 type MemoryEntry struct {
 	// Key is the opaque lookup key (e.g. "pref/test-runner").
 	Key string
-	// Value is the stored text. The store treats it as opaque bytes.
+	// Value is the stored text. The store treats it as opaque bytes. It is
+	// EMPTY in MemoryStore.Index results, which omit values by design (the
+	// tier-0 index carries only the routing table, not the payload).
 	Value string
+	// Description is an optional one-line summary used as the tier-0 index hook.
+	// When empty on write, the store derives one from the value's first line; so
+	// Index results always carry a non-empty Description even for entries that
+	// were stored without one.
+	Description string
 	// UpdatedAt is the wall-clock time the entry was last written.
 	UpdatedAt time.Time
 }
@@ -188,8 +196,17 @@ type MemoryEntry struct {
 // shared across unrelated projects. Implementations must be safe for concurrent
 // use and durable across process restarts.
 type MemoryStore interface {
-	// Remember stores value under key, overwriting any existing entry and
-	// bumping its UpdatedAt. An empty key is rejected.
+	// RememberEntry stores e, overwriting any existing entry under e.Key and
+	// bumping its UpdatedAt. e.Description is the optional one-line tier-0 hook;
+	// an empty description means "derive from the value's first line on Index".
+	// An empty key is rejected. RememberEntry is the full-fidelity write;
+	// Remember is a convenience wrapper over it.
+	RememberEntry(ctx context.Context, e MemoryEntry) error
+	// Remember stores value under key with no explicit description (the index
+	// derives one from the value), overwriting any existing entry and bumping its
+	// UpdatedAt. An empty key is rejected. It is a convenience wrapper over
+	// RememberEntry, kept so callers that do not care about descriptions stay
+	// unchanged.
 	Remember(ctx context.Context, key, value string) error
 	// Recall returns the entry for the exact key. The boolean reports whether an
 	// entry was found; a miss is (zero, false, nil), not an error.
@@ -199,6 +216,13 @@ type MemoryStore interface {
 	List(ctx context.Context, prefix string) ([]MemoryEntry, error)
 	// Forget deletes the entry for key. Deleting a missing key is not an error.
 	Forget(ctx context.Context, key string) error
+	// Index returns the tier-0 routing table: every entry as (key, description,
+	// updated-at) with the VALUE OMITTED, sorted by key for deterministic output.
+	// The store fills Description (explicit, else derived from the value's first
+	// line) but does NOT apply the tier-0 size cap — capping/rendering is the
+	// consumer's concern. It is the cheap, always-in-context summary view that
+	// lets the model see what it has stored without loading every value.
+	Index(ctx context.Context) ([]MemoryEntry, error)
 }
 
 // GrepMatch is a single Workspace.Grep hit.
