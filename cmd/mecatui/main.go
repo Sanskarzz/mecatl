@@ -158,9 +158,11 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 // cross-session memory (Remember/Recall) scoped per-project (see resolveMemoryDir;
 // disable with --no-memory or relocate with --memory-dir), slash-command expansion
 // from the conventional dirs (.mecatl/commands, .claude/commands; disable with
-// --no-commands or relocate with --commands-dir), and conventional skill discovery
+// --no-commands or relocate with --commands-dir), conventional skill discovery
 // (the read-only Skill tool over .claude/skills etc.; disable with --no-skills or
-// scope with --skills-dir). It leaves the heavier opt-ins (MCP, ToolHive, telemetry,
+// scope with --skills-dir), and ToolHive MCP server discovery (ToolHiveEnabled:
+// true, fail-soft when no runtime is reachable, so inert on a laptop without
+// Podman/Docker). It leaves the heavier opt-ins (static --mcp-server, telemetry,
 // the writable SkillDraft quarantine) off — a focused single-user default. The
 // provider is OpenAI when OPENAI_API_KEY is set, else the offline mock (--mock).
 func embeddedConfig(cfg config) app.Config {
@@ -204,6 +206,17 @@ func embeddedConfig(cfg config) app.Config {
 		// with --no-skills; scope to one vetted dir with --skills-dir.
 		SkillsDirs:         skillDirs,
 		SkillsConventional: skillsConv,
+		// ToolHive MCP discovery ON by default (the "default" group). Fail-soft when
+		// no container runtime is reachable (degrades to zero servers + diagnostic),
+		// so it's inert on a laptop without Podman/Docker. When workloads ARE running,
+		// their tools register automatically — the same single-user convenience as
+		// agents/skills/commands. Static --mcp-server stays off (heavier opt-in).
+		ToolHiveEnabled: true,
+		ToolHiveGroup:   "", // empty -> "default"
+		// MCP resource/prompt tools: ON when a connected server exposes them (no-op
+		// when none do or when ToolHive discovers zero servers).
+		MCPResourceTools: true,
+		MCPPrompts:       true,
 	}
 }
 
