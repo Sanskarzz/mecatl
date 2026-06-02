@@ -42,6 +42,9 @@ func (noopMemStore) Recall(context.Context, string) (tool.MemoryEntry, bool, err
 func (noopMemStore) List(context.Context, string) ([]tool.MemoryEntry, error) { return nil, nil }
 func (noopMemStore) Forget(context.Context, string) error                     { return nil }
 func (noopMemStore) Index(context.Context) ([]tool.MemoryEntry, error)        { return nil, nil }
+func (noopMemStore) Search(context.Context, string, int) ([]tool.MemoryEntry, error) {
+	return nil, nil
+}
 
 // stubMemberEngine satisfies Config.MemberEngine (MemberEngineFactory) just
 // enough to be non-nil; the Service only nil-checks it for the teams cap. It is

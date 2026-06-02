@@ -223,6 +223,15 @@ type MemoryStore interface {
 	// consumer's concern. It is the cheap, always-in-context summary view that
 	// lets the model see what it has stored without loading every value.
 	Index(ctx context.Context) ([]MemoryEntry, error)
+	// Search ranks entries by lexical relevance to query (a local, dependency-free
+	// BM25 over each entry's key + derived description + value) and returns the top
+	// k matches best-first. Like Index, results carry (key, description, updated-at)
+	// with the VALUE OMITTED — the value participates in scoring but is never
+	// returned; callers Recall a key to load it. Results are deterministically
+	// ordered (score descending, then key ascending). Entries with no query-term
+	// overlap (zero score) are dropped. An empty or whitespace-only query yields an
+	// empty slice, NOT an error. k <= 0 selects the store's default page size.
+	Search(ctx context.Context, query string, k int) ([]MemoryEntry, error)
 }
 
 // GrepMatch is a single Workspace.Grep hit.

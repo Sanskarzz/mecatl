@@ -305,6 +305,44 @@ func (s *Store) Index(ctx context.Context) ([]tool.MemoryEntry, error) {
 	return out, nil
 }
 
+// Search ranks entries by BM25 lexical relevance to query (over each entry's
+// key + derived description + value) and returns the top k best-first, with the
+// VALUE OMITTED and Description filled — mirroring Index's result shape. Ranking
+// runs INSIDE the shared lock, over the freshly loaded data, so it sees a
+// consistent snapshot and never races a concurrent write. An empty or
+// whitespace-only query short-circuits to an empty result (no lock, no error);
+// k <= 0 uses the default page size. See bm25Rank for the scoring/ordering rules.
+func (s *Store) Search(ctx context.Context, query string, k int) ([]tool.MemoryEntry, error) {
+	if strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+	lctx, cancel := lockCtx(ctx)
+	defer cancel()
+	var out []tool.MemoryEntry
+	err := s.withSharedLock(lctx, func(data persisted) error {
+		entries := make([]tool.MemoryEntry, 0, len(data.Entries))
+		for key, r := range data.Entries {
+			entries = append(entries, tool.MemoryEntry{
+				Key:         key,
+				Value:       r.Value,
+				Description: deriveDescription(r),
+				UpdatedAt:   r.UpdatedAt,
+			})
+		}
+		out = bm25Rank(entries, query, k)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Defence in depth: bm25Rank already omits values, but guarantee no value
+	// ever escapes Search regardless of future ranking changes.
+	for i := range out {
+		out[i].Value = ""
+	}
+	return out, nil
+}
+
 // deriveDescription returns r's tier-0 one-line description, delegating to the
 // shared derivation: explicit Description if set, else the value's first non-empty
 // line.

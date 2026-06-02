@@ -65,6 +65,10 @@ func (s *fakeStore) List(_ context.Context, prefix string) ([]tool.MemoryEntry, 
 	return out, nil
 }
 
+func (*fakeStore) Search(_ context.Context, _ string, _ int) ([]tool.MemoryEntry, error) {
+	return nil, nil
+}
+
 func (s *fakeStore) Forget(_ context.Context, key string) error {
 	s.forget++
 	delete(s.entries, key)

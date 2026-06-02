@@ -304,3 +304,57 @@ func TestStoreConcurrentRememberNoCorruption(t *testing.T) {
 		t.Errorf("after %d concurrent writes, got %d entries", n, len(all))
 	}
 }
+
+func TestStoreSearchRanksAndOmitsValues(t *testing.T) {
+	st, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	const secret = "SECRET-VALUE-SHOULD-NOT-RENDER"
+	if err := st.RememberEntry(ctx, tool.MemoryEntry{
+		Key: "pref/test-runner", Value: secret, Description: "preferred test runner",
+	}); err != nil {
+		t.Fatalf("RememberEntry: %v", err)
+	}
+	if err := st.RememberEntry(ctx, tool.MemoryEntry{
+		Key: "project/deploy-gate", Value: "staging deploy needs manual approval", Description: "deploy gate",
+	}); err != nil {
+		t.Fatalf("RememberEntry: %v", err)
+	}
+	if err := st.RememberEntry(ctx, tool.MemoryEntry{
+		Key: "pref/editor", Value: "vim", Description: "favourite editor",
+	}); err != nil {
+		t.Fatalf("RememberEntry: %v", err)
+	}
+
+	got, err := st.Search(ctx, "preferred test runner", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("expected at least one search result")
+	}
+	if got[0].Key != "pref/test-runner" {
+		t.Errorf("top result = %q, want pref/test-runner", got[0].Key)
+	}
+	for _, e := range got {
+		if e.Value != "" {
+			t.Errorf("Search result %q leaked a value: %q", e.Key, e.Value)
+		}
+	}
+}
+
+func TestStoreSearchEmptyQuery(t *testing.T) {
+	st, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := st.Search(context.Background(), "  ", 10)
+	if err != nil {
+		t.Fatalf("Search empty query should not error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("empty query should return no results, got %d", len(got))
+	}
+}

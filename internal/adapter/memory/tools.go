@@ -21,6 +21,8 @@ const (
 	RememberToolName = "Remember"
 	// RecallToolName is the catalog name of the Recall tool.
 	RecallToolName = "Recall"
+	// SearchMemoryToolName is the catalog name of the SearchMemory tool.
+	SearchMemoryToolName = "SearchMemory"
 )
 
 // --- Descriptions ---------------------------------------------------------
@@ -75,6 +77,9 @@ Behavior:
 - Your current memory INDEX (every saved key + a one-line description, value
   omitted) is shown to you automatically at the start of each session. Use Recall
   to load the FULL value of a key you see in that index.
+- The index is capped, so older entries may be omitted from it. If the key you
+  need is not in the index, use SearchMemory with a topic query to find candidate
+  keys, then Recall the key it returns.
 - A key that exactly matches an entry returns that entry's full value.
 - A key that matches no exact entry is treated as a PREFIX and returns every
   entry whose key starts with it (sorted by key).
@@ -90,6 +95,21 @@ Arguments:
 
 Example:
   {"key": "pref/"}   lists every saved preference.`
+
+// searchMemoryDescription is the model-facing documentation for the SearchMemory
+// tool.
+const searchMemoryDescription = `Search your cross-session project memory by topic and get back the best-matching keys, ranked by lexical relevance. Use this to FIND saved facts not shown in your tier-0 memory index (the index is capped, so older entries may be omitted).
+
+The memory recall loop is: (1) check the tier-0 memory index shown at session start; (2) if what you need is not there, SearchMemory with a topic query to find candidate keys; (3) Recall the key to load its full value.
+
+Results are "key — one-line description" lines, ranked best-first; values are omitted (Recall a key to load its full value). Ranking is local and lexical (term overlap), so phrase your query with the words you expect in the key or description, e.g. "preferred test runner".
+
+When NOT to use:
+- To discover facts about the current code: use Read, Grep, and Glob. Memory holds only what was deliberately saved with Remember.
+
+Arguments:
+- query (required): topic words to rank against.
+- limit (optional): max results (default 10).`
 
 // --- Remember tool --------------------------------------------------------
 
@@ -248,6 +268,80 @@ func (rt RecallTool) Execute(ctx context.Context, in session.ToolCall, _ tool.Wo
 	return session.NewToolResult(in.ID, truncateMemory(b.String())), nil
 }
 
+// --- SearchMemory tool ----------------------------------------------------
+
+// SearchMemoryTool ranks memory entries by lexical relevance to a query and
+// returns the best-matching keys (value omitted). It is read-only
+// (ReadOnly() == true) so the loop may dispatch it in parallel with other reads.
+type SearchMemoryTool struct {
+	store tool.MemoryStore
+}
+
+// NewSearchMemoryTool constructs the SearchMemory tool bound to store. store
+// must be non-nil.
+func NewSearchMemoryTool(store tool.MemoryStore) tool.Tool {
+	if store == nil {
+		panic("memory: NewSearchMemoryTool requires a non-nil MemoryStore")
+	}
+	return SearchMemoryTool{store: store}
+}
+
+// Compile-time assertion that SearchMemoryTool implements tool.Tool.
+var _ tool.Tool = SearchMemoryTool{}
+
+// searchMemoryArgs is the JSON argument shape for the SearchMemory tool.
+type searchMemoryArgs struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit"`
+}
+
+// Spec returns the model-facing specification of the SearchMemory tool.
+func (SearchMemoryTool) Spec() tool.ToolSpec {
+	return tool.ToolSpec{
+		Name:        SearchMemoryToolName,
+		Description: searchMemoryDescription,
+		Schema: schema(`{
+  "type": "object",
+  "properties": {
+    "query": {"type": "string", "description": "Topic words to rank memory entries against, e.g. \"preferred test runner\"."},
+    "limit": {"type": "integer", "description": "Optional maximum number of results to return (default 10)."}
+  },
+  "required": ["query"]
+}`),
+	}
+}
+
+// ReadOnly reports that SearchMemory does not mutate state.
+func (SearchMemoryTool) ReadOnly() bool { return true }
+
+// Execute ranks entries against the query and renders the best matches as
+// "key — description" lines (values omitted; Recall a key to load its value).
+func (st SearchMemoryTool) Execute(ctx context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+	var args searchMemoryArgs
+	if msg, ok := parseArgs(in, &args); !ok {
+		return session.NewToolError(in.ID, msg), nil
+	}
+	if strings.TrimSpace(args.Query) == "" {
+		return session.NewToolError(in.ID, "the \"query\" argument is required"), nil
+	}
+
+	entries, err := st.store.Search(ctx, args.Query, args.Limit)
+	if err != nil {
+		return session.NewToolError(in.ID, fmt.Sprintf("could not search memory for %q: %v", args.Query, err)), nil
+	}
+	if len(entries) == 0 {
+		// A no-hit search is a clear, non-error result so the model can proceed.
+		return session.NewToolResult(in.ID, fmt.Sprintf("No memory entries match %q. (Try different words, or check the tier-0 index for exact keys.)", args.Query)), nil
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d match%s for %q (best first; Recall a key to load its full value):\n", len(entries), matchPlural(len(entries)), args.Query)
+	for _, e := range entries {
+		fmt.Fprintf(&b, "- %s — %s\n", e.Key, e.Description)
+	}
+	return session.NewToolResult(in.ID, truncateMemory(b.String())), nil
+}
+
 // --- Registration helpers -------------------------------------------------
 
 // Tools returns the memory tools (Recall + Remember) bound to store, ready for
@@ -258,6 +352,7 @@ func Tools(store tool.MemoryStore) []tool.Tool {
 	return []tool.Tool{
 		NewRecallTool(store),
 		NewRememberTool(store),
+		NewSearchMemoryTool(store),
 	}
 }
 
@@ -299,4 +394,12 @@ func plural(n int) string {
 		return "y"
 	}
 	return "ies"
+}
+
+// matchPlural returns "" for one match and "es" otherwise, for "match{,es}".
+func matchPlural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "es"
 }

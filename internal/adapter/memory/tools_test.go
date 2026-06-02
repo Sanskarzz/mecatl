@@ -68,6 +68,25 @@ func (f *fakeStore) List(_ context.Context, prefix string) ([]tool.MemoryEntry, 
 	return out, nil
 }
 
+func (f *fakeStore) Search(_ context.Context, query string, k int) ([]tool.MemoryEntry, error) {
+	if strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	entries := make([]tool.MemoryEntry, 0, len(f.m))
+	for key, e := range f.m {
+		entries = append(entries, tool.MemoryEntry{
+			Key:         key,
+			Value:       e.Value,
+			Description: descriptionOrFirstLine(e.Description, e.Value),
+			UpdatedAt:   e.UpdatedAt,
+		})
+	}
+	// Reuse the real ranker (same package) so the fake mirrors the Store.
+	return bm25Rank(entries, query, k), nil
+}
+
 func (f *fakeStore) Forget(_ context.Context, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -232,14 +251,14 @@ func TestMemoryToolsMalformedArgs(t *testing.T) {
 
 func TestMemoryToolsRegistration(t *testing.T) {
 	fs := newFakeStore()
-	if len(Tools(fs)) != 2 {
-		t.Fatalf("Tools() = %d, want 2", len(Tools(fs)))
+	if len(Tools(fs)) != 3 {
+		t.Fatalf("Tools() = %d, want 3", len(Tools(fs)))
 	}
 	cat := tool.NewCatalog()
 	if err := Register(cat, fs); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	for _, name := range []string{"Recall", "Remember"} {
+	for _, name := range []string{"Recall", "Remember", "SearchMemory"} {
 		if _, ok := cat.Lookup(name); !ok {
 			t.Errorf("catalog missing %q after Register", name)
 		}
@@ -264,8 +283,88 @@ func TestMemoryToolSpecsHaveDocs(t *testing.T) {
 	}
 }
 
+func TestSearchMemoryRanksRelevantFirst(t *testing.T) {
+	fs := newFakeStore()
+	ctx := context.Background()
+	_ = fs.RememberEntry(ctx, tool.MemoryEntry{
+		Key: "pref/test-runner", Value: "Run tests with gotestsum", Description: "preferred test runner",
+	})
+	_ = fs.RememberEntry(ctx, tool.MemoryEntry{
+		Key: "project/deploy-gate", Value: "staging deploy needs manual approval", Description: "deploy gate",
+	})
+	_ = fs.RememberEntry(ctx, tool.MemoryEntry{
+		Key: "pref/editor", Value: "vim", Description: "favourite editor",
+	})
+
+	res := exec(t, NewSearchMemoryTool(fs), call(t, "SearchMemory", map[string]any{
+		"query": "preferred test runner",
+	}))
+	if res.IsError {
+		t.Fatalf("SearchMemory errored: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "pref/test-runner") {
+		t.Fatalf("expected the relevant key in results:\n%s", res.Content)
+	}
+	// The relevant key must rank ahead of the unrelated ones by byte position.
+	rel := strings.Index(res.Content, "pref/test-runner")
+	for _, other := range []string{"project/deploy-gate", "pref/editor"} {
+		if oi := strings.Index(res.Content, other); oi >= 0 && oi < rel {
+			t.Errorf("%q ranked before pref/test-runner:\n%s", other, res.Content)
+		}
+	}
+}
+
+func TestSearchMemoryOmitsValues(t *testing.T) {
+	fs := newFakeStore()
+	const secret = "SECRET-VALUE-SHOULD-NOT-RENDER"
+	_ = fs.RememberEntry(context.Background(), tool.MemoryEntry{
+		Key: "pref/test-runner", Value: secret, Description: "preferred test runner",
+	})
+	res := exec(t, NewSearchMemoryTool(fs), call(t, "SearchMemory", map[string]any{
+		"query": "preferred test runner",
+	}))
+	if res.IsError {
+		t.Fatalf("SearchMemory errored: %s", res.Content)
+	}
+	if strings.Contains(res.Content, secret) {
+		t.Errorf("SearchMemory leaked a stored value:\n%s", res.Content)
+	}
+	if !strings.Contains(res.Content, "pref/test-runner") {
+		t.Errorf("SearchMemory should still return the key:\n%s", res.Content)
+	}
+}
+
+func TestSearchMemoryEmptyQueryIsError(t *testing.T) {
+	fs := newFakeStore()
+	res := exec(t, NewSearchMemoryTool(fs), call(t, "SearchMemory", map[string]any{"query": "   "}))
+	if !res.IsError {
+		t.Errorf("empty/whitespace query should be a tool error, got %q", res.Content)
+	}
+}
+
+func TestSearchMemoryNoHitIsNotError(t *testing.T) {
+	fs := newFakeStore()
+	_ = fs.Remember(context.Background(), "pref/editor", "vim")
+	res := exec(t, NewSearchMemoryTool(fs), call(t, "SearchMemory", map[string]any{
+		"query": "kubernetes deployment topology",
+	}))
+	if res.IsError {
+		t.Errorf("a no-hit search must NOT be an error result: %s", res.Content)
+	}
+	if !strings.Contains(strings.ToLower(res.Content), "no memory entries match") {
+		t.Errorf("expected a clear no-hit message, got %q", res.Content)
+	}
+}
+
+func TestSearchMemoryReadOnly(t *testing.T) {
+	fs := newFakeStore()
+	if !NewSearchMemoryTool(fs).ReadOnly() {
+		t.Error("SearchMemory.ReadOnly() must be true")
+	}
+}
+
 func TestNewMemoryToolsNilStorePanics(t *testing.T) {
-	for _, ctor := range []func(tool.MemoryStore) tool.Tool{NewRememberTool, NewRecallTool} {
+	for _, ctor := range []func(tool.MemoryStore) tool.Tool{NewRememberTool, NewRecallTool, NewSearchMemoryTool} {
 		func() {
 			defer func() {
 				if recover() == nil {
