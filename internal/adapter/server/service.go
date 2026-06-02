@@ -570,11 +570,22 @@ func (s *Service) StartRun(ctx context.Context, id session.SessionID, text strin
 // UserPromptSubmit hook operate on the TEXT only (see Engine.RunContent). All
 // other behaviour (workspace/engine selection, registration, drain contract) is
 // identical to StartRun.
+//
+// It reopens-if-completed (via loadAndReopen) so a follow-up prompt on a session
+// that cleanly finished a prior turn continues it — the in-process multi-turn
+// counterpart to the cross-process LoadSession resume path.
 func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, text string, parts []session.Content) (*agent.Run, error) {
 	if text == "" && len(parts) == 0 {
 		return nil, fmt.Errorf("%w: prompt text or parts is required", ErrInvalidArgument)
 	}
-	sess, err := s.GetSession(ctx, id)
+	// loadAndReopen (not GetSession): a session that cleanly completed a prior turn
+	// is in StateCompleted, and the engine's RecordUserPrompt rejects a terminal
+	// state — so an in-process follow-up prompt (interactive multi-turn chat, a
+	// long-lived teammate) must reopen-if-completed FIRST, exactly as the
+	// cross-process LoadSession resume path does. A freshly-created idle session is
+	// returned unchanged; a failed/cancelled session is NOT reopened, so its illegal
+	// transition still surfaces rather than silently continuing a broken session.
+	sess, err := s.loadAndReopen(ctx, id)
 	if err != nil {
 		return nil, err
 	}

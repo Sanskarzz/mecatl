@@ -108,6 +108,57 @@ func TestStartRunDelegatesToContent(t *testing.T) {
 	}
 }
 
+// TestStartRunContentReopensCompletedSession is the regression guard for the
+// in-process multi-turn bug: a first prompt drives the session to StateCompleted
+// (and persists it), and a second StartRun on the same session id must reopen it
+// rather than fail with "RecordUserPrompt from completed". It mirrors the
+// cross-process LoadSession resume path for an interactive multi-turn chat.
+func TestStartRunContentReopensCompletedSession(t *testing.T) {
+	llm := mockllm.New(mockllm.TextTurn("first"), mockllm.TextTurn("second"))
+	svc := newService(t, llm, allowRules())
+
+	sess, err := svc.CreateSession(context.Background(), "/ws", session.ModeDefault, session.Limits{MaxTurns: 2})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// First turn → runs to completion and persists StateCompleted.
+	run, err := svc.StartRun(context.Background(), sess.ID, "hello")
+	if err != nil {
+		t.Fatalf("StartRun #1: %v", err)
+	}
+	drainRun(t, run)
+	svc.Persist(context.Background(), sess.ID)
+	svc.FinishRun(sess.ID, run)
+
+	if got, _ := svc.GetSession(context.Background(), sess.ID); got.State != session.StateCompleted {
+		t.Fatalf("precondition: state after turn #1 = %q, want completed", got.State)
+	}
+
+	// Second prompt on the SAME session must succeed (reopen-if-completed).
+	run, err = svc.StartRun(context.Background(), sess.ID, "again")
+	if err != nil {
+		t.Fatalf("StartRun #2 on completed session: %v", err)
+	}
+	drainRun(t, run)
+	svc.Persist(context.Background(), sess.ID)
+	svc.FinishRun(sess.ID, run)
+
+	got, err := svc.GetSession(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	var userPrompts int
+	for _, m := range got.Conversation.Messages {
+		if m.Role == session.RoleUser {
+			userPrompts++
+		}
+	}
+	if userPrompts != 2 {
+		t.Fatalf("user prompts = %d, want 2 (history preserved across reopen)", userPrompts)
+	}
+}
+
 func TestProviderCapabilitiesSurface(t *testing.T) {
 	want := port.ProviderCapabilities{Image: true, EmbeddedContext: true}
 	llm := mockllm.NewWith([]mockllm.Option{mockllm.WithCapabilities(want)})
