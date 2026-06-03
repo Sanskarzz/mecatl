@@ -135,6 +135,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.endRun(stopError)
 		mm, drainCmd := m.drainQueue(stopError)
 		return mm, tea.Batch(m.refreshCmd(), drainCmd)
+	case clipboardResultMsg:
+		return m.onClipboardResult(msg)
+	case clipboardErrMsg:
+		return m.onClipboardErr(msg)
 	case client.StreamClosedMsg:
 		// Clean close. If a run was still active (no terminal result seen),
 		// finalise it; otherwise it's the expected post-result close (no-op).
@@ -369,6 +373,16 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// ctrl+v reads the OS clipboard into the prompt (image → staged attachment,
+	// text → inserted). It is handled here — before the phase switch — for the two
+	// input-accepting phases (idle + running, both keep the textarea focused for
+	// compose/enqueue), so it behaves identically in either and is not duplicated in
+	// both per-phase handlers. It is not a palette/mention nav key, so routing it
+	// ahead of those menus shadows nothing.
+	if key.Matches(msg, m.keys.Paste) && (m.phase == phaseIdle || m.phase == phaseRunning) {
+		return m.onClipboardPaste()
+	}
+
 	switch m.phase {
 	case phaseAwaitingApproval:
 		return m.onApprovalKey(msg)
@@ -397,6 +411,14 @@ func (m Model) onPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.phase != phaseIdle && m.phase != phaseRunning {
 		return m, nil
+	}
+	// A bracketed paste whose payload is a single media FILE PATH (the common
+	// drag-an-image-onto-the-terminal flow) is staged as an attachment instead of
+	// inserted literally. On ANY miss (not a path, not media, cap-gated, oversize)
+	// it returns ok=false and we fall through to the literal-text insert below
+	// (iteration-1 behaviour) — so prose pastes are completely unaffected.
+	if mm, cmd, ok := m.tryPasteMediaPath(msg.Content); ok {
+		return mm, cmd
 	}
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
@@ -775,6 +797,46 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 		media = res
 		for _, body := range res.InlineText {
 			text = strings.TrimSpace(text + "\n\n" + body)
+		}
+	}
+	// Reconcile staged clipboard / pasted-path image attachments. A "[Image #N]"
+	// marker that still survives in the prompt text (the user did not delete it
+	// while editing) becomes an inline media part; markers ascending by N → parts in
+	// display order. Each is rebuilt at submit time via client.StageClipboardImage
+	// (the same cap-gate + size-cap choke point), so a cap that flipped or an
+	// oversize blob LOUD-rejects here too: surface it, keep the input, send nothing.
+	// The markers are UI tokens, so they are STRIPPED from the sent text.
+	hadStaged := len(m.stagedMedia) > 0
+	for _, marker := range survivingMarkers(text, m.stagedMedia) {
+		sa := m.stagedMedia[marker]
+		part, desc, err := client.StageClipboardImage(sa.mime, sa.data, m.caps)
+		if err != nil {
+			m.conv.addError("attach: " + err.Error())
+			m.refreshView()
+			return m, nil
+		}
+		media.Parts = append(media.Parts, part)
+		media.Descriptors = append(media.Descriptors, desc)
+		text = stripMarker(text, marker)
+	}
+	if hadStaged {
+		// Drop the staged set (whether sent or — for deleted markers — discarded);
+		// trim the whole text (stripMarker already removed the stray spaces around
+		// each marker, so multi-line structure and inner newlines are preserved).
+		text = strings.TrimSpace(text)
+		m.stagedMedia = nil
+		m.nextMediaN = 0
+	}
+	// Re-check the COMBINED media aggregate (mention parts + clipboard parts):
+	// ExpandMentions capped its own parts, but the clipboard reconciliation appended
+	// more, so a mention-heavy + clipboard-heavy prompt could cross the per-prompt
+	// caps. Loud-reject client-side (keep input, send nothing) exactly like the
+	// mention over-cap path, rather than letting the server reject post-send.
+	if hadStaged {
+		if err := media.CheckAggregateCaps(); err != nil {
+			m.conv.addError("attach: " + err.Error())
+			m.refreshView()
+			return m, nil
 		}
 	}
 	// A media-only prompt (empty text but at least one part) still sends — the proto

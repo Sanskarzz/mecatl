@@ -280,6 +280,115 @@ func TestExpandMentionsUnsupportedFileRefused(t *testing.T) {
 	}
 }
 
+// TestBuildMediaPartImage directly unit-tests the extracted proto-construction
+// choke point: an image with the cap on yields an IMAGE part + "(inline)" desc.
+func TestBuildMediaPartImage(t *testing.T) {
+	png := readFixturePNG(t)
+	part, desc, err := buildMediaPart("image/png", png, Capabilities{Image: true})
+	if err != nil {
+		t.Fatalf("buildMediaPart: %v", err)
+	}
+	if part.GetKind() != mecatlv1.Content_KIND_IMAGE || part.GetMimeType() != "image/png" {
+		t.Errorf("part = %v, want IMAGE image/png", part)
+	}
+	if !bytes.Equal(part.GetData(), png) {
+		t.Errorf("data mismatch")
+	}
+	if desc != "image/png (inline)" {
+		t.Errorf("desc = %q, want image/png (inline)", desc)
+	}
+}
+
+// TestBuildMediaPartCapGated asserts buildMediaPart refuses an image when the cap
+// is off, with a message that survives ExpandMentions' %q wrap.
+func TestBuildMediaPartCapGated(t *testing.T) {
+	_, _, err := buildMediaPart("image/png", readFixturePNG(t), Capabilities{Image: false})
+	if err == nil {
+		t.Fatal("want cap-gated error")
+	}
+	if !strings.Contains(err.Error(), "does not accept images") {
+		t.Errorf("error = %q, want the image-cap message", err)
+	}
+}
+
+// TestBuildMediaPartOversize asserts the per-file cap is enforced in the choke
+// point itself (so every caller — @-mention, clipboard, path-paste — shares it).
+func TestBuildMediaPartOversize(t *testing.T) {
+	big := make([]byte, maxMediaBytes+1)
+	copy(big, readFixturePNG(t))
+	_, _, err := buildMediaPart("image/png", big, Capabilities{Image: true})
+	if err == nil {
+		t.Fatal("want oversize error")
+	}
+	if !strings.Contains(err.Error(), "per-file limit") {
+		t.Errorf("error = %q, want the per-file-limit message", err)
+	}
+}
+
+// TestStagePathMediaImage asserts the path-staging wrapper reads, sniffs, and
+// returns an image attachment's mime/data/descriptor.
+func TestStagePathMediaImage(t *testing.T) {
+	dir := t.TempDir()
+	png := readFixturePNG(t)
+	path := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(path, png, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mime, data, desc, err := StagePathMedia(path, Capabilities{Image: true})
+	if err != nil {
+		t.Fatalf("StagePathMedia: %v", err)
+	}
+	if mime != "image/png" || !bytes.Equal(data, png) || desc != "image/png (inline)" {
+		t.Errorf("got mime=%q desc=%q data=%d bytes", mime, desc, len(data))
+	}
+}
+
+// TestStagePathMediaTextRejected asserts a text file is NOT a media attachment via
+// the path-paste branch (it falls back to a literal paste in the ui).
+func TestStagePathMediaTextRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(path, []byte("plain text"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, _, _, err := StagePathMedia(path, Capabilities{Image: true}); err == nil {
+		t.Fatal("want error for a text file via the media-path branch")
+	}
+}
+
+// TestCheckAggregateCapsCount asserts the re-check (used after the ui merges
+// clipboard parts into a MediaResult) rejects an over-count part set and passes a
+// within-limit one — the per-prompt count cap.
+func TestCheckAggregateCapsCount(t *testing.T) {
+	mk := func(n int) MediaResult {
+		var r MediaResult
+		for i := 0; i < n; i++ {
+			r.Parts = append(r.Parts, &mecatlv1.Content{Kind: mecatlv1.Content_KIND_IMAGE, MimeType: "image/png", Data: []byte{1}})
+		}
+		return r
+	}
+	if err := mk(maxPromptMediaParts).CheckAggregateCaps(); err != nil {
+		t.Errorf("at the limit should pass: %v", err)
+	}
+	err := mk(maxPromptMediaParts + 1).CheckAggregateCaps()
+	if err == nil || !strings.Contains(err.Error(), "too many media attachments") {
+		t.Errorf("over the count cap should report too-many: %v", err)
+	}
+}
+
+// TestCheckAggregateCapsBytes asserts the total-bytes re-check rejects a combined
+// set over the prompt byte cap (each part is under the per-file cap).
+func TestCheckAggregateCapsBytes(t *testing.T) {
+	var r MediaResult
+	for i := 0; i < 3; i++ { // 3 × 8 MiB = 24 MiB > 20 MiB prompt cap
+		r.Parts = append(r.Parts, &mecatlv1.Content{Kind: mecatlv1.Content_KIND_IMAGE, MimeType: "image/png", Data: make([]byte, 8<<20)})
+	}
+	err := r.CheckAggregateCaps()
+	if err == nil || !strings.Contains(err.Error(), "prompt limit") {
+		t.Errorf("over the byte cap should report the prompt-limit: %v", err)
+	}
+}
+
 // TestClientMediaLimitsMatchDomain is the drift sentinel: the client-side fail-
 // fast caps MUST equal the domain caps in internal/session/content.go. They are
 // duplicated (the ui→no-internal layering forbids importing session), so this

@@ -156,6 +156,38 @@ func (c *fakeConv) OpenConverse(_ context.Context) (*client.Stream, error) {
 	return client.NewStream(c.recv, c.send), nil
 }
 
+// fakeClipboard is a scripted client.Clipboard for the ctrl+v tests: Read returns
+// its canned mime/data or err, and records how many times it was called so the
+// cap-gated "image never read" assertion can be made (actually the gate is decided
+// at result time, so calls counts that Read WAS invoked). It implements
+// client.Clipboard so the ui's clipboard path runs with no subprocess.
+type fakeClipboard struct {
+	mime  string
+	data  []byte
+	err   error
+	calls int
+	// seq, when non-nil, returns a DIFFERENT data slice per successive Read (the
+	// i-th call returns seq[i], the last repeats once exhausted). Lets a test stage
+	// byte-distinguishable images across multiple ctrl+v presses so the submit-time
+	// part ordering is assertable. mime still applies to every read.
+	seq [][]byte
+}
+
+func (f *fakeClipboard) Read(_ context.Context) (string, []byte, error) {
+	i := f.calls
+	f.calls++
+	if f.err != nil {
+		return "", nil, f.err
+	}
+	if len(f.seq) > 0 {
+		if i >= len(f.seq) {
+			i = len(f.seq) - 1
+		}
+		return f.mime, f.seq[i], nil
+	}
+	return f.mime, f.data, nil
+}
+
 // fakeMCP is a scripted client.MCP for the overlay tests: each method returns its
 // canned data or a canned error. err, when set, is returned by every call so the
 // overlay's classified-error rendering can be exercised. It implements client.MCP

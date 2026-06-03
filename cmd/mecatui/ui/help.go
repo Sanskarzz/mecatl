@@ -52,6 +52,7 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 		{key: "shift+enter", action: "newline (also ctrl+j)"},
 		{key: "/", action: "slash-command palette (built-ins always; workspace commands when enabled)"},
 		{key: "@", action: "attach a file: image/audio inlines as media (when supported), else inlines text"},
+		{key: "ctrl+v", action: "paste a clipboard image as an attachment (when supported), else paste text"},
 		{key: "esc", action: "cancel the running turn"},
 	})
 

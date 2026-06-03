@@ -43,7 +43,11 @@ type Deps struct {
 	Conv    Converser
 	MCP     client.MCP       // MCP/ToolHive inventory + resources/prompts; nil disables the overlay
 	Cmds    client.Commander // slash-command discovery for the input palette; nil disables it
-	Theme   theme.Theme
+	// Clipboard reads the OS clipboard for ctrl+v paste (image-first, text-fallback).
+	// nil cleanly disables ctrl+v image paste (same convention as nil MCP/Cmds);
+	// main.go populates it with client.NewClipboard().
+	Clipboard client.Clipboard
+	Theme     theme.Theme
 
 	// Display-only context for the header bar.
 	Server    string
@@ -196,6 +200,17 @@ type Model struct {
 
 	// streamCh is the current run's reader channel; WaitForMsg drains it.
 	streamCh chan tea.Msg
+
+	// stagedMedia holds clipboard/pasted-path image attachments not yet sent,
+	// keyed by their literal "[Image #N]" marker (which also sits in the textarea
+	// text). nextMediaN is the monotonic marker counter. The design is
+	// no-live-renumber + reconcile-at-submit: a marker's N is assigned once and
+	// never reused (deleting a marker leaves a numbering gap — fine, documented),
+	// and submitPrompt reconciles by which markers still survive in the sent text
+	// (survivingMarkers), ordering the parts ascending by N. This keeps the paste
+	// handler O(1) and avoids renumbering every staged marker on each edit.
+	stagedMedia map[string]stagedAttachment
+	nextMediaN  int
 }
 
 // New builds the root model from deps. It wires the widgets but does not connect;
@@ -275,6 +290,10 @@ func (m Model) resetSession() Model {
 	m.toolProgress = ""
 	m.queued = nil
 	m.queuePaused = ""
+	// Drop staged-but-unsent media attachments: /clear wipes the session-derived
+	// state, and pasted-but-unsent images are part of that compose state.
+	m.stagedMedia = nil
+	m.nextMediaN = 0
 	return m
 }
 

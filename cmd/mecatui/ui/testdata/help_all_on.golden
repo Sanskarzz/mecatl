@@ -9,6 +9,7 @@
 ┃    shift+enter   newline (also ctrl+j)                                                            ┃
 ┃    /             slash-command palette (built-ins always; workspace commands when enabled)        ┃
 ┃    @             attach a file: image/audio inlines as media (when supported), else inlines text  ┃
+┃    ctrl+v        paste a clipboard image as an attachment (when supported), else paste text       ┃
 ┃    esc           cancel the running turn                                                          ┃
 ┃                                                                                                   ┃
 ┃  While a run is streaming                                                                         ┃

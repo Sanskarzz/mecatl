@@ -152,6 +152,33 @@ drop). Client-side size limits (10 MiB per file, 20 MiB and 16 parts per prompt)
 mirror the server's domain caps and fail fast before opening a stream; the server
 re-validates every part regardless.
 
+### `ctrl+v` — paste a clipboard image
+
+`ctrl+v` reads the **OS clipboard**. The contract is **image-first, text-fallback**:
+
+- a clipboard **image** is staged as an inline attachment and an `[Image #N]` marker
+  is inserted into the prompt (cap-gated on `image` — on a text-only model the image
+  is refused with a status line and nothing is staged);
+- otherwise the clipboard **text** is inserted into the prompt (always — text is not
+  cap-gated, so `ctrl+v` still pastes text on an image-incapable model).
+
+On submit, every surviving `[Image #N]` marker becomes a media part (ascending by
+`N`, in display order), the marker is **stripped** from the sent text, and the part
+rides the same `Prompt.parts` send path as an `@`-mention attachment — there is no
+second send path. Deleting a marker from the input before sending drops that
+attachment. `N` is monotonic and never reused (a delete leaves a numbering gap, by
+design); `/clear` drops any staged-but-unsent attachments.
+
+Dragging an image file onto the terminal usually arrives as a **pasted path**; a
+single media-file path is staged the same way (an `[Image #N]` marker), and anything
+that is not a stageable media file stays literal pasted text.
+
+Clipboard reads shell out to a platform tool — **wl-clipboard** (`wl-paste`, Wayland),
+**xclip** (X11), **pbpaste**/**pngpaste** (macOS), or **PowerShell** (Windows). With
+none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads the
+`«class PNGf»` pasteboard flavour, so an image copied from a **Chromium/Electron** app
+(which uses the `public.png` flavour) may not paste as an image and falls back to text.
+
 ## Keys
 
 | Key | Action |
@@ -159,7 +186,8 @@ re-validates every part regardless.
 | `enter` (idle) | send the prompt |
 | `enter` (while a run streams) | **queue a follow-up** (staged, sent when the turn ends) |
 | `shift+enter` (or `ctrl+j`) | newline in the input |
-| paste | insert clipboard text into the prompt (ignored while an overlay/modal is open) |
+| paste (bracketed) | insert clipboard text into the prompt; a single pasted **media-file path** is staged as an attachment instead (ignored while an overlay/modal is open) |
+| `ctrl+v` | read the OS clipboard — a clipboard **image** stages as an `[Image #N]` attachment (when supported), else paste clipboard **text** (see below) |
 | `esc` (while a run streams) | clear staged input → else clear the queue → else cancel the in-flight run (sends `Cancel`; waits for the terminal result) |
 | `enter` (idle, **paused queue**, empty input) | resume — send the next staged follow-up |
 | `esc` (idle, **paused queue**) | clear staged input → else clear the queue |
@@ -172,10 +200,10 @@ re-validates every part regardless.
 | `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`; plus workspace commands) |
 | `@` | file-mention menu — complete a workspace path, then attach it on submit (see below) |
 
-The `?` overlay enumerates the rest of the chords — `ctrl+o`/`ctrl+r`/`ctrl+p`
-(MCP inventory / resources / prompts), `ctrl+a` (agent team), `ctrl+t`
-(expand/collapse details) — and greys out any whose feature the connected server
-has not enabled (driven by the server's relayed capabilities).
+The `?` overlay enumerates the rest of the chords — `ctrl+v` (paste a clipboard
+image), `ctrl+o`/`ctrl+r`/`ctrl+p` (MCP inventory / resources / prompts), `ctrl+a`
+(agent team), `ctrl+t` (expand/collapse details) — and greys out any whose feature
+the connected server has not enabled (driven by the server's relayed capabilities).
 
 ### Type-while-running and queued follow-ups
 

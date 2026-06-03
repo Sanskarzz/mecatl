@@ -46,6 +46,28 @@ type MediaResult struct {
 	InlineText []string
 }
 
+// CheckAggregateCaps re-validates the per-PROMPT media aggregate (part count and
+// total bytes) over Parts. ExpandMentions already enforces these caps over its own
+// mention parts, but the ui appends clipboard / pasted-path parts to the same
+// MediaResult AFTER that check, so the COMBINED set can exceed the caps. The ui
+// calls this once after merging so a mention-heavy + clipboard-heavy prompt
+// loud-rejects client-side (keep input, send nothing) instead of being rejected
+// post-send by the server. The per-FILE cap is enforced at construction
+// (buildMediaPart), so this only re-checks the two aggregate limits.
+func (r MediaResult) CheckAggregateCaps() error {
+	if len(r.Parts) > maxPromptMediaParts {
+		return fmt.Errorf("too many media attachments (%d, limit %d)", len(r.Parts), maxPromptMediaParts)
+	}
+	total := 0
+	for _, p := range r.Parts {
+		total += len(p.GetData())
+	}
+	if total > maxPromptMediaBytes {
+		return fmt.Errorf("media attachments total %d bytes, over the %d-byte prompt limit", total, maxPromptMediaBytes)
+	}
+	return nil
+}
+
 // ExpandMentions reads each @-mentioned path (the UI has already stat-filtered
 // these to EXISTING REGULAR FILES; a token that is not a real file stays literal
 // prose and never reaches here), sniffs its content type, and routes it to exactly
@@ -76,29 +98,18 @@ func ExpandMentions(paths []string, caps Capabilities) (MediaResult, error) {
 			return MediaResult{}, fmt.Errorf("read %q: %w", p, err)
 		}
 		mime := http.DetectContentType(data[:min(sniffLen, len(data))])
-		kind := mediaKind(mime)
-		switch kind {
-		case mecatlv1.Content_KIND_IMAGE:
-			if !caps.Image {
-				return MediaResult{}, fmt.Errorf("%q is an image (%s) but the server's model does not accept images", p, mime)
-			}
-		case mecatlv1.Content_KIND_AUDIO:
-			if !caps.Audio {
-				return MediaResult{}, fmt.Errorf("%q is audio (%s) but the server's model does not accept audio", p, mime)
-			}
-		default: // KIND_UNSPECIFIED: not media → either text (inline) or unsupported (error).
-			if strings.HasPrefix(mime, "text/") {
-				res.InlineText = append(res.InlineText, inlineTextBlock(p, data))
-				continue
-			}
-			return MediaResult{}, fmt.Errorf("%q (%s) is not a text, image, or audio file", p, mime)
+		if strings.HasPrefix(mime, "text/") {
+			// Not media: inline the text body (a delimited block) into the prompt.
+			res.InlineText = append(res.InlineText, inlineTextBlock(p, data))
+			continue
 		}
-		if len(data) > maxMediaBytes {
-			return MediaResult{}, fmt.Errorf("%q is %d bytes, over the %d-byte per-file limit", p, len(data), maxMediaBytes)
+		part, desc, err := buildMediaPart(mime, data, caps)
+		if err != nil {
+			return MediaResult{}, fmt.Errorf("%q: %w", p, err)
 		}
 		total += len(data)
-		res.Parts = append(res.Parts, &mecatlv1.Content{Kind: kind, MimeType: mime, Data: data})
-		res.Descriptors = append(res.Descriptors, mime+" (inline)")
+		res.Parts = append(res.Parts, part)
+		res.Descriptors = append(res.Descriptors, desc)
 	}
 	if len(res.Parts) > maxPromptMediaParts {
 		return MediaResult{}, fmt.Errorf("too many media attachments (%d, limit %d)", len(res.Parts), maxPromptMediaParts)
@@ -107,6 +118,74 @@ func ExpandMentions(paths []string, caps Capabilities) (MediaResult, error) {
 		return MediaResult{}, fmt.Errorf("media attachments total %d bytes, over the %d-byte prompt limit", total, maxPromptMediaBytes)
 	}
 	return res, nil
+}
+
+// buildMediaPart is the SINGLE proto-construction choke point for a media (image
+// or audio) blob: it cap-gates the kind against the server's capabilities,
+// enforces the per-file size cap, and builds the inline Content part plus its
+// human descriptor. The caller has already established this is NOT text (a text/*
+// mime is inlined upstream, never reaches here); a non-media mime (a PDF, a zip)
+// is a loud "not a text, image, or audio file" error so an explicitly-attached
+// binary is never shipped as raw-byte garbage.
+//
+// Both ExpandMentions (the @-mention path) and the clipboard/path-staging wrappers
+// below route through here, so the cap-gate, the size-cap, and the proto shape are
+// defined once. Errors are bare (no %q path prefix): ExpandMentions wraps each with
+// its mention path, the clipboard path keeps them as-is.
+func buildMediaPart(mime string, data []byte, caps Capabilities) (*mecatlv1.Content, string, error) {
+	kind := mediaKind(mime)
+	switch kind {
+	case mecatlv1.Content_KIND_IMAGE:
+		if !caps.Image {
+			return nil, "", fmt.Errorf("is an image (%s) but the server's model does not accept images", mime)
+		}
+	case mecatlv1.Content_KIND_AUDIO:
+		if !caps.Audio {
+			return nil, "", fmt.Errorf("is audio (%s) but the server's model does not accept audio", mime)
+		}
+	default: // KIND_UNSPECIFIED: not media (text is handled upstream) → unsupported.
+		return nil, "", fmt.Errorf("(%s) is not a text, image, or audio file", mime)
+	}
+	if len(data) > maxMediaBytes {
+		return nil, "", fmt.Errorf("is %d bytes, over the %d-byte per-file limit", len(data), maxMediaBytes)
+	}
+	return &mecatlv1.Content{Kind: kind, MimeType: mime, Data: data}, mime + " (inline)", nil
+}
+
+// StagePathMedia reads a file the UI wants to attach via a drag-and-drop / pasted
+// path, sniffs it, and runs it through the SAME sniff/cap/size logic as an
+// @-mention — returning the sniffed mime, the raw bytes, and the human descriptor
+// for a successful media (image/audio) attachment. It errors for anything that is
+// not a media attachment: a text file (the path-paste branch wants a real media
+// file, not an inline-text body — text falls through to literal paste), an
+// unsupported binary, a cap-gated kind, an oversize file, or an unreadable path.
+// The UI uses this for the pasted-image-PATH branch (it stats for a fast reject,
+// then calls here for the read + sniff + build); on ANY error the UI falls back to
+// inserting the path literally. net/http + proto stay here in client.
+func StagePathMedia(path string, caps Capabilities) (mime string, data []byte, descriptor string, err error) {
+	data, err = os.ReadFile(path) //nolint:gosec // path is a user-pasted file path the user chose to attach; reading it is the feature.
+	if err != nil {
+		return "", nil, "", fmt.Errorf("read %q: %w", path, err)
+	}
+	mime = http.DetectContentType(data[:min(sniffLen, len(data))])
+	if strings.HasPrefix(mime, "text/") {
+		return "", nil, "", fmt.Errorf("%q (%s) is a text file, not a media attachment", path, mime)
+	}
+	_, descriptor, err = buildMediaPart(mime, data, caps)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("%q: %w", path, err)
+	}
+	return mime, data, descriptor, nil
+}
+
+// StageClipboardImage rebuilds clipboard bytes the UI staged (proto-free, as a
+// mime+data pair under an "[Image #N]" marker) into an inline media Content part
+// at SUBMIT time, applying the same cap-gate + size-cap as every other path. The
+// UI appends the returned part to its opaque media.Parts slice and the descriptor
+// to media.Descriptors without ever naming the proto type. It is the submit-side
+// counterpart to onClipboardPaste's staging.
+func StageClipboardImage(mime string, data []byte, caps Capabilities) (*mecatlv1.Content, string, error) {
+	return buildMediaPart(mime, data, caps)
 }
 
 // mediaKind maps a sniffed MIME type to a proto Content kind: image/* → IMAGE,

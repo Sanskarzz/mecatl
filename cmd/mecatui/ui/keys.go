@@ -10,6 +10,10 @@ type keyMap struct {
 	Submit  key.Binding
 	Newline key.Binding
 	Cancel  key.Binding
+	// Paste (ctrl+v) reads the OS clipboard: an image stages as an inline media
+	// attachment ([Image #N]), text inserts into the prompt. Distinct from a
+	// bracketed paste (tea.PasteMsg, handled by onPaste) which never reaches here.
+	Paste   key.Binding
 	Quit    key.Binding
 	Allow   key.Binding
 	Deny    key.Binding
@@ -83,6 +87,10 @@ func defaultKeys() keyMap {
 		Cancel: key.NewBinding(
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "cancel run"),
+		),
+		Paste: key.NewBinding(
+			key.WithKeys("ctrl+v"),
+			key.WithHelp("ctrl+v", "paste image"),
 		),
 		Quit: key.NewBinding(
 			key.WithKeys("ctrl+c"),

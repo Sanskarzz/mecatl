@@ -2,13 +2,102 @@ package ui
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
+	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
+
+// newPastePathModel builds an idle Model rooted at ws (where the media file
+// lives), so a pasted PATH resolves and stats against a real tree.
+func newPastePathModel(t *testing.T, ws string, caps client.Capabilities) Model {
+	t.Helper()
+	conv := &fakeConv{recv: &fakeRecver{}, send: &fakeSender{}}
+	m := New(Deps{
+		Session:     conv,
+		Conv:        conv,
+		Theme:       theme.New("aztec", theme.AztecPalette()),
+		Workspace:   ws,
+		Ctx:         context.Background(),
+		NoAltScreen: true,
+	})
+	return applyAll(m,
+		tea.WindowSizeMsg{Width: 100, Height: 30},
+		client.SessionReadyMsg{SessionID: "sess-test-0001", Capabilities: caps},
+	)
+}
+
+// TestPasteImagePathStages: pasting a single media FILE PATH stages it as an
+// attachment ([Image #1]) instead of inserting the path literally.
+func TestPasteImagePathStages(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "shot.png"), tinyPNG(t), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	m := newPastePathModel(t, ws, client.Capabilities{Image: true})
+
+	mm, _ := m.Update(pasteMsg("shot.png"))
+	m = mm.(Model)
+
+	if len(m.stagedMedia) != 1 {
+		t.Fatalf("staged = %d, want 1 (pasted media path)", len(m.stagedMedia))
+	}
+	if !strings.Contains(m.ta.Value(), "[Image #1]") {
+		t.Errorf("input = %q, want the marker, not the literal path", m.ta.Value())
+	}
+	if strings.Contains(m.ta.Value(), "shot.png") {
+		t.Errorf("input = %q, want the path replaced by the marker", m.ta.Value())
+	}
+}
+
+// TestPasteNonImagePathLiteral: pasting a path that is NOT a media file stays
+// literal text and stages nothing (fall-through to iteration-1 behaviour).
+func TestPasteNonImagePathLiteral(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "notes.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	m := newPastePathModel(t, ws, client.Capabilities{Image: true})
+
+	mm, _ := m.Update(pasteMsg("notes.txt"))
+	m = mm.(Model)
+
+	if len(m.stagedMedia) != 0 {
+		t.Fatalf("staged = %d, want 0 (a .txt path is not media)", len(m.stagedMedia))
+	}
+	if !strings.Contains(m.ta.Value(), "notes.txt") {
+		t.Errorf("input = %q, want the literal path", m.ta.Value())
+	}
+}
+
+// TestPasteImagePathCapGatedLiteral: a media path on an image-INCAPABLE server is
+// NOT staged — StagePathMedia refuses, so onPaste falls through to literal text
+// (no loud error, no marker).
+func TestPasteImagePathCapGatedLiteral(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "shot.png"), tinyPNG(t), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	m := newPastePathModel(t, ws, client.Capabilities{Image: false})
+
+	mm, _ := m.Update(pasteMsg("shot.png"))
+	m = mm.(Model)
+
+	if len(m.stagedMedia) != 0 {
+		t.Fatalf("staged = %d, want 0 (cap-gated path falls through to literal)", len(m.stagedMedia))
+	}
+	if !strings.Contains(m.ta.Value(), "shot.png") {
+		t.Errorf("input = %q, want the literal path on fall-through", m.ta.Value())
+	}
+	if strings.Contains(stripANSIstr(m.View().Content), "attach:") {
+		t.Errorf("cap-gated path-paste should NOT raise a loud error (it falls through)")
+	}
+}
 
 // pasteMsg is the bracketed-paste message Bubble Tea v2 emits on a paste — a
 // struct with the pasted Content (NOT a KeyPressMsg), which is why it needs its
@@ -29,6 +118,9 @@ func TestPasteLandsInInputWhenIdle(t *testing.T) {
 
 	if got := m.ta.Value(); got != "hello pasted world" {
 		t.Fatalf("input value = %q, want the pasted text", got)
+	}
+	if len(m.stagedMedia) != 0 {
+		t.Fatalf("a normal text paste must stage no media, got %v", m.stagedMedia)
 	}
 }
 

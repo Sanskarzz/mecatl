@@ -1,0 +1,64 @@
+# Clipboard image paste (`ctrl+v`)
+
+`ctrl+v` in the mecatui prompt reads the OS clipboard and, when it holds an image,
+stages it as an inline media attachment that rides the existing `Prompt.parts` send
+path. This note records the non-obvious decisions.
+
+## Why shell out (no cgo, no `golang.design/x/clipboard`)
+
+There is no portable, pure-Go clipboard read that works on **Wayland**. The common
+library (`golang.design/x/clipboard`) needs cgo + X11 headers and does not support
+Wayland's `wl-clipboard` protocol at all; on a Wayland session it reads nothing.
+Rather than add a cgo dependency that still fails on the most common modern Linux
+desktop, the reader **shells out** to the platform's clipboard binary:
+
+| Platform | image | text |
+|---|---|---|
+| Wayland | `wl-paste --list-types` → `wl-paste --no-newline --type image/png` | `wl-paste --no-newline` |
+| X11 | `xclip -selection clipboard -t TARGETS -o` → `... -t image/png -o` | `xclip -selection clipboard -o` |
+| macOS | `pngpaste -` | `pbpaste` |
+| Windows | PowerShell `Clipboard.GetImage()` → PNG stream | `Get-Clipboard -Raw` |
+
+argv is always **direct** — never `sh -c` — so there is no shell-injection surface
+(the binary names are fixed by the capability probe; the args are constant). `os/exec`
+is allowed in the `client` package (it already does `os`/`net/http`) but FORBIDDEN in
+`ui`/domain/`port`/`agent`, so the reader lives in `cmd/mecatui/client/clipboard.go`
+behind the proto-free `client.Clipboard` interface the `ui` consumes.
+
+## Image-first, text-fallback
+
+`Read` tries an image first (list the clipboard's types, fetch only if an `image/*`
+type is present; macOS `pngpaste` fetches unconditionally and the output is sniffed),
+and falls back to fetching clipboard **text** when there is no image. The returned
+mime tells the caller which branch to take. This keeps `ctrl+v` useful as a plain
+text paste even on a model that takes no images (image staging is cap-gated; text is
+not). A genuinely empty clipboard is `ErrEmptyClipboard`; no backend binary at all is
+`ErrNoClipboardTool` (which drives an actionable install hint).
+
+## The injected-runner testability seam
+
+`shellClipboard` takes its `run`/`lookPath`/`getenv`/`timeout` as struct fields.
+`NewClipboard()` wires the real `exec.CommandContext(...).Output()`, `exec.LookPath`,
+`os.Getenv`, and a 3s timeout; tests inject a recording runner that returns canned
+image **and** text bytes keyed by argv, asserting the exact backend argv was invoked
+(proving it is not a shell) entirely offline — no real clipboard, no subprocess.
+
+## `[Image #N]` — reconcile at submit, never live-renumber
+
+A staged image is keyed by a literal `[Image #N]` marker inserted into the textarea;
+`N` is monotonic and **never reused**. The model does NOT renumber markers as the user
+edits (deleting `#1` leaves `#2` as `#2`, a documented gap). Instead `submitPrompt`
+**reconciles by presence**: it builds a part for every marker that still survives in
+the sent text (`survivingMarkers`, ordered ascending by `N` → parts in display order),
+strips the markers from the sent text, and clears the staged set. This makes the paste
+handler O(1) and gives a natural "delete the marker to drop the attachment" gesture.
+The proto part is (re)built only at submit via `client.StageClipboardImage`, which
+shares the single `buildMediaPart` cap-gate + size-cap choke point with `@`-mentions,
+so a cap that flipped or an oversize blob loud-rejects on the same path.
+
+## macOS Chromium/Electron gap
+
+`pngpaste` reads the `«class PNGf»` pasteboard flavour. Chromium/Electron apps copy
+images as the `public.png` flavour, which `pngpaste` does not see — so an image copied
+from Chrome may paste as text/empty rather than as an image. There is no shell-only fix
+(it needs an `NSPasteboard` read of the `public.png` UTI); documented as a known gap.

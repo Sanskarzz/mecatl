@@ -97,12 +97,13 @@ func run(args []string) error {
 	defer func() { _ = cl.Close() }()
 
 	deps := ui.Deps{
-		Session: &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: client.ModeFromString(cfg.mode)},
-		Conv:    cl,
-		MCP:     cl,
-		Cmds:    cl,
-		Theme:   th,
-		Server:  target,
+		Session:   &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: client.ModeFromString(cfg.mode)},
+		Conv:      cl,
+		MCP:       cl,
+		Cmds:      cl,
+		Clipboard: client.NewClipboard(),
+		Theme:     th,
+		Server:    target,
 		// Model is best-effort display only. For an EXTERNAL --server it reflects
 		// the locally-configured --model flag and may NOT match the server's actual
 		// model (the server owns provider config); for an embedded server it is
