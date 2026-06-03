@@ -7,20 +7,21 @@
 // into the Engine's EventSink and Logger, mounting MetricsHandler at /metrics,
 // and passing a TracerProvider to NewTracing.
 //
-// # Context limitation
+// # Context
 //
-// port.EventSink.Emit(ev) carries no context.Context, and session.Event has no
-// session-id field. Consequently the tracing implementation cannot link its
-// spans to an inbound gRPC/HTTP request context, and it cannot key spans by run
-// when multiple runs interleave on the same sink. Tracing therefore scopes
-// spans to a single provider-level root per sink instance (see Tracing). Tool
-// child spans are still produced with accurate latency, and the run lifecycle
-// span captures stop reason and token usage. Per-run correlation across
-// concurrent runs requires a future ctx-aware seam (e.g. an Emit(ctx, ev)
-// variant or a per-run sink handed out by the server interceptor).
+// port.EventSink.Emit(ctx, ev) carries the run's context.Context, but
+// session.Event has no session-id field. When the ctx carries a trace span
+// (e.g. the run goroutine was started under an inbound request span), Tracing
+// parents its run span to it, so concurrent runs correlate to their originating
+// request. When the ctx carries no span, Tracing falls back to a single
+// provider-level root per sink instance (see Tracing). Tool child spans are
+// produced with accurate latency, and the run lifecycle span captures stop
+// reason and token usage.
 package telemetry
 
 import (
+	"context"
+
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
 )
@@ -38,9 +39,9 @@ func NewSink(sinks ...port.EventSink) port.EventSink {
 	return &fanOut{sinks: sinks}
 }
 
-// Emit relays ev to every wrapped sink.
-func (f *fanOut) Emit(ev session.Event) {
+// Emit relays ctx and ev to every wrapped sink.
+func (f *fanOut) Emit(ctx context.Context, ev session.Event) {
 	for _, s := range f.sinks {
-		s.Emit(ev)
+		s.Emit(ctx, ev)
 	}
 }

@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,10 +19,10 @@ func TestMetricsEventsTotal(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
 
-	m.Emit(session.Event{Type: session.EvSessionInit})
-	m.Emit(session.Event{Type: session.EvTurnStart, Turn: 0})
-	m.Emit(session.Event{Type: session.EvMessageDelta})
-	m.Emit(session.Event{Type: session.EvMessageDelta})
+	m.Emit(context.Background(), session.Event{Type: session.EvSessionInit})
+	m.Emit(context.Background(), session.Event{Type: session.EvTurnStart, Turn: 0})
+	m.Emit(context.Background(), session.Event{Type: session.EvMessageDelta})
+	m.Emit(context.Background(), session.Event{Type: session.EvMessageDelta})
 
 	if got := testutil.ToFloat64(m.events.WithLabelValues("session.init")); got != 1 {
 		t.Errorf("events_total{session.init} = %v, want 1", got)
@@ -35,11 +36,11 @@ func TestMetricsRunsAndActiveRuns(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
 
-	m.Emit(session.Event{Type: session.EvSessionInit})
+	m.Emit(context.Background(), session.Event{Type: session.EvSessionInit})
 	if got := testutil.ToFloat64(m.activeRuns); got != 1 {
 		t.Fatalf("active_runs after init = %v, want 1", got)
 	}
-	m.Emit(session.Event{Type: session.EvResult, Result: &session.ResultPayload{Stop: session.StopEndTurn}})
+	m.Emit(context.Background(), session.Event{Type: session.EvResult, Result: &session.ResultPayload{Stop: session.StopEndTurn}})
 	if got := testutil.ToFloat64(m.activeRuns); got != 0 {
 		t.Fatalf("active_runs after result = %v, want 0", got)
 	}
@@ -52,7 +53,7 @@ func TestMetricsTokensAndCacheRatio(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
 
-	m.Emit(session.Event{Type: session.EvResult, Result: &session.ResultPayload{
+	m.Emit(context.Background(), session.Event{Type: session.EvResult, Result: &session.ResultPayload{
 		Stop: session.StopEndTurn,
 		Usage: session.Usage{
 			InputTokens:      100,
@@ -82,8 +83,8 @@ func TestMetricsPermissionAsks(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
 
-	m.Emit(session.Event{Type: session.EvPermissionAsk})
-	m.Emit(session.Event{Type: session.EvPermissionAsk})
+	m.Emit(context.Background(), session.Event{Type: session.EvPermissionAsk})
+	m.Emit(context.Background(), session.Event{Type: session.EvPermissionAsk})
 
 	if got := testutil.ToFloat64(m.permAsks); got != 2 {
 		t.Errorf("permission_asks_total = %v, want 2", got)
@@ -113,7 +114,7 @@ func TestMetricsToolCall(t *testing.T) {
 func TestMetricsHandlerServesMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
-	m.Emit(session.Event{Type: session.EvSessionInit})
+	m.Emit(context.Background(), session.Event{Type: session.EvSessionInit})
 
 	srv := httptest.NewServer(MetricsHandler(reg))
 	defer srv.Close()
@@ -141,19 +142,36 @@ func TestMetricsHandlerServesMetrics(t *testing.T) {
 func TestNewSinkFansOut(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
-	c := &countingSink{}
+	c1 := &countingSink{}
+	c2 := &countingSink{}
 
-	sink := NewSink(m, c)
-	sink.Emit(session.Event{Type: session.EvSessionInit})
+	// A ctx with a recognisable value so we can assert the fan-out forwards the
+	// SAME ctx to EVERY wrapped sink, not a fresh background one.
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "marker")
 
-	if c.n != 1 {
-		t.Errorf("fan-out sink count = %d, want 1", c.n)
+	sink := NewSink(m, c1, c2)
+	sink.Emit(ctx, session.Event{Type: session.EvSessionInit})
+
+	if c1.n != 1 || c2.n != 1 {
+		t.Errorf("fan-out sink counts = %d,%d, want 1,1", c1.n, c2.n)
+	}
+	for i, c := range []*countingSink{c1, c2} {
+		if c.lastCtx == nil || c.lastCtx.Value(ctxKey{}) != "marker" {
+			t.Errorf("sink %d did not receive the forwarded ctx (got %v)", i, c.lastCtx)
+		}
 	}
 	if got := testutil.ToFloat64(m.events.WithLabelValues("session.init")); got != 1 {
 		t.Errorf("metrics not driven by fan-out: events_total{session.init} = %v", got)
 	}
 }
 
-type countingSink struct{ n int }
+type countingSink struct {
+	n       int
+	lastCtx context.Context //nolint:containedctx // test double records the forwarded ctx for assertion
+}
 
-func (c *countingSink) Emit(session.Event) { c.n++ }
+func (c *countingSink) Emit(ctx context.Context, _ session.Event) {
+	c.n++
+	c.lastCtx = ctx
+}

@@ -25,22 +25,26 @@ const tracerName = "github.com/stacklok/mecatl/internal/adapter/telemetry"
 //   - a child span per tool, opened on tool.call and ended on the matching
 //     tool.result, keyed by ToolCallID.
 //
-// # Context limitation
+// # Context
 //
-// Because EventSink.Emit carries no context.Context and session.Event has no
-// session id, Tracing cannot link to an inbound request context and cannot
-// distinguish concurrent runs on a single sink. It therefore keeps a single
-// "current run" span per Tracing instance: a result event closes the open run
-// span, and the next session.init opens a fresh one. Tool spans are correlated
-// by ToolCallID, which is unique within a run. For per-run correlation across
-// truly concurrent runs, hand each run its own Tracing/EventSink from a
-// ctx-aware server seam. The span map is mutex-guarded so concurrent Emit calls
-// are safe even under the single-root model.
+// EventSink.Emit carries the run's context.Context. When that ctx carries a
+// trace span (the run goroutine was started under an inbound request span),
+// Tracing parents the run span to it, so concurrent runs each link to their
+// originating request. When the ctx carries no span, Tracing falls back to a
+// single "current run" span per Tracing instance: a result event closes the
+// open run span, and the next session.init opens a fresh one. Tool spans are
+// correlated by ToolCallID, which is unique within a run. The span map is
+// mutex-guarded so concurrent Emit calls are safe.
+//
+// Note: because session.Event has no session id, the single-instance fallback
+// still cannot distinguish two concurrent runs whose ctx carries no span; that
+// case relies on each run having its own ctx span (or its own Tracing/EventSink)
+// for correct correlation.
 type Tracing struct {
 	tracer trace.Tracer
 
 	mu       sync.Mutex
-	runCtx   context.Context //nolint:containedctx // span carrier; no request ctx is available on Emit
+	runCtx   context.Context //nolint:containedctx // per-run span-carrier fallback when Emit's request ctx carries no span
 	runSpan  trace.Span
 	turnSpan trace.Span
 	tools    map[session.ToolCallID]trace.Span
@@ -58,19 +62,20 @@ func NewTracing(tp trace.TracerProvider) *Tracing {
 	}
 }
 
-// Emit maintains run, turn, and tool spans from the event stream.
-func (t *Tracing) Emit(ev session.Event) {
+// Emit maintains run, turn, and tool spans from the event stream. When ctx
+// carries a trace span, a newly opened run span is parented to it.
+func (t *Tracing) Emit(ctx context.Context, ev session.Event) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	switch ev.Type {
 	case session.EvSessionInit:
-		t.startRun()
+		t.startRun(ctx)
 	case session.EvTurnStart:
-		t.ensureRun()
+		t.ensureRun(ctx)
 		t.startTurn(ev.Turn)
 	case session.EvToolCall:
-		t.ensureRun()
+		t.ensureRun(ctx)
 		t.startTool(ev.ToolCall)
 	case session.EvToolResult:
 		t.endTool(ev.ToolResult)
@@ -79,24 +84,30 @@ func (t *Tracing) Emit(ev session.Event) {
 	case session.EvMessageDelta, session.EvPermissionAsk, session.EvHook, session.EvCompaction, session.EvToolProgress:
 		// EvToolProgress is a transient advisory line with no span of its own; it
 		// only ensures the run span exists, like the other in-run lifecycle events.
-		t.ensureRun()
+		t.ensureRun(ctx)
 	}
 }
 
 // ensureRun opens a run span lazily if the first event of a run was not a
 // session.init (defensive: the run span must exist before any child span).
-func (t *Tracing) ensureRun() {
+func (t *Tracing) ensureRun(ctx context.Context) {
 	if t.runSpan == nil {
-		t.startRun()
+		t.startRun(ctx)
 	}
 }
 
-// startRun opens the per-run root span.
-func (t *Tracing) startRun() {
+// startRun opens the per-run root span. When ctx carries a span (a remote or
+// in-process parent), the run span is parented to it so concurrent runs
+// correlate to their originating request; otherwise it starts a fresh root.
+func (t *Tracing) startRun(ctx context.Context) {
 	if t.runSpan != nil {
 		return
 	}
-	t.runCtx, t.runSpan = t.tracer.Start(context.Background(), "mecatl.run")
+	parent := context.Background()
+	if trace.SpanContextFromContext(ctx).IsValid() {
+		parent = ctx
+	}
+	t.runCtx, t.runSpan = t.tracer.Start(parent, "mecatl.run")
 }
 
 // startTurn opens a per-turn child span, ending any previous turn span first.

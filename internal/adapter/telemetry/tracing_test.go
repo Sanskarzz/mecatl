@@ -1,12 +1,15 @@
 package telemetry
 
 import (
+	"context"
+	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/stacklok/mecatl/internal/session"
 )
@@ -40,8 +43,8 @@ func attrInt(s tracetest.SpanStub, key string) (int64, bool) {
 func TestTracingRunSpan(t *testing.T) {
 	tr, exp := newTestTracing(t)
 
-	tr.Emit(session.Event{Type: session.EvSessionInit})
-	tr.Emit(session.Event{Type: session.EvResult, Result: &session.ResultPayload{
+	tr.Emit(context.Background(), session.Event{Type: session.EvSessionInit})
+	tr.Emit(context.Background(), session.Event{Type: session.EvResult, Result: &session.ResultPayload{
 		Stop:  session.StopEndTurn,
 		Usage: session.Usage{InputTokens: 100, OutputTokens: 50, CacheReadTokens: 20, CacheWriteTokens: 5},
 	}})
@@ -74,13 +77,13 @@ func TestTracingRunSpan(t *testing.T) {
 func TestTracingToolChildSpan(t *testing.T) {
 	tr, exp := newTestTracing(t)
 
-	tr.Emit(session.Event{Type: session.EvSessionInit})
-	tr.Emit(session.Event{Type: session.EvTurnStart, Turn: 0})
+	tr.Emit(context.Background(), session.Event{Type: session.EvSessionInit})
+	tr.Emit(context.Background(), session.Event{Type: session.EvTurnStart, Turn: 0})
 	call := session.NewToolCall("c1", "bash", nil)
-	tr.Emit(session.Event{Type: session.EvToolCall, ToolCall: &call})
+	tr.Emit(context.Background(), session.Event{Type: session.EvToolCall, ToolCall: &call})
 	res := session.NewToolError("c1", "boom")
-	tr.Emit(session.Event{Type: session.EvToolResult, ToolResult: &res})
-	tr.Emit(session.Event{Type: session.EvResult, Result: &session.ResultPayload{Stop: session.StopEndTurn}})
+	tr.Emit(context.Background(), session.Event{Type: session.EvToolResult, ToolResult: &res})
+	tr.Emit(context.Background(), session.Event{Type: session.EvResult, Result: &session.ResultPayload{Stop: session.StopEndTurn}})
 
 	spans := exp.GetSpans()
 	tool, ok := spanByName(spans, "mecatl.tool")
@@ -119,8 +122,8 @@ func TestTracingToolChildSpan(t *testing.T) {
 func TestTracingErrorStopReason(t *testing.T) {
 	tr, exp := newTestTracing(t)
 
-	tr.Emit(session.Event{Type: session.EvSessionInit})
-	tr.Emit(session.Event{Type: session.EvResult, Result: &session.ResultPayload{Stop: session.StopError}})
+	tr.Emit(context.Background(), session.Event{Type: session.EvSessionInit})
+	tr.Emit(context.Background(), session.Event{Type: session.EvResult, Result: &session.ResultPayload{Stop: session.StopError}})
 
 	run, ok := spanByName(exp.GetSpans(), "mecatl.run")
 	if !ok {
@@ -128,5 +131,106 @@ func TestTracingErrorStopReason(t *testing.T) {
 	}
 	if run.Status.Code != codes.Error {
 		t.Errorf("run status = %v, want Error", run.Status.Code)
+	}
+}
+
+// TestTracingRunSpanParentsToCtxSpan asserts that when the Emit ctx carries a
+// trace span, the run span is parented to it (so concurrent runs correlate to
+// their originating request, the issue the ctx-aware seam unlocks).
+func TestTracingRunSpanParentsToCtxSpan(t *testing.T) {
+	tr, exp := newTestTracing(t)
+
+	// Open a parent span on the SAME provider and put it in the ctx.
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	t.Cleanup(func() { _ = tp.Shutdown(t.Context()) })
+	ctx, parent := tp.Tracer("test").Start(context.Background(), "inbound.request")
+
+	tr.Emit(ctx, session.Event{Type: session.EvSessionInit})
+	tr.Emit(ctx, session.Event{Type: session.EvResult, Result: &session.ResultPayload{Stop: session.StopEndTurn}})
+	parent.End()
+
+	run, ok := spanByName(exp.GetSpans(), "mecatl.run")
+	if !ok {
+		t.Fatal("no mecatl.run span")
+	}
+	if run.Parent.SpanID() != parent.SpanContext().SpanID() {
+		t.Errorf("run parent = %v, want ctx span %v", run.Parent.SpanID(), parent.SpanContext().SpanID())
+	}
+}
+
+// TestTracingRunSpanRootsWhenCtxHasNoSpan asserts the fallback: a ctx with no
+// span still yields a (root) run span, preserving the single-root behaviour.
+func TestTracingRunSpanRootsWhenCtxHasNoSpan(t *testing.T) {
+	tr, exp := newTestTracing(t)
+
+	ctx := context.Background() // no span
+	if trace.SpanContextFromContext(ctx).IsValid() {
+		t.Fatal("precondition: background ctx must carry no valid span")
+	}
+
+	tr.Emit(ctx, session.Event{Type: session.EvSessionInit})
+	tr.Emit(ctx, session.Event{Type: session.EvResult, Result: &session.ResultPayload{Stop: session.StopEndTurn}})
+
+	run, ok := spanByName(exp.GetSpans(), "mecatl.run")
+	if !ok {
+		t.Fatal("no mecatl.run span")
+	}
+	if run.Parent.IsValid() {
+		t.Errorf("run span parent = %v, want no parent (root) when ctx has no span", run.Parent.SpanID())
+	}
+}
+
+// TestTracingConcurrentEmitParentsToOwnCtxSpan drives two independent Tracing
+// instances from two goroutines, each under its OWN inbound ctx span, and
+// asserts each run span parents to its own ctx span. This exercises the Emit
+// mutex + per-run ctx parenting under -race and backs the "concurrent runs
+// correlate to their originating request" docstring claim. (Each run uses its
+// own Tracing because a single Tracing instance multiplexes one run span at a
+// time; the per-run ctx span is what distinguishes concurrent originating
+// requests.)
+func TestTracingConcurrentEmitParentsToOwnCtxSpan(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	t.Cleanup(func() { _ = tp.Shutdown(t.Context()) })
+
+	// Two distinct inbound request spans.
+	ctxA, parentA := tp.Tracer("test").Start(context.Background(), "inbound.A")
+	ctxB, parentB := tp.Tracer("test").Start(context.Background(), "inbound.B")
+
+	trA := NewTracing(tp)
+	trB := NewTracing(tp)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	run := func(tr *Tracing, ctx context.Context) {
+		defer wg.Done()
+		tr.Emit(ctx, session.Event{Type: session.EvSessionInit})
+		tr.Emit(ctx, session.Event{Type: session.EvResult, Result: &session.ResultPayload{Stop: session.StopEndTurn}})
+	}
+	go run(trA, ctxA)
+	go run(trB, ctxB)
+	wg.Wait()
+	parentA.End()
+	parentB.End()
+
+	spans := exp.GetSpans()
+	// Collect run spans by parent span id.
+	parentOfRun := map[trace.SpanID]bool{}
+	var runCount int
+	for _, s := range spans {
+		if s.Name != "mecatl.run" {
+			continue
+		}
+		runCount++
+		parentOfRun[s.Parent.SpanID()] = true
+	}
+	if runCount != 2 {
+		t.Fatalf("got %d mecatl.run spans, want 2", runCount)
+	}
+	if !parentOfRun[parentA.SpanContext().SpanID()] {
+		t.Errorf("no run span parented to inbound.A (%v)", parentA.SpanContext().SpanID())
+	}
+	if !parentOfRun[parentB.SpanContext().SpanID()] {
+		t.Errorf("no run span parented to inbound.B (%v)", parentB.SpanContext().SpanID())
 	}
 }

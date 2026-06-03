@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -85,8 +86,12 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	return m
 }
 
-// Emit records Prometheus metrics derived from a single domain Event.
-func (m *Metrics) Emit(ev session.Event) {
+// Emit records Prometheus metrics derived from a single domain Event. The ctx
+// is currently unused: the client_golang recording API takes no context. It is
+// part of the port.EventSink contract (so OTel-metrics implementers can read a
+// span/baggage from it) and is threaded for when this adapter migrates to the
+// OTel metrics SDK.
+func (m *Metrics) Emit(_ context.Context, ev session.Event) {
 	m.events.WithLabelValues(string(ev.Type)).Inc()
 
 	switch ev.Type {

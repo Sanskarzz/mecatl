@@ -483,7 +483,11 @@ func (e *Engine) openCard(r *Run, turnIdx int, c session.ToolCall) {
 func (e *Engine) emit(r *Run, ev session.Event) {
 	sequenced := r.emit(ev)
 	if e.deps.Sink != nil {
-		e.deps.Sink.Emit(sequenced)
+		ctx := r.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		e.deps.Sink.Emit(ctx, sequenced)
 	}
 }
 

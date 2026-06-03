@@ -18,7 +18,7 @@ import (
 // and assert it threads through baseEngineDeps onto the per-session engine.
 type fakeSink struct{}
 
-func (fakeSink) Emit(session.Event) {}
+func (fakeSink) Emit(context.Context, session.Event) {}
 
 // configWithCollaborators returns a Config that turns ON the optional collaborators
 // whose silent loss the [High] review flagged: a cascade compactor (a DISTINCT type

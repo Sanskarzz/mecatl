@@ -187,6 +187,14 @@ type Run struct {
 	asks   *askRegistry
 	cancel context.CancelFunc
 	seq    atomic.Int64
+	// ctx is the run's context, captured at RunContent. Engine.emit forwards it
+	// to the injected EventSink so telemetry adapters can read a trace span from
+	// it and correlate spans/metrics to the originating request. Each run (including
+	// child/subagent/fork runs, which enter through their own Run/RunContent call)
+	// captures its OWN ctx, so a child's emits correlate to the child, not the
+	// parent. It is set once before the run goroutine starts and only read after,
+	// so it needs no synchronisation.
+	ctx context.Context //nolint:containedctx // run-scoped carrier forwarded to the EventSink; never the request's own field
 }
 
 // Events returns the channel of domain Events for this run. It is closed when the
@@ -225,6 +233,7 @@ func (e *Engine) RunContent(ctx context.Context, sess *session.Session, ws tool.
 		events: make(chan session.Event, 64),
 		asks:   newAskRegistry(),
 		cancel: cancel,
+		ctx:    ctx,
 	}
 	go func() {
 		defer close(r.events)
