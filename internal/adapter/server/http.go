@@ -92,6 +92,8 @@ type serverCapabilitiesJSON struct {
 	Skills        bool `json:"skills"`
 	Teams         bool `json:"teams"`
 	Bash          bool `json:"bash"`
+	Image         bool `json:"image"`
+	Audio         bool `json:"audio"`
 }
 
 // capabilitiesJSON projects the shared proto capabilities onto the JSON shape.
@@ -106,6 +108,8 @@ func capabilitiesJSON(c *mecatlv1.ServerCapabilities) *serverCapabilitiesJSON {
 		Skills:        c.GetSkills(),
 		Teams:         c.GetTeams(),
 		Bash:          c.GetBash(),
+		Image:         c.GetImage(),
+		Audio:         c.GetAudio(),
 	}
 }
 

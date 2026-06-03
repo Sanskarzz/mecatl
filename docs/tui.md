@@ -127,6 +127,31 @@ across same-named checkouts. Pass `--no-memory` to disable it or `--memory-dir` 
 relocate the store. Background memory consolidation (the "dream" distiller, which
 spends tokens) stays **off** on the embedded server.
 
+### `@`-file mentions and media attachments
+
+Typing `@` opens an inline **file-completion menu** — the same kind of dropdown as
+the `/` palette, mutually exclusive with it (a line is either a `/command` or has an
+`@token` word, never both). It lists workspace files matching the typed token
+(case-insensitive substring on the path or base name; dotfiles/`.git` pruned; capped
+to 8 rows and a bounded directory walk so a huge tree never blocks). `↑`/`↓` select,
+`tab`/`enter` complete the highlighted path into the input (`@<path> `), `esc`
+dismisses.
+
+On submit, every `@path` in the prompt is read and routed by sniffed content type:
+
+- an **image** or **audio** file becomes an inline media part sent over gRPC
+  (`Prompt.parts`), rendered in the transcript as a `📎 image/png (inline)` line;
+- any **other** file is treated as text and **inlined** into the prompt as a
+  delimited block (so a text-only model still sees its content).
+
+Media attachment is **caps-gated**: the server advertises whether its wired model
+consumes images/audio (the `image`/`audio` server capabilities). Mentioning an image
+file to a text-only model is a **loud refusal** — the submit is rejected with an
+inline `attach: …` error, the input is kept, and nothing is sent (never a silent
+drop). Client-side size limits (10 MiB per file, 20 MiB and 16 parts per prompt)
+mirror the server's domain caps and fail fast before opening a stream; the server
+re-validates every part regardless.
+
 ## Keys
 
 | Key | Action |
@@ -145,6 +170,7 @@ spends tokens) stays **off** on the embedded server.
 | `pgup` / `pgdn` | scroll the conversation |
 | `?` | help overlay (on an empty prompt) |
 | `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`; plus workspace commands) |
+| `@` | file-mention menu — complete a workspace path, then attach it on submit (see below) |
 
 The `?` overlay enumerates the rest of the chords — `ctrl+o`/`ctrl+r`/`ctrl+p`
 (MCP inventory / resources / prompts), `ctrl+a` (agent team), `ctrl+t`

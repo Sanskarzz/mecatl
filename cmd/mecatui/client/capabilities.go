@@ -16,6 +16,11 @@ type Capabilities struct {
 	Skills        bool
 	Teams         bool
 	Bash          bool
+	// Image/Audio report whether the wired provider consumes that media kind. They
+	// gate the @-mention file-attach UX: a client refuses to send a part the
+	// server's provider cannot read (an old server with no field → false → degrade).
+	Image bool
+	Audio bool
 }
 
 // capabilitiesFrom maps a proto ServerCapabilities (nil-safe) to the plain
@@ -31,5 +36,7 @@ func capabilitiesFrom(c *mecatlv1.ServerCapabilities) Capabilities {
 		Skills:        c.GetSkills(),
 		Teams:         c.GetTeams(),
 		Bash:          c.GetBash(),
+		Image:         c.GetImage(),
+		Audio:         c.GetAudio(),
 	}
 }

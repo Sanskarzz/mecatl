@@ -51,6 +51,7 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 		{key: "enter", action: "send the prompt"},
 		{key: "shift+enter", action: "newline (also ctrl+j)"},
 		{key: "/", action: "slash-command palette (built-ins always; workspace commands when enabled)"},
+		{key: "@", action: "attach a file: image/audio inlines as media (when supported), else inlines text"},
 		{key: "esc", action: "cancel the running turn"},
 	})
 
@@ -87,6 +88,16 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 	}
 	if caps.Memory {
 		b.WriteString(muted.Render("Cross-session memory is on — context carries across runs.") + "\n")
+	}
+	switch {
+	case caps.Image && caps.Audio:
+		b.WriteString(muted.Render("Type @ to attach a file — images and audio go to the model as media.") + "\n")
+	case caps.Image:
+		b.WriteString(muted.Render("Type @ to attach a file — images go to the model as media.") + "\n")
+	case caps.Audio:
+		b.WriteString(muted.Render("Type @ to attach a file — audio goes to the model as media.") + "\n")
+	default:
+		b.WriteString(muted.Render("Type @ to attach a file — this model takes text only, so files inline as text.") + "\n")
 	}
 
 	b.WriteString("\n" + muted.Render("esc or ? to close"))

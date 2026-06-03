@@ -343,9 +343,10 @@ func (r *renderer) renderBlock(idx int, b *block, expand bool) string {
 		body := r.th.Style("userBlock").Render(sanitizeTerminal(b.raw))
 		out := label + "\n" + body
 		// Render one muted placeholder line per attached media part, so a multimodal
-		// prompt is never silently shown as text-only. The TUI has no media-attach
-		// input yet (the ACP editor is the headline multimodal client); this is the
-		// render contract for when media IS present.
+		// prompt is never silently shown as text-only. Media is attached via the
+		// @-mention menu (type "@" then a path; an image/audio file becomes a part),
+		// gated on the server's advertised image/audio caps — see mention.go and
+		// client.ExpandMentions.
 		for _, m := range b.media {
 			out += "\n" + r.th.Style("muted").Render("📎 "+sanitizeTerminal(m))
 		}

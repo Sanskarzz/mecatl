@@ -7,9 +7,8 @@ import (
 
 // TestRenderUserBlockWithMediaPlaceholders asserts a user prompt carrying media
 // renders a clear "📎 …" placeholder line per part below the text — so a
-// multimodal prompt is never silently shown as text-only. The TUI has no
-// media-attach input affordance yet (the ACP editor is the headline multimodal
-// client); this exercises the render contract directly.
+// multimodal prompt is never silently shown as text-only. Media is attached via
+// the @-mention menu; this exercises the render contract directly.
 func TestRenderUserBlockWithMediaPlaceholders(t *testing.T) {
 	r := newTestRenderer()
 	c := &conversation{}

@@ -108,11 +108,15 @@ func WaitForMsg(ch <-chan tea.Msg) tea.Cmd {
 }
 
 // SendPrompt sends the mandatory first frame. It MUST be the first Send on a
-// fresh stream (the server rejects a non-prompt first frame).
-func (s *Stream) SendPrompt(sessionID, text string) error {
+// fresh stream (the server rejects a non-prompt first frame). parts carries the
+// non-text media (image/audio) built by ExpandMentions; nil for a text-only
+// prompt. The server enforces the cross-field "text or parts non-empty" rule and
+// re-validates every part (session.ValidateMediaParts), so a media-only prompt
+// (empty text, non-nil parts) is legal here.
+func (s *Stream) SendPrompt(sessionID, text string, parts []*mecatlv1.Content) error {
 	return s.sendFrame(&mecatlv1.ConverseRequest{
 		Kind: &mecatlv1.ConverseRequest_Prompt{
-			Prompt: &mecatlv1.Prompt{SessionId: sessionID, Text: text},
+			Prompt: &mecatlv1.Prompt{SessionId: sessionID, Text: text, Parts: parts},
 		},
 	})
 }

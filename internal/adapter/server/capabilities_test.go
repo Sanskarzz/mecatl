@@ -15,6 +15,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
 	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/team"
 	"github.com/stacklok/mecatl/internal/tool"
 )
@@ -112,6 +113,40 @@ func capsFromCreate(t *testing.T, svc *server.Service) *mecatlv1.ServerCapabilit
 		t.Fatalf("CreateSession: %v", err)
 	}
 	return resp.GetCapabilities()
+}
+
+// TestCapabilitiesMediaFromProvider asserts the image/audio caps are driven by
+// the WIRED PROVIDER's ProviderCapabilities (via the engine seam), not a static
+// guess: a provider advertising image-only surfaces over the gRPC CreateSession
+// response as image=true, audio=false. This is the gate the client's @-mention
+// file-attach UX reads.
+func TestCapabilitiesMediaFromProvider(t *testing.T) {
+	cat := tool.NewCatalog()
+	engine := agent.NewEngine(agent.Deps{
+		LLM:     mockllm.NewWith([]mockllm.Option{mockllm.WithCapabilities(port.ProviderCapabilities{Image: true})}),
+		Catalog: cat,
+		Policy:  permpolicy.NewPolicy(nil, nil),
+		Model:   "test-model",
+	})
+	svc, err := server.NewService(server.Config{
+		Engine:     engine,
+		Store:      memstore.New(),
+		Workspaces: func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		Now:        func() time.Time { return time.Unix(0, 0) },
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	caps := capsFromCreate(t, svc)
+	if caps == nil {
+		t.Fatal("capabilities not populated on CreateSession response")
+	}
+	if !caps.GetImage() {
+		t.Errorf("image cap = false, want true (provider advertises images)")
+	}
+	if caps.GetAudio() {
+		t.Errorf("audio cap = true, want false (provider does not advertise audio)")
+	}
 }
 
 // TestCapabilities asserts that the create response's capabilities reflect the

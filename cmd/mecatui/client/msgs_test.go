@@ -287,7 +287,7 @@ func TestAskRoundTrip(t *testing.T) {
 func TestPromptAndCancelFrames(t *testing.T) {
 	fs := newFakeStream()
 	st := NewStream(fs, fs)
-	if err := st.SendPrompt("sess-1", "hello"); err != nil {
+	if err := st.SendPrompt("sess-1", "hello", nil); err != nil {
 		t.Fatalf("SendPrompt: %v", err)
 	}
 	if err := st.SendCancel(); err != nil {
@@ -303,5 +303,36 @@ func TestPromptAndCancelFrames(t *testing.T) {
 	}
 	if frames[1].GetCancel() == nil {
 		t.Errorf("second frame = %#v, want Cancel", frames[1])
+	}
+}
+
+// TestSendPromptCarriesParts asserts SendPrompt attaches the media parts to the
+// Prompt frame (the multimodal send path), alongside the text.
+func TestSendPromptCarriesParts(t *testing.T) {
+	fs := newFakeStream()
+	st := NewStream(fs, fs)
+	parts := []*mecatlv1.Content{
+		{Kind: mecatlv1.Content_KIND_IMAGE, MimeType: "image/png", Data: []byte{0x89, 0x50}},
+	}
+	if err := st.SendPrompt("sess-2", "look at this", parts); err != nil {
+		t.Fatalf("SendPrompt: %v", err)
+	}
+	frames := fs.sentFrames()
+	if len(frames) != 1 {
+		t.Fatalf("sent %d frames, want 1", len(frames))
+	}
+	p := frames[0].GetPrompt()
+	if p == nil {
+		t.Fatalf("frame is not a Prompt: %#v", frames[0])
+	}
+	if p.GetText() != "look at this" {
+		t.Errorf("text = %q, want %q", p.GetText(), "look at this")
+	}
+	got := p.GetParts()
+	if len(got) != 1 {
+		t.Fatalf("parts = %d, want 1", len(got))
+	}
+	if got[0].GetKind() != mecatlv1.Content_KIND_IMAGE || got[0].GetMimeType() != "image/png" {
+		t.Errorf("part = %#v, want image/png IMAGE", got[0])
 	}
 }

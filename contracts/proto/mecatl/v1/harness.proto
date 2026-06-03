@@ -188,6 +188,13 @@ message ServerCapabilities {
   bool teams = 5;
   // bash is true when the Bash tool is registered (i.e. NOT --no-bash).
   bool bash = 6;
+  // image is true when the wired LLM provider consumes image prompt parts.
+  // Gates the @-mention file-attach UX for images (a client refuses to send an
+  // image part to a server whose provider cannot read it).
+  bool image = 7;
+  // audio is true when the wired LLM provider consumes audio prompt parts.
+  // Gates the @-mention file-attach UX for audio.
+  bool audio = 8;
 }
 
 // CreateSessionResponse carries the newly-allocated session id.

@@ -26,7 +26,7 @@ func TestCapabilitiesFrom(t *testing.T) {
 			want: Capabilities{},
 		},
 		{
-			name: "all on",
+			name: "all on (incl. media caps)",
 			in: &mecatlv1.ServerCapabilities{
 				Mcp:           true,
 				SlashCommands: true,
@@ -34,6 +34,8 @@ func TestCapabilitiesFrom(t *testing.T) {
 				Skills:        true,
 				Teams:         true,
 				Bash:          true,
+				Image:         true,
+				Audio:         true,
 			},
 			want: Capabilities{
 				MCP:           true,
@@ -42,6 +44,17 @@ func TestCapabilitiesFrom(t *testing.T) {
 				Skills:        true,
 				Teams:         true,
 				Bash:          true,
+				Image:         true,
+				Audio:         true,
+			},
+		},
+		{
+			name: "media caps map independently (image on, audio off)",
+			in: &mecatlv1.ServerCapabilities{
+				Image: true,
+			},
+			want: Capabilities{
+				Image: true,
 			},
 		},
 		{
@@ -50,11 +63,13 @@ func TestCapabilitiesFrom(t *testing.T) {
 				Mcp:    true,
 				Memory: true,
 				Bash:   true,
+				Audio:  true,
 			},
 			want: Capabilities{
 				MCP:    true,
 				Memory: true,
 				Bash:   true,
+				Audio:  true,
 			},
 		},
 	}

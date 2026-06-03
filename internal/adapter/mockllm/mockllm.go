@@ -35,10 +35,11 @@ type Turn struct {
 // replays the next programmed Turn. It is safe for concurrent use; the cursor is
 // guarded by a mutex.
 type Provider struct {
-	mu     sync.Mutex
-	turns  []Turn
-	cursor int
-	caps   port.ProviderCapabilities
+	mu       sync.Mutex
+	turns    []Turn
+	cursor   int
+	caps     port.ProviderCapabilities
+	observer func(port.LLMRequest)
 }
 
 // Option configures a Provider.
@@ -49,6 +50,18 @@ type Option func(*Provider)
 // image- or audio-capable without reaching for the OpenAI adapter.
 func WithCapabilities(caps port.ProviderCapabilities) Option {
 	return func(p *Provider) { p.caps = caps }
+}
+
+// WithRequestObserver registers an optional observer invoked with each
+// port.LLMRequest the mock receives, BEFORE the scripted turn is yielded. It lets
+// a test assert what actually reached the provider — e.g. that a multimodal prompt
+// carried its media Parts across the wire→domain→engine→provider path. It is
+// purely additive: a Provider built without it behaves exactly as before (the
+// default observer is nil and never called), so existing mockllm users are
+// unaffected. The observer runs on the calling goroutine, under no lock; keep it
+// cheap and side-effect-light (a test capture typically copies the field it needs).
+func WithRequestObserver(fn func(port.LLMRequest)) Option {
+	return func(p *Provider) { p.observer = fn }
 }
 
 // New constructs a Provider that replays the given turns in order, one per
@@ -92,14 +105,21 @@ func (p *Provider) Reset() {
 // internal cursor. If the script is exhausted it returns an empty iterator (no
 // chunks, no error). The returned iterator stops early if ctx is cancelled. The
 // outer error is always nil; the mock never fails to start a stream.
-func (p *Provider) Stream(ctx context.Context, _ port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
+func (p *Provider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
 	p.mu.Lock()
 	var chunks []port.Chunk
 	if p.cursor < len(p.turns) {
 		chunks = p.turns[p.cursor].Chunks
 		p.cursor++
 	}
+	observer := p.observer
 	p.mu.Unlock()
+
+	// Surface the request to an optional test observer (nil in the common case),
+	// so a test can assert what actually reached the provider.
+	if observer != nil {
+		observer(req)
+	}
 
 	return func(yield func(port.Chunk, error) bool) {
 		for _, c := range chunks {

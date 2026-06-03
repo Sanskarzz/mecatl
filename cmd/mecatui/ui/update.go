@@ -483,6 +483,14 @@ func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return mm, cmd
 		}
 	}
+	// The @-mention menu, like the palette, claims its navigation/complete keys
+	// while running EXCEPT enter (which must enqueue uniformly) and esc (the
+	// Cancel branch layers clear-input/clear-queue/cancel below).
+	if m.mention.open && !key.Matches(msg, m.keys.Submit) && !key.Matches(msg, m.keys.Cancel) {
+		if mm, handled := m.onMentionKey(msg); handled {
+			return mm, nil
+		}
+	}
 	switch {
 	case key.Matches(msg, m.keys.Cancel):
 		if strings.TrimSpace(m.ta.Value()) != "" {
@@ -570,6 +578,13 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return mm, cmd
 		}
 	}
+	// The @-mention menu (mutually exclusive with the palette) claims the same
+	// navigation/complete keys while it is open.
+	if m.mention.open {
+		if mm, handled := m.onMentionKey(msg); handled {
+			return mm, nil
+		}
+	}
 	switch {
 	case key.Matches(msg, m.keys.Help) && strings.TrimSpace(m.ta.Value()) == "":
 		// "?" is printable: open help only on an empty prompt so "?" in prose still
@@ -630,21 +645,44 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // a command, e.g. opening an overlay).
 func (m Model) onPaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	switch msg.String() {
-	case "up":
+	case keyMenuUp:
 		m.paletteMoveUp()
 		return m, nil, true
-	case "down":
+	case keyMenuDown:
 		m.paletteMoveDown()
 		return m, nil, true
-	case "tab", "enter":
+	case keyMenuTab, keyMenuEnter:
 		if mm, cmd, ran := m.runSelectedBuiltin(); ran {
 			return mm, cmd, true
 		}
 		return m.paletteComplete(), nil, true
-	case "esc":
+	case keyMenuDismiss:
 		return m.paletteDismiss(), nil, true
 	}
 	return m, nil, false
+}
+
+// onMentionKey handles keys while the @-mention file menu is open. Like
+// onPaletteKey it reports handled=false for keys it does not claim (so the key
+// still reaches the textarea). Unlike onPaletteKey it issues no command —
+// completing a mention only rewrites the input, never runs a built-in — so it
+// returns just (Model, handled). up/down move the selection; tab/enter complete
+// the highlighted path; esc dismisses. The two menus never coexist (mutually
+// exclusive tokens), so the caller routes to whichever is open.
+func (m Model) onMentionKey(msg tea.KeyPressMsg) (Model, bool) {
+	switch msg.String() {
+	case keyMenuUp:
+		m.mentionMoveUp()
+		return m, true
+	case keyMenuDown:
+		m.mentionMoveDown()
+		return m, true
+	case keyMenuTab, keyMenuEnter:
+		return m.mentionComplete(), true
+	case keyMenuDismiss:
+		return m.mentionDismiss(), true
+	}
+	return m, false
 }
 
 // runSelectedBuiltin runs the currently-selected palette row IF it is a built-in
@@ -684,6 +722,10 @@ func (m Model) runSelectedBuiltin() (tea.Model, tea.Cmd, bool) {
 // input.
 func (m Model) afterInputEdit(cmd tea.Cmd) (tea.Model, tea.Cmd) {
 	mm, fetch := m.syncPalette()
+	// The @-mention menu syncs from the SAME input edit. It is mutually exclusive
+	// with the palette (mentionToken returns false for a "/" line and for a
+	// multi-line input), so at most one opens; the sync is synchronous (no fetch).
+	mm = mm.syncMention()
 	if fetch == nil {
 		return mm, cmd
 	}
@@ -697,7 +739,7 @@ func (m Model) afterInputEdit(cmd tea.Cmd) (tea.Model, tea.Cmd) {
 // mandatory prompt frame, starts the reader goroutine, and arms WaitForMsg.
 func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.ta.Value())
-	if text == "" || m.sessionID == "" {
+	if m.sessionID == "" {
 		return m, nil
 	}
 	// A BARE built-in command line ("/clear", "/help", …) is intercepted here —
@@ -712,7 +754,40 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 			return b.run(m)
 		}
 	}
-	m.conv.addUser(text)
+	// Expand any @-mentions that resolve to an existing REGULAR FILE into media
+	// parts (image/audio) and inlined text-file bodies. attachableMentions is the
+	// stat-filter gate: a token that is not a real file (prose like "@oncall", a
+	// directory, a dangling link) is left as literal text and never reaches
+	// ExpandMentions. The remaining filesystem + proto work lives behind
+	// client.ExpandMentions (the ui passes only resolved path strings + the
+	// proto-free caps, and reads back proto-free Descriptors/InlineText — the proto
+	// Parts stay opaque, kept in the MediaResult and handed straight to SendPrompt,
+	// so the ui never names a proto type). ANY error LOUD-rejects: surface it in the
+	// transcript, keep the input intact, send NOTHING.
+	var media client.MediaResult
+	if files := attachableMentions(m.deps.Workspace, text); len(files) > 0 {
+		res, err := client.ExpandMentions(files, m.caps)
+		if err != nil {
+			m.conv.addError("attach: " + err.Error())
+			m.refreshView()
+			return m, nil
+		}
+		media = res
+		for _, body := range res.InlineText {
+			text = strings.TrimSpace(text + "\n\n" + body)
+		}
+	}
+	// A media-only prompt (empty text but at least one part) still sends — the proto
+	// allows text OR parts, and the server enforces "at least one non-empty". A
+	// truly empty submit (no text AND no parts) is the no-op early-return.
+	if text == "" && len(media.Parts) == 0 {
+		return m, nil
+	}
+	if len(media.Descriptors) > 0 {
+		m.conv.addUserWithMedia(text, media.Descriptors)
+	} else {
+		m.conv.addUser(text)
+	}
 	m.ta.Reset()
 	// A fresh run clears any queue pause: whether this is the auto-drain (popAndSubmit
 	// already cleared it) or a manual send while paused, the queue now gets a new
@@ -745,7 +820,7 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	go stream.ReadLoop(runCtx, ch)
 
 	send := func() tea.Msg {
-		if err := stream.SendPrompt(m.sessionID, text); err != nil {
+		if err := stream.SendPrompt(m.sessionID, text, media.Parts); err != nil {
 			return client.StreamErrMsg{Err: err}
 		}
 		return nil

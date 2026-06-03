@@ -71,6 +71,12 @@ func (m Model) View() tea.View {
 	if pal := renderPalette(m.deps.Theme, m.palette, m.caps, m.ta.Value(), m.width); pal != "" {
 		regions = append(regions, pal)
 	}
+	// The @-mention file menu is the same kind of inline dropdown as the palette
+	// (idle/running, above the input) and is mutually exclusive with it, so at most
+	// one of the two renders.
+	if men := renderMention(m.deps.Theme, m.mention, m.width); men != "" {
+		regions = append(regions, men)
+	}
 	// Staged follow-ups (queued while a run streams) are summarised in a muted card
 	// just above the input — between the body/palette and the input — so the user can
 	// see what will run next. Shown in any phase whenever the queue is non-empty (it

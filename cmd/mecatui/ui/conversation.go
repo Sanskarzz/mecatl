@@ -107,11 +107,11 @@ type block struct {
 	raw string // user text, assistant markdown buffer, or notice text
 
 	// media holds one placeholder line per non-text part attached to a USER block
-	// (blockUser), e.g. "image/png (inline)" / "audio/wav (url)". The TUI has no
-	// media-attach input affordance yet (the headline multimodal client is the ACP
-	// editor), so this is the RENDER contract: when a user prompt carries media,
-	// each part renders a clear "📎 …" placeholder line below the text rather than
-	// the media being silently shown as text-only. Empty for a text-only prompt.
+	// (blockUser), e.g. "image/png (inline)". It is populated when a prompt
+	// attaches media via the @-mention menu (mention.go → client.ExpandMentions):
+	// each part renders a clear "📎 …" placeholder line below the text so a
+	// multimodal prompt is never silently shown as text-only. Empty for a text-only
+	// prompt.
 	media []string
 
 	// Reasoning is an ATTRIBUTE of the assistant block, not a sibling: a turn's

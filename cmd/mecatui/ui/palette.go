@@ -15,6 +15,18 @@ import (
 // through the full filtered set; the window scrolls to keep it visible.
 const maxPaletteRows = 8
 
+// Inline-menu navigation key strings, shared by the slash palette (onPaletteKey)
+// and the @-mention menu (onMentionKey) since both react to msg.String() with the
+// same vocabulary. Named so the two switches don't repeat the literals (and so a
+// rebind is a single edit).
+const (
+	keyMenuUp      = "up"
+	keyMenuDown    = "down"
+	keyMenuTab     = "tab"
+	keyMenuEnter   = "enter"
+	keyMenuDismiss = "esc"
+)
+
 // paletteState holds the slash-command palette's state on the Model. It is value-
 // embedded (like mcpState) so the Model stays a plain struct Update copies. The
 // palette is a lightweight inline dropdown over the input — NOT a phase or an

@@ -668,12 +668,16 @@ drive at chosen caps fixtures.
 
 - **Agents-roster hint line is already present** (`agents.go:333`) — review item
   #6 is stale; no change needed (optional Low polish only). See B6.
-- **`port.ProviderCapabilities` is ACP-only** — it gates multimodal prompt input
-  and is advertised via the ACP `handleInitialize` handshake
-  (`service.go:611-616`), NOT over gRPC. It is a different concept from the new
-  `ServerCapabilities` (feature enablement). Keep the two names distinct; do not
-  conflate or merge them. (They could share a future "server info" umbrella, but
-  that's out of scope and would couple two unrelated concerns.)
+- **`port.ProviderCapabilities` is the multimodal-input seam** — it gates which
+  non-text prompt input the wired provider consumes. It is advertised via the ACP
+  `handleInitialize` handshake AND (since the `@`-mention/media iteration) projected
+  onto the gRPC `ServerCapabilities.image`/`.audio` fields, which gate the mecatui
+  `@`-mention file-attach UX (the client refuses to send a media part a provider
+  cannot read). It remains a distinct CONCEPT from the rest of `ServerCapabilities`
+  (feature enablement / wired seams) even though both now ride the same gRPC
+  message: the media caps are read from the provider seam (`Engine.Capabilities()`),
+  the others from registered tools / nil-checked config. Keep the source-of-truth
+  distinction; don't conflate the population logic.
 
 ---
 

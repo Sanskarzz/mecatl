@@ -295,6 +295,14 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 	has := func(name string) bool {
 		return s.cfg.Engine != nil && s.cfg.Engine.HasTool(name)
 	}
+	// Multimodal prompt-input caps come from the wired provider (via the engine
+	// seam), NOT a registered tool — they gate the client's @-mention file-attach
+	// UX. Guard the nil engine the same way has() does, so a child/member service
+	// with no engine advertises image/audio=false rather than panicking.
+	var pcaps port.ProviderCapabilities
+	if s.cfg.Engine != nil {
+		pcaps = s.cfg.Engine.Capabilities()
+	}
 	return &mecatlv1.ServerCapabilities{
 		Mcp:           s.cfg.MCPProvider != nil,
 		SlashCommands: s.cfg.Commands != nil,
@@ -302,6 +310,8 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 		Memory:        has(memory.RememberToolName),
 		Skills:        has(skills.ToolName),
 		Bash:          has(tools.BashToolName),
+		Image:         pcaps.Image,
+		Audio:         pcaps.Audio,
 	}
 }
 

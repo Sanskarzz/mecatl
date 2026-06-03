@@ -1,8 +1,10 @@
 package server_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -199,5 +201,87 @@ func TestGRPCConverseRejectsBadPart(t *testing.T) {
 	_, rerr := stream.Recv()
 	if status.Code(rerr) != codes.InvalidArgument {
 		t.Fatalf("recv code = %v, want InvalidArgument (err=%v)", status.Code(rerr), rerr)
+	}
+}
+
+// TestGRPCConverseCarriesMediaPart asserts a VALID image part survives the FULL
+// wire→domain→engine→provider path (the load-bearing accept-path counterpart to
+// TestGRPCConverseRejectsBadPart). A mockllm request observer captures the
+// LLMRequest the provider actually received, and the test asserts the user message
+// in it carries a session.MediaImage part with the expected bytes — so dropping the
+// parts anywhere on that path (e.g. the gRPC handler passing nil to
+// StartRunContent) FAILS this test, which a "no InvalidArgument" check alone could
+// not detect. Fully offline (mockllm + bufconn).
+func TestGRPCConverseCarriesMediaPart(t *testing.T) {
+	wantBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+
+	var (
+		mu   sync.Mutex
+		seen []session.Message
+	)
+	observe := func(req port.LLMRequest) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen = req.Messages // last request wins; the single turn here is enough
+	}
+	llm := mockllm.NewWith([]mockllm.Option{mockllm.WithRequestObserver(observe)}, mockllm.TextTurn("I see it"))
+	svc := newService(t, llm, allowRules())
+	gclient, cleanup := dialGRPC(t, svc)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cs, err := gclient.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	stream, err := gclient.Converse(ctx)
+	if err != nil {
+		t.Fatalf("Converse: %v", err)
+	}
+	if serr := stream.Send(&mecatlv1.ConverseRequest{Kind: &mecatlv1.ConverseRequest_Prompt{
+		Prompt: &mecatlv1.Prompt{
+			SessionId: cs.GetSessionId(),
+			Text:      "what is this",
+			Parts:     []*mecatlv1.Content{{Kind: mecatlv1.Content_KIND_IMAGE, MimeType: "image/png", Data: wantBytes}},
+		},
+	}}); serr != nil {
+		t.Fatalf("Send: %v", serr)
+	}
+	// Drain events to the terminal result; a clean EOF (not an InvalidArgument)
+	// proves the part was accepted and the run ran. The mock turn yields a result.
+	var sawResult bool
+	for {
+		resp, rerr := stream.Recv()
+		if rerr != nil {
+			if status.Code(rerr) == codes.InvalidArgument {
+				t.Fatalf("valid image part rejected: %v", rerr)
+			}
+			break // clean EOF
+		}
+		if resp.GetEvent().GetType() == string(session.EvResult) {
+			sawResult = true
+		}
+	}
+	if !sawResult {
+		t.Fatalf("no terminal result event over the wire (run did not complete)")
+	}
+
+	// The load-bearing assertion: the provider actually saw the media part.
+	mu.Lock()
+	defer mu.Unlock()
+	var found bool
+	for _, msg := range seen {
+		if msg.Role != session.RoleUser {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part.Kind == session.MediaImage && bytes.Equal(part.Data, wantBytes) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("provider did not receive the image part across the wire: %+v", seen)
 	}
 }
