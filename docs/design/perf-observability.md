@@ -1,8 +1,15 @@
 # Performance observability — problem, approaches, and the decided direction
 
-- Status: **DECIDED (2026-06-03) — ready for implementation.** Approach **D
-  (phased hybrid)** chosen, with the decisions in §5 settled in discussion.
-  Sections 1–3 retain the research/rationale; §4–§5 record what was decided.
+- Status: **Approach D — Phase 1 SHIPPED (2026-06-03); Phase 2 pending.**
+  Phase 1 (the stdlib + OTel foundations) is implemented and committed:
+  ctx-aware EventSink seam → OTel metrics migration → latency instruments
+  (turn/TTFT/inter-token/tool-queue exponential histograms) → mecated
+  runtime-introspection admin surface (pprof + knobs, runtime/metrics + expvar
+  snapshot, FlightRecorder, process-RSS gauge) → goleak gates + live goroutine
+  watchdog → mecatui `--perf` embedded admin surface. **Phase 2** (the opt-in
+  perf-over-MCP server reading those sources + the companion interpretation
+  skill) is **not yet started.** Sections 1–3 retain the research/rationale;
+  §4–§5 record the decisions.
 - Date: 2026-06-03.
 - Scope: how mecatl exposes its own runtime performance for measurement —
   by humans, by tooling, and (the new idea) by an **AI agent over MCP**.
