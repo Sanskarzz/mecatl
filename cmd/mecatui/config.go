@@ -91,6 +91,10 @@ type config struct {
 	perf                       bool
 	perfAddr                   string
 	perfGoroutineWarnThreshold int
+	// perfMCP mounts the read-only perf MCP server at /mcp on the embedded admin
+	// surface (only meaningful with --perf). The admin listener is loopback by
+	// construction; embed FAILS CLOSED if --perf-addr is non-loopback with this set.
+	perfMCP bool
 }
 
 // defaultProbeAddr is mecated's historical default loopback gRPC address. In AUTO
@@ -134,6 +138,7 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.perf, "perf", false, "embedded server only: expose the loopback perf-observability admin surface (/metrics, /debug/pprof, /debug/vars, /debug/flightrecorder) and wire domain metrics into the engine. OFF by default. The address is logged on start. SECURITY: loopback-bound, UNAUTHENTICATED — its output can embed prompt text/file paths/goroutine stacks, so it stays on 127.0.0.1 only (decision 6/7 of docs/design/perf-observability.md)")
 	fs.StringVar(&cfg.perfAddr, "perf-addr", "", "embedded server only: loopback listen address for the --perf admin surface (empty = an ephemeral 127.0.0.1 port, logged on start, so it never clashes with a co-running mecated on :9090). Only consulted with --perf")
 	fs.IntVar(&cfg.perfGoroutineWarnThreshold, "perf-goroutine-warn-threshold", 0, "embedded server only: arm the live goroutine-leak watchdog — log a Warn whenever runtime.NumGoroutine() exceeds this count (decision 10). 0 (default) disables the alarm; the /metrics goroutine-count series is exported regardless. Only consulted with --perf")
+	fs.BoolVar(&cfg.perfMCP, "perf-mcp", false, "embedded server only: mount the read-only perf MCP server at /mcp on the --perf admin surface, so an agent can introspect THIS process's runtime/latency/profile state over MCP (list_slow_turns, runtime/heap/CPU profiles, FlightRecorder). Only meaningful with --perf. SECURITY: loopback-bound, UNAUTHENTICATED (decision 6) — embed REFUSES a non-loopback --perf-addr with this set")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err

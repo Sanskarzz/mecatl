@@ -1,15 +1,22 @@
 # Performance observability — problem, approaches, and the decided direction
 
-- Status: **Approach D — Phase 1 SHIPPED (2026-06-03); Phase 2 pending.**
+- Status: **Approach D — Phase 1 SHIPPED; Phase 2 perf MCP server WIRED
+  (2026-06-03); only the companion skill remains.**
   Phase 1 (the stdlib + OTel foundations) is implemented and committed:
   ctx-aware EventSink seam → OTel metrics migration → latency instruments
   (turn/TTFT/inter-token/tool-queue exponential histograms) → mecated
   runtime-introspection admin surface (pprof + knobs, runtime/metrics + expvar
   snapshot, FlightRecorder, process-RSS gauge) → goleak gates + live goroutine
-  watchdog → mecatui `--perf` embedded admin surface. **Phase 2** (the opt-in
-  perf-over-MCP server reading those sources + the companion interpretation
-  skill) is **not yet started.** Sections 1–3 retain the research/rationale;
-  §4–§5 record the decisions.
+  watchdog → mecatui `--perf` embedded admin surface. **Phase 2** — the opt-in
+  perf-over-MCP server (`internal/adapter/mcpperf`) reading those sources — is now
+  **wired into both composition roots** behind `--perf-mcp` (mecated) /
+  `--perf-mcp` with `--perf` (mecatui embed): the server mounts at `/mcp` on the
+  loopback admin listener, backed by a `telemetry.SlowTurnBuffer` slow-turn ring
+  fanned into the engine's EventSink and bridged to the adapter's
+  `SlowTurnSource` at the cmd boundary, plus the `mecated perf-mcp print-config`
+  helper. The **only remaining Phase-2 item** is the companion interpretation
+  skill (§8). Sections 1–3 retain the research/rationale; §4–§5 record the
+  decisions.
 - Date: 2026-06-03.
 - Scope: how mecatl exposes its own runtime performance for measurement —
   by humans, by tooling, and (the new idea) by an **AI agent over MCP**.
@@ -322,6 +329,16 @@ and 2 are both committed (not "maybe later").
    any future off-loopback exposure MUST add auth (and the §2.4 redaction still
    applies to summaries regardless). The embedded mecatui server uses its UNIX
    socket's filesystem perms.
+   - **TRIPWIRE (enforced as of the Phase-2 wiring, addressing the security
+     review's CWE-306 Low):** loopback-only is no longer documentation-only — it
+     is **enforced at the composition root, fail-closed**. `--perf-mcp` on a
+     **non-loopback** `--metrics-addr` (mecated) or a non-loopback `--perf-addr`
+     (mecatui embed) **refuses to start** (`bind loopback or add auth (future
+     work)`). The check runs before any listener/recorder side effect. If a
+     future change deliberately serves `/mcp` off loopback, it **MUST** add auth
+     first (a bearer token plumbed through the admin mux, the §2.4 "scary flag")
+     — relaxing the tripwire without adding auth re-opens the unauthenticated
+     runtime-data exposure.
 7. **Scope — both `mecated` and the `mecatui` embedded server.** Perf
    observability covers the embedded in-process server too (the WASM hang that
    motivated this was a mecatui freeze), exposed over its loopback/socket surface.

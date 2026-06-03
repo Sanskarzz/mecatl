@@ -33,9 +33,11 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/mcpperf"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
 	"github.com/stacklok/mecatl/internal/app"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // socketName is the fixed socket filename inside the per-process temp directory.
@@ -69,6 +71,15 @@ type PerfConfig struct {
 	// to DefaultPerfAddr (an ephemeral loopback port). The bound address (with the
 	// resolved port) is logged and exposed via Server.AdminAddr.
 	Addr string
+	// MCP mounts the read-only perf MCP server (internal/adapter/mcpperf) at /mcp on
+	// the embedded admin mux, so an agent can introspect THIS process's
+	// runtime/latency/profile state over MCP. Only meaningful with Enabled. The
+	// admin listener is loopback by construction (DefaultPerfAddr / a loopback Addr),
+	// and setupPerf FAILS CLOSED if a non-loopback Addr is configured with MCP set:
+	// the surface is UNAUTHENTICATED and can embed goroutine-derived names/timing
+	// (decision 6 / CWE-306). When set, a slow-turn ring buffer is wired into the
+	// embedded engine's sink so list_slow_turns sees real turns.
+	MCP bool
 	// GoroutineWarnThreshold arms the live goroutine-leak watchdog (decision 10):
 	// a background sampler logs slog.Warn whenever runtime.NumGoroutine() exceeds
 	// this count. 0 (default) disables the alarm; the runtime collector still
@@ -278,6 +289,20 @@ func setupPerf(ctx context.Context, perf PerfConfig, cfg *app.Config) (perfState
 		logger = slog.Default()
 	}
 
+	// FAIL CLOSED on a non-loopback admin Addr with the perf MCP server requested —
+	// BEFORE arming any telemetry/flight-recorder/listener so the refusal is a pure
+	// config error with no side effects. The surface is UNAUTHENTICATED and can
+	// embed goroutine-derived names/timing (decision 6 / CWE-306).
+	if perf.MCP {
+		addr := perf.Addr
+		if addr == "" {
+			addr = DefaultPerfAddr
+		}
+		if !isLoopbackHostPort(addr) {
+			return perfState{}, fmt.Errorf("perf MCP refuses a non-loopback admin Addr=%s: it exposes unauthenticated runtime data; bind loopback or add auth (future work)", addr)
+		}
+	}
+
 	// Telemetry providers: metrics ALWAYS on (no OTLP endpoint needed — the
 	// embedded server only serves loopback Prometheus + introspection), the same
 	// Setup path mecated uses. The runtime collector (go.goroutine.count, GC, heap)
@@ -306,7 +331,18 @@ func setupPerf(ctx context.Context, perf PerfConfig, cfg *app.Config) (perfState
 		return perfState{}, fmt.Errorf("setup metrics: %w", err)
 	}
 	tracing := telemetry.NewTracing(otel.GetTracerProvider())
-	cfg.Sink = telemetry.NewSink(metrics, tracing)
+
+	// Slow-turn ring buffer: only when the perf MCP server is mounted. It observes
+	// EvTurnEnd as one more EventSink fanned out alongside metrics/tracing, storing
+	// scalars only (redaction by shape) and spawning no goroutine — so it stays
+	// goleak-clean. list_slow_turns then sees the embedded engine's real turns.
+	var slowTurns *telemetry.SlowTurnBuffer
+	sinks := []port.EventSink{metrics, tracing}
+	if perf.MCP {
+		slowTurns = telemetry.NewSlowTurnBuffer(telemetry.DefaultSlowTurnCapacity, time.Now)
+		sinks = append(sinks, slowTurns)
+	}
+	cfg.Sink = telemetry.NewSink(sinks...)
 	cfg.Logger = metrics
 
 	// FlightRecorder: arm the bounded execution-trace ring buffer via the
@@ -367,14 +403,30 @@ func setupPerf(ctx context.Context, perf PerfConfig, cfg *app.Config) (perfState
 	if addr == "" {
 		addr = DefaultPerfAddr
 	}
+	// (The non-loopback + MCP refusal already happened at the top of setupPerf,
+	// before any side effects.)
 	lis, lerr := net.Listen("tcp", addr)
 	if lerr != nil {
 		ps.teardown(ctx)
 		return perfState{}, fmt.Errorf("listen perf admin %q: %w", addr, lerr)
 	}
 	ps.adminAddr = lis.Addr().String()
+	adminMux := telemetry.NewAdminMux(providers.Registry, recorder)
+	adminPaths := "/metrics /debug/pprof /debug/vars /debug/flightrecorder"
+	if perf.MCP {
+		adminMux.Handle("/mcp", mcpperf.Handler(mcpperf.Deps{
+			Snapshot:  telemetry.Snapshot,
+			Gatherer:  providers.Registry,
+			Recorder:  recorder, // nil-able
+			Profiler:  mcpperf.NewProfiler(),
+			SlowTurns: slowTurnSource(slowTurns),
+			Clock:     time.Now,
+			Logger:    logger,
+		}))
+		adminPaths += " /mcp"
+	}
 	ps.adminSrv = &http.Server{
-		Handler:           telemetry.NewAdminMux(providers.Registry, recorder),
+		Handler:           adminMux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -383,9 +435,58 @@ func setupPerf(ctx context.Context, perf PerfConfig, cfg *app.Config) (perfState
 		}
 	}()
 	logger.Info("perf admin server listening (loopback, UNAUTHENTICATED — single-user trust model)",
-		"addr", ps.adminAddr, "paths", "/metrics /debug/pprof /debug/vars /debug/flightrecorder")
+		"addr", ps.adminAddr, "paths", adminPaths)
 
 	return ps, nil
+}
+
+// isLoopbackHostPort reports whether a "host:port" listen address binds the
+// loopback interface (127.0.0.0/8, ::1, or "localhost"). It is the fail-closed
+// gate for mounting the UNAUTHENTICATED perf MCP server (decision 6 / CWE-306). A
+// malformed address (no port) is treated as the bare host; an unparseable host is
+// NOT loopback (fail safe).
+func isLoopbackHostPort(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// slowTurnSource bridges the telemetry slow-turn ring buffer to the
+// mcpperf.SlowTurnSource read seam. The dependency points inward (embed →
+// telemetry, embed → mcpperf); telemetry never imports the adapter, so the tiny
+// field-copy adapter lives here at the composition boundary. A nil buffer yields
+// a nil source so list_slow_turns reports "history not enabled".
+func slowTurnSource(b *telemetry.SlowTurnBuffer) mcpperf.SlowTurnSource {
+	if b == nil {
+		return nil
+	}
+	return slowTurnBridge{b}
+}
+
+// slowTurnBridge maps telemetry.SlowTurn (scalars) to mcpperf.SlowTurn at the
+// composition boundary. The shapes are identical by design (a 1:1 copy), but
+// keeping the types distinct is what lets telemetry stay ignorant of the adapter.
+type slowTurnBridge struct{ b *telemetry.SlowTurnBuffer }
+
+func (s slowTurnBridge) Recent(thresholdMs int64) []mcpperf.SlowTurn {
+	src := s.b.Recent(thresholdMs)
+	out := make([]mcpperf.SlowTurn, len(src))
+	for i, t := range src {
+		out[i] = mcpperf.SlowTurn{
+			TurnIndex:       t.TurnIndex,
+			DurationMs:      t.DurationMs,
+			TTFTMs:          t.TTFTMs,
+			InterTokenMaxMs: t.InterTokenMaxMs,
+			EndedAt:         t.EndedAt,
+		}
+	}
+	return out
 }
 
 // runtimeDir picks the base directory for the per-process socket dir: the

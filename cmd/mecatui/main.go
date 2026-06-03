@@ -156,7 +156,11 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 	if addr := srv.AdminAddr(); addr != "" {
 		// Mirror mecated's loopback/unauth note: the perf surface can leak prompt
 		// text/file paths/goroutine stacks, so it is loopback-bound only.
-		fmt.Fprintf(os.Stderr, "mecatui: perf admin surface (loopback, UNAUTHENTICATED) at http://%s — /metrics /debug/pprof /debug/vars /debug/flightrecorder\n", addr)
+		paths := "/metrics /debug/pprof /debug/vars /debug/flightrecorder"
+		if cfg.perfMCP {
+			paths += " /mcp"
+		}
+		fmt.Fprintf(os.Stderr, "mecatui: perf admin surface (loopback, UNAUTHENTICATED) at http://%s — %s\n", addr, paths)
 	}
 	// The embedded server has no auth/TLS — it is a private UNIX socket dialled
 	// plaintext, the same single-user loopback trust model mecated uses.
@@ -256,6 +260,7 @@ func perfConfig(cfg config) embed.PerfConfig {
 		Enabled:                true,
 		Addr:                   cfg.perfAddr,
 		GoroutineWarnThreshold: cfg.perfGoroutineWarnThreshold,
+		MCP:                    cfg.perfMCP,
 	}
 }
 

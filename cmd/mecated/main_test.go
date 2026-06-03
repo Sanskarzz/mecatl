@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,11 +12,15 @@ import (
 	"runtime/trace"
 	"strings"
 	"testing"
+	"time"
 
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/stacklok/mecatl/internal/adapter/mcpperf"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
+	"github.com/stacklok/mecatl/internal/session"
 )
 
 // seedQuarantine writes a model-drafted-looking SKILL.md (with origin: model
@@ -418,5 +425,239 @@ func TestAllowAllRefusalReason(t *testing.T) {
 				t.Fatalf("expected no error, got %v", err)
 			}
 		})
+	}
+}
+
+// TestParseFlagsPerfMCP asserts --perf-mcp defaults OFF, parses ON, and that
+// --perf-mcp with an EMPTY --metrics-addr is a fatal config error (it rides the
+// admin listener).
+func TestParseFlagsPerfMCP(t *testing.T) {
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if def.perfMCP {
+		t.Errorf("perfMCP default = true, want false (OFF by default)")
+	}
+
+	on, err := parseFlags([]string{"--perf-mcp"})
+	if err != nil {
+		t.Fatalf("parseFlags(--perf-mcp): %v", err)
+	}
+	if !on.perfMCP {
+		t.Errorf("perfMCP = false, want true (--perf-mcp)")
+	}
+
+	if _, err := parseFlags([]string{"--perf-mcp", "--metrics-addr", ""}); err == nil {
+		t.Error("parseFlags(--perf-mcp with empty --metrics-addr) should be a fatal config error")
+	}
+}
+
+// TestParseFlagsPerfMCPRefusesNonLoopback is the mecated-side fail-closed proof
+// (mirroring embed's TestStartPerfMCPRefusesNonLoopback): --perf-mcp on a
+// non-loopback --metrics-addr (0.0.0.0 wildcard or a public IP) is rejected as a
+// fatal CONFIG error in parseFlags — BEFORE serve() binds any listener. Because
+// the refusal lives in config validation (finding #1), proving the address never
+// reaches serve() is exactly proving no listener is bound. A loopback address
+// with --perf-mcp must still parse cleanly.
+func TestParseFlagsPerfMCPRefusesNonLoopback(t *testing.T) {
+	nonLoopback := []string{"0.0.0.0:9090", "192.168.1.10:9090", "example.com:9090"}
+	for _, addr := range nonLoopback {
+		_, err := parseFlags([]string{"--perf-mcp", "--metrics-addr", addr})
+		if err == nil {
+			t.Errorf("parseFlags(--perf-mcp --metrics-addr %s) = nil error, want a non-loopback refusal (fail-closed, no listener bound)", addr)
+			continue
+		}
+		if !strings.Contains(err.Error(), "non-loopback") {
+			t.Errorf("parseFlags(--perf-mcp --metrics-addr %s) error = %q, want a non-loopback refusal", addr, err)
+		}
+	}
+
+	// A loopback address with --perf-mcp still parses cleanly (the gate is targeted).
+	for _, addr := range []string{"127.0.0.1:9090", "[::1]:9090", "localhost:9090"} {
+		if _, err := parseFlags([]string{"--perf-mcp", "--metrics-addr", addr}); err != nil {
+			t.Errorf("parseFlags(--perf-mcp --metrics-addr %s) = %v, want loopback to pass", addr, err)
+		}
+	}
+}
+
+// TestIsLoopbackHostPort asserts the fail-closed loopback gate: loopback hosts
+// (127.x, ::1, localhost) pass; non-loopback / unparseable hosts do NOT (so a
+// misconfigured bind refuses the unauthenticated MCP surface).
+func TestIsLoopbackHostPort(t *testing.T) {
+	tests := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:9090", true},
+		{"127.0.0.2:9090", true},
+		{"[::1]:9090", true},
+		{"localhost:9090", true},
+		{"0.0.0.0:9090", false},
+		{"192.168.1.10:9090", false},
+		{"example.com:9090", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isLoopbackHostPort(tt.addr); got != tt.want {
+			t.Errorf("isLoopbackHostPort(%q) = %v, want %v", tt.addr, got, tt.want)
+		}
+	}
+}
+
+// TestSlowTurnSourceBridge asserts the cmd-boundary bridge maps the telemetry
+// buffer to mcpperf.SlowTurnSource (and that a nil buffer yields a nil source so
+// list_slow_turns reports "history not enabled").
+func TestSlowTurnSourceBridge(t *testing.T) {
+	if src := slowTurnSource(nil); src != nil {
+		t.Errorf("slowTurnSource(nil) = %v, want nil source", src)
+	}
+
+	buf := telemetry.NewSlowTurnBuffer(8, func() time.Time { return time.Unix(0, 0) })
+	buf.Emit(context.Background(), session.Event{
+		Type:    session.EvTurnEnd,
+		Turn:    7,
+		TurnEnd: &session.TurnEndPayload{DurationMs: 1234, TTFTMs: 12, InterTokenMaxMs: 34},
+	})
+	src := slowTurnSource(buf)
+	got := src.Recent(0)
+	if len(got) != 1 {
+		t.Fatalf("bridged Recent returned %d turns, want 1", len(got))
+	}
+	w := got[0]
+	if w.TurnIndex != 7 || w.DurationMs != 1234 || w.TTFTMs != 12 || w.InterTokenMaxMs != 34 {
+		t.Errorf("bridge did not copy scalars: %+v", w)
+	}
+}
+
+// TestPerfMCPPrintConfig asserts the print-config subcommand emits a paste-ready
+// .mcp.json with the right url and NO Authorization/headers (decision 6: loopback,
+// no auth).
+func TestPerfMCPPrintConfig(t *testing.T) {
+	var out bytes.Buffer
+	if err := runPerfMCPPrintConfig([]string{"--metrics-addr", "127.0.0.1:7777"}, &out); err != nil {
+		t.Fatalf("runPerfMCPPrintConfig: %v", err)
+	}
+	body := out.String()
+	if strings.Contains(strings.ToLower(body), "authorization") || strings.Contains(strings.ToLower(body), "headers") {
+		t.Errorf("print-config emitted an auth header; decision 6 is loopback/no-auth:\n%s", body)
+	}
+
+	var parsed struct {
+		McpServers map[string]struct {
+			Type string `json:"type"`
+			URL  string `json:"url"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
+		t.Fatalf("print-config output is not valid JSON: %v\n%s", err, body)
+	}
+	srv, ok := parsed.McpServers["mecatl-perf"]
+	if !ok {
+		t.Fatalf("print-config missing the mecatl-perf server entry:\n%s", body)
+	}
+	if srv.Type != "http" {
+		t.Errorf("server type = %q, want http", srv.Type)
+	}
+	if srv.URL != "http://127.0.0.1:7777/mcp" {
+		t.Errorf("server url = %q, want http://127.0.0.1:7777/mcp", srv.URL)
+	}
+
+	// Strict key-set: decode into a map and assert the server object's keys are
+	// EXACTLY {type,url}. A stray token/env/headers/Authorization field would
+	// otherwise slip past the typed struct (which silently drops unknown keys) —
+	// this is stronger than the substring grep above (decision 6: loopback, no auth).
+	var raw struct {
+		McpServers map[string]map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+		t.Fatalf("print-config output is not valid JSON: %v\n%s", err, body)
+	}
+	rawSrv, ok := raw.McpServers["mecatl-perf"]
+	if !ok {
+		t.Fatalf("strict decode missing the mecatl-perf server entry:\n%s", body)
+	}
+	wantKeys := map[string]bool{"type": true, "url": true}
+	for k := range rawSrv {
+		if !wantKeys[k] {
+			t.Errorf("server object carries an unexpected key %q (want exactly {type,url} — decision 6 forbids token/env/headers):\n%s", k, body)
+		}
+	}
+	for k := range wantKeys {
+		if _, present := rawSrv[k]; !present {
+			t.Errorf("server object missing required key %q:\n%s", k, body)
+		}
+	}
+
+	// Default --metrics-addr (no flag) uses the loopback :9090 default.
+	out.Reset()
+	if err := runPerfMCPPrintConfig(nil, &out); err != nil {
+		t.Fatalf("runPerfMCPPrintConfig(nil): %v", err)
+	}
+	if !strings.Contains(out.String(), "http://127.0.0.1:9090/mcp") {
+		t.Errorf("default url missing; got:\n%s", out.String())
+	}
+}
+
+// TestAdminMuxMountsPerfMCP is the e2e mount proof: an admin mux built the way
+// serve() builds it (NewAdminMux + a /mcp Handle of mcpperf.Handler) answers an
+// MCP initialize at /mcp while /metrics and /debug/pprof still work; and a mux
+// WITHOUT the /mcp mount returns 404 there. This mirrors serve()'s wiring without
+// standing up the full daemon.
+func TestAdminMuxMountsPerfMCP(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mecatl_perfmcp_mount_seed",
+		Help: "seed series so /metrics is non-empty",
+	}))
+
+	// --- WITH /mcp mounted ---
+	withMux := telemetry.NewAdminMux(reg, nil)
+	withMux.Handle("/mcp", mcpperf.Handler(mcpperf.Deps{
+		Snapshot:  telemetry.Snapshot,
+		Gatherer:  reg,
+		Profiler:  mcpperf.NewProfiler(),
+		SlowTurns: slowTurnSource(telemetry.NewSlowTurnBuffer(8, nil)),
+		Clock:     time.Now,
+	}))
+	on := httptest.NewServer(withMux)
+	defer on.Close()
+
+	// /mcp answers an MCP initialize over the SDK client (proves the handler is
+	// mounted and speaks the protocol).
+	mc := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "mecated-test", Version: "v1"}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sess, err := mc.Connect(ctx, &mcpsdk.StreamableClientTransport{
+		Endpoint:             on.URL + "/mcp",
+		DisableStandaloneSSE: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect to mounted /mcp: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	// The sibling admin endpoints still serve alongside /mcp.
+	for _, p := range []string{"/metrics", "/debug/pprof/"} {
+		resp, gerr := http.Get(on.URL + p)
+		if gerr != nil {
+			t.Fatalf("GET %s: %v", p, gerr)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s status = %d, want 200 (must coexist with /mcp)", p, resp.StatusCode)
+		}
+	}
+
+	// --- WITHOUT /mcp mounted: /mcp must be 404 (absent when --perf-mcp is off) ---
+	off := httptest.NewServer(telemetry.NewAdminMux(reg, nil))
+	defer off.Close()
+	resp, gerr := http.Post(off.URL+"/mcp", "application/json", bytes.NewReader([]byte(`{}`)))
+	if gerr != nil {
+		t.Fatalf("POST /mcp (off): %v", gerr)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("POST /mcp status = %d, want 404 when --perf-mcp is off", resp.StatusCode)
 	}
 }

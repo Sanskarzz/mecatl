@@ -17,6 +17,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -43,6 +44,7 @@ import (
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
+	"github.com/stacklok/mecatl/internal/adapter/mcpperf"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
@@ -122,6 +124,15 @@ type config struct {
 	mutexProfileFraction int
 	blockProfileRate     int
 	flightRecorder       bool
+
+	// perfMCP mounts the read-only perf MCP server (internal/adapter/mcpperf) at
+	// /mcp on the loopback admin listener, so an agent can introspect THIS
+	// process's runtime/latency/profile state over MCP. OFF by default. It requires
+	// --metrics-addr (the admin listener it rides) AND that address to be loopback:
+	// the surface is UNAUTHENTICATED and can embed goroutine-derived names/timing,
+	// so serve() FAILS CLOSED if --perf-mcp is set on a non-loopback --metrics-addr
+	// (decision 6 + the security review's CWE-306 Low finding).
+	perfMCP bool
 
 	// goroutineWarnThreshold arms a background watchdog that logs slog.Warn when
 	// runtime.NumGoroutine() exceeds it (decision 10: a live leak alarm, not just
@@ -310,6 +321,16 @@ func main() {
 		}
 		return
 	}
+	// `mecated perf-mcp print-config` prints a paste-ready client .mcp.json snippet
+	// for the loopback perf MCP server. Loopback + no auth (decision 6), so the
+	// snippet carries NO Authorization header. One-shot offline CLI action.
+	if len(os.Args) >= 3 && os.Args[1] == "perf-mcp" && os.Args[2] == "print-config" {
+		if err := runPerfMCPPrintConfig(os.Args[3:], os.Stdout); err != nil {
+			slog.Error("perf-mcp print-config failed", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("mecated exited with error", "err", err)
 		os.Exit(1)
@@ -363,6 +384,41 @@ func runSkillsPromote(argv []string, in io.Reader, out io.Writer) error {
 	slog.Info("skill promoted to the active catalog (takes effect on next server start)",
 		"name", name, "from", quarantine, "to", active)
 	return nil
+}
+
+// runPerfMCPPrintConfig implements `mecated perf-mcp print-config [--metrics-addr
+// host:port]`: it prints the paste-ready client .mcp.json snippet pointing at the
+// loopback perf MCP server's /mcp endpoint. Per decision 6 (loopback, no auth) the
+// snippet carries NO Authorization header — adding one is a future off-loopback
+// concern. --metrics-addr sets the host:port in the printed URL (default
+// 127.0.0.1:9090, matching defaultMetricsAddr). Output goes to stdout so it can be
+// redirected into a client config.
+func runPerfMCPPrintConfig(argv []string, out io.Writer) error {
+	fs := flag.NewFlagSet("mecated perf-mcp print-config", flag.ContinueOnError)
+	fs.SetOutput(out)
+	var addr string
+	fs.StringVar(&addr, "metrics-addr", defaultMetricsAddr, "the loopback admin listen address the perf MCP server is mounted on (host:port); sets the host:port in the printed URL")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+
+	// Build the snippet via the JSON encoder so the structure (and absence of a
+	// headers/Authorization field) is enforced by the type, not a fragile format
+	// string. The "type":"http" transport matches the streamable-HTTP handler.
+	type perfServer struct {
+		Type string `json:"type"`
+		URL  string `json:"url"`
+	}
+	cfg := struct {
+		McpServers map[string]perfServer `json:"mcpServers"`
+	}{
+		McpServers: map[string]perfServer{
+			"mecatl-perf": {Type: "http", URL: "http://" + addr + "/mcp"},
+		},
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(cfg)
 }
 
 // run parses flags, builds the engine/service via internal/app, and serves until a
@@ -478,7 +534,19 @@ func run() error {
 	}
 
 	tracing := telemetry.NewTracing(otel.GetTracerProvider())
-	sink := telemetry.NewSink(metrics, tracing)
+
+	// Slow-turn ring buffer: when the perf MCP server is mounted it observes
+	// EvTurnEnd as one more EventSink fanned out alongside metrics/tracing, so its
+	// list_slow_turns tool sees the SAME TurnEndPayload the latency histograms do.
+	// It stores scalars only (redaction by shape) and spawns no goroutine. Built
+	// only when --perf-mcp is set so a bare daemon carries no extra sink.
+	var slowTurns *telemetry.SlowTurnBuffer
+	sinks := []port.EventSink{metrics, tracing}
+	if cfg.perfMCP {
+		slowTurns = telemetry.NewSlowTurnBuffer(telemetry.DefaultSlowTurnCapacity, time.Now)
+		sinks = append(sinks, slowTurns)
+	}
+	sink := telemetry.NewSink(sinks...)
 
 	built, err := app.Build(ctx, appConfig(cfg, sink, metrics))
 	if err != nil {
@@ -497,7 +565,7 @@ func run() error {
 		return serveACP(ctx, built.Service, cfg.storeDir != "")
 	}
 
-	return serve(ctx, cfg, built.Service, providers.Registry, recorder)
+	return serve(ctx, cfg, built.Service, providers.Registry, recorder, slowTurns)
 }
 
 // appConfig maps the CLI/env config onto the shared app.Config build contract,
@@ -605,6 +673,8 @@ func parseFlags(argv []string) (config, error) {
 	fs.IntVar(&cfg.blockProfileRate, "block-profile-rate", 0, "runtime.SetBlockProfileRate in nanoseconds: sample one blocking event per N ns blocked for /debug/pprof/block. 0 (default) disables it. Adds per-block-event overhead; enable only when investigating blocking")
 	fs.BoolVar(&cfg.flightRecorder, "flight-recorder", true, "arm the execution-trace FlightRecorder (bounded in-memory ring buffer) so /debug/flightrecorder can snapshot recent activity. ON by default (low, bounded overhead). Pass --flight-recorder=false to disable")
 
+	fs.BoolVar(&cfg.perfMCP, "perf-mcp", false, "mount the read-only perf MCP server at /mcp on the loopback admin listener, so an agent can introspect THIS process's runtime/latency/profile state over MCP (list_slow_turns, runtime/heap/CPU profiles, FlightRecorder). OFF by default. Requires --metrics-addr, and that address MUST be loopback: the surface is UNAUTHENTICATED (decision 6) and can embed goroutine-derived function names/timing, so a non-loopback --metrics-addr with --perf-mcp is REFUSED. Print a paste-ready client .mcp.json with `mecated perf-mcp print-config`")
+
 	fs.IntVar(&cfg.goroutineWarnThreshold, "goroutine-warn-threshold", 0, "live goroutine-leak alarm: log a slog.Warn whenever runtime.NumGoroutine() exceeds this count (decision 10 of docs/design/perf-observability.md). 0 (default) disables the alarm; the runtime collector still exports the goroutine count as a /metrics series regardless. A healthy mecated holds a low-hundreds goroutine count; pick a high ceiling (e.g. 10000) so the alarm only fires on a genuine leak, not normal concurrency")
 	fs.DurationVar(&cfg.goroutineWarnInterval, "goroutine-warn-interval", 30*time.Second, "how often the goroutine-leak watchdog samples runtime.NumGoroutine(). Only consulted when --goroutine-warn-threshold > 0")
 
@@ -657,6 +727,21 @@ func parseFlags(argv []string) (config, error) {
 		return config{}, err
 	}
 
+	// --perf-mcp rides the admin listener, so it is meaningless without one.
+	if cfg.perfMCP && cfg.metricsAddr == "" {
+		return config{}, errors.New("--perf-mcp requires --metrics-addr (the loopback admin listener it mounts /mcp on)")
+	}
+	// FAIL CLOSED on a non-loopback --metrics-addr with --perf-mcp set, here in
+	// config validation — BEFORE serve() binds any listener — so the refusal is a
+	// pure config error with no side effects (matching the embed path, which
+	// validates before arming any telemetry/listener). The /mcp surface is
+	// UNAUTHENTICATED and can embed goroutine-derived function names and timing
+	// (decision 6 + the security review's CWE-306 Low finding), so it must never
+	// be reachable off loopback.
+	if cfg.perfMCP && !isLoopbackHostPort(cfg.metricsAddr) {
+		return config{}, fmt.Errorf("--perf-mcp refuses a non-loopback --metrics-addr=%s: it exposes unauthenticated runtime data; bind loopback or add auth (future work)", cfg.metricsAddr)
+	}
+
 	cfg.openAIKey = os.Getenv("OPENAI_API_KEY")
 	// An API key in the environment implies the user wants the real provider.
 	if cfg.openAIKey != "" {
@@ -682,7 +767,7 @@ func parseFlags(argv []string) (config, error) {
 // liveness/readiness probes and the standard gRPC health service are mounted
 // OUTSIDE the auth/rate-limit layer so orchestrators can probe without
 // credentials.
-func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus.Registry, recorder *telemetry.FlightRecorder) error {
+func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus.Registry, recorder *telemetry.FlightRecorder, slowTurns *telemetry.SlowTurnBuffer) error {
 	tlsCfg, err := buildTLSConfig(cfg)
 	if err != nil {
 		return err
@@ -733,10 +818,30 @@ func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus
 	// MUST stay loopback — these endpoints are never mounted on the public
 	// gRPC/HTTP service surface (decision 6 in docs/design/perf-observability.md).
 	var metricsSrv *http.Server
+	adminPaths := "/metrics /debug/pprof /debug/vars /debug/flightrecorder"
 	if cfg.metricsAddr != "" {
+		adminMux := telemetry.NewAdminMux(reg, recorder)
+		// Perf MCP server: mount /mcp on the SAME loopback admin mux. It is
+		// UNAUTHENTICATED and its output can embed goroutine-derived function names
+		// and timing, so a non-loopback --metrics-addr with --perf-mcp is REFUSED
+		// (decision 6 + the security review's CWE-306 Low finding). That refusal is
+		// enforced fail-closed in parseFlags (config validation), BEFORE serve()
+		// binds anything — so by the time we reach here the address is loopback.
+		if cfg.perfMCP {
+			adminMux.Handle("/mcp", mcpperf.Handler(mcpperf.Deps{
+				Snapshot:  telemetry.Snapshot,
+				Gatherer:  reg,
+				Recorder:  recorder, // nil-able: /debug/flightrecorder disabled ⇒ capture tool reports unavailable
+				Profiler:  mcpperf.NewProfiler(),
+				SlowTurns: slowTurnSource(slowTurns),
+				Clock:     time.Now,
+				Logger:    slog.Default(),
+			}))
+			adminPaths += " /mcp"
+		}
 		metricsSrv = &http.Server{
 			Addr:              cfg.metricsAddr,
-			Handler:           telemetry.NewAdminMux(reg, recorder),
+			Handler:           adminMux,
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 	}
@@ -776,7 +881,11 @@ func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus
 
 	if metricsSrv != nil {
 		go func() {
-			slog.Info("admin server listening (loopback)", "addr", cfg.metricsAddr, "paths", "/metrics /debug/pprof /debug/vars /debug/flightrecorder")
+			if cfg.perfMCP {
+				slog.Info("admin server listening (loopback; /mcp is UNAUTHENTICATED perf MCP — keep loopback)", "addr", cfg.metricsAddr, "paths", adminPaths)
+			} else {
+				slog.Info("admin server listening (loopback)", "addr", cfg.metricsAddr, "paths", adminPaths)
+			}
 			if serveErr := metricsSrv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 				errCh <- fmt.Errorf("metrics serve: %w", serveErr)
 			}
@@ -823,6 +932,61 @@ func warnIfNonLoopback(flagName, addr string, authed bool) {
 	}
 	slog.Warn("API bound to a NON-loopback address with NO authentication: it exposes UNAUTHENTICATED command/file execution to the network — set --auth-token / --tls-cert (or front it with a trusted mesh) before doing this",
 		"flag", flagName, "addr", addr)
+}
+
+// isLoopbackHostPort reports whether a "host:port" listen address binds the
+// loopback interface (127.0.0.0/8, ::1, or the literal "localhost"). It is the
+// fail-closed gate for mounting the UNAUTHENTICATED perf MCP server: the admin
+// surface can leak goroutine-derived names/timing, so it must never ride a
+// non-loopback listener (decision 6 / CWE-306). A malformed address (no port) is
+// treated as the bare host. An empty/unparseable host is NOT loopback (fail safe).
+func isLoopbackHostPort(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "localhost" {
+		// ACCEPTED assumption (security review Low): we trust the literal string
+		// "localhost" as loopback without resolving it. A self-inflicted /etc/hosts
+		// override is contrived and single-user; the SDK's DNS-rebinding/Host
+		// validation remains the runtime backstop.
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// slowTurnSource bridges the telemetry slow-turn ring buffer to the
+// mcpperf.SlowTurnSource read seam. The dependency points inward (cmd →
+// telemetry, cmd → mcpperf); telemetry never imports the adapter, so the tiny
+// field-copy adapter lives here at the composition boundary. A nil buffer yields
+// a nil source so list_slow_turns reports "history not enabled".
+func slowTurnSource(b *telemetry.SlowTurnBuffer) mcpperf.SlowTurnSource {
+	if b == nil {
+		return nil
+	}
+	return slowTurnBridge{b}
+}
+
+// slowTurnBridge maps telemetry.SlowTurn (scalars) to mcpperf.SlowTurn at the
+// composition boundary. The shapes are identical by design, so this is a 1:1
+// copy — but keeping the two types distinct is what lets telemetry stay ignorant
+// of the adapter.
+type slowTurnBridge struct{ b *telemetry.SlowTurnBuffer }
+
+func (s slowTurnBridge) Recent(thresholdMs int64) []mcpperf.SlowTurn {
+	src := s.b.Recent(thresholdMs)
+	out := make([]mcpperf.SlowTurn, len(src))
+	for i, t := range src {
+		out[i] = mcpperf.SlowTurn{
+			TurnIndex:       t.TurnIndex,
+			DurationMs:      t.DurationMs,
+			TTFTMs:          t.TTFTMs,
+			InterTokenMaxMs: t.InterTokenMaxMs,
+			EndedAt:         t.EndedAt,
+		}
+	}
+	return out
 }
 
 // buildTLSConfig assembles the *tls.Config for the gRPC + HTTP servers from the

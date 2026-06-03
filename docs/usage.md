@@ -164,6 +164,7 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--flight-recorder` | `true` | arm a bounded in-memory execution-trace **flight recorder** (8 MiB / 5s window) so a trace of the recent past can be snapshotted on demand. Low overhead; `=false` disables. |
 | `--mutex-profile-fraction` | `0` | `runtime.SetMutexProfileFraction` rate (0 = off). Populates `/debug/pprof/mutex`; has runtime overhead — enable only while investigating lock contention. |
 | `--block-profile-rate` | `0` | `runtime.SetBlockProfileRate` rate in ns (0 = off). Populates `/debug/pprof/block`; has runtime overhead — enable only while investigating blocking. |
+| `--perf-mcp` | `false` | mount the **read-only perf MCP server** at `/mcp` on the admin listener (see the observability note). Requires `--metrics-addr`, and that address **must be loopback** — a non-loopback `--metrics-addr` with `--perf-mcp` is **refused** (fail-closed). |
 
 ### Observability (the loopback admin listener)
 
@@ -177,10 +178,41 @@ state, so they must never be bound off-localhost:
 | `/debug/pprof/` | the standard pprof profiles (`heap`, `goroutine`, `allocs`, `profile` (CPU), `trace`, and — when the rate flags are set — `mutex`, `block`). Capture with `go tool pprof http://127.0.0.1:9090/debug/pprof/heap`. |
 | `/debug/vars` | a curated `mecatl_runtime` JSON snapshot (goroutines, heap, GC pauses, RSS, uptime) from `runtime/metrics` — cheap, structured, no STW. |
 | `/debug/flightrecorder` | a snapshot of the in-memory flight-recorder ring (an execution trace of the recent past); view with `go tool trace`. Absent when `--flight-recorder=false`. |
+| `/mcp` | the **perf MCP server** (read-only). Mounted only with `--perf-mcp`. Lets an agent introspect this process's runtime/latency/profile state over MCP — `list_slow_turns`, runtime/heap/CPU profile rankings, FlightRecorder summaries — returning **reduced numeric summaries** (never raw blobs). Absent (404) when `--perf-mcp` is off. |
 
 > These are the **in-process** profiling sources — no external profiling backend
-> is required. A later opt-in perf-over-MCP surface will expose reduced,
+> is required. The `/mcp` endpoint (opt-in via `--perf-mcp`) exposes reduced,
 > agent-readable summaries of the same data. See `docs/design/perf-observability.md`.
+
+#### The perf MCP server (`--perf-mcp`)
+
+`--perf-mcp` mounts a read-only MCP server at `/mcp` on the admin listener so an
+agent can scrape this process's own performance state through MCP tools instead
+of a human reading raw `/metrics` / `/debug/pprof`. It is **unauthenticated**
+(decision 6: loopback + the SDK's DNS-rebinding protection only) and its output
+can embed goroutine-derived function names and timing, so it is **fail-closed**:
+`--perf-mcp` on a **non-loopback** `--metrics-addr` is **refused at startup**
+(`bind loopback or add auth (future work)`). Any future off-loopback exposure
+**MUST** add auth.
+
+Generate a paste-ready client config with:
+
+```sh
+mecated perf-mcp print-config --metrics-addr 127.0.0.1:9090
+```
+
+It prints (note: **no `Authorization` header** — the surface is loopback/no-auth):
+
+```json
+{
+  "mcpServers": {
+    "mecatl-perf": {
+      "type": "http",
+      "url": "http://127.0.0.1:9090/mcp"
+    }
+  }
+}
+```
 
 ### Environment
 
@@ -576,7 +608,10 @@ loopback observability surface `mecated` exposes — `/metrics`, `/debug/pprof/*
 (`--perf-addr` to fix it; `--perf-goroutine-warn-threshold` to arm the goroutine
 alarm). The chosen address is logged at startup (loopback, unauthenticated —
 same posture as `mecated`'s admin listener; see the observability note in §3).
-This is the in-process way to profile a freeze in the embedded server itself.
+With `--perf` it also accepts **`--perf-mcp`** to mount the read-only perf MCP
+server at `/mcp` on that admin surface (same fail-closed loopback enforcement: a
+non-loopback `--perf-addr` with `--perf-mcp` is refused). This is the in-process
+way to profile a freeze in the embedded server itself.
 The embedded server also accepts `--yolo` (the
 allow-all operator posture — same semantics, root refusal, and `MECATL_SANDBOX`/
 `IS_SANDBOX` env as `mecated`; see the allow-all note in §7). It is **ignored when

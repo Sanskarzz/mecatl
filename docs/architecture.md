@@ -668,11 +668,18 @@ error.
   exporter + SDK TracerProvider and installs it globally (wired in `mecated` via
   `--otlp-endpoint` / `--otlp-protocol` / `--otlp-insecure`); with an empty
   endpoint `Providers.Tracer` is the current (no-op) global and only metrics run.
-  > A broader performance-observability effort is landing incrementally (pprof,
-  > FlightRecorder, an opt-in perf-over-MCP surface). The runtime collector and
-  > the OTel metrics pipeline above are **live**; the remaining surfaces are not
-  > wired yet. See `docs/design/perf-observability.md` (the decided direction)
-  > and `docs/perf-measurement-survey.md` (the Go-perf technique reference).
+  > A broader performance-observability effort lands incrementally on a
+  > **loopback-only, unauthenticated admin listener** (`--metrics-addr`, default
+  > `127.0.0.1:9090`): `/metrics`, `/debug/pprof/*`, `/debug/vars` (a curated
+  > `runtime/metrics` snapshot), `/debug/flightrecorder` (an execution-trace ring),
+  > and — opt-in via `--perf-mcp` — `/mcp`, the read-only **perf MCP server**
+  > (`internal/adapter/mcpperf`) that lets an agent introspect this process's
+  > runtime/latency/profile state as reduced numeric summaries (slow-turns,
+  > profile rankings, FlightRecorder summaries). All of it is **live**. The MCP
+  > surface is fail-closed to loopback (it is unauthenticated and can embed
+  > goroutine-derived names/timing). See `docs/design/perf-observability.md` (the
+  > decided direction) and `docs/perf-measurement-survey.md` (the Go-perf
+  > technique reference).
 - **SessionStore** — `memstore` (default, in-memory) and `jsonlstore`
   (append-only JSONL replay log: `<dir>/<id>.session.jsonl` snapshots +
   `<dir>/<id>.tools.jsonl` tool records; `jsonlstore` also implements `Logger`).
@@ -875,6 +882,7 @@ changes when one is swapped:
 | `tool.MemoryStore` | `internal/tool/tool.go` (impl `memory`) | cross-session memory + `dream` consolidation |
 | `tool.WorkspaceForker` | `tool/isolation.go` (impl `forker`) | fork-join isolated branches |
 | `tool.Catalog` | `internal/tool/catalog.go` | core tools + MCP (streaming-HTTP) + repo map |
+| `mcpperf.Deps` (perf MCP server) | `internal/adapter/mcpperf` | opt-in `--perf-mcp`; a read-only MCP `http.Handler` mounted at `/mcp` on the loopback admin listener (both composition roots: `cmd/mecated` and `cmd/mecatui/embed`). Built by DI — `Snapshot`/`Gatherer`/`Profiler` from `telemetry`, a slow-turn ring buffer (`telemetry.SlowTurnBuffer`) bridged at the cmd boundary to the `mcpperf.SlowTurnSource` seam (telemetry never imports mcpperf — the dependency points inward). Fail-closed to loopback (unauthenticated) |
 | `SessionStore` + AGENTS.md/CLAUDE.md discovery | `port` + `prompt/builder.go` | file-as-memory; AGENTS.md wins over CLAUDE.md, injected as a **user** message, never system |
 
 **Remaining non-goals / deliberate deferrals**: an **OS-level sandbox**

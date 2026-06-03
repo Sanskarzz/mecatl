@@ -2,6 +2,7 @@ package embed_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.uber.org/goleak"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -214,6 +216,33 @@ func TestStartPerfDisabledStartsNoAdminListener(t *testing.T) {
 	}
 }
 
+// TestStartPerfMCPRefusesNonLoopback asserts the fail-closed loopback enforcement
+// (decision 6 / CWE-306): with perf.MCP set and a NON-loopback admin Addr, Start
+// returns an error and binds nothing. The refusal happens before any telemetry or
+// flight-recorder side effects, so this is safe to run alongside the one
+// perf-enabled test in this binary (it never arms the process FlightRecorder).
+func TestStartPerfMCPRefusesNonLoopback(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, err := embed.Start(ctx, mockAppConfig(t.TempDir()), embed.PerfConfig{
+		Enabled: true,
+		MCP:     true,
+		Addr:    "0.0.0.0:0", // non-loopback: must be refused
+	})
+	if err == nil {
+		if srv != nil {
+			_ = srv.Close()
+		}
+		t.Fatal("Start with perf.MCP on a non-loopback Addr should fail closed, got nil error")
+	}
+	if !strings.Contains(err.Error(), "non-loopback") {
+		t.Errorf("error = %q, want it to mention the non-loopback refusal", err)
+	}
+}
+
 // TestStartPerfServesAdminSurface is the end-to-end proof of decision 7: with
 // --perf the embedded server brings up a loopback admin listener on an ephemeral
 // port (AdminAddr reports it) serving the runtime-introspection surface —
@@ -245,6 +274,7 @@ func TestStartPerfServesAdminSurface(t *testing.T) {
 	srv, err := embed.Start(ctx, mockAppConfig(workspace), embed.PerfConfig{
 		Enabled:                true,
 		Addr:                   "127.0.0.1:0", // ephemeral loopback
+		MCP:                    true,          // also mount /mcp (the perf MCP server)
 		GoroutineWarnThreshold: 1 << 30,       // armed but never fires
 		GoroutineWarnInterval:  time.Millisecond,
 	})
@@ -281,7 +311,80 @@ func TestStartPerfServesAdminSurface(t *testing.T) {
 	// snapshot is non-empty.
 	driveTurn(ctx, t, srv.Target(), workspace)
 
+	// End-to-end engine → slow-turn buffer → MCP: the turn above emitted an
+	// EvTurnEnd that the slow-turn ring buffer (fanned into the embedded engine's
+	// Sink) recorded. Calling list_slow_turns over the mounted /mcp must now report
+	// at least one turn — proving the whole wiring: the buffer observed the event,
+	// the cmd→telemetry→mcpperf bridge handed it to the tool, and /mcp is mounted.
 	base := "http://" + addr
+	t.Run("/mcp list_slow_turns end-to-end", func(t *testing.T) {
+		mc := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "embed-test", Version: "v1"}, nil)
+		dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer dialCancel()
+		sess, cerr := mc.Connect(dialCtx, &mcpsdk.StreamableClientTransport{
+			Endpoint:             base + "/mcp",
+			DisableStandaloneSSE: true,
+		}, nil)
+		if cerr != nil {
+			t.Fatalf("connect to /mcp: %v", cerr)
+		}
+		defer func() { _ = sess.Close() }()
+
+		callCtx, callCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer callCancel()
+		res, cerr := sess.CallTool(callCtx, &mcpsdk.CallToolParams{
+			Name:      "list_slow_turns",
+			Arguments: json.RawMessage(`{}`),
+		})
+		if cerr != nil {
+			t.Fatalf("CallTool(list_slow_turns): %v", cerr)
+		}
+		if res.IsError {
+			t.Fatalf("list_slow_turns returned an error result: %+v", res.Content)
+		}
+		// The structured output carries totalCount AND the turns themselves. After one
+		// driven turn we assert not just a non-empty count but that a real scalar
+		// payload flowed engine→buffer→MCP: at least one turn object is present, it
+		// carries the real event turn_index, and its buffer-stamped ended_at is a
+		// populated (non-zero) wall-clock timestamp. A non-empty count alone could
+		// mask an empty/zeroed turns array (e.g. a totalCount computed off a stale or
+		// dropped payload).
+		//
+		// NOTE we deliberately do NOT assert duration_ms/ttft_ms > 0: those are
+		// wall-clock deltas the engine measures against the streamed response, and the
+		// MOCK provider returns instantly, so they legitimately round to 0ms here.
+		// Asserting them positive would be a flake, not a stronger proof. ended_at
+		// (always stamped by the buffer's clock) is the deterministic scalar that
+		// proves a real turn object — not just a count — reached the MCP tool.
+		raw, merr := json.Marshal(res.StructuredContent)
+		if merr != nil {
+			t.Fatalf("marshal structured content: %v", merr)
+		}
+		var out struct {
+			TotalCount int `json:"totalCount"`
+			Turns      []struct {
+				TurnIndex  int       `json:"turn_index"`
+				DurationMs int64     `json:"duration_ms"`
+				EndedAt    time.Time `json:"ended_at"`
+			} `json:"turns"`
+		}
+		if uerr := json.Unmarshal(raw, &out); uerr != nil {
+			t.Fatalf("unmarshal list_slow_turns output %s: %v", raw, uerr)
+		}
+		if out.TotalCount < 1 {
+			t.Fatalf("list_slow_turns totalCount = %d after a driven turn, want >= 1 (engine→buffer→MCP path broken)", out.TotalCount)
+		}
+		if len(out.Turns) < 1 {
+			t.Fatalf("list_slow_turns returned %d turns after a driven turn, want >= 1 (real scalar payload should flow, not just a count): %s", len(out.Turns), raw)
+		}
+		if out.Turns[0].EndedAt.IsZero() {
+			t.Fatalf("list_slow_turns turn[0].ended_at is zero, want a populated buffer-stamped timestamp (proves a real turn object flowed engine→buffer→MCP, not a bare count): %s", raw)
+		}
+		if out.Turns[0].TurnIndex < 0 {
+			t.Fatalf("list_slow_turns turn[0].turn_index = %d, want the real event turn index (>= 0): %s", out.Turns[0].TurnIndex, raw)
+		}
+	})
+
 	cases := []struct {
 		path       string
 		wantSubstr string // marker that must appear in the body (empty = any non-empty body)
