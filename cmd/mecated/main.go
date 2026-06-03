@@ -473,7 +473,7 @@ func run() error {
 	// a configured ceiling. Disabled by default (threshold 0). It is bound to ctx
 	// so it unwinds on shutdown — it would be ironic for the leak alarm to leak.
 	if cfg.goroutineWarnThreshold > 0 {
-		startGoroutineWatchdog(ctx, cfg.goroutineWarnThreshold, cfg.goroutineWarnInterval, runtime.NumGoroutine, slog.Default())
+		telemetry.StartGoroutineWatchdog(ctx, cfg.goroutineWarnThreshold, cfg.goroutineWarnInterval, runtime.NumGoroutine, slog.Default())
 		slog.Info("goroutine-leak watchdog armed", "threshold", cfg.goroutineWarnThreshold, "interval", cfg.goroutineWarnInterval)
 	}
 
@@ -565,41 +565,6 @@ func sandboxDeclared() bool {
 
 func validateAllowAll(cfg config) error {
 	return allowAllRefusalReason(cfg.allowAllTools, os.Geteuid(), sandboxDeclared())
-}
-
-// startGoroutineWatchdog launches a background ticker that samples the live
-// goroutine count (via the injected count func, normally runtime.NumGoroutine)
-// every interval and logs a slog.Warn when it exceeds threshold — the live
-// leak ALARM of decision 10, complementing the test-time goleak gate and the
-// runtime collector's goroutine-count /metrics series.
-//
-// The goroutine exits when ctx is cancelled (shutdown), so the watchdog itself
-// never leaks — verified by the package's own goleak-free shutdown and by
-// TestGoroutineWatchdogStopsOnCancel. count and logger are injected so the
-// behaviour is unit-testable without spawning real goroutines or racing the
-// global logger.
-func startGoroutineWatchdog(ctx context.Context, threshold int, interval time.Duration, count func() int, logger *slog.Logger) {
-	if threshold <= 0 {
-		return
-	}
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	go func() {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if n := count(); n > threshold {
-					logger.Warn("goroutine count exceeds the configured watchdog threshold — possible goroutine leak",
-						"goroutines", n, "threshold", threshold)
-				}
-			}
-		}
-	}()
 }
 
 // parseFlags turns argv into a config, resolving env-derived defaults.
@@ -771,7 +736,7 @@ func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus
 	if cfg.metricsAddr != "" {
 		metricsSrv = &http.Server{
 			Addr:              cfg.metricsAddr,
-			Handler:           newAdminMux(reg, recorder),
+			Handler:           telemetry.NewAdminMux(reg, recorder),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 	}
@@ -831,35 +796,6 @@ func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus
 
 	shutdown(grpcSrv, httpSrv, metricsSrv)
 	return nil
-}
-
-// newAdminMux builds the loopback admin mux: /metrics (read-only, secret-free)
-// plus the runtime-introspection surface — pprof, expvar (/debug/vars), and,
-// when recorder is non-nil, the FlightRecorder snapshot (/debug/flightrecorder).
-// It is extracted from serve so a test can drive the REAL mux construction (a
-// parallel hand-rolled mux in a test would not catch a deleted Handle here).
-//
-// recorder may be nil (FlightRecorder disabled), in which case
-// /debug/flightrecorder is NOT mounted and a GET returns 404.
-//
-// SECURITY: pprof/FlightRecorder/expvar output can embed prompt text, file
-// paths, and goroutine stacks. The returned mux MUST be served only on a
-// loopback-bound listener — never on the public gRPC/HTTP service surface
-// (decision 6 in docs/design/perf-observability.md).
-func newAdminMux(reg *prometheus.Registry, recorder *telemetry.FlightRecorder) *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", telemetry.MetricsHandler(reg))
-	telemetry.RegisterPprof(mux)
-	mux.Handle("/debug/vars", telemetry.ExpvarHandler())
-	if recorder != nil {
-		mux.HandleFunc("/debug/flightrecorder", func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/octet-stream")
-			if _, err := recorder.Snapshot(w); err != nil {
-				http.Error(w, "flight recorder snapshot: "+err.Error(), http.StatusServiceUnavailable)
-			}
-		})
-	}
-	return mux
 }
 
 // warnIfNonLoopback logs the API trust assumption for the given bind address.

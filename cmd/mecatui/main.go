@@ -148,11 +148,16 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 		return defaultProbeAddr, client.DialConfig{Server: defaultProbeAddr}, noop, nil
 	}
 
-	srv, err := embed.Start(ctx, embeddedConfig(cfg))
+	srv, err := embed.Start(ctx, embeddedConfig(cfg), perfConfig(cfg))
 	if err != nil {
 		return "", client.DialConfig{}, noop, fmt.Errorf("start embedded server: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "mecatui: no server found; hosting an embedded mecated at %s\n", srv.Target())
+	if addr := srv.AdminAddr(); addr != "" {
+		// Mirror mecated's loopback/unauth note: the perf surface can leak prompt
+		// text/file paths/goroutine stacks, so it is loopback-bound only.
+		fmt.Fprintf(os.Stderr, "mecatui: perf admin surface (loopback, UNAUTHENTICATED) at http://%s — /metrics /debug/pprof /debug/vars /debug/flightrecorder\n", addr)
+	}
 	// The embedded server has no auth/TLS — it is a private UNIX socket dialled
 	// plaintext, the same single-user loopback trust model mecated uses.
 	return srv.Target(), client.DialConfig{Server: srv.Target()}, func() { _ = srv.Close() }, nil
@@ -234,6 +239,23 @@ func embeddedConfig(cfg config) app.Config {
 		ImportClaudePermissions: true,
 		TrustProject:            true,
 		AllowAllTools:           cfg.allowAllTools,
+	}
+}
+
+// perfConfig maps the TUI config onto the embedded server's perf-observability
+// options (decision 7). It is OFF unless --perf is passed; when on, it carries the
+// loopback admin address (empty → an ephemeral port chosen and logged by embed)
+// and the optional goroutine-leak watchdog threshold. The Logger is left nil so
+// embed falls back to slog.Default() — mecatui has no slog of its own, and these
+// pre-TUI/teardown lines land in stderr scrollback like the other embed notices.
+func perfConfig(cfg config) embed.PerfConfig {
+	if !cfg.perf {
+		return embed.PerfConfig{}
+	}
+	return embed.PerfConfig{
+		Enabled:                true,
+		Addr:                   cfg.perfAddr,
+		GoroutineWarnThreshold: cfg.perfGoroutineWarnThreshold,
 	}
 }
 

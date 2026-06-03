@@ -161,6 +161,18 @@ var (
 // This is the wiring every composition root should use (cmd/mecated today, the
 // cmd/mecatui embedded server next), so a second consumer cannot silently lose a
 // Start against the one-recorder-per-process stdlib constraint.
+//
+// LIMITATION — the sync.Once is process-lifetime, not re-armable. The singleton
+// is constructed and started exactly once; once its OWNER Stops it (the caller
+// that received a nil error armed it and is the only one that should Stop it),
+// it CANNOT be re-armed in the same process — a subsequent ProcessFlightRecorder
+// returns the now-stopped instance, and Start() on it will fail because the
+// stdlib slot has already been used and torn down. This is fine for the
+// production wiring (one mecated, or one embedded server, per process, armed at
+// startup and stopped at shutdown), but it is a hard constraint for a test
+// binary or any future multi-embed: only ONE owner per process may arm-then-stop
+// the recorder; later owners must coalesce (and must NOT Stop what they did not
+// arm — see cmd/mecatui/embed's ownsRecorder gate).
 func ProcessFlightRecorder(cfg trace.FlightRecorderConfig) (*FlightRecorder, error) {
 	processFROnce.Do(func() {
 		fr := NewFlightRecorder(cfg)

@@ -267,11 +267,11 @@ func TestAppConfigMapsAllowAll(t *testing.T) {
 	}
 }
 
-// TestNewAdminMuxServesIntrospectionEndpoints drives the REAL newAdminMux helper
-// (the one serve mounts) and asserts each runtime-introspection endpoint serves
-// a non-trivial body. Building the mux through the production helper — rather
-// than a parallel hand-rolled mux — means deleting a mux.Handle in newAdminMux
-// would fail this test.
+// TestNewAdminMuxServesIntrospectionEndpoints drives the REAL telemetry.NewAdminMux
+// helper (the one serve mounts) and asserts each runtime-introspection endpoint
+// serves a non-trivial body. Building the mux through the production helper —
+// rather than a parallel hand-rolled mux — means deleting a mux.Handle in
+// telemetry.NewAdminMux would fail this test.
 func TestNewAdminMuxServesIntrospectionEndpoints(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	// Seed one series so /metrics renders a non-empty exposition body (an empty
@@ -287,7 +287,7 @@ func TestNewAdminMuxServesIntrospectionEndpoints(t *testing.T) {
 	}
 	defer recorder.Stop()
 
-	srv := httptest.NewServer(newAdminMux(reg, recorder))
+	srv := httptest.NewServer(telemetry.NewAdminMux(reg, recorder))
 	defer srv.Close()
 
 	cases := []struct {
@@ -324,7 +324,7 @@ func TestNewAdminMuxServesIntrospectionEndpoints(t *testing.T) {
 // (FlightRecorder disabled) branch: /debug/flightrecorder is ABSENT (404) while
 // the always-on endpoints still serve.
 func TestNewAdminMuxOmitsFlightRecorderWhenDisabled(t *testing.T) {
-	srv := httptest.NewServer(newAdminMux(prometheus.NewRegistry(), nil))
+	srv := httptest.NewServer(telemetry.NewAdminMux(prometheus.NewRegistry(), nil))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/debug/flightrecorder")

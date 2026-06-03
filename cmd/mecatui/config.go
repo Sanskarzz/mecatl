@@ -80,6 +80,17 @@ type config struct {
 	// (resolveSkills), not here.
 	skillsDir string
 	noSkills  bool
+
+	// Embedded-server perf observability (decision 7 in
+	// docs/design/perf-observability.md; used only when hosting an in-process
+	// server). OFF by default. perf arms the loopback runtime-introspection admin
+	// surface (pprof/expvar/RSS/goroutines/flightrecorder + /metrics) plus the
+	// domain-metrics EventSink in the embedded engine. perfAddr is the loopback
+	// admin listen address (empty = an ephemeral loopback port, logged on start).
+	// perfGoroutineWarnThreshold arms the live goroutine-leak watchdog (0 = off).
+	perf                       bool
+	perfAddr                   string
+	perfGoroutineWarnThreshold int
 }
 
 // defaultProbeAddr is mecated's historical default loopback gRPC address. In AUTO
@@ -119,6 +130,10 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.noCommands, "no-commands", false, "embedded server only: disable slash-command expansion entirely")
 	fs.StringVar(&cfg.skillsDir, "skills-dir", "", "embedded server only: directory of skill units (<name>/SKILL.md); empty = the conventional dirs (e.g. .claude/skills)")
 	fs.BoolVar(&cfg.noSkills, "no-skills", false, "embedded server only: disable skill discovery (the Skill tool) entirely")
+
+	fs.BoolVar(&cfg.perf, "perf", false, "embedded server only: expose the loopback perf-observability admin surface (/metrics, /debug/pprof, /debug/vars, /debug/flightrecorder) and wire domain metrics into the engine. OFF by default. The address is logged on start. SECURITY: loopback-bound, UNAUTHENTICATED — its output can embed prompt text/file paths/goroutine stacks, so it stays on 127.0.0.1 only (decision 6/7 of docs/design/perf-observability.md)")
+	fs.StringVar(&cfg.perfAddr, "perf-addr", "", "embedded server only: loopback listen address for the --perf admin surface (empty = an ephemeral 127.0.0.1 port, logged on start, so it never clashes with a co-running mecated on :9090). Only consulted with --perf")
+	fs.IntVar(&cfg.perfGoroutineWarnThreshold, "perf-goroutine-warn-threshold", 0, "embedded server only: arm the live goroutine-leak watchdog — log a Warn whenever runtime.NumGoroutine() exceeds this count (decision 10). 0 (default) disables the alarm; the /metrics goroutine-count series is exported regardless. Only consulted with --perf")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err

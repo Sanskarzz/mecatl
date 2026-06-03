@@ -570,7 +570,14 @@ bin/mecatui --server 127.0.0.1:8080 --workspace "$PWD"
 
 The embedded server keeps the heavier opt-ins (MCP, ToolHive, skills, memory,
 server-side slash-command expansion) off; run a full `mecated` and use `--server`
-for those. The embedded server also accepts `--yolo` (the
+for those. It also accepts **`--perf`** (off by default) to bring up the same
+loopback observability surface `mecated` exposes — `/metrics`, `/debug/pprof/*`,
+`/debug/vars`, `/debug/flightrecorder` — on an ephemeral `127.0.0.1` port
+(`--perf-addr` to fix it; `--perf-goroutine-warn-threshold` to arm the goroutine
+alarm). The chosen address is logged at startup (loopback, unauthenticated —
+same posture as `mecated`'s admin listener; see the observability note in §3).
+This is the in-process way to profile a freeze in the embedded server itself.
+The embedded server also accepts `--yolo` (the
 allow-all operator posture — same semantics, root refusal, and `MECATL_SANDBOX`/
 `IS_SANDBOX` env as `mecated`; see the allow-all note in §7). It is **ignored when
 dialling an external `--server`**. Note the TUI's **built-in slash commands** (`/clear`, `/help`, and the

@@ -1,4 +1,4 @@
-package main
+package telemetry
 
 import (
 	"bytes"
@@ -13,12 +13,12 @@ import (
 	"time"
 )
 
-// TestGoroutineWatchdogWarnsAboveThreshold asserts the watchdog logs a Warn
+// TestStartGoroutineWatchdogWarnsAboveThreshold asserts the watchdog logs a Warn
 // when the sampled count exceeds the threshold, and that the emitted record
 // carries the structured attributes (goroutines=<n>, threshold=<t>) — so a
 // regression that drops or swaps the structured fields is caught, not just the
 // message substring. It uses a JSON handler so the payload can be parsed.
-func TestGoroutineWatchdogWarnsAboveThreshold(t *testing.T) {
+func TestStartGoroutineWatchdogWarnsAboveThreshold(t *testing.T) {
 	t.Parallel()
 
 	var mu sync.Mutex
@@ -33,7 +33,7 @@ func TestGoroutineWatchdogWarnsAboveThreshold(t *testing.T) {
 		threshold = 10
 	)
 	count := func() int { return sampled }
-	startGoroutineWatchdog(ctx, threshold, time.Millisecond, count, logger)
+	StartGoroutineWatchdog(ctx, threshold, time.Millisecond, count, logger)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -83,9 +83,9 @@ func assertWarnPayload(t *testing.T, logOutput string, wantGoroutines, wantThres
 	}
 }
 
-// TestGoroutineWatchdogQuietBelowThreshold asserts no warning fires when the
+// TestStartGoroutineWatchdogQuietBelowThreshold asserts no warning fires when the
 // count stays at or below the threshold.
-func TestGoroutineWatchdogQuietBelowThreshold(t *testing.T) {
+func TestStartGoroutineWatchdogQuietBelowThreshold(t *testing.T) {
 	t.Parallel()
 
 	var mu sync.Mutex
@@ -95,7 +95,7 @@ func TestGoroutineWatchdogQuietBelowThreshold(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	startGoroutineWatchdog(ctx, 100, time.Millisecond, func() int { return 100 }, logger)
+	StartGoroutineWatchdog(ctx, 100, time.Millisecond, func() int { return 100 }, logger)
 	time.Sleep(50 * time.Millisecond)
 
 	mu.Lock()
@@ -106,7 +106,7 @@ func TestGoroutineWatchdogQuietBelowThreshold(t *testing.T) {
 	}
 }
 
-// TestGoroutineWatchdogStopsOnCancel asserts the watchdog goroutine stops
+// TestStartGoroutineWatchdogStopsOnCancel asserts the watchdog goroutine stops
 // sampling after ctx is cancelled — it must not leak (decision 10's irony).
 //
 // To stay robust under a loaded -race box, it does not rely on a fixed
@@ -115,13 +115,13 @@ func TestGoroutineWatchdogQuietBelowThreshold(t *testing.T) {
 // for QUIESCENCE: read the counter, wait one observation window, read again,
 // and only conclude "stopped" once two consecutive reads are identical. A
 // still-running ticker would keep incrementing across windows and never settle.
-func TestGoroutineWatchdogStopsOnCancel(t *testing.T) {
+func TestStartGoroutineWatchdogStopsOnCancel(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int64
 	ctx, cancel := context.WithCancel(context.Background())
 
-	startGoroutineWatchdog(ctx, 1<<30, time.Millisecond, func() int {
+	StartGoroutineWatchdog(ctx, 1<<30, time.Millisecond, func() int {
 		calls.Add(1)
 		return 0
 	}, slog.New(slog.NewTextHandler(noopWriter{}, nil)))
@@ -150,28 +150,28 @@ func TestGoroutineWatchdogStopsOnCancel(t *testing.T) {
 	t.Fatalf("watchdog never quiesced after cancel; still sampling at %d", prev)
 }
 
-// TestGoroutineWatchdogProductionWiring smoke-covers the EXACT injection main.go
-// uses — runtime.NumGoroutine + slog.Default — proving the real production
-// wiring starts and stops cleanly without panic. The 1<<30 threshold ensures it
-// never actually warns regardless of the live goroutine count.
-func TestGoroutineWatchdogProductionWiring(t *testing.T) {
+// TestStartGoroutineWatchdogProductionWiring smoke-covers the EXACT injection the
+// composition roots use — runtime.NumGoroutine + slog.Default — proving the real
+// production wiring starts and stops cleanly without panic. The 1<<30 threshold
+// ensures it never actually warns regardless of the live goroutine count.
+func TestStartGoroutineWatchdogProductionWiring(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	startGoroutineWatchdog(ctx, 1<<30, time.Millisecond, runtime.NumGoroutine, slog.Default())
+	StartGoroutineWatchdog(ctx, 1<<30, time.Millisecond, runtime.NumGoroutine, slog.Default())
 	time.Sleep(5 * time.Millisecond) // let it sample at least once
 	cancel()
 }
 
-// TestGoroutineWatchdogDisabledAtZero asserts threshold 0 spawns nothing.
-func TestGoroutineWatchdogDisabledAtZero(t *testing.T) {
+// TestStartGoroutineWatchdogDisabledAtZero asserts threshold 0 spawns nothing.
+func TestStartGoroutineWatchdogDisabledAtZero(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int64
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	startGoroutineWatchdog(ctx, 0, time.Millisecond, func() int {
+	StartGoroutineWatchdog(ctx, 0, time.Millisecond, func() int {
 		calls.Add(1)
 		return 1 << 30
 	}, slog.New(slog.NewTextHandler(noopWriter{}, nil)))
