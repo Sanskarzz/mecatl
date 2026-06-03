@@ -127,6 +127,25 @@ type FileSystem interface {
 	Glob(ctx context.Context, pattern string) ([]string, error)
 }
 
+// WorkspaceReader is the READ-ONLY subset of Workspace: a rooted, path-scoped
+// reader that can fetch a file and stat it, without any mutate capability. It is
+// the narrow seam non-tool consumers take when they only need to LOOK at the
+// workspace — e.g. the permission-config resolver (issue #13), which reads
+// `.mecatl/settings.yaml` and stats it to revalidate its cache, but must never
+// write. Passing a WorkspaceReader (not a full Workspace) to those consumers
+// makes the read-only contract a compile-time guarantee.
+//
+// Workspace embeds it, so any *Workspace is usable where a WorkspaceReader is
+// expected. All paths are session-relative; the adapter rejects escapes.
+type WorkspaceReader interface {
+	// Root returns the absolute session root all paths are scoped to.
+	Root() string
+	// Read returns the contents of the file at the session-relative path.
+	Read(ctx context.Context, path string) ([]byte, error)
+	// Stat returns metadata for the file at the session-relative path.
+	Stat(ctx context.Context, path string) (FileInfo, error)
+}
+
 // Workspace is the session-scoped seam every Tool executes against. It scopes
 // all paths to a single session root (rejecting escapes such as "../"), exposes
 // the read/search/run operations the 7 core tools need, and carries the
@@ -135,16 +154,14 @@ type FileSystem interface {
 // All paths are relative to the session root unless documented otherwise;
 // adapters must reject any path that resolves outside the root.
 type Workspace interface {
-	// Root returns the absolute session root all paths are scoped to.
-	Root() string
+	// WorkspaceReader is the read-only subset (Root + Read + Stat); embedding it
+	// keeps the read methods defined once and lets a *Workspace satisfy a
+	// read-only consumer.
+	WorkspaceReader
 
-	// Read returns the contents of the file at the session-relative path.
-	Read(ctx context.Context, path string) ([]byte, error)
 	// Write replaces the contents of the file at the session-relative path,
 	// creating it (and parent directories) if needed.
 	Write(ctx context.Context, path string, data []byte) error
-	// Stat returns metadata for the file at the session-relative path.
-	Stat(ctx context.Context, path string) (FileInfo, error)
 	// Glob returns session-relative paths matching the shell-style pattern.
 	Glob(ctx context.Context, pattern string) ([]string, error)
 	// Grep returns the matches of a regular expression across files selected by

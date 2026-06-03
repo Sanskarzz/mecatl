@@ -1,0 +1,393 @@
+package permconfig
+
+import (
+	"context"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sync"
+
+	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
+	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/tool"
+)
+
+// Compile-time assertion that *Resolver satisfies the policy's RuleResolver port.
+var _ permpolicy.RuleResolver = (*Resolver)(nil)
+
+// Conventional permission-config locations. Project files are discovered under
+// the session workspace root; user-global files under the XDG config dir / home.
+// The project tier splits into SHARED (checked-in) and LOCAL (gitignored,
+// personal), mirroring the Scope ordering ScopeLocalProject > ScopeSharedProject.
+const (
+	// projectFileMecatl is the SHARED (checked-in) project YAML config.
+	projectFileMecatl = ".mecatl/settings.yaml"
+	// projectFileMecatlLocal is the LOCAL (gitignored, personal) project YAML config.
+	projectFileMecatlLocal = ".mecatl/settings.local.yaml"
+	// projectFileClaude is the Claude-Code-compatible SHARED project settings file.
+	projectFileClaude = ".claude/settings.json"
+	// projectFileClaudeLocal is the Claude-Code-compatible LOCAL project settings file.
+	projectFileClaudeLocal = ".claude/settings.local.json"
+	// userSubdirMecatl is the user-level YAML config under the XDG config dir.
+	userSubdirMecatl = "mecatl/settings.yaml" // joined under <config>/...
+	// userSubdirClaude is the Claude-Code-compatible user-level settings file,
+	// rooted at the home directory (~/.claude/settings.json).
+	userSubdirClaude = ".claude/settings.json"
+)
+
+// projectSource is one discovered project-config file: its workspace-relative
+// path, the config scope it loads at, and whether it is a Claude-imported JSON
+// (vs a mecatl YAML). The discovery list is fixed; whether each file EXISTS is
+// resolved per workspace via ws.Stat.
+type projectSource struct {
+	path   string
+	scope  governance.Scope
+	claude bool
+}
+
+// Options configures a Resolver's discovery posture (issue #13).
+type Options struct {
+	// Conventional turns on auto-discovery of the project-level conventional files
+	// (the shared/local .mecatl + .claude files) and the user-global files. Default
+	// false keeps discovery fully off (only ExplicitFiles, if any, are loaded).
+	Conventional bool
+	// ImportClaude turns on importing Claude-Code settings.json (project + user),
+	// with the lossy fail-safe table applied (see claudeimport.go). Default false.
+	ImportClaude bool
+	// TrustProject, when true, honours a project's ALLOW rules (shared AND local —
+	// both are project-supplied). When false (the default — the safe stance) a
+	// project's allows are DROPPED while its deny/ask rules are still honoured.
+	// User-global and explicit (CLI) config is always trusted regardless.
+	TrustProject bool
+	// ExplicitFiles are operator-pointed YAML config files (e.g. from a repeatable
+	// --permission-config flag), loaded at ScopeCLI (the HIGHEST config precedence,
+	// fully trusted) regardless of Conventional. Read from the host filesystem at
+	// construction.
+	ExplicitFiles []string
+}
+
+// resolveEnv abstracts the process environment so the resolver is testable with a
+// fake home / XDG and a fake user-file reader. The composition root binds osEnv.
+type resolveEnv struct {
+	getenv      func(string) string
+	userHomeDir func() (string, error)
+	readFile    func(string) ([]byte, error)
+}
+
+// osEnv binds the resolver to the real process environment + filesystem.
+var osEnv = resolveEnv{getenv: os.Getenv, userHomeDir: os.UserHomeDir, readFile: os.ReadFile}
+
+// fileStamp fingerprints a single config file's on-disk state (mod time + size)
+// so the cache can detect a mid-process edit. A missing file stamps as exists=false
+// — so a config CREATED after the first Resolve also invalidates the cache (not
+// just an edit to an existing one).
+type fileStamp struct {
+	exists  bool
+	modUnix int64
+	size    int64
+}
+
+// cacheEntry is a resolved per-root result plus the fingerprint of the project
+// files it was built from. Resolve revalidates the fingerprint on every hit and
+// rebuilds when any stamp changed (mtime/size), so a deny added (or a file
+// created/removed) mid-process takes effect on the next call — not at restart.
+type cacheEntry struct {
+	rules  []governance.Rule
+	stamps map[string]fileStamp // keyed by the project-relative file path
+}
+
+// Resolver discovers and caches file-based permission rules per workspace root
+// (issue #13). It implements permpolicy.RuleResolver: the policy calls Resolve on
+// every Evaluate, so the resolver caches — discovery is file I/O. The cache is
+// keyed by ws.Root() with a sync.RWMutex; each entry is REVALIDATED against the
+// config files' mtime/size on every hit, so the cache speeds up the common
+// unchanged case without going stale on an edit (matching the re-probe stance of
+// the MCP source prober and command lister).
+//
+// The USER-GLOBAL + explicit (CLI) rules are root-independent and resolved ONCE at
+// construction (they are the operator's own, fully trusted). Only the PROJECT
+// rules are re-resolved per root, gated by TrustProject.
+type Resolver struct {
+	opts    Options
+	env     resolveEnv
+	sources []projectSource // the fixed project-file discovery list
+
+	// userRules are the root-independent user-global + explicit (CLI) rules,
+	// computed once at construction. Always fully trusted.
+	userRules []governance.Rule
+
+	mu    sync.RWMutex
+	cache map[string]*cacheEntry // keyed by ws.Root()
+}
+
+// New constructs a Resolver from opts, reading the user-global + explicit (CLI)
+// rules once (project rules are read lazily per root in Resolve). It logs the
+// import report (demoted/inert/dropped specs) so lossy outcomes are observable. It
+// never fails: an unreadable/malformed user file is logged and skipped (the
+// process must still start), matching the rest of the composition's fail-soft
+// posture. Returns nil when opts requests no sources at all, so callers can pass
+// the result straight to permpolicy.NewPolicyWithResolver (a nil resolver = off).
+func New(opts Options) *Resolver {
+	return newWithEnv(opts, osEnv)
+}
+
+// newWithEnv is New with an injectable environment, for tests.
+func newWithEnv(opts Options, env resolveEnv) *Resolver {
+	if !opts.Conventional && len(opts.ExplicitFiles) == 0 {
+		return nil
+	}
+	r := &Resolver{
+		opts:    opts,
+		env:     env,
+		sources: projectSources(opts),
+		cache:   make(map[string]*cacheEntry),
+	}
+	var report Report
+	r.userRules = r.loadUserRules(&report)
+	logReport(&report, "user-global")
+	return r
+}
+
+// projectSources returns the fixed, ordered list of project-config files to probe
+// per workspace, given the discovery posture. The LOCAL files (gitignored,
+// personal) load at the higher-precedence ScopeLocalProject; the SHARED
+// (checked-in) files at ScopeSharedProject. Claude files are included only when
+// ImportClaude is set.
+func projectSources(opts Options) []projectSource {
+	if !opts.Conventional {
+		return nil
+	}
+	srcs := []projectSource{
+		{path: projectFileMecatlLocal, scope: governance.ScopeLocalProject},
+		{path: projectFileMecatl, scope: governance.ScopeSharedProject},
+	}
+	if opts.ImportClaude {
+		srcs = append(srcs,
+			projectSource{path: projectFileClaudeLocal, scope: governance.ScopeLocalProject, claude: true},
+			projectSource{path: projectFileClaude, scope: governance.ScopeSharedProject, claude: true},
+		)
+	}
+	return srcs
+}
+
+// Resolve returns the rules that apply to the given workspace: the project rules
+// (gated by TrustProject) plus the root-independent user/CLI rules. A nil ws
+// yields only the user/CLI rules (no project to discover). The per-root cache is
+// revalidated against the config files' mtime/size, so a mid-process edit takes
+// effect on the next call. It satisfies permpolicy.RuleResolver.
+func (r *Resolver) Resolve(_ context.Context, ws tool.WorkspaceReader) []governance.Rule {
+	if ws == nil {
+		return r.userRules
+	}
+	root := ws.Root()
+
+	// Fast path: a cache hit whose fingerprint still matches the files on disk.
+	stamps := r.stampSources(ws)
+	r.mu.RLock()
+	entry, ok := r.cache[root]
+	r.mu.RUnlock()
+	if ok && stampsEqual(entry.stamps, stamps) {
+		return entry.rules
+	}
+
+	// Miss or stale: reload the project rules and re-stamp.
+	project := r.loadProjectRules(ws)
+	merged := make([]governance.Rule, 0, len(project)+len(r.userRules))
+	merged = append(merged, project...)
+	merged = append(merged, r.userRules...)
+
+	r.mu.Lock()
+	r.cache[root] = &cacheEntry{rules: merged, stamps: stamps}
+	r.mu.Unlock()
+	return merged
+}
+
+// stampSources fingerprints every discovered project-config file under ws via
+// ws.Stat (the read-only seam — never a write), so a changed/created/removed file
+// invalidates the cache. A stat error other than "exists" is treated as
+// exists=false (e.g. a not-found file), which is the correct revalidation signal.
+func (r *Resolver) stampSources(ws tool.WorkspaceReader) map[string]fileStamp {
+	stamps := make(map[string]fileStamp, len(r.sources))
+	for _, src := range r.sources {
+		fi, err := ws.Stat(context.Background(), src.path)
+		if err != nil {
+			stamps[src.path] = fileStamp{exists: false}
+			continue
+		}
+		stamps[src.path] = fileStamp{exists: true, modUnix: fi.ModTime.UnixNano(), size: fi.Size}
+	}
+	return stamps
+}
+
+// stampsEqual reports whether two stamp maps are identical (same keys, same
+// exists/mtime/size), i.e. no config file changed since the cached resolution.
+func stampsEqual(a, b map[string]fileStamp) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok || va != vb {
+			return false
+		}
+	}
+	return true
+}
+
+// loadProjectRules discovers and parses every project-config file under ws.Root()
+// (read THROUGH the workspace, the same session-scoped seam the tools use), tags
+// each at its tier scope (local > shared), applies the trust gate, and logs the
+// import report. It is fail-soft PER FILE: an unreadable/malformed file is logged
+// and skipped, so a bad shared YAML never suppresses a good local/Claude file.
+func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) []governance.Rule {
+	var report Report
+	var rules []governance.Rule
+
+	for _, src := range r.sources {
+		data, err := ws.Read(context.Background(), src.path)
+		if err != nil {
+			continue // absent file: nothing to load (not an error)
+		}
+		if src.claude {
+			imported, ierr := importClaude(data, src.scope, &report)
+			if ierr != nil {
+				slog.Warn("permission config: project claude settings unparseable; skipping",
+					"file", src.path, "root", ws.Root(), "err", ierr)
+				continue
+			}
+			rules = append(rules, imported...)
+			continue
+		}
+		cfg, perr := parseYAML(data)
+		if perr != nil {
+			slog.Warn("permission config: project YAML unparseable; skipping",
+				"file", src.path, "root", ws.Root(), "err", perr)
+			continue
+		}
+		rules = append(rules, rulesFromConfig(cfg, src.scope, &report)...)
+	}
+
+	rules = r.applyTrustGate(rules, &report)
+	logReport(&report, "project("+ws.Root()+")")
+	return rules
+}
+
+// applyTrustGate drops project ALLOW rules when the project is untrusted, keeping
+// every DENY and ASK rule (they only tighten). A dropped allow is reported so the
+// operator sees that an untrusted project's grant was ignored. When TrustProject
+// is set the rules pass through unchanged. It applies to BOTH project tiers
+// (shared and local) — both are project-supplied.
+func (r *Resolver) applyTrustGate(rules []governance.Rule, report *Report) []governance.Rule {
+	if r.opts.TrustProject {
+		return rules
+	}
+	kept := rules[:0:0]
+	for _, rule := range rules {
+		if rule.Effect == governance.Allow {
+			report.addDropped(specOf(rule), "project allow dropped (project not trusted; pass --trust-project to honour it)")
+			continue
+		}
+		kept = append(kept, rule)
+	}
+	return kept
+}
+
+// loadUserRules reads the explicit (CLI) operator files at ScopeCLI plus the
+// root-independent user-global config (XDG/home) at ScopeUser, all fully trusted.
+// Read from the host filesystem via the injectable env (NOT a workspace — these
+// live outside any session root). Fail-soft per file.
+func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
+	var rules []governance.Rule
+
+	// Explicit operator files (always loaded, regardless of Conventional) at the
+	// HIGHEST config scope (ScopeCLI), so a CLI rule out-ranks a project/user rule
+	// of the same effect. Operator-supplied -> fully trusted (not gated).
+	for _, path := range r.opts.ExplicitFiles {
+		if path == "" {
+			continue
+		}
+		data, err := r.env.readFile(path)
+		if err != nil {
+			slog.Warn("permission config: explicit file unreadable; skipping", "file", path, "err", err)
+			continue
+		}
+		cfg, perr := parseYAML(data)
+		if perr != nil {
+			slog.Warn("permission config: explicit file unparseable; skipping", "file", path, "err", perr)
+			continue
+		}
+		rules = append(rules, rulesFromConfig(cfg, governance.ScopeCLI, report)...)
+	}
+
+	if !r.opts.Conventional {
+		return rules
+	}
+
+	// User-global YAML under the XDG config dir.
+	if cfgDir := userConfigDir(r.env); cfgDir != "" {
+		path := filepath.Join(cfgDir, userSubdirMecatl)
+		if data, err := r.env.readFile(path); err == nil {
+			if cfg, perr := parseYAML(data); perr != nil {
+				slog.Warn("permission config: user YAML unparseable; skipping", "file", path, "err", perr)
+			} else {
+				rules = append(rules, rulesFromConfig(cfg, governance.ScopeUser, report)...)
+			}
+		}
+	}
+
+	// User-global Claude settings.json (when importing).
+	if r.opts.ImportClaude {
+		if home, err := r.env.userHomeDir(); err == nil && home != "" {
+			path := filepath.Join(home, userSubdirClaude)
+			if data, rerr := r.env.readFile(path); rerr == nil {
+				if imported, ierr := importClaude(data, governance.ScopeUser, report); ierr != nil {
+					slog.Warn("permission config: user claude settings unparseable; skipping", "file", path, "err", ierr)
+				} else {
+					rules = append(rules, imported...)
+				}
+			}
+		}
+	}
+
+	return rules
+}
+
+// userConfigDir returns the XDG config base for the user-level config: the value
+// of $XDG_CONFIG_HOME when set, else ~/.config. It returns "" when neither can be
+// resolved (the caller then skips the user-level source).
+func userConfigDir(env resolveEnv) string {
+	if base := env.getenv("XDG_CONFIG_HOME"); base != "" {
+		return base
+	}
+	if home, err := env.userHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".config")
+	}
+	return ""
+}
+
+// specOf reconstructs a human-readable "Tool(pattern)" spec from a rule, for the
+// drop report. A tool-wide rule (empty pattern) renders as the bare tool name.
+func specOf(rule governance.Rule) string {
+	if rule.Pattern == "" {
+		return rule.Tool
+	}
+	return rule.Tool + "(" + rule.Pattern + ")"
+}
+
+// logReport logs the lossy outcomes (demoted/inert/dropped specs) of a load at the
+// given origin, so an operator can see exactly what was weakened or ignored. A
+// clean report logs nothing.
+func logReport(report *Report, origin string) {
+	if report.Empty() {
+		return
+	}
+	for _, e := range report.Demoted {
+		slog.Warn("permission config: rule demoted", "origin", origin, "spec", e.Spec, "reason", e.Reason)
+	}
+	for _, e := range report.Inert {
+		slog.Warn("permission config: rule inert", "origin", origin, "spec", e.Spec, "reason", e.Reason)
+	}
+	for _, e := range report.Dropped {
+		slog.Warn("permission config: rule dropped", "origin", origin, "spec", e.Spec, "reason", e.Reason)
+	}
+}

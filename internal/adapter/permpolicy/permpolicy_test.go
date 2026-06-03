@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/adapter/permstore"
 	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // Compile-time assertion that Policy satisfies the frozen port interface.
@@ -20,9 +22,9 @@ func bashCall(cmd string) session.ToolCall {
 	return session.NewToolCall("c1", "Bash", args)
 }
 
-func fileCall(tool, p string) session.ToolCall {
+func fileCall(toolName, p string) session.ToolCall {
 	args, _ := json.Marshal(map[string]string{"file_path": p})
-	return session.NewToolCall("c1", tool, args)
+	return session.NewToolCall("c1", toolName, args)
 }
 
 const sid = session.SessionID("s1")
@@ -33,7 +35,7 @@ func TestPolicyDenyBeatsAllow(t *testing.T) {
 		{Scope: governance.ScopeManaged, Tool: "Bash", Pattern: "rm *", Effect: governance.Allow},
 		{Scope: governance.ScopeUser, Tool: "Bash", Pattern: "rm *", Effect: governance.Deny},
 	}, nil)
-	got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("rm x"))
+	got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("rm x"), nil)
 	if got.Effect != governance.Deny {
 		t.Fatalf("expected Deny, got %v", got.Effect)
 	}
@@ -43,14 +45,14 @@ func TestPolicyDenyBeatsAllow(t *testing.T) {
 func TestPolicyPlanMode(t *testing.T) {
 	p := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
 
-	if got := p.Evaluate(context.Background(), sid, session.ModePlan, fileCall("Write", "/x")); got.Effect != governance.Deny {
+	if got := p.Evaluate(context.Background(), sid, session.ModePlan, fileCall("Write", "/x"), nil); got.Effect != governance.Deny {
 		t.Fatalf("plan mode Write: expected Deny, got %v", got.Effect)
 	}
-	if got := p.Evaluate(context.Background(), sid, session.ModePlan, fileCall("Read", "/x")); got.Effect != governance.Allow {
+	if got := p.Evaluate(context.Background(), sid, session.ModePlan, fileCall("Read", "/x"), nil); got.Effect != governance.Allow {
 		t.Fatalf("plan mode Read: expected Allow, got %v", got.Effect)
 	}
 	// Non-plan mode lets the mutating tool through (rule allows it).
-	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, fileCall("Write", "/x")); got.Effect != governance.Allow {
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, fileCall("Write", "/x"), nil); got.Effect != governance.Allow {
 		t.Fatalf("default mode Write: expected Allow, got %v", got.Effect)
 	}
 }
@@ -59,11 +61,11 @@ func TestPolicyPlanMode(t *testing.T) {
 // `git status` resolve Allow (it would otherwise be the default Ask).
 func TestPolicyLearnThenAllow(t *testing.T) {
 	p := permpolicy.NewPolicy(nil, permstore.New())
-	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("git status")); got.Effect != governance.Ask {
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("git status"), nil); got.Effect != governance.Ask {
 		t.Fatalf("pre-learn: expected Ask, got %v", got.Effect)
 	}
 	p.Learn(sid, bashCall("git status"))
-	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("git status")); got.Effect != governance.Allow {
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("git status"), nil); got.Effect != governance.Allow {
 		t.Fatalf("post-learn: expected Allow, got %v", got.Effect)
 	}
 }
@@ -74,7 +76,7 @@ func TestPolicyLearnedAllowCannotOverrideDeny(t *testing.T) {
 		{Scope: governance.ScopeManaged, Tool: "Bash", Pattern: "git status", Effect: governance.Deny},
 	}, permstore.New())
 	p.Learn(sid, bashCall("git status"))
-	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("git status")); got.Effect != governance.Deny {
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("git status"), nil); got.Effect != governance.Deny {
 		t.Fatalf("expected Deny to survive a learned allow, got %v", got.Effect)
 	}
 }
@@ -83,7 +85,7 @@ func TestPolicyLearnedAllowCannotOverrideDeny(t *testing.T) {
 func TestPolicyLearnedAllowDoesNotBypassPlanMode(t *testing.T) {
 	p := permpolicy.NewPolicy(nil, permstore.New())
 	p.Learn(sid, fileCall("Write", "/x"))
-	if got := p.Evaluate(context.Background(), sid, session.ModePlan, fileCall("Write", "/x")); got.Effect != governance.Deny {
+	if got := p.Evaluate(context.Background(), sid, session.ModePlan, fileCall("Write", "/x"), nil); got.Effect != governance.Deny {
 		t.Fatalf("plan mode must still deny Write despite learned allow, got %v", got.Effect)
 	}
 }
@@ -92,10 +94,10 @@ func TestPolicyLearnedAllowDoesNotBypassPlanMode(t *testing.T) {
 func TestPolicyLearnedRuleSessionIsolation(t *testing.T) {
 	p := permpolicy.NewPolicy(nil, permstore.New())
 	p.Learn("A", bashCall("git status"))
-	if got := p.Evaluate(context.Background(), "A", session.ModeDefault, bashCall("git status")); got.Effect != governance.Allow {
+	if got := p.Evaluate(context.Background(), "A", session.ModeDefault, bashCall("git status"), nil); got.Effect != governance.Allow {
 		t.Fatalf("session A should see its learned allow, got %v", got.Effect)
 	}
-	if got := p.Evaluate(context.Background(), "B", session.ModeDefault, bashCall("git status")); got.Effect != governance.Ask {
+	if got := p.Evaluate(context.Background(), "B", session.ModeDefault, bashCall("git status"), nil); got.Effect != governance.Ask {
 		t.Fatalf("session B must NOT see session A's learned rule, got %v", got.Effect)
 	}
 }
@@ -106,7 +108,7 @@ func TestPolicyLearnedRuleSessionIsolation(t *testing.T) {
 func TestPolicyLearnRefusesCompound(t *testing.T) {
 	p := permpolicy.NewPolicy(nil, permstore.New())
 	p.Learn(sid, bashCall("git status; rm -rf /"))
-	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("git status")); got.Effect != governance.Ask {
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("git status"), nil); got.Effect != governance.Ask {
 		t.Fatalf("a compound learn must not have recorded `git status`, got %v", got.Effect)
 	}
 }
@@ -115,7 +117,64 @@ func TestPolicyLearnRefusesCompound(t *testing.T) {
 func TestPolicyNilStoreLearnIsNoop(t *testing.T) {
 	p := permpolicy.NewPolicy(nil, nil)
 	p.Learn(sid, bashCall("git status")) // must not panic
-	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("git status")); got.Effect != governance.Ask {
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("git status"), nil); got.Effect != governance.Ask {
 		t.Fatalf("nil-store policy should stay Ask, got %v", got.Effect)
+	}
+}
+
+// fakeResolver returns a different rule set PER ws.Root(), so a single Policy can
+// be exercised against two workspaces and observed to decide differently. It is
+// the per-session-resolution seam (issue #13) in miniature.
+type fakeResolver struct {
+	byRoot map[string][]governance.Rule
+}
+
+func (f fakeResolver) Resolve(_ context.Context, ws tool.WorkspaceReader) []governance.Rule {
+	if ws == nil {
+		return nil
+	}
+	return f.byRoot[ws.Root()]
+}
+
+// Same Policy + two workspaces with different resolved rules → different decisions
+// for the SAME tool call. This is the core per-session-resolution acceptance proof
+// at the policy level: the workspace, not the session, selects the config.
+func TestPolicyResolverPerWorkspace(t *testing.T) {
+	resolver := fakeResolver{byRoot: map[string][]governance.Rule{
+		"/ws-a": {{Scope: governance.ScopeSharedProject, Tool: "Bash", Pattern: "go test*", Effect: governance.Allow}},
+		"/ws-b": {{Scope: governance.ScopeSharedProject, Tool: "Bash", Pattern: "go test*", Effect: governance.Deny}},
+	}}
+	// Built-in floor: Bash asks. A config allow loosens it; a config deny tightens.
+	p := permpolicy.NewPolicyWithResolver(
+		[]governance.Rule{{Scope: governance.ScopeBuiltinDefault, Tool: "Bash", Effect: governance.Ask}},
+		nil, resolver)
+
+	wsA := memfs.NewWorkspace("/ws-a")
+	wsB := memfs.NewWorkspace("/ws-b")
+	call := bashCall("go test ./...")
+
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, call, wsA); got.Effect != governance.Allow {
+		t.Fatalf("ws-a should allow (config allow loosens built-in ask), got %v", got.Effect)
+	}
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, call, wsB); got.Effect != governance.Deny {
+		t.Fatalf("ws-b should deny (config deny), got %v", got.Effect)
+	}
+	// A nil workspace falls back to the built-in floor (resolver returns nothing).
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, call, nil); got.Effect != governance.Ask {
+		t.Fatalf("nil ws should stay at the built-in ask, got %v", got.Effect)
+	}
+}
+
+// A project deny resolved for a workspace beats a per-session LEARNED allow: both
+// ride the same lowest-scope extra channel, and the fold is deny-dominant.
+func TestPolicyResolverDenyBeatsLearnedAllow(t *testing.T) {
+	resolver := fakeResolver{byRoot: map[string][]governance.Rule{
+		"/ws": {{Scope: governance.ScopeSharedProject, Tool: "Bash", Pattern: "git status", Effect: governance.Deny}},
+	}}
+	p := permpolicy.NewPolicyWithResolver(nil, permstore.New(), resolver)
+	p.Learn(sid, bashCall("git status")) // learn an allow for the very same call
+	ws := memfs.NewWorkspace("/ws")
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("git status"), ws); got.Effect != governance.Deny {
+		t.Fatalf("project deny must beat a learned allow, got %v", got.Effect)
 	}
 }

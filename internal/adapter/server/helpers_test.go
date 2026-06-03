@@ -14,13 +14,14 @@ import (
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
-// scriptTool is a minimal Tool for the server tests: it records whether it ran
-// and returns a fixed content body.
+// scriptTool is a minimal Tool for the server tests: it records whether (and how
+// many times) it ran and returns a fixed content body.
 type scriptTool struct {
 	name     string
 	readOnly bool
 	content  string
 	executed atomic.Bool
+	runCount atomic.Int64
 }
 
 func (s *scriptTool) Spec() tool.ToolSpec {
@@ -29,9 +30,11 @@ func (s *scriptTool) Spec() tool.ToolSpec {
 func (s *scriptTool) ReadOnly() bool { return s.readOnly }
 func (s *scriptTool) Execute(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 	s.executed.Store(true)
+	s.runCount.Add(1)
 	return session.NewToolResult(in.ID, s.content), nil
 }
-func (s *scriptTool) ran() bool { return s.executed.Load() }
+func (s *scriptTool) ran() bool   { return s.executed.Load() }
+func (s *scriptTool) runs() int64 { return s.runCount.Load() }
 
 // call builds a session.ToolCall.
 func call(id, name, args string) session.ToolCall {

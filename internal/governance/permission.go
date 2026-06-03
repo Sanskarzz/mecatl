@@ -27,7 +27,7 @@ type PermissionDecision struct {
 // Scope identifies the configuration layer a permission rule originates from.
 // Higher-precedence scopes override lower ones when rules are merged. The
 // ordering (highest first) is: Managed > CLI > LocalProject > SharedProject >
-// User, so a smaller Scope value has higher precedence.
+// User > BuiltinDefault, so a smaller Scope value has higher precedence.
 type Scope int
 
 const (
@@ -39,8 +39,17 @@ const (
 	ScopeLocalProject
 	// ScopeSharedProject is checked-in, shared project settings.
 	ScopeSharedProject
-	// ScopeUser is the user's global settings; lowest precedence.
+	// ScopeUser is the user's global settings.
 	ScopeUser
+	// ScopeBuiltinDefault is the harness's built-in default ruleset (the
+	// read-allow / mutate-ask floor). It is the LOWEST precedence (largest iota
+	// value), BELOW ScopeUser, so any configured rule of the same effect from a
+	// higher scope wins the same-effect tie. Crucially, because it sits below
+	// every config scope, a higher-scope Allow can LOOSEN a built-in Ask (the
+	// merged deny→ask→allow fold still applies: a deny/ask in ANY scope beats an
+	// allow, but among same-effect matches the higher scope is reported). It is
+	// added at the TAIL of the iota so the existing scope values stay stable.
+	ScopeBuiltinDefault
 )
 
 // HasHigherPrecedenceThan reports whether s overrides other when rules conflict.

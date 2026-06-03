@@ -56,15 +56,57 @@ func TestSameEffectHigherScopeWins(t *testing.T) {
 	}
 }
 
-// ask beats allow when no deny is present.
-func TestAskBeatsAllow(t *testing.T) {
+// The ONLY loosening (issue #13): a higher-precedence Allow relaxes the BUILT-IN
+// DEFAULT Ask floor (ScopeBuiltinDefault). Here a shared-project Allow loosens the
+// built-in Bash/Write ask.
+func TestConfigAllowLoosensBuiltinDefaultAsk(t *testing.T) {
+	rules := []Rule{
+		{Scope: ScopeSharedProject, Tool: "Write", Effect: Allow},
+		{Scope: ScopeBuiltinDefault, Tool: "Write", Effect: Ask},
+	}
+	e := NewEvaluator(rules)
+	if got := e.Evaluate("Write", fileArgs("/x"), false); got.Effect != Allow {
+		t.Fatalf("expected Allow (config allow loosens the built-in-default ask), got %v", got.Effect)
+	}
+}
+
+// A higher-scope Allow must NOT suppress a CONFIGURED Ask (issue #13 narrowing): a
+// ScopeManaged Allow over a ScopeSharedProject Ask resolves to Ask — both are
+// author intent, and a config ask still gates regardless of an out-ranking allow.
+// This is the case the over-broad first cut got wrong; nothing else pins it.
+func TestHigherScopeAllowDoesNotSuppressConfiguredAsk(t *testing.T) {
 	rules := []Rule{
 		{Scope: ScopeManaged, Tool: "Write", Effect: Allow},
+		{Scope: ScopeSharedProject, Tool: "Write", Effect: Ask},
+	}
+	e := NewEvaluator(rules)
+	if got := e.Evaluate("Write", fileArgs("/x"), false); got.Effect != Ask {
+		t.Fatalf("expected Ask (a managed allow must not suppress a configured shared-project ask), got %v", got.Effect)
+	}
+}
+
+// The inverse: a higher-precedence Ask still beats a lower-precedence Allow, so a
+// managed/config ask gates a learned (lowest-scope) allow.
+func TestHigherScopeAskBeatsLowerScopeAllow(t *testing.T) {
+	rules := []Rule{
+		{Scope: ScopeManaged, Tool: "Write", Effect: Ask},
+		{Scope: ScopeUser, Tool: "Write", Effect: Allow},
+	}
+	e := NewEvaluator(rules)
+	if got := e.Evaluate("Write", fileArgs("/x"), false); got.Effect != Ask {
+		t.Fatalf("expected Ask (higher-scope ask beats lower-scope allow), got %v", got.Effect)
+	}
+}
+
+// On an EXACT scope tie between Ask and Allow, Ask wins (fail safe toward asking).
+func TestEqualScopeAskBeatsAllow(t *testing.T) {
+	rules := []Rule{
+		{Scope: ScopeUser, Tool: "Write", Effect: Allow},
 		{Scope: ScopeUser, Tool: "Write", Effect: Ask},
 	}
 	e := NewEvaluator(rules)
 	if got := e.Evaluate("Write", fileArgs("/x"), false); got.Effect != Ask {
-		t.Fatalf("expected Ask, got %v", got.Effect)
+		t.Fatalf("expected Ask on a scope tie, got %v", got.Effect)
 	}
 }
 

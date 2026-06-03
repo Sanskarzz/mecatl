@@ -152,6 +152,10 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--skills-conventional` | `false` | also discover skills from the conventional known paths: `<workspace>/.mecatl/skills`, `<workspace>/.claude/skills`, `$XDG_CONFIG_HOME/mecatl/skills` (or `~/.config/mecatl/skills`), and `~/.claude/skills` — lower precedence than `--skills-dir`. **OFF by default** (strict opt-in); only enable for trusted locations. **See the skills trust note below.** |
 | `--skills-draft-dir` | `""` | enable the writable `SkillDraft` tool and set the **quarantine** directory for model-authored candidate skills. Empty disables the tool. Must be **outside the workspace root** (so the model's `Write`/`Edit` cannot reach it) and **disjoint** from every `--skills-dir` / conventional location — both fatal startup errors. **See the self-improving-skill loop note below.** |
 | `--skills-draft-similarity-threshold` | `0.5` | 2-gram Jaccard similarity above which `SkillDraft` warns of a near-duplicate existing skill (warn-only; it never blocks the draft). |
+| `--permissions-conventional` | `true` | auto-discover the per-project permission config (`<workspace>/.mecatl/settings.yaml`, and with `--import-claude-permissions` also `<workspace>/.claude/settings.json`) plus the user-global file. **Re-resolved per session** against each session's workspace root. ON and inert until such a file exists. **See the permission-config note below.** |
+| `--import-claude-permissions` | `false` | also import Claude-Code `settings.json` permissions (project + user). **Lossy** (fail-safe): see the table below. |
+| `--trust-project` | `false` | honour a discovered **project's ALLOW rules** (its deny/ask are always honoured regardless). OFF by default (the safe stance) — an untrusted repo's grants are ignored. **See the permission-config note below.** |
+| `--permission-config` | `""` | path to a YAML permission-config file loaded at the **user (fully-trusted) scope** (**repeatable**). Always loaded regardless of `--permissions-conventional`. |
 
 ### Environment
 
@@ -217,6 +221,80 @@ conventional set defaults OFF rather than auto-discovering. The always-in-contex
 description cap and the on-activation body truncation apply to **every** source,
 including the conventional ones. (An OS-level sandbox around tool execution remains
 future work — see the deferral note in the architecture doc.)
+
+### File-based permission config (`.mecatl/settings.yaml`, issue #13)
+
+The built-in permission policy (read-only tools allowed; `Bash`/`Edit`/`Write`/
+`Team`/`SkillDraft` ask) can be tuned per project and per user with config files,
+**re-resolved per session** against each session's workspace root by the
+`internal/adapter/permconfig` resolver. So two sessions running in different repos
+under the same `mecated` get **different** decisions for the same tool call.
+
+**Schema** — `.mecatl/settings.yaml` (the checked-in, shared file),
+`.mecatl/settings.local.yaml` (a gitignored personal override at a higher scope),
+and the user-global file all share the same shape, mirroring Claude-Code's
+permissions:
+
+```yaml
+permissions:
+  allow:
+    - "Bash(go test:*)"   # Claude "prefix:*" form, normalised to the glob "go test*"
+    - "Bash(go build*)"   # native mecatl glob
+    - "Read"              # bare tool name = tool-wide
+  ask:
+    - "Bash(git push:*)"
+  deny:
+    - "Bash(rm:*)"        # deny wins absolutely, in any scope
+```
+
+Each entry is a rule spec `Tool(pattern)` or bare `Tool`. Patterns use the
+evaluator's glob grammar; the Claude `prefix:*` / `prefix:` form is normalised to a
+`prefix*` glob. Config rules use **glob** semantics (`Exact:false`) — only LEARNED
+"allow always" rules are exact.
+
+**Scope → location** (highest precedence first; see `internal/governance` Scope):
+
+| Scope | Location | Trust |
+| --- | --- | --- |
+| `ScopeCLI` | each `--permission-config <file>` | fully trusted |
+| `ScopeLocalProject` | `<workspace>/.mecatl/settings.local.yaml` (gitignored, personal); `<workspace>/.claude/settings.local.json` with `--import-claude-permissions` | **trust-gated** |
+| `ScopeSharedProject` | `<workspace>/.mecatl/settings.yaml` (checked-in, shared); `<workspace>/.claude/settings.json` with `--import-claude-permissions` | **trust-gated** |
+| `ScopeUser` | `$XDG_CONFIG_HOME/mecatl/settings.yaml` (or `~/.config/...`); `~/.claude/settings.json` with `--import-claude-permissions` | fully trusted |
+| `ScopeBuiltinDefault` | the built-in floor (read-allow / mutate-ask) | n/a — lowest precedence |
+
+The resolver re-reads project files **per session** against the session's workspace
+root, and **revalidates** its per-root cache on the config files' mtime/size — so a
+`deny` added mid-process takes effect on the next call, not at restart. Among
+ask-vs-allow the configured **higher scope wins**, with ONE narrow exception: a
+higher-scope config **Allow loosens ONLY the built-in `ScopeBuiltinDefault` Ask**
+floor (e.g. allowing `Bash(go test:*)` relaxes the built-in Bash ask). It can never
+suppress a **configured** Ask, **deny/ask in any scope still beats an allow**, and a
+learned allow can never out-rank a configured deny/ask. Plan mode still hard-denies
+mutations first. Config files are size- and rule-count-capped (defense-in-depth).
+
+**The trust gate** — a project's config is part of the repo the model is editing.
+Its **DENY and ASK** rules are **always** honoured (they only tighten). Its
+**ALLOW** rules (shared AND local) are honoured **only with `--trust-project`**;
+otherwise they are dropped (and logged) so a checked-in `settings.yaml` cannot
+auto-approve tool calls in an untrusted repo. User-global and `--permission-config`
+(CLI) files are the operator's own and are always fully trusted.
+
+**Claude import is lossy** (`--import-claude-permissions`) — every lossy outcome is
+logged:
+
+| Claude spec | Outcome |
+| --- | --- |
+| `WebFetch(domain:x)` in an **allow** list | **demoted to `ask`** (domain/substring match is too risky to auto-allow) |
+| `Read(~/...)` (leading `~`) | kept but **inert** — the `~` is left unexpanded, so it never matches the absolute path a tool resolves |
+| unparseable spec | **dropped** |
+
+The import never widens: a demotion only ever moves `allow → ask`, and the
+`deny`/`ask` buckets import verbatim.
+
+> **`mecatui` trusts fully.** The TUI runs in a repo you own, so it sets
+> `--permissions-conventional`, `--import-claude-permissions`, and `--trust-project`
+> all ON by default. The `mecated` daemon defaults `--permissions-conventional` ON
+> but `--trust-project` / `--import-claude-permissions` OFF (the safe network stance).
 
 ### The self-improving-skill loop (`SkillDraft` + `mecated skills promote`)
 

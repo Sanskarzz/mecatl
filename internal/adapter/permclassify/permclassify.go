@@ -64,6 +64,7 @@ import (
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/prompt"
 	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // defaultTimeout bounds a single classification when Config.Timeout is 0. It is
@@ -186,8 +187,8 @@ type classifyingPolicy struct {
 // Evaluate implements port.PermissionPolicy. See Wrap for the full semantics. It
 // forwards sessionID to the inner policy unchanged so per-session learned rules
 // are honoured by the layer it decorates.
-func (p *classifyingPolicy) Evaluate(ctx context.Context, sessionID session.SessionID, mode session.PermissionMode, c session.ToolCall) governance.PermissionDecision {
-	base := p.inner.Evaluate(ctx, sessionID, mode, c)
+func (p *classifyingPolicy) Evaluate(ctx context.Context, sessionID session.SessionID, mode session.PermissionMode, c session.ToolCall, ws tool.WorkspaceReader) governance.PermissionDecision {
+	base := p.inner.Evaluate(ctx, sessionID, mode, c, ws)
 
 	// Monotonicity invariant, enforced unconditionally: an inner Deny is sacred
 	// and is NEVER consulted nor relaxed, regardless of how ClassifyOn is

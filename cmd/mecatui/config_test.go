@@ -21,6 +21,22 @@ func TestEmbeddedConfigEnablesAgentDefs(t *testing.T) {
 	}
 }
 
+// TestEmbeddedConfigTrustsPermissions asserts the TUI runs the trust-fully
+// permission posture (issue #13): the user owns the repo they run in, so
+// conventional discovery, Claude import, AND project trust are all ON.
+func TestEmbeddedConfigTrustsPermissions(t *testing.T) {
+	ac := embeddedConfig(config{workspace: "/ws", model: "m", mock: true})
+	if !ac.PermissionsConventional {
+		t.Error("embeddedConfig PermissionsConventional = false, want true")
+	}
+	if !ac.ImportClaudePermissions {
+		t.Error("embeddedConfig ImportClaudePermissions = false, want true")
+	}
+	if !ac.TrustProject {
+		t.Error("embeddedConfig TrustProject = false, want true (the user owns the repo)")
+	}
+}
+
 // TestParseFlagsDefaults asserts --server defaults to empty (AUTO: probe-then-embed)
 // and that an empty workspace resolves to an absolute path (cwd).
 func TestParseFlagsDefaults(t *testing.T) {

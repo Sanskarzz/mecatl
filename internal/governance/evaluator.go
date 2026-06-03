@@ -224,8 +224,21 @@ func (e *Evaluator) resolveBash(rules []Rule, args json.RawMessage) PermissionDe
 }
 
 // resolveSimple finds the winning decision for a single tool+pattern against the
-// rule set using deny → ask → allow precedence, with Scope breaking same-effect
-// ties.
+// rule set. The resolution is:
+//
+//  1. A Deny in ANY scope wins ABSOLUTELY (deny-dominant) — a deny can never be
+//     out-ranked or loosened by an allow/ask of any scope.
+//  2. Otherwise an Ask beats an Allow (the classic deny → ask → allow order), with
+//     ONE narrow exception (issue #13): a higher-precedence Allow may loosen ONLY
+//     a built-in-DEFAULT Ask (the ScopeBuiltinDefault floor). This lets a project/
+//     user/CLI config Allow relax the harness's own read-allow/mutate-ask floor,
+//     WITHOUT letting an Allow suppress any CONFIGURED Ask (e.g. a ScopeManaged
+//     Allow must NOT silently override a ScopeSharedProject Ask — both are author
+//     intent, and an Ask there must still gate). On an exact scope tie Ask wins.
+//  3. No matching rule → Ask (the safe default: pause for the client).
+//
+// Within each effect the highest-precedence matching rule is the candidate (Scope
+// breaks same-effect ties), then step 2 compares across the two non-deny effects.
 func (*Evaluator) resolveSimple(rules []Rule, tool, pattern string) PermissionDecision {
 	// Collect the highest-precedence matching rule per effect.
 	best := map[Effect]*Rule{}
@@ -239,13 +252,26 @@ func (*Evaluator) resolveSimple(rules []Rule, tool, pattern string) PermissionDe
 			best[r.Effect] = r
 		}
 	}
-	// deny → ask → allow precedence on the effect itself.
-	for _, eff := range []Effect{Deny, Ask, Allow} {
-		if r := best[eff]; r != nil {
-			return PermissionDecision{Effect: eff, Reason: ruleReason(r, tool, pattern)}
-		}
+	// (1) Deny is absolute.
+	if r := best[Deny]; r != nil {
+		return PermissionDecision{Effect: Deny, Reason: ruleReason(r, tool, pattern)}
 	}
-	// No matching rule: default to Ask so an unconfigured call pauses for the
+	// (2) Ask normally beats Allow; the ONLY loosening is a higher-precedence Allow
+	// over a built-in-DEFAULT Ask floor. A configured Ask (any scope above the
+	// floor) is never suppressed by an Allow.
+	ask, allow := best[Ask], best[Allow]
+	switch {
+	case ask != nil && allow != nil:
+		if ask.Scope == ScopeBuiltinDefault && allow.Scope.HasHigherPrecedenceThan(ask.Scope) {
+			return PermissionDecision{Effect: Allow, Reason: ruleReason(allow, tool, pattern)}
+		}
+		return PermissionDecision{Effect: Ask, Reason: ruleReason(ask, tool, pattern)}
+	case ask != nil:
+		return PermissionDecision{Effect: Ask, Reason: ruleReason(ask, tool, pattern)}
+	case allow != nil:
+		return PermissionDecision{Effect: Allow, Reason: ruleReason(allow, tool, pattern)}
+	}
+	// (3) No matching rule: default to Ask so an unconfigured call pauses for the
 	// client rather than being silently allowed.
 	return PermissionDecision{
 		Effect: Ask,

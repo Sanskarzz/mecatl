@@ -67,7 +67,7 @@
 |---|---|---|
 | ko build + PSS-restricted manifests | ✅ | `.ko.yaml`, `deploy/` |
 | Health probes in manifests | 🔨 | `/healthz`+`/readyz`+gRPC health now exist; `deploy/` can switch TCP→httpGet (manifest edit pending) |
-| Config file (vs flags only) | 🟦 | flags suffice for v1; add if operators ask |
+| Config file (vs flags only) | ✅ | file-based PERMISSION config shipped (issue #13): `internal/adapter/permconfig` loads `.mecatl/settings.yaml` (+ imports Claude-Code `settings.json`), RE-RESOLVED PER SESSION against each session's workspace root via a `permpolicy.RuleResolver`. Tiered scopes (project < user), trust-gated project allows (`--trust-project`), conventional discovery (`--permissions-conventional`, ON), Claude import (`--import-claude-permissions`), explicit files (`--permission-config`). Broader (non-permission) config-file surface remains flags-only |
 
 ## Other / future features (Optional — not production blockers)
 

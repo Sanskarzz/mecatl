@@ -35,6 +35,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/openai"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
+	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/adapter/permstore"
 	"github.com/stacklok/mecatl/internal/adapter/repomap"
@@ -176,6 +177,23 @@ type Config struct {
 	MCPPrompts       bool
 	ToolHiveEnabled  bool
 	ToolHiveGroup    string
+
+	// File-based permission config (issue #13). PermissionsConventional turns on
+	// auto-discovery of the conventional per-project config (<ws>/.mecatl/settings.yaml
+	// and, with ImportClaudePermissions, <ws>/.claude/settings.json) plus the
+	// user-global files; it is re-resolved PER SESSION against each session's
+	// workspace root. ImportClaudePermissions additionally imports Claude-Code
+	// settings.json (with the lossy fail-safe table). TrustProject honours a
+	// project's ALLOW rules (a project's deny/ask is always honoured regardless);
+	// leave it off to ignore an untrusted repo's grants. PermissionConfigs are
+	// explicit operator-pointed YAML files, loaded at the user (fully-trusted)
+	// scope regardless of the conventional toggle. When none of these select any
+	// source the resolver is nil and the policy behaves exactly as before
+	// (built-ins + learned rules only).
+	PermissionsConventional bool
+	ImportClaudePermissions bool
+	TrustProject            bool
+	PermissionConfigs       []string
 
 	// Observability relays, injected by the caller (mecated wires telemetry; the
 	// embedded TUI server leaves both nil). The engine nil-guards each.
@@ -421,7 +439,20 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 	// The SAME policy (and thus store) is shared with every per-session client-MCP
 	// engine via sessionEngineFactory, so an MCP-mounted session learns identically.
 	learned := permstore.New()
-	policy := permpolicy.NewPolicy(defaultRules(), learned)
+	// File-based permission config (issue #13): the resolver re-resolves the
+	// per-project `.mecatl/settings.yaml` (and Claude-imported settings.json)
+	// against each session's workspace root, gating project ALLOW rules behind
+	// TrustProject and caching per root. It rides the SAME lowest-scope extra
+	// channel as the learned rules. permconfig.New returns nil when no source is
+	// configured, in which case NewPolicyWithResolver behaves exactly like
+	// NewPolicy (built-ins + learned only).
+	resolver := permconfig.New(permconfig.Options{
+		Conventional:  cfg.PermissionsConventional,
+		ImportClaude:  cfg.ImportClaudePermissions,
+		TrustProject:  cfg.TrustProject,
+		ExplicitFiles: cfg.PermissionConfigs,
+	})
+	policy := permpolicy.NewPolicyWithResolver(defaultRules(), learned, resolver)
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
 	cat, mainMgr, mcpProvider, mcpInventory, memStore, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
@@ -1352,20 +1383,27 @@ func promptConfig(cfg Config) prompt.Config {
 // Glob, WebFetch, the Task explorer) are allowed; mutating tools (Bash, Edit, Write)
 // and the writable SkillDraft tool ask for approval. Anything unmatched defaults to
 // ask via the evaluator.
+//
+// These rules carry ScopeBuiltinDefault — the LOWEST precedence scope, below every
+// config scope (issue #13). That lets a higher-scope config Allow LOOSEN a built-in
+// Ask (e.g. a project `.mecatl/settings.yaml` that allows `Bash(go test:*)` relaxes
+// the built-in Bash→Ask). Deny/ask in any scope still beats allow, so a config can
+// only loosen a built-in ASK, never a built-in DENY (there are none here) — and a
+// config deny/ask still wins over anything.
 func defaultRules() []governance.Rule {
 	return []governance.Rule{
-		{Scope: governance.ScopeManaged, Tool: "Read", Effect: governance.Allow},
-		{Scope: governance.ScopeManaged, Tool: "Grep", Effect: governance.Allow},
-		{Scope: governance.ScopeManaged, Tool: "Glob", Effect: governance.Allow},
-		{Scope: governance.ScopeManaged, Tool: "WebFetch", Effect: governance.Allow},
-		{Scope: governance.ScopeManaged, Tool: "Task", Effect: governance.Allow},
-		{Scope: governance.ScopeManaged, Tool: "Bash", Effect: governance.Ask},
-		{Scope: governance.ScopeManaged, Tool: "Edit", Effect: governance.Ask},
-		{Scope: governance.ScopeManaged, Tool: "Write", Effect: governance.Ask},
-		{Scope: governance.ScopeManaged, Tool: skills.DraftToolName, Effect: governance.Ask},
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Read", Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Grep", Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Glob", Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: "WebFetch", Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Task", Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Bash", Effect: governance.Ask},
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Edit", Effect: governance.Ask},
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Write", Effect: governance.Ask},
+		{Scope: governance.ScopeBuiltinDefault, Tool: skills.DraftToolName, Effect: governance.Ask},
 		// Team spawns coordinating subagents that may mutate the workspace (Mutating
 		// members), so it ASKS — unlike the read-only Task explorer, which is allowed.
-		{Scope: governance.ScopeManaged, Tool: "Team", Effect: governance.Ask},
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Team", Effect: governance.Ask},
 	}
 }
 

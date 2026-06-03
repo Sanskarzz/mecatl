@@ -131,6 +131,74 @@ func TestParseFlagsAgentDefs(t *testing.T) {
 	}
 }
 
+// TestParseFlagsPermissionConfig asserts the issue #13 permission-config flags
+// parse into the config: --permissions-conventional defaults ON, --trust-project /
+// --import-claude-permissions default OFF, and --permission-config is repeatable.
+func TestParseFlagsPermissionConfig(t *testing.T) {
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if !def.permissionsConventional {
+		t.Errorf("permissionsConventional default = false, want true (auto-discover ON)")
+	}
+	if def.trustProject {
+		t.Errorf("trustProject default = true, want false (safe stance)")
+	}
+	if def.importClaudePermissions {
+		t.Errorf("importClaudePermissions default = true, want false")
+	}
+
+	cfg, err := parseFlags([]string{
+		"--permission-config", "/etc/a.yaml",
+		"--permission-config", "/etc/b.yaml",
+		"--permissions-conventional=false",
+		"--import-claude-permissions",
+		"--trust-project",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if got := []string(cfg.permissionConfigs); len(got) != 2 || got[0] != "/etc/a.yaml" || got[1] != "/etc/b.yaml" {
+		t.Errorf("permissionConfigs = %v, want [/etc/a.yaml /etc/b.yaml]", got)
+	}
+	if cfg.permissionsConventional {
+		t.Errorf("permissionsConventional = true, want false (explicitly disabled)")
+	}
+	if !cfg.importClaudePermissions {
+		t.Errorf("importClaudePermissions = false, want true")
+	}
+	if !cfg.trustProject {
+		t.Errorf("trustProject = false, want true")
+	}
+}
+
+// TestAppConfigMapsPermissionConfig asserts appConfig threads the 4 permission-
+// config fields onto the shared app.Config.
+func TestAppConfigMapsPermissionConfig(t *testing.T) {
+	cfg, err := parseFlags([]string{
+		"--permission-config", "/etc/a.yaml",
+		"--import-claude-permissions",
+		"--trust-project",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	ac := appConfig(cfg, nil, nil)
+	if !ac.PermissionsConventional {
+		t.Errorf("PermissionsConventional = false, want true (default)")
+	}
+	if !ac.ImportClaudePermissions {
+		t.Errorf("ImportClaudePermissions = false, want true")
+	}
+	if !ac.TrustProject {
+		t.Errorf("TrustProject = false, want true")
+	}
+	if len(ac.PermissionConfigs) != 1 || ac.PermissionConfigs[0] != "/etc/a.yaml" {
+		t.Errorf("PermissionConfigs = %v, want [/etc/a.yaml]", ac.PermissionConfigs)
+	}
+}
+
 // TestAppConfigMapsAgentDefs asserts appConfig threads the agent-def fields onto the
 // shared app.Config.
 func TestAppConfigMapsAgentDefs(t *testing.T) {

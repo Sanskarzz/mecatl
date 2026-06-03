@@ -99,7 +99,7 @@ func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session
 		// failure (a deny result or a PreToolUse veto) lands on a card the client has
 		// already seen — see openCard.
 		e.openCard(r, turnIdx, c)
-		decision, cancelled := e.authorize(ctx, r, sess, turnIdx, c)
+		decision, cancelled := e.authorize(ctx, r, sess, ws, turnIdx, c)
 		if cancelled {
 			return nil, true
 		}
@@ -157,7 +157,7 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws t
 	// its error result, since there is no real tool to open a card for.
 	e.openCard(r, turnIdx, c)
 
-	decision, cancelled := e.authorize(ctx, r, sess, turnIdx, c)
+	decision, cancelled := e.authorize(ctx, r, sess, ws, turnIdx, c)
 	if cancelled {
 		return session.ToolResult{}, true
 	}
@@ -186,8 +186,8 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws t
 // effective decision (Allow or Deny — an approved Ask becomes Allow, a denied or
 // cancelled Ask becomes Deny) and a cancelled flag set only when ctx was
 // cancelled while awaiting.
-func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, turnIdx int, c session.ToolCall) (governance.PermissionDecision, bool) {
-	decision := e.deps.Policy.Evaluate(ctx, sess.ID, sess.Mode, c)
+func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall) (governance.PermissionDecision, bool) {
+	decision := e.deps.Policy.Evaluate(ctx, sess.ID, sess.Mode, c, ws)
 	if decision.Effect != governance.Ask {
 		return decision, false
 	}
