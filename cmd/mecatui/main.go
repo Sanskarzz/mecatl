@@ -55,6 +55,14 @@ func run(args []string) error {
 		return err
 	}
 
+	// Allow-all posture WARN: mecatui has no slog and runs on the alt screen, so emit
+	// a single pre-TUI stderr line (it lands in scrollback before the alt screen takes
+	// over). Only meaningful for the embedded server (an external --server owns its own
+	// posture). Refusal already handled in validate().
+	if cfg.allowAllTools && cfg.server == "" {
+		fmt.Fprintln(os.Stderr, "mecatui: WARNING: --dangerously-allow-all-tools is active; permission prompts for the built-in mutate-ask floor are SUPPRESSED on the embedded server. A Deny in any scope and any deliberately configured Ask still apply. For ephemeral, isolated, single-tenant use only.")
+	}
+
 	reg := buildRegistry(cfg.workspace, cfg.themeDir)
 	if cfg.listThemes {
 		for _, name := range reg.List() {
@@ -225,6 +233,7 @@ func embeddedConfig(cfg config) app.Config {
 		PermissionsConventional: true,
 		ImportClaudePermissions: true,
 		TrustProject:            true,
+		AllowAllTools:           cfg.allowAllTools,
 	}
 }
 

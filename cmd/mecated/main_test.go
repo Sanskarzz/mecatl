@@ -224,3 +224,66 @@ func TestAppConfigMapsAgentDefs(t *testing.T) {
 		t.Errorf("ModelAliases = %v", ac.ModelAliases)
 	}
 }
+
+func TestParseFlagsAllowAll(t *testing.T) {
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if def.allowAllTools {
+		t.Errorf("allowAllTools default = true, want false")
+	}
+
+	cfg, err := parseFlags([]string{"--dangerously-allow-all-tools"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !cfg.allowAllTools {
+		t.Errorf("allowAllTools = false, want true (flag set)")
+	}
+}
+
+func TestAppConfigMapsAllowAll(t *testing.T) {
+	cfg, err := parseFlags([]string{"--dangerously-allow-all-tools"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if ac := appConfig(cfg, nil, nil); !ac.AllowAllTools {
+		t.Errorf("appConfig.AllowAllTools = false, want true")
+	}
+
+	off, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if ac := appConfig(off, nil, nil); ac.AllowAllTools {
+		t.Errorf("appConfig.AllowAllTools = true with flag off, want false")
+	}
+}
+
+func TestAllowAllRefusalReason(t *testing.T) {
+	tests := []struct {
+		name     string
+		allowAll bool
+		euid     int
+		sandbox  bool
+		wantErr  bool
+	}{
+		{"root no sandbox refused", true, 0, false, true},
+		{"root with sandbox ok", true, 0, true, false},
+		{"non-root no sandbox ok", true, 1000, false, false},
+		{"non-root with sandbox ok", true, 1000, true, false},
+		{"flag off root ok", false, 0, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := allowAllRefusalReason(tt.allowAll, tt.euid, tt.sandbox)
+			if tt.wantErr && err == nil {
+				t.Fatalf("expected a refusal error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+		})
+	}
+}

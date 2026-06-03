@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -404,5 +405,91 @@ func TestValidateEmbeddedProviderRequired(t *testing.T) {
 	// An external server means no embedded provider is needed.
 	if err := (config{workspace: "/abs", mode: "default", server: "127.0.0.1:8080"}).validate(); err != nil {
 		t.Errorf("an external --server should not require a provider: %v", err)
+	}
+}
+
+func TestParseFlagsAllowAll(t *testing.T) {
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if def.allowAllTools {
+		t.Errorf("allowAllTools default = true, want false")
+	}
+
+	cfg, err := parseFlags([]string{"-dangerously-allow-all-tools"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !cfg.allowAllTools {
+		t.Errorf("allowAllTools = false, want true (flag set)")
+	}
+}
+
+func TestEmbeddedConfigMapsAllowAll(t *testing.T) {
+	on := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, allowAllTools: true})
+	if !on.AllowAllTools {
+		t.Errorf("embeddedConfig.AllowAllTools = false, want true")
+	}
+	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true})
+	if off.AllowAllTools {
+		t.Errorf("embeddedConfig.AllowAllTools = true with flag off, want false")
+	}
+}
+
+func TestAllowAllRefusalReason(t *testing.T) {
+	tests := []struct {
+		name     string
+		allowAll bool
+		euid     int
+		sandbox  bool
+		wantErr  bool
+	}{
+		{"root no sandbox refused", true, 0, false, true},
+		{"root with sandbox ok", true, 0, true, false},
+		{"non-root no sandbox ok", true, 1000, false, false},
+		{"non-root with sandbox ok", true, 1000, true, false},
+		{"flag off root ok", false, 0, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := allowAllRefusalReason(tt.allowAll, tt.euid, tt.sandbox)
+			if tt.wantErr && err == nil {
+				t.Fatalf("expected a refusal error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateAllowAllServerGuard asserts validate()'s `server == ""` guard: an
+// external server skips the allow-all root refusal entirely (on any euid), while
+// the embedded path with a declared sandbox is permitted. The root-refused branch
+// reads the real os.Geteuid(), so it is only assertable when actually running as
+// root.
+func TestValidateAllowAllServerGuard(t *testing.T) {
+	// External server: allow-all never trips the refusal regardless of euid.
+	ext := config{server: "127.0.0.1:8080", workspace: "/abs", mode: "default", allowAllTools: true}
+	if err := ext.validate(); err != nil {
+		t.Errorf("external server + allow-all should skip the refusal, got %v", err)
+	}
+
+	// Embedded + declared sandbox: permitted on any euid.
+	t.Setenv("MECATL_SANDBOX", "1")
+	emb := config{workspace: "/abs", mode: "default", mock: true, allowAllTools: true}
+	if err := emb.validate(); err != nil {
+		t.Errorf("embedded + allow-all + MECATL_SANDBOX=1 should validate, got %v", err)
+	}
+
+	// Embedded + root + no sandbox: refused — only assertable when running as root.
+	t.Setenv("MECATL_SANDBOX", "")
+	t.Setenv("IS_SANDBOX", "")
+	if os.Geteuid() == 0 {
+		refused := config{workspace: "/abs", mode: "default", mock: true, allowAllTools: true}
+		if err := refused.validate(); err == nil {
+			t.Error("embedded + allow-all as root without a sandbox should be refused")
+		}
 	}
 }

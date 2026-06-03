@@ -206,6 +206,7 @@ type config struct {
 	permissionsConventional bool
 	importClaudePermissions bool
 	trustProject            bool
+	allowAllTools           bool
 }
 
 // mcpServerList is a repeatable flag.Value collecting --mcp-server name=URL
@@ -356,6 +357,17 @@ func run() error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
+	// Allow-all posture: refuse the dangerous flag when running privileged outside a
+	// declared sandbox (root + no prompts can modify anything on the host). Checked
+	// AFTER the slog handler is installed and BEFORE app.Build, so it covers both the
+	// ACP and network serving modes.
+	if err := validateAllowAll(cfg); err != nil {
+		return err
+	}
+	if cfg.allowAllTools {
+		slog.Warn("ALLOW-ALL POSTURE ACTIVE (--dangerously-allow-all-tools): permission prompts for the built-in mutate-ask floor are SUPPRESSED for EVERY session on this daemon. A Deny in any scope and any deliberately configured Ask (managed/project/user) still apply — a configured Ask may block an unattended run. Intended for ephemeral, isolated, single-tenant deployments only.")
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -457,9 +469,27 @@ func appConfig(cfg config, sink port.EventSink, logger port.Logger) app.Config {
 		ImportClaudePermissions:   cfg.importClaudePermissions,
 		TrustProject:              cfg.trustProject,
 		PermissionConfigs:         cfg.permissionConfigs,
+		AllowAllTools:             cfg.allowAllTools,
 		Sink:                      sink,
 		Logger:                    logger,
 	}
+}
+
+// allowAllRefusalReason returns a non-nil error when an allow-all request must
+// be refused: running privileged (euid 0) without a declared sandbox.
+func allowAllRefusalReason(allowAll bool, euid int, sandbox bool) error {
+	if allowAll && euid == 0 && !sandbox {
+		return errors.New("--dangerously-allow-all-tools refused: running as root (euid 0) without a declared sandbox; set MECATL_SANDBOX=1 (or IS_SANDBOX=1) to affirm an isolated, disposable environment")
+	}
+	return nil
+}
+
+func sandboxDeclared() bool {
+	return os.Getenv("MECATL_SANDBOX") == "1" || os.Getenv("IS_SANDBOX") == "1"
+}
+
+func validateAllowAll(cfg config) error {
+	return allowAllRefusalReason(cfg.allowAllTools, os.Geteuid(), sandboxDeclared())
 }
 
 // parseFlags turns argv into a config, resolving env-derived defaults.
@@ -529,6 +559,8 @@ func parseFlags(argv []string) (config, error) {
 	fs.BoolVar(&cfg.permissionsConventional, "permissions-conventional", true, "auto-discover the per-project permission config: <workspace>/.mecatl/settings.local.yaml (gitignored, personal — higher precedence) and <workspace>/.mecatl/settings.yaml (checked-in, shared), plus — with --import-claude-permissions — the matching .claude/settings.local.json and .claude/settings.json, plus the user-global file ($XDG_CONFIG_HOME/mecatl/settings.yaml). RE-RESOLVED PER SESSION against each session's workspace root (and revalidated on file mtime change), so two sessions in different repos get different decisions. ON by default and INERT when no such file exists. TRUST BOUNDARY: a project's ALLOW rules are honoured ONLY with --trust-project; its deny/ask rules are ALWAYS honoured")
 	fs.BoolVar(&cfg.importClaudePermissions, "import-claude-permissions", false, "also import Claude-Code settings.json permissions (project <workspace>/.claude/settings{,.local}.json and user ~/.claude/settings.json) when --permissions-conventional is set. LOSSY (fail-safe): a WebFetch(domain:...) ALLOW is DEMOTED to ask, a Read(~/...) rule is left INERT (\"~\" unexpanded), an unparseable spec is DROPPED — every case is logged")
 	fs.BoolVar(&cfg.trustProject, "trust-project", false, "honour a discovered PROJECT's ALLOW rules (its deny/ask rules are always honoured regardless). Default OFF (the safe stance): an untrusted repo's permission grants are ignored. TRUST BOUNDARY: enabling this lets a checked-in .mecatl/settings.yaml auto-approve tool calls — only pass it for a repo you trust")
+	fs.BoolVar(&cfg.allowAllTools, "dangerously-allow-all-tools", false,
+		"OPERATOR POSTURE (dangerous): suppress permission prompts for the built-in mutate-ask floor server-wide, for ephemeral/sandboxed single-tenant use only. A Deny in ANY scope and any DELIBERATELY configured Ask still apply (see docs/design/ALLOW-ALL-POSTURE.md). Refused when running as root (euid 0) unless MECATL_SANDBOX=1 (or IS_SANDBOX=1) declares an isolated environment.")
 
 	fs.BoolVar(&cfg.acp, "acp", false, "serve the Agent Client Protocol (ACP) over stdio for an editor that spawned mecated as a subprocess (JSON-RPC 2.0 on stdin/stdout). Skips the TCP/HTTP listeners; the single session workspace is the editor-provided cwd. No TLS/auth/rate-limit (stdio is a local, parent-process trust boundary)")
 

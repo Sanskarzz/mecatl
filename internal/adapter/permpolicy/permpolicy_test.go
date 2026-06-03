@@ -178,3 +178,64 @@ func TestPolicyResolverDenyBeatsLearnedAllow(t *testing.T) {
 		t.Fatalf("project deny must beat a learned allow, got %v", got.Effect)
 	}
 }
+
+// TestPolicyAllowAllLoosensBuiltinFloor: a ScopeCLI allow-all rule loosens the
+// built-in ScopeBuiltinDefault Ask floor for mutating tools (the operator
+// allow-all posture). See docs/design/ALLOW-ALL-POSTURE.md.
+func TestPolicyAllowAllLoosensBuiltinFloor(t *testing.T) {
+	pBash := permpolicy.NewPolicy([]governance.Rule{
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Bash", Effect: governance.Ask},
+		{Scope: governance.ScopeCLI, Effect: governance.Allow},
+	}, nil)
+	if got := pBash.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("ls"), nil); got.Effect != governance.Allow {
+		t.Fatalf("allow-all should loosen the built-in Bash Ask floor, got %v", got.Effect)
+	}
+
+	pEdit := permpolicy.NewPolicy([]governance.Rule{
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Edit", Effect: governance.Ask},
+		{Scope: governance.ScopeCLI, Effect: governance.Allow},
+	}, nil)
+	if got := pEdit.Evaluate(context.Background(), sid, session.ModeDefault, fileCall("Edit", "/x"), nil); got.Effect != governance.Allow {
+		t.Fatalf("allow-all should loosen the built-in Edit Ask floor, got %v", got.Effect)
+	}
+}
+
+// TestPolicyAllowAllLosesToManagedDeny: deny-dominance is absolute — a
+// ScopeManaged Deny beats the ScopeCLI allow-all rule.
+func TestPolicyAllowAllLosesToManagedDeny(t *testing.T) {
+	p := permpolicy.NewPolicy([]governance.Rule{
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Bash", Effect: governance.Ask},
+		{Scope: governance.ScopeCLI, Effect: governance.Allow},
+		{Scope: governance.ScopeManaged, Tool: "Bash", Pattern: "rm *", Effect: governance.Deny},
+	}, nil)
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("rm x"), nil); got.Effect != governance.Deny {
+		t.Fatalf("a managed Deny must beat allow-all, got %v", got.Effect)
+	}
+}
+
+// TestPolicyAllowAllDefersToConfiguredAsk: a deliberately configured (non-builtin)
+// Ask still asks under allow-all — the posture only loosens the built-in floor.
+func TestPolicyAllowAllDefersToConfiguredAsk(t *testing.T) {
+	p := permpolicy.NewPolicy([]governance.Rule{
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Bash", Effect: governance.Ask},
+		{Scope: governance.ScopeCLI, Effect: governance.Allow},
+		{Scope: governance.ScopeUser, Tool: "Bash", Pattern: "git push*", Effect: governance.Ask},
+	}, nil)
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("git push origin"), nil); got.Effect != governance.Ask {
+		t.Fatalf("allow-all must defer to a configured Ask, got %v", got.Effect)
+	}
+}
+
+// TestPolicyAllowAllCompoundBashDenyWins: the substitution/newline-aware bash gate
+// still wins under allow-all — a configured Deny matching one segment of a compound
+// command denies the whole command.
+func TestPolicyAllowAllCompoundBashDenyWins(t *testing.T) {
+	p := permpolicy.NewPolicy([]governance.Rule{
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Bash", Effect: governance.Ask},
+		{Scope: governance.ScopeCLI, Effect: governance.Allow},
+		{Scope: governance.ScopeUser, Tool: "Bash", Pattern: "rm *", Effect: governance.Deny},
+	}, nil)
+	if got := p.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("ls && rm x"), nil); got.Effect != governance.Deny {
+		t.Fatalf("compound-bash deny must win under allow-all, got %v", got.Effect)
+	}
+}

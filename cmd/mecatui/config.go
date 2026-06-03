@@ -45,6 +45,13 @@ type config struct {
 	mock          bool
 	noBash        bool
 
+	// allowAllTools is the operator allow-all posture for the EMBEDDED server only
+	// (ignored when dialling an external --server). When set it injects a single
+	// ScopeCLI allow-all rule that suppresses the built-in mutate-ask floor; a Deny
+	// in any scope and any deliberately configured Ask still apply. Refused as root
+	// outside a declared sandbox (see validate). See docs/design/ALLOW-ALL-POSTURE.md.
+	allowAllTools bool
+
 	// Embedded-server memory config (used only when hosting an in-process
 	// server). An empty memoryDir means "compute the per-project default under
 	// $XDG_DATA_HOME/mecatui/memory"; an explicit path overrides it. noMemory
@@ -104,6 +111,8 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")
 	fs.BoolVar(&cfg.mock, "mock", false, "embedded server only: use the canned offline mock provider instead of OpenAI (no network)")
 	fs.BoolVar(&cfg.noBash, "no-bash", false, "embedded server only: disable the Bash tool (shell-less mode)")
+	fs.BoolVar(&cfg.allowAllTools, "dangerously-allow-all-tools", false,
+		"embedded server only; OPERATOR POSTURE (dangerous): suppress permission prompts for the built-in mutate-ask floor, for ephemeral/sandboxed use only. Deny in any scope and configured Ask still apply. Refused as root unless MECATL_SANDBOX=1 (or IS_SANDBOX=1).")
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "embedded server only: per-project memory store directory (empty = a per-project default under $XDG_DATA_HOME/mecatui/memory)")
 	fs.BoolVar(&cfg.noMemory, "no-memory", false, "embedded server only: disable cross-session memory (Remember/Recall) entirely")
 	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "embedded server only: directory of slash-command templates (<name>.md); empty = the conventional dirs (.mecatl/commands, .claude/commands)")
@@ -174,6 +183,25 @@ func (c config) validate() error {
 		return errors.New("no external --server given and no OPENAI_API_KEY set: " +
 			"set OPENAI_API_KEY to host an embedded server, pass --mock for an offline run, " +
 			"or point --server at a running mecated")
+	}
+	// Allow-all posture: only meaningful for the embedded server; refuse it when
+	// running privileged outside a declared sandbox. Dialling an external server
+	// never embeds, so it must not trip the refusal.
+	if c.server == "" {
+		sandbox := os.Getenv("MECATL_SANDBOX") == "1" || os.Getenv("IS_SANDBOX") == "1"
+		if err := allowAllRefusalReason(c.allowAllTools, os.Geteuid(), sandbox); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// allowAllRefusalReason returns a non-nil error when an allow-all request must be
+// refused: running privileged (euid 0) without a declared sandbox. Pure and
+// table-testable; the os lookups live at the call site.
+func allowAllRefusalReason(allowAll bool, euid int, sandbox bool) error {
+	if allowAll && euid == 0 && !sandbox {
+		return errors.New("--dangerously-allow-all-tools refused: running as root (euid 0) without a declared sandbox; set MECATL_SANDBOX=1 (or IS_SANDBOX=1) to affirm an isolated, disposable environment")
 	}
 	return nil
 }

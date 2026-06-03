@@ -156,12 +156,14 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--import-claude-permissions` | `false` | also import Claude-Code `settings.json` permissions (project + user). **Lossy** (fail-safe): see the table below. |
 | `--trust-project` | `false` | honour a discovered **project's ALLOW rules** (its deny/ask are always honoured regardless). OFF by default (the safe stance) — an untrusted repo's grants are ignored. **See the permission-config note below.** |
 | `--permission-config` | `""` | path to a YAML permission-config file loaded at the **user (fully-trusted) scope** (**repeatable**). Always loaded regardless of `--permissions-conventional`. |
+| `--dangerously-allow-all-tools` | `false` | **OPERATOR POSTURE (dangerous).** Suppress permission prompts for the built-in mutate-ask floor (`Bash`/`Edit`/`Write`/`Team`/`SkillDraft`) **server-wide** — for ephemeral, isolated, single-tenant deployments only. A `Deny` in **any** scope and any **deliberately configured** `Ask` (managed/project/user) still apply. **Refused when running as root** (euid 0) unless `MECATL_SANDBOX=1` (or `IS_SANDBOX=1`) is set. **See the allow-all note below.** |
 
 ### Environment
 
 | Var | Effect |
 | --- | --- |
 | `OPENAI_API_KEY` | the OpenAI API key. **If set, it implies `--openai`** — the real provider is selected automatically. |
+| `MECATL_SANDBOX` / `IS_SANDBOX` | set either to `1` to affirm an isolated, disposable environment so `--dangerously-allow-all-tools` is permitted while running as root. |
 
 ### Provider selection
 
@@ -295,6 +297,42 @@ The import never widens: a demotion only ever moves `allow → ask`, and the
 > `--permissions-conventional`, `--import-claude-permissions`, and `--trust-project`
 > all ON by default. The `mecated` daemon defaults `--permissions-conventional` ON
 > but `--trust-project` / `--import-claude-permissions` OFF (the safe network stance).
+
+### The allow-all posture (`--dangerously-allow-all-tools`)
+
+For unattended runs (CI, a throwaway container, a disposable VM) you can suppress
+the permission prompts for the **built-in mutate-ask floor** with the long,
+un-aliased operator flag `--dangerously-allow-all-tools`. It is available on
+`mecated` and on the embedded `mecatui` server (it is **ignored when `mecatui`
+dials an external `--server`** — that server owns its own posture).
+
+It is **not** a `PermissionMode` and **not** an evaluator bypass. It injects a
+single `ScopeCLI` allow-all **rule** into the main engine's static ruleset, which
+loosens **only** the built-in `Bash`/`Edit`/`Write`/`Team`/`SkillDraft` Ask floor.
+The governance invariants are unchanged:
+
+- A `Deny` in **any** scope (including `ScopeManaged`) still wins — deny-dominance is
+  absolute. An admin can forbid specific tools/patterns even under allow-all.
+- Any **deliberately configured** `Ask` (managed/project/user) still asks. Allow-all
+  never suppresses a configured Ask, so a misconfigured Ask can still **block an
+  unattended run** — the startup warning says so. (The common CI case configures no
+  asks beyond the built-in floor, so allow-all is fully unattended there.)
+
+**Sandbox-first.** The flag bypasses the *prompt*, never a *sandbox*. The real
+boundary for unattended agentic execution is OS-level isolation (container/microVM,
+network-off-by-default, ephemeral filesystem) — enable allow-all **only where the
+harness cannot cause durable harm**, and only on single-tenant daemons (the flag
+makes *every* session on that daemon allow-all).
+
+**Root refusal.** If allow-all is requested **and** the process runs as root
+(`euid 0`) **and** neither `MECATL_SANDBOX=1` nor `IS_SANDBOX=1` is set, the process
+**refuses to start** with a clear error: root + no prompts can modify anything on the
+host, so the operator must affirm an isolated, disposable environment via the env var.
+
+```sh
+# CI / sandboxed container, offline mock, no prompts:
+MECATL_SANDBOX=1 bin/mecated --mock --dangerously-allow-all-tools
+```
 
 ### The self-improving-skill loop (`SkillDraft` + `mecated skills promote`)
 
@@ -508,7 +546,10 @@ bin/mecatui --server 127.0.0.1:8080 --workspace "$PWD"
 
 The embedded server keeps the heavier opt-ins (MCP, ToolHive, skills, memory,
 server-side slash-command expansion) off; run a full `mecated` and use `--server`
-for those. Note the TUI's **built-in slash commands** (`/clear`, `/help`, and the
+for those. The embedded server also accepts `--dangerously-allow-all-tools` (the
+allow-all operator posture — same semantics, root refusal, and `MECATL_SANDBOX`/
+`IS_SANDBOX` env as `mecated`; see the allow-all note in §7). It is **ignored when
+dialling an external `--server`**. Note the TUI's **built-in slash commands** (`/clear`, `/help`, and the
 caps-gated `/mcp`/`/agents`) still work regardless — they act on the TUI itself,
 not the server, so typing `/` always opens a useful palette even with workspace
 slash-command expansion off. See `docs/tui.md` for all flags.

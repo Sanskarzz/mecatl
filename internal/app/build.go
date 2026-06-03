@@ -195,6 +195,12 @@ type Config struct {
 	TrustProject            bool
 	PermissionConfigs       []string
 
+	// AllowAllTools, when set, injects a single ScopeCLI allow-all rule into the
+	// MAIN engine's static ruleset alongside defaultRules(). It loosens ONLY the
+	// built-in mutate-ask floor; a Deny in any scope and any CONFIGURED Ask still
+	// win (see docs/design/ALLOW-ALL-POSTURE.md). Children are already allow-all.
+	AllowAllTools bool
+
 	// Observability relays, injected by the caller (mecated wires telemetry; the
 	// embedded TUI server leaves both nil). The engine nil-guards each.
 	Sink   port.EventSink
@@ -452,7 +458,7 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 		TrustProject:  cfg.TrustProject,
 		ExplicitFiles: cfg.PermissionConfigs,
 	})
-	policy := permpolicy.NewPolicyWithResolver(defaultRules(), learned, resolver)
+	policy := permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, resolver)
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
 	cat, mainMgr, mcpProvider, mcpInventory, memStore, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
@@ -1405,6 +1411,17 @@ func defaultRules() []governance.Rule {
 		// members), so it ASKS — unlike the read-only Task explorer, which is allowed.
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Team", Effect: governance.Ask},
 	}
+}
+
+// mainRules returns the main engine's static ruleset: the built-in floor, plus
+// — when cfg.AllowAllTools — a single ScopeCLI allow-all rule that loosens that
+// floor (a Deny in any scope and any configured Ask still win).
+func mainRules(cfg Config) []governance.Rule {
+	rules := defaultRules()
+	if cfg.AllowAllTools {
+		rules = append([]governance.Rule{{Scope: governance.ScopeCLI, Effect: governance.Allow}}, rules...)
+	}
+	return rules
 }
 
 // defaultLimits returns the non-zero stop limits injected for sessions created
