@@ -88,7 +88,7 @@ type recordingLogger struct {
 	results []session.ToolResult
 }
 
-func (l *recordingLogger) ToolCall(_ session.SessionID, _ session.ToolCall, result session.ToolResult, _ time.Duration) {
+func (l *recordingLogger) ToolCall(_ session.SessionID, _ session.ToolCall, result session.ToolResult, _, _ time.Duration) {
 	l.mu.Lock()
 	l.calls++
 	l.results = append(l.results, result)

@@ -158,6 +158,23 @@ type TurnEndPayload struct {
 	// DurationMs is the elapsed milliseconds for the turn's model call; 0 when no
 	// Clock is injected.
 	DurationMs int64
+	// TTFTMs is the time-to-first-token: the elapsed milliseconds from the start
+	// of the model stream to the FIRST content chunk (text or reasoning) of the
+	// turn. It is 0 when no Clock is injected OR when the turn produced no content
+	// chunk at all (a tool-call-only or empty turn) — a 0 here is "not measured",
+	// never a real zero, so telemetry must guard against recording bogus zeros.
+	TTFTMs int64
+	// InterTokenMeanMs is the per-turn MEAN gap, in milliseconds, between
+	// consecutive content chunks (text or reasoning) within the turn — the typical
+	// streaming smoothness. It feeds the mecatl.inter_token histogram. It is 0 when
+	// fewer than two content chunks were observed (no gap exists) or no Clock is
+	// injected.
+	InterTokenMeanMs int64
+	// InterTokenMaxMs is the per-turn WORST (largest) single gap, in milliseconds,
+	// between consecutive content chunks within the turn — the jitter spike users
+	// feel. It feeds the mecatl.inter_token.max histogram. It is 0 under the same
+	// <2-chunk / no-Clock conditions as InterTokenMeanMs.
+	InterTokenMaxMs int64
 }
 
 // SubagentPayload is the REDACTED observability projection carried by the three

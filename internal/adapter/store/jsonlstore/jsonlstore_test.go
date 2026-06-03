@@ -129,9 +129,9 @@ func TestToolCallLogParseable(t *testing.T) {
 	st, dir := newStore(t)
 	call := session.NewToolCall("call-7", "Bash", json.RawMessage(`{"cmd":"ls"}`))
 	res := session.NewToolResult("call-7", "file.txt")
-	st.ToolCall("sess-1", call, res, 1500*time.Microsecond)
+	st.ToolCall("sess-1", call, res, 800*time.Microsecond, 1500*time.Microsecond)
 	st.ToolCall("sess-1", session.NewToolCall("call-8", "Read", nil),
-		session.NewToolError("call-8", "nope"), 42*time.Microsecond)
+		session.NewToolError("call-8", "nope"), 0, 42*time.Microsecond)
 
 	path := filepath.Join(dir, "sess-1.tools.jsonl")
 	if n := countLines(t, path); n != 2 {
@@ -157,6 +157,9 @@ func TestToolCallLogParseable(t *testing.T) {
 	}
 	if rec["took_micros"].(float64) != 1500 {
 		t.Errorf("took_micros = %v, want 1500", rec["took_micros"])
+	}
+	if rec["queued_micros"].(float64) != 800 {
+		t.Errorf("queued_micros = %v, want 800", rec["queued_micros"])
 	}
 
 	var rec2 map[string]any

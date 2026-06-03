@@ -29,6 +29,17 @@ import (
 func (e *Engine) dispatch(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, calls []session.ToolCall) ([]session.ToolResult, bool) {
 	results := make(map[session.ToolCallID]session.ToolResult, len(calls))
 
+	// Enqueue timestamp: every call in this turn enters dispatch NOW, before any
+	// batching or serialization. Queue time is (execution-start − this enqueue),
+	// so a mutating call held behind an earlier serial tool (or a permission ask)
+	// records the real wait it sat through — the coordinated-omission fix
+	// (perf-observability §5 decision 2). A nil Clock leaves enqueue as the zero
+	// time, and timeExecute then reports a 0 queue duration (guarded like took).
+	var enqueue time.Time
+	if e.deps.Clock != nil {
+		enqueue = e.deps.Clock.Now()
+	}
+
 	i := 0
 	for i < len(calls) {
 		c := calls[i]
@@ -36,7 +47,7 @@ func (e *Engine) dispatch(ctx context.Context, r *Run, sess *session.Session, ws
 
 		// Mutating (or unknown) tools flush alone, serially.
 		if !known || !t.ReadOnly() {
-			res, cancelled := e.runOne(ctx, r, sess, ws, turnIdx, c, t, known)
+			res, cancelled := e.runOne(ctx, r, sess, ws, turnIdx, c, t, known, enqueue)
 			if cancelled {
 				return nil, true
 			}
@@ -58,7 +69,7 @@ func (e *Engine) dispatch(ctx context.Context, r *Run, sess *session.Session, ws
 			j++
 		}
 
-		batchRes, cancelled := e.runReadBatch(ctx, r, sess, ws, turnIdx, batch)
+		batchRes, cancelled := e.runReadBatch(ctx, r, sess, ws, turnIdx, batch, enqueue)
 		if cancelled {
 			return nil, true
 		}
@@ -81,7 +92,7 @@ func (e *Engine) dispatch(ctx context.Context, r *Run, sess *session.Session, ws
 // are sequenced first (resolved one at a time, before any execution) so we never
 // surface two asks simultaneously; the calls cleared to execute then run in
 // parallel. It returns the results keyed by CallID and a cancelled flag.
-func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, batch []session.ToolCall) (map[session.ToolCallID]session.ToolResult, bool) {
+func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, batch []session.ToolCall, enqueue time.Time) (map[session.ToolCallID]session.ToolResult, bool) {
 	out := make(map[session.ToolCallID]session.ToolResult, len(batch))
 
 	// Phase 1: resolve permission (asks sequenced) and run hooks. Calls that are
@@ -128,7 +139,7 @@ func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session
 		wg.Add(1)
 		go func(p pending) {
 			defer wg.Done()
-			res := e.execute(ctx, r, sess, ws, turnIdx, p.call, p.t)
+			res := e.execute(ctx, r, sess, ws, turnIdx, p.call, p.t, enqueue)
 			mu.Lock()
 			out[p.call.ID] = res
 			mu.Unlock()
@@ -144,7 +155,7 @@ func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session
 
 // runOne handles a single (mutating or unknown) tool call serially: authorize,
 // pre-hook, execute, post-hook. It returns the result and a cancelled flag.
-func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool, known bool) (session.ToolResult, bool) {
+func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool, known bool, enqueue time.Time) (session.ToolResult, bool) {
 	if !known {
 		res := session.NewToolError(c.ID, fmt.Sprintf("unknown tool %q", c.Name))
 		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
@@ -178,7 +189,7 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws t
 	}
 
 	// Execute the EFFECTIVE call (args possibly rewritten by the PreToolUse hook).
-	return e.execute(ctx, r, sess, ws, turnIdx, effective, t), false
+	return e.execute(ctx, r, sess, ws, turnIdx, effective, t, enqueue), false
 }
 
 // authorize evaluates the permission policy for a call and, on Ask, pauses the
@@ -332,8 +343,22 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 // otherwise best-effort: a hook execution error does not abort, and a block only
 // annotates (the tool already ran; a block neither undoes nor suppresses the
 // result).
-func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool) session.ToolResult {
-	res, dur := e.timeExecute(ctx, r, ws, turnIdx, c, t)
+func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool, enqueue time.Time) session.ToolResult {
+	// Execution begins now. queued is the wait from enqueue (when the call entered
+	// dispatch) to this point — for a mutating call serialized behind an earlier
+	// tool, or any call held behind a permission ask, this is the real queue time
+	// (perf-observability §5 decision 2). The same execStart anchors the execution
+	// duration, so queued + took partition the wall time from enqueue to result.
+	var execStart time.Time
+	var queued time.Duration
+	if e.deps.Clock != nil {
+		execStart = e.deps.Clock.Now()
+		if !enqueue.IsZero() {
+			queued = execStart.Sub(enqueue)
+		}
+	}
+
+	res, dur := e.timeExecute(ctx, r, ws, turnIdx, c, t, execStart)
 
 	// PostToolUse may rewrite the result. The effective (possibly rewritten) result
 	// is what we log, emit, and return, so the audit log, the client event stream,
@@ -342,17 +367,19 @@ func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws 
 	res = e.postHook(ctx, r, sess, turnIdx, c, res)
 
 	if e.deps.Logger != nil {
-		e.deps.Logger.ToolCall(sess.ID, c, res, dur)
+		e.deps.Logger.ToolCall(sess.ID, c, res, queued, dur)
 	}
 
 	e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 	return res
 }
 
-// timeExecute runs the tool, capturing its result and elapsed wall time via the
-// injected Clock (zero duration when no Clock is configured). A harness-level
-// execution error becomes an error ToolResult so the model can recover; the loop
-// never aborts on a single tool failure.
+// timeExecute runs the tool and reports its elapsed wall time as (Clock.Now −
+// start), where start is the execution-start anchor the caller already read from
+// the injected Clock (so queued and took share one clock read and never
+// double-advance a fake clock). The duration is 0 when no Clock is configured. A
+// harness-level execution error becomes an error ToolResult so the model can
+// recover; the loop never aborts on a single tool failure.
 //
 // Observability seam: a tool that implements observableTool (the Task subagent)
 // is run via ExecuteObserved with an emit closure bound to THIS run, so it can
@@ -363,11 +390,7 @@ func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws 
 // concurrent, read-parallel) tool goroutine — consistent with the existing
 // dispatch emits, which e.emit serialises. Tools that do not implement the seam
 // take the ordinary Execute path unchanged.
-func (e *Engine) timeExecute(ctx context.Context, r *Run, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool) (session.ToolResult, time.Duration) {
-	var start time.Time
-	if e.deps.Clock != nil {
-		start = e.deps.Clock.Now()
-	}
+func (e *Engine) timeExecute(ctx context.Context, r *Run, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool, start time.Time) (session.ToolResult, time.Duration) {
 	var (
 		res session.ToolResult
 		err error

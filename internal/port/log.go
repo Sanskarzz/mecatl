@@ -26,7 +26,15 @@ type EventSink interface {
 // Logger records structured observability for tool execution. It is an
 // observability seam, distinct from the model-visible conversation.
 type Logger interface {
-	// ToolCall records that a tool was executed, with its result and the wall
-	// time it took.
-	ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, took time.Duration)
+	// ToolCall records that a tool was executed, with its result, the time it
+	// spent waiting in the dispatch queue before execution started (queued), and
+	// the wall time its execution then took (took).
+	//
+	// queued is the coordinated-omission measure: it is the gap between when the
+	// call ENTERED dispatch and when its execution actually began. For a read-only
+	// call cleared to run immediately it is near-zero; for a mutating call held by
+	// the read-parallel/mutate-serial ordering (or behind a permission ask) it is
+	// the real wait the model's call sat through. Both durations are 0 when no
+	// Clock is injected.
+	ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, queued, took time.Duration)
 }

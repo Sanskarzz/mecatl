@@ -100,31 +100,34 @@ func (st *Store) Load(_ context.Context, id session.SessionID) (*session.Session
 // toolCallRecord is the structured line written by ToolCall. It is a flat,
 // self-describing record for offline replay/analysis.
 type toolCallRecord struct {
-	Type       string             `json:"type"` // always "tool_call"
-	Time       time.Time          `json:"time"`
-	SessionID  session.SessionID  `json:"session_id"`
-	CallID     session.ToolCallID `json:"call_id"`
-	Tool       string             `json:"tool"`
-	Args       json.RawMessage    `json:"args,omitempty"`
-	Result     string             `json:"result"`
-	IsError    bool               `json:"is_error"`
-	TookMicros int64              `json:"took_micros"`
+	Type         string             `json:"type"` // always "tool_call"
+	Time         time.Time          `json:"time"`
+	SessionID    session.SessionID  `json:"session_id"`
+	CallID       session.ToolCallID `json:"call_id"`
+	Tool         string             `json:"tool"`
+	Args         json.RawMessage    `json:"args,omitempty"`
+	Result       string             `json:"result"`
+	IsError      bool               `json:"is_error"`
+	QueuedMicros int64              `json:"queued_micros"`
+	TookMicros   int64              `json:"took_micros"`
 }
 
-// ToolCall appends a structured tool-call record to the per-session tool log.
-// It satisfies port.Logger. Errors are intentionally swallowed (the port has no
-// error return) but the record is best-effort durable.
-func (st *Store) ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, took time.Duration) {
+// ToolCall appends a structured tool-call record to the per-session tool log,
+// including both the dispatch queue time (queued) and the execution wall time
+// (took) in microseconds. It satisfies port.Logger. Errors are intentionally
+// swallowed (the port has no error return) but the record is best-effort durable.
+func (st *Store) ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, queued, took time.Duration) {
 	rec := toolCallRecord{
-		Type:       "tool_call",
-		Time:       time.Now().UTC(),
-		SessionID:  id,
-		CallID:     call.ID,
-		Tool:       call.Name,
-		Args:       call.Args,
-		Result:     result.Content,
-		IsError:    result.IsError,
-		TookMicros: took.Microseconds(),
+		Type:         "tool_call",
+		Time:         time.Now().UTC(),
+		SessionID:    id,
+		CallID:       call.ID,
+		Tool:         call.Name,
+		Args:         call.Args,
+		Result:       result.Content,
+		IsError:      result.IsError,
+		QueuedMicros: queued.Microseconds(),
+		TookMicros:   took.Microseconds(),
 	}
 	line, err := json.Marshal(rec)
 	if err != nil {

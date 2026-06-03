@@ -312,7 +312,7 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 		e.maybeCompact(ctx, r, sess, turnIdx)
 
 		// Step 4: build the request and consume the model stream.
-		asst, usage, streamStop, err := e.runTurn(ctx, r, sess, turnIdx)
+		asst, usage, streamStop, timing, err := e.runTurn(ctx, r, sess, turnIdx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				e.terminate(ctx, r, sess, session.StopCancelled, lastText, total, nil)
@@ -336,7 +336,13 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 			durMs = e.deps.Clock.Now().Sub(turnStart).Milliseconds()
 		}
 		e.emit(r, session.Event{Type: session.EvTurnEnd, Turn: turnIdx,
-			TurnEnd: &session.TurnEndPayload{Usage: usage, DurationMs: durMs}})
+			TurnEnd: &session.TurnEndPayload{
+				Usage:            usage,
+				DurationMs:       durMs,
+				TTFTMs:           timing.ttftMs,
+				InterTokenMeanMs: timing.interTokenMeanMs,
+				InterTokenMaxMs:  timing.interTokenMaxMs,
+			}})
 
 		if err := sess.RecordAssistant(asst); err != nil {
 			e.terminate(ctx, r, sess, session.StopError, lastText, total, err)
@@ -414,14 +420,69 @@ func (e *Engine) recordPrompt(ctx context.Context, r *Run, sess *session.Session
 	return true, "", nil
 }
 
+// turnTiming carries the latency measurements runTurn derives from the model
+// stream, in milliseconds. A field is 0 when it could not be measured (no Clock
+// injected, no content chunk for TTFT, or fewer than two content chunks for the
+// inter-token summary) — telemetry treats a 0 here as "not measured", never a
+// real observation.
+type turnTiming struct {
+	ttftMs           int64
+	interTokenMeanMs int64
+	interTokenMaxMs  int64
+}
+
 // runTurn builds the LLMRequest, calls Stream, and assembles the chunk sequence
 // into a single assistant Message. It emits message.delta events for text. It
 // honours ctx cancellation mid-stream by returning context.Canceled.
-func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, turnIdx int) (session.Message, session.Usage, session.StopReason, error) {
+//
+// It also measures, via the injected Clock (never time.Now directly, so tests
+// drive it with a fake clock): TTFT — the elapsed time from the start of the
+// model stream to the FIRST content chunk (text or reasoning) — and the
+// inter-token gaps between consecutive content chunks, summarised as mean and
+// max. Tool-call/usage/done chunks are NOT content and never count toward TTFT or
+// the inter-token gaps (those carry no user-perceived token). A turn with zero
+// content chunks reports no TTFT; a turn with one content chunk reports a TTFT
+// but no inter-token summary (there is no gap).
+func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, turnIdx int) (session.Message, session.Usage, session.StopReason, turnTiming, error) {
 	req := e.buildRequest(sess)
 	seq, err := e.deps.LLM.Stream(ctx, req)
 	if err != nil {
-		return session.Message{}, session.Usage{}, session.StopNone, fmt.Errorf("agent: start stream: %w", err)
+		return session.Message{}, session.Usage{}, session.StopNone, turnTiming{}, fmt.Errorf("agent: start stream: %w", err)
+	}
+
+	// Latency measurement state. streamStart anchors TTFT; lastContent marks the
+	// previous content chunk's arrival for the inter-token gaps. Both are taken
+	// from the injected Clock; when no Clock is configured, hasClock is false and
+	// every measurement degrades to 0 (matching the turn-duration guard).
+	hasClock := e.deps.Clock != nil
+	var streamStart, lastContent time.Time
+	if hasClock {
+		streamStart = e.deps.Clock.Now()
+	}
+	var (
+		timing             turnTiming
+		contentChunks      int
+		gapSumMs, gapMaxMs int64
+	)
+	// noteContent records the arrival of one content chunk (text or reasoning) for
+	// the TTFT / inter-token measurement. It must be called exactly once per
+	// content chunk, before the chunk is otherwise handled.
+	noteContent := func() {
+		if !hasClock {
+			return
+		}
+		now := e.deps.Clock.Now()
+		contentChunks++
+		if contentChunks == 1 {
+			timing.ttftMs = now.Sub(streamStart).Milliseconds()
+		} else {
+			gap := now.Sub(lastContent).Milliseconds()
+			gapSumMs += gap
+			if gap > gapMaxMs {
+				gapMaxMs = gap
+			}
+		}
+		lastContent = now
 	}
 
 	// text is the visible assistant text. reasoningBlob is the opaque
@@ -435,19 +496,21 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 
 	for chunk, cerr := range seq {
 		if cerr != nil {
-			return session.Message{}, usage, stop, fmt.Errorf("agent: stream: %w", cerr)
+			return session.Message{}, usage, stop, turnTiming{}, fmt.Errorf("agent: stream: %w", cerr)
 		}
 		if ctx.Err() != nil {
-			return session.Message{}, usage, stop, context.Canceled
+			return session.Message{}, usage, stop, turnTiming{}, context.Canceled
 		}
 		switch chunk.Kind {
 		case port.ChunkText:
+			noteContent()
 			text += chunk.Text
 			e.emit(r, session.Event{Type: session.EvMessageDelta, Turn: turnIdx, Text: chunk.Text})
 		case port.ChunkReasoning:
 			// Display-only: surface the human-readable reasoning summary to
 			// clients. This text is NOT what gets replayed to the provider (see
 			// ChunkReasoningItem below); it must not be stored on Message.Reasoning.
+			noteContent()
 			e.emit(r, session.Event{Type: session.EvReasoningDelta, Turn: turnIdx, Text: chunk.Text})
 		case port.ChunkReasoningItem:
 			// The opaque encrypted_content replay blob. Stored on Message.Reasoning
@@ -471,10 +534,18 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 	// A consumer that exited because ctx was cancelled mid-stream surfaces as a
 	// cancellation, not a normal end-of-turn.
 	if ctx.Err() != nil {
-		return session.Message{}, usage, stop, context.Canceled
+		return session.Message{}, usage, stop, turnTiming{}, context.Canceled
 	}
 
-	return session.NewAssistantMessage(text, reasoningBlob, calls), usage, stop, nil
+	// Summarise the inter-token gaps: mean over the (contentChunks-1) gaps and the
+	// largest single gap. With fewer than two content chunks there is no gap, so
+	// both stay 0 (already the zero value) — never a bogus zero observation.
+	if contentChunks >= 2 {
+		timing.interTokenMeanMs = gapSumMs / int64(contentChunks-1)
+		timing.interTokenMaxMs = gapMaxMs
+	}
+
+	return session.NewAssistantMessage(text, reasoningBlob, calls), usage, stop, timing, nil
 }
 
 // buildRequest assembles the provider-neutral LLMRequest for the current turn:

@@ -165,9 +165,9 @@ func Setup(ctx context.Context, cfg OTLPConfig) (Providers, error) {
 }
 
 // newMeterProvider builds the SDK MeterProvider with a prometheus-exporter reader
-// (registered on a fresh registry) and the base-2 exponential-histogram view for
-// the tool-duration instrument (decision 2). It returns the provider and the
-// registry to serve at /metrics.
+// (registered on a fresh registry) and the base-2 exponential-histogram views for
+// every latency instrument (decision 2). It returns the provider and the registry
+// to serve at /metrics.
 func newMeterProvider(res *resource.Resource) (*sdkmetric.MeterProvider, *prometheus.Registry, error) {
 	reg := prometheus.NewRegistry()
 	promExporter, err := otelprom.New(otelprom.WithRegisterer(reg))
@@ -175,11 +175,14 @@ func newMeterProvider(res *resource.Resource) (*sdkmetric.MeterProvider, *promet
 		return nil, nil, fmt.Errorf("build prometheus exporter: %w", err)
 	}
 
-	mp := sdkmetric.NewMeterProvider(
+	opts := []sdkmetric.Option{
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(promExporter),
-		sdkmetric.WithView(ToolDurationView()),
-	)
+	}
+	for _, v := range LatencyViews() {
+		opts = append(opts, sdkmetric.WithView(v))
+	}
+	mp := sdkmetric.NewMeterProvider(opts...)
 	return mp, reg, nil
 }
 

@@ -25,12 +25,24 @@ import (
 func newTestMetrics(t *testing.T) (*Metrics, *metric.ManualReader) {
 	t.Helper()
 	reader := metric.NewManualReader()
-	mp := metric.NewMeterProvider(metric.WithReader(reader), metric.WithView(ToolDurationView()))
+	mp := metric.NewMeterProvider(append([]metric.Option{metric.WithReader(reader)}, latencyViewOpts()...)...)
 	m, err := NewMetrics(mp)
 	if err != nil {
 		t.Fatalf("NewMetrics: %v", err)
 	}
 	return m, reader
+}
+
+// latencyViewOpts adapts the production LatencyViews() into MeterProvider options
+// so tests install the SAME exponential-histogram views the production pipeline
+// does — proving the latency series collect as exponential histograms here too.
+func latencyViewOpts() []metric.Option {
+	views := LatencyViews()
+	opts := make([]metric.Option, 0, len(views))
+	for _, v := range views {
+		opts = append(opts, metric.WithView(v))
+	}
+	return opts
 }
 
 // collect gathers all metrics into a flat name→Aggregation map for assertions.
@@ -221,9 +233,9 @@ func TestMetricsToolCallExponentialHistogram(t *testing.T) {
 	m, reader := newTestMetrics(t)
 
 	m.ToolCall("sess-1", session.NewToolCall("c1", "bash", nil),
-		session.NewToolResult("c1", "ok"), 250*time.Millisecond)
+		session.NewToolResult("c1", "ok"), 0, 250*time.Millisecond)
 	m.ToolCall("sess-1", session.NewToolCall("c2", "bash", nil),
-		session.NewToolError("c2", "boom"), 10*time.Millisecond)
+		session.NewToolError("c2", "boom"), 0, 10*time.Millisecond)
 
 	data := collect(t, reader)
 	calls := data["mecatl.tool.calls"]
@@ -254,6 +266,115 @@ func TestMetricsToolCallExponentialHistogram(t *testing.T) {
 	}
 }
 
+// expHist asserts the named instrument collected as an ExponentialHistogram and
+// returns its single data point, failing otherwise.
+func expHist(t *testing.T, data map[string]metricdata.Aggregation, name string) metricdata.ExponentialHistogramDataPoint[float64] {
+	t.Helper()
+	exp, ok := data[name].(metricdata.ExponentialHistogram[float64])
+	if !ok {
+		t.Fatalf("%s is %T, want ExponentialHistogram[float64]", name, data[name])
+	}
+	if len(exp.DataPoints) != 1 {
+		t.Fatalf("%s series = %d, want 1", name, len(exp.DataPoints))
+	}
+	return exp.DataPoints[0]
+}
+
+// TestMetricsLatencyInstruments asserts the five latency instruments — turn
+// duration, TTFT, inter-token (mean), inter-token (max), and tool queue — all
+// collect as base-2 exponential histograms (decision 2) with sane unit-converted
+// values, and that the "not measured" zero-guards hold (a turn with no content
+// records turn duration only; a zero queue time still records on the queue
+// histogram since 0 is a real, immediate-dispatch observation there).
+func TestMetricsLatencyInstruments(t *testing.T) {
+	m, reader := newTestMetrics(t)
+
+	// A fully-measured turn: duration 195ms, TTFT 30ms, mean inter-token 25ms.
+	m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{
+		DurationMs: 195, TTFTMs: 30, InterTokenMeanMs: 25, InterTokenMaxMs: 40,
+	}})
+	// A tool-call-only turn: duration measured, TTFT/inter-token "not measured" (0)
+	// → must NOT add a TTFT/inter-token observation.
+	m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{
+		DurationMs: 5, TTFTMs: 0, InterTokenMeanMs: 0, InterTokenMaxMs: 0,
+	}})
+	// A queued mutate tool: 120ms queue, 30ms execution.
+	m.ToolCall("s", session.NewToolCall("c", "edit", nil),
+		session.NewToolResult("c", "ok"), 120*time.Millisecond, 30*time.Millisecond)
+
+	data := collect(t, reader)
+
+	turn := expHist(t, data, turnDurationInstrument)
+	if turn.Count != 2 { // both turns record a duration
+		t.Errorf("turn.duration count = %d, want 2", turn.Count)
+	}
+	if got := turn.Sum; got < 0.199 || got > 0.201 { // 195ms + 5ms = 0.2s
+		t.Errorf("turn.duration sum = %v, want ≈0.2", got)
+	}
+
+	ttft := expHist(t, data, ttftInstrument)
+	if ttft.Count != 1 { // only the measured turn
+		t.Errorf("ttft count = %d, want 1 (the no-content turn must not record)", ttft.Count)
+	}
+	if got := ttft.Sum; got < 0.029 || got > 0.031 {
+		t.Errorf("ttft sum = %v, want ≈0.03", got)
+	}
+
+	inter := expHist(t, data, interTokenInstrument)
+	if inter.Count != 1 {
+		t.Errorf("inter_token count = %d, want 1", inter.Count)
+	}
+	if got := inter.Sum; got < 0.0249 || got > 0.0251 {
+		t.Errorf("inter_token sum = %v, want ≈0.025", got)
+	}
+
+	interMax := expHist(t, data, interTokenMaxInstrument)
+	if interMax.Count != 1 { // only the measured turn (max 40ms)
+		t.Errorf("inter_token.max count = %d, want 1", interMax.Count)
+	}
+	if got := interMax.Sum; got < 0.0399 || got > 0.0401 {
+		t.Errorf("inter_token.max sum = %v, want ≈0.04", got)
+	}
+
+	queue := expHist(t, data, toolQueueInstrument)
+	if queue.Count != 1 {
+		t.Errorf("tool.queue count = %d, want 1", queue.Count)
+	}
+	if got := queue.Sum; got < 0.119 || got > 0.121 { // 120ms
+		t.Errorf("tool.queue sum = %v, want ≈0.12", got)
+	}
+}
+
+// TestMetricsLatencyGuardsIndependent proves the >0 skip-guards in recordTurnEnd
+// are INDEPENDENT, not coupled: a turn that measured TTFT but produced fewer than
+// two content chunks (a single content chunk) carries TTFTMs>0 with
+// InterTokenMeanMs==0 and InterTokenMaxMs==0. The TTFT histogram must increment
+// while BOTH inter-token histograms (mean and max) must NOT — a regression that
+// gated them on a shared condition would wrongly record (or wrongly drop) one.
+func TestMetricsLatencyGuardsIndependent(t *testing.T) {
+	m, reader := newTestMetrics(t)
+
+	// Single-content-chunk-style payload: TTFT measured, both gaps "not measured".
+	m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{
+		DurationMs: 50, TTFTMs: 20, InterTokenMeanMs: 0, InterTokenMaxMs: 0,
+	}})
+
+	data := collect(t, reader)
+
+	ttft := expHist(t, data, ttftInstrument)
+	if ttft.Count != 1 {
+		t.Errorf("ttft count = %d, want 1 (TTFT measured)", ttft.Count)
+	}
+	// Neither inter-token histogram should have any data point at all: with nothing
+	// recorded, the instrument produces no series.
+	if _, present := data[interTokenInstrument]; present {
+		t.Errorf("inter_token (mean) recorded on a zero-gap turn; guards are coupled to TTFT")
+	}
+	if _, present := data[interTokenMaxInstrument]; present {
+		t.Errorf("inter_token.max recorded on a zero-gap turn; guards are coupled to TTFT")
+	}
+}
+
 // TestMetricsScrapeThroughPrometheusExporter wires the adapter through the OTel
 // prometheus exporter (as Setup does) and asserts the expected series names
 // appear in the /metrics text. These pinned names are mecatl's choice — there is
@@ -264,7 +385,7 @@ func TestMetricsScrapeThroughPrometheusExporter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prometheus exporter: %v", err)
 	}
-	mp := metric.NewMeterProvider(metric.WithReader(exp), metric.WithView(ToolDurationView()))
+	mp := metric.NewMeterProvider(append([]metric.Option{metric.WithReader(exp)}, latencyViewOpts()...)...)
 	m, err := NewMetrics(mp)
 	if err != nil {
 		t.Fatalf("NewMetrics: %v", err)
@@ -276,7 +397,10 @@ func TestMetricsScrapeThroughPrometheusExporter(t *testing.T) {
 		Stop:  session.StopEndTurn,
 		Usage: session.Usage{InputTokens: 10, CacheReadTokens: 5},
 	}})
-	m.ToolCall("s", session.NewToolCall("c", "bash", nil), session.NewToolResult("c", "ok"), 5*time.Millisecond)
+	m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{
+		DurationMs: 100, TTFTMs: 20, InterTokenMeanMs: 10, InterTokenMaxMs: 15,
+	}})
+	m.ToolCall("s", session.NewToolCall("c", "bash", nil), session.NewToolResult("c", "ok"), 3*time.Millisecond, 5*time.Millisecond)
 
 	body := scrape(t, MetricsHandler(reg))
 	// The prometheus exporter applies its own _total / unit suffixes; these are
@@ -290,6 +414,11 @@ func TestMetricsScrapeThroughPrometheusExporter(t *testing.T) {
 		"mecatl_active_runs",
 		"mecatl_cache_hit_ratio",
 		"mecatl_tool_duration_seconds",
+		"mecatl_turn_duration_seconds",
+		"mecatl_ttft_seconds",
+		"mecatl_inter_token_seconds",
+		"mecatl_inter_token_max_seconds",
+		"mecatl_tool_queue_seconds",
 	} {
 		if !strings.Contains(body, name) {
 			t.Errorf("/metrics missing series %q", name)
@@ -303,9 +432,11 @@ func TestMetricsScrapeThroughPrometheusExporter(t *testing.T) {
 // This proves (a) the Meter and the Registry returned by Setup are the SAME
 // pipeline — a mecatl_* domain series only appears if NewMetrics's meter feeds the
 // registry's exporter — and (b) Setup installs the exponential-histogram view, so
-// the tool-duration series renders as a native/exponential histogram (a single
-// le="+Inf" bucket) rather than the default explicit buckets. Deleting
-// ToolDurationView from Setup would regress (b).
+// the tool-duration series AND the newest latency series (inter_token.max) both
+// render as native/exponential histograms (a single le="+Inf" bucket) rather than
+// the default explicit buckets. Proving inter_token.max here confirms the
+// latencyInstruments-slice → LatencyViews() → Setup path covers a new instrument
+// automatically. Deleting LatencyViews from Setup would regress (b).
 func TestMetricsThroughRealSetup(t *testing.T) {
 	providers, err := Setup(context.Background(), OTLPConfig{}) // metrics only
 	if err != nil {
@@ -326,7 +457,12 @@ func TestMetricsThroughRealSetup(t *testing.T) {
 		Usage: session.Usage{InputTokens: 10, CacheReadTokens: 5},
 	}})
 	m.ToolCall("s", session.NewToolCall("c", "bash", nil),
-		session.NewToolResult("c", "ok"), 250*time.Millisecond)
+		session.NewToolResult("c", "ok"), 0, 250*time.Millisecond)
+	// A turn with a measured worst inter-token gap so the newest latency series is
+	// present and exercised through the real Setup pipeline.
+	m.Emit(context.Background(), session.Event{Type: session.EvTurnEnd, TurnEnd: &session.TurnEndPayload{
+		DurationMs: 100, TTFTMs: 20, InterTokenMeanMs: 10, InterTokenMaxMs: 40,
+	}})
 
 	body := scrape(t, MetricsHandler(providers.Registry))
 
@@ -338,10 +474,30 @@ func TestMetricsThroughRealSetup(t *testing.T) {
 		t.Errorf("/metrics missing mecatl_tool_duration_seconds_count")
 	}
 
-	// (b) The exponential view collapses the histogram to a single le="+Inf"
-	// bucket line. The default explicit-bucket histogram (no view) would instead
-	// emit many finite-le bucket lines (le="0.005", le="0.01", …). Counting the
-	// _bucket lines discriminates the two and breaks if the view is removed.
+	// (b) The exponential view collapses each latency histogram to a single
+	// le="+Inf" bucket line. The default explicit-bucket histogram (no view) would
+	// instead emit many finite-le bucket lines (le="0.005", le="0.01", …). Counting
+	// the _bucket lines per series discriminates the two and breaks if the view is
+	// removed. Asserting it for inter_token.max (driven only by the
+	// latencyInstruments slice) proves a new instrument inherits the exponential
+	// view through Setup with no per-instrument wiring.
+	assertSingleInfBucket := func(prefix string) {
+		t.Helper()
+		var bucketLines int
+		for _, line := range strings.Split(body, "\n") {
+			if strings.HasPrefix(line, prefix+"_bucket{") {
+				bucketLines++
+				if !strings.Contains(line, `le="+Inf"`) {
+					t.Errorf("%s histogram has a finite-le bucket %q; exponential view not installed", prefix, line)
+				}
+			}
+		}
+		if bucketLines != 1 {
+			t.Errorf("%s _bucket lines = %d, want 1 (exponential view); explicit buckets imply the view was dropped", prefix, bucketLines)
+		}
+	}
+	assertSingleInfBucket("mecatl_inter_token_max_seconds")
+
 	var bucketLines int
 	for _, line := range strings.Split(body, "\n") {
 		if strings.HasPrefix(line, "mecatl_tool_duration_seconds_bucket{") {
