@@ -214,6 +214,14 @@ It prints (note: **no `Authorization` header** — the surface is loopback/no-au
 }
 ```
 
+A companion **interpretation skill** ships at
+`.claude/skills/perf-mcp-interpretation/` — it teaches an agent to read this
+server's reduced output (tool routing/cost, pprof rankings, the leak/contention/GC
+signatures, the upper-bound caveat). Because it lives under `.claude/skills/`, an
+agent working in this repo (e.g. Claude Code) discovers it automatically; an
+external MCP client can copy it in alongside the perf-server config so the
+connected agent knows how to act on the numbers.
+
 ### Environment
 
 | Var | Effect |
