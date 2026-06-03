@@ -225,36 +225,68 @@ func TestFlightRecorderDefaultsApplied(t *testing.T) {
 	fr.Stop()
 }
 
-// TestProcessFlightRecorderCoalescesSecondArming asserts the process-singleton
-// invariant: the first ProcessFlightRecorder call arms and returns the shared
-// instance with a nil error; a second call is COALESCED — it returns the SAME
+// TestRecorderSlotCoalescesSecondArming asserts the singleton invariant that
+// ProcessFlightRecorder relies on: the first get arms and returns the shared
+// instance with a nil error; a second get is COALESCED — it returns the SAME
 // instance plus ErrFlightRecorderAlreadyActive, never a second silently-dropped
 // recorder. This is the guard for decision 7's second consumer (the embedded
 // server) against the one-recorder-per-process stdlib constraint.
 //
-// It runs in its own process: the package-level sync.Once means the singleton is
-// armed for the rest of this test binary, so it is isolated behind a build that
-// only this test touches the accessor. It stops the recorder at the end so the
-// runtime trace subscription does not leak into other tests.
-func TestProcessFlightRecorderCoalescesSecondArming(t *testing.T) {
-	first, err := ProcessFlightRecorder(trace.FlightRecorderConfig{})
-	if err != nil {
-		t.Fatalf("first ProcessFlightRecorder: %v", err)
-	}
-	if first == nil {
-		t.Fatal("first ProcessFlightRecorder returned a nil recorder")
-	}
-	if !first.Enabled() {
-		t.Fatal("the shared recorder should be started after the first call")
-	}
-	t.Cleanup(first.Stop)
+// It exercises a FRESH recorderSlot with a fake armer (a sentinel recorder that
+// is never started), so the logic is tested without claiming the stdlib's single
+// process-wide trace slot — which is what lets it run repeatably under -count>1,
+// unlike a test that drove the package-level ProcessFlightRecorder singleton.
+func TestRecorderSlotCoalescesSecondArming(t *testing.T) {
+	sentinel := &FlightRecorder{} // never Started; identity is all this test needs
+	var armCalls int
+	slot := &recorderSlot{arm: func(trace.FlightRecorderConfig) (*FlightRecorder, error) {
+		armCalls++
+		return sentinel, nil
+	}}
 
-	second, err := ProcessFlightRecorder(trace.FlightRecorderConfig{})
+	first, err := slot.get(trace.FlightRecorderConfig{})
+	if err != nil {
+		t.Fatalf("first get: unexpected error %v", err)
+	}
+	if first != sentinel {
+		t.Fatalf("first get returned %p, want the armed sentinel %p", first, sentinel)
+	}
+
+	second, err := slot.get(trace.FlightRecorderConfig{})
 	if !errors.Is(err, ErrFlightRecorderAlreadyActive) {
-		t.Fatalf("second ProcessFlightRecorder err = %v, want ErrFlightRecorderAlreadyActive", err)
+		t.Fatalf("second get err = %v, want ErrFlightRecorderAlreadyActive", err)
 	}
 	if second != first {
-		t.Errorf("second call returned a different instance (%p) than the first (%p); arming was not coalesced", second, first)
+		t.Errorf("second get returned a different instance (%p) than the first (%p); arming was not coalesced", second, first)
+	}
+	if armCalls != 1 {
+		t.Errorf("arm called %d times, want exactly 1 (the slot must arm once)", armCalls)
+	}
+}
+
+// TestRecorderSlotArmErrorPropagates asserts that when the first arming fails,
+// every get returns that error (and a nil recorder) and the failed arm is not
+// retried — matching ProcessFlightRecorder's "if the first arming failed, every
+// call returns that error" contract.
+func TestRecorderSlotArmErrorPropagates(t *testing.T) {
+	armErr := errFlightRecorder("boom")
+	var armCalls int
+	slot := &recorderSlot{arm: func(trace.FlightRecorderConfig) (*FlightRecorder, error) {
+		armCalls++
+		return nil, armErr
+	}}
+
+	for i := range 3 {
+		rec, err := slot.get(trace.FlightRecorderConfig{})
+		if !errors.Is(err, armErr) {
+			t.Fatalf("get #%d err = %v, want the arm error", i, err)
+		}
+		if rec != nil {
+			t.Fatalf("get #%d returned a non-nil recorder %p on arm failure", i, rec)
+		}
+	}
+	if armCalls != 1 {
+		t.Errorf("arm called %d times, want exactly 1 (a failed arm must not be retried)", armCalls)
 	}
 }
 

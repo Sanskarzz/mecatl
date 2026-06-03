@@ -138,16 +138,56 @@ type errFlightRecorder string
 
 func (e errFlightRecorder) Error() string { return string(e) }
 
-// processFlightRecorder is the single process-wide FlightRecorder. The stdlib
-// permits exactly one active flight recorder per process, so this enforces that
-// as an invariant rather than leaving it to caller convention: the first
-// ProcessFlightRecorder call constructs + arms it under processFROnce; every
-// later call returns the SAME instance.
-var (
-	processFROnce sync.Once
-	processFR     *FlightRecorder
-	processFRErr  error
-)
+// recorderSlot enforces the "one shared, armed recorder, first-caller-arms,
+// later-callers-coalesce" invariant. It is factored out of ProcessFlightRecorder
+// so the first-vs-coalesce and error-propagation logic can be exercised on a
+// FRESH slot with a fake armer in tests — repeatably, and without consuming the
+// stdlib's single process-wide trace slot. The process uses exactly one
+// package-level instance (processSlot); tests construct their own.
+//
+// It must never be copied after first use (it holds a sync.Once + atomic.Bool);
+// always use it by pointer.
+type recorderSlot struct {
+	once      sync.Once
+	coalesced atomic.Bool
+	rec       *FlightRecorder
+	err       error
+	// arm constructs and starts the shared recorder on the first get. Injected so
+	// the slot logic is testable without arming a real runtime trace recorder.
+	arm func(trace.FlightRecorderConfig) (*FlightRecorder, error)
+}
+
+// get arms the slot on the first call (via arm) and returns the shared instance.
+// The first successful caller gets (rec, nil); every later caller is COALESCED —
+// (same rec, ErrFlightRecorderAlreadyActive). If arming failed, every caller
+// gets (nil, err). cfg is honoured only on the first (arming) call.
+func (s *recorderSlot) get(cfg trace.FlightRecorderConfig) (*FlightRecorder, error) {
+	s.once.Do(func() { s.rec, s.err = s.arm(cfg) })
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.coalesced.Swap(true) {
+		// A prior caller already armed the singleton; this caller is coalesced.
+		return s.rec, ErrFlightRecorderAlreadyActive
+	}
+	return s.rec, nil
+}
+
+// armProcessFlightRecorder is the production armer: it constructs a recorder with
+// the given bounded config and starts it, claiming the stdlib's single
+// process-wide trace slot.
+func armProcessFlightRecorder(cfg trace.FlightRecorderConfig) (*FlightRecorder, error) {
+	fr := NewFlightRecorder(cfg)
+	if err := fr.Start(); err != nil {
+		return nil, err
+	}
+	return fr, nil
+}
+
+// processSlot is the single process-wide FlightRecorder slot. The stdlib permits
+// exactly one active flight recorder per process, so this enforces that as an
+// invariant rather than leaving it to caller convention.
+var processSlot = recorderSlot{arm: armProcessFlightRecorder}
 
 // ProcessFlightRecorder returns the single shared, started FlightRecorder for
 // this process, constructing and arming it on the first call with the given
@@ -162,10 +202,10 @@ var (
 // cmd/mecatui embedded server next), so a second consumer cannot silently lose a
 // Start against the one-recorder-per-process stdlib constraint.
 //
-// LIMITATION — the sync.Once is process-lifetime, not re-armable. The singleton
-// is constructed and started exactly once; once its OWNER Stops it (the caller
-// that received a nil error armed it and is the only one that should Stop it),
-// it CANNOT be re-armed in the same process — a subsequent ProcessFlightRecorder
+// LIMITATION — the slot is process-lifetime, not re-armable. The singleton is
+// constructed and started exactly once; once its OWNER Stops it (the caller that
+// received a nil error armed it and is the only one that should Stop it), it
+// CANNOT be re-armed in the same process — a subsequent ProcessFlightRecorder
 // returns the now-stopped instance, and Start() on it will fail because the
 // stdlib slot has already been used and torn down. This is fine for the
 // production wiring (one mecated, or one embedded server, per process, armed at
@@ -174,27 +214,5 @@ var (
 // the recorder; later owners must coalesce (and must NOT Stop what they did not
 // arm — see cmd/mecatui/embed's ownsRecorder gate).
 func ProcessFlightRecorder(cfg trace.FlightRecorderConfig) (*FlightRecorder, error) {
-	processFROnce.Do(func() {
-		fr := NewFlightRecorder(cfg)
-		if err := fr.Start(); err != nil {
-			processFRErr = err
-			return
-		}
-		processFR = fr
-	})
-	if processFRErr != nil {
-		return nil, processFRErr
-	}
-	if processFRCoalesced.Swap(true) {
-		// A prior caller already armed the singleton; this caller is coalesced.
-		return processFR, ErrFlightRecorderAlreadyActive
-	}
-	return processFR, nil
+	return processSlot.get(cfg)
 }
-
-// processFRCoalesced flips true once the singleton has been handed to its FIRST
-// successful caller, so the SECOND and later callers are told (via
-// ErrFlightRecorderAlreadyActive) that they were coalesced rather than that they
-// armed the recorder. It is separate from processFROnce because Once.Do runs its
-// body exactly once but does not itself distinguish first vs later callers.
-var processFRCoalesced atomic.Bool
