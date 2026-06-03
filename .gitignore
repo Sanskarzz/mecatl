@@ -13,3 +13,7 @@ coverage.*
 
 # Per-session agent memory (local only)
 /.claude/agent-memory/
+
+# Local Claude Code runtime artifacts
+/.claude/worktrees/
+/.claude/scheduled_tasks.lock
