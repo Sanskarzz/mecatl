@@ -546,6 +546,38 @@ func TestLifecycleListSlowTurns(t *testing.T) {
 	}
 }
 
+// TestListSlowTurnsRawJSONKeysAreSnakeCase guards the WIRE contract by inspecting
+// the raw JSON bytes of the tool result's structured content, not by round-tripping
+// through the Go struct (the other tests unmarshal into ListSlowTurnsOutput, so they
+// would silently pass even if the per-turn fields serialized as PascalCase). It marshals
+// the structuredContent the SDK puts on the wire and asserts the per-turn keys are
+// snake_case (turn_index/duration_ms/ttft_ms/inter_token_max_ms/ended_at) and that the
+// PascalCase Go field names never appear — a regression if mcpperf.SlowTurn lost its tags
+// or the bridge started returning an untagged struct.
+func TestListSlowTurnsRawJSONKeysAreSnakeCase(t *testing.T) {
+	sess := dialTestServer(t, fullDeps())
+	res := callTool(t, sess, "list_slow_turns", ListSlowTurnsInput{Limit: 5})
+	if res.IsError {
+		t.Fatalf("list_slow_turns isError: %s", resultText(res))
+	}
+	raw, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal structuredContent: %v", err)
+	}
+	got := string(raw)
+
+	for _, want := range []string{`"turn_index"`, `"duration_ms"`, `"ttft_ms"`, `"inter_token_max_ms"`, `"ended_at"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("raw slow-turn JSON missing snake_case key %s: %s", want, got)
+		}
+	}
+	for _, banned := range []string{`"TurnIndex"`, `"DurationMs"`, `"TTFTMs"`, `"InterTokenMaxMs"`, `"EndedAt"`} {
+		if strings.Contains(got, banned) {
+			t.Errorf("raw slow-turn JSON leaked PascalCase key %s: %s", banned, got)
+		}
+	}
+}
+
 func TestLifecycleListSlowTurnsDisabled(t *testing.T) {
 	d := fullDeps()
 	d.SlowTurns = nil

@@ -61,7 +61,6 @@ func registerTools(srv *mcpsdk.Server, d Deps, gate *cpuGate) {
 type QueryMetricInput struct {
 	MetricName string  `json:"metric_name,omitempty" jsonschema:"the curated metric to query; omit to list available metric names"`
 	Quantile   float64 `json:"quantile,omitempty" jsonschema:"for a histogram metric, a single quantile in (0,1] to report (e.g. 0.99); omit for p50/p90/p99"`
-	MaxPoints  int     `json:"max_points,omitempty" jsonschema:"cap on the number of series points returned (1-20, default 20)"`
 }
 
 // QueryMetricOutput is the structured result of query_metric. Exactly one shape
