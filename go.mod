@@ -12,10 +12,12 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/exp/teatest/v2 v2.0.0-20260527151214-009e6338d40d
 	github.com/gofrs/flock v0.13.0
+	github.com/google/pprof v0.0.0-20260115054156-294ebfa9ad83
 	github.com/malivvan/tree-sitter v0.0.2-0.20250125152656-46b39a70b658
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/openai/openai-go/v3 v3.37.0
 	github.com/prometheus/client_golang v1.23.2
+	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/procfs v0.20.1
 	github.com/stacklok/toolhive v0.28.3
 	github.com/tiktoken-go/tokenizer v0.8.0
@@ -186,7 +188,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/otlptranslator v1.0.0 // indirect
 	github.com/redis/go-redis/v9 v9.19.0 // indirect
