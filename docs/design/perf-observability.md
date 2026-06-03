@@ -1,7 +1,8 @@
 # Performance observability — problem, approaches, and the decided direction
 
-- Status: **Approach D — Phase 1 SHIPPED; Phase 2 perf MCP server WIRED
-  (2026-06-03); only the companion skill remains.**
+- Status: **Approach D — SHIPPED (2026-06-03). Phase 1 + Phase 2 complete.**
+  Phase 2's companion interpretation skill landed at
+  `.claude/skills/perf-mcp-interpretation/`, completing the effort.
   Phase 1 (the stdlib + OTel foundations) is implemented and committed:
   ctx-aware EventSink seam → OTel metrics migration → latency instruments
   (turn/TTFT/inter-token/tool-queue exponential histograms) → mecated
