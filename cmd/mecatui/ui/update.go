@@ -125,8 +125,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case client.StreamErrMsg:
 		// An error PAUSES the queue (shouldDrain(stopError) is false): the staged
-		// follow-ups are kept intact, not auto-sent into a broken run. drainQueue is a
-		// no-op here, but routed through it so the policy lives in one place.
+		// follow-ups are kept intact and marked paused (m.queuePaused) so the queue
+		// card says why, not auto-sent into a broken run. drainQueue records the pause
+		// here, but the policy lives in one place.
 		m.conv.addError("stream error: " + msg.Err.Error())
 		m = m.endRun(stopError)
 		mm, drainCmd := m.drainQueue(stopError)
@@ -560,10 +561,30 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openMCP(mcpPrompts)
 	case key.Matches(msg, m.keys.Agents):
 		return m.openAgents()
+	case key.Matches(msg, m.keys.Cancel) && m.queuePaused != "":
+		// A run ended on a non-clean stop with staged follow-ups still queued (the
+		// paused state). Mirror the running-phase esc layering: a non-empty input is
+		// cleared first; otherwise esc drops the paused queue. (With no input and an
+		// empty queue queuePaused is already "", so this branch never strands esc.)
+		if strings.TrimSpace(m.ta.Value()) != "" {
+			m.ta.Reset()
+			return m.afterInputEdit(nil)
+		}
+		m.queued = nil
+		m.queuePaused = ""
+		m.statusMsg = m.deps.Theme.Style("muted").Render("queue cleared")
+		m.refreshView()
+		return m, nil
 	case key.Matches(msg, m.keys.Newline):
 		m.ta.InsertRune('\n')
 		return m.afterInputEdit(nil)
 	case key.Matches(msg, m.keys.Submit):
+		// While paused, enter on an EMPTY line RESUMES: fire the next staged prompt
+		// manually. A non-empty line falls through to a normal submit (which also
+		// clears the pause and lets the queue drain at the new run's clean end).
+		if m.queuePaused != "" && len(m.queued) > 0 && strings.TrimSpace(m.ta.Value()) == "" {
+			return m.popAndSubmit()
+		}
 		return m.submitPrompt()
 	case key.Matches(msg, m.keys.ScrollU), key.Matches(msg, m.keys.ScrollD):
 		var cmd tea.Cmd
@@ -668,6 +689,10 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	}
 	m.conv.addUser(text)
 	m.ta.Reset()
+	// A fresh run clears any queue pause: whether this is the auto-drain (popAndSubmit
+	// already cleared it) or a manual send while paused, the queue now gets a new
+	// chance to drain at this run's clean completion, so it is no longer "paused".
+	m.queuePaused = ""
 	// The textarea stays FOCUSED while running so the user can type a follow-up and
 	// enqueue it (see enqueuePrompt / onRunningKey). It used to Blur here to signal
 	// "input disabled while running"; type-while-running supersedes that.
@@ -795,13 +820,15 @@ func (m *Model) refreshView() {
 // called on every run-completion path (ResultMsg / StreamErrMsg / StreamClosedMsg)
 // AFTER endRun has settled the model back to idle.
 //
-// It only fires on a CLEAN stop (shouldDrain): a normal end_turn/stop. On an error,
-// a user-cancel ("cancelled"), or a stream close it returns a no-op and KEEPS the
-// queue — the locked policy is "pause & keep on anything but a clean stop", so a
-// broken or cancelled run never silently fires the next staged prompt; the user can
-// resend or clear the queue with esc. The phase==phaseIdle guard is belt-and-braces
-// (endRun always lands idle on these paths) so a future caller can't drain into a
-// still-running model.
+// It fires on a HEALTHY stop (shouldDrain): end_turn, the empty reason, or a size
+// limit (max_turns / max_tool_calls). On a non-healthy stop — error, a user-cancel
+// ("cancelled"), max_consecutive_failures, or a stream close — it does NOT fire:
+// instead it records the stop reason in m.queuePaused and KEEPS the queue, so the
+// run that died never silently fires the next staged prompt. The user then resumes
+// with enter on an empty line (resumeQueue) or clears with esc — renderQueue shows
+// that affordance. The phase==phaseIdle guard is belt-and-braces (endRun always
+// lands idle on these paths) so a future caller can't drain into a still-running
+// model.
 //
 // The submit goes through the EXISTING submitPrompt path — the same one a typed
 // prompt uses — so the queued prompt reopens the completed session server-side
@@ -809,9 +836,32 @@ func (m *Model) refreshView() {
 // path. submitPrompt sets phaseRunning and opens a fresh stream whose own ResultMsg
 // re-enters drainQueue, giving a one-at-a-time FIFO drain.
 func (m Model) drainQueue(stop string) (tea.Model, tea.Cmd) {
-	if !shouldDrain(stop) || len(m.queued) == 0 || m.phase != phaseIdle {
+	if len(m.queued) == 0 {
+		m.queuePaused = ""
 		return m, nil
 	}
+	if !shouldDrain(stop) {
+		// A non-clean stop (error / user-cancel / repeated failures / stream close)
+		// with staged follow-ups: PAUSE and KEEP the queue, but record the reason so
+		// renderQueue can say so loudly (and the idle keys can resume/clear it) — a
+		// silent "N queued" after the run died reads as a hang. The user resumes with
+		// enter on an empty line (resumeQueue) or clears with esc.
+		m.queuePaused = stop
+		return m, nil
+	}
+	if m.phase != phaseIdle {
+		return m, nil // belt-and-braces: never drain into a still-running model.
+	}
+	return m.popAndSubmit()
+}
+
+// popAndSubmit pops the oldest staged follow-up, clears any pause, and submits it
+// through the EXISTING submitPrompt path (server-side StartRunContent reopen) — the
+// single shared body behind both the auto-drain (drainQueue) and the manual resume
+// (resumeQueue). submitPrompt sets phaseRunning and opens a fresh stream whose own
+// ResultMsg re-enters drainQueue, giving a one-at-a-time FIFO drain.
+func (m Model) popAndSubmit() (tea.Model, tea.Cmd) {
+	m.queuePaused = ""
 	next := m.queued[0]
 	m.queued = m.queued[1:]
 	m.ta.SetValue(next)
@@ -819,19 +869,30 @@ func (m Model) drainQueue(stop string) (tea.Model, tea.Cmd) {
 }
 
 // shouldDrain reports whether a terminal stop reason should auto-fire the next
-// staged follow-up. Only a CLEAN/normal stop drains: an explicit end_turn or the
-// empty reason (treated as a clean end_turn throughout, cf. stopReasonLabel — these
-// two members match its "done" case exactly so the two switches agree on the
-// clean-stop vocabulary). The vocabulary is the session.StopReason set ("" /
-// end_turn / max_turns / max_tool_calls / max_consecutive_failures / cancelled /
-// error). Everything else — stopError, a user-cancel ("cancelled"), the "closed"
-// StreamClosed sentinel, and the limit stops (max_turns / max_tool_calls /
-// max_consecutive_failures) — PAUSES the drain and keeps the queue: a limit stop is
-// not clean (the harness stopped the run for a reason), so firing the next follow-up
-// into a model that just hit a guardrail would be surprising.
+// staged follow-up. It drains on a HEALTHY stop — one where the model was either
+// done or merely hit a SIZE bound, so feeding the next staged prompt simply
+// continues the work the user lined up:
+//
+//   - ""        — treated as a clean end_turn throughout (cf. stopReasonLabel).
+//   - end_turn  — the model finished without requesting more tools.
+//   - max_turns / max_tool_calls — the run hit a per-run budget. The model was
+//     healthy; it just ran out of room. A queued follow-up ("continue", or the next
+//     step) is exactly what's wanted here, and firing it reopens the session with a
+//     fresh budget — so these DRAIN (issue: a silent pause-on-limit read as a hang).
+//
+// Everything else PAUSES the drain and keeps the queue intact, because the run
+// stopped for a bad reason or the user intervened — firing a follow-up into it would
+// be surprising:
+//
+//   - max_consecutive_failures — the run was failing repeatedly; don't pile on.
+//   - cancelled — the USER stopped the run; auto-resuming would fight that intent.
+//   - error / "closed" — the run broke or the stream ended abnormally.
+//
+// The vocabulary is the session.StopReason set plus the "closed" StreamClosed
+// sentinel; stopReasonLabel renders the same set for the footer.
 func shouldDrain(stop string) bool {
 	switch stop {
-	case "", "end_turn":
+	case "", "end_turn", "max_turns", "max_tool_calls":
 		return true
 	default:
 		return false

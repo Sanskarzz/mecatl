@@ -157,6 +157,7 @@ type Model struct {
 	mcp          mcpState       // MCP overlay state (view==mcpNone when closed)
 	palette      paletteState   // slash-command palette (open when the input starts with "/")
 	queued       []string       // follow-up prompts staged while a run streams; drained FIFO on a clean stop (see drainQueue)
+	queuePaused  string         // non-empty when a run ended on a non-clean stop with a non-empty queue: the stop reason holding the queue (see drainQueue/renderQueue)
 	agents       agentsState    // agent-team overlay state (view==agentsNone when closed)
 	showHelp     bool           // the "?" keys-&-features overlay is open (caps-driven; see help.go)
 	stream       *client.Stream // current run's stream
@@ -272,6 +273,7 @@ func (m Model) resetSession() Model {
 	m.activeTool = ""
 	m.toolProgress = ""
 	m.queued = nil
+	m.queuePaused = ""
 	return m
 }
 

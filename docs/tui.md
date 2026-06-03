@@ -135,6 +135,8 @@ spends tokens) stays **off** on the embedded server.
 | `enter` (while a run streams) | **queue a follow-up** (staged, sent when the turn ends) |
 | `shift+enter` (or `ctrl+j`) | newline in the input |
 | `esc` (while a run streams) | clear staged input → else clear the queue → else cancel the in-flight run (sends `Cancel`; waits for the terminal result) |
+| `enter` (idle, **paused queue**, empty input) | resume — send the next staged follow-up |
+| `esc` (idle, **paused queue**) | clear staged input → else clear the queue |
 | `ctrl+c` | quit |
 | in the permission modal: `a`/`y`/`enter` | allow |
 | in the permission modal: `d`/`n`/`esc` | deny |
@@ -157,13 +159,22 @@ at 16; an over-cap `enter` is rejected with a muted `queue full (16)` status and
 input is kept. A muted card above the input shows `⏳ N queued` with up to three
 previews (`+K more` over that).
 
-When the turn ends **cleanly** (`end_turn`/`stop`), the queue drains **one at a time,
-FIFO**: the oldest staged line is submitted through the ordinary prompt path (so it
-reopens the session server-side exactly like a manual follow-up), and that run's
-completion drives the next. The drain **pauses and keeps** the queue on anything that
-is *not* a clean stop — an error, a user cancel, a stream close, or a limit stop
-(`max_turns`/`max_tool_calls`/…) — so a broken or cancelled run never silently fires
-the backlog; resend or clear it with `esc`.
+When the run ends on a **healthy** stop, the queue drains **one at a time, FIFO**: the
+oldest staged line is submitted through the ordinary prompt path (so it reopens the
+session server-side exactly like a manual follow-up), and that run's completion drives
+the next. A healthy stop is one where the model was *done* or merely hit a *size
+bound* — `end_turn` (and the empty reason), **plus** the per-run limits `max_turns`
+and `max_tool_calls` (the run just ran out of budget; firing the next staged prompt
+reopens it with a fresh budget, which is what a lined-up "continue" wants).
+
+On a **non-healthy** stop the drain **pauses and keeps** the queue — an error, a user
+cancel, `max_consecutive_failures`, or a stream close — so a broken, failing, or
+deliberately-cancelled run never silently fires the backlog. The card switches from
+the muted `⏳ N queued` to a louder `⏸ N queued · paused: <reason>` with the resume/
+clear keys, so a held queue is never mistaken for a hang. From there (idle), `enter`
+on an empty line **resumes** (sends the next staged line) and `esc` **clears** the
+queue; sending a fresh prompt also clears the pause and lets the queue drain at that
+run's clean end.
 
 A built-in (`/clear`, `/help`) typed mid-run is enqueued like any other line and
 dispatched **at drain time**, when the phase is idle and the built-in's idle-guard is

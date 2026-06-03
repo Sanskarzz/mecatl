@@ -265,13 +265,13 @@ func TestNoDrainOnCancel(t *testing.T) {
 	}
 }
 
-// TestNoDrainOnLimitStop: the LIMIT stop reasons (max_turns / max_tool_calls /
-// max_consecutive_failures) PAUSE the drain — the queue is retained and no new
-// prompt frame is sent. This pins shouldDrain's "limit stops are not clean" branch,
-// which is otherwise exercised only by footer label-rendering tests: a regression
-// that wrongly added a limit stop to the drain set would pass silently without this.
-func TestNoDrainOnLimitStop(t *testing.T) {
-	for _, stop := range []string{"max_turns", "max_tool_calls", "max_consecutive_failures"} {
+// TestDrainOnSizeLimit: the SIZE-bound stop reasons (max_turns / max_tool_calls)
+// DRAIN — the model was healthy and merely ran out of per-run budget, so a queued
+// follow-up ("continue") is exactly what the user lined up. This pins shouldDrain's
+// widened healthy-stop set (the fix for the silent pause-on-limit that read as a
+// hang): a regression narrowing it back to end_turn-only would fail here.
+func TestDrainOnSizeLimit(t *testing.T) {
+	for _, stop := range []string{"max_turns", "max_tool_calls"} {
 		t.Run(stop, func(t *testing.T) {
 			m, conv := newQueueModel(t)
 			m = startRunning(t, m, "first")
@@ -281,13 +281,111 @@ func TestNoDrainOnLimitStop(t *testing.T) {
 			m = mm.(Model)
 			runBatchLeaves(cmd)
 
-			if len(m.queued) != 1 || m.queued[0] != "second" {
-				t.Fatalf("%s must keep the queue, got %v", stop, m.queued)
+			if len(m.queued) != 0 {
+				t.Fatalf("%s must drain the queue, got %v", stop, m.queued)
 			}
-			if got := promptTexts(conv.send); len(got) != 1 {
-				t.Fatalf("%s must not auto-submit, prompt frames = %v", stop, got)
+			if m.queuePaused != "" {
+				t.Fatalf("%s drains, must not mark paused, got %q", stop, m.queuePaused)
+			}
+			if m.phase != phaseRunning {
+				t.Errorf("%s drain should reopen a run (phaseRunning), got %d", stop, m.phase)
+			}
+			if got := promptTexts(conv.send); len(got) != 2 || got[1] != "second" {
+				t.Fatalf("%s must auto-submit the staged follow-up, prompt frames = %v", stop, got)
 			}
 		})
+	}
+}
+
+// TestPauseOnConsecutiveFailures: max_consecutive_failures is NOT a healthy stop —
+// the run was failing repeatedly, so the queue PAUSES (kept, marked with the reason)
+// rather than piling a follow-up onto a failing run. Pins the one limit reason that
+// stays out of the drain set.
+func TestPauseOnConsecutiveFailures(t *testing.T) {
+	m, conv := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+
+	mm, cmd := m.Update(client.ResultMsg{Stop: "max_consecutive_failures"})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+
+	if len(m.queued) != 1 || m.queued[0] != "second" {
+		t.Fatalf("max_consecutive_failures must keep the queue, got %v", m.queued)
+	}
+	if m.queuePaused != "max_consecutive_failures" {
+		t.Fatalf("must mark queue paused with the stop reason, got %q", m.queuePaused)
+	}
+	if got := promptTexts(conv.send); len(got) != 1 {
+		t.Fatalf("must not auto-submit, prompt frames = %v", got)
+	}
+}
+
+// TestPausedQueueRendersLoud: a paused queue must render the loud "⏸ … paused"
+// header and the resume/clear hint — not the silent "⏳ N queued" — so a held queue
+// never looks like a hang. (The whole reason the pause affordance exists.)
+func TestPausedQueueRendersLoud(t *testing.T) {
+	m, _ := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+	mm, cmd := m.Update(client.ResultMsg{Stop: stopError, Error: "boom"})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+
+	card := m.renderQueue()
+	if !strings.Contains(card, "paused") || !strings.Contains(card, "enter sends next") {
+		t.Fatalf("paused queue card must say paused + show resume/clear keys, got:\n%s", card)
+	}
+}
+
+// TestResumePausedQueueOnEnter: enter on an EMPTY input while paused fires the head
+// staged prompt manually (the resume key the paused card advertises), reopening a
+// run and clearing the pause.
+func TestResumePausedQueueOnEnter(t *testing.T) {
+	m, conv := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+	mm, cmd := m.Update(client.ResultMsg{Stop: "cancelled"})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+	if m.queuePaused == "" || m.phase != phaseIdle {
+		t.Fatalf("precondition: expected paused+idle, got paused=%q phase=%d", m.queuePaused, m.phase)
+	}
+
+	mm, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+
+	if len(m.queued) != 0 {
+		t.Fatalf("resume must pop the head, got %v", m.queued)
+	}
+	if m.queuePaused != "" || m.phase != phaseRunning {
+		t.Fatalf("resume must clear pause + reopen a run, got paused=%q phase=%d", m.queuePaused, m.phase)
+	}
+	if got := promptTexts(conv.send); len(got) != 2 || got[1] != "second" {
+		t.Fatalf("resume must submit the staged prompt, frames = %v", got)
+	}
+}
+
+// TestEscClearsPausedQueueIdle: esc while idle+paused (empty input) drops the queue —
+// the clear key the paused card advertises, mirroring the running-phase esc layering.
+func TestEscClearsPausedQueueIdle(t *testing.T) {
+	m, conv := newQueueModel(t)
+	m = startRunning(t, m, "first")
+	m = enqueue(t, m, "second")
+	mm, cmd := m.Update(client.ResultMsg{Stop: "cancelled"})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+
+	mm, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = mm.(Model)
+	runBatchLeaves(cmd)
+
+	if len(m.queued) != 0 || m.queuePaused != "" {
+		t.Fatalf("esc must clear the paused queue, got queued=%v paused=%q", m.queued, m.queuePaused)
+	}
+	if got := promptTexts(conv.send); len(got) != 1 {
+		t.Fatalf("clearing the queue must not submit, frames = %v", got)
 	}
 }
 

@@ -276,10 +276,19 @@ const queuePreviewLimit = 3
 // can't blow out the card; truncate appends an ellipsis past the cap.
 const queuePreviewWidth = 60
 
-// renderQueue draws the muted "staged follow-ups" card shown just above the input
-// whenever the queue is non-empty. It reuses existing theme slots only (muted for
-// the frame text, toolArgs for the previews) — no new slots — so it inherits the
-// palette/card visual language. Returns "" for an empty queue (View omits it then).
+// renderQueue draws the "staged follow-ups" card shown just above the input
+// whenever the queue is non-empty. It reuses existing theme slots only (muted /
+// toolArgs for the normal card, ctxWarn for the paused header) — no new slots — so
+// it inherits the palette/card visual language. Returns "" for an empty queue (View
+// omits it then).
+//
+// Two states:
+//   - DRAINING (m.queuePaused == ""): a run is streaming (or about to) and the queue
+//     will fire FIFO at its clean completion — a muted "⏳ N queued".
+//   - PAUSED (m.queuePaused != ""): the last run ended on a non-clean stop (error /
+//     cancel / repeated failures / stream close) so the queue is HELD, not fired. A
+//     ctxWarn "⏸ N queued · paused: <reason>" header plus the resume/clear keys, so
+//     a held queue never reads as a silent hang (the whole point of this card).
 func (m Model) renderQueue() string {
 	n := len(m.queued)
 	if n == 0 {
@@ -288,13 +297,21 @@ func (m Model) renderQueue() string {
 	th := m.deps.Theme
 	muted := th.Style("muted")
 	var b strings.Builder
-	b.WriteString(muted.Render(fmt.Sprintf("⏳ %d queued", n)))
+	if m.queuePaused != "" {
+		reason, _ := stopReasonLabel(m.queuePaused)
+		b.WriteString(th.Style("ctxWarn").Render(fmt.Sprintf("⏸ %d queued · paused: %s", n, reason)))
+	} else {
+		b.WriteString(muted.Render(fmt.Sprintf("⏳ %d queued", n)))
+	}
 	shown := min(n, queuePreviewLimit)
 	for i := 0; i < shown; i++ {
 		b.WriteString("\n" + th.Style("toolArgs").Render("  "+truncate(oneLine(m.queued[i]), queuePreviewWidth)))
 	}
 	if rest := n - shown; rest > 0 {
 		b.WriteString("\n" + muted.Render(fmt.Sprintf("  +%d more", rest)))
+	}
+	if m.queuePaused != "" {
+		b.WriteString("\n" + muted.Render("  enter sends next · esc clears"))
 	}
 	return th.Style("askCard").Render(b.String())
 }
