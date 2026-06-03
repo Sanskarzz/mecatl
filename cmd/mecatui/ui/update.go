@@ -583,7 +583,7 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// manually. A non-empty line falls through to a normal submit (which also
 		// clears the pause and lets the queue drain at the new run's clean end).
 		if m.queuePaused != "" && len(m.queued) > 0 && strings.TrimSpace(m.ta.Value()) == "" {
-			return m.popAndSubmit()
+			return m.resumeQueue()
 		}
 		return m.submitPrompt()
 	case key.Matches(msg, m.keys.ScrollU), key.Matches(msg, m.keys.ScrollD):
@@ -866,6 +866,16 @@ func (m Model) popAndSubmit() (tea.Model, tea.Cmd) {
 	m.queued = m.queued[1:]
 	m.ta.SetValue(next)
 	return m.submitPrompt()
+}
+
+// resumeQueue is the MANUAL counterpart to the auto-drain: it fires the next staged
+// follow-up when the user presses enter on an empty line while the queue is paused
+// (a run ended on a non-clean stop; see onIdleKey). It shares popAndSubmit with
+// drainQueue so the two triggers — automatic on a healthy completion, manual on
+// resume — go through one body and one send path. Callers gate on a non-empty,
+// paused queue; this assumes m.queued is non-empty.
+func (m Model) resumeQueue() (tea.Model, tea.Cmd) {
+	return m.popAndSubmit()
 }
 
 // shouldDrain reports whether a terminal stop reason should auto-fire the next
