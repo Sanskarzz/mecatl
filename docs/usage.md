@@ -157,6 +157,30 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--trust-project` | `false` | honour a discovered **project's ALLOW rules** (its deny/ask are always honoured regardless). OFF by default (the safe stance) — an untrusted repo's grants are ignored. **See the permission-config note below.** |
 | `--permission-config` | `""` | path to a YAML permission-config file loaded at the **user (fully-trusted) scope** (**repeatable**). Always loaded regardless of `--permissions-conventional`. |
 | `--yolo` | `false` | **OPERATOR POSTURE (dangerous).** Suppress permission prompts for the built-in mutate-ask floor (`Bash`/`Edit`/`Write`/`Team`/`SkillDraft`) **server-wide** — for ephemeral, isolated, single-tenant deployments only. A `Deny` in **any** scope and any **deliberately configured** `Ask` (managed/project/user) still apply. **Refused when running as root** (euid 0) unless `MECATL_SANDBOX=1` (or `IS_SANDBOX=1`) is set. **See the allow-all note below.** |
+| `--metrics-addr` | `127.0.0.1:9090` | loopback **admin/observability** listener (empty disables). Serves `/metrics` and the runtime-introspection endpoints — **see the observability note below**. |
+| `--otlp-endpoint` | `""` | OTLP collector endpoint for trace export (empty → tracing is a no-op; metrics are always on via `/metrics`). |
+| `--otlp-protocol` | `grpc` | OTLP transport: `grpc` or `http`. |
+| `--otlp-insecure` | `false` | skip TLS for the OTLP exporter (for a local collector). |
+| `--flight-recorder` | `true` | arm a bounded in-memory execution-trace **flight recorder** (8 MiB / 5s window) so a trace of the recent past can be snapshotted on demand. Low overhead; `=false` disables. |
+| `--mutex-profile-fraction` | `0` | `runtime.SetMutexProfileFraction` rate (0 = off). Populates `/debug/pprof/mutex`; has runtime overhead — enable only while investigating lock contention. |
+| `--block-profile-rate` | `0` | `runtime.SetBlockProfileRate` rate in ns (0 = off). Populates `/debug/pprof/block`; has runtime overhead — enable only while investigating blocking. |
+
+### Observability (the loopback admin listener)
+
+`--metrics-addr` (default `127.0.0.1:9090`, empty disables) serves, **loopback-only and
+unauthenticated** by design — these endpoints can expose prompt text and internal
+state, so they must never be bound off-localhost:
+
+| Endpoint | What |
+| --- | --- |
+| `/metrics` | Prometheus scrape — domain metrics (`mecatl_*`, incl. the turn/TTFT/inter-token/tool latency exponential histograms) plus Go runtime + process-RSS series, via the OTel prometheus exporter. |
+| `/debug/pprof/` | the standard pprof profiles (`heap`, `goroutine`, `allocs`, `profile` (CPU), `trace`, and — when the rate flags are set — `mutex`, `block`). Capture with `go tool pprof http://127.0.0.1:9090/debug/pprof/heap`. |
+| `/debug/vars` | a curated `mecatl_runtime` JSON snapshot (goroutines, heap, GC pauses, RSS, uptime) from `runtime/metrics` — cheap, structured, no STW. |
+| `/debug/flightrecorder` | a snapshot of the in-memory flight-recorder ring (an execution trace of the recent past); view with `go tool trace`. Absent when `--flight-recorder=false`. |
+
+> These are the **in-process** profiling sources — no external profiling backend
+> is required. A later opt-in perf-over-MCP surface will expose reduced,
+> agent-readable summaries of the same data. See `docs/design/perf-observability.md`.
 
 ### Environment
 

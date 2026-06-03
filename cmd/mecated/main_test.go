@@ -2,12 +2,18 @@ package main
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime/trace"
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/stacklok/mecatl/internal/adapter/skills"
+	"github.com/stacklok/mecatl/internal/adapter/telemetry"
 )
 
 // seedQuarantine writes a model-drafted-looking SKILL.md (with origin: model
@@ -259,6 +265,133 @@ func TestAppConfigMapsAllowAll(t *testing.T) {
 	if ac := appConfig(off, nil, nil); ac.AllowAllTools {
 		t.Errorf("appConfig.AllowAllTools = true with flag off, want false")
 	}
+}
+
+// TestNewAdminMuxServesIntrospectionEndpoints drives the REAL newAdminMux helper
+// (the one serve mounts) and asserts each runtime-introspection endpoint serves
+// a non-trivial body. Building the mux through the production helper — rather
+// than a parallel hand-rolled mux — means deleting a mux.Handle in newAdminMux
+// would fail this test.
+func TestNewAdminMuxServesIntrospectionEndpoints(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	// Seed one series so /metrics renders a non-empty exposition body (an empty
+	// registry would otherwise produce an empty body and mask whether the handler
+	// is even mounted).
+	reg.MustRegister(prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mecatl_admin_mux_test_seed",
+		Help: "Test seed series so /metrics is non-empty.",
+	}))
+	recorder := telemetry.NewFlightRecorder(trace.FlightRecorderConfig{})
+	if err := recorder.Start(); err != nil {
+		t.Fatalf("flight recorder Start: %v", err)
+	}
+	defer recorder.Stop()
+
+	srv := httptest.NewServer(newAdminMux(reg, recorder))
+	defer srv.Close()
+
+	cases := []struct {
+		path       string
+		wantSubstr string // a marker that must appear in the body (empty = any non-empty body)
+	}{
+		{"/metrics", "mecatl_admin_mux_test_seed"}, // the seeded series proves the exporter is wired
+		{"/debug/pprof/", "Types of profiles"},     // the pprof index page
+		{"/debug/vars", "mecatl_runtime"},          // the curated expvar key
+		{"/debug/flightrecorder", ""},              // a binary trace snapshot
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			resp, err := http.Get(srv.URL + tc.path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", tc.path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET %s status = %d, want 200", tc.path, resp.StatusCode)
+			}
+			body := readBody(t, resp)
+			if len(body) == 0 {
+				t.Fatalf("GET %s returned an empty body", tc.path)
+			}
+			if tc.wantSubstr != "" && !strings.Contains(string(body), tc.wantSubstr) {
+				t.Errorf("GET %s body missing %q; got %.160q", tc.path, tc.wantSubstr, body)
+			}
+		})
+	}
+}
+
+// TestNewAdminMuxOmitsFlightRecorderWhenDisabled asserts the recorder==nil
+// (FlightRecorder disabled) branch: /debug/flightrecorder is ABSENT (404) while
+// the always-on endpoints still serve.
+func TestNewAdminMuxOmitsFlightRecorderWhenDisabled(t *testing.T) {
+	srv := httptest.NewServer(newAdminMux(prometheus.NewRegistry(), nil))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/debug/flightrecorder")
+	if err != nil {
+		t.Fatalf("GET /debug/flightrecorder: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /debug/flightrecorder status = %d, want 404 when the recorder is disabled", resp.StatusCode)
+	}
+
+	// An always-on endpoint must still be mounted.
+	varsResp, err := http.Get(srv.URL + "/debug/vars")
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer func() { _ = varsResp.Body.Close() }()
+	if varsResp.StatusCode != http.StatusOK {
+		t.Errorf("GET /debug/vars status = %d, want 200 even with the recorder disabled", varsResp.StatusCode)
+	}
+}
+
+// TestParseFlagsRuntimeIntrospection asserts the runtime-introspection flags
+// parse: --flight-recorder defaults ON and --flight-recorder=false flips it, and
+// --mutex-profile-fraction / --block-profile-rate parse into the config.
+func TestParseFlagsRuntimeIntrospection(t *testing.T) {
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if !def.flightRecorder {
+		t.Errorf("flightRecorder default = false, want true (ON by default)")
+	}
+	if def.mutexProfileFraction != 0 {
+		t.Errorf("mutexProfileFraction default = %d, want 0 (off)", def.mutexProfileFraction)
+	}
+	if def.blockProfileRate != 0 {
+		t.Errorf("blockProfileRate default = %d, want 0 (off)", def.blockProfileRate)
+	}
+
+	cfg, err := parseFlags([]string{
+		"--flight-recorder=false",
+		"--mutex-profile-fraction=5",
+		"--block-profile-rate=1000",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.flightRecorder {
+		t.Errorf("flightRecorder = true, want false (--flight-recorder=false)")
+	}
+	if cfg.mutexProfileFraction != 5 {
+		t.Errorf("mutexProfileFraction = %d, want 5", cfg.mutexProfileFraction)
+	}
+	if cfg.blockProfileRate != 1000 {
+		t.Errorf("blockProfileRate = %d, want 1000", cfg.blockProfileRate)
+	}
+}
+
+// readBody reads an entire response body, failing the test on error.
+func readBody(t *testing.T, resp *http.Response) []byte {
+	t.Helper()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return b
 }
 
 func TestAllowAllRefusalReason(t *testing.T) {

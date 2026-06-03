@@ -26,6 +26,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/trace"
 	"sort"
 	"strings"
 	"syscall"
@@ -110,6 +112,16 @@ type config struct {
 	otlpEndpoint string // OTLP collector endpoint (empty disables tracing)
 	otlpProtocol string // OTLP transport: "grpc" (default) or "http"
 	otlpInsecure bool   // skip TLS when dialing the OTLP collector (dev only)
+
+	// Runtime-introspection admin surface (loopback only, on the --metrics-addr
+	// listener): pprof + expvar + a runtime/metrics snapshot + a FlightRecorder.
+	// mutexProfileFraction arms runtime.SetMutexProfileFraction (0 = off);
+	// blockProfileRate arms runtime.SetBlockProfileRate in ns (0 = off); both add
+	// runtime overhead when > 0. flightRecorder arms the bounded execution-trace
+	// ring buffer (default ON — low, bounded overhead).
+	mutexProfileFraction int
+	blockProfileRate     int
+	flightRecorder       bool
 
 	// Memory: per-project memory store directory (empty disables memory tools).
 	memoryDir string
@@ -406,6 +418,47 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("setup metrics: %w", err)
 	}
+	// Process-RSS gauge (mecatl.process.rss): Linux-only, no-op elsewhere. It
+	// rides the same MeterProvider so it renders on /metrics (decision 9).
+	if rerr := telemetry.RegisterProcessGauges(providers.Meter); rerr != nil {
+		return fmt.Errorf("setup process gauges: %w", rerr)
+	}
+
+	// Runtime profiling knobs: arm mutex/block sampling only when explicitly
+	// requested (both add overhead; default 0 = off). pprof exposes the resulting
+	// profiles at /debug/pprof/{mutex,block} on the loopback admin mux.
+	if cfg.mutexProfileFraction > 0 {
+		runtime.SetMutexProfileFraction(cfg.mutexProfileFraction)
+		slog.Info("mutex profiling enabled", "fraction", cfg.mutexProfileFraction)
+	}
+	if cfg.blockProfileRate > 0 {
+		runtime.SetBlockProfileRate(cfg.blockProfileRate)
+		slog.Info("block profiling enabled", "rate_ns", cfg.blockProfileRate)
+	}
+
+	// FlightRecorder: arm the bounded execution-trace ring buffer (default ON) so
+	// /debug/flightrecorder can snapshot recent activity. Stopped on shutdown so
+	// the runtime trace subscription is torn down (goleak-clean).
+	var recorder *telemetry.FlightRecorder
+	if cfg.flightRecorder {
+		// Use the process-singleton accessor: only one flight recorder may be
+		// active process-wide (a stdlib constraint), and a second consumer (the
+		// embedded server) must coalesce onto it rather than silently lose a Start.
+		rec, rerr := telemetry.ProcessFlightRecorder(trace.FlightRecorderConfig{})
+		switch {
+		case errors.Is(rerr, telemetry.ErrFlightRecorderAlreadyActive):
+			// Already armed elsewhere in this process — reuse the shared instance.
+			recorder = rec
+			slog.Info("flight recorder already active process-wide; reusing the shared instance (loopback /debug/flightrecorder)")
+		case rerr != nil:
+			slog.Warn("flight recorder failed to start; continuing without it", "err", rerr)
+		default:
+			recorder = rec
+			slog.Info("flight recorder armed (loopback /debug/flightrecorder)")
+			defer recorder.Stop()
+		}
+	}
+
 	tracing := telemetry.NewTracing(otel.GetTracerProvider())
 	sink := telemetry.NewSink(metrics, tracing)
 
@@ -426,7 +479,7 @@ func run() error {
 		return serveACP(ctx, built.Service, cfg.storeDir != "")
 	}
 
-	return serve(ctx, cfg, built.Service, providers.Registry)
+	return serve(ctx, cfg, built.Service, providers.Registry, recorder)
 }
 
 // appConfig maps the CLI/env config onto the shared app.Config build contract,
@@ -530,6 +583,10 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.otlpProtocol, "otlp-protocol", telemetry.ProtocolGRPC, "OTLP transport: \"grpc\" (default) or \"http\"")
 	fs.BoolVar(&cfg.otlpInsecure, "otlp-insecure", false, "skip TLS when dialing the OTLP collector (development only)")
 
+	fs.IntVar(&cfg.mutexProfileFraction, "mutex-profile-fraction", 0, "runtime.SetMutexProfileFraction: report 1/N mutex contention events for /debug/pprof/mutex. 0 (default) disables it. Adds per-contention sampling overhead; enable only when investigating lock contention")
+	fs.IntVar(&cfg.blockProfileRate, "block-profile-rate", 0, "runtime.SetBlockProfileRate in nanoseconds: sample one blocking event per N ns blocked for /debug/pprof/block. 0 (default) disables it. Adds per-block-event overhead; enable only when investigating blocking")
+	fs.BoolVar(&cfg.flightRecorder, "flight-recorder", true, "arm the execution-trace FlightRecorder (bounded in-memory ring buffer) so /debug/flightrecorder can snapshot recent activity. ON by default (low, bounded overhead). Pass --flight-recorder=false to disable")
+
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "per-project memory store directory (empty disables the Remember/Recall tools)")
 	fs.DurationVar(&cfg.memoryConsolidateInterval, "memory-consolidate-interval", 0, "interval for background memory consolidation (dream); 0 disables. Only meaningful with --memory-dir")
 
@@ -593,16 +650,18 @@ func parseFlags(argv []string) (config, error) {
 }
 
 // serve starts the gRPC and HTTP servers (and, when --metrics-addr is set, the
-// Prometheus /metrics endpoint on its own listener) concurrently and blocks
+// loopback admin endpoint — /metrics plus the pprof/expvar/FlightRecorder
+// runtime-introspection surface — on its own listener) concurrently and blocks
 // until ctx is cancelled (a signal) or a server fails, then shuts them all down
-// gracefully.
+// gracefully. recorder may be nil (FlightRecorder disabled), in which case
+// /debug/flightrecorder is not mounted.
 //
 // The harness API is protected by the server.Authenticator (bearer auth + rate
 // limiting, both off by default) and optionally by TLS / mutual TLS. The
 // liveness/readiness probes and the standard gRPC health service are mounted
 // OUTSIDE the auth/rate-limit layer so orchestrators can probe without
 // credentials.
-func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus.Registry) error {
+func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus.Registry, recorder *telemetry.FlightRecorder) error {
 	tlsCfg, err := buildTLSConfig(cfg)
 	if err != nil {
 		return err
@@ -643,16 +702,20 @@ func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus
 		TLSConfig:         tlsCfg,
 	}
 
-	// The /metrics endpoint runs on a separate loopback listener: it is a
-	// read-only, secret-free surface kept apart from the harness API. An empty
-	// --metrics-addr disables it.
+	// The admin endpoint runs on a separate loopback listener: it carries
+	// /metrics (read-only, secret-free) PLUS the runtime-introspection surface —
+	// pprof, expvar (/debug/vars), and the FlightRecorder snapshot
+	// (/debug/flightrecorder). An empty --metrics-addr disables the whole mux.
+	//
+	// SECURITY: pprof/FlightRecorder/expvar output can embed prompt text, file
+	// paths, and goroutine stacks. This listener is loopback-bound by default and
+	// MUST stay loopback — these endpoints are never mounted on the public
+	// gRPC/HTTP service surface (decision 6 in docs/design/perf-observability.md).
 	var metricsSrv *http.Server
 	if cfg.metricsAddr != "" {
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", telemetry.MetricsHandler(reg))
 		metricsSrv = &http.Server{
 			Addr:              cfg.metricsAddr,
-			Handler:           mux,
+			Handler:           newAdminMux(reg, recorder),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 	}
@@ -692,7 +755,7 @@ func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus
 
 	if metricsSrv != nil {
 		go func() {
-			slog.Info("metrics server listening", "addr", cfg.metricsAddr, "path", "/metrics")
+			slog.Info("admin server listening (loopback)", "addr", cfg.metricsAddr, "paths", "/metrics /debug/pprof /debug/vars /debug/flightrecorder")
 			if serveErr := metricsSrv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 				errCh <- fmt.Errorf("metrics serve: %w", serveErr)
 			}
@@ -712,6 +775,35 @@ func serve(ctx context.Context, cfg config, svc *server.Service, reg *prometheus
 
 	shutdown(grpcSrv, httpSrv, metricsSrv)
 	return nil
+}
+
+// newAdminMux builds the loopback admin mux: /metrics (read-only, secret-free)
+// plus the runtime-introspection surface — pprof, expvar (/debug/vars), and,
+// when recorder is non-nil, the FlightRecorder snapshot (/debug/flightrecorder).
+// It is extracted from serve so a test can drive the REAL mux construction (a
+// parallel hand-rolled mux in a test would not catch a deleted Handle here).
+//
+// recorder may be nil (FlightRecorder disabled), in which case
+// /debug/flightrecorder is NOT mounted and a GET returns 404.
+//
+// SECURITY: pprof/FlightRecorder/expvar output can embed prompt text, file
+// paths, and goroutine stacks. The returned mux MUST be served only on a
+// loopback-bound listener — never on the public gRPC/HTTP service surface
+// (decision 6 in docs/design/perf-observability.md).
+func newAdminMux(reg *prometheus.Registry, recorder *telemetry.FlightRecorder) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", telemetry.MetricsHandler(reg))
+	telemetry.RegisterPprof(mux)
+	mux.Handle("/debug/vars", telemetry.ExpvarHandler())
+	if recorder != nil {
+		mux.HandleFunc("/debug/flightrecorder", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			if _, err := recorder.Snapshot(w); err != nil {
+				http.Error(w, "flight recorder snapshot: "+err.Error(), http.StatusServiceUnavailable)
+			}
+		})
+	}
+	return mux
 }
 
 // warnIfNonLoopback logs the API trust assumption for the given bind address.

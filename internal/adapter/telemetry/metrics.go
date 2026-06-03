@@ -3,6 +3,8 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -248,6 +250,53 @@ func NewMetrics(mp metric.MeterProvider) (*Metrics, error) {
 	}
 
 	return m, nil
+}
+
+// rssZeroLogOnce ensures the "RSS read returned 0 on a supported platform"
+// diagnostic is logged at most once for the process lifetime, so a persistent
+// /proc failure surfaces a single actionable line rather than one per scrape.
+var rssZeroLogOnce sync.Once
+
+// RegisterProcessGauges registers the process-level observable gauges on the
+// given MeterProvider's meter. Currently it registers mecatl.process.rss (the
+// resident set size in bytes), read lock-free via readRSS on each collection.
+//
+// The gauge is registered ONLY where RSS is actually readable (Linux): off
+// Linux rssSupported() is false and the series is simply absent (decision 9 —
+// the RSS gauge ships for general long-session memory visibility, no
+// leak-specific alarm). It is a separate registration from NewMetrics because
+// the domain instruments derive from the event/log stream, whereas this is an
+// async observation of the OS process; keeping it apart lets a caller opt out.
+//
+// It returns an error if the instrument fails to construct.
+func RegisterProcessGauges(mp metric.MeterProvider) error {
+	if !rssSupported() {
+		return nil
+	}
+	meter := mp.Meter(meterName)
+	rss, err := meter.Int64ObservableGauge(
+		"mecatl.process.rss",
+		metric.WithDescription("Process resident set size in bytes (read from /proc on Linux)."),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			if v := readRSS(); v > 0 {
+				o.Observe(int64(v)) //nolint:gosec // RSS bytes fits an int64 for any real process
+			} else {
+				// 0 on a platform that claims RSS support means a persistent /proc
+				// read failure: the gauge series silently goes missing. Log it ONCE
+				// at debug so the gap is diagnosable without flooding every scrape.
+				rssZeroLogOnce.Do(func() {
+					slog.Debug("process RSS read returned 0 on a supported platform; mecatl_process_rss series will be absent until /proc reads succeed")
+				})
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("telemetry: process rss gauge: %w", err)
+	}
+	_ = rss // the instrument is driven by its callback; the handle is not used directly.
+	return nil
 }
 
 // Emit records OTel metrics derived from a single domain Event. The ctx is the
