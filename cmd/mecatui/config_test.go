@@ -417,7 +417,7 @@ func TestParseFlagsAllowAll(t *testing.T) {
 		t.Errorf("allowAllTools default = true, want false")
 	}
 
-	cfg, err := parseFlags([]string{"-dangerously-allow-all-tools"})
+	cfg, err := parseFlags([]string{"-yolo"})
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
 	}

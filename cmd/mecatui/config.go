@@ -111,7 +111,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")
 	fs.BoolVar(&cfg.mock, "mock", false, "embedded server only: use the canned offline mock provider instead of OpenAI (no network)")
 	fs.BoolVar(&cfg.noBash, "no-bash", false, "embedded server only: disable the Bash tool (shell-less mode)")
-	fs.BoolVar(&cfg.allowAllTools, "dangerously-allow-all-tools", false,
+	fs.BoolVar(&cfg.allowAllTools, "yolo", false,
 		"embedded server only; OPERATOR POSTURE (dangerous): suppress permission prompts for the built-in mutate-ask floor, for ephemeral/sandboxed use only. Deny in any scope and configured Ask still apply. Refused as root unless MECATL_SANDBOX=1 (or IS_SANDBOX=1).")
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "embedded server only: per-project memory store directory (empty = a per-project default under $XDG_DATA_HOME/mecatui/memory)")
 	fs.BoolVar(&cfg.noMemory, "no-memory", false, "embedded server only: disable cross-session memory (Remember/Recall) entirely")
@@ -201,7 +201,7 @@ func (c config) validate() error {
 // table-testable; the os lookups live at the call site.
 func allowAllRefusalReason(allowAll bool, euid int, sandbox bool) error {
 	if allowAll && euid == 0 && !sandbox {
-		return errors.New("--dangerously-allow-all-tools refused: running as root (euid 0) without a declared sandbox; set MECATL_SANDBOX=1 (or IS_SANDBOX=1) to affirm an isolated, disposable environment")
+		return errors.New("--yolo refused: running as root (euid 0) without a declared sandbox; set MECATL_SANDBOX=1 (or IS_SANDBOX=1) to affirm an isolated, disposable environment")
 	}
 	return nil
 }

@@ -895,7 +895,7 @@ LocalProject > SharedProject > User`); **no matching rule defaults to Ask** (the
 harness never silently allows an unconfigured call). Plan mode (`ModePlan`)
 denies mutating tools (`Edit`, `Write`) and non-read-only `Bash` up front.
 
-The allow-all operator posture (`--dangerously-allow-all-tools`, `app.Config.AllowAllTools`)
+The allow-all operator posture (`--yolo`, `app.Config.AllowAllTools`)
 is **not** an evaluator bypass: it injects a single `ScopeCLI` allow-all rule into the
 **main** engine's static ruleset (`mainRules` in `internal/app/build.go`), which loosens
 only the `ScopeBuiltinDefault` mutate-ask floor — deny-dominance and the honouring of any

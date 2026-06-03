@@ -30,10 +30,12 @@ doc records why, and specifies the posture we ship instead.
    theatre (see below). The real boundary is deployment isolation. Anyone who
    wants "always confirm `rm -rf /` even here" expresses it as a configured
    `Deny`/`Ask` rule — which allow-all honours by construction.
-4. **Loud, gated opt-in.** A long, un-aliased operator flag
-   (`--dangerously-allow-all-tools`), refused when running privileged outside a
-   declared sandbox, logged at startup. Sandbox-first: the flag is for disposable,
-   isolated environments only.
+4. **Loud, gated opt-in.** An explicit operator flag (`--yolo`), refused when
+   running privileged outside a declared sandbox, logged at startup.
+   Sandbox-first: the flag is for disposable, isolated environments only. (The
+   name is deliberately memorable; the safety rests on the root/sandbox refusal,
+   the loud startup warning, and the preserved deny-dominance — not on a
+   scary-name deterrent.)
 
 ## Why not a `yolo` PermissionMode (what the spike got wrong)
 
@@ -123,9 +125,9 @@ allow-all is fully unattended there.)
 
 ## Gating (mirrors Claude Code's posture)
 
-- **Long, un-aliased flag.** `--dangerously-allow-all-tools` on `mecated`; the
-  embedded `mecatui` gets the same flag (no `--mode yolo`, no `-y`). Refused by
-  default.
+- **Explicit flag, off by default.** `--yolo` on `mecated`; the embedded
+  `mecatui` gets the same flag (it is a process-start flag, never a session
+  `PermissionMode` — no `--mode yolo`). Refused by default.
 - **Privilege + sandbox refusal.** At config validation in the composition root
   (`cmd/mecated`, `cmd/mecatui` — the only layers allowed to touch `os`): if
   allow-all is requested **and** `os.Geteuid() == 0` **and** no sandbox assertion
@@ -158,7 +160,7 @@ Far smaller than the rejected mode:
    `mainRules` helper prepends the `ScopeCLI` allow-all rule to `defaultRules()` for
    the **main** engine policy only (children are already allow-all). The startup
    warning lives in the composition roots, not here (`port.Logger` is ToolCall-only).
-2. `cmd/mecated/main.go` — `--dangerously-allow-all-tools` flag → `appConfig`;
+2. `cmd/mecated/main.go` — `--yolo` flag → `appConfig`;
    privilege/sandbox refusal in flag validation; startup `WARN`.
 3. `cmd/mecatui/config.go` + `cmd/mecatui/main.go` — same flag for the embedded
    server; same refusal; thread into `app.Config`. (No `--mode yolo`.)
