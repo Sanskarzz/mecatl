@@ -637,10 +637,15 @@ error.
 
 ## 11. Observability & persistence
 
-- **EventSink** (`port.EventSink`) — an optional secondary relay. `Run.emit`
-  always writes to the `Events()` channel (the primary surface) and then mirrors
-  the sequenced event to `Deps.Sink` when configured (`dispatch.go`'s
-  `Engine.emit`). `Seq` is a monotonic per-run counter (`atomic.Int64`).
+- **EventSink** (`port.EventSink`) — an optional secondary relay.
+  `Emit(ctx, ev)` carries the run's `context.Context` so telemetry can parent a
+  run span to an inbound request span (the ctx is a **trace/baggage carrier
+  only** — sinks must not derive cancellation/deadlines from it, since terminal
+  emits deliberately pass an already-cancelled ctx). `Run.emit` always writes to
+  the `Events()` channel (the primary surface) and then mirrors the sequenced
+  event to `Deps.Sink` when configured (`dispatch.go`'s `Engine.emit`, which
+  forwards the per-run `Run.ctx`). `Seq` is a monotonic per-run counter
+  (`atomic.Int64`).
 - **Logger** (`port.Logger`) — `ToolCall(id, call, result, took)` records
   tool-execution timing, distinct from the model-visible conversation. The loop
   times execution via the injected `Clock` (`timeExecute`).
@@ -652,6 +657,11 @@ error.
   hierarchy; and `telemetry.Setup` builds and installs an **OTLP** TracerProvider
   (gRPC or HTTP transport), wired in `mecated` via `--otlp-endpoint` /
   `--otlp-protocol` / `--otlp-insecure` (a no-op when the endpoint is empty).
+  > A broader performance-observability effort is in flight (pprof, runtime
+  > metrics, FlightRecorder, an opt-in perf-over-MCP surface). See
+  > `docs/design/perf-observability.md` (the decided direction) and
+  > `docs/perf-measurement-survey.md` (the Go-perf technique reference).
+  > Landing incrementally — not all of it is wired yet.
 - **SessionStore** — `memstore` (default, in-memory) and `jsonlstore`
   (append-only JSONL replay log: `<dir>/<id>.session.jsonl` snapshots +
   `<dir>/<id>.tools.jsonl` tool records; `jsonlstore` also implements `Logger`).
