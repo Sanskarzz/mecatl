@@ -123,6 +123,14 @@ type config struct {
 	blockProfileRate     int
 	flightRecorder       bool
 
+	// goroutineWarnThreshold arms a background watchdog that logs slog.Warn when
+	// runtime.NumGoroutine() exceeds it (decision 10: a live leak alarm, not just
+	// the test-time goleak gate). 0 (default) disables it. The runtime collector
+	// already exports the goroutine COUNT as a series; this is the ALARM on top.
+	goroutineWarnThreshold int
+	// goroutineWarnInterval is how often the watchdog samples NumGoroutine.
+	goroutineWarnInterval time.Duration
+
 	// Memory: per-project memory store directory (empty disables memory tools).
 	memoryDir string
 
@@ -459,6 +467,16 @@ func run() error {
 		}
 	}
 
+	// Live goroutine-leak alarm (decision 10): the runtime collector already
+	// exports the goroutine COUNT as a /metrics series; this is the operator-facing
+	// ALARM on top — a background watchdog logging slog.Warn when the count exceeds
+	// a configured ceiling. Disabled by default (threshold 0). It is bound to ctx
+	// so it unwinds on shutdown — it would be ironic for the leak alarm to leak.
+	if cfg.goroutineWarnThreshold > 0 {
+		startGoroutineWatchdog(ctx, cfg.goroutineWarnThreshold, cfg.goroutineWarnInterval, runtime.NumGoroutine, slog.Default())
+		slog.Info("goroutine-leak watchdog armed", "threshold", cfg.goroutineWarnThreshold, "interval", cfg.goroutineWarnInterval)
+	}
+
 	tracing := telemetry.NewTracing(otel.GetTracerProvider())
 	sink := telemetry.NewSink(metrics, tracing)
 
@@ -549,6 +567,41 @@ func validateAllowAll(cfg config) error {
 	return allowAllRefusalReason(cfg.allowAllTools, os.Geteuid(), sandboxDeclared())
 }
 
+// startGoroutineWatchdog launches a background ticker that samples the live
+// goroutine count (via the injected count func, normally runtime.NumGoroutine)
+// every interval and logs a slog.Warn when it exceeds threshold — the live
+// leak ALARM of decision 10, complementing the test-time goleak gate and the
+// runtime collector's goroutine-count /metrics series.
+//
+// The goroutine exits when ctx is cancelled (shutdown), so the watchdog itself
+// never leaks — verified by the package's own goleak-free shutdown and by
+// TestGoroutineWatchdogStopsOnCancel. count and logger are injected so the
+// behaviour is unit-testable without spawning real goroutines or racing the
+// global logger.
+func startGoroutineWatchdog(ctx context.Context, threshold int, interval time.Duration, count func() int, logger *slog.Logger) {
+	if threshold <= 0 {
+		return
+	}
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if n := count(); n > threshold {
+					logger.Warn("goroutine count exceeds the configured watchdog threshold — possible goroutine leak",
+						"goroutines", n, "threshold", threshold)
+				}
+			}
+		}
+	}()
+}
+
 // parseFlags turns argv into a config, resolving env-derived defaults.
 func parseFlags(argv []string) (config, error) {
 	fs := flag.NewFlagSet("mecated", flag.ContinueOnError)
@@ -586,6 +639,9 @@ func parseFlags(argv []string) (config, error) {
 	fs.IntVar(&cfg.mutexProfileFraction, "mutex-profile-fraction", 0, "runtime.SetMutexProfileFraction: report 1/N mutex contention events for /debug/pprof/mutex. 0 (default) disables it. Adds per-contention sampling overhead; enable only when investigating lock contention")
 	fs.IntVar(&cfg.blockProfileRate, "block-profile-rate", 0, "runtime.SetBlockProfileRate in nanoseconds: sample one blocking event per N ns blocked for /debug/pprof/block. 0 (default) disables it. Adds per-block-event overhead; enable only when investigating blocking")
 	fs.BoolVar(&cfg.flightRecorder, "flight-recorder", true, "arm the execution-trace FlightRecorder (bounded in-memory ring buffer) so /debug/flightrecorder can snapshot recent activity. ON by default (low, bounded overhead). Pass --flight-recorder=false to disable")
+
+	fs.IntVar(&cfg.goroutineWarnThreshold, "goroutine-warn-threshold", 0, "live goroutine-leak alarm: log a slog.Warn whenever runtime.NumGoroutine() exceeds this count (decision 10 of docs/design/perf-observability.md). 0 (default) disables the alarm; the runtime collector still exports the goroutine count as a /metrics series regardless. A healthy mecated holds a low-hundreds goroutine count; pick a high ceiling (e.g. 10000) so the alarm only fires on a genuine leak, not normal concurrency")
+	fs.DurationVar(&cfg.goroutineWarnInterval, "goroutine-warn-interval", 30*time.Second, "how often the goroutine-leak watchdog samples runtime.NumGoroutine(). Only consulted when --goroutine-warn-threshold > 0")
 
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "per-project memory store directory (empty disables the Remember/Recall tools)")
 	fs.DurationVar(&cfg.memoryConsolidateInterval, "memory-consolidate-interval", 0, "interval for background memory consolidation (dream); 0 disables. Only meaningful with --memory-dir")
