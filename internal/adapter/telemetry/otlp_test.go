@@ -10,38 +10,43 @@ import (
 )
 
 func TestSetupDisabledWhenEndpointEmpty(t *testing.T) {
-	// A no-op provider is installed so we can assert Setup does not replace it.
+	// A no-op provider is installed so we can assert Setup does not replace the
+	// TRACER provider when tracing is disabled. Metrics are always on, so a real
+	// Meter/Registry is still returned.
 	otel.SetTracerProvider(noop.NewTracerProvider())
 	before := otel.GetTracerProvider()
 
-	shutdown, err := Setup(t.Context(), OTLPConfig{})
+	providers, err := Setup(t.Context(), OTLPConfig{})
 	if err != nil {
 		t.Fatalf("Setup with empty endpoint: unexpected error: %v", err)
 	}
-	if shutdown == nil {
+	if providers.Shutdown == nil {
 		t.Fatal("Setup returned a nil shutdown func")
 	}
 	if got := otel.GetTracerProvider(); got != before {
-		t.Errorf("Setup installed a provider when disabled: %T", got)
+		t.Errorf("Setup installed a tracer provider when disabled: %T", got)
 	}
-	if err := shutdown(t.Context()); err != nil {
-		t.Errorf("no-op shutdown returned error: %v", err)
+	if providers.Meter == nil || providers.Registry == nil {
+		t.Error("Setup returned nil Meter/Registry; metrics should always be on")
+	}
+	if err := providers.Shutdown(t.Context()); err != nil {
+		t.Errorf("shutdown returned error: %v", err)
 	}
 }
 
 func TestSetupBadProtocol(t *testing.T) {
-	shutdown, err := Setup(t.Context(), OTLPConfig{
+	providers, err := Setup(t.Context(), OTLPConfig{
 		Endpoint: "localhost:4317",
 		Protocol: "carrier-pigeon",
 	})
 	if err == nil {
 		t.Fatal("Setup with bad protocol: expected error, got nil")
 	}
-	if shutdown == nil {
+	if providers.Shutdown == nil {
 		t.Fatal("Setup returned a nil shutdown func on error")
 	}
-	// The error shutdown must still be safe to call.
-	if err := shutdown(t.Context()); err != nil {
+	// The error-path shutdown must still be safe to call.
+	if err := providers.Shutdown(t.Context()); err != nil {
 		t.Errorf("error-path shutdown returned error: %v", err)
 	}
 }
@@ -54,18 +59,18 @@ func TestSetupGRPCDoesNotDial(t *testing.T) {
 	defer cancel()
 
 	type result struct {
-		shutdown func(context.Context) error
-		err      error
+		providers Providers
+		err       error
 	}
 	done := make(chan result, 1)
 	go func() {
-		sd, err := Setup(ctx, OTLPConfig{
+		p, err := Setup(ctx, OTLPConfig{
 			Endpoint: "127.0.0.1:1", // nothing listening here
 			Protocol: ProtocolGRPC,
 			Insecure: true,
 			Timeout:  100 * time.Millisecond,
 		})
-		done <- result{sd, err}
+		done <- result{p, err}
 	}()
 
 	select {
@@ -73,7 +78,7 @@ func TestSetupGRPCDoesNotDial(t *testing.T) {
 		if res.err != nil {
 			t.Fatalf("Setup against unreachable endpoint errored: %v", res.err)
 		}
-		if res.shutdown == nil {
+		if res.providers.Shutdown == nil {
 			t.Fatal("Setup returned a nil shutdown func")
 		}
 		if _, ok := otel.GetTracerProvider().(*noop.TracerProvider); ok {
@@ -84,7 +89,7 @@ func TestSetupGRPCDoesNotDial(t *testing.T) {
 		// only assert it does not hang or panic.
 		sdCtx, sdCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer sdCancel()
-		_ = res.shutdown(sdCtx)
+		_ = res.providers.Shutdown(sdCtx)
 	case <-time.After(2 * time.Second):
 		t.Fatal("Setup blocked: gRPC exporter should construct without dialing")
 	}

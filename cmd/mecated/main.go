@@ -371,37 +371,41 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Observability: install the OTLP trace exporter + global TracerProvider
-	// BEFORE building the tracing sink below, so NewTracing(otel.GetTracerProvider())
-	// picks up the installed provider. An empty --otlp-endpoint disables tracing.
-	traceShutdown, err := telemetry.Setup(ctx, telemetry.OTLPConfig{
+	// Observability: install the OTel metrics pipeline (always on) + the OTLP
+	// trace exporter/global TracerProvider (when --otlp-endpoint is set) BEFORE
+	// building the sinks below. Setup returns the meter provider feeding the
+	// domain instruments, the prometheus registry to serve at /metrics, the
+	// tracer provider, and a combined shutdown that flushes both.
+	providers, err := telemetry.Setup(ctx, telemetry.OTLPConfig{
 		Endpoint:    cfg.otlpEndpoint,
 		Protocol:    cfg.otlpProtocol,
 		Insecure:    cfg.otlpInsecure,
 		ServiceName: "mecatl",
 	})
 	if err != nil {
-		return fmt.Errorf("setup tracing: %w", err)
+		return fmt.Errorf("setup telemetry: %w", err)
 	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if serr := traceShutdown(shutdownCtx); serr != nil {
-			slog.Warn("tracing shutdown", "err", serr)
+		if serr := providers.Shutdown(shutdownCtx); serr != nil {
+			slog.Warn("telemetry shutdown", "err", serr)
 		}
 	}()
 	if cfg.otlpEndpoint == "" {
-		slog.Info("tracing disabled (--otlp-endpoint empty)")
+		slog.Info("tracing disabled (--otlp-endpoint empty); metrics + runtime collector active")
 	} else {
 		slog.Info("tracing enabled (OTLP exporter installed)", "endpoint", cfg.otlpEndpoint, "protocol", cfg.otlpProtocol, "insecure", cfg.otlpInsecure)
 	}
 
-	// Observability: a private Prometheus registry feeds both the EventSink/Logger
-	// adapter and the /metrics handler. Tracing uses the global OTel TracerProvider
-	// installed by telemetry.Setup above (a no-op when tracing is disabled), so the
-	// sink emits to the OTLP exporter when an endpoint is set.
-	reg := prometheus.NewRegistry()
-	metrics := telemetry.NewMetrics(reg)
+	// Observability: the OTel meter provider feeds the EventSink/Logger adapter;
+	// its prometheus exporter renders those series on providers.Registry, served
+	// by the /metrics handler. Tracing uses the global OTel TracerProvider
+	// installed by telemetry.Setup above (a no-op when tracing is disabled).
+	metrics, err := telemetry.NewMetrics(providers.Meter)
+	if err != nil {
+		return fmt.Errorf("setup metrics: %w", err)
+	}
 	tracing := telemetry.NewTracing(otel.GetTracerProvider())
 	sink := telemetry.NewSink(metrics, tracing)
 
@@ -422,7 +426,7 @@ func run() error {
 		return serveACP(ctx, built.Service, cfg.storeDir != "")
 	}
 
-	return serve(ctx, cfg, built.Service, reg)
+	return serve(ctx, cfg, built.Service, providers.Registry)
 }
 
 // appConfig maps the CLI/env config onto the shared app.Config build contract,

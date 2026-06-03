@@ -2,18 +2,27 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Protocol selects the OTLP transport used by the exporter.
@@ -55,49 +64,132 @@ type OTLPConfig struct {
 	Version string
 }
 
-// Setup builds an OTLP span exporter and an SDK TracerProvider with a batch span
-// processor, a parent-based sampler, and a resource carrying service.name and
-// (optionally) service.version. It installs the provider via otel.SetTracerProvider
-// and a W3C TraceContext propagator via otel.SetTextMapPropagator, then returns a
-// shutdown func that flushes and stops the provider.
+// Providers bundles the OTel providers Setup installs, so callers wire metrics
+// and traces from one place instead of a positional return list.
+type Providers struct {
+	// Tracer is the TracerProvider (a no-op provider when tracing is disabled).
+	// It is also installed globally via otel.SetTracerProvider, so
+	// NewTracing(otel.GetTracerProvider()) picks it up.
+	Tracer trace.TracerProvider
+	// Meter is the MeterProvider feeding the domain instruments. Pass it to
+	// NewMetrics. It is always a real SDK provider (metrics are always on, even
+	// when OTLP tracing is disabled) so /metrics has data to serve.
+	Meter metric.MeterProvider
+	// Registry is the prometheus registry the metrics exporter registers on.
+	// Serve it via MetricsHandler at /metrics.
+	Registry *prometheus.Registry
+	// Shutdown flushes and stops BOTH providers. Always non-nil.
+	Shutdown func(context.Context) error
+}
+
+// Setup builds the OTel metrics and (optionally) tracing pipelines.
 //
-// When cfg.Endpoint is empty, tracing is disabled: Setup installs nothing and
-// returns a no-op shutdown with a nil error (the caller should log that tracing
-// is disabled). After Setup runs with a real endpoint, telemetry.NewTracing
-// reading otel.GetTracerProvider() emits to the installed provider.
+// Metrics are ALWAYS installed: a prometheus-exporter reader registers the
+// domain instruments on a fresh prometheus.Registry (returned for /metrics), the
+// tool-duration histogram is configured as a base-2 exponential histogram via a
+// metric.View, and the runtime collector (go.goroutine.count, GC, heap, …) is
+// started against the MeterProvider. The MeterProvider is NOT installed globally
+// — it is returned in Providers.Meter for explicit injection into NewMetrics.
 //
-// The gRPC exporter is constructed lazily and does not dial the collector until
-// the first export, so Setup returns promptly even against an unreachable
+// Tracing is installed only when cfg.Endpoint is non-empty: Setup builds an OTLP
+// span exporter and an SDK TracerProvider with a batch span processor, a
+// parent-based sampler, and a resource carrying service.name and (optionally)
+// service.version. It installs the provider via otel.SetTracerProvider and a W3C
+// TraceContext propagator via otel.SetTextMapPropagator. When cfg.Endpoint is
+// empty, tracing is disabled and Providers.Tracer is a no-op provider.
+//
+// The gRPC trace exporter is constructed lazily and does not dial the collector
+// until the first export, so Setup returns promptly even against an unreachable
 // endpoint.
-func Setup(ctx context.Context, cfg OTLPConfig) (shutdown func(context.Context) error, err error) {
+//
+// An OTLP metric exporter (push to a collector) is a deliberate seam: the
+// MeterProvider is assembled from a slice of readers, so adding an
+// otlpmetric reader here when an endpoint is configured is a one-line change.
+func Setup(ctx context.Context, cfg OTLPConfig) (Providers, error) {
 	noop := func(context.Context) error { return nil }
-
-	if cfg.Endpoint == "" {
-		return noop, nil
-	}
-
-	exporter, err := newExporter(ctx, cfg)
-	if err != nil {
-		return noop, fmt.Errorf("telemetry: build OTLP exporter: %w", err)
+	providers := Providers{
+		Tracer:   otel.GetTracerProvider(), // current global; a no-op until tracing is installed.
+		Shutdown: noop,
 	}
 
 	res, err := newResource(ctx, cfg)
 	if err != nil {
-		// Best effort: tear down the exporter we just created.
-		_ = exporter.Shutdown(ctx)
-		return noop, fmt.Errorf("telemetry: build resource: %w", err)
+		return providers, fmt.Errorf("telemetry: build resource: %w", err)
 	}
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sampler(cfg.SampleRatio)),
+	// --- Metrics (always on) ---
+	mp, reg, err := newMeterProvider(res)
+	if err != nil {
+		return providers, fmt.Errorf("telemetry: build meter provider: %w", err)
+	}
+	providers.Meter = mp
+	providers.Registry = reg
+
+	// Runtime collector: goroutines, GC, heap, allocations against this provider.
+	if rerr := otelruntime.Start(otelruntime.WithMeterProvider(mp)); rerr != nil {
+		_ = mp.Shutdown(ctx)
+		return providers, fmt.Errorf("telemetry: start runtime collector: %w", rerr)
+	}
+
+	shutdowns := []func(context.Context) error{mp.Shutdown}
+
+	// --- Tracing (optional) ---
+	if cfg.Endpoint != "" {
+		exporter, eerr := newExporter(ctx, cfg)
+		if eerr != nil {
+			_ = mp.Shutdown(ctx)
+			return providers, fmt.Errorf("telemetry: build OTLP exporter: %w", eerr)
+		}
+		tp := sdktrace.NewTracerProvider(
+			sdktrace.WithBatcher(exporter),
+			sdktrace.WithResource(res),
+			sdktrace.WithSampler(sampler(cfg.SampleRatio)),
+		)
+		otel.SetTracerProvider(tp)
+		otel.SetTextMapPropagator(propagation.TraceContext{})
+		providers.Tracer = tp
+		shutdowns = append(shutdowns, tp.Shutdown)
+	}
+
+	providers.Shutdown = func(sctx context.Context) error {
+		var errs []error
+		for _, fn := range shutdowns {
+			if serr := fn(sctx); serr != nil {
+				errs = append(errs, serr)
+			}
+		}
+		return errors.Join(errs...)
+	}
+
+	return providers, nil
+}
+
+// newMeterProvider builds the SDK MeterProvider with a prometheus-exporter reader
+// (registered on a fresh registry) and the base-2 exponential-histogram view for
+// the tool-duration instrument (decision 2). It returns the provider and the
+// registry to serve at /metrics.
+func newMeterProvider(res *resource.Resource) (*sdkmetric.MeterProvider, *prometheus.Registry, error) {
+	reg := prometheus.NewRegistry()
+	promExporter, err := otelprom.New(otelprom.WithRegisterer(reg))
+	if err != nil {
+		return nil, nil, fmt.Errorf("build prometheus exporter: %w", err)
+	}
+
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(promExporter),
+		sdkmetric.WithView(ToolDurationView()),
 	)
+	return mp, reg, nil
+}
 
-	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.TraceContext{})
-
-	return tp.Shutdown, nil
+// MetricsHandler returns an http.Handler that serves the given registry in the
+// Prometheus text exposition format, suitable for mounting at /metrics. It is a
+// thin wrapper over promhttp that keeps the handler construction (and the
+// promhttp.HandlerOpts choice) in one place; the composition root still names
+// *prometheus.Registry to wire the handler, which architecture.md §2 permits.
+func MetricsHandler(reg *prometheus.Registry) http.Handler {
+	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 }
 
 // newExporter constructs the OTLP span exporter for the configured protocol.

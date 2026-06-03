@@ -29,7 +29,8 @@ Around that core, every capability beyond the minimal loop is a **seam with a
 default and a swap-in adapter**, so the production build stays static and
 network-free unless you wire something in. The current adapters cover, grouped:
 **reliability** (`llmresilience` retry/breaker decorator), **observability**
-(`telemetry`: Prometheus, OTel spans, OTLP), **security** (server auth/mTLS, rate
+(`telemetry`: OTel metrics + runtime collector via a Prometheus exporter, OTel
+spans over OTLP), **security** (server auth/mTLS, rate
 limiting, the `permclassify` model-based risk classifier), **context management**
 (`tokenizer` + the `CascadeCompactor`), **memory** (`memory` + `dream`),
 **parallelism** (`forker` fork-join), and **extensibility** (the `mcp`
@@ -80,7 +81,7 @@ flowchart LR
     st["store/memstore · jsonlstore · sessnap"]
     tools["tools (Read/Edit/Write/Grep/Glob/WebFetch + optional Bash)"]
     pp["permpolicy · hookexec"]
-    tel["telemetry (Prometheus/OTel/OTLP)"]
+    tel["telemetry (OTel metrics+spans · Prometheus exporter · OTLP)"]
     ext["mcp (streaming-HTTP) · repomap\nmemory · dream · forker · tokenizer"]
   end
 
@@ -651,17 +652,27 @@ error.
   times execution via the injected `Clock` (`timeExecute`).
 - **Telemetry** (`internal/adapter/telemetry`) — one adapter that implements
   **both** `port.EventSink` (deriving counters/gauges from the event stream) and
-  `port.Logger` (per-tool counters + a latency histogram). `telemetry.NewMetrics`
-  exposes Prometheus metrics for mounting at `/metrics`; `telemetry.NewSink` fans
-  one Engine `EventSink` out to several sinks; OTel spans model the run/turn/tool
-  hierarchy; and `telemetry.Setup` builds and installs an **OTLP** TracerProvider
-  (gRPC or HTTP transport), wired in `mecated` via `--otlp-endpoint` /
-  `--otlp-protocol` / `--otlp-insecure` (a no-op when the endpoint is empty).
-  > A broader performance-observability effort is in flight (pprof, runtime
-  > metrics, FlightRecorder, an opt-in perf-over-MCP surface). See
-  > `docs/design/perf-observability.md` (the decided direction) and
-  > `docs/perf-measurement-survey.md` (the Go-perf technique reference).
-  > Landing incrementally — not all of it is wired yet.
+  `port.Logger` (per-tool counters + a latency histogram). It is built on the
+  **OTel metrics SDK**: `telemetry.NewMetrics(metric.MeterProvider)` creates the
+  domain instruments from an injected MeterProvider. `telemetry.NewSink` fans one
+  Engine `EventSink` out to several sinks; OTel spans model the run/turn/tool
+  hierarchy. `telemetry.Setup` returns a `Providers{Tracer, Meter, Registry,
+  Shutdown}` struct: **metrics are always on** — Setup always builds an SDK
+  MeterProvider with a Prometheus-exporter reader on a fresh `Registry`, installs
+  the tool-duration base-2 exponential-histogram view (`telemetry.ToolDurationView`,
+  the single source of truth any MeterProvider feeding `NewMetrics` must install),
+  and starts the contrib **runtime collector** (goroutines, GC, heap) against that
+  provider. `/metrics` is served via the OTel Prometheus exporter using
+  `telemetry.MetricsHandler(providers.Registry)`. **Tracing installs only when an
+  OTLP endpoint is set**: with `cfg.Endpoint` non-empty Setup builds an OTLP span
+  exporter + SDK TracerProvider and installs it globally (wired in `mecated` via
+  `--otlp-endpoint` / `--otlp-protocol` / `--otlp-insecure`); with an empty
+  endpoint `Providers.Tracer` is the current (no-op) global and only metrics run.
+  > A broader performance-observability effort is landing incrementally (pprof,
+  > FlightRecorder, an opt-in perf-over-MCP surface). The runtime collector and
+  > the OTel metrics pipeline above are **live**; the remaining surfaces are not
+  > wired yet. See `docs/design/perf-observability.md` (the decided direction)
+  > and `docs/perf-measurement-survey.md` (the Go-perf technique reference).
 - **SessionStore** — `memstore` (default, in-memory) and `jsonlstore`
   (append-only JSONL replay log: `<dir>/<id>.session.jsonl` snapshots +
   `<dir>/<id>.tools.jsonl` tool records; `jsonlstore` also implements `Logger`).
