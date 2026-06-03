@@ -90,6 +90,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.onKey(msg)
 
+	case tea.PasteMsg:
+		return m.onPaste(msg)
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.sp, cmd = m.sp.Update(msg)
@@ -376,6 +379,28 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+// onPaste routes a bracketed-paste payload to the prompt input. Bubble Tea v2
+// emits tea.PasteMsg (not KeyPressMsg) for a paste, so it does NOT pass through
+// onKey — this mirrors onKey's overlay/help/phase gating itself. A paste is
+// dropped while any overlay/help/approval owns the keyboard (it must not leak
+// into the input behind the modal); otherwise it is accepted ONLY in the
+// input-accepting phases (idle or running — both keep the textarea focused for
+// compose/enqueue) and forwarded to the textarea, which inserts the runes
+// internally, then run through afterInputEdit so the slash palette re-syncs
+// (e.g. pasting "/cl" opens the palette) — the same funnel typed input uses.
+func (m Model) onPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	if m.showHelp || m.phase == phaseAwaitingApproval ||
+		m.mcp.view != mcpNone || m.agents.view != agentsNone {
+		return m, nil
+	}
+	if m.phase != phaseIdle && m.phase != phaseRunning {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.ta, cmd = m.ta.Update(msg)
+	return m.afterInputEdit(cmd)
 }
 
 // onApprovalKey resolves the open permission modal. Left/right (or tab) toggle

@@ -134,6 +134,7 @@ spends tokens) stays **off** on the embedded server.
 | `enter` (idle) | send the prompt |
 | `enter` (while a run streams) | **queue a follow-up** (staged, sent when the turn ends) |
 | `shift+enter` (or `ctrl+j`) | newline in the input |
+| paste | insert clipboard text into the prompt (ignored while an overlay/modal is open) |
 | `esc` (while a run streams) | clear staged input → else clear the queue → else cancel the in-flight run (sends `Cancel`; waits for the terminal result) |
 | `enter` (idle, **paused queue**, empty input) | resume — send the next staged follow-up |
 | `esc` (idle, **paused queue**) | clear staged input → else clear the queue |
