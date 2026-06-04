@@ -790,10 +790,24 @@ func buildDirCommandExpander(cfg Config) prompt.CommandExpander {
 		return nil
 	}
 	if cfg.CommandsDir != "" {
+		// An explicit --commands-dir is OPERATOR-supplied (not repo-injected), so it is
+		// trusted regardless of workspace trust — no project-tier gate applies.
 		slog.Info("slash commands ENABLED", "dir", cfg.CommandsDir)
 		return prompt.NewDirCommandExpander(cfg.CommandsDir)
 	}
-	// EnableCommands with no explicit dir: use the package defaults.
+	// EnableCommands with no explicit dir: the package defaults are the PROJECT-tier
+	// dirs (workspace-relative .mecatl/commands, .claude/commands). They are repo-
+	// injected steering, so they are withheld when there IS a workspace to distrust
+	// AND it is untrusted (Phase 2a). cfg.TrustProject carries the folded
+	// TrustDecision (Build). With no workspace there is no project to gate (the
+	// expander resolves per-session against each session's root). An untrusted repo's
+	// slash commands cannot run before the operator trusts it; the agent still works
+	// in "ask the human" mode (raw text passes through the NoopExpander).
+	if cfg.Workspace != "" && !cfg.TrustProject {
+		slog.Warn("slash commands: project-tier command dirs WITHHELD (untrusted workspace); raw text passes through. Trust this repo (--trust-project or trustedWorkspaces) or pass --commands-dir to enable project slash commands",
+			"dirs", ".mecatl/commands,.claude/commands")
+		return nil
+	}
 	slog.Info("slash commands ENABLED (default dirs)", "dirs", ".mecatl/commands,.claude/commands")
 	return prompt.NewDirCommandExpander()
 }
@@ -1116,6 +1130,26 @@ func logMCPInventory(inventory []mcpsource.SourceInfo) {
 	}
 }
 
+// skillResolveOptions is the SINGLE source of truth for how this package resolves
+// skills sources from cfg. Every skills consumer (registerSkills, resolveSkillIndex,
+// activeSkillDirs) MUST build its skills.ResolveOptions through here so the
+// Workspace-Trust Phase-2a project-tier gate (IncludeProjectTier: cfg.TrustProject —
+// cfg.TrustProject carries the folded TrustDecision from Build) is applied by
+// CONSTRUCTION. A future consumer that calls this helper inherits the gate
+// automatically; a future consumer that hand-rolls a skills.ResolveOptions would
+// silently reopen the project-tier injection gap — so don't. Behaviour for the three
+// existing callers is identical to the prior hand-synced options.
+func skillResolveOptions(cfg Config) skills.ResolveOptions {
+	return skills.ResolveOptions{
+		Explicit:     cfg.SkillsDirs,
+		Conventional: cfg.SkillsConventional,
+		Workspace:    cfg.Workspace,
+		// Project-tier skills are withheld when the workspace is untrusted (Phase 2a /
+		// R2.5). cfg.TrustProject already carries the folded TrustDecision (Build).
+		IncludeProjectTier: cfg.TrustProject,
+	}
+}
+
 // registerSkills wires the progressive-disclosure Skill tool from the resolved
 // Source list (explicit dirs + conventional locations when enabled). Skills stay
 // OPT-IN: with no sources, nothing is registered. The SkillDraft tool is registered
@@ -1126,11 +1160,7 @@ func logMCPInventory(inventory []mcpsource.SourceInfo) {
 // the ListSkills snapshot (skillSnapshot). The slice is nil when no skills are
 // discovered (disabled, no sources, or none valid).
 func registerSkills(ctx context.Context, cfg Config, cat *tool.Catalog) []skills.Skill {
-	sources := skills.ResolveSources(skills.ResolveOptions{
-		Explicit:     cfg.SkillsDirs,
-		Conventional: cfg.SkillsConventional,
-		Workspace:    cfg.Workspace,
-	})
+	sources := skills.ResolveSources(skillResolveOptions(cfg))
 	if len(sources) == 0 && cfg.SkillsDraftDir != "" {
 		registerSkillDraft(cfg, cat, nil)
 		return nil

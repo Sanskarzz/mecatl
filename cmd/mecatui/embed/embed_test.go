@@ -144,6 +144,11 @@ func TestStartWithMemoryDirServes(t *testing.T) {
 		Tokenizer:      "heuristic",
 		MemoryDir:      t.TempDir(), // turns on the Remember/Recall registration gate
 		EnableCommands: true,        // turns on the slash-command lister (caps.SlashCommands)
+		// Project-tier (workspace-relative) slash-command dirs are repo-injected
+		// steering, withheld on an UNTRUSTED workspace (Workspace-Trust Phase 2a). This
+		// test asserts EnableCommands ⇒ a wired lister, which now requires a TRUSTED
+		// workspace; an untrusted repo correctly degrades to no command lister.
+		TrustProject: true,
 	}, embed.PerfConfig{})
 	if err != nil {
 		t.Fatalf("embed.Start with MemoryDir: %v", err)

@@ -205,6 +205,49 @@ func TestBuildSoulGateUnopenableWorkspaceDefaultsAllow(t *testing.T) {
 // soul (<workspace>/.mecatl/soul.md) contributes NO fragment when --trust-project is
 // UNSET and there is no user soul: the source is nil and the meta records the
 // project provenance as untrusted (for Item 3's inspector / a future warning).
+// TestSelectSoulProjectDoubleGateAND is the consolidated MUST-FIX 3 reconciliation:
+// the PROJECT soul is admitted ONLY when BOTH gates pass — trust (provenance) AND
+// soul:apply (policy). It drives the full 2x2 matrix and asserts the project soul is
+// withheld if EITHER trust is false OR soul:apply denies, and loads only when both
+// hold. This proves the as-built composes as a logical AND, unambiguously.
+func TestSelectSoulProjectDoubleGateAND(t *testing.T) {
+	cases := []struct {
+		name      string
+		trusted   bool
+		gate      governance.Effect
+		wantLoads bool
+	}{
+		{"untrusted + soul:apply allow -> withheld (trust fails)", false, governance.Allow, false},
+		{"untrusted + soul:apply deny  -> withheld (both fail)", false, governance.Deny, false},
+		{"trusted   + soul:apply deny  -> withheld (policy fails)", true, governance.Deny, false},
+		{"trusted   + soul:apply allow -> LOADS (both pass)", true, governance.Allow, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			xdg := t.TempDir() // no user soul -> the project soul is the only candidate
+			fakeSoulEnv(t, xdg)
+			ws := t.TempDir()
+			writeProjectSoul(t, ws, "You are a project persona.")
+
+			src, meta := selectSoulSource(
+				Config{Workspace: ws, TrustProject: tc.trusted},
+				newFakeIO().io(),
+				fakeGate(tc.gate),
+			)
+			if tc.wantLoads {
+				if src == nil || !meta.Present || meta.Provenance != soulProject || !meta.Trusted {
+					t.Fatalf("both gates pass: project soul must load; got src=%v meta=%+v", src, meta)
+				}
+				return
+			}
+			if src != nil || meta.Present {
+				t.Fatalf("a failing gate (trust=%v, soul:apply=%v) must withhold the project soul; got src=%v meta=%+v",
+					tc.trusted, tc.gate, src, meta)
+			}
+		})
+	}
+}
+
 func TestSelectSoulUntrustedProjectDropped(t *testing.T) {
 	xdg := t.TempDir() // no user soul
 	fakeSoulEnv(t, xdg)

@@ -194,6 +194,24 @@ func buildSoulGate(cfg Config) soulGate {
 // withhold-with-warn (the soul is applied at build time with no interactive gate, so
 // Ask cannot be satisfied — set soul:apply→allow to apply it). gate may be nil in
 // tests/legacy callers, which is treated as Allow (the default-on posture).
+//
+// PROJECT-SOUL DOUBLE-GATE (Workspace-Trust MUST-FIX 3). The PROJECT soul is admitted
+// only if BOTH gates pass — a logical AND:
+//  1. TRUST (provenance): cfg.TrustProject (the folded TrustDecision) must be true,
+//     else the project soul is withheld (line ~266). "May this repo set a persona at
+//     all?"
+//  2. soul:apply (policy): even on a trusted repo, soul:apply may Deny/Ask, which
+//     withholds. "Does the operator's permission config permit applying a soul this
+//     run?"
+//
+// The two are INDEPENDENT and both must pass. The soul:apply consultation above runs
+// first as an early-out (it also governs the always-trusted USER soul, which is never
+// trust-gated). For the PROJECT soul the trust gate is the dominant provenance check:
+// a project's OWN soul:apply ALLOW rule is itself trust-gated inside buildSoulGate
+// (project permission rules only resolve when trusted), so an untrusted project can
+// never grant itself soul:apply — the AND holds in every case. An untrusted project
+// soul is withheld irrespective of soul:apply; a trusted project soul still obeys an
+// explicit soul:apply Deny/Ask. No change to buildSoulGate's internals.
 func selectSoulSource(cfg Config, io baselineIO, gate soulGate) (prompt.SoulSource, soulMeta) {
 	if cfg.NoSoul {
 		slog.Info("soul DISABLED (--no-soul)")

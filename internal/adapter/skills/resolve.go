@@ -37,6 +37,20 @@ type ResolveOptions struct {
 	// conventional paths (<workspace>/.mecatl/skills, <workspace>/.claude/skills).
 	// Only consulted when Conventional is true and non-empty.
 	Workspace string
+	// IncludeProjectTier, when true (the default — see the negated zero-value note),
+	// admits the PROJECT-tier conventional locations (<workspace>/.mecatl/skills,
+	// <workspace>/.claude/skills). The composition layer sets it false when the
+	// workspace is UNTRUSTED (Workspace-Trust feature, Phase 2a / R2.5) so a cloned
+	// repo's project skills cannot steer the model before the operator trusts it;
+	// the user-tier and explicit sources stay active regardless ("ask the human"
+	// mode, not "do nothing"). It gates ONLY the project tier — never the explicit
+	// or user-tier sources.
+	//
+	// ZERO-VALUE NOTE: because the zero value of a bool is false, callers must set
+	// this explicitly. ResolveSources (the public entry) defaults it to true so the
+	// historical behaviour is preserved; resolveSourcesEnv honours the field as
+	// given. Only Conventional==true makes the project tier eligible at all.
+	IncludeProjectTier bool
 }
 
 // ResolveSources builds the ORDERED, highest-precedence-first Source list from the
@@ -53,6 +67,11 @@ type ResolveOptions struct {
 // directories are harmless (DirSource treats an absent dir as "no skills"). When
 // Conventional is false only the Explicit paths are included — preserving the
 // strict opt-in default.
+//
+// NOTE on IncludeProjectTier: callers control whether the project tier is admitted
+// via opts.IncludeProjectTier. Composition sets it from the workspace-trust decision
+// (true when trusted, false when untrusted — Phase 2a / R2.5); set it true to keep
+// the historical "project tier always admitted" behaviour.
 func ResolveSources(opts ResolveOptions) []Source {
 	return resolveSourcesEnv(opts, xdgconfig.OSEnv)
 }
@@ -73,8 +92,10 @@ func resolveSourcesEnv(opts ResolveOptions, env xdgconfig.ResolveEnv) []Source {
 		return sources
 	}
 
-	// Project-level (under the workspace), beats user-level.
-	if opts.Workspace != "" {
+	// Project-level (under the workspace), beats user-level. Withheld when the
+	// workspace is untrusted (IncludeProjectTier=false) — Phase 2a / R2.5. The
+	// user-tier sources below are NEVER gated.
+	if opts.Workspace != "" && opts.IncludeProjectTier {
 		sources = append(sources,
 			DirSource{Dir: filepath.Join(opts.Workspace, ProjectDirMecatl), Label: "project(.mecatl)"},
 			DirSource{Dir: filepath.Join(opts.Workspace, ProjectDirClaude), Label: "project(.claude)"},

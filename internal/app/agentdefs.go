@@ -283,11 +283,10 @@ type skillIndex map[string]string
 // discovery fault yields an empty index (a def's skills preload then no-ops with a
 // diagnostic) rather than failing the build. Returns nil when skills are disabled.
 func resolveSkillIndex(ctx context.Context, cfg Config) skillIndex {
-	sources := skills.ResolveSources(skills.ResolveOptions{
-		Explicit:     cfg.SkillsDirs,
-		Conventional: cfg.SkillsConventional,
-		Workspace:    cfg.Workspace,
-	})
+	// Build through skillResolveOptions (the single choke point) so an untrusted
+	// project skill cannot be preloaded into an agent def's prompt — the Phase-2a
+	// project-tier trust gate is inherited by construction.
+	sources := skills.ResolveSources(skillResolveOptions(cfg))
 	if len(sources) == 0 {
 		return nil
 	}
@@ -636,11 +635,26 @@ func skillSnapshot(discovered []skills.Skill) []*mecatlv1.SkillInfo {
 // dirs + conventional locations when enabled). It is forgiving: discovery
 // diagnostics are logged and a hard fault yields an empty registry rather than
 // failing the build. Strict opt-in — zero sources means an empty registry.
+//
+// TRUST-GATE INVARIANT: the project-tier trust gate here (and for skills/commands) is
+// COMPLETE only because agents/skills are resolved ONCE at BUILD time against the
+// composition cfg.Workspace and baked into the registry/catalog — they are NOT
+// re-resolved per wire-supplied session workspace. If a future change re-resolves
+// these per session (e.g. against a CreateSession-supplied root), it MUST re-apply the
+// trust decision for that root or the project-tier injection gap silently reopens.
 func resolveAgentRegistry(ctx context.Context, cfg Config) *agents.Registry {
+	// Project-tier agent defs are withheld when the workspace is untrusted (Phase 2a).
+	// cfg.TrustProject already carries the folded TrustDecision (Build). The user-tier
+	// + explicit defs stay active regardless ("ask the human" mode, not "do nothing").
+	if cfg.AgentsConventional && cfg.Workspace != "" && !cfg.TrustProject {
+		slog.Warn("agent definitions: project-tier defs WITHHELD (untrusted workspace); user-tier and explicit defs stay active. Trust this repo (--trust-project or trustedWorkspaces) to admit its project agent defs",
+			"workspace", cfg.Workspace, "dirs", ".mecatl/agents,.claude/agents")
+	}
 	sources := agents.ResolveSources(agents.ResolveOptions{
-		Explicit:     cfg.AgentsDirs,
-		Conventional: cfg.AgentsConventional,
-		Workspace:    cfg.Workspace,
+		Explicit:           cfg.AgentsDirs,
+		Conventional:       cfg.AgentsConventional,
+		Workspace:          cfg.Workspace,
+		IncludeProjectTier: cfg.TrustProject,
 	})
 	if len(sources) == 0 {
 		slog.Info("agent definitions DISABLED (no agents dirs configured)")

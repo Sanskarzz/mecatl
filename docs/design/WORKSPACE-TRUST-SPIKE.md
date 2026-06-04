@@ -1,13 +1,31 @@
 # Workspace Trust — implementation plan (Phases 0+1+2)
 
-> **STATUS: Phases 0 + 1 SHIPPED; Phase 2 is implementation-ready plan.**
+> **STATUS: Phases 0 + 1 SHIPPED; Phase 2a (project-tier authority gating)
+> SHIPPED; Phase 2b (trust.yaml registry + drift) and 2c (mecatui pre-TUI
+> prompt) are implementation-ready plan.**
 > Phase 0 (unify the default — mecatui resolves `--trust-project`, default
 > false, no longer hardcoding trust ON) is wired and tested. Phase 1
 > (declarative `trustedWorkspaces:` list + the composition `TrustDecision`
 > resolver) is wired and tested (`internal/adapter/workspacetrust`,
-> `internal/app/trust.go`). Phase 2 (prompt-and-remember + complete gate +
-> drift) is not yet built. Phase 3 (in-TUI trust modal, per-scope trust,
-> speculative schema reservations) is **explicitly out of scope** — see §11.
+> `internal/app/trust.go`).
+>
+> **Phase 2a SHIPPED** (R2.4 / R2.5 / R2.6 + MUST-FIX 3 reconciliation): when a
+> workspace is UNTRUSTED, the composition now withholds the **project tier** of
+> agent definitions, slash commands, and skills — in addition to the
+> already-gated project ALLOW rules and project soul. The user-tier config, the
+> built-in tools, the base prompt, every Deny/Ask, and the permission prompt
+> stay fully active ("ask the human" mode, not "do nothing"). The skills adapter
+> gained the additive `ResolveOptions.IncludeProjectTier` (mirrored on the agents
+> adapter); commands/agents/skills are gated in `internal/app` composition off the
+> folded `TrustDecision`. The remembered `trust.yaml` registry, the identity-anchor
+> drift hash, and the mecatui first-encounter prompt are **NOT** part of 2a — they
+> are Phase 2b/2c below.
+>
+> **Phase 2b/2c remaining**: the machine-written `<xdg>/mecatl/trust.yaml` registry +
+> the `TrustRemembered` tier + the identity-anchor drift hash (2b); the mecatui
+> pre-TUI prompt + persistence + path sanitization (2c). Phase 3 (in-TUI trust
+> modal, per-scope trust, speculative schema reservations) is **explicitly out of
+> scope** — see §11.
 >
 > File:line citations are to the tree as of this spike; verify before
 > implementing.
@@ -136,7 +154,15 @@ does not re-prompt (those re-resolve live via permconfig's own mtime cache —
 `resolve.go:174-192` — and were already trusted); editing its **identity
 anchor** (persona/commands/skills/soul) does re-prompt.
 
-### 4.2 The gap is REAL — current state (verified)
+### 4.2 The gap is REAL — current state (verified) — **CLOSED in Phase 2a**
+
+> **CLOSED (Phase 2a).** The gap described below was real; it is now closed.
+> `internal/app` withholds the **project tier** of agents/commands/skills when the
+> folded `TrustDecision` is untrusted, via `agents.ResolveOptions.IncludeProjectTier`
+> / `skills.ResolveOptions.IncludeProjectTier` (set to `decision.Trusted`) and a
+> `buildDirCommandExpander` branch that drops the default project-tier command dirs
+> (an explicit `--commands-dir` is operator-supplied and stays). The text below is
+> retained for the historical rationale.
 
 `--trust-project` today gates **only** permission ALLOW rules
 (`permconfig.applyTrustGate`, `resolve.go:269-282`) and the project soul
@@ -451,7 +477,7 @@ admission gate and identity-anchor drift.
 - **R2.3** Corrupt/unreadable/wrong-version `trust.yaml` ⇒ `TrustNone`, never a
   grant (MUST-FIX 5.4).
 
-*Complete admission gate (MUST-FIX 1):*
+*Complete admission gate (MUST-FIX 1) — **SHIPPED in Phase 2a**:*
 - **R2.4** When `!decision.Trusted`, ONLY the **project-tier** sources are
   withheld for: agent definitions, slash commands, AND skills — in addition to
   the existing project-allows + project-soul gating. **The built-in tools, the
@@ -464,6 +490,23 @@ admission gate and identity-anchor drift.
   one narrow adapter touch; no signature break.
 - **R2.6** Each withheld project-tier source logs a `slog.Warn` drop-report
   line (mirroring `applyTrustGate`, `resolve.go:276`).
+
+> **As-built (Phase 2a).** `skills.ResolveOptions.IncludeProjectTier` AND
+> `agents.ResolveOptions.IncludeProjectTier` are additive bools (default false at
+> the env-resolver; the public `ResolveSources` callers in `internal/app` set them
+> from `cfg.TrustProject`, the folded `TrustDecision`). All three `internal/app`
+> skills callers (`registerSkills`, `resolveSkillIndex` for agent-def preload,
+> `activeSkillDirs` for the draft-overlap check) pass `IncludeProjectTier:
+> cfg.TrustProject`, so an untrusted project skill cannot leak via the preload or
+> draft path either. Commands have NO user-tier conventional dir — the default
+> command dirs (`.mecatl/commands`, `.claude/commands`) are workspace-relative
+> (project tier), so on an untrusted workspace `buildDirCommandExpander` returns
+> nil ⇒ the `NoopExpander` (raw text passes through); an explicit `--commands-dir`
+> is operator-supplied and stays. The gate fires only when `cfg.Workspace != ""`
+> (no workspace ⇒ no project to distrust). The MUST-FIX 3 soul double-gate is
+> reconciled in `selectSoulSource`'s doc comment: trust (provenance) AND soul:apply
+> (policy) is a logical AND that holds in every cell of the 2×2 matrix, because a
+> project's own `soul:apply` ALLOW is itself trust-gated inside `buildSoulGate`.
 
 *Drift (identity anchor only):*
 - **R2.7** The identity-anchor hash = `SHA256Hex`-fold of soul ⊕ project agent

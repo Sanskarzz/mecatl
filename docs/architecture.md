@@ -970,9 +970,12 @@ deliberately **never** strips re-entrant launchers (`docker exec`, `npx`,
 
 ### Workspace trust (`internal/app/trust.go`, `internal/adapter/workspacetrust`)
 
-Whether a *project's* contributions are admitted — its permission **ALLOW** rules
-and its project soul — is a **composition** decision, not a governance scope
-(`governance`/`session`/`prompt`/`tool` stay trust-unaware). The decision is
+Whether a *project's* contributions are admitted — the **project authority set** —
+is a **composition** decision, not a governance scope
+(`governance`/`session`/`prompt`/`tool` stay trust-unaware). The project authority
+set is: the project permission **ALLOW** rules, the project **soul**, and (Phase 2a)
+the **project tier** of agent definitions, slash commands, and skills
+(`<workspace>/.mecatl/*`, `<workspace>/.claude/*`). The decision is
 produced once per process by `resolveTrust(cfg) TrustDecision` (MUST-FIX 2 of the
 workspace-trust design), which folds, highest first:
 
@@ -990,11 +993,28 @@ and the soul provenance gate (`soulselect.go`) — honour declared trust through
 bypass. The composition narrates the decision (`slog.Info "workspace trust"
 trusted=… source=… drifted=…`), mirroring the soul-selection narration.
 
+**Phase 2a — the project-tier authority gate.** When the folded decision is
+**untrusted**, composition also withholds the **PROJECT TIER ONLY** of
+agents/commands/skills, mirroring how the project ALLOWs and project soul are gated:
+the `agents`/`skills` adapters gained an additive `ResolveOptions.IncludeProjectTier`
+(set to `cfg.TrustProject`; the three `internal/app` skills callers —
+`registerSkills`, the agent-def skill-preload `resolveSkillIndex`, and the
+draft-overlap `activeSkillDirs` — all pass it), and `buildDirCommandExpander` drops
+the default project-tier command dirs (`.mecatl/commands`, `.claude/commands`) when
+`cfg.Workspace != "" && !cfg.TrustProject`, degrading to the `NoopExpander` so raw
+text still passes through. The **user tier** (`$XDG_CONFIG_HOME/mecatl/*`,
+`~/.claude/*`), the built-in tools, the base prompt, every Deny/Ask, the permission
+prompt, and any **explicit** `--commands-dir`/`--agents-dir`/`--skills-dir`
+(operator-supplied, not repo-injected) stay active — an untrusted repo degrades to
+**"ask the human"**, never **"do nothing"**. The project soul carries a **double
+gate** (trust provenance AND the `soul:apply` policy — a logical AND, reconciled in
+`selectSoulSource`'s doc comment).
+
 **Settings-vs-state split.** `trustedWorkspaces:` is config **DATA**, not a
 governance `Rule`, and lives in the **human-authored** `settings.yaml` that mecatl
 only ever *reads*. The machine-written trust registry, the interactive prompt, and
 identity-anchor drift are a later phase (`TrustRemembered`/`Drifted` are reserved
-in the taxonomy but unused in Phase 1). **Path keying** is cleaned + absolute +
+in the taxonomy but unused through Phase 2a). **Path keying** is cleaned + absolute +
 symlink-resolved (`filepath.Abs` then `EvalSymlinks`) on both sides, so a
 moved/symlinked path cannot forge or inherit trust; an unresolvable entry is
 skipped. Trust is **monotonic-positive**: it only ever *grants* admission of a

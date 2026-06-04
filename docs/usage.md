@@ -163,7 +163,7 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--user-model-consolidate-interval` | `0` | interval for background consolidation (dream) of the user-model store, scoped to the `user/` namespace; 0 disables. |
 | `--permissions-conventional` | `true` | auto-discover the per-project permission config (`<workspace>/.mecatl/settings.yaml`, and with `--import-claude-permissions` also `<workspace>/.claude/settings.json`) plus the user-global file. **Re-resolved per session** against each session's workspace root. ON and inert until such a file exists. **See the permission-config note below.** |
 | `--import-claude-permissions` | `false` | also import Claude-Code `settings.json` permissions (project + user). **Lossy** (fail-safe): see the table below. |
-| `--trust-project` | `false` | honour a discovered **project's ALLOW rules** (its deny/ask are always honoured regardless) **and** a discovered **project persona/soul** at `<workspace>/.mecatl/soul.md` (issue #14, Phase 3). OFF by default (the safe stance) — an untrusted repo's grants and its project soul are ignored. **See the permission-config and persona/soul notes below.** |
+| `--trust-project` | `false` | honour the discovered **project authority set**: the project's ALLOW rules (its deny/ask are always honoured regardless), its project persona/soul at `<workspace>/.mecatl/soul.md`, AND the **project tier** of agent definitions, slash commands, and skills (`<workspace>/.mecatl/*`, `<workspace>/.claude/*`). OFF by default (the safe stance) — an untrusted repo's grants, persona, agents, commands, and skills are withheld; the agent still runs in "ask the human" mode (see the workspace-trust note below). **See the permission-config, persona/soul, and workspace-trust notes below.** |
 | `--permission-config` | `""` | path to a YAML permission-config file loaded at the **user (fully-trusted) scope** (**repeatable**). Always loaded regardless of `--permissions-conventional`. |
 | `--yolo` | `false` | **OPERATOR POSTURE (dangerous).** Suppress permission prompts for the built-in mutate-ask floor (`Bash`/`Edit`/`Write`/`Team`/`SkillDraft`) **server-wide** — for ephemeral, isolated, single-tenant deployments only. A `Deny` in **any** scope and any **deliberately configured** `Ask` (managed/project/user) still apply. **Refused when running as root** (euid 0) unless `MECATL_SANDBOX=1` (or `IS_SANDBOX=1`) is set. **See the allow-all note below.** |
 | `--metrics-addr` | `127.0.0.1:9090` | loopback **admin/observability** listener (empty disables). Serves `/metrics` and the runtime-introspection endpoints — **see the observability note below**. |
@@ -452,6 +452,49 @@ the shared user config).
   `settings.yaml` resolves to **untrusted** (a corrupt config never *grants*
   trust); it is logged, never an error that aborts startup. The composition logs
   the decision: `workspace trust trusted=… source=flag|declared|none`.
+
+### What an untrusted workspace withholds (WORKSPACE-TRUST Phase 2a)
+
+Trust is **not** a kill-switch. An untrusted repo is still a fully usable coding
+agent — it degrades to **"ask the human" mode**, never **"do nothing" mode**. The
+line is drawn between the agent's **own capability** (never gated) and the repo's
+**injected steering/authority** (gated).
+
+**Always active on ANY repo — trusted or not (NEVER gated):**
+
+- the built-in tools (Read, Edit, Bash, …) and the whole agent loop;
+- the base system prompt;
+- **your own user-tier config**: the user soul, and your user-level agent
+  definitions, slash commands, and skills under `$XDG_CONFIG_HOME/mecatl/*` (or
+  `~/.config/mecatl/*`) and `~/.claude/*`. A repo cannot touch these;
+- **every Deny / Ask rule** from any scope (they only tighten);
+- the permission prompt itself — on an untrusted repo the agent still runs; it
+  just **asks** for the tool calls the repo would have auto-allowed.
+
+**Withheld when the workspace is UNTRUSTED — the project-injected authority set:**
+
+- the project's permission **ALLOW** rules (auto-approval the repo grants itself);
+- the project **soul** (`<workspace>/.mecatl/soul.md` — a repo rewriting the
+  agent's persona);
+- the **project tier** of **agent definitions** (`<workspace>/.mecatl/agents`,
+  `<workspace>/.claude/agents`), **slash commands** (`<workspace>/.mecatl/commands`,
+  `<workspace>/.claude/commands`), and **skills** (`<workspace>/.mecatl/skills`,
+  `<workspace>/.claude/skills`).
+
+So a freshly-cloned, untrusted repo cannot silently steer the model with a
+`.claude/agents/evil.md`, a malicious slash command, an injected skill, a
+self-granted auto-approve, or a repo persona — but you can still read, edit, and
+run-with-a-prompt in it from the first run. An explicit `--commands-dir`,
+`--agents-dir`, or `--skills-dir` you pass is **operator-supplied** (not
+repo-injected) and is honoured regardless of trust. Each withheld project-tier
+source is logged at `WARN` so the degradation is visible. Trust the repo
+(`--trust-project` or a `trustedWorkspaces:` entry) to admit its full project
+authority set.
+
+> The soul carries a **double gate**: it is admitted only if the workspace is
+> trusted (provenance) **AND** the `soul:apply` permission resolves to Allow
+> (policy) — a logical AND. An untrusted repo's soul is withheld irrespective of
+> `soul:apply`; a trusted repo's soul still obeys an explicit `soul:apply: deny`.
 
 ### The allow-all posture (`--yolo`)
 

@@ -35,6 +35,16 @@ type ResolveOptions struct {
 	// Workspace is the session workspace root used to resolve the project-level
 	// conventional paths. Only consulted when Conventional is true and non-empty.
 	Workspace string
+	// IncludeProjectTier, when true, admits the PROJECT-tier conventional locations
+	// (<workspace>/.mecatl/agents, <workspace>/.claude/agents). The composition layer
+	// sets it false when the workspace is UNTRUSTED (Workspace-Trust feature, Phase
+	// 2a) so a cloned repo's project agent defs cannot steer the model before the
+	// operator trusts it; the user-tier and explicit sources stay active regardless.
+	// It gates ONLY the project tier. Mirrors skills.ResolveOptions.IncludeProjectTier.
+	//
+	// ZERO-VALUE NOTE: false by default; callers set it explicitly. Composition uses
+	// the folded trust bool. Only Conventional==true makes the project tier eligible.
+	IncludeProjectTier bool
 }
 
 // ResolveSources builds the ORDERED, highest-precedence-first Source list from the
@@ -68,7 +78,9 @@ func resolveSourcesEnv(opts ResolveOptions, env xdgconfig.ResolveEnv) []AgentSou
 		return sources
 	}
 
-	if opts.Workspace != "" {
+	// Project tier — withheld when the workspace is untrusted (IncludeProjectTier=false,
+	// Phase 2a). The user-tier sources below are NEVER gated.
+	if opts.Workspace != "" && opts.IncludeProjectTier {
 		sources = append(sources,
 			DirSource{Dir: filepath.Join(opts.Workspace, ProjectDirMecatl), Label: "project(.mecatl)"},
 			DirSource{Dir: filepath.Join(opts.Workspace, ProjectDirClaude), Label: "project(.claude)"},

@@ -53,9 +53,10 @@ func TestResolveSourcesConventionalPrecedenceOrder(t *testing.T) {
 	const home = "/home/u"
 	const ws = "/work/repo"
 	got := resolveSourcesEnv(ResolveOptions{
-		Explicit:     []string{"/explicit"},
-		Conventional: true,
-		Workspace:    ws,
+		Explicit:           []string{"/explicit"},
+		Conventional:       true,
+		Workspace:          ws,
+		IncludeProjectTier: true,
 	}, xdgconfig.ResolveEnv{
 		Getenv:      func(string) string { return "" }, // no XDG_CONFIG_HOME -> ~/.config
 		UserHomeDir: func() (string, error) { return home, nil },
@@ -76,8 +77,9 @@ func TestResolveSourcesHonorsXDGConfigHome(t *testing.T) {
 	const home = "/home/u"
 	const xdg = "/custom/xdg"
 	got := resolveSourcesEnv(ResolveOptions{
-		Conventional: true,
-		Workspace:    "/ws",
+		Conventional:       true,
+		Workspace:          "/ws",
+		IncludeProjectTier: true,
 	}, xdgconfig.ResolveEnv{
 		Getenv: func(k string) string {
 			if k == "XDG_CONFIG_HOME" {
@@ -118,8 +120,9 @@ func TestResolveSourcesNoHomeSkipsUser(t *testing.T) {
 	// No home and no XDG: user-level sources cannot be resolved, but project ones
 	// (under an explicit workspace) still resolve.
 	got := resolveSourcesEnv(ResolveOptions{
-		Conventional: true,
-		Workspace:    "/ws",
+		Conventional:       true,
+		Workspace:          "/ws",
+		IncludeProjectTier: true,
 	}, xdgconfig.ResolveEnv{
 		Getenv:      func(string) string { return "" },
 		UserHomeDir: func() (string, error) { return "", errNoHome },
@@ -129,6 +132,54 @@ func TestResolveSourcesNoHomeSkipsUser(t *testing.T) {
 		filepath.Join("/ws", ".claude", "skills"),
 	}
 	assertDirs(t, got, want)
+}
+
+// TestResolveSourcesUntrustedDropsProjectTier asserts the Phase-2a trust gate:
+// with IncludeProjectTier=false (an UNTRUSTED workspace) the project-tier
+// conventional dirs are WITHHELD while the explicit and user-tier dirs stay active
+// — the "ask the human, not do nothing" degradation (R2.5).
+func TestResolveSourcesUntrustedDropsProjectTier(t *testing.T) {
+	const home = "/home/u"
+	const ws = "/work/repo"
+	got := resolveSourcesEnv(ResolveOptions{
+		Explicit:           []string{"/explicit"},
+		Conventional:       true,
+		Workspace:          ws,
+		IncludeProjectTier: false, // untrusted
+	}, xdgconfig.ResolveEnv{
+		Getenv:      func(string) string { return "" },
+		UserHomeDir: func() (string, error) { return home, nil },
+	})
+	// Explicit (operator-supplied) + user tier stay; project tier is dropped.
+	want := []string{
+		"/explicit",
+		filepath.Join(home, ".config", "mecatl", "skills"),
+		filepath.Join(home, ".claude", "skills"),
+	}
+	assertDirs(t, got, want)
+	for _, d := range dirs(t, got) {
+		if d == filepath.Join(ws, ".mecatl", "skills") || d == filepath.Join(ws, ".claude", "skills") {
+			t.Errorf("untrusted workspace leaked a project-tier skills dir: %q", d)
+		}
+	}
+}
+
+// TestResolveSourcesTrustedKeepsProjectTier is the positive counterpart: with
+// IncludeProjectTier=true the project tier IS admitted (current behaviour).
+func TestResolveSourcesTrustedKeepsProjectTier(t *testing.T) {
+	const home = "/home/u"
+	const ws = "/work/repo"
+	got := resolveSourcesEnv(ResolveOptions{
+		Conventional:       true,
+		Workspace:          ws,
+		IncludeProjectTier: true,
+	}, xdgconfig.ResolveEnv{
+		Getenv:      func(string) string { return "" },
+		UserHomeDir: func() (string, error) { return home, nil },
+	})
+	if !containsDir(dirs(t, got), filepath.Join(ws, ".mecatl", "skills")) {
+		t.Errorf("trusted workspace must admit the project tier; got %v", dirs(t, got))
+	}
 }
 
 var errNoHome = errors.New("no home")

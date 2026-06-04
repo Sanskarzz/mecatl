@@ -101,11 +101,10 @@ func warnSkillDraftResiduals(cfg Config) {
 // (explicit dirs plus the conventional locations when SkillsConventional is set), so
 // the overlap check covers the same trees the catalog serves.
 func activeSkillDirs(cfg Config) []string {
-	sources := skills.ResolveSources(skills.ResolveOptions{
-		Explicit:     cfg.SkillsDirs,
-		Conventional: cfg.SkillsConventional,
-		Workspace:    cfg.Workspace,
-	})
+	// Build through skillResolveOptions (the single choke point) so the draft-overlap
+	// check covers exactly the trees the catalog serves and inherits the Phase-2a
+	// project-tier trust gate by construction.
+	sources := skills.ResolveSources(skillResolveOptions(cfg))
 	var dirs []string
 	for _, s := range sources {
 		if ds, ok := s.(skills.DirSource); ok && ds.Dir != "" {
