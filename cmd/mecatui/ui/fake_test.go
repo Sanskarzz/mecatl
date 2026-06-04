@@ -317,3 +317,36 @@ func (f *fakeAgents) ListAgents(_ context.Context) ([]client.Agent, error) {
 	}
 	return f.agents, nil
 }
+
+// fakeSoul is a scripted client.SoulFetcher for the /soul inspection panel tests:
+// GetSoul returns the canned soul, or err when set. It implements
+// client.SoulFetcher so the ui's /soul path runs with no proto and no network.
+type fakeSoul struct {
+	soul  client.Soul
+	err   error
+	calls int
+}
+
+func (f *fakeSoul) GetSoul(_ context.Context) (client.Soul, error) {
+	f.calls++
+	if f.err != nil {
+		return client.Soul{}, f.err
+	}
+	return f.soul, nil
+}
+
+// fakeUserModel is a scripted client.UserModelLister for the /usermodel panel
+// tests: GetUserModel returns the canned model, or err when set.
+type fakeUserModel struct {
+	model client.UserModel
+	err   error
+	calls int
+}
+
+func (f *fakeUserModel) GetUserModel(_ context.Context) (client.UserModel, error) {
+	f.calls++
+	if f.err != nil {
+		return client.UserModel{}, f.err
+	}
+	return f.model, nil
+}

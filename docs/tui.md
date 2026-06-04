@@ -124,15 +124,36 @@ conversation and scrollback) and `/help` (open the keys-&-features overlay) are
 *always* available because they act purely on the TUI's own state; `/mcp` (browse
 the MCP inventory), `/agents` (browse the agent-definition inventory — the
 resolved registry the `Task` tool routes delegations to), `/team` (the live
-agent-team overlay, also on `ctrl+a`), and `/skills` (browse the skills
-inventory) appear only when the connected server advertises those capabilities
-(and, for `/mcp`/`/agents`/`/skills`, the matching client collaborator is wired).
+agent-team overlay, also on `ctrl+a`), `/skills` (browse the skills inventory),
+`/soul` (inspect the persona — read-only), and `/usermodel` (inspect the user
+model — read-only) appear only when the connected server advertises those
+capabilities (and, for `/mcp`/`/agents`/`/skills`/`/soul`/`/usermodel`, the
+matching client collaborator is wired). The fixed palette order is
+`clear, help, mcp, agents, team, skills, soul, usermodel` (locked by a test).
 `/agents` and `/team` are distinct: `/agents` is the **definition inventory** (a
 palette-only `ListAgents` snapshot, gated on `caps.agents`), while `/team` opens
 the **live overlay** of a team that has actually run (gated on `caps.teams`).
 These never reach the model — a bare built-in line is intercepted and run
 locally. (`/compact` is a planned follow-up: it needs a server RPC that does not
 exist yet.)
+
+**`/soul` (read-only persona inspection).** Gated on `caps.soul` AND a wired soul
+fetcher. It fires `GetSoul` (a build-time snapshot the server takes once at
+startup) and shows a metadata line — provenance + trust state
+(`user` | `project (trusted)` | `project (UNTRUSTED → not loaded)` |
+`· DRIFTED`), byte size, and a short content hash — over the persona body. Because
+the body can be up to 20 KiB, the panel is **scrollable**: `pgup`/`pgdn` (and
+`up`/`down`, `home`/`end`) move a line-window, with a "lines X–Y of N" indicator
+when the content overflows the window; `esc` closes. It NEVER edits the soul (the
+soul is agent-read-only); trust/drift are computed server-side in composition and
+only displayed here.
+
+**`/usermodel` (read-only user-model inspection).** Gated on `caps.user_model` AND
+a wired user-model lister. It fires `GetUserModel` (a **live** read of the
+user-model store's index, so it reflects facts saved since startup) and shows an
+aggregate line (count · size · hash) over a `key — description` list, name-sorted.
+The per-entry value is omitted — `RecallUser` loads it. `esc` closes; the panel
+never edits the user model (the agent curates it).
 
 **Workspace slash commands are ON by default** on top of the built-ins, expanding
 `/<name>` inputs from the conventional workspace dirs `.mecatl/commands` and
@@ -225,7 +246,7 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 | `home` / `end` | jump to the top / bottom of the conversation (`end` resumes auto-follow) |
 | mouse wheel | scroll the conversation (**alt screen only**; see below) |
 | `?` | help overlay (on an empty prompt) |
-| `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`; plus workspace commands) |
+| `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`, `/soul`, `/usermodel`; plus workspace commands) |
 | `ctrl+a` | open the **live agent-team overlay** (the full roster + per-member focus of the most-recent team) — works **while idle and mid-run**; inert under a permission modal. Same surface as `/team`. |
 | `@` | file-mention menu — complete a workspace path, then attach it on submit (see below) |
 

@@ -273,7 +273,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, mcpClose, err := buildEngine(ctx, cfg, provider, store)
+	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, userModelStore, mcpClose, err := buildEngine(ctx, cfg, provider, store)
 	if err != nil {
 		return nil, err
 	}
@@ -307,6 +307,19 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// so this is a startup snapshot (like Agents), not a live lister. nil/empty when
 		// skills are disabled.
 		Skills: skillSnapshot(discoveredSkills),
+		// GetSoul snapshot: re-run the same selection policy (selectSoulSource) once
+		// here and project the WINNING soul's content + meta into the proto form. The
+		// soul is selected deterministically at build time (USER-wins precedence, trust
+		// gate, drift check), so this re-read of one tiny capped file is idempotent and
+		// keeps the snapshot a pure read at request time — exactly the Agents idiom. nil
+		// when no soul source is wired (capabilities().Soul then false).
+		Soul: soulSnapshot(cfg),
+		// GetUserModel live lister: wrap the SAME user-model store the engine writes to
+		// (threaded out of buildEngine — never a second store on the same dir, which
+		// would violate the one-Store-per-dir lock invariant) so a fetch reflects the
+		// CURRENT entries. nil when user model is disabled (capabilities().UserModel
+		// then false).
+		UserModel: userModelLister(userModelStore),
 		// ListCommands palette discovery: a workspace-aware lister over the same
 		// command expander build the engine uses. nil disables the RPC (empty list).
 		Commands: commandLister,
@@ -475,12 +488,12 @@ func buildStore(cfg Config) (port.SessionStore, error) {
 // factory (built HERE because store/policy/hooks/counter/mcpProvider — the exact
 // collaborators a per-session engine must share with the main one — are all in
 // scope here, so the factory cannot drift from the main engine's Deps).
-func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, []skills.Skill, func(), error) {
+func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, []skills.Skill, *memory.Store, func(), error) {
 	// SkillDraft trust boundary: when enabled, the quarantine dir must live OUTSIDE
 	// the workspace root (so the model's workspace-confined Write/Edit cannot reach
 	// it) and be disjoint from every active skills dir. Fatal on a misconfig.
 	if err := validateSkillDraftConfig(cfg); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, func() {}, err
+		return nil, nil, nil, nil, nil, nil, nil, nil, func() {}, err
 	}
 	warnSkillDraftResiduals(cfg)
 
@@ -542,7 +555,7 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 	deps := baseEngineDeps(cfg, provider, store, policy, mainHooks, counter, mcpProvider, instructions)
 	deps.Catalog = cat
 	sessFactory := sessionEngineFactory(cfg, provider, store, policy, hooks, counter, mcpProvider, instructions)
-	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, mcpClose, nil
+	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, userModelStore, mcpClose, nil
 }
 
 // buildInstructionAssembler composes the turn-0 instruction assembler in order:

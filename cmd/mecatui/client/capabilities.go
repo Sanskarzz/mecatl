@@ -17,6 +17,10 @@ type Capabilities struct {
 	Teams         bool
 	Agents        bool
 	Bash          bool
+	// Soul / UserModel report whether the server has a soul source / user-model store
+	// wired. They gate the /soul and /usermodel read-only inspection panels.
+	Soul      bool
+	UserModel bool
 	// Image/Audio report whether the wired provider consumes that media kind. They
 	// gate the @-mention file-attach UX: a client refuses to send a part the
 	// server's provider cannot read (an old server with no field → false → degrade).
@@ -38,6 +42,8 @@ func capabilitiesFrom(c *mecatlv1.ServerCapabilities) Capabilities {
 		Teams:         c.GetTeams(),
 		Agents:        c.GetAgents(),
 		Bash:          c.GetBash(),
+		Soul:          c.GetSoul(),
+		UserModel:     c.GetUserModel(),
 		Image:         c.GetImage(),
 		Audio:         c.GetAudio(),
 	}

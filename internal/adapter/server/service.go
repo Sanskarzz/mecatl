@@ -3,10 +3,12 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -115,6 +117,24 @@ type Config struct {
 	// snapshot and never reaches into the skills adapter's discovery types. May be
 	// empty (skills disabled or none found).
 	Skills []*mecatlv1.SkillInfo
+
+	// Soul is the resolved soul (persona) BUILD-TIME SNAPSHOT taken at startup. It
+	// backs GetSoul and is a pure read of this snapshot — the soul is selected once
+	// (USER-wins precedence, project trust gate, drift check) and is immutable for the
+	// process lifetime, so no live re-read is warranted. The composition root
+	// (internal/app) projects the winning soul's content + soulMeta into the proto form
+	// (soulSnapshot) so the server adapter never reaches into the soul adapter or the
+	// composition-layer soulMeta type. nil when no soul source is wired (--no-soul or
+	// none present); a nil Soul makes capabilities().Soul false and GetSoul return an
+	// empty (present=false) snapshot.
+	Soul *mecatlv1.SoulInfo
+
+	// UserModel lists the CURRENT user-model entries, backing GetUserModel. Unlike
+	// Soul (a startup snapshot) it is a LIVE lister: the composition root closes over
+	// the user-model store's Index so a refresh reflects entries saved since startup.
+	// It is the same seam idiom as Commands. Optional and nil-safe: when nil (user
+	// model disabled) capabilities().UserModel is false and GetUserModel returns empty.
+	UserModel UserModelLister
 
 	// SessionEngine builds a PER-SESSION engine over client-provided streaming-HTTP
 	// MCP servers (the ACP session/new mcpServers). It is the seam that lets a
@@ -318,6 +338,8 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 		SlashCommands: s.cfg.Commands != nil,
 		Teams:         s.cfg.MemberEngine != nil,
 		Agents:        len(s.cfg.Agents) > 0,
+		Soul:          s.cfg.Soul != nil,
+		UserModel:     s.cfg.UserModel != nil,
 		Memory:        has(memory.RememberToolName),
 		Skills:        has(skills.ToolName),
 		Bash:          has(tools.BashToolName),
@@ -906,6 +928,70 @@ func (s *Service) ListAgents(_ context.Context) []*mecatlv1.AgentInfo {
 // It is a pure read of the injected snapshot; no live discovery.
 func (s *Service) ListSkills(_ context.Context) []*mecatlv1.SkillInfo {
 	return s.cfg.Skills
+}
+
+// --- Soul + user-model inspection --------------------------------------------
+
+// GetSoul returns the resolved soul (persona) snapshot (the build-time
+// projection injected via Config.Soul). It is a pure read of that snapshot; no
+// live re-read. When no soul source is wired it returns an empty snapshot
+// (present=false), never nil, so the wire adapters always have a SoulInfo to
+// serialize.
+func (s *Service) GetSoul(_ context.Context) *mecatlv1.SoulInfo {
+	if s.cfg.Soul == nil {
+		return &mecatlv1.SoulInfo{}
+	}
+	return s.cfg.Soul
+}
+
+// UserModelEntry is the surface-agnostic listing metadata for one user-model
+// fact (key + description, value omitted), mirroring tool.MemoryEntry's index
+// shape. The Service exposes its own type so the wire adapters and the
+// composition seam (UserModelLister) need not import the memory adapter.
+type UserModelEntry struct {
+	// Key is the entry's stable key.
+	Key string
+	// Description is the entry's one-line description.
+	Description string
+}
+
+// UserModelLister enumerates the CURRENT user-model entries (key + description,
+// value omitted). It is the composition-injected seam backing GetUserModel: the
+// composition root closes over the user-model store's Index so a fetch reflects
+// the live store state. It is read-only.
+type UserModelLister interface {
+	// List returns the user-model entries, key-sorted, or an error on a genuine
+	// store fault.
+	List(ctx context.Context) ([]UserModelEntry, error)
+}
+
+// GetUserModel returns the CURRENT user-model entries (a live read of the wired
+// lister) plus aggregate size + hash over the rendered "key — description" rows.
+// A nil lister (user model disabled) yields an empty response. A store fault is
+// returned as ErrInternal so the wire adapters surface it distinctly.
+func (s *Service) GetUserModel(ctx context.Context) (*mecatlv1.GetUserModelResponse, error) {
+	if s.cfg.UserModel == nil {
+		return &mecatlv1.GetUserModelResponse{}, nil
+	}
+	entries, err := s.cfg.UserModel.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: list user model: %v", ErrInternal, err)
+	}
+	out := make([]*mecatlv1.UserModelEntry, 0, len(entries))
+	var agg strings.Builder
+	for _, e := range entries {
+		out = append(out, &mecatlv1.UserModelEntry{Key: e.Key, Description: e.Description})
+		agg.WriteString(e.Key)
+		agg.WriteByte('\t')
+		agg.WriteString(e.Description)
+		agg.WriteByte('\n')
+	}
+	sum := sha256.Sum256([]byte(agg.String()))
+	return &mecatlv1.GetUserModelResponse{
+		Entries:   out,
+		SizeBytes: int64(agg.Len()),
+		Sha256:    hex.EncodeToString(sum[:]),
+	}, nil
 }
 
 // --- Slash command discovery -------------------------------------------------

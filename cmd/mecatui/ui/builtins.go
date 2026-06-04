@@ -30,10 +30,12 @@ type builtin struct {
 // definition inventory) only when the server advertises Agents AND an agents
 // collaborator is wired (agentsWired); /team (the live-team overlay) only when
 // the server advertises Teams; /skills only when the server advertises Skills
-// AND a skills collaborator is wired (skillsWired). The order is fixed
-// (clear, help, mcp, agents, team, skills) and locked by a test so the palette
-// ordering is stable.
-func builtinCommands(caps client.Capabilities, mcpWired, agentsWired, skillsWired bool) []builtin {
+// AND a skills collaborator is wired (skillsWired); /soul only when the server
+// advertises Soul AND a soul collaborator is wired (soulWired); /usermodel only
+// when the server advertises UserModel AND a user-model collaborator is wired
+// (userModelWired). The order is fixed (clear, help, mcp, agents, team, skills,
+// soul, usermodel) and locked by a test so the palette ordering is stable.
+func builtinCommands(caps client.Capabilities, mcpWired, agentsWired, skillsWired, soulWired, userModelWired bool) []builtin {
 	out := []builtin{
 		{
 			name: "clear",
@@ -74,14 +76,28 @@ func builtinCommands(caps client.Capabilities, mcpWired, agentsWired, skillsWire
 			run:  Model.runSkills,
 		})
 	}
+	if caps.Soul && soulWired {
+		out = append(out, builtin{
+			name: "soul",
+			desc: "inspect the persona (read-only)",
+			run:  Model.runSoul,
+		})
+	}
+	if caps.UserModel && userModelWired {
+		out = append(out, builtin{
+			name: "usermodel",
+			desc: "inspect the user model (read-only)",
+			run:  Model.runUserModel,
+		})
+	}
 	return out
 }
 
 // builtinByName looks up a built-in by name within the caps-filtered set, for
 // dispatch. ok is false when no built-in by that name is currently registered
 // (either unknown, or gated off on this server).
-func builtinByName(caps client.Capabilities, mcpWired, agentsWired, skillsWired bool, name string) (builtin, bool) {
-	for _, b := range builtinCommands(caps, mcpWired, agentsWired, skillsWired) {
+func builtinByName(caps client.Capabilities, mcpWired, agentsWired, skillsWired, soulWired, userModelWired bool, name string) (builtin, bool) {
+	for _, b := range builtinCommands(caps, mcpWired, agentsWired, skillsWired, soulWired, userModelWired) {
 		if b.name == name {
 			return b, true
 		}
@@ -139,4 +155,18 @@ func (m Model) runTeam() (tea.Model, tea.Cmd) {
 // belt-and-braces here.
 func (m Model) runSkills() (tea.Model, tea.Cmd) {
 	return m.openSkills()
+}
+
+// runSoul opens the read-only soul (persona) inspection panel. Only registered
+// when caps.Soul && the soul collaborator is wired, so openSoul's own nil/idle
+// guards are belt-and-braces here.
+func (m Model) runSoul() (tea.Model, tea.Cmd) {
+	return m.openSoul()
+}
+
+// runUserModel opens the read-only user-model inspection panel. Only registered
+// when caps.UserModel && the user-model collaborator is wired, so openUserModel's
+// own nil/idle guards are belt-and-braces here.
+func (m Model) runUserModel() (tea.Model, tea.Cmd) {
+	return m.openUserModel()
 }

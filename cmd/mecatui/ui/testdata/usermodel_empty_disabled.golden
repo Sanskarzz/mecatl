@@ -1,0 +1,30 @@
+ mecatui  ·  session sess-test-00  ·  mock-model  ·  mode default  ·  127.0.0.1:8080
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+      ┃                                                                                      ┃
+      ┃  User model (operator facts)                                                         ┃
+      ┃                                                                                      ┃
+      ┃  The user model is not enabled on this server.                                       ┃
+      ┃  Run a mecated without --no-user-model (and with an XDG/home to resolve the store).  ┃
+      ┃                                                                                      ┃
+      ┃  the agent curates this · Recall loads a fact's value · esc close                    ┃
+      ┃                                                                                      ┃
+      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+
+
+
+
+
+┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
+┃
+┃
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ connected                                                                   ctx 0 · ↑0 ↓0 cache 0%
+? help · / commands · ctrl+c quit

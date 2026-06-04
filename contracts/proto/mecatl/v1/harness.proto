@@ -98,6 +98,21 @@ service HarnessService {
   // a skill remains a run-path concern (the Skill tool reads the body).
   rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
 
+  // GetSoul returns the resolved soul (user-scoped persona) BUILD-TIME SNAPSHOT:
+  // the selected soul's content + size/hash + provenance (user/project) + trust
+  // and drift state. The soul is selected once at startup (USER-wins precedence,
+  // project trust gate, drift check — issue #14 Phase 3 Items 1+2), so this is a
+  // pure read of that snapshot, never a live re-read. Read-only inspection: it
+  // never mutates the soul (the agent-read-only invariant).
+  rpc GetSoul(GetSoulRequest) returns (GetSoulResponse);
+
+  // GetUserModel returns the CURRENT user-model entries (durable FACTS about the
+  // operator): each entry's key + one-line description, plus an aggregate size +
+  // hash. Unlike GetSoul (a startup snapshot) this is a LIVE read of the
+  // user-model store's index, so it reflects entries the agent has saved since
+  // startup. Metadata only — the per-entry values are omitted (Recall loads them).
+  rpc GetUserModel(GetUserModelRequest) returns (GetUserModelResponse);
+
   // --- Agent teams (experimental) -----------------------------------------
   //
   // A team is a set of long-lived member sessions that coordinate through a
@@ -208,6 +223,12 @@ message ServerCapabilities {
   // run-path member-engine): defs can be browsable without teams enabled.
   // Gates the /agents definition-inventory panel.
   bool agents = 9;
+  // soul is true when a soul source is wired (a soul was selected at startup, so
+  // GetSoul returns its snapshot). Gates the /soul read-only inspection panel.
+  bool soul = 10;
+  // user_model is true when the user-model store is wired (GetUserModel reads its
+  // live index). Gates the /usermodel read-only inspection panel.
+  bool user_model = 11;
 }
 
 // CreateSessionResponse carries the newly-allocated session id.
@@ -886,6 +907,86 @@ message ListSkillsRequest {}
 message ListSkillsResponse {
   // skills are the (possibly empty) discovered skills, name-sorted.
   repeated SkillInfo skills = 1;
+}
+
+// --- Soul (persona) inspection ----------------------------------------------
+
+// SoulProvenance records WHERE the selected soul originated, mirroring the
+// composition-layer soulProvenance. It is a read-only attribution for the /soul
+// inspection panel; it never affects execution.
+enum SoulProvenance {
+  // SOUL_PROVENANCE_UNSPECIFIED means no soul was selected (none present, an
+  // untrusted project soul was dropped, or --no-soul).
+  SOUL_PROVENANCE_UNSPECIFIED = 0;
+  // SOUL_PROVENANCE_USER is the user-scoped soul (always trusted).
+  SOUL_PROVENANCE_USER = 1;
+  // SOUL_PROVENANCE_PROJECT is the project-scoped <workspace>/.mecatl/soul.md
+  // (selected only with --trust-project).
+  SOUL_PROVENANCE_PROJECT = 2;
+}
+
+// SoulInfo is the BUILD-TIME SNAPSHOT of the resolved soul: the selected soul's
+// content plus its provenance/trust/drift metadata. It mirrors the
+// composition-layer soulMeta + the loaded body. It carries NO write path — the
+// soul is agent-read-only; this is purely for the /soul inspection panel. When
+// no soul was selected (present=false) the content/hash are empty but provenance
+// may still report a DROPPED untrusted project soul (trusted=false).
+message SoulInfo {
+  // content is the selected soul's clean body (the bytes that reach the prompt),
+  // capped server-side at the soul byte ceiling (20 KiB). Empty when none.
+  string content = 1;
+  // size_bytes is the byte length of content, or 0 for none.
+  int64 size_bytes = 2;
+  // sha256 is the lowercase-hex SHA-256 of content, or "" for none.
+  string sha256 = 3;
+  // present is true when a soul fragment WILL be contributed this run.
+  bool present = 4;
+  // provenance is where the selected (or dropped) soul came from.
+  SoulProvenance provenance = 5;
+  // trusted reflects whether the soul's provenance is trusted (a user soul always
+  // is; a project soul only with --trust-project).
+  bool trusted = 6;
+  // drifted is true when the selected soul's content hash differs from its
+  // recorded baseline (informational; a drifted soul still loads unless strict).
+  bool drifted = 7;
+}
+
+// GetSoulRequest requests the resolved soul snapshot.
+message GetSoulRequest {}
+
+// GetSoulResponse carries the resolved soul snapshot.
+message GetSoulResponse {
+  // soul is the resolved soul snapshot. Never nil; present=false when no soul was
+  // selected.
+  SoulInfo soul = 1;
+}
+
+// --- User-model inspection --------------------------------------------------
+
+// UserModelEntry is one user-model fact's listing metadata: its key + a one-line
+// description. The per-entry VALUE is omitted (Recall loads it) — discovery is
+// metadata only.
+message UserModelEntry {
+  // key is the entry's stable key.
+  string key = 1;
+  // description is the entry's one-line description (explicit, else derived).
+  string description = 2;
+}
+
+// GetUserModelRequest requests the current user-model index.
+message GetUserModelRequest {}
+
+// GetUserModelResponse carries the current user-model entries plus aggregate
+// metadata. The entries reflect the LIVE store index at request time.
+message GetUserModelResponse {
+  // entries are the current user-model entries, key-sorted.
+  repeated UserModelEntry entries = 1;
+  // size_bytes is the aggregate byte length of the rendered entries (key +
+  // description), an at-a-glance footprint indicator.
+  int64 size_bytes = 2;
+  // sha256 is the lowercase-hex SHA-256 over the rendered entries, so a client
+  // can tell at a glance whether the user model changed between fetches.
+  string sha256 = 3;
 }
 
 // --- Agent team messages ----------------------------------------------------

@@ -103,6 +103,8 @@ func run(args []string) error {
 		Cmds:      cl,
 		Skills:    cl,
 		Agents:    cl,
+		Soul:      cl,
+		UserModel: cl,
 		Clipboard: client.NewClipboard(),
 		Theme:     th,
 		Server:    target,

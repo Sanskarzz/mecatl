@@ -48,6 +48,8 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h.mux.HandleFunc("GET /v1/mcp/toolhive/groups", h.listToolHiveGroups)
 	h.mux.HandleFunc("GET /v1/agents", h.listAgents)
 	h.mux.HandleFunc("GET /v1/skills", h.listSkills)
+	h.mux.HandleFunc("GET /v1/soul", h.getSoul)
+	h.mux.HandleFunc("GET /v1/usermodel", h.getUserModel)
 	h.mux.HandleFunc("GET /v1/commands", h.listCommands)
 	h.mux.HandleFunc("POST /v1/teams", h.createTeam)
 	h.mux.HandleFunc("POST /v1/teams/{id}/members", h.spawnTeammate)
@@ -675,6 +677,21 @@ func (h *HTTPHandler) listAgents(w http.ResponseWriter, r *http.Request) {
 // listSkills handles GET /v1/skills.
 func (h *HTTPHandler) listSkills(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, &mecatlv1.ListSkillsResponse{Skills: h.svc.ListSkills(r.Context())})
+}
+
+// getSoul handles GET /v1/soul.
+func (h *HTTPHandler) getSoul(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, &mecatlv1.GetSoulResponse{Soul: h.svc.GetSoul(r.Context())})
+}
+
+// getUserModel handles GET /v1/usermodel.
+func (h *HTTPHandler) getUserModel(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.svc.GetUserModel(r.Context())
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // listCommands handles GET /v1/commands?workspace=.

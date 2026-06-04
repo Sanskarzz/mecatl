@@ -232,6 +232,20 @@ func (h *HarnessServer) ListSkills(ctx context.Context, _ *mecatlv1.ListSkillsRe
 	return &mecatlv1.ListSkillsResponse{Skills: h.svc.ListSkills(ctx)}, nil
 }
 
+// GetSoul returns the resolved soul (persona) snapshot.
+func (h *HarnessServer) GetSoul(ctx context.Context, _ *mecatlv1.GetSoulRequest) (*mecatlv1.GetSoulResponse, error) {
+	return &mecatlv1.GetSoulResponse{Soul: h.svc.GetSoul(ctx)}, nil
+}
+
+// GetUserModel returns the current user-model index snapshot.
+func (h *HarnessServer) GetUserModel(ctx context.Context, _ *mecatlv1.GetUserModelRequest) (*mecatlv1.GetUserModelResponse, error) {
+	resp, err := h.svc.GetUserModel(ctx)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return resp, nil
+}
+
 // ListCommands returns the available slash commands for the requested workspace.
 func (h *HarnessServer) ListCommands(ctx context.Context, req *mecatlv1.ListCommandsRequest) (*mecatlv1.ListCommandsResponse, error) {
 	cmds, err := h.svc.ListCommands(ctx, req.GetWorkspace())

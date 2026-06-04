@@ -39,12 +39,14 @@ type Converser interface {
 // imports client + theme only — never contracts/gen or any internal/... package;
 // all proto contact happens behind Converser/SessionCreator.
 type Deps struct {
-	Session SessionCreator
-	Conv    Converser
-	MCP     client.MCP         // MCP/ToolHive inventory + resources/prompts; nil disables the overlay
-	Cmds    client.Commander   // slash-command discovery for the input palette; nil disables it
-	Skills  client.SkillLister // skills-inventory discovery for the /skills panel; nil disables it
-	Agents  client.AgentLister // agent-definition discovery for the /agents panel; nil disables it
+	Session   SessionCreator
+	Conv      Converser
+	MCP       client.MCP             // MCP/ToolHive inventory + resources/prompts; nil disables the overlay
+	Cmds      client.Commander       // slash-command discovery for the input palette; nil disables it
+	Skills    client.SkillLister     // skills-inventory discovery for the /skills panel; nil disables it
+	Agents    client.AgentLister     // agent-definition discovery for the /agents panel; nil disables it
+	Soul      client.SoulFetcher     // soul (persona) inspection for the /soul panel; nil disables it
+	UserModel client.UserModelLister // user-model inspection for the /usermodel panel; nil disables it
 	// Clipboard reads the OS clipboard for ctrl+v paste (image-first, text-fallback).
 	// nil cleanly disables ctrl+v image paste (same convention as nil MCP/Cmds);
 	// main.go populates it with client.NewClipboard().
@@ -174,6 +176,8 @@ type Model struct {
 	queuePaused  string         // non-empty when a run ended on a non-clean stop with a non-empty queue: the stop reason holding the queue (see drainQueue/renderQueue)
 	team         teamState      // live agent-team overlay state (view==teamNone when closed)
 	agentsInv    agentsInvState // agent-definition inventory overlay state (view==agentsInvNone when closed)
+	soul         soulState      // soul (persona) inspection overlay state (view==soulNone when closed)
+	userModel    userModelState // user-model inspection overlay state (view==userModelNone when closed)
 	showHelp     bool           // the "?" keys-&-features overlay is open (caps-driven; see help.go)
 	stream       *client.Stream // current run's stream
 	cancelRun    context.CancelFunc

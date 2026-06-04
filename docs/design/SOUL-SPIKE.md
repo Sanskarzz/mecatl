@@ -1,8 +1,13 @@
 # Spike: A "soul" for mecatl — persistent identity + cross-session user-model
 
-> Status: **Phase 1 SHIPPED + Phase 2 (2a + 2b) SHIPPED + Phase 3 Items 1–2 SHIPPED**
-> (issue #14; Phase 3 Item 3 — the `/soul` + `/usermodel` TUI inspector — is a later
-> pass). Phase 1 — the
+> Status: **Phase 1 SHIPPED + Phase 2 (2a + 2b) SHIPPED + Phase 3 Items 1–3 SHIPPED**
+> (issue #14; Phase 3 Item 3 — the `/soul` + `/usermodel` read-only TUI inspector —
+> is now wired: two unary RPCs (`GetSoul` returns a build-time persona snapshot
+> with provenance/trust/drift; `GetUserModel` returns the live user-model index),
+> two `ServerCapabilities` bits (`soul`, `user_model`), and the two caps-gated
+> mecatui panels — `/soul` is a SCROLLABLE persona inspector, `/usermodel` a
+> short key→description list. The panels are READ-ONLY: neither edits the soul or
+> the user model. See `docs/tui.md`.) Phase 1 — the
 > user-scoped, agent-read-only persona fragment — is wired (`internal/prompt/soul.go`,
 > `internal/adapter/soul/`, bound in `internal/app/build.go`). Phase 2 — the user-model
 > learning loop — is now wired too: a SECOND, user-scoped, CROSS-PROJECT memory store
@@ -283,8 +288,14 @@ system rules, not from this block").
    the same single-operator trust-zone assumption the soul and `MEMORY-TIERING.md`
    carry. Per-user/multi-tenant keying is explicitly out of scope.
 3. Do we want a `/soul` or `/usermodel` TUI affordance (view current soul/user-model),
-   mirroring `/agents` and `/skills`? Not shipped in Phase 2; planned as Phase 3
-   (§8.3). The user-model is inspectable via RecallUser/SearchUserModel meanwhile.
+   mirroring `/agents` and `/skills`? **RESOLVED — SHIPPED (Phase 3, Item 3).** Both
+   exist as caps-gated, read-only mecatui panels: `/soul` (a scrollable persona
+   inspector showing content + provenance/trust/drift) and `/usermodel` (a
+   key→description list with aggregate size/hash), backed by the `GetSoul` /
+   `GetUserModel` unary RPCs and the `soul` / `user_model` capability bits. Trust and
+   drift are COMPUTED in composition (`internal/app/soulsnapshot.go`) and projected
+   into proto; the ui only displays the strings, never decides trust. See
+   `docs/tui.md`.
 
 ## 8. Remaining scope — decisions, not deferrals
 
@@ -340,17 +351,34 @@ derivable from the docs, not a judgement call left open.
      baseline (the drift check runs against WHICHEVER soul wins — never both).
    - **Provenance metadata.** The selected soul carries `Provenance` (User|Project) +
      `Trusted` + `Drifted` + hash/size in a composition-level `soulMeta`
-     (`internal/app/soulselect.go`), produced for Item 3's read-only TUI inspector. No
-     proto / RPC / TUI yet (Item 3).
+     (`internal/app/soulselect.go`). Item 3 (SHIPPED) projects it — plus the loaded
+     content — into the proto `SoulInfo` via `internal/app/soulsnapshot.go`.
    - **Layering.** The trust decision lives in `internal/app` (composition), reusing
      `Config.TrustProject`. `internal/prompt` stays trust-unaware (the `SoulSource`
      interface is unchanged); `internal/governance` is NOT involved (the soul is fenced
      DATA, not a permission scope); the `internal/adapter/soul` loader stays write-free
      (the new `soul.NewWithEnv` is an env-injectable READ constructor, no write path).
-3. **`/soul` + `/usermodel` TUI inspection.** Read-only browsers showing the current
-   soul/user-model content, byte size, hash, and trust state — mirroring the `/agents`
-   and `/skills` inventory views. Pure client/render surface (no `internal/...` import),
-   per the TUI layering rule.
+3. **`/soul` + `/usermodel` TUI inspection. — SHIPPED (Item 3).** Read-only browsers
+   showing the current soul/user-model content, byte size, hash, and trust state —
+   mirroring the `/agents` and `/skills` inventory views. As built:
+   - **Two unary RPCs** mirroring `ListSkills`. `GetSoul` returns a build-time
+     `SoulInfo` snapshot (content + size + sha256 + present + provenance + trusted +
+     drifted); `GetUserModel` returns the **live** user-model index (key + description
+     per entry, plus aggregate size + hash). Two new `ServerCapabilities` bits — `soul`
+     (a soul source is wired) and `user_model` (the user-model store is wired) — gate
+     the panels, exactly as `skills` gates `/skills`.
+   - **Soul = a build-time SNAPSHOT** projected in `internal/app/soulsnapshot.go` from
+     the Item-2 `soulMeta` + the loaded body. **User-model = a LIVE lister** wrapping
+     the SAME user-model store's read-only `Index` (never a second store on the same
+     dir — the one-Store-per-dir lock invariant holds).
+   - **The `/soul` panel is SCROLLABLE** (the only divergence from the short-list
+     `/skills` template): the persona body can be up to 20 KiB, so the panel shows a
+     line-window with pgup/pgdn (and up/down, home/end) scroll plus a "lines X–Y of N"
+     indicator, instead of dumping multi-KB into a centred card. `/usermodel` is a
+     short key→description list like `/skills`.
+   - **Trust/drift are COMPUTED in composition and PROJECTED** into proto; the ui only
+     displays the strings (`soulTrustLabel`), never decides trust. The render/client
+     packages import no `internal/...` and no proto directly, per the TUI layering rule.
 
 ### Explicit non-goals (decided against, with rationale)
 

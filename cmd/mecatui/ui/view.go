@@ -66,6 +66,10 @@ func (m Model) View() tea.View {
 		body = renderAgentsInvOverlay(m.deps.Theme, m.agentsInv, m.caps, m.width, m.vp.Height())
 	case m.skills.view != skillsNone:
 		body = renderSkillsOverlay(m.deps.Theme, m.skills, m.caps, m.width, m.vp.Height())
+	case m.soul.view != soulNone:
+		body = renderSoulOverlay(m.deps.Theme, m.soul, m.caps, m.width, m.vp.Height())
+	case m.userModel.view != userModelNone:
+		body = renderUserModelOverlay(m.deps.Theme, m.userModel, m.caps, m.width, m.vp.Height())
 	case m.phase == phaseIdle && m.conv.isEmpty():
 		// First-run zero-state: a welcome card in the empty viewport. Not an overlay
 		// (claims no keyboard); typing flows over it and it vanishes on the first block.

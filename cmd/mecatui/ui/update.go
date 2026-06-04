@@ -171,6 +171,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if mm, handled := m.updateAgentsInvMsg(msg); handled {
 			return mm, nil
 		}
+		// Soul (persona) inspection result/error msg; fall through if not a SoulMsg.
+		if mm, handled := m.updateSoulMsg(msg); handled {
+			return mm, nil
+		}
+		// User-model inspection result/error msg; fall through if not a UserModelMsg.
+		if mm, handled := m.updateUserModelMsg(msg); handled {
+			return mm, nil
+		}
 		// Stream events (session.init / turn.start / deltas / tool.* /
 		// permission.ask / hook / compaction / result) are handled separately to
 		// keep this reducer's branch count in check.
@@ -459,6 +467,19 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// An open skills overlay likewise owns the keyboard (idle-only). It is
 	// read-only — esc closes it internally — so route here before the phase switch.
 	if mm, cmd, handled := m.onSkillsKey(msg); handled {
+		return mm, cmd
+	}
+
+	// An open soul overlay owns the keyboard (idle-only): esc closes it, the scroll
+	// keys page its content, everything else is swallowed. Routed here before the
+	// phase switch, like the other read-only inventory overlays.
+	if mm, cmd, handled := m.onSoulKey(msg); handled {
+		return mm, cmd
+	}
+
+	// An open user-model overlay likewise owns the keyboard (idle-only). It is
+	// read-only — esc closes it internally — so route here before the phase switch.
+	if mm, cmd, handled := m.onUserModelKey(msg); handled {
 		return mm, cmd
 	}
 
@@ -888,7 +909,7 @@ func (m Model) runSelectedBuiltin() (tea.Model, tea.Cmd, bool) {
 	if !row.Builtin {
 		return m, nil, false
 	}
-	b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, row.Name)
+	b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, m.deps.Soul != nil, m.deps.UserModel != nil, row.Name)
 	if !found {
 		return m, nil, false
 	}
@@ -936,7 +957,7 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	// "/name arg" line has a space → commandPrefix is false → also falls through
 	// (workspace commands expand server-side from the full line).
 	if name, ok := commandPrefix(text); ok {
-		if b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, name); found {
+		if b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, m.deps.Soul != nil, m.deps.UserModel != nil, name); found {
 			m.ta.Reset()
 			return b.run(m)
 		}

@@ -55,6 +55,8 @@ const (
 	HarnessService_ListAgents_FullMethodName          = "/mecatl.v1.HarnessService/ListAgents"
 	HarnessService_ListCommands_FullMethodName        = "/mecatl.v1.HarnessService/ListCommands"
 	HarnessService_ListSkills_FullMethodName          = "/mecatl.v1.HarnessService/ListSkills"
+	HarnessService_GetSoul_FullMethodName             = "/mecatl.v1.HarnessService/GetSoul"
+	HarnessService_GetUserModel_FullMethodName        = "/mecatl.v1.HarnessService/GetUserModel"
 	HarnessService_CreateTeam_FullMethodName          = "/mecatl.v1.HarnessService/CreateTeam"
 	HarnessService_SpawnTeammate_FullMethodName       = "/mecatl.v1.HarnessService/SpawnTeammate"
 	HarnessService_SendTeammateMessage_FullMethodName = "/mecatl.v1.HarnessService/SendTeammateMessage"
@@ -125,6 +127,19 @@ type HarnessServiceClient interface {
 	// process lifetime); it performs no live discovery. Metadata only — activating
 	// a skill remains a run-path concern (the Skill tool reads the body).
 	ListSkills(ctx context.Context, in *ListSkillsRequest, opts ...grpc.CallOption) (*ListSkillsResponse, error)
+	// GetSoul returns the resolved soul (user-scoped persona) BUILD-TIME SNAPSHOT:
+	// the selected soul's content + size/hash + provenance (user/project) + trust
+	// and drift state. The soul is selected once at startup (USER-wins precedence,
+	// project trust gate, drift check — issue #14 Phase 3 Items 1+2), so this is a
+	// pure read of that snapshot, never a live re-read. Read-only inspection: it
+	// never mutates the soul (the agent-read-only invariant).
+	GetSoul(ctx context.Context, in *GetSoulRequest, opts ...grpc.CallOption) (*GetSoulResponse, error)
+	// GetUserModel returns the CURRENT user-model entries (durable FACTS about the
+	// operator): each entry's key + one-line description, plus an aggregate size +
+	// hash. Unlike GetSoul (a startup snapshot) this is a LIVE read of the
+	// user-model store's index, so it reflects entries the agent has saved since
+	// startup. Metadata only — the per-entry values are omitted (Recall loads them).
+	GetUserModel(ctx context.Context, in *GetUserModelRequest, opts ...grpc.CallOption) (*GetUserModelResponse, error)
 	// CreateTeam allocates a new agent team and returns its id, optionally enrolling
 	// an initial roster in the same atomic call. Members may also be added afterwards
 	// with SpawnTeammate; the team is then driven with RunTeam.
@@ -287,6 +302,26 @@ func (c *harnessServiceClient) ListSkills(ctx context.Context, in *ListSkillsReq
 	return out, nil
 }
 
+func (c *harnessServiceClient) GetSoul(ctx context.Context, in *GetSoulRequest, opts ...grpc.CallOption) (*GetSoulResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSoulResponse)
+	err := c.cc.Invoke(ctx, HarnessService_GetSoul_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessServiceClient) GetUserModel(ctx context.Context, in *GetUserModelRequest, opts ...grpc.CallOption) (*GetUserModelResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetUserModelResponse)
+	err := c.cc.Invoke(ctx, HarnessService_GetUserModel_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *harnessServiceClient) CreateTeam(ctx context.Context, in *CreateTeamRequest, opts ...grpc.CallOption) (*CreateTeamResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateTeamResponse)
@@ -418,6 +453,19 @@ type HarnessServiceServer interface {
 	// process lifetime); it performs no live discovery. Metadata only — activating
 	// a skill remains a run-path concern (the Skill tool reads the body).
 	ListSkills(context.Context, *ListSkillsRequest) (*ListSkillsResponse, error)
+	// GetSoul returns the resolved soul (user-scoped persona) BUILD-TIME SNAPSHOT:
+	// the selected soul's content + size/hash + provenance (user/project) + trust
+	// and drift state. The soul is selected once at startup (USER-wins precedence,
+	// project trust gate, drift check — issue #14 Phase 3 Items 1+2), so this is a
+	// pure read of that snapshot, never a live re-read. Read-only inspection: it
+	// never mutates the soul (the agent-read-only invariant).
+	GetSoul(context.Context, *GetSoulRequest) (*GetSoulResponse, error)
+	// GetUserModel returns the CURRENT user-model entries (durable FACTS about the
+	// operator): each entry's key + one-line description, plus an aggregate size +
+	// hash. Unlike GetSoul (a startup snapshot) this is a LIVE read of the
+	// user-model store's index, so it reflects entries the agent has saved since
+	// startup. Metadata only — the per-entry values are omitted (Recall loads them).
+	GetUserModel(context.Context, *GetUserModelRequest) (*GetUserModelResponse, error)
 	// CreateTeam allocates a new agent team and returns its id, optionally enrolling
 	// an initial roster in the same atomic call. Members may also be added afterwards
 	// with SpawnTeammate; the team is then driven with RunTeam.
@@ -485,6 +533,12 @@ func (UnimplementedHarnessServiceServer) ListCommands(context.Context, *ListComm
 }
 func (UnimplementedHarnessServiceServer) ListSkills(context.Context, *ListSkillsRequest) (*ListSkillsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListSkills not implemented")
+}
+func (UnimplementedHarnessServiceServer) GetSoul(context.Context, *GetSoulRequest) (*GetSoulResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSoul not implemented")
+}
+func (UnimplementedHarnessServiceServer) GetUserModel(context.Context, *GetUserModelRequest) (*GetUserModelResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetUserModel not implemented")
 }
 func (UnimplementedHarnessServiceServer) CreateTeam(context.Context, *CreateTeamRequest) (*CreateTeamResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateTeam not implemented")
@@ -748,6 +802,42 @@ func _HarnessService_ListSkills_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HarnessService_GetSoul_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSoulRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).GetSoul(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_GetSoul_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).GetSoul(ctx, req.(*GetSoulRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessService_GetUserModel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetUserModelRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).GetUserModel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_GetUserModel_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).GetUserModel(ctx, req.(*GetUserModelRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _HarnessService_CreateTeam_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateTeamRequest)
 	if err := dec(in); err != nil {
@@ -903,6 +993,14 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListSkills",
 			Handler:    _HarnessService_ListSkills_Handler,
+		},
+		{
+			MethodName: "GetSoul",
+			Handler:    _HarnessService_GetSoul_Handler,
+		},
+		{
+			MethodName: "GetUserModel",
+			Handler:    _HarnessService_GetUserModel_Handler,
 		},
 		{
 			MethodName: "CreateTeam",
