@@ -107,12 +107,17 @@ palette with a set of commands the TUI itself ships — independent of workspace
 dirs and even when server slash-command expansion is off. `/clear` (reset the
 conversation and scrollback) and `/help` (open the keys-&-features overlay) are
 *always* available because they act purely on the TUI's own state; `/mcp` (browse
-the MCP inventory), `/agents` (the agent-team overlay), and `/skills` (browse the
-skills inventory) appear only when the connected server advertises those
-capabilities (and, for `/mcp`/`/skills`, the matching client collaborator is
-wired). These never reach the model — a
-bare built-in line is intercepted and run locally. (`/compact` is a planned
-follow-up: it needs a server RPC that does not exist yet.)
+the MCP inventory), `/agents` (browse the agent-definition inventory — the
+resolved registry the `Task` tool routes delegations to), `/team` (the live
+agent-team overlay, also on `ctrl+a`), and `/skills` (browse the skills
+inventory) appear only when the connected server advertises those capabilities
+(and, for `/mcp`/`/agents`/`/skills`, the matching client collaborator is wired).
+`/agents` and `/team` are distinct: `/agents` is the **definition inventory** (a
+palette-only `ListAgents` snapshot, gated on `caps.agents`), while `/team` opens
+the **live overlay** of a team that has actually run (gated on `caps.teams`).
+These never reach the model — a bare built-in line is intercepted and run
+locally. (`/compact` is a planned follow-up: it needs a server RPC that does not
+exist yet.)
 
 **Workspace slash commands are ON by default** on top of the built-ins, expanding
 `/<name>` inputs from the conventional workspace dirs `.mecatl/commands` and
@@ -203,13 +208,17 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 | in the permission modal: `←`/`→`/`tab` | toggle the focused button |
 | `pgup` / `pgdn` | scroll the conversation |
 | `?` | help overlay (on an empty prompt) |
-| `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/skills`; plus workspace commands) |
+| `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`; plus workspace commands) |
+| `ctrl+a` | open the **live agent-team overlay** (the full roster + per-member focus of the most-recent team) — works **while idle and mid-run**; inert under a permission modal. Same surface as `/team`. |
 | `@` | file-mention menu — complete a workspace path, then attach it on submit (see below) |
 
 The `?` overlay enumerates the rest of the chords — `ctrl+v` (paste a clipboard
 image), `ctrl+o`/`ctrl+r`/`ctrl+p` (MCP inventory / resources / prompts), `ctrl+a`
-(agent team), `ctrl+t` (expand/collapse details) — and greys out any whose feature
-the connected server has not enabled (driven by the server's relayed capabilities).
+(live agent-team overlay, available idle **and** mid-run), `ctrl+t`
+(expand/collapse details) — and greys out any whose feature the connected server
+has not enabled (driven by the server's relayed capabilities). When the server
+serves agent definitions (`caps.agents`), it also notes that `/agents` browses the
+definition inventory.
 
 ### Type-while-running and queued follow-ups
 

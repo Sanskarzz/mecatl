@@ -178,6 +178,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if mm, handled := m.updateSkillsMsg(msg); handled {
 			return mm, nil
 		}
+		// Agent-definition inventory result/error msg is reduced next; if it's not an
+		// AgentsMsg, fall through. Like the skills panel it fires no follow-up command.
+		if mm, handled := m.updateAgentsInvMsg(msg); handled {
+			return mm, nil
+		}
 		// Stream events (session.init / turn.start / deltas / tool.* /
 		// permission.ask / hook / compaction / result) are handled separately to
 		// keep this reducer's branch count in check.
@@ -391,10 +396,18 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return mm, cmd
 	}
 
-	// An open agent-team overlay likewise owns the keyboard (idle-only). It steps
-	// back from focus → roster → closed on esc internally, so route here before the
-	// phase switch (and before the ctrl+t toggle, so esc/enter belong to it).
-	if mm, cmd, handled := m.onAgentsKey(msg); handled {
+	// An open live agent-team overlay likewise owns the keyboard. It can open while
+	// idle OR mid-run (Gap B), and it steps back from focus → roster → closed on esc
+	// internally, so route here before the phase switch (and before the ctrl+t
+	// toggle, so esc/enter belong to it).
+	if mm, cmd, handled := m.onTeamKey(msg); handled {
+		return mm, cmd
+	}
+
+	// An open agent-definition inventory overlay likewise owns the keyboard
+	// (idle-only). It is read-only — esc closes it internally — so route here before
+	// the phase switch.
+	if mm, cmd, handled := m.onAgentsInvKey(msg); handled {
 		return mm, cmd
 	}
 
@@ -501,7 +514,7 @@ func (m Model) onQuitDisarm(msg quitDisarmMsg) (tea.Model, tea.Cmd) {
 // (e.g. pasting "/cl" opens the palette) — the same funnel typed input uses.
 func (m Model) onPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	if m.showHelp || m.phase == phaseAwaitingApproval ||
-		m.mcp.view != mcpNone || m.agents.view != agentsNone {
+		m.mcp.view != mcpNone || m.team.view != teamNone || m.agentsInv.view != agentsInvNone {
 		return m, nil
 	}
 	if m.phase != phaseIdle && m.phase != phaseRunning {
@@ -609,6 +622,12 @@ func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch {
+	case key.Matches(msg, m.keys.Agents):
+		// ctrl+a opens the live agent-team overlay MID-RUN (Gap B): the deep view is
+		// most useful while the team streams. openTeam permits phaseRunning and reads
+		// the live lanes; pre-empt the textarea default so the keypress drives the
+		// overlay, never the input.
+		return m.openTeam()
 	case key.Matches(msg, m.keys.Cancel):
 		if strings.TrimSpace(m.ta.Value()) != "" {
 			// Staged-but-unsent input: esc clears it first (mirrors a text editor's
@@ -717,7 +736,7 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Prompts):
 		return m.openMCP(mcpPrompts)
 	case key.Matches(msg, m.keys.Agents):
-		return m.openAgents()
+		return m.openTeam()
 	case key.Matches(msg, m.keys.Cancel) && m.queuePaused != "":
 		// A run ended on a non-clean stop with staged follow-ups still queued (the
 		// paused state). Mirror the running-phase esc layering: a non-empty input is
@@ -818,7 +837,7 @@ func (m Model) runSelectedBuiltin() (tea.Model, tea.Cmd, bool) {
 	if !row.Builtin {
 		return m, nil, false
 	}
-	b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Skills != nil, row.Name)
+	b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, row.Name)
 	if !found {
 		return m, nil, false
 	}
@@ -866,7 +885,7 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	// "/name arg" line has a space → commandPrefix is false → also falls through
 	// (workspace commands expand server-side from the full line).
 	if name, ok := commandPrefix(text); ok {
-		if b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Skills != nil, name); found {
+		if b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, name); found {
 			m.ta.Reset()
 			return b.run(m)
 		}

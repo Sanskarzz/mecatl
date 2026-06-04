@@ -98,13 +98,14 @@ func renderSkillsOverlay(th theme.Theme, st skillsState, caps client.Capabilitie
 	return centerCard(th, renderSkillsPanel(th, st, caps, width), width, height)
 }
 
-// skillsTextWidth is the column budget for wrapping server-derived skill text
-// (descriptions and the error line) to the card's inner width: the terminal width
-// minus the askCard chrome (border + horizontal padding) and a centering margin,
-// capped so lines stay readable on very wide terminals. A non-positive or very
-// narrow terminal returns 0, which disables wrapping so an unknown size renders
-// the bare, content-sized card like the other overlays do.
-func skillsTextWidth(width int) int {
+// cardTextWidth is the column budget for wrapping server-derived overlay text
+// (skill/agent descriptions, metadata lines, error lines) to a centred card's
+// inner width: the terminal width minus the askCard chrome (border + horizontal
+// padding) and a centering margin, capped so lines stay readable on very wide
+// terminals. A non-positive or very narrow terminal returns 0, which disables
+// wrapping so an unknown size renders the bare, content-sized card like the other
+// overlays do. Shared by the /skills and /agents inventory panels.
+func cardTextWidth(width int) int {
 	const (
 		chrome = 6   // askCard border(2) + horizontal padding(2*2)
 		margin = 4   // breathing room so the centered card isn't flush to the edge
@@ -162,7 +163,7 @@ func renderSkillsPanel(th theme.Theme, st skillsState, caps client.Capabilities,
 	var b strings.Builder
 	b.WriteString(th.Style("askTitle").Render("Skills inventory") + "\n\n")
 
-	budget := skillsTextWidth(width)
+	budget := cardTextWidth(width)
 	switch {
 	case st.loading:
 		b.WriteString(th.Style("muted").Render("loading…") + "\n")

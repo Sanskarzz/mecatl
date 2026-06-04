@@ -203,6 +203,11 @@ message ServerCapabilities {
   // audio is true when the wired LLM provider consumes audio prompt parts.
   // Gates the @-mention file-attach UX for audio.
   bool audio = 8;
+  // agents is true when the agent-definition registry is resolvable and served
+  // (ListAgents returns the resolved snapshot). Independent of `teams` (the
+  // run-path member-engine): defs can be browsable without teams enabled.
+  // Gates the /agents definition-inventory panel.
+  bool agents = 9;
 }
 
 // CreateSessionResponse carries the newly-allocated session id.

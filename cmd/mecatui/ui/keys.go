@@ -39,9 +39,9 @@ type keyMap struct {
 	// panel to re-probe LIVE MCP source status.
 	Refresh key.Binding
 
-	// Tasks flips the ctrl+a agents overlay from the roster to the shared team task
+	// Tasks flips the ctrl+a team overlay from the roster to the shared team task
 	// sub-view (and back). Like Refresh it is a BARE 't' consulted ONLY inside the
-	// overlay (onAgentsRosterKey / the agentsTasks branch intercept before any idle
+	// overlay (onTeamRosterKey / the teamTasks branch intercept before any idle
 	// open key), so it never collides with the textarea (blurred while the overlay
 	// is open) nor with any global control binding.
 	Tasks key.Binding
@@ -53,10 +53,12 @@ type keyMap struct {
 	JumpTop key.Binding
 	JumpEnd key.Binding
 
-	// Agents opens the agent-team hierarchy overlay: the FULL (uncapped) roster
-	// of the most-recent Team tool card, with per-member focus. Like the MCP
-	// bindings it is control-modified so it never collides with textarea input,
-	// and is only live while idle.
+	// Agents (ctrl+a) opens the live agent-team overlay: the FULL (uncapped)
+	// roster of the most-recent Team tool card, with per-member focus. Like the
+	// MCP bindings it is control-modified so it never collides with textarea
+	// input. It is live both while idle AND mid-run (Gap B) — the deep view is
+	// most useful while the team streams; it stays inert under a permission modal.
+	// (Mapped from /team in the palette; /agents is the def inventory, palette-only.)
 	Agents key.Binding
 
 	// ExpandTools is the general "show details" toggle: full vs line-capped

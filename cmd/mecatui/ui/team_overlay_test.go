@@ -1,11 +1,13 @@
 package ui
 
-// Tests for the ctrl+a agent-team hierarchy OVERLAY: a full-screen, uncapped view
-// of the most-recent Team tool card's roster, plus a per-member focus pane. It is
-// additive over the inline Team card (which stays capped at maxTeamLanes with a
-// "· +K more" roll-up) — the overlay is the overflow home that shows the WHOLE
-// team. It reads the live lanes already accumulated in the conversation (no new
-// events / RPCs) and is an idle-only affordance, like the MCP overlays.
+// Tests for the ctrl+a live agent-team hierarchy OVERLAY (the /team built-in): a
+// full-screen, uncapped view of the most-recent Team tool card's roster, plus a
+// per-member focus pane. It is additive over the inline Team card (which stays
+// capped at maxTeamLanes with a "· +K more" roll-up) — the overlay is the
+// overflow home that shows the WHOLE team. It reads the live lanes already
+// accumulated in the conversation (no new events / RPCs). It opens while idle OR
+// mid-run (Gap B), and stays inert under a permission modal. Distinct from the
+// /agents definition inventory (agents_inventory_test.go).
 
 import (
 	"fmt"
@@ -49,8 +51,8 @@ func TestAgentsOpensRoster(t *testing.T) {
 	})
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
-	if m.agents.view != agentsRoster {
-		t.Fatalf("view = %v, want agentsRoster", m.agents.view)
+	if m.team.view != teamRoster {
+		t.Fatalf("view = %v, want teamRoster", m.team.view)
 	}
 	out := stripANSIstr(m.View().Content)
 	if !strings.Contains(out, "agents · 2 members") {
@@ -65,28 +67,213 @@ func TestAgentsOpensRoster(t *testing.T) {
 }
 
 // TestAgentsNoTeamIsNoOp asserts ctrl+a with no team is a no-op (overlay stays
-// closed) and surfaces a brief hint.
+// closed) and surfaces a caps-aware hint: with teams NOT advertised the copy
+// names that, distinguishing "not enabled" from "no team yet" (Gap D).
 func TestAgentsNoTeamIsNoOp(t *testing.T) {
-	m := newMCPModel(t, aztec(), nil)
+	m := newMCPModel(t, aztec(), nil) // zero caps → Teams false
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
-	if m.agents.view != agentsNone {
-		t.Fatalf("overlay opened with no team: %v", m.agents.view)
+	if m.team.view != teamNone {
+		t.Fatalf("overlay opened with no team: %v", m.team.view)
 	}
-	if m.statusMsg != "no active team" {
-		t.Errorf("status = %q, want 'no active team'", m.statusMsg)
+	if m.statusMsg != "agent teams are not enabled on this server" {
+		t.Errorf("status = %q, want the not-enabled hint", m.statusMsg)
 	}
 }
 
-// TestAgentsGatedWhileRunning asserts the overlay is idle-only (cannot open
-// mid-run), like the MCP overlays.
-func TestAgentsGatedWhileRunning(t *testing.T) {
+// TestAgentsNoTeamWithTeamsEnabled asserts the empty-state hint distinguishes
+// "teams enabled but none run yet" from "teams not enabled" (Gap D).
+func TestAgentsNoTeamWithTeamsEnabled(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m.caps.Teams = true // teams advertised, but no team has run
+	mm, _ := m.openTeam()
+	m = mm.(Model)
+	if m.team.view != teamNone {
+		t.Fatalf("overlay opened with no team: %v", m.team.view)
+	}
+	if m.statusMsg != "no team has run yet" {
+		t.Errorf("status = %q, want the no-team-yet hint", m.statusMsg)
+	}
+}
+
+// TestAgentsOpensWhileRunning asserts the live overlay CAN open mid-run (Gap B):
+// the deep view is most useful while the team streams. It still rejects the
+// permission-modal phase (TestAgentsGatedWhileAwaitingApproval).
+func TestAgentsOpensWhileRunning(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(c *conversation) {
+		c.setTeamStart("t1", "", roster())
+		c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Grep"}))
+	})
+	m.phase = phaseRunning
+	mm, _ := m.openTeam()
+	if mm.(Model).team.view != teamRoster {
+		t.Error("overlay did not open while running (Gap B)")
+	}
+}
+
+// TestAgentsGatedWhileAwaitingApproval asserts the overlay still refuses to open
+// while a permission modal owns the keyboard.
+func TestAgentsGatedWhileAwaitingApproval(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
 	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", "", roster()) })
+	m.phase = phaseAwaitingApproval
+	mm, _ := m.openTeam()
+	if mm.(Model).team.view != teamNone {
+		t.Error("overlay opened while awaiting approval")
+	}
+}
+
+// TestAgentsMidRunKeysDriveOverlayNotInput is the Gap-B end-to-end: with a live
+// team streaming (phaseRunning), ctrl+a opens the overlay, and the roster nav
+// keys (↑/enter/t/esc) drive the OVERLAY rather than enqueuing a follow-up or
+// cancelling the run. It asserts: the overlay opens to the roster; the queue
+// stays empty across the navigation (no enqueuePrompt); no cancel frame is sent
+// (the run keeps streaming); and esc from the roster closes the overlay,
+// returning to the running phase with the input refocused.
+func TestAgentsMidRunKeysDriveOverlayNotInput(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(c *conversation) {
+		c.setTeamStart("t1", "", roster())
+		c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Grep"}))
+	})
+	send := &fakeSender{}
+	m.stream = client.NewStream(nil, send) // a stream whose Send records frames
 	m.phase = phaseRunning
-	mm, _ := m.openAgents()
-	if mm.(Model).agents.view != agentsNone {
-		t.Error("overlay opened while running")
+
+	// ctrl+a mid-run opens the overlay (Gap B), pre-empting the textarea default.
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.team.view != teamRoster {
+		t.Fatalf("ctrl+a mid-run did not open the roster: view=%v", m.team.view)
+	}
+
+	// Each nav key must be claimed by the overlay (onTeamKey) before the running
+	// phase switch — it must NOT enqueue a follow-up nor send a cancel frame.
+	for _, k := range []tea.KeyPressMsg{
+		{Code: tea.KeyDown},  // move selection
+		{Code: tea.KeyEnter}, // focus the selected member (NOT enqueue)
+		{Code: tea.KeyEsc},   // focus → roster
+	} {
+		mm, _ = m.Update(k)
+		m = mm.(Model)
+		if len(m.queued) != 0 {
+			t.Fatalf("overlay key %v enqueued a follow-up: queue=%v", k.Code, m.queued)
+		}
+		if m.phase != phaseRunning {
+			t.Fatalf("overlay key %v changed the phase to %v", k.Code, m.phase)
+		}
+	}
+	// 't' opens the task sub-view (still overlay-owned).
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
+	m = mm.(Model)
+	if m.team.view != teamTasks {
+		t.Fatalf("'t' did not open the task sub-view mid-run: %v", m.team.view)
+	}
+	// 't' again → roster, esc → close.
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
+	m = mm.(Model)
+	if m.team.view != teamRoster {
+		t.Fatalf("'t' did not toggle back to the roster mid-run: %v", m.team.view)
+	}
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = mm.(Model)
+	if m.team.view != teamNone {
+		t.Fatalf("esc from roster did not close the overlay mid-run: %v", m.team.view)
+	}
+	if m.phase != phaseRunning {
+		t.Fatalf("closing the overlay changed the phase to %v, want phaseRunning", m.phase)
+	}
+	// No cancel frame must have been sent across the whole interaction.
+	for _, f := range send.frames() {
+		if f.GetCancel() != nil {
+			t.Fatalf("a cancel frame was sent while driving the mid-run overlay: %+v", f)
+		}
+	}
+}
+
+// TestTeamOverlaySanitizesMemberContent locks the sanitizeTerminal wrappers on
+// the LIVE /team overlay: member content is CLAUDE.md-trust-class (it flows from
+// TeamMsg, which a member model emits), so a member NAME or tool Detail carrying
+// an escape sequence must render inert (no raw 0x1b) in BOTH the roster and the
+// per-member focus pane. Per the repo's no-destructive-test-literals rule the
+// literal is an innocuous ANSI/OSC escape, never a destructive-looking command.
+func TestTeamOverlaySanitizesMemberContent(t *testing.T) {
+	const evilName = "\x1b]0;pwned\x07scout"
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(c *conversation) {
+		c.setTeamStart("t1", "", []client.TeamMemberSpec{
+			{Name: "lead", Role: "coordinator", Lead: true, Mutating: true},
+			{Name: evilName, Role: "\x1b[31mresearcher\x1b[0m"},
+		})
+		c.addTeamMember(member(evilName, "tool.call", client.TeamMsg{
+			ToolName: "Grep",
+			Detail:   "\x1b[31mpattern: handleErr\x1b[0m",
+		}))
+	})
+
+	// Roster view: the member name + role are sanitized.
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.team.view != teamRoster {
+		t.Fatalf("view = %v, want teamRoster", m.team.view)
+	}
+	roster := stripANSIstr(m.View().Content)
+	if strings.ContainsRune(roster, 0x1b) {
+		t.Errorf("raw ESC (0x1b) leaked into the roster overlay; sanitizeTerminal not applied:\n%q", roster)
+	}
+	if !strings.Contains(roster, "]0;pwnedscout") {
+		t.Errorf("sanitized member name not rendered as inert text in the roster:\n%q", roster)
+	}
+
+	// Focus pane: the member's lane sub-header + tool-call Detail are sanitized.
+	m.team.view = teamFocus
+	m.team.member = evilName
+	focus := stripANSIstr(m.View().Content)
+	if strings.ContainsRune(focus, 0x1b) {
+		t.Errorf("raw ESC (0x1b) leaked into the focus pane; sanitizeTerminal not applied:\n%q", focus)
+	}
+	if !strings.Contains(focus, "]0;pwnedscout") {
+		t.Errorf("sanitized member name not rendered as inert text in the focus pane:\n%q", focus)
+	}
+	if !strings.Contains(focus, "pattern: handleErr") {
+		t.Errorf("sanitized tool Detail not rendered as inert text in the focus pane:\n%q", focus)
+	}
+}
+
+// TestAgentsMidRunNoTeamNoCapsIsNoOp guards the onRunningKey Agents-branch
+// ordering: ctrl+a pressed MID-RUN with teams NOT enabled and no live team must
+// be a clean no-op — it does NOT open the overlay, does NOT enqueue a follow-up,
+// does NOT cancel the run, and the key is NOT swallowed into the textarea (no
+// stray 'a'/control rune leaks into the input). The Agents case sits BEFORE
+// Cancel/Submit/default in onRunningKey, so a regression that reordered it (or
+// dropped it) would let the keypress fall through to the textarea default.
+func TestAgentsMidRunNoTeamNoCapsIsNoOp(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil) // zero caps → Teams false
+	send := &fakeSender{}
+	m.stream = client.NewStream(nil, send)
+	m.phase = phaseRunning
+	before := m.ta.Value()
+
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+
+	if m.team.view != teamNone {
+		t.Fatalf("ctrl+a mid-run with no team opened the overlay: view=%v", m.team.view)
+	}
+	if len(m.queued) != 0 {
+		t.Errorf("ctrl+a mid-run no-op enqueued a follow-up: queue=%v", m.queued)
+	}
+	if m.phase != phaseRunning {
+		t.Errorf("ctrl+a mid-run no-op changed the phase to %v", m.phase)
+	}
+	if m.ta.Value() != before {
+		t.Errorf("ctrl+a leaked into the textarea: %q (was %q)", m.ta.Value(), before)
+	}
+	for _, f := range send.frames() {
+		if f.GetCancel() != nil {
+			t.Fatalf("ctrl+a mid-run no-op sent a cancel frame: %+v", f)
+		}
 	}
 }
 
@@ -107,15 +294,15 @@ func TestAgentsSelectionAndFocus(t *testing.T) {
 	// Lead sorts first (cursor 0). Down → cursor 1 (scout).
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = mm.(Model)
-	if m.agents.cursor != 1 {
-		t.Fatalf("cursor = %d after down, want 1", m.agents.cursor)
+	if m.team.cursor != 1 {
+		t.Fatalf("cursor = %d after down, want 1", m.team.cursor)
 	}
 
 	// Enter → focus scout.
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = mm.(Model)
-	if m.agents.view != agentsFocus || m.agents.member != "scout" {
-		t.Fatalf("focus state = %v/%q, want focus/scout", m.agents.view, m.agents.member)
+	if m.team.view != teamFocus || m.team.member != "scout" {
+		t.Fatalf("focus state = %v/%q, want focus/scout", m.team.view, m.team.member)
 	}
 	out := stripANSIstr(m.View().Content)
 	if !strings.Contains(out, "agent · scout") {
@@ -131,15 +318,15 @@ func TestAgentsSelectionAndFocus(t *testing.T) {
 	// esc → back to roster.
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = mm.(Model)
-	if m.agents.view != agentsRoster || m.agents.member != "" {
-		t.Fatalf("esc from focus = %v/%q, want roster/empty", m.agents.view, m.agents.member)
+	if m.team.view != teamRoster || m.team.member != "" {
+		t.Fatalf("esc from focus = %v/%q, want roster/empty", m.team.view, m.team.member)
 	}
 
 	// esc → closed.
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = mm.(Model)
-	if m.agents.view != agentsNone {
-		t.Fatalf("esc from roster did not close: %v", m.agents.view)
+	if m.team.view != teamNone {
+		t.Fatalf("esc from roster did not close: %v", m.team.view)
 	}
 }
 
@@ -279,7 +466,7 @@ func TestAgentsRosterWindowed(t *testing.T) {
 	m = mm.(Model)
 	out := stripANSIstr(m.View().Content)
 
-	rows := agentsRosterRows(m.vp.Height())
+	rows := teamRosterRows(m.vp.Height())
 	if rows >= n {
 		t.Fatalf("test premise broken: window %d must be smaller than roster %d", rows, n)
 	}
@@ -314,8 +501,8 @@ func TestAgentsWindowFollowsCursor(t *testing.T) {
 	// end/G jumps to the last member.
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
 	m = mm.(Model)
-	if m.agents.cursor != n-1 {
-		t.Fatalf("end did not jump to last: cursor=%d want %d", m.agents.cursor, n-1)
+	if m.team.cursor != n-1 {
+		t.Fatalf("end did not jump to last: cursor=%d want %d", m.team.cursor, n-1)
 	}
 	out := stripANSIstr(m.View().Content)
 	// The last member is the alphabetically-last numbered one ("member-s" for n=20:
@@ -340,8 +527,8 @@ func TestAgentsWindowFollowsCursor(t *testing.T) {
 	// home/g jumps back to the first.
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyHome})
 	m = mm.(Model)
-	if m.agents.cursor != 0 {
-		t.Fatalf("home did not jump to first: cursor=%d", m.agents.cursor)
+	if m.team.cursor != 0 {
+		t.Fatalf("home did not jump to first: cursor=%d", m.team.cursor)
 	}
 }
 
@@ -356,16 +543,16 @@ func TestAgentsPageKeys(t *testing.T) {
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
 
-	page := agentsRosterRows(m.vp.Height())
+	page := teamRosterRows(m.vp.Height())
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	m = mm.(Model)
-	if m.agents.cursor != page {
-		t.Errorf("pgdn moved cursor to %d, want one page (%d)", m.agents.cursor, page)
+	if m.team.cursor != page {
+		t.Errorf("pgdn moved cursor to %d, want one page (%d)", m.team.cursor, page)
 	}
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	m = mm.(Model)
-	if m.agents.cursor != 0 {
-		t.Errorf("pgup from one page in should return to 0, got %d", m.agents.cursor)
+	if m.team.cursor != 0 {
+		t.Errorf("pgup from one page in should return to 0, got %d", m.team.cursor)
 	}
 }
 
@@ -491,8 +678,8 @@ func TestAgentsFocusContextMeter(t *testing.T) {
 	m = mm.(Model)
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = mm.(Model)
-	if m.agents.view != agentsFocus {
-		t.Fatalf("view = %v, want agentsFocus", m.agents.view)
+	if m.team.view != teamFocus {
+		t.Fatalf("view = %v, want teamFocus", m.team.view)
 	}
 	out := stripANSIstr(m.View().Content)
 	if !strings.Contains(out, "ctx ") || !strings.Contains(out, "88%") {
@@ -542,22 +729,22 @@ func TestAgentsTasksToggle(t *testing.T) {
 	m = seedTeam(m, tasksTeam)
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
-	if m.agents.view != agentsRoster {
-		t.Fatalf("view = %v, want agentsRoster", m.agents.view)
+	if m.team.view != teamRoster {
+		t.Fatalf("view = %v, want teamRoster", m.team.view)
 	}
 
 	// t → task sub-view.
 	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 	m = mm.(Model)
-	if m.agents.view != agentsTasks {
-		t.Fatalf("t did not open the task sub-view: %v", m.agents.view)
+	if m.team.view != teamTasks {
+		t.Fatalf("t did not open the task sub-view: %v", m.team.view)
 	}
 
 	// t → back to roster.
 	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 	m = mm.(Model)
-	if m.agents.view != agentsRoster {
-		t.Fatalf("t did not toggle back to the roster: %v", m.agents.view)
+	if m.team.view != teamRoster {
+		t.Fatalf("t did not toggle back to the roster: %v", m.team.view)
 	}
 
 	// t → tasks, then esc → back to roster.
@@ -565,15 +752,15 @@ func TestAgentsTasksToggle(t *testing.T) {
 	m = mm.(Model)
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = mm.(Model)
-	if m.agents.view != agentsRoster {
-		t.Fatalf("esc from tasks should return to the roster, got %v", m.agents.view)
+	if m.team.view != teamRoster {
+		t.Fatalf("esc from tasks should return to the roster, got %v", m.team.view)
 	}
 
 	// esc from the roster closes the overlay.
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = mm.(Model)
-	if m.agents.view != agentsNone {
-		t.Fatalf("esc from roster did not close: %v", m.agents.view)
+	if m.team.view != teamNone {
+		t.Fatalf("esc from roster did not close: %v", m.team.view)
 	}
 }
 
@@ -586,8 +773,8 @@ func TestAgentsTasksEmpty(t *testing.T) {
 	m = mm.(Model)
 	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 	m = mm.(Model)
-	if m.agents.view != agentsTasks {
-		t.Fatalf("view = %v, want agentsTasks", m.agents.view)
+	if m.team.view != teamTasks {
+		t.Fatalf("view = %v, want teamTasks", m.team.view)
 	}
 	out := stripANSIstr(m.View().Content)
 	if !strings.Contains(out, "(no tasks)") {
@@ -647,11 +834,11 @@ func TestAgentsRosterGolden(t *testing.T) {
 	m = seedTeam(m, agentsGoldenTeam)
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
-	if m.agents.view != agentsRoster {
-		t.Fatalf("view = %v, want agentsRoster", m.agents.view)
+	if m.team.view != teamRoster {
+		t.Fatalf("view = %v, want teamRoster", m.team.view)
 	}
 	got := stripANSI([]byte(m.View().Content))
-	compareGolden(t, "agents_roster.golden", got)
+	compareGolden(t, "team_roster.golden", got)
 }
 
 // TestAgentsTasksView locks the task sub-view golden: a team with completed,
@@ -664,11 +851,11 @@ func TestAgentsTasksView(t *testing.T) {
 	m = mm.(Model)
 	mm, _ = m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 	m = mm.(Model)
-	if m.agents.view != agentsTasks {
-		t.Fatalf("view = %v, want agentsTasks", m.agents.view)
+	if m.team.view != teamTasks {
+		t.Fatalf("view = %v, want teamTasks", m.team.view)
 	}
 	got := stripANSI([]byte(m.View().Content))
-	compareGolden(t, "agents_tasks.golden", got)
+	compareGolden(t, "team_tasks.golden", got)
 }
 
 // TestAgentsRosterWindowedGolden locks a 20-member roster WINDOWED at a ~24-row
@@ -688,7 +875,7 @@ func TestAgentsRosterWindowedGolden(t *testing.T) {
 		m = mm.(Model)
 	}
 	got := stripANSI([]byte(m.View().Content))
-	compareGolden(t, "agents_roster_windowed.golden", got)
+	compareGolden(t, "team_roster_windowed.golden", got)
 }
 
 // TestAgentsFocusGolden locks the per-member focus pane (the scout, which has a
@@ -703,11 +890,11 @@ func TestAgentsFocusGolden(t *testing.T) {
 	m = mm.(Model)
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = mm.(Model)
-	if m.agents.view != agentsFocus || m.agents.member != "scout" {
-		t.Fatalf("focus = %v/%q, want focus/scout", m.agents.view, m.agents.member)
+	if m.team.view != teamFocus || m.team.member != "scout" {
+		t.Fatalf("focus = %v/%q, want focus/scout", m.team.view, m.team.member)
 	}
 	got := stripANSI([]byte(m.View().Content))
-	compareGolden(t, "agents_focus.golden", got)
+	compareGolden(t, "team_focus.golden", got)
 }
 
 // verboseFocusTeam builds a single-member team whose lane carries a long trace
@@ -740,11 +927,11 @@ func TestAgentsFocusWindowed(t *testing.T) {
 	// scout is the only (lead) member → row 0; enter focuses it.
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = mm.(Model)
-	if m.agents.view != agentsFocus {
-		t.Fatalf("view = %v, want agentsFocus", m.agents.view)
+	if m.team.view != teamFocus {
+		t.Fatalf("view = %v, want teamFocus", m.team.view)
 	}
 
-	rows := agentsFocusRows(m.vp.Height())
+	rows := teamFocusRows(m.vp.Height())
 	// The unbounded trace would be > rows (message + maxTeamTrace chip lines).
 	if rows >= maxTeamTrace {
 		t.Fatalf("test premise broken: focus window %d must be smaller than the trace", rows)
@@ -781,9 +968,9 @@ func TestAgentsFocusWindowedGolden(t *testing.T) {
 	m = mm.(Model)
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = mm.(Model)
-	if m.agents.view != agentsFocus {
-		t.Fatalf("view = %v, want agentsFocus", m.agents.view)
+	if m.team.view != teamFocus {
+		t.Fatalf("view = %v, want teamFocus", m.team.view)
 	}
 	got := stripANSI([]byte(m.View().Content))
-	compareGolden(t, "agents_focus_windowed.golden", got)
+	compareGolden(t, "team_focus_windowed.golden", got)
 }

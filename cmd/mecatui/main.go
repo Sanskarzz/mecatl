@@ -102,6 +102,7 @@ func run(args []string) error {
 		MCP:       cl,
 		Cmds:      cl,
 		Skills:    cl,
+		Agents:    cl,
 		Clipboard: client.NewClipboard(),
 		Theme:     th,
 		Server:    target,

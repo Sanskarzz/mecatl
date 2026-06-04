@@ -188,6 +188,74 @@ func TestFooterTeamDoneDropsSegment(t *testing.T) {
 	}
 }
 
+// TestAgentsInvSlashCommandEndToEnd drives the FULL palette path for the /agents
+// definition inventory (issue #15, Gap A): type "/agents", press enter, and assert
+// the panel opens, fires ListAgents, and renders the resolved defs in the
+// conversation viewport. It goes through the real keypress→palette→builtin
+// dispatch→Update reducer→render chain (not a direct runAgentsInv call), so a
+// regression in the palette gating, the caps/wired filter, or the AgentsMsg
+// reduction surfaces here. caps.Agents + a wired AgentLister are both set, which is
+// what registers the /agents built-in.
+func TestAgentsInvSlashCommandEndToEnd(t *testing.T) {
+	fa := sampleAgents()
+	m := newAgentsInvModel(t, fa, client.Capabilities{Agents: true})
+
+	// Type the built-in name; the palette opens on "/".
+	m = typeText(t, m, "/agents")
+	if !m.palette.open {
+		t.Fatal("palette should be open after typing /agents")
+	}
+
+	// Enter runs the selected built-in (opens the panel + fires the RPC). Drive the
+	// returned command to completion so the AgentsMsg is reduced back in.
+	mm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = feedCmd(t, mm.(Model), cmd)
+
+	if m.agentsInv.view != agentsInvPanel {
+		t.Fatalf("/agents+enter should open the inventory panel, view=%v", m.agentsInv.view)
+	}
+	if fa.calls != 1 {
+		t.Errorf("ListAgents calls = %d, want 1 (the /agents built-in fired the RPC)", fa.calls)
+	}
+	body := stripANSIstr(m.View().Content)
+	if !strings.Contains(body, "scout") || !strings.Contains(body, "explore the codebase") {
+		t.Errorf("the rendered panel should carry the resolved defs, got:\n%s", body)
+	}
+	if !strings.Contains(body, "model:gpt-5") || !strings.Contains(body, "tools:Read,Grep") {
+		t.Errorf("the rendered panel should carry the def metadata, got:\n%s", body)
+	}
+}
+
+// TestTeamOverlayCtrlAMidRunEndToEnd drives the live-team overlay open MID-RUN via
+// the real keypress reducer (issue #15, Gap B): with a team streaming, ctrl+a
+// opens the roster overlay (rendered in the viewport) without enqueuing or
+// cancelling. It complements the unit test by going through Update + View.
+func TestTeamOverlayCtrlAMidRunEndToEnd(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m.caps.Teams = true
+	m = seedTeam(m, func(c *conversation) {
+		c.setTeamStart("t1", "team-x", roster())
+		c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Grep"}))
+	})
+	m.phase = phaseRunning
+
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.team.view != teamRoster {
+		t.Fatalf("ctrl+a mid-run should open the roster overlay, view=%v", m.team.view)
+	}
+	if len(m.queued) != 0 {
+		t.Errorf("ctrl+a mid-run must not enqueue, queue=%v", m.queued)
+	}
+	if m.phase != phaseRunning {
+		t.Errorf("ctrl+a mid-run must not change the phase, got %v", m.phase)
+	}
+	body := stripANSIstr(m.View().Content)
+	if !strings.Contains(body, "agents · 2 members") || !strings.Contains(body, "[lead]") {
+		t.Errorf("the rendered overlay should show the live roster, got:\n%s", body)
+	}
+}
+
 // TestHeaderTruncatesLongModel asserts a long model id is capped in the header.
 func TestHeaderTruncatesLongModel(t *testing.T) {
 	long := "anthropic/claude-opus-4-8-with-a-really-long-suffix-2026"

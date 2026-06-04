@@ -44,6 +44,7 @@ type Deps struct {
 	MCP     client.MCP         // MCP/ToolHive inventory + resources/prompts; nil disables the overlay
 	Cmds    client.Commander   // slash-command discovery for the input palette; nil disables it
 	Skills  client.SkillLister // skills-inventory discovery for the /skills panel; nil disables it
+	Agents  client.AgentLister // agent-definition discovery for the /agents panel; nil disables it
 	// Clipboard reads the OS clipboard for ctrl+v paste (image-first, text-fallback).
 	// nil cleanly disables ctrl+v image paste (same convention as nil MCP/Cmds);
 	// main.go populates it with client.NewClipboard().
@@ -165,7 +166,8 @@ type Model struct {
 	mention      mentionState   // @-file-mention completion menu (open when the trailing word is an "@token"); mutually exclusive with palette
 	queued       []string       // follow-up prompts staged while a run streams; drained FIFO on a clean stop (see drainQueue)
 	queuePaused  string         // non-empty when a run ended on a non-clean stop with a non-empty queue: the stop reason holding the queue (see drainQueue/renderQueue)
-	agents       agentsState    // agent-team overlay state (view==agentsNone when closed)
+	team         teamState      // live agent-team overlay state (view==teamNone when closed)
+	agentsInv    agentsInvState // agent-definition inventory overlay state (view==agentsInvNone when closed)
 	showHelp     bool           // the "?" keys-&-features overlay is open (caps-driven; see help.go)
 	stream       *client.Stream // current run's stream
 	cancelRun    context.CancelFunc

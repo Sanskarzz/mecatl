@@ -149,6 +149,48 @@ func TestCapabilitiesMediaFromProvider(t *testing.T) {
 	}
 }
 
+// TestCapabilitiesAgentsFromSnapshot asserts the agents cap flips with a
+// non-empty Config.Agents snapshot (the resolved agent-definition registry that
+// backs ListAgents) and is false when the snapshot is empty. It is independent of
+// the teams cap (the run-path member-engine): defs are browsable without teams.
+func TestCapabilitiesAgentsFromSnapshot(t *testing.T) {
+	newSvc := func(agents []*mecatlv1.AgentInfo) *server.Service {
+		t.Helper()
+		engine := agent.NewEngine(agent.Deps{
+			LLM:     mockllm.New(mockllm.TextTurn("x")),
+			Catalog: tool.NewCatalog(),
+			Policy:  permpolicy.NewPolicy(nil, nil),
+			Model:   "test-model",
+		})
+		svc, err := server.NewService(server.Config{
+			Engine:     engine,
+			Store:      memstore.New(),
+			Workspaces: func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+			Now:        func() time.Time { return time.Unix(0, 0) },
+			Agents:     agents,
+		})
+		if err != nil {
+			t.Fatalf("new service: %v", err)
+		}
+		return svc
+	}
+
+	// Non-empty snapshot → agents=true, even with teams off.
+	on := capsFromCreate(t, newSvc([]*mecatlv1.AgentInfo{{Name: "scout", Description: "explore"}}))
+	if !on.GetAgents() {
+		t.Errorf("agents cap = false, want true (non-empty Agents snapshot)")
+	}
+	if on.GetTeams() {
+		t.Errorf("teams cap = true, want false (no member engine) — agents must be independent of teams")
+	}
+
+	// Empty snapshot → agents=false.
+	off := capsFromCreate(t, newSvc(nil))
+	if off.GetAgents() {
+		t.Errorf("agents cap = true, want false (empty Agents snapshot)")
+	}
+}
+
 // TestCapabilities asserts that the create response's capabilities reflect the
 // BUILT catalog and wired seams, NOT a static list. It is the correctness guard:
 // the tool caps are driven by the REAL tool constructors, so it fails if a tool

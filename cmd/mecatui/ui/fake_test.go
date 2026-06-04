@@ -299,3 +299,21 @@ func (f *fakeSkills) ListSkills(_ context.Context) ([]client.Skill, error) {
 	}
 	return f.skills, nil
 }
+
+// fakeAgents is a scripted client.AgentLister for the /agents inventory panel
+// tests: ListAgents returns the canned agents slice, or err when set. calls
+// counts the invocations so a test can assert the RPC fired. It implements
+// client.AgentLister so the ui's /agents path runs with no proto and no network.
+type fakeAgents struct {
+	agents []client.Agent
+	err    error
+	calls  int
+}
+
+func (f *fakeAgents) ListAgents(_ context.Context) ([]client.Agent, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.agents, nil
+}

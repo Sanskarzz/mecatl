@@ -214,13 +214,13 @@ func TestPasteIgnoredWhileMCPOverlayOpen(t *testing.T) {
 
 // TestPasteIgnoredWhileAgentsOverlayOpen: an open agent-team overlay owns the
 // keyboard (idle-only), so a paste is dropped. Asserts the value stays empty AND
-// the overlay stays open — this pins the `|| m.agents.view != agentsNone` term in
+// the overlay stays open — this pins the `|| m.team.view != teamNone` term in
 // onPaste's gate.
 //
-// The textarea is deliberately RE-FOCUSED after the overlay opens (openAgents
+// The textarea is deliberately RE-FOCUSED after the overlay opens (openTeam
 // blurs it, and a blurred textarea silently no-ops a forwarded paste — which would
 // MASK a missing gate term). Re-focusing makes the agents gate term the SOLE line
-// of defence, so deleting `|| m.agents.view != agentsNone` from onPaste genuinely
+// of defence, so deleting `|| m.team.view != teamNone` from onPaste genuinely
 // fails this test (the focused textarea would otherwise insert the runes). This is
 // the defense-in-depth the gate provides: drop the paste while the overlay owns the
 // keyboard regardless of the textarea's focus state.
@@ -231,7 +231,7 @@ func TestPasteIgnoredWhileAgentsOverlayOpen(t *testing.T) {
 	})
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
-	if m.agents.view == agentsNone {
+	if m.team.view == teamNone {
 		t.Fatalf("agents overlay should be open after ctrl+a")
 	}
 	_ = m.ta.Focus() // defeat the blur masking — exercise the gate, not the blur.
@@ -242,7 +242,7 @@ func TestPasteIgnoredWhileAgentsOverlayOpen(t *testing.T) {
 	if got := m.ta.Value(); got != "" {
 		t.Fatalf("paste leaked into input behind the agents overlay: %q", got)
 	}
-	if m.agents.view == agentsNone {
+	if m.team.view == teamNone {
 		t.Fatalf("agents overlay should still be open after an ignored paste")
 	}
 }

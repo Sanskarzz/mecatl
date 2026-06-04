@@ -493,8 +493,7 @@ matching commands, `renderPalette` shows a one-line muted note instead of "".
 > independent of the server's `slash_commands` capability and even with no
 > `Commander` wired. `/clear` (reset conversation + scrollback) and `/help` (open
 > the keys-&-features overlay) are always registered (they act purely on the
-> Model); `/mcp` and `/agents` are caps-gated (`caps.MCP && MCP-wired`, and
-> `caps.Teams`). `syncPalette` filters over `mergeCommands(m.builtinRows(),
+> Model); `/mcp`, `/agents`, `/team`, and `/skills` are caps-gated. `syncPalette` filters over `mergeCommands(m.builtinRows(),
 > m.palette.commands)` — built-ins lead, then the discovered workspace rows, with
 > a built-in winning any name collision. A bare built-in line (e.g. `/clear`) is
 > intercepted in `submitPrompt` and run locally, so it never reaches the model;
@@ -506,6 +505,18 @@ matching commands, `renderPalette` shows a one-line muted note instead of "".
 > single neutral **"no matching command"**. The footer always shows
 > "`/ commands`" and the help/zero-state always advertise `/`. (`/compact` is a
 > deliberate follow-up: it needs a server RPC that does not yet exist.)
+
+> **Update — issue #15: `/agents` vs `/team` split.** `/agents` is now the
+> agent-**definition inventory** (palette-only, gated on `caps.agents` + a wired
+> `AgentLister`): a read-only `ListAgents` panel listing the resolved registry the
+> `Task` tool routes delegations to (name · description · `model:`/`perm:`/`tools:`
+> metadata), modelled on the `/skills` panel (`agents_inventory.go`). The
+> live-agent-team overlay moved to a new `/team` built-in (gated on `caps.teams`),
+> still bound to `ctrl+a` (`team.go`, renamed from `agents.go`). `caps.agents` is a
+> new `ServerCapabilities` bit, INDEPENDENT of `caps.teams`: defs are browsable
+> even with no member-engine wired (`Service.capabilities()` sets it from a
+> non-empty `Config.Agents` snapshot). `ctrl+a` now also opens the live overlay
+> **mid-run** (not just idle) — it still stays inert under a permission modal.
 
 Superseded original design (kept for context): a one-line note branched on caps:
 - `!caps.SlashCommands` → muted "slash commands are not enabled on this server"
@@ -604,7 +615,7 @@ corrections section).
 | `cmd/mecatui/ui/mcp.go` | caps-aware empty-state copy; thread caps into `renderMCPOverlay`/panels | ui |
 | `cmd/mecatui/ui/palette.go` | caps-aware "no commands" / "not enabled" note | ui |
 | `cmd/mecatui/ui/conversation.go` | add `isEmpty()` predicate | ui |
-| `cmd/mecatui/ui/agents.go` | (optional Low) extend roster hint with pgup/pgdn/home/end | ui |
+| `cmd/mecatui/ui/team.go` (was `agents.go`) | (optional Low) extend roster hint with pgup/pgdn/home/end | ui |
 
 ---
 

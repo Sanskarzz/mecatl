@@ -51,8 +51,10 @@ func (m Model) View() tea.View {
 		body = m.rend.renderPermissionModal(m.ask, m.expandTools, m.width, m.vp.Height())
 	case m.mcp.view != mcpNone:
 		body = renderMCPOverlay(m.deps.Theme, m.mcp, m.caps, m.width, m.vp.Height())
-	case m.agents.view != agentsNone:
-		body = renderAgentsOverlay(m.deps.Theme, m.agents, m.conv.latestTeamBlock(), m.width, m.vp.Height())
+	case m.team.view != teamNone:
+		body = renderTeamOverlay(m.deps.Theme, m.team, m.conv.latestTeamBlock(), m.width, m.vp.Height())
+	case m.agentsInv.view != agentsInvNone:
+		body = renderAgentsInvOverlay(m.deps.Theme, m.agentsInv, m.caps, m.width, m.vp.Height())
 	case m.skills.view != skillsNone:
 		body = renderSkillsOverlay(m.deps.Theme, m.skills, m.caps, m.width, m.vp.Height())
 	case m.phase == phaseIdle && m.conv.isEmpty():
@@ -241,7 +243,7 @@ func (m Model) fitFooter(left string, width int) string {
 	// The team segment is non-empty ONLY for a LIVE team — liveTeamBlock returns the
 	// latest team that is still running (not teamDone). This DELIBERATELY differs
 	// from the ctrl+a overlay's gate: the footer is a live-activity advertisement
-	// and hides once the team is done, whereas openAgents opens on the last-seen
+	// and hides once the team is done, whereas openTeam opens on the last-seen
 	// team done-or-not (so the user can still review a finished roster). The two are
 	// meant to disagree in the done state — do not unify them.
 	var teamFull, teamMedium, teamCompact string

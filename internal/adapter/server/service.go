@@ -317,6 +317,7 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 		Mcp:           s.cfg.MCPProvider != nil,
 		SlashCommands: s.cfg.Commands != nil,
 		Teams:         s.cfg.MemberEngine != nil,
+		Agents:        len(s.cfg.Agents) > 0,
 		Memory:        has(memory.RememberToolName),
 		Skills:        has(skills.ToolName),
 		Bash:          has(tools.BashToolName),

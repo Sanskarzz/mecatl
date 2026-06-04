@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime/trace"
 	"strings"
 	"testing"
@@ -170,6 +172,79 @@ func TestStartWithMemoryDirServes(t *testing.T) {
 	}
 	if !caps.SlashCommands {
 		t.Errorf("caps.SlashCommands = false, want true (EnableCommands ⇒ command lister wired)")
+	}
+}
+
+// TestStartListAgentsOverSocket is the end-to-end proof of the /agents
+// definition-inventory wiring (issue #15, Gap A/D): with an --agents-dir
+// configured, app.Build resolves the registry, projects it into the create
+// response's caps (agents=true) and the ListAgents snapshot, and the ordinary TUI
+// client reads both across the embedded socket — with no network. A def written
+// to disk must surface name/description/resolved-model/tools through the
+// client.Agent mapping. It also asserts agents is INDEPENDENT of teams (no member
+// engine wired ⇒ teams=false while agents=true).
+func TestStartListAgentsOverSocket(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A trusted agents dir with one resolvable def.
+	agentsDir := t.TempDir()
+	def := "---\n" +
+		"name: scout\n" +
+		"description: explore the codebase\n" +
+		"tools: [Read, Grep]\n" +
+		"---\n" +
+		"You are a careful explorer.\n"
+	if werr := os.WriteFile(filepath.Join(agentsDir, "scout.md"), []byte(def), 0o600); werr != nil {
+		t.Fatalf("write agent def: %v", werr)
+	}
+
+	workspace := t.TempDir()
+	srv, err := embed.Start(ctx, app.Config{
+		Workspace:          workspace,
+		Model:              "mock-model",
+		UseMock:            true,
+		Shell:              "/bin/sh",
+		Compaction:         "heuristic",
+		Tokenizer:          "heuristic",
+		AgentsDirs:         []string{agentsDir},
+		AgentsConventional: false, // only the explicit dir, deterministic
+	}, embed.PerfConfig{})
+	if err != nil {
+		t.Fatalf("embed.Start with AgentsDirs: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	cl, err := client.Dial(client.DialConfig{Server: srv.Target()})
+	if err != nil {
+		t.Fatalf("dial embedded server: %v", err)
+	}
+	defer func() { _ = cl.Close() }()
+
+	_, caps, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"))
+	if err != nil {
+		t.Fatalf("CreateSession over embedded socket: %v", err)
+	}
+	if !caps.Agents {
+		t.Errorf("caps.Agents = false, want true (AgentsDirs configured ⇒ registry resolved)")
+	}
+	if caps.Teams {
+		t.Errorf("caps.Teams = true, want false (no member engine) — agents must be independent of teams")
+	}
+
+	agents, err := cl.ListAgents(ctx)
+	if err != nil {
+		t.Fatalf("ListAgents over embedded socket: %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("ListAgents returned %d defs, want 1: %+v", len(agents), agents)
+	}
+	a := agents[0]
+	if a.Name != "scout" || a.Description != "explore the codebase" {
+		t.Errorf("agent name/description mismapped: %+v", a)
+	}
+	if len(a.Tools) == 0 {
+		t.Errorf("agent tools should carry the resolved read-only scope, got empty: %+v", a)
 	}
 }
 

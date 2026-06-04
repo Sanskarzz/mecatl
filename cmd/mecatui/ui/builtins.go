@@ -26,12 +26,14 @@ type builtin struct {
 // builtinCommands returns the caps-filtered built-in set for the connected
 // server. /clear and /help are ALWAYS present — they act purely on the Model and
 // need no server feature. /mcp is present only when the server advertises MCP
-// AND a Commander-independent MCP collaborator is wired (mcpWired); /agents only
-// when the server advertises Teams; /skills only when the server advertises
-// Skills AND a skills collaborator is wired (skillsWired). The order is fixed
-// (clear, help, mcp, agents, skills) and locked by a test so the palette
+// AND a Commander-independent MCP collaborator is wired (mcpWired); /agents (the
+// definition inventory) only when the server advertises Agents AND an agents
+// collaborator is wired (agentsWired); /team (the live-team overlay) only when
+// the server advertises Teams; /skills only when the server advertises Skills
+// AND a skills collaborator is wired (skillsWired). The order is fixed
+// (clear, help, mcp, agents, team, skills) and locked by a test so the palette
 // ordering is stable.
-func builtinCommands(caps client.Capabilities, mcpWired, skillsWired bool) []builtin {
+func builtinCommands(caps client.Capabilities, mcpWired, agentsWired, skillsWired bool) []builtin {
 	out := []builtin{
 		{
 			name: "clear",
@@ -51,11 +53,18 @@ func builtinCommands(caps client.Capabilities, mcpWired, skillsWired bool) []bui
 			run:  Model.runMCP,
 		})
 	}
-	if caps.Teams {
+	if caps.Agents && agentsWired {
 		out = append(out, builtin{
 			name: "agents",
-			desc: "agent-team overlay",
-			run:  Model.runAgents,
+			desc: "browse agent definitions",
+			run:  Model.runAgentsInv,
+		})
+	}
+	if caps.Teams {
+		out = append(out, builtin{
+			name: "team",
+			desc: "live agent-team overlay",
+			run:  Model.runTeam,
 		})
 	}
 	if caps.Skills && skillsWired {
@@ -71,8 +80,8 @@ func builtinCommands(caps client.Capabilities, mcpWired, skillsWired bool) []bui
 // builtinByName looks up a built-in by name within the caps-filtered set, for
 // dispatch. ok is false when no built-in by that name is currently registered
 // (either unknown, or gated off on this server).
-func builtinByName(caps client.Capabilities, mcpWired, skillsWired bool, name string) (builtin, bool) {
-	for _, b := range builtinCommands(caps, mcpWired, skillsWired) {
+func builtinByName(caps client.Capabilities, mcpWired, agentsWired, skillsWired bool, name string) (builtin, bool) {
+	for _, b := range builtinCommands(caps, mcpWired, agentsWired, skillsWired) {
 		if b.name == name {
 			return b, true
 		}
@@ -112,10 +121,17 @@ func (m Model) runMCP() (tea.Model, tea.Cmd) {
 	return m.openMCP(mcpPanel)
 }
 
-// runAgents opens the agent-team overlay — the same surface ctrl+a opens. Only
-// registered when caps.Teams.
-func (m Model) runAgents() (tea.Model, tea.Cmd) {
-	return m.openAgents()
+// runAgentsInv opens the agent-definition inventory panel. Only registered when
+// caps.Agents && the agents collaborator is wired, so openAgentsInv's own
+// nil/idle guards are belt-and-braces here.
+func (m Model) runAgentsInv() (tea.Model, tea.Cmd) {
+	return m.openAgentsInv()
+}
+
+// runTeam opens the live agent-team overlay — the same surface ctrl+a opens.
+// Only registered when caps.Teams.
+func (m Model) runTeam() (tea.Model, tea.Cmd) {
+	return m.openTeam()
 }
 
 // runSkills opens the skills inventory panel. Only registered when caps.Skills

@@ -15,6 +15,7 @@ type Capabilities struct {
 	Memory        bool
 	Skills        bool
 	Teams         bool
+	Agents        bool
 	Bash          bool
 	// Image/Audio report whether the wired provider consumes that media kind. They
 	// gate the @-mention file-attach UX: a client refuses to send a part the
@@ -35,6 +36,7 @@ func capabilitiesFrom(c *mecatlv1.ServerCapabilities) Capabilities {
 		Memory:        c.GetMemory(),
 		Skills:        c.GetSkills(),
 		Teams:         c.GetTeams(),
+		Agents:        c.GetAgents(),
 		Bash:          c.GetBash(),
 		Image:         c.GetImage(),
 		Audio:         c.GetAudio(),

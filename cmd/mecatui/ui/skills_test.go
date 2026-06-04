@@ -94,7 +94,7 @@ func TestRunSkillsOpensPanel(t *testing.T) {
 func TestSkillsPanelWrapsLongDescriptions(t *testing.T) {
 	th := theme.New("aztec", theme.AztecPalette())
 	const width = 100
-	budget := skillsTextWidth(width)
+	budget := cardTextWidth(width)
 	if budget <= 0 {
 		t.Fatalf("precondition: width %d should yield a positive wrap budget", width)
 	}

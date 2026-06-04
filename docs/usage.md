@@ -626,7 +626,9 @@ allow-all operator posture — same semantics, root refusal, and `MECATL_SANDBOX
 dialling an external `--server`**. Note the TUI's **built-in slash commands** (`/clear`, `/help`, and the
 caps-gated `/mcp`/`/agents`) still work regardless — they act on the TUI itself,
 not the server, so typing `/` always opens a useful palette even with workspace
-slash-command expansion off. See `docs/tui.md` for all flags.
+slash-command expansion off (`/agents` browses the agent-definition inventory;
+`/team`, also `ctrl+a`, opens the live agent-team overlay). See `docs/tui.md` for
+all flags.
 
 It streams the conversation (glamour markdown for assistant text, themed cards
 for tool I/O), shows a thinking spinner and a usage footer, and pops an inline

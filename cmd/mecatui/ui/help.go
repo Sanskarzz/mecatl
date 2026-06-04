@@ -93,6 +93,12 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 			"Skills run automatically when the model needs them — not a browsable\n"+
 				"list; watch the transcript for Skill tool calls.") + "\n")
 	}
+	// Agent definitions, when served, are browsable via /agents (the inventory the
+	// Task tool routes delegations to). Distinct from caps.Teams / ctrl+a, which is
+	// the live overlay of a team that has actually run.
+	if caps.Agents {
+		b.WriteString(muted.Render("Type /agents to browse the agent-definition inventory.") + "\n")
+	}
 	if caps.SlashCommands {
 		b.WriteString(muted.Render("Type / to browse slash commands.") + "\n")
 	}
