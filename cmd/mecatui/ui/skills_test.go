@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
@@ -82,6 +83,39 @@ func TestRunSkillsOpensPanel(t *testing.T) {
 	body := stripANSIstr(m.View().Content)
 	if !strings.Contains(body, "code-review") || !strings.Contains(body, "fan-out web research") {
 		t.Errorf("panel should render the skills, got:\n%s", body)
+	}
+}
+
+// TestSkillsPanelWrapsLongDescriptions locks the overflow fix: a long skill
+// description must wrap to the card's inner width instead of running off the
+// right edge. It renders the panel body directly at a known width and asserts
+// every line fits the wrap budget AND the description actually spilled onto >1
+// indented line (so the assertion would fail if wrapping were removed).
+func TestSkillsPanelWrapsLongDescriptions(t *testing.T) {
+	th := theme.New("aztec", theme.AztecPalette())
+	const width = 100
+	budget := skillsTextWidth(width)
+	if budget <= 0 {
+		t.Fatalf("precondition: width %d should yield a positive wrap budget", width)
+	}
+
+	long := "This is a deliberately long skill description that should wrap across " +
+		"several lines instead of overflowing the panel card and running off the " +
+		"right edge of the terminal the way it did before the wrapping fix landed."
+	st := skillsState{view: skillsPanel, skills: []client.Skill{{Name: "wrappy", Description: long}}}
+
+	plain := stripANSIstr(renderSkillsPanel(th, st, client.Capabilities{Skills: true}, width))
+	indented := 0
+	for _, ln := range strings.Split(plain, "\n") {
+		if w := ansi.StringWidth(ln); w > budget {
+			t.Errorf("rendered line exceeds wrap budget %d (got %d): %q", budget, w, ln)
+		}
+		if strings.HasPrefix(ln, "  ") && strings.TrimSpace(ln) != "" {
+			indented++
+		}
+	}
+	if indented < 2 {
+		t.Errorf("long description should wrap onto >=2 indented lines, got %d:\n%s", indented, plain)
 	}
 }
 

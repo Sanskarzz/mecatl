@@ -5,6 +5,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
@@ -94,7 +95,48 @@ func renderSkillsOverlay(th theme.Theme, st skillsState, caps client.Capabilitie
 	if st.view != skillsPanel {
 		return ""
 	}
-	return centerCard(th, renderSkillsPanel(th, st, caps), width, height)
+	return centerCard(th, renderSkillsPanel(th, st, caps, width), width, height)
+}
+
+// skillsTextWidth is the column budget for wrapping server-derived skill text
+// (descriptions and the error line) to the card's inner width: the terminal width
+// minus the askCard chrome (border + horizontal padding) and a centering margin,
+// capped so lines stay readable on very wide terminals. A non-positive or very
+// narrow terminal returns 0, which disables wrapping so an unknown size renders
+// the bare, content-sized card like the other overlays do.
+func skillsTextWidth(width int) int {
+	const (
+		chrome = 6   // askCard border(2) + horizontal padding(2*2)
+		margin = 4   // breathing room so the centered card isn't flush to the edge
+		maxW   = 100 // cap so prose stays readable on very wide terminals
+		minW   = 20  // below this, don't wrap (degrade to the bare card)
+	)
+	w := width - chrome - margin
+	if w > maxW {
+		w = maxW
+	}
+	if w < minW {
+		return 0
+	}
+	return w
+}
+
+// indentWrap word-wraps s to the text budget and indents every resulting line by
+// two spaces (the inventory's description indent) so continuation lines align
+// under the first. A budget <= 0 falls back to a single indented line (unknown
+// size). ansi.Wrap breaks over-long tokens too, so a space-free string can't
+// overflow the card.
+func indentWrap(s string, budget int) string {
+	const indent = "  "
+	if budget <= 0 {
+		return indent + s
+	}
+	wrapped := ansi.Wrap(s, budget-len(indent), "")
+	lines := strings.Split(wrapped, "\n")
+	for i, ln := range lines {
+		lines[i] = indent + ln
+	}
+	return strings.Join(lines, "\n")
 }
 
 // skillsDisabledNote is the empty-inventory copy when skills are NOT enabled on
@@ -116,22 +158,27 @@ func skillsEmptyCopy(caps client.Capabilities) string {
 // renderSkillsPanel renders the read-only inventory: one row per skill (name +
 // description), name-sorted by the server. EVERY server-derived string is
 // terminal-sanitized.
-func renderSkillsPanel(th theme.Theme, st skillsState, caps client.Capabilities) string {
+func renderSkillsPanel(th theme.Theme, st skillsState, caps client.Capabilities, width int) string {
 	var b strings.Builder
 	b.WriteString(th.Style("askTitle").Render("Skills inventory") + "\n\n")
 
+	budget := skillsTextWidth(width)
 	switch {
 	case st.loading:
 		b.WriteString(th.Style("muted").Render("loading…") + "\n")
 	case st.err != nil:
-		b.WriteString(th.Style("errorText").Render("list skills: "+sanitizeTerminal(st.err.Error())) + "\n")
+		line := "list skills: " + sanitizeTerminal(st.err.Error())
+		if budget > 0 {
+			line = ansi.Wrap(line, budget, "")
+		}
+		b.WriteString(th.Style("errorText").Render(line) + "\n")
 	case len(st.skills) == 0:
 		b.WriteString(th.Style("muted").Render(skillsEmptyCopy(caps)) + "\n")
 	default:
 		for _, s := range st.skills {
 			b.WriteString(th.Style("toolName").Render(sanitizeTerminal(s.Name)) + "\n")
 			if s.Description != "" {
-				b.WriteString(th.Style("toolArgs").Render("  "+sanitizeTerminal(s.Description)) + "\n")
+				b.WriteString(th.Style("toolArgs").Render(indentWrap(sanitizeTerminal(s.Description), budget)) + "\n")
 			}
 		}
 	}
