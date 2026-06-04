@@ -117,8 +117,26 @@ Arguments:
 // (ReadOnly() == false). The store is constructor-injected, mirroring how the
 // Bash tool takes a CommandRunner, so command/memory side effects stay optional
 // and testable with a fake.
+//
+// The tool is PARAMETERIZED so the user-model family (RememberUser, see
+// usermodeltools.go) reuses the exact same write logic with only a different
+// catalog name, a specialized description, an enforced key prefix, and an
+// injection scan — rather than a near-duplicate type. The zero value of those
+// fields reproduces the original project-memory Remember behaviour.
 type RememberTool struct {
 	store tool.MemoryStore
+	// name overrides the catalog name; "" means RememberToolName.
+	name string
+	// desc overrides the model-facing description; "" means rememberDescription.
+	desc string
+	// keyPrefix, when non-empty, is ENFORCED on every write: a key lacking it is
+	// rejected (the caller must namespace explicitly, so a stray key cannot escape
+	// the user-model namespace). Empty means no prefix constraint.
+	keyPrefix string
+	// scanInjection, when true, runs an injection scan over the VALUE at write time
+	// and rejects (does not store) a flagged value. It guards transcript-sourced
+	// poisoning for the user-model write paths (the agent tool AND the 2b fork).
+	scanInjection bool
 }
 
 // NewRememberTool constructs the Remember tool bound to store. store must be
@@ -140,11 +158,21 @@ type rememberArgs struct {
 	Description string `json:"description"`
 }
 
-// Spec returns the model-facing specification of the Remember tool.
-func (RememberTool) Spec() tool.ToolSpec {
+// Spec returns the model-facing specification of the Remember tool. The name and
+// description fall back to the project-memory defaults unless overridden (the
+// user-model family overrides both).
+func (rt RememberTool) Spec() tool.ToolSpec {
+	name := rt.name
+	if name == "" {
+		name = RememberToolName
+	}
+	desc := rt.desc
+	if desc == "" {
+		desc = rememberDescription
+	}
 	return tool.ToolSpec{
-		Name:        RememberToolName,
-		Description: rememberDescription,
+		Name:        name,
+		Description: desc,
 		Schema: schema(`{
   "type": "object",
   "properties": {
@@ -172,8 +200,43 @@ func (rt RememberTool) Execute(ctx context.Context, in session.ToolCall, _ tool.
 	if args.Value == "" {
 		return session.NewToolError(in.ID, "the \"value\" argument is required"), nil
 	}
+	// Enforce the namespace prefix (user-model family): prepend it when absent so a
+	// stray key cannot escape the namespace, but never double-prefix an already
+	// well-formed key.
+	key := args.Key
+	if rt.keyPrefix != "" && !strings.HasPrefix(key, rt.keyPrefix) {
+		key = rt.keyPrefix + key
+	}
+	// Injection-scan at write time (user-model family): a transcript-sourced fact
+	// must not be able to launder role-override / instruction-injection text into a
+	// block that re-enters context every session. The <user-model> block renders
+	// KEY + DESCRIPTION (the value is dropped from the tier-0 index), and the
+	// description is either the explicit args.Description or the value's first line —
+	// so BOTH the value AND the EFFECTIVE description must be scanned, or a payload
+	// hidden in `description` would bypass the value-only scan and still be injected.
+	// A hit in EITHER field REJECTS the write (not stored) with a model-addressable
+	// error. The same RememberTool{scanInjection:true} backs both the agent tool and
+	// the 2b reviewer's child engine (buildUserModelReviewEngine), so this one gate
+	// covers both write paths.
+	if rt.scanInjection {
+		effectiveDesc := descriptionOrFirstLine(args.Description, args.Value)
+		for _, field := range []string{args.Value, args.Description, effectiveDesc} {
+			if marker, found := scanForInjection(field); found {
+				return session.NewToolError(in.ID, fmt.Sprintf("refusing to store %q: it contains a disallowed instruction-injection / role-override pattern (%q). Store plain FACTS about the operator, not instructions.", key, marker)), nil
+			}
+		}
+		// Fence-integrity guard (mirrors soul's reject-on-close-tag): a value or
+		// description containing the literal data-fence close-tag could close the
+		// <user-model> fence early and smuggle trailing text out of the data zone.
+		// Reject it. Case-insensitive so "</USER-MODEL>" cannot slip through.
+		for _, field := range []string{args.Value, args.Description} {
+			if strings.Contains(strings.ToLower(field), userModelCloseTag) {
+				return session.NewToolError(in.ID, fmt.Sprintf("refusing to store %q: it contains the data-fence close-tag %q, which could break the <user-model> data fence.", key, userModelCloseTag)), nil
+			}
+		}
+	}
 	if err := rt.store.RememberEntry(ctx, tool.MemoryEntry{
-		Key:         args.Key,
+		Key:         key,
 		Value:       args.Value,
 		Description: args.Description,
 	}); err != nil {
@@ -185,7 +248,7 @@ func (rt RememberTool) Execute(ctx context.Context, in session.ToolCall, _ tool.
 	// in-run feedback that lets the model see its own write immediately, even though
 	// the tier-0 index itself is computed once at run start and does not refresh
 	// mid-run.
-	return session.NewToolResult(in.ID, fmt.Sprintf("Remembered %q — %s", args.Key, descriptionOrFirstLine(args.Description, args.Value))), nil
+	return session.NewToolResult(in.ID, fmt.Sprintf("Remembered %q — %s", key, descriptionOrFirstLine(args.Description, args.Value))), nil
 }
 
 // --- Recall tool ----------------------------------------------------------
@@ -194,6 +257,10 @@ func (rt RememberTool) Execute(ctx context.Context, in session.ToolCall, _ tool.
 // (ReadOnly() == true) so the loop may dispatch it in parallel with other reads.
 type RecallTool struct {
 	store tool.MemoryStore
+	// name/desc override the catalog name and description for the user-model family
+	// (RecallUser). Empty falls back to the project-memory defaults.
+	name string
+	desc string
 }
 
 // NewRecallTool constructs the Recall tool bound to store. store must be non-nil.
@@ -213,10 +280,18 @@ type recallArgs struct {
 }
 
 // Spec returns the model-facing specification of the Recall tool.
-func (RecallTool) Spec() tool.ToolSpec {
+func (rt RecallTool) Spec() tool.ToolSpec {
+	name := rt.name
+	if name == "" {
+		name = RecallToolName
+	}
+	desc := rt.desc
+	if desc == "" {
+		desc = recallDescription
+	}
 	return tool.ToolSpec{
-		Name:        RecallToolName,
-		Description: recallDescription,
+		Name:        name,
+		Description: desc,
 		Schema: schema(`{
   "type": "object",
   "properties": {
@@ -275,6 +350,10 @@ func (rt RecallTool) Execute(ctx context.Context, in session.ToolCall, _ tool.Wo
 // (ReadOnly() == true) so the loop may dispatch it in parallel with other reads.
 type SearchMemoryTool struct {
 	store tool.MemoryStore
+	// name/desc override the catalog name and description for the user-model family
+	// (SearchUserModel). Empty falls back to the project-memory defaults.
+	name string
+	desc string
 }
 
 // NewSearchMemoryTool constructs the SearchMemory tool bound to store. store
@@ -296,10 +375,18 @@ type searchMemoryArgs struct {
 }
 
 // Spec returns the model-facing specification of the SearchMemory tool.
-func (SearchMemoryTool) Spec() tool.ToolSpec {
+func (st SearchMemoryTool) Spec() tool.ToolSpec {
+	name := st.name
+	if name == "" {
+		name = SearchMemoryToolName
+	}
+	desc := st.desc
+	if desc == "" {
+		desc = searchMemoryDescription
+	}
 	return tool.ToolSpec{
-		Name:        SearchMemoryToolName,
-		Description: searchMemoryDescription,
+		Name:        name,
+		Description: desc,
 		Schema: schema(`{
   "type": "object",
   "properties": {

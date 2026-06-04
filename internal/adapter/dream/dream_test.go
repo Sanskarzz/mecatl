@@ -456,3 +456,49 @@ func (blockingProvider) Stream(ctx context.Context, _ port.LLMRequest) (iter.Seq
 		<-ctx.Done()
 	}, nil
 }
+
+// TestPrefixScopesConsolidationToUserNamespace proves Config.Prefix:"user/" limits
+// consolidation to the user-model namespace: only "user/"-prefixed entries are
+// listed and eligible for mutation; project-memory keys are never touched. This is
+// the same Prefix mechanism the user-model consolidator uses (issue #14, Phase 2b).
+func TestPrefixScopesConsolidationToUserNamespace(t *testing.T) {
+	store := newFakeStore(map[string]string{
+		"user/a":    "operator likes terse answers",
+		"user/b":    "operator likes terse replies",
+		"user/c":    "operator background: Go",
+		"pref/x":    "project test runner",
+		"project/y": "deploy gate",
+	})
+	// A merge that folds user/b into user/a, plus a forget of pref/x — but pref/x is
+	// OUTSIDE the prefix, so it is never even listed and the forget is a no-invented-
+	// key no-op (the project key must survive).
+	p := &stubPlanner{plan: Plan{
+		Merges:  []Merge{{Into: "user/a", From: []string{"user/b"}, Value: "operator likes terse answers"}},
+		Forgets: []string{"pref/x"},
+	}}
+	c := newWithPlanner(store, p, Config{MinEntriesToRun: 3, Prefix: "user/"})
+
+	rep, err := c.Consolidate(context.Background())
+	if err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	if rep.Merged != 1 {
+		t.Errorf("expected 1 merged user/ entry, got %+v", rep)
+	}
+	// user/b folded away; user/a, user/c remain.
+	if _, ok := store.entries["user/b"]; ok {
+		t.Errorf("user/b should have been folded into user/a")
+	}
+	if _, ok := store.entries["user/a"]; !ok {
+		t.Errorf("user/a (merge survivor) should remain")
+	}
+	// The project-namespace keys are untouched: they were outside the prefix, so the
+	// pref/x forget is a no-op (no-invented-keys still holds — pref/x was not in the
+	// listed input).
+	if _, ok := store.entries["pref/x"]; !ok {
+		t.Errorf("pref/x is outside the user/ prefix and must NOT be forgotten")
+	}
+	if _, ok := store.entries["project/y"]; !ok {
+		t.Errorf("project/y is outside the user/ prefix and must survive")
+	}
+}

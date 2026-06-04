@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -46,6 +47,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/adapter/tokenizer"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
+	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/port"
@@ -131,6 +133,25 @@ type Config struct {
 	// construction: no tool can write the soul.
 	SoulPath string
 	NoSoul   bool
+
+	// User model (issue #14, Phase 2): a user-scoped, cross-PROJECT memory of
+	// durable FACTS about the operator, exposed to the agent as RememberUser /
+	// RecallUser / SearchUserModel tools (2a, default-on) and injected as a turn-0
+	// <user-model> block (LAST, after the soul + project memory index). It is a
+	// SECOND memory.Store under UserModelDir (or the conventional
+	// <xdg>/mecatl/usermodel). NoUserModel disables it entirely (--no-user-model).
+	//
+	// UserModelReview enables the OPT-IN Phase-2b background reviewer (OFF by
+	// default): after a session stops, a fresh single-shot child extracts operator
+	// facts from the transcript and writes them via RememberUser. It NEVER reopens
+	// the user session (R10). UserModelReviewInterval is a session-count debounce
+	// (0/1 = review every session when enabled). UserModelConsolidateInterval drives
+	// a separate dream.Consolidator scoped to the "user/" namespace (0 = off).
+	UserModelDir                 string
+	NoUserModel                  bool
+	UserModelReview              bool
+	UserModelReviewInterval      int
+	UserModelConsolidateInterval time.Duration
 
 	// Skills: explicit directories (highest precedence) plus the conventional
 	// project/user locations when SkillsConventional is set. SkillsDraftDir enables
@@ -477,7 +498,7 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 	policy := permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, resolver)
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
-	cat, mainMgr, mcpProvider, mcpInventory, memStore, discoveredSkills, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
+	cat, mainMgr, mcpProvider, mcpInventory, memStore, userModelStore, discoveredSkills, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
 
 	counter := buildTokenCounter(cfg)
 
@@ -495,9 +516,20 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 	// the composition layer — prompt never imports them. Both ride as turn-0 user
 	// messages (after the cache breakpoint), so neither enters prompt.Build's
 	// StablePrefix.
-	instructions := buildInstructionAssembler(soulSrc, memStore)
+	instructions := buildInstructionAssembler(soulSrc, memStore, userModelStore)
 
-	deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, mcpProvider, instructions)
+	// Phase 2b (OPT-IN, OFF by default): when UserModelReview is set AND a user-model
+	// store is wired, wrap the MAIN engine's HookRunner with a composition-layer
+	// Stop-trigger decorator that, on PhaseStop, fires the background reviewer in a
+	// DETACHED goroutine (debounced by UserModelReviewInterval). The reviewer spawns a
+	// FRESH single-shot child scoped to ONLY the RememberUser tool over the user-model
+	// store — it NEVER reopens the user's terminal session (R10). The decorator is a
+	// composition-layer wrapper around port.HookRunner, NOT a domain port. The
+	// per-session client-MCP engines keep the UNWRAPPED hooks: the reviewer fires once
+	// per MAIN-engine Stop, not per client-MCP session stop.
+	mainHooks := maybeWrapUserModelReview(cfg, hooks, store, provider, userModelStore)
+
+	deps := baseEngineDeps(cfg, provider, store, policy, mainHooks, counter, mcpProvider, instructions)
 	deps.Catalog = cat
 	sessFactory := sessionEngineFactory(cfg, provider, store, policy, hooks, counter, mcpProvider, instructions)
 	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, mcpClose, nil
@@ -506,14 +538,17 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 // buildInstructionAssembler composes the turn-0 instruction assembler in order:
 // always the RootAssembler (project instruction files); then the SoulAssembler
 // (user-scoped persona/identity) when a soul source is wired (soulSrc non-nil);
-// then the tier-0 MemoryIndexAssembler (saved facts) when a memory store is wired
-// (memStore non-nil). Identity precedes saved-facts (issue #14 ordering). Each
-// nil collaborator is OMITTED entirely, so a soul/memory-disabled deployment adds
-// no machinery. The sources satisfy prompt.SoulSource / prompt.MemoryIndexSource
-// structurally; this is the one place those adapters meet their ports. When
-// nothing but the root is wired, the bare RootAssembler is returned (no Multi).
-func buildInstructionAssembler(soulSrc prompt.SoulSource, memStore *memory.Store) prompt.InstructionAssembler {
-	if soulSrc == nil && memStore == nil {
+// then the tier-0 MemoryIndexAssembler (saved project facts) when a project memory
+// store is wired (memStore non-nil); then the UserModelAssembler (durable FACTS
+// about the operator) when a user-model store is wired (userModelStore non-nil).
+// Order is identity → saved project facts → operator model (issue #14 ordering).
+// Each nil collaborator is OMITTED entirely, so a soul/memory/user-model-disabled
+// deployment adds no machinery. The sources satisfy prompt.SoulSource /
+// prompt.MemoryIndexSource / prompt.UserModelSource structurally; this is the one
+// place those adapters meet their ports. When nothing but the root is wired, the
+// bare RootAssembler is returned (no Multi).
+func buildInstructionAssembler(soulSrc prompt.SoulSource, memStore, userModelStore *memory.Store) prompt.InstructionAssembler {
+	if soulSrc == nil && memStore == nil && userModelStore == nil {
 		return prompt.RootAssembler{}
 	}
 	assemblers := []prompt.InstructionAssembler{prompt.RootAssembler{}}
@@ -522,6 +557,11 @@ func buildInstructionAssembler(soulSrc prompt.SoulSource, memStore *memory.Store
 	}
 	if memStore != nil {
 		assemblers = append(assemblers, prompt.MemoryIndexAssembler{Src: memStore})
+	}
+	if userModelStore != nil {
+		// LAST in the seam (issue #14 ordering): soul (identity) → memory index
+		// (saved project facts) → user model (who the operator is).
+		assemblers = append(assemblers, prompt.UserModelAssembler{Src: userModelStore})
 	}
 	return prompt.NewMultiAssembler(assemblers...)
 }
@@ -543,6 +583,42 @@ func buildSoulSource(cfg Config) prompt.SoulSource {
 		slog.Info("soul ENABLED (read-only persona)", "path", "conventional <xdg>/mecatl/soul.md (fail-soft if absent)")
 	}
 	return soul.New(soul.Options{Path: cfg.SoulPath})
+}
+
+// userModelSubdir is the conventional user-model store directory relative to the
+// XDG config base, i.e. <config>/mecatl/usermodel (fallback
+// ~/.config/mecatl/usermodel). Mirrors soul's soulSubpath path convention.
+const userModelSubdir = "mecatl/usermodel"
+
+// buildUserModelStore constructs the SECOND, USER-scoped memory store (issue #14,
+// Phase 2) — a cross-project store of durable FACTS about the operator. It returns
+// nil when user-model is disabled (--no-user-model), when no directory can be
+// resolved, or when the store cannot be opened (all fail-soft: the user-model
+// tools/block simply don't appear). It resolves UserModelDir when set, else the
+// conventional <xdg>/mecatl/usermodel. It upholds the one-Store-per-dir invariant:
+// this is the SOLE construction site for the user-model store, distinct from the
+// per-project memory store (different dir), so the two never contend on a lock.
+func buildUserModelStore(cfg Config) *memory.Store {
+	if cfg.NoUserModel {
+		slog.Info("user model DISABLED (--no-user-model)")
+		return nil
+	}
+	dir := cfg.UserModelDir
+	if dir == "" {
+		base := xdgconfig.UserConfigDir(xdgconfig.OSEnv)
+		if base == "" {
+			slog.Info("user model DISABLED (no --user-model-dir and no XDG/home to resolve the conventional location)")
+			return nil
+		}
+		dir = filepath.Join(base, userModelSubdir)
+	}
+	store, err := memory.New(dir)
+	if err != nil {
+		slog.Warn("could not open user-model store; user-model tools disabled", "dir", dir, "err", err)
+		return nil
+	}
+	slog.Info("user model ENABLED (cross-project operator FACTS)", "dir", dir)
+	return store
 }
 
 // baseEngineDeps assembles the agent.Deps SHARED by the main engine (buildEngine)
@@ -765,7 +841,7 @@ func registerCoreTools(cfg Config, cat *tool.Catalog, log bool) {
 // — the optional Bash tool. It then optionally registers Fork, memory, skills, the
 // repo map, and connects any MCP servers. The returned close func tears down the
 // MCP manager on shutdown.
-func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, *memory.Store, []skills.Skill, func()) {
+func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, *memory.Store, *memory.Store, []skills.Skill, func()) {
 	cat := tool.NewCatalog()
 	registerCoreTools(cfg, cat, true)
 	// memStore is the per-project memory store, returned so the caller can bind it
@@ -864,6 +940,22 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		}
 	}
 
+	// User-model tools (issue #14, Phase 2a): a SECOND, USER-scoped memory store
+	// (cross-project), exposed as RememberUser/RecallUser/SearchUserModel. ON by
+	// default reading the conventional <xdg>/mecatl/usermodel; --no-user-model
+	// disables it. userModelStore is returned so the caller can bind it to the
+	// prompt <user-model> source AND (for Phase 2b) to the background reviewer's
+	// write tool. It stays nil when disabled or unopenable (fail-soft).
+	userModelStore := buildUserModelStore(cfg)
+	if userModelStore != nil {
+		if err := memory.RegisterUserModel(cat, userModelStore); err != nil {
+			slog.Warn("registering user-model tools failed; some tools may be missing", "err", err)
+		} else {
+			slog.Info("user-model tools ENABLED (RememberUser/RecallUser/SearchUserModel; cross-project)")
+			startUserModelConsolidation(ctx, cfg, userModelStore, provider)
+		}
+	}
+
 	discoveredSkills := registerSkills(ctx, cfg, cat)
 
 	// Repo-map tool (Aider-style ranked codebase overview). CGO-free (tree-sitter via
@@ -875,7 +967,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		slog.Info("repo map tool DISABLED")
 	}
 
-	return cat, mainMgr, mcpProvider, mcpInventory, memStore, discoveredSkills, mcpClose
+	return cat, mainMgr, mcpProvider, mcpInventory, memStore, userModelStore, discoveredSkills, mcpClose
 }
 
 // registerMCP RESOLVES the MCP server inventory from the pluggable source list
@@ -1060,6 +1152,73 @@ func startMemoryConsolidation(ctx context.Context, cfg Config, store tool.Memory
 			slog.Warn("memory consolidation loop stopped", "err", err)
 		}
 	}()
+}
+
+// startUserModelConsolidation launches a SEPARATE dream consolidator on the
+// USER-model store, scoped to the "user/" key namespace, when
+// UserModelConsolidateInterval is positive (default 0 = off). It mirrors
+// startMemoryConsolidation but with dream.Config{Prefix: "user/"} so it only ever
+// touches user-model entries, never project memory. It shares ctx and the agent's
+// provider. It returns true when a consolidator was started (a positive interval),
+// false otherwise — a small testability seam so a test can assert the OFF-by-default
+// posture (interval 0 ⇒ no goroutine) without observing the background loop.
+func startUserModelConsolidation(ctx context.Context, cfg Config, store tool.MemoryStore, provider port.LLMProvider) bool {
+	if cfg.UserModelConsolidateInterval <= 0 {
+		slog.Info("user-model consolidation DISABLED")
+		return false
+	}
+	cons := dream.New(store, provider, dream.Config{Model: cfg.Model, Prefix: "user/"})
+	slog.Info("user-model consolidation ENABLED (dream; user/ namespace)",
+		"interval", cfg.UserModelConsolidateInterval, "model", cfg.Model)
+	go func() {
+		err := cons.RunPeriodically(ctx, cfg.UserModelConsolidateInterval, func(err error) {
+			slog.Warn("user-model consolidation", "err", err)
+		})
+		if err != nil && !errors.Is(err, context.Canceled) {
+			slog.Warn("user-model consolidation loop stopped", "err", err)
+		}
+	}()
+	return true
+}
+
+// maybeWrapUserModelReview returns hooks wrapped with the Phase-2b Stop-trigger
+// decorator when UserModelReview is enabled AND a user-model store is wired;
+// otherwise it returns hooks unchanged (the feature is OFF by default, so the
+// common path is a passthrough). The decorator builds a child engine scoped to
+// ONLY the RememberUser tool over the user-model store, constructs an
+// agent.UserModelReviewer, and on PhaseStop fires reviewer.Review in a DETACHED
+// goroutine (debounced by UserModelReviewInterval). The reviewer reads the
+// finished session's transcript via the SessionStore and spawns a FRESH child
+// session — it NEVER reopens the user's terminal session (R10).
+func maybeWrapUserModelReview(cfg Config, hooks port.HookRunner, store port.SessionStore, provider port.LLMProvider, userModelStore *memory.Store) port.HookRunner {
+	if !cfg.UserModelReview {
+		slog.Info("user-model background review DISABLED")
+		return hooks
+	}
+	if userModelStore == nil {
+		slog.Warn("user-model background review requested but the user-model store is disabled; review is a no-op")
+		return hooks
+	}
+	reviewer := agent.NewUserModelReviewer(store, buildUserModelReviewEngine(cfg, provider, userModelStore))
+	slog.Info("user-model background review ENABLED (Stop-triggered, detached fork; never reopens the user session)",
+		"review_interval", cfg.UserModelReviewInterval)
+	return newUserModelReviewHooks(hooks, reviewer, cfg.UserModelReviewInterval)
+}
+
+// buildUserModelReviewEngine constructs the child *Engine the Phase-2b reviewer
+// runs: a catalog containing ONLY the RememberUser tool bound to the user-model
+// store, under the standard allow-all, non-interactive child policy. So the
+// reviewer can WRITE the user model but has no other capability (no Read/Edit/Bash,
+// no Task/Fork). RememberUser carries the write-time injection scan, so a
+// transcript-poisoning attempt cannot land in the user-model block.
+func buildUserModelReviewEngine(cfg Config, provider port.LLMProvider, store *memory.Store) *agent.Engine {
+	cat := tool.NewCatalog()
+	for _, t := range memory.NewUserModelTools(store) {
+		if t.Spec().Name == memory.RememberUserToolName {
+			cat.MustRegister(t)
+		}
+	}
+	return newChildEngine(provider, cat, cfg.Model, promptConfig(cfg))
 }
 
 // buildCommandRunner builds the local command runner the Bash tool executes

@@ -154,6 +154,11 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--skills-draft-similarity-threshold` | `0.5` | 2-gram Jaccard similarity above which `SkillDraft` warns of a near-duplicate existing skill (warn-only; it never blocks the draft). |
 | `--soul-file` | `""` | path to a user-scoped, **agent-read-only** persona/"soul" file (empty → the conventional `$XDG_CONFIG_HOME/mecatl/soul.md`, fallback `~/.config/mecatl/soul.md`). Injected as turn-0 context, **fail-soft** (missing/empty/oversized/injection-flagged → no fragment). No tool can write it. **See the persona/soul note below.** |
 | `--no-soul` | `false` | disable the user-scoped persona/soul fragment entirely (otherwise it is read from the conventional location, fail-soft if absent). |
+| `--user-model-dir` | `""` | directory for the user-scoped, **cross-project** user-model store of durable FACTS about the operator (empty → the conventional `$XDG_CONFIG_HOME/mecatl/usermodel`, fallback `~/.config/mecatl/usermodel`). Exposes **RememberUser/RecallUser/SearchUserModel** + a turn-0 `<user-model>` block. **See the user-model note below.** |
+| `--no-user-model` | `false` | disable the user model entirely (the RememberUser/RecallUser/SearchUserModel tools and the `<user-model>` block). |
+| `--user-model-review` | `false` | enable the **opt-in** background user-model reviewer: after a session stops, a fresh single-shot child extracts durable operator FACTS from the transcript via RememberUser. OFF by default. It **never reopens** the user session; the write path is injection-scanned. |
+| `--user-model-review-interval` | `1` | session-count debounce for `--user-model-review` (review every Nth session that stops; 1 = every session). |
+| `--user-model-consolidate-interval` | `0` | interval for background consolidation (dream) of the user-model store, scoped to the `user/` namespace; 0 disables. |
 | `--permissions-conventional` | `true` | auto-discover the per-project permission config (`<workspace>/.mecatl/settings.yaml`, and with `--import-claude-permissions` also `<workspace>/.claude/settings.json`) plus the user-global file. **Re-resolved per session** against each session's workspace root. ON and inert until such a file exists. **See the permission-config note below.** |
 | `--import-claude-permissions` | `false` | also import Claude-Code `settings.json` permissions (project + user). **Lossy** (fail-safe): see the table below. |
 | `--trust-project` | `false` | honour a discovered **project's ALLOW rules** (its deny/ask are always honoured regardless). OFF by default (the safe stance) — an untrusted repo's grants are ignored. **See the permission-config note below.** |
@@ -469,7 +474,46 @@ It is **read-only to the agent by construction**: no tool can write the soul, an
 loader has no write path. This is deliberate — a writable identity anchor is a
 prompt-injection trap (a single poisoned write would rewrite "who the agent is" across
 *every* future session). Bootstrap and edit it by hand, with a text editor. (See
-`docs/design/SOUL-SPIKE.md` for the threat model and the Phase-2 learning-loop proposal.)
+`docs/design/SOUL-SPIKE.md` for the threat model and the Phase-2 learning loop.)
+
+### User model (`~/.config/mecatl/usermodel`, issue #14 Phase 2)
+
+A **user-scoped, cross-project** model of durable **FACTS about the operator** — who
+they are and how they like to work. Unlike the soul (read-only) and per-project memory
+(`--memory-dir`), the user model is **writable by the agent** and **shared across every
+project**, backed by a SECOND `memory` store at `$XDG_CONFIG_HOME/mecatl/usermodel`
+(fallback `~/.config/mecatl/usermodel`), overridable with `--user-model-dir`.
+
+It surfaces two ways:
+
+- **Tools (on by default):** `RememberUser`, `RecallUser`, `SearchUserModel` — the
+  user-model siblings of the per-project memory tools. Keys are auto-namespaced under
+  `user/`. The model sees a turn-0 `<user-model>` block summarising the saved facts
+  (injected LAST: soul → memory index → user model).
+- **Background reviewer (off by default, `--user-model-review`):** after a session
+  stops, a fresh single-shot child reads the transcript and extracts operator facts via
+  RememberUser. It is debounced by `--user-model-review-interval` and **never reopens or
+  re-runs the user's session** — it spawns a brand-new child. A
+  `--user-model-consolidate-interval` points a `dream` consolidator at the `user/`
+  namespace.
+
+**Rules vs facts — the operator boundary.** The user model holds **FACTS about the
+operator** (stated preferences, communication style, domain background), **never rules
+or behavioural instructions for the agent**. How the agent behaves comes from its soul
+and the system rules; the `<user-model>` block is fenced **DATA** the model treats as
+facts, not a new instruction stream, and the tool descriptions forbid storing rules or
+anything the workspace already knows. The RememberUser write path injection-scans both
+the value AND the effective description (reusing `skills.ScanForInjection`) — the
+`<user-model>` block renders the key + description, so scanning only the value would
+miss a payload hidden in `description` — and additionally rejects any field containing
+the data-fence close-tag `</user-model>` (mirroring soul's reject-on-close-tag), so a
+poisoned transcript cannot launder steering into the block or break its data fence. The user model is an instruction
+**fragment**, not a governance scope — it can never loosen a configured permission Ask.
+Over-eager memory is *steered* (by the descriptions), not *enforced* (there is no
+rule/fact classifier); this is a deliberate, accepted residual risk. Single-operator
+assumption: there is no per-user keying — "the operator" is implicitly singular, the
+same trust-zone assumption the soul and `docs/design/MEMORY-TIERING.md` carry. Disable
+it with `--no-user-model`.
 
 ### Graceful shutdown
 

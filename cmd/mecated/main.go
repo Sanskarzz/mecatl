@@ -151,6 +151,19 @@ type config struct {
 	soulFile string
 	noSoul   bool
 
+	// User model (issue #14, Phase 2): a user-scoped, cross-project memory of
+	// durable FACTS about the operator (RememberUser/RecallUser/SearchUserModel +
+	// a turn-0 <user-model> block). ON by default at the conventional
+	// ~/.config/mecatl/usermodel; noUserModel disables it; userModelDir overrides
+	// the dir. userModelReview enables the OPT-IN (off by default) Stop-triggered
+	// background reviewer; userModelReviewInterval is its session-count debounce;
+	// userModelConsolidateInterval drives a "user/"-scoped dream consolidator.
+	userModelDir                 string
+	noUserModel                  bool
+	userModelReview              bool
+	userModelReviewInterval      int
+	userModelConsolidateInterval time.Duration
+
 	// Skills: explicit directories of progressive-disclosure skill units laid out
 	// as <dir>/<name>/SKILL.md (repeatable; highest precedence). Empty + no
 	// conventional set disables the Skill tool. skillsConventional adds the
@@ -578,51 +591,56 @@ func run() error {
 // threading the telemetry sink (EventSink) and metrics (Logger) into the engine.
 func appConfig(cfg config, sink port.EventSink, logger port.Logger) app.Config {
 	return app.Config{
-		Workspace:                 cfg.workspace,
-		Model:                     cfg.model,
-		UseOpenAI:                 cfg.useOpenAI,
-		OpenAIBaseURL:             cfg.openAIBaseURL,
-		OpenAIKey:                 cfg.openAIKey,
-		UseMock:                   cfg.useMock,
-		StoreDir:                  cfg.storeDir,
-		Shell:                     cfg.shell,
-		NoBash:                    cfg.noBash,
-		Compaction:                cfg.compaction,
-		Tokenizer:                 cfg.tokenizer,
-		LLMMaxAttempts:            cfg.llmMaxAttempts,
-		LLMPerAttemptTimeout:      cfg.llmPerAttemptTimeout,
-		LLMBreakerThreshold:       cfg.llmBreakerThreshold,
-		LLMBreakerCooldown:        cfg.llmBreakerCooldown,
-		MemoryDir:                 cfg.memoryDir,
-		MemoryConsolidateInterval: cfg.memoryConsolidateInterval,
-		SoulPath:                  cfg.soulFile,
-		NoSoul:                    cfg.noSoul,
-		SkillsDirs:                cfg.skillsDirs,
-		SkillsConventional:        cfg.skillsConventional,
-		SkillsDraftDir:            cfg.skillsDraftDir,
-		SkillsDraftThreshold:      cfg.skillsDraftThreshold,
-		AgentsDirs:                cfg.agentsDirs,
-		AgentsConventional:        cfg.agentsConventional,
-		SubagentModel:             cfg.subagentModel,
-		ModelAliases:              cfg.modelAliases,
-		CommandsDir:               cfg.commandsDir,
-		EnableCommands:            cfg.enableCommands,
-		EnableFork:                cfg.enableFork,
-		ForkPreservedCap:          cfg.forkPreservedCap,
-		EnableRepoMap:             cfg.enableRepoMap,
-		EnableTeams:               cfg.enableTeams,
-		MCPServers:                cfg.mcpServers,
-		MCPResourceTools:          cfg.mcpResourceTools,
-		MCPPrompts:                cfg.mcpPrompts,
-		ToolHiveEnabled:           cfg.toolHiveEnabled,
-		ToolHiveGroup:             cfg.toolHiveGroup,
-		PermissionsConventional:   cfg.permissionsConventional,
-		ImportClaudePermissions:   cfg.importClaudePermissions,
-		TrustProject:              cfg.trustProject,
-		PermissionConfigs:         cfg.permissionConfigs,
-		AllowAllTools:             cfg.allowAllTools,
-		Sink:                      sink,
-		Logger:                    logger,
+		Workspace:                    cfg.workspace,
+		Model:                        cfg.model,
+		UseOpenAI:                    cfg.useOpenAI,
+		OpenAIBaseURL:                cfg.openAIBaseURL,
+		OpenAIKey:                    cfg.openAIKey,
+		UseMock:                      cfg.useMock,
+		StoreDir:                     cfg.storeDir,
+		Shell:                        cfg.shell,
+		NoBash:                       cfg.noBash,
+		Compaction:                   cfg.compaction,
+		Tokenizer:                    cfg.tokenizer,
+		LLMMaxAttempts:               cfg.llmMaxAttempts,
+		LLMPerAttemptTimeout:         cfg.llmPerAttemptTimeout,
+		LLMBreakerThreshold:          cfg.llmBreakerThreshold,
+		LLMBreakerCooldown:           cfg.llmBreakerCooldown,
+		MemoryDir:                    cfg.memoryDir,
+		MemoryConsolidateInterval:    cfg.memoryConsolidateInterval,
+		SoulPath:                     cfg.soulFile,
+		NoSoul:                       cfg.noSoul,
+		UserModelDir:                 cfg.userModelDir,
+		NoUserModel:                  cfg.noUserModel,
+		UserModelReview:              cfg.userModelReview,
+		UserModelReviewInterval:      cfg.userModelReviewInterval,
+		UserModelConsolidateInterval: cfg.userModelConsolidateInterval,
+		SkillsDirs:                   cfg.skillsDirs,
+		SkillsConventional:           cfg.skillsConventional,
+		SkillsDraftDir:               cfg.skillsDraftDir,
+		SkillsDraftThreshold:         cfg.skillsDraftThreshold,
+		AgentsDirs:                   cfg.agentsDirs,
+		AgentsConventional:           cfg.agentsConventional,
+		SubagentModel:                cfg.subagentModel,
+		ModelAliases:                 cfg.modelAliases,
+		CommandsDir:                  cfg.commandsDir,
+		EnableCommands:               cfg.enableCommands,
+		EnableFork:                   cfg.enableFork,
+		ForkPreservedCap:             cfg.forkPreservedCap,
+		EnableRepoMap:                cfg.enableRepoMap,
+		EnableTeams:                  cfg.enableTeams,
+		MCPServers:                   cfg.mcpServers,
+		MCPResourceTools:             cfg.mcpResourceTools,
+		MCPPrompts:                   cfg.mcpPrompts,
+		ToolHiveEnabled:              cfg.toolHiveEnabled,
+		ToolHiveGroup:                cfg.toolHiveGroup,
+		PermissionsConventional:      cfg.permissionsConventional,
+		ImportClaudePermissions:      cfg.importClaudePermissions,
+		TrustProject:                 cfg.trustProject,
+		PermissionConfigs:            cfg.permissionConfigs,
+		AllowAllTools:                cfg.allowAllTools,
+		Sink:                         sink,
+		Logger:                       logger,
 	}
 }
 
@@ -691,6 +709,12 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.StringVar(&cfg.soulFile, "soul-file", "", "path to a user-scoped, agent-READ-ONLY persona/\"soul\" file injected as turn-0 context (empty = the conventional $XDG_CONFIG_HOME/mecatl/soul.md, fallback ~/.config/mecatl/soul.md). Fail-soft: a missing/empty/oversized/injection-flagged file degrades to no fragment, never an error. No tool can write it")
 	fs.BoolVar(&cfg.noSoul, "no-soul", false, "disable the user-scoped persona/soul fragment entirely (otherwise it is read from the conventional location, fail-soft if absent)")
+
+	fs.StringVar(&cfg.userModelDir, "user-model-dir", "", "directory for the user-scoped, CROSS-PROJECT user-model store of durable FACTS about the operator (empty = the conventional $XDG_CONFIG_HOME/mecatl/usermodel, fallback ~/.config/mecatl/usermodel). Exposes RememberUser/RecallUser/SearchUserModel and a turn-0 <user-model> block. Holds FACTS about the operator, never rules — how the agent behaves comes from its soul + system rules")
+	fs.BoolVar(&cfg.noUserModel, "no-user-model", false, "disable the user-model entirely (the RememberUser/RecallUser/SearchUserModel tools and the <user-model> block)")
+	fs.BoolVar(&cfg.userModelReview, "user-model-review", false, "enable the OPT-IN background user-model reviewer: after a session stops, a fresh single-shot child extracts durable operator FACTS from the transcript and writes them via RememberUser. OFF by default. It NEVER reopens the user session; the write path is injection-scanned")
+	fs.IntVar(&cfg.userModelReviewInterval, "user-model-review-interval", 1, "session-count debounce for --user-model-review: review every Nth session that stops (1 = every session). Only consulted when --user-model-review is set")
+	fs.DurationVar(&cfg.userModelConsolidateInterval, "user-model-consolidate-interval", 0, "interval for background consolidation (dream) of the user-model store, scoped to the user/ namespace; 0 disables. Only meaningful with the user-model enabled")
 
 	fs.Var(&cfg.skillsDirs, "skills-dir", "directory to discover progressive-disclosure skills from, laid out as <name>/SKILL.md (repeatable; highest precedence); empty disables the Skill tool unless --skills-conventional is set. TRUST BOUNDARY: a SKILL.md steers the model like AGENTS.md/CLAUDE.md — point this only at directories you trust")
 	fs.BoolVar(&cfg.skillsConventional, "skills-conventional", false, "also discover skills from the conventional locations: <workspace>/"+skills.ProjectDirMecatl+", <workspace>/"+skills.ProjectDirClaude+", $XDG_CONFIG_HOME/mecatl/skills (or ~/.config/mecatl/skills), and ~/.claude/skills (lower precedence than --skills-dir). Default OFF — opt in only for trusted locations (same trust class as AGENTS.md/CLAUDE.md)")

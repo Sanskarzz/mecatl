@@ -116,7 +116,7 @@ per-package `doc.go` files and honoured by the code:
 | `session`, `governance`, `tool`, `prompt` (domain) | stdlib + other domain packages. Never `adapter`, `agent`, `contracts`, `os`, or any third-party library. |
 | `port` | domain packages + stdlib (`context`, `io`, `iter`, `time`). |
 | `agent` (application) | domain + `port` + stdlib only. Never an adapter or `contracts`. (Tests may import adapters.) |
-| `adapter/*` | domain + `port` + the one external lib it adapts. Never `agent`. (Deliberate adapter→adapter carve-outs: (1) `adapter/mcpperf` may import `adapter/telemetry` solely for the `RuntimeSnapshot` data DTO it projects into tool output — a plain JSON struct with no OTel/SDK types, not a behavioural dependency; the DTO stays in `telemetry` by design. (2) `adapter/soul` imports `adapter/skills` for `ScanForInjection` — the conservative role-override deny-list is shared so the soul reuses the same load-time injection gate rather than copying the regexes. (3) `adapter/{permconfig,skills,agents,soul}` import the leaf `adapter/xdgconfig` for the shared `ResolveEnv`/`UserConfigDir` XDG path-resolution seam — a stdlib-only adapter leaf, extracted to de-duplicate the four copies.) |
+| `adapter/*` | domain + `port` + the one external lib it adapts. Never `agent`. (Deliberate adapter→adapter carve-outs: (1) `adapter/mcpperf` may import `adapter/telemetry` solely for the `RuntimeSnapshot` data DTO it projects into tool output — a plain JSON struct with no OTel/SDK types, not a behavioural dependency; the DTO stays in `telemetry` by design. (2) `adapter/soul` AND `adapter/memory` import `adapter/skills` for `ScanForInjection` — the conservative role-override deny-list is shared so the soul (load-time) and the user-model RememberUser write path (write-time) reuse the same injection gate rather than copying the regexes. (3) `adapter/{permconfig,skills,agents,soul,memory}` import the leaf `adapter/xdgconfig` for the shared `ResolveEnv`/`UserConfigDir` XDG path-resolution seam — a stdlib-only adapter leaf, extracted to de-duplicate the copies (the user-model store resolves `<xdg>/mecatl/usermodel` through it). (4) `adapter/soul` and `adapter/memory` import the DOMAIN `internal/prompt` for a single compile-time assertion only — `var _ prompt.SoulSource = (*Store)(nil)` (soul→prompt) and `var _ prompt.UserModelSource = (*Store)(nil)` (memory→prompt) — pinning that each adapter satisfies the consumer-local prompt port it is bound to at composition. These are assertion-only edges (no prompt value is constructed or called); the adapters meet the ports structurally, and `internal/prompt` never imports them. |
 | `contracts/gen` | generated; protobuf + gRPC runtime. |
 | `app` (composition) | the shared engine/service assembly (`app.Build`). MAY import adapters + `agent` + (via `server`) `contracts/gen`. Nothing imports it but the `cmd/` mains. |
 | `cmd/*` | flags + serving; consumes `internal/app`. With `app`, the only places concrete adapters meet ports. |
@@ -743,6 +743,22 @@ memory with an LLM call — merging duplicates and dropping stale entries — bu
 deliberately conservative (it never invents keys and is fail-safe on error), run
 once or on a ticker via `RunPeriodically` (`--memory-consolidate-interval`).
 
+**User model (issue #14 Phase 2).** A SECOND `memory.Store` — user-scoped and
+**cross-project** (`<xdg>/mecatl/usermodel`, distinct from the per-project store) —
+holds durable FACTS about the operator. It is exposed (2a, default-on) as the
+**RememberUser/RecallUser/SearchUserModel** tool family (the parameterized memory tool
+structs, not duplicates) under an enforced `user/` key prefix, plus a turn-0
+`<user-model>` block (`prompt.UserModelAssembler`, injected LAST — soul → memory index →
+user model). RememberUser injection-scans the value AND the effective description at write time (`skills.ScanForInjection`) and rejects the `</user-model>` fence close-tag in either,
+guarding the block against transcript-sourced poisoning. An OPT-IN (off by default,
+`--user-model-review`) Stop-triggered background reviewer (`agent.UserModelReviewer`,
+wired via a composition-layer Stop-hook decorator) re-reads a finished session's
+transcript and extracts operator facts via a FRESH single-shot child — it **never
+reopens the user's terminal session** (R10). A `--user-model-consolidate-interval`
+drives a separate `dream.Consolidator{Prefix:"user/"}`. The user-model is a writable
+instruction FRAGMENT of FACTS, NEVER a governance scope; behaviour comes from the soul +
+system rules, not this block.
+
 ## 15. Parallelism — fork-join (pattern 8)
 
 `tool.WorkspaceForker` (`tool/isolation.go`) is the workspace-isolation seam:
@@ -882,8 +898,9 @@ changes when one is swapped:
 | `port.PermissionPolicy` | `internal/port/permission.go` | `permpolicy` (layer-1 rules), optionally decorated by `permclassify` (layer-2 model classifier) |
 | `Compactor` | `agent/compaction.go` | `HeuristicCompactor` → `CascadeCompactor` |
 | `TokenCounter` | `agent/tokencount.go` | `HeuristicTokenCounter` → `tokenizer.Counter` |
-| `InstructionAssembler` | `prompt/instructions.go` | `RootAssembler` (AGENTS.md/CLAUDE.md) → `MultiAssembler` composing `RootAssembler` → `SoulAssembler` (persona) → `MemoryIndexAssembler` (saved-facts), all as turn-0 user messages |
+| `InstructionAssembler` | `prompt/instructions.go` | `RootAssembler` (AGENTS.md/CLAUDE.md) → `MultiAssembler` composing `RootAssembler` → `SoulAssembler` (persona) → `MemoryIndexAssembler` (saved project facts) → `UserModelAssembler` (operator FACTS), all as turn-0 user messages |
 | `prompt.SoulSource` | `prompt/soul.go` (impl `internal/adapter/soul`) | nil (off) → `*soul.Store` over user-scoped `~/.config/mecatl/soul.md`; agent-READ-ONLY (no write path), env-injected (not the WorkspaceReader — the file is outside any session root), injection-scanned + byte-capped, fail-soft; on by default, `--soul-file`/`--no-soul` |
+| `prompt.UserModelSource` | `prompt/usermodel.go` (impl `internal/adapter/memory`) | nil (off) → a SECOND, user-scoped, **cross-project** `*memory.Store` over `<xdg>/mecatl/usermodel`; durable operator FACTS exposed as RememberUser/RecallUser/SearchUserModel (enforced `user/` prefix; write-time injection scan) + the turn-0 `<user-model>` block; on by default, `--user-model-dir`/`--no-user-model`. Writable FACTS, not a governance scope. OPT-IN Stop-triggered reviewer via `--user-model-review` (never reopens the user session) |
 | `CommandExpander` | `prompt/command.go` | `NoopExpander` → `DirCommandExpander` (slash commands) |
 | `tool.Disclosable` + `ToolSearch` | `internal/tool` | always-listed → progressive disclosure |
 | `Skill` tool (skills) | `internal/adapter/skills` (impl) | off → opt-in `--skills-dir`; progressive disclosure of *instructions* (metadata always in context, body on activation) |

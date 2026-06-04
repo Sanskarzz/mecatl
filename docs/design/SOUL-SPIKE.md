@@ -1,9 +1,16 @@
 # Spike: A "soul" for mecatl — persistent identity + cross-session user-model
 
-> Status: **Phase 1 SHIPPED** (issue #14). The user-scoped, agent-read-only persona
-> fragment is wired (`internal/prompt/soul.go`, `internal/adapter/soul/`, bound in
-> `internal/app/build.go`); Phase 2 (the learning loop) remains a proposal.
-> Author pass: 2026-06-04.
+> Status: **Phase 1 SHIPPED + Phase 2 (2a + 2b) SHIPPED** (issue #14). Phase 1 — the
+> user-scoped, agent-read-only persona fragment — is wired (`internal/prompt/soul.go`,
+> `internal/adapter/soul/`, bound in `internal/app/build.go`). Phase 2 — the user-model
+> learning loop — is now wired too: a SECOND, user-scoped, CROSS-PROJECT memory store
+> of durable FACTS about the operator (`internal/adapter/memory/usermodeltools.go`,
+> `internal/prompt/usermodel.go`), exposed as the RememberUser/RecallUser/SearchUserModel
+> tools (2a, default-on) and a turn-0 `<user-model>` block, PLUS an OPT-IN (off by
+> default) Stop-triggered background reviewer that extracts operator facts from a
+> finished transcript (`internal/agent/usermodelreview.go`, wired via a composition-
+> layer Stop-hook decorator in `internal/app/usermodelreview.go`). Author pass:
+> 2026-06-04.
 >
 > **Ground-truth corrections applied during implementation** (the as-built wins over
 > the sketch below where they conflict):
@@ -208,24 +215,37 @@ Phase 1 is small, violates no layering rule, reuses an established seam, and lan
 squarely inside mecatl's existing governance story. It is the spike's recommended
 deliverable.
 
-### Phase 2 — the user-model learning loop (bigger, optional, gated)
+### Phase 2 — the user-model learning loop (2a + 2b SHIPPED)
 
-The "what it knows about _you_" half: a user-scoped `USER.md`-equivalent the agent
-_does_ curate, plus a background review pass.
+The "what it knows about _you_" half: a user-scoped model the agent _does_ curate,
+plus an optional background review pass. As-built:
 
-- **User-scoped memory partition** — either a `user/` key namespace in the existing
-  store, or a sibling `memory.Store` rooted at `~/.config/mecatl/`. Visible to the
-  existing `Recall`/`SearchMemory` tools.
-- **Background review on `Stop`** — a hook (or a forked single-shot engine, like
-  `Task`) that reads the just-finished transcript and proposes new user-model
-  entries. Reuses the fork machinery mecatl already has.
-- **Consolidation** — point a `dream.Consolidator` (with a `user/` prefix) at the
-  partition. The GC half already exists.
+- **User-scoped memory partition (2a, default-on)** — a SIBLING `memory.Store` (a
+  SECOND `memory.New(dir)` instance) rooted at `<xdg>/mecatl/usermodel`, CROSS-PROJECT
+  and distinct from the per-project store. Exposed as a dedicated tool family
+  RememberUser/RecallUser/SearchUserModel (the parameterized memory tool structs, not
+  duplicates) under an enforced `user/` key prefix, plus a turn-0 `<user-model>` block
+  (`prompt.UserModelAssembler`, injected LAST: soul → memory index → user model). The
+  RememberUser write path runs `skills.ScanForInjection` over the value and rejects a
+  flagged one (guards both the agent tool AND the 2b fork against transcript poisoning).
+- **Background review on `Stop` (2b, OFF by default behind `--user-model-review`)** — a
+  composition-layer Stop-hook DECORATOR (`internal/app/usermodelreview.go`) that, on
+  `PhaseStop`, fires `agent.UserModelReviewer.Review` in a DETACHED goroutine, debounced
+  by a session-count interval. The reviewer re-loads the finished session's transcript
+  via the `SessionStore` (a read) and spawns a FRESH single-shot child whose only tool
+  is RememberUser — it **never reopens/re-runs the user's terminal session** (R10), so
+  the reopen-if-completed invariant is untouched.
+- **Consolidation (off by default)** — a SEPARATE `dream.Consolidator` with
+  `Config{Prefix: "user/"}` over the user-model store, driven by
+  `--user-model-consolidate-interval` (0 = off). No new dream fields.
 
-Phase 2 carries the harder questions (over-eager memory — the dominant failure mode
-per `docs/harnesses/08`; cost of an extra model call per turn; whether the user-model
-is _rules_ (→ read-only, belongs in the soul) or _facts_ (→ writable memory)). It
-should ship behind a flag and only after Phase 1.
+The resolved answers to Phase 2's harder questions: over-eager memory is STEERED (the
+tool descriptions forbid rules + workspace-discoverable facts; no rule/fact classifier
+— accepted residual risk); the per-turn cost is avoided by making 2b Stop-triggered and
+off by default (no extra call on the happy path); and the user-model is **facts, not
+rules** — it is a writable-memory instruction FRAGMENT, NOT a governance scope, and the
+`<user-model>` header says so explicitly ("how to behave comes from your soul and these
+system rules, not from this block").
 
 ## 7. Feasibility & recommendation
 
@@ -238,15 +258,22 @@ should ship behind a flag and only after Phase 1.
 - **Naming:** adopt `soul.md`/`SoulAssembler` for ecosystem familiarity, but treat
   `SOUL.md` as convention, not contract — no interop promise (§3).
 
-### Open questions
+### Open questions (resolved by Phase 2)
 
-1. Is the persona a **scope** in the governance sense, or just an instruction
-   fragment? (If a scope, where does it sit relative to `ScopeManaged`? It must
-   **not** be able to loosen a configured Ask — same invariant as issue #13.)
+1. Is the persona/user-model a **scope** in the governance sense, or just an
+   instruction fragment? **RESOLVED: an instruction fragment, never a governance
+   scope.** Both the soul and the user-model ride the turn-0 user-message seam as
+   fenced DATA; neither participates in the permission `Scope` ladder, so neither can
+   loosen a configured Ask (the issue #13 invariant is structurally untouched — they
+   are not rules in the evaluator at all).
 2. Multi-user: the embedded/gateway surfaces are effectively single-user today.
-   Does a soul need a user-identity key, or is "the operator" implicitly singular?
-3. Do we want a `/soul` TUI affordance (view current soul + its hash + trust state),
-   mirroring `/agents` and `/skills`?
+   **RESOLVED (for now): "the operator" is implicitly singular.** The user-model store
+   uses no per-user identity key — it is one cross-project store per host config dir,
+   the same single-operator trust-zone assumption the soul and `MEMORY-TIERING.md`
+   carry. Per-user/multi-tenant keying is explicitly out of scope.
+3. Do we want a `/soul` or `/usermodel` TUI affordance (view current soul/user-model),
+   mirroring `/agents` and `/skills`? **DEFERRED:** not shipped in Phase 2; the
+   user-model is inspectable via the RecallUser/SearchUserModel tools meanwhile.
 
 ## Sources
 

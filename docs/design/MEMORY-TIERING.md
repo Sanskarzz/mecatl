@@ -174,6 +174,20 @@ provenance/author labeling (and likely per-author trust gating) before the index
 safe to inject. That is out of scope here; the data fence is the cheap hardening for
 the single-user case, not a substitute for provenance in a shared store.
 
+**Sibling user-model store (issue #14 Phase 2).** A SECOND `memory.Store` instance —
+user-scoped and CROSS-PROJECT (`<xdg>/mecatl/usermodel`), holding durable FACTS about
+the operator and exposed as the RememberUser/RecallUser/SearchUserModel tools + a
+turn-0 `<user-model>` block — reuses this exact store implementation (no new store type,
+no schema change), just rooted at a different directory and scoped to a `user/` key
+prefix. Its trust model is **identical** to the above: it assumes the SAME single-user,
+single-trust-zone assumption — every entry was written by this operator's own sessions
+(or the opt-in Stop-time reviewer over this operator's own transcripts), so the fenced
+`<user-model>` block is safe to inject. A shared/multi-tenant user-model dir would need
+the same per-author provenance work before it is safe; per-user keying is explicitly out
+of scope. As defence-in-depth the RememberUser write path additionally injection-scans
+each value (`skills.ScanForInjection`) so a transcript-sourced fact cannot smuggle
+role-override text into the block.
+
 ---
 
 ## 3. Interface impact — `tool.MemoryStore`

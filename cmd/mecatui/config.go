@@ -71,6 +71,20 @@ type config struct {
 	soulFile string
 	noSoul   bool
 
+	// Embedded-server user-model config (issue #14, Phase 2; used only when hosting
+	// an in-process server). A user-scoped, CROSS-PROJECT memory of durable FACTS
+	// about the operator (RememberUser/RecallUser/SearchUserModel + a turn-0
+	// <user-model> block). ON by default at the conventional
+	// $XDG_CONFIG_HOME/mecatl/usermodel (fallback ~/.config/mecatl/usermodel).
+	// userModelDir overrides the dir; noUserModel disables it. userModelReview
+	// enables the OPT-IN (off by default) Stop-triggered background reviewer;
+	// userModelReviewInterval is its session-count debounce. Map onto app.Config in
+	// embeddedConfig. The user model holds FACTS about the operator, never rules.
+	userModelDir            string
+	noUserModel             bool
+	userModelReview         bool
+	userModelReviewInterval int
+
 	// Embedded-server slash-command config (used only when hosting an in-process
 	// server). Command expansion is ON by default, expanding "/<name>" inputs from
 	// the conventional workspace dirs (.mecatl/commands, .claude/commands). An
@@ -142,6 +156,10 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.noMemory, "no-memory", false, "embedded server only: disable cross-session memory (Remember/Recall) entirely")
 	fs.StringVar(&cfg.soulFile, "soul-file", "", "embedded server only: path to a user-scoped, agent-READ-ONLY persona/\"soul\" file injected as turn-0 context (empty = the conventional $XDG_CONFIG_HOME/mecatl/soul.md, fallback ~/.config/mecatl/soul.md; fail-soft if absent)")
 	fs.BoolVar(&cfg.noSoul, "no-soul", false, "embedded server only: disable the user-scoped persona/soul fragment entirely")
+	fs.StringVar(&cfg.userModelDir, "user-model-dir", "", "embedded server only: directory for the user-scoped, CROSS-PROJECT user-model store of durable FACTS about the operator (empty = the conventional $XDG_CONFIG_HOME/mecatl/usermodel, fallback ~/.config/mecatl/usermodel). Exposes RememberUser/RecallUser/SearchUserModel and a turn-0 <user-model> block")
+	fs.BoolVar(&cfg.noUserModel, "no-user-model", false, "embedded server only: disable the user model entirely (the RememberUser/RecallUser/SearchUserModel tools and the <user-model> block)")
+	fs.BoolVar(&cfg.userModelReview, "user-model-review", false, "embedded server only: enable the OPT-IN background user-model reviewer (off by default): after a session stops, a fresh single-shot child extracts durable operator FACTS from the transcript via RememberUser. NEVER reopens the user session")
+	fs.IntVar(&cfg.userModelReviewInterval, "user-model-review-interval", 1, "embedded server only: session-count debounce for --user-model-review (1 = every session)")
 	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "embedded server only: directory of slash-command templates (<name>.md); empty = the conventional dirs (.mecatl/commands, .claude/commands)")
 	fs.BoolVar(&cfg.noCommands, "no-commands", false, "embedded server only: disable slash-command expansion entirely")
 	fs.StringVar(&cfg.skillsDir, "skills-dir", "", "embedded server only: directory of skill units (<name>/SKILL.md); empty = the conventional dirs (e.g. .claude/skills)")
