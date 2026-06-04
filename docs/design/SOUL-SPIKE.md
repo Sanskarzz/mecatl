@@ -252,9 +252,10 @@ system rules, not from this block").
 - **Persona (Phase 1): feasible and well-fitted.** Clean seam, no new domain types
   beyond a consumer-local port, no layering violation, and it _strengthens_ the
   governance story rather than straining it. Recommend proceeding to a design pass.
-- **Learning loop (Phase 2): feasible but with real risk surface.** mecatl owns the
-  GC and fork primitives; the open risk is over-eager/low-signal user-modeling and
-  per-turn cost. Recommend deferring behind Phase 1 and a flag.
+- **Learning loop (Phase 2): SHIPPED.** mecatl owned the GC and fork primitives; the
+  risks (over-eager/low-signal user-modeling, per-turn cost) were handled by steering +
+  making the costly background-review path (2b) Stop-triggered and off by default. 2a
+  (the local user-model + tools) is default-on and free.
 - **Naming:** adopt `soul.md`/`SoulAssembler` for ecosystem familiarity, but treat
   `SOUL.md` as convention, not contract — no interop promise (§3).
 
@@ -272,8 +273,51 @@ system rules, not from this block").
    the same single-operator trust-zone assumption the soul and `MEMORY-TIERING.md`
    carry. Per-user/multi-tenant keying is explicitly out of scope.
 3. Do we want a `/soul` or `/usermodel` TUI affordance (view current soul/user-model),
-   mirroring `/agents` and `/skills`? **DEFERRED:** not shipped in Phase 2; the
-   user-model is inspectable via the RecallUser/SearchUserModel tools meanwhile.
+   mirroring `/agents` and `/skills`? Not shipped in Phase 2; planned as Phase 3
+   (§8.3). The user-model is inspectable via RecallUser/SearchUserModel meanwhile.
+
+## 8. Remaining scope — decisions, not deferrals
+
+Everything beyond Phase 2 is a recorded decision here, not a silent TODO. Three items
+**finish** the soul feature (Phase 3, building now); two are **explicit non-goals**,
+each because it contradicts an already-documented mecatl posture — so the answer is
+derivable from the docs, not a judgement call left open.
+
+### Phase 3 — completion work (building now)
+
+1. **Drift detection + integrity.** A content hash (sha256) baseline of the soul (and
+   the user-model snapshot) computed at load, with tamper detection and an alert (and
+   optional restore-to-baseline) — the `clawsec` `soul-guardian` model from §4. This is
+   what gives the Phase-1 hash (deferred in correction **(D)**) a real consumer at last.
+2. **Trust-gating an imported / project-sourced soul.** A soul that does NOT originate
+   from the user's own `~/.config/mecatl/` — a soul file discovered in a cloned repo, or
+   one explicitly imported — is **untrusted by default** and gated exactly like a
+   project ALLOW via `--trust-project` (the issue #13 mechanism). This is the single
+   context where the spike's "trust-gate" (§4) actually applies; the user-scoped soul
+   stays ungated (correction **(C)**).
+3. **`/soul` + `/usermodel` TUI inspection.** Read-only browsers showing the current
+   soul/user-model content, byte size, hash, and trust state — mirroring the `/agents`
+   and `/skills` inventory views. Pure client/render surface (no `internal/...` import),
+   per the TUI layering rule.
+
+### Explicit non-goals (decided against, with rationale)
+
+4. **External dialectic modeling (Honcho-style) — NON-GOAL.** Adding an external
+   memory/user-modeling provider port + a hosted-service adapter contradicts mecatl's
+   **local-first / "no external by default" posture** (the embedded-server default
+   enables only free+local features; external/networked stays off). The local user-model
+   (2a) + consolidation (2b) already deliver cross-session user-modeling with no external
+   dependency, no secrets, and no network egress. Revisit ONLY if a concrete need for
+   portable / cross-device user-modeling arises — and then as its own RFC, behind an
+   explicit opt-in, not as soul work.
+5. **Per-user multi-tenant keying — NON-GOAL.** mecatl is single-operator today: the
+   embedded TUI host and the gateway both serve one operator, and there is no
+   user-identity concept in the `session` aggregate. Threading a per-user key through the
+   aggregate + partitioning the soul/user-model stores per user would build machinery
+   **for a surface that does not exist** — the wrong abstraction written on spec ("the
+   cheapest abstraction is the one you don't write yet"). The single-operator trust-zone
+   assumption (Open question #2, `MEMORY-TIERING.md`) holds until a genuine multi-tenant
+   surface lands; this becomes in-scope the moment one does, and not before.
 
 ## Sources
 
