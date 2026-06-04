@@ -21,8 +21,15 @@ import (
 //
 // CONSTRAINT — NO STDIO MCP, NEVER SPAWN: this source only *lists already-running
 // workloads* and reads their HTTP proxy URLs. It never starts, stops, or spawns a
-// workload, and it never connects over stdio. Workloads whose transport is not
-// streamable-http are reported as a SkipError, not connected.
+// workload, and it never connects over stdio.
+//
+// A workload's *backend* transport (core.Workload.TransportType: stdio/sse/
+// streamable-http) is NOT what mecatl connects to. ToolHive runs an HTTP proxy in
+// front of every workload — for a stdio backend the proxy bridges stdio<->HTTP and
+// exposes a streamable-HTTP (or SSE) endpoint at w.URL. So mecatl filters on the
+// *effective proxy mode* (core.Workload.ProxyMode, what clients actually speak),
+// not the backend transport: a stdio-backed server is reachable and IS mapped; only
+// an SSE proxy is skipped (mecatl's MCP client is streamable-HTTP only).
 
 // effectiveDefaultGroup is the group name used when the operator did not name one
 // (mirroring ToolHive's own notion of a "default" group). Empty group -> "default".
@@ -95,8 +102,11 @@ func (s ToolHiveSource) Name() string {
 //     has.
 //   - A workload whose name contains "__" is skipped (it would corrupt the
 //     mcp__<server>__<tool> namespacing).
-//   - A workload whose transport is not streamable-http is skipped with a
-//     diagnostic (mecatl's MCP client is streamable-HTTP only — no SSE, no stdio).
+//   - A workload whose *effective proxy transport* is not streamable-http is
+//     skipped with a diagnostic. This is the proxy mode clients speak (w.ProxyMode),
+//     NOT the backend transport: a stdio-backed workload proxied as streamable-HTTP
+//     is mapped; only an SSE proxy is skipped (mecatl's MCP client is
+//     streamable-HTTP only — no SSE).
 func (s ToolHiveSource) Servers(ctx context.Context) ([]mcp.ServerConfig, []SkipError, error) {
 	lister, err := s.newLister(ctx)
 	if err != nil {
@@ -152,10 +162,15 @@ func (s ToolHiveSource) Servers(ctx context.Context) ([]mcp.ServerConfig, []Skip
 			})
 			continue
 		}
-		if w.TransportType != types.TransportTypeStreamableHTTP {
+		// Filter on the EFFECTIVE PROXY transport, not the backend transport. The
+		// ToolHive proxy fronts every workload over HTTP; w.ProxyMode is the protocol
+		// clients speak to it (already resolved by ToolHive, with stdio defaulting to
+		// streamable-http). A stdio backend proxied as streamable-HTTP is reachable
+		// and mapped; only an SSE proxy is skipped (we have no SSE client).
+		if mode := types.EffectiveProxyMode(w.TransportType, types.ProxyMode(w.ProxyMode)); mode != types.ProxyModeStreamableHTTP {
 			skips = append(skips, SkipError{
 				Server: w.Name,
-				Reason: fmt.Sprintf("non-streamable transport %q; mecatl MCP is streamable-HTTP only", w.TransportType),
+				Reason: fmt.Sprintf("proxy transport %q is not streamable-HTTP; mecatl MCP is streamable-HTTP only", mode),
 			})
 			continue
 		}

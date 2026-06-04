@@ -89,8 +89,8 @@ func TestResolveWalksSourcesOnce(t *testing.T) {
 	// listed twice). Pair it with a static source whose name collides so the merge
 	// + shadow path is exercised in the same pass.
 	lister := &fakeLister{workloads: []core.Workload{
-		running("th", "http://127.0.0.1:1/mcp", types.TransportTypeStreamableHTTP, "default"),
-		running("dup", "http://127.0.0.1:2/mcp", types.TransportTypeStreamableHTTP, "default"),
+		running("th", "http://127.0.0.1:1/mcp", types.TransportTypeStreamableHTTP, types.ProxyModeStreamableHTTP, "default"),
+		running("dup", "http://127.0.0.1:2/mcp", types.TransportTypeStreamableHTTP, types.ProxyModeStreamableHTTP, "default"),
 	}}
 	static := StaticSource{Configs: []mcp.ServerConfig{{Name: "dup", URL: "http://static/mcp"}}}
 	th := sourceWith("default", lister, nil)

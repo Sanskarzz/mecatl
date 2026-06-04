@@ -45,11 +45,15 @@ func sourceWith(group string, lister workloadLister, newErr error) ToolHiveSourc
 	}
 }
 
-func running(name, url string, tt types.TransportType, group string) core.Workload {
+// running builds a running workload. proxyMode is the effective proxy transport
+// clients speak (what ToolHive populates on core.Workload.ProxyMode); for direct
+// transports it equals the transport type, for stdio it is the bridge protocol.
+func running(name, url string, tt types.TransportType, proxyMode types.ProxyMode, group string) core.Workload {
 	return core.Workload{
 		Name:          name,
 		URL:           url,
 		TransportType: tt,
+		ProxyMode:     proxyMode.String(),
 		Status:        runtime.WorkloadStatusRunning,
 		Group:         group,
 	}
@@ -57,8 +61,8 @@ func running(name, url string, tt types.TransportType, group string) core.Worklo
 
 func TestToolHiveMapsRunningStreamable(t *testing.T) {
 	f := &fakeLister{workloads: []core.Workload{
-		running("github", "http://127.0.0.1:8080/mcp", types.TransportTypeStreamableHTTP, "default"),
-		running("fetch", "http://127.0.0.1:8081/mcp", types.TransportTypeStreamableHTTP, "default"),
+		running("github", "http://127.0.0.1:8080/mcp", types.TransportTypeStreamableHTTP, types.ProxyModeStreamableHTTP, "default"),
+		running("fetch", "http://127.0.0.1:8081/mcp", types.TransportTypeStreamableHTTP, types.ProxyModeStreamableHTTP, "default"),
 	}}
 	got, skips, err := sourceWith("default", f, nil).Servers(context.Background())
 	if err != nil {
@@ -80,7 +84,7 @@ func TestToolHiveMapsRunningStreamable(t *testing.T) {
 
 func TestToolHiveSkipsSSE(t *testing.T) {
 	f := &fakeLister{workloads: []core.Workload{
-		running("legacy", "http://127.0.0.1:9000/sse", types.TransportTypeSSE, "default"),
+		running("legacy", "http://127.0.0.1:9000/sse", types.TransportTypeSSE, types.ProxyModeSSE, "default"),
 	}}
 	got, skips, err := sourceWith("default", f, nil).Servers(context.Background())
 	if err != nil {
@@ -89,30 +93,68 @@ func TestToolHiveSkipsSSE(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("SSE workload must not be mapped, got %v", got)
 	}
-	if len(skips) != 1 || skips[0].Server != "legacy" || !strings.Contains(skips[0].Reason, "non-streamable") {
+	if len(skips) != 1 || skips[0].Server != "legacy" || !strings.Contains(skips[0].Reason, "not streamable-HTTP") {
 		t.Fatalf("expected one non-streamable skip for legacy, got %v", skips)
 	}
 }
 
-func TestToolHiveSkipsStdio(t *testing.T) {
+// A stdio *backend* is bridged to streamable-HTTP by the ToolHive proxy, so it is
+// reachable over HTTP and MUST be mapped — the backend transport is irrelevant; the
+// proxy mode is what mecatl's client speaks.
+func TestToolHiveMapsStdioBackedStreamable(t *testing.T) {
 	f := &fakeLister{workloads: []core.Workload{
-		running("local", "", types.TransportTypeStdio, "default"),
+		running("github", "http://127.0.0.1:8080/mcp", types.TransportTypeStdio, types.ProxyModeStreamableHTTP, "default"),
+	}}
+	got, skips, err := sourceWith("default", f, nil).Servers(context.Background())
+	if err != nil {
+		t.Fatalf("Servers: %v", err)
+	}
+	if len(skips) != 0 {
+		t.Fatalf("stdio-backed streamable-HTTP workload must not be skipped, got %v", skips)
+	}
+	if len(got) != 1 || got[0].Name != "github" || got[0].URL != "http://127.0.0.1:8080/mcp" {
+		t.Fatalf("stdio-backed streamable-HTTP workload must be mapped, got %v", got)
+	}
+}
+
+// A stdio backend proxied as SSE is NOT reachable (mecatl has no SSE client).
+func TestToolHiveSkipsStdioSSEProxy(t *testing.T) {
+	f := &fakeLister{workloads: []core.Workload{
+		running("legacy", "http://127.0.0.1:9000/sse", types.TransportTypeStdio, types.ProxyModeSSE, "default"),
 	}}
 	got, skips, err := sourceWith("default", f, nil).Servers(context.Background())
 	if err != nil {
 		t.Fatalf("Servers: %v", err)
 	}
 	if len(got) != 0 {
-		t.Fatalf("stdio workload must not be mapped, got %v", got)
+		t.Fatalf("SSE-proxied workload must not be mapped, got %v", got)
 	}
-	if len(skips) != 1 || !strings.Contains(skips[0].Reason, "non-streamable") {
-		t.Fatalf("expected one non-streamable skip for stdio, got %v", skips)
+	if len(skips) != 1 || !strings.Contains(skips[0].Reason, "not streamable-HTTP") {
+		t.Fatalf("expected one non-streamable skip for SSE-proxied stdio, got %v", skips)
+	}
+}
+
+// Empty ProxyMode on a stdio backend defaults to streamable-HTTP (ToolHive's
+// documented default), so it is reachable and mapped.
+func TestToolHiveStdioEmptyProxyModeDefaultsStreamable(t *testing.T) {
+	f := &fakeLister{workloads: []core.Workload{
+		running("github", "http://127.0.0.1:8080/mcp", types.TransportTypeStdio, "", "default"),
+	}}
+	got, skips, err := sourceWith("default", f, nil).Servers(context.Background())
+	if err != nil {
+		t.Fatalf("Servers: %v", err)
+	}
+	if len(skips) != 0 {
+		t.Fatalf("stdio with empty proxy mode must default to streamable-HTTP and map, got skips %v", skips)
+	}
+	if len(got) != 1 || got[0].Name != "github" {
+		t.Fatalf("stdio with empty proxy mode must be mapped, got %v", got)
 	}
 }
 
 func TestToolHiveSkipsDoubleUnderscoreName(t *testing.T) {
 	f := &fakeLister{workloads: []core.Workload{
-		running("bad__name", "http://127.0.0.1:8080/mcp", types.TransportTypeStreamableHTTP, "default"),
+		running("bad__name", "http://127.0.0.1:8080/mcp", types.TransportTypeStreamableHTTP, types.ProxyModeStreamableHTTP, "default"),
 	}}
 	got, skips, err := sourceWith("default", f, nil).Servers(context.Background())
 	if err != nil {
@@ -147,8 +189,8 @@ func TestToolHiveSkipsNonRunning(t *testing.T) {
 
 func TestToolHiveGroupFilterApplied(t *testing.T) {
 	f := &fakeLister{workloads: []core.Workload{
-		running("a", "http://127.0.0.1:1/mcp", types.TransportTypeStreamableHTTP, "team-x"),
-		running("b", "http://127.0.0.1:2/mcp", types.TransportTypeStreamableHTTP, "default"),
+		running("a", "http://127.0.0.1:1/mcp", types.TransportTypeStreamableHTTP, types.ProxyModeStreamableHTTP, "team-x"),
+		running("b", "http://127.0.0.1:2/mcp", types.TransportTypeStreamableHTTP, types.ProxyModeStreamableHTTP, "default"),
 	}}
 	got, _, err := sourceWith("team-x", f, nil).Servers(context.Background())
 	if err != nil {
@@ -161,8 +203,8 @@ func TestToolHiveGroupFilterApplied(t *testing.T) {
 
 func TestToolHiveEmptyGroupDefaults(t *testing.T) {
 	f := &fakeLister{workloads: []core.Workload{
-		running("a", "http://127.0.0.1:1/mcp", types.TransportTypeStreamableHTTP, "default"),
-		running("b", "http://127.0.0.1:2/mcp", types.TransportTypeStreamableHTTP, "other"),
+		running("a", "http://127.0.0.1:1/mcp", types.TransportTypeStreamableHTTP, types.ProxyModeStreamableHTTP, "default"),
+		running("b", "http://127.0.0.1:2/mcp", types.TransportTypeStreamableHTTP, types.ProxyModeStreamableHTTP, "other"),
 	}}
 	src := sourceWith("", f, nil) // empty group -> "default"
 	if src.Name() != "toolhive(default)" {
@@ -208,7 +250,7 @@ func TestToolHiveListErrorDegrades(t *testing.T) {
 
 func TestToolHiveEmptyGroupNoMatches(t *testing.T) {
 	f := &fakeLister{workloads: []core.Workload{
-		running("a", "http://127.0.0.1:1/mcp", types.TransportTypeStreamableHTTP, "other"),
+		running("a", "http://127.0.0.1:1/mcp", types.TransportTypeStreamableHTTP, types.ProxyModeStreamableHTTP, "other"),
 	}}
 	got, skips, err := sourceWith("default", f, nil).Servers(context.Background())
 	if err != nil {
