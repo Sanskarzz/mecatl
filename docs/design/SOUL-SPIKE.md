@@ -1,6 +1,8 @@
 # Spike: A "soul" for mecatl — persistent identity + cross-session user-model
 
-> Status: **Phase 1 SHIPPED + Phase 2 (2a + 2b) SHIPPED** (issue #14). Phase 1 — the
+> Status: **Phase 1 SHIPPED + Phase 2 (2a + 2b) SHIPPED + Phase 3 Items 1–2 SHIPPED**
+> (issue #14; Phase 3 Item 3 — the `/soul` + `/usermodel` TUI inspector — is a later
+> pass). Phase 1 — the
 > user-scoped, agent-read-only persona fragment — is wired (`internal/prompt/soul.go`,
 > `internal/adapter/soul/`, bound in `internal/app/build.go`). Phase 2 — the user-model
 > learning loop — is now wired too: a SECOND, user-scoped, CROSS-PROJECT memory store
@@ -21,8 +23,12 @@
 >   exactly as `MemoryIndexAssembler` ignores its `ws` argument.
 > - **(C)** No trust-gate in Phase 1. `--trust-project` gates project-sourced ALLOW
 >   rules only; user-scoped config is always trusted, and `~/.config/mecatl/soul.md` is
->   user-authored on the user's own box. Trust-gating an *imported* soul is a Phase-2
->   concern, not wired here.
+>   user-authored on the user's own box. **UPDATE (Phase 3, Item 2, SHIPPED):**
+>   trust-gating a *project-sourced* soul (a discovered `<workspace>/.mecatl/soul.md`)
+>   is now wired — it is untrusted by default and honoured only with `--trust-project`
+>   (the same issue-#13 gesture, no new flag), with USER-WINS precedence. The
+>   **user-scoped soul stays ungated** (correction (C) preserved): it always loads if
+>   present, regardless of `--trust-project`. See §8.2.
 > - **(D)** ~~The content hash is DEFERRED to Phase 2~~ **SUPERSEDED (Phase 3, Item 1,
 >   SHIPPED):** the hash now has a real consumer — **drift detection**. `soul.LoadWithMeta`
 >   computes the sha256 of the clean body in the same read; the composition layer
@@ -312,12 +318,35 @@ derivable from the docs, not a judgement call left open.
      disproportionate for an MVP. If wanted later it is an explicit, operator-gated
      `--restore-soul` that copies an approved snapshot back; out of scope here.
    - User-model snapshot hashing is left to a later item — Item 1 is scoped to the SOUL.
-2. **Trust-gating an imported / project-sourced soul.** A soul that does NOT originate
-   from the user's own `~/.config/mecatl/` — a soul file discovered in a cloned repo, or
-   one explicitly imported — is **untrusted by default** and gated exactly like a
-   project ALLOW via `--trust-project` (the issue #13 mechanism). This is the single
-   context where the spike's "trust-gate" (§4) actually applies; the user-scoped soul
-   stays ungated (correction **(C)**).
+2. **Trust-gating an imported / project-sourced soul. — SHIPPED (Item 2).** A soul that
+   does NOT originate from the user's own `~/.config/mecatl/` — a soul file **discovered
+   in a cloned repo** — is **untrusted by default** and gated exactly like a project
+   ALLOW via `--trust-project` (the issue #13 mechanism — NOT a new trust concept or
+   flag). This is the single context where the spike's "trust-gate" (§4) actually
+   applies; the user-scoped soul stays ungated (correction **(C)**). As built:
+   - **Two provenances.** USER: the conventional `<xdg>/mecatl/soul.md` (fallback
+     `~/.config/mecatl/soul.md`) or an explicit `--soul-file PATH` — always trusted.
+     PROJECT: a discovered `<workspace>/.mecatl/soul.md` (parallel to
+     `.mecatl/settings.yaml`, resolved per the build-time workspace) — untrusted by
+     default.
+   - **USER-WINS precedence (single identity anchor; NOT a merge).** When a user-scoped
+     soul is present it is used and the project soul is **ignored**. The project soul is
+     used ONLY when (a) `--trust-project` is set AND (b) no user-scoped soul is present.
+     Two simultaneous soul blocks are explicitly avoided.
+   - **Untrusted = dropped silently-but-LOGGED** (`slog.Warn`, mirroring `applyTrustGate`'s
+     report posture), never an error. The project soul then contributes no fragment.
+   - **Same loader discipline.** A trusted project soul loads through the SAME
+     `soul.Store` (byte cap, injection scan, fence reject) and the SAME Item-1 drift
+     baseline (the drift check runs against WHICHEVER soul wins — never both).
+   - **Provenance metadata.** The selected soul carries `Provenance` (User|Project) +
+     `Trusted` + `Drifted` + hash/size in a composition-level `soulMeta`
+     (`internal/app/soulselect.go`), produced for Item 3's read-only TUI inspector. No
+     proto / RPC / TUI yet (Item 3).
+   - **Layering.** The trust decision lives in `internal/app` (composition), reusing
+     `Config.TrustProject`. `internal/prompt` stays trust-unaware (the `SoulSource`
+     interface is unchanged); `internal/governance` is NOT involved (the soul is fenced
+     DATA, not a permission scope); the `internal/adapter/soul` loader stays write-free
+     (the new `soul.NewWithEnv` is an env-injectable READ constructor, no write path).
 3. **`/soul` + `/usermodel` TUI inspection.** Read-only browsers showing the current
    soul/user-model content, byte size, hash, and trust state — mirroring the `/agents`
    and `/skills` inventory views. Pure client/render surface (no `internal/...` import),

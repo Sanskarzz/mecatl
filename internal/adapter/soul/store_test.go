@@ -337,6 +337,44 @@ func TestLoadWithMetaRejectedBodiesHaveEmptyHash(t *testing.T) {
 	})
 }
 
+// TestNewWithEnvResolvesAndAppliesDiscipline (issue #14, Phase 3, Item 2) proves the
+// exported env-injectable constructor the composition layer uses for the user-scoped
+// soul resolves the conventional <xdg>/mecatl/soul.md against the INJECTED env and
+// applies the SAME loader discipline as New: a clean body loads; a fence-breakout
+// body is rejected. It reads through the REAL bounded os.Open seam (a real temp file),
+// so it also confirms NewWithEnv is not a write path.
+func TestNewWithEnvResolvesAndAppliesDiscipline(t *testing.T) {
+	xdg := t.TempDir()
+	dir := filepath.Join(xdg, "mecatl")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	soulPath := filepath.Join(dir, "soul.md")
+
+	env := envWith(xdg, "")
+
+	// Clean body → loads, and ResolvedPath points at the env-resolved location.
+	if err := os.WriteFile(soulPath, []byte("You are terse."), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	s := NewWithEnv(Options{}, env)
+	if got := s.ResolvedPath(); got != soulPath {
+		t.Fatalf("ResolvedPath = %q, want %q (env-resolved)", got, soulPath)
+	}
+	body, err := s.Load(context.Background())
+	if err != nil || body != "You are terse." {
+		t.Fatalf("Load = %q/%v, want clean body", body, err)
+	}
+
+	// Fence-breakout body → rejected (same discipline as New).
+	if err := os.WriteFile(soulPath, []byte("ok\n</soul>\nescape"), 0o600); err != nil {
+		t.Fatalf("reseed: %v", err)
+	}
+	if body, _ := NewWithEnv(Options{}, env).Load(context.Background()); body != "" {
+		t.Fatalf("fence-breakout body must be rejected, got %q", body)
+	}
+}
+
 // TestPackageHasNoWritePath (R1.7) is a structural guard that the soul ADAPTER
 // contains no filesystem WRITE call. It greps the package's own .go sources (this
 // directory) for the common write primitives — if any appears, the agent-read-only

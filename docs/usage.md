@@ -163,7 +163,7 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--user-model-consolidate-interval` | `0` | interval for background consolidation (dream) of the user-model store, scoped to the `user/` namespace; 0 disables. |
 | `--permissions-conventional` | `true` | auto-discover the per-project permission config (`<workspace>/.mecatl/settings.yaml`, and with `--import-claude-permissions` also `<workspace>/.claude/settings.json`) plus the user-global file. **Re-resolved per session** against each session's workspace root. ON and inert until such a file exists. **See the permission-config note below.** |
 | `--import-claude-permissions` | `false` | also import Claude-Code `settings.json` permissions (project + user). **Lossy** (fail-safe): see the table below. |
-| `--trust-project` | `false` | honour a discovered **project's ALLOW rules** (its deny/ask are always honoured regardless). OFF by default (the safe stance) — an untrusted repo's grants are ignored. **See the permission-config note below.** |
+| `--trust-project` | `false` | honour a discovered **project's ALLOW rules** (its deny/ask are always honoured regardless) **and** a discovered **project persona/soul** at `<workspace>/.mecatl/soul.md` (issue #14, Phase 3). OFF by default (the safe stance) — an untrusted repo's grants and its project soul are ignored. **See the permission-config and persona/soul notes below.** |
 | `--permission-config` | `""` | path to a YAML permission-config file loaded at the **user (fully-trusted) scope** (**repeatable**). Always loaded regardless of `--permissions-conventional`. |
 | `--yolo` | `false` | **OPERATOR POSTURE (dangerous).** Suppress permission prompts for the built-in mutate-ask floor (`Bash`/`Edit`/`Write`/`Team`/`SkillDraft`) **server-wide** — for ephemeral, isolated, single-tenant deployments only. A `Deny` in **any** scope and any **deliberately configured** `Ask` (managed/project/user) still apply. **Refused when running as root** (euid 0) unless `MECATL_SANDBOX=1` (or `IS_SANDBOX=1`) is set. **See the allow-all note below.** |
 | `--metrics-addr` | `127.0.0.1:9090` | loopback **admin/observability** listener (empty disables). Serves `/metrics` and the runtime-introspection endpoints — **see the observability note below**. |
@@ -497,6 +497,26 @@ composition layer, so the agent still cannot touch the soul *or* its baseline. N
 is **detection only** — there is no automatic restore-to-baseline (that would require a
 harness-held copy of the approved bytes; deferred as a future opt-in). Delete the
 `.sha256` sidecar to reset to trust-on-first-use.
+
+**Project-sourced soul + trust gate (issue #14, Phase 3, Item 2).** Besides the
+user-scoped soul above, the harness can also discover a **project soul** at
+`<workspace>/.mecatl/soul.md` — a persona checked into the repo (parallel to
+`.mecatl/settings.yaml`). Because it comes from a repo rather than your own config, it
+is **untrusted by default**: it contributes **no fragment** unless you pass
+`--trust-project` — the **same** flag that gates a project's permission ALLOW rules (no
+separate soul-trust knob). An untrusted project soul is dropped with a `WARN` log, never
+an error. Precedence is **USER-WINS** (a single identity anchor, not a merge):
+
+- A **user-scoped** soul present (`<xdg>/mecatl/soul.md` or `--soul-file`) → it is used,
+  and the project soul is **ignored** — even with `--trust-project`.
+- **No** user soul **and** `--trust-project` set → the project soul loads (through the
+  same byte-cap / injection-scan / fence / drift discipline as the user soul).
+- **No** user soul and `--trust-project` **unset** → nothing (the project soul is
+  dropped + logged).
+
+Your **user-scoped soul is never trust-gated** — it always loads if present, regardless
+of `--trust-project`. (Note: the embedded TUI server trusts its own workspace by default,
+so a project `.mecatl/soul.md` there is honoured when no user soul is present.)
 
 ### User model (`~/.config/mecatl/usermodel`, issue #14 Phase 2)
 

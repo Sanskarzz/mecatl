@@ -107,6 +107,15 @@ func New(opts Options) *Store {
 	return newWith(opts, xdgconfig.OSEnv, osRead)
 }
 
+// NewWithEnv is New with an injectable PATH-RESOLUTION environment (Getenv/
+// UserHomeDir) but the REAL bounded file read. The composition layer uses it so
+// the user-scoped soul's conventional <xdg>/mecatl/soul.md resolves against a
+// faked env in tests (no real ~/.config dependency) while still reading an actual
+// on-disk file. It adds NO write path: env is used only to compute a path string.
+func NewWithEnv(opts Options, env xdgconfig.ResolveEnv) *Store {
+	return newWith(opts, env, osRead)
+}
+
 // newWith is New with an injectable environment + bounded-read seam, for tests.
 func newWith(opts Options, env xdgconfig.ResolveEnv, read readFunc) *Store {
 	maxBytes := opts.MaxBytes

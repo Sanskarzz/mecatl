@@ -42,7 +42,6 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/repomap"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
-	"github.com/stacklok/mecatl/internal/adapter/soul"
 	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/adapter/tokenizer"
@@ -588,40 +587,24 @@ func buildSoulSource(cfg Config) prompt.SoulSource {
 }
 
 // buildSoulSourceWith is buildSoulSource with an injectable baseline-IO seam, so the
-// drift-baseline read/write can be exercised offline (no real ~/.config). It owns the
-// Item-1 drift policy: construct the *soul.Store, compute the loaded body's hash
-// (LoadWithMeta), establish/compare the baseline sidecar, and — only
-// when --soul-strict AND the soul drifted — return nil so the drifted persona
-// contributes no fragment. By default a drifted soul STILL loads (a hand-edit on the
-// operator's own box is expected); the drift is surfaced as a Warn alarm only.
+// drift-baseline read/write can be exercised offline (no real ~/.config). It
+// delegates the full selection policy to selectSoulSource (soulselect.go), which
+// owns: USER-wins precedence between a user-scoped and a project-sourced soul (Item
+// 2), the project-soul trust gate (--trust-project, the issue-#13 mechanism), and
+// the Item-1 drift check applied to WHICHEVER soul wins. It discards the soulMeta
+// snapshot here (the prompt assembler only needs the source); selectSoulSource's
+// second return value (the provenance/trusted/drift metadata) is the read-only seam
+// Item 3's TUI inspector will consume — there is no proto/RPC/TUI for it yet.
+//
+// NOTE: the selected soul file is read TWICE per build — once here for the startup
+// hash + selection, then again by the assembler's Load at run time (which
+// re-validates the body). That is an accepted cost: it is one small file (capped at
+// 20 KiB), read at most twice, and keeping the hash/selection out of the assembler
+// keeps drift + provenance a pure composition concern (internal/prompt stays
+// drift- and trust-unaware). No caching seam is warranted for two reads of a tiny file.
 func buildSoulSourceWith(cfg Config, io baselineIO) prompt.SoulSource {
-	if cfg.NoSoul {
-		slog.Info("soul DISABLED (--no-soul)")
-		return nil
-	}
-	if cfg.SoulPath != "" {
-		slog.Info("soul ENABLED (read-only persona)", "path", cfg.SoulPath)
-	} else {
-		slog.Info("soul ENABLED (read-only persona)", "path", "conventional <xdg>/mecatl/soul.md (fail-soft if absent)")
-	}
-	store := soul.New(soul.Options{Path: cfg.SoulPath})
-
-	// Drift baseline (Item 1). LoadWithMeta is fail-soft: an absent/rejected soul
-	// yields an empty hash, and checkSoulDrift then does nothing (no sidecar for an
-	// absent soul). NOTE: this means the soul file is read TWICE per build — once here
-	// for the startup hash, then again by the assembler's Load at run time (which
-	// re-validates the body). That is an accepted cost: it is one small user file
-	// (capped at 20 KiB), read at most twice, and keeping the hash computation out of
-	// the assembler keeps drift a pure composition concern (internal/prompt stays
-	// drift-unaware). No caching seam is warranted for two reads of a tiny file.
-	res, _ := store.LoadWithMeta(context.Background())
-	drifted := checkSoulDrift(io, store.ResolvedPath(), res.SHA256, cfg.ApproveSoul)
-	if drifted && cfg.SoulStrict {
-		slog.Warn("soul: drifted persona refused (--soul-strict); no soul fragment this run",
-			"path", store.ResolvedPath())
-		return nil
-	}
-	return store
+	src, _ := selectSoulSource(cfg, io)
+	return src
 }
 
 // userModelSubdir is the conventional user-model store directory relative to the

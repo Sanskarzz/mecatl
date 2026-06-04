@@ -105,6 +105,18 @@ workspace you didn't author (e.g. a cloned repo's `.claude/skills`) can steer th
 model — use `--no-skills` for untrusted workspaces. Only read-only discovery is
 wired; the writable SkillDraft self-improvement loop stays off.
 
+**Project trust posture (incl. the project soul).** The embedded server trusts the
+workspace you launch it in — it runs with `--trust-project` effectively ON. So, just
+as it honours the repo's `.mecatl/settings.yaml` permission ALLOW rules, it also
+honours a project persona/soul at `<workspace>/.mecatl/soul.md` (issue #14, Phase 3) —
+**by default, with no extra gesture** — when no user-scoped soul
+(`~/.config/mecatl/soul.md`) is present (the user soul always wins). This is
+consistent with the existing permission-rule trust, not a new boundary: launching the
+TUI in a repo trusts that repo. In `mecated`, by contrast, a project soul stays gated
+behind an explicit `--trust-project`. For a workspace you don't fully trust, either
+run `mecated` without `--trust-project`, or keep your own `~/.config/mecatl/soul.md`
+(which takes precedence and is never trust-gated).
+
 **Built-in client-side slash commands always appear.** Typing `/` opens the
 palette with a set of commands the TUI itself ships — independent of workspace
 dirs and even when server slash-command expansion is off. `/clear` (reset the
