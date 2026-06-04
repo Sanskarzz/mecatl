@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -626,6 +627,78 @@ func TestSupervisorStillRejectsRealMutatingDespiteMCPExempt(t *testing.T) {
 	err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "ro"})
 	if err == nil || !strings.Contains(err.Error(), "Edit") {
 		t.Fatalf("read-only member with a real mutating tool must still be rejected naming Edit, got %v", err)
+	}
+}
+
+// roShellFactory builds a read-only member whose catalog holds a workspace-mutating
+// Bash stand-in AND sets MemberBuild.IsolateReadOnly=true — the composition-layer
+// signal that the member was granted a shell and must run in an isolated worktree.
+func roShellFactory(t *testing.T, tm *team.Team) agent.MemberEngine {
+	t.Helper()
+	return func(spec agent.MemberSpec) agent.MemberBuild {
+		b := catalogFactory(t, tm, fakeMutatingTool{name: "Bash"})(spec)
+		b.IsolateReadOnly = true
+		return b
+	}
+}
+
+// TestSupervisorReadOnlyIsolatedMemberForksViaReadOnlyForker asserts the new
+// three-tier behaviour: a read-only member the factory marked IsolateReadOnly is
+// ACCEPTED (its mutating Bash is exempt because it is not base-sharing) and is forked
+// via the READ-ONLY forker (the worktree seam), not the force-copy one.
+func TestSupervisorReadOnlyIsolatedMemberForksViaReadOnlyForker(t *testing.T) {
+	tm := team.New("t")
+	mutatingFk := &recordingForker{}
+	roFk := &recordingForker{}
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), roShellFactory(t, tm),
+		agent.WithForker(mutatingFk), agent.WithReadOnlyForker(roFk))
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "ro"}); err != nil {
+		t.Fatalf("read-only-isolated member with a read-only forker should be accepted: %v", err)
+	}
+	roFk.mu.Lock()
+	defer roFk.mu.Unlock()
+	mutatingFk.mu.Lock()
+	defer mutatingFk.mu.Unlock()
+	if len(roFk.labels) != 1 || roFk.labels[0] != "ro" {
+		t.Fatalf("read-only forker labels = %v, want [ro] (an isolated read-only member forks via the worktree forker)", roFk.labels)
+	}
+	if len(mutatingFk.labels) != 0 {
+		t.Fatalf("force-copy forker labels = %v, want none (a read-only member must not use the mutating forker)", mutatingFk.labels)
+	}
+}
+
+// TestSupervisorReadOnlyIsolatedMemberNeedsReadOnlyForker asserts a member marked
+// IsolateReadOnly with NO read-only forker wired is rejected with the dedicated
+// mis-wire sentinel.
+func TestSupervisorReadOnlyIsolatedMemberNeedsReadOnlyForker(t *testing.T) {
+	tm := team.New("t")
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), roShellFactory(t, tm))
+	err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "ro"})
+	if !errors.Is(err, agent.ErrReadOnlyShellNoForker) {
+		t.Fatalf("AddMember of an IsolateReadOnly member without a read-only forker = %v, want ErrReadOnlyShellNoForker", err)
+	}
+	if got := tm.Members(); len(got) != 0 {
+		t.Errorf("roster = %v, want empty after rejection", got)
+	}
+}
+
+// TestSupervisorBaseSharingMemberWithBashStillRejected asserts the backstop still
+// trips for a GENUINELY base-sharing member: one that holds Bash but did NOT set
+// IsolateReadOnly (so the supervisor would run it on the shared base). Its
+// mutating-classified tool would corrupt the shared workspace, so it is rejected.
+func TestSupervisorBaseSharingMemberWithBashStillRejected(t *testing.T) {
+	tm := team.New("t")
+	// A read-only forker IS wired, but the factory did NOT mark IsolateReadOnly, so
+	// this member would base-share — the backstop must still catch its Bash.
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		catalogFactory(t, tm, fakeMutatingTool{name: "Bash"}),
+		agent.WithReadOnlyForker(&recordingForker{}))
+	err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "ro"})
+	if !errors.Is(err, agent.ErrReadOnlyMemberMutating) {
+		t.Fatalf("base-sharing member holding Bash = %v, want ErrReadOnlyMemberMutating", err)
+	}
+	if !strings.Contains(err.Error(), "Bash") {
+		t.Errorf("error %q should name the offending tool", err)
 	}
 }
 

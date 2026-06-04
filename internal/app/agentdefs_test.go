@@ -114,6 +114,42 @@ func TestScopedToolNamesDropsMutatingForTask(t *testing.T) {
 	}
 }
 
+// TestScopedToolNamesModeAllowShell asserts the three allowMutating/allowShell
+// combinations a team member can be scoped under:
+//   - (false, true)  — a worktree-isolated read-only member: Bash survives,
+//     Edit/Write are still dropped.
+//   - (false, false) — a base-sharing read-only member (or a Task child): all three
+//     mutating tools are dropped.
+//   - (true, _)      — a mutating member: all three survive.
+func TestScopedToolNamesModeAllowShell(t *testing.T) {
+	cfg := Config{Shell: "/bin/sh", Workspace: t.TempDir()}
+	base := baseTaskTools(cfg)
+	if _, ok := base["Bash"]; !ok {
+		t.Fatalf("expected Bash in base when a shell is configured")
+	}
+	def := agents.AgentDef{Name: "m", Tools: []string{"Read", "Edit", "Write", "Bash"}}
+
+	// (false, true): worktree read-only member keeps Bash, drops Edit/Write.
+	names, _ := scopedToolNamesMode(def, base, false, true)
+	sort.Strings(names)
+	if strings.Join(names, ",") != "Bash,Read" {
+		t.Fatalf("(allowMutating=false, allowShell=true) kept = %v, want [Bash Read]", names)
+	}
+
+	// (false, false): base-sharing read-only member drops Bash too.
+	names, _ = scopedToolNamesMode(def, base, false, false)
+	if strings.Join(names, ",") != "Read" {
+		t.Fatalf("(false,false) kept = %v, want [Read] (all mutating dropped)", names)
+	}
+
+	// (true, _): mutating member keeps everything.
+	names, _ = scopedToolNamesMode(def, base, true, false)
+	sort.Strings(names)
+	if strings.Join(names, ",") != "Bash,Edit,Read,Write" {
+		t.Fatalf("(true,_) kept = %v, want [Bash Edit Read Write]", names)
+	}
+}
+
 func TestScopedToolNamesDefaultSetIsReadOnly(t *testing.T) {
 	// No Tools allowlist => default to the available base, but still read-only-only.
 	cfg := Config{Shell: "/bin/sh", Workspace: t.TempDir()}

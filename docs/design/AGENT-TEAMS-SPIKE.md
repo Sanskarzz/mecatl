@@ -158,34 +158,90 @@ member driver loop (per teammate, in the supervisor):
 when a message is posted to `me` or a task `me` could claim becomes unblocked. No
 busy-polling.
 
-### 5.3 Workspace contention (the agreed mutation stance)
+### 5.3 Workspace contention (the THREE-TIER model)
 
-Per the decision this spike was scoped under: **read-only teammates share the base
-workspace; mutating teammates run in isolated forked workspaces** (`WorkspaceForker`,
-reused from Fork). So:
+Workspace isolation is the security boundary; **capability flows down from the
+parent** (which has Bash). A team member lands in one of three tiers (`AddMember`
+picks the tier from `spec.Mutating` and the factory's `MemberBuild.IsolateReadOnly`):
 
-- a `code-reviewer`/`researcher` teammate (read-only) shares the base — cheap, no
-  copy;
-- an `implementer` teammate (Edit/Write) gets its own fork — parallel writes
-  are safe because isolated;
+- **base-share, no shell** (fallback when no read-only forker is wired): a read-only
+  teammate (`code-reviewer`/`researcher`) shares the base — cheap, no copy — and gets
+  Read/Grep/Glob only, NO Edit/Write/Bash, so it cannot corrupt the shared base;
+- **read-only worktree, full shell**: a read-only teammate runs in a cheap git
+  **worktree** (the forker's default mode — shares the base repo's `.git`, so it sees
+  the **full commit history**) with Read/Grep/Glob **+ Bash**, but never Edit/Write.
+  It can inspect with a real shell (`git log`/`git show`, `cat`, build, test) confined
+  to a throwaway checkout. This is the common case once a shell is configured;
+- **mutating copy, full shell**: an `implementer` teammate (Edit/Write) gets its own
+  **force-copy** fork (own `.git`) with Edit/Write/Bash — parallel writes are safe
+  because isolated.
+
 - **merge/selection stays manual in v1** (consistent with Fork's no-auto-merge):
   the team reports each mutating teammate's fork path; a later phase can add a
-  judge/merge step (the "tournament" join).
+  judge/merge step (the "tournament" join). A read-only worktree is throwaway — never
+  merged.
 
 This keeps the read-parallel/mutate-serial invariant intact: nothing mutates the
-shared base concurrently.
+shared base concurrently. The Supervisor holds **two forkers** — `s.forker`
+(force-copy, for mutating members) and `s.roForker` (worktree, for read-only-isolated
+members) — and `AddMember`'s mutating-tool backstop gates on **base-sharing**
+(`!needFork`), so an isolated member's mutating-classified Bash is exempt (it lands in
+the member's own fork/worktree, never the shared base).
 
-> **Workspace-aware Bash (done).** A Mutating teammate (and a Fork branch) now gets
-> **Bash as well as Edit/Write** when a shell is configured. `BashTool.Execute` passes
-> the per-branch/per-member forked `Workspace.Root()` to `CommandRunner.Run` as the
-> working directory (the `CommandRunner` contract carries an explicit `workdir`; an
-> empty one falls back to the runner's configured root), so a forked child's Bash runs
-> in its OWN fork — its **default cwd is the fork, not the shared parent base** — and
-> the bash gate (`SplitCommands`/`ReadOnlyBash`) is unchanged. Residual: unlike
-> path-scoped Edit/Write, Bash can still escape its cwd via absolute paths or `cd` —
-> the inherent Bash trust model, the same as the main session; the fix removes the
-> accidental shared-base mutation, which is what the fork/`ForkTool.ReadOnly()`
-> isolation needs. A read-only (base-sharing) member still gets **no** Bash.
+> **Workspace-aware Bash (done).** Both forked tiers get **Bash** when a shell is
+> configured. `BashTool.Execute` passes the per-member forked `Workspace.Root()` to
+> `CommandRunner.Run` as the working directory (the `CommandRunner` contract carries
+> an explicit `workdir`; an empty one falls back to the runner's configured root), so a
+> forked member's Bash runs in its OWN fork/worktree — its **default cwd is the fork,
+> not the shared parent base** — and the bash gate (`SplitCommands`/`ReadOnlyBash`) is
+> unchanged. Residual: unlike path-scoped Edit/Write, Bash can still escape its cwd via
+> absolute paths or `cd` — the inherent Bash trust model, the same as the main session;
+> isolation is the boundary.
+>
+> **Shared-`.git` hardening (read-only worktree).** A worktree shares the parent
+> repo's `.git/config` + `.git/hooks`, so an untrusted repo could run code via
+> `core.pager` / `core.hooksPath` / `core.fsmonitor` / an external diff driver — **and
+> `git worktree add` fires the base repo's `post-checkout` hook at FORK time, before any
+> member runner exists.** The hardening closes these fixed-key + hook vectors but does
+> **not** close attacker-named `.gitattributes` driver configs (see *Residual /
+> follow-up* below). The single neutralizing environment lives in
+> `internal/adapter/gitenv` (a stdlib-only leaf) so two code paths share it and cannot
+> drift:
+>
+> 1. **The forker's own git** (`runGit`/`gitRepoRoot`/`forkWorktree`) sets
+>    `cmd.Env = gitenv.Scrub(os.Environ())`, so the fork-time `post-checkout` hook (and
+>    any config-driven exec a probe might trigger) is neutralized before the worktree
+>    even exists.
+> 2. **A read-only member's Bash** runs through a **sandboxed command runner**
+>    (`internal/app.buildSandboxedCommandRunner`) given the COMPLETE
+>    `gitenv.Scrub(os.Environ())` environment.
+>
+> `gitenv.Scrub` **DROPS** every inherited `GIT_*` variable (so `GIT_EXTERNAL_DIFF`,
+> `GIT_SSH_COMMAND`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_PROXY_COMMAND` etc. cannot
+> leak in — an append could not remove these) plus `PAGER`/`LESS`, while keeping
+> PATH/HOME so git still works, then **APPENDS** the neutralizing set: `GIT_PAGER=cat`,
+> `PAGER=cat`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, and
+> precedence-winning env-injected config (`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/
+> `GIT_CONFIG_VALUE_n`) forcing `core.hooksPath=/dev/null`, `core.pager=cat`,
+> `core.fsmonitor=false` and an empty `diff.external` over the shared `.git/config`. The
+> MAIN session keeps its UNHARDENED runner (operator hooks/pager honoured). A Mutating
+> (force-copy) member's fork has its OWN `.git`, so config-hardening is moot there, but
+> it gets the hardened runner anyway. The per-command timeout (~30s) and the
+> supervisor's concurrency cap (`defaultTeamConcurrency=4`) already bound a team's shell
+> usage, so no extra per-member deadline/semaphore is added.
+>
+> **Residual / follow-up.** A fixed-key env override structurally cannot cover git config
+> keys whose *driver name* is attacker-chosen in a tracked `.gitattributes`. Two such
+> vectors remain reachable when the shared `.git` belongs to an **untrusted** repo:
+> `filter.<drv>.smudge` (executes at `git worktree add` checkout — fork time) and
+> `diff.<drv>.textconv` (executes on `git show` / `git log -p`); an `alias.<name>=!sh`
+> also fires, but only if the member invokes that alias by name. Because the driver name
+> is arbitrary, there is no fixed `GIT_CONFIG_KEY_n` that can pin it to an inert value.
+> For a **trusted** repo (the operator's own) this execution is equivalent to the operator
+> running git themselves — acceptable. The planned robust mitigation is to **gate
+> read-only-member shell on workspace trust** (untrusted ⇒ no subagent shell, matching the
+> harness's "untrusted degrades to ask-the-human" posture). This is a tracked follow-up,
+> not yet implemented.
 
 ### 5.4 Quiescence & deadlock
 

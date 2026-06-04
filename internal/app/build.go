@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/dream"
 	"github.com/stacklok/mecatl/internal/adapter/forker"
+	"github.com/stacklok/mecatl/internal/adapter/gitenv"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
@@ -966,7 +968,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 	if cfg.EnableTeams {
 		// buildTeamWiring always returns a non-nil forker and hooks runner under
 		// EnableTeams, so they are wired unconditionally (no nil guards).
-		factory, fk, teamHooks := buildTeamWiring(ctx, cfg, provider, mainMgr)
+		factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, provider, mainMgr)
 		// factory is a server.MemberEngineFactory; NewTeamTool wants the
 		// agent.TeamMemberEngineFactory of identical underlying shape — an explicit
 		// conversion bridges the two named types (both func(*team.Team, MemberSpec)
@@ -974,6 +976,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		cat.MustRegister(agent.NewTeamTool(
 			agent.TeamMemberEngineFactory(factory),
 			agent.WithTeamToolForker(fk),
+			agent.WithTeamToolReadOnlyForker(roFk),
 			agent.WithTeamToolHooks(teamHooks),
 		))
 		slog.Info("Team tool ENABLED (in-process coordinating subagents; mutate-serial, ASK)")
@@ -1314,6 +1317,56 @@ func buildCommandRunner(cfg Config) tool.CommandRunner {
 	return runner
 }
 
+// buildSandboxedCommandRunner builds the command runner team MEMBERS' Bash executes
+// against. It mirrors buildCommandRunner (returns nil when Bash is disabled) but
+// HARDENS the runner against several git config-driven code-execution vectors in a
+// SHARED `.git`: a read-only member runs in a git worktree (the forker default) that
+// shares the parent repo's `.git/config` and `.git/hooks`, so without this an untrusted
+// base repo could run code via core.pager / core.hooksPath / core.fsmonitor / an
+// external diff driver the instant the member runs git.
+//
+// The runner is given a COMPLETE, scrubbed environment from gitenv.Scrub(os.Environ())
+// — the SAME helper the forker uses for its own fork-time git, so the two cannot drift.
+// Scrub:
+//   - DROPS every inherited GIT_* variable (so GIT_EXTERNAL_DIFF, GIT_SSH_COMMAND,
+//     GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_PROXY_COMMAND etc. cannot leak in — an
+//     append-only env could not remove these) plus inherited PAGER/LESS, while
+//     keeping PATH/HOME/etc. so git still functions;
+//   - APPENDS the neutralizing set: GIT_CONFIG_NOSYSTEM=1,
+//     GIT_CONFIG_GLOBAL=/dev/null, GIT_PAGER=cat, PAGER=cat, plus env-injected git
+//     config (GIT_CONFIG_COUNT + KEY/VALUE pairs) that takes PRECEDENCE over the
+//     shared repo-local .git/config, force-overriding core.hooksPath=/dev/null (kills
+//     ALL repo hooks, including the fork-time post-checkout), core.pager=cat,
+//     core.fsmonitor=false and an empty diff.external (no external diff driver).
+//
+// RESIDUAL — this does NOT close git driver configs whose driver NAME is attacker-chosen
+// in a tracked `.gitattributes`: filter.<drv>.smudge (fires at worktree checkout / fork
+// time) and diff.<drv>.textconv (fires on `git show` / `git log -p`), plus
+// alias.<name>=!sh if the member invokes that alias by name. A fixed-key env override
+// cannot pin an arbitrary driver name to an inert value. These are reachable only when
+// the shared `.git` is an UNTRUSTED repo; for a TRUSTED repo this is equivalent to the
+// operator running git themselves. The planned robust mitigation is to gate
+// read-only-member shell on workspace trust (untrusted ⇒ no subagent shell) — a tracked
+// follow-up, not yet implemented.
+//
+// The MAIN session keeps its own UNHARDENED runner (buildCommandRunner) so operator
+// hooks/pager are honoured there; only team-member shells are sandboxed. Per-command
+// timeout (~30s, applied by the runner) and the supervisor's concurrency cap
+// (defaultTeamConcurrency=4) already bound how much shell a team can run, so no extra
+// per-subagent deadline/semaphore is added here.
+func buildSandboxedCommandRunner(cfg Config) tool.CommandRunner {
+	if cfg.NoBash || cfg.Shell == "" {
+		return nil
+	}
+	env := gitenv.Scrub(os.Environ())
+	runner, err := osfs.NewCommandRunnerShell(cfg.Workspace, cfg.Shell, osfs.WithCommandEnvList(env))
+	if err != nil {
+		slog.Warn("could not build sandboxed member command runner; team-member Bash disabled", "workspace", cfg.Workspace, "err", err)
+		return nil
+	}
+	return runner
+}
+
 // bashDisabledReason returns a short human-readable reason Bash is disabled.
 func bashDisabledReason(cfg Config) string {
 	switch {
@@ -1446,26 +1499,39 @@ func buildTaskTool(ctx context.Context, cfg Config, provider port.LLMProvider, h
 	), mcpClose
 }
 
-// buildTeamWiring constructs the three agent-team dependencies — the unified
-// per-member engine factory, the workspace forker, and the shared team hooks runner
-// — that BOTH team entry points consume: the parent catalog's Team tool
-// (buildCatalog) and the gRPC CreateTeam path (applyTeamConfig → server.Config). It
-// is the single source of that wiring truth, so the two paths cannot drift; each
-// caller invokes it and gets a functionally identical factory. It is only ever
-// called under cfg.EnableTeams.
+// buildTeamWiring constructs the agent-team dependencies — the unified per-member
+// engine factory, the TWO workspace forkers (force-copy for mutating members,
+// worktree for read-only-isolated members), and the shared team hooks runner — that
+// BOTH team entry points consume: the parent catalog's Team tool (buildCatalog) and
+// the gRPC CreateTeam path (applyTeamConfig → server.Config). It is the single source
+// of that wiring truth, so the two paths cannot drift; each caller invokes it and
+// gets a functionally identical factory. It is only ever called under cfg.EnableTeams.
 //
 // The factory is server.MemberEngineFactory, which is the SAME shape as
 // agent.TeamMemberEngineFactory (both `func(*team.Team, MemberSpec) MemberBuild`), so
 // one factory value satisfies both the gRPC Config.MemberEngine and NewTeamTool.
 //
 // It resolves the agent-definition registry and skill index ONCE (exactly as
-// buildCatalog shares the registry with the Task tool), and uses
-// forker.WithForceCopy so a Mutating member runs in a FULLY isolated fork (own .git
-// object DB/refs), matching buildCatalog's Fork branch wiring. The single teamHooks
-// runner is threaded through both the supervisor (TeammateIdle) and the member
-// coordination tools (TaskCreated / TaskCompleted gates). mainMgr supplies the
-// per-agent MCP base manager so a member's agent definition can scope its MCP servers.
-func buildTeamWiring(ctx context.Context, cfg Config, provider port.LLMProvider, mainMgr *mcp.Manager) (server.MemberEngineFactory, tool.WorkspaceForker, port.HookRunner) {
+// buildCatalog shares the registry with the Task tool). The two forkers:
+//   - fk (force-copy, WithForceCopy): a Mutating member runs in a FULLY isolated fork
+//     (own .git object DB/refs), matching buildCatalog's Fork branch wiring, so its
+//     git commit/push/update-ref cannot escape into the base repo.
+//   - roFk (worktree, the forker DEFAULT — no WithForceCopy): a read-only-isolated
+//     member runs in a cheap git worktree that SHARES the base repo's .git (⇒ full
+//     history for git log/show) but has its own working tree; it never edits, only
+//     inspects.
+//
+// The member Bash runs through a SANDBOXED command runner
+// (buildSandboxedCommandRunner) that neutralises the fixed-key git config-driven
+// code-execution vectors in the shared .git (core.pager/hooksPath/fsmonitor/external
+// diff); a residual remains for attacker-named `.gitattributes` filter/diff drivers in
+// an untrusted repo (see buildSandboxedCommandRunner). roIsolationAvailable (runner
+// wired AND roFk non-nil) tells the factory it may grant a read-only member Bash and
+// mark it IsolateReadOnly. The single teamHooks runner is threaded through both the
+// supervisor (TeammateIdle) and the member coordination tools (TaskCreated /
+// TaskCompleted gates). mainMgr supplies the per-agent MCP base manager so a member's
+// agent definition can scope its MCP servers.
+func buildTeamWiring(ctx context.Context, cfg Config, provider port.LLMProvider, mainMgr *mcp.Manager) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, port.HookRunner) {
 	// A single hooks runner shared by the supervisor and the member coordination
 	// tools. hookexec.New(nil) matches buildEngine's default: the configured-hook map
 	// is not yet wired from cfg anywhere, so this is an inert (no-op) runner today,
@@ -1477,14 +1543,16 @@ func buildTeamWiring(ctx context.Context, cfg Config, provider port.LLMProvider,
 	// scoped catalog/model/prompt/permissionMode.
 	agentReg := resolveAgentRegistry(ctx, cfg)
 	skillIdx := resolveSkillIndex(ctx, cfg)
-	factory := buildMemberEngine(cfg, provider, teamHooks, agentReg, skillIdx, buildCommandRunner(cfg), mainMgr)
-	// WithForceCopy: Mutating team members run Bash (incl. git) in their forks, so
-	// they get FULLY isolated forks (a full copy incl. .git — own object DB/refs)
-	// rather than a worktree that shares the base repo's .git, keeping a member's
-	// git commit/push/update-ref from escaping into the base repo. (Read-only
-	// members share the base directly and never fork, so they're unaffected.)
+	// fk (force-copy) for mutating members; roFk (worktree default) for read-only
+	// members the factory grants a shell. Read-only members run git in the shared
+	// .git of a worktree, so they get the SANDBOXED runner; the main session keeps its
+	// own unhardened runner elsewhere.
 	fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }, forker.WithForceCopy())
-	return factory, fk, teamHooks
+	roFk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
+	memberRunner := buildSandboxedCommandRunner(cfg)
+	roIsolationAvailable := memberRunner != nil && roFk != nil
+	factory := buildMemberEngine(cfg, provider, teamHooks, agentReg, skillIdx, memberRunner, roIsolationAvailable, mainMgr)
+	return factory, fk, roFk, teamHooks
 }
 
 // applyTeamConfig wires the opt-in agent-teams capability into the server.Config.
@@ -1499,9 +1567,10 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvide
 		slog.Info("agent teams DISABLED (set --enable-teams to enable; experimental)")
 		return
 	}
-	factory, fk, teamHooks := buildTeamWiring(context.Background(), cfg, provider, mainMgr)
+	factory, fk, roFk, teamHooks := buildTeamWiring(context.Background(), cfg, provider, mainMgr)
 	svcCfg.MemberEngine = factory
 	svcCfg.Forker = fk
+	svcCfg.ReadOnlyForker = roFk
 	svcCfg.TeamHooks = teamHooks
 	slog.Info("agent teams ENABLED (experimental; CreateTeam/SpawnTeammate/RunTeam + Team tool)")
 }
@@ -1537,7 +1606,7 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvide
 // spawn, so a stale roster reference never wedges a team. (An unknown Task `agent`
 // arg, by contrast, is a model-addressable error — the model can retry; an operator
 // roster entry cannot.)
-func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner tool.CommandRunner, mainMgr *mcp.Manager) server.MemberEngineFactory {
+func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner tool.CommandRunner, roIsolationAvailable bool, mainMgr *mcp.Manager) server.MemberEngineFactory {
 	return func(t *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		var (
@@ -1559,6 +1628,14 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 			// separate runner the coordination tools use; it is the per-def fallback so a
 			// defined member with no scoped hooks behaves as before.
 			memberHooks port.HookRunner = hookexec.New(nil)
+			// isolateReadOnly is set true iff this is a NON-mutating member that we
+			// nonetheless gave Bash (runner wired AND a read-only forker available). It
+			// tells the supervisor to run the member in a throwaway git worktree (where
+			// its Bash is confined) and to exempt it from the base-sharing
+			// mutating-tool backstop. It stays false for a Mutating member (its flag
+			// already drives the force-copy fork) and for a base-sharing read-only
+			// member (no shell).
+			isolateReadOnly bool
 		)
 
 		def, defined := lookupMemberDef(reg, spec)
@@ -1568,17 +1645,41 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 			// fork, and Bash is now workspace-aware (BashTool passes the member's
 			// forked Workspace.Root() to the runner as workdir), so a def MAY scope
 			// Bash in for a Mutating member and it runs in the member's fork, not the
-			// shared parent base. For a read-only (base-sharing) member,
-			// scopedToolNamesMode drops Bash (and Edit/Write) since allowMutating is
-			// false — Bash.ReadOnly()==false — so the read-only-share guarantee holds.
+			// shared parent base. For a read-only member that we can isolate in a
+			// worktree (allowShell), scopedToolNamesMode keeps Bash but still drops
+			// Edit/Write; for a base-sharing read-only member it drops all three.
 			base := baseTaskTools(cfg)
-			names, diags := scopedToolNamesMode(def, base, spec.Mutating)
+			// allowShell: a non-mutating member may keep Bash ONLY when a runner is
+			// wired AND a read-only forker is available to isolate it in a worktree.
+			allowShell := !spec.Mutating && runner != nil && roIsolationAvailable
+			names, diags := scopedToolNamesMode(def, base, spec.Mutating, allowShell)
 			for _, d := range diags {
 				slog.Warn("team member agent def tool scoping",
 					"member", spec.Name, "agent", def.Name, "tool", d.tool, "reason", d.reason, "path", def.Path)
 			}
 			for _, name := range names {
+				// Bash registers with the HARDENED member runner (passed in), not the
+				// unhardened baseTaskTools one used purely to compute the name set — so a
+				// member's shell over the shared `.git` cannot be hijacked via git config
+				// (core.pager/hooksPath/fsmonitor/external-diff). Every other tool registers
+				// as-is. Note: there is NO unhardened member-Bash fall-through — `runner` is
+				// always the sandboxed memberRunner; a force-copy (Mutating) member would not
+				// even need it (its fork has its OWN `.git`, so config-hardening is moot
+				// there), but it gets the hardened runner anyway.
+				if name == tools.BashToolName && runner != nil {
+					cat.MustRegister(tools.NewBashTool(runner))
+					continue
+				}
 				cat.MustRegister(base[name])
+			}
+			// A read-only def-member that ended up with Bash is worktree-isolated.
+			if allowShell {
+				for _, name := range names {
+					if name == tools.BashToolName {
+						isolateReadOnly = true
+						break
+					}
+				}
 			}
 			// Per-agent MCP: add the def's referenced/inline servers' tools to THIS
 			// member's catalog. The inline managers' Close rides on the MemberBuild so the
@@ -1609,27 +1710,30 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 			slog.Info("team member adopts agent def",
 				"member", spec.Name, "agent", def.Name, "tools", strings.Join(names, ","),
 				"model", model, "mode", mode, "mutating", spec.Mutating,
+				"isolate_read_only", isolateReadOnly,
 				"preloaded_skills", len(bodies), "path", def.Path)
 		} else {
-			// Default member catalog: read-only base, plus Edit/Write (and Bash, when a
-			// runner is configured) for a Mutating member only. Bash is now
-			// workspace-aware — BashTool.Execute passes the member's forked
-			// Workspace.Root() to the runner as the working directory — so a Mutating
-			// member's Bash runs in its OWN isolated fork, not the shared parent base.
-			// A read-only (base-sharing) member gets NO mutating tools, so the
-			// read-only-share / mutating-fork isolation guarantee holds. (Bash can still
-			// escape its cwd via absolute paths / `cd`, the inherent Bash trust model;
-			// the fix removes the accidental shared-base mutation a parent-rooted runner
-			// caused.)
+			// Default member catalog (three tiers). Read/Grep/Glob always. Edit/Write
+			// only for a Mutating member. Bash when a runner is wired AND the member is
+			// either Mutating (own force-copy fork) OR read-only-isolated (own worktree,
+			// roIsolationAvailable) — so a read-only member now gets a shell for
+			// inspection (git log/show, build, test) confined to its throwaway worktree,
+			// while a base-sharing read-only member (no forker) still gets NO shell, so
+			// the read-only-share isolation guarantee holds. Bash is workspace-aware
+			// (BashTool.Execute passes the member's forked Workspace.Root() to the runner
+			// as workdir), so an isolated member's Bash runs in its OWN fork/worktree,
+			// not the shared parent base. (Bash can still escape its cwd via absolute
+			// paths / `cd`, the inherent Bash trust model; isolation is the boundary.)
 			cat.MustRegister(tools.ReadTool{})
 			cat.MustRegister(tools.GrepTool{})
 			cat.MustRegister(tools.GlobTool{})
 			if spec.Mutating {
 				cat.MustRegister(tools.EditTool{})
 				cat.MustRegister(tools.WriteTool{})
-				if runner != nil {
-					cat.MustRegister(tools.NewBashTool(runner))
-				}
+			}
+			if runner != nil && (spec.Mutating || roIsolationAvailable) {
+				cat.MustRegister(tools.NewBashTool(runner))
+				isolateReadOnly = !spec.Mutating && roIsolationAvailable
 			}
 		}
 
@@ -1640,7 +1744,7 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 		}
 
 		eng := newChildEngineWithHooks(provider, cat, model, pc, memberHooks)
-		return agent.MemberBuild{Engine: eng, Mode: mode, Limits: memberLimits, Close: mcpClose, MCPToolNames: mcpNames}
+		return agent.MemberBuild{Engine: eng, Mode: mode, Limits: memberLimits, Close: mcpClose, MCPToolNames: mcpNames, IsolateReadOnly: isolateReadOnly}
 	}
 }
 

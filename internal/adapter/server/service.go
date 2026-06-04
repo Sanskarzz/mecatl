@@ -151,9 +151,16 @@ type Config struct {
 	// catalog (read-only base + MemberTools, plus mutating tools only for a
 	// Mutating member) and the provider/model.
 	MemberEngine MemberEngineFactory
-	// Forker isolates a Mutating team member's workspace. Optional; required only
-	// if a Mutating member is spawned.
+	// Forker isolates a Mutating team member's workspace (force-copy: own `.git`).
+	// Optional; required only if a Mutating member is spawned.
 	Forker tool.WorkspaceForker
+	// ReadOnlyForker isolates a read-only-isolated team member's workspace as a cheap
+	// git worktree (shares the base repo's `.git` ⇒ full history) so an inspect-only
+	// member can run a shell (git log/show, build, test) confined to a throwaway
+	// checkout. Optional; required only if the member factory marks any read-only
+	// member IsolateReadOnly (which the composition root does only when this is
+	// wired). When nil, read-only members base-share with no shell.
+	ReadOnlyForker tool.WorkspaceForker
 	// TeamHooks fires the team lifecycle hooks (TeammateIdle) and is passed to
 	// member coordination tools for the TaskCreated / TaskCompleted gates.
 	// Optional.

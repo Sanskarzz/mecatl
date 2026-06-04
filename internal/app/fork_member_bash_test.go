@@ -137,7 +137,7 @@ func TestMutatingMemberHasBashAndEdit(t *testing.T) {
 		t.Fatal("precondition: expected a non-nil command runner with Shell set")
 	}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, nil)
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, false, nil)
 	build := factory(tm, agent.MemberSpec{Name: "writer", Mutating: true})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -163,7 +163,7 @@ func TestReadOnlyMemberHasNoBashOrEdit(t *testing.T) {
 	cfg := teamCfg(t)
 	runner := buildCommandRunner(cfg)
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, nil)
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, false, nil)
 	build := factory(tm, agent.MemberSpec{Name: "reader", Mutating: false})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -179,6 +179,88 @@ func TestReadOnlyMemberHasNoBashOrEdit(t *testing.T) {
 	}
 }
 
+// TestReadOnlyIsolatedMemberHasBashNotEdit proves the new three-tier behaviour for a
+// DEFAULT (no-def) read-only member: with a runner AND read-only isolation available,
+// it gets Bash (for inspection) but NOT Edit, and the build is flagged
+// IsolateReadOnly so the supervisor runs it in a worktree.
+func TestReadOnlyIsolatedMemberHasBashNotEdit(t *testing.T) {
+	cfg := teamCfg(t)
+	runner := buildSandboxedCommandRunner(cfg)
+	if runner == nil {
+		t.Fatal("precondition: expected a non-nil sandboxed runner with Shell set")
+	}
+	tm := team.New("t")
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, true, nil)
+	build := factory(tm, agent.MemberSpec{Name: "reader", Mutating: false})
+	if build.Engine == nil {
+		t.Fatal("factory returned a nil engine")
+	}
+	if !build.IsolateReadOnly {
+		t.Error("read-only member with Bash should set IsolateReadOnly so the supervisor isolates it in a worktree")
+	}
+
+	events := drainEngine(t, build.Engine)
+
+	if unknownToolResult(events, "b1") {
+		t.Error("read-only-isolated member did NOT get Bash; it must get a shell for inspection in its worktree")
+	}
+	if !sawDispatchedTool(events, "b1") {
+		t.Error("read-only-isolated member did not dispatch Bash; it must be present in the catalog")
+	}
+	if !unknownToolResult(events, "e1") {
+		t.Error("read-only-isolated member dispatched Edit; an inspect-only member must NOT get Edit/Write")
+	}
+}
+
+// TestReadOnlyMemberNoRunnerNoBashNotIsolated reasserts the base-sharing fallback:
+// with no runner the read-only member gets no Bash and is NOT IsolateReadOnly (so the
+// supervisor base-shares it), unchanged from before this feature.
+func TestReadOnlyMemberNoRunnerNoBashNotIsolated(t *testing.T) {
+	cfg := teamCfg(t)
+	tm := team.New("t")
+	// roIsolationAvailable is moot when the runner is nil — pass true to prove the
+	// runner gate (runner != nil) is what actually withholds Bash.
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, nil, true, nil)
+	build := factory(tm, agent.MemberSpec{Name: "reader", Mutating: false})
+	if build.Engine == nil {
+		t.Fatal("factory returned a nil engine")
+	}
+	if build.IsolateReadOnly {
+		t.Error("read-only member with no runner must NOT be IsolateReadOnly (no shell => base-share)")
+	}
+
+	events := drainEngine(t, build.Engine)
+	if !unknownToolResult(events, "b1") {
+		t.Error("read-only member with no runner dispatched Bash; without a runner there must be no shell")
+	}
+}
+
+// TestReadOnlyIsolatedMemberDefKeepsBashDropsEdit proves the DEFINED read-only-member
+// path with isolation available keeps Bash (a def allowlisting it) but still drops
+// Edit, and flags IsolateReadOnly.
+func TestReadOnlyIsolatedMemberDefKeepsBashDropsEdit(t *testing.T) {
+	cfg := teamCfg(t)
+	runner := buildSandboxedCommandRunner(cfg)
+	tm := team.New("t")
+	def := agents.AgentDef{Name: "reader", Description: "r", Tools: []string{"Read", "Edit", "Bash"}}
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, true, nil)
+	build := factory(tm, agent.MemberSpec{Name: "reader", AgentType: "reader", Mutating: false})
+	if build.Engine == nil {
+		t.Fatal("factory returned a nil engine")
+	}
+	if !build.IsolateReadOnly {
+		t.Error("read-only def-member that kept Bash should set IsolateReadOnly")
+	}
+
+	events := drainEngine(t, build.Engine)
+	if unknownToolResult(events, "b1") {
+		t.Error("read-only-isolated def-member allowlisting Bash did NOT get Bash; it must keep it for inspection")
+	}
+	if !unknownToolResult(events, "e1") {
+		t.Error("read-only-isolated def-member got Edit; Edit/Write must still be dropped for an inspect-only member")
+	}
+}
+
 // TestMutatingMemberDefCanScopeInBash proves the DEFINED-member path now lets a
 // Mutating member's agent def scope Bash IN: a def that allowlists Bash gets it
 // (workspace-aware, fork-confined), alongside a listed Edit.
@@ -187,7 +269,7 @@ func TestMutatingMemberDefCanScopeInBash(t *testing.T) {
 	runner := buildCommandRunner(cfg)
 	tm := team.New("t")
 	def := agents.AgentDef{Name: "writer", Description: "w", Tools: []string{"Read", "Edit", "Bash"}}
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, nil)
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, false, nil)
 	build := factory(tm, agent.MemberSpec{Name: "writer", AgentType: "writer", Mutating: true})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -214,7 +296,7 @@ func TestReadOnlyMemberDefCannotScopeInBash(t *testing.T) {
 	runner := buildCommandRunner(cfg)
 	tm := team.New("t")
 	def := agents.AgentDef{Name: "reader", Description: "r", Tools: []string{"Read", "Edit", "Bash"}}
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, nil)
+	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, false, nil)
 	build := factory(tm, agent.MemberSpec{Name: "reader", AgentType: "reader", Mutating: false})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")

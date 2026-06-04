@@ -410,6 +410,61 @@ func TestTeamToolMutatingMemberNoForker(t *testing.T) {
 	}
 }
 
+// TestTeamToolReadOnlyMemberForksViaReadOnlyForker locks the IN-CATALOG Team-tool
+// entry point in step with the gRPC path (the drift-twin): a factory that marks a
+// read-only member IsolateReadOnly must, when driven through TeamTool.Execute, fork
+// that member via the injected READ-ONLY forker (the worktree seam) — not the
+// mutating force-copy forker. This is the same three-tier behaviour
+// TestSupervisorReadOnlyIsolatedMemberForksViaReadOnlyForker asserts on the
+// supervisor directly; here it is proven through the TeamTool wiring.
+func TestTeamToolReadOnlyMemberForksViaReadOnlyForker(t *testing.T) {
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	// A factory that grants the member a (mutating) Bash stand-in and marks it
+	// IsolateReadOnly — the composition-layer signal that it was granted a shell and
+	// must run in an isolated worktree via the read-only forker.
+	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		cat.MustRegister(fakeMutatingTool{name: "Bash"})
+		eng := agent.NewEngine(agent.Deps{
+			LLM:     mockllm.New(mockllm.TextTurn("inspection done")),
+			Catalog: cat,
+			Policy:  allow,
+			Model:   "member-model",
+		})
+		return agent.MemberBuild{Engine: eng, IsolateReadOnly: true}
+	}
+
+	mutatingFk := &recordingForker{}
+	roFk := &recordingForker{}
+	tt := agent.NewTeamTool(factory,
+		agent.WithTeamToolForker(mutatingFk),
+		agent.WithTeamToolReadOnlyForker(roFk))
+
+	res, err := tt.Execute(context.Background(),
+		toolCall("c1", "Team", `{"goal":"inspect","members":[{"name":"lead","role":"inspect the history"}]}`),
+		memfs.NewWorkspace("/ws"))
+	if err != nil {
+		t.Fatalf("Execute returned a harness error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("Team execute errored: %q", res.Content)
+	}
+
+	roFk.mu.Lock()
+	defer roFk.mu.Unlock()
+	mutatingFk.mu.Lock()
+	defer mutatingFk.mu.Unlock()
+	if len(roFk.labels) != 1 || roFk.labels[0] != "lead" {
+		t.Fatalf("read-only forker labels = %v, want [lead] (the IsolateReadOnly member forks via the worktree forker through TeamTool)", roFk.labels)
+	}
+	if len(mutatingFk.labels) != 0 {
+		t.Fatalf("force-copy forker labels = %v, want none (a read-only member must not use the mutating forker)", mutatingFk.labels)
+	}
+}
+
 // TestTeamToolNilFactoryPanics pins the composition-root contract: a Team tool with
 // no member-engine factory is a programming error.
 func TestTeamToolNilFactoryPanics(t *testing.T) {

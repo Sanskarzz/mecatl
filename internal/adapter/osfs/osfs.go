@@ -388,6 +388,34 @@ func (w *Workspace) walkAll(ctx context.Context) ([]string, error) {
 type CommandRunner struct {
 	root  string
 	shell string
+	// env, when set, is the COMPLETE process environment for every Run (it REPLACES
+	// the inherited os.Environ(), it does not augment it). It is nil for an
+	// unhardened runner (the main session, which inherits the operator's full
+	// environment unchanged). The team-member sandboxed runner populates it via
+	// WithCommandEnvList with a fully-scrubbed-and-neutralised environment computed
+	// in composition (internal/app.buildSandboxedCommandRunner via gitenv.Scrub):
+	// inherited git danger is REMOVED, not merely overridden. osfs stays free of
+	// git-specific knowledge — it just sets whatever complete env it is handed.
+	env []string
+}
+
+// CommandRunnerOption configures a CommandRunner at construction.
+type CommandRunnerOption func(*CommandRunner)
+
+// WithCommandEnvList sets the COMPLETE process environment ("KEY=VALUE" entries)
+// used for every Run, REPLACING the inherited os.Environ() rather than augmenting
+// it. This is how the composition root hardens the team-member shell against a
+// shared `.git`: it computes a fully scrubbed-and-neutralised environment (via
+// gitenv.Scrub — inherited GIT_* danger REMOVED, not just overridden) and hands
+// the complete list here. Because the option REPLACES the environment, removing an
+// inherited variable (e.g. GIT_EXTERNAL_DIFF) is possible — an append-only option
+// could not. A nil/empty list leaves the runner unhardened (the main-session
+// default, which inherits os.Environ() unchanged). osfs holds no git knowledge: it
+// just runs with whatever complete environment it is given.
+func WithCommandEnvList(env []string) CommandRunnerOption {
+	return func(r *CommandRunner) {
+		r.env = append([]string(nil), env...)
+	}
 }
 
 // NewCommandRunner returns a local tool.CommandRunner that executes commands via
@@ -403,7 +431,7 @@ func NewCommandRunner(dir string) (tool.CommandRunner, error) {
 // shell binary (e.g. "/bin/bash"). An empty shell is rejected: a shell-less
 // deployment must omit the runner (and the Bash tool) entirely rather than
 // construct a runner with no shell.
-func NewCommandRunnerShell(dir, shell string) (tool.CommandRunner, error) {
+func NewCommandRunnerShell(dir, shell string, opts ...CommandRunnerOption) (tool.CommandRunner, error) {
 	if shell == "" {
 		return nil, errors.New("osfs: command runner requires a non-empty shell")
 	}
@@ -411,7 +439,11 @@ func NewCommandRunnerShell(dir, shell string) (tool.CommandRunner, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &CommandRunner{root: abs, shell: shell}, nil
+	r := &CommandRunner{root: abs, shell: shell}
+	for _, o := range opts {
+		o(r)
+	}
+	return r, nil
 }
 
 // Compile-time assertion that CommandRunner satisfies the runner port.
@@ -446,6 +478,14 @@ func (r *CommandRunner) Run(ctx context.Context, command, workdir string) (tool.
 	cmd.Dir = dir
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// A hardened (team-member) runner carries a COMPLETE, pre-scrubbed environment
+	// (computed in composition via gitenv.Scrub: inherited GIT_* danger removed,
+	// neutralising config appended); use it verbatim so removal of an inherited
+	// variable actually takes effect. An unhardened runner has r.env == nil, so
+	// cmd.Env stays nil and exec inherits os.Environ() unchanged, as before.
+	if r.env != nil {
+		cmd.Env = r.env
+	}
 
 	err := cmd.Run()
 	res := tool.CommandResult{

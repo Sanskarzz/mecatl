@@ -71,6 +71,53 @@ func TestForkGitWorktree(t *testing.T) {
 	}
 }
 
+// TestForkNeutralizesRepoHooks proves the forker's OWN git invocations run with a
+// git-neutralizing environment: `git worktree add` would otherwise FIRE the base
+// repo's post-checkout hook at fork time (before any sandboxed member runner exists).
+// A base repo with a post-checkout hook that writes a sentinel must NOT create that
+// sentinel when Fork runs. Skipped when git is unavailable.
+func TestForkNeutralizesRepoHooks(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	base := t.TempDir()
+	initGitRepo(t, base)
+	writeFile(t, filepath.Join(base, "tracked.txt"), "from base\n")
+	gitCommit(t, base)
+
+	// Install a post-checkout hook that writes an innocuous sentinel file. git
+	// worktree add runs a checkout in the new worktree and fires this hook UNLESS
+	// core.hooksPath is neutralised.
+	sentinel := filepath.Join(t.TempDir(), "hook-fired")
+	hookDir := filepath.Join(base, ".git", "hooks")
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	hook := "#!/bin/sh\ntouch " + sentinel + "\n"
+	if err := os.WriteFile(filepath.Join(hookDir, "post-checkout"), []byte(hook), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	baseWS, err := osfs.NewWorkspace(base)
+	if err != nil {
+		t.Fatalf("base workspace: %v", err)
+	}
+	f := forker.New(osfsWorkspace)
+	child, cleanup, err := f.Fork(context.Background(), baseWS, "ro-member")
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+
+	// Sanity: we did take the worktree path (so the hook was genuinely reachable).
+	if _, err := os.Stat(filepath.Join(child.Root(), ".git")); err != nil {
+		t.Fatalf("child is not a git worktree (.git missing): %v", err)
+	}
+	if _, statErr := os.Stat(sentinel); statErr == nil {
+		t.Fatalf("post-checkout hook FIRED (sentinel %s created) at fork time — forker git env is not neutralized", sentinel)
+	}
+}
+
 // TestForkCopyFallback exercises the non-git path: forking a plain directory
 // yields an isolated recursive copy; writes in the child do not affect the base,
 // and cleanup removes the copy.

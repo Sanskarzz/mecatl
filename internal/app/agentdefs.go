@@ -154,7 +154,7 @@ type scopeDiag struct {
 // for the full algorithm. Task children are unconditionally read-only so
 // Task.ReadOnly() stays honestly true.
 func scopedToolNames(def agents.AgentDef, available map[string]tool.Tool) ([]string, []scopeDiag) {
-	return scopedToolNamesMode(def, available, false)
+	return scopedToolNamesMode(def, available, false, false)
 }
 
 // scopedToolNamesMode computes a def's effective tool NAME set as a pure set
@@ -167,15 +167,19 @@ func scopedToolNames(def agents.AgentDef, available map[string]tool.Tool) ([]str
 //  4. drop any name not in the available base set (DISTINCT "unknown tool"
 //     diagnostic — a typo or an MCP/skills tool this Tier-1 call site can't see);
 //  5. when allowMutating is false, drop any mutating (non-read-only) tool with a
-//     DISTINCT "not permitted (read-only)" diagnostic. When allowMutating is true
-//     (a Mutating team member, which runs in an isolated fork) a def MAY keep
-//     Edit/Write/Bash, so mutating tools survive.
+//     DISTINCT diagnostic — EXCEPT that when allowShell is true the Bash tool alone
+//     survives. allowMutating == true (a Mutating team member, which runs in an
+//     isolated force-copy fork) keeps every mutating tool (Edit/Write/Bash).
+//     allowMutating == false + allowShell == true (a read-only team member that the
+//     supervisor will isolate in a git worktree) keeps Bash for inspection but still
+//     drops Edit/Write. allowMutating == false + allowShell == false (a Task child or
+//     a base-sharing read-only member) drops every mutating tool.
 //
 // available maps an available base tool name to its tool.Tool (used to read
 // ReadOnly()). It returns the kept names (sorted) and the diagnostics. The caller
 // (teams) still appends MemberTools AFTER this — coordination tools bypass the
 // allowlist and this filter entirely.
-func scopedToolNamesMode(def agents.AgentDef, available map[string]tool.Tool, allowMutating bool) ([]string, []scopeDiag) {
+func scopedToolNamesMode(def agents.AgentDef, available map[string]tool.Tool, allowMutating, allowShell bool) ([]string, []scopeDiag) {
 	disallowed := make(map[string]struct{}, len(def.DisallowedTools))
 	for _, d := range def.DisallowedTools {
 		disallowed[d] = struct{}{}
@@ -218,9 +222,16 @@ func scopedToolNamesMode(def agents.AgentDef, available map[string]tool.Tool, al
 			continue
 		}
 		if !allowMutating && !t.ReadOnly() {
-			// Step 5: read-only call site (Task, or a base-sharing team member); a
-			// workspace-mutating tool is dropped, full stop.
-			diags = append(diags, scopeDiag{name, "tool is workspace-mutating but this call site is read-only; dropped"})
+			// Step 5: read-only call site (Task, or a read-only team member). A
+			// workspace-mutating tool is dropped — EXCEPT Bash when allowShell is true,
+			// i.e. a read-only member the supervisor isolates in a git worktree, where a
+			// shell is used for inspection (git log/show, build, test) but Edit/Write
+			// would still corrupt nothing shared, so we keep ONLY Bash.
+			if allowShell && name == tools.BashToolName {
+				kept = append(kept, name)
+				continue
+			}
+			diags = append(diags, scopeDiag{name, "tool is workspace-mutating but this call site is read-only (shell requires workspace isolation; base-sharing member); dropped"})
 			continue
 		}
 		kept = append(kept, name)

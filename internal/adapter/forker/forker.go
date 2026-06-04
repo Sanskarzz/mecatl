@@ -41,9 +41,26 @@
 // directory along with the tree, so the fork is a SELF-CONTAINED repository. A
 // branch's git/Bash writes (commits, refs, objects) then stay inside the fork and
 // CANNOT reach the base repo. The composition root wires WithForceCopy for the Fork
-// tool's branches and for mutating team members (see internal/app/build.go); the
-// default (no option) keeps the cheap auto worktree-vs-copy behaviour for read-only
-// callers.
+// tool's branches and for mutating team members (see internal/app/build.go).
+//
+// The DEFAULT (no option) — the cheap auto worktree-vs-copy behaviour — is now used
+// DELIBERATELY for READ-ONLY callers that nonetheless need a shell, specifically
+// read-only team members (see internal/app.buildTeamWiring): a worktree SHARES the
+// base repo's `.git`, so the member gets the full commit history for `git log`/`git
+// show` inspection at near-zero cost, while its own working tree + index keep its
+// (non-mutating) Bash from disturbing the base working tree. Because a worktree shares
+// `.git/config` + `.git/hooks`, the composition root runs such a member's Bash through
+// a SANDBOXED command runner that neutralises git config-driven code execution
+// (core.pager / core.hooksPath / core.fsmonitor / external diff); see
+// internal/app.buildSandboxedCommandRunner.
+//
+// The forker's OWN git invocations are hardened the same way. `git worktree add`
+// fires the base repo's post-checkout hook, and even `git rev-parse` honours
+// core.pager / external diff — all at FORK time, BEFORE the sandboxed member runner
+// exists. So runGit/gitRepoRoot set cmd.Env = gitenv.Scrub(os.Environ()), the SAME
+// neutralizing environment the member runner uses (the single shared source in
+// internal/adapter/gitenv keeps the two from drifting): inherited GIT_* danger is
+// dropped and hooks/pager/fsmonitor/external-diff are force-neutralised.
 //
 // Cost: a full copy (including `.git`, which for an established repo is often the
 // bulk of the bytes) is HEAVIER than a worktree, which copies no file contents.
@@ -68,6 +85,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/stacklok/mecatl/internal/adapter/gitenv"
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
@@ -252,6 +270,9 @@ func gitRepoRoot(ctx context.Context, dir string) (string, bool) {
 	// Use a capturing exec directly (the injected runner is fire-and-forget); a
 	// failure simply means "not a repo / no git" and triggers the copy fallback.
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
+	// Even this read-only probe runs git config-aware; scrub the env so a shared
+	// `.git/config` (core.pager/external diff/etc.) can never drive code here.
+	cmd.Env = gitenv.Scrub(os.Environ())
 	out, err := cmd.Output()
 	if err != nil {
 		return "", false
@@ -268,6 +289,12 @@ func gitRepoRoot(ctx context.Context, dir string) (string, bool) {
 func runGit(ctx context.Context, dir string, args ...string) error {
 	full := append([]string{"-C", dir}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
+	// CRITICAL: scrub the env BEFORE any git invocation. `git worktree add` fires
+	// the base repo's post-checkout hook, and other subcommands honour core.pager /
+	// external diff — all at FORK time, before the sandboxed member runner exists.
+	// gitenv.Scrub (shared with buildSandboxedCommandRunner) neutralises hooks,
+	// pager, fsmonitor and external diff and drops inherited GIT_* danger.
+	cmd.Env = gitenv.Scrub(os.Environ())
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

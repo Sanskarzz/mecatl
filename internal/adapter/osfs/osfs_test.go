@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stacklok/mecatl/internal/adapter/fsconformance"
+	"github.com/stacklok/mecatl/internal/adapter/gitenv"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/tool"
 )
@@ -155,6 +157,136 @@ func TestCommandRunnerTimeout(t *testing.T) {
 func TestCommandRunnerEmptyShellRejected(t *testing.T) {
 	if _, err := osfs.NewCommandRunnerShell(t.TempDir(), ""); err == nil {
 		t.Fatal("NewCommandRunnerShell with empty shell = nil err, want error")
+	}
+}
+
+// TestCommandRunnerWithCommandEnvList asserts the WithCommandEnvList option sets the
+// COMPLETE process environment for every Run (it REPLACES os.Environ() rather than
+// appending). This is the seam the composition root uses to hand the runner a fully
+// scrubbed-and-neutralised environment: because it replaces, it can REMOVE an
+// inherited dangerous variable (an append-only option could not). It checks that an
+// injected var is present, that a var NOT in the list is absent (proving replacement,
+// not augmentation), and that an inherited dangerous var is gone.
+func TestCommandRunnerWithCommandEnvList(t *testing.T) {
+	t.Setenv("GIT_EXTERNAL_DIFF", "/bin/evil") // inherited danger that must NOT survive
+	r, err := osfs.NewCommandRunnerShell(t.TempDir(), "/bin/sh", osfs.WithCommandEnvList([]string{
+		"GIT_PAGER=cat",
+		"PATH=/usr/bin:/bin",
+	}))
+	if err != nil {
+		t.Fatalf("NewCommandRunnerShell: %v", err)
+	}
+	ctx := context.Background()
+
+	res, err := r.Run(ctx, "printf '%s' \"$GIT_PAGER\"", "")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.TrimSpace(res.Stdout) != "cat" {
+		t.Errorf("GIT_PAGER = %q, want cat (injected env)", res.Stdout)
+	}
+
+	// GIT_EXTERNAL_DIFF was inherited but is NOT in the supplied list: replacement
+	// semantics mean it must be GONE (an append-only env could not have removed it).
+	res, err = r.Run(ctx, "printf '%s' \"$GIT_EXTERNAL_DIFF\"", "")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.TrimSpace(res.Stdout) != "" {
+		t.Errorf("GIT_EXTERNAL_DIFF = %q, want empty (replaced env drops inherited danger)", res.Stdout)
+	}
+
+	// A var present in the list IS set; a var NOT present is unset (replacement).
+	res, err = r.Run(ctx, "printf '%s' \"$PATH\"", "")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.TrimSpace(res.Stdout) != "/usr/bin:/bin" {
+		t.Errorf("PATH = %q, want /usr/bin:/bin (replacement env, exact list)", res.Stdout)
+	}
+}
+
+// TestSandboxedRunnerConfigOverride proves the env-injected git config (the kind
+// buildSandboxedCommandRunner hands the runner via gitenv.Scrub) beats a repo-local
+// .git/config setting — the actual threat, not merely "the env var is set". A temp
+// git repo's repo-local config points a config-driven execution hook at a marker
+// command that writes a sentinel; running git through the sandboxed runner must NOT
+// fire the marker because the env-injected config takes precedence over .git/config.
+//
+// It uses TWO repo-local vectors:
+//   - core.fsmonitor — a program git runs on `git status` UNCONDITIONALLY (no TTY
+//     needed), giving a deterministic config→exec proof; the scrub injects
+//     core.fsmonitor=false.
+//   - core.pager via `git --paginate log` — the reviewer's named vector; the scrub
+//     injects core.pager=cat (and GIT_PAGER=cat).
+//
+// A control sub-test first confirms the fsmonitor marker DOES fire under an
+// unhardened environment, so the negative assertion proves neutralization rather
+// than a no-op.
+func TestSandboxedRunnerConfigOverride(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	run("add", "f.txt")
+	run("commit", "-q", "-m", "first")
+
+	// Repo-local config sets a config-driven execution vector that writes a sentinel.
+	fsmonSentinel := filepath.Join(t.TempDir(), "fsmonitor-fired")
+	run("config", "core.fsmonitor", "touch "+fsmonSentinel+"; echo")
+	pagerSentinel := filepath.Join(t.TempDir(), "pager-fired")
+	run("config", "core.pager", "touch "+pagerSentinel)
+
+	// Control: under an UNHARDENED env the fsmonitor program fires on `git status`,
+	// proving the vector is genuinely reachable in this repo/git version.
+	t.Run("control_fires_unhardened", func(t *testing.T) {
+		ctrlMarker := filepath.Join(t.TempDir(), "ctrl-fired")
+		run("config", "core.fsmonitor", "touch "+ctrlMarker+"; echo")
+		t.Cleanup(func() { run("config", "core.fsmonitor", "touch "+fsmonSentinel+"; echo") })
+		cmd := exec.Command("git", "-C", repo, "status")
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1")
+		_ = cmd.Run()
+		if _, err := os.Stat(ctrlMarker); err != nil {
+			t.Skipf("fsmonitor did not fire even unhardened (%v); vector not exercisable here", err)
+		}
+	})
+
+	// Build the runner with the SAME neutralizing env composition uses.
+	r, err := osfs.NewCommandRunnerShell(repo, "/bin/sh", osfs.WithCommandEnvList(gitenv.Scrub(os.Environ())))
+	if err != nil {
+		t.Fatalf("NewCommandRunnerShell: %v", err)
+	}
+
+	// fsmonitor: env-injected core.fsmonitor=false must override .git/config.
+	if _, err := r.Run(context.Background(), "git status", repo); err != nil {
+		t.Fatalf("Run status: %v", err)
+	}
+	if _, statErr := os.Stat(fsmonSentinel); statErr == nil {
+		t.Fatalf("core.fsmonitor program FIRED (sentinel %s) — env-injected core.fsmonitor=false did not override repo .git/config", fsmonSentinel)
+	}
+
+	// pager: env-injected core.pager=cat (+ GIT_PAGER=cat) must override .git/config.
+	if _, err := r.Run(context.Background(), "git --paginate log", repo); err != nil {
+		t.Fatalf("Run log: %v", err)
+	}
+	if _, statErr := os.Stat(pagerSentinel); statErr == nil {
+		t.Fatalf("core.pager marker FIRED (sentinel %s) — env-injected core.pager=cat did not override repo .git/config", pagerSentinel)
 	}
 }
 

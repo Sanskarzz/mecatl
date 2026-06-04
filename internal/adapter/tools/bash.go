@@ -30,6 +30,9 @@ When NOT to use:
 
 Behavior:
 - The command runs with the workspace root as its working directory.
+- Under a subagent (a forked branch or an isolated team member) the working
+  directory is a throwaway, isolated workspace (a git worktree or a copy), not the
+  shared base — so commands you run there do not affect the parent's tree.
 - Standard output and standard error are captured together and returned along
   with the process exit code. A non-zero exit code is reported, not hidden.
 

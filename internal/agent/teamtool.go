@@ -31,9 +31,11 @@ const maxTeamPreview = 200
 // (server.Config.MemberEngine) AND the Team tool — so the per-member engine wiring
 // lives in one place (internal/app) and cannot drift between the two paths. The
 // composition root supplies it; it is expected to capture nothing (the team is
-// passed per-call) and to shape the member's catalog from spec.Mutating (a read-only
-// member must NOT be handed workspace-mutating tools) plus the team coordination
-// tools (MemberTools). Returning a MemberBuild (rather than a bare *Engine) is how a
+// passed per-call) and to shape the member's catalog per the three-tier workspace
+// policy (a base-sharing read-only member must NOT be handed workspace-mutating
+// tools; a read-only-isolated member may have Bash and sets IsolateReadOnly; a
+// Mutating member may have Edit/Write/Bash) plus the team coordination tools
+// (MemberTools). Returning a MemberBuild (rather than a bare *Engine) is how a
 // member's agent-definition permissionMode reaches the supervisor's per-member
 // session — it is the exact shape server.MemberEngineFactory has, so one factory
 // serves both paths.
@@ -47,8 +49,11 @@ type TeamMemberArg struct {
 	// Role is the member's role briefing — its first-turn instruction. It becomes
 	// the member's InitialPrompt.
 	Role string `json:"role"`
-	// Mutating requests an isolated forked workspace with workspace-mutating tools
-	// (Edit/Write/Bash). A read-only member (the default) shares the base.
+	// Mutating requests a self-contained copied workspace (own `.git`) with
+	// edit/write/shell tools (Edit/Write/Bash). A read-only member (the default,
+	// false) runs in an isolated throwaway git worktree with full shell for
+	// INSPECTION (git log/show, cat, build, test) but no Edit/Write. Neither tier is
+	// merged back into the base.
 	Mutating bool `json:"mutating,omitempty"`
 }
 
@@ -79,7 +84,7 @@ var teamSchema = json.RawMessage(`{
         "properties": {
           "name": {"type": "string", "description": "Unique member handle peers address messages to."},
           "role": {"type": "string", "description": "The member's role briefing — its first-turn instruction (e.g. 'Investigate the auth code path and report findings')."},
-          "mutating": {"type": "boolean", "description": "True if the member needs to edit/write files (runs in an isolated forked workspace); false (default) shares the base read-only."}
+          "mutating": {"type": "boolean", "description": "True if the member needs to edit/write files (runs in a self-contained copied workspace with edit/write/shell). False (default) runs read-only in an isolated throwaway git worktree with full shell for INSPECTION (git log/show, cat, build, test) but no Edit/Write. Neither is merged back."}
         },
         "required": ["name", "role"]
       }
@@ -115,10 +120,15 @@ var teamSchema = json.RawMessage(`{
 type TeamTool struct {
 	// factory builds each member's Engine, bound to the per-call team. Required.
 	factory TeamMemberEngineFactory
-	// forker isolates a Mutating member's workspace. Required only if any member is
-	// Mutating; a Mutating member without it yields a tool error (the model can
-	// retry with a read-only roster).
+	// forker isolates a Mutating member's workspace (force-copy: own `.git`). Required
+	// only if any member is Mutating; a Mutating member without it yields a tool error
+	// (the model can retry with a read-only roster).
 	forker tool.WorkspaceForker
+	// roForker isolates a read-only member that the factory granted a shell, as a
+	// cheap git worktree. Required only if the factory marks a read-only member
+	// IsolateReadOnly (which the composition root does only when this is wired). When
+	// nil, read-only members base-share with no shell.
+	roForker tool.WorkspaceForker
 	// hooks fires the team lifecycle hooks (TeammateIdle) — shared with the member
 	// coordination tools by the composition root. nil disables them.
 	hooks port.HookRunner
@@ -130,9 +140,17 @@ type TeamTool struct {
 type TeamOption func(*TeamTool)
 
 // WithTeamToolForker injects the workspace forker used to isolate a Mutating
-// member's workspace. It is required only if the model forms a Mutating roster.
+// member's workspace (force-copy). It is required only if the model forms a Mutating
+// roster.
 func WithTeamToolForker(f tool.WorkspaceForker) TeamOption {
 	return func(t *TeamTool) { t.forker = f }
+}
+
+// WithTeamToolReadOnlyForker injects the workspace forker (the worktree-default mode)
+// used to isolate a read-only member that the factory granted a shell. It is required
+// only if the factory marks a read-only member IsolateReadOnly.
+func WithTeamToolReadOnlyForker(f tool.WorkspaceForker) TeamOption {
+	return func(t *TeamTool) { t.roForker = f }
 }
 
 // WithTeamToolHooks injects the HookRunner threaded into the Supervisor (and, by
@@ -165,8 +183,11 @@ func (*TeamTool) Spec() tool.ToolSpec {
 			"workers sharing a task list and mailbox. You specify the roster: each member has a " +
 			"name, a role (its briefing), and whether it needs to edit files (mutating). The " +
 			"FIRST member is the coordinating lead. Members run as long-lived subagents that " +
-			"coordinate via a shared task list and direct messages; mutating members run in " +
-			"isolated workspaces. Returns ONLY the team's final joined summary — the per-member " +
+			"coordinate via a shared task list and direct messages. A read-only member runs in " +
+			"an isolated throwaway git worktree with a full shell for INSPECTION (git log/show, " +
+			"cat, build, test) but cannot edit files; a mutating member runs in a self-contained " +
+			"copied workspace with edit/write/shell. Neither is merged back. Returns ONLY the " +
+			"team's final joined summary — the per-member " +
 			"transcripts stay out of this conversation. Use for work that splits into " +
 			"specialist roles; for a single one-shot investigation use Task instead.",
 		Schema: teamSchema,
@@ -219,6 +240,9 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	opts := []SupervisorOption{}
 	if t.forker != nil {
 		opts = append(opts, WithForker(t.forker))
+	}
+	if t.roForker != nil {
+		opts = append(opts, WithReadOnlyForker(t.roForker))
 	}
 	if t.hooks != nil {
 		opts = append(opts, WithTeamHooks(t.hooks))

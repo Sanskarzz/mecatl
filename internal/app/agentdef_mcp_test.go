@@ -208,7 +208,7 @@ func TestMemberReadOnlyDefWithMCPAccepted(t *testing.T) {
 	// The member loop calls the MCP echo tool, then reports done.
 	mcpCall := session.ToolCall{ID: "c1", Name: "mcp__inline__echo", Args: json.RawMessage(`{"text":"x"}`)}
 	prov := mockllm.New(mockllm.ToolCallTurn(mcpCall), mockllm.TextTurn("done"))
-	factory := buildMemberEngine(cfg, prov, hookexec.New(nil), regOf(def), nil, nil, nil)
+	factory := buildMemberEngine(cfg, prov, hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
 		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
@@ -246,7 +246,7 @@ func TestMemberReadOnlyDefWithEditStillRejected(t *testing.T) {
 		MCPServers:  []agents.AgentMCPServer{{Name: "inline", URL: url}},
 	}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, nil)
+	factory := buildMemberEngine(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
 		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })

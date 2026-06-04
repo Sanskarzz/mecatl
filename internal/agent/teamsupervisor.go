@@ -35,10 +35,25 @@ import (
 // finishes when a round plans no work; team.Quiescent reports whether that is
 // genuine completion (all tasks done, mailboxes empty) or a stuck dependency.
 //
-// Workspace policy (the agreed read-only-share / mutating-fork stance): a read-only
-// member shares the base workspace; a Mutating member runs in its OWN forked
-// workspace (via the injected tool.WorkspaceForker), so parallel writes are safe
-// because isolated — exactly like Fork. v1 does not auto-merge forks.
+// Workspace policy (three tiers; isolation is the security boundary, capability
+// flows down from the parent):
+//
+//   - BASE-SHARE, no shell — the fallback when no read-only forker is wired: a
+//     read-only member shares the base workspace and gets NO workspace-mutating
+//     tool (no Edit/Write/Bash), so it cannot corrupt the shared base.
+//   - READ-ONLY WORKTREE, full shell — a read-only member runs in a cheap git
+//     worktree (the default forker mode, shares the base repo's `.git` ⇒ full
+//     history) with Read/Grep/Glob PLUS Bash, but never Edit/Write. It can inspect
+//     with a real shell (git log/show, cat, build, test) confined to a throwaway
+//     worktree; the shared `.git` is hardened against config-driven code execution
+//     in the composition layer (see internal/app.buildSandboxedCommandRunner).
+//   - MUTATING COPY, full shell — a Mutating member runs in its OWN force-copied
+//     fork (own `.git`) with Edit/Write/Bash, so parallel writes are safe because
+//     isolated — exactly like Fork.
+//
+// The two forked tiers use DIFFERENT injected forkers (s.forker = force-copy for
+// mutating; s.roForker = worktree for read-only-isolated). v1 does not auto-merge
+// any fork.
 
 // AddMember failure-class sentinels. They let a caller (e.g. the gRPC adapter)
 // classify an enrolment failure into the right wire status instead of collapsing
@@ -65,10 +80,20 @@ var (
 	// ErrNilEngine is returned by AddMember when the member-engine factory returns
 	// a nil Engine. It is a server-internal fault (a broken factory).
 	ErrNilEngine = errors.New("agent: member engine factory returned nil")
-	// ErrReadOnlyMemberMutating is returned by AddMember when a non-Mutating
-	// (base-sharing) member's catalog contains a workspace-mutating tool. It is a
-	// server MISCONFIGURATION of the member's catalog, not a bad client request.
+	// ErrReadOnlyMemberMutating is returned by AddMember when a BASE-SHARING member's
+	// catalog contains a workspace-mutating tool. It is a server MISCONFIGURATION of
+	// the member's catalog, not a bad client request. It is gated on base-sharing
+	// (neither Mutating nor read-only-isolated): a worktree-isolated read-only member
+	// is exempt exactly like a mutating one, because its mutating-classified Bash
+	// lands in its own throwaway worktree, never the shared base.
 	ErrReadOnlyMemberMutating = errors.New("agent: read-only member given workspace-mutating tool")
+	// ErrReadOnlyShellNoForker is returned by AddMember when a member's factory marked
+	// it read-only-isolated (MemberBuild.IsolateReadOnly — it put Bash into a
+	// non-mutating member's catalog) but no read-only forker is configured. It is a
+	// should-never-happen server MIS-WIRE assertion: the composition layer only sets
+	// IsolateReadOnly when the read-only forker is wired, so this guards the two from
+	// drifting apart.
+	ErrReadOnlyShellNoForker = errors.New("agent: read-only-isolated member requires a configured read-only WorkspaceForker")
 )
 
 // defaultMaxRounds bounds a team Run so a non-converging team cannot loop forever.
@@ -115,8 +140,11 @@ type MemberSpec struct {
 	// Lead marks the coordinating member. The lead is NOT auto-assigned tasks (it
 	// coordinates); it runs on its initial prompt and whenever it has messages.
 	Lead bool
-	// Mutating requests an isolated forked workspace for this member (it may
-	// Edit/Write). A read-only member (the default) shares the base workspace.
+	// Mutating requests a self-contained force-copied fork (own `.git`) for this
+	// member, with Edit/Write/Bash. A read-only member (the default) either runs in
+	// an isolated git WORKTREE with a shell for inspection (when a read-only forker is
+	// wired — the factory sets MemberBuild.IsolateReadOnly) or, failing that, shares
+	// the base workspace with no shell. See the package "Workspace policy" doc.
 	Mutating bool
 	// InitialPrompt is the member's first-turn input, run in round 0 (typically the
 	// lead's top-level task, or a teammate's role briefing).
@@ -157,28 +185,58 @@ type MemberBuild struct {
 	// them from the read-only-member workspace-mutating-tool backstop — exactly like
 	// the team coordination tools. Empty when the def scopes no MCP servers.
 	MCPToolNames []string
+	// IsolateReadOnly tells the supervisor this is a NON-mutating member that the
+	// factory nonetheless gave Bash (i.e. it put a workspace-mutating shell into a
+	// read-only member's catalog because a read-only forker is available). When true
+	// the supervisor runs the member in an isolated git WORKTREE (via s.roForker) so
+	// its mutating-classified Bash lands in a throwaway checkout, never the shared
+	// base — and the read-only-member workspace-mutating-tool backstop EXEMPTS it
+	// (the guard gates on base-sharing, and an isolated member is not base-sharing).
+	// It is false for a base-sharing read-only member (no shell) and for a Mutating
+	// member (the Mutating flag already drives its force-copy fork). The factory must
+	// set it true ONLY when it actually added Bash to a non-mutating catalog AND a
+	// read-only forker is available; setting it without a wired forker trips
+	// ErrReadOnlyShellNoForker.
+	IsolateReadOnly bool
 }
 
 // MemberEngine builds the per-member engine (and its optional permission mode) from
 // its spec. The composition root supplies it; it is expected to capture the shared
 // *team.Team so the member's catalog includes MemberTools(team, spec.Name) (always
 // available to a member, even under a restrictive agent definition) plus the
-// member's scoped base tools, model, and policy. It MUST consult spec.Mutating: a
-// read-only member shares the base workspace, so it must NOT be given mutating tools
-// (Edit/Write/Bash) — only a Mutating member (which runs in an isolated fork) may
-// have them. Bash is now workspace-aware: BashTool.Execute runs the command with the
-// member's forked Workspace.Root() as the working directory, so a Mutating member's
-// Bash runs in its OWN fork, not the shared parent base — which is why a Mutating
-// member MAY be given Bash while a read-only (base-sharing) member must not.
+// member's scoped base tools, model, and policy.
+//
+// Catalog shaping follows the three-tier workspace policy (see the package doc):
+//
+//   - A read-only member that the factory CANNOT isolate (no read-only forker /
+//     runner wired) shares the base workspace, so it must get NO mutating tool
+//     (no Edit/Write/Bash) and MemberBuild.IsolateReadOnly stays false.
+//   - A read-only member the factory CAN isolate gets Read/Grep/Glob PLUS Bash (but
+//     NOT Edit/Write) and sets MemberBuild.IsolateReadOnly=true, so the supervisor
+//     runs it in a throwaway git worktree (s.roForker) where its Bash is confined.
+//   - A Mutating member (which runs in an isolated force-copy fork via s.forker) may
+//     get Edit/Write/Bash.
+//
+// Bash is workspace-aware: BashTool.Execute runs the command with the member's
+// (forked) Workspace.Root() as the working directory, so an isolated member's Bash
+// runs in its OWN worktree/fork, never the shared parent base — which is why an
+// isolated member MAY be given Bash while a base-sharing read-only member must not.
 type MemberEngine func(spec MemberSpec) MemberBuild
 
 // Supervisor orchestrates one agent team. Build it with NewSupervisor, enrol
 // members with AddMember (before Run), then call Run.
 type Supervisor struct {
-	team    *team.Team
-	base    tool.Workspace
-	forker  tool.WorkspaceForker
-	factory MemberEngine
+	team   *team.Team
+	base   tool.Workspace
+	forker tool.WorkspaceForker
+	// roForker forks a read-only-isolated member's workspace as a cheap git WORKTREE
+	// (the forker's default mode — shares the base repo's `.git` ⇒ full history). It
+	// is distinct from forker (force-copy, for Mutating members): a worktree is the
+	// right isolation for an inspect-only member that may run git but never edits.
+	// Nil when no read-only forker is wired (then read-only members base-share with
+	// no shell).
+	roForker tool.WorkspaceForker
+	factory  MemberEngine
 
 	limits      session.Limits
 	mode        session.PermissionMode
@@ -217,9 +275,19 @@ type memberRT struct {
 type SupervisorOption func(*Supervisor)
 
 // WithForker injects the workspace-isolation seam used to fork a Mutating member's
-// workspace. It is required only if any member is Mutating.
+// workspace (force-copy: own `.git`). It is required only if any member is Mutating.
 func WithForker(f tool.WorkspaceForker) SupervisorOption {
 	return func(s *Supervisor) { s.forker = f }
+}
+
+// WithReadOnlyForker injects the workspace-isolation seam used to fork a read-only
+// member that the factory granted a shell (MemberBuild.IsolateReadOnly). It should
+// be the forker's DEFAULT mode (git worktree: shares the base repo's `.git`), so an
+// inspect-only member gets full history cheaply. It is required only if the factory
+// marks any read-only member IsolateReadOnly; without it such a member trips
+// ErrReadOnlyShellNoForker.
+func WithReadOnlyForker(f tool.WorkspaceForker) SupervisorOption {
+	return func(s *Supervisor) { s.roForker = f }
 }
 
 // WithTeamLimits overrides the per-member, per-round stop conditions (default
@@ -320,10 +388,12 @@ func NewSupervisor(t *team.Team, base tool.Workspace, factory MemberEngine, opts
 	return s
 }
 
-// AddMember enrols a member: it registers it on the team roster, builds its
-// workspace (the shared base for a read-only member, an isolated fork for a
-// Mutating one), constructs its session and Engine, and records it. It must be
-// called before Run. A Mutating member without a configured forker is an error.
+// AddMember enrols a member: it registers it on the team roster, builds its engine,
+// selects its workspace per the three-tier policy (the shared base for a
+// base-sharing read-only member; a worktree fork for a read-only-isolated member; a
+// force-copy fork for a Mutating one), constructs its session, and records it. It
+// must be called before Run. A Mutating member without s.forker, or a
+// read-only-isolated member without s.roForker, is an error.
 func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 	if strings.TrimSpace(spec.Name) == "" {
 		return ErrMemberNameRequired
@@ -338,44 +408,51 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 		return fmt.Errorf("agent: enrol member: %w", err)
 	}
 
-	ws := s.base
-	var cleanup func() error
-	if spec.Mutating {
-		if s.forker == nil {
-			s.team.RemoveMember(spec.Name)
-			return fmt.Errorf("%w (member %q)", ErrNoForker, spec.Name)
-		}
-		child, cl, err := s.forker.Fork(ctx, s.base, spec.Name)
-		if err != nil {
-			s.team.RemoveMember(spec.Name)
-			return fmt.Errorf("%w for %q: %w", ErrForkWorkspace, spec.Name, err)
-		}
-		ws, cleanup = child, cl
-	}
-
+	// Build the engine FIRST: the factory reads only spec (never the workspace), and
+	// its MemberBuild.IsolateReadOnly decides whether a read-only member needs its own
+	// (worktree) fork — so workspace selection depends on the build, not the reverse.
 	build := s.factory(spec)
 	eng := build.Engine
-	// The member teardown closes BOTH the factory's per-member resources (inline MCP
-	// managers) AND the fork cleanup, in that order (MCP first, then the workspace).
-	// composeCleanup tolerates nil on either side, so a read-only member with no
-	// inline MCP and no fork yields a nil cleanup exactly as before.
-	cleanup = composeCleanup(build.Close, cleanup)
 	if eng == nil {
-		if cleanup != nil {
-			_ = cleanup()
+		if build.Close != nil {
+			_ = build.Close()
 		}
 		s.team.RemoveMember(spec.Name)
 		return fmt.Errorf("%w for %q", ErrNilEngine, spec.Name)
 	}
 
-	// The supervisor is authoritative on the read-only-share / mutating-fork stance:
-	// it chose ws above from spec.Mutating, but the factory builds the Engine's
-	// catalog independently. Verify they agree. A non-Mutating member shares the base
-	// workspace, so it must NOT be handed a WORKSPACE-mutating tool (Edit / Write /
-	// non-read-only Bash) — that would let it corrupt the shared base concurrently
-	// with peers. Team coordination tools report ReadOnly() == false but only mutate
-	// TEAM state, so they are exempted by name.
-	if !spec.Mutating {
+	// Workspace selection (three tiers). needFork is true for any member that runs in
+	// its OWN isolated workspace — a Mutating member (force-copy fork, s.forker) or a
+	// read-only-isolated member that the factory granted a shell (worktree fork,
+	// s.roForker). A neither-mutating-nor-isolated member shares the base (no fork,
+	// no shell). needFork also drives the mutating-tool backstop below: an isolated
+	// member's mutating-classified Bash lands in its OWN workspace, so it is exempt.
+	needFork := spec.Mutating || build.IsolateReadOnly
+	ws, cleanup, err := s.selectMemberWorkspace(ctx, spec, build)
+	if err != nil {
+		if build.Close != nil {
+			_ = build.Close()
+		}
+		s.team.RemoveMember(spec.Name)
+		return err
+	}
+
+	// The member teardown closes BOTH the factory's per-member resources (inline MCP
+	// managers) AND the fork cleanup, in that order (MCP first, then the workspace).
+	// composeCleanup tolerates nil on either side, so a base-sharing member with no
+	// inline MCP and no fork yields a nil cleanup exactly as before.
+	cleanup = composeCleanup(build.Close, cleanup)
+
+	// The supervisor is authoritative on the workspace-isolation stance: it chose ws
+	// above, but the factory builds the Engine's catalog independently. Verify they
+	// agree. The backstop gates on BASE-SHARING (!needFork): a member that shares the
+	// base must NOT be handed a WORKSPACE-mutating tool (Edit / Write / non-read-only
+	// Bash) — that would let it corrupt the shared base concurrently with peers. A
+	// member running in its OWN workspace (Mutating fork OR read-only worktree) is
+	// exempt: its mutating tool lands in the isolated fork, never the shared base.
+	// Team coordination tools report ReadOnly() == false but only mutate TEAM state,
+	// so they are exempted by name regardless.
+	if !needFork {
 		if bad := workspaceMutatingTools(eng.catalogTools(), build.MCPToolNames); len(bad) > 0 {
 			if cleanup != nil {
 				_ = cleanup()
@@ -409,6 +486,42 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 	s.members[spec.Name] = &memberRT{spec: spec, engine: eng, ws: ws, cleanup: cleanup, sess: sess}
 	s.order = append(s.order, spec.Name)
 	return nil
+}
+
+// selectMemberWorkspace picks a member's workspace per the three-tier policy and
+// returns it plus its fork cleanup (nil for the base-sharing tier). A Mutating member
+// forks via s.forker (force-copy); a read-only-isolated member (build.IsolateReadOnly)
+// forks via s.roForker (worktree); a base-sharing member uses s.base with no fork. A
+// required-but-missing forker returns the matching sentinel (ErrNoForker /
+// ErrReadOnlyShellNoForker); a fork I/O failure wraps ErrForkWorkspace. The caller
+// owns roster/Close teardown on error.
+func (s *Supervisor) selectMemberWorkspace(ctx context.Context, spec MemberSpec, build MemberBuild) (tool.Workspace, func() error, error) {
+	switch {
+	case spec.Mutating:
+		if s.forker == nil {
+			return nil, nil, fmt.Errorf("%w (member %q)", ErrNoForker, spec.Name)
+		}
+		return forkOrWrap(ctx, s.forker, s.base, spec.Name)
+	case build.IsolateReadOnly:
+		// A read-only-isolated member must have a read-only forker wired. This is a
+		// should-never-happen mis-wire (composition only sets IsolateReadOnly when the
+		// forker is wired), so it is a server misconfiguration, not a bad request.
+		if s.roForker == nil {
+			return nil, nil, fmt.Errorf("%w (member %q)", ErrReadOnlyShellNoForker, spec.Name)
+		}
+		return forkOrWrap(ctx, s.roForker, s.base, spec.Name)
+	default:
+		return s.base, nil, nil
+	}
+}
+
+// forkOrWrap forks base via f, wrapping any I/O failure with ErrForkWorkspace.
+func forkOrWrap(ctx context.Context, f tool.WorkspaceForker, base tool.Workspace, name string) (tool.Workspace, func() error, error) {
+	child, cl, err := f.Fork(ctx, base, name)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w for %q: %w", ErrForkWorkspace, name, err)
+	}
+	return child, cl, nil
 }
 
 // TeamOutcome is the result of a team Run.

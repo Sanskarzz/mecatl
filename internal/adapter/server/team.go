@@ -111,6 +111,9 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name string, member
 	if s.cfg.Forker != nil {
 		opts = append(opts, agent.WithForker(s.cfg.Forker))
 	}
+	if s.cfg.ReadOnlyForker != nil {
+		opts = append(opts, agent.WithReadOnlyForker(s.cfg.ReadOnlyForker))
+	}
 	if s.cfg.TeamHooks != nil {
 		opts = append(opts, agent.WithTeamHooks(s.cfg.TeamHooks))
 	}
@@ -207,6 +210,7 @@ func classifyAddMemberErr(err error) error {
 		errors.Is(err, team.ErrTooManyMembers):
 		return fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	case errors.Is(err, agent.ErrNoForker),
+		errors.Is(err, agent.ErrReadOnlyShellNoForker),
 		errors.Is(err, agent.ErrReadOnlyMemberMutating):
 		return fmt.Errorf("%w: %v", ErrFailedPrecondition, err)
 	case errors.Is(err, agent.ErrForkWorkspace),

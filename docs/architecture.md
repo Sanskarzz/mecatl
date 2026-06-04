@@ -771,6 +771,26 @@ parent's tree. `agent.NewForkTool(childEngine, forker, …)` is the fan-out tool
 branches and joins their results. It is opt-in via `--enable-fork`; like Task,
 the children's intermediate events are drained internally.
 
+The same seam serves **agent teams** (`agent.Supervisor`/`TeamTool`) with a
+**three-tier** member workspace policy. A Mutating member forks **force-copy** (own
+`.git`, via `forker.WithForceCopy`) and gets Edit/Write/Bash; a read-only member the
+factory marks `MemberBuild.IsolateReadOnly` forks **worktree** (the forker DEFAULT —
+shares the base repo's `.git`, so it sees full history) and gets Read/Grep/Glob +
+Bash but never Edit/Write, so it can `git log`/`git show`/build/test confined to a
+throwaway checkout; a base-sharing read-only member (no forker wired) gets NO shell.
+The Supervisor holds two forkers (`s.forker` force-copy, `s.roForker` worktree); the
+mutating-tool backstop gates on base-sharing, exempting any isolated member. A
+read-only member's Bash runs through a **sandboxed** runner
+(`buildSandboxedCommandRunner`) that neutralises git config-driven code execution in
+the shared `.git`. The single neutralizing env lives in the stdlib-only leaf
+`internal/adapter/gitenv` (`Scrub`) so the **forker's own git** (whose `git worktree
+add` would otherwise fire the base repo's `post-checkout` hook at fork time) and the
+member runner share it and can't drift: `Scrub` drops inherited `GIT_*` danger
+(`GIT_EXTERNAL_DIFF`/`GIT_SSH_COMMAND`/…) and forces `core.hooksPath=/dev/null`,
+`core.pager=cat`, `core.fsmonitor=false`, empty `diff.external`, `GIT_PAGER`/`PAGER=cat`,
+`GIT_CONFIG_NOSYSTEM`. The main session keeps its unhardened runner. (Task /
+`buildChildEngine` are a separate, unchanged read-only-explorer path.)
+
 ## 16. Extensibility — MCP, tools & progressive disclosure
 
 The `tool.Catalog` is the single registration seam, so every tool — core, remote,

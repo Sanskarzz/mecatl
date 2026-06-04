@@ -2,7 +2,13 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +20,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
@@ -39,7 +46,7 @@ func teamCfg(t *testing.T) Config {
 func TestBuildMemberEngineReadOnlySpawnSucceeds(t *testing.T) {
 	cfg := teamCfg(t)
 	provider := mockllm.New(mockllm.TextTurn("ok"))
-	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, nil))
+	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, false, nil))
 
 	ctx := context.Background()
 	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", nil)
@@ -60,7 +67,7 @@ func TestBuildMemberEngineReadOnlySpawnSucceeds(t *testing.T) {
 func TestBuildMemberEngineMutatingSpawnSucceeds(t *testing.T) {
 	cfg := teamCfg(t)
 	provider := mockllm.New(mockllm.TextTurn("ok"))
-	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, nil))
+	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, false, nil))
 
 	ctx := context.Background()
 	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", nil)
@@ -81,7 +88,7 @@ func TestBuildMemberEngineMutatingSpawnSucceeds(t *testing.T) {
 func TestTeamsEnabledEndToEnd(t *testing.T) {
 	cfg := teamCfg(t)
 	provider := mockllm.New(mockllm.TextTurn("all done"))
-	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, nil))
+	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, false, nil))
 
 	ctx := context.Background()
 	// Atomic create+populate: the initial roster is enrolled by CreateTeam itself, so
@@ -162,6 +169,158 @@ func TestBuildEnableTeamsRunsTeam(t *testing.T) {
 	}
 	if !outcome.Quiescent {
 		t.Errorf("RunTeam outcome: Quiescent = false, want true (outcome=%+v)", outcome)
+	}
+}
+
+// TestReadOnlyMemberRunsGitInWorktreeEndToEnd is the key proof of this feature: a
+// READ-ONLY team member, driven through the real Service/Supervisor wiring, runs git
+// (log/show) over a cheap git WORKTREE that shares the base repo's .git — so it sees
+// the full commit history — confined to a throwaway checkout, and the worktree is
+// cleaned up afterwards (no leak). The member never edits anything.
+func TestReadOnlyMemberRunsGitInWorktreeEndToEnd(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	cfg := teamCfg(t)
+
+	// A real git repo with two commits whose subjects we assert the member can read.
+	repo := t.TempDir()
+	initGitRepoTest(t, repo)
+	writeRepoFile(t, repo, "alpha.txt", "alpha\n")
+	gitCommitTest(t, repo, "add alpha")
+	writeRepoFile(t, repo, "beta.txt", "beta\n")
+	gitCommitTest(t, repo, "add beta")
+
+	// Scope worktrees under a known dir so we can assert they are cleaned up.
+	worktreeBase := t.TempDir()
+	roFk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) },
+		forker.WithTempBase(worktreeBase))
+	mutatingFk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) },
+		forker.WithForceCopy())
+	runner := buildSandboxedCommandRunner(cfg)
+	if runner == nil {
+		t.Fatal("precondition: expected a non-nil sandboxed runner")
+	}
+
+	// The read-only lead: git log --oneline, then git show --stat HEAD, then a probe
+	// of the workspace's .git (worktree pointer is a FILE; a force-copy would be a
+	// DIR), then report.
+	provider := mockllm.New(
+		mockllm.ToolCallTurn(session.ToolCall{ID: "g1", Name: "Bash", Args: gitArgs("git log --oneline")}),
+		mockllm.ToolCallTurn(session.ToolCall{ID: "g2", Name: "Bash", Args: gitArgs("git show --stat HEAD")}),
+		mockllm.ToolCallTurn(session.ToolCall{ID: "g3", Name: "Bash", Args: gitArgs("if [ -f .git ]; then echo DOTGIT_IS_FILE; elif [ -d .git ]; then echo DOTGIT_IS_DIR; else echo DOTGIT_MISSING; fi")}),
+		mockllm.TextTurn("inspection done"),
+	)
+	factory := buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, runner, true, nil)
+
+	osfsWS := func(root string) tool.Workspace {
+		ws, err := osfs.NewWorkspace(root)
+		if err != nil {
+			t.Fatalf("osfs workspace %q: %v", root, err)
+		}
+		return ws
+	}
+	svc, err := server.NewService(server.Config{
+		Engine:         noopEngine(),
+		Store:          memstore.New(),
+		Workspaces:     osfsWS,
+		Now:            func() time.Time { return time.Unix(0, 0) },
+		MemberEngine:   factory,
+		Forker:         mutatingFk,
+		ReadOnlyForker: roFk,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	ctx := context.Background()
+	teamID, _, err := svc.CreateTeam(ctx, repo, "inspect",
+		[]agent.MemberSpec{{Name: "lead", Lead: true, InitialPrompt: "inspect the history"}})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+
+	// Collect the member's Bash tool.result bodies from the event stream.
+	var mu sync.Mutex
+	var bashOut strings.Builder
+	sink := func(te agent.TeamEvent) {
+		ev := te.Event
+		if ev.Type == session.EvToolResult && ev.ToolResult != nil {
+			mu.Lock()
+			bashOut.WriteString(ev.ToolResult.Content)
+			bashOut.WriteString("\n")
+			mu.Unlock()
+		}
+	}
+	if _, err := svc.RunTeam(ctx, teamID, sink); err != nil {
+		t.Fatalf("RunTeam: %v", err)
+	}
+
+	got := bashOut.String()
+	for _, want := range []string{"add alpha", "add beta"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("member git output missing %q; got:\n%s", want, got)
+		}
+	}
+	// git show --stat HEAD names the file added in the HEAD commit.
+	if !strings.Contains(got, "beta.txt") {
+		t.Errorf("git show --stat HEAD output missing beta.txt; got:\n%s", got)
+	}
+
+	// The member's workspace must be a git WORKTREE (cheap, shares the base .git),
+	// NOT a force-copy: in a worktree the child's `.git` is a FILE (a gitdir
+	// pointer), whereas a recursive copy would leave a `.git` DIRECTORY. The
+	// history/leak checks above pass for a force-copy too, so this is what actually
+	// distinguishes the worktree path.
+	if !strings.Contains(got, "DOTGIT_IS_FILE") {
+		t.Errorf("read-only member workspace is not a git worktree (.git is not a pointer file); got:\n%s", got)
+	}
+	if strings.Contains(got, "DOTGIT_IS_DIR") {
+		t.Errorf("read-only member workspace has a .git DIRECTORY (force-copy), expected a worktree pointer file; got:\n%s", got)
+	}
+
+	// The worktree must be cleaned up: no leftover child dir under worktreeBase.
+	entries, err := os.ReadDir(worktreeBase)
+	if err != nil {
+		t.Fatalf("read worktree base: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("worktree base not cleaned up; leftover entries: %v", entries)
+	}
+}
+
+// gitArgs builds the Bash tool's JSON args for a command. The command strings are
+// innocuous read-only git inspection (log/show).
+func gitArgs(command string) json.RawMessage {
+	b, _ := json.Marshal(map[string]string{"command": command})
+	return b
+}
+
+func initGitRepoTest(t *testing.T, dir string) {
+	t.Helper()
+	runGitTest(t, dir, "init")
+	runGitTest(t, dir, "config", "user.email", "test@example.com")
+	runGitTest(t, dir, "config", "user.name", "Test")
+}
+
+func writeRepoFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+func gitCommitTest(t *testing.T, dir, msg string) {
+	t.Helper()
+	runGitTest(t, dir, "add", "-A")
+	runGitTest(t, dir, "commit", "-m", msg)
+}
+
+func runGitTest(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
 
