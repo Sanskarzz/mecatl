@@ -24,7 +24,9 @@
 ┃    ctrl+t        expand/collapse details                                                           ┃
 ┃                                                                                                    ┃
 ┃  General                                                                                           ┃
-┃    pgup/pgdn     scroll the conversation                                                           ┃
+┃    pgup/pgdn     scroll the conversation (a ↑NN% header cue shows while scrolled up)               ┃
+┃    home/end      jump to top / bottom (end resumes auto-follow)                                    ┃
+┃    wheel         mouse-wheel scroll (alt screen only; hold Shift / ⌥ Option to select text)        ┃
 ┃    ?             this help (on an empty prompt)                                                    ┃
 ┃    ctrl+c        quit (press twice; first press clears the prompt or arms, again within 3s exits)  ┃
 ┃                                                                                                    ┃

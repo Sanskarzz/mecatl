@@ -73,7 +73,9 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 
 	b.WriteString("\n" + muted.Render("General") + "\n")
 	writeHelpRows(&b, th, []helpRow{
-		{key: "pgup/pgdn", action: "scroll the conversation"},
+		{key: "pgup/pgdn", action: "scroll the conversation (a ↑NN% header cue shows while scrolled up)"},
+		{key: "home/end", action: "jump to top / bottom (end resumes auto-follow)"},
+		{key: "wheel", action: "mouse-wheel scroll (alt screen only; hold Shift / ⌥ Option to select text)"},
 		{key: "?", action: "this help (on an empty prompt)"},
 		{key: "ctrl+c", action: "quit (press twice; first press clears the prompt or arms, again within 3s exits)"},
 	})

@@ -209,7 +209,9 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 | in the permission modal: `a`/`y`/`enter` | allow |
 | in the permission modal: `d`/`n`/`esc` | deny |
 | in the permission modal: `←`/`→`/`tab` | toggle the focused button |
-| `pgup` / `pgdn` | scroll the conversation |
+| `pgup` / `pgdn` | scroll the conversation up / down |
+| `home` / `end` | jump to the top / bottom of the conversation (`end` resumes auto-follow) |
+| mouse wheel | scroll the conversation (**alt screen only**; see below) |
 | `?` | help overlay (on an empty prompt) |
 | `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`; plus workspace commands) |
 | `ctrl+a` | open the **live agent-team overlay** (the full roster + per-member focus of the most-recent team) — works **while idle and mid-run**; inert under a permission modal. Same surface as `/team`. |
@@ -218,10 +220,26 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 The `?` overlay enumerates the rest of the chords — `ctrl+v` (paste a clipboard
 image), `ctrl+o`/`ctrl+r`/`ctrl+p` (MCP inventory / resources / prompts), `ctrl+a`
 (live agent-team overlay, available idle **and** mid-run), `ctrl+t`
-(expand/collapse details) — and greys out any whose feature the connected server
-has not enabled (driven by the server's relayed capabilities). When the server
-serves agent definitions (`caps.agents`), it also notes that `/agents` browses the
-definition inventory.
+(expand/collapse details), and the scroll keys (`pgup`/`pgdn`, `home`/`end`, mouse
+wheel) — and greys out any whose feature the connected server has not enabled
+(driven by the server's relayed capabilities). When the server serves agent
+definitions (`caps.agents`), it also notes that `/agents` browses the definition
+inventory.
+
+**Scrollback and auto-follow.** The conversation viewport **auto-follows** the
+bottom (tails streaming output) until you scroll up — with `pgup`, `home`, or the
+mouse wheel. While scrolled up the header shows a muted **`↑ NN%`** position cue,
+streaming continues to render *in place* (a new delta no longer yanks the view to
+the bottom), and auto-follow stays off. Scrolling back to the bottom — `pgdn` past
+the end, `end`, or the wheel — re-pins the view and resumes auto-follow.
+
+The **mouse wheel** is only active on the alternate screen (the default full-screen
+TUI). With `--inline` / `--no-alt-screen` the terminal's own scrollback and
+selection are left untouched (no mouse capture). On the alt screen, capturing the
+mouse for wheel-scroll also grabs plain click-drag, so to make a **native text
+selection** hold **Shift** (in iTerm2, **⌥ Option**) while dragging — that bypasses
+the app's mouse grab. (Bubble Tea v2 has no wheel-only mouse mode, so this
+Shift-bypass is how wheel-scroll and text selection coexist.)
 
 ### Type-while-running and queued follow-ups
 

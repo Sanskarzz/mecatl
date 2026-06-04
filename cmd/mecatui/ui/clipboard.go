@@ -104,19 +104,17 @@ func (m Model) onClipboardResult(msg clipboardResultMsg) (tea.Model, tea.Cmd) {
 // actionable install hint; an empty clipboard is a benign status (no transcript
 // noise); any other error (oversize image, backend failure) is a loud transcript
 // error.
-func (m Model) onClipboardErr(msg clipboardErrMsg) (tea.Model, tea.Cmd) {
+func (m Model) onClipboardErr(msg clipboardErrMsg) tea.Model {
 	switch {
 	case errors.Is(msg.err, client.ErrNoClipboardTool):
 		m.statusMsg = m.deps.Theme.Style("muted").Render("image paste needs wl-clipboard (Wayland) / xclip (X11) installed")
-		return m, nil
 	case errors.Is(msg.err, client.ErrEmptyClipboard):
 		m.statusMsg = m.deps.Theme.Style("muted").Render("clipboard is empty")
-		return m, nil
 	default:
 		m.conv.addError("clipboard: " + msg.err.Error())
 		m.refreshView()
-		return m, nil
 	}
+	return m
 }
 
 // insertText appends s (plus a trailing space when s ends a marker) at the end of

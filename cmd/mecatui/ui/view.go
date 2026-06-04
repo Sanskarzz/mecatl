@@ -32,6 +32,15 @@ func (m Model) View() tea.View {
 	var v tea.View
 	v.AltScreen = !m.deps.NoAltScreen
 	v.WindowTitle = "mecatui"
+	// Enable mouse-wheel scrolling — but ONLY on the alt screen. In --inline /
+	// --no-alt-screen mode we leave the terminal's native scrollback + selection
+	// untouched (no mouse capture). On the alt screen, capturing the mouse means
+	// plain click-drag selection is grabbed by the app; hold Shift (iTerm2: ⌥
+	// Option) to bypass the grab and do native selection. (v2 has no wheel-only
+	// mouse mode, so this Shift-bypass is how wheel-scroll and selection coexist.)
+	if !m.deps.NoAltScreen {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 
 	if m.phase == phaseFatal {
 		v.Content = m.renderFatal()
@@ -115,14 +124,33 @@ func (m Model) renderHeader() string {
 		parts = append(parts, m.deps.Server)
 	}
 	line := strings.Join(parts, "  ·  ")
-	if delta := m.changedFilesIndicator(); delta != "" {
-		// Right-align the muted "Δ N files" indicator on the header line when it
-		// fits beside the identity segment; otherwise drop it (the header never
-		// wraps). The header is the least-crowded bar — the footer is already busy
-		// with the context meter and usage facets.
-		line = m.fitHeader(line, delta, m.widthOr(80))
+	// Right-align ONE muted indicator on the header line when it fits beside the
+	// identity segment; otherwise drop it (the header never wraps). The header is
+	// the least-crowded bar — the footer is already busy with the context meter
+	// and usage facets. The scroll-position indicator takes precedence over the
+	// changed-files indicator while the user is scrolled up, so it is visible
+	// exactly when it matters; at the bottom it is "" and the changed-files cue
+	// shows (so the steady-state at-bottom frame is byte-identical to before).
+	indicator := m.scrollIndicator()
+	if indicator == "" {
+		indicator = m.changedFilesIndicator()
+	}
+	if indicator != "" {
+		line = m.fitHeader(line, indicator, m.widthOr(80))
 	}
 	return m.deps.Theme.Style("header").Width(m.widthOr(80)).Render(line)
+}
+
+// scrollIndicator returns the muted "↑ NN%" header cue shown ONLY when the user
+// has scrolled up off the bottom (!m.stuck) — the discoverable signal that the
+// view is no longer tailing live output and how far up it sits. It is "" while
+// stuck (auto-following the bottom), so the at-bottom steady-state header — and
+// thus the View goldens captured there — is unchanged.
+func (m Model) scrollIndicator() string {
+	if m.stuck {
+		return ""
+	}
+	return fmt.Sprintf("↑ %d%%", int(m.vp.ScrollPercent()*100))
 }
 
 // changedFilesIndicator returns the muted "✎ N files" header indicator

@@ -17,6 +17,7 @@ import (
 // the field set. Keep this in sync with resetSession.
 type sessionStateProjection struct {
 	convEmpty     bool
+	stuck         bool
 	filesChanged  []string
 	filesSeenLen  int
 	filesSeenNil  bool
@@ -30,6 +31,7 @@ type sessionStateProjection struct {
 func sessionState(m Model) sessionStateProjection {
 	return sessionStateProjection{
 		convEmpty:     m.conv.isEmpty(),
+		stuck:         m.stuck,
 		filesChanged:  m.filesChanged,
 		filesSeenLen:  len(m.filesSeen),
 		filesSeenNil:  m.filesSeen == nil,
@@ -237,6 +239,9 @@ func TestClearBuiltinResetsState(t *testing.T) {
 	m.contextTokens = 1200
 	m.activeTool = "Write"
 	m.toolProgress = "writing"
+	// Scrolled up (auto-follow off): /clear must re-arm it, since an empty
+	// conversation is at-bottom and the next run must tail its streaming deltas.
+	m.stuck = false
 	m.refreshView()
 	if m.conv.isEmpty() {
 		t.Fatal("precondition: conversation should be non-empty before /clear")
@@ -260,6 +265,9 @@ func TestClearBuiltinResetsState(t *testing.T) {
 	// drift-proof one). Each line mirrors a field resetSession (model.go) owns.
 	if !m.conv.isEmpty() {
 		t.Error("/clear should empty the conversation")
+	}
+	if !m.stuck {
+		t.Error("/clear should re-arm auto-follow (stuck) — an empty conversation is at-bottom")
 	}
 	if m.filesChanged != nil || m.filesSeen != nil {
 		t.Errorf("/clear should reset changed-files: filesChanged=%v filesSeen=%v", m.filesChanged, m.filesSeen)

@@ -19,6 +19,14 @@ type keyMap struct {
 	Deny    key.Binding
 	ScrollU key.Binding
 	ScrollD key.Binding
+	// ScrollTop / ScrollBottom jump the conversation viewport to its top / bottom
+	// (End naturally re-sticks auto-follow). These are DEDICATED scrollback keys
+	// bound to "home"/"end" ONLY — deliberately NOT g/G, which must stay typeable
+	// in prose. They are distinct from the team-overlay JumpTop/JumpEnd below
+	// (home/g, end/G), which are consulted ONLY inside the agent-team overlay to
+	// move the roster selection; these move the conversation scroll position.
+	ScrollTop    key.Binding
+	ScrollBottom key.Binding
 
 	// MCP overlay bindings. MCPPanel toggles the read-only inventory panel;
 	// Resources / Prompts open the respective pickers. They are only live while
@@ -113,6 +121,17 @@ func defaultKeys() keyMap {
 		ScrollD: key.NewBinding(
 			key.WithKeys("pgdown"),
 			key.WithHelp("pgdn", "scroll down"),
+		),
+		// home/end ONLY (not g/G — those stay typeable in prose). Distinct from the
+		// team-overlay JumpTop/JumpEnd (home/g, end/G), which only move the roster
+		// selection while that overlay owns the keyboard.
+		ScrollTop: key.NewBinding(
+			key.WithKeys("home"),
+			key.WithHelp("home", "scroll to top"),
+		),
+		ScrollBottom: key.NewBinding(
+			key.WithKeys("end"),
+			key.WithHelp("end", "scroll to bottom"),
 		),
 		// ctrl+o / ctrl+r / ctrl+p: control-modified so they never collide with
 		// the textarea's printable input (a bare letter must still type into the

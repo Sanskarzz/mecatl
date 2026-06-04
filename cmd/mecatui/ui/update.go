@@ -129,6 +129,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		return m.onResize(msg)
 
+	case tea.MouseWheelMsg:
+		return m.onMouseWheel(msg)
+
 	case tea.KeyPressMsg:
 		return m.onKey(msg)
 
@@ -146,49 +149,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case quitDisarmMsg:
 		return m.onQuitDisarm(msg)
 
-	// Lifecycle / transport.
-	case client.SessionReadyMsg:
-		m.sessionID = msg.SessionID
-		m.caps = msg.Capabilities // stored for Phase B; unrendered this phase
-		m.phase = phaseIdle
-		m.statusMsg = "connected"
-		return m, nil
-	case client.ConnectErrMsg:
-		m.phase = phaseFatal
-		m.fatalErr = msg.Err.Error()
-		return m, nil
-	case client.StreamErrMsg:
-		// An error PAUSES the queue (shouldDrain(stopError) is false): the staged
-		// follow-ups are kept intact and marked paused (m.queuePaused) so the queue
-		// card says why, not auto-sent into a broken run. drainQueue records the pause
-		// here, but the policy lives in one place.
-		m.conv.addError("stream error: " + msg.Err.Error())
-		m = m.endRun(stopError)
-		mm, drainCmd := m.drainQueue(stopError)
-		return mm, tea.Batch(m.refreshCmd(), drainCmd)
-	case clipboardResultMsg:
-		return m.onClipboardResult(msg)
-	case clipboardErrMsg:
-		return m.onClipboardErr(msg)
-	case client.StreamClosedMsg:
-		// Clean close. If a run was still active (no terminal result seen),
-		// finalise it; otherwise it's the expected post-result close (no-op).
-		if m.phase == phaseRunning || m.phase == phaseAwaitingApproval {
-			m = m.endRun("closed")
-			mm, drainCmd := m.drainQueue("closed")
-			return mm, tea.Batch(m.refreshCmd(), drainCmd)
-		}
-		return m, nil
-
-	case client.CommandsMsg:
-		// Slash-command discovery landed: store the set (a failure degrades quietly
-		// to an empty palette) and re-sync so the palette reflects it immediately if
-		// the input is still a command line.
-		m.palette.commands = msg.Commands
-		mm, cmd := m.syncPalette()
-		return mm, cmd
-
 	default:
+		// Lifecycle / transport msgs (session-ready, connect/stream error, stream
+		// close, clipboard results, slash-command discovery) are reduced in a
+		// separate type-switch to keep this dispatcher's branch count in check.
+		if mm, cmd, handled := m.updateLifecycle(msg); handled {
+			return mm, cmd
+		}
 		// MCP overlay result/error msgs (Stage D) are reduced first; if it's not
 		// one of those, fall through to the stream-event handler.
 		if mm, cmd, handled := m.updateMCPMsg(msg); handled {
@@ -208,6 +175,58 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// permission.ask / hook / compaction / result) are handled separately to
 		// keep this reducer's branch count in check.
 		return m.updateStreamEvent(msg)
+	}
+}
+
+// updateLifecycle reduces the transport/lifecycle msgs (session-ready, connect &
+// stream errors, stream close, clipboard results, slash-command discovery). It is
+// split out of update so the top-level dispatcher stays under the cyclomatic cap;
+// handled=false means the msg is none of these and the caller continues its
+// fall-through chain (MCP/skills/agents overlays → stream events).
+func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
+	switch msg := msg.(type) {
+	case client.SessionReadyMsg:
+		m.sessionID = msg.SessionID
+		m.caps = msg.Capabilities // stored for Phase B; unrendered this phase
+		m.phase = phaseIdle
+		m.statusMsg = "connected"
+		return m, nil, true
+	case client.ConnectErrMsg:
+		m.phase = phaseFatal
+		m.fatalErr = msg.Err.Error()
+		return m, nil, true
+	case client.StreamErrMsg:
+		// An error PAUSES the queue (shouldDrain(stopError) is false): the staged
+		// follow-ups are kept intact and marked paused (m.queuePaused) so the queue
+		// card says why, not auto-sent into a broken run. drainQueue records the pause
+		// here, but the policy lives in one place.
+		m.conv.addError("stream error: " + msg.Err.Error())
+		m = m.endRun(stopError)
+		mm, drainCmd := m.drainQueue(stopError)
+		return mm, tea.Batch(m.refreshCmd(), drainCmd), true
+	case clipboardResultMsg:
+		mm, cmd := m.onClipboardResult(msg)
+		return mm, cmd, true
+	case clipboardErrMsg:
+		return m.onClipboardErr(msg), nil, true
+	case client.StreamClosedMsg:
+		// Clean close. If a run was still active (no terminal result seen),
+		// finalise it; otherwise it's the expected post-result close (no-op).
+		if m.phase == phaseRunning || m.phase == phaseAwaitingApproval {
+			m = m.endRun("closed")
+			mm, drainCmd := m.drainQueue("closed")
+			return mm, tea.Batch(m.refreshCmd(), drainCmd), true
+		}
+		return m, nil, true
+	case client.CommandsMsg:
+		// Slash-command discovery landed: store the set (a failure degrades quietly
+		// to an empty palette) and re-sync so the palette reflects it immediately if
+		// the input is still a command line.
+		m.palette.commands = msg.Commands
+		mm, cmd := m.syncPalette()
+		return mm, cmd, true
+	default:
+		return m, nil, false
 	}
 }
 
@@ -386,6 +405,11 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.ta.SetWidth(m.width)
 	m.rend.setWidth(m.width)
 	m.refreshView()
+	// A resize is a first-class scroll transition like wheel/key: SetHeight can
+	// clamp YOffset so AtBottom() flips (e.g. growing the viewport until the
+	// content fits), so re-derive auto-follow — otherwise stuck would be stale and
+	// the "↑ NN%" header cue would lie about a view that is now at the bottom.
+	m.syncStuck()
 	return m, nil
 }
 
@@ -688,10 +712,9 @@ func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.afterInputEdit(nil)
 	case key.Matches(msg, m.keys.Submit):
 		return m.enqueuePrompt()
-	case key.Matches(msg, m.keys.ScrollU), key.Matches(msg, m.keys.ScrollD):
-		var cmd tea.Cmd
-		m.vp, cmd = m.vp.Update(msg)
-		return m, cmd
+	case key.Matches(msg, m.keys.ScrollU), key.Matches(msg, m.keys.ScrollD),
+		key.Matches(msg, m.keys.ScrollTop), key.Matches(msg, m.keys.ScrollBottom):
+		return m.onScrollKey(msg)
 	default:
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
@@ -791,10 +814,9 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.resumeQueue()
 		}
 		return m.submitPrompt()
-	case key.Matches(msg, m.keys.ScrollU), key.Matches(msg, m.keys.ScrollD):
-		var cmd tea.Cmd
-		m.vp, cmd = m.vp.Update(msg)
-		return m, cmd
+	case key.Matches(msg, m.keys.ScrollU), key.Matches(msg, m.keys.ScrollD),
+		key.Matches(msg, m.keys.ScrollTop), key.Matches(msg, m.keys.ScrollBottom):
+		return m.onScrollKey(msg)
 	default:
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
@@ -1115,11 +1137,56 @@ func (m Model) endRun(stop string) Model {
 	return m
 }
 
+// onMouseWheel routes a wheel event to the conversation viewport and re-derives
+// auto-follow. Mouse capture is enabled only on the alt screen (View sets
+// MouseModeCellMotion there); the viewport's own Update handles tea.MouseWheelMsg
+// (gated on MouseWheelEnabled, default true), so a wheel-up unsticks and a wheel
+// back to the bottom re-sticks — same as the nav keys.
+func (m Model) onMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.vp, cmd = m.vp.Update(msg)
+	m.syncStuck()
+	return m, cmd
+}
+
+// syncStuck re-derives the auto-follow flag from the viewport's actual position:
+// stuck is true exactly when the viewport is at the bottom. Called after every
+// scroll/wheel/nav so a scroll-up unsticks (next streaming delta then re-renders
+// in place without yanking to bottom — see refreshView) and scrolling/jumping
+// back to the bottom re-sticks (auto-follow resumes).
+func (m *Model) syncStuck() {
+	m.stuck = m.vp.AtBottom()
+}
+
+// onScrollKey is the shared conversation-scroll handler used by both onIdleKey and
+// onRunningKey: pgup/pgdn delegate to the viewport (which does its own scroll
+// math), home/end jump to top/bottom, then syncStuck re-derives auto-follow. End
+// naturally re-sticks; home (and a partial pgup) unsticks so streaming no longer
+// yanks the view to the bottom. The caller has already matched one of these keys.
+func (m Model) onScrollKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch {
+	case key.Matches(msg, m.keys.ScrollTop):
+		m.vp.GotoTop()
+	case key.Matches(msg, m.keys.ScrollBottom):
+		m.vp.GotoBottom()
+	default: // ScrollU / ScrollD
+		m.vp, cmd = m.vp.Update(msg)
+	}
+	m.syncStuck()
+	return m, cmd
+}
+
 // refreshView re-renders the conversation into the viewport, keeping the view
 // pinned to the bottom unless the user has scrolled up. It clears m.viewDirty, so
 // every render path (afterEvent, endRun, onResize, the frame-cadence renderTickMsg)
 // settles the flag — making "rendered ⟺ not dirty" an invariant and force-flushing
 // the tail at every turn/tool/result/error boundary regardless of tick timing.
+//
+// It re-pins ONLY when m.stuck (auto-follow). A scroll-up sets stuck=false (via
+// syncStuck), so a streaming delta re-renders the growing content in place without
+// yanking the view back to the bottom — the user's scroll-up survives streaming.
+// Scrolling/jumping back to the bottom re-sets stuck, and auto-follow resumes.
 func (m *Model) refreshView() {
 	m.viewDirty = false
 	content := m.rend.renderConversation(&m.conv, m.expandTools)
@@ -1131,9 +1198,8 @@ func (m *Model) refreshView() {
 			content += "\n" + list
 		}
 	}
-	atBottom := m.vp.AtBottom()
 	m.vp.SetContent(content)
-	if m.stuck || atBottom {
+	if m.stuck {
 		m.vp.GotoBottom()
 	}
 }

@@ -135,11 +135,17 @@ type Model struct {
 	width  int
 	height int
 
-	conv  conversation
-	vp    viewport.Model
-	ta    textarea.Model
-	sp    spinner.Model
-	stuck bool // viewport pinned to bottom
+	conv conversation
+	vp   viewport.Model
+	ta   textarea.Model
+	sp   spinner.Model
+	// stuck is true while the viewport auto-follows the bottom (tails streaming
+	// output). It is no longer hardcoded: syncStuck re-derives it from
+	// m.vp.AtBottom() after every scroll/wheel/nav so a scroll-up unsticks (and
+	// survives streaming — refreshView only re-pins to bottom when stuck) and
+	// scrolling/jumping back to the bottom re-sticks (auto-follow resumes). The
+	// initial value is true because an empty conversation is already at-bottom.
+	stuck bool
 
 	// viewDirty is set when a streamed delta mutated the conversation but
 	// refreshView has not yet re-rendered it into the viewport. A one-shot
@@ -309,6 +315,11 @@ func (m *Model) recordFileChange(path string) {
 // state — leaving them to drain into a freshly-cleared transcript would surprise.
 func (m Model) resetSession() Model {
 	m.conv = conversation{}
+	// An empty conversation is at-bottom by definition, so auto-follow must be
+	// re-armed: without this a /clear issued while scrolled up (stuck=false) would
+	// strand stuck false, and refreshView (re-pins only if stuck) would silently
+	// fail to tail the NEXT run's streaming deltas until the user manually hit End.
+	m.stuck = true
 	m.filesChanged = nil
 	m.filesSeen = nil
 	m.usage = client.Usage{}
