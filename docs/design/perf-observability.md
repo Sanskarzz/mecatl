@@ -343,6 +343,16 @@ and 2 are both committed (not "maybe later").
 7. **Scope — both `mecated` and the `mecatui` embedded server.** Perf
    observability covers the embedded in-process server too (the WASM hang that
    motivated this was a mecatui freeze), exposed over its loopback/socket surface.
+   - **Admin-port default — fixed `127.0.0.1:9099`, fail-on-clash (revised).** The
+     embedded `mecatui` perf admin listener originally defaulted to an **ephemeral**
+     `127.0.0.1:0` so it could never collide with a co-running `mecated` (`:9090`).
+     That made the `/mcp` URL unknowable without scraping logs and changed every
+     restart, so an MCP-client config could never hardcode it. **Revised:** the
+     default is now a **fixed, predictable** `127.0.0.1:9099` (distinct from
+     `mecated`'s `9090`, so the two still don't collide). On a port clash at
+     startup, `embed.Start` **fails with guidance** pointing at `--perf-addr` —
+     **no silent ephemeral fallback**. The ephemeral behaviour remains an explicit
+     opt-in via `--perf-addr 127.0.0.1:0` (and any other `host:port` is accepted).
 8. **Companion skill — build it.** Author a Claude skill that teaches an agent to
    read mecatl's perf MCP output (pprof rankings, `runtime/metrics`,
    FlightRecorder summaries; leak/contention/GC-pressure signatures). Built with

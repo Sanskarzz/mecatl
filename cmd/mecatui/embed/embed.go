@@ -45,11 +45,14 @@ import (
 const socketName = "mecated.sock"
 
 // DefaultPerfAddr is the loopback default for the opt-in perf admin listener when
-// PerfConfig.Enabled is set but Addr is empty. It deliberately uses an ephemeral
-// port (":0") so a mecatui run never clashes with a co-running mecated whose own
-// admin listener defaults to 127.0.0.1:9090 — the chosen address is logged (and
-// returned via Server.AdminAddr) so an operator can point a browser/pprof at it.
-const DefaultPerfAddr = "127.0.0.1:0"
+// PerfConfig.Enabled is set but Addr is empty. It is a FIXED, PREDICTABLE loopback
+// port, chosen so an MCP-client config can hardcode the /mcp URL once and reconnect
+// across restarts (an ephemeral ":0" port changes every run, so its URL is
+// unknowable without scraping logs). It is distinct from mecated's own admin
+// default (127.0.0.1:9090) so the two don't collide when co-running. If 9099 is
+// unavailable, Start FAILS with guidance rather than silently falling back — pass
+// --perf-addr 127.0.0.1:0 for an ephemeral port, or another host:port.
+const DefaultPerfAddr = "127.0.0.1:9099"
 
 // PerfConfig is the opt-in perf-observability configuration for the embedded
 // server (decision 7 in docs/design/perf-observability.md). It is OFF by default
@@ -68,7 +71,7 @@ type PerfConfig struct {
 	// telemetry, no admin listener, no flight recorder, no watchdog.
 	Enabled bool
 	// Addr is the loopback HTTP listen address for the admin mux. Empty defaults
-	// to DefaultPerfAddr (an ephemeral loopback port). The bound address (with the
+	// to DefaultPerfAddr (a fixed loopback port). The bound address (with the
 	// resolved port) is logged and exposed via Server.AdminAddr.
 	Addr string
 	// MCP mounts the read-only perf MCP server (internal/adapter/mcpperf) at /mcp on
@@ -408,7 +411,7 @@ func setupPerf(ctx context.Context, perf PerfConfig, cfg *app.Config) (perfState
 	lis, lerr := net.Listen("tcp", addr)
 	if lerr != nil {
 		ps.teardown(ctx)
-		return perfState{}, fmt.Errorf("listen perf admin %q: %w", addr, lerr)
+		return perfState{}, fmt.Errorf("perf admin port %q is unavailable: %w; choose another address with --perf-addr (a different host:port, or 127.0.0.1:0 for an ephemeral port)", addr, lerr)
 	}
 	ps.adminAddr = lis.Addr().String()
 	adminMux := telemetry.NewAdminMux(providers.Registry, recorder)

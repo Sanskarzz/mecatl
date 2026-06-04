@@ -214,6 +214,13 @@ It prints (note: **no `Authorization` header** — the surface is loopback/no-au
 }
 ```
 
+> **Embedded `mecatui` server:** when `mecatui` hosts its own server (`--perf
+> --perf-mcp`), the admin surface defaults to a **fixed `127.0.0.1:9099`** (whereas
+> `mecated` defaults to `9090`). A `mecatui` user can generate the matching client
+> snippet by overriding the address — `mecated perf-mcp print-config --metrics-addr
+> 127.0.0.1:9099` — or simply hardcode the `http://127.0.0.1:9099/mcp` URL, since
+> the port is now predictable across restarts.
+
 A companion **interpretation skill** ships at
 `.claude/skills/perf-mcp-interpretation/` — it teaches an agent to read this
 server's reduced output (tool routing/cost, pprof rankings, the leak/contention/GC
@@ -612,9 +619,12 @@ The embedded server keeps the heavier opt-ins (MCP, ToolHive, skills, memory,
 server-side slash-command expansion) off; run a full `mecated` and use `--server`
 for those. It also accepts **`--perf`** (off by default) to bring up the same
 loopback observability surface `mecated` exposes — `/metrics`, `/debug/pprof/*`,
-`/debug/vars`, `/debug/flightrecorder` — on an ephemeral `127.0.0.1` port
-(`--perf-addr` to fix it; `--perf-goroutine-warn-threshold` to arm the goroutine
-alarm). The chosen address is logged at startup (loopback, unauthenticated —
+`/debug/vars`, `/debug/flightrecorder` — on a **fixed** `127.0.0.1:9099` port by
+default (predictable, so an MCP-client config can hardcode the `/mcp` URL once;
+distinct from `mecated`'s `:9090`). Pass `--perf-addr host:port` to move it, or
+`--perf-addr 127.0.0.1:0` for an ephemeral port. On a port clash, startup **fails
+with guidance** rather than silently falling back (`--perf-goroutine-warn-threshold`
+arms the goroutine alarm). The chosen address is logged at startup (loopback, unauthenticated —
 same posture as `mecated`'s admin listener; see the observability note in §3).
 With `--perf` it also accepts **`--perf-mcp`** to mount the read-only perf MCP
 server at `/mcp` on that admin surface (same fail-closed loopback enforcement: a

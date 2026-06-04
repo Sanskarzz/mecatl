@@ -164,6 +164,9 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 			paths += " /mcp"
 		}
 		fmt.Fprintf(os.Stderr, "mecatui: perf admin surface (loopback, UNAUTHENTICATED) at http://%s — %s\n", addr, paths)
+		if cfg.perfMCP {
+			fmt.Fprintf(os.Stderr, "mecatui: perf MCP ready at http://%s/mcp — point an MCP client here\n", addr)
+		}
 	}
 	// The embedded server has no auth/TLS — it is a private UNIX socket dialled
 	// plaintext, the same single-user loopback trust model mecated uses.
