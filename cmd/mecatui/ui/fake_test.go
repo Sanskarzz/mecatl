@@ -131,6 +131,15 @@ type fakeConv struct {
 	// approval cases rely on). recvIdx tracks the round-robin position.
 	recvers []*fakeRecver
 	recvIdx int
+
+	// runCancelled, when non-nil, is closed the first time a run context handed to
+	// OpenConverse is cancelled — the deterministic, output-flush-independent signal
+	// that submitPrompt's per-run cancelRun fired. The double-ctrl+c quit path calls
+	// cancelRun directly (it does NOT send a Cancel frame), so this ctx observation —
+	// not a GetCancel() frame — is how a test proves that wiring end-to-end. A
+	// background goroutine watches the run ctx; cancelOnce guards the one-shot close.
+	runCancelled chan struct{}
+	cancelOnce   sync.Once
 }
 
 func (c *fakeConv) CreateSession(_ context.Context) (string, client.Capabilities, error) {
@@ -144,7 +153,16 @@ func (c *fakeConv) CreateSession(_ context.Context) (string, client.Capabilities
 	return "sess-test-0001", c.caps, nil
 }
 
-func (c *fakeConv) OpenConverse(_ context.Context) (*client.Stream, error) {
+func (c *fakeConv) OpenConverse(ctx context.Context) (*client.Stream, error) {
+	// Observe the per-run context: when it is cancelled (the double-ctrl+c quit calls
+	// cancelRun, or endRun cancels), close runCancelled once. This is how the program
+	// test proves cancelRun fired without inspecting unexported model fields.
+	if c.runCancelled != nil {
+		go func() {
+			<-ctx.Done()
+			c.cancelOnce.Do(func() { close(c.runCancelled) })
+		}()
+	}
 	if len(c.recvers) > 0 {
 		i := c.recvIdx
 		if i >= len(c.recvers) {

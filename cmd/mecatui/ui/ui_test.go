@@ -307,6 +307,9 @@ func TestFullCycleProgram(t *testing.T) {
 	// idle — the deterministic completion signal.
 	pd.prog.waitRunComplete(t, 1, 5*time.Second)
 
+	// ctrl+c is now a graceful double-press (issue #17): the first arms the quit
+	// guard, the second exits — so the test driver presses it twice to terminate.
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
 
@@ -509,6 +512,9 @@ func TestClearBuiltinProgram(t *testing.T) {
 	tm.Type("/clear")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
+	// ctrl+c is now a graceful double-press (issue #17): the first arms the quit
+	// guard, the second exits — so the test driver presses it twice to terminate.
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
 
@@ -543,6 +549,9 @@ func TestHelpBuiltinProgram(t *testing.T) {
 	tm.Type("/help")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
+	// ctrl+c is now a graceful double-press (issue #17): the first arms the quit
+	// guard, the second exits — so the test driver presses it twice to terminate.
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
 
@@ -636,6 +645,9 @@ func TestQueuedPromptAutoSendsProgram(t *testing.T) {
 	run1.release()
 	prog.waitRunComplete(t, 1, 5*time.Second)
 
+	// ctrl+c is now a graceful double-press (issue #17): the first arms the quit
+	// guard, the second exits — so the test driver presses it twice to terminate.
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
 
@@ -722,6 +734,9 @@ func TestStreamedEmojiMarkdownNotScrambled(t *testing.T) {
 	// for polling the rendered tail, which is what flaked under -race CPU starvation.
 	pd.prog.waitRunComplete(t, 1, 5*time.Second)
 
+	// ctrl+c is now a graceful double-press (issue #17): the first arms the quit
+	// guard, the second exits — so the test driver presses it twice to terminate.
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
 

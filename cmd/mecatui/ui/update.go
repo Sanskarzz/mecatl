@@ -31,6 +31,27 @@ func (Model) renderTickCmd() tea.Cmd {
 	return tea.Tick(renderInterval, func(time.Time) tea.Msg { return renderTickMsg{} })
 }
 
+// quitArmWindow is how long the double-ctrl+c guard stays armed: a first ctrl+c on
+// an empty prompt arms it and shows a hint; a second ctrl+c within this window
+// quits, otherwise the guard disarms (quitDisarmMsg) and the hint clears. Matches
+// Claude Code's "press ctrl+c again to exit" grace window.
+const quitArmWindow = 3 * time.Second
+
+// quitHint is the footer hint shown while the quit guard is armed. The exact string
+// is reused as the disarm/clear sentinel: onKey/quitDisarmMsg clear the status line
+// ONLY when it still equals this hint, so a later status overwrite is never undone.
+const quitHint = "press ctrl+c again to quit"
+
+// quitDisarmMsg fires quitArmWindow after the guard is armed. Its gen is the arm
+// generation it was scheduled with; the handler ignores it unless it still matches
+// m.quitArmGen (a stale tick from a previous arm cannot disarm a fresh guard).
+type quitDisarmMsg struct{ gen int }
+
+// quitDisarmCmd schedules the one-shot disarm tick for arm generation gen.
+func (Model) quitDisarmCmd(gen int) tea.Cmd {
+	return tea.Tick(quitArmWindow, func(time.Time) tea.Msg { return quitDisarmMsg{gen} })
+}
+
 // markDirty records that a streamed delta mutated the conversation and returns the
 // updated model plus the command to drive the coalesced flush. It arms a one-shot
 // renderTickMsg ONLY when none is already pending (tickArmed) — so a burst of deltas
@@ -99,21 +120,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case renderTickMsg:
-		// Frame-cadence flush of coalesced deltas. The one-shot tick has fired:
-		// disarm, flush if a delta dirtied the view (refreshView clears viewDirty),
-		// and re-arm a fresh one-shot only if more deltas are still pending AND a run
-		// is streaming — so the ticker idles to zero when the stream goes quiet and
-		// self-terminates at run end. No flush depends on this tick (every boundary
-		// force-flushes), so a dropped/late tick can never lose the tail.
-		m.tickArmed = false
-		if m.viewDirty {
-			m.refreshView()
-		}
-		if m.viewDirty && m.phase == phaseRunning {
-			m.tickArmed = true
-			return m, m.renderTickCmd()
-		}
-		return m, nil
+		return m.onRenderTick()
+
+	case quitDisarmMsg:
+		return m.onQuitDisarm(msg)
 
 	// Lifecycle / transport.
 	case client.SessionReadyMsg:
@@ -173,6 +183,24 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// keep this reducer's branch count in check.
 		return m.updateStreamEvent(msg)
 	}
+}
+
+// onRenderTick is the frame-cadence flush of coalesced deltas. The one-shot tick
+// has fired: disarm, flush if a delta dirtied the view (refreshView clears
+// viewDirty), and re-arm a fresh one-shot only if more deltas are still pending AND
+// a run is streaming — so the ticker idles to zero when the stream goes quiet and
+// self-terminates at run end. No flush depends on this tick (every boundary
+// force-flushes), so a dropped/late tick can never lose the tail.
+func (m Model) onRenderTick() (tea.Model, tea.Cmd) {
+	m.tickArmed = false
+	if m.viewDirty {
+		m.refreshView()
+	}
+	if m.viewDirty && m.phase == phaseRunning {
+		m.tickArmed = true
+		return m, m.renderTickCmd()
+	}
+	return m, nil
 }
 
 // updateStreamEvent reduces the per-event stream msgs into the conversation. It
@@ -335,13 +363,26 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// onKey routes key presses by phase. Global quit (ctrl+c) always wins.
+// onKey routes key presses by phase. ctrl+c is handled first, with a graceful
+// double-press guard (Claude Code's "press again to exit"): a first ctrl+c does
+// NOT quit — it clears a non-empty prompt, or on an empty prompt arms the guard
+// and shows a hint; a second ctrl+c while armed quits. The fatal screen is the one
+// exception (single press quits — there is nothing to lose). The OS-signal path
+// (SIGINT/SIGTERM via tea.WithContext in main) is unaffected; this is the in-TUI
+// key path only.
 func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, m.keys.Quit) {
-		if m.cancelRun != nil {
-			m.cancelRun()
+		return m.onQuitKey()
+	}
+
+	// Any non-ctrl+c key disarms the quit guard (and clears the hint if it is still
+	// the one we set) before routing on, so the "press again" window only spans
+	// consecutive ctrl+c presses.
+	if m.quitArmed {
+		m.quitArmed = false
+		if m.statusMsg == quitHint {
+			m.statusMsg = ""
 		}
-		return m, tea.Quit
 	}
 
 	// An open MCP overlay owns the keyboard (it only opens while idle). It steps
@@ -404,6 +445,49 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+// onQuitKey implements the graceful double-press ctrl+c (issue #17): a second press
+// while armed quits; the fatal screen quits on the first press; a first press with
+// staged input clears it (no arm); a first press on an empty prompt arms the guard,
+// shows the hint, and schedules the timed disarm. See onKey's doc for the rationale.
+func (m Model) onQuitKey() (tea.Model, tea.Cmd) {
+	// Already armed → a second ctrl+c within the window: quit now. The fatal
+	// (dead-connection) screen also exits on a single press — there is no input to
+	// clear and no run to protect, so the guard would only add friction.
+	if m.quitArmed || m.phase == phaseFatal {
+		if m.cancelRun != nil {
+			m.cancelRun()
+		}
+		return m, tea.Quit
+	}
+	// First ctrl+c with staged input: clear the input (mirrors esc's clear-the-line)
+	// and do NOT arm — a single press to wipe a draft is expected.
+	if strings.TrimSpace(m.ta.Value()) != "" {
+		m.ta.Reset()
+		return m.afterInputEdit(nil)
+	}
+	// First ctrl+c on an empty prompt: arm the guard, show the hint, and schedule the
+	// timed disarm for this arm generation.
+	m.quitArmed = true
+	m.quitArmGen++
+	m.statusMsg = quitHint
+	m.refreshView()
+	return m, m.quitDisarmCmd(m.quitArmGen)
+}
+
+// onQuitDisarm handles the timed disarm tick: it disarms ONLY if the tick matches
+// the current arm generation (a stale tick from a prior arm must not disarm a guard
+// re-armed since) and clears the hint only if it is still the one we set.
+func (m Model) onQuitDisarm(msg quitDisarmMsg) (tea.Model, tea.Cmd) {
+	if m.quitArmed && msg.gen == m.quitArmGen {
+		m.quitArmed = false
+		if m.statusMsg == quitHint {
+			m.statusMsg = ""
+		}
+		m.refreshView()
+	}
+	return m, nil
 }
 
 // onPaste routes a bracketed-paste payload to the prompt input. Bubble Tea v2

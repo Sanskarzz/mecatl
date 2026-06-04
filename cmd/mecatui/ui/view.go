@@ -195,6 +195,12 @@ func (m Model) renderFooter() string {
 	if m.phase == phaseRunning {
 		help = "enter queue · esc cancel/clear · " + help
 	}
+	// While the double-ctrl+c guard is armed, prepend a loud "again to quit" cue to
+	// the help line. The footer is the one chrome line present in every phase (the
+	// left status differs by phase), so it is the robust place for the hint.
+	if m.quitArmed {
+		help = m.deps.Theme.Style("ctxWarn").Render("ctrl+c again to quit") + " · " + help
+	}
 
 	width := m.widthOr(80)
 	line := m.fitFooter(left, width)

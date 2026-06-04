@@ -197,7 +197,7 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 | `esc` (while a run streams) | clear staged input → else clear the queue → else cancel the in-flight run (sends `Cancel`; waits for the terminal result) |
 | `enter` (idle, **paused queue**, empty input) | resume — send the next staged follow-up |
 | `esc` (idle, **paused queue**) | clear staged input → else clear the queue |
-| `ctrl+c` | quit |
+| `ctrl+c` | graceful quit (double-press): with a non-empty prompt the first press **clears the input**; on an empty prompt it **arms** the guard and shows a footer hint — press `ctrl+c` again within 3s to exit. Any other key disarms. The fatal (dead-connection) screen exits on a single press. |
 | in the permission modal: `a`/`y`/`enter` | allow |
 | in the permission modal: `d`/`n`/`esc` | deny |
 | in the permission modal: `←`/`→`/`tab` | toggle the focused button |

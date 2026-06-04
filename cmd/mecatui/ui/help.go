@@ -75,7 +75,7 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 	writeHelpRows(&b, th, []helpRow{
 		{key: "pgup/pgdn", action: "scroll the conversation"},
 		{key: "?", action: "this help (on an empty prompt)"},
-		{key: "ctrl+c", action: "quit"},
+		{key: "ctrl+c", action: "quit (press twice; first press clears the prompt or arms, again within 3s exits)"},
 	})
 
 	// The skills clarification. Skills always ACTIVATE automatically (the model

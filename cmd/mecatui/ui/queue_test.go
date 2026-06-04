@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -501,19 +502,50 @@ func TestEscCancelsWhenEmptyEmpty(t *testing.T) {
 	}
 }
 
-// TestCtrlCStillQuits: ctrl+c quits while running (the global quit wins, unchanged).
-func TestCtrlCStillQuits(t *testing.T) {
+// TestCtrlCDoublePressQuitsWhileRunning: while running with an empty prompt the
+// first ctrl+c ARMS the quit guard (does not quit — issue #17's graceful exit), and
+// the second ctrl+c then quits with a QuitMsg.
+func TestCtrlCDoublePressQuitsWhileRunning(t *testing.T) {
 	m, _ := newQueueModel(t)
 	m = startRunning(t, m, "first")
 
-	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
-	if cmd == nil {
-		t.Fatal("ctrl+c should return a command (tea.Quit)")
+	mm, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	m = mm.(Model)
+	if !m.quitArmed {
+		t.Fatal("first ctrl+c while running (empty input) should arm, not quit")
 	}
-	if msg := cmd(); msg == nil {
-		t.Fatal("ctrl+c command yielded nil, want a QuitMsg")
-	} else if _, ok := msg.(tea.QuitMsg); !ok {
-		t.Fatalf("ctrl+c yielded %T, want tea.QuitMsg", msg)
+	if isQuitCmd(cmd) {
+		t.Fatal("first ctrl+c should not yield a QuitMsg")
+	}
+
+	_, cmd = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if !isQuitCmd(cmd) {
+		t.Fatal("second ctrl+c while armed should quit (QuitMsg)")
+	}
+}
+
+// isQuitCmd reports whether cmd resolves to a tea.QuitMsg (i.e. the program will
+// exit). A nil cmd or any other message is not a quit.
+//
+// tea.Quit resolves its message synchronously and instantly, whereas a timer
+// command (e.g. the quit guard's quitDisarmCmd, a tea.Tick) only yields its message
+// after its full wall-clock window. So we resolve cmd on a goroutine and race it
+// against a short bound: a quit is observed at once; anything that has not produced
+// a QuitMsg within the bound is treated as "not a quit" — keeping the assertion
+// clock-free (no test ever blocks on a real 3s disarm tick). This is sound because
+// the ONLY command this codebase resolves to a QuitMsg is the bare tea.Quit.
+func isQuitCmd(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	got := make(chan tea.Msg, 1)
+	go func() { got <- cmd() }()
+	select {
+	case msg := <-got:
+		_, ok := msg.(tea.QuitMsg)
+		return ok
+	case <-time.After(50 * time.Millisecond):
+		return false // a slow (timer) command — by construction never the quit
 	}
 }
 

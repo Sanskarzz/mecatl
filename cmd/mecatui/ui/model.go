@@ -170,6 +170,16 @@ type Model struct {
 	stream       *client.Stream // current run's stream
 	cancelRun    context.CancelFunc
 
+	// quitArmed is true after a first ctrl+c on an empty prompt: a second ctrl+c
+	// within quitArmWindow then quits (Claude Code's "press again to exit"
+	// convention). Any other key disarms it, and a timed quitDisarmMsg disarms it
+	// when the window lapses. quitArmGen is the monotonic arm generation: the
+	// disarm tick carries the gen it was armed with, so a stale tick (the guard was
+	// disarmed and re-armed in between) is ignored. NOT reset in resetSession — the
+	// quit guard is transport/compose state, not session-derived transcript state.
+	quitArmed  bool
+	quitArmGen int
+
 	// caps is the connected server's advertised capabilities, delivered once on
 	// SessionReadyMsg. It drives the honest discoverability affordances (which
 	// chords the help overlay annotates as available, and whether an empty
