@@ -24,9 +24,13 @@ var soulEnv = xdgconfig.OSEnv
 // soulselect.go is the composition-layer SOUL PROVENANCE + TRUST GATE (issue #14,
 // Phase 3, Item 2). The soul is fenced DATA, never a permission scope, so this is
 // NOT routed through internal/governance — but it REUSES the issue-#13 trust gate
-// (Config.TrustProject, the --trust-project flag) so an imported/project-sourced
-// soul is governed by the EXACT same operator gesture that gates a project's ALLOW
-// permission rules. No new trust concept, no new flag.
+// (Config.TrustProject) so an imported/project-sourced soul is governed by the
+// EXACT same operator gesture that gates a project's ALLOW permission rules. As of
+// the Workspace-Trust feature (Phase 1), Config.TrustProject carries the FOLDED
+// TrustDecision (trust.go): the --trust-project flag OR a settings.yaml
+// `trustedWorkspaces:` declaration. A declared-trusted workspace therefore honours
+// a project soul exactly as --trust-project does — through this same gate, never a
+// bypass.
 //
 // Two soul PROVENANCES:
 //   - USER: the conventional user-scoped <xdg>/mecatl/soul.md (fallback

@@ -1,11 +1,13 @@
 # Workspace Trust — implementation plan (Phases 0+1+2)
 
-> **STATUS: Phase 0 SHIPPED; Phases 1 + 2 are implementation-ready plan.**
+> **STATUS: Phases 0 + 1 SHIPPED; Phase 2 is implementation-ready plan.**
 > Phase 0 (unify the default — mecatui resolves `--trust-project`, default
-> false, no longer hardcoding trust ON) is wired and tested. Phases 1 (declarative
-> trust + `TrustDecision`) and 2 (prompt-and-remember + complete gate + drift)
-> are not yet built. Phase 3 (in-TUI trust modal, per-scope trust, speculative
-> schema reservations) is **explicitly out of scope** — see §11.
+> false, no longer hardcoding trust ON) is wired and tested. Phase 1
+> (declarative `trustedWorkspaces:` list + the composition `TrustDecision`
+> resolver) is wired and tested (`internal/adapter/workspacetrust`,
+> `internal/app/trust.go`). Phase 2 (prompt-and-remember + complete gate +
+> drift) is not yet built. Phase 3 (in-TUI trust modal, per-scope trust,
+> speculative schema reservations) is **explicitly out of scope** — see §11.
 >
 > File:line citations are to the tree as of this spike; verify before
 > implementing.
@@ -27,24 +29,52 @@ sibling to but never inside `settings.yaml`.
 
 ---
 
-## 2. Terminology
+## 2. Terminology — and what "untrusted" does NOT take away
 
-We retire the mechanics-flavored "trust surface" in favor of two named domain
-concepts (the must-fix-1 separation made explicit):
+The single most important framing correction (vs an earlier draft): **an
+untrusted workspace must still be a fully usable coding agent.** Trust is NOT
+"the agent refuses to function on a repo you haven't blessed" — that would make
+the harness unusable on every freshly-cloned repo, which no real agent (Claude
+Code included) does. Claude Code's folder-trust prompt gates *auto-execution
+and the repo's ability to pre-authorize/re-persona the agent*; it does **not**
+disable the agent. We match that.
 
-- **Project steering set** — *everything project-sourced that influences the
-  model's behaviour or the agent's authority.* The thing the **trust gate
-  admits or withholds.** Members today: project permission **ALLOW** rules,
-  the project **soul**, project-discovered **agent definitions**, **slash
-  commands**, and **skills**. (Deny/Ask rules and the user channel are never
-  in this set — they only tighten, and the user owns them.)
-- **Identity anchor** — *the high-signal, rarely-edited, identity-or-executable
-  subset whose change should re-prompt.* Members: the project **soul**, project
-  **agent-definition** bodies, **command** definitions, and **skill**
-  definitions. **Explicitly NOT `settings.yaml`** (edited every commit → drift
-  nag → blind-click trust → defeats the premise).
+So we draw the line between the agent's **own capability** (never gated) and the
+repo's **injected steering/authority** (gated):
 
-The trust gate covers the **project steering set**. The drift re-prompt is
+- **Always available, on ANY repo, trusted or not — NEVER gated:**
+  - the built-in tools (Read, Edit, Bash, etc.) and the whole agent loop;
+  - the base system prompt;
+  - the **operator's OWN** user-tier config under `~/.config/mecatl` /
+    `~/.claude` — the user soul, user agent defs, user commands, user skills,
+    user-global permission rules. None of this is repo-sourced; an untrusted
+    repo cannot touch it (each adapter already separates a USER tier from a
+    PROJECT tier — e.g. `skills/resolve.go:76-90`);
+  - every **DENY / ASK** rule from any scope (they only tighten);
+  - the permission prompt itself. On an untrusted repo the agent still runs;
+    it just **asks** for the tool calls the repo would have auto-allowed.
+
+  An untrusted repo therefore degrades to **"ask the human" mode**, not **"do
+  nothing" mode.** Read/edit/run-with-a-prompt all work.
+
+- **Gated by trust — the PROJECT-INJECTED steering/authority set** (the thing
+  the trust gate withholds when untrusted):
+  - project permission **ALLOW** rules (auto-approval the repo grants itself);
+  - the project **soul** (a repo rewriting the agent's persona);
+  - **project-tier** agent definitions, slash commands, and skills — i.e. the
+    `<workspace>/.mecatl/*` and `<workspace>/.claude/*` tiers ONLY. The
+    user-tier equivalents stay active.
+
+  This is the "project authority set." Withholding it makes the agent *more
+  cautious on an unknown repo*, not *broken*.
+
+- **Identity anchor** (the drift sub-concept) — *the high-signal, rarely-edited
+  subset of the project authority set whose change should re-prompt.* Members:
+  the project **soul**, project **agent-definition** bodies, **command**
+  definitions, and **skill** definitions. **Explicitly NOT `settings.yaml`**
+  (edited every commit → drift nag → blind-click trust → defeats the premise).
+
+The trust gate withholds the **project authority set**. The drift re-prompt is
 anchored on the **identity anchor** only. (MUST-FIX 1, resolved in §4.)
 
 ---
@@ -63,11 +93,13 @@ Build **(d) hybrid, phased 0→1→2**:
   gives durable no-re-prompt trust.
 - **Phase 2** — the interactive prompt-and-remember: a machine-written
   `<xdg>/mecatl/trust.yaml` registry keyed by absolute path, the **identity
-  anchor** drift check, completion of the admission gate to cover
-  agents/commands/skills, and the mecatui **pre-TUI** prompt that writes it.
-  mecated stays declarative (reads the registry; never prompts/writes).
+  anchor** drift check, completion of the admission gate to cover the
+  **project tier** of agents/commands/skills, and the mecatui **pre-TUI**
+  prompt that writes it. mecated stays declarative (reads the registry; never
+  prompts/writes).
 
-The trust resolution composes one answer consumed by every steering-set member.
+The trust resolution composes one answer consumed by every member of the
+project authority set.
 
 ---
 
@@ -77,14 +109,21 @@ The trust resolution composes one answer consumed by every steering-set member.
 
 | Concern | Covers | Mechanism |
 |---|---|---|
-| **Admission** (the trust gate) | the whole **project steering set**: allows + soul + agents + commands + skills | when untrusted, ALL project-sourced steering is withheld |
+| **Admission** (the trust gate) | the **project authority set**: project ALLOW rules + project soul + **project-tier** agents/commands/skills | when untrusted, the repo's INJECTED steering is withheld — the agent's own tools, the base prompt, and the operator's USER-tier config stay fully active |
 | **Drift re-prompt** | the **identity anchor** only: soul + agent/command/skill **definitions** (NOT settings.yaml) | a changed anchor hash ⇒ re-prompt (mecatui) / re-gate-to-safe (mecated) |
 
+**What untrusted does NOT remove** (see §2): built-in tools, the loop, the base
+prompt, all user-tier config, every Deny/Ask, and the permission prompt itself.
+An untrusted repo gives a working agent in "ask the human" mode — it just
+doesn't auto-approve the repo's own grants or adopt the repo's persona.
+
 Rationale (the panel's tension, resolved):
-- **Admission must be complete** or the gate is security theatre: a trusted
-  repo could ship a malicious agent persona or slash command today and trip no
-  alarm because agents/commands/skills are admitted regardless of trust
-  (confirmed below). So the gate must cover them.
+- **Admission must be complete WITHIN the project authority set** or the gate is
+  security theatre: a trusted repo could ship a malicious agent persona or slash
+  command today and trip no alarm because project-tier agents/commands/skills are
+  admitted regardless of trust (confirmed below). So the gate must cover the
+  project tier of all three — but ONLY the project tier; the user tier and the
+  built-in capability are never gated.
 - **Drift must be tuned to signal**: `settings.yaml` changes on nearly every
   commit; hashing it for drift = constant re-prompt = nag-fatigue = users
   blind-clicking "trust" = the premise defeated. So `settings.yaml` is **in the
@@ -92,7 +131,7 @@ Rationale (the panel's tension, resolved):
   *definitions* are rarely-edited identity/executable content — high-signal for
   drift. A re-bless gesture (§7) accepts an intended anchor edit.
 
-Net: trusting a repo admits its full steering set; editing its **permissions**
+Net: trusting a repo admits its full project authority set; editing its **permissions**
 does not re-prompt (those re-resolve live via permconfig's own mtime cache —
 `resolve.go:174-192` — and were already trusted); editing its **identity
 anchor** (persona/commands/skills/soul) does re-prompt.
@@ -262,9 +301,9 @@ subsystem.
 2. **TOCTOU — single coherent read.** The trust decision and the config read
    must be coherent: compute the identity-anchor hash from the **same bytes**
    used to admit. Concretely, `workspacetrust` reads each anchor file **once**,
-   computes the hash, AND that read is the one composition uses to build the
-   steering set — no second open between check and use where the file could be
-   swapped. Where a single read isn't structurally possible (permconfig reads
+   computes the hash, AND that read is the one composition uses to admit the
+   project authority set — no second open between check and use where the file
+   could be swapped. Where a single read isn't structurally possible (permconfig reads
    `settings.yaml` separately), the residual window is the same narrow
    single-user-desktop window `soulguard` already accepts; documented, not
    over-engineered. (settings.yaml is NOT in the drift anchor, so its TOCTOU
@@ -327,10 +366,28 @@ flips it true; mecated unchanged.
 
 ---
 
-### Phase 1 — declarative trust + TrustDecision resolver
+### Phase 1 — declarative trust + TrustDecision resolver — **SHIPPED**
 
 **Goal:** durable, no-prompt trust via `settings.yaml` `trustedWorkspaces:`,
 behind a real `TrustDecision`.
+
+**Status:** SHIPPED. The `internal/adapter/workspacetrust` leaf reads
+`trustedWorkspaces: []string` from `<xdg>/mecatl/settings.yaml` (realpath-keyed,
+fail-safe). `internal/app/trust.go` introduces `TrustSource`/`TrustDecision` and
+`resolveTrust(cfg)`, folding `--trust-project` (`TrustFlag`) > a declared match
+(`TrustDeclared`) > none. `Build` collapses the decision onto `cfg.TrustProject`
+before the downstream build, so permconfig's `Options.TrustProject` and the soul
+provenance gate both honour declared trust through the EXACT same monotonic-positive
+admission path (no new bypass; deny/ask unchanged). Composition narrates the
+decision (`slog.Info "workspace trust"`). Tests:
+`internal/adapter/workspacetrust/trust_test.go` (parse, match/no-match, missing
+key, malformed fail-safe, blank-entry skip, symlink-alias match, alias-cannot-forge);
+`internal/app/trust_test.go` (`TestResolveTrustFlagWins`, `TestResolveTrustDeclared`,
+`TestResolveTrustNone`, `TestResolveTrustFlagWinsSourceOverDeclared`,
+`TestResolveTrustMalformedEntryFailSafe`, `TestResolveTrustEmptyWorkspaceNoDeclared`,
+`TestDeclaredTrustFeedsSoulGate`, `TestNonDeclaredDropsSoul`,
+`TestResolveTrustMonotonicPositiveDenyHonoured`). Docs updated: `docs/usage.md`,
+`docs/architecture.md`, CLAUDE.md. `Drifted` stays false/unused until Phase 2.
 
 **Requirements (testable):**
 - **R1.1** A new `internal/adapter/workspacetrust` leaf reads
@@ -395,9 +452,13 @@ admission gate and identity-anchor drift.
   grant (MUST-FIX 5.4).
 
 *Complete admission gate (MUST-FIX 1):*
-- **R2.4** When `!decision.Trusted`, the **project-tier** sources are withheld
-  for: agent definitions, slash commands, AND skills — in addition to the
-  existing allows + soul gating. User-tier and explicit sources are unaffected.
+- **R2.4** When `!decision.Trusted`, ONLY the **project-tier** sources are
+  withheld for: agent definitions, slash commands, AND skills — in addition to
+  the existing project-allows + project-soul gating. **The built-in tools, the
+  base prompt, every user-tier source (user soul/agents/commands/skills,
+  user-global permission rules), every Deny/Ask, and the permission prompt
+  itself stay fully active** (§2). The untrusted agent works in "ask the human"
+  mode; it is never disabled.
 - **R2.5** Skills gating uses an additive `ResolveOptions.IncludeProjectTier`
   (default true) so composition can drop the project tier when untrusted — the
   one narrow adapter touch; no signature break.
@@ -413,7 +474,7 @@ admission gate and identity-anchor drift.
 
 *mecatui pre-TUI prompt:*
 - **R2.9** Before the TUI starts (the pre-alt-screen window, near
-  `cmd/mecatui/main.go:58-64`), if the workspace has any project steering-set
+  `cmd/mecatui/main.go:58-64`), if the workspace has any project authority-set
   member present AND `resolveTrust` returns `TrustNone` or `Drifted`, prompt on
   the terminal: **[t]rust / [o]nce / [n]o** (default no).
   - `t` ⇒ write the registry entry (realpath + current anchor hash) ⇒ trusted
@@ -433,7 +494,7 @@ admission gate and identity-anchor drift.
   (`O_NOFOLLOW`/0o600/temp-rename), the identity-anchor hash computation, the
   registry schema; injectable IO seam.
 - `internal/app/trust.go` — extend `resolveTrust` with the `TrustRemembered`
-  tier + drift; expose anchor-hash + steering-set detection helpers.
+  tier + drift; expose anchor-hash + authority-set detection helpers.
 - `internal/app/build.go` — gate project-tier agents (agentdefs source
   resolution), commands (`buildCommandExpander`, `:775-781`), skills
   (`registerSkills`, `:1115-1147`) on `decision.Trusted`.
@@ -445,10 +506,12 @@ admission gate and identity-anchor drift.
   resolution (no prompt).
 
 **Tests (incl. security):**
-- registry entry with matching anchor ⇒ `TrustRemembered`, full steering set
-  admitted; mismatched anchor ⇒ `Drifted`, re-gated to safe;
-- untrusted repo: project agents/commands/skills/soul/allows ALL withheld;
-  user-tier unaffected — one test per surface;
+- registry entry with matching anchor ⇒ `TrustRemembered`, full project
+  authority set admitted; mismatched anchor ⇒ `Drifted`, re-gated to safe;
+- untrusted repo: PROJECT-tier agents/commands/skills/soul/allows withheld, but
+  **user-tier agents/commands/skills/soul + user-global rules + built-in tools
+  stay active and the loop still runs** (the "still usable" assertion) — one
+  test per surface, both the withheld-project and the active-user side;
 - editing `settings.yaml` does NOT cause drift (not in the anchor); editing the
   soul/an agent def DOES;
 - mecated never writes `trust.yaml` (write-seam spy asserts zero writes on the
@@ -500,8 +563,8 @@ agents/commands/skills, not just allows+soul — a one-line invariant update).
   with zero proto churn. An external-server / remote-workspace trust modal is a
   later issue.
 - **Per-scope trust** (trust the soul but not the allows) — admission is
-  all-or-nothing for the steering set. No reserved schema field (the panel and
-  we agree: don't reserve speculative schema).
+  all-or-nothing for the project authority set. No reserved schema field (the
+  panel and we agree: don't reserve speculative schema).
 - **`--approve-trust` one-shot re-bless** — Phase 2 re-blesses by re-answering
   the prompt; a non-interactive `--approve-trust` flag (parallel to
   `--approve-soul`) is a small follow-up if mecated operators need it.

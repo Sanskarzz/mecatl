@@ -265,6 +265,19 @@ type Built struct {
 // manager on shutdown. Build itself starts no listeners — serving is the caller's
 // responsibility (see cmd/mecated/serve and cmd/mecatui/embed).
 func Build(ctx context.Context, cfg Config) (*Built, error) {
+	// Workspace trust (MUST-FIX 2): fold the --trust-project flag and the
+	// declarative settings.yaml `trustedWorkspaces:` list into ONE decision,
+	// produced once here, then collapse it back onto cfg.TrustProject — the SAME
+	// bool both downstream admission consumers already read (permconfig's
+	// Options.TrustProject and the soul provenance gate). This keeps the fold a
+	// composition concern with zero adapter signature churn: buildEngine and the
+	// soul build see only the effective trust bool. Trust is monotonic-positive —
+	// it grants admission only and never suppresses a Deny/Ask (deny-dominance is
+	// unchanged in the evaluator).
+	trust := resolveTrust(cfg)
+	narrateTrust(trust, cfg.Workspace)
+	cfg.TrustProject = trust.Trusted
+
 	provider, err := buildProvider(cfg)
 	if err != nil {
 		return nil, err

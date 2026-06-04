@@ -406,6 +406,53 @@ The import never widens: a demotion only ever moves `allow → ask`, and the
 > `--trust-project` OFF (the safe stance); it defaults `--import-claude-permissions`
 > OFF (the safe network stance).
 
+### Declarative workspace trust (`trustedWorkspaces:`, WORKSPACE-TRUST Phase 1)
+
+`--trust-project` is a **per-invocation** flag. For CI, a daemon, or a power-user
+who works repeatedly in a known-good checkout, declaring the trust once is more
+ergonomic than passing the flag every run. The **user-global** `settings.yaml`
+(`$XDG_CONFIG_HOME/mecatl/settings.yaml`, or `~/.config/mecatl/settings.yaml`)
+gains an optional top-level `trustedWorkspaces:` list of **absolute workspace
+paths** to pre-trust:
+
+```yaml
+# ~/.config/mecatl/settings.yaml  (the operator's own, fully-trusted file)
+trustedWorkspaces:
+  - /home/me/src/my-project
+  - /home/me/work/known-good-repo
+
+permissions:            # the same file also carries user-scoped permission rules
+  deny:
+    - "Bash(curl:*)"
+```
+
+When the current workspace's path matches a declared entry, it is trusted exactly
+as `--trust-project` would trust it — **the same admission gate, no separate
+path**: the project's ALLOW rules and its project soul are honoured. This is
+**read-only**: mecatl only ever *reads* `trustedWorkspaces:` from your
+human-authored `settings.yaml`; it never writes it (the machine-written trust
+registry is a later phase). Both `mecated` and `mecatui` honour it (it lives in
+the shared user config).
+
+**Precedence and semantics:**
+
+- The effective trust is `--trust-project` **OR** a `trustedWorkspaces` match.
+  The flag wins as the *source label* when both apply; either way the workspace
+  is trusted.
+- **Path keying is symlink-safe.** Both the declared entries and the current
+  workspace are compared on their **cleaned, absolute, symlink-resolved**
+  (`realpath`) form, so a moved or symlinked path cannot forge or inherit another
+  workspace's trust. A declared entry that does not resolve (typo / broken
+  symlink) is ignored; the rest of the list is honoured.
+- **Monotonic-positive.** `trustedWorkspaces` only ever **grants** trust. It can
+  never override a **Deny** or a configured **Ask** anywhere — those tighten and
+  are always honoured. Trust gates only whether a project's *ALLOW* rules (and
+  its soul) are admitted, never the deny-dominant evaluation.
+- **Fail-safe.** A missing key, a malformed entry, or an unparseable
+  `settings.yaml` resolves to **untrusted** (a corrupt config never *grants*
+  trust); it is logged, never an error that aborts startup. The composition logs
+  the decision: `workspace trust trusted=… source=flag|declared|none`.
+
 ### The allow-all posture (`--yolo`)
 
 For unattended runs (CI, a throwaway container, a disposable VM) you can suppress

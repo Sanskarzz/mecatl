@@ -1,0 +1,305 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stacklok/mecatl/internal/adapter/osfs"
+	"github.com/stacklok/mecatl/internal/adapter/permconfig"
+	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
+	"github.com/stacklok/mecatl/internal/governance"
+)
+
+// withTrustEnv swaps the package-level trustEnv for the duration of a test (so the
+// declarative-trust read runs against a faked XDG/home — never the developer's
+// real ~/.config) and restores it on cleanup.
+func withTrustEnv(t *testing.T, env xdgconfig.ResolveEnv) {
+	t.Helper()
+	prev := trustEnv
+	trustEnv = env
+	t.Cleanup(func() { trustEnv = prev })
+}
+
+// trustSettingsEnv returns an injected env whose user-global settings.yaml returns
+// the given bytes, with $XDG_CONFIG_HOME pointed at configDir.
+func trustSettingsEnv(configDir string, settings []byte) xdgconfig.ResolveEnv {
+	want := filepath.Join(configDir, "mecatl", "settings.yaml")
+	return xdgconfig.ResolveEnv{
+		Getenv: func(k string) string {
+			if k == "XDG_CONFIG_HOME" {
+				return configDir
+			}
+			return ""
+		},
+		UserHomeDir: func() (string, error) { return "", errors.New("no home") },
+		ReadFile: func(p string) ([]byte, error) {
+			if p == want && settings != nil {
+				return settings, nil
+			}
+			return nil, errors.New("not found")
+		},
+	}
+}
+
+// realWS creates a real workspace dir and returns its realpath.
+func realWS(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatalf("eval: %v", err)
+	}
+	return resolved
+}
+
+// TestResolveTrustFlagWins asserts --trust-project ⇒ Trusted, Source=flag,
+// regardless of (and without consulting) the declarative list.
+func TestResolveTrustFlagWins(t *testing.T) {
+	withTrustEnv(t, trustSettingsEnv(t.TempDir(), nil)) // no declarations
+	d := resolveTrust(Config{Workspace: realWS(t), TrustProject: true})
+	if !d.Trusted || d.Source != TrustFlag {
+		t.Fatalf("resolveTrust(--trust-project) = %+v, want Trusted with Source=flag", d)
+	}
+	if d.Drifted {
+		t.Fatal("Drifted must stay false in Phase 1")
+	}
+}
+
+// TestResolveTrustDeclared asserts a workspace whose realpath is in
+// trustedWorkspaces ⇒ Trusted, Source=declared, with NO flag.
+func TestResolveTrustDeclared(t *testing.T) {
+	ws := realWS(t)
+	cfg := t.TempDir()
+	settings := []byte("trustedWorkspaces:\n  - " + ws + "\n")
+	withTrustEnv(t, trustSettingsEnv(cfg, settings))
+
+	d := resolveTrust(Config{Workspace: ws}) // no --trust-project
+	if !d.Trusted || d.Source != TrustDeclared {
+		t.Fatalf("resolveTrust(declared) = %+v, want Trusted with Source=declared", d)
+	}
+}
+
+// TestResolveTrustNone asserts a non-declared workspace with no flag ⇒ untrusted.
+func TestResolveTrustNone(t *testing.T) {
+	ws := realWS(t)
+	cfg := t.TempDir()
+	// Declare a DIFFERENT path.
+	settings := []byte("trustedWorkspaces:\n  - " + filepath.Dir(ws) + "\n")
+	withTrustEnv(t, trustSettingsEnv(cfg, settings))
+
+	d := resolveTrust(Config{Workspace: ws})
+	if d.Trusted || d.Source != TrustNone {
+		t.Fatalf("resolveTrust(not declared, no flag) = %+v, want untrusted with Source=none", d)
+	}
+}
+
+// TestResolveTrustFlagWinsSourceOverDeclared asserts that when BOTH the flag and a
+// declaration apply, the flag is the reported Source (highest precedence), still
+// Trusted.
+func TestResolveTrustFlagWinsSourceOverDeclared(t *testing.T) {
+	ws := realWS(t)
+	cfg := t.TempDir()
+	settings := []byte("trustedWorkspaces:\n  - " + ws + "\n")
+	withTrustEnv(t, trustSettingsEnv(cfg, settings))
+
+	d := resolveTrust(Config{Workspace: ws, TrustProject: true})
+	if !d.Trusted || d.Source != TrustFlag {
+		t.Fatalf("resolveTrust(flag+declared) = %+v, want Trusted with Source=flag", d)
+	}
+}
+
+// TestResolveTrustMalformedEntryFailSafe asserts a malformed settings.yaml ⇒
+// untrusted (no grant), and a single bad entry does not suppress a valid one.
+func TestResolveTrustMalformedEntryFailSafe(t *testing.T) {
+	ws := realWS(t)
+	cfg := t.TempDir()
+
+	// Unparseable ⇒ untrusted (fail-safe).
+	withTrustEnv(t, trustSettingsEnv(cfg, []byte("trustedWorkspaces: [unterminated\n : :")))
+	if d := resolveTrust(Config{Workspace: ws}); d.Trusted {
+		t.Fatalf("unparseable settings.yaml granted trust: %+v", d)
+	}
+
+	// Bad entry first, valid entry second ⇒ still trusted (declared).
+	settings := []byte("trustedWorkspaces:\n  - /nonexistent/does/not/resolve\n  - " + ws + "\n")
+	withTrustEnv(t, trustSettingsEnv(cfg, settings))
+	if d := resolveTrust(Config{Workspace: ws}); !d.Trusted || d.Source != TrustDeclared {
+		t.Fatalf("bad entry suppressed a valid declaration: %+v", d)
+	}
+}
+
+// TestResolveTrustEmptyWorkspaceNoDeclared asserts an empty workspace is never
+// declared-trusted (only the flag can trust an empty-workspace run).
+func TestResolveTrustEmptyWorkspaceNoDeclared(t *testing.T) {
+	withTrustEnv(t, trustSettingsEnv(t.TempDir(), []byte("trustedWorkspaces:\n  - /x\n")))
+	if d := resolveTrust(Config{Workspace: ""}); d.Trusted {
+		t.Fatalf("empty workspace declared-trusted: %+v", d)
+	}
+}
+
+// TestDeclaredTrustFeedsSoulGate (R1.3) proves the FOLDED decision reaches the
+// soul provenance gate: a workspace declared in trustedWorkspaces loads its
+// project soul WITHOUT --trust-project, exactly as the flag would — because Build
+// collapses resolveTrust onto cfg.TrustProject before the soul build runs. We
+// simulate that fold here (set cfg.TrustProject = resolveTrust(...).Trusted) and
+// assert the project soul loads.
+func TestDeclaredTrustFeedsSoulGate(t *testing.T) {
+	ws := realWS(t)
+	writeProjectSoul(t, ws, "You are a project persona.")
+	xdg := t.TempDir() // no user soul
+	fakeSoulEnv(t, xdg)
+
+	cfgDir := t.TempDir()
+	settings := []byte("trustedWorkspaces:\n  - " + ws + "\n")
+	withTrustEnv(t, trustSettingsEnv(cfgDir, settings))
+
+	cfg := Config{Workspace: ws} // NO --trust-project
+	d := resolveTrust(cfg)
+	if !d.Trusted || d.Source != TrustDeclared {
+		t.Fatalf("precondition: declared workspace should resolve trusted, got %+v", d)
+	}
+	cfg.TrustProject = d.Trusted // the Build-time fold
+
+	src, meta := selectSoulSource(cfg, newFakeIO().io(), nil)
+	if src == nil {
+		t.Fatal("a declared-trusted project soul (no user soul) must load via the folded decision")
+	}
+	if !meta.Present || meta.Provenance != soulProject || !meta.Trusted {
+		t.Fatalf("meta = %+v, want Present project trusted (declared trust honoured by the soul gate)", meta)
+	}
+}
+
+// TestNonDeclaredDropsSoul is the negative companion: a non-declared workspace,
+// no flag ⇒ the project soul is withheld (untrusted), confirming the fold does not
+// spuriously grant.
+func TestNonDeclaredDropsSoul(t *testing.T) {
+	ws := realWS(t)
+	writeProjectSoul(t, ws, "You are a project persona.")
+	xdg := t.TempDir()
+	fakeSoulEnv(t, xdg)
+	withTrustEnv(t, trustSettingsEnv(t.TempDir(), nil)) // no declarations
+
+	cfg := Config{Workspace: ws}
+	cfg.TrustProject = resolveTrust(cfg).Trusted // false
+	src, meta := selectSoulSource(cfg, newFakeIO().io(), nil)
+	if src != nil || meta.Present {
+		t.Fatalf("non-declared, no-flag project soul must be withheld, got src=%v meta=%+v", src, meta)
+	}
+}
+
+// TestResolveTrustMonotonicPositiveDenyHonoured is the MUST-FIX 5.5 invariant at
+// the composition→permconfig boundary: a trusted workspace folds to
+// TrustProject=true, but a project DENY rule is STILL honoured — trust grants
+// admission of ALLOWs only; it never overrides a Deny. This mirrors permconfig's
+// TestResolveProjectDenyKeptWhenUntrusted from the GRANTED side.
+//
+// FOLD-SOURCE PARITY: the invariant is asserted under BOTH trust sources —
+// TrustDeclared (the settings.yaml list) and TrustFlag (--trust-project) — proving
+// the fold collapses to the SAME effective bool regardless of where trust came
+// from, so neither source can be a Deny-overriding back door.
+func TestResolveTrustMonotonicPositiveDenyHonoured(t *testing.T) {
+	cases := []struct {
+		name       string
+		wantSource TrustSource
+		// cfg builds the Config for a fresh workspace ws; declared installs the
+		// user-scope trustedWorkspaces declaration when the source is TrustDeclared.
+		setup func(t *testing.T, ws string) Config
+	}{
+		{
+			name:       "declared",
+			wantSource: TrustDeclared,
+			setup: func(t *testing.T, ws string) Config {
+				t.Helper()
+				cfgDir := t.TempDir()
+				withTrustEnv(t, trustSettingsEnv(cfgDir, []byte("trustedWorkspaces:\n  - "+ws+"\n")))
+				return Config{Workspace: ws} // NO --trust-project
+			},
+		},
+		{
+			name:       "flag",
+			wantSource: TrustFlag,
+			setup: func(t *testing.T, ws string) Config {
+				t.Helper()
+				withTrustEnv(t, trustSettingsEnv(t.TempDir(), nil)) // no declarations
+				return Config{Workspace: ws, TrustProject: true}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := realWS(t)
+			cfg := tc.setup(t, ws)
+
+			d := resolveTrust(cfg)
+			if !d.Trusted || d.Source != tc.wantSource {
+				t.Fatalf("precondition: want Trusted via %v, got %+v", tc.wantSource, d)
+			}
+
+			// Build the permconfig resolver the SAME way buildEngine does, feeding the
+			// folded decision. The project ships a DENY; it must survive being trusted.
+			settingsYAML := "permissions:\n  deny:\n    - \"Bash(some-blocked-cmd:*)\"\n"
+			if err := os.MkdirAll(filepath.Join(ws, ".mecatl"), 0o755); err != nil {
+				t.Fatalf("mkdir .mecatl: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(ws, ".mecatl", "settings.yaml"), []byte(settingsYAML), 0o644); err != nil {
+				t.Fatalf("write project settings: %v", err)
+			}
+
+			resolver := permconfig.New(permconfig.Options{
+				Conventional: true,
+				TrustProject: d.Trusted, // the FOLDED decision (true via either source)
+			})
+			if resolver == nil {
+				t.Fatal("resolver should be non-nil with Conventional on")
+			}
+			wsReader, err := osfs.NewWorkspace(ws)
+			if err != nil {
+				t.Fatalf("open ws reader: %v", err)
+			}
+			rules := resolver.Resolve(context.Background(), wsReader)
+
+			found := false
+			for _, r := range rules {
+				if r.Tool == "Bash" && r.Effect == governance.Deny {
+					found = true
+				}
+				if r.Effect == governance.Allow && r.Tool == "Bash" {
+					t.Fatalf("trust must not turn a project DENY into an ALLOW: %+v", r)
+				}
+			}
+			if !found {
+				t.Fatalf("project DENY dropped under %v trust (monotonic-positive violated): %+v", tc.wantSource, rules)
+			}
+		})
+	}
+}
+
+// TestNarrateTrustLogsDecision covers R1.4: the composition narrates the trust
+// decision so the why-trusted story is visible in the log (mirroring the soul
+// narration). We swap the default slog logger for a buffer and assert the source +
+// trusted fields are emitted. It is a thin logging assertion, not over-engineered.
+func TestNarrateTrustLogsDecision(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	narrateTrust(TrustDecision{Trusted: true, Source: TrustDeclared}, "/some/ws")
+
+	out := buf.String()
+	for _, want := range []string{"workspace trust", "trusted=true", "source=declared", "/some/ws"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("narrateTrust log missing %q; got: %s", want, out)
+		}
+	}
+}

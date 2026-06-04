@@ -967,3 +967,38 @@ deliberately **never** strips re-entrant launchers (`docker exec`, `npx`,
 `sudo`, `devbox run`). `HasSubstitutionOrGrouping` flags `$(...)`, backticks,
 `<(...)`, and `(`/`{` grouping and floors such segments at Ask (fail-safe).
 `ReadOnlyBash` classifies a command line as read-only for plan-mode gating.
+
+### Workspace trust (`internal/app/trust.go`, `internal/adapter/workspacetrust`)
+
+Whether a *project's* contributions are admitted — its permission **ALLOW** rules
+and its project soul — is a **composition** decision, not a governance scope
+(`governance`/`session`/`prompt`/`tool` stay trust-unaware). The decision is
+produced once per process by `resolveTrust(cfg) TrustDecision` (MUST-FIX 2 of the
+workspace-trust design), which folds, highest first:
+
+1. `--trust-project` — the per-invocation operator flag (`TrustFlag`);
+2. a **declarative** `trustedWorkspaces:` match (`TrustDeclared`) — Phase 1: the
+   `internal/adapter/workspacetrust` leaf reads an operator-authored, **read-only**
+   list of absolute workspace paths from the user-global `settings.yaml` (via the
+   shared `xdgconfig` env seam) and answers "is this workspace declared-trusted?";
+3. otherwise `TrustNone`.
+
+`Build` collapses `decision.Trusted` back onto `cfg.TrustProject` before the
+downstream build, so the existing consumers — `permconfig.Options.TrustProject`
+and the soul provenance gate (`soulselect.go`) — honour declared trust through the
+**exact same admission path** as the flag, with no adapter signature churn and no
+bypass. The composition narrates the decision (`slog.Info "workspace trust"
+trusted=… source=… drifted=…`), mirroring the soul-selection narration.
+
+**Settings-vs-state split.** `trustedWorkspaces:` is config **DATA**, not a
+governance `Rule`, and lives in the **human-authored** `settings.yaml` that mecatl
+only ever *reads*. The machine-written trust registry, the interactive prompt, and
+identity-anchor drift are a later phase (`TrustRemembered`/`Drifted` are reserved
+in the taxonomy but unused in Phase 1). **Path keying** is cleaned + absolute +
+symlink-resolved (`filepath.Abs` then `EvalSymlinks`) on both sides, so a
+moved/symlinked path cannot forge or inherit trust; an unresolvable entry is
+skipped. Trust is **monotonic-positive**: it only ever *grants* admission of a
+project's ALLOWs/soul — it never overrides a Deny or a configured Ask (those remain
+deny-dominant in the evaluator). A missing/malformed/unparseable `settings.yaml`
+fails safe to untrusted (a corrupt config never grants trust). See
+`docs/design/WORKSPACE-TRUST-SPIKE.md`.
