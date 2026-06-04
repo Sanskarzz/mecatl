@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -564,4 +565,417 @@ func TestNewTaskToolNilEnginePanics(t *testing.T) {
 		}
 	}()
 	_ = agent.NewTaskTool(nil)
+}
+
+// recordingTaskForker is a fake tool.WorkspaceForker that hands out in-memory
+// workspaces rooted at a fork-specific path and records the fork labels and cleanup
+// calls. It mirrors the team supervisor's recordingForker.
+type recordingTaskForker struct {
+	mu       sync.Mutex
+	labels   []string
+	cleanups int
+}
+
+func (f *recordingTaskForker) Fork(_ context.Context, _ tool.Workspace, label string) (tool.Workspace, func() error, error) {
+	f.mu.Lock()
+	f.labels = append(f.labels, label)
+	f.mu.Unlock()
+	ws := memfs.NewWorkspace("/fork/" + label)
+	cleanup := func() error {
+		f.mu.Lock()
+		f.cleanups++
+		f.mu.Unlock()
+		return nil
+	}
+	return ws, cleanup, nil
+}
+
+// erroringForker always fails Fork. It proves the no-silent-fallback contract: a
+// shell-bearing child whose isolation fails must yield a tool error, never run
+// against the shared parent ws.
+type erroringForker struct{}
+
+func (erroringForker) Fork(_ context.Context, _ tool.Workspace, _ string) (tool.Workspace, func() error, error) {
+	return nil, nil, errors.New("worktree add failed")
+}
+
+// rootRecordingTool is a read-only child tool that records the Workspace.Root() it
+// was executed against, so a test can prove the child ran in the forked worktree (not
+// the shared parent base).
+type rootRecordingTool struct {
+	mu    sync.Mutex
+	roots []string
+}
+
+func (*rootRecordingTool) Spec() tool.ToolSpec {
+	return tool.ToolSpec{Name: "Probe", Description: "probe: records ws root", Schema: json.RawMessage(`{"type":"object"}`)}
+}
+func (*rootRecordingTool) ReadOnly() bool { return true }
+func (rt *rootRecordingTool) Execute(_ context.Context, in session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
+	rt.mu.Lock()
+	rt.roots = append(rt.roots, ws.Root())
+	rt.mu.Unlock()
+	return session.NewToolResult(in.ID, "probed "+ws.Root()), nil
+}
+func (rt *rootRecordingTool) seenRoots() []string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := make([]string, len(rt.roots))
+	copy(out, rt.roots)
+	return out
+}
+
+// runTaskOnce drives a parent engine that calls Task once with the given prompt, over
+// the given parent workspace, and returns the parent's single Task tool.result.
+func runTaskOnce(t *testing.T, task tool.Tool, parentWS tool.Workspace, prompt string) *session.ToolResult {
+	t.Helper()
+	parentLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"`+prompt+`"}`)),
+		mockllm.TextTurn("parent done"),
+	)
+	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), parentWS, "go")
+	evs := drain(r)
+	var got *session.ToolResult
+	for _, ev := range evs {
+		if ev.Type == session.EvToolResult && ev.ToolResult != nil {
+			got = ev.ToolResult
+		}
+	}
+	if got == nil {
+		t.Fatalf("parent saw no Task tool result; events: %v", typesOf(evs))
+	}
+	return got
+}
+
+// TestSubagentForksBeforeRunning asserts that, with a child forker wired, the Task
+// child runs in the FORKED workspace (its tools see the fork root, not the parent
+// base), the fork is labelled from the goal, and the fork's cleanup runs after the
+// child drains.
+func TestSubagentForksBeforeRunning(t *testing.T) {
+	probe := &rootRecordingTool{}
+	childCat := catalogWith(t, probe)
+	childLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("k1", "Probe", `{}`)),
+		mockllm.TextTurn("inspected the fork"),
+	)
+	childEngine := childEngineWith(childLLM, childCat)
+
+	fk := &recordingTaskForker{}
+	task := agent.NewTaskTool(childEngine, agent.WithChildForker(fk))
+
+	got := runTaskOnce(t, task, memfs.NewWorkspace("/base"), "inspect history")
+	if got.IsError {
+		t.Fatalf("Task result is an error: %q", got.Content)
+	}
+	if got.Content != "inspected the fork" {
+		t.Fatalf("Task result = %q, want the child summary", got.Content)
+	}
+
+	// The child's tool must have run against the FORK root, never the parent base.
+	roots := probe.seenRoots()
+	if len(roots) != 1 {
+		t.Fatalf("probe ran %d times, want 1: %v", len(roots), roots)
+	}
+	if got, want := roots[0], "/fork/inspect history"; got != want {
+		t.Fatalf("child ran against ws root %q, want the fork %q (not the parent /base)", got, want)
+	}
+
+	fk.mu.Lock()
+	defer fk.mu.Unlock()
+	if len(fk.labels) != 1 || fk.labels[0] != "inspect history" {
+		t.Fatalf("fork labels = %v, want [\"inspect history\"] (label from the goal)", fk.labels)
+	}
+	if fk.cleanups != 1 {
+		t.Errorf("fork cleanups = %d, want 1 (cleanup must run after the child drains)", fk.cleanups)
+	}
+}
+
+// TestSubagentNilForkerRunsAgainstParent asserts the unchanged legacy behaviour: with
+// NO child forker wired, the child runs against the parent workspace (its tools see
+// the parent root) — no fork, exactly as before Phase 2.
+func TestSubagentNilForkerRunsAgainstParent(t *testing.T) {
+	probe := &rootRecordingTool{}
+	childLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("k1", "Probe", `{}`)),
+		mockllm.TextTurn("inspected the base"),
+	)
+	childEngine := childEngineWith(childLLM, catalogWith(t, probe))
+
+	task := agent.NewTaskTool(childEngine) // no WithChildForker
+
+	got := runTaskOnce(t, task, memfs.NewWorkspace("/base"), "look around")
+	if got.IsError {
+		t.Fatalf("Task result is an error: %q", got.Content)
+	}
+	roots := probe.seenRoots()
+	if len(roots) != 1 || roots[0] != "/base" {
+		t.Fatalf("child ran against roots %v, want [\"/base\"] (the shared parent, no fork)", roots)
+	}
+}
+
+// TestSubagentForkErrorIsToolError asserts the no-silent-fallback contract: when a
+// child forker is wired but Fork fails, Task returns a tool ERROR and the child NEVER
+// runs (so its Bash cannot land in the shared parent base).
+func TestSubagentForkErrorIsToolError(t *testing.T) {
+	probe := &rootRecordingTool{}
+	// Script a child that WOULD run a probe if it ever started — it must not.
+	childLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("k1", "Probe", `{}`)),
+		mockllm.TextTurn("should never run"),
+	)
+	childEngine := childEngineWith(childLLM, catalogWith(t, probe))
+
+	task := agent.NewTaskTool(childEngine, agent.WithChildForker(erroringForker{}))
+
+	got := runTaskOnce(t, task, memfs.NewWorkspace("/base"), "inspect")
+	if !got.IsError {
+		t.Fatalf("Task result = %+v, want an error result (fork failure must not silently fall back)", got)
+	}
+	if !strings.Contains(got.Content, "workspace isolation failed") {
+		t.Fatalf("Task error = %q, want it to mention workspace isolation failure", got.Content)
+	}
+	if roots := probe.seenRoots(); len(roots) != 0 {
+		t.Fatalf("child ran (roots=%v) despite the fork failure; it must NOT run against the parent base", roots)
+	}
+}
+
+// concurrencyForker counts how many forks are simultaneously live (between Fork and
+// cleanup) and records the peak, so a test can assert the shell-concurrency gate caps
+// concurrent worktrees.
+type concurrencyForker struct {
+	mu      sync.Mutex
+	live    int
+	peak    int
+	gate    chan struct{} // closed by the test to release blocked children
+	entered chan struct{} // signals each Fork has incremented live
+}
+
+func (f *concurrencyForker) Fork(_ context.Context, _ tool.Workspace, label string) (tool.Workspace, func() error, error) {
+	f.mu.Lock()
+	f.live++
+	if f.live > f.peak {
+		f.peak = f.live
+	}
+	f.mu.Unlock()
+	if f.entered != nil {
+		f.entered <- struct{}{}
+	}
+	// Block inside the held slot until the test releases, maximising overlap.
+	if f.gate != nil {
+		<-f.gate
+	}
+	ws := memfs.NewWorkspace("/fork/" + label)
+	cleanup := func() error {
+		f.mu.Lock()
+		f.live--
+		f.mu.Unlock()
+		return nil
+	}
+	return ws, cleanup, nil
+}
+
+// TestSubagentShellGateCapsConcurrentForks asserts WithMaxConcurrentTaskShells bounds
+// how many shell-bearing Task children hold a forked worktree at once: with a cap of
+// N and more than N concurrent Task calls, no more than N forks are ever live.
+func TestSubagentShellGateCapsConcurrentForks(t *testing.T) {
+	const maxShells = 2
+	const fanout = 6
+
+	fk := &concurrencyForker{
+		gate:    make(chan struct{}),
+		entered: make(chan struct{}, fanout),
+	}
+	// Each child does nothing but summarize; the contention is purely in Fork.
+	newChild := func() *agent.Engine {
+		return childEngineWith(mockllm.New(mockllm.TextTurn("done")), catalogWith(t))
+	}
+	// One Task tool, shared across concurrent calls (the gate is per-tool).
+	task := agent.NewTaskTool(newChild(),
+		agent.WithChildForker(fk),
+		agent.WithMaxConcurrentTaskShells(maxShells),
+	)
+
+	var wg sync.WaitGroup
+	for i := 0; i < fanout; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_, _ = task.Execute(context.Background(),
+				session.NewToolCall(session.ToolCallID("c"+string(rune('0'+n))), "Task",
+					json.RawMessage(`{"prompt":"go"}`)),
+				memfs.NewWorkspace("/base"))
+		}(i)
+	}
+
+	// Wait until exactly `maxShells` children have entered Fork; the rest must be blocked on
+	// the gate. Drain `maxShells` entered signals, then assert no more than maxShells are live.
+	for i := 0; i < maxShells; i++ {
+		<-fk.entered
+	}
+	// Give any (incorrectly) unbounded children a chance to enter, then check the peak.
+	// We can't deterministically wait for "nothing else happens", so we assert the gate
+	// holds while still blocked: live must be <= maxShells right now.
+	fk.mu.Lock()
+	live := fk.live
+	fk.mu.Unlock()
+	if live > maxShells {
+		close(fk.gate)
+		wg.Wait()
+		t.Fatalf("%d forks live at once, want <= maxShells=%d (shell gate must bound concurrency)", live, maxShells)
+	}
+
+	// Release the held slots in waves and let everything finish.
+	close(fk.gate)
+	wg.Wait()
+
+	if fk.peak > maxShells {
+		t.Fatalf("peak concurrent forks = %d, want <= maxShells=%d", fk.peak, maxShells)
+	}
+	if fk.live != 0 {
+		t.Errorf("forks still live after completion: %d (cleanup must release every slot)", fk.live)
+	}
+}
+
+// forkLabels returns the labels Fork was called with (concurrency-safe).
+func (f *recordingTaskForker) forkLabels() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.labels))
+	copy(out, f.labels)
+	return out
+}
+
+// blockingForker holds its one slot: the FIRST Fork blocks (signalling it has
+// entered) until released, so a test can keep the shell gate FULL while it fires a
+// second, pre-cancelled call. It records whether Fork was called more than once.
+type blockingForker struct {
+	entered chan struct{} // signalled when the first Fork is in-flight
+	release chan struct{} // closed by the test to let the first Fork return
+	mu      sync.Mutex
+	calls   int
+}
+
+func (f *blockingForker) Fork(_ context.Context, _ tool.Workspace, label string) (tool.Workspace, func() error, error) {
+	f.mu.Lock()
+	f.calls++
+	n := f.calls
+	f.mu.Unlock()
+	if n == 1 {
+		close(f.entered)
+		<-f.release // hold the single gate slot until the test releases it
+	}
+	return memfs.NewWorkspace("/fork/" + label), func() error { return nil }, nil
+}
+
+func (f *blockingForker) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// TestSubagentCtxCancelledBeforeIsolation asserts the abort-don't-fork contract: when
+// the shell gate is FULL and the call's ctx is cancelled, acquireShellSlot returns nil,
+// Execute surfaces the "cancelled before workspace isolation" tool error, and crucially
+// Fork is NEVER called for that call and its child NEVER runs (so no worktree is created
+// and no Bash lands in the shared base). A blocking forker holds the single gate slot so
+// the second (cancelled) call can ONLY take the ctx.Done() branch of the select —
+// deterministic, not a racy "both cases ready" pick.
+func TestSubagentCtxCancelledBeforeIsolation(t *testing.T) {
+	probe := &rootRecordingTool{}
+	// The child WOULD run a probe if it ever started — it must not, for the cancelled call.
+	childLLM := mockllm.New(
+		mockllm.TextTurn("first child done"),
+		mockllm.ToolCallTurn(toolCall("k1", "Probe", `{}`)),
+		mockllm.TextTurn("should never run"),
+	)
+	childEngine := childEngineWith(childLLM, catalogWith(t, probe))
+
+	fk := &blockingForker{entered: make(chan struct{}), release: make(chan struct{})}
+	// Gate capacity 1: the first (blocking) Fork fills it, so the second call's
+	// acquireShellSlot finds the send blocked and its cancelled ctx is the only ready case.
+	task := agent.NewTaskTool(childEngine,
+		agent.WithChildForker(fk),
+		agent.WithMaxConcurrentTaskShells(1),
+	)
+
+	// First call: acquires the only slot and blocks inside Fork (holding the gate).
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		_, _ = task.Execute(context.Background(),
+			session.NewToolCall("c0", "Task", json.RawMessage(`{"prompt":"hold the slot"}`)),
+			memfs.NewWorkspace("/base"))
+	}()
+	<-fk.entered // the gate is now full and held
+
+	// Second call: pre-cancelled ctx, gate full ⇒ acquireShellSlot must abort (nil).
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := task.Execute(ctx,
+		session.NewToolCall("c1", "Task", json.RawMessage(`{"prompt":"inspect"}`)),
+		memfs.NewWorkspace("/base"))
+	if err != nil {
+		t.Fatalf("Task.Execute returned a transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("Task result = %+v, want an error result (ctx cancelled before isolation)", res)
+	}
+	if !strings.Contains(res.Content, "cancelled before workspace isolation") {
+		t.Fatalf("Task error = %q, want it to mention cancellation before isolation", res.Content)
+	}
+	// Only the FIRST call ever forked; the cancelled call must NOT have forked.
+	if got := fk.callCount(); got != 1 {
+		t.Fatalf("Fork called %d times, want exactly 1 (the cancelled call must NOT fork)", got)
+	}
+	// The cancelled call's child must NEVER run: the probe saw no workspace.
+	if roots := probe.seenRoots(); len(roots) != 0 {
+		t.Fatalf("a child ran (roots=%v) despite the pre-isolation cancellation; the cancelled call must NOT run", roots)
+	}
+
+	// Release the first call so the test (and its goroutine) can finish cleanly.
+	close(fk.release)
+	<-firstDone
+}
+
+// TestSubagentMaxConcurrentTaskShellsZeroClamps asserts that
+// WithMaxConcurrentTaskShells(0) clamps the gate to capacity 1 rather than building a
+// zero-capacity channel (which would DEADLOCK the very first acquire). A single forking
+// Task call must complete; a short-ctx deadlock backstop fails the test if it ever
+// blocks forever.
+func TestSubagentMaxConcurrentTaskShellsZeroClamps(t *testing.T) {
+	probe := &rootRecordingTool{}
+	childLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("k1", "Probe", `{}`)),
+		mockllm.TextTurn("done"),
+	)
+	childEngine := childEngineWith(childLLM, catalogWith(t, probe))
+
+	fk := &recordingTaskForker{}
+	task := agent.NewTaskTool(childEngine,
+		agent.WithChildForker(fk),
+		agent.WithMaxConcurrentTaskShells(0), // clamps to 1; a zero-cap gate would deadlock
+	)
+
+	// Short ctx as a deadlock backstop: a zero-cap (unclamped) gate would block the
+	// first acquire forever and trip this deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	res, err := task.Execute(ctx,
+		session.NewToolCall("c1", "Task", json.RawMessage(`{"prompt":"go"}`)),
+		memfs.NewWorkspace("/base"))
+	if err != nil {
+		t.Fatalf("Task.Execute returned a transport error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("Task result is an error: %q (a clamped gate must let a single call complete)", res.Content)
+	}
+	// The single call must have acquired its slot, forked, run, and cleaned up.
+	if labels := fk.forkLabels(); len(labels) != 1 {
+		t.Fatalf("Fork called %d times, want exactly 1 (the single Task call must proceed): %v", len(labels), labels)
+	}
+	if fk.cleanups != 1 {
+		t.Errorf("fork cleanups = %d, want 1 (the slot must be released after the call)", fk.cleanups)
+	}
 }

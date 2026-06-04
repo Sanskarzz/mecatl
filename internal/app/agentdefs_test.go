@@ -266,7 +266,7 @@ func TestAgentSnapshotProjectsResolvedFields(t *testing.T) {
 }
 
 func TestBuildAgentTaskEnginesEmptyRegistry(t *testing.T) {
-	engines, meta, closeFn := buildAgentTaskEngines(context.Background(), Config{}, mockllm.New(), agents.NewRegistry(nil), nil, nil, nil)
+	engines, meta, closeFn := buildAgentTaskEngines(context.Background(), Config{}, mockllm.New(), agents.NewRegistry(nil), nil, nil, nil, nil)
 	if engines != nil || meta != nil || closeFn != nil {
 		t.Fatalf("empty registry must yield nil engines/meta/close, got engines=%v meta=%v close!=nil=%v", engines, meta, closeFn != nil)
 	}
@@ -300,7 +300,7 @@ func TestBuildAgentTaskEnginesCarriesPerDefLimits(t *testing.T) {
 		{Name: "bounded", Description: "b", MaxTurns: 2, MaxToolCalls: 9},
 		{Name: "plain", Description: "p"},
 	})
-	_, meta, _ := buildAgentTaskEngines(context.Background(), cfg, mockllm.New(), reg, nil, nil, nil)
+	_, meta, _ := buildAgentTaskEngines(context.Background(), cfg, mockllm.New(), reg, nil, nil, nil, nil)
 
 	byName := map[string]agent.AgentMeta{}
 	for _, m := range meta {
@@ -365,7 +365,7 @@ func TestBuildAgentTaskEnginesResolvedModelOnRequest(t *testing.T) {
 		{Name: "speedy", Description: "fast one", Model: "fast", Body: "Be quick."},
 	})
 
-	engines, meta, _ := buildAgentTaskEngines(context.Background(), cfg, rec, reg, nil, nil, nil)
+	engines, meta, _ := buildAgentTaskEngines(context.Background(), cfg, rec, reg, nil, nil, nil, nil)
 	if len(engines) != 1 || len(meta) != 1 || meta[0].Name != "speedy" {
 		t.Fatalf("want 1 engine+meta for 'speedy', got engines=%d meta=%+v", len(engines), meta)
 	}

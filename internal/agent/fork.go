@@ -285,8 +285,14 @@ func (*ForkTool) Spec() tool.ToolSpec {
 // the same as the main session. What the fix guarantees is that no ACCIDENTAL
 // shared-base mutation happens — a branch's relative-path Bash lands in the fork.)
 // That is why ReadOnly() can safely return true even for mutating (Edit/Write/Bash)
-// children — unlike TaskTool, where a mutating child shares the base and would force
-// ReadOnly() to false.
+// children — for the SAME reason TaskTool.ReadOnly() stays true: each tool isolates
+// its mutating child so the child's writes never touch the shared parent base.
+// Isolation, not catalog read-only-ness, is the boundary (after Phase 2 a Task child
+// with Bash runs in its OWN git worktree exactly as a Fork branch runs in its own
+// force-copy). The remaining distinction is only WHICH tools the child gets: a Fork
+// branch keeps Edit/Write (it is meant to IMPLEMENT in its fork), while a Task child
+// drops them and is shell-only (a read-only explorer that may run git/build/test but
+// cannot edit the project).
 func (*ForkTool) ReadOnly() bool { return true }
 
 // branchResult is the joined outcome of one branch.

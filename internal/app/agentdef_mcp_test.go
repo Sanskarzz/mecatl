@@ -176,7 +176,7 @@ func TestTaskDefInlineMCPCloseAggregated(t *testing.T) {
 		Tools:       []string{"Read"},
 		MCPServers:  []agents.AgentMCPServer{{Name: "inline", URL: url}},
 	}})
-	engines, _, closeFn := buildAgentTaskEngines(context.Background(), Config{Model: "m"}, mockllm.New(), reg, nil, hookexec.New(nil), nil)
+	engines, _, closeFn := buildAgentTaskEngines(context.Background(), Config{Model: "m"}, mockllm.New(), reg, nil, hookexec.New(nil), nil, nil)
 	if engines["inline-task"] == nil {
 		t.Fatal("inline-task engine not built")
 	}

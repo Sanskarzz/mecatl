@@ -1412,15 +1412,33 @@ func newChildEngineWithHooks(provider port.LLMProvider, cat *tool.Catalog, model
 	})
 }
 
-// buildChildEngine constructs a child *Engine scoped to the read-only explorer
-// toolset (Read/Grep/Glob ONLY — no Fork/Task, so a child can never recurse or fan
-// out further) under an allow-all, non-interactive policy. Both the Task subagent
-// and the Fork fan-out tool share this child shape.
-func buildChildEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
+// buildChildEngine constructs the default Task explorer child *Engine: the read-only
+// explorer toolset (Read/Grep/Glob — never Fork/Task/ToolSearch, so a child can never
+// recurse or fan out further, and never Edit/Write, so it cannot edit the project)
+// under an allow-all, non-interactive policy.
+//
+// Bash IS registered when a runner is configured (runner != nil), using the SANDBOXED
+// runner: a Task child now runs in an isolated git WORKTREE (wired via the Task tool's
+// child forker — see buildTaskTool) that SHARES the parent repo's `.git`, so its shell
+// can inspect history (git log/show), build, and test confined to a throwaway
+// checkout. Because the worktree shares `.git/config` and `.git/hooks`, the runner
+// must be the hardened buildSandboxedCommandRunner (same rationale as team members —
+// see that func) so an untrusted base repo cannot run code via
+// core.pager/hooksPath/fsmonitor/external-diff the instant the child runs git. A
+// shell-less deployment passes a nil runner and the child runs Bash-less (and the
+// caller wires no forker), exactly like the original read-only explorer.
+//
+// BashTool.Execute is workspace-aware: it passes the child's forked Workspace.Root()
+// to the runner as the working directory, so the child's Bash defaults to its OWN
+// worktree, not the shared parent base.
+func buildChildEngine(cfg Config, provider port.LLMProvider, runner tool.CommandRunner) *agent.Engine {
 	childCat := tool.NewCatalog()
 	childCat.MustRegister(tools.ReadTool{})
 	childCat.MustRegister(tools.GrepTool{})
 	childCat.MustRegister(tools.GlobTool{})
+	if runner != nil {
+		childCat.MustRegister(tools.NewBashTool(runner))
+	}
 
 	return newChildEngine(provider, childCat, cfg.Model, promptConfig(cfg))
 }
@@ -1485,17 +1503,46 @@ func buildForkJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 // close func tears those inline managers down (it is aggregated into Built.Close —
 // these are process-lifetime engines). The close is nil when no def opens an inline
 // server.
+//
+// Workspace isolation (Phase 2): when Bash is configured, the Task tool is wired with
+// a SANDBOXED command runner AND a worktree forker (the forker DEFAULT mode — no
+// WithForceCopy — so the child shares the parent repo's `.git` for full history). The
+// Task tool then forks each child run into a throwaway git worktree before running it,
+// so a read-only explorer's shell (git log/show, build, test) is confined to that
+// worktree and never touches the shared parent base — which is what keeps Task
+// read-parallel-safe (see agent.TaskTool.ReadOnly). The sandboxed runner neutralises
+// the git config-driven code-execution vectors in the shared `.git` (same rationale
+// and residual as team members — see buildSandboxedCommandRunner). When Bash is
+// disabled (nil runner) no forker is wired and the child stays a base-sharing
+// read-only explorer with no shell, exactly as before.
 func buildTaskTool(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager) (tool.Tool, func() error) {
 	// Resolve the active skills once so a def's `skills:` can preload skill bodies
 	// into its engine prompt. The same index is the operator-controlled skill set
 	// the Skill tool serves. `hooks` is the inert default each def adopts unless its
 	// own `hooks:` map scopes lifecycle hooks to its engine.
 	skillIdx := resolveSkillIndex(ctx, cfg)
-	engines, meta, mcpClose := buildAgentTaskEngines(ctx, cfg, provider, reg, skillIdx, hooks, mainMgr)
-	return agent.NewTaskTool(
-		buildChildEngine(cfg, provider),
+	// The Task child's Bash runs over a worktree that SHARES the parent `.git`, so it
+	// gets the HARDENED runner (the main session keeps its own unhardened runner). nil
+	// when Bash is disabled — then no shell, no forker.
+	sandboxedRunner := buildSandboxedCommandRunner(cfg)
+	engines, meta, mcpClose := buildAgentTaskEngines(ctx, cfg, provider, reg, skillIdx, hooks, sandboxedRunner, mainMgr)
+	opts := []agent.TaskOption{
 		agent.WithSubagentStopHook(hooks),
 		agent.WithAgentEngines(engines, meta),
+	}
+	// Wire the worktree forker ONLY when Bash is available: the child catalog has Bash
+	// iff sandboxedRunner != nil, and the forker is what isolates that shell. The two
+	// must move together — a Bash child without isolation would run its shell in the
+	// shared base (the exact hazard); a forker without Bash would fork for nothing.
+	if sandboxedRunner != nil {
+		// Worktree default (no WithForceCopy): shares the base repo's `.git` ⇒ full
+		// history for git log/show, with its own throwaway working tree.
+		taskForker := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
+		opts = append(opts, agent.WithChildForker(taskForker))
+	}
+	return agent.NewTaskTool(
+		buildChildEngine(cfg, provider, sandboxedRunner),
+		opts...,
 	), mcpClose
 }
 

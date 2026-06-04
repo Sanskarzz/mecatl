@@ -44,10 +44,14 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   intersected with the call site's available **core** toolset (Read/Edit/Write/Grep/
   Glob/WebFetch/Bash). `Task`/`Fork`/`ToolSearch` are ALWAYS excluded (no nesting / no
   silent disclosure tool).
-  - **Task delegates are unconditionally read-only** — `Task.ReadOnly()` stays `true`,
-    so a def's mutating tools (Edit/Write/non-RO Bash) are dropped on the Task path
-    (with a startup diagnostic). A mutating specialist is a **team member** (forks) or
-    a **Fork** branch, not a Task.
+  - **Task delegates are read-only EXPLORERS WITH A SHELL** — `Task.ReadOnly()` stays
+    `true`, but a Task child now runs in an isolated git **worktree** (when Bash is
+    configured), so it KEEPS Bash for inspection (git log/show, cat, build, test) while
+    **Edit/Write are still dropped** on the Task path (with a startup diagnostic) — a
+    def's Bash survives via `scopedToolNamesMode`'s `allowShell`. Its writes land in the
+    throwaway worktree, never the shared base, which is why `ReadOnly()` stays true. A
+    truly **mutating** specialist (edits the project's files) is a **team member**
+    (force-copy fork) or a **Fork** branch, not a Task.
   - **Team members** obey read-only-share / mutating-fork: a `Mutating` member (runs
     in an isolated fork) MAY keep Edit/Write/Bash; a read-only (base-sharing) member
     has them dropped (so the supervisor's `ErrReadOnlyMemberMutating` backstop never

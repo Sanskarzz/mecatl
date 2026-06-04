@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/stacklok/mecatl/internal/governance"
@@ -21,6 +22,16 @@ const taskToolName = "Task"
 // subagent card title compact and bounds how much of the (model-authored) prompt
 // is echoed to the event stream.
 const maxSubagentGoalLen = 60
+
+// defaultMaxConcurrentTaskShells bounds how many shell-bearing Task children may
+// hold a forked worktree at once. Task is read-only (ReadOnly()==true), so the
+// dispatcher runs Task calls concurrently and the model can fan many out; each
+// shell-bearing child now forks a git worktree (disk + a `git worktree add`
+// process), so an unbounded fan-out is real resource pressure. The gate is
+// acquired only on the forking path (childForker != nil); a forker-less Task is
+// not bounded (it allocates nothing per call beyond the child session). The
+// default mirrors the team supervisor's defaultTeamConcurrency.
+const defaultMaxConcurrentTaskShells = 4
 
 // observableTool is the agent-internal seam by which a tool may forward a
 // REDACTED, allowlisted projection of its internal activity to the parent run's
@@ -121,8 +132,16 @@ var taskSchema = json.RawMessage(`{
 // TaskTool is the subagent delegation tool (gauntlet #7). It is a tool.Tool that,
 // when executed, spins up a CHILD agent loop with its own fresh Session, its own
 // (tighter) Limits, and a SCOPED tool catalog — supplied by the injected child
-// *Engine — runs it to completion against the SAME workspace as the parent, and
-// returns ONLY the child's final summary string as a single ToolResult.
+// *Engine — runs it to completion, and returns ONLY the child's final summary
+// string as a single ToolResult.
+//
+// Workspace: when a child forker is wired (WithChildForker — the composition root
+// wires it iff the child catalog includes Bash), each child runs in its OWN isolated
+// git WORKTREE (shares the base repo's `.git` ⇒ full history) so the explorer's shell
+// can inspect (git log/show, cat, build, test) without its writes touching the shared
+// parent workspace; the worktree is torn down after the child drains. Without a
+// forker the child has no Bash and runs against the parent workspace, exactly as it
+// originally did. Either way Task stays read-parallel-safe (see ReadOnly).
 //
 // Context isolation is the whole point: the parent never observes the child's
 // intermediate tool.call / tool.result / message.delta events. The child's Event
@@ -174,6 +193,25 @@ type TaskTool struct {
 	// PreToolUse/PostToolUse hooks.
 	hooks port.HookRunner
 
+	// childForker, when non-nil, isolates each child run in its OWN forked workspace
+	// (a cheap git WORKTREE — shares the base repo's `.git` ⇒ full history) instead of
+	// running against the shared parent workspace. The composition root wires it ONLY
+	// when the child catalog includes Bash, so a shell-bearing read-only explorer runs
+	// its (mutating-classified) Bash in a throwaway worktree, never the shared base —
+	// which is what keeps Task read-parallel-safe (see ReadOnly). When nil, the child
+	// runs against the parent ws exactly as before (no shell wired). A fork FAILURE on
+	// this path is a tool error, NOT a silent fallback to the shared ws: the child's
+	// catalog has Bash precisely because isolation was available, so running it in the
+	// shared base would be the exact hazard isolation exists to prevent.
+	childForker tool.WorkspaceForker
+
+	// shellGate bounds how many shell-bearing Task children may hold a forked
+	// worktree concurrently. It is a buffered channel used as a counting semaphore,
+	// acquired before Fork and released after the fork's cleanup, ONLY on the forking
+	// path. nil disables bounding (the forker-less path never touches it). Capacity is
+	// defaultMaxConcurrentTaskShells unless overridden by WithMaxConcurrentTaskShells.
+	shellGate chan struct{}
+
 	// idPrefix seeds the generated child SessionID so child sessions are
 	// distinguishable in logs/stores.
 	idPrefix string
@@ -206,6 +244,32 @@ func WithSubagentStopHook(h port.HookRunner) TaskOption {
 // "subagent"). Child ids are of the form "<prefix>-<callID>".
 func WithChildSessionPrefix(p string) TaskOption {
 	return func(t *TaskTool) { t.idPrefix = p }
+}
+
+// WithChildForker injects the workspace-isolation seam each child run forks before
+// executing. The composition root wires it ONLY when the child catalog includes Bash
+// (the read-only explorer's shell), so the child's mutating-classified Bash lands in
+// a throwaway git worktree, never the shared parent base — preserving Task's
+// read-parallel safety (see ReadOnly). It should be the forker's DEFAULT mode (git
+// worktree: shares the base repo's `.git` ⇒ full history for git log/show). When the
+// forker is nil (the default), the child runs against the parent workspace exactly as
+// before. A fork failure on this path is a tool error, not a silent fallback.
+func WithChildForker(f tool.WorkspaceForker) TaskOption {
+	return func(t *TaskTool) { t.childForker = f }
+}
+
+// WithMaxConcurrentTaskShells bounds how many shell-bearing Task children may hold a
+// forked worktree at once (default defaultMaxConcurrentTaskShells). It applies ONLY
+// when a child forker is wired (the forker-less path allocates nothing per call worth
+// bounding). A value < 1 is clamped to 1 (a zero-capacity gate would deadlock). It is
+// a no-op when no forker is wired.
+func WithMaxConcurrentTaskShells(n int) TaskOption {
+	return func(t *TaskTool) {
+		if n < 1 {
+			n = 1
+		}
+		t.shellGate = make(chan struct{}, n)
+	}
 }
 
 // WithAgentEngines injects the per-definition child engines (keyed by agent name)
@@ -275,6 +339,13 @@ func NewTaskTool(childEngine *Engine, opts ...TaskOption) tool.Tool {
 	for _, o := range opts {
 		o(t)
 	}
+	// When a child forker is wired but the operator did not explicitly size the shell
+	// gate, default it: each shell-bearing child holds a forked worktree, so an
+	// unbounded read-parallel fan-out must be capped. The gate is irrelevant (and left
+	// nil) on the forker-less path.
+	if t.childForker != nil && t.shellGate == nil {
+		t.shellGate = make(chan struct{}, defaultMaxConcurrentTaskShells)
+	}
 	return t
 }
 
@@ -284,11 +355,14 @@ func NewTaskTool(childEngine *Engine, opts ...TaskOption) tool.Tool {
 // the model can choose a specialist via the optional `agent` arg.
 func (t *TaskTool) Spec() tool.ToolSpec {
 	desc := "Delegate a focused read-only investigation — 'search → summarize', " +
-		"'read N files → report findings' — to a subagent with its own fresh context. " +
-		"Returns only the subagent's final summary. Use when exploration would bloat the " +
-		"main context. The subagent cannot see this conversation, so put everything it " +
-		"needs in `prompt`; it runs read-only tools (Read/Grep/Glob), cannot make changes, " +
-		"and cannot delegate further."
+		"'read N files → report findings', 'check the git history' — to a subagent with " +
+		"its own fresh context. Returns only the subagent's final summary. Use when " +
+		"exploration would bloat the main context. The subagent cannot see this " +
+		"conversation, so put everything it needs in `prompt`. It runs read-only tools " +
+		"(Read/Grep/Glob) PLUS a full shell (git log/show, cat, build, test) in an " +
+		"isolated, throwaway git worktree — so it can inspect history and run commands, " +
+		"but its changes are DISCARDED, it cannot edit the project's files (no Edit/Write), " +
+		"and it cannot delegate further."
 	desc += t.agentEnumeration()
 	return tool.ToolSpec{
 		Name:        taskToolName,
@@ -317,14 +391,27 @@ func (t *TaskTool) agentEnumeration() string {
 // dispatcher run Task CONCURRENTLY with other read-only tools that share the same
 // Workspace (read-parallel / mutate-serial; see dispatch.go).
 //
-// INVARIANT — this is safe ONLY while the child catalog stays read-only. The
-// composition root MUST wire childEngine with a read-only explorer catalog (Read,
-// Grep, Glob; see NewTaskTool). Wiring a mutating tool (Edit/Write/non-RO Bash)
-// into a child while ReadOnly() still returns true would let a subagent mutate
-// the shared Workspace concurrently with the parent's other read-only calls,
-// breaking the read-parallel safety guarantee and racing on the filesystem. If a
-// mutating child is ever needed, ReadOnly() must return false so the dispatcher
-// serializes Task with everything else.
+// INVARIANT — what keeps this safe is WORKSPACE ISOLATION, not catalog
+// read-only-ness. A Task child may now WRITE via Bash (the read-only explorer's
+// shell — git, build, test, cat), but when a child forker is wired (childForker !=
+// nil — the composition root wires it iff the child catalog has Bash) the child runs
+// in an ISOLATED git WORKTREE, so its writes land in a throwaway checkout and NEVER
+// touch the shared parent workspace the parent's other read-only calls race over.
+// The read-parallel guarantee therefore holds exactly as before: no two concurrent
+// dispatched tools ever mutate the same tree.
+//
+// The only surface a worktree child shares with the parent is the `.git` object
+// DB/refs (git-locked for concurrent access; config-driven code-execution vectors
+// — hooks/pager/fsmonitor/external-diff — neutralized by the sandboxed runner's
+// gitenv env in the composition layer), and a detached-HEAD worktree's stray commit
+// is dangling and gc-able. A fork FAILURE is surfaced as a tool error, never a
+// silent fallback to the shared ws (which WOULD break this), so the invariant cannot
+// be violated by a degraded fork.
+//
+// When NO forker is wired the child has no Bash (the catalog stays a pure read-only
+// explorer) and runs against the shared ws — also safe, by catalog read-only-ness,
+// exactly as it always was. Either way Task is read-parallel-safe and ReadOnly()
+// honestly returns true.
 func (*TaskTool) ReadOnly() bool { return true }
 
 // Execute runs one subagent: it builds a FRESH child Session (own conversation,
@@ -388,15 +475,47 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 		}
 	}
 
+	// Workspace selection. When a child forker is wired (the child catalog has Bash),
+	// run the child in its OWN isolated git worktree so its shell's writes never touch
+	// the shared parent base — what keeps Task read-parallel-safe (see ReadOnly). A
+	// fork FAILURE is a tool error, NOT a silent fallback to the shared ws: the child
+	// has Bash precisely because isolation was available, so running it shared would be
+	// the exact hazard. cleanup tears the worktree down after the child fully drains
+	// (the run is drained below in this call), so a deferred cleanup is correct.
+	runWS := ws
+	if t.childForker != nil {
+		// Bound concurrent shell-bearing children (each holds a worktree): acquire
+		// before Fork, release after cleanup. The gate is honored per-call so a
+		// read-parallel fan-out cannot create unbounded worktrees at once.
+		release := t.acquireShellSlot(ctx)
+		if release == nil {
+			// ctx cancelled while waiting for a slot — surface it as a tool error rather
+			// than forking; the parent ctx governs the whole call.
+			return session.NewToolError(call.ID, "Task: cancelled before workspace isolation"), nil
+		}
+		forkWS, cleanup, err := t.childForker.Fork(ctx, ws, subagentGoal(args))
+		if err != nil {
+			release()
+			return session.NewToolError(call.ID, "Task: workspace isolation failed: "+err.Error()), nil
+		}
+		runWS = forkWS
+		defer func() {
+			if cleanup != nil {
+				_ = cleanup()
+			}
+			release()
+		}()
+	}
+
 	// A fresh child session: own conversation, own (tighter) Limits, scoped to the
-	// SAME workspace root as the parent so the subagent explores the same project.
-	// When a named agent def pins limits, the child runs under THOSE; otherwise it
-	// uses the Task tool's default limits.
+	// run workspace root (the isolated worktree when forked, else the parent base) so
+	// the subagent explores the same project. When a named agent def pins limits, the
+	// child runs under THOSE; otherwise it uses the Task tool's default limits.
 	childID := t.childSessionID(call.ID)
 	child := session.New(
 		childID,
 		t.childMode,
-		ws.Root(),
+		runWS.Root(),
 		limits,
 		time.Now(),
 	)
@@ -413,7 +532,7 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	}
 
 	start := time.Now()
-	run := engine.Run(ctx, child, ws, args.Prompt)
+	run := engine.Run(ctx, child, runWS, args.Prompt)
 
 	// Drain the child's Event stream entirely INSIDE the Task tool. Nothing from
 	// the child surfaces to the parent except the final summary string and, when
@@ -447,6 +566,25 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 		final = "(subagent produced no summary)"
 	}
 	return session.NewToolResult(call.ID, final), nil
+}
+
+// acquireShellSlot acquires one slot of the shell-bearing-child concurrency gate,
+// blocking until a slot is free or ctx is cancelled. It returns a release func to
+// return the slot (idempotent-safe to call once), or nil if ctx was cancelled while
+// waiting — the caller then aborts the call without forking. A nil gate (no bound)
+// returns an inert release immediately. It is only ever consulted on the forking
+// path (childForker != nil), where NewTaskTool always sized a gate.
+func (t *TaskTool) acquireShellSlot(ctx context.Context) func() {
+	if t.shellGate == nil {
+		return func() {}
+	}
+	select {
+	case t.shellGate <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-t.shellGate }) }
+	case <-ctx.Done():
+		return nil
+	}
 }
 
 // subagentGoal derives the short, plain-text goal label forwarded on

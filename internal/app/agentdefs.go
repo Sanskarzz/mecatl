@@ -447,34 +447,50 @@ func defHookRunner(cfg Config, def agents.AgentDef, fallback port.HookRunner) po
 	return hookexec.New(hooks, opts...)
 }
 
-// buildAgentTaskEngines turns the registry into the per-def, read-only child
-// engines + metadata the Task tool routes over. Each engine gets:
+// buildAgentTaskEngines turns the registry into the per-def child engines +
+// metadata the Task tool routes over. Each engine gets:
 //   - a SCOPED catalog = (def.Tools allowlist ∩ available base tools) minus
-//     def.DisallowedTools, read-only-only, never Task/Fork/ToolSearch;
+//     def.DisallowedTools, never Task/Fork/ToolSearch and never Edit/Write (a Task
+//     child is a read-only explorer), but KEEPING Bash when the Task tool can isolate
+//     the child in a worktree (runner != nil — see allowShell below);
 //   - a resolved model (def.Model > SubagentModel > parent);
 //   - the def.Body composed into the system prompt as the Role (composition-layer
 //     only; no prompt.Config domain change — critique M2/M3);
 //   - an allow-all policy and progressive disclosure OFF (tiny catalog).
 //
-// A def whose entire allowlist is stripped (e.g. a pure-mutating Task def) still
+// A def whose entire allowlist is stripped (e.g. a pure-Edit/Write Task def) still
 // gets an engine with an empty-but-valid catalog; the diagnostics explain why,
 // and the model still receives a clear "no tools" inventory. Returns nil/empty
 // when the registry is empty so Task behaves exactly as before.
+//
 // The skillIdx preloads each def's `skills:` bodies into its prompt; defaultHooks
 // is the inert fallback HookRunner a def with no scoped `hooks:` adopts (so the
 // default Task engine behaviour is unchanged).
-func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMProvider, reg *agents.Registry, skillIdx skillIndex, defaultHooks port.HookRunner, mainMgr *mcp.Manager) (map[string]*agent.Engine, []agent.AgentMeta, func() error) {
+//
+// runner is the SANDBOXED command runner (nil when Bash is disabled). When non-nil
+// the Task tool forks every child into a worktree, so a per-def Task explorer that
+// scopes Bash KEEPS it (allowShell) — registered with the hardened runner — and runs
+// it in that isolated worktree, exactly like the default explorer; Edit/Write are
+// still dropped. The per-def engines share the SAME TaskTool child forker (the fork
+// happens in TaskTool.run regardless of which engine handles the call), so they only
+// need Bash in their catalog. When runner is nil, allowShell is false and Bash is
+// dropped — the def stays a base-sharing read-only explorer with no shell.
+func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMProvider, reg *agents.Registry, skillIdx skillIndex, defaultHooks port.HookRunner, runner tool.CommandRunner, mainMgr *mcp.Manager) (map[string]*agent.Engine, []agent.AgentMeta, func() error) {
 	if reg == nil || reg.Len() == 0 {
 		return nil, nil, nil
 	}
 	base := baseTaskTools(cfg)
+	// allowShell: a per-def Task explorer keeps Bash ONLY when a (sandboxed) runner is
+	// wired — the Task tool then isolates the child in a worktree where its shell is
+	// confined. Edit/Write stay dropped regardless (read-only explorer).
+	allowShell := runner != nil
 
 	engines := make(map[string]*agent.Engine, reg.Len())
 	meta := make([]agent.AgentMeta, 0, reg.Len())
 	var closeFn func() error
 
 	for _, def := range reg.List() {
-		names, diags := scopedToolNames(def, base)
+		names, diags := scopedToolNamesMode(def, base, false, allowShell)
 		for _, d := range diags {
 			slog.Warn("agent def tool scoping",
 				"agent", def.Name, "tool", d.tool, "reason", d.reason, "path", def.Path)
@@ -482,6 +498,15 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 
 		cat := tool.NewCatalog()
 		for _, name := range names {
+			// Bash registers with the HARDENED runner (the base map's Bash is the
+			// unhardened one used only to compute the name set), since the Task child's
+			// shell runs over a worktree that shares the parent `.git`. Every other tool
+			// registers as-is. allowShell is true iff runner != nil, so this branch only
+			// fires with a non-nil runner.
+			if name == tools.BashToolName && runner != nil {
+				cat.MustRegister(tools.NewBashTool(runner))
+				continue
+			}
 			cat.MustRegister(base[name])
 		}
 

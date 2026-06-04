@@ -125,8 +125,9 @@ Without `--openai` the demo is fully offline. With `--openai` and no
 ## 3. Running the server (`mecated`)
 
 `mecated` is a composition root: it parses flags/env, then delegates the
-assembly — an LLM provider, the seven-tool catalog plus a read-only `Task`
-subagent, the permission policy, lifecycle hooks, the session store, and the
+assembly — an LLM provider, the seven-tool catalog plus a read-only-explorer
+`Task` subagent (which gets a full shell inside an isolated git worktree when Bash
+is configured), the permission policy, lifecycle hooks, the session store, and the
 two-layer system prompt — to the shared `internal/app` package (`app.Build`),
 and serves the resulting `HarnessService` over gRPC and HTTP/SSE concurrently.
 (The TUI reuses that same `app.Build` to host an embedded server — see below.)

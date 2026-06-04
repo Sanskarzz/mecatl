@@ -532,28 +532,56 @@ just custom Go `HookRunner` adapters).
 
 `TaskTool` is a `tool.Tool` (catalog name `Task`) that delegates a focused
 read-only investigation to a **child agent loop**. Its `Execute`:
-1. Builds a **fresh** child `session.New(...)` — own conversation, own (tighter)
+1. **Workspace selection.** When a child forker is wired (`WithChildForker` — the
+   composition root wires it **iff** the child catalog includes Bash) it forks the
+   incoming `ws` into an **isolated git worktree** (the forker DEFAULT mode — shares
+   the base repo's `.git`, so the child sees full history) and runs the child there;
+   the worktree is torn down after the child drains. Without a forker the child has
+   no Bash and runs against the **parent** `ws`, exactly as before. A fork **failure**
+   on the wired path is a tool **error**, never a silent fallback to the shared `ws`
+   (running the child's Bash in the shared base is the exact hazard isolation exists
+   to prevent).
+2. Builds a **fresh** child `session.New(...)` — own conversation, own (tighter)
    `Limits` (`defaultChildLimits`: 12 turns / 40 tool calls / 3 failures),
-   scoped to the **same workspace root** as the parent.
-2. Runs the child via the injected `childEngine.Run(ctx, child, ws, prompt)`.
-3. **Drains the child's entire Event stream inside `Execute`** (`drainChild`),
+   scoped to the **run** workspace root (the worktree when forked, else the parent).
+3. Runs the child via the injected `childEngine.Run(ctx, child, runWS, prompt)`.
+4. **Drains the child's entire Event stream inside `Execute`** (`drainChild`),
    discarding every intermediate `turn.start`/`message.delta`/`tool.call`/
    `tool.result`/`hook`/`compaction` event, and **returns only the final
    summary string** as one `ToolResult` (gauntlet #7).
 
-Read-only-child invariants, enforced by construction and defended at runtime:
-- The composition layer wires `childEngine` with a **read-only explorer catalog
-  (Read, Grep, Glob only)** that **never includes `Task`** — so a subagent
-  cannot recurse — and an **allow-all** policy so the child never prompts a
-  human (`internal/app`: `buildTaskTool` / `buildChildEngine`).
-- `TaskTool.ReadOnly()` returns `true`, letting the parent run `Task`
-  concurrently with other read-only tools. Its godoc states the invariant
-  explicitly: this is safe only while the child catalog stays read-only.
+The child is a **read-only explorer with a shell** — capability flows down from the
+parent (which has Bash); isolation, not catalog read-only-ness, is the security
+boundary:
+- The composition layer wires `childEngine` with **Read/Grep/Glob plus Bash**
+  (`buildChildEngine` registers Bash via the **sandboxed** runner —
+  `buildSandboxedCommandRunner`, the SAME hardening team members get, since the
+  worktree shares the parent `.git`), **never `Task`/`Fork`/`ToolSearch`** (no
+  recursion / fan-out) and **never Edit/Write** (it inspects, it does not edit the
+  project). Per-def Task engines keep Bash via `scopedToolNamesMode`'s `allowShell`
+  and share the one `TaskTool` forker. With no runner (`--no-bash`) the child is a
+  Bash-less read-only explorer and no forker is wired — the original behaviour. The
+  policy is **allow-all** so the child never prompts a human (`internal/app`:
+  `buildTaskTool` / `buildChildEngine` / `buildAgentTaskEngines`).
+- `TaskTool.ReadOnly()` stays **`true`**, letting the parent run `Task` concurrently
+  with other read-only tools. This is safe because the child's (mutating-classified)
+  Bash writes land in the **isolated worktree**, never the shared base the parent's
+  other read-only calls race over; the only shared surface is the `.git` object
+  DB/refs (git-locked; config-driven code-exec vectors neutralised via `gitenv`).
+- `WithMaxConcurrentTaskShells` (default 4) is a semaphore bounding how many
+  worktree-bearing children fork at once — Task is read-parallel, so the model can
+  fan many out; each shell-bearing child holds a worktree (`git worktree add` +
+  disk). The gate is acquired before `Fork` and released after cleanup, only on the
+  forking path.
 - Defensively, `drainChild` **auto-denies** any permission ask the child raises,
   so a child can never block on a human regardless of policy.
 - The child run is bounded by the parent `ctx`; `SubagentStop` fires
   best-effort (on a detached short-lived context if the parent is already
   cancelled). `NewTaskTool` panics on a nil child Engine.
+
+This mirrors the **team-member** worktree treatment (§ below): same `gitenv`
+hardening, same untrusted-`.gitattributes` residual, and the workspace-trust gate is
+the **shared follow-up** for both Team and Task.
 
 ## 9. The OpenAI Responses adapter (`internal/adapter/openai`)
 
@@ -788,8 +816,12 @@ add` would otherwise fire the base repo's `post-checkout` hook at fork time) and
 member runner share it and can't drift: `Scrub` drops inherited `GIT_*` danger
 (`GIT_EXTERNAL_DIFF`/`GIT_SSH_COMMAND`/…) and forces `core.hooksPath=/dev/null`,
 `core.pager=cat`, `core.fsmonitor=false`, empty `diff.external`, `GIT_PAGER`/`PAGER=cat`,
-`GIT_CONFIG_NOSYSTEM`. The main session keeps its unhardened runner. (Task /
-`buildChildEngine` are a separate, unchanged read-only-explorer path.)
+`GIT_CONFIG_NOSYSTEM`. The main session keeps its unhardened runner. **The Task
+subagent (§8) shares this exact treatment**: when Bash is configured `TaskTool` holds
+its own worktree forker (`WithChildForker`) and forks each child into a throwaway
+worktree, with the SAME `buildSandboxedCommandRunner` + `gitenv` hardening and the
+SAME untrusted-`.gitattributes` residual; the workspace-trust gate is the shared
+follow-up for both.
 
 ## 16. Extensibility — MCP, tools & progressive disclosure
 
