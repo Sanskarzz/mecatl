@@ -522,3 +522,183 @@ func TestNarrateTrustLogsDecision(t *testing.T) {
 		}
 	}
 }
+
+// osBackedTrustEnv returns a ResolveEnv whose XDG config dir is configDir and whose
+// reads hit the real filesystem (os.ReadFile) — so the REAL registry write seam
+// (osRegistryWrite, used by workspacetrust.NewWithEnv) writes trust.yaml under
+// configDir and a subsequent read sees it. Fully offline (a temp dir, never the
+// developer's ~/.config).
+func osBackedTrustEnv(configDir string) xdgconfig.ResolveEnv {
+	return xdgconfig.ResolveEnv{
+		Getenv: func(k string) string {
+			if k == "XDG_CONFIG_HOME" {
+				return configDir
+			}
+			return ""
+		},
+		UserHomeDir: func() (string, error) { return "", errors.New("no home") },
+		ReadFile:    os.ReadFile,
+	}
+}
+
+// realWSWithSoul creates a real workspace dir carrying a project soul (an authority
+// member + a stable identity anchor) and returns its realpath.
+func realWSWithSoul(t *testing.T) string {
+	t.Helper()
+	ws := realWS(t)
+	if err := os.MkdirAll(filepath.Join(ws, ".mecatl"), 0o755); err != nil {
+		t.Fatalf("mkdir .mecatl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".mecatl", "soul.md"), []byte("project persona"), 0o644); err != nil {
+		t.Fatalf("write soul: %v", err)
+	}
+	return ws
+}
+
+// TestResolveTrustExportedDelegates asserts the EXPORTED ResolveTrust returns the
+// same decision as the unexported resolveTrust (the prompt and Build never disagree).
+func TestResolveTrustExportedDelegates(t *testing.T) {
+	ws := realWS(t)
+	cfg := t.TempDir()
+	settings := []byte("trustedWorkspaces:\n  - " + ws + "\n")
+	withTrustEnv(t, trustSettingsEnv(cfg, settings))
+
+	got := ResolveTrust(Config{Workspace: ws})
+	want := resolveTrust(Config{Workspace: ws})
+	if got != want {
+		t.Fatalf("ResolveTrust=%+v != resolveTrust=%+v", got, want)
+	}
+	if !got.Trusted || got.Source != TrustDeclared {
+		t.Fatalf("ResolveTrust(declared) = %+v, want Trusted/declared", got)
+	}
+}
+
+// TestHasProjectAuthorityComposition asserts the composition wrapper detects a
+// project soul and skips an empty workspace.
+func TestHasProjectAuthorityComposition(t *testing.T) {
+	withTrustEnv(t, trustSettingsEnv(t.TempDir(), nil))
+	if HasProjectAuthority(Config{Workspace: ""}) {
+		t.Fatal("empty workspace reported authority")
+	}
+	if HasProjectAuthority(Config{Workspace: realWS(t)}) {
+		t.Fatal("empty repo reported authority")
+	}
+	if !HasProjectAuthority(Config{Workspace: realWSWithSoul(t)}) {
+		t.Fatal("repo with a soul did NOT report authority")
+	}
+}
+
+// TestHasProjectAuthorityCompositionPerType lifts the adapter's per-type authority
+// cases UP through the composition wrapper (app.HasProjectAuthority), so the two
+// can't silently diverge: it covers each authority member type (soul / agent /
+// command / skill / .mecatl allow-rule / .claude allow-rule) and the two
+// NOT-authority cases (deny-only, empty-allow). It writes to a real workspace (the
+// probe walks the real tree); trustEnv is faked only so no real ~/.config is read.
+func TestHasProjectAuthorityCompositionPerType(t *testing.T) {
+	cases := []struct {
+		name string
+		rel  string
+		body string
+		want bool
+	}{
+		{"soul", ".mecatl/soul.md", "project persona", true},
+		{"agent", ".claude/agents/reviewer.md", "agent body", true},
+		{"command", ".mecatl/commands/deploy.md", "command body", true},
+		{"skill", ".mecatl/skills/x/SKILL.md", "skill body", true},
+		{"mecatl-allow", ".mecatl/settings.yaml", "permissions:\n  allow:\n    - Read\n", true},
+		{"claude-allow", ".claude/settings.json", `{"permissions":{"allow":["Read"]}}`, true},
+		{"deny-only", ".mecatl/settings.yaml", "permissions:\n  deny:\n    - Bash\n", false},
+		{"empty-allow", ".mecatl/settings.yaml", "permissions:\n  allow: []\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withTrustEnv(t, trustSettingsEnv(t.TempDir(), nil))
+			ws := realWS(t)
+			p := filepath.Join(ws, tc.rel)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if err := os.WriteFile(p, []byte(tc.body), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if got := HasProjectAuthority(Config{Workspace: ws}); got != tc.want {
+				t.Fatalf("HasProjectAuthority(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRememberTrustRoundTripFeedsResolve is the no-double-resolution proof: after the
+// prompt persists via RememberTrust, a fresh ResolveTrust returns TrustRemembered for
+// the SAME workspace+anchor — Build will NOT re-prompt or re-resolve to a different
+// answer. It also proves the persisted anchor matches the live anchor (no drift right
+// after a grant), and that the trustedAt clock is the injected one.
+func TestRememberTrustRoundTripFeedsResolve(t *testing.T) {
+	ws := realWSWithSoul(t)
+	cfg := t.TempDir()
+	withTrustEnv(t, osBackedTrustEnv(cfg))
+
+	// Pre-state: not trusted, but authority present ⇒ the prompt would fire.
+	pre := ResolveTrust(Config{Workspace: ws})
+	if pre.Trusted || pre.Drifted {
+		t.Fatalf("pre-Remember: %+v, want untrusted/undrifted (TrustNone)", pre)
+	}
+	if !HasProjectAuthority(Config{Workspace: ws}) {
+		t.Fatal("pre-Remember: expected authority present")
+	}
+
+	at := time.Date(2026, 6, 4, 9, 30, 0, 0, time.UTC)
+	if err := RememberTrust(Config{Workspace: ws}, at); err != nil {
+		t.Fatalf("RememberTrust: %v", err)
+	}
+
+	// Post-state: the SAME fold now returns TrustRemembered — the outcome feeds the
+	// next resolution (no re-prompt). This is exactly what Build computes.
+	post := ResolveTrust(Config{Workspace: ws})
+	if !post.Trusted || post.Source != TrustRemembered || post.Drifted {
+		t.Fatalf("post-Remember: %+v, want Trusted/remembered/undrifted", post)
+	}
+}
+
+// TestRememberTrustThenDriftReResolvesDrifted asserts that editing the identity
+// surface AFTER a Remember makes the next ResolveTrust report Drifted (untrusted) —
+// the signal mecatui turns into a re-prompt. Re-persisting then clears it.
+func TestRememberTrustThenDriftReResolvesDrifted(t *testing.T) {
+	ws := realWSWithSoul(t)
+	cfg := t.TempDir()
+	withTrustEnv(t, osBackedTrustEnv(cfg))
+
+	at := time.Date(2026, 6, 4, 9, 30, 0, 0, time.UTC)
+	if err := RememberTrust(Config{Workspace: ws}, at); err != nil {
+		t.Fatalf("RememberTrust: %v", err)
+	}
+	if d := ResolveTrust(Config{Workspace: ws}); !d.Trusted {
+		t.Fatalf("after Remember: %+v, want trusted", d)
+	}
+
+	// Edit the soul ⇒ the live anchor drifts from the remembered one.
+	if err := os.WriteFile(filepath.Join(ws, ".mecatl", "soul.md"), []byte("MALICIOUS rewrite"), 0o644); err != nil {
+		t.Fatalf("rewrite soul: %v", err)
+	}
+	drift := ResolveTrust(Config{Workspace: ws})
+	if drift.Trusted || !drift.Drifted {
+		t.Fatalf("after edit: %+v, want untrusted+Drifted (re-prompt signal)", drift)
+	}
+
+	// Re-bless: persist the new anchor ⇒ trusted again, no drift.
+	if err := RememberTrust(Config{Workspace: ws}, at); err != nil {
+		t.Fatalf("re-RememberTrust: %v", err)
+	}
+	if d := ResolveTrust(Config{Workspace: ws}); !d.Trusted || d.Drifted {
+		t.Fatalf("after re-bless: %+v, want trusted/undrifted", d)
+	}
+}
+
+// TestRememberTrustEmptyWorkspaceNoop asserts RememberTrust with no workspace is a
+// no-op (no error, nothing written) — a degraded composition never aborts.
+func TestRememberTrustEmptyWorkspaceNoop(t *testing.T) {
+	withTrustEnv(t, osBackedTrustEnv(t.TempDir()))
+	if err := RememberTrust(Config{Workspace: ""}, time.Now()); err != nil {
+		t.Fatalf("RememberTrust(empty) = %v, want nil no-op", err)
+	}
+}

@@ -493,8 +493,8 @@ matches** the workspace's live identity surface.
   (`workspace trust: identity anchor DRIFTED …`). `mecated` has no prompt, so a
   drifted entry never silently inherits the old grant; the interactive re-prompt
   that turns drift back into a fresh trust decision is the `mecatui` first-encounter
-  prompt (a later sub-phase). `--trust-project` always overrides (it short-circuits
-  before the registry is even read).
+  prompt (see the next section). `--trust-project` always overrides (it
+  short-circuits before the registry is even read).
 - **`mecated` is read-only on the registry** — it *reads* `trust.yaml`
   declaratively (a remembered + undrifted workspace is trusted) but **never
   prompts and never writes** it. A repo trusted in `mecatui` for a given user is
@@ -506,6 +506,56 @@ matches** the workspace's live identity surface.
   corrupt / wrong-version `trust.yaml` resolves to **untrusted** (a corrupt
   registry never *grants* trust). The path is derived solely from your user XDG
   config dir, never from a repo-controlled path — a repo cannot self-trust.
+
+### The `mecatui` first-encounter trust prompt (WORKSPACE-TRUST Phase 2c)
+
+`mecated` is purely declarative — it never asks. But when you launch **`mecatui`**
+with its **embedded** server (the default: no `--server`, and no `mecated` already
+running on the loopback default) in a workspace that is **not yet trusted** and
+that carries a **project authority set** worth gating, `mecatui` prompts you once,
+**before** the TUI takes over the screen:
+
+```
+mecatui: do you trust the project files in this workspace?
+  /home/me/src/some-cloned-repo
+Trusting honours this project's soul, agents, commands, skills, and ALLOW rules. Its deny/ask rules apply regardless.
+[t]rust (persist) / [o]nce (this run only) / [n]o (default):
+```
+
+- **`t` (trust)** — trust this run **and remember it**: writes the workspace +
+  its current identity-anchor hash to `trust.yaml`, so future launches (and your
+  own `mecated`) trust it without asking, until the project's identity surface
+  drifts.
+- **`o` (once)** — trust **this run only**; nothing is persisted. Next launch asks
+  again.
+- **`n` / Enter / anything else** — **do not trust** (the safe default): the
+  project's soul, agents, commands, skills, and ALLOW rules are withheld; the agent
+  still runs with your user-tier config and the built-in tools.
+
+**When the prompt fires.** Only when there is something a trust grant would
+actually admit: a project soul (`<ws>/.mecatl/soul.md`), a project-tier
+agent/command/skill definition, or a project `settings.yaml`/`settings.local.yaml`
+carrying **ALLOW** rules. A repo with only deny/ask rules (which apply regardless)
+or no project authority at all is **never** prompted — you are not nagged for a
+workspace that has nothing to gate. A workspace already trusted (via
+`--trust-project`, a `trustedWorkspaces:` match, or a remembered + undrifted
+`trust.yaml` entry) is **not** prompted either.
+
+**Drift is a re-prompt.** If you previously trusted a workspace and its identity
+surface (soul / agents / commands / skills) has since **changed**, the prompt
+re-fires with a "this workspace **CHANGED** since you trusted it" notice —
+answering `t` re-persists the new anchor.
+
+**Non-interactive = untrusted (fail-safe).** If `mecatui`'s stdin is **not a
+terminal** (piped, redirected, headless), it **cannot** prompt — so it proceeds
+**untrusted** for that run and prints a one-line note. It never blocks startup
+waiting for input and never auto-trusts off a pipe. To trust non-interactively,
+pass `--trust-project` or declare the workspace in `trustedWorkspaces:`.
+
+**Security.** The echoed workspace path is **terminal-escape-sanitized** before
+display, so a repo directory named with embedded ANSI/OSC escapes cannot corrupt
+or spoof the prompt (CWE-150). The prompt and the registry write live in the
+`mecatui` composition root, not the render layer.
 
 ### What an untrusted workspace withholds (WORKSPACE-TRUST Phase 2a)
 

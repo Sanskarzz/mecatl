@@ -117,6 +117,37 @@ Pass `--trust-project` for a repo you trust to honour its ALLOW rules and projec
 soul — exactly the gesture `mecated` requires. (Earlier builds hardcoded trust ON
 for the TUI; that blanket-trust regression is gone.)
 
+**First-encounter trust prompt (WORKSPACE-TRUST Phase 2c).** Rather than silently
+ignoring an untrusted repo, the embedded server asks you once. Before the TUI takes
+over the screen (a **pre-alt-screen** stderr prompt, alongside the other startup
+notices), if the workspace is **not already trusted** and carries a **project
+authority set** worth gating — a project soul, project-tier agents/commands/skills,
+or a `settings.yaml` with **ALLOW** rules — `mecatui` prompts:
+
+```
+mecatui: do you trust the project files in this workspace?
+  /home/me/src/some-cloned-repo
+[t]rust (persist) / [o]nce (this run only) / [n]o (default):
+```
+
+- **`t`** trusts this run and **remembers** it (writes the workspace + its current
+  identity-anchor hash to `~/.config/mecatl/trust.yaml`, so it stays trusted until
+  the project's identity surface drifts).
+- **`o`** trusts this run only (nothing persisted).
+- **`n` / Enter / anything else** declines — the safe default (project authority
+  withheld; the agent still runs with your user-tier config + built-in tools).
+
+If you had trusted the repo before and its **soul / agents / commands / skills
+changed since**, the prompt **re-fires** as a drift re-prompt ("this workspace
+**CHANGED** since you trusted it"). A repo with nothing to gate (no project
+authority, or only deny/ask rules) is **never** prompted, and an already-trusted
+repo (`--trust-project`, `trustedWorkspaces:`, or a remembered + undrifted entry) is
+**not** re-asked. If stdin is **not a terminal** (piped/headless), `mecatui` cannot
+prompt — it proceeds **untrusted** for that run and never blocks. The echoed path is
+terminal-escape-sanitized (CWE-150). The prompt lives in the `mecatui` composition
+root, not the render layer — no proto event, no change to `ui`/`theme`/`client`. See
+`docs/usage.md` for the full semantics; `mecated` itself never prompts (declarative).
+
 **Built-in client-side slash commands always appear.** Typing `/` opens the
 palette with a set of commands the TUI itself ships — independent of workspace
 dirs and even when server slash-command expansion is off. `/clear` (reset the

@@ -30,6 +30,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/adrg/xdg"
+	"golang.org/x/term"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/embed"
@@ -153,6 +154,16 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 		return defaultProbeAddr, client.DialConfig{Server: defaultProbeAddr}, noop, nil
 	}
 
+	// We are about to HOST an embedded server (the auto-reuse path above returned).
+	// This is the pre-TUI window (before the Bubble Tea alt screen starts) where the
+	// first-encounter workspace-trust prompt belongs (Workspace-Trust Phase 2c): if
+	// the workspace is not already trusted but carries a project authority set (or a
+	// remembered entry that DRIFTED), prompt the operator. The outcome feeds
+	// cfg.trustProject so embeddedConfig → app.Build honours it WITHOUT re-resolving
+	// or re-prompting. Only the embedded server is gated; an external --server (above)
+	// owns its own declarative trust. See cmd/mecatui/trust.go.
+	cfg = applyTrustPrompt(cfg)
+
 	srv, err := embed.Start(ctx, embeddedConfig(cfg), perfConfig(cfg))
 	if err != nil {
 		return "", client.DialConfig{}, noop, fmt.Errorf("start embedded server: %w", err)
@@ -173,6 +184,31 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 	// The embedded server has no auth/TLS — it is a private UNIX socket dialled
 	// plaintext, the same single-user loopback trust model mecated uses.
 	return srv.Target(), client.DialConfig{Server: srv.Target()}, func() { _ = srv.Close() }, nil
+}
+
+// applyTrustPrompt runs the pre-TUI first-encounter workspace-trust gate
+// (Workspace-Trust Phase 2c) and returns cfg with trustProject set when the
+// operator (or an already-existing trust grant) trusts the run. It builds the
+// production trust seam over embeddedConfig(cfg) — so the prompt folds the EXACT
+// same app.Config app.Build will fold — and reads stdin / writes stderr / detects
+// a TTY on os.Stdin's fd. On a positive outcome it sets trustProject=true so
+// app.Build short-circuits to TrustFlag (the prompt outcome wins, no
+// re-resolution). On a non-TTY or a declined prompt, trustProject is left as-is and
+// app.Build re-resolves to the same (untrusted, or declaratively-trusted) answer.
+//
+// --trust-project already trusting the project short-circuits the whole gate (the
+// flag is an explicit operator grant; ResolveTrust returns Trusted, so no prompt).
+func applyTrustPrompt(cfg config) config {
+	seam := prodTrustSeam(embeddedConfig(cfg))
+	isTTY := term.IsTerminal(int(os.Stdin.Fd()))
+	out := resolveTrustForRun(seam, cfg.workspace, os.Stdin, os.Stderr, isTTY)
+	// Monotonic-positive: only a positive outcome grants; never flip an existing
+	// grant off (a declared/remembered trust already made ResolveTrust return
+	// Trusted, so out.trusted is true and this is a no-op for those paths).
+	if out.trusted {
+		cfg.trustProject = true
+	}
+	return cfg
 }
 
 // embeddedConfig maps the TUI config onto the shared app.Config build contract for

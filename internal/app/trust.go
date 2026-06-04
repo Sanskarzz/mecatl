@@ -2,6 +2,7 @@ package app
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/stacklok/mecatl/internal/adapter/workspacetrust"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
@@ -130,6 +131,53 @@ func resolveTrust(cfg Config) TrustDecision {
 		return TrustDecision{Trusted: true, Source: TrustRemembered}
 	}
 	return TrustDecision{Trusted: false, Source: TrustNone}
+}
+
+// ResolveTrust is the EXPORTED composition-level trust fold, for a SECOND
+// composition root that must learn the trust decision BEFORE it calls Build —
+// specifically the mecatui pre-TUI first-encounter prompt (Workspace-Trust Phase
+// 2c). It returns the SAME TrustDecision Build computes internally (it delegates to
+// the same unexported resolveTrust), so the prompt and Build never disagree.
+//
+// The prompt uses it to decide whether to fire: a TrustNone-with-authority or a
+// Drifted decision prompts; an already-trusted (Flag/Declared/Remembered) decision
+// does NOT. When the operator then answers "trust"/"trust-once", mecatui sets
+// cfg.TrustProject=true so Build's own fold short-circuits to TrustFlag (trusted)
+// — the prompt OUTCOME wins and Build does NOT re-resolve or re-prompt. When the
+// operator declines (or the decision was already trusted declaratively), mecatui
+// leaves cfg.TrustProject as-is and Build re-resolves to the SAME answer this call
+// produced (idempotent: resolveTrust performs no writes and no prompt).
+func ResolveTrust(cfg Config) TrustDecision { return resolveTrust(cfg) }
+
+// HasProjectAuthority reports whether cfg.Workspace carries a project AUTHORITY
+// SET worth gating behind the pre-TUI trust prompt (a project soul, project-tier
+// agents/commands/skills, or a project settings.yaml with ALLOW rules). It is the
+// composition-side wrapper over the workspacetrust adapter's presence probe, so the
+// mecatui prompt asks ONLY when a trust grant would actually change what is
+// admitted — a not-trusted repo with nothing to gate is never nagged. It reuses
+// trustEnv only for symmetry; the probe itself walks the workspace tree (no XDG
+// read), so it is fail-safe quiet (any IO/parse failure ⇒ "no authority").
+func HasProjectAuthority(cfg Config) bool {
+	if cfg.Workspace == "" {
+		return false
+	}
+	return workspacetrust.NewWithEnv(trustEnv).HasProjectAuthority(cfg.Workspace)
+}
+
+// RememberTrust persists a "trust" grant for cfg.Workspace to the machine-written
+// trust.yaml registry, capturing the LIVE identity-anchor hash at trustedAt. It is
+// the ONLY production caller of workspacetrust.Remember (Phase 2c), invoked by the
+// mecatui prompt when the operator answers "trust" (persist). "trust-once" trusts
+// the run WITHOUT calling this (nothing is persisted). trustedAt is injected by the
+// caller (composition supplies time.Now via a clock seam) so tests are
+// deterministic. A write failure is returned for the caller to log fail-soft — a
+// failed persist must never abort startup; the run still proceeds trusted.
+func RememberTrust(cfg Config, trustedAt time.Time) error {
+	if cfg.Workspace == "" {
+		return nil
+	}
+	reader := workspacetrust.NewWithEnv(trustEnv)
+	return reader.Remember(cfg.Workspace, reader.AnchorHash(cfg.Workspace), trustedAt)
 }
 
 // narrateTrust logs the trust decision (mirroring the soulMeta narration): an Info

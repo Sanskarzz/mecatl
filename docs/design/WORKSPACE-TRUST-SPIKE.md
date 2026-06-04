@@ -1,9 +1,12 @@
 # Workspace Trust — implementation plan (Phases 0+1+2)
 
-> **STATUS: Phases 0 + 1 SHIPPED; Phase 2a (project-tier authority gating)
+> **STATUS: FEATURE COMPLETE — Phases 0, 1, 2a, 2b, 2c all SHIPPED. Phase 3 was
+> CUT (§11). The §11 follow-ups remain as later issues.**
+>
+> **STATUS (history): Phases 0 + 1 SHIPPED; Phase 2a (project-tier authority gating)
 > SHIPPED; Phase 2b (trust.yaml registry + identity-anchor drift) SHIPPED; Phase
 > 2c (mecatui pre-TUI first-encounter prompt — the production caller of the
-> registry write API) is implementation-ready plan.**
+> registry write API) SHIPPED.**
 > Phase 0 (unify the default — mecatui resolves `--trust-project`, default
 > false, no longer hardcoding trust ON) is wired and tested. Phase 1
 > (declarative `trustedWorkspaces:` list + the composition `TrustDecision`
@@ -34,10 +37,35 @@
 > never prompts/writes). The write API's only production CALLER — the mecatui
 > first-encounter prompt — is **2c**.
 >
-> **Phase 2c remaining**: the mecatui pre-TUI first-encounter prompt that CALLS the
-> registry write API on approval, the drift re-prompt UX, prompt-path sanitization.
-> Phase 3 (in-TUI trust modal, per-scope trust, speculative schema reservations) is
-> **explicitly out of scope** — see §11.
+> **Phase 2c SHIPPED**: the mecatui pre-TUI first-encounter prompt. In the
+> cmd/mecatui composition root (`cmd/mecatui/trust.go`, invoked from `main.go`'s
+> `resolveTransport` in the pre-embedded-server window — before the Bubble Tea alt
+> screen), when the embedded server is about to host an UNTRUSTED workspace that
+> carries a project AUTHORITY SET (`app.HasProjectAuthority` → a project soul,
+> project-tier agents/commands/skills, or a project `settings.yaml` with ALLOW
+> rules) — OR a remembered entry whose identity anchor DRIFTED — the operator is
+> prompted **[t]rust / [o]nce / [n]o** (default no). `t` persists via
+> `app.RememberTrust` → `workspacetrust.Remember` (the registry write API's sole
+> production caller); `o` trusts the run without persisting; `n`/default/empty leaves
+> it untrusted. Drift is a RE-PROMPT ("this workspace CHANGED since you trusted
+> it"). The prompt outcome feeds `cfg.trustProject` so `app.Build` honours it WITHOUT
+> re-resolving or re-prompting (`app.ResolveTrust` is the shared fold both use). The
+> workspace path is terminal-escape-SANITIZED before echo (CWE-150,
+> `sanitizeTrustEcho`); a NON-TTY (piped/headless) NEVER prompts and NEVER
+> auto-trusts — it fails safe to UNTRUSTED (never blocks startup). `mecated` is
+> untouched (declarative, never prompts/writes). `ui/theme/client` are untouched (the
+> render-layer rule holds; no proto event added). Tests:
+> `internal/adapter/workspacetrust/authority_test.go` (authority detection: soul /
+> agent / command / skill / allow-rule present; deny-only + empty-allow NOT
+> authority), `internal/app/trust_test.go` (`TestResolveTrustExportedDelegates`,
+> `TestHasProjectAuthorityComposition`, `TestRememberTrustRoundTripFeedsResolve` —
+> the no-double-resolution proof, `TestRememberTrustThenDriftReResolvesDrifted`,
+> `TestRememberTrustEmptyWorkspaceNoop`), `cmd/mecatui/trust_test.go`
+> (already-trusted-no-prompt, no-authority-no-prompt, trust-persists,
+> trust-once-not-persisted, decline-untrusted, **drift-reprompts**,
+> **non-TTY-untrusted** + non-TTY-drift, **path-sanitization**, remember-failure
+> fail-soft). Phase 3 (in-TUI trust modal, per-scope trust, speculative schema
+> reservations) is **explicitly out of scope** — see §11.
 >
 > File:line citations are to the tree as of this spike; verify before
 > implementing.
@@ -470,10 +498,30 @@ settings-vs-state split + the `TrustDecision` resolver.
 
 ---
 
-### Phase 2 — interactive prompt-and-remember + complete the gate + drift
+### Phase 2 — interactive prompt-and-remember + complete the gate + drift — **SHIPPED (2a + 2b + 2c)**
 
 **Goal:** the requested UX — detect, prompt, remember — with a complete
 admission gate and identity-anchor drift.
+
+> **As-built (Phase 2c — the mecatui prompt, R2.9–R2.12).** The pre-TUI prompt
+> lives in `cmd/mecatui/trust.go` (`resolveTrustForRun` + `askTrust`), invoked from
+> `main.go`'s `resolveTransport` in the pre-embedded-server window (just before
+> `embed.Start`, after the auto-reuse probe returns — so it fires ONLY when this
+> process is about to host the embedded server, never for an external `--server`).
+> Authority detection is `app.HasProjectAuthority` → `workspacetrust.HasProjectAuthority`
+> (`authority.go`: project soul ∨ any project-tier agent/command/skill file ∨ a
+> project `settings.yaml`/`settings.local.yaml` with a non-empty `permissions.allow`
+> — deny/ask-only is NOT authority, since they apply trusted or not). The prompt
+> answers map [t]→persist (`app.RememberTrust`, capturing the LIVE anchor at an
+> injected `time.Now`), [o]→trust-this-run-no-persist, [n]/default/empty→untrusted.
+> Drift (`d.Drifted`) is a RE-PROMPT. The outcome feeds `cfg.trustProject` so
+> `app.Build`'s own `resolveTrust` short-circuits to `TrustFlag` — NO double
+> resolution, NO re-prompt (`app.ResolveTrust` is the exported shared fold; a
+> round-trip test proves a freshly-`Remember`ed workspace then resolves
+> `TrustRemembered`). NON-TTY (`term.IsTerminal(os.Stdin.Fd())==false`) skips the
+> prompt → UNTRUSTED (never blocks, never auto-trusts). The workspace path is
+> escape-stripped by `sanitizeTrustEcho` (CWE-150). `ui/theme/client` untouched (no
+> proto event; render-layer rule intact). `mecated` untouched (declarative).
 
 **Requirements (testable):**
 
