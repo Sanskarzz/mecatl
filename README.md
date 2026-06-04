@@ -31,6 +31,7 @@ API. No TUI — it's a service and a library.
 - **Resilience** — retry/backoff + circuit breaker around the provider (never replays a partially-streamed turn); provider errors surface to clients.
 - **Context management** — two-layer cache-stable prompt; a pluggable `Compactor` (single-summary default + a tiered snip→strip→collapse→summarize cascade) with a `TokenCounter` seam (heuristic or offline tiktoken).
 - **Memory** — conservative tiered memory (Remember/Recall) + optional background "dream" consolidation.
+- **Persona / soul** — an optional user-scoped, **agent-read-only** persona fragment (`~/.config/mecatl/soul.md`) injected as turn-0 context; injection-scanned, byte-capped, and fail-soft (no tool can write it).
 - **MCP client** — connect to MCP servers over **streaming-HTTP transport only** (stdio is not supported); their tools register namespaced `mcp__server__tool`.
 
 **Interfaces & operations**
@@ -138,7 +139,7 @@ OpenAI, gRPC, or the filesystem — those are adapters behind ports, wired toget
 | `internal/session`, `internal/governance`, `internal/tool`, `internal/prompt` | the domain (aggregate, permission/hook types, tool catalog + FS interfaces, prompt assembly) |
 | `internal/port` | the port interfaces the loop consumes |
 | `internal/agent` | the agent loop, dispatch, permission pause/resume, compaction, subagent |
-| `internal/adapter/*` | adapters: `openai`, `mockllm`, `llmresilience`, `osfs`/`memfs`, `permpolicy`, `permclassify`, `hookexec`, `store/*`, `tools`, `toolkit`, `memory`, `dream`, `forker`, `repomap`, `tokenizer`, `telemetry`, `mcp`, `server` |
+| `internal/adapter/*` | adapters: `openai`, `mockllm`, `llmresilience`, `osfs`/`memfs`, `permpolicy`, `permclassify`, `hookexec`, `store/*`, `tools`, `toolkit`, `memory`, `dream`, `soul`, `forker`, `repomap`, `tokenizer`, `telemetry`, `mcp`, `server` |
 | `contracts/proto`, `contracts/gen` | gRPC contract (source of truth) and generated Go |
 | `cmd/mecated`, `cmd/mecademo` | the server (composition root) and the demo |
 

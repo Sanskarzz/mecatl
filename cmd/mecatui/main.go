@@ -217,6 +217,12 @@ func embeddedConfig(cfg config) app.Config {
 		// calls the real provider on a timer, so a default-on interval would
 		// silently spend tokens on an idle TUI. mecated defaults it to 0 too.
 		MemoryDir: resolveMemoryDir(cfg),
+		// Soul ON by default (issue #14, Phase 1): a user-scoped, agent-READ-ONLY
+		// persona fragment read from the conventional ~/.config/mecatl/soul.md
+		// (fail-soft if absent), consistent with the "enable every free+local feature
+		// by default" posture. --soul-file overrides the path; --no-soul disables it.
+		SoulPath: cfg.soulFile,
+		NoSoul:   cfg.noSoul,
 		// Slash commands ON by default (the .mecatl/commands + .claude/commands
 		// convention); --no-commands disables, --commands-dir overrides. File-backed
 		// commands are local, user-authored prompt templates — no network/trust cost,

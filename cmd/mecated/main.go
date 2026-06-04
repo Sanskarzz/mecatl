@@ -145,6 +145,12 @@ type config struct {
 	// Memory: per-project memory store directory (empty disables memory tools).
 	memoryDir string
 
+	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona fragment.
+	// ON by default reading the conventional ~/.config/mecatl/soul.md (fail-soft if
+	// absent). soulFile overrides the path; noSoul disables it entirely.
+	soulFile string
+	noSoul   bool
+
 	// Skills: explicit directories of progressive-disclosure skill units laid out
 	// as <dir>/<name>/SKILL.md (repeatable; highest precedence). Empty + no
 	// conventional set disables the Skill tool. skillsConventional adds the
@@ -589,6 +595,8 @@ func appConfig(cfg config, sink port.EventSink, logger port.Logger) app.Config {
 		LLMBreakerCooldown:        cfg.llmBreakerCooldown,
 		MemoryDir:                 cfg.memoryDir,
 		MemoryConsolidateInterval: cfg.memoryConsolidateInterval,
+		SoulPath:                  cfg.soulFile,
+		NoSoul:                    cfg.noSoul,
 		SkillsDirs:                cfg.skillsDirs,
 		SkillsConventional:        cfg.skillsConventional,
 		SkillsDraftDir:            cfg.skillsDraftDir,
@@ -680,6 +688,9 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "per-project memory store directory (empty disables the Remember/Recall tools)")
 	fs.DurationVar(&cfg.memoryConsolidateInterval, "memory-consolidate-interval", 0, "interval for background memory consolidation (dream); 0 disables. Only meaningful with --memory-dir")
+
+	fs.StringVar(&cfg.soulFile, "soul-file", "", "path to a user-scoped, agent-READ-ONLY persona/\"soul\" file injected as turn-0 context (empty = the conventional $XDG_CONFIG_HOME/mecatl/soul.md, fallback ~/.config/mecatl/soul.md). Fail-soft: a missing/empty/oversized/injection-flagged file degrades to no fragment, never an error. No tool can write it")
+	fs.BoolVar(&cfg.noSoul, "no-soul", false, "disable the user-scoped persona/soul fragment entirely (otherwise it is read from the conventional location, fail-soft if absent)")
 
 	fs.Var(&cfg.skillsDirs, "skills-dir", "directory to discover progressive-disclosure skills from, laid out as <name>/SKILL.md (repeatable; highest precedence); empty disables the Skill tool unless --skills-conventional is set. TRUST BOUNDARY: a SKILL.md steers the model like AGENTS.md/CLAUDE.md — point this only at directories you trust")
 	fs.BoolVar(&cfg.skillsConventional, "skills-conventional", false, "also discover skills from the conventional locations: <workspace>/"+skills.ProjectDirMecatl+", <workspace>/"+skills.ProjectDirClaude+", $XDG_CONFIG_HOME/mecatl/skills (or ~/.config/mecatl/skills), and ~/.claude/skills (lower precedence than --skills-dir). Default OFF — opt in only for trusted locations (same trust class as AGENTS.md/CLAUDE.md)")

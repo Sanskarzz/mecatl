@@ -4,6 +4,8 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+
+	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 )
 
 // dirs extracts the resolved DirSource directories (in precedence order) so a
@@ -23,9 +25,9 @@ func dirs(t *testing.T, sources []Source) []string {
 
 func TestResolveSourcesOptInByDefault(t *testing.T) {
 	// Zero options: strictly opt-in — no explicit dirs, conventional OFF.
-	got := resolveSourcesEnv(ResolveOptions{}, resolveEnv{
-		getenv:      func(string) string { return "" },
-		userHomeDir: func() (string, error) { return "/home/u", nil },
+	got := resolveSourcesEnv(ResolveOptions{}, xdgconfig.ResolveEnv{
+		Getenv:      func(string) string { return "" },
+		UserHomeDir: func() (string, error) { return "/home/u", nil },
 	})
 	if len(got) != 0 {
 		t.Fatalf("zero options must resolve no sources, got %d: %v", len(got), got)
@@ -35,9 +37,9 @@ func TestResolveSourcesOptInByDefault(t *testing.T) {
 func TestResolveSourcesExplicitOnly(t *testing.T) {
 	got := resolveSourcesEnv(ResolveOptions{
 		Explicit: []string{"/one", "", "/two"}, // empty entries dropped
-	}, resolveEnv{
-		getenv:      func(string) string { return "" },
-		userHomeDir: func() (string, error) { return "/home/u", nil },
+	}, xdgconfig.ResolveEnv{
+		Getenv:      func(string) string { return "" },
+		UserHomeDir: func() (string, error) { return "/home/u", nil },
 	})
 	assertDirs(t, got, []string{"/one", "/two"})
 	for _, s := range got {
@@ -54,9 +56,9 @@ func TestResolveSourcesConventionalPrecedenceOrder(t *testing.T) {
 		Explicit:     []string{"/explicit"},
 		Conventional: true,
 		Workspace:    ws,
-	}, resolveEnv{
-		getenv:      func(string) string { return "" }, // no XDG_CONFIG_HOME -> ~/.config
-		userHomeDir: func() (string, error) { return home, nil },
+	}, xdgconfig.ResolveEnv{
+		Getenv:      func(string) string { return "" }, // no XDG_CONFIG_HOME -> ~/.config
+		UserHomeDir: func() (string, error) { return home, nil },
 	})
 	// Precedence, highest first: explicit > project(.mecatl) > project(.claude)
 	// > user(xdg ~/.config/mecatl) > user(~/.claude).
@@ -76,14 +78,14 @@ func TestResolveSourcesHonorsXDGConfigHome(t *testing.T) {
 	got := resolveSourcesEnv(ResolveOptions{
 		Conventional: true,
 		Workspace:    "/ws",
-	}, resolveEnv{
-		getenv: func(k string) string {
+	}, xdgconfig.ResolveEnv{
+		Getenv: func(k string) string {
 			if k == "XDG_CONFIG_HOME" {
 				return xdg
 			}
 			return ""
 		},
-		userHomeDir: func() (string, error) { return home, nil },
+		UserHomeDir: func() (string, error) { return home, nil },
 	})
 	resolved := dirs(t, got)
 	wantXDG := filepath.Join(xdg, "mecatl", "skills")
@@ -101,9 +103,9 @@ func TestResolveSourcesNoWorkspaceSkipsProject(t *testing.T) {
 	got := resolveSourcesEnv(ResolveOptions{
 		Conventional: true,
 		// Workspace empty: project-level sources are skipped, user-level remain.
-	}, resolveEnv{
-		getenv:      func(string) string { return "" },
-		userHomeDir: func() (string, error) { return home, nil },
+	}, xdgconfig.ResolveEnv{
+		Getenv:      func(string) string { return "" },
+		UserHomeDir: func() (string, error) { return home, nil },
 	})
 	want := []string{
 		filepath.Join(home, ".config", "mecatl", "skills"),
@@ -118,9 +120,9 @@ func TestResolveSourcesNoHomeSkipsUser(t *testing.T) {
 	got := resolveSourcesEnv(ResolveOptions{
 		Conventional: true,
 		Workspace:    "/ws",
-	}, resolveEnv{
-		getenv:      func(string) string { return "" },
-		userHomeDir: func() (string, error) { return "", errNoHome },
+	}, xdgconfig.ResolveEnv{
+		Getenv:      func(string) string { return "" },
+		UserHomeDir: func() (string, error) { return "", errNoHome },
 	})
 	want := []string{
 		filepath.Join("/ws", ".mecatl", "skills"),

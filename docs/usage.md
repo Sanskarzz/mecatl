@@ -152,6 +152,8 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--skills-conventional` | `false` | also discover skills from the conventional known paths: `<workspace>/.mecatl/skills`, `<workspace>/.claude/skills`, `$XDG_CONFIG_HOME/mecatl/skills` (or `~/.config/mecatl/skills`), and `~/.claude/skills` — lower precedence than `--skills-dir`. **OFF by default** (strict opt-in); only enable for trusted locations. **See the skills trust note below.** |
 | `--skills-draft-dir` | `""` | enable the writable `SkillDraft` tool and set the **quarantine** directory for model-authored candidate skills. Empty disables the tool. Must be **outside the workspace root** (so the model's `Write`/`Edit` cannot reach it) and **disjoint** from every `--skills-dir` / conventional location — both fatal startup errors. **See the self-improving-skill loop note below.** |
 | `--skills-draft-similarity-threshold` | `0.5` | 2-gram Jaccard similarity above which `SkillDraft` warns of a near-duplicate existing skill (warn-only; it never blocks the draft). |
+| `--soul-file` | `""` | path to a user-scoped, **agent-read-only** persona/"soul" file (empty → the conventional `$XDG_CONFIG_HOME/mecatl/soul.md`, fallback `~/.config/mecatl/soul.md`). Injected as turn-0 context, **fail-soft** (missing/empty/oversized/injection-flagged → no fragment). No tool can write it. **See the persona/soul note below.** |
+| `--no-soul` | `false` | disable the user-scoped persona/soul fragment entirely (otherwise it is read from the conventional location, fail-soft if absent). |
 | `--permissions-conventional` | `true` | auto-discover the per-project permission config (`<workspace>/.mecatl/settings.yaml`, and with `--import-claude-permissions` also `<workspace>/.claude/settings.json`) plus the user-global file. **Re-resolved per session** against each session's workspace root. ON and inert until such a file exists. **See the permission-config note below.** |
 | `--import-claude-permissions` | `false` | also import Claude-Code `settings.json` permissions (project + user). **Lossy** (fail-safe): see the table below. |
 | `--trust-project` | `false` | honour a discovered **project's ALLOW rules** (its deny/ask are always honoured regardless). OFF by default (the safe stance) — an untrusted repo's grants are ignored. **See the permission-config note below.** |
@@ -447,6 +449,27 @@ agent can author a reusable skill from a procedure it just performed. This is th
 When you promote, **read the body** — it is agent-authored, untrusted,
 instruction-like text that becomes trusted on promotion. The automated injection
 scan is a backstop, not a substitute for reading it.
+
+### Persona / soul (`~/.config/mecatl/soul.md`, issue #14)
+
+A **user-scoped, agent-read-only** persona fragment — the operator's "soul": who
+the agent is, its style, the posture it should take. It is read from
+`$XDG_CONFIG_HOME/mecatl/soul.md` (fallback `~/.config/mecatl/soul.md`), or from an
+explicit path via `--soul-file`, and injected as a **turn-0 user message** (after
+the cache-stable system prefix, before the memory index — identity before saved
+facts), fenced in a `<soul>…</soul>` data block so the model treats it as persona
+data rather than a new instruction stream.
+
+It is **on by default** and costs nothing when absent — a missing file is fail-soft.
+The whole load is fail-soft: a missing, empty, whitespace-only, oversized (> 20 KiB),
+unreadable, or **prompt-injection-flagged** file degrades to **no fragment**, never an
+error that aborts a run. Disable it entirely with `--no-soul`.
+
+It is **read-only to the agent by construction**: no tool can write the soul, and the
+loader has no write path. This is deliberate — a writable identity anchor is a
+prompt-injection trap (a single poisoned write would rewrite "who the agent is" across
+*every* future session). Bootstrap and edit it by hand, with a text editor. (See
+`docs/design/SOUL-SPIKE.md` for the threat model and the Phase-2 learning-loop proposal.)
 
 ### Graceful shutdown
 

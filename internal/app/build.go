@@ -41,6 +41,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/repomap"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
+	"github.com/stacklok/mecatl/internal/adapter/soul"
 	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/adapter/tokenizer"
@@ -120,6 +121,16 @@ type Config struct {
 	// with MemoryDir set).
 	MemoryDir                 string
 	MemoryConsolidateInterval time.Duration
+
+	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona fragment
+	// injected as a turn-0 user message. ON by default reading the conventional
+	// $XDG_CONFIG_HOME/mecatl/soul.md (fallback ~/.config/mecatl/soul.md) — a
+	// missing file is fail-soft, so it costs nothing. SoulPath overrides the path
+	// (--soul-file); NoSoul disables it entirely (--no-soul), in which case the
+	// SoulAssembler is not wired (nil source → no-op). The adapter is read-only by
+	// construction: no tool can write the soul.
+	SoulPath string
+	NoSoul   bool
 
 	// Skills: explicit directories (highest precedence) plus the conventional
 	// project/user locations when SkillsConventional is set. SkillsDraftDir enables
@@ -470,13 +481,21 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 
 	counter := buildTokenCounter(cfg)
 
-	// Instructions seam: RootAssembler (AGENTS.md/CLAUDE.md) always; when a memory
-	// store is wired, also the tier-0 MemoryIndexAssembler so the model sees its
-	// saved-memory index at turn 0. The adapter (*memory.Store) meets the
-	// prompt-defined MemoryIndexSource port HERE, in the composition layer — prompt
-	// never imports the memory adapter. The index rides as a turn-0 user message
-	// (after the cache breakpoint), so it never enters prompt.Build's StablePrefix.
-	instructions := buildInstructionAssembler(memStore)
+	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona source. ON
+	// by default reading the conventional ~/.config/mecatl/soul.md; --no-soul leaves
+	// it nil (no fragment), --soul-file overrides the path. The adapter (*soul.Store)
+	// meets the prompt-defined SoulSource port HERE, in the composition layer — the
+	// one place the adapter binds the port. A missing file is fail-soft (no-op).
+	soulSrc := buildSoulSource(cfg)
+
+	// Instructions seam: RootAssembler (AGENTS.md/CLAUDE.md) always; then the soul
+	// (identity, when wired), then the tier-0 MemoryIndexAssembler (saved facts, when
+	// a memory store is wired) — identity BEFORE saved-facts (issue #14 ordering). The
+	// adapters (*soul.Store, *memory.Store) meet their prompt-defined ports HERE, in
+	// the composition layer — prompt never imports them. Both ride as turn-0 user
+	// messages (after the cache breakpoint), so neither enters prompt.Build's
+	// StablePrefix.
+	instructions := buildInstructionAssembler(soulSrc, memStore)
 
 	deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, mcpProvider, instructions)
 	deps.Catalog = cat
@@ -484,20 +503,46 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, mcpClose, nil
 }
 
-// buildInstructionAssembler composes the turn-0 instruction assembler: always the
-// RootAssembler (project instruction files), plus the tier-0 MemoryIndexAssembler
-// when a memory store is wired (memStore non-nil). When memStore is nil the
-// MemoryIndexAssembler is omitted entirely, so a memory-disabled deployment adds
-// no index machinery. The store satisfies prompt.MemoryIndexSource structurally;
-// this is the one place the adapter meets the port.
-func buildInstructionAssembler(memStore *memory.Store) prompt.InstructionAssembler {
-	if memStore == nil {
+// buildInstructionAssembler composes the turn-0 instruction assembler in order:
+// always the RootAssembler (project instruction files); then the SoulAssembler
+// (user-scoped persona/identity) when a soul source is wired (soulSrc non-nil);
+// then the tier-0 MemoryIndexAssembler (saved facts) when a memory store is wired
+// (memStore non-nil). Identity precedes saved-facts (issue #14 ordering). Each
+// nil collaborator is OMITTED entirely, so a soul/memory-disabled deployment adds
+// no machinery. The sources satisfy prompt.SoulSource / prompt.MemoryIndexSource
+// structurally; this is the one place those adapters meet their ports. When
+// nothing but the root is wired, the bare RootAssembler is returned (no Multi).
+func buildInstructionAssembler(soulSrc prompt.SoulSource, memStore *memory.Store) prompt.InstructionAssembler {
+	if soulSrc == nil && memStore == nil {
 		return prompt.RootAssembler{}
 	}
-	return prompt.NewMultiAssembler(
-		prompt.RootAssembler{},
-		prompt.MemoryIndexAssembler{Src: memStore},
-	)
+	assemblers := []prompt.InstructionAssembler{prompt.RootAssembler{}}
+	if soulSrc != nil {
+		assemblers = append(assemblers, prompt.SoulAssembler{Src: soulSrc})
+	}
+	if memStore != nil {
+		assemblers = append(assemblers, prompt.MemoryIndexAssembler{Src: memStore})
+	}
+	return prompt.NewMultiAssembler(assemblers...)
+}
+
+// buildSoulSource constructs the user-scoped, agent-read-only soul source (issue
+// #14, Phase 1). It returns an untyped nil prompt.SoulSource when soul is disabled
+// (--no-soul) so buildInstructionAssembler's nil check holds (no typed-nil
+// gotcha). Otherwise it builds a *soul.Store reading SoulPath (when set) or the
+// conventional ~/.config/mecatl/soul.md. A missing file is fail-soft, so leaving
+// soul on costs nothing. The adapter is read-only by construction — no write path.
+func buildSoulSource(cfg Config) prompt.SoulSource {
+	if cfg.NoSoul {
+		slog.Info("soul DISABLED (--no-soul)")
+		return nil
+	}
+	if cfg.SoulPath != "" {
+		slog.Info("soul ENABLED (read-only persona)", "path", cfg.SoulPath)
+	} else {
+		slog.Info("soul ENABLED (read-only persona)", "path", "conventional <xdg>/mecatl/soul.md (fail-soft if absent)")
+	}
+	return soul.New(soul.Options{Path: cfg.SoulPath})
 }
 
 // baseEngineDeps assembles the agent.Deps SHARED by the main engine (buildEngine)

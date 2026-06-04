@@ -3,11 +3,11 @@ package permconfig
 import (
 	"context"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
+	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/tool"
 )
@@ -66,17 +66,6 @@ type Options struct {
 	ExplicitFiles []string
 }
 
-// resolveEnv abstracts the process environment so the resolver is testable with a
-// fake home / XDG and a fake user-file reader. The composition root binds osEnv.
-type resolveEnv struct {
-	getenv      func(string) string
-	userHomeDir func() (string, error)
-	readFile    func(string) ([]byte, error)
-}
-
-// osEnv binds the resolver to the real process environment + filesystem.
-var osEnv = resolveEnv{getenv: os.Getenv, userHomeDir: os.UserHomeDir, readFile: os.ReadFile}
-
 // fileStamp fingerprints a single config file's on-disk state (mod time + size)
 // so the cache can detect a mid-process edit. A missing file stamps as exists=false
 // — so a config CREATED after the first Resolve also invalidates the cache (not
@@ -109,7 +98,7 @@ type cacheEntry struct {
 // rules are re-resolved per root, gated by TrustProject.
 type Resolver struct {
 	opts    Options
-	env     resolveEnv
+	env     xdgconfig.ResolveEnv
 	sources []projectSource // the fixed project-file discovery list
 
 	// userRules are the root-independent user-global + explicit (CLI) rules,
@@ -128,11 +117,11 @@ type Resolver struct {
 // posture. Returns nil when opts requests no sources at all, so callers can pass
 // the result straight to permpolicy.NewPolicyWithResolver (a nil resolver = off).
 func New(opts Options) *Resolver {
-	return newWithEnv(opts, osEnv)
+	return newWithEnv(opts, xdgconfig.OSEnv)
 }
 
 // newWithEnv is New with an injectable environment, for tests.
-func newWithEnv(opts Options, env resolveEnv) *Resolver {
+func newWithEnv(opts Options, env xdgconfig.ResolveEnv) *Resolver {
 	if !opts.Conventional && len(opts.ExplicitFiles) == 0 {
 		return nil
 	}
@@ -306,7 +295,7 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 		if path == "" {
 			continue
 		}
-		data, err := r.env.readFile(path)
+		data, err := r.env.ReadFile(path)
 		if err != nil {
 			slog.Warn("permission config: explicit file unreadable; skipping", "file", path, "err", err)
 			continue
@@ -324,9 +313,9 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 	}
 
 	// User-global YAML under the XDG config dir.
-	if cfgDir := userConfigDir(r.env); cfgDir != "" {
+	if cfgDir := xdgconfig.UserConfigDir(r.env); cfgDir != "" {
 		path := filepath.Join(cfgDir, userSubdirMecatl)
-		if data, err := r.env.readFile(path); err == nil {
+		if data, err := r.env.ReadFile(path); err == nil {
 			if cfg, perr := parseYAML(data); perr != nil {
 				slog.Warn("permission config: user YAML unparseable; skipping", "file", path, "err", perr)
 			} else {
@@ -337,9 +326,9 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 
 	// User-global Claude settings.json (when importing).
 	if r.opts.ImportClaude {
-		if home, err := r.env.userHomeDir(); err == nil && home != "" {
+		if home, err := r.env.UserHomeDir(); err == nil && home != "" {
 			path := filepath.Join(home, userSubdirClaude)
-			if data, rerr := r.env.readFile(path); rerr == nil {
+			if data, rerr := r.env.ReadFile(path); rerr == nil {
 				if imported, ierr := importClaude(data, governance.ScopeUser, report); ierr != nil {
 					slog.Warn("permission config: user claude settings unparseable; skipping", "file", path, "err", ierr)
 				} else {
@@ -350,19 +339,6 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 	}
 
 	return rules
-}
-
-// userConfigDir returns the XDG config base for the user-level config: the value
-// of $XDG_CONFIG_HOME when set, else ~/.config. It returns "" when neither can be
-// resolved (the caller then skips the user-level source).
-func userConfigDir(env resolveEnv) string {
-	if base := env.getenv("XDG_CONFIG_HOME"); base != "" {
-		return base
-	}
-	if home, err := env.userHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".config")
-	}
-	return ""
 }
 
 // specOf reconstructs a human-readable "Tool(pattern)" spec from a rule, for the

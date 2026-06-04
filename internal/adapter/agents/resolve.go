@@ -1,8 +1,9 @@
 package agents
 
 import (
-	"os"
 	"path/filepath"
+
+	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 )
 
 // Conventional agent-def sub-paths (Claude-Code-style "extra paths"). A def is
@@ -36,16 +37,6 @@ type ResolveOptions struct {
 	Workspace string
 }
 
-// resolveEnv abstracts the process environment so the resolver is testable with a
-// fake home / XDG without touching the real one.
-type resolveEnv struct {
-	getenv      func(string) string
-	userHomeDir func() (string, error)
-}
-
-// osEnv binds the resolver to the real process environment.
-var osEnv = resolveEnv{getenv: os.Getenv, userHomeDir: os.UserHomeDir}
-
 // ResolveSources builds the ORDERED, highest-precedence-first Source list from the
 // conventional locations plus any explicit paths, ready to hand to NewMultiSource.
 // The precedence is:
@@ -59,11 +50,11 @@ var osEnv = resolveEnv{getenv: os.Getenv, userHomeDir: os.UserHomeDir}
 // overrides both. Each location becomes a labelled DirSource; missing directories
 // are harmless. When Conventional is false only the Explicit paths are included.
 func ResolveSources(opts ResolveOptions) []AgentSource {
-	return resolveSourcesEnv(opts, osEnv)
+	return resolveSourcesEnv(opts, xdgconfig.OSEnv)
 }
 
 // resolveSourcesEnv is ResolveSources with an injectable environment, for tests.
-func resolveSourcesEnv(opts ResolveOptions, env resolveEnv) []AgentSource {
+func resolveSourcesEnv(opts ResolveOptions, env xdgconfig.ResolveEnv) []AgentSource {
 	var sources []AgentSource
 
 	for _, dir := range opts.Explicit {
@@ -84,25 +75,12 @@ func resolveSourcesEnv(opts ResolveOptions, env resolveEnv) []AgentSource {
 		)
 	}
 
-	if cfg := userConfigDir(env); cfg != "" {
+	if cfg := xdgconfig.UserConfigDir(env); cfg != "" {
 		sources = append(sources, DirSource{Dir: filepath.Join(cfg, userSubdirMecatl), Label: "user(xdg)"})
 	}
-	if home, err := env.userHomeDir(); err == nil && home != "" {
+	if home, err := env.UserHomeDir(); err == nil && home != "" {
 		sources = append(sources, DirSource{Dir: filepath.Join(home, userSubdirClaude), Label: "user(.claude)"})
 	}
 
 	return sources
-}
-
-// userConfigDir returns the XDG config base for the mecatl user-level agents dir:
-// $XDG_CONFIG_HOME when set, else ~/.config. It returns "" when neither can be
-// resolved.
-func userConfigDir(env resolveEnv) string {
-	if base := env.getenv("XDG_CONFIG_HOME"); base != "" {
-		return base
-	}
-	if home, err := env.userHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".config")
-	}
-	return ""
 }

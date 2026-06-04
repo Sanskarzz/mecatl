@@ -438,6 +438,69 @@ func TestTurn0InjectsMemoryIndexAfterAgentsMD(t *testing.T) {
 	}
 }
 
+// fakeSoulSrc is a scripted prompt.SoulSource for the e2e ordering test.
+type fakeSoulSrc struct{ body string }
+
+func (f fakeSoulSrc) Load(context.Context) (string, error) { return f.body, nil }
+
+// TestTurn0InjectsSoulAfterAgentsMD is the issue #14 end-to-end proof: with a
+// composed MultiAssembler (RootAssembler + SoulAssembler + MemoryIndexAssembler),
+// the turn-0 conversation contains the persona/soul as a USER message, ordered
+// AFTER the AGENTS.md instruction message, BEFORE the memory index (identity
+// before saved facts), and all before the user prompt.
+func TestTurn0InjectsSoulAfterAgentsMD(t *testing.T) {
+	ctx := context.Background()
+	store, err := memory.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("memory.New: %v", err)
+	}
+	if err := store.RememberEntry(ctx, tool.MemoryEntry{
+		Key: "pref/test-runner", Value: "gotestsum", Description: "preferred test runner",
+	}); err != nil {
+		t.Fatalf("RememberEntry: %v", err)
+	}
+
+	llm := mockllm.New(mockllm.TextTurn("done"))
+	cat := catalogWith(t, &fakeTool{name: "Read", readOnly: true, exec: okExec})
+	asm := prompt.NewMultiAssembler(
+		prompt.RootAssembler{},
+		prompt.SoulAssembler{Src: fakeSoulSrc{body: "PERSONA-MARKER terse engineer"}},
+		prompt.MemoryIndexAssembler{Src: store},
+	)
+	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Instructions: asm})
+
+	ws := memfs.NewWorkspace("/ws")
+	if err := ws.Write(ctx, "AGENTS.md", []byte("project rule")); err != nil {
+		t.Fatalf("seed AGENTS.md: %v", err)
+	}
+	sess := newSession(t, session.Limits{})
+	drain(e.Run(ctx, sess, ws, "the user prompt"))
+
+	// Find the order of the four turn-0 user messages.
+	var agentsIdx, soulIdx, memoryIdx, promptIdx = -1, -1, -1, -1
+	for i, m := range sess.Conversation.Messages {
+		if m.Role != session.RoleUser {
+			continue
+		}
+		switch {
+		case strings.Contains(m.Text, "project rule"):
+			agentsIdx = i
+		case strings.Contains(m.Text, "PERSONA-MARKER terse engineer"):
+			soulIdx = i
+		case strings.Contains(m.Text, "pref/test-runner") && strings.Contains(m.Text, "preferred test runner"):
+			memoryIdx = i
+		case strings.Contains(m.Text, "the user prompt"):
+			promptIdx = i
+		}
+	}
+	if agentsIdx < 0 || soulIdx < 0 || memoryIdx < 0 || promptIdx < 0 {
+		t.Fatalf("missing a turn-0 message: agents=%d soul=%d memory=%d prompt=%d", agentsIdx, soulIdx, memoryIdx, promptIdx)
+	}
+	if agentsIdx >= soulIdx || soulIdx >= memoryIdx || memoryIdx >= promptIdx {
+		t.Fatalf("turn-0 order wrong: agents=%d soul=%d memory=%d prompt=%d (want agents < soul < memory < prompt)", agentsIdx, soulIdx, memoryIdx, promptIdx)
+	}
+}
+
 // TestDefaultAssemblerWhenNil asserts NewEngine defaults the assembler so a run
 // with no Instructions field set still discovers root instructions.
 func TestDefaultAssemblerWhenNil(t *testing.T) {

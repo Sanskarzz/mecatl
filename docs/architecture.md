@@ -67,7 +67,7 @@ flowchart LR
     sess["internal/session\nSession · Conversation · Event\nToolCall · ToolResult · Usage"]
     gov["internal/governance\nEffect · Decision · Rule · Scope\nHookEvent · Evaluator · bash.go"]
     tl["internal/tool\nTool · ToolSpec · Catalog · Disclosable\nFileSystem · Workspace · CommandRunner\nMemoryStore · WorkspaceForker · ToolSearch"]
-    pr["internal/prompt\nLayered · Build · Env\nInstructionAssembler · CommandExpander"]
+    pr["internal/prompt\nLayered · Build · Env\nInstructionAssembler · SoulSource · CommandExpander"]
   end
 
   subgraph DECOR["decorators (port → same port)"]
@@ -82,7 +82,7 @@ flowchart LR
     tools["tools (Read/Edit/Write/Grep/Glob/WebFetch + optional Bash)"]
     pp["permpolicy · hookexec"]
     tel["telemetry (OTel metrics+spans · Prometheus exporter · OTLP)"]
-    ext["mcp (streaming-HTTP) · repomap\nmemory · dream · forker · tokenizer"]
+    ext["mcp (streaming-HTTP) · repomap\nmemory · dream · soul · forker · tokenizer"]
   end
 
   mecated --> svc --> engine
@@ -116,7 +116,7 @@ per-package `doc.go` files and honoured by the code:
 | `session`, `governance`, `tool`, `prompt` (domain) | stdlib + other domain packages. Never `adapter`, `agent`, `contracts`, `os`, or any third-party library. |
 | `port` | domain packages + stdlib (`context`, `io`, `iter`, `time`). |
 | `agent` (application) | domain + `port` + stdlib only. Never an adapter or `contracts`. (Tests may import adapters.) |
-| `adapter/*` | domain + `port` + the one external lib it adapts. Never `agent`. (One deliberate adapter→adapter carve-out: `adapter/mcpperf` may import `adapter/telemetry` solely for the `RuntimeSnapshot` data DTO it projects into tool output — a plain JSON struct with no OTel/SDK types, not a behavioural dependency. The DTO stays in `telemetry` by design.) |
+| `adapter/*` | domain + `port` + the one external lib it adapts. Never `agent`. (Deliberate adapter→adapter carve-outs: (1) `adapter/mcpperf` may import `adapter/telemetry` solely for the `RuntimeSnapshot` data DTO it projects into tool output — a plain JSON struct with no OTel/SDK types, not a behavioural dependency; the DTO stays in `telemetry` by design. (2) `adapter/soul` imports `adapter/skills` for `ScanForInjection` — the conservative role-override deny-list is shared so the soul reuses the same load-time injection gate rather than copying the regexes. (3) `adapter/{permconfig,skills,agents,soul}` import the leaf `adapter/xdgconfig` for the shared `ResolveEnv`/`UserConfigDir` XDG path-resolution seam — a stdlib-only adapter leaf, extracted to de-duplicate the four copies.) |
 | `contracts/gen` | generated; protobuf + gRPC runtime. |
 | `app` (composition) | the shared engine/service assembly (`app.Build`). MAY import adapters + `agent` + (via `server`) `contracts/gen`. Nothing imports it but the `cmd/` mains. |
 | `cmd/*` | flags + serving; consumes `internal/app`. With `app`, the only places concrete adapters meet ports. |
@@ -882,7 +882,8 @@ changes when one is swapped:
 | `port.PermissionPolicy` | `internal/port/permission.go` | `permpolicy` (layer-1 rules), optionally decorated by `permclassify` (layer-2 model classifier) |
 | `Compactor` | `agent/compaction.go` | `HeuristicCompactor` → `CascadeCompactor` |
 | `TokenCounter` | `agent/tokencount.go` | `HeuristicTokenCounter` → `tokenizer.Counter` |
-| `InstructionAssembler` | `prompt/instructions.go` | `RootAssembler` (AGENTS.md/CLAUDE.md) → scoped assembler |
+| `InstructionAssembler` | `prompt/instructions.go` | `RootAssembler` (AGENTS.md/CLAUDE.md) → `MultiAssembler` composing `RootAssembler` → `SoulAssembler` (persona) → `MemoryIndexAssembler` (saved-facts), all as turn-0 user messages |
+| `prompt.SoulSource` | `prompt/soul.go` (impl `internal/adapter/soul`) | nil (off) → `*soul.Store` over user-scoped `~/.config/mecatl/soul.md`; agent-READ-ONLY (no write path), env-injected (not the WorkspaceReader — the file is outside any session root), injection-scanned + byte-capped, fail-soft; on by default, `--soul-file`/`--no-soul` |
 | `CommandExpander` | `prompt/command.go` | `NoopExpander` → `DirCommandExpander` (slash commands) |
 | `tool.Disclosable` + `ToolSearch` | `internal/tool` | always-listed → progressive disclosure |
 | `Skill` tool (skills) | `internal/adapter/skills` (impl) | off → opt-in `--skills-dir`; progressive disclosure of *instructions* (metadata always in context, body on activation) |

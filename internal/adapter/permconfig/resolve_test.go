@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
+	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/tool"
 )
@@ -50,11 +51,11 @@ func newProjectWS(t *testing.T, root string, settings string) *countingWS {
 }
 
 // fakeEnv is an injectable environment with no user-global files and no home.
-func fakeEnv() resolveEnv {
-	return resolveEnv{
-		getenv:      func(string) string { return "" },
-		userHomeDir: func() (string, error) { return "", errors.New("no home") },
-		readFile:    func(string) ([]byte, error) { return nil, errors.New("not found") },
+func fakeEnv() xdgconfig.ResolveEnv {
+	return xdgconfig.ResolveEnv{
+		Getenv:      func(string) string { return "" },
+		UserHomeDir: func() (string, error) { return "", errors.New("no home") },
+		ReadFile:    func(string) ([]byte, error) { return nil, errors.New("not found") },
 	}
 }
 
@@ -135,7 +136,7 @@ func TestResolveConventionalOffYieldsNilResolver(t *testing.T) {
 // A nil workspace yields only the user-global rules (no project to read).
 func TestResolveNilWorkspace(t *testing.T) {
 	env := fakeEnv()
-	env.readFile = func(_ string) ([]byte, error) {
+	env.ReadFile = func(_ string) ([]byte, error) {
 		return []byte("permissions:\n  deny:\n    - \"Bash(curl:*)\"\n"), nil
 	}
 	r := newWithEnv(Options{ExplicitFiles: []string{"/etc/mecatl/perms.yaml"}}, env)
@@ -153,7 +154,7 @@ func TestResolveNilWorkspace(t *testing.T) {
 // ScopeSharedProject; user-global → ScopeUser.
 func TestResolveScopeAssignmentPerTier(t *testing.T) {
 	env := fakeEnv()
-	env.readFile = func(_ string) ([]byte, error) {
+	env.ReadFile = func(_ string) ([]byte, error) {
 		return []byte("permissions:\n  deny:\n    - \"Bash(curl:*)\"\n"), nil
 	}
 	r := newWithEnv(Options{

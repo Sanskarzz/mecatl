@@ -4,6 +4,8 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+
+	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 )
 
 func dirs(t *testing.T, sources []AgentSource) []string {
@@ -33,9 +35,9 @@ func assertDirs(t *testing.T, got []AgentSource, want []string) {
 }
 
 func TestResolveSourcesOptInByDefault(t *testing.T) {
-	got := resolveSourcesEnv(ResolveOptions{}, resolveEnv{
-		getenv:      func(string) string { return "" },
-		userHomeDir: func() (string, error) { return "/home/u", nil },
+	got := resolveSourcesEnv(ResolveOptions{}, xdgconfig.ResolveEnv{
+		Getenv:      func(string) string { return "" },
+		UserHomeDir: func() (string, error) { return "/home/u", nil },
 	})
 	if len(got) != 0 {
 		t.Fatalf("zero options must resolve no sources, got %d: %v", len(got), got)
@@ -49,9 +51,9 @@ func TestResolveSourcesConventionalPrecedenceOrder(t *testing.T) {
 		Explicit:     []string{"/explicit"},
 		Conventional: true,
 		Workspace:    ws,
-	}, resolveEnv{
-		getenv:      func(string) string { return "" },
-		userHomeDir: func() (string, error) { return home, nil },
+	}, xdgconfig.ResolveEnv{
+		Getenv:      func(string) string { return "" },
+		UserHomeDir: func() (string, error) { return home, nil },
 	})
 	want := []string{
 		"/explicit",
@@ -69,14 +71,14 @@ func TestResolveSourcesHonorsXDGConfigHome(t *testing.T) {
 	got := resolveSourcesEnv(ResolveOptions{
 		Conventional: true,
 		Workspace:    "/ws",
-	}, resolveEnv{
-		getenv: func(k string) string {
+	}, xdgconfig.ResolveEnv{
+		Getenv: func(k string) string {
 			if k == "XDG_CONFIG_HOME" {
 				return xdg
 			}
 			return ""
 		},
-		userHomeDir: func() (string, error) { return home, nil },
+		UserHomeDir: func() (string, error) { return home, nil },
 	})
 	resolved := dirs(t, got)
 	wantXDG := filepath.Join(xdg, "mecatl", "agents")
@@ -98,9 +100,9 @@ func TestResolveSourcesNoHomeSkipsUser(t *testing.T) {
 	got := resolveSourcesEnv(ResolveOptions{
 		Conventional: true,
 		Workspace:    "/ws",
-	}, resolveEnv{
-		getenv:      func(string) string { return "" },
-		userHomeDir: func() (string, error) { return "", errors.New("no home") },
+	}, xdgconfig.ResolveEnv{
+		Getenv:      func(string) string { return "" },
+		UserHomeDir: func() (string, error) { return "", errors.New("no home") },
 	})
 	want := []string{
 		filepath.Join("/ws", ".mecatl", "agents"),
