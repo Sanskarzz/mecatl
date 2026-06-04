@@ -50,6 +50,32 @@ func TestMCPEmptyStateCapsAware(t *testing.T) {
 	}
 }
 
+// TestSkillsEmptyStateCapsAware mirrors the MCP empty-state payoff for the
+// /skills panel: the SAME empty inventory reads "not enabled" (with a remedy)
+// when caps.Skills is false and "none configured" when caps.Skills is true.
+func TestSkillsEmptyStateCapsAware(t *testing.T) {
+	th := aztec()
+	off := client.Capabilities{}            // skills off
+	on := client.Capabilities{Skills: true} // skills on, but inventory empty
+	emptyPanel := skillsState{view: skillsPanel}
+
+	offOut := stripANSIstr(renderSkillsOverlay(th, emptyPanel, off, 100, 24))
+	if !strings.Contains(offOut, "Skills are not enabled on this server") {
+		t.Errorf("skills off: want 'not enabled' copy in:\n%s", offOut)
+	}
+	if !strings.Contains(offOut, "Run a mecated") {
+		t.Errorf("skills off copy should carry the remedy:\n%s", offOut)
+	}
+
+	onOut := stripANSIstr(renderSkillsOverlay(th, emptyPanel, on, 100, 24))
+	if !strings.Contains(onOut, "No skills configured on this server") {
+		t.Errorf("skills on-but-empty: want 'none configured' copy in:\n%s", onOut)
+	}
+	if strings.Contains(onOut, "not enabled") {
+		t.Errorf("skills on-but-empty must NOT say 'not enabled':\n%s", onOut)
+	}
+}
+
 // TestPaletteEmptyNoteNeutral asserts the "/" palette note is a single neutral
 // "no matching command" (built-ins always exist, so the old caps-based "not
 // enabled"/"none found" distinction is gone), and is empty for a non-command

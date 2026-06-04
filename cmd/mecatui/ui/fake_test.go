@@ -263,3 +263,21 @@ func (f *fakeMCP) ListToolHiveGroups(_ context.Context) ([]string, error) {
 	}
 	return f.groups, nil
 }
+
+// fakeSkills is a scripted client.SkillLister for the /skills panel tests:
+// ListSkills returns the canned skills slice, or err when set. calls counts the
+// invocations so a test can assert the RPC fired. It implements client.SkillLister
+// so the ui's skills path runs with no proto and no network.
+type fakeSkills struct {
+	skills []client.Skill
+	err    error
+	calls  int
+}
+
+func (f *fakeSkills) ListSkills(_ context.Context) ([]client.Skill, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.skills, nil
+}

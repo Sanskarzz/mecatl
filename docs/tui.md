@@ -91,7 +91,11 @@ ToolHive, the writable SkillDraft quarantine) **off** — for those, run a full
 conventional dirs, e.g. `.claude/skills`, when present) — consistent with
 agent-definition discovery. Skills register only when at least one `SKILL.md` is
 found (opt-in by presence), so with none, `caps.Skills` is false and the `?`
-overlay reflects that. Pass `--no-skills` to disable discovery entirely, or
+overlay reflects that. When skills ARE discovered, `/skills` opens a read-only
+inventory panel listing each skill's name + one-line description (a startup
+snapshot via the `ListSkills` RPC — skills are immutable for the process
+lifetime). Activation stays the model's call (the `Skill` tool reads the body on
+demand); the panel is discovery only. Pass `--no-skills` to disable discovery entirely, or
 `--skills-dir` to scope it to a single vetted directory. Note the trust boundary:
 a skill auto-activates from its always-in-context metadata, so a `SKILL.md` in a
 workspace you didn't author (e.g. a cloned repo's `.claude/skills`) can steer the
@@ -103,8 +107,10 @@ palette with a set of commands the TUI itself ships — independent of workspace
 dirs and even when server slash-command expansion is off. `/clear` (reset the
 conversation and scrollback) and `/help` (open the keys-&-features overlay) are
 *always* available because they act purely on the TUI's own state; `/mcp` (browse
-the MCP inventory) and `/agents` (the agent-team overlay) appear only when the
-connected server advertises those capabilities. These never reach the model — a
+the MCP inventory), `/agents` (the agent-team overlay), and `/skills` (browse the
+skills inventory) appear only when the connected server advertises those
+capabilities (and, for `/mcp`/`/skills`, the matching client collaborator is
+wired). These never reach the model — a
 bare built-in line is intercepted and run locally. (`/compact` is a planned
 follow-up: it needs a server RPC that does not exist yet.)
 
@@ -197,7 +203,7 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 | in the permission modal: `←`/`→`/`tab` | toggle the focused button |
 | `pgup` / `pgdn` | scroll the conversation |
 | `?` | help overlay (on an empty prompt) |
-| `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`; plus workspace commands) |
+| `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/skills`; plus workspace commands) |
 | `@` | file-mention menu — complete a workspace path, then attach it on submit (see below) |
 
 The `?` overlay enumerates the rest of the chords — `ctrl+v` (paste a clipboard

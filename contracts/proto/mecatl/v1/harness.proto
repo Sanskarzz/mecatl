@@ -91,6 +91,13 @@ service HarnessService {
   // empty workspace, or a server with no command expander, returns an empty list.
   rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
 
+  // ListSkills returns the resolved skills inventory snapshot: each discovered
+  // skill's name + one-line description. Derived from the snapshot taken at
+  // startup (skills are discovered once at build time and immutable for the
+  // process lifetime); it performs no live discovery. Metadata only — activating
+  // a skill remains a run-path concern (the Skill tool reads the body).
+  rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
+
   // --- Agent teams (experimental) -----------------------------------------
   //
   // A team is a set of long-lived member sessions that coordinate through a
@@ -180,8 +187,9 @@ message ServerCapabilities {
   // memory is true when cross-session memory tools (Remember/Recall) are
   // registered. Agent-side: no overlay, surfaced as prose only.
   bool memory = 3;
-  // skills is true when the Skill tool is registered. Agent-side: never a
-  // browsable list; surfaced as the "skills run automatically" clarification.
+  // skills is true when the Skill tool is registered. Gates the /skills
+  // inventory browser (the read-only ListSkills snapshot). Activation stays the
+  // model's concern — the panel is discovery only.
   bool skills = 4;
   // teams is true when agent teams are enabled (a member-engine factory is
   // wired). Gates the ctrl+a deep view's relevance.
@@ -850,6 +858,29 @@ message ListCommandsRequest {
 message ListCommandsResponse {
   // commands are the (possibly empty) discovered commands, name-sorted.
   repeated Command commands = 1;
+}
+
+// --- Skills inventory discovery ---------------------------------------------
+
+// SkillInfo is one discovered skill's listing metadata: the activation name and
+// a short, human-facing description for the inventory panel. It carries NO body
+// — discovery is metadata-only; activation (which reads the body) is a separate
+// run-path concern handled by the Skill tool.
+message SkillInfo {
+  // name is the skill's stable activation identifier (the value passed to the
+  // Skill tool).
+  string name = 1;
+  // description is the one-line frontmatter summary that steers WHEN to activate.
+  string description = 2;
+}
+
+// ListSkillsRequest requests the resolved skills inventory snapshot.
+message ListSkillsRequest {}
+
+// ListSkillsResponse carries the resolved skills inventory.
+message ListSkillsResponse {
+  // skills are the (possibly empty) discovered skills, name-sorted.
+  repeated SkillInfo skills = 1;
 }
 
 // --- Agent team messages ----------------------------------------------------

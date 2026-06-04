@@ -54,6 +54,7 @@ const (
 	HarnessService_ListToolHiveGroups_FullMethodName  = "/mecatl.v1.HarnessService/ListToolHiveGroups"
 	HarnessService_ListAgents_FullMethodName          = "/mecatl.v1.HarnessService/ListAgents"
 	HarnessService_ListCommands_FullMethodName        = "/mecatl.v1.HarnessService/ListCommands"
+	HarnessService_ListSkills_FullMethodName          = "/mecatl.v1.HarnessService/ListSkills"
 	HarnessService_CreateTeam_FullMethodName          = "/mecatl.v1.HarnessService/CreateTeam"
 	HarnessService_SpawnTeammate_FullMethodName       = "/mecatl.v1.HarnessService/SpawnTeammate"
 	HarnessService_SendTeammateMessage_FullMethodName = "/mecatl.v1.HarnessService/SendTeammateMessage"
@@ -118,6 +119,12 @@ type HarnessServiceClient interface {
 	// CommandExpander handles it when a "/<cmd> args" prompt is submitted). An
 	// empty workspace, or a server with no command expander, returns an empty list.
 	ListCommands(ctx context.Context, in *ListCommandsRequest, opts ...grpc.CallOption) (*ListCommandsResponse, error)
+	// ListSkills returns the resolved skills inventory snapshot: each discovered
+	// skill's name + one-line description. Derived from the snapshot taken at
+	// startup (skills are discovered once at build time and immutable for the
+	// process lifetime); it performs no live discovery. Metadata only — activating
+	// a skill remains a run-path concern (the Skill tool reads the body).
+	ListSkills(ctx context.Context, in *ListSkillsRequest, opts ...grpc.CallOption) (*ListSkillsResponse, error)
 	// CreateTeam allocates a new agent team and returns its id, optionally enrolling
 	// an initial roster in the same atomic call. Members may also be added afterwards
 	// with SpawnTeammate; the team is then driven with RunTeam.
@@ -270,6 +277,16 @@ func (c *harnessServiceClient) ListCommands(ctx context.Context, in *ListCommand
 	return out, nil
 }
 
+func (c *harnessServiceClient) ListSkills(ctx context.Context, in *ListSkillsRequest, opts ...grpc.CallOption) (*ListSkillsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSkillsResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ListSkills_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *harnessServiceClient) CreateTeam(ctx context.Context, in *CreateTeamRequest, opts ...grpc.CallOption) (*CreateTeamResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateTeamResponse)
@@ -395,6 +412,12 @@ type HarnessServiceServer interface {
 	// CommandExpander handles it when a "/<cmd> args" prompt is submitted). An
 	// empty workspace, or a server with no command expander, returns an empty list.
 	ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error)
+	// ListSkills returns the resolved skills inventory snapshot: each discovered
+	// skill's name + one-line description. Derived from the snapshot taken at
+	// startup (skills are discovered once at build time and immutable for the
+	// process lifetime); it performs no live discovery. Metadata only — activating
+	// a skill remains a run-path concern (the Skill tool reads the body).
+	ListSkills(context.Context, *ListSkillsRequest) (*ListSkillsResponse, error)
 	// CreateTeam allocates a new agent team and returns its id, optionally enrolling
 	// an initial roster in the same atomic call. Members may also be added afterwards
 	// with SpawnTeammate; the team is then driven with RunTeam.
@@ -459,6 +482,9 @@ func (UnimplementedHarnessServiceServer) ListAgents(context.Context, *ListAgents
 }
 func (UnimplementedHarnessServiceServer) ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListCommands not implemented")
+}
+func (UnimplementedHarnessServiceServer) ListSkills(context.Context, *ListSkillsRequest) (*ListSkillsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListSkills not implemented")
 }
 func (UnimplementedHarnessServiceServer) CreateTeam(context.Context, *CreateTeamRequest) (*CreateTeamResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateTeam not implemented")
@@ -704,6 +730,24 @@ func _HarnessService_ListCommands_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HarnessService_ListSkills_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSkillsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ListSkills(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ListSkills_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ListSkills(ctx, req.(*ListSkillsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _HarnessService_CreateTeam_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateTeamRequest)
 	if err := dec(in); err != nil {
@@ -855,6 +899,10 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListCommands",
 			Handler:    _HarnessService_ListCommands_Handler,
+		},
+		{
+			MethodName: "ListSkills",
+			Handler:    _HarnessService_ListSkills_Handler,
 		},
 		{
 			MethodName: "CreateTeam",

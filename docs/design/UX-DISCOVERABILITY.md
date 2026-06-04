@@ -80,8 +80,9 @@ message ServerCapabilities {
   // memory is true when cross-session memory tools (Remember/Recall) are
   // registered. Agent-side: no overlay, surfaced as prose only.
   bool memory = 3;
-  // skills is true when the Skill tool is registered. Agent-side: never a
-  // browsable list; surfaced as the "skills run automatically" clarification.
+  // skills is true when the Skill tool is registered. Gates the /skills
+  // inventory browser (the read-only ListSkills snapshot). Activation stays the
+  // model's concern — the panel is discovery only.
   bool skills = 4;
   // teams is true when agent teams are enabled (a member-engine factory is
   // wired). Gates the ctrl+a deep view's relevance.
@@ -416,8 +417,8 @@ mecatui — keys & features
     ?                this help (type ? on an empty prompt)
     ctrl+c           quit
 
-  Skills run automatically — the model invokes them itself; there is no
-  browsable skills list. {caps.Skills ? "Skills ARE enabled on this server." : "Skills are not enabled on this server."}
+  Skills activate automatically — the model invokes them itself. When skills are
+  enabled the inventory IS browsable: {caps.Skills ? "type /skills to browse the skills inventory." : "skills are not enabled on this server (nothing to browse)."}
   Slash commands (/) are the human-facing analog.
 
   {caps.Memory ? "Cross-session memory is on — context carries across runs." : ""}

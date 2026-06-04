@@ -28,8 +28,8 @@
 ┃    ?             this help (on an empty prompt)                                                   ┃
 ┃    ctrl+c        quit                                                                             ┃
 ┃                                                                                                   ┃
-┃  Skills run automatically when the model needs them — not a browsable                             ┃
-┃  list; watch the transcript for Skill tool calls.                                                 ┃
+┃  Skills activate automatically when the model needs them; type /skills                            ┃
+┃  to browse the skills inventory.                                                                  ┃
 ┃  Type / to browse slash commands.                                                                 ┃
 ┃  Cross-session memory is on — context carries across runs.                                        ┃
 ┃  Type @ to attach a file — this model takes text only, so files inline as text.                   ┃

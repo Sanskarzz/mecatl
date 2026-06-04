@@ -227,6 +227,11 @@ func (h *HarnessServer) ListAgents(ctx context.Context, _ *mecatlv1.ListAgentsRe
 	return &mecatlv1.ListAgentsResponse{Agents: h.svc.ListAgents(ctx)}, nil
 }
 
+// ListSkills returns the resolved skills-inventory snapshot.
+func (h *HarnessServer) ListSkills(ctx context.Context, _ *mecatlv1.ListSkillsRequest) (*mecatlv1.ListSkillsResponse, error) {
+	return &mecatlv1.ListSkillsResponse{Skills: h.svc.ListSkills(ctx)}, nil
+}
+
 // ListCommands returns the available slash commands for the requested workspace.
 func (h *HarnessServer) ListCommands(ctx context.Context, req *mecatlv1.ListCommandsRequest) (*mecatlv1.ListCommandsResponse, error) {
 	cmds, err := h.svc.ListCommands(ctx, req.GetWorkspace())

@@ -53,6 +53,8 @@ func (m Model) View() tea.View {
 		body = renderMCPOverlay(m.deps.Theme, m.mcp, m.caps, m.width, m.vp.Height())
 	case m.agents.view != agentsNone:
 		body = renderAgentsOverlay(m.deps.Theme, m.agents, m.conv.latestTeamBlock(), m.width, m.vp.Height())
+	case m.skills.view != skillsNone:
+		body = renderSkillsOverlay(m.deps.Theme, m.skills, m.caps, m.width, m.vp.Height())
 	case m.phase == phaseIdle && m.conv.isEmpty():
 		// First-run zero-state: a welcome card in the empty viewport. Not an overlay
 		// (claims no keyboard); typing flows over it and it vanishes on the first block.

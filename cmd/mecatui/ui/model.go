@@ -41,8 +41,9 @@ type Converser interface {
 type Deps struct {
 	Session SessionCreator
 	Conv    Converser
-	MCP     client.MCP       // MCP/ToolHive inventory + resources/prompts; nil disables the overlay
-	Cmds    client.Commander // slash-command discovery for the input palette; nil disables it
+	MCP     client.MCP         // MCP/ToolHive inventory + resources/prompts; nil disables the overlay
+	Cmds    client.Commander   // slash-command discovery for the input palette; nil disables it
+	Skills  client.SkillLister // skills-inventory discovery for the /skills panel; nil disables it
 	// Clipboard reads the OS clipboard for ctrl+v paste (image-first, text-fallback).
 	// nil cleanly disables ctrl+v image paste (same convention as nil MCP/Cmds);
 	// main.go populates it with client.NewClipboard().
@@ -159,6 +160,7 @@ type Model struct {
 	toolProgress string         // transient progress line for the in-flight tool (cleared on result/turn boundary)
 	ask          pendingAsk     // current permission modal (when phaseAwaitingApproval)
 	mcp          mcpState       // MCP overlay state (view==mcpNone when closed)
+	skills       skillsState    // skills-inventory overlay state (view==skillsNone when closed)
 	palette      paletteState   // slash-command palette (open when the input starts with "/")
 	mention      mentionState   // @-file-mention completion menu (open when the trailing word is an "@token"); mutually exclusive with palette
 	queued       []string       // follow-up prompts staged while a run streams; drained FIFO on a clean stop (see drainQueue)

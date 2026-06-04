@@ -231,7 +231,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, mcpClose, err := buildEngine(ctx, cfg, provider, store)
+	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, mcpClose, err := buildEngine(ctx, cfg, provider, store)
 	if err != nil {
 		return nil, err
 	}
@@ -260,6 +260,11 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// resolves the same registry for the Task tool), so this re-resolution is
 		// cheap and keeps the snapshot a pure read at request time.
 		Agents: agentSnapshot(cfg, resolveAgentRegistry(ctx, cfg)),
+		// ListSkills snapshot: the skills discovered once at build time (registerSkills),
+		// projected into the proto form. Skills are immutable for the process lifetime,
+		// so this is a startup snapshot (like Agents), not a live lister. nil/empty when
+		// skills are disabled.
+		Skills: skillSnapshot(discoveredSkills),
 		// ListCommands palette discovery: a workspace-aware lister over the same
 		// command expander build the engine uses. nil disables the RPC (empty list).
 		Commands: commandLister,
@@ -428,12 +433,12 @@ func buildStore(cfg Config) (port.SessionStore, error) {
 // factory (built HERE because store/policy/hooks/counter/mcpProvider — the exact
 // collaborators a per-session engine must share with the main one — are all in
 // scope here, so the factory cannot drift from the main engine's Deps).
-func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, func(), error) {
+func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, []skills.Skill, func(), error) {
 	// SkillDraft trust boundary: when enabled, the quarantine dir must live OUTSIDE
 	// the workspace root (so the model's workspace-confined Write/Edit cannot reach
 	// it) and be disjoint from every active skills dir. Fatal on a misconfig.
 	if err := validateSkillDraftConfig(cfg); err != nil {
-		return nil, nil, nil, nil, nil, nil, func() {}, err
+		return nil, nil, nil, nil, nil, nil, nil, func() {}, err
 	}
 	warnSkillDraftResiduals(cfg)
 
@@ -461,7 +466,7 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 	policy := permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, resolver)
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
-	cat, mainMgr, mcpProvider, mcpInventory, memStore, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
+	cat, mainMgr, mcpProvider, mcpInventory, memStore, discoveredSkills, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
 
 	counter := buildTokenCounter(cfg)
 
@@ -476,7 +481,7 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 	deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, mcpProvider, instructions)
 	deps.Catalog = cat
 	sessFactory := sessionEngineFactory(cfg, provider, store, policy, hooks, counter, mcpProvider, instructions)
-	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, mcpClose, nil
+	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, mcpClose, nil
 }
 
 // buildInstructionAssembler composes the turn-0 instruction assembler: always the
@@ -715,7 +720,7 @@ func registerCoreTools(cfg Config, cat *tool.Catalog, log bool) {
 // — the optional Bash tool. It then optionally registers Fork, memory, skills, the
 // repo map, and connects any MCP servers. The returned close func tears down the
 // MCP manager on shutdown.
-func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, *memory.Store, func()) {
+func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, *memory.Store, []skills.Skill, func()) {
 	cat := tool.NewCatalog()
 	registerCoreTools(cfg, cat, true)
 	// memStore is the per-project memory store, returned so the caller can bind it
@@ -814,7 +819,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		}
 	}
 
-	registerSkills(ctx, cfg, cat)
+	discoveredSkills := registerSkills(ctx, cfg, cat)
 
 	// Repo-map tool (Aider-style ranked codebase overview). CGO-free (tree-sitter via
 	// WebAssembly), so it ships in the default static build with no build tag.
@@ -825,7 +830,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		slog.Info("repo map tool DISABLED")
 	}
 
-	return cat, mainMgr, mcpProvider, mcpInventory, memStore, mcpClose
+	return cat, mainMgr, mcpProvider, mcpInventory, memStore, discoveredSkills, mcpClose
 }
 
 // registerMCP RESOLVES the MCP server inventory from the pluggable source list
@@ -931,7 +936,11 @@ func logMCPInventory(inventory []mcpsource.SourceInfo) {
 // OPT-IN: with no sources, nothing is registered. The SkillDraft tool is registered
 // when SkillsDraftDir is set, even with no active sources (to close the
 // author→promote→active loop).
-func registerSkills(ctx context.Context, cfg Config, cat *tool.Catalog) {
+//
+// It returns the discovered skills so the composition root can project them into
+// the ListSkills snapshot (skillSnapshot). The slice is nil when no skills are
+// discovered (disabled, no sources, or none valid).
+func registerSkills(ctx context.Context, cfg Config, cat *tool.Catalog) []skills.Skill {
 	sources := skills.ResolveSources(skills.ResolveOptions{
 		Explicit:     cfg.SkillsDirs,
 		Conventional: cfg.SkillsConventional,
@@ -939,11 +948,11 @@ func registerSkills(ctx context.Context, cfg Config, cat *tool.Catalog) {
 	})
 	if len(sources) == 0 && cfg.SkillsDraftDir != "" {
 		registerSkillDraft(cfg, cat, nil)
-		return
+		return nil
 	}
 	if len(sources) == 0 {
 		slog.Info("skills DISABLED (no skills dirs configured)")
-		return
+		return nil
 	}
 
 	discovered, skips, err := skills.RegisterSource(ctx, cat, skills.NewMultiSource(sources...))
@@ -968,6 +977,7 @@ func registerSkills(ctx context.Context, cfg Config, cat *tool.Catalog) {
 	}
 
 	registerSkillDraft(cfg, cat, discovered)
+	return discovered
 }
 
 // registerSkillDraft registers the writable SkillDraft tool when SkillsDraftDir is

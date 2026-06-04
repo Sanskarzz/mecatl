@@ -801,6 +801,16 @@ the tool is read-only it is also available in plan mode. The tool is registered
 **only when at least one valid skill is discovered** — an empty inventory
 advertises nothing.
 
+The discovered set is *also* projected into a server-side inventory snapshot
+(`internal/app.skillSnapshot`, name-sorted, name+description only — no body),
+carried on `server.Config.Skills` and served read-only by the **`ListSkills`
+RPC** (`HarnessService.ListSkills` / `GET /v1/skills`). It mirrors `ListAgents`
+rather than `ListCommands`: skills are discovered once at build time and
+immutable for the process lifetime, so the snapshot is a pure read, never a live
+re-scan. The mecatui TUI consumes it for the `/skills` browser panel (gated on
+`caps.Skills` plus a wired `client.SkillLister`); activation stays the model's
+concern, so the panel is discovery only.
+
 *Where skills come from* is itself a seam: `skills.Source`
 (`Skills(ctx) ([]Skill, []SkipError, error)`) is the **pluggable extensibility
 point**. `skills.DirSource{Dir, Label}` is the default local-filesystem

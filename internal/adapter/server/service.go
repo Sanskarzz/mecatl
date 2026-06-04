@@ -106,6 +106,16 @@ type Config struct {
 	// agents adapter. May be empty (agent definitions disabled or none found).
 	Agents []*mecatlv1.AgentInfo
 
+	// Skills is the resolved skills-inventory snapshot taken at startup. It backs
+	// ListSkills and is a pure read of this snapshot (no live discovery — skills
+	// are discovered once at build time and immutable for the process lifetime).
+	// The composition root (internal/app) discovers the skills once and projects
+	// each into the proto form (name + description); that PROJECTION (skillSnapshot)
+	// lives in internal/app, not here, so the server adapter holds only the proto
+	// snapshot and never reaches into the skills adapter's discovery types. May be
+	// empty (skills disabled or none found).
+	Skills []*mecatlv1.SkillInfo
+
 	// SessionEngine builds a PER-SESSION engine over client-provided streaming-HTTP
 	// MCP servers (the ACP session/new mcpServers). It is the seam that lets a
 	// session mount its OWN MCP tools without leaking them into the shared Engine
@@ -889,6 +899,12 @@ func (s *Service) ListToolHiveGroups(ctx context.Context) []string {
 // It is a pure read of the injected snapshot; no live discovery.
 func (s *Service) ListAgents(_ context.Context) []*mecatlv1.AgentInfo {
 	return s.cfg.Agents
+}
+
+// ListSkills returns the resolved skills-inventory snapshot (possibly empty).
+// It is a pure read of the injected snapshot; no live discovery.
+func (s *Service) ListSkills(_ context.Context) []*mecatlv1.SkillInfo {
+	return s.cfg.Skills
 }
 
 // --- Slash command discovery -------------------------------------------------

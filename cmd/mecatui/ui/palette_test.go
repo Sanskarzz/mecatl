@@ -328,6 +328,44 @@ func TestPaletteNilCommanderShowsBuiltins(t *testing.T) {
 	}
 }
 
+// TestPaletteSkillsRowGatedOnWiredAndCap verifies the /skills built-in row
+// surfaces in the palette only when BOTH the server advertises Skills AND a
+// skills collaborator is wired (m.deps.Skills != nil), mirroring the /mcp gate.
+func TestPaletteSkillsRowGatedOnWiredAndCap(t *testing.T) {
+	hasSkills := func(m Model) bool {
+		for _, r := range m.builtinRows() {
+			if r.Name == "skills" {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Cap on, wired: /skills present.
+	m := newPaletteModel(t, nil)
+	m.caps = client.Capabilities{Skills: true}
+	m.deps.Skills = &fakeSkills{}
+	if !hasSkills(m) {
+		t.Error("/skills should appear when caps.Skills && a skills lister is wired")
+	}
+
+	// Cap on, NOT wired: absent.
+	m2 := newPaletteModel(t, nil)
+	m2.caps = client.Capabilities{Skills: true}
+	m2.deps.Skills = nil
+	if hasSkills(m2) {
+		t.Error("/skills should NOT appear when caps.Skills but no skills lister is wired")
+	}
+
+	// Wired, cap off: absent.
+	m3 := newPaletteModel(t, nil)
+	m3.caps = client.Capabilities{}
+	m3.deps.Skills = &fakeSkills{}
+	if hasSkills(m3) {
+		t.Error("/skills should NOT appear when wired but the server does not advertise Skills")
+	}
+}
+
 // TestPaletteClosesWhenLeavingCommandMode verifies a space after the name (args)
 // or a non-command line closes the palette.
 func TestPaletteClosesWhenLeavingCommandMode(t *testing.T) {

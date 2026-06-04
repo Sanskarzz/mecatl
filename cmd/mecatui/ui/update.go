@@ -163,6 +163,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if mm, cmd, handled := m.updateMCPMsg(msg); handled {
 			return mm, cmd
 		}
+		// Skills overlay result/error msg is reduced next; if it's not a SkillsMsg,
+		// fall through to the stream-event handler. It fires no follow-up command.
+		if mm, handled := m.updateSkillsMsg(msg); handled {
+			return mm, nil
+		}
 		// Stream events (session.init / turn.start / deltas / tool.* /
 		// permission.ask / hook / compaction / result) are handled separately to
 		// keep this reducer's branch count in check.
@@ -349,6 +354,12 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// back from focus → roster → closed on esc internally, so route here before the
 	// phase switch (and before the ctrl+t toggle, so esc/enter belong to it).
 	if mm, cmd, handled := m.onAgentsKey(msg); handled {
+		return mm, cmd
+	}
+
+	// An open skills overlay likewise owns the keyboard (idle-only). It is
+	// read-only — esc closes it internally — so route here before the phase switch.
+	if mm, cmd, handled := m.onSkillsKey(msg); handled {
 		return mm, cmd
 	}
 
@@ -723,7 +734,7 @@ func (m Model) runSelectedBuiltin() (tea.Model, tea.Cmd, bool) {
 	if !row.Builtin {
 		return m, nil, false
 	}
-	b, found := builtinByName(m.caps, m.deps.MCP != nil, row.Name)
+	b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Skills != nil, row.Name)
 	if !found {
 		return m, nil, false
 	}
@@ -771,7 +782,7 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	// "/name arg" line has a space → commandPrefix is false → also falls through
 	// (workspace commands expand server-side from the full line).
 	if name, ok := commandPrefix(text); ok {
-		if b, found := builtinByName(m.caps, m.deps.MCP != nil, name); found {
+		if b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Skills != nil, name); found {
 			m.ta.Reset()
 			return b.run(m)
 		}

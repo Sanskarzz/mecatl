@@ -27,9 +27,11 @@ type builtin struct {
 // server. /clear and /help are ALWAYS present — they act purely on the Model and
 // need no server feature. /mcp is present only when the server advertises MCP
 // AND a Commander-independent MCP collaborator is wired (mcpWired); /agents only
-// when the server advertises Teams. The order is fixed (clear, help, mcp,
-// agents) and locked by a test so the palette ordering is stable.
-func builtinCommands(caps client.Capabilities, mcpWired bool) []builtin {
+// when the server advertises Teams; /skills only when the server advertises
+// Skills AND a skills collaborator is wired (skillsWired). The order is fixed
+// (clear, help, mcp, agents, skills) and locked by a test so the palette
+// ordering is stable.
+func builtinCommands(caps client.Capabilities, mcpWired, skillsWired bool) []builtin {
 	out := []builtin{
 		{
 			name: "clear",
@@ -56,14 +58,21 @@ func builtinCommands(caps client.Capabilities, mcpWired bool) []builtin {
 			run:  Model.runAgents,
 		})
 	}
+	if caps.Skills && skillsWired {
+		out = append(out, builtin{
+			name: "skills",
+			desc: "browse skills inventory",
+			run:  Model.runSkills,
+		})
+	}
 	return out
 }
 
 // builtinByName looks up a built-in by name within the caps-filtered set, for
 // dispatch. ok is false when no built-in by that name is currently registered
 // (either unknown, or gated off on this server).
-func builtinByName(caps client.Capabilities, mcpWired bool, name string) (builtin, bool) {
-	for _, b := range builtinCommands(caps, mcpWired) {
+func builtinByName(caps client.Capabilities, mcpWired, skillsWired bool, name string) (builtin, bool) {
+	for _, b := range builtinCommands(caps, mcpWired, skillsWired) {
 		if b.name == name {
 			return b, true
 		}
@@ -107,4 +116,11 @@ func (m Model) runMCP() (tea.Model, tea.Cmd) {
 // registered when caps.Teams.
 func (m Model) runAgents() (tea.Model, tea.Cmd) {
 	return m.openAgents()
+}
+
+// runSkills opens the skills inventory panel. Only registered when caps.Skills
+// && the skills collaborator is wired, so openSkills's own nil/idle guards are
+// belt-and-braces here.
+func (m Model) runSkills() (tea.Model, tea.Cmd) {
+	return m.openSkills()
 }

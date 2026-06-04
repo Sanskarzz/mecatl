@@ -55,9 +55,10 @@ func runBatchLeaves(cmd tea.Cmd) {
 	}
 }
 
-// builtinNames extracts the ordered built-in names for a caps/mcpWired combo.
-func builtinNames(caps client.Capabilities, mcpWired bool) []string {
-	bs := builtinCommands(caps, mcpWired)
+// builtinNames extracts the ordered built-in names for a caps/mcpWired/skillsWired
+// combo.
+func builtinNames(caps client.Capabilities, mcpWired, skillsWired bool) []string {
+	bs := builtinCommands(caps, mcpWired, skillsWired)
 	out := make([]string, len(bs))
 	for i, b := range bs {
 		out[i] = b.name
@@ -67,24 +68,30 @@ func builtinNames(caps client.Capabilities, mcpWired bool) []string {
 
 // TestBuiltinCommandsCapsFilter pins the caps gate AND the fixed order: /clear
 // and /help are always present (and lead, in that order); /mcp needs caps.MCP &&
-// the MCP collaborator wired; /agents needs caps.Teams.
+// the MCP collaborator wired; /agents needs caps.Teams; /skills needs caps.Skills
+// && the skills collaborator wired. The fixed order is clear, help, mcp, agents,
+// skills.
 func TestBuiltinCommandsCapsFilter(t *testing.T) {
 	cases := []struct {
-		name     string
-		caps     client.Capabilities
-		mcpWired bool
-		want     []string
+		name        string
+		caps        client.Capabilities
+		mcpWired    bool
+		skillsWired bool
+		want        []string
 	}{
-		{"bare", client.Capabilities{}, false, []string{"clear", "help"}},
-		{"mcp cap but not wired", client.Capabilities{MCP: true}, false, []string{"clear", "help"}},
-		{"mcp wired but no cap", client.Capabilities{}, true, []string{"clear", "help"}},
-		{"mcp cap and wired", client.Capabilities{MCP: true}, true, []string{"clear", "help", "mcp"}},
-		{"teams only", client.Capabilities{Teams: true}, false, []string{"clear", "help", "agents"}},
-		{"all", client.Capabilities{MCP: true, Teams: true}, true, []string{"clear", "help", "mcp", "agents"}},
+		{"bare", client.Capabilities{}, false, false, []string{"clear", "help"}},
+		{"mcp cap but not wired", client.Capabilities{MCP: true}, false, false, []string{"clear", "help"}},
+		{"mcp wired but no cap", client.Capabilities{}, true, false, []string{"clear", "help"}},
+		{"mcp cap and wired", client.Capabilities{MCP: true}, true, false, []string{"clear", "help", "mcp"}},
+		{"teams only", client.Capabilities{Teams: true}, false, false, []string{"clear", "help", "agents"}},
+		{"skills cap but not wired", client.Capabilities{Skills: true}, false, false, []string{"clear", "help"}},
+		{"skills wired but no cap", client.Capabilities{}, false, true, []string{"clear", "help"}},
+		{"skills cap and wired", client.Capabilities{Skills: true}, false, true, []string{"clear", "help", "skills"}},
+		{"all", client.Capabilities{MCP: true, Teams: true, Skills: true}, true, true, []string{"clear", "help", "mcp", "agents", "skills"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := builtinNames(tc.caps, tc.mcpWired)
+			got := builtinNames(tc.caps, tc.mcpWired, tc.skillsWired)
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Fatalf("builtinCommands order/filter = %v, want %v", got, tc.want)
 			}
@@ -95,17 +102,23 @@ func TestBuiltinCommandsCapsFilter(t *testing.T) {
 // TestBuiltinByName covers the dispatch lookup: a registered built-in is found,
 // a gated-off one is not, and an unknown name is not.
 func TestBuiltinByName(t *testing.T) {
-	caps := client.Capabilities{Teams: true} // agents on, mcp off
-	if _, ok := builtinByName(caps, false, "clear"); !ok {
+	caps := client.Capabilities{Teams: true, Skills: true} // agents + skills cap, mcp off
+	if _, ok := builtinByName(caps, false, true, "clear"); !ok {
 		t.Error("clear should be found (always registered)")
 	}
-	if _, ok := builtinByName(caps, false, "agents"); !ok {
+	if _, ok := builtinByName(caps, false, true, "agents"); !ok {
 		t.Error("agents should be found (teams on)")
 	}
-	if _, ok := builtinByName(caps, false, "mcp"); ok {
+	if _, ok := builtinByName(caps, false, true, "skills"); !ok {
+		t.Error("skills should be found (skills cap + wired)")
+	}
+	if _, ok := builtinByName(caps, false, false, "skills"); ok {
+		t.Error("skills should NOT be found (skills cap on but not wired)")
+	}
+	if _, ok := builtinByName(caps, false, true, "mcp"); ok {
 		t.Error("mcp should NOT be found (mcp off / not wired)")
 	}
-	if _, ok := builtinByName(caps, false, "nope"); ok {
+	if _, ok := builtinByName(caps, false, true, "nope"); ok {
 		t.Error("unknown name should not be found")
 	}
 }

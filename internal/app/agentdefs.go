@@ -612,6 +612,26 @@ func agentSnapshot(cfg Config, reg *agents.Registry) []*mecatlv1.AgentInfo {
 	return out
 }
 
+// skillSnapshot projects the discovered skills into the proto SkillInfo list the
+// server's ListSkills RPC returns. It is a pure projection of name + description
+// (metadata only, no body): name-sorted for a deterministic inventory regardless
+// of discovery order, and nil-safe (an empty/nil input yields nil, not an error).
+func skillSnapshot(discovered []skills.Skill) []*mecatlv1.SkillInfo {
+	if len(discovered) == 0 {
+		return nil
+	}
+	sorted := append([]skills.Skill(nil), discovered...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	out := make([]*mecatlv1.SkillInfo, 0, len(sorted))
+	for _, s := range sorted {
+		out = append(out, &mecatlv1.SkillInfo{
+			Name:        s.Name,
+			Description: s.Description,
+		})
+	}
+	return out
+}
+
 // resolveAgentRegistry resolves the agent-definition registry from cfg (explicit
 // dirs + conventional locations when enabled). It is forgiving: discovery
 // diagnostics are logged and a hard fault yields an empty registry rather than

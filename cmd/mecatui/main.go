@@ -101,6 +101,7 @@ func run(args []string) error {
 		Conv:      cl,
 		MCP:       cl,
 		Cmds:      cl,
+		Skills:    cl,
 		Clipboard: client.NewClipboard(),
 		Theme:     th,
 		Server:    target,

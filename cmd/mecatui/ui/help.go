@@ -78,12 +78,21 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 		{key: "ctrl+c", action: "quit"},
 	})
 
-	// The skills clarification: skills are never a browsable list (unlike MCP /
-	// commands), so the help overlay is the one place to explain how they surface.
+	// The skills clarification. Skills always ACTIVATE automatically (the model
+	// decides when, not the user), but when the server advertises Skills the
+	// inventory IS browsable via /skills — so the copy is caps-aware: it points at
+	// /skills when enabled, and keeps the "run automatically, not browsable" framing
+	// when skills are off (nothing to browse).
 	b.WriteString("\n")
-	b.WriteString(muted.Render(
-		"Skills run automatically when the model needs them — not a browsable\n"+
-			"list; watch the transcript for Skill tool calls.") + "\n")
+	if caps.Skills {
+		b.WriteString(muted.Render(
+			"Skills activate automatically when the model needs them; type /skills\n"+
+				"to browse the skills inventory.") + "\n")
+	} else {
+		b.WriteString(muted.Render(
+			"Skills run automatically when the model needs them — not a browsable\n"+
+				"list; watch the transcript for Skill tool calls.") + "\n")
+	}
 	if caps.SlashCommands {
 		b.WriteString(muted.Render("Type / to browse slash commands.") + "\n")
 	}
