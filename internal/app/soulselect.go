@@ -5,9 +5,13 @@ import (
 	"log/slog"
 	"path/filepath"
 
+	"github.com/stacklok/mecatl/internal/adapter/osfs"
+	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/soul"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
+	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/prompt"
+	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // soulEnv is the PATH-RESOLUTION environment used to resolve the conventional
@@ -97,6 +101,77 @@ type soulMeta struct {
 	SHA256 string
 	// Size is the byte length of the selected soul's clean body, or 0 for none.
 	Size int
+	// PermEffect is the resolved effect of the synthetic "soul:apply" action for this
+	// run (issue #14). It is informational (for the slog narration + future use): on a
+	// Deny or Ask the soul is WITHHELD (Present stays false) and this records WHY. The
+	// zero value ("") means the gate was not consulted (legacy/nil-gate path) or
+	// resolved to Allow. There is no proto/RPC/TUI surface for it this pass.
+	PermEffect governance.Effect
+}
+
+// soulGate resolves the permission effect of the synthetic "soul:apply" action
+// (issue #14). It is the composition-layer seam the soul load-gate consults BEFORE
+// running the USER/project selection: it shares the SAME governance evaluator +
+// file-config resolver the real tool policy uses, so a `soul:apply` rule in
+// .mecatl/settings.yaml or the user settings is honoured exactly like a tool rule
+// (project rules gated by --trust-project, resolved against cfg.Workspace). It is an
+// injectable seam so tests can drive each effect with a fake; the real binding is
+// buildSoulGate.
+type soulGate interface {
+	// Effect returns the resolved governance.Effect for the "soul:apply" action.
+	Effect() governance.Effect
+}
+
+// soulGateFunc adapts a function to soulGate (the lightweight-closure idiom used
+// elsewhere in this package, e.g. commandListerFunc).
+type soulGateFunc func() governance.Effect
+
+// Effect implements soulGate.
+func (f soulGateFunc) Effect() governance.Effect { return f() }
+
+// buildSoulGate constructs the real soul load-gate: it evaluates the synthetic
+// "soul:apply" action against the SAME ruleset (mainRules) + file-config resolver
+// (permconfig) the main tool policy uses, so the soul is governed identically. It
+// REUSES the existing permission stack rather than building a parallel one: the
+// resolver is constructed from the SAME Config fields buildEngine passes to
+// permconfig.New, and project ALLOW rules stay gated behind --trust-project and
+// resolved against cfg.Workspace via a READ-ONLY osfs workspace (exactly like the
+// real per-session policy, which resolves against each session's root).
+//
+// A nil/unopenable workspace (or a resolver that wants no project sources) simply
+// means no project-scoped soul:apply rule applies — selection then falls back to the
+// built-in floor Allow (the default-on posture). The gate never fails: it is a pure
+// read of config the process already trusts.
+func buildSoulGate(cfg Config) soulGate {
+	rules := mainRules(cfg)
+	eval := governance.NewEvaluator(rules)
+	resolver := permconfig.New(permconfig.Options{
+		Conventional:  cfg.PermissionsConventional,
+		ImportClaude:  cfg.ImportClaudePermissions,
+		TrustProject:  cfg.TrustProject,
+		ExplicitFiles: cfg.PermissionConfigs,
+	})
+	return soulGateFunc(func() governance.Effect {
+		var ws tool.WorkspaceReader
+		if cfg.Workspace != "" {
+			if w, err := osfs.NewWorkspace(cfg.Workspace); err == nil {
+				ws = w
+			}
+			// FAIL-OPEN-TO-FLOOR BY DESIGN: an unopenable workspace leaves ws nil, so the
+			// resolver yields only user/CLI rules (no project soul:apply rule) and the gate
+			// falls back to the built-in floor Allow. This is deliberate: a user-scoped soul
+			// should still load when the PROJECT workspace can't be read. It is distinct
+			// from a configured Deny/Ask, which DOES withhold (those are real rules, honoured).
+		}
+		var extra []governance.Rule
+		if resolver != nil {
+			extra = resolver.Resolve(context.Background(), ws)
+		}
+		// planMode=false: the soul is build-time data, not a mutating tool call; plan
+		// mode does not apply. EvaluateWith folds the floor Allow with any config
+		// rule deny-dominantly, so a config Ask/Deny on soul:apply still wins.
+		return eval.EvaluateWith(SoulApplyAction, nil, false, extra).Effect
+	})
 }
 
 // selectSoulSource owns the full Item-2 selection policy: USER-wins precedence, the
@@ -108,10 +183,33 @@ type soulMeta struct {
 // discipline (byte cap, injection scan, fence reject), and an absent/rejected soul
 // simply yields no fragment. The drift baseline (checkSoulDrift) runs against the
 // SELECTED soul's path only — never both — so there is no double-baseline.
-func selectSoulSource(cfg Config, io baselineIO) (prompt.SoulSource, soulMeta) {
+//
+// BEFORE any selection it consults the soul load-gate (issue #14): the synthetic
+// "soul:apply" governance action, resolved through the SAME evaluator/resolver the
+// real tool policy uses. Allow ⇒ proceed; Deny ⇒ withhold (no fragment); Ask ⇒
+// withhold-with-warn (the soul is applied at build time with no interactive gate, so
+// Ask cannot be satisfied — set soul:apply→allow to apply it). gate may be nil in
+// tests/legacy callers, which is treated as Allow (the default-on posture).
+func selectSoulSource(cfg Config, io baselineIO, gate soulGate) (prompt.SoulSource, soulMeta) {
 	if cfg.NoSoul {
 		slog.Info("soul DISABLED (--no-soul)")
 		return nil, soulMeta{}
+	}
+
+	// Soul load-gate: consult the "soul:apply" permission BEFORE selecting a source.
+	// A nil gate (tests/legacy) defaults to Allow — the built-in floor posture.
+	if gate != nil {
+		switch eff := gate.Effect(); eff {
+		case governance.Deny:
+			slog.Warn("soul: withheld by permission policy (soul:apply → deny)")
+			return nil, soulMeta{PermEffect: governance.Deny}
+		case governance.Ask:
+			slog.Warn("soul: soul:apply resolved to Ask, but the soul is applied at build time with no interactive gate; withholding this run — set soul:apply→allow to apply it")
+			return nil, soulMeta{PermEffect: governance.Ask}
+		default:
+			// Allow (or unrecognised, fail-safe to the default-on posture): proceed.
+			_ = eff
+		}
 	}
 
 	// USER candidate first (always trusted). An explicit --soul-file is a user-scoped
@@ -121,9 +219,9 @@ func selectSoulSource(cfg Config, io baselineIO) (prompt.SoulSource, soulMeta) {
 	if userRes.Body != "" {
 		// USER-WINS: a present user soul is selected; the project soul is ignored.
 		if cfg.SoulPath != "" {
-			slog.Info("soul ENABLED (user provenance, read-only persona)", "path", cfg.SoulPath)
+			slog.Info("soul ENABLED (user provenance, read-only persona); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)", "path", cfg.SoulPath)
 		} else {
-			slog.Info("soul ENABLED (user provenance, read-only persona)",
+			slog.Info("soul ENABLED (user provenance, read-only persona); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)",
 				"path", "conventional <xdg>/mecatl/soul.md")
 		}
 		drifted := checkSoulDrift(io, userStore.ResolvedPath(), userRes.SHA256, cfg.ApproveSoul)
@@ -167,7 +265,7 @@ func selectSoulSource(cfg Config, io baselineIO) (prompt.SoulSource, soulMeta) {
 		return nil, soulMeta{Provenance: soulProject, Trusted: false, SHA256: projRes.SHA256, Size: projRes.Size}
 	}
 
-	slog.Info("soul ENABLED (PROJECT provenance, read-only persona; trusted via --trust-project)", "path", projectPath)
+	slog.Info("soul ENABLED (PROJECT provenance, read-only persona; trusted via --trust-project); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)", "path", projectPath)
 	drifted := checkSoulDrift(io, projectStore.ResolvedPath(), projRes.SHA256, cfg.ApproveSoul)
 	if drifted && cfg.SoulStrict {
 		slog.Warn("soul: drifted persona refused (--soul-strict); no soul fragment this run",

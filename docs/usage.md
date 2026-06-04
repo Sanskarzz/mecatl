@@ -361,6 +361,29 @@ otherwise they are dropped (and logged) so a checked-in `settings.yaml` cannot
 auto-approve tool calls in an untrusted repo. User-global and `--permission-config`
 (CLI) files are the operator's own and are always fully trusted.
 
+**Memory + soul are pre-approved at the floor** (issue #14) — the six memory tools
+(`Remember`/`Recall`/`SearchMemory` and the cross-project `RememberUser`/`RecallUser`/
+`SearchUserModel`) and the synthetic `soul:apply` action are explicit
+`ScopeBuiltinDefault` Allows in the built-in ruleset, so by default they **do not
+prompt**: an agent recalling and saving its own facts, and applying the operator's
+soul, is part of "having a memory/identity", not a workspace mutation. They are
+explicit (auditable in source + the `... ENABLED ...; permission: allow (built-in
+default, overridable ...)` startup logs) and **overridable** — being the lowest scope,
+any higher-scope config Ask/Deny wins. To require approval (or block) one, add it to a
+`settings.yaml`:
+
+```yaml
+permissions:
+  ask:
+    - "Remember"     # require approval before the agent writes project memory
+  deny:
+    - "soul:apply"   # withhold the soul entirely this deployment
+```
+
+`soul:apply` is consulted at **soul-load (build time)**, not per tool call: `allow`
+applies the soul, `deny` withholds it, and `ask` also **withholds** it (with a warning)
+because there is no interactive gate at build time — set it back to `allow` to apply.
+
 **Claude import is lossy** (`--import-claude-permissions`) — every lossy outcome is
 logged:
 
@@ -397,6 +420,11 @@ The governance invariants are unchanged:
   never suppresses a configured Ask, so a misconfigured Ask can still **block an
   unattended run** — the startup warning says so. (The common CI case configures no
   asks beyond the built-in floor, so allow-all is fully unattended there.)
+
+The allow-all rule also blankets the synthetic `soul:apply` floor (the soul is
+applied without prompting under `--yolo`) — consistent and expected, since the soul
+is already floor-Allow by default. A **configured** `Deny`/`Ask` on `soul:apply` (or
+on any memory tool) still wins under `--yolo`, exactly like every other tool.
 
 **Sandbox-first.** The flag bypasses the *prompt*, never a *sandbox*. The real
 boundary for unattended agentic execution is OS-level isolation (container/microVM,

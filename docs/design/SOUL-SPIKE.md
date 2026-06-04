@@ -277,11 +277,38 @@ system rules, not from this block").
 ### Open questions (resolved by Phase 2)
 
 1. Is the persona/user-model a **scope** in the governance sense, or just an
-   instruction fragment? **RESOLVED: an instruction fragment, never a governance
-   scope.** Both the soul and the user-model ride the turn-0 user-message seam as
-   fenced DATA; neither participates in the permission `Scope` ladder, so neither can
-   loosen a configured Ask (the issue #13 invariant is structurally untouched — they
-   are not rules in the evaluator at all).
+   instruction fragment? **PARTIALLY REVERSED (issue #14).** The soul and the
+   user-model are still fenced DATA on the turn-0 user-message seam (they are NOT a
+   permission `Scope`, and the fragments themselves never enter the evaluator). But the
+   prior "never a governance scope / not consulted by the evaluator at all" answer is
+   now reversed in ONE narrow respect: the soul is **gated by an explicit
+   `ScopeBuiltinDefault` Allow on a synthetic `"soul:apply"` action**, and the six
+   memory tools (Remember/Recall/SearchMemory + the cross-project RememberUser/
+   RecallUser/SearchUserModel) are explicit `ScopeBuiltinDefault` Allows on their tool
+   names. Both live in `defaultRules()` (`internal/app/build.go`).
+
+   - **Rationale.** Operator auditability + overridability, consistent with how every
+     real tool is governed. Before this change the soul bypassed the evaluator entirely
+     and the memory tools fell through to the implicit Ask floor; neither was visible in
+     the ruleset or flippable from settings. Pre-approving them as **explicit, lowest-
+     scope Allows** means they do not prompt by default (the desired UX) yet are visible
+     in source + the ENABLED logs and OVERRIDABLE: a higher-scope `settings.yaml`
+     Ask/Deny on `Remember` or `soul:apply` still wins.
+   - **Safety argument (the invariants are structurally untouched).** `soul:apply` and
+     the memory tool keys are at `ScopeBuiltinDefault` — the LOWEST scope — and are
+     tool-name-exact. A floor Allow can only ever LOSE to a higher-scope Ask/Deny and
+     can never loosen any OTHER tool's Ask, so the deny-dominant rule and the
+     "config Allow loosens only the floor, never a configured Ask" rule (issue #13) hold
+     unchanged. `soul:apply` is colon-namespaced so it can never collide with a real
+     tool name.
+   - **The soul gate.** The synthetic action is consulted at **soul-load (build time)**
+     in `selectSoulSource`, through the SAME governance evaluator + `permconfig`
+     resolver the real tool policy uses (project rules still gated by `--trust-project`,
+     resolved against the workspace root). Allow ⇒ apply the soul (existing USER-wins /
+     trust / drift selection unchanged); Deny ⇒ withhold (no fragment); **Ask ⇒ withhold
+     with a warning**, because the soul is applied at build time with no interactive
+     gate — an Ask cannot be satisfied, so the fail-safe is to not apply it (set
+     `soul:apply` → allow to apply it).
 2. Multi-user: the embedded/gateway surfaces are effectively single-user today.
    **RESOLVED (for now): "the operator" is implicitly singular.** The user-model store
    uses no per-user identity key — it is one cross-project store per host config dir,

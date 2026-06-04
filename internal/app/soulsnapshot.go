@@ -52,7 +52,7 @@ func soulSnapshot(cfg Config) *mecatlv1.SoulInfo {
 // drift-baseline read is exercised offline (no real ~/.config). It is the testable
 // body; soulSnapshot binds the real filesystem.
 func soulSnapshotWith(cfg Config, io baselineIO) *mecatlv1.SoulInfo {
-	src, meta := selectSoulSource(cfg, io)
+	src, meta := selectSoulSource(cfg, io, buildSoulGate(cfg))
 
 	// A soul WAS selected: load its clean body for the panel. Load is fail-soft and
 	// re-validates the body (the SAME discipline LoadWithMeta applied during

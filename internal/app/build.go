@@ -616,7 +616,7 @@ func buildSoulSource(cfg Config) prompt.SoulSource {
 // keeps drift + provenance a pure composition concern (internal/prompt stays
 // drift- and trust-unaware). No caching seam is warranted for two reads of a tiny file.
 func buildSoulSourceWith(cfg Config, io baselineIO) prompt.SoulSource {
-	src, _ := selectSoulSource(cfg, io)
+	src, _ := selectSoulSource(cfg, io, buildSoulGate(cfg))
 	return src
 }
 
@@ -964,7 +964,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 			slog.Warn("registering memory tools failed; some tools may be missing", "err", err)
 		} else {
 			memStore = store
-			slog.Info("memory tools ENABLED (Remember/Recall/SearchMemory)", "dir", cfg.MemoryDir)
+			slog.Info("memory tools ENABLED (Remember/Recall/SearchMemory); permission: allow (built-in default, overridable to ask/deny via settings)", "dir", cfg.MemoryDir)
 			startMemoryConsolidation(ctx, cfg, store, provider)
 		}
 	} else {
@@ -986,7 +986,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 		if err := memory.RegisterUserModel(cat, userModelStore); err != nil {
 			slog.Warn("registering user-model tools failed; some tools may be missing", "err", err)
 		} else {
-			slog.Info("user-model tools ENABLED (RememberUser/RecallUser/SearchUserModel; cross-project)")
+			slog.Info("user-model tools ENABLED (RememberUser/RecallUser/SearchUserModel; cross-project); permission: allow (built-in default, overridable to ask/deny via settings)")
 			startUserModelConsolidation(ctx, cfg, userModelStore, provider)
 		}
 	}
@@ -1634,6 +1634,17 @@ func promptConfig(cfg Config) prompt.Config {
 	}
 }
 
+// SoulApplyAction is the SYNTHETIC governance action key the soul load-gate
+// evaluates (issue #14). It is NOT a real tool — the soul is fenced DATA applied at
+// build time, not a tool the model invokes — but governance.Rule.Tool is a free
+// string matched verbatim by the evaluator, so a synthetic colon-namespaced key
+// rides the SAME deny→ask→allow machinery as a real tool. The colon namespace
+// guarantees it can never collide with a real tool name (tool names are
+// identifier-like, never colon-bearing). The soul is pre-approved at the built-in
+// floor (see defaultRules), so it does not prompt by default but is explicit,
+// auditable in source + logs, and overridable to ask/deny via operator config.
+const SoulApplyAction = "soul:apply"
+
 // defaultRules is the built-in permission ruleset: read-only tools (Read, Grep,
 // Glob, WebFetch, the Task explorer) are allowed; mutating tools (Bash, Edit, Write)
 // and the writable SkillDraft tool ask for approval. Anything unmatched defaults to
@@ -1645,6 +1656,19 @@ func promptConfig(cfg Config) prompt.Config {
 // the built-in Bash→Ask). Deny/ask in any scope still beats allow, so a config can
 // only loosen a built-in ASK, never a built-in DENY (there are none here) — and a
 // config deny/ask still wins over anything.
+//
+// MEMORY + SOUL pre-approval (issue #14): the six memory tools (per-project
+// Remember/Recall/SearchMemory + cross-project RememberUser/RecallUser/
+// SearchUserModel) and the synthetic soul-application action ("soul:apply") are
+// pre-approved here as explicit ScopeBuiltinDefault ALLOWs. They are the agent's
+// memory capability + the soul-application gesture — pre-approved at the built-in
+// floor (the LOWEST scope) so they do NOT prompt by default, yet they are EXPLICIT
+// (visible in source + ENABLED logs) and OVERRIDABLE: because the floor is the
+// lowest scope, a higher-scope config Ask/Deny (a user/project/managed
+// settings.yaml) still WINS — a user can flip any of them to ask/deny. Being
+// floor-scoped + tool-name-exact, these allows can only LOSE to a higher-scope
+// ask/deny; they never loosen any OTHER tool's Ask, so the deny-dominant +
+// loosen-only-the-floor invariants are structurally untouched.
 func defaultRules() []governance.Rule {
 	return []governance.Rule{
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Read", Effect: governance.Allow},
@@ -1659,6 +1683,20 @@ func defaultRules() []governance.Rule {
 		// Team spawns coordinating subagents that may mutate the workspace (Mutating
 		// members), so it ASKS — unlike the read-only Task explorer, which is allowed.
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Team", Effect: governance.Ask},
+		// Memory capability (per-project + cross-project), pre-approved at the floor:
+		// reading/writing the agent's own saved facts is part of "having a memory", not
+		// a workspace mutation, so it does not prompt by default. Overridable to ask/deny.
+		{Scope: governance.ScopeBuiltinDefault, Tool: memory.RememberToolName, Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: memory.RecallToolName, Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: memory.SearchMemoryToolName, Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: memory.RememberUserToolName, Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: memory.RecallUserToolName, Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: memory.SearchUserModelToolName, Effect: governance.Allow},
+		// Soul application: the synthetic "soul:apply" action the soul load-gate
+		// consults at build time (selectSoulSource). Pre-approved here so the soul is
+		// applied by default; an operator config Ask/Deny still wins (Ask ⇒ withheld,
+		// since the soul is applied at build time with no interactive gate).
+		{Scope: governance.ScopeBuiltinDefault, Tool: SoulApplyAction, Effect: governance.Allow},
 	}
 }
 
