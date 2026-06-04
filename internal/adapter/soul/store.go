@@ -9,8 +9,12 @@
 // at the session workspace).
 //
 // SECURITY / "no write path" invariant: the agent loop can NEVER mutate the soul.
-// This package exposes exactly ONE method — Load — and contains NO os.WriteFile/
-// Create/MkdirAll and NO Catalog/tool registration. A writable identity anchor is
+// Every method on Store is READ-ONLY (Load / LoadWithMeta read+validate the body;
+// ResolvedPath only computes a path string), and this package contains NO
+// os.WriteFile/Create/MkdirAll and NO Catalog/tool registration. The drift-baseline
+// fingerprint (issue #14, Phase 3) is COMPUTED here (LoadWithMeta) but PERSISTED only
+// by the composition layer (internal/app/soulguard) — the adapter never writes.
+// A writable identity anchor is
 // the central trap the spike (docs/design/SOUL-SPIKE.md §4) warns against: a
 // prompt injection that rewrites "who the agent is" would persist across every
 // future session. So identity is read-only-if-present and bootstrapped by hand
@@ -31,6 +35,8 @@ package soul
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"os"
@@ -110,6 +116,16 @@ func newWith(opts Options, env xdgconfig.ResolveEnv, read readFunc) *Store {
 	return &Store{path: opts.Path, maxBytes: maxBytes, env: env, read: read}
 }
 
+// ResolvedPath returns the soul file path this Store will read — the explicit Path
+// when set, else the conventional <xdg>/mecatl/soul.md (fallback
+// ~/.config/mecatl/soul.md) — or "" when none can be resolved. It is a READ-ONLY
+// accessor (it computes a path string; it touches no file and writes nothing), used
+// by the composition layer to locate the drift-baseline sidecar (issue #14, Phase 3,
+// Item 1) as a sibling of this path. Exposing it does NOT add a write path.
+func (s *Store) ResolvedPath() string {
+	return s.resolvePath()
+}
+
 // resolvePath returns the soul file path: the explicit Path when set, else the
 // conventional <xdg>/mecatl/soul.md (fallback ~/.config/mecatl/soul.md). It
 // returns "" when no path can be resolved (no explicit path and neither
@@ -124,22 +140,57 @@ func (s *Store) resolvePath() string {
 	return ""
 }
 
+// Result is the outcome of LoadWithMeta: the clean soul body plus its content
+// fingerprint, for the composition-layer drift baseline (issue #14, Phase 3,
+// Item 1). The SHA256 is computed over the SAME clean body Load returns (after
+// trim/scan/fence checks) — so it fingerprints the bytes that actually reach the
+// prompt, not the raw file. When there is no usable soul every field is its zero
+// value (empty Body, empty SHA256, zero Size), so an absent/rejected soul yields
+// no fingerprint and therefore no baseline.
+//
+// Note: this is metadata ABOUT a read; it adds no write path. The composition
+// layer (internal/app/soulguard) is the only place that turns this hash into an
+// on-disk baseline sidecar — the soul adapter itself stays write-free (the
+// agent-read-only invariant).
+type Result struct {
+	// Body is the clean, validated soul body (== Load's return), or "" for none.
+	Body string
+	// SHA256 is the lowercase-hex SHA-256 of Body, or "" when Body is empty.
+	SHA256 string
+	// Size is len(Body) in bytes, or 0 when Body is empty.
+	Size int
+}
+
 // Load reads, validates, and returns the soul body, or ("", nil) when there is no
-// usable soul. It is the ONLY method on Store, and it FAILS SOFT at every branch:
-// an unresolvable path, a missing/unreadable file, an over-cap file, an empty/
-// whitespace-only body, a fence-breakout body, or an injection-scan hit all yield
-// ("", nil) — never an error that aborts a run. Each branch logs at Debug.
+// usable soul. It FAILS SOFT at every branch: an unresolvable path, a missing/
+// unreadable file, an over-cap file, an empty/whitespace-only body, a fence-breakout
+// body, or an injection-scan hit all yield ("", nil) — never an error that aborts a
+// run. Each branch logs at Debug.
 //
 // The read is BOUNDED to maxBytes+1 bytes and the cap is checked on RAW bytes
 // (before TrimSpace), so an over-cap or pathological file is rejected without
 // allocating its full contents.
 //
-// It satisfies prompt.SoulSource.
-func (s *Store) Load(_ context.Context) (string, error) {
+// Load is a thin wrapper over LoadWithMeta so existing prompt.SoulSource consumers
+// (which only need the body) are unchanged. It satisfies prompt.SoulSource.
+func (s *Store) Load(ctx context.Context) (string, error) {
+	res, err := s.LoadWithMeta(ctx)
+	return res.Body, err
+}
+
+// LoadWithMeta is Load plus the content fingerprint (SHA-256 + size) of the clean
+// body, computed in the same pass WITHOUT re-reading the file. It shares every
+// fail-soft branch with Load: an absent/empty/over-cap/flagged/fence-breakout soul
+// yields the zero Result (empty body, empty hash, zero size) and a nil error.
+//
+// This adds NO write path: it only computes a hash over bytes already read. The
+// hash's sole consumer is the composition-layer drift baseline (internal/app),
+// which is the only place allowed to persist it.
+func (s *Store) LoadWithMeta(_ context.Context) (Result, error) {
 	path := s.resolvePath()
 	if path == "" {
 		slog.Debug("soul: no path could be resolved (no --soul-file and no XDG/home); no soul loaded")
-		return "", nil
+		return Result{}, nil
 	}
 
 	// Read at most maxBytes+1 RAW bytes: enough to DETECT an over-cap file without
@@ -149,32 +200,33 @@ func (s *Store) Load(_ context.Context) (string, error) {
 		// Missing file is the common case (soul is opt-in-by-presence); a genuine
 		// read error is equally best-effort. Either way: no fragment, no abort.
 		slog.Debug("soul: file not read; no soul loaded", "path", path, "err", err)
-		return "", nil
+		return Result{}, nil
 	}
 
 	if len(raw) > s.maxBytes {
 		slog.Debug("soul: file over byte cap; rejected (not truncated)",
 			"path", path, "bytes_read", len(raw), "max", s.maxBytes)
-		return "", nil
+		return Result{}, nil
 	}
 
 	body := strings.TrimSpace(string(raw))
 	if body == "" {
 		slog.Debug("soul: file empty or whitespace-only; no soul loaded", "path", path)
-		return "", nil
+		return Result{}, nil
 	}
 
 	if marker, found := scanForInjection(body); found {
 		slog.Debug("soul: injection marker detected; rejected", "path", path, "marker", marker)
-		return "", nil
+		return Result{}, nil
 	}
 
 	// Fence-integrity guard: a body containing the literal close-tag could close the
 	// data fence early and smuggle trailing text out of the data zone. Reject it.
 	if strings.Contains(body, soulCloseTag) {
 		slog.Debug("soul: body contains the data-fence close-tag; rejected", "path", path, "tag", soulCloseTag)
-		return "", nil
+		return Result{}, nil
 	}
 
-	return body, nil
+	sum := sha256.Sum256([]byte(body))
+	return Result{Body: body, SHA256: hex.EncodeToString(sum[:]), Size: len(body)}, nil
 }

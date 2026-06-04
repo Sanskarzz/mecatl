@@ -131,8 +131,19 @@ type Config struct {
 	// (--soul-file); NoSoul disables it entirely (--no-soul), in which case the
 	// SoulAssembler is not wired (nil source → no-op). The adapter is read-only by
 	// construction: no tool can write the soul.
-	SoulPath string
-	NoSoul   bool
+	//
+	// Soul DRIFT BASELINE (issue #14, Phase 3, Item 1): on load the harness records
+	// the soul's content hash in a sidecar (<soulPath>.sha256) trust-on-first-use; a
+	// later run whose hash differs logs a drift WARN and still loads (the persona is
+	// the operator's own). ApproveSoul (--approve-soul) (re)writes the baseline to the
+	// current hash, accepting an edit. SoulStrict (--soul-strict) makes a DRIFTED soul
+	// contribute NO fragment. Both default false. The hash is computed in the adapter;
+	// the baseline WRITE lives only in the composition layer (soulguard) — the soul
+	// adapter stays write-free.
+	SoulPath    string
+	NoSoul      bool
+	ApproveSoul bool
+	SoulStrict  bool
 
 	// User model (issue #14, Phase 2): a user-scoped, cross-PROJECT memory of
 	// durable FACTS about the operator, exposed to the agent as RememberUser /
@@ -573,6 +584,17 @@ func buildInstructionAssembler(soulSrc prompt.SoulSource, memStore, userModelSto
 // conventional ~/.config/mecatl/soul.md. A missing file is fail-soft, so leaving
 // soul on costs nothing. The adapter is read-only by construction — no write path.
 func buildSoulSource(cfg Config) prompt.SoulSource {
+	return buildSoulSourceWith(cfg, osBaselineIO)
+}
+
+// buildSoulSourceWith is buildSoulSource with an injectable baseline-IO seam, so the
+// drift-baseline read/write can be exercised offline (no real ~/.config). It owns the
+// Item-1 drift policy: construct the *soul.Store, compute the loaded body's hash
+// (LoadWithMeta), establish/compare the baseline sidecar, and — only
+// when --soul-strict AND the soul drifted — return nil so the drifted persona
+// contributes no fragment. By default a drifted soul STILL loads (a hand-edit on the
+// operator's own box is expected); the drift is surfaced as a Warn alarm only.
+func buildSoulSourceWith(cfg Config, io baselineIO) prompt.SoulSource {
 	if cfg.NoSoul {
 		slog.Info("soul DISABLED (--no-soul)")
 		return nil
@@ -582,7 +604,24 @@ func buildSoulSource(cfg Config) prompt.SoulSource {
 	} else {
 		slog.Info("soul ENABLED (read-only persona)", "path", "conventional <xdg>/mecatl/soul.md (fail-soft if absent)")
 	}
-	return soul.New(soul.Options{Path: cfg.SoulPath})
+	store := soul.New(soul.Options{Path: cfg.SoulPath})
+
+	// Drift baseline (Item 1). LoadWithMeta is fail-soft: an absent/rejected soul
+	// yields an empty hash, and checkSoulDrift then does nothing (no sidecar for an
+	// absent soul). NOTE: this means the soul file is read TWICE per build — once here
+	// for the startup hash, then again by the assembler's Load at run time (which
+	// re-validates the body). That is an accepted cost: it is one small user file
+	// (capped at 20 KiB), read at most twice, and keeping the hash computation out of
+	// the assembler keeps drift a pure composition concern (internal/prompt stays
+	// drift-unaware). No caching seam is warranted for two reads of a tiny file.
+	res, _ := store.LoadWithMeta(context.Background())
+	drifted := checkSoulDrift(io, store.ResolvedPath(), res.SHA256, cfg.ApproveSoul)
+	if drifted && cfg.SoulStrict {
+		slog.Warn("soul: drifted persona refused (--soul-strict); no soul fragment this run",
+			"path", store.ResolvedPath())
+		return nil
+	}
+	return store
 }
 
 // userModelSubdir is the conventional user-model store directory relative to the

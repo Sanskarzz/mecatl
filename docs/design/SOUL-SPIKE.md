@@ -23,9 +23,13 @@
 >   rules only; user-scoped config is always trusted, and `~/.config/mecatl/soul.md` is
 >   user-authored on the user's own box. Trust-gating an *imported* soul is a Phase-2
 >   concern, not wired here.
-> - **(D)** The content hash is DEFERRED to Phase 2: Phase 1 has no consumer for it (no
->   cache, no `/soul` view, no drift baseline) — the soul is re-read each build. (The
->   adapter optionally logs at Debug for observability; no hash is computed.)
+> - **(D)** ~~The content hash is DEFERRED to Phase 2~~ **SUPERSEDED (Phase 3, Item 1,
+>   SHIPPED):** the hash now has a real consumer — **drift detection**. `soul.LoadWithMeta`
+>   computes the sha256 of the clean body in the same read; the composition layer
+>   (`internal/app/soulguard`) records it as a harness-owned baseline sidecar
+>   (`<soulPath>.sha256`) trust-on-first-use, warns on a later mismatch, and (with
+>   `--soul-strict`) refuses a drifted soul. The soul ADAPTER still computes the hash but
+>   never writes the baseline — the agent-read-only invariant is intact.
 > - The consumer-local port is named **`SoulSource`** (not `SoulReader`).
 > Research basis: NousResearch/hermes-agent source read (`~/Development/hermes-dir`),
 > the `SOUL.md` community ecosystem, and `docs/harnesses/02` (Twelve Patterns) +
@@ -283,12 +287,31 @@ Everything beyond Phase 2 is a recorded decision here, not a silent TODO. Three 
 each because it contradicts an already-documented mecatl posture — so the answer is
 derivable from the docs, not a judgement call left open.
 
-### Phase 3 — completion work (building now)
+### Phase 3 — completion work
 
-1. **Drift detection + integrity.** A content hash (sha256) baseline of the soul (and
-   the user-model snapshot) computed at load, with tamper detection and an alert (and
-   optional restore-to-baseline) — the `clawsec` `soul-guardian` model from §4. This is
-   what gives the Phase-1 hash (deferred in correction **(D)**) a real consumer at last.
+1. **Drift detection + integrity. — SHIPPED (Item 1).** A content hash (sha256)
+   baseline of the soul computed at load (`soul.LoadWithMeta`, over the clean body, in
+   the same read), with tamper detection and an alert — the `clawsec` `soul-guardian`
+   model from §4. This is what gives the Phase-1 hash (deferred in correction **(D)**) a
+   real consumer at last. As built:
+   - The baseline is a **harness-owned sidecar** next to the soul:
+     `<soulPath>.sha256` (for `--soul-file PATH`, `PATH.sha256`). The WRITE lives ONLY in
+     the composition layer (`internal/app/soulguard.go`); the soul adapter stays
+     write-free.
+   - **Trust-on-first-use:** no sidecar at load → the current hash is written as the
+     baseline + `slog.Info("soul: baseline established")`.
+   - **Warn-and-load (default):** a later run whose hash differs logs a `slog.Warn` drift
+     alarm with both hashes and STILL loads (a hand-edit on the operator's own box is
+     expected). Drift is NOT a governance gate — the soul is fenced DATA, never a
+     permission scope.
+   - `--approve-soul` (re)writes the baseline to the current hash (accept an edit);
+     `--soul-strict` makes a DRIFTED soul contribute no fragment.
+   - **Restore-to-baseline is DEFERRED (future opt-in).** A hash-only baseline gives
+     detection + alert without a harness-owned COPY of the approved bytes — which would be
+     both a content WRITE surface (contradicting the agent-read-only posture) and
+     disproportionate for an MVP. If wanted later it is an explicit, operator-gated
+     `--restore-soul` that copies an approved snapshot back; out of scope here.
+   - User-model snapshot hashing is left to a later item — Item 1 is scoped to the SOUL.
 2. **Trust-gating an imported / project-sourced soul.** A soul that does NOT originate
    from the user's own `~/.config/mecatl/` — a soul file discovered in a cloned repo, or
    one explicitly imported — is **untrusted by default** and gated exactly like a

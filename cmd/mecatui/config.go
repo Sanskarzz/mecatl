@@ -68,8 +68,16 @@ type config struct {
 	// missing file is fail-soft, so it costs nothing. soulFile overrides the path;
 	// noSoul disables it entirely and wins (the resolved SoulPath/NoSoul map onto
 	// app.Config in embeddedConfig). No tool can write the soul.
-	soulFile string
-	noSoul   bool
+	//
+	// Drift baseline (issue #14, Phase 3, Item 1): the harness records the soul's
+	// content hash in a sidecar (<soulPath>.sha256) trust-on-first-use; a later run
+	// whose hash differs logs a drift WARN and still loads. approveSoul (re)writes the
+	// baseline to the current hash (accept the edit); soulStrict makes a DRIFTED soul
+	// contribute no fragment.
+	soulFile    string
+	noSoul      bool
+	approveSoul bool
+	soulStrict  bool
 
 	// Embedded-server user-model config (issue #14, Phase 2; used only when hosting
 	// an in-process server). A user-scoped, CROSS-PROJECT memory of durable FACTS
@@ -156,6 +164,8 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.noMemory, "no-memory", false, "embedded server only: disable cross-session memory (Remember/Recall) entirely")
 	fs.StringVar(&cfg.soulFile, "soul-file", "", "embedded server only: path to a user-scoped, agent-READ-ONLY persona/\"soul\" file injected as turn-0 context (empty = the conventional $XDG_CONFIG_HOME/mecatl/soul.md, fallback ~/.config/mecatl/soul.md; fail-soft if absent)")
 	fs.BoolVar(&cfg.noSoul, "no-soul", false, "embedded server only: disable the user-scoped persona/soul fragment entirely")
+	fs.BoolVar(&cfg.approveSoul, "approve-soul", false, "embedded server only: (re)write the soul DRIFT BASELINE to the current soul's content hash, accepting the file as-is. The baseline is a harness-owned sidecar next to the soul (<soul-path>.sha256); a later run whose hash differs logs a drift WARN")
+	fs.BoolVar(&cfg.soulStrict, "soul-strict", false, "embedded server only: refuse a DRIFTED soul — if its content hash differs from the recorded baseline, contribute NO soul fragment this run (instead of the default warn-and-load). Pair with --approve-soul to accept an edit")
 	fs.StringVar(&cfg.userModelDir, "user-model-dir", "", "embedded server only: directory for the user-scoped, CROSS-PROJECT user-model store of durable FACTS about the operator (empty = the conventional $XDG_CONFIG_HOME/mecatl/usermodel, fallback ~/.config/mecatl/usermodel). Exposes RememberUser/RecallUser/SearchUserModel and a turn-0 <user-model> block")
 	fs.BoolVar(&cfg.noUserModel, "no-user-model", false, "embedded server only: disable the user model entirely (the RememberUser/RecallUser/SearchUserModel tools and the <user-model> block)")
 	fs.BoolVar(&cfg.userModelReview, "user-model-review", false, "embedded server only: enable the OPT-IN background user-model reviewer (off by default): after a session stops, a fresh single-shot child extracts durable operator FACTS from the transcript via RememberUser. NEVER reopens the user session")

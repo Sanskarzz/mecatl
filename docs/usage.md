@@ -154,6 +154,8 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--skills-draft-similarity-threshold` | `0.5` | 2-gram Jaccard similarity above which `SkillDraft` warns of a near-duplicate existing skill (warn-only; it never blocks the draft). |
 | `--soul-file` | `""` | path to a user-scoped, **agent-read-only** persona/"soul" file (empty → the conventional `$XDG_CONFIG_HOME/mecatl/soul.md`, fallback `~/.config/mecatl/soul.md`). Injected as turn-0 context, **fail-soft** (missing/empty/oversized/injection-flagged → no fragment). No tool can write it. **See the persona/soul note below.** |
 | `--no-soul` | `false` | disable the user-scoped persona/soul fragment entirely (otherwise it is read from the conventional location, fail-soft if absent). |
+| `--approve-soul` | `false` | (re)write the soul **drift baseline** to the current soul's content hash, accepting the file as-is. The baseline is a harness-owned sidecar next to the soul (`<soul-path>.sha256`); a later run whose hash differs logs a drift `WARN`. Use once after intentionally editing your soul. **See the persona/soul note below.** |
+| `--soul-strict` | `false` | refuse a **drifted** soul: if its content hash differs from the recorded baseline, contribute **no** soul fragment this run (instead of the default warn-and-load). Pair with `--approve-soul` to accept an edit. |
 | `--user-model-dir` | `""` | directory for the user-scoped, **cross-project** user-model store of durable FACTS about the operator (empty → the conventional `$XDG_CONFIG_HOME/mecatl/usermodel`, fallback `~/.config/mecatl/usermodel`). Exposes **RememberUser/RecallUser/SearchUserModel** + a turn-0 `<user-model>` block. **See the user-model note below.** |
 | `--no-user-model` | `false` | disable the user model entirely (the RememberUser/RecallUser/SearchUserModel tools and the `<user-model>` block). |
 | `--user-model-review` | `false` | enable the **opt-in** background user-model reviewer: after a session stops, a fresh single-shot child extracts durable operator FACTS from the transcript via RememberUser. OFF by default. It **never reopens** the user session; the write path is injection-scanned. |
@@ -475,6 +477,26 @@ loader has no write path. This is deliberate — a writable identity anchor is a
 prompt-injection trap (a single poisoned write would rewrite "who the agent is" across
 *every* future session). Bootstrap and edit it by hand, with a text editor. (See
 `docs/design/SOUL-SPIKE.md` for the threat model and the Phase-2 learning loop.)
+
+**Drift detection (issue #14, Phase 3).** The harness fingerprints the soul's content
+(sha256 of the clean body) and records it in a **harness-owned sidecar** next to the
+soul file: `<soul-path>.sha256` (e.g. `~/.config/mecatl/soul.md.sha256`, or
+`PATH.sha256` for `--soul-file PATH`). On the first load with no sidecar it records the
+current hash as the baseline (trust-on-first-use) and logs `soul: baseline established`.
+On a later load whose hash differs it logs a **`WARN` drift alert** with both hashes and
+**still loads** the soul — a hand-edit on your own box is expected, so drift is surfaced,
+not blocked (the soul is fenced DATA, never a permission gate). To manage drift:
+
+- `--approve-soul` — (re)write the baseline to the current hash, accepting your edit.
+  Run it once after you intentionally change your soul to silence the warning.
+- `--soul-strict` — refuse a **drifted** soul: contribute no fragment this run until you
+  `--approve-soul` the change. Useful on a shared/locked-down box.
+
+The hash is computed by the read-only loader; the baseline **write** lives only in the
+composition layer, so the agent still cannot touch the soul *or* its baseline. Note this
+is **detection only** — there is no automatic restore-to-baseline (that would require a
+harness-held copy of the approved bytes; deferred as a future opt-in). Delete the
+`.sha256` sidecar to reset to trust-on-first-use.
 
 ### User model (`~/.config/mecatl/usermodel`, issue #14 Phase 2)
 

@@ -221,8 +221,10 @@ func embeddedConfig(cfg config) app.Config {
 		// persona fragment read from the conventional ~/.config/mecatl/soul.md
 		// (fail-soft if absent), consistent with the "enable every free+local feature
 		// by default" posture. --soul-file overrides the path; --no-soul disables it.
-		SoulPath: cfg.soulFile,
-		NoSoul:   cfg.noSoul,
+		SoulPath:    cfg.soulFile,
+		NoSoul:      cfg.noSoul,
+		ApproveSoul: cfg.approveSoul,
+		SoulStrict:  cfg.soulStrict,
 		// User model ON by default (issue #14, Phase 2): cross-project operator FACTS.
 		// The background reviewer (UserModelReview) and consolidation stay OFF by
 		// default — both spend tokens on the real provider, so an idle TUI never does.

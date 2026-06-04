@@ -148,8 +148,16 @@ type config struct {
 	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona fragment.
 	// ON by default reading the conventional ~/.config/mecatl/soul.md (fail-soft if
 	// absent). soulFile overrides the path; noSoul disables it entirely.
-	soulFile string
-	noSoul   bool
+	//
+	// Drift baseline (issue #14, Phase 3, Item 1): the harness records the soul's
+	// content hash in a sidecar (<soulPath>.sha256) trust-on-first-use; a later run
+	// whose hash differs logs a drift WARN and still loads. approveSoul (re)writes the
+	// baseline to the current hash (accept the edit); soulStrict makes a DRIFTED soul
+	// contribute no fragment.
+	soulFile    string
+	noSoul      bool
+	approveSoul bool
+	soulStrict  bool
 
 	// User model (issue #14, Phase 2): a user-scoped, cross-project memory of
 	// durable FACTS about the operator (RememberUser/RecallUser/SearchUserModel +
@@ -610,6 +618,8 @@ func appConfig(cfg config, sink port.EventSink, logger port.Logger) app.Config {
 		MemoryConsolidateInterval:    cfg.memoryConsolidateInterval,
 		SoulPath:                     cfg.soulFile,
 		NoSoul:                       cfg.noSoul,
+		ApproveSoul:                  cfg.approveSoul,
+		SoulStrict:                   cfg.soulStrict,
 		UserModelDir:                 cfg.userModelDir,
 		NoUserModel:                  cfg.noUserModel,
 		UserModelReview:              cfg.userModelReview,
@@ -709,6 +719,8 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.StringVar(&cfg.soulFile, "soul-file", "", "path to a user-scoped, agent-READ-ONLY persona/\"soul\" file injected as turn-0 context (empty = the conventional $XDG_CONFIG_HOME/mecatl/soul.md, fallback ~/.config/mecatl/soul.md). Fail-soft: a missing/empty/oversized/injection-flagged file degrades to no fragment, never an error. No tool can write it")
 	fs.BoolVar(&cfg.noSoul, "no-soul", false, "disable the user-scoped persona/soul fragment entirely (otherwise it is read from the conventional location, fail-soft if absent)")
+	fs.BoolVar(&cfg.approveSoul, "approve-soul", false, "(re)write the soul DRIFT BASELINE to the current soul's content hash, accepting the file as-is. The baseline is a harness-owned sidecar next to the soul (<soul-path>.sha256); a later run whose hash differs logs a drift WARN. Use this once after intentionally editing your soul")
+	fs.BoolVar(&cfg.soulStrict, "soul-strict", false, "refuse a DRIFTED soul: if the soul's content hash differs from the recorded baseline, contribute NO soul fragment this run (instead of the default warn-and-load). Pair with --approve-soul to accept an edit")
 
 	fs.StringVar(&cfg.userModelDir, "user-model-dir", "", "directory for the user-scoped, CROSS-PROJECT user-model store of durable FACTS about the operator (empty = the conventional $XDG_CONFIG_HOME/mecatl/usermodel, fallback ~/.config/mecatl/usermodel). Exposes RememberUser/RecallUser/SearchUserModel and a turn-0 <user-model> block. Holds FACTS about the operator, never rules — how the agent behaves comes from its soul + system rules")
 	fs.BoolVar(&cfg.noUserModel, "no-user-model", false, "disable the user-model entirely (the RememberUser/RecallUser/SearchUserModel tools and the <user-model> block)")
