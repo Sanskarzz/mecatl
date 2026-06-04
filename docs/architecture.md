@@ -984,7 +984,11 @@ workspace-trust design), which folds, highest first:
    `internal/adapter/workspacetrust` leaf reads an operator-authored, **read-only**
    list of absolute workspace paths from the user-global `settings.yaml` (via the
    shared `xdgconfig` env seam) and answers "is this workspace declared-trusted?";
-3. otherwise `TrustNone`.
+3. a **remembered** `trust.yaml` entry (`TrustRemembered`) — Phase 2b: a
+   machine-written registry entry whose stored **identity-anchor hash** still
+   matches the workspace's live identity surface. A present entry whose anchor
+   **mismatches** ⇒ `Drifted` (and `Trusted=false` — fail-safe);
+4. otherwise `TrustNone`.
 
 `Build` collapses `decision.Trusted` back onto `cfg.TrustProject` before the
 downstream build, so the existing consumers — `permconfig.Options.TrustProject`
@@ -1012,13 +1016,32 @@ gate** (trust provenance AND the `soul:apply` policy — a logical AND, reconcil
 
 **Settings-vs-state split.** `trustedWorkspaces:` is config **DATA**, not a
 governance `Rule`, and lives in the **human-authored** `settings.yaml` that mecatl
-only ever *reads*. The machine-written trust registry, the interactive prompt, and
-identity-anchor drift are a later phase (`TrustRemembered`/`Drifted` are reserved
-in the taxonomy but unused through Phase 2a). **Path keying** is cleaned + absolute +
+only ever *reads*. The **machine-written** trust registry (Phase 2b) is a
+**separate** file — `<xdg>/mecatl/trust.yaml`, a sibling of but never inside
+`settings.yaml`. `workspacetrust` reads it (`Remembered`) and writes it
+(`Remember`, the only write path); `mecated` reads it declaratively and **never**
+writes or prompts. Each entry is keyed by `realpath` and stores the
+**identity-anchor hash** captured at trust time plus a `trustedAt` timestamp (the
+timestamp is injected by composition — the adapter never calls `time.Now()`, so the
+write is deterministic in tests). The **identity anchor** (`anchor.go`) is a
+deterministic fold of the project **soul** ⊕ project-tier **agent** ⊕ **command** ⊕
+**skill** definitions (sorted file set, per-file content hashes), and **explicitly
+excludes `settings.yaml`** — permissions change every commit, so anchoring drift on
+them would nag-fatigue the operator (they re-resolve live via permconfig's mtime
+cache instead). A drift (entry present, anchor mismatched) re-gates to untrusted +
+`slog.Warn`; the interactive re-prompt is the `mecatui` first-encounter prompt
+(Phase 2c, still to come). The registry **write** uses `O_NOFOLLOW` + `0o600` +
+temp-then-rename (mirroring `soulguard`'s sidecar write, CWE-59), and a corrupt /
+oversized / wrong-version registry fails safe to untrusted. The SHA-256 primitive is
+shared with `soulguard` via the `internal/adapter/hashutil` leaf (`SHA256Hex`) —
+**only** the primitive is shared; the soul drift baseline (a soul-only `.sha256`
+sidecar, re-blessed by `--approve-soul`) and the trust identity anchor (the
+registry-stored fold, re-blessed by re-answering the prompt) stay **parallel**
+mechanisms. **Path keying** is cleaned + absolute +
 symlink-resolved (`filepath.Abs` then `EvalSymlinks`) on both sides, so a
 moved/symlinked path cannot forge or inherit trust; an unresolvable entry is
 skipped. Trust is **monotonic-positive**: it only ever *grants* admission of a
 project's ALLOWs/soul — it never overrides a Deny or a configured Ask (those remain
 deny-dominant in the evaluator). A missing/malformed/unparseable `settings.yaml`
-fails safe to untrusted (a corrupt config never grants trust). See
-`docs/design/WORKSPACE-TRUST-SPIKE.md`.
+**or** `trust.yaml` fails safe to untrusted (a corrupt config never grants trust).
+See `docs/design/WORKSPACE-TRUST-SPIKE.md`.

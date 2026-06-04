@@ -35,14 +35,13 @@ package soul
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/stacklok/mecatl/internal/adapter/hashutil"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 )
 
@@ -236,6 +235,5 @@ func (s *Store) LoadWithMeta(_ context.Context) (Result, error) {
 		return Result{}, nil
 	}
 
-	sum := sha256.Sum256([]byte(body))
-	return Result{Body: body, SHA256: hex.EncodeToString(sum[:]), Size: len(body)}, nil
+	return Result{Body: body, SHA256: hashutil.SHA256Hex([]byte(body)), Size: len(body)}, nil
 }

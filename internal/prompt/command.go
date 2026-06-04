@@ -167,11 +167,18 @@ var (
 	_ CommandLister   = (*MultiExpander)(nil)
 )
 
-// defaultCommandDirs are the workspace-relative directories DirCommandExpander
-// searches, in order, for a command's <name>.md file. ".mecatl/commands/" is the
-// native location; ".claude/commands/" is accepted for familiarity. The first
-// directory that contains a matching file wins.
-var defaultCommandDirs = []string{".mecatl/commands", ".claude/commands"}
+// DefaultCommandDirs are the workspace-relative, PROJECT-TIER directories
+// DirCommandExpander searches, in order, for a command's <name>.md file.
+// ".mecatl/commands/" is the native location; ".claude/commands/" is accepted for
+// familiarity. The first directory that contains a matching file wins.
+//
+// This is the CANONICAL project-tier command dir set: it is the single source of
+// truth for (a) the expander's default search path here, (b) composition's
+// untrusted-workspace command gate (internal/app/build.go), and (c) the
+// workspace-trust identity anchor (internal/adapter/workspacetrust/anchor.go), so
+// the gate's admission surface and the anchor's drift surface can never silently
+// diverge. Treat it as read-only; copy before mutating.
+var DefaultCommandDirs = []string{".mecatl/commands", ".claude/commands"}
 
 // DirCommandExpander discovers command templates as <name>.md files under one or
 // more workspace-relative directories (default ".mecatl/commands/" and
@@ -215,7 +222,7 @@ func NewDirCommandExpander(dirs ...string) *DirCommandExpander {
 		}
 	}
 	if len(cleaned) == 0 {
-		cleaned = append(cleaned, defaultCommandDirs...)
+		cleaned = append(cleaned, DefaultCommandDirs...)
 	}
 	return &DirCommandExpander{dirs: cleaned}
 }

@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
+	"github.com/stacklok/mecatl/internal/adapter/workspacetrust"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/governance"
 )
@@ -281,6 +283,223 @@ func TestResolveTrustMonotonicPositiveDenyHonoured(t *testing.T) {
 				t.Fatalf("project DENY dropped under %v trust (monotonic-positive violated): %+v", tc.wantSource, rules)
 			}
 		})
+	}
+}
+
+// realConfigTrustEnv returns an env rooted at a REAL temp config dir (XDG_CONFIG_HOME
+// = configDir, real os.ReadFile), so the fold can read a trust.yaml that the same
+// workspacetrust.Reader wrote — fully offline, never the developer's ~/.config. Used
+// by the remembered-trust fold tests.
+func realConfigTrustEnv(configDir string) xdgconfig.ResolveEnv {
+	return xdgconfig.ResolveEnv{
+		Getenv: func(k string) string {
+			if k == "XDG_CONFIG_HOME" {
+				return configDir
+			}
+			return ""
+		},
+		UserHomeDir: func() (string, error) { return "", errors.New("no home") },
+		ReadFile:    os.ReadFile,
+	}
+}
+
+// writeAnchorSurface writes a minimal project identity surface (a soul) so the
+// workspace has a non-trivial, stable anchor to remember and later drift.
+func writeAnchorSurface(t *testing.T, ws, persona string) {
+	t.Helper()
+	dir := filepath.Join(ws, ".mecatl")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir .mecatl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "soul.md"), []byte(persona), 0o644); err != nil {
+		t.Fatalf("write project soul: %v", err)
+	}
+}
+
+// TestResolveTrustRememberedMatch (R2.2) asserts a workspace with a trust.yaml entry
+// whose anchor MATCHES the live identity anchor ⇒ Trusted, Source=remembered,
+// Drifted=false — when there is no flag and no declaration.
+func TestResolveTrustRememberedMatch(t *testing.T) {
+	ws := realWS(t)
+	writeAnchorSurface(t, ws, "remembered persona")
+	cfg := t.TempDir()
+	withTrustEnv(t, realConfigTrustEnv(cfg))
+
+	// Remember the workspace at its CURRENT anchor (what the 2c prompt will do).
+	reader := workspacetrust.NewWithEnv(realConfigTrustEnv(cfg))
+	if err := reader.Remember(ws, reader.AnchorHash(ws), time.Unix(1700000000, 0)); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+
+	d := resolveTrust(Config{Workspace: ws}) // no flag, no declaration
+	if !d.Trusted || d.Source != TrustRemembered || d.Drifted {
+		t.Fatalf("resolveTrust(remembered, matching anchor) = %+v, want Trusted Source=remembered Drifted=false", d)
+	}
+}
+
+// TestResolveTrustRememberedDriftFailsSafe (R2.2 + R2.8 + MUST-FIX 5.4) asserts a
+// trust.yaml entry whose anchor MISMATCHES the live anchor (the project's identity
+// surface changed since it was trusted) ⇒ Trusted=FALSE, Drifted=true. mecated has
+// no prompt, so a drifted entry must fail safe to untrusted (2c re-prompts).
+func TestResolveTrustRememberedDriftFailsSafe(t *testing.T) {
+	ws := realWS(t)
+	writeAnchorSurface(t, ws, "original persona")
+	cfg := t.TempDir()
+	withTrustEnv(t, realConfigTrustEnv(cfg))
+
+	reader := workspacetrust.NewWithEnv(realConfigTrustEnv(cfg))
+	if err := reader.Remember(ws, reader.AnchorHash(ws), time.Unix(1700000000, 0)); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+
+	// Tamper the identity surface AFTER remembering — the live anchor now differs.
+	if err := os.WriteFile(filepath.Join(ws, ".mecatl", "soul.md"), []byte("MALICIOUS persona"), 0o644); err != nil {
+		t.Fatalf("tamper soul: %v", err)
+	}
+
+	d := resolveTrust(Config{Workspace: ws})
+	if d.Trusted || !d.Drifted {
+		t.Fatalf("resolveTrust(drifted) = %+v, want Trusted=false Drifted=true (fail-safe)", d)
+	}
+}
+
+// TestResolveTrustFlagBeatsRemembered asserts --trust-project short-circuits before
+// the registry is consulted: the SOURCE is flag even when a remembered entry exists.
+func TestResolveTrustFlagBeatsRemembered(t *testing.T) {
+	ws := realWS(t)
+	writeAnchorSurface(t, ws, "persona")
+	cfg := t.TempDir()
+	withTrustEnv(t, realConfigTrustEnv(cfg))
+	reader := workspacetrust.NewWithEnv(realConfigTrustEnv(cfg))
+	if err := reader.Remember(ws, reader.AnchorHash(ws), time.Unix(1, 0)); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+
+	d := resolveTrust(Config{Workspace: ws, TrustProject: true})
+	if !d.Trusted || d.Source != TrustFlag {
+		t.Fatalf("flag must win over remembered: got %+v, want Source=flag", d)
+	}
+}
+
+// TestResolveTrustDeclaredBeatsRemembered asserts a declarative trustedWorkspaces
+// match takes precedence over a remembered entry (Source=declared). Here BOTH the
+// settings.yaml declaration AND a trust.yaml entry exist for ws; declared wins.
+func TestResolveTrustDeclaredBeatsRemembered(t *testing.T) {
+	ws := realWS(t)
+	writeAnchorSurface(t, ws, "persona")
+	cfg := t.TempDir()
+
+	// Write the declaration into the SAME config dir's settings.yaml, and remember
+	// the workspace in that dir's trust.yaml. The fold reads both from realConfigTrustEnv.
+	mecatlDir := filepath.Join(cfg, "mecatl")
+	if err := os.MkdirAll(mecatlDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mecatlDir, "settings.yaml"), []byte("trustedWorkspaces:\n  - "+ws+"\n"), 0o644); err != nil {
+		t.Fatalf("write settings.yaml: %v", err)
+	}
+	withTrustEnv(t, realConfigTrustEnv(cfg))
+	reader := workspacetrust.NewWithEnv(realConfigTrustEnv(cfg))
+	if err := reader.Remember(ws, reader.AnchorHash(ws), time.Unix(1, 0)); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+
+	d := resolveTrust(Config{Workspace: ws})
+	if !d.Trusted || d.Source != TrustDeclared {
+		t.Fatalf("declared must win over remembered: got %+v, want Source=declared", d)
+	}
+}
+
+// TestResolveTrustRememberedMonotonicDenyHonoured (MUST-FIX 5.5) asserts a
+// remembered-trusted workspace still honours a project DENY — remembered trust, like
+// flag/declared, grants ADMISSION only and never overrides a Deny.
+func TestResolveTrustRememberedMonotonicDenyHonoured(t *testing.T) {
+	ws := realWS(t)
+	writeAnchorSurface(t, ws, "persona")
+	cfg := t.TempDir()
+	withTrustEnv(t, realConfigTrustEnv(cfg))
+	reader := workspacetrust.NewWithEnv(realConfigTrustEnv(cfg))
+	if err := reader.Remember(ws, reader.AnchorHash(ws), time.Unix(1, 0)); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+
+	d := resolveTrust(Config{Workspace: ws})
+	if !d.Trusted || d.Source != TrustRemembered {
+		t.Fatalf("precondition: want remembered-trusted, got %+v", d)
+	}
+
+	// The project ships a DENY; remembered trust must not turn it into an ALLOW.
+	settingsYAML := "permissions:\n  deny:\n    - \"Bash(some-blocked-cmd:*)\"\n"
+	if err := os.WriteFile(filepath.Join(ws, ".mecatl", "settings.yaml"), []byte(settingsYAML), 0o644); err != nil {
+		t.Fatalf("write project settings: %v", err)
+	}
+	resolver := permconfig.New(permconfig.Options{Conventional: true, TrustProject: d.Trusted})
+	if resolver == nil {
+		t.Fatal("resolver nil")
+	}
+	wsReader, err := osfs.NewWorkspace(ws)
+	if err != nil {
+		t.Fatalf("open ws reader: %v", err)
+	}
+	for _, r := range resolver.Resolve(context.Background(), wsReader) {
+		if r.Effect == governance.Allow && r.Tool == "Bash" {
+			t.Fatalf("remembered trust turned a project DENY into an ALLOW: %+v", r)
+		}
+	}
+}
+
+// TestResolveTrustNeverWritesRegistry (FIX 3 — mecated declarative, no write on the
+// fold path) pins that resolveTrust (the path Build runs, and the daemon's only
+// trust path) NEVER creates or modifies trust.yaml. Only Phase 2c's mecatui prompt
+// writes the registry. We remember a workspace (a legitimate prior write), snapshot
+// trust.yaml's mtime+size, run resolveTrust repeatedly, and assert the file is
+// byte-for-byte untouched (no create, no mtime bump).
+func TestResolveTrustNeverWritesRegistry(t *testing.T) {
+	ws := realWS(t)
+	writeAnchorSurface(t, ws, "persona")
+	cfg := t.TempDir()
+	withTrustEnv(t, realConfigTrustEnv(cfg))
+
+	// A legitimate prior write (simulating a past 2c approval).
+	reader := workspacetrust.NewWithEnv(realConfigTrustEnv(cfg))
+	if err := reader.Remember(ws, reader.AnchorHash(ws), time.Unix(1700000000, 0)); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+	path := filepath.Join(cfg, "mecatl", "trust.yaml")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat trust.yaml: %v", err)
+	}
+
+	// Resolve several times (remembered + matching ⇒ trusted). None may write.
+	for i := 0; i < 3; i++ {
+		if d := resolveTrust(Config{Workspace: ws}); !d.Trusted || d.Source != TrustRemembered {
+			t.Fatalf("precondition: want remembered-trusted on iter %d, got %+v", i, d)
+		}
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("trust.yaml vanished after resolveTrust: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) || after.Size() != before.Size() {
+		t.Fatalf("resolveTrust modified trust.yaml (mtime %v→%v, size %d→%d); the fold/daemon path must NEVER write",
+			before.ModTime(), after.ModTime(), before.Size(), after.Size())
+	}
+}
+
+// TestNarrateTrustWarnsOnDrift asserts a Drifted decision narrates at Warn (the
+// re-gated-to-untrusted alarm), not the quiet Info line.
+func TestNarrateTrustWarnsOnDrift(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	narrateTrust(TrustDecision{Trusted: false, Source: TrustNone, Drifted: true}, "/some/ws")
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "DRIFTED") {
+		t.Fatalf("drifted decision must narrate at WARN with a drift message; got: %s", out)
 	}
 }
 

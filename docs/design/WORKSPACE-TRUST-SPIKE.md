@@ -1,8 +1,9 @@
 # Workspace Trust — implementation plan (Phases 0+1+2)
 
 > **STATUS: Phases 0 + 1 SHIPPED; Phase 2a (project-tier authority gating)
-> SHIPPED; Phase 2b (trust.yaml registry + drift) and 2c (mecatui pre-TUI
-> prompt) are implementation-ready plan.**
+> SHIPPED; Phase 2b (trust.yaml registry + identity-anchor drift) SHIPPED; Phase
+> 2c (mecatui pre-TUI first-encounter prompt — the production caller of the
+> registry write API) is implementation-ready plan.**
 > Phase 0 (unify the default — mecatui resolves `--trust-project`, default
 > false, no longer hardcoding trust ON) is wired and tested. Phase 1
 > (declarative `trustedWorkspaces:` list + the composition `TrustDecision`
@@ -21,11 +22,22 @@
 > drift hash, and the mecatui first-encounter prompt are **NOT** part of 2a — they
 > are Phase 2b/2c below.
 >
-> **Phase 2b/2c remaining**: the machine-written `<xdg>/mecatl/trust.yaml` registry +
-> the `TrustRemembered` tier + the identity-anchor drift hash (2b); the mecatui
-> pre-TUI prompt + persistence + path sanitization (2c). Phase 3 (in-TUI trust
-> modal, per-scope trust, speculative schema reservations) is **explicitly out of
-> scope** — see §11.
+> **Phase 2b SHIPPED**: the machine-written `<xdg>/mecatl/trust.yaml` registry
+> (`internal/adapter/workspacetrust/registry.go` — `Remembered` read API +
+> `Remember` write API, `O_NOFOLLOW`/`0o600`/temp-rename, realpath-keyed,
+> fail-to-untrusted), the identity-anchor hash (`anchor.go` — soul ⊕ project agent
+> ⊕ command ⊕ skill defs, `settings.yaml` EXCLUDED), the shared
+> `internal/adapter/hashutil.SHA256Hex` primitive (soulguard's soul-only sidecar
+> anchor stays PARALLEL — MUST-FIX 4), and the `resolveTrust` fold extended to
+> `flag > declared > REMEMBERED > none` with drift failing safe to untrusted
+> (`internal/app/trust.go`). `mecated` consumes the registry declaratively (reads,
+> never prompts/writes). The write API's only production CALLER — the mecatui
+> first-encounter prompt — is **2c**.
+>
+> **Phase 2c remaining**: the mecatui pre-TUI first-encounter prompt that CALLS the
+> registry write API on approval, the drift re-prompt UX, prompt-path sanitization.
+> Phase 3 (in-TUI trust modal, per-scope trust, speculative schema reservations) is
+> **explicitly out of scope** — see §11.
 >
 > File:line citations are to the tree as of this spike; verify before
 > implementing.
@@ -465,7 +477,23 @@ admission gate and identity-anchor drift.
 
 **Requirements (testable):**
 
-*Registry (remembered trust):*
+*Registry (remembered trust) — **SHIPPED in Phase 2b**:*
+
+> **As-built (Phase 2b).** `internal/adapter/workspacetrust/registry.go` reads
+> (`Remembered(workspace, currentAnchorHash) → (remembered, drifted)`) and writes
+> (`Remember(workspace, anchorHash, trustedAt)`) the `version: 1` registry. The
+> write is RMW (preserve other entries) → `O_NOFOLLOW`+`0o600`+temp-rename
+> (`osRegistryWrite`, injectable via `NewWithEnvIO`). `trustedAt` is INJECTED by the
+> caller (composition passes `time.Now()`); the adapter never calls `time.Now()`.
+> The identity-anchor hash is `anchor.go`'s `AnchorHash` (soul ⊕ project agent ⊕
+> command ⊕ skill defs, fixed sorted fold, absent-marked, `settings.yaml` EXCLUDED).
+> `resolveTrust` (`internal/app/trust.go`) gained the `TrustRemembered` tier between
+> `TrustDeclared` and `TrustNone`; a matching anchor ⇒ `Trusted`, a mismatch ⇒
+> `Trusted=false, Drifted=true` (`narrateTrust` logs drift at Warn). The
+> `SHA256Hex` primitive is the new `internal/adapter/hashutil` leaf, shared by the
+> soul adapter and the anchor; soulguard's sidecar anchor is unchanged (parallel).
+> mecated consumes it for free (Build folds `resolveTrust` onto `cfg.TrustProject`).
+
 - **R2.1** `workspacetrust` reads/writes `<xdg>/mecatl/trust.yaml`: a map keyed
   by `{cleaned, realpath}` ⇒ `{anchorSHA256, trustedAt}`. Written via an
   `O_NOFOLLOW`, 0o600, temp-then-rename seam (the `soulguard` discipline,
@@ -621,10 +649,19 @@ agents/commands/skills, not just allows+soul — a one-line invariant update).
   already accepts. settings.yaml is admission-only (no drift anchor), fail-safe.
 - **AGENTS.md / CLAUDE.md** — these project files steer the model (system-prompt
   discovery in `internal/prompt`). They are operator-context, not an
-  admission-gated steering channel today. **Decision:** out of the trust gate
-  for this feature (they are read as ambient project context like the code
-  itself); noted as a candidate follow-up (`#TRUST-AGENTSMD`) if the threat model
-  later demands gating ambient project markdown. Stated, not silently ignored.
+  admission-gated steering channel today. **DECISION (operator-confirmed):** left
+  OUT of both the trust gate and the drift anchor for this feature — they are read
+  as ambient project context like the repo's code itself, and they are ubiquitous,
+  benign-by-default project conventions ("use pytest", "frontend lives in
+  `frontend/`") whose gating would cost the agent its project conventions on every
+  untrusted clone. Accepted residual: **Medium** — an untrusted repo's AGENTS.md
+  steers on first run, and a trusted repo that later pulls a malicious AGENTS.md
+  changes injected instructions without tripping drift. Mitigated by: the
+  high-value authority (allow-rules, persona/soul, agents/commands/skills) IS
+  gated; the agent reads repo files anyway (Read is never gated); a malicious
+  AGENTS.md is prompt-steering, not an auto-approval grant. Revisit via
+  `#TRUST-AGENTSMD` if the threat model later demands gating ambient project
+  markdown. Stated and chosen, not silently ignored.
 
 **Follow-up issues to file:**
 - `#TRUST-SKILLS-GATE` — only if skills-gating (R2.5) balloons beyond the

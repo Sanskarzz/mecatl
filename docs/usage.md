@@ -431,8 +431,8 @@ as `--trust-project` would trust it — **the same admission gate, no separate
 path**: the project's ALLOW rules and its project soul are honoured. This is
 **read-only**: mecatl only ever *reads* `trustedWorkspaces:` from your
 human-authored `settings.yaml`; it never writes it (the machine-written trust
-registry is a later phase). Both `mecated` and `mecatui` honour it (it lives in
-the shared user config).
+registry is a **separate** file — see the next section). Both `mecated` and
+`mecatui` honour it (it lives in the shared user config).
 
 **Precedence and semantics:**
 
@@ -452,6 +452,60 @@ the shared user config).
   `settings.yaml` resolves to **untrusted** (a corrupt config never *grants*
   trust); it is logged, never an error that aborts startup. The composition logs
   the decision: `workspace trust trusted=… source=flag|declared|none`.
+
+### Remembered trust + drift (`trust.yaml`, WORKSPACE-TRUST Phase 2b)
+
+Beyond the human-authored `trustedWorkspaces:` list, mecatl keeps a
+**machine-written** trust registry at
+`$XDG_CONFIG_HOME/mecatl/trust.yaml` (fallback `~/.config/mecatl/trust.yaml`).
+It is a **sibling of, but never inside,** the human `settings.yaml` (the
+settings-vs-state split): you edit `settings.yaml`; only the harness writes
+`trust.yaml`. Each entry remembers a trusted workspace (keyed by its
+`realpath`) **and** the **identity-anchor hash** captured at the moment of
+trust:
+
+```yaml
+# ~/.config/mecatl/trust.yaml   (machine-written; do not hand-edit)
+version: 1
+workspaces:
+  /home/me/src/my-project:
+    anchorSHA256: 9f2c…           # the project's identity surface at trust time
+    trustedAt: 2026-06-04T12:00:00Z
+```
+
+A remembered entry is honoured as `source=remembered` (precedence **below**
+`--trust-project` and a `trustedWorkspaces:` match) **only while its anchor still
+matches** the workspace's live identity surface.
+
+- **The identity anchor** is the high-signal, rarely-edited project authority
+  surface: the project **soul** (`<ws>/.mecatl/soul.md`), and the **project-tier**
+  **agent**, **slash-command**, and **skill** definitions under `<ws>/.mecatl/*`
+  and `<ws>/.claude/*`. It is hashed deterministically (sorted file set, per-file
+  content hashes folded).
+- **`settings.yaml` is NOT in the anchor.** Editing your project's permission
+  rules (which change on nearly every commit) does **not** trigger drift — that
+  would nag-fatigue you into blind-clicking trust. Permission edits re-resolve
+  live (permconfig's own mtime cache) without re-prompting. **Drift fires only
+  when the project's persona / agents / commands / skills change.**
+- **Drift fails safe.** If a remembered workspace's anchor no longer matches
+  (the project's identity surface changed since you trusted it), the workspace is
+  re-gated to **untrusted** for this run, logged at `WARN`
+  (`workspace trust: identity anchor DRIFTED …`). `mecated` has no prompt, so a
+  drifted entry never silently inherits the old grant; the interactive re-prompt
+  that turns drift back into a fresh trust decision is the `mecatui` first-encounter
+  prompt (a later sub-phase). `--trust-project` always overrides (it short-circuits
+  before the registry is even read).
+- **`mecated` is read-only on the registry** — it *reads* `trust.yaml`
+  declaratively (a remembered + undrifted workspace is trusted) but **never
+  prompts and never writes** it. A repo trusted in `mecatui` for a given user is
+  honoured by that same user's `mecated` (shared `$XDG_CONFIG_HOME`); cross-user
+  is not shared (use that user's `trustedWorkspaces:`).
+- **Security.** The registry is keyed by `realpath` (symlink-safe, symmetric on
+  read and write); the write uses `O_NOFOLLOW` + `0o600` + temp-then-rename (a
+  pre-planted symlink at the path is refused); and an unreadable / oversized /
+  corrupt / wrong-version `trust.yaml` resolves to **untrusted** (a corrupt
+  registry never *grants* trust). The path is derived solely from your user XDG
+  config dir, never from a repo-controlled path — a repo cannot self-trust.
 
 ### What an untrusted workspace withholds (WORKSPACE-TRUST Phase 2a)
 

@@ -59,16 +59,19 @@ func (s TrustSource) String() string {
 
 // TrustDecision is the single composition-level answer to "is this workspace
 // trusted, and why?" (MUST-FIX 2). Its Trusted field is the effective bool fed to
-// the admission consumers; Source drives the log narration. Drifted is reserved
-// for Phase 2 (a registry entry whose identity-anchor hash mismatched) and stays
-// false/unused in Phase 1.
+// the admission consumers; Source drives the log narration. Drifted is true when a
+// remembered (trust.yaml) registry entry existed but its identity-anchor hash no
+// longer matches the live anchor (Phase 2b) — a drifted entry FAILS SAFE to
+// untrusted here (mecated has no prompt; Phase 2c's mecatui turns Drifted into a
+// re-prompt).
 type TrustDecision struct {
 	// Trusted is the effective admission bool: honour the project's ALLOW rules
 	// and project soul when true.
 	Trusted bool
 	// Source records why (for the slog narration).
 	Source TrustSource
-	// Drifted is reserved for Phase 2 (registry anchor mismatch). Always false here.
+	// Drifted is true when a remembered registry entry existed but its anchor hash
+	// mismatched the live identity anchor. When Drifted, Trusted is FALSE (fail-safe).
 	Drifted bool
 }
 
@@ -79,34 +82,72 @@ type TrustDecision struct {
 // developer's real ~/.config.
 var trustEnv = xdgconfig.OSEnv
 
-// resolveTrust folds, highest first, the per-invocation flag and the declarative
-// list into a TrustDecision for cfg.Workspace (MUST-FIX 2; R1.2):
+// resolveTrust folds, highest first, the per-invocation flag, the declarative list,
+// and the machine-written registry into a TrustDecision for cfg.Workspace
+// (MUST-FIX 2; R1.2 + R2.2):
 //
-//	--trust-project        ⇒ TrustFlag       (one-shot operator override)
-//	trustedWorkspaces match ⇒ TrustDeclared   (realpath-keyed; MUST-FIX 5.1)
-//	otherwise               ⇒ TrustNone
+//	--trust-project          ⇒ TrustFlag        (one-shot operator override)
+//	trustedWorkspaces match  ⇒ TrustDeclared    (realpath-keyed; MUST-FIX 5.1)
+//	trust.yaml entry, anchor  ⇒ TrustRemembered  (remembered + anchor MATCHES live)
+//	  matches
+//	trust.yaml entry, anchor  ⇒ TrustNone+Drifted (remembered but anchor DRIFTED —
+//	  mismatches                                   fail-safe untrusted; 2c re-prompts)
+//	otherwise                ⇒ TrustNone
 //
-// The flag wins over the declared list only for the SOURCE label; both yield
-// Trusted=true. Trust is monotonic-positive: neither input can revoke a Deny or
-// downgrade an Ask — they gate admission only. resolveTrust performs NO writes
-// and never errors: a missing/corrupt settings.yaml simply yields TrustNone (the
+// The flag and declared list win over a remembered entry for the SOURCE label
+// (precedence), and they short-circuit BEFORE the registry/anchor are even read —
+// an explicitly-trusted run never pays the anchor-hash cost and never drifts. A
+// remembered entry only grants when its stored identity-anchor hash equals the
+// LIVE anchor; a mismatch fails safe to untrusted with Drifted=true (the drift
+// signal). Trust is monotonic-positive: no input can revoke a Deny or downgrade an
+// Ask — they gate admission only. resolveTrust performs NO writes and never errors:
+// a missing/corrupt settings.yaml or trust.yaml simply yields TrustNone (the
 // workspacetrust reader fails safe).
 func resolveTrust(cfg Config) TrustDecision {
 	if cfg.TrustProject {
 		return TrustDecision{Trusted: true, Source: TrustFlag}
 	}
-	if cfg.Workspace != "" {
-		if workspacetrust.NewWithEnv(trustEnv).IsDeclared(cfg.Workspace) {
-			return TrustDecision{Trusted: true, Source: TrustDeclared}
+	if cfg.Workspace == "" {
+		return TrustDecision{Trusted: false, Source: TrustNone}
+	}
+
+	reader := workspacetrust.NewWithEnv(trustEnv)
+	if reader.IsDeclared(cfg.Workspace) {
+		return TrustDecision{Trusted: true, Source: TrustDeclared}
+	}
+
+	// Remembered tier: consult the machine-written registry. Compute the live
+	// identity-anchor hash ONCE and ask the registry whether a matching/drifted
+	// entry exists. A remembered+undrifted entry grants TrustRemembered; a
+	// remembered+drifted entry FAILS SAFE to untrusted (Drifted=true) — mecated has
+	// no prompt, and Phase 2c's mecatui turns Drifted into a re-prompt.
+	anchor := reader.AnchorHash(cfg.Workspace)
+	remembered, drifted := reader.Remembered(cfg.Workspace, anchor)
+	if remembered {
+		if drifted {
+			return TrustDecision{Trusted: false, Source: TrustNone, Drifted: true}
 		}
+		return TrustDecision{Trusted: true, Source: TrustRemembered}
 	}
 	return TrustDecision{Trusted: false, Source: TrustNone}
 }
 
-// narrateTrust logs the trust decision (mirroring the soulMeta narration): an
-// Info line for the resolved state, so the why-trusted story is visible in the
-// composition log exactly like the soul selection is.
+// narrateTrust logs the trust decision (mirroring the soulMeta narration): an Info
+// line for the resolved state, so the why-trusted story is visible in the
+// composition log exactly like the soul selection is. A DRIFTED decision (a
+// remembered entry whose identity anchor changed) logs at Warn in the
+// applyTrustGate drop-report style — the workspace's identity surface changed since
+// it was trusted, so it has been re-gated to UNTRUSTED for this run (Phase 2c's
+// mecatui will turn this into a re-prompt; mecated stays declarative).
 func narrateTrust(d TrustDecision, workspace string) {
+	if d.Drifted {
+		slog.Warn("workspace trust: identity anchor DRIFTED since the workspace was trusted; re-gated to untrusted (run mecatui to re-confirm trust)",
+			"trusted", d.Trusted,
+			"source", d.Source.String(),
+			"drifted", d.Drifted,
+			"workspace", workspace)
+		return
+	}
 	slog.Info("workspace trust",
 		"trusted", d.Trusted,
 		"source", d.Source.String(),

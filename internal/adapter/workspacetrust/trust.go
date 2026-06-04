@@ -1,8 +1,15 @@
-// Package workspacetrust is the adapter-layer reader for DECLARATIVE workspace
-// trust (Workspace-Trust feature, Phase 1). It reads an operator-authored,
-// read-only `trustedWorkspaces:` list from the user-global
-// <xdg>/mecatl/settings.yaml and answers a single question for composition: is a
-// given workspace path declared-trusted?
+// Package workspacetrust is the adapter-layer reader/writer for workspace trust
+// (Workspace-Trust feature, Phases 1 + 2b). It serves composition from two
+// user-global sources under the XDG config dir:
+//
+//   - Phase 1 (DECLARATIVE, this file): the operator-authored, read-only
+//     `trustedWorkspaces:` list in <xdg>/mecatl/settings.yaml. IsDeclared answers
+//     "is this workspace declared-trusted?"
+//   - Phase 2b (REMEMBERED, registry.go): the machine-written <xdg>/mecatl/trust.yaml
+//     registry. Remembered answers "is this workspace remembered-trusted, and has
+//     its identity anchor DRIFTED?"; Remember persists an entry; the identity-anchor
+//     hash (anchor.go) is what drift is measured against. The registry is a SIBLING
+//     of settings.yaml, never inside it (the settings-vs-state split).
 //
 // # What it is (and is NOT)
 //
@@ -70,19 +77,39 @@ type schema struct {
 	TrustedWorkspaces []string `yaml:"trustedWorkspaces"`
 }
 
-// Reader resolves declarative workspace trust from the user-global settings.yaml.
-// Construct it with New (real env) or NewWithEnv (faked env, for offline tests).
+// Reader resolves workspace trust from the user-global config dir: the DECLARATIVE
+// `trustedWorkspaces:` list in settings.yaml (Phase 1, IsDeclared) AND the
+// MACHINE-WRITTEN trust.yaml registry (Phase 2b, Remembered/Remember).
+//
+// Construct it with New (real env + real registry write seam) or NewWithEnv (faked
+// env + the real write seam) or NewWithEnvIO (faked env + an injected write seam, so
+// the registry write runs fully offline in tests). A Reader built without a write
+// seam still serves every READ path; only Remember requires the seam.
 type Reader struct {
-	env xdgconfig.ResolveEnv
+	env       xdgconfig.ResolveEnv
+	writeFile registryWriteFunc
 }
 
-// New binds a Reader to the real process environment + filesystem.
-func New() *Reader { return &Reader{env: xdgconfig.OSEnv} }
+// New binds a Reader to the real process environment + filesystem, with the real
+// O_NOFOLLOW/0o600/temp-rename registry write seam.
+func New() *Reader { return &Reader{env: xdgconfig.OSEnv, writeFile: osRegistryWrite} }
 
 // NewWithEnv binds a Reader to an injected env so the XDG/home resolution and the
 // file read run fully offline against a fake — never the developer's real
-// ~/.config. Tests use this.
-func NewWithEnv(env xdgconfig.ResolveEnv) *Reader { return &Reader{env: env} }
+// ~/.config. It uses the REAL registry write seam (so a test that writes a registry
+// against a faked XDG dir exercises the actual O_NOFOLLOW/temp-rename path). Tests
+// that need to SPY on or REJECT the write inject their own seam via NewWithEnvIO.
+func NewWithEnv(env xdgconfig.ResolveEnv) *Reader {
+	return &Reader{env: env, writeFile: osRegistryWrite}
+}
+
+// NewWithEnvIO binds a Reader to an injected env AND an injected registry write
+// seam, so the write is fully observable/controllable offline (e.g. a spy that
+// records writes to assert "mecated never writes", or a stub that always errors). A
+// nil writeFile leaves the Reader read-only (Remember then errors).
+func NewWithEnvIO(env xdgconfig.ResolveEnv, writeFile registryWriteFunc) *Reader {
+	return &Reader{env: env, writeFile: writeFile}
+}
 
 // IsDeclared reports whether workspace is in the operator-authored
 // `trustedWorkspaces:` list, comparing on the cleaned + realpath'd absolute path
