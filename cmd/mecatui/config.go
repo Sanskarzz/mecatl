@@ -45,6 +45,15 @@ type config struct {
 	mock          bool
 	noBash        bool
 
+	// trustProject controls whether a discovered PROJECT's permission ALLOW rules
+	// and its project-scoped soul (.mecatl/soul.md) are honoured for the EMBEDDED
+	// server only (ignored when dialling an external --server). DEFAULT FALSE — the
+	// safe stance, unified with mecated's --trust-project. A project's deny/ask rules
+	// are ALWAYS honoured regardless; only its ALLOW grants and project soul are
+	// gated. Pass --trust-project for a repo you trust. Mapped onto
+	// app.Config.TrustProject in embeddedConfig.
+	trustProject bool
+
 	// allowAllTools is the operator allow-all posture for the EMBEDDED server only
 	// (ignored when dialling an external --server). When set it injects a single
 	// ScopeCLI allow-all rule that suppresses the built-in mutate-ask floor; a Deny
@@ -158,6 +167,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")
 	fs.BoolVar(&cfg.mock, "mock", false, "embedded server only: use the canned offline mock provider instead of OpenAI (no network)")
 	fs.BoolVar(&cfg.noBash, "no-bash", false, "embedded server only: disable the Bash tool (shell-less mode)")
+	fs.BoolVar(&cfg.trustProject, "trust-project", false, "embedded server only: honour a discovered PROJECT's ALLOW rules AND its project-scoped soul (.mecatl/soul.md) (its deny/ask rules are always honoured regardless). Default OFF (the safe stance, unified with mecated): an untrusted repo's permission grants and project soul are ignored. TRUST BOUNDARY: enabling this lets a checked-in .mecatl/settings.yaml auto-approve tool calls and a checked-in project soul steer the model — only pass it for a repo you trust")
 	fs.BoolVar(&cfg.allowAllTools, "yolo", false,
 		"embedded server only; OPERATOR POSTURE (dangerous): suppress permission prompts for the built-in mutate-ask floor, for ephemeral/sandboxed use only. Deny in any scope and configured Ask still apply. Refused as root unless MECATL_SANDBOX=1 (or IS_SANDBOX=1).")
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "embedded server only: per-project memory store directory (empty = a per-project default under $XDG_DATA_HOME/mecatui/memory)")

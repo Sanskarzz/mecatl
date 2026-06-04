@@ -77,6 +77,7 @@ absolute path (the server requires absolute).
 | `--no-commands` | off | **embedded** server: disable slash-command expansion |
 | `--skills-dir` | – (auto) | **embedded** server: skill-unit dir (`<name>/SKILL.md`); empty = the conventional dirs (e.g. `.claude/skills`) |
 | `--no-skills` | off | **embedded** server: disable skill discovery (the Skill tool) |
+| `--trust-project` | off | **embedded** server: honour a discovered project's permission **ALLOW** rules **and** its project soul (`.mecatl/soul.md`). Default OFF, unified with `mecated` — deny/ask are always honoured regardless. Only pass it for a repo you trust |
 | `--perf` | off | **embedded** server: expose the loopback perf admin surface (`/metrics`, `/debug/pprof`, `/debug/vars`, `/debug/flightrecorder`) and wire domain metrics. Loopback, UNAUTHENTICATED |
 | `--perf-addr` | – (`127.0.0.1:9099`) | **embedded** server: admin listen address for `--perf`. Empty = the **fixed** `127.0.0.1:9099` (predictable, so an MCP-client config can hardcode the `/mcp` URL; distinct from `mecated`'s `:9090`). Pass another `host:port`, or `127.0.0.1:0` for an ephemeral port. On a clash, startup **fails with guidance** |
 | `--perf-mcp` | off | **embedded** server: mount the read-only perf MCP server at `/mcp` on the `--perf` surface (introspect this process over MCP). Refuses a non-loopback `--perf-addr` |
@@ -105,17 +106,16 @@ workspace you didn't author (e.g. a cloned repo's `.claude/skills`) can steer th
 model — use `--no-skills` for untrusted workspaces. Only read-only discovery is
 wired; the writable SkillDraft self-improvement loop stays off.
 
-**Project trust posture (incl. the project soul).** The embedded server trusts the
-workspace you launch it in — it runs with `--trust-project` effectively ON. So, just
-as it honours the repo's `.mecatl/settings.yaml` permission ALLOW rules, it also
-honours a project persona/soul at `<workspace>/.mecatl/soul.md` (issue #14, Phase 3) —
-**by default, with no extra gesture** — when no user-scoped soul
-(`~/.config/mecatl/soul.md`) is present (the user soul always wins). This is
-consistent with the existing permission-rule trust, not a new boundary: launching the
-TUI in a repo trusts that repo. In `mecated`, by contrast, a project soul stays gated
-behind an explicit `--trust-project`. For a workspace you don't fully trust, either
-run `mecated` without `--trust-project`, or keep your own `~/.config/mecatl/soul.md`
-(which takes precedence and is never trust-gated).
+**Project trust posture (incl. the project soul).** The embedded server does **not**
+blanket-trust the workspace you launch it in. `--trust-project` is **default OFF**,
+unified with `mecated` (WORKSPACE-TRUST Phase 0). So, by default, a repo's
+`.mecatl/settings.yaml` permission **ALLOW** rules are ignored and a project
+persona/soul at `<workspace>/.mecatl/soul.md` (issue #14, Phase 3) is **not** loaded;
+the repo's deny/ask permission rules are always honoured regardless, and your
+user-scoped soul (`~/.config/mecatl/soul.md`) always loads and takes precedence.
+Pass `--trust-project` for a repo you trust to honour its ALLOW rules and project
+soul — exactly the gesture `mecated` requires. (Earlier builds hardcoded trust ON
+for the TUI; that blanket-trust regression is gone.)
 
 **Built-in client-side slash commands always appear.** Typing `/` opens the
 palette with a set of commands the TUI itself ships — independent of workspace

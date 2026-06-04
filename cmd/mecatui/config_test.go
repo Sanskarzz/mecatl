@@ -22,10 +22,11 @@ func TestEmbeddedConfigEnablesAgentDefs(t *testing.T) {
 	}
 }
 
-// TestEmbeddedConfigTrustsPermissions asserts the TUI runs the trust-fully
-// permission posture (issue #13): the user owns the repo they run in, so
-// conventional discovery, Claude import, AND project trust are all ON.
-func TestEmbeddedConfigTrustsPermissions(t *testing.T) {
+// TestEmbeddedConfigPermissionPosture asserts the TUI discovers the conventional
+// per-project permission config and imports Claude-Code settings (issue #13), but
+// that project TRUST is DEFAULT FALSE (WORKSPACE-TRUST Phase 0): unified with
+// mecated, a project's ALLOW rules + project soul are gated behind --trust-project.
+func TestEmbeddedConfigPermissionPosture(t *testing.T) {
 	ac := embeddedConfig(config{workspace: "/ws", model: "m", mock: true})
 	if !ac.PermissionsConventional {
 		t.Error("embeddedConfig PermissionsConventional = false, want true")
@@ -33,8 +34,41 @@ func TestEmbeddedConfigTrustsPermissions(t *testing.T) {
 	if !ac.ImportClaudePermissions {
 		t.Error("embeddedConfig ImportClaudePermissions = false, want true")
 	}
-	if !ac.TrustProject {
-		t.Error("embeddedConfig TrustProject = false, want true (the user owns the repo)")
+	if ac.TrustProject {
+		t.Error("embeddedConfig TrustProject = true by default, want false (Phase 0: untrusted unless --trust-project)")
+	}
+}
+
+// TestEmbeddedConfigMapsTrustProject asserts the --trust-project flag flows through
+// to app.Config.TrustProject: off by default, true when the flag is set.
+func TestEmbeddedConfigMapsTrustProject(t *testing.T) {
+	on := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, trustProject: true})
+	if !on.TrustProject {
+		t.Error("embeddedConfig.TrustProject = false with --trust-project, want true")
+	}
+	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true})
+	if off.TrustProject {
+		t.Error("embeddedConfig.TrustProject = true with flag off, want false")
+	}
+}
+
+// TestParseFlagsTrustProject asserts --trust-project defaults to false and flips
+// true when set — unified with mecated's default-off posture.
+func TestParseFlagsTrustProject(t *testing.T) {
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if def.trustProject {
+		t.Error("trustProject default = true, want false")
+	}
+
+	cfg, err := parseFlags([]string{"-trust-project"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !cfg.trustProject {
+		t.Error("trustProject = false, want true (flag set)")
 	}
 }
 

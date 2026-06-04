@@ -257,14 +257,16 @@ func embeddedConfig(cfg config) app.Config {
 		// when none do or when ToolHive discovers zero servers).
 		MCPResourceTools: true,
 		MCPPrompts:       true,
-		// File-based permission config (issue #13): the TUI runs in a repo the user
-		// owns, so trust it FULLY — discover the conventional per-project config,
-		// import Claude-Code settings.json, and honour the project's ALLOW rules.
-		// Re-resolved per session against the session workspace root. Inert until a
-		// .mecatl/settings.yaml (or .claude/settings.json) exists.
+		// File-based permission config (issue #13): discover the conventional
+		// per-project config and import Claude-Code settings.json — re-resolved per
+		// session against the session workspace root, inert until a
+		// .mecatl/settings.yaml (or .claude/settings.json) exists. TrustProject is
+		// DEFAULT FALSE (unified with mecated, WORKSPACE-TRUST Phase 0): a project's
+		// ALLOW rules and its project soul are honoured ONLY with --trust-project; its
+		// deny/ask rules are always honoured regardless.
 		PermissionsConventional: true,
 		ImportClaudePermissions: true,
-		TrustProject:            true,
+		TrustProject:            cfg.trustProject,
 		AllowAllTools:           cfg.allowAllTools,
 	}
 }

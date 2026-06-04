@@ -396,10 +396,15 @@ logged:
 The import never widens: a demotion only ever moves `allow → ask`, and the
 `deny`/`ask` buckets import verbatim.
 
-> **`mecatui` trusts fully.** The TUI runs in a repo you own, so it sets
-> `--permissions-conventional`, `--import-claude-permissions`, and `--trust-project`
-> all ON by default. The `mecated` daemon defaults `--permissions-conventional` ON
-> but `--trust-project` / `--import-claude-permissions` OFF (the safe network stance).
+> **`mecatui` defaults match `mecated`.** The embedded TUI server sets
+> `--permissions-conventional` and `--import-claude-permissions` ON, but
+> `--trust-project` is **OFF by default** (WORKSPACE-TRUST Phase 0) — unified with
+> `mecated`. So a project's ALLOW rules and its project soul are honoured only when
+> you pass `--trust-project` to `mecatui`; deny/ask are always honoured regardless.
+> (Earlier builds hardcoded trust ON for the TUI; that blanket-trust regression is
+> gone.) The `mecated` daemon likewise defaults `--permissions-conventional` ON but
+> `--trust-project` OFF (the safe stance); it defaults `--import-claude-permissions`
+> OFF (the safe network stance).
 
 ### The allow-all posture (`--yolo`)
 
@@ -543,8 +548,9 @@ an error. Precedence is **USER-WINS** (a single identity anchor, not a merge):
   dropped + logged).
 
 Your **user-scoped soul is never trust-gated** — it always loads if present, regardless
-of `--trust-project`. (Note: the embedded TUI server trusts its own workspace by default,
-so a project `.mecatl/soul.md` there is honoured when no user soul is present.)
+of `--trust-project`. (Note: the embedded TUI server defaults `--trust-project` OFF,
+unified with `mecated` (WORKSPACE-TRUST Phase 0), so a project `.mecatl/soul.md` is
+honoured only when you pass `--trust-project` to `mecatui`.)
 
 ### User model (`~/.config/mecatl/usermodel`, issue #14 Phase 2)
 
