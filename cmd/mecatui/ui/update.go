@@ -101,10 +101,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return model, cmd
 }
 
+// onStreamMsg applies the generation guard for the stream fan-in, then re-dispatches
+// the unwrapped message. A message produced by a run's reader (waitCmd) carries the
+// generation of the channel it was read from; if that no longer matches the current
+// run, the reader is bound to an ABANDONED channel (a reader left over after a
+// queue-drain re-pointed streamCh, or any future double-arm), so the message is
+// dropped and NOT re-armed — the stale reader dies with it. This neutralises both
+// stale-teardown (a leftover StreamClosed/StreamErr cancelling the new run) and stale
+// re-arm (a leftover event re-arming a reader on the new channel) structurally,
+// regardless of how many readers leaked. Messages NOT from the stream reader
+// (SessionReadyMsg, CommandsMsg, key/tick/paste, a send-error StreamErrMsg) are not
+// wrapped and never reach here — they go straight to the switch in update.
+func (m Model) onStreamMsg(sm streamMsg) (tea.Model, tea.Cmd) {
+	if sm.gen != m.streamGen {
+		return m, nil
+	}
+	return m.update(sm.msg)
+}
+
 // update is the body of the Elm reducer (see Update, which wraps it with the
 // test-only onPhase observer).
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case streamMsg:
+		return m.onStreamMsg(msg)
+
 	case tea.WindowSizeMsg:
 		return m.onResize(msg)
 
@@ -555,6 +576,14 @@ func (m Model) onApprovalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // resolveAsk sends the approval/denial on the SAME stream (ask_id correlation),
 // closes the modal, and resumes the run (spinner restarts). The send is wrapped
 // in a command so a send error surfaces as a StreamErrMsg.
+//
+// It MUST NOT re-arm the stream reader (no m.waitCmd()): unlike a stream-event
+// handler, an approval keypress consumes no message, and the PermissionAskMsg that
+// opened the modal already armed the run's single reader (afterEvent) — still in
+// flight, since the paused run has put nothing on the channel. Arming a second here
+// would leak an extra reader that outlives the run (see streamMsg / the streamGen
+// guard for why a leaked reader is dangerous across a queue-drain). One send, no
+// reader: the existing one delivers the resume events.
 func (m Model) resolveAsk(allow bool) (tea.Model, tea.Cmd) {
 	askID := m.ask.AskID
 	stream := m.stream
@@ -577,7 +606,7 @@ func (m Model) resolveAsk(allow bool) (tea.Model, tea.Cmd) {
 		}
 		return nil
 	}
-	return m, tea.Batch(send, m.waitCmd())
+	return m, send
 }
 
 // onRunningKey handles keys while a run streams. Type-while-running: the textarea
@@ -991,6 +1020,7 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	m.stream = stream
 	m.streamCh = ch
 	m.cancelRun = cancel
+	m.streamGen++ // open a fresh reader generation; readers of any prior run go stale
 	// ReadLoop selects on runCtx so it can never wedge if endRun stops draining
 	// ch; endRun calls cancelRun, which unblocks and exits the reader.
 	go stream.ReadLoop(runCtx, ch)
@@ -1022,13 +1052,28 @@ func (m Model) afterEvent() (Model, tea.Cmd) {
 	return m, m.waitCmd()
 }
 
-// waitCmd re-arms the fan-in command on the current run channel. Returns nil when
-// no run is active (defensive).
+// streamMsg wraps one message pulled from a run's reader channel with the stream
+// GENERATION that channel belonged to when the reader was armed. The reducer drops
+// any streamMsg whose gen no longer matches m.streamGen (see update), so a reader
+// left bound to an abandoned channel — leaked across a queue-drain or any future
+// double-arm — cannot route its messages into the current run. It is the structural
+// backstop behind the "exactly one reader per run" fan-in invariant.
+type streamMsg struct {
+	gen uint64
+	msg tea.Msg
+}
+
+// waitCmd re-arms the fan-in command on the current run channel, tagging whatever it
+// delivers with the current stream generation so a stale reader's output is dropped
+// rather than misrouted (see streamMsg + update's gen check). Returns nil when no
+// run is active (defensive).
 func (m Model) waitCmd() tea.Cmd {
 	if m.streamCh == nil {
 		return nil
 	}
-	return client.WaitForMsg(m.streamCh)
+	gen := m.streamGen
+	read := client.WaitForMsg(m.streamCh)
+	return func() tea.Msg { return streamMsg{gen: gen, msg: read()} }
 }
 
 // refreshCmd is the command returned on the run-completion paths, after endRun +
@@ -1053,6 +1098,7 @@ func (m Model) endRun(stop string) Model {
 	}
 	m.stream = nil
 	m.streamCh = nil
+	m.streamGen++ // invalidate any reader still bound to the torn-down run's channel
 	m.activeTool = ""
 	m.phase = phaseIdle
 	// Ensure the input is focused now the run is done. With type-while-running the

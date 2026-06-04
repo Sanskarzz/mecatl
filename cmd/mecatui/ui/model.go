@@ -215,6 +215,19 @@ type Model struct {
 	// streamCh is the current run's reader channel; WaitForMsg drains it.
 	streamCh chan tea.Msg
 
+	// streamGen is the monotonic generation of the CURRENT run's stream. Every
+	// reader command (waitCmd) tags the message it delivers with the generation that
+	// was current when it was armed; the reducer drops any stream message whose
+	// generation no longer matches (see Update). submitPrompt bumps it when it opens a
+	// new run and endRun bumps it when it tears one down, so a reader left bound to an
+	// ABANDONED stream channel (e.g. one leaked across a queue-drain) can never route
+	// its messages — a stale StreamClosed/StreamErr can't cancel the new run, and a
+	// stale event can't re-arm a reader on the new channel. This is the structural
+	// backstop for the hand-maintained "exactly one reader per run" fan-in invariant:
+	// even if a future handler leaks an extra reader, its messages become inert at the
+	// next run boundary regardless of how many readers leaked.
+	streamGen uint64
+
 	// stagedMedia holds clipboard/pasted-path image attachments not yet sent,
 	// keyed by their literal "[Image #N]" marker (which also sits in the textarea
 	// text). nextMediaN is the monotonic marker counter. The design is
