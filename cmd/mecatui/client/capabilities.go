@@ -21,6 +21,10 @@ type Capabilities struct {
 	// wired. They gate the /soul and /usermodel read-only inspection panels.
 	Soul      bool
 	UserModel bool
+	// ModelSelection is true when >=1 provider is available (ListModels would return
+	// at least one model). It gates the /models picker: an old server (field absent →
+	// false) hides the command, same mechanism as Soul/UserModel.
+	ModelSelection bool
 	// Image/Audio report whether the wired provider consumes that media kind. They
 	// gate the @-mention file-attach UX: a client refuses to send a part the
 	// server's provider cannot read (an old server with no field → false → degrade).
@@ -35,16 +39,17 @@ func capabilitiesFrom(c *mecatlv1.ServerCapabilities) Capabilities {
 		return Capabilities{}
 	}
 	return Capabilities{
-		MCP:           c.GetMcp(),
-		SlashCommands: c.GetSlashCommands(),
-		Memory:        c.GetMemory(),
-		Skills:        c.GetSkills(),
-		Teams:         c.GetTeams(),
-		Agents:        c.GetAgents(),
-		Bash:          c.GetBash(),
-		Soul:          c.GetSoul(),
-		UserModel:     c.GetUserModel(),
-		Image:         c.GetImage(),
-		Audio:         c.GetAudio(),
+		MCP:            c.GetMcp(),
+		SlashCommands:  c.GetSlashCommands(),
+		Memory:         c.GetMemory(),
+		Skills:         c.GetSkills(),
+		Teams:          c.GetTeams(),
+		Agents:         c.GetAgents(),
+		Bash:           c.GetBash(),
+		Soul:           c.GetSoul(),
+		UserModel:      c.GetUserModel(),
+		ModelSelection: c.GetModelSelection(),
+		Image:          c.GetImage(),
+		Audio:          c.GetAudio(),
 	}
 }

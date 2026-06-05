@@ -297,6 +297,29 @@ so a client can hide its picker against an older/empty server. The advertised
 `context_limit` is the SAME catalog value the per-session engine uses for its
 compaction trigger, so a large-context model is not compacted at the 128k default.
 
+#### The `mecatui` model picker + client-side last-used persistence
+
+`mecatui` surfaces the wire selection as the **`/models`** palette command (gated on
+`caps.model_selection`): a grouped-by-provider picker (`↑`/`↓` to move, `enter` to
+select, `esc` to close) that **persists** your choice and applies it to the **next**
+session — the provider is fixed per session, so a pick takes effect on the next
+`CreateSession`, not the live run. The selection is stored **client-side** in
+`$XDG_STATE_HOME/mecatui/models.yaml` (fallback `~/.local/state/mecatui/models.yaml`)
+as a per-workspace map (realpath-keyed) plus a global `default`, so a brand-new repo
+inherits your last choice. This is machine-written **state** under `XDG_STATE_HOME`
+(a sibling of the human config, mirroring `trust.yaml`'s settings-vs-state split). On
+launch the persisted selection is **reconciled** against `ListModels` BEFORE the
+first `CreateSession`: if its provider is no longer available (a removed key), it
+falls back to the server default for that run with a loud notice — the state file is
+left intact (the preference returns next launch), and connect never hard-fails with
+`InvalidArgument`.
+
+> **`--model` vs the picker.** For the embedded `mecatui` server, `--model` is the
+> server's **default** model (what it resolves when the client sends no `model_id`);
+> the `/models` picker is the **client's** per-session selector layered on top. For an
+> external `--server`, the server owns its provider config — `--model` is only a header
+> display hint, and the picker's selection rides the wire as `provider_id`/`model_id`.
+
 ### The loopback / unauthenticated trust note
 
 On startup `mecated` logs the trust posture for each listen address:

@@ -1,0 +1,30 @@
+ mecatui  ·  session sess-test-00  ·  gpt-5  ·  mode default  ·  127.0.0.1:8080
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+                       ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+                       ┃                                                    ┃
+                       ┃  Models                                            ┃
+                       ┃                                                    ┃
+                       ┃  openai                                            ┃
+                       ┃  ╭──────────────────────────────╮                  ┃
+                       ┃  │  › ● GPT-5  img reason 200K  │                  ┃
+                       ┃  ╰──────────────────────────────╯                  ┃
+                       ┃      GPT-5 mini  reason 128K                       ┃
+                       ┃      text-embed                                    ┃
+                       ┃                                                    ┃
+                       ┃  openrouter                                        ┃
+                       ┃      Claude  img reason 1M                         ┃
+                       ┃                                                    ┃
+                       ┃  ↑/↓ select · enter use · esc close · ● = current  ┃
+                       ┃                                                    ┃
+                       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+
+
+┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
+┃
+┃
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ connected                                                                   ctx 0 · ↑0 ↓0 cache 0%
+? help · / commands · ctrl+c quit

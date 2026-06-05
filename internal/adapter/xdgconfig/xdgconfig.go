@@ -44,3 +44,20 @@ func UserConfigDir(env ResolveEnv) string {
 	}
 	return ""
 }
+
+// UserStateDir returns the XDG STATE base for a user-level state location: the
+// value of $XDG_STATE_HOME when set, else ~/.local/state. It returns "" when
+// neither can be resolved (the caller then skips persistence). It is the
+// state-base twin of UserConfigDir, for MACHINE-WRITTEN runtime state (last-used
+// selections, registries) — the settings-vs-state split the trust feature
+// established (human config under XDG_CONFIG_HOME, machine state under
+// XDG_STATE_HOME).
+func UserStateDir(env ResolveEnv) string {
+	if base := env.Getenv("XDG_STATE_HOME"); base != "" {
+		return base
+	}
+	if home, err := env.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".local", "state")
+	}
+	return ""
+}

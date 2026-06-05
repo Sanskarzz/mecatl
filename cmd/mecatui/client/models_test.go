@@ -1,0 +1,154 @@
+package client
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"google.golang.org/grpc"
+
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+)
+
+// fakeModelsClient is a scripted HarnessServiceClient for the ListModels +
+// CreateSession wrapper tests. It embeds the interface and overrides only the two
+// RPCs under test, recording the requests so the proto-build assertions can run.
+type fakeModelsClient struct {
+	mecatlv1.HarnessServiceClient
+
+	listResp *mecatlv1.ListModelsResponse
+	listErr  error
+	lastList *mecatlv1.ListModelsRequest
+
+	createResp *mecatlv1.CreateSessionResponse
+	lastCreate *mecatlv1.CreateSessionRequest
+}
+
+func (f *fakeModelsClient) ListModels(_ context.Context, in *mecatlv1.ListModelsRequest, _ ...grpc.CallOption) (*mecatlv1.ListModelsResponse, error) {
+	f.lastList = in
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.listResp, nil
+}
+
+func (f *fakeModelsClient) CreateSession(_ context.Context, in *mecatlv1.CreateSessionRequest, _ ...grpc.CallOption) (*mecatlv1.CreateSessionResponse, error) {
+	f.lastCreate = in
+	if f.createResp != nil {
+		return f.createResp, nil
+	}
+	return &mecatlv1.CreateSessionResponse{SessionId: "sess-1"}, nil
+}
+
+func TestListModelsMapping(t *testing.T) {
+	fake := &fakeModelsClient{listResp: &mecatlv1.ListModelsResponse{
+		Models: []*mecatlv1.ModelInfo{
+			{Id: "gpt-5", ProviderId: "openai", DisplayName: "GPT-5", Image: true, Reasoning: true, ContextLimit: 200000},
+			{Id: "o3", ProviderId: "openai", Reasoning: true},
+		},
+	}}
+	cl := newFakeClient(fake)
+
+	ms, err := cl.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if fake.lastList == nil {
+		t.Fatal("ListModels request not sent")
+	}
+	if len(ms) != 2 {
+		t.Fatalf("models = %d, want 2", len(ms))
+	}
+	m0 := ms[0]
+	if m0.ID != "gpt-5" || m0.ProviderID != "openai" || m0.DisplayName != "GPT-5" {
+		t.Fatalf("model[0] = %+v", m0)
+	}
+	if !m0.Image || !m0.Reasoning || m0.ContextLimit != 200000 {
+		t.Fatalf("model[0] caps = img:%v reason:%v ctx:%d", m0.Image, m0.Reasoning, m0.ContextLimit)
+	}
+	// The second model has no display name / no image — verify the bools default
+	// false and the empty fields stay empty (no spurious fallback in the mapper).
+	m1 := ms[1]
+	if m1.Image || m1.DisplayName != "" || m1.ContextLimit != 0 {
+		t.Fatalf("model[1] = %+v, want zero image/display/ctx", m1)
+	}
+}
+
+func TestListModelsNilSafe(t *testing.T) {
+	cl := newFakeClient(&fakeModelsClient{listResp: nil})
+	ms, err := cl.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(ms) != 0 {
+		t.Fatalf("models = %d, want 0 (nil response → empty)", len(ms))
+	}
+	// mapModelInfo(nil) is zero.
+	if got := mapModelInfo(nil); got != (ModelInfo{}) {
+		t.Fatalf("mapModelInfo(nil) = %+v, want zero", got)
+	}
+}
+
+func TestListModelsError(t *testing.T) {
+	cl := newFakeClient(&fakeModelsClient{listErr: errors.New("boom")})
+	if _, err := cl.ListModels(context.Background()); err == nil {
+		t.Fatal("ListModels should propagate the RPC error")
+	}
+}
+
+// TestCreateSessionCarriesModelSelection asserts the SINGLE proto-build point sets
+// provider_id/model_id from the selection — and leaves them empty for the zero
+// selection (⇒ the server default).
+func TestCreateSessionCarriesModelSelection(t *testing.T) {
+	t.Run("non-zero selection sets both fields", func(t *testing.T) {
+		fake := &fakeModelsClient{}
+		cl := newFakeClient(fake)
+		_, _, err := cl.CreateSession(context.Background(), "/ws",
+			mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT,
+			ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"})
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		if fake.lastCreate.GetProviderId() != "openrouter" || fake.lastCreate.GetModelId() != "anthropic/claude" {
+			t.Fatalf("request = provider:%q model:%q, want openrouter/anthropic-claude",
+				fake.lastCreate.GetProviderId(), fake.lastCreate.GetModelId())
+		}
+		if fake.lastCreate.GetWorkspace() != "/ws" {
+			t.Fatalf("workspace = %q, want /ws", fake.lastCreate.GetWorkspace())
+		}
+	})
+	t.Run("zero selection leaves both empty (server default)", func(t *testing.T) {
+		fake := &fakeModelsClient{}
+		cl := newFakeClient(fake)
+		_, _, err := cl.CreateSession(context.Background(), "/ws",
+			mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT, ModelSelection{})
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		if fake.lastCreate.GetProviderId() != "" || fake.lastCreate.GetModelId() != "" {
+			t.Fatalf("zero selection set provider:%q model:%q, want both empty",
+				fake.lastCreate.GetProviderId(), fake.lastCreate.GetModelId())
+		}
+	})
+}
+
+// TestModelSelectionHelpers covers IsZero + Matches (the picker's row-marker /
+// reconcile predicates).
+func TestModelSelectionHelpers(t *testing.T) {
+	if !(ModelSelection{}).IsZero() {
+		t.Error("empty selection should be zero")
+	}
+	if (ModelSelection{ProviderID: "openai"}).IsZero() {
+		t.Error("a selection with a provider should not be zero")
+	}
+	sel := ModelSelection{ProviderID: "openai", ModelID: "gpt-5"}
+	if !sel.Matches(ModelInfo{ProviderID: "openai", ID: "gpt-5"}) {
+		t.Error("selection should match the same provider+id")
+	}
+	if sel.Matches(ModelInfo{ProviderID: "openai", ID: "o3"}) {
+		t.Error("selection should NOT match a different id")
+	}
+	if sel.Matches(ModelInfo{ProviderID: "openrouter", ID: "gpt-5"}) {
+		t.Error("selection should NOT match a different provider")
+	}
+}

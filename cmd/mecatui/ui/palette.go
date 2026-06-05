@@ -81,7 +81,7 @@ func commandPrefix(s string) (prefix string, ok bool) {
 // /help), independent of any Commander or server slash-command support; the
 // caps-gated ones (/mcp, /agents, /team, /skills) appear only when reachable.
 func (m Model) builtinRows() []client.Command {
-	bs := builtinCommands(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, m.deps.Soul != nil, m.deps.UserModel != nil)
+	bs := builtinCommands(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, m.deps.Soul != nil, m.deps.UserModel != nil, m.deps.Models != nil)
 	rows := make([]client.Command, 0, len(bs))
 	for _, b := range bs {
 		rows = append(rows, client.Command{Name: b.name, Description: b.desc, Builtin: true})

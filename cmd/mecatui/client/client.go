@@ -96,13 +96,18 @@ func (c *Client) Close() error {
 
 // CreateSession allocates a server-side session against an absolute workspace and
 // returns its id together with the server's advertised Capabilities. mode is the
-// proto PermissionMode (see ModeFromString). The Capabilities are the proto-free
-// mirror of the create response's ServerCapabilities; an older server that omits
-// the field yields the all-false zero value (see capabilitiesFrom).
-func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecatlv1.PermissionMode) (string, Capabilities, error) {
+// proto PermissionMode (see ModeFromString). sel is the optional, proto-free model
+// selection (its zero value ⇒ no provider_id/model_id set ⇒ the server's default).
+// This is the SINGLE proto-build point for the model selection: the ui passes a
+// plain ModelSelection and never sees the proto request. The Capabilities are the
+// proto-free mirror of the create response's ServerCapabilities; an older server
+// that omits the field yields the all-false zero value (see capabilitiesFrom).
+func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecatlv1.PermissionMode, sel ModelSelection) (string, Capabilities, error) {
 	resp, err := c.svc.CreateSession(ctx, &mecatlv1.CreateSessionRequest{
-		Workspace: workspace,
-		Mode:      mode,
+		Workspace:  workspace,
+		Mode:       mode,
+		ProviderId: sel.ProviderID,
+		ModelId:    sel.ModelID,
 	})
 	if err != nil {
 		return "", Capabilities{}, fmt.Errorf("create session: %w", err)

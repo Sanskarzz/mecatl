@@ -25,7 +25,16 @@ import (
 // stores for its honest discoverability affordances (Phase B); an older server
 // yields the all-false zero value.
 type SessionCreator interface {
-	CreateSession(ctx context.Context) (string, client.Capabilities, error)
+	CreateSession(ctx context.Context, sel client.ModelSelection) (string, client.Capabilities, error)
+}
+
+// SelectionStore persists + loads the client-side model selection (last-used). It
+// is satisfied by a main-owned concrete type backed by an XDG state file; nil
+// cleanly disables persistence (the active selection then lives only for the run).
+// The ui touches no os/xdg itself — persistence is composition-side, like
+// SessionCreator. Save is given the workspace so the store can key per-workspace.
+type SelectionStore interface {
+	Save(workspace string, sel client.ModelSelection) error
 }
 
 // Converser opens one Converse run as a *client.Stream. *client.Client satisfies
@@ -47,6 +56,15 @@ type Deps struct {
 	Agents    client.AgentLister     // agent-definition discovery for the /agents panel; nil disables it
 	Soul      client.SoulFetcher     // soul (persona) inspection for the /soul panel; nil disables it
 	UserModel client.UserModelLister // user-model inspection for the /usermodel panel; nil disables it
+	Models    client.ModelLister     // selectable-model discovery for the /models picker; nil disables it
+	// SelectionStore persists the picked model (last-used). nil disables persistence
+	// (the pick still applies to the next create this run, just isn't remembered).
+	SelectionStore SelectionStore
+	// InitialModel is the persisted selection loaded at launch (composition-side,
+	// from the state file). The picker seeds its active selection from it (the ●
+	// marker) and the startup CreateSession carries it — AFTER the connect-time
+	// ListModels reconcile clears it if its provider is no longer available.
+	InitialModel client.ModelSelection
 	// Clipboard reads the OS clipboard for ctrl+v paste (image-first, text-fallback).
 	// nil cleanly disables ctrl+v image paste (same convention as nil MCP/Cmds);
 	// main.go populates it with client.NewClipboard().
@@ -178,9 +196,16 @@ type Model struct {
 	agentsInv    agentsInvState // agent-definition inventory overlay state (view==agentsInvNone when closed)
 	soul         soulState      // soul (persona) inspection overlay state (view==soulNone when closed)
 	userModel    userModelState // user-model inspection overlay state (view==userModelNone when closed)
-	showHelp     bool           // the "?" keys-&-features overlay is open (caps-driven; see help.go)
-	stream       *client.Stream // current run's stream
-	cancelRun    context.CancelFunc
+	models       modelsState    // /models picker overlay state (view==modelsNone when closed)
+	// activeModel is the currently-selected (provider, model) the NEXT CreateSession
+	// will carry (apply-on-next-create). Seeded from Deps.InitialModel, updated by the
+	// picker, and reconciled-to-default at connect when its provider is unavailable. It
+	// is the SOURCE of truth for the create selection; m.models.active mirrors it for
+	// the picker's ● marker. The header model display reads from it once non-zero.
+	activeModel client.ModelSelection
+	showHelp    bool           // the "?" keys-&-features overlay is open (caps-driven; see help.go)
+	stream      *client.Stream // current run's stream
+	cancelRun   context.CancelFunc
 
 	// quitArmed is true after a first ctrl+c on an empty prompt: a second ctrl+c
 	// within quitArmWindow then quits (Claude Code's "press again to exit"
@@ -276,6 +301,12 @@ func New(deps Deps) Model {
 		sp:    sp,
 		vp:    vp,
 		stuck: true,
+		// Seed the active selection from the persisted last-used (composition loads it
+		// from the state file). The connect-time ListModels reconcile clears it to the
+		// server default if its provider is no longer available, BEFORE the create that
+		// carries it (so a removed key never hard-fails the connect with InvalidArgument).
+		activeModel: deps.InitialModel,
+		models:      modelsState{active: deps.InitialModel},
 	}
 }
 
@@ -339,7 +370,21 @@ func (m Model) resetSession() Model {
 	return m
 }
 
-// Init starts the spinner and kicks off the async CreateSession.
+// Init starts the spinner and kicks off connect.
+//
+// Connect SEQUENCING (§4 key-removed safety): when a model lister is wired, it
+// fetches ListModels FIRST and lets the connecting-phase ModelsMsg reconcile the
+// persisted selection against availability BEFORE firing CreateSession — so the
+// startup create carries only a validated selection and a removed provider key can
+// never hard-fail the connect with InvalidArgument. With no lister wired (old
+// server / persistence off) it fires CreateSession directly (the historical path,
+// with an empty selection).
 func (m Model) Init() tea.Cmd {
+	if m.deps.Models != nil {
+		return tea.Batch(m.sp.Tick, client.ListModelsCmd(m.deps.Ctx, m.deps.Models))
+	}
+	// No-lister / old-server path: with no model lister wired there is nothing to
+	// reconcile, so fire CreateSession directly (with the empty selection) — do NOT
+	// wait on a ListModels that will never arrive, which would strand at "connecting…".
 	return tea.Batch(m.sp.Tick, m.createSessionCmd())
 }

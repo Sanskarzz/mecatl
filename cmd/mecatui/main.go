@@ -37,6 +37,7 @@ import (
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 	"github.com/stacklok/mecatl/cmd/mecatui/ui"
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/app"
 )
 
@@ -97,18 +98,29 @@ func run(args []string) error {
 	}
 	defer func() { _ = cl.Close() }()
 
+	// Client-side model-selection persistence (the /models picker): the store reads
+	// the last-used selection at launch and persists a pick. Lives in main (the
+	// composition root) so the client stays proto-only and the ui never touches
+	// os/xdg. The connect-time ListModels reconcile clears a now-unavailable provider
+	// before the create carries it (see ui.Init / updateModelsMsg).
+	store := newSelectionStore(xdgconfig.OSEnv)
+	initialSel := store.Load(cfg.workspace)
+
 	deps := ui.Deps{
-		Session:   &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: client.ModeFromString(cfg.mode)},
-		Conv:      cl,
-		MCP:       cl,
-		Cmds:      cl,
-		Skills:    cl,
-		Agents:    cl,
-		Soul:      cl,
-		UserModel: cl,
-		Clipboard: client.NewClipboard(),
-		Theme:     th,
-		Server:    target,
+		Session:        &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: client.ModeFromString(cfg.mode)},
+		Conv:           cl,
+		MCP:            cl,
+		Cmds:           cl,
+		Skills:         cl,
+		Agents:         cl,
+		Soul:           cl,
+		UserModel:      cl,
+		Models:         cl,
+		SelectionStore: store,
+		InitialModel:   initialSel,
+		Clipboard:      client.NewClipboard(),
+		Theme:          th,
+		Server:         target,
 		// Model is best-effort display only. For an EXTERNAL --server it reflects
 		// the locally-configured --model flag and may NOT match the server's actual
 		// model (the server owns provider config); for an embedded server it is
@@ -428,15 +440,18 @@ func themeDirs(workspace, extraDir string) []string {
 	return dirs
 }
 
-// sessionAdapter bridges the ui's parameterless SessionCreator to the client's
-// CreateSession(ctx, workspace, mode). The workspace and mode are fixed at
-// startup, so the ui only needs "create the session".
+// sessionAdapter bridges the ui's SessionCreator to the client's
+// CreateSession(ctx, workspace, mode, sel). The workspace and mode are fixed at
+// startup (they don't change at runtime in MVP); only the model selection is
+// per-call — the ui passes the (reconciled) apply-on-next-create selection as a
+// proto-free client.ModelSelection, and this adapter forwards it to the single
+// proto-build point in client.CreateSession. The ui never sees the proto request.
 type sessionAdapter struct {
 	cl        *client.Client
 	workspace string
 	mode      mecatlv1.PermissionMode
 }
 
-func (s *sessionAdapter) CreateSession(ctx context.Context) (string, client.Capabilities, error) {
-	return s.cl.CreateSession(ctx, s.workspace, s.mode)
+func (s *sessionAdapter) CreateSession(ctx context.Context, sel client.ModelSelection) (string, client.Capabilities, error) {
+	return s.cl.CreateSession(ctx, s.workspace, s.mode, sel)
 }

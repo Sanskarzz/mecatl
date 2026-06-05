@@ -1,0 +1,30 @@
+ mecatui  ·  session sess-test-00  ·  mock-model  ·  mode default  ·  127.0.0.1:8080
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+                   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+                   ┃                                                           ┃
+                   ┃  Models                                                   ┃
+                   ┃                                                           ┃
+                   ┃  Model selection is not available on this server.         ┃
+                   ┃  Set OPENAI_API_KEY or OPENROUTER_API_KEY and reconnect.  ┃
+                   ┃                                                           ┃
+                   ┃  ↑/↓ select · enter use · esc close · ● = current         ┃
+                   ┃                                                           ┃
+                   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+
+
+
+
+
+┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
+┃
+┃
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ connected                                                                   ctx 0 · ↑0 ↓0 cache 0%
+? help · / commands · ctrl+c quit

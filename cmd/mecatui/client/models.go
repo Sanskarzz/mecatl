@@ -1,0 +1,107 @@
+package client
+
+import (
+	"context"
+
+	tea "charm.land/bubbletea/v2"
+
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+)
+
+// The model-selection surface: plain client-owned structs mirroring the proto
+// ModelInfo + ListModelsResponse, the unary RPC wrapper that maps proto → the
+// structs, and the tea.Cmd constructor the ui's /models picker calls. As with the
+// soul/usermodel/skills surfaces, NO proto type leaks past this file — the ui
+// renders the picker purely from these plain structs.
+
+// ModelInfo is one selectable model's listing metadata — the proto-free mirror of
+// mecatlv1.ModelInfo. The ui renders the /models picker purely from these. The
+// (ProviderID, ID) pair is what CreateSession ultimately carries.
+type ModelInfo struct {
+	ID           string // the opaque model_id sent on CreateSession
+	ProviderID   string // the provider_id sent on CreateSession
+	DisplayName  string // human label; falls back to ID server-side already
+	Image        bool   // accepts image input
+	Reasoning    bool   // emits reasoning
+	ContextLimit int64  // total context window in tokens; 0 = unknown
+}
+
+// ModelSelection is the chosen (provider, model) the client sends on
+// CreateSession. Proto-free; the zero value means "server default" (no
+// provider_id/model_id set on the request).
+type ModelSelection struct {
+	ProviderID string
+	ModelID    string
+}
+
+// IsZero reports whether the selection is empty (⇒ the server picks its default).
+func (s ModelSelection) IsZero() bool { return s.ProviderID == "" && s.ModelID == "" }
+
+// Matches reports whether m is the model this selection names (by provider + id).
+func (s ModelSelection) Matches(m ModelInfo) bool {
+	return s.ProviderID == m.ProviderID && s.ModelID == m.ID
+}
+
+// ModelsMsg carries a ListModels result for the /models picker. Err is set on
+// failure; the picker surfaces it rather than silently degrading.
+type ModelsMsg struct {
+	Models []ModelInfo
+	Err    error
+}
+
+// ModelLister is the subset of *Client the ui's /models picker needs. Splitting
+// it out keeps the ui injectable with a fake for offline tests; *Client satisfies
+// it.
+type ModelLister interface {
+	ListModels(ctx context.Context) ([]ModelInfo, error)
+}
+
+// ListModels fetches the selectable-model inventory across AVAILABLE providers,
+// (provider_id, id)-sorted (the server sorts; the client preserves that order).
+func (c *Client) ListModels(ctx context.Context) ([]ModelInfo, error) {
+	resp, err := c.svc.ListModels(ctx, &mecatlv1.ListModelsRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return mapModels(resp), nil
+}
+
+// mapModels maps a proto ListModelsResponse (nil-safe) to the plain structs.
+func mapModels(in *mecatlv1.ListModelsResponse) []ModelInfo {
+	if in == nil {
+		return nil
+	}
+	models := in.GetModels()
+	out := make([]ModelInfo, 0, len(models))
+	for _, m := range models {
+		out = append(out, mapModelInfo(m))
+	}
+	return out
+}
+
+// mapModelInfo maps one proto ModelInfo (nil-safe) to the plain struct.
+func mapModelInfo(m *mecatlv1.ModelInfo) ModelInfo {
+	if m == nil {
+		return ModelInfo{}
+	}
+	return ModelInfo{
+		ID:           m.GetId(),
+		ProviderID:   m.GetProviderId(),
+		DisplayName:  m.GetDisplayName(),
+		Image:        m.GetImage(),
+		Reasoning:    m.GetReasoning(),
+		ContextLimit: m.GetContextLimit(),
+	}
+}
+
+// ListModelsCmd fetches the model inventory off the update goroutine; the result
+// (success or error) arrives as a ModelsMsg.
+func ListModelsCmd(ctx context.Context, l ModelLister) tea.Cmd {
+	return func() tea.Msg {
+		ms, err := l.ListModels(ctx)
+		if err != nil {
+			return ModelsMsg{Err: err}
+		}
+		return ModelsMsg{Models: ms}
+	}
+}

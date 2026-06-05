@@ -113,7 +113,7 @@ func TestStartServesOverSocket(t *testing.T) {
 	}
 	defer func() { _ = cl.Close() }()
 
-	sessID, _, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"))
+	sessID, _, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"), client.ModelSelection{})
 	if err != nil {
 		t.Fatalf("CreateSession over embedded socket: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestStartWithMemoryDirServes(t *testing.T) {
 	}
 	defer func() { _ = cl.Close() }()
 
-	sessID, caps, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"))
+	sessID, caps, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"), client.ModelSelection{})
 	if err != nil {
 		t.Fatalf("CreateSession over embedded socket (memory enabled): %v", err)
 	}
@@ -226,7 +226,7 @@ func TestStartListAgentsOverSocket(t *testing.T) {
 	}
 	defer func() { _ = cl.Close() }()
 
-	_, caps, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"))
+	_, caps, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"), client.ModelSelection{})
 	if err != nil {
 		t.Fatalf("CreateSession over embedded socket: %v", err)
 	}

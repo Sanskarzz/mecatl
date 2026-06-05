@@ -156,11 +156,12 @@ conversation and scrollback) and `/help` (open the keys-&-features overlay) are
 the MCP inventory), `/agents` (browse the agent-definition inventory — the
 resolved registry the `Task` tool routes delegations to), `/team` (the live
 agent-team overlay, also on `ctrl+a`), `/skills` (browse the skills inventory),
-`/soul` (inspect the persona — read-only), and `/usermodel` (inspect the user
-model — read-only) appear only when the connected server advertises those
-capabilities (and, for `/mcp`/`/agents`/`/skills`/`/soul`/`/usermodel`, the
-matching client collaborator is wired). The fixed palette order is
-`clear, help, mcp, agents, team, skills, soul, usermodel` (locked by a test).
+`/soul` (inspect the persona — read-only), `/usermodel` (inspect the user
+model — read-only), and `/models` (pick the model for the next session) appear
+only when the connected server advertises those capabilities (and, for
+`/mcp`/`/agents`/`/skills`/`/soul`/`/usermodel`/`/models`, the matching client
+collaborator is wired). The fixed palette order is
+`clear, help, mcp, agents, team, skills, soul, usermodel, models` (locked by a test).
 `/agents` and `/team` are distinct: `/agents` is the **definition inventory** (a
 palette-only `ListAgents` snapshot, gated on `caps.agents`), while `/team` opens
 the **live overlay** of a team that has actually run (gated on `caps.teams`).
@@ -185,6 +186,28 @@ user-model store's index, so it reflects facts saved since startup) and shows an
 aggregate line (count · size · hash) over a `key — description` list, name-sorted.
 The per-entry value is omitted — `RecallUser` loads it. `esc` closes; the panel
 never edits the user model (the agent curates it).
+
+**`/models` (model picker — the only *selecting* overlay).** Gated on
+`caps.model_selection` (the server advertises ≥1 available provider) AND a wired
+model lister. It fires `ListModels` and renders the selectable models **grouped by
+provider**, each row showing the display name plus capability glyphs (`img` when
+the model takes image input, `reason` when it emits reasoning) and a compact
+context window (e.g. `200K`, `1M`; omitted when unknown). `↑`/`↓` move a cursor
+across the flattened list, `enter` **selects** the cursor model (a `●` marks the
+currently-active one), and `esc` closes. UNLIKE the read-only overlays it changes
+state: selecting **persists** the choice (last-used) and **applies to the NEXT
+session** (`provider_id`/`model_id` on the next `CreateSession`) — it does NOT
+re-route the live session (provider is fixed per session; a live switch is a
+deferred follow-up). The pick is persisted **client-side** to a state file:
+`$XDG_STATE_HOME/mecatui/models.yaml` (fallback `~/.local/state/mecatui/models.yaml`)
+— a per-workspace map (realpath-keyed) plus a global `default`, so a brand-new repo
+inherits your last choice. On launch the selection is **reconciled** against
+`ListModels` BEFORE the first `CreateSession`: if the persisted model's provider is
+no longer available (its key was removed), the selection falls back to the server
+default for that run with a loud notice and the state file is left intact (the
+preference returns next launch). The state file is machine-written **state** under
+`XDG_STATE_HOME`, a sibling of the human config — the same settings-vs-state split
+as `trust.yaml`.
 
 **Workspace slash commands are ON by default** on top of the built-ins, expanding
 `/<name>` inputs from the conventional workspace dirs `.mecatl/commands` and
@@ -277,7 +300,7 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 | `home` / `end` | jump to the top / bottom of the conversation (`end` resumes auto-follow) |
 | mouse wheel | scroll the conversation (**alt screen only**; see below) |
 | `?` | help overlay (on an empty prompt) |
-| `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`, `/soul`, `/usermodel`; plus workspace commands) |
+| `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`, `/soul`, `/usermodel`, `/models`; plus workspace commands) |
 | `ctrl+a` | open the **live agent-team overlay** (the full roster + per-member focus of the most-recent team) — works **while idle and mid-run**; inert under a permission modal. Same surface as `/team`. |
 | `@` | file-mention menu — complete a workspace path, then attach it on submit (see below) |
 

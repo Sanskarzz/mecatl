@@ -140,9 +140,21 @@ type fakeConv struct {
 	// background goroutine watches the run ctx; cancelOnce guards the one-shot close.
 	runCancelled chan struct{}
 	cancelOnce   sync.Once
+
+	// createdSel records the model selection the LAST CreateSession carried — the
+	// /models e2e asserts the picked (provider, model) threads into the create. created
+	// is closed once (createdOnce) on the first create so a test can sequence on the
+	// create having happened without polling rendered output.
+	createdSel  client.ModelSelection
+	created     chan struct{}
+	createdOnce sync.Once
 }
 
-func (c *fakeConv) CreateSession(_ context.Context) (string, client.Capabilities, error) {
+func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection) (string, client.Capabilities, error) {
+	c.createdSel = sel
+	if c.created != nil {
+		c.createdOnce.Do(func() { close(c.created) })
+	}
 	if c.sessionReady != nil {
 		select {
 		case <-c.sessionReady:
@@ -349,4 +361,36 @@ func (f *fakeUserModel) GetUserModel(_ context.Context) (client.UserModel, error
 		return client.UserModel{}, f.err
 	}
 	return f.model, nil
+}
+
+// fakeModels is a scripted client.ModelLister for the /models picker tests:
+// ListModels returns the canned list, or err when set.
+type fakeModels struct {
+	models []client.ModelInfo
+	err    error
+	calls  int
+}
+
+func (f *fakeModels) ListModels(_ context.Context) ([]client.ModelInfo, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.models, nil
+}
+
+// fakeStore is a spy client SelectionStore (ui.SelectionStore) for the /models
+// tests: it records the last Save and can be made to fail.
+type fakeStore struct {
+	lastWS  string
+	lastSel client.ModelSelection
+	saves   int
+	err     error
+}
+
+func (s *fakeStore) Save(ws string, sel client.ModelSelection) error {
+	s.saves++
+	s.lastWS = ws
+	s.lastSel = sel
+	return s.err
 }

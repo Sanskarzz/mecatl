@@ -179,6 +179,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if mm, handled := m.updateUserModelMsg(msg); handled {
 			return mm, nil
 		}
+		// /models picker result/error + selection-saved msg. During connect it also
+		// returns the CreateSession command (the §4 reconcile-then-create sequence),
+		// so this one DOES carry a follow-up command. Fall through if not a models msg.
+		if mm, cmd, handled := m.updateModelsMsg(msg); handled {
+			return mm, cmd
+		}
 		// Stream events (session.init / turn.start / deltas / tool.* /
 		// permission.ask / hook / compaction / result) are handled separately to
 		// keep this reducer's branch count in check.
@@ -443,43 +449,11 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// An open MCP overlay owns the keyboard (it only opens while idle). It steps
-	// back / closes on esc internally, so route here before the phase switch.
-	if mm, cmd, handled := m.onMCPKey(msg); handled {
-		return mm, cmd
-	}
-
-	// An open live agent-team overlay likewise owns the keyboard. It can open while
-	// idle OR mid-run (Gap B), and it steps back from focus → roster → closed on esc
-	// internally, so route here before the phase switch (and before the ctrl+t
-	// toggle, so esc/enter belong to it).
-	if mm, cmd, handled := m.onTeamKey(msg); handled {
-		return mm, cmd
-	}
-
-	// An open agent-definition inventory overlay likewise owns the keyboard
-	// (idle-only). It is read-only — esc closes it internally — so route here before
-	// the phase switch.
-	if mm, cmd, handled := m.onAgentsInvKey(msg); handled {
-		return mm, cmd
-	}
-
-	// An open skills overlay likewise owns the keyboard (idle-only). It is
-	// read-only — esc closes it internally — so route here before the phase switch.
-	if mm, cmd, handled := m.onSkillsKey(msg); handled {
-		return mm, cmd
-	}
-
-	// An open soul overlay owns the keyboard (idle-only): esc closes it, the scroll
-	// keys page its content, everything else is swallowed. Routed here before the
-	// phase switch, like the other read-only inventory overlays.
-	if mm, cmd, handled := m.onSoulKey(msg); handled {
-		return mm, cmd
-	}
-
-	// An open user-model overlay likewise owns the keyboard (idle-only). It is
-	// read-only — esc closes it internally — so route here before the phase switch.
-	if mm, cmd, handled := m.onUserModelKey(msg); handled {
+	// An open inventory/picker overlay (MCP, team, agents, skills, soul, usermodel,
+	// models) owns the keyboard while open — each steps back / closes on esc
+	// internally and returns handled=false when closed. Routed here before the phase
+	// switch (and before the ctrl+t toggle, so esc/enter belong to the overlay).
+	if mm, cmd, handled := m.onOverlayKey(msg); handled {
 		return mm, cmd
 	}
 
@@ -524,6 +498,30 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+// onOverlayKey routes a key to whichever inventory/picker overlay is open, in a
+// fixed order. Each per-overlay handler returns handled=false when its overlay is
+// closed, so at most one consumes the key (they never coexist). Extracted from
+// onKey so the dispatcher stays under the cyclomatic cap as overlays accrue. The
+// /models picker is the only SELECTING one (cursor + enter); the rest are read-only
+// / esc-only. Returns handled=false when no overlay is open so onKey falls through.
+func (m Model) onOverlayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	overlays := []func(tea.KeyPressMsg) (tea.Model, tea.Cmd, bool){
+		m.onMCPKey,
+		m.onTeamKey,
+		m.onAgentsInvKey,
+		m.onSkillsKey,
+		m.onSoulKey,
+		m.onUserModelKey,
+		m.onModelsKey,
+	}
+	for _, route := range overlays {
+		if mm, cmd, handled := route(msg); handled {
+			return mm, cmd, true
+		}
+	}
+	return m, nil, false
 }
 
 // onQuitKey implements the graceful double-press ctrl+c (issue #17): a second press
@@ -909,7 +907,7 @@ func (m Model) runSelectedBuiltin() (tea.Model, tea.Cmd, bool) {
 	if !row.Builtin {
 		return m, nil, false
 	}
-	b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, m.deps.Soul != nil, m.deps.UserModel != nil, row.Name)
+	b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, m.deps.Soul != nil, m.deps.UserModel != nil, m.deps.Models != nil, row.Name)
 	if !found {
 		return m, nil, false
 	}
@@ -957,7 +955,7 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 	// "/name arg" line has a space → commandPrefix is false → also falls through
 	// (workspace commands expand server-side from the full line).
 	if name, ok := commandPrefix(text); ok {
-		if b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, m.deps.Soul != nil, m.deps.UserModel != nil, name); found {
+		if b, found := builtinByName(m.caps, m.deps.MCP != nil, m.deps.Agents != nil, m.deps.Skills != nil, m.deps.Soul != nil, m.deps.UserModel != nil, m.deps.Models != nil, name); found {
 			m.ta.Reset()
 			return b.run(m)
 		}
@@ -1340,8 +1338,9 @@ func sumUsage(a, b client.Usage) client.Usage {
 // SessionReadyMsg or ConnectErrMsg.
 func (m Model) createSessionCmd() tea.Cmd {
 	deps := m.deps
+	sel := m.activeModel // the reconciled apply-on-next-create selection (zero ⇒ server default)
 	return func() tea.Msg {
-		id, caps, err := deps.Session.CreateSession(deps.Ctx)
+		id, caps, err := deps.Session.CreateSession(deps.Ctx, sel)
 		if err != nil {
 			return client.ConnectErrMsg{Err: err}
 		}

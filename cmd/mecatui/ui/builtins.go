@@ -33,9 +33,11 @@ type builtin struct {
 // AND a skills collaborator is wired (skillsWired); /soul only when the server
 // advertises Soul AND a soul collaborator is wired (soulWired); /usermodel only
 // when the server advertises UserModel AND a user-model collaborator is wired
-// (userModelWired). The order is fixed (clear, help, mcp, agents, team, skills,
-// soul, usermodel) and locked by a test so the palette ordering is stable.
-func builtinCommands(caps client.Capabilities, mcpWired, agentsWired, skillsWired, soulWired, userModelWired bool) []builtin {
+// (userModelWired); /models (the model picker) only when the server advertises
+// model_selection AND a model lister is wired (modelsWired). The order is fixed
+// (clear, help, mcp, agents, team, skills, soul, usermodel, models) and locked by a
+// test so the palette ordering is stable.
+func builtinCommands(caps client.Capabilities, mcpWired, agentsWired, skillsWired, soulWired, userModelWired, modelsWired bool) []builtin {
 	out := []builtin{
 		{
 			name: "clear",
@@ -90,14 +92,21 @@ func builtinCommands(caps client.Capabilities, mcpWired, agentsWired, skillsWire
 			run:  Model.runUserModel,
 		})
 	}
+	if caps.ModelSelection && modelsWired {
+		out = append(out, builtin{
+			name: "models",
+			desc: "pick the model for the next session",
+			run:  Model.runModels,
+		})
+	}
 	return out
 }
 
 // builtinByName looks up a built-in by name within the caps-filtered set, for
 // dispatch. ok is false when no built-in by that name is currently registered
 // (either unknown, or gated off on this server).
-func builtinByName(caps client.Capabilities, mcpWired, agentsWired, skillsWired, soulWired, userModelWired bool, name string) (builtin, bool) {
-	for _, b := range builtinCommands(caps, mcpWired, agentsWired, skillsWired, soulWired, userModelWired) {
+func builtinByName(caps client.Capabilities, mcpWired, agentsWired, skillsWired, soulWired, userModelWired, modelsWired bool, name string) (builtin, bool) {
+	for _, b := range builtinCommands(caps, mcpWired, agentsWired, skillsWired, soulWired, userModelWired, modelsWired) {
 		if b.name == name {
 			return b, true
 		}
@@ -169,4 +178,11 @@ func (m Model) runSoul() (tea.Model, tea.Cmd) {
 // own nil/idle guards are belt-and-braces here.
 func (m Model) runUserModel() (tea.Model, tea.Cmd) {
 	return m.openUserModel()
+}
+
+// runModels opens the /models picker. Only registered when caps.ModelSelection &&
+// the model lister is wired, so openModels's own nil/idle guards are
+// belt-and-braces here.
+func (m Model) runModels() (tea.Model, tea.Cmd) {
+	return m.openModels()
 }

@@ -70,6 +70,8 @@ func (m Model) View() tea.View {
 		body = renderSoulOverlay(m.deps.Theme, m.soul, m.caps, m.width, m.vp.Height())
 	case m.userModel.view != userModelNone:
 		body = renderUserModelOverlay(m.deps.Theme, m.userModel, m.caps, m.width, m.vp.Height())
+	case m.models.view != modelsNone:
+		body = renderModelsOverlay(m.deps.Theme, m.models, m.caps, m.width, m.vp.Height())
 	case m.phase == phaseIdle && m.conv.isEmpty():
 		// First-run zero-state: a welcome card in the empty viewport. Not an overlay
 		// (claims no keyboard); typing flows over it and it vanishes on the first block.
@@ -118,7 +120,12 @@ func (m Model) renderHeader() string {
 		"mecatui",
 		"session " + short(sid),
 	}
-	if m.deps.Model != "" {
+	// Prefer the picker's active selection once set (it is what the NEXT session
+	// will use); fall back to the launch-time --model display. sanitize: a model id
+	// can be server/provider-derived.
+	if name := m.activeModel.ModelID; name != "" {
+		parts = append(parts, truncate(sanitizeTerminal(name), maxModelLen))
+	} else if m.deps.Model != "" {
 		parts = append(parts, truncate(m.deps.Model, maxModelLen))
 	}
 	if m.deps.Mode != "" {
