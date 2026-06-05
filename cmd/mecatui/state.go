@@ -39,11 +39,13 @@ import (
 //	workspaces:
 //	  /abs/realpath/repo-a: { providerId: openrouter, modelId: anthropic/claude-... }
 //
-// Read order on launch: workspaces[realpath(ws)] if present, else default. Write on
-// select: update BOTH the per-workspace entry AND default (so a brand-new repo
-// inherits the last choice rather than falling to the catalog default). Workspaces
-// are realpath-keyed (filepath.Abs + EvalSymlinks), mirroring the trust registry,
-// so a moved/symlinked repo doesn't fork its state.
+// Read order on launch: workspaces[realpath(ws)] if present, else the global default
+// (if ever set), else the zero selection (the server default). Write on select:
+// update ONLY the per-workspace entry — the global default is left untouched so an
+// unseen/new repo falls back to the server default instead of silently inheriting the
+// last pick made elsewhere. (A future explicit "set as default" is the only writer of
+// default.) Workspaces are realpath-keyed (filepath.Abs + EvalSymlinks), mirroring the
+// trust registry, so a moved/symlinked repo doesn't fork its state.
 //
 // # Safety
 //
@@ -119,10 +121,13 @@ func (s *selectionStore) Load(workspace string) client.ModelSelection {
 	return client.ModelSelection{ProviderID: sf.Default.ProviderID, ModelID: sf.Default.ModelID}
 }
 
-// Save persists sel as BOTH the per-workspace entry (realpath-keyed) and the global
-// default (so a new repo inherits the last choice). It is read-modify-write: it
-// preserves other workspaces' entries. A zero (empty) workspace skips the
-// per-workspace entry but still updates default. The write is atomic.
+// Save persists sel as the per-workspace entry (realpath-keyed) ONLY. It deliberately
+// does NOT touch the global default: an unseen/new repo falls back to the server
+// default rather than silently inheriting whatever was last picked elsewhere (which
+// could be an expensive model). A future explicit "set as default" affordance is the
+// only thing that should write Default. It is read-modify-write: it preserves the
+// existing default and every other workspace's entry. A zero (empty/unresolvable)
+// workspace persists nothing. The write is atomic.
 func (s *selectionStore) Save(workspace string, sel client.ModelSelection) error {
 	if s == nil || s.path == "" {
 		return errors.New("mecatui: no XDG state dir to persist the model selection")
@@ -133,7 +138,6 @@ func (s *selectionStore) Save(workspace string, sel client.ModelSelection) error
 		sf.Workspaces = make(map[string]modelSelectionEntry)
 	}
 	entry := modelSelectionEntry{ProviderID: sel.ProviderID, ModelID: sel.ModelID}
-	sf.Default = entry
 	if key, err := realpathState(workspace); err == nil {
 		sf.Workspaces[key] = entry
 	}

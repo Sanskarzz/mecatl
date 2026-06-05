@@ -305,8 +305,9 @@ select, `esc` to close) that **persists** your choice and applies it to the **ne
 session — the provider is fixed per session, so a pick takes effect on the next
 `CreateSession`, not the live run. The selection is stored **client-side** in
 `$XDG_STATE_HOME/mecatui/models.yaml` (fallback `~/.local/state/mecatui/models.yaml`)
-as a per-workspace map (realpath-keyed) plus a global `default`, so a brand-new repo
-inherits your last choice. This is machine-written **state** under `XDG_STATE_HOME`
+as a per-workspace map (realpath-keyed). A pick is scoped to its own workspace; an
+unseen/new repo falls back to the server default rather than inheriting another repo's
+pick. This is machine-written **state** under `XDG_STATE_HOME`
 (a sibling of the human config, mirroring `trust.yaml`'s settings-vs-state split). On
 launch the persisted selection is **reconciled** against `ListModels` BEFORE the
 first `CreateSession`: if its provider is no longer available (a removed key), it

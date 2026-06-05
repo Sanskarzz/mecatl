@@ -24,8 +24,9 @@ func fakeStateEnv(stateHome string) xdgconfig.ResolveEnv {
 	}
 }
 
-// TestSelectionStoreRoundTrip covers save→load for both the global default and a
-// per-workspace entry, and that Save updates BOTH (a fresh repo inherits default).
+// TestSelectionStoreRoundTrip covers save→load for a per-workspace entry, and that a
+// pick is scoped to ITS workspace ONLY — an unseen repo falls back to the server
+// default (zero selection), never inheriting another workspace's pick.
 func TestSelectionStoreRoundTrip(t *testing.T) {
 	stateHome := t.TempDir()
 	wsA := t.TempDir()
@@ -42,12 +43,14 @@ func TestSelectionStoreRoundTrip(t *testing.T) {
 	if got := store2.Load(wsA); got != selA {
 		t.Fatalf("Load(wsA) = %+v, want %+v", got, selA)
 	}
-	// wsB has no entry yet → inherits the global default (== the last Save).
-	if got := store2.Load(wsB); got != selA {
-		t.Fatalf("Load(wsB) = %+v, want the default %+v", got, selA)
+	// wsB has no entry → falls back to the server default (zero selection), NOT wsA's
+	// pick. A pick must not leak across workspaces.
+	if got := (store2.Load(wsB)); got != (client.ModelSelection{}) {
+		t.Fatalf("Load(wsB) = %+v, want the zero selection (server default), not wsA's pick", got)
 	}
 
-	// A second Save for wsB updates wsB AND the default, leaving wsA intact.
+	// A second Save for wsB updates wsB ONLY, leaving wsA intact and the global
+	// default still unset.
 	selB := client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5"}
 	if err := store2.Save(wsB, selB); err != nil {
 		t.Fatalf("Save(wsB): %v", err)
@@ -59,9 +62,10 @@ func TestSelectionStoreRoundTrip(t *testing.T) {
 	if got := store3.Load(wsB); got != selB {
 		t.Fatalf("Load(wsB) = %+v, want %+v", got, selB)
 	}
-	// A brand-new repo now inherits selB (the new default).
-	if got := store3.Load(t.TempDir()); got != selB {
-		t.Fatalf("Load(new repo) = %+v, want the updated default %+v", got, selB)
+	// A brand-new repo still falls back to the server default — it does NOT inherit
+	// the most-recent pick.
+	if got := store3.Load(t.TempDir()); got != (client.ModelSelection{}) {
+		t.Fatalf("Load(new repo) = %+v, want the zero selection (server default)", got)
 	}
 }
 
@@ -80,8 +84,9 @@ func TestSelectionStoreRealpathKeying(t *testing.T) {
 	if err := store.Save(target, sel); err != nil {
 		t.Fatalf("Save(target): %v", err)
 	}
-	// Loading via the symlink must hit the SAME realpath-keyed entry, not fall to
-	// the (here identical) default — verify by also setting a DIFFERENT default.
+	// Loading via the symlink must hit the SAME realpath-keyed entry as the target —
+	// verify it's the target's entry and not some other workspace's by also saving a
+	// DIFFERENT entry for an unrelated workspace.
 	if err := store.Save(t.TempDir(), client.ModelSelection{ProviderID: "openai", ModelID: "other"}); err != nil {
 		t.Fatalf("Save(other): %v", err)
 	}

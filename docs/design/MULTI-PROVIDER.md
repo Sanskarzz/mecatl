@@ -270,6 +270,11 @@ across `ListModels` and the `CreateSessionResponse` (incl. the capability echo).
 - **P2:** async catalog refresh + SSRF hardening; Chat-Completions adapter.
 - **P3:** secrets store + OAuth + per-client/profile key custody + tenant isolation.
 
-Open / deferred items: a `small_model` tier (sub-agent cheap model), per-workspace vs
-global default-model persistence, mid-session same-family model switch, and a
-zero-keys first-run UX.
+Model-selection persistence is **per-workspace only** (realpath-keyed); a pick never
+writes the global `default`, so an unseen repo falls back to the server default rather
+than inheriting the last pick made elsewhere. An explicit "set as default" affordance
+(the only writer of the global `default`) is a deferred follow-up.
+
+Open / deferred items: an explicit "set as default" gesture, a `small_model` tier
+(sub-agent cheap model), mid-session same-family model switch, and a zero-keys
+first-run UX.

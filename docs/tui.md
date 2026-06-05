@@ -200,8 +200,9 @@ session** (`provider_id`/`model_id` on the next `CreateSession`) — it does NOT
 re-route the live session (provider is fixed per session; a live switch is a
 deferred follow-up). The pick is persisted **client-side** to a state file:
 `$XDG_STATE_HOME/mecatui/models.yaml` (fallback `~/.local/state/mecatui/models.yaml`)
-— a per-workspace map (realpath-keyed) plus a global `default`, so a brand-new repo
-inherits your last choice. On launch the selection is **reconciled** against
+— a per-workspace map (realpath-keyed). A pick is scoped to its workspace only; an
+unseen/new repo falls back to the server default rather than inheriting another
+repo's pick. On launch the selection is **reconciled** against
 `ListModels` BEFORE the first `CreateSession`: if the persisted model's provider is
 no longer available (its key was removed), the selection falls back to the server
 default for that run with a loud notice and the state file is left intact (the
