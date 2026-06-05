@@ -597,15 +597,27 @@ func composeClose(errClose func() error, plainClose func()) func() {
 
 // agentPromptConfig is promptConfig with the def's body composed into the Role
 // (Option C from the critique: compose, do not replace, and keep the domain
-// prompt.Config untouched). The default role line is preserved and the def body
-// is appended after it, so the specialist's playbook rides in the cache-stable
-// StablePrefix while the standard mecatl framing remains. The Env model is set to
-// the caller's ALREADY-RESOLVED model id (threaded in, not re-resolved): resolving
-// it a second time here would re-run resolveModel and log the unknown-alias warning
-// a second time per def. The caller resolves the model ONCE and passes it.
+// prompt.Config untouched). The role is rebuilt from a DELTA-AWARE base keyed on
+// the resolvedModel — the default framing plus the per-model agency contract
+// (agencyDelta) — with the def body appended after it, so the specialist's
+// playbook rides in the cache-stable StablePrefix while the standard mecatl
+// framing AND the agency contract remain. The delta is keyed on resolvedModel,
+// NOT cfg.Model, so a def that overrides the model gets the contract matching the
+// model it will actually run on (and overrides the cfg.Model-keyed delta that
+// promptConfig set). The Env model is set to the caller's ALREADY-RESOLVED model
+// id (threaded in, not re-resolved): resolving it a second time here would re-run
+// resolveModel and log the unknown-alias warning a second time per def. The caller
+// resolves the model ONCE and passes it.
 func agentPromptConfig(cfg Config, def agents.AgentDef, resolvedModel string, skillBodies ...string) prompt.Config {
-	pc := promptConfig(cfg)
+	pc := promptConfig(cfg, cfg.gitStatus)
 	pc.Env.Model = resolvedModel
+
+	// Delta-aware base keyed on the model this def will run on.
+	base := prompt.DefaultRole()
+	if d := agencyDelta(resolvedModel); d != "" {
+		base += "\n\n" + d
+	}
+
 	var parts []string
 	if body := strings.TrimSpace(def.Body); body != "" {
 		parts = append(parts, "Agent definition ("+def.Name+"):\n\n"+body)
@@ -614,8 +626,12 @@ func agentPromptConfig(cfg Config, def agents.AgentDef, resolvedModel string, sk
 	// starts with those playbooks in context (Claude-Code-style skill preloading).
 	// They ride in the cache-stable StablePrefix alongside the def body.
 	parts = append(parts, skillBodies...)
+	// Always set Role from the delta-aware base so the resolvedModel-keyed delta
+	// wins over the cfg.Model-keyed one promptConfig may have set.
 	if len(parts) > 0 {
-		pc.Role = prompt.DefaultRole() + "\n\n" + strings.Join(parts, "\n\n")
+		pc.Role = base + "\n\n" + strings.Join(parts, "\n\n")
+	} else {
+		pc.Role = base
 	}
 	return pc
 }

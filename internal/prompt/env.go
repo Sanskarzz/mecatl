@@ -24,6 +24,12 @@ type Env struct {
 	// Mode is the session permission mode (e.g. "default", "plan",
 	// "acceptEdits").
 	Mode string
+	// Shell is the shell the Bash tool executes against (e.g. "/bin/bash").
+	Shell string
+	// GitStatus is a start-of-session git snapshot (branch + short status +
+	// recent commits). It may be multi-line and is rendered as a dedicated
+	// sub-block; an empty value emits no sub-block.
+	GitStatus string
 }
 
 // EnvBlock renders env as an <env>...</env> block with a stable, deterministic
@@ -39,6 +45,7 @@ func EnvBlock(env Env) string {
 		{"model", env.Model},
 		{"os", env.OS},
 		{"permission-mode", env.Mode},
+		{"shell", env.Shell},
 	}
 	// Defensive: guarantee deterministic ordering even if the literal above is
 	// ever reordered by mistake.
@@ -51,6 +58,13 @@ func EnvBlock(env Env) string {
 		b.WriteString(p[0])
 		b.WriteString(": ")
 		b.WriteString(p[1])
+	}
+	// GitStatus is multi-line, so it rides a dedicated sub-block AFTER the sorted
+	// scalar pairs and before </env>; an empty snapshot emits nothing.
+	if gs := strings.TrimSpace(env.GitStatus); gs != "" {
+		b.WriteString("\n<git-status>\n")
+		b.WriteString(gs)
+		b.WriteString("\n</git-status>")
 	}
 	b.WriteString("\n</env>")
 	return b.String()

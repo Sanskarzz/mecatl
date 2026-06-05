@@ -17,7 +17,7 @@
 
 | # | Pattern | Status | Behind a seam? | Seam / location |
 |---|---------|--------|----------------|-----------------|
-| 1 | Persistent instruction file | Implemented | Yes | `prompt.DiscoverInstructions` over `tool.Workspace` FS port |
+| 1 | Persistent instruction file | Implemented | Yes | `prompt.DiscoverInstructions` over `tool.Workspace` FS port. **System-prompt CONTENT enhancement shipped (#19):** rewritten role/tone/safety, generated `toolDisciplineHints`, `<env>` `shell`/`<git-status>`, plan-mode reminder, per-model `agencyDelta` in composition. |
 | 2 | Scoped context assembly | Partial (root-only) | Partial | `prompt.DiscoverInstructions` — single file, no scope ladder; `governance.Scope` ladder exists but unused for instructions |
 | 3 | Tiered memory | Missing (v1 non-goal) | No seam | none |
 | 4 | Dream / sleep consolidation | Missing (v1 non-goal) | No seam | none |
@@ -314,7 +314,9 @@ skills) on demand, surfacing only metadata until invoked, to protect attention.
 Glob/WebFetch/Bash/Task). But **all** tools — including MCP tools — are
 **eager-registered** into one `Catalog` at startup (`cmd/mecated:buildCatalog`; MCP
 via `registerMCP`), and the **full** spec of every available tool is rendered
-into the (cache-stable) system prompt every turn (`prompt.toolInventory`,
+into the (cache-stable) system prompt every turn (`prompt.toolInventory` plus the
+`prompt.toolDisciplineHints` usage-guidance block generated off the same live
+catalog — #19, so a Bash-disabled build omits the "reserve Bash" steer),
 `buildRequest` → `Catalog.Specs(mode)`). There is no metadata-only tier, no lazy
 hydration, no `ToolSearch`/`list-skills` meta-tool, no skill unit.
 

@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/dream"
@@ -249,6 +250,15 @@ type Config struct {
 	// embedded TUI server leaves both nil). The engine nil-guards each.
 	Sink   port.EventSink
 	Logger port.Logger
+
+	// gitStatus is the start-of-session git snapshot (branch + short status + recent
+	// commits) rendered into the volatile <git-status> sub-block. It is computed ONCE
+	// in Build (against cfg.Workspace, with the hardened/scrubbed git env, and only for
+	// a TRUSTED workspace) and carried here so promptConfig/agentPromptConfig thread the
+	// single precomputed value into every child/member engine — never re-running git per
+	// child build or per team-member spawn on the hot path. Unexported: it is an
+	// internal composition detail, not an operator knob.
+	gitStatus string
 }
 
 // Built is the result of Build: the assembled server.Service plus a Close func
@@ -279,6 +289,14 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	trust := resolveTrust(cfg)
 	narrateTrust(trust, cfg.Workspace)
 	cfg.TrustProject = trust.Trusted
+
+	// Start-of-session git snapshot, computed ONCE here (FIX 2): gitSnapshot runs git
+	// against cfg.Workspace through a HARDENED/scrubbed env and only for a TRUSTED
+	// workspace (FIX 1). The single value is carried on cfg.gitStatus so every
+	// child/member promptConfig threads it in rather than re-running git per build or
+	// per team-member spawn. Computed AFTER the trust fold so the gate sees effective
+	// trust (declared/remembered/flag all collapse onto cfg.TrustProject above).
+	cfg.gitStatus = gitSnapshot(cfg.Workspace, cfg.Shell, cfg.TrustProject)
 
 	provider, err := buildProvider(cfg)
 	if err != nil {
@@ -706,7 +724,7 @@ func baseEngineDeps(
 		Store:               store,
 		Sink:                cfg.Sink,
 		Logger:              cfg.Logger,
-		PromptConfig:        promptConfig(cfg),
+		PromptConfig:        promptConfig(cfg, cfg.gitStatus),
 		Model:               cfg.Model,
 		ContextWindowTokens: defaultContextWindowTokens,
 		CompactionRatio:     defaultCompactionRatio,
@@ -1299,7 +1317,7 @@ func buildUserModelReviewEngine(cfg Config, provider port.LLMProvider, store *me
 			cat.MustRegister(t)
 		}
 	}
-	return newChildEngine(provider, cat, cfg.Model, promptConfig(cfg))
+	return newChildEngine(provider, cat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
 // buildCommandRunner builds the local command runner the Bash tool executes
@@ -1440,7 +1458,7 @@ func buildChildEngine(cfg Config, provider port.LLMProvider, runner tool.Command
 		childCat.MustRegister(tools.NewBashTool(runner))
 	}
 
-	return newChildEngine(provider, childCat, cfg.Model, promptConfig(cfg))
+	return newChildEngine(provider, childCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
 // buildForkChildEngine constructs the child *Engine each Fork branch runs. Unlike
@@ -1478,7 +1496,7 @@ func buildForkChildEngine(cfg Config, provider port.LLMProvider, runner tool.Com
 		childCat.MustRegister(tools.NewBashTool(runner))
 	}
 
-	return newChildEngine(provider, childCat, cfg.Model, promptConfig(cfg))
+	return newChildEngine(provider, childCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
 // buildForkJudgeEngine constructs the minimal, tool-less read-only child *Engine
@@ -1488,7 +1506,7 @@ func buildForkChildEngine(cfg Config, provider port.LLMProvider, runner tool.Com
 // in tests, the judge's LLM calls never interleave with the branches'; with the
 // stateless OpenAI adapter this separation is naturally harmless.
 func buildForkJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
-	return newChildEngine(provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg))
+	return newChildEngine(provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
 // buildTaskTool constructs the Task subagent tool over a default child Engine
@@ -1658,7 +1676,7 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 		cat := tool.NewCatalog()
 		var (
 			model = cfg.Model
-			pc    = promptConfig(cfg)
+			pc    = promptConfig(cfg, cfg.gitStatus)
 			mode  session.PermissionMode
 			// memberLimits carries ONLY the def-set per-round stop conditions (zero =
 			// unset); AddMember per-field merges them onto the team default (s.limits).
@@ -1815,17 +1833,130 @@ func lookupMemberDef(reg *agents.Registry, spec agent.MemberSpec) (agents.AgentD
 
 // promptConfig builds the system-prompt configuration. The volatile Env values
 // (cwd/os/model/date/mode) are computed HERE in the composition layer so the domain
-// stays infra-free; the loop fills in the per-turn Mode and Tools.
-func promptConfig(cfg Config) prompt.Config {
-	return prompt.Config{
+// stays infra-free; the loop fills in the per-turn Mode and Tools. The git snapshot
+// is NOT recomputed here — it is the single value Build computed once (hardened +
+// trust-gated) and threaded in as gitStatus, so a child-engine build or a team-member
+// spawn never re-runs git on the hot path (FIX 2).
+func promptConfig(cfg Config, gitStatus string) prompt.Config {
+	pc := prompt.Config{
 		Env: prompt.Env{
-			Cwd:   cfg.Workspace,
-			OS:    runtime.GOOS,
-			Model: cfg.Model,
-			Date:  time.Now().Format("2006-01-02"),
-			Mode:  string(session.ModeDefault),
+			Cwd:       cfg.Workspace,
+			OS:        runtime.GOOS,
+			Model:     cfg.Model,
+			Date:      time.Now().Format("2006-01-02"),
+			Mode:      string(session.ModeDefault),
+			Shell:     cfg.Shell,
+			GitStatus: gitStatus,
 		},
 	}
+	// The emphatic task-persistence "agency" contract is supplied per-model HERE
+	// (the prompt package stays model-neutral); fold it onto the default role.
+	if d := agencyDelta(cfg.Model); d != "" {
+		pc.Role = prompt.DefaultRole() + "\n\n" + d
+	}
+	return pc
+}
+
+// agencyDelta returns the per-model emphatic task-persistence contract appended
+// to the role framing. Claude-family models already persist on a task without
+// it (and the extra wording can over-steer them), so it is OMITTED for Claude
+// and supplied for every other model family. The prompt package is model-neutral
+// by design; this model-family decision lives in the composition layer.
+func agencyDelta(model string) string {
+	if strings.Contains(strings.ToLower(model), "claude") {
+		return ""
+	}
+	return "Keep going until the task is actually resolved before ending your " +
+		"turn — implement the change rather than describing it, and do not stop " +
+		"at analysis or a partial fix. But when you are genuinely blocked or the " +
+		"request is ambiguous, stop and ask rather than guessing."
+}
+
+// gitSnapshot returns a bounded, fail-soft start-of-session git snapshot for the
+// workspace (branch + short status + recent commits), rendered into the volatile
+// <git-status> sub-block. It runs git best-effort through an osfs command runner and
+// returns "" on any failure — a missing shell, a non-git directory (rev-parse fails),
+// or a timeout. It never registers a tool.
+//
+// SECURITY (FIX 1): reading an untrusted `.git` is exactly the operation that needs
+// neutralizing — `git status`/`git log` would otherwise execute repo-local
+// core.fsmonitor / core.pager / core.hooksPath / an external diff driver, an RCE on a
+// malicious clone the instant the session starts. So this runner is HARDENED with the
+// SAME scrubbed env as buildSandboxedCommandRunner — gitenv.Scrub(os.Environ()) via
+// osfs.WithCommandEnvList — which drops inherited GIT_*/PAGER and force-overrides
+// core.hooksPath=/dev/null, core.pager=cat, core.fsmonitor=false and an empty
+// diff.external, neutralizing the fixed-key git-config code-exec vectors. AND it is
+// TRUST-GATED: it runs ONLY for a trusted workspace (trustProject) — when untrusted it
+// returns "" so no <git-status> block renders at all and no git ever executes against
+// the untrusted repo. The residual attacker-named .gitattributes driver vectors are
+// the same as buildSandboxedCommandRunner and moot here given the trust gate.
+func gitSnapshot(workspace, shell string, trustProject bool) string {
+	// Trust gate: never run git against an untrusted workspace.
+	if !trustProject {
+		return ""
+	}
+	// Harden the runner with the scrubbed git env (same pattern as
+	// buildSandboxedCommandRunner) so a repo-local git config cannot run code.
+	env := gitenv.Scrub(os.Environ())
+	runner, err := osfs.NewCommandRunnerShell(workspace, shellOr(shell), osfs.WithCommandEnvList(env))
+	if err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	run := func(command string) string {
+		res, err := runner.Run(ctx, command, workspace)
+		if err != nil || res.ExitCode != 0 {
+			return ""
+		}
+		return strings.TrimSpace(res.Stdout)
+	}
+
+	branch := run("git rev-parse --abbrev-ref HEAD")
+	if branch == "" {
+		// Not a git repo (or git unavailable) — emit nothing.
+		return ""
+	}
+
+	status := run("git status --short")
+	if status == "" {
+		status = "(clean)"
+	} else {
+		// Bound the status to ~20 lines so a noisy tree cannot blow up the prompt.
+		lines := strings.Split(status, "\n")
+		if len(lines) > 20 {
+			lines = append(lines[:20], "... (truncated)")
+			status = strings.Join(lines, "\n")
+		}
+	}
+
+	commits := run("git log --oneline -n 5")
+
+	snapshot := "branch: " + branch + "\nstatus:\n" + status
+	if commits != "" {
+		snapshot += "\ncommits:\n" + commits
+	}
+	// Final guard: cap the whole snapshot to ~2KB. Truncate on a rune boundary
+	// (FIX 3) so the byte cap cannot slice a multibyte UTF-8 rune mid-sequence:
+	// back off to the start of the last valid rune.
+	const maxSnapshot = 2048
+	if len(snapshot) > maxSnapshot {
+		snapshot = snapshot[:maxSnapshot]
+		for len(snapshot) > 0 && !utf8.ValidString(snapshot) {
+			snapshot = snapshot[:len(snapshot)-1]
+		}
+	}
+	return snapshot
+}
+
+// shellOr returns shell, or a sane default when it is empty, so gitSnapshot can
+// run even if no shell was configured for the Bash tool.
+func shellOr(shell string) string {
+	if shell == "" {
+		return "/bin/sh"
+	}
+	return shell
 }
 
 // SoulApplyAction is the SYNTHETIC governance action key the soul load-gate

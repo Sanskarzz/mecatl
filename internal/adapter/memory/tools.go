@@ -55,6 +55,11 @@ When NOT to use (the over-eager-memory anti-pattern):
   the memory of the code. Saving such facts is the dominant memory failure mode:
   it goes stale and pollutes future context.
 - Do NOT save transient task state, secrets, or large blobs.
+- Do NOT save task progress or temporary working state — that belongs in the
+  conversation, not durable memory.
+- NEVER save a negative capability claim ("tool X is broken", "Y doesn't work",
+  "can't do Z"). Transient failures get frozen into durable refusals the agent
+  later cites against itself. Record durable facts, not momentary failures.
 
 Behavior:
 - Memory is scoped to THIS project. Writing a key overwrites any prior value.

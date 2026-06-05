@@ -67,7 +67,7 @@ flowchart LR
     sess["internal/session\nSession · Conversation · Event\nToolCall · ToolResult · Usage"]
     gov["internal/governance\nEffect · Decision · Rule · Scope\nHookEvent · Evaluator · bash.go"]
     tl["internal/tool\nTool · ToolSpec · Catalog · Disclosable\nFileSystem · Workspace · CommandRunner\nMemoryStore · WorkspaceForker · ToolSearch"]
-    pr["internal/prompt\nLayered · Build · Env\nInstructionAssembler · SoulSource · CommandExpander"]
+    pr["internal/prompt\nLayered · Build · Env · toolDisciplineHints\nInstructionAssembler · SoulSource · CommandExpander\n(model-neutral; per-model agencyDelta lives in internal/app)"]
   end
 
   subgraph DECOR["decorators (port → same port)"]

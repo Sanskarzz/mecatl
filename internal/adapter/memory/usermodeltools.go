@@ -70,6 +70,8 @@ When NOT to use:
   rediscoverable with a few Read/Grep/Glob calls (file layout, build commands,
   dependency versions). Those belong in project memory at most, never here.
 - Do NOT store transient task state, secrets, or large blobs.
+- NEVER store a negative capability claim about yourself or your tools ("X is
+  broken", "can't do Y"); these are momentary, not durable facts about the operator.
 
 Behavior:
 - This store is CROSS-PROJECT and scoped to the operator, not the project.

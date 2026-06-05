@@ -206,7 +206,7 @@ func TestTaskRunsGitInWorktreeEndToEnd(t *testing.T) {
 	)
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
-	parentEng := newChildEngine(parentProvider, parentCat, cfg.Model, promptConfig(cfg))
+	parentEng := newChildEngine(parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 
 	sess := session.New("parent", session.ModeDefault, repo, session.Limits{MaxTurns: 5}, time.Now())
 	run := parentEng.Run(context.Background(), sess, parentWS, "go")
@@ -311,7 +311,7 @@ func TestBuildTaskToolRealWiringForksChildShellWhenShell(t *testing.T) {
 	parentWS := osfsWSForTest(t, repo)
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
-	parentEng := newChildEngine(parentProvider, parentCat, cfg.Model, promptConfig(cfg))
+	parentEng := newChildEngine(parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 
 	sess := session.New("parent", session.ModeDefault, repo, session.Limits{MaxTurns: 5}, time.Now())
 	run := parentEng.Run(context.Background(), sess, parentWS, "go")
@@ -383,7 +383,7 @@ func TestBuildTaskToolRealWiringNoShellNoForker(t *testing.T) {
 	parentWS := osfsWSForTest(t, repo)
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
-	parentEng := newChildEngine(parentProvider, parentCat, cfg.Model, promptConfig(cfg))
+	parentEng := newChildEngine(parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 
 	sess := session.New("parent", session.ModeDefault, repo, session.Limits{MaxTurns: 5}, time.Now())
 	run := parentEng.Run(context.Background(), sess, parentWS, "go")
@@ -419,7 +419,7 @@ func newTaskToolForTest(t *testing.T, cfg Config, childProvider *mockllm.Provide
 		Catalog:      childCat,
 		Policy:       permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
 		Logger:       logger,
-		PromptConfig: promptConfig(cfg),
+		PromptConfig: promptConfig(cfg, cfg.gitStatus),
 		Model:        cfg.Model,
 	})
 	roFk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) },
