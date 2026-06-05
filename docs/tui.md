@@ -31,7 +31,9 @@ The simplest path needs no separate server — just launch the TUI with an LLM k
 
 ```sh
 # Embedded server (default): mecatui hosts mecated in-process over a UNIX socket.
-OPENAI_API_KEY=sk-... bin/mecatui --workspace "$PWD"
+# The provider is AUTO-DETECTED from whichever key is set:
+OPENAI_API_KEY=sk-...      bin/mecatui --workspace "$PWD"   # OpenAI
+OPENROUTER_API_KEY=sk-or-... bin/mecatui --workspace "$PWD" # OpenRouter
 
 # Offline, no network — uses the canned mock provider:
 bin/mecatui --mock --workspace "$PWD"
@@ -40,8 +42,12 @@ bin/mecatui --mock --workspace "$PWD"
 With no `--server`, mecatui runs in **auto** mode: it first probes the loopback
 default `127.0.0.1:8080` and **reuses a `mecated` already running there**; only if
 none answers does it host an **embedded** server itself (a UNIX socket in
-`$XDG_RUNTIME_DIR`, torn down on exit). The embedded provider is OpenAI when
-`OPENAI_API_KEY` is set, else the offline mock (`--mock`).
+`$XDG_RUNTIME_DIR`, torn down on exit). The embedded provider is **auto-detected**
+from the environment — `OPENAI_API_KEY` enables the `openai` provider,
+`OPENROUTER_API_KEY` the `openrouter` provider (set both, and you pick between their
+models in the **`/models`** picker — see the Overlays section); with neither, the
+offline mock (`--mock`). When more than one is keyed, run `/models` to choose; the
+choice is persisted per workspace.
 
 To use a specific **external** server instead, pass `--server`:
 
@@ -67,8 +73,9 @@ absolute path (the server requires absolute).
 | `--tls-ca` | – | PEM CA bundle for external-server verification |
 | `--insecure` | off | skip TLS verification (testing only) |
 | `--list-themes` | – | print available themes and exit |
-| `--model` | `gpt-5` | model id for the **embedded** server |
+| `--model` | – (provider default) | model id for the **embedded** server; empty = the provider-appropriate default (openai → `gpt-5`, openrouter → `openai/gpt-5`). Overridden per session by the `/models` picker |
 | `--openai-base-url` | – | OpenAI base URL override for the **embedded** server |
+| `--openrouter-base-url` | – | OpenRouter base URL override for the **embedded** server (default `https://openrouter.ai/api/v1`) |
 | `--mock` | off | **embedded** server: use the offline mock provider (no network) |
 | `--no-bash` | off | **embedded** server: disable the Bash tool (shell-less) |
 | `--memory-dir` | – (auto) | **embedded** server: per-project memory store dir; empty = a default under `$XDG_DATA_HOME/mecatui/memory` |
