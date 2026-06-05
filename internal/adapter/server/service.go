@@ -37,17 +37,36 @@ type Clock func() time.Time
 // id when nil; tests may inject a deterministic generator.
 type IDGenerator func() session.SessionID
 
-// SessionEngineFactory builds a PER-SESSION agent engine over the client-provided
-// streaming-HTTP MCP servers (specs), returning the engine, a close func that
-// tears down that session's MCP manager, and an error. It is the seam the ACP
-// adapter uses to mount an editor's session/new mcpServers for the lifetime of
-// one session, WITHOUT leaking those tools (or their auth) into the shared engine
-// every other session uses. The composition root (internal/app) supplies it via
-// Config.SessionEngine; when nil, CreateSessionWithMCP rejects any non-empty
-// specs with ErrInvalidArgument. It mirrors MemberEngineFactory: the Service
-// references the type in its signatures but never builds managers itself — the
-// app layer is the only place mcp + agent are wired together.
-type SessionEngineFactory func(ctx context.Context, specs []mcp.ServerConfig) (*agent.Engine, func() error, error)
+// ProviderSelector names a per-session provider+model (multi-provider Phase 0,
+// S3). The zero value (both empty) means "server default" — the shared engine,
+// no per-session build. It is a NEUTRAL value object owned by the server adapter:
+// the composition root (internal/app) resolves it against the registry/catalog;
+// the adapter never imports either. Setting ModelID with an empty ProviderID is a
+// client error (a bare model on an env-derived default provider is ambiguous) —
+// rejected at the create boundary before the factory is consulted.
+type ProviderSelector struct {
+	// ProviderID is the registry id ("" => server default).
+	ProviderID string
+	// ModelID is the model selector ("" => provider default; a non-empty id the
+	// catalog doesn't know is passed through to the provider verbatim).
+	ModelID string
+}
+
+// SessionEngineFactory builds a PER-SESSION agent engine over a non-default
+// provider/model selector AND/OR the client-provided streaming-HTTP MCP servers
+// (specs), returning the engine, a close func that tears down that session's MCP
+// manager (a no-op when no specs), and an error. It is the seam the ACP adapter
+// uses to mount an editor's session/new mcpServers AND the seam the gRPC/HTTP
+// CreateSession path uses to bind a per-session provider/model — both WITHOUT
+// leaking those tools (or the registry) into the shared engine every other
+// session uses. A session needing BOTH a non-default model and client MCP gets
+// ONE engine over ONE catalog from a single call (sel + specs are orthogonal
+// inputs). The factory returns an error wrapping ErrInvalidArgument for an
+// unknown/unavailable provider id. The composition root (internal/app) supplies
+// it via Config.SessionEngine; when nil, a non-default selector or non-empty
+// specs are rejected with ErrInvalidArgument. It mirrors MemberEngineFactory: the
+// Service references the type in its signatures but never builds managers itself.
+type SessionEngineFactory func(ctx context.Context, sel ProviderSelector, specs []mcp.ServerConfig) (*agent.Engine, func() error, error)
 
 // Config wires the server adapter to the WP8 engine and its collaborators.
 type Config struct {
@@ -108,6 +127,16 @@ type Config struct {
 	// agents adapter. May be empty (agent definitions disabled or none found).
 	Agents []*mecatlv1.AgentInfo
 
+	// Models is the resolved selectable-model inventory snapshot taken at startup
+	// (multi-provider Phase 0, S3). It backs ListModels and is a pure read of this
+	// snapshot (no live discovery — the registry's available providers + the
+	// embedded catalog are both fixed for the process lifetime). The composition
+	// root (internal/app) joins the registry's AVAILABLE providers to the catalog
+	// and projects each model into the proto form (modelSnapshot) so the server
+	// adapter never imports providercatalog or the registry. May be empty (zero
+	// providers available). NO secret material (no key, env var name, or base URL).
+	Models []*mecatlv1.ModelInfo
+
 	// Skills is the resolved skills-inventory snapshot taken at startup. It backs
 	// ListSkills and is a pure read of this snapshot (no live discovery — skills
 	// are discovered once at build time and immutable for the process lifetime).
@@ -136,12 +165,15 @@ type Config struct {
 	// model disabled) capabilities().UserModel is false and GetUserModel returns empty.
 	UserModel UserModelLister
 
-	// SessionEngine builds a PER-SESSION engine over client-provided streaming-HTTP
-	// MCP servers (the ACP session/new mcpServers). It is the seam that lets a
-	// session mount its OWN MCP tools without leaking them into the shared Engine
-	// every other session uses. When nil, CreateSessionWithMCP rejects any non-empty
-	// MCP specs with ErrInvalidArgument; a session with no client MCP always uses the
-	// shared Engine (zero overhead). The composition root (internal/app) supplies it.
+	// SessionEngine builds a PER-SESSION engine over a non-default provider/model
+	// selector AND/OR client-provided streaming-HTTP MCP servers (the ACP
+	// session/new mcpServers). It is the seam that lets a session bind its OWN
+	// provider/model or mount its OWN MCP tools without leaking them (or the
+	// provider registry) into the shared Engine every other session uses. When nil,
+	// a non-default selector or non-empty MCP specs are rejected with
+	// ErrInvalidArgument; a session with the zero selector and no client MCP always
+	// uses the shared Engine (zero overhead). The composition root (internal/app)
+	// supplies it.
 	SessionEngine SessionEngineFactory
 
 	// MemberEngine builds a team member's Engine from the shared team and the
@@ -172,6 +204,19 @@ type Config struct {
 	// defaultMaxTeams when zero.
 	MaxTeams int
 
+	// MaxSessionEngines caps the number of live (un-released) PER-SESSION engines
+	// the registry holds at once (CWE-770). A per-session engine is registered when
+	// a session needs a non-default provider/model selector OR client-provided MCP
+	// servers. The ACP surface drains them on editor disconnect, but the gRPC/HTTP
+	// surfaces have no teardown signal, so without a cap a hostile authed client
+	// could call CreateSession with a valid provider_id repeatedly (never closing)
+	// and grow the map unbounded. createSession returns ErrTooManySessionEngines
+	// (ResourceExhausted) when the cap is reached; CloseSession / EndSession frees a
+	// slot. It is a generous count (a session is multi-turn and its engine MUST
+	// persist across turns, so this is NOT terminal-state eviction). Defaults to
+	// defaultMaxSessionEngines when zero.
+	MaxSessionEngines int
+
 	// OnCloseSession, when non-nil, is invoked by CloseSession with the closing
 	// session id BEFORE the per-session engine teardown. It is the composition
 	// seam for releasing session-scoped state the Service does not own — currently
@@ -184,6 +229,12 @@ type Config struct {
 // defaultMaxTeams is the live-team registry cap applied when Config.MaxTeams is
 // zero. It bounds memory growth from teams that are created but never cleaned up.
 const defaultMaxTeams = 64
+
+// defaultMaxSessionEngines is the per-session engine registry cap applied when
+// Config.MaxSessionEngines is zero. It is generous (a per-session engine is a
+// legitimate per-conversation resource) but finite, so a client that never
+// releases its selector/MCP sessions cannot grow the map without bound (CWE-770).
+const defaultMaxSessionEngines = 1024
 
 // ErrConfig is returned by NewService when a required dependency is missing.
 var ErrConfig = errors.New("server: invalid config")
@@ -222,11 +273,15 @@ type Service struct {
 	mu    sync.Mutex
 	runs  map[session.SessionID]*runState
 	teams map[string]*teamState
-	// sessionEngines holds the per-session client-MCP engines. Unlike teams (capped
-	// by MaxTeams), it is bounded by CONNECTION LIFETIME, not a count: the ACP
-	// adapter calls CloseSession for each tracked session when the editor
-	// disconnects (closeTrackedSessions), and Service.Close drains the rest on
-	// shutdown — so no speculative cap is warranted.
+	// sessionEngines holds the per-session engines — built for a session that needs
+	// a non-default provider/model selector (gRPC/HTTP CreateSession) OR
+	// client-provided MCP servers (ACP session/new). The ACP surface drains them on
+	// editor disconnect (closeTrackedSessions) and Service.Close drains the rest on
+	// shutdown, but the gRPC/HTTP surfaces have NO connection-teardown signal — a
+	// client that creates selector sessions and never calls CloseSession/EndSession
+	// would otherwise grow this map unbounded (CWE-770). So it is also CAPPED at
+	// Config.MaxSessionEngines (mirroring MaxTeams): createSession returns
+	// ErrTooManySessionEngines once the cap is reached, and CloseSession frees a slot.
 	sessionEngines map[session.SessionID]*sessionEngine
 	// sessionWorkspaces holds per-session Workspace OVERRIDES. When an entry is
 	// present for a session id, StartRun uses it instead of building one from the
@@ -281,6 +336,9 @@ func NewService(cfg Config) (*Service, error) {
 	if cfg.MaxTeams <= 0 {
 		cfg.MaxTeams = defaultMaxTeams
 	}
+	if cfg.MaxSessionEngines <= 0 {
+		cfg.MaxSessionEngines = defaultMaxSessionEngines
+	}
 	return &Service{
 		cfg:               cfg,
 		runs:              make(map[session.SessionID]*runState),
@@ -296,9 +354,39 @@ func NewService(cfg Config) (*Service, error) {
 // GetSession; the lost stream simply cannot be resumed in place.
 var ErrNoActiveRun = errors.New("server: no active run for session")
 
-// CreateSession allocates a new idle session, persists it, and returns it.
-// workspace must be non-empty. An unspecified mode falls back to DefaultMode.
+// CreateSession allocates a new idle session on the SHARED engine, persists it,
+// and returns it. workspace must be non-empty. An unspecified mode falls back to
+// DefaultMode. It is the no-selector, no-MCP fast path: it delegates to the
+// generalized createSession with the zero selector and nil specs.
 func (s *Service) CreateSession(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits) (*session.Session, error) {
+	return s.createSession(ctx, workspace, mode, limits, ProviderSelector{}, nil)
+}
+
+// CreateSessionWithProvider creates a session bound to a non-default
+// provider/model selector (multi-provider Phase 0, S3) via a PER-SESSION engine,
+// with no client MCP. It is the gRPC/HTTP entry for a CreateSession request that
+// carries provider_id/model_id. The zero selector delegates to the shared-engine
+// fast path; a non-zero selector REQUIRES Config.SessionEngine (else
+// ErrInvalidArgument) and resolves through the factory (an unknown/unavailable
+// provider id surfaces as ErrInvalidArgument). Setting ModelID with an empty
+// ProviderID is rejected (a bare model on the env-derived default provider is
+// ambiguous).
+func (s *Service) CreateSessionWithProvider(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, sel ProviderSelector) (*session.Session, error) {
+	if sel.ProviderID == "" && sel.ModelID != "" {
+		return nil, fmt.Errorf("%w: model_id requires provider_id (a bare model on the default provider is ambiguous)", ErrInvalidArgument)
+	}
+	return s.createSession(ctx, workspace, mode, limits, sel, nil)
+}
+
+// createSession is the single create path generalizing the shared-engine fast
+// path, the per-session provider/model selector, and the per-session client MCP
+// servers. A session needs a PER-SESSION engine when the selector is non-zero OR
+// specs are non-empty; otherwise it uses the shared engine (zero overhead, no
+// registry entry — today's byte-identical path). The factory takes both inputs so
+// a session with BOTH a non-default model and client MCP gets ONE engine over ONE
+// catalog. On a persist failure after the engine was built, the per-session MCP
+// manager is torn down so a failed create never leaks it.
+func (s *Service) createSession(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, sel ProviderSelector, specs []mcp.ServerConfig) (*session.Session, error) {
 	if workspace == "" {
 		return nil, fmt.Errorf("%w: workspace is required", ErrInvalidArgument)
 	}
@@ -310,9 +398,69 @@ func (s *Service) CreateSession(ctx context.Context, workspace string, mode sess
 		// injected defaults so a default session cannot run unbounded.
 		limits = s.cfg.DefaultLimits
 	}
+
+	needPerSession := sel != (ProviderSelector{}) || len(specs) > 0
+	if !needPerSession {
+		// Shared-engine fast path (today's behaviour, byte-identical).
+		sess := session.New(s.cfg.NewID(), mode, workspace, limits, s.cfg.Now())
+		if err := s.cfg.Store.Save(ctx, sess); err != nil {
+			return nil, fmt.Errorf("server: persist session: %w", err)
+		}
+		return sess, nil
+	}
+
+	if s.cfg.SessionEngine == nil {
+		return nil, fmt.Errorf("%w: per-session engine not supported (no session-engine factory configured)", ErrInvalidArgument)
+	}
+	// Cheap cap pre-check (CWE-770): reject BEFORE the factory connects MCP /
+	// allocates an engine when the registry is already full, so a hostile client
+	// that never releases its sessions cannot even drive the (more expensive) build
+	// path. The authoritative re-check under lock at registration below closes the
+	// TOCTOU window (two concurrent creates racing the last slot).
+	s.mu.Lock()
+	full := len(s.sessionEngines) >= s.cfg.MaxSessionEngines
+	s.mu.Unlock()
+	if full {
+		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
+	}
+
+	eng, closeFn, err := s.cfg.SessionEngine(ctx, sel, specs)
+	if err != nil {
+		// Factory maps an unknown/unavailable provider to ErrInvalidArgument; any
+		// error is propagated as-is for the caller to map to a status.
+		return nil, err
+	}
 	sess := session.New(s.cfg.NewID(), mode, workspace, limits, s.cfg.Now())
-	if err := s.cfg.Store.Save(ctx, sess); err != nil {
-		return nil, fmt.Errorf("server: persist session: %w", err)
+
+	// Authoritative cap check under the SAME lock as the insert (TOCTOU-safe): if
+	// the registry filled between the pre-check and here, tear the freshly-built
+	// engine down rather than exceed the cap. This is BEFORE the Store.Save, so a
+	// cap rejection leaves NO orphan session in the store.
+	s.mu.Lock()
+	if len(s.sessionEngines) >= s.cfg.MaxSessionEngines {
+		s.mu.Unlock()
+		if closeFn != nil {
+			_ = closeFn()
+		}
+		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
+	}
+	// Reserve the slot under the lock so a concurrent create cannot also claim it,
+	// then persist OUTSIDE the lock (no I/O under the mutex). If the persist fails,
+	// evict the reservation and tear the engine down.
+	s.sessionEngines[sess.ID] = &sessionEngine{engine: eng, close: closeFn}
+	s.mu.Unlock()
+
+	if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
+		// The engine was built and the slot reserved but the session could not be
+		// persisted: evict the reservation and tear the per-session MCP manager down
+		// so a failed create leaks neither a slot nor a connection.
+		s.mu.Lock()
+		delete(s.sessionEngines, sess.ID)
+		s.mu.Unlock()
+		if closeFn != nil {
+			_ = closeFn()
+		}
+		return nil, fmt.Errorf("server: persist session: %w", serr)
 	}
 	return sess, nil
 }
@@ -341,17 +489,18 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 		pcaps = s.cfg.Engine.Capabilities()
 	}
 	return &mecatlv1.ServerCapabilities{
-		Mcp:           s.cfg.MCPProvider != nil,
-		SlashCommands: s.cfg.Commands != nil,
-		Teams:         s.cfg.MemberEngine != nil,
-		Agents:        len(s.cfg.Agents) > 0,
-		Soul:          s.cfg.Soul != nil,
-		UserModel:     s.cfg.UserModel != nil,
-		Memory:        has(memory.RememberToolName),
-		Skills:        has(skills.ToolName),
-		Bash:          has(tools.BashToolName),
-		Image:         pcaps.Image,
-		Audio:         pcaps.Audio,
+		Mcp:            s.cfg.MCPProvider != nil,
+		SlashCommands:  s.cfg.Commands != nil,
+		Teams:          s.cfg.MemberEngine != nil,
+		Agents:         len(s.cfg.Agents) > 0,
+		Soul:           s.cfg.Soul != nil,
+		UserModel:      s.cfg.UserModel != nil,
+		ModelSelection: len(s.cfg.Models) > 0,
+		Memory:         has(memory.RememberToolName),
+		Skills:         has(skills.ToolName),
+		Bash:           has(tools.BashToolName),
+		Image:          pcaps.Image,
+		Audio:          pcaps.Audio,
 	}
 }
 
@@ -370,38 +519,12 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 // The per-session engine's MCP manager is torn down by CloseSession (editor
 // disconnect) or by the Service's Close.
 func (s *Service) CreateSessionWithMCP(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, specs []mcp.ServerConfig) (*session.Session, error) {
-	if len(specs) == 0 {
-		return s.CreateSession(ctx, workspace, mode, limits)
-	}
-	if s.cfg.SessionEngine == nil {
-		return nil, fmt.Errorf("%w: client MCP not supported (no per-session engine configured)", ErrInvalidArgument)
-	}
-	if workspace == "" {
-		return nil, fmt.Errorf("%w: workspace is required", ErrInvalidArgument)
-	}
-	eng, closeFn, err := s.cfg.SessionEngine(ctx, specs)
-	if err != nil {
-		return nil, err
-	}
-	if mode == "" {
-		mode = s.cfg.DefaultMode
-	}
-	if limits == (session.Limits{}) {
-		limits = s.cfg.DefaultLimits
-	}
-	sess := session.New(s.cfg.NewID(), mode, workspace, limits, s.cfg.Now())
-	if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
-		// The engine was built but the session could not be persisted: tear the
-		// per-session MCP manager down so a failed create never leaks it.
-		if closeFn != nil {
-			_ = closeFn()
-		}
-		return nil, fmt.Errorf("server: persist session: %w", serr)
-	}
-	s.mu.Lock()
-	s.sessionEngines[sess.ID] = &sessionEngine{engine: eng, close: closeFn}
-	s.mu.Unlock()
-	return sess, nil
+	// Thin wrapper over the generalized create path with the ZERO provider
+	// selector: no specs uses the shared engine (today's behaviour), specs build a
+	// per-session engine. The factory now takes (sel, specs); the zero selector
+	// leaves the per-session engine bound to the DEFAULT provider, matching the
+	// pre-S3 MCP path exactly.
+	return s.createSession(ctx, workspace, mode, limits, ProviderSelector{}, specs)
 }
 
 // SetSessionWorkspace registers a per-session Workspace OVERRIDE for id, so a
@@ -608,7 +731,10 @@ func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, 
 	if err != nil {
 		return nil, err
 	}
-	eng, closeFn, err := s.cfg.SessionEngine(ctx, specs)
+	// Re-mount client MCP on resume with the ZERO provider selector: a resumed
+	// session keeps the DEFAULT provider (per-session provider/model binding on
+	// resume is out of scope — the wire CreateSession selector is for new sessions).
+	eng, closeFn, err := s.cfg.SessionEngine(ctx, ProviderSelector{}, specs)
 	if err != nil {
 		// The session was loaded + (if needed) reopened and re-persisted, but the
 		// per-session engine could not be built. We deliberately do NOT roll that
@@ -935,6 +1061,13 @@ func (s *Service) ListAgents(_ context.Context) []*mecatlv1.AgentInfo {
 // It is a pure read of the injected snapshot; no live discovery.
 func (s *Service) ListSkills(_ context.Context) []*mecatlv1.SkillInfo {
 	return s.cfg.Skills
+}
+
+// ListModels returns the resolved selectable-model inventory snapshot (possibly
+// empty) — every available provider's catalog models, secret-free. It is a pure
+// read of the injected snapshot; no live discovery (multi-provider Phase 0, S3).
+func (s *Service) ListModels(_ context.Context) []*mecatlv1.ModelInfo {
+	return s.cfg.Models
 }
 
 // --- Soul + user-model inspection --------------------------------------------

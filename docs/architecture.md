@@ -635,8 +635,14 @@ service owns session lifecycle (`CreateSession`, `GetSession`), starts runs
 reach the right run.
 
 **gRPC (`harness.proto`, `grpc.go`)** — `HarnessService`:
-- `CreateSession(CreateSessionRequest) → CreateSessionResponse`
+- `CreateSession(CreateSessionRequest) → CreateSessionResponse` — carries an
+  OPTIONAL per-session `provider_id` / `model_id` selector (multi-provider Phase 0; see §18).
 - `GetSession(GetSessionRequest) → GetSessionResponse`
+- `ListModels(ListModelsRequest) → ListModelsResponse` — the selectable-model
+  inventory: every AVAILABLE provider's catalog models projected to public metadata
+  (`ModelInfo{id, provider_id, display_name, image, reasoning, context_limit}`), no
+  secrets, (provider_id, id)-sorted. Gated by `ServerCapabilities.model_selection`
+  (true iff ≥1 provider is available). See §18.
 - `Converse(stream ConverseRequest) → stream ConverseResponse)` — bidirectional.
   The first frame **must** be `prompt`; then zero or more `resume_approval` /
   `cancel` control frames. `ConverseRequest` is a `oneof kind { Prompt prompt=1;
@@ -654,8 +660,9 @@ v1 enforces required checks in the Go server (protovalidate runtime is deferred)
 
 | HTTP | Maps to | Notes |
 |---|---|---|
-| `POST /v1/sessions` | `CreateSession` | JSON body → `session_id` |
+| `POST /v1/sessions` | `CreateSession` | JSON body → `session_id`; optional `provider_id`/`model_id` selector |
 | `GET /v1/sessions/{id}` | `GetSession` | JSON snapshot |
+| `GET /v1/models` | `ListModels` | JSON selectable-model inventory (available providers only, secret-free) |
 | `POST /v1/sessions/{id}/prompt` | start a run | `text/event-stream`; each event is `data: <proto Event as JSON>` |
 | `POST /v1/sessions/{id}/approve` | `Run.Approve` | resolves the paused ask |
 | `POST /v1/sessions/{id}/cancel` | `Run.Cancel` | cancels the in-flight run |
@@ -1097,3 +1104,70 @@ project's ALLOWs/soul — it never overrides a Deny or a configured Ask (those r
 deny-dominant in the evaluator). A missing/malformed/unparseable `settings.yaml`
 **or** `trust.yaml` fails safe to untrusted (a corrupt config never grants trust).
 See `docs/design/WORKSPACE-TRUST-SPIKE.md`.
+
+## 18. Multi-provider — registry, per-session routing & model inventory
+
+mecatl can serve more than one LLM provider in one process and bind a **provider +
+model per session**. The wiring lives entirely in the composition layer
+(`internal/app`); the domain/agent/server never see a registry — they receive a bare
+`port.LLMProvider`.
+
+**The registry (`internal/app/registry.go`).** `buildProviderRegistry` constructs,
+once at `Build`, the set of AVAILABLE providers — a provider is available iff one of
+its credential env vars resolves (the var NAMES come from the embedded models.dev
+catalog, `internal/adapter/providercatalog`; `OPENAI_API_KEY`/`OPENROUTER_API_KEY`).
+Only available providers are held (an unkeyed provider is omitted — its availability
+is itself sensitive, CWE-200). OpenRouter rides the SAME stateless openai adapter with
+the OpenRouter base URL substituted. `UseMock` short-circuits to a single synthetic
+`mock` entry (offline). The zero-keys case is the named, actionable `errNoProvider`.
+`buildProvider` returns the registry **and** its default provider so the shared engine
++ every child/fork/team engine keep receiving the single default provider exactly as
+before (the default path is byte-identical). A composition-only `providerConstructor`
+seam (mirroring `envDetector`) lets the offline e2e back two real provider ids with
+mocks; production leaves it nil.
+
+**Per-session routing (`sessionEngineFactory`).** `CreateSession` carries an OPTIONAL
+`provider_id`/`model_id` selector, expressed at the server boundary as the NEUTRAL
+`server.ProviderSelector` (the server adapter imports neither the registry nor the
+catalog). The widened `SessionEngineFactory func(ctx, sel, specs)` is the ONE seam for
+a per-session engine — it serves BOTH a non-default provider/model AND client-provided
+MCP servers (orthogonal inputs → ONE engine over ONE catalog). The composition factory
+resolves the selector against the registry and builds Deps via
+**`engineDepsForProvider`**, which re-derives EVERY provider/model-closing field
+(LLM, Compactor, Model, model-keyed TokenCounter, `PromptConfig.Env.Model`, and the
+**ContextWindowTokens** — looked up from the catalog's `ContextLimit()` for the
+selected model so the compaction trigger AGREES with the `ListModels`-advertised
+`context_limit`; an uncatalogued passthrough model or the default provider falls back
+to the 128k default). This is the contamination fix: a shallow clone swapping only the
+LLM would compact/count through the wrong model. The resolution table:
+
+| `provider_id` | `model_id` | Outcome |
+|---|---|---|
+| `""` | `""` | **Shared engine** (default provider, no per-session build) — today's path |
+| `""` | set | **InvalidArgument** — a bare model on the env-derived default provider is ambiguous |
+| known+available | `""` | per-session engine on that provider's default model |
+| known+available | catalogued | per-session engine bound to (provider, model) |
+| known+available | NOT catalogued | **passthrough** — the model string reaches the provider verbatim (catalog gates nothing) |
+| unknown/unavailable | any | **InvalidArgument** — `"unknown or unavailable provider"`, never a silent fallback |
+
+The provider is **fixed for the session lifetime** (reasoning-replay + the byte-stable
+prefix are provider-private; "switch provider" = new session). `session.Session` is
+NOT widened — the selector resolves to an ENGINE at create time, registered in the same
+`sessionEngines` map (and selected the same way by `StartRunContent`) the client-MCP
+path uses; `loadAndReopen` is untouched. That map is **capped** at
+`Config.MaxSessionEngines` (default 1024): the gRPC/HTTP surfaces have no
+connection-teardown drain, so without a cap a client creating selector sessions and
+never calling `CloseSession`/`EndSession` could grow it unbounded (CWE-770). Past the
+cap, `createSession` returns `ErrTooManySessionEngines` (gRPC `ResourceExhausted` /
+HTTP 429); `CloseSession`/`EndSession` frees a slot. (Keys are NEVER on the wire — only
+the provider id.)
+
+**Model inventory (`ListModels` / `internal/app/modelsnapshot.go`).** `modelSnapshot`
+joins the registry's AVAILABLE providers to the embedded catalog and projects each
+model into the proto `ModelInfo` (public metadata only — id, provider_id, display_name,
+image/reasoning flags, context_limit — never a key/env/base-URL). The composition root
+injects the snapshot into `server.Config.Models`; the server adapter holds only the
+proto slice (mirroring the `ListAgents` idiom). The `mock` provider advertises no
+selectable models. `ServerCapabilities.model_selection` is true iff the snapshot is
+non-empty, gating the client's model picker the way `agents` gates `/agents`. Provider
+key/base-URL flags landed in `cmd/mecated` earlier; the picker UX is a client concern.

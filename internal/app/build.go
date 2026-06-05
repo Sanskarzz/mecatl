@@ -39,6 +39,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/adapter/permstore"
+	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
 	"github.com/stacklok/mecatl/internal/adapter/repomap"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
@@ -273,7 +274,26 @@ type Config struct {
 	// construction runs OFFLINE. Unexported: an internal composition detail mirroring
 	// xdgconfig.OSEnv's env-injection idiom, not an operator knob.
 	envDetector envDetector
+
+	// providerConstructor is the injectable seam (multi-provider Phase 0, S3 e2e)
+	// for the concrete port.LLMProvider built per AVAILABLE provider id. It defaults
+	// to the real (resilience-wrapped) openai-adapter constructor (set in
+	// buildProviderRegistry); tests inject a fake that returns a distinct mockllm per
+	// id, so the offline multi-provider e2e can build a registry with TWO real
+	// provider ids backed by mocks WITHOUT a single mock short-circuit collapsing
+	// them. It does NOT replace credential detection — a provider is still AVAILABLE
+	// iff a (fake) key resolves via envDetector; this seam only swaps WHAT the
+	// available entry's provider is. Unexported: a composition-only test seam
+	// mirroring envDetector, not an operator knob. Production path unchanged.
+	providerConstructor providerConstructor
 }
+
+// providerConstructor builds the port.LLMProvider for an available provider id,
+// given its resolved key and base URL. The production implementation
+// (newOpenAIEntry's body) constructs the resilience-wrapped openai adapter; the
+// S3 e2e injects a mock-returning fake. It NEVER receives the key on any wire — it
+// is a pure in-process construction seam.
+type providerConstructor func(cfg Config, id, key, baseURL string) port.LLMProvider
 
 // osGetenv is the production environment lookup the provider registry uses when no
 // envDetector is injected. It is the single place internal/app reads the process
@@ -324,7 +344,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// trust (declared/remembered/flag all collapse onto cfg.TrustProject above).
 	cfg.gitStatus = gitSnapshot(cfg.Workspace, cfg.Shell, cfg.TrustProject)
 
-	provider, err := buildProvider(cfg)
+	reg, provider, err := buildProvider(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +352,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, userModelStore, mcpClose, err := buildEngine(ctx, cfg, provider, store)
+	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, userModelStore, mcpClose, err := buildEngine(ctx, cfg, reg, provider, store)
 	if err != nil {
 		return nil, err
 	}
@@ -361,6 +381,14 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// resolves the same registry for the Task tool), so this re-resolution is
 		// cheap and keeps the snapshot a pure read at request time.
 		Agents: agentSnapshot(cfg, resolveAgentRegistry(ctx, cfg)),
+		// ListModels snapshot: join the provider registry's AVAILABLE providers to the
+		// embedded catalog and project each model into the proto form. The registry and
+		// catalog are both fixed for the process lifetime, so this is a startup snapshot
+		// (like Agents/Skills), not a live lister. Empty when zero providers are
+		// available (the zero-keys / mock case). Secret-free (modelSnapshot projects no
+		// key/env/base-URL); the projection lives in modelsnapshot.go so the server
+		// adapter never imports providercatalog or the registry.
+		Models: modelSnapshot(reg),
 		// ListSkills snapshot: the skills discovered once at build time (registerSkills),
 		// projected into the proto form. Skills are immutable for the process lifetime,
 		// so this is a startup snapshot (like Agents), not a live lister. nil/empty when
@@ -417,28 +445,42 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 }
 
 // sessionEngineFactory returns the server.SessionEngineFactory that builds a
-// PER-SESSION engine over the client-provided streaming-HTTP MCP servers (the ACP
-// session/new mcpServers). Each call connects a SCOPED mcp.NewManager for that one
-// session (best-effort, exactly like defMCPTools: a down server is logged-and-
+// PER-SESSION engine over an optional non-default provider/model SELECTOR
+// (multi-provider Phase 0, S3) AND/OR the client-provided streaming-HTTP MCP
+// servers (the ACP session/new mcpServers). The two inputs are orthogonal: a
+// session with BOTH a non-default model and client MCP gets ONE engine over ONE
+// catalog from a single call. Each call connects a SCOPED mcp.NewManager for that
+// one session when specs are present (best-effort: a down server is logged-and-
 // skipped, never fatal), registers the CORE tools (registerCoreTools — the same
-// core toolset the main engine gets) PLUS those MCP tools into a fresh catalog, and
-// builds an engine whose every collaborator MATCHES the main engine via
-// baseEngineDeps (so a per-session engine compacts, expands commands, persists, and
-// emits telemetry exactly like the shared one — only the catalog differs).
+// core toolset the main engine gets) PLUS those MCP tools into a fresh catalog,
+// and builds an engine whose every NON-provider collaborator MATCHES the main
+// engine via engineDepsForProvider (so a per-session engine compacts, expands
+// commands, persists, and emits telemetry exactly like the shared one — only the
+// catalog and the resolved provider/model differ).
 //
-// It captures the SAME store/policy/hooks/token-counter the main engine was built
-// with (threaded from Build, where they are already in scope), so the two engines
-// cannot drift on their Deps. The mcpProvider passed to baseEngineDeps is the MAIN
-// provider, so a client-MCP session's CommandExpander mirrors main's command source
-// (file commands + main MCP prompts); per-session MCP prompts-as-commands is a
-// future refinement, not required here.
+// PROVIDER/MODEL RESOLUTION (the §0.2 resolution table): the zero selector keeps
+// the DEFAULT provider + cfg.Model (the pre-S3 MCP path, byte-identical). A
+// non-empty sel.ProviderID is looked up in the registry — a miss (unknown id, or
+// an available-only registry that omits an unkeyed provider) is a loud error
+// wrapping server.ErrInvalidArgument, NEVER a silent fallback. sel.ModelID is
+// handed VERBATIM to engineDepsForProvider (empty => provider/adapter default; an
+// id the catalog doesn't know flows through to the provider unchanged — the
+// catalog never gates the model string). engineDepsForProvider re-derives EVERY
+// provider-closing Deps field (LLM/Compactor/Model/TokenCounter/PromptConfig.Env)
+// against the resolved (provider, model), so a per-session engine bound to a
+// non-default provider compacts and counts through THAT provider — the
+// contamination fix the S1 seam was designed for.
 //
-// It returns the engine and the manager's Close so the Service can tear that
-// session's MCP connections down on disconnect. The factory is wired into
-// server.Config.SessionEngine in Build, so the ACP adapter can mount client MCP
-// without app having to leak mcp/agent wiring into the server or acp layers.
+// It captures the SAME store/policy/hooks the main engine was built with (threaded
+// from Build), plus the registry (so it can resolve the selector) and the DEFAULT
+// provider (the zero-selector fallback), so the two engines cannot drift on their
+// shared Deps. It returns the engine and the manager's Close (a no-op when no
+// specs) so the Service can tear that session's MCP connections down on
+// disconnect. Wired into server.Config.SessionEngine in Build, so neither the
+// registry nor mcp/agent wiring leaks into the server or acp layers.
 func sessionEngineFactory(
 	cfg Config,
+	reg *providerRegistry,
 	provider port.LLMProvider,
 	store port.SessionStore,
 	policy port.PermissionPolicy,
@@ -446,16 +488,43 @@ func sessionEngineFactory(
 	mcpProvider mcp.Provider,
 	instructions prompt.InstructionAssembler,
 ) server.SessionEngineFactory {
-	return func(ctx context.Context, specs []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+		// Resolve the provider/model selector FIRST (before any MCP connect), so an
+		// unknown provider fails fast without a wasted connection. The zero selector
+		// keeps the default provider + cfg.Model (pre-S3 behaviour) and window=0 (⇒ the
+		// 128k default, byte-identical).
+		resolvedProvider, resolvedModel := provider, cfg.Model
+		contextWindow := 0
+		if sel.ProviderID != "" {
+			entry, ok := reg.Lookup(sel.ProviderID)
+			if !ok {
+				return nil, nil, fmt.Errorf("%w: unknown or unavailable provider %q", server.ErrInvalidArgument, sel.ProviderID)
+			}
+			resolvedProvider = entry.provider
+			// "" => provider/adapter default; a non-empty unknown model => verbatim
+			// passthrough (the catalog is NOT consulted to GATE the model string).
+			resolvedModel = sel.ModelID
+			// Derive the compaction window from the catalog for (provider, model) so the
+			// trigger AGREES with the ListModels-advertised context_limit (Medium #2). A
+			// passthrough/uncatalogued model or a zero/missing catalog limit yields 0,
+			// which engineDepsForProvider falls back to the 128k default — the model
+			// string still flows through verbatim regardless.
+			contextWindow = catalogContextWindow(sel.ProviderID, sel.ModelID)
+		}
+
 		onError := func(sc mcp.ServerConfig, err error) {
 			slog.Warn("client MCP server unreachable; skipping for this session",
 				"server", sc.Name, "url", sc.URL, "err", err)
 		}
-		mgr, err := mcp.NewManager(ctx, specs, onError)
-		if err != nil {
-			// Best-effort: every server failed. The session still gets a usable engine
-			// (core tools only) rather than failing session creation outright.
-			slog.Warn("client MCP: no servers connected for this session; mounting core tools only", "err", err)
+		var mgr *mcp.Manager
+		if len(specs) > 0 {
+			m, err := mcp.NewManager(ctx, specs, onError)
+			if err != nil {
+				// Best-effort: every server failed. The session still gets a usable engine
+				// (core tools only) rather than failing session creation outright.
+				slog.Warn("client MCP: no servers connected for this session; mounting core tools only", "err", err)
+			}
+			mgr = m
 		}
 
 		cat := tool.NewCatalog()
@@ -470,13 +539,40 @@ func sessionEngineFactory(
 				"servers", len(mgr.Servers()), "tools", len(mgr.Tools()))
 		}
 
-		// Identical to the main engine in every Deps field except the catalog (which
-		// carries the extra client MCP tools): baseEngineDeps is the single source of
-		// that shared wiring, so no collaborator is silently dropped.
-		deps := baseEngineDeps(cfg, provider, store, policy, hooks, mcpProvider, instructions)
+		// Identical to the main engine in every NON-provider Deps field except the
+		// catalog (which carries the extra client MCP tools): engineDepsForProvider is
+		// the single source of the provider-closing wiring AND the shared wiring, so no
+		// collaborator is silently dropped and a non-default provider never contaminates
+		// compaction/counting.
+		deps := engineDepsForProvider(cfg, resolvedProvider, resolvedModel, contextWindow, store, policy, hooks, mcpProvider, instructions)
 		deps.Catalog = cat
 		return agent.NewEngine(deps), closeFn, nil
 	}
+}
+
+// catalogContextWindow returns the embedded models.dev catalog's total context
+// window (limit.context) for (providerID, modelID), or 0 when the provider/model is
+// not catalogued (a power-user passthrough model) or carries no/zero window. The
+// caller (the per-session factory) threads it into engineDepsForProvider, where 0
+// falls back to the conservative 128k default. Reading the catalog HERE keeps the
+// compaction-trigger window in agreement with the ListModels-advertised
+// context_limit (both projected from the same catalog), so a large-context model is
+// not compacted at 128k. It NEVER gates the model string — an uncatalogued model
+// still reaches the provider verbatim; only its trigger window falls back.
+func catalogContextWindow(providerID, modelID string) int {
+	if providerID == "" || modelID == "" {
+		return 0
+	}
+	p, ok := providercatalog.Default().Provider(providerID)
+	if !ok {
+		return 0
+	}
+	for _, m := range p.Models() {
+		if m.ID() == modelID {
+			return m.ContextLimit()
+		}
+	}
+	return 0
 }
 
 // buildProvider builds the N-provider registry (multi-provider S1) and returns the
@@ -490,18 +586,26 @@ func sessionEngineFactory(
 //
 // A canned mock (UseMock) short-circuits to a single offline entry; the zero-keys
 // case returns the named, actionable errNoProvider.
-func buildProvider(cfg Config) (port.LLMProvider, error) {
+//
+// S3 returns the registry ALONGSIDE the default provider (it was discarded in S1)
+// so the composition can thread it into the per-session engine factory (for
+// per-session provider/model routing) and into modelSnapshot (for the ListModels
+// projection). The default provider is still returned so every other downstream
+// consumer (buildEngine's shared engine, child/fork/team/dream/reviewer engines)
+// keeps receiving the single default provider exactly as before — one construction,
+// no second env probe.
+func buildProvider(cfg Config) (*providerRegistry, port.LLMProvider, error) {
 	reg, err := buildProviderRegistry(cfg, cfg.envDetector)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	entry, ok := reg.Lookup(reg.Default())
 	if !ok {
 		// Defensive: buildProviderRegistry never returns a non-nil registry with an
 		// empty/absent default (it errors on zero providers), so this is unreachable.
-		return nil, errNoProvider
+		return nil, nil, errNoProvider
 	}
-	return entry.provider, nil
+	return reg, entry.provider, nil
 }
 
 // buildStore constructs the SessionStore: a JSONL replay store under StoreDir, or
@@ -527,7 +631,7 @@ func buildStore(cfg Config) (port.SessionStore, error) {
 // factory (built HERE because store/policy/hooks/counter/mcpProvider — the exact
 // collaborators a per-session engine must share with the main one — are all in
 // scope here, so the factory cannot drift from the main engine's Deps).
-func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, []skills.Skill, *memory.Store, func(), error) {
+func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, []skills.Skill, *memory.Store, func(), error) {
 	// SkillDraft trust boundary: when enabled, the quarantine dir must live OUTSIDE
 	// the workspace root (so the model's workspace-confined Write/Edit cannot reach
 	// it) and be disjoint from every active skills dir. Fatal on a misconfig.
@@ -591,7 +695,7 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 
 	deps := baseEngineDeps(cfg, provider, store, policy, mainHooks, mcpProvider, instructions)
 	deps.Catalog = cat
-	sessFactory := sessionEngineFactory(cfg, provider, store, policy, hooks, mcpProvider, instructions)
+	sessFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, mcpProvider, instructions)
 	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, userModelStore, mcpClose, nil
 }
 
@@ -720,8 +824,10 @@ func baseEngineDeps(
 	// provider-closing fields (LLM/Compactor/Model/TokenCounter/PromptConfig). The
 	// model-keyed TokenCounter is derived INSIDE engineDepsForProvider against
 	// cfg.Model, so the default path stays semantically identical to pre-S1
-	// (buildTokenCounter(cfg) for the default model).
-	return engineDepsForProvider(cfg, provider, cfg.Model, store, policy, hooks, mcpProvider, instructions)
+	// (buildTokenCounter(cfg) for the default model). It passes contextWindow=0 so the
+	// default model keeps the conservative 128k window (no behaviour change) — the
+	// catalog-derived per-model window applies ONLY to a non-default selector.
+	return engineDepsForProvider(cfg, provider, cfg.Model, 0, store, policy, hooks, mcpProvider, instructions)
 }
 
 // engineDepsForProvider re-derives the COMPLETE set of provider-closing agent.Deps
@@ -729,17 +835,29 @@ func baseEngineDeps(
 // provider compacts and replays reasoning through THAT provider — never the default.
 // It is the multi-provider analogue of baseEngineDeps: baseEngineDeps closes over the
 // single default provider; this takes the provider+model explicitly and rebuilds
-// EVERY field that binds them by value. The provider-dependent fields are EXACTLY:
+// EVERY field that binds them by value. The provider/model-dependent fields are EXACTLY:
 //   - Deps.LLM                    (the provider itself)
 //   - Deps.Compactor              (buildCompactor binds provider+model BY VALUE)
 //   - Deps.Model                  (the model string)
 //   - Deps.TokenCounter           (tiktoken is model-keyed)
 //   - Deps.PromptConfig.Env.Model (the agency-delta + env model are model-keyed)
+//   - Deps.ContextWindowTokens    (the compaction trigger window — model-keyed; see
+//     contextWindow below. This is the S1-deferred "6th field": ListModels now
+//     advertises the real per-model window, so the trigger MUST agree with it or a
+//     1M-context model would still compact at 128k.)
 //
 // Every NON-provider field (Policy/Hooks/Store/Sink/Logger/Instructions/
-// ContextWindowTokens/CompactionRatio/CommandExpander) is shared and threaded in.
-// Catalog is deliberately left unset — the caller sets it AFTER this returns (the
-// per-session engine adds the client's MCP tools), matching baseEngineDeps' contract.
+// CompactionRatio/CommandExpander) is shared and threaded in. Catalog is
+// deliberately left unset — the caller sets it AFTER this returns (the per-session
+// engine adds the client's MCP tools), matching baseEngineDeps' contract.
+//
+// contextWindow is the model's total context window in tokens. The CALLER resolves
+// it (the per-session factory looks it up in the catalog for the selected
+// provider+model); a value <= 0 means "unknown / not catalogued / default provider"
+// and falls back to defaultContextWindowTokens (128k). The DEFAULT path
+// (baseEngineDeps) passes 0 so it stays byte-identical to pre-S1 (128k) — a behaviour
+// change to the default model is deliberately avoided; only an explicit non-default
+// selector whose catalog entry carries a known window overrides it.
 //
 // CRITICAL (design): a shallow clone of baseEngineDeps with only LLM swapped would
 // compact and COUNT through the wrong provider/model, because buildCompactor and
@@ -757,6 +875,7 @@ func engineDepsForProvider(
 	cfg Config,
 	provider port.LLMProvider,
 	model string,
+	contextWindow int,
 	store port.SessionStore,
 	policy port.PermissionPolicy,
 	hooks port.HookRunner,
@@ -770,6 +889,13 @@ func engineDepsForProvider(
 	modelCfg := cfg
 	modelCfg.Model = model
 	counter := buildTokenCounter(modelCfg)
+	// Resolve the compaction window: an unknown/uncatalogued/default (<=0) window
+	// falls back to the conservative 128k default, so the trigger never compacts a
+	// large-context model prematurely yet the default path stays byte-identical.
+	window := defaultContextWindowTokens
+	if contextWindow > 0 {
+		window = contextWindow
+	}
 	return agent.Deps{
 		LLM:          provider,
 		Policy:       policy,
@@ -784,7 +910,7 @@ func engineDepsForProvider(
 		Logger:              cfg.Logger,
 		PromptConfig:        promptConfig(modelCfg, cfg.gitStatus),
 		Model:               model,
-		ContextWindowTokens: defaultContextWindowTokens,
+		ContextWindowTokens: window,
 		CompactionRatio:     defaultCompactionRatio,
 		TokenCounter:        counter,
 		Compactor:           buildCompactor(modelCfg, provider, counter),

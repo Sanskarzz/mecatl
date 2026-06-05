@@ -130,7 +130,7 @@ func TestRegistryZeroKeys(t *testing.T) {
 // TestRegistryZeroKeysViaBuildProvider: the same zero-keys error surfaces through
 // the buildProvider shim (the Build call site).
 func TestRegistryZeroKeysViaBuildProvider(t *testing.T) {
-	_, err := buildProvider(Config{envDetector: fakeEnv(nil)})
+	_, _, err := buildProvider(Config{envDetector: fakeEnv(nil)})
 	if !errors.Is(err, errNoProvider) {
 		t.Fatalf("buildProvider zero-keys error = %v, want errNoProvider", err)
 	}

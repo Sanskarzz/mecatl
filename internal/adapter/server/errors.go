@@ -33,4 +33,13 @@ var (
 	// MCP read methods can keep an unknown-server name as InvalidArgument while a
 	// genuine fault on a known server is reported as a server error.
 	ErrInternal = errors.New("server: internal error")
+	// ErrTooManySessionEngines is returned by createSession when the per-session
+	// engine registry is already at Config.MaxSessionEngines. It bounds the memory
+	// growth (CWE-770) from per-session engines created (by a client-MCP session OR a
+	// non-default provider/model selector) but never released via CloseSession /
+	// EndSession — the gRPC/HTTP surfaces have no connection-teardown drain, so a
+	// hostile authed client could otherwise grow the map unbounded. Releasing a
+	// session frees a slot. Adapters map it to ResourceExhausted / HTTP 429, mirroring
+	// ErrTooManyTeams.
+	ErrTooManySessionEngines = errors.New("server: too many live per-session engines")
 )

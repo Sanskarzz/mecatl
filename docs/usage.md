@@ -261,7 +261,41 @@ builds an N-provider registry and AUTO-DETECTS availability from the environment
   `no LLM provider available: set OPENAI_API_KEY or OPENROUTER_API_KEY (run with --openai/--mock for offline)`.
 
 When more than one provider is available, `openai` is the default (single-provider
-back-compat); per-session provider selection over the wire is a later phase.
+back-compat) — a `CreateSession` with no selector uses it.
+
+#### Per-session provider/model selection (wire)
+
+`CreateSession` accepts an OPTIONAL **`provider_id`** + **`model_id`** selector
+(gRPC fields; JSON `provider_id`/`model_id` on `POST /v1/sessions`), so one server
+can drive different providers/models per session. The provider is **fixed for the
+session lifetime** — "switch provider" means a new session. The two fields are
+distinct (never slash-joined). Resolution:
+
+| `provider_id` | `model_id` | Result |
+|---|---|---|
+| empty | empty | the server **default** provider (today's behaviour) |
+| empty | set | **`InvalidArgument`** — a bare model on the default provider is ambiguous; name the provider |
+| available | empty | that provider's default model |
+| available | catalogued | bound to (provider, model) |
+| available | not catalogued | **passthrough** — the model string is sent verbatim (escape hatch for a model the catalog doesn't yet know) |
+| unknown / unavailable | any | **`InvalidArgument`** — `unknown or unavailable provider`, never a silent fallback |
+
+Keys are NEVER on the wire — only the provider id. A server caps the number of live
+per-session engines (selector OR client-MCP sessions): exceeding it returns
+`ResourceExhausted` (gRPC) / HTTP `429` — close sessions you finish with
+`CloseSession` / `DELETE /v1/sessions/{id}` to free slots.
+
+#### Discovering models — `ListModels` / `GET /v1/models`
+
+`ListModels` returns the selectable-model inventory: every **available** provider's
+catalog models projected to public metadata only — `id`, `provider_id`,
+`display_name`, `image`, `reasoning`, `context_limit` — **no keys, env-var names, or
+base URLs**, and an unavailable provider is omitted entirely. The list is
+`(provider_id, id)`-sorted; it is empty when no provider is available (or under
+`--mock`). `ServerCapabilities.model_selection` is `true` iff the list is non-empty,
+so a client can hide its picker against an older/empty server. The advertised
+`context_limit` is the SAME catalog value the per-session engine uses for its
+compaction trigger, so a large-context model is not compacted at the 128k default.
 
 ### The loopback / unauthenticated trust note
 

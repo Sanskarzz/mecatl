@@ -46,7 +46,7 @@ func TestBaseEngineDepsDelegatesToProviderSeam(t *testing.T) {
 	provider, store, policy, hooks, mcpP, instr := depsTestFixture(t)
 
 	base := baseEngineDeps(cfg, provider, store, policy, hooks, mcpP, instr)
-	direct := engineDepsForProvider(cfg, provider, cfg.Model, store, policy, hooks, mcpP, instr)
+	direct := engineDepsForProvider(cfg, provider, cfg.Model, 0, store, policy, hooks, mcpP, instr)
 
 	if base.Model != direct.Model {
 		t.Errorf("Model: base=%q direct=%q", base.Model, direct.Model)
@@ -105,7 +105,7 @@ func TestEngineDepsForProviderRebindsModel(t *testing.T) {
 
 	const altModel = "gpt-4" // cl100k_base, a DIFFERENT encoding from gpt-4o (o200k_base)
 
-	deps := engineDepsForProvider(cfg, provider, altModel, store, policy, hooks, mcpP, instr)
+	deps := engineDepsForProvider(cfg, provider, altModel, 0, store, policy, hooks, mcpP, instr)
 
 	if deps.Model != altModel {
 		t.Errorf("Deps.Model = %q, want %q (not the default gpt-4o)", deps.Model, altModel)
@@ -125,7 +125,7 @@ func TestEngineDepsForProviderRebindsModel(t *testing.T) {
 	// (cl100k_base) must DIFFER from a counter built for the default cfg.Model
 	// (o200k_base) on a probe string. If engineDepsForProvider leaked the default
 	// model's counter, these would be equal and the guard would be vacuous.
-	defaultDeps := engineDepsForProvider(cfg, provider, cfg.Model, store, policy, hooks, mcpP, instr)
+	defaultDeps := engineDepsForProvider(cfg, provider, cfg.Model, 0, store, policy, hooks, mcpP, instr)
 	const probe = "tokenization differences 12345 café 日本語"
 	altCount := deps.TokenCounter.Count(probe)
 	defCount := defaultDeps.TokenCounter.Count(probe)

@@ -113,6 +113,13 @@ service HarnessService {
   // startup. Metadata only — the per-entry values are omitted (Recall loads them).
   rpc GetUserModel(GetUserModelRequest) returns (GetUserModelResponse);
 
+  // ListModels returns the selectable-model inventory: every AVAILABLE provider's
+  // catalog models, projected to public metadata only (no secrets). It powers the
+  // client /models picker (multi-provider Phase 0, S3). Derived from the build-time
+  // registry+catalog snapshot; it performs no live discovery and never reveals an
+  // unavailable provider.
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+
   // --- Agent teams (experimental) -----------------------------------------
   //
   // A team is a set of long-lived member sessions that coordinate through a
@@ -181,6 +188,23 @@ message CreateSessionRequest {
   PermissionMode mode = 2;
   // limits are the optional stop conditions.
   Limits limits = 3;
+
+  // provider_id selects which configured provider backs this session, by its
+  // stable registry id ("openai" / "openrouter"). Empty => the server default
+  // provider (today's behaviour). An unknown/unavailable id is a loud
+  // InvalidArgument, never a silent fallback. The provider is FIXED for the
+  // session lifetime (reasoning-replay + byte-stable prefix are provider-private);
+  // "switch provider" = new session. Keys are NEVER on the wire — only this id.
+  // (multi-provider Phase 0, S3.)
+  string provider_id = 4;
+
+  // model_id is the opaque model selector within provider_id. Empty => the
+  // provider's default model. An id ListModels did not advertise is passed
+  // through to the provider VERBATIM (a power-user escape hatch for a model the
+  // embedded catalog doesn't yet know). NOT slash-joined with provider_id —
+  // two distinct fields by design. Setting model_id WITHOUT provider_id is a loud
+  // InvalidArgument (a bare model on an env-derived default provider is ambiguous).
+  string model_id = 5;
 }
 
 // ServerCapabilities reports which optional features this server has ENABLED,
@@ -229,6 +253,11 @@ message ServerCapabilities {
   // user_model is true when the user-model store is wired (GetUserModel reads its
   // live index). Gates the /usermodel read-only inspection panel.
   bool user_model = 11;
+  // model_selection is true when >=1 provider is available (ListModels would return
+  // >0). Gates the client's /models picker the same way `agents` gates /agents.
+  // Additive: an older server leaves it false and the client hides the picker.
+  // (multi-provider Phase 0, S3.)
+  bool model_selection = 12;
 }
 
 // CreateSessionResponse carries the newly-allocated session id.
@@ -987,6 +1016,42 @@ message GetUserModelResponse {
   // sha256 is the lowercase-hex SHA-256 over the rendered entries, so a client
   // can tell at a glance whether the user model changed between fetches.
   string sha256 = 3;
+}
+
+// --- Model inventory discovery ----------------------------------------------
+
+// ModelInfo is one selectable model in the resolved inventory. It mirrors the
+// composition-layer projection of the provider registry's AVAILABLE providers
+// joined to the embedded models.dev catalog. It carries NO secret material
+// (no key, no env var name, no base URL) — only public model metadata. The
+// modality/reasoning bits gate the client picker's affordances; context_limit
+// informs the picker's display only (the server is the cap authority).
+message ModelInfo {
+  // id is the opaque model selector (the value sent as CreateSession.model_id).
+  string id = 1;
+  // provider_id is the registry id this model is served by (CreateSession.provider_id).
+  string provider_id = 2;
+  // display_name is the human-facing model name from the catalog (falls back to id).
+  string display_name = 3;
+  // image is true when the model accepts image prompt input (catalog modality).
+  bool image = 4;
+  // reasoning is true when the model emits reasoning/thinking (catalog flag).
+  bool reasoning = 5;
+  // context_limit is the model's total context window in tokens (0 when unknown).
+  int64 context_limit = 6;
+}
+
+// ListModelsRequest requests the selectable-model inventory.
+message ListModelsRequest {}
+
+// ListModelsResponse carries the selectable models across AVAILABLE providers
+// only (a provider with no resolved credentials is omitted entirely — its
+// availability is itself sensitive, CWE-200). Sorted by (provider_id, id) for a
+// deterministic picker. Empty when zero providers are available (the zero-keys
+// case) — the client renders that as "no models; set a provider key".
+message ListModelsResponse {
+  // models are the (possibly empty) selectable models, (provider_id, id)-sorted.
+  repeated ModelInfo models = 1;
 }
 
 // --- Agent team messages ----------------------------------------------------

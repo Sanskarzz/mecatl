@@ -48,6 +48,7 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h.mux.HandleFunc("GET /v1/mcp/toolhive/groups", h.listToolHiveGroups)
 	h.mux.HandleFunc("GET /v1/agents", h.listAgents)
 	h.mux.HandleFunc("GET /v1/skills", h.listSkills)
+	h.mux.HandleFunc("GET /v1/models", h.listModels)
 	h.mux.HandleFunc("GET /v1/soul", h.getSoul)
 	h.mux.HandleFunc("GET /v1/usermodel", h.getUserModel)
 	h.mux.HandleFunc("GET /v1/commands", h.listCommands)
@@ -71,6 +72,12 @@ type createSessionBody struct {
 	Workspace string    `json:"workspace"`
 	Mode      string    `json:"mode,omitempty"`
 	Limits    *limitsIn `json:"limits,omitempty"`
+	// ProviderID / ModelID select a per-session provider+model (multi-provider
+	// Phase 0, S3). Empty both => the server default provider. ProviderID without
+	// ModelID => the provider's default model; ModelID without ProviderID is a
+	// client error (a bare model on the default provider is ambiguous).
+	ProviderID string `json:"provider_id,omitempty"`
+	ModelID    string `json:"model_id,omitempty"`
 }
 
 type limitsIn struct {
@@ -89,14 +96,15 @@ type createSessionResp struct {
 // client gets. Populated from the shared Service.capabilities() so the two
 // surfaces cannot drift.
 type serverCapabilitiesJSON struct {
-	MCP           bool `json:"mcp"`
-	SlashCommands bool `json:"slash_commands"`
-	Memory        bool `json:"memory"`
-	Skills        bool `json:"skills"`
-	Teams         bool `json:"teams"`
-	Bash          bool `json:"bash"`
-	Image         bool `json:"image"`
-	Audio         bool `json:"audio"`
+	MCP            bool `json:"mcp"`
+	SlashCommands  bool `json:"slash_commands"`
+	Memory         bool `json:"memory"`
+	Skills         bool `json:"skills"`
+	Teams          bool `json:"teams"`
+	Bash           bool `json:"bash"`
+	Image          bool `json:"image"`
+	Audio          bool `json:"audio"`
+	ModelSelection bool `json:"model_selection"`
 }
 
 // capabilitiesJSON projects the shared proto capabilities onto the JSON shape.
@@ -105,14 +113,15 @@ func capabilitiesJSON(c *mecatlv1.ServerCapabilities) *serverCapabilitiesJSON {
 		return nil
 	}
 	return &serverCapabilitiesJSON{
-		MCP:           c.GetMcp(),
-		SlashCommands: c.GetSlashCommands(),
-		Memory:        c.GetMemory(),
-		Skills:        c.GetSkills(),
-		Teams:         c.GetTeams(),
-		Bash:          c.GetBash(),
-		Image:         c.GetImage(),
-		Audio:         c.GetAudio(),
+		MCP:            c.GetMcp(),
+		SlashCommands:  c.GetSlashCommands(),
+		Memory:         c.GetMemory(),
+		Skills:         c.GetSkills(),
+		Teams:          c.GetTeams(),
+		Bash:           c.GetBash(),
+		Image:          c.GetImage(),
+		Audio:          c.GetAudio(),
+		ModelSelection: c.GetModelSelection(),
 	}
 }
 
@@ -208,7 +217,8 @@ func (h *HTTPHandler) createSession(w http.ResponseWriter, r *http.Request) {
 			MaxConsecutiveFailures: body.Limits.MaxConsecutiveFailures,
 		}
 	}
-	sess, err := h.svc.CreateSession(r.Context(), body.Workspace, modeFromString(body.Mode), limits)
+	sel := ProviderSelector{ProviderID: body.ProviderID, ModelID: body.ModelID}
+	sess, err := h.svc.CreateSessionWithProvider(r.Context(), body.Workspace, modeFromString(body.Mode), limits, sel)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -679,6 +689,11 @@ func (h *HTTPHandler) listSkills(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, &mecatlv1.ListSkillsResponse{Skills: h.svc.ListSkills(r.Context())})
 }
 
+// listModels handles GET /v1/models.
+func (h *HTTPHandler) listModels(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, &mecatlv1.ListModelsResponse{Models: h.svc.ListModels(r.Context())})
+}
+
 // getSoul handles GET /v1/soul.
 func (h *HTTPHandler) getSoul(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, &mecatlv1.GetSoulResponse{Soul: h.svc.GetSoul(r.Context())})
@@ -754,6 +769,10 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusPreconditionFailed, err.Error())
 	case errors.Is(err, ErrTooManyTeams):
 		// The live-team registry is at MaxTeams (gRPC: ResourceExhausted).
+		writeError(w, http.StatusTooManyRequests, err.Error())
+	case errors.Is(err, ErrTooManySessionEngines):
+		// The per-session engine registry is at MaxSessionEngines (gRPC:
+		// ResourceExhausted): the client must release a session before opening another.
 		writeError(w, http.StatusTooManyRequests, err.Error())
 	case errors.Is(err, ErrNoActiveRun):
 		// Known session, but its run is not live in this process (e.g. the

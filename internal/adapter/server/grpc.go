@@ -34,7 +34,12 @@ func (h *HarnessServer) CreateSession(ctx context.Context, req *mecatlv1.CreateS
 	if req.GetWorkspace() == "" {
 		return nil, status.Error(codes.InvalidArgument, "workspace is required")
 	}
-	sess, err := h.svc.CreateSession(ctx, req.GetWorkspace(), modeFromProto(req.GetMode()), limitsFromProto(req.GetLimits()))
+	// Per-session provider/model selector (multi-provider Phase 0, S3): the two
+	// fields map to the neutral ProviderSelector; the zero selector keeps the
+	// shared-engine fast path. An unknown/unavailable provider, or model_id without
+	// provider_id, surfaces as InvalidArgument via toStatus.
+	sel := ProviderSelector{ProviderID: req.GetProviderId(), ModelID: req.GetModelId()}
+	sess, err := h.svc.CreateSessionWithProvider(ctx, req.GetWorkspace(), modeFromProto(req.GetMode()), limitsFromProto(req.GetLimits()), sel)
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -232,6 +237,11 @@ func (h *HarnessServer) ListSkills(ctx context.Context, _ *mecatlv1.ListSkillsRe
 	return &mecatlv1.ListSkillsResponse{Skills: h.svc.ListSkills(ctx)}, nil
 }
 
+// ListModels returns the resolved selectable-model inventory snapshot.
+func (h *HarnessServer) ListModels(ctx context.Context, _ *mecatlv1.ListModelsRequest) (*mecatlv1.ListModelsResponse, error) {
+	return &mecatlv1.ListModelsResponse{Models: h.svc.ListModels(ctx)}, nil
+}
+
 // GetSoul returns the resolved soul (persona) snapshot.
 func (h *HarnessServer) GetSoul(ctx context.Context, _ *mecatlv1.GetSoulRequest) (*mecatlv1.GetSoulResponse, error) {
 	return &mecatlv1.GetSoulResponse{Soul: h.svc.GetSoul(ctx)}, nil
@@ -275,6 +285,8 @@ func toStatus(err error) error {
 	case errors.Is(err, ErrTeamRunning):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, ErrTooManyTeams):
+		return status.Error(codes.ResourceExhausted, err.Error())
+	case errors.Is(err, ErrTooManySessionEngines):
 		return status.Error(codes.ResourceExhausted, err.Error())
 	case errors.Is(err, ErrInternal):
 		return status.Error(codes.Internal, err.Error())

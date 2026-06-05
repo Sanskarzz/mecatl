@@ -201,11 +201,18 @@ func providerKey(cfgKey, providerID string, detect envDetector) string {
 // different base URL + key), so the two cannot drift on resilience wrapping. It logs
 // the provider id and base URL ONLY — never the key.
 func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
+	slog.Info("LLM provider available", "provider", id, "model", cfg.Model, "base_url", baseURL)
+	// Composition-only test seam (S3 e2e): when a providerConstructor is injected,
+	// it builds the provider (e.g. a distinct mock per id) instead of the real
+	// openai adapter, so the offline multi-provider e2e can hold TWO real provider
+	// ids backed by mocks. Production leaves it nil and uses the openai adapter.
+	if cfg.providerConstructor != nil {
+		return providerEntry{id: id, provider: cfg.providerConstructor(cfg, id, key, baseURL), available: true, baseURL: baseURL}
+	}
 	opts := []openai.Option{openai.WithAPIKey(key)}
 	if baseURL != "" {
 		opts = append(opts, openai.WithBaseURL(baseURL))
 	}
-	slog.Info("LLM provider available", "provider", id, "model", cfg.Model, "base_url", baseURL)
 	var llm port.LLMProvider = openai.New(opts...)
 	llm = llmresilience.Wrap(llm, llmresilience.Config{
 		MaxAttempts:       cfg.LLMMaxAttempts,

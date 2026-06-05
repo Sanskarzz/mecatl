@@ -57,6 +57,7 @@ const (
 	HarnessService_ListSkills_FullMethodName          = "/mecatl.v1.HarnessService/ListSkills"
 	HarnessService_GetSoul_FullMethodName             = "/mecatl.v1.HarnessService/GetSoul"
 	HarnessService_GetUserModel_FullMethodName        = "/mecatl.v1.HarnessService/GetUserModel"
+	HarnessService_ListModels_FullMethodName          = "/mecatl.v1.HarnessService/ListModels"
 	HarnessService_CreateTeam_FullMethodName          = "/mecatl.v1.HarnessService/CreateTeam"
 	HarnessService_SpawnTeammate_FullMethodName       = "/mecatl.v1.HarnessService/SpawnTeammate"
 	HarnessService_SendTeammateMessage_FullMethodName = "/mecatl.v1.HarnessService/SendTeammateMessage"
@@ -140,6 +141,12 @@ type HarnessServiceClient interface {
 	// user-model store's index, so it reflects entries the agent has saved since
 	// startup. Metadata only — the per-entry values are omitted (Recall loads them).
 	GetUserModel(ctx context.Context, in *GetUserModelRequest, opts ...grpc.CallOption) (*GetUserModelResponse, error)
+	// ListModels returns the selectable-model inventory: every AVAILABLE provider's
+	// catalog models, projected to public metadata only (no secrets). It powers the
+	// client /models picker (multi-provider Phase 0, S3). Derived from the build-time
+	// registry+catalog snapshot; it performs no live discovery and never reveals an
+	// unavailable provider.
+	ListModels(ctx context.Context, in *ListModelsRequest, opts ...grpc.CallOption) (*ListModelsResponse, error)
 	// CreateTeam allocates a new agent team and returns its id, optionally enrolling
 	// an initial roster in the same atomic call. Members may also be added afterwards
 	// with SpawnTeammate; the team is then driven with RunTeam.
@@ -322,6 +329,16 @@ func (c *harnessServiceClient) GetUserModel(ctx context.Context, in *GetUserMode
 	return out, nil
 }
 
+func (c *harnessServiceClient) ListModels(ctx context.Context, in *ListModelsRequest, opts ...grpc.CallOption) (*ListModelsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListModelsResponse)
+	err := c.cc.Invoke(ctx, HarnessService_ListModels_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *harnessServiceClient) CreateTeam(ctx context.Context, in *CreateTeamRequest, opts ...grpc.CallOption) (*CreateTeamResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateTeamResponse)
@@ -466,6 +483,12 @@ type HarnessServiceServer interface {
 	// user-model store's index, so it reflects entries the agent has saved since
 	// startup. Metadata only — the per-entry values are omitted (Recall loads them).
 	GetUserModel(context.Context, *GetUserModelRequest) (*GetUserModelResponse, error)
+	// ListModels returns the selectable-model inventory: every AVAILABLE provider's
+	// catalog models, projected to public metadata only (no secrets). It powers the
+	// client /models picker (multi-provider Phase 0, S3). Derived from the build-time
+	// registry+catalog snapshot; it performs no live discovery and never reveals an
+	// unavailable provider.
+	ListModels(context.Context, *ListModelsRequest) (*ListModelsResponse, error)
 	// CreateTeam allocates a new agent team and returns its id, optionally enrolling
 	// an initial roster in the same atomic call. Members may also be added afterwards
 	// with SpawnTeammate; the team is then driven with RunTeam.
@@ -539,6 +562,9 @@ func (UnimplementedHarnessServiceServer) GetSoul(context.Context, *GetSoulReques
 }
 func (UnimplementedHarnessServiceServer) GetUserModel(context.Context, *GetUserModelRequest) (*GetUserModelResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetUserModel not implemented")
+}
+func (UnimplementedHarnessServiceServer) ListModels(context.Context, *ListModelsRequest) (*ListModelsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListModels not implemented")
 }
 func (UnimplementedHarnessServiceServer) CreateTeam(context.Context, *CreateTeamRequest) (*CreateTeamResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateTeam not implemented")
@@ -838,6 +864,24 @@ func _HarnessService_GetUserModel_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HarnessService_ListModels_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListModelsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).ListModels(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_ListModels_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).ListModels(ctx, req.(*ListModelsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _HarnessService_CreateTeam_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateTeamRequest)
 	if err := dec(in); err != nil {
@@ -1001,6 +1045,10 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetUserModel",
 			Handler:    _HarnessService_GetUserModel_Handler,
+		},
+		{
+			MethodName: "ListModels",
+			Handler:    _HarnessService_ListModels_Handler,
 		},
 		{
 			MethodName: "CreateTeam",
