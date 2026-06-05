@@ -89,6 +89,18 @@ type limitsIn struct {
 type createSessionResp struct {
 	SessionID    string                  `json:"session_id"`
 	Capabilities *serverCapabilitiesJSON `json:"capabilities,omitempty"`
+	// SessionCapabilities echoes the per-session resolved input capability (catalog
+	// ∩ adapter for THIS session's provider+model), so an HTTP client gates
+	// per-session @-attach UX on the same intersected value the gRPC client gets.
+	SessionCapabilities *sessionCapabilitiesJSON `json:"session_capabilities,omitempty"`
+}
+
+// sessionCapabilitiesJSON mirrors mecatlv1.SessionCapabilities for the JSON
+// surface. Bools-only by design (the per-session surface is ONLY the model-varying
+// image/audio input axis); it structurally cannot leak a secret.
+type sessionCapabilitiesJSON struct {
+	Image bool `json:"image"`
+	Audio bool `json:"audio"`
 }
 
 // serverCapabilitiesJSON mirrors mecatlv1.ServerCapabilities for the JSON
@@ -223,9 +235,11 @@ func (h *HTTPHandler) createSession(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	scaps := h.svc.SessionCapabilities(sess.ID)
 	writeJSON(w, http.StatusCreated, createSessionResp{
-		SessionID:    string(sess.ID),
-		Capabilities: capabilitiesJSON(h.svc.capabilities()),
+		SessionID:           string(sess.ID),
+		Capabilities:        capabilitiesJSON(h.svc.capabilities()),
+		SessionCapabilities: &sessionCapabilitiesJSON{Image: scaps.Image, Audio: scaps.Audio},
 	})
 }
 

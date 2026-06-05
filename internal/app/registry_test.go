@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -123,6 +124,39 @@ func TestRegistryZeroKeys(t *testing.T) {
 	for _, want := range []string{"OPENAI_API_KEY", "OPENROUTER_API_KEY", "--openai", "--mock"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error message %q does not mention %q", msg, want)
+		}
+	}
+}
+
+// TestNoKeyInStartupLogs captures the slog output of a real buildProviderRegistry
+// with SENTINEL keys and asserts the key NEVER appears in any startup log line
+// (CWE-200). The per-provider "LLM provider available" line logs id + base URL
+// only; the resilience line logs knobs only. The base URLs themselves carry no
+// credential (no userinfo / ?key= form), so the only forbidden tokens are the
+// sentinel key and the env-var names.
+func TestNoKeyInStartupLogs(t *testing.T) {
+	const sentinelKey = "sk-SENTINEL-startup-log"
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	_, err := buildProviderRegistry(Config{
+		Model: "gpt-5",
+		providerConstructor: func(_ Config, _, _, _ string) port.LLMProvider {
+			return nil // never used for logging; the slog lines fire before/around it
+		},
+	}, fakeEnv(map[string]string{
+		"OPENAI_API_KEY":     sentinelKey,
+		"OPENROUTER_API_KEY": sentinelKey,
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	logs := buf.String()
+	for _, bad := range []string{sentinelKey} {
+		if strings.Contains(logs, bad) {
+			t.Fatalf("startup logs leaked the sentinel key %q:\n%s", bad, logs)
 		}
 	}
 }

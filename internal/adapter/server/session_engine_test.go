@@ -86,9 +86,9 @@ func finalText(t *testing.T, run *agent.Run) string {
 // session uses the SHARED engine and the per-session factory is NOT called.
 func TestCreateSessionWithMCPEmptySpecsSharedEngine(t *testing.T) {
 	var called atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (server.SessionEngineResult, error) {
 		called.Add(1)
-		return nil, func() error { return nil }, nil
+		return server.SessionEngineResult{Close: func() error { return nil }}, nil
 	}
 	svc := newMCPService(t, "shared reply", factory)
 
@@ -131,11 +131,11 @@ func TestStartRunRoutesToPerSessionEngine(t *testing.T) {
 		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "test-model",
 	})
-	factory := func(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig) (server.SessionEngineResult, error) {
 		if len(specs) != 1 || specs[0].URL != "https://example.test/mcp" {
 			t.Errorf("factory specs = %+v", specs)
 		}
-		return perSession, func() error { closed.Add(1); return nil }, nil
+		return server.SessionEngineResult{Engine: perSession, Close: func() error { closed.Add(1); return nil }}, nil
 	}
 	svc := newMCPService(t, "shared reply", factory)
 
@@ -189,8 +189,8 @@ func TestEndSessionEvictsLearnedAndTearsDown(t *testing.T) {
 		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "test-model",
 	})
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (*agent.Engine, func() error, error) {
-		return perSession, func() error { closed.Add(1); return nil }, nil
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (server.SessionEngineResult, error) {
+		return server.SessionEngineResult{Engine: perSession, Close: func() error { closed.Add(1); return nil }}, nil
 	}
 	shared := agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(mockllm.TextTurn("shared")),
@@ -243,14 +243,14 @@ func TestEndSessionEvictsLearnedAndTearsDown(t *testing.T) {
 // registered per-session engine.
 func TestServiceCloseTearsDownSessionEngines(t *testing.T) {
 	var closed atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (server.SessionEngineResult, error) {
 		eng := agent.NewEngine(agent.Deps{
 			LLM:     mockllm.New(mockllm.TextTurn("x")),
 			Catalog: tool.NewCatalog(),
 			Policy:  permpolicy.NewPolicy(nil, nil),
 			Model:   "test-model",
 		})
-		return eng, func() error { closed.Add(1); return nil }, nil
+		return server.SessionEngineResult{Engine: eng, Close: func() error { closed.Add(1); return nil }}, nil
 	}
 	svc := newMCPService(t, "shared", factory)
 	if _, err := svc.CreateSessionWithMCP(context.Background(), "/ws", session.ModeDefault, session.Limits{},
@@ -275,9 +275,9 @@ func TestServiceCloseTearsDownSessionEngines(t *testing.T) {
 // StartRun uses the SHARED engine.
 func TestLoadSessionWithMCPEmptySpecsSharedEngine(t *testing.T) {
 	var called atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (server.SessionEngineResult, error) {
 		called.Add(1)
-		return nil, func() error { return nil }, nil
+		return server.SessionEngineResult{Close: func() error { return nil }}, nil
 	}
 	svc, store := newMCPServiceStore(t, "shared reply", factory)
 	id := persistCompleted(t, store)
@@ -326,11 +326,11 @@ func TestLoadSessionWithMCPRoutesToPerSessionEngine(t *testing.T) {
 		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "test-model",
 	})
-	factory := func(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig) (server.SessionEngineResult, error) {
 		if len(specs) != 1 || specs[0].URL != "https://example.test/mcp" {
 			t.Errorf("factory specs = %+v", specs)
 		}
-		return perSession, func() error { closed.Add(1); return nil }, nil
+		return server.SessionEngineResult{Engine: perSession, Close: func() error { closed.Add(1); return nil }}, nil
 	}
 	svc, store := newMCPServiceStore(t, "shared reply", factory)
 	id := persistCompleted(t, store)
@@ -364,9 +364,9 @@ func TestLoadSessionWithMCPRoutesToPerSessionEngine(t *testing.T) {
 // connect, so an unknown id never wastes a connect).
 func TestLoadSessionWithMCPUnknownIDNotFound(t *testing.T) {
 	var called atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (server.SessionEngineResult, error) {
 		called.Add(1)
-		return nil, func() error { return nil }, nil
+		return server.SessionEngineResult{Close: func() error { return nil }}, nil
 	}
 	svc := newMCPService(t, "shared", factory)
 	_, err := svc.LoadSessionWithMCP(context.Background(), "never-created",
@@ -386,7 +386,7 @@ func TestLoadSessionWithMCPUnknownIDNotFound(t *testing.T) {
 func TestLoadSessionWithMCPReloadReplacesAndClosesPrior(t *testing.T) {
 	var firstClosed, secondClosed atomic.Int32
 	var n atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (server.SessionEngineResult, error) {
 		eng := agent.NewEngine(agent.Deps{
 			LLM:     mockllm.New(mockllm.TextTurn("x")),
 			Catalog: tool.NewCatalog(),
@@ -395,9 +395,9 @@ func TestLoadSessionWithMCPReloadReplacesAndClosesPrior(t *testing.T) {
 		})
 		switch n.Add(1) {
 		case 1:
-			return eng, func() error { firstClosed.Add(1); return nil }, nil
+			return server.SessionEngineResult{Engine: eng, Close: func() error { firstClosed.Add(1); return nil }}, nil
 		default:
-			return eng, func() error { secondClosed.Add(1); return nil }, nil
+			return server.SessionEngineResult{Engine: eng, Close: func() error { secondClosed.Add(1); return nil }}, nil
 		}
 	}
 	svc, store := newMCPServiceStore(t, "shared", factory)

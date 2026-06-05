@@ -45,12 +45,22 @@ type Agent struct {
 	// info is the agent identity returned on initialize.
 	info implementation
 
-	// caps is the configured LLM provider's multimodal input support, read ONCE
-	// from the Service at construction. handleInitialize advertises it as the
-	// promptCapabilities (image/audio/embeddedContext), and handleSessionPrompt
-	// consults it to loud-reject prompt content the provider cannot consume — so a
-	// non-conformant client that ignores the advertised caps still gets a clear
-	// error instead of a silent drop.
+	// caps is the DEFAULT provider+model's intersected multimodal input support
+	// (catalog ∩ adapter, computed in composition), read ONCE from the Service at
+	// construction. handleInitialize advertises it as the promptCapabilities
+	// (image/audio/embeddedContext), and handleSessionPrompt consults it to
+	// loud-reject prompt content the provider cannot consume — so a non-conformant
+	// client that ignores the advertised caps still gets a clear error instead of a
+	// silent drop.
+	//
+	// CAPTURE-ONCE IS CORRECT IN P0: ACP carries NO per-session provider/model
+	// selector (session/new passes only mcpServers, never a selector), so every ACP
+	// session rides the DEFAULT engine and a.caps is correct for every one of them.
+	// svc.ProviderCapabilities() returns the composition-intersected DEFAULT caps —
+	// the SAME value the gRPC/HTTP CreateSessionResponse echoes for a default-engine
+	// session — so the ACP gate and the wire echo cannot disagree. A per-session ACP
+	// capability gate (capture-once → per-session lookup) lands only when an ACP
+	// selector lands (P1+); see docs/design/MULTI-PROVIDER.md.
 	caps port.ProviderCapabilities
 
 	// resume reports whether session/load is supported (a session store is

@@ -113,10 +113,11 @@ func TestSessionEngineFactoryBuildsUsableEngine(t *testing.T) {
 	factory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, nil, prompt.RootAssembler{})
 
 	// Zero selector + no specs: the per-session engine binds the DEFAULT provider.
-	eng, closeFn, err := factory(context.Background(), server.ProviderSelector{}, []mcp.ServerConfig{})
+	res, err := factory(context.Background(), server.ProviderSelector{}, []mcp.ServerConfig{})
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
+	eng, closeFn := res.Engine, res.Close
 	if eng == nil {
 		t.Fatal("factory returned a nil engine")
 	}
@@ -154,10 +155,11 @@ func twoProviderFactory(t *testing.T) (server.SessionEngineFactory, *providerReg
 // returns the terminal text (so a test can assert the bound provider's reply).
 func runFactoryEngine(t *testing.T, factory server.SessionEngineFactory, sel server.ProviderSelector) string {
 	t.Helper()
-	eng, closeFn, err := factory(context.Background(), sel, nil)
+	res, err := factory(context.Background(), sel, nil)
 	if err != nil {
 		t.Fatalf("factory(%+v): %v", sel, err)
 	}
+	eng, closeFn := res.Engine, res.Close
 	defer func() { _ = closeFn() }()
 	sess := session.New("s1", session.ModeDefault, "/ws", session.Limits{MaxTurns: 5}, time.Now())
 	ws := memfs.NewWorkspace("/ws")
@@ -169,7 +171,7 @@ func runFactoryEngine(t *testing.T, factory server.SessionEngineFactory, sel ser
 // fallback to the default.
 func TestSessionEngineFactoryUnknownProvider(t *testing.T) {
 	factory, _ := twoProviderFactory(t)
-	_, _, err := factory(context.Background(), server.ProviderSelector{ProviderID: "anthropic"}, nil)
+	_, err := factory(context.Background(), server.ProviderSelector{ProviderID: "anthropic"}, nil)
 	if err == nil {
 		t.Fatal("expected an error for an unknown provider id, got nil")
 	}
@@ -219,11 +221,12 @@ func TestSessionEngineFactoryModelPassthrough(t *testing.T) {
 	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{})
 
 	const unknownModel = "gpt-5-preview-not-in-catalog"
-	eng, closeFn, err := factory(context.Background(),
+	res, err := factory(context.Background(),
 		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: unknownModel}, nil)
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
+	eng, closeFn := res.Engine, res.Close
 	defer func() { _ = closeFn() }()
 	sess := session.New("s1", session.ModeDefault, "/ws", session.Limits{MaxTurns: 5}, time.Now())
 	drainRun(eng.RunContent(context.Background(), sess, memfs.NewWorkspace("/ws"), "hi", nil))
@@ -260,22 +263,24 @@ func TestSessionEngineFactoryContextWindowFromCatalog(t *testing.T) {
 	factory, _ := twoProviderFactory(t)
 
 	// Known model ⇒ the engine's window is the catalog limit.
-	eng, closeFn, err := factory(context.Background(),
+	res, err := factory(context.Background(),
 		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: knownModel}, nil)
 	if err != nil {
 		t.Fatalf("factory(known): %v", err)
 	}
+	eng, closeFn := res.Engine, res.Close
 	defer func() { _ = closeFn() }()
 	if got := eng.ContextWindow(); got != knownLimit {
 		t.Fatalf("ContextWindowTokens = %d, want the catalog limit %d for %q", got, knownLimit, knownModel)
 	}
 
 	// Passthrough (uncatalogued) model ⇒ the 128k default fallback.
-	engPT, closePT, err := factory(context.Background(),
+	resPT, err := factory(context.Background(),
 		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: "totally-made-up-model"}, nil)
 	if err != nil {
 		t.Fatalf("factory(passthrough): %v", err)
 	}
+	engPT, closePT := resPT.Engine, resPT.Close
 	defer func() { _ = closePT() }()
 	if got := engPT.ContextWindow(); got != defaultContextWindowTokens {
 		t.Fatalf("passthrough ContextWindowTokens = %d, want the %d default fallback", got, defaultContextWindowTokens)
@@ -291,12 +296,13 @@ func TestSessionEngineFactorySelectorMCPCoexist(t *testing.T) {
 	factory, _ := twoProviderFactory(t)
 	// One spec to an unreachable URL: best-effort connect logs-and-skips, the engine
 	// is still built (core tools only) and bound to the SELECTED provider.
-	eng, closeFn, err := factory(context.Background(),
+	res, err := factory(context.Background(),
 		server.ProviderSelector{ProviderID: providerOpenRouter},
 		[]mcp.ServerConfig{{Name: "docs", URL: "https://127.0.0.1:0/mcp"}})
 	if err != nil {
 		t.Fatalf("factory(sel+specs): %v", err)
 	}
+	eng, closeFn := res.Engine, res.Close
 	if eng == nil || closeFn == nil {
 		t.Fatal("factory returned nil engine/close for sel+specs")
 	}

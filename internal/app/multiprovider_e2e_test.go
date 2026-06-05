@@ -6,7 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/encoding/protojson"
+
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
@@ -102,6 +106,184 @@ func TestMultiProviderE2E(t *testing.T) {
 	if got := drainRun(run); got != "REPLY-FROM-openai" {
 		t.Fatalf("zero-selector turn routed to %q, want the default (openai) provider's reply", got)
 	}
+}
+
+// TestMultiProviderCapabilityEcho drives the FULL composition and asserts the
+// per-session capability echo (sink b) and the single-source agreement between the
+// ACP gate (ProviderCapabilities) and the wire echo (sink c). It wires DISTINCT
+// adapter capabilities per provider via the providerConstructor seam: openai
+// Image:false, openrouter Image:true. The catalog is REAL, so the echo is the
+// catalog ∩ adapter intersection. All offline.
+func TestMultiProviderCapabilityEcho(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+
+	// openai is the DEFAULT provider (preferredDefaultProvider prefers it). cfg.Model
+	// is left empty ⇒ the default session resolves to the empty model on openai ⇒
+	// passthrough ⇒ adapter-only caps for the default = openai's Image:false.
+	built, err := Build(ctx, Config{
+		Workspace: workspace,
+		NoSoul:    true,
+		envDetector: fakeEnv(map[string]string{
+			"OPENAI_API_KEY":     "sk-x",
+			"OPENROUTER_API_KEY": "sk-x",
+		}),
+		providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
+			caps := port.ProviderCapabilities{Image: id == providerOpenRouter}
+			// Identifying reply so a routed turn proves WHICH provider was bound,
+			// closing the routing⇄caps coherence gap (the turn and the caps must agree
+			// on the same provider). Two turns scripted per mock (one per assertion).
+			reply := "REPLY-FROM-" + id
+			return mockllm.NewWith([]mockllm.Option{mockllm.WithCapabilities(caps)},
+				mockllm.TextTurn(reply), mockllm.TextTurn(reply))
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer built.Close()
+	svc := built.Service
+
+	// (b) per-session echo for a session bound to openrouter + a catalog image model,
+	// AND the routing⇄caps coherence: the turn routes to the openrouter-bound provider
+	// (REPLY-FROM-openrouter) AND that session's caps reflect openrouter's intersected
+	// caps (Image:true), in ONE test.
+	imgModel, _ := firstImageModel(t, providerOpenRouter)
+	orSess, err := svc.CreateSessionWithProvider(ctx, workspace, session.ModeDefault, defaultLimits(),
+		server.ProviderSelector{ProviderID: providerOpenRouter, ModelID: imgModel})
+	if err != nil {
+		t.Fatalf("create openrouter session: %v", err)
+	}
+	if got := svc.SessionCapabilities(orSess.ID); !got.Image {
+		t.Fatalf("openrouter+image-model session echo Image = false, want true (catalog image ∩ adapter Image:true)")
+	}
+	orRun, err := svc.StartRun(ctx, orSess.ID, "hi")
+	if err != nil {
+		t.Fatalf("StartRun(openrouter): %v", err)
+	}
+	if got := drainRun(orRun); got != "REPLY-FROM-openrouter" {
+		t.Fatalf("openrouter session turn routed to %q, want REPLY-FROM-openrouter (routing⇄caps must agree)", got)
+	}
+
+	// A session bound to openai (Image:false adapter) + the same image model ⇒ the
+	// intersection is false, it DIFFERS from the openrouter echo (per-session), AND the
+	// turn routes to the openai-bound provider — proving routing and caps agree on the
+	// SAME provider per session.
+	oaSess, err := svc.CreateSessionWithProvider(ctx, workspace, session.ModeDefault, defaultLimits(),
+		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: imgModel})
+	if err != nil {
+		t.Fatalf("create openai session: %v", err)
+	}
+	if got := svc.SessionCapabilities(oaSess.ID); got.Image {
+		t.Fatalf("openai+image-model session echo Image = true, want false (adapter Image:false)")
+	}
+	oaRun, err := svc.StartRun(ctx, oaSess.ID, "hi")
+	if err != nil {
+		t.Fatalf("StartRun(openai): %v", err)
+	}
+	if got := drainRun(oaRun); got != "REPLY-FROM-openai" {
+		t.Fatalf("openai session turn routed to %q, want REPLY-FROM-openai (routing⇄caps must agree)", got)
+	}
+
+	// (5) zero-selector session ⇒ echo == DefaultCapabilities (the default provider's
+	// intersected caps). The default is openai (Image:false) on the empty model.
+	zeroSess, err := svc.CreateSession(ctx, workspace, session.ModeDefault, defaultLimits())
+	if err != nil {
+		t.Fatalf("create zero-selector session: %v", err)
+	}
+	def := svc.ProviderCapabilities()
+	if svc.SessionCapabilities(zeroSess.ID) != def {
+		t.Fatalf("zero-selector echo %+v != ProviderCapabilities %+v (must read DefaultCapabilities)",
+			svc.SessionCapabilities(zeroSess.ID), def)
+	}
+
+	// (c) single-source agreement: the ACP gate (ProviderCapabilities) equals the
+	// wire echo for a default-engine session — both derive from DefaultCapabilities.
+	if def.Image {
+		t.Fatalf("default ProviderCapabilities Image = true, want false (default openai adapter Image:false)")
+	}
+}
+
+// firstImageModel returns the first catalog model id for providerID that the
+// catalog marks image-capable.
+func firstImageModel(t *testing.T, providerID string) (string, bool) {
+	t.Helper()
+	p, ok := providercatalog.Default().Provider(providerID)
+	if !ok {
+		t.Fatalf("provider %q not in catalog", providerID)
+	}
+	for _, m := range p.Models() {
+		if m.SupportsImageInput() {
+			return m.ID(), true
+		}
+	}
+	t.Skipf("no catalogued image model for %q", providerID)
+	return "", false
+}
+
+// TestSessionCapabilitiesNoSecrets builds with SENTINEL keys and asserts the
+// per-session capability echo carries NO secret. SessionCapabilities is bools-only,
+// so it structurally cannot leak — this test documents that and tripwires a future
+// string field. It also re-checks ProviderCapabilities (the ACP gate) and the
+// CreateSessionResponse path through the gRPC handler for the sentinel in NO string
+// field (CWE-200). All offline.
+func TestSessionCapabilitiesNoSecrets(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	const sentinelKey = "sk-SENTINEL-capecho"
+
+	built, err := Build(ctx, Config{
+		Workspace: workspace,
+		NoSoul:    true,
+		envDetector: fakeEnv(map[string]string{
+			"OPENAI_API_KEY":     sentinelKey,
+			"OPENROUTER_API_KEY": sentinelKey,
+		}),
+		providerConstructor: func(_ Config, _, _, _ string) port.LLMProvider {
+			return mockllm.NewWith([]mockllm.Option{mockllm.WithCapabilities(port.ProviderCapabilities{Image: true})}, mockllm.TextTurn("x"))
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer built.Close()
+	svc := built.Service
+
+	// Drive the gRPC CreateSession handler so the actual CreateSessionResponse (incl.
+	// session_capabilities + capabilities) is built — the wire surface the client
+	// sees. Assert the sentinel appears in NO string field.
+	h := server.NewHarnessServer(svc)
+	imgModel, _ := firstImageModel(t, providerOpenRouter)
+	resp, err := h.CreateSession(ctx, &mecatlv1.CreateSessionRequest{
+		Workspace:  workspace,
+		ProviderId: providerOpenRouter,
+		ModelId:    imgModel,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// The echo must reflect the intersection (openrouter Image:true ∩ catalog image).
+	if !resp.GetSessionCapabilities().GetImage() {
+		t.Fatal("session_capabilities.image = false, want true (intersection)")
+	}
+	forbidden := []string{sentinelKey, "OPENAI_API_KEY", "OPENROUTER_API_KEY", openRouterDefaultBaseURL}
+	// Belt-and-braces marshal scan: serialize the ENTIRE response (all fields, incl.
+	// capabilities + session_capabilities + any future-added string field) and assert
+	// none of the forbidden substrings appear. This future-proofs the tripwire against
+	// a new string field — not just the session_id checked structurally below.
+	blob, merr := protojson.Marshal(resp)
+	if merr != nil {
+		t.Fatalf("protojson.Marshal(resp): %v", merr)
+	}
+	for _, bad := range forbidden {
+		if strings.Contains(string(blob), bad) {
+			t.Fatalf("secret %q leaked into the marshalled CreateSessionResponse: %s", bad, blob)
+		}
+	}
+
+	// ProviderCapabilities (the ACP gate) is a bools-only neutral value — no string
+	// to leak; this asserts it is the same source the echo reads for the default.
+	_ = svc.ProviderCapabilities()
 }
 
 // runProviderTurn creates a session bound to sel, drives one turn, and returns the

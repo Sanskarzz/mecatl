@@ -46,10 +46,16 @@ func modelSnapshot(reg *providerRegistry) []*mecatlv1.ModelInfo {
 				name = m.ID() // display falls back to the id when the catalog has no name
 			}
 			out = append(out, &mecatlv1.ModelInfo{
-				Id:           m.ID(),
-				ProviderId:   pid,
-				DisplayName:  name,
-				Image:        m.SupportsImageInput(),
+				Id:          m.ID(),
+				ProviderId:  pid,
+				DisplayName: name,
+				// Image is the INTERSECTION (catalog modality ∩ adapter transmit), the
+				// single source computed in capability.go — NOT the catalog alone. So a
+				// catalog that claims image for a model the wired adapter cannot send
+				// image parts to advertises image=false (the honest truth). P0 effect is
+				// identical (adapter Image:true ∩ catalog image = catalog image); a P1
+				// adapter that reports Image:false flips it as pure data.
+				Image:        modelCapability(reg, pid, m.ID()).Image,
 				Reasoning:    m.SupportsReasoning(),
 				ContextLimit: int64(m.ContextLimit()),
 			})

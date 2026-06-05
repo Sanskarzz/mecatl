@@ -115,11 +115,12 @@ func capsFromCreate(t *testing.T, svc *server.Service) *mecatlv1.ServerCapabilit
 	return resp.GetCapabilities()
 }
 
-// TestCapabilitiesMediaFromProvider asserts the image/audio caps are driven by
-// the WIRED PROVIDER's ProviderCapabilities (via the engine seam), not a static
-// guess: a provider advertising image-only surfaces over the gRPC CreateSession
-// response as image=true, audio=false. This is the gate the client's @-mention
-// file-attach UX reads.
+// TestCapabilitiesMediaFromProvider asserts the image/audio caps are driven by the
+// composition-supplied DefaultCapabilities (the catalog ∩ adapter intersection for
+// the default provider+model, multi-provider Phase 0 S5) — NOT the bare engine seam
+// (which is adapter-only and would re-introduce the catalog gap): a default capability
+// of image-only surfaces over the gRPC CreateSession response as image=true,
+// audio=false. This is the gate the client's @-mention file-attach UX reads.
 func TestCapabilitiesMediaFromProvider(t *testing.T) {
 	cat := tool.NewCatalog()
 	engine := agent.NewEngine(agent.Deps{
@@ -133,6 +134,8 @@ func TestCapabilitiesMediaFromProvider(t *testing.T) {
 		Store:      memstore.New(),
 		Workspaces: func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
 		Now:        func() time.Time { return time.Unix(0, 0) },
+		// The server reads DefaultCapabilities (composition-computed), not the engine.
+		DefaultCapabilities: port.ProviderCapabilities{Image: true},
 	})
 	if err != nil {
 		t.Fatalf("new service: %v", err)

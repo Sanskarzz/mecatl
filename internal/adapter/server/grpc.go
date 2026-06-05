@@ -43,9 +43,18 @@ func (h *HarnessServer) CreateSession(ctx context.Context, req *mecatlv1.CreateS
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	// session_capabilities echoes the per-session resolved input capability (catalog
+	// ∩ adapter for THIS session's provider+model), which may differ from the
+	// server-wide capabilities when a non-default selector was supplied. Both read
+	// the composition's single source, so they cannot disagree.
+	scaps := h.svc.SessionCapabilities(sess.ID)
 	return &mecatlv1.CreateSessionResponse{
 		SessionId:    string(sess.ID),
 		Capabilities: h.svc.capabilities(),
+		SessionCapabilities: &mecatlv1.SessionCapabilities{
+			Image: scaps.Image,
+			Audio: scaps.Audio,
+		},
 	}, nil
 }
 

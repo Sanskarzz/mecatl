@@ -52,21 +52,41 @@ type ProviderSelector struct {
 	ModelID string
 }
 
+// SessionEngineResult is what a SessionEngineFactory returns: the built
+// per-session engine, the per-session resolved input Capabilities (a NEUTRAL
+// port.ProviderCapabilities computed in composition as the catalog ∩ adapter
+// intersection for the session's resolved provider+model — see internal/app
+// modelCapability), and the Close func that tears down that session's MCP manager
+// (a no-op when no specs). A struct (not a 4-tuple) keeps the two interface-typed
+// members readable and leaves room for future per-session metadata without another
+// signature churn. The Service echoes Capabilities back on CreateSessionResponse
+// (session_capabilities) and never recomputes it — the composition is the single
+// source so the wire echo and the ListModels view cannot disagree.
+type SessionEngineResult struct {
+	// Engine is the built per-session engine. Required (non-nil on a nil error).
+	Engine *agent.Engine
+	// Capabilities is the session's resolved input capability (catalog ∩ adapter),
+	// computed in composition. The server echoes it verbatim; it never recomputes.
+	Capabilities port.ProviderCapabilities
+	// Close tears down the session's MCP manager. Never nil (a no-op when no specs).
+	Close func() error
+}
+
 // SessionEngineFactory builds a PER-SESSION agent engine over a non-default
 // provider/model selector AND/OR the client-provided streaming-HTTP MCP servers
-// (specs), returning the engine, a close func that tears down that session's MCP
-// manager (a no-op when no specs), and an error. It is the seam the ACP adapter
-// uses to mount an editor's session/new mcpServers AND the seam the gRPC/HTTP
-// CreateSession path uses to bind a per-session provider/model — both WITHOUT
-// leaking those tools (or the registry) into the shared engine every other
-// session uses. A session needing BOTH a non-default model and client MCP gets
-// ONE engine over ONE catalog from a single call (sel + specs are orthogonal
-// inputs). The factory returns an error wrapping ErrInvalidArgument for an
-// unknown/unavailable provider id. The composition root (internal/app) supplies
-// it via Config.SessionEngine; when nil, a non-default selector or non-empty
-// specs are rejected with ErrInvalidArgument. It mirrors MemberEngineFactory: the
-// Service references the type in its signatures but never builds managers itself.
-type SessionEngineFactory func(ctx context.Context, sel ProviderSelector, specs []mcp.ServerConfig) (*agent.Engine, func() error, error)
+// (specs), returning a SessionEngineResult (engine + per-session capabilities +
+// close func) and an error. It is the seam the ACP adapter uses to mount an
+// editor's session/new mcpServers AND the seam the gRPC/HTTP CreateSession path
+// uses to bind a per-session provider/model — both WITHOUT leaking those tools (or
+// the registry/catalog) into the shared engine every other session uses. A session
+// needing BOTH a non-default model and client MCP gets ONE engine over ONE catalog
+// from a single call (sel + specs are orthogonal inputs). The factory returns an
+// error wrapping ErrInvalidArgument for an unknown/unavailable provider id. The
+// composition root (internal/app) supplies it via Config.SessionEngine; when nil, a
+// non-default selector or non-empty specs are rejected with ErrInvalidArgument. It
+// mirrors MemberEngineFactory: the Service references the type in its signatures
+// but never builds managers itself.
+type SessionEngineFactory func(ctx context.Context, sel ProviderSelector, specs []mcp.ServerConfig) (SessionEngineResult, error)
 
 // Config wires the server adapter to the WP8 engine and its collaborators.
 type Config struct {
@@ -136,6 +156,16 @@ type Config struct {
 	// adapter never imports providercatalog or the registry. May be empty (zero
 	// providers available). NO secret material (no key, env var name, or base URL).
 	Models []*mecatlv1.ModelInfo
+
+	// DefaultCapabilities is the NEUTRAL per-(default provider+default model) input
+	// capability — the catalog ∩ adapter INTERSECTION computed once in composition
+	// (internal/app modelCapability for the registry default + cfg.Model). It is the
+	// single source for BOTH the shared/default-engine session_capabilities echo
+	// (when a session uses no per-session engine) AND ProviderCapabilities() (the ACP
+	// gate). The server adapter holds only this neutral value — it never imports the
+	// catalog or registry. The zero value (text-only) is the safe default for a
+	// child/member service with no provider. (multi-provider Phase 0, S5.)
+	DefaultCapabilities port.ProviderCapabilities
 
 	// Skills is the resolved skills-inventory snapshot taken at startup. It backs
 	// ListSkills and is a pure read of this snapshot (no live discovery — skills
@@ -301,7 +331,12 @@ type Service struct {
 // for the owning session id.
 type sessionEngine struct {
 	engine *agent.Engine
-	close  func() error
+	// caps is the session's resolved input capability (catalog ∩ adapter), computed
+	// in composition and echoed verbatim on CreateSessionResponse.session_capabilities
+	// via SessionCapabilities. Never recomputed here — the composition is the single
+	// source so the per-session echo cannot drift from the ListModels view.
+	caps  port.ProviderCapabilities
+	close func() error
 }
 
 // runState couples an in-flight *agent.Run with the live *session.Session the
@@ -424,12 +459,13 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
 	}
 
-	eng, closeFn, err := s.cfg.SessionEngine(ctx, sel, specs)
+	res, err := s.cfg.SessionEngine(ctx, sel, specs)
 	if err != nil {
 		// Factory maps an unknown/unavailable provider to ErrInvalidArgument; any
 		// error is propagated as-is for the caller to map to a status.
 		return nil, err
 	}
+	eng, closeFn := res.Engine, res.Close
 	sess := session.New(s.cfg.NewID(), mode, workspace, limits, s.cfg.Now())
 
 	// Authoritative cap check under the SAME lock as the insert (TOCTOU-safe): if
@@ -447,7 +483,7 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 	// Reserve the slot under the lock so a concurrent create cannot also claim it,
 	// then persist OUTSIDE the lock (no I/O under the mutex). If the persist fails,
 	// evict the reservation and tear the engine down.
-	s.sessionEngines[sess.ID] = &sessionEngine{engine: eng, close: closeFn}
+	s.sessionEngines[sess.ID] = &sessionEngine{engine: eng, caps: res.Capabilities, close: closeFn}
 	s.mu.Unlock()
 
 	if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
@@ -480,14 +516,13 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 	has := func(name string) bool {
 		return s.cfg.Engine != nil && s.cfg.Engine.HasTool(name)
 	}
-	// Multimodal prompt-input caps come from the wired provider (via the engine
-	// seam), NOT a registered tool — they gate the client's @-mention file-attach
-	// UX. Guard the nil engine the same way has() does, so a child/member service
-	// with no engine advertises image/audio=false rather than panicking.
-	var pcaps port.ProviderCapabilities
-	if s.cfg.Engine != nil {
-		pcaps = s.cfg.Engine.Capabilities()
-	}
+	// Multimodal prompt-input caps come from the composition-computed DEFAULT
+	// intersection (catalog ∩ adapter for the default provider+model), NOT the bare
+	// engine.Capabilities() (which is adapter-only and would re-introduce the catalog
+	// gap). The zero value (text-only) is the safe default for a child/member service
+	// with no provider. This is the SAME DefaultCapabilities ProviderCapabilities()
+	// returns, so the server-wide caps echo and the ACP gate share ONE source.
+	pcaps := s.cfg.DefaultCapabilities
 	return &mecatlv1.ServerCapabilities{
 		Mcp:            s.cfg.MCPProvider != nil,
 		SlashCommands:  s.cfg.Commands != nil,
@@ -734,7 +769,7 @@ func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, 
 	// Re-mount client MCP on resume with the ZERO provider selector: a resumed
 	// session keeps the DEFAULT provider (per-session provider/model binding on
 	// resume is out of scope — the wire CreateSession selector is for new sessions).
-	eng, closeFn, err := s.cfg.SessionEngine(ctx, ProviderSelector{}, specs)
+	res, err := s.cfg.SessionEngine(ctx, ProviderSelector{}, specs)
 	if err != nil {
 		// The session was loaded + (if needed) reopened and re-persisted, but the
 		// per-session engine could not be built. We deliberately do NOT roll that
@@ -751,7 +786,7 @@ func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, 
 	if prior, ok := s.sessionEngines[id]; ok && prior.close != nil {
 		_ = prior.close()
 	}
-	s.sessionEngines[id] = &sessionEngine{engine: eng, close: closeFn}
+	s.sessionEngines[id] = &sessionEngine{engine: res.Engine, caps: res.Capabilities, close: res.Close}
 	s.mu.Unlock()
 	return sess, nil
 }
@@ -812,12 +847,39 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 	return run, nil
 }
 
-// ProviderCapabilities reports the configured LLM provider's multimodal input
-// support, so a surface adapter can advertise it (e.g. ACP promptCapabilities)
-// and loud-reject unsupported prompt content. It reads the capabilities through
-// the engine's provider seam.
+// ProviderCapabilities reports the DEFAULT provider+model's multimodal input
+// support, so a surface adapter can advertise it (e.g. ACP promptCapabilities) and
+// loud-reject unsupported prompt content. It returns the composition-computed
+// DefaultCapabilities — the catalog ∩ adapter INTERSECTION for the default
+// provider+cfg.Model — NOT the bare engine.Capabilities() (adapter-only, which
+// would over-advertise a model the adapter can transmit to but the catalog says
+// cannot take image). This is the SAME value the CreateSessionResponse echoes for a
+// default-engine session, so the ACP gate and the wire echo cannot disagree.
+//
+// ACP carries NO per-session provider/model selector in P0 (session/new passes only
+// mcpServers, never a selector), so every ACP session rides the DEFAULT engine and
+// the Agent's capture-once a.caps = svc.ProviderCapabilities() is correct for every
+// ACP session. A per-session ACP capability gate lands only when an ACP selector
+// lands (P1+) — see docs/design/MULTI-PROVIDER.md.
 func (s *Service) ProviderCapabilities() port.ProviderCapabilities {
-	return s.cfg.Engine.Capabilities()
+	return s.cfg.DefaultCapabilities
+}
+
+// SessionCapabilities reports the resolved input capability (catalog ∩ adapter)
+// for the session under id: the per-session engine's precomputed neutral caps when
+// a per-session engine is registered (a non-default provider/model selector or
+// client MCP), else the composition-computed DefaultCapabilities (the shared-engine
+// path). The value was computed ONCE in composition (modelCapability) and stored;
+// SessionCapabilities never recomputes it, so the wire echo cannot drift from the
+// ListModels view. It backs the CreateSessionResponse.session_capabilities echo.
+func (s *Service) SessionCapabilities(id session.SessionID) port.ProviderCapabilities {
+	s.mu.Lock()
+	se, ok := s.sessionEngines[id]
+	s.mu.Unlock()
+	if ok {
+		return se.caps
+	}
+	return s.cfg.DefaultCapabilities
 }
 
 // LookupRun returns the in-flight run for a session and true, or false if no

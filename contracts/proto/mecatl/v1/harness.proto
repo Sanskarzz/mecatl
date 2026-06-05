@@ -267,6 +267,31 @@ message CreateSessionResponse {
   // capabilities reports which optional features this server has enabled, for an
   // honest client UI. Nil/absent from an older server → treat as all-false.
   ServerCapabilities capabilities = 2;
+
+  // session_capabilities reports the multimodal input capability of the
+  // provider+model THIS session actually resolved to — the INTERSECTION of the
+  // catalog's per-model modalities and the wired adapter's transmit capability,
+  // computed once in composition (internal/app). It MAY differ from `capabilities`
+  // (the server-wide shared-engine view) when the request carried
+  // provider_id/model_id selecting a NON-default engine. Clients gate per-session
+  // @-attach UX on THIS, not the server-wide bits. Nil/absent from an older server
+  // → fall back to `capabilities`. (multi-provider Phase 0, S5.)
+  SessionCapabilities session_capabilities = 3;
+}
+
+// SessionCapabilities is the per-session resolved input capability: ONLY the
+// model-varying input bits (image/audio). A dedicated message (not a reuse of
+// ServerCapabilities) keeps the per-session surface MINIMAL — the other
+// ServerCapabilities bits (mcp/skills/teams/...) are server-wide and would be
+// misleading per session. Reasoning is intentionally EXCLUDED: it is discoverable
+// via ListModels for the selected id and is not a per-session input-gating
+// concern (no adapter "can replay reasoning" authority bit exists). The value is
+// the catalog ∩ adapter intersection computed in composition. (Phase 0, S5.)
+message SessionCapabilities {
+  // image is true when the resolved provider+model can consume image prompt parts.
+  bool image = 1;
+  // audio is true when the resolved provider+model can consume audio prompt parts.
+  bool audio = 2;
 }
 
 // GetSessionRequest looks up an existing session by id.

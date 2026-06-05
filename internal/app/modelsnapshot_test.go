@@ -131,6 +131,49 @@ func TestModelSnapshotSortedDeterministic(t *testing.T) {
 	}
 }
 
+// TestModelSnapshotImageReflectsIntersection: sink (a) reads the catalog ∩ adapter
+// INTERSECTION, not the catalog alone. With an adapter-says-no double (Image:false)
+// for a provider whose catalog DOES claim image, every projected ModelInfo.Image is
+// false — proving modelSnapshot consults the adapter authority via modelCapability.
+func TestModelSnapshotImageReflectsIntersection(t *testing.T) {
+	// A registry whose openai provider reports Image:false (the P1 "adapter says no").
+	reg := &providerRegistry{
+		entries: map[string]providerEntry{
+			providerOpenAI: {
+				id:        providerOpenAI,
+				provider:  mockllm.NewWith([]mockllm.Option{mockllm.WithCapabilities(port.ProviderCapabilities{Image: false})}, mockllm.TextTurn("x")),
+				available: true,
+			},
+		},
+		defaultID: providerOpenAI,
+	}
+	models := modelSnapshot(reg)
+	if len(models) == 0 {
+		t.Fatal("expected openai models")
+	}
+	for _, m := range models {
+		if m.GetImage() {
+			t.Fatalf("ModelInfo[%q].Image = true with an adapter reporting Image:false; "+
+				"snapshot read the catalog alone, not the intersection", m.GetId())
+		}
+	}
+
+	// Control: with an adapter reporting Image:true, the catalog's image models DO
+	// advertise image (the intersection is the catalog value), so the false above is
+	// the adapter's doing, not a blanket false.
+	regYes := regWithProvider(providerOpenAI, port.ProviderCapabilities{Image: true})
+	anyImage := false
+	for _, m := range modelSnapshot(regYes) {
+		if m.GetImage() {
+			anyImage = true
+			break
+		}
+	}
+	if !anyImage {
+		t.Fatal("with adapter Image:true, expected >=1 catalog image model to advertise image")
+	}
+}
+
 // TestModelSnapshotMapsCatalogFields: the projected ModelInfo carries the catalog's
 // image/reasoning/context_limit for a known model (mapping correctness).
 func TestModelSnapshotMapsCatalogFields(t *testing.T) {

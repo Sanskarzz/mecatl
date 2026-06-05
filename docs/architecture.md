@@ -1171,3 +1171,15 @@ proto slice (mirroring the `ListAgents` idiom). The `mock` provider advertises n
 selectable models. `ServerCapabilities.model_selection` is true iff the snapshot is
 non-empty, gating the client's model picker the way `agents` gates `/agents`. Provider
 key/base-URL flags landed in `cmd/mecated` earlier; the picker UX is a client concern.
+
+**Capability single-source (`internal/app/capability.go`).** A model's true input
+capability is the INTERSECTION `catalog-per-model-modalities ∩ adapter-Capabilities()`,
+computed by `modelCapability` in composition (the only layer holding both inputs). That
+ONE neutral `port.ProviderCapabilities` feeds three sinks so they cannot disagree:
+`ModelInfo.image` (ListModels), the `CreateSessionResponse.session_capabilities` echo
+(per-session), and the ACP gate (`Service.ProviderCapabilities()`, the default caps).
+The server/acp adapters receive only the computed value — no catalog/registry type
+crosses inward. Keys are never on the wire — only the provider id. **Full design:
+see `docs/design/MULTI-PROVIDER.md`** (registry, catalog-as-data, DTO neutrality,
+selection primitive, per-session engine, capability intersection, disclosure posture
++ per-client key custody, and the P0→P3 phasing).

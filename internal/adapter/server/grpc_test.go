@@ -69,6 +69,10 @@ func newService(t *testing.T, llm *mockllm.Provider, rules []governance.Rule, to
 		Store:      memstore.New(),
 		Workspaces: func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
 		Now:        func() time.Time { return time.Unix(0, 0) },
+		// The server reads DefaultCapabilities (composition-computed), not the engine.
+		// In these tests there is no catalog/selector, so the intersection is the bare
+		// adapter caps — mirror that by sourcing them from the wired provider.
+		DefaultCapabilities: llm.Capabilities(),
 	})
 	if err != nil {
 		t.Fatalf("new service: %v", err)

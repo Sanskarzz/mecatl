@@ -389,6 +389,14 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// key/env/base-URL); the projection lives in modelsnapshot.go so the server
 		// adapter never imports providercatalog or the registry.
 		Models: modelSnapshot(reg),
+		// DefaultCapabilities: the catalog ∩ adapter INTERSECTION for the DEFAULT
+		// provider + cfg.Model, computed ONCE here in composition (the single source).
+		// It backs BOTH the shared-engine session_capabilities echo (when a session
+		// uses no per-session engine) AND Service.ProviderCapabilities() (the ACP gate),
+		// so the wire echo, the server-wide caps, and the ACP gate cannot disagree. A
+		// neutral port.ProviderCapabilities — the registry/catalog never reach the
+		// server adapter. (multi-provider Phase 0, S5.)
+		DefaultCapabilities: modelCapability(reg, reg.Default(), cfg.Model),
 		// ListSkills snapshot: the skills discovered once at build time (registerSkills),
 		// projected into the proto form. Skills are immutable for the process lifetime,
 		// so this is a startup snapshot (like Agents), not a live lister. nil/empty when
@@ -488,19 +496,23 @@ func sessionEngineFactory(
 	mcpProvider mcp.Provider,
 	instructions prompt.InstructionAssembler,
 ) server.SessionEngineFactory {
-	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig) (server.SessionEngineResult, error) {
 		// Resolve the provider/model selector FIRST (before any MCP connect), so an
 		// unknown provider fails fast without a wasted connection. The zero selector
 		// keeps the default provider + cfg.Model (pre-S3 behaviour) and window=0 (⇒ the
-		// 128k default, byte-identical).
+		// 128k default, byte-identical). resolvedProviderID is threaded so the
+		// per-session capability intersection (modelCapability) keys on the right
+		// provider — the zero selector uses the registry default.
 		resolvedProvider, resolvedModel := provider, cfg.Model
+		resolvedProviderID := reg.Default()
 		contextWindow := 0
 		if sel.ProviderID != "" {
 			entry, ok := reg.Lookup(sel.ProviderID)
 			if !ok {
-				return nil, nil, fmt.Errorf("%w: unknown or unavailable provider %q", server.ErrInvalidArgument, sel.ProviderID)
+				return server.SessionEngineResult{}, fmt.Errorf("%w: unknown or unavailable provider %q", server.ErrInvalidArgument, sel.ProviderID)
 			}
 			resolvedProvider = entry.provider
+			resolvedProviderID = sel.ProviderID
 			// "" => provider/adapter default; a non-empty unknown model => verbatim
 			// passthrough (the catalog is NOT consulted to GATE the model string).
 			resolvedModel = sel.ModelID
@@ -511,6 +523,12 @@ func sessionEngineFactory(
 			// string still flows through verbatim regardless.
 			contextWindow = catalogContextWindow(sel.ProviderID, sel.ModelID)
 		}
+		// The per-session input capability is the catalog ∩ adapter INTERSECTION for
+		// the resolved (provider, model), computed HERE in composition — the single
+		// source the server echoes verbatim on session_capabilities. It is a NEUTRAL
+		// port.ProviderCapabilities; neither the catalog nor the registry crosses into
+		// the server adapter.
+		sessionCaps := modelCapability(reg, resolvedProviderID, resolvedModel)
 
 		onError := func(sc mcp.ServerConfig, err error) {
 			slog.Warn("client MCP server unreachable; skipping for this session",
@@ -546,7 +564,11 @@ func sessionEngineFactory(
 		// compaction/counting.
 		deps := engineDepsForProvider(cfg, resolvedProvider, resolvedModel, contextWindow, store, policy, hooks, mcpProvider, instructions)
 		deps.Catalog = cat
-		return agent.NewEngine(deps), closeFn, nil
+		return server.SessionEngineResult{
+			Engine:       agent.NewEngine(deps),
+			Capabilities: sessionCaps,
+			Close:        closeFn,
+		}, nil
 	}
 }
 

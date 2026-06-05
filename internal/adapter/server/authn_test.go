@@ -184,6 +184,54 @@ func TestHTTPAuthBearer(t *testing.T) {
 	}
 }
 
+// TestListModelsRequiresAuth pins the disclosure guarantee that ListModels is
+// behind auth on BOTH surfaces — it would otherwise leak the available-provider
+// set (CWE-200) to an unauthenticated caller. The gRPC UnaryInterceptor wraps ALL
+// handlers method-agnostically and the HTTP auth.Middleware wraps the whole mux, so
+// this is structurally covered; the explicit test guards against a future handler
+// that bypasses the interceptor.
+func TestListModelsRequiresAuth(t *testing.T) {
+	// gRPC: no credential ⇒ Unauthenticated; correct token ⇒ OK.
+	svc := newService(t, mockllm.New(), allowRules())
+	auth := server.NewAuthenticator(server.SecurityConfig{AuthToken: "secret"})
+	client, cleanup := dialGRPCSecure(t, svc, auth)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := client.ListModels(ctx, &mecatlv1.ListModelsRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("gRPC ListModels no-token code = %v, want Unauthenticated", status.Code(err))
+	}
+	if _, err := client.ListModels(bearerCtx(ctx, "secret"), &mecatlv1.ListModelsRequest{}); err != nil {
+		t.Fatalf("gRPC ListModels correct-token: %v", err)
+	}
+
+	// HTTP: GET /v1/models with no token ⇒ 401; with the token ⇒ 200.
+	srv := httptest.NewServer(secureHTTP(svc, auth))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatalf("GET /v1/models: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("HTTP ListModels no-token status = %d, want 401", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /v1/models with token: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("HTTP ListModels correct-token status = %d, want 200", resp.StatusCode)
+	}
+}
+
 // Health endpoints must bypass auth even when a token is configured.
 func TestHTTPHealthBypassesAuth(t *testing.T) {
 	svc := newService(t, mockllm.New(), allowRules())

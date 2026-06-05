@@ -73,6 +73,10 @@ func newServiceCfg(t *testing.T, llm *mockllm.Provider, rules []governance.Rule,
 		Workspaces:    func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
 		DefaultLimits: session.Limits{MaxTurns: 10, MaxToolCalls: 20},
 		Now:           func() time.Time { return time.Unix(0, 0) },
+		// The ACP gate reads ProviderCapabilities() = DefaultCapabilities (composition-
+		// computed), not the engine. In these tests there is no catalog/selector, so the
+		// intersection is the bare adapter caps — source them from the wired provider.
+		DefaultCapabilities: llm.Capabilities(),
 	}
 	if configFn != nil {
 		configFn(&cfg)
@@ -593,12 +597,12 @@ type fakeSessionEngine struct {
 	engine *agent.Engine
 }
 
-func (f *fakeSessionEngine) factory(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+func (f *fakeSessionEngine) factory(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig) (server.SessionEngineResult, error) {
 	f.mu.Lock()
 	f.called++
 	f.specs = specs
 	f.mu.Unlock()
-	return f.engine, func() error { return nil }, nil
+	return server.SessionEngineResult{Engine: f.engine, Close: func() error { return nil }}, nil
 }
 
 // stubEngine builds a minimal mockllm-backed engine the fake factory hands back as
@@ -1295,16 +1299,16 @@ type closingSessionEngine struct {
 	engine *agent.Engine
 }
 
-func (f *closingSessionEngine) factory(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (*agent.Engine, func() error, error) {
+func (f *closingSessionEngine) factory(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (server.SessionEngineResult, error) {
 	f.mu.Lock()
 	f.called++
 	f.mu.Unlock()
-	return f.engine, func() error {
+	return server.SessionEngineResult{Engine: f.engine, Close: func() error {
 		f.mu.Lock()
 		f.closed++
 		f.mu.Unlock()
 		return nil
-	}, nil
+	}}, nil
 }
 
 func (f *closingSessionEngine) calls() int {
