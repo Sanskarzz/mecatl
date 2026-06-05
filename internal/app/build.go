@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -286,6 +287,22 @@ type Config struct {
 	// available entry's provider is. Unexported: a composition-only test seam
 	// mirroring envDetector, not an operator knob. Production path unchanged.
 	providerConstructor providerConstructor
+
+	// liveModelHTTPClient is the composition-only test seam for the LIVE model
+	// listers' HTTP transport (mirroring envDetector/providerConstructor). Production
+	// leaves it nil — each lister then builds a default client with a sane timeout.
+	// Tests inject a mock transport (a RoundTripper) so the live-listing path runs
+	// OFFLINE and never contacts the real provider endpoint. Unexported: an internal
+	// composition detail, not an operator knob.
+	liveModelHTTPClient *http.Client
+
+	// liveModelRefreshSync makes the live-model refresh run SYNCHRONOUSLY inside
+	// Build (before it returns) instead of in a background goroutine. It is a
+	// composition-only test seam so an offline e2e can assert the post-refresh
+	// snapshot deterministically without sleeps/polling (the repo's anti-flake rule).
+	// Production leaves it false — the refresh is fully background, so Build never
+	// blocks on the network. Unexported: not an operator knob.
+	liveModelRefreshSync bool
 }
 
 // providerConstructor builds the port.LLMProvider for an available provider id,
@@ -454,9 +471,24 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		mcpClose()
 		return nil, fmt.Errorf("build service: %w", err)
 	}
+
+	// LIVE model listing: Build seeded svcCfg.Models with the EMBEDDED snapshot
+	// synchronously above (so the ModelSelection cap is honest from t=0 and Build
+	// NEVER touches the network). Now kick a SINGLE background refresh that fetches
+	// each available provider's live catalog (only providers WITH a lister actually
+	// fetch — openrouter today) and atomically SWAPS the merged result into the
+	// service via SetModels. The refresh is owned by COMPOSITION (it holds the
+	// registry + listers); the service just stores the projected proto slice. It is
+	// cancelled by Close so a shutdown mid-fetch does not leak the goroutine (the
+	// goleak suite catches a leak). startLiveModelRefresh is a no-op when no provider
+	// has a lister (e.g. mock/openai-only), so the goroutine + ctx are skipped.
+	refreshClose := startLiveModelRefresh(reg, svc, cfg.liveModelRefreshSync)
+
 	// Close tears down the main MCP manager AND any per-session client-MCP engines
-	// still registered (svc.Close), so a process exit leaks neither.
+	// still registered (svc.Close), so a process exit leaks neither. It also cancels
+	// the live-model refresh goroutine.
 	closeAll := func() {
+		refreshClose()
 		svc.Close()
 		mcpClose()
 	}

@@ -47,12 +47,7 @@ import (
 // authority bit in P0. ModelInfo.reasoning stays catalog-sourced. If P1 wants
 // reasoning intersected, add the adapter bit then (anti-speculative).
 func modelCapability(reg *providerRegistry, providerID, modelID string) port.ProviderCapabilities {
-	var adapterCaps port.ProviderCapabilities
-	if reg != nil {
-		if entry, ok := reg.Lookup(providerID); ok && entry.provider != nil {
-			adapterCaps = entry.provider.Capabilities()
-		}
-	}
+	adapterCaps := modelAdapterCaps(reg, providerID)
 
 	catImage, catAudio, catalogued := catalogModalities(providerID, modelID)
 	if !catalogued {
@@ -66,6 +61,38 @@ func modelCapability(reg *providerRegistry, providerID, modelID string) port.Pro
 		Audio:           adapterCaps.Audio && catAudio,
 		EmbeddedContext: adapterCaps.EmbeddedContext,
 	}
+}
+
+// modelAdapterCaps returns the wired adapter's transmit capabilities for a
+// provider (the AUTHORITY on what it can actually send), or the zero value
+// (text-only) for an unknown/unavailable provider or a nil registry — a provider
+// we cannot reach transmits nothing. It is the shared adapter-side input of BOTH
+// the catalog-keyed modelCapability (session echo / ACP gate) and the live-or-
+// embedded liveModelSnapshot (the picker), so the two intersect against the SAME
+// adapter authority.
+func modelAdapterCaps(reg *providerRegistry, providerID string) port.ProviderCapabilities {
+	var caps port.ProviderCapabilities
+	if reg != nil {
+		if entry, ok := reg.Lookup(providerID); ok && entry.provider != nil {
+			caps = entry.provider.Capabilities()
+		}
+	}
+	return caps
+}
+
+// hasImageModality reports whether "image" is among a model's input modalities. It
+// is the ONE predicate both the embedded path (via providercatalog's
+// SupportsImageInput, which tests the same list) and the LIVE path
+// (liveModelSnapshot) use to derive image-ness, so a live model and an embedded
+// model can never disagree on how image is computed. The image capability the
+// picker advertises is always adapterCaps.Image AND hasImageModality(modalities).
+func hasImageModality(modalities []string) bool {
+	for _, mod := range modalities {
+		if mod == "image" {
+			return true
+		}
+	}
+	return false
 }
 
 // catalogModalities reports the catalog's per-model input modalities (image,
@@ -87,15 +114,16 @@ func catalogModalities(providerID, modelID string) (image, audio, found bool) {
 		if m.ID() != modelID {
 			continue
 		}
-		// Image derives from the catalog's OWN accessor (SupportsImageInput) — the
-		// SAME predicate ListModels reads — so the session echo and ListModels
-		// provably agree on a model's image-ness (the anti-divergence guarantee rests
-		// on ONE function, not two copies of the "is image among inputModalities"
-		// test). Audio has no catalog accessor (the catalog carries no audio field
-		// today), so it derives from the raw modality list for forward-compatibility;
-		// it is false in the P0 data, so the AND in modelCapability is false regardless.
-		image = m.SupportsImageInput()
-		for _, mod := range m.InputModalities() {
+		// Image derives from the SHARED hasImageModality predicate over the catalog's
+		// raw modality list — the SAME function liveModelSnapshot (the picker) uses —
+		// so the session echo and ListModels provably agree on a model's image-ness
+		// (the anti-divergence guarantee rests on ONE function, not two copies of the
+		// "is image among inputModalities" test, for BOTH the live and embedded paths).
+		// Audio derives from the same raw list for forward-compatibility; it is false
+		// in the P0 data, so the AND in modelCapability is false regardless.
+		mods := m.InputModalities()
+		image = hasImageModality(mods)
+		for _, mod := range mods {
 			if mod == "audio" {
 				audio = true
 			}

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
@@ -300,6 +301,16 @@ var ErrConfig = errors.New("server: invalid config")
 type Service struct {
 	cfg Config
 
+	// models is the selectable-model inventory, SEEDED from cfg.Models at
+	// construction and atomically SWAPPED by SetModels when the composition layer's
+	// background live-catalog refresh completes (multi-provider live listing). It is
+	// an atomic.Pointer so ListModels and the ModelSelection capability read it
+	// lock-free while the refresh writes it race-free (verified under -race). The
+	// pointer is never nil after NewService (it is initialised to the seed, possibly
+	// an empty slice). The registry/catalog/lister never reach here — only the
+	// projected []*mecatlv1.ModelInfo crosses this seam.
+	models atomic.Pointer[[]*mecatlv1.ModelInfo]
+
 	mu    sync.Mutex
 	runs  map[session.SessionID]*runState
 	teams map[string]*teamState
@@ -374,13 +385,45 @@ func NewService(cfg Config) (*Service, error) {
 	if cfg.MaxSessionEngines <= 0 {
 		cfg.MaxSessionEngines = defaultMaxSessionEngines
 	}
-	return &Service{
+	svc := &Service{
 		cfg:               cfg,
 		runs:              make(map[session.SessionID]*runState),
 		teams:             make(map[string]*teamState),
 		sessionEngines:    make(map[session.SessionID]*sessionEngine),
 		sessionWorkspaces: make(map[session.SessionID]tool.Workspace),
-	}, nil
+	}
+	// Seed the model inventory from the static snapshot. ListModels and the
+	// ModelSelection cap read this atomic so a later live-catalog SetModels swap is
+	// race-free. A nil cfg.Models seeds an empty (non-nil) slice so the pointer is
+	// never nil.
+	seed := cfg.Models
+	svc.models.Store(&seed)
+	return svc, nil
+}
+
+// SetModels atomically swaps the selectable-model inventory. It is the composition
+// layer's seam for the background live-catalog refresh: Build seeds the embedded
+// snapshot synchronously (via Config.Models) and, once the live fetch completes,
+// calls SetModels with the merged result. ListModels and the ModelSelection
+// capability then reflect the new set on their next read. It is concurrency-safe
+// (atomic store) and carries only the projected proto slice — no registry/catalog/
+// lister type crosses this boundary. A nil argument stores an empty (non-nil)
+// slice so the pointer is never nil.
+func (s *Service) SetModels(models []*mecatlv1.ModelInfo) {
+	if models == nil {
+		models = []*mecatlv1.ModelInfo{}
+	}
+	s.models.Store(&models)
+}
+
+// currentModels returns the live model inventory pointer's contents (never nil
+// after NewService). It is the single internal read used by ListModels and the
+// ModelSelection capability so they cannot disagree.
+func (s *Service) currentModels() []*mecatlv1.ModelInfo {
+	if p := s.models.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // ErrNoActiveRun is returned by Approve/Cancel when the session exists (possibly
@@ -530,7 +573,7 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 		Agents:         len(s.cfg.Agents) > 0,
 		Soul:           s.cfg.Soul != nil,
 		UserModel:      s.cfg.UserModel != nil,
-		ModelSelection: len(s.cfg.Models) > 0,
+		ModelSelection: len(s.currentModels()) > 0,
 		Memory:         has(memory.RememberToolName),
 		Skills:         has(skills.ToolName),
 		Bash:           has(tools.BashToolName),
@@ -1129,7 +1172,7 @@ func (s *Service) ListSkills(_ context.Context) []*mecatlv1.SkillInfo {
 // empty) — every available provider's catalog models, secret-free. It is a pure
 // read of the injected snapshot; no live discovery (multi-provider Phase 0, S3).
 func (s *Service) ListModels(_ context.Context) []*mecatlv1.ModelInfo {
-	return s.cfg.Models
+	return s.currentModels()
 }
 
 // --- Soul + user-model inspection --------------------------------------------

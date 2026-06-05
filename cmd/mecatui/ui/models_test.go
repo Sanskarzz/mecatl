@@ -88,6 +88,40 @@ func TestRunModelsOpensPicker(t *testing.T) {
 	}
 }
 
+// TestModelsPanelSanitizesNames locks the sanitizeTerminal wrappers in the /models
+// picker against deletion: open the picker with a model whose id + display_name +
+// provider_id embed ANSI/OSC escapes (the live OpenRouter catalog is an UNTRUSTED
+// source now), feed the inventory, render, and assert no raw ESC (0x1b) survives.
+// Mirrors skills_test.go's TestSkillsPanelSanitizesNames. Per repo memory the literal
+// is an innocuous ANSI escape, never a destructive-looking command.
+func TestModelsPanelSanitizesNames(t *testing.T) {
+	fm := &fakeModels{models: []client.ModelInfo{
+		// id-only row (no display name) ⇒ the row label falls back to the id, so the
+		// id's sanitization is exercised in the rendered label.
+		{ID: "\x1b]0;pwned\x07evil/model", ProviderID: "open\x1b[31mrouter"},
+		// a row with a control/ANSI display name ⇒ the label sanitization is exercised.
+		{ID: "openai/safe", ProviderID: "open\x1b[31mrouter", DisplayName: "\x1b[31mRed Model\x1b[0m"},
+	}}
+	m := newModelsModel(t, fm, &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+
+	// stripANSIstr removes the LEGITIMATE theme styling escapes; what remains must
+	// carry NO raw ESC — if any survives, it came from the server-derived model
+	// id/display_name/provider_id and sanitizeTerminal was not applied.
+	out := stripANSIstr(m.View().Content)
+	if strings.ContainsRune(out, 0x1b) {
+		t.Errorf("raw ESC (0x1b) leaked into the rendered picker; sanitizeTerminal not applied:\n%q", out)
+	}
+	// The sanitized fields still render as inert text (ESC stripped, body kept):
+	// the id-fallback label, the provider header, and the display-name label.
+	for _, want := range []string{"]0;pwnedevil/model", "[31mrouter", "[31mRed Model[0m"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("sanitized field %q not rendered as inert text, got:\n%q", want, out)
+		}
+	}
+}
+
 // TestRunModelsNilGuard asserts the picker won't open without a model lister wired.
 func TestRunModelsNilGuard(t *testing.T) {
 	recv := &fakeRecver{gate: make(chan struct{})}

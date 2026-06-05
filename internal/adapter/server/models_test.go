@@ -128,6 +128,50 @@ func TestHTTPListModels(t *testing.T) {
 	}
 }
 
+// TestSetModelsSwap proves the atomic swap: ListModels reflects the SEED snapshot
+// at first, then the SetModels-swapped set afterward, and the ModelSelection cap
+// stays honest across the swap (it reads the same atomic length). This is the
+// deterministic server-side proof of the async-swap mechanism (composition drives
+// SetModels from its background live refresh).
+func TestSetModelsSwap(t *testing.T) {
+	// Seed with one (embedded-floor stand-in) model.
+	seed := []*mecatlv1.ModelInfo{{Id: "seed/model", ProviderId: "openrouter", DisplayName: "Seed"}}
+	svc := modelsService(t, seed)
+
+	got := svc.ListModels(context.Background())
+	if len(got) != 1 || got[0].GetId() != "seed/model" {
+		t.Fatalf("seed ListModels = %+v, want the seed model", got)
+	}
+	if !capsFromCreate(t, svc).GetModelSelection() {
+		t.Fatal("ModelSelection cap false with a non-empty seed")
+	}
+
+	// Swap in a larger live set (the composition refresh's effect).
+	live := []*mecatlv1.ModelInfo{
+		{Id: "live/a", ProviderId: "openrouter", DisplayName: "A"},
+		{Id: "live/b", ProviderId: "openrouter", DisplayName: "B"},
+		{Id: "live/c", ProviderId: "openrouter", DisplayName: "C"},
+	}
+	svc.SetModels(live)
+
+	got = svc.ListModels(context.Background())
+	if len(got) != 3 || got[0].GetId() != "live/a" {
+		t.Fatalf("post-swap ListModels = %+v, want the 3 live models", got)
+	}
+	if !capsFromCreate(t, svc).GetModelSelection() {
+		t.Fatal("ModelSelection cap false after a non-empty swap")
+	}
+
+	// A nil swap stores an empty (non-nil) slice and flips the cap off.
+	svc.SetModels(nil)
+	if len(svc.ListModels(context.Background())) != 0 {
+		t.Fatal("nil swap did not empty ListModels")
+	}
+	if capsFromCreate(t, svc).GetModelSelection() {
+		t.Fatal("ModelSelection cap true after an empty swap")
+	}
+}
+
 // TestCapabilitiesModelSelection asserts the model_selection cap flips with a
 // non-empty Config.Models snapshot (mirrors the agents cap test).
 func TestCapabilitiesModelSelection(t *testing.T) {

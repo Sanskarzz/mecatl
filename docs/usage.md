@@ -288,7 +288,7 @@ per-session engines (selector OR client-MCP sessions): exceeding it returns
 #### Discovering models — `ListModels` / `GET /v1/models`
 
 `ListModels` returns the selectable-model inventory: every **available** provider's
-catalog models projected to public metadata only — `id`, `provider_id`,
+models projected to public metadata only — `id`, `provider_id`,
 `display_name`, `image`, `reasoning`, `context_limit` — **no keys, env-var names, or
 base URLs**, and an unavailable provider is omitted entirely. The list is
 `(provider_id, id)`-sorted; it is empty when no provider is available (or under
@@ -296,6 +296,20 @@ base URLs**, and an unavailable provider is omitted entirely. The list is
 so a client can hide its picker against an older/empty server. The advertised
 `context_limit` is the SAME catalog value the per-session engine uses for its
 compaction trigger, so a large-context model is not compacted at the 128k default.
+
+For a provider with **live model listing** (currently **OpenRouter**), the picker
+reflects the provider's **real, live catalog** (~344 models) rather than the curated
+embedded subset, when that provider is keyed. The live list is fetched once in the
+background just after startup and swapped in — `/models` shows the embedded subset at
+first and the full live set a moment later (and offline, or on an upstream blip, it
+keeps showing the curated subset — the embedded catalog is the fallback floor). The
+fetch is keyless and never blocks startup. Providers without a live lister (OpenAI)
+show their curated embedded catalog as before.
+
+> Network note: a keyed OpenRouter `Build` makes **one best-effort background
+> outbound request** to `https://openrouter.ai/api/v1/models` to populate the live
+> picker. It is unauthenticated (no key on the wire) and fail-safe — offline, blocked,
+> or any error simply leaves the embedded curated subset in place.
 
 #### The `mecatui` model picker + client-side last-used persistence
 

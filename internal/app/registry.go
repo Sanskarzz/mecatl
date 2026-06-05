@@ -9,6 +9,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/openai"
+	"github.com/stacklok/mecatl/internal/adapter/openrouter"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
 	"github.com/stacklok/mecatl/internal/port"
 )
@@ -89,6 +90,12 @@ type providerEntry struct {
 	provider  port.LLMProvider // resilience-wrapped, ready to hand to an engine
 	available bool             // ≥1 of the provider's env[] keys resolved
 	baseURL   string           // for logging/diagnostics ONLY; never wired
+	// lister is the OPTIONAL live-catalog capability for this provider (nil =>
+	// embedded-catalog only). Setting it (at registry build, per provider id) is the
+	// ENTIRE opt-in for live model listing — no merge/snapshot plumbing change. It is
+	// kept on the entry, NOT type-asserted from .provider, because openrouter and
+	// openai share the SAME openai.Provider adapter and only openrouter opts in.
+	lister modelLister
 }
 
 // providerRegistry holds the N configured providers. It is built once in Build
@@ -198,7 +205,15 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 		if baseURL == "" {
 			baseURL = openRouterDefaultBaseURL
 		}
-		entries[providerOpenRouter] = newOpenAIEntry(cfg, providerOpenRouter, key, baseURL)
+		entry := newOpenAIEntry(cfg, providerOpenRouter, key, baseURL)
+		// OpenRouter opts into LIVE model listing: its public /models endpoint
+		// enumerates the real catalog (~344 models) vs the curated embedded subset.
+		// The lister rides on the entry (NOT the shared openai.Provider) so openai —
+		// which uses the same adapter — does NOT advertise live listing. The HTTP
+		// client is the composition test seam (nil => default timeout client; tests
+		// inject a mock transport). KEYLESS: the lister never receives the key.
+		entry.lister = openRouterLister{inner: openrouter.NewLister(cfg.liveModelHTTPClient)}
+		entries[providerOpenRouter] = entry
 	}
 
 	if len(entries) == 0 {

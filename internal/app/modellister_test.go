@@ -1,0 +1,459 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/adapter/openrouter"
+	"github.com/stacklok/mecatl/internal/port"
+)
+
+// fixtureClient serves the trimmed openrouter fixture for the whole-Build e2e.
+func fixtureClient(t *testing.T) *http.Client {
+	t.Helper()
+	fixture, err := os.ReadFile("../adapter/openrouter/testdata/models.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(string(fixture))),
+			Header:     make(http.Header),
+		}, nil
+	})}
+}
+
+// fakeLister is a controllable modelLister: it returns canned models or an error,
+// for the merge + fail-safe unit tests (no HTTP).
+type fakeLister struct {
+	models []modelEntry
+	err    error
+	calls  atomic.Int32
+}
+
+func (f *fakeLister) ListModels(context.Context) ([]modelEntry, error) {
+	f.calls.Add(1)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.models, nil
+}
+
+// regWithLister builds a registry with openai (no lister) + openrouter (the given
+// lister), both backed by canned mocks, for the composition merge tests.
+func regWithLister(lister modelLister) *providerRegistry {
+	return &providerRegistry{
+		entries: map[string]providerEntry{
+			providerOpenAI: {
+				id:        providerOpenAI,
+				provider:  mockllm.NewWith([]mockllm.Option{mockllm.WithCapabilities(port.ProviderCapabilities{Image: true})}, mockllm.TextTurn("x")),
+				available: true,
+			},
+			providerOpenRouter: {
+				id:        providerOpenRouter,
+				provider:  mockllm.NewWith([]mockllm.Option{mockllm.WithCapabilities(port.ProviderCapabilities{Image: true})}, mockllm.TextTurn("x")),
+				available: true,
+				lister:    lister,
+			},
+		},
+		defaultID: providerOpenAI,
+	}
+}
+
+// TestLiveSnapshotReplacesEmbedded: a successful live result REPLACES the embedded
+// openrouter subset (a live-only id appears; the live set drives the openrouter
+// models). OpenAI (no lister) keeps its embedded subset.
+func TestLiveSnapshotReplacesEmbedded(t *testing.T) {
+	lister := &fakeLister{models: []modelEntry{
+		{ID: "live-only/model", DisplayName: "Live Only", ContextLimit: 1_000_000, InputModalities: []string{"text"}},
+		{ID: "live-only/vision", DisplayName: "Live Vision", ContextLimit: 200_000, InputModalities: []string{"text", "image"}, Reasoning: true},
+	}}
+	reg := regWithLister(lister)
+
+	models := liveModelSnapshot(context.Background(), reg)
+
+	var orIDs, openaiCount int
+	sawLiveOnly := false
+	curated := orEmbeddedIDs(t)
+	curatedSeen := false
+	for _, m := range models {
+		switch m.GetProviderId() {
+		case providerOpenRouter:
+			orIDs++
+			if m.GetId() == "live-only/model" {
+				sawLiveOnly = true
+			}
+			if curated[m.GetId()] {
+				curatedSeen = true
+			}
+		case providerOpenAI:
+			openaiCount++
+		}
+	}
+	if !sawLiveOnly {
+		t.Fatal("live-only model absent: live result did not REPLACE the embedded subset")
+	}
+	if orIDs != 2 {
+		t.Fatalf("openrouter contributed %d models, want exactly the 2 live ones", orIDs)
+	}
+	if curatedSeen {
+		t.Fatal("a curated embedded openrouter id survived a successful live fetch (replace, not union)")
+	}
+	if openaiCount == 0 {
+		t.Fatal("openai (no lister) lost its embedded subset")
+	}
+}
+
+// TestLiveSnapshotFallsBackOnError: a lister error ⇒ openrouter falls back to the
+// embedded subset (never empty, never a crash). Same for an empty live list.
+func TestLiveSnapshotFallsBackOnError(t *testing.T) {
+	curated := orEmbeddedIDs(t)
+	for _, tc := range []struct {
+		name   string
+		lister *fakeLister
+	}{
+		{"error", &fakeLister{err: errors.New("boom")}},
+		{"empty", &fakeLister{models: nil}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := regWithLister(tc.lister)
+			models := liveModelSnapshot(context.Background(), reg)
+			orCount := 0
+			for _, m := range models {
+				if m.GetProviderId() == providerOpenRouter {
+					orCount++
+					if !curated[m.GetId()] {
+						t.Fatalf("non-embedded id %q after fallback", m.GetId())
+					}
+				}
+			}
+			if orCount != len(curated) {
+				t.Fatalf("fallback openrouter count = %d, want embedded %d", orCount, len(curated))
+			}
+		})
+	}
+}
+
+// TestLiveSnapshotAvailabilityGating: openrouter NOT in the registry (no key) ⇒ its
+// lister is NEVER called, and no openrouter models appear. openai (keyed, no
+// lister) shows its embedded subset.
+func TestLiveSnapshotAvailabilityGating(t *testing.T) {
+	lister := &fakeLister{models: []modelEntry{{ID: "should/never-appear"}}}
+	reg := &providerRegistry{
+		entries: map[string]providerEntry{
+			providerOpenAI: {id: providerOpenAI, provider: mockllm.New(mockllm.TextTurn("x")), available: true},
+			// openrouter intentionally ABSENT (no key) — its lister exists in the test
+			// but is not wired into any available entry.
+		},
+		defaultID: providerOpenAI,
+	}
+	models := liveModelSnapshot(context.Background(), reg)
+	for _, m := range models {
+		if m.GetProviderId() == providerOpenRouter {
+			t.Fatalf("openrouter model %q shown for an unavailable provider", m.GetId())
+		}
+	}
+	if lister.calls.Load() != 0 {
+		t.Fatalf("unavailable provider's lister was called %d times", lister.calls.Load())
+	}
+}
+
+// TestLiveOnlyModelImageSingleSource: a live-only TEXT-ONLY model advertises
+// image=false even though the (openai-adapter-backed) provider reports Image:true —
+// proving the modality source for a live model is the LIVE metadata via the SHARED
+// hasImageModality predicate, not the adapter-only fallback. A live VISION model
+// advertises image=true.
+func TestLiveOnlyModelImageSingleSource(t *testing.T) {
+	lister := &fakeLister{models: []modelEntry{
+		{ID: "text/only", InputModalities: []string{"text"}},
+		{ID: "vision/cap", InputModalities: []string{"text", "image"}},
+	}}
+	reg := regWithLister(lister) // openrouter provider reports Image:true
+	models := liveModelSnapshot(context.Background(), reg)
+	got := map[string]bool{}
+	for _, m := range models {
+		if m.GetProviderId() == providerOpenRouter {
+			got[m.GetId()] = m.GetImage()
+		}
+	}
+	if got["text/only"] {
+		t.Error("text-only live model advertises image=true (adapter-only fallback leaked; modality source not live)")
+	}
+	if !got["vision/cap"] {
+		t.Error("vision live model advertises image=false (adapter Image:true ∩ live image should be true)")
+	}
+	// Single-source check: the picker's image == adapterCaps.Image && hasImageModality(modalities).
+	for _, m := range lister.models {
+		want := hasImageModality(m.InputModalities) // adapter is Image:true here
+		if got[m.ID] != want {
+			t.Errorf("model %q image=%v, shared predicate says %v", m.ID, got[m.ID], want)
+		}
+	}
+}
+
+// orEmbeddedIDs returns the embedded openrouter model ids as a set, the fallback
+// floor the tests assert against.
+func orEmbeddedIDs(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for _, m := range embeddedModels(providerOpenRouter) {
+		out[m.ID] = true
+	}
+	if len(out) == 0 {
+		t.Fatal("no embedded openrouter models — fixture assumption broken")
+	}
+	return out
+}
+
+// --- E2E through the real openrouter adapter + a mock transport (no network) ---
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestLiveSnapshotThroughRealAdapter wires the REAL openrouter.Lister (over a mock
+// transport serving the trimmed fixture) into a registry and asserts the merged
+// snapshot reflects the live (fixture) openrouter models — more than the curated
+// subset, and a fixture id present.
+func TestLiveSnapshotThroughRealAdapter(t *testing.T) {
+	fixture, err := os.ReadFile("../adapter/openrouter/testdata/models.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("Authorization") != "" {
+			t.Error("CWE-200: Authorization header sent to keyless endpoint")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(string(fixture))),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	reg := &providerRegistry{
+		entries: map[string]providerEntry{
+			providerOpenRouter: {
+				id:        providerOpenRouter,
+				provider:  mockllm.NewWith([]mockllm.Option{mockllm.WithCapabilities(port.ProviderCapabilities{Image: true})}, mockllm.TextTurn("x")),
+				available: true,
+				lister:    openRouterLister{inner: openrouter.NewLister(client)},
+			},
+		},
+		defaultID: providerOpenRouter,
+	}
+	models := liveModelSnapshot(context.Background(), reg)
+	ids := map[string]*mecatlv1.ModelInfo{}
+	for _, m := range models {
+		ids[m.GetId()] = m
+	}
+	// A fixture id present (live, not embedded).
+	if _, ok := ids["openrouter/fusion"]; !ok {
+		t.Fatalf("fixture live model openrouter/fusion absent; got %d models", len(models))
+	}
+	// The image single-source: openrouter/fusion is text-only ⇒ image=false even
+	// though the adapter reports Image:true.
+	if ids["openrouter/fusion"].GetImage() {
+		t.Error("text-only fixture model advertises image=true")
+	}
+	// qwen is text+image ⇒ image=true.
+	if q, ok := ids["qwen/qwen3.7-plus"]; ok && !q.GetImage() {
+		t.Error("text+image fixture model advertises image=false")
+	}
+}
+
+// TestBuildAsyncSwap drives the FULL composition (app.Build → server.Service) with
+// the live-model refresh forced SYNCHRONOUS (a deterministic test seam, no sleeps)
+// and a mock transport serving the openrouter fixture. It proves: (1) the
+// ModelSelection cap is honest from the embedded seed; (2) after the refresh, the
+// snapshot reflects the LIVE openrouter models (a fixture id present); (3) no
+// secret leaks. The non-sync (background) path is covered by the e2e + goleak.
+func TestBuildAsyncSwap(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	const sentinelKey = "sk-SENTINEL-asyncswap"
+
+	// First, a synchronous-OFF build to confirm the SEED (embedded) is present
+	// immediately and the cap is honest even before any live fetch.
+	seedBuilt, err := Build(ctx, Config{
+		Workspace:   workspace,
+		NoSoul:      true,
+		envDetector: fakeEnv(map[string]string{"OPENROUTER_API_KEY": sentinelKey}),
+		providerConstructor: func(_ Config, _, _, _ string) port.LLMProvider {
+			return mockllm.New(mockllm.TextTurn("x"))
+		},
+		// No transport + no sync ⇒ a real (nil-client) lister would hit the network in
+		// the background goroutine; to keep this strictly offline, force sync OFF AND
+		// inject a transport so even the background goroutine is offline.
+		liveModelHTTPClient: fixtureClient(t),
+	})
+	if err != nil {
+		t.Fatalf("Build(seed): %v", err)
+	}
+	// The seed is present synchronously (embedded openrouter subset is non-empty), so
+	// ModelSelection is honest from t=0 regardless of the background refresh.
+	if len(seedBuilt.Service.ListModels(ctx)) == 0 {
+		t.Fatal("seed snapshot empty: ModelSelection would be dishonest at t=0")
+	}
+	seedBuilt.Close()
+
+	// Now a synchronous-refresh build: the refresh runs inline before Build returns,
+	// so ListModels deterministically reflects the LIVE (fixture) set.
+	built, err := Build(ctx, Config{
+		Workspace:   workspace,
+		NoSoul:      true,
+		envDetector: fakeEnv(map[string]string{"OPENROUTER_API_KEY": sentinelKey}),
+		providerConstructor: func(_ Config, _, _, _ string) port.LLMProvider {
+			return mockllm.New(mockllm.TextTurn("x"))
+		},
+		liveModelHTTPClient:  fixtureClient(t),
+		liveModelRefreshSync: true,
+	})
+	if err != nil {
+		t.Fatalf("Build(sync): %v", err)
+	}
+	defer built.Close()
+
+	models := built.Service.ListModels(ctx)
+	ids := map[string]bool{}
+	for _, m := range models {
+		ids[m.GetId()] = true
+		for _, f := range []string{m.GetId(), m.GetProviderId(), m.GetDisplayName()} {
+			if strings.Contains(f, sentinelKey) {
+				t.Fatalf("secret leaked into ListModels field %q", f)
+			}
+		}
+	}
+	if !ids["openrouter/fusion"] {
+		t.Fatalf("post-refresh snapshot missing live fixture model; got %d models", len(models))
+	}
+}
+
+// --- The REAL background (async) path: runSync=false ---
+
+// fakeSwapper records SetModels calls (the seam startLiveModelRefresh writes
+// through). It is concurrency-safe so the refresh goroutine can write while the test
+// reads after the joiner, and signals the FIRST swap on the swapped channel so a test
+// can wait for the async swap DETERMINISTICALLY (no sleep).
+type fakeSwapper struct {
+	mu      sync.Mutex
+	last    []*mecatlv1.ModelInfo
+	calls   int
+	wasSet  bool
+	swapped chan struct{}
+}
+
+func newFakeSwapper() *fakeSwapper { return &fakeSwapper{swapped: make(chan struct{}, 1)} }
+
+func (s *fakeSwapper) SetModels(m []*mecatlv1.ModelInfo) {
+	s.mu.Lock()
+	s.last = m
+	s.calls++
+	s.wasSet = true
+	s.mu.Unlock()
+	select {
+	case s.swapped <- struct{}{}:
+	default:
+	}
+}
+
+func (s *fakeSwapper) snapshot() (set bool, calls int, last []*mecatlv1.ModelInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.wasSet, s.calls, s.last
+}
+
+// blockingLister blocks in ListModels until the refresh's ctx is cancelled, then
+// returns its canned models WITHOUT error (the worst case for the no-overwrite
+// guard: a fetch that "succeeds" right as cancellation lands must still be
+// suppressed by the ctx.Err() check, never swapped). It signals started so the test
+// knows the goroutine is inside the fetch before it cancels — making the cancel
+// strictly mid-fetch (deterministic, no sleep).
+type blockingLister struct {
+	started chan struct{}
+	models  []modelEntry
+}
+
+func (b *blockingLister) ListModels(ctx context.Context) ([]modelEntry, error) {
+	close(b.started)
+	<-ctx.Done() // unblock only on cancel — so cancel provably precedes the guard
+	return b.models, nil
+}
+
+// TestAsyncRefreshSwapsAfterJoin exercises the REAL background path (runSync=false):
+// the goroutine spawns, fetches, swaps, and the returned closer's cancel+wg.Wait
+// JOINS it — so after the closer returns, the swap has DETERMINISTICALLY landed (no
+// sleep, the WaitGroup is the barrier). This covers the concurrency the sync-mode
+// tests never run, and goleak (leakmain_test.go) confirms no goroutine lingers.
+func TestAsyncRefreshSwapsAfterJoin(t *testing.T) {
+	lister := &fakeLister{models: []modelEntry{
+		{ID: "live/a", InputModalities: []string{"text"}},
+		{ID: "live/b", InputModalities: []string{"text", "image"}},
+	}}
+	reg := regWithLister(lister)
+	swap := newFakeSwapper()
+
+	closer := startLiveModelRefresh(reg, swap, false) // ASYNC
+
+	// Wait for the background swap to land on its OWN (deterministic via the swapped
+	// channel — NO sleep, NO poll), then join+cleanup. This exercises the real
+	// goroutine-spawn → fetch → swap path; goleak (leakmain_test.go) confirms the
+	// joiner leaves nothing behind.
+	<-swap.swapped
+	closer() // cancel + wg.Wait → the goroutine has fully unwound
+
+	set, calls, last := swap.snapshot()
+	if !set || calls != 1 {
+		t.Fatalf("after join: set=%v calls=%d, want exactly one swap", set, calls)
+	}
+	// The swap carries the merged live set (live REPLACES embedded for openrouter,
+	// openai keeps its embedded subset).
+	var sawLiveA bool
+	for _, m := range last {
+		if m.GetProviderId() == providerOpenRouter && m.GetId() == "live/a" {
+			sawLiveA = true
+		}
+	}
+	if !sawLiveA {
+		t.Fatal("post-join swap missing the live openrouter model")
+	}
+	if lister.calls.Load() != 1 {
+		t.Fatalf("lister called %d times, want 1", lister.calls.Load())
+	}
+}
+
+// TestAsyncRefreshCancelMidFetchDoesNotOverwrite exercises the ctx.Err() no-
+// overwrite guard: the closer is called WHILE the fetch is blocked (shutdown mid-
+// fetch). After release + join, SetModels must NOT have been called — the seed is
+// preserved, never overwritten with a partial/empty result.
+func TestAsyncRefreshCancelMidFetchDoesNotOverwrite(t *testing.T) {
+	lister := &blockingLister{
+		started: make(chan struct{}),
+		models:  []modelEntry{{ID: "live/late", InputModalities: []string{"text"}}},
+	}
+	reg := regWithLister(lister)
+	swap := newFakeSwapper()
+
+	closer := startLiveModelRefresh(reg, swap, false) // ASYNC
+
+	<-lister.started // the goroutine is now blocked inside ListModels (mid-fetch)
+
+	// Close cancels the ctx (unblocking the fetch) THEN wg.Wait joins. The fetch
+	// returns models without error, but the goroutine's ctx.Err() guard suppresses
+	// the swap because cancellation provably preceded the return.
+	closer()
+
+	set, calls, _ := swap.snapshot()
+	if set || calls != 0 {
+		t.Fatalf("cancel mid-fetch overwrote the seed: set=%v calls=%d, want no swap", set, calls)
+	}
+}

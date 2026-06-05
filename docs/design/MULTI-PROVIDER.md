@@ -24,8 +24,18 @@ This document is the design rationale. The runtime overview is `docs/architectur
   change: a new registry entry whose adapter `Capabilities()` reports its real transmit
   ability, plus catalog rows whose `inputModalities` differ per model. The intersection
   formula (§7) is unchanged; no server/acp/proto edit.
-- **P2.** Async catalog refresh (with SSRF hardening) + a Chat-Completions adapter for
-  the long tail (Gemini-native / Together / …).
+- **Live model listing (SHIPPED).** A one-shot **per-provider** live catalog fetch via an
+  optional, composition-local `modelLister` capability (§11). OpenRouter is the first
+  implementer: its public, **unauthenticated** `/models` endpoint enumerates the real
+  catalog (~344 models) and **replaces** the curated embedded subset for that provider on
+  success; the embedded catalog is the **fallback floor** on any error/empty/timeout. The
+  embedded snapshot is seeded synchronously at `Build` (the `ModelSelection` cap is honest
+  from t=0) and the live set is swapped in by a background goroutine — `Build` never
+  touches the network.
+- **P2.** Disk cache + **periodic/interval** live refresh; OpenAI/Anthropic listers; the
+  per-session live-capability closer (so a session bound to a *live-only/uncatalogued*
+  model resolves image from live modalities, not the adapter-only passthrough fallback).
+  Plus a Chat-Completions adapter for the long tail (Gemini-native / Together / …).
 - **P3.** Secrets store + OAuth + per-client/profile key custody (see §8).
 
 ---
@@ -65,7 +75,16 @@ Curation is explicit and reviewable (no silent caps, no regex sweep): openai (al
 anthropic (all 24, made ready for P1), openrouter (a 19-route flagship allowlist). An
 unknown provider/model id is an honest `(_, false)` lookup miss, never a substitution.
 Regeneration is one deterministic `jq -S` filter (recorded in the package doc-comment)
-so a re-pin diff shows only real model changes. Async refresh + SSRF hardening are P2.
+so a re-pin diff shows only real model changes.
+
+The embedded catalog is now the **FALLBACK FLOOR**, not the only source: a provider with
+a live `modelLister` (OpenRouter — §11) has its real catalog fetched and **replaces** the
+curated subset for that provider; on any fetch error/empty the embedded subset is shown
+unchanged. So a keyed OpenRouter picker shows ~344 live models, but offline (or on an
+upstream blip) it still shows the curated 19. SSRF hardening for the live fetch shipped
+with the lister (fixed-host const URL, keyless, size cap); the SSRF/async-refresh items
+formerly parked at P2 are partly delivered (one-shot OpenRouter refresh) — periodic/disk
+refresh remains P2.
 
 ---
 
@@ -267,7 +286,12 @@ across `ListModels` and the `CreateSessionResponse` (incl. the capability echo).
 - **P1:** native Anthropic Messages adapter (validates the abstraction); per-model
   modality divergence is a data change; per-session ACP gate + (if wanted) reasoning
   intersection land here.
-- **P2:** async catalog refresh + SSRF hardening; Chat-Completions adapter.
+- **Live model listing — shipped:** the optional `modelLister` capability + the OpenRouter
+  lister adapter; one-shot background refresh, live-replaces-embedded merge, embedded
+  fallback floor, atomic snapshot swap (§11). The SSRF hardening + one-shot refresh moved
+  OUT of P2 (they ship here).
+- **P2:** disk cache + periodic/interval live refresh; OpenAI/Anthropic listers; the
+  per-session live-capability closer; Chat-Completions adapter.
 - **P3:** secrets store + OAuth + per-client/profile key custody + tenant isolation.
 
 Model-selection persistence is **per-workspace only** (realpath-keyed); a pick never
@@ -322,3 +346,64 @@ provider — `server.Config.MemberEngine` is wired ONCE at build with the defaul
 provider and CreateTeam carries no selector today; the in-catalog Team tool IS
 covered. (2) Surfacing the resolved provider in `ListAgents`/`AgentInfo` — that is a
 proto change with no consumer yet.
+
+## 11. Live model listing (SHIPPED — OpenRouter)
+
+The picker used to show only the curated embedded subset (`providercatalog`, §3) — for
+OpenRouter, a hand-pinned 19 of ~344. Live model listing makes a provider whose API can
+enumerate its real catalog do so, behind a clean **optional capability** so a future
+provider opts in trivially.
+
+**The abstraction.** A composition-local **`modelLister`** interface
+(`internal/app/modellister.go`) — `ListModels(ctx) ([]modelEntry, error)` — NOT a `port`,
+for the same reason `providerRegistry` is composition-only: a SINGLE consumer
+(`liveModelSnapshot`), and the domain/agent never enumerate a catalog (the server still
+receives only `[]*mecatlv1.ModelInfo`). `modelEntry` is a NEUTRAL, SOURCE-AGNOSTIC composition-local type
+(id, displayName, contextLimit, inputModalities, reasoning, toolCall) — never a `port`
+type, never `providercatalog.Model`. Both the live listers AND the embedded floor
+(`embeddedModels`) produce `modelEntry`, so a SINGLE projection (`projectModelEntry`) +
+sort (`sortModelInfos`) serve BOTH the synchronous seed (`modelSnapshot`) and the live
+refresh — the floor and the seed cannot hand-sync-drift. The capability rides on an OPTIONAL
+`providerEntry.lister` field (NOT a type-assert on `entry.provider`, because OpenRouter
+and OpenAI share the SAME `openai.Provider` adapter and only OpenRouter opts in). **The
+whole opt-in for a future provider is: implement `ListModels` + set `entry.lister` at
+registry build** — zero merge/snapshot/registry-plumbing change.
+
+**The OpenRouter lister adapter** (`internal/adapter/openrouter`) is a stdlib-only LEAF
+(no domain/port/app/other-adapter import; returns its OWN `openrouter.Model`, which
+composition maps to `modelEntry` — no import cycle). It GETs the FIXED-host const
+`https://openrouter.ai/api/v1/models` over an INJECTED `*http.Client`. Hardening: SSRF —
+fixed const URL, no caller-supplied host; CWE-200 — KEYLESS, no `Authorization` header
+(the endpoint is unauthenticated; the key never reaches the lister); CWE-770 — an
+`io.LimitReader` 4 MiB cap rejects an oversized body; a `ctx` deadline + client timeout
+bound a hang. Mapping: `id`→id, `name`→displayName, `context_length`→contextLimit,
+`architecture.input_modalities`→modalities, `supported_parameters ∋ {reasoning, tools}`→
+reasoning/toolCall.
+
+**Merge + fail-safe.** Per available provider: a SUCCESSFUL, non-empty live result
+**REPLACES** the embedded subset for that provider (the point: the real catalog, not the
+curated 19 union'd with their live duplicates); ANY error/timeout/empty (or no lister)
+falls back to the embedded subset, with one `slog.Warn`. Since every in-scope provider
+has an embedded subset, an available provider always contributes ≥ its curated subset —
+the picker is **never blanked** by an upstream blip. Availability gating is free:
+`liveModelSnapshot` iterates `reg.Available()`, so an unkeyed provider is neither fetched
+nor shown (the keyless endpoint does not bypass this — no key ⇒ no entry ⇒ no lister).
+
+**Capability single-source.** The image bit a live model advertises is
+`adapterCaps.Image && hasImageModality(model.InputModalities)` — the SAME extracted
+`hasImageModality` predicate the embedded path uses (both live and embedded carry a
+`modelEntry` with authoritative modalities). So a live text-only model advertises
+`image=false` even though the (openai-adapter-backed) OpenRouter provider reports
+`Image:true`. **Scope: the PICKER only.** A session bound to a *live-only/uncatalogued*
+model still resolves caps via the per-session factory's adapter-only passthrough
+(`image=true`) — a documented, bounded picker-vs-session divergence; the closer (a shared
+live cache threaded into the per-session factory) is **P2**.
+
+**Async swap.** `Build` seeds `Config.Models` with the EMBEDDED snapshot synchronously
+(so `ModelSelection` is honest from t=0 and `Build` NEVER touches the network), then kicks
+ONE background goroutine that fetches the live catalog and **atomically swaps** the merged
+result via `Service.SetModels` (an `atomic.Pointer[[]*ModelInfo]` inside the Service that
+`ListModels`/`ModelSelection` read lock-free). The goroutine is cancelled by `Close`
+(no leak; verified under `-race`). A composition-only `liveModelRefreshSync` test seam runs
+the refresh inline for deterministic offline e2e (no sleeps). When no available provider
+has a lister (mock/openai-only), the refresh is a no-op — no goroutine.
