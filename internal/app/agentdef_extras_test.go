@@ -143,7 +143,8 @@ func TestBuildAgentTaskEnginesWithSkillsAndHooks(t *testing.T) {
 		Skills:      []string{"playbook"},
 		Hooks:       map[string]string{"PreToolUse": "exit 0"},
 	}})
-	engines, meta, _ := buildAgentTaskEngines(context.Background(), Config{Model: "m", Shell: "/bin/sh"}, mockllm.New(), reg, idx, hookexec.New(nil), nil, nil)
+	prov := mockllm.New()
+	engines, meta, _ := buildAgentTaskEngines(context.Background(), Config{Model: "m", Shell: "/bin/sh"}, prov, regForTest(prov, providerMock, "m"), providerMock, "m", reg, idx, hookexec.New(nil), nil, nil)
 	if len(engines) != 1 || engines["spec"] == nil {
 		t.Fatalf("want 1 engine for 'spec', got %d", len(engines))
 	}

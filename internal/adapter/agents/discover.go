@@ -43,6 +43,7 @@ type frontmatter struct {
 	Tools           stringOrSlice     `yaml:"tools"`
 	DisallowedTools stringOrSlice     `yaml:"disallowedTools"`
 	Model           string            `yaml:"model"`
+	Provider        string            `yaml:"provider"`
 	PermissionMode  string            `yaml:"permissionMode"`
 	MaxTurns        int               `yaml:"maxTurns"`
 	MaxToolCalls    int               `yaml:"maxToolCalls"`
@@ -347,6 +348,7 @@ func parseAgentDef(raw []byte, path string) (AgentDef, string, []string) {
 		Tools:           []string(fm.Tools),
 		DisallowedTools: []string(fm.DisallowedTools),
 		Model:           strings.TrimSpace(fm.Model),
+		Provider:        strings.TrimSpace(fm.Provider),
 		PermissionMode:  strings.TrimSpace(fm.PermissionMode),
 		MaxTurns:        fm.MaxTurns,
 		MaxToolCalls:    fm.MaxToolCalls,

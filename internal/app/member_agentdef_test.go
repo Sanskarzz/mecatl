@@ -37,7 +37,7 @@ func TestMemberMutatingDefKeepsEditWhenMutating(t *testing.T) {
 	cfg := Config{Workspace: t.TempDir(), Model: "m"}
 	def := agents.AgentDef{Name: "writer", Description: "w", Tools: []string{"Read", "Edit"}}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, false, nil)
+	factory := memberFactoryForTest(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
 		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) },
@@ -64,7 +64,7 @@ func TestMemberReadOnlyDefDropsMutating(t *testing.T) {
 	cfg := Config{Workspace: t.TempDir(), Model: "m"}
 	def := agents.AgentDef{Name: "reviewer", Description: "r", Tools: []string{"Read", "Edit", "Write"}}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, false, nil)
+	factory := memberFactoryForTest(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
 		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
@@ -89,7 +89,7 @@ func TestMemberPerMemberPlanMode(t *testing.T) {
 	cfg := Config{Workspace: t.TempDir(), Model: "m"}
 	planDef := agents.AgentDef{Name: "planner", Description: "p", PermissionMode: "plan"}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(planDef), nil, nil, false, nil)
+	factory := memberFactoryForTest(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(planDef), nil, nil, false, nil)
 
 	build := factory(tm, agent.MemberSpec{Name: "planner", AgentType: "planner"})
 	if build.Mode != session.ModePlan {
@@ -113,7 +113,7 @@ func TestMemberDefLimitsOnBuild(t *testing.T) {
 	boundedDef := agents.AgentDef{Name: "bounded", Description: "b", MaxTurns: 2, MaxToolCalls: 9}
 	plainDef := agents.AgentDef{Name: "plain", Description: "p"}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(boundedDef, plainDef), nil, nil, false, nil)
+	factory := memberFactoryForTest(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(boundedDef, plainDef), nil, nil, false, nil)
 
 	bounded := factory(tm, agent.MemberSpec{Name: "bounded", AgentType: "bounded"})
 	if bounded.Limits != (session.Limits{MaxTurns: 2, MaxToolCalls: 9}) {
@@ -137,7 +137,7 @@ func TestMemberRepoMapDefAcceptedReadOnly(t *testing.T) {
 		mockllm.ToolCallTurn(session.NewToolCall("c1", "RepoMap", json.RawMessage(`{}`))),
 		mockllm.TextTurn("done"),
 	)
-	factory := buildMemberEngine(cfg, mapCall, hookexec.New(nil), regOf(def), nil, nil, false, nil)
+	factory := memberFactoryForTest(cfg, mapCall, hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
 		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
@@ -160,7 +160,7 @@ func TestMemberRepoMapDefAcceptedReadOnly(t *testing.T) {
 func TestMemberUnknownAgentTypeFallsBack(t *testing.T) {
 	cfg := Config{Workspace: t.TempDir(), Model: "m"}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(), nil, nil, false, nil)
+	factory := memberFactoryForTest(cfg, mockllm.New(mockllm.TextTurn("x")), hookexec.New(nil), regOf(), nil, nil, false, nil)
 
 	build := factory(tm, agent.MemberSpec{Name: "ghost", AgentType: "does-not-exist"})
 	if build.Engine == nil {

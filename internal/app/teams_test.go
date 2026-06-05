@@ -46,7 +46,7 @@ func teamCfg(t *testing.T) Config {
 func TestBuildMemberEngineReadOnlySpawnSucceeds(t *testing.T) {
 	cfg := teamCfg(t)
 	provider := mockllm.New(mockllm.TextTurn("ok"))
-	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, false, nil))
+	svc := teamServiceWithFactory(t, memberFactoryForTest(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, false, nil))
 
 	ctx := context.Background()
 	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", nil)
@@ -67,7 +67,7 @@ func TestBuildMemberEngineReadOnlySpawnSucceeds(t *testing.T) {
 func TestBuildMemberEngineMutatingSpawnSucceeds(t *testing.T) {
 	cfg := teamCfg(t)
 	provider := mockllm.New(mockllm.TextTurn("ok"))
-	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, false, nil))
+	svc := teamServiceWithFactory(t, memberFactoryForTest(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, false, nil))
 
 	ctx := context.Background()
 	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", nil)
@@ -88,7 +88,7 @@ func TestBuildMemberEngineMutatingSpawnSucceeds(t *testing.T) {
 func TestTeamsEnabledEndToEnd(t *testing.T) {
 	cfg := teamCfg(t)
 	provider := mockllm.New(mockllm.TextTurn("all done"))
-	svc := teamServiceWithFactory(t, buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, false, nil))
+	svc := teamServiceWithFactory(t, memberFactoryForTest(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, false, nil))
 
 	ctx := context.Background()
 	// Atomic create+populate: the initial roster is enrolled by CreateTeam itself, so
@@ -211,7 +211,7 @@ func TestReadOnlyMemberRunsGitInWorktreeEndToEnd(t *testing.T) {
 		mockllm.ToolCallTurn(session.ToolCall{ID: "g3", Name: "Bash", Args: gitArgs("if [ -f .git ]; then echo DOTGIT_IS_FILE; elif [ -d .git ]; then echo DOTGIT_IS_DIR; else echo DOTGIT_MISSING; fi")}),
 		mockllm.TextTurn("inspection done"),
 	)
-	factory := buildMemberEngine(cfg, provider, nil, agents.NewRegistry(nil), nil, runner, true, nil)
+	factory := memberFactoryForTest(cfg, provider, nil, agents.NewRegistry(nil), nil, runner, true, nil)
 
 	osfsWS := func(root string) tool.Workspace {
 		ws, err := osfs.NewWorkspace(root)

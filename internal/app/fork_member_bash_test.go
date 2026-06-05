@@ -137,7 +137,7 @@ func TestMutatingMemberHasBashAndEdit(t *testing.T) {
 		t.Fatal("precondition: expected a non-nil command runner with Shell set")
 	}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, false, nil)
+	factory := memberFactoryForTest(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, false, nil)
 	build := factory(tm, agent.MemberSpec{Name: "writer", Mutating: true})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -163,7 +163,7 @@ func TestReadOnlyMemberHasNoBashOrEdit(t *testing.T) {
 	cfg := teamCfg(t)
 	runner := buildCommandRunner(cfg)
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, false, nil)
+	factory := memberFactoryForTest(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, false, nil)
 	build := factory(tm, agent.MemberSpec{Name: "reader", Mutating: false})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -190,7 +190,7 @@ func TestReadOnlyIsolatedMemberHasBashNotEdit(t *testing.T) {
 		t.Fatal("precondition: expected a non-nil sandboxed runner with Shell set")
 	}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, true, nil)
+	factory := memberFactoryForTest(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, runner, true, nil)
 	build := factory(tm, agent.MemberSpec{Name: "reader", Mutating: false})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -220,7 +220,7 @@ func TestReadOnlyMemberNoRunnerNoBashNotIsolated(t *testing.T) {
 	tm := team.New("t")
 	// roIsolationAvailable is moot when the runner is nil — pass true to prove the
 	// runner gate (runner != nil) is what actually withholds Bash.
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, nil, true, nil)
+	factory := memberFactoryForTest(cfg, bashThenEdit(), hookexec.New(nil), agents.NewRegistry(nil), nil, nil, true, nil)
 	build := factory(tm, agent.MemberSpec{Name: "reader", Mutating: false})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -243,7 +243,7 @@ func TestReadOnlyIsolatedMemberDefKeepsBashDropsEdit(t *testing.T) {
 	runner := buildSandboxedCommandRunner(cfg)
 	tm := team.New("t")
 	def := agents.AgentDef{Name: "reader", Description: "r", Tools: []string{"Read", "Edit", "Bash"}}
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, true, nil)
+	factory := memberFactoryForTest(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, true, nil)
 	build := factory(tm, agent.MemberSpec{Name: "reader", AgentType: "reader", Mutating: false})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -269,7 +269,7 @@ func TestMutatingMemberDefCanScopeInBash(t *testing.T) {
 	runner := buildCommandRunner(cfg)
 	tm := team.New("t")
 	def := agents.AgentDef{Name: "writer", Description: "w", Tools: []string{"Read", "Edit", "Bash"}}
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, false, nil)
+	factory := memberFactoryForTest(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, false, nil)
 	build := factory(tm, agent.MemberSpec{Name: "writer", AgentType: "writer", Mutating: true})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")
@@ -296,7 +296,7 @@ func TestReadOnlyMemberDefCannotScopeInBash(t *testing.T) {
 	runner := buildCommandRunner(cfg)
 	tm := team.New("t")
 	def := agents.AgentDef{Name: "reader", Description: "r", Tools: []string{"Read", "Edit", "Bash"}}
-	factory := buildMemberEngine(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, false, nil)
+	factory := memberFactoryForTest(cfg, bashThenEdit(), hookexec.New(nil), regOf(def), nil, runner, false, nil)
 	build := factory(tm, agent.MemberSpec{Name: "reader", AgentType: "reader", Mutating: false})
 	if build.Engine == nil {
 		t.Fatal("factory returned a nil engine")

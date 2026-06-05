@@ -110,7 +110,7 @@ func TestSessionEngineFactoryBuildsUsableEngine(t *testing.T) {
 		entries:   map[string]providerEntry{providerMock: {id: providerMock, provider: provider, available: true}},
 		defaultID: providerMock,
 	}
-	factory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, nil, prompt.RootAssembler{})
+	factory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, nil, prompt.RootAssembler{}, nil)
 
 	// Zero selector + no specs: the per-session engine binds the DEFAULT provider.
 	res, err := factory(context.Background(), server.ProviderSelector{}, []mcp.ServerConfig{})
@@ -147,7 +147,7 @@ func twoProviderFactory(t *testing.T) (server.SessionEngineFactory, *providerReg
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{})
+	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, nil)
 	return factory, reg
 }
 
@@ -218,7 +218,7 @@ func TestSessionEngineFactoryModelPassthrough(t *testing.T) {
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{})
+	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, nil)
 
 	const unknownModel = "gpt-5-preview-not-in-catalog"
 	res, err := factory(context.Background(),

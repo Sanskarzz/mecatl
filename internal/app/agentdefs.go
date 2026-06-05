@@ -56,17 +56,100 @@ var builtinModelAliases = map[string]string{
 // and falls back to inherit (the parent model), so a shared .claude/agents file
 // naming a model mecatl doesn't know never breaks startup (critique M4).
 func resolveModel(cfg Config, def agents.AgentDef) string {
-	parent := cfg.Model
+	return resolveModelFor(cfg, def, cfg.Model)
+}
+
+// resolveProviderModel resolves a def's (provider, model) pair in the COMPOSITION
+// layer (the registry lives here; neither the agents adapter nor internal/agent
+// ever sees it). It extends resolveModel with a provider dimension and is the ONE
+// resolver both the def-pinned (Half A) and the session-propagation (Half B) call
+// sites share — the THREE-LEVEL provider precedence
+//
+//	def.Provider > session-selected provider > build-time default provider
+//
+// is realised by what the CALL SITE threads in as parentProviderID: the build-time
+// path passes (reg.Default(), cfg.Model); a provider-SELECTED session passes its
+// resolved (providerID, modelID). The resolver itself only knows the two levels
+// def.Provider > parentProviderID; the third (session vs build-time) is decided by
+// the caller. parentModel is the matching parent model for the same-provider chain.
+//
+// Provider precedence: def.Provider (if set AND known/available) wins; an
+// UNKNOWN/unavailable def.Provider is a LOUD fallback to parentProviderID + a
+// slog.Warn (mirroring every other forgiving def-error handler — a shared repo
+// naming a provider this operator hasn't keyed must not wedge startup).
+//
+// Model precedence — the CRITICAL cross-provider rebasing rule: when the resolved
+// provider SWITCHES away from parentProviderID, the model must NOT inherit the
+// parent's model string (it is an id for the PARENT's provider — e.g. a bare
+// "gpt-5" is invalid on openrouter, which wants "openai/gpt-5"). A switched
+// provider takes def.Model (alias-resolved) when the def pins one, else THAT
+// provider's builtin default (DefaultModelFor). When the provider is unchanged
+// (def pins nothing or pins the same provider, or the fallback path), the EXISTING
+// resolveModel chain (def.Model > SubagentModel > parentModel) applies unchanged —
+// full back-compat for every existing def.
+func resolveProviderModel(cfg Config, provReg *providerRegistry, def agents.AgentDef, parentProviderID, parentModel string) (providerID, model string) {
+	pid := parentProviderID
+	if p := strings.TrimSpace(def.Provider); p != "" {
+		if _, ok := provReg.Lookup(p); ok {
+			pid = p
+		} else {
+			slog.Warn("agent def references an unknown/unavailable provider; inheriting parent provider",
+				"agent", def.Name, "provider", p, "path", def.Path)
+			// pid stays parentProviderID (fail-safe).
+		}
+	}
+
+	if pid != parentProviderID {
+		// Provider SWITCHED: never inherit the parent model string (different endpoint).
+		if m := strings.TrimSpace(def.Model); m != "" && m != "inherit" {
+			if resolved := resolveAlias(cfg, def, m); resolved != "" {
+				return pid, resolved
+			}
+		}
+		// No explicit def model (or an alias that resolves to inherit): rebase off the
+		// new provider's builtin default, NOT the parent model.
+		return pid, provReg.DefaultModelFor(pid)
+	}
+
+	// Same provider as the parent: the existing chain is correct (full back-compat).
+	// Resolve the model against the parent model rather than cfg.Model, so a session
+	// that selected a non-default model on the SAME provider propagates it to a def
+	// that pins no model of its own.
+	return pid, resolveModelFor(cfg, def, parentModel)
+}
+
+// resolveChildProvider resolves a def to the (childProvider, model, childWindow)
+// triple a child-engine build needs: it runs resolveProviderModel, then for a
+// SWITCHED provider looks up the registry entry's provider + its catalogued context
+// window; for the inherited-default path it returns the supplied parentProvider with
+// window=0 (byte-identical 128k). It is the shared resolution step both
+// buildAgentTaskEngines and buildMemberEngine use, so the per-def provider-switch
+// logic lives in ONE place (and keeps buildMemberEngine under the gocyclo budget).
+func resolveChildProvider(cfg Config, provReg *providerRegistry, def agents.AgentDef, parentProvider port.LLMProvider, parentProviderID, parentModel string) (childProvider port.LLMProvider, providerID, model string, childWindow int) {
+	pid, model := resolveProviderModel(cfg, provReg, def, parentProviderID, parentModel)
+	childProvider = parentProvider
+	if pid != parentProviderID {
+		if entry, ok := provReg.Lookup(pid); ok {
+			childProvider = entry.provider
+			childWindow = catalogContextWindow(pid, model)
+		}
+	}
+	return childProvider, pid, model, childWindow
+}
+
+// resolveModelFor is resolveModel with the inherited parent model threaded in
+// explicitly (instead of always cfg.Model), so the same-provider chain honours a
+// session-selected model as the inherit target. resolveModel is the
+// parentModel==cfg.Model specialization.
+func resolveModelFor(cfg Config, def agents.AgentDef, parentModel string) string {
 	pick := func(model string) string {
 		if model == "" {
-			return parent
+			return parentModel
 		}
 		return model
 	}
-
 	sel := strings.TrimSpace(def.Model)
 	if sel == "" || sel == "inherit" {
-		// def doesn't pin a model: apply the global override, else inherit.
 		return pick(resolveAlias(cfg, def, strings.TrimSpace(cfg.SubagentModel)))
 	}
 	return pick(resolveAlias(cfg, def, sel))
@@ -475,7 +558,17 @@ func defHookRunner(cfg Config, def agents.AgentDef, fallback port.HookRunner) po
 // happens in TaskTool.run regardless of which engine handles the call), so they only
 // need Bash in their catalog. When runner is nil, allowShell is false and Bash is
 // dropped — the def stays a base-sharing read-only explorer with no shell.
-func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMProvider, reg *agents.Registry, skillIdx skillIndex, defaultHooks port.HookRunner, runner tool.CommandRunner, mainMgr *mcp.Manager) (map[string]*agent.Engine, []agent.AgentMeta, func() error) {
+//
+// PROVIDER RESOLUTION (per-sub-agent provider): each def's (provider, model) is
+// resolved via resolveProviderModel against provReg with the call site's parent
+// (parentProviderID/parentModel). A def that pins no provider inherits the parent
+// (the build-time default, or a session-selected provider in Half B); a def that
+// pins a known provider routes its child engine to THAT provider (its child engine
+// is built through engineDepsForProvider so it compacts/counts on the right model —
+// no cross-provider contamination); an unknown provider is a loud fallback. The
+// registry NEVER leaves this resolution point — the child engine receives a bare
+// port.LLMProvider (the resolved entry's provider), exactly as before.
+func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMProvider, provReg *providerRegistry, parentProviderID, parentModel string, reg *agents.Registry, skillIdx skillIndex, defaultHooks port.HookRunner, runner tool.CommandRunner, mainMgr *mcp.Manager) (map[string]*agent.Engine, []agent.AgentMeta, func() error) {
 	if reg == nil || reg.Len() == 0 {
 		return nil, nil, nil
 	}
@@ -524,7 +617,10 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 		}
 		closeFn = composeCloseErr(mcpClose, closeFn)
 
-		model := resolveModel(cfg, def)
+		// Resolve the def's (provider, model, window): a pinned-and-known provider
+		// switches the child engine (with its catalogued window); a def pinning no (or
+		// the same) provider inherits the parent (window=0 ⇒ byte-identical 128k).
+		childProvider, pid, model, childWindow := resolveChildProvider(cfg, provReg, def, provider, parentProviderID, parentModel)
 
 		bodies, missing := preloadedSkillBodies(def, skillIdx)
 		for _, name := range missing {
@@ -534,9 +630,10 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 		hooks := defHookRunner(cfg, def, defaultHooks)
 
 		// ProgressiveTools deliberately OFF: child catalogs are tiny and a ToolSearch
-		// tool would not be in the def allowlist. newChildEngineWithHooks leaves it at
-		// its zero value (off), matching the original explicit omission.
-		engines[def.Name] = newChildEngineWithHooks(provider, cat, model, agentPromptConfig(cfg, def, model, bodies...), hooks)
+		// tool would not be in the def allowlist. newChildEngineForProvider leaves it at
+		// its zero value (off), matching the original explicit omission, AND routes the
+		// child's compactor/counter/window through pid+model (contamination fix).
+		engines[def.Name] = newChildEngineForProvider(cfg, childProvider, model, childWindow, cat, agentPromptConfig(cfg, def, model, bodies...), hooks)
 		// Per-def limits ride on AgentMeta so the Task tool bounds THIS def's child
 		// session by them (per-field falling back to the Task default child limits for
 		// any zero field). A def that sets neither yields the default, unchanged.
@@ -547,7 +644,7 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 		})
 
 		slog.Info("agent def engine built",
-			"agent", def.Name, "tools", strings.Join(names, ","), "model", model,
+			"agent", def.Name, "tools", strings.Join(names, ","), "provider", pid, "model", model,
 			"preloaded_skills", len(bodies), "path", def.Path)
 	}
 

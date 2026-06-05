@@ -447,7 +447,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// eviction remains a follow-up; see docs/adr/0001-acp-adapter.md.
 		OnCloseSession: learned.Forget,
 	}
-	applyTeamConfig(&svcCfg, cfg, provider, mainMgr)
+	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr)
 
 	svc, err := server.NewService(svcCfg)
 	if err != nil {
@@ -506,6 +506,7 @@ func sessionEngineFactory(
 	hooks port.HookRunner,
 	mcpProvider mcp.Provider,
 	instructions prompt.InstructionAssembler,
+	agentReg *agents.Registry,
 ) server.SessionEngineFactory {
 	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig) (server.SessionEngineResult, error) {
 		// Resolve the provider/model selector FIRST (before any MCP connect), so an
@@ -568,11 +569,40 @@ func sessionEngineFactory(
 				"servers", len(mgr.Servers()), "tools", len(mgr.Tools()))
 		}
 
+		// Half B — per-session sub-agent tools. The build-time per-session catalog is
+		// core-tools-only (registerCoreTools registers NO Task/Team — those are added
+		// separately in buildCatalog, which the factory never calls), so a
+		// provider-selected session today CANNOT spawn sub-agents at all. Build a
+		// per-session Task tool (and, under EnableTeams, an in-catalog Team tool) wired
+		// to THIS session's resolved (provider, providerID, model) as the inherited
+		// parent — reusing the SAME builders the build-time path uses so the two
+		// catalogs cannot drift. A def's own `provider:` still overrides per-def. The
+		// per-session mgr (the client-MCP manager) is the mainMgr for Task/member defs'
+		// MCP reference/inline resolution, mirroring the build-time path.
+		//
+		// The Task tool's inline-MCP close is FOLDED into the returned Close so a def's
+		// inline MCP managers are torn down with the session (CloseSession/Service.Close).
+		taskTool, taskClose := buildTaskTool(ctx, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, hooks, agentReg, mgr)
+		cat.MustRegister(taskTool)
+		closeFn = composeCloseErr(taskClose, closeFn)
+		if cfg.EnableTeams {
+			// In-catalog Team tool over a per-session member factory wired to the session
+			// provider as parent. (The standalone gRPC CreateTeam RPC stays on the default
+			// provider — deferred; CreateTeam carries no per-session selector today.)
+			factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, mgr)
+			cat.MustRegister(agent.NewTeamTool(
+				agent.TeamMemberEngineFactory(factory),
+				agent.WithTeamToolForker(fk),
+				agent.WithTeamToolReadOnlyForker(roFk),
+				agent.WithTeamToolHooks(teamHooks),
+			))
+		}
+
 		// Identical to the main engine in every NON-provider Deps field except the
-		// catalog (which carries the extra client MCP tools): engineDepsForProvider is
-		// the single source of the provider-closing wiring AND the shared wiring, so no
-		// collaborator is silently dropped and a non-default provider never contaminates
-		// compaction/counting.
+		// catalog (which carries the extra client MCP + per-session sub-agent tools):
+		// engineDepsForProvider is the single source of the provider-closing wiring AND
+		// the shared wiring, so no collaborator is silently dropped and a non-default
+		// provider never contaminates compaction/counting.
 		deps := engineDepsForProvider(cfg, resolvedProvider, resolvedModel, contextWindow, store, policy, hooks, mcpProvider, instructions)
 		deps.Catalog = cat
 		return server.SessionEngineResult{
@@ -694,10 +724,28 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 		TrustProject:  cfg.TrustProject,
 		ExplicitFiles: cfg.PermissionConfigs,
 	})
-	policy := permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, resolver)
+	// permconfig.New returns a TYPED-nil (*permconfig.Resolver)(nil) when no config
+	// source is wired; passing that into NewPolicyWithResolver would store a non-nil
+	// INTERFACE wrapping a nil pointer, so the policy's `resolver != nil` guard stays
+	// true and Resolve panics on the first tool-permission evaluation. Pass a real
+	// untyped nil so the documented "nil resolver behaves like NewPolicy" contract
+	// holds (the no-config default — built-ins + learned only).
+	var policy *permpolicy.Policy
+	if resolver != nil {
+		policy = permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, resolver)
+	} else {
+		policy = permpolicy.NewPolicy(mainRules(cfg), learned)
+	}
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
-	cat, mainMgr, mcpProvider, mcpInventory, memStore, userModelStore, discoveredSkills, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
+	// Resolve the agent-definition registry ONCE here and share it with BOTH the
+	// build-time catalog's Task/Team tools and the per-session engine factory (Half B
+	// builds a per-session Task/Team tool over the SAME registry, closed over below).
+	// Discovery is idempotent file scanning; resolving once avoids per-session
+	// re-discovery (the registry does not vary per session).
+	agentReg := resolveAgentRegistry(ctx, cfg)
+
+	cat, mainMgr, mcpProvider, mcpInventory, memStore, userModelStore, discoveredSkills, mcpClose := buildCatalog(ctx, cfg, reg, provider, hooks, agentReg)
 
 	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona source. ON
 	// by default reading the conventional ~/.config/mecatl/soul.md; --no-soul leaves
@@ -728,7 +776,7 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 
 	deps := baseEngineDeps(cfg, provider, store, policy, mainHooks, mcpProvider, instructions)
 	deps.Catalog = cat
-	sessFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, mcpProvider, instructions)
+	sessFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, mcpProvider, instructions, agentReg)
 	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, userModelStore, mcpClose, nil
 }
 
@@ -1140,7 +1188,7 @@ func registerCoreTools(cfg Config, cat *tool.Catalog, log bool) {
 // — the optional Bash tool. It then optionally registers Fork, memory, skills, the
 // repo map, and connects any MCP servers. The returned close func tears down the
 // MCP manager on shutdown.
-func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, *memory.Store, *memory.Store, []skills.Skill, func()) {
+func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, hooks port.HookRunner, agentReg *agents.Registry) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, *memory.Store, *memory.Store, []skills.Skill, func()) {
 	cat := tool.NewCatalog()
 	registerCoreTools(cfg, cat, true)
 	// memStore is the per-project memory store, returned so the caller can bind it
@@ -1154,8 +1202,11 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 	// entries then resolve to a clear "unknown server" diagnostic).
 	mainMgr, mcpProvider, mcpInventory, mcpClose := registerMCP(ctx, cfg, cat)
 
-	agentReg := resolveAgentRegistry(ctx, cfg)
-	taskTool, taskMCPClose := buildTaskTool(ctx, cfg, provider, hooks, agentReg, mainMgr)
+	// Build-time Task tool: the inherited parent is the build-time DEFAULT provider +
+	// model (reg.Default()/cfg.Model), so a def that pins no provider runs on the
+	// default exactly as before. A def's own `provider:` overrides per-def. agentReg
+	// is resolved ONCE in buildEngine and shared with the per-session factory (Half B).
+	taskTool, taskMCPClose := buildTaskTool(ctx, cfg, reg, provider, reg.Default(), cfg.Model, hooks, agentReg, mainMgr)
 	cat.MustRegister(taskTool)
 	// Aggregate the per-def INLINE MCP managers' teardown into the main MCP close, so
 	// Built.Close tears them ALL down on shutdown (process-lifetime engines).
@@ -1203,7 +1254,7 @@ func buildCatalog(ctx context.Context, cfg Config, provider port.LLMProvider, ho
 	if cfg.EnableTeams {
 		// buildTeamWiring always returns a non-nil forker and hooks runner under
 		// EnableTeams, so they are wired unconditionally (no nil guards).
-		factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, provider, mainMgr)
+		factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, provider, reg.Default(), cfg.Model, mainMgr)
 		// factory is a server.MemberEngineFactory; NewTeamTool wants the
 		// agent.TeamMemberEngineFactory of identical underlying shape — an explicit
 		// conversion bridges the two named types (both func(*team.Team, MemberSpec)
@@ -1647,6 +1698,67 @@ func newChildEngineWithHooks(provider port.LLMProvider, cat *tool.Catalog, model
 	})
 }
 
+// newChildEngineForProvider is newChildEngineWithHooks BUT it RE-DERIVES the
+// provider-closing Deps (Compactor/TokenCounter/PromptConfig.Env.Model/
+// ContextWindow) for the supplied provider+model via engineDepsForProvider — so a
+// child bound to a NON-default provider compacts and counts through THAT provider,
+// never the default (the cross-provider contamination fix the Phase-0 panel
+// flagged). It then OVERRIDES the non-provider fields back to the child's shape:
+// an allow-all non-learning policy (nil store), the supplied catalog + hooks, and
+// no instructions/sink/store (child engines are internal sub-agents, not
+// persisted sessions). The provider is FIXED for this child's lifetime.
+//
+// For the INHERITED-DEFAULT case (a def that pins no provider on a default session)
+// the caller passes contextWindow=0, so engineDepsForProvider falls back to the
+// 128k default and the child stays byte-identical to the old newChildEngineWithHooks
+// path. A provider-SWITCHED child gets its real catalog window (catalogContextWindow).
+func newChildEngineForProvider(cfg Config, provider port.LLMProvider, model string, contextWindow int, cat *tool.Catalog, pc prompt.Config, hooks port.HookRunner) *agent.Engine {
+	return agent.NewEngine(childEngineDepsForProvider(cfg, provider, model, contextWindow, cat, pc, hooks))
+}
+
+// childEngineDepsForProvider builds the agent.Deps for a child/member engine bound
+// to provider+model, re-deriving the provider-closing fields via
+// engineDepsForProvider then OVERRIDING the non-provider fields back to the child's
+// shape. It is split out from newChildEngineForProvider so a test can assert the
+// child Deps directly (Sink/Logger nil, Compactor/TokenCounter keyed on the CHILD's
+// model) — the engine's deps are otherwise private.
+func childEngineDepsForProvider(cfg Config, provider port.LLMProvider, model string, contextWindow int, cat *tool.Catalog, pc prompt.Config, hooks port.HookRunner) agent.Deps {
+	if hooks == nil {
+		hooks = hookexec.New(nil)
+	}
+	// engineDepsForProvider re-derives every provider-closing field against the
+	// requested provider+model. We pass the child's allow-all policy and nil
+	// store/mcpProvider/instructions directly so it does not adopt the main engine's
+	// interactive policy or persistence. The PromptConfig it builds (Env.Model +
+	// agency delta keyed on `model`) is then REPLACED with the caller's pc, which the
+	// per-def path composes with the def body — but the Model/TokenCounter/Compactor/
+	// ContextWindow it derived are kept (those are the contamination-sensitive fields).
+	deps := engineDepsForProvider(cfg, provider, model, contextWindow,
+		nil, // store: child engines never persist (disables Learn entirely)
+		permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		hooks,
+		nil, // mcpProvider: child command expansion does not consult MCP prompts
+		nil, // instructions: child engines carry no turn-0 instruction assembler
+	)
+	deps.Catalog = cat
+	deps.PromptConfig = pc
+	// Child engines do NOT expand slash commands (the old newChildEngineWithHooks
+	// path left CommandExpander nil — a sub-agent receives literal instructions, not
+	// user "/cmd" text). engineDepsForProvider built one from cfg; clear it so the
+	// child's non-provider shape is unchanged from the pre-feature constructor.
+	deps.CommandExpander = nil
+	// Telemetry stays OFF for child engines: engineDepsForProvider set Sink/Logger
+	// from cfg, but the OLD child constructor (newChildEngineWithHooks) left BOTH nil,
+	// so a sub-agent's turns/tool-calls were invisible to the operator-facing
+	// TTFT/turn-duration histograms. Restoring nil keeps byte-identity with the
+	// pre-feature child shape — without it every def-pinned / team-member / Half-B
+	// session child would double-count against the shared Sink. Distinct sub-agent
+	// telemetry tagging is a SEPARATE decision; nil is the conservative choice here.
+	deps.Sink = nil
+	deps.Logger = nil
+	return deps
+}
+
 // buildChildEngine constructs the default Task explorer child *Engine: the read-only
 // explorer toolset (Read/Grep/Glob — never Fork/Task/ToolSearch, so a child can never
 // recurse or fan out further, and never Edit/Write, so it cannot edit the project)
@@ -1750,7 +1862,14 @@ func buildForkJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 // and residual as team members — see buildSandboxedCommandRunner). When Bash is
 // disabled (nil runner) no forker is wired and the child stays a base-sharing
 // read-only explorer with no shell, exactly as before.
-func buildTaskTool(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager) (tool.Tool, func() error) {
+//
+// PER-SUB-AGENT PROVIDER: provReg + parentProviderID + parentModel are the
+// inheritance point threaded down to buildAgentTaskEngines so a def's `provider:`
+// can route its child to a different provider (Half A) and a def that pins none
+// inherits whatever the call site supplies — the build-time default (buildCatalog)
+// or a session-selected provider (Half B). The registry never reaches the Task
+// tool itself; it is consumed only inside buildAgentTaskEngines' resolution loop.
+func buildTaskTool(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager) (tool.Tool, func() error) {
 	// Resolve the active skills once so a def's `skills:` can preload skill bodies
 	// into its engine prompt. The same index is the operator-controlled skill set
 	// the Skill tool serves. `hooks` is the inert default each def adopts unless its
@@ -1760,7 +1879,7 @@ func buildTaskTool(ctx context.Context, cfg Config, provider port.LLMProvider, h
 	// gets the HARDENED runner (the main session keeps its own unhardened runner). nil
 	// when Bash is disabled — then no shell, no forker.
 	sandboxedRunner := buildSandboxedCommandRunner(cfg)
-	engines, meta, mcpClose := buildAgentTaskEngines(ctx, cfg, provider, reg, skillIdx, hooks, sandboxedRunner, mainMgr)
+	engines, meta, mcpClose := buildAgentTaskEngines(ctx, cfg, provider, provReg, parentProviderID, parentModel, reg, skillIdx, hooks, sandboxedRunner, mainMgr)
 	opts := []agent.TaskOption{
 		agent.WithSubagentStopHook(hooks),
 		agent.WithAgentEngines(engines, meta),
@@ -1813,7 +1932,13 @@ func buildTaskTool(ctx context.Context, cfg Config, provider port.LLMProvider, h
 // supervisor (TeammateIdle) and the member coordination tools (TaskCreated /
 // TaskCompleted gates). mainMgr supplies the per-agent MCP base manager so a member's
 // agent definition can scope its MCP servers.
-func buildTeamWiring(ctx context.Context, cfg Config, provider port.LLMProvider, mainMgr *mcp.Manager) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, port.HookRunner) {
+//
+// PER-SUB-AGENT PROVIDER: provReg + parentProviderID + parentModel thread the
+// inheritance point into buildMemberEngine so a member's agent def `provider:` can
+// route its engine to a different provider, and a member that pins none inherits
+// whatever the caller supplies (the build-time default in buildCatalog/
+// applyTeamConfig, or a session-selected provider in Half B's in-catalog Team tool).
+func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, port.HookRunner) {
 	// A single hooks runner shared by the supervisor and the member coordination
 	// tools. hookexec.New(nil) matches buildEngine's default: the configured-hook map
 	// is not yet wired from cfg anywhere, so this is an inert (no-op) runner today,
@@ -1833,7 +1958,7 @@ func buildTeamWiring(ctx context.Context, cfg Config, provider port.LLMProvider,
 	roFk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
 	memberRunner := buildSandboxedCommandRunner(cfg)
 	roIsolationAvailable := memberRunner != nil && roFk != nil
-	factory := buildMemberEngine(cfg, provider, teamHooks, agentReg, skillIdx, memberRunner, roIsolationAvailable, mainMgr)
+	factory := buildMemberEngine(cfg, provReg, provider, parentProviderID, parentModel, teamHooks, agentReg, skillIdx, memberRunner, roIsolationAvailable, mainMgr)
 	return factory, fk, roFk, teamHooks
 }
 
@@ -1844,17 +1969,34 @@ func buildTeamWiring(ctx context.Context, cfg Config, provider port.LLMProvider,
 // SAME wiring the Team tool uses (buildCatalog) — so the gRPC CreateTeam path and the
 // Team tool cannot drift. MaxTeams is left at zero so the server applies its own
 // default.
-func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvider, mainMgr *mcp.Manager) {
+func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, provider port.LLMProvider, mainMgr *mcp.Manager) {
 	if !cfg.EnableTeams {
 		slog.Info("agent teams DISABLED (set --enable-teams to enable; experimental)")
 		return
 	}
-	factory, fk, roFk, teamHooks := buildTeamWiring(context.Background(), cfg, provider, mainMgr)
+	// The gRPC CreateTeam path's MemberEngine is wired ONCE here with the build-time
+	// DEFAULT provider as the inherited parent (reg.Default()/cfg.Model). Per-session
+	// provider propagation to the standalone CreateTeam RPC is DEFERRED (CreateTeam
+	// carries no selector today); the in-catalog Team tool IS covered in Half B.
+	factory, fk, roFk, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr)
 	svcCfg.MemberEngine = factory
 	svcCfg.Forker = fk
 	svcCfg.ReadOnlyForker = roFk
 	svcCfg.TeamHooks = teamHooks
 	slog.Info("agent teams ENABLED (experimental; CreateTeam/SpawnTeammate/RunTeam + Team tool)")
+}
+
+// modelCfgFor returns a copy of cfg with the Model field overridden, so a
+// promptConfig built for a child/member keys its Env.Model + agency delta on the
+// INHERITED (parent/session) model rather than cfg.Model. It mirrors the
+// modelCfg-clone idiom inside engineDepsForProvider. An empty override leaves
+// cfg.Model unchanged (the build-time default path).
+func modelCfgFor(cfg Config, model string) Config {
+	if model == "" {
+		return cfg
+	}
+	cfg.Model = model
+	return cfg
 }
 
 // buildMemberEngine returns the per-member engine factory the server uses to build
@@ -1888,13 +2030,25 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, provider port.LLMProvide
 // spawn, so a stale roster reference never wedges a team. (An unknown Task `agent`
 // arg, by contrast, is a model-addressable error — the model can retry; an operator
 // roster entry cannot.)
-func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner tool.CommandRunner, roIsolationAvailable bool, mainMgr *mcp.Manager) server.MemberEngineFactory {
+//
+// PER-SUB-AGENT PROVIDER: provReg + parentProviderID + parentModel are the
+// inheritance point. A DEFINED member resolves its def's (provider, model) via
+// resolveProviderModel; a def that pins a known provider routes the member engine
+// to THAT provider (built through newChildEngineForProvider so it compacts/counts
+// on the right model). A member pinning none — or the DEFAULT (undefined) member —
+// inherits the parent provider unchanged.
+func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner tool.CommandRunner, roIsolationAvailable bool, mainMgr *mcp.Manager) server.MemberEngineFactory {
 	return func(t *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		var (
-			model = cfg.Model
-			pc    = promptConfig(cfg, cfg.gitStatus)
-			mode  session.PermissionMode
+			// Default (undefined) member: inherit the parent provider + model the call
+			// site supplied (the build-time default, or a session-selected provider in
+			// Half B). A DEFINED member overrides these via resolveProviderModel below.
+			model         = parentModel
+			pc            = promptConfig(modelCfgFor(cfg, parentModel), cfg.gitStatus)
+			childProvider = provider
+			childWindow   = 0
+			mode          session.PermissionMode
 			// memberLimits carries ONLY the def-set per-round stop conditions (zero =
 			// unset); AddMember per-field merges them onto the team default (s.limits).
 			memberLimits session.Limits
@@ -1977,7 +2131,10 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 			}
 			mcpClose, mcpNames = cl, names2
 			memberLimits = defLimits(def, session.Limits{}) // only def-set fields; AddMember merges with the team default
-			model = resolveModel(cfg, def)                  // resolve ONCE; thread the id into agentPromptConfig
+			// Resolve the def's (provider, model, window) via the SHARED helper: a
+			// pinned-and-known provider switches the member engine; a def pinning none
+			// inherits the parent. resolve ONCE; thread the model into agentPromptConfig.
+			childProvider, _, model, childWindow = resolveChildProvider(cfg, provReg, def, provider, parentProviderID, parentModel)
 			bodies, missing := preloadedSkillBodies(def, skillIdx)
 			for _, name := range missing {
 				slog.Warn("team member agent def references an unknown skill; not preloaded",
@@ -2025,7 +2182,10 @@ func buildMemberEngine(cfg Config, provider port.LLMProvider, teamHooks port.Hoo
 			cat.MustRegister(mt)
 		}
 
-		eng := newChildEngineWithHooks(provider, cat, model, pc, memberHooks)
+		// Built through newChildEngineForProvider so a provider-switched member
+		// compacts/counts on its own model (contamination fix); childWindow=0 for the
+		// inherited-default member keeps it byte-identical.
+		eng := newChildEngineForProvider(cfg, childProvider, model, childWindow, cat, pc, memberHooks)
 		return agent.MemberBuild{Engine: eng, Mode: mode, Limits: memberLimits, Close: mcpClose, MCPToolNames: mcpNames, IsolateReadOnly: isolateReadOnly}
 	}
 }

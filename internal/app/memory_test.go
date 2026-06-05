@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
@@ -29,7 +30,7 @@ func TestBuildCatalogRegistersMemorySearchWhenEnabled(t *testing.T) {
 
 	t.Run("enabled", func(t *testing.T) {
 		cfg := Config{MemoryDir: t.TempDir()}
-		cat, _, _, _, _, _, _, closeFn := buildCatalog(ctx, cfg, provider, hooks)
+		cat, _, _, _, _, _, _, closeFn := buildCatalog(ctx, cfg, regForTest(provider, providerMock, cfg.Model), provider, hooks, agents.NewRegistry(nil))
 		defer closeFn()
 
 		for _, name := range memoryToolNames {
@@ -41,7 +42,7 @@ func TestBuildCatalogRegistersMemorySearchWhenEnabled(t *testing.T) {
 
 	t.Run("disabled", func(t *testing.T) {
 		cfg := Config{MemoryDir: ""}
-		cat, _, _, _, _, _, _, closeFn := buildCatalog(ctx, cfg, provider, hooks)
+		cat, _, _, _, _, _, _, closeFn := buildCatalog(ctx, cfg, regForTest(provider, providerMock, cfg.Model), provider, hooks, agents.NewRegistry(nil))
 		defer closeFn()
 
 		for _, name := range memoryToolNames {

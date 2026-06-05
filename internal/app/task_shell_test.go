@@ -132,7 +132,7 @@ func TestBuildAgentTaskEnginesWithRunnerKeepsBashDropsEdit(t *testing.T) {
 	})
 
 	// With a runner: Bash kept, Edit dropped.
-	engines, _, _ := buildAgentTaskEngines(context.Background(), cfg, bashThenEdit(), reg, nil, hookexec.New(nil), runner, nil)
+	engines, _, _ := agentTaskEnginesForTest(context.Background(), cfg, bashThenEdit(), reg, nil, hookexec.New(nil), runner, nil)
 	eng := engines["inspector"]
 	if eng == nil {
 		t.Fatal("inspector engine not built")
@@ -149,7 +149,7 @@ func TestBuildAgentTaskEnginesWithRunnerKeepsBashDropsEdit(t *testing.T) {
 	}
 
 	// Without a runner: Bash dropped too (no shell, no isolation).
-	enginesNoShell, _, _ := buildAgentTaskEngines(context.Background(), cfg, bashThenEdit(), reg, nil, hookexec.New(nil), nil, nil)
+	enginesNoShell, _, _ := agentTaskEnginesForTest(context.Background(), cfg, bashThenEdit(), reg, nil, hookexec.New(nil), nil, nil)
 	engNoShell := enginesNoShell["inspector"]
 	if engNoShell == nil {
 		t.Fatal("inspector engine (no shell) not built")
@@ -299,7 +299,7 @@ func TestBuildTaskToolRealWiringForksChildShellWhenShell(t *testing.T) {
 		mockllm.TextTurn("probed"),
 	)
 
-	task, closeFn := buildTaskTool(context.Background(), cfg, childProvider, hookexec.New(nil), regOf(), nil)
+	task, closeFn := taskToolForTest(context.Background(), cfg, childProvider, hookexec.New(nil), regOf(), nil)
 	if closeFn != nil {
 		defer func() { _ = closeFn() }()
 	}
@@ -371,7 +371,7 @@ func TestBuildTaskToolRealWiringNoShellNoForker(t *testing.T) {
 		mockllm.TextTurn("could not run a shell"),
 	)
 
-	task, closeFn := buildTaskTool(context.Background(), cfg, childProvider, hookexec.New(nil), regOf(), nil)
+	task, closeFn := taskToolForTest(context.Background(), cfg, childProvider, hookexec.New(nil), regOf(), nil)
 	if closeFn != nil {
 		defer func() { _ = closeFn() }()
 	}

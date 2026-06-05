@@ -133,6 +133,15 @@ func (r *providerRegistry) Default() string { return r.defaultID }
 // explicit cfg.Model otherwise (see resolveDefaultModel).
 func (r *providerRegistry) DefaultModel() string { return r.defaultModel }
 
+// DefaultModelFor returns the builtin default model for a given provider id (the
+// id the model string is VALID for), or "" when the provider has no table entry
+// (the adapter/endpoint default). It is the single source the per-sub-agent
+// provider resolver uses when a def switches provider but pins no model — a parent
+// model string is for the PARENT's provider and may be invalid on the child's, so
+// the child rebases off this provider-appropriate default rather than inheriting
+// the parent model. Composition-only, like the rest of the registry.
+func (*providerRegistry) DefaultModelFor(id string) string { return builtinDefaultModel[id] }
+
 // errNoProvider is the named, actionable zero-keys error: when no provider's
 // credentials resolved AND the mock is not selected, Build cannot serve a useful
 // engine. It names BOTH env vars and the offline escape hatches so first-run is

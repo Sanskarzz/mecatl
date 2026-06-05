@@ -1179,7 +1179,18 @@ ONE neutral `port.ProviderCapabilities` feeds three sinks so they cannot disagre
 `ModelInfo.image` (ListModels), the `CreateSessionResponse.session_capabilities` echo
 (per-session), and the ACP gate (`Service.ProviderCapabilities()`, the default caps).
 The server/acp adapters receive only the computed value — no catalog/registry type
-crosses inward. Keys are never on the wire — only the provider id. **Full design:
-see `docs/design/MULTI-PROVIDER.md`** (registry, catalog-as-data, DTO neutrality,
-selection primitive, per-session engine, capability intersection, disclosure posture
-+ per-client key custody, and the P0→P3 phasing).
+crosses inward. Keys are never on the wire — only the provider id.
+
+**Per-sub-agent provider (shipped).** A Task agent def or team member may pin a
+`provider:` (orthogonal to `model:`) to run its child engine on a DIFFERENT provider
+than the parent, and a provider-selected session propagates its provider to the
+sub-agents it spawns (which it now CAN — Half B builds it a per-session Task/Team
+tool). Precedence: `def.Provider > session-selected provider > build-time default`;
+every child routes through `engineDepsForProvider` so it never contaminates the
+parent's compactor/counter. Composition-only — the registry never reaches the child
+engine (a bare `port.LLMProvider` is handed down).
+
+**Full design: see `docs/design/MULTI-PROVIDER.md`** (registry, catalog-as-data, DTO
+neutrality, selection primitive, per-session engine, capability intersection,
+disclosure posture + per-client key custody, per-sub-agent provider, and the P0→P3
+phasing).

@@ -20,6 +20,11 @@ description: Reviews a diff...  # REQUIRED — always-in-context routing metadat
 tools: [Read, Grep, Glob]      # OPTIONAL — allowlist of CORE tool names (array or "a, b" string)
 disallowedTools: [Write]       # OPTIONAL — subtractive filter applied after tools/default
 model: sonnet                  # OPTIONAL — alias | full id | inherit/empty (=> parent)
+provider: openrouter           # OPTIONAL — provider id (openai|openrouter|…). Empty => inherit
+                               #   the session's provider, or the build-time default for a
+                               #   non-selected session. Orthogonal to model:; when it SWITCHES
+                               #   provider the model rebases off model: (or the provider default),
+                               #   never the parent model. Unknown provider => loud parent fallback.
 permissionMode: plan           # OPTIONAL — default | plan | acceptEdits
 maxTurns: 9                    # OPTIONAL — per-run turn cap (0/absent => call-site default)
 maxToolCalls: 25               # OPTIONAL — per-run tool-call cap (0/absent => call-site default)

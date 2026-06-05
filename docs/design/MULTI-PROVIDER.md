@@ -278,3 +278,47 @@ than inheriting the last pick made elsewhere. An explicit "set as default" affor
 Open / deferred items: an explicit "set as default" gesture, a `small_model` tier
 (sub-agent cheap model), mid-session same-family model switch, and a zero-keys
 first-run UX.
+
+## 10. Per-sub-agent provider selection (SHIPPED — both halves)
+
+A Task agent definition and a team member may resolve to a DIFFERENT provider (+
+model) than the parent, routed through the same `providerRegistry` — without leaking
+the registry past the composition layer (`internal/app`). Both halves are SHIPPED:
+
+- **Half A — def-pinned provider.** A new `provider:` frontmatter field on an agent
+  def (pure data on `agents.AgentDef.Provider`; the adapter never imports the
+  registry) routes that def's child engine to the named provider. It is orthogonal
+  to `model:` (two fields, mirroring the wire's `provider_id`/`model_id` — never a
+  slash-joined string).
+- **Half B — session-provider propagation.** A session that SELECTED provider P over
+  the Phase-0 wire now gets a per-session Task tool (and, under `--enable-teams`, an
+  in-catalog Team tool) wired to P as the inherited parent — so its sub-agents that
+  pin NO provider inherit P, not the build-time default. The build-time per-session
+  catalog was core-tools-only, so a selected session previously could not spawn
+  sub-agents at all; Half B closes that gap by reusing the SAME `buildTaskTool`/
+  `buildTeamWiring` builders (no per-session-catalog drift), folding the Task tool's
+  inline-MCP close into `SessionEngineResult.Close`, bounded by `MaxSessionEngines`.
+
+**Three-level provider precedence:** `def.Provider > session-selected provider >
+build-time default provider`, realised by a `parentProviderID` the call site threads
+into the one shared resolver `resolveProviderModel(cfg, reg, def, parentProviderID,
+parentModel)` (the build-time path passes `reg.Default()`/`cfg.Model`; a selected
+session passes its resolved provider/model). When the provider SWITCHES, the model is
+rebased off `def.Model` (or the new provider's `builtinDefaultModel`), NEVER the
+inherited parent model (a bare `gpt-5` is invalid on openrouter). Same-provider keeps
+the existing `resolveModel` chain (full back-compat).
+
+**Contamination fix:** every child engine — def-pinned OR session-inheriting — is
+built through `newChildEngineForProvider` → `engineDepsForProvider`, so a child on
+provider X compacts/counts/prompts through X with X+model's catalogued context
+window. A non-switching child keeps window=0 (128k, byte-identical).
+
+**Fail-safe:** a def naming an unknown/unavailable provider is a LOUD fallback to the
+parent provider + `slog.Warn` (mirroring every other forgiving def-error handler) —
+one bad shared-repo def never wedges startup.
+
+**Deferred (NOT built):** (1) the standalone gRPC `CreateTeam` RPC's per-session
+provider — `server.Config.MemberEngine` is wired ONCE at build with the default
+provider and CreateTeam carries no selector today; the in-catalog Team tool IS
+covered. (2) Surfacing the resolved provider in `ListAgents`/`AgentInfo` — that is a
+proto change with no consumer yet.

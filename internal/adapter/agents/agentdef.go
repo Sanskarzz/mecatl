@@ -58,6 +58,12 @@ type AgentDef struct {
 	// id, or "inherit"/empty (=> parent model). Aliases are resolved ONLY in
 	// internal/app, never here.
 	Model string
+	// Provider is the OPTIONAL provider-id selector (e.g. "openai", "openrouter").
+	// Empty => inherit the parent/session provider. It is PURE DATA, orthogonal to
+	// Model: the id => port.LLMProvider resolution happens ONLY in internal/app (the
+	// provider registry lives there); this adapter never imports the registry.
+	// Mirrors Model exactly — a hint the composition layer resolves.
+	Provider string
 	// PermissionMode is the OPTIONAL session permission mode hint
 	// (default|plan|acceptEdits). Stored as the raw string; the domain mode value
 	// object is resolved in the composition layer.

@@ -59,6 +59,43 @@ Inspect the change and report findings.`)
 	}
 }
 
+// TestParseAgentDefProvider asserts the per-sub-agent-provider frontmatter field:
+// a `provider:` value parses into AgentDef.Provider (trimmed), and its ABSENCE
+// leaves Provider == "" (inherit). It is pure data — orthogonal to model.
+func TestParseAgentDefProvider(t *testing.T) {
+	withProvider := []byte(`---
+name: x
+description: d
+provider:  openrouter
+model: anthropic/claude-sonnet-4.5
+---
+body`)
+	def, perr, _ := parseAgentDef(withProvider, "x.md")
+	if perr != "" {
+		t.Fatalf("parse error: %s", perr)
+	}
+	if def.Provider != "openrouter" {
+		t.Fatalf("provider = %q, want %q (trimmed)", def.Provider, "openrouter")
+	}
+	if def.Model != "anthropic/claude-sonnet-4.5" {
+		t.Fatalf("model = %q, want the verbatim model id (orthogonal to provider)", def.Model)
+	}
+
+	noProvider := []byte(`---
+name: y
+description: d
+model: sonnet
+---
+body`)
+	def2, perr2, _ := parseAgentDef(noProvider, "y.md")
+	if perr2 != "" {
+		t.Fatalf("parse error: %s", perr2)
+	}
+	if def2.Provider != "" {
+		t.Fatalf("absent provider = %q, want \"\" (inherit)", def2.Provider)
+	}
+}
+
 // TestParseAgentDefToolsStringForm asserts Claude-Code compatibility: a `tools`
 // scalar string ("Read, Edit Grep") parses identically to the array form.
 func TestParseAgentDefToolsStringForm(t *testing.T) {

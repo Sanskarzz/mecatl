@@ -176,7 +176,8 @@ func TestTaskDefInlineMCPCloseAggregated(t *testing.T) {
 		Tools:       []string{"Read"},
 		MCPServers:  []agents.AgentMCPServer{{Name: "inline", URL: url}},
 	}})
-	engines, _, closeFn := buildAgentTaskEngines(context.Background(), Config{Model: "m"}, mockllm.New(), reg, nil, hookexec.New(nil), nil, nil)
+	mcpProv := mockllm.New()
+	engines, _, closeFn := buildAgentTaskEngines(context.Background(), Config{Model: "m"}, mcpProv, regForTest(mcpProv, providerMock, "m"), providerMock, "m", reg, nil, hookexec.New(nil), nil, nil)
 	if engines["inline-task"] == nil {
 		t.Fatal("inline-task engine not built")
 	}
@@ -208,7 +209,7 @@ func TestMemberReadOnlyDefWithMCPAccepted(t *testing.T) {
 	// The member loop calls the MCP echo tool, then reports done.
 	mcpCall := session.ToolCall{ID: "c1", Name: "mcp__inline__echo", Args: json.RawMessage(`{"text":"x"}`)}
 	prov := mockllm.New(mockllm.ToolCallTurn(mcpCall), mockllm.TextTurn("done"))
-	factory := buildMemberEngine(cfg, prov, hookexec.New(nil), regOf(def), nil, nil, false, nil)
+	factory := memberFactoryForTest(cfg, prov, hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
 		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
@@ -246,7 +247,7 @@ func TestMemberReadOnlyDefWithEditStillRejected(t *testing.T) {
 		MCPServers:  []agents.AgentMCPServer{{Name: "inline", URL: url}},
 	}
 	tm := team.New("t")
-	factory := buildMemberEngine(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, false, nil)
+	factory := memberFactoryForTest(cfg, editCall(), hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
 		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
