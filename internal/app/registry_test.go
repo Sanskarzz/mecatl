@@ -197,6 +197,69 @@ func TestResolveDefaultModelPrecedence(t *testing.T) {
 	}
 }
 
+// recordingEnv wraps an envDetector so a test can observe WHICH env var names the
+// registry queried — proving the names come from the catalog (+ the composition
+// augmentation), not a hardcoded inline map.
+func recordingEnv(vars map[string]string, queried *[]string) envDetector {
+	return func(name string) string {
+		*queried = append(*queried, name)
+		return vars[name]
+	}
+}
+
+// TestRegistryEnvDetectionCatalogDriven proves the env-var names consulted come
+// from the providercatalog env[] (plus the openrouter composition augmentation),
+// not the deleted inline builtinProviderEnv map. openai is queried for
+// OPENAI_API_KEY; openrouter for BOTH OPENROUTER_API_KEY and OPENAI_API_KEY.
+func TestRegistryEnvDetectionCatalogDriven(t *testing.T) {
+	var openaiQueried []string
+	if got := providerKey("", "openai", recordingEnv(nil, &openaiQueried)); got != "" {
+		t.Fatalf("providerKey(openai) = %q, want \"\" (nothing set)", got)
+	}
+	if !reflect.DeepEqual(openaiQueried, []string{"OPENAI_API_KEY"}) {
+		t.Errorf("openai queried %v, want [OPENAI_API_KEY] (from catalog env[])", openaiQueried)
+	}
+
+	var orQueried []string
+	if got := providerKey("", "openrouter", recordingEnv(nil, &orQueried)); got != "" {
+		t.Fatalf("providerKey(openrouter) = %q, want \"\"", got)
+	}
+	// catalog env[] = [OPENROUTER_API_KEY]; composition appends OPENAI_API_KEY.
+	if !reflect.DeepEqual(orQueried, []string{"OPENROUTER_API_KEY", "OPENAI_API_KEY"}) {
+		t.Errorf("openrouter queried %v, want [OPENROUTER_API_KEY OPENAI_API_KEY] (catalog + augmentation)", orQueried)
+	}
+}
+
+// TestProviderEnvVarsFromCatalog asserts the composition helper returns the
+// catalog's env[] for a provider (the openrouter case includes the augmentation).
+func TestProviderEnvVarsFromCatalog(t *testing.T) {
+	if got := providerEnvVars("openai"); !reflect.DeepEqual(got, []string{"OPENAI_API_KEY"}) {
+		t.Errorf("providerEnvVars(openai) = %v, want [OPENAI_API_KEY] (from catalog)", got)
+	}
+	if got := providerEnvVars("openrouter"); !reflect.DeepEqual(got, []string{"OPENROUTER_API_KEY", "OPENAI_API_KEY"}) {
+		t.Errorf("providerEnvVars(openrouter) = %v, want [OPENROUTER_API_KEY OPENAI_API_KEY]", got)
+	}
+	// An unknown provider id is an honest empty (unavailable), never a panic.
+	if got := providerEnvVars("nonesuch"); got != nil {
+		t.Errorf("providerEnvVars(nonesuch) = %v, want nil", got)
+	}
+}
+
+// TestOpenRouterOpenAIKeyFallbackPreserved is the §4.2 regression tripwire: with
+// ONLY OPENAI_API_KEY set (no OPENROUTER_API_KEY), openrouter must still be
+// available via the composition augmentation — preserving S1 behaviour exactly.
+func TestOpenRouterOpenAIKeyFallbackPreserved(t *testing.T) {
+	reg, err := buildProviderRegistry(Config{}, fakeEnv(map[string]string{
+		"OPENAI_API_KEY": "sk-shared",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	if _, ok := reg.Lookup("openrouter"); !ok {
+		t.Error("openrouter UNAVAILABLE with only OPENAI_API_KEY set; the composition fallback regressed")
+	}
+}
+
 // streamOnce drives a single Stream against the entry's provider, draining the
 // iterator so the underlying HTTP request is actually issued. It returns the outer
 // Stream error (nil on a successful start). Offline: the provider must point at a

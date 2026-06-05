@@ -3,11 +3,13 @@ package app
 import (
 	"errors"
 	"log/slog"
+	"slices"
 	"sort"
 
 	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/openai"
+	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
 	"github.com/stacklok/mecatl/internal/port"
 )
 
@@ -35,17 +37,35 @@ const openRouterDefaultBaseURL = "https://openrouter.ai/api/v1"
 // lookup so registry construction never touches the real process environment.
 type envDetector func(name string) string
 
-// builtinProviderEnv maps each known provider id to the ordered list of
-// environment variables whose non-empty value makes that provider AVAILABLE
-// (any one suffices). This inline map is the S1 stand-in for the models.dev
-// catalog's per-provider env[] array; S2 replaces it with the catalog read
-// without changing the registry's interface.
+// providerEnvVars returns the ordered list of environment variables whose
+// non-empty value makes a provider AVAILABLE (any one suffices). The var NAMES
+// come from the embedded models.dev catalog's per-provider env[] (S2 replaced
+// S1's inline map with this catalog read, leaving the registry's interface and
+// behaviour unchanged).
 //
-// OpenRouter accepts EITHER its own key or, by convention, an OpenAI key, so it
-// lists both; the first non-empty value wins.
-var builtinProviderEnv = map[string][]string{
-	providerOpenAI:     {"OPENAI_API_KEY"},
-	providerOpenRouter: {"OPENROUTER_API_KEY", "OPENAI_API_KEY"},
+// One mecatl-specific augmentation lives HERE in composition, never in the
+// vendored catalog data (which stays honest to upstream — openrouter's env[] is
+// ["OPENROUTER_API_KEY"] only): OpenRouter rides the same Responses-speaking
+// openai adapter, so by mecatl convention it ALSO accepts an OpenAI key. We
+// append OPENAI_API_KEY for the openrouter provider so an operator who set only
+// OPENAI_API_KEY (pointing the base URL at OpenRouter) still resolves — exactly
+// S1's behaviour. The first non-empty value wins.
+//
+// A provider id absent from the catalog returns nil (unavailable), exactly like
+// an unset env var.
+func providerEnvVars(providerID string) []string {
+	p, ok := providercatalog.Default().Provider(providerID)
+	if !ok {
+		return nil
+	}
+	vars := p.EnvVars()
+	if providerID == providerOpenRouter {
+		// mecatl convention: OpenRouter also accepts an OpenAI key.
+		if !slices.Contains(vars, "OPENAI_API_KEY") {
+			vars = append(vars, "OPENAI_API_KEY")
+		}
+	}
+	return vars
 }
 
 // providerEntry is one configured provider in the registry: its stable id, the
@@ -161,13 +181,14 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 
 // providerKey resolves the credential for a provider: an explicit cfg-supplied key
 // wins (it was read from the env by the cmd layer), otherwise the first non-empty
-// value among the provider's builtinProviderEnv vars (the multi-env-var slice — any
-// one suffices). Returns "" when nothing resolves (provider unavailable).
+// value among the provider's catalog-driven env vars (providerEnvVars — the
+// multi-env-var slice, any one suffices). Returns "" when nothing resolves
+// (provider unavailable).
 func providerKey(cfgKey, providerID string, detect envDetector) string {
 	if cfgKey != "" {
 		return cfgKey
 	}
-	for _, v := range builtinProviderEnv[providerID] {
+	for _, v := range providerEnvVars(providerID) {
 		if val := detect(v); val != "" {
 			return val
 		}
@@ -206,24 +227,26 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 // resolveDefaultModel resolves the default (providerID, modelID) pair from cfg and
 // the registry. Precedence (per the Phase-0 brief):
 //
-//  1. --model flag (cfg.Model) — in S1 (no catalog) it is a bare string paired with
-//     the default provider id; the catalog-aware "which provider owns this model"
-//     resolution lands in S2.
+//  1. --model flag (cfg.Model) — a bare string paired with the default provider
+//     id; the catalog-aware "which provider owns this model" resolution is
+//     deferred (S-later).
 //  2. settings default_model — TODO(S-later): settings plumbing not yet present; do
-//     NOT invent the field in S1.
+//     NOT invent the field yet.
 //  3. client last-used state — S4 (client-side), not the server.
 //  4. registry default — the first available provider id (sorted for determinism),
-//     with an empty model (the adapter/endpoint default) until the S2 catalog
-//     supplies a per-provider default model.
+//     with an empty model (the adapter/endpoint default) until a later slice wires
+//     the catalog's per-provider default model (deferred — S2 swapped env-detection
+//     only, not default-model resolution).
 //
 // The provider preference among available providers is openai first (back-compat
 // with the single-provider default), then sorted order.
 func resolveDefaultModel(cfg Config, reg *providerRegistry) (providerID, modelID string) {
 	defID := preferredDefaultProvider(reg)
-	// (1) --model flag: a bare model string in S1, paired with the default provider.
+	// (1) --model flag: a bare model string, paired with the default provider.
 	// (2) settings default_model: TODO(S-later).
 	// (3) client last-used: S4.
-	// (4) registry default model: empty (adapter/endpoint default) until S2.
+	// (4) registry default model: empty (adapter/endpoint default) — wiring the
+	//     catalog per-provider default model is deferred (S-later).
 	return defID, cfg.Model
 }
 
