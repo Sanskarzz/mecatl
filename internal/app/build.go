@@ -348,6 +348,17 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Per-provider default model (multi-provider): when the operator passed no
+	// explicit --model (cfg.Model == ""), adopt the registry's resolved per-provider
+	// default (e.g. openai => "gpt-5", openrouter => "openai/gpt-5") so EVERY
+	// downstream consumer below — buildEngine, buildCompactor, buildTokenCounter,
+	// modelSnapshot, and DefaultCapabilities — uses the provider-appropriate model
+	// rather than one valid only for OpenAI. cfg is a local value here, so this single
+	// assignment propagates to all of them. An explicit --model is untouched
+	// (resolveDefaultModel returns it verbatim, so reg.DefaultModel() == cfg.Model).
+	if cfg.Model == "" {
+		cfg.Model = reg.DefaultModel()
+	}
 	store, err := buildStore(cfg)
 	if err != nil {
 		return nil, err

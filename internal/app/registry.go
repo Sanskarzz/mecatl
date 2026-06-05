@@ -25,6 +25,18 @@ const (
 	providerMock = "mock"
 )
 
+// builtinDefaultModel is the per-provider default model used when the operator did
+// NOT pass an explicit --model (cfg.Model == ""). The default must be a VALID id for
+// that provider's endpoint: OpenAI's Responses API takes the bare "gpt-5", but
+// OpenRouter namespaces every model, so the same model is "openai/gpt-5" there
+// (catalogued in providercatalog, so it resolves cleanly through modelCapability). A
+// provider absent from this table resolves to "" — the adapter/endpoint default —
+// which is the safe, non-presumptuous fallback for a future provider.
+var builtinDefaultModel = map[string]string{
+	providerOpenAI:     "gpt-5",
+	providerOpenRouter: "openai/gpt-5",
+}
+
 // openRouterDefaultBaseURL is the OpenRouter Responses-compatible API base URL.
 // OpenRouter rides the SAME stateless openai adapter (it speaks the Responses
 // API) with this base URL substituted — there is NO separate wire adapter in P0.
@@ -88,8 +100,9 @@ type providerEntry struct {
 // provider so the Build call site is unchanged); per-session multi-provider
 // routing is S3.
 type providerRegistry struct {
-	entries   map[string]providerEntry // keyed by provider id; only AVAILABLE entries
-	defaultID string                   // resolved default (precedence: resolveDefaultModel)
+	entries      map[string]providerEntry // keyed by provider id; only AVAILABLE entries
+	defaultID    string                   // resolved default provider (precedence: resolveDefaultModel)
+	defaultModel string                   // resolved default model for defaultID ("" => adapter/endpoint default)
 }
 
 // Lookup returns the entry for id and whether it exists (and is therefore
@@ -113,6 +126,12 @@ func (r *providerRegistry) Available() []string {
 // Default returns the default provider id, or "" when zero providers are
 // available (the zero-keys case).
 func (r *providerRegistry) Default() string { return r.defaultID }
+
+// DefaultModel returns the resolved default model for the default provider, or ""
+// when no model resolved (the adapter/endpoint default). It is the per-provider
+// default-model table value when the operator passed no explicit --model, or the
+// explicit cfg.Model otherwise (see resolveDefaultModel).
+func (r *providerRegistry) DefaultModel() string { return r.defaultModel }
 
 // errNoProvider is the named, actionable zero-keys error: when no provider's
 // credentials resolved AND the mock is not selected, Build cannot serve a useful
@@ -146,6 +165,9 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 		return &providerRegistry{
 			entries:   map[string]providerEntry{providerMock: {id: providerMock, provider: mock, available: true}},
 			defaultID: providerMock,
+			// The mock ignores the model entirely; carry cfg.Model so an explicit
+			// --model is still echoed (snapshots/capabilities) without inventing one.
+			defaultModel: cfg.Model,
 		}, nil
 	}
 
@@ -175,7 +197,7 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 	}
 
 	reg := &providerRegistry{entries: entries}
-	reg.defaultID, _ = resolveDefaultModel(cfg, reg)
+	reg.defaultID, reg.defaultModel = resolveDefaultModel(cfg, reg)
 	return reg, nil
 }
 
@@ -234,27 +256,29 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 // resolveDefaultModel resolves the default (providerID, modelID) pair from cfg and
 // the registry. Precedence (per the Phase-0 brief):
 //
-//  1. --model flag (cfg.Model) — a bare string paired with the default provider
-//     id; the catalog-aware "which provider owns this model" resolution is
-//     deferred (S-later).
+//  1. --model flag (cfg.Model) — an EXPLICIT operator override (non-empty): a bare
+//     string paired with the default provider id; the catalog-aware "which provider
+//     owns this model" resolution is deferred (S-later).
 //  2. settings default_model — TODO(S-later): settings plumbing not yet present; do
 //     NOT invent the field yet.
 //  3. client last-used state — S4 (client-side), not the server.
-//  4. registry default — the first available provider id (sorted for determinism),
-//     with an empty model (the adapter/endpoint default) until a later slice wires
-//     the catalog's per-provider default model (deferred — S2 swapped env-detection
-//     only, not default-model resolution).
+//  4. per-provider default model — when no explicit --model, the builtinDefaultModel
+//     table entry for the default provider (e.g. openai => "gpt-5", openrouter =>
+//     "openai/gpt-5"). A provider absent from the table yields "" — the
+//     adapter/endpoint default — the safe fallback for a future provider.
 //
 // The provider preference among available providers is openai first (back-compat
 // with the single-provider default), then sorted order.
 func resolveDefaultModel(cfg Config, reg *providerRegistry) (providerID, modelID string) {
 	defID := preferredDefaultProvider(reg)
-	// (1) --model flag: a bare model string, paired with the default provider.
+	// (1) --model flag: an EXPLICIT override wins, paired with the default provider.
+	if cfg.Model != "" {
+		return defID, cfg.Model
+	}
 	// (2) settings default_model: TODO(S-later).
 	// (3) client last-used: S4.
-	// (4) registry default model: empty (adapter/endpoint default) — wiring the
-	//     catalog per-provider default model is deferred (S-later).
-	return defID, cfg.Model
+	// (4) per-provider default model from the table (no entry => "" => endpoint default).
+	return defID, builtinDefaultModel[defID]
 }
 
 // preferredDefaultProvider picks the default provider id from the available

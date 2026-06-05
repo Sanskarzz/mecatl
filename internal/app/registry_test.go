@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
 )
@@ -20,6 +21,16 @@ import (
 // from the map resolves to "" (unavailable), exactly like an unset env var.
 func fakeEnv(vars map[string]string) envDetector {
 	return func(name string) string { return vars[name] }
+}
+
+// mockllmImageProvider is an offline mock provider that advertises image input, so a
+// modelCapability intersection over a catalogued image model yields Image:true from
+// the catalog side without any network. Mirrors capability_test.go's regWithProvider.
+func mockllmImageProvider() port.LLMProvider {
+	return mockllm.NewWith(
+		[]mockllm.Option{mockllm.WithCapabilities(port.ProviderCapabilities{Image: true})},
+		mockllm.TextTurn("x"),
+	)
 }
 
 // TestRegistryNProviders: both keys set ⇒ both providers available, sorted, each
@@ -214,8 +225,24 @@ func TestResolveDefaultModelPrecedence(t *testing.T) {
 		t.Errorf("modelID = %q, want gpt-5-mini (the --model flag)", mid)
 	}
 
-	// --model unset: empty model (adapter/endpoint default until the S2 catalog),
-	// default provider still resolves.
+	// --model unset, openai available: the per-provider default "gpt-5".
+	regOpenAI, err := buildProviderRegistry(Config{}, fakeEnv(map[string]string{
+		"OPENAI_API_KEY": "sk",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	pid, mid = resolveDefaultModel(Config{}, regOpenAI)
+	if pid != "openai" {
+		t.Errorf("providerID = %q, want openai", pid)
+	}
+	if mid != "gpt-5" {
+		t.Errorf("modelID = %q, want gpt-5 (the openai per-provider default)", mid)
+	}
+
+	// --model unset, openrouter-only: the per-provider default "openai/gpt-5" — the
+	// hardcoded bare "gpt-5" would be an INVALID id at the OpenRouter endpoint, which
+	// is the whole point of the per-provider default table.
 	regNoModel, err := buildProviderRegistry(Config{}, fakeEnv(map[string]string{
 		"OPENROUTER_API_KEY": "sk",
 	}))
@@ -226,8 +253,62 @@ func TestResolveDefaultModelPrecedence(t *testing.T) {
 	if pid != "openrouter" {
 		t.Errorf("providerID = %q, want openrouter (only available)", pid)
 	}
-	if mid != "" {
-		t.Errorf("modelID = %q, want \"\" (no --model, no catalog default yet)", mid)
+	if mid != "openai/gpt-5" {
+		t.Errorf("modelID = %q, want openai/gpt-5 (the openrouter per-provider default)", mid)
+	}
+
+	// A provider with NO table entry falls back to "" (the adapter/endpoint default).
+	// Synthesize that directly: a registry whose default is an untabled provider id.
+	regUntabled := &providerRegistry{
+		entries:   map[string]providerEntry{"futureprovider": {id: "futureprovider", available: true}},
+		defaultID: "futureprovider",
+	}
+	if _, mid := resolveDefaultModel(Config{}, regUntabled); mid != "" {
+		t.Errorf("modelID = %q, want \"\" for a provider absent from builtinDefaultModel", mid)
+	}
+
+	// The registry stores the resolved default model on itself (DefaultModel()).
+	if got := regNoModel.DefaultModel(); got != "openai/gpt-5" {
+		t.Errorf("regNoModel.DefaultModel() = %q, want openai/gpt-5", got)
+	}
+	if got := regOpenAI.DefaultModel(); got != "gpt-5" {
+		t.Errorf("regOpenAI.DefaultModel() = %q, want gpt-5", got)
+	}
+}
+
+// TestBuildProviderOpenRouterDefaultModel: an OpenRouter-only environment with an
+// EMPTY --model resolves the per-provider default "openai/gpt-5" (NOT the bare
+// "gpt-5", which is invalid at the OpenRouter endpoint) AND that resolved model is
+// catalogued, so the DefaultCapabilities intersection resolves (image true). This is
+// the integration-ish path: buildProvider through the envDetector +
+// providerConstructor seams (fully offline), then modelCapability over the resolved
+// default. It is the exact no-selection path an OpenRouter-only operator hits.
+func TestBuildProviderOpenRouterDefaultModel(t *testing.T) {
+	cfg := Config{
+		// Empty Model = the no-selection path (the new flag default).
+		envDetector: fakeEnv(map[string]string{"OPENROUTER_API_KEY": "sk"}),
+		providerConstructor: func(_ Config, _, _, _ string) port.LLMProvider {
+			// An image-capable adapter so the intersection's image bit comes purely
+			// from the catalog (openai/gpt-5 is catalogued image-capable for openrouter).
+			return mockllmImageProvider()
+		},
+	}
+	reg, _, err := buildProvider(cfg)
+	if err != nil {
+		t.Fatalf("buildProvider: %v", err)
+	}
+	if reg.Default() != providerOpenRouter {
+		t.Fatalf("Default() = %q, want openrouter", reg.Default())
+	}
+	if got := reg.DefaultModel(); got != "openai/gpt-5" {
+		t.Fatalf("DefaultModel() = %q, want openai/gpt-5 (per-provider default)", got)
+	}
+	// DefaultCapabilities (Build wires modelCapability(reg, reg.Default(), cfg.Model)
+	// with cfg.Model adopted from reg.DefaultModel()): the catalog lookup must succeed
+	// for the resolved default, so image resolves true.
+	caps := modelCapability(reg, reg.Default(), reg.DefaultModel())
+	if !caps.Image {
+		t.Fatalf("DefaultCapabilities.Image = false, want true (catalog openai/gpt-5 ∩ adapter image)")
 	}
 }
 

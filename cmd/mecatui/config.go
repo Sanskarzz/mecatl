@@ -165,7 +165,7 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.noAltScreen, "inline", false, "alias for --no-alt-screen: render inline in the normal buffer, preserving native scrollback/search")
 	fs.Int64Var(&cfg.contextWindow, "context-window", 0, "model context-window size in tokens for the footer meter (0 = unknown; not inferred from the model name)")
 
-	fs.StringVar(&cfg.model, "model", "gpt-5", "model identifier for the embedded server (ignored when dialling an external server)")
+	fs.StringVar(&cfg.model, "model", "", "model identifier for the embedded server (empty: use the provider-appropriate default; ignored when dialling an external server)")
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")
 	fs.StringVar(&cfg.openRouterBaseURL, "openrouter-base-url", "", "embedded server only: override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)")
 	fs.BoolVar(&cfg.mock, "mock", false, "embedded server only: use the canned offline mock provider instead of OpenAI (no network)")

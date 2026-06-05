@@ -687,7 +687,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.httpAddr, "http-addr", defaultHTTPAddr,
 		"HTTP/SSE listen address (defaults to loopback; set --auth-token and/or --tls-cert before binding non-loopback)")
 	fs.StringVar(&cfg.workspace, "workspace", cwd, "default session workspace root")
-	fs.StringVar(&cfg.model, "model", "gpt-5", "model identifier sent to the provider")
+	fs.StringVar(&cfg.model, "model", "", "model identifier sent to the provider (empty: use the provider-appropriate default)")
 	fs.BoolVar(&cfg.useOpenAI, "openai", false, "use the OpenAI Responses provider (key from OPENAI_API_KEY)")
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL (compatible endpoints)")
 	fs.StringVar(&cfg.openRouterBaseURL, "openrouter-base-url", "", "override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)")
