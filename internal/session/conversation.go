@@ -26,11 +26,14 @@ type Message struct {
 	ToolCalls []ToolCall
 	// ToolResult holds the result carried by a tool-role message; nil otherwise.
 	ToolResult *ToolResult
-	// Reasoning is the provider's opaque reasoning REPLAY blob (OpenAI's
-	// reasoning-item encrypted_content), replayed back verbatim on subsequent
-	// calls and never interpreted or displayed by the harness. It is distinct
-	// from the human-readable reasoning SUMMARY surfaced via reasoning.delta
-	// events for display: that prose is never stored here.
+	// Reasoning is the provider's opaque reasoning REPLAY blob (e.g. OpenAI's
+	// reasoning-item encrypted_content, or Anthropic's (thinking,signature) pair),
+	// replayed back verbatim on subsequent calls and never interpreted or displayed
+	// by the harness. The STRUCTURE is provider-neutral (one opaque blob per
+	// message); the CONTENTS are provider-private — each adapter packs/unpacks its
+	// own wire shape, so the domain value object stays a bare string (do NOT widen
+	// it). It is distinct from the human-readable reasoning SUMMARY surfaced via
+	// reasoning.delta events for display: that prose is never stored here.
 	Reasoning string
 	// Parts carries non-text media (image/audio) on a USER message; it is nil for
 	// assistant/tool/system messages. Text remains the flattened text body

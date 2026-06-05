@@ -32,12 +32,9 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/forker"
 	"github.com/stacklok/mecatl/internal/adapter/gitenv"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
-	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	mcpsource "github.com/stacklok/mecatl/internal/adapter/mcp/source"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/adapter/openai"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
@@ -108,6 +105,16 @@ type Config struct {
 	StoreDir      string
 	Shell         string
 	NoBash        bool
+
+	// OpenRouter (multi-provider Phase 0, S1): the OpenRouter provider rides the
+	// SAME stateless openai adapter (it speaks the Responses API) with the
+	// OpenRouter base URL substituted. OpenRouterKey is the credential (the cmd
+	// layer reads it from OPENROUTER_API_KEY); when empty the registry falls back
+	// to the OPENROUTER_API_KEY / OPENAI_API_KEY env vars via its envDetector.
+	// OpenRouterBaseURL overrides the default https://openrouter.ai/api/v1. These
+	// are ADDITIVE — the OpenAI fields above are unchanged (S1 is non-breaking).
+	OpenRouterKey     string
+	OpenRouterBaseURL string
 
 	// Context management: the compaction strategy ("heuristic"|"cascade") and the
 	// token counter ("heuristic"|"tiktoken"). Empty means "heuristic".
@@ -259,7 +266,19 @@ type Config struct {
 	// child build or per team-member spawn on the hot path. Unexported: it is an
 	// internal composition detail, not an operator knob.
 	gitStatus string
+
+	// envDetector is the injectable environment-lookup seam the provider registry
+	// uses for credential-availability detection (multi-provider S1). It defaults
+	// to os.Getenv (set in Build); tests inject a fake map-backed lookup so registry
+	// construction runs OFFLINE. Unexported: an internal composition detail mirroring
+	// xdgconfig.OSEnv's env-injection idiom, not an operator knob.
+	envDetector envDetector
 }
+
+// osGetenv is the production environment lookup the provider registry uses when no
+// envDetector is injected. It is the single place internal/app reads the process
+// environment for provider credentials; tests override it via Config.envDetector.
+func osGetenv(name string) string { return os.Getenv(name) }
 
 // Built is the result of Build: the assembled server.Service plus a Close func
 // that tears down composition-owned resources (the MCP manager). Close is always
@@ -286,6 +305,13 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// soul build see only the effective trust bool. Trust is monotonic-positive —
 	// it grants admission only and never suppresses a Deny/Ask (deny-dominance is
 	// unchanged in the evaluator).
+	// Default the provider registry's environment-lookup seam to the real process
+	// environment (tests inject a fake before calling Build). Set once here so every
+	// downstream registry construction shares it.
+	if cfg.envDetector == nil {
+		cfg.envDetector = osGetenv
+	}
+
 	trust := resolveTrust(cfg)
 	narrateTrust(trust, cfg.Workspace)
 	cfg.TrustProject = trust.Trusted
@@ -417,7 +443,6 @@ func sessionEngineFactory(
 	store port.SessionStore,
 	policy port.PermissionPolicy,
 	hooks port.HookRunner,
-	counter agent.TokenCounter,
 	mcpProvider mcp.Provider,
 	instructions prompt.InstructionAssembler,
 ) server.SessionEngineFactory {
@@ -448,54 +473,35 @@ func sessionEngineFactory(
 		// Identical to the main engine in every Deps field except the catalog (which
 		// carries the extra client MCP tools): baseEngineDeps is the single source of
 		// that shared wiring, so no collaborator is silently dropped.
-		deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, mcpProvider, instructions)
+		deps := baseEngineDeps(cfg, provider, store, policy, hooks, mcpProvider, instructions)
 		deps.Catalog = cat
 		return agent.NewEngine(deps), closeFn, nil
 	}
 }
 
-// buildProvider constructs the LLMProvider per config: OpenAI when requested or
-// keyed, a canned mock when UseMock is set, otherwise an error (the server needs a
-// real LLM to be useful).
+// buildProvider builds the N-provider registry (multi-provider S1) and returns the
+// DEFAULT provider so the Build call site is unchanged: every downstream consumer
+// (buildEngine, buildCompactor, child/fork/team/dream/reviewer engines) keeps
+// receiving the single default provider exactly as before. The registry itself —
+// env-based availability detection across the configured providers (openai,
+// openrouter), the resilience wrapping, and the per-provider startup logging — lives
+// in registry.go. Per-session multi-provider ROUTING is S3, not S1; S1 only settles
+// the registry shape and the default-provider seam.
+//
+// A canned mock (UseMock) short-circuits to a single offline entry; the zero-keys
+// case returns the named, actionable errNoProvider.
 func buildProvider(cfg Config) (port.LLMProvider, error) {
-	switch {
-	case cfg.UseOpenAI:
-		if cfg.OpenAIKey == "" {
-			return nil, errors.New("OpenAI provider requires an API key (OPENAI_API_KEY)")
-		}
-		opts := []openai.Option{openai.WithAPIKey(cfg.OpenAIKey)}
-		if cfg.OpenAIBaseURL != "" {
-			opts = append(opts, openai.WithBaseURL(cfg.OpenAIBaseURL))
-		}
-		slog.Info("LLM provider: openai", "model", cfg.Model, "base_url", cfg.OpenAIBaseURL)
-		// Wrap the real provider with the resilience decorator (bounded retries,
-		// per-attempt timeout, circuit breaker). Classifier/Clock are left nil so
-		// the production defaults (DefaultClassifier / time.Now) apply. The mock
-		// path below is intentionally left unwrapped: it never fails over the
-		// network, so resilience would be inert.
-		var llm port.LLMProvider = openai.New(opts...)
-		llm = llmresilience.Wrap(llm, llmresilience.Config{
-			MaxAttempts:       cfg.LLMMaxAttempts,
-			BaseBackoff:       llmBaseBackoff,
-			MaxBackoff:        llmMaxBackoff,
-			PerAttemptTimeout: cfg.LLMPerAttemptTimeout,
-			BreakerThreshold:  cfg.LLMBreakerThreshold,
-			BreakerCooldown:   cfg.LLMBreakerCooldown,
-		})
-		slog.Info("LLM resilience enabled",
-			"max_attempts", cfg.LLMMaxAttempts,
-			"per_attempt_timeout", cfg.LLMPerAttemptTimeout,
-			"breaker_threshold", cfg.LLMBreakerThreshold,
-			"breaker_cooldown", cfg.LLMBreakerCooldown)
-		return llm, nil
-	case cfg.UseMock:
-		slog.Warn("LLM provider: mock (canned, offline) — for smoke tests only")
-		return mockllm.New(
-			mockllm.TextTurn("Mock provider: no real model is configured. Set OPENAI_API_KEY for live use."),
-		), nil
-	default:
-		return nil, errors.New("no LLM provider configured: set OPENAI_API_KEY (OpenAI) or enable the mock")
+	reg, err := buildProviderRegistry(cfg, cfg.envDetector)
+	if err != nil {
+		return nil, err
 	}
+	entry, ok := reg.Lookup(reg.Default())
+	if !ok {
+		// Defensive: buildProviderRegistry never returns a non-nil registry with an
+		// empty/absent default (it errors on zero providers), so this is unreachable.
+		return nil, errNoProvider
+	}
+	return entry.provider, nil
 }
 
 // buildStore constructs the SessionStore: a JSONL replay store under StoreDir, or
@@ -556,8 +562,6 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 
 	cat, mainMgr, mcpProvider, mcpInventory, memStore, userModelStore, discoveredSkills, mcpClose := buildCatalog(ctx, cfg, provider, hooks)
 
-	counter := buildTokenCounter(cfg)
-
 	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona source. ON
 	// by default reading the conventional ~/.config/mecatl/soul.md; --no-soul leaves
 	// it nil (no fragment), --soul-file overrides the path. The adapter (*soul.Store)
@@ -585,9 +589,9 @@ func buildEngine(ctx context.Context, cfg Config, provider port.LLMProvider, sto
 	// per MAIN-engine Stop, not per client-MCP session stop.
 	mainHooks := maybeWrapUserModelReview(cfg, hooks, store, provider, userModelStore)
 
-	deps := baseEngineDeps(cfg, provider, store, policy, mainHooks, counter, mcpProvider, instructions)
+	deps := baseEngineDeps(cfg, provider, store, policy, mainHooks, mcpProvider, instructions)
 	deps.Catalog = cat
-	sessFactory := sessionEngineFactory(cfg, provider, store, policy, hooks, counter, mcpProvider, instructions)
+	sessFactory := sessionEngineFactory(cfg, provider, store, policy, hooks, mcpProvider, instructions)
 	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, userModelStore, mcpClose, nil
 }
 
@@ -708,10 +712,64 @@ func baseEngineDeps(
 	store port.SessionStore,
 	policy port.PermissionPolicy,
 	hooks port.HookRunner,
-	counter agent.TokenCounter,
 	mcpProvider mcp.Provider,
 	instructions prompt.InstructionAssembler,
 ) agent.Deps {
+	// baseEngineDeps is the "default provider + default model" specialization of
+	// engineDepsForProvider: it delegates so there is a SINGLE enumeration of the
+	// provider-closing fields (LLM/Compactor/Model/TokenCounter/PromptConfig). The
+	// model-keyed TokenCounter is derived INSIDE engineDepsForProvider against
+	// cfg.Model, so the default path stays semantically identical to pre-S1
+	// (buildTokenCounter(cfg) for the default model).
+	return engineDepsForProvider(cfg, provider, cfg.Model, store, policy, hooks, mcpProvider, instructions)
+}
+
+// engineDepsForProvider re-derives the COMPLETE set of provider-closing agent.Deps
+// for a specific provider+model, so a per-session engine bound to a non-default
+// provider compacts and replays reasoning through THAT provider — never the default.
+// It is the multi-provider analogue of baseEngineDeps: baseEngineDeps closes over the
+// single default provider; this takes the provider+model explicitly and rebuilds
+// EVERY field that binds them by value. The provider-dependent fields are EXACTLY:
+//   - Deps.LLM                    (the provider itself)
+//   - Deps.Compactor              (buildCompactor binds provider+model BY VALUE)
+//   - Deps.Model                  (the model string)
+//   - Deps.TokenCounter           (tiktoken is model-keyed)
+//   - Deps.PromptConfig.Env.Model (the agency-delta + env model are model-keyed)
+//
+// Every NON-provider field (Policy/Hooks/Store/Sink/Logger/Instructions/
+// ContextWindowTokens/CompactionRatio/CommandExpander) is shared and threaded in.
+// Catalog is deliberately left unset — the caller sets it AFTER this returns (the
+// per-session engine adds the client's MCP tools), matching baseEngineDeps' contract.
+//
+// CRITICAL (design): a shallow clone of baseEngineDeps with only LLM swapped would
+// compact and COUNT through the wrong provider/model, because buildCompactor and
+// buildTokenCounter BOTH bind model by value — cross-provider reasoning
+// contamination. This explicit re-derivation is the fix. DESIGNED in S1, CONSUMED in
+// S3 (per-session routing); S1 exercises only the default-provider path via
+// baseEngineDeps, which MUST stay byte-identical to the pre-S1 Deps.
+//
+// The model-keyed TokenCounter is DERIVED INTERNALLY (buildTokenCounter against the
+// model-overridden cfg), NOT taken as a parameter: this makes counter/model
+// contamination impossible BY CONSTRUCTION — an S3 caller cannot thread in a counter
+// built for a different model — and guarantees the Compactor and the compaction
+// trigger share ONE counter keyed to THIS model. (Panel finding #1.)
+func engineDepsForProvider(
+	cfg Config,
+	provider port.LLMProvider,
+	model string,
+	store port.SessionStore,
+	policy port.PermissionPolicy,
+	hooks port.HookRunner,
+	mcpProvider mcp.Provider,
+	instructions prompt.InstructionAssembler,
+) agent.Deps {
+	// modelCfg is cfg with the provider-closing Model overridden, so promptConfig
+	// (Env.Model + agencyDelta), buildTokenCounter (tiktoken vocab), and buildCompactor
+	// (Model field) all close over the REQUESTED model rather than cfg.Model. Every
+	// other cfg field is shared.
+	modelCfg := cfg
+	modelCfg.Model = model
+	counter := buildTokenCounter(modelCfg)
 	return agent.Deps{
 		LLM:          provider,
 		Policy:       policy,
@@ -724,12 +782,12 @@ func baseEngineDeps(
 		Store:               store,
 		Sink:                cfg.Sink,
 		Logger:              cfg.Logger,
-		PromptConfig:        promptConfig(cfg, cfg.gitStatus),
-		Model:               cfg.Model,
+		PromptConfig:        promptConfig(modelCfg, cfg.gitStatus),
+		Model:               model,
 		ContextWindowTokens: defaultContextWindowTokens,
 		CompactionRatio:     defaultCompactionRatio,
 		TokenCounter:        counter,
-		Compactor:           buildCompactor(cfg, provider, counter),
+		Compactor:           buildCompactor(modelCfg, provider, counter),
 		CommandExpander:     buildCommandExpander(cfg, mcpProvider),
 	}
 }

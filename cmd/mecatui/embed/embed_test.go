@@ -259,6 +259,13 @@ func TestStartProviderError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Multi-provider S1: app.Build now AUTO-DETECTS a provider from the environment
+	// (OPENAI_API_KEY / OPENROUTER_API_KEY) via its registry, so the zero-keys case
+	// only triggers when those vars are genuinely unset. Clear them here so the test
+	// is deterministic regardless of the developer/CI environment.
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
+
 	_, err := embed.Start(ctx, app.Config{Workspace: t.TempDir(), Model: "x"}, embed.PerfConfig{})
 	if err == nil {
 		t.Fatal("expected an error when no LLM provider is configured")

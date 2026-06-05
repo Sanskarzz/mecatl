@@ -76,17 +76,19 @@ const defaultMetricsAddr = "127.0.0.1:9090"
 // addresses, TLS, auth, rate limiting, metrics, tracing) is serve-time state
 // owned by this binary.
 type config struct {
-	grpcAddr      string
-	httpAddr      string
-	workspace     string
-	model         string
-	useOpenAI     bool
-	openAIBaseURL string
-	openAIKey     string
-	useMock       bool
-	storeDir      string
-	shell         string
-	noBash        bool
+	grpcAddr          string
+	httpAddr          string
+	workspace         string
+	model             string
+	useOpenAI         bool
+	openAIBaseURL     string
+	openAIKey         string
+	openRouterBaseURL string
+	openRouterKey     string
+	useMock           bool
+	storeDir          string
+	shell             string
+	noBash            bool
 
 	// Context management: the compaction strategy and the token counter. Both
 	// default to the current behaviour exactly (heuristic compactor + heuristic
@@ -604,6 +606,8 @@ func appConfig(cfg config, sink port.EventSink, logger port.Logger) app.Config {
 		UseOpenAI:                    cfg.useOpenAI,
 		OpenAIBaseURL:                cfg.openAIBaseURL,
 		OpenAIKey:                    cfg.openAIKey,
+		OpenRouterBaseURL:            cfg.openRouterBaseURL,
+		OpenRouterKey:                cfg.openRouterKey,
 		UseMock:                      cfg.useMock,
 		StoreDir:                     cfg.storeDir,
 		Shell:                        cfg.shell,
@@ -686,6 +690,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.model, "model", "gpt-5", "model identifier sent to the provider")
 	fs.BoolVar(&cfg.useOpenAI, "openai", false, "use the OpenAI Responses provider (key from OPENAI_API_KEY)")
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL (compatible endpoints)")
+	fs.StringVar(&cfg.openRouterBaseURL, "openrouter-base-url", "", "override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)")
 	fs.BoolVar(&cfg.useMock, "mock", false, "use a canned offline mock provider (no network; for smoke tests only)")
 	fs.StringVar(&cfg.storeDir, "store-dir", "", "directory for the JSONL session store (empty -> in-memory store)")
 	fs.StringVar(&cfg.shell, "shell", "/bin/sh", "shell used to execute Bash-tool commands; empty disables Bash (shell-less mode)")
@@ -794,6 +799,10 @@ func parseFlags(argv []string) (config, error) {
 	if cfg.openAIKey != "" {
 		cfg.useOpenAI = true
 	}
+	// OpenRouter (multi-provider S1): the provider registry auto-detects it from
+	// OPENROUTER_API_KEY too, but reading it here makes the credential custody
+	// explicit and lets the registry prefer the dedicated key over a fallback.
+	cfg.openRouterKey = os.Getenv("OPENROUTER_API_KEY")
 	// An auth token from the environment is honored when the flag is unset, so a
 	// secret need not appear in the process argv.
 	if cfg.authToken == "" {

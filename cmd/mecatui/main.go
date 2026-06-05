@@ -235,6 +235,8 @@ func embeddedConfig(cfg config) app.Config {
 		UseOpenAI:            cfg.openAIKey != "",
 		OpenAIKey:            cfg.openAIKey,
 		OpenAIBaseURL:        cfg.openAIBaseURL,
+		OpenRouterKey:        cfg.openRouterKey,
+		OpenRouterBaseURL:    cfg.openRouterBaseURL,
 		UseMock:              cfg.mock,
 		Shell:                "/bin/sh",
 		NoBash:               cfg.noBash,

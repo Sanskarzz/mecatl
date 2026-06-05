@@ -1,0 +1,288 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
+)
+
+// fakeEnv builds an envDetector backed by a fixed map, so registry construction
+// runs entirely OFFLINE (no real process environment, no network). A var absent
+// from the map resolves to "" (unavailable), exactly like an unset env var.
+func fakeEnv(vars map[string]string) envDetector {
+	return func(name string) string { return vars[name] }
+}
+
+// TestRegistryNProviders: both keys set ⇒ both providers available, sorted, each
+// with a non-nil constructed provider.
+func TestRegistryNProviders(t *testing.T) {
+	reg, err := buildProviderRegistry(Config{Model: "gpt-5"}, fakeEnv(map[string]string{
+		"OPENAI_API_KEY":     "sk-openai",
+		"OPENROUTER_API_KEY": "sk-openrouter",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	got := reg.Available()
+	want := []string{"openai", "openrouter"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Available() = %v, want %v", got, want)
+	}
+	for _, id := range want {
+		e, ok := reg.Lookup(id)
+		if !ok {
+			t.Fatalf("Lookup(%q): not found", id)
+		}
+		if e.provider == nil {
+			t.Errorf("provider %q: nil port.LLMProvider", id)
+		}
+		if !e.available {
+			t.Errorf("provider %q: available=false, want true", id)
+		}
+	}
+	// Default prefers openai (single-provider back-compat).
+	if reg.Default() != "openai" {
+		t.Errorf("Default() = %q, want openai", reg.Default())
+	}
+	// OpenRouter must carry the default base URL for diagnostics.
+	if e, _ := reg.Lookup("openrouter"); e.baseURL != openRouterDefaultBaseURL {
+		t.Errorf("openrouter baseURL = %q, want %q", e.baseURL, openRouterDefaultBaseURL)
+	}
+}
+
+// TestRegistryEnvDetectionSingle: only OPENROUTER_API_KEY set ⇒ only openrouter
+// available (OPENROUTER_API_KEY is not in openai's env[] list, so openai stays off).
+func TestRegistryEnvDetectionSingle(t *testing.T) {
+	reg, err := buildProviderRegistry(Config{}, fakeEnv(map[string]string{
+		"OPENROUTER_API_KEY": "sk-openrouter",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	if got := reg.Available(); !reflect.DeepEqual(got, []string{"openrouter"}) {
+		t.Fatalf("Available() = %v, want [openrouter]", got)
+	}
+	if _, ok := reg.Lookup("openai"); ok {
+		t.Error("openai should be UNAVAILABLE: OPENROUTER_API_KEY is not in its env[] list")
+	}
+}
+
+// TestRegistryEnvDetectionOpenRouterFallback: OpenRouter is available when EITHER
+// its own key OR (by convention) an OpenAI key resolves — the multi-env-var slice.
+func TestRegistryEnvDetectionOpenRouterFallback(t *testing.T) {
+	// Only the dedicated OpenRouter key: openrouter available, openai NOT.
+	reg, err := buildProviderRegistry(Config{}, fakeEnv(map[string]string{
+		"OPENROUTER_API_KEY": "sk-openrouter",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	if got := reg.Available(); !reflect.DeepEqual(got, []string{"openrouter"}) {
+		t.Fatalf("Available() = %v, want [openrouter]", got)
+	}
+	if reg.Default() != "openrouter" {
+		t.Errorf("Default() = %q, want openrouter (only available provider)", reg.Default())
+	}
+}
+
+// TestRegistryEnvDetectionMultiVar: a SHARED OPENAI_API_KEY makes BOTH openai and
+// openrouter available (openrouter falls back to the OpenAI key).
+func TestRegistryEnvDetectionMultiVar(t *testing.T) {
+	reg, err := buildProviderRegistry(Config{}, fakeEnv(map[string]string{
+		"OPENAI_API_KEY": "sk-shared",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	got := reg.Available()
+	want := []string{"openai", "openrouter"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Available() = %v, want %v (openrouter falls back to OPENAI_API_KEY)", got, want)
+	}
+}
+
+// TestRegistryZeroKeys: an empty environment and !UseMock ⇒ the named, actionable
+// errNoProvider naming BOTH env vars and the offline escape hatches.
+func TestRegistryZeroKeys(t *testing.T) {
+	_, err := buildProviderRegistry(Config{}, fakeEnv(nil))
+	if err == nil {
+		t.Fatal("buildProviderRegistry with no keys: want error, got nil")
+	}
+	if !errors.Is(err, errNoProvider) {
+		t.Fatalf("error = %v, want errNoProvider", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"OPENAI_API_KEY", "OPENROUTER_API_KEY", "--openai", "--mock"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message %q does not mention %q", msg, want)
+		}
+	}
+}
+
+// TestRegistryZeroKeysViaBuildProvider: the same zero-keys error surfaces through
+// the buildProvider shim (the Build call site).
+func TestRegistryZeroKeysViaBuildProvider(t *testing.T) {
+	_, err := buildProvider(Config{envDetector: fakeEnv(nil)})
+	if !errors.Is(err, errNoProvider) {
+		t.Fatalf("buildProvider zero-keys error = %v, want errNoProvider", err)
+	}
+}
+
+// TestRegistryMockShortCircuit: UseMock ⇒ a single "mock" entry regardless of the
+// environment (even with real keys present).
+func TestRegistryMockShortCircuit(t *testing.T) {
+	reg, err := buildProviderRegistry(Config{UseMock: true}, fakeEnv(map[string]string{
+		"OPENAI_API_KEY":     "sk-openai",
+		"OPENROUTER_API_KEY": "sk-openrouter",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry(UseMock): %v", err)
+	}
+	if got := reg.Available(); !reflect.DeepEqual(got, []string{"mock"}) {
+		t.Fatalf("Available() = %v, want [mock]", got)
+	}
+	if reg.Default() != "mock" {
+		t.Errorf("Default() = %q, want mock", reg.Default())
+	}
+	e, ok := reg.Lookup("mock")
+	if !ok || e.provider == nil {
+		t.Fatal("mock entry missing or nil provider")
+	}
+	// The real providers must NOT be constructed under the mock short-circuit.
+	if _, ok := reg.Lookup("openai"); ok {
+		t.Error("openai should not exist under UseMock")
+	}
+}
+
+// TestResolveDefaultModelPrecedence: --model (cfg.Model) flows to modelID; the
+// providerID is the preferred available provider (openai first, else sorted).
+func TestResolveDefaultModelPrecedence(t *testing.T) {
+	// --model set: returned verbatim as the model id.
+	reg, err := buildProviderRegistry(Config{Model: "gpt-5-mini"}, fakeEnv(map[string]string{
+		"OPENAI_API_KEY": "sk",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	pid, mid := resolveDefaultModel(Config{Model: "gpt-5-mini"}, reg)
+	if pid != "openai" {
+		t.Errorf("providerID = %q, want openai", pid)
+	}
+	if mid != "gpt-5-mini" {
+		t.Errorf("modelID = %q, want gpt-5-mini (the --model flag)", mid)
+	}
+
+	// --model unset: empty model (adapter/endpoint default until the S2 catalog),
+	// default provider still resolves.
+	regNoModel, err := buildProviderRegistry(Config{}, fakeEnv(map[string]string{
+		"OPENROUTER_API_KEY": "sk",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	pid, mid = resolveDefaultModel(Config{}, regNoModel)
+	if pid != "openrouter" {
+		t.Errorf("providerID = %q, want openrouter (only available)", pid)
+	}
+	if mid != "" {
+		t.Errorf("modelID = %q, want \"\" (no --model, no catalog default yet)", mid)
+	}
+}
+
+// streamOnce drives a single Stream against the entry's provider, draining the
+// iterator so the underlying HTTP request is actually issued. It returns the outer
+// Stream error (nil on a successful start). Offline: the provider must point at a
+// local stub server.
+func streamOnce(t *testing.T, p port.LLMProvider) {
+	t.Helper()
+	seq, err := p.Stream(context.Background(), port.LLMRequest{
+		Model:    "m",
+		Messages: []session.Message{session.NewUserMessage("hi")},
+	})
+	if err != nil {
+		// A failure to even start the request (e.g. unroutable base URL) is a wiring
+		// failure for this test's purposes.
+		t.Fatalf("Stream returned outer error: %v", err)
+	}
+	for range seq { //nolint:revive // drain to force the HTTP round-trip
+	}
+}
+
+// TestRegistryOpenRouterBaseURLOverrideRoutes proves the openrouter entry's provider
+// was constructed with openai.WithBaseURL from cfg.OpenRouterBaseURL — i.e. the base
+// URL is actually WIRED INTO THE ADAPTER, not merely stored on the logging-only
+// entry.baseURL field. It points OpenRouterBaseURL at a local stub, streams once, and
+// asserts the stub received the request at the configured path. (Panel finding #3 +
+// the cfg.OpenRouterBaseURL override path.)
+func TestRegistryOpenRouterBaseURLOverrideRoutes(t *testing.T) {
+	var hit atomic.Int32
+	var gotPath atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit.Add(1)
+		gotPath.Store(r.URL.Path)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Minimal terminal SSE so the iterator completes promptly.
+		_, _ = w.Write([]byte("event: response.completed\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","sequence_number":0,"response":{"status":"completed"}}` + "\n\n"))
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	reg, err := buildProviderRegistry(Config{
+		OpenRouterBaseURL: srv.URL + "/api/v1",
+	}, fakeEnv(map[string]string{"OPENROUTER_API_KEY": "sk-openrouter"}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	entry, ok := reg.Lookup("openrouter")
+	if !ok {
+		t.Fatal("openrouter entry missing")
+	}
+	if entry.baseURL != srv.URL+"/api/v1" {
+		t.Errorf("entry.baseURL = %q, want the override %q", entry.baseURL, srv.URL+"/api/v1")
+	}
+
+	streamOnce(t, entry.provider)
+
+	if hit.Load() == 0 {
+		t.Fatal("the OpenRouter provider did not route to the configured base URL (WithBaseURL not wired into the adapter)")
+	}
+	// The openai SDK appends "/responses" under the configured base path.
+	if p, _ := gotPath.Load().(string); !strings.HasPrefix(p, "/api/v1") {
+		t.Errorf("request path = %q, want it under the /api/v1 override base", p)
+	}
+}
+
+// TestRegistryOpenRouterDefaultBaseURL asserts that WITHOUT an override the openrouter
+// entry carries the public OpenRouter base URL (the same value newOpenAIEntry passes
+// to openai.WithBaseURL — the override-routing test above proves that same field is
+// the one wired into the adapter). (Should-add #3, default branch.)
+func TestRegistryOpenRouterDefaultBaseURL(t *testing.T) {
+	reg, err := buildProviderRegistry(Config{}, fakeEnv(map[string]string{
+		"OPENROUTER_API_KEY": "sk-openrouter",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	entry, ok := reg.Lookup("openrouter")
+	if !ok {
+		t.Fatal("openrouter entry missing")
+	}
+	if entry.baseURL != openRouterDefaultBaseURL {
+		t.Errorf("default openrouter baseURL = %q, want %q", entry.baseURL, openRouterDefaultBaseURL)
+	}
+	if !strings.Contains(entry.baseURL, "openrouter.ai") {
+		t.Errorf("default openrouter baseURL %q does not route to openrouter.ai", entry.baseURL)
+	}
+}

@@ -46,9 +46,8 @@ func TestBaseEngineDepsCarriesFullCollaboratorSet(t *testing.T) {
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
 	hooks := hookexec.New(nil)
-	counter := buildTokenCounter(cfg)
 
-	deps := baseEngineDeps(cfg, provider, store, policy, hooks, counter, nil, prompt.RootAssembler{})
+	deps := baseEngineDeps(cfg, provider, store, policy, hooks, nil, prompt.RootAssembler{})
 
 	if deps.Instructions == nil {
 		t.Fatal("Instructions is nil — turn-0 project instructions / memory index would not assemble")
@@ -99,9 +98,8 @@ func TestSessionEngineFactoryBuildsUsableEngine(t *testing.T) {
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
 	hooks := hookexec.New(nil)
-	counter := buildTokenCounter(cfg)
 
-	factory := sessionEngineFactory(cfg, provider, store, policy, hooks, counter, nil, prompt.RootAssembler{})
+	factory := sessionEngineFactory(cfg, provider, store, policy, hooks, nil, prompt.RootAssembler{})
 
 	eng, closeFn, err := factory(context.Background(), []mcp.ServerConfig{})
 	if err != nil {

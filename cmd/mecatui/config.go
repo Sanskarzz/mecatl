@@ -39,11 +39,13 @@ type config struct {
 	// Embedded-server provider config (used only when no external server is
 	// dialled). The OpenAI key is read from OPENAI_API_KEY; --mock selects the
 	// canned offline provider instead (useful for a no-network smoke run).
-	model         string
-	openAIBaseURL string
-	openAIKey     string
-	mock          bool
-	noBash        bool
+	model             string
+	openAIBaseURL     string
+	openAIKey         string
+	openRouterBaseURL string
+	openRouterKey     string
+	mock              bool
+	noBash            bool
 
 	// trustProject controls whether a discovered PROJECT's permission ALLOW rules
 	// and its project-scoped soul (.mecatl/soul.md) are honoured for the EMBEDDED
@@ -165,6 +167,7 @@ func parseFlags(args []string) (config, error) {
 
 	fs.StringVar(&cfg.model, "model", "gpt-5", "model identifier for the embedded server (ignored when dialling an external server)")
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")
+	fs.StringVar(&cfg.openRouterBaseURL, "openrouter-base-url", "", "embedded server only: override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)")
 	fs.BoolVar(&cfg.mock, "mock", false, "embedded server only: use the canned offline mock provider instead of OpenAI (no network)")
 	fs.BoolVar(&cfg.noBash, "no-bash", false, "embedded server only: disable the Bash tool (shell-less mode)")
 	fs.BoolVar(&cfg.trustProject, "trust-project", false, "embedded server only: honour a discovered PROJECT's ALLOW rules AND its project-scoped soul (.mecatl/soul.md) (its deny/ask rules are always honoured regardless). Default OFF (the safe stance, unified with mecated): an untrusted repo's permission grants and project soul are ignored. TRUST BOUNDARY: enabling this lets a checked-in .mecatl/settings.yaml auto-approve tool calls and a checked-in project soul steer the model — only pass it for a repo you trust")
@@ -201,6 +204,7 @@ func parseFlags(args []string) (config, error) {
 		cfg.theme = os.Getenv("MECATUI_THEME")
 	}
 	cfg.openAIKey = os.Getenv("OPENAI_API_KEY")
+	cfg.openRouterKey = os.Getenv("OPENROUTER_API_KEY")
 
 	if !cfg.listThemes {
 		ws, err := resolveWorkspace(cfg.workspace)
@@ -248,10 +252,10 @@ func (c config) validate() error {
 		return fmt.Errorf("invalid --mode %q (want default|plan|accept-edits)", c.mode)
 	}
 	// When hosting an embedded server (no external --server) the provider must be
-	// resolvable: either an OpenAI key in the environment or the offline mock.
-	if c.server == "" && c.openAIKey == "" && !c.mock {
-		return errors.New("no external --server given and no OPENAI_API_KEY set: " +
-			"set OPENAI_API_KEY to host an embedded server, pass --mock for an offline run, " +
+	// resolvable: an OpenAI or OpenRouter key in the environment, or the offline mock.
+	if c.server == "" && c.openAIKey == "" && c.openRouterKey == "" && !c.mock {
+		return errors.New("no external --server given and no OPENAI_API_KEY or OPENROUTER_API_KEY set: " +
+			"set OPENAI_API_KEY or OPENROUTER_API_KEY to host an embedded server, pass --mock for an offline run, " +
 			"or point --server at a running mecated")
 	}
 	// Allow-all posture: only meaningful for the embedded server; refuse it when

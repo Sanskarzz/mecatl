@@ -16,6 +16,15 @@ import (
 // LLMRequest is the provider-neutral input to a model call. System is the
 // two-layer system prompt (stable prefix + volatile suffix for cache
 // breakpoints); Tools are the schemas, stable across turns for caching.
+//
+// DTO-neutrality guardrail (multi-provider Finding B): this struct is
+// deliberately provider-NEUTRAL and must stay so. Model is a BARE opaque string
+// (no provider/endpoint/key rides the request — those are server-side registry
+// concerns). Provider-PRIVATE knobs (OpenAI's store/include flags, an Anthropic
+// thinking-budget, a reasoning-effort) are an ADAPTER CONSTRUCTION concern — a
+// WithThinkingBudget-style Option like the existing openai.WithBaseURL — NOT a new
+// LLMRequest field, because the domain/agent loop never branches on provider. A
+// reflection guard test (llm_neutral_test.go) tripwires any silent field addition.
 type LLMRequest struct {
 	// System is the layered system prompt.
 	System prompt.Layered
@@ -23,7 +32,8 @@ type LLMRequest struct {
 	Messages []session.Message
 	// Tools are the tool schemas the model may call.
 	Tools []tool.ToolSpec
-	// Model is the provider model identifier.
+	// Model is the provider model identifier (an opaque string; the adapter maps it
+	// to the concrete wire model). Provider-neutral — see the struct doc-comment.
 	Model string
 }
 
@@ -36,12 +46,20 @@ const (
 	// ChunkReasoning is a human-readable reasoning summary delta. It is
 	// DISPLAY-ONLY: clients render it for visibility into the model's thinking;
 	// it is NOT the blob replayed to the provider. (See ChunkReasoningItem.)
+	//
+	// DTO-neutrality note (multi-provider Finding C): the ChunkReasoning (display
+	// summary) vs ChunkReasoningItem (replay blob) split is the PROVIDER-NEUTRAL
+	// seam P1 (the native Anthropic adapter) validates — Anthropic's thinking delta
+	// maps to ChunkReasoning, its (thinking,signature) replay token to
+	// ChunkReasoningItem. Keep the split; do not collapse the two.
 	ChunkReasoning
 	// ChunkReasoningItem carries the provider's opaque reasoning REPLAY blob
-	// (OpenAI's reasoning-item encrypted_content), emitted once the reasoning
-	// output item is assembled. The Text field holds the encrypted blob, which
-	// the loop stores on Message.Reasoning and the adapter sends back verbatim on
-	// subsequent stateless calls. It is never displayed or interpreted.
+	// (e.g. OpenAI's reasoning-item encrypted_content, or Anthropic's
+	// (thinking,signature) pair), emitted once the reasoning output item is
+	// assembled. The Text field holds the opaque blob, which the loop stores on
+	// Message.Reasoning and the adapter sends back verbatim on subsequent stateless
+	// calls. It is never displayed or interpreted — the contents are provider-
+	// private; only the STRUCTURE (one opaque blob per message) is neutral.
 	ChunkReasoningItem
 	// ChunkToolCall is a fully-assembled tool call, emitted once complete.
 	ChunkToolCall
@@ -59,8 +77,9 @@ type Chunk struct {
 	// Kind discriminates the payload.
 	Kind ChunkKind
 	// Text carries the assistant text on ChunkText, the human-readable reasoning
-	// summary on ChunkReasoning (display-only), and the opaque reasoning replay
-	// blob on ChunkReasoningItem (encrypted_content, never displayed).
+	// summary on ChunkReasoning (display-only), and the provider's opaque reasoning
+	// replay blob on ChunkReasoningItem (e.g. OpenAI encrypted_content or Anthropic
+	// (thinking,signature); never displayed).
 	Text string
 	// ToolCall is set on ChunkToolCall.
 	ToolCall *session.ToolCall

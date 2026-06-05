@@ -147,6 +147,7 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--model` | `gpt-5` | model identifier sent to the provider |
 | `--openai` | `false` | use the OpenAI Responses provider (key from `OPENAI_API_KEY`) |
 | `--openai-base-url` | `""` | override the OpenAI API base URL (compatible endpoints) |
+| `--openrouter-base-url` | `""` | override the OpenRouter API base URL (default `https://openrouter.ai/api/v1`; key from `OPENROUTER_API_KEY`) |
 | `--mock` | `false` | use a canned offline mock provider (no network; smoke tests only) |
 | `--store-dir` | `""` | directory for the JSONL session store (empty → in-memory) |
 | `--skills-dir` | `""` | directory to discover progressive-disclosure skills from, laid out as `<name>/SKILL.md`. **Repeatable** (highest precedence, in the order given); empty disables the `Skill` tool unless `--skills-conventional` is set. **See the skills trust note below.** |
@@ -244,17 +245,23 @@ connected agent knows how to act on the numbers.
 | Var | Effect |
 | --- | --- |
 | `OPENAI_API_KEY` | the OpenAI API key. **If set, it implies `--openai`** — the real provider is selected automatically. |
+| `OPENROUTER_API_KEY` | the OpenRouter API key. **If set, the `openrouter` provider is auto-detected** — it rides the same stateless Responses adapter against `https://openrouter.ai/api/v1` (override with `--openrouter-base-url`). OpenRouter also accepts an `OPENAI_API_KEY` by convention. |
 | `MECATL_SANDBOX` / `IS_SANDBOX` | set either to `1` to affirm an isolated, disposable environment so `--yolo` is permitted while running as root. |
 
 ### Provider selection
 
-A provider is **required** — the server has nothing to do without one:
+A provider is **required** — the server has nothing to do without one. The server
+builds an N-provider registry and AUTO-DETECTS availability from the environment:
 
-- `--openai` (or `OPENAI_API_KEY` set) → OpenAI Responses provider. `--openai`
-  without a key fails: `--openai requires OPENAI_API_KEY to be set`.
+- `OPENAI_API_KEY` set (or `--openai`) → the `openai` Responses provider.
+- `OPENROUTER_API_KEY` set → the `openrouter` provider (same adapter, OpenRouter
+  base URL; falls back to `OPENAI_API_KEY` by convention).
 - `--mock` → canned offline provider (single text turn; smoke tests only).
-- neither → startup error:
-  `no LLM provider configured: pass --openai (with OPENAI_API_KEY) or --mock`.
+- none of the above → startup error:
+  `no LLM provider available: set OPENAI_API_KEY or OPENROUTER_API_KEY (run with --openai/--mock for offline)`.
+
+When more than one provider is available, `openai` is the default (single-provider
+back-compat); per-session provider selection over the wire is a later phase.
 
 ### The loopback / unauthenticated trust note
 
@@ -1288,6 +1295,11 @@ resends the full input slice, carrying reasoning items forward.
 | Base URL | `--openai-base-url https://your-host/v1` (SDK appends `/responses`) |
 | Model | `--model <id>` |
 
+**OpenRouter** rides this same stateless Responses adapter: set `OPENROUTER_API_KEY`
+and the `openrouter` provider is auto-detected against `https://openrouter.ai/api/v1`
+(override with `--openrouter-base-url`). It accepts an `OPENAI_API_KEY` by convention
+when no dedicated key is set.
+
 ```console
 # OpenAI
 $ OPENAI_API_KEY=sk-... go run ./cmd/mecated --openai --model gpt-5
@@ -1318,12 +1330,16 @@ before suspecting the harness.
 
 ## 10. Troubleshooting / FAQ
 
-**`no LLM provider configured: pass --openai (with OPENAI_API_KEY) or --mock`**
-You started `mecated` with neither a provider flag nor a key. Set
-`OPENAI_API_KEY`, pass `--openai`, or pass `--mock` for an offline smoke test.
+**`no LLM provider available: set OPENAI_API_KEY or OPENROUTER_API_KEY (run with --openai/--mock for offline)`**
+You started `mecated` with no provider key in the environment. Set
+`OPENAI_API_KEY` or `OPENROUTER_API_KEY`, pass `--openai`, or pass `--mock` for an
+offline smoke test.
 
-**`--openai requires OPENAI_API_KEY to be set`**
-`--openai` was passed but no key is in the environment. `export OPENAI_API_KEY=…`.
+**`--openai requires OPENAI_API_KEY to be set`** (the `cmd/mecademo` demo only)
+The demo's `--openai` flag was passed but no key is in the environment.
+`export OPENAI_API_KEY=…`. (`mecated`/`mecatui` instead auto-detect the provider
+from the environment and emit the `no LLM provider available: …` message above when
+no key resolves.)
 
 **`bind: address already in use`**
 Another `mecated` (or process) holds the port. Pick free ports with
