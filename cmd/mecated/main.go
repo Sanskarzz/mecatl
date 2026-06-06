@@ -110,6 +110,7 @@ type config struct {
 	// LLM resilience knobs (see package internal/adapter/llmresilience).
 	llmMaxAttempts       int
 	llmPerAttemptTimeout time.Duration
+	llmStreamIdleTimeout time.Duration
 	llmBreakerThreshold  int
 	llmBreakerCooldown   time.Duration
 
@@ -630,6 +631,7 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		Tokenizer:                    cfg.tokenizer,
 		LLMMaxAttempts:               cfg.llmMaxAttempts,
 		LLMPerAttemptTimeout:         cfg.llmPerAttemptTimeout,
+		LLMStreamIdleTimeout:         cfg.llmStreamIdleTimeout,
 		LLMBreakerThreshold:          cfg.llmBreakerThreshold,
 		LLMBreakerCooldown:           cfg.llmBreakerCooldown,
 		MemoryDir:                    cfg.memoryDir,
@@ -716,6 +718,7 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.IntVar(&cfg.llmMaxAttempts, "llm-max-attempts", 3, "max LLM stream-establish attempts (initial call plus retries)")
 	fs.DurationVar(&cfg.llmPerAttemptTimeout, "llm-per-attempt-timeout", 30*time.Second, "per-attempt timeout for establishing an LLM stream (0 disables)")
+	fs.DurationVar(&cfg.llmStreamIdleTimeout, "llm-stream-idle-timeout", 120*time.Second, "max idle gap between LLM stream chunks after the first chunk; a longer stall terminates the turn (0 disables)")
 	fs.IntVar(&cfg.llmBreakerThreshold, "llm-breaker-threshold", 5, "consecutive LLM failures that open the circuit breaker (0 disables)")
 	fs.DurationVar(&cfg.llmBreakerCooldown, "llm-breaker-cooldown", 30*time.Second, "how long the LLM circuit breaker stays open before half-opening")
 

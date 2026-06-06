@@ -12,6 +12,16 @@
 // once any chunk has been emitted to the caller, a subsequent mid-stream error
 // is surfaced verbatim and never retried.
 //
+// Post-first-chunk reads are additionally bounded by StreamIdleTimeout: the gap
+// between consecutive chunks AFTER the first is bounded so a mid-stream upstream
+// stall cannot wedge the caller forever (the underlying adapters' stream.Next()
+// blocks indefinitely on a stalled SSE connection). When a read exceeds the idle
+// budget the wrapper cancels the per-attempt context and SYNTHESIZES a terminal
+// *StreamIdleError — it cannot rely on the adapter to surface one, because the
+// openai/anthropic adapters SWALLOW the ctx error on cancel (they yield nothing).
+// A StreamIdleError is terminal and never retried: no-replay-after-first-chunk
+// holds, so a mid-stream idle stall ends the turn as an error.
+//
 // The breaker counts consecutive TRANSIENT establishment failures across calls
 // (HTTP 429/408/5xx, network errors, per-attempt timeouts — see
 // isTransientForBreaker). Permanent client errors (4xx other than 408/429, e.g.
@@ -55,6 +65,13 @@ type Config struct {
 	// PerAttemptTimeout bounds each attempt's establishment (connect + first
 	// chunk). 0 disables it. It never overrides a shorter caller deadline.
 	PerAttemptTimeout time.Duration
+	// StreamIdleTimeout bounds the gap between consecutive chunks AFTER the first
+	// chunk has been observed. 0 disables it. A longer stall terminates the stream
+	// with a classified *StreamIdleError (errors.Is(_, context.DeadlineExceeded)),
+	// which is TERMINAL and never retried — no-replay-after-first-chunk holds. It
+	// is distinct from PerAttemptTimeout, which bounds only establishment and the
+	// FIRST chunk (and is retryable).
+	StreamIdleTimeout time.Duration
 	// BreakerThreshold is the number of consecutive failed attempts that opens
 	// the breaker. Values < 1 disable the breaker.
 	BreakerThreshold int
@@ -110,6 +127,26 @@ func (e *ExhaustedError) Error() string {
 
 // Unwrap exposes the final underlying error to errors.Is/As.
 func (e *ExhaustedError) Unwrap() error { return e.Err }
+
+// StreamIdleError is the terminal error synthesized when a stream stalls
+// mid-flight: no chunk arrived within StreamIdleTimeout AFTER the first chunk was
+// already observed. The wrapper synthesizes it because the underlying adapters
+// swallow the ctx error on cancel (they yield nothing once the context is done),
+// so cancelling the per-attempt context unblocks the inner stream.Next() but
+// surfaces no error of its own. It is TERMINAL and never retried
+// (no-replay-after-first-chunk).
+type StreamIdleError struct {
+	// Idle is the configured idle budget that elapsed without a chunk.
+	Idle time.Duration
+}
+
+func (e *StreamIdleError) Error() string {
+	return fmt.Sprintf("llmresilience: llm stream stalled: no chunk for %s", e.Idle)
+}
+
+// Unwrap returns context.DeadlineExceeded so errors.Is(err, context.DeadlineExceeded)
+// holds, classifying the stall as a deadline (not a caller cancel).
+func (*StreamIdleError) Unwrap() error { return context.DeadlineExceeded }
 
 // breakerState is the closed/open/half-open state machine, guarded by mu.
 type breakerState struct {
@@ -267,8 +304,15 @@ func (p *resilientProvider) Stream(ctx context.Context, req port.LLMRequest) (it
 func (p *resilientProvider) establish(ctx context.Context, req port.LLMRequest) (*firstChunk, error) {
 	attemptCtx := ctx
 	var cancel context.CancelFunc
-	if p.cfg.PerAttemptTimeout > 0 {
+	switch {
+	case p.cfg.PerAttemptTimeout > 0:
 		attemptCtx, cancel = context.WithTimeout(ctx, p.cfg.PerAttemptTimeout)
+	case p.cfg.StreamIdleTimeout > 0:
+		// No establishment timeout, but the idle watchdog needs a cancel handle to
+		// unblock the inner stream.Next() when a mid-stream read stalls. Derive a
+		// cancellable context so the rest-loop can fire it; without a per-attempt
+		// timeout there is no establishment deadline (unchanged behaviour there).
+		attemptCtx, cancel = context.WithCancel(ctx)
 	}
 
 	seq, err := p.inner.Stream(attemptCtx, req)
@@ -308,25 +352,107 @@ func (p *resilientProvider) establish(ctx context.Context, req port.LLMRequest) 
 
 	// We have a real first chunk. Build a continuation iterator that yields the
 	// remainder and cleans up the pull iterator and per-attempt ctx.
-	rest := func(yield func(port.Chunk, error) bool) {
+	rest := p.restSeq(next, stop, cancel)
+	return &firstChunk{chunk: chunk, restSeq: rest}, nil
+}
+
+// restSeq builds the continuation iterator that yields the remainder of the
+// inner stream after the buffered first chunk, cleaning up the pull iterator and
+// per-attempt context when it finishes.
+//
+// When StreamIdleTimeout <= 0 it is the plain pull loop (no goroutine, no
+// behaviour change). When StreamIdleTimeout > 0 each next() call is bounded by a
+// per-iteration idle deadline: the read runs on a helper goroutine and a timer is
+// reset to StreamIdleTimeout each iteration; if the timer fires first the wrapper
+// cancels the per-attempt context (unblocking the inner stream.Next()) and yields
+// a terminal *StreamIdleError. The helper goroutine is always drained after a
+// cancel so it cannot leak.
+func (p *resilientProvider) restSeq(next func() (port.Chunk, error, bool), stop func(), cancel context.CancelFunc) iter.Seq2[port.Chunk, error] {
+	if p.cfg.StreamIdleTimeout <= 0 {
+		return func(yield func(port.Chunk, error) bool) {
+			defer stop()
+			if cancel != nil {
+				defer cancel()
+			}
+			for {
+				c, e, ok := next()
+				if !ok {
+					return
+				}
+				if !yield(c, e) {
+					return
+				}
+				if e != nil {
+					return
+				}
+			}
+		}
+	}
+
+	// Idle-bounded variant. A real time.NewTimer is used (NOT cfg.Clock — that
+	// drives breaker math only, consistent with backoff()).
+	return func(yield func(port.Chunk, error) bool) {
 		defer stop()
 		if cancel != nil {
 			defer cancel()
 		}
+
+		type pull struct {
+			c  port.Chunk
+			e  error
+			ok bool
+		}
+		// Single-shot channel per iteration; the helper goroutine writes exactly one
+		// result then exits, so there is one goroutine in flight at a time.
+		results := make(chan pull, 1)
+		timer := time.NewTimer(p.cfg.StreamIdleTimeout)
+		defer timer.Stop()
+
 		for {
-			c, e, ok := next()
-			if !ok {
-				return
+			go func() {
+				c, e, ok := next()
+				results <- pull{c: c, e: e, ok: ok}
+			}()
+
+			// Reset the idle timer for THIS read.
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
 			}
-			if !yield(c, e) {
-				return
-			}
-			if e != nil {
+			timer.Reset(p.cfg.StreamIdleTimeout)
+
+			select {
+			case r := <-results:
+				if !r.ok {
+					return
+				}
+				if !yield(r.c, r.e) {
+					return
+				}
+				if r.e != nil {
+					return
+				}
+			case <-timer.C:
+				// Idle budget elapsed. Cancel the per-attempt ctx to unblock the inner
+				// stream.Next(); the adapters swallow the resulting ctx error (they yield
+				// nothing on cancel), so we MUST synthesize the terminal error ourselves.
+				if cancel != nil {
+					cancel()
+				}
+				// Drain the in-flight helper goroutine so neither it nor the inner pull
+				// coroutine leaks: the cancel above unblocks the helper's next() call,
+				// which then returns and the goroutine sends + exits. We MUST read this
+				// before returning — the deferred stop() unwinds the pull iterator, and
+				// stop()/next() may not run concurrently, so the helper's next() has to
+				// have completed first.
+				<-results
+				yield(port.Chunk{}, &StreamIdleError{Idle: p.cfg.StreamIdleTimeout})
 				return
 			}
 		}
 	}
-	return &firstChunk{chunk: chunk, restSeq: rest}, nil
 }
 
 // attemptError annotates an establishment error with the per-attempt context's

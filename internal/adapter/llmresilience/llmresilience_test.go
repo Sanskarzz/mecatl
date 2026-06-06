@@ -7,6 +7,7 @@ import (
 	"iter"
 	"net"
 	"net/http"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -43,6 +44,15 @@ type step struct {
 	// per-attempt timeout and caller cancellation).
 	block    bool
 	blockErr error // error returned after block unblocks (default ctx.Err()).
+	// stallAfterChunks, if true, yields chunks then blocks on ctx.Done() WITHOUT
+	// yielding anything further — mirroring the openai/anthropic adapters that
+	// swallow the ctx error on cancel (they yield nothing). This exercises the
+	// post-first-chunk idle watchdog: the stream never produces ChunkDone.
+	stallAfterChunks bool
+	// onChunk, if set, is invoked just before each chunk is yielded with the
+	// zero-based chunk index. Used to sample runtime state (e.g. goroutine count)
+	// at a deterministic point mid-stream.
+	onChunk func(idx int)
 }
 
 func (f *fakeProvider) Capabilities() port.ProviderCapabilities { return f.caps }
@@ -76,10 +86,20 @@ func (f *fakeProvider) Stream(ctx context.Context, _ port.LLMRequest) (iter.Seq2
 		return nil, s.outerErr
 	}
 	return func(yield func(port.Chunk, error) bool) {
-		for _, c := range s.chunks {
+		for i, c := range s.chunks {
+			if s.onChunk != nil {
+				s.onChunk(i)
+			}
 			if !yield(c, nil) {
 				return
 			}
+		}
+		if s.stallAfterChunks {
+			// Mirror the real adapters: block until cancelled, then swallow the ctx
+			// error (yield nothing). The wrapper's idle watchdog must synthesize the
+			// terminal error itself.
+			<-ctx.Done()
+			return
 		}
 		if s.midErr != nil {
 			yield(port.Chunk{}, s.midErr)
@@ -215,6 +235,300 @@ func TestMidStreamErrorAfterFirstChunkNotRetried(t *testing.T) {
 	}
 	if f.Calls() != 1 {
 		t.Fatalf("inner called %d times, want 1 (no replay after first chunk)", f.Calls())
+	}
+}
+
+// TestStreamIdleTimeoutAfterFirstChunkTerminates is the core regression guard for
+// the mid-stream stall bug: a stream that yields a first chunk then stalls (the
+// adapter swallows the ctx error and yields nothing) must be terminated by the
+// post-first-chunk idle watchdog with a *StreamIdleError, NOT hang forever. The
+// stall is TERMINAL and never retried (no-replay-after-first-chunk). The whole
+// test is deadline-guarded so a regression HANGS the iterator and fails here.
+func TestStreamIdleTimeoutAfterFirstChunkTerminates(t *testing.T) {
+	f := &fakeProvider{steps: []step{
+		{chunks: []port.Chunk{{Kind: port.ChunkText, Text: "partial"}}, stallAfterChunks: true},
+	}}
+	cfg := Config{
+		MaxAttempts:       3,
+		BaseBackoff:       time.Nanosecond,
+		MaxBackoff:        time.Nanosecond,
+		StreamIdleTimeout: 50 * time.Millisecond,
+	}
+	p := Wrap(f, cfg)
+
+	type outcome struct {
+		got []port.Chunk
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		seq, err := p.Stream(context.Background(), port.LLMRequest{})
+		if err != nil {
+			done <- outcome{err: err}
+			return
+		}
+		got, derr := drain(t, seq)
+		done <- outcome{got: got, err: derr}
+	}()
+
+	select {
+	case o := <-done:
+		if len(o.got) != 1 || o.got[0].Text != "partial" {
+			t.Fatalf("got %+v, want one 'partial' chunk before the stall error", o.got)
+		}
+		if o.err == nil {
+			t.Fatalf("drain returned nil error, want a stream-idle timeout")
+		}
+		if !errors.Is(o.err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want errors.Is(_, context.DeadlineExceeded)", o.err)
+		}
+		var sie *StreamIdleError
+		if !errors.As(o.err, &sie) {
+			t.Fatalf("err = %v, want *StreamIdleError", o.err)
+		}
+		if f.Calls() != 1 {
+			t.Fatalf("inner called %d times, want 1 (idle stall is terminal, never retried)", f.Calls())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stream/drain hung past the idle watchdog deadline — the mid-stream stall was not bounded (regression)")
+	}
+}
+
+// TestStreamIdleTimeoutDisabledWhenZero asserts the existing post-first-chunk loop
+// is unchanged when StreamIdleTimeout == 0: a normal scripted turn completes
+// verbatim (no goroutine, no behaviour change).
+func TestStreamIdleTimeoutDisabledWhenZero(t *testing.T) {
+	f := &fakeProvider{steps: []step{{chunks: textTurn("ok")}}}
+	cfg := Config{MaxAttempts: 3, StreamIdleTimeout: 0}
+	p := Wrap(f, cfg)
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream error: %v", err)
+	}
+	got, derr := drain(t, seq)
+	if derr != nil {
+		t.Fatalf("drain error: %v", derr)
+	}
+	if len(got) != 3 || got[0].Text != "ok" {
+		t.Fatalf("got %+v, want textTurn(ok)", got)
+	}
+	if f.Calls() != 1 {
+		t.Fatalf("inner called %d times, want 1", f.Calls())
+	}
+}
+
+// TestStreamIdleDisabledSpawnsNoWatchdogGoroutine proves the StreamIdleTimeout<=0
+// path takes the goroutine-FREE rest loop: it samples the live goroutine count at
+// a deterministic point mid-stream (the SECOND chunk, which is read inside the
+// rest loop) for both the disabled (0) and armed (>0) configs over the identical
+// scenario. The armed path keeps a helper goroutine in flight during that read; the
+// disabled path drives next() inline on the caller goroutine. The disabled count
+// must therefore be strictly LESS than the armed count — a direct, robust witness
+// that disabling spawns no watchdog goroutine (and no time.NewTimer). Sampling a
+// DIFFERENTIAL at the same scenario point avoids depending on any absolute count.
+func TestStreamIdleDisabledSpawnsNoWatchdogGoroutine(t *testing.T) {
+	// sampleRestChunkGoroutines drives a 3-chunk turn and returns the live
+	// goroutine count captured while the SECOND chunk (a rest-loop read) is being
+	// produced by the inner provider.
+	sampleRestChunkGoroutines := func(idleTimeout time.Duration) int {
+		var sampled int
+		f := &fakeProvider{}
+		f.steps = []step{{
+			chunks: textTurn("ok"),
+			onChunk: func(idx int) {
+				// idx 0 is the first chunk (pulled in establish, inline either way);
+				// idx 1 is read inside the rest loop — the path that differs.
+				if idx == 1 {
+					sampled = runtime.NumGoroutine()
+				}
+			},
+		}}
+		p := Wrap(f, Config{MaxAttempts: 1, StreamIdleTimeout: idleTimeout})
+		seq, err := p.Stream(context.Background(), port.LLMRequest{})
+		if err != nil {
+			t.Fatalf("Stream error: %v", err)
+		}
+		if _, derr := drain(t, seq); derr != nil {
+			t.Fatalf("drain error: %v", derr)
+		}
+		return sampled
+	}
+
+	// Settle so a prior test's teardown does not skew either sample.
+	waitNoExtraGoroutines(t, runtime.NumGoroutine())
+
+	disabled := sampleRestChunkGoroutines(0)
+	armed := sampleRestChunkGoroutines(50 * time.Millisecond)
+
+	if disabled >= armed {
+		t.Fatalf("rest-chunk goroutine count: disabled=%d armed=%d; disabled must be strictly fewer (no watchdog goroutine when StreamIdleTimeout<=0)", disabled, armed)
+	}
+}
+
+// TestStreamIdleEarlyStopDrainsHelper exercises the watchdog-ARMED early-stop
+// cleanup branch: a caller that ranges the stream and breaks AFTER the first chunk
+// abandons the iterator mid-stream while the idle watchdog goroutine is in flight
+// (the agent loop actually does this on a mid-stream error). The buffered first
+// chunk must be delivered, the abandonment must unwind cleanly, and the watchdog
+// helper goroutine must be drained — proven by the package goleak gate (TestMain).
+// The test is deadline-guarded so a regression that wedges the cleanup fails here
+// rather than hanging the suite.
+func TestStreamIdleEarlyStopDrainsHelper(t *testing.T) {
+	// One real first chunk, then a stall (no further chunk, ctx error swallowed) —
+	// the same shape the adapters produce. The caller breaks after the first chunk,
+	// so the rest-loop's single read is what arms (and then must unwind) the
+	// watchdog goroutine.
+	f := &fakeProvider{steps: []step{
+		{chunks: []port.Chunk{{Kind: port.ChunkText, Text: "first"}}, stallAfterChunks: true},
+	}}
+	cfg := Config{
+		MaxAttempts:       1,
+		StreamIdleTimeout: 50 * time.Millisecond,
+	}
+	p := Wrap(f, cfg)
+
+	type outcome struct {
+		first string
+		count int
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		seq, err := p.Stream(context.Background(), port.LLMRequest{})
+		if err != nil {
+			done <- outcome{}
+			return
+		}
+		var o outcome
+		for c, e := range seq {
+			if e != nil {
+				break
+			}
+			o.count++
+			if o.count == 1 {
+				o.first = c.Text
+			}
+			// Abandon the iterator right after the first chunk while the watchdog is
+			// armed for the (stalled) remainder.
+			break
+		}
+		done <- o
+	}()
+
+	select {
+	case o := <-done:
+		if o.count != 1 || o.first != "first" {
+			t.Fatalf("got count=%d first=%q, want exactly the first chunk", o.count, o.first)
+		}
+		if f.Calls() != 1 {
+			t.Fatalf("inner called %d times, want 1", f.Calls())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("early-stop cleanup wedged: the watchdog-armed abandon path did not unwind (regression)")
+	}
+	// Goroutine teardown is asynchronous after the break; let the watchdog helper +
+	// pull coroutine unwind before the goleak gate samples at TestMain.
+	waitNoExtraGoroutines(t, runtime.NumGoroutine())
+}
+
+// TestStreamIdleCallerCancelMidStallUnwinds exercises the watchdog-armed path when
+// the PARENT context is cancelled WHILE the inner read is stalled: the loop's
+// select observes neither a chunk nor its own idle timer first, but the helper's
+// next() unblocks via the cancelled ctx and returns, so the iterator must unwind
+// promptly (NOT wait out the full idle budget, and NOT leak). Deadline-guarded so
+// a regression fails rather than hangs; the goleak gate proves no leak.
+func TestStreamIdleCallerCancelMidStallUnwinds(t *testing.T) {
+	f := &fakeProvider{steps: []step{
+		{chunks: []port.Chunk{{Kind: port.ChunkText, Text: "first"}}, stallAfterChunks: true},
+	}}
+	cfg := Config{
+		MaxAttempts: 1,
+		// Long idle budget: if the test passes, it must be the CALLER CANCEL — not the
+		// watchdog timer — that unwinds the stalled read. A regression that ignored the
+		// cancel would block until this budget (or forever) and trip the 5s deadline.
+		StreamIdleTimeout: time.Hour,
+	}
+	p := Wrap(f, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		seq, err := p.Stream(ctx, port.LLMRequest{})
+		if err != nil {
+			return
+		}
+		for _, e := range seq {
+			_ = e
+		}
+	}()
+
+	// Let the first chunk flow and the inner read stall, then cancel the parent.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// Unwound promptly via the caller cancel.
+	case <-time.After(5 * time.Second):
+		t.Fatal("caller-cancel mid-stall did not unwind the iterator (regression)")
+	}
+	if f.Calls() != 1 {
+		t.Fatalf("inner called %d times, want 1", f.Calls())
+	}
+	waitNoExtraGoroutines(t, runtime.NumGoroutine())
+}
+
+// waitNoExtraGoroutines waits (with a short settle budget) until the live
+// goroutine count returns to at most baseline. Goroutine teardown after an
+// abandoned/cancelled iterator is asynchronous, so a bare NumGoroutine() check
+// would flake; this polls instead. It is a soft pre-check — the authoritative
+// leak assertion is the package goleak gate in TestMain.
+func waitNoExtraGoroutines(t *testing.T, baseline int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= baseline {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Not fatal here (goleak owns the verdict), but surface a hint if it never settled.
+	t.Logf("goroutine count did not settle to <= baseline (%d) within budget; goleak gate is authoritative", baseline)
+}
+
+// TestPreFirstChunkStallStillUsesPerAttemptTimeout asserts the establishment
+// window is unaffected by StreamIdleTimeout: a pre-first-chunk stall still trips
+// the (retryable) PerAttemptTimeout path. With both knobs set, the first attempt
+// blocks before any chunk (per-attempt deadline fires, retryable) and the second
+// succeeds.
+func TestPreFirstChunkStallStillUsesPerAttemptTimeout(t *testing.T) {
+	f := &fakeProvider{steps: []step{
+		{block: true}, // blocks BEFORE any chunk → per-attempt deadline → retryable
+		{chunks: textTurn("recovered")},
+	}}
+	cfg := Config{
+		MaxAttempts:       2,
+		BaseBackoff:       time.Nanosecond,
+		MaxBackoff:        time.Nanosecond,
+		PerAttemptTimeout: 20 * time.Millisecond,
+		StreamIdleTimeout: 5 * time.Second, // generous; must not interfere pre-first-chunk
+	}
+	p := Wrap(f, cfg)
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
+		t.Fatalf("Stream error: %v", err)
+	}
+	got, derr := drain(t, seq)
+	if derr != nil {
+		t.Fatalf("drain error: %v", derr)
+	}
+	if len(got) == 0 || got[0].Text != "recovered" {
+		t.Fatalf("got %+v, want recovered", got)
+	}
+	if f.Calls() != 2 {
+		t.Fatalf("inner called %d times, want 2 (pre-first-chunk stall retried)", f.Calls())
 	}
 }
 
@@ -434,9 +748,15 @@ func TestBreakerOpensFailsFastHalfOpensRecovers(t *testing.T) {
 		t.Fatalf("half-open: inner called %d times, want 1", f.Calls())
 	}
 
-	// After recovery the breaker is closed: subsequent calls flow through.
-	if _, err := p.Stream(context.Background(), port.LLMRequest{}); err != nil {
+	// After recovery the breaker is closed: subsequent calls flow through. Drain
+	// the returned stream so the inner pull coroutine is unwound (an undrained seq
+	// leaves the first-chunk coroutine parked at its yield — caught by goleak).
+	seq, err = p.Stream(context.Background(), port.LLMRequest{})
+	if err != nil {
 		t.Fatalf("post-recovery Stream error: %v", err)
+	}
+	if _, derr := drain(t, seq); derr != nil {
+		t.Fatalf("post-recovery drain error: %v", derr)
 	}
 }
 

@@ -393,6 +393,29 @@ trial after cooldown. **Motivating incident:** a burst of permanent 404s (OpenRo
 policy-blocked / unavailable models) was counting toward the shared breaker via an unconditional
 `recordFailure`, tripping it and then blocking unrelated WORKING models for the cooldown.
 
+**Post-first-chunk idle bound (`StreamIdleTimeout`).** `PerAttemptTimeout` bounds only
+establishment and the FIRST chunk; once streaming proper begins the per-attempt context is left
+live and there is no per-chunk deadline. A real upstream SSE connection can stall mid-stream —
+the openai/anthropic adapters' `stream.Next()` then blocks forever, the loop never sees
+`ChunkDone`, and the turn hangs in "thinking" permanently. `StreamIdleTimeout` (default 120s; 0
+disables) closes this: in `restSeq`'s continuation loop each `next()` runs on a helper goroutine
+and a `time.NewTimer` (real time, NOT `cfg.Clock` — that drives breaker math only) is reset to the
+idle budget per iteration. On a timeout the wrapper `cancel()`s the per-attempt context (to
+unblock the inner `stream.Next()`), DRAINS the in-flight helper (so neither it nor the pull
+coroutine leaks — `next()`/`stop()` may not run concurrently, so the helper must finish first),
+then yields a synthesized terminal **`*StreamIdleError`**.
+
+The synthesis is load-bearing: both adapters **swallow the ctx error on cancel** (they yield
+NOTHING once the context is done), so cancelling unblocks `stream.Next()` but surfaces no error —
+the wrapper must produce one itself. `StreamIdleError.Unwrap()` returns `context.DeadlineExceeded`
+so `errors.Is(err, context.DeadlineExceeded)` holds (classified as a deadline, not a caller
+cancel). It is **TERMINAL and never retried** — no-replay-after-first-chunk holds, so a mid-stream
+idle stall ends the turn as `StopError` rather than replaying a partially-observed turn. The
+breaker is untouched (a mid-stream error structurally never reaches the establishment seam where
+`recordFailure` lives). When `StreamIdleTimeout <= 0` the loop is the plain pull (no goroutine, no
+behaviour change). A package-level `goleak` gate (`leakmain_test.go`) proves the watchdog goroutine
+unwinds on every path.
+
 ## Composition — `internal/app/` (multi-provider — see `MULTI-PROVIDER.md`)
 
 The single shared assembly of provider + catalog + policy + engine into a `server.Service`

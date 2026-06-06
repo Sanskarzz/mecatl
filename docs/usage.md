@@ -174,6 +174,20 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--block-profile-rate` | `0` | `runtime.SetBlockProfileRate` rate in ns (0 = off). Populates `/debug/pprof/block`; has runtime overhead — enable only while investigating blocking. |
 | `--perf-mcp` | `false` | mount the **read-only perf MCP server** at `/mcp` on the admin listener (see the observability note). Requires `--metrics-addr`, and that address **must be loopback** — a non-loopback `--metrics-addr` with `--perf-mcp` is **refused** (fail-closed). |
 
+#### LLM resilience knobs
+
+These tune the resilience decorator wrapped around every provider (see
+`internal/adapter/llmresilience`). They split cleanly into the **establishment**
+window (retryable) and the **post-first-chunk** stream (terminal).
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--llm-max-attempts` | `3` | max stream-establish attempts (initial call plus retries). Retries apply ONLY before the first chunk — no-replay-after-first-chunk. |
+| `--llm-per-attempt-timeout` | `30s` | per-attempt timeout for **establishing** an LLM stream (connect + first chunk). A timeout here is **retryable**. 0 disables. |
+| `--llm-stream-idle-timeout` | `120s` | max idle gap between LLM stream chunks **after the first chunk**. A longer stall **ends the turn as an error** (it is terminal, never retried — replay is unsafe mid-stream). Guards against an upstream SSE connection that stalls mid-stream and would otherwise hang the turn forever. 0 disables. |
+| `--llm-breaker-threshold` | `5` | consecutive **transient** establishment failures that open the per-provider circuit breaker (0 disables). |
+| `--llm-breaker-cooldown` | `30s` | how long the breaker stays open before admitting a half-open trial. |
+
 ### Observability (the loopback admin listener)
 
 `--metrics-addr` (default `127.0.0.1:9090`, empty disables) serves, **loopback-only and

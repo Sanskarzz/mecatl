@@ -303,6 +303,7 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 		BaseBackoff:       llmBaseBackoff,
 		MaxBackoff:        llmMaxBackoff,
 		PerAttemptTimeout: cfg.LLMPerAttemptTimeout,
+		StreamIdleTimeout: cfg.LLMStreamIdleTimeout,
 		BreakerThreshold:  cfg.LLMBreakerThreshold,
 		BreakerCooldown:   cfg.LLMBreakerCooldown,
 	})
@@ -310,6 +311,7 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 		"provider", id,
 		"max_attempts", cfg.LLMMaxAttempts,
 		"per_attempt_timeout", cfg.LLMPerAttemptTimeout,
+		"stream_idle_timeout", cfg.LLMStreamIdleTimeout,
 		"breaker_threshold", cfg.LLMBreakerThreshold,
 		"breaker_cooldown", cfg.LLMBreakerCooldown)
 	return providerEntry{id: id, provider: llm, available: true, baseURL: baseURL}
@@ -366,6 +368,7 @@ func newAnthropicEntry(cfg Config, key string, meta *liveMetaStore) providerEntr
 		BaseBackoff:       llmBaseBackoff,
 		MaxBackoff:        llmMaxBackoff,
 		PerAttemptTimeout: cfg.LLMPerAttemptTimeout,
+		StreamIdleTimeout: cfg.LLMStreamIdleTimeout,
 		BreakerThreshold:  cfg.LLMBreakerThreshold,
 		BreakerCooldown:   cfg.LLMBreakerCooldown,
 	})
@@ -373,6 +376,7 @@ func newAnthropicEntry(cfg Config, key string, meta *liveMetaStore) providerEntr
 		"provider", providerAnthropic,
 		"max_attempts", cfg.LLMMaxAttempts,
 		"per_attempt_timeout", cfg.LLMPerAttemptTimeout,
+		"stream_idle_timeout", cfg.LLMStreamIdleTimeout,
 		"breaker_threshold", cfg.LLMBreakerThreshold,
 		"breaker_cooldown", cfg.LLMBreakerCooldown)
 	entry := providerEntry{id: providerAnthropic, provider: llm, available: true, baseURL: baseURL}
