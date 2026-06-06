@@ -257,10 +257,14 @@ func (p *resilientProvider) establish(ctx context.Context, req port.LLMRequest) 
 
 	seq, err := p.inner.Stream(attemptCtx, req)
 	if err != nil {
+		// Capture the TRUE per-attempt cause BEFORE cancel() runs: once cancel()
+		// fires, attemptCtx.Err() becomes context.Canceled and would mask the real
+		// error (e.g. a 400) as a cancellation.
+		cause := attemptCtx.Err()
 		if cancel != nil {
 			cancel()
 		}
-		return nil, attemptError(attemptCtx, err)
+		return nil, attemptError(cause, err)
 	}
 
 	// Pull the first chunk using a pull iterator so we can stop after one.
@@ -275,12 +279,15 @@ func (p *resilientProvider) establish(ctx context.Context, req port.LLMRequest) 
 		return &firstChunk{empty: true}, nil
 	}
 	if cerr != nil {
-		// Error before any real chunk: retryable establishment failure.
+		// Error before any real chunk: retryable establishment failure. Capture the
+		// TRUE per-attempt cause BEFORE cancel() so the real error is not masked as a
+		// cancellation (see attemptError).
+		cause := attemptCtx.Err()
 		stop()
 		if cancel != nil {
 			cancel()
 		}
-		return nil, attemptError(attemptCtx, cerr)
+		return nil, attemptError(cause, cerr)
 	}
 
 	// We have a real first chunk. Build a continuation iterator that yields the
@@ -307,11 +314,26 @@ func (p *resilientProvider) establish(ctx context.Context, req port.LLMRequest) 
 }
 
 // attemptError annotates an establishment error with the per-attempt context's
-// cause when a per-attempt deadline fired, so the classifier and caller-cancel
-// check observe the right underlying cause.
-func attemptError(attemptCtx context.Context, err error) error {
-	if ce := attemptCtx.Err(); ce != nil && !errors.Is(err, ce) {
-		return fmt.Errorf("%w: %w", ce, err)
+// cause when a per-attempt deadline (or genuine caller-cancel) fired, so the
+// classifier and caller-cancel check observe the right underlying cause.
+//
+// cause MUST be the per-attempt context's Err() read BEFORE the cleanup cancel()
+// has run — never attemptCtx.Err() read afterwards. The cleanup cancel() we issue
+// in establish() always sets attemptCtx.Err() to context.Canceled; reading it
+// after cancel() would therefore mask EVERY real establishment error (e.g. a 400)
+// as `context.Canceled: <real>`, which the loop then treats as a caller cancel and
+// terminates as "cancelled" with the real provider message discarded.
+//
+// With the pre-cancel cause:
+//   - cause == nil (no per-attempt deadline, no caller cancel): return err
+//     VERBATIM so the real error surfaces (the classifier / loop see e.g. the 400
+//     and report StopError with the provider message).
+//   - cause != nil: wrap it as `cause: err` so a genuine per-attempt deadline stays
+//     retryable (DefaultClassifier) and a genuine caller-cancel stays a cancel
+//     (the loop's StopCancelled / wedge-recovery path).
+func attemptError(cause, err error) error {
+	if cause != nil && !errors.Is(err, cause) {
+		return fmt.Errorf("%w: %w", cause, err)
 	}
 	return err
 }

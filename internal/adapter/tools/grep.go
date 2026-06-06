@@ -57,6 +57,8 @@ func (GrepTool) Spec() tool.ToolSpec {
   },
   "required": ["pattern"]
 }`),
+		// path is intentionally optional/absent from "required" — fine because the
+		// openai adapter sends tools NON-STRICT (see bash.go's note); don't add it.
 	}
 }
 

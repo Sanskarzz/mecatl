@@ -104,6 +104,11 @@ func (BashTool) Spec() tool.ToolSpec {
   },
   "required": ["command"]
 }`),
+		// timeout_ms is intentionally OPTIONAL and absent from "required". The openai
+		// adapter sends tools NON-STRICT (see openai.buildTools), so a `required` that
+		// omits an optional property is fine — do NOT "fix" this by adding timeout_ms
+		// to required; strict mode is deliberately off and arg validation happens at
+		// the execution edge.
 	}
 }
 

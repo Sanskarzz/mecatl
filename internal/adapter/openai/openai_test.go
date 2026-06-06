@@ -265,6 +265,35 @@ func TestBuildParams(t *testing.T) {
 	}
 }
 
+// TestBuildToolsStrictOff asserts that function tools are sent NON-STRICT: the
+// FunctionToolParam.Strict field is left unset (the param.Opt zero value), so the
+// SDK omits it and the upstream default (non-strict) applies. A Bash-shaped schema
+// with an optional `timeout_ms` not listed in `required` would 400 under strict
+// mode on a strict-enforcing OpenAI-compatible upstream; non-strict accepts it.
+func TestBuildToolsStrictOff(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"timeout_ms":{"type":"integer"}},"required":["command"]}`)
+	tools, err := buildTools([]tool.ToolSpec{
+		{Name: "run_command", Description: "Run a command.", Schema: schema},
+	})
+	if err != nil {
+		t.Fatalf("buildTools: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(tools))
+	}
+	fn := tools[0].OfFunction
+	if fn == nil || fn.Name != "run_command" {
+		t.Fatalf("tool 0 = %+v, want function run_command", tools[0])
+	}
+	// Strict must be the zero param.Opt (unset → SDK omits it → non-strict default).
+	if fn.Strict.Valid() {
+		t.Errorf("Strict is set (=%v); want unset/false (non-strict)", fn.Strict.Value)
+	}
+	if fn.Strict.Value {
+		t.Errorf("Strict.Value = true, want false")
+	}
+}
+
 // TestRequestNoOrphanedFunctionCallAfterInterrupt drives a session to a cancelled
 // turn (assistant function_call with no output), recovers it via Interrupt (which
 // closes out the orphan), and asserts the built request has a matching

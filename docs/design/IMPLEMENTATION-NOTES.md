@@ -313,6 +313,29 @@ its OWN `openrouter.Model` (composition maps it to `modelEntry` — no import cy
 `id`/`name`/`context_length`/`top_provider.max_completion_tokens`→OutputLimit (the output
 ceiling, captured for the resolvers)/`architecture.input_modalities`/`supported_parameters∋{reasoning,tools}`.
 
+### `openai` tool schemas — NON-STRICT (shared by openai + openrouter)
+
+`openai.buildTools` sends function tools **non-strict** (`FunctionToolParam.Strict` left unset
+→ the SDK omits it → upstream default applies). Strict mode would require every tool schema's
+`required` to list ALL of its `properties`, but many built-in tools carry genuinely optional
+params (Bash `timeout_ms`, Edit `replace_all`, Read `offset`/`limit`, Grep `path`, memory
+Remember/query, ToolSearch, Fork, Team, Task, RepoMap, …); a strict-enforcing OpenAI-compatible
+upstream (Azure reached via OpenRouter) `400`s those. We don't need the guarantee: **argument
+validation lives at the execution edge** — every tool re-parses/validates via
+`session.ParseArgs` / `NewToolError` before acting. The openai adapter is shared by the
+`openai` and `openrouter` provider ids, so non-strict here covers both.
+
+### `llmresilience` — cleanup-cancel vs genuine deadline/cancel
+
+`establish` applies the per-attempt timeout via a child context it must `cancel()` to release.
+The TRUE error cause is captured **before** that cleanup `cancel()` (`cause := attemptCtx.Err()`
+then `cancel()` then `attemptError(cause, err)`); reading `attemptCtx.Err()` AFTER cancel would
+report `context.Canceled` and mask every real establishment error (e.g. a 400) — which the loop
+then mis-classifies as a caller cancel and terminates as "cancelled" with the real message
+discarded. `attemptError(cause, err)`: `cause==nil` ⇒ return `err` verbatim (real error
+surfaces → `StopError`); `cause!=nil` ⇒ wrap `cause: err` (genuine per-attempt deadline stays
+retryable; genuine caller-cancel stays a cancel / wedge-recovery).
+
 ## Composition — `internal/app/` (multi-provider — see `MULTI-PROVIDER.md`)
 
 The single shared assembly of provider + catalog + policy + engine into a `server.Service`

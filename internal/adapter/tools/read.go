@@ -67,6 +67,8 @@ func (ReadTool) Spec() tool.ToolSpec {
   },
   "required": ["path"]
 }`),
+		// offset/limit are intentionally optional/absent from "required" — fine because
+		// the openai adapter sends tools NON-STRICT (see bash.go's note); don't add them.
 	}
 }
 

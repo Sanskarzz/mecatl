@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
+	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
@@ -622,6 +623,91 @@ func (b *blockingProvider) Stream(ctx context.Context, _ port.LLMRequest) (iter.
 		<-ctx.Done()
 		yield(port.Chunk{}, ctx.Err())
 	}, nil
+}
+
+// errProvider returns a real, NON-context error as the outer Stream error on
+// every call — the shape of a provider 400 reaching the establishment seam.
+type errProvider struct {
+	err error
+}
+
+func (*errProvider) Capabilities() port.ProviderCapabilities { return port.ProviderCapabilities{} }
+
+func (p *errProvider) Stream(context.Context, port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
+	return nil, p.err
+}
+
+// firstChunkErrProvider returns a NON-nil iterator whose FIRST yielded chunk
+// carries a real, NON-context error — the shape of a provider 400 surfacing as
+// the first SSE chunk rather than as the outer Stream error. This drives the
+// "first-chunk cerr" establishment seam in llmresilience (distinct from the
+// outer-Stream-error seam that errProvider exercises).
+type firstChunkErrProvider struct {
+	err error
+}
+
+func (*firstChunkErrProvider) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{}
+}
+
+func (p *firstChunkErrProvider) Stream(context.Context, port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
+	return func(yield func(port.Chunk, error) bool) {
+		yield(port.Chunk{}, p.err)
+	}, nil
+}
+
+// TestEstablishErrorTerminatesStopError is the end-to-end reproduction of the
+// reported symptom: a real establishment error (NOT a context error), wrapped
+// through llmresilience with a per-attempt timeout, must terminate the turn as
+// StopError with the provider message surfaced — NOT as StopCancelled with an
+// empty/silent result.
+func TestEstablishErrorTerminatesStopError(t *testing.T) {
+	provErr := fmt.Errorf("upstream rejected request: bad tool schema (400)")
+	inner := &errProvider{err: provErr}
+	llm := llmresilience.Wrap(inner, llmresilience.Config{
+		MaxAttempts:       1,
+		PerAttemptTimeout: time.Second,
+	})
+
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t)})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+
+	res := lastResult(t, drain(r))
+	if res.Stop != session.StopError {
+		t.Fatalf("stop = %q, want error (NOT cancelled)", res.Stop)
+	}
+	if !strings.Contains(res.Error, "bad tool schema (400)") {
+		t.Fatalf("result error = %q, want the provider message surfaced", res.Error)
+	}
+}
+
+// TestFirstChunkErrorTerminatesStopError is the end-to-end counterpart of
+// TestEstablishErrorTerminatesStopError for the OTHER establishment seam: here
+// the inner Stream succeeds (non-nil iterator) but the FIRST CHUNK yields a real
+// provider error (the "first-chunk cerr" path in llmresilience.establish). Wrapped
+// through llmresilience with a per-attempt timeout, this too must terminate the
+// turn as StopError with the provider message surfaced — NOT as StopCancelled.
+// If the cerr-site masking fix (cause := attemptCtx.Err() read BEFORE cancel) is
+// reverted, the cleanup cancel() masks the real error as context.Canceled, the
+// loop treats it as a caller-cancel, and this test fails on StopCancelled.
+func TestFirstChunkErrorTerminatesStopError(t *testing.T) {
+	provErr := fmt.Errorf("upstream rejected request: bad tool schema (400)")
+	inner := &firstChunkErrProvider{err: provErr}
+	llm := llmresilience.Wrap(inner, llmresilience.Config{
+		MaxAttempts:       1,
+		PerAttemptTimeout: time.Second,
+	})
+
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t)})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+
+	res := lastResult(t, drain(r))
+	if res.Stop != session.StopError {
+		t.Fatalf("stop = %q, want error (NOT cancelled)", res.Stop)
+	}
+	if !strings.Contains(res.Error, "bad tool schema (400)") {
+		t.Fatalf("result error = %q, want the provider message surfaced", res.Error)
+	}
 }
 
 // TestCancelMidToolThenResumeSucceeds drives turn-1 to record an assistant

@@ -53,6 +53,19 @@ func buildParams(req port.LLMRequest) (responses.ResponseNewParams, error) {
 // Schema is the JSON schema object for the tool's arguments; it is unmarshalled
 // into the map[string]any the SDK expects. An empty schema is sent as an empty
 // object so the tool is always well-formed.
+//
+// Tools are sent NON-STRICT (Strict left unset → SDK omits it → upstream default
+// is non-strict). Strict mode requires every tool schema's `required` to list ALL
+// of its `properties` keys, but many built-in tools carry genuinely optional
+// params (Bash timeout_ms, Edit replace_all, Read offset/limit, Grep path, the
+// memory Remember/query tools, ToolSearch, Fork, Team, Task, RepoMap, …). A
+// strict-enforcing OpenAI-compatible upstream (e.g. Azure reached via OpenRouter)
+// would 400 those schemas. We do not need strict's guarantee: tool arguments are
+// validated at the execution edge — every tool re-parses and validates its args
+// via session.ParseArgs / NewToolError before doing anything — so a malformed or
+// missing-optional argument is caught there, not by the wire schema. This adapter
+// is shared by the "openai" and "openrouter" provider ids, so non-strict here
+// covers both.
 func buildTools(specs []tool.ToolSpec) ([]responses.ToolUnionParam, error) {
 	if len(specs) == 0 {
 		return nil, nil
@@ -70,7 +83,7 @@ func buildTools(specs []tool.ToolSpec) ([]responses.ToolUnionParam, error) {
 		fn := responses.FunctionToolParam{
 			Name:       s.Name,
 			Parameters: params,
-			Strict:     oai.Bool(true),
+			// Strict intentionally left unset (non-strict) — see buildTools doc.
 		}
 		if s.Description != "" {
 			fn.Description = oai.String(s.Description)

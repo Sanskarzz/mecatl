@@ -293,6 +293,89 @@ func TestPerAttemptTimeoutIsRetryable(t *testing.T) {
 	}
 }
 
+// TestRealEstablishErrorNotMaskedAsCanceled is the regression guard for the
+// cleanup-cancel-masking bug: with a per-attempt timeout configured, a real
+// establishment error (a 400) must NOT be reported as context.Canceled merely
+// because establish() cancels the per-attempt context during cleanup. The real
+// *oai.Error must remain recoverable via errors.As. Covers BOTH establish error
+// paths — the outer Stream error and the first-chunk cerr.
+func TestRealEstablishErrorNotMaskedAsCanceled(t *testing.T) {
+	cfg := Config{MaxAttempts: 1, PerAttemptTimeout: time.Second}
+
+	cases := []struct {
+		name string
+		step step
+	}{
+		{"outer error", step{outerErr: apiErr(400)}},
+		{"first-chunk cerr", step{chunks: nil, midErr: apiErr(400)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeProvider{steps: []step{tc.step}}
+			p := Wrap(f, cfg)
+			_, err := p.Stream(context.Background(), port.LLMRequest{})
+			if err == nil {
+				t.Fatalf("Stream returned nil error, want the 400")
+			}
+			if errors.Is(err, context.Canceled) {
+				t.Fatalf("err masked as context.Canceled: %v", err)
+			}
+			var apiErr *oai.Error
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != 400 {
+				t.Fatalf("err = %v, want recoverable 400 *oai.Error", err)
+			}
+			if f.Calls() != 1 {
+				t.Fatalf("inner called %d times, want 1", f.Calls())
+			}
+		})
+	}
+}
+
+// TestGenuineCallerCancelSurfacesCanceled asserts that a genuine caller-cancel,
+// even WITH a per-attempt timeout configured, still surfaces as context.Canceled
+// (preserving the loop's StopCancelled / wedge-recovery path). This guards against
+// an over-correction of the masking fix.
+func TestGenuineCallerCancelSurfacesCanceled(t *testing.T) {
+	f := &fakeProvider{steps: []step{{block: true}}}
+	cfg := Config{MaxAttempts: 5, PerAttemptTimeout: time.Hour}
+	p := Wrap(f, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := p.Stream(ctx, port.LLMRequest{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if f.Calls() != 1 {
+		t.Fatalf("inner called %d times, want 1 (caller cancel not retried)", f.Calls())
+	}
+}
+
+// TestPerAttemptDeadlineChainHasDeadlineExceeded asserts that a genuine
+// single-attempt per-attempt timeout produces an error chain that still satisfies
+// errors.Is(_, context.DeadlineExceeded) — the property DefaultClassifier keys on
+// to keep per-attempt timeouts retryable.
+func TestPerAttemptDeadlineChainHasDeadlineExceeded(t *testing.T) {
+	f := &fakeProvider{steps: []step{{block: true}}}
+	cfg := Config{MaxAttempts: 1, PerAttemptTimeout: 20 * time.Millisecond}
+	p := Wrap(f, cfg)
+
+	_, err := p.Stream(context.Background(), port.LLMRequest{})
+	if err == nil {
+		t.Fatalf("Stream returned nil, want a per-attempt deadline error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err chain = %v, want errors.Is(_, context.DeadlineExceeded)", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("err masked as context.Canceled: %v", err)
+	}
+}
+
 func TestBreakerOpensFailsFastHalfOpensRecovers(t *testing.T) {
 	conn := &net.OpError{Op: "dial", Err: errors.New("refused")}
 	clk := &manualClock{t: time.Unix(1000, 0)}

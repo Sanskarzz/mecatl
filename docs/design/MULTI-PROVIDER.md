@@ -76,6 +76,14 @@ A composition-only `providerConstructor` seam (mirroring `envDetector`) lets the
 e2e back two real provider ids with distinct mocks; production leaves it nil and uses
 the resilience-wrapped openai adapter.
 
+Because OpenRouter rides the SAME openai adapter, its function tools are sent
+**non-strict** (`FunctionToolParam.Strict` left unset). This matters on
+strict-enforcing OpenAI-compatible upstreams (e.g. Azure reached via OpenRouter): strict
+mode would reject any tool schema whose `required` omits an optional property, and several
+built-in tools have optional params. Non-strict avoids the upstream `400`; argument
+validation happens at the execution edge (`session.ParseArgs` / `NewToolError`), so strict's
+guarantee is not needed. See `IMPLEMENTATION-NOTES.md`.
+
 ---
 
 ## 3. Catalog-as-data (`internal/adapter/providercatalog`)

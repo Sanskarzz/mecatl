@@ -69,6 +69,8 @@ func (EditTool) Spec() tool.ToolSpec {
   },
   "required": ["path", "old_string", "new_string"]
 }`),
+		// replace_all is intentionally optional/absent from "required" — fine because
+		// the openai adapter sends tools NON-STRICT (see bash.go's note); don't add it.
 	}
 }
 
