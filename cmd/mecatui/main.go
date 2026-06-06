@@ -21,6 +21,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -37,6 +38,7 @@ import (
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 	"github.com/stacklok/mecatl/cmd/mecatui/ui"
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/app"
 )
@@ -320,6 +322,12 @@ func embeddedConfig(cfg config) app.Config {
 		ImportClaudePermissions: true,
 		TrustProject:            cfg.trustProject,
 		AllowAllTools:           cfg.allowAllTools,
+		// Diagnostics wraps slog.Default() so the build-once composition facts (token
+		// counter / compaction strategy / slash commands) keep landing in the same
+		// stderr scrollback they did before the relocation — mecatui has no slog of its
+		// own, exactly like the perf path's Logger fallback. NopDiagnostics would have
+		// silenced those three lines; this preserves current behavior with least churn.
+		Diagnostics: slogdiag.NewFromLogger(slog.Default()),
 	}
 }
 

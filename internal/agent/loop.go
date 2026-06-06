@@ -46,11 +46,17 @@ type Deps struct {
 	Store port.SessionStore
 	// Clock supplies wall time for tool-call timing (optional; nil → no timing).
 	Clock port.Clock
-	// Logger records tool-execution observability (optional; nil → no logging).
-	Logger port.Logger
+	// ToolCallRecorder records tool-execution observability — the tool-call audit
+	// seam (optional; nil → no recording).
+	ToolCallRecorder port.ToolCallRecorder
 	// Sink, when non-nil, also receives every Event the loop emits, in addition
 	// to the Run.Events() channel which is always the primary surface.
 	Sink port.EventSink
+	// Diagnostics is the general-purpose operational logging seam (optional; nil →
+	// port.NopDiagnostics, applied in NewEngine, so the engine never nil-panics and
+	// stays silent when no sink is injected). It is DISTINCT from ToolCallRecorder
+	// (the per-tool audit seam) and Sink (the model's conversation stream).
+	Diagnostics port.Diagnostics
 	// Compactor compresses history at the threshold; nil → HeuristicCompactor.
 	Compactor Compactor
 	// TokenCounter estimates history size for the compaction trigger (and is
@@ -111,6 +117,9 @@ func NewEngine(deps Deps) *Engine {
 	}
 	if deps.CommandExpander == nil {
 		deps.CommandExpander = prompt.NoopExpander{}
+	}
+	if deps.Diagnostics == nil {
+		deps.Diagnostics = port.NopDiagnostics{}
 	}
 	// Progressive disclosure: register the ToolSearch hydration tool so the model
 	// can fetch a full spec on demand. It is registered only when enabled and only

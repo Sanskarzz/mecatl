@@ -146,7 +146,7 @@ type Server struct {
 // temp dir, or telemetry resource.
 func Start(ctx context.Context, cfg app.Config, perf PerfConfig) (*Server, error) {
 	// Perf setup happens BEFORE app.Build so the domain-metrics EventSink can be
-	// injected into the engine via cfg.Sink/cfg.Logger. perfState gathers the
+	// injected into the engine via cfg.Sink/cfg.ToolCallRecorder. perfState gathers the
 	// teardown handles; on any later error we unwind it.
 	ps, err := setupPerf(ctx, perf, &cfg)
 	if err != nil {
@@ -279,7 +279,7 @@ func (p perfState) teardown(ctx context.Context) {
 }
 
 // setupPerf installs the perf-observability surface when perf.Enabled, mutating
-// cfg to inject the domain-metrics EventSink/Logger into the engine BEFORE
+// cfg to inject the domain-metrics EventSink/ToolCallRecorder into the engine BEFORE
 // app.Build runs. It returns a perfState carrying the teardown handles (a zero
 // perfState when perf is disabled). On any setup error it unwinds whatever it has
 // already built and returns the error.
@@ -326,8 +326,8 @@ func setupPerf(ctx context.Context, perf PerfConfig, cfg *app.Config) (perfState
 
 	// Domain-metrics EventSink: wire turn/tool/latency instruments into the
 	// embedded engine so the embedded server's domain series show up at /metrics
-	// too (app.Config.Sink/Logger are optional injection — the engine nil-guards
-	// both). app.Build already supports this seam, so we use it.
+	// too (app.Config.Sink/ToolCallRecorder are optional injection — the engine
+	// nil-guards both). app.Build already supports this seam, so we use it.
 	metrics, err := telemetry.NewMetrics(providers.Meter)
 	if err != nil {
 		ps.teardown(ctx)
@@ -346,7 +346,7 @@ func setupPerf(ctx context.Context, perf PerfConfig, cfg *app.Config) (perfState
 		sinks = append(sinks, slowTurns)
 	}
 	cfg.Sink = telemetry.NewSink(sinks...)
-	cfg.Logger = metrics
+	cfg.ToolCallRecorder = metrics
 
 	// FlightRecorder: arm the bounded execution-trace ring buffer via the
 	// process-singleton accessor (only one may be active process-wide). We may

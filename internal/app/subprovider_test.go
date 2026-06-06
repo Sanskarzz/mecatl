@@ -197,20 +197,25 @@ func TestSubproviderChildCompactorAndCounter(t *testing.T) {
 }
 
 // TestSubproviderChildTelemetryOff guards the telemetry-leak regression: a child
-// engine's Deps.Sink and Deps.Logger are NIL even though engineDepsForProvider sets
+// engine's Deps.Sink and Deps.ToolCallRecorder are NIL even though engineDepsForProvider sets
 // them from cfg — restoring byte-identity with the pre-feature child shape, so a
 // sub-agent's turns/tool-calls don't double-count against the operator-facing
 // histograms. A regression that dropped the nil-restore would fail here.
 func TestSubproviderChildTelemetryOff(t *testing.T) {
-	cfg := Config{Model: "gpt-5", Sink: fakeSink{}, Logger: &recordingToolLogger{}}
+	cfg := Config{Model: "gpt-5", Sink: fakeSink{}, ToolCallRecorder: &recordingToolLogger{}, Diagnostics: &capturingDiagnostics{}}
 	provider := mockllm.New()
 	// A provider-switched child (the same path a def-pinned / Half-B session child takes).
 	deps := childEngineDepsForProvider(cfg, provider, "gpt-5", 0, tool.NewCatalog(), promptConfig(cfg, ""), nil)
 	if deps.Sink != nil {
 		t.Fatalf("child Deps.Sink = %v, want nil (child telemetry off; pre-feature byte-identity)", deps.Sink)
 	}
-	if deps.Logger != nil {
-		t.Fatalf("child Deps.Logger = %v, want nil (child telemetry off)", deps.Logger)
+	if deps.ToolCallRecorder != nil {
+		t.Fatalf("child Deps.ToolCallRecorder = %v, want nil (child telemetry off)", deps.ToolCallRecorder)
+	}
+	// Diagnostics stays SILENT for children: NopDiagnostics (not the injected
+	// capturing sink), mirroring Sink/ToolCallRecorder being nil.
+	if _, ok := deps.Diagnostics.(port.NopDiagnostics); !ok {
+		t.Fatalf("child Deps.Diagnostics = %T, want port.NopDiagnostics (child diagnostics silent)", deps.Diagnostics)
 	}
 	// Sanity: the parent's shared deps DO carry the Sink (so the test proves the child
 	// override, not an absent Sink). baseEngineDeps is the default-provider parent path.

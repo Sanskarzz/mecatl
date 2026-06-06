@@ -23,9 +23,10 @@ type EventSink interface {
 	Emit(ctx context.Context, ev session.Event)
 }
 
-// Logger records structured observability for tool execution. It is an
-// observability seam, distinct from the model-visible conversation.
-type Logger interface {
+// ToolCallRecorder records structured observability for tool execution. It is a
+// tool-call audit seam, distinct from the model-visible conversation and from any
+// general-purpose diagnostic logging (see Diagnostics).
+type ToolCallRecorder interface {
 	// ToolCall records that a tool was executed, with its result, the time it
 	// spent waiting in the dispatch queue before execution started (queued), and
 	// the wall time its execution then took (took).

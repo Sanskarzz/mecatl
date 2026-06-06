@@ -318,7 +318,7 @@ func TestDispatchQueueTimeMeasured(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(0, 0)} // advances 1ms per Now()
 	logger := &queueRecordingLogger{}
 	e := newEngine(agent.Deps{
-		LLM: llm, Catalog: catalogWith(t, first, second), Clock: clk, Logger: logger,
+		LLM: llm, Catalog: catalogWith(t, first, second), Clock: clk, ToolCallRecorder: logger,
 	})
 	sess := newSession(t, session.Limits{})
 	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")

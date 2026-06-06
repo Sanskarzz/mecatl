@@ -106,7 +106,7 @@ const (
 
 // Metrics is an OpenTelemetry-backed telemetry adapter. It implements both
 // port.EventSink (deriving counters/gauges from the event stream) and
-// port.Logger (deriving tool-call counters and a latency histogram).
+// port.ToolCallRecorder (deriving tool-call counters and a latency histogram).
 //
 // All series use bounded attribute sets: tool names and stop reasons are bounded
 // domain values, and no series is ever labelled by session id or free text. The
@@ -147,12 +147,12 @@ type Metrics struct {
 
 // Compile-time interface checks.
 var (
-	_ port.EventSink = (*Metrics)(nil)
-	_ port.Logger    = (*Metrics)(nil)
+	_ port.EventSink        = (*Metrics)(nil)
+	_ port.ToolCallRecorder = (*Metrics)(nil)
 )
 
 // NewMetrics constructs a Metrics adapter from an OTel MeterProvider. It
-// implements both port.EventSink and port.Logger. The provider is expected to
+// implements both port.EventSink and port.ToolCallRecorder. The provider is expected to
 // have a prometheus exporter reader and the tool-duration exponential-histogram
 // view installed (see Setup); NewMetrics itself only creates the instruments.
 //
@@ -374,7 +374,7 @@ func (m *Metrics) recordTurnEnd(ctx context.Context, p *session.TurnEndPayload) 
 func msToSeconds(ms int64) float64 { return float64(ms) / 1000.0 }
 
 // ToolCall records the per-tool call counter and the duration/queue-time latency
-// histograms. It satisfies port.Logger. port.Logger carries no ctx, so the
+// histograms. It satisfies port.ToolCallRecorder. ToolCallRecorder carries no ctx, so the
 // recordings use a background context — exemplar correlation is best-effort here.
 // queued is the dispatch wait (enqueue→execution start); took is the execution
 // wall time. Both are recorded with the same tool attribute.

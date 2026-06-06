@@ -415,12 +415,12 @@ func newTaskToolForTest(t *testing.T, cfg Config, childProvider *mockllm.Provide
 	childCat.MustRegister(tools.GlobTool{})
 	childCat.MustRegister(tools.NewBashTool(runner))
 	childEng := agent.NewEngine(agent.Deps{
-		LLM:          childProvider,
-		Catalog:      childCat,
-		Policy:       permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
-		Logger:       logger,
-		PromptConfig: promptConfig(cfg, cfg.gitStatus),
-		Model:        cfg.Model,
+		LLM:              childProvider,
+		Catalog:          childCat,
+		Policy:           permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		ToolCallRecorder: logger,
+		PromptConfig:     promptConfig(cfg, cfg.gitStatus),
+		Model:            cfg.Model,
 	})
 	roFk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) },
 		forker.WithTempBase(worktreeBase))
@@ -437,7 +437,7 @@ func osfsWSForTest(t *testing.T, dir string) tool.Workspace {
 	return ws
 }
 
-// recordingToolLogger is a port.Logger that records each tool call's result content by
+// recordingToolLogger is a port.ToolCallRecorder that records each tool call's result content by
 // call ID, so a test can read the REAL output a child's Bash produced. It is
 // concurrency-safe (the loop logs from its own goroutine).
 type recordingToolLogger struct {

@@ -47,6 +47,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/mcpperf"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
+	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/app"
@@ -463,6 +464,12 @@ func run() error {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+	// Diagnostics sink for the composition's build-once facts (and future relocated
+	// operational logging). It wraps the SAME stderr/text/Info logger installed above,
+	// so the relocated facts print identically to today — but flow through the injected
+	// port.Diagnostics rather than slog.Default(). (slog.SetDefault stays for now:
+	// iteration 2 relocates the remaining slog sites and bans the default.)
+	diag := slogdiag.NewFromLogger(logger)
 
 	// Allow-all posture: refuse the dangerous flag when running privileged outside a
 	// declared sandbox (root + no prompts can modify anything on the host). Checked
@@ -579,7 +586,7 @@ func run() error {
 	}
 	sink := telemetry.NewSink(sinks...)
 
-	built, err := app.Build(ctx, appConfig(cfg, sink, metrics))
+	built, err := app.Build(ctx, appConfig(cfg, sink, metrics, diag))
 	if err != nil {
 		return err
 	}
@@ -600,8 +607,10 @@ func run() error {
 }
 
 // appConfig maps the CLI/env config onto the shared app.Config build contract,
-// threading the telemetry sink (EventSink) and metrics (Logger) into the engine.
-func appConfig(cfg config, sink port.EventSink, logger port.Logger) app.Config {
+// threading the telemetry sink (EventSink), the per-tool audit recorder
+// (ToolCallRecorder), and the general-purpose operational logging sink
+// (Diagnostics) into the engine/composition.
+func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, diag port.Diagnostics) app.Config {
 	return app.Config{
 		Workspace:                    cfg.workspace,
 		Model:                        cfg.model,
@@ -658,7 +667,8 @@ func appConfig(cfg config, sink port.EventSink, logger port.Logger) app.Config {
 		PermissionConfigs:            cfg.permissionConfigs,
 		AllowAllTools:                cfg.allowAllTools,
 		Sink:                         sink,
-		Logger:                       logger,
+		ToolCallRecorder:             recorder,
+		Diagnostics:                  diag,
 	}
 }
 

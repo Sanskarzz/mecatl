@@ -233,7 +233,7 @@ func TestFullCycle(t *testing.T) {
 
 	clk := &fakeClock{t: time.Unix(0, 0)}
 	logger := &recordingLogger{}
-	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Clock: clk, Logger: logger})
+	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Clock: clk, ToolCallRecorder: logger})
 	sess := newSession(t, session.Limits{})
 	ws := memfs.NewWorkspace("/ws")
 
@@ -267,6 +267,53 @@ func TestFullCycle(t *testing.T) {
 		if evs[i].Seq <= evs[i-1].Seq {
 			t.Fatalf("seq not increasing at %d: %d <= %d", i, evs[i].Seq, evs[i-1].Seq)
 		}
+	}
+}
+
+// TestNilDiagnosticsRunsWithoutPanic pins the production nil-safety guarantee:
+// NewEngine defaults an OMITTED Deps.Diagnostics to port.NopDiagnostics
+// (loop.go), so an engine built without injecting a Diagnostics sink runs a full
+// cycle without nil-panicking. It deliberately constructs Deps via agent.Deps
+// directly (NOT the newEngine test helper) and leaves Diagnostics nil, then drives
+// a complete text → tool call → text loop and asserts it reaches a clean result.
+func TestNilDiagnosticsRunsWithoutPanic(t *testing.T) {
+	read := &fakeTool{name: "Read", readOnly: true,
+		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			return session.NewToolResult(in.ID, "file contents"), nil
+		}}
+	cat := catalogWith(t, read)
+
+	llm := mockllm.New(
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("let me look"),
+			mockllm.ToolCallChunk(toolCall("c1", "Read", `{"path":"a.go"}`)),
+			mockllm.UsageChunk(session.Usage{InputTokens: 10, OutputTokens: 2}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("all done"),
+			mockllm.UsageChunk(session.Usage{InputTokens: 5, OutputTokens: 3}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+	)
+
+	// Diagnostics is intentionally OMITTED (nil) — the engine must not panic.
+	e := agent.NewEngine(agent.Deps{
+		LLM:     llm,
+		Catalog: cat,
+		Policy:  allowAll(),
+		Model:   "test-model",
+	})
+	sess := newSession(t, session.Limits{})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "look at a.go")
+	evs := drain(r)
+
+	res := lastResult(t, evs)
+	if res.Stop != session.StopEndTurn {
+		t.Fatalf("stop = %q, want end_turn (engine should run cleanly with nil Diagnostics)", res.Stop)
+	}
+	if res.Text != "all done" {
+		t.Fatalf("final text = %q, want %q", res.Text, "all done")
 	}
 }
 
@@ -1169,7 +1216,7 @@ func TestPostToolUseHookMutatesResult(t *testing.T) {
 	)
 	sess := newSession(t, session.Limits{})
 	logger := &recordingLogger{}
-	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, tl), Hooks: hooks, Logger: logger})
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, tl), Hooks: hooks, ToolCallRecorder: logger})
 	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")
 	evs := drain(r)
 

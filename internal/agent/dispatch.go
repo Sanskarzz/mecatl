@@ -366,8 +366,8 @@ func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws 
 	// redaction reaches the audit log too rather than leaking the raw tool output.
 	res = e.postHook(ctx, r, sess, turnIdx, c, res)
 
-	if e.deps.Logger != nil {
-		e.deps.Logger.ToolCall(sess.ID, c, res, queued, dur)
+	if e.deps.ToolCallRecorder != nil {
+		e.deps.ToolCallRecorder.ToolCall(sess.ID, c, res, queued, dur)
 	}
 
 	e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})

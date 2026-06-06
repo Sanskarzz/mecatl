@@ -1,14 +1,14 @@
 // Package jsonlstore implements an append-only, JSONL-backed port.SessionStore
-// and port.Logger. It is the observability/replay seam: every Save appends a
-// session snapshot as one JSON line to a per-session file, and every ToolCall
-// appends a structured tool-call record to a per-session log. Nothing is ever
-// overwritten, so the files form a replayable audit trail; Load reads the most
-// recent snapshot line.
+// and port.ToolCallRecorder (the tool-call audit seam). It is the
+// observability/replay seam: every Save appends a session snapshot as one JSON
+// line to a per-session file, and every ToolCall appends a structured tool-call
+// record to a per-session log. Nothing is ever overwritten, so the files form a
+// replayable audit trail; Load reads the most recent snapshot line.
 //
 // Layout under the configured dir:
 //
 //	<dir>/<id>.session.jsonl   — one snapshot per Save (latest line wins)
-//	<dir>/<id>.tools.jsonl     — one record per Logger.ToolCall
+//	<dir>/<id>.tools.jsonl     — one record per ToolCallRecorder.ToolCall
 //
 // Session ids are sanitized for use as filenames so an id can never escape dir.
 package jsonlstore
@@ -32,7 +32,7 @@ import (
 // ErrNotFound is returned by Load when no snapshot file exists for the id.
 var ErrNotFound = fmt.Errorf("jsonlstore: session not found")
 
-// Store is an append-only JSONL SessionStore and Logger rooted at a directory.
+// Store is an append-only JSONL SessionStore and ToolCallRecorder rooted at a directory.
 type Store struct {
 	dir string
 	mu  sync.Mutex // serializes appends across files
@@ -40,8 +40,8 @@ type Store struct {
 
 // compile-time assertions that Store satisfies both ports.
 var (
-	_ port.SessionStore = (*Store)(nil)
-	_ port.Logger       = (*Store)(nil)
+	_ port.SessionStore     = (*Store)(nil)
+	_ port.ToolCallRecorder = (*Store)(nil)
 )
 
 // New constructs a Store writing under dir, creating dir if needed.
@@ -114,7 +114,7 @@ type toolCallRecord struct {
 
 // ToolCall appends a structured tool-call record to the per-session tool log,
 // including both the dispatch queue time (queued) and the execution wall time
-// (took) in microseconds. It satisfies port.Logger. Errors are intentionally
+// (took) in microseconds. It satisfies port.ToolCallRecorder. Errors are intentionally
 // swallowed (the port has no error return) but the record is best-effort durable.
 func (st *Store) ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, queued, took time.Duration) {
 	rec := toolCallRecord{

@@ -2,9 +2,9 @@
 // and Prometheus metrics from the harness's domain event stream.
 //
 // It implements both port.EventSink (so it observes every session.Event the
-// loop emits) and port.Logger (so it observes per-tool execution timing). The
-// adapter is self-contained: the leader wires it by teeing the telemetry sink
-// into the Engine's EventSink and Logger, mounting MetricsHandler at /metrics,
+// loop emits) and port.ToolCallRecorder (so it observes per-tool execution
+// timing). The adapter is self-contained: the leader wires it by teeing the
+// telemetry sink into the Engine's EventSink and ToolCallRecorder, mounting MetricsHandler at /metrics,
 // and passing a TracerProvider to NewTracing.
 //
 // # Context

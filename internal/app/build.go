@@ -95,8 +95,8 @@ const (
 // by the caller). Each cmd/ main maps its own CLI/env surface onto this struct.
 //
 // The zero value is a usable shell-less, provider-less configuration; callers set
-// the fields they need. Sink and Logger are optional (nil installs no telemetry —
-// the engine nil-guards both).
+// the fields they need. Sink and ToolCallRecorder are optional (nil installs no
+// telemetry — the engine nil-guards both).
 type Config struct {
 	Workspace     string
 	Model         string
@@ -265,8 +265,16 @@ type Config struct {
 
 	// Observability relays, injected by the caller (mecated wires telemetry; the
 	// embedded TUI server leaves both nil). The engine nil-guards each.
-	Sink   port.EventSink
-	Logger port.Logger
+	Sink             port.EventSink
+	ToolCallRecorder port.ToolCallRecorder
+
+	// Diagnostics is the general-purpose operational logging seam, injected by the
+	// caller (mecated wires a slogdiag sink to stderr; the embedded TUI passes its
+	// own). It is the sink the build-once composition facts (token counter /
+	// compaction strategy / slash-command state) are emitted through EXACTLY ONCE in
+	// Build. Nil is tolerated: Build defaults it to port.NopDiagnostics so the
+	// composition stays silent rather than nil-panicking.
+	Diagnostics port.Diagnostics
 
 	// gitStatus is the start-of-session git snapshot (branch + short status + recent
 	// commits) rendered into the volatile <git-status> sub-block. It is computed ONCE
@@ -356,6 +364,13 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if cfg.envDetector == nil {
 		cfg.envDetector = osGetenv
 	}
+	// Default the general-purpose diagnostics sink so the build-once composition
+	// facts (and every other Diagnostics consumer) are nil-safe: an injected nil
+	// means "stay silent", not "panic". Set once here so every downstream
+	// engineDepsForProvider closes over the same sink.
+	if cfg.Diagnostics == nil {
+		cfg.Diagnostics = port.NopDiagnostics{}
+	}
 
 	trust := resolveTrust(cfg)
 	narrateTrust(trust, cfg.Workspace)
@@ -384,6 +399,14 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if cfg.Model == "" {
 		cfg.Model = reg.DefaultModel()
 	}
+	// Emit the build-once composition facts (token counter / compaction strategy /
+	// slash commands) EXACTLY ONCE here, through the injected Diagnostics — keyed to
+	// the resolved MAIN model. The per-derivation builders no longer log these (they
+	// run per session AND per child engine); relocating the emit here makes operators
+	// see each fact once instead of N times. Other slog sites in this file are not
+	// yet relocated (iteration 2).
+	logBuildConfigFacts(cfg)
+
 	store, err := buildStore(cfg)
 	if err != nil {
 		return nil, err
@@ -970,7 +993,7 @@ func baseEngineDeps(
 //     advertises the real per-model window, so the trigger MUST agree with it or a
 //     1M-context model would still compact at 128k.)
 //
-// Every NON-provider field (Policy/Hooks/Store/Sink/Logger/Instructions/
+// Every NON-provider field (Policy/Hooks/Store/Sink/ToolCallRecorder/Instructions/
 // CompactionRatio/CommandExpander) is shared and threaded in. Catalog is
 // deliberately left unset — the caller sets it AFTER this returns (the per-session
 // engine adds the client's MCP tools), matching baseEngineDeps' contract.
@@ -1031,7 +1054,8 @@ func engineDepsForProvider(
 		// snapshot is always current for auto-resume after a restart.
 		Store:               store,
 		Sink:                cfg.Sink,
-		Logger:              cfg.Logger,
+		ToolCallRecorder:    cfg.ToolCallRecorder,
+		Diagnostics:         cfg.Diagnostics,
 		PromptConfig:        promptConfig(modelCfg, cfg.gitStatus),
 		Model:               model,
 		ContextWindowTokens: window,
@@ -1112,15 +1136,18 @@ func (f commandListerFunc) List(ctx context.Context, root string) ([]server.Comm
 
 // buildDirCommandExpander returns the file-backed slash-command expander, or nil
 // when command expansion is not enabled (so the caller can compose conditionally).
+//
+// It does NOT log — the build-once slash-command fact is emitted ONCE in Build
+// via the injected Diagnostics (see slashCommandDecision / logBuildConfigFacts).
+// It is reached per session (buildCommandExpander) and via buildCommandLister, so
+// logging here would fire repeatedly.
 func buildDirCommandExpander(cfg Config) prompt.CommandExpander {
 	if cfg.CommandsDir == "" && !cfg.EnableCommands {
-		slog.Info("slash commands DISABLED (set a commands dir or enable commands to enable)")
 		return nil
 	}
 	if cfg.CommandsDir != "" {
 		// An explicit --commands-dir is OPERATOR-supplied (not repo-injected), so it is
 		// trusted regardless of workspace trust — no project-tier gate applies.
-		slog.Info("slash commands ENABLED", "dir", cfg.CommandsDir)
 		return prompt.NewDirCommandExpander(cfg.CommandsDir)
 	}
 	// EnableCommands with no explicit dir: the package defaults are the PROJECT-tier
@@ -1132,12 +1159,30 @@ func buildDirCommandExpander(cfg Config) prompt.CommandExpander {
 	// slash commands cannot run before the operator trusts it; the agent still works
 	// in "ask the human" mode (raw text passes through the NoopExpander).
 	if cfg.Workspace != "" && !cfg.TrustProject {
-		slog.Warn("slash commands: project-tier command dirs WITHHELD (untrusted workspace); raw text passes through. Trust this repo (--trust-project or trustedWorkspaces) or pass --commands-dir to enable project slash commands",
-			"dirs", ".mecatl/commands,.claude/commands")
 		return nil
 	}
-	slog.Info("slash commands ENABLED (default dirs)", "dirs", ".mecatl/commands,.claude/commands")
 	return prompt.NewDirCommandExpander()
+}
+
+// slashCommandDecision mirrors buildDirCommandExpander's branch logic to produce
+// the human-readable slash-command fact (same messages and key-values as before),
+// so Build can log it ONCE rather than the builder logging it per derivation. It
+// depends only on cfg, matching the builder's branches exactly.
+func slashCommandDecision(cfg Config) diagFact {
+	if cfg.CommandsDir == "" && !cfg.EnableCommands {
+		return diagFact{level: port.LevelInfo, msg: "slash commands DISABLED (set a commands dir or enable commands to enable)"}
+	}
+	if cfg.CommandsDir != "" {
+		return diagFact{level: port.LevelInfo, msg: "slash commands ENABLED", args: []any{"dir", cfg.CommandsDir}}
+	}
+	if cfg.Workspace != "" && !cfg.TrustProject {
+		return diagFact{
+			level: port.LevelWarn,
+			msg:   "slash commands: project-tier command dirs WITHHELD (untrusted workspace); raw text passes through. Trust this repo (--trust-project or trustedWorkspaces) or pass --commands-dir to enable project slash commands",
+			args:  []any{"dirs", ".mecatl/commands,.claude/commands"},
+		}
+	}
+	return diagFact{level: port.LevelInfo, msg: "slash commands ENABLED (default dirs)", args: []any{"dirs", ".mecatl/commands,.claude/commands"}}
 }
 
 // buildMCPPromptExpander returns the MCP prompt expander, or nil when MCP prompts
@@ -1162,23 +1207,77 @@ func buildMCPPromptExpander(cfg Config, p mcp.Provider) prompt.CommandExpander {
 	return mcp.NewPromptExpander(p)
 }
 
+// diagFact is one build-once composition decision rendered for the operator: a
+// severity level, a human-readable message, and slog-style alternating key/value
+// args. The three build-once fact families (token counter, compaction strategy,
+// slash commands) each produce one, and logBuildConfigFacts emits them ONCE at
+// composition through the injected Diagnostics — instead of the per-derivation
+// builders logging them N times (once per session AND per child engine).
+type diagFact struct {
+	level port.Level
+	msg   string
+	args  []any
+}
+
+// logBuildConfigFacts emits the build-once composition facts EXACTLY ONCE through
+// cfg.Diagnostics. It is called a single time from Build (after cfg.Model is
+// resolved), NOT from engineDepsForProvider — which is re-invoked per session and
+// per child engine. The facts are keyed to the MAIN engine's model (cfg.Model);
+// child engines stay silent (childEngineDepsForProvider sets NopDiagnostics).
+//
+// The token-counter fact is captured from an actual build attempt
+// (buildTokenCounterWithDecision) so the tiktoken-unavailable fallback warning is
+// faithful; the other two are derived purely from cfg.
+func logBuildConfigFacts(cfg Config) {
+	_, tokenFact := buildTokenCounterWithDecision(cfg)
+	facts := []diagFact{
+		tokenFact,
+		compactionDecision(cfg),
+		slashCommandDecision(cfg),
+	}
+	for _, f := range facts {
+		cfg.Diagnostics.Log(context.Background(), f.level, f.msg, f.args...)
+	}
+}
+
 // buildTokenCounter selects the TokenCounter from cfg.Tokenizer. The default
 // ("heuristic"/empty) returns the dependency-free heuristic counter. "tiktoken"
 // returns the offline tiktoken-backed counter for the configured model; if it
-// cannot be built it logs and falls back to the heuristic so startup never fails.
+// cannot be built it falls back to the heuristic so startup never fails.
+//
+// It does NOT log — the build-once composition fact is emitted ONCE in Build via
+// the injected Diagnostics (see logBuildConfigFacts). This builder is re-invoked
+// per session AND per child engine, so logging here would fire N times.
 func buildTokenCounter(cfg Config) agent.TokenCounter {
+	counter, _ := buildTokenCounterWithDecision(cfg)
+	return counter
+}
+
+// buildTokenCounterWithDecision is buildTokenCounter plus the human-readable
+// decision (level/msg/kv) describing the selection, so Build can log it ONCE.
+// The fallback case is only knowable by actually attempting tokenizer
+// construction, so the decision is captured here rather than re-derived from cfg.
+func buildTokenCounterWithDecision(cfg Config) (agent.TokenCounter, diagFact) {
 	switch cfg.Tokenizer {
 	case "tiktoken":
 		tc, err := tokenizer.NewForModel(cfg.Model)
 		if err != nil {
-			slog.Warn("tiktoken counter unavailable; falling back to heuristic", "model", cfg.Model, "err", err)
-			return agent.HeuristicTokenCounter{}
+			return agent.HeuristicTokenCounter{}, diagFact{
+				level: port.LevelWarn,
+				msg:   "tiktoken counter unavailable; falling back to heuristic",
+				args:  []any{"model", cfg.Model, "err", err},
+			}
 		}
-		slog.Info("token counter: tiktoken (offline vocab)", "model", cfg.Model)
-		return tc
+		return tc, diagFact{
+			level: port.LevelInfo,
+			msg:   "token counter: tiktoken (offline vocab)",
+			args:  []any{"model", cfg.Model},
+		}
 	default:
-		slog.Info("token counter: heuristic (dependency-free)")
-		return agent.HeuristicTokenCounter{}
+		return agent.HeuristicTokenCounter{}, diagFact{
+			level: port.LevelInfo,
+			msg:   "token counter: heuristic (dependency-free)",
+		}
 	}
 }
 
@@ -1186,10 +1285,13 @@ func buildTokenCounter(cfg Config) agent.TokenCounter {
 // ("heuristic"/empty) returns the single-summary HeuristicCompactor. "cascade"
 // returns the tiered CascadeCompactor reducing toward defaultCompactionTargetRatio
 // (below the trigger ratio, for hysteresis).
+//
+// It does NOT log — the build-once composition fact is emitted ONCE in Build via
+// the injected Diagnostics (see logBuildConfigFacts); this builder runs per
+// session AND per child engine.
 func buildCompactor(cfg Config, provider port.LLMProvider, counter agent.TokenCounter) agent.Compactor {
 	switch cfg.Compaction {
 	case "cascade":
-		slog.Info("compaction strategy: cascade (snip→strip→collapse→summarize)")
 		return agent.CascadeCompactor{
 			Counter:      counter,
 			BudgetTokens: int(float64(defaultContextWindowTokens) * defaultCompactionTargetRatio),
@@ -1197,8 +1299,19 @@ func buildCompactor(cfg Config, provider port.LLMProvider, counter agent.TokenCo
 			Model:        cfg.Model,
 		}
 	default:
-		slog.Info("compaction strategy: heuristic (single-summary)")
 		return agent.HeuristicCompactor{}
+	}
+}
+
+// compactionDecision describes the compaction-strategy selection from cfg, so
+// Build can log it ONCE. It mirrors buildCompactor's switch but takes no provider
+// (the human-readable fact depends only on cfg.Compaction).
+func compactionDecision(cfg Config) diagFact {
+	switch cfg.Compaction {
+	case "cascade":
+		return diagFact{level: port.LevelInfo, msg: "compaction strategy: cascade (snip→strip→collapse→summarize)"}
+	default:
+		return diagFact{level: port.LevelInfo, msg: "compaction strategy: heuristic (single-summary)"}
 	}
 }
 
@@ -1763,7 +1876,7 @@ func newChildEngineForProvider(cfg Config, provider port.LLMProvider, model stri
 // to provider+model, re-deriving the provider-closing fields via
 // engineDepsForProvider then OVERRIDING the non-provider fields back to the child's
 // shape. It is split out from newChildEngineForProvider so a test can assert the
-// child Deps directly (Sink/Logger nil, Compactor/TokenCounter keyed on the CHILD's
+// child Deps directly (Sink/ToolCallRecorder nil, Compactor/TokenCounter keyed on the CHILD's
 // model) — the engine's deps are otherwise private.
 func childEngineDepsForProvider(cfg Config, provider port.LLMProvider, model string, contextWindow int, cat *tool.Catalog, pc prompt.Config, hooks port.HookRunner) agent.Deps {
 	if hooks == nil {
@@ -1790,7 +1903,7 @@ func childEngineDepsForProvider(cfg Config, provider port.LLMProvider, model str
 	// user "/cmd" text). engineDepsForProvider built one from cfg; clear it so the
 	// child's non-provider shape is unchanged from the pre-feature constructor.
 	deps.CommandExpander = nil
-	// Telemetry stays OFF for child engines: engineDepsForProvider set Sink/Logger
+	// Telemetry stays OFF for child engines: engineDepsForProvider set Sink/ToolCallRecorder
 	// from cfg, but the OLD child constructor (newChildEngineWithHooks) left BOTH nil,
 	// so a sub-agent's turns/tool-calls were invisible to the operator-facing
 	// TTFT/turn-duration histograms. Restoring nil keeps byte-identity with the
@@ -1798,7 +1911,12 @@ func childEngineDepsForProvider(cfg Config, provider port.LLMProvider, model str
 	// session child would double-count against the shared Sink. Distinct sub-agent
 	// telemetry tagging is a SEPARATE decision; nil is the conservative choice here.
 	deps.Sink = nil
-	deps.Logger = nil
+	deps.ToolCallRecorder = nil
+	// Diagnostics stays silent for child engines (mirror Sink/ToolCallRecorder):
+	// engineDepsForProvider set it from cfg, but a sub-agent's operational logging
+	// must not double through the operator's diagnostic sink. NopDiagnostics keeps
+	// the child engine nil-safe while emitting nothing.
+	deps.Diagnostics = port.NopDiagnostics{}
 	return deps
 }
 
