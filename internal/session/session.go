@@ -16,7 +16,9 @@ type SessionID string
 //	idle → running → awaiting → running → completed
 //
 // with Cancel permitted from any non-terminal state and Fail from any
-// non-terminal state. completed, failed, and cancelled are terminal.
+// non-terminal state. completed, failed, and cancelled are terminal. Two terminal
+// states have a recovery seam back to idle: Reopen (from completed) and Interrupt
+// (from cancelled, also repairing the interrupted turn's history); failed is final.
 type State string
 
 const (
@@ -368,9 +370,11 @@ func (s *Session) Fail() error {
 // interactive multi-turn chat — needs an explicit, guarded re-open rather than a
 // fresh session that would lose its history.
 //
-// It is legal ONLY from StateCompleted (a clean end-of-run). A failed or cancelled
-// run is NOT resumable, and a non-terminal session is already runnable, so every
-// other state returns ErrIllegalTransition. Reopen clears the recorded stop reason
+// It is legal ONLY from StateCompleted (a clean end-of-run). A FAILED run is NOT
+// resumable; a CANCELLED run recovers through Interrupt (which also repairs the
+// interrupted turn's history), NOT here; and a non-terminal session is already
+// runnable — so every other state returns ErrIllegalTransition. Reopen clears the
+// recorded stop reason
 // and any pending ask, and RESETS the per-run Counters to zero so the configured
 // Limits bound EACH prompt's work, matching their single-run meaning rather than
 // silently becoming a session-lifetime cap. A caller that wants a lifetime budget
@@ -380,6 +384,65 @@ func (s *Session) Reopen() error {
 	if s.State != StateCompleted {
 		return fmt.Errorf("%w: Reopen from %q", ErrIllegalTransition, s.State)
 	}
+	s.State = StateIdle
+	s.stop = StopNone
+	s.pending = nil
+	s.Counters = Counters{}
+	return nil
+}
+
+// closeOutInterruptedTurn repairs an interrupted-mid-dispatch history so it is
+// provider-valid: for the trailing assistant message's ToolCalls that have no
+// following tool-result message, it appends one synthetic error tool result per
+// orphaned ToolCall.ID. Idempotent; a no-op when there is no trailing orphan.
+// Mutates Conversation only via its append method.
+func (s *Session) closeOutInterruptedTurn() {
+	msgs := s.Conversation.Messages
+	// Find the LAST assistant message.
+	lastAssistant := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == RoleAssistant {
+			lastAssistant = i
+			break
+		}
+	}
+	if lastAssistant < 0 {
+		return
+	}
+	// Collect the set of CallIDs already answered by tool-role messages that
+	// follow the trailing assistant message.
+	answered := make(map[ToolCallID]struct{})
+	for _, m := range msgs[lastAssistant+1:] {
+		if m.Role == RoleTool && m.ToolResult != nil {
+			answered[m.ToolResult.CallID] = struct{}{}
+		}
+	}
+	// For each tool call on the trailing assistant message not yet answered,
+	// append a synthetic error result in ToolCalls order. IsError here means the
+	// call was interrupted by cancellation, NOT a real tool failure.
+	for _, call := range msgs[lastAssistant].ToolCalls {
+		if _, ok := answered[call.ID]; ok {
+			continue
+		}
+		s.Conversation.Append(NewToolMessage(NewToolError(call.ID, "tool call interrupted by cancellation")))
+	}
+}
+
+// Interrupt recovers a CANCELLED session to StateIdle after repairing the
+// interrupted turn's history. Legal ONLY from StateCancelled. Mirrors Reopen's
+// reset (clears stop + pending, resets Counters) but is a SEPARATE method
+// because its precondition and history-repair invariant differ.
+//
+// A turn cancelled mid-dispatch may leave the trailing assistant message with
+// tool calls that never received a result; closeOutInterruptedTurn appends a
+// synthetic error result per orphan so the replayed history stays
+// provider-valid (no dangling tool_use / function_call) before the next prompt.
+// Reopen stays completed-only; a FAILED session is never resumable.
+func (s *Session) Interrupt() error {
+	if s.State != StateCancelled {
+		return fmt.Errorf("%w: Interrupt from %q", ErrIllegalTransition, s.State)
+	}
+	s.closeOutInterruptedTurn()
 	s.State = StateIdle
 	s.stop = StopNone
 	s.pending = nil

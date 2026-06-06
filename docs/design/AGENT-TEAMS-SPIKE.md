@@ -90,9 +90,15 @@ beyond teams. The state machine becomes
 `idle → running → awaiting → … → completed → (Reopen) → idle → …`.
 
 > Invariant to preserve: `Reopen` must be illegal from `StateFailed`/
-> `StateCancelled` (a failed/cancelled run is not resumable), matching the spirit
-> of the existing terminal guards. A test asserting `Reopen` from each terminal
-> state belongs with the change.
+> `StateCancelled`, matching the spirit of the existing terminal guards. A test
+> asserting `Reopen` from each terminal state belongs with the change.
+>
+> Scope update: a `cancelled` session **is** now recoverable in-process for
+> interactive multi-turn — but via a SEPARATE seam, `session.Interrupt()`, not
+> `Reopen`. Interrupt is legal only from `StateCancelled`, recovers to `idle`,
+> and repairs the interrupted turn's history (closing out orphaned tool calls)
+> so the replay stays provider-valid. `Reopen` stays `completed`-only. A
+> `failed` session remains non-resumable from both seams.
 
 ## 4. Layering: where each piece lives
 

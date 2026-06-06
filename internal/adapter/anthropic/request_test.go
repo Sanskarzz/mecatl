@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/anthropics/anthropic-sdk-go"
 
@@ -468,5 +469,58 @@ func TestBuildMessagesUserTextFastPath(t *testing.T) {
 	m := params.Messages[0]
 	if m.Role != "user" || m.Content[0].OfText == nil || m.Content[0].OfText.Text != "hello" {
 		t.Fatalf("user message = %+v, want a text block 'hello'", m)
+	}
+}
+
+// TestRequestNoOrphanedToolUseAfterInterrupt drives a session to a cancelled
+// turn (assistant tool_use with no result), recovers it via Interrupt (which
+// closes out the orphan), and asserts the built request has a matching
+// tool_result for every tool_use — no orphan that Anthropic would 400 on.
+func TestRequestNoOrphanedToolUseAfterInterrupt(t *testing.T) {
+	sess := session.New("s1", session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
+	if err := sess.RecordUserPrompt("read the file", nil); err != nil {
+		t.Fatalf("RecordUserPrompt: %v", err)
+	}
+	if err := sess.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	calls := []session.ToolCall{session.NewToolCall("toolu_1", "read_file", json.RawMessage(`{"path":"x"}`))}
+	if err := sess.RecordAssistant(session.NewAssistantMessage("", "", calls)); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+	if err := sess.Cancel(); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if err := sess.Interrupt(); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+
+	p := testProvider()
+	params, err := p.buildParams(port.LLMRequest{
+		Model:    "claude-sonnet-4-6",
+		Messages: sess.Conversation.Messages,
+	})
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	toolUseIDs := map[string]bool{}
+	toolResultIDs := map[string]bool{}
+	for _, m := range params.Messages {
+		for _, c := range m.Content {
+			if c.OfToolUse != nil {
+				toolUseIDs[c.OfToolUse.ID] = true
+			}
+			if c.OfToolResult != nil {
+				toolResultIDs[c.OfToolResult.ToolUseID] = true
+			}
+		}
+	}
+	if len(toolUseIDs) == 0 {
+		t.Fatal("precondition: expected at least one tool_use block in the request")
+	}
+	for id := range toolUseIDs {
+		if !toolResultIDs[id] {
+			t.Fatalf("tool_use %q has no matching tool_result (orphan that would 400)", id)
+		}
 	}
 }

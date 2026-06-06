@@ -743,12 +743,14 @@ func (s *Service) SetMode(ctx context.Context, id session.SessionID, mode sessio
 
 // LoadSession resumes a previously-persisted session so a subsequent StartRun
 // continues it. It loads the latest snapshot from the store and, if the session
-// is in a terminal-but-resumable state (StateCompleted — a clean end-of-run),
-// REOPENS it to StateIdle (preserving the conversation history) and re-persists,
-// so the next prompt's BeginTurn is legal. A session already idle is returned
-// unchanged; a failed/cancelled session is NOT resumable (Reopen rejects it) and
-// the prior state is returned as-is so the next StartRun surfaces the illegal
-// transition rather than silently continuing a broken session.
+// is in a terminal-but-resumable state, REOPENS/INTERRUPTS it to StateIdle
+// (preserving the conversation history) and re-persists, so the next prompt's
+// BeginTurn is legal. A cleanly COMPLETED session is reopened via Reopen; a
+// CANCELLED session (an interrupted turn) is recovered via Interrupt, which also
+// repairs the history (closing out any orphaned tool calls). A session already
+// idle is returned unchanged; a FAILED session is NOT resumable and the prior
+// state is returned as-is so the next StartRun surfaces the illegal transition
+// rather than silently continuing a broken session.
 //
 // It returns ErrNotFound when the store has no snapshot for id (including the
 // in-memory store after a process restart, or when no store-dir is configured
@@ -757,22 +759,32 @@ func (s *Service) LoadSession(ctx context.Context, id session.SessionID) (*sessi
 	return s.loadAndReopen(ctx, id)
 }
 
-// loadAndReopen is the shared load + reopen-if-completed body of LoadSession and
-// LoadSessionWithMCP, factored out so the two cannot drift: it loads the latest
-// snapshot, and if the session cleanly completed REOPENS it to idle (preserving
-// history) and re-persists. ErrNotFound propagates from GetSession; Reopen rejects
-// a failed/cancelled session and that prior state is returned as-is.
+// loadAndReopen is the shared load + reopen-if-completed / interrupt-if-cancelled
+// body of LoadSession and LoadSessionWithMCP, factored out so the two cannot
+// drift: it loads the latest snapshot, and if the session cleanly COMPLETED
+// REOPENS it to idle, or if it was CANCELLED (an interrupted turn) recovers it
+// via Interrupt (which also repairs the history), then re-persists. ErrNotFound
+// propagates from GetSession; a FAILED session is NOT resumable and that prior
+// state is returned as-is so the next run surfaces the illegal transition.
 func (s *Service) loadAndReopen(ctx context.Context, id session.SessionID) (*session.Session, error) {
 	sess, err := s.GetSession(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if sess.State == session.StateCompleted {
+	switch sess.State {
+	case session.StateCompleted:
 		if rerr := sess.Reopen(); rerr != nil {
 			return nil, fmt.Errorf("server: reopen session: %w", rerr)
 		}
 		if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
 			return nil, fmt.Errorf("server: persist reopened session: %w", serr)
+		}
+	case session.StateCancelled:
+		if rerr := sess.Interrupt(); rerr != nil {
+			return nil, fmt.Errorf("server: interrupt session: %w", rerr)
+		}
+		if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
+			return nil, fmt.Errorf("server: persist interrupted session: %w", serr)
 		}
 	}
 	return sess, nil

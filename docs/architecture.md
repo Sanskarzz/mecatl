@@ -175,10 +175,25 @@ stateDiagram-v2
   idle --> cancelled: Cancel
   idle --> failed: Fail
   awaiting --> cancelled: Cancel
+  completed --> idle: Reopen
+  cancelled --> idle: Interrupt (history-repairing)
   completed --> [*]
   cancelled --> [*]
   failed --> [*]
 ```
+
+A terminal session can re-enter the loop through one of two intention-revealing
+seams (a `failed` session stays terminal — never resumable):
+- `completed → (Reopen) → idle` — a clean end-of-run is reopened to accept the
+  next prompt, preserving history and resetting per-run `Counters`.
+- `cancelled → (Interrupt) → idle` — an interrupted turn is recovered the same
+  way, but Interrupt **also repairs the history**: a turn cancelled mid-dispatch
+  can leave the trailing assistant message with tool calls that never received a
+  result, so `closeOutInterruptedTurn` appends one synthetic error tool result
+  per orphaned `ToolCall.ID` before going idle, keeping the replayed history
+  provider-valid (no dangling `tool_use`/`function_call`). The service's
+  `loadAndReopen` drives the right seam per state; both persist the recovered
+  snapshot.
 
 Notable, code-accurate details:
 - `BeginTurn` is legal from `idle` **or** `running` (a follow-up model call in

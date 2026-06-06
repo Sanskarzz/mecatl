@@ -265,6 +265,69 @@ func TestBuildParams(t *testing.T) {
 	}
 }
 
+// TestRequestNoOrphanedFunctionCallAfterInterrupt drives a session to a cancelled
+// turn (assistant function_call with no output), recovers it via Interrupt (which
+// closes out the orphan), and asserts the built request has a matching
+// function_call_output for every function_call — no orphan that OpenAI would
+// reject.
+func TestRequestNoOrphanedFunctionCallAfterInterrupt(t *testing.T) {
+	sess := session.New("s1", session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
+	if err := sess.RecordUserPrompt("read the file", nil); err != nil {
+		t.Fatalf("RecordUserPrompt: %v", err)
+	}
+	if err := sess.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	calls := []session.ToolCall{session.NewToolCall("call_1", "read_file", json.RawMessage(`{"path":"x"}`))}
+	if err := sess.RecordAssistant(session.NewAssistantMessage("", "", calls)); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+	if err := sess.Cancel(); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if err := sess.Interrupt(); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+
+	params, err := buildParams(port.LLMRequest{
+		Model:    "gpt-5.2",
+		Messages: sess.Conversation.Messages,
+	})
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	raw, err := json.Marshal(params.Input.OfInputItemList)
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+	callIDs := map[string]bool{}
+	outputIDs := map[string]bool{}
+	for _, m := range items {
+		switch m["type"] {
+		case "function_call":
+			if id, ok := m["call_id"].(string); ok {
+				callIDs[id] = true
+			}
+		case "function_call_output":
+			if id, ok := m["call_id"].(string); ok {
+				outputIDs[id] = true
+			}
+		}
+	}
+	if len(callIDs) == 0 {
+		t.Fatalf("precondition: expected at least one function_call:\n%s", raw)
+	}
+	for id := range callIDs {
+		if !outputIDs[id] {
+			t.Fatalf("function_call %q has no matching function_call_output (orphan)", id)
+		}
+	}
+}
+
 func TestBuildParamsInvalidSchema(t *testing.T) {
 	req := port.LLMRequest{
 		Model: "m",

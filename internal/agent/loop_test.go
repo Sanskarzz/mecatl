@@ -157,6 +157,32 @@ func containsType(evs []session.Event, ty session.EventType) bool {
 	return false
 }
 
+// assertNoOrphanedToolCalls is a session-level structural invariant check: every
+// ToolCall.ID emitted by an assistant message must be answered by some following
+// ToolResult.CallID. This pins "the loop + Interrupt leaves a matched history"
+// without importing a provider adapter — a real round-trip through the anthropic /
+// openai request builders (their NoOrphaned tests) would reject any dangling
+// tool_use, and this mirrors that contract at the session layer.
+func assertNoOrphanedToolCalls(t *testing.T, msgs []session.Message) {
+	t.Helper()
+	answered := make(map[session.ToolCallID]struct{})
+	for _, m := range msgs {
+		if m.Role == session.RoleTool && m.ToolResult != nil {
+			answered[m.ToolResult.CallID] = struct{}{}
+		}
+	}
+	for _, m := range msgs {
+		if m.Role != session.RoleAssistant {
+			continue
+		}
+		for _, call := range m.ToolCalls {
+			if _, ok := answered[call.ID]; !ok {
+				t.Fatalf("orphaned tool call %q has no answering tool result", call.ID)
+			}
+		}
+	}
+}
+
 func lastResult(t *testing.T, evs []session.Event) *session.ResultPayload {
 	t.Helper()
 	for i := len(evs) - 1; i >= 0; i-- {
@@ -596,6 +622,197 @@ func (b *blockingProvider) Stream(ctx context.Context, _ port.LLMRequest) (iter.
 		<-ctx.Done()
 		yield(port.Chunk{}, ctx.Err())
 	}, nil
+}
+
+// TestCancelMidToolThenResumeSucceeds drives turn-1 to record an assistant
+// tool-call then blocks inside the tool until the run is cancelled, so dispatch
+// returns cancelled=true AFTER RecordAssistant but before RecordToolResults — the
+// exact mid-dispatch interruption that leaves an orphaned tool_use. It then
+// Interrupt()s the cancelled session (history-repair) and runs a SECOND mock turn
+// on the same engine+session, asserting the wedge error is gone, the second run
+// completes, and a synthetic tool result precedes the new user prompt.
+func TestCancelMidToolThenResumeSucceeds(t *testing.T) {
+	// The tool signals it has started, then blocks until ctx is cancelled — so the
+	// run is cancelled mid-dispatch, after the assistant message is recorded.
+	toolStarted := make(chan struct{})
+	read := &fakeTool{name: "Read", readOnly: true,
+		exec: func(ctx context.Context, _ session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			close(toolStarted)
+			<-ctx.Done()
+			return session.ToolResult{}, ctx.Err()
+		}}
+
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("c1", "Read", `{"path":"a.go"}`)),
+	)
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, read)})
+	sess := newSession(t, session.Limits{})
+	ws := memfs.NewWorkspace("/ws")
+
+	r := e.Run(context.Background(), sess, ws, "look at a.go")
+	<-toolStarted
+	r.Cancel()
+	res := lastResult(t, drain(r))
+	if res.Stop != session.StopCancelled {
+		t.Fatalf("turn-1 stop = %q, want cancelled", res.Stop)
+	}
+	if sess.State != session.StateCancelled {
+		t.Fatalf("after cancel state = %q, want cancelled", sess.State)
+	}
+
+	// Recover the wedged session.
+	if err := sess.Interrupt(); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+
+	// FIX 3: the loop-driven cancel + Interrupt must leave a provider-valid history
+	// (no dangling tool_use) — the same contract the adapter NoOrphaned tests enforce
+	// against a hand-built history, checked here against the real loop's output.
+	assertNoOrphanedToolCalls(t, sess.Conversation.Messages)
+
+	// Second turn: a clean end-of-turn answer. This is the regression assertion —
+	// before the fix RecordUserPrompt would reject the cancelled session.
+	llm2 := mockllm.New(
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("all done"),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+	)
+	e2 := newEngine(agent.Deps{LLM: llm2, Catalog: catalogWith(t, read)})
+	r2 := e2.Run(context.Background(), sess, ws, "second prompt")
+	res2 := lastResult(t, drain(r2))
+	if res2.Stop != session.StopEndTurn {
+		t.Fatalf("turn-2 stop = %q, want end_turn (not the cancelled wedge)", res2.Stop)
+	}
+
+	// The synthetic tool result for the orphaned c1 must sit before the new user
+	// prompt in the replayed history.
+	var synthIdx, secondPromptIdx = -1, -1
+	for i, m := range sess.Conversation.Messages {
+		if m.Role == session.RoleTool && m.ToolResult != nil && m.ToolResult.CallID == "c1" && m.ToolResult.IsError {
+			synthIdx = i
+		}
+		if m.Role == session.RoleUser && m.Text == "second prompt" {
+			secondPromptIdx = i
+		}
+	}
+	if synthIdx < 0 {
+		t.Fatalf("no synthetic tool result for orphaned c1 in conversation")
+	}
+	if secondPromptIdx < 0 {
+		t.Fatalf("second prompt not recorded in conversation")
+	}
+	if synthIdx >= secondPromptIdx {
+		t.Fatalf("synthetic result@%d must precede second prompt@%d", synthIdx, secondPromptIdx)
+	}
+}
+
+// TestCancelAwaitingApprovalThenResumeSucceeds exercises the SECOND path into the
+// orphaned-tool_use wedge: a cancel while the session is paused at StateAwaiting on
+// a permission gate. The assistant message with its ToolCalls is ALREADY recorded
+// before the gate; cancelling while awaiting takes the authorize() cancelled=true
+// branch (dispatch.go), leaving the same orphan as a mid-tool cancel. It then
+// Interrupt()s and runs a clean second turn, asserting no wedge and a matched
+// history.
+func TestCancelAwaitingApprovalThenResumeSucceeds(t *testing.T) {
+	var executed atomic.Bool
+	write := &fakeTool{name: "Write", readOnly: false,
+		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			executed.Store(true)
+			return session.NewToolResult(in.ID, "wrote"), nil
+		}}
+	cat := catalogWith(t, write)
+	policy := permpolicy.NewPolicy(nil, nil) // no rule → Ask, so the run pauses at the gate
+
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("c1", "Write", `{"path":"a"}`)),
+	)
+	e := newEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: policy})
+	sess := newSession(t, session.Limits{})
+	ws := memfs.NewWorkspace("/ws")
+
+	r := e.Run(context.Background(), sess, ws, "write a")
+
+	// Drain events; when the run pauses on the ask, cancel WHILE awaiting (do not
+	// Approve/Deny). The cancel unblocks await() down the cancelled=true branch.
+	var sawAsk bool
+	for ev := range r.Events() {
+		if ev.Type == session.EvPermissionAsk {
+			sawAsk = true
+			r.Cancel()
+		}
+	}
+	if !sawAsk {
+		t.Fatalf("run never paused on a permission.ask")
+	}
+	if executed.Load() {
+		t.Fatalf("tool ran despite cancel-while-awaiting")
+	}
+
+	// drain already returned; recompute the terminal result by snapshotting state.
+	if sess.State != session.StateCancelled {
+		t.Fatalf("after cancel-while-awaiting state = %q, want cancelled", sess.State)
+	}
+
+	// The assistant message with the c1 tool call must already be recorded AND
+	// orphaned at this point — that is the wedge this branch creates.
+	orphanBefore := false
+	for _, m := range sess.Conversation.Messages {
+		if m.Role == session.RoleAssistant {
+			for _, c := range m.ToolCalls {
+				if c.ID == "c1" {
+					orphanBefore = true
+				}
+			}
+		}
+	}
+	if !orphanBefore {
+		t.Fatalf("expected an orphaned assistant tool call c1 before Interrupt")
+	}
+
+	// Recover the wedged session.
+	if err := sess.Interrupt(); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+
+	// FIX 3: post-Interrupt history is provider-valid (no dangling tool_use).
+	assertNoOrphanedToolCalls(t, sess.Conversation.Messages)
+
+	// Second turn: a clean end-of-turn answer. Before the fix RecordUserPrompt would
+	// reject the cancelled session and the orphaned tool_use would wedge replay.
+	llm2 := mockllm.New(
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("ok"),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+	)
+	e2 := newEngine(agent.Deps{LLM: llm2, Catalog: cat, Policy: policy})
+	r2 := e2.Run(context.Background(), sess, ws, "second prompt")
+	res2 := lastResult(t, drain(r2))
+	if res2.Stop != session.StopEndTurn {
+		t.Fatalf("turn-2 stop = %q, want end_turn (not the cancelled wedge)", res2.Stop)
+	}
+
+	// The synthetic tool result closing out the orphaned c1 must precede the new
+	// user prompt in the replayed history.
+	var synthIdx, secondPromptIdx = -1, -1
+	for i, m := range sess.Conversation.Messages {
+		if m.Role == session.RoleTool && m.ToolResult != nil && m.ToolResult.CallID == "c1" && m.ToolResult.IsError {
+			synthIdx = i
+		}
+		if m.Role == session.RoleUser && m.Text == "second prompt" {
+			secondPromptIdx = i
+		}
+	}
+	if synthIdx < 0 {
+		t.Fatalf("no synthetic tool result for orphaned c1 in conversation")
+	}
+	if secondPromptIdx < 0 {
+		t.Fatalf("second prompt not recorded in conversation")
+	}
+	if synthIdx >= secondPromptIdx {
+		t.Fatalf("synthetic result@%d must precede second prompt@%d", synthIdx, secondPromptIdx)
+	}
 }
 
 func TestStopMaxTurns(t *testing.T) {

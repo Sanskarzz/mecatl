@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -181,5 +182,182 @@ func TestLoadSessionReopensCompleted(t *testing.T) {
 
 	if _, err := svc.LoadSession(context.Background(), "missing"); !errors.Is(err, server.ErrNotFound) {
 		t.Fatalf("LoadSession unknown = %v, want ErrNotFound", err)
+	}
+}
+
+// blockingTool signals it has started, then blocks until the run's context is
+// cancelled — so a run can be driven to StateCancelled mid-dispatch (after the
+// assistant tool-call is recorded, before its result).
+type blockingTool struct{ started chan struct{} }
+
+func (*blockingTool) Spec() tool.ToolSpec {
+	return tool.ToolSpec{Name: "Read", Description: "Read: test tool", Schema: json.RawMessage(`{"type":"object"}`)}
+}
+func (*blockingTool) ReadOnly() bool { return true }
+func (b *blockingTool) Execute(ctx context.Context, _ session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+	close(b.started)
+	<-ctx.Done()
+	return session.ToolResult{}, ctx.Err()
+}
+
+var _ tool.Tool = (*blockingTool)(nil)
+
+// newServiceWithEngine builds a Service over a memstore whose engine uses the
+// given LLM + catalog, so a run can be driven to a real cancelled state through
+// the Service surface.
+func newServiceWithEngine(t *testing.T, llm port.LLMProvider, cat *tool.Catalog) (*server.Service, port.SessionStore) {
+	t.Helper()
+	store := memstore.New()
+	engine := agent.NewEngine(agent.Deps{
+		LLM:     llm,
+		Catalog: cat,
+		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Model:   "test-model",
+		Store:   store,
+	})
+	svc, err := server.NewService(server.Config{
+		Engine:     engine,
+		Store:      store,
+		Workspaces: func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		Now:        func() time.Time { return time.Unix(0, 0) },
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	return svc, store
+}
+
+// TestStartRunContentRecoversCancelledSession is THE regression test: a run is
+// driven to StateCancelled (blocking tool + Cancel), then a SECOND StartRunContent
+// on the same session must NOT return the "record user prompt … from cancelled"
+// wedge error and must produce a terminal result.
+func TestStartRunContentRecoversCancelledSession(t *testing.T) {
+	bt := &blockingTool{started: make(chan struct{})}
+	cat := tool.NewCatalog()
+	cat.MustRegister(bt)
+	// Turn-1: a tool call to the blocking tool. Turn-2: a clean end-of-turn.
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(session.NewToolCall("c1", "Read", json.RawMessage(`{"path":"a.go"}`))),
+		mockllm.ChunksTurn(mockllm.TextChunk("all done"), mockllm.DoneChunk(session.StopEndTurn)),
+	)
+	svc, _ := newServiceWithEngine(t, llm, cat)
+
+	sess, err := svc.CreateSession(context.Background(), "/ws", session.ModeDefault, session.Limits{})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	run, err := svc.StartRunContent(context.Background(), sess.ID, "look at a.go", nil)
+	if err != nil {
+		t.Fatalf("first StartRunContent: %v", err)
+	}
+	<-bt.started
+	run.Cancel()
+	drainRun(t, run)
+
+	reloaded, err := svc.GetSession(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if reloaded.State != session.StateCancelled {
+		t.Fatalf("after cancel state = %q, want cancelled", reloaded.State)
+	}
+
+	// The regression: a second prompt must be accepted, not wedged.
+	run2, err := svc.StartRunContent(context.Background(), sess.ID, "second prompt", nil)
+	if err != nil {
+		t.Fatalf("second StartRunContent returned error (wedge?): %v", err)
+	}
+	var sawResult bool
+	for ev := range run2.Events() {
+		if ev.Type == session.EvResult {
+			sawResult = true
+			if ev.Result.Stop != session.StopEndTurn {
+				t.Fatalf("second run stop = %q, want end_turn", ev.Result.Stop)
+			}
+		}
+	}
+	if !sawResult {
+		t.Fatalf("second run produced no terminal result")
+	}
+}
+
+// TestLoadSessionRecoversCancelledViaInterrupt confirms a persisted cancelled
+// session is recovered to StateIdle (via Interrupt) and re-persisted.
+func TestLoadSessionRecoversCancelledViaInterrupt(t *testing.T) {
+	store := memstore.New()
+	svc := newServiceWithStore(t, store)
+	sess, err := svc.CreateSession(context.Background(), "/ws", session.ModeDefault, session.Limits{})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// Drive to a cancelled terminal state with an orphaned tool call, persist it.
+	if err := sess.RecordUserPrompt("go", nil); err != nil {
+		t.Fatalf("RecordUserPrompt: %v", err)
+	}
+	if err := sess.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	calls := []session.ToolCall{session.NewToolCall("c1", "Read", nil)}
+	if err := sess.RecordAssistant(session.NewAssistantMessage("", "", calls)); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+	if err := sess.Cancel(); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if err := store.Save(context.Background(), sess); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := svc.LoadSession(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if loaded.State != session.StateIdle {
+		t.Fatalf("loaded state = %q, want idle (interrupted)", loaded.State)
+	}
+	// History was repaired: the orphaned c1 now has a synthetic error result.
+	var found bool
+	for _, m := range loaded.Conversation.Messages {
+		if m.Role == session.RoleTool && m.ToolResult != nil && m.ToolResult.CallID == "c1" && m.ToolResult.IsError {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("interrupted history missing synthetic result for c1")
+	}
+	// Persisted: a fresh load reflects StateIdle.
+	persisted, err := svc.GetSession(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if persisted.State != session.StateIdle {
+		t.Fatalf("persisted state = %q, want idle", persisted.State)
+	}
+}
+
+// TestLoadSessionDoesNotRecoverFailed confirms a persisted FAILED session stays
+// non-resumable: LoadSession leaves it StateFailed (the next run surfaces the
+// illegal transition).
+func TestLoadSessionDoesNotRecoverFailed(t *testing.T) {
+	store := memstore.New()
+	svc := newServiceWithStore(t, store)
+	sess, err := svc.CreateSession(context.Background(), "/ws", session.ModeDefault, session.Limits{})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := sess.Fail(); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	if err := store.Save(context.Background(), sess); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := svc.LoadSession(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if loaded.State != session.StateFailed {
+		t.Fatalf("loaded state = %q, want failed (not recovered)", loaded.State)
 	}
 }
