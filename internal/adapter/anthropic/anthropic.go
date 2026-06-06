@@ -34,12 +34,22 @@ const defaultThinkingBudget int64 = 4096
 // model's larger ceiling and 400 every turn.
 type maxTokensResolver func(model string) int
 
+// thinkingResolver maps a model id to its LIVE extended-thinking descriptor:
+// (adaptive, enabled, known). Composition builds it over the live-metadata store
+// (the adapter stays catalog-/store-free). A nil resolver — or known=false for a
+// model the live source does not describe — falls the adapter back to its embedded
+// prefix matrix (usesAdaptiveThinking/thinkingCapable), the OFFLINE floor. When
+// known=true the adapter TRUSTS the live bits: adaptive ⇒ {type:"adaptive"},
+// else enabled ⇒ manual {type:"enabled"}, else NEITHER ⇒ omit thinking (NONE).
+type thinkingResolver func(model string) (adaptive, enabled, known bool)
+
 // Provider is a port.LLMProvider backed by the native Anthropic Messages API.
 // Construct it with New.
 type Provider struct {
 	client         sdk.MessageService
 	maxTokens      int64             // construction fallback (WithMaxTokens / default)
 	maxTokensFor   maxTokensResolver // per-request resolver (WithMaxTokensResolver)
+	thinkingFor    thinkingResolver  // per-request LIVE thinking descriptor (WithThinkingResolver)
 	thinkingBudget int64
 }
 
@@ -51,6 +61,7 @@ type config struct {
 	baseURL        string
 	maxTokens      int64
 	maxTokensFor   maxTokensResolver
+	thinkingFor    thinkingResolver
 	thinkingBudget int64
 	extra          []option.RequestOption
 }
@@ -84,6 +95,17 @@ func WithMaxTokens(n int64) Option {
 // composition).
 func WithMaxTokensResolver(resolve maxTokensResolver) Option {
 	return func(c *config) { c.maxTokensFor = resolve }
+}
+
+// WithThinkingResolver injects the per-model LIVE extended-thinking descriptor
+// resolver. Composition builds it over the live-metadata store (which carries
+// Anthropic's Capabilities.Thinking.Types), so a request's thinking mode reflects
+// the model's TRUE capability rather than a stale id-prefix guess. A nil resolver —
+// or known=false for a model the live source does not describe — falls back to the
+// adapter's embedded prefix matrix (the OFFLINE floor); the prefix lists are NOT
+// removed. Keeps the adapter catalog-/store-free (the store stays in composition).
+func WithThinkingResolver(resolve thinkingResolver) Option {
+	return func(c *config) { c.thinkingFor = resolve }
 }
 
 // WithThinkingBudget sets budget_tokens for the manual (type:"enabled") thinking
@@ -138,6 +160,7 @@ func New(opts ...Option) *Provider {
 		client:         client.Messages,
 		maxTokens:      maxTokens,
 		maxTokensFor:   c.maxTokensFor,
+		thinkingFor:    c.thinkingFor,
 		thinkingBudget: budget,
 	}
 }

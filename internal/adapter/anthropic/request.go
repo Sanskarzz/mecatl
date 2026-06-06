@@ -55,7 +55,7 @@ func (p *Provider) buildParams(req port.LLMRequest) (sdk.MessageNewParams, error
 		Messages:  messages,
 		Tools:     tools,
 		System:    buildSystem(req.System),
-		Thinking:  thinkingConfigFor(req.Model, maxTokens, p.thinkingBudget),
+		Thinking:  thinkingConfigFor(req.Model, maxTokens, p.thinkingBudget, p.thinkingFor),
 	}
 	return params, nil
 }
@@ -92,17 +92,25 @@ func buildSystem(l prompt.Layered) []sdk.TextBlockParam {
 //
 // display is set to "summarized" explicitly so the harness receives streamed
 // thinking deltas for display (the default flips to "omitted" on Opus 4.8/4.7).
-func thinkingConfigFor(model string, maxTokens, budget int64) sdk.ThinkingConfigParamUnion {
-	if usesAdaptiveThinking(model) {
+//
+// MODE SELECTION is LIVE-FIRST: when resolve reports known=true for the model, its
+// adaptive/enabled bits decide the mode authoritatively (the reliability win — a
+// newly-released model the prefix lists don't know gets its true mode from the live
+// API). When known=false (no resolver, offline, or the model is absent from the live
+// list) it falls back to the EXISTING prefix matrix (usesAdaptiveThinking /
+// thinkingCapable), the deterministic OFFLINE floor.
+func thinkingConfigFor(model string, maxTokens, budget int64, resolve thinkingResolver) sdk.ThinkingConfigParamUnion {
+	adaptive, manual := thinkingMode(model, resolve)
+	if adaptive {
 		return sdk.ThinkingConfigParamUnion{
 			OfAdaptive: &sdk.ThinkingConfigAdaptiveParam{
 				Display: sdk.ThinkingConfigAdaptiveDisplaySummarized,
 			},
 		}
 	}
-	// Thinking-INCAPABLE (Claude 3.5 and earlier): omit the thinking field — a
-	// manual {type:"enabled"} 400s on these.
-	if !thinkingCapable(model) {
+	// Thinking-INCAPABLE: omit the thinking field — a manual {type:"enabled"} 400s on
+	// these (Claude 3.5 and earlier, or a live "none" model).
+	if !manual {
 		return sdk.ThinkingConfigParamUnion{}
 	}
 	// Manual: clamp budget to [minThinkingBudget, max_tokens-1].
@@ -124,6 +132,27 @@ func thinkingConfigFor(model string, maxTokens, budget int64) sdk.ThinkingConfig
 			Display:      sdk.ThinkingConfigEnabledDisplaySummarized,
 		},
 	}
+}
+
+// thinkingMode decides a model's extended-thinking mode as (adaptive, manual). It
+// is LIVE-FIRST: when resolve reports known=true the live bits are authoritative —
+// adaptive wins, else enabled ⇒ manual, else NEITHER ⇒ none (both false). When
+// known=false (nil resolver / offline / model absent from the live list) it falls
+// back to the embedded prefix matrix (usesAdaptiveThinking / thinkingCapable), the
+// deterministic offline floor that is NEVER removed.
+func thinkingMode(model string, resolve thinkingResolver) (adaptive, manual bool) {
+	if resolve != nil {
+		if a, e, known := resolve(model); known {
+			// Trust the live descriptor: adaptive precedence, then manual, then none.
+			return a, !a && e
+		}
+	}
+	if usesAdaptiveThinking(model) {
+		return true, false
+	}
+	// thinkingCapable returns false only for the prefix-listed incapable families;
+	// an unknown/uncatalogued id is treated as manual-capable (the broad safe default).
+	return false, thinkingCapable(model)
 }
 
 // usesAdaptiveThinking reports whether model REQUIRES (or, for 4.6, recommends and

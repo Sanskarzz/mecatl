@@ -39,10 +39,19 @@ This document is the design rationale. The runtime overview is `docs/architectur
   embedded snapshot is seeded synchronously at `Build` (the `ModelSelection` cap is honest
   from t=0) and the live set is swapped in by a background goroutine — `Build` never
   touches the network.
-- **P2.** Disk cache + **periodic/interval** live refresh; OpenAI/Anthropic listers; the
-  per-session live-capability closer (so a session bound to a *live-only/uncatalogued*
-  model resolves image from live modalities, not the adapter-only passthrough fallback).
-  Plus a Chat-Completions adapter for the long tail (Gemini-native / Together / …).
+- **Live metadata → resolvers (SHIPPED).** The live model record now feeds the
+  request-path RESOLVERS, not just the picker: a composition-owned `liveMetaStore`
+  (seeded from the catalog at t=0, swapped by the SAME one-shot refresh) backs
+  live-first-with-catalog-floor lookups for the output ceiling (`max_tokens`), the
+  context window, and the Anthropic thinking matrix. The **Anthropic keyed lister**
+  (`client.Models.List`) supplies all of these incl. the live thinking descriptor;
+  the **OpenRouter** lister now also captures `top_provider.max_completion_tokens`.
+  See §12.
+- **P2.** Disk cache + **periodic/interval** live refresh; OpenAI lister (sparse —
+  catalog-only, see §12); the per-session live-capability closer (so a session bound
+  to a *live-only/uncatalogued* model resolves image from live modalities, not the
+  adapter-only passthrough fallback). Plus a Chat-Completions adapter for the long
+  tail (Gemini-native / Together / …).
 - **P3.** Secrets store + OAuth + per-client/profile key custody (see §8).
 
 ---
@@ -125,7 +134,8 @@ wire-divergences P1 surfaced were both absorbed at adapter-construction, not in 
   (`defaultMaxTokens`=4096, the lowest common Claude ceiling) for an uncatalogued model so it
   never 400s. CRITICAL for per-session/sub-agent routing: a route to a smaller-ceiling model
   (e.g. `claude-3-5-haiku`=8192) must not send the default model's larger ceiling. NOT an
-  `LLMRequest` field; the adapter stays catalog-free.
+  `LLMRequest` field; the adapter stays catalog-free. (The resolver is now LIVE-FIRST
+  with the catalog as the floor — §12.)
 - **Extended thinking is model-class-dependent — THREE outcomes** (`thinkingConfigFor`):
   `{type:"adaptive"}` for Opus 4.8/4.7/4.6 + Sonnet 4.6 + Mythos (a manual
   `{type:"enabled",budget_tokens}` **400s** on Opus 4.8/4.7); `{type:"enabled",budget_tokens:N}`
@@ -133,7 +143,9 @@ wire-divergences P1 surfaced were both absorbed at adapter-construction, not in 
   Claude 3.7 Sonnet); and **NONE — omit `thinking` entirely** for thinking-INCAPABLE models
   (Claude 3.5 and earlier — sending `{type:"enabled"}` there 400s). `display:"summarized"` is
   set explicitly so display deltas stream. The budget is the `WithThinkingBudget` Option
-  (clamped ≥1024 & <max_tokens). Thinking is **ON**.
+  (clamped ≥1024 & <max_tokens). Thinking is **ON**. The mode is now LIVE-FIRST via
+  `WithThinkingResolver` (Anthropic's `Capabilities.Thinking.Types`), with these
+  prefix lists kept as the OFFLINE FLOOR — §12.
 - **Ambient-env custody** — `New` passes `option.WithoutEnvironmentDefaults()` FIRST, so the
   SDK does NOT autoload `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/WIF profiles; the adapter
   contributes only the harness-resolved key + optional `--anthropic-base-url`, preserving the
@@ -471,3 +483,90 @@ result via `Service.SetModels` (an `atomic.Pointer[[]*ModelInfo]` inside the Ser
 (no leak; verified under `-race`). A composition-only `liveModelRefreshSync` test seam runs
 the refresh inline for deterministic offline e2e (no sleeps). When no available provider
 has a lister (mock/openai-only), the refresh is a no-op — no goroutine.
+
+---
+
+## 12. Live metadata → the resolvers (SHIPPED)
+
+§11's live record reached ONLY the picker (`Service.SetModels`). The request-path
+metadata that actually drives a turn — the `max_tokens` output ceiling, the
+compaction `ContextWindowTokens`, and the Anthropic extended-thinking mode — read
+STATIC sources (the catalog, or hardcoded id-prefix lists) on a SEPARATE path the
+live data never touched. This slice **broadens the live record so it also feeds those
+resolvers**, without leaking the lister/registry/SDK past composition.
+
+**The enriched neutral record.** `modelEntry` (`modellister.go`) gains `OutputLimit`
+(the `max_tokens` ceiling) and a `thinkingDescriptor{Known,Adaptive,Enabled}` — the
+NEUTRAL, source-agnostic projection of a model's thinking capability. The zero
+descriptor (`Known=false`) means "unknown" ⇒ the adapter falls back to its prefix
+matrix. Only the live Anthropic source sets `Known=true`; every other source leaves
+it zero (a struct of bools costs nothing). The picker proto slice AND the resolver
+store both project from the ONE `modelEntry` list per refresh, so they cannot drift.
+
+**The `liveMetaStore`** (`internal/app/livemeta.go`) is a composition-owned
+`map[providerID]map[modelID]modelEntry` behind an `atomic.Pointer` (the same lock-free
+swap the picker uses). It is **seeded from the embedded catalog at Build BEFORE any
+network call** (`seedFromCatalog` over `reg.Available()`), so every resolver has a
+correct-enough value at t=0; the SAME background refresh that calls `SetModels` also
+calls `store.Swap` with the merged live list. It rides on `providerRegistry.meta`
+(every resolver call site already holds `reg`/`provReg`); nil-tolerant reads keep a
+hand-built test registry safe.
+
+**Per-field, live-first-then-catalog-floor helpers** replace the bare catalog reads:
+
+| Resolver call site (before)                 | After                                            |
+|---------------------------------------------|--------------------------------------------------|
+| `WithMaxTokensResolver(anthropicOutputLimit)` | closure over `meta.outputLimitFor(anthropic, …)` |
+| `catalogContextWindow(pid, model)` (build/agentdefs) | `reg.meta.contextWindowFor(pid, model)`  |
+| `usesAdaptiveThinking`/`thinkingCapable`    | `meta.thinkingFor(…)` via `WithThinkingResolver` |
+
+Precedence is **PER FIELD**: take the live value only when the store has the model
+AND the field is present (non-zero / `Known`); else the catalog floor; else the
+conservative default the consumer already applies (`engineDepsForProvider`'s 128k,
+the adapter's `defaultMaxTokens`). A live MISS for a model the catalog knows falls
+back WHOLESALE to the catalog row — **live absence NEVER erases the catalog**. The
+per-session child engines (`engineDepsForProvider`/`resolveChildProvider`) pick up
+the store FOR FREE through the registry. With NO lister wired the store is
+catalog-seeded ⇒ behaviour is **byte-identical** to before (a test asserts it).
+
+**The Anthropic keyed lister** (`internal/adapter/anthropic/lister.go`) is the
+reliability headline. It calls `client.Models.ListAutoPaging` and maps the SDK's rich
+`ModelInfo` → its OWN neutral `anthropic.Model`: `MaxTokens`→OutputLimit,
+`MaxInputTokens`→ContextLimit, `Capabilities.ImageInput`→image, and
+`Capabilities.Thinking.Types.{adaptive,enabled}`→`ThinkingDescriptor`. **Auth:** unlike
+the keyless OpenRouter lister, this endpoint is AUTHENTICATED — the lister carries the
+key for a READ-ONLY metadata GET, used ONLY to read and NEVER logged (CWE-200). It is
+availability-gated by construction (it runs only for a keyed = AVAILABLE anthropic
+provider). The SDK takes `option.WithHTTPClient` for a mock transport, so the lister
+is fully offline-testable (a `testdata/models.json` fixture; no live call ever).
+
+**Thinking-from-live via `WithThinkingResolver`.** A new adapter Option mirrors
+`WithMaxTokensResolver`: `thinkingConfigFor` consults the resolver FIRST and, when it
+reports `known=true`, TRUSTS the live bits (adaptive ⇒ `{type:"adaptive"}`, else
+enabled ⇒ manual `{type:"enabled",budget}`, else NEITHER ⇒ omit thinking = NONE). When
+`known=false` (nil resolver, offline, or model absent from the live list) it falls
+back to the EXISTING `usesAdaptiveThinking`/`thinkingCapable` **prefix matrix — the
+offline floor, which is NOT deleted** (its tests stay green). So a newly-released
+Claude model the prefix lists don't know gets its true thinking mode from the API,
+while offline/uncatalogued runs keep the deterministic guess.
+
+**OpenRouter live data → resolvers.** The OpenRouter lister now captures the NEW wire
+field `top_provider.max_completion_tokens` → `OutputLimit` (a `null` value ⇒ 0 ⇒
+catalog floor); its context window + image already arrived but only reached the
+picker — they now route through the `liveMetaStore` into the resolvers too. OpenRouter
+exposes no thinking-types matrix (only a coarse `reasoning` flag), so a model routed
+via OpenRouter leaves the thinking descriptor zero and defers to the adapter floor.
+
+**Per-provider matrix.** Anthropic self-describes EVERY field (output ceiling, context
+window, image, thinking) — the authoritative live source. OpenRouter supplies output
+ceiling + context + image (no thinking matrix). **OpenAI stays catalog-only**: its
+`/v1/models` is sparse (id/created/owned_by only — it cannot self-describe ceilings),
+so there is no OpenAI lister and the embedded catalog remains OpenAI's source for
+every metadata field.
+
+**Refresh cadence.** ONE-SHOT at Build (reused `startLiveModelRefresh`; no TTL) — a
+periodic/disk-cached refresh stays a P2 item. **Not surfaced in the picker:** the
+output ceiling / thinking mode remain INTERNAL resolver inputs (no proto/mecatui/caps
+change); a TUI badge for them is a deferred follow-up (the picker-proto slice "Slice
+D"). The OpenRouter `reasoning_details` replay fix is a SEPARATE request-path bug, not
+bundled here.

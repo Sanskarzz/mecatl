@@ -572,8 +572,11 @@ func sessionEngineFactory(
 			// trigger AGREES with the ListModels-advertised context_limit (Medium #2). A
 			// passthrough/uncatalogued model or a zero/missing catalog limit yields 0,
 			// which engineDepsForProvider falls back to the 128k default — the model
-			// string still flows through verbatim regardless.
-			contextWindow = catalogContextWindow(sel.ProviderID, sel.ModelID)
+			// string still flows through verbatim regardless. LIVE-FIRST: the live
+			// context window (when present) beats the catalog, falling back to the catalog
+			// floor — so the live ListModels picker and the compaction trigger still agree
+			// (both project from the one refreshed modelEntry list).
+			contextWindow = reg.meta.contextWindowFor(sel.ProviderID, sel.ModelID)
 		}
 		// The per-session input capability is the catalog ∩ adapter INTERSECTION for
 		// the resolved (provider, model), computed HERE in composition — the single

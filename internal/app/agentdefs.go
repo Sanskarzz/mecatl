@@ -131,7 +131,10 @@ func resolveChildProvider(cfg Config, provReg *providerRegistry, def agents.Agen
 	if pid != parentProviderID {
 		if entry, ok := provReg.Lookup(pid); ok {
 			childProvider = entry.provider
-			childWindow = catalogContextWindow(pid, model)
+			// LIVE-FIRST context window (live when present, catalog floor) so a child/
+			// sub-agent that switches provider compacts on the SAME window the picker
+			// advertises — it picks up the live-metadata store FOR FREE via the registry.
+			childWindow = provReg.meta.contextWindowFor(pid, model)
 		}
 	}
 	return childProvider, pid, model, childWindow

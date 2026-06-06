@@ -46,6 +46,9 @@ func TestMultiProviderE2E(t *testing.T) {
 			"OPENROUTER_API_KEY": sentinelKey,
 			"ANTHROPIC_API_KEY":  sentinelKey,
 		}),
+		// Strictly offline: the openrouter/anthropic listers are armed (keyed), so refuse
+		// every live fetch — they fail-safe to the embedded catalog without any network.
+		liveModelHTTPClient: offlineHTTPClient(),
 		// Mock-per-id seam: each available provider id gets a DISTINCT mock that
 		// replies with its own id, so a routed turn proves which provider was bound.
 		// Several identical turns are scripted because the default (openai) provider
@@ -156,6 +159,8 @@ func TestMultiProviderCapabilityEcho(t *testing.T) {
 			"OPENAI_API_KEY":     "sk-x",
 			"OPENROUTER_API_KEY": "sk-x",
 		}),
+		// Strictly offline: refuse the (keyed) openrouter live fetch ⇒ embedded floor.
+		liveModelHTTPClient: offlineHTTPClient(),
 		providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
 			caps := port.ProviderCapabilities{Image: id == providerOpenRouter}
 			// Identifying reply so a routed turn proves WHICH provider was bound,
@@ -267,6 +272,8 @@ func TestSessionCapabilitiesNoSecrets(t *testing.T) {
 			"OPENAI_API_KEY":     sentinelKey,
 			"OPENROUTER_API_KEY": sentinelKey,
 		}),
+		// Strictly offline: refuse the (keyed) openrouter live fetch ⇒ embedded floor.
+		liveModelHTTPClient: offlineHTTPClient(),
 		providerConstructor: func(_ Config, _, _, _ string) port.LLMProvider {
 			return mockllm.NewWith([]mockllm.Option{mockllm.WithCapabilities(port.ProviderCapabilities{Image: true})}, mockllm.TextTurn("x"))
 		},
@@ -338,6 +345,8 @@ func TestSubAgentPinsAnthropic(t *testing.T) {
 			"OPENAI_API_KEY":    "sk-x",
 			"ANTHROPIC_API_KEY": "sk-x",
 		}),
+		// Strictly offline: refuse the (keyed) anthropic live fetch ⇒ embedded floor.
+		liveModelHTTPClient: offlineHTTPClient(),
 		providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
 			reply := "REPLY-FROM-" + id
 			return mockllm.New(

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/anthropic"
 	"github.com/stacklok/mecatl/internal/adapter/openrouter"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
 	"github.com/stacklok/mecatl/internal/adapter/server"
@@ -38,7 +39,9 @@ func startLiveModelRefresh(reg *providerRegistry, swap modelSwapper, runSync boo
 	if runSync {
 		ctx, cancel := context.WithTimeout(context.Background(), liveModelRefreshTimeout)
 		defer cancel()
-		swap.SetModels(liveModelSnapshot(ctx, reg))
+		models, byProvider := liveModelSnapshot(ctx, reg)
+		swap.SetModels(models)
+		reg.meta.Swap(byProvider)
 		return func() {}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -48,7 +51,7 @@ func startLiveModelRefresh(reg *providerRegistry, swap modelSwapper, runSync boo
 		defer wg.Done()
 		fetchCtx, fetchCancel := context.WithTimeout(ctx, liveModelRefreshTimeout)
 		defer fetchCancel()
-		models := liveModelSnapshot(fetchCtx, reg)
+		models, byProvider := liveModelSnapshot(fetchCtx, reg)
 		// If the refresh ctx was cancelled (the closer ran — a shutdown — before the
 		// fetch finished), the fetch was interrupted and its result is untrustworthy
 		// (the embedded floor at best), so DO NOT overwrite the seed. Only swap when the
@@ -57,7 +60,10 @@ func startLiveModelRefresh(reg *providerRegistry, swap modelSwapper, runSync boo
 		if ctx.Err() != nil {
 			return
 		}
+		// Both sinks are fed from the ONE modelEntry list per provider, so the picker
+		// proto slice and the resolver-feeding meta store cannot drift.
 		swap.SetModels(models)
+		reg.meta.Swap(byProvider)
 	}()
 	return func() {
 		cancel()
@@ -94,9 +100,23 @@ type modelEntry struct {
 	ID              string
 	DisplayName     string
 	ContextLimit    int
+	OutputLimit     int // max_tokens output ceiling (0 = unknown ⇒ catalog/default floor)
 	InputModalities []string
 	Reasoning       bool
 	ToolCall        bool
+	Thinking        thinkingDescriptor // Anthropic-only; zero value = unknown ⇒ adapter prefix floor
+}
+
+// thinkingDescriptor is a NEUTRAL, source-agnostic projection of a model's
+// extended-thinking capability — the live replacement for the adapter's hardcoded
+// adaptive/enabled/none prefix lists. The zero value (Known=false) means "unknown",
+// so the anthropic adapter falls back to its embedded prefix matrix (the offline
+// floor). Only the live Anthropic lister populates it (Capabilities.Thinking.Types);
+// every other source leaves it zero, which costs nothing and changes no behaviour.
+type thinkingDescriptor struct {
+	Known    bool // true only when a live source populated it
+	Adaptive bool // Capabilities.Thinking.Types.adaptive.supported
+	Enabled  bool // Capabilities.Thinking.Types.enabled.supported (manual)
 }
 
 // modelLister is the OPTIONAL live-catalog capability a provider may expose. It is
@@ -131,12 +151,61 @@ func (l openRouterLister) ListModels(ctx context.Context) ([]modelEntry, error) 
 	out := make([]modelEntry, 0, len(raw))
 	for _, m := range raw {
 		out = append(out, modelEntry{
-			ID:              m.ID,
-			DisplayName:     m.DisplayName,
-			ContextLimit:    m.ContextLimit,
+			ID:           m.ID,
+			DisplayName:  m.DisplayName,
+			ContextLimit: m.ContextLimit,
+			// top_provider.max_completion_tokens (Slice C). CAPTURED into the meta store,
+			// but currently OFF the OpenRouter request path: OpenRouter rides the openai
+			// Responses adapter, which has no per-model max_tokens resolver today (only the
+			// native anthropic adapter does). The composition UPPER clamp (clampLive in
+			// livemeta.go) gates this value, so a future OpenRouter max_tokens consumer
+			// cannot reintroduce the unbounded-live risk.
+			OutputLimit:     m.OutputLimit,
 			InputModalities: m.InputModalities,
 			Reasoning:       m.Reasoning,
 			ToolCall:        m.ToolCall,
+			// Thinking stays zero: OpenRouter exposes only a coarse `reasoning` flag, not
+			// the adaptive/enabled thinking-types matrix — so a model routed via OpenRouter
+			// defers to the adapter's prefix floor (it is not the native anthropic provider).
+		})
+	}
+	return out, nil
+}
+
+// anthropicLister adapts the *anthropic.Lister (which returns its OWN package type,
+// []anthropic.Model — no import cycle) to the composition modelLister interface by
+// mapping each anthropic.Model → modelEntry, INCLUDING the live thinking descriptor
+// (the live replacement for the adapter's prefix matrix), the output ceiling, the
+// context window, and image. This is the one place the adapter's type is mapped to
+// the composition-neutral type; the adapter never imports internal/app.
+type anthropicLister struct {
+	inner *anthropic.Lister
+}
+
+func (l anthropicLister) ListModels(ctx context.Context) ([]modelEntry, error) {
+	raw, err := l.inner.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]modelEntry, 0, len(raw))
+	for _, m := range raw {
+		var mods []string
+		if m.Image {
+			mods = []string{"image"} // feed the SHARED hasImageModality predicate
+		}
+		out = append(out, modelEntry{
+			ID:              m.ID,
+			DisplayName:     m.DisplayName,
+			ContextLimit:    m.ContextLimit,
+			OutputLimit:     m.OutputLimit,
+			InputModalities: mods,
+			Reasoning:       m.Thinking.Adaptive || m.Thinking.Enabled,
+			ToolCall:        true, // every current Claude model supports tool use
+			Thinking: thinkingDescriptor{
+				Known:    true, // a live anthropic source populated this
+				Adaptive: m.Thinking.Adaptive,
+				Enabled:  m.Thinking.Enabled,
+			},
 		})
 	}
 	return out, nil
@@ -159,9 +228,12 @@ func embeddedModels(providerID string) []modelEntry {
 			ID:              m.ID(),
 			DisplayName:     m.Name(),
 			ContextLimit:    m.ContextLimit(),
+			OutputLimit:     m.OutputLimit(),
 			InputModalities: m.InputModalities(),
 			Reasoning:       m.SupportsReasoning(),
 			ToolCall:        m.SupportsToolCall(),
+			// Thinking stays zero (Known=false): the embedded catalog has no thinking-
+			// types bit, so an embedded/seed model defers to the adapter's prefix floor.
 		})
 	}
 	return out
@@ -211,23 +283,29 @@ func sortModelInfos(out []*mecatlv1.ModelInfo) {
 // The fetch is attempted at most once per provider here; the CALLER (the
 // background refresh in Build) owns concurrency/lifecycle. This function is pure
 // w.r.t. composition state — it reads the registry and the network (through the
-// listers) and returns a fresh proto slice. It REUSES projectModelEntry +
-// sortModelInfos so the live floor and the embedded seed cannot drift.
-func liveModelSnapshot(ctx context.Context, reg *providerRegistry) []*mecatlv1.ModelInfo {
+// listers) and returns BOTH the fresh proto slice (the picker sink) AND the
+// per-provider []modelEntry map (the resolver-feeding meta-store sink). Both sinks
+// project from the SAME modelEntry list per provider so the picker and the resolvers
+// cannot drift. It REUSES projectModelEntry + sortModelInfos so the live floor and
+// the embedded seed cannot drift.
+func liveModelSnapshot(ctx context.Context, reg *providerRegistry) ([]*mecatlv1.ModelInfo, map[string][]modelEntry) {
 	if reg == nil {
-		return nil
+		return nil, nil
 	}
 	var out []*mecatlv1.ModelInfo
+	byProvider := make(map[string][]modelEntry)
 	for _, pid := range reg.Available() { // available (keyed) providers ONLY
 		if pid == providerMock {
 			continue // the mock never advertises selectable models
 		}
-		for _, m := range resolveProviderModels(ctx, reg, pid) {
+		entries := resolveProviderModels(ctx, reg, pid)
+		byProvider[pid] = entries
+		for _, m := range entries {
 			out = append(out, projectModelEntry(reg, pid, m))
 		}
 	}
 	sortModelInfos(out)
-	return out
+	return out, byProvider
 }
 
 // resolveProviderModels returns the per-provider model list applying the merge +

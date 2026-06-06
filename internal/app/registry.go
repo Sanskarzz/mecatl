@@ -117,6 +117,13 @@ type providerRegistry struct {
 	entries      map[string]providerEntry // keyed by provider id; only AVAILABLE entries
 	defaultID    string                   // resolved default provider (precedence: resolveDefaultModel)
 	defaultModel string                   // resolved default model for defaultID ("" => adapter/endpoint default)
+	// meta is the composition-owned live-metadata store the request-path resolvers
+	// read (output ceiling / context window / modalities / thinking). It is seeded
+	// from the catalog at build BEFORE any network call and atomically swapped by the
+	// background live refresh, so a resolver is always live-first with a catalog
+	// floor. Never nil for a registry built by buildProviderRegistry; nil-tolerant
+	// reads (liveMetaStore.lookup) keep a hand-built test registry safe.
+	meta *liveMetaStore
 }
 
 // Lookup returns the entry for id and whether it exists (and is therefore
@@ -191,10 +198,23 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 			// The mock ignores the model entirely; carry cfg.Model so an explicit
 			// --model is still echoed (snapshots/capabilities) without inventing one.
 			defaultModel: cfg.Model,
+			// An EMPTY (non-nil) meta store: the mock has no lister and no catalog rows,
+			// so it stays empty, but an explicit store keeps the resolver helpers'
+			// invariant uniform (every production registry carries one) and future-proofs
+			// a mock-with-metadata path. The helpers are nil-tolerant regardless.
+			meta: newLiveMetaStore(),
 		}, nil
 	}
 
 	entries := make(map[string]providerEntry)
+
+	// The live-metadata store the request-path resolvers read. Construct it FIRST so
+	// the per-provider entries' resolver closures (notably anthropic's max-tokens +
+	// thinking resolvers) capture it; it is seeded from the catalog (seedFromCatalog)
+	// AFTER the entries are built (we need reg.Available()) and BEFORE any network
+	// call, then atomically swapped by the background refresh. Live-first, catalog
+	// floor — see liveMetaStore.
+	meta := newLiveMetaStore()
 
 	// openai: AVAILABLE iff a key resolves — from cfg.OpenAIKey (which the cmd layer
 	// reads from OPENAI_API_KEY) or, failing that, the OPENAI_API_KEY env var via
@@ -228,15 +248,18 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 	// or the catalog-driven env vars via detect. Per-session routing, sub-agent
 	// provider switch, and the capability intersection treat it as data (no change).
 	if key := providerKey(cfg.AnthropicKey, providerAnthropic, detect); key != "" {
-		entries[providerAnthropic] = newAnthropicEntry(cfg, key)
+		entries[providerAnthropic] = newAnthropicEntry(cfg, key, meta)
 	}
 
 	if len(entries) == 0 {
 		return nil, errNoProvider
 	}
 
-	reg := &providerRegistry{entries: entries}
+	reg := &providerRegistry{entries: entries, meta: meta}
 	reg.defaultID, reg.defaultModel = resolveDefaultModel(cfg, reg)
+	// Seed the live-metadata store from the embedded catalog for every available
+	// provider — the t=0 floor every resolver reads before the background live swap.
+	meta.seedFromCatalog(reg.Available())
 	return reg, nil
 }
 
@@ -300,25 +323,39 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 // above the model's ceiling; a conservative fallback applies when uncatalogued).
 // It logs the provider id, default model, and base URL ONLY — never the key. No
 // lister in P1 (live Anthropic listing is deferred).
-func newAnthropicEntry(cfg Config, key string) providerEntry {
+func newAnthropicEntry(cfg Config, key string, meta *liveMetaStore) providerEntry {
 	baseURL := cfg.AnthropicBaseURL
 	slog.Info("LLM provider available", "provider", providerAnthropic, "model", cfg.Model, "base_url", baseURL)
 	if cfg.providerConstructor != nil {
-		return providerEntry{
+		entry := providerEntry{
 			id:        providerAnthropic,
 			provider:  cfg.providerConstructor(cfg, providerAnthropic, key, baseURL),
 			available: true,
 			baseURL:   baseURL,
 		}
+		entry.lister = anthropicLister{inner: anthropic.NewLister(key, baseURL, cfg.liveModelHTTPClient)}
+		return entry
 	}
 	opts := []anthropic.Option{
 		anthropic.WithAPIKey(key),
-		// PER-MODEL max_tokens: each request's max_tokens is resolved from ITS model's
-		// catalogued output ceiling, so a per-session/sub-agent route to a
-		// smaller-ceiling model (e.g. claude-3-5-haiku=8192) never sends the default
-		// model's larger value and 400s. The adapter stays catalog-free — composition
-		// owns the catalog read.
-		anthropic.WithMaxTokensResolver(anthropicOutputLimit),
+		// PER-MODEL max_tokens: each request's max_tokens is resolved LIVE-FIRST from
+		// the live-metadata store (the live output ceiling when present), else the
+		// catalogued ceiling, else the adapter's conservative default. So a per-session/
+		// sub-agent route to a smaller-ceiling model (e.g. claude-3-5-haiku=8192) never
+		// sends the default model's larger value and 400s, and a newly-released model the
+		// catalog doesn't know gets its true ceiling from the live API. The adapter stays
+		// catalog-/store-free — composition owns the closure over meta.
+		anthropic.WithMaxTokensResolver(func(model string) int {
+			return meta.outputLimitFor(providerAnthropic, model)
+		}),
+		// THINKING-FROM-LIVE: the adapter's extended-thinking mode (adaptive / manual /
+		// none) reads the LIVE descriptor (Capabilities.Thinking.Types) when the model is
+		// KNOWN, falling back to the adapter's hardcoded prefix matrix as the OFFLINE
+		// floor (known=false). This retires the stale-prefix guesswork for live runs
+		// while keeping the deterministic matrix for offline/uncatalogued models.
+		anthropic.WithThinkingResolver(func(model string) (adaptive, enabled, known bool) {
+			return meta.thinkingFor(providerAnthropic, model)
+		}),
 	}
 	if baseURL != "" {
 		opts = append(opts, anthropic.WithBaseURL(baseURL))
@@ -338,7 +375,16 @@ func newAnthropicEntry(cfg Config, key string) providerEntry {
 		"per_attempt_timeout", cfg.LLMPerAttemptTimeout,
 		"breaker_threshold", cfg.LLMBreakerThreshold,
 		"breaker_cooldown", cfg.LLMBreakerCooldown)
-	return providerEntry{id: providerAnthropic, provider: llm, available: true, baseURL: baseURL}
+	entry := providerEntry{id: providerAnthropic, provider: llm, available: true, baseURL: baseURL}
+	// Anthropic opts into LIVE model listing: its keyed /v1/models endpoint
+	// self-describes the rich per-model metadata (output ceiling, context window,
+	// image, thinking types). The lister rides on the entry (so only anthropic
+	// advertises it) and carries the key for a READ-ONLY metadata GET — it is
+	// availability-gated by construction (this code runs only when the key resolved)
+	// and never logs the key. The HTTP client is the composition test seam (nil ⇒
+	// default client; tests inject a mock transport).
+	entry.lister = anthropicLister{inner: anthropic.NewLister(key, baseURL, cfg.liveModelHTTPClient)}
+	return entry
 }
 
 // anthropicOutputLimit returns the catalogued output ceiling for a SPECIFIC

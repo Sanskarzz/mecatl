@@ -18,6 +18,7 @@
 //	id                                       → ID
 //	name                                     → DisplayName
 //	context_length                           → ContextLimit
+//	top_provider.max_completion_tokens       → OutputLimit (the output ceiling)
 //	architecture.input_modalities ∋ "image"  → InputModalities (carries "image")
 //	supported_parameters ∋ "reasoning"       → Reasoning
 //	supported_parameters ∋ "tools"           → ToolCall
@@ -75,9 +76,19 @@ const (
 // its composition-local modelEntry; it never leaves this package's caller as-is and
 // carries nothing provider-private (no key, no URL).
 type Model struct {
-	ID              string
-	DisplayName     string
-	ContextLimit    int
+	ID           string
+	DisplayName  string
+	ContextLimit int
+	// OutputLimit is top_provider.max_completion_tokens (the output ceiling; 0 =
+	// unknown). It is CAPTURED for the meta store but is currently OFF the request
+	// path for OpenRouter: OpenRouter rides the openai Responses adapter, which takes
+	// NO per-model max_tokens resolver today (unlike the native anthropic adapter). So
+	// this value reaches the resolvers' store but no OpenRouter request consumes it
+	// yet. If a future change wires a max_tokens resolver for the openai/OpenRouter
+	// adapter, the composition UPPER clamp (internal/app/livemeta.go clampLive) MUST
+	// already gate this live value before it can flow into max_tokens — do not wire
+	// the consumer ahead of the clamp.
+	OutputLimit     int
 	InputModalities []string
 	Reasoning       bool
 	ToolCall        bool
@@ -115,6 +126,13 @@ type wireModel struct {
 	Architecture  struct {
 		InputModalities []string `json:"input_modalities"`
 	} `json:"architecture"`
+	// TopProvider carries the upstream provider's per-model limits. Its
+	// max_completion_tokens is the output ceiling — NEW field captured for the
+	// resolvers (it previously never reached the wire struct). Absent/null ⇒ 0 ⇒ the
+	// composition helper falls back to the catalog floor.
+	TopProvider struct {
+		MaxCompletionTokens int `json:"max_completion_tokens"`
+	} `json:"top_provider"`
 	SupportedParameters []string `json:"supported_parameters"`
 }
 
@@ -164,6 +182,7 @@ func (l *Lister) ListModels(ctx context.Context) ([]Model, error) {
 			ID:              truncateRunes(w.ID, maxIDRunes),
 			DisplayName:     truncateRunes(w.Name, maxNameRunes),
 			ContextLimit:    w.ContextLength,
+			OutputLimit:     w.TopProvider.MaxCompletionTokens,
 			InputModalities: append([]string(nil), w.Architecture.InputModalities...),
 			Reasoning:       slices.Contains(w.SupportedParameters, "reasoning"),
 			ToolCall:        slices.Contains(w.SupportedParameters, "tools"),

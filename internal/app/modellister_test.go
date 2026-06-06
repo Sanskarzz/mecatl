@@ -33,6 +33,18 @@ func fixtureClient(t *testing.T) *http.Client {
 	})}
 }
 
+// offlineHTTPClient is a transport that refuses EVERY request, so a live-model
+// lister wired into a full Build (anthropic and/or openrouter) fails fast and
+// fail-safes to the embedded catalog WITHOUT ever touching the network. It is the
+// strictly-offline guard for the multi-provider Build tests that arm a lister but
+// don't care about the live result (CWE: never contact api.anthropic.com /
+// openrouter.ai in a test).
+func offlineHTTPClient() *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("offline: live model fetch refused in test")
+	})}
+}
+
 // fakeLister is a controllable modelLister: it returns canned models or an error,
 // for the merge + fail-safe unit tests (no HTTP).
 type fakeLister struct {
@@ -80,7 +92,7 @@ func TestLiveSnapshotReplacesEmbedded(t *testing.T) {
 	}}
 	reg := regWithLister(lister)
 
-	models := liveModelSnapshot(context.Background(), reg)
+	models, _ := liveModelSnapshot(context.Background(), reg)
 
 	var orIDs, openaiCount int
 	sawLiveOnly := false
@@ -127,7 +139,7 @@ func TestLiveSnapshotFallsBackOnError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := regWithLister(tc.lister)
-			models := liveModelSnapshot(context.Background(), reg)
+			models, _ := liveModelSnapshot(context.Background(), reg)
 			orCount := 0
 			for _, m := range models {
 				if m.GetProviderId() == providerOpenRouter {
@@ -157,7 +169,7 @@ func TestLiveSnapshotAvailabilityGating(t *testing.T) {
 		},
 		defaultID: providerOpenAI,
 	}
-	models := liveModelSnapshot(context.Background(), reg)
+	models, _ := liveModelSnapshot(context.Background(), reg)
 	for _, m := range models {
 		if m.GetProviderId() == providerOpenRouter {
 			t.Fatalf("openrouter model %q shown for an unavailable provider", m.GetId())
@@ -179,7 +191,7 @@ func TestLiveOnlyModelImageSingleSource(t *testing.T) {
 		{ID: "vision/cap", InputModalities: []string{"text", "image"}},
 	}}
 	reg := regWithLister(lister) // openrouter provider reports Image:true
-	models := liveModelSnapshot(context.Background(), reg)
+	models, _ := liveModelSnapshot(context.Background(), reg)
 	got := map[string]bool{}
 	for _, m := range models {
 		if m.GetProviderId() == providerOpenRouter {
@@ -251,7 +263,7 @@ func TestLiveSnapshotThroughRealAdapter(t *testing.T) {
 		},
 		defaultID: providerOpenRouter,
 	}
-	models := liveModelSnapshot(context.Background(), reg)
+	models, _ := liveModelSnapshot(context.Background(), reg)
 	ids := map[string]*mecatlv1.ModelInfo{}
 	for _, m := range models {
 		ids[m.GetId()] = m

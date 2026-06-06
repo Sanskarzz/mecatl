@@ -157,7 +157,7 @@ func TestThinkingConfigModelAware(t *testing.T) {
 		"  CLAUDE-OPUS-4-8  ", // whitespace + case-insensitive
 	}
 	for _, m := range adaptive {
-		cfg := thinkingConfigFor(m, maxTokens, budget)
+		cfg := thinkingConfigFor(m, maxTokens, budget, nil)
 		if cfg.OfAdaptive == nil {
 			t.Errorf("%s: want adaptive thinking, got %+v", m, cfg)
 		}
@@ -176,7 +176,7 @@ func TestThinkingConfigModelAware(t *testing.T) {
 		"some-unknown-future-model", // unknown => capable-manual (safe broad default)
 	}
 	for _, m := range manual {
-		cfg := thinkingConfigFor(m, maxTokens, budget)
+		cfg := thinkingConfigFor(m, maxTokens, budget, nil)
 		if cfg.OfEnabled == nil {
 			t.Errorf("%s: want manual enabled+budget thinking, got %+v", m, cfg)
 			continue
@@ -201,7 +201,7 @@ func TestThinkingConfigModelAware(t *testing.T) {
 		"CLAUDE-3-5-SONNET-20241022", // case-insensitive
 	}
 	for _, m := range incapable {
-		cfg := thinkingConfigFor(m, maxTokens, budget)
+		cfg := thinkingConfigFor(m, maxTokens, budget, nil)
 		if cfg.OfEnabled != nil || cfg.OfAdaptive != nil {
 			t.Errorf("%s: must send NO thinking config (incapable model 400s on {type:enabled}), got %+v", m, cfg)
 		}
@@ -228,7 +228,7 @@ func TestBuildParamsNoThinkingForIncapableModel(t *testing.T) {
 
 func TestThinkingConfigBudgetClampedBelowMaxTokens(t *testing.T) {
 	// budget >= max_tokens must be clamped strictly below max_tokens.
-	cfg := thinkingConfigFor("claude-sonnet-4-5", 2000, 8000)
+	cfg := thinkingConfigFor("claude-sonnet-4-5", 2000, 8000, nil)
 	if cfg.OfEnabled == nil {
 		t.Fatal("want manual thinking config")
 	}
@@ -246,6 +246,54 @@ func TestBuildParamsThinkingSelectedByRequestModel(t *testing.T) {
 	sonnet45, _ := p.buildParams(port.LLMRequest{Model: "claude-sonnet-4-5"})
 	if sonnet45.Thinking.OfEnabled == nil {
 		t.Error("claude-sonnet-4-5 request should select manual enabled thinking")
+	}
+}
+
+// TestBuildParamsLiveMaxTokensClampsThinkingBudget is the load-bearing 400-trap: the
+// LIVE-derived max_tokens (via WithMaxTokensResolver) and the manual thinking budget
+// must interact safely END-TO-END through buildParams. Anthropic rejects a request
+// where budget_tokens >= max_tokens, so a SMALL live ceiling MUST clamp the (large)
+// configured budget strictly below it. This drives the clamp through the resolver,
+// not with literal args.
+func TestBuildParamsLiveMaxTokensClampsThinkingBudget(t *testing.T) {
+	// A live resolver returns a SMALL ceiling (5000) for a MANUAL-thinking model,
+	// while the configured budget is LARGE (8000) — without the clamp this 400s.
+	resolver := func(string) int { return 5000 }
+	p := New(WithAPIKey("sk"), WithMaxTokensResolver(resolver), WithThinkingBudget(8000))
+
+	params, err := p.buildParams(port.LLMRequest{Model: "claude-sonnet-4-5"})
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	if params.MaxTokens != 5000 {
+		t.Fatalf("MaxTokens = %d, want the live ceiling 5000", params.MaxTokens)
+	}
+	if params.Thinking.OfEnabled == nil {
+		t.Fatalf("claude-sonnet-4-5 should select manual enabled thinking, got %+v", params.Thinking)
+	}
+	if params.Thinking.OfEnabled.BudgetTokens >= params.MaxTokens {
+		t.Fatalf("budget_tokens %d not clamped below max_tokens %d (would 400)",
+			params.Thinking.OfEnabled.BudgetTokens, params.MaxTokens)
+	}
+}
+
+// TestBuildParamsLiveCeilingBelowMinBudgetOmitsThinking is the degenerate case: a
+// live ceiling BELOW the minimum thinking budget floor (1024) leaves no room for a
+// valid manual thinking config, so the thinking field must be OMITTED entirely
+// rather than sent as an invalid {type:"enabled"} config (which 400s).
+func TestBuildParamsLiveCeilingBelowMinBudgetOmitsThinking(t *testing.T) {
+	resolver := func(string) int { return 1000 } // below the 1024 minThinkingBudget floor
+	p := New(WithAPIKey("sk"), WithMaxTokensResolver(resolver), WithThinkingBudget(8000))
+
+	params, err := p.buildParams(port.LLMRequest{Model: "claude-sonnet-4-5"})
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	if params.MaxTokens != 1000 {
+		t.Fatalf("MaxTokens = %d, want the live ceiling 1000", params.MaxTokens)
+	}
+	if (params.Thinking != sdk.ThinkingConfigParamUnion{}) {
+		t.Fatalf("tiny live ceiling must omit thinking (no room for the floor), got %+v", params.Thinking)
 	}
 }
 

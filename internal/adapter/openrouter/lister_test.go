@@ -71,6 +71,10 @@ func TestListModels_MappingFromFixture(t *testing.T) {
 	if qwen.ContextLimit != 1_000_000 {
 		t.Errorf("qwen ContextLimit=%d, want 1000000", qwen.ContextLimit)
 	}
+	// Slice C: the output ceiling is captured from top_provider.max_completion_tokens.
+	if qwen.OutputLimit != 65536 {
+		t.Errorf("qwen OutputLimit=%d, want 65536 (top_provider.max_completion_tokens)", qwen.OutputLimit)
+	}
 	if qwen.DisplayName != "Qwen: Qwen3.7 Plus" {
 		t.Errorf("qwen DisplayName=%q", qwen.DisplayName)
 	}
@@ -82,6 +86,11 @@ func TestListModels_MappingFromFixture(t *testing.T) {
 	}
 	if fusion.Reasoning || fusion.ToolCall {
 		t.Errorf("fusion reasoning=%v tools=%v, want both false", fusion.Reasoning, fusion.ToolCall)
+	}
+	// fusion's top_provider.max_completion_tokens is null ⇒ OutputLimit 0 (the
+	// composition helper then falls back to the catalog floor).
+	if fusion.OutputLimit != 0 {
+		t.Errorf("fusion OutputLimit=%d, want 0 (null max_completion_tokens)", fusion.OutputLimit)
 	}
 
 	// tools but no reasoning, image-capable

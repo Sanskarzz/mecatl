@@ -320,6 +320,8 @@ func TestSubproviderHalfAFullBuildE2E(t *testing.T) {
 			"OPENAI_API_KEY":     "sk-x",
 			"OPENROUTER_API_KEY": "sk-x",
 		}),
+		// Strictly offline: refuse the (keyed) openrouter live fetch ⇒ embedded floor.
+		liveModelHTTPClient: offlineHTTPClient(),
 		providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
 			reply := "REPLY-FROM-" + id
 			return mockllm.New(
