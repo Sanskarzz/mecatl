@@ -115,3 +115,45 @@ func TestModelsE2EKeyRemovedFallback(t *testing.T) {
 		t.Errorf("final activeModel = %+v, want zero (fell back to server default)", fm.activeModel)
 	}
 }
+
+// TestModelsE2EFilterAndSelect drives the headline scroll+filter flow end-to-end:
+// after connect, open /models (via the slash-command submit path), type a filter
+// that uniquely narrows the list, press enter, and assert the FILTERED+chosen model
+// is carried into activeModel. Sequenced on the create signal + FinalModel only,
+// never on tm.Output() (the documented flush-starvation flake discipline).
+func TestModelsE2EFilterAndSelect(t *testing.T) {
+	models := []client.ModelInfo{
+		{ID: "gpt-5", ProviderID: "openai", DisplayName: "GPT-5", ContextLimit: 200000},
+		{ID: "anthropic/claude", ProviderID: "openrouter", DisplayName: "Claude", ContextLimit: 1000000},
+	}
+	// No persisted selection: the startup create carries the empty (default).
+	m, conv, prog := newModelsProgram(t, models, client.ModelSelection{})
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+
+	waitClosed(t, "startup CreateSession", conv.created, 5*time.Second)
+	prog.wait(t, phaseIdle, 5*time.Second)
+
+	// Open the picker by typing "/models" and pressing enter (the slash-command
+	// submit path → runModels → openModels).
+	for _, r := range "/models" {
+		tm.Send(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	// Type a filter that uniquely narrows to the openrouter/claude row, then select.
+	for _, r := range "claude" {
+		tm.Send(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	// Graceful double-ctrl+c quit.
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
+
+	fm := tm.FinalModel(t).(Model)
+	want := client.ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"}
+	if fm.activeModel != want {
+		t.Errorf("final activeModel = %+v, want the filtered+chosen %+v", fm.activeModel, want)
+	}
+}

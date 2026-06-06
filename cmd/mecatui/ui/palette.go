@@ -239,7 +239,7 @@ func renderPalette(th theme.Theme, st paletteState, caps client.Capabilities, in
 		}
 		return ""
 	}
-	start, end := paletteWindow(st.cursor, len(st.filtered), maxPaletteRows)
+	start, end := scrollWindow(st.cursor, len(st.filtered), maxPaletteRows)
 
 	var b strings.Builder
 	b.WriteString(th.Style("muted").Render("commands") + "\n")
@@ -282,22 +282,4 @@ func paletteEmptyNote(th theme.Theme, st paletteState, _ client.Capabilities, in
 		return ""
 	}
 	return th.Style("muted").Render("no matching command")
-}
-
-// paletteWindow returns the [start,end) slice bounds of a scrolling window of
-// size limit over n rows, kept around the selected cursor so it stays visible.
-func paletteWindow(cursor, n, limit int) (start, end int) {
-	if n <= limit {
-		return 0, n
-	}
-	start = cursor - limit/2
-	if start < 0 {
-		start = 0
-	}
-	end = start + limit
-	if end > n {
-		end = n
-		start = end - limit
-	}
-	return start, end
 }

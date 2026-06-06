@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,6 +23,13 @@ import (
 // sequencing) so the picker can be opened directly while idle.
 func newModelsModel(t *testing.T, fm *fakeModels, store SelectionStore, caps client.Capabilities, initial client.ModelSelection) Model {
 	t.Helper()
+	return newModelsModelSized(t, fm, store, caps, initial, 100, 30)
+}
+
+// newModelsModelSized is newModelsModel with an explicit terminal size, so the
+// window tests can force a small row budget (short height ⇒ the list clips).
+func newModelsModelSized(t *testing.T, fm *fakeModels, store SelectionStore, caps client.Capabilities, initial client.ModelSelection, w, h int) Model {
+	t.Helper()
 	recv := &fakeRecver{gate: make(chan struct{})}
 	send := &fakeSender{}
 	conv := &fakeConv{recv: recv, send: send, caps: caps}
@@ -40,7 +48,7 @@ func newModelsModel(t *testing.T, fm *fakeModels, store SelectionStore, caps cli
 		NoAltScreen:    true,
 	})
 	m = applyAll(m,
-		tea.WindowSizeMsg{Width: 100, Height: 30},
+		tea.WindowSizeMsg{Width: w, Height: h},
 		client.SessionReadyMsg{SessionID: "sess-test-0001", Capabilities: caps},
 	)
 	return m
@@ -114,11 +122,19 @@ func TestModelsPanelSanitizesNames(t *testing.T) {
 		t.Errorf("raw ESC (0x1b) leaked into the rendered picker; sanitizeTerminal not applied:\n%q", out)
 	}
 	// The sanitized fields still render as inert text (ESC stripped, body kept):
-	// the id-fallback label, the provider header, and the display-name label.
+	// the id-fallback label, the provider segment, and the display-name label.
 	for _, want := range []string{"]0;pwnedevil/model", "[31mrouter", "[31mRed Model[0m"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("sanitized field %q not rendered as inert text, got:\n%q", want, out)
 		}
+	}
+
+	// Typing a filter echoes USER text, but the ROWS still carry server strings:
+	// re-assert no raw ESC survives once the filter narrows the (sanitized) rows.
+	m = typeFilter(t, m, "router")
+	out = stripANSIstr(m.View().Content)
+	if strings.ContainsRune(out, 0x1b) {
+		t.Errorf("raw ESC leaked into the FILTERED picker; sanitizeTerminal not applied:\n%q", out)
 	}
 }
 
@@ -134,14 +150,19 @@ func TestRunModelsNilGuard(t *testing.T) {
 	}
 }
 
-// TestModelsCursorNav asserts up/down move across the flattened list (skipping no
-// rows — every model is a row) and clamp at the ends.
+// TestModelsCursorNav asserts up/down move across the flat list (every model is a
+// row) and clamp at the ends. The cursor now indexes the FILTERED slice; with an
+// empty filter filtered == models, so the clamps hold unchanged — assert
+// len(filtered)==4 as a guard that the sync ran.
 func TestModelsCursorNav(t *testing.T) {
 	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
 	mm, cmd := m.runModels()
 	m = feedCmd(t, mm.(Model), cmd)
 	if m.models.cursor != 0 {
 		t.Fatalf("initial cursor = %d, want 0", m.models.cursor)
+	}
+	if len(m.models.filtered) != 4 {
+		t.Fatalf("filtered len = %d, want 4 (empty filter ⇒ filtered == models)", len(m.models.filtered))
 	}
 	// Up at the top clamps.
 	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
@@ -154,6 +175,306 @@ func TestModelsCursorNav(t *testing.T) {
 	}
 	if m.models.cursor != 3 {
 		t.Errorf("cursor after many downs = %d, want 3 (clamped at last)", m.models.cursor)
+	}
+}
+
+// typeFilter feeds each rune of s into the open picker's focused filter input via
+// onModelsKey (the production routing), asserting each key is handled. It mirrors
+// how a user types: one KeyPressMsg per rune (Code = the rune).
+func typeFilter(t *testing.T, m Model, s string) Model {
+	t.Helper()
+	for _, r := range s {
+		m = pressModelsKey(t, m, tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	return m
+}
+
+// TestModelsFilterNarrows: typing "claude" into the focused filter narrows to the
+// single openrouter/claude row, the cursor clamps to 0, and enter selects it over
+// the FILTERED set (proving cursor + active operate over filtered, not models).
+func TestModelsFilterNarrows(t *testing.T) {
+	store := &fakeStore{}
+	m := newModelsModel(t, sampleModels(), store, modelsCaps(), client.ModelSelection{})
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+	// Move the cursor off row 0 first to prove the filter clamps it back.
+	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+
+	m = typeFilter(t, m, "claude")
+	if len(m.models.filtered) != 1 {
+		t.Fatalf("filtered len = %d, want 1 (only claude matches)", len(m.models.filtered))
+	}
+	if m.models.filtered[0].ID != "anthropic/claude" {
+		t.Fatalf("filtered[0].ID = %q, want anthropic/claude", m.models.filtered[0].ID)
+	}
+	if m.models.cursor != 0 {
+		t.Errorf("cursor after narrowing = %d, want 0 (clamped to filtered bounds)", m.models.cursor)
+	}
+	// enter selects the filtered cursor model.
+	mm, _, _ = m.onModelsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	want := client.ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"}
+	if m.activeModel != want {
+		t.Errorf("activeModel = %+v, want the filtered+chosen %+v", m.activeModel, want)
+	}
+}
+
+// TestModelsFilterByProvider proves provider_id is a match field: "openai" → the 3
+// openai rows; "router" → the single openrouter row (matched by provider_id, not
+// id/display_name).
+func TestModelsFilterByProvider(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+
+	m = typeFilter(t, m, "openai")
+	if len(m.models.filtered) != 3 {
+		t.Errorf("filter \"openai\" → %d rows, want 3", len(m.models.filtered))
+	}
+
+	// Reset and filter by a substring of provider_id ONLY.
+	m.models.filter.SetValue("")
+	m = m.syncModelsFilter()
+	m = typeFilter(t, m, "router")
+	if len(m.models.filtered) != 1 || m.models.filtered[0].ProviderID != "openrouter" {
+		t.Errorf("filter \"router\" should match the openrouter row by provider_id, got %+v", m.models.filtered)
+	}
+}
+
+// TestModelsFilterCaseInsensitive: "CLAUDE" matches "Claude".
+func TestModelsFilterCaseInsensitive(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+	m = typeFilter(t, m, "CLAUDE")
+	if len(m.models.filtered) != 1 || m.models.filtered[0].ID != "anthropic/claude" {
+		t.Errorf("case-insensitive filter \"CLAUDE\" should match Claude, got %+v", m.models.filtered)
+	}
+}
+
+// TestModelsFilterUppercaseField proves BOTH sides are lowered: an uppercase FIELD
+// (ProviderID "OpenAI") matched by a lowercase query ("openai"). The previous
+// case-insensitive test only lowered the query; this lowers the field.
+func TestModelsFilterUppercaseField(t *testing.T) {
+	in := []client.ModelInfo{
+		{ID: "gpt-5", ProviderID: "OpenAI", DisplayName: "GPT-5"},
+		{ID: "anthropic/claude", ProviderID: "OpenRouter", DisplayName: "Claude"},
+	}
+	got := filterModels(in, "openai")
+	if len(got) != 1 || got[0].ProviderID != "OpenAI" {
+		t.Errorf("lowercase query \"openai\" should match uppercase field \"OpenAI\", got %+v", got)
+	}
+}
+
+// TestModelsFilterPreservesOrder: a query matching >1 row keeps the input
+// (provider_id,id-sorted) order — filterModels must not reorder.
+func TestModelsFilterPreservesOrder(t *testing.T) {
+	in := []client.ModelInfo{
+		{ID: "gpt-5", ProviderID: "openai", DisplayName: "GPT-5"},
+		{ID: "gpt-5-mini", ProviderID: "openai", DisplayName: "GPT-5 mini"},
+		{ID: "gpt-4", ProviderID: "openai", DisplayName: "GPT-4"},
+	}
+	got := filterModels(in, "gpt")
+	if len(got) != 3 {
+		t.Fatalf("filter \"gpt\" → %d rows, want 3", len(got))
+	}
+	for i := range in {
+		if got[i].ID != in[i].ID {
+			t.Errorf("filtered[%d].ID = %q, want %q (input order must be preserved)", i, got[i].ID, in[i].ID)
+		}
+	}
+}
+
+// TestModelsFilterCursorClamp: cursor at the last row, then a filter narrowing to 1
+// row clamps the cursor to 0 (palette parity).
+func TestModelsFilterCursorClamp(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+	for i := 0; i < 3; i++ {
+		m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	if m.models.cursor != 3 {
+		t.Fatalf("precondition: cursor = %d, want 3", m.models.cursor)
+	}
+	m = typeFilter(t, m, "gpt-5-mini")
+	if len(m.models.filtered) != 1 {
+		t.Fatalf("filtered len = %d, want 1", len(m.models.filtered))
+	}
+	if m.models.cursor != 0 {
+		t.Errorf("cursor after narrowing = %d, want 0 (clamped)", m.models.cursor)
+	}
+}
+
+// TestModelsFilterEscClears asserts the two-stage esc: a non-empty filter is
+// cleared (picker stays open, filtered restored to the full list); a second esc
+// (now-empty filter) closes the picker.
+func TestModelsFilterEscClears(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+	m = typeFilter(t, m, "claude")
+	if len(m.models.filtered) != 1 {
+		t.Fatalf("precondition: filtered len = %d, want 1", len(m.models.filtered))
+	}
+
+	// First esc: clears the filter, stays open.
+	mm, _, handled := m.onModelsKey(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if !handled {
+		t.Fatal("esc should be handled by the open picker")
+	}
+	m = mm.(Model)
+	if m.models.view != modelsPanel {
+		t.Error("first esc (non-empty filter) should keep the picker open")
+	}
+	if m.models.filter.Value() != "" {
+		t.Errorf("first esc should clear the filter, value = %q", m.models.filter.Value())
+	}
+	if len(m.models.filtered) != 4 {
+		t.Errorf("filtered should be restored to the full list, len = %d want 4", len(m.models.filtered))
+	}
+
+	// Second esc: empty filter ⇒ closes.
+	mm, _, _ = m.onModelsKey(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = mm.(Model)
+	if m.models.view != modelsNone {
+		t.Error("second esc (empty filter) should close the picker")
+	}
+}
+
+// TestModelsFilterDoesNotInterceptJK guards the arrow-only routing (the j/k-in-
+// Up/Down trap): typing "kimi"/"jamba" must accumulate into the filter and NOT move
+// the cursor (keys.Up/Down bind k/j, but the picker matches arrows by msg.String()).
+func TestModelsFilterDoesNotInterceptJK(t *testing.T) {
+	// A list whose names contain j and k so a filter is meaningful.
+	fm := &fakeModels{models: []client.ModelInfo{
+		{ID: "kimi-k2", ProviderID: "moonshot", DisplayName: "Kimi K2"},
+		{ID: "jamba", ProviderID: "ai21", DisplayName: "Jamba"},
+		{ID: "gpt-5", ProviderID: "openai", DisplayName: "GPT-5"},
+	}}
+	m := newModelsModel(t, fm, &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+
+	m = typeFilter(t, m, "kimi")
+	if m.models.filter.Value() != "kimi" {
+		t.Errorf("filter value = %q, want \"kimi\" (k/i/m/i must type, not navigate)", m.models.filter.Value())
+	}
+	if m.models.cursor != 0 {
+		t.Errorf("cursor moved to %d while typing \"kimi\"; j/k must not be intercepted as nav", m.models.cursor)
+	}
+	if len(m.models.filtered) != 1 || m.models.filtered[0].ID != "kimi-k2" {
+		t.Errorf("filter \"kimi\" should narrow to kimi-k2, got %+v", m.models.filtered)
+	}
+
+	// And "jamba" likewise.
+	m.models.filter.SetValue("")
+	m = m.syncModelsFilter()
+	m = typeFilter(t, m, "jamba")
+	if m.models.filter.Value() != "jamba" || m.models.cursor != 0 {
+		t.Errorf("typing \"jamba\": value=%q cursor=%d, want value \"jamba\" cursor 0", m.models.filter.Value(), m.models.cursor)
+	}
+}
+
+// manyModels builds n flat models for the window tests, labelled model-NNN so an
+// in/out-of-window assertion can target a specific row's text.
+func manyModels(n int) *fakeModels {
+	ms := make([]client.ModelInfo, n)
+	for i := 0; i < n; i++ {
+		id := "model-" + itoa3(i)
+		ms[i] = client.ModelInfo{ID: id, ProviderID: "prov", DisplayName: id}
+	}
+	return &fakeModels{models: ms}
+}
+
+// itoa3 zero-pads a small int to 3 digits so the row labels are distinct
+// substrings (model-007 is not a substring of model-070).
+func itoa3(i int) string {
+	s := strconv.Itoa(i)
+	for len(s) < 3 {
+		s = "0" + s
+	}
+	return s
+}
+
+// TestModelsWindowFollowsCursorPastBottom: with a list longer than the row budget
+// at a small terminal height, paging the cursor past the window bottom keeps the
+// SELECTED row in the rendered window and pushes an early row out of view.
+func TestModelsWindowFollowsCursorPastBottom(t *testing.T) {
+	fm := manyModels(30)
+	m := newModelsModelSized(t, fm, &fakeStore{}, modelsCaps(), client.ModelSelection{}, 100, 14)
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+
+	// Drive the cursor to the last row.
+	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyEnd})
+	if m.models.cursor != 29 {
+		t.Fatalf("cursor after End = %d, want 29", m.models.cursor)
+	}
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "model-029") {
+		t.Errorf("the selected last row (model-029) should be visible in the window:\n%s", out)
+	}
+	// The cursor's NEIGHBOR must ALSO be in-window, so a degenerate single-row window
+	// can't pass this test.
+	if !strings.Contains(out, "model-028") {
+		t.Errorf("the neighbor row (model-028) should be visible in the window:\n%s", out)
+	}
+	if strings.Contains(out, "model-000") {
+		t.Errorf("an early row (model-000) should be scrolled out of the window:\n%s", out)
+	}
+}
+
+// TestModelsWindowFollowsCursorPastTop: after jumping to the bottom then back to the
+// top, the first row is visible again (the window follows the cursor up too).
+func TestModelsWindowFollowsCursorPastTop(t *testing.T) {
+	fm := manyModels(30)
+	m := newModelsModelSized(t, fm, &fakeStore{}, modelsCaps(), client.ModelSelection{}, 100, 14)
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+
+	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyEnd})
+	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyHome})
+	if m.models.cursor != 0 {
+		t.Fatalf("cursor after Home = %d, want 0", m.models.cursor)
+	}
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "model-000") {
+		t.Errorf("the first row (model-000) should be visible after Home:\n%s", out)
+	}
+	// The cursor's NEIGHBOR must ALSO be in-window, so a degenerate single-row window
+	// can't pass this test.
+	if !strings.Contains(out, "model-001") {
+		t.Errorf("the neighbor row (model-001) should be visible after Home:\n%s", out)
+	}
+	if strings.Contains(out, "model-029") {
+		t.Errorf("the last row (model-029) should be out of the window after Home:\n%s", out)
+	}
+}
+
+// TestModelsNoMatchNote: a filter matching nothing (inventory non-empty) renders the
+// distinct "no models match …" note, NOT the server-empty/disabled copy, and enter
+// is a no-op (cursor safe).
+func TestModelsNoMatchNote(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+	m = typeFilter(t, m, "zzzzz")
+	if len(m.models.filtered) != 0 {
+		t.Fatalf("filtered len = %d, want 0", len(m.models.filtered))
+	}
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, `no models match "zzzzz" — esc to clear`) {
+		t.Errorf("the no-match note (with recovery hint) should render, got:\n%s", out)
+	}
+	if strings.Contains(out, "No selectable models advertised") || strings.Contains(out, "not available on this server") {
+		t.Errorf("the no-match state must be distinct from server-empty/disabled copy:\n%s", out)
+	}
+	// enter is a no-op (cursor past the empty filtered set).
+	mm, _, _ = m.onModelsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !mm.(Model).activeModel.IsZero() {
+		t.Error("enter on a no-match filter must be a no-op")
 	}
 }
 
@@ -413,6 +734,41 @@ func TestModelsPickerEmptyGolden(t *testing.T) {
 	m = feedCmd(t, mm.(Model), cmd)
 	got := stripANSI([]byte(m.View().Content))
 	compareGolden(t, "models_empty.golden", got)
+}
+
+// TestModelsPickerFilteredGolden locks the narrowed list (filter "gpt" applied)
+// with the flat provider-tagged rows + the active marker.
+func TestModelsPickerFilteredGolden(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(),
+		client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5"})
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+	m = typeFilter(t, m, "gpt")
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "models_filtered.golden", got)
+}
+
+// TestModelsPickerScrolledGolden locks a mid-list window: a 30-row list at a small
+// height with the cursor paged to the bottom, proving the list clips + the window
+// follows the cursor.
+func TestModelsPickerScrolledGolden(t *testing.T) {
+	m := newModelsModelSized(t, manyModels(30), &fakeStore{}, modelsCaps(), client.ModelSelection{}, 100, 14)
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyEnd})
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "models_scrolled.golden", got)
+}
+
+// TestModelsPickerNoMatchGolden locks the filter-matched-nothing note (distinct
+// from the server-empty/disabled states).
+func TestModelsPickerNoMatchGolden(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+	m = typeFilter(t, m, "zzzzz")
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "models_nomatch.golden", got)
 }
 
 // pressModelsKey routes a key through onModelsKey, asserting it was handled.

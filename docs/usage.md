@@ -314,8 +314,12 @@ show their curated embedded catalog as before.
 #### The `mecatui` model picker + client-side last-used persistence
 
 `mecatui` surfaces the wire selection as the **`/models`** palette command (gated on
-`caps.model_selection`): a grouped-by-provider picker (`↑`/`↓` to move, `enter` to
-select, `esc` to close) that **persists** your choice and applies it to the **next**
+`caps.model_selection`): a flat, **type-to-filter** picker — each row tagged with
+its `provider_id` (`provider · name`), filtered live by a case-insensitive
+substring over `provider_id`/`id`/display name, scrolled in a window clipped to the
+terminal height that follows the cursor (`↑`/`↓` to move, `pgup`/`pgdown` to page,
+`home`/`end` to jump, `enter` to select; `esc` clears a non-empty filter, then
+closes) that **persists** your choice and applies it to the **next**
 session — the provider is fixed per session, so a pick takes effect on the next
 `CreateSession`, not the live run. The selection is stored **client-side** in
 `$XDG_STATE_HOME/mecatui/models.yaml` (fallback `~/.local/state/mecatui/models.yaml`)

@@ -1,22 +1,22 @@
- mecatui  ·  session sess-test-00  ·  mock-model  ·  mode default  ·  127.0.0.1:8080
+ mecatui  ·  session sess-test-00  ·  gpt-5  ·  mode default  ·  127.0.0.1:8080
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-
-
 
 
 
 
      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
      ┃                                                                                       ┃
-     ┃  Models                                                                               ┃
-     ┃  > filter models…                                                                     ┃
+     ┃  Models  (2)                                                                          ┃
+     ┃  > gpt                                                                                ┃
      ┃                                                                                       ┃
-     ┃  No selectable models advertised.                                                     ┃
+     ┃  ╭───────────────────────────────────────╮                                            ┃
+     ┃  │  › ● openai · GPT-5  img reason 200K  │                                            ┃
+     ┃  ╰───────────────────────────────────────╯                                            ┃
+     ┃      openai · GPT-5 mini  reason 128K                                                 ┃
      ┃                                                                                       ┃
      ┃  type to filter · ↑/↓/pgup move · enter use · esc clear filter / close · ● = current  ┃
      ┃                                                                                       ┃
      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
 
 
 

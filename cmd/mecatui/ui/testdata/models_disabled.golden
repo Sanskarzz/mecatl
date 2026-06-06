@@ -5,17 +5,17 @@
 
 
 
-
-                   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-                   ┃                                                           ┃
-                   ┃  Models                                                   ┃
-                   ┃                                                           ┃
-                   ┃  Model selection is not available on this server.         ┃
-                   ┃  Set OPENAI_API_KEY or OPENROUTER_API_KEY and reconnect.  ┃
-                   ┃                                                           ┃
-                   ┃  ↑/↓ select · enter use · esc close · ● = current         ┃
-                   ┃                                                           ┃
-                   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+     ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+     ┃                                                                                       ┃
+     ┃  Models                                                                               ┃
+     ┃  > filter models…                                                                     ┃
+     ┃                                                                                       ┃
+     ┃  Model selection is not available on this server.                                     ┃
+     ┃  Set OPENAI_API_KEY or OPENROUTER_API_KEY and reconnect.                              ┃
+     ┃                                                                                       ┃
+     ┃  type to filter · ↑/↓/pgup move · enter use · esc clear filter / close · ● = current  ┃
+     ┃                                                                                       ┃
+     ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 
 

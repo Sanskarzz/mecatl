@@ -196,13 +196,23 @@ never edits the user model (the agent curates it).
 
 **`/models` (model picker — the only *selecting* overlay).** Gated on
 `caps.model_selection` (the server advertises ≥1 available provider) AND a wired
-model lister. It fires `ListModels` and renders the selectable models **grouped by
-provider**, each row showing the display name plus capability glyphs (`img` when
-the model takes image input, `reason` when it emits reasoning) and a compact
-context window (e.g. `200K`, `1M`; omitted when unknown). `↑`/`↓` move a cursor
-across the flattened list, `enter` **selects** the cursor model (a `●` marks the
-currently-active one), and `esc` closes. UNLIKE the read-only overlays it changes
-state: selecting **persists** the choice (last-used) and **applies to the NEXT
+model lister. It fires `ListModels` and renders the selectable models as a **flat
+list**, each row tagged with its `provider_id` (`provider · name`) plus capability
+glyphs (`img` when the model takes image input, `reason` when it emits reasoning)
+and a compact context window (e.g. `200K`, `1M`; omitted when unknown). The picker
+opens with a **type-to-filter** input focused: type to narrow the list by a
+substring match (case-insensitive) over `provider_id`, model `id`, and display
+name — at 300+ live models this is how you find one fast. The list **scrolls** in a
+window clipped to the terminal height that follows the cursor (the selected row
+stays visible when you page past the top/bottom edge), so a large catalog never
+overruns the screen. `↑`/`↓` move the cursor over the **filtered** set, `pgup`/
+`pgdown` page, `home`/`end` jump, and `enter` **selects** the cursor model (a `●`
+marks the currently-active one). `esc` is **two-stage**: with a non-empty filter it
+clears the filter (the picker stays open); with an empty filter it closes the
+picker. (`j`/`k` type into the filter — they do **not** navigate here, unlike the
+read-only overlays — so a name like `kimi`/`jamba` filters as typed.) UNLIKE the
+read-only overlays it changes state: selecting **persists** the choice (last-used)
+and **applies to the NEXT
 session** (`provider_id`/`model_id` on the next `CreateSession`) — it does NOT
 re-route the live session (provider is fixed per session; a live switch is a
 deferred follow-up). The pick is persisted **client-side** to a state file:

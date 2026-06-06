@@ -263,7 +263,7 @@ func renderMention(th theme.Theme, st mentionState, width int) string {
 	if !st.open || len(st.matches) == 0 {
 		return ""
 	}
-	start, end := paletteWindow(st.cursor, len(st.matches), maxMentionRows)
+	start, end := scrollWindow(st.cursor, len(st.matches), maxMentionRows)
 
 	var b strings.Builder
 	b.WriteString(th.Style("muted").Render("files") + "\n")
