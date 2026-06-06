@@ -43,8 +43,33 @@ linters:
     - unparam
     - unused
   settings:
+    # depguard is the PER-FILE half of the machine-enforced clean-core layering
+    # (the other half is the whole-graph DAG test in internal/arch/layering_test.go).
+    # The core tiers (session, governance, tool, prompt, port, team, agent) are an
+    # ALLOWLIST: each rule is list-mode: strict and lists $gostd + exactly the mecatl
+    # core packages that tier legitimately imports (see the import map in CLAUDE.md's
+    # "layering rule"). This makes a NEW heavy adapter import rejected BY DEFAULT — the
+    # whole point of an allowlist over a denylist of named adapters. cmd/ mains are
+    # composition roots and are deliberately NOT targeted by any core rule.
+    #
+    # The `os` deny entries are the expressiveness patch: `os` is stdlib so $gostd
+    # would otherwise allow it, but CLAUDE.md bans core packages from importing os.
+    # depguard applies deny OVER allow, so the deny wins. (Confirmed: no core package
+    # imports os today, so these fire zero false positives on the clean tree.) NOTE
+    # this `os` ban is DIRECT-only: depguard sees one file's imports, so a *transitive*
+    # reach into os (every core pkg ultimately touches os via fmt/etc.) is intentionally
+    # NOT graph-enforced — neither here nor in the DAG test. The rule is "no core file
+    # may name os directly", not "no core package may transitively depend on os".
+    #
+    # Every core rule EXCLUDES '!$test': test files legitimately import the
+    # memfs/mockllm adapters (offline tests) and the external-test convention
+    # imports the package-under-test itself. This mirrors the DAG test in
+    # internal/arch/layering_test.go, which reads NON-TEST imports only. Production
+    # (non-test) core code is what the allowlist holds to the inward-only rule.
     depguard:
       rules:
+        # ORTHOGONAL to the core-tier layering rules below: this is the house
+        # deprecation guard (io/ioutil), not part of the clean-core allowlist set.
         deprecated:
           list-mode: lax
           files:
@@ -53,6 +78,92 @@ linters:
           deny:
             - pkg: io/ioutil
               desc: deprecated; use io and os
+        # Domain leaves: pure, no mecatl-core dependencies. (session is the pure
+        # domain leaf; governance is the session-free leaf.)
+        core-domain-leaf:
+          list-mode: strict
+          files:
+            - '**/internal/session/**.go'
+            - '**/internal/governance/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+          deny:
+            - pkg: os
+              desc: 'core domain must not import os (CLAUDE.md layering rule); side effects belong in adapters/composition'
+        # Domain (tool): holds the FileSystem/Workspace interfaces, imports session only.
+        core-tool:
+          list-mode: strict
+          files:
+            - '**/internal/tool/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/internal/session
+          deny:
+            - pkg: os
+              desc: 'core domain must not import os (CLAUDE.md layering rule); side effects belong in adapters/composition'
+        # Domain (prompt): two-layer assembly + consumer-local ports; imports
+        # session + tool only (NOT port — prompt's ports live in prompt).
+        core-prompt:
+          list-mode: strict
+          files:
+            - '**/internal/prompt/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/internal/session
+            - github.com/stacklok/mecatl/internal/tool
+          deny:
+            - pkg: os
+              desc: 'core domain must not import os (CLAUDE.md layering rule); side effects belong in adapters/composition'
+        # port: the inward-facing interfaces; imports domain only (session,
+        # governance, prompt, tool) + stdlib. Adapters meet these only in composition.
+        core-port:
+          list-mode: strict
+          files:
+            - '**/internal/port/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/internal/session
+            - github.com/stacklok/mecatl/internal/governance
+            - github.com/stacklok/mecatl/internal/prompt
+            - github.com/stacklok/mecatl/internal/tool
+          deny:
+            - pkg: os
+              desc: 'port must not import os (CLAUDE.md layering rule); side effects belong in adapters/composition'
+        # team: the agent-team domain types; imports session only.
+        core-team:
+          list-mode: strict
+          files:
+            - '**/internal/team/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/internal/session
+          deny:
+            - pkg: os
+              desc: 'core domain must not import os (CLAUDE.md layering rule); side effects belong in adapters/composition'
+        # agent: the APPLICATION loop; imports domain + port + team + stdlib +
+        # golang.org/x/sync/errgroup. Adapters are INJECTED, never imported.
+        core-agent:
+          list-mode: strict
+          files:
+            - '**/internal/agent/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/internal/session
+            - github.com/stacklok/mecatl/internal/governance
+            - github.com/stacklok/mecatl/internal/prompt
+            - github.com/stacklok/mecatl/internal/tool
+            - github.com/stacklok/mecatl/internal/port
+            - github.com/stacklok/mecatl/internal/team
+            - golang.org/x/sync/errgroup
+          deny:
+            - pkg: os
+              desc: 'agent (application loop) must not import os (CLAUDE.md layering rule); side effects belong in adapters/composition'
     # forbidigo is the BAN GUARD for the logging architecture (iteration 3): no NEW
     # global-slog drift may re-enter internal/. Diagnostics flow through the injected
     # port.Diagnostics seam; slog.Default()/slog.SetDefault()/package-level

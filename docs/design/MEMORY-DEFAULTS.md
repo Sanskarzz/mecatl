@@ -367,9 +367,11 @@ treating the directory as **opaque and store-owned**:
    memory" may be surprised that a worktree starts empty. Acceptable and consistent
    with the documented scoping. No action.
 
-3. **No machine-enforced layering check** exists yet (CLAUDE.md: "verified by
-   import review"). The new helpers in `main.go` import only stdlib (`os`,
-   `path/filepath`, `strings`); nothing new leaks into `ui`/`theme`/`client`.
+3. **Layering is now machine-enforced** (depguard allowlist in `.golangci.yml` +
+   the DAG test in `internal/arch/layering_test.go`, both under `task lint`/`task
+   test`). The helpers in `main.go` live in `cmd/` (a composition root, exempt from
+   the core rules) and import only stdlib (`os`, `path/filepath`, `strings`);
+   nothing new leaks into `ui`/`theme`/`client`.
 
 4. **Default-on changes disk footprint.** Every project opened in mecatui now gets
    a (small, lazily-created) directory under `~/.local/share`. The store file is

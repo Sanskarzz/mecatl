@@ -162,19 +162,46 @@ github.com/stacklok/mecatl
 └── docs/design/                        # this file + STEP-CHAIN.md + PRODUCTION-READINESS.md
 ```
 
-**Allowed-imports matrix** (the contract; CI can enforce with `depguard`):
+**Allowed-imports matrix** (the contract; **machine-enforced** — see "Layering enforcement" below):
 
 | Package | May import |
 |---|---|
 | `session`, `prompt`, `governance`, `tool` (domain) | stdlib, other domain packages. **Never** `adapter`, `agent`, `contracts`, `os`, OpenAI SDK, grpc-go. |
 | `port` | domain packages + stdlib (`context`, `io`, `iter`, `time`). Nothing else. (`port` imports `tool` and `prompt` because `LLMRequest` carries `[]tool.ToolSpec` and `prompt.Layered`.) |
-| `agent` (application) | domain + `port` + stdlib. **Never** `adapter` or `contracts`. (Tests may import adapters.) |
+| `team` (domain) | `session` + stdlib. The agent-team value types. |
+| `agent` (application) | domain + `port` + `team` + stdlib + `golang.org/x/sync/errgroup`. **Never** `adapter` or `contracts`. (Tests may import adapters — see the `$test` carve-out below.) |
 | `adapter/*` | domain + `port` + the specific external lib it adapts. The loop never imports an adapter; two driven adapters legitimately reference `agent` types they implement/drive — `tokenizer` satisfies `agent.TokenCounter`, and `server` drives `agent.Engine`/`agent.Run`. |
 | `contracts/gen` | generated; protobuf + grpc-go runtime only. |
 | `cmd/*` | everything — this is the composition root where wiring happens. |
 
 The only place concrete adapters meet ports is `cmd/` (dependency injection by hand;
 no DI framework — explicit constructors, doc 03 "pass dependencies explicitly").
+
+### Layering enforcement (two mechanisms)
+
+The allowed-imports matrix above is enforced by two complementary, machine-checked
+mechanisms — both run under `task lint` / `task test`, neither relies on review:
+
+1. **depguard allowlist** (`.golangci.yml`, per-file). One `list-mode: strict` rule per
+   core tier (`core-domain-leaf`, `core-tool`, `core-prompt`, `core-port`, `core-team`,
+   `core-agent`), each allowing only `$gostd` + the exact mecatl-core packages that tier
+   legitimately imports, plus an explicit `os` **deny** (depguard applies deny over allow,
+   patching the gap that `os` is stdlib but banned in core). It is an **allowlist**, not a
+   denylist of known adapters: a *new* heavy adapter import is rejected by default. depguard
+   sees one file's direct imports at a time.
+2. **DAG-assertion test** (`internal/arch/layering_test.go`, whole-graph). Walks the
+   **non-test** import graph of the seven core packages and asserts (a) no core package
+   transitively reaches an adapter / `contracts/gen` / `internal/app` / an LLM SDK / grpc,
+   (b) no import **cycle** among the core packages (the property a per-file linter cannot
+   observe), and (c) `port` / `agent` direct imports stay within their allow-sets. Hermetic
+   and offline (resolves from the on-disk module via `go/build`; no network, no `go.mod`
+   change), mirroring `internal/prompt/layering_test.go`.
+
+**Carve-outs** these encode deliberately: `port.PermissionPolicy` is implemented in the
+`permpolicy` **adapter** (not `governance`, which can't import `session`); `FileSystem` /
+`Workspace` live in `tool` (moving them to `port` makes a `port↔tool` cycle); and **agent
+test files may import the `memfs` / `mockllm` adapters** to run the loop offline — so the
+`core-agent` depguard rule excludes `$test` and the DAG test reads non-test imports only.
 
 ---
 

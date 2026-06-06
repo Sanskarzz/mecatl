@@ -45,10 +45,10 @@ Layered DDD; the package's layer is in CAPS. Design rationale lives in `docs/des
 
 ## The layering rule (the thing to get right)
 
-Dependencies point **inward only** (verified by import review; not machine-enforced):
+Dependencies point **inward only**, machine-enforced two ways (both run under `task lint`/`task test`): the **depguard allowlist** in `.golangci.yml` (per-file — each core tier is `list-mode: strict` allowing only `$gostd` + the exact core packages it imports, with an `os` deny on top; a NEW heavy-adapter import is rejected by default) AND the **DAG test** in `internal/arch/layering_test.go` (whole-graph — transitive direction + cycle detection, which the per-file depguard cannot express). `internal/team` is part of the core (agent imports it).
 
-- Domain (`session`, `prompt`, `governance`, `tool`) and `internal/agent` must **never** import an adapter, `contracts/gen`, `os`, the OpenAI/Anthropic SDKs, or gRPC.
-- `internal/port` imports only domain + stdlib. `internal/agent` imports only domain + `port` — adapters are injected.
+- Domain (`session`, `prompt`, `governance`, `tool`), `internal/team`, and `internal/agent` must **never** import an adapter, `contracts/gen`, `os`, the OpenAI/Anthropic SDKs, or gRPC.
+- `internal/port` imports only domain + stdlib. `internal/agent` imports only domain + `port` + `team` (+ stdlib + `golang.org/x/sync/errgroup`) — adapters are injected. (Agent **test** files may import the `memfs`/`mockllm` adapters to run offline; the depguard `core-agent` rule excludes `$test`, and the DAG test reads non-test imports only.)
 - Concrete adapters meet ports **only** in the composition layer — `internal/app` and the `cmd/` mains. No DI framework; explicit constructors. Keep wiring in `internal/app`, not in domain/`port`/`agent`.
 
 ## Things That Will Bite You
