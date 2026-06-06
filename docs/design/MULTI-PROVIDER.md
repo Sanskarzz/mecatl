@@ -229,6 +229,37 @@ selected model so the compaction trigger AGREES with the `ListModels`-advertised
 the 128k default). This is the cross-provider contamination guard: a shallow clone
 swapping only the LLM would compact and count through the wrong model.
 
+**Per-session catalog = core + server-global MCP + client MCP + per-session
+Task/Team.** The factory does NOT build a core-only catalog. After `registerCoreTools`
+it mounts the **server-global** MCP tools (`cfg.MCPServers` + ToolHive — the same tools
+`buildCatalog→registerMCP` mounts on the main engine) by reusing the **shared** manager
+Build already connected (`mainMgr.Tools()`), threaded into the factory as `globalMgr`.
+This closes the selector-strips-MCP bug: before the fix, selecting any non-default
+provider/model (what the mecatui `/models` picker always does) silently dropped every
+server-global MCP tool (github/slack/fetch/…). Mount order is **core → global MCP →
+client MCP → per-session Task/Team**, which gives **global-wins** collision precedence:
+`mcp.Register` is **first-wins + skip-and-continue** — a client tool whose namespaced
+name collides with an already-registered global one is SKIPPED (the global tool stays),
+and **every other non-colliding client tool is still registered**. This is the
+strictly-robust behaviour: a return-on-first-duplicate would have silently dropped every
+client tool ordered *after* the collider, and also mis-handled two global servers
+clashing. `Register` returns the **skipped tool names** alongside the joined error, so
+each mount site emits ONE **provenance-bearing** WARN naming exactly which tools were
+dropped and who won — distinct per tier: the per-session client mount says the tool(s)
+were *shadowed by an existing server-global tool of the same name (the global tool
+wins)* (the line an end-user reads to self-diagnose a vanished tool); the global mounts
+(per-session and build-time `registerMCP`) say a *server advertised a name already
+registered* (a defective-server / within-global condition). These are composition-layer
+logs, so the loop's "exactly two diagnostics lines" invariant does not apply.
+**Lifecycle isolation:** `globalMgr` is owned by `Build`; it is reused, never
+reconnected, and its `Close` is **NEVER** folded into the per-session
+`SessionEngineResult.Close` — a per-session `CloseSession` tearing down the shared
+manager would kill MCP for every other live session. `globalMgr` is also the
+`reference:`-resolution mainMgr for per-session Task/Team subagent defs (falling back to
+the client mgr only when there is no global manager), so a selector session's
+`reference: <name>` resolves against the server-global servers — parity with the
+build-time path.
+
 `session.Session` is NOT widened — the selector resolves to an ENGINE at create time,
 registered in the same `sessionEngines` map (and selected the same way by
 `StartRunContent`) the client-MCP path uses. The map is **capped** at

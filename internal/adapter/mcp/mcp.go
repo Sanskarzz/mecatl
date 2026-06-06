@@ -519,11 +519,30 @@ func (m *Manager) Close() error {
 // collision should be impossible given the mcp__ namespacing, but two servers
 // configured with the same Name (or a server advertising duplicate tools) would
 // trip it.
-func Register(cat *tool.Catalog, tools []tool.Tool) error {
+//
+// SKIP-AND-CONTINUE on collision: a duplicate-tool error is NON-fatal — the
+// already-registered tool wins (FIRST-wins, so a caller registering the
+// authoritative set first — e.g. the server-global MCP tools before client tools —
+// keeps it), the colliding tool is skipped, and Register KEEPS registering the rest.
+// This is what makes "global wins, the other non-colliding client tools are
+// preserved" actually true (a return-on-first-dup would silently drop every tool
+// ordered after the collider). Non-duplicate registration errors are also
+// accumulated rather than aborting.
+//
+// It returns the NAMES of the skipped/failed tools (in encounter order) alongside the
+// joined error, so a caller can emit ONE provenance-bearing WARN listing exactly which
+// tools were dropped (e.g. "client MCP: shadowed by a server-global tool: <names>")
+// rather than a generic line. The skipped slice is non-nil iff the error is non-nil;
+// the error still satisfies errors.Is(_, tool.ErrDuplicateTool) when any collision
+// occurred. Both are nil/empty when every tool registered cleanly.
+func Register(cat *tool.Catalog, tools []tool.Tool) (skipped []string, err error) {
+	var errs []error
 	for _, t := range tools {
-		if err := cat.Register(t); err != nil {
-			return fmt.Errorf("mcp: register %q: %w", t.Spec().Name, err)
+		if rerr := cat.Register(t); rerr != nil {
+			name := t.Spec().Name
+			skipped = append(skipped, name)
+			errs = append(errs, fmt.Errorf("mcp: register %q: %w", name, rerr))
 		}
 	}
-	return nil
+	return skipped, errors.Join(errs...)
 }

@@ -551,12 +551,18 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 // session with BOTH a non-default model and client MCP gets ONE engine over ONE
 // catalog from a single call. Each call connects a SCOPED mcp.NewManager for that
 // one session when specs are present (best-effort: a down server is logged-and-
-// skipped, never fatal), registers the CORE tools (registerCoreTools — the same
-// core toolset the main engine gets) PLUS those MCP tools into a fresh catalog,
-// and builds an engine whose every NON-provider collaborator MATCHES the main
-// engine via engineDepsForProvider (so a per-session engine compacts, expands
-// commands, persists, and emits telemetry exactly like the shared one — only the
-// catalog and the resolved provider/model differ).
+// skipped, never fatal), and assembles a fresh catalog in this order: the CORE
+// tools (registerCoreTools — the same core toolset the main engine gets), then the
+// SERVER-GLOBAL MCP tools (globalMgr.Tools() — cfg.MCPServers + ToolHive, the same
+// tools buildCatalog→registerMCP mounts on the main engine, reused from Build's
+// already-connected shared manager — NOT reconnected, and NOT in the per-session
+// closeFn), then the client MCP tools, then a per-session Task/Team. It builds an
+// engine whose every NON-provider collaborator MATCHES the main engine via
+// engineDepsForProvider (so a per-session engine compacts, expands commands,
+// persists, and emits telemetry exactly like the shared one — only the catalog and
+// the resolved provider/model differ). globalMgr is also the `reference:`-resolution
+// mainMgr for per-session Task/Team subagent defs (falling back to the client mgr
+// when there is no global manager), parity with the build-time path.
 //
 // PROVIDER/MODEL RESOLUTION (the §0.2 resolution table): the zero selector keeps
 // the DEFAULT provider + cfg.Model (the pre-S3 MCP path, byte-identical). A
@@ -572,11 +578,12 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 // contamination fix the S1 seam was designed for.
 //
 // It captures the SAME store/policy/hooks the main engine was built with (threaded
-// from Build), plus the registry (so it can resolve the selector) and the DEFAULT
-// provider (the zero-selector fallback), so the two engines cannot drift on their
-// shared Deps. It returns the engine and the manager's Close (a no-op when no
-// specs) so the Service can tear that session's MCP connections down on
-// disconnect. Wired into server.Config.SessionEngine in Build, so neither the
+// from Build), plus the registry (so it can resolve the selector), the DEFAULT
+// provider (the zero-selector fallback), and the SHARED global MCP manager
+// (globalMgr — owned by Build), so the two engines cannot drift on their shared
+// Deps or their MCP toolset. It returns the engine and a Close that tears down ONLY
+// this session's own MCP connections (client specs + per-def inline managers) — the
+// shared globalMgr is NEVER in that Close. Wired into server.Config.SessionEngine in Build, so neither the
 // registry nor mcp/agent wiring leaks into the server or acp layers.
 func sessionEngineFactory(
 	cfg Config,
@@ -586,6 +593,7 @@ func sessionEngineFactory(
 	policy port.PermissionPolicy,
 	hooks port.HookRunner,
 	mcpProvider mcp.Provider,
+	globalMgr *mcp.Manager,
 	instructions prompt.InstructionAssembler,
 	agentReg *agents.Registry,
 ) server.SessionEngineFactory {
@@ -644,36 +652,66 @@ func sessionEngineFactory(
 		cat := tool.NewCatalog()
 		registerCoreTools(cfg, cat, false)
 		closeFn := func() error { return nil }
+		// Mount the SERVER-GLOBAL MCP tools (cfg.MCPServers + ToolHive) that the main
+		// engine got via buildCatalog→registerMCP. globalMgr is the SHARED manager Build
+		// owns; we reuse its already-connected Tools() — we do NOT reconnect and we MUST
+		// NOT fold globalMgr.Close into closeFn (a per-session CloseSession must never
+		// tear down MCP for every other session). Mounted BEFORE the client specs so a
+		// client tool colliding with a global one loses: mcp.Register is FIRST-wins +
+		// skip-and-continue, so the global tool stays and every OTHER (non-colliding)
+		// client tool is still registered. Each mount logs ONE provenance-bearing WARN
+		// naming the dropped tools (Register returns the skipped names): the global mount
+		// is a within-/across-global clash (a defective server advertising a duplicate),
+		// the client mount is the client↔global tier (the global tool shadows the client
+		// one — the WARN an end-user reads to self-diagnose a vanished tool).
+		if globalMgr != nil {
+			if skipped, rerr := mcp.Register(cat, globalMgr.Tools()); rerr != nil {
+				cfg.diag().Log(ctx, port.LevelWarn,
+					"server-global MCP: skipped duplicate tool name(s) (a server advertised a name already registered): "+strings.Join(skipped, ", "),
+					"tools", strings.Join(skipped, ", "), "err", rerr)
+			}
+		}
 		if mgr != nil {
-			if rerr := mcp.Register(cat, mgr.Tools()); rerr != nil {
-				cfg.diag().Log(ctx, port.LevelWarn, "client MCP: registering tools failed; some may be missing", "err", rerr)
+			if skipped, rerr := mcp.Register(cat, mgr.Tools()); rerr != nil {
+				cfg.diag().Log(ctx, port.LevelWarn,
+					"client MCP: tool(s) shadowed by an existing server-global tool of the same name (the global tool wins): "+strings.Join(skipped, ", "),
+					"tools", strings.Join(skipped, ", "), "err", rerr)
 			}
 			closeFn = mgr.Close
 			cfg.diag().Log(ctx, port.LevelInfo, "client MCP mounted for session",
 				"servers", len(mgr.Servers()), "tools", len(mgr.Tools()))
 		}
 
-		// Half B — per-session sub-agent tools. The build-time per-session catalog is
-		// core-tools-only (registerCoreTools registers NO Task/Team — those are added
-		// separately in buildCatalog, which the factory never calls), so a
-		// provider-selected session today CANNOT spawn sub-agents at all. Build a
-		// per-session Task tool (and, under EnableTeams, an in-catalog Team tool) wired
-		// to THIS session's resolved (provider, providerID, model) as the inherited
-		// parent — reusing the SAME builders the build-time path uses so the two
-		// catalogs cannot drift. A def's own `provider:` still overrides per-def. The
-		// per-session mgr (the client-MCP manager) is the mainMgr for Task/member defs'
-		// MCP reference/inline resolution, mirroring the build-time path.
+		// Half B — per-session sub-agent tools. The per-session catalog already carries
+		// core + server-global MCP + client MCP (above); here we add a per-session Task
+		// tool (and, under EnableTeams, an in-catalog Team tool) wired to THIS session's
+		// resolved (provider, providerID, model) as the inherited parent — reusing the
+		// SAME builders the build-time path uses so the two catalogs cannot drift. A
+		// def's own `provider:` still overrides per-def.
+		//
+		// refMgr is the mainMgr for Task/member defs' MCP `reference:` resolution: prefer
+		// the SHARED globalMgr (parity with the build-time path, which passes the global
+		// mainMgr — so a per-session subagent's `reference: <name>` resolves against the
+		// SERVER-global servers), falling back to the per-session client mgr when there is
+		// no global manager. We do NOT merge the two into a synthetic manager (that would
+		// entangle their lifecycles); per-def INLINE MCP entries connect independently of
+		// refMgr and are unaffected.
 		//
 		// The Task tool's inline-MCP close is FOLDED into the returned Close so a def's
 		// inline MCP managers are torn down with the session (CloseSession/Service.Close).
-		taskTool, taskClose := buildTaskTool(ctx, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, hooks, agentReg, mgr)
+		// globalMgr is NEVER in that Close — Build owns its lifecycle.
+		refMgr := globalMgr
+		if refMgr == nil {
+			refMgr = mgr
+		}
+		taskTool, taskClose := buildTaskTool(ctx, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, hooks, agentReg, refMgr)
 		cat.MustRegister(taskTool)
 		closeFn = composeCloseErr(taskClose, closeFn)
 		if cfg.EnableTeams {
 			// In-catalog Team tool over a per-session member factory wired to the session
 			// provider as parent. (The standalone gRPC CreateTeam RPC stays on the default
 			// provider — deferred; CreateTeam carries no per-session selector today.)
-			factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, mgr)
+			factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, refMgr)
 			cat.MustRegister(agent.NewTeamTool(
 				agent.TeamMemberEngineFactory(factory),
 				agent.WithTeamToolForker(fk),
@@ -861,7 +899,7 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 
 	deps := baseEngineDeps(cfg, provider, store, policy, mainHooks, mcpProvider, instructions)
 	deps.Catalog = cat
-	sessFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, mcpProvider, instructions, agentReg)
+	sessFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, mcpProvider, mainMgr, instructions, agentReg)
 	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, userModelStore, mcpClose, nil
 }
 
@@ -1551,8 +1589,13 @@ func registerMCP(ctx context.Context, cfg Config, cat *tool.Catalog) (*mcp.Manag
 		cfg.diag().Log(ctx, port.LevelWarn, "MCP manager construction failed; continuing without MCP tools", "err", err)
 		return nil, nil, inventory, func() {}
 	}
-	if err := mcp.Register(cat, mgr.Tools()); err != nil {
-		cfg.diag().Log(ctx, port.LevelWarn, "registering MCP tools failed; some tools may be missing", "err", err)
+	if skipped, err := mcp.Register(cat, mgr.Tools()); err != nil {
+		// Within-/across-global clash at build time: a defective server advertised a
+		// name another already-registered server (or the same server) exposes. The
+		// namespaced names (mcp__<server>__<tool>) carry the server provenance.
+		cfg.diag().Log(ctx, port.LevelWarn,
+			"server-global MCP: skipped duplicate tool name(s) (a server advertised a name already registered): "+strings.Join(skipped, ", "),
+			"tools", strings.Join(skipped, ", "), "err", err)
 	}
 	cfg.diag().Log(ctx, port.LevelInfo, "MCP tools registered", "servers", len(configs), "tools", len(mgr.Tools()))
 

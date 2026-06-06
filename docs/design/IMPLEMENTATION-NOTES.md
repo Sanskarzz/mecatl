@@ -496,6 +496,47 @@ bare `port.LLMProvider`. **DEFERRED:** the standalone gRPC `CreateTeam` RPC stay
 provider (no per-CreateTeam selector); `ListAgents`/`AgentInfo` provider surfacing (no proto
 change).
 
+**Server-global MCP on every session (bug #3 fix, `sessionEngineFactory`):** the
+per-session catalog mounts the SERVER-GLOBAL MCP tools (`cfg.MCPServers` + ToolHive — the
+same tools `buildCatalog→registerMCP` mounts on the main engine), NOT just core + client
+MCP. `Build` threads the shared, already-connected `mainMgr` into the factory as
+`globalMgr`; the factory calls `mcp.Register(cat, globalMgr.Tools())` right after
+`registerCoreTools` and BEFORE the client specs. Before this, a selector session (any
+`provider_id`/`model_id` — what the mecatui `/models` picker always sends) got a fresh
+core-only catalog and silently dropped all ~100 server-global MCP tools. Mount order
+**core → global MCP → client MCP → per-session Task/Team** yields **global-wins**
+collision precedence: `mcp.Register` is **first-wins + skip-and-continue** — a colliding
+client tool is skipped (the global one stays) while EVERY other non-colliding client tool
+is still registered, the skipped names accumulating into one aggregated `ErrDuplicateTool`
+(`errors.Join`, still `errors.Is`-matchable). (A return-on-first-dup would silently drop
+every tool ordered after the collider; the skip-and-continue form also fixes two global
+servers clashing.) `Register` ALSO returns the skipped tool NAMES (`(skipped []string, err
+error)`), so each of the three mount sites logs ONE **provenance-bearing** WARN listing
+the dropped tools: the per-session CLIENT mount → *"client MCP: tool(s) shadowed by an
+existing server-global tool of the same name (the global tool wins): <names>"* (the
+client↔global tier, the line an end-user reads); the per-session GLOBAL mount and
+build-time `registerMCP` GLOBAL mount → *"server-global MCP: skipped duplicate tool
+name(s) (a server advertised a name already registered): <names>"* (a within-/across-global
+defective-server condition). These are composition logs, so the loop's two-line
+diagnostics invariant does not apply. (Identity-dedup, a `CreateSessionResponse` skipped
+field, and TUI rendering are a deferred follow-up — out of scope.) **Lifecycle:**
+`globalMgr` is owned by `Build` — it is reused (NOT reconnected) and its `Close` is NEVER
+folded into `SessionEngineResult.Close` (a per-session `CloseSession` closing the shared
+manager would kill MCP for all other sessions). **Task/Team parity:** the factory threads
+`globalMgr` (falling back to the per-session client `mgr` only when nil) as the
+`reference:`-resolution mainMgr into `buildTaskTool`/`buildTeamWiring`, so a selector
+session's subagent `reference: <name>` resolves against the global servers like the
+build-time path; managers are NOT merged (no entangled lifecycles) and per-def INLINE MCP
+entries connect independently. Guards: `TestSessionEngineFactoryMountsGlobalMCPToolsForSelector`
+(catalog + dispatch proof), `TestSessionEngineFactorySelectorCloseKeepsGlobalMCP` (DELETE-counter
+proof the shared manager survives a per-session close), `TestSessionEngineFactorySelectorNilGlobalMCP`
+(nil-globalMgr: core present, no global tool), `TestSelectorTaskRefResolvesGlobalMCP` /
+`TestSelectorTaskRefResolvesClientMCPWhenNoGlobal` (Task reference parity, both refMgr branches
+driven through the factory), `TestSelectorClientToolCollisionGlobalWins` (skip-and-continue: global
+wins, the other client tool survives), and `mcp.TestRegisterSkipAndContinueOnCollision` (the
+Register-level contract — asserts the returned `skipped []string` names exactly the collider
+and the joined error still matches `errors.Is(_, tool.ErrDuplicateTool)`).
+
 **LIVE model listing (`modellister.go`):** an OPTIONAL composition-local `modelLister` interface
 (`ListModels(ctx) ([]modelEntry, error)` — NOT a port, single consumer; same reasoning as
 `providerRegistry`) carried on an OPTIONAL `providerEntry.lister` field (set per-provider at

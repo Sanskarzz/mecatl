@@ -286,11 +286,62 @@ func TestRegisterIntoCatalog(t *testing.T) {
 	s := connectTest(t, ServerConfig{Name: "fake", URL: url})
 
 	cat := tool.NewCatalog()
-	if err := Register(cat, s.Tools()); err != nil {
+	skipped, err := Register(cat, s.Tools())
+	if err != nil {
 		t.Fatalf("Register: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("clean registration must report no skipped tools, got %v", skipped)
 	}
 	if _, ok := cat.Lookup("mcp__fake__echo"); !ok {
 		t.Errorf("echo not registered in catalog")
+	}
+}
+
+// fakeRegTool is a minimal tool.Tool for exercising Register's collision handling
+// without standing up a server (the in-process server only ever exposes "echo").
+type fakeRegTool struct{ name string }
+
+func (f fakeRegTool) Spec() tool.ToolSpec { return tool.ToolSpec{Name: f.name} }
+func (fakeRegTool) ReadOnly() bool        { return true }
+func (fakeRegTool) Execute(context.Context, session.ToolCall, tool.Workspace) (session.ToolResult, error) {
+	return session.ToolResult{}, nil
+}
+
+// TestRegisterSkipAndContinueOnCollision proves Register is FIRST-wins +
+// skip-and-continue: a tool whose name already exists is skipped (the first
+// registration wins), but EVERY other non-colliding tool ordered AFTER the collider
+// is still registered. A return-on-first-dup would silently drop "keep".
+func TestRegisterSkipAndContinueOnCollision(t *testing.T) {
+	cat := tool.NewCatalog()
+	// Pre-register the authoritative "dup" tool (stands in for a global tool already
+	// mounted before the client set).
+	if err := cat.Register(fakeRegTool{name: "mcp__x__dup"}); err != nil {
+		t.Fatalf("seed register: %v", err)
+	}
+
+	// A second batch: a colliding tool FIRST, then a distinct one AFTER it.
+	skipped, err := Register(cat, []tool.Tool{
+		fakeRegTool{name: "mcp__x__dup"},  // collides → skipped
+		fakeRegTool{name: "mcp__x__keep"}, // ordered after the collider → must survive
+	})
+	if err == nil {
+		t.Fatal("Register should return a (non-fatal) error reporting the skipped collision")
+	}
+	if !errors.Is(err, tool.ErrDuplicateTool) {
+		t.Fatalf("aggregated error must still satisfy errors.Is(_, ErrDuplicateTool); got %v", err)
+	}
+	// The skipped-names list must name EXACTLY the colliding tool (so a caller can log
+	// which tool was dropped) — and NOT the survivor.
+	if len(skipped) != 1 || skipped[0] != "mcp__x__dup" {
+		t.Fatalf("skipped names = %v, want exactly [mcp__x__dup] (the collider; the survivor must not appear)", skipped)
+	}
+	// The collider did not displace the original, AND the later tool survived.
+	if _, ok := cat.Lookup("mcp__x__dup"); !ok {
+		t.Error("the first-registered dup tool must remain")
+	}
+	if _, ok := cat.Lookup("mcp__x__keep"); !ok {
+		t.Error("a non-colliding tool ordered AFTER the collider was dropped (abort-on-first regression)")
 	}
 }
 
