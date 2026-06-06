@@ -93,9 +93,11 @@ func (c CascadeCompactor) Compact(ctx context.Context, conv *session.Conversatio
 	if cut < len(headIdx) {
 		cut = len(headIdx)
 	}
-	if cut > len(msgs) {
-		cut = len(msgs)
-	}
+	// Snap the cut past any leading tool-result messages so the preserved tail
+	// never STARTS on a tool result whose matching assistant call dropped into the
+	// middle — that orphan draws a provider HTTP 400 on replay and bricks the
+	// session. (snapCutToTurnBoundary also clamps to [0,len].)
+	cut = snapCutToTurnBoundary(msgs, cut)
 	tail := msgs[cut:]
 	middle := middleMessages(msgs, headIdx, cut)
 
@@ -109,7 +111,7 @@ func (c CascadeCompactor) Compact(ctx context.Context, conv *session.Conversatio
 	}
 
 	if c.fits(counter, head, middle, tail, paths) {
-		return c.assemble(head, middle, tail, paths), summaryNote(notes), nil
+		return c.finish(conv, head, middle, tail, paths, notes)
 	}
 
 	// Tier 2: strip — truncate large tool-result bodies in the middle.
@@ -130,7 +132,7 @@ func (c CascadeCompactor) Compact(ctx context.Context, conv *session.Conversatio
 	}
 
 	if c.fits(counter, head, middle, tail, paths) {
-		return c.assemble(head, middle, tail, paths), summaryNote(notes), nil
+		return c.finish(conv, head, middle, tail, paths, notes)
 	}
 
 	// Tier 3: collapse — replace large tool-read bodies with a path+size pointer,
@@ -152,7 +154,7 @@ func (c CascadeCompactor) Compact(ctx context.Context, conv *session.Conversatio
 	}
 
 	if c.LLM == nil || c.fits(counter, head, middle, tail, paths) {
-		return c.assemble(head, middle, tail, paths), summaryNote(notes), nil
+		return c.finish(conv, head, middle, tail, paths, notes)
 	}
 
 	// Tier 4: summarize — ask the LLM to summarise the (already stripped/collapsed)
@@ -164,7 +166,21 @@ func (c CascadeCompactor) Compact(ctx context.Context, conv *session.Conversatio
 	}
 	middle = []session.Message{session.NewUserMessage(summary)}
 	notes = append(notes, "summarize: replaced oldest segment with an LLM summary")
-	return c.assemble(head, middle, tail, paths), summaryNote(notes), nil
+	return c.finish(conv, head, middle, tail, paths, notes)
+}
+
+// finish assembles the compacted history from the preserved head, paths summary,
+// compacted middle, and preserved tail, then self-validates tool pairing. Every
+// successful return path in Compact funnels through it, so the cascade NEVER
+// emits a history that orphans a tool result or dangles a tool call. On a pairing
+// failure it aborts to the ORIGINAL history with ErrCompactionWouldOrphan — the
+// loop keeps the uncompacted history rather than bricking the session.
+func (c CascadeCompactor) finish(conv *session.Conversation, head, middle, tail []session.Message, paths []string, notes []string) ([]session.Message, string, error) {
+	out := c.assemble(head, middle, tail, paths)
+	if err := session.ValidateToolPairing(out); err != nil {
+		return conv.Messages, "", fmt.Errorf("%w: %v", ErrCompactionWouldOrphan, err)
+	}
+	return out, summaryNote(notes), nil
 }
 
 // counter returns the configured TokenCounter or the heuristic default.
@@ -328,11 +344,17 @@ func middleMessages(msgs []session.Message, headIdx []int, cut int) []session.Me
 // snip drops the older half of the middle segment, keeping the more recent half
 // (the work nearer the current task). It is the cheapest tier: no body rewriting,
 // just dropping settled turns. An empty or single-element middle is unchanged.
+//
+// The drop boundary is snapped past any leading tool-result messages
+// (snapCutToTurnBoundary) so the kept half never STARTS on a tool result whose
+// matching assistant call was just dropped — that orphan would draw a provider
+// HTTP 400 on replay (and trip the cascade's finish self-validation, aborting the
+// whole compaction to the original history).
 func snip(middle []session.Message) []session.Message {
 	if len(middle) <= 1 {
 		return middle
 	}
-	drop := len(middle) / 2
+	drop := snapCutToTurnBoundary(middle, len(middle)/2)
 	return middle[drop:]
 }
 

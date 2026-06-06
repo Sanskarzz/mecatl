@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -361,6 +362,47 @@ func TestReplaceHistoryOnlyWhileRunning(t *testing.T) {
 	s := newTestSession(Limits{}) // idle
 	if err := s.ReplaceHistory(nil); !errors.Is(err, ErrIllegalTransition) {
 		t.Fatalf("err = %v, want ErrIllegalTransition", err)
+	}
+}
+
+// TestReplaceHistoryRejectsUnpairedHistory pins the aggregate-level guard: while
+// running, ReplaceHistory refuses a tool-pairing-invalid slice (a leading orphan
+// tool result) — wrapping the pairing error — and leaves the conversation
+// untouched, but accepts a clean paired slice and actually applies the swap.
+func TestReplaceHistoryRejectsUnpairedHistory(t *testing.T) {
+	s := newTestSession(Limits{})
+	_ = s.BeginTurn()
+	_ = s.RecordAssistant(NewAssistantMessage("old", "", nil))
+	before := append([]Message(nil), s.Conversation.Messages...)
+
+	// (a) Leading-orphan slice: a tool result whose call never preceded it.
+	orphan := []Message{
+		NewUserMessage("goal"),
+		NewToolMessage(NewToolResult("c1", "result")),
+	}
+	err := s.ReplaceHistory(orphan)
+	if err == nil {
+		t.Fatalf("ReplaceHistory accepted an unpaired (orphan) history")
+	}
+	if got := ValidateToolPairing(orphan); got == nil || !strings.Contains(err.Error(), "orphaned tool result") {
+		t.Fatalf("error %v does not wrap the pairing message", err)
+	}
+	if !reflect.DeepEqual(s.Conversation.Messages, before) {
+		t.Fatalf("conversation mutated despite rejected replacement: %+v", s.Conversation.Messages)
+	}
+
+	// (b) Clean paired slice: accepted, and the swap is applied.
+	clean := []Message{
+		NewSystemMessage("summary"),
+		NewUserMessage("continue"),
+		NewAssistantMessage("", "", []ToolCall{NewToolCall("c1", "Read", nil)}),
+		NewToolMessage(NewToolResult("c1", "ok")),
+	}
+	if err := s.ReplaceHistory(clean); err != nil {
+		t.Fatalf("ReplaceHistory rejected a clean paired history: %v", err)
+	}
+	if !reflect.DeepEqual(s.Conversation.Messages, clean) {
+		t.Fatalf("clean replacement not applied: %+v", s.Conversation.Messages)
 	}
 }
 

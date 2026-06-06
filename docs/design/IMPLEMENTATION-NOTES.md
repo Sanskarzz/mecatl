@@ -152,6 +152,45 @@ concurrent worktree-bearing children (Task is read-parallel, so the model can fa
 `gitenv` hardening + same untrusted-`.gitattributes` residual as team members; the
 workspace-trust gate is the SHARED follow-up for both Team + Task.
 
+**Compaction never emits unpaired history (tool-pairing invariant).** Both compactors
+(`HeuristicCompactor` in `compaction.go`, `CascadeCompactor` in `cascade.go`) slice a kept
+tail by message COUNT. The bug: when the count cut landed ON a `RoleTool` message whose
+matching assistant `ToolCall` was dropped into the summarised head, the replayed history
+opened on an ORPHANED tool result → provider HTTP 400 ("No tool call found for function call
+output with call_id X") → run stop=error → `Session.Fail()` → every subsequent prompt rejected
+with `illegal state transition: RecordUserPrompt from "failed"` (permanently bricked).
+
+The fix has three layers, all pure/offline:
+- **Cut-snapping.** The shared unexported `snapCutToTurnBoundary(msgs, cut)` clamps `cut` to
+  `[0,len]` then advances it past any leading `RoleTool` messages (`for cut<len && msgs[cut].Role==RoleTool { cut++ }`),
+  so the tail never STARTS on a tool result. Used by `HeuristicCompactor.Compact` (replaces the
+  bare `len-keep` clamp) AND `CascadeCompactor.Compact` (applied to its head-floored cut before
+  deriving tail/middle). Edge cases: a tail that is entirely tool results snaps to `len` (empty
+  tail — system+goal+summary still emitted, output non-empty); multiple consecutive leading
+  orphans are all consumed by the while-loop.
+- **Self-validation + abort-to-original.** `session.ValidateToolPairing(out)` is BIDIRECTIONAL
+  (errors on an orphaned tool result OR a dangling assistant call). Each compactor runs it on the
+  assembled slice and, on failure, returns the ORIGINAL `conv.Messages` wrapped in the exported
+  sentinel `agent.ErrCompactionWouldOrphan`. The cascade funnels EVERY successful return through a
+  small `finish(conv,head,middle,tail,paths,notes)` helper so all five tier return points validate.
+- **Loop + aggregate backstop.** `maybeCompact` treats `ErrCompactionWouldOrphan` like the existing
+  Compact-error branch (WARN + return false, no compaction Event, REUSING the existing WARN line so
+  the "loop emits exactly TWO diagnostics lines" invariant holds), and runs a defensive
+  `ValidateToolPairing(compacted)` between `Compact` and `ReplaceHistory`. `Session.ReplaceHistory`
+  itself now rejects an unpaired slice (aggregate-level guard), so the existing ReplaceHistory-reject
+  branch catches pairing failures for free.
+
+Coverage: unit tests on both compactors (orphan-at-tail-head, tail-all-tool-results,
+multiple-consecutive-leading-orphans, cascade-orphan), `ValidateToolPairing` table test, and an
+END-TO-END `TestCompactionThroughLoopNeverOrphans` that drives the real loop + real
+`HeuristicCompactor` with a mockllm tool-call script and a tiny `ContextWindowTokens`, asserting
+the final history is pairing-valid and the session did NOT reach `StateFailed`.
+
+**Deferred follow-up: `failed` is still not recoverable.** This PR does NOT make `StateFailed`
+resumable (`Reopen` stays completed-only; `Fail()` carries a cross-reference comment). Rationale:
+the pairing fix REMOVES the trigger that bricked sessions here, so automatic failed-recovery is no
+longer urgent; making `failed` recoverable is a larger lifecycle change tracked separately.
+
 ## Adapters — `internal/adapter/`
 
 ### `anthropic` (multi-provider P1)

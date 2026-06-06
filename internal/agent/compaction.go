@@ -3,12 +3,22 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/stacklok/mecatl/internal/session"
 )
+
+// ErrCompactionWouldOrphan is the sentinel a Compactor returns when the only
+// history it could produce would be tool-pairing-invalid (an orphaned tool
+// result or a dangling tool call). The loop treats it like any other compaction
+// failure — keep the original history and continue without compaction — rather
+// than emitting a history that draws a provider HTTP 400 and bricks the session.
+// Compactors return the ORIGINAL messages alongside this error so a caller that
+// ignores the sentinel still gets a safe slice.
+var ErrCompactionWouldOrphan = errors.New("agent: compaction would orphan a tool result or dangle a tool call")
 
 // Compactor compresses a Conversation that has grown past the context-window
 // threshold into a shorter, semantically-equivalent history. It is a seam
@@ -60,11 +70,11 @@ func (h HeuristicCompactor) Compact(_ context.Context, conv *session.Conversatio
 	msgs := conv.Messages
 	paths := touchedPaths(msgs)
 
-	// Split the head (to be summarised) from the preserved tail.
-	cut := len(msgs) - keep
-	if cut < 0 {
-		cut = 0
-	}
+	// Split the head (to be summarised) from the preserved tail. Snap the cut past
+	// any leading tool-result messages so the tail never STARTS on a tool result
+	// whose matching assistant tool call landed in the dropped head — that orphan
+	// draws a provider HTTP 400 on replay and bricks the session.
+	cut := snapCutToTurnBoundary(msgs, len(msgs)-keep)
 	head := msgs[:cut]
 	tail := msgs[cut:]
 
@@ -92,7 +102,33 @@ func (h HeuristicCompactor) Compact(_ context.Context, conv *session.Conversatio
 		out = append(out, truncateToolBody(m, bodyBudget))
 	}
 
+	// Self-validate: never emit a history that would orphan a tool result or
+	// dangle a tool call (boundary-snapping handles the common case, but defend
+	// the contract directly). On failure, abort to the ORIGINAL history.
+	if err := session.ValidateToolPairing(out); err != nil {
+		return msgs, "", fmt.Errorf("%w: %v", ErrCompactionWouldOrphan, err)
+	}
+
 	return out, summary, nil
+}
+
+// snapCutToTurnBoundary clamps cut to [0,len(msgs)] and then advances it past any
+// leading tool-result messages, so the slice msgs[cut:] never STARTS on a
+// RoleTool message whose matching assistant tool call sits below the cut. Both
+// compactors share it. A tail that is entirely tool results snaps cut all the way
+// to len(msgs) (empty tail), which is fine — the compacted output still carries
+// the system prompt, the goal, and the synthesised summary.
+func snapCutToTurnBoundary(msgs []session.Message, cut int) int {
+	if cut < 0 {
+		cut = 0
+	}
+	if cut > len(msgs) {
+		cut = len(msgs)
+	}
+	for cut < len(msgs) && msgs[cut].Role == session.RoleTool {
+		cut++
+	}
+	return cut
 }
 
 // firstUser returns the first user-role message in msgs.

@@ -791,6 +791,17 @@ Two seams keep a long run inside the model's context window:
   soon as the slice fits the token budget, with trigger/target **hysteresis** so
   it does not thrash near the threshold.
 
+  Both compactors **snap the kept-tail boundary past leading tool results** (the
+  shared `snapCutToTurnBoundary` helper) so the preserved tail never STARTS on a
+  `RoleTool` message whose matching assistant tool call was dropped into the head —
+  an orphaned tool result draws a provider HTTP 400 on replay. As a final guard
+  each compactor **self-validates** the assembled slice with
+  `session.ValidateToolPairing` (bidirectional: no orphaned results, no dangling
+  calls) and, on failure, **aborts to the original history** with the
+  `agent.ErrCompactionWouldOrphan` sentinel; the loop treats it like any other
+  compaction failure (keep the uncompacted history, WARN, continue). The aggregate
+  itself backstops this: `Session.ReplaceHistory` rejects an unpaired slice.
+
 ## 14. Memory — cross-session recall & consolidation (pattern 3 / 4)
 
 `tool.MemoryStore` (`Remember`/`Recall`/`List`/`Forget`) is the seam for

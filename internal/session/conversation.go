@@ -1,5 +1,10 @@
 package session
 
+import (
+	"fmt"
+	"sort"
+)
+
 // Role identifies the author of a Message in the conversation.
 type Role string
 
@@ -93,6 +98,49 @@ func (c *Conversation) Append(m Message) {
 // Len reports the number of messages in the conversation.
 func (c *Conversation) Len() int {
 	return len(c.Messages)
+}
+
+// ValidateToolPairing reports whether the message history is well-paired for
+// provider replay: every tool-result message (RoleTool) must answer a preceding
+// assistant ToolCall, and every assistant ToolCall must be answered by a
+// following tool-result. It is BIDIRECTIONAL because providers reject BOTH
+// shapes — an orphaned tool result (no matching tool_use/function_call above it)
+// AND a dangling tool call (no result below it) draw an HTTP 400. It is pure (no
+// I/O, no new deps): used by compaction to refuse emitting a history that would
+// brick the session, and by ReplaceHistory as the aggregate-level guard.
+//
+// An empty or nil slice is trivially valid.
+func ValidateToolPairing(msgs []Message) error {
+	// Track which call IDs have been opened by an assistant message and not yet
+	// answered. Order matters: a result must follow its call, not precede it.
+	open := make(map[ToolCallID]struct{})
+	for i, m := range msgs {
+		switch m.Role {
+		case RoleAssistant:
+			for _, c := range m.ToolCalls {
+				open[c.ID] = struct{}{}
+			}
+		case RoleTool:
+			if m.ToolResult == nil {
+				return fmt.Errorf("message %d: tool-role message carries no result", i)
+			}
+			id := m.ToolResult.CallID
+			if _, ok := open[id]; !ok {
+				return fmt.Errorf("message %d: orphaned tool result for call %q (no preceding assistant tool call)", i, id)
+			}
+			delete(open, id)
+		}
+	}
+	if len(open) > 0 {
+		// Surface one dangling id deterministically for a stable error message.
+		ids := make([]string, 0, len(open))
+		for id := range open {
+			ids = append(ids, string(id))
+		}
+		sort.Strings(ids)
+		return fmt.Errorf("dangling tool call %q (no following tool result)", ids[0])
+	}
+	return nil
 }
 
 // Turn records one model call together with the tools it triggered. It is a

@@ -266,9 +266,19 @@ func (s *Session) RecordUserPromptWithParts(text string, parts []Content, instru
 // is the compaction seam: the loop hands it the compacted message slice so the
 // replacement flows through the root rather than mutating Conversation.Messages
 // directly. It is legal only while running, when compaction occurs.
+//
+// As the aggregate-level guard it REJECTS a slice that is not tool-pairing-valid
+// (an orphaned tool result or a dangling tool call) via ValidateToolPairing: such
+// a history draws a provider HTTP 400 on the next replay and would drive the run
+// to StateFailed (permanently unrunnable). Refusing it here keeps the invariant
+// that the conversation is always provider-replayable, independent of which
+// compactor produced the slice.
 func (s *Session) ReplaceHistory(messages []Message) error {
 	if s.State != StateRunning {
 		return fmt.Errorf("%w: ReplaceHistory from %q", ErrIllegalTransition, s.State)
+	}
+	if err := ValidateToolPairing(messages); err != nil {
+		return fmt.Errorf("ReplaceHistory: %w", err)
 	}
 	s.Conversation.Messages = messages
 	return nil
@@ -352,6 +362,14 @@ func (s *Session) Cancel() error {
 
 // Fail transitions the session to StateFailed with StopError. It is legal from
 // any non-terminal state.
+//
+// A failed session is NOT resumable (only Reopen, completed-only, recovers a
+// session). Making failed recoverable is a deferred follow-up: the historical
+// trigger that bricked sessions here was compaction emitting unpaired history
+// (an orphaned tool result → provider HTTP 400 → Fail), which the compactors now
+// prevent by snapping the kept-tail boundary past leading tool results and
+// self-validating via ValidateToolPairing. With the trigger removed, automatic
+// failed-recovery is no longer urgent.
 func (s *Session) Fail() error {
 	if s.State.IsTerminal() {
 		return fmt.Errorf("%w: Fail from %q", ErrIllegalTransition, s.State)

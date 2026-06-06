@@ -626,6 +626,17 @@ func (e *Engine) maybeCompact(ctx context.Context, r *Run, sess *session.Session
 		// existing history and continue — but no longer SILENTLY: surface the
 		// degraded mode on the operator channel so a run that keeps growing
 		// uncompacted is diagnosable. Behaviour is unchanged (still continue).
+		// ErrCompactionWouldOrphan (a compactor refusing to emit a tool-pairing-
+		// invalid history) lands here too, reusing this WARN — no new diagnostics
+		// line, preserving the "loop emits exactly TWO lines" invariant.
+		r.diag.Log(ctx, port.LevelWarn, "compaction failed; continuing without compaction", "error", err)
+		return false
+	}
+	// Last line of defense: never hand the session a history that would orphan a
+	// tool result. A compactor SHOULD have caught this and returned the sentinel,
+	// but validate again before ReplaceHistory and degrade-and-continue (same
+	// branch, same WARN) rather than risk a provider HTTP 400 that bricks the run.
+	if err := session.ValidateToolPairing(compacted); err != nil {
 		r.diag.Log(ctx, port.LevelWarn, "compaction failed; continuing without compaction", "error", err)
 		return false
 	}
