@@ -83,6 +83,16 @@ type Deps struct {
 	// CompactionRatio overrides defaultCompactionRatio when in (0,1].
 	CompactionRatio float64
 
+	// Role is the operator-facing label this engine logs under in diagnostics: the
+	// empty string for the MAIN engine (correlated by session only), or a non-empty
+	// role for a child/subagent engine (e.g. "task" for the Task subagent, a team
+	// member's name, or a fork-branch label) so interleaved child diagnostics are
+	// readable. It is read once per run when binding the run-scoped Diagnostics (see
+	// drive): empty → only the "session" key; set → "session"+"agent" keys. It is
+	// NOT plumbed into Sink/ToolCallRecorder (those stay off for children) and never
+	// reaches the model.
+	Role string
+
 	// ProgressiveTools, when true, enables progressive tool disclosure
 	// (pattern 9): the per-turn request advertises lightweight specs for tools
 	// implementing tool.Disclosable plus a built-in ToolSearch tool the model
@@ -204,6 +214,15 @@ type Run struct {
 	// parent. It is set once before the run goroutine starts and only read after,
 	// so it needs no synchronisation.
 	ctx context.Context //nolint:containedctx // run-scoped carrier forwarded to the EventSink; never the request's own field
+	// diag is the run-scoped operational-logging seam: deps.Diagnostics bound to
+	// this run's session id (and, for a child engine, its agent role) via With, so
+	// every line emitted through it carries the correlation keys. It is bound ONCE
+	// per run in RunContent — NOT at engine construction, because the engine is
+	// built before the session id exists and is often SHARED across sessions. It is
+	// Nop-safe: deps.Diagnostics is never nil post-NewEngine, and With on
+	// NopDiagnostics returns NopDiagnostics. It is set before the run goroutine
+	// starts and only read after, so it needs no synchronisation.
+	diag port.Diagnostics
 }
 
 // Events returns the channel of domain Events for this run. It is closed when the
@@ -243,6 +262,12 @@ func (e *Engine) RunContent(ctx context.Context, sess *session.Session, ws tool.
 		asks:   newAskRegistry(),
 		cancel: cancel,
 		ctx:    ctx,
+		// Bind the run-scoped diagnostics ONCE here, where the live session is in
+		// scope: correlate every emitted line to this session id, and (for a child
+		// engine, Role != "") to its agent role too. The main engine has Role=="" so
+		// only the "session" key is bound. With on NopDiagnostics returns Nop, so an
+		// engine with no injected sink stays silent.
+		diag: e.bindRunDiag(sess.ID),
 	}
 	go func() {
 		defer close(r.events)
@@ -598,16 +623,33 @@ func (e *Engine) maybeCompact(ctx context.Context, r *Run, sess *session.Session
 	compacted, summary, err := e.deps.Compactor.Compact(ctx, sess.Conversation)
 	if err != nil {
 		// Compaction is best-effort: a failure must not abort the run. Keep the
-		// existing history and continue.
+		// existing history and continue — but no longer SILENTLY: surface the
+		// degraded mode on the operator channel so a run that keeps growing
+		// uncompacted is diagnosable. Behaviour is unchanged (still continue).
+		r.diag.Log(ctx, port.LevelWarn, "compaction failed; continuing without compaction", "error", err)
 		return false
 	}
 	if err := sess.ReplaceHistory(compacted); err != nil {
 		// Replacement is legal only while running; if the seam rejects it, keep the
-		// existing history rather than aborting the run.
+		// existing history rather than aborting the run — and emit a degraded-mode
+		// warning rather than swallowing it. Behaviour is unchanged (still continue).
+		r.diag.Log(ctx, port.LevelWarn, "compaction produced history the session rejected; continuing without compaction", "error", err)
 		return false
 	}
 	e.emit(r, session.Event{Type: session.EvCompaction, Turn: turnIdx, Text: summary})
 	return true
+}
+
+// bindRunDiag returns the run-scoped Diagnostics for a run against the given
+// session id: deps.Diagnostics with the "session" key bound, plus the "agent" key
+// when Deps.Role is set (a child/subagent engine). The main engine (Role=="") binds
+// only "session". deps.Diagnostics is never nil post-NewEngine and With on
+// NopDiagnostics returns NopDiagnostics, so the result is always non-nil and safe.
+func (e *Engine) bindRunDiag(id session.SessionID) port.Diagnostics {
+	if e.deps.Role != "" {
+		return e.deps.Diagnostics.With("session", string(id), "agent", e.deps.Role)
+	}
+	return e.deps.Diagnostics.With("session", string(id))
 }
 
 // emit assigns the next monotonic Seq, publishes the event on the Run channel,

@@ -20,6 +20,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/tools"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/tool"
 )
@@ -206,7 +207,7 @@ func TestTaskRunsGitInWorktreeEndToEnd(t *testing.T) {
 	)
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
-	parentEng := newChildEngine(parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	parentEng := newChildEngine(port.NopDiagnostics{}, "", parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 
 	sess := session.New("parent", session.ModeDefault, repo, session.Limits{MaxTurns: 5}, time.Now())
 	run := parentEng.Run(context.Background(), sess, parentWS, "go")
@@ -311,7 +312,7 @@ func TestBuildTaskToolRealWiringForksChildShellWhenShell(t *testing.T) {
 	parentWS := osfsWSForTest(t, repo)
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
-	parentEng := newChildEngine(parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	parentEng := newChildEngine(port.NopDiagnostics{}, "", parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 
 	sess := session.New("parent", session.ModeDefault, repo, session.Limits{MaxTurns: 5}, time.Now())
 	run := parentEng.Run(context.Background(), sess, parentWS, "go")
@@ -383,7 +384,7 @@ func TestBuildTaskToolRealWiringNoShellNoForker(t *testing.T) {
 	parentWS := osfsWSForTest(t, repo)
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
-	parentEng := newChildEngine(parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	parentEng := newChildEngine(port.NopDiagnostics{}, "", parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 
 	sess := session.New("parent", session.ModeDefault, repo, session.Limits{MaxTurns: 5}, time.Now())
 	run := parentEng.Run(context.Background(), sess, parentWS, "go")

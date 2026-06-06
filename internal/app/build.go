@@ -1243,7 +1243,9 @@ type diagFact struct {
 // cfg.diag(). It is called a single time from Build (after cfg.Model is
 // resolved), NOT from engineDepsForProvider — which is re-invoked per session and
 // per child engine. The facts are keyed to the MAIN engine's model (cfg.Model);
-// child engines stay silent (childEngineDepsForProvider sets NopDiagnostics).
+// the build-once FACTS are emitted only here, once. (Child engines DO emit live
+// per-run diagnostics — correlated by session+agent role — but not these
+// build-once composition facts, which are a one-shot main-engine concern.)
 //
 // The token-counter fact is captured from an actual build attempt
 // (buildTokenCounterWithDecision) so the tiktoken-unavailable fallback warning is
@@ -1761,7 +1763,7 @@ func buildUserModelReviewEngine(cfg Config, provider port.LLMProvider, store *me
 			cat.MustRegister(t)
 		}
 	}
-	return newChildEngine(provider, cat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	return newChildEngine(cfg.diag(), "usermodel-review", provider, cat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
 // buildCommandRunner builds the local command runner the Bash tool executes
@@ -1848,27 +1850,37 @@ func bashDisabledReason(cfg Config) string {
 // the prompt config. It is the single source of truth for that boilerplate so the
 // five child-engine builders (Task explorer, Fork branch, Fork judge, per-def Task
 // engine, team member) cannot drift apart.
-func newChildEngine(provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config) *agent.Engine {
-	return newChildEngineWithHooks(provider, cat, model, pc, hookexec.New(nil))
+func newChildEngine(diag port.Diagnostics, role string, provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config) *agent.Engine {
+	return newChildEngineWithHooks(diag, role, provider, cat, model, pc, hookexec.New(nil))
 }
 
 // newChildEngineWithHooks is newChildEngine with an explicit HookRunner, so a
 // per-def Task/member engine can scope its own lifecycle hooks (from a def's
 // `hooks:` map) instead of the inert default. A nil hooks runner falls back to an
 // inert one, preserving the no-hooks contract.
-func newChildEngineWithHooks(provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config, hooks port.HookRunner) *agent.Engine {
+func newChildEngineWithHooks(diag port.Diagnostics, role string, provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config, hooks port.HookRunner) *agent.Engine {
 	if hooks == nil {
 		hooks = hookexec.New(nil)
+	}
+	if diag == nil {
+		diag = port.NopDiagnostics{}
 	}
 	return agent.NewEngine(agent.Deps{
 		LLM:     provider,
 		Catalog: cat,
 		// Child/member engines are non-interactive (allow-all) and never learn:
 		// nil store disables Learn entirely for them.
-		Policy:              permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
-		Hooks:               hooks,
-		PromptConfig:        pc,
-		Model:               model,
+		Policy:       permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Hooks:        hooks,
+		PromptConfig: pc,
+		Model:        model,
+		// Diagnostics is LIVE for child engines (correlated by session + the agent
+		// role below) so interleaved child diagnostics are readable on the operator
+		// channel — this is DISTINCT from Sink/ToolCallRecorder (telemetry/audit),
+		// which stay OFF for children (never set here). The role tags every line the
+		// child emits with "agent"=<role>.
+		Diagnostics:         diag,
+		Role:                role,
 		ContextWindowTokens: defaultContextWindowTokens,
 		CompactionRatio:     defaultCompactionRatio,
 	})
@@ -1888,8 +1900,8 @@ func newChildEngineWithHooks(provider port.LLMProvider, cat *tool.Catalog, model
 // the caller passes contextWindow=0, so engineDepsForProvider falls back to the
 // 128k default and the child stays byte-identical to the old newChildEngineWithHooks
 // path. A provider-SWITCHED child gets its real catalog window (catalogContextWindow).
-func newChildEngineForProvider(cfg Config, provider port.LLMProvider, model string, contextWindow int, cat *tool.Catalog, pc prompt.Config, hooks port.HookRunner) *agent.Engine {
-	return agent.NewEngine(childEngineDepsForProvider(cfg, provider, model, contextWindow, cat, pc, hooks))
+func newChildEngineForProvider(cfg Config, role string, provider port.LLMProvider, model string, contextWindow int, cat *tool.Catalog, pc prompt.Config, hooks port.HookRunner) *agent.Engine {
+	return agent.NewEngine(childEngineDepsForProvider(cfg, role, provider, model, contextWindow, cat, pc, hooks))
 }
 
 // childEngineDepsForProvider builds the agent.Deps for a child/member engine bound
@@ -1898,7 +1910,7 @@ func newChildEngineForProvider(cfg Config, provider port.LLMProvider, model stri
 // shape. It is split out from newChildEngineForProvider so a test can assert the
 // child Deps directly (Sink/ToolCallRecorder nil, Compactor/TokenCounter keyed on the CHILD's
 // model) — the engine's deps are otherwise private.
-func childEngineDepsForProvider(cfg Config, provider port.LLMProvider, model string, contextWindow int, cat *tool.Catalog, pc prompt.Config, hooks port.HookRunner) agent.Deps {
+func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvider, model string, contextWindow int, cat *tool.Catalog, pc prompt.Config, hooks port.HookRunner) agent.Deps {
 	if hooks == nil {
 		hooks = hookexec.New(nil)
 	}
@@ -1932,11 +1944,16 @@ func childEngineDepsForProvider(cfg Config, provider port.LLMProvider, model str
 	// telemetry tagging is a SEPARATE decision; nil is the conservative choice here.
 	deps.Sink = nil
 	deps.ToolCallRecorder = nil
-	// Diagnostics stays silent for child engines (mirror Sink/ToolCallRecorder):
-	// engineDepsForProvider set it from cfg, but a sub-agent's operational logging
-	// must not double through the operator's diagnostic sink. NopDiagnostics keeps
-	// the child engine nil-safe while emitting nothing.
-	deps.Diagnostics = port.NopDiagnostics{}
+	// Telemetry (Sink) and the per-tool audit seam (ToolCallRecorder) stay OFF for
+	// child engines (set nil just above) — a sub-agent's turns/tool-calls must not
+	// double through the operator's metrics/audit. Diagnostics is DIFFERENT: it is
+	// intentionally LIVE for children, bound to cfg.diag() and tagged with the
+	// child's agent role (Deps.Role), so interleaved child diagnostics (compaction
+	// degradation, policy denies) are readable and correlated on the operator
+	// channel. This is the one operator-facing seam children speak on; Sink and
+	// ToolCallRecorder remain silent.
+	deps.Diagnostics = cfg.diag()
+	deps.Role = role
 	return deps
 }
 
@@ -1968,7 +1985,7 @@ func buildChildEngine(cfg Config, provider port.LLMProvider, runner tool.Command
 		childCat.MustRegister(tools.NewBashTool(runner))
 	}
 
-	return newChildEngine(provider, childCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	return newChildEngine(cfg.diag(), "task", provider, childCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
 // buildForkChildEngine constructs the child *Engine each Fork branch runs. Unlike
@@ -2006,7 +2023,7 @@ func buildForkChildEngine(cfg Config, provider port.LLMProvider, runner tool.Com
 		childCat.MustRegister(tools.NewBashTool(runner))
 	}
 
-	return newChildEngine(provider, childCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	return newChildEngine(cfg.diag(), "fork", provider, childCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
 // buildForkJudgeEngine constructs the minimal, tool-less read-only child *Engine
@@ -2016,7 +2033,7 @@ func buildForkChildEngine(cfg Config, provider port.LLMProvider, runner tool.Com
 // in tests, the judge's LLM calls never interleave with the branches'; with the
 // stateless OpenAI adapter this separation is naturally harmless.
 func buildForkJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
-	return newChildEngine(provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	return newChildEngine(cfg.diag(), "fork-judge", provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
 // buildTaskTool constructs the Task subagent tool over a default child Engine
@@ -2366,7 +2383,7 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 		// Built through newChildEngineForProvider so a provider-switched member
 		// compacts/counts on its own model (contamination fix); childWindow=0 for the
 		// inherited-default member keeps it byte-identical.
-		eng := newChildEngineForProvider(cfg, childProvider, model, childWindow, cat, pc, memberHooks)
+		eng := newChildEngineForProvider(cfg, "member:"+spec.Name, childProvider, model, childWindow, cat, pc, memberHooks)
 		return agent.MemberBuild{Engine: eng, Mode: mode, Limits: memberLimits, Close: mcpClose, MCPToolNames: mcpNames, IsolateReadOnly: isolateReadOnly}
 	}
 }

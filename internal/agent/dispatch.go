@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/tool"
 )
@@ -200,6 +201,15 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws t
 func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall) (governance.PermissionDecision, bool) {
 	decision := e.deps.Policy.Evaluate(ctx, sess.ID, sess.Mode, c, ws)
 	if decision.Effect != governance.Ask {
+		// Operator visibility for a policy DENY: the deny reason otherwise reaches
+		// only the client event (via denyResult), never the operator channel. Emit
+		// it here, at the one site where the POLICY (not the user) resolves the call,
+		// so an operator can see WHY a call was refused. Allow/Ask are NOT emitted —
+		// they are the event taxonomy's job (EvToolCall / EvPermissionAsk); emitting
+		// them here would double-log.
+		if decision.Effect == governance.Deny {
+			r.diag.Log(ctx, port.LevelInfo, "tool call denied by policy", "tool", c.Name, "reason", decision.Reason, "turn", turnIdx)
+		}
 		return decision, false
 	}
 

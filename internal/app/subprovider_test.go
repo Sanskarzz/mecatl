@@ -173,7 +173,7 @@ func TestSubproviderChildCompactorAndCounter(t *testing.T) {
 	childProvider, _, model, window := resolveChildProvider(cfg, reg,
 		agents.AgentDef{Name: "big", Provider: providerOpenRouter, Model: childModel},
 		reg.entries[providerOpenAI].provider, providerOpenAI, "gpt-5")
-	deps := childEngineDepsForProvider(cfg, childProvider, model, window, tool.NewCatalog(), promptConfig(cfg, ""), nil)
+	deps := childEngineDepsForProvider(cfg, "", childProvider, model, window, tool.NewCatalog(), promptConfig(cfg, ""), nil)
 
 	// Compactor.Model is bound BY VALUE to the child's model (the contamination vector).
 	cc, ok := deps.Compactor.(agent.CascadeCompactor)
@@ -200,20 +200,25 @@ func TestSubproviderChildCompactorAndCounter(t *testing.T) {
 // sub-agent's turns/tool-calls don't double-count against the operator-facing
 // histograms. A regression that dropped the nil-restore would fail here.
 func TestSubproviderChildTelemetryOff(t *testing.T) {
-	cfg := Config{Model: "gpt-5", Sink: fakeSink{}, ToolCallRecorder: &recordingToolLogger{}, Diagnostics: &capturingDiagnostics{}}
+	injectedDiag := &capturingDiagnostics{}
+	cfg := Config{Model: "gpt-5", Sink: fakeSink{}, ToolCallRecorder: &recordingToolLogger{}, Diagnostics: injectedDiag}
 	provider := mockllm.New()
 	// A provider-switched child (the same path a def-pinned / Half-B session child takes).
-	deps := childEngineDepsForProvider(cfg, provider, "gpt-5", 0, tool.NewCatalog(), promptConfig(cfg, ""), nil)
+	deps := childEngineDepsForProvider(cfg, "member:explorer", provider, "gpt-5", 0, tool.NewCatalog(), promptConfig(cfg, ""), nil)
 	if deps.Sink != nil {
 		t.Fatalf("child Deps.Sink = %v, want nil (child telemetry off; pre-feature byte-identity)", deps.Sink)
 	}
 	if deps.ToolCallRecorder != nil {
 		t.Fatalf("child Deps.ToolCallRecorder = %v, want nil (child telemetry off)", deps.ToolCallRecorder)
 	}
-	// Diagnostics stays SILENT for children: NopDiagnostics (not the injected
-	// capturing sink), mirroring Sink/ToolCallRecorder being nil.
-	if _, ok := deps.Diagnostics.(port.NopDiagnostics); !ok {
-		t.Fatalf("child Deps.Diagnostics = %T, want port.NopDiagnostics (child diagnostics silent)", deps.Diagnostics)
+	// Diagnostics is LIVE for children (DISTINCT from telemetry/audit, which stay
+	// off above): the child carries the INJECTED diagnostics, not NopDiagnostics,
+	// and is tagged with its agent role so interleaved child logs are readable.
+	if deps.Diagnostics != injectedDiag {
+		t.Fatalf("child Deps.Diagnostics = %T, want the injected diagnostics (child diagnostics live + correlated)", deps.Diagnostics)
+	}
+	if deps.Role != "member:explorer" {
+		t.Fatalf("child Deps.Role = %q, want %q (child diagnostics correlated by agent role)", deps.Role, "member:explorer")
 	}
 	// Sanity: the parent's shared deps DO carry the Sink (so the test proves the child
 	// override, not an absent Sink). baseEngineDeps is the default-provider parent path.

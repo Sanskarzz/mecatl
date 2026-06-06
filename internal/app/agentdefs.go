@@ -635,7 +635,7 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 		// tool would not be in the def allowlist. newChildEngineForProvider leaves it at
 		// its zero value (off), matching the original explicit omission, AND routes the
 		// child's compactor/counter/window through pid+model (contamination fix).
-		engines[def.Name] = newChildEngineForProvider(cfg, childProvider, model, childWindow, cat, agentPromptConfig(cfg, def, model, bodies...), hooks)
+		engines[def.Name] = newChildEngineForProvider(cfg, "task:"+def.Name, childProvider, model, childWindow, cat, agentPromptConfig(cfg, def, model, bodies...), hooks)
 		// Per-def limits ride on AgentMeta so the Task tool bounds THIS def's child
 		// session by them (per-field falling back to the Task default child limits for
 		// any zero field). A def that sets neither yields the default, unchanged.

@@ -72,9 +72,63 @@ Composition facts (token counter, compaction strategy, session-store kind, featu
 enable/disable lines) are emitted ONCE, in `app.Build`. They are NEVER emitted in
 the per-engine deps builders (`engineDepsForProvider` / `childEngineDepsForProvider`)
 — a per-session engine is re-derived on every provider/model change, and re-emitting
-the facts there caused N× duplication of the same lines. Child engines (Task
-subagent, team members) get `NopDiagnostics` so their derivation is silent: the
-operator's diagnostic sink must not double through them.
+the facts there caused N× duplication of the same lines. The build-once FACTS stay a
+one-shot main-engine concern; child engines never re-emit them.
+
+(Child engines DO emit live per-run diagnostics — see "Session correlation" below —
+but only the run-scoped lines from the two emitters, never these build-once facts.)
+
+## Session correlation
+
+Diagnostics lines are correlated to the originating run at the point they are
+emitted, via `port.Diagnostics.With`:
+
+- **Per-run, not at construction.** The engine is built BEFORE the session id
+  exists and is often SHARED across sessions (`service.go` builds the engine before
+  `session.New`). So the run-scoped sink is bound ONCE per run, inside
+  `Engine.RunContent`, where the live `*session.Session` is in scope:
+  `runDiag := deps.Diagnostics.With("session", id)` — plus `"agent", role` when the
+  engine carries a `Deps.Role` (a child/subagent engine). It is stored on the `Run`
+  (`Run.diag`) and the two emitters log through it. Binding at construction would
+  cross-tag every session that shares the engine; binding per-run is what makes
+  `TestRunDiagnosticsNoCrossTag` hold. It is Nop-safe: `deps.Diagnostics` is never
+  nil post-`NewEngine`, and `With` on `NopDiagnostics` returns `NopDiagnostics`.
+- **Main engine vs children.** The MAIN engine has `Deps.Role == ""` → lines carry
+  only the `"session"` key. A CHILD engine (Task subagent `"task"` / per-def
+  `"task:<name>"`, team member `"member:<name>"`, Fork branch `"fork"`, Fork judge
+  `"fork-judge"`, user-model reviewer `"usermodel-review"`) sets `Deps.Role` → lines
+  carry `"session"` + `"agent"=<role>`, so interleaved child diagnostics are
+  readable.
+- **Children emit, but only Diagnostics.** Child engines now carry the REAL
+  `cfg.diag()` (not `NopDiagnostics`) so their degraded-mode warnings and policy
+  denies reach the operator channel, correlated. This is DISTINCT from telemetry and
+  audit: `Deps.Sink` (`EventSink`) and `Deps.ToolCallRecorder` stay nil/OFF for
+  children — a sub-agent's turns/tool-calls must not double-count against the
+  operator-facing metrics/audit. Only Diagnostics is live for children.
+
+### The two emitters (and what is deliberately NOT emitted)
+
+The agent loop emits exactly TWO run-scoped diagnostics lines, both through the
+run-scoped sink:
+
+1. **Compaction failure** (`maybeCompact`, `LevelWarn`, key `error`) — the two
+   branches that previously SWALLOWED a compaction error (the `Compact` error and
+   the `ReplaceHistory` rejection) now log a degraded-mode warning before
+   continuing uncompacted. Behaviour is unchanged (the run still continues); the
+   warning just stops the silent swallow.
+2. **Policy deny** (`authorize`, `LevelInfo`, keys `tool`, `reason`) — at the one
+   site where the permission POLICY resolves a call to `Deny`, the deny reason
+   (which otherwise reaches only the client event via `denyResult`) is surfaced on
+   the operator channel.
+
+Deliberately NOT emitted, because the `session.Event` taxonomy already owns them
+(emitting here would be double-logging):
+
+- **Cancellation** — `EvResult{Stop: StopCancelled}` carries it.
+- **Tool errors** — `EvToolResult{IsError}` + the `ToolCallRecorder` audit seam.
+- **Compaction success** — `EvCompaction` carries it.
+- **Permission ask / allow** — `EvPermissionAsk` / `EvToolCall` carry them; only
+  the policy DENY is logged, never allow or ask.
 
 ## The ban + guard
 

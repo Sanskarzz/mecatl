@@ -87,7 +87,7 @@ func TestBuildConfigFactsLogOnceAcrossChildDerivations(t *testing.T) {
 		nil, nil, nil, nil, nil)
 	const nChildren = 5
 	for range nChildren {
-		_ = childEngineDepsForProvider(cfg, provider, cfg.Model, 0,
+		_ = childEngineDepsForProvider(cfg, "", provider, cfg.Model, 0,
 			tool.NewCatalog(), promptConfig(cfg, ""), nil)
 	}
 
