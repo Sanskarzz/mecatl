@@ -12,10 +12,14 @@
 // once any chunk has been emitted to the caller, a subsequent mid-stream error
 // is surfaced verbatim and never retried.
 //
-// The breaker counts consecutive failed attempts across calls. After
-// BreakerThreshold failures it opens and Stream fails fast with *BreakerError
-// for BreakerCooldown; it then half-opens to admit a single trial. Any success
-// resets it. All breaker state is concurrency-safe.
+// The breaker counts consecutive TRANSIENT establishment failures across calls
+// (HTTP 429/408/5xx, network errors, per-attempt timeouts — see
+// isTransientForBreaker). Permanent client errors (4xx other than 408/429, e.g.
+// a policy-blocked or unavailable model returning 400/403/404) and caller
+// cancellations are breaker-neutral: they neither open the breaker nor reset it.
+// After BreakerThreshold transient failures it opens and Stream fails fast with
+// *BreakerError for BreakerCooldown; it then half-opens to admit a single trial.
+// Any success resets it. All breaker state is concurrency-safe.
 //
 // The package depends only on the standard library and internal/port; the
 // classifier reaches *openai.Error via errors.As to read its StatusCode, which
@@ -168,6 +172,10 @@ func (p *resilientProvider) recordSuccess() {
 
 // recordFailure tallies a failed attempt and opens the breaker once the
 // threshold is reached (or immediately again on a failed half-open trial).
+// Stream calls it only for TRANSIENT establishment failures (HTTP 429/408/5xx,
+// network errors, per-attempt timeouts — see isTransientForBreaker); permanent
+// client errors (4xx other than 408/429) and caller cancellations are
+// breaker-neutral and never reach here.
 func (p *resilientProvider) recordFailure(now time.Time) {
 	if p.cfg.BreakerThreshold < 1 {
 		return
@@ -220,12 +228,20 @@ func (p *resilientProvider) Stream(ctx context.Context, req port.LLMRequest) (it
 		}
 
 		lastErr = err
-		p.recordFailure(p.cfg.Clock())
 
-		// Caller cancellation is never retried.
+		// Caller cancellation is never retried and is breaker-neutral.
 		if isCallerCanceled(ctx, err) {
 			return nil, err
 		}
+		// Only TRANSIENT failures count toward the shared breaker; permanent
+		// client errors (4xx) and caller cancels leave its counters untouched.
+		// (A half-open trial that fails with a PERMANENT error therefore leaves
+		// the breaker in open&halfOpen — the next allow re-admits a trial after
+		// cooldown; permanent errors never drive breaker state.)
+		if isTransientForBreaker(err) {
+			p.recordFailure(p.cfg.Clock())
+		}
+		// Permanent (non-retryable) errors are surfaced verbatim, not retried.
 		if !p.cfg.Classifier(err) {
 			return nil, err
 		}
@@ -476,6 +492,76 @@ func retryableStatus(code int) bool {
 	default:
 		return false
 	}
+}
+
+// isTransientForBreaker is the breaker-health predicate: it reports whether an
+// establishment failure is a sign the PROVIDER is unhealthy and should count
+// toward the shared circuit breaker. It is DISTINCT from the retry classifier
+// (cfg.Classifier): the breaker must NOT be coupled to the caller-injectable
+// classifier, so it keeps its own status switch.
+//
+// The two predicates deliberately DIVERGE on HTTP 409: a request conflict is
+// retryable per-request (retryableStatus returns true) but is NOT a sign the
+// provider is unhealthy, so 409 must not trip a shared breaker and is excluded
+// here. The breaker counts only transient provider-health failures:
+//   - true: HTTP 408, 429, any 5xx; net.Error; bare context.DeadlineExceeded
+//     (a per-attempt timeout).
+//   - false: HTTP 409 (request-conflict ≠ provider-unhealthy), all other 4xx
+//     (400/401/403/404/...), context.Canceled, unknown errors, nil.
+//
+// It mirrors DefaultClassifier's errors.As chain but writes its own status
+// switch inline (rather than reusing retryableStatus) so the 409 divergence is
+// explicit and self-documenting.
+func isTransientForBreaker(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Caller-style context cancellation is breaker-neutral.
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	// breakerStatus is the breaker's OWN status switch, intentionally distinct
+	// from retryableStatus: 408/429/5xx count as provider-health signals; 409
+	// does NOT (request-conflict is not provider-unhealthy), and neither does any
+	// other 4xx.
+	breakerStatus := func(code int) bool {
+		switch {
+		case code == 408 || code == 429:
+			return true
+		case code >= 500 && code <= 599:
+			return true
+		default:
+			return false
+		}
+	}
+
+	// OpenAI typed API error: classify on HTTP status.
+	var apiErr *oai.Error
+	if errors.As(err, &apiErr) {
+		return breakerStatus(apiErr.StatusCode)
+	}
+
+	// Generic status-bearing errors (interface escape hatch for non-openai
+	// providers that expose a StatusCode).
+	var sc interface{ StatusCode() int }
+	if errors.As(err, &sc) {
+		return breakerStatus(sc.StatusCode())
+	}
+
+	// Network errors and timeouts are transient provider-health signals.
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+
+	// A bare DeadlineExceeded (a per-attempt timeout surfaced without a net.Error
+	// wrapper) is transient.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	return false
 }
 
 // Compile-time assertion that the decorator satisfies the port.

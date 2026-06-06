@@ -480,9 +480,302 @@ func TestBreakerHalfOpenFailureReopens(t *testing.T) {
 	}
 }
 
+// TestBreakerHalfOpenPermanentErrorStaysOpen pins the designed (IMPLEMENTATION-NOTES)
+// behaviour of a half-open trial that fails with a PERMANENT error: such an error is
+// breaker-neutral, so recordFailure is never reached for it. The breaker therefore
+// stays in its post-cooldown open&halfOpen shape — it is NOT hard-reopened with a fresh
+// cooldown (the half-open reopen branch), NOR reset. Consequently the next allow() after
+// cooldown re-admits a trial that reaches inner and surfaces the next programmed step,
+// rather than wedging behind a permanent *BreakerError lockout.
+func TestBreakerHalfOpenPermanentErrorStaysOpen(t *testing.T) {
+	clk := &manualClock{t: time.Unix(1000, 0)}
+	// Step 0..2: transient burst opens the breaker. Step 3: the half-open trial fails
+	// with a PERMANENT 400. Step 4: the next half-open trial succeeds, proving the
+	// breaker kept admitting trials (no permanent lockout).
+	f := &fakeProvider{steps: []step{
+		{outerErr: apiErr(503)},
+		{outerErr: apiErr(503)},
+		{outerErr: apiErr(503)},
+		{outerErr: apiErr(400)},
+		{chunks: textTurn("recovered")},
+	}}
+	cfg := Config{
+		MaxAttempts:      1, // one attempt per Stream, so each call is one establishment
+		BaseBackoff:      time.Nanosecond,
+		MaxBackoff:       time.Nanosecond,
+		BreakerThreshold: 3,
+		BreakerCooldown:  30 * time.Second,
+		Clock:            clk.Now,
+	}
+	p := Wrap(f, cfg)
+
+	// 1. Three transient failures open the breaker.
+	for i := 0; i < 3; i++ {
+		if _, err := p.Stream(context.Background(), port.LLMRequest{}); err == nil {
+			t.Fatalf("burst attempt %d: want error", i)
+		}
+	}
+	if f.Calls() != 3 {
+		t.Fatalf("inner called %d times during burst, want 3", f.Calls())
+	}
+	// Breaker is open: fails fast without calling inner.
+	if _, err := p.Stream(context.Background(), port.LLMRequest{}); !errorsAsBreaker(err) {
+		t.Fatalf("want *BreakerError while open, got %v", err)
+	}
+	if f.Calls() != 3 {
+		t.Fatalf("inner called while breaker open (calls=%d, want 3)", f.Calls())
+	}
+
+	// 2. Advance past cooldown so the next allow() admits a HALF-OPEN trial.
+	clk.Advance(31 * time.Second)
+
+	// 3. The half-open trial (step 3) returns a PERMANENT 400.
+	_, err := p.Stream(context.Background(), port.LLMRequest{})
+
+	// Assert: the 400 surfaces VERBATIM, NOT wrapped as a *BreakerError.
+	if errorsAsBreaker(err) {
+		t.Fatalf("half-open permanent trial returned *BreakerError, want the verbatim 400: %v", err)
+	}
+	var got400 *oai.Error
+	if !errors.As(err, &got400) || got400.StatusCode != 400 {
+		t.Fatalf("half-open trial err = %v, want verbatim 400 *oai.Error", err)
+	}
+	if f.Calls() != 4 {
+		t.Fatalf("half-open permanent trial: inner called %d times, want 4 (trial WAS admitted)", f.Calls())
+	}
+
+	// 4. WITHOUT advancing the clock further beyond cooldown again, the breaker keeps
+	// admitting trials — the permanent error neither re-armed (hard-reopened with a
+	// fresh cooldown) nor reset it. The next Stream therefore reaches inner (step 4)
+	// and surfaces the programmed success, not a permanent *BreakerError lockout.
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if errorsAsBreaker(err) {
+		t.Fatalf("breaker wedged after half-open permanent error (fast-failed instead of admitting a trial): %v", err)
+	}
+	if err != nil {
+		t.Fatalf("post-permanent-trial Stream error: %v", err)
+	}
+	gotChunks, derr := drain(t, seq)
+	if derr != nil {
+		t.Fatalf("drain error: %v", derr)
+	}
+	if len(gotChunks) == 0 || gotChunks[0].Text != "recovered" {
+		t.Fatalf("got %+v, want textTurn(recovered)", gotChunks)
+	}
+	if f.Calls() != 5 {
+		t.Fatalf("post-permanent-trial: inner called %d times, want 5 (trial admitted again)", f.Calls())
+	}
+}
+
 func errorsAsBreaker(err error) bool {
 	var be *BreakerError
 	return errors.As(err, &be)
+}
+
+// TestBreakerCountsTransientNotPermanent is the unit table for the breaker-health
+// predicate isTransientForBreaker, distinct from DefaultClassifier (see ~499):
+// 408/429/5xx/net/timeout are transient and count; 409 (the deliberate
+// divergence), all other 4xx, caller cancel, unknown and nil are breaker-neutral.
+func TestBreakerCountsTransientNotPermanent(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"429 transient", apiErr(429), true},
+		{"408 transient", apiErr(408), true},
+		{"500 transient", apiErr(500), true},
+		{"503 transient", apiErr(503), true},
+		{"net error transient", &net.OpError{Op: "dial", Err: errors.New("refused")}, true},
+		{"deadline exceeded transient", context.DeadlineExceeded, true},
+		{"400 permanent", apiErr(400), false},
+		{"401 permanent", apiErr(401), false},
+		{"403 permanent", apiErr(403), false},
+		{"404 permanent", apiErr(404), false},
+		{"409 permanent for breaker (divergence)", apiErr(409), false},
+		{"context canceled neutral", context.Canceled, false},
+		{"unknown neutral", errors.New("mystery"), false},
+		{"nil neutral", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTransientForBreaker(tc.err); got != tc.want {
+				t.Fatalf("isTransientForBreaker(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBreakerOpensOnTransientBurst asserts a burst of TRANSIENT establishment
+// failures opens the shared breaker: after BreakerThreshold failures the next
+// Stream fails fast with *BreakerError without calling inner.
+func TestBreakerOpensOnTransientBurst(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"429 burst", apiErr(429)},
+		{"503 burst", apiErr(503)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &manualClock{t: time.Unix(1000, 0)}
+			f := &fakeProvider{steps: []step{{outerErr: tc.err}}}
+			cfg := Config{
+				MaxAttempts:      1,
+				BaseBackoff:      time.Nanosecond,
+				MaxBackoff:       time.Nanosecond,
+				BreakerThreshold: 3,
+				BreakerCooldown:  30 * time.Second,
+				Clock:            clk.Now,
+			}
+			p := Wrap(f, cfg)
+
+			for i := 0; i < 3; i++ {
+				if _, err := p.Stream(context.Background(), port.LLMRequest{}); err == nil {
+					t.Fatalf("attempt %d: want error", i)
+				}
+			}
+			callsAtOpen := f.Calls()
+			if callsAtOpen != 3 {
+				t.Fatalf("inner called %d times, want 3", callsAtOpen)
+			}
+
+			_, err := p.Stream(context.Background(), port.LLMRequest{})
+			var be *BreakerError
+			if !errors.As(err, &be) {
+				t.Fatalf("4th Stream err = %v, want *BreakerError", err)
+			}
+			if f.Calls() != callsAtOpen {
+				t.Fatalf("inner called during open breaker (calls=%d, want %d)", f.Calls(), callsAtOpen)
+			}
+		})
+	}
+}
+
+// TestBreakerDoesNotOpenOnPermanentErrors is the core regression guard for the
+// live bug: a burst of breaker-NEUTRAL client errors must NOT trip the shared
+// breaker, so a working model still flows after the burst. This covers the
+// permanent 4xx (400/401/403/404, e.g. a policy-blocked or unavailable model) AND
+// the 409 divergence: 409 is RETRYABLE per cfg.Classifier yet breaker-neutral per
+// isTransientForBreaker (a request-conflict is not provider-unhealthy), so a 409
+// burst must likewise leave the breaker closed even though it is retryable. With
+// MaxAttempts:1 each 409 surfaces in a single attempt like the other rows. This
+// row goes red if 409 were added to the breaker's transient set.
+func TestBreakerDoesNotOpenOnPermanentErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"400 burst", apiErr(400)},
+		{"401 burst", apiErr(401)},
+		{"403 burst", apiErr(403)},
+		{"404 burst", apiErr(404)},
+		{"409 burst (retryable but breaker-neutral)", apiErr(409)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &manualClock{t: time.Unix(1000, 0)}
+			f := &fakeProvider{steps: []step{{outerErr: tc.err}}}
+			cfg := Config{
+				MaxAttempts:      1,
+				BaseBackoff:      time.Nanosecond,
+				MaxBackoff:       time.Nanosecond,
+				BreakerThreshold: 3,
+				BreakerCooldown:  30 * time.Second,
+				Clock:            clk.Now,
+			}
+			p := Wrap(f, cfg)
+
+			// More than the threshold's worth of permanent errors.
+			for i := 0; i < 5; i++ {
+				if _, err := p.Stream(context.Background(), port.LLMRequest{}); err == nil {
+					t.Fatalf("attempt %d: want error", i)
+				}
+			}
+			callsAfterBurst := f.Calls()
+			if callsAfterBurst != 5 {
+				t.Fatalf("inner called %d times during burst, want 5", callsAfterBurst)
+			}
+
+			// Flip to a working model; it must succeed — the breaker stayed closed.
+			f.mu.Lock()
+			f.steps = []step{{chunks: textTurn("works")}}
+			f.mu.Unlock()
+
+			seq, err := p.Stream(context.Background(), port.LLMRequest{})
+			if errorsAsBreaker(err) {
+				t.Fatalf("working model blocked by breaker after permanent-error burst: %v", err)
+			}
+			if err != nil {
+				t.Fatalf("working model Stream error: %v", err)
+			}
+			got, derr := drain(t, seq)
+			if derr != nil {
+				t.Fatalf("drain error: %v", derr)
+			}
+			if len(got) == 0 || got[0].Text != "works" {
+				t.Fatalf("got %+v, want textTurn(works)", got)
+			}
+			if f.Calls() != callsAfterBurst+1 {
+				t.Fatalf("working model: inner called %d times, want %d (inner WAS called)", f.Calls(), callsAfterBurst+1)
+			}
+		})
+	}
+}
+
+// TestBreakerNeutralOnCallerCancel asserts caller cancellations are
+// breaker-neutral: even more cancels than the threshold never open the breaker,
+// and a subsequent working step succeeds.
+func TestBreakerNeutralOnCallerCancel(t *testing.T) {
+	clk := &manualClock{t: time.Unix(1000, 0)}
+	f := &fakeProvider{steps: []step{{block: true}}}
+	cfg := Config{
+		MaxAttempts:      1,
+		BaseBackoff:      time.Nanosecond,
+		MaxBackoff:       time.Nanosecond,
+		BreakerThreshold: 3,
+		BreakerCooldown:  30 * time.Second,
+		Clock:            clk.Now,
+	}
+	p := Wrap(f, cfg)
+
+	// Exceed the threshold's worth of caller-cancels.
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			cancel()
+		}()
+		_, err := p.Stream(ctx, port.LLMRequest{})
+		if errorsAsBreaker(err) {
+			t.Fatalf("cancel %d returned *BreakerError: %v", i, err)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancel %d err = %v, want context.Canceled", i, err)
+		}
+		cancel()
+	}
+
+	// A subsequent working step succeeds — the breaker never opened.
+	f.mu.Lock()
+	f.steps = []step{{chunks: textTurn("works")}}
+	f.mu.Unlock()
+
+	seq, err := p.Stream(context.Background(), port.LLMRequest{})
+	if errorsAsBreaker(err) {
+		t.Fatalf("working step blocked by breaker after caller-cancel burst: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("working step Stream error: %v", err)
+	}
+	got, derr := drain(t, seq)
+	if derr != nil {
+		t.Fatalf("drain error: %v", derr)
+	}
+	if len(got) == 0 || got[0].Text != "works" {
+		t.Fatalf("got %+v, want textTurn(works)", got)
+	}
 }
 
 // apiErr builds an *oai.Error with enough populated for its Error() method to

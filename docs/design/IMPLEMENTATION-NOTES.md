@@ -336,6 +336,24 @@ discarded. `attemptError(cause, err)`: `cause==nil` ⇒ return `err` verbatim (r
 surfaces → `StopError`); `cause!=nil` ⇒ wrap `cause: err` (genuine per-attempt deadline stays
 retryable; genuine caller-cancel stays a cancel / wedge-recovery).
 
+**Breaker counts only TRANSIENT failures.** The per-provider circuit breaker is for
+provider-health signals, not every establish failure. `Stream` calls `recordFailure` ONLY when
+`isTransientForBreaker(err)` is true — a breaker-specific predicate (mirroring the classifier's
+`errors.As` chain) DISTINCT from `cfg.Classifier`/`retryableStatus`: true for HTTP 408/429/5xx,
+`net.Error`, and a bare `context.DeadlineExceeded` (per-attempt timeout); false for all other 4xx
+(400/401/403/404…), `context.Canceled`, unknown, nil. It deliberately **diverges on HTTP 409**:
+409 is retryable per-request (so `retryableStatus` returns true) but a request conflict is NOT a
+sign the provider is unhealthy, so it must not trip a shared breaker — `isTransientForBreaker`
+returns false for 409. The breaker must NOT be coupled to the caller-injectable `cfg.Classifier`,
+hence its own inline status switch (not `retryableStatus` minus 409). In `Stream`, the order is:
+caller-cancel check first (breaker-neutral, never retried) → `recordFailure` only if transient →
+permanent errors surfaced verbatim → backoff. A permanent error and a caller-cancel leave the
+breaker counters UNTOUCHED (neither `recordFailure` nor `recordSuccess`); a half-open trial that
+fails with a PERMANENT error leaves the breaker in `open&halfOpen` so the next `allow` re-admits a
+trial after cooldown. **Motivating incident:** a burst of permanent 404s (OpenRouter
+policy-blocked / unavailable models) was counting toward the shared breaker via an unconditional
+`recordFailure`, tripping it and then blocking unrelated WORKING models for the cooldown.
+
 ## Composition — `internal/app/` (multi-provider — see `MULTI-PROVIDER.md`)
 
 The single shared assembly of provider + catalog + policy + engine into a `server.Service`

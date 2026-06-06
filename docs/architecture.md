@@ -750,7 +750,9 @@ Its load-bearing invariant is **no replay after the first chunk**: retries happe
 only while *establishing* the stream (connect + first chunk). Once the first
 `Chunk` has been yielded, the decorator never re-issues the call, so the model
 never re-sees a half-streamed turn. The breaker opens after N consecutive
-establishment failures and short-circuits with a `BreakerError` until its
+**transient** establishment failures (rate-limits, timeouts, 5xx, network);
+permanent client errors (4xx other than 408/429) and caller cancellations don't
+count. It short-circuits with a `BreakerError` until its
 cooldown half-opens it; exhausted retries surface as an `ExhaustedError`. Both
 flow back to the client as a terminal `result` event — `session.ResultPayload`
 now carries an **`Error`** field, so a provider failure is reported to the caller
