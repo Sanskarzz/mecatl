@@ -1,11 +1,12 @@
 package app
 
 import (
-	"log/slog"
+	"context"
 	"time"
 
 	"github.com/stacklok/mecatl/internal/adapter/workspacetrust"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // trust.go is the COMPOSITION-LAYER workspace-trust resolver (Workspace-Trust
@@ -112,7 +113,7 @@ func resolveTrust(cfg Config) TrustDecision {
 		return TrustDecision{Trusted: false, Source: TrustNone}
 	}
 
-	reader := workspacetrust.NewWithEnv(trustEnv)
+	reader := workspacetrust.NewWithEnv(trustEnv).WithDiagnostics(cfg.diag())
 	if reader.IsDeclared(cfg.Workspace) {
 		return TrustDecision{Trusted: true, Source: TrustDeclared}
 	}
@@ -161,7 +162,7 @@ func HasProjectAuthority(cfg Config) bool {
 	if cfg.Workspace == "" {
 		return false
 	}
-	return workspacetrust.NewWithEnv(trustEnv).HasProjectAuthority(cfg.Workspace)
+	return workspacetrust.NewWithEnv(trustEnv).WithDiagnostics(cfg.diag()).HasProjectAuthority(cfg.Workspace)
 }
 
 // RememberTrust persists a "trust" grant for cfg.Workspace to the machine-written
@@ -176,7 +177,7 @@ func RememberTrust(cfg Config, trustedAt time.Time) error {
 	if cfg.Workspace == "" {
 		return nil
 	}
-	reader := workspacetrust.NewWithEnv(trustEnv)
+	reader := workspacetrust.NewWithEnv(trustEnv).WithDiagnostics(cfg.diag())
 	return reader.Remember(cfg.Workspace, reader.AnchorHash(cfg.Workspace), trustedAt)
 }
 
@@ -187,16 +188,16 @@ func RememberTrust(cfg Config, trustedAt time.Time) error {
 // applyTrustGate drop-report style — the workspace's identity surface changed since
 // it was trusted, so it has been re-gated to UNTRUSTED for this run (Phase 2c's
 // mecatui will turn this into a re-prompt; mecated stays declarative).
-func narrateTrust(d TrustDecision, workspace string) {
+func narrateTrust(diag port.Diagnostics, d TrustDecision, workspace string) {
 	if d.Drifted {
-		slog.Warn("workspace trust: identity anchor DRIFTED since the workspace was trusted; re-gated to untrusted (run mecatui to re-confirm trust)",
+		diag.Log(context.Background(), port.LevelWarn, "workspace trust: identity anchor DRIFTED since the workspace was trusted; re-gated to untrusted (run mecatui to re-confirm trust)",
 			"trusted", d.Trusted,
 			"source", d.Source.String(),
 			"drifted", d.Drifted,
 			"workspace", workspace)
 		return
 	}
-	slog.Info("workspace trust",
+	diag.Log(context.Background(), port.LevelInfo, "workspace trust",
 		"trusted", d.Trusted,
 		"source", d.Source.String(),
 		"drifted", d.Drifted,

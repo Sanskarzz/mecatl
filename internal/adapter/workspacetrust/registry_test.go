@@ -1,13 +1,17 @@
 package workspacetrust
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // realConfigEnv returns an env rooted at a REAL temp config dir: $XDG_CONFIG_HOME
@@ -194,6 +198,33 @@ func TestRegistryFailToUntrustedOnUnparseable(t *testing.T) {
 	r := NewWithEnv(envWithTrustYAML(t.TempDir(), []byte("version: 1\nworkspaces: [unterminated\n : :")))
 	if remembered, _ := r.Remembered(ws, "anchor"); remembered {
 		t.Fatal("unparseable trust.yaml reported as remembered; must fail safe")
+	}
+}
+
+// TestRegistryFailSafeWarnReachesInjectedSink pins BOTH the diagnostics wiring (the
+// injected port.Diagnostics is actually consulted on the fail-safe path) AND the
+// level (a silent WARN→Info downgrade fails the test). A corrupt trust.yaml must
+// (a) fail safe to not-remembered AND (b) emit the "unparseable" line at WARN.
+func TestRegistryFailSafeWarnReachesInjectedSink(t *testing.T) {
+	base := t.TempDir()
+	ws := realDir(t, base, "repo")
+	var buf bytes.Buffer
+	// minLevel=Info so an accidental WARN→Info downgrade would STILL be captured; the
+	// assertion then pins level=WARN, so the downgrade fails the test.
+	diag := slogdiag.New(&buf, false, port.LevelInfo)
+
+	r := NewWithEnv(envWithTrustYAML(t.TempDir(), []byte("version: 1\nworkspaces: [unterminated\n : :"))).
+		WithDiagnostics(diag)
+	if remembered, _ := r.Remembered(ws, "anchor"); remembered {
+		t.Fatal("unparseable trust.yaml reported as remembered; must fail safe")
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "trust.yaml unparseable") {
+		t.Fatalf("fail-safe unparseable line did not reach the injected sink; got: %s", out)
+	}
+	if !strings.Contains(out, "level=WARN") {
+		t.Fatalf("fail-safe unparseable line must be WARN (no silent downgrade); got: %s", out)
 	}
 }
 

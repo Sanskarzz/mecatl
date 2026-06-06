@@ -3,7 +3,6 @@ package app
 import (
 	"bytes"
 	"context"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/adapter/server"
+	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/adapter/tokenizer"
 	"github.com/stacklok/mecatl/internal/agent"
@@ -109,12 +109,10 @@ func TestResolveProviderModelSessionInheritance(t *testing.T) {
 // the model resolves through the same-provider chain.
 func TestResolveProviderModelFailSafe(t *testing.T) {
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	diag := slogdiag.New(&buf, false, port.LevelWarn)
 
 	reg := regForTest(mockllm.New(), providerOpenAI, "parent-model")
-	cfg := Config{Model: "parent-model"}
+	cfg := Config{Model: "parent-model", Diagnostics: diag}
 
 	// "anthropic" is not in this single-provider registry => unknown.
 	pid, mdl := resolveProviderModel(cfg, reg, agents.AgentDef{Name: "z", Provider: "anthropic"}, providerOpenAI, "parent-model")
@@ -409,7 +407,7 @@ func runTaskAgent(t *testing.T, _ *mockllm.Provider, engines map[string]*agent.E
 // Each provider mock is scripted with: a Task tool call (the session/parent turn),
 // the sub-agent's reply, then a parent-done turn — so a single provider can back
 // BOTH the session engine and a child that inherited it (shared mockllm cursor).
-func twoProviderFactoryWithAgents(t *testing.T, defs *agents.Registry, taskAgent string) (server.SessionEngineFactory, *providerRegistry) {
+func twoProviderFactoryWithAgents(t *testing.T, defs *agents.Registry, taskAgent string, diag ...port.Diagnostics) (server.SessionEngineFactory, *providerRegistry) {
 	t.Helper()
 	mkMock := func(id string) *mockllm.Provider {
 		return mockllm.New(
@@ -422,6 +420,9 @@ func twoProviderFactoryWithAgents(t *testing.T, defs *agents.Registry, taskAgent
 	or := mkMock(providerOpenRouter)
 	reg := twoProviderReg(oa, providerOpenAI, "gpt-5", or, providerOpenRouter)
 	cfg := Config{Model: "gpt-5"}
+	if len(diag) > 0 {
+		cfg.Diagnostics = diag[0]
+	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
 	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, nil, defs)
@@ -486,14 +487,12 @@ func TestHalfBDefProviderOverridesSession(t *testing.T) {
 // TestResolveProviderModelFailSafe by exercising the whole per-session wiring.
 func TestHalfBSelectedSessionUnknownProviderFallsBack(t *testing.T) {
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	diag := slogdiag.New(&buf, false, port.LevelWarn)
 
 	defs := agents.NewRegistry([]agents.AgentDef{
 		{Name: "bogus", Description: "names an unkeyed provider", Provider: "anthropic"},
 	})
-	factory, _ := twoProviderFactoryWithAgents(t, defs, "bogus")
+	factory, _ := twoProviderFactoryWithAgents(t, defs, "bogus", diag)
 	// Session selects openrouter; the def's bogus provider is unknown => the child
 	// falls back to the SESSION provider (openrouter), runs, and does NOT error.
 	if got := runFactoryTaskTurn(t, factory, server.ProviderSelector{ProviderID: providerOpenRouter}); got != "CHILD-FROM-openrouter" {

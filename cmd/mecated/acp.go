@@ -7,6 +7,7 @@ import (
 
 	"github.com/stacklok/mecatl/internal/adapter/acp"
 	"github.com/stacklok/mecatl/internal/adapter/server"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // serveACP runs the Agent Client Protocol stdio loop: it speaks JSON-RPC 2.0 to
@@ -24,10 +25,10 @@ import (
 // --store-dir). It gates ACP session/load: the agent advertises loadSession only
 // when resume is true, so an editor never attempts to resume a session that the
 // in-memory store would lose across a restart.
-func serveACP(ctx context.Context, svc *server.Service, resume bool) error {
+func serveACP(ctx context.Context, svc *server.Service, resume bool, diag port.Diagnostics) error {
 	slog.Info("serving Agent Client Protocol over stdio (JSON-RPC 2.0); TCP/HTTP listeners skipped",
 		"resume", resume)
-	agent := acp.NewAgent(svc, acp.WithResume(resume))
+	agent := acp.NewAgent(svc, acp.WithResume(resume), acp.WithDiagnostics(diag))
 	conn := acp.NewConn(os.Stdin, os.Stdout, agent.Handle)
 	return agent.Serve(ctx, conn)
 }

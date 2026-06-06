@@ -29,7 +29,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -38,6 +37,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
@@ -196,7 +196,10 @@ type Server struct {
 // defaultConnectTimeout). A non-nil error means the server should be treated as
 // unavailable; callers (the composition root) are expected to log-and-skip such
 // a server rather than aborting the whole harness.
-func Connect(ctx context.Context, cfg ServerConfig) (*Server, error) {
+func Connect(ctx context.Context, cfg ServerConfig, diag port.Diagnostics) (*Server, error) {
+	if diag == nil {
+		diag = port.NopDiagnostics{}
+	}
 	if cfg.Name == "" {
 		return nil, errors.New("mcp: server config requires a Name")
 	}
@@ -273,7 +276,7 @@ func Connect(ctx context.Context, cfg ServerConfig) (*Server, error) {
 	caps := serverCapabilities(sess)
 	if caps != nil && caps.Resources != nil {
 		if res, rerr := srv.listResources(connectCtx); rerr != nil {
-			slog.Warn("mcp: listing resources failed; continuing without them",
+			diag.Log(connectCtx, port.LevelWarn, "mcp: listing resources failed; continuing without them",
 				"server", cfg.Name, "err", rerr)
 		} else {
 			srv.resources = res
@@ -281,7 +284,7 @@ func Connect(ctx context.Context, cfg ServerConfig) (*Server, error) {
 	}
 	if caps != nil && caps.Prompts != nil {
 		if pr, perr := srv.listPrompts(connectCtx); perr != nil {
-			slog.Warn("mcp: listing prompts failed; continuing without them",
+			diag.Log(connectCtx, port.LevelWarn, "mcp: listing prompts failed; continuing without them",
 				"server", cfg.Name, "err", perr)
 		} else {
 			srv.prompts = pr
@@ -357,13 +360,16 @@ type Manager struct {
 // NewManager returns an error only if no servers could be connected AND at
 // least one was configured, so the caller can distinguish "nothing usable" from
 // "all good".
-func NewManager(ctx context.Context, configs []ServerConfig, onError func(cfg ServerConfig, err error)) (*Manager, error) {
+func NewManager(ctx context.Context, configs []ServerConfig, onError func(cfg ServerConfig, err error), diag port.Diagnostics) (*Manager, error) {
+	if diag == nil {
+		diag = port.NopDiagnostics{}
+	}
 	m := &Manager{}
 	var lastErr error
 	var attempted int
 	for _, cfg := range configs {
 		attempted++
-		srv, err := Connect(ctx, cfg)
+		srv, err := Connect(ctx, cfg, diag)
 		if err != nil {
 			lastErr = err
 			if onError != nil {

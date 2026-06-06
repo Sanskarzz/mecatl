@@ -3,7 +3,6 @@ package telemetry
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
 
@@ -269,16 +268,19 @@ var rssZeroLogOnce sync.Once
 // async observation of the OS process; keeping it apart lets a caller opt out.
 //
 // It returns an error if the instrument fails to construct.
-func RegisterProcessGauges(mp metric.MeterProvider) error {
+func RegisterProcessGauges(mp metric.MeterProvider, diag port.Diagnostics) error {
 	if !rssSupported() {
 		return nil
+	}
+	if diag == nil {
+		diag = port.NopDiagnostics{}
 	}
 	meter := mp.Meter(meterName)
 	rss, err := meter.Int64ObservableGauge(
 		"mecatl.process.rss",
 		metric.WithDescription("Process resident set size in bytes (read from /proc on Linux)."),
 		metric.WithUnit("By"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+		metric.WithInt64Callback(func(ctx context.Context, o metric.Int64Observer) error {
 			if v := readRSS(); v > 0 {
 				o.Observe(int64(v)) //nolint:gosec // RSS bytes fits an int64 for any real process
 			} else {
@@ -286,7 +288,7 @@ func RegisterProcessGauges(mp metric.MeterProvider) error {
 				// read failure: the gauge series silently goes missing. Log it ONCE
 				// at debug so the gap is diagnosable without flooding every scrape.
 				rssZeroLogOnce.Do(func() {
-					slog.Debug("process RSS read returned 0 on a supported platform; mecatl_process_rss series will be absent until /proc reads succeed")
+					diag.Log(ctx, port.LevelDebug, "process RSS read returned 0 on a supported platform; mecatl_process_rss series will be absent until /proc reads succeed")
 				})
 			}
 			return nil

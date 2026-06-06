@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,9 +12,11 @@ import (
 
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
+	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/workspacetrust"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // withTrustEnv swaps the package-level trustEnv for the duration of a test (so the
@@ -492,11 +493,9 @@ func TestResolveTrustNeverWritesRegistry(t *testing.T) {
 // re-gated-to-untrusted alarm), not the quiet Info line.
 func TestNarrateTrustWarnsOnDrift(t *testing.T) {
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	diag := slogdiag.New(&buf, false, port.LevelInfo)
 
-	narrateTrust(TrustDecision{Trusted: false, Source: TrustNone, Drifted: true}, "/some/ws")
+	narrateTrust(diag, TrustDecision{Trusted: false, Source: TrustNone, Drifted: true}, "/some/ws")
 	out := buf.String()
 	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "DRIFTED") {
 		t.Fatalf("drifted decision must narrate at WARN with a drift message; got: %s", out)
@@ -509,11 +508,9 @@ func TestNarrateTrustWarnsOnDrift(t *testing.T) {
 // trusted fields are emitted. It is a thin logging assertion, not over-engineered.
 func TestNarrateTrustLogsDecision(t *testing.T) {
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	diag := slogdiag.New(&buf, false, port.LevelInfo)
 
-	narrateTrust(TrustDecision{Trusted: true, Source: TrustDeclared}, "/some/ws")
+	narrateTrust(diag, TrustDecision{Trusted: true, Source: TrustDeclared}, "/some/ws")
 
 	out := buf.String()
 	for _, want := range []string{"workspace trust", "trusted=true", "source=declared", "/some/ws"} {

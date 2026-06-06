@@ -65,6 +65,13 @@ type config struct {
 	// outside a declared sandbox (see validate). See docs/design/ALLOW-ALL-POSTURE.md.
 	allowAllTools bool
 
+	// quiet routes the embedded server's operational diagnostics (and the perf
+	// surface's startup/teardown lines) to io.Discard instead of the per-user state
+	// log file. Default OFF: diagnostics land in $XDG_STATE_HOME/mecatl/mecatui.log
+	// (never stderr — stderr corrupts the Bubble Tea alt-screen). --quiet drops them
+	// entirely for an operator who wants zero on-disk diagnostics.
+	quiet bool
+
 	// Embedded-server memory config (used only when hosting an in-process
 	// server). An empty memoryDir means "compute the per-project default under
 	// $XDG_DATA_HOME/mecatui/memory"; an explicit path overrides it. noMemory
@@ -176,6 +183,8 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.trustProject, "trust-project", false, "embedded server only: honour a discovered PROJECT's ALLOW rules AND its project-scoped soul (.mecatl/soul.md) (its deny/ask rules are always honoured regardless). Default OFF (the safe stance, unified with mecated): an untrusted repo's permission grants and project soul are ignored. TRUST BOUNDARY: enabling this lets a checked-in .mecatl/settings.yaml auto-approve tool calls and a checked-in project soul steer the model — only pass it for a repo you trust")
 	fs.BoolVar(&cfg.allowAllTools, "yolo", false,
 		"embedded server only; OPERATOR POSTURE (dangerous): suppress permission prompts for the built-in mutate-ask floor, for ephemeral/sandboxed use only. Deny in any scope and configured Ask still apply. Refused as root unless MECATL_SANDBOX=1 (or IS_SANDBOX=1).")
+	fs.BoolVar(&cfg.quiet, "quiet", false,
+		"discard the embedded server's operational diagnostics instead of writing them to $XDG_STATE_HOME/mecatl/mecatui.log (fallback ~/.local/state/mecatl/mecatui.log). Diagnostics NEVER go to stderr (that corrupts the TUI alt-screen); --quiet drops them entirely")
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "embedded server only: per-project memory store directory (empty = a per-project default under $XDG_DATA_HOME/mecatui/memory)")
 	fs.BoolVar(&cfg.noMemory, "no-memory", false, "embedded server only: disable cross-session memory (Remember/Recall) entirely")
 	fs.StringVar(&cfg.soulFile, "soul-file", "", "embedded server only: path to a user-scoped, agent-READ-ONLY persona/\"soul\" file injected as turn-0 context (empty = the conventional $XDG_CONFIG_HOME/mecatl/soul.md, fallback ~/.config/mecatl/soul.md; fail-soft if absent)")

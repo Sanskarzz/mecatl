@@ -7,13 +7,15 @@ import (
 	"testing"
 
 	"github.com/adrg/xdg"
+
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // TestEmbeddedConfigEnablesAgentDefs asserts the embedded server enables conventional
 // agent-definition discovery (consistent with EnableTeams/EnableFork; inert until a
 // <name>.md exists under a conventional dir).
 func TestEmbeddedConfigEnablesAgentDefs(t *testing.T) {
-	ac := embeddedConfig(config{workspace: "/ws", model: "m", mock: true})
+	ac := embeddedConfig(config{workspace: "/ws", model: "m", mock: true}, port.NopDiagnostics{})
 	if !ac.AgentsConventional {
 		t.Error("embeddedConfig AgentsConventional = false, want true")
 	}
@@ -27,7 +29,7 @@ func TestEmbeddedConfigEnablesAgentDefs(t *testing.T) {
 // that project TRUST is DEFAULT FALSE (WORKSPACE-TRUST Phase 0): unified with
 // mecated, a project's ALLOW rules + project soul are gated behind --trust-project.
 func TestEmbeddedConfigPermissionPosture(t *testing.T) {
-	ac := embeddedConfig(config{workspace: "/ws", model: "m", mock: true})
+	ac := embeddedConfig(config{workspace: "/ws", model: "m", mock: true}, port.NopDiagnostics{})
 	if !ac.PermissionsConventional {
 		t.Error("embeddedConfig PermissionsConventional = false, want true")
 	}
@@ -42,11 +44,11 @@ func TestEmbeddedConfigPermissionPosture(t *testing.T) {
 // TestEmbeddedConfigMapsTrustProject asserts the --trust-project flag flows through
 // to app.Config.TrustProject: off by default, true when the flag is set.
 func TestEmbeddedConfigMapsTrustProject(t *testing.T) {
-	on := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, trustProject: true})
+	on := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, trustProject: true}, port.NopDiagnostics{})
 	if !on.TrustProject {
 		t.Error("embeddedConfig.TrustProject = false with --trust-project, want true")
 	}
-	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true})
+	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true}, port.NopDiagnostics{})
 	if off.TrustProject {
 		t.Error("embeddedConfig.TrustProject = true with flag off, want false")
 	}
@@ -202,11 +204,11 @@ func TestResolveCommands(t *testing.T) {
 // TestEmbeddedConfigCommands asserts embeddedConfig turns slash commands ON by
 // default and that --no-commands turns them fully off.
 func TestEmbeddedConfigCommands(t *testing.T) {
-	on := embeddedConfig(config{workspace: "/ws", model: "m", mock: true})
+	on := embeddedConfig(config{workspace: "/ws", model: "m", mock: true}, port.NopDiagnostics{})
 	if !on.EnableCommands || on.CommandsDir != "" {
 		t.Errorf("default: EnableCommands=%v CommandsDir=%q, want (true, \"\")", on.EnableCommands, on.CommandsDir)
 	}
-	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, noCommands: true})
+	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, noCommands: true}, port.NopDiagnostics{})
 	if off.EnableCommands || off.CommandsDir != "" {
 		t.Errorf("--no-commands: EnableCommands=%v CommandsDir=%q, want (false, \"\")", off.EnableCommands, off.CommandsDir)
 	}
@@ -264,11 +266,11 @@ func TestResolveSkills(t *testing.T) {
 // TestEmbeddedConfigSkills asserts embeddedConfig turns conventional skill discovery
 // ON by default and that --no-skills turns it off (no dirs, no conventional).
 func TestEmbeddedConfigSkills(t *testing.T) {
-	on := embeddedConfig(config{workspace: "/ws", model: "m", mock: true})
+	on := embeddedConfig(config{workspace: "/ws", model: "m", mock: true}, port.NopDiagnostics{})
 	if !on.SkillsConventional || on.SkillsDirs != nil {
 		t.Errorf("default: SkillsConventional=%v SkillsDirs=%v, want (true, nil)", on.SkillsConventional, on.SkillsDirs)
 	}
-	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, noSkills: true})
+	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, noSkills: true}, port.NopDiagnostics{})
 	if off.SkillsConventional || off.SkillsDirs != nil {
 		t.Errorf("--no-skills: SkillsConventional=%v SkillsDirs=%v, want (false, nil)", off.SkillsConventional, off.SkillsDirs)
 	}
@@ -461,11 +463,11 @@ func TestParseFlagsAllowAll(t *testing.T) {
 }
 
 func TestEmbeddedConfigMapsAllowAll(t *testing.T) {
-	on := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, allowAllTools: true})
+	on := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, allowAllTools: true}, port.NopDiagnostics{})
 	if !on.AllowAllTools {
 		t.Errorf("embeddedConfig.AllowAllTools = false, want true")
 	}
-	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true})
+	off := embeddedConfig(config{workspace: "/ws", model: "m", mock: true}, port.NopDiagnostics{})
 	if off.AllowAllTools {
 		t.Errorf("embeddedConfig.AllowAllTools = true with flag off, want false")
 	}

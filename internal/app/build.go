@@ -19,7 +19,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -333,6 +332,26 @@ type providerConstructor func(cfg Config, id, key, baseURL string) port.LLMProvi
 // environment for provider credentials; tests override it via Config.envDetector.
 func osGetenv(name string) string { return os.Getenv(name) }
 
+// diag returns c.Diagnostics, or port.NopDiagnostics when it is nil. Build
+// defaults c.Diagnostics to a non-nil sink for the whole production path, but the
+// composition helpers are also exercised DIRECTLY by unit tests that construct a
+// bare Config (no Diagnostics). Routing every helper's Log call through cfg.diag()
+// makes those direct-call sites nil-safe by construction without forcing every test
+// Config to set the field — and never silently nil-panics on a forgotten sink.
+//
+// DISCIPLINE (keeps the nil-safety invariant from regressing): every composition
+// helper MUST log via cfg.diag(), NEVER cfg.Diagnostics directly — the field is nil
+// on the direct-call test path, so a bare cfg.Diagnostics.Log would nil-panic there.
+// Passing cfg.diag() — not cfg.Diagnostics — into a callee's Diagnostics argument is
+// the same rule; the one exception is a callee that itself defaults nil→Nop (e.g.
+// the adapter constructors), where forwarding cfg.Diagnostics is harmless.
+func (c Config) diag() port.Diagnostics {
+	if c.Diagnostics == nil {
+		return port.NopDiagnostics{}
+	}
+	return c.Diagnostics
+}
+
 // Built is the result of Build: the assembled server.Service plus a Close func
 // that tears down composition-owned resources (the MCP manager). Close is always
 // safe to call, even when nothing needs closing.
@@ -373,7 +392,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	}
 
 	trust := resolveTrust(cfg)
-	narrateTrust(trust, cfg.Workspace)
+	narrateTrust(cfg.diag(), trust, cfg.Workspace)
 	cfg.TrustProject = trust.Trusted
 
 	// Start-of-session git snapshot, computed ONCE here (FIX 2): gitSnapshot runs git
@@ -415,7 +434,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if err != nil {
 		return nil, err
 	}
-	logMCPInventory(mcpInventory)
+	logMCPInventory(ctx, cfg.diag(), mcpInventory)
 
 	// The command lister backs ListCommands (the TUI palette). It reuses the SAME
 	// expander build the engine consumes, so the palette offers exactly the
@@ -425,7 +444,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	svcCfg := server.Config{
 		Engine:        engine,
 		Store:         store,
-		Workspaces:    osfsWorkspaceFactory(),
+		Workspaces:    osfsWorkspaceFactory(cfg.diag()),
 		DefaultLimits: defaultLimits(),
 		MCPProvider:   mcpProvider,
 		MCPSources:    mcpInventory,
@@ -513,7 +532,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// cancelled by Close so a shutdown mid-fetch does not leak the goroutine (the
 	// goleak suite catches a leak). startLiveModelRefresh is a no-op when no provider
 	// has a lister (e.g. mock/openai-only), so the goroutine + ctx are skipped.
-	refreshClose := startLiveModelRefresh(reg, svc, cfg.liveModelRefreshSync)
+	refreshClose := startLiveModelRefresh(cfg.diag(), reg, svc, cfg.liveModelRefreshSync)
 
 	// Close tears down the main MCP manager AND any per-session client-MCP engines
 	// still registered (svc.Close), so a process exit leaks neither. It also cancels
@@ -609,16 +628,16 @@ func sessionEngineFactory(
 		sessionCaps := modelCapability(reg, resolvedProviderID, resolvedModel)
 
 		onError := func(sc mcp.ServerConfig, err error) {
-			slog.Warn("client MCP server unreachable; skipping for this session",
+			cfg.diag().Log(ctx, port.LevelWarn, "client MCP server unreachable; skipping for this session",
 				"server", sc.Name, "url", sc.URL, "err", err)
 		}
 		var mgr *mcp.Manager
 		if len(specs) > 0 {
-			m, err := mcp.NewManager(ctx, specs, onError)
+			m, err := mcp.NewManager(ctx, specs, onError, cfg.diag())
 			if err != nil {
 				// Best-effort: every server failed. The session still gets a usable engine
 				// (core tools only) rather than failing session creation outright.
-				slog.Warn("client MCP: no servers connected for this session; mounting core tools only", "err", err)
+				cfg.diag().Log(ctx, port.LevelWarn, "client MCP: no servers connected for this session; mounting core tools only", "err", err)
 			}
 			mgr = m
 		}
@@ -628,10 +647,10 @@ func sessionEngineFactory(
 		closeFn := func() error { return nil }
 		if mgr != nil {
 			if rerr := mcp.Register(cat, mgr.Tools()); rerr != nil {
-				slog.Warn("client MCP: registering tools failed; some may be missing", "err", rerr)
+				cfg.diag().Log(ctx, port.LevelWarn, "client MCP: registering tools failed; some may be missing", "err", rerr)
 			}
 			closeFn = mgr.Close
-			slog.Info("client MCP mounted for session",
+			cfg.diag().Log(ctx, port.LevelInfo, "client MCP mounted for session",
 				"servers", len(mgr.Servers()), "tools", len(mgr.Tools()))
 		}
 
@@ -741,14 +760,14 @@ func buildProvider(cfg Config) (*providerRegistry, port.LLMProvider, error) {
 // the in-memory store when the dir is empty.
 func buildStore(cfg Config) (port.SessionStore, error) {
 	if cfg.StoreDir == "" {
-		slog.Info("session store: in-memory")
+		cfg.diag().Log(context.Background(), port.LevelInfo, "session store: in-memory")
 		return memstore.New(), nil
 	}
 	st, err := jsonlstore.New(cfg.StoreDir)
 	if err != nil {
 		return nil, fmt.Errorf("open jsonl store %q: %w", cfg.StoreDir, err)
 	}
-	slog.Info("session store: jsonl", "dir", cfg.StoreDir)
+	cfg.diag().Log(context.Background(), port.LevelInfo, "session store: jsonl", "dir", cfg.StoreDir)
 	return st, nil
 }
 
@@ -789,6 +808,7 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 		ImportClaude:  cfg.ImportClaudePermissions,
 		TrustProject:  cfg.TrustProject,
 		ExplicitFiles: cfg.PermissionConfigs,
+		Diagnostics:   cfg.diag(),
 	})
 	// permconfig.New returns a TYPED-nil (*permconfig.Resolver)(nil) when no config
 	// source is wired; passing that into NewPolicyWithResolver would store a non-nil
@@ -923,24 +943,24 @@ const userModelSubdir = "mecatl/usermodel"
 // per-project memory store (different dir), so the two never contend on a lock.
 func buildUserModelStore(cfg Config) *memory.Store {
 	if cfg.NoUserModel {
-		slog.Info("user model DISABLED (--no-user-model)")
+		cfg.diag().Log(context.Background(), port.LevelInfo, "user model DISABLED (--no-user-model)")
 		return nil
 	}
 	dir := cfg.UserModelDir
 	if dir == "" {
 		base := xdgconfig.UserConfigDir(xdgconfig.OSEnv)
 		if base == "" {
-			slog.Info("user model DISABLED (no --user-model-dir and no XDG/home to resolve the conventional location)")
+			cfg.diag().Log(context.Background(), port.LevelInfo, "user model DISABLED (no --user-model-dir and no XDG/home to resolve the conventional location)")
 			return nil
 		}
 		dir = filepath.Join(base, userModelSubdir)
 	}
 	store, err := memory.New(dir)
 	if err != nil {
-		slog.Warn("could not open user-model store; user-model tools disabled", "dir", dir, "err", err)
+		cfg.diag().Log(context.Background(), port.LevelWarn, "could not open user-model store; user-model tools disabled", "dir", dir, "err", err)
 		return nil
 	}
-	slog.Info("user model ENABLED (cross-project operator FACTS)", "dir", dir)
+	cfg.diag().Log(context.Background(), port.LevelInfo, "user model ENABLED (cross-project operator FACTS)", "dir", dir)
 	return store
 }
 
@@ -1055,7 +1075,7 @@ func engineDepsForProvider(
 		Store:               store,
 		Sink:                cfg.Sink,
 		ToolCallRecorder:    cfg.ToolCallRecorder,
-		Diagnostics:         cfg.Diagnostics,
+		Diagnostics:         cfg.diag(),
 		PromptConfig:        promptConfig(modelCfg, cfg.gitStatus),
 		Model:               model,
 		ContextWindowTokens: window,
@@ -1190,20 +1210,20 @@ func slashCommandDecision(cfg Config) diagFact {
 func buildMCPPromptExpander(cfg Config, p mcp.Provider) prompt.CommandExpander {
 	if !cfg.MCPPrompts || p == nil {
 		if !cfg.MCPPrompts {
-			slog.Info("MCP prompts DISABLED")
+			cfg.diag().Log(context.Background(), port.LevelInfo, "MCP prompts DISABLED")
 		}
 		return nil
 	}
 	prompts, err := p.ListPrompts(context.Background(), "")
 	if err != nil {
-		slog.Warn("MCP prompt listing failed; prompt expansion disabled", "err", err)
+		cfg.diag().Log(context.Background(), port.LevelWarn, "MCP prompt listing failed; prompt expansion disabled", "err", err)
 		return nil
 	}
 	if len(prompts) == 0 {
-		slog.Info("MCP prompts DISABLED (no connected server exposes a prompt)")
+		cfg.diag().Log(context.Background(), port.LevelInfo, "MCP prompts DISABLED (no connected server exposes a prompt)")
 		return nil
 	}
-	slog.Info("MCP prompt expansion ENABLED", "count", len(prompts))
+	cfg.diag().Log(context.Background(), port.LevelInfo, "MCP prompt expansion ENABLED", "count", len(prompts))
 	return mcp.NewPromptExpander(p)
 }
 
@@ -1220,7 +1240,7 @@ type diagFact struct {
 }
 
 // logBuildConfigFacts emits the build-once composition facts EXACTLY ONCE through
-// cfg.Diagnostics. It is called a single time from Build (after cfg.Model is
+// cfg.diag(). It is called a single time from Build (after cfg.Model is
 // resolved), NOT from engineDepsForProvider — which is re-invoked per session and
 // per child engine. The facts are keyed to the MAIN engine's model (cfg.Model);
 // child engines stay silent (childEngineDepsForProvider sets NopDiagnostics).
@@ -1236,7 +1256,7 @@ func logBuildConfigFacts(cfg Config) {
 		slashCommandDecision(cfg),
 	}
 	for _, f := range facts {
-		cfg.Diagnostics.Log(context.Background(), f.level, f.msg, f.args...)
+		cfg.diag().Log(context.Background(), f.level, f.msg, f.args...)
 	}
 }
 
@@ -1331,10 +1351,10 @@ func registerCoreTools(cfg Config, cat *tool.Catalog, log bool) {
 	if runner := buildCommandRunner(cfg); runner != nil {
 		cat.MustRegister(tools.NewBashTool(runner))
 		if log {
-			slog.Info("Bash tool ENABLED", "shell", cfg.Shell, "cwd", cfg.Workspace)
+			cfg.diag().Log(context.Background(), port.LevelInfo, "Bash tool ENABLED", "shell", cfg.Shell, "cwd", cfg.Workspace)
 		}
 	} else if log {
-		slog.Info("Bash tool DISABLED (shell-less mode): the agent has no command execution",
+		cfg.diag().Log(context.Background(), port.LevelInfo, "Bash tool DISABLED (shell-less mode): the agent has no command execution",
 			"reason", bashDisabledReason(cfg))
 	}
 }
@@ -1366,7 +1386,7 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	cat.MustRegister(taskTool)
 	// Aggregate the per-def INLINE MCP managers' teardown into the main MCP close, so
 	// Built.Close tears them ALL down on shutdown (process-lifetime engines).
-	mcpClose = composeClose(taskMCPClose, mcpClose)
+	mcpClose = composeClose(cfg.diag(), taskMCPClose, mcpClose)
 
 	// Fork fan-out tool: a scoped child Engine (no Fork/Task/ToolSearch, so a branch
 	// cannot recurse) run against an ISOLATED forked workspace. Unlike the Task
@@ -1396,10 +1416,10 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 			agent.WithForkSubagentStopHook(hooks),
 			agent.WithForkJudge(judge),
 			agent.WithWinnerReaper(agent.NewLRUForkReaper(preservedCap))))
-		slog.Info("Fork tool ENABLED (parallel isolated MUTATING child branches; judge selection wired)",
+		cfg.diag().Log(ctx, port.LevelInfo, "Fork tool ENABLED (parallel isolated MUTATING child branches; judge selection wired)",
 			"preserved_fork_cap", preservedCap)
 	} else {
-		slog.Info("Fork tool DISABLED")
+		cfg.diag().Log(ctx, port.LevelInfo, "Fork tool DISABLED")
 	}
 
 	// Team tool: forms a team of coordinating subagents in-process, driving a
@@ -1421,9 +1441,9 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 			agent.WithTeamToolReadOnlyForker(roFk),
 			agent.WithTeamToolHooks(teamHooks),
 		))
-		slog.Info("Team tool ENABLED (in-process coordinating subagents; mutate-serial, ASK)")
+		cfg.diag().Log(ctx, port.LevelInfo, "Team tool ENABLED (in-process coordinating subagents; mutate-serial, ASK)")
 	} else {
-		slog.Info("Team tool DISABLED")
+		cfg.diag().Log(ctx, port.LevelInfo, "Team tool DISABLED")
 	}
 
 	// Memory tools: opt-in, registered only when a per-project memory directory is
@@ -1431,18 +1451,18 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	if cfg.MemoryDir != "" {
 		store, err := memory.New(cfg.MemoryDir)
 		if err != nil {
-			slog.Warn("could not open memory store; memory tools disabled", "dir", cfg.MemoryDir, "err", err)
+			cfg.diag().Log(ctx, port.LevelWarn, "could not open memory store; memory tools disabled", "dir", cfg.MemoryDir, "err", err)
 		} else if err := memory.Register(cat, store); err != nil {
-			slog.Warn("registering memory tools failed; some tools may be missing", "err", err)
+			cfg.diag().Log(ctx, port.LevelWarn, "registering memory tools failed; some tools may be missing", "err", err)
 		} else {
 			memStore = store
-			slog.Info("memory tools ENABLED (Remember/Recall/SearchMemory); permission: allow (built-in default, overridable to ask/deny via settings)", "dir", cfg.MemoryDir)
+			cfg.diag().Log(ctx, port.LevelInfo, "memory tools ENABLED (Remember/Recall/SearchMemory); permission: allow (built-in default, overridable to ask/deny via settings)", "dir", cfg.MemoryDir)
 			startMemoryConsolidation(ctx, cfg, store, provider)
 		}
 	} else {
-		slog.Info("memory tools DISABLED (memory dir empty)")
+		cfg.diag().Log(ctx, port.LevelInfo, "memory tools DISABLED (memory dir empty)")
 		if cfg.MemoryConsolidateInterval > 0 {
-			slog.Warn("memory consolidation interval is a no-op without a memory dir (memory is disabled)",
+			cfg.diag().Log(ctx, port.LevelWarn, "memory consolidation interval is a no-op without a memory dir (memory is disabled)",
 				"interval", cfg.MemoryConsolidateInterval)
 		}
 	}
@@ -1456,9 +1476,9 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	userModelStore := buildUserModelStore(cfg)
 	if userModelStore != nil {
 		if err := memory.RegisterUserModel(cat, userModelStore); err != nil {
-			slog.Warn("registering user-model tools failed; some tools may be missing", "err", err)
+			cfg.diag().Log(ctx, port.LevelWarn, "registering user-model tools failed; some tools may be missing", "err", err)
 		} else {
-			slog.Info("user-model tools ENABLED (RememberUser/RecallUser/SearchUserModel; cross-project); permission: allow (built-in default, overridable to ask/deny via settings)")
+			cfg.diag().Log(ctx, port.LevelInfo, "user-model tools ENABLED (RememberUser/RecallUser/SearchUserModel; cross-project); permission: allow (built-in default, overridable to ask/deny via settings)")
 			startUserModelConsolidation(ctx, cfg, userModelStore, provider)
 		}
 	}
@@ -1469,9 +1489,9 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	// WebAssembly), so it ships in the default static build with no build tag.
 	if cfg.EnableRepoMap {
 		cat.MustRegister(repomap.NewTool())
-		slog.Info("repo map tool ENABLED (CGO-free tree-sitter via WebAssembly)")
+		cfg.diag().Log(ctx, port.LevelInfo, "repo map tool ENABLED (CGO-free tree-sitter via WebAssembly)")
 	} else {
-		slog.Info("repo map tool DISABLED")
+		cfg.diag().Log(ctx, port.LevelInfo, "repo map tool DISABLED")
 	}
 
 	return cat, mainMgr, mcpProvider, mcpInventory, memStore, userModelStore, discoveredSkills, mcpClose
@@ -1523,53 +1543,53 @@ func registerMCP(ctx context.Context, cfg Config, cat *tool.Catalog) (*mcp.Manag
 
 	configs, inventory, skips := mcpsource.Resolve(ctx, sources)
 	for _, s := range skips {
-		slog.Warn("MCP server skipped", "name", s.Server, "reason", s.Reason)
+		cfg.diag().Log(ctx, port.LevelWarn, "MCP server skipped", "name", s.Server, "reason", s.Reason)
 	}
 	if len(configs) == 0 {
-		slog.Info("MCP DISABLED (no servers resolved from any source)",
+		cfg.diag().Log(ctx, port.LevelInfo, "MCP DISABLED (no servers resolved from any source)",
 			"toolhive", cfg.ToolHiveEnabled, "static", len(cfg.MCPServers))
 		return nil, nil, inventory, func() {}
 	}
 
 	onError := func(sc mcp.ServerConfig, err error) {
-		slog.Warn("MCP server unreachable; skipping", "name", sc.Name, "url", sc.URL, "err", err)
+		cfg.diag().Log(ctx, port.LevelWarn, "MCP server unreachable; skipping", "name", sc.Name, "url", sc.URL, "err", err)
 	}
-	mgr, err := mcp.NewManager(ctx, configs, onError)
+	mgr, err := mcp.NewManager(ctx, configs, onError, cfg.diag())
 	if err != nil {
-		slog.Warn("MCP manager construction failed; continuing without MCP tools", "err", err)
+		cfg.diag().Log(ctx, port.LevelWarn, "MCP manager construction failed; continuing without MCP tools", "err", err)
 		return nil, nil, inventory, func() {}
 	}
 	if err := mcp.Register(cat, mgr.Tools()); err != nil {
-		slog.Warn("registering MCP tools failed; some tools may be missing", "err", err)
+		cfg.diag().Log(ctx, port.LevelWarn, "registering MCP tools failed; some tools may be missing", "err", err)
 	}
-	slog.Info("MCP tools registered", "servers", len(configs), "tools", len(mgr.Tools()))
+	cfg.diag().Log(ctx, port.LevelInfo, "MCP tools registered", "servers", len(configs), "tools", len(mgr.Tools()))
 
 	if cfg.MCPResourceTools {
 		registered, rerr := mcp.RegisterResourceTools(cat, mgr)
 		switch {
 		case rerr != nil:
-			slog.Warn("registering MCP resource tools failed", "err", rerr)
+			cfg.diag().Log(ctx, port.LevelWarn, "registering MCP resource tools failed", "err", rerr)
 		case registered:
-			slog.Info("MCP resource tools ENABLED (ListMcpResources/ReadMcpResource)")
+			cfg.diag().Log(ctx, port.LevelInfo, "MCP resource tools ENABLED (ListMcpResources/ReadMcpResource)")
 		default:
-			slog.Info("MCP resource tools DISABLED (no connected server exposes a resource)")
+			cfg.diag().Log(ctx, port.LevelInfo, "MCP resource tools DISABLED (no connected server exposes a resource)")
 		}
 	} else {
-		slog.Info("MCP resource tools DISABLED")
+		cfg.diag().Log(ctx, port.LevelInfo, "MCP resource tools DISABLED")
 	}
 
 	return mgr, mgr, inventory, func() {
 		if err := mgr.Close(); err != nil {
-			slog.Warn("MCP manager close", "err", err)
+			cfg.diag().Log(ctx, port.LevelWarn, "MCP manager close", "err", err)
 		}
 	}
 }
 
 // logMCPInventory logs a one-line-per-source summary of the resolved MCP source
 // inventory, keeping the resolution observable.
-func logMCPInventory(inventory []mcpsource.SourceInfo) {
+func logMCPInventory(ctx context.Context, d port.Diagnostics, inventory []mcpsource.SourceInfo) {
 	for _, src := range inventory {
-		slog.Info("MCP source resolved",
+		d.Log(ctx, port.LevelInfo, "MCP source resolved",
 			"source", src.Name, "kind", src.Kind, "group", src.Group,
 			"servers", len(src.Servers), "diagnostics", len(src.Diagnostics))
 	}
@@ -1607,36 +1627,36 @@ func skillResolveOptions(cfg Config) skills.ResolveOptions {
 func registerSkills(ctx context.Context, cfg Config, cat *tool.Catalog) []skills.Skill {
 	sources := skills.ResolveSources(skillResolveOptions(cfg))
 	if len(sources) == 0 && cfg.SkillsDraftDir != "" {
-		registerSkillDraft(cfg, cat, nil)
+		registerSkillDraft(ctx, cfg, cat, nil)
 		return nil
 	}
 	if len(sources) == 0 {
-		slog.Info("skills DISABLED (no skills dirs configured)")
+		cfg.diag().Log(ctx, port.LevelInfo, "skills DISABLED (no skills dirs configured)")
 		return nil
 	}
 
 	discovered, skips, err := skills.RegisterSource(ctx, cat, skills.NewMultiSource(sources...))
 	for _, s := range skips {
-		slog.Warn("skill skipped", "path", s.Path, "reason", s.Reason)
+		cfg.diag().Log(ctx, port.LevelWarn, "skill skipped", "path", s.Path, "reason", s.Reason)
 	}
 	switch {
 	case err != nil:
-		slog.Warn("registering skills failed; Skill tool disabled",
+		cfg.diag().Log(ctx, port.LevelWarn, "registering skills failed; Skill tool disabled",
 			"dirs", strings.Join(cfg.SkillsDirs, ","), "conventional", cfg.SkillsConventional, "err", err)
 	case len(discovered) == 0:
-		slog.Info("skills DISABLED (no valid SKILL.md found in any source)",
+		cfg.diag().Log(ctx, port.LevelInfo, "skills DISABLED (no valid SKILL.md found in any source)",
 			"dirs", strings.Join(cfg.SkillsDirs, ","), "conventional", cfg.SkillsConventional)
 	default:
 		names := make([]string, 0, len(discovered))
 		for _, s := range discovered {
 			names = append(names, s.Name)
 		}
-		slog.Info("Skill tool ENABLED",
+		cfg.diag().Log(ctx, port.LevelInfo, "Skill tool ENABLED",
 			"dirs", strings.Join(cfg.SkillsDirs, ","), "conventional", cfg.SkillsConventional,
 			"count", len(discovered), "skills", strings.Join(names, ","))
 	}
 
-	registerSkillDraft(cfg, cat, discovered)
+	registerSkillDraft(ctx, cfg, cat, discovered)
 	return discovered
 }
 
@@ -1644,15 +1664,15 @@ func registerSkills(ctx context.Context, cfg Config, cat *tool.Catalog) []skills
 // set, binding a DirDrafter to the quarantine dir and the snapshot of currently
 // active skills (for the offline novelty check). The structural trust boundary is
 // enforced by validateSkillDraftConfig at engine-build time.
-func registerSkillDraft(cfg Config, cat *tool.Catalog, existing []skills.Skill) {
+func registerSkillDraft(ctx context.Context, cfg Config, cat *tool.Catalog, existing []skills.Skill) {
 	if cfg.SkillsDraftDir == "" {
-		slog.Info("SkillDraft tool DISABLED (no skills-draft dir)")
+		cfg.diag().Log(ctx, port.LevelInfo, "SkillDraft tool DISABLED (no skills-draft dir)")
 		return
 	}
 	drafter := skills.NewDirDrafter(cfg.SkillsDraftDir, existing,
 		skills.WithSimilarityThreshold(cfg.SkillsDraftThreshold))
 	cat.MustRegister(skills.NewDraftTool(drafter))
-	slog.Info("SkillDraft tool ENABLED (model-authored skills -> quarantine -> operator promote)",
+	cfg.diag().Log(ctx, port.LevelInfo, "SkillDraft tool ENABLED (model-authored skills -> quarantine -> operator promote)",
 		"quarantine", cfg.SkillsDraftDir, "similarity_threshold", cfg.SkillsDraftThreshold,
 		"snapshot_skills", len(existing))
 }
@@ -1662,17 +1682,17 @@ func registerSkillDraft(cfg Config, cat *tool.Catalog, existing []skills.Skill) 
 // exits on shutdown) and the same LLM provider as the agent.
 func startMemoryConsolidation(ctx context.Context, cfg Config, store tool.MemoryStore, provider port.LLMProvider) {
 	if cfg.MemoryConsolidateInterval <= 0 {
-		slog.Info("memory consolidation DISABLED")
+		cfg.diag().Log(ctx, port.LevelInfo, "memory consolidation DISABLED")
 		return
 	}
 	cons := dream.New(store, provider, dream.Config{Model: cfg.Model})
-	slog.Info("memory consolidation ENABLED (dream)", "interval", cfg.MemoryConsolidateInterval, "model", cfg.Model)
+	cfg.diag().Log(ctx, port.LevelInfo, "memory consolidation ENABLED (dream)", "interval", cfg.MemoryConsolidateInterval, "model", cfg.Model)
 	go func() {
 		err := cons.RunPeriodically(ctx, cfg.MemoryConsolidateInterval, func(err error) {
-			slog.Warn("memory consolidation", "err", err)
+			cfg.diag().Log(ctx, port.LevelWarn, "memory consolidation", "err", err)
 		})
 		if err != nil && !errors.Is(err, context.Canceled) {
-			slog.Warn("memory consolidation loop stopped", "err", err)
+			cfg.diag().Log(ctx, port.LevelWarn, "memory consolidation loop stopped", "err", err)
 		}
 	}()
 }
@@ -1687,18 +1707,18 @@ func startMemoryConsolidation(ctx context.Context, cfg Config, store tool.Memory
 // posture (interval 0 ⇒ no goroutine) without observing the background loop.
 func startUserModelConsolidation(ctx context.Context, cfg Config, store tool.MemoryStore, provider port.LLMProvider) bool {
 	if cfg.UserModelConsolidateInterval <= 0 {
-		slog.Info("user-model consolidation DISABLED")
+		cfg.diag().Log(ctx, port.LevelInfo, "user-model consolidation DISABLED")
 		return false
 	}
 	cons := dream.New(store, provider, dream.Config{Model: cfg.Model, Prefix: "user/"})
-	slog.Info("user-model consolidation ENABLED (dream; user/ namespace)",
+	cfg.diag().Log(ctx, port.LevelInfo, "user-model consolidation ENABLED (dream; user/ namespace)",
 		"interval", cfg.UserModelConsolidateInterval, "model", cfg.Model)
 	go func() {
 		err := cons.RunPeriodically(ctx, cfg.UserModelConsolidateInterval, func(err error) {
-			slog.Warn("user-model consolidation", "err", err)
+			cfg.diag().Log(ctx, port.LevelWarn, "user-model consolidation", "err", err)
 		})
 		if err != nil && !errors.Is(err, context.Canceled) {
-			slog.Warn("user-model consolidation loop stopped", "err", err)
+			cfg.diag().Log(ctx, port.LevelWarn, "user-model consolidation loop stopped", "err", err)
 		}
 	}()
 	return true
@@ -1715,17 +1735,17 @@ func startUserModelConsolidation(ctx context.Context, cfg Config, store tool.Mem
 // session — it NEVER reopens the user's terminal session (R10).
 func maybeWrapUserModelReview(cfg Config, hooks port.HookRunner, store port.SessionStore, provider port.LLMProvider, userModelStore *memory.Store) port.HookRunner {
 	if !cfg.UserModelReview {
-		slog.Info("user-model background review DISABLED")
+		cfg.diag().Log(context.Background(), port.LevelInfo, "user-model background review DISABLED")
 		return hooks
 	}
 	if userModelStore == nil {
-		slog.Warn("user-model background review requested but the user-model store is disabled; review is a no-op")
+		cfg.diag().Log(context.Background(), port.LevelWarn, "user-model background review requested but the user-model store is disabled; review is a no-op")
 		return hooks
 	}
 	reviewer := agent.NewUserModelReviewer(store, buildUserModelReviewEngine(cfg, provider, userModelStore))
-	slog.Info("user-model background review ENABLED (Stop-triggered, detached fork; never reopens the user session)",
+	cfg.diag().Log(context.Background(), port.LevelInfo, "user-model background review ENABLED (Stop-triggered, detached fork; never reopens the user session)",
 		"review_interval", cfg.UserModelReviewInterval)
-	return newUserModelReviewHooks(hooks, reviewer, cfg.UserModelReviewInterval)
+	return newUserModelReviewHooks(hooks, reviewer, cfg.UserModelReviewInterval, cfg.diag())
 }
 
 // buildUserModelReviewEngine constructs the child *Engine the Phase-2b reviewer
@@ -1753,7 +1773,7 @@ func buildCommandRunner(cfg Config) tool.CommandRunner {
 	}
 	runner, err := osfs.NewCommandRunnerShell(cfg.Workspace, cfg.Shell)
 	if err != nil {
-		slog.Warn("could not build command runner; Bash tool disabled", "workspace", cfg.Workspace, "err", err)
+		cfg.diag().Log(context.Background(), port.LevelWarn, "could not build command runner; Bash tool disabled", "workspace", cfg.Workspace, "err", err)
 		return nil
 	}
 	return runner
@@ -1803,7 +1823,7 @@ func buildSandboxedCommandRunner(cfg Config) tool.CommandRunner {
 	env := gitenv.Scrub(os.Environ())
 	runner, err := osfs.NewCommandRunnerShell(cfg.Workspace, cfg.Shell, osfs.WithCommandEnvList(env))
 	if err != nil {
-		slog.Warn("could not build sandboxed member command runner; team-member Bash disabled", "workspace", cfg.Workspace, "err", err)
+		cfg.diag().Log(context.Background(), port.LevelWarn, "could not build sandboxed member command runner; team-member Bash disabled", "workspace", cfg.Workspace, "err", err)
 		return nil
 	}
 	return runner
@@ -2132,7 +2152,7 @@ func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry,
 // default.
 func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, provider port.LLMProvider, mainMgr *mcp.Manager) {
 	if !cfg.EnableTeams {
-		slog.Info("agent teams DISABLED (set --enable-teams to enable; experimental)")
+		cfg.diag().Log(context.Background(), port.LevelInfo, "agent teams DISABLED (set --enable-teams to enable; experimental)")
 		return
 	}
 	// The gRPC CreateTeam path's MemberEngine is wired ONCE here with the build-time
@@ -2144,7 +2164,7 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, p
 	svcCfg.Forker = fk
 	svcCfg.ReadOnlyForker = roFk
 	svcCfg.TeamHooks = teamHooks
-	slog.Info("agent teams ENABLED (experimental; CreateTeam/SpawnTeammate/RunTeam + Team tool)")
+	cfg.diag().Log(context.Background(), port.LevelInfo, "agent teams ENABLED (experimental; CreateTeam/SpawnTeammate/RunTeam + Team tool)")
 }
 
 // modelCfgFor returns a copy of cfg with the Model field overridden, so a
@@ -2235,7 +2255,7 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			isolateReadOnly bool
 		)
 
-		def, defined := lookupMemberDef(reg, spec)
+		def, defined := lookupMemberDef(cfg.diag(), reg, spec)
 		if defined {
 			// Scope the def over the member's AVAILABLE base, allowing mutating tools
 			// (Edit/Write/Bash) only for a Mutating member — it runs in an isolated
@@ -2251,7 +2271,7 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			allowShell := !spec.Mutating && runner != nil && roIsolationAvailable
 			names, diags := scopedToolNamesMode(def, base, spec.Mutating, allowShell)
 			for _, d := range diags {
-				slog.Warn("team member agent def tool scoping",
+				cfg.diag().Log(context.Background(), port.LevelWarn, "team member agent def tool scoping",
 					"member", spec.Name, "agent", def.Name, "tool", d.tool, "reason", d.reason, "path", def.Path)
 			}
 			for _, name := range names {
@@ -2283,10 +2303,10 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			// supervisor tears them down on member teardown; the MCP tool names are handed
 			// to the supervisor so the read-only-member backstop exempts them (they report
 			// ReadOnly()==false but never touch the workspace).
-			mcpTools, names2, cl := defMCPTools(context.Background(), def, mainMgr)
+			mcpTools, names2, cl := defMCPTools(context.Background(), cfg.diag(), def, mainMgr)
 			for _, mt := range mcpTools {
 				if err := cat.Register(mt); err != nil {
-					slog.Warn("team member agent def MCP tool registration failed; skipped",
+					cfg.diag().Log(context.Background(), port.LevelWarn, "team member agent def MCP tool registration failed; skipped",
 						"member", spec.Name, "agent", def.Name, "tool", mt.Spec().Name, "err", err)
 				}
 			}
@@ -2298,16 +2318,16 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			childProvider, _, model, childWindow = resolveChildProvider(cfg, provReg, def, provider, parentProviderID, parentModel)
 			bodies, missing := preloadedSkillBodies(def, skillIdx)
 			for _, name := range missing {
-				slog.Warn("team member agent def references an unknown skill; not preloaded",
+				cfg.diag().Log(context.Background(), port.LevelWarn, "team member agent def references an unknown skill; not preloaded",
 					"member", spec.Name, "agent", def.Name, "skill", name, "path", def.Path)
 			}
 			pc = agentPromptConfig(cfg, def, model, bodies...)
-			mode = resolvePermissionMode(def)
+			mode = resolvePermissionMode(cfg.diag(), def)
 			// A def's `hooks:` scope lifecycle hooks to this member's engine. A def that
 			// scopes none keeps the inert default (memberHooks unchanged), preserving the
 			// historical defined-member engine shape.
 			memberHooks = defHookRunner(cfg, def, memberHooks)
-			slog.Info("team member adopts agent def",
+			cfg.diag().Log(context.Background(), port.LevelInfo, "team member adopts agent def",
 				"member", spec.Name, "agent", def.Name, "tools", strings.Join(names, ","),
 				"model", model, "mode", mode, "mutating", spec.Mutating,
 				"isolate_read_only", isolateReadOnly,
@@ -2355,14 +2375,14 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 // and true on a hit. An empty AgentType or a miss returns false (the caller falls
 // back to the default member catalog); a miss on a NON-empty AgentType also warns,
 // so a stale roster reference is observable without failing the spawn.
-func lookupMemberDef(reg *agents.Registry, spec agent.MemberSpec) (agents.AgentDef, bool) {
+func lookupMemberDef(d port.Diagnostics, reg *agents.Registry, spec agent.MemberSpec) (agents.AgentDef, bool) {
 	name := strings.TrimSpace(spec.AgentType)
 	if name == "" || reg == nil {
 		return agents.AgentDef{}, false
 	}
 	def, ok := reg.Get(name)
 	if !ok {
-		slog.Warn("team member references an unknown agent def; using the default member catalog",
+		d.Log(context.Background(), port.LevelWarn, "team member references an unknown agent def; using the default member catalog",
 			"member", spec.Name, "agent", name)
 		return agents.AgentDef{}, false
 	}
@@ -2588,11 +2608,11 @@ func defaultLimits() session.Limits {
 // osfsWorkspaceFactory returns a server.WorkspaceFactory that builds an osfs
 // Workspace rooted at the session's workspace dir. A root that cannot be opened
 // yields a nil Workspace; tool calls against it return errors the model can read.
-func osfsWorkspaceFactory() server.WorkspaceFactory {
+func osfsWorkspaceFactory(d port.Diagnostics) server.WorkspaceFactory {
 	return func(root string) tool.Workspace {
 		ws, err := osfs.NewWorkspace(root)
 		if err != nil {
-			slog.Error("workspace factory: cannot open root", "root", root, "err", err)
+			d.Log(context.Background(), port.LevelError, "workspace factory: cannot open root", "root", root, "err", err)
 			return nil
 		}
 		return ws

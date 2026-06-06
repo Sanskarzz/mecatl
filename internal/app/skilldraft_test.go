@@ -10,6 +10,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/tool"
 )
@@ -99,14 +100,14 @@ func TestDefaultRulesSkillDraftAsks(t *testing.T) {
 func TestRegisterSkillDraftGating(t *testing.T) {
 	t.Run("disabled when no draft dir", func(t *testing.T) {
 		cat := tool.NewCatalog()
-		registerSkillDraft(Config{}, cat, nil)
+		registerSkillDraft(context.Background(), Config{Diagnostics: port.NopDiagnostics{}}, cat, nil)
 		if _, ok := cat.Lookup(skills.DraftToolName); ok {
 			t.Error("SkillDraft must NOT be registered without a skills-draft dir")
 		}
 	})
 	t.Run("registered when draft dir set", func(t *testing.T) {
 		cat := tool.NewCatalog()
-		registerSkillDraft(Config{SkillsDraftDir: t.TempDir(), SkillsDraftThreshold: 0.5}, cat, nil)
+		registerSkillDraft(context.Background(), Config{SkillsDraftDir: t.TempDir(), SkillsDraftThreshold: 0.5, Diagnostics: port.NopDiagnostics{}}, cat, nil)
 		if _, ok := cat.Lookup(skills.DraftToolName); !ok {
 			t.Error("SkillDraft must be registered when a skills-draft dir is set")
 		}

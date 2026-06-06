@@ -18,6 +18,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/sdk/metric"
+
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // --- pprof ---
@@ -339,7 +341,7 @@ func TestProcessRSSGaugeOnMetricsScrape(t *testing.T) {
 		t.Fatalf("prometheus exporter: %v", err)
 	}
 	mp := metric.NewMeterProvider(metric.WithReader(exp))
-	if rerr := RegisterProcessGauges(mp); rerr != nil {
+	if rerr := RegisterProcessGauges(mp, port.NopDiagnostics{}); rerr != nil {
 		t.Fatalf("RegisterProcessGauges: %v", rerr)
 	}
 

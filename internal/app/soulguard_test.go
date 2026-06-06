@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // writeTestFile seeds a real temp soul file (the soul.Store reads through its own
@@ -66,7 +68,7 @@ const (
 // current hash is written as the baseline exactly once and no drift is reported.
 func TestCheckSoulDriftTOFU(t *testing.T) {
 	f := newFakeIO()
-	if drifted := checkSoulDrift(f.io(), testSoulPath, hashA, false); drifted {
+	if drifted := checkSoulDrift(port.NopDiagnostics{}, f.io(), testSoulPath, hashA, false); drifted {
 		t.Fatal("first sighting must not be drift (TOFU)")
 	}
 	if f.writes != 1 {
@@ -77,7 +79,7 @@ func TestCheckSoulDriftTOFU(t *testing.T) {
 	}
 
 	// A second load with the SAME hash must NOT rewrite (matching, no drift).
-	if drifted := checkSoulDrift(f.io(), testSoulPath, hashA, false); drifted {
+	if drifted := checkSoulDrift(port.NopDiagnostics{}, f.io(), testSoulPath, hashA, false); drifted {
 		t.Fatal("matching hash must not be drift")
 	}
 	if f.writes != 1 {
@@ -89,7 +91,7 @@ func TestCheckSoulDriftTOFU(t *testing.T) {
 func TestCheckSoulDriftMatching(t *testing.T) {
 	f := newFakeIO()
 	f.files[testSidecar] = []byte(hashA + "\n") // editor-style trailing newline
-	if drifted := checkSoulDrift(f.io(), testSoulPath, hashA, false); drifted {
+	if drifted := checkSoulDrift(port.NopDiagnostics{}, f.io(), testSoulPath, hashA, false); drifted {
 		t.Fatal("matching hash must not be drift")
 	}
 	if f.writes != 0 {
@@ -102,7 +104,7 @@ func TestCheckSoulDriftMatching(t *testing.T) {
 func TestCheckSoulDriftDiffering(t *testing.T) {
 	f := newFakeIO()
 	f.files[testSidecar] = []byte(hashA)
-	if drifted := checkSoulDrift(f.io(), testSoulPath, hashB, false); !drifted {
+	if drifted := checkSoulDrift(port.NopDiagnostics{}, f.io(), testSoulPath, hashB, false); !drifted {
 		t.Fatal("differing hash must report drift")
 	}
 	if f.writes != 0 {
@@ -122,7 +124,7 @@ func TestCheckSoulDriftApproveRewrites(t *testing.T) {
 	t.Run("differing prior baseline", func(t *testing.T) {
 		f := newFakeIO()
 		f.files[testSidecar] = []byte(hashA)
-		if drifted := checkSoulDrift(f.io(), testSoulPath, hashB, true); drifted {
+		if drifted := checkSoulDrift(port.NopDiagnostics{}, f.io(), testSoulPath, hashB, true); drifted {
 			t.Fatal("--approve-soul must clear drift")
 		}
 		if f.writes != 1 {
@@ -135,7 +137,7 @@ func TestCheckSoulDriftApproveRewrites(t *testing.T) {
 
 	t.Run("no prior baseline (TOFU+approve)", func(t *testing.T) {
 		f := newFakeIO() // no sidecar at all
-		if drifted := checkSoulDrift(f.io(), testSoulPath, hashA, true); drifted {
+		if drifted := checkSoulDrift(port.NopDiagnostics{}, f.io(), testSoulPath, hashA, true); drifted {
 			t.Fatal("--approve-soul with no prior baseline must not report drift")
 		}
 		if f.writes != 1 {
@@ -149,7 +151,7 @@ func TestCheckSoulDriftApproveRewrites(t *testing.T) {
 	t.Run("matching prior baseline (idempotent re-approve)", func(t *testing.T) {
 		f := newFakeIO()
 		f.files[testSidecar] = []byte(hashA + "\n")
-		if drifted := checkSoulDrift(f.io(), testSoulPath, hashA, true); drifted {
+		if drifted := checkSoulDrift(port.NopDiagnostics{}, f.io(), testSoulPath, hashA, true); drifted {
 			t.Fatal("re-approving a matching baseline must not report drift")
 		}
 		// Approve is unconditional, so it still writes — the key is that the baseline
@@ -171,7 +173,7 @@ func TestCheckSoulDriftApproveRewrites(t *testing.T) {
 func TestCheckSoulDriftWriteFailureFailsSoft(t *testing.T) {
 	f := newFakeIO() // no sidecar → TOFU path
 	f.writeErr = errors.New("disk full")
-	if drifted := checkSoulDrift(f.io(), testSoulPath, hashA, false); drifted {
+	if drifted := checkSoulDrift(port.NopDiagnostics{}, f.io(), testSoulPath, hashA, false); drifted {
 		t.Fatal("a baseline write failure must not report drift (fail-soft)")
 	}
 	if f.writes != 1 {
@@ -186,7 +188,7 @@ func TestCheckSoulDriftWriteFailureFailsSoft(t *testing.T) {
 // (empty current hash) creates no sidecar and reports no drift.
 func TestCheckSoulDriftAbsentSoulWritesNothing(t *testing.T) {
 	f := newFakeIO()
-	if drifted := checkSoulDrift(f.io(), testSoulPath, "", false); drifted {
+	if drifted := checkSoulDrift(port.NopDiagnostics{}, f.io(), testSoulPath, "", false); drifted {
 		t.Fatal("absent soul must not be drift")
 	}
 	if f.writes != 0 {
@@ -203,7 +205,7 @@ func TestCheckSoulDriftAbsentSoulWritesNothing(t *testing.T) {
 func TestCheckSoulDriftUnreadableBaselineFailsSoft(t *testing.T) {
 	f := newFakeIO()
 	f.readErr = fs.ErrPermission
-	if drifted := checkSoulDrift(f.io(), testSoulPath, hashA, false); drifted {
+	if drifted := checkSoulDrift(port.NopDiagnostics{}, f.io(), testSoulPath, hashA, false); drifted {
 		t.Fatal("an unreadable baseline must not report drift (fail-soft)")
 	}
 	if f.writes != 0 {

@@ -18,7 +18,7 @@ func TestListResourcesPerServerAndAll(t *testing.T) {
 	m, err := NewManager(ctx, []ServerConfig{
 		{Name: "a", URL: url},
 		{Name: "b", URL: url2},
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestReadResourceText(t *testing.T) {
 	defer stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	m, err := NewManager(ctx, []ServerConfig{{Name: "a", URL: url}}, nil)
+	m, err := NewManager(ctx, []ServerConfig{{Name: "a", URL: url}}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestReadResourceBinarySummarized(t *testing.T) {
 	defer stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	m, err := NewManager(ctx, []ServerConfig{{Name: "a", URL: url}}, nil)
+	m, err := NewManager(ctx, []ServerConfig{{Name: "a", URL: url}}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestReadResourceUnknownURIErrors(t *testing.T) {
 	defer stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	m, err := NewManager(ctx, []ServerConfig{{Name: "a", URL: url}}, nil)
+	m, err := NewManager(ctx, []ServerConfig{{Name: "a", URL: url}}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestCapabilityAbsentServerSkipped(t *testing.T) {
 	defer stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	m, err := NewManager(ctx, []ServerConfig{{Name: "t", URL: url}}, nil)
+	m, err := NewManager(ctx, []ServerConfig{{Name: "t", URL: url}}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}

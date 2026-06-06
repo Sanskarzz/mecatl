@@ -36,13 +36,13 @@ package soul
 import (
 	"context"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/stacklok/mecatl/internal/adapter/hashutil"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // DefaultMaxBytes is the load-time byte ceiling on the soul body (matching the
@@ -90,6 +90,12 @@ type Options struct {
 	// MaxBytes caps the loaded body; 0 uses DefaultMaxBytes. A body over the cap is
 	// rejected (no fragment), not truncated. The cap bounds the RAW file read.
 	MaxBytes int
+	// Diagnostics is the operational-logging sink for the loader's fail-soft Debug
+	// lines (no path / unreadable / over-cap / empty / injection-marker / fence
+	// breakout). nil is tolerated: newWith defaults it to port.NopDiagnostics so the
+	// loader stays silent rather than nil-panicking. The composition layer injects
+	// the shared sink; tests that don't care leave it unset.
+	Diagnostics port.Diagnostics
 }
 
 // Store is a user-scoped, agent-read-only persona loader. It satisfies
@@ -99,6 +105,7 @@ type Store struct {
 	maxBytes int
 	env      xdgconfig.ResolveEnv // path resolution (Getenv/UserHomeDir) only
 	read     readFunc             // bounded file read seam
+	diag     port.Diagnostics     // operational-logging sink; never nil after newWith
 }
 
 // New constructs a Store from opts, binding the real process environment.
@@ -121,7 +128,11 @@ func newWith(opts Options, env xdgconfig.ResolveEnv, read readFunc) *Store {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxBytes
 	}
-	return &Store{path: opts.Path, maxBytes: maxBytes, env: env, read: read}
+	diag := opts.Diagnostics
+	if diag == nil {
+		diag = port.NopDiagnostics{}
+	}
+	return &Store{path: opts.Path, maxBytes: maxBytes, env: env, read: read, diag: diag}
 }
 
 // ResolvedPath returns the soul file path this Store will read — the explicit Path
@@ -194,10 +205,10 @@ func (s *Store) Load(ctx context.Context) (string, error) {
 // This adds NO write path: it only computes a hash over bytes already read. The
 // hash's sole consumer is the composition-layer drift baseline (internal/app),
 // which is the only place allowed to persist it.
-func (s *Store) LoadWithMeta(_ context.Context) (Result, error) {
+func (s *Store) LoadWithMeta(ctx context.Context) (Result, error) {
 	path := s.resolvePath()
 	if path == "" {
-		slog.Debug("soul: no path could be resolved (no --soul-file and no XDG/home); no soul loaded")
+		s.diag.Log(ctx, port.LevelDebug, "soul: no path could be resolved (no --soul-file and no XDG/home); no soul loaded")
 		return Result{}, nil
 	}
 
@@ -207,31 +218,31 @@ func (s *Store) LoadWithMeta(_ context.Context) (Result, error) {
 	if err != nil {
 		// Missing file is the common case (soul is opt-in-by-presence); a genuine
 		// read error is equally best-effort. Either way: no fragment, no abort.
-		slog.Debug("soul: file not read; no soul loaded", "path", path, "err", err)
+		s.diag.Log(ctx, port.LevelDebug, "soul: file not read; no soul loaded", "path", path, "err", err)
 		return Result{}, nil
 	}
 
 	if len(raw) > s.maxBytes {
-		slog.Debug("soul: file over byte cap; rejected (not truncated)",
+		s.diag.Log(ctx, port.LevelDebug, "soul: file over byte cap; rejected (not truncated)",
 			"path", path, "bytes_read", len(raw), "max", s.maxBytes)
 		return Result{}, nil
 	}
 
 	body := strings.TrimSpace(string(raw))
 	if body == "" {
-		slog.Debug("soul: file empty or whitespace-only; no soul loaded", "path", path)
+		s.diag.Log(ctx, port.LevelDebug, "soul: file empty or whitespace-only; no soul loaded", "path", path)
 		return Result{}, nil
 	}
 
 	if marker, found := scanForInjection(body); found {
-		slog.Debug("soul: injection marker detected; rejected", "path", path, "marker", marker)
+		s.diag.Log(ctx, port.LevelDebug, "soul: injection marker detected; rejected", "path", path, "marker", marker)
 		return Result{}, nil
 	}
 
 	// Fence-integrity guard: a body containing the literal close-tag could close the
 	// data fence early and smuggle trailing text out of the data zone. Reject it.
 	if strings.Contains(body, soulCloseTag) {
-		slog.Debug("soul: body contains the data-fence close-tag; rejected", "path", path, "tag", soulCloseTag)
+		s.diag.Log(ctx, port.LevelDebug, "soul: body contains the data-fence close-tag; rejected", "path", path, "tag", soulCloseTag)
 		return Result{}, nil
 	}
 

@@ -35,6 +35,7 @@ import (
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/internal/adapter/mcpperf"
 	"github.com/stacklok/mecatl/internal/adapter/server"
+	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
 	"github.com/stacklok/mecatl/internal/app"
 	"github.com/stacklok/mecatl/internal/port"
@@ -319,7 +320,7 @@ func setupPerf(ctx context.Context, perf PerfConfig, cfg *app.Config) (perfState
 
 	// Process-RSS gauge (mecatl.process.rss): Linux-only, no-op elsewhere; rides
 	// the same MeterProvider so it renders on /metrics (decision 9).
-	if rerr := telemetry.RegisterProcessGauges(providers.Meter); rerr != nil {
+	if rerr := telemetry.RegisterProcessGauges(providers.Meter, slogdiag.NewFromLogger(logger)); rerr != nil {
 		ps.teardown(ctx)
 		return perfState{}, fmt.Errorf("setup process gauges: %w", rerr)
 	}

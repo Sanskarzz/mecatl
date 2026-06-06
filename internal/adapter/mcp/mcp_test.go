@@ -89,7 +89,7 @@ func connectTest(t *testing.T, cfg ServerConfig) *Server {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	s, err := Connect(ctx, cfg)
+	s, err := Connect(ctx, cfg, nil)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestManagerSkipsUnreachableServer(t *testing.T) {
 		{Name: "bad", URL: "http://127.0.0.1:1/mcp", Timeout: 500 * time.Millisecond},
 	}, func(cfg ServerConfig, _ error) {
 		skipped = append(skipped, cfg.Name)
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("NewManager should not fail when one server connects: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestConnectValidatesConfig(t *testing.T) {
 		{Name: "ok", URL: ""},
 	}
 	for _, cfg := range cases {
-		if _, err := Connect(ctx, cfg); err == nil {
+		if _, err := Connect(ctx, cfg, nil); err == nil {
 			t.Errorf("Connect(%+v) = nil error, want validation error", cfg)
 		}
 	}

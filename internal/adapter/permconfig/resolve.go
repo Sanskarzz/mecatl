@@ -2,13 +2,13 @@ package permconfig
 
 import (
 	"context"
-	"log/slog"
 	"path/filepath"
 	"sync"
 
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
@@ -64,6 +64,11 @@ type Options struct {
 	// fully trusted) regardless of Conventional. Read from the host filesystem at
 	// construction.
 	ExplicitFiles []string
+	// Diagnostics is the operational-logging sink for the lossy import report
+	// (demoted/inert/dropped specs) and the per-file fail-soft skip lines. nil is
+	// tolerated: newWithEnv defaults it to port.NopDiagnostics so the resolver stays
+	// silent rather than nil-panicking. The composition layer injects the shared sink.
+	Diagnostics port.Diagnostics
 }
 
 // fileStamp fingerprints a single config file's on-disk state (mod time + size)
@@ -99,7 +104,8 @@ type cacheEntry struct {
 type Resolver struct {
 	opts    Options
 	env     xdgconfig.ResolveEnv
-	sources []projectSource // the fixed project-file discovery list
+	sources []projectSource  // the fixed project-file discovery list
+	diag    port.Diagnostics // operational-logging sink; never nil after newWithEnv
 
 	// userRules are the root-independent user-global + explicit (CLI) rules,
 	// computed once at construction. Always fully trusted.
@@ -125,15 +131,20 @@ func newWithEnv(opts Options, env xdgconfig.ResolveEnv) *Resolver {
 	if !opts.Conventional && len(opts.ExplicitFiles) == 0 {
 		return nil
 	}
+	diag := opts.Diagnostics
+	if diag == nil {
+		diag = port.NopDiagnostics{}
+	}
 	r := &Resolver{
 		opts:    opts,
 		env:     env,
 		sources: projectSources(opts),
+		diag:    diag,
 		cache:   make(map[string]*cacheEntry),
 	}
 	var report Report
 	r.userRules = r.loadUserRules(&report)
-	logReport(&report, "user-global")
+	r.logReport(&report, "user-global")
 	return r
 }
 
@@ -240,7 +251,7 @@ func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) []governance.Rule {
 		if src.claude {
 			imported, ierr := importClaude(data, src.scope, &report)
 			if ierr != nil {
-				slog.Warn("permission config: project claude settings unparseable; skipping",
+				r.diag.Log(context.Background(), port.LevelWarn, "permission config: project claude settings unparseable; skipping",
 					"file", src.path, "root", ws.Root(), "err", ierr)
 				continue
 			}
@@ -249,7 +260,7 @@ func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) []governance.Rule {
 		}
 		cfg, perr := parseYAML(data)
 		if perr != nil {
-			slog.Warn("permission config: project YAML unparseable; skipping",
+			r.diag.Log(context.Background(), port.LevelWarn, "permission config: project YAML unparseable; skipping",
 				"file", src.path, "root", ws.Root(), "err", perr)
 			continue
 		}
@@ -257,7 +268,7 @@ func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) []governance.Rule {
 	}
 
 	rules = r.applyTrustGate(rules, &report)
-	logReport(&report, "project("+ws.Root()+")")
+	r.logReport(&report, "project("+ws.Root()+")")
 	return rules
 }
 
@@ -297,12 +308,12 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 		}
 		data, err := r.env.ReadFile(path)
 		if err != nil {
-			slog.Warn("permission config: explicit file unreadable; skipping", "file", path, "err", err)
+			r.diag.Log(context.Background(), port.LevelWarn, "permission config: explicit file unreadable; skipping", "file", path, "err", err)
 			continue
 		}
 		cfg, perr := parseYAML(data)
 		if perr != nil {
-			slog.Warn("permission config: explicit file unparseable; skipping", "file", path, "err", perr)
+			r.diag.Log(context.Background(), port.LevelWarn, "permission config: explicit file unparseable; skipping", "file", path, "err", perr)
 			continue
 		}
 		rules = append(rules, rulesFromConfig(cfg, governance.ScopeCLI, report)...)
@@ -317,7 +328,7 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 		path := filepath.Join(cfgDir, userSubdirMecatl)
 		if data, err := r.env.ReadFile(path); err == nil {
 			if cfg, perr := parseYAML(data); perr != nil {
-				slog.Warn("permission config: user YAML unparseable; skipping", "file", path, "err", perr)
+				r.diag.Log(context.Background(), port.LevelWarn, "permission config: user YAML unparseable; skipping", "file", path, "err", perr)
 			} else {
 				rules = append(rules, rulesFromConfig(cfg, governance.ScopeUser, report)...)
 			}
@@ -330,7 +341,7 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 			path := filepath.Join(home, userSubdirClaude)
 			if data, rerr := r.env.ReadFile(path); rerr == nil {
 				if imported, ierr := importClaude(data, governance.ScopeUser, report); ierr != nil {
-					slog.Warn("permission config: user claude settings unparseable; skipping", "file", path, "err", ierr)
+					r.diag.Log(context.Background(), port.LevelWarn, "permission config: user claude settings unparseable; skipping", "file", path, "err", ierr)
 				} else {
 					rules = append(rules, imported...)
 				}
@@ -353,17 +364,17 @@ func specOf(rule governance.Rule) string {
 // logReport logs the lossy outcomes (demoted/inert/dropped specs) of a load at the
 // given origin, so an operator can see exactly what was weakened or ignored. A
 // clean report logs nothing.
-func logReport(report *Report, origin string) {
+func (r *Resolver) logReport(report *Report, origin string) {
 	if report.Empty() {
 		return
 	}
 	for _, e := range report.Demoted {
-		slog.Warn("permission config: rule demoted", "origin", origin, "spec", e.Spec, "reason", e.Reason)
+		r.diag.Log(context.Background(), port.LevelWarn, "permission config: rule demoted", "origin", origin, "spec", e.Spec, "reason", e.Reason)
 	}
 	for _, e := range report.Inert {
-		slog.Warn("permission config: rule inert", "origin", origin, "spec", e.Spec, "reason", e.Reason)
+		r.diag.Log(context.Background(), port.LevelWarn, "permission config: rule inert", "origin", origin, "spec", e.Spec, "reason", e.Reason)
 	}
 	for _, e := range report.Dropped {
-		slog.Warn("permission config: rule dropped", "origin", origin, "spec", e.Spec, "reason", e.Reason)
+		r.diag.Log(context.Background(), port.LevelWarn, "permission config: rule dropped", "origin", origin, "spec", e.Spec, "reason", e.Reason)
 	}
 }

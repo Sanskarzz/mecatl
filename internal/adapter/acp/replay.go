@@ -1,6 +1,10 @@
 package acp
 
-import "github.com/stacklok/mecatl/internal/session"
+import (
+	"context"
+
+	"github.com/stacklok/mecatl/internal/session"
+)
 
 // replay.go reconstructs an editor's transcript on session/load by re-projecting
 // the persisted Conversation through the SAME projectUpdate path the live prompt
@@ -95,14 +99,15 @@ func historyEvents(c *session.Conversation) []session.Event {
 // notifications by projecting each synthesized history event through the live
 // projectUpdate path. A nil conversation (or one with no projectable messages) is
 // a no-op. It is called synchronously from handleSessionLoad so the transcript is
-// flushed to the editor before the load response returns.
-func (a *Agent) replayHistory(sessionID string, c *session.Conversation) {
+// flushed to the editor before the load response returns. ctx is the load dispatch
+// context, forwarded to notifyUpdate for its diagnostics trace carrier only.
+func (a *Agent) replayHistory(ctx context.Context, sessionID string, c *session.Conversation) {
 	if c == nil {
 		return
 	}
 	for _, ev := range historyEvents(c) {
 		if update, ok := projectUpdate(ev); ok {
-			a.notifyUpdate(sessionID, update)
+			a.notifyUpdate(ctx, sessionID, update)
 		}
 	}
 }

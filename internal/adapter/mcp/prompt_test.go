@@ -13,7 +13,7 @@ func newPromptManager(t *testing.T) *Manager {
 	t.Cleanup(stop)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	m, err := NewManager(ctx, []ServerConfig{{Name: "a", URL: url}}, nil)
+	m, err := NewManager(ctx, []ServerConfig{{Name: "a", URL: url}}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}

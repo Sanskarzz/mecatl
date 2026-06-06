@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +75,12 @@ type Agent struct {
 	// handleInitialize, which the ACP handshake guarantees precedes any session/new,
 	// and only read thereafter on the same dispatch path — no lock needed.
 	fsDelegation bool
+
+	// diag is the operational-logging sink for the adapter's best-effort Debug lines
+	// (notify/cancel/close/request_permission failures). Never nil after NewAgent
+	// (defaulted to port.NopDiagnostics), so a caller that injects none stays silent
+	// rather than nil-panicking. The composition root sets it via WithDiagnostics.
+	diag port.Diagnostics
 }
 
 // AgentOption configures an Agent at construction.
@@ -89,6 +94,17 @@ func WithResume(enabled bool) AgentOption {
 	return func(a *Agent) { a.resume = enabled }
 }
 
+// WithDiagnostics injects the operational-logging sink the adapter writes its
+// best-effort Debug lines through. A nil sink is ignored (NewAgent's
+// NopDiagnostics default stands), so the adapter never nil-panics.
+func WithDiagnostics(d port.Diagnostics) AgentOption {
+	return func(a *Agent) {
+		if d != nil {
+			a.diag = d
+		}
+	}
+}
+
 // NewAgent constructs an Agent over svc. The Conn is set by Serve so the Agent
 // can issue outbound request_permission calls and session/update notifications.
 func NewAgent(svc *server.Service, opts ...AgentOption) *Agent {
@@ -98,6 +114,7 @@ func NewAgent(svc *server.Service, opts ...AgentOption) *Agent {
 		mcpSessions: make(map[string]struct{}),
 		info:        implementation{Name: "mecatl", Version: "acp-phase3"},
 		caps:        svc.ProviderCapabilities(),
+		diag:        port.NopDiagnostics{},
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -329,7 +346,7 @@ func modeStateFor(current session.PermissionMode) *sessionModeState {
 func (a *Agent) notifyAvailableCommands(ctx context.Context, sessionID, workspace string) {
 	cmds, err := a.svc.ListCommands(ctx, workspace)
 	if err != nil {
-		slog.Debug("acp: list commands failed", "session", sessionID, "err", err)
+		a.diag.Log(ctx, port.LevelDebug, "acp: list commands failed", "session", sessionID, "err", err)
 		return
 	}
 	if len(cmds) == 0 {
@@ -339,7 +356,7 @@ func (a *Agent) notifyAvailableCommands(ctx context.Context, sessionID, workspac
 	for _, c := range cmds {
 		out = append(out, availableCommand{Name: c.Name, Description: c.Description})
 	}
-	a.notifyUpdate(sessionID, availableCommandsUpdate{
+	a.notifyUpdate(ctx, sessionID, availableCommandsUpdate{
 		SessionUpdate:     updateAvailableCommands,
 		AvailableCommands: out,
 	})
@@ -409,7 +426,7 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 	}
 	// Rebuild the editor's transcript from the persisted history BEFORE returning,
 	// so a re-attaching editor sees the prior turns rather than an empty session.
-	a.replayHistory(req.SessionID, sess.Conversation)
+	a.replayHistory(ctx, req.SessionID, sess.Conversation)
 	return loadSessionResponse{Modes: modeStateFor(sess.Mode)}, nil
 }
 
@@ -439,7 +456,7 @@ func (a *Agent) handleSetMode(ctx context.Context, params json.RawMessage) (any,
 	// Confirm the change to the editor. SetMode is a no-op when the mode is
 	// unchanged, but emitting the update unconditionally keeps the picker
 	// authoritative and is harmless (the editor sets the value it already has).
-	a.notifyUpdate(req.SessionID, currentModeUpdate{
+	a.notifyUpdate(ctx, req.SessionID, currentModeUpdate{
 		SessionUpdate: updateCurrentMode,
 		CurrentModeID: string(sess.Mode),
 	})
@@ -533,7 +550,7 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, params json.RawMessage)
 			}
 		default:
 			if update, ok := projectUpdate(ev); ok {
-				a.notifyUpdate(req.SessionID, update)
+				a.notifyUpdate(ctx, req.SessionID, update)
 			}
 		}
 	}
@@ -555,7 +572,7 @@ func (a *Agent) handleSessionCancel(ctx context.Context, params json.RawMessage)
 		return
 	}
 	if err := a.svc.Cancel(ctx, session.SessionID(n.SessionID)); err != nil {
-		slog.Debug("acp: session/cancel", "session", n.SessionID, "err", err)
+		a.diag.Log(ctx, port.LevelDebug, "acp: session/cancel", "session", n.SessionID, "err", err)
 	}
 }
 
@@ -600,7 +617,7 @@ func (a *Agent) handleSessionClose(ctx context.Context, params json.RawMessage) 
 	// Cancel ongoing work first (best-effort: no live run is the common case).
 	if err := a.svc.Cancel(ctx, id); err != nil &&
 		!errors.Is(err, server.ErrNoActiveRun) && !errors.Is(err, server.ErrNotFound) {
-		slog.Debug("acp: session/close: cancel", "session", req.SessionID, "err", err)
+		a.diag.Log(ctx, port.LevelDebug, "acp: session/close: cancel", "session", req.SessionID, "err", err)
 	}
 	// Untrack BEFORE teardown so a later closeTrackedSessions on disconnect skips
 	// this id (no double-close). delete on an absent key is a no-op, so untracking
@@ -621,7 +638,7 @@ func (a *Agent) requestPermission(ctx context.Context, sessionID string, run run
 		var resp requestPermissionResponse
 		err := a.conn.Call(ctx, methodRequestPermission, permissionRequestFor(sessionID, ask), &resp)
 		if err != nil {
-			slog.Debug("acp: request_permission failed; denying", "session", sessionID, "ask", ask.AskID, "err", err)
+			a.diag.Log(ctx, port.LevelDebug, "acp: request_permission failed; denying", "session", sessionID, "ask", ask.AskID, "err", err)
 			run.Approve(ask.AskID, session.VerdictDeny)
 			return
 		}
@@ -630,10 +647,12 @@ func (a *Agent) requestPermission(ctx context.Context, sessionID string, run run
 }
 
 // notifyUpdate pushes one session/update notification, logging (not failing) a
-// write error: a dropped notification must not abort the in-flight prompt.
-func (a *Agent) notifyUpdate(sessionID string, update any) {
+// write error: a dropped notification must not abort the in-flight prompt. ctx is
+// the dispatch context, forwarded to diag.Log only as a trace/baggage carrier (the
+// Notify itself is fire-and-forget — the adapter derives no cancellation from it).
+func (a *Agent) notifyUpdate(ctx context.Context, sessionID string, update any) {
 	if err := a.conn.Notify(methodSessionUpdate, sessionNotification{SessionID: sessionID, Update: update}); err != nil {
-		slog.Debug("acp: session/update notify failed", "session", sessionID, "err", err)
+		a.diag.Log(ctx, port.LevelDebug, "acp: session/update notify failed", "session", sessionID, "err", err)
 	}
 }
 

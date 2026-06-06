@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stacklok/mecatl/internal/app"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // fakeSeam builds a trustSeam over in-memory fakes so every prompt branch is
@@ -297,7 +298,7 @@ func TestProdTrustSeamWiring(t *testing.T) {
 		t.Fatalf("write soul: %v", err)
 	}
 
-	seam := prodTrustSeam(embeddedConfig(config{workspace: ws}))
+	seam := prodTrustSeam(embeddedConfig(config{workspace: ws}, port.NopDiagnostics{}))
 
 	if d := seam.resolve(); d.Trusted || d.Drifted {
 		t.Fatalf("prod resolve(): %+v, want untrusted/undrifted", d)

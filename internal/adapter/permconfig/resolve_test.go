@@ -1,14 +1,18 @@
 package permconfig
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
+	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
@@ -253,6 +257,31 @@ func TestResolvePartialMalformedFailSoft(t *testing.T) {
 	rules := r.Resolve(context.Background(), ws)
 	if findRule(rules, "Bash", "rm*") == nil {
 		t.Fatalf("the good Claude file must still load despite the bad YAML sibling: %+v", rules)
+	}
+}
+
+// TestResolveEmitsFailSafeWarnThroughInjectedSink pins BOTH the diagnostics wiring
+// (the injected port.Diagnostics is actually consulted — the very thing the soul-gate
+// site was caught NOT doing) AND the level (a silent WARN→Info downgrade fails here).
+// It feeds an unparseable project YAML and asserts the fail-safe "skipping" line
+// reaches the injected sink at WARN.
+func TestResolveEmitsFailSafeWarnThroughInjectedSink(t *testing.T) {
+	var buf bytes.Buffer
+	// minLevel=Info so an accidental WARN→Info downgrade would STILL be captured;
+	// the assertion then pins level=WARN, so the downgrade fails the test.
+	diag := slogdiag.New(&buf, false, port.LevelInfo)
+
+	r := newWithEnv(Options{Conventional: true, TrustProject: true, Diagnostics: diag}, fakeEnv())
+	ws := newProjectWS(t, "/repo", "permissions: [this is: not: valid")
+
+	_ = r.Resolve(context.Background(), ws)
+
+	out := buf.String()
+	if !strings.Contains(out, "project YAML unparseable; skipping") {
+		t.Fatalf("fail-safe parse-skip line did not reach the injected sink; got: %s", out)
+	}
+	if !strings.Contains(out, "level=WARN") {
+		t.Fatalf("fail-safe parse-skip line must be WARN (no silent downgrade); got: %s", out)
 	}
 }
 

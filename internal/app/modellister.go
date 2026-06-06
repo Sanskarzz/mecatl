@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/openrouter"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
 	"github.com/stacklok/mecatl/internal/adapter/server"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // liveModelRefreshTimeout bounds the whole background refresh (all providers'
@@ -32,14 +32,14 @@ type modelSwapper interface {
 // goroutine, no ctx) — so a mock/openai-only deployment spawns nothing. When sync
 // is true (a test seam) the refresh runs INLINE before returning, so an offline
 // e2e can assert the swapped snapshot deterministically without sleeps.
-func startLiveModelRefresh(reg *providerRegistry, swap modelSwapper, runSync bool) func() {
+func startLiveModelRefresh(d port.Diagnostics, reg *providerRegistry, swap modelSwapper, runSync bool) func() {
 	if reg == nil || !anyProviderHasLister(reg) {
 		return func() {} // nothing to refresh
 	}
 	if runSync {
 		ctx, cancel := context.WithTimeout(context.Background(), liveModelRefreshTimeout)
 		defer cancel()
-		models, byProvider := liveModelSnapshot(ctx, reg)
+		models, byProvider := liveModelSnapshot(ctx, d, reg)
 		swap.SetModels(models)
 		reg.meta.Swap(byProvider)
 		return func() {}
@@ -51,7 +51,7 @@ func startLiveModelRefresh(reg *providerRegistry, swap modelSwapper, runSync boo
 		defer wg.Done()
 		fetchCtx, fetchCancel := context.WithTimeout(ctx, liveModelRefreshTimeout)
 		defer fetchCancel()
-		models, byProvider := liveModelSnapshot(fetchCtx, reg)
+		models, byProvider := liveModelSnapshot(fetchCtx, d, reg)
 		// If the refresh ctx was cancelled (the closer ran — a shutdown — before the
 		// fetch finished), the fetch was interrupted and its result is untrustworthy
 		// (the embedded floor at best), so DO NOT overwrite the seed. Only swap when the
@@ -288,7 +288,7 @@ func sortModelInfos(out []*mecatlv1.ModelInfo) {
 // project from the SAME modelEntry list per provider so the picker and the resolvers
 // cannot drift. It REUSES projectModelEntry + sortModelInfos so the live floor and
 // the embedded seed cannot drift.
-func liveModelSnapshot(ctx context.Context, reg *providerRegistry) ([]*mecatlv1.ModelInfo, map[string][]modelEntry) {
+func liveModelSnapshot(ctx context.Context, d port.Diagnostics, reg *providerRegistry) ([]*mecatlv1.ModelInfo, map[string][]modelEntry) {
 	if reg == nil {
 		return nil, nil
 	}
@@ -298,7 +298,7 @@ func liveModelSnapshot(ctx context.Context, reg *providerRegistry) ([]*mecatlv1.
 		if pid == providerMock {
 			continue // the mock never advertises selectable models
 		}
-		entries := resolveProviderModels(ctx, reg, pid)
+		entries := resolveProviderModels(ctx, d, reg, pid)
 		byProvider[pid] = entries
 		for _, m := range entries {
 			out = append(out, projectModelEntry(reg, pid, m))
@@ -311,20 +311,20 @@ func liveModelSnapshot(ctx context.Context, reg *providerRegistry) ([]*mecatlv1.
 // resolveProviderModels returns the per-provider model list applying the merge +
 // fail-safe rules: live REPLACES embedded on success+non-empty, else embedded
 // fallback (with a single Warn on a live failure).
-func resolveProviderModels(ctx context.Context, reg *providerRegistry, pid string) []modelEntry {
+func resolveProviderModels(ctx context.Context, d port.Diagnostics, reg *providerRegistry, pid string) []modelEntry {
 	entry, ok := reg.Lookup(pid)
 	if !ok || entry.lister == nil {
 		return embeddedModels(pid) // no lister: embedded floor, exactly as today
 	}
 	live, err := entry.lister.ListModels(ctx)
 	if err != nil {
-		slog.Warn("live model fetch failed, using embedded catalog", "provider", pid, "err", err)
+		d.Log(ctx, port.LevelWarn, "live model fetch failed, using embedded catalog", "provider", pid, "err", err)
 		return embeddedModels(pid)
 	}
 	if len(live) == 0 {
 		// An empty live list is never shown — the embedded floor always wins over
 		// nothing (a transient upstream blip must not blank the picker).
-		slog.Warn("live model fetch returned no models, using embedded catalog", "provider", pid)
+		d.Log(ctx, port.LevelWarn, "live model fetch returned no models, using embedded catalog", "provider", pid)
 		return embeddedModels(pid)
 	}
 	return live

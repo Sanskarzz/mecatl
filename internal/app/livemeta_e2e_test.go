@@ -71,7 +71,7 @@ func TestAnthropicLiveResolverPicksUpCeiling(t *testing.T) {
 	}
 
 	// Run the live snapshot + swap (the same two-sink path the background refresh uses).
-	models, byProvider := liveModelSnapshot(context.Background(), reg)
+	models, byProvider := liveModelSnapshot(context.Background(), port.NopDiagnostics{}, reg)
 	if len(models) == 0 {
 		t.Fatal("live snapshot empty")
 	}
@@ -182,7 +182,7 @@ func TestOpenRouterOutputLimitSurvivesSwapIntoStore(t *testing.T) {
 	meta.seedFromCatalog(reg.Available())
 
 	// Run the real snapshot + swap (the two-sink path the background refresh uses).
-	_, byProvider := liveModelSnapshot(context.Background(), reg)
+	_, byProvider := liveModelSnapshot(context.Background(), port.NopDiagnostics{}, reg)
 	meta.Swap(byProvider)
 
 	// qwen/qwen3.7-plus has top_provider.max_completion_tokens = 65536 in the fixture.

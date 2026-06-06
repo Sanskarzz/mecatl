@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"log/slog"
 	"path/filepath"
 
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
@@ -10,6 +9,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/soul"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/prompt"
 	"github.com/stacklok/mecatl/internal/tool"
 )
@@ -154,6 +154,10 @@ func buildSoulGate(cfg Config) soulGate {
 		ImportClaude:  cfg.ImportClaudePermissions,
 		TrustProject:  cfg.TrustProject,
 		ExplicitFiles: cfg.PermissionConfigs,
+		// Match build.go's twin permconfig.New: route this resolver's operator-facing
+		// fail-safe WARN lines (config unparseable/skipped, rule demoted/dropped/inert)
+		// through the injected sink instead of silently defaulting to NopDiagnostics.
+		Diagnostics: cfg.diag(),
 	})
 	return soulGateFunc(func() governance.Effect {
 		var ws tool.WorkspaceReader
@@ -214,7 +218,7 @@ func buildSoulGate(cfg Config) soulGate {
 // explicit soul:apply Deny/Ask. No change to buildSoulGate's internals.
 func selectSoulSource(cfg Config, io baselineIO, gate soulGate) (prompt.SoulSource, soulMeta) {
 	if cfg.NoSoul {
-		slog.Info("soul DISABLED (--no-soul)")
+		cfg.diag().Log(context.Background(), port.LevelInfo, "soul DISABLED (--no-soul)")
 		return nil, soulMeta{}
 	}
 
@@ -223,10 +227,10 @@ func selectSoulSource(cfg Config, io baselineIO, gate soulGate) (prompt.SoulSour
 	if gate != nil {
 		switch eff := gate.Effect(); eff {
 		case governance.Deny:
-			slog.Warn("soul: withheld by permission policy (soul:apply → deny)")
+			cfg.diag().Log(context.Background(), port.LevelWarn, "soul: withheld by permission policy (soul:apply → deny)")
 			return nil, soulMeta{PermEffect: governance.Deny}
 		case governance.Ask:
-			slog.Warn("soul: soul:apply resolved to Ask, but the soul is applied at build time with no interactive gate; withholding this run — set soul:apply→allow to apply it")
+			cfg.diag().Log(context.Background(), port.LevelWarn, "soul: soul:apply resolved to Ask, but the soul is applied at build time with no interactive gate; withholding this run — set soul:apply→allow to apply it")
 			return nil, soulMeta{PermEffect: governance.Ask}
 		default:
 			// Allow (or unrecognised, fail-safe to the default-on posture): proceed.
@@ -236,19 +240,19 @@ func selectSoulSource(cfg Config, io baselineIO, gate soulGate) (prompt.SoulSour
 
 	// USER candidate first (always trusted). An explicit --soul-file is a user-scoped
 	// override of the conventional path; either way it is the operator's own file.
-	userStore := soul.NewWithEnv(soul.Options{Path: cfg.SoulPath}, soulEnv)
+	userStore := soul.NewWithEnv(soul.Options{Path: cfg.SoulPath, Diagnostics: cfg.diag()}, soulEnv)
 	userRes, _ := userStore.LoadWithMeta(context.Background())
 	if userRes.Body != "" {
 		// USER-WINS: a present user soul is selected; the project soul is ignored.
 		if cfg.SoulPath != "" {
-			slog.Info("soul ENABLED (user provenance, read-only persona); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)", "path", cfg.SoulPath)
+			cfg.diag().Log(context.Background(), port.LevelInfo, "soul ENABLED (user provenance, read-only persona); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)", "path", cfg.SoulPath)
 		} else {
-			slog.Info("soul ENABLED (user provenance, read-only persona); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)",
+			cfg.diag().Log(context.Background(), port.LevelInfo, "soul ENABLED (user provenance, read-only persona); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)",
 				"path", "conventional <xdg>/mecatl/soul.md")
 		}
-		drifted := checkSoulDrift(io, userStore.ResolvedPath(), userRes.SHA256, cfg.ApproveSoul)
+		drifted := checkSoulDrift(cfg.diag(), io, userStore.ResolvedPath(), userRes.SHA256, cfg.ApproveSoul)
 		if drifted && cfg.SoulStrict {
-			slog.Warn("soul: drifted persona refused (--soul-strict); no soul fragment this run",
+			cfg.diag().Log(context.Background(), port.LevelWarn, "soul: drifted persona refused (--soul-strict); no soul fragment this run",
 				"path", userStore.ResolvedPath(), "provenance", soulUser.String())
 			return nil, soulMeta{}
 		}
@@ -266,15 +270,15 @@ func selectSoulSource(cfg Config, io baselineIO, gate soulGate) (prompt.SoulSour
 	// Resolution is per the build-time cfg.Workspace (the single-workspace embedded
 	// server). An empty workspace means there is no project soul to discover.
 	if cfg.Workspace == "" {
-		slog.Info("soul: no fragment (no user soul present; no workspace to discover a project soul)")
+		cfg.diag().Log(context.Background(), port.LevelInfo, "soul: no fragment (no user soul present; no workspace to discover a project soul)")
 		return nil, soulMeta{}
 	}
 	projectPath := filepath.Join(cfg.Workspace, projectSoulSubpath)
-	projectStore := soul.NewWithEnv(soul.Options{Path: projectPath}, soulEnv)
+	projectStore := soul.NewWithEnv(soul.Options{Path: projectPath, Diagnostics: cfg.diag()}, soulEnv)
 	projRes, _ := projectStore.LoadWithMeta(context.Background())
 	if projRes.Body == "" {
 		// No project soul on disk (or it was rejected by the loader's discipline).
-		slog.Info("soul: no fragment (no user or project soul present; fail-soft)")
+		cfg.diag().Log(context.Background(), port.LevelInfo, "soul: no fragment (no user or project soul present; fail-soft)")
 		return nil, soulMeta{}
 	}
 
@@ -282,15 +286,15 @@ func selectSoulSource(cfg Config, io baselineIO, gate soulGate) (prompt.SoulSour
 	// the EXACT issue-#13 mechanism. An untrusted project soul is dropped
 	// silently-but-LOGGED (Warn), never an error.
 	if !cfg.TrustProject {
-		slog.Warn("soul: a project-sourced soul was discovered but is UNTRUSTED; dropping it (no fragment). Pass --trust-project to honour a soul discovered in this repo (only for a repo you trust)",
+		cfg.diag().Log(context.Background(), port.LevelWarn, "soul: a project-sourced soul was discovered but is UNTRUSTED; dropping it (no fragment). Pass --trust-project to honour a soul discovered in this repo (only for a repo you trust)",
 			"path", projectPath)
 		return nil, soulMeta{Provenance: soulProject, Trusted: false, SHA256: projRes.SHA256, Size: projRes.Size}
 	}
 
-	slog.Info("soul ENABLED (PROJECT provenance, read-only persona; trusted via --trust-project); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)", "path", projectPath)
-	drifted := checkSoulDrift(io, projectStore.ResolvedPath(), projRes.SHA256, cfg.ApproveSoul)
+	cfg.diag().Log(context.Background(), port.LevelInfo, "soul ENABLED (PROJECT provenance, read-only persona; trusted via --trust-project); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)", "path", projectPath)
+	drifted := checkSoulDrift(cfg.diag(), io, projectStore.ResolvedPath(), projRes.SHA256, cfg.ApproveSoul)
 	if drifted && cfg.SoulStrict {
-		slog.Warn("soul: drifted persona refused (--soul-strict); no soul fragment this run",
+		cfg.diag().Log(context.Background(), port.LevelWarn, "soul: drifted persona refused (--soul-strict); no soul fragment this run",
 			"path", projectPath, "provenance", soulProject.String())
 		return nil, soulMeta{Provenance: soulProject, Trusted: true}
 	}

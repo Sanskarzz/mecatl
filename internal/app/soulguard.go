@@ -1,11 +1,13 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"io/fs"
-	"log/slog"
 	"os"
 	"syscall"
+
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // soulguard is the composition-layer SOUL DRIFT BASELINE (issue #14, Phase 3, Item
@@ -126,13 +128,13 @@ func isASCIISpace(b byte) bool {
 // --approve-soul). It logs at Info on success and Warn on failure (fail-soft: a
 // write failure never aborts a run — the soul still loads, drift detection is just
 // degraded for this run).
-func establishBaseline(io baselineIO, sidecar, currentHash, reason string) {
+func establishBaseline(d port.Diagnostics, io baselineIO, sidecar, currentHash, reason string) {
 	if err := io.writeFile(sidecar, []byte(currentHash+"\n")); err != nil {
-		slog.Warn("soul: could not write drift baseline; drift detection degraded for this run",
+		d.Log(context.Background(), port.LevelWarn, "soul: could not write drift baseline; drift detection degraded for this run",
 			"sidecar", sidecar, "reason", reason, "err", err)
 		return
 	}
-	slog.Info("soul: baseline established", "sidecar", sidecar, "reason", reason, "hash", currentHash)
+	d.Log(context.Background(), port.LevelInfo, "soul: baseline established", "sidecar", sidecar, "reason", reason, "hash", currentHash)
 }
 
 // checkSoulDrift compares the current soul hash against the on-disk baseline and
@@ -151,7 +153,7 @@ func establishBaseline(io baselineIO, sidecar, currentHash, reason string) {
 //
 // It is fail-soft: an unreadable sidecar is logged at Warn and treated as "no
 // reliable baseline" (not drifted, no spurious alarm).
-func checkSoulDrift(io baselineIO, soulPath, currentHash string, approve bool) (drifted bool) {
+func checkSoulDrift(d port.Diagnostics, io baselineIO, soulPath, currentHash string, approve bool) (drifted bool) {
 	if currentHash == "" {
 		return false // no usable soul → no baseline, no drift (R1.5)
 	}
@@ -161,18 +163,18 @@ func checkSoulDrift(io baselineIO, soulPath, currentHash string, approve bool) (
 	}
 
 	if approve {
-		establishBaseline(io, sidecar, currentHash, "approve")
+		establishBaseline(d, io, sidecar, currentHash, "approve")
 		return false
 	}
 
 	baseline, ok, err := readBaseline(io, sidecar)
 	if err != nil {
-		slog.Warn("soul: could not read drift baseline; drift detection skipped for this run",
+		d.Log(context.Background(), port.LevelWarn, "soul: could not read drift baseline; drift detection skipped for this run",
 			"sidecar", sidecar, "err", err)
 		return false
 	}
 	if !ok {
-		establishBaseline(io, sidecar, currentHash, "trust-on-first-use") // R1.2
+		establishBaseline(d, io, sidecar, currentHash, "trust-on-first-use") // R1.2
 		return false
 	}
 	if baseline == currentHash {
@@ -180,7 +182,7 @@ func checkSoulDrift(io baselineIO, soulPath, currentHash string, approve bool) (
 	}
 
 	// R1.3: drift. Alarm with both hashes; the soul still loads unless --soul-strict.
-	slog.Warn("soul: drift detected — the persona file changed since the approved baseline; run with --approve-soul to accept it (or --soul-strict to refuse a drifted soul)",
+	d.Log(context.Background(), port.LevelWarn, "soul: drift detected — the persona file changed since the approved baseline; run with --approve-soul to accept it (or --soul-strict to refuse a drifted soul)",
 		"sidecar", sidecar, "baseline", baseline, "current", currentHash)
 	return true
 }

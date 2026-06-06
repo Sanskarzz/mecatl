@@ -92,7 +92,7 @@ func TestLiveSnapshotReplacesEmbedded(t *testing.T) {
 	}}
 	reg := regWithLister(lister)
 
-	models, _ := liveModelSnapshot(context.Background(), reg)
+	models, _ := liveModelSnapshot(context.Background(), port.NopDiagnostics{}, reg)
 
 	var orIDs, openaiCount int
 	sawLiveOnly := false
@@ -139,7 +139,7 @@ func TestLiveSnapshotFallsBackOnError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := regWithLister(tc.lister)
-			models, _ := liveModelSnapshot(context.Background(), reg)
+			models, _ := liveModelSnapshot(context.Background(), port.NopDiagnostics{}, reg)
 			orCount := 0
 			for _, m := range models {
 				if m.GetProviderId() == providerOpenRouter {
@@ -169,7 +169,7 @@ func TestLiveSnapshotAvailabilityGating(t *testing.T) {
 		},
 		defaultID: providerOpenAI,
 	}
-	models, _ := liveModelSnapshot(context.Background(), reg)
+	models, _ := liveModelSnapshot(context.Background(), port.NopDiagnostics{}, reg)
 	for _, m := range models {
 		if m.GetProviderId() == providerOpenRouter {
 			t.Fatalf("openrouter model %q shown for an unavailable provider", m.GetId())
@@ -191,7 +191,7 @@ func TestLiveOnlyModelImageSingleSource(t *testing.T) {
 		{ID: "vision/cap", InputModalities: []string{"text", "image"}},
 	}}
 	reg := regWithLister(lister) // openrouter provider reports Image:true
-	models, _ := liveModelSnapshot(context.Background(), reg)
+	models, _ := liveModelSnapshot(context.Background(), port.NopDiagnostics{}, reg)
 	got := map[string]bool{}
 	for _, m := range models {
 		if m.GetProviderId() == providerOpenRouter {
@@ -263,7 +263,7 @@ func TestLiveSnapshotThroughRealAdapter(t *testing.T) {
 		},
 		defaultID: providerOpenRouter,
 	}
-	models, _ := liveModelSnapshot(context.Background(), reg)
+	models, _ := liveModelSnapshot(context.Background(), port.NopDiagnostics{}, reg)
 	ids := map[string]*mecatlv1.ModelInfo{}
 	for _, m := range models {
 		ids[m.GetId()] = m
@@ -414,7 +414,7 @@ func TestAsyncRefreshSwapsAfterJoin(t *testing.T) {
 	reg := regWithLister(lister)
 	swap := newFakeSwapper()
 
-	closer := startLiveModelRefresh(reg, swap, false) // ASYNC
+	closer := startLiveModelRefresh(port.NopDiagnostics{}, reg, swap, false) // ASYNC
 
 	// Wait for the background swap to land on its OWN (deterministic via the swapped
 	// channel — NO sleep, NO poll), then join+cleanup. This exercises the real
@@ -455,7 +455,7 @@ func TestAsyncRefreshCancelMidFetchDoesNotOverwrite(t *testing.T) {
 	reg := regWithLister(lister)
 	swap := newFakeSwapper()
 
-	closer := startLiveModelRefresh(reg, swap, false) // ASYNC
+	closer := startLiveModelRefresh(port.NopDiagnostics{}, reg, swap, false) // ASYNC
 
 	<-lister.started // the goroutine is now blocked inside ListModels (mid-fetch)
 

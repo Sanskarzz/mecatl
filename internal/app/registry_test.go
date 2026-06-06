@@ -1,9 +1,9 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
 )
@@ -147,15 +148,17 @@ func TestRegistryZeroKeys(t *testing.T) {
 // sentinel key and the env-var names.
 func TestNoKeyInStartupLogs(t *testing.T) {
 	const sentinelKey = "sk-SENTINEL-startup-log"
-	var buf strings.Builder
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	defer slog.SetDefault(prev)
+	var buf bytes.Buffer
+	// The registry's startup lines now route through the injected port.Diagnostics
+	// (iteration 2), not slog.Default(); capture THAT sink so the no-key assertion
+	// inspects the real bytes the operator would see.
+	diag := slogdiag.New(&buf, false, port.LevelDebug)
 
 	_, err := buildProviderRegistry(Config{
-		Model: "gpt-5",
+		Model:       "gpt-5",
+		Diagnostics: diag,
 		providerConstructor: func(_ Config, _, _, _ string) port.LLMProvider {
-			return nil // never used for logging; the slog lines fire before/around it
+			return nil // never used for logging; the diagnostics lines fire before/around it
 		},
 	}, fakeEnv(map[string]string{
 		"OPENAI_API_KEY":     sentinelKey,

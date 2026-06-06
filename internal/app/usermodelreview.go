@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 
 	"github.com/stacklok/mecatl/internal/agent"
@@ -33,15 +32,22 @@ type userModelReviewHooks struct {
 	// interval debounces reviews by session-stop count: a review fires on the 1st
 	// Stop and then every `interval` Stops thereafter. 0 or 1 means "every Stop".
 	interval int
+	// diag is the injected operational-logging sink for the (best-effort) review
+	// failure line. Never nil — newUserModelReviewHooks defaults it to NopDiagnostics.
+	diag port.Diagnostics
 
 	mu    sync.Mutex
 	count int // number of PhaseStop events seen
 }
 
 // newUserModelReviewHooks wraps inner with the Stop-trigger decorator. interval is
-// the session-count debounce (0/1 = every session).
-func newUserModelReviewHooks(inner port.HookRunner, reviewer *agent.UserModelReviewer, interval int) port.HookRunner {
-	return &userModelReviewHooks{inner: inner, reviewer: reviewer, interval: interval}
+// the session-count debounce (0/1 = every session). A nil diag defaults to
+// NopDiagnostics so the decorator never nil-panics on the failure line.
+func newUserModelReviewHooks(inner port.HookRunner, reviewer *agent.UserModelReviewer, interval int, diag port.Diagnostics) port.HookRunner {
+	if diag == nil {
+		diag = port.NopDiagnostics{}
+	}
+	return &userModelReviewHooks{inner: inner, reviewer: reviewer, interval: interval, diag: diag}
 }
 
 // Run delegates to the inner runner, then — only for PhaseStop, and only when the
@@ -61,7 +67,7 @@ func (h *userModelReviewHooks) Run(ctx context.Context, ev governance.HookEvent)
 		//nolint:gosec // G118: intentional background ctx — see comment above.
 		go func() {
 			if rerr := h.reviewer.Review(context.Background(), sessionID); rerr != nil {
-				slog.Warn("user-model background review failed", "session", sessionID, "err", rerr)
+				h.diag.Log(context.Background(), port.LevelWarn, "user-model background review failed", "session", sessionID, "err", rerr)
 			}
 		}()
 	}

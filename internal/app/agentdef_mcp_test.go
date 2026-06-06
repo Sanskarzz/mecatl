@@ -17,6 +17,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/team"
 	"github.com/stacklok/mecatl/internal/tool"
@@ -64,7 +65,7 @@ func connectMainManager(t *testing.T, name, url string) *mcp.Manager {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	mgr, err := mcp.NewManager(ctx, []mcp.ServerConfig{{Name: name, URL: url}}, nil)
+	mgr, err := mcp.NewManager(ctx, []mcp.ServerConfig{{Name: name, URL: url}}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager(main): %v", err)
 	}
@@ -92,7 +93,7 @@ func TestDefMCPToolsReferencePullsFromMainManager(t *testing.T) {
 		Description: "uses a referenced server",
 		MCPServers:  []agents.AgentMCPServer{{Name: "main"}}, // reference (no URL)
 	}
-	tools, names, closeFn := defMCPTools(context.Background(), def, main)
+	tools, names, closeFn := defMCPTools(context.Background(), port.NopDiagnostics{}, def, main)
 	if closeFn != nil {
 		t.Fatal("a reference entry must open no connection (nil close)")
 	}
@@ -114,7 +115,7 @@ func TestDefMCPToolsInlineConnectsAndTearsDown(t *testing.T) {
 		MCPServers:  []agents.AgentMCPServer{{Name: "inline", URL: url}},
 	}
 	// No main manager: an inline def must still connect on its own.
-	tools, names, closeFn := defMCPTools(context.Background(), def, nil)
+	tools, names, closeFn := defMCPTools(context.Background(), port.NopDiagnostics{}, def, nil)
 	if closeFn == nil {
 		t.Fatal("an inline entry must return a non-nil close")
 	}
@@ -157,7 +158,7 @@ func TestDefMCPToolsUnknownReferenceSkipped(t *testing.T) {
 		Description: "references a server that does not exist",
 		MCPServers:  []agents.AgentMCPServer{{Name: "nope"}},
 	}
-	tools, _, closeFn := defMCPTools(context.Background(), def, main)
+	tools, _, closeFn := defMCPTools(context.Background(), port.NopDiagnostics{}, def, main)
 	if len(tools) != 0 || closeFn != nil {
 		t.Fatalf("unknown reference must yield no tools and no close, got tools=%d close!=nil=%v", len(tools), closeFn != nil)
 	}

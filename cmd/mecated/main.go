@@ -522,7 +522,7 @@ func run() error {
 	}
 	// Process-RSS gauge (mecatl.process.rss): Linux-only, no-op elsewhere. It
 	// rides the same MeterProvider so it renders on /metrics (decision 9).
-	if rerr := telemetry.RegisterProcessGauges(providers.Meter); rerr != nil {
+	if rerr := telemetry.RegisterProcessGauges(providers.Meter, diag); rerr != nil {
 		return fmt.Errorf("setup process gauges: %w", rerr)
 	}
 
@@ -600,7 +600,7 @@ func run() error {
 		// session/load (resume) is offered only when a durable session store is
 		// configured: the in-memory store would lose snapshots across a restart, so
 		// loadSession stays false there.
-		return serveACP(ctx, built.Service, cfg.storeDir != "")
+		return serveACP(ctx, built.Service, cfg.storeDir != "", diag)
 	}
 
 	return serve(ctx, cfg, built.Service, providers.Registry, recorder, slowTurns)

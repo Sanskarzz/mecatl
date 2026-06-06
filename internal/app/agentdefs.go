@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"log/slog"
 	"sort"
 	"strings"
 
@@ -93,7 +92,7 @@ func resolveProviderModel(cfg Config, provReg *providerRegistry, def agents.Agen
 		if _, ok := provReg.Lookup(p); ok {
 			pid = p
 		} else {
-			slog.Warn("agent def references an unknown/unavailable provider; inheriting parent provider",
+			cfg.diag().Log(context.Background(), port.LevelWarn, "agent def references an unknown/unavailable provider; inheriting parent provider",
 				"agent", def.Name, "provider", p, "path", def.Path)
 			// pid stays parentProviderID (fail-safe).
 		}
@@ -178,7 +177,7 @@ func resolveAlias(cfg Config, def agents.AgentDef, sel string) string {
 	if strings.ContainsAny(sel, "-./:") || strings.Contains(sel, " ") {
 		return sel
 	}
-	slog.Warn("agent def references an unknown model alias; inheriting parent model",
+	cfg.diag().Log(context.Background(), port.LevelWarn, "agent def references an unknown model alias; inheriting parent model",
 		"agent", def.Name, "model", sel, "path", def.Path)
 	return ""
 }
@@ -192,7 +191,7 @@ func resolveAlias(cfg Config, def agents.AgentDef, sel string) string {
 // Note (critique B2): plan mode hard-denies mutations (existing invariant), so a
 // plan member is effectively read-only even if Mutating. acceptEdits is meaningful
 // only for a Mutating member (a read-only member has no mutating tools to accept).
-func resolvePermissionMode(def agents.AgentDef) session.PermissionMode {
+func resolvePermissionMode(d port.Diagnostics, def agents.AgentDef) session.PermissionMode {
 	switch strings.TrimSpace(def.PermissionMode) {
 	case "", "default":
 		return "" // caller's default
@@ -201,7 +200,7 @@ func resolvePermissionMode(def agents.AgentDef) session.PermissionMode {
 	case string(session.ModeAccept):
 		return session.ModeAccept
 	default:
-		slog.Warn("agent def references an unknown permissionMode; using the default",
+		d.Log(context.Background(), port.LevelWarn, "agent def references an unknown permissionMode; using the default",
 			"agent", def.Name, "mode", def.PermissionMode, "path", def.Path)
 		return ""
 	}
@@ -433,7 +432,7 @@ func preloadedSkillBodies(def agents.AgentDef, idx skillIndex) (bodies []string,
 // It is forgiving end-to-end (the skills/teams philosophy): an unreachable inline
 // server or an unknown reference is logged and skipped, never fatal — the def is
 // still built with whatever MCP tools did resolve.
-func defMCPTools(ctx context.Context, def agents.AgentDef, mainMgr *mcp.Manager) (mcpTools []tool.Tool, names []string, closeFn func() error) {
+func defMCPTools(ctx context.Context, d port.Diagnostics, def agents.AgentDef, mainMgr *mcp.Manager) (mcpTools []tool.Tool, names []string, closeFn func() error) {
 	if len(def.MCPServers) == 0 {
 		return nil, nil, nil
 	}
@@ -447,12 +446,12 @@ func defMCPTools(ctx context.Context, def agents.AgentDef, mainMgr *mcp.Manager)
 		if entry.IsReference() {
 			refTools, ok := mainServerTools(mainMgr, name)
 			if !ok {
-				slog.Warn("agent def references an unknown MCP server; not scoped (no such configured server)",
+				d.Log(ctx, port.LevelWarn, "agent def references an unknown MCP server; not scoped (no such configured server)",
 					"agent", def.Name, "server", name, "path", def.Path)
 				continue
 			}
 			mcpTools = append(mcpTools, refTools...)
-			slog.Info("agent def scopes a referenced MCP server",
+			d.Log(ctx, port.LevelInfo, "agent def scopes a referenced MCP server",
 				"agent", def.Name, "server", name, "tools", len(refTools), "path", def.Path)
 			continue
 		}
@@ -465,19 +464,19 @@ func defMCPTools(ctx context.Context, def agents.AgentDef, mainMgr *mcp.Manager)
 
 	if len(inlineConfigs) > 0 {
 		onError := func(sc mcp.ServerConfig, err error) {
-			slog.Warn("agent def inline MCP server unreachable; skipping",
+			d.Log(ctx, port.LevelWarn, "agent def inline MCP server unreachable; skipping",
 				"agent", def.Name, "server", sc.Name, "url", sc.URL, "err", err)
 		}
-		mgr, err := mcp.NewManager(ctx, inlineConfigs, onError)
+		mgr, err := mcp.NewManager(ctx, inlineConfigs, onError, d)
 		if err != nil {
-			slog.Warn("agent def inline MCP managers all failed; none scoped",
+			d.Log(ctx, port.LevelWarn, "agent def inline MCP managers all failed; none scoped",
 				"agent", def.Name, "err", err)
 		}
 		if mgr != nil {
 			inlineTools := mgr.Tools()
 			mcpTools = append(mcpTools, inlineTools...)
 			closeFn = mgr.Close
-			slog.Info("agent def scopes inline MCP servers",
+			d.Log(ctx, port.LevelInfo, "agent def scopes inline MCP servers",
 				"agent", def.Name, "servers", len(mgr.Servers()), "tools", len(inlineTools), "path", def.Path)
 		}
 	}
@@ -516,7 +515,7 @@ func defHookRunner(cfg Config, def agents.AgentDef, fallback port.HookRunner) po
 	for rawPhase, cmd := range def.Hooks {
 		phase := governance.HookPhase(rawPhase)
 		if _, ok := knownHookPhases[phase]; !ok {
-			slog.Warn("agent def references an unknown hook phase; ignored",
+			cfg.diag().Log(context.Background(), port.LevelWarn, "agent def references an unknown hook phase; ignored",
 				"agent", def.Name, "phase", rawPhase, "path", def.Path)
 			continue
 		}
@@ -529,7 +528,7 @@ func defHookRunner(cfg Config, def agents.AgentDef, fallback port.HookRunner) po
 	if cfg.Shell != "" {
 		opts = append(opts, hookexec.WithShell(cfg.Shell))
 	}
-	slog.Info("agent def scopes lifecycle hooks", "agent", def.Name, "phases", len(hooks), "path", def.Path)
+	cfg.diag().Log(context.Background(), port.LevelInfo, "agent def scopes lifecycle hooks", "agent", def.Name, "phases", len(hooks), "path", def.Path)
 	return hookexec.New(hooks, opts...)
 }
 
@@ -588,7 +587,7 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 	for _, def := range reg.List() {
 		names, diags := scopedToolNamesMode(def, base, false, allowShell)
 		for _, d := range diags {
-			slog.Warn("agent def tool scoping",
+			cfg.diag().Log(ctx, port.LevelWarn, "agent def tool scoping",
 				"agent", def.Name, "tool", d.tool, "reason", d.reason, "path", def.Path)
 		}
 
@@ -611,10 +610,10 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 		// aggregated into closeFn → Built.Close (process-lifetime engines, torn down on
 		// shutdown). MCP tool names are NOT relevant to a Task def's read-only backstop
 		// (Task defs are not team members), so the names return is ignored here.
-		mcpTools, _, mcpClose := defMCPTools(ctx, def, mainMgr)
+		mcpTools, _, mcpClose := defMCPTools(ctx, cfg.diag(), def, mainMgr)
 		for _, mt := range mcpTools {
 			if err := cat.Register(mt); err != nil {
-				slog.Warn("agent def MCP tool registration failed; skipped",
+				cfg.diag().Log(ctx, port.LevelWarn, "agent def MCP tool registration failed; skipped",
 					"agent", def.Name, "tool", mt.Spec().Name, "err", err)
 			}
 		}
@@ -627,7 +626,7 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 
 		bodies, missing := preloadedSkillBodies(def, skillIdx)
 		for _, name := range missing {
-			slog.Warn("agent def references an unknown skill; not preloaded",
+			cfg.diag().Log(ctx, port.LevelWarn, "agent def references an unknown skill; not preloaded",
 				"agent", def.Name, "skill", name, "path", def.Path)
 		}
 		hooks := defHookRunner(cfg, def, defaultHooks)
@@ -646,7 +645,7 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 			Limits:      defLimits(def, agent.DefaultChildLimits()),
 		})
 
-		slog.Info("agent def engine built",
+		cfg.diag().Log(ctx, port.LevelInfo, "agent def engine built",
 			"agent", def.Name, "tools", strings.Join(names, ","), "provider", pid, "model", model,
 			"preloaded_skills", len(bodies), "path", def.Path)
 	}
@@ -682,11 +681,11 @@ func composeCloseErr(first, second func() error) func() error {
 // and a plain func() (the main MCP close) into ONE func() that runs both — MCP-def
 // teardown first, then the main manager. It is how buildCatalog folds the Task-def
 // inline managers into the single mcpClose that feeds Built.Close.
-func composeClose(errClose func() error, plainClose func()) func() {
+func composeClose(d port.Diagnostics, errClose func() error, plainClose func()) func() {
 	return func() {
 		if errClose != nil {
 			if err := errClose(); err != nil {
-				slog.Warn("agent def inline MCP close", "err", err)
+				d.Log(context.Background(), port.LevelWarn, "agent def inline MCP close", "err", err)
 			}
 		}
 		if plainClose != nil {
@@ -799,7 +798,7 @@ func resolveAgentRegistry(ctx context.Context, cfg Config) *agents.Registry {
 	// cfg.TrustProject already carries the folded TrustDecision (Build). The user-tier
 	// + explicit defs stay active regardless ("ask the human" mode, not "do nothing").
 	if cfg.AgentsConventional && cfg.Workspace != "" && !cfg.TrustProject {
-		slog.Warn("agent definitions: project-tier defs WITHHELD (untrusted workspace); user-tier and explicit defs stay active. Trust this repo (--trust-project or trustedWorkspaces) to admit its project agent defs",
+		cfg.diag().Log(ctx, port.LevelWarn, "agent definitions: project-tier defs WITHHELD (untrusted workspace); user-tier and explicit defs stay active. Trust this repo (--trust-project or trustedWorkspaces) to admit its project agent defs",
 			"workspace", cfg.Workspace, "dirs", ".mecatl/agents,.claude/agents")
 	}
 	sources := agents.ResolveSources(agents.ResolveOptions{
@@ -809,26 +808,26 @@ func resolveAgentRegistry(ctx context.Context, cfg Config) *agents.Registry {
 		IncludeProjectTier: cfg.TrustProject,
 	})
 	if len(sources) == 0 {
-		slog.Info("agent definitions DISABLED (no agents dirs configured)")
+		cfg.diag().Log(ctx, port.LevelInfo, "agent definitions DISABLED (no agents dirs configured)")
 		return agents.NewRegistry(nil)
 	}
 	reg, skips, err := agents.ResolveRegistry(ctx, agents.NewMultiSource(sources...))
 	for _, s := range skips {
-		slog.Warn("agent def skipped", "path", s.Path, "reason", s.Reason)
+		cfg.diag().Log(ctx, port.LevelWarn, "agent def skipped", "path", s.Path, "reason", s.Reason)
 	}
 	if err != nil {
-		slog.Warn("resolving agent definitions failed; none registered",
+		cfg.diag().Log(ctx, port.LevelWarn, "resolving agent definitions failed; none registered",
 			"dirs", strings.Join(cfg.AgentsDirs, ","), "conventional", cfg.AgentsConventional, "err", err)
 		return agents.NewRegistry(nil)
 	}
 	if reg.Len() == 0 {
-		slog.Info("agent definitions DISABLED (no valid <name>.md found in any source)")
+		cfg.diag().Log(ctx, port.LevelInfo, "agent definitions DISABLED (no valid <name>.md found in any source)")
 	} else {
 		names := make([]string, 0, reg.Len())
 		for _, d := range reg.List() {
 			names = append(names, d.Name)
 		}
-		slog.Info("agent definitions ENABLED",
+		cfg.diag().Log(ctx, port.LevelInfo, "agent definitions ENABLED",
 			"count", reg.Len(), "agents", strings.Join(names, ","),
 			"conventional", cfg.AgentsConventional)
 	}

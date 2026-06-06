@@ -1,8 +1,8 @@
 package app
 
 import (
+	"context"
 	"errors"
-	"log/slog"
 	"slices"
 	"sort"
 
@@ -186,7 +186,7 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 
 	// UseMock short-circuit: a single synthetic entry, offline, regardless of env.
 	if cfg.UseMock {
-		slog.Warn("LLM provider: mock (canned, offline) — for smoke tests only")
+		cfg.diag().Log(context.Background(), port.LevelWarn, "LLM provider: mock (canned, offline) — for smoke tests only")
 		mock := mockllm.New(
 			mockllm.TextTurn("Mock provider: no real model is configured. Set OPENAI_API_KEY for live use."),
 		)
@@ -285,7 +285,7 @@ func providerKey(cfgKey, providerID string, detect envDetector) string {
 // different base URL + key), so the two cannot drift on resilience wrapping. It logs
 // the provider id and base URL ONLY — never the key.
 func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
-	slog.Info("LLM provider available", "provider", id, "model", cfg.Model, "base_url", baseURL)
+	cfg.diag().Log(context.Background(), port.LevelInfo, "LLM provider available", "provider", id, "model", cfg.Model, "base_url", baseURL)
 	// Composition-only test seam (S3 e2e): when a providerConstructor is injected,
 	// it builds the provider (e.g. a distinct mock per id) instead of the real
 	// openai adapter, so the offline multi-provider e2e can hold TWO real provider
@@ -306,7 +306,7 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 		BreakerThreshold:  cfg.LLMBreakerThreshold,
 		BreakerCooldown:   cfg.LLMBreakerCooldown,
 	})
-	slog.Info("LLM resilience enabled",
+	cfg.diag().Log(context.Background(), port.LevelInfo, "LLM resilience enabled",
 		"provider", id,
 		"max_attempts", cfg.LLMMaxAttempts,
 		"per_attempt_timeout", cfg.LLMPerAttemptTimeout,
@@ -325,7 +325,7 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 // lister in P1 (live Anthropic listing is deferred).
 func newAnthropicEntry(cfg Config, key string, meta *liveMetaStore) providerEntry {
 	baseURL := cfg.AnthropicBaseURL
-	slog.Info("LLM provider available", "provider", providerAnthropic, "model", cfg.Model, "base_url", baseURL)
+	cfg.diag().Log(context.Background(), port.LevelInfo, "LLM provider available", "provider", providerAnthropic, "model", cfg.Model, "base_url", baseURL)
 	if cfg.providerConstructor != nil {
 		entry := providerEntry{
 			id:        providerAnthropic,
@@ -369,7 +369,7 @@ func newAnthropicEntry(cfg Config, key string, meta *liveMetaStore) providerEntr
 		BreakerThreshold:  cfg.LLMBreakerThreshold,
 		BreakerCooldown:   cfg.LLMBreakerCooldown,
 	})
-	slog.Info("LLM resilience enabled",
+	cfg.diag().Log(context.Background(), port.LevelInfo, "LLM resilience enabled",
 		"provider", providerAnthropic,
 		"max_attempts", cfg.LLMMaxAttempts,
 		"per_attempt_timeout", cfg.LLMPerAttemptTimeout,

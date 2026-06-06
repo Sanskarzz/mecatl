@@ -89,7 +89,7 @@ func minimalReviewer(t *testing.T, store port.SessionStore) *agent.UserModelRevi
 func TestUserModelReviewHooksFiresOnStopDebounced(t *testing.T) {
 	store := newSignalStore()
 	inner := &recordingHookRunner{outcome: governance.HookOutcome{Block: true, Message: "inner-msg"}}
-	hooks := newUserModelReviewHooks(inner, minimalReviewer(t, store), 3)
+	hooks := newUserModelReviewHooks(inner, minimalReviewer(t, store), 3, port.NopDiagnostics{})
 
 	stop := governance.HookEvent{Phase: governance.PhaseStop, SessionID: "s"}
 
@@ -126,7 +126,7 @@ func TestUserModelReviewHooksFiresOnStopDebounced(t *testing.T) {
 func TestUserModelReviewHooksIgnoresNonStop(t *testing.T) {
 	store := newSignalStore()
 	inner := &recordingHookRunner{}
-	hooks := newUserModelReviewHooks(inner, minimalReviewer(t, store), 1)
+	hooks := newUserModelReviewHooks(inner, minimalReviewer(t, store), 1, port.NopDiagnostics{})
 
 	if _, err := hooks.Run(context.Background(), governance.HookEvent{Phase: governance.PhasePreToolUse, SessionID: "s"}); err != nil {
 		t.Fatalf("Run: %v", err)

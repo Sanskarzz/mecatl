@@ -42,9 +42,9 @@
 package workspacetrust
 
 import (
+	"context"
 	"errors"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +54,7 @@ import (
 	yaml "go.yaml.in/yaml/v3"
 
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // userSubdirTrust is the machine-written trust registry relative to the XDG config
@@ -119,7 +120,7 @@ func (r *Reader) Remembered(workspace, currentAnchorHash string) (remembered, dr
 	}
 	key, err := realpath(workspace)
 	if err != nil {
-		slog.Warn("workspace trust: cannot resolve workspace realpath for registry lookup; treating as not-remembered",
+		r.diag.Log(context.Background(), port.LevelWarn, "workspace trust: cannot resolve workspace realpath for registry lookup; treating as not-remembered",
 			"workspace", workspace, "err", err)
 		return false, false
 	}
@@ -151,7 +152,7 @@ func (r *Reader) registryEntries() map[string]registryEntry {
 		return nil
 	}
 	if len(data) > maxRegistryBytes {
-		slog.Warn("workspace trust: trust.yaml exceeds size cap; ignoring remembered trust",
+		r.diag.Log(context.Background(), port.LevelWarn, "workspace trust: trust.yaml exceeds size cap; ignoring remembered trust",
 			"file", path, "bytes", len(data), "cap", maxRegistryBytes)
 		return nil
 	}
@@ -160,12 +161,12 @@ func (r *Reader) registryEntries() map[string]registryEntry {
 	}
 	var rf registryFile
 	if perr := yaml.Unmarshal(data, &rf); perr != nil {
-		slog.Warn("workspace trust: trust.yaml unparseable; ignoring remembered trust (fail-safe)",
+		r.diag.Log(context.Background(), port.LevelWarn, "workspace trust: trust.yaml unparseable; ignoring remembered trust (fail-safe)",
 			"file", path, "err", perr)
 		return nil
 	}
 	if rf.Version != registryVersion {
-		slog.Warn("workspace trust: trust.yaml has an unknown schema version; ignoring remembered trust (fail-safe)",
+		r.diag.Log(context.Background(), port.LevelWarn, "workspace trust: trust.yaml has an unknown schema version; ignoring remembered trust (fail-safe)",
 			"file", path, "version", rf.Version, "want", registryVersion)
 		return nil
 	}
@@ -173,7 +174,7 @@ func (r *Reader) registryEntries() map[string]registryEntry {
 	count := 0
 	for raw, entry := range rf.Workspaces {
 		if count >= maxRegistryEntries {
-			slog.Warn("workspace trust: trust.yaml exceeds entry cap; remaining entries ignored",
+			r.diag.Log(context.Background(), port.LevelWarn, "workspace trust: trust.yaml exceeds entry cap; remaining entries ignored",
 				"file", path, "cap", maxRegistryEntries)
 			break
 		}

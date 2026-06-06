@@ -41,6 +41,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/app"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 func main() {
@@ -176,11 +177,31 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 	// cfg.trustProject so embeddedConfig → app.Build honours it WITHOUT re-resolving
 	// or re-prompting. Only the embedded server is gated; an external --server (above)
 	// owns its own declarative trust. See cmd/mecatui/trust.go.
-	cfg = applyTrustPrompt(cfg)
+	// Open the embedded server's diagnostics sink ONCE, here in the host-an-embedded
+	// branch. It is a file under $XDG_STATE_HOME/mecatl/mecatui.log (fallback
+	// ~/.local/state/...), or io.Discard under --quiet / on any open failure — NEVER
+	// stderr, which would corrupt the Bubble Tea alt-screen. The same writer backs
+	// BOTH the app.Diagnostics sink and the perf surface's slog.Logger, so neither
+	// path leaks a line to the terminal. The file handle (when one was opened) is
+	// closed by the returned cleanup alongside the server.
+	diagW, diagCloser, toFile := openDiagLogWriter(xdgconfig.OSEnv, cfg.quiet)
+	diag := slogdiag.New(diagW, false, port.LevelInfo)
+	// A dedicated slog.Logger over the SAME writer for the perf surface's Logger field
+	// (its lines are otherwise emitted via slog.Default()→stderr by embed).
+	perfLogger := slog.New(slog.NewTextHandler(diagW, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	srv, err := embed.Start(ctx, embeddedConfig(cfg), perfConfig(cfg))
+	cfg = applyTrustPrompt(cfg, diag)
+
+	srv, err := embed.Start(ctx, embeddedConfig(cfg, diag), perfConfig(cfg, perfLogger))
 	if err != nil {
+		_ = diagCloser.Close()
 		return "", client.DialConfig{}, noop, fmt.Errorf("start embedded server: %w", err)
+	}
+	if toFile {
+		// One line, written to the FILE sink (never the TUI), so an operator can find
+		// where the embedded server's diagnostics went.
+		diag.Log(ctx, port.LevelInfo, "mecatui: embedded server diagnostics log opened",
+			"path", resolveDiagLogPath(xdgconfig.OSEnv))
 	}
 	fmt.Fprintf(os.Stderr, "mecatui: no server found; hosting an embedded mecated at %s\n", srv.Target())
 	if addr := srv.AdminAddr(); addr != "" {
@@ -196,8 +217,13 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 		}
 	}
 	// The embedded server has no auth/TLS — it is a private UNIX socket dialled
-	// plaintext, the same single-user loopback trust model mecated uses.
-	return srv.Target(), client.DialConfig{Server: srv.Target()}, func() { _ = srv.Close() }, nil
+	// plaintext, the same single-user loopback trust model mecated uses. Cleanup
+	// closes the server AND the diagnostics log file (a no-op closer for the
+	// discard/quiet paths), so a clean exit leaks no fd.
+	return srv.Target(), client.DialConfig{Server: srv.Target()}, func() {
+		_ = srv.Close()
+		_ = diagCloser.Close()
+	}, nil
 }
 
 // applyTrustPrompt runs the pre-TUI first-encounter workspace-trust gate
@@ -212,8 +238,8 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 //
 // --trust-project already trusting the project short-circuits the whole gate (the
 // flag is an explicit operator grant; ResolveTrust returns Trusted, so no prompt).
-func applyTrustPrompt(cfg config) config {
-	seam := prodTrustSeam(embeddedConfig(cfg))
+func applyTrustPrompt(cfg config, diag port.Diagnostics) config {
+	seam := prodTrustSeam(embeddedConfig(cfg, diag))
 	isTTY := term.IsTerminal(int(os.Stdin.Fd()))
 	out := resolveTrustForRun(seam, cfg.workspace, os.Stdin, os.Stderr, isTTY)
 	// Monotonic-positive: only a positive outcome grants; never flip an existing
@@ -240,7 +266,7 @@ func applyTrustPrompt(cfg config) config {
 // Podman/Docker). It leaves the heavier opt-ins (static --mcp-server, telemetry,
 // the writable SkillDraft quarantine) off — a focused single-user default. The
 // provider is OpenAI when OPENAI_API_KEY is set, else the offline mock (--mock).
-func embeddedConfig(cfg config) app.Config {
+func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 	cmdDir, enableCmds := resolveCommands(cfg)
 	skillDirs, skillsConv := resolveSkills(cfg)
 	return app.Config{
@@ -322,22 +348,26 @@ func embeddedConfig(cfg config) app.Config {
 		ImportClaudePermissions: true,
 		TrustProject:            cfg.trustProject,
 		AllowAllTools:           cfg.allowAllTools,
-		// Diagnostics wraps slog.Default() so the build-once composition facts (token
-		// counter / compaction strategy / slash commands) keep landing in the same
-		// stderr scrollback they did before the relocation — mecatui has no slog of its
-		// own, exactly like the perf path's Logger fallback. NopDiagnostics would have
-		// silenced those three lines; this preserves current behavior with least churn.
-		Diagnostics: slogdiag.NewFromLogger(slog.Default()),
+		// Diagnostics is the injected file-backed (or, under --quiet, discarding) sink.
+		// It is NEVER stderr: an operational line on stderr corrupts the Bubble Tea
+		// alt-screen. The caller (resolveTransport) opens the sink once over
+		// $XDG_STATE_HOME/mecatl/mecatui.log and threads it here AND into the perf
+		// Logger, so both land in the same file rather than the terminal. A nil diag
+		// (e.g. the pre-embed trust-prompt fold) is tolerated — app.Build defaults it to
+		// NopDiagnostics.
+		Diagnostics: diag,
 	}
 }
 
 // perfConfig maps the TUI config onto the embedded server's perf-observability
 // options (decision 7). It is OFF unless --perf is passed; when on, it carries the
 // loopback admin address (empty → an ephemeral port chosen and logged by embed)
-// and the optional goroutine-leak watchdog threshold. The Logger is left nil so
-// embed falls back to slog.Default() — mecatui has no slog of its own, and these
-// pre-TUI/teardown lines land in stderr scrollback like the other embed notices.
-func perfConfig(cfg config) embed.PerfConfig {
+// and the optional goroutine-leak watchdog threshold. The Logger is set to the
+// SAME file-backed (or, under --quiet, discarding) writer the Diagnostics sink uses
+// — so the perf surface's startup/teardown/watchdog lines land in
+// $XDG_STATE_HOME/mecatl/mecatui.log, NEVER on stderr where they would corrupt the
+// Bubble Tea alt-screen (the bug embed's slog.Default() fallback caused).
+func perfConfig(cfg config, logger *slog.Logger) embed.PerfConfig {
 	if !cfg.perf {
 		return embed.PerfConfig{}
 	}
@@ -346,6 +376,7 @@ func perfConfig(cfg config) embed.PerfConfig {
 		Addr:                   cfg.perfAddr,
 		GoroutineWarnThreshold: cfg.perfGoroutineWarnThreshold,
 		MCP:                    cfg.perfMCP,
+		Logger:                 logger,
 	}
 }
 

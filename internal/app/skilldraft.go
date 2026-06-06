@@ -1,13 +1,14 @@
 package app
 
 import (
+	"context"
 	"fmt"
-	"log/slog"
 	"path/filepath"
 	"strings"
 
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // validateSkillDraftConfig enforces the SkillDraft trust boundary at build time
@@ -83,7 +84,7 @@ func warnSkillDraftResiduals(cfg Config) {
 		return
 	}
 	if !cfg.NoBash && cfg.Shell != "" {
-		slog.Warn("SkillDraft trust boundary is structural for Write/Edit only: Bash is enabled and (absent an OS sandbox) can write to any path, so it can reach the skills trees. For a fully structural boundary, run shell-less (no bash) or under an OS sandbox.")
+		cfg.diag().Log(context.Background(), port.LevelWarn, "SkillDraft trust boundary is structural for Write/Edit only: Bash is enabled and (absent an OS sandbox) can write to any path, so it can reach the skills trees. For a fully structural boundary, run shell-less (no bash) or under an OS sandbox.")
 	}
 	workspace, err := osfs.ResolveRoot(cfg.Workspace)
 	if err != nil {
@@ -91,7 +92,7 @@ func warnSkillDraftResiduals(cfg Config) {
 	}
 	for _, ad := range activeSkillDirs(cfg) {
 		if ad == workspace || dirsOverlap(workspace, ad) {
-			slog.Warn("an active skills dir is INSIDE the workspace and is reachable by the model's Write/Edit (Ask-gated); place active skills OUTSIDE the workspace so promoted skills cannot be planted directly by the model",
+			cfg.diag().Log(context.Background(), port.LevelWarn, "an active skills dir is INSIDE the workspace and is reachable by the model's Write/Edit (Ask-gated); place active skills OUTSIDE the workspace so promoted skills cannot be planted directly by the model",
 				"active_skills_dir", ad, "workspace", workspace)
 		}
 	}

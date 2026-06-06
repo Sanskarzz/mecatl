@@ -45,14 +45,15 @@
 package workspacetrust
 
 import (
+	"context"
 	"fmt"
-	"log/slog"
 	"path/filepath"
 	"strings"
 
 	yaml "go.yaml.in/yaml/v3"
 
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
+	"github.com/stacklok/mecatl/internal/port"
 )
 
 // userSubdirMecatl is the user-level YAML config under the XDG config dir,
@@ -88,11 +89,29 @@ type schema struct {
 type Reader struct {
 	env       xdgconfig.ResolveEnv
 	writeFile registryWriteFunc
+	// diag is the operational-logging sink for the fail-safe Warn lines (unresolvable
+	// realpath, oversized/unparseable config, unknown schema version). Never nil after
+	// a constructor (defaulted to port.NopDiagnostics), so a read path never
+	// nil-panics. The composition layer injects the shared sink via WithDiagnostics.
+	diag port.Diagnostics
 }
 
 // New binds a Reader to the real process environment + filesystem, with the real
 // O_NOFOLLOW/0o600/temp-rename registry write seam.
-func New() *Reader { return &Reader{env: xdgconfig.OSEnv, writeFile: osRegistryWrite} }
+func New() *Reader {
+	return &Reader{env: xdgconfig.OSEnv, writeFile: osRegistryWrite, diag: port.NopDiagnostics{}}
+}
+
+// WithDiagnostics injects the operational-logging sink the Reader writes its
+// fail-safe Warn lines through and returns the receiver for fluent wiring. A nil
+// sink is ignored (the NopDiagnostics default stands), so the Reader never
+// nil-panics. The composition layer calls this immediately after a constructor.
+func (r *Reader) WithDiagnostics(d port.Diagnostics) *Reader {
+	if r != nil && d != nil {
+		r.diag = d
+	}
+	return r
+}
 
 // NewWithEnv binds a Reader to an injected env so the XDG/home resolution and the
 // file read run fully offline against a fake — never the developer's real
@@ -100,7 +119,7 @@ func New() *Reader { return &Reader{env: xdgconfig.OSEnv, writeFile: osRegistryW
 // against a faked XDG dir exercises the actual O_NOFOLLOW/temp-rename path). Tests
 // that need to SPY on or REJECT the write inject their own seam via NewWithEnvIO.
 func NewWithEnv(env xdgconfig.ResolveEnv) *Reader {
-	return &Reader{env: env, writeFile: osRegistryWrite}
+	return &Reader{env: env, writeFile: osRegistryWrite, diag: port.NopDiagnostics{}}
 }
 
 // NewWithEnvIO binds a Reader to an injected env AND an injected registry write
@@ -108,7 +127,7 @@ func NewWithEnv(env xdgconfig.ResolveEnv) *Reader {
 // records writes to assert "mecated never writes", or a stub that always errors). A
 // nil writeFile leaves the Reader read-only (Remember then errors).
 func NewWithEnvIO(env xdgconfig.ResolveEnv, writeFile registryWriteFunc) *Reader {
-	return &Reader{env: env, writeFile: writeFile}
+	return &Reader{env: env, writeFile: writeFile, diag: port.NopDiagnostics{}}
 }
 
 // IsDeclared reports whether workspace is in the operator-authored
@@ -130,7 +149,7 @@ func (r *Reader) IsDeclared(workspace string) bool {
 	if err != nil {
 		// The workspace under test cannot be resolved (e.g. broken symlink): it
 		// cannot match a declared realpath. Fail-safe: untrusted.
-		slog.Warn("workspace trust: cannot resolve workspace realpath; treating as not-declared",
+		r.diag.Log(context.Background(), port.LevelWarn, "workspace trust: cannot resolve workspace realpath; treating as not-declared",
 			"workspace", workspace, "err", err)
 		return false
 	}
@@ -140,7 +159,7 @@ func (r *Reader) IsDeclared(workspace string) bool {
 		if derr != nil {
 			// A declared entry that does not resolve (typo, moved dir, broken
 			// symlink) is ignored; the rest of the list is honoured.
-			slog.Warn("workspace trust: declared trustedWorkspaces entry does not resolve; ignoring it",
+			r.diag.Log(context.Background(), port.LevelWarn, "workspace trust: declared trustedWorkspaces entry does not resolve; ignoring it",
 				"entry", entry, "err", derr)
 			continue
 		}
@@ -167,7 +186,7 @@ func (r *Reader) declaredEntries() []string {
 		return nil
 	}
 	if len(data) > maxConfigBytes {
-		slog.Warn("workspace trust: user settings.yaml exceeds size cap; ignoring trustedWorkspaces",
+		r.diag.Log(context.Background(), port.LevelWarn, "workspace trust: user settings.yaml exceeds size cap; ignoring trustedWorkspaces",
 			"file", path, "bytes", len(data), "cap", maxConfigBytes)
 		return nil
 	}
@@ -176,7 +195,7 @@ func (r *Reader) declaredEntries() []string {
 	}
 	var s schema
 	if perr := yaml.Unmarshal(data, &s); perr != nil {
-		slog.Warn("workspace trust: user settings.yaml unparseable; ignoring trustedWorkspaces",
+		r.diag.Log(context.Background(), port.LevelWarn, "workspace trust: user settings.yaml unparseable; ignoring trustedWorkspaces",
 			"file", path, "err", perr)
 		return nil
 	}
