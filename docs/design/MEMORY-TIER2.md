@@ -489,8 +489,8 @@ this is sub-millisecond and allocation-light — it is the same full-scan shape
 etc.). Justification, on the record:
 
 - The repo has been **burned by a heavyweight native dep** (the tree-sitter WASM
-  binding: ~23 MB/session leak + freeze, now disabled by default — see the
-  RepoMap memory). A CGO vector lib is exactly that risk class.
+  binding: ~23 MB/session leak + freeze, since **removed entirely** — see
+  `docs/design/REPOMAP-TREE-SITTER.md`). A CGO vector lib is exactly that risk class.
 - The ACP layer was deliberately **hand-rolled rather than take a Go library**
   that failed the governance+maturity screen. A vector-DB dep faces the same
   screen and fails it here for want of a forcing function.

@@ -74,7 +74,7 @@
 | Item | Status | Rationale |
 |---|---|---|
 | Multi-vendor model routing | 🟦 | `LLMProvider` port already abstracts it; a router is a convenience adapter |
-| Repo map (tree-sitter PageRank) | ✅ | `internal/adapter/repomap` read-only tool (Go/Python/TS/TSX, personalized PageRank). CGO-free: tree-sitter runs as WebAssembly via `wazero` with embedded grammars, so it ships in the default static `CGO_ENABLED=0` binary (no build tag) |
+| Repo map (tree-sitter PageRank) | ❌ removed | The Aider-style repo-map tool was **retired and removed** — its WASM tree-sitter binding leaked (~23 MB/session) and hung after ~160 files. See `docs/design/REPOMAP-TREE-SITTER.md`. May return later from a clean design |
 | Slash commands | ✅ | `prompt.CommandExpander` + `DirCommandExpander` (`.mecatl/commands`/`.claude/commands` templates); `--commands-dir`/`--enable-commands`. (Full skill packaging still future.) |
 | Live OpenAI validation | ✅ | validated against Sonnet 4.5 via OpenRouter (full tool-calling loop) |
 | Fuzz tests (bash splitter, SSE decoder) | ✅ | native Go fuzzers + Taskfile `fuzz` target; security invariants asserted; no crashers found |

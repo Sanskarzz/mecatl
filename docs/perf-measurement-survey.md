@@ -18,7 +18,7 @@ axes, and picking the wrong axis is how you measure the wrong thing:
 | **What clock** | on-CPU · wall-clock · off-CPU (blocked) | A streaming agent spends most of its wall time *blocked* on the model and on tool I/O. A CPU profile of mecatl will look idle and tell you nothing about TTFT. |
 | **Granularity** | aggregate (a counter/histogram) · per-event (a trace span) | Aggregates answer "is p99 turn latency regressing"; per-event answers "*why was this one turn* slow". |
 | **Fidelity** | sampling (pprof, perf) · exact (counters, the execution tracer) | Sampling is cheap and lossy; exact is precise and costly. |
-| **Locus** | in-process (pprof, runtime/metrics) · out-of-process (perf, eBPF, /proc) | Only out-of-process sees memory the Go runtime cannot — **the tree-sitter WASM leak lives in wazero linear memory, invisible to the Go heap profiler** (see §9, §10, and `docs/design/REPOMAP-TREE-SITTER.md`). |
+| **Locus** | in-process (pprof, runtime/metrics) · out-of-process (perf, eBPF, /proc) | Only out-of-process sees memory the Go runtime cannot — the tree-sitter WASM leak (in the **since-removed** RepoMap tool) lived in wazero linear memory, invisible to the Go heap profiler (see §9, §10, and `docs/design/REPOMAP-TREE-SITTER.md`); it remains the canonical off-heap-leak example. |
 
 ## §1 — pprof: `net/http/pprof` + `runtime/pprof`
 
@@ -168,9 +168,9 @@ The only locus that sees what the Go runtime cannot.
   (`runqlat`). Numeric, scriptable, but Linux-only + privileged.
 - **`/proc/<pid>/smaps_rollup` and `VmRSS`** — total resident memory **including
   the wazero WASM linear memory and any cgo allocation that the Go heap profiler
-  structurally cannot see.** This is the load-bearing one for mecatl: the
-  tree-sitter binding leaks ~23 MB of RSS per RepoMap session in WASM memory that
-  `/memory/classes` and `pprof heap` both report as *nothing*
+  structurally cannot see.** The load-bearing example for mecatl: the (since-removed)
+  tree-sitter binding leaked ~23 MB of RSS per RepoMap session in WASM memory that
+  `/memory/classes` and `pprof heap` both reported as *nothing*
   (`docs/design/REPOMAP-TREE-SITTER.md`). To detect that class of leak you **must**
   read process RSS, not the Go heap.
 

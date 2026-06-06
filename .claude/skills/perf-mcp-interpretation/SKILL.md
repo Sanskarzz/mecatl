@@ -91,9 +91,9 @@ symptom to match. The essentials:
   corroborates the live goroutine watchdog.
 - **Off-heap growth (the WASM-leak signature).** `rss_bytes` climbing while
   `heap_alloc_bytes` / `heap_object_bytes` stay flat = growth **off the Go heap**,
-  invisible to pprof/heap and runtime metrics. (RepoMap/tree-sitter WASM is the
-  known cause; it is currently **disabled**, but the pattern still stands for any
-  off-heap consumer.)
+  invisible to pprof/heap and runtime metrics. (The historical cause was the
+  RepoMap/tree-sitter WASM tool, since **removed**, but the pattern still stands
+  for any off-heap consumer.)
 - **GC-driven jitter.** `gc_pause_p99_upper_bound_ns` spikes and a rising
   `gc_pause_count`, alongside high `top_allocations` on the streaming/chunk-decode
   path, explain inter-token jitter — GC pauses land between tokens.

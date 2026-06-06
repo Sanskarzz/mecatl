@@ -29,7 +29,7 @@ const (
 	// EvToolResult carries the result of a tool execution.
 	EvToolResult EventType = "tool.result"
 	// EvToolProgress is transient progress for a long-running tool: it carries a
-	// human-readable Text line (e.g. "repo map: parsed 128/512 files") emitted at a
+	// human-readable Text line (e.g. "scanned 128/512 files") emitted at a
 	// tool's phase boundaries via the observability seam so a slow call does not
 	// look dead. It is ADVISORY — NOT persisted to a SessionStore and NOT recorded
 	// to the model's conversation history; clients render it as a transient status

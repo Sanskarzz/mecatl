@@ -40,7 +40,6 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/adapter/permstore"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
-	"github.com/stacklok/mecatl/internal/adapter/repomap"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
@@ -215,8 +214,7 @@ type Config struct {
 	EnableCommands bool
 
 	// Optional tools, on by default in the standalone server.
-	EnableFork    bool
-	EnableRepoMap bool
+	EnableFork bool
 
 	// ForkPreservedCap bounds how many PRESERVED winner forks (join=first /
 	// join=judge) survive at once across the process: a new winner beyond the cap
@@ -1486,15 +1484,6 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	}
 
 	discoveredSkills := registerSkills(ctx, cfg, cat)
-
-	// Repo-map tool (Aider-style ranked codebase overview). CGO-free (tree-sitter via
-	// WebAssembly), so it ships in the default static build with no build tag.
-	if cfg.EnableRepoMap {
-		cat.MustRegister(repomap.NewTool())
-		cfg.diag().Log(ctx, port.LevelInfo, "repo map tool ENABLED (CGO-free tree-sitter via WebAssembly)")
-	} else {
-		cfg.diag().Log(ctx, port.LevelInfo, "repo map tool DISABLED")
-	}
 
 	return cat, mainMgr, mcpProvider, mcpInventory, memStore, userModelStore, discoveredSkills, mcpClose
 }

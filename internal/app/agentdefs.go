@@ -9,7 +9,6 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
-	"github.com/stacklok/mecatl/internal/adapter/repomap"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
 	"github.com/stacklok/mecatl/internal/agent"
@@ -337,17 +336,6 @@ func baseTaskTools(cfg Config) map[string]tool.Tool {
 	if runner := buildCommandRunner(cfg); runner != nil {
 		bt := tools.NewBashTool(runner)
 		out[bt.Spec().Name] = bt
-	}
-	// Repo-map (RepoMap) is allowlistable by a def ONLY when --enable-repomap is on:
-	// it is read-only, so it survives the read-only Task / read-only-member scope, and
-	// a def that allowlists it then gets it in its engine catalog. A def that does NOT
-	// list it never receives it (allowlist semantics); the default (no `tools:`) =
-	// every available base tool, which now includes RepoMap when enabled — consistent
-	// with how the core tools default in. When --enable-repomap is OFF, RepoMap is not
-	// in the base, so a def listing it gets the DISTINCT "unknown tool" diagnostic.
-	if cfg.EnableRepoMap {
-		rm := repomap.NewTool()
-		out[rm.Spec().Name] = rm
 	}
 	return out
 }

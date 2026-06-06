@@ -156,7 +156,6 @@ github.com/stacklok/mecatl
 │       ├── forker/                     #   WorkspaceForker (git-worktree / copy isolation)
 │       ├── tokenizer/                  #   offline tiktoken TokenCounter
 │       ├── mcp/                        #   MCP client (streaming-HTTP only) → namespaced tools
-│       ├── repomap/                    #   read-only repo-map tool (tree-sitter + PageRank)
 │       ├── telemetry/                  #   EventSink/Logger → Prometheus, OTel spans, OTLP
 │       └── server/                     #   gRPC + HTTP/SSE service, auth/mTLS, health, rate limit
 └── docs/design/                        # this file + STEP-CHAIN.md + PRODUCTION-READINESS.md
@@ -486,7 +485,7 @@ Adapters fall into three shapes:
   (`FileSystem`+`CommandRunner`), `store/memstore`+`jsonlstore` (`SessionStore`,
   `jsonlstore` also `Logger`), `hookexec` (`HookRunner`), `permpolicy`
   (`PermissionPolicy`), `telemetry` (`EventSink`+`Logger`), the `tools` catalog,
-  `memory`/`repomap`/`forker` (tools/seams).
+  `memory`/`forker` (tools/seams).
 - **Decorators over a port** — both wrap an inner port and return the *same*
   interface, so they compose transparently at the composition root:
   - `llmresilience.Wrap(inner port.LLMProvider, cfg) port.LLMProvider` — retry/
@@ -659,7 +658,7 @@ was designed for. The authoritative tracker is
 | Four-tier compaction cascade | **Done** | `CascadeCompactor` (`agent/cascade.go`) behind the `Compactor` seam — tiered snip→strip→collapse→summarize with trigger/target hysteresis. Default stays `HeuristicCompactor`; opt in with `--compaction=cascade`. |
 | Real tokenizer | **Done** | `TokenCounter` seam (`agent/tokencount.go`); offline tiktoken adapter `internal/adapter/tokenizer`. Default stays the heuristic counter. |
 | MCP client (**streaming-HTTP transport ONLY — stdio MCP is explicitly NOT supported, ever**) | **Done** | `internal/adapter/mcp`: streaming-HTTP transport only (no `os/exec`-spawned stdio server is ever created); registers remote tools into `tool.Catalog` namespaced `mcp__<server>__<tool>`. |
-| Repo map / embeddings | **Done (repo map)** | `internal/adapter/repomap`: a read-only, multi-language repo-map `Tool` (tree-sitter parsing + personalized PageRank over the symbol-reference graph), no CGO. Embeddings remain unbuilt. |
+| Repo map / embeddings | **Removed (repo map); embeddings unbuilt** | The Aider-style repo-map tool (`internal/adapter/repomap`, tree-sitter + PageRank) was **retired and removed** — the WASM tree-sitter binding leaked and hung after ~160 files. See `docs/design/REPOMAP-TREE-SITTER.md`. May be reintroduced later from a clean design. Embeddings remain unbuilt. |
 | Persistent cross-session memory | **Done** | `tool.MemoryStore` seam + file-backed `internal/adapter/memory` (Remember/Recall tools, per-project), plus opt-in `dream` consolidation. The `SessionStore` + AGENTS.md/CLAUDE.md discovery still cover the file-as-memory case. |
 | Slash commands / skills | **Done (commands)** | `prompt.CommandExpander` seam + `DirCommandExpander` (`.mecatl/commands` / `.claude/commands` templates). Skill packaging remains future. |
 | Fork-join parallelism (pattern 8) | **Done** | `tool.WorkspaceForker` seam + `internal/adapter/forker` (git-worktree / copy isolation) + `agent.NewForkTool`. |

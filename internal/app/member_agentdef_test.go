@@ -126,31 +126,31 @@ func TestMemberDefLimitsOnBuild(t *testing.T) {
 	}
 }
 
-// TestMemberRepoMapDefAcceptedReadOnly proves a READ-ONLY member whose def
-// allowlists RepoMap is accepted (RepoMap is read-only, so the AddMember
-// workspace-mutating backstop is not tripped) and dispatches a RepoMap tool.call.
-func TestMemberRepoMapDefAcceptedReadOnly(t *testing.T) {
-	cfg := Config{Workspace: t.TempDir(), Model: "m", EnableRepoMap: true}
-	def := agents.AgentDef{Name: "mapper", Description: "m", Tools: []string{"RepoMap"}}
+// TestMemberReadOnlyAllowlistedToolDispatches proves a READ-ONLY member whose def
+// allowlists a read-only core tool (Grep) is accepted (the AddMember
+// workspace-mutating backstop is not tripped) and dispatches that tool.call.
+func TestMemberReadOnlyAllowlistedToolDispatches(t *testing.T) {
+	cfg := Config{Workspace: t.TempDir(), Model: "m"}
+	def := agents.AgentDef{Name: "searcher", Description: "s", Tools: []string{"Grep"}}
 	tm := team.New("t")
-	mapCall := mockllm.New(
-		mockllm.ToolCallTurn(session.NewToolCall("c1", "RepoMap", json.RawMessage(`{}`))),
+	grepCall := mockllm.New(
+		mockllm.ToolCallTurn(session.NewToolCall("c1", "Grep", json.RawMessage(`{"pattern":"x"}`))),
 		mockllm.TextTurn("done"),
 	)
-	factory := memberFactoryForTest(cfg, mapCall, hookexec.New(nil), regOf(def), nil, nil, false, nil)
+	factory := memberFactoryForTest(cfg, grepCall, hookexec.New(nil), regOf(def), nil, nil, false, nil)
 
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
 		func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
 	if err := sup.AddMember(context.Background(), agent.MemberSpec{
-		Name: "mapper", AgentType: "mapper", InitialPrompt: "map it",
+		Name: "searcher", AgentType: "searcher", InitialPrompt: "search it",
 	}); err != nil {
-		t.Fatalf("read-only member allowlisting RepoMap should be accepted, got %v", err)
+		t.Fatalf("read-only member allowlisting Grep should be accepted, got %v", err)
 	}
 
 	var events []agent.TeamEvent
 	sup.Run(context.Background(), func(ev agent.TeamEvent) { events = append(events, ev) })
-	if !sawToolCall(events, "mapper", "RepoMap") {
-		t.Fatalf("member with a def listing RepoMap should dispatch a RepoMap tool.call; events=%d", len(events))
+	if !sawToolCall(events, "searcher", "Grep") {
+		t.Fatalf("member with a def listing Grep should dispatch a Grep tool.call; events=%d", len(events))
 	}
 }
 

@@ -14,7 +14,6 @@ require (
 	github.com/charmbracelet/x/exp/teatest/v2 v2.0.0-20260527151214-009e6338d40d
 	github.com/gofrs/flock v0.13.0
 	github.com/google/pprof v0.0.0-20260115054156-294ebfa9ad83
-	github.com/malivvan/tree-sitter v0.0.2-0.20250125152656-46b39a70b658
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/openai/openai-go/v3 v3.37.0
 	github.com/prometheus/client_golang v1.23.2
@@ -47,7 +46,6 @@ require (
 	github.com/1password/onepassword-sdk-go v0.3.1 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/alecthomas/chroma/v2 v2.14.0 // indirect
-	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect

@@ -275,7 +275,7 @@ func applyTrustPrompt(cfg config, diag port.Diagnostics) config {
 
 // embeddedConfig maps the TUI config onto the shared app.Config build contract for
 // the in-process server. It enables the standard default toolset (Bash unless
-// --no-bash, Fork, repo map), the agent-teams capability (inert until a client
+// --no-bash, Fork), the agent-teams capability (inert until a client
 // drives a team), conventional agent-definition discovery (AgentsConventional:
 // true, also inert until a <name>.md exists under a conventional dir), and
 // cross-session memory (Remember/Recall) scoped per-project (see resolveMemoryDir;
@@ -311,11 +311,8 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		LLMBreakerThreshold:  5,
 		LLMBreakerCooldown:   30 * time.Second,
 		EnableFork:           true,
-		// EnableRepoMap OFF: the WASM tree-sitter binding leaks and hangs after
-		// ~160 files, freezing the in-process TUI. See docs/design/REPOMAP-TREE-SITTER.md.
-		EnableRepoMap:      false,
-		EnableTeams:        true,
-		AgentsConventional: true,
+		EnableTeams:          true,
+		AgentsConventional:   true,
 		// Memory is ON by default, per-project. MemoryConsolidateInterval is left
 		// at 0 (off) deliberately: the "dream" distiller spawns a goroutine that
 		// calls the real provider on a timer, so a default-on interval would

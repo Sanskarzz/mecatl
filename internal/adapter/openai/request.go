@@ -58,7 +58,7 @@ func buildParams(req port.LLMRequest) (responses.ResponseNewParams, error) {
 // is non-strict). Strict mode requires every tool schema's `required` to list ALL
 // of its `properties` keys, but many built-in tools carry genuinely optional
 // params (Bash timeout_ms, Edit replace_all, Read offset/limit, Grep path, the
-// memory Remember/query tools, ToolSearch, Fork, Team, Task, RepoMap, …). A
+// memory Remember/query tools, ToolSearch, Fork, Team, Task,…). A
 // strict-enforcing OpenAI-compatible upstream (e.g. Azure reached via OpenRouter)
 // would 400 those schemas. We do not need strict's guarantee: tool arguments are
 // validated at the execution edge — every tool re-parses and validates its args

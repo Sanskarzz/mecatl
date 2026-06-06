@@ -63,8 +63,8 @@ const DefaultPerfAddr = "127.0.0.1:9099"
 // FlightRecorder — on a loopback HTTP listener, plus the domain-metrics EventSink
 // wired into the embedded engine so turn/tool/latency series render at /metrics.
 //
-// The motivating incident (the WASM tree-sitter render-starvation + memory
-// freeze) was a mecatui process freeze, so goroutines, RSS, pprof, and the flight
+// The motivating incident (a render-starvation + memory-growth freeze in a
+// since-removed tool) was a mecatui process freeze, so goroutines, RSS, pprof, and the flight
 // recorder are exactly the instruments it needed — hence covering the embedded
 // server, not just the standalone daemon.
 type PerfConfig struct {

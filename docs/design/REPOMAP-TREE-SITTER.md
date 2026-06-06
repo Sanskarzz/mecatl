@@ -1,8 +1,38 @@
 # Repo-map tree-sitter: freeze root cause + binding evaluation
 
-**Status:** investigation complete; mechanism decision **pending**.
-**Date:** 2026-06-02.
-**Scope:** `internal/adapter/repomap/` — the Aider-style repo-map tool.
+> ## RESOLUTION — RETIRED / REMOVED (2026-06-06)
+>
+> **The RepoMap tool and the `github.com/malivvan/tree-sitter` dependency have been
+> removed entirely.** Rather than rework the extraction, we retired the feature.
+>
+> **Rationale.** The Aider-style repo-map tool relied on a WASM tree-sitter binding
+> (`github.com/malivvan/tree-sitter`, running on `wazero`) that leaks unrecoverably
+> (~23 MB/session) and hangs after ~160 files — fatal for the in-process `mecatui`
+> host. It was already gated OFF by default behind `--enable-repomap`. We decided
+> the cost of carrying a broken, default-off tool plus its heavy dependency
+> outweighed its value, so it was removed instead of reworked.
+>
+> **What was removed (commit pending):**
+> - the entire `internal/adapter/repomap/` package;
+> - the `--enable-repomap` flag (`cmd/mecated`), the `EnableRepoMap` `app.Config`
+>   field, and its catalog registration in `internal/app/build.go` /
+>   `internal/app/agentdefs.go`;
+> - the `github.com/malivvan/tree-sitter` direct dependency (and its now-orphaned
+>   transitive deps `andybalholm/brotli`, `xyproto/randomstring`) via `go mod tidy`.
+>   NOTE: `github.com/tetratelabs/wazero` was **NOT** dropped — contrary to an
+>   earlier assumption it has another live consumer (ToolHive's secrets path →
+>   `1password/onepassword-sdk-go` → `extism/go-sdk`), so it remains an indirect dep.
+>
+> **Reintroduction.** A repo-map capability may return later, but only from a clean
+> design (a non-leaking extractor, e.g. a CGO-free pure-Go parser or a reworked
+> tree-sitter integration) — not by re-enabling this code. The investigation below
+> is preserved as the historical record that informed the removal decision.
+
+---
+
+**Status:** RETIRED (removed 2026-06-06). Investigation complete; original mechanism decision was pending when the feature was removed.
+**Date:** 2026-06-02 (investigation); 2026-06-06 (retired).
+**Scope:** `internal/adapter/repomap/` — the (now removed) Aider-style repo-map tool.
 
 ## Summary
 

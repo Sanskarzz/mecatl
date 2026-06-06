@@ -143,11 +143,7 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   server's tools to the def's catalog directly (see "What v1 supports"), but listing an
   MCP tool name in the `tools:` allowlist still yields an "unknown tool" diagnostic —
   the `tools:`/`disallowedTools:` scope governs the **core** toolset only; MCP tools
-  arrive via `mcpServers:`, not the core allowlist. (The **repo-map** tool, `RepoMap`,
-  is the one non-core exception: when `--enable-repomap` is on it joins the def-scoping
-  base, so a def can allowlist it like a core tool — it is read-only, so it survives the
-  read-only Task / read-only-member scope. With `--enable-repomap` off, listing it
-  yields the same "unknown tool" diagnostic.)
+  arrive via `mcpServers:`, not the core allowlist.
 - **No `--agents` inline JSON.** Definitions come only from `<name>.md` files under
   `--agents-dir` / the conventional dirs.
 - **No Agent-as-tool nesting.** A def cannot re-add `Task`/`Fork`/`ToolSearch`; a child

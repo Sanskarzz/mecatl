@@ -16,7 +16,7 @@ API. No TUI — it's a service and a library.
 
 **The loop & tools**
 - **Streaming agent loop** (`iter.Seq2`) with pause, resume, and cancel — every step is a typed `Event`.
-- **Core tool kit** — Read (line-numbered), Edit (read-before-edit / exact-match / uniqueness invariants), Write, Grep, Glob, a WebFetch stub, and an **optional** Bash (behind a `CommandRunner` seam, so the harness runs shell-less in a locked-down pod). Plus opt-in tools: a **repo map** (tree-sitter + PageRank, CGO-free), **memory** (Remember/Recall), **fork-join** (parallel isolated branches), and **ToolSearch** for progressive disclosure.
+- **Core tool kit** — Read (line-numbered), Edit (read-before-edit / exact-match / uniqueness invariants), Write, Grep, Glob, a WebFetch stub, and an **optional** Bash (behind a `CommandRunner` seam, so the harness runs shell-less in a locked-down pod). Plus opt-in tools: **memory** (Remember/Recall), **fork-join** (parallel isolated branches), and **ToolSearch** for progressive disclosure.
 - **Read-parallel / mutate-serial dispatch** — read-only tools run concurrently; mutating tools never do (a correctness guarantee, not an optimization).
 - **One-shot subagents** — the Task tool runs an isolated child loop and returns only its final string; **fork-join** generalizes it to N parallel branches in isolated workspaces.
 
@@ -100,7 +100,7 @@ go run ./cmd/mecated --openai \
   --memory-dir ./mem --memory-consolidate-interval 1h \
   --otlp-endpoint localhost:4317 \        # export OTel traces; /metrics is always on --metrics-addr
   --compaction cascade --tokenizer tiktoken \
-  --enable-fork --enable-repomap \        # both default on; --no-bash for shell-less
+  --enable-fork \                         # default on; --no-bash for shell-less
   --commands-dir .mecatl/commands            # slash-command templates
 ```
 
@@ -139,7 +139,7 @@ OpenAI, gRPC, or the filesystem — those are adapters behind ports, wired toget
 | `internal/session`, `internal/governance`, `internal/tool`, `internal/prompt` | the domain (aggregate, permission/hook types, tool catalog + FS interfaces, prompt assembly) |
 | `internal/port` | the port interfaces the loop consumes |
 | `internal/agent` | the agent loop, dispatch, permission pause/resume, compaction, subagent |
-| `internal/adapter/*` | adapters: `openai`, `mockllm`, `llmresilience`, `osfs`/`memfs`, `permpolicy`, `permclassify`, `hookexec`, `store/*`, `tools`, `toolkit`, `memory`, `dream`, `soul`, `forker`, `repomap`, `tokenizer`, `telemetry`, `mcp`, `server` |
+| `internal/adapter/*` | adapters: `openai`, `mockllm`, `llmresilience`, `osfs`/`memfs`, `permpolicy`, `permclassify`, `hookexec`, `store/*`, `tools`, `toolkit`, `memory`, `dream`, `soul`, `forker`, `tokenizer`, `telemetry`, `mcp`, `server` |
 | `contracts/proto`, `contracts/gen` | gRPC contract (source of truth) and generated Go |
 | `cmd/mecated`, `cmd/mecademo` | the server (composition root) and the demo |
 

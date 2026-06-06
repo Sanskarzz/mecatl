@@ -316,45 +316,6 @@ func TestBuildAgentTaskEnginesCarriesPerDefLimits(t *testing.T) {
 	}
 }
 
-// TestBaseTaskToolsRepoMapGate proves RepoMap is in the def-scoping base ONLY when
-// EnableRepoMap is set (FIX B): with it on a def can allowlist RepoMap; with it off
-// the name is unknown to the base.
-func TestBaseTaskToolsRepoMapGate(t *testing.T) {
-	if _, ok := baseTaskTools(Config{})["RepoMap"]; ok {
-		t.Fatal("RepoMap must NOT be in the base when EnableRepoMap is off")
-	}
-	base := baseTaskTools(Config{EnableRepoMap: true})
-	rm, ok := base["RepoMap"]
-	if !ok {
-		t.Fatal("RepoMap must be in the base when EnableRepoMap is on")
-	}
-	if !rm.ReadOnly() {
-		t.Fatal("RepoMap must report read-only so it survives read-only Task/member scoping")
-	}
-}
-
-// TestScopedToolNamesRepoMapAllowlist proves a def can allowlist RepoMap when
-// EnableRepoMap is on (it survives read-only Task scoping), and that listing it
-// WITHOUT EnableRepoMap yields the DISTINCT "unknown tool" diagnostic.
-func TestScopedToolNamesRepoMapAllowlist(t *testing.T) {
-	def := agents.AgentDef{Name: "mapper", Description: "m", Tools: []string{"RepoMap"}}
-
-	// Enabled: RepoMap is kept (read-only Task scope), no diagnostic.
-	names, diags := scopedToolNames(def, baseTaskTools(Config{EnableRepoMap: true}))
-	if len(names) != 1 || names[0] != "RepoMap" {
-		t.Fatalf("with EnableRepoMap a def allowlisting RepoMap should keep it, got names=%v diags=%v", names, diags)
-	}
-
-	// Disabled: RepoMap is unknown to the base => dropped with an "unknown tool" diag.
-	names2, diags2 := scopedToolNames(def, baseTaskTools(Config{}))
-	if len(names2) != 0 {
-		t.Fatalf("without EnableRepoMap RepoMap must be dropped, got %v", names2)
-	}
-	if len(diags2) != 1 || diags2[0].tool != "RepoMap" || !strings.Contains(diags2[0].reason, "unknown tool") {
-		t.Fatalf("without EnableRepoMap RepoMap should yield an 'unknown tool' diagnostic, got %+v", diags2)
-	}
-}
-
 // TestBuildAgentTaskEnginesResolvedModelOnRequest builds per-def engines, runs one
 // via the Task tool, and asserts the recorded LLMRequest.Model equals the
 // resolved per-def model (def.Model alias > parent).

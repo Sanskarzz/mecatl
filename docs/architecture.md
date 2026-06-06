@@ -34,7 +34,7 @@ spans over OTLP), **security** (server auth/mTLS, rate
 limiting, the `permclassify` model-based risk classifier), **context management**
 (`tokenizer` + the `CascadeCompactor`), **memory** (`memory` + `dream`),
 **parallelism** (`forker` fork-join), and **extensibility** (the `mcp`
-streaming-HTTP client and the `repomap` tool). Each is detailed below.
+streaming-HTTP client). Each is detailed below.
 
 ## 2. The big picture
 
@@ -82,7 +82,7 @@ flowchart LR
     tools["tools (Read/Edit/Write/Grep/Glob/WebFetch + optional Bash)"]
     pp["permpolicy · hookexec"]
     tel["telemetry (OTel metrics+spans · Prometheus exporter · OTLP)"]
-    ext["mcp (streaming-HTTP) · repomap\nmemory · dream · soul · forker · tokenizer"]
+    ext["mcp (streaming-HTTP)\nmemory · dream · soul · forker · tokenizer"]
   end
 
   mecated --> svc --> engine
@@ -867,13 +867,6 @@ stdio/command transport is never used, so no MCP server is ever `os/exec`-spawne
 tools are registered into the catalog **namespaced** `mcp__<server>__<tool>` so a
 remote tool can never collide with or shadow a built-in.
 
-**Repo map** (`internal/adapter/repomap`) — a **read-only** repo-map tool
-(`repomap.NewTool`, `ReadOnly()==true`). It parses source with **tree-sitter and
-ranks files by personalized PageRank** over the symbol-reference graph, producing
-a compact "where the important code lives" map. It is multi-language and needs
-**no CGO** (tree-sitter runs as pure-Go WASM via wazero), so it does not affect
-the static default build; it is wired in `mecated` via `--enable-repomap`.
-
 **Progressive tool disclosure** (pattern 9) — a tool may optionally implement
 `tool.Disclosable`; the built-in `tool.Search` tool (catalog name `ToolSearch`,
 `tool.NewToolSearch`) hydrates hidden tools on demand by searching the catalog. A
@@ -923,7 +916,7 @@ consumer (`skills.RegisterSource`) is unchanged. The Source seam lives in the
 **adapter** package, NOT the domain: nothing in the domain or the agent loop
 consumes skills (they are packaged into a `tool.Tool` at composition time), so a
 domain port would be the wrong home — the seam is scoped to where it is consumed,
-mirroring MCP, repo-map, and the TUI theme search-path.
+mirroring MCP and the TUI theme search-path.
 
 **The self-improving skill loop** (`skills.Drafter`, opt-in) closes the loop so
 durable skills can *come into being from the agent's own experience*. A single
@@ -993,7 +986,7 @@ changes when one is swapped:
 | `tool.CommandRunner` | `internal/tool/tool.go` (impl `osfs`) | the command-execution chokepoint; an OS sandbox wraps here |
 | `tool.MemoryStore` | `internal/tool/tool.go` (impl `memory`) | cross-session memory + `dream` consolidation |
 | `tool.WorkspaceForker` | `tool/isolation.go` (impl `forker`) | fork-join isolated branches |
-| `tool.Catalog` | `internal/tool/catalog.go` | core tools + MCP (streaming-HTTP) + repo map |
+| `tool.Catalog` | `internal/tool/catalog.go` | core tools + MCP (streaming-HTTP) |
 | `mcpperf.Deps` (perf MCP server) | `internal/adapter/mcpperf` | opt-in `--perf-mcp`; a read-only MCP `http.Handler` mounted at `/mcp` on the loopback admin listener (both composition roots: `cmd/mecated` and `cmd/mecatui/embed`). Built by DI — `Snapshot`/`Gatherer`/`Profiler` from `telemetry`, a slow-turn ring buffer (`telemetry.SlowTurnBuffer`) bridged at the cmd boundary to the `mcpperf.SlowTurnSource` seam (telemetry never imports mcpperf — the dependency points inward). Fail-closed to loopback (unauthenticated) |
 | `SessionStore` + AGENTS.md/CLAUDE.md discovery | `port` + `prompt/builder.go` | file-as-memory; AGENTS.md wins over CLAUDE.md, injected as a **user** message, never system |
 

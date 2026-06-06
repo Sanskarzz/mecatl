@@ -52,11 +52,7 @@ You do **not** need a network or an API key for `task build`, `task test`, or
 the offline demo.
 
 The default `mecated` build is CGO-free and statically linkable (the ko image
-builds it with `CGO_ENABLED=0`). This includes the tree-sitter-backed repo-map
-tool: tree-sitter runs as WebAssembly via the pure-Go `wazero` runtime (the
-grammars are embedded, so it works fully offline), so the repo map ships in the
-default static binary with no build tag. It is registered by default; pass
-`--enable-repomap=false` to turn it off.
+builds it with `CGO_ENABLED=0`).
 
 ---
 

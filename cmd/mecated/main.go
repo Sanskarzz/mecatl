@@ -223,11 +223,6 @@ type config struct {
 	// survive at once; the oldest beyond the cap is LRU-reaped. 0 => the default.
 	forkPreservedCap int
 
-	// RepoMap: enable the Aider-style repo-map tool. It is CGO-free (tree-sitter
-	// runs as WebAssembly via wazero), so it is registered unconditionally by
-	// default; this flag lets operators turn it off without a rebuild.
-	enableRepoMap bool
-
 	// Teams: enable the experimental agent-teams capability (CreateTeam /
 	// SpawnTeammate / RunTeam). Opt-in, default off.
 	enableTeams bool
@@ -660,7 +655,6 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		EnableCommands:               cfg.enableCommands,
 		EnableFork:                   cfg.enableFork,
 		ForkPreservedCap:             cfg.forkPreservedCap,
-		EnableRepoMap:                cfg.enableRepoMap,
 		EnableTeams:                  cfg.enableTeams,
 		MCPServers:                   cfg.mcpServers,
 		MCPResourceTools:             cfg.mcpResourceTools,
@@ -770,7 +764,6 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.BoolVar(&cfg.enableFork, "enable-fork", true, "register the Fork fan-out tool (parallel isolated child branches)")
 	fs.IntVar(&cfg.forkPreservedCap, "fork-preserved-cap", agent.DefaultPreservedForkCap, "max PRESERVED winner forks (join=first/judge) kept on disk at once; the oldest beyond this is LRU-reaped. Preserved forks stay inspectable until reaped")
-	fs.BoolVar(&cfg.enableRepoMap, "enable-repomap", false, "register the Aider-style repo-map tool. OFF by default: the WASM tree-sitter binding leaks and hangs after ~160 files, freezing the in-process TUI (see docs/design/REPOMAP-TREE-SITTER.md). Pass --enable-repomap to opt in until the extraction is reworked")
 	fs.BoolVar(&cfg.enableTeams, "enable-teams", true, "register the experimental agent-teams capability (CreateTeam/SpawnTeammate/RunTeam); on by default and inert until a client drives a team. Pass --enable-teams=false to disable")
 
 	fs.Var(&cfg.mcpServers, "mcp-server", "remote MCP server as name=URL (repeatable); auth token read from MCP_<NAME>_TOKEN")

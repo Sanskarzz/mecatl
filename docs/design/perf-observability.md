@@ -46,8 +46,8 @@ to the code paths that cause them:
 | **Dispatch lock contention / mutate-serial queueing** | `Engine.dispatch` read-parallel/mutate-serial (`internal/agent/dispatch.go`); results merged under a mutex | A slow `Edit` serially blocks every queued mutation — an internal **coordinated-omission** source (survey §12). Mean tool latency won't show the queueing. |
 | **Goroutine leaks** | per-run background goroutine (`Engine.Run` → `drive`), the SSE consumer + its cancel path, subagent/fork drain loops (`subagent.go`, fork tool), the server Run registry (`server/service.go`) | Each run spins goroutines; a cancellation path that doesn't unwind leaks them across a long-lived `mecated`. |
 | **GC pressure / allocation churn** | chunk decoding, event fan-out (`Run.emit`), prompt assembly, the compaction cascade (`agent/cascade.go`) | High alloc/op on the hot streaming path drives GC pauses that show up as inter-token jitter. |
-| **Long-session memory growth** | conversation history before compaction; the jsonl store; **the tree-sitter WASM leak** (`adapter/repomap`, `docs/design/REPOMAP-TREE-SITTER.md`) | Memory climbs over a long session. **The WASM leak (~23 MB RSS per RepoMap call) is off the Go heap** — invisible to `pprof heap` and `runtime/metrics`; only process RSS sees it (survey §9). |
-| **TUI render cadence** | `cmd/mecatui/ui` coalescing streamed deltas to frame cadence | Render must keep up with inter-token rate without scrambling markdown; a starved render goroutine is the symptom the WASM hang already produced once. |
+| **Long-session memory growth** | conversation history before compaction; the jsonl store; historically the tree-sitter WASM leak (`adapter/repomap`, now **removed** — see `docs/design/REPOMAP-TREE-SITTER.md`) | Memory climbs over a long session. The since-removed WASM leak (~23 MB RSS per call) was **off the Go heap** — invisible to `pprof heap` and `runtime/metrics`; only process RSS saw it (survey §9). The off-heap-growth signature still applies to any future off-heap consumer. |
+| **TUI render cadence** | `cmd/mecatui/ui` coalescing streamed deltas to frame cadence | Render must keep up with inter-token rate without scrambling markdown; a starved render goroutine is the symptom the (now-removed) WASM hang already produced once. |
 | **Tail latency** | run/turn timing across all the above | p99 turn latency is the SLO that matters; averages lie. |
 
 What mecatl **already has** (verified against `internal/adapter/telemetry/` and
@@ -74,8 +74,8 @@ What it **does not** have (the gaps every approach below must reckon with):
 - **No OTel metrics** (traces only).
 - **No goroutine-leak gate** in tests (`go.uber.org/goleak` is in go.sum,
   transitively, but unused).
-- **No process-RSS reading** — so the one leak we *know about* (tree-sitter WASM)
-  has no instrument that can see it.
+- **No process-RSS reading** — so the one leak we knew about at the time
+  (the since-removed tree-sitter WASM tool) had no instrument that could see it.
 
 The corrected record matters: a prior research note asserted mecatl "already has
 OTel metrics." It does **not** — it has OTel *traces*. Metrics are Prometheus-only
@@ -160,7 +160,7 @@ A new **edge adapter** `internal/adapter/mcpperf` imports the SDK + the perf
 sources; **domain / port / agent never import it** (the inward-only rule,
 `docs/architecture.md` §2). Wiring is confined to `internal/app` (behind a flag,
 `app.Build`) and `cmd/mecated` (owns the flag + token, mounts on the loopback
-mux). This mirrors exactly how the MCP *client*, repomap, and skills adapters sit.
+mux). This mirrors exactly how the MCP *client* and skills adapters sit.
 A `mecated perf-mcp print-config` helper (mirroring the `skills promote`
 subcommand) would print a paste-ready client snippet:
 
@@ -357,10 +357,11 @@ and 2 are both committed (not "maybe later").
    read mecatl's perf MCP output (pprof rankings, `runtime/metrics`,
    FlightRecorder summaries; leak/contention/GC-pressure signatures). Built with
    `/skill-write`; the MCP server itself is built with `/mcp-server-authoring`.
-9. **WASM leak — parked.** Tree-sitter / RepoMap is **disabled** at present, so
-   the specific ~23 MB-RSS leak is not an active concern. A **process-RSS gauge**
-   still ships (Phase 1) for general long-session memory visibility (history,
-   jsonl store), but no leak-specific alarm and no Option-E rework in this effort.
+9. **WASM leak — resolved by removal.** Tree-sitter / RepoMap has been **removed**
+   entirely (see `docs/design/REPOMAP-TREE-SITTER.md`), so the specific ~23 MB-RSS
+   leak no longer exists in the tree. A **process-RSS gauge** still ships (Phase 1)
+   for general long-session memory visibility (history, jsonl store), but no
+   leak-specific alarm and no Option-E rework in this effort.
 10. **goleak — broad + live alarm.** `goleak.VerifyTestMain` across the
     concurrency-heavy packages (`agent`, `server`, subagent/fork, openai stream)
     **and** a live goroutine-count gauge/alarm in `mecated` — not just a test gate.

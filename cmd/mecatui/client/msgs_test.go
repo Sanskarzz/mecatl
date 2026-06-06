@@ -46,8 +46,8 @@ func TestEventToMsg(t *testing.T) {
 		},
 		{
 			"tool.progress",
-			&mecatlv1.Event{Type: "tool.progress", Text: "repo map: parsed 64/512 files"},
-			ToolProgressMsg{Text: "repo map: parsed 64/512 files"},
+			&mecatlv1.Event{Type: "tool.progress", Text: "scanned 64/512 files"},
+			ToolProgressMsg{Text: "scanned 64/512 files"},
 		},
 		{
 			"permission.ask",
