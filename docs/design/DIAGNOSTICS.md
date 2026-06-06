@@ -1,0 +1,89 @@
+# Diagnostics, audit, and the global-slog ban
+
+Status: **shipped** (logging-architecture refactor, iterations 1–3). This is a
+correction/reference doc, not an essay — it records the seams, the sink-per-binary
+policy, the build-once rule, and the enforcement guard.
+
+## Two seams, deliberately separate
+
+The harness has two distinct logging concerns, and they are NOT the same port:
+
+- **`port.Diagnostics`** (`internal/port/diagnostics.go`) — general-purpose
+  operational logging: composition decisions, degraded-mode warnings, lifecycle
+  notes. Low-volume, human-readable. The agent loop and the composition layer write
+  to it; domain packages stay silent. Contract is tiny and slog-shaped
+  (`Log(ctx, level, msg, args...)` + `With`), but the port imports only `context`
+  (a tripwire test, `diagnostics_imports_test.go`, keeps it backend-free). Callers
+  that inject nothing get `NopDiagnostics` (`app.Build` defaults to it), so every
+  consumer is nil-safe.
+- **`port.ToolCallRecorder`** (`internal/port/log.go`) — the per-tool AUDIT seam:
+  `ToolCall(id, call, result, took)`, one structured record per tool execution.
+
+They are separate because they answer different questions. Diagnostics is "what is
+the harness doing / why did it degrade"; the recorder is "what did each tool call
+do, with what result, how long" — an audit trail with a fixed shape, consumed by
+telemetry as counters + a latency histogram. Folding them into one port would force
+either the audit into free-form strings or the diagnostics into a tool-call shape.
+
+## Three observability channels
+
+| Channel | Port | Adapter | Carries |
+|---|---|---|---|
+| Operational logging | `port.Diagnostics` | `slogdiag` (over `log/slog`) | composition/lifecycle/degraded-mode lines |
+| Per-tool audit | `port.ToolCallRecorder` | `telemetry` (counters + histogram); `jsonlstore` audit | one record per tool call |
+| Metrics / traces | `port.EventSink` | `telemetry` (OTel SDK) | counters/gauges/spans from the event stream |
+
+All three are injected at composition; none reaches for a global.
+
+## Sink-per-binary policy
+
+`slogdiag` owns the `port.Level → slog.Level` map and the text-vs-JSON handler
+choice; the composition layer picks the destination:
+
+- **mecated** (daemon): `slog.SetDefault` installs a stderr/text/Info logger and
+  `slogdiag.NewFromLogger(logger)` wraps the SAME logger. stderr/journald is the
+  correct sink for a server, so the `slog.SetDefault` here is the DELIBERATE,
+  PERMANENT third-party-slog bridge — any ambient `slog.Default()` use (a transitive
+  dependency, the perf surface's nil-Logger fallback) is correctly routed there.
+- **mecatui** (TUI): the global slog default is redirected on EVERY startup path, in
+  two layers. (1) A UNIVERSAL baseline — `installBaselineSlog` at the top of `run()`,
+  before any transport resolution or the Bubble Tea program — floors the default to
+  `io.Discard`. The TUI owns the alt-screen and has no in-process diagnostics of its
+  own, so for the client-only transports (external `--server`, or reuse of an
+  already-running mecated — both of which return early from `resolveTransport`) the
+  floor is the whole story: ambient/third-party slog is silently dropped rather than
+  corrupting the render. (2) A REFINEMENT — in the host-embedded branch only,
+  `resolveTransport` opens a FILE at `$XDG_STATE_HOME/mecatl/mecatui.log` (fallback
+  `~/.local/state/...`) once and installs a second `slog.SetDefault` onto that file
+  writer (the same writer backs the `slogdiag` sink AND the perf surface's
+  `*slog.Logger`). That second call wins for the embedded path, so the embedded
+  server's ambient slog is captured and operator-recoverable instead of discarded.
+  Under `--quiet` every writer is `io.Discard`. Either way, no transport mode leaks a
+  stray slog line to the alt-screen.
+
+`cmd/` mains are the ONLY layer allowed to call `slog.SetDefault` — they own the
+third-party-slog bridge. `slogdiag.NewFromLogger(nil)` falls back to a DISCARD
+logger (not `slog.Default()`), so even the adapter's own fallback can't reach the
+global default.
+
+## Build-once facts
+
+Composition facts (token counter, compaction strategy, session-store kind, feature
+enable/disable lines) are emitted ONCE, in `app.Build`. They are NEVER emitted in
+the per-engine deps builders (`engineDepsForProvider` / `childEngineDepsForProvider`)
+— a per-session engine is re-derived on every provider/model change, and re-emitting
+the facts there caused N× duplication of the same lines. Child engines (Task
+subagent, team members) get `NopDiagnostics` so their derivation is silent: the
+operator's diagnostic sink must not double through them.
+
+## The ban + guard
+
+Global slog is banned in `internal/`: no `slog.Default()`, no `slog.SetDefault()`,
+no package-level `slog.Info|Warn|Debug|Error(Context)?`. Diagnostics flow through
+the injected `port.Diagnostics` seam instead. The ban is enforced by **`forbidigo`**
+in `.golangci.yml` with precise patterns, scoped so `internal/` is covered and
+`cmd/` mains are exempt (issues exclude-rule on `^cmd/`; `_test.go` also exempt).
+The patterns are call-shape-precise: `slog.New*` / `slog.Handler` / `HandlerOptions`
+/ `Level` / `DiscardHandler` (slogdiag's legitimate internals) and the `*slog.Logger`
+type (the perf surface) do NOT match. Each forbidden hit emits a message pointing
+the contributor back at this doc and the `port.Diagnostics` seam.

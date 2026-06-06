@@ -60,6 +60,15 @@ func run(args []string) error {
 		return err
 	}
 
+	// UNIVERSAL global-slog floor: redirect the stdlib default to io.Discard (or, under
+	// --quiet, still discard) BEFORE any transport resolution or the Bubble Tea program.
+	// This covers EVERY transport path — external --server and reuse-an-already-running
+	// mecated both return early from resolveTransport and would otherwise leave the
+	// default at stderr, which the alt-screen (started below for ALL paths) would let a
+	// stray ambient/third-party slog line corrupt. The host-embedded branch later refines
+	// this floor to the mecatui.log file writer. See docs/design/DIAGNOSTICS.md.
+	installBaselineSlog(cfg.quiet)
+
 	// Allow-all posture WARN: mecatui has no slog and runs on the alt screen, so emit
 	// a single pre-TUI stderr line (it lands in scrollback before the alt screen takes
 	// over). Only meaningful for the embedded server (an external --server owns its own
@@ -186,9 +195,22 @@ func resolveTransport(ctx context.Context, cfg config) (target string, dial clie
 	// closed by the returned cleanup alongside the server.
 	diagW, diagCloser, toFile := openDiagLogWriter(xdgconfig.OSEnv, cfg.quiet)
 	diag := slogdiag.New(diagW, false, port.LevelInfo)
-	// A dedicated slog.Logger over the SAME writer for the perf surface's Logger field
-	// (its lines are otherwise emitted via slog.Default()→stderr by embed).
+	// A dedicated slog.Logger over the SAME writer for the perf surface's Logger field.
+	// Explicit injection (rather than relying on the redirected default below) keeps the
+	// perf surface's sink unambiguous even if a caller ever reuses perfConfig elsewhere.
 	perfLogger := slog.New(slog.NewTextHandler(diagW, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// REFINE the universal baseline (installBaselineSlog at the top of run() already
+	// floored the global default to io.Discard for every transport path): in the
+	// host-embedded path, redirect the GLOBAL slog default onto the same FILE writer the
+	// Diagnostics sink uses (io.Discard under --quiet) BEFORE the embedded server /
+	// Bubble Tea program starts. Any ambient slog.Default() use — a transitive
+	// dependency that logs, or embed.setupPerf's nil-Logger fallback — now writes to
+	// $XDG_STATE_HOME/mecatl/mecatui.log, NEVER to stderr/the alt-screen, AND is
+	// operator-recoverable rather than discarded. This second SetDefault wins over the
+	// baseline for the embedded path. cmd/ mains are the only layer allowed to call
+	// slog.SetDefault (internal/ flows through the injected port.Diagnostics, ban-
+	// guarded). See docs/design/DIAGNOSTICS.md.
+	slog.SetDefault(slog.New(slog.NewTextHandler(diagW, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	cfg = applyTrustPrompt(cfg, diag)
 
@@ -366,7 +388,9 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 // SAME file-backed (or, under --quiet, discarding) writer the Diagnostics sink uses
 // — so the perf surface's startup/teardown/watchdog lines land in
 // $XDG_STATE_HOME/mecatl/mecatui.log, NEVER on stderr where they would corrupt the
-// Bubble Tea alt-screen (the bug embed's slog.Default() fallback caused).
+// Bubble Tea alt-screen. (Belt-and-suspenders: resolveTransport also redirects the
+// global slog default onto the same writer, so even embed's nil-Logger fallback
+// would land in the file rather than the terminal.)
 func perfConfig(cfg config, logger *slog.Logger) embed.PerfConfig {
 	if !cfg.perf {
 		return embed.PerfConfig{}

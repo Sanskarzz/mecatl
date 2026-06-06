@@ -463,12 +463,18 @@ func run() error {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// slog.SetDefault stays for the daemon: this is the DELIBERATE, PERMANENT
+	// third-party-slog bridge — a server's operational output belongs on
+	// stderr/journald, so any ambient slog.Default() use (a transitive dependency, the
+	// perf surface's nil-Logger fallback) is correctly routed there. cmd/ mains are the
+	// only layer allowed to call slog.SetDefault; all of internal/ flows through the
+	// injected port.Diagnostics (ban-guarded). The TUI, by contrast, redirects the
+	// default to a FILE because it owns the alt-screen. See docs/design/DIAGNOSTICS.md.
 	slog.SetDefault(logger)
-	// Diagnostics sink for the composition's build-once facts (and future relocated
-	// operational logging). It wraps the SAME stderr/text/Info logger installed above,
-	// so the relocated facts print identically to today — but flow through the injected
-	// port.Diagnostics rather than slog.Default(). (slog.SetDefault stays for now:
-	// iteration 2 relocates the remaining slog sites and bans the default.)
+	// Diagnostics sink for the composition's build-once facts and the relocated
+	// operational logging. It wraps the SAME stderr/text/Info logger installed above,
+	// so the facts print identically — but flow through the injected port.Diagnostics
+	// rather than slog.Default().
 	diag := slogdiag.NewFromLogger(logger)
 
 	// Allow-all posture: refuse the dangerous flag when running privileged outside a

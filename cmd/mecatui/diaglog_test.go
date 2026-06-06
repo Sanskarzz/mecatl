@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,5 +136,41 @@ func TestOpenDiagLogWriterDiscardsWhenUnresolvable(t *testing.T) {
 	defer func() { _ = closer.Close() }()
 	if w != io.Discard || toFile {
 		t.Fatalf("no resolvable state base must discard (w=%T toFile=%v)", w, toFile)
+	}
+}
+
+// TestBaselineSlogWriterAlwaysDiscards pins the client-only-mode floor: the TUI has
+// no in-process diagnostics of its own, so the universal baseline writer is
+// io.Discard whether or not --quiet is set. (The host-embedded path REFINES this to
+// the mecatui.log file writer; that refinement is openDiagLogWriter, tested above.)
+func TestBaselineSlogWriterAlwaysDiscards(t *testing.T) {
+	for _, quiet := range []bool{false, true} {
+		if got := baselineSlogWriter(quiet); got != io.Discard {
+			t.Fatalf("baselineSlogWriter(quiet=%v) = %T, want io.Discard", quiet, got)
+		}
+	}
+}
+
+// TestInstallBaselineSlogRedirectsGlobalDefault proves the universal floor takes
+// effect: after installBaselineSlog, the GLOBAL slog default no longer writes to a
+// stderr stand-in. This is the property that makes the redirect cover the client-only
+// transports (--server / reuse) — where resolveTransport returns early and never
+// touches the default — so ambient/third-party slog cannot corrupt the alt-screen.
+func TestInstallBaselineSlogRedirectsGlobalDefault(t *testing.T) {
+	// Save and restore the process-global default so this test can't leak into others.
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// Plant a default that writes to a buffer (stands in for the stderr the stdlib
+	// default would use), then install the baseline and confirm nothing lands there.
+	var stderrStandIn bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&stderrStandIn, nil)))
+
+	installBaselineSlog(false)
+	slog.Default().Info("ambient line that must not reach the stderr stand-in")
+	slog.Default().Log(context.Background(), slog.LevelError, "nor this one")
+
+	if stderrStandIn.Len() != 0 {
+		t.Fatalf("global slog default still writes to the stderr stand-in after installBaselineSlog: %q", stderrStandIn.String())
 	}
 }

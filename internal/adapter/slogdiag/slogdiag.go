@@ -48,11 +48,13 @@ func NewText(w io.Writer) *Diagnostics {
 
 // NewFromLogger wraps an already-constructed *slog.Logger. It lets a caller that
 // already owns a slog.Logger (e.g. one shared with another subsystem) expose it
-// through the Diagnostics port without re-deriving a handler. A nil logger
-// falls back to slog.Default so the result is always usable.
+// through the Diagnostics port without re-deriving a handler. A nil logger falls
+// back to a DISCARD logger (never slog.Default): the result is always usable, but
+// the fallback can no longer reach the global default sink — keeping this adapter
+// off the banned global-default path (mirrors mcpperf.go's nil-Logger fallback).
 func NewFromLogger(l *slog.Logger) *Diagnostics {
 	if l == nil {
-		l = slog.Default()
+		l = slog.New(slog.DiscardHandler)
 	}
 	return &Diagnostics{log: l}
 }

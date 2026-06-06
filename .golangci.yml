@@ -31,6 +31,7 @@ linters:
   enable:
     - depguard
     - errcheck
+    - forbidigo
     - goconst
     - gocyclo
     - gosec
@@ -52,6 +53,24 @@ linters:
           deny:
             - pkg: io/ioutil
               desc: deprecated; use io and os
+    # forbidigo is the BAN GUARD for the logging architecture (iteration 3): no NEW
+    # global-slog drift may re-enter internal/. Diagnostics flow through the injected
+    # port.Diagnostics seam; slog.Default()/slog.SetDefault()/package-level
+    # slog.Info|Warn|Debug|Error are forbidden there. cmd/ mains are EXEMPT (see the
+    # exclusions block below) — they own the third-party-slog bridge (mecated→stderr,
+    # mecatui→file). The patterns are precise: slog.New*/Handler/HandlerOptions/Level/
+    # DiscardHandler (slogdiag's legitimate internals) and the *slog.Logger type (the
+    # perf surface) do NOT match, so only the banned call shapes trip. See
+    # docs/design/DIAGNOSTICS.md and CLAUDE.md ("global slog is banned in internal/").
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: 'slog\.Default\b'
+          msg: 'global slog is banned in internal/: route diagnostics through the injected port.Diagnostics seam (slogdiag adapter); the cmd/ main owns the sink. See docs/design/DIAGNOSTICS.md.'
+        - pattern: 'slog\.SetDefault\b'
+          msg: 'global slog is banned in internal/: only cmd/ mains may install a slog default (the third-party-slog bridge). internal/ must take a port.Diagnostics. See docs/design/DIAGNOSTICS.md.'
+        - pattern: 'slog\.(Info|Warn|Debug|Error)(Context)?\b'
+          msg: 'package-level slog.* is banned in internal/: log through the injected port.Diagnostics seam, not the global logger. See docs/design/DIAGNOSTICS.md.'
     goconst:
       ignore-tests: true
       min-occurrences: 5
@@ -130,6 +149,19 @@ linters:
       - linters:
           - revive
         path: .golangci.yml
+      # forbidigo (the global-slog ban) is scoped to internal/ ONLY. cmd/ mains are
+      # the composition roots that legitimately own the third-party-slog bridge —
+      # mecated installs a stderr default, mecatui redirects the default to a file —
+      # so they MUST be allowed slog.Default/SetDefault. The ban exists to keep
+      # internal/ on the injected port.Diagnostics seam, not to police the mains.
+      - linters:
+          - forbidigo
+        path: ^cmd/
+      # Test files may name the banned patterns in literals/messages (e.g. the guard
+      # test asserting the rule bites, or doc-comments referencing slog.Warn).
+      - linters:
+          - forbidigo
+        path: (.+)_test\.go
       # SessionID and ToolSpec are deliberate, frozen domain names from the WP1
       # ports that other packages depend on. revive flags them as "stutter"
       # (session.SessionID / tool.ToolSpec) but renaming would break the public

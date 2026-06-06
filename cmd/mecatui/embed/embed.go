@@ -290,7 +290,11 @@ func setupPerf(ctx context.Context, perf PerfConfig, cfg *app.Config) (perfState
 	}
 	logger := perf.Logger
 	if logger == nil {
-		logger = slog.Default()
+		// Discard, not slog.Default(): the embedded TUI never wants a perf line on
+		// stderr/the alt-screen. The real caller (cmd/mecatui) always injects a
+		// file-backed Logger AND redirects the global default to the same file, so
+		// this fallback only fires for a caller that wired no Logger at all.
+		logger = slog.New(slog.DiscardHandler)
 	}
 
 	// FAIL CLOSED on a non-loopback admin Addr with the perf MCP server requested —

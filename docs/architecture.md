@@ -270,7 +270,8 @@ runs with no network and no disk.
 | `HookRunner` (`hookrunner.go`) | run a lifecycle hook, map exit code to outcome | `Run(ctx context.Context, ev governance.HookEvent) (governance.HookOutcome, error)` |
 | `PermissionPolicy` (`permission.go`) | deny→ask→allow across merged scopes | `Evaluate(ctx context.Context, mode session.PermissionMode, c session.ToolCall) governance.PermissionDecision` |
 | `EventSink` (`log.go`) | relay loop events to the API stream | `Emit(ev session.Event)` |
-| `Logger` (`log.go`) | structured tool-execution observability | `ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, took time.Duration)` |
+| `ToolCallRecorder` (`log.go`) | structured per-tool AUDIT (distinct from `Diagnostics`) | `ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, took time.Duration)` |
+| `Diagnostics` (`diagnostics.go`) | injected operational-logging seam (NO global slog in `internal/`) | `Log(ctx, level Level, msg string, args ...any)` · `With(args ...any) Diagnostics` |
 | `Clock` (`clock.go`) | abstract wall clock | `Now() time.Time` |
 
 The model-call request and stream types (`llm.go`):
@@ -697,12 +698,19 @@ error.
   event to `Deps.Sink` when configured (`dispatch.go`'s `Engine.emit`, which
   forwards the per-run `Run.ctx`). `Seq` is a monotonic per-run counter
   (`atomic.Int64`).
-- **Logger** (`port.Logger`) — `ToolCall(id, call, result, took)` records
-  tool-execution timing, distinct from the model-visible conversation. The loop
-  times execution via the injected `Clock` (`timeExecute`).
+- **ToolCallRecorder** (`port.ToolCallRecorder`) — `ToolCall(id, call, result,
+  took)` records tool-execution timing, the per-tool AUDIT seam, distinct from the
+  model-visible conversation. The loop times execution via the injected `Clock`
+  (`timeExecute`).
+- **Diagnostics** (`port.Diagnostics`) — the injected operational-logging seam
+  (composition decisions, degraded-mode warnings, lifecycle notes), DISTINCT from
+  the audit (`ToolCallRecorder`) and the event stream (`EventSink`). `internal/`
+  takes this port and NEVER touches global slog; the `slogdiag` adapter is the only
+  slog bridge and composition picks the sink per binary. The ban is `forbidigo`-
+  guarded. See `docs/design/DIAGNOSTICS.md`.
 - **Telemetry** (`internal/adapter/telemetry`) — one adapter that implements
   **both** `port.EventSink` (deriving counters/gauges from the event stream) and
-  `port.Logger` (per-tool counters + a latency histogram). It is built on the
+  `port.ToolCallRecorder` (per-tool counters + a latency histogram). It is built on the
   **OTel metrics SDK**: `telemetry.NewMetrics(metric.MeterProvider)` creates the
   domain instruments from an injected MeterProvider. `telemetry.NewSink` fans one
   Engine `EventSink` out to several sinks; OTel spans model the run/turn/tool
