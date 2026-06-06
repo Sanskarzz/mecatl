@@ -44,6 +44,8 @@ type config struct {
 	openAIKey         string
 	openRouterBaseURL string
 	openRouterKey     string
+	anthropicBaseURL  string
+	anthropicKey      string
 	mock              bool
 	noBash            bool
 
@@ -168,6 +170,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.model, "model", "", "model identifier for the embedded server (empty: use the provider-appropriate default; ignored when dialling an external server)")
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")
 	fs.StringVar(&cfg.openRouterBaseURL, "openrouter-base-url", "", "embedded server only: override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)")
+	fs.StringVar(&cfg.anthropicBaseURL, "anthropic-base-url", "", "embedded server only: override the native Anthropic API base URL (compatible/proxy endpoints; key from ANTHROPIC_API_KEY)")
 	fs.BoolVar(&cfg.mock, "mock", false, "embedded server only: use the canned offline mock provider instead of OpenAI (no network)")
 	fs.BoolVar(&cfg.noBash, "no-bash", false, "embedded server only: disable the Bash tool (shell-less mode)")
 	fs.BoolVar(&cfg.trustProject, "trust-project", false, "embedded server only: honour a discovered PROJECT's ALLOW rules AND its project-scoped soul (.mecatl/soul.md) (its deny/ask rules are always honoured regardless). Default OFF (the safe stance, unified with mecated): an untrusted repo's permission grants and project soul are ignored. TRUST BOUNDARY: enabling this lets a checked-in .mecatl/settings.yaml auto-approve tool calls and a checked-in project soul steer the model — only pass it for a repo you trust")
@@ -205,6 +208,7 @@ func parseFlags(args []string) (config, error) {
 	}
 	cfg.openAIKey = os.Getenv("OPENAI_API_KEY")
 	cfg.openRouterKey = os.Getenv("OPENROUTER_API_KEY")
+	cfg.anthropicKey = os.Getenv("ANTHROPIC_API_KEY")
 
 	if !cfg.listThemes {
 		ws, err := resolveWorkspace(cfg.workspace)
@@ -252,10 +256,11 @@ func (c config) validate() error {
 		return fmt.Errorf("invalid --mode %q (want default|plan|accept-edits)", c.mode)
 	}
 	// When hosting an embedded server (no external --server) the provider must be
-	// resolvable: an OpenAI or OpenRouter key in the environment, or the offline mock.
-	if c.server == "" && c.openAIKey == "" && c.openRouterKey == "" && !c.mock {
-		return errors.New("no external --server given and no OPENAI_API_KEY or OPENROUTER_API_KEY set: " +
-			"set OPENAI_API_KEY or OPENROUTER_API_KEY to host an embedded server, pass --mock for an offline run, " +
+	// resolvable: an OpenAI, Anthropic, or OpenRouter key in the environment, or the
+	// offline mock.
+	if c.server == "" && c.openAIKey == "" && c.openRouterKey == "" && c.anthropicKey == "" && !c.mock {
+		return errors.New("no external --server given and no OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY set: " +
+			"set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY to host an embedded server, pass --mock for an offline run, " +
 			"or point --server at a running mecated")
 	}
 	// Allow-all posture: only meaningful for the embedded server; refuse it when

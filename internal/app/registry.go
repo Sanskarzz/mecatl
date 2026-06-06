@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sort"
 
+	"github.com/stacklok/mecatl/internal/adapter/anthropic"
 	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/openai"
@@ -20,6 +21,7 @@ import (
 const (
 	providerOpenAI     = "openai"
 	providerOpenRouter = "openrouter"
+	providerAnthropic  = "anthropic"
 	// providerMock is the synthetic offline provider id used only when UseMock is
 	// set. It never reaches the wire as a selectable provider; it exists so the
 	// registry has exactly one entry in offline/smoke-test runs.
@@ -36,6 +38,11 @@ const (
 var builtinDefaultModel = map[string]string{
 	providerOpenAI:     "gpt-5",
 	providerOpenRouter: "openai/gpt-5",
+	// anthropic: the current GA Sonnet (verified against the live Anthropic models
+	// overview, 2026-06-06): the best speed/intelligence balance and a cheaper
+	// default than Opus. It is catalogued in providercatalog (resolves cleanly
+	// through modelCapability) and supports extended thinking (adaptive).
+	providerAnthropic: "claude-sonnet-4-6",
 }
 
 // openRouterDefaultBaseURL is the OpenRouter Responses-compatible API base URL.
@@ -154,7 +161,7 @@ func (*providerRegistry) DefaultModelFor(id string) string { return builtinDefau
 // engine. It names BOTH env vars and the offline escape hatches so first-run is
 // self-explanatory (S4's picker renders the same copy as an empty-picker note).
 var errNoProvider = errors.New(
-	"no LLM provider available: set OPENAI_API_KEY or OPENROUTER_API_KEY (run with --openai/--mock for offline)")
+	"no LLM provider available: set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY (run with --openai/--mock for offline)")
 
 // buildProviderRegistry constructs the registry from cfg and the injected env
 // detector. It builds (and resilience-wraps) ONLY the available providers — there
@@ -216,6 +223,14 @@ func buildProviderRegistry(cfg Config, detect envDetector) (*providerRegistry, e
 		entries[providerOpenRouter] = entry
 	}
 
+	// anthropic: the native Messages-API adapter (NOT the openai adapter). AVAILABLE
+	// iff a key resolves — from cfg.AnthropicKey (the cmd layer reads ANTHROPIC_API_KEY)
+	// or the catalog-driven env vars via detect. Per-session routing, sub-agent
+	// provider switch, and the capability intersection treat it as data (no change).
+	if key := providerKey(cfg.AnthropicKey, providerAnthropic, detect); key != "" {
+		entries[providerAnthropic] = newAnthropicEntry(cfg, key)
+	}
+
 	if len(entries) == 0 {
 		return nil, errNoProvider
 	}
@@ -275,6 +290,73 @@ func newOpenAIEntry(cfg Config, id, key, baseURL string) providerEntry {
 		"breaker_threshold", cfg.LLMBreakerThreshold,
 		"breaker_cooldown", cfg.LLMBreakerCooldown)
 	return providerEntry{id: id, provider: llm, available: true, baseURL: baseURL}
+}
+
+// newAnthropicEntry constructs a resilience-wrapped native-Anthropic provider
+// entry. It honors the SAME composition-only providerConstructor test seam first
+// (so the offline multi-provider e2e can back "anthropic" with a mock), else
+// constructs the anthropic adapter with WithMaxTokens set to the default model's
+// catalogued output limit (Anthropic REQUIRES max_tokens and rejects a value
+// above the model's ceiling; a conservative fallback applies when uncatalogued).
+// It logs the provider id, default model, and base URL ONLY — never the key. No
+// lister in P1 (live Anthropic listing is deferred).
+func newAnthropicEntry(cfg Config, key string) providerEntry {
+	baseURL := cfg.AnthropicBaseURL
+	slog.Info("LLM provider available", "provider", providerAnthropic, "model", cfg.Model, "base_url", baseURL)
+	if cfg.providerConstructor != nil {
+		return providerEntry{
+			id:        providerAnthropic,
+			provider:  cfg.providerConstructor(cfg, providerAnthropic, key, baseURL),
+			available: true,
+			baseURL:   baseURL,
+		}
+	}
+	opts := []anthropic.Option{
+		anthropic.WithAPIKey(key),
+		// PER-MODEL max_tokens: each request's max_tokens is resolved from ITS model's
+		// catalogued output ceiling, so a per-session/sub-agent route to a
+		// smaller-ceiling model (e.g. claude-3-5-haiku=8192) never sends the default
+		// model's larger value and 400s. The adapter stays catalog-free — composition
+		// owns the catalog read.
+		anthropic.WithMaxTokensResolver(anthropicOutputLimit),
+	}
+	if baseURL != "" {
+		opts = append(opts, anthropic.WithBaseURL(baseURL))
+	}
+	var llm port.LLMProvider = anthropic.New(opts...)
+	llm = llmresilience.Wrap(llm, llmresilience.Config{
+		MaxAttempts:       cfg.LLMMaxAttempts,
+		BaseBackoff:       llmBaseBackoff,
+		MaxBackoff:        llmMaxBackoff,
+		PerAttemptTimeout: cfg.LLMPerAttemptTimeout,
+		BreakerThreshold:  cfg.LLMBreakerThreshold,
+		BreakerCooldown:   cfg.LLMBreakerCooldown,
+	})
+	slog.Info("LLM resilience enabled",
+		"provider", providerAnthropic,
+		"max_attempts", cfg.LLMMaxAttempts,
+		"per_attempt_timeout", cfg.LLMPerAttemptTimeout,
+		"breaker_threshold", cfg.LLMBreakerThreshold,
+		"breaker_cooldown", cfg.LLMBreakerCooldown)
+	return providerEntry{id: providerAnthropic, provider: llm, available: true, baseURL: baseURL}
+}
+
+// anthropicOutputLimit returns the catalogued output ceiling for a SPECIFIC
+// anthropic model id (the per-request max_tokens resolver the adapter calls with
+// req.Model). Returns 0 for an uncatalogued model, so the adapter falls back to
+// its conservative constant (the lowest common Claude ceiling) and never 400s on
+// a too-high value. Composition-only catalog read; keeps the adapter catalog-free.
+func anthropicOutputLimit(model string) int {
+	p, ok := providercatalog.Default().Provider(providerAnthropic)
+	if !ok {
+		return 0
+	}
+	for _, m := range p.Models() {
+		if m.ID() == model {
+			return m.OutputLimit()
+		}
+	}
+	return 0
 }
 
 // resolveDefaultModel resolves the default (providerID, modelID) pair from cfg and

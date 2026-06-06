@@ -148,6 +148,7 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--openai` | `false` | use the OpenAI Responses provider (key from `OPENAI_API_KEY`) |
 | `--openai-base-url` | `""` | override the OpenAI API base URL (compatible endpoints) |
 | `--openrouter-base-url` | `""` | override the OpenRouter API base URL (default `https://openrouter.ai/api/v1`; key from `OPENROUTER_API_KEY`) |
+| `--anthropic-base-url` | `""` | override the native Anthropic API base URL (compatible/proxy endpoints; key from `ANTHROPIC_API_KEY`) |
 | `--mock` | `false` | use a canned offline mock provider (no network; smoke tests only) |
 | `--store-dir` | `""` | directory for the JSONL session store (empty → in-memory) |
 | `--skills-dir` | `""` | directory to discover progressive-disclosure skills from, laid out as `<name>/SKILL.md`. **Repeatable** (highest precedence, in the order given); empty disables the `Skill` tool unless `--skills-conventional` is set. **See the skills trust note below.** |
@@ -246,6 +247,7 @@ connected agent knows how to act on the numbers.
 | --- | --- |
 | `OPENAI_API_KEY` | the OpenAI API key. **If set, it implies `--openai`** — the real provider is selected automatically. |
 | `OPENROUTER_API_KEY` | the OpenRouter API key. **If set, the `openrouter` provider is auto-detected** — it rides the same stateless Responses adapter against `https://openrouter.ai/api/v1` (override with `--openrouter-base-url`). OpenRouter also accepts an `OPENAI_API_KEY` by convention. |
+| `ANTHROPIC_API_KEY` | the Anthropic API key. **If set, the native `anthropic` provider is auto-detected** — the native Messages-API adapter (NOT the Responses adapter), stateless full-replay, with extended thinking **on** (model-aware: adaptive for Opus 4.8/4.7/4.6 + Sonnet 4.6, manual budget for older families). Default model `claude-sonnet-4-6`; override the host with `--anthropic-base-url`. |
 | `MECATL_SANDBOX` / `IS_SANDBOX` | set either to `1` to affirm an isolated, disposable environment so `--yolo` is permitted while running as root. |
 
 ### Provider selection
@@ -256,9 +258,11 @@ builds an N-provider registry and AUTO-DETECTS availability from the environment
 - `OPENAI_API_KEY` set (or `--openai`) → the `openai` Responses provider.
 - `OPENROUTER_API_KEY` set → the `openrouter` provider (same adapter, OpenRouter
   base URL; falls back to `OPENAI_API_KEY` by convention).
+- `ANTHROPIC_API_KEY` set → the native `anthropic` Messages provider (extended
+  thinking on, model-aware; default model `claude-sonnet-4-6`).
 - `--mock` → canned offline provider (single text turn; smoke tests only).
 - none of the above → startup error:
-  `no LLM provider available: set OPENAI_API_KEY or OPENROUTER_API_KEY (run with --openai/--mock for offline)`.
+  `no LLM provider available: set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY (run with --openai/--mock for offline)`.
 
 When more than one provider is available, `openai` is the default (single-provider
 back-compat) — a `CreateSession` with no selector uses it.

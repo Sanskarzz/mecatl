@@ -85,6 +85,8 @@ type config struct {
 	openAIKey         string
 	openRouterBaseURL string
 	openRouterKey     string
+	anthropicBaseURL  string
+	anthropicKey      string
 	useMock           bool
 	storeDir          string
 	shell             string
@@ -608,6 +610,8 @@ func appConfig(cfg config, sink port.EventSink, logger port.Logger) app.Config {
 		OpenAIKey:                    cfg.openAIKey,
 		OpenRouterBaseURL:            cfg.openRouterBaseURL,
 		OpenRouterKey:                cfg.openRouterKey,
+		AnthropicBaseURL:             cfg.anthropicBaseURL,
+		AnthropicKey:                 cfg.anthropicKey,
 		UseMock:                      cfg.useMock,
 		StoreDir:                     cfg.storeDir,
 		Shell:                        cfg.shell,
@@ -691,6 +695,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.BoolVar(&cfg.useOpenAI, "openai", false, "use the OpenAI Responses provider (key from OPENAI_API_KEY)")
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL (compatible endpoints)")
 	fs.StringVar(&cfg.openRouterBaseURL, "openrouter-base-url", "", "override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)")
+	fs.StringVar(&cfg.anthropicBaseURL, "anthropic-base-url", "", "override the native Anthropic API base URL (compatible/proxy endpoints; key from ANTHROPIC_API_KEY)")
 	fs.BoolVar(&cfg.useMock, "mock", false, "use a canned offline mock provider (no network; for smoke tests only)")
 	fs.StringVar(&cfg.storeDir, "store-dir", "", "directory for the JSONL session store (empty -> in-memory store)")
 	fs.StringVar(&cfg.shell, "shell", "/bin/sh", "shell used to execute Bash-tool commands; empty disables Bash (shell-less mode)")
@@ -803,6 +808,10 @@ func parseFlags(argv []string) (config, error) {
 	// OPENROUTER_API_KEY too, but reading it here makes the credential custody
 	// explicit and lets the registry prefer the dedicated key over a fallback.
 	cfg.openRouterKey = os.Getenv("OPENROUTER_API_KEY")
+	// Anthropic (multi-provider P1): the native Messages-API provider; the registry
+	// also auto-detects ANTHROPIC_API_KEY, but reading it here makes the credential
+	// custody explicit (extended thinking is ON, model-aware).
+	cfg.anthropicKey = os.Getenv("ANTHROPIC_API_KEY")
 	// An auth token from the environment is honored when the flag is unset, so a
 	// secret need not appear in the process argv.
 	if cfg.authToken == "" {

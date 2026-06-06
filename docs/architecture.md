@@ -1115,10 +1115,19 @@ model per session**. The wiring lives entirely in the composition layer
 **The registry (`internal/app/registry.go`).** `buildProviderRegistry` constructs,
 once at `Build`, the set of AVAILABLE providers — a provider is available iff one of
 its credential env vars resolves (the var NAMES come from the embedded models.dev
-catalog, `internal/adapter/providercatalog`; `OPENAI_API_KEY`/`OPENROUTER_API_KEY`).
+catalog, `internal/adapter/providercatalog`; `OPENAI_API_KEY`/`OPENROUTER_API_KEY`/`ANTHROPIC_API_KEY`).
 Only available providers are held (an unkeyed provider is omitted — its availability
 is itself sensitive, CWE-200). OpenRouter rides the SAME stateless openai adapter with
-the OpenRouter base URL substituted. `UseMock` short-circuits to a single synthetic
+the OpenRouter base URL substituted. **Anthropic (P1) is the first native non-OpenAI
+wire adapter** (`internal/adapter/anthropic`, on the official MIT `anthropic-sdk-go`):
+the native Messages API, also STATELESS full-replay, wired via `newAnthropicEntry`. It
+validated the provider abstraction — it shipped with NO domain/agent/server/acp/proto
+edit; `engineDepsForProvider`, per-session routing, the capability intersection, and
+per-sub-agent-provider switching all treat it as data. Its wire-divergences (the
+REQUIRED `max_tokens`, the model-class-dependent extended-thinking config which is ON
+and model-aware, and the `(thinking,signature[],redacted)` reasoning-replay list packed
+into the opaque `Message.Reasoning` STRING) are absorbed at adapter-construction, not in
+the DTO. `UseMock` short-circuits to a single synthetic
 `mock` entry (offline). The zero-keys case is the named, actionable `errNoProvider`.
 `buildProvider` returns the registry **and** its default provider so the shared engine
 + every child/fork/team engine keep receiving the single default provider exactly as

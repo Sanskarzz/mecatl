@@ -18,12 +18,19 @@ This document is the design rationale. The runtime overview is `docs/architectur
   engine + a DTO-neutrality audit + capability single-source + disclosure hardening.
   Providers: **OpenAI** and **OpenRouter**, both on the SAME stateless Responses
   adapter (OpenRouter = the openai adapter with the OpenRouter base URL substituted).
-- **P1 (next).** A native **Anthropic Messages** adapter — the first provider with a
-  genuinely different wire shape, which VALIDATES the abstraction. Per-model modality
-  divergence (e.g. some Anthropic models take image, some do not) is a pure **data**
-  change: a new registry entry whose adapter `Capabilities()` reports its real transmit
-  ability, plus catalog rows whose `inputModalities` differ per model. The intersection
-  formula (§7) is unchanged; no server/acp/proto edit.
+- **P1 (SHIPPED).** A native **Anthropic Messages** adapter (`internal/adapter/anthropic`,
+  on the official MIT `anthropic-sdk-go`) — the first provider with a genuinely different
+  wire shape, which **VALIDATES the abstraction**. Per-model modality divergence (e.g. some
+  Anthropic models take image, some do not) is a pure **data** change: a new registry entry
+  whose adapter `Capabilities()` reports its real transmit ability (Image:true, Audio:false,
+  EmbeddedContext:true), plus catalog rows whose `inputModalities` differ per model. The
+  intersection formula (§7) is unchanged; `engineDepsForProvider`, per-session routing, the
+  capability intersection, and per-sub-agent-provider switching ALL work for anthropic with
+  **zero new code** (they treat it as data). **No domain/agent/server/acp/proto edit** — the
+  only edits are composition (registry + Config + cmd key plumbing). The abstraction held;
+  details in §4. Extended thinking is **ON and model-aware**; `max_tokens` is an adapter-
+  construction default (catalog-derived per model); `cache_control` is a single ephemeral
+  breakpoint at the `StablePrefix` boundary.
 - **Live model listing (SHIPPED).** A one-shot **per-provider** live catalog fetch via an
   optional, composition-local `modelLister` capability (§11). OpenRouter is the first
   implementer: its public, **unauthenticated** `/models` endpoint enumerates the real
@@ -105,6 +112,63 @@ deliberately provider-NEUTRAL and guarded:
   blob split is the neutral seam P1 validates — do not collapse it.
 - A reflection guard (`internal/port/llm_neutral_test.go`) tripwires any silent
   `LLMRequest` field addition.
+
+### P1 verdict: the abstraction HELD (`Message.Reasoning` stayed a `string`)
+
+The native Anthropic adapter shipped with **no domain/port/agent change**. The two genuine
+wire-divergences P1 surfaced were both absorbed at adapter-construction, not in the DTO:
+
+- **`max_tokens` (required by Anthropic, absent everywhere in the harness)** — resolved
+  **per request model**, not baked in: composition injects a `WithMaxTokensResolver(func(model) int)`
+  built from the catalog's per-model output limit (`anthropicOutputLimit`), and `buildParams`
+  computes `max_tokens` from `req.Model` via it, with a conservative flat fallback
+  (`defaultMaxTokens`=4096, the lowest common Claude ceiling) for an uncatalogued model so it
+  never 400s. CRITICAL for per-session/sub-agent routing: a route to a smaller-ceiling model
+  (e.g. `claude-3-5-haiku`=8192) must not send the default model's larger ceiling. NOT an
+  `LLMRequest` field; the adapter stays catalog-free.
+- **Extended thinking is model-class-dependent — THREE outcomes** (`thinkingConfigFor`):
+  `{type:"adaptive"}` for Opus 4.8/4.7/4.6 + Sonnet 4.6 + Mythos (a manual
+  `{type:"enabled",budget_tokens}` **400s** on Opus 4.8/4.7); `{type:"enabled",budget_tokens:N}`
+  for older thinking-CAPABLE families (Claude 4: Sonnet 4.5/4, Opus 4.5/4.1/4, Haiku 4.5; and
+  Claude 3.7 Sonnet); and **NONE — omit `thinking` entirely** for thinking-INCAPABLE models
+  (Claude 3.5 and earlier — sending `{type:"enabled"}` there 400s). `display:"summarized"` is
+  set explicitly so display deltas stream. The budget is the `WithThinkingBudget` Option
+  (clamped ≥1024 & <max_tokens). Thinking is **ON**.
+- **Ambient-env custody** — `New` passes `option.WithoutEnvironmentDefaults()` FIRST, so the
+  SDK does NOT autoload `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/WIF profiles; the adapter
+  contributes only the harness-resolved key + optional `--anthropic-base-url`, preserving the
+  single-knob credential/base-URL custody and the availability gate.
+- **Tool `input_schema` fidelity** — the WHOLE tool schema passes through
+  (properties/required on their typed fields, every other top-level key via
+  `ToolInputSchemaParam.ExtraFields`), so `$defs`/`additionalProperties`/nested enums/top-level
+  constraints survive on Anthropic exactly as on OpenAI.
+- **Stream-accumulation cap** — the per-block tool-args / thinking-text / signature buffers
+  are bounded (8 MiB) and fail the stream when exceeded (MITM/DoS hardening, matching the
+  openrouter lister's caps).
+
+- **Reasoning replay packed into the opaque string.** Anthropic's replay unit is a *list*
+  of `thinking` blocks `{thinking,signature}` plus possibly `redacted_thinking` `{data}`
+  (interleaved thinking can produce several per turn, and redacted blocks must round-trip
+  too). A single bare string cannot hold a list directly, but the `Message.Reasoning`
+  contract is explicitly "opaque blob, adapter packs/unpacks its own wire shape", so the
+  adapter packs the ordered list **into** the string as a versioned JSON envelope and
+  unpacks it to reconstruct the thinking/redacted blocks **before** the `tool_use` blocks
+  on the next turn (omitting/misordering them on a tool-bearing assistant turn 400s — the
+  load-bearing correctness item). The envelope:
+
+  ```json
+  {"v":1,"blocks":[
+     {"t":"thinking","x":"<thinking text>","s":"<signature>"},
+     {"t":"redacted","d":"<opaque redacted data>"}
+  ]}
+  ```
+
+  Order in `blocks[]` = the SSE `index` order = the model's original emission order, so the
+  thinking-sequence rule is preserved by construction. An empty list packs to `""` (replay
+  no-op, exactly like the openai empty-blob case). The adapter emits ONE `ChunkReasoningItem`
+  carrying the packed envelope at `message_stop` (honoring "one opaque blob per message"
+  even with multiple blocks); the display deltas stream separately as `ChunkReasoning`.
+  **`session.Message.Reasoning` stayed a bare `string`** — no domain widening, no leak.
 
 ---
 

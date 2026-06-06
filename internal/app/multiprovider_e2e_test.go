@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,11 +23,13 @@ import (
 // mock providers via the S3 composition-only providerConstructor seam, plus a fake
 // two-key env. All offline (mockllm, real temp workspace, no network). It proves:
 //
-//  1. ListModels returns models for BOTH available providers, secret-free.
+//  1. ListModels returns models for ALL available providers, secret-free.
 //  2. CreateSession{provider_id:"openrouter"} registers a per-session engine and a
 //     turn routes to the OpenRouter-bound provider (distinct reply).
 //  3. CreateSession{provider_id:"openai"} routes to the openai-bound provider.
-//  4. CreateSession{provider_id:"anthropic"} (not in registry) ⇒ InvalidArgument.
+//  4. CreateSession{provider_id:"anthropic"} routes to the native-Anthropic-bound
+//     provider (distinct reply), proving the registry wires it via newAnthropicEntry
+//     and per-session routing / engineDepsForProvider treat it as data.
 //  5. CreateSession{} (zero selector) ⇒ the shared default-provider engine.
 func TestMultiProviderE2E(t *testing.T) {
 	ctx := context.Background()
@@ -36,10 +40,11 @@ func TestMultiProviderE2E(t *testing.T) {
 	built, err := Build(ctx, Config{
 		Workspace: workspace,
 		NoSoul:    true,
-		// Fake two-key env ⇒ openai + openrouter both AVAILABLE in the registry.
+		// Fake three-key env ⇒ openai + openrouter + anthropic all AVAILABLE.
 		envDetector: fakeEnv(map[string]string{
 			"OPENAI_API_KEY":     sentinelKey,
 			"OPENROUTER_API_KEY": sentinelKey,
+			"ANTHROPIC_API_KEY":  sentinelKey,
 		}),
 		// Mock-per-id seam: each available provider id gets a DISTINCT mock that
 		// replies with its own id, so a routed turn proves which provider was bound.
@@ -73,8 +78,24 @@ func TestMultiProviderE2E(t *testing.T) {
 			}
 		}
 	}
-	if !seen[providerOpenAI] || !seen[providerOpenRouter] {
+	if !seen[providerOpenAI] || !seen[providerOpenRouter] || !seen[providerAnthropic] {
 		t.Fatalf("ListModels missing a provider; saw %v", seen)
+	}
+	// Current Claude ids surface for the native anthropic provider.
+	var sawSonnet46, sawOpus48 bool
+	for _, m := range models {
+		if m.GetProviderId() != providerAnthropic {
+			continue
+		}
+		switch m.GetId() {
+		case "claude-sonnet-4-6":
+			sawSonnet46 = true
+		case "claude-opus-4-8":
+			sawOpus48 = true
+		}
+	}
+	if !sawSonnet46 || !sawOpus48 {
+		t.Fatalf("ListModels missing current Claude ids (sonnet-4-6=%v opus-4-8=%v)", sawSonnet46, sawOpus48)
 	}
 
 	// (2) provider_id="openrouter" routes a turn to the OpenRouter-bound provider.
@@ -87,9 +108,16 @@ func TestMultiProviderE2E(t *testing.T) {
 		t.Fatalf("openai selector routed to %q, want REPLY-FROM-openai", got)
 	}
 
-	// (4) unknown provider ⇒ InvalidArgument (never a silent fallback).
+	// (4) provider_id="anthropic" routes a turn to the native-Anthropic-bound
+	// provider (distinct reply) — proving the registry wires it and per-session
+	// routing / engineDepsForProvider / capability intersection treat it as data.
+	if got := runProviderTurn(t, svc, workspace, server.ProviderSelector{ProviderID: providerAnthropic}); got != "REPLY-FROM-anthropic" {
+		t.Fatalf("anthropic selector routed to %q, want REPLY-FROM-anthropic", got)
+	}
+
+	// An unknown provider still ⇒ InvalidArgument (never a silent fallback).
 	_, err = svc.CreateSessionWithProvider(ctx, workspace, session.ModeDefault, defaultLimits(),
-		server.ProviderSelector{ProviderID: "anthropic"})
+		server.ProviderSelector{ProviderID: "does-not-exist"})
 	if !errors.Is(err, server.ErrInvalidArgument) {
 		t.Fatalf("unknown-provider create error = %v, want ErrInvalidArgument", err)
 	}
@@ -284,6 +312,63 @@ func TestSessionCapabilitiesNoSecrets(t *testing.T) {
 	// ProviderCapabilities (the ACP gate) is a bools-only neutral value — no string
 	// to leak; this asserts it is the same source the echo reads for the default.
 	_ = svc.ProviderCapabilities()
+}
+
+// TestSubAgentPinsAnthropic drives the FULL composition with three mock-backed
+// providers and a real on-disk agent def pinning provider=anthropic. A DEFAULT
+// session (running on the openai default) routes a Task to that def; the sub-agent
+// reply proves it ran on the native-Anthropic-bound provider — closing the
+// per-sub-agent-provider claim for anthropic with NO registry/agent change.
+func TestSubAgentPinsAnthropic(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	agentsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(agentsDir, "claudespec.md"),
+		[]byte("---\nname: claudespec\ndescription: runs on anthropic\nprovider: anthropic\ntools: [Read]\n---\nYou run on anthropic.\n"),
+		0o600); err != nil {
+		t.Fatalf("write agent def: %v", err)
+	}
+
+	built, err := Build(ctx, Config{
+		Workspace:     workspace,
+		NoSoul:        true,
+		AgentsDirs:    []string{agentsDir},
+		AllowAllTools: true, // --yolo: auto-approve the routed Task
+		envDetector: fakeEnv(map[string]string{
+			"OPENAI_API_KEY":    "sk-x",
+			"ANTHROPIC_API_KEY": "sk-x",
+		}),
+		providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
+			reply := "REPLY-FROM-" + id
+			return mockllm.New(
+				mockllm.ToolCallTurn(session.NewToolCall("p1", "Task", []byte(`{"prompt":"go","agent":"claudespec"}`))),
+				mockllm.TextTurn(reply), mockllm.TextTurn(reply), mockllm.TextTurn(reply),
+			)
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer built.Close()
+	svc := built.Service
+
+	sess, err := svc.CreateSession(ctx, workspace, session.ModeDefault, defaultLimits())
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	run, err := svc.StartRun(ctx, sess.ID, "go")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	var taskResult string
+	for ev := range run.Events() {
+		if ev.Type == session.EvToolResult && ev.ToolResult != nil && ev.ToolResult.Content != "" {
+			taskResult = ev.ToolResult.Content
+		}
+	}
+	if !strings.Contains(taskResult, "REPLY-FROM-anthropic") {
+		t.Fatalf("Task sub-agent (provider: anthropic) reply = %q, want it to contain REPLY-FROM-anthropic", taskResult)
+	}
 }
 
 // runProviderTurn creates a session bound to sel, drives one turn, and returns the

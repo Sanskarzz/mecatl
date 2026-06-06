@@ -1,0 +1,424 @@
+package anthropic
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	sdk "github.com/anthropics/anthropic-sdk-go"
+
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/prompt"
+	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/tool"
+)
+
+func testProvider() *Provider {
+	return New(WithAPIKey("sk-test"), WithMaxTokens(16000), WithThinkingBudget(4096))
+}
+
+func TestBuildParamsCacheControlBreakpoint(t *testing.T) {
+	p := testProvider()
+	req := port.LLMRequest{
+		Model:  "claude-sonnet-4-6",
+		System: prompt.Layered{StablePrefix: "STABLE", VolatileSuffix: "VOLATILE"},
+	}
+	params, err := p.buildParams(req)
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	if len(params.System) != 2 {
+		t.Fatalf("system blocks = %d, want 2", len(params.System))
+	}
+	if params.System[0].Text != "STABLE" {
+		t.Errorf("system[0].Text = %q, want STABLE", params.System[0].Text)
+	}
+	// Assert on the marshalled WIRE form: the single ephemeral breakpoint lands on
+	// the StablePrefix block and NOT on the VolatileSuffix block.
+	stable, err := json.Marshal(params.System[0])
+	if err != nil {
+		t.Fatalf("marshal system[0]: %v", err)
+	}
+	if !strings.Contains(string(stable), `"cache_control":{"type":"ephemeral"}`) {
+		t.Errorf("StablePrefix block missing ephemeral cache_control breakpoint: %s", stable)
+	}
+	volatile, err := json.Marshal(params.System[1])
+	if err != nil {
+		t.Fatalf("marshal system[1]: %v", err)
+	}
+	if strings.Contains(string(volatile), "cache_control") {
+		t.Errorf("VolatileSuffix block must NOT carry a cache breakpoint: %s", volatile)
+	}
+}
+
+func TestBuildParamsEmptySystemOmitted(t *testing.T) {
+	p := testProvider()
+	params, err := p.buildParams(port.LLMRequest{Model: "claude-sonnet-4-6"})
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	if len(params.System) != 0 {
+		t.Fatalf("empty system should be omitted, got %d blocks", len(params.System))
+	}
+}
+
+func TestBuildParamsMaxTokensSet(t *testing.T) {
+	p := testProvider()
+	params, _ := p.buildParams(port.LLMRequest{Model: "claude-sonnet-4-6"})
+	if params.MaxTokens != 16000 {
+		t.Fatalf("max_tokens = %d, want 16000 (the WithMaxTokens option)", params.MaxTokens)
+	}
+}
+
+func TestBuildParamsMaxTokensDefault(t *testing.T) {
+	p := New(WithAPIKey("sk"))
+	params, _ := p.buildParams(port.LLMRequest{Model: "claude-sonnet-4-6"})
+	if params.MaxTokens != defaultMaxTokens {
+		t.Fatalf("max_tokens = %d, want default %d", params.MaxTokens, defaultMaxTokens)
+	}
+}
+
+// TestBuildParamsMaxTokensPerRequestModel is the per-session-routing guard: a
+// Provider built with a LARGE construction fallback + a per-model resolver must
+// send each REQUEST's model ceiling, not the fallback. A route to a
+// smaller-ceiling model (claude-3-5-haiku=8192) sends ≤8192 even though the
+// fallback is 64000 — otherwise it 400s every turn. (The mock e2e cannot catch
+// this; it is the buildParams unit path.)
+func TestBuildParamsMaxTokensPerRequestModel(t *testing.T) {
+	// Resolver mirrors the real catalog ceilings for these ids.
+	resolver := func(model string) int {
+		switch {
+		case strings.HasPrefix(model, "claude-3-5-haiku"):
+			return 8192
+		case strings.HasPrefix(model, "claude-3-opus"):
+			return 4096
+		case strings.HasPrefix(model, "claude-sonnet-4-6"):
+			return 64000
+		default:
+			return 0 // uncatalogued -> adapter fallback
+		}
+	}
+	// Construction fallback is the BIG default-model ceiling (the bug's source).
+	p := New(WithAPIKey("sk"), WithMaxTokens(64000), WithMaxTokensResolver(resolver))
+
+	cases := []struct {
+		model string
+		want  int64
+	}{
+		{"claude-3-5-haiku-20241022", 8192},
+		{"claude-3-opus-20240229", 4096},
+		{"claude-sonnet-4-6", 64000},
+		{"some-uncatalogued-model", 64000}, // falls back to WithMaxTokens
+	}
+	for _, tc := range cases {
+		params, err := p.buildParams(port.LLMRequest{Model: tc.model})
+		if err != nil {
+			t.Fatalf("%s: buildParams: %v", tc.model, err)
+		}
+		if params.MaxTokens != tc.want {
+			t.Errorf("%s: max_tokens = %d, want %d (per-request model ceiling)", tc.model, params.MaxTokens, tc.want)
+		}
+	}
+
+	// Explicit: a haiku request must NEVER exceed the haiku ceiling even though the
+	// construction fallback is 64000.
+	params, _ := p.buildParams(port.LLMRequest{Model: "claude-3-5-haiku-20241022"})
+	if params.MaxTokens > 8192 {
+		t.Fatalf("haiku route sent max_tokens=%d > 8192 ceiling (would 400)", params.MaxTokens)
+	}
+}
+
+// TestMaxTokensResolverNilFallsBack: with no resolver, every request uses the
+// construction fallback (back-compat with WithMaxTokens alone).
+func TestMaxTokensResolverNilFallsBack(t *testing.T) {
+	p := New(WithAPIKey("sk"), WithMaxTokens(12345))
+	params, _ := p.buildParams(port.LLMRequest{Model: "claude-3-5-haiku-20241022"})
+	if params.MaxTokens != 12345 {
+		t.Fatalf("nil resolver max_tokens = %d, want the 12345 fallback", params.MaxTokens)
+	}
+}
+
+// TestThinkingConfigModelAware verifies the THREE-class thinking config: adaptive
+// (Opus 4.8/4.7/4.6 + Sonnet 4.6 + Mythos), manual enabled+budget (older capable:
+// 4.x + 3.7 sonnet), and NONE (3.5 and earlier — incapable). A wrong config 400s,
+// so this is load-bearing.
+func TestThinkingConfigModelAware(t *testing.T) {
+	const maxTokens = 16000
+	const budget = 4096
+
+	// Class 1: ADAPTIVE.
+	adaptive := []string{
+		"claude-opus-4-8",
+		"claude-opus-4-7",
+		"claude-opus-4-6",
+		"claude-sonnet-4-6",
+		"claude-opus-4-8-20260101", // dated snapshot still matches
+		"claude-mythos-preview",
+		"  CLAUDE-OPUS-4-8  ", // whitespace + case-insensitive
+	}
+	for _, m := range adaptive {
+		cfg := thinkingConfigFor(m, maxTokens, budget)
+		if cfg.OfAdaptive == nil {
+			t.Errorf("%s: want adaptive thinking, got %+v", m, cfg)
+		}
+		if cfg.OfEnabled != nil {
+			t.Errorf("%s: must NOT send manual enabled thinking (400s on Opus 4.8/4.7)", m)
+		}
+	}
+
+	// Class 2: MANUAL enabled+budget (older thinking-capable).
+	manual := []string{
+		"claude-sonnet-4-5",
+		"claude-opus-4-5",
+		"claude-haiku-4-5",
+		"claude-sonnet-4-20250514",
+		"claude-3-7-sonnet-20250219",
+		"some-unknown-future-model", // unknown => capable-manual (safe broad default)
+	}
+	for _, m := range manual {
+		cfg := thinkingConfigFor(m, maxTokens, budget)
+		if cfg.OfEnabled == nil {
+			t.Errorf("%s: want manual enabled+budget thinking, got %+v", m, cfg)
+			continue
+		}
+		if cfg.OfEnabled.BudgetTokens != budget {
+			t.Errorf("%s: budget = %d, want %d", m, cfg.OfEnabled.BudgetTokens, budget)
+		}
+		if cfg.OfAdaptive != nil {
+			t.Errorf("%s: must NOT send adaptive thinking", m)
+		}
+	}
+
+	// Class 3: NONE — thinking-INCAPABLE (Claude 3.5 and earlier) => omit thinking.
+	incapable := []string{
+		"claude-3-5-sonnet-20241022",
+		"claude-3-5-sonnet-20240620",
+		"claude-3-5-haiku-20241022",
+		"claude-3-5-haiku-latest",
+		"claude-3-opus-20240229",
+		"claude-3-sonnet-20240229",
+		"claude-3-haiku-20240307",
+		"CLAUDE-3-5-SONNET-20241022", // case-insensitive
+	}
+	for _, m := range incapable {
+		cfg := thinkingConfigFor(m, maxTokens, budget)
+		if cfg.OfEnabled != nil || cfg.OfAdaptive != nil {
+			t.Errorf("%s: must send NO thinking config (incapable model 400s on {type:enabled}), got %+v", m, cfg)
+		}
+		// A zero union must marshal without a thinking field.
+		if (cfg != sdk.ThinkingConfigParamUnion{}) {
+			t.Errorf("%s: thinking union must be the zero value (no field), got %+v", m, cfg)
+		}
+	}
+}
+
+// TestBuildParamsNoThinkingForIncapableModel proves the end-to-end buildParams
+// path omits thinking for a 3.5 model (the request-level guard, not just the
+// helper).
+func TestBuildParamsNoThinkingForIncapableModel(t *testing.T) {
+	p := testProvider()
+	params, err := p.buildParams(port.LLMRequest{Model: "claude-3-5-sonnet-20241022"})
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	if (params.Thinking != sdk.ThinkingConfigParamUnion{}) {
+		t.Fatalf("3.5-sonnet request carried a thinking config (would 400): %+v", params.Thinking)
+	}
+}
+
+func TestThinkingConfigBudgetClampedBelowMaxTokens(t *testing.T) {
+	// budget >= max_tokens must be clamped strictly below max_tokens.
+	cfg := thinkingConfigFor("claude-sonnet-4-5", 2000, 8000)
+	if cfg.OfEnabled == nil {
+		t.Fatal("want manual thinking config")
+	}
+	if cfg.OfEnabled.BudgetTokens >= 2000 {
+		t.Fatalf("budget %d not clamped below max_tokens 2000", cfg.OfEnabled.BudgetTokens)
+	}
+}
+
+func TestBuildParamsThinkingSelectedByRequestModel(t *testing.T) {
+	p := testProvider()
+	opus, _ := p.buildParams(port.LLMRequest{Model: "claude-opus-4-8"})
+	if opus.Thinking.OfAdaptive == nil {
+		t.Error("claude-opus-4-8 request should select adaptive thinking")
+	}
+	sonnet45, _ := p.buildParams(port.LLMRequest{Model: "claude-sonnet-4-5"})
+	if sonnet45.Thinking.OfEnabled == nil {
+		t.Error("claude-sonnet-4-5 request should select manual enabled thinking")
+	}
+}
+
+func TestBuildToolsInputSchema(t *testing.T) {
+	p := testProvider()
+	req := port.LLMRequest{
+		Model: "claude-sonnet-4-6",
+		Tools: []tool.ToolSpec{{
+			Name:        "read_file",
+			Description: "Read a file",
+			Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`),
+		}},
+	}
+	params, err := p.buildParams(req)
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	if len(params.Tools) != 1 {
+		t.Fatalf("tools = %d, want 1", len(params.Tools))
+	}
+	tp := params.Tools[0].OfTool
+	if tp == nil || tp.Name != "read_file" {
+		t.Fatalf("tool = %+v, want read_file", tp)
+	}
+	if len(tp.InputSchema.Required) != 1 || tp.InputSchema.Required[0] != "path" {
+		t.Errorf("input_schema.required = %v, want [path]", tp.InputSchema.Required)
+	}
+}
+
+func TestBuildToolsEmptySchema(t *testing.T) {
+	p := testProvider()
+	params, err := p.buildParams(port.LLMRequest{
+		Model: "claude-sonnet-4-6",
+		Tools: []tool.ToolSpec{{Name: "ping"}},
+	})
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	tp := params.Tools[0].OfTool
+	if tp.InputSchema.Properties == nil {
+		t.Error("empty schema must produce an empty object properties, not nil")
+	}
+}
+
+// TestBuildToolsSchemaFidelity proves the WHOLE tool schema survives onto the wire
+// (matching the openai adapter): $defs, additionalProperties, a nested enum, and a
+// top-level title must all appear in the marshalled input_schema, not be dropped
+// to a bare properties+required.
+func TestBuildToolsSchemaFidelity(t *testing.T) {
+	p := testProvider()
+	schema := `{
+		"type":"object",
+		"title":"EditArgs",
+		"additionalProperties":false,
+		"properties":{
+			"mode":{"type":"string","enum":["a","b"]},
+			"ref":{"$ref":"#/$defs/Ref"}
+		},
+		"required":["mode"],
+		"$defs":{"Ref":{"type":"string","enum":["x","y"]}}
+	}`
+	params, err := p.buildParams(port.LLMRequest{
+		Model: "claude-sonnet-4-6",
+		Tools: []tool.ToolSpec{{Name: "edit", Schema: json.RawMessage(schema)}},
+	})
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	blob, err := json.Marshal(params.Tools[0].OfTool.InputSchema)
+	if err != nil {
+		t.Fatalf("marshal input_schema: %v", err)
+	}
+	got := string(blob)
+	for _, want := range []string{
+		`"additionalProperties":false`,
+		`"$defs"`,
+		`"title":"EditArgs"`,
+		`"enum":["a","b"]`,
+		`"enum":["x","y"]`,
+		`"$ref":"#/$defs/Ref"`,
+		`"required":["mode"]`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("input_schema dropped %s; got: %s", want, got)
+		}
+	}
+	// A duplicate top-level "type":"object" must appear exactly once (the SDK's
+	// constant default), not twice.
+	if n := strings.Count(got, `"type":"object"`); n != 1 {
+		t.Errorf("top-level type:object appears %d times, want exactly 1: %s", n, got)
+	}
+}
+
+// TestAssistantThinkingBeforeToolUse is the 400-trap replay assertion: an
+// assistant message with packed reasoning + a tool call must reconstruct the
+// thinking block BEFORE the tool_use block in the outgoing request.
+func TestAssistantThinkingBeforeToolUse(t *testing.T) {
+	packed := packReasoning([]reasoningBlock{
+		{Kind: reasoningKindThinking, Thinking: "ponder", Signature: "SIG=="},
+	})
+	msg := session.Message{
+		Role:      session.RoleAssistant,
+		Reasoning: packed,
+		ToolCalls: []session.ToolCall{{ID: "toolu_1", Name: "read_file", Args: json.RawMessage(`{"path":"x"}`)}},
+	}
+	blocks := assistantBlocks(msg)
+	if len(blocks) != 2 {
+		t.Fatalf("assistant blocks = %d, want 2 (thinking, tool_use)", len(blocks))
+	}
+	if blocks[0].OfThinking == nil {
+		t.Fatal("first block must be a thinking block (sequence rule: thinking before tool_use)")
+	}
+	if blocks[0].OfThinking.Signature != "SIG==" {
+		t.Errorf("thinking signature = %q, want SIG==", blocks[0].OfThinking.Signature)
+	}
+	if blocks[1].OfToolUse == nil {
+		t.Fatal("second block must be the tool_use block")
+	}
+	if blocks[1].OfToolUse.ID != "toolu_1" {
+		t.Errorf("tool_use id = %q, want toolu_1", blocks[1].OfToolUse.ID)
+	}
+}
+
+func TestAssistantRedactedThinkingReconstructed(t *testing.T) {
+	packed := packReasoning([]reasoningBlock{{Kind: reasoningKindRedacted, Data: "RD=="}})
+	msg := session.Message{Role: session.RoleAssistant, Reasoning: packed, Text: "hi"}
+	blocks := assistantBlocks(msg)
+	if blocks[0].OfRedactedThinking == nil {
+		t.Fatal("first block must be a redacted_thinking block")
+	}
+	if blocks[0].OfRedactedThinking.Data != "RD==" {
+		t.Errorf("redacted data = %q, want RD==", blocks[0].OfRedactedThinking.Data)
+	}
+}
+
+func TestBuildMessagesToolResultIsUserRole(t *testing.T) {
+	p := testProvider()
+	req := port.LLMRequest{
+		Model: "claude-sonnet-4-6",
+		Messages: []session.Message{
+			session.NewToolMessage(session.ToolResult{CallID: "toolu_1", Content: "42"}),
+		},
+	}
+	params, err := p.buildParams(req)
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	if len(params.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(params.Messages))
+	}
+	m := params.Messages[0]
+	if m.Role != "user" {
+		t.Errorf("tool_result message role = %q, want user", m.Role)
+	}
+	if m.Content[0].OfToolResult == nil {
+		t.Fatal("expected a tool_result block")
+	}
+	if m.Content[0].OfToolResult.ToolUseID != "toolu_1" {
+		t.Errorf("tool_use_id = %q, want toolu_1", m.Content[0].OfToolResult.ToolUseID)
+	}
+}
+
+func TestBuildMessagesUserTextFastPath(t *testing.T) {
+	p := testProvider()
+	params, err := p.buildParams(port.LLMRequest{
+		Model:    "claude-sonnet-4-6",
+		Messages: []session.Message{session.NewUserMessage("hello")},
+	})
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	m := params.Messages[0]
+	if m.Role != "user" || m.Content[0].OfText == nil || m.Content[0].OfText.Text != "hello" {
+		t.Fatalf("user message = %+v, want a text block 'hello'", m)
+	}
+}

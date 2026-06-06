@@ -118,6 +118,14 @@ type Config struct {
 	OpenRouterKey     string
 	OpenRouterBaseURL string
 
+	// Anthropic (multi-provider P1): the native Anthropic Messages-API provider.
+	// AnthropicKey is the credential (the cmd layer reads it from ANTHROPIC_API_KEY);
+	// when empty the registry falls back to the ANTHROPIC_API_KEY env var via its
+	// envDetector. AnthropicBaseURL overrides the API host for a compatible/proxy
+	// endpoint. These are ADDITIVE — the OpenAI/OpenRouter fields are unchanged.
+	AnthropicKey     string
+	AnthropicBaseURL string
+
 	// Context management: the compaction strategy ("heuristic"|"cascade") and the
 	// token counter ("heuristic"|"tiktoken"). Empty means "heuristic".
 	Compaction string
