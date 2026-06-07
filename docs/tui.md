@@ -353,8 +353,10 @@ release = finalize). The highlight is **logical** — it survives scrolling (whe
 `pgup`/`pgdn`, `home`/`end`) and a streaming re-render. Dragging to the **top or
 bottom edge** of the conversation **auto-scrolls** the view in that direction and
 keeps extending the selection over the newly-revealed lines (so you can select more
-than one screenful) — it scrolls continuously while you hold at the edge and stops
-at the content top/bottom. On **release** the visible
+than one screenful) — it scrolls continuously while you hold at the edge, **ramping
+up** (it starts one line at a time, then accelerates the longer you hold, capped so a
+single step can never leap a full screen), and stops at the content top/bottom. On
+**release** the visible
 selection is copied (the default is copy-on-select): the ANSI styling and the
 gutter/right-padding are stripped, multi-line selections join with `\n`, and the
 footer/status confirms with a muted **`copied N chars`**. A **double-click** selects

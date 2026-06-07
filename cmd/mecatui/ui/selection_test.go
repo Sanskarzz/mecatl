@@ -880,6 +880,385 @@ func TestAutoScrollDirectionFlipNoSecondLoop(t *testing.T) {
 	}
 }
 
+// driveAutoScroll feeds one autoScrollMsg tick through Update and returns the new
+// model plus the re-arm command (nil once the loop disarms). Pure-reducer, no clock.
+func driveAutoScroll(t *testing.T, m Model) (Model, tea.Cmd) {
+	t.Helper()
+	mm, cmd := m.Update(autoScrollMsg{})
+	return mm.(Model), cmd
+}
+
+// TestRampToLines pins the pure acceleration curve directly: gentle first contact
+// (ramp 0 → 1 line), a Fibonacci-ish ramp, then saturation at the cap. This is the
+// deterministic kernel the per-tick deltas are derived from.
+func TestRampToLines(t *testing.T) {
+	// onAutoScroll increments the ramp THEN scrolls, so ramp=1 is the first tick.
+	want := []int{1, 1, 2, 3, 5, 8, 10, 10, 10, 10}
+	for r, w := range want {
+		if got := rampToLines(r); got != w {
+			t.Errorf("rampToLines(%d) = %d, want %d", r, got, w)
+		}
+	}
+	if got := rampToLines(100); got != maxAutoScrollLines {
+		t.Errorf("rampToLines(100) = %d, want cap %d", got, maxAutoScrollLines)
+	}
+}
+
+// TestAutoScrollFirstTickIsOneLine: the FIRST held tick after arming scrolls exactly
+// one line (gentle first contact). rampToLines(1)==1.
+func TestAutoScrollFirstTickIsOneLine(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent(hlContent(200))
+	m.vp.SetYOffset(50)
+	top := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+3)
+	m, _ = motionMouse(m, 0, top) // arm scrollUp (already scrolled 1 via arm)
+	armedOff := m.vp.YOffset()
+
+	m, cmd := driveAutoScroll(t, m)
+	if m.vp.YOffset() != armedOff-1 {
+		t.Errorf("first tick YOffset = %d, want one line up (%d)", m.vp.YOffset(), armedOff-1)
+	}
+	if cmd == nil {
+		t.Error("first tick should re-arm while still scrolling")
+	}
+}
+
+// TestAutoScrollAccelerates: a sustained hold ramps the lines-per-tick along the
+// curve. Observed deltas are 1,2,3,5,8,10 (ramp 1..6). Fails if the curve is wrong
+// or absent (a flat 1-line-per-tick would diverge at tick 2).
+func TestAutoScrollAccelerates(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent(hlContent(2000)) // tall enough not to hit the top before saturating
+	m.vp.SetYOffset(1000)
+	top := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+3)
+	m, _ = motionMouse(m, 0, top) // arm scrollUp
+	armedOff := m.vp.YOffset()
+
+	// Cumulative offsets for deltas 1,2,3,5,8,10 scrolling UP.
+	deltas := []int{1, 2, 3, 5, 8, 10}
+	want := armedOff
+	for i, d := range deltas {
+		var cmd tea.Cmd
+		m, cmd = driveAutoScroll(t, m)
+		want -= d
+		if m.vp.YOffset() != want {
+			t.Fatalf("tick %d: YOffset = %d, want %d (cumulative delta %d)", i+1, m.vp.YOffset(), want, d)
+		}
+		if cmd == nil {
+			t.Fatalf("tick %d should re-arm while still scrolling", i+1)
+		}
+	}
+}
+
+// TestAutoScrollSpeedCaps: past saturation every tick moves exactly
+// maxAutoScrollLines — never more — so one tick can't leap a full screen.
+func TestAutoScrollSpeedCaps(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent(hlContent(5000))
+	m.vp.SetYOffset(2500)
+	top := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+3)
+	m, _ = motionMouse(m, 0, top) // arm scrollDown? no — top edge → scrollUp
+
+	for i := 0; i < 12; i++ {
+		before := m.vp.YOffset()
+		var cmd tea.Cmd
+		m, cmd = driveAutoScroll(t, m)
+		moved := before - m.vp.YOffset() // scrolling up: YOffset decreases
+		if moved > maxAutoScrollLines {
+			t.Fatalf("tick %d moved %d lines, exceeds cap %d", i+1, moved, maxAutoScrollLines)
+		}
+		if cmd == nil {
+			t.Fatalf("tick %d should still be scrolling against tall content", i+1)
+		}
+	}
+	// After ~6 ticks the curve has saturated; the final step must be exactly the cap.
+	before := m.vp.YOffset()
+	m, _ = driveAutoScroll(t, m)
+	if got := before - m.vp.YOffset(); got != maxAutoScrollLines {
+		t.Errorf("saturated tick moved %d lines, want exactly cap %d", got, maxAutoScrollLines)
+	}
+}
+
+// TestAutoScrollNeverOvershootsContentTop: with fewer than maxAutoScrollLines lines
+// of room above, a ramped up-tick lands exactly on 0 and the next tick disarms — it
+// never scrolls past the content top.
+func TestAutoScrollNeverOvershootsContentTop(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent(hlContent(200))
+	m.vp.SetYOffset(4) // < maxAutoScrollLines lines above the top
+	top := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+3)
+	m, _ = motionMouse(m, 0, top) // arm scrollUp (scrolls 1 → YOffset 3)
+
+	// Accelerate until the loop disarms; assert YOffset never goes below 0.
+	cmd := m.autoScrollCmd()
+	for i := 0; cmd != nil && i < 20; i++ {
+		m, cmd = driveAutoScroll(t, m)
+		if m.vp.YOffset() < 0 {
+			t.Fatalf("tick %d overshot content top: YOffset = %d", i+1, m.vp.YOffset())
+		}
+	}
+	if m.vp.YOffset() != 0 {
+		t.Errorf("after disarm YOffset = %d, want exactly 0 (content top)", m.vp.YOffset())
+	}
+	if cmd != nil {
+		t.Error("the loop must disarm once it reaches the content top")
+	}
+	if m.sel.autoScroll != scrollNone {
+		t.Errorf("autoScroll = %v, want scrollNone after content top", m.sel.autoScroll)
+	}
+	if m.sel.autoScrollRamp != 0 {
+		t.Errorf("autoScrollRamp = %d, want reset to 0 at content top", m.sel.autoScrollRamp)
+	}
+}
+
+// TestAutoScrollNeverOvershootsContentBottom: the down-edge mirror — lands exactly on
+// the max offset and disarms, never past the content bottom.
+func TestAutoScrollNeverOvershootsContentBottom(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent(hlContent(200))
+	// Discover the max YOffset, then back off a few lines so a ramped tick would
+	// overshoot if it weren't clamped.
+	m.vp.GotoBottom()
+	maxOff := m.vp.YOffset()
+	m.vp.SetYOffset(maxOff - 4)
+	top := convTopRow(m)
+	bottom := top + m.vp.Height() - 1
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+1)
+	m, _ = motionMouse(m, 0, bottom) // arm scrollDown (scrolls 1)
+
+	cmd := m.autoScrollCmd()
+	for i := 0; cmd != nil && i < 20; i++ {
+		m, cmd = driveAutoScroll(t, m)
+		if m.vp.YOffset() > maxOff {
+			t.Fatalf("tick %d overshot content bottom: YOffset = %d (max %d)", i+1, m.vp.YOffset(), maxOff)
+		}
+	}
+	if m.vp.YOffset() != maxOff {
+		t.Errorf("after disarm YOffset = %d, want exactly the max offset %d", m.vp.YOffset(), maxOff)
+	}
+	if cmd != nil {
+		t.Error("the loop must disarm once it reaches the content bottom")
+	}
+	if m.sel.autoScroll != scrollNone {
+		t.Errorf("autoScroll = %v, want scrollNone after content bottom", m.sel.autoScroll)
+	}
+}
+
+// TestAutoScrollRampResetsOnRelease: accelerate, release, re-press + re-arm; the next
+// tick scrolls one line again (a fresh hold restarts gentle).
+func TestAutoScrollRampResetsOnRelease(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent(hlContent(2000))
+	m.vp.SetYOffset(1000)
+	top := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+3)
+	m, _ = motionMouse(m, 0, top) // arm scrollUp
+	// Accelerate several ticks.
+	for i := 0; i < 4; i++ {
+		m, _ = driveAutoScroll(t, m)
+	}
+	if m.sel.autoScrollRamp == 0 {
+		t.Fatal("precondition: ramp should be advanced after accelerating")
+	}
+
+	// Release ends the drag; re-press starts a fresh selection (ramp zeroed).
+	m, _ = releaseMouse(m, 0, top)
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+3)
+	m, _ = motionMouse(m, 0, top) // re-arm scrollUp
+	armedOff := m.vp.YOffset()
+
+	m, _ = driveAutoScroll(t, m)
+	if got := armedOff - m.vp.YOffset(); got != 1 {
+		t.Errorf("first tick after re-arm moved %d lines, want 1 (ramp reset on release)", got)
+	}
+}
+
+// TestAutoScrollRampResetsOnMotionBackInside: accelerate, move the pointer back
+// inside the region, then re-arm at the edge; the next tick scrolls one line again.
+func TestAutoScrollRampResetsOnMotionBackInside(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent(hlContent(2000))
+	m.vp.SetYOffset(1000)
+	top := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+3)
+	m, _ = motionMouse(m, 0, top) // arm scrollUp
+	for i := 0; i < 4; i++ {
+		m, _ = driveAutoScroll(t, m)
+	}
+
+	// Motion back inside disarms AND resets the ramp.
+	m, _ = motionMouse(m, 2, top+5)
+	if m.sel.autoScroll != scrollNone {
+		t.Fatal("precondition: motion back inside should disarm")
+	}
+	if m.sel.autoScrollRamp != 0 {
+		t.Fatalf("motion back inside should reset the ramp, got %d", m.sel.autoScrollRamp)
+	}
+
+	// Re-arm at the edge; the first held tick is gentle again.
+	m, _ = motionMouse(m, 0, top)
+	armedOff := m.vp.YOffset()
+	m, _ = driveAutoScroll(t, m)
+	if got := armedOff - m.vp.YOffset(); got != 1 {
+		t.Errorf("first tick after re-hold moved %d lines, want 1 (ramp reset inside)", got)
+	}
+}
+
+// TestAutoScrollRampResetsOnEsc: accelerate, esc-clear, re-select + re-arm; the next
+// tick scrolls one line again.
+func TestAutoScrollRampResetsOnEsc(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent(hlContent(2000))
+	m.vp.SetYOffset(1000)
+	top := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+3)
+	m, _ = motionMouse(m, 0, top) // arm scrollUp
+	for i := 0; i < 4; i++ {
+		m, _ = driveAutoScroll(t, m)
+	}
+
+	m, _ = pressKey(m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.sel.active || m.sel.autoScrollRamp != 0 {
+		t.Fatalf("esc should clear selection and reset ramp: active=%v ramp=%d", m.sel.active, m.sel.autoScrollRamp)
+	}
+
+	// Re-select and re-arm; first held tick is gentle.
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+3)
+	m, _ = motionMouse(m, 0, top)
+	armedOff := m.vp.YOffset()
+	m, _ = driveAutoScroll(t, m)
+	if got := armedOff - m.vp.YOffset(); got != 1 {
+		t.Errorf("first tick after esc+re-arm moved %d lines, want 1 (ramp reset on esc)", got)
+	}
+}
+
+// TestAutoScrollHeadTracksEdgeAfterMultiLineStep: after a multi-line accelerated
+// step the selection head still tracks the scrolled edge at the drag column
+// (extendHeadToEdge is step-size-agnostic).
+func TestAutoScrollHeadTracksEdgeAfterMultiLineStep(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent(hlContent(2000))
+	m.vp.SetYOffset(1000)
+	top := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+3)
+	m, _ = motionMouse(m, 0, top) // arm scrollUp
+	// Accelerate to a multi-line step (tick 3 moves 3 lines, well past 1).
+	for i := 0; i < 3; i++ {
+		m, _ = driveAutoScroll(t, m)
+	}
+	if m.sel.headL != m.vp.YOffset() {
+		t.Errorf("scrollUp head line = %d, want the top content line %d after a multi-line step", m.sel.headL, m.vp.YOffset())
+	}
+
+	// Now the down-edge mirror: head tracks the bottom visible line.
+	m2, _ := selModel(t)
+	m2.vp.SetContent(hlContent(2000))
+	m2.vp.SetYOffset(1000)
+	top2 := convTopRow(m2)
+	bottom2 := top2 + m2.vp.Height() - 1
+	m2, _ = pressMouse(m2, tea.MouseLeft, 0, top2+1)
+	m2, _ = motionMouse(m2, 0, bottom2) // arm scrollDown
+	for i := 0; i < 3; i++ {
+		m2, _ = driveAutoScroll(t, m2)
+	}
+	wantHead := m2.vp.YOffset() + m2.vp.Height() - 1
+	if m2.sel.headL != wantHead {
+		t.Errorf("scrollDown head line = %d, want the bottom visible line %d after a multi-line step", m2.sel.headL, wantHead)
+	}
+}
+
+// TestArmAutoScrollDoesNotAdvanceRamp is the load-bearing invariant: armAutoScroll
+// must NOT advance the ramp. The ramp lives in onAutoScroll (the held tick), NOT in
+// the per-cell motion handler — terminal drag reporting fires a motion event per
+// cell at the edge, so if arming advanced the ramp every mouse jiggle would silently
+// accelerate. Fire several edge motions WITHOUT any ticks between them, assert the
+// ramp stays 0, then drive ONE tick and assert it moved exactly 1 line (ramp was
+// still 0 → onAutoScroll advances to 1 → rampToLines(1)==1).
+func TestArmAutoScrollDoesNotAdvanceRamp(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent(hlContent(2000))
+	m.vp.SetYOffset(1000)
+	top := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+3)
+	// Re-fire the SAME-edge motion several times with NO autoScrollMsg ticks between
+	// (the runaway-acceleration scenario): each re-arm scrolls 1 line but must not
+	// touch the ramp.
+	for i := 0; i < 5; i++ {
+		m, _ = motionMouse(m, 0, top)
+		if m.sel.autoScroll != scrollUp {
+			t.Fatalf("motion %d should keep scrollUp armed, got %v", i+1, m.sel.autoScroll)
+		}
+		if m.sel.autoScrollRamp != 0 {
+			t.Fatalf("motion %d advanced the ramp to %d — armAutoScroll must NOT touch it", i+1, m.sel.autoScrollRamp)
+		}
+	}
+
+	before := m.vp.YOffset()
+	m, _ = driveAutoScroll(t, m)
+	if got := before - m.vp.YOffset(); got != 1 {
+		t.Errorf("first held tick moved %d lines, want 1 (ramp was still 0)", got)
+	}
+}
+
+// TestAutoScrollRampPersistsAcrossDirectionFlip pins the DELIBERATE persist-across-
+// flip behavior: a direction flip mid-hold (top edge → bottom edge) is a CONTINUATION
+// of an active edge-scroll, not a fresh hold, so the ramp is intentionally NOT reset
+// — armAutoScroll never touches it and onAutoScroll keeps incrementing across the
+// flip. The head re-anchors to the new edge each tick, so there is no desync. (The
+// reset seams are release / motion-back-inside / esc / inactive / content-edge — a
+// flip is none of those.)
+func TestAutoScrollRampPersistsAcrossDirectionFlip(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent(hlContent(2000))
+	m.vp.SetYOffset(1000)
+	top := convTopRow(m)
+	bottom := top + m.vp.Height() - 1
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top+3)
+	m, _ = motionMouse(m, 0, top) // arm scrollUp
+	// Accelerate a few ticks at the top edge: ramp ends at 3 after three ticks.
+	for i := 0; i < 3; i++ {
+		m, _ = driveAutoScroll(t, m)
+	}
+	if m.sel.autoScrollRamp != 3 {
+		t.Fatalf("precondition: ramp = %d, want 3 after three ticks", m.sel.autoScrollRamp)
+	}
+
+	// Flip to the bottom edge: continuation, NOT a reset. The ramp must persist.
+	m, _ = motionMouse(m, 0, bottom)
+	if m.sel.autoScroll != scrollDown {
+		t.Fatalf("flip should arm scrollDown, got %v", m.sel.autoScroll)
+	}
+	if m.sel.autoScrollRamp != 3 {
+		t.Errorf("flip reset the ramp to %d — a mid-hold direction flip must NOT reset (it's a continuation)", m.sel.autoScrollRamp)
+	}
+
+	// The next tick continues the ramp (ramp 3→4 → rampToLines(4)==5), proving it did
+	// NOT restart at 1.
+	before := m.vp.YOffset()
+	m, _ = driveAutoScroll(t, m)
+	if got := m.vp.YOffset() - before; got != rampToLines(4) {
+		t.Errorf("post-flip tick moved %d lines down, want the continued-ramp value %d (not a reset-to-1)", got, rampToLines(4))
+	}
+	if rampToLines(4) == 1 {
+		t.Fatal("test premise broken: rampToLines(4) should be > 1")
+	}
+}
+
 // nonSelectable is one row of the table-driven overlay/mode gate test: a mutator
 // that drives the model into a state where selectable() is false.
 type nonSelectableCase struct {

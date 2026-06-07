@@ -1333,16 +1333,45 @@ func (m Model) clickCopy(disarm tea.Cmd) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tea.SetClipboard(payload), m.shellWriteCmd(payload), disarm)
 }
 
-// autoScrollInterval is the cadence of the edge-drag autoscroll tick. ~50ms ≈ 20
-// lines/sec: fast enough to feel responsive when selecting a large region, slow
-// enough to stay controllable. The tick is a SELF-RE-ARMING one-shot driven only
-// while a drag sits at an edge (m.sel.autoScroll != scrollNone), so it idles to
-// zero the instant the drag leaves the edge, releases, or the content runs out.
+// autoScrollInterval is the cadence of the edge-drag autoscroll tick (FIXED — the
+// acceleration is purely lines-per-tick, see rampToLines, not a varying interval).
+// ~50ms keeps a gentle first step controllable; a sustained hold ramps the
+// lines-per-tick up (capped at maxAutoScrollLines) so a large region selects fast.
+// The tick is a SELF-RE-ARMING one-shot driven only while a drag sits at an edge
+// (m.sel.autoScroll != scrollNone), so it idles to zero the instant the drag leaves
+// the edge, releases, or the content runs out.
 const autoScrollInterval = 50 * time.Millisecond
 
-// autoScrollMsg is the edge-drag autoscroll tick. The handler scrolls one line in
-// the stashed direction, extends the selection head to the newly-revealed edge
-// line, and re-arms ITSELF only if still dragging at that edge with room to move.
+// maxAutoScrollLines caps edge-autoscroll at 10 lines/tick — under half a typical
+// viewport so one 50ms tick can never leap past a full screen (no overshoot). The
+// interval stays fixed; acceleration is purely lines-per-tick.
+const maxAutoScrollLines = 10
+
+// rampToLines maps the consecutive-tick ramp counter to a lines-per-tick step. It is
+// a pure, deterministic, monotonic-non-decreasing Fibonacci-ish curve that starts
+// gentle (rampToLines(0)==1) and saturates at maxAutoScrollLines: 1,1,2,3,5,8,10,10…
+// onAutoScroll increments the ramp THEN scrolls, so the OBSERVED per-tick deltas are
+// 1,2,3,5,8,10,10,… — first contact is one line (via armAutoScroll's explicit n=1),
+// then a sustained hold accelerates. Speed is a pure function of the integer ramp, so
+// tests can drive N ticks and assert exact YOffset deltas with no wall clock.
+func rampToLines(r int) int {
+	a, b := 1, 1
+	for i := 0; i < r; i++ {
+		a, b = b, a+b
+		if a >= maxAutoScrollLines {
+			return maxAutoScrollLines
+		}
+	}
+	if a > maxAutoScrollLines {
+		return maxAutoScrollLines
+	}
+	return a
+}
+
+// autoScrollMsg is the edge-drag autoscroll tick. The handler scrolls a ramped number
+// of lines (rampToLines, accelerating the longer the edge is held) in the stashed
+// direction, extends the selection head to the newly-revealed edge line, and re-arms
+// ITSELF only if still dragging at that edge with room to move.
 type autoScrollMsg struct{}
 
 // autoScrollCmd schedules one edge-drag autoscroll tick.
@@ -1354,9 +1383,11 @@ func (Model) autoScrollCmd() tea.Cmd {
 // button held. It is a no-op when no selection is active (a bare hover never starts
 // one). When the pointer reaches the TOP edge (y <= top) or BOTTOM edge (y >=
 // bottom) of the conversation region it ARMS edge-autoscroll: it scrolls one line
-// that way now, stashes the direction, and returns the self-re-arming tick so the
-// view keeps scrolling (and the selection keeps extending) even while the pointer
-// is held still at the edge. A motion back INSIDE the region disarms autoscroll.
+// that way now (first contact stays gentle), stashes the direction, and returns the
+// self-re-arming tick so the view keeps scrolling (ACCELERATING the longer it is
+// held — see onAutoScroll/rampToLines) and the selection keeps extending even while
+// the pointer is held still at the edge. A motion back INSIDE the region disarms
+// autoscroll and resets the acceleration ramp.
 func (m Model) onMouseMotion(mo tea.Mouse) (tea.Model, tea.Cmd) {
 	if !m.sel.active {
 		return m, nil
@@ -1377,8 +1408,12 @@ func (m Model) onMouseMotion(mo tea.Mouse) (tea.Model, tea.Cmd) {
 	case mo.Y >= bottom:
 		return m.armAutoScroll(scrollDown, mo.X)
 	}
-	// Inside the region: plain extend, and disarm any edge-autoscroll.
+	// Inside the region: plain extend, and disarm any edge-autoscroll. Reset the
+	// acceleration ramp too, so re-entering an edge restarts at the gentle 1-line
+	// step (Req 4 — the inside-region path is the one disarm seam that does not go
+	// through m.sel = selection{}, so the reset is explicit here).
 	m.sel.autoScroll = scrollNone
+	m.sel.autoScrollRamp = 0
 	line, col, ok := screenToContent(m, mo.X, mo.Y)
 	if !ok {
 		return m, nil
@@ -1390,11 +1425,15 @@ func (m Model) onMouseMotion(mo tea.Mouse) (tea.Model, tea.Cmd) {
 }
 
 // armAutoScroll begins (or continues) edge-autoscroll in dir: it scrolls the
-// viewport one line, extends the selection head to the now-edge content line at
-// column-for-x, re-applies the highlight, re-derives auto-follow (an edge scroll is
-// an explicit user scroll, exactly like a wheel/key), and returns the re-arming
-// tick. If the viewport can't move further in dir (already at content top/bottom)
-// it DISARMS — no scroll, no tick — so the ticker never spins at the content edge.
+// viewport exactly ONE line (first contact stays gentle — acceleration is the held-
+// tick concern of onAutoScroll, not the per-cell re-arm), extends the selection head
+// to the now-edge content line at column-for-x, re-applies the highlight, re-derives
+// auto-follow (an edge scroll is an explicit user scroll, exactly like a wheel/key),
+// and returns the re-arming tick. If the viewport can't move further in dir (already
+// at content top/bottom) it DISARMS — no scroll, no tick — so the ticker never spins
+// at the content edge. It does NOT touch autoScrollRamp: onMouseMotion re-fires this
+// per cell at the edge, so resetting the ramp here would defeat acceleration; the
+// ramp is 0 on a fresh hold via the disarm-time reset instead.
 //
 // SINGLE-FLIGHT: it spawns a NEW tick loop ONLY when transitioning into an armed
 // state FROM scrollNone. Terminal drag reporting (mode 1002/1003) emits a motion
@@ -1408,7 +1447,7 @@ func (m Model) onMouseMotion(mo tea.Mouse) (tea.Model, tea.Cmd) {
 // duplicate same-direction loop — the exact bug this guards against.
 func (m Model) armAutoScroll(dir autoScrollDir, x int) (tea.Model, tea.Cmd) {
 	m.sel.dragX = x // remember the column so the tick can keep the head aligned
-	if !m.scrollOneLine(dir) {
+	if !m.scrollLines(dir, 1) {
 		m.sel.autoScroll = scrollNone // at the content edge: stop, don't re-arm
 		m.extendHeadToEdge(dir, x)
 		applySelectionHighlight(&m)
@@ -1428,15 +1467,21 @@ func (m Model) armAutoScroll(dir autoScrollDir, x int) (tea.Model, tea.Cmd) {
 // onAutoScroll handles one edge-drag autoscroll tick. It no-ops unless a drag is
 // STILL armed at an edge (release / motion-back-inside / esc-clear all set
 // autoScroll back to scrollNone, so a pending tick from a prior arm dies here),
-// then scrolls one more line, extends the head, and re-arms — stopping when the
-// content edge is reached (scrollOneLine returns false).
+// then ADVANCES the ramp and scrolls rampToLines(ramp) lines (accelerating the
+// longer the edge is held), extends the head, and re-arms — stopping when the
+// content edge is reached (scrollLines returns false), where it also resets the ramp
+// so the next hold restarts gentle. The ramp is touched ONLY here, never in
+// armAutoScroll (which re-fires per cell and would reset acceleration each motion).
 func (m Model) onAutoScroll() (tea.Model, tea.Cmd) {
 	if !m.sel.active || m.sel.autoScroll == scrollNone {
 		return m, nil
 	}
 	dir := m.sel.autoScroll
-	if !m.scrollOneLine(dir) {
+	m.sel.autoScrollRamp++
+	n := rampToLines(m.sel.autoScrollRamp)
+	if !m.scrollLines(dir, n) {
 		m.sel.autoScroll = scrollNone // reached content top/bottom: stop re-arming
+		m.sel.autoScrollRamp = 0      // and reset acceleration for the next hold
 		m.extendHeadToEdge(dir, m.sel.dragX)
 		applySelectionHighlight(&m)
 		return m, nil
@@ -1447,16 +1492,22 @@ func (m Model) onAutoScroll() (tea.Model, tea.Cmd) {
 	return m, m.autoScrollCmd()
 }
 
-// scrollOneLine moves the viewport one line in dir and reports whether it actually
-// moved (false when already at the content top/bottom). Uses the bubbles viewport
-// ScrollUp/ScrollDown API.
-func (m *Model) scrollOneLine(dir autoScrollDir) bool {
+// scrollLines moves the viewport n lines in dir and reports whether it actually
+// moved (false when already at the content top/bottom). n is clamped to at least 1.
+// A partially-clamped multi-line scroll (fewer lines remaining than n) still moves
+// YOffset → returns true; the NEXT tick then moves 0 → false → disarm. That is how
+// the loop lands exactly on the content edge and stops with no extra clamp math (Req
+// 5). Uses the bubbles viewport ScrollUp/ScrollDown API, which already takes a count.
+func (m *Model) scrollLines(dir autoScrollDir, n int) bool {
+	if n < 1 {
+		n = 1
+	}
 	before := m.vp.YOffset()
 	switch dir {
 	case scrollUp:
-		m.vp.ScrollUp(1)
+		m.vp.ScrollUp(n)
 	case scrollDown:
-		m.vp.ScrollDown(1)
+		m.vp.ScrollDown(n)
 	default:
 		return false
 	}
@@ -1498,6 +1549,7 @@ func (m Model) onMouseRelease(mo tea.Mouse) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.sel.autoScroll = scrollNone // the drag is over: kill any pending autoscroll tick
+	m.sel.autoScrollRamp = 0      // self-reset acceleration so release is a true reset seam
 	if line, col, ok := screenToContent(m, mo.X, mo.Y); ok {
 		m.sel.headL = line
 		m.sel.headC = col

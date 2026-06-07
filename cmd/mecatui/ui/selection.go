@@ -39,10 +39,11 @@ const (
 // an inactive selection.
 //
 // autoScroll is the edge-drag direction: non-scrollNone while the held pointer sits
-// at the top/bottom viewport border, driving a self-re-arming tick that scrolls one
-// line at a time and extends the head to the newly-revealed line. It is cleared
-// (back to scrollNone) on release, on motion back inside the region, on esc-clear,
-// and whenever the selection goes inactive — so any in-flight tick no-ops.
+// at the top/bottom viewport border, driving a self-re-arming tick that scrolls the
+// view (ACCELERATING the longer the edge is held — see autoScrollRamp) and extends
+// the head to the newly-revealed lines. It is cleared (back to scrollNone) on
+// release, on motion back inside the region, on esc-clear, and whenever the
+// selection goes inactive — so any in-flight tick no-ops.
 type selection struct {
 	active           bool
 	anchorL, anchorC int
@@ -52,6 +53,12 @@ type selection struct {
 	// so the self-re-arming tick (which carries no fresh mouse coordinate) can keep
 	// the head at the same horizontal column as the view scrolls.
 	dragX int
+	// autoScrollRamp counts consecutive armed TICKS at the current edge; it drives the
+	// lines-per-tick acceleration (rampToLines). Reset to 0 on every disarm (release /
+	// motion-back-inside / esc / content-edge / inactive) so a fresh edge-hold restarts
+	// at 1 line. It is advanced ONLY in onAutoScroll — never in armAutoScroll, which
+	// re-fires per cell at the edge and would otherwise reset acceleration each motion.
+	autoScrollRamp int
 	// snapshot is the VISIBLE selected text (selectedText) as of the last time the
 	// selection geometry changed via a gesture — the identity anchor for the
 	// selection. The anchor/head are absolute line indices into the viewport content,
