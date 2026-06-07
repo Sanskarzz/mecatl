@@ -2,6 +2,8 @@ package ui
 
 import (
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -302,4 +304,102 @@ func colToByte(stripped string, col int) int {
 		n++
 	}
 	return pos
+}
+
+// Grapheme-cluster classes for the double-click word selector. This is a
+// hand-rolled, dependency-free classification (stdlib unicode only) — NOT UAX#29
+// word segmentation. Terminal word-select uses word-character CLASSES (the classic
+// "double-click selects the identifier/path/run" behaviour), not the linguistic
+// word boundaries UAX#29 yields, which would surprise users by splitting
+// identifiers, dotted paths, and contractions. A cluster is classified by its FIRST
+// rune.
+const (
+	classWord  = iota // letters, digits, '_' — an identifier-ish run
+	classSpace        // whitespace
+	classPunct        // everything else
+)
+
+// graphemeClass classifies a grapheme cluster by its FIRST rune into one of
+// classWord / classSpace / classPunct. An empty cluster is treated as punct (it
+// only arises defensively; wordAt never feeds it one).
+func graphemeClass(cluster string) int {
+	if cluster == "" {
+		return classPunct
+	}
+	r, _ := utf8.DecodeRuneInString(cluster)
+	switch {
+	case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_':
+		return classWord
+	case unicode.IsSpace(r):
+		return classSpace
+	default:
+		return classPunct
+	}
+}
+
+// wordAt returns the [startCol, endCol) grapheme-column span (exclusive end,
+// matching headC semantics) of the maximal run of the SAME grapheme class as the
+// cluster at col, on the already-ansi-stripped line. Columns are GRAPHEME columns,
+// never bytes, so wide/multibyte runes are handled correctly. A click on whitespace
+// selects the whitespace run; on punctuation, the punctuation run. col at/past the
+// grapheme count (a click past end-of-line) returns an empty (col, col) span — the
+// caller treats that as "nothing to select" and copies nothing.
+func wordAt(stripped string, col int) (startCol, endCol int) {
+	// Build one class per grapheme column by walking clusters once.
+	var classes []int
+	rest := stripped
+	for len(rest) > 0 {
+		cl, _ := ansi.FirstGraphemeCluster(rest, ansi.GraphemeWidth)
+		if cl == "" {
+			break
+		}
+		classes = append(classes, graphemeClass(cl))
+		rest = rest[len(cl):]
+	}
+	n := len(classes)
+	if n == 0 || col < 0 || col >= n {
+		return col, col
+	}
+	target := classes[col]
+	start := col
+	for start > 0 && classes[start-1] == target {
+		start--
+	}
+	end := col + 1
+	for end < n && classes[end] == target {
+		end++
+	}
+	return start, end
+}
+
+// wordSelect sets the selection to the word (same-class run) under the click at
+// (line, col), then re-applies the highlight + identity snapshot. An out-of-bounds
+// line index is a no-op (returns the model unchanged). A click that yields an empty
+// span (past end-of-line, or a blank line) leaves an inactive-equivalent empty
+// selection (anchor==head) so the caller copies nothing.
+func (m Model) wordSelect(line, col int) Model {
+	lines := strings.Split(m.vp.GetContent(), "\n")
+	if line < 0 || line >= len(lines) {
+		return m
+	}
+	stripped := ansi.Strip(lines[line])
+	s, e := wordAt(stripped, col)
+	m.sel = selection{active: true, anchorL: line, anchorC: s, headL: line, headC: e}
+	applySelectionHighlight(&m)
+	return m
+}
+
+// lineSelect sets the selection to the WHOLE logical line (column 0 to the line's
+// grapheme count), then re-applies the highlight + identity snapshot. An empty line
+// yields an empty selection (anchor==head) so the caller copies nothing. An
+// out-of-bounds line index is a no-op.
+func (m Model) lineSelect(line int) Model {
+	lines := strings.Split(m.vp.GetContent(), "\n")
+	if line < 0 || line >= len(lines) {
+		return m
+	}
+	stripped := ansi.Strip(lines[line])
+	m.sel = selection{active: true, anchorL: line, anchorC: 0, headL: line, headC: graphemeCount(stripped)}
+	applySelectionHighlight(&m)
+	return m
 }

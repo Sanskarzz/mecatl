@@ -48,6 +48,15 @@ func releaseMouse(m Model, x, y int) (Model, tea.Cmd) {
 }
 
 // collectLeaves runs a (possibly batched) command and returns its leaf messages.
+//
+// It executes every leaf cmd SYNCHRONOUSLY, so it must only be handed batches whose
+// leaves all return promptly — the release / right-click copy paths
+// (tea.SetClipboard + the shell-write fallback), which is what the pre-existing copy
+// tests feed it. It must NOT be handed the double/triple-click copy-on-select batch:
+// that one also carries the multi-click disarm tick (tea.Tick(clickWindow=400ms)),
+// and running it would block the full window. The click-copy tests assert on model
+// state instead (selectedText + statusMsg), so no tea.Tick is ever executed and
+// there is no timing dependence anywhere — see TestDoubleClickSelectsWord et al.
 func collectLeaves(cmd tea.Cmd) []tea.Msg {
 	var out []tea.Msg
 	var walk func(c tea.Cmd)
@@ -75,7 +84,10 @@ func collectLeaves(cmd tea.Cmd) []tea.Msg {
 // underlying type is a string, so its %v rendering IS the payload.
 func osc52Payload(leaves []tea.Msg) (string, bool) {
 	for _, msg := range leaves {
-		// shellWriteResultMsg is the other leaf; skip it.
+		// shellWriteResultMsg is the other copy-path leaf; skip it. (The multi-click
+		// disarm tick never reaches here: collectLeaves is only fed the tick-free
+		// release / right-click copy batches — the click-copy tests assert on model
+		// state instead, so this helper never walks a batch containing a tea.Tick.)
 		if _, ok := msg.(shellWriteResultMsg); ok {
 			continue
 		}
@@ -236,6 +248,40 @@ func TestRightClickCopiesExistingSelection(t *testing.T) {
 	}
 	if len(cb.wrote) != 1 || string(cb.wrote[0]) != "hello" {
 		t.Errorf("right-click shell-write not invoked: %v", cb.wrote)
+	}
+}
+
+// TestRightClickDoesNotAdvanceClickCount: a right-click is outside the multi-click
+// sequence (Req 10) — it must NOT advance clickCount/clickGen, yet it still copies
+// the existing selection.
+func TestRightClickDoesNotAdvanceClickCount(t *testing.T) {
+	m, _, y := convModel(t, "hello world here")
+
+	// Build a REAL (non-empty) selection via press+drag so the right-click has
+	// something to copy. The drag invalidates the multi-click sequence (clickCount→0)
+	// while leaving an active span.
+	m, _ = pressMouse(m, tea.MouseLeft, 0, y)
+	m, _ = motionMouse(m, 5, y) // select "hello"
+	if !m.sel.active || m.sel.empty() {
+		t.Fatal("precondition: press+drag should leave a non-empty selection")
+	}
+	// Re-arm the count to a known value WITHOUT disturbing the span (a left press
+	// would collapse it to a zero-width anchor). The right-click must leave both the
+	// count and the generation exactly as it found them.
+	m.clickCount = 1
+	m.clickGen = 7
+	beforeCount, beforeGen := m.clickCount, m.clickGen
+
+	m, cmd := pressMouse(m, tea.MouseRight, 40, y)
+
+	if m.clickCount != beforeCount {
+		t.Errorf("right-click advanced clickCount %d → %d, want it unchanged", beforeCount, m.clickCount)
+	}
+	if m.clickGen != beforeGen {
+		t.Errorf("right-click bumped clickGen %d → %d, want it unchanged", beforeGen, m.clickGen)
+	}
+	if payload, ok := osc52Payload(collectLeaves(cmd)); !ok || payload != "hello" {
+		t.Errorf("right-click should copy the existing selection, got payload %q ok=%v", payload, ok)
 	}
 }
 
@@ -948,5 +994,392 @@ func TestCtrlVPasteWithActiveSelection(t *testing.T) {
 
 	if !strings.Contains(m.ta.Value(), "pasted text") {
 		t.Errorf("ctrl+v should insert the pasted text regardless of an active selection, got %q", m.ta.Value())
+	}
+}
+
+// convModel builds a selectable model whose conversation renders the given plain
+// assistant line VERBATIM into the viewport (a plain run of words round-trips
+// through glamour unchanged), so a press maps to real, refreshView-stable content —
+// unlike a bare vp.SetContent, which refreshView (called by the copy path) would
+// clobber with the conversation render and then drop the now-mismatched selection.
+// It returns the model, the logical line index of the assistant line, and the screen
+// y to click it at; for an ASCII line the screen x equals the grapheme column.
+func convModel(t *testing.T, line string) (Model, int, int) {
+	t.Helper()
+	cb := &fakeClipboard{}
+	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
+	m.deps.NoAltScreen = false
+	m.deps.Clipboard = cb
+	m = applyAll(m,
+		tea.WindowSizeMsg{Width: 100, Height: 40},
+		client.SessionReadyMsg{SessionID: "sess-conv-0001"},
+	)
+	m.conv.addUser("req")
+	m.conv.appendAssistant(line)
+	m.phase = phaseIdle
+	m.stuck = true
+	m.refreshView()
+	m.deps.Clipboard = cb // ensure threaded after refresh
+	idx := lineIndexContaining(m.vp.GetContent(), strings.Fields(line)[0])
+	if idx < 0 {
+		t.Fatalf("assistant line %q not found in rendered content", line)
+	}
+	top := convTopRow(m)
+	y := top + (idx - m.vp.YOffset())
+	if y < top || y >= top+m.vp.Height() {
+		t.Fatalf("assistant line %d not on screen (YOffset=%d top=%d h=%d)", idx, m.vp.YOffset(), top, m.vp.Height())
+	}
+	return m, idx, y
+}
+
+// setColContent sets raw viewport content for the cases that do NOT trigger a
+// copy-driven refreshView (empty/no-copy selections): a successful copy calls
+// refreshView, which rebuilds the viewport from the CONVERSATION and would clobber
+// this raw content, so use convModel for any test that copies. Pins YOffset to 0 so
+// logical line index equals screen offset from convTopRow.
+func setColContent(t *testing.T, m Model, content string) Model {
+	t.Helper()
+	m.vp.SetContent(content)
+	m.vp.SetYOffset(0)
+	return m
+}
+
+// TestWordAtWordChars exercises the pure word classifier on word/space/punct runs,
+// boundaries, and multibyte/wide clusters. FAILS if any run is mis-bounded.
+func TestWordAtWordChars(t *testing.T) {
+	cases := []struct {
+		name             string
+		line             string
+		col              int
+		wantStart, wantE int
+	}{
+		{"mid word bar", "foo bar baz", 5, 4, 7},     // "bar" at cols 4..6
+		{"on space", "foo bar baz", 3, 3, 4},         // the single space run
+		{"snake token", "snake_case_id", 6, 0, 13},   // whole identifier
+		{"a-b on a", "a-b", 0, 0, 1},                 // "a"
+		{"a-b on dash", "a-b", 1, 1, 2},              // "-" punct run
+		{"col 0", "foo bar", 0, 0, 3},                // "foo"
+		{"col n-1", "foo bar", 6, 4, 7},              // last char of "bar"
+		{"multibyte héllo", "héllo wörld", 0, 0, 5},  // "héllo" (5 graphemes)
+		{"multibyte wörld", "héllo wörld", 6, 6, 11}, // "wörld"
+		{"wide CJK run", "日本 語", 0, 0, 2},            // "日本" (space at col 2)
+		{"wide CJK after space", "日本 語", 3, 3, 4},    // "語"
+		{"multi-char punct run", "a::b", 1, 1, 3},    // "::" bounded as one punct run [1,3)
+		// A DECOMPOSED combining cluster: 'e'+U+0301 (combining acute) is ONE grapheme
+		// cluster at col 0. Written with explicit \u escapes so an editor NFC pass
+		// cannot silently precompose it: the first word is 4 grapheme columns, so
+		// wordAt(col 0) spans [0,4) — proving grapheme-cluster (not rune) indexing.
+		// A regression to rune-indexing would see 5 runes in the first word -> [0,5).
+		{"decomposed combining", "e\u0301llo wo\u0308rld", 0, 0, 4},
+		{"past EOL", "abc", 3, 3, 3}, // col == n → empty
+		{"empty line", "", 0, 0, 0},  // empty → (0,0)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, e := wordAt(tc.line, tc.col)
+			if s != tc.wantStart || e != tc.wantE {
+				t.Errorf("wordAt(%q, %d) = (%d, %d), want (%d, %d)", tc.line, tc.col, s, e, tc.wantStart, tc.wantE)
+			}
+		})
+	}
+}
+
+// TestDoubleClickSelectsWord: two left presses at the same spot over a word select
+// the WHOLE word and copy it immediately. Asserted DETERMINISTICALLY on model state
+// — selectedText is the exact string clickCopy hands to tea.SetClipboard (payload :=
+// selectedText(...)), and statusMsg is set synchronously by clickCopy on a real copy
+// — so no cmd is executed and the 400ms disarm tick never runs (zero timing
+// dependence; this is why the test is ~0.00s).
+func TestDoubleClickSelectsWord(t *testing.T) {
+	m, _, y := convModel(t, "hello world after")
+	// "world" starts at grapheme col 6; click mid-word at col 7 (== screen x for ASCII).
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+
+	if !m.sel.active {
+		t.Fatal("double-click should leave an active selection")
+	}
+	if got := selectedText(m.vp.GetContent(), m.sel); got != "world" {
+		t.Errorf("double-click selectedText = %q, want %q (the exact OSC52 payload)", got, "world")
+	}
+	if !strings.Contains(stripANSIstr(m.statusMsg), "copied") {
+		t.Errorf("double-click status = %q, want a 'copied N chars' confirmation (copy fired)", stripANSIstr(m.statusMsg))
+	}
+}
+
+// TestTripleClickSelectsLine: a third press at the same spot selects the WHOLE
+// logical line (anchorC==0, headC==graphemeCount) and copies it. Asserted on model
+// state (selectedText + statusMsg), so no cmd / disarm tick runs — see
+// TestDoubleClickSelectsWord for why.
+func TestTripleClickSelectsLine(t *testing.T) {
+	m, idx, y := convModel(t, "hello world here")
+	stripped := ansi.Strip(strings.Split(m.vp.GetContent(), "\n")[idx])
+
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+
+	if m.sel.anchorC != 0 {
+		t.Errorf("triple-click anchorC = %d, want 0", m.sel.anchorC)
+	}
+	if want := graphemeCount(stripped); m.sel.headC != want {
+		t.Errorf("triple-click headC = %d, want graphemeCount %d", m.sel.headC, want)
+	}
+	if got := selectedText(m.vp.GetContent(), m.sel); got != "hello world here" {
+		t.Errorf("triple-click selectedText = %q, want %q (whole line, trailing trimmed)", got, "hello world here")
+	}
+	if !strings.Contains(stripANSIstr(m.statusMsg), "copied") {
+		t.Errorf("triple-click status = %q, want a 'copied N chars' confirmation (copy fired)", stripANSIstr(m.statusMsg))
+	}
+}
+
+// TestClickCountSamePositionAdvances: presses at the same logical position advance
+// 1→2→3 and a 4th WRAPS to 1 (a fresh zero-width anchor, not a line).
+func TestClickCountSamePositionAdvances(t *testing.T) {
+	m, _, y := convModel(t, "hello world here")
+
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	if m.clickCount != 1 {
+		t.Fatalf("press1 clickCount = %d, want 1", m.clickCount)
+	}
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	if m.clickCount != 2 {
+		t.Fatalf("press2 clickCount = %d, want 2", m.clickCount)
+	}
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	if m.clickCount != 3 {
+		t.Fatalf("press3 clickCount = %d, want 3", m.clickCount)
+	}
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	if m.clickCount != 1 {
+		t.Fatalf("press4 clickCount = %d, want 1 (wrap)", m.clickCount)
+	}
+	// The wrapped 4th press must be a fresh zero-width anchor, NOT a line select —
+	// and a zero-width anchor copies NOTHING. An empty selection means clickCopy is
+	// never reached (the count==1 branch returns before it) and selectedText is "",
+	// so there is provably no clipboard payload. This is the deterministic no-copy
+	// assertion (criterion 6): we never run the returned disarm tick.
+	if !m.sel.empty() {
+		t.Errorf("wrapped 4th press should be a zero-width anchor, got anchorC=%d headC=%d", m.sel.anchorC, m.sel.headC)
+	}
+	if got := selectedText(m.vp.GetContent(), m.sel); got != "" {
+		t.Errorf("wrapped 4th press selectedText = %q, want \"\" (no copy)", got)
+	}
+}
+
+// TestClickCountDifferentPositionResets: a press at a clearly different logical
+// column resets the count to 1, updates clickL/clickC, and yields a single anchor
+// (not a word).
+func TestClickCountDifferentPositionResets(t *testing.T) {
+	m, _, y := convModel(t, "hello world here")
+
+	m, _ = pressMouse(m, tea.MouseLeft, 1, y) // col A
+	if m.clickCount != 1 {
+		t.Fatalf("first press clickCount = %d, want 1", m.clickCount)
+	}
+	m, _ = pressMouse(m, tea.MouseLeft, 9, y) // clearly different col B
+	if m.clickCount != 1 {
+		t.Errorf("press at a different position clickCount = %d, want 1 (reset)", m.clickCount)
+	}
+	if m.clickC != 9 {
+		t.Errorf("clickC = %d, want 9 (recorded the new position)", m.clickC)
+	}
+	if !m.sel.empty() {
+		t.Errorf("a reset press should be a zero-width anchor, not a word: anchorC=%d headC=%d", m.sel.anchorC, m.sel.headC)
+	}
+}
+
+// TestClickDisarmResetsCount: a matching clickDisarmMsg resets the count to 0; a
+// STALE gen (after a re-arm) does NOT.
+func TestClickDisarmResetsCount(t *testing.T) {
+	m, _, y := convModel(t, "hello world here")
+
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	if m.clickCount != 1 {
+		t.Fatalf("press clickCount = %d, want 1", m.clickCount)
+	}
+	gen := m.clickGen
+	mm, _ := m.Update(clickDisarmMsg{gen: gen})
+	m = mm.(Model)
+	if m.clickCount != 0 {
+		t.Errorf("matching clickDisarmMsg should reset count to 0, got %d", m.clickCount)
+	}
+
+	// Re-arm with a new press (bumps clickGen), then feed the STALE prior-gen tick.
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	if m.clickCount != 1 {
+		t.Fatalf("re-arm press clickCount = %d, want 1", m.clickCount)
+	}
+	staleGen := m.clickGen - 1
+	// Guard: the stale gen must be genuinely PRIOR — if it accidentally equalled the
+	// current gen the test would silently pass by feeding the live disarm.
+	if staleGen == m.clickGen {
+		t.Fatal("stale gen equals current — test can't distinguish")
+	}
+	mm, _ = m.Update(clickDisarmMsg{gen: staleGen})
+	m = mm.(Model)
+	if m.clickCount != 1 {
+		t.Errorf("a stale clickDisarmMsg must NOT reset the count, got %d", m.clickCount)
+	}
+}
+
+// TestDoubleClickOnWhitespaceSelectsSpaceRun: a double-click on whitespace selects
+// the whitespace run (assert on the column span width, since selectedText trims
+// trailing spaces).
+func TestDoubleClickOnWhitespaceSelectsSpaceRun(t *testing.T) {
+	// "ab    cd": four spaces at cols 2..5 (a whitespace payload trims to "" so the
+	// click copies nothing and does NOT refreshView — the selection geometry persists).
+	m, _, y := convModel(t, "ab    cd")
+
+	m, _ = pressMouse(m, tea.MouseLeft, 3, y) // inside the space run
+	m, _ = pressMouse(m, tea.MouseLeft, 3, y)
+
+	if !m.sel.active {
+		t.Fatal("double-click on whitespace should leave an active selection")
+	}
+	if w := m.sel.headC - m.sel.anchorC; w != 4 {
+		t.Errorf("whitespace run width = %d, want 4 (cols 2..5)", w)
+	}
+	if m.sel.anchorC != 2 || m.sel.headC != 6 {
+		t.Errorf("whitespace span = [%d,%d), want [2,6)", m.sel.anchorC, m.sel.headC)
+	}
+}
+
+// assertNoCopy is the DETERMINISTIC no-copy check shared by the empty-gesture tests:
+// the selection is empty (so clickCopy's payload := selectedText(...) is "" and the
+// copy branch is never taken) AND the status carries no "copied" confirmation. It
+// touches no command, so the 400ms disarm tick is never run.
+func assertNoCopy(t *testing.T, m Model, what string) {
+	t.Helper()
+	if !m.sel.empty() {
+		t.Errorf("%s should be an empty selection, got [%d,%d)-[%d,%d)", what, m.sel.anchorL, m.sel.anchorC, m.sel.headL, m.sel.headC)
+	}
+	if got := selectedText(m.vp.GetContent(), m.sel); got != "" {
+		t.Errorf("%s selectedText = %q, want \"\" (no payload)", what, got)
+	}
+	if strings.Contains(stripANSIstr(m.statusMsg), "copied") {
+		t.Errorf("%s set a 'copied' status %q, want none (no copy fired)", what, stripANSIstr(m.statusMsg))
+	}
+}
+
+// TestDoubleClickPastEOLNoCopy: a double-click past the content width selects
+// nothing and copies nothing.
+func TestDoubleClickPastEOLNoCopy(t *testing.T) {
+	m, _ := selModel(t)
+	m = setColContent(t, m, "abc")
+	tp := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 50, tp) // well past EOL (clamps to col 3 == n)
+	m, _ = pressMouse(m, tea.MouseLeft, 50, tp)
+
+	assertNoCopy(t, m, "double-click past EOL")
+}
+
+// TestDoubleClickEmptyLineNoCopy: a double-click on a blank line copies nothing.
+func TestDoubleClickEmptyLineNoCopy(t *testing.T) {
+	m, _ := selModel(t)
+	m = setColContent(t, m, "first\n\nthird") // line 1 is blank
+	tp := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, tp+1) // the blank line
+	m, _ = pressMouse(m, tea.MouseLeft, 0, tp+1)
+
+	assertNoCopy(t, m, "double-click on a blank line")
+}
+
+// TestTripleClickEmptyLineNoCopy: a triple-click on a blank line copies nothing
+// (the whole-line span is still empty).
+func TestTripleClickEmptyLineNoCopy(t *testing.T) {
+	m, _ := selModel(t)
+	m = setColContent(t, m, "first\n\nthird")
+	tp := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, tp+1)
+	m, _ = pressMouse(m, tea.MouseLeft, 0, tp+1)
+	m, _ = pressMouse(m, tea.MouseLeft, 0, tp+1)
+
+	assertNoCopy(t, m, "triple-click on a blank line")
+}
+
+// TestMultiClickInertUnderOverlay: under each non-selectable state, two presses
+// start NO selection AND leave clickCount==0 (Req 9, count is AFTER the gate).
+func TestMultiClickInertUnderOverlay(t *testing.T) {
+	cases := []nonSelectableCase{
+		{"help", func(m *Model) { m.showHelp = true }},
+		{"noMouse", func(m *Model) { m.deps.NoMouse = true }},
+		{"noAltScreen", func(m *Model) { m.deps.NoAltScreen = true }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := selModel(t)
+			m = setColContent(t, m, "hello world")
+			tc.enter(&m)
+			if selectable(m) {
+				t.Fatalf("precondition: %s should be non-selectable", tc.name)
+			}
+			tp := convTopRow(m)
+			m, _ = pressMouse(m, tea.MouseLeft, 7, tp)
+			m, _ = pressMouse(m, tea.MouseLeft, 7, tp)
+			if m.sel.active {
+				t.Errorf("%s: presses must not start a selection", tc.name)
+			}
+			if m.clickCount != 0 {
+				t.Errorf("%s: presses must not advance clickCount (got %d)", tc.name, m.clickCount)
+			}
+		})
+	}
+}
+
+// TestDragAfterDoubleClickResetsCount: a drag-extend after a double-click resets
+// clickCount to 0 and moves the head (the word/line leaves a real anchor/head so a
+// subsequent drag extends normally).
+func TestDragAfterDoubleClickResetsCount(t *testing.T) {
+	m, _, y := convModel(t, "hello world second line")
+
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	if m.clickCount != 2 {
+		t.Fatalf("precondition: double-click clickCount = %d, want 2", m.clickCount)
+	}
+	beforeHead := m.sel.headC
+
+	m, _ = motionMouse(m, 20, y) // drag-extend to the right
+
+	if m.clickCount != 0 {
+		t.Errorf("a drag after double-click should reset clickCount to 0, got %d", m.clickCount)
+	}
+	if m.sel.headC == beforeHead {
+		t.Errorf("the drag should have moved the head (%d → %d)", beforeHead, m.sel.headC)
+	}
+}
+
+// TestDoubleClickIdentitySnapshotSurvivesRefresh: a double-click word selection
+// survives a refreshView with appended content below it (snapshot still matches, so
+// the highlight is reapplied rather than the selection dropped).
+func TestDoubleClickIdentitySnapshotSurvivesRefresh(t *testing.T) {
+	m, _, y := convModel(t, "hello world after")
+
+	// "world" at cols 6..10; double-click selects it.
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	m, _ = pressMouse(m, tea.MouseLeft, 7, y)
+	if !m.sel.active || m.sel.empty() {
+		t.Fatal("precondition: double-click should leave a non-empty selection")
+	}
+	anchorC, headC := m.sel.anchorC, m.sel.headC
+
+	m.phase = phaseRunning
+	m = applyAll(m,
+		client.AssistantDeltaMsg{Turn: 1, Text: strings.Repeat("appended\n", 5)},
+		renderTickMsg{},
+	)
+
+	if !m.sel.active {
+		t.Error("double-click selection should survive a streaming delta below it")
+	}
+	if m.sel.anchorC != anchorC || m.sel.headC != headC {
+		t.Errorf("delta moved the word selection columns: [%d,%d) → [%d,%d)", anchorC, headC, m.sel.anchorC, m.sel.headC)
+	}
+	if len(byteRanges(m.vp.GetContent(), m.sel)) == 0 {
+		t.Error("the word-selection highlight should still be derivable after the refresh")
 	}
 }

@@ -52,6 +52,25 @@ func (Model) quitDisarmCmd(gen int) tea.Cmd {
 	return tea.Tick(quitArmWindow, func(time.Time) tea.Msg { return quitDisarmMsg{gen} })
 }
 
+// clickWindow is how long a multi-click sequence (single → double → triple) stays
+// armed between presses: a press within this window of the previous one at the SAME
+// logical position advances the count; otherwise the sequence has lapsed and the
+// next press starts a fresh single click. It is enforced via the armed-generation +
+// tea.Tick disarm pattern (clickDisarmMsg), NOT a wall clock read in the reducer —
+// exactly like the double-ctrl+c quit guard, so the reducer stays a pure function of
+// its messages.
+const clickWindow = 400 * time.Millisecond
+
+// clickDisarmMsg fires clickWindow after a counted press. Its gen is the click
+// generation it was scheduled with; onClickDisarm ignores it unless it still matches
+// m.clickGen (a stale tick from a prior press cannot reset a freshly-advanced count).
+type clickDisarmMsg struct{ gen int }
+
+// clickDisarmCmd schedules the one-shot multi-click disarm tick for click generation gen.
+func (Model) clickDisarmCmd(gen int) tea.Cmd {
+	return tea.Tick(clickWindow, func(time.Time) tea.Msg { return clickDisarmMsg{gen} })
+}
+
 // markDirty records that a streamed delta mutated the conversation and returns the
 // updated model plus the command to drive the coalesced flush. It arms a one-shot
 // renderTickMsg ONLY when none is already pending (tickArmed) — so a burst of deltas
@@ -143,17 +162,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		return m.onResize(msg)
 
-	case tea.MouseWheelMsg:
-		return m.onMouseWheel(msg)
-
-	case tea.MouseClickMsg:
-		return m.onMousePress(msg.Mouse())
-
-	case tea.MouseMotionMsg:
-		return m.onMouseMotion(msg.Mouse())
-
-	case tea.MouseReleaseMsg:
-		return m.onMouseRelease(msg.Mouse())
+	case tea.MouseWheelMsg, tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
+		return m.onMouseMsg(msg)
 
 	case autoScrollMsg:
 		return m.onAutoScroll()
@@ -174,6 +184,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case quitDisarmMsg:
 		return m.onQuitDisarm(msg)
+
+	case clickDisarmMsg:
+		return m.onClickDisarm(msg)
 
 	default:
 		// Lifecycle / transport msgs (session-ready, connect/stream error, stream
@@ -606,6 +619,17 @@ func (m Model) onQuitDisarm(msg quitDisarmMsg) (tea.Model, tea.Cmd) {
 			m.statusMsg = ""
 		}
 		m.refreshView()
+	}
+	return m, nil
+}
+
+// onClickDisarm handles the timed multi-click disarm tick: it resets the click
+// count to 0 ONLY if the tick matches the current click generation (a stale tick
+// from a prior press must not reset a count advanced by a press since). It mutates
+// no visible state, so no refreshView is needed.
+func (m Model) onClickDisarm(msg clickDisarmMsg) (tea.Model, tea.Cmd) {
+	if msg.gen == m.clickGen {
+		m.clickCount = 0
 	}
 	return m, nil
 }
@@ -1211,6 +1235,25 @@ func (m Model) onMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// onMouseMsg fans the four mouse message types out to their handlers. It is one
+// switch case in update() (keeping update()'s cyclomatic complexity bounded) that
+// re-discriminates the concrete mouse type here, where the dispatch logically
+// belongs.
+func (m Model) onMouseMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.MouseWheelMsg:
+		return m.onMouseWheel(msg)
+	case tea.MouseClickMsg:
+		return m.onMousePress(msg.Mouse())
+	case tea.MouseMotionMsg:
+		return m.onMouseMotion(msg.Mouse())
+	case tea.MouseReleaseMsg:
+		return m.onMouseRelease(msg.Mouse())
+	default:
+		return m, nil
+	}
+}
+
 // onMousePress handles a mouse button press. A LEFT press in the conversation
 // region anchors a new selection (when selectable — no overlay owns the body, alt
 // screen on); a RIGHT press copies the current selection if one exists (a
@@ -1224,6 +1267,9 @@ func (m Model) onMousePress(mo tea.Mouse) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseLeft:
+		// The selectable gate AND the count logic sit here, AFTER the gate: a press
+		// while an overlay owns the body (or under --no-mouse/--inline) starts nothing
+		// AND does not advance the multi-click count (Req 9).
 		if !selectable(m) {
 			return m, nil
 		}
@@ -1231,12 +1277,60 @@ func (m Model) onMousePress(mo tea.Mouse) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
-		m.sel = selection{active: true, anchorL: line, anchorC: col, headL: line, headC: col}
-		applySelectionHighlight(&m)
-		return m, nil
+
+		// Advance the multi-click count. Same LOGICAL position (line,col) within the
+		// armed window → increment with wrap 1→2→3→1; a different position (or a lapsed
+		// sequence, clickCount==0) → a fresh single click. Position equality is by
+		// logical content position, NOT raw x/y (Req 5).
+		if m.clickCount > 0 && line == m.clickL && col == m.clickC {
+			m.clickCount++
+			if m.clickCount > 3 {
+				m.clickCount = 1
+			}
+		} else {
+			m.clickCount = 1
+			m.clickL, m.clickC = line, col
+		}
+		m.clickGen++
+		disarm := m.clickDisarmCmd(m.clickGen)
+
+		switch m.clickCount {
+		case 2:
+			m = m.wordSelect(line, col)
+		case 3:
+			m = m.lineSelect(line)
+		default: // 1 (and a wrapped 4th press): today's zero-width anchor, no copy.
+			m.sel = selection{active: true, anchorL: line, anchorC: col, headL: line, headC: col}
+			applySelectionHighlight(&m)
+			return m, disarm
+		}
+
+		// Word/line select copies immediately (copy-on-select), but only when the
+		// gesture produced a non-empty span — a double-click past end-of-line, or a
+		// triple-click on a blank line, yields an empty selection and copies nothing.
+		if m.sel.empty() {
+			return m, disarm
+		}
+		return m.clickCopy(disarm)
 	default:
 		return m, nil
 	}
+}
+
+// clickCopy copies the current (word/line) selection immediately — the copy-on-select
+// behaviour for double/triple-click — and BATCHES the multi-click disarm tick with
+// the copy commands so the sequence still lapses on its own. It mirrors
+// copySelection's status + OSC52 + shell-write fallback rather than reusing it,
+// because copySelection's signature is shared with the right-click and
+// release-on-drag paths (which carry no disarm) and must stay unchanged.
+func (m Model) clickCopy(disarm tea.Cmd) (tea.Model, tea.Cmd) {
+	payload := selectedText(m.vp.GetContent(), m.sel)
+	if payload == "" {
+		return m, disarm
+	}
+	m.statusMsg = m.deps.Theme.Style("muted").Render(fmt.Sprintf("copied %s", plural(len([]rune(payload)), "char")))
+	m.refreshView()
+	return m, tea.Batch(tea.SetClipboard(payload), m.shellWriteCmd(payload), disarm)
 }
 
 // autoScrollInterval is the cadence of the edge-drag autoscroll tick. ~50ms ≈ 20
@@ -1267,6 +1361,11 @@ func (m Model) onMouseMotion(mo tea.Mouse) (tea.Model, tea.Cmd) {
 	if !m.sel.active {
 		return m, nil
 	}
+	// A real drag-extend invalidates any in-flight multi-click sequence (so the next
+	// press after a drag is a fresh single click, not a phantom double). Placed AFTER
+	// the active guard so a BARE hover (no held selection) leaves the count untouched.
+	// Only clickCount is cleared — sel.autoScroll is the drag's own concern below.
+	m.clickCount = 0
 	top := convTopRow(m)
 	if top < 0 {
 		return m, nil
@@ -1463,11 +1562,20 @@ func applySelectionHighlight(m *Model) {
 // highlight in place. It is called from the SINGLE selectable→non-selectable
 // chokepoint in Update (Req 8) and from the esc-clear path. A no-op when nothing is
 // selected. Value-receiver-friendly: returns the mutated Model.
+//
+// It also zeroes the multi-click sequence (clickCount): esc-clear and the
+// non-selectable chokepoint both drop the selection but predate the multi-click
+// machinery, so without this a sequence armed just before an esc / overlay-open
+// could carry into the next press. The drag-invalidation, different-position reset,
+// disarm tick, and resetSession already cover the cases that matter; this is the
+// belt-and-suspenders symmetry that keeps "selection dropped ⟹ sequence dropped"
+// true at every seam.
 func (m Model) clearSelection() Model {
 	if m.sel.active {
 		m.sel = selection{} // zeroes autoScroll too
 		m.vp.ClearHighlights()
 	}
+	m.clickCount = 0
 	return m
 }
 

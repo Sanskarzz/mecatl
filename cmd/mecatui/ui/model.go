@@ -226,6 +226,24 @@ type Model struct {
 	quitArmed  bool
 	quitArmGen int
 
+	// clickCount tracks the multi-click sequence for word/line select, mirroring the
+	// quitArmed machinery: 0 = no sequence (disarmed), 1 = single click (today's
+	// zero-width anchor), 2 = double-click (word select), 3 = triple-click (whole-line
+	// select); a 4th press at the same spot WRAPS 3→1 (re-anchoring a zero-width
+	// selection). A press at a DIFFERENT logical (line,col) resets the count to 1.
+	// clickGen is the monotonic arm generation: the disarm tick (clickDisarmMsg)
+	// carries the gen it was armed with, so a stale tick (the count was reset and
+	// re-armed in between) is ignored — exactly like quitArmGen. clickL/clickC record
+	// the LOGICAL (line,col) of the last counted press (from screenToContent, NOT raw
+	// x/y) so same-position equality is by content position and survives layout. A
+	// drag that extends the head invalidates the sequence (clickCount=0). Zeroed in
+	// resetSession alongside m.sel — a /clear rebuilds the transcript, so a pending
+	// multi-click anchored into the old content is stale.
+	clickCount int
+	clickGen   int
+	clickL     int
+	clickC     int
+
 	// caps is the connected server's advertised capabilities, delivered once on
 	// SessionReadyMsg. It drives the honest discoverability affordances (which
 	// chords the help overlay annotates as available, and whether an empty
@@ -394,6 +412,8 @@ func (m Model) resetSession() Model {
 	// anchored into the old content is stale. The caller's refreshView re-renders
 	// without re-applying it (sel is now inactive), clearing the highlight too.
 	m.sel = selection{}
+	// Drop any pending multi-click sequence: it is anchored into the old content.
+	m.clickCount = 0
 	return m
 }
 

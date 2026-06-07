@@ -318,6 +318,7 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 | `home` / `end` | jump to the top / bottom of the conversation (`end` resumes auto-follow) |
 | mouse wheel | scroll the conversation (**alt screen only**; see below) |
 | mouse drag (left) | **select text** in the conversation — drag to an edge auto-scrolls; copies on release (alt screen only; see below) |
+| double / triple-click (left) | select word / whole line (copies; alt screen only) |
 | right-click | copy the current selection (if any) |
 | `esc` (with an active selection) | **clear the selection** first — before any other `esc` meaning |
 | `?` | help overlay (on an empty prompt) |
@@ -356,8 +357,12 @@ than one screenful) — it scrolls continuously while you hold at the edge and s
 at the content top/bottom. On **release** the visible
 selection is copied (the default is copy-on-select): the ANSI styling and the
 gutter/right-padding are stripped, multi-line selections join with `\n`, and the
-footer/status confirms with a muted **`copied N chars`**. A **right-click** copies
-the current selection too. **`esc`** clears an active selection **before** its other
+footer/status confirms with a muted **`copied N chars`**. A **double-click** selects
+the **word** under the cursor (a maximal run of word characters, whitespace, or
+punctuation) and a **triple-click** selects the **whole logical line** — both
+highlight and copy immediately, just like copy-on-select; a fourth click at the same
+spot cycles back to a plain anchor. A **right-click** copies the current selection
+too. **`esc`** clears an active selection **before** its other
 meanings (cancel a run / close an overlay / clear the input or queue); with no
 selection, `esc` behaves exactly as before. Selection is **blocked** while an
 overlay/modal owns the screen (permission ask, `/mcp`, `/team`, `/agents`,

@@ -1,44 +1,44 @@
  mecatui  ·  session sess-test-00  ·  mock-model  ·  mode default  ·  127.0.0.1:8080
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃                                                                                                                    ┃
-┃  mecatui — keys & features                                                                                         ┃
-┃                                                                                                                    ┃
-┃  Prompting                                                                                                         ┃
-┃    enter         send the prompt                                                                                   ┃
-┃    shift+enter   newline (also ctrl+j)                                                                             ┃
-┃    /             slash-command palette (built-ins always; workspace commands when enabled)                         ┃
-┃    @             attach a file: image/audio inlines as media (when supported), else inlines text                   ┃
-┃    ctrl+v        paste a clipboard image as an attachment (when supported), else paste text                        ┃
-┃    esc           cancel the running turn                                                                           ┃
-┃                                                                                                                    ┃
-┃  While a run is streaming                                                                                          ┃
-┃    enter         queue a follow-up (sends when the turn ends)                                                      ┃
-┃    esc           clear staged input / queue, else cancel run                                                       ┃
-┃                                                                                                                    ┃
-┃  Inspect (while idle)                                                                                              ┃
-┃    ctrl+o        MCP inventory  [not enabled]                                                                      ┃
-┃    ctrl+r        MCP resources  [not enabled]                                                                      ┃
-┃    ctrl+p        MCP prompts  [not enabled]                                                                        ┃
-┃    ctrl+a        agent team                                                                                        ┃
-┃    ctrl+t        expand/collapse details                                                                           ┃
-┃                                                                                                                    ┃
-┃  General                                                                                                           ┃
-┃    pgup/pgdn     scroll the conversation (a ↑NN% header cue shows while scrolled up)                               ┃
-┃    home/end      jump to top / bottom (end resumes auto-follow)                                                    ┃
-┃    wheel         mouse-wheel scroll (alt screen only)                                                              ┃
-┃    drag          select text · drag to an edge auto-scrolls · copies on release · right-click copies · esc clears  ┃
-┃    ?             this help (on an empty prompt)                                                                    ┃
-┃    ctrl+c        quit (press twice; first press clears the prompt or arms, again within 3s exits)                  ┃
-┃                                                                                                                    ┃
-┃  Skills run automatically when the model needs them — not a browsable                                              ┃
-┃  list; watch the transcript for Skill tool calls.                                                                  ┃
-┃  Cross-session memory is on — context carries across runs.                                                         ┃
-┃  Type @ to attach a file — this model takes text only, so files inline as text.                                    ┃
-┃                                                                                                                    ┃
-┃  esc or ? to close                                                                                                 ┃
-┃                                                                                                                    ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                                                                                                                                                            ┃
+┃  mecatui — keys & features                                                                                                                                 ┃
+┃                                                                                                                                                            ┃
+┃  Prompting                                                                                                                                                 ┃
+┃    enter         send the prompt                                                                                                                           ┃
+┃    shift+enter   newline (also ctrl+j)                                                                                                                     ┃
+┃    /             slash-command palette (built-ins always; workspace commands when enabled)                                                                 ┃
+┃    @             attach a file: image/audio inlines as media (when supported), else inlines text                                                           ┃
+┃    ctrl+v        paste a clipboard image as an attachment (when supported), else paste text                                                                ┃
+┃    esc           cancel the running turn                                                                                                                   ┃
+┃                                                                                                                                                            ┃
+┃  While a run is streaming                                                                                                                                  ┃
+┃    enter         queue a follow-up (sends when the turn ends)                                                                                              ┃
+┃    esc           clear staged input / queue, else cancel run                                                                                               ┃
+┃                                                                                                                                                            ┃
+┃  Inspect (while idle)                                                                                                                                      ┃
+┃    ctrl+o        MCP inventory  [not enabled]                                                                                                              ┃
+┃    ctrl+r        MCP resources  [not enabled]                                                                                                              ┃
+┃    ctrl+p        MCP prompts  [not enabled]                                                                                                                ┃
+┃    ctrl+a        agent team                                                                                                                                ┃
+┃    ctrl+t        expand/collapse details                                                                                                                   ┃
+┃                                                                                                                                                            ┃
+┃  General                                                                                                                                                   ┃
+┃    pgup/pgdn     scroll the conversation (a ↑NN% header cue shows while scrolled up)                                                                       ┃
+┃    home/end      jump to top / bottom (end resumes auto-follow)                                                                                            ┃
+┃    wheel         mouse-wheel scroll (alt screen only)                                                                                                      ┃
+┃    drag          select text · drag to an edge auto-scrolls · copies on release · double-click word · triple-click line · right-click copies · esc clears  ┃
+┃    ?             this help (on an empty prompt)                                                                                                            ┃
+┃    ctrl+c        quit (press twice; first press clears the prompt or arms, again within 3s exits)                                                          ┃
+┃                                                                                                                                                            ┃
+┃  Skills run automatically when the model needs them — not a browsable                                                                                      ┃
+┃  list; watch the transcript for Skill tool calls.                                                                                                          ┃
+┃  Cross-session memory is on — context carries across runs.                                                                                                 ┃
+┃  Type @ to attach a file — this model takes text only, so files inline as text.                                                                            ┃
+┃                                                                                                                                                            ┃
+┃  esc or ? to close                                                                                                                                         ┃
+┃                                                                                                                                                            ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
 ┃
 ┃
