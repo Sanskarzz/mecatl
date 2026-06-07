@@ -280,6 +280,13 @@ func (t *Theme) compile() {
 			Foreground(col(p.TextMuted)).
 			Bold(true),
 
+		// In-app text selection highlight (mouse-drag select + copy). Reverse video
+		// is deliberately theme-INDEPENDENT (it swaps fg/bg via SGR 7, so it reads on
+		// any palette) and survives an ANSI-strip cleanly in the stripped View
+		// goldens — keeping the steady-state goldens unaffected while a selection is
+		// visible only when one is active.
+		"selection": lipgloss.NewStyle().Reverse(true),
+
 		// Context-window pressure slots for the footer meter: success when the
 		// context is comfortably below the compaction band, warning approaching
 		// it, danger once over it.

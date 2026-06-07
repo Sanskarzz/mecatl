@@ -12,15 +12,27 @@ import (
 	"time"
 )
 
-// Clipboard reads the OS clipboard for ctrl+v paste. Read returns the clipboard's
+// Clipboard reads AND writes the OS clipboard. Read returns the clipboard's
 // content as a (mime, data) pair: an image/* mime when the clipboard holds an
 // image (which the UI stages as an inline media part), or a text mime (text/plain)
 // when it holds text (which the UI inserts into the textarea). The mime tells the
-// caller which branch to take. A nil Clipboard on Deps cleanly disables ctrl+v
-// (the same convention as a nil MCP/Cmds collaborator). The UI imports client, so
-// the interface + its sentinels live here, not in the ui package.
+// caller which branch to take. Write is the BEST-EFFORT shell-clipboard fallback
+// behind the in-app text-selection copy: the UI's primary copy path is OSC52
+// (tea.SetClipboard), and Write mirrors the same payload into the platform
+// clipboard binary so the copy still lands on terminals that don't honour OSC52.
+// A Write error is non-fatal — OSC52 is the primary and the copy is considered to
+// have succeeded if either path works — so the UI must NOT surface it loudly. A
+// nil Clipboard on Deps cleanly disables BOTH ctrl+v read and the shell write (the
+// same convention as a nil MCP/Cmds collaborator); the OSC52 copy still runs. The
+// UI imports client, so the interface + its sentinels live here, not in the ui
+// package.
 type Clipboard interface {
 	Read(ctx context.Context) (mime string, data []byte, err error)
+	// Write copies data (of the given mime, e.g. "text/plain") into the OS
+	// clipboard via the platform binary. It is best-effort; a missing backend or a
+	// failed subprocess returns an error the caller is expected to treat as a muted
+	// non-event, never a transcript error.
+	Write(ctx context.Context, mime string, data []byte) error
 }
 
 var (
@@ -38,6 +50,10 @@ var (
 // hung wl-paste) can never block the UI's command goroutine indefinitely.
 const clipboardTimeout = 3 * time.Second
 
+// binXclip is the X11 clipboard binary used for both the read (list/fetch) and the
+// write (`-i`) paths; named once so the read/write argv share one spelling.
+const binXclip = "xclip"
+
 // shellClipboard is the production Clipboard: it shells out to the platform's
 // clipboard binary. os/exec is allowed in the client package (it already does
 // os/net/http in media.go) but FORBIDDEN in the ui/domain/port layers — hence
@@ -49,6 +65,9 @@ type shellClipboard struct {
 	lookPath func(string) (string, error)
 	getenv   func(string) string
 	timeout  time.Duration
+	// runStdin feeds stdin to a backend (the copy WRITE path). Injected like run so
+	// tests drive the shell write offline. Returns the subprocess error, if any.
+	runStdin func(ctx context.Context, stdin []byte, name string, args ...string) error
 }
 
 // NewClipboard wires the real backend: exec.CommandContext(...).Output(), the real
@@ -61,6 +80,11 @@ func NewClipboard() Clipboard {
 		lookPath: exec.LookPath,
 		getenv:   os.Getenv,
 		timeout:  clipboardTimeout,
+		runStdin: func(ctx context.Context, stdin []byte, name string, args ...string) error {
+			cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // fixed backend binary names selected by capability probe; args are constant.
+			cmd.Stdin = bytes.NewReader(stdin)
+			return cmd.Run()
+		},
 	}
 }
 
@@ -79,6 +103,9 @@ type backend struct {
 	imageArgs []string
 	// textArgs fetches the clipboard text.
 	textArgs []string
+	// writeTextArgs WRITES stdin to the clipboard (the copy fallback). Empty when
+	// the backend has no shell write path; Write then no-ops with an error.
+	writeTextArgs []string
 }
 
 // selectBackend probes the environment + PATH for a usable clipboard backend, in
@@ -97,13 +124,15 @@ func (c *shellClipboard) selectBackend() (backend, error) {
 			listTypesArgs: []string{"wl-paste", "--list-types"},
 			imageArgs:     []string{"wl-paste", "--no-newline", "--type", "image/png"},
 			textArgs:      []string{"wl-paste", "--no-newline"},
+			writeTextArgs: writeArgsFor(c.lookPath, "wl-copy"),
 		}, nil
-	case c.getenv("DISPLAY") != "" && has("xclip"):
+	case c.getenv("DISPLAY") != "" && has(binXclip):
 		return backend{
-			name:          "xclip",
-			listTypesArgs: []string{"xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"},
-			imageArgs:     []string{"xclip", "-selection", "clipboard", "-t", "image/png", "-o"},
-			textArgs:      []string{"xclip", "-selection", "clipboard", "-o"},
+			name:          binXclip,
+			listTypesArgs: []string{binXclip, "-selection", "clipboard", "-t", "TARGETS", "-o"},
+			imageArgs:     []string{binXclip, "-selection", "clipboard", "-t", "image/png", "-o"},
+			textArgs:      []string{binXclip, "-selection", "clipboard", "-o"},
+			writeTextArgs: []string{binXclip, "-selection", "clipboard", "-i"},
 		}, nil
 	case has("pngpaste") || has("pbpaste"):
 		// macOS. pngpaste fetches a clipboard image to stdout ("-"); it has no
@@ -117,6 +146,8 @@ func (c *shellClipboard) selectBackend() (backend, error) {
 		if has("pngpaste") {
 			b.imageArgs = []string{"pngpaste", "-"}
 		}
+		// pbcopy is the macOS clipboard WRITE binary (it always ships with pbpaste).
+		b.writeTextArgs = writeArgsFor(c.lookPath, "pbcopy")
 		return b, nil
 	case has("powershell"):
 		// Windows. Get-Clipboard yields text; GetImage() + the PNG stream yields the
@@ -126,10 +157,51 @@ func (c *shellClipboard) selectBackend() (backend, error) {
 			name:      "powershell",
 			imageArgs: []string{"powershell", "-NoProfile", "-Command", winImageScript},
 			textArgs:  []string{"powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"},
+			// clip.exe reads stdin and sets the clipboard; it ships on every Windows.
+			writeTextArgs: writeArgsFor(c.lookPath, "clip"),
 		}, nil
 	default:
 		return backend{}, ErrNoClipboardTool
 	}
+}
+
+// writeArgsFor returns the single-binary write argv (a bare {bin}) when bin is on
+// PATH, or nil when it is not — so a backend whose READ binary exists but whose
+// WRITE binary (wl-copy / pbcopy / clip) does not simply has no shell write path
+// and Write no-ops with an error (OSC52 still carries the copy).
+func writeArgsFor(lookPath func(string) (string, error), bin string) []string {
+	if _, err := lookPath(bin); err != nil {
+		return nil
+	}
+	return []string{bin}
+}
+
+// Write implements Clipboard's best-effort shell-clipboard WRITE: it resolves the
+// platform backend, pipes data to its write binary's stdin, and returns any
+// subprocess/backend error. It is the FALLBACK behind the UI's OSC52 copy — the UI
+// batches it alongside tea.SetClipboard and treats a returned error as a muted
+// non-event, so a missing wl-copy/xclip/pbcopy/clip never surfaces loudly. A
+// no-backend environment is ErrNoClipboardTool; a backend without a write path is a
+// plain "no clipboard write backend" error. The payload is size-capped at
+// maxMediaBytes (parity with the read path) BEFORE any subprocess is spawned, so a
+// pathological selection can't pipe an unbounded blob into the clipboard binary.
+func (c *shellClipboard) Write(ctx context.Context, _ string, data []byte) error {
+	if len(data) > maxMediaBytes {
+		return fmt.Errorf("clipboard write payload is %d bytes, over the %d-byte limit", len(data), maxMediaBytes)
+	}
+	b, err := c.selectBackend()
+	if err != nil {
+		return err
+	}
+	if len(b.writeTextArgs) == 0 {
+		return errors.New("no clipboard write backend")
+	}
+	if to := c.timeout; to > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, to)
+		defer cancel()
+	}
+	return c.runStdin(ctx, data, b.writeTextArgs[0], b.writeTextArgs[1:]...)
 }
 
 // winImageScript fetches a clipboard image as raw PNG bytes on stdout. Kept as a

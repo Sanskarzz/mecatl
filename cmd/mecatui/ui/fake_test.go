@@ -201,6 +201,13 @@ type fakeClipboard struct {
 	// byte-distinguishable images across multiple ctrl+v presses so the submit-time
 	// part ordering is assertable. mime still applies to every read.
 	seq [][]byte
+
+	// wrote records the payloads passed to Write (the best-effort shell-clipboard
+	// copy fallback) so the in-app text-selection copy tests can assert the shell
+	// path was invoked with the exact payload. writeErr, when set, is returned by
+	// Write to model a missing/failed backend (which the UI must swallow).
+	wrote    [][]byte
+	writeErr error
 }
 
 func (f *fakeClipboard) Read(_ context.Context) (string, []byte, error) {
@@ -216,6 +223,13 @@ func (f *fakeClipboard) Read(_ context.Context) (string, []byte, error) {
 		return f.mime, f.seq[i], nil
 	}
 	return f.mime, f.data, nil
+}
+
+// Write records the payload (so the copy tests can assert the shell-clipboard
+// fallback was invoked) and returns writeErr, modelling the best-effort backend.
+func (f *fakeClipboard) Write(_ context.Context, _ string, data []byte) error {
+	f.wrote = append(f.wrote, append([]byte(nil), data...))
+	return f.writeErr
 }
 
 // fakeMCP is a scripted client.MCP for the overlay tests: each method returns its

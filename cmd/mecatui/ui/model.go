@@ -273,6 +273,15 @@ type Model struct {
 	// handler O(1) and avoids renumbering every staged marker on each edit.
 	stagedMedia map[string]stagedAttachment
 	nextMediaN  int
+
+	// sel is the in-app text-selection state (mouse-drag select + copy over the
+	// conversation viewport). Zero value = inactive. Its coordinates are LOGICAL
+	// content positions (line index + grapheme column into the ansi-stripped line),
+	// so the highlight survives scrolling and a streaming re-render — the byte
+	// ranges are recomputed from the CURRENT content each frame (see
+	// applySelectionHighlight / refreshView). Active only on the alt screen; an
+	// overlay/modal/help blocks a new selection and clears an active one.
+	sel selection
 }
 
 // New builds the root model from deps. It wires the widgets but does not connect;
@@ -291,6 +300,11 @@ func New(deps Deps) Model {
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(th.Style("spinner")))
 
 	vp := viewport.New()
+	// In-app text-selection highlight style. The viewport re-applies it on every
+	// render (it survives scroll/stream), and SetContent clears the ranges — so the
+	// ranges are re-applied after each refreshView (applySelectionHighlight) while a
+	// selection is active. Reverse video is theme-independent and ANSI-strips cleanly.
+	vp.HighlightStyle = th.Style("selection")
 
 	return Model{
 		deps:  deps,
@@ -367,6 +381,10 @@ func (m Model) resetSession() Model {
 	// state, and pasted-but-unsent images are part of that compose state.
 	m.stagedMedia = nil
 	m.nextMediaN = 0
+	// Drop any active text selection: /clear rebuilds the transcript, so a selection
+	// anchored into the old content is stale. The caller's refreshView re-renders
+	// without re-applying it (sel is now inactive), clearing the highlight too.
+	m.sel = selection{}
 	return m
 }
 

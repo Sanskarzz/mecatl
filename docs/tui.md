@@ -317,6 +317,9 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 | `pgup` / `pgdn` | scroll the conversation up / down |
 | `home` / `end` | jump to the top / bottom of the conversation (`end` resumes auto-follow) |
 | mouse wheel | scroll the conversation (**alt screen only**; see below) |
+| mouse drag (left) | **select text** in the conversation — drag to an edge auto-scrolls; copies on release (alt screen only; see below) |
+| right-click | copy the current selection (if any) |
+| `esc` (with an active selection) | **clear the selection** first — before any other `esc` meaning |
 | `?` | help overlay (on an empty prompt) |
 | `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`, `/soul`, `/usermodel`, `/models`; plus workspace commands) |
 | `ctrl+a` | open the **live agent-team overlay** (the full roster + per-member focus of the most-recent team) — works **while idle and mid-run**; inert under a permission modal. Same surface as `/team`. |
@@ -339,12 +342,35 @@ the bottom), and auto-follow stays off. Scrolling back to the bottom — `pgdn` 
 the end, `end`, or the wheel — re-pins the view and resumes auto-follow.
 
 The **mouse wheel** is only active on the alternate screen (the default full-screen
-TUI). With `--inline` / `--no-alt-screen` the terminal's own scrollback and
-selection are left untouched (no mouse capture). On the alt screen, capturing the
-mouse for wheel-scroll also grabs plain click-drag, so to make a **native text
-selection** hold **Shift** (in iTerm2, **⌥ Option**) while dragging — that bypasses
-the app's mouse grab. (Bubble Tea v2 has no wheel-only mouse mode, so this
-Shift-bypass is how wheel-scroll and text selection coexist.)
+TUI). With `--inline` / `--no-alt-screen` the terminal's own scrollback and native
+selection are left untouched (no mouse capture).
+
+**In-app text selection + copy (alt screen).** On the alt screen the app captures
+the mouse, so it provides its **own** text selection: **left-click-drag** over the
+conversation highlights the runes under the drag (press = anchor, drag = extend,
+release = finalize). The highlight is **logical** — it survives scrolling (wheel,
+`pgup`/`pgdn`, `home`/`end`) and a streaming re-render. Dragging to the **top or
+bottom edge** of the conversation **auto-scrolls** the view in that direction and
+keeps extending the selection over the newly-revealed lines (so you can select more
+than one screenful) — it scrolls continuously while you hold at the edge and stops
+at the content top/bottom. On **release** the visible
+selection is copied (the default is copy-on-select): the ANSI styling and the
+gutter/right-padding are stripped, multi-line selections join with `\n`, and the
+footer/status confirms with a muted **`copied N chars`**. A **right-click** copies
+the current selection too. **`esc`** clears an active selection **before** its other
+meanings (cancel a run / close an overlay / clear the input or queue); with no
+selection, `esc` behaves exactly as before. Selection is **blocked** while an
+overlay/modal owns the screen (permission ask, `/mcp`, `/team`, `/agents`,
+`/skills`, `/soul`, `/usermodel`, `/models`, help, the fatal screen) — a press there
+starts nothing, and opening an overlay mid-drag clears the selection. The wheel
+still scrolls while a selection exists, without clearing it.
+
+The copy uses **OSC52** (`tea.SetClipboard`) as the primary path and **also**
+mirrors the payload into the platform clipboard binary as a best-effort fallback —
+**wl-copy** (Wayland), **`xclip -selection clipboard -i`** (X11), **pbcopy**
+(macOS), **clip** (Windows). The shell write is best-effort: if no binary is present
+the OSC52 copy still carries the selection, and a failed shell write is never
+surfaced as an error.
 
 ### Type-while-running and queued follow-ups
 

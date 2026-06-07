@@ -317,3 +317,118 @@ func TestHasImageTypeSpaceSeparated(t *testing.T) {
 		t.Error("newline-separated listing with image/jpeg should report an image type")
 	}
 }
+
+// stdinRecorder is an injected runStdin that records the (argv, stdin) it was
+// invoked with so a Write test can assert the EXACT backend command + payload (not
+// a shell), and returns a canned error keyed by the space-joined argv.
+type stdinRecorder struct {
+	got   [][]string
+	stdin [][]byte
+	errs  map[string]error
+}
+
+func (r *stdinRecorder) run(_ context.Context, stdin []byte, name string, args ...string) error {
+	argv := append([]string{name}, args...)
+	r.got = append(r.got, argv)
+	r.stdin = append(r.stdin, append([]byte(nil), stdin...))
+	return r.errs[join(argv)]
+}
+
+// clipWriteWith builds a shellClipboard wired for the WRITE path: a read runner
+// (unused by Write but required by selectBackend's struct), an injected runStdin
+// recorder, and the lookPath/getenv pair selecting a backend.
+func clipWriteWith(stdin *stdinRecorder, have map[string]bool, env map[string]string) *shellClipboard {
+	cb := clipWith(&recordingRunner{}, have, env)
+	cb.runStdin = stdin.run
+	return cb
+}
+
+// TestClipboardWriteWayland: a Wayland environment with wl-copy on PATH writes the
+// payload to the EXACT wl-copy argv (stdin), not a shell.
+func TestClipboardWriteWayland(t *testing.T) {
+	rec := &stdinRecorder{}
+	cb := clipWriteWith(rec, map[string]bool{"wl-paste": true, "wl-copy": true}, map[string]string{"WAYLAND_DISPLAY": "wayland-0"})
+
+	if err := cb.Write(context.Background(), "text/plain", []byte("hello copy")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if len(rec.got) != 1 || !reflect.DeepEqual(rec.got[0], []string{"wl-copy"}) {
+		t.Fatalf("write argv = %v, want a single [wl-copy]", rec.got)
+	}
+	if !bytes.Equal(rec.stdin[0], []byte("hello copy")) {
+		t.Errorf("stdin = %q, want the payload", rec.stdin[0])
+	}
+}
+
+// TestClipboardWriteX11: an X11 environment writes via `xclip -selection clipboard
+// -i` with the payload on stdin.
+func TestClipboardWriteX11(t *testing.T) {
+	rec := &stdinRecorder{}
+	cb := clipWriteWith(rec, map[string]bool{"xclip": true}, map[string]string{"DISPLAY": ":0"})
+
+	if err := cb.Write(context.Background(), "text/plain", []byte("x11 payload")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if len(rec.got) != 1 || !reflect.DeepEqual(rec.got[0], []string{"xclip", "-selection", "clipboard", "-i"}) {
+		t.Fatalf("write argv = %v, want xclip -selection clipboard -i", rec.got)
+	}
+	if !bytes.Equal(rec.stdin[0], []byte("x11 payload")) {
+		t.Errorf("stdin = %q, want the payload", rec.stdin[0])
+	}
+}
+
+// TestClipboardWriteNoBackend: with no clipboard binary at all, Write returns
+// ErrNoClipboardTool (the caller swallows it — OSC52 still carried the copy).
+func TestClipboardWriteNoBackend(t *testing.T) {
+	rec := &stdinRecorder{}
+	cb := clipWriteWith(rec, map[string]bool{}, map[string]string{})
+
+	if err := cb.Write(context.Background(), "text/plain", []byte("x")); !errors.Is(err, ErrNoClipboardTool) {
+		t.Errorf("Write err = %v, want ErrNoClipboardTool", err)
+	}
+	if len(rec.got) != 0 {
+		t.Errorf("no backend should run nothing, ran %v", rec.got)
+	}
+}
+
+// TestClipboardWriteReadBinaryButNoWriteBinary: a Wayland environment where
+// wl-paste exists but wl-copy does NOT yields a "no write backend" error (and runs
+// nothing) — the READ path is still usable, the WRITE path simply has no binary.
+func TestClipboardWriteReadBinaryButNoWriteBinary(t *testing.T) {
+	rec := &stdinRecorder{}
+	cb := clipWriteWith(rec, map[string]bool{"wl-paste": true}, map[string]string{"WAYLAND_DISPLAY": "wayland-0"})
+
+	if err := cb.Write(context.Background(), "text/plain", []byte("x")); err == nil {
+		t.Error("Write with no wl-copy should error")
+	}
+	if len(rec.got) != 0 {
+		t.Errorf("missing write binary should run nothing, ran %v", rec.got)
+	}
+}
+
+// TestClipboardWriteBackendError: a backend error from the subprocess is returned
+// verbatim (the UI treats it as a muted non-event).
+func TestClipboardWriteBackendError(t *testing.T) {
+	boom := errors.New("subprocess failed")
+	rec := &stdinRecorder{errs: map[string]error{"pbcopy": boom}}
+	cb := clipWriteWith(rec, map[string]bool{"pbpaste": true, "pbcopy": true}, map[string]string{})
+
+	if err := cb.Write(context.Background(), "text/plain", []byte("mac payload")); !errors.Is(err, boom) {
+		t.Errorf("Write err = %v, want the subprocess error", err)
+	}
+}
+
+// TestClipboardWriteOverCap: a payload over maxMediaBytes returns an error and does
+// NOT spawn the subprocess (parity with the read-path size cap).
+func TestClipboardWriteOverCap(t *testing.T) {
+	rec := &stdinRecorder{}
+	cb := clipWriteWith(rec, map[string]bool{"xclip": true}, map[string]string{"DISPLAY": ":0"})
+
+	big := make([]byte, maxMediaBytes+1)
+	if err := cb.Write(context.Background(), "text/plain", big); err == nil {
+		t.Error("an over-cap Write should error")
+	}
+	if len(rec.got) != 0 {
+		t.Errorf("an over-cap Write must not spawn the subprocess, ran %v", rec.got)
+	}
+}

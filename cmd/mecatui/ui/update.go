@@ -90,11 +90,25 @@ func (m Model) markDirty() (Model, tea.Cmd) {
 // viewDirty, making "rendered ⟺ not dirty" an invariant.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	model, cmd := m.update(msg)
-	// Test-only deterministic progress observer (nil in production). Fired on the
-	// update goroutine after the message is reduced so teatest can sequence on the
-	// reducer's actual phase, not on the CPU-starved output flush. See Deps.onPhase.
-	if m.deps.onPhase != nil {
-		if mm, ok := model.(Model); ok {
+	if mm, ok := model.(Model); ok {
+		// SINGLE source of truth for "an overlay/modal/help/fatal took the body, so a
+		// mid-drag selection is now stale" (Req 8). This wrapper sees the model BEFORE
+		// and AFTER the message is reduced, so a selectable→non-selectable transition
+		// is detectable in ONE place — covering every overlay opener, the permission
+		// ask, and the fatal screen without a clearSelection() call sprinkled in each.
+		// It runs synchronously while the overlay state is active (before View renders
+		// the overlay body and well before the overlay closes), so the viewport
+		// highlight is cleared the moment the body changes hands. The openers do NOT
+		// refreshView, so this cannot live in refreshView — it must be on the
+		// per-message seam.
+		if mm.sel.active && !selectable(mm) {
+			mm = mm.clearSelection()
+			model = mm
+		}
+		// Test-only deterministic progress observer (nil in production). Fired on the
+		// update goroutine after the message is reduced so teatest can sequence on the
+		// reducer's actual phase, not on the CPU-starved output flush. See Deps.onPhase.
+		if m.deps.onPhase != nil {
 			m.deps.onPhase(mm.phase)
 		}
 	}
@@ -131,6 +145,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseWheelMsg:
 		return m.onMouseWheel(msg)
+
+	case tea.MouseClickMsg:
+		return m.onMousePress(msg.Mouse())
+
+	case tea.MouseMotionMsg:
+		return m.onMouseMotion(msg.Mouse())
+
+	case tea.MouseReleaseMsg:
+		return m.onMouseRelease(msg.Mouse())
+
+	case autoScrollMsg:
+		return m.onAutoScroll()
 
 	case tea.KeyPressMsg:
 		return m.onKey(msg)
@@ -221,6 +247,12 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	case clipboardResultMsg:
 		mm, cmd := m.onClipboardResult(msg)
 		return mm, cmd, true
+	case shellWriteResultMsg:
+		// Best-effort shell-clipboard WRITE result: intentionally swallowed. OSC52
+		// (tea.SetClipboard) is the primary copy path and the copy already reported
+		// success via the status line, so a missing/failed shell backend must NOT
+		// surface — handled here only so it doesn't fall through to a stream handler.
+		return m, nil, true
 	case clipboardErrMsg:
 		return m.onClipboardErr(msg), nil, true
 	case client.StreamClosedMsg:
@@ -409,7 +441,6 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 
 	taH := 4
 	footerH := 2
-	headerH := 2
 	vpH := m.height - taH - footerH - headerH
 	if vpH < 1 {
 		vpH = 1
@@ -447,6 +478,18 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.statusMsg == quitHint {
 			m.statusMsg = ""
 		}
+	}
+
+	// esc clears an ACTIVE text selection FIRST — before every other esc meaning
+	// (cancel run / close overlay / clear input/queue). This consumes the key ONLY
+	// when a selection is active; with no selection it falls through untouched, so
+	// today's esc semantics are entirely preserved (Req 5). A selection only exists
+	// on the alt screen with no overlay (selectable), so this never shadows an
+	// overlay's own esc.
+	if key.Matches(msg, m.keys.Cancel) && m.sel.active {
+		m = m.clearSelection() // also zeroes any pending edge-autoscroll direction
+		m.refreshView()
+		return m, nil
 	}
 
 	// An open inventory/picker overlay (MCP, team, agents, skills, soul, usermodel,
@@ -1168,6 +1211,276 @@ func (m Model) onMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// onMousePress handles a mouse button press. A LEFT press in the conversation
+// region anchors a new selection (when selectable — no overlay owns the body, alt
+// screen on); a RIGHT press copies the current selection if one exists (a
+// convenience over the copy-on-release default). A press outside the conversation
+// region (header/input/footer) or while an overlay owns the body starts nothing.
+func (m Model) onMousePress(mo tea.Mouse) (tea.Model, tea.Cmd) {
+	switch mo.Button {
+	case tea.MouseRight:
+		if m.sel.active && !m.sel.empty() {
+			return m.copySelection()
+		}
+		return m, nil
+	case tea.MouseLeft:
+		if !selectable(m) {
+			return m, nil
+		}
+		line, col, ok := screenToContent(m, mo.X, mo.Y)
+		if !ok {
+			return m, nil
+		}
+		m.sel = selection{active: true, anchorL: line, anchorC: col, headL: line, headC: col}
+		applySelectionHighlight(&m)
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+// autoScrollInterval is the cadence of the edge-drag autoscroll tick. ~50ms ≈ 20
+// lines/sec: fast enough to feel responsive when selecting a large region, slow
+// enough to stay controllable. The tick is a SELF-RE-ARMING one-shot driven only
+// while a drag sits at an edge (m.sel.autoScroll != scrollNone), so it idles to
+// zero the instant the drag leaves the edge, releases, or the content runs out.
+const autoScrollInterval = 50 * time.Millisecond
+
+// autoScrollMsg is the edge-drag autoscroll tick. The handler scrolls one line in
+// the stashed direction, extends the selection head to the newly-revealed edge
+// line, and re-arms ITSELF only if still dragging at that edge with room to move.
+type autoScrollMsg struct{}
+
+// autoScrollCmd schedules one edge-drag autoscroll tick.
+func (Model) autoScrollCmd() tea.Cmd {
+	return tea.Tick(autoScrollInterval, func(time.Time) tea.Msg { return autoScrollMsg{} })
+}
+
+// onMouseMotion extends an active selection as the pointer is dragged with the
+// button held. It is a no-op when no selection is active (a bare hover never starts
+// one). When the pointer reaches the TOP edge (y <= top) or BOTTOM edge (y >=
+// bottom) of the conversation region it ARMS edge-autoscroll: it scrolls one line
+// that way now, stashes the direction, and returns the self-re-arming tick so the
+// view keeps scrolling (and the selection keeps extending) even while the pointer
+// is held still at the edge. A motion back INSIDE the region disarms autoscroll.
+func (m Model) onMouseMotion(mo tea.Mouse) (tea.Model, tea.Cmd) {
+	if !m.sel.active {
+		return m, nil
+	}
+	top := convTopRow(m)
+	if top < 0 {
+		return m, nil
+	}
+	bottom := top + m.vp.Height() - 1
+	switch {
+	case mo.Y <= top:
+		return m.armAutoScroll(scrollUp, mo.X)
+	case mo.Y >= bottom:
+		return m.armAutoScroll(scrollDown, mo.X)
+	}
+	// Inside the region: plain extend, and disarm any edge-autoscroll.
+	m.sel.autoScroll = scrollNone
+	line, col, ok := screenToContent(m, mo.X, mo.Y)
+	if !ok {
+		return m, nil
+	}
+	m.sel.headL = line
+	m.sel.headC = col
+	applySelectionHighlight(&m)
+	return m, nil
+}
+
+// armAutoScroll begins (or continues) edge-autoscroll in dir: it scrolls the
+// viewport one line, extends the selection head to the now-edge content line at
+// column-for-x, re-applies the highlight, re-derives auto-follow (an edge scroll is
+// an explicit user scroll, exactly like a wheel/key), and returns the re-arming
+// tick. If the viewport can't move further in dir (already at content top/bottom)
+// it DISARMS — no scroll, no tick — so the ticker never spins at the content edge.
+//
+// SINGLE-FLIGHT: it spawns a NEW tick loop ONLY when transitioning into an armed
+// state FROM scrollNone. Terminal drag reporting (mode 1002/1003) emits a motion
+// event on every cell change, so a drag jittering at the edge would otherwise spawn
+// a fresh self-re-arming tick per event — multiple concurrent loops → runaway
+// double/triple-speed autoscroll. The gate is `!= scrollNone` (NOT `== dir`): a
+// loop is already running regardless of its direction, and the single loop reads
+// m.sel.autoScroll fresh each tick, so a direction flip (up→down) is picked up by
+// the existing loop without spawning a second. Gating on `== dir` would leave a
+// stale opposite-direction loop alive on a flip, which then converts itself into a
+// duplicate same-direction loop — the exact bug this guards against.
+func (m Model) armAutoScroll(dir autoScrollDir, x int) (tea.Model, tea.Cmd) {
+	m.sel.dragX = x // remember the column so the tick can keep the head aligned
+	if !m.scrollOneLine(dir) {
+		m.sel.autoScroll = scrollNone // at the content edge: stop, don't re-arm
+		m.extendHeadToEdge(dir, x)
+		applySelectionHighlight(&m)
+		return m, nil
+	}
+	alreadyRunning := m.sel.autoScroll != scrollNone
+	m.sel.autoScroll = dir
+	m.syncStuck()
+	m.extendHeadToEdge(dir, x)
+	applySelectionHighlight(&m)
+	if alreadyRunning {
+		return m, nil // a tick loop is already live; it reads the new direction itself
+	}
+	return m, m.autoScrollCmd()
+}
+
+// onAutoScroll handles one edge-drag autoscroll tick. It no-ops unless a drag is
+// STILL armed at an edge (release / motion-back-inside / esc-clear all set
+// autoScroll back to scrollNone, so a pending tick from a prior arm dies here),
+// then scrolls one more line, extends the head, and re-arms — stopping when the
+// content edge is reached (scrollOneLine returns false).
+func (m Model) onAutoScroll() (tea.Model, tea.Cmd) {
+	if !m.sel.active || m.sel.autoScroll == scrollNone {
+		return m, nil
+	}
+	dir := m.sel.autoScroll
+	if !m.scrollOneLine(dir) {
+		m.sel.autoScroll = scrollNone // reached content top/bottom: stop re-arming
+		m.extendHeadToEdge(dir, m.sel.dragX)
+		applySelectionHighlight(&m)
+		return m, nil
+	}
+	m.syncStuck()
+	m.extendHeadToEdge(dir, m.sel.dragX)
+	applySelectionHighlight(&m)
+	return m, m.autoScrollCmd()
+}
+
+// scrollOneLine moves the viewport one line in dir and reports whether it actually
+// moved (false when already at the content top/bottom). Uses the bubbles viewport
+// ScrollUp/ScrollDown API.
+func (m *Model) scrollOneLine(dir autoScrollDir) bool {
+	before := m.vp.YOffset()
+	switch dir {
+	case scrollUp:
+		m.vp.ScrollUp(1)
+	case scrollDown:
+		m.vp.ScrollDown(1)
+	default:
+		return false
+	}
+	return m.vp.YOffset() != before
+}
+
+// extendHeadToEdge sets the selection head to the content line now at the scrolled
+// edge (top line when scrolling up, bottom visible line when scrolling down) at the
+// grapheme column under x — so the selection grows to cover the newly-revealed
+// lines as the view scrolls. convTopRow/screenToContent are pure value-receiver
+// reads, so passing *m to them is a read-only snapshot.
+func (m *Model) extendHeadToEdge(dir autoScrollDir, x int) {
+	top := convTopRow(*m)
+	if top < 0 {
+		return
+	}
+	y := top
+	if dir == scrollDown {
+		y = top + m.vp.Height() - 1
+	}
+	if line, col, ok := screenToContent(*m, x, y); ok {
+		m.sel.headL = line
+		m.sel.headC = col
+	}
+}
+
+// onMouseRelease finalises a selection. An empty (anchor==head, e.g. a plain
+// click) selection is cleared with no copy; a real selection copies on release
+// (the copy-on-select default). A release with no active selection is a no-op.
+// Release always DISARMS edge-autoscroll (scrollNone) so any in-flight tick no-ops.
+//
+// Asymmetry note: a release uses screenToContent's clamp (a release outside the
+// region still finalises the head at the nearest visible content), unlike motion,
+// which routes an at-edge position into armAutoScroll. This is intentional —
+// autoscroll only makes sense while the button is HELD; on release the drag is over,
+// so we just snap the head to wherever the pointer last was and finish.
+func (m Model) onMouseRelease(mo tea.Mouse) (tea.Model, tea.Cmd) {
+	if !m.sel.active {
+		return m, nil
+	}
+	m.sel.autoScroll = scrollNone // the drag is over: kill any pending autoscroll tick
+	if line, col, ok := screenToContent(m, mo.X, mo.Y); ok {
+		m.sel.headL = line
+		m.sel.headC = col
+	}
+	if m.sel.empty() {
+		m.sel = selection{}
+		m.vp.ClearHighlights()
+		m.refreshView()
+		return m, nil
+	}
+	return m.copySelection()
+}
+
+// copySelection copies the VISIBLE (ansi-stripped) selected text via OSC52
+// (tea.SetClipboard, the primary path) AND the best-effort shell-clipboard write
+// (shellWriteCmd, batched). It sets a muted "copied N chars" status. An empty
+// payload is a no-op (defensive — release already clears empties).
+func (m Model) copySelection() (tea.Model, tea.Cmd) {
+	payload := selectedText(m.vp.GetContent(), m.sel)
+	if payload == "" {
+		return m, nil
+	}
+	m.statusMsg = m.deps.Theme.Style("muted").Render(fmt.Sprintf("copied %s", plural(len([]rune(payload)), "char")))
+	m.refreshView()
+	return m, tea.Batch(tea.SetClipboard(payload), m.shellWriteCmd(payload))
+}
+
+// applySelectionHighlight (re)applies the selection's byte ranges to the viewport's
+// native highlights, recomputing them against the CURRENT content. It brackets the
+// SetHighlights/ClearHighlights calls with a YOffset save/restore: SetHighlights
+// calls showHighlight()→EnsureVisible(), which can move YOffset, so neutralising it
+// keeps the scroll position stable (the highlight must follow the content, never
+// yank the view). Called on every press/motion AND after every refreshView while a
+// selection is active (SetContent clears highlights, so a re-render would otherwise
+// drop them). A pointer receiver: it mutates m.vp in place.
+func applySelectionHighlight(m *Model) {
+	saved := m.vp.YOffset()
+	m.vp.ClearHighlights()
+	if m.sel.active {
+		if ranges := byteRanges(m.vp.GetContent(), m.sel); len(ranges) > 0 {
+			m.vp.SetHighlights(ranges)
+		}
+	}
+	m.vp.SetYOffset(saved)
+}
+
+// clearSelection drops any active text selection (including a pending edge-
+// autoscroll direction, so an in-flight tick no-ops) and clears the viewport
+// highlight in place. It is called from the SINGLE selectable→non-selectable
+// chokepoint in Update (Req 8) and from the esc-clear path. A no-op when nothing is
+// selected. Value-receiver-friendly: returns the mutated Model.
+func (m Model) clearSelection() Model {
+	if m.sel.active {
+		m.sel = selection{} // zeroes autoScroll too
+		m.vp.ClearHighlights()
+	}
+	return m
+}
+
+// shellWriteResultMsg is the (ignored) result of the best-effort shell-clipboard
+// write. It carries the error so a future maintainer could surface it, but the
+// handler is intentionally a silent no-op: OSC52 is the primary copy path and the
+// copy is considered to have succeeded regardless, so a missing wl-copy/xclip/
+// pbcopy/clip must never produce a scary status (per the copy UX: best-effort).
+type shellWriteResultMsg struct{ err error }
+
+// shellWriteCmd returns a command that mirrors payload into the OS clipboard via
+// the platform binary (the OSC52 fallback). It is best-effort: a nil Clipboard
+// collaborator or any backend error is swallowed into a no-op result. It runs off
+// the update goroutine (it shells out), like the ctrl+v read.
+func (m Model) shellWriteCmd(payload string) tea.Cmd {
+	cb := m.deps.Clipboard
+	if cb == nil {
+		return nil
+	}
+	ctx := m.deps.Ctx
+	return func() tea.Msg {
+		err := cb.Write(ctx, "text/plain", []byte(payload))
+		return shellWriteResultMsg{err: err}
+	}
+}
+
 // syncStuck re-derives the auto-follow flag from the viewport's actual position:
 // stuck is true exactly when the viewport is at the bottom. Called after every
 // scroll/wheel/nav so a scroll-up unsticks (next streaming delta then re-renders
@@ -1220,6 +1533,15 @@ func (m *Model) refreshView() {
 	m.vp.SetContent(content)
 	if m.stuck {
 		m.vp.GotoBottom()
+	}
+	// SetContent above CLEARS the viewport's highlights, so an active text selection
+	// must be re-applied against the NEW content (its byte ranges are recomputed
+	// from the current lines). This is the single content-render chokepoint, so it
+	// covers every refreshView caller — the highlight survives a streaming re-render
+	// (Req 2). applySelectionHighlight saves/restores YOffset, and it runs AFTER the
+	// stuck re-pin so the captured offset is the final settled position.
+	if m.sel.active {
+		applySelectionHighlight(m)
 	}
 }
 
