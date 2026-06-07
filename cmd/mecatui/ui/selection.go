@@ -66,12 +66,15 @@ func convTopRow(m Model) int {
 // selectable reports whether a left-click may START a selection right now. It is
 // the SAME overlay/mode gate the body switch in view.go uses to decide what owns
 // the conversation region: a selection may only begin when the plain viewport is
-// showing it. Mouse capture exists only on the alt screen, so --inline/--no-alt-
-// screen (NoAltScreen) is never selectable; an open overlay/modal/help or the
-// fatal screen owns the body and blocks a new selection (and opening one mid-drag
-// clears the active selection — see the overlay-open paths in update.go).
+// showing it. Mouse capture exists only on the alt screen with mouse enabled, so
+// --inline/--no-alt-screen (NoAltScreen) and --no-mouse (NoMouse) are never
+// selectable — those leave the mouse uncaptured for the terminal's native
+// selection. An open overlay/modal/help or the fatal screen owns the body and
+// blocks a new selection (and opening one mid-drag clears the active selection —
+// see the overlay-open paths in update.go).
 func selectable(m Model) bool {
 	return !m.deps.NoAltScreen &&
+		!m.deps.NoMouse &&
 		m.phase != phaseFatal &&
 		m.phase != phaseAwaitingApproval &&
 		!m.showHelp &&

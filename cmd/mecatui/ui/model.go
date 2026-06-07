@@ -94,6 +94,15 @@ type Deps struct {
 	// persists in the captured output instead of being cleared on exit.
 	NoAltScreen bool
 
+	// NoMouse disables mouse capture on the alt screen (View leaves MouseMode at
+	// MouseModeNone), so the terminal's OWN click-drag selection works again — at
+	// the cost of in-app mouse-wheel scroll and the in-app drag-select/copy layer
+	// (selectable() returns false). Keyboard scroll is unaffected. Default false
+	// (mouse captured). Set true by --no-mouse / MECATUI_NO_MOUSE=1. Inert under
+	// NoAltScreen (mouse is already off inline). The escape hatch for terminals
+	// that strip OSC52 or users who prefer native selection.
+	NoMouse bool
+
 	// onPhase is a test-only observer (nil in production, unexported so no external
 	// caller can set it) invoked by Update on the SINGLE update goroutine after each
 	// reduced message, with the model's current phase. The teatest cases use it to

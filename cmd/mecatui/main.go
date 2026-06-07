@@ -146,6 +146,9 @@ func run(args []string) error {
 		// First-class opt-out: render inline in the normal buffer (preserving
 		// native scrollback) instead of the alternate screen. Default false.
 		NoAltScreen: cfg.noAltScreen,
+		// Escape hatch: disable mouse capture so the terminal's native selection
+		// works (trades away in-app wheel scroll + drag-select). Default false.
+		NoMouse: cfg.noMouse,
 	}
 
 	prog := tea.NewProgram(ui.New(deps), tea.WithContext(ctx))

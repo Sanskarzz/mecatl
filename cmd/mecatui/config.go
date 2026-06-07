@@ -31,6 +31,16 @@ type config struct {
 	// ui.Deps.NoAltScreen.
 	noAltScreen bool
 
+	// noMouse disables mouse capture on the alt screen, so the terminal's OWN
+	// click-drag selection works again — at the cost of in-app mouse-wheel scroll
+	// and the in-app drag-select/copy layer (keyboard scroll stays). The escape
+	// hatch for terminals/multiplexers (tmux, zellij, some web terminals) that
+	// strip OSC52 AND where the user prefers native selection. Off by default
+	// (mouse captured: wheel scroll + in-app selection). Honoured from --no-mouse
+	// or MECATUI_NO_MOUSE=1. Inert under --no-alt-screen (mouse is already off
+	// inline). Wired to ui.Deps.NoMouse.
+	noMouse bool
+
 	// contextWindow is the model's context-window size in tokens, used as the
 	// footer meter denominator. 0 = unknown (meter shows just the current size).
 	// Honoured verbatim; never inferred from the model name.
@@ -172,6 +182,7 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.listThemes, "list-themes", false, "list available themes and exit")
 	fs.BoolVar(&cfg.noAltScreen, "no-alt-screen", false, "render inline in the terminal's normal buffer instead of the alternate screen, preserving native scrollback/search")
 	fs.BoolVar(&cfg.noAltScreen, "inline", false, "alias for --no-alt-screen: render inline in the normal buffer, preserving native scrollback/search")
+	fs.BoolVar(&cfg.noMouse, "no-mouse", false, "disable mouse capture on the alt screen so the terminal's NATIVE click-drag selection works (for tmux/zellij/web terminals that strip OSC52, or when you prefer native select); trades away in-app mouse-wheel scroll and the in-app drag-select/copy layer. Keyboard scroll (pgup/pgdn/home/end) is unaffected. Or set MECATUI_NO_MOUSE=1")
 	fs.Int64Var(&cfg.contextWindow, "context-window", 0, "model context-window size in tokens for the footer meter (0 = unknown; not inferred from the model name)")
 
 	fs.StringVar(&cfg.model, "model", "", "model identifier for the embedded server (empty: use the provider-appropriate default; ignored when dialling an external server)")
@@ -214,6 +225,14 @@ func parseFlags(args []string) (config, error) {
 	}
 	if cfg.theme == "" {
 		cfg.theme = os.Getenv("MECATUI_THEME")
+	}
+	// Env fallback: --no-mouse wins if passed; otherwise MECATUI_NO_MOUSE=1/true
+	// enables it (set-and-forget in a shell rc for a multiplexer that strips OSC52).
+	if !cfg.noMouse {
+		switch os.Getenv("MECATUI_NO_MOUSE") {
+		case "1", "true":
+			cfg.noMouse = true
+		}
 	}
 	cfg.openAIKey = os.Getenv("OPENAI_API_KEY")
 	cfg.openRouterKey = os.Getenv("OPENROUTER_API_KEY")

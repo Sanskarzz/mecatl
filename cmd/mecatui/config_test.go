@@ -121,6 +121,48 @@ func TestParseFlagsNoAltScreen(t *testing.T) {
 	}
 }
 
+// TestParseFlagsNoMouse asserts the native-selection escape hatch: off by default,
+// set by --no-mouse, and set by MECATUI_NO_MOUSE=1/true (with the flag winning).
+func TestParseFlagsNoMouse(t *testing.T) {
+	t.Setenv("MECATUI_NO_MOUSE", "") // isolate from the ambient environment
+	cfg, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.noMouse {
+		t.Error("noMouse = true by default, want false (mouse captured: wheel + in-app selection)")
+	}
+
+	cfg, err = parseFlags([]string{"-no-mouse"})
+	if err != nil {
+		t.Fatalf("parseFlags(-no-mouse): %v", err)
+	}
+	if !cfg.noMouse {
+		t.Error("-no-mouse did not set noMouse")
+	}
+
+	for _, v := range []string{"1", "true"} {
+		t.Setenv("MECATUI_NO_MOUSE", v)
+		cfg, err := parseFlags(nil)
+		if err != nil {
+			t.Fatalf("parseFlags (MECATUI_NO_MOUSE=%q): %v", v, err)
+		}
+		if !cfg.noMouse {
+			t.Errorf("MECATUI_NO_MOUSE=%q did not set noMouse", v)
+		}
+	}
+
+	// A non-truthy env value must NOT enable it.
+	t.Setenv("MECATUI_NO_MOUSE", "0")
+	cfg, err = parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags (MECATUI_NO_MOUSE=0): %v", err)
+	}
+	if cfg.noMouse {
+		t.Error("MECATUI_NO_MOUSE=0 set noMouse, want false")
+	}
+}
+
 // TestParseFlagsMemoryDefaults asserts the memory flags default to off/empty;
 // the per-project default PATH is computed later in embeddedConfig, not here.
 func TestParseFlagsMemoryDefaults(t *testing.T) {

@@ -372,6 +372,18 @@ mirrors the payload into the platform clipboard binary as a best-effort fallback
 the OSC52 copy still carries the selection, and a failed shell write is never
 surfaced as an error.
 
+**`--no-mouse`: native selection instead.** In-app selection and the mouse wheel
+exist only because the app captures the mouse — and Bubble Tea has no wheel-only
+mouse mode, so capturing it is what *prevents* the terminal's own click-drag
+selection. If you'd rather use your terminal's native selection (e.g. on a
+multiplexer or web terminal that strips OSC52, where neither the OSC52 nor the
+shell-write copy reaches your clipboard), pass **`--no-mouse`** (or set
+**`MECATUI_NO_MOUSE=1`**). It keeps the alt-screen TUI but leaves the mouse
+uncaptured, so click-drag selection is handled by your terminal again — at the cost
+of in-app mouse-wheel scroll and the in-app drag-select/copy layer. Keyboard scroll
+(`pgup`/`pgdn`, `home`/`end`) is unaffected. (`--inline` / `--no-alt-screen`
+likewise leaves the mouse uncaptured.)
+
 ### Type-while-running and queued follow-ups
 
 The input stays **focused while a run streams**, so you can compose the next

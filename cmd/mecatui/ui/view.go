@@ -32,13 +32,18 @@ func (m Model) View() tea.View {
 	var v tea.View
 	v.AltScreen = !m.deps.NoAltScreen
 	v.WindowTitle = "mecatui"
-	// Enable mouse-wheel scrolling — but ONLY on the alt screen. In --inline /
-	// --no-alt-screen mode we leave the terminal's native scrollback + selection
-	// untouched (no mouse capture). On the alt screen, capturing the mouse means
-	// plain click-drag selection is grabbed by the app; hold Shift (iTerm2: ⌥
-	// Option) to bypass the grab and do native selection. (v2 has no wheel-only
-	// mouse mode, so this Shift-bypass is how wheel-scroll and selection coexist.)
-	if !m.deps.NoAltScreen {
+	// Capture the mouse — but ONLY on the alt screen, and ONLY when mouse capture
+	// is not disabled. Capturing the mouse buys wheel-scroll and the in-app
+	// drag-select/copy layer (see selection.go) at the cost of the terminal's OWN
+	// native click-drag selection (the terminal forwards drags to us instead).
+	// Two opt-outs leave the mouse uncaptured so native selection works:
+	//   - --inline / --no-alt-screen: native scrollback + selection, inline buffer.
+	//   - --no-mouse (NoMouse): alt screen kept, but native selection over in-app
+	//     wheel/drag — the escape hatch for terminals that strip OSC52. Keyboard
+	//     scroll (pgup/pgdn/home/end) is unaffected either way.
+	// (Bubble Tea v2 has no wheel-only mouse mode, so wheel-scroll and native
+	// selection genuinely cannot coexist; this is the deliberate tradeoff.)
+	if !m.deps.NoAltScreen && !m.deps.NoMouse {
 		v.MouseMode = tea.MouseModeCellMotion
 	}
 

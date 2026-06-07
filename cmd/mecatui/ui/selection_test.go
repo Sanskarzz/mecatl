@@ -303,6 +303,62 @@ func TestNoAltScreenDisablesSelection(t *testing.T) {
 	}
 }
 
+// TestNoMouseDisablesSelection: the --no-mouse escape hatch leaves the alt screen
+// up but disables in-app selection so the terminal's native selection works — a
+// left-press starts nothing and selectable() is false.
+func TestNoMouseDisablesSelection(t *testing.T) {
+	m, _ := selModel(t)
+	m.deps.NoMouse = true
+	top := convTopRow(m)
+
+	m, _ = pressMouse(m, tea.MouseLeft, 0, top)
+	if m.sel.active {
+		t.Error("NoMouse must disable in-app selection")
+	}
+	if selectable(m) {
+		t.Error("selectable should be false under NoMouse")
+	}
+}
+
+// TestNoMouseLeavesMouseUncaptured: View must NOT request mouse capture under
+// --no-mouse (so the terminal keeps the mouse for native selection), while the
+// default alt-screen path DOES capture it (MouseModeCellMotion) for wheel + in-app
+// drag-select. This is the load-bearing toggle behind the escape hatch.
+func TestNoMouseLeavesMouseUncaptured(t *testing.T) {
+	m, _ := selModel(t)
+
+	if got := m.View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Errorf("default alt screen: MouseMode = %v, want MouseModeCellMotion (mouse captured)", got)
+	}
+
+	m.deps.NoMouse = true
+	if got := m.View().MouseMode; got != tea.MouseModeNone {
+		t.Errorf("--no-mouse: MouseMode = %v, want MouseModeNone (uncaptured for native selection)", got)
+	}
+
+	// --inline already leaves the mouse uncaptured regardless of NoMouse.
+	m.deps.NoMouse = false
+	m.deps.NoAltScreen = true
+	if got := m.View().MouseMode; got != tea.MouseModeNone {
+		t.Errorf("--inline: MouseMode = %v, want MouseModeNone", got)
+	}
+}
+
+// TestSelectionAssumesSoftWrapDisabled guards the load-bearing invariant of the
+// screen→content mapping: screenToContent maps a screen row to logical line
+// YOffset()+(y-convTop) and a cell X straight to a grapheme column ONLY because the
+// viewport does not soft-wrap (glamour hard-wraps the content to the width instead).
+// If anyone enables viewport SoftWrap, that one-line offset silently mis-maps every
+// click — this test fails loudly to point them at selection.go's mapping.
+func TestSelectionAssumesSoftWrapDisabled(t *testing.T) {
+	m, _ := selModel(t)
+	if m.vp.SoftWrap {
+		t.Fatal("viewport SoftWrap is enabled — the selection screen→content mapping in " +
+			"selection.go assumes it is OFF (no wrap-aware walk); re-derive screenToContent/" +
+			"graphemeColForCellX for wrapped lines before enabling it")
+	}
+}
+
 // TestWheelKeepsSelection: a wheel scroll while a selection exists still scrolls
 // (re-derives auto-follow) and does NOT clear the selection (Req 10).
 func TestWheelKeepsSelection(t *testing.T) {
