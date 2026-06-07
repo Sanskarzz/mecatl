@@ -199,3 +199,72 @@ func TestOpenRouterOutputLimitSurvivesSwapIntoStore(t *testing.T) {
 		t.Errorf("openrouter outputLimitFor(fusion) = %d, want 0 (null max_completion_tokens)", got)
 	}
 }
+
+// TestOpenRouterLiveModalitiesGateSessionEcho is the headline bug e2e: the OpenRouter
+// adapter is shared with openai (Capabilities() Image:true), but a TEXT-ONLY live
+// model must report Image:false in the per-session capability echo (modelCapability),
+// while a vision live model reports Image:true. It also asserts the picker
+// (projectModelEntry) and the session echo derive image from the SAME live source, so
+// they cannot disagree. Runs the REAL openrouter lister over the fixture, fully offline.
+func TestOpenRouterLiveModalitiesGateSessionEcho(t *testing.T) {
+	fixture, err := os.ReadFile("../adapter/openrouter/testdata/models.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(string(fixture))),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	meta := newLiveMetaStore()
+	reg := &providerRegistry{
+		entries: map[string]providerEntry{
+			providerOpenRouter: {
+				id:        providerOpenRouter,
+				provider:  mockllm.NewWith([]mockllm.Option{mockllm.WithCapabilities(port.ProviderCapabilities{Image: true})}, mockllm.TextTurn("x")),
+				available: true,
+				lister:    openRouterLister{inner: openrouter.NewLister(client)},
+			},
+		},
+		defaultID: providerOpenRouter,
+		meta:      meta,
+	}
+	meta.seedFromCatalog(reg.Available())
+
+	// Run the real snapshot + swap (the two-sink path the background refresh uses).
+	picker, byProvider := liveModelSnapshot(context.Background(), port.NopDiagnostics{}, reg)
+	meta.Swap(byProvider)
+
+	const (
+		textOnly = "nvidia/nemotron-3-ultra-550b-a55b:free" // input_modalities ["text"]
+		vision   = "qwen/qwen3.7-plus"                      // input_modalities ["text","image"]
+	)
+
+	// The session echo path (modelCapability) gates image on the LIVE modalities.
+	if got := modelCapability(reg, providerOpenRouter, textOnly); got.Image {
+		t.Errorf("session echo Image = true for text-only %q, want false (the reported bug)", textOnly)
+	}
+	if got := modelCapability(reg, providerOpenRouter, vision); !got.Image {
+		t.Errorf("session echo Image = false for vision %q, want true", vision)
+	}
+
+	// The picker path (projectModelEntry, surfaced in liveModelSnapshot) must AGREE.
+	pickerImage := map[string]bool{}
+	for _, m := range picker {
+		pickerImage[m.Id] = m.Image
+	}
+	if pickerImage[textOnly] {
+		t.Errorf("picker Image = true for text-only %q, want false (picker/echo must agree)", textOnly)
+	}
+	if !pickerImage[vision] {
+		t.Errorf("picker Image = false for vision %q, want true (picker/echo must agree)", vision)
+	}
+	if got := modelCapability(reg, providerOpenRouter, textOnly).Image; got != pickerImage[textOnly] {
+		t.Errorf("picker/echo DISAGREE for %q: echo=%v picker=%v", textOnly, got, pickerImage[textOnly])
+	}
+	if got := modelCapability(reg, providerOpenRouter, vision).Image; got != pickerImage[vision] {
+		t.Errorf("picker/echo DISAGREE for %q: echo=%v picker=%v", vision, got, pickerImage[vision])
+	}
+}

@@ -294,12 +294,14 @@ inputs. The result is a NEUTRAL `port.ProviderCapabilities`; neither the catalog
 registry type crosses into the server/acp adapters.
 
 ```
-                       internal/app  (HAS catalog + registry adapters)
-  catalog.Model ──────► modelCapability(reg, providerID, modelID)
-   .InputModalities      = ProviderCapabilities{
-  reg.Lookup(pid)            Image: adapter.Image AND catalog-image,
-   .provider                 Audio: adapter.Audio AND catalog-audio,  (P0 catalog has no audio ⇒ false)
-   .Capabilities() ───►      EmbeddedContext: adapter.EmbeddedContext }
+                       internal/app  (HAS catalog + registry adapters + live meta store)
+  reg.meta.modalitiesFor ─► modelCapability(reg, providerID, modelID)
+   (LIVE, openrouter)        = ProviderCapabilities{
+  catalog.Model ──────►          Image: adapter.Image AND (LIVE-image ELSE catalog-image),
+   .InputModalities (floor)      Audio: adapter.Audio AND (LIVE-audio ELSE catalog-audio), (P0 ⇒ false)
+  reg.Lookup(pid)                EmbeddedContext: adapter.EmbeddedContext }
+   .provider                  (same live InputModalities the picker reads via projectModelEntry)
+   .Capabilities() ───►       
                                        │ NEUTRAL values only — no catalog/registry type crosses
                 ┌──────────────────────┼───────────────────────────────┐
                 ▼                      ▼                               ▼
@@ -308,10 +310,29 @@ registry type crosses into the server/acp adapters.
                                   for the RESOLVED provider+model     = DefaultCapabilities (default)
 ```
 
-Fail-safe rules (all toward text-only): an unknown/unavailable provider (or nil
-registry) ⇒ zero value (a provider we cannot reach transmits nothing); an uncatalogued
-or empty `model_id` ⇒ ADAPTER-ONLY caps (a passthrough model trusts the adapter when the
-catalog is silent — zeroing would strip image from every passthrough model).
+**Modality input is LIVE-FIRST, not catalog-only.** A provider with a live lister
+(OpenRouter) stores authoritative per-model `input_modalities` in the `liveMetaStore`
+(`modalitiesFor`), and `modelCapability` reads them FIRST: `Image = adapter.Image AND
+hasImageModality(live)` (and audio likewise). This is the SAME live
+`modelEntry.InputModalities` the picker reads via `projectModelEntry`, so the session
+echo / ACP gate and the picker derive image from ONE source and cannot disagree — the
+single-source guarantee now spans the live path, not just the embedded catalog. It fixes
+the bug where an OpenRouter TEXT-ONLY model (e.g. `openai/gpt-4`) reported `image:true` in
+the session echo: OpenRouter shares the openai adapter (`Capabilities()` Image:true) and
+nothing read the model's live `["text"]` modalities, so the permissive passthrough default
+leaked image. The effect is OpenRouter-scoped: only providers WITH a lister get honest
+live gating; openai-direct/anthropic semantics are unchanged.
+
+Precedence (per modality field): (1) LIVE modalities (when the meta store HAS the model —
+PRESENCE-keyed: a present entry wins even with an EMPTY modality list, treated text-only
+exactly as the picker does, so present-but-empty cannot diverge into echo=true via a
+catalogued image row) → (2) embedded CATALOG floor (catalogued model, no live entry) →
+(3) ADAPTER-ONLY passthrough (uncatalogued + no live entry). Fail-safe rules (all toward text-only): an
+unknown/unavailable provider (or nil registry) ⇒ zero value (a provider we cannot reach
+transmits nothing); an uncatalogued or empty `model_id` with NO live entry ⇒ ADAPTER-ONLY
+caps (a passthrough model trusts the adapter when both catalog and live are silent —
+zeroing would strip image from every passthrough model, and the live-absent permissive
+fallback is deliberately preserved).
 
 **The three sinks share one value:**
 - (a) `modelSnapshot` sets `ModelInfo.Image = modelCapability(...).Image`.

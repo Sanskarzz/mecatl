@@ -575,10 +575,32 @@ picker + the store project from the ONE list, can't drift). The catalog read sit
 live-first-then-catalog-floor helpers: `meta.outputLimitFor` (replaces the bare
 `anthropicOutputLimit` in `WithMaxTokensResolver`), `reg.meta.contextWindowFor` (replaces
 `catalogContextWindow` at `build.go`/`agentdefs.go` — per-session children pick it up FOR FREE),
-`meta.thinkingFor` (fed to the anthropic `WithThinkingResolver`). Precedence is PER FIELD: live
-when present & `>0`/`Known`, else catalog floor, else the consumer's conservative default; a live
-MISS for a model the catalog knows falls back WHOLESALE to the catalog row (live absence NEVER
-erases the catalog); with NO lister the store is catalog-seeded ⇒ behaviour byte-identical.
+`meta.thinkingFor` (fed to the anthropic `WithThinkingResolver`), and `meta.modalitiesFor` (the
+input-modality list, consumed by `modelCapability` — see below). Precedence is PER FIELD: live
+when present & `>0`/`Known` (the SCALAR fields), else catalog floor, else the consumer's
+conservative default; a live MISS for a model the catalog knows falls back WHOLESALE to the
+catalog row (live absence NEVER erases the catalog); with NO lister the store is catalog-seeded ⇒
+behaviour byte-identical. **`modalitiesFor` is the exception: PRESENCE-keyed, not value-keyed** — a
+present live entry is authoritative EVEN with an empty modality list (treated text-only, matching
+the picker), so only a true miss falls through to the catalog (the regression the picker≠echo
+Medium pinned).
+
+| field | helper | live source | catalog floor | default |
+|-------|--------|-------------|---------------|---------|
+| output ceiling | `outputLimitFor` | `modelEntry.OutputLimit>0` (clamped) | `anthropicOutputLimit` | adapter `defaultMaxTokens` |
+| context window | `contextWindowFor` | `modelEntry.ContextLimit>0` (clamped) | `catalogContextWindow` | `engineDeps` 128k |
+| thinking | `thinkingFor` | `modelEntry.Thinking.Known` | — (catalog has none) | adapter prefix matrix |
+| modalities | `modalitiesFor` | `modelEntry.InputModalities` (PRESENT entry, even if empty) | `catalogModalities` | adapter-only passthrough caps |
+
+**`modelCapability` modality input is LIVE-FIRST** (`capability.go`): the per-(provider,model)
+capability intersection now reads `reg.meta.modalitiesFor` FIRST — `Image = adapter.Image AND
+hasImageModality(live)`, `Audio = adapter.Audio AND hasAudioModality(live)` — falling through to
+the `catalogModalities` floor, then to the adapter-only passthrough (uncatalogued + no live entry,
+nil-guarded). It reads the SAME `modelEntry.InputModalities` the picker (`projectModelEntry`)
+reads, restoring the single-source guarantee for the SESSION ECHO / ACP gate (not just the
+picker). Fixes the OpenRouter text-only model reporting `image:true` (shared openai adapter, never
+read its live `["text"]`). OpenRouter-scoped; openai-direct/anthropic passthrough semantics
+unchanged.
 **Anthropic + OpenRouter listers SHIPPED** (anthropic keyed `client.Models.List` +
 thinking-from-live; openrouter captures `top_provider.max_completion_tokens`); **OpenAI stays
 CATALOG-ONLY** (its `/v1/models` is sparse — no lister). **DEFERRED (live listing):** disk cache,

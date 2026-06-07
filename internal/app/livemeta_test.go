@@ -136,6 +136,48 @@ func TestLiveMissFallsBackToCatalogRow(t *testing.T) {
 	}
 }
 
+// TestModalitiesForFromLiveStore: modalitiesFor returns the live input-modality list
+// when the store HAS the model; PRESENCE (not value) is the key — a present entry is
+// authoritative even with an EMPTY modality list (found=true, empty list ⇒ the caller
+// treats it text-only, matching the picker). Only a true MISS (absent model / nil store)
+// is found=false, so modelCapability falls through to the catalog floor. This is the
+// modality twin of contextWindowFor.
+func TestModalitiesForFromLiveStore(t *testing.T) {
+	s := newLiveMetaStore()
+	s.seedFromCatalog([]string{providerAnthropic})
+
+	// A live swap carrying modalities for an openrouter-style passthrough id.
+	s.Swap(map[string][]modelEntry{
+		providerOpenRouter: {{ID: "openai/gpt-4", InputModalities: []string{"text", "image"}}},
+	})
+	mods, found := s.modalitiesFor(providerOpenRouter, "openai/gpt-4")
+	if !found {
+		t.Fatal("modalitiesFor: found=false for a live entry with modalities, want true")
+	}
+	if len(mods) != 2 || mods[0] != "text" || mods[1] != "image" {
+		t.Fatalf("modalitiesFor = %v, want [text image]", mods)
+	}
+
+	// An entry PRESENT but with NO modalities ⇒ found=true with an empty list (a live
+	// source that omits architecture.input_modalities is authoritative text-only; the
+	// caller must NOT fall through to the catalog floor, or picker≠echo diverges).
+	s.Swap(map[string][]modelEntry{
+		providerOpenRouter: {{ID: "openai/gpt-4", InputModalities: nil}},
+	})
+	mods, found = s.modalitiesFor(providerOpenRouter, "openai/gpt-4")
+	if !found {
+		t.Error("modalitiesFor: found=false for a present-but-empty entry, want true (presence is authoritative)")
+	}
+	if len(mods) != 0 {
+		t.Errorf("modalitiesFor = %v for a present-but-empty entry, want empty", mods)
+	}
+
+	// An absent model is a clean miss.
+	if _, found := s.modalitiesFor(providerOpenRouter, "no-such-model"); found {
+		t.Error("modalitiesFor: found=true for an absent model, want false")
+	}
+}
+
 // TestThinkingForFromLiveStore: thinkingFor returns the live descriptor only when a
 // live source populated it (Known=true); a seed-only or absent entry yields
 // known=false (the adapter then falls back to its prefix matrix).
@@ -180,6 +222,9 @@ func TestLiveMetaStoreNilSafe(t *testing.T) {
 	}
 	if _, _, known := s.thinkingFor(providerAnthropic, catAnthropicModel); known {
 		t.Error("nil store thinkingFor should report known=false")
+	}
+	if _, found := s.modalitiesFor(providerAnthropic, catAnthropicModel); found {
+		t.Error("nil store modalitiesFor should report found=false")
 	}
 	s.Swap(map[string][]modelEntry{providerAnthropic: {{ID: "x"}}}) // must not panic
 	s.seedFromCatalog([]string{providerAnthropic})                  // must not panic

@@ -473,6 +473,11 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// so the wire echo, the server-wide caps, and the ACP gate cannot disagree. A
 		// neutral port.ProviderCapabilities — the registry/catalog never reach the
 		// server adapter. (multi-provider Phase 0, S5.)
+		//
+		// NOTE: this runs in Build, BEFORE the background live Swap, so its modality
+		// input is the CATALOG SEED, not the live feed — fine for the default/ACP path,
+		// which has no per-session selector in P0. A per-session SELECTOR session (see
+		// the modelCapability call below, evaluated post-Swap) DOES get the live value.
 		DefaultCapabilities: modelCapability(reg, reg.Default(), cfg.Model),
 		// ListSkills snapshot: the skills discovered once at build time (registerSkills),
 		// projected into the proto form. Skills are immutable for the process lifetime,

@@ -30,7 +30,12 @@ import (
 // FIELD's live-first-else-catalog-else-default precedence is applied by the small
 // helpers below (outputLimitFor / contextWindowFor / modalitiesFor / thinkingFor).
 // A live MISS for a model the catalog knows falls back WHOLESALE to the catalog row
-// (the seed entry) — live absence NEVER erases the catalog.
+// (the seed entry) — live absence NEVER erases the catalog. modalitiesFor really
+// exists below and feeds modelCapability's live-first modality input, so the session
+// echo / ACP gate now derive image/audio from the SAME live modalities the picker does.
+// Note modalities are PRESENCE-keyed, not value-keyed: a PRESENT live entry is
+// authoritative even with an EMPTY modality list (treated as text-only, matching the
+// picker), unlike the >0/Known scalar fields above — only a true miss falls back.
 //
 // It is composition-only (held on providerRegistry); it never crosses into a port,
 // the domain, the agent, or the server adapter. Adapters receive CLOSURES over it
@@ -185,6 +190,25 @@ func (s *liveMetaStore) contextWindowFor(providerID, modelID string) int {
 		return clampLive(m.ContextLimit, maxLiveContextLimit)
 	}
 	return catalogContextWindow(providerID, modelID)
+}
+
+// modalitiesFor resolves a model's input modalities from the live store. A PRESENT
+// live entry is AUTHORITATIVE — found=true — EVEN when its modality list is empty/nil:
+// a live source that lists the model but omits architecture.input_modalities is
+// asserting "no declared modalities" (text-only), exactly as the picker treats it
+// (hasImageModality(empty)=false). Returning found=false here for present-but-empty
+// would let modelCapability fall through to the catalog floor and re-introduce
+// picker≠echo divergence (picker=false via the empty list, echo=true via a catalogued
+// image row). Only a true MISS (no entry, or a nil/unseeded store) returns (nil,false),
+// so the caller falls through to the catalog floor then the adapter-only passthrough.
+// nil-safe via lookup. This is the modality twin of contextWindowFor — the seam that
+// makes the session echo and the picker (projectModelEntry, which reads the SAME
+// modelEntry.InputModalities) derive image/audio from ONE live-first source.
+func (s *liveMetaStore) modalitiesFor(providerID, modelID string) (mods []string, found bool) {
+	if m, ok := s.lookup(providerID, modelID); ok {
+		return m.InputModalities, true
+	}
+	return nil, false
 }
 
 // thinkingFor resolves a model's thinking descriptor from the live store. It returns

@@ -28,19 +28,31 @@ import (
 // per model. The intersection formula is unchanged; no server/acp/proto edit. That
 // is the whole point of locating the AND in composition.
 //
-// Logic (all fail-safe toward text-only):
+// Modality precedence (LIVE-FIRST → catalog floor → adapter-only passthrough; all
+// fail-safe toward text-only):
 //   - adapterCaps = reg.Lookup(providerID).provider.Capabilities(). An
 //     unknown/unavailable provider (or a nil registry) yields the zero value
-//     (text-only) — a provider we cannot reach transmits nothing.
-//   - catalog modalities: from providercatalog for (providerID, modelID). An
-//     UNCATALOGUED or EMPTY modelID falls back to ADAPTER-ONLY caps (a passthrough
-//     model: trust the adapter, the catalog is simply silent — do NOT zero it, or
-//     every passthrough/uncatalogued model would lose image).
-//   - Image = adapterCaps.Image AND catalog-image; Audio = adapterCaps.Audio AND
-//     catalog-audio. The catalog carries NO audio field today, so the catalog-audio
-//     term is false and the AND is false regardless — Audio stays effectively
-//     adapter-driven (and the P0 adapter is Audio:false). EmbeddedContext is
-//     adapter-driven (the catalog has no opinion).
+//     (text-only) — a provider we cannot reach transmits nothing. The adapter is ALWAYS
+//     the transmit-authority ceiling: every modality below is AND'd with adapterCaps.
+//   - (1) LIVE modalities (reg.meta.modalitiesFor): when a provider has a live lister
+//     (e.g. openrouter) the live input_modalities are AUTHORITATIVE for that model —
+//     Image = adapterCaps.Image AND hasImageModality(live); Audio likewise. A PRESENT
+//     live entry wins even with an EMPTY modality list (⇒ text-only), NOT a fall-through:
+//     this is exactly how the picker treats it, so present-but-empty cannot diverge into
+//     echo=true via a catalogued image row. This is the SAME live modelEntry.InputModalities
+//     the picker (projectModelEntry) reads, so the session echo / ACP gate and the picker
+//     provably AGREE (the single-source guarantee).
+//     It fixes the bug where an openrouter TEXT-ONLY model (sharing the openai adapter,
+//     Image:true) reported Image:true in the echo because nothing read its live modalities.
+//   - (2) CATALOG floor: no live entry but the embedded catalog knows the model ⇒
+//     Image = adapterCaps.Image AND catalog-image; Audio = adapterCaps.Audio AND
+//     catalog-audio. The catalog carries NO audio field today, so catalog-audio is
+//     false and the AND is false regardless — Audio stays effectively adapter-driven.
+//   - (3) PASSTHROUGH: UNCATALOGUED + no live entry falls back to ADAPTER-ONLY caps
+//     (trust the adapter, both catalog and live are silent — do NOT zero it, or every
+//     passthrough model on openai-direct/anthropic would lose image). Only providers
+//     WITH a live lister get honest per-model gating; the global default is unchanged.
+//   - EmbeddedContext is adapter-driven throughout (neither catalog nor live opines).
 //
 // Reasoning is intentionally NOT intersected here: it is a ModelInfo field, not a
 // port.ProviderCapabilities bit, and there is no adapter "can replay reasoning"
@@ -49,10 +61,24 @@ import (
 func modelCapability(reg *providerRegistry, providerID, modelID string) port.ProviderCapabilities {
 	adapterCaps := modelAdapterCaps(reg, providerID)
 
+	// (1) Live-first: a provider with a live lister (openrouter) carries authoritative
+	// per-model input_modalities in the meta store — the SAME modelEntry.InputModalities
+	// the picker reads. nil-guarded (modalitiesFor → lookup is nil-safe).
+	if reg != nil && reg.meta != nil {
+		if liveMods, found := reg.meta.modalitiesFor(providerID, modelID); found {
+			return port.ProviderCapabilities{
+				Image:           adapterCaps.Image && hasImageModality(liveMods),
+				Audio:           adapterCaps.Audio && hasAudioModality(liveMods),
+				EmbeddedContext: adapterCaps.EmbeddedContext,
+			}
+		}
+	}
+
+	// (2) Catalog floor: no live entry, but the embedded catalog knows the model.
 	catImage, catAudio, catalogued := catalogModalities(providerID, modelID)
 	if !catalogued {
-		// Passthrough / uncatalogued model: the catalog is silent, so trust the
-		// adapter alone. Zeroing here would strip image from every uncatalogued model.
+		// (3) Passthrough / uncatalogued model: catalog AND live are silent, so trust
+		// the adapter alone. Zeroing here would strip image from every uncatalogued model.
 		return adapterCaps
 	}
 
@@ -89,6 +115,20 @@ func modelAdapterCaps(reg *providerRegistry, providerID string) port.ProviderCap
 func hasImageModality(modalities []string) bool {
 	for _, mod := range modalities {
 		if mod == "image" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAudioModality reports whether "audio" is among a model's input modalities. It is
+// the audio twin of hasImageModality so the live modality path computes audio-ness the
+// SAME way the catalog path does (catalogModalities also scans the raw list for "audio").
+// AND'd with adapterCaps.Audio in modelCapability; the P0 adapters are Audio:false, so
+// this is forward-compatible until an audio-capable adapter ships.
+func hasAudioModality(modalities []string) bool {
+	for _, mod := range modalities {
+		if mod == "audio" {
 			return true
 		}
 	}

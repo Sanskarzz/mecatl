@@ -20,6 +20,18 @@ func regWithProvider(id string, caps port.ProviderCapabilities) *providerRegistr
 	}
 }
 
+// regWithMeta builds regWithProvider's registry but ALSO attaches a live meta store
+// Swap'd with the supplied live modelEntry list for the provider — the fixture for the
+// live-first modality path of modelCapability (the same store the picker reads). It
+// mirrors livemeta_test.go's newLiveMetaStore + Swap convention.
+func regWithMeta(id string, caps port.ProviderCapabilities, live []modelEntry) *providerRegistry {
+	reg := regWithProvider(id, caps)
+	meta := newLiveMetaStore()
+	meta.Swap(map[string][]modelEntry{id: live})
+	reg.meta = meta
+	return reg
+}
+
 // catalogImageModel returns a (model id) that the catalog marks image-capable for
 // the given provider, plus a model id that is NOT image-capable, so the
 // intersection tests assert against the SAME data the catalog ships.
@@ -100,7 +112,9 @@ func TestModelCapabilityIntersection_CatalogAudioAlwaysFalse(t *testing.T) {
 
 // TestModelCapabilityIntersection_PassthroughModel: an uncatalogued model id falls
 // back to ADAPTER-ONLY caps (image NOT zeroed) — a passthrough model trusts the
-// adapter when the catalog is silent.
+// adapter when the catalog is silent. This fixture's registry carries NO meta store
+// (meta:nil from regWithProvider), so it documents the LIVE-ABSENT fallback: with no
+// live entry AND no catalog row, modelCapability returns the adapter caps verbatim.
 func TestModelCapabilityIntersection_PassthroughModel(t *testing.T) {
 	reg := regWithProvider(providerOpenAI, port.ProviderCapabilities{Image: true, Audio: true})
 	got := modelCapability(reg, providerOpenAI, "totally-made-up-model-not-in-catalog")
@@ -109,6 +123,119 @@ func TestModelCapabilityIntersection_PassthroughModel(t *testing.T) {
 	}
 	if !got.Audio {
 		t.Fatal("passthrough Audio = false, want adapter-only true")
+	}
+}
+
+// TestModelCapability_LiveModalitiesAuthoritative_TextOnly reproduces the reported
+// bug: an OpenRouter TEXT-ONLY model (openai/gpt-4) shares the openai adapter whose
+// Capabilities() is Image:true, but its LIVE input_modalities are ["text"]. The live
+// store is authoritative ⇒ Image must be FALSE (adapter Image:true AND no image
+// modality). Before the live-first wiring this returned true (the bug).
+func TestModelCapability_LiveModalitiesAuthoritative_TextOnly(t *testing.T) {
+	reg := regWithMeta(providerOpenRouter, port.ProviderCapabilities{Image: true},
+		[]modelEntry{{ID: "openai/gpt-4", InputModalities: []string{"text"}}})
+	if got := modelCapability(reg, providerOpenRouter, "openai/gpt-4"); got.Image {
+		t.Fatalf("Image = true for a live text-only model, want false (adapter Image:true ∩ no image modality)")
+	}
+}
+
+// TestModelCapability_LiveModalitiesAuthoritative_Vision: the same live path but the
+// model's live modalities include "image" ⇒ Image:true (adapter Image:true ∩ image).
+func TestModelCapability_LiveModalitiesAuthoritative_Vision(t *testing.T) {
+	reg := regWithMeta(providerOpenRouter, port.ProviderCapabilities{Image: true},
+		[]modelEntry{{ID: "openai/gpt-4o", InputModalities: []string{"text", "image"}}})
+	if got := modelCapability(reg, providerOpenRouter, "openai/gpt-4o"); !got.Image {
+		t.Fatalf("Image = false for a live vision model, want true (adapter Image:true ∩ image modality)")
+	}
+}
+
+// TestModelCapability_LiveMissCatalogFloor: with a meta store present but EMPTY of the
+// queried model (live miss), modelCapability falls through to the catalog floor — a
+// catalogued non-image model is still gated to Image:false. Confirms the live path
+// does not break the catalog floor when the live store simply lacks the model.
+func TestModelCapability_LiveMissCatalogFloor(t *testing.T) {
+	_, noImageModel := catalogModels(t, providerOpenAI)
+	if noImageModel == "" {
+		t.Skip("no catalogued openai non-image model")
+	}
+	// meta store seeded for a DIFFERENT provider; the openai query is a live miss.
+	reg := regWithMeta(providerOpenAI, port.ProviderCapabilities{Image: true},
+		[]modelEntry{{ID: "unrelated-live-model", InputModalities: []string{"text", "image"}}})
+	if got := modelCapability(reg, providerOpenAI, noImageModel); got.Image {
+		t.Fatalf("Image = true on live-miss catalog floor, want false (catalog non-image gates it)")
+	}
+}
+
+// TestModelCapability_LiveMissCatalogFloor_ImageModel: the live-miss path must not
+// SWALLOW the catalog's true. A live store present but lacking the queried model
+// (live miss) + a catalogued IMAGE model + adapter Image:true ⇒ Image:true via the
+// catalog floor. Pairs with the non-image case above (which proves the floor gates).
+func TestModelCapability_LiveMissCatalogFloor_ImageModel(t *testing.T) {
+	imageModel, _ := catalogModels(t, providerOpenAI)
+	if imageModel == "" {
+		t.Skip("no catalogued openai image model")
+	}
+	reg := regWithMeta(providerOpenAI, port.ProviderCapabilities{Image: true},
+		[]modelEntry{{ID: "unrelated-live-model", InputModalities: []string{"text"}}})
+	if got := modelCapability(reg, providerOpenAI, imageModel); !got.Image {
+		t.Fatalf("Image = false on live-miss image catalog floor, want true (catalog image ∩ adapter Image:true)")
+	}
+}
+
+// TestModelCapability_LiveVisionAdapterNo is the live twin of the catalog
+// CatalogNoImage→AdapterNo gate: live modalities include "image" but the ADAPTER
+// reports Image:false ⇒ the live branch yields Image:false (adapter is the transmit
+// ceiling that clamps the live path, the same AND the catalog path enforces).
+func TestModelCapability_LiveVisionAdapterNo(t *testing.T) {
+	reg := regWithMeta(providerOpenRouter, port.ProviderCapabilities{Image: false},
+		[]modelEntry{{ID: "openai/gpt-4o", InputModalities: []string{"text", "image"}}})
+	if got := modelCapability(reg, providerOpenRouter, "openai/gpt-4o"); got.Image {
+		t.Fatalf("Image = true with adapter Image:false on the live path, want false (adapter ceiling clamps live)")
+	}
+}
+
+// TestModelCapability_LiveAudioModality exercises the LIVE audio path (hasAudioModality):
+// live modalities ["text","audio"] + adapter Audio:true ⇒ Audio:true; the same live
+// modalities with adapter Audio:false ⇒ Audio:false (the AND gate). Audio is dormant in
+// P0 adapters, so this is the only coverage of the live audio AND.
+func TestModelCapability_LiveAudioModality(t *testing.T) {
+	regYes := regWithMeta(providerOpenRouter, port.ProviderCapabilities{Image: true, Audio: true},
+		[]modelEntry{{ID: "some/audio-model", InputModalities: []string{"text", "audio"}}})
+	if got := modelCapability(regYes, providerOpenRouter, "some/audio-model"); !got.Audio {
+		t.Fatalf("Audio = false for live audio modality + adapter Audio:true, want true")
+	}
+	regNo := regWithMeta(providerOpenRouter, port.ProviderCapabilities{Image: true, Audio: false},
+		[]modelEntry{{ID: "some/audio-model", InputModalities: []string{"text", "audio"}}})
+	if got := modelCapability(regNo, providerOpenRouter, "some/audio-model"); got.Audio {
+		t.Fatalf("Audio = true with adapter Audio:false on the live path, want false (the AND gate)")
+	}
+}
+
+// TestModelCapability_LivePresentButEmpty_AgreesWithPicker is the regression guard for
+// the picker≠echo Medium: a live entry that EXISTS but carries an EMPTY modality list
+// for a model id that is ALSO catalogued image-capable. A PRESENT live entry is
+// authoritative (text-only), so BOTH the session echo (modelCapability) and the picker
+// (projectModelEntry) must report Image:false — they AGREE. If modalitiesFor re-added a
+// len>0 guard, the echo would fall through to the catalog image row (Image:true) while
+// the picker stays false, breaking the single-source invariant.
+func TestModelCapability_LivePresentButEmpty_AgreesWithPicker(t *testing.T) {
+	imageModel, _ := catalogModels(t, providerOpenRouter)
+	if imageModel == "" {
+		t.Skip("no catalogued openrouter image model")
+	}
+	empty := modelEntry{ID: imageModel, InputModalities: nil} // present, but no modalities
+	reg := regWithMeta(providerOpenRouter, port.ProviderCapabilities{Image: true}, []modelEntry{empty})
+
+	echo := modelCapability(reg, providerOpenRouter, imageModel).Image
+	if echo {
+		t.Errorf("session echo Image = true for a present-but-empty live entry (catalogued image), want false")
+	}
+	picker := projectModelEntry(reg, providerOpenRouter, empty).Image
+	if picker {
+		t.Errorf("picker Image = true for a present-but-empty live entry, want false")
+	}
+	if echo != picker {
+		t.Errorf("picker/echo DISAGREE for present-but-empty %q: echo=%v picker=%v", imageModel, echo, picker)
 	}
 }
 
