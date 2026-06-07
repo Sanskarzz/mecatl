@@ -330,8 +330,19 @@ func New(deps Deps) Model {
 	// In-app text-selection highlight style. The viewport re-applies it on every
 	// render (it survives scroll/stream), and SetContent clears the ranges — so the
 	// ranges are re-applied after each refreshView (applySelectionHighlight) while a
-	// selection is active. Reverse video is theme-independent and ANSI-strips cleanly.
+	// selection is active. The "selection" style is a solid high-contrast block
+	// (luminance-derived foreground), legible on dark and light themes alike.
+	//
+	// BOTH HighlightStyle and SelectedHighlightStyle must be set to the SAME style.
+	// SetHighlights always focuses the nearest match (hiIdx >= 0), and the viewport
+	// renders that focused range with SelectedHighlightStyle ON TOP of HighlightStyle.
+	// We have no "focused" sub-selection concept (it's one drag selection), so leaving
+	// SelectedHighlightStyle empty makes its second pass re-render the focused span
+	// with an empty style — silently WIPING the highlight on it (for a single-line
+	// selection that's the whole thing → invisible). Setting both identical keeps the
+	// selection a uniform block.
 	vp.HighlightStyle = th.Style("selection")
+	vp.SelectedHighlightStyle = th.Style("selection")
 
 	return Model{
 		deps:  deps,

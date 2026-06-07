@@ -349,8 +349,20 @@ selection are left untouched (no mouse capture).
 **In-app text selection + copy (alt screen).** On the alt screen the app captures
 the mouse, so it provides its **own** text selection: **left-click-drag** over the
 conversation highlights the runes under the drag (press = anchor, drag = extend,
-release = finalize). The highlight is **logical** — it survives scrolling (wheel,
-`pgup`/`pgdn`, `home`/`end`) and a streaming re-render. Dragging to the **top or
+release = finalize). The highlight is a **solid high-contrast block**: the
+selection's own ANSI is stripped and re-rendered with a dedicated selection
+background plus a foreground chosen by the background's relative luminance
+(near-black on a light theme, near-white on a dark one), so the block is legible
+on every built-in theme — light (`solar`) and dark (`aztec`/`mono`) alike. (It is
+**not** reverse-video, which was invisible over already-coloured content.) The
+block is **glyph-bounded** — it stops at each line's last glyph rather than
+filling the terminal width, so multi-line selections have a ragged right edge;
+an empty line spanned in the middle of a selection is a gap (no cell to colour).
+The highlight is **logical** — it survives scrolling (wheel,
+`pgup`/`pgdn`, `home`/`end`) and a streaming re-render. The selection
+background is the optional **`selection`** palette slot; a theme that omits it
+derives the block from its **`accent`** colour, still with a luminance-correct
+foreground. Dragging to the **top or
 bottom edge** of the conversation **auto-scrolls** the view in that direction and
 keeps extending the selection over the newly-revealed lines (so you can select more
 than one screenful) — it scrolls continuously while you hold at the edge, **ramping
@@ -359,7 +371,12 @@ single step can never leap a full screen), and stops at the content top/bottom. 
 **release** the visible
 selection is copied (the default is copy-on-select): the ANSI styling and the
 gutter/right-padding are stripped, multi-line selections join with `\n`, and the
-footer/status confirms with a muted **`copied N chars`**. A **double-click** selects
+footer/status confirms with a muted **`copied · N chars · M lines`**. While a
+selection is active (and the view is idle) the footer-left shows a **live
+`N chars · M lines`** count; after a copy it becomes **`copied · N chars · M
+lines`** and the selection persists, so the confirmation rides alongside the
+still-live count rather than replacing it. The count is shown only at idle — never
+while a run streams, a permission ask is open, or the client is connecting. A **double-click** selects
 the **word** under the cursor (a maximal run of word characters, whitespace, or
 punctuation) and a **triple-click** selects the **whole logical line** — both
 highlight and copy immediately, just like copy-on-select; a fourth click at the same

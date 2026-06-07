@@ -29,6 +29,8 @@ var aztecPalette = Palette{
 	Text:      "#E7E2D3",
 	TextMuted: "#8A998F",
 
+	Selection: "#2A4D45", // dark jade block → near-white fg
+
 	Success: "#4CC38A",
 	Warning: aztecGold,
 	Error:   "#D9603B",
@@ -74,6 +76,8 @@ var monoPalette = Palette{
 	Text:      "#E4E4E4",
 	TextMuted: "#7A7A7A",
 
+	Selection: "#2F4A66", // dark blue block → near-white fg
+
 	Success: "#9ECE6A",
 	Warning: "#E0AF68",
 	Error:   "#F7768E",
@@ -118,6 +122,8 @@ var solarPalette = Palette{
 
 	Text:      "#073642",
 	TextMuted: "#657B83",
+
+	Selection: "#CFC8B0", // light sand block → near-black fg (exercises the flip)
 
 	Success: "#859900",
 	Warning: solarGold,

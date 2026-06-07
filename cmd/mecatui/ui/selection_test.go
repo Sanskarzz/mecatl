@@ -197,6 +197,77 @@ func TestByteRangesMultiLine(t *testing.T) {
 	m.vp.SetHighlights(ranges)
 }
 
+// TestByteRangesEmptyInteriorLineGetsNoCell pins the SHIPPED behaviour for an
+// empty interior line in a multi-line selection. We VERIFIED a one-cell
+// [off, off+1] range over the '\n' byte does NOT paint in bubbles viewport
+// v2.1.0 (lipgloss.StyleRanges renders the bg SGR with no glyph between the
+// escapes), so byteRanges deliberately skips the empty line: the surrounding
+// lines stay highlighted, the empty line is a gap. This locks that contract
+// (and that the ranges stay ascending/non-overlapping + don't panic).
+func TestByteRangesEmptyInteriorLineGetsNoCell(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent("alpha\n\nbeta")
+	content := m.vp.GetContent()
+	// Select from line0col0 through line2col4 — spanning the empty middle line.
+	sel := selection{active: true, anchorL: 0, anchorC: 0, headL: 2, headC: 4}
+	ranges := byteRanges(content, sel)
+	// Two ranges: "alpha" (line0) and "beta" (line2). The empty line1 contributes
+	// none (the known limitation).
+	if len(ranges) != 2 {
+		t.Fatalf("ranges = %v, want 2 (empty interior line contributes none)", ranges)
+	}
+	// Ascending + non-overlapping.
+	if ranges[0][0] > ranges[0][1] || ranges[0][1] > ranges[1][0] || ranges[1][0] > ranges[1][1] {
+		t.Errorf("ranges not ascending/non-overlapping: %v", ranges)
+	}
+	if got := content[ranges[0][0]:ranges[0][1]]; got != "alpha" {
+		t.Errorf("range[0] slice = %q, want %q", got, "alpha")
+	}
+	if got := content[ranges[1][0]:ranges[1][1]]; got != "beta" {
+		t.Errorf("range[1] slice = %q, want %q", got, "beta")
+	}
+	// Must not panic when handed to the real viewport.
+	m.vp.SetHighlights(ranges)
+}
+
+// TestByteRangesGlyphWidthNotPadded asserts an interior line's highlight stops at
+// its last glyph, NOT the terminal width — the highlight is ragged (glyph-bounded),
+// never a full-width bar (Req 6). The interior line's range slices to exactly the
+// stripped line content.
+func TestByteRangesGlyphWidthNotPadded(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent("first line\nshort\nlast line here")
+	content := m.vp.GetContent()
+	// Select all three lines; the middle line "short" is the interior line.
+	sel := selection{active: true, anchorL: 0, anchorC: 0, headL: 2, headC: 14}
+	ranges := byteRanges(content, sel)
+	if len(ranges) != 3 {
+		t.Fatalf("ranges = %v, want 3", ranges)
+	}
+	// The interior line's range must equal exactly the stripped "short" (5 cells),
+	// not padded to the 100-cell terminal width.
+	mid := content[ranges[1][0]:ranges[1][1]]
+	if mid != "short" {
+		t.Errorf("interior line slice = %q, want %q (glyph-bounded, not full-width)", mid, "short")
+	}
+	if w := ranges[1][1] - ranges[1][0]; w != len("short") {
+		t.Errorf("interior line width = %d bytes, want %d (== grapheme count, no pad)", w, len("short"))
+	}
+}
+
+// TestSelectedTextUnchangedByEmptyLineFix asserts the COPY path still preserves
+// the empty middle line (the byteRanges/highlight change is additive and must not
+// touch selectedText). The empty line survives as a "\n" in the joined payload.
+func TestSelectedTextUnchangedByEmptyLineFix(t *testing.T) {
+	m, _ := selModel(t)
+	m.vp.SetContent("alpha\n\nbeta")
+	sel := selection{active: true, anchorL: 0, anchorC: 0, headL: 2, headC: 4}
+	got := selectedText(m.vp.GetContent(), sel)
+	if got != "alpha\n\nbeta" {
+		t.Errorf("selectedText = %q, want %q (empty middle line preserved)", got, "alpha\n\nbeta")
+	}
+}
+
 // TestPressDragReleaseCopies: a press anchors, motion extends, release copies. The
 // returned command carries the OSC52 payload AND the shell-write fallback fires;
 // the status reads "copied". FAILS if the copy path breaks.
@@ -472,9 +543,33 @@ func TestSelectionClearedOnReflowAboveIt(t *testing.T) {
 	if m.sel.active {
 		t.Errorf("selection should be CLEARED after a reflow shifted the content under it (marker %d → %d)", markerLine, afterIdx)
 	}
-	if strings.Contains(m.vp.View(), "\x1b[7m") {
-		t.Error("no reverse-video selection highlight should remain after the reflow-clear")
+	if len(byteRanges(m.vp.GetContent(), m.sel)) != 0 {
+		t.Error("no selection highlight ranges should remain after the reflow-clear")
 	}
+	if strings.Contains(m.vp.View(), selectionBgSGR(t, m)) {
+		t.Error("no selection background highlight should remain after the reflow-clear")
+	}
+}
+
+// selectionBgSGR returns the truecolor background SGR substring the resolved
+// "selection" theme style emits (e.g. "48;2;42;77;69" for aztec's #2A4D45), so a
+// test can assert the highlight block's presence/absence without hard-coding the
+// hex. It probes the style by rendering a single glyph and extracting the
+// background portion of the SGR — the part that survives even when no glyph is
+// present.
+func selectionBgSGR(t *testing.T, m Model) string {
+	t.Helper()
+	probe := m.deps.Theme.Style("selection").Render("X")
+	idx := strings.Index(probe, "48;")
+	if idx < 0 {
+		t.Fatalf("selection style has no background SGR: %q", probe)
+	}
+	// Slice from "48;" up to (and excluding) the SGR terminator 'm'.
+	end := strings.IndexByte(probe[idx:], 'm')
+	if end < 0 {
+		t.Fatalf("malformed selection SGR: %q", probe)
+	}
+	return probe[idx : idx+end]
 }
 
 // TestWheelKeepsSelection: a wheel scroll while a selection exists still scrolls
@@ -496,6 +591,45 @@ func TestWheelKeepsSelection(t *testing.T) {
 	}
 	if m.stuck == beforeStuck && beforeStuck {
 		t.Error("a wheel-up should have unstuck the view (auto-follow re-derived)")
+	}
+}
+
+// TestSelectionHighlightWrapsSelectedText is the STRONG visibility guard: it
+// asserts the selection background SGR immediately WRAPS the selected glyphs in the
+// rendered viewport — not an empty open+reset pair around unstyled text. A prior
+// bug left SelectedHighlightStyle unset, so the viewport's focused-range pass
+// re-rendered the span with an empty style and wiped the colour; the rendered
+// output was "<open><reset>text<open><reset>" (SGR present but the text NOT inside
+// the block). A presence-only check ("does the SGR byte appear?") passed anyway —
+// this test fails on that bug because it requires the selected text to sit between
+// the open SGR and the reset.
+func TestSelectionHighlightWrapsSelectedText(t *testing.T) {
+	m, _ := selModel(t)
+	// Controlled single-line content: the selected span has no newline, so a correct
+	// highlight must wrap it contiguously (a multi-line span would be split across
+	// per-line ranges and couldn't be matched as one substring).
+	m.vp.SetContent("alpha bravo charlie delta echo")
+	m.vp.SetYOffset(0)
+	// Select "bravo" — cols [6,11), no trailing space, so the wrapped span equals the
+	// (trailing-trimmed) selectedText.
+	m.sel = selection{active: true, anchorL: 0, anchorC: 6, headL: 0, headC: 11}
+	m.sel.snapshot = selectedText(m.vp.GetContent(), m.sel)
+	applySelectionHighlight(&m)
+
+	want := selectedText(m.vp.GetContent(), m.sel)
+	if want != "bravo" {
+		t.Fatalf("setup: selected text = %q, want %q", want, "bravo")
+	}
+	// Full open SGR for the selection style (fg+bg), up to and including the 'm'.
+	probe := m.deps.Theme.Style("selection").Render("X")
+	mIdx := strings.IndexByte(probe, 'm')
+	if mIdx < 0 {
+		t.Fatalf("selection style has no SGR: %q", probe)
+	}
+	openSGR := probe[:mIdx+1]
+
+	if !strings.Contains(m.vp.View(), openSGR+want) {
+		t.Errorf("selection highlight does not wrap the selected text:\n want open SGR %q immediately followed by %q in the rendered view", openSGR, want)
 	}
 }
 
@@ -539,11 +673,16 @@ func TestSelectionSurvivesStreamingDelta(t *testing.T) {
 	// Stronger: the VIEWPORT itself must still carry the highlight after the
 	// SetContent (which clears highlights) → re-apply loop ran in refreshView. The
 	// bubbles viewport doesn't expose its highlight ranges, so assert the rendered
-	// view actually contains the reverse-video SGR (the "selection" theme style),
-	// AND that the recomputed byte offsets still slice the expected span out of the
-	// current content (closing the clear-then-reapply loop for real).
-	if !strings.Contains(m.vp.View(), "\x1b[7m") {
-		t.Error("after a streaming delta the rendered viewport should still carry the reverse-video selection highlight")
+	// view actually carries the selection BACKGROUND SGR (the "selection" theme
+	// style is now a solid block, NOT reverse video), AND that the recomputed byte
+	// offsets still slice the expected span out of the current content (closing the
+	// clear-then-reapply loop for real).
+	selSGR := selectionBgSGR(t, m)
+	if !strings.Contains(m.vp.View(), selSGR) {
+		t.Errorf("after a streaming delta the rendered viewport should still carry the selection background SGR %q", selSGR)
+	}
+	if strings.Contains(m.vp.View(), "\x1b[7m") {
+		t.Error("the selection highlight must be a solid block, not reverse video")
 	}
 	// byteRanges offsets index the ANSI-STRIPPED content (the viewport contract), so
 	// slicing the stripped form recovers the same first-line span selectedText

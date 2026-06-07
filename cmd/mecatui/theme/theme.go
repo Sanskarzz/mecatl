@@ -8,8 +8,22 @@ package theme
 
 import (
 	"image/color"
+	"math"
+	"strconv"
 
 	"charm.land/lipgloss/v2"
+)
+
+// Selection-highlight foreground constants and the luminance cutoff used to pick
+// between them. selFgDark/selFgLight are FIXED near-black / near-white values
+// (softer than pure #000/#fff to match the palette aesthetic) chosen purely to
+// guarantee contrast against the classified background — deliberately NOT
+// Text/Bg, which a theme may tune for prose, not for a solid block. The cutoff
+// L≥selLumThreshold ⇒ the background is "light" ⇒ pick the dark foreground.
+const (
+	selFgDark       = "#1a1a1a"
+	selFgLight      = "#f0f0f0"
+	selLumThreshold = 0.4
 )
 
 // Palette is the raw, semantic colour set a theme is defined by. Every field is
@@ -37,6 +51,12 @@ type Palette struct {
 	// Foreground text.
 	Text      string `json:"text"`
 	TextMuted string `json:"textMuted"`
+
+	// In-app text-selection highlight background. Empty ⇒ derived from Accent.
+	// The foreground is NOT a palette slot: it is computed from this background's
+	// relative luminance (see contrastingText) so the block is legible on any
+	// theme, dark or light.
+	Selection string `json:"selection"`
 
 	// Status colours.
 	Success string `json:"success"`
@@ -96,6 +116,49 @@ func col(hex string) color.Color {
 	return lipgloss.Color(hex)
 }
 
+// relLuminance returns the WCAG relative luminance (0..1) of a "#rrggbb" hex
+// colour, plus ok=false when the string is empty or malformed. It is the
+// colour-blind-safe basis for choosing a contrasting foreground: luminance is a
+// brightness measure, independent of hue. The formula is the standard
+// sRGB→linear gamma expansion (c≤0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4)
+// weighted 0.2126·R + 0.7152·G + 0.0722·B.
+func relLuminance(hex string) (float64, bool) {
+	if len(hex) != 7 || hex[0] != '#' {
+		return 0, false
+	}
+	chans := [3]float64{}
+	for i := 0; i < 3; i++ {
+		v, err := strconv.ParseUint(hex[1+i*2:3+i*2], 16, 8)
+		if err != nil {
+			return 0, false
+		}
+		c := float64(v) / 255.0
+		if c <= 0.04045 {
+			c /= 12.92
+		} else {
+			c = math.Pow((c+0.055)/1.055, 2.4)
+		}
+		chans[i] = c
+	}
+	return 0.2126*chans[0] + 0.7152*chans[1] + 0.0722*chans[2], true
+}
+
+// contrastingText picks the selection-highlight FOREGROUND for a given
+// background hex: a near-black fg on a light background, a near-white fg on a
+// dark one, decided by relative luminance (contrast, not hue → colour-blind
+// safe). A malformed/empty background falls back to the light foreground (the
+// common dark-theme case). The result feeds the "selection" style only.
+func contrastingText(bgHex string) color.Color {
+	l, ok := relLuminance(bgHex)
+	if !ok {
+		return col(selFgLight)
+	}
+	if l >= selLumThreshold {
+		return col(selFgDark)
+	}
+	return col(selFgLight)
+}
+
 // Color returns the color.Color for a semantic slot name (e.g. "accent",
 // "error", "user"). Unknown slots return nil (terminal default). The lookup is
 // by the palette's JSON field name so callers and JSON authors share one
@@ -140,6 +203,7 @@ func buildSlots(p Palette) map[string]string {
 		"borderSubtle":   p.BorderSubtle,
 		"text":           p.Text,
 		"textMuted":      p.TextMuted,
+		"selection":      p.Selection,
 		"success":        p.Success,
 		"warning":        p.Warning,
 		"error":          p.Error,
@@ -171,6 +235,19 @@ func (t *Theme) compile() {
 	t.slots = buildSlots(p)
 	rounded := lipgloss.RoundedBorder()
 	thick := lipgloss.ThickBorder()
+
+	// In-app selection highlight: a SOLID flat block. The viewport's
+	// lipgloss.StyleRanges STRIPS the selected span's own ANSI and re-renders it
+	// with ONLY this style, so an explicit Background + computed Foreground paint a
+	// legible block — reverse video (SGR 7) was invisible over already-coloured
+	// content. The background is the palette's Selection slot, falling back to the
+	// Accent when unset; the foreground is luminance-derived for contrast on any
+	// palette (dark or light).
+	selBg := p.Selection
+	if selBg == "" {
+		selBg = p.Accent
+	}
+	selFg := contrastingText(selBg)
 
 	t.styles = map[string]lipgloss.Style{
 		// Top header bar: session/model/mode, primary border bottom.
@@ -280,12 +357,14 @@ func (t *Theme) compile() {
 			Foreground(col(p.TextMuted)).
 			Bold(true),
 
-		// In-app text selection highlight (mouse-drag select + copy). Reverse video
-		// is deliberately theme-INDEPENDENT (it swaps fg/bg via SGR 7, so it reads on
-		// any palette) and survives an ANSI-strip cleanly in the stripped View
-		// goldens — keeping the steady-state goldens unaffected while a selection is
-		// visible only when one is active.
-		"selection": lipgloss.NewStyle().Reverse(true),
+		// In-app text selection highlight (mouse-drag select + copy): a solid
+		// high-contrast block (selBg / luminance-derived selFg above), NOT reverse
+		// video. The viewport StyleRanges-strips the selected span and re-renders it
+		// with ONLY this style, so a flat Background+Foreground reads on any palette
+		// where reverse video over coloured content did not. It survives an
+		// ANSI-strip cleanly in the stripped View goldens, and is applied only while
+		// a selection is active — so the steady-state goldens are unaffected.
+		"selection": lipgloss.NewStyle().Background(col(selBg)).Foreground(selFg),
 
 		// Context-window pressure slots for the footer meter: success when the
 		// context is comfortably below the compaction band, warning approaching

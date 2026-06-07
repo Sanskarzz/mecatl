@@ -192,7 +192,8 @@ func (s selection) empty() bool {
 
 // byteRanges converts the selection into the viewport's native SetHighlights
 // argument: ascending, non-overlapping [start,end] byte-offset pairs, ONE per
-// spanned content line. The offsets are bytes into the ANSI-STRIPPED content
+// spanned content line that has at least one selected cell (an empty interior
+// line yields none — see the KNOWN LIMITATION below). The offsets are bytes into the ANSI-STRIPPED content
 // (verified against bubbles viewport v2.1.0's parseMatches, which walks
 // ansi.Strip(content) — a per-line range into the stripped content highlights the
 // right cells, where a single range straddling a \n does not). Each line's range
@@ -234,6 +235,16 @@ func byteRanges(content string, sel selection) [][]int {
 			if b1 > b0 {
 				ranges = append(ranges, []int{b0, b1})
 			}
+			// KNOWN LIMITATION — an EMPTY interior line contributes no highlighted
+			// cell. We VERIFIED a one-cell [off, off+1] range over the '\n' byte does
+			// NOT paint in bubbles viewport v2.1.0: parseMatches DOES translate it to a
+			// {0,1} grapheme range on the blank line, but lipgloss.StyleRanges then
+			// renders Style.Render(ansi.Cut("", 0, 1)) — i.e. the background SGR with
+			// NO glyph between the open/close escapes ("\x1b[…m\x1b[m"), so the terminal
+			// shows zero coloured cells. Rather than ship an invisible no-op range that
+			// the test would have to special-case, the empty line stays a gap in the
+			// highlight (the run above and below it is still solid). The COPY path
+			// (selectedText) is unaffected — it preserves the empty line via "\n".
 		}
 		off += len(stripped) + 1 // +1 for the '\n' separator
 	}

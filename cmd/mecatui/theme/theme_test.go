@@ -35,7 +35,7 @@ func TestStylesCompiled(t *testing.T) {
 		"header", "footer", "viewport", "userBlock", "userLabel",
 		"assistantLabel", "toolCard", "toolName", "toolArgs", "toolOk",
 		"toolErr", "askCard", "askTitle", "askButton", "askButtonActive",
-		"spinner", "muted", "errorText",
+		"spinner", "muted", "errorText", "selection",
 	}
 	th := New("aztec", aztecPalette)
 	for _, slot := range want {
@@ -65,6 +65,12 @@ func TestParseThemeMergeOverBase(t *testing.T) {
 	// Untouched slot must inherit Aztec.
 	if th.Palette.Primary != aztecPalette.Primary {
 		t.Errorf("primary = %q, want inherited Aztec %q", th.Palette.Primary, aztecPalette.Primary)
+	}
+	// Back-compat: a partial palette that omits the newer "selection" slot must
+	// inherit the Aztec base value (the optional field never breaks an older
+	// theme file).
+	if th.Palette.Selection != aztecPalette.Selection {
+		t.Errorf("selection = %q, want inherited Aztec %q", th.Palette.Selection, aztecPalette.Selection)
 	}
 }
 
@@ -140,5 +146,98 @@ func TestColorUnknownSlot(t *testing.T) {
 	th := New("aztec", aztecPalette)
 	if c := th.Color("does-not-exist"); c != nil {
 		t.Errorf("unknown slot colour = %v, want nil", c)
+	}
+}
+
+// TestContrastingTextLuminance locks the luminance-driven foreground pick: a
+// LIGHT selection background gets the near-black fg, a DARK one the near-white
+// fg, and a malformed/empty background falls back to the light fg (the common
+// dark-theme case). The two straddling hexes prove the threshold flips.
+func TestContrastingTextLuminance(t *testing.T) {
+	cases := []struct {
+		name string
+		bg   string
+		want string // expected fg hex
+	}{
+		{"solar bg light", "#FDF6E3", selFgDark},
+		{"plain light", "#f0f0f0", selFgDark},
+		{"solar selection sand", "#CFC8B0", selFgDark},
+		{"aztec bg dark", "#0E1311", selFgLight},
+		{"aztec selection jade", "#2A4D45", selFgLight},
+		{"pure black", "#000000", selFgLight},
+		{"malformed", "not-a-hex", selFgLight},
+		{"empty", "", selFgLight},
+		// Straddle the L=0.4 threshold (grey ramp: L≈0.4 near c≈0.72): #999999
+		// (L≈0.32) sits just below → light fg; #BBBBBB (L≈0.49) just above → dark
+		// fg. This is the flip point.
+		{"just below threshold", "#999999", selFgLight},
+		{"just above threshold", "#BBBBBB", selFgDark},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := contrastingText(c.bg)
+			want := col(c.want)
+			if got != want {
+				t.Errorf("contrastingText(%q) = %v, want %v", c.bg, got, want)
+			}
+		})
+	}
+}
+
+// TestSelectionStyleIsSolidBlock asserts the compiled "selection" style is a
+// solid flat block — a non-nil Background AND Foreground, NOT reverse video — and
+// that the foreground obeys the luminance rule per theme (solar's light block →
+// dark fg; aztec/mono's dark block → light fg). The rendered probe must carry a
+// background SGR (48;…), never the reverse SGR (\x1b[7m).
+func TestSelectionStyleIsSolidBlock(t *testing.T) {
+	cases := []struct {
+		theme  string
+		pal    Palette
+		wantFg string
+	}{
+		{"aztec", aztecPalette, selFgLight},
+		{"mono", monoPalette, selFgLight},
+		{"solar", solarPalette, selFgDark},
+	}
+	for _, c := range cases {
+		t.Run(c.theme, func(t *testing.T) {
+			th := New(c.theme, c.pal)
+			st := th.Style("selection")
+			if st.GetBackground() == nil {
+				t.Errorf("%s selection: background is nil, want a solid block bg", c.theme)
+			}
+			if st.GetForeground() == nil {
+				t.Errorf("%s selection: foreground is nil, want a computed fg", c.theme)
+			}
+			if fg := st.GetForeground(); fg != col(c.wantFg) {
+				t.Errorf("%s selection fg = %v, want %v", c.theme, fg, col(c.wantFg))
+			}
+			probe := st.Render("X")
+			if strings.Contains(probe, "\x1b[7m") {
+				t.Errorf("%s selection must NOT be reverse video, got %q", c.theme, probe)
+			}
+			// A background SGR is "48;" (truecolor) in the rendered output.
+			if !strings.Contains(probe, "48;") {
+				t.Errorf("%s selection should render a background SGR, got %q", c.theme, probe)
+			}
+		})
+	}
+}
+
+// TestSelectionFallbackToAccent asserts that a palette with NO selection slot
+// derives the block background from Accent, with a luminance-correct fg. This is
+// the partial-theme path: a user theme that never sets "selection" still gets a
+// legible block.
+func TestSelectionFallbackToAccent(t *testing.T) {
+	p := aztecPalette
+	p.Selection = "" // force the accent fallback
+	th := New("partial", p)
+	st := th.Style("selection")
+	if st.GetBackground() != col(p.Accent) {
+		t.Errorf("fallback selection bg = %v, want accent %v", st.GetBackground(), col(p.Accent))
+	}
+	// aztecGold (#E9B949) is a light-ish accent → dark fg expected.
+	if fg, want := st.GetForeground(), contrastingText(p.Accent); fg != want {
+		t.Errorf("fallback selection fg = %v, want luminance-of-accent %v", fg, want)
 	}
 }

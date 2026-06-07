@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
@@ -224,9 +225,20 @@ func (m Model) renderFooter() string {
 	case phaseConnecting:
 		left = m.sp.View() + " connecting…"
 	default:
-		left = m.statusMsg
-		if left == "" {
-			left = "ready"
+		// While a non-empty selection is active at idle/default phase, the footer
+		// shows a live "N chars · M lines" count (→ "copied · …" after a copy). This
+		// arm is the ONLY phase the count can appear in — the running/approval/
+		// connecting arms above own the footer-left in those phases — so the count is
+		// never shown mid-run by construction (Req 5). With no selection the existing
+		// statusMsg / "ready" is shown unchanged.
+		switch {
+		case m.sel.active && !m.sel.empty():
+			left = m.selectionStatus()
+		default:
+			left = m.statusMsg
+			if left == "" {
+				left = "ready"
+			}
 		}
 	}
 
@@ -252,6 +264,29 @@ func (m Model) renderFooter() string {
 	line := m.fitFooter(left, width)
 	footer := m.deps.Theme.Style("footer").Width(width).Render(line)
 	return footer + "\n" + m.deps.Theme.Style("muted").Render(help)
+}
+
+// selectionStatus is the footer-left segment shown while a non-empty selection
+// is active (idle/default phase only — see renderFooter). It reports the live
+// VISIBLE size of the selection as "N chars · M lines" (correct singular: "1
+// char", "1 line"), counting the copy-ready runes (selectedText) and the spanned
+// logical lines. After a copy the statusMsg carries "copied …", so the count is
+// prefixed "copied · " — the selection persists past a copy (Req 7), so the
+// confirmation rides alongside the still-live count rather than replacing it. The
+// whole segment is muted so it reads as chrome, not an alert.
+func (m Model) selectionStatus() string {
+	muted := m.deps.Theme.Style("muted")
+	txt := selectedText(m.vp.GetContent(), m.sel)
+	chars := len([]rune(txt))
+	startL, _, endL, _ := m.sel.normalize()
+	lines := endL - startL + 1
+	count := fmt.Sprintf("%s · %s", plural(chars, "char"), plural(lines, "line"))
+	// statusMsg is lipgloss-rendered (ANSI-wrapped), so strip before matching the
+	// "copied" sentinel copySelection sets.
+	if strings.Contains(ansi.Strip(m.statusMsg), "copied") {
+		return muted.Render("copied · " + count)
+	}
+	return muted.Render(count)
 }
 
 // footerGapPad is the minimum blank gap kept between the left status and the
