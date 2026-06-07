@@ -50,6 +50,16 @@ type selection struct {
 	// so the self-re-arming tick (which carries no fresh mouse coordinate) can keep
 	// the head at the same horizontal column as the view scrolls.
 	dragX int
+	// snapshot is the VISIBLE selected text (selectedText) as of the last time the
+	// selection geometry changed via a gesture — the identity anchor for the
+	// selection. The anchor/head are absolute line indices into the viewport content,
+	// so a reflow that changes the line count ABOVE or WITHIN the selection (ctrl+t
+	// expand/collapse, compaction) silently re-points them at different text. On every
+	// re-render refreshView recomputes selectedText against the CURRENT content and,
+	// if it no longer equals snapshot, DROPS the selection rather than highlight/copy
+	// the wrong runes. A pure streaming append BELOW the selection leaves the selected
+	// lines untouched, so snapshot still matches and the selection survives (Req 2).
+	snapshot string
 }
 
 // convTopRow is the screen row where the conversation viewport's first row sits. It

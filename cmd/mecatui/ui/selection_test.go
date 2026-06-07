@@ -359,6 +359,78 @@ func TestSelectionAssumesSoftWrapDisabled(t *testing.T) {
 	}
 }
 
+// lineIndexContaining returns the index of the first content line containing sub,
+// or -1. Lines are the viewport content split on "\n" (the same basis the
+// selection's absolute line indices use).
+func lineIndexContaining(content, sub string) int {
+	for i, ln := range strings.Split(content, "\n") {
+		if strings.Contains(ansi.Strip(ln), sub) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestSelectionClearedOnReflowAboveIt: selection-identity robustness. The anchor/
+// head are ABSOLUTE line indices, so a re-render that changes the line count above
+// (or within) the selection — here ctrl+t expanding a tool body — re-points them at
+// different text. The selection must be DROPPED, not left highlighting/copying the
+// wrong runes. (A pure append BELOW does not trigger this — see
+// TestSelectionSurvivesStreamingDelta.)
+func TestSelectionClearedOnReflowAboveIt(t *testing.T) {
+	cb := &fakeClipboard{}
+	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
+	m.deps.NoAltScreen = false
+	m.deps.Clipboard = cb
+	m = applyAll(m,
+		tea.WindowSizeMsg{Width: 100, Height: 40},
+		client.SessionReadyMsg{SessionID: "sess-reflow-1"},
+	)
+	// A tool block whose body is long enough that ctrl+t (full vs line-capped) changes
+	// its rendered height, followed by a UNIQUE assistant marker line BELOW it.
+	m.conv.addUser("req")
+	m.conv.addTool("t1", "Bash", `{"cmd":"seq 40"}`)
+	m.conv.resolveTool("t1", strings.TrimRight(strings.Repeat("toolbodyline\n", 40), "\n"), false)
+	const marker = "UNIQUEMARKERZZZ"
+	m.conv.appendAssistant(marker + " trailing words here")
+	m.phase = phaseIdle
+	m.stuck = true
+	m.refreshView()
+
+	// Select within the marker line (in the capped render).
+	markerLine := lineIndexContaining(m.vp.GetContent(), marker)
+	if markerLine < 0 {
+		t.Fatal("marker not found in capped content")
+	}
+	top := convTopRow(m)
+	y := top + (markerLine - m.vp.YOffset())
+	if y < top || y >= top+m.vp.Height() {
+		t.Fatalf("marker line %d not on screen (YOffset=%d top=%d h=%d)", markerLine, m.vp.YOffset(), top, m.vp.Height())
+	}
+	m, _ = pressMouse(m, tea.MouseLeft, 0, y)
+	m, _ = motionMouse(m, 40, y) // wide enough to cover the whole marker line
+	if !m.sel.active {
+		t.Fatal("expected an active selection on the marker line")
+	}
+	if !strings.Contains(m.sel.snapshot, marker) {
+		t.Fatalf("selection snapshot %q should cover the marker", m.sel.snapshot)
+	}
+
+	// Toggle ctrl+t → the tool body expands, shifting the marker DOWN, so line index
+	// markerLine now holds a tool-body line instead of the marker.
+	m, _ = pressKey(m, tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	afterIdx := lineIndexContaining(m.vp.GetContent(), marker)
+	if afterIdx == markerLine {
+		t.Fatalf("test setup did not shift the layout (marker stayed at line %d); ctrl+t must change the tool body height", markerLine)
+	}
+	if m.sel.active {
+		t.Errorf("selection should be CLEARED after a reflow shifted the content under it (marker %d → %d)", markerLine, afterIdx)
+	}
+	if strings.Contains(m.vp.View(), "\x1b[7m") {
+		t.Error("no reverse-video selection highlight should remain after the reflow-clear")
+	}
+}
+
 // TestWheelKeepsSelection: a wheel scroll while a selection exists still scrolls
 // (re-derives auto-follow) and does NOT clear the selection (Req 10).
 func TestWheelKeepsSelection(t *testing.T) {

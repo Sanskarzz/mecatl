@@ -1409,6 +1409,12 @@ func (m Model) onMouseRelease(mo tea.Mouse) (tea.Model, tea.Cmd) {
 		m.refreshView()
 		return m, nil
 	}
+	// Release is the one head-changing path that doesn't already run through
+	// applySelectionHighlight; refresh the ranges AND the identity snapshot for the
+	// final head before copy, so the immediately-following refreshView (in
+	// copySelection) sees a matching snapshot and keeps the highlight rather than
+	// treating the moved head as a reflow and clearing it.
+	applySelectionHighlight(&m)
 	return m.copySelection()
 }
 
@@ -1438,9 +1444,16 @@ func applySelectionHighlight(m *Model) {
 	saved := m.vp.YOffset()
 	m.vp.ClearHighlights()
 	if m.sel.active {
-		if ranges := byteRanges(m.vp.GetContent(), m.sel); len(ranges) > 0 {
+		content := m.vp.GetContent()
+		if ranges := byteRanges(content, m.sel); len(ranges) > 0 {
 			m.vp.SetHighlights(ranges)
 		}
+		// Record what the selection currently covers — its identity anchor. Captured
+		// here because every selection-GEOMETRY change funnels through this function
+		// while the content is stable (gestures don't re-render). refreshView compares
+		// this snapshot against the post-render content BEFORE calling us, so a reflow
+		// under the selection clears it instead of being silently re-snapshotted.
+		m.sel.snapshot = selectedText(content, m.sel)
 	}
 	m.vp.SetYOffset(saved)
 }
@@ -1540,8 +1553,19 @@ func (m *Model) refreshView() {
 	// covers every refreshView caller — the highlight survives a streaming re-render
 	// (Req 2). applySelectionHighlight saves/restores YOffset, and it runs AFTER the
 	// stuck re-pin so the captured offset is the final settled position.
+	//
+	// Identity check FIRST: the anchor/head are absolute line indices, so a reflow
+	// that changed the line count above/within the selection (ctrl+t expand/collapse,
+	// compaction) now re-points them at different text. If the text under the current
+	// ranges no longer matches what was selected, DROP the selection rather than
+	// highlight/copy the wrong runes. A pure append below leaves the selected lines
+	// untouched, so this does NOT fire for streaming (Req 2 preserved).
 	if m.sel.active {
-		applySelectionHighlight(m)
+		if selectedText(m.vp.GetContent(), m.sel) != m.sel.snapshot {
+			*m = m.clearSelection()
+		} else {
+			applySelectionHighlight(m)
+		}
 	}
 }
 
