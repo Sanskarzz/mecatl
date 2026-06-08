@@ -50,7 +50,7 @@ func TestTaskRoutesToNamedAgent(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("want 1 result, got %d", len(results))
 	}
-	if results[0].IsError || results[0].Content != "REVIEWER" {
+	if results[0].IsError || !strings.Contains(results[0].Content, "REVIEWER") {
 		t.Fatalf("routed result = %+v, want the reviewer engine's summary", results[0])
 	}
 }
@@ -70,7 +70,7 @@ func TestTaskDefaultExplorerUnchanged(t *testing.T) {
 		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"explore"}`)),
 		mockllm.TextTurn("parent done"),
 	)
-	if len(results) != 1 || results[0].Content != "DEFAULT" {
+	if len(results) != 1 || !strings.Contains(results[0].Content, "DEFAULT") {
 		t.Fatalf("default route result = %+v, want DEFAULT explorer", results[0])
 	}
 }

@@ -138,6 +138,35 @@ type taskArgs struct {
 	// limits: a child that exceeds it is cancelled and the result is a time-budget tool
 	// error. A non-positive value is ignored (no deadline).
 	TimeoutMs *int `json:"timeout_ms,omitempty"`
+
+	// Model optionally PINS this child to a specific provider model for THIS call
+	// (cheaper for fan-out, stronger for deep analysis), overriding the inherited
+	// parent/explorer model. It is an opaque provider-model string; the composition
+	// root resolves it to a contamination-safe child engine via the injected engine
+	// factory (so Compactor/TokenCounter/Env.Model/ContextWindow are re-derived for the
+	// override model — never a clone-and-swap of the LLM on an existing engine). An
+	// unknown/unroutable model is a model-addressable error. Empty = inherit. It is
+	// REJECTED together with `agent` (a specialist already pins its own engine/model).
+	Model string `json:"model,omitempty"`
+
+	// OutputSchema optionally requests STRUCTURED output: a model-authored JSON schema
+	// (a SUBSET — object/array/string/number/integer/boolean/null/properties/required/
+	// items/enum). When present the child is given a synthetic SubmitResult tool whose
+	// parameters ARE this schema and is instructed to call it to deliver; the submitted
+	// payload is validated against the schema (session.ValidateJSON) and, on a mismatch,
+	// a model-visible correction is re-injected and the child re-driven, BOUNDED. The
+	// validated payload becomes the Task result text. Omitted (the default) = today's
+	// free-text behaviour, unchanged.
+	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
+
+	// MaxTokens optionally imposes a per-call TIGHTEN-ONLY cumulative TOKEN ceiling on
+	// this child run (input+output, the loop-level token budget). It rides a Run-scoped
+	// override on the SHARED child engine (no fresh engine needed), folded tighten-only
+	// with the operator default: the lower non-zero value wins, so a per-call ceiling can
+	// make the child stricter than the operator's bound, never looser. A non-positive
+	// value is ignored (inherit the engine's budget). A budget-stopped child returns its
+	// best-effort summary (StopBudget is a clean terminal), not an error.
+	MaxTokens *int `json:"max_tokens,omitempty"`
 }
 
 // AgentMeta is the plain (name, description) summary of one registered agent
@@ -191,6 +220,18 @@ var taskSchema = json.RawMessage(`{
     "timeout_ms": {
       "type": "integer",
       "description": "Optional wall-clock deadline in milliseconds for the whole subagent run; if it exceeds this it is cancelled and returns a time-budget error. Omit for no deadline."
+    },
+    "model": {
+      "type": "string",
+      "description": "Optional provider model id to pin THIS subagent to (e.g. a cheaper model for wide fan-out, a stronger one for deep analysis). Omit to inherit the parent's model. Cannot be combined with the agent argument (a specialist already pins its own model)."
+    },
+    "max_tokens": {
+      "type": "integer",
+      "description": "Optional cap on the subagent's total token spend (input+output) for THIS call. Tighten-only: it can make the subagent stricter than the default, never looser. When reached the subagent stops cleanly and returns its best-effort summary. Omit to use the default."
+    },
+    "output_schema": {
+      "type": "object",
+      "description": "Optional JSON schema describing the structured result you want back. When present, the subagent must deliver by calling a SubmitResult tool with JSON matching this schema; the validated JSON is returned as the result. Supports a subset: type/properties/required/items/enum. Omit for a free-text summary."
     }
   },
   "required": ["prompt"]
@@ -283,10 +324,48 @@ type TaskTool struct {
 	// WithMaxConcurrentChildren (or its deprecated alias WithMaxConcurrentTaskShells).
 	childGate chan struct{}
 
+	// engineFactory, when non-nil, mints a child engine for a per-call `model`
+	// override. It is a composition-supplied closure (WithTaskEngineFactory) closing
+	// over the provider registry: given an opaque model string it returns a child
+	// engine built through the SAME contamination-safe per-provider path the named-agent
+	// engines use (engineDepsForProvider re-derives Compactor/TokenCounter/Env.Model/
+	// ContextWindow for the override model) — NEVER a clone-and-swap of the LLM on an
+	// existing engine. It returns ok=false for an unknown/unroutable model, which Task
+	// renders as a model-addressable error. nil (the default) means no per-call model
+	// override is wired (a `model` arg then errors with a clear "not supported" message).
+	// It is layering-clean: the closure takes a string and returns *Engine — both
+	// agent-layer types — and no adapter/proto/server type crosses (same shape as
+	// WithAgentEngines).
+	engineFactory func(model string) (*Engine, bool)
+
 	// idPrefix seeds the generated child SessionID so child sessions are
 	// distinguishable in logs/stores.
 	idPrefix string
 }
+
+// defaultStructuredOutputRetries bounds how many CORRECTION re-drives a
+// structured-output child gets after a SubmitResult payload fails schema validation
+// (or the child never calls SubmitResult), before the Task tool gives up with
+// StopStructuredOutput. It mirrors defaultNoProgressNudges (2): the FIRST attempt plus
+// this many corrections. It is a bounded retry counter — NOT tool_choice forcing
+// (incompatible with Anthropic thinking + the OpenAI reasoning path).
+//
+// LIMIT SEMANTICS (per-attempt vs cross-attempt): each correction re-drive Reopen()s
+// the child session, which RESETS its Counters — so the per-call MaxTurns/MaxToolCalls
+// (and a def's WithChildLimits) bound EACH ATTEMPT independently, giving a
+// structured-output child effectively up to (1+defaultStructuredOutputRetries)× its
+// per-child turn/tool budget across the whole call. That is BOUNDED (a small constant
+// multiplier), not a runaway. The cross-attempt ceiling is the TOKEN budget
+// (Deps.MaxRunTokens / the per-call max_tokens override): driveChild SUMS usage across
+// every drive (usage = usage.Add(u)) and RE-PASSES the same runOpts (carrying the
+// tighten-only override) to each RunContentWith, so the token budget genuinely
+// accumulates across attempts and is the real cross-attempt brake.
+const defaultStructuredOutputRetries = 2
+
+// submitResultToolName is the catalog name of the synthetic deliverable tool a
+// structured-output child is given. It is run-scoped (RunOptions.ExtraTools), never
+// registered into any shared catalog.
+const submitResultToolName = "SubmitResult"
 
 // TaskOption configures a TaskTool.
 type TaskOption func(*TaskTool)
@@ -351,6 +430,20 @@ func WithMaxConcurrentChildren(n int) TaskOption {
 // Deprecated: use WithMaxConcurrentChildren.
 func WithMaxConcurrentTaskShells(n int) TaskOption {
 	return WithMaxConcurrentChildren(n)
+}
+
+// WithTaskEngineFactory injects the composition-supplied factory that mints a child
+// engine for a per-call `model` override. The closure closes over the provider
+// registry and builds the override child through the contamination-safe per-provider
+// path (engineDepsForProvider) — Compactor/TokenCounter/Env.Model/ContextWindow are
+// re-derived for the override model, NEVER a clone-and-swap of the LLM on an existing
+// engine. It returns (engine, true) for a routable model and (nil, false) otherwise
+// (an unknown/unroutable model, which Task surfaces as a model-addressable error).
+// nil (the default) leaves Task without a per-call model override (a `model` arg then
+// errors). It is the layering-clean seam: only func(string)(*Engine,bool) crosses into
+// internal/agent (same shape as WithAgentEngines).
+func WithTaskEngineFactory(f func(model string) (*Engine, bool)) TaskOption {
+	return func(t *TaskTool) { t.engineFactory = f }
 }
 
 // WithAgentEngines injects the per-definition child engines (keyed by agent name)
@@ -539,6 +632,59 @@ func (t *TaskTool) ExecuteWithParent(ctx context.Context, call session.ToolCall,
 // loop against the SAME workspace, drains the child's entire Event stream
 // internally, optionally forwards a redacted projection of that activity, and
 // returns only the child's final summary text as a single ToolResult.
+// selectChildEngine resolves the child engine + base session limits for a Task call
+// from its `agent` / `model` arguments (mutually exclusive — R9). It returns
+// ok=false with a model-addressable error ToolResult on a bad selection (agent+model
+// together, an unknown agent, an unwired/unroutable model), and the chosen engine +
+// limits on success. The default explorer + the Task tool's default limits is the
+// no-arg case.
+func (t *TaskTool) selectChildEngine(callID session.ToolCallID, args taskArgs) (engine *Engine, limits session.Limits, errResult session.ToolResult, ok bool) {
+	// `agent` and `model` are mutually exclusive: a named specialist already pins its
+	// own engine/model/prompt/scope, so layering a call-time model over it would
+	// silently break the def's contract. Reject the combination with a clear error.
+	wantAgent := strings.TrimSpace(args.Agent)
+	wantModel := strings.TrimSpace(args.Model)
+	if wantAgent != "" && wantModel != "" {
+		return nil, session.Limits{}, session.NewToolError(callID,
+			"Task: specify `agent` OR `model`, not both — a specialist agent already pins its own model"), false
+	}
+
+	// Route to a named specialist when requested; otherwise the default explorer. An
+	// unknown name is a model-addressable error listing the valid names, so the model
+	// can retry — it never silently falls back (which would run the wrong scope/prompt).
+	engine = t.childEngine
+	limits = t.limits // default explorer bound; a named agent with per-def limits overrides.
+	if wantAgent != "" {
+		eng, found := t.agentEngines[wantAgent]
+		if !found {
+			return nil, session.Limits{}, session.NewToolError(callID, "Task: "+t.unknownAgentHint(wantAgent)), false
+		}
+		engine = eng
+		if l, found := t.agentLimits[wantAgent]; found {
+			limits = l
+		}
+	}
+
+	// Per-call model override (R9/D6): mint a child engine for the requested model via
+	// the composition-supplied factory, which re-derives Compactor/TokenCounter/
+	// Env.Model/ContextWindow for the override model (no clone-and-swap). An unknown/
+	// unroutable model is a model-addressable error; without a wired factory the
+	// override is unsupported (an honest error, never a silent inherit).
+	if wantModel != "" {
+		if t.engineFactory == nil {
+			return nil, session.Limits{}, session.NewToolError(callID,
+				"Task: per-call `model` override is not supported in this deployment"), false
+		}
+		eng, found := t.engineFactory(wantModel)
+		if !found || eng == nil {
+			return nil, session.Limits{}, session.NewToolError(callID,
+				fmt.Sprintf("Task: unknown or unroutable model %q; omit `model` to inherit the parent's model", wantModel)), false
+		}
+		engine = eng
+	}
+	return engine, limits, session.ToolResult{}, true
+}
+
 func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error) {
 	var args taskArgs
 	if msg, ok := session.ParseArgs(call, &args); !ok {
@@ -548,23 +694,11 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 		return session.NewToolError(call.ID, "Task: 'prompt' is required and must be non-empty"), nil
 	}
 
-	// Route to a named specialist when requested; otherwise the default explorer.
-	// An unknown name is a model-addressable error listing the valid names, so the
-	// model can retry — it never silently falls back (which would run the wrong
-	// scope/prompt under the requested name).
-	engine := t.childEngine
-	// limits default to the Task tool's own (the no-`agent` explorer bound); a named
-	// agent with per-def limits overrides them below.
-	limits := t.limits
-	if name := strings.TrimSpace(args.Agent); name != "" {
-		eng, ok := t.agentEngines[name]
-		if !ok {
-			return session.NewToolError(call.ID, "Task: "+t.unknownAgentHint(name)), nil
-		}
-		engine = eng
-		if l, ok := t.agentLimits[name]; ok {
-			limits = l
-		}
+	// Select the child engine + base limits from `agent`/`model` (mutually exclusive),
+	// returning a model-addressable error result for a bad selection.
+	engine, limits, errResult, ok := t.selectChildEngine(call.ID, args)
+	if !ok {
+		return errResult, nil
 	}
 
 	// Per-call limit overrides (tighten-only): the model may make THIS child stricter
@@ -644,20 +778,43 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 		}})
 	}
 
-	start := time.Now()
-	run := engine.Run(ctx, child, runWS, args.Prompt)
+	// Per-call token ceiling (R4): a Run-scoped TIGHTEN-ONLY override carried into the
+	// child run via RunContentWith, so a per-call max_tokens bounds the SHARED child
+	// engine WITHOUT minting a fresh engine (the cleaner of the two R4 options). 0 ⇒
+	// inherit the engine's operator-default budget. It folds tighten-only in the loop
+	// (effectiveMaxRunTokens), so it can make the child stricter, never looser.
+	var runOpts RunOptions
+	if args.MaxTokens != nil && *args.MaxTokens > 0 {
+		runOpts.MaxRunTokensOverride = *args.MaxTokens
+	}
 
-	// Drain the child's Event stream entirely INSIDE the Task tool. Nothing from
-	// the child surfaces to the parent except the final summary string and, when
-	// observed, the redacted subagent.* metadata. Auto-deny any permission ask so
-	// the child can never block on a human (defensive: the recommended wiring is an
-	// allow-all read-only policy that never asks).
+	// Structured output (D1/D2): when an output_schema is supplied, give the child a
+	// synthetic SubmitResult tool (run-scoped — never registered into the shared
+	// catalog) whose parameters ARE the schema, instruct it to call SubmitResult to
+	// deliver, validate the submitted payload, and re-drive on a mismatch up to a
+	// bounded retry count. The validated JSON becomes the result text; exhaustion is a
+	// model-visible StopStructuredOutput tool error. Omitted ⇒ today's free-text path.
+	var submit *submitResultTool
+	prompt := args.Prompt
+	if len(args.OutputSchema) > 0 && strings.TrimSpace(string(args.OutputSchema)) != "" {
+		submit = newSubmitResultTool(args.OutputSchema)
+		runOpts.ExtraTools = []tool.Tool{submit}
+		prompt = structuredOutputPrompt(args.Prompt, args.OutputSchema)
+	}
+
 	// A child forking a worktree (childForker != nil) runs ISOLATED, so its Bash asks
 	// are eligible for the A2 worktree-safe auto-approve; a forker-less child is
 	// base-sharing (no auto-approve). The parent caps carry interactivity + the surface
 	// back-channel for an interactive parent; headless leaves them zero (auto-deny).
 	posture := childPosture{isolated: t.childForker != nil, caps: caps, role: t.idPrefix}
-	final, stop, usage, toolCount := drainChildObserved(run, emit, string(call.ID), string(childID), posture)
+
+	start := time.Now()
+	// Drain the child's Event stream entirely INSIDE the Task tool. Nothing from the
+	// child surfaces to the parent except the final summary string and, when observed,
+	// the redacted subagent.* metadata. The structured-output retry loop re-drives the
+	// SAME child session (Reopen) with a correction prompt on a validation miss; the
+	// free-text path runs exactly one drive.
+	final, stop, usage, toolCount := driveChild(ctx, engine, child, runWS, prompt, runOpts, emit, call, childID, posture, submit, args.OutputSchema)
 
 	if emit != nil {
 		emit(session.Event{Type: session.EvSubagentEnd, Subagent: &session.SubagentPayload{
@@ -682,17 +839,134 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 			fmt.Sprintf("Task: subagent exceeded its time budget (%dms) and was stopped", *args.TimeoutMs)), nil
 	}
 
+	return renderTaskResult(call.ID, childID, final, stop, submit), nil
+}
+
+// renderTaskResult labels the child's terminal by stop reason (D4 — the typed result
+// taxonomy), surfaced in the MODEL-VISIBLE result, and stamps the agentId trailer (D5).
+// The mapping:
+//   - StopError                         → tool error (the child crashed).
+//   - StopStructuredOutput              → tool error carrying the last validation
+//     failure (the child never produced a schema-valid payload within the retry budget).
+//   - StopMaxTurns / StopMaxToolCalls   → success-with-note (stopped at a limit).
+//   - StopBudget                        → success-with-note (stopped at the token budget).
+//   - everything else (StopEndTurn / StopNoProgress / …) → success.
+//
+// On every NON-error terminal the result text carries the structured payload (when a
+// schema was satisfied) else the free-text summary, prefixed with the agentId trailer
+// so the parent MODEL can discover the child id (mirroring renderTeamResult's Team-id
+// line — the runtime-discoverability axis: the id must be where the model reads it, not
+// only on the client-only subagent.* events).
+func renderTaskResult(callID session.ToolCallID, childID session.SessionID, final string, stop session.StopReason, submit *submitResultTool) session.ToolResult {
+	// Structured-output failure: the retry budget was exhausted without a schema-valid
+	// payload. Surface the last validation error AS the tool error (model-visible),
+	// never only a log line.
+	if stop == session.StopStructuredOutput {
+		msg := "subagent did not produce output matching the requested schema"
+		if submit != nil {
+			if last := submit.lastError(); last != "" {
+				msg += ": " + last
+			}
+		}
+		return session.NewToolError(callID, "Task: "+msg)
+	}
 	if stop == session.StopError {
 		msg := final
 		if msg == "" {
 			msg = "subagent failed without producing a summary"
 		}
-		return session.NewToolError(call.ID, "Task: "+msg), nil
+		return session.NewToolError(callID, "Task: "+msg)
 	}
-	if final == "" {
-		final = "(subagent produced no summary)"
+
+	// Success family. A structured-output run returns the validated payload; otherwise
+	// the free-text summary.
+	body := final
+	if submit != nil {
+		if payload := submit.payload(); payload != "" {
+			body = payload
+		}
 	}
-	return session.NewToolResult(call.ID, final), nil
+	if strings.TrimSpace(body) == "" {
+		body = "(subagent produced no summary)"
+	}
+	// Limit / budget notes: the child stopped at a bound rather than finishing. The
+	// result is still a success (the partial work is usable), annotated so the model
+	// knows the deliverable may be incomplete.
+	switch stop {
+	case session.StopMaxTurns:
+		body = "[subagent stopped: reached its max-turns limit]\n\n" + body
+	case session.StopMaxToolCalls:
+		body = "[subagent stopped: reached its max-tool-calls limit]\n\n" + body
+	case session.StopBudget:
+		body = "[subagent stopped: reached its token budget]\n\n" + body
+	}
+	return session.NewToolResult(callID, renderTaskTrailer(childID, body))
+}
+
+// renderTaskTrailer prepends the model-visible agentId line to a Task result body,
+// mirroring renderTeamResult's Team-id line. The childID is rendered VERBATIM (the
+// deterministic t.childSessionID(callID)) so a human can correlate the overlay row and
+// the parent can refer to "the subagent that did X" by id. It pre-positions the seam
+// for a future inspect/resume without a second wire change (R2: trailer only this round).
+func renderTaskTrailer(childID session.SessionID, body string) string {
+	return fmt.Sprintf("agentId: %s\n\n%s", childID, body)
+}
+
+// driveChild runs the child loop and, when a structured-output schema is in play,
+// applies the bounded SubmitResult validation-retry. It returns the terminal text,
+// stop reason, cumulative usage, and observed tool-call count.
+//
+// FREE-TEXT path (submit == nil): exactly one RunContentWith drive — byte-identical to
+// the prior engine.Run(...) behaviour.
+//
+// STRUCTURED path (submit != nil): drive the child; if it called SubmitResult with a
+// VALID payload, the run is done (submit.payload() holds it). If the submitted payload
+// was INVALID or SubmitResult was never called, re-inject a model-visible correction
+// (Reopen + re-drive) up to defaultStructuredOutputRetries times, then give up with
+// StopStructuredOutput. The retry is a SEPARATE bounded loop owned here (NOT a change
+// to finishTurnNoTools — that hot shared path stays Task-agnostic, decision D2), and
+// uses NO tool_choice forcing (incompatible with the reasoning paths).
+func driveChild(ctx context.Context, engine *Engine, child *session.Session, runWS tool.Workspace, prompt string, runOpts RunOptions, emit func(session.Event), call session.ToolCall, childID session.SessionID, posture childPosture, submit *submitResultTool, schema json.RawMessage) (finalText string, stop session.StopReason, usage session.Usage, toolCount int) {
+	drivePrompt := prompt
+	// attempts = 1 (initial) + defaultStructuredOutputRetries corrections, but only the
+	// structured path retries; the free-text path runs once.
+	maxAttempts := 1
+	if submit != nil {
+		maxAttempts = 1 + defaultStructuredOutputRetries
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// A re-drive reuses the SAME child session: Reopen the completed session so
+		// RecordUserPrompt accepts the correction prompt (the run drove it to a terminal
+		// state). A non-recoverable session (failed/cancelled) ends the retry loop.
+		// NOTE: Reopen() RESETS Counters, so the per-call MaxTurns/MaxToolCalls bound EACH
+		// attempt independently (≤(1+defaultStructuredOutputRetries)× across the call —
+		// bounded). The cross-attempt ceiling is the TOKEN budget: usage is summed below
+		// and runOpts (carrying the tighten-only override) is re-passed to every drive.
+		if attempt > 0 {
+			if err := child.Reopen(); err != nil {
+				return finalText, stop, usage, toolCount
+			}
+		}
+		run := engine.RunContentWith(ctx, child, runWS, drivePrompt, nil, runOpts)
+		text, st, u, tc := drainChildObserved(run, emit, string(call.ID), string(childID), posture)
+		finalText, stop = text, st
+		usage = usage.Add(u)
+		toolCount += tc
+
+		// Free-text path, or a structured run that produced a valid payload: done.
+		if submit == nil || submit.valid() {
+			return finalText, stop, usage, toolCount
+		}
+		// A child that crashed or was cancelled must not be re-driven — surface it.
+		if stop == session.StopError || stop == session.StopCancelled || ctx.Err() != nil {
+			return finalText, stop, usage, toolCount
+		}
+		// Structured miss: build the correction prompt for the next attempt (if any).
+		drivePrompt = structuredCorrectionPrompt(schema, submit.lastError())
+	}
+	// Retry budget exhausted with no valid payload: a CLEAN terminal the Task result
+	// renders as a model-visible validation-failure tool error (recoverable, not failed).
+	return finalText, session.StopStructuredOutput, usage, toolCount
 }
 
 // tightenLimit applies a per-call TIGHTEN-ONLY override to an inherited session limit:

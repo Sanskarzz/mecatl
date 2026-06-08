@@ -116,8 +116,8 @@ func TestSubagentReturnsOnlyFinalString(t *testing.T) {
 	if got.IsError {
 		t.Fatalf("parent tool result is an error: %q", got.Content)
 	}
-	if got.Content != "summary: main.go is package main" {
-		t.Fatalf("parent tool result = %q, want the child's final summary", got.Content)
+	if !strings.Contains(got.Content, "summary: main.go is package main") {
+		t.Fatalf("parent tool result = %q, want it to contain the child's final summary", got.Content)
 	}
 
 	// The parent must NEVER see the child's intermediate signals. The child read
@@ -411,8 +411,8 @@ func TestSubagentChildScopeExcludesTaskAndMutators(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("parent saw %d tool results, want 1", len(results))
 	}
-	if results[0].Content != "done despite blocks" {
-		t.Fatalf("parent result = %q", results[0].Content)
+	if !strings.Contains(results[0].Content, "done despite blocks") {
+		t.Fatalf("parent result = %q, want it to contain the child summary", results[0].Content)
 	}
 }
 
@@ -534,7 +534,7 @@ func TestSubagentAutoDeniesAsk(t *testing.T) {
 			results = append(results, ev.ToolResult)
 		}
 	}
-	if len(results) != 1 || results[0].Content != "child finished after denial" {
+	if len(results) != 1 || !strings.Contains(results[0].Content, "child finished after denial") {
 		t.Fatalf("parent results = %+v, want single child summary", results)
 	}
 }
@@ -668,8 +668,8 @@ func TestSubagentForksBeforeRunning(t *testing.T) {
 	if got.IsError {
 		t.Fatalf("Task result is an error: %q", got.Content)
 	}
-	if got.Content != "inspected the fork" {
-		t.Fatalf("Task result = %q, want the child summary", got.Content)
+	if !strings.Contains(got.Content, "inspected the fork") {
+		t.Fatalf("Task result = %q, want it to contain the child summary", got.Content)
 	}
 
 	// The child's tool must have run against the FORK root, never the parent base.

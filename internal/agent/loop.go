@@ -314,6 +314,38 @@ type Run struct {
 	// the run goroutine starts and only read after, so it needs no synchronisation; the
 	// router itself is concurrency-safe for the cross-goroutine register/route.
 	childAsks *childAskRouter
+	// opts are the per-RUN overrides supplied at RunContentWith: a TIGHTEN-ONLY token
+	// ceiling and a set of run-scoped EXTRA tools (e.g. the synthetic SubmitResult tool
+	// for a structured-output Task child). They are read-only after the goroutine starts
+	// and are NEVER folded into the shared Engine.deps — that is the whole point: a
+	// per-call override must not mutate the shared child engine (the "Provider is FIXED
+	// per session" / no-clone-swap discipline applied to run-scoped knobs). The zero
+	// value is the legacy run (no override, no extras), so Run/RunContent are unchanged.
+	opts RunOptions
+}
+
+// RunOptions are per-RUN overrides a caller threads into RunContentWith. They are
+// run-scoped: they live on the Run, never on the shared Engine.Deps, so a per-call
+// knob (a tighter token ceiling, a synthetic deliverable tool) works on a SHARED child
+// engine WITHOUT minting a fresh engine or mutating the engine other concurrent runs
+// share. The zero value is the legacy run (Run/RunContent build it).
+type RunOptions struct {
+	// MaxRunTokensOverride, when > 0, is a per-run TIGHTEN-ONLY override of the engine's
+	// Deps.MaxRunTokens budget: the effective ceiling for THIS run is the lower of the
+	// two non-zero values (a per-call ceiling may make the run stricter than the operator
+	// default, never looser — mirroring the per-call limit tighten-only discipline). 0
+	// (the default) inherits the engine's Deps.MaxRunTokens unchanged.
+	MaxRunTokensOverride int
+	// ExtraTools are run-scoped tools layered OVER the engine's catalog for THIS run
+	// only: their specs are advertised to the model this run and they are dispatchable,
+	// but they are never registered into the shared catalog (so concurrent runs of the
+	// same engine never see them, and the engine is not mutated). A name collision with a
+	// catalog tool resolves to the EXTRA tool (the run-scoped overlay wins) for THIS run.
+	// The Task tool uses this to inject the synthetic SubmitResult deliverable tool for a
+	// structured-output child. Every ExtraTool MUST be ReadOnly (it is dispatched on the
+	// read-parallel path); a structured-output SubmitResult records into a per-run sink
+	// and performs no workspace mutation, so it is read-only.
+	ExtraTools []tool.Tool
 }
 
 // Events returns the channel of domain Events for this run. It is closed when the
@@ -377,12 +409,22 @@ func (e *Engine) Run(ctx context.Context, sess *session.Session, ws tool.Workspa
 // operate on the TEXT only; the media parts pass through untouched and are
 // recorded verbatim on the user message. Run delegates here with nil parts.
 func (e *Engine) RunContent(ctx context.Context, sess *session.Session, ws tool.Workspace, userText string, parts []session.Content) *Run {
+	return e.RunContentWith(ctx, sess, ws, userText, parts, RunOptions{})
+}
+
+// RunContentWith is RunContent plus per-RUN overrides (RunOptions): a tighten-only
+// token ceiling and run-scoped extra tools. It is the seam a per-call Task knob uses
+// to bound or augment a SHARED child engine for one delegation without minting a fresh
+// engine or mutating the engine other runs share. RunContent delegates here with a
+// zero RunOptions (the legacy run).
+func (e *Engine) RunContentWith(ctx context.Context, sess *session.Session, ws tool.Workspace, userText string, parts []session.Content, opts RunOptions) *Run {
 	ctx, cancel := context.WithCancel(ctx)
 	r := &Run{
 		events: make(chan session.Event, 64),
 		asks:   newAskRegistry(),
 		cancel: cancel,
 		ctx:    ctx,
+		opts:   opts,
 		// Bind the run-scoped diagnostics ONCE here, where the live session is in
 		// scope: correlate every emitted line to this session id, and (for a child
 		// engine, Role != "") to its agent role too. The main engine has Role=="" so
@@ -629,11 +671,51 @@ func (e *Engine) finishTurnNoTools(ctx context.Context, r *Run, sess *session.Se
 	return false
 }
 
+// effectiveMaxRunTokens folds the engine's Deps.MaxRunTokens with the run's optional
+// per-call override (RunOptions.MaxRunTokensOverride), TIGHTEN-ONLY: when both are
+// positive the lower wins (a per-call ceiling can make the run stricter, never looser);
+// when only one is positive that one applies; 0+0 means no budget. It is the single
+// fold both the budget check and any future budget-reading site must use.
+func (e *Engine) effectiveMaxRunTokens(r *Run) int {
+	base := e.deps.MaxRunTokens
+	over := r.opts.MaxRunTokensOverride
+	switch {
+	case base > 0 && over > 0:
+		if over < base {
+			return over
+		}
+		return base
+	case over > 0:
+		return over
+	default:
+		return base
+	}
+}
+
 // budgetExhausted reports whether the run's cumulative usage has crossed the
-// configured loop-level token ceiling (Deps.MaxRunTokens). A non-positive ceiling
-// (the default) disables the budget and always returns false.
-func (e *Engine) budgetExhausted(total session.Usage) bool {
-	return e.deps.MaxRunTokens > 0 && total.TotalTokens() >= e.deps.MaxRunTokens
+// effective loop-level token ceiling (Deps.MaxRunTokens folded with the run's
+// tighten-only RunOptions override). A non-positive effective ceiling (the default)
+// disables the budget and always returns false.
+func (e *Engine) budgetExhausted(r *Run, total session.Usage) bool {
+	ceiling := e.effectiveMaxRunTokens(r)
+	return ceiling > 0 && total.TotalTokens() >= ceiling
+}
+
+// lookupTool resolves a tool by name for THIS run: the run-scoped ExtraTools overlay
+// is consulted FIRST (so a structured-output SubmitResult, or any per-run tool, wins
+// over a same-named catalog tool for this run only), then the shared catalog. It is
+// the single resolution point dispatch uses so the overlay and the advertised specs
+// (buildRequest) never disagree.
+func (e *Engine) lookupTool(r *Run, name string) (tool.Tool, bool) {
+	for _, t := range r.opts.ExtraTools {
+		if t.Spec().Name == name {
+			return t, true
+		}
+	}
+	if e.deps.Catalog == nil {
+		return nil, false
+	}
+	return e.deps.Catalog.Lookup(name)
 }
 
 // preTurnTerminal runs the turn-BOUNDARY stop checks before a model call, in
@@ -654,7 +736,7 @@ func (e *Engine) preTurnTerminal(ctx context.Context, r *Run, sess *session.Sess
 		e.terminate(ctx, r, sess, session.StopCancelled, lastText, total, nil)
 		return true
 	}
-	if e.budgetExhausted(total) {
+	if e.budgetExhausted(r, total) {
 		e.terminateComplete(ctx, r, sess, session.StopBudget, lastText, total)
 		return true
 	}
@@ -732,7 +814,7 @@ type turnTiming struct {
 // content chunks reports no TTFT; a turn with one content chunk reports a TTFT
 // but no inter-token summary (there is no gap).
 func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, turnIdx int) (session.Message, session.Usage, session.StopReason, turnTiming, error) {
-	req := e.buildRequest(sess)
+	req := e.buildRequest(r, sess)
 	seq, err := e.deps.LLM.Stream(ctx, req)
 	if err != nil {
 		return session.Message{}, session.Usage{}, session.StopNone, turnTiming{}, fmt.Errorf("agent: start stream: %w", err)
@@ -839,7 +921,7 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 // buildRequest assembles the provider-neutral LLMRequest for the current turn:
 // the layered system prompt (cache-stable prefix + volatile env suffix), the
 // conversation history, and the mode-filtered tool specs.
-func (e *Engine) buildRequest(sess *session.Session) port.LLMRequest {
+func (e *Engine) buildRequest(r *Run, sess *session.Session) port.LLMRequest {
 	cfg := e.deps.PromptConfig
 	// Progressive disclosure (pattern 9): when enabled, advertise lightweight
 	// specs (full spec for non-disclosable tools, including the ToolSearch tool
@@ -849,6 +931,26 @@ func (e *Engine) buildRequest(sess *session.Session) port.LLMRequest {
 		cfg.Tools = e.deps.Catalog.AdvertisedSpecs(sess.Mode)
 	} else {
 		cfg.Tools = e.deps.Catalog.Specs(sess.Mode)
+	}
+	// Run-scoped extra tools (RunOptions.ExtraTools) are advertised this run only,
+	// after the catalog specs, so a structured-output SubmitResult (or any per-run
+	// tool) is visible to the model without being registered into the shared catalog.
+	// A name already present in cfg.Tools is REPLACED by the extra's spec (the overlay
+	// wins, matching lookupTool's overlay-first resolution) so the advertised set and
+	// the dispatch resolution never disagree.
+	for _, xt := range r.opts.ExtraTools {
+		spec := xt.Spec()
+		replaced := false
+		for i := range cfg.Tools {
+			if cfg.Tools[i].Name == spec.Name {
+				cfg.Tools[i] = spec
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cfg.Tools = append(cfg.Tools, spec)
+		}
 	}
 	cfg.Env.Model = e.deps.Model
 	cfg.Env.Mode = string(sess.Mode)

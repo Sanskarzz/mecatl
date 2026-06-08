@@ -567,6 +567,21 @@ read-only investigation to a **child agent loop**. Its `Execute`:
    `tool.result`/`hook`/`compaction` event, and **returns only the final
    summary string** as one `ToolResult` (gauntlet #7).
 
+**Per-call knobs (`taskArgs`).** Beyond `prompt`/`description`/`agent`, a Task call may
+supply: `max_turns`/`max_tool_calls`/`max_tokens` (TIGHTEN-ONLY caps — the model can
+make its child stricter than the operator's bound, never looser); `timeout_ms` (a
+wall-clock deadline → a time-budget tool error); `model` (pin THIS child to a specific
+provider model — minted via the composition-supplied `WithTaskEngineFactory` closure
+through the contamination-safe `newChildEngineForProvider` path, NEVER a clone-and-swap;
+mutually exclusive with `agent`); and `output_schema` (a model-authored JSON schema —
+the child is given a synthetic `SubmitResult` tool whose params ARE the schema, must
+call it to deliver, and the submitted payload is validated by `session.ValidateJSON`
+with a bounded correction-retry, NO `tool_choice` forcing). The Task RESULT is labelled
+by terminal reason (success / `[subagent stopped: …]` note / structured-output
+validation error / error) and carries an `agentId: <childID>` trailer (model-visible,
+mirroring the Team-id line) so the parent can discover the child id. None of these widen
+`port.LLMRequest` — they are `taskArgs`/`RunOptions`/factory concerns.
+
 The child is a **read-only explorer with a shell** — capability flows down from the
 parent (which has Bash); isolation, not catalog read-only-ness, is the security
 boundary:

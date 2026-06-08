@@ -2072,16 +2072,52 @@ func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvid
 // to the runner as the working directory, so the child's Bash defaults to its OWN
 // worktree, not the shared parent base.
 func buildChildEngine(cfg Config, provider port.LLMProvider, runner tool.CommandRunner) *agent.Engine {
-	childCat := tool.NewCatalog()
-	childCat.MustRegister(tools.ReadTool{})
-	childCat.MustRegister(tools.GrepTool{})
-	childCat.MustRegister(tools.GlobTool{})
-	if runner != nil {
-		childCat.MustRegister(tools.NewBashTool(runner))
-	}
-
-	return newChildEngine(cfg.diag(), "task", provider, childCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	return newChildEngine(cfg.diag(), "task", provider, readOnlyExplorerCatalog(runner), cfg.Model, explorerPromptConfig(cfg))
 }
+
+// readOnlyExplorerCatalog builds the canonical read-only explorer tool surface a Task
+// child (and a read-only Fork/member base) is scoped to: Read/Grep/Glob, PLUS the
+// SANDBOXED Bash tool when a runner is wired (runner != nil). It NEVER includes
+// Edit/Write (the explorer inspects, it does not edit the project) nor Task/Fork/
+// ToolSearch (no recursion/fan-out). It is the ONE definition of that surface, shared by
+// buildChildEngine (default Task explorer), buildTaskEngineFactory (per-call model
+// override — byte-identical to the default), and buildForkChildEngine's read-only base
+// (which then layers Edit/Write on top). The team-member catalog is DELIBERATELY NOT
+// built from here: its Bash gating differs (spec.Mutating || roIsolationAvailable, with
+// the isolateReadOnly side-effect), so it keeps its own tiering.
+func readOnlyExplorerCatalog(runner tool.CommandRunner) *tool.Catalog {
+	cat := tool.NewCatalog()
+	cat.MustRegister(tools.ReadTool{})
+	cat.MustRegister(tools.GrepTool{})
+	cat.MustRegister(tools.GlobTool{})
+	if runner != nil {
+		cat.MustRegister(tools.NewBashTool(runner))
+	}
+	return cat
+}
+
+// explorerPromptConfig is promptConfig for the DEFAULT Task explorer child: it appends
+// the References convention (D5b) to the explorer's Role so the child ENDS its summary
+// with a `References:` block listing the relevant file paths (path or path:line). This
+// makes the most common Task deliverable navigable without re-searching, and it lands in
+// the model-visible RESULT by construction (it shapes the child's output). It augments
+// the explorer Role specifically — NOT the shared defaultTone "Cite code as
+// file_path:line" sentence (that already exists and is a different, inline-citation
+// instruction). A per-def Task engine builds its Role via agentPromptConfig instead, so
+// this applies to the anonymous explorer (the no-`agent` path) where it is most useful.
+func explorerPromptConfig(cfg Config) prompt.Config {
+	pc := promptConfig(cfg, cfg.gitStatus)
+	pc.Role += "\n\n" + explorerReferencesInstruction
+	return pc
+}
+
+// explorerReferencesInstruction is the References-convention directive appended to the
+// default explorer child's Role (D5b). The substring "References:" is a stable test key
+// (TestExplorerPromptInstructsReferences) — do not change it.
+const explorerReferencesInstruction = "When you finish, END your summary with a " +
+	"\"References:\" section listing the file paths (as path or path:line) most relevant " +
+	"to the task, so the caller can navigate directly to them without searching again. " +
+	"List concrete paths, not prose."
 
 // buildForkChildEngine constructs the child *Engine each Fork branch runs. Unlike
 // buildChildEngine (the read-only Task explorer), a Fork branch child MAY MUTATE
@@ -2106,17 +2142,14 @@ func buildChildEngine(cfg Config, provider port.LLMProvider, runner tool.Command
 // caused. The mutating winner's fork is what winner-preservation
 // (join=first/judge) keeps.
 func buildForkChildEngine(cfg Config, provider port.LLMProvider, runner tool.CommandRunner) *agent.Engine {
-	childCat := tool.NewCatalog()
-	childCat.MustRegister(tools.ReadTool{})
-	childCat.MustRegister(tools.GrepTool{})
-	childCat.MustRegister(tools.GlobTool{})
+	// Start from the read-only explorer surface (Read/Grep/Glob + sandboxed Bash) then
+	// LAYER Edit/Write on top — a Fork branch MAY mutate its OWN fork. Bash is
+	// workspace-aware (BashTool.Execute passes the per-branch forked Workspace.Root() as
+	// workdir), so a branch's Bash runs in its OWN fork. (Task/Fork/ToolSearch stay
+	// excluded — readOnlyExplorerCatalog never adds them — so a branch can't recurse.)
+	childCat := readOnlyExplorerCatalog(runner)
 	childCat.MustRegister(tools.EditTool{})
 	childCat.MustRegister(tools.WriteTool{})
-	if runner != nil {
-		// Workspace-aware: the runner honors the per-branch forked Workspace.Root()
-		// the BashTool passes as workdir, so a branch's Bash runs in its OWN fork.
-		childCat.MustRegister(tools.NewBashTool(runner))
-	}
 
 	return newChildEngine(cfg.diag(), "fork", provider, childCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
@@ -2187,10 +2220,56 @@ func buildTaskTool(ctx context.Context, cfg Config, provReg *providerRegistry, p
 		taskForker := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
 		opts = append(opts, agent.WithChildForker(taskForker))
 	}
+	// Per-call model override factory: mint an explorer child engine for a requested
+	// model through the SAME contamination-safe per-provider path (newChildEngineFor
+	// Provider re-derives Compactor/TokenCounter/Env.Model/ContextWindow for the
+	// override model) — never a clone-and-swap of the LLM on an existing engine. The
+	// closure hands internal/agent only func(string)(*Engine,bool); the registry never
+	// crosses (same shape/spirit as WithAgentEngines).
+	opts = append(opts, agent.WithTaskEngineFactory(
+		buildTaskEngineFactory(cfg, provReg, provider, parentProviderID, sandboxedRunner)))
 	return agent.NewTaskTool(
 		buildChildEngine(cfg, provider, sandboxedRunner),
 		opts...,
 	), mcpClose
+}
+
+// buildTaskEngineFactory returns the per-call model-override factory the Task tool
+// invokes when a call sets `model`. Given an opaque model id it builds a fresh
+// read-only explorer child engine pinned to that model on the parent's provider,
+// re-deriving the provider-closing Deps (Compactor/TokenCounter/Env.Model/ContextWindow)
+// via newChildEngineForProvider so the override child compacts and counts on the
+// OVERRIDE model — the contamination-safe path, NEVER a clone-and-swap of an existing
+// engine's LLM. The explorer catalog mirrors buildChildEngine exactly (Read/Grep/Glob +
+// Bash when a sandboxed runner is wired), so a model-override child has the same tool
+// surface and worktree isolation as the default explorer.
+//
+// Routability: a blank model is unroutable (ok=false → Task surfaces a model-addressable
+// error). Any non-blank model is routed on the parent provider (the provider validates
+// the exact id at request time); its context window is re-derived live-first via the
+// registry meta so the override child compacts on the right window. Cross-provider
+// routing by a bare model id is intentionally out of scope this round (the registry is
+// keyed by provider, not model) — a def's `provider:` remains the cross-provider seam.
+func buildTaskEngineFactory(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID string, runner tool.CommandRunner) func(model string) (*agent.Engine, bool) {
+	return func(model string) (*agent.Engine, bool) {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return nil, false
+		}
+		// Same read-only explorer surface + References convention as the default explorer
+		// (buildChildEngine) — a model-override child is still the explorer, just on a
+		// different model.
+		childCat := readOnlyExplorerCatalog(runner)
+		// Re-derive the override model's context window live-first (same store the picker
+		// reads), so the override child compacts on its real window rather than the parent's.
+		childWindow := 0
+		if provReg != nil {
+			childWindow = provReg.meta.contextWindowFor(parentProviderID, model)
+		}
+		eng := newChildEngineForProvider(cfg, "task:model="+model, provider, model, childWindow,
+			childCat, explorerPromptConfig(modelCfgFor(cfg, model)), nil)
+		return eng, true
+	}
 }
 
 // buildTeamWiring constructs the agent-team dependencies — the unified per-member

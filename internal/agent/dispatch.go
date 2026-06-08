@@ -44,7 +44,7 @@ func (e *Engine) dispatch(ctx context.Context, r *Run, sess *session.Session, ws
 	i := 0
 	for i < len(calls) {
 		c := calls[i]
-		t, known := e.deps.Catalog.Lookup(c.Name)
+		t, known := e.lookupTool(r, c.Name)
 
 		// Mutating (or unknown) tools flush alone, serially.
 		if !known || !t.ReadOnly() {
@@ -62,7 +62,7 @@ func (e *Engine) dispatch(ctx context.Context, r *Run, sess *session.Session, ws
 		var batch []session.ToolCall
 		for j < len(calls) {
 			nc := calls[j]
-			nt, ok := e.deps.Catalog.Lookup(nc.Name)
+			nt, ok := e.lookupTool(r, nc.Name)
 			if !ok || !nt.ReadOnly() {
 				break
 			}
@@ -106,7 +106,7 @@ func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session
 	var toRun []pending
 	for _, c := range batch {
 		c := c // local copy: openCard takes &c, and this loop variable is reused.
-		t, _ := e.deps.Catalog.Lookup(c.Name)
+		t, _ := e.lookupTool(r, c.Name)
 		// Open the tool card BEFORE the permission/hook gate so any synthesized
 		// failure (a deny result or a PreToolUse veto) lands on a card the client has
 		// already seen — see openCard.

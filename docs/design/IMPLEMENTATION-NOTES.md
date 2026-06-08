@@ -198,6 +198,84 @@ read-parallel/mutate-serial is UNCHANGED (the gate bounds child START, not dispa
 Guards: `agent.TestSubagentChildGateCapsForkerlessConcurrency`,
 `agent.TestSubagentShellGateCapsConcurrentForks`, `agent.TestSupervisorRoundConcurrencyBounded`.
 
+**Task per-call model override (`WithTaskEngineFactory`).** `taskArgs.Model` (optional opaque
+string) pins THIS child to a specific provider model. The TaskTool cannot build engines
+(composition layer's job), so the composition root injects a closure
+`func(model string) (*agent.Engine, bool)` via `WithTaskEngineFactory`; `buildTaskEngineFactory`
+(internal/app) builds the override child through `newChildEngineForProvider` — the SAME
+contamination-safe per-provider path the named-agent engines use — so Compactor/TokenCounter/
+`Env.Model`/ContextWindow are RE-DERIVED for the override model, NEVER a clone-and-swap of an
+existing engine's LLM (the "Provider is FIXED per session" invariant). The factory routes the
+model on the parent's provider (the registry is keyed by provider, not model — cross-provider
+routing by a bare model id stays a def's `provider:` concern), re-derives the window live-first via
+`provReg.meta.contextWindowFor`, and returns `(nil,false)` for a blank/unroutable model (Task then
+surfaces a model-addressable error). `agent` + `model` together is REJECTED (R9): a specialist
+already pins its own engine/model. Reasoning-effort stays an adapter-construction Option (the
+factory owns adapter construction), never a `taskArgs`/`port.LLMRequest` field. Guards:
+`agent.TestTaskPerCallModelRoutesToFactory`, `agent.TestTaskPerCallModelUnknownErrors`,
+`agent.TestTaskAgentAndModelTogetherRejected`, `app.TestBuildTaskEngineFactoryReDerivesForOverrideModel`.
+
+**Task structured output (`output_schema` + `SubmitResult` + bounded validation-retry).** When
+`taskArgs.OutputSchema` (a model-authored JSON schema) is present, the child is given a synthetic
+`SubmitResult` tool (`internal/agent/structuredoutput.go`) whose PARAMETERS ARE that schema,
+injected run-scoped via the new `RunOptions.ExtraTools` (never registered into the shared catalog,
+so concurrent runs of the same engine never see it). The child prompt is augmented to "call
+SubmitResult to deliver" — NO `tool_choice` forcing (incompatible with Anthropic thinking + the
+OpenAI reasoning path). `SubmitResult.Execute` validates the submitted payload against the schema
+via `session.ValidateJSON` (a JSON-schema SUBSET validator — object/array/string/number/integer/
+boolean/null/properties/required/items/enum, FAIL-OPEN on any unsupported keyword; a domain helper,
+the SINGLE structured-output validation choke point, DISTINCT from `ValidateMediaParts`) and records
+the payload + validity onto the per-run tool struct. On a validation miss (or a child that never
+called SubmitResult) the Task tool re-injects a model-visible correction prompt and re-drives the
+SAME child session (`session.Reopen` + `Engine.RunContentWith`) up to `defaultStructuredOutputRetries`
+(2), then gives up with the new `session.StopStructuredOutput` CLEAN terminal. The retry is a
+SEPARATE bounded loop owned by `driveChild` — NOT a change to the hot shared `finishTurnNoTools`
+(decision D2). The validated payload becomes the result text; exhaustion is rendered as a
+MODEL-VISIBLE tool error carrying the last validation failure (never only a log line). Default (no
+schema) = today's free-text behaviour. PER-ATTEMPT vs CROSS-ATTEMPT limits: each correction
+re-drive `Reopen()`s the child, RESETTING its `Counters`, so per-call `MaxTurns`/`MaxToolCalls`
+(and `WithChildLimits`) bound EACH attempt — up to `(1+defaultStructuredOutputRetries)×` across the
+call (bounded, not a runaway); the cross-attempt brake is the TOKEN budget, which `driveChild` SUMS
+across drives and re-passes (the `runOpts` override) to each `RunContentWith`. Guards:
+`session.TestValidateJSONSubset`, `agent.TestTaskStructuredOutputHappyPath/RetryCorrects/
+ExhaustionFails/FreeTextUnchanged`, `agent.TestDriveChildStructuredPlainTextExhaustsToCleanTerminal`
+(plain-text-never-SubmitResult exhaustion → StopStructuredOutput, child COMPLETED + Reopen-recoverable),
+`agent.TestSubmitResultOverlayWinsAndIsAdvertised` (RunOptions overlay-first + advertised once).
+
+**References convention (D5b) + read-only explorer catalog extraction.** The DEFAULT explorer
+child's Role appends `explorerReferencesInstruction` (via `explorerPromptConfig`, the single site)
+so the child ENDS its summary with a `References:` block listing relevant file paths (path or
+path:line) — model-visible by construction (it shapes the child's output → the RESULT text). It is
+DISTINCT from the shared `defaultTone` "Cite code as file_path:line" inline-citation sentence. The
+read-only explorer tool surface `{Read, Grep, Glob, +sandboxed Bash when runner != nil}` is now
+`readOnlyExplorerCatalog(runner)` — ONE definition shared by `buildChildEngine`,
+`buildTaskEngineFactory` (byte-identical), and `buildForkChildEngine`'s read-only base (which then
+layers Edit/Write). The team-member catalog is DELIBERATELY NOT built from it (its Bash gating
+differs: `spec.Mutating || roIsolationAvailable` + the `isolateReadOnly` side-effect). Guard:
+`app.TestExplorerPromptInstructsReferences`.
+
+**Task typed result taxonomy + agentId trailer (`renderTaskResult`/`renderTaskTrailer`).** The Task
+RESULT is now LABELLED by terminal stop reason: `StopError` → tool error; `StopStructuredOutput` →
+tool error carrying the last validation failure; `StopMaxTurns`/`StopMaxToolCalls`/`StopBudget` →
+success-with-note (`[subagent stopped: …]` prefix); everything else (`StopEndTurn`/`StopNoProgress`/
+…) → success. On every non-error terminal the result text carries an `agentId: <childID>` trailer
+(mirroring `renderTeamResult`'s Team-id line) so the parent MODEL can DISCOVER the deterministic
+child id (`subagent-<callID>`) — the runtime-discoverability axis: the id must be where the model
+reads it, not only on the client-only `subagent.*` events. It is INFORMATIONAL this round (no
+`InspectTask` tool yet — R2), pre-positioning the seam. Guard:
+`agent.TestTaskAgentIdTrailerInResultText` (+ the existing subagent tests updated from exact-equality
+to substring assertions for the trailer).
+
+**Task per-call token ceiling (`max_tokens`, Run-scoped budget override — R4).** `taskArgs.MaxTokens`
+rides the new `RunOptions.MaxRunTokensOverride` carried into `Engine.RunContentWith`, so a per-call
+token ceiling bounds the SHARED child engine WITHOUT minting a fresh engine. `effectiveMaxRunTokens`
+folds it TIGHTEN-ONLY with `Deps.MaxRunTokens` (the lower non-zero value wins), so a per-call ceiling
+can make the child stricter than the operator default, never looser. A budget-stopped child ends
+`StopBudget` (clean terminal) → a success-with-note Task result, not an error. The `RunOptions`
+override is the cleaner of the two R4 options (it generalises and works on the shared engine);
+`RunContent`/`Run` delegate to `RunContentWith` with a zero `RunOptions` (legacy run, unchanged).
+Guards: `agent.TestTaskPerCallMaxTokensHitsBudgetTerminal`, `agent.TestTaskPerCallMaxTokensTightenOnly`.
+
 **Unknown-tool card (dispatch `runOne`).** An unknown/unresolved tool-call name now opens an
 `EvToolCall` card BEFORE its `EvToolResult` error (`unknown tool %q`), preserving the
 card-before-the-gate ordering so a client (ACP/mecatui) keys the failure to a card it already

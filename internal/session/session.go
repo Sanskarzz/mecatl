@@ -120,6 +120,17 @@ const (
 	// holds. It maps to the proto stop string verbatim (no proto enum; the wire stop
 	// field is a string passthrough, exactly like StopNoProgress).
 	StopBudget StopReason = "budget"
+	// StopStructuredOutput means a structured-output (output_schema) child run
+	// exhausted its bounded SubmitResult validation-retry budget without ever
+	// producing a schema-valid payload. Like StopNoProgress / StopBudget it is a
+	// CLEAN terminal (not StopError — the run did not crash, it just failed to
+	// satisfy the requested schema), routed through the completed path so the session
+	// ends COMPLETED and stays Reopen-recoverable. The Task tool renders it as a
+	// model-visible tool error carrying the last validation failure, so the failure
+	// reaches the model (never only a log line). It maps to the proto stop string
+	// verbatim (no proto enum; the wire stop field is a string passthrough, exactly
+	// like StopNoProgress / StopBudget).
+	StopStructuredOutput StopReason = "structured_output"
 )
 
 // Limits are the configured stop conditions for a session. A zero value in any

@@ -323,8 +323,8 @@ func TestSubproviderHalfADefPinsProvider(t *testing.T) {
 	})
 	engines, meta, _ := buildAgentTaskEngines(context.Background(), cfg, oa, reg, providerOpenAI, "gpt-5", defs, nil, nil, nil, nil)
 
-	if got := runTaskAgent(t, oa, engines, meta, "pinned"); got != "REPLY-FROM-openrouter" {
-		t.Fatalf("def pinned to openrouter routed to %q, want REPLY-FROM-openrouter", got)
+	if got := runTaskAgent(t, oa, engines, meta, "pinned"); !strings.Contains(got, "REPLY-FROM-openrouter") {
+		t.Fatalf("def pinned to openrouter routed to %q, want it to contain REPLY-FROM-openrouter", got)
 	}
 }
 
@@ -481,14 +481,14 @@ func TestHalfBSessionProviderInheritance(t *testing.T) {
 
 	// Select openrouter: the no-provider def inherits openrouter.
 	orFactory, _ := twoProviderFactoryWithAgents(t, defs, "plain")
-	if got := runFactoryTaskTurn(t, orFactory, server.ProviderSelector{ProviderID: providerOpenRouter}); got != "CHILD-FROM-openrouter" {
-		t.Fatalf("no-provider def on an openrouter session ran on %q, want CHILD-FROM-openrouter (inherited session provider)", got)
+	if got := runFactoryTaskTurn(t, orFactory, server.ProviderSelector{ProviderID: providerOpenRouter}); !strings.Contains(got, "CHILD-FROM-openrouter") {
+		t.Fatalf("no-provider def on an openrouter session ran on %q, want it to contain CHILD-FROM-openrouter (inherited session provider)", got)
 	}
 
 	// Select openai: the same def inherits openai.
 	oaFactory, _ := twoProviderFactoryWithAgents(t, defs, "plain")
-	if got := runFactoryTaskTurn(t, oaFactory, server.ProviderSelector{ProviderID: providerOpenAI}); got != "CHILD-FROM-openai" {
-		t.Fatalf("no-provider def on an openai session ran on %q, want CHILD-FROM-openai", got)
+	if got := runFactoryTaskTurn(t, oaFactory, server.ProviderSelector{ProviderID: providerOpenAI}); !strings.Contains(got, "CHILD-FROM-openai") {
+		t.Fatalf("no-provider def on an openai session ran on %q, want it to contain CHILD-FROM-openai", got)
 	}
 }
 
@@ -501,8 +501,8 @@ func TestHalfBDefProviderOverridesSession(t *testing.T) {
 	})
 	factory, _ := twoProviderFactoryWithAgents(t, defs, "pinned")
 	// Session selects openrouter; the def pins openai => the CHILD must run on openai.
-	if got := runFactoryTaskTurn(t, factory, server.ProviderSelector{ProviderID: providerOpenRouter}); got != "CHILD-FROM-openai" {
-		t.Fatalf("def pinning openai on an openrouter session ran on %q, want CHILD-FROM-openai (def overrides session)", got)
+	if got := runFactoryTaskTurn(t, factory, server.ProviderSelector{ProviderID: providerOpenRouter}); !strings.Contains(got, "CHILD-FROM-openai") {
+		t.Fatalf("def pinning openai on an openrouter session ran on %q, want it to contain CHILD-FROM-openai (def overrides session)", got)
 	}
 }
 
@@ -522,8 +522,8 @@ func TestHalfBSelectedSessionUnknownProviderFallsBack(t *testing.T) {
 	factory, _ := twoProviderFactoryWithAgents(t, defs, "bogus", diag)
 	// Session selects openrouter; the def's bogus provider is unknown => the child
 	// falls back to the SESSION provider (openrouter), runs, and does NOT error.
-	if got := runFactoryTaskTurn(t, factory, server.ProviderSelector{ProviderID: providerOpenRouter}); got != "CHILD-FROM-openrouter" {
-		t.Fatalf("def with a bogus provider on an openrouter session ran on %q, want CHILD-FROM-openrouter (fall back to session provider, not error)", got)
+	if got := runFactoryTaskTurn(t, factory, server.ProviderSelector{ProviderID: providerOpenRouter}); !strings.Contains(got, "CHILD-FROM-openrouter") {
+		t.Fatalf("def with a bogus provider on an openrouter session ran on %q, want it to contain CHILD-FROM-openrouter (fall back to session provider, not error)", got)
 	}
 	if !strings.Contains(buf.String(), "unknown/unavailable provider") {
 		t.Fatalf("expected an unknown-provider slog.Warn, got: %s", buf.String())
