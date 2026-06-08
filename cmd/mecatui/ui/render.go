@@ -728,12 +728,16 @@ const maxTeamLanes = 6
 // very long name blowing out the gutter.
 const maxTeamNameWidth = 16
 
-// teamGlyph is the per-member state glyph (glyph-not-colour-only), three states: a
-// "✓" for a TERMINAL member (the team has ended — b.teamDone), a hollow "○" for an
-// IDLE member (finished its current round, awaiting the next round or synthesis),
-// and a filled "◆" for one actively working.
+// teamGlyph is the per-member state glyph (glyph-not-colour-only): a "✗" for a member
+// that STOPPED non-resumably (team ended and the lane carries a terminal disposition),
+// a "✓" for a clean TERMINAL member (the team has ended — b.teamDone), a hollow "○" for
+// an IDLE member (finished its current round, awaiting the next round or synthesis),
+// and a filled "◆" for one actively working. The stopped state is checked first so the
+// overlay no longer flips a stopped member to "✓ done" and contradicts the supervisor.
 func teamGlyph(ln *teamLane, teamDone bool) string {
 	switch {
+	case teamDone && ln.stopped:
+		return "✗"
 	case teamDone:
 		return "✓"
 	case ln.idle:
@@ -881,17 +885,24 @@ func teamMutCue(ln *teamLane) string {
 	return "·"
 }
 
-// teamLaneState derives a member's current state label for the collapsed line,
-// three states: "done" when the team has ended (teamDone — terminal, wins over
+// teamLaneState derives a member's current state label for the collapsed line:
+// "stopped — <reason>" when the team has ended and the lane STOPPED non-resumably
+// (terminal, distinct from a clean finish so the overlay does not contradict the
+// supervisor), "done" when the team has ended cleanly (teamDone — terminal, wins over
 // everything), "idle" when the member finished its round and is awaiting the next
 // round / synthesis, else the running tool name (when one is active) or "working".
 // Only the WORKING state gets a trailing "…" heartbeat so a quiet card reads as
-// in-flight rather than stalled (mirroring the "reasoning…" affordance); idle and
-// terminal members are genuinely quiet and get no ellipsis. The tool name is
+// in-flight rather than stalled (mirroring the "reasoning…" affordance); idle, stopped
+// and done members are genuinely quiet and get no ellipsis. The tool name is
 // sanitized (server-derived). The mutating signal lives in teamMutCue, not here, so
 // it persists once a tool name fills this label.
 func teamLaneState(ln *teamLane, teamDone bool) string {
 	switch {
+	case teamDone && ln.stopped:
+		if label := teamStopReasonLabel(ln.stopReason); label != "" {
+			return "stopped — " + label
+		}
+		return "stopped"
 	case teamDone:
 		return "done"
 	case ln.idle:
@@ -902,6 +913,19 @@ func teamLaneState(ln *teamLane, teamDone bool) string {
 		label = sanitizeTerminal(ln.current)
 	}
 	return label + "…"
+}
+
+// teamStopReasonLabel maps a member's closed stop reason to a calm one-word label
+// ("error" / "cancelled" / "budget"). An empty or unknown reason returns "" (the
+// caller then renders a bare "stopped"). The reason is a closed supervisor enum
+// already mapped to a known string by the client, so no sanitization is needed.
+func teamStopReasonLabel(reason string) string {
+	switch reason {
+	case teamStopReasonError, teamStopReasonCancelled, teamStopReasonBudget:
+		return reason
+	default:
+		return ""
+	}
 }
 
 // renderTeamTrace renders a member lane's expanded trace: message lines (clamped,
@@ -961,14 +985,34 @@ func (r *renderer) renderTeamTrace(ln *teamLane) string {
 }
 
 // teamResolvedLine is the muted one-line summary shown once the team run has
-// ended: the round count, summed team token totals, and the stop reason (reusing
-// the subagent stop-label mapping so labels stay consistent).
+// ended: the round count, summed team token totals, the stop reason (reusing the
+// subagent stop-label mapping so labels stay consistent), and — when any member
+// stopped non-resumably — a "N stopped" count tell. The count is the calm inline
+// card's only signal of a stopped member (the per-member glyph lives in the modal
+// overlay), so it appears only when stopped > 0.
 func teamResolvedLine(b *block) string {
-	return fmt.Sprintf("team · %s · ↑%s ↓%s · stop:%s",
+	line := fmt.Sprintf("team · %s · ↑%s ↓%s · stop:%s",
 		plural(b.teamRounds, "round"),
 		humanizeTokens(b.teamUsage.InputTokens),
 		humanizeTokens(b.teamUsage.OutputTokens),
 		subagentStopLabel(b.teamStop))
+	if n := teamStoppedCount(b); n > 0 {
+		line += fmt.Sprintf(" · %d stopped", n)
+	}
+	return line
+}
+
+// teamStoppedCount reports how many member lanes ended STOPPED (non-resumable /
+// budget-exhausted). It drives the inline-card "N stopped" tell and the overlay
+// roster sub-header count.
+func teamStoppedCount(b *block) int {
+	n := 0
+	for i := range b.teamLanes {
+		if b.teamLanes[i].stopped {
+			n++
+		}
+	}
+	return n
 }
 
 // oneLine collapses any internal newlines/tabs in a member message preview to

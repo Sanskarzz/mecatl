@@ -255,6 +255,15 @@ func formatDuration(ms int64) string {
 // spelling rather than scattering the literal.
 const stopError = "error"
 
+// The closed team-member stop-reason vocabulary (mirrors the proto
+// TeamMemberStopReason / client.reasonString output). Named once so the disposition
+// label helper and any future site share one spelling.
+const (
+	teamStopReasonError     = "error"
+	teamStopReasonCancelled = "cancelled"
+	teamStopReasonBudget    = "budget"
+)
+
 // slotCtxWarn is the themed warning slot name shared by the context-pressure meter
 // and the non-error LIMIT stop labels (turn/tool-call/repeated-failure/no-progress).
 const slotCtxWarn = "ctxWarn"

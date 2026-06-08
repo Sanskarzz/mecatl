@@ -311,6 +311,38 @@ func TestToProtoTable(t *testing.T) {
 			},
 		},
 		{
+			name: "team.end disposition snapshot",
+			in: session.Event{Type: session.EvTeamEnd, Seq: 36, Turn: 1,
+				Team: &session.TeamPayload{ParentCallID: "p1", TeamID: "team-p1", Rounds: 2,
+					Stop: session.StopEndTurn,
+					Dispositions: []session.TeamMemberDisposition{
+						{Name: "lead", Disposition: "done"},
+						{Name: "scout", Disposition: "stopped", Reason: "budget"},
+						{Name: "fixer", Disposition: "stopped", Reason: "error"},
+						{Name: "probe", Disposition: "stopped", Reason: "cancelled"},
+					}}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				disps := got.GetTeam().GetDispositions()
+				if len(disps) != 4 {
+					t.Fatalf("dispositions len = %d, want 4: %+v", len(disps), disps)
+				}
+				// done → stopped=false, reason UNSPECIFIED.
+				if disps[0].GetName() != "lead" || disps[0].GetStopped() ||
+					disps[0].GetReason() != mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_UNSPECIFIED {
+					t.Errorf("done disposition mismatch: %+v", disps[0])
+				}
+				if !disps[1].GetStopped() || disps[1].GetReason() != mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_BUDGET {
+					t.Errorf("budget disposition mismatch: %+v", disps[1])
+				}
+				if !disps[2].GetStopped() || disps[2].GetReason() != mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_ERROR {
+					t.Errorf("error disposition mismatch: %+v", disps[2])
+				}
+				if !disps[3].GetStopped() || disps[3].GetReason() != mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_CANCELLED {
+					t.Errorf("cancelled disposition mismatch: %+v", disps[3])
+				}
+			},
+		},
+		{
 			name: "compaction",
 			in:   session.Event{Type: session.EvCompaction, Seq: 8, Turn: 2, Text: "summary"},
 			assert: func(t *testing.T, got *mecatlv1.Event) {

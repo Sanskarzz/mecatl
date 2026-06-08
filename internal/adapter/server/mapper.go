@@ -158,6 +158,14 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 	for _, f := range p.Findings {
 		findings = append(findings, &mecatlv1.TeamFinding{Member: f.Member, Body: f.Body})
 	}
+	dispositions := make([]*mecatlv1.TeamMemberDisposition, 0, len(p.Dispositions))
+	for _, d := range p.Dispositions {
+		dispositions = append(dispositions, &mecatlv1.TeamMemberDisposition{
+			Name:    d.Name,
+			Stopped: d.Disposition == "stopped",
+			Reason:  toProtoTeamMemberStopReason(d.Reason),
+		})
+	}
 	return &mecatlv1.Team{
 		ParentCallId:  p.ParentCallID,
 		TeamId:        p.TeamID,
@@ -175,6 +183,24 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 		ContextWindow: p.ContextWindow,
 		Tasks:         tasks,
 		Findings:      findings,
+		Dispositions:  dispositions,
+	}
+}
+
+// toProtoTeamMemberStopReason maps the closed disposition-reason string (the
+// supervisor's MemberStopReason value, projected through session.TeamMemberDisposition)
+// to its proto enum. An unknown or empty reason maps to UNSPECIFIED, so a future reason
+// is never silently mis-classified as an existing one.
+func toProtoTeamMemberStopReason(r string) mecatlv1.TeamMemberStopReason {
+	switch r {
+	case "error":
+		return mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_ERROR
+	case "cancelled":
+		return mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_CANCELLED
+	case "budget":
+		return mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_BUDGET
+	default:
+		return mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_UNSPECIFIED
 	}
 }
 

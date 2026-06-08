@@ -420,7 +420,7 @@ func TestAgentsResolvedSubhead(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
 	m = seedTeam(m, func(c *conversation) {
 		c.setTeamStart("t1", "", roster())
-		c.setTeamEnd("t1", "", 4, "end_turn", client.Usage{InputTokens: 5200, OutputTokens: 410})
+		c.setTeamEnd("t1", "", 4, "end_turn", client.Usage{InputTokens: 5200, OutputTokens: 410}, nil)
 	})
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
@@ -438,6 +438,146 @@ func TestAgentsResolvedSubhead(t *testing.T) {
 	// is block-derived and would pass regardless, so it cannot cover the row threading.)
 	if !strings.Contains(out, "✓") || !strings.Contains(out, "done") {
 		t.Errorf("ended team's lane rows must render terminal (✓ / \"done\"), got %q", out)
+	}
+}
+
+// TestAgentsRosterStoppedGolden locks the roster overlay for an ENDED team carrying a
+// per-member terminal disposition snapshot: a budget-stopped member must render
+// "✗ stopped — budget", clean members must render "✓ done", and the sub-header must
+// carry the "N stopped" count. This is the regression guard for the "overlay no longer
+// contradicts the supervisor" fix: without the disposition snapshot every lane flipped
+// to ✓ done. The companion sub-test renders the SAME team with all-done dispositions
+// and asserts the two frames DIFFER (the stopped frame shows ✗ / "stopped"; the done
+// frame does not).
+func TestAgentsRosterStoppedGolden(t *testing.T) {
+	stopped := []client.TeamMemberDisposition{
+		{Name: "lead"},
+		{Name: "scout", Stopped: true, Reason: "budget"},
+	}
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(c *conversation) {
+		c.setTeamStart("t1", "", roster())
+		c.setTeamEnd("t1", "", 4, "end_turn", client.Usage{InputTokens: 5200, OutputTokens: 410}, stopped)
+	})
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "team_roster_stopped.golden", got)
+
+	out := string(got)
+	if !strings.Contains(out, "✗") || !strings.Contains(out, "stopped — budget") {
+		t.Errorf("stopped lane must render \"✗ stopped — budget\", got %q", out)
+	}
+	if !strings.Contains(out, "✓") || !strings.Contains(out, "done") {
+		t.Errorf("clean lane must still render \"✓ done\", got %q", out)
+	}
+	if !strings.Contains(out, "1 stopped") {
+		t.Errorf("roster sub-header must carry the \"1 stopped\" count, got %q", out)
+	}
+
+	// The SAME team rendered with all-done dispositions must NOT show ✗ / "stopped":
+	// this is the contradiction the fix removes.
+	allDone := []client.TeamMemberDisposition{{Name: "lead"}, {Name: "scout"}}
+	md := newMCPModel(t, aztec(), nil)
+	md = seedTeam(md, func(c *conversation) {
+		c.setTeamStart("t1", "", roster())
+		c.setTeamEnd("t1", "", 4, "end_turn", client.Usage{InputTokens: 5200, OutputTokens: 410}, allDone)
+	})
+	mmd, _ := md.Update(ctrlKey('a'))
+	md = mmd.(Model)
+	doneOut := stripANSIstr(md.View().Content)
+	if strings.Contains(doneOut, "✗") || strings.Contains(doneOut, "stopped") {
+		t.Errorf("all-done team must NOT render ✗ / stopped, got %q", doneOut)
+	}
+	if doneOut == out {
+		t.Errorf("stopped render must DIFFER from the all-done render")
+	}
+}
+
+// TestTeamStopReasonLabelAndLaneState covers every stop-reason render path (the golden
+// only exercised "budget"): each known reason maps to its calm label and teamLaneState
+// renders "stopped — <reason>", while an empty/unknown reason falls back to a bare
+// "stopped" (the render.go default branch). teamLaneState is only asserted at terminal
+// (teamDone), where the stopped state is honoured.
+func TestTeamStopReasonLabelAndLaneState(t *testing.T) {
+	cases := []struct {
+		reason    string
+		wantLabel string
+		wantState string
+	}{
+		{"error", "error", "stopped — error"},
+		{"cancelled", "cancelled", "stopped — cancelled"},
+		{"budget", "budget", "stopped — budget"},
+		{"", "", "stopped"},      // a done member's empty reason → bare "stopped"
+		{"weird", "", "stopped"}, // an unknown/future reason → bare "stopped"
+	}
+	for _, tc := range cases {
+		t.Run("reason="+tc.reason, func(t *testing.T) {
+			if got := teamStopReasonLabel(tc.reason); got != tc.wantLabel {
+				t.Errorf("teamStopReasonLabel(%q) = %q, want %q", tc.reason, got, tc.wantLabel)
+			}
+			ln := &teamLane{name: "m", stopped: true, stopReason: tc.reason}
+			if got := teamLaneState(ln, true); got != tc.wantState {
+				t.Errorf("teamLaneState(stopped, reason=%q) = %q, want %q", tc.reason, got, tc.wantState)
+			}
+		})
+	}
+}
+
+// TestTeamCardStoppedCountInline asserts the calm inline Team card resolved line gains
+// the "N stopped" tell when a member stopped (the per-member glyph lives in the modal
+// overlay, so the inline card needs the count tell).
+func TestTeamCardStoppedCountInline(t *testing.T) {
+	r := newTestRenderer()
+	c := &conversation{}
+	c.addTool("t1", "Team", `{"goal":"ship the feature"}`)
+	c.setTeamStart("t1", "", roster())
+	c.setTeamEnd("t1", "", 4, "end_turn", client.Usage{InputTokens: 5200, OutputTokens: 410},
+		[]client.TeamMemberDisposition{{Name: "lead"}, {Name: "scout", Stopped: true, Reason: "budget"}})
+	out := stripANSIstr(r.renderBlock(0, &c.blocks[0], false))
+	if !strings.Contains(out, "1 stopped") {
+		t.Errorf("inline resolved Team line must show \"1 stopped\", got %q", out)
+	}
+}
+
+// TestTeamStoppedCountMultiple asserts the "N stopped" tell sums correctly at N>=2 (the
+// other count tests only cover N=1): two stopped members + one clean → "2 stopped" on
+// both the inline resolved Team line and the ctrl+a roster sub-header. This exercises
+// teamStoppedCount summing across lanes (not just a boolean tell).
+func TestTeamStoppedCountMultiple(t *testing.T) {
+	threeRoster := []client.TeamMemberSpec{
+		{Name: "lead", Role: "coordinator", Lead: true, Mutating: true},
+		{Name: "scout", Role: "researcher"},
+		{Name: "fixer", Role: "patcher"},
+	}
+	disps := []client.TeamMemberDisposition{
+		{Name: "lead"}, // clean / done
+		{Name: "scout", Stopped: true, Reason: "budget"},
+		{Name: "fixer", Stopped: true, Reason: "error"},
+	}
+
+	// Inline resolved Team card line.
+	r := newTestRenderer()
+	c := &conversation{}
+	c.addTool("t1", "Team", `{"goal":"ship the feature"}`)
+	c.setTeamStart("t1", "", threeRoster)
+	c.setTeamEnd("t1", "", 4, "end_turn", client.Usage{InputTokens: 5200, OutputTokens: 410}, disps)
+	inline := stripANSIstr(r.renderBlock(0, &c.blocks[0], false))
+	if !strings.Contains(inline, "2 stopped") {
+		t.Errorf("inline resolved Team line must show \"2 stopped\", got %q", inline)
+	}
+
+	// ctrl+a roster sub-header.
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(cv *conversation) {
+		cv.setTeamStart("t1", "", threeRoster)
+		cv.setTeamEnd("t1", "", 4, "end_turn", client.Usage{InputTokens: 5200, OutputTokens: 410}, disps)
+	})
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	overlay := stripANSIstr(m.View().Content)
+	if !strings.Contains(overlay, "2 stopped") {
+		t.Errorf("roster sub-header must show \"2 stopped\", got %q", overlay)
 	}
 }
 

@@ -390,11 +390,15 @@ func teamRosterSubhead(b *block) string {
 	if !b.teamDone {
 		return ""
 	}
-	return fmt.Sprintf("%s · ↑%s ↓%s · stop:%s",
+	line := fmt.Sprintf("%s · ↑%s ↓%s · stop:%s",
 		plural(b.teamRounds, "round"),
 		humanizeTokens(b.teamUsage.InputTokens),
 		humanizeTokens(b.teamUsage.OutputTokens),
 		subagentStopLabel(b.teamStop))
+	if n := teamStoppedCount(b); n > 0 {
+		line += fmt.Sprintf(" · %d stopped", n)
+	}
+	return line
 }
 
 // renderTeamFocus renders ONE member's full detail: a header (state glyph +

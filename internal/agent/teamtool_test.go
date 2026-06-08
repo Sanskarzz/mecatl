@@ -420,6 +420,68 @@ func TestTeamFindingsProjectedOnChangeAndOnEnd(t *testing.T) {
 	}
 }
 
+// TestTeamEndCarriesMemberDispositions drives a real team run through the Team tool →
+// supervisor → EvTeamEnd path and asserts the per-member terminal disposition snapshot
+// is bridged onto the EMITTED team.end payload (the contractual stitch the supervisor /
+// mapper tests bracket but neither exercises): the supervisor's verdict for a STOPPED
+// member must actually reach EvTeamEnd.Dispositions with the right {name, disposition,
+// reason}, and a clean member must reach it as done/no-reason. The worker's run ends
+// StopError (EmptyTurnWithStop) so it is marked stopped/error; the lead finishes
+// cleanly and synthesises, so it is done.
+func TestTeamEndCarriesMemberDispositions(t *testing.T) {
+	leadProv := mockllm.New(
+		mockllm.TextTurn("delegating to the worker"), // round 0
+		mockllm.TextTurn("CONSOLIDATED REPORT"),      // synthesis
+	)
+	// The worker's only turn ends StopError (a refused/truncated/failed response shape),
+	// so its run is non-resumable → the supervisor marks it stopped with reason=error.
+	workerProv := mockllm.New(mockllm.EmptyTurnWithStop(session.StopError))
+	providers := map[string]*mockllm.Provider{"lead": leadProv, "worker": workerProv}
+
+	teamTool := agent.NewTeamTool(teamToolFactory(t, providers))
+	parentCat := catalogWith(t, teamTool)
+	parentLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("p1", "Team",
+			`{"goal":"investigate","members":[{"name":"lead","role":"coordinate"},{"name":"worker","role":"investigate"}]}`)),
+		mockllm.TextTurn("parent received the report"),
+	)
+	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: parentCat})
+	sess := newSession(t, session.Limits{})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "investigate")
+	evs := drain(r)
+
+	var end *session.TeamPayload
+	for _, ev := range evs {
+		if ev.Type == session.EvTeamEnd {
+			end = ev.Team
+		}
+	}
+	if end == nil {
+		t.Fatal("no team.end event")
+	}
+	if len(end.Dispositions) == 0 {
+		t.Fatalf("team.end carried no member dispositions; the supervisor verdict did not reach the wire")
+	}
+	byName := map[string]session.TeamMemberDisposition{}
+	for _, d := range end.Dispositions {
+		byName[d.Name] = d
+	}
+	worker, ok := byName["worker"]
+	if !ok {
+		t.Fatalf("team.end dispositions missing the worker: %+v", end.Dispositions)
+	}
+	if worker.Disposition != "stopped" || worker.Reason != "error" {
+		t.Errorf("worker disposition = %q/%q, want stopped/error", worker.Disposition, worker.Reason)
+	}
+	lead, ok := byName["lead"]
+	if !ok {
+		t.Fatalf("team.end dispositions missing the lead: %+v", end.Dispositions)
+	}
+	if lead.Disposition != "done" || lead.Reason != "" {
+		t.Errorf("lead disposition = %q/%q, want done/\"\"", lead.Disposition, lead.Reason)
+	}
+}
+
 // TestTeamFindingsBodyClamped asserts a long finding body is CLAMPED on the
 // projected snapshot (the same cap every member-derived preview uses), never copied
 // verbatim onto the stream.

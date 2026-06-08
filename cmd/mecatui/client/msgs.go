@@ -173,6 +173,17 @@ type TeamFinding struct {
 	Body   string
 }
 
+// TeamMemberDisposition is one member's TERMINAL disposition, set on a TeamEnd msg.
+// Mirrors mecatlv1.TeamMemberDisposition; closed-enum supervisor verdicts only, never
+// member content. Stopped distinguishes a non-resumable/budget-exhausted member from a
+// clean one; Reason refines a stop ("error"/"cancelled"/"budget"; empty when not
+// stopped).
+type TeamMemberDisposition struct {
+	Name    string
+	Stopped bool
+	Reason  string
+}
+
 // TeamMemberSpec is one roster entry forwarded on team.start, as plain data.
 // Mirrors mecatlv1.TeamMemberSpec; carries only member metadata, never content.
 type TeamMemberSpec struct {
@@ -222,6 +233,9 @@ type TeamMsg struct {
 	// msg (the first-class team.findings event) and on TeamEnd. It feeds the ctrl+a
 	// agents findings view.
 	Findings []TeamFinding
+	// Dispositions is the per-member terminal disposition snapshot, set on a TeamEnd
+	// msg. It lets the overlay render a stopped member distinctly from a clean "done".
+	Dispositions []TeamMemberDisposition
 }
 
 // CompactionMsg is a muted "history compacted" notice.
@@ -343,7 +357,30 @@ func teamMsg(kind TeamKind, t *mecatlv1.Team) TeamMsg {
 	for _, f := range t.GetFindings() {
 		msg.Findings = append(msg.Findings, TeamFinding{Member: f.GetMember(), Body: f.GetBody()})
 	}
+	for _, d := range t.GetDispositions() {
+		msg.Dispositions = append(msg.Dispositions, TeamMemberDisposition{
+			Name:    d.GetName(),
+			Stopped: d.GetStopped(),
+			Reason:  reasonString(d.GetReason()),
+		})
+	}
 	return msg
+}
+
+// reasonString maps a proto TeamMemberStopReason enum to the plain reason string the
+// ui consumes ("error"/"cancelled"/"budget"; "" for UNSPECIFIED/done). Keeping the
+// enum→string switch here keeps the ui layer proto-free.
+func reasonString(r mecatlv1.TeamMemberStopReason) string {
+	switch r {
+	case mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_ERROR:
+		return "error"
+	case mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_CANCELLED:
+		return "cancelled"
+	case mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_BUDGET:
+		return "budget"
+	default:
+		return ""
+	}
 }
 
 // usageFrom converts a proto Usage (nil-safe) to the plain struct.

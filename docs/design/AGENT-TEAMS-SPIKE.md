@@ -306,7 +306,12 @@ The team is **done** when every member is `Idle`/`Stopped`, no task is
 kernel). The same predicate distinguishes "done" from "deadlocked waiting on each
 other": if members are idle but tasks remain blocked by an unsatisfiable
 dependency cycle, the supervisor surfaces it to the lead rather than hanging. A
-global wall-clock/turn budget bounds a runaway team.
+global wall-clock/turn budget bounds a runaway team. A member's terminal
+disposition — and, when it stopped, the closed-enum reason (`error`/`cancelled`/
+`budget`) — now reaches the wire on `team.end` (a per-member snapshot parallel to
+the terminal tasks/findings snapshots, bridged in `internal/agent`), so the ctrl+a
+overlay renders `✗ stopped — <reason>` for a stopped member instead of flipping every
+terminal lane to `✓ done`.
 
 ### 5.5 Permissions & non-interactivity
 

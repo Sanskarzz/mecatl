@@ -104,10 +104,13 @@ const (
 	// wire volume, exactly like EvTeamTasks.
 	EvTeamFindings EventType = "team.findings"
 	// EvTeamEnd is emitted when a Team run terminates. It is a BOUNDED projection
-	// carrying only aggregate metadata — the number of rounds, the stop reason, and
-	// the team's cumulative usage — never member content. The team's joined summary
-	// folds back into the parent conversation exclusively via the Team tool's
-	// ToolResult.
+	// carrying aggregate metadata — the number of rounds, the stop reason, the team's
+	// cumulative usage — plus the terminal Tasks/Findings snapshots and a per-member
+	// terminal disposition snapshot (TeamPayload.Dispositions). The disposition carries
+	// ONLY closed-enum supervisor verdicts (done/stopped × error/cancelled/budget),
+	// NOT member-authored content, so the redaction discipline is untouched. The team's
+	// joined summary folds back into the parent conversation exclusively via the Team
+	// tool's ToolResult.
 	EvTeamEnd EventType = "team.end"
 )
 
@@ -289,6 +292,26 @@ type TeamFindingSnapshot struct {
 	Body string
 }
 
+// TeamMemberDisposition is one member's TERMINAL disposition, projected onto the
+// team.end snapshot so a watching client can render a stopped member distinctly from
+// a clean one (instead of recomputing "done" and contradicting the supervisor). It
+// carries ONLY closed-enum supervisor verdicts — never member-authored content — so
+// it needs no preview cap and opens no redaction surface (Name is already forwarded
+// verbatim on the team.start roster). Disposition is "done"/"stopped"; Reason is
+// "error"/"cancelled"/"budget" (empty for a done member). Like TeamTaskSnapshot it
+// lives in session (session never imports team); the MemberOutcome → snapshot bridge
+// lives in internal/agent. Disposition/Reason are plain strings here (the domain
+// stays free of the internal/agent enum types, mirroring TeamTaskSnapshot.State);
+// the closed-enum guarantee is enforced at the bridge.
+type TeamMemberDisposition struct {
+	// Name is the member name (matches a roster entry by name).
+	Name string
+	// Disposition is "done" / "stopped".
+	Disposition string
+	// Reason is "error" / "cancelled" / "budget"; empty when done.
+	Reason string
+}
+
 // TeamPayload is the BOUNDED observability projection carried by the team.* events
 // (EvTeamStart / EvTeamMember / EvTeamTasks / EvTeamFindings / EvTeamEnd). It is the ONLY information
 // about an in-process team's run that surfaces to clients on the event stream.
@@ -316,7 +339,8 @@ type TeamFindingSnapshot struct {
 //   - EvTeamFindings: ParentCallID, TeamID, Findings (the team-wide findings ledger
 //     snapshot; no Member).
 //   - EvTeamEnd:    ParentCallID, TeamID, Rounds, Stop, Usage (cumulative), Tasks
-//     (the terminal task snapshot), Findings (the terminal findings snapshot).
+//     (the terminal task snapshot), Findings (the terminal findings snapshot),
+//     Dispositions (the per-member terminal disposition snapshot).
 type TeamPayload struct {
 	// ParentCallID is the parent's Team tool-call id, attributing every team.*
 	// event to the originating Team card. Set on all three kinds.
@@ -376,6 +400,12 @@ type TeamPayload struct {
 	// carries the recording member's name and a BOUNDED body preview, never the raw
 	// finding.
 	Findings []TeamFindingSnapshot
+	// Dispositions is a per-member TERMINAL disposition snapshot, set ONLY on EvTeamEnd
+	// (parallel to the terminal Tasks/Findings snapshots). It lets a client render a
+	// stopped member distinctly from a clean one without recomputing "done". Each entry
+	// carries closed-enum supervisor verdicts only, never member content. Empty on
+	// every other kind.
+	Dispositions []TeamMemberDisposition
 }
 
 // Event is the domain-owned, provider-neutral unit of the streaming model. The

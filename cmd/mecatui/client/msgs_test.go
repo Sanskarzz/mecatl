@@ -180,6 +180,27 @@ func TestEventToMsgTeam(t *testing.T) {
 					{Member: "fixer", Body: "patched the key"},
 				}},
 		},
+		{
+			// The terminal disposition snapshot rides team.end: a done member decodes
+			// stopped=false / reason="", and each stop reason enum decodes to its plain
+			// string. This is what lets the overlay stop contradicting the supervisor.
+			"team.end disposition snapshot",
+			&mecatlv1.Event{Type: "team.end", Team: &mecatlv1.Team{
+				ParentCallId: "t1", TeamId: "team-t1", Rounds: 2, Stop: "end_turn",
+				Dispositions: []*mecatlv1.TeamMemberDisposition{
+					{Name: "lead"},
+					{Name: "scout", Stopped: true, Reason: mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_BUDGET},
+					{Name: "fixer", Stopped: true, Reason: mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_ERROR},
+					{Name: "probe", Stopped: true, Reason: mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_CANCELLED},
+				}}},
+			TeamMsg{Kind: TeamEnd, ParentCallID: "t1", TeamID: "team-t1", Rounds: 2, Stop: "end_turn",
+				Dispositions: []TeamMemberDisposition{
+					{Name: "lead"},
+					{Name: "scout", Stopped: true, Reason: "budget"},
+					{Name: "fixer", Stopped: true, Reason: "error"},
+					{Name: "probe", Stopped: true, Reason: "cancelled"},
+				}},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

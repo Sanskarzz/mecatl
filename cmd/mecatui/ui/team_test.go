@@ -380,7 +380,7 @@ func TestTeamResolved(t *testing.T) {
 	out := teamCard(t, false, func(c *conversation) {
 		c.setTeamStart("t1", "", roster())
 		c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Grep"}))
-		c.setTeamEnd("t1", "", 4, "end_turn", client.Usage{InputTokens: 5200, OutputTokens: 410})
+		c.setTeamEnd("t1", "", 4, "end_turn", client.Usage{InputTokens: 5200, OutputTokens: 410}, nil)
 		c.resolveTool("t1", "team shipped the feature", false)
 	})
 	if !strings.Contains(out, "4 rounds") {
@@ -402,7 +402,7 @@ func TestTeamResolved(t *testing.T) {
 func TestTeamErrorResolves(t *testing.T) {
 	out := teamCard(t, false, func(c *conversation) {
 		c.setTeamStart("t1", "", roster())
-		c.setTeamEnd("t1", "", 1, "error", client.Usage{})
+		c.setTeamEnd("t1", "", 1, "error", client.Usage{}, nil)
 		c.resolveTool("t1", "Team: the run failed", true)
 	})
 	if !strings.Contains(out, "✗") {
@@ -470,7 +470,7 @@ func TestTeamMissAttributionIsSafe(t *testing.T) {
 	if c.addTeamMember(client.TeamMsg{Kind: client.TeamMember, ParentCallID: "nope", Member: "x"}) {
 		t.Errorf("addTeamMember should miss when no Team card matches")
 	}
-	if c.setTeamEnd("nope", "", 0, "end_turn", client.Usage{}) {
+	if c.setTeamEnd("nope", "", 0, "end_turn", client.Usage{}, nil) {
 		t.Errorf("setTeamEnd should miss when no Team card matches")
 	}
 }

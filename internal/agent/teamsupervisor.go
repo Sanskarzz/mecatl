@@ -279,7 +279,11 @@ type memberRT struct {
 	// session is still resumable, so the lead-synthesis special-case (§5) may drive it
 	// ONE last time. synthesise skips a lead only when nonResumable is set.
 	nonResumable bool
-	lastText     string
+	// stopReason is the closed-enum cause when this member is stopped (set in runTurn's
+	// stop branch alongside stopped). Empty for a member that finished cleanly. Touched
+	// only where stopped is, so the same single-goroutine ownership rule holds.
+	stopReason MemberStopReason
+	lastText   string
 	// turnsUsed is the cumulative number of turns this member has spent across all
 	// rounds. It is captured from sess.Counters.Turns at the end of each run, BEFORE
 	// Reopen zeroes the per-round counters, so the running total survives the reset
@@ -581,6 +585,34 @@ type TeamOutcome struct {
 	Report string
 }
 
+// MemberDisposition is the terminal disposition of one team member at the end of a
+// Run: a closed enum (done / stopped), never free-form text. It is a SUPERVISOR
+// verdict, not member-authored content, so it sidesteps the redaction question.
+type MemberDisposition string
+
+const (
+	// DispositionDone is a member that finished cleanly (idle, no-progress, or any
+	// non-error terminal whose session re-opened successfully).
+	DispositionDone MemberDisposition = "done"
+	// DispositionStopped is a member that ended non-resumably or exhausted its budget.
+	DispositionStopped MemberDisposition = "stopped"
+)
+
+// MemberStopReason is WHY a stopped member stopped: a closed enum. Empty/unspecified
+// for a member that finished cleanly (DispositionDone).
+type MemberStopReason string
+
+const (
+	// StopReasonError is a run that failed (StopError) or a session that could not be
+	// re-opened — both internal-fault, non-resumable class.
+	StopReasonError MemberStopReason = "error"
+	// StopReasonCancelled is a member ended by ctx cancellation.
+	StopReasonCancelled MemberStopReason = "cancelled"
+	// StopReasonBudget is a member that exhausted its lifetime turn budget (its session
+	// stays resumable; it is merely non-schedulable).
+	StopReasonBudget MemberStopReason = "budget"
+)
+
 // MemberOutcome summarises one member at the end of a Run.
 type MemberOutcome struct {
 	// Name is the member name.
@@ -590,6 +622,12 @@ type MemberOutcome struct {
 	// Stopped reports whether the member ended in a non-resumable state (its last
 	// run failed or was cancelled, so it could not be re-opened for another round).
 	Stopped bool
+	// Disposition is the member's TERMINAL disposition (done / stopped). It is the
+	// closed-enum form of Stopped: Disposition == DispositionStopped iff Stopped.
+	Disposition MemberDisposition
+	// Reason is WHY a stopped member stopped (error / cancelled / budget); empty for a
+	// done member.
+	Reason MemberStopReason
 }
 
 // turnInput pairs a member with the rendered prompt for its next turn this round.
@@ -773,6 +811,19 @@ func (s *Supervisor) runTurn(ctx context.Context, ti turnInput, evCh chan<- Team
 		m.stopped = true
 		if stop == session.StopError || reopenErr != nil {
 			m.nonResumable = true
+		}
+		// Classify the stop reason (closed enum). Order is most-specific first: test
+		// stop == StopCancelled BEFORE reopenErr, because a cancelled member's Reopen
+		// also fails (Reopen is completed-only) and would otherwise collapse a genuine
+		// cancellation into the generic error class. Reopen-failure folds into error
+		// (same nonResumable family as StopError); budget is the residual lifetime cap.
+		switch {
+		case stop == session.StopCancelled:
+			m.stopReason = StopReasonCancelled
+		case stop == session.StopError || reopenErr != nil:
+			m.stopReason = StopReasonError
+		case budgetExhausted:
+			m.stopReason = StopReasonBudget
 		}
 		_ = s.team.SetMemberState(m.spec.Name, team.MemberStopped)
 		s.team.ReleaseTasks(m.spec.Name)
@@ -966,7 +1017,17 @@ func (s *Supervisor) outcome(rounds int) TeamOutcome {
 	o := TeamOutcome{Rounds: rounds, Quiescent: s.team.Quiescent()}
 	for _, name := range s.order {
 		m := s.members[name]
-		o.Members = append(o.Members, MemberOutcome{Name: name, LastText: m.lastText, Stopped: m.stopped})
+		disp := DispositionDone
+		if m.stopped {
+			disp = DispositionStopped
+		}
+		o.Members = append(o.Members, MemberOutcome{
+			Name:        name,
+			LastText:    m.lastText,
+			Stopped:     m.stopped,
+			Disposition: disp,
+			Reason:      m.stopReason,
+		})
 	}
 	return o
 }

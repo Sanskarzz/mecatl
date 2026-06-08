@@ -229,6 +229,25 @@ the Team-tool sink emits it on ledger change (de-duped via `findingsEqual`, clam
 (domain), maps to the proto `TeamFinding` (`toProtoTeam`), and the mecatui client decodes it to
 `client.TeamFinding` → the conversation block's `teamFindings`, consistent with the task path.
 
+**`EvTeamEnd` also carries a per-member terminal disposition snapshot.** The supervisor already
+knows each member's terminal verdict (`MemberOutcome`); `runTurn`'s stop branch classifies the
+cause into a closed `MemberStopReason` (`error`/`cancelled`/`budget`) and `outcome` derives a
+closed `MemberDisposition` (`done`/`stopped`). The cause→reason classification tests
+`stop == StopCancelled` BEFORE `reopenErr` (a cancelled member's `Reopen` also fails, so without
+this ordering a genuine cancellation would collapse into `error`); a failed `Reopen` folds into
+`error`; `budget` is the residual lifetime-cap cause; `StopNoProgress` and a clean idle stay
+`done` (no special handling — `runTurn` never marks them stopped). The snapshot rides
+`session.TeamMemberDisposition` (domain, plain strings) bridged in `internal/agent`
+(`projectTeamDispositions`) exactly like the tasks/findings bridges (session never imports
+`internal/team`), maps to the proto `TeamMemberDisposition` (`bool stopped` + closed-enum
+`TeamMemberStopReason` — `(done, error)` non-representable) via `toProtoTeam` /
+`toProtoTeamMemberStopReason`, and the mecatui client decodes it to `client.TeamMemberDisposition`
+→ the lane's `stopped`/`stopReason`. It is CONSUMED BY THE CLIENT OVERLAY, NOT the model (the
+model already gets `[STOPPED]` in the lead's report via `joinTeamFallback`), so the overlay renders
+`✗ stopped — <reason>` distinctly from `✓ done` instead of recomputing "done" and contradicting the
+supervisor. It is a supervisor verdict (closed enums, `Name` already on the roster), kept OFF the
+`EvTeamMember` redaction channel exactly like the tasks/findings discipline.
+
 **The Task subagent (read-only explorer) gets the SAME treatment** (Phase 2): when Bash is
 configured, `TaskTool` holds a worktree `childForker` (`WithChildForker`) and forks each child
 run into a throwaway git worktree BEFORE running it (`buildChildEngine` registers Bash via the

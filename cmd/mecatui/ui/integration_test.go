@@ -180,7 +180,7 @@ func TestFooterTeamDoneDropsSegment(t *testing.T) {
 	})
 	m = seedTeam(m, func(c *conversation) {
 		c.setTeamStart("t1", "team-x", roster())
-		c.setTeamEnd("t1", "team-x", 3, "end_turn", client.Usage{InputTokens: 100})
+		c.setTeamEnd("t1", "team-x", 3, "end_turn", client.Usage{InputTokens: 100}, nil)
 	})
 	footer := stripANSIstr(m.fitFooter("ready", 200))
 	if strings.Contains(footer, teamLiveGlyph) || strings.Contains(footer, "team-x") {

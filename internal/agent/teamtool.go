@@ -357,6 +357,9 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 			// The terminal findings snapshot likewise always lands, so the final ledger
 			// is observable even if no member event followed the last RecordFinding.
 			Findings: projectTeamFindingsSnapshot(tm.Findings()),
+			// The per-member terminal disposition snapshot lets a watching client render
+			// a stopped member distinctly from a clean one instead of recomputing "done".
+			Dispositions: projectTeamDispositions(outcome.Members),
 		}})
 	}
 
@@ -602,6 +605,25 @@ func projectTeamFindingsSnapshot(findings []team.Finding) []session.TeamFindingS
 		out = append(out, session.TeamFindingSnapshot{
 			Member: f.Member,
 			Body:   clampPreview(f.Body),
+		})
+	}
+	return out
+}
+
+// projectTeamDispositions maps the supervisor's terminal MemberOutcomes onto the
+// domain TeamMemberDisposition snapshot carried on EvTeamEnd. The bridge lives HERE
+// (internal/agent), not in session, mirroring the tasks/findings snapshot bridges:
+// the MemberOutcome → session.TeamMemberDisposition mapping is application-layer. The
+// enum strings are the supervisor's closed MemberDisposition/MemberStopReason values,
+// so no member-authored content crosses (Name rides verbatim on the team.start roster
+// already) and no preview cap is needed.
+func projectTeamDispositions(members []MemberOutcome) []session.TeamMemberDisposition {
+	out := make([]session.TeamMemberDisposition, 0, len(members))
+	for _, m := range members {
+		out = append(out, session.TeamMemberDisposition{
+			Name:        m.Name,
+			Disposition: string(m.Disposition),
+			Reason:      string(m.Reason),
 		})
 	}
 	return out

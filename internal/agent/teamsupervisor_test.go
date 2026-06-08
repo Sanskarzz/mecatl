@@ -14,6 +14,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/team"
 	"github.com/stacklok/mecatl/internal/tool"
@@ -713,6 +714,154 @@ func TestSupervisorBaseSharingMemberWithBashStillRejected(t *testing.T) {
 // TestSupervisorRunsMemberCloseOnCleanup asserts the MemberBuild.Close teardown seam:
 // the supervisor composes build.Close with the fork cleanup and runs it on Run's
 // cleanupAll, so a per-member inline MCP manager is torn down (no leak).
+// TestSupervisorMemberDispositionError asserts a member whose run ends StopError is
+// reported with Disposition==stopped and Reason==error. A failed run is the hardest
+// fault: it sets nonResumable and short-circuits the Reopen, so it must classify as
+// error regardless of any Reopen outcome. The team has no lead, so there is no
+// synthesis to mask the member's terminal state.
+func TestSupervisorMemberDispositionError(t *testing.T) {
+	tm := team.New("t")
+	// One uncooperative turn that ends StopError (a refused/truncated/failed response
+	// shape — see mockllm.EmptyTurnWithStop). The run terminates in error, so the
+	// member is non-resumable and never scheduled again.
+	prov := mockllm.New(mockllm.EmptyTurnWithStop(session.StopError))
+	providers := map[string]*mockllm.Provider{"worker": prov}
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		memberFactory(t, tm, providers), agent.WithMaxRounds(5))
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "worker", InitialPrompt: "go"}); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+	out := sup.Run(context.Background(), nil)
+	m := singleMember(t, out)
+	if m.Disposition != agent.DispositionStopped || m.Reason != agent.StopReasonError {
+		t.Fatalf("disposition = %q/%q, want stopped/error", m.Disposition, m.Reason)
+	}
+}
+
+// TestSupervisorMemberDispositionBudget asserts a member stopped purely by its
+// lifetime turn budget is reported with Disposition==stopped and Reason==budget — NOT
+// error. A budget-exhausted member's session re-opens cleanly (it is non-schedulable,
+// not non-resumable), so the error/cancelled tests must both be false for the budget
+// branch to win.
+func TestSupervisorMemberDispositionBudget(t *testing.T) {
+	tm := team.New("loop")
+	// Each round: ping self (so it is re-planned) then a clean text turn (StopEndTurn,
+	// never an error). Long enough to outlast the budget without exhausting the script.
+	selfPing := session.NewToolCall("p", "SendMessage",
+		json.RawMessage(`{"to":"worker","body":"keep going"}`))
+	var turns []mockllm.Turn
+	for i := 0; i < 60; i++ {
+		turns = append(turns, mockllm.ToolCallTurn(selfPing), mockllm.TextTurn("still working"))
+	}
+	prov := mockllm.New(turns...)
+	providers := map[string]*mockllm.Provider{"worker": prov}
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		memberFactory(t, tm, providers), agent.WithMaxRounds(30), agent.WithMemberTurnBudget(5))
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "worker", InitialPrompt: "loop"}); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+	out := sup.Run(context.Background(), nil)
+	m := singleMember(t, out)
+	if m.Disposition != agent.DispositionStopped || m.Reason != agent.StopReasonBudget {
+		t.Fatalf("disposition = %q/%q, want stopped/budget", m.Disposition, m.Reason)
+	}
+}
+
+// TestSupervisorMemberDispositionCancelled asserts a member ended by ctx cancellation
+// is reported with Disposition==stopped and Reason==cancelled — NOT error. This proves
+// the runTurn precedence: a cancelled member's Reopen ALSO fails (Reopen is
+// completed-only), so the classification must test stop==StopCancelled BEFORE reopenErr
+// would fold it into the generic error class.
+func TestSupervisorMemberDispositionCancelled(t *testing.T) {
+	tm := team.New("t")
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel the run as soon as the worker's turn reaches the provider, so the member's
+	// in-flight run observes the cancellation and ends StopCancelled.
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		prov := mockllm.NewWith(
+			[]mockllm.Option{mockllm.WithRequestObserver(func(port.LLMRequest) { cancel() })},
+			mockllm.TextTurn("never reached cleanly"),
+		)
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
+			LLM: prov, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "mock",
+		})}
+	}
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory, agent.WithMaxRounds(5))
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "worker", InitialPrompt: "go"}); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+	out := sup.Run(ctx, nil)
+	m := singleMember(t, out)
+	if m.Disposition != agent.DispositionStopped || m.Reason != agent.StopReasonCancelled {
+		t.Fatalf("disposition = %q/%q, want stopped/cancelled (precedence: StopCancelled before reopenErr)", m.Disposition, m.Reason)
+	}
+}
+
+// TestSupervisorMemberDispositionDone asserts a member that finishes cleanly is
+// reported with Disposition==done and an empty Reason.
+func TestSupervisorMemberDispositionDone(t *testing.T) {
+	tm := team.New("t")
+	prov := mockllm.New(mockllm.TextTurn("all done"))
+	providers := map[string]*mockllm.Provider{"worker": prov}
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+		memberFactory(t, tm, providers), agent.WithMaxRounds(5))
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "worker", InitialPrompt: "go"}); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+	out := sup.Run(context.Background(), nil)
+	m := singleMember(t, out)
+	if m.Disposition != agent.DispositionDone || m.Reason != "" {
+		t.Fatalf("disposition = %q/%q, want done/\"\"", m.Disposition, m.Reason)
+	}
+}
+
+// TestSupervisorMemberDispositionNoProgressIsDone asserts a member that ends
+// StopNoProgress (the clean reasoning-model terminal introduced by the no-progress
+// work) is reported as done — NOT stopped. StopNoProgress is neither StopError nor
+// cancellation and its session re-opens, so runTurn never marks it stopped; this guards
+// against a future regression that mislabels the clean no-progress terminal.
+func TestSupervisorMemberDispositionNoProgressIsDone(t *testing.T) {
+	tm := team.New("t")
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		// One empty (no text, no tool call) turn with nudging DISABLED, so the run
+		// terminates immediately with StopNoProgress — the clean reasoning-model
+		// no-deliverable terminal.
+		prov := mockllm.New(mockllm.EmptyTurn())
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
+			LLM: prov, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "mock",
+			MaxNoProgressNudges: -1,
+		})}
+	}
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory, agent.WithMaxRounds(5))
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "worker", InitialPrompt: "go"}); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+	out := sup.Run(context.Background(), nil)
+	m := singleMember(t, out)
+	if m.Disposition != agent.DispositionDone || m.Reason != "" {
+		t.Fatalf("disposition = %q/%q, want done/\"\" (StopNoProgress is a clean terminal)", m.Disposition, m.Reason)
+	}
+}
+
+// singleMember asserts the outcome has exactly one member and returns it.
+func singleMember(t *testing.T, out agent.TeamOutcome) agent.MemberOutcome {
+	t.Helper()
+	if len(out.Members) != 1 {
+		t.Fatalf("expected exactly one member outcome, got %d: %+v", len(out.Members), out.Members)
+	}
+	return out.Members[0]
+}
+
 func TestSupervisorRunsMemberCloseOnCleanup(t *testing.T) {
 	tm := team.New("t")
 	var closed int

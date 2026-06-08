@@ -476,7 +476,7 @@ func (m *Model) applyTeam(msg client.TeamMsg) {
 	case client.TeamFindings:
 		m.conv.setTeamFindings(msg.ParentCallID, msg.Findings)
 	case client.TeamEnd:
-		m.conv.setTeamEnd(msg.ParentCallID, msg.TeamID, msg.Rounds, msg.Stop, msg.Usage)
+		m.conv.setTeamEnd(msg.ParentCallID, msg.TeamID, msg.Rounds, msg.Stop, msg.Usage, msg.Dispositions)
 		// team.end carries the terminal task + findings snapshots too, so the sub-views
 		// land the final state even if no member event followed the last transition.
 		m.conv.setTeamTasks(msg.ParentCallID, msg.Tasks)

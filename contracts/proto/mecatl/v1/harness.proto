@@ -628,6 +628,11 @@ message Team {
   // carries the recording member's name and a CAPPED body preview, never the raw
   // finding.
   repeated TeamFinding findings = 16;
+  // dispositions is the per-member TERMINAL disposition snapshot, set ONLY on team.end
+  // (parallel to the terminal tasks/findings snapshots). Lets a client render a stopped
+  // member distinctly from a clean "done" instead of recomputing it. Closed-enum
+  // supervisor verdicts only, never member content.
+  repeated TeamMemberDisposition dispositions = 17;
 }
 
 // ToolCall is a request from the model to invoke a named tool. Mirrors
@@ -1230,6 +1235,33 @@ message TeamFinding {
   string member = 1;
   // body is a CAPPED preview of the finding text.
   string body = 2;
+}
+
+// TeamMemberStopReason is WHY a stopped member stopped (team.end disposition snapshot).
+// Closed enum: a supervisor verdict, never member-authored text.
+enum TeamMemberStopReason {
+  // a done member, or an unknown/future reason.
+  TEAM_MEMBER_STOP_REASON_UNSPECIFIED = 0;
+  // the member's run failed or its session could not be re-opened.
+  TEAM_MEMBER_STOP_REASON_ERROR = 1;
+  // the member was ended by ctx cancellation.
+  TEAM_MEMBER_STOP_REASON_CANCELLED = 2;
+  // the member exhausted its lifetime turn budget.
+  TEAM_MEMBER_STOP_REASON_BUDGET = 3;
+}
+
+// TeamMemberDisposition is one member's TERMINAL disposition (team.end). Mirrors
+// session.TeamMemberDisposition. Closed-enum supervisor verdicts only — no member
+// content. A bool stopped + enum reason keeps the done/stopped split a closed
+// two-state (a done member has no reason, so (done, error) is non-representable).
+message TeamMemberDisposition {
+  // name matches a roster entry by name.
+  string name = 1;
+  // stopped reports whether the member ended non-resumably / budget-exhausted (true)
+  // or cleanly (false).
+  bool stopped = 2;
+  // reason is WHY a stopped member stopped; UNSPECIFIED for a done member.
+  TeamMemberStopReason reason = 3;
 }
 
 // CleanupTeamRequest names the finished team to tear down.

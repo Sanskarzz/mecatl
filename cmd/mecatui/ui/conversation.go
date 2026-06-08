@@ -67,6 +67,14 @@ type teamLane struct {
 	// block.teamDone (set only at team.end), never here.
 	idle bool
 
+	// stopped + stopReason are the member's TERMINAL disposition, set ONLY at team.end
+	// (setTeamEnd applies the team.end Dispositions snapshot). They are distinct from
+	// `idle` (a per-round, non-terminal state cleared by new activity): once the team has
+	// ended (block.teamDone), a stopped lane renders "✗ stopped — <reason>" instead of the
+	// blanket "✓ done". Empty stopReason / stopped=false on a clean member.
+	stopped    bool
+	stopReason string
+
 	// ctxUsed / ctxWindow back the per-member context meter in the ctrl+a agents
 	// overlay. ctxUsed is the CURRENT context occupancy — the most recent turn's
 	// input-token count (ASSIGNED, not summed, each turn.end, mirroring the main
@@ -523,8 +531,11 @@ func (ln *teamLane) pushTrace(t teamTrace) {
 
 // setTeamEnd records the resolved end stats (rounds, stop, summed usage) on the
 // Team block matching parentCallID, defensively backfilling the team id (only when
-// non-empty) in case team.start was missed. Returns false when no match.
-func (c *conversation) setTeamEnd(parentCallID, teamID string, rounds int, stop string, usage client.Usage) bool {
+// non-empty) in case team.start was missed. It also applies the per-member terminal
+// disposition snapshot onto the matching lanes (by name), so a stopped member renders
+// "✗ stopped — <reason>" instead of the blanket "✓ done" once the team has ended.
+// Returns false when no match.
+func (c *conversation) setTeamEnd(parentCallID, teamID string, rounds int, stop string, usage client.Usage, dispositions []client.TeamMemberDisposition) bool {
 	b := c.teamBlock(parentCallID)
 	if b == nil {
 		return false
@@ -537,6 +548,11 @@ func (c *conversation) setTeamEnd(parentCallID, teamID string, rounds int, stop 
 	b.teamRounds = rounds
 	b.teamStop = stop
 	b.teamUsage = usage
+	for _, d := range dispositions {
+		ln := b.lane(d.Name)
+		ln.stopped = d.Stopped
+		ln.stopReason = d.Reason
+	}
 	return true
 }
 
