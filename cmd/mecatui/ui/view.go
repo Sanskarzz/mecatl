@@ -53,9 +53,6 @@ func (m Model) View() tea.View {
 		return v
 	}
 
-	header := m.renderHeader()
-	footer := m.renderFooter()
-
 	var body string
 	switch {
 	case m.showHelp:
@@ -86,38 +83,14 @@ func (m Model) View() tea.View {
 		body = m.vp.View()
 	}
 
-	input := m.renderInput()
-
-	// The slash-command palette is an inline dropdown shown just ABOVE the input
-	// (not an overlay over the conversation): it appears only while idle and the
-	// input is a command line, so it never competes with the permission modal or
-	// the MCP/agents overlays.
-	// body MUST stay regions[1], directly below the header: convTopRow derives the
-	// conversation's top screen row from the header's rendered height ALONE (the
-	// regions are joined with "\n"), so inserting any region ABOVE the body here would
-	// shift the body down and break the selection click→content mapping. The
-	// convTopRow drift test (selection_test.go) guards this.
-	regions := []string{header, body}
-	if pal := renderPalette(m.deps.Theme, m.palette, m.caps, m.ta.Value(), m.width); pal != "" {
-		regions = append(regions, pal)
-	}
-	// The @-mention file menu is the same kind of inline dropdown as the palette
-	// (idle/running, above the input) and is mutually exclusive with it, so at most
-	// one of the two renders.
-	if men := renderMention(m.deps.Theme, m.mention, m.width); men != "" {
-		regions = append(regions, men)
-	}
-	// Staged follow-ups (queued while a run streams) are summarised in a muted card
-	// just above the input — between the body/palette and the input — so the user can
-	// see what will run next. Shown in any phase whenever the queue is non-empty (it
-	// only fills mid-run, but it survives an error/cancel pause, so it must render at
-	// idle too until it drains or is cleared).
-	if q := m.renderQueue(); q != "" {
-		regions = append(regions, q)
-	}
-	regions = append(regions, input, footer)
-
-	v.Content = strings.Join(regions, "\n")
+	// The full vertical region stack — header, body, the conditional inline
+	// palette/mention/queue regions, then input + footer — is owned by the layout
+	// model (layout.go). assembleLayout mirrors the old hand-joined order and the
+	// SAME non-empty conditions, so a no-transient frame is byte-identical. The same
+	// chrome() the layout uses also drives onResize/relayout (viewport sizing) and
+	// convTopRow (click→content mapping), so the three can never disagree about where
+	// the body sits or how tall it must be.
+	v.Content = m.assembleLayout(body).join()
 	return v
 }
 
@@ -199,7 +172,8 @@ const headerGapPad = 2
 // is room (accounting for the header's 1-cell horizontal padding on each side),
 // and otherwise returns the identity line unchanged — so the indicator never forces
 // a wrap; a too-narrow terminal simply sheds it. (The identity line itself still
-// wraps when it alone exceeds the width — see headerHeight() in selection.go.)
+// wraps when it alone exceeds the width; the header's resulting rendered row count is
+// measured via region.height()/chrome() in layout.go.)
 func (m Model) fitHeader(line, indicator string, width int) string {
 	const headerPad = 2 // the "header" style pads 1 cell each side
 	styled := m.deps.Theme.Style("muted").Render(indicator)

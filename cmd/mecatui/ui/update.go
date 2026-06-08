@@ -122,8 +122,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// per-message seam.
 		if mm.sel.active && !selectable(mm) {
 			mm = mm.clearSelection()
-			model = mm
 		}
+		// SINGLE relayout chokepoint: re-size the viewport from the CURRENT region
+		// stack after every message, so the body height always matches the layout
+		// regardless of WHAT changed — a resize, a transient (palette/mention/queue)
+		// toggling on or off, or a header re-wrap on a model-id change. Without it only
+		// onResize re-sized, so a transient appearing between resizes would push the
+		// footer off-screen. relayout acts ONLY when the height actually changed, so the
+		// per-message cost is one chrome render + a compare (and nothing more) on the
+		// vast majority of messages — including stream deltas. Placed AFTER the
+		// selection-clear so a height change re-derives byteRanges against the
+		// already-settled selection state in the same frame; relayout's own refreshView
+		// (height-changed only) is the sole re-render, so a frame is never rendered twice.
+		mm.relayout()
+		model = mm
 		// Test-only deterministic progress observer (nil in production). Fired on the
 		// update goroutine after the message is reduced so teatest can sequence on the
 		// reducer's actual phase, not on the CPU-starved output flush. See Deps.onPhase.
@@ -446,34 +458,64 @@ func (m *Model) applyTeam(msg client.TeamMsg) {
 	}
 }
 
-// onResize updates widget dimensions and invalidates the glamour width cache via
-// the renderer width, then re-renders.
+// onResize updates the WIDTH-bearing widget dimensions and invalidates the glamour
+// width cache via the renderer width, then delegates HEIGHT sizing to relayout. Width
+// is set here (it is purely a resize concern); the viewport height is derived from the
+// measured region stack by relayout, so a single source of truth — chrome() — drives
+// both onResize and convTopRow and they can never disagree.
+//
+// Order matters: width/height and the per-widget widths are set FIRST so renderHeader/
+// chrome (which relayout measures) reflect the NEW width before the body height is
+// computed from them.
 func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width = msg.Width
 	m.height = msg.Height
-
-	taH := 4
-	footerH := 2
-	// The header is MEASURED (not a constant) because its identity line word-wraps at
-	// narrow widths — see headerHeight(); width/height are set above so renderHeader()
-	// reflects the NEW width. taH/footerH are fixed-height widgets (only the header
-	// wraps), and headerHeight() is the same source of truth convTopRow uses, so the
-	// viewport sizing and the click→content mapping can never disagree.
-	vpH := m.height - taH - footerH - m.headerHeight()
-	if vpH < 1 {
-		vpH = 1
-	}
 	m.vp.SetWidth(m.width)
-	m.vp.SetHeight(vpH)
 	m.ta.SetWidth(m.width)
 	m.rend.setWidth(m.width)
-	m.refreshView()
-	// A resize is a first-class scroll transition like wheel/key: SetHeight can
-	// clamp YOffset so AtBottom() flips (e.g. growing the viewport until the
-	// content fits), so re-derive auto-follow — otherwise stuck would be stale and
-	// the "↑ NN%" header cue would lie about a view that is now at the bottom.
-	m.syncStuck()
+	// relayout sizes the viewport height from the measured layout (header + transients
+	// + input + footer) and, when the height changed, re-renders + re-derives
+	// auto-follow — the tail onResize used to do inline. The magic taH=4/footerH=2 and
+	// the header arithmetic are GONE; the heights are measured via lipgloss.Height of
+	// the rendered regions in chrome().
+	m.relayout()
 	return m, nil
+}
+
+// relayout sizes the conversation viewport HEIGHT to whatever the current region
+// stack leaves for the body, so the footer is never pushed off-screen by a transient
+// region (palette / mention / queue) — the overflow fix. bodyHeight is the total
+// height minus everything chrome() renders above and below the body at the CURRENT
+// model state; when a transient is present the viewport shrinks to keep the footer
+// on-screen, and when it clears the viewport grows back.
+//
+// It is the SINGLE height authority (onResize and the per-message Update chokepoint
+// both call it). onResize keeps its OWN call rather than relying on the chokepoint:
+// onResize is invoked directly (not only through Update) — by tests and by any future
+// non-Update caller — so it must size the viewport itself; the chokepoint's later call
+// then early-returns on the height-equality guard, so the double call is free. It acts
+// ONLY when the computed height differs from the viewport's current height — so the
+// common case (no layout change) is a cheap chrome render + compare with no re-render.
+// When the height DID change it mirrors onResize's old
+// tail: SetHeight, refreshView (re-render the conversation into the resized viewport),
+// then syncStuck (SetHeight can clamp YOffset so AtBottom flips — re-derive
+// auto-follow, otherwise the "↑ NN%" cue would lie). Width is NOT touched here (it is
+// an onResize concern). A pointer receiver: it mutates the viewport in place.
+func (m *Model) relayout() {
+	if m.width <= 0 || m.height <= 0 {
+		return // pre-first-resize: nothing to size against yet.
+	}
+	above, below := m.chrome()
+	bodyHeight := m.height - sumHeight(above) - sumHeight(below)
+	if bodyHeight < 1 {
+		bodyHeight = 1
+	}
+	if bodyHeight == m.vp.Height() {
+		return
+	}
+	m.vp.SetHeight(bodyHeight)
+	m.refreshView()
+	m.syncStuck()
 }
 
 // onKey routes key presses by phase. ctrl+c is handled first, with a graceful

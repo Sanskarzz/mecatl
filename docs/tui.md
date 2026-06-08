@@ -342,6 +342,16 @@ streaming continues to render *in place* (a new delta no longer yanks the view t
 the bottom), and auto-follow stays off. Scrolling back to the bottom — `pgdn` past
 the end, `end`, or the wheel — re-pins the view and resumes auto-follow.
 
+**Layout (one model).** The frame is a vertical stack of regions — header, the
+conversation body, zero or more **transient inline regions** (the slash-command
+palette, the `@`-mention menu, the queued-follow-ups card), then the input and
+footer. A single layout model (`layout.go`) is the source of truth: `View()` renders
+it, the per-message relayout step sizes the viewport from it, and the mouse
+selection maps clicks through it, so they can never disagree about where the body
+sits or how tall it is. When a transient region appears the viewport **shrinks** to
+make room and the footer stays on-screen — a transient never pushes the footer off
+the bottom (and the viewport grows back when the transient clears).
+
 The **mouse wheel** is only active on the alternate screen (the default full-screen
 TUI). With `--inline` / `--no-alt-screen` the terminal's own scrollback and native
 selection are left untouched (no mouse capture).
