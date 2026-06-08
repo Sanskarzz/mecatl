@@ -5,15 +5,24 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
-// headerH is the screen height of the top header bar: one styled identity line
-// plus its bottom border. It is the SINGLE source of truth for the header height —
-// onResize subtracts it from the window to size the viewport, and convTopRow uses
-// it as the viewport's first screen row. Keeping it one constant means a header
-// layout change can't silently mis-map click coordinates against the viewport.
-const headerH = 2
+// headerHeight is the SINGLE source of truth for the on-screen height of the top
+// header bar: the number of rows m.renderHeader() actually occupies once styled at
+// the current width. It is NOT a constant — the header's identity line word-WRAPS
+// when it exceeds the width (lipgloss .Width() wraps; fitHeader only sheds the
+// right-aligned indicator, never the identity parts), so a real session (long model
+// id + "mode acceptEdits" + host:port) renders a 3–4 row header at a narrow width.
+// Both onResize (which subtracts it to size the viewport) and convTopRow (which uses
+// it as the viewport's first screen row) measure it here, so the click→content
+// mapping and the layout can never disagree. Measured on demand rather than cached
+// on the model: the header height can change WITHOUT a resize (e.g. the active model
+// id changes and the new id wraps), and mouse events are not hot.
+func (m Model) headerHeight() int {
+	return lipgloss.Height(m.renderHeader())
+}
 
 // autoScrollDir is the edge-autoscroll direction stashed while a drag is held at a
 // viewport border (so a self-re-arming tick keeps scrolling without further mouse
@@ -71,15 +80,21 @@ type selection struct {
 	snapshot string
 }
 
-// convTopRow is the screen row where the conversation viewport's first row sits. It
-// equals the header height (headerH). Returns -1 (sentinel "unknown") before the
-// first resize, when width/height are unset — callers then refuse to start a
-// selection.
+// convTopRow is the 0-based screen row where the conversation viewport's first row
+// sits. View() joins its regions with "\n" and the body is region[1], rendered
+// directly below the header, so the body-top screen row is exactly the header's
+// RENDERED height — which is why this returns m.headerHeight() (the actual rendered
+// rows) rather than a constant: the header word-WRAPS at narrow widths, so a fixed
+// "2" would under-count the real body-top and paint the highlight ABOVE the cursor.
+// If a region is ever inserted between the header and the body, derive the offset
+// from the region list instead of headerHeight alone (the convTopRow-drift test in
+// selection_test.go guards this). Returns -1 (sentinel "unknown") before the first
+// resize, when width/height are unset — callers then refuse to start a selection.
 func convTopRow(m Model) int {
 	if m.width <= 0 || m.height <= 0 {
 		return -1
 	}
-	return headerH
+	return m.headerHeight()
 }
 
 // selectable reports whether a left-click may START a selection right now. It is

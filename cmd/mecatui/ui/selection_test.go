@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
@@ -102,8 +103,11 @@ func osc52Payload(leaves []tea.Msg) (string, bool) {
 func TestScreenToContentMapsRowToLine(t *testing.T) {
 	m, _ := selModel(t)
 	top := convTopRow(m)
-	if top != 2 {
-		t.Fatalf("convTopRow = %d, want 2", top)
+	// The body-top is the header's RENDERED height (not a magic number); assert the
+	// relationship. At width 100 with default deps the header is 2 rows, so this is
+	// still 2 — behaviour unchanged — but the test no longer hardcodes it.
+	if want := lipgloss.Height(m.renderHeader()); top != want {
+		t.Fatalf("convTopRow = %d, want %d (rendered header height)", top, want)
 	}
 	// A click at the first viewport row maps to YOffset()+0.
 	line, _, ok := screenToContent(m, 0, top)
@@ -113,6 +117,12 @@ func TestScreenToContentMapsRowToLine(t *testing.T) {
 	if line != m.vp.YOffset() {
 		t.Errorf("first row mapped to line %d, want YOffset %d", line, m.vp.YOffset())
 	}
+	// A mid-viewport row maps to YOffset()+k (k=5 is well within the viewport
+	// height) — pins that offset propagation holds beyond the origin in the common
+	// (non-wrapped) case, not just the top row.
+	if mid, _, ok := screenToContent(m, 0, top+5); !ok || mid != m.vp.YOffset()+5 {
+		t.Errorf("mid row (top+5) mapped to line %d (ok=%v), want YOffset+5 = %d", mid, ok, m.vp.YOffset()+5)
+	}
 	// Above the top row: a miss (header region).
 	if _, _, ok := screenToContent(m, 0, top-1); ok {
 		t.Error("a click above the viewport top must not map (header region)")
@@ -120,6 +130,162 @@ func TestScreenToContentMapsRowToLine(t *testing.T) {
 	// At/below the viewport bottom: a miss (input/footer region).
 	if _, _, ok := screenToContent(m, 0, top+m.vp.Height()); ok {
 		t.Error("a click at the viewport bottom edge must not map (input region)")
+	}
+}
+
+// TestConvTopRowMatchesRenderedBodyTop validates the HAPPY PATH: at width 100 the
+// header is 2 rows, and it renders the full View() frame, finds the real screen row
+// of the first body content line, and asserts convTopRow points there AND
+// screenToContent maps that row to the first visible content line (YOffset). Because
+// the header here is 2 rows, this case would also pass against the OLD buggy
+// headerH=2 constant — TestConvTopRowTracksWrappedHeader is the actual regression
+// guard for the wrapped (>2 row) case the fix targets.
+func TestConvTopRowMatchesRenderedBodyTop(t *testing.T) {
+	m, _ := selModel(t)
+
+	headerRows := lipgloss.Height(m.renderHeader())
+	top := convTopRow(m)
+	if top != headerRows {
+		t.Fatalf("convTopRow = %d, want %d (rendered header height = body-top)", top, headerRows)
+	}
+
+	// screenToContent at the body-top row returns the first visible content line.
+	line, _, ok := screenToContent(m, 0, top)
+	if !ok {
+		t.Fatal("body-top row should map")
+	}
+	if line != m.vp.YOffset() {
+		t.Errorf("body-top mapped to line %d, want YOffset %d", line, m.vp.YOffset())
+	}
+
+	// Cross-check against the actual rendered frame: the frame line at screen index
+	// `top`, ANSI-stripped, must equal the first visible body line — i.e. the body
+	// really does render at convTopRow on screen.
+	frame := strings.Split(m.View().Content, "\n")
+	if top >= len(frame) {
+		t.Fatalf("convTopRow %d past frame end (%d lines)", top, len(frame))
+	}
+	// Compare on content identity (right-trimmed): the frame pads the body line to
+	// the full terminal width while vp.GetContent() carries the renderer's own
+	// padding, so the trailing whitespace differs by a cell — the load-bearing
+	// assertion is that the SAME text renders at screen row `top`.
+	gotFrameLine := strings.TrimRight(ansi.Strip(frame[top]), " ")
+	wantBodyLine := strings.TrimRight(ansi.Strip(strings.Split(m.vp.GetContent(), "\n")[m.vp.YOffset()]), " ")
+	if gotFrameLine != wantBodyLine {
+		t.Errorf("frame[%d] = %q, want first visible body line %q", top, gotFrameLine, wantBodyLine)
+	}
+}
+
+// TestConvTopRowTracksWrappedHeader is the ACTUAL regression guard for the wrapped
+// case: a long model id + acceptEdits mode + long host:port at a NARROW width forces
+// the identity line to wrap, so the header renders >2 rows. convTopRow must track
+// that taller height; the body must RENDER at that row in the real frame (the
+// renderHeader/headerHeight-disagreement class the fix eliminates); the mapping must
+// propagate the offset across the whole viewport (not just the origin); and the row
+// just above (the header's last row) must NOT map. selModel sets stuck=true over 120
+// content lines, so YOffset>0 and the top visible line is real text — the frame
+// cross-check is not vacuous.
+func TestConvTopRowTracksWrappedHeader(t *testing.T) {
+	m, _ := selModel(t)
+	m.deps.Model = "openrouter/anthropic/claude-3.5-sonnet-20241022-extended"
+	m.deps.Mode = "acceptEdits"
+	m.deps.Server = "some-long-host.example.internal:50051"
+	// Resize NARROW so the joined identity line exceeds the width and wraps.
+	mm, _ := m.onResize(tea.WindowSizeMsg{Width: 40, Height: 30})
+	m = mm.(Model)
+
+	headerRows := lipgloss.Height(m.renderHeader())
+	if headerRows <= 2 {
+		t.Fatalf("PRECONDITION: header did not wrap (%d rows); test would no-op", headerRows)
+	}
+
+	top := convTopRow(m)
+	if top != headerRows {
+		t.Fatalf("convTopRow = %d, want %d (wrapped header height)", top, headerRows)
+	}
+
+	line, _, ok := screenToContent(m, 0, top)
+	if !ok {
+		t.Fatal("body-top row should map under a wrapped header")
+	}
+	if line != m.vp.YOffset() {
+		t.Errorf("body-top mapped to line %d, want YOffset %d", line, m.vp.YOffset())
+	}
+
+	// FRAME CROSS-CHECK under the wrapped header: the body must actually RENDER at
+	// screen row `top` in the full frame. This is what catches a renderHeader /
+	// headerHeight disagreement — convTopRow==headerHeight() alone would pass even if
+	// the body rendered somewhere else. Compared right-trimmed (the frame pads to the
+	// terminal width; identity is the load-bearing part). The body-top line is real
+	// non-blank text here (stuck=true, YOffset>0), so the compare is not vacuous.
+	frame := strings.Split(m.View().Content, "\n")
+	if top >= len(frame) {
+		t.Fatalf("convTopRow %d past frame end (%d lines)", top, len(frame))
+	}
+	bodyLines := strings.Split(m.vp.GetContent(), "\n")
+	gotFrameLine := strings.TrimRight(ansi.Strip(frame[top]), " ")
+	wantBodyLine := strings.TrimRight(ansi.Strip(bodyLines[m.vp.YOffset()]), " ")
+	if gotFrameLine == "" {
+		t.Fatal("PRECONDITION: body-top frame line is blank; frame cross-check would be vacuous")
+	}
+	if gotFrameLine != wantBodyLine {
+		t.Errorf("frame[%d] = %q, want first visible body line %q", top, gotFrameLine, wantBodyLine)
+	}
+
+	// MID-VIEWPORT mapping: the bug shifted EVERY row, not just the top. A row k below
+	// the body-top must map to YOffset()+k. k=3 is within the (shrunken) viewport
+	// height under the wrapped header.
+	const k = 3
+	if k >= m.vp.Height() {
+		t.Fatalf("PRECONDITION: viewport height %d too small for mid-row k=%d", m.vp.Height(), k)
+	}
+	if mid, _, ok := screenToContent(m, 0, top+k); !ok || mid != m.vp.YOffset()+k {
+		t.Errorf("mid row (top+%d) mapped to line %d (ok=%v), want YOffset+%d = %d", k, mid, ok, k, m.vp.YOffset()+k)
+	}
+
+	// The row just above the body-top is the header's last row — no selection there.
+	if _, _, ok := screenToContent(m, 0, top-1); ok {
+		t.Error("the header's last row (convTopRow-1) must not map")
+	}
+}
+
+// TestOnResizeUsesMeasuredHeaderHeight guards the viewport sizing: vpH is derived
+// from the MEASURED header height, so a wrapping resize shrinks the viewport by the
+// real header rows, and a non-wrapping (width 100) resize keeps the steady-state
+// height (header == 2) byte-for-byte unchanged. It uses the SAME total height for
+// both cases and asserts the wrapped vpH is strictly LESS — proving the measured
+// height actually flows into sizing (not a no-op).
+func TestOnResizeUsesMeasuredHeaderHeight(t *testing.T) {
+	const taH, footerH, totalH = 4, 2, 30
+
+	// Wrapping case: long deps at a narrow width.
+	m, _ := selModel(t)
+	m.deps.Model = "openrouter/anthropic/claude-3.5-sonnet-20241022-extended"
+	m.deps.Mode = "acceptEdits"
+	m.deps.Server = "some-long-host.example.internal:50051"
+	mm, _ := m.onResize(tea.WindowSizeMsg{Width: 40, Height: totalH})
+	m = mm.(Model)
+	wrappedHeader := lipgloss.Height(m.renderHeader())
+	if wrappedHeader <= 2 {
+		t.Fatalf("PRECONDITION: header did not wrap (%d rows); sizing test would be vacuous", wrappedHeader)
+	}
+	if got, want := m.vp.Height(), m.height-taH-footerH-wrappedHeader; got != want {
+		t.Errorf("wrapped vpH = %d, want %d (height - %d - %d - measured header)", got, want, taH, footerH)
+	}
+
+	// Non-wrapping steady state: same total height at width 100, header is 2 rows.
+	m2, _ := selModel(t)
+	mm2, _ := m2.onResize(tea.WindowSizeMsg{Width: 100, Height: totalH})
+	m2 = mm2.(Model)
+	if got, want := m2.vp.Height(), m2.height-taH-footerH-2; got != want {
+		t.Errorf("steady-state vpH = %d, want %d (header == 2 rows)", got, want)
+	}
+
+	// The wrapped (taller header) viewport must be strictly SHORTER than the
+	// non-wrapped one for the same total height — the measured header flows into
+	// sizing rather than being ignored.
+	if m.vp.Height() >= m2.vp.Height() {
+		t.Errorf("wrapped vpH %d should be < non-wrapped vpH %d (taller header eats more rows)", m.vp.Height(), m2.vp.Height())
 	}
 }
 

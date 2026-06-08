@@ -92,6 +92,11 @@ func (m Model) View() tea.View {
 	// (not an overlay over the conversation): it appears only while idle and the
 	// input is a command line, so it never competes with the permission modal or
 	// the MCP/agents overlays.
+	// body MUST stay regions[1], directly below the header: convTopRow derives the
+	// conversation's top screen row from the header's rendered height ALONE (the
+	// regions are joined with "\n"), so inserting any region ABOVE the body here would
+	// shift the body down and break the selection click→content mapping. The
+	// convTopRow drift test (selection_test.go) guards this.
 	regions := []string{header, body}
 	if pal := renderPalette(m.deps.Theme, m.palette, m.caps, m.ta.Value(), m.width); pal != "" {
 		regions = append(regions, pal)
@@ -142,7 +147,8 @@ func (m Model) renderHeader() string {
 	}
 	line := strings.Join(parts, "  ·  ")
 	// Right-align ONE muted indicator on the header line when it fits beside the
-	// identity segment; otherwise drop it (the header never wraps). The header is
+	// identity segment; otherwise drop it (so the indicator never forces a wrap — the
+	// identity line itself still wraps when it alone exceeds the width). The header is
 	// the least-crowded bar — the footer is already busy with the context meter
 	// and usage facets. The scroll-position indicator takes precedence over the
 	// changed-files indicator while the user is scrolled up, so it is visible
@@ -191,8 +197,9 @@ const headerGapPad = 2
 
 // fitHeader right-aligns the muted indicator beside the identity line when there
 // is room (accounting for the header's 1-cell horizontal padding on each side),
-// and otherwise returns the identity line unchanged — the header is a single
-// non-wrapping row, so a too-narrow terminal simply sheds the indicator.
+// and otherwise returns the identity line unchanged — so the indicator never forces
+// a wrap; a too-narrow terminal simply sheds it. (The identity line itself still
+// wraps when it alone exceeds the width — see headerHeight() in selection.go.)
 func (m Model) fitHeader(line, indicator string, width int) string {
 	const headerPad = 2 // the "header" style pads 1 cell each side
 	styled := m.deps.Theme.Style("muted").Render(indicator)

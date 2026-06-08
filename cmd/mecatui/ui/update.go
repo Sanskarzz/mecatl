@@ -454,7 +454,12 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 
 	taH := 4
 	footerH := 2
-	vpH := m.height - taH - footerH - headerH
+	// The header is MEASURED (not a constant) because its identity line word-wraps at
+	// narrow widths — see headerHeight(); width/height are set above so renderHeader()
+	// reflects the NEW width. taH/footerH are fixed-height widgets (only the header
+	// wraps), and headerHeight() is the same source of truth convTopRow uses, so the
+	// viewport sizing and the click→content mapping can never disagree.
+	vpH := m.height - taH - footerH - m.headerHeight()
 	if vpH < 1 {
 		vpH = 1
 	}
