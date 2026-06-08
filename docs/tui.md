@@ -359,16 +359,20 @@ selection are left untouched (no mouse capture).
 **In-app text selection + copy (alt screen).** On the alt screen the app captures
 the mouse, so it provides its **own** text selection: **left-click-drag** over the
 conversation highlights the runes under the drag (press = anchor, drag = extend,
-release = finalize). The highlight is a **solid high-contrast block**: the
-selection's own ANSI is stripped and re-rendered with a dedicated selection
-background plus a foreground chosen by the background's relative luminance
-(near-black on a light theme, near-white on a dark one), so the block is legible
-on every built-in theme — light (`solar`) and dark (`aztec`/`mono`) alike. (It is
-**not** reverse-video, which was invisible over already-coloured content.) The
-block is **glyph-bounded** — it stops at each line's last glyph rather than
-filling the terminal width, so multi-line selections have a ragged right edge;
-an empty line spanned in the middle of a selection is a gap (no cell to colour).
-The highlight is **logical** — it survives scrolling (wheel,
+release = finalize). The highlight is rendered **by the app** — the selection
+style is spliced into the conversation's own content lines before they reach the
+viewport, **not** the viewport's native highlighter (which mis-placed the block on
+ANSI-styled markdown content, painting it on the wrong line). It is a **solid
+high-contrast block**: the selection's own ANSI is stripped and re-rendered with a
+dedicated selection background plus a foreground chosen by the background's relative
+luminance (near-black on a light theme, near-white on a dark one), so the block is
+legible on every built-in theme — light (`solar`) and dark (`aztec`/`mono`) alike.
+(It is **not** reverse-video, which was invisible over already-coloured content.)
+The block is **glyph-bounded** — it stops at each line's last glyph rather than
+filling the terminal width, so multi-line selections have a ragged right edge; an
+empty line spanned in the **middle** of a multi-line selection now paints **one
+cell** so the run stays solid through it. The highlight is **logical** — it
+survives scrolling (wheel,
 `pgup`/`pgdn`, `home`/`end`) and a streaming re-render. The selection
 background is the optional **`selection`** palette slot; a theme that omits it
 derives the block from its **`accent`** colour, still with a luminance-correct
@@ -417,6 +421,13 @@ uncaptured, so click-drag selection is handled by your terminal again — at the
 of in-app mouse-wheel scroll and the in-app drag-select/copy layer. Keyboard scroll
 (`pgup`/`pgdn`, `home`/`end`) is unaffected. (`--inline` / `--no-alt-screen`
 likewise leaves the mouse uncaptured.)
+
+**Troubleshooting — `MECATUI_DEBUG_MOUSE`.** If selection or click mapping looks
+off (a highlight on the wrong line, a click that lands a row away), set
+**`MECATUI_DEBUG_MOUSE=1`**: the footer-left is overridden during a press/drag with a
+live diagnostic — the raw mouse cell, the layout offsets (`top` = conversation top
+row, `yoff`, viewport height), and the `screenToContent` mapping (`ok`, logical
+`L`/`C`). It is off by default (zero cost when unset).
 
 ### Type-while-running and queued follow-ups
 

@@ -352,8 +352,8 @@ func TestRelayoutKeepsSelectionAcrossHeightChange(t *testing.T) {
 	}
 	wantAnchorL, wantAnchorC := m.sel.anchorL, m.sel.anchorC
 	wantHeadL, wantHeadC := m.sel.headL, m.sel.headC
-	if len(byteRanges(m.vp.GetContent(), m.sel)) == 0 {
-		t.Fatal("precondition: selection should yield non-empty byte ranges")
+	if !strings.Contains(m.vp.View(), selectionBgSGR(t, m)) {
+		t.Fatal("precondition: selection should render the highlight (selection bg SGR present)")
 	}
 	beforeH := m.vp.Height()
 
@@ -374,8 +374,8 @@ func TestRelayoutKeepsSelectionAcrossHeightChange(t *testing.T) {
 			wantAnchorL, wantAnchorC, m.sel.anchorL, m.sel.anchorC,
 			wantHeadL, wantHeadC, m.sel.headL, m.sel.headC)
 	}
-	if len(byteRanges(m.vp.GetContent(), m.sel)) == 0 {
-		t.Error("selection byte ranges must stay non-empty after the height change")
+	if !strings.Contains(m.vp.View(), selectionBgSGR(t, m)) {
+		t.Error("selection highlight (bg SGR) must stay rendered after the height change")
 	}
 }
 

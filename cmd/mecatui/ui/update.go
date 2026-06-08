@@ -116,12 +116,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// is detectable in ONE place — covering every overlay opener, the permission
 		// ask, and the fatal screen without a clearSelection() call sprinkled in each.
 		// It runs synchronously while the overlay state is active (before View renders
-		// the overlay body and well before the overlay closes), so the viewport
-		// highlight is cleared the moment the body changes hands. The openers do NOT
-		// refreshView, so this cannot live in refreshView — it must be on the
-		// per-message seam.
+		// the overlay body and well before the overlay closes), so the highlight is
+		// cleared the moment the body changes hands. The openers do NOT refreshView, so
+		// this cannot live in refreshView — it must be on the per-message seam.
 		if mm.sel.active && !selectable(mm) {
 			mm = mm.clearSelection()
+			// The highlight is spliced into the content (styleSelection), not a native
+			// viewport highlight, so dropping the selection needs a re-render to repaint
+			// the now-UNSTYLED content. relayout below only refreshes on a height change,
+			// so refresh here explicitly — this is the single seam that owns the
+			// clear-then-render for the non-selectable transition.
+			mm.refreshView()
 		}
 		// SINGLE relayout chokepoint: re-size the viewport from the CURRENT region
 		// stack after every message, so the body height always matches the layout
@@ -131,9 +136,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// footer off-screen. relayout acts ONLY when the height actually changed, so the
 		// per-message cost is one chrome render + a compare (and nothing more) on the
 		// vast majority of messages — including stream deltas. Placed AFTER the
-		// selection-clear so a height change re-derives byteRanges against the
-		// already-settled selection state in the same frame; relayout's own refreshView
-		// (height-changed only) is the sole re-render, so a frame is never rendered twice.
+		// selection-clear so a height change re-splices the selection (styleSelection)
+		// against the already-settled selection state in the same frame; relayout's own
+		// refreshView (height-changed only) re-renders, so a frame is never rendered twice
+		// (the clear path above already refreshed when it fired).
 		mm.relayout()
 		model = mm
 		// Test-only deterministic progress observer (nil in production). Fired on the
@@ -1301,12 +1307,27 @@ func (m Model) onMouseMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// mouseDebugLine formats a one-line mouse diagnostic for the footer overlay (gated
+// on Deps.DebugMouse): the raw pointer cell, the layout offsets (convTopRow, the
+// viewport YOffset and height), and the screenToContent mapping (ok + logical
+// line/col). It is the durable instrument for diagnosing selection/coordinate issues
+// — the wrong-line highlight that motivated this overlay shows up as a mismatch
+// between the raw y and the mapped L. Pure read; no mutation.
+func (m Model) mouseDebugLine(mo tea.Mouse) string {
+	line, col, ok := screenToContent(m, mo.X, mo.Y)
+	return fmt.Sprintf("MOUSE raw x=%d y=%d | top=%d yoff=%d vph=%d | map ok=%v L%d C%d",
+		mo.X, mo.Y, convTopRow(m), m.vp.YOffset(), m.vp.Height(), ok, line, col)
+}
+
 // onMousePress handles a mouse button press. A LEFT press in the conversation
 // region anchors a new selection (when selectable — no overlay owns the body, alt
 // screen on); a RIGHT press copies the current selection if one exists (a
 // convenience over the copy-on-release default). A press outside the conversation
 // region (header/input/footer) or while an overlay owns the body starts nothing.
 func (m Model) onMousePress(mo tea.Mouse) (tea.Model, tea.Cmd) {
+	if m.deps.DebugMouse {
+		m.mouseDebug = m.mouseDebugLine(mo)
+	}
 	switch mo.Button {
 	case tea.MouseRight:
 		if m.sel.active && !m.sel.empty() {
@@ -1348,7 +1369,7 @@ func (m Model) onMousePress(mo tea.Mouse) (tea.Model, tea.Cmd) {
 			m = m.lineSelect(line)
 		default: // 1 (and a wrapped 4th press): today's zero-width anchor, no copy.
 			m.sel = selection{active: true, anchorL: line, anchorC: col, headL: line, headC: col}
-			applySelectionHighlight(&m)
+			snapshotSelection(&m)
 			return m, disarm
 		}
 
@@ -1436,6 +1457,9 @@ func (Model) autoScrollCmd() tea.Cmd {
 // the pointer is held still at the edge. A motion back INSIDE the region disarms
 // autoscroll and resets the acceleration ramp.
 func (m Model) onMouseMotion(mo tea.Mouse) (tea.Model, tea.Cmd) {
+	if m.deps.DebugMouse {
+		m.mouseDebug = m.mouseDebugLine(mo)
+	}
 	if !m.sel.active {
 		return m, nil
 	}
@@ -1467,7 +1491,7 @@ func (m Model) onMouseMotion(mo tea.Mouse) (tea.Model, tea.Cmd) {
 	}
 	m.sel.headL = line
 	m.sel.headC = col
-	applySelectionHighlight(&m)
+	snapshotSelection(&m)
 	return m, nil
 }
 
@@ -1497,14 +1521,14 @@ func (m Model) armAutoScroll(dir autoScrollDir, x int) (tea.Model, tea.Cmd) {
 	if !m.scrollLines(dir, 1) {
 		m.sel.autoScroll = scrollNone // at the content edge: stop, don't re-arm
 		m.extendHeadToEdge(dir, x)
-		applySelectionHighlight(&m)
+		snapshotSelection(&m)
 		return m, nil
 	}
 	alreadyRunning := m.sel.autoScroll != scrollNone
 	m.sel.autoScroll = dir
 	m.syncStuck()
 	m.extendHeadToEdge(dir, x)
-	applySelectionHighlight(&m)
+	snapshotSelection(&m)
 	if alreadyRunning {
 		return m, nil // a tick loop is already live; it reads the new direction itself
 	}
@@ -1530,12 +1554,12 @@ func (m Model) onAutoScroll() (tea.Model, tea.Cmd) {
 		m.sel.autoScroll = scrollNone // reached content top/bottom: stop re-arming
 		m.sel.autoScrollRamp = 0      // and reset acceleration for the next hold
 		m.extendHeadToEdge(dir, m.sel.dragX)
-		applySelectionHighlight(&m)
+		snapshotSelection(&m)
 		return m, nil
 	}
 	m.syncStuck()
 	m.extendHeadToEdge(dir, m.sel.dragX)
-	applySelectionHighlight(&m)
+	snapshotSelection(&m)
 	return m, m.autoScrollCmd()
 }
 
@@ -1603,16 +1627,15 @@ func (m Model) onMouseRelease(mo tea.Mouse) (tea.Model, tea.Cmd) {
 	}
 	if m.sel.empty() {
 		m.sel = selection{}
-		m.vp.ClearHighlights()
-		m.refreshView()
+		m.refreshView() // repaint the now-UNSTYLED content (no native highlight to clear)
 		return m, nil
 	}
 	// Release is the one head-changing path that doesn't already run through
-	// applySelectionHighlight; refresh the ranges AND the identity snapshot for the
-	// final head before copy, so the immediately-following refreshView (in
-	// copySelection) sees a matching snapshot and keeps the highlight rather than
-	// treating the moved head as a reflow and clearing it.
-	applySelectionHighlight(&m)
+	// snapshotSelection; capture the identity snapshot AND re-render the spliced
+	// highlight for the final head before copy, so the immediately-following
+	// refreshView (in copySelection) sees a matching snapshot and keeps the highlight
+	// rather than treating the moved head as a reflow and clearing it.
+	snapshotSelection(&m)
 	return m.copySelection()
 }
 
@@ -1630,37 +1653,49 @@ func (m Model) copySelection() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tea.SetClipboard(payload), m.shellWriteCmd(payload))
 }
 
-// applySelectionHighlight (re)applies the selection's byte ranges to the viewport's
-// native highlights, recomputing them against the CURRENT content. It brackets the
-// SetHighlights/ClearHighlights calls with a YOffset save/restore: SetHighlights
-// calls showHighlight()→EnsureVisible(), which can move YOffset, so neutralising it
-// keeps the scroll position stable (the highlight must follow the content, never
-// yank the view). Called on every press/motion AND after every refreshView while a
-// selection is active (SetContent clears highlights, so a re-render would otherwise
-// drop them). A pointer receiver: it mutates m.vp in place.
-func applySelectionHighlight(m *Model) {
-	saved := m.vp.YOffset()
-	m.vp.ClearHighlights()
-	if m.sel.active {
-		content := m.vp.GetContent()
-		if ranges := byteRanges(content, m.sel); len(ranges) > 0 {
-			m.vp.SetHighlights(ranges)
-		}
-		// Record what the selection currently covers — its identity anchor. Captured
-		// here because every selection-GEOMETRY change funnels through this function
-		// while the content is stable (gestures don't re-render). refreshView compares
-		// this snapshot against the post-render content BEFORE calling us, so a reflow
-		// under the selection clears it instead of being silently re-snapshotted.
-		m.sel.snapshot = selectedText(content, m.sel)
+// snapshotSelection records the selection's identity anchor and RE-SPLICES the
+// highlight over the unstyled base content in place — the per-gesture (press / drag /
+// edge-autoscroll) update. It REPLACES the old applySelectionHighlight: the highlight
+// is no longer the viewport's native SetHighlights (which mis-placed it on ANSI-styled
+// content — see styleSelection) but our own per-line splice. So there is no
+// SetHighlights/ClearHighlights and no YOffset save/restore to neutralise an
+// EnsureVisible scroll-jump — re-splicing the SAME-length content never moves YOffset.
+//
+// It works off m.selBase (the unstyled conversation render, captured when the
+// selection became active and refreshed by refreshView) rather than re-rendering the
+// whole conversation, so a gesture does not rebuild the transcript or disturb the
+// viewport's scroll/line geometry. The snapshot (selectedText against the unstyled
+// base) is the identity anchor refreshView compares against to drop the selection on a
+// reflow. A pointer receiver: it mutates m.vp in place.
+func snapshotSelection(m *Model) {
+	if !m.sel.active {
+		return
 	}
-	m.vp.SetYOffset(saved)
+	base := m.selBase
+	if base == "" {
+		// Defensive: no base captured (e.g. a test that set raw viewport content then
+		// pointed a selection at it without a press). Adopt the current viewport content
+		// as the base and remember it, so subsequent gestures re-splice cleanly.
+		base = m.vp.GetContent()
+		m.selBase = base
+	}
+	m.sel.snapshot = selectedText(base, m.sel)
+	m.vp.SetContent(styleSelection(base, m.sel, m.deps.Theme.Style("selection")))
 }
 
 // clearSelection drops any active text selection (including a pending edge-
-// autoscroll direction, so an in-flight tick no-ops) and clears the viewport
-// highlight in place. It is called from the SINGLE selectable→non-selectable
-// chokepoint in Update (Req 8) and from the esc-clear path. A no-op when nothing is
-// selected. Value-receiver-friendly: returns the mutated Model.
+// autoscroll direction, so an in-flight tick no-ops). It is called from the SINGLE
+// selectable→non-selectable chokepoint in Update (Req 8) and from the esc-clear
+// path. A no-op when nothing is selected. Value-receiver-friendly: returns the
+// mutated Model.
+//
+// IMPORTANT: it does NOT re-render. The highlight is now spliced into the content by
+// styleSelection inside refreshView (not a native viewport highlight mutated in
+// place), so dropping the selection requires a subsequent refreshView to re-render
+// the UNSTYLED content — every clearSelection caller must follow with one (the esc
+// path, the Update selectable→non-selectable chokepoint, overlay-open). The
+// chokepoint's caller (Update) is the seam that guarantees a render: the per-message
+// relayout/refresh runs after it. The esc path refreshViews explicitly.
 //
 // It also zeroes the multi-click sequence (clickCount): esc-clear and the
 // non-selectable chokepoint both drop the selection but predate the multi-click
@@ -1672,7 +1707,7 @@ func applySelectionHighlight(m *Model) {
 func (m Model) clearSelection() Model {
 	if m.sel.active {
 		m.sel = selection{} // zeroes autoScroll too
-		m.vp.ClearHighlights()
+		m.selBase = ""      // drop the splice base so the next selection re-captures it
 	}
 	m.clickCount = 0
 	return m
@@ -1750,29 +1785,34 @@ func (m *Model) refreshView() {
 			content += "\n" + list
 		}
 	}
+	// An active text selection is now rendered by US (styleSelection splices the
+	// selection style into the content lines) rather than the viewport's native
+	// SetHighlights — which mis-placed the highlight on ANSI-styled (glamour) content
+	// because its parseMatches detects newlines at stripped offsets in the original
+	// ANSI bytes (see styleSelection). This is the single content-render chokepoint,
+	// so it covers every refreshView caller — the highlight survives a streaming
+	// re-render (Req 2).
+	//
+	// Identity check FIRST, against the UNSTYLED content: the anchor/head are absolute
+	// line indices, so a reflow that changed the line count above/within the selection
+	// (ctrl+t expand/collapse, compaction) now re-points them at different text. If the
+	// text under the selection no longer matches what was selected, DROP it rather than
+	// highlight/copy the wrong runes. selectedText must read the UNSTYLED content, so it
+	// runs before the splice. A pure append below leaves the selected lines untouched, so
+	// this does NOT fire for streaming (Req 2 preserved).
+	if m.sel.active && selectedText(content, m.sel) != m.sel.snapshot {
+		*m = m.clearSelection()
+	}
+	if m.sel.active {
+		// Record the UNSTYLED render as the splice base, so a subsequent gesture
+		// (snapshotSelection) can re-splice the highlight in place without re-rendering
+		// the whole conversation.
+		m.selBase = content
+		content = styleSelection(content, m.sel, m.deps.Theme.Style("selection"))
+	}
 	m.vp.SetContent(content)
 	if m.stuck {
 		m.vp.GotoBottom()
-	}
-	// SetContent above CLEARS the viewport's highlights, so an active text selection
-	// must be re-applied against the NEW content (its byte ranges are recomputed
-	// from the current lines). This is the single content-render chokepoint, so it
-	// covers every refreshView caller — the highlight survives a streaming re-render
-	// (Req 2). applySelectionHighlight saves/restores YOffset, and it runs AFTER the
-	// stuck re-pin so the captured offset is the final settled position.
-	//
-	// Identity check FIRST: the anchor/head are absolute line indices, so a reflow
-	// that changed the line count above/within the selection (ctrl+t expand/collapse,
-	// compaction) now re-points them at different text. If the text under the current
-	// ranges no longer matches what was selected, DROP the selection rather than
-	// highlight/copy the wrong runes. A pure append below leaves the selected lines
-	// untouched, so this does NOT fire for streaming (Req 2 preserved).
-	if m.sel.active {
-		if selectedText(m.vp.GetContent(), m.sel) != m.sel.snapshot {
-			*m = m.clearSelection()
-		} else {
-			applySelectionHighlight(m)
-		}
 	}
 }
 

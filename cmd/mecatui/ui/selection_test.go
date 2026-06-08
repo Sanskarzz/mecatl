@@ -333,97 +333,428 @@ func TestSelectedTextStripsANSI(t *testing.T) {
 	}
 }
 
-// TestByteRangesMultiLine: a multi-line selection produces ascending, non-
-// overlapping byte ranges that, fed to the REAL viewport.SetHighlights, do not
-// panic, and the GetContent slicing of each range equals the expected stripped
-// substring.
-func TestByteRangesMultiLine(t *testing.T) {
+// TestCellWidthForCol pins the grapheme-column → CELL-width conversion that lets
+// styleSelection place the highlight correctly over WIDE runes (lipgloss.StyleRanges
+// is cell-indexed; the selection's columns are grapheme-indexed). "ab中文cd" is 6
+// grapheme columns but the two CJK runes are 2 cells each, so the first 4 grapheme
+// columns ("ab中文") span 1+1+2+2 = 6 cells.
+func TestCellWidthForCol(t *testing.T) {
+	cases := []struct {
+		stripped  string
+		col, want int
+	}{
+		{"ab中文cd", 0, 0},
+		{"ab中文cd", 2, 2},  // "ab" → 2 cells
+		{"ab中文cd", 3, 4},  // "ab中" → 1+1+2
+		{"ab中文cd", 4, 6},  // "ab中文" → 1+1+2+2 (the plan's load-bearing case)
+		{"ab中文cd", 6, 8},  // whole line → 1+1+2+2+1+1
+		{"ab中文cd", 99, 8}, // past end clamps to full width
+		{"ascii", 3, 3},   // narrow runes: cell == grapheme
+		{"", 0, 0},
+	}
+	for _, tc := range cases {
+		if got := cellWidthForCol(tc.stripped, tc.col); got != tc.want {
+			t.Errorf("cellWidthForCol(%q, %d) = %d, want %d", tc.stripped, tc.col, got, tc.want)
+		}
+	}
+}
+
+// TestStyleSelectionWideRuneSpan: selecting a span that starts AFTER wide runes
+// places the open SGR immediately before the selected substring — proving the
+// grapheme→cell conversion (cellWidthForCol) feeds StyleRanges the right cell
+// offsets. Selecting "cd" (grapheme cols [4,6)) over "ab中文cd" must wrap exactly
+// "cd": the open SGR sits immediately before "cd", and the wide runes BEFORE it are
+// NOT inside the styled block.
+func TestStyleSelectionWideRuneSpan(t *testing.T) {
 	m, _ := selModel(t)
-	// Replace the viewport content with a known plain set for exact assertions.
-	m.vp.SetContent("hello world\nsecond line\nthird row")
-	content := m.vp.GetContent()
+	content := "ab中文cd"
+	sel := selection{active: true, anchorL: 0, anchorC: 4, headL: 0, headC: 6} // "cd"
+	open := openSelectionSGR(t, m)
+	styled := styleSelection(content, sel, m.deps.Theme.Style("selection"))
+
+	if !strings.Contains(styled, open+"cd") {
+		t.Errorf("wide-rune span: want open SGR %q immediately before %q in %q", open, "cd", styled)
+	}
+	// The wide runes before the span must NOT be inside the styled block: nothing
+	// styled should precede "中文" up to the open SGR.
+	if strings.Contains(styled, open+"中") || strings.Contains(styled, open+"ab") {
+		t.Errorf("the highlight must start at the selected 'cd', not over the preceding glyphs: %q", styled)
+	}
+}
+
+// TestWideRuneSelectionThroughStyledRenderPath combines the wide-rune cell-conversion
+// (cellWidthForCol) with the styled-content fidelity guard — the offset bug is most
+// dangerous when wide runes coexist with ANSI-styled lines above. It builds a styled
+// transcript (collapsed reasoning summary etc. above) whose ANSWER line contains CJK
+// wide runes, selects that whole line, renders the FULL frame, and asserts the
+// selection bg SGR lands on the answer's screen row (and no earlier row) AND wraps the
+// wide glyphs (the open SGR sits immediately before the "中文" run on that row).
+func TestWideRuneSelectionThroughStyledRenderPath(t *testing.T) {
+	const wide = "中文"
+	m, answerIdx := styledTranscriptModel(t, "answer with "+wide+" wide runes here")
+
+	// Select the whole answer line.
+	m = m.lineSelect(answerIdx)
+	if !m.sel.active || m.sel.empty() {
+		t.Fatal("lineSelect should produce a non-empty selection on the wide-rune answer line")
+	}
+
+	wantRow := convTopRow(m) + answerIdx - m.vp.YOffset()
+	// The highlight is on the answer's row and nowhere earlier (styled-content guard).
+	assertHighlightOnlyOnRow(t, m, wantRow)
+
+	// The wide-rune run is wrapped by the highlight: because the whole line is selected
+	// (anchorC 0), the open SGR opens at column 0 and the line — including the wide
+	// runes — is inside the styled block, so the "中文" run appears on the highlighted
+	// row. The cell-width conversion placed the span over the full glyph width without
+	// truncating mid-wide-rune (a grapheme-vs-cell bug would clip "中文").
+	frame := strings.Split(m.View().Content, "\n")
+	if !strings.Contains(ansi.Strip(frame[wantRow]), wide) {
+		t.Errorf("the wide-rune run %q is missing from the highlighted row %d: %q", wide, wantRow, ansi.Strip(frame[wantRow]))
+	}
+	open := openSelectionSGR(t, m)
+	// The selected line is styled from its start: the open SGR appears on the row and
+	// the wide-rune run follows it within the same styled block (no reset between the
+	// open SGR and "中文").
+	row := frame[wantRow]
+	oi := strings.Index(row, open)
+	if oi < 0 {
+		t.Fatalf("open SGR not found on the highlighted row: %q", row)
+	}
+	if wi := strings.Index(row, wide); wi < oi {
+		t.Errorf("the wide-rune run appears before the selection open SGR on row %d — the highlight does not cover it: %q", wantRow, row)
+	}
+}
+
+// TestSelectionHighlightOnStyledLaterLine is the CORE regression guard for THIS bug
+// (the highlight rendered ~2 lines above the selected line on ANSI-styled content).
+// It builds the conversation through the REAL render path — a collapsed reasoning
+// summary line (which carries the multibyte "·" AND dim SGR, so ansi.Strip(line) !=
+// line for a line ABOVE the answer) plus a glamour-styled assistant answer — so the
+// content is ANSI-styled exactly like a real session. It selects on the ANSWER line
+// (several content lines down), renders the full View(), and asserts the selection bg
+// SGR appears on the EXPECTED screen row and on NO earlier row.
+//
+// This MUST FAIL against the old viewport.SetHighlights path: parseMatches walked
+// ansi.Strip(content) for positions but indexed the original ANSI bytes for newline
+// detection, so the stripped/original offset divergence over the styled lines above
+// pushed the highlight onto the wrong (earlier) row. styleSelection splices per-line,
+// so the highlight lands on the selected line. NOTE for maintainers: plain-content
+// tests never triggered this — STYLED content (ansi.Strip(line) != line above the
+// selection) is MANDATORY for this guard.
+func TestSelectionHighlightOnStyledLaterLine(t *testing.T) {
+	cb := &fakeClipboard{}
+	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
+	m.deps.NoAltScreen = false
+	m.deps.Clipboard = cb
+	m = applyAll(m,
+		tea.WindowSizeMsg{Width: 100, Height: 40},
+		client.SessionReadyMsg{SessionID: "sess-styled-1"},
+	)
+	// Real render path: a user prompt, then an assistant turn whose collapsed reasoning
+	// summary line carries the multibyte "·" + dim SGR (so ansi.Strip != raw on lines
+	// ABOVE the answer — the bug's trigger), plus a glamour-styled answer line with a
+	// UNIQUE marker word to locate it.
+	const marker = "ANSWERMARKERZZZ"
+	m.conv.addUser("a styled request")
+	m.conv.startAssistant()
+	m.conv.appendReasoning("step one\nstep two\nstep three")
+	m.conv.endReasoningStream() // freeze the collapsed "reasoning summary · N lines" line
+	m.conv.appendAssistant(marker + " is the selected answer line")
+	m.phase = phaseIdle
+	m.stuck = true
+	m.refreshView()
+
+	// PRECONDITION: at least one content line ABOVE the answer is ANSI-styled (the
+	// stripped form differs from the raw), so the original-vs-stripped offset
+	// divergence that broke the native highlighter is actually present.
+	lines := strings.Split(m.vp.GetContent(), "\n")
+	answerIdx := lineIndexContaining(m.vp.GetContent(), marker)
+	if answerIdx <= 0 {
+		t.Fatalf("answer marker not found below another line (idx=%d)", answerIdx)
+	}
+	styledAbove := false
+	for i := 0; i < answerIdx; i++ {
+		if ansi.Strip(lines[i]) != lines[i] {
+			styledAbove = true
+			break
+		}
+	}
+	if !styledAbove {
+		t.Fatal("PRECONDITION: no ANSI-styled line above the answer; the bug's trigger is absent and this guard would be vacuous")
+	}
+
+	// Select the answer line (whole line).
+	m = m.lineSelect(answerIdx)
+	if !m.sel.active || m.sel.empty() {
+		t.Fatal("precondition: lineSelect should produce a non-empty selection on the answer line")
+	}
+
+	// The expected screen row of the selected line.
+	wantRow := convTopRow(m) + answerIdx - m.vp.YOffset()
+	frame := strings.Split(m.View().Content, "\n")
+	if wantRow < 0 || wantRow >= len(frame) {
+		t.Fatalf("expected row %d out of frame range (%d lines)", wantRow, len(frame))
+	}
+	selSGR := selectionBgSGR(t, m)
+
+	// The selection bg SGR must appear on the EXPECTED row.
+	if !strings.Contains(frame[wantRow], selSGR) {
+		t.Errorf("selection highlight missing on the answer's screen row %d: %q", wantRow, frame[wantRow])
+	}
+	// And on NO EARLIER row (the exact wrong-line bug: the old path painted it ~2 rows
+	// above, over the styled reasoning/user lines).
+	for r := 0; r < wantRow; r++ {
+		if strings.Contains(frame[r], selSGR) {
+			t.Errorf("selection highlight leaked onto earlier screen row %d (should be only on row %d): %q", r, wantRow, frame[r])
+		}
+	}
+}
+
+// styledTranscriptModel builds a selectable, idle model whose conversation is built
+// through the REAL render path (user prompt → assistant turn with a collapsed
+// reasoning summary — multibyte "·" + dim SGR — then a glamour-styled answer line
+// carrying `answer`), so content lines ABOVE the answer are ANSI-styled (ansi.Strip
+// != raw). It returns the model, the logical line index of the answer, and the
+// renderer's stripped form of that answer line (the glyphs as they appear after
+// glamour). The answer text must be a single visual line at width 100.
+func styledTranscriptModel(t *testing.T, answer string) (Model, int) {
+	t.Helper()
+	cb := &fakeClipboard{}
+	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
+	m.deps.NoAltScreen = false
+	m.deps.Clipboard = cb
+	m = applyAll(m,
+		tea.WindowSizeMsg{Width: 100, Height: 40},
+		client.SessionReadyMsg{SessionID: "sess-styled-tx"},
+	)
+	m.conv.addUser("a styled request")
+	m.conv.startAssistant()
+	m.conv.appendReasoning("step one\nstep two\nstep three")
+	m.conv.endReasoningStream()
+	m.conv.appendAssistant(answer)
+	m.phase = phaseIdle
+	m.stuck = true
+	m.refreshView()
+
+	idx := lineIndexContaining(m.vp.GetContent(), strings.Fields(answer)[0])
+	if idx <= 0 {
+		t.Fatalf("answer line %q not found below another line (idx=%d)", answer, idx)
+	}
+	// PRECONDITION: at least one styled line above the answer (the bug's trigger).
+	lines := strings.Split(m.vp.GetContent(), "\n")
+	styledAbove := false
+	for i := 0; i < idx; i++ {
+		if ansi.Strip(lines[i]) != lines[i] {
+			styledAbove = true
+			break
+		}
+	}
+	if !styledAbove {
+		t.Fatal("PRECONDITION: no ANSI-styled line above the answer; the bug's trigger is absent")
+	}
+	return m, idx
+}
+
+// assertHighlightOnlyOnRow renders the full frame and asserts the selection bg SGR
+// is present on screen row `wantRow` and on NO earlier row — the wrong-line guard.
+func assertHighlightOnlyOnRow(t *testing.T, m Model, wantRow int) {
+	t.Helper()
+	frame := strings.Split(m.View().Content, "\n")
+	if wantRow < 0 || wantRow >= len(frame) {
+		t.Fatalf("expected row %d out of frame range (%d lines)", wantRow, len(frame))
+	}
+	selSGR := selectionBgSGR(t, m)
+	if !strings.Contains(frame[wantRow], selSGR) {
+		t.Errorf("selection highlight missing on the expected screen row %d: %q", wantRow, frame[wantRow])
+	}
+	for r := 0; r < wantRow; r++ {
+		if strings.Contains(frame[r], selSGR) {
+			t.Errorf("selection highlight leaked onto earlier screen row %d (should be only on row %d): %q", r, wantRow, frame[r])
+		}
+	}
+}
+
+// TestDragReSplicesAfterDeltaUsesFreshBase is the selBase-staleness guard. The whole
+// risk of the m.selBase state is that a content change (a streaming delta) re-captures
+// the base in refreshView, and a SUBSEQUENT gesture (snapshotSelection) must re-splice
+// the FRESH base — not a stale one. This exercises exactly that path: select on a
+// styled answer line, apply a delta + frame flush (refreshView re-renders the GROWN
+// content and re-captures selBase), THEN drag to extend the selection (snapshotSelection
+// re-splices selBase in place). The rendered frame must carry the highlight correctly
+// against the fresh content — wrapping the answer line's text on its row, nowhere
+// earlier — proving the re-splice used the grown base.
+func TestDragReSplicesAfterDeltaUsesFreshBase(t *testing.T) {
+	const marker = "FRESHBASEMARKER"
+	m, answerIdx := styledTranscriptModel(t, marker+" is the selected answer line")
+
+	// Scroll up so the answer line is on a stable, non-tail line and a delta won't
+	// re-pin the view past it (the append lands below the selection).
+	for m.vp.YOffset() > 0 && answerIdx < m.vp.YOffset() {
+		m, _ = pressKey(m, tea.KeyPressMsg{Code: tea.KeyPgUp})
+	}
+	top := convTopRow(m)
+	y := top + (answerIdx - m.vp.YOffset())
+	if y < top || y >= top+m.vp.Height() {
+		t.Fatalf("answer line %d not on screen (YOffset=%d top=%d h=%d)", answerIdx, m.vp.YOffset(), top, m.vp.Height())
+	}
+
+	// Anchor on the answer line.
+	m, _ = pressMouse(m, tea.MouseLeft, 0, y)
+	if !m.sel.active {
+		t.Fatal("press should activate a selection on the answer line")
+	}
+
+	// Streaming delta BELOW the selection + frame flush: refreshView re-renders the
+	// grown conversation and re-captures m.selBase against it.
+	m.phase = phaseRunning
+	m = applyAll(m,
+		client.AssistantDeltaMsg{Turn: 1, Text: strings.Repeat("appended tail line\n", 5)},
+		renderTickMsg{},
+	)
+	if !m.sel.active {
+		t.Fatal("selection should survive a streaming delta below it")
+	}
+	m.phase = phaseIdle
+
+	// The grown content (post-delta) has MORE lines than at press time — record the
+	// fresh unstyled render line count so a stale (shorter) base re-splice is caught.
+	freshLineCount := strings.Count(m.rend.renderConversation(&m.conv, m.expandTools), "\n")
+
+	// Now DRAG to extend the head along the answer line: snapshotSelection re-splices
+	// the (freshly re-captured) selBase in place — NOT a stale base.
+	m, _ = motionMouse(m, 30, y)
+	if !m.sel.active || m.sel.empty() {
+		t.Fatal("drag should extend to a non-empty selection on the answer line")
+	}
+
+	// TEETH: the post-drag viewport content must have the FRESH (grown) line count. A
+	// stale base re-splice would SetContent the shorter pre-delta content, shrinking the
+	// viewport's line count below the current conversation render — caught here.
+	if got := strings.Count(m.vp.GetContent(), "\n"); got != freshLineCount {
+		t.Errorf("post-drag viewport has %d newlines, want %d (the fresh grown content) — snapshotSelection re-spliced a STALE base", got, freshLineCount)
+	}
+
+	// The re-splice must be correct against the FRESH content: the answer line's text
+	// sits immediately after the selection open SGR on its row, and the bg SGR is on no
+	// earlier row. If the re-splice had used a stale base, the spliced line would not
+	// match the current viewport content and the highlight would land wrong.
+	open := openSelectionSGR(t, m)
+	wantRow := convTopRow(m) + answerIdx - m.vp.YOffset()
+	frame := strings.Split(m.View().Content, "\n")
+	if wantRow < 0 || wantRow >= len(frame) {
+		t.Fatalf("expected row %d out of frame range (%d lines)", wantRow, len(frame))
+	}
+	if !strings.Contains(frame[wantRow], open+marker) {
+		t.Errorf("re-splice did not wrap the fresh answer text: want open SGR %q immediately before %q on row %d, got %q", open, marker, wantRow, frame[wantRow])
+	}
+	assertHighlightOnlyOnRow(t, m, wantRow)
+}
+
+// openSelectionSGR returns the full open SGR (fg+bg, up to and including the 'm')
+// the resolved "selection" theme style emits — the prefix that must immediately
+// precede a styled span in a styleSelection/StyleRanges render.
+func openSelectionSGR(t *testing.T, m Model) string {
+	t.Helper()
+	probe := m.deps.Theme.Style("selection").Render("X")
+	mIdx := strings.IndexByte(probe, 'm')
+	if mIdx < 0 {
+		t.Fatalf("selection style has no SGR: %q", probe)
+	}
+	return probe[:mIdx+1]
+}
+
+// styledLines is the per-line result of styleSelection over content, split on "\n",
+// using the model's "selection" theme style — the render-level basis for the
+// migrated byteRanges tests (they used to assert on the native SetHighlights byte
+// ranges; the highlight is now an app-owned per-line splice).
+func styledLines(m Model, content string, sel selection) []string {
+	styled := styleSelection(content, sel, m.deps.Theme.Style("selection"))
+	return strings.Split(styled, "\n")
+}
+
+// TestSelectionMultiLineStylesEachSpannedLine (migrated from TestByteRangesMultiLine):
+// each spanned line carries the selection open SGR immediately wrapping its expected
+// substring — the per-line splice covers the start-line tail and the end-line head.
+func TestSelectionMultiLineStylesEachSpannedLine(t *testing.T) {
+	m, _ := selModel(t)
+	content := "hello world\nsecond line\nthird row"
 	// Select from col 6 line0 ("world") through col 6 line1 ("second").
 	sel := selection{active: true, anchorL: 0, anchorC: 6, headL: 1, headC: 6}
-	ranges := byteRanges(content, sel)
-	if len(ranges) != 2 {
-		t.Fatalf("ranges = %v, want 2 (one per spanned line)", ranges)
+	open := openSelectionSGR(t, m)
+	lines := styledLines(m, content, sel)
+
+	if !strings.Contains(lines[0], open+"world") {
+		t.Errorf("line0 styled span: want open SGR %q immediately before %q in %q", open, "world", lines[0])
 	}
-	// Ascending + non-overlapping.
-	if ranges[0][0] > ranges[0][1] || ranges[0][1] > ranges[1][0] || ranges[1][0] > ranges[1][1] {
-		t.Errorf("ranges not ascending/non-overlapping: %v", ranges)
+	if !strings.Contains(lines[1], open+"second") {
+		t.Errorf("line1 styled span: want open SGR %q immediately before %q in %q", open, "second", lines[1])
 	}
-	// The byte ranges index the STRIPPED content (matches the viewport contract).
-	if got := content[ranges[0][0]:ranges[0][1]]; got != "world" {
-		t.Errorf("range[0] slice = %q, want %q", got, "world")
+	// The unspanned line2 must carry no selection styling.
+	if strings.Contains(lines[2], selectionBgSGR(t, m)) {
+		t.Errorf("line2 is outside the selection but carries the bg SGR: %q", lines[2])
 	}
-	if got := content[ranges[1][0]:ranges[1][1]]; got != "second" {
-		t.Errorf("range[1] slice = %q, want %q", got, "second")
-	}
-	// Must not panic when handed to the real viewport.
-	m.vp.SetHighlights(ranges)
 }
 
-// TestByteRangesEmptyInteriorLineGetsNoCell pins the SHIPPED behaviour for an
-// empty interior line in a multi-line selection. We VERIFIED a one-cell
-// [off, off+1] range over the '\n' byte does NOT paint in bubbles viewport
-// v2.1.0 (lipgloss.StyleRanges renders the bg SGR with no glyph between the
-// escapes), so byteRanges deliberately skips the empty line: the surrounding
-// lines stay highlighted, the empty line is a gap. This locks that contract
-// (and that the ranges stay ascending/non-overlapping + don't panic).
-func TestByteRangesEmptyInteriorLineGetsNoCell(t *testing.T) {
+// TestSelectionEmptyInteriorLinePaintsOneCell (migrated from
+// TestByteRangesEmptyInteriorLineGetsNoCell — CONTRACT CHANGE): an EMPTY interior
+// line of a multi-line selection now paints exactly ONE styled cell (style.Render(" "))
+// so the run stays solid through the blank line, removing the old byteRanges gap. The
+// surrounding non-empty lines carry their styled substrings; the copy path
+// (selectedText) still preserves the empty line as "\n" (asserted separately).
+func TestSelectionEmptyInteriorLinePaintsOneCell(t *testing.T) {
 	m, _ := selModel(t)
-	m.vp.SetContent("alpha\n\nbeta")
-	content := m.vp.GetContent()
+	content := "alpha\n\nbeta"
 	// Select from line0col0 through line2col4 — spanning the empty middle line.
 	sel := selection{active: true, anchorL: 0, anchorC: 0, headL: 2, headC: 4}
-	ranges := byteRanges(content, sel)
-	// Two ranges: "alpha" (line0) and "beta" (line2). The empty line1 contributes
-	// none (the known limitation).
-	if len(ranges) != 2 {
-		t.Fatalf("ranges = %v, want 2 (empty interior line contributes none)", ranges)
+	lines := styledLines(m, content, sel)
+	open := openSelectionSGR(t, m)
+
+	if !strings.Contains(lines[0], open+"alpha") {
+		t.Errorf("line0 want %q before %q, got %q", open, "alpha", lines[0])
 	}
-	// Ascending + non-overlapping.
-	if ranges[0][0] > ranges[0][1] || ranges[0][1] > ranges[1][0] || ranges[1][0] > ranges[1][1] {
-		t.Errorf("ranges not ascending/non-overlapping: %v", ranges)
+	if !strings.Contains(lines[2], open+"beta") {
+		t.Errorf("line2 want %q before %q, got %q", open, "beta", lines[2])
 	}
-	if got := content[ranges[0][0]:ranges[0][1]]; got != "alpha" {
-		t.Errorf("range[0] slice = %q, want %q", got, "alpha")
+	// The empty interior line now carries exactly the style.Render(" ") output: the
+	// selection bg SGR with a single space glyph (NOT a gap).
+	if lines[1] != m.deps.Theme.Style("selection").Render(" ") {
+		t.Errorf("empty interior line = %q, want the one-cell painted style %q", lines[1], m.deps.Theme.Style("selection").Render(" "))
 	}
-	if got := content[ranges[1][0]:ranges[1][1]]; got != "beta" {
-		t.Errorf("range[1] slice = %q, want %q", got, "beta")
+	if !strings.Contains(lines[1], selectionBgSGR(t, m)) {
+		t.Errorf("empty interior line should carry the selection bg SGR (one painted cell), got %q", lines[1])
 	}
-	// Must not panic when handed to the real viewport.
-	m.vp.SetHighlights(ranges)
 }
 
-// TestByteRangesGlyphWidthNotPadded asserts an interior line's highlight stops at
-// its last glyph, NOT the terminal width — the highlight is ragged (glyph-bounded),
-// never a full-width bar (Req 6). The interior line's range slices to exactly the
-// stripped line content.
-func TestByteRangesGlyphWidthNotPadded(t *testing.T) {
+// TestSelectionInteriorLineGlyphBounded (migrated from TestByteRangesGlyphWidthNotPadded):
+// an interior line's highlight stops at its last glyph, NOT the terminal width — the
+// styled span ends right after the line's content, not padded to 100 cells (Req 6).
+func TestSelectionInteriorLineGlyphBounded(t *testing.T) {
 	m, _ := selModel(t)
-	m.vp.SetContent("first line\nshort\nlast line here")
-	content := m.vp.GetContent()
+	content := "first line\nshort\nlast line here"
 	// Select all three lines; the middle line "short" is the interior line.
 	sel := selection{active: true, anchorL: 0, anchorC: 0, headL: 2, headC: 14}
-	ranges := byteRanges(content, sel)
-	if len(ranges) != 3 {
-		t.Fatalf("ranges = %v, want 3", ranges)
+	lines := styledLines(m, content, sel)
+	open := openSelectionSGR(t, m)
+
+	// The interior line must be the styled "short" with NO trailing padded cells: it
+	// equals StyleRanges over exactly the 5-cell content, so stripping ANSI yields
+	// "short" with no width pad.
+	mid := lines[1]
+	if stripped := ansi.Strip(mid); stripped != "short" {
+		t.Errorf("interior line stripped = %q, want %q (glyph-bounded, not full-width)", stripped, "short")
 	}
-	// The interior line's range must equal exactly the stripped "short" (5 cells),
-	// not padded to the 100-cell terminal width.
-	mid := content[ranges[1][0]:ranges[1][1]]
-	if mid != "short" {
-		t.Errorf("interior line slice = %q, want %q (glyph-bounded, not full-width)", mid, "short")
-	}
-	if w := ranges[1][1] - ranges[1][0]; w != len("short") {
-		t.Errorf("interior line width = %d bytes, want %d (== grapheme count, no pad)", w, len("short"))
+	if !strings.Contains(mid, open+"short") {
+		t.Errorf("interior line want %q before %q, got %q", open, "short", mid)
 	}
 }
 
 // TestSelectedTextUnchangedByEmptyLineFix asserts the COPY path still preserves
-// the empty middle line (the byteRanges/highlight change is additive and must not
-// touch selectedText). The empty line survives as a "\n" in the joined payload.
+// the empty middle line (the highlight-render change is additive and must not touch
+// selectedText). The empty line survives as a "\n" in the joined payload. It ALSO
+// asserts copy over ANSI-styled + wide-rune content yields the correct ansi-stripped
+// payload (the copy path is grapheme-column indexed and strips ANSI, independent of
+// the styleSelection render path).
 func TestSelectedTextUnchangedByEmptyLineFix(t *testing.T) {
 	m, _ := selModel(t)
 	m.vp.SetContent("alpha\n\nbeta")
@@ -431,6 +762,16 @@ func TestSelectedTextUnchangedByEmptyLineFix(t *testing.T) {
 	got := selectedText(m.vp.GetContent(), sel)
 	if got != "alpha\n\nbeta" {
 		t.Errorf("selectedText = %q, want %q (empty middle line preserved)", got, "alpha\n\nbeta")
+	}
+
+	// ANSI + wide-rune copy: a styled line containing CJK wide runes. The selection
+	// columns are GRAPHEME columns; selectedText must strip ANSI and slice by grapheme,
+	// so selecting "ab中文cd" (6 graphemes) recovers exactly that text.
+	styled := m.deps.Theme.Style("toolName").Render("ab中文cd") + "   "
+	m.vp.SetContent(styled)
+	wide := selection{active: true, anchorL: 0, anchorC: 0, headL: 0, headC: graphemeCount("ab中文cd")}
+	if got := selectedText(m.vp.GetContent(), wide); got != "ab中文cd" {
+		t.Errorf("wide-rune copy = %q, want %q (ansi stripped, grapheme-sliced)", got, "ab中文cd")
 	}
 }
 
@@ -537,6 +878,11 @@ func TestEscClearsSelectionThenRestoresSemantics(t *testing.T) {
 	if !m.sel.active {
 		t.Fatal("precondition: a selection should be active")
 	}
+	// PRECONDITION: the selection is actually RENDERED (the bg SGR splice is in the
+	// frame) — so the post-esc absence assertion is meaningful, not vacuous.
+	if !strings.Contains(m.vp.View(), selectionBgSGR(t, m)) {
+		t.Fatal("precondition: the active selection should be rendered (bg SGR present) before esc")
+	}
 
 	// First esc: clears the selection, consumes the key, does NOT cancel the run.
 	m, cmd := pressKey(m, tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -548,6 +894,11 @@ func TestEscClearsSelectionThenRestoresSemantics(t *testing.T) {
 	}
 	if m.phase != phaseRunning {
 		t.Error("esc clearing a selection must not cancel the run")
+	}
+	// FRAME-LEVEL: the esc clear path's follow-up refreshView actually WIPED the
+	// spliced highlight — no stuck selection block lingers in the rendered frame.
+	if strings.Contains(m.vp.View(), selectionBgSGR(t, m)) {
+		t.Error("esc-clear must leave no selection highlight (bg SGR) in the rendered frame")
 	}
 
 	// Second esc (no selection, empty input, no queue): today's esc cancels the run.
@@ -709,9 +1060,6 @@ func TestSelectionClearedOnReflowAboveIt(t *testing.T) {
 	if m.sel.active {
 		t.Errorf("selection should be CLEARED after a reflow shifted the content under it (marker %d → %d)", markerLine, afterIdx)
 	}
-	if len(byteRanges(m.vp.GetContent(), m.sel)) != 0 {
-		t.Error("no selection highlight ranges should remain after the reflow-clear")
-	}
 	if strings.Contains(m.vp.View(), selectionBgSGR(t, m)) {
 		t.Error("no selection background highlight should remain after the reflow-clear")
 	}
@@ -761,41 +1109,32 @@ func TestWheelKeepsSelection(t *testing.T) {
 }
 
 // TestSelectionHighlightWrapsSelectedText is the STRONG visibility guard: it
-// asserts the selection background SGR immediately WRAPS the selected glyphs in the
-// rendered viewport — not an empty open+reset pair around unstyled text. A prior
-// bug left SelectedHighlightStyle unset, so the viewport's focused-range pass
-// re-rendered the span with an empty style and wiped the colour; the rendered
-// output was "<open><reset>text<open><reset>" (SGR present but the text NOT inside
-// the block). A presence-only check ("does the SGR byte appear?") passed anyway —
-// this test fails on that bug because it requires the selected text to sit between
-// the open SGR and the reset.
+// asserts the selection background SGR immediately WRAPS the selected glyphs after
+// the app-owned styleSelection splice — not an empty open+reset pair around unstyled
+// text. A presence-only check ("does the SGR byte appear?") would pass on a broken
+// splice that emitted the SGR with the text outside the block; this requires the
+// selected text to sit immediately after the open SGR. It runs styleSelection
+// directly (a pure per-line splice) so a refreshView conversation re-render can't
+// clobber the controlled content. B1 (TestSelectionHighlightOnStyledLaterLine) is
+// the companion guard that exercises the full styled render path through View().
 func TestSelectionHighlightWrapsSelectedText(t *testing.T) {
 	m, _ := selModel(t)
 	// Controlled single-line content: the selected span has no newline, so a correct
-	// highlight must wrap it contiguously (a multi-line span would be split across
-	// per-line ranges and couldn't be matched as one substring).
-	m.vp.SetContent("alpha bravo charlie delta echo")
-	m.vp.SetYOffset(0)
+	// highlight must wrap it contiguously.
+	content := "alpha bravo charlie delta echo"
 	// Select "bravo" — cols [6,11), no trailing space, so the wrapped span equals the
 	// (trailing-trimmed) selectedText.
-	m.sel = selection{active: true, anchorL: 0, anchorC: 6, headL: 0, headC: 11}
-	m.sel.snapshot = selectedText(m.vp.GetContent(), m.sel)
-	applySelectionHighlight(&m)
+	sel := selection{active: true, anchorL: 0, anchorC: 6, headL: 0, headC: 11}
 
-	want := selectedText(m.vp.GetContent(), m.sel)
+	want := selectedText(content, sel)
 	if want != "bravo" {
 		t.Fatalf("setup: selected text = %q, want %q", want, "bravo")
 	}
-	// Full open SGR for the selection style (fg+bg), up to and including the 'm'.
-	probe := m.deps.Theme.Style("selection").Render("X")
-	mIdx := strings.IndexByte(probe, 'm')
-	if mIdx < 0 {
-		t.Fatalf("selection style has no SGR: %q", probe)
-	}
-	openSGR := probe[:mIdx+1]
+	openSGR := openSelectionSGR(t, m)
+	styled := styleSelection(content, sel, m.deps.Theme.Style("selection"))
 
-	if !strings.Contains(m.vp.View(), openSGR+want) {
-		t.Errorf("selection highlight does not wrap the selected text:\n want open SGR %q immediately followed by %q in the rendered view", openSGR, want)
+	if !strings.Contains(styled, openSGR+want) {
+		t.Errorf("selection highlight does not wrap the selected text:\n want open SGR %q immediately followed by %q in the styled content %q", openSGR, want, styled)
 	}
 }
 
@@ -830,19 +1169,20 @@ func TestSelectionSurvivesStreamingDelta(t *testing.T) {
 	if m.stuck != beforeStuck {
 		t.Errorf("streaming delta changed stuck: %v → %v", beforeStuck, m.stuck)
 	}
-	// The highlight is re-applied each refreshView while active: a fresh
-	// byteRanges against the current content is non-empty (the selected span still
-	// exists in the grown content).
-	if len(byteRanges(m.vp.GetContent(), m.sel)) == 0 {
-		t.Error("selection highlight ranges should still be derivable after a delta")
+	// The selection is still derivable after the delta: its visible text is non-empty
+	// and still equals the identity snapshot (the snapshot reflow-clear in refreshView
+	// did NOT fire, so the selection survived the append below it).
+	payload := selectedText(m.vp.GetContent(), m.sel)
+	if payload == "" {
+		t.Error("selection should still carry visible text after a delta")
+	}
+	if payload != m.sel.snapshot {
+		t.Errorf("selectedText %q diverged from snapshot %q after a delta (should be untouched by an append below)", payload, m.sel.snapshot)
 	}
 	// Stronger: the VIEWPORT itself must still carry the highlight after the
-	// SetContent (which clears highlights) → re-apply loop ran in refreshView. The
-	// bubbles viewport doesn't expose its highlight ranges, so assert the rendered
-	// view actually carries the selection BACKGROUND SGR (the "selection" theme
-	// style is now a solid block, NOT reverse video), AND that the recomputed byte
-	// offsets still slice the expected span out of the current content (closing the
-	// clear-then-reapply loop for real).
+	// SetContent → styleSelection splice ran in refreshView. Assert the rendered view
+	// carries the selection BACKGROUND SGR (the "selection" theme style is a solid
+	// block, NOT reverse video).
 	selSGR := selectionBgSGR(t, m)
 	if !strings.Contains(m.vp.View(), selSGR) {
 		t.Errorf("after a streaming delta the rendered viewport should still carry the selection background SGR %q", selSGR)
@@ -850,15 +1190,13 @@ func TestSelectionSurvivesStreamingDelta(t *testing.T) {
 	if strings.Contains(m.vp.View(), "\x1b[7m") {
 		t.Error("the selection highlight must be a solid block, not reverse video")
 	}
-	// byteRanges offsets index the ANSI-STRIPPED content (the viewport contract), so
-	// slicing the stripped form recovers the same first-line span selectedText
-	// reports — the recompute-against-current-content path is intact.
-	ranges := byteRanges(m.vp.GetContent(), m.sel)
-	stripped := ansi.Strip(m.vp.GetContent())
-	got := strings.TrimRight(stripped[ranges[0][0]:ranges[0][1]], " ")
-	wantFirstLine := strings.SplitN(selectedText(m.vp.GetContent(), m.sel), "\n", 2)[0]
-	if got == "" || got != wantFirstLine {
-		t.Errorf("recomputed range slices %q, want the selectedText first line %q", got, wantFirstLine)
+	// The styleSelection splice over the current content wraps the selected span: the
+	// first selected line's text sits immediately after the open SGR in the rendered
+	// view (closing the splice-against-current-content path for real).
+	open := openSelectionSGR(t, m)
+	wantFirstLine := strings.SplitN(payload, "\n", 2)[0]
+	if wantFirstLine != "" && !strings.Contains(m.vp.View(), open+wantFirstLine) {
+		t.Errorf("styled view should wrap the first selected line %q immediately after the open SGR", wantFirstLine)
 	}
 }
 
@@ -892,6 +1230,11 @@ func TestOpeningOverlayClearsSelection(t *testing.T) {
 	if !m.sel.active {
 		t.Fatal("precondition: a selection should be active")
 	}
+	// PRECONDITION: the selection is actually RENDERED (the bg SGR splice is in the
+	// frame) so the post-clear absence assertion is meaningful.
+	if !strings.Contains(m.vp.View(), selectionBgSGR(t, m)) {
+		t.Fatal("precondition: the active selection should be rendered (bg SGR present) before the overlay opens")
+	}
 
 	// "?" on an empty prompt opens help.
 	m, _ = pressKey(m, tea.KeyPressMsg{Code: '?'})
@@ -900,6 +1243,12 @@ func TestOpeningOverlayClearsSelection(t *testing.T) {
 	}
 	if m.sel.active {
 		t.Error("opening an overlay mid-selection should clear the selection")
+	}
+	// FRAME-LEVEL: opening the overlay routes through the Update non-selectable
+	// chokepoint, whose explicit refreshView must repaint the UNSTYLED content — no
+	// stuck selection block lingers in the conversation viewport frame.
+	if strings.Contains(m.vp.View(), selectionBgSGR(t, m)) {
+		t.Error("opening an overlay must leave no selection highlight (bg SGR) in the rendered frame")
 	}
 }
 
@@ -1648,8 +1997,13 @@ func TestKeyboardScrollKeepsSelection(t *testing.T) {
 			if !m.sel.active {
 				t.Errorf("%s scroll must not clear the selection", k.name)
 			}
-			if len(byteRanges(m.vp.GetContent(), m.sel)) == 0 {
-				t.Errorf("%s scroll left the selection highlight underivable", k.name)
+			// The highlight is content-level (styleSelection), so it stays rendered even
+			// if the scroll moved the selected line off-screen — assert against the
+			// styled content, not the visible viewport view (visibility-independent, like
+			// the old byteRanges check).
+			styled := styleSelection(m.vp.GetContent(), m.sel, m.deps.Theme.Style("selection"))
+			if !strings.Contains(styled, selectionBgSGR(t, m)) {
+				t.Errorf("%s scroll left the selection highlight unrendered (bg SGR absent in styled content)", k.name)
 			}
 		})
 	}
@@ -2063,7 +2417,47 @@ func TestDoubleClickIdentitySnapshotSurvivesRefresh(t *testing.T) {
 	if m.sel.anchorC != anchorC || m.sel.headC != headC {
 		t.Errorf("delta moved the word selection columns: [%d,%d) → [%d,%d)", anchorC, headC, m.sel.anchorC, m.sel.headC)
 	}
-	if len(byteRanges(m.vp.GetContent(), m.sel)) == 0 {
-		t.Error("the word-selection highlight should still be derivable after the refresh")
+	styled := styleSelection(m.vp.GetContent(), m.sel, m.deps.Theme.Style("selection"))
+	if !strings.Contains(styled, selectionBgSGR(t, m)) {
+		t.Error("the word-selection highlight should still be rendered after the refresh (bg SGR absent)")
+	}
+}
+
+// TestMouseDebugOverlay covers the gated MECATUI_DEBUG_MOUSE diagnostic: with
+// DebugMouse on, a mouse press sets m.mouseDebug to the formatted line (raw coords +
+// content mapping) and the footer surfaces it (highest priority — over the phase
+// arms). With DebugMouse off, no press sets it and the footer shows the normal
+// status. Default OFF, zero cost when unset.
+func TestMouseDebugOverlay(t *testing.T) {
+	// Off by default: a press records nothing and the footer shows the normal status.
+	m, _ := selModel(t)
+	top := convTopRow(m)
+	m, _ = pressMouse(m, tea.MouseLeft, 3, top)
+	if m.mouseDebug != "" {
+		t.Errorf("DebugMouse off: a press must not set mouseDebug, got %q", m.mouseDebug)
+	}
+	if got := stripANSIstr(m.renderFooter()); strings.Contains(got, "MOUSE raw") {
+		t.Errorf("DebugMouse off: footer must not show the mouse diagnostic, got %q", got)
+	}
+
+	// mouseDebugLine formats the expected shape directly.
+	m2, _ := selModel(t)
+	m2.deps.DebugMouse = true
+	mo := tea.Mouse{X: 7, Y: convTopRow(m2) + 1}
+	line := m2.mouseDebugLine(mo)
+	for _, want := range []string{"MOUSE raw x=7", "y=", "top=", "yoff=", "vph=", "map ok="} {
+		if !strings.Contains(line, want) {
+			t.Errorf("mouseDebugLine = %q, missing %q", line, want)
+		}
+	}
+
+	// With DebugMouse on, a press sets m.mouseDebug and the footer surfaces it (over
+	// the idle "ready" status).
+	m2, _ = pressMouse(m2, tea.MouseLeft, 7, convTopRow(m2)+1)
+	if !strings.Contains(m2.mouseDebug, "MOUSE raw") {
+		t.Errorf("DebugMouse on: a press should set mouseDebug, got %q", m2.mouseDebug)
+	}
+	if got := stripANSIstr(m2.renderFooter()); !strings.Contains(got, "MOUSE raw") {
+		t.Errorf("DebugMouse on: footer should surface the mouse diagnostic, got %q", got)
 	}
 }

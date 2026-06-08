@@ -223,6 +223,13 @@ func (m Model) renderFooter() string {
 		}
 	}
 
+	// The mouse-debug overlay (MECATUI_DEBUG_MOUSE=1) takes the footer-left at the
+	// HIGHEST priority — over every phase arm above — so the live raw-coords/mapping
+	// line stays visible even during a drag (the gesture that the diagnostic targets).
+	if m.deps.DebugMouse && m.mouseDebug != "" {
+		left = m.deps.Theme.Style("muted").Render(m.mouseDebug)
+	}
+
 	// The full decompressed chord list now lives in the "?" help overlay, so the
 	// footer carries only the two entry points and quit. "/ commands" is ALWAYS
 	// shown: the TUI ships built-in client-side commands (/clear, /help, and the

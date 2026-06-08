@@ -14,8 +14,8 @@ import (
 // the normal -race suite) so it never runs in CI and never touches the working
 // tree by default. It is fully deterministic: no Tick, no goroutine, no
 // wall-clock — it sets crafted viewport content, points the selection at a known
-// span, applies the highlight through the production applySelectionHighlight
-// path, and captures m.View().
+// span, applies the highlight through the production styleSelection splice, and
+// captures m.View().
 //
 // Run it with:
 //
@@ -55,7 +55,7 @@ func TestEmitSelectionSamples(t *testing.T) {
 			name: "multiline-code-empty-prose",
 			body: "x := compute()\n\nNow the prose explains it.",
 			// Span all three logical lines (code → empty → prose); the empty interior
-			// line is a deliberate gap (known limitation).
+			// line now paints ONE styled cell (styleSelection), so the run is solid.
 			sel: selection{active: true, anchorL: 0, anchorC: 0, headL: 2, headC: 26},
 		},
 		{
@@ -80,19 +80,15 @@ func TestEmitSelectionSamples(t *testing.T) {
 		for _, sc := range scenarios {
 			m, _ := selModel(t)
 			m.deps.Theme = th
-			// Re-point BOTH viewport highlight styles at the per-sample theme (model.go
-			// wires them once at New; this test swaps the theme after construction). Both
-			// matter: the viewport renders the focused range with SelectedHighlightStyle
-			// on top of HighlightStyle, so leaving the latter at the default-theme value
-			// would mis-colour (or, if empty, wipe) the highlight.
-			m.vp.HighlightStyle = th.Style("selection")
-			m.vp.SelectedHighlightStyle = th.Style("selection")
-			m.vp.SetContent(sc.body)
-			m.vp.SetYOffset(0)
 			m.phase = phaseIdle
 			m.sel = sc.sel
-			m.sel.snapshot = selectedText(m.vp.GetContent(), m.sel)
-			applySelectionHighlight(&m)
+			// The highlight is now an app-owned splice (styleSelection) over the content,
+			// NOT the viewport's native SetHighlights — so paint the selection style into
+			// the body BEFORE SetContent (mirroring refreshView's production path).
+			m.sel.snapshot = selectedText(sc.body, m.sel)
+			styled := styleSelection(sc.body, m.sel, th.Style("selection"))
+			m.vp.SetContent(styled)
+			m.vp.SetYOffset(0)
 
 			view := m.View().Content // tea.View struct; Content is the rendered ANSI
 			path := filepath.Join(outDir, "selection-sample-"+name+"-"+sc.name+".txt")

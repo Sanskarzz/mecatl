@@ -103,6 +103,14 @@ type Deps struct {
 	// that strip OSC52 or users who prefer native selection.
 	NoMouse bool
 
+	// DebugMouse turns on a footer diagnostic overlay (env MECATUI_DEBUG_MOUSE=1):
+	// on every mouse press/motion the footer-left is overridden with the raw mouse
+	// coordinates and their content mapping (top=convTopRow, yoff, viewport height,
+	// and the screenToContent result) — the durable instrument for diagnosing
+	// selection/coordinate issues (it is what surfaced the highlight-on-wrong-line
+	// bug). Default OFF (zero cost when unset); main.go reads the env var.
+	DebugMouse bool
+
 	// onPhase is a test-only observer (nil in production, unexported so no external
 	// caller can set it) invoked by Update on the SINGLE update goroutine after each
 	// reduced message, with the model's current phase. The teatest cases use it to
@@ -304,11 +312,27 @@ type Model struct {
 	// sel is the in-app text-selection state (mouse-drag select + copy over the
 	// conversation viewport). Zero value = inactive. Its coordinates are LOGICAL
 	// content positions (line index + grapheme column into the ansi-stripped line),
-	// so the highlight survives scrolling and a streaming re-render — the byte
-	// ranges are recomputed from the CURRENT content each frame (see
-	// applySelectionHighlight / refreshView). Active only on the alt screen; an
-	// overlay/modal/help blocks a new selection and clears an active one.
+	// so the highlight survives scrolling and a streaming re-render — the selection
+	// style is spliced into the CURRENT content each frame (see styleSelection /
+	// refreshView). Active only on the alt screen; an overlay/modal/help blocks a new
+	// selection and clears an active one.
 	sel selection
+
+	// mouseDebug is the last formatted mouse-diagnostic line (see mouseDebugLine),
+	// rendered in the footer only when Deps.DebugMouse is set. Set at the top of
+	// onMousePress/onMouseMotion when the diagnostic is enabled; empty otherwise.
+	mouseDebug string
+
+	// selBase is the UNSTYLED content the active selection's highlight is spliced
+	// onto (styleSelection) — the conversation render WITHOUT any selection styling.
+	// It is captured the moment a selection becomes active (a press / word / line
+	// gesture) and refreshed by refreshView (a full conversation re-render). A pure
+	// GEOMETRY change (drag / edge-autoscroll, via snapshotSelection) re-splices THIS
+	// base in place rather than re-rendering the whole conversation — so the highlight
+	// follows the new span without a content rebuild and the viewport's scroll/line
+	// geometry is undisturbed (matching the old in-place highlight). Empty when no
+	// selection is active.
+	selBase string
 }
 
 // New builds the root model from deps. It wires the widgets but does not connect;
@@ -327,22 +351,16 @@ func New(deps Deps) Model {
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(th.Style("spinner")))
 
 	vp := viewport.New()
-	// In-app text-selection highlight style. The viewport re-applies it on every
-	// render (it survives scroll/stream), and SetContent clears the ranges — so the
-	// ranges are re-applied after each refreshView (applySelectionHighlight) while a
-	// selection is active. The "selection" style is a solid high-contrast block
-	// (luminance-derived foreground), legible on dark and light themes alike.
-	//
-	// BOTH HighlightStyle and SelectedHighlightStyle must be set to the SAME style.
-	// SetHighlights always focuses the nearest match (hiIdx >= 0), and the viewport
-	// renders that focused range with SelectedHighlightStyle ON TOP of HighlightStyle.
-	// We have no "focused" sub-selection concept (it's one drag selection), so leaving
-	// SelectedHighlightStyle empty makes its second pass re-render the focused span
-	// with an empty style — silently WIPING the highlight on it (for a single-line
-	// selection that's the whole thing → invisible). Setting both identical keeps the
-	// selection a uniform block.
-	vp.HighlightStyle = th.Style("selection")
-	vp.SelectedHighlightStyle = th.Style("selection")
+	// In-app text-selection highlight is rendered by the APP (styleSelection splices
+	// the "selection" theme style into the content lines inside refreshView), NOT the
+	// viewport's native SetHighlights/HighlightStyle. The native highlighter mis-placed
+	// the block on ANSI-styled (glamour) content — its parseMatches detects newlines at
+	// stripped offsets indexed into the original ANSI bytes, so the highlight landed on
+	// the wrong line (see styleSelection in selection.go). Owning the splice ourselves
+	// is the durable fix and removes the HighlightStyle/SelectedHighlightStyle wiring
+	// (and its EnsureVisible scroll-jump) entirely. The "selection" style is a solid
+	// high-contrast block (luminance-derived foreground), legible on dark and light
+	// themes alike — styleSelection reads it via m.deps.Theme.Style("selection").
 
 	return Model{
 		deps:  deps,
