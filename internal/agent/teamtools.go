@@ -109,7 +109,9 @@ func (sendMessageTool) Spec() tool.ToolSpec {
 		Description: "Send a direct message to another team member by name. The message is " +
 			"delivered to that member's inbox and read at the start of its next turn. Use it to " +
 			"share a finding, ask a peer to do something, challenge a hypothesis, or report back " +
-			"to the lead. The recipient must be a current team member.",
+			"to the lead. The recipient must be a current team member. This returns as soon as " +
+			"the message is queued; the peer reads it on its NEXT turn, so don't block waiting " +
+			"for a reply — continue your own work.",
 		Schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -159,7 +161,9 @@ func (addTaskTool) Spec() tool.ToolSpec {
 		Description: "Add a task to the shared team task list. Optionally declare dependencies on " +
 			"other task ids that must complete first — a task with unmet dependencies cannot be " +
 			"claimed until they finish. Returns the new task id. Typically the lead breaks work " +
-			"into tasks this way; any member may add follow-up tasks it discovers.",
+			"into tasks this way; any member may add follow-up tasks it discovers. Call ListTasks " +
+			"to see existing task ids before declaring deps. The returned id is what claimants " +
+			"pass to ClaimTask/CompleteTask.",
 		Schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -214,7 +218,8 @@ func (claimTaskTool) Spec() tool.ToolSpec {
 			"'task_id', claims that specific task (fails if it is already claimed or blocked by an " +
 			"unfinished dependency). With no 'task_id', claims the next available unclaimed, " +
 			"unblocked task. Returns the claimed task's id and description, or reports that nothing " +
-			"is claimable.",
+			"is claimable. After claiming, do the work, RecordFinding, then CompleteTask with the " +
+			"same id.",
 		Schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -263,7 +268,8 @@ func (completeTaskTool) Spec() tool.ToolSpec {
 	return tool.ToolSpec{
 		Name: "CompleteTask",
 		Description: "Mark a task you have claimed as complete. This unblocks any task that depends " +
-			"on it. You may only complete a task that is in-progress and assigned to you.",
+			"on it. You may only complete a task that is in-progress and assigned to you. " +
+			"RecordFinding BEFORE completing — completing a task does not capture your conclusions.",
 		Schema: json.RawMessage(`{
   "type": "object",
   "properties": {

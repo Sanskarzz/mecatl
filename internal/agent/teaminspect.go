@@ -74,9 +74,11 @@ func NewInspectMemberTool(store port.SessionStore) tool.Tool {
 func (*InspectMemberTool) Spec() tool.ToolSpec {
 	return tool.ToolSpec{
 		Name: inspectMemberToolName,
-		Description: "Read one team member's full transcript by team id and member name. Use ONLY " +
-			"when the team's summary is insufficient and you need a specific member's detailed work. " +
-			"Returns a bounded rendering of that member's conversation.",
+		Description: "Read one team member's full transcript by team id and member name. Each " +
+			"call folds that member's transcript into this conversation and consumes context " +
+			"budget, so prefer the team's summary and use this ONLY when the summary is " +
+			"insufficient and you need a specific member's detailed work. Returns a bounded " +
+			"rendering of that member's conversation.",
 		Schema: inspectMemberSchema,
 	}
 }

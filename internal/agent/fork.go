@@ -250,9 +250,12 @@ func NewForkTool(childEngine *Engine, forker tool.WorkspaceForker, opts ...ForkO
 func (*ForkTool) Spec() tool.ToolSpec {
 	return tool.ToolSpec{
 		Name: forkToolName,
-		Description: "Fan out several independent tasks to run in PARALLEL, each in its own " +
-			"isolated forked workspace and fresh context, then join their results into one " +
-			"summary. Use to explore multiple approaches at once or to split independent work. " +
+		Description: "Fan out several independent tasks (up to 8) to run in PARALLEL, each in " +
+			"its own isolated forked workspace and fresh context, then join their results into " +
+			"one summary. Use to explore multiple approaches at once or to split independent " +
+			"work. For a single task just do it yourself or use Task; for work where the " +
+			"branches must coordinate or share state, use Team — Fork branches are fully " +
+			"independent and never communicate. " +
 			"Each branch runs in an isolated fork, so a branch may IMPLEMENT by editing, " +
 			"writing files, and running shell commands (Bash), not just explore — its changes " +
 			"land in its own fork and never touch this workspace (Bash runs with the fork as its " +

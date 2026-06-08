@@ -212,6 +212,9 @@ func (*TeamTool) Spec() tool.ToolSpec {
 			"over many rounds and can consume a very large number of tokens. Use it only when " +
 			"the work genuinely splits into independent specialist roles. For a single focused " +
 			"investigation use Task; for something you can do directly, do it directly.\n\n" +
+			"Keep the roster small (2-4 members is typical). In each member's role, tell it to " +
+			"RecordFinding as it works and to message the lead when it is done — findings are " +
+			"how the lead builds the consolidated report.\n\n" +
 			"Members are READ-ONLY by default: they inspect, build, and test in an isolated " +
 			"throwaway git worktree with a full shell (git log/show, cat, build, test) but " +
 			"CANNOT edit files. Set mutating: true only for a member that must write code (it " +

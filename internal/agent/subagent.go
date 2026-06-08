@@ -395,11 +395,13 @@ func NewTaskTool(childEngine *Engine, opts ...TaskOption) tool.Tool {
 func (t *TaskTool) Spec() tool.ToolSpec {
 	desc := "Delegate a focused read-only investigation — 'search → summarize', " +
 		"'read N files → report findings', 'check the git history' — to a subagent with " +
-		"its own fresh context. Returns only the subagent's final summary. Use when " +
-		"exploration would bloat the main context. The subagent cannot see this " +
-		"conversation, so put everything it needs in `prompt`. It runs read-only tools " +
-		"(Read/Grep/Glob) PLUS a full shell (git log/show, cat, build, test) in an " +
-		"isolated, throwaway git worktree — so it can inspect history and run commands, " +
+		"its own fresh context. Returns only the subagent's final summary. Use when the " +
+		"investigation is multi-step or would bloat the main context; don't delegate a " +
+		"single quick read you can do yourself with Read/Grep. You may issue several Task " +
+		"calls in ONE turn to investigate independent questions concurrently. The subagent " +
+		"cannot see this conversation, so put everything it needs in `prompt`. It runs " +
+		"read-only tools (Read/Grep/Glob) PLUS a full shell (git log/show, cat, build, test) " +
+		"in an isolated, throwaway git worktree — so it can inspect history and run commands, " +
 		"but its changes are DISCARDED, it cannot edit the project's files (no Edit/Write), " +
 		"and it cannot delegate further."
 	desc += t.agentEnumeration()
