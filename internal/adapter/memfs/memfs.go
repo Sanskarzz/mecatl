@@ -25,6 +25,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
+
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
@@ -126,14 +128,21 @@ func (f *FileSystem) Stat(_ context.Context, p string) (tool.FileInfo, error) {
 	}, nil
 }
 
-// Glob returns session-relative paths matching the shell-style pattern, in
-// deterministic (sorted) order. Matching uses path.Match against each stored
-// key.
+// Glob returns session-relative paths matching the glob pattern, in
+// deterministic (sorted) order. The pattern supports the "**" globstar (matching
+// across "/" recursively) in addition to "*", "?", "[…]" and "{…}". Matching uses
+// doublestar.Match against each stored key. This mirrors the osfs adapter's
+// globstar support so the in-memory test fabric and the real filesystem agree;
+// the shared fsconformance suite pins both.
 func (f *FileSystem) Glob(_ context.Context, pattern string) ([]string, error) {
-	cleaned, err := cleanPath(pattern)
-	if err != nil {
-		return nil, err
+	// Same normalization as osfs: strip a leading "/" and any leading "./" so an
+	// absolute/leading-slash or "./"-prefixed pattern matches the root-relative,
+	// slash-separated stored keys; empty/"." matches nothing.
+	pat := normalizeGlobPattern(pattern)
+	if pat == "" {
+		return nil, nil
 	}
+
 	f.mu.RLock()
 	keys := make([]string, 0, len(f.files))
 	for k := range f.files {
@@ -143,8 +152,10 @@ func (f *FileSystem) Glob(_ context.Context, pattern string) ([]string, error) {
 
 	var out []string
 	for _, k := range keys {
-		ok, merr := path.Match(cleaned, k)
+		ok, merr := doublestar.Match(pat, k)
 		if merr != nil {
+			// doublestar.Match returns ErrBadPattern for a malformed pattern;
+			// surface it like the old path.Match error.
 			return nil, merr
 		}
 		if ok {
@@ -153,6 +164,22 @@ func (f *FileSystem) Glob(_ context.Context, pattern string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// normalizeGlobPattern applies the leniency the old filepath.Join-based osfs Glob
+// had: it strips a leading "/" and any leading "./" segments so callers passing
+// "/**/*.go" or "./**/*.go" get the same result as "**/*.go". An empty or "."
+// pattern normalizes to "" (caller treats it as match-nothing).
+func normalizeGlobPattern(pattern string) string {
+	pat := strings.TrimPrefix(pattern, "/")
+	for strings.HasPrefix(pat, "./") {
+		pat = pat[2:]
+	}
+	pat = strings.TrimPrefix(pat, "/")
+	if pat == "." {
+		return ""
+	}
+	return pat
 }
 
 // cleanPath normalizes a session-relative path to a clean, slash-separated key

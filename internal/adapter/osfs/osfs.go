@@ -21,9 +21,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bmatcuk/doublestar/v4"
 
 	"github.com/stacklok/mecatl/internal/tool"
 )
@@ -165,42 +168,73 @@ func (f *FileSystem) Stat(_ context.Context, path string) (tool.FileInfo, error)
 	return toFileInfo(fi), nil
 }
 
-// Glob returns session-relative paths matching the shell-style pattern. The
-// pattern itself is interpreted relative to the root; matches that resolve
-// outside the root are discarded.
+// Glob returns session-relative paths matching the glob pattern, sorted. The
+// pattern supports the "**" globstar (matching across directory separators
+// recursively) in addition to the usual shell-style "*", "?", "[…]" and "{…}"
+// metacharacters. The pattern is interpreted relative to the root; matches that
+// resolve outside the root are discarded.
 func (f *FileSystem) Glob(_ context.Context, pattern string) ([]string, error) {
-	// Validate the pattern's non-magic root does not escape.
-	absPattern := filepath.Join(f.root, filepath.FromSlash(pattern))
-	matches, err := filepath.Glob(absPattern)
+	// doublestar patterns are root-relative, slash-separated paths. normalizeGlobPattern
+	// preserves the old filepath.Join leniency (silently absorbing a leading "/"
+	// or "./", which would otherwise be an invalid absolute pattern). An empty or
+	// "." pattern normalizes to "" → match-nothing; the Glob tool already rejects
+	// "" upstream, but stay robust here rather than globbing the entire root.
+	pat := normalizeGlobPattern(filepath.ToSlash(pattern))
+	if pat == "" {
+		return nil, nil
+	}
+
+	// Walk the os.Root-confined fs.FS. f.r.FS() (Go 1.24+) returns an fs.FS that
+	// refuses to traverse any symlink that would leave the root, so escaping
+	// intermediate-directory components are rejected by construction — closing
+	// the filename-enumeration leak filepath.Glob had. WithNoFollow keeps the
+	// walk from descending into symlinked directories.
+	var matches []string
+	err := doublestar.GlobWalk(f.r.FS(), pat, func(p string, d fs.DirEntry) error {
+		// Drop leaf symlink matches to preserve the previous behavior exactly: a
+		// symlink inside the root can still target a file outside it, and Glob
+		// must not be a channel for following links out of the workspace. This
+		// mirrors the old Lstat + fs.ModeSymlink drop.
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		// A bare "**" matches the root itself as "."; surfacing the workspace root
+		// to the model is meaningless, so drop it (filepath.Glob never produced it).
+		if p == "." {
+			return nil
+		}
+		// p is already root-relative and slash-separated.
+		matches = append(matches, p)
+		return nil
+	}, doublestar.WithNoFollow())
 	if err != nil {
+		// doublestar returns ErrBadPattern (wrapping path.ErrBadPattern) for a
+		// malformed pattern; surface it like filepath.Glob's ErrBadPattern.
+		// IO errors are not requested (no WithFailOnIOErrors), matching the old
+		// lenient "skip unreadable" behavior.
 		return nil, err
 	}
-	rels := make([]string, 0, len(matches))
-	for _, m := range matches {
-		rel, err := f.toRel(m)
-		if err != nil {
-			continue
-		}
-		// Confine matches the same way every other operation is confined: Lstat
-		// THROUGH the os.Root. This drops both (a) leaf symlinks — a symlink
-		// inside the root can still target a file outside it, and Glob must not
-		// be a channel for following links out of the workspace — and (b) matches
-		// reachable only via a symlinked intermediate directory component that
-		// leaves the root, which a raw os.Lstat(m) on the literal match path
-		// would NOT catch (filepath.Glob does not resolve such components, so the
-		// match looks like an in-root regular file). os.Root refuses to traverse
-		// an escaping component, so the Lstat errors and the match is dropped —
-		// closing an out-of-root filename-enumeration leak.
-		fi, lerr := f.r.Lstat(rel)
-		if lerr != nil {
-			continue
-		}
-		if fi.Mode()&fs.ModeSymlink != 0 {
-			continue
-		}
-		rels = append(rels, rel)
+	// filepath.Glob returned sorted matches and the contract advertises sorted
+	// output; GlobWalk visits in directory order, so sort to preserve it.
+	sort.Strings(matches)
+	return matches, nil
+}
+
+// normalizeGlobPattern applies the leniency the old filepath.Join-based Glob
+// had: it strips a leading "/" and any leading "./" segments so callers passing
+// "/**/*.go" or "./**/*.go" get the same result as "**/*.go". An empty or "."
+// pattern normalizes to "" (the caller treats it as match-nothing). The input
+// is expected slash-separated (callers pass filepath.ToSlash(pattern)).
+func normalizeGlobPattern(pattern string) string {
+	pat := strings.TrimPrefix(pattern, "/")
+	for strings.HasPrefix(pat, "./") {
+		pat = pat[2:]
 	}
-	return rels, nil
+	pat = strings.TrimPrefix(pat, "/")
+	if pat == "." {
+		return ""
+	}
+	return pat
 }
 
 // toRel converts an absolute path under root into a slash-separated

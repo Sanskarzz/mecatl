@@ -21,9 +21,12 @@ When NOT to use:
 
 Arguments:
 - pattern (required): a shell-style glob, e.g. "*.go", "cmd/*/main.go".
+  "*" matches within a single path segment; "**" matches across directories
+  recursively, so "**/*.go" finds every Go file at any depth under the root.
 
 Example:
   {"pattern": "internal/adapter/*/*.go"}
+  {"pattern": "**/*.go"}
 
 Limits:
 - Returns at most 1000 paths per call, sorted; beyond that the list is truncated

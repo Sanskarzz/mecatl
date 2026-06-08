@@ -10,6 +10,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.3
 	github.com/adrg/xdg v0.5.3
 	github.com/anthropics/anthropic-sdk-go v1.47.0
+	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/exp/teatest/v2 v2.0.0-20260527151214-009e6338d40d
 	github.com/gofrs/flock v0.13.0

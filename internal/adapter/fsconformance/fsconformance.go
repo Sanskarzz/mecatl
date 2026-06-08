@@ -78,6 +78,36 @@ func Run(t *testing.T, newWS func(t *testing.T) tool.Workspace) {
 		}
 	})
 
+	t.Run("glob globstar recurses", func(t *testing.T) {
+		ws := newWS(t)
+		// Files at varying depths plus a non-.go file. "**/*.go" must match the
+		// Go files at every depth and exclude the non-.go file. This pins the
+		// "**" globstar capability on every adapter (osfs AND memfs) and prevents
+		// the two from diverging again.
+		for _, p := range []string{"top.go", "x/y/z.go", "x/notes.md"} {
+			if err := ws.Write(ctx, p, []byte("z")); err != nil {
+				t.Fatalf("Write %s: %v", p, err)
+			}
+		}
+		got, err := ws.Glob(ctx, "**/*.go")
+		if err != nil {
+			t.Fatalf("Glob(**/*.go): %v", err)
+		}
+		set := map[string]bool{}
+		for _, m := range got {
+			set[m] = true
+		}
+		if !set["top.go"] {
+			t.Errorf("Glob(**/*.go) = %v, missing top-level top.go", got)
+		}
+		if !set["x/y/z.go"] {
+			t.Errorf("Glob(**/*.go) = %v, missing depth-2 x/y/z.go", got)
+		}
+		if set["x/notes.md"] {
+			t.Errorf("Glob(**/*.go) = %v, surfaced non-Go x/notes.md", got)
+		}
+	})
+
 	t.Run("path escape rejected", func(t *testing.T) {
 		ws := newWS(t)
 		escapes := []string{

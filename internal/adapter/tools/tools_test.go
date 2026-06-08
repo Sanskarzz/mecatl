@@ -444,6 +444,30 @@ func TestGlobNoMatch(t *testing.T) {
 	}
 }
 
+// TestGlobGlobstar drives the model-facing "**" capability end-to-end through
+// GlobTool.Execute on a memfs workspace. It is the e2e gate proving an agent can
+// recurse across directories.
+func TestGlobGlobstar(t *testing.T) {
+	ws := memfs.NewWorkspace("/")
+	seed(t, ws, "top.go", "package main\n")
+	seed(t, ws, "a/mid.go", "package a\n")
+	seed(t, ws, "a/b/deep.go", "package b\n")
+	seed(t, ws, "a/b/notes.md", "ignore me\n")
+
+	res := exec(t, GlobTool{}, call(t, "Glob", map[string]any{"pattern": "**/*.go"}), ws)
+	if res.IsError {
+		t.Fatalf("Glob errored: %s", res.Content)
+	}
+	for _, want := range []string{"top.go", "a/b/deep.go"} {
+		if !strings.Contains(res.Content, want) {
+			t.Errorf("Glob(**/*.go) result = %q, missing %q", res.Content, want)
+		}
+	}
+	if strings.Contains(res.Content, "notes.md") {
+		t.Errorf("Glob(**/*.go) result = %q, surfaced non-Go file", res.Content)
+	}
+}
+
 func TestWebFetchStub(t *testing.T) {
 	ws := memfs.NewWorkspace("/")
 	res := exec(t, WebFetchTool{}, call(t, "WebFetch", map[string]any{"url": "https://example.com"}), ws)

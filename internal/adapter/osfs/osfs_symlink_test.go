@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -120,23 +121,29 @@ func TestGlobAndGrepDoNotFollowEscapingSymlinks(t *testing.T) {
 	ws, _ := newSymlinkWorkspace(t)
 	ctx := context.Background()
 
-	// "evil" is a symlink to an outside file; Glob("*") must not list it.
-	matches, err := ws.Glob(ctx, "*")
-	if err != nil {
-		t.Fatalf("Glob: %v", err)
-	}
-	for _, m := range matches {
-		if m == "evil" || m == "up" {
-			t.Errorf("Glob surfaced escaping symlink %q", m)
+	// "evil" is a symlink to an outside file; neither a single-segment glob nor
+	// the recursive "**" globstar may list it or anything reached through "up".
+	for _, pattern := range []string{"*", "**/*", "**"} {
+		matches, err := ws.Glob(ctx, pattern)
+		if err != nil {
+			t.Fatalf("Glob(%q): %v", pattern, err)
+		}
+		for _, m := range matches {
+			if m == "evil" || m == "up" || strings.HasPrefix(m, "up/") {
+				t.Errorf("Glob(%q) surfaced escaping symlink %q", pattern, m)
+			}
 		}
 	}
 
-	// Grep across the tree must not read the outside target's content.
-	hits, err := ws.Grep(ctx, "top secret", "")
-	if err != nil {
-		t.Fatalf("Grep: %v", err)
-	}
-	if len(hits) != 0 {
-		t.Errorf("Grep followed escaping symlink, got %d hits", len(hits))
+	// Grep across the tree, and Grep driven by a "**" pathGlob, must not read the
+	// outside target's content.
+	for _, pathGlob := range []string{"", "**/*"} {
+		hits, err := ws.Grep(ctx, "top secret", pathGlob)
+		if err != nil {
+			t.Fatalf("Grep(pathGlob=%q): %v", pathGlob, err)
+		}
+		if len(hits) != 0 {
+			t.Errorf("Grep(pathGlob=%q) followed escaping symlink, got %d hits", pathGlob, len(hits))
+		}
 	}
 }

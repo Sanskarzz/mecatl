@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -331,6 +332,99 @@ func TestGrep(t *testing.T) {
 	}
 }
 
+// TestGlobGlobstarRecurses asserts the "**" globstar crosses directory
+// separators, finding files at every depth. The old filepath.Glob delegation
+// could only match within a single path segment, so a recursive "**/*.go" found
+// only the lucky single-segment depth (it matched depth-2 "a/mid.go" but missed
+// depth-1 "top.go" and depth-3 "a/b/deep.go").
+func TestGlobGlobstarRecurses(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	ws, err := osfs.NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+
+	// Files at depths 1, 2 and 3.
+	want := []string{
+		"top.go",
+		"a/mid.go",
+		"a/b/deep.go",
+	}
+	other := []string{
+		"a/notes.md",
+		"a/b/data.txt",
+	}
+	for _, p := range append(append([]string{}, want...), other...) {
+		if err := ws.Write(ctx, p, []byte("package x\n")); err != nil {
+			t.Fatalf("Write %s: %v", p, err)
+		}
+	}
+
+	got, err := ws.Glob(ctx, "**/*.go")
+	if err != nil {
+		t.Fatalf("Glob(**/*.go): %v", err)
+	}
+	gotSet := map[string]bool{}
+	for _, m := range got {
+		gotSet[m] = true
+	}
+	for _, w := range want {
+		if !gotSet[w] {
+			t.Errorf("Glob(**/*.go) = %v, missing %q", got, w)
+		}
+	}
+	// The deepest file is the canary the old single-segment behavior would miss.
+	if !gotSet["a/b/deep.go"] {
+		t.Errorf("Glob(**/*.go) did not recurse to depth 3; got %v", got)
+	}
+	// Non-.go files must not appear.
+	for _, o := range other {
+		if gotSet[o] {
+			t.Errorf("Glob(**/*.go) surfaced non-Go file %q", o)
+		}
+	}
+}
+
+// TestGrepGlobstarPathGlob proves Grep is fixed transitively: its pathGlob
+// funnels through FileSystem.Glob, so a "**" pattern now selects files at any
+// depth.
+func TestGrepGlobstarPathGlob(t *testing.T) {
+	ctx := context.Background()
+	ws, _ := osfs.NewWorkspace(t.TempDir())
+	files := map[string]string{
+		"top.go":      "package main\nfunc Foo() {}\n",
+		"a/mid.go":    "package a\nfunc Foo() {}\n",
+		"a/b/deep.go": "package b\nfunc Foo() {}\n",
+		"a/b/skip.md": "Foo in markdown\n",
+	}
+	for p, c := range files {
+		if err := ws.Write(ctx, p, []byte(c)); err != nil {
+			t.Fatalf("Write %s: %v", p, err)
+		}
+	}
+
+	hits, err := ws.Grep(ctx, "func Foo", "**/*.go")
+	if err != nil {
+		t.Fatalf("Grep(**/*.go): %v", err)
+	}
+	if len(hits) != 3 {
+		t.Errorf("Grep(func Foo, **/*.go) = %d hits (%v), want 3", len(hits), hits)
+	}
+	var sawDeep bool
+	for _, h := range hits {
+		if h.Path == "a/b/deep.go" {
+			sawDeep = true
+		}
+		if strings.HasSuffix(h.Path, ".md") {
+			t.Errorf("Grep(**/*.go) matched non-Go file %q", h.Path)
+		}
+	}
+	if !sawDeep {
+		t.Errorf("Grep(**/*.go) did not reach depth-3 file; got %v", hits)
+	}
+}
+
 func TestGrepInvalidPattern(t *testing.T) {
 	ctx := context.Background()
 	ws, _ := osfs.NewWorkspace(t.TempDir())
@@ -390,7 +484,10 @@ func TestGlobDoesNotLeakThroughSymlink(t *testing.T) {
 		t.Fatalf("symlink leaf: %v", err)
 	}
 
-	for _, pattern := range []string{"link/*", "*", "*.txt"} {
+	// The "**" globstar must also refuse to cross an escaping symlink: a
+	// recursive walk is exactly the pattern an attacker would use to enumerate
+	// out-of-root files, so it is the security gate on the doublestar change.
+	for _, pattern := range []string{"link/*", "*", "*.txt", "**/*", "**/*.txt"} {
 		got, err := ws.Glob(ctx, pattern)
 		if err != nil {
 			t.Fatalf("Glob(%q): %v", pattern, err)
@@ -415,5 +512,156 @@ func TestGlobDoesNotLeakThroughSymlink(t *testing.T) {
 	}
 	if !sawReal {
 		t.Errorf("Glob(*.txt) = %v, expected to contain real.txt", got)
+	}
+}
+
+// TestGlobRejectsDotDotPattern pins the confinement against literal ".." in the
+// pattern itself: a "../"-bearing glob must never climb out of the root. The
+// os.Root.FS() walk refuses such traversal, so these patterns return no matches
+// and no error. Stand-in target names are used; nothing sensitive is referenced.
+func TestGlobRejectsDotDotPattern(t *testing.T) {
+	ctx := context.Background()
+
+	// An out-of-root sibling file the patterns would reach if confinement broke.
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "target.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed outside file: %v", err)
+	}
+
+	root := t.TempDir()
+	ws, err := osfs.NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	if err := ws.Write(ctx, "in.txt", []byte("ok")); err != nil {
+		t.Fatalf("Write in.txt: %v", err)
+	}
+
+	for _, pattern := range []string{"../*", "../*.txt", "**/../**", "a/../../target.txt", "../../*"} {
+		got, gerr := ws.Glob(ctx, pattern)
+		if gerr != nil {
+			t.Errorf("Glob(%q) error = %v, want nil", pattern, gerr)
+		}
+		if len(got) != 0 {
+			t.Errorf("Glob(%q) = %v, want no matches (confinement breach)", pattern, got)
+		}
+	}
+}
+
+// TestGlobBadPattern asserts a malformed pattern surfaces as an error (mirroring
+// TestGrepInvalidPattern), rather than being silently swallowed.
+func TestGlobBadPattern(t *testing.T) {
+	ctx := context.Background()
+	ws, _ := osfs.NewWorkspace(t.TempDir())
+	if _, err := ws.Glob(ctx, "["); err == nil {
+		t.Fatal("Glob with malformed pattern = nil err, want error")
+	}
+}
+
+// TestGlobPatternNormalization asserts the leading-"/"/"./" leniency: "/**/*.go"
+// and "./**/*.go" return the same non-empty set as "**/*.go", and ""/"." return
+// (nil, nil).
+func TestGlobPatternNormalization(t *testing.T) {
+	ctx := context.Background()
+	ws, _ := osfs.NewWorkspace(t.TempDir())
+	for _, p := range []string{"top.go", "a/b/deep.go"} {
+		if err := ws.Write(ctx, p, []byte("z")); err != nil {
+			t.Fatalf("Write %s: %v", p, err)
+		}
+	}
+
+	base, err := ws.Glob(ctx, "**/*.go")
+	if err != nil {
+		t.Fatalf("Glob(**/*.go): %v", err)
+	}
+	if len(base) == 0 {
+		t.Fatal("Glob(**/*.go) returned no matches; fixture broken")
+	}
+	for _, equiv := range []string{"/**/*.go", "./**/*.go"} {
+		got, gerr := ws.Glob(ctx, equiv)
+		if gerr != nil {
+			t.Fatalf("Glob(%q): %v", equiv, gerr)
+		}
+		if !slices.Equal(got, base) {
+			t.Errorf("Glob(%q) = %v, want same as Glob(**/*.go) = %v", equiv, got, base)
+		}
+	}
+
+	for _, empty := range []string{"", "."} {
+		got, gerr := ws.Glob(ctx, empty)
+		if gerr != nil {
+			t.Errorf("Glob(%q) error = %v, want nil", empty, gerr)
+		}
+		if got != nil {
+			t.Errorf("Glob(%q) = %v, want nil (match-nothing)", empty, got)
+		}
+	}
+}
+
+// TestGlobZeroSegmentGlobstar pins the doublestar semantic that "a/**/b.go"
+// matches with ZERO intermediate segments ("a/b.go") as well as one or more
+// ("a/x/b.go") — the behavior that distinguishes "**" from a single "*".
+func TestGlobZeroSegmentGlobstar(t *testing.T) {
+	ctx := context.Background()
+	ws, _ := osfs.NewWorkspace(t.TempDir())
+	for _, p := range []string{"a/b.go", "a/x/b.go"} {
+		if err := ws.Write(ctx, p, []byte("z")); err != nil {
+			t.Fatalf("Write %s: %v", p, err)
+		}
+	}
+
+	got, err := ws.Glob(ctx, "a/**/b.go")
+	if err != nil {
+		t.Fatalf("Glob(a/**/b.go): %v", err)
+	}
+	set := map[string]bool{}
+	for _, m := range got {
+		set[m] = true
+	}
+	if !set["a/b.go"] {
+		t.Errorf("Glob(a/**/b.go) = %v, missing zero-segment a/b.go", got)
+	}
+	if !set["a/x/b.go"] {
+		t.Errorf("Glob(a/**/b.go) = %v, missing one-segment a/x/b.go", got)
+	}
+}
+
+// TestGlobDropsInRootLeafSymlink pins the "drop ALL leaf symlinks" contract: a
+// symlink wholly inside the root (link.txt -> a.txt) is still dropped from Glob
+// results, even though it does not escape. This catches a future refactor that
+// narrows the drop to only escaping links.
+func TestGlobDropsInRootLeafSymlink(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	ws, err := osfs.NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	if err := ws.Write(ctx, "a.txt", []byte("ok")); err != nil {
+		t.Fatalf("Write a.txt: %v", err)
+	}
+	// An in-root symlink to an in-root target (does not escape).
+	if err := os.Symlink("a.txt", filepath.Join(root, "link.txt")); err != nil {
+		t.Fatalf("symlink in-root leaf: %v", err)
+	}
+
+	got, err := ws.Glob(ctx, "*")
+	if err != nil {
+		t.Fatalf("Glob(*): %v", err)
+	}
+	var sawReal, sawLink bool
+	for _, m := range got {
+		switch m {
+		case "a.txt":
+			sawReal = true
+		case "link.txt":
+			sawLink = true
+		}
+	}
+	if !sawReal {
+		t.Errorf("Glob(*) = %v, missing real file a.txt", got)
+	}
+	if sawLink {
+		t.Errorf("Glob(*) = %v, surfaced in-root leaf symlink link.txt (must drop all leaf symlinks)", got)
 	}
 }
