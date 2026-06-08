@@ -1,5 +1,9 @@
 # mecatl
 
+<p align="center">
+  <img src="./assets/mecatito.png" alt="Mecatito, the mecatl mascot" width="320">
+</p>
+
 A **headless agentic coding harness** in Go — the system around a model that lets it
 actually finish a software task: a streaming agent loop, a core tool kit, an enforced
 permission model, deterministic hooks, one-shot subagents, prompt caching, and the
