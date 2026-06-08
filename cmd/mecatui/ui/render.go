@@ -728,14 +728,19 @@ const maxTeamLanes = 6
 // very long name blowing out the gutter.
 const maxTeamNameWidth = 16
 
-// teamGlyph is the per-member state glyph (glyph-not-colour-only): a hollow "○"
-// for a member that has finished its terminal result, a filled "◆" for one still
-// working.
-func teamGlyph(ln *teamLane) string {
-	if ln.done {
+// teamGlyph is the per-member state glyph (glyph-not-colour-only), three states: a
+// "✓" for a TERMINAL member (the team has ended — b.teamDone), a hollow "○" for an
+// IDLE member (finished its current round, awaiting the next round or synthesis),
+// and a filled "◆" for one actively working.
+func teamGlyph(ln *teamLane, teamDone bool) string {
+	switch {
+	case teamDone:
+		return "✓"
+	case ln.idle:
 		return "○"
+	default:
+		return "◆"
 	}
-	return "◆"
 }
 
 // teamLaneOrder returns lane indices in render order: the lead member(s) first,
@@ -797,7 +802,7 @@ func (r *renderer) renderTeam(b *block, expand bool) string {
 			out.WriteString("\n")
 		}
 		out.WriteString("\n")
-		out.WriteString(muted.Render(teamLaneLine(ln, nameW)))
+		out.WriteString(muted.Render(teamLaneLine(ln, nameW, false)))
 		if expand {
 			if tr := r.renderTeamTrace(ln); tr != "" {
 				out.WriteString("\n")
@@ -847,7 +852,7 @@ func teamNameWidth(lanes []teamLane, shown []int) int {
 // padded) with the "[lead]" tag appended after the column, then the current tool
 // or a derived state label (with a "…" heartbeat while active) and running token
 // totals. No elapsed clock, so it updates only as events arrive.
-func teamLaneLine(ln *teamLane, nameW int) string {
+func teamLaneLine(ln *teamLane, nameW int, teamDone bool) string {
 	name := truncate(sanitizeTerminal(ln.name), maxTeamNameWidth)
 	if pad := nameW - len([]rune(name)); pad > 0 {
 		name += strings.Repeat(" ", pad)
@@ -856,10 +861,10 @@ func teamLaneLine(ln *teamLane, nameW int) string {
 		name += " [lead]"
 	}
 	return fmt.Sprintf("%s %s %s · %s · ↑%s ↓%s",
-		teamGlyph(ln),
+		teamGlyph(ln, teamDone),
 		teamMutCue(ln),
 		name,
-		teamLaneState(ln),
+		teamLaneState(ln, teamDone),
 		humanizeTokens(ln.usage.InputTokens),
 		humanizeTokens(ln.usage.OutputTokens))
 }
@@ -876,16 +881,21 @@ func teamMutCue(ln *teamLane) string {
 	return "·"
 }
 
-// teamLaneState derives a member's current state label for the collapsed line: the
-// running tool name when one is active, "done" once the member reported its
-// terminal result, else "working". An ACTIVE member (not done) gets a trailing "…"
-// heartbeat so a quiet card reads as in-flight rather than stalled (mirroring the
-// "reasoning…" affordance); a done member has no ellipsis. The tool name is
+// teamLaneState derives a member's current state label for the collapsed line,
+// three states: "done" when the team has ended (teamDone — terminal, wins over
+// everything), "idle" when the member finished its round and is awaiting the next
+// round / synthesis, else the running tool name (when one is active) or "working".
+// Only the WORKING state gets a trailing "…" heartbeat so a quiet card reads as
+// in-flight rather than stalled (mirroring the "reasoning…" affordance); idle and
+// terminal members are genuinely quiet and get no ellipsis. The tool name is
 // sanitized (server-derived). The mutating signal lives in teamMutCue, not here, so
 // it persists once a tool name fills this label.
-func teamLaneState(ln *teamLane) string {
-	if ln.done {
+func teamLaneState(ln *teamLane, teamDone bool) string {
+	switch {
+	case teamDone:
 		return "done"
+	case ln.idle:
+		return "idle"
 	}
 	label := "working"
 	if ln.current != "" {

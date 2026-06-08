@@ -322,7 +322,9 @@ func TestStopReasonLabelSanitizesUnknown(t *testing.T) {
 
 // TestTeamWorkingCounts locks the (working, total) classification the footer
 // k/N segment derives from a team's lanes: total is the lane count, working is the
-// count of lanes NOT done — the SAME !ln.done predicate the roster glyphs use.
+// count of lanes NOT idle — the SAME !ln.idle predicate teamLaneState uses for the
+// non-terminal roster glyph. An idle lane (finished its round, awaiting the next)
+// is NOT counted as working.
 func TestTeamWorkingCounts(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -331,8 +333,8 @@ func TestTeamWorkingCounts(t *testing.T) {
 	}{
 		{"empty", nil, 0, 0},
 		{"all working", []teamLane{{}, {}, {}}, 3, 3},
-		{"all done", []teamLane{{done: true}, {done: true}}, 0, 2},
-		{"mixed", []teamLane{{done: true}, {}, {done: true}, {}}, 2, 4},
+		{"all idle", []teamLane{{idle: true}, {idle: true}}, 0, 2},
+		{"mixed", []teamLane{{idle: true}, {}, {idle: true}, {}}, 2, 4},
 		{"single working", []teamLane{{}}, 1, 1},
 	}
 	for _, tc := range cases {
@@ -342,5 +344,32 @@ func TestTeamWorkingCounts(t *testing.T) {
 				t.Errorf("teamWorkingCounts = (%d, %d), want (%d, %d)", wk, tot, tc.wantWk, tc.wantTot)
 			}
 		})
+	}
+}
+
+// TestFooterCountsIdleAsNotWorking pins the bug fix at the lane level: a live team
+// where one member has fired a per-round result (idle) and another is working must
+// count 1/2 working — NOT 2/2 (the old !ln.done predicate counted an idle member as
+// working) and NOT 0/2 (idle is not terminal). The lane is asserted idle (not a
+// fabricated terminal flag) to pin the cause.
+func TestFooterCountsIdleAsNotWorking(t *testing.T) {
+	c := &conversation{}
+	c.addTool("t1", "Team", `{}`)
+	c.setTeamStart("t1", "", roster())
+	// lead works; scout finishes its round (idle), team still live.
+	c.addTeamMember(member("lead", "tool.call", client.TeamMsg{ToolName: "Edit"}))
+	c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Grep"}))
+	c.addTeamMember(member("scout", "result", client.TeamMsg{}))
+
+	lanes := c.blocks[0].teamLanes
+	if !lanes[1].idle {
+		t.Fatalf("scout lane must be idle after its per-round result, got %+v", lanes[1])
+	}
+	if lanes[0].idle {
+		t.Fatalf("lead lane must be working (not idle), got %+v", lanes[0])
+	}
+	wk, tot := teamWorkingCounts(lanes)
+	if wk != 1 || tot != 2 {
+		t.Errorf("teamWorkingCounts = (%d, %d), want (1, 2) — idle scout must not count as working", wk, tot)
 	}
 }

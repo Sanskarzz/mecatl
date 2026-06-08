@@ -60,7 +60,12 @@ type teamLane struct {
 	toolCount int
 	usage     client.Usage
 	trace     []teamTrace
-	done      bool // the member reported its terminal result
+	// idle marks that the member finished its current ROUND (it reported a per-round
+	// result); it is awaiting the next round or the lead's synthesis. It is NOT
+	// terminal — a member is re-driven each round, so this is cleared the moment new
+	// activity (delta / tool.call / turn.end) arrives. Team-terminal lives on
+	// block.teamDone (set only at team.end), never here.
+	idle bool
 
 	// ctxUsed / ctxWindow back the per-member context meter in the ctrl+a agents
 	// overlay. ctxUsed is the CURRENT context occupancy — the most recent turn's
@@ -414,9 +419,11 @@ func (b *block) lane(member string) *teamLane {
 // block matching parentCallID, accumulating per the inner kind: a message.delta
 // appends/extends a message trace line; a tool.call sets the lane's current tool
 // and appends a (pending) tool chip; a tool.result finalises the chip's error
-// state; a turn.end/result carries usage and (for result) marks the lane done.
-// The trace is capped at maxTeamTrace (oldest entries dropped). Returns false when
-// no matching Team block exists.
+// state; a turn.end/result carries usage and (for result) marks the lane IDLE
+// (finished its round, not terminal); forward activity (delta / tool.call /
+// turn.end) clears idle again. Team-terminal lives on block.teamDone, set only by
+// setTeamEnd — never on a lane. The trace is capped at maxTeamTrace (oldest
+// entries dropped). Returns false when no matching Team block exists.
 func (c *conversation) addTeamMember(msg client.TeamMsg) bool {
 	b := c.teamBlock(msg.ParentCallID)
 	if b == nil {
@@ -432,14 +439,17 @@ func (c *conversation) addTeamMember(msg client.TeamMsg) bool {
 	ln := b.lane(msg.Member)
 	switch msg.InnerKind {
 	case "message.delta":
+		ln.idle = false
 		ln.appendMessage(msg.Text)
 	case "tool.call":
+		ln.idle = false
 		ln.current = msg.ToolName
 		ln.toolCount++
 		ln.appendTool(msg.ToolName, msg.Detail, false)
 	case "tool.result":
 		ln.markToolResult(msg.ToolName, msg.Detail, msg.IsError)
 	case "turn.end":
+		ln.idle = false
 		ln.usage = sumUsage(ln.usage, msg.Usage)
 		// The context meter tracks CURRENT occupancy, not cumulative cost: assign the
 		// most recent turn's input tokens (matching the main meter's
@@ -450,7 +460,7 @@ func (c *conversation) addTeamMember(msg client.TeamMsg) bool {
 			ln.ctxWindow = msg.ContextWindow
 		}
 	case "result":
-		ln.done = true
+		ln.idle = true
 		ln.current = ""
 		if msg.Usage != (client.Usage{}) {
 			ln.usage = sumUsage(ln.usage, msg.Usage)

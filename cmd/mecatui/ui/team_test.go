@@ -161,20 +161,90 @@ func TestTeamLaneOrderDoesNotMutate(t *testing.T) {
 	}
 }
 
-// TestTeamHeartbeatStopsWhenDone asserts the "…" heartbeat is present while a
-// member is active and absent once it is done.
-func TestTeamHeartbeatStopsWhenDone(t *testing.T) {
-	live := teamLaneState(&teamLane{current: "Grep"})
-	if live != "Grep…" {
-		t.Errorf("active member state = %q, want Grep…", live)
+// TestTeamLaneStateMapping asserts the three-state label/glyph mapping: WORKING
+// (◆, tool-name/working… with a heartbeat), IDLE (○, "idle", no heartbeat, finished
+// its round), and DONE (✓, "done", terminal — driven by teamDone, never a per-round
+// result). Terminal wins over both idle and working.
+func TestTeamLaneStateMapping(t *testing.T) {
+	// working: tool active, live team → heartbeat on the tool name.
+	if got := teamLaneState(&teamLane{current: "Grep"}, false); got != "Grep…" {
+		t.Errorf("working member state = %q, want Grep…", got)
 	}
-	done := teamLaneState(&teamLane{current: "Grep", done: true})
-	if done != "done" {
-		t.Errorf("done member state = %q, want done (no heartbeat)", done)
+	// working: live, no tool yet → "working…".
+	if got := teamLaneState(&teamLane{}, false); got != "working…" {
+		t.Errorf("live-no-tool member state = %q, want working…", got)
 	}
-	working := teamLaneState(&teamLane{})
-	if working != "working…" {
-		t.Errorf("idle-but-live member state = %q, want working…", working)
+	// idle: finished its round → "idle", no heartbeat, no stale tool name.
+	if got := teamLaneState(&teamLane{idle: true, current: "Grep"}, false); got != "idle" {
+		t.Errorf("idle member state = %q, want idle (no heartbeat)", got)
+	}
+	// terminal wins over idle.
+	if got := teamLaneState(&teamLane{idle: true}, true); got != "done" {
+		t.Errorf("terminal+idle member state = %q, want done", got)
+	}
+	// terminal wins over working.
+	if got := teamLaneState(&teamLane{current: "Grep"}, true); got != "done" {
+		t.Errorf("terminal+working member state = %q, want done", got)
+	}
+
+	// glyph parity: ◆ working / ○ idle / ✓ terminal.
+	if got := teamGlyph(&teamLane{}, false); got != "◆" {
+		t.Errorf("working glyph = %q, want ◆", got)
+	}
+	if got := teamGlyph(&teamLane{idle: true}, false); got != "○" {
+		t.Errorf("idle glyph = %q, want ○", got)
+	}
+	if got := teamGlyph(&teamLane{}, true); got != "✓" {
+		t.Errorf("terminal glyph = %q, want ✓", got)
+	}
+}
+
+// TestTeamLaneIdleResetsOnActivity drives one member through a full round cycle on a
+// real conversation: a per-round result marks the lane IDLE (not terminal), and any
+// forward activity (message.delta / tool.call / turn.end) on the next round CLEARS
+// idle so it reads as working again. This is the fail-on-regression for the original
+// bug (a permanent terminal flag set on a per-round result): with that bug, the lane
+// would still read idle/done after step 4's delta and the assert fails.
+func TestTeamLaneIdleResetsOnActivity(t *testing.T) {
+	c := &conversation{}
+	c.addTool("t1", "Team", `{}`)
+	c.setTeamStart("t1", "", roster())
+
+	scout := func() *teamLane { return &c.blocks[0].teamLanes[1] }
+
+	// round 0: starts working on a tool.
+	c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Grep"}))
+	if scout().idle {
+		t.Fatal("after tool.call: lane must be working, got idle")
+	}
+	// round 0 result → idle, current cleared.
+	c.addTeamMember(member("scout", "result", client.TeamMsg{}))
+	if !scout().idle || scout().current != "" {
+		t.Fatalf("after result: want idle && current=='', got idle=%v current=%q", scout().idle, scout().current)
+	}
+	// round 1 first activity = message.delta → idle cleared.
+	c.addTeamMember(member("scout", "message.delta", client.TeamMsg{Text: "again"}))
+	if scout().idle {
+		t.Fatal("after message.delta on next round: idle must be cleared")
+	}
+	// round 1 result → idle again.
+	c.addTeamMember(member("scout", "result", client.TeamMsg{}))
+	if !scout().idle {
+		t.Fatal("after round-1 result: want idle again")
+	}
+	// tool.call also clears idle.
+	c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Read"}))
+	if scout().idle {
+		t.Fatal("tool.call must clear idle")
+	}
+	// back to idle, then turn.end clears it too.
+	c.addTeamMember(member("scout", "result", client.TeamMsg{}))
+	if !scout().idle {
+		t.Fatal("want idle before turn.end check")
+	}
+	c.addTeamMember(member("scout", "turn.end", client.TeamMsg{Usage: client.Usage{InputTokens: 10}}))
+	if scout().idle {
+		t.Fatal("turn.end must clear idle")
 	}
 }
 

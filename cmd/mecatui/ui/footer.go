@@ -308,14 +308,17 @@ func renderUsageFacets(u client.Usage) string {
 }
 
 // teamWorkingCounts classifies a team's member lanes into (working, total). total
-// is the lane count; working is the number of lanes NOT yet done. It reuses the
-// EXACT same !ln.done predicate that teamGlyph/teamLaneState use to render the
-// per-member roster glyph (◆ working / ○ done), so the footer's "k/N working"
-// can never disagree with the glyphs in the ctrl+a panel.
+// is the lane count; working is the number of lanes NOT idle (genuinely in a turn).
+// It reuses the EXACT same !ln.idle predicate that teamLaneState uses for the
+// non-terminal roster glyph (◆ working / ○ idle / ✓ done — the last being terminal,
+// overlay-only), so the footer's "k/N working" can never disagree with the live
+// glyphs in the ctrl+a panel. The footer segment is only rendered for a LIVE team
+// (liveTeamBlock returns nil once b.teamDone), so the terminal case never reaches
+// here — excluding idle is sufficient.
 func teamWorkingCounts(lanes []teamLane) (working, total int) {
 	total = len(lanes)
 	for i := range lanes {
-		if !lanes[i].done {
+		if !lanes[i].idle {
 			working++
 		}
 	}

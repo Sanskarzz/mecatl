@@ -339,7 +339,7 @@ func renderTeamRoster(th theme.Theme, st teamState, b *block, height int) string
 	}
 	for row := start; row < end; row++ {
 		ln := &b.teamLanes[order[row]]
-		line := teamRosterLine(th, ln, nameW)
+		line := teamRosterLine(th, ln, nameW, b.teamDone)
 		if row == cursor {
 			out.WriteString(th.Style("askButtonActive").Render("› "+line) + "\n")
 		} else {
@@ -364,8 +364,8 @@ func renderTeamRoster(th theme.Theme, st teamState, b *block, height int) string
 // denominator, so a bare "ctx <size>" with no band is suppressed entirely. The
 // role is sanitized (roster-derived) and truncated so a long role can't blow out
 // the row.
-func teamRosterLine(th theme.Theme, ln *teamLane, nameW int) string {
-	line := teamLaneLine(ln, nameW)
+func teamRosterLine(th theme.Theme, ln *teamLane, nameW int, teamDone bool) string {
+	line := teamLaneLine(ln, nameW, teamDone)
 	if ln.ctxWindow > 0 {
 		line += " · " + renderContextMeter(th, ln.ctxUsed, ln.ctxWindow)
 	}
@@ -420,7 +420,7 @@ func renderTeamFocus(th theme.Theme, b *block, member string, height int) string
 	// the focus pane is self-describing: glyph, mutating cue, name, [lead], state,
 	// usage — plus the per-member context meter band when the member's window is
 	// known (same gating as the roster row: no window → no meter).
-	subhead := teamLaneLine(ln, 0)
+	subhead := teamLaneLine(ln, 0, b.teamDone)
 	if ln.ctxWindow > 0 {
 		subhead += " · " + renderContextMeter(th, ln.ctxUsed, ln.ctxWindow)
 	}

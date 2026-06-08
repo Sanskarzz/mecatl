@@ -431,6 +431,14 @@ func TestAgentsResolvedSubhead(t *testing.T) {
 	if !strings.Contains(out, "↑5.2K") {
 		t.Errorf("resolved sub-header should show summed usage, got %q", out)
 	}
+	// Also assert the lane ROWS render terminal once the team has ended: a member row
+	// must carry the ✓ glyph and the "done" label. This only happens when the overlay
+	// correctly threads b.teamDone into teamRosterLine → teamLaneLine; a wrong
+	// (false) teamDone arg would render "◆ … working…" and this fails. (The sub-header
+	// is block-derived and would pass regardless, so it cannot cover the row threading.)
+	if !strings.Contains(out, "✓") || !strings.Contains(out, "done") {
+		t.Errorf("ended team's lane rows must render terminal (✓ / \"done\"), got %q", out)
+	}
 }
 
 // resize sends a WindowSizeMsg so a test can pick the overlay height (the window
@@ -964,6 +972,35 @@ func TestAgentsRosterGolden(t *testing.T) {
 	}
 	got := stripANSI([]byte(m.View().Content))
 	compareGolden(t, "team_roster.golden", got)
+}
+
+// agentsIdleTeam builds a team caught MID-RUN between rounds: the scout has fired a
+// per-round result (so it is IDLE — finished its round, awaiting the next) while the
+// lead is still working a tool. The team is NOT ended (no setTeamEnd), so the roster
+// must show the scout as "○ ... idle" (not "done") and the lead as "◆ ... Edit…".
+// This is the human-visible proof the idle state renders distinctly mid-run.
+func agentsIdleTeam(c *conversation) {
+	c.setTeamStart("t1", "", roster()) // lead (mutating) + scout (read-only)
+	c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Grep", Detail: "pattern: handleErr"}))
+	c.addTeamMember(member("scout", "turn.end", client.TeamMsg{Usage: client.Usage{InputTokens: 1200, OutputTokens: 80}}))
+	c.addTeamMember(member("scout", "result", client.TeamMsg{})) // scout finished round 0 → IDLE
+	c.addTeamMember(member("lead", "tool.call", client.TeamMsg{ToolName: "Edit"}))
+}
+
+// TestAgentsRosterMidRunIdleGolden locks the mid-run roster overlay: a member that
+// finished its round shows "○ ... idle" while the team is still live, visibly
+// DIFFERENT from the all-"working" team_roster.golden. Fail-on-regression: with the
+// permanent-flag bug the scout would render "○ ... done", a different golden.
+func TestAgentsRosterMidRunIdleGolden(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, agentsIdleTeam)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.team.view != teamRoster {
+		t.Fatalf("view = %v, want teamRoster", m.team.view)
+	}
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "team_roster_midrun_idle.golden", got)
 }
 
 // TestAgentsTasksView locks the task sub-view golden: a team with completed,
