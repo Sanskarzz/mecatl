@@ -62,8 +62,10 @@ type TeamMemberArg struct {
 // coordinating lead.
 type teamArgs struct {
 	// Goal is the team's top-level objective. It is threaded into the supervisor
-	// (WithTeamGoal) and rendered — fenced UNTRUSTED — into every member's round-0
-	// turn and into the lead's synthesis prompt.
+	// (WithTeamGoal) and rendered as the team's TRUSTED top-level instruction into
+	// every member's round-0 turn and into the lead's synthesis prompt — its
+	// provenance is the principal (the parent model authored it from the user's own
+	// prompt inside the running session), never a peer.
 	Goal string `json:"goal"`
 	// Members is the roster the model formed. The first member is the lead.
 	Members []TeamMemberArg `json:"members"`
@@ -75,7 +77,7 @@ var teamSchema = json.RawMessage(`{
   "properties": {
     "goal": {
       "type": "string",
-      "description": "The team's top-level objective. Handed to the lead (the first member) as its briefing."
+      "description": "The team's top-level objective — the team's trusted top-level instruction, handed to the lead (the first member) and every member as their briefing."
     },
     "members": {
       "type": "array",
@@ -269,10 +271,14 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 
 	opts := []SupervisorOption{
 		// Thread the goal so it frames every member's round-0 turn and the lead's
-		// synthesis, and namespace member-session ids by the team id (the parent call
-		// id) so two concurrent teams sharing a member name get distinct, collision-free
-		// stored ids. The prefix MUST match MemberSessionID's scheme so the inspect tool
-		// can derive the same id: "team-<teamID>" → ids "team-<teamID>-<member>".
+		// synthesis as the team's TRUSTED top-level instruction (the parent model
+		// authored args.Goal from the user's own prompt — its provenance is the
+		// principal, not a peer, which is exactly the trusted case), and namespace
+		// member-session ids by the team id (the parent call id) so two concurrent
+		// teams sharing a member name get distinct, collision-free stored ids. The
+		// prefix MUST match MemberSessionID's scheme so the inspect tool can derive the
+		// same id: "team-<teamID>" → ids "team-<teamID>-<member>". No WithUntrustedGoal
+		// here: the in-loop Team tool's goal is always principal-authored and trusted.
 		WithTeamGoal(args.Goal),
 		WithMemberSessionPrefix(memberSessionIDPrefix + teamID),
 	}

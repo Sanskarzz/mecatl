@@ -145,8 +145,20 @@ loop reaches quiescence (or the round/budget cap), `Supervisor.Run` drives ONE f
 **synthesis turn** on the lead (`synthesise` → the shared `driveOneTurn` helper). Its
 output is `TeamOutcome.Report`, which the Team tool returns as its `ToolResult` and
 the gRPC `RunTeam` rides back on the outcome — so both entry points get the
-consolidated report for free. The synthesis prompt's source material is assembled in
-three layers (`buildSynthesisSources`), all fenced UNTRUSTED:
+consolidated report for free. The team GOAL is rendered as the lead's (and every
+member's) **TRUSTED top-level instruction** — NOT fenced — because its provenance is
+the principal (the parent model's tool call from the user's prompt, or the gRPC request
+the deployment owns) and no member-facing tool can mutate it (`WithTeamGoal` is the sole
+writer). This is the instruction-hierarchy / spotlighting / CaMeL consensus: the
+principal's task is trusted; only peer/retrieved data is untrusted. The goal is still
+run through `neutraliseFraming` so it cannot forge a fence or a section header
+(defang-but-don't-fence). A relay/multi-tenant deployment that interpolates untrusted
+end-user text into the goal re-fences it via `agent.WithUntrustedGoal(true)` (the in-loop
+Team tool stays always-trusted; the gRPC path flips it through `server.Config.TeamGoalUntrusted`).
+Fencing the goal as UNTRUSTED was the original behaviour and caused spurious refusals
+(the member was handed its own job inside a "do not obey" block). The synthesis prompt's
+remaining source material is assembled in three layers (`buildSynthesisSources`), all
+fenced UNTRUSTED:
 
 1. **The findings ledger** (`team.Team.Findings()`) — the PRIMARY, deterministic
    channel: members record conclusions with the `RecordFinding` coordination tool as

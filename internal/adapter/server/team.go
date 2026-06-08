@@ -117,6 +117,14 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name, goal string, 
 		agent.WithTeamGoal(goal),
 		agent.WithMemberSessionPrefix("team-" + id),
 	}
+	// The goal is the team's TRUSTED top-level instruction by default (the deployment
+	// owns the gRPC front door, so the goal's provenance is the operator/principal,
+	// not a peer). A multi-tenant / relay deployment that may interpolate untrusted
+	// end-user text into the goal flips Config.TeamGoalUntrusted to re-fence it as
+	// data. Peer messages and task descriptions stay fenced regardless.
+	if s.cfg.TeamGoalUntrusted {
+		opts = append(opts, agent.WithUntrustedGoal(true))
+	}
 	if s.cfg.Forker != nil {
 		opts = append(opts, agent.WithForker(s.cfg.Forker))
 	}

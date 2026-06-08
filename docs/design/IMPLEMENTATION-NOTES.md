@@ -209,8 +209,17 @@ the shared `driveOneTurn` helper, factored OUT of `runTurn` so the auto-deny / e
 terminal-text-capture logic lives in one place). Its output is `TeamOutcome.Report`, which the
 Team tool resolves through the **three-tier `deliverable()` chain** (`teamtool.go`) before
 returning it as the `ToolResult`; the gRPC `RunTeam` rides the report back on
-the outcome. Synthesis lives inside `Run`, so BOTH entry points share it. `buildSynthesisSources`
-assembles the prompt in three layers, ALL fenced UNTRUSTED via `writeUntrustedBlock`: (1) the
+the outcome. Synthesis lives inside `Run`, so BOTH entry points share it. **The team GOAL is
+rendered as the lead's (and every member's) TRUSTED top-level instruction**, not fenced — its
+provenance is the principal (the parent model's tool call from the user's own prompt, or the gRPC
+request the deployment owns), and `WithTeamGoal` is the SOLE writer with no member-facing tool able
+to mutate it, so trusting it is safe (instruction-hierarchy / spotlighting / CaMeL consensus: the
+principal's task is trusted, only peer/retrieved data is untrusted). It is STILL run through
+`neutraliseFraming` on render so it cannot forge a fence or a section header (defang-but-don't-fence).
+A deployment that interpolates untrusted end-user text into the goal opts BACK into fencing via
+`agent.WithUntrustedGoal(true)` (the Team-tool path is always trusted; the gRPC path flips it through
+`server.Config.TeamGoalUntrusted`). `buildSynthesisSources`
+assembles the rest of the prompt in three layers, ALL fenced UNTRUSTED via `writeUntrustedBlock`: (1) the
 **findings ledger** (`team.Team.Findings()`, the PRIMARY channel — members append with the
 `RecordFinding` coordination tool, a sixth member tool auto-exempted from the read-only-member
 mutating-tool backstop because `MemberToolNames()` derives from `MemberTools`); (2) a

@@ -214,6 +214,16 @@ type Config struct {
 	// catalog (read-only base + MemberTools, plus mutating tools only for a
 	// Mutating member) and the provider/model.
 	MemberEngine MemberEngineFactory
+	// TeamGoalUntrusted, when true, re-fences the gRPC/HTTP CreateTeam goal as
+	// UNTRUSTED data in member and synthesis prompts (threaded to
+	// agent.WithUntrustedGoal). DEFAULT false: the goal is the team's TRUSTED
+	// top-level instruction (its provenance is the deployment/operator that owns the
+	// gRPC front door, not a peer — peer messages and task descriptions stay fenced
+	// regardless). A multi-tenant / relay deployment that interpolates untrusted
+	// end-user text into the goal should set this true so the goal is fenced as data.
+	// It is a composition decision (the deployment knows the goal's provenance); the
+	// supervisor only takes the bool.
+	TeamGoalUntrusted bool
 	// Forker isolates a Mutating team member's workspace (force-copy: own `.git`).
 	// Optional; required only if a Mutating member is spawned.
 	Forker tool.WorkspaceForker

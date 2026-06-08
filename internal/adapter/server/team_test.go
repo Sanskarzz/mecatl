@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/team"
 	"github.com/stacklok/mecatl/internal/tool"
 )
@@ -130,6 +132,117 @@ func TestMemberSessionIDRoundTripsGRPCPath(t *testing.T) {
 	if got.ID != id {
 		t.Errorf("loaded session id = %q, want %q", got.ID, id)
 	}
+}
+
+// teamServiceWithGoalTrust builds a team-enabled Service whose CreateTeam goal-trust
+// posture is set by the goalUntrusted flag (Config.TeamGoalUntrusted), returning the
+// Service and its backing store so a test can load a member session and inspect the
+// rendered round-0 prompt. It mirrors teamServiceWithStore but threads the flag.
+func teamServiceWithGoalTrust(t *testing.T, llm *mockllm.Provider, goalUntrusted bool) (*server.Service, port.SessionStore) {
+	t.Helper()
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	store := memstore.New()
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
+			LLM: llm, Catalog: cat, Policy: allow, Model: "mock",
+		})}
+	}
+	engine := agent.NewEngine(agent.Deps{
+		LLM: mockllm.New(mockllm.TextTurn("x")), Catalog: tool.NewCatalog(), Policy: allow, Model: "mock",
+	})
+	svc, err := server.NewService(server.Config{
+		Engine:            engine,
+		Store:             store,
+		Workspaces:        func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		Now:               func() time.Time { return time.Unix(0, 0) },
+		MemberEngine:      memberEngine,
+		TeamGoalUntrusted: goalUntrusted,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	return svc, store
+}
+
+// leadPromptContaining loads the persisted lead session and returns the FIRST user
+// message that mentions the "Team goal:" header — the rendered round-0 prompt whose
+// goal-trust rendering the opt-in controls. It fails the test if no such prompt exists.
+func leadPromptContaining(t *testing.T, store port.SessionStore, publishedTeamID string) string {
+	t.Helper()
+	id := agent.MemberSessionID(publishedTeamID, "lead")
+	sess, err := store.Load(context.Background(), id)
+	if err != nil {
+		t.Fatalf("lead session not persisted under %q: %v", id, err)
+	}
+	for _, m := range sess.Conversation.Messages {
+		if m.Role == session.RoleUser && strings.Contains(m.Text, "Team goal:") {
+			return m.Text
+		}
+	}
+	t.Fatalf("no lead user prompt carrying a 'Team goal:' header in session %q", id)
+	return ""
+}
+
+// TestCreateTeamGoalTrustOptIn pins the multi-tenant safety valve END-TO-END: with
+// Config.TeamGoalUntrusted UNSET (default) the gRPC CreateTeam goal renders TRUSTED
+// (plain, after the "Team goal:" header, NOT inside an <<<UNTRUSTED fence) in the
+// member's round-0 prompt; with the flag SET the same goal is re-fenced as UNTRUSTED
+// data. This proves CreateTeam threads agent.WithUntrustedGoal(true) only when the
+// relay opt-in is configured.
+//
+// Fail-on-regression: if CreateTeam stopped threading the flag (e.g. dropped the
+// `if s.cfg.TeamGoalUntrusted { ... WithUntrustedGoal(true) }` branch), the
+// fenced-when-set assertion below would fail (the goal would render trusted regardless).
+func TestCreateTeamGoalTrustOptIn(t *testing.T) {
+	const goal = "audit the login flow"
+
+	// fence is the literal marker writeUntrustedBlock emits immediately after the
+	// "Team goal:\n" header when the goal is fenced as UNTRUSTED.
+	const fencedGoalHeader = "Team goal:\n<<<UNTRUSTED"
+	const trustedGoalHeader = "Team goal:\n" + goal
+
+	run := func(t *testing.T, goalUntrusted bool) string {
+		// Two TextTurns: one for the lead's round-0 turn, one for the lead's synthesis turn.
+		svc, store := teamServiceWithGoalTrust(t, mockllm.New(
+			mockllm.TextTurn("delegating"), mockllm.TextTurn("report"),
+		), goalUntrusted)
+		h := server.NewHarnessServer(svc)
+		ctx := context.Background()
+
+		createResp, err := h.CreateTeam(ctx, &mecatlv1.CreateTeamRequest{
+			Workspace: "/ws", Name: "test", Goal: goal,
+			Members: []*mecatlv1.TeammateSpec{{Name: "lead", Lead: true, InitialPrompt: "go"}},
+		})
+		if err != nil {
+			t.Fatalf("CreateTeam: %v", err)
+		}
+		teamID := createResp.GetTeamId()
+		if _, err := svc.RunTeam(ctx, teamID, func(agent.TeamEvent) {}); err != nil {
+			t.Fatalf("RunTeam: %v", err)
+		}
+		return leadPromptContaining(t, store, teamID)
+	}
+
+	t.Run("default trusted", func(t *testing.T) {
+		prompt := run(t, false)
+		if !strings.Contains(prompt, trustedGoalHeader) {
+			t.Fatalf("default CreateTeam must render the goal TRUSTED (plain after the header):\n%s", prompt)
+		}
+		if strings.Contains(prompt, fencedGoalHeader) {
+			t.Fatalf("default CreateTeam must NOT fence the goal:\n%s", prompt)
+		}
+	})
+
+	t.Run("opt-in fenced", func(t *testing.T) {
+		prompt := run(t, true)
+		if !strings.Contains(prompt, fencedGoalHeader) {
+			t.Fatalf("Config.TeamGoalUntrusted=true must re-fence the CreateTeam goal as UNTRUSTED:\n%s", prompt)
+		}
+	})
 }
 
 func newCreateTeam(workspace string) *mecatlv1.CreateTeamRequest {
