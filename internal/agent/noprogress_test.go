@@ -21,11 +21,25 @@ import (
 // is exhausted. Each assertion FAILS on the pre-fix code (which terminated on zero
 // tool calls regardless of text, silently as StopEndTurn).
 
-// nudgeMessagesIn counts the RoleUser messages whose text is the continuation nudge.
+// nudgeMessagesIn counts the RoleUser messages whose text is the GENTLE continuation
+// nudge. Since the nudge is graduated (gentle early, extractive on the final attempt),
+// this counts ONLY gentle nudges; use extractiveNudgeMessagesIn for the final one.
 func nudgeMessagesIn(msgs []session.Message) int {
 	n := 0
 	for _, m := range msgs {
 		if m.Role == session.RoleUser && strings.Contains(m.Text, "Make concrete progress on the task using your tools") {
+			n++
+		}
+	}
+	return n
+}
+
+// extractiveNudgeMessagesIn counts the RoleUser messages whose text is the FINAL
+// (extractive) continuation nudge, keyed on a stable substring of the extractive text.
+func extractiveNudgeMessagesIn(msgs []session.Message) int {
+	n := 0
+	for _, m := range msgs {
+		if m.Role == session.RoleUser && strings.Contains(m.Text, "Stop investigating now") {
 			n++
 		}
 	}
@@ -135,12 +149,18 @@ func TestNoProgressBoundedThenTerminatesClearly(t *testing.T) {
 	if got := llm.Calls(); got != nudgeBudget+1 {
 		t.Fatalf("model calls = %d, want %d (initial + %d nudges, then give up — never unbounded)", got, nudgeBudget+1, nudgeBudget)
 	}
-	if n := nudgeMessagesIn(sess.Conversation.Messages); n != nudgeBudget {
-		t.Fatalf("nudge messages = %d, want %d", n, nudgeBudget)
+	// The nudge is graduated: with cap=2 the loop injects ONE gentle nudge (attempt 1)
+	// then ONE extractive nudge (attempt 2, the final one before give-up).
+	if n := nudgeMessagesIn(sess.Conversation.Messages); n != 1 {
+		t.Fatalf("gentle nudge messages = %d, want 1", n)
 	}
-	// The code makes TWO distinct EvNoProgress emissions: N advisory "nudging to
-	// continue" events, then ONE terminal "ending run" give-up event. Pin both counts
-	// and the Turn index they carry (the no-progress turn's 0-based index).
+	if n := extractiveNudgeMessagesIn(sess.Conversation.Messages); n != 1 {
+		t.Fatalf("extractive nudge messages = %d, want 1", n)
+	}
+	// The code makes TWO distinct advisory EvNoProgress emissions (gentle "nudging to
+	// continue" then final "final attempt: requesting a best-effort answer"), then ONE
+	// terminal "ending run" give-up event. Pin the counts and the Turn index they carry
+	// (the no-progress turn's 0-based index).
 	var advisory, terminal int
 	for _, ev := range evs {
 		if ev.Type != session.EvNoProgress {
@@ -151,6 +171,8 @@ func TestNoProgressBoundedThenTerminatesClearly(t *testing.T) {
 		}
 		switch {
 		case strings.Contains(ev.Text, "nudging to continue"):
+			advisory++
+		case strings.Contains(ev.Text, "final attempt: requesting a best-effort answer"):
 			advisory++
 		case strings.Contains(ev.Text, "ending run"):
 			terminal++
@@ -411,5 +433,170 @@ func TestUnknownToolEmitsCardBeforeResult(t *testing.T) {
 	// The result must be an unknown-tool error.
 	if r := evs[resultIdx].ToolResult; !r.IsError || !strings.Contains(r.Content, "unknown tool") {
 		t.Fatalf("unknown-tool result = {err:%v content:%q}, want an 'unknown tool' error", r.IsError, r.Content)
+	}
+}
+
+// indexOfUserMessage returns the index of the first RoleUser message containing sub, or
+// -1 if none. Used to assert the gentle nudge precedes the extractive one in history.
+func indexOfUserMessage(msgs []session.Message, sub string) int {
+	for i, m := range msgs {
+		if m.Role == session.RoleUser && strings.Contains(m.Text, sub) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestGraduatedNudgeGentleThenExtractive: with cap=2 the loop nudges GENTLY on attempt 1
+// then EXTRACTIVELY on attempt 2 (the final attempt before give-up), then gives up with
+// StopNoProgress on the third empty turn. Exactly 3 model calls, never 4. FAILS on the
+// pre-change code: it injected the gentle text on BOTH attempts, so the extractive text
+// never appears and nudgeMessagesIn would be 2.
+func TestGraduatedNudgeGentleThenExtractive(t *testing.T) {
+	llm := mockllm.New(
+		mockllm.EmptyTurn(),
+		mockllm.EmptyTurn(),
+		mockllm.EmptyTurn(),
+		// must NEVER be reached: the cap (not script exhaustion) bounds the loop.
+		mockllm.TextTurn("should-never-run"),
+	)
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t), MaxNoProgressNudges: 2})
+	sess := newSession(t, session.Limits{})
+	ws := memfs.NewWorkspace("/ws")
+
+	evs := drain(e.Run(context.Background(), sess, ws, "go"))
+
+	if got := llm.Calls(); got != 3 {
+		t.Fatalf("model calls = %d, want 3 (initial + gentle nudge + extractive nudge, then give up)", got)
+	}
+	if n := nudgeMessagesIn(sess.Conversation.Messages); n != 1 {
+		t.Fatalf("gentle nudge messages = %d, want 1 (only attempt 1 is gentle)", n)
+	}
+	if n := extractiveNudgeMessagesIn(sess.Conversation.Messages); n != 1 {
+		t.Fatalf("extractive nudge messages = %d, want 1 (the final attempt before give-up)", n)
+	}
+	// The gentle nudge must precede the extractive nudge in replayed history.
+	gentleIdx := indexOfUserMessage(sess.Conversation.Messages, "Make concrete progress on the task using your tools")
+	extractIdx := indexOfUserMessage(sess.Conversation.Messages, "Stop investigating now")
+	if gentleIdx < 0 || extractIdx < 0 || gentleIdx >= extractIdx {
+		t.Fatalf("gentle nudge (idx %d) must precede extractive nudge (idx %d)", gentleIdx, extractIdx)
+	}
+	res := lastResult(t, evs)
+	if res.Stop != session.StopNoProgress {
+		t.Fatalf("stop = %q, want %q (give up after the extractive attempt)", res.Stop, session.StopNoProgress)
+	}
+	if sess.State != session.StateCompleted {
+		t.Fatalf("session state = %q, want completed", sess.State)
+	}
+}
+
+// TestGraduatedNudgeRescue is the whole point: a model that stalls then ANSWERS on the
+// turn after the extractive nudge completes StopEndTurn with its answer — NOT
+// StopNoProgress. Script (cap=2): EmptyTurn, EmptyTurn, TextTurn("best-effort answer").
+// The 3rd request's replayed history must contain the extractive nudge as a RoleUser
+// message (proving it was injected and got one more turn). FAILS on the pre-change code:
+// the 3rd request would carry the gentle text again, never the extractive text.
+func TestGraduatedNudgeRescue(t *testing.T) {
+	var thirdReqMsgs []session.Message
+	var nth int
+	obs := func(req port.LLMRequest) {
+		nth++
+		if nth == 3 {
+			thirdReqMsgs = req.Messages
+		}
+	}
+	llm := mockllm.NewWith(
+		[]mockllm.Option{mockllm.WithRequestObserver(obs)},
+		mockllm.EmptyTurn(),
+		mockllm.EmptyTurn(),
+		mockllm.TextTurn("best-effort answer"),
+	)
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t), MaxNoProgressNudges: 2})
+	sess := newSession(t, session.Limits{})
+	ws := memfs.NewWorkspace("/ws")
+
+	evs := drain(e.Run(context.Background(), sess, ws, "go"))
+
+	if got := llm.Calls(); got != 3 {
+		t.Fatalf("model calls = %d, want 3 (the extractive nudge gets one more turn, which answers)", got)
+	}
+	if n := nudgeMessagesIn(sess.Conversation.Messages); n != 1 {
+		t.Fatalf("gentle nudge messages = %d, want 1", n)
+	}
+	if n := extractiveNudgeMessagesIn(sess.Conversation.Messages); n != 1 {
+		t.Fatalf("extractive nudge messages = %d, want 1", n)
+	}
+	// The extractive nudge must be a RoleUser message in the 3rd request's history.
+	if idx := indexOfUserMessage(thirdReqMsgs, "Stop investigating now"); idx < 0 {
+		t.Fatalf("extractive nudge not found as a user message in the 3rd request; msgs=%+v", thirdReqMsgs)
+	}
+	res := lastResult(t, evs)
+	if res.Stop != session.StopEndTurn {
+		t.Fatalf("stop = %q, want %q (a post-extractive answer is a real end_turn, NOT no_progress)", res.Stop, session.StopEndTurn)
+	}
+	if res.Text != "best-effort answer" {
+		t.Fatalf("final text = %q, want %q", res.Text, "best-effort answer")
+	}
+}
+
+// TestGraduatedNudgeCapOneIsExtractive: with cap=1 the single nudge IS the final one, so
+// it is EXTRACTIVE with no gentle attempt. Then give up on the next empty turn. Exactly 2
+// model calls. Pins the cap=1 off-by-one.
+func TestGraduatedNudgeCapOneIsExtractive(t *testing.T) {
+	llm := mockllm.New(
+		mockllm.EmptyTurn(),
+		mockllm.EmptyTurn(),
+		// must NEVER be reached.
+		mockllm.TextTurn("should-never-run"),
+	)
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t), MaxNoProgressNudges: 1})
+	sess := newSession(t, session.Limits{})
+	ws := memfs.NewWorkspace("/ws")
+
+	evs := drain(e.Run(context.Background(), sess, ws, "go"))
+
+	if got := llm.Calls(); got != 2 {
+		t.Fatalf("model calls = %d, want 2 (initial + one extractive nudge, then give up)", got)
+	}
+	if n := nudgeMessagesIn(sess.Conversation.Messages); n != 0 {
+		t.Fatalf("gentle nudge messages = %d, want 0 (cap=1 has no gentle attempt)", n)
+	}
+	if n := extractiveNudgeMessagesIn(sess.Conversation.Messages); n != 1 {
+		t.Fatalf("extractive nudge messages = %d, want 1 (the single nudge is the final one)", n)
+	}
+	if res := lastResult(t, evs); res.Stop != session.StopNoProgress {
+		t.Fatalf("stop = %q, want %q", res.Stop, session.StopNoProgress)
+	}
+}
+
+// TestGraduatedNudgeFinalAdvisoryText pins the EvNoProgress advisory text decision: with
+// cap=2 and three empty turns, exactly one gentle advisory ("nudging to continue"), one
+// final advisory ("final attempt: requesting a best-effort answer"), and one terminal
+// ("ending run") event.
+func TestGraduatedNudgeFinalAdvisoryText(t *testing.T) {
+	llm := mockllm.New(mockllm.EmptyTurn(), mockllm.EmptyTurn(), mockllm.EmptyTurn())
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t), MaxNoProgressNudges: 2})
+	sess := newSession(t, session.Limits{})
+
+	evs := drain(e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go"))
+
+	var gentle, final, terminal, other int
+	for _, ev := range evs {
+		if ev.Type != session.EvNoProgress {
+			continue
+		}
+		switch {
+		case strings.Contains(ev.Text, "nudging to continue"):
+			gentle++
+		case strings.Contains(ev.Text, "final attempt: requesting a best-effort answer"):
+			final++
+		case strings.Contains(ev.Text, "ending run"):
+			terminal++
+		default:
+			other++
+		}
+	}
+	if gentle != 1 || final != 1 || terminal != 1 || other != 0 {
+		t.Fatalf("EvNoProgress advisory texts = {gentle:%d final:%d terminal:%d other:%d}, want {1 1 1 0}", gentle, final, terminal, other)
 	}
 }

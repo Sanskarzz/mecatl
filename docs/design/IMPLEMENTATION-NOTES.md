@@ -114,9 +114,20 @@ BOUNDED continuation
 user message (`noProgressNudgeText`, a *new* user message, not a re-send and not a forced text
 block) up to `Deps.MaxNoProgressNudges` times (default `defaultNoProgressNudges`=2 applied in
 `NewEngine`; `Config.MaxNoProgressNudges` threads an operator override through
-`engineDepsForProvider`; `<0` disables). Each nudge emits a visible `EvNoProgress` event
-(transient, advisory, NOT recorded to history, NOT a diagnostics line — the event taxonomy owns
-it, so the "loop emits exactly TWO diagnostic lines" invariant holds). On budget exhaustion the
+`engineDepsForProvider`; `<0` disables). The nudge is **GRADUATED** by attempt, selected on the
+PRE-INCREMENT counter: the early attempt(s) get the gentle `noProgressNudgeText`; the FINAL
+attempt before give-up (where `*noProgressNudges == nudgeCap-1` at entry to the nudge branch)
+gets the forceful `noProgressExtractiveNudgeText`, which tells the model to stop investigating
+and emit its best-effort final answer NOW from information already gathered. Because the give-up
+branch and the increment both read the pre-increment value, the extractive nudge is structurally
+guaranteed one more model turn before give-up — a model that answers on that turn completes
+`StopEndTurn` (the rescue path), not `StopNoProgress`. With `nudgeCap==1` the single nudge IS the
+final one → extractive only, no gentle attempt (no `tool_choice` forcing on either nudge; both are
+plain `RoleUser` messages). Each nudge emits a visible `EvNoProgress` event (transient, advisory,
+NOT recorded to history, NOT a diagnostics line — the event taxonomy owns it, so the "loop emits
+exactly TWO diagnostic lines" invariant holds); the final/extractive attempt carries a DISTINCT
+advisory text ("final attempt: requesting a best-effort answer") so clients can render it as a
+last-ditch notice, while the gentle advisory and terminal give-up texts are unchanged. On budget exhaustion the
 run terminates CLEANLY via `terminateComplete` with `StopNoProgress` — a NON-error terminal, so
 the session ends `completed` and stays Reopen-recoverable (never `StopError`, never an infinite
 loop). The nudge loop is ALSO independently bounded by `Limits.MaxTurns` (each nudged turn goes

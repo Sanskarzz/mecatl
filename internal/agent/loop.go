@@ -36,13 +36,34 @@ const defaultCompactionRatio = 0.8
 // clearly with StopNoProgress. A negative MaxNoProgressNudges disables nudging.
 const defaultNoProgressNudges = 2
 
-// noProgressNudgeText is the bounded continuation injected as a NEW user message
-// after a no-progress turn. It is a fresh user message (NOT a forced text block and
-// NOT a re-send of the prior array), so it complies with the reasoning-model field
-// guidance ("do not naively retry the same message array"; "avoid emitting text
-// blocks right after tool results") and never forces tool use (no tool_choice).
+// noProgressNudgeText is the GENTLE continuation injected as a NEW user message on the
+// EARLY no-progress attempt(s) (every nudge except the final one before give-up; see
+// finishTurnNoTools). It is a fresh user message (NOT a forced text block and NOT a
+// re-send of the prior array), so it complies with the reasoning-model field guidance
+// ("do not naively retry the same message array"; "avoid emitting text blocks right
+// after tool results") and never forces tool use (no tool_choice). The substring
+// "Make concrete progress on the task using your tools" is a stable test key — do not
+// change it.
 const noProgressNudgeText = "Please continue. Make concrete progress on the task using your tools, " +
 	"or — if you are blocked or believe the task is complete — say so explicitly in a short message."
+
+// noProgressExtractiveNudgeText is the FINAL no-progress nudge, injected on the LAST
+// attempt before give-up (the nudge where *noProgressNudges == nudgeCap-1; see
+// finishTurnNoTools). Unlike the gentle nudge it does not ask for "progress"; it is a
+// last-resort EXTRACTION: stop investigating and produce a best-effort deliverable NOW
+// from information already gathered, rather than ending the run with nothing. It is a
+// fresh user message (NOT a forced text block, NOT a re-send, NO tool_choice) — same
+// provider-neutral compliance as noProgressNudgeText. It instructs the model AGAINST
+// running tools but does NOT set tool_choice (the no-tool_choice-forcing invariant). The
+// extractive nudge is structurally guaranteed one more model turn (it rides the same
+// return-false re-drive path), so a model that answers after it completes with
+// StopEndTurn, NOT StopNoProgress. The substring "Stop investigating now" is a stable
+// test key (extractiveNudgeMessagesIn) — do not change it.
+const noProgressExtractiveNudgeText = "Stop investigating now and do not run any " +
+	"more commands or tools. Using only the information you have already gathered, " +
+	"write your best final answer to the original task as a direct message now, even " +
+	"if it is incomplete or uncertain — note any gaps briefly. Do not plan further " +
+	"steps; deliver what you have."
 
 // Deps are the injected ports and configuration a single Engine is built from.
 // Every field is a port (an interface) or plain config, so the agent package
@@ -454,6 +475,16 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 // continuation nudge was injected and the caller loops back to Step 2.
 // noProgressNudges is mutated through the pointer; nudgeCap < 0 disables nudging.
 //
+// The continuation nudge is GRADUATED by attempt (selected on the PRE-INCREMENT counter):
+// the early attempt(s) get the gentle noProgressNudgeText, and the FINAL attempt before
+// give-up (where *noProgressNudges == nudgeCap-1 at entry to the nudge branch) gets the
+// forceful noProgressExtractiveNudgeText, which tells the model to stop investigating and
+// emit its best-effort final answer NOW. The give-up branch and the increment both read
+// the pre-increment value, so the extractive nudge is structurally guaranteed one more
+// model turn before give-up (a model that answers on that turn ends StopEndTurn, not
+// StopNoProgress). With nudgeCap==1 the single nudge IS the final one → extractive only,
+// no gentle attempt.
+//
 // streamStop discipline (the masking guard): the no-progress nudge applies ONLY when
 // the turn ended on a BENIGN end — StopEndTurn or StopNone (the model simply finished
 // its turn). Both adapters' mapStop relay a REAL terminal condition (max_tokens /
@@ -505,10 +536,22 @@ func (e *Engine) finishTurnNoTools(ctx context.Context, r *Run, sess *session.Se
 	// Limits.MaxTurns and re-checks cancellation). The empty assistant turn (with its
 	// reasoning blob) precedes the nudge, so the next turn replays the model's own
 	// reasoning.
+	//
+	// GRADUATED selection on the PRE-INCREMENT counter: the final nudge before give-up
+	// (*noProgressNudges == nudgeCap-1, only reachable here since the give-up branch
+	// already short-circuited nudgeCap<0 and *noProgressNudges>=nudgeCap) gets the
+	// forceful extractive nudge; earlier attempts get the gentle one. The increment MUST
+	// stay AFTER this predicate.
+	final := *noProgressNudges == nudgeCap-1
+	nudgeText := noProgressNudgeText
+	advisory := "model produced no tool call or text; nudging to continue"
+	if final {
+		nudgeText = noProgressExtractiveNudgeText
+		advisory = "model still not progressing; final attempt: requesting a best-effort answer"
+	}
 	*noProgressNudges++
-	e.emit(r, session.Event{Type: session.EvNoProgress, Turn: turnIdx,
-		Text: "model produced no tool call or text; nudging to continue"})
-	if err := sess.RecordUserPrompt(noProgressNudgeText, nil); err != nil {
+	e.emit(r, session.Event{Type: session.EvNoProgress, Turn: turnIdx, Text: advisory})
+	if err := sess.RecordUserPrompt(nudgeText, nil); err != nil {
 		e.terminate(ctx, r, sess, session.StopError, lastText, total, err)
 		return true
 	}
