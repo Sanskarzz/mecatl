@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stacklok/mecatl/internal/session"
@@ -192,5 +193,229 @@ func TestTasksEqualDedup(t *testing.T) {
 	}
 	if tasksEqual(base, nil) {
 		t.Error("differing lengths must compare unequal")
+	}
+}
+
+// TestIsNonDeliverable pins the conservative predicate: it fires on empty/whitespace and
+// on a SHORT refusal-PREFIXED text over a populated ledger, but NEVER on a short valid
+// terse report, a long refusal-prefixed text (over the floor), a refusal phrase appearing
+// mid-body (not prefix-anchored), or a refusal-shaped text with an empty ledger. Reverting
+// the refusal-prefix half of the trigger flips the headline "short refusal + ledger" row.
+func TestIsNonDeliverable(t *testing.T) {
+	longRefusal := "I'm sorry, but I cannot assist " + strings.Repeat("with the detailed analysis here ", 20)
+	cases := []struct {
+		name      string
+		text      string
+		ledgerLen int
+		want      bool
+	}{
+		{"empty", "", 3, true},
+		{"whitespace", "   \n\t", 3, true},
+		{"short refusal + ledger", "I'm sorry, but I cannot assist with that request.", 3, true},
+		{"short refusal, no ledger", "I'm sorry, but I cannot assist with that request.", 0, false},
+		{"long refusal-prefixed report", longRefusal, 3, false},
+		{"short valid terse report", "All three modules pass; no issues found.", 3, false},
+		{"refusal phrase mid-body", "The team reviewed auth. One member noted: I cannot assist further here.", 3, false},
+		{"good substantive report", "The team investigated the authentication path across three modules.\n\nFindings: tokens are validated in middleware.go before any handler runs; the refresh flow rotates secrets correctly; no missing checks were found in the reviewed code.", 3, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isNonDeliverable(c.text, c.ledgerLen); got != c.want {
+				t.Errorf("isNonDeliverable(%q, %d) = %v, want %v", c.text, c.ledgerLen, got, c.want)
+			}
+		})
+	}
+}
+
+// TestDeliverableHonestFloorWhenLedgerEmpty asserts tier 3: a TeamOutcome with no report,
+// no findings, and members all stopped yields the honest floor — non-empty, naming
+// non-convergence, the round count, and the stopped-member reasons.
+func TestDeliverableHonestFloorWhenLedgerEmpty(t *testing.T) {
+	o := TeamOutcome{
+		Rounds:    5,
+		Quiescent: false,
+		Members: []MemberOutcome{
+			{Name: "lead", Stopped: true, Disposition: DispositionStopped, Reason: StopReasonBudget},
+			{Name: "scout", Stopped: true, Disposition: DispositionStopped, Reason: StopReasonError},
+		},
+	}
+	got := deliverable(o)
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("deliverable must NEVER be empty (structural invariant)")
+	}
+	for _, want := range []string{"did NOT converge", "5 round", "lead: budget", "scout: error", "recoverable result"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("honest floor missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestDeliverableNonConvergenceHeaderOnPlausibleSynthesis asserts AC6: a substantive,
+// non-refusal synthesis on a NON-quiescent team still carries the non-convergence banner
+// (tier 1 + header), while the SAME report on a quiescent team does NOT.
+func TestDeliverableNonConvergenceHeaderOnPlausibleSynthesis(t *testing.T) {
+	report := "The team reviewed the auth path and confirmed tokens are validated in middleware before any handler runs. No gaps were found in the reviewed code."
+	nonConv := TeamOutcome{
+		Rounds:    8,
+		Quiescent: false,
+		Report:    report,
+		Findings:  []session.TeamFindingSnapshot{{Member: "scout", Body: "tokens validated"}},
+		Members:   []MemberOutcome{{Name: "lead", Disposition: DispositionDone}},
+	}
+	got := deliverable(nonConv)
+	if !strings.Contains(got, "did NOT converge (stop: max-turns)") {
+		t.Errorf("non-quiescent tier-1 deliverable must carry the non-convergence header:\n%s", got)
+	}
+	if !strings.Contains(got, report) {
+		t.Errorf("tier-1 deliverable must still contain the report body:\n%s", got)
+	}
+
+	conv := nonConv
+	conv.Quiescent = true
+	gotConv := deliverable(conv)
+	if strings.Contains(gotConv, "did NOT converge") {
+		t.Errorf("a converged tier-1 deliverable must NOT carry a non-convergence banner:\n%s", gotConv)
+	}
+	if !strings.Contains(gotConv, report) {
+		t.Errorf("converged tier-1 deliverable must contain the report verbatim:\n%s", gotConv)
+	}
+}
+
+// TestDeliverableRefusalFallsBackToLedger is the pure-layer guard for the headline: a
+// refusal-shaped report over a populated ledger is REPLACED by the structured fallback
+// (the ledger reaches the deliverable; the refusal text does not). It is the unit-level
+// companion to the e2e TestTeamToolRefusalSynthesisFallsBackToLedger.
+func TestDeliverableRefusalFallsBackToLedger(t *testing.T) {
+	o := TeamOutcome{
+		Rounds:    4,
+		Quiescent: false,
+		Report:    "I'm sorry, but I cannot assist with that request.",
+		Findings: []session.TeamFindingSnapshot{
+			{Member: "scout", Body: "auth path validates tokens in middleware.go"},
+		},
+		Members: []MemberOutcome{
+			{Name: "scout", Disposition: DispositionDone, Completed: []string{"review auth"}},
+		},
+	}
+	got := deliverable(o)
+	if strings.Contains(got, "I cannot assist") || strings.Contains(got, "I'm sorry") {
+		t.Errorf("the refusal text must be discarded, not surfaced:\n%s", got)
+	}
+	if !strings.Contains(got, "auth path validates tokens in middleware.go") {
+		t.Errorf("the recorded finding must reach the fallback deliverable:\n%s", got)
+	}
+	if !strings.Contains(got, "Recorded findings:") {
+		t.Errorf("the structured fallback must lead with the findings ledger:\n%s", got)
+	}
+	if !strings.Contains(got, "completed: review auth") {
+		t.Errorf("the per-member completed tasks must appear:\n%s", got)
+	}
+}
+
+// TestDeliverableSingleMemberLeadRefusalDropsLeadLastText pins the lead-LastText skip
+// (the MemberOutcome.Lead deviation). A lead-only team whose synthesis is a refusal —
+// which is ALSO the lead's terminal LastText — must still surface the lead-authored
+// finding from the ledger while DROPPING the refusal text. If a regression started
+// counting the lead's LastText in joinTeamFallback/hasMemberContent, the refusal would
+// re-leak into the deliverable and this test would fail.
+func TestDeliverableSingleMemberLeadRefusalDropsLeadLastText(t *testing.T) {
+	const refusal = "I'm sorry, but I cannot assist with that request."
+	o := TeamOutcome{
+		Rounds:    3,
+		Quiescent: false,
+		Report:    refusal, // the rejected synthesis
+		Findings: []session.TeamFindingSnapshot{
+			{Member: "lead", Body: "config loads from /etc/app before $HOME override"},
+		},
+		Members: []MemberOutcome{
+			{Name: "lead", Lead: true, LastText: refusal, Disposition: DispositionDone},
+		},
+	}
+	got := deliverable(o)
+	if strings.Contains(got, "I cannot assist") || strings.Contains(got, "I'm sorry") {
+		t.Errorf("the lead's refusal LastText must be dropped (the !m.Lead skip), not surfaced:\n%s", got)
+	}
+	if !strings.Contains(got, "config loads from /etc/app before $HOME override") {
+		t.Errorf("the lead-authored finding must survive into the deliverable:\n%s", got)
+	}
+	if !strings.Contains(got, "Recorded findings:") {
+		t.Errorf("the structured fallback must render the ledger:\n%s", got)
+	}
+}
+
+// TestDeliverableSingleMemberLeadRefusalNoLedgerStaysNonEmpty is the sibling: a lead-only
+// team that refuses AND recorded NO findings. By the LOCKED isNonDeliverable design the
+// ledgerLen>0 guard means a refusal over an EMPTY ledger is NOT rejected — there is
+// nothing better to show, so the lead's words pass through (no worse than the floor, and
+// may carry context), with the non-convergence banner prepended. The invariant the
+// reviewer cares about holds: the deliverable is NON-EMPTY (never an empty result), and it
+// carries the "did NOT converge" banner so the parent still learns the team did not finish.
+func TestDeliverableSingleMemberLeadRefusalNoLedgerStaysNonEmpty(t *testing.T) {
+	const refusal = "I'm sorry, but I cannot assist with that request."
+	o := TeamOutcome{
+		Rounds:    3,
+		Quiescent: false,
+		Report:    refusal,
+		Findings:  nil,
+		Members: []MemberOutcome{
+			{Name: "lead", Lead: true, LastText: refusal, Disposition: DispositionDone},
+		},
+	}
+	got := deliverable(o)
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("deliverable must NEVER be empty (structural invariant)")
+	}
+	if !strings.Contains(got, "did NOT converge") {
+		t.Errorf("a non-quiescent deliverable must carry the non-convergence banner:\n%s", got)
+	}
+}
+
+// TestJoinTeamFallbackGroupsFindingsInFirstSeenOrder pins the findings grouping order: a
+// two-member ledger (scout then fixer) must render "From scout:" before "From fixer:",
+// driven by the first-seen order slice. A switch to map-iteration order would fail this.
+func TestJoinTeamFallbackGroupsFindingsInFirstSeenOrder(t *testing.T) {
+	o := TeamOutcome{
+		Rounds:    2,
+		Quiescent: true,
+		Findings: []session.TeamFindingSnapshot{
+			{Member: "scout", Body: "scout finding A"},
+			{Member: "fixer", Body: "fixer finding B"},
+			{Member: "scout", Body: "scout finding C"},
+		},
+		Members: []MemberOutcome{
+			{Name: "scout", Disposition: DispositionDone},
+			{Name: "fixer", Disposition: DispositionDone},
+		},
+	}
+	got := joinTeamFallback(o)
+	scoutIdx := strings.Index(got, "From scout:")
+	fixerIdx := strings.Index(got, "From fixer:")
+	if scoutIdx < 0 || fixerIdx < 0 {
+		t.Fatalf("both member finding groups must render:\n%s", got)
+	}
+	if scoutIdx > fixerIdx {
+		t.Errorf("findings must group in first-seen member order (scout before fixer):\n%s", got)
+	}
+	// Both of scout's findings must appear under its single group (append order preserved).
+	if !strings.Contains(got, "scout finding A") || !strings.Contains(got, "scout finding C") {
+		t.Errorf("all of a member's findings must render under its group:\n%s", got)
+	}
+}
+
+// TestDeliverableShortValidReportKept asserts AC2 at the pure layer: a SHORT but
+// non-refusal-shaped real report over a populated ledger passes through verbatim (tier 1),
+// NOT degraded to the structured fallback.
+func TestDeliverableShortValidReportKept(t *testing.T) {
+	report := "All modules reviewed; no security issues found."
+	o := TeamOutcome{
+		Rounds:    2,
+		Quiescent: true,
+		Report:    report,
+		Findings:  []session.TeamFindingSnapshot{{Member: "scout", Body: "x"}},
+		Members:   []MemberOutcome{{Name: "scout", Disposition: DispositionDone}},
+	}
+	got := deliverable(o)
+	if got != report {
+		t.Errorf("a short valid report on a quiescent team must pass through verbatim, got:\n%s", got)
 	}
 }

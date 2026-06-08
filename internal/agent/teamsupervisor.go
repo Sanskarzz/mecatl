@@ -583,6 +583,14 @@ type TeamOutcome struct {
 	// (no lead, lead stopped, or the lead produced no text); the caller then renders
 	// the degraded joinTeamFallback concatenation instead.
 	Report string
+	// Findings is the team's findings ledger at the end of the Run, snapshotted in
+	// append order — the PRIMARY deterministic, member-authored data the degraded
+	// deliverable leads with. It is the same data buildSynthesisSources reads
+	// (s.team.Findings()), captured onto the outcome so BOTH the Team-tool deliverable
+	// path and the gRPC RunTeam consumer get the rich fallback without reaching into
+	// the live *team.Team. Bodies are clamped identically to the wire/observability
+	// projection (projectTeamFindingsSnapshot).
+	Findings []session.TeamFindingSnapshot
 }
 
 // MemberDisposition is the terminal disposition of one team member at the end of a
@@ -628,6 +636,17 @@ type MemberOutcome struct {
 	// Reason is WHY a stopped member stopped (error / cancelled / budget); empty for a
 	// done member.
 	Reason MemberStopReason
+	// Completed holds this member's completed-task descriptions (clamped), captured in
+	// outcome() from the shared task list. It feeds the ledger-rich deliverable
+	// fallback so a degraded report can state what each member actually finished — the
+	// "honest gaps" data the incident wanted. Empty for a member that completed no task.
+	Completed []string
+	// Lead reports whether this member is the coordinating lead. The structured
+	// deliverable fallback SKIPS the lead's LastText: after the synthesis turn the
+	// lead's last words ARE the synthesis (empty, truncated, or the rejected refusal
+	// the fallback exists to replace), so echoing them would re-surface the very text
+	// the fallback discarded. The lead's disposition still appears.
+	Lead bool
 }
 
 // turnInput pairs a member with the rendered prompt for its next turn this round.
@@ -884,7 +903,9 @@ func (s *Supervisor) persistMember(ctx context.Context, m *memberRT) {
 // prompt from the three D1 source layers (ledger → digest-for-non-recording-members
 // → lead inbox), all fenced UNTRUSTED, then drives the lead via driveOneTurn (the
 // same auto-deny / forward / capture path runTurn uses) and persists the lead
-// session afterwards. It returns "" — telling Run to fall back to joinTeamFallback —
+// session afterwards. It returns "" — telling Run to fall back to the structured
+// deliverable (the QUALITY gate that rejects a refusal-shaped report lives in the Team
+// tool's deliverable() chain, NOT here: synthesise is a pure producer) —
 // when there is no lead, the lead is stopped (non-resumable: Reopen already failed),
 // or the lead produced no synthesis text. When the lead hits its turn budget mid-
 // synthesis but produced text, the text is returned with a truncation note.
@@ -950,6 +971,8 @@ func (s *Supervisor) buildSynthesisSources() string {
 		writeUntrustedBlock(&b, s.goal)
 	}
 
+	s.writeStoppedMemberStatus(&b)
+
 	// Layer 1 — the findings ledger (primary), grouped by member in append order.
 	findings := s.team.Findings()
 	recorded := make(map[string]bool)
@@ -1012,14 +1035,53 @@ func (s *Supervisor) buildSynthesisSources() string {
 	return b.String()
 }
 
-// outcome assembles the final TeamOutcome from member runtime state.
+// writeStoppedMemberStatus appends the TRUSTED "Team status:" section (3A) flagging the
+// members that stopped before finishing and why (the supervisor's closed MemberStopReason
+// enum: budget/error/cancelled), plus their roster names (which already ride EvTeamStart /
+// EvTeamEnd verbatim, so they are safe to cross unfenced). None of it is member-authored
+// content, so it is NOT wrapped in writeUntrustedBlock; the bare "Team status:" header line
+// is the only forgeable token, and framingHeader neutralises a finding body that tries to
+// forge it. Nothing is written when no member stopped (an all-clean team).
+func (s *Supervisor) writeStoppedMemberStatus(b *strings.Builder) {
+	var stoppedParts []string
+	for _, name := range s.order {
+		m := s.members[name]
+		if m != nil && m.stopped {
+			reason := string(m.stopReason)
+			if reason == "" {
+				reason = "unknown"
+			}
+			stoppedParts = append(stoppedParts, fmt.Sprintf("%s (%s)", name, reason))
+		}
+	}
+	if len(stoppedParts) == 0 {
+		return
+	}
+	b.WriteString("\nTeam status:\n")
+	fmt.Fprintf(b, "Members %s stopped before finishing. Their work may be incomplete; "+
+		"note any resulting gaps in your report.\n", strings.Join(stoppedParts, ", "))
+}
+
+// outcome assembles the final TeamOutcome from member runtime state. It snapshots
+// the findings ledger and each member's completed-task descriptions onto the outcome
+// (clamped via the same projection the wire/observability path uses) so the degraded
+// deliverable fallback can lead with member-authored data without reaching back into
+// the live *team.Team after the Run has returned.
 func (s *Supervisor) outcome(rounds int) TeamOutcome {
 	o := TeamOutcome{Rounds: rounds, Quiescent: s.team.Quiescent()}
+	o.Findings = projectTeamFindingsSnapshot(s.team.Findings())
+	tasks := s.team.Tasks()
 	for _, name := range s.order {
 		m := s.members[name]
 		disp := DispositionDone
 		if m.stopped {
 			disp = DispositionStopped
+		}
+		var completed []string
+		for _, tk := range tasks {
+			if tk.State == team.TaskCompleted && tk.Assignee == name {
+				completed = append(completed, clampPreview(tk.Description))
+			}
 		}
 		o.Members = append(o.Members, MemberOutcome{
 			Name:        name,
@@ -1027,6 +1089,8 @@ func (s *Supervisor) outcome(rounds int) TeamOutcome {
 			Stopped:     m.stopped,
 			Disposition: disp,
 			Reason:      m.stopReason,
+			Completed:   completed,
+			Lead:        name == s.leadName,
 		})
 	}
 	return o
@@ -1258,6 +1322,7 @@ func framingHeader(trimmed string) bool {
 	switch {
 	case trimmed == "new messages for you:",
 		trimmed == "team goal:",
+		trimmed == "team status:",
 		trimmed == "team roster:",
 		trimmed == "your role:",
 		trimmed == "recorded findings:",

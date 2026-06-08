@@ -218,6 +218,21 @@ func TestTeamToolFormsTeamAndIsolatesContent(t *testing.T) {
 	if !strings.Contains(summary, "CONSOLIDATED REPORT") {
 		t.Errorf("returned result should be the lead's consolidated synthesis, got: %q", summary)
 	}
+	// The deliverable chain returns the lead's synthesis (tier 1, a usable non-refusal
+	// report), NOT the degraded structured fallback — the synthesis text is present and
+	// the "Recorded findings:" fallback header is absent.
+	if strings.Contains(summary, "Recorded findings:") {
+		t.Errorf("a usable synthesis must NOT be degraded to the structured fallback: %q", summary)
+	}
+	// WHY the non-convergence banner is expected: this scripted roster never reaches
+	// genuine quiescence — the worker ends after reporting but the lead keeps producing
+	// LEAD_SECRET turns, so the team stops at the round cap (Quiescent=false) rather than
+	// idling to convergence. deliverable therefore prepends the "did NOT converge" banner
+	// to tier 1 (AC6). This assertion depends on that SCHEDULER behaviour, not on the
+	// deliverable chain itself; a roster that idled cleanly would omit the banner.
+	if !strings.Contains(summary, "did NOT converge") {
+		t.Errorf("a non-quiescent team's deliverable must carry the non-convergence banner (AC6): %q", summary)
+	}
 
 	// The parent Conversation must contain ONLY: the user prompt, the parent's Team
 	// tool call, the Team ToolResult (the joined summary), and the parent's final
@@ -417,6 +432,111 @@ func TestTeamFindingsProjectedOnChangeAndOnEnd(t *testing.T) {
 	}
 	if len(end.Findings) != 2 {
 		t.Errorf("team.end should carry the final findings ledger, got %+v", end.Findings)
+	}
+}
+
+// teamResultContent drives a 2-member team (lead coordinates, worker records ONE finding
+// then ends) through the real Team tool path with a scripted LEAD synthesis text, and
+// returns the parent's single Team ToolResult content. It is the shared harness for the
+// deliverable-resilience e2e tests: the only variable across them is the lead's synthesis
+// text, so each test passes its own and asserts on the resulting deliverable.
+func teamResultContent(t *testing.T, leadSynthesis string) string {
+	t.Helper()
+	finding := session.NewToolCall("w1", "RecordFinding",
+		json.RawMessage(`{"finding":"auth path validates tokens in middleware.go"}`))
+	leadProv := mockllm.New(
+		mockllm.TextTurn("delegating to the worker"), // round 0
+		mockllm.TextTurn(leadSynthesis),              // synthesis (last lead turn)
+	)
+	workerProv := mockllm.New(
+		mockllm.ToolCallTurn(finding), // round 0 turn 1: record a finding
+		mockllm.TextTurn("done"),      // round 0 turn 2: end the run cleanly
+	)
+	providers := map[string]*mockllm.Provider{"lead": leadProv, "worker": workerProv}
+
+	teamTool := agent.NewTeamTool(teamToolFactory(t, providers))
+	parentCat := catalogWith(t, teamTool)
+	parentLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("p1", "Team",
+			`{"goal":"investigate the auth path","members":[{"name":"lead","role":"coordinate"},{"name":"worker","role":"investigate and report"}]}`)),
+		mockllm.TextTurn("parent received the team result"),
+	)
+	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: parentCat})
+	sess := newSession(t, session.Limits{})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "investigate the auth path")
+	evs := drain(r)
+
+	var results []*session.ToolResult
+	for _, ev := range evs {
+		if ev.Type == session.EvToolResult {
+			results = append(results, ev.ToolResult)
+		}
+	}
+	if len(results) != 1 {
+		t.Fatalf("parent saw %d tool results, want exactly 1 (the Team deliverable)", len(results))
+	}
+	// AC9 (gauntlet #7): the member's intermediate activity must NOT leak into the parent
+	// Conversation — only the single Team ToolResult folds back. Assert the isolation
+	// property holds regardless of the deliverable's content.
+	for _, msg := range sess.Conversation.Messages {
+		for _, tc := range msg.ToolCalls {
+			if tc.Name == "RecordFinding" || tc.Name == "CompleteTask" || tc.Name == "SendMessage" {
+				t.Fatalf("member tool call %q leaked into parent Conversation", tc.Name)
+			}
+		}
+	}
+	return results[0].Content
+}
+
+// TestTeamToolRefusalSynthesisFallsBackToLedger is the HEADLINE incident-regression
+// guard: when the lead's synthesis is a REFUSAL ("I'm sorry, but I cannot assist…") yet
+// the team recorded a finding, the deliverable that folds back to the parent must be the
+// ledger-rich structured fallback — the recorded finding present, the refusal text GONE.
+// Reverting the isNonDeliverable refusal check makes this test fail (the refusal would
+// pass through tier 1).
+func TestTeamToolRefusalSynthesisFallsBackToLedger(t *testing.T) {
+	content := teamResultContent(t, "I'm sorry, but I cannot assist with that request.")
+
+	if strings.Contains(content, "I cannot assist") || strings.Contains(content, "I'm sorry") {
+		t.Errorf("the refusal text must be DISCARDED, not returned to the parent:\n%s", content)
+	}
+	if !strings.Contains(content, "auth path validates tokens in middleware.go") {
+		t.Errorf("the recorded finding must reach the fallback deliverable (ledger fallback):\n%s", content)
+	}
+	if !strings.Contains(content, "Recorded findings:") {
+		t.Errorf("the structured fallback must lead with the findings ledger:\n%s", content)
+	}
+	if !strings.Contains(content, "From worker:") {
+		t.Errorf("the fallback must group findings by member:\n%s", content)
+	}
+}
+
+// TestTeamToolShortValidSynthesisKept is the no-false-positive guard (AC2): a SHORT but
+// legitimate, non-refusal-shaped report is KEPT verbatim (tier 1 passthrough), NOT
+// degraded to the structured fallback — even though the ledger is populated.
+func TestTeamToolShortValidSynthesisKept(t *testing.T) {
+	const report = "All modules reviewed; no security issues found."
+	content := teamResultContent(t, report)
+
+	if !strings.Contains(content, report) {
+		t.Errorf("a short valid synthesis must pass through verbatim:\n%s", content)
+	}
+	if strings.Contains(content, "Recorded findings:") {
+		t.Errorf("a valid synthesis must NOT be degraded to the structured fallback:\n%s", content)
+	}
+}
+
+// TestTeamToolEmptySynthesisFallsBack asserts AC3/AC5: an EMPTY lead synthesis still
+// falls back to the ledger-rich structured deliverable containing the recorded finding
+// (the pre-existing empty-fallback behaviour, now enriched with the grouped ledger).
+func TestTeamToolEmptySynthesisFallsBack(t *testing.T) {
+	content := teamResultContent(t, "")
+
+	if !strings.Contains(content, "auth path validates tokens in middleware.go") {
+		t.Errorf("an empty synthesis must fall back to the ledger-rich deliverable:\n%s", content)
+	}
+	if !strings.Contains(content, "Recorded findings:") {
+		t.Errorf("the empty-synthesis fallback must lead with the findings ledger:\n%s", content)
 	}
 }
 

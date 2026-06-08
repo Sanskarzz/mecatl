@@ -352,6 +352,17 @@ sits or how tall it is. When a transient region appears the viewport **shrinks**
 make room and the footer stays on-screen — a transient never pushes the footer off
 the bottom (and the viewport grows back when the transient clears).
 
+**Advisory vs durable notices.** A **compaction** boundary (`compaction` event) is a
+durable fact, so it lands as a muted **scrollback notice** that stays in the transcript.
+A **no-progress** notice (`no_progress` event — a nudge or the terminal give-up) is
+instead routed to the **transient footer status**: a successful nudge-recover must leave
+no permanent residue, and the *terminal* no-progress stop is already conveyed durably and
+independently by the run's `ResultMsg` → the footer label **`stopped · no progress`**. So
+no-progress never enters scrollback; during an active run it is effectively silent (the
+spinner already shows liveness), surfacing at most as a brief idle footer status. No
+advisory-vs-terminal proto field is needed — the durable terminal signal rides
+`ResultMsg`.
+
 The **mouse wheel** is only active on the alternate screen (the default full-screen
 TUI). With `--inline` / `--no-alt-screen` the terminal's own scrollback and native
 selection are left untouched (no mouse capture).

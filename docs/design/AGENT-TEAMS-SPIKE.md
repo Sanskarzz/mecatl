@@ -157,11 +157,33 @@ three layers (`buildSynthesisSources`), all fenced UNTRUSTED:
    that was frequently empty on a limit cutoff).
 3. **The lead's drained inbox** — peer messages addressed to the lead, appended last.
 
-If the lead is non-resumable (its last run failed / `Reopen` failed) or produces no
-text, `Report` is empty and the Team tool falls back to a clearly-labelled per-member
-concatenation (`joinTeamFallback`) — never an empty deliverable. A lead stopped purely
+A lead stopped purely
 by its lifetime turn budget is still resumable: the ONE synthesis turn runs even then
 (the report is the deliverable).
+
+**The deliverable resolves through a three-tier chain — never a bare refusal or empty
+(`deliverable()` in `teamtool.go`).** `synthesise` is a pure PRODUCER; the QUALITY gate
+lives in the Team tool. Tier **1** returns the lead's synthesis when it is usable —
+non-empty AND `!isNonDeliverable(report, len(Findings))`. Tier **2** is the ledger-rich
+structured fallback (`joinTeamFallback`): the findings ledger grouped by member FIRST,
+then per-member disposition + `[STOPPED: reason]` + completed tasks + last text — reached
+when the synthesis is empty OR a non-deliverable. Tier **3** is an honest floor ("ran N
+rounds, did not converge, M stopped") when even the ledger is empty — structurally
+non-empty. `isNonDeliverable` is deliberately CONSERVATIVE: it fires only on
+empty/whitespace OR (short `≤ 280 runes` AND a PREFIX-anchored match against the tiny
+`refusalPrefixes` set AND `ledgerLen > 0`) — all three together, so a legitimately terse
+real report is never discarded and a refusal over an empty ledger is left alone. A
+non-convergence header (`convergenceHeader`) is prepended to tiers 2/3 always and to tier
+1 when `!Quiescent` (a runaway team's plausible-looking synthesis still carries the "did
+NOT converge" banner). The fallback SKIPS the lead's `LastText` (it IS the rejected
+synthesis). The data (`TeamOutcome.Findings`, `MemberOutcome.Completed`/`.Lead`) is
+snapshotted in `outcome()`, so the gRPC path gets the same rich fallback. Headline guard:
+`TestTeamToolRefusalSynthesisFallsBackToLedger`.
+
+> **Deferred (4A) — team-wide token budget.** A config-only `WithTeamTokenBudget` that
+> stops scheduling after the current round when the accumulated `session.Usage` crosses a
+> ceiling, making `stop:max-tokens` trip this same fallback. The brake the 2.2M-token
+> runaway needed; this bundle is the safety net. Orthogonal, not implemented here.
 
 **On-demand member inspection (PULL).** Member sessions are persisted to the injected
 `port.SessionStore` under collision-free, team-namespaced ids

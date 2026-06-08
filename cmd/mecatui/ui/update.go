@@ -410,26 +410,43 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.TeamMsg:
 		m.applyTeam(msg)
 		return m.afterEvent()
-	case client.CompactionMsg, client.NoProgressMsg:
-		// Transient muted advisory notices that carry no model content: a compaction
-		// boundary, or a no-progress nudge/give-up (so a silent no-op turn is visible).
-		// Both render identically as a muted notice line.
+	case client.CompactionMsg:
+		// A compaction boundary is a DURABLE fact worth keeping in the transcript, so it
+		// stays a scrollback notice.
 		m.conv.addNotice(noticeLine(msg))
 		return m.afterEvent()
+	case client.NoProgressMsg:
+		// No-progress (advisory nudge OR terminal give-up) is TRANSIENT: a successful
+		// nudge-recover must leave NO permanent scrollback residue. The terminal stop is
+		// conveyed durably and independently by the ResultMsg → footer "stopped · no
+		// progress", so routing every no-progress notice to the transient footer status
+		// loses nothing terminal while keeping the advisory ephemeral. (It surfaces only
+		// at idle — during a run the spinner owns the footer-left and already shows
+		// liveness; that is the intended, non-intrusive behaviour.)
+		m.statusMsg = m.deps.Theme.Style("muted").Render(noticeLine(msg))
+		return m.afterEvent()
 	case client.ResultMsg:
-		m.usage = sumUsage(m.usage, msg.Usage)
-		// The latest turn's prompt size is the current context occupancy
-		// (InputTokens already includes cache-served tokens).
-		m.contextTokens = msg.Usage.InputTokens
-		if msg.Stop == stopError && msg.Error != "" {
-			m.conv.addError(msg.Error)
-		}
-		m = m.endRun(msg.Stop)
-		mm, drainCmd := m.drainQueue(msg.Stop)
-		return mm, tea.Batch(m.refreshCmd(), drainCmd)
+		return m.applyResult(msg)
 	default:
 		return m, nil
 	}
+}
+
+// applyResult handles a terminal ResultMsg: it folds the turn's usage into the running
+// totals, records the latest context occupancy, surfaces a terminal error, ends the run,
+// and drains any queued prompts. Extracted from updateStreamEvent's switch to keep that
+// dispatcher flat.
+func (m Model) applyResult(msg client.ResultMsg) (tea.Model, tea.Cmd) {
+	m.usage = sumUsage(m.usage, msg.Usage)
+	// The latest turn's prompt size is the current context occupancy
+	// (InputTokens already includes cache-served tokens).
+	m.contextTokens = msg.Usage.InputTokens
+	if msg.Stop == stopError && msg.Error != "" {
+		m.conv.addError(msg.Error)
+	}
+	m = m.endRun(msg.Stop)
+	mm, drainCmd := m.drainQueue(msg.Stop)
+	return mm, tea.Batch(m.refreshCmd(), drainCmd)
 }
 
 // noticeLine renders the muted-notice text for a transient advisory message

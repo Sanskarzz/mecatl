@@ -99,9 +99,13 @@ var teamSchema = json.RawMessage(`{
 // teamsupervisor.go). When executed it builds a fresh team.Team, enrols the
 // model-supplied roster (synthesizing the first member as the lead), drives the
 // existing Supervisor to quiescence over the SAME base workspace as the parent,
-// and returns the LEAD's consolidated synthesis (TeamOutcome.Report) as a single
-// ToolResult — falling back to a labelled per-member concatenation
-// (joinTeamFallback) only when the lead could not synthesise.
+// and returns the team's deliverable as a single ToolResult. The deliverable resolves
+// through the three-tier deliverable() chain: (1) the lead's consolidated synthesis when
+// it is a usable report (non-empty AND not a non-deliverable — isNonDeliverable rejects a
+// bare refusal over a populated ledger), (2) a ledger-rich structured fallback (findings
+// grouped by member, per-member disposition/reason/completed-tasks/last-text), (3) an
+// honest floor when even the ledger is empty. A non-convergence header is prepended when
+// the team did NOT converge. The ToolResult is therefore NEVER a bare refusal or empty.
 //
 // It is the team analogue of TaskTool/ForkTool, with two deliberate differences:
 //
@@ -201,13 +205,20 @@ func (*TeamTool) Spec() tool.ToolSpec {
 			"workers sharing a task list and mailbox. You specify the roster: each member has a " +
 			"name, a role (its briefing), and whether it needs to edit files (mutating). The " +
 			"FIRST member is the coordinating lead. Members run as long-lived subagents that " +
-			"coordinate via a shared task list and direct messages. A read-only member runs in " +
-			"an isolated throwaway git worktree with a full shell for INSPECTION (git log/show, " +
-			"cat, build, test) but cannot edit files; a mutating member runs in a self-contained " +
-			"copied workspace with edit/write/shell. Neither is merged back. Returns the " +
-			"lead's consolidated report — the per-member " +
-			"transcripts stay out of this conversation. Use for work that splits into " +
-			"specialist roles; for a single one-shot investigation use Task instead.",
+			"coordinate via a shared task list and direct messages.\n\n" +
+			"A team is the MOST EXPENSIVE tool — it runs several long-lived agents in parallel " +
+			"over many rounds and can consume a very large number of tokens. Use it only when " +
+			"the work genuinely splits into independent specialist roles. For a single focused " +
+			"investigation use Task; for something you can do directly, do it directly.\n\n" +
+			"Members are READ-ONLY by default: they inspect, build, and test in an isolated " +
+			"throwaway git worktree with a full shell (git log/show, cat, build, test) but " +
+			"CANNOT edit files. Set mutating: true only for a member that must write code (it " +
+			"then runs in a self-contained copied workspace with edit/write/shell). Neither tier " +
+			"is merged back.\n\n" +
+			"The returned report is the team's deliverable — a consolidated synthesis of the " +
+			"members' findings. USE IT as the result; do NOT redo the team's work yourself. If " +
+			"you need a specific member's full detail, call InspectMember with the returned team " +
+			"id. The per-member transcripts stay out of this conversation.",
 		Schema: teamSchema,
 	}
 }
@@ -363,14 +374,10 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 		}})
 	}
 
-	// The returned deliverable is the lead's consolidated synthesis (outcome.Report).
-	// When synthesis could not run (no lead, a non-resumable lead, or the lead produced
-	// no text) Report is empty; we then fall back to the labelled per-member
-	// concatenation so the parent always sees a non-empty, honest result.
-	result := outcome.Report
-	if strings.TrimSpace(result) == "" {
-		result = joinTeamFallback(outcome)
-	}
+	// The returned deliverable resolves through the three-tier deliverable() chain: the
+	// lead's synthesis when it is a usable report, else the ledger-rich structured
+	// fallback, else an honest floor — never a bare refusal or an empty string.
+	result := deliverable(outcome)
 	// Surface the team id INSIDE the returned text so the parent MODEL can discover
 	// the id it must pass to InspectMember. The id rides only EvTeamStart otherwise
 	// (a client-only event the model never sees), so without this the model can never
@@ -682,45 +689,236 @@ func memberEventUsage(ev session.Event) session.Usage {
 	return session.Usage{}
 }
 
-// joinTeamFallback renders the per-member terminal summaries into a single, clearly
-// delimited string. It is the DEGRADED path: it is returned only when the lead could
-// not synthesise a consolidated report (no lead, a non-resumable lead, or an empty
-// synthesis), so the parent still receives a non-empty, honest result instead of an
-// empty deliverable. The PRIMARY return value is the lead's synthesis (TeamOutcome
-// .Report); this concatenation mirrors fork.go's joinBranches — each member reports
-// its status (stopped or done) and its last text — in deterministic enrolment order.
-func joinTeamFallback(o TeamOutcome) string {
-	var b strings.Builder
+// nonDeliverableMaxLen is the rune ceiling below which a refusal-prefixed synthesis is
+// treated as a non-deliverable (see isNonDeliverable). ~280 runes is ~2-3 sentences —
+// well under any genuine multi-member consolidated report, but comfortably above a
+// padded one-line refusal. It is a GUARD on the refusal-prefix match, never a standalone
+// signal: a long-but-refusal-prefixed text and a short-but-non-refusal text both pass.
+const nonDeliverableMaxLen = 280
+
+// refusalPrefixes is the small, deliberately TINY set of lower-cased phrases a refusal
+// synthesis tends to OPEN with. Matched as a PREFIX of the trimmed, lower-cased text
+// (never a substring), so a real report that opens substantively and mentions a refusal
+// later does not match. The set will miss novel phrasings — acceptable, because (i) the
+// trigger requires short + prefix + ledger>0 together, and (ii) the fallback is strictly
+// better than a refusal, so a miss costs the status quo while a false positive only
+// swaps a terse-but-valid report for the member-authored ledger.
+var refusalPrefixes = []string{
+	"i'm sorry, but i can",
+	"i am sorry, but i can",
+	"i'm sorry, i can",
+	"i am sorry, i can",
+	"i cannot assist",
+	"i can't assist",
+	"i'm unable to",
+	"i am unable to",
+	"sorry, i can",
+	"i won't be able to",
+}
+
+// isNonDeliverable reports whether a lead synthesis is a non-deliverable that must be
+// REPLACED by the structured fallback rather than returned to the parent. It is
+// CONSERVATIVE by design: it fires ONLY on strong signals so a legitimately terse real
+// report is never discarded. It is pure (no I/O, no Supervisor state) and table-tested.
+//
+// text       — the lead's synthesis (the raw TeamOutcome.Report).
+// ledgerLen  — len(outcome.Findings): how many findings the team actually recorded.
+//
+// Fires when EITHER:
+//
+//	(a) the trimmed text is empty/whitespace; OR
+//	(b) the trimmed text is SHORT (<= nonDeliverableMaxLen runes) AND its lower-cased,
+//	    trimmed PREFIX matches one of refusalPrefixes AND the team recorded findings the
+//	    short text cannot plausibly contain (ledgerLen > 0).
+//
+// It does NOT fire on a long text that merely contains a refusal phrase mid-body (a real
+// report discussing refusals), nor on a short non-refusal-shaped answer (a valid terse
+// report), nor on a refusal-shaped text when the ledger is empty (nothing better to fall
+// back to — the honest floor still states non-convergence, so returning the lead's words
+// is no worse and may carry context).
+func isNonDeliverable(text string, ledgerLen int) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return true
+	}
+	lower := strings.ToLower(t)
+	short := len([]rune(t)) <= nonDeliverableMaxLen
+	refusalShaped := false
+	for _, p := range refusalPrefixes {
+		if strings.HasPrefix(lower, p) {
+			refusalShaped = true
+			break
+		}
+	}
+	return short && refusalShaped && ledgerLen > 0
+}
+
+// convergenceHeader returns the deliverable's leading status line stating round count
+// and whether the team converged. On a non-quiescent team (stop:max-turns) it states the
+// team did NOT converge so the parent learns this even when the synthesis body looks
+// plausible. On a quiescent team it states clean completion. deliverable prepends it to
+// tiers 2 and 3 always, and to tier 1 ONLY when !o.Quiescent (a converged happy-path
+// synthesis needs no banner). The "stop: max-turns" label mirrors teamStop's
+// non-quiescent → StopMaxTurns mapping.
+func convergenceHeader(o TeamOutcome) string {
 	stopped := 0
 	for _, m := range o.Members {
 		if m.Stopped {
 			stopped++
 		}
 	}
-	fmt.Fprintf(&b, "Team finished in %d round(s) (%s): %d member(s), %d stopped.\n",
-		o.Rounds, quiescenceLabel(o.Quiescent), len(o.Members), stopped)
-	for _, m := range o.Members {
-		b.WriteString("\n=== ")
-		b.WriteString(m.Name)
-		if m.Stopped {
-			b.WriteString(" [STOPPED] ===\n")
-		} else {
-			b.WriteString(" [DONE] ===\n")
+	if o.Quiescent {
+		return fmt.Sprintf("Team finished in %d round(s) (converged): %d member(s), %d stopped.\n\n",
+			o.Rounds, len(o.Members), stopped)
+	}
+	return fmt.Sprintf("Team ran %d round(s) and did NOT converge (stop: max-turns): %d member(s), %d stopped.\n\n",
+		o.Rounds, len(o.Members), stopped)
+}
+
+// deliverable resolves the team's final deliverable through three tiers, guaranteeing a
+// non-empty, honest result that is NEVER a bare refusal. Tier 1: the lead's synthesis,
+// IF non-empty AND not a non-deliverable (isNonDeliverable). Tier 2: a ledger-rich
+// structured fallback (findings ledger grouped by member, per-member dispositions +
+// completed tasks, last text). Tier 3: an honest floor — "ran N rounds, did not converge,
+// M stopped" — which is always non-empty because round count and dispositions always
+// exist. The non-convergence header (convergenceHeader) is prepended to tiers 2 and 3
+// always, and to tier 1 only when !o.Quiescent.
+func deliverable(o TeamOutcome) string {
+	report := strings.TrimSpace(o.Report)
+	if report != "" && !isNonDeliverable(o.Report, len(o.Findings)) {
+		// Tier 1 — the lead's usable synthesis. Prepend the non-convergence banner only
+		// when the team did NOT converge (a converged happy path needs no banner).
+		if !o.Quiescent {
+			return convergenceHeader(o) + o.Report
 		}
-		if strings.TrimSpace(m.LastText) != "" {
-			b.WriteString(m.LastText)
-			b.WriteString("\n")
+		return o.Report
+	}
+
+	// Tier 2 — the ledger-rich structured fallback. Build the body header-agnostically;
+	// if it is empty (no findings, no completed tasks, no last text across all members)
+	// fall through to the tier-3 honest floor. Either way the convergence header leads.
+	body := joinTeamFallback(o)
+	if strings.TrimSpace(body) == "" {
+		return convergenceHeader(o) + honestFloor(o)
+	}
+	return convergenceHeader(o) + body
+}
+
+// honestFloor is tier 3: the absolute floor reached only when the structured fallback
+// has no content to show (no findings, no completed tasks, no member last text). Round
+// count and dispositions always exist, so it is always non-empty — this is what makes
+// the "NEVER empty" invariant structural rather than incidental. The convergence header
+// is prepended by deliverable; this returns the floor BODY.
+func honestFloor(o TeamOutcome) string {
+	var stopped []string
+	for _, m := range o.Members {
+		if m.Stopped {
+			reason := string(m.Reason)
+			if reason == "" {
+				reason = "unknown"
+			}
+			stopped = append(stopped, fmt.Sprintf("%s: %s", m.Name, reason))
 		}
 	}
+	var b strings.Builder
+	b.WriteString("The lead did not produce a usable consolidated report, and the team recorded " +
+		"no findings, completed tasks, or final member output to fall back to.")
+	if len(stopped) > 0 {
+		fmt.Fprintf(&b, " Stopped members: %s.", strings.Join(stopped, ", "))
+	}
+	b.WriteString(" The work did not produce a recoverable result; consider re-running with a " +
+		"narrower goal or a smaller roster, or do the work directly.")
 	return b.String()
 }
 
-// quiescenceLabel renders the team's completion class for the joined summary.
-func quiescenceLabel(quiescent bool) string {
-	if quiescent {
-		return "quiescent"
+// joinTeamFallback renders the team's degraded deliverable BODY: the member-authored
+// findings ledger grouped by member FIRST, then a per-member status block (disposition +
+// reason + completed tasks + last text). It is HEADER-AGNOSTIC — deliverable prepends the
+// non-convergence header (convergenceHeader), so round/stop info appears once across all
+// tiers. It is the DEGRADED path: returned when the lead's synthesis is empty or a
+// non-deliverable, so the parent receives a non-empty, honest, member-data-rich result
+// instead of a refusal or an empty string. It returns "" when there is genuinely nothing
+// to show (no findings AND no per-member content), letting deliverable use the tier-3
+// honest floor.
+func joinTeamFallback(o TeamOutcome) string {
+	var b strings.Builder
+
+	// Findings ledger, grouped by member in first-seen append order (the gold).
+	byMember := make(map[string][]string)
+	var order []string
+	for _, f := range o.Findings {
+		if _, seen := byMember[f.Member]; !seen {
+			order = append(order, f.Member)
+		}
+		byMember[f.Member] = append(byMember[f.Member], f.Body)
 	}
-	return "stopped without quiescence"
+	if len(o.Findings) > 0 {
+		b.WriteString("The lead did not produce a usable consolidated report. Here is what the team gathered:\n\n")
+		b.WriteString("Recorded findings:\n")
+		for _, member := range order {
+			fmt.Fprintf(&b, "\nFrom %s:\n", member)
+			for _, body := range byMember[member] {
+				fmt.Fprintf(&b, "- %s\n", body)
+			}
+		}
+	}
+
+	// Per-member status — disposition + reason + completed tasks + last text.
+	var statusBody strings.Builder
+	for _, m := range o.Members {
+		statusBody.WriteString("\n=== ")
+		statusBody.WriteString(m.Name)
+		if m.Stopped {
+			reason := string(m.Reason)
+			if reason == "" {
+				reason = "unknown"
+			}
+			fmt.Fprintf(&statusBody, " [STOPPED: %s] ===\n", reason)
+		} else {
+			statusBody.WriteString(" [DONE] ===\n")
+		}
+		if len(m.Completed) > 0 {
+			fmt.Fprintf(&statusBody, "completed: %s\n", strings.Join(m.Completed, "; "))
+		}
+		// Skip the lead's LastText: after synthesis it IS the (empty/truncated/rejected)
+		// synthesis the fallback exists to replace, so echoing it would re-surface the
+		// discarded text (e.g. the refusal the headline guard removes).
+		if !m.Lead && strings.TrimSpace(m.LastText) != "" {
+			statusBody.WriteString(m.LastText)
+			statusBody.WriteString("\n")
+		}
+	}
+	// Emit the per-member status block only when it carries content beyond the bare
+	// disposition lines, OR when there are findings to anchor it. A roster of all-DONE
+	// members with no completed tasks and no last text and no findings yields "" so
+	// deliverable falls through to the honest floor.
+	if len(o.Findings) > 0 || hasMemberContent(o.Members) {
+		if len(o.Findings) == 0 {
+			b.WriteString("The lead did not produce a usable consolidated report. Here is what the team gathered:\n")
+		}
+		b.WriteString("\nPer-member status:\n")
+		b.WriteString(statusBody.String())
+	}
+
+	return b.String()
+}
+
+// hasMemberContent reports whether any member carries fallback-worthy content beyond its
+// bare disposition: a completed task or non-empty last text. It is the tier-2-vs-tier-3
+// boundary signal — when no member has content AND there are no findings, the structured
+// fallback is effectively empty and deliverable uses the honest floor.
+func hasMemberContent(members []MemberOutcome) bool {
+	for _, m := range members {
+		if len(m.Completed) > 0 {
+			return true
+		}
+		// The lead's LastText is excluded (see joinTeamFallback) — it is the rejected
+		// synthesis, not fallback-worthy content — so it does not count here either.
+		if !m.Lead && strings.TrimSpace(m.LastText) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // Compile-time assertion that TeamTool satisfies the Tool contract and the

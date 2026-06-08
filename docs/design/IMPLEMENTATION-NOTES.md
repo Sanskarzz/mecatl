@@ -207,8 +207,8 @@ gets the hardened runner anyway.
 scheduling loop, `Supervisor.Run` drives ONE final synthesis turn on the lead (`synthesise` →
 the shared `driveOneTurn` helper, factored OUT of `runTurn` so the auto-deny / event-forward /
 terminal-text-capture logic lives in one place). Its output is `TeamOutcome.Report`, which the
-Team tool returns as its `ToolResult` (falling back to the labelled `joinTeamFallback`
-concatenation only when synthesis could not run); the gRPC `RunTeam` rides the report back on
+Team tool resolves through the **three-tier `deliverable()` chain** (`teamtool.go`) before
+returning it as the `ToolResult`; the gRPC `RunTeam` rides the report back on
 the outcome. Synthesis lives inside `Run`, so BOTH entry points share it. `buildSynthesisSources`
 assembles the prompt in three layers, ALL fenced UNTRUSTED via `writeUntrustedBlock`: (1) the
 **findings ledger** (`team.Team.Findings()`, the PRIMARY channel — members append with the
@@ -220,7 +220,34 @@ member whose `LastText` is otherwise the only trace); (3) the **lead's drained i
 an injected body cannot forge one. A lead stopped purely by its lifetime turn budget is still
 *resumable* (`memberRT.nonResumable` is set ONLY on `StopError`/`Reopen`-fail, NOT on budget), so
 the ONE synthesis turn runs even then (§5 special-case); a genuinely non-resumable lead yields an
-empty `Report` → `joinTeamFallback`.
+empty `Report` → the structured fallback.
+
+**The deliverable chain — never a bare refusal or empty (`teamtool.go`).** `synthesise` is a
+pure PRODUCER; the QUALITY gate lives in `deliverable(TeamOutcome)`, three tiers: **(1)** the
+lead's synthesis when it is a usable report — non-empty AND `!isNonDeliverable(report, len(Findings))`;
+**(2)** a ledger-rich structured fallback (`joinTeamFallback`) leading with the findings ledger
+grouped by member, then per-member disposition + `[STOPPED: reason]` + completed tasks + last text;
+**(3)** an honest floor ("ran N rounds, did not converge, M stopped") when even the ledger is empty —
+always non-empty because round count + dispositions always exist. `isNonDeliverable` is CONSERVATIVE:
+it fires only on empty/whitespace OR (short `≤ nonDeliverableMaxLen` = **280 runes** AND a lower-cased
+PREFIX-anchored match against the tiny `refusalPrefixes` set AND `ledgerLen > 0`) — all three required,
+so a legitimately terse real report is never discarded and a refusal over an empty ledger is left
+alone (nothing better to show). A non-convergence header (`convergenceHeader`) is prepended to tiers 2
+and 3 always, and to tier 1 only when `!Quiescent` (so even a plausible-looking synthesis on a runaway
+team carries the "did NOT converge (stop: max-turns)" banner). The fallback SKIPS the lead's `LastText`
+(`MemberOutcome.Lead`) — after synthesis it IS the rejected report, so echoing it would re-surface the
+discarded refusal. `TeamOutcome` carries `Findings []session.TeamFindingSnapshot` and `MemberOutcome`
+carries `Completed []string` + `Lead bool`, all populated in `outcome()` (clamped via
+`projectTeamFindingsSnapshot`), so BOTH the Team-tool and gRPC paths get the rich fallback without
+reaching into the live `*team.Team`. The headline regression guard is
+`TestTeamToolRefusalSynthesisFallsBackToLedger`: a refusal synthesis over a populated ledger must never
+reach the parent.
+
+> **Deferred next item — 4A team-wide token budget.** A `WithTeamTokenBudget` SupervisorOption +
+> gRPC/CLI knob that reads the accumulated `total session.Usage`, stops scheduling after the current
+> round, and makes `stop:max-tokens` a first-class terminal tripping this SAME fallback. This bundle
+> is the *safety net* (never return junk); 4A is the *brake* (the real ceiling the incident needed).
+> Orthogonal — config-only, not implemented here.
 
 **Member sessions persist for out-of-band inspection.** The supervisor saves each member session
 to the injected `port.SessionStore` (`WithMemberStore`, never a concrete adapter — layering
