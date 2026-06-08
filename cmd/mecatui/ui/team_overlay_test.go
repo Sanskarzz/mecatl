@@ -806,6 +806,131 @@ func TestAgentsTasksSummary(t *testing.T) {
 	}
 }
 
+// --- findings sub-view -----------------------------------------------------
+
+// findingsTeam builds a team whose shared findings ledger carries two members'
+// findings, exercising the member-grouped row rendering and the summary roll-up.
+func findingsTeam(c *conversation) {
+	c.setTeamStart("t1", "", roster())
+	c.setTeamFindings("t1", []client.TeamFinding{
+		{Member: "scout", Body: "the cache key omits the tenant id"},
+		{Member: "lead", Body: "fix applied; tests green"},
+	})
+}
+
+// TestSetTeamFindingsAttribution asserts setTeamFindings stores the snapshot on the
+// matching Team block and is a no-op for an unknown parent call id (the same
+// attribution contract setTeamTasks has).
+func TestSetTeamFindingsAttribution(t *testing.T) {
+	c := &conversation{}
+	c.addTool("t1", "Team", `{}`)
+	c.setTeamFindings("t1", []client.TeamFinding{{Member: "scout", Body: "found it"}})
+	if got := c.blocks[0].teamFindings; len(got) != 1 || got[0].member != "scout" || got[0].body != "found it" {
+		t.Errorf("findings snapshot not stored on the block: %+v", got)
+	}
+	// A miss must not panic and must not touch the block's ledger.
+	c.setTeamFindings("nope", []client.TeamFinding{{Member: "x", Body: "y"}})
+	if got := c.blocks[0].teamFindings; len(got) != 1 || got[0].member != "scout" {
+		t.Errorf("a miss must leave the matched block's ledger unchanged: %+v", got)
+	}
+}
+
+// TestAgentsFindingsToggle asserts f flips the roster to the findings sub-view, and
+// f/esc both return to the roster; esc from the roster still closes the overlay.
+func TestAgentsFindingsToggle(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, findingsTeam)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.team.view != teamRoster {
+		t.Fatalf("view = %v, want teamRoster", m.team.view)
+	}
+
+	// f → findings sub-view.
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	m = mm.(Model)
+	if m.team.view != teamFindings {
+		t.Fatalf("f did not open the findings sub-view: %v", m.team.view)
+	}
+
+	// f → back to roster.
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	m = mm.(Model)
+	if m.team.view != teamRoster {
+		t.Fatalf("f did not toggle back to the roster: %v", m.team.view)
+	}
+
+	// f → findings, then esc → back to roster.
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = mm.(Model)
+	if m.team.view != teamRoster {
+		t.Fatalf("esc from findings should return to the roster, got %v", m.team.view)
+	}
+}
+
+// TestAgentsFindingsShowsBody is the production-gap regression: pushing a
+// TeamFindings TeamMsg through the model and opening the findings sub-view must
+// actually RENDER the finding body (member + body), proving EvTeamFindings no longer
+// dies at the model field. It drives the real EventToMsg→applyTeam→render path by
+// pushing the TeamMsg through Update, mirroring how the wire delivers it.
+func TestAgentsFindingsShowsBody(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	// Seed a Team card + roster so the overlay has a block to attribute to.
+	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", "", roster()) })
+	// Deliver the findings snapshot the way the wire does: a TeamFindings TeamMsg
+	// routed through Update → applyTeam → setTeamFindings.
+	mm, _ := m.Update(client.TeamMsg{
+		Kind:         client.TeamFindings,
+		ParentCallID: "t1",
+		TeamID:       "t1",
+		Findings: []client.TeamFinding{
+			{Member: "scout", Body: "UNIQUE_FINDING_BODY the cache key omits the tenant id"},
+		},
+	})
+	m = mm.(Model)
+
+	mm, _ = m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	m = mm.(Model)
+	if m.team.view != teamFindings {
+		t.Fatalf("view = %v, want teamFindings", m.team.view)
+	}
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "UNIQUE_FINDING_BODY the cache key omits the tenant id") {
+		t.Fatalf("findings sub-view did not render the finding body, got:\n%s", out)
+	}
+	if !strings.Contains(out, "scout") {
+		t.Errorf("findings row should name the recording member, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1 finding(s) from 1 member(s)") {
+		t.Errorf("findings summary mismatch, got:\n%s", out)
+	}
+}
+
+// TestAgentsFindingsEmpty asserts a team with no findings reads as a muted
+// "(no findings)" with a zeroed summary and never panics.
+func TestAgentsFindingsEmpty(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", "", roster()) })
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	m = mm.(Model)
+	if m.team.view != teamFindings {
+		t.Fatalf("view = %v, want teamFindings", m.team.view)
+	}
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "(no findings)") {
+		t.Errorf("empty ledger should show '(no findings)', got %q", out)
+	}
+	if !strings.Contains(out, "0 finding(s) from 0 member(s)") {
+		t.Errorf("empty summary should report zero counts, got %q", out)
+	}
+}
+
 // --- goldens ---------------------------------------------------------------
 
 // agentsGoldenTeam builds a representative team for the overlay goldens: a lead +
@@ -856,6 +981,22 @@ func TestAgentsTasksView(t *testing.T) {
 	}
 	got := stripANSI([]byte(m.View().Content))
 	compareGolden(t, "team_tasks.golden", got)
+}
+
+// TestAgentsFindingsView locks the findings sub-view golden: a team with two
+// members' findings, the summary roll-up, and one member·body row per finding.
+func TestAgentsFindingsView(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, findingsTeam)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	m = mm.(Model)
+	if m.team.view != teamFindings {
+		t.Fatalf("view = %v, want teamFindings", m.team.view)
+	}
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "team_findings.golden", got)
 }
 
 // TestAgentsRosterWindowedGolden locks a 20-member roster WINDOWED at a ~24-row

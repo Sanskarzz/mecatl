@@ -722,7 +722,10 @@ func sessionEngineFactory(
 				agent.WithTeamToolForker(fk),
 				agent.WithTeamToolReadOnlyForker(roFk),
 				agent.WithTeamToolHooks(teamHooks),
+				agent.WithTeamToolStore(store),
 			))
+			// The PULL member-transcript inspect tool reads the SAME shared store.
+			cat.MustRegister(agent.NewInspectMemberTool(store))
 		}
 
 		// Identical to the main engine in every NON-provider Deps field except the
@@ -873,7 +876,7 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// re-discovery (the registry does not vary per session).
 	agentReg := resolveAgentRegistry(ctx, cfg)
 
-	cat, mainMgr, mcpProvider, mcpInventory, memStore, userModelStore, discoveredSkills, mcpClose := buildCatalog(ctx, cfg, reg, provider, hooks, agentReg)
+	cat, mainMgr, mcpProvider, mcpInventory, memStore, userModelStore, discoveredSkills, mcpClose := buildCatalog(ctx, cfg, reg, provider, hooks, agentReg, store)
 
 	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona source. ON
 	// by default reading the conventional ~/.config/mecatl/soul.md; --no-soul leaves
@@ -1408,7 +1411,7 @@ func registerCoreTools(cfg Config, cat *tool.Catalog, log bool) {
 // — the optional Bash tool. It then optionally registers Fork, memory, skills, the
 // repo map, and connects any MCP servers. The returned close func tears down the
 // MCP manager on shutdown.
-func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, hooks port.HookRunner, agentReg *agents.Registry) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, *memory.Store, *memory.Store, []skills.Skill, func()) {
+func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, hooks port.HookRunner, agentReg *agents.Registry, store port.SessionStore) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, *memory.Store, *memory.Store, []skills.Skill, func()) {
 	cat := tool.NewCatalog()
 	registerCoreTools(cfg, cat, true)
 	// memStore is the per-project memory store, returned so the caller can bind it
@@ -1484,7 +1487,12 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 			agent.WithTeamToolForker(fk),
 			agent.WithTeamToolReadOnlyForker(roFk),
 			agent.WithTeamToolHooks(teamHooks),
+			agent.WithTeamToolStore(store),
 		))
+		// The PULL member-transcript inspect tool: read-only, reads the SAME session
+		// store the Team tool persists members to (collision-free MemberSessionID ids).
+		// Gated on EnableTeams (no teams → no transcripts to inspect).
+		cat.MustRegister(agent.NewInspectMemberTool(store))
 		cfg.diag().Log(ctx, port.LevelInfo, "Team tool ENABLED (in-process coordinating subagents; mutate-serial, ASK)")
 	} else {
 		cfg.diag().Log(ctx, port.LevelInfo, "Team tool DISABLED")

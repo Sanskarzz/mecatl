@@ -95,7 +95,7 @@ type teamState struct {
 // client can still SpawnTeammate before RunTeam.
 //
 // It returns ErrTeamsDisabled when teams are not enabled.
-func (s *Service) CreateTeam(ctx context.Context, workspace, name string, members []agent.MemberSpec) (string, []team.Member, error) {
+func (s *Service) CreateTeam(ctx context.Context, workspace, name, goal string, members []agent.MemberSpec) (string, []team.Member, error) {
 	if s.cfg.MemberEngine == nil {
 		return "", nil, ErrTeamsDisabled
 	}
@@ -107,7 +107,16 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name string, member
 	base := s.cfg.Workspaces(workspace)
 	factory := func(spec agent.MemberSpec) agent.MemberBuild { return s.cfg.MemberEngine(t, spec) }
 
-	opts := []agent.SupervisorOption{}
+	// Compute the team id FIRST (it needs only NewID, no dependency on the supervisor)
+	// so the member-session prefix can namespace member ids by it — keeping the gRPC
+	// path's stored ids collision-free across concurrent teams and aligned with
+	// agent.MemberSessionID (which the inspect tool derives).
+	id := "team-" + string(s.cfg.NewID())
+
+	opts := []agent.SupervisorOption{
+		agent.WithTeamGoal(goal),
+		agent.WithMemberSessionPrefix("team-" + id),
+	}
 	if s.cfg.Forker != nil {
 		opts = append(opts, agent.WithForker(s.cfg.Forker))
 	}
@@ -116,6 +125,9 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name string, member
 	}
 	if s.cfg.TeamHooks != nil {
 		opts = append(opts, agent.WithTeamHooks(s.cfg.TeamHooks))
+	}
+	if s.cfg.Store != nil {
+		opts = append(opts, agent.WithMemberStore(s.cfg.Store))
 	}
 	sup := agent.NewSupervisor(t, base, factory, opts...)
 
@@ -128,7 +140,6 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name string, member
 		}
 	}
 
-	id := "team-" + string(s.cfg.NewID())
 	s.mu.Lock()
 	// Count only un-cleaned teams (the live registry) against the cap; CleanupTeam
 	// frees a slot. The check and the insert share the lock so concurrent CreateTeams

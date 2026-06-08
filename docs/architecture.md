@@ -866,6 +866,19 @@ worktree, with the SAME `buildSandboxedCommandRunner` + `gitenv` hardening and t
 SAME untrusted-`.gitattributes` residual; the workspace-trust gate is the shared
 follow-up for both.
 
+A team's **returned deliverable** is the **lead's consolidated synthesis**, not a
+concatenation of member `LastText`: after the scheduling loop, `Supervisor.Run` drives
+ONE final synthesis turn on the lead whose output is `TeamOutcome.Report` (the Team
+tool's `ToolResult`; the gRPC `RunTeam` carries it on the outcome). The synthesis
+prompt reads three fenced-UNTRUSTED layers — the **findings ledger** (members append
+with the `RecordFinding` tool, the primary channel), a **LastText/completed-task
+digest** for non-recording members, and the **lead's inbox** — never the members' full
+transcripts (context isolation holds). Member sessions persist to the `port.SessionStore`
+under `MemberSessionID(teamID, member)` (`team-<teamID>-<member>`, collision-free across
+concurrent teams); the parent catalog's read-only **`InspectMember`** tool pulls ONE
+member's bounded transcript on demand (PULL — never auto-injected). A `team.findings`
+event projects the ledger onto the stream, mirroring `team.tasks`.
+
 ## 16. Extensibility — MCP, tools & progressive disclosure
 
 The `tool.Catalog` is the single registration seam, so every tool — core, remote,

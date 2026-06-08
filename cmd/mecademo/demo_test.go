@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stacklok/mecatl/internal/session"
@@ -56,6 +57,25 @@ func TestRunScenarioOffline(t *testing.T) {
 	// The permission ask must precede the approved tool's result, and a Write
 	// result (the approved tool) must appear and be non-error.
 	assertApprovalResumed(t, events)
+}
+
+// TestRunTeamScenarioOffline runs the demo's offline team scenario and asserts the
+// outcome is the lead's CONSOLIDATED synthesis (the team's deliverable), not a bare
+// per-member concatenation — proving the new aggregation shape end to end.
+func TestRunTeamScenarioOffline(t *testing.T) {
+	outcome, err := RunTeamScenario(context.Background())
+	if err != nil {
+		t.Fatalf("RunTeamScenario: %v", err)
+	}
+	if !strings.Contains(outcome.Report, "Consolidated report") {
+		t.Errorf("team Report = %q, want the lead's consolidated synthesis", outcome.Report)
+	}
+	if strings.Contains(outcome.Report, "=== ") {
+		t.Errorf("team Report must not be a header-only concatenation: %q", outcome.Report)
+	}
+	if len(outcome.Members) != 2 {
+		t.Errorf("team had %d members, want 2", len(outcome.Members))
+	}
 }
 
 // assertApprovalResumed verifies a permission.ask was emitted and the loop then

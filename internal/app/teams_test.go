@@ -21,6 +21,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/team"
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
@@ -49,7 +50,7 @@ func TestBuildMemberEngineReadOnlySpawnSucceeds(t *testing.T) {
 	svc := teamServiceWithFactory(t, memberFactoryForTest(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, false, nil))
 
 	ctx := context.Background()
-	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", nil)
+	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", "", nil)
 	if err != nil {
 		t.Fatalf("CreateTeam: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestBuildMemberEngineMutatingSpawnSucceeds(t *testing.T) {
 	svc := teamServiceWithFactory(t, memberFactoryForTest(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, false, nil))
 
 	ctx := context.Background()
-	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", nil)
+	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", "", nil)
 	if err != nil {
 		t.Fatalf("CreateTeam: %v", err)
 	}
@@ -87,13 +88,14 @@ func TestBuildMemberEngineMutatingSpawnSucceeds(t *testing.T) {
 // coordination is covered by the supervisor unit tests.)
 func TestTeamsEnabledEndToEnd(t *testing.T) {
 	cfg := teamCfg(t)
-	provider := mockllm.New(mockllm.TextTurn("all done"))
+	// Two turns: round-0 work, then the lead's synthesis turn (the deliverable).
+	provider := mockllm.New(mockllm.TextTurn("all done"), mockllm.TextTurn("CONSOLIDATED all done"))
 	svc := teamServiceWithFactory(t, memberFactoryForTest(cfg, provider, nil, agents.NewRegistry(nil), nil, nil, false, nil))
 
 	ctx := context.Background()
 	// Atomic create+populate: the initial roster is enrolled by CreateTeam itself, so
 	// no separate SpawnTeammate call is needed before RunTeam.
-	teamID, enrolled, err := svc.CreateTeam(ctx, t.TempDir(), "test",
+	teamID, enrolled, err := svc.CreateTeam(ctx, t.TempDir(), "test", "",
 		[]agent.MemberSpec{{Name: "lead", Lead: true, InitialPrompt: "go"}})
 	if err != nil {
 		t.Fatalf("CreateTeam: %v", err)
@@ -111,6 +113,9 @@ func TestTeamsEnabledEndToEnd(t *testing.T) {
 	}
 	if !outcome.Quiescent {
 		t.Errorf("RunTeam outcome: Quiescent = false, want true (outcome=%+v)", outcome)
+	}
+	if !strings.Contains(outcome.Report, "CONSOLIDATED") {
+		t.Errorf("RunTeam outcome.Report = %q, want the lead's synthesis", outcome.Report)
 	}
 }
 
@@ -130,7 +135,7 @@ func TestTeamsDisabledWhenNoFactory(t *testing.T) {
 	}
 	defer built.Close()
 
-	_, _, err = built.Service.CreateTeam(context.Background(), "/ws", "test", nil)
+	_, _, err = built.Service.CreateTeam(context.Background(), "/ws", "test", "", nil)
 	if !errors.Is(err, server.ErrTeamsDisabled) {
 		t.Fatalf("CreateTeam (teams off): err = %v, want ErrTeamsDisabled", err)
 	}
@@ -153,7 +158,7 @@ func TestBuildEnableTeamsRunsTeam(t *testing.T) {
 	defer built.Close()
 
 	ctx := context.Background()
-	teamID, _, err := built.Service.CreateTeam(ctx, t.TempDir(), "test", nil)
+	teamID, _, err := built.Service.CreateTeam(ctx, t.TempDir(), "test", "", nil)
 	if errors.Is(err, server.ErrTeamsDisabled) {
 		t.Fatal("CreateTeam returned ErrTeamsDisabled with EnableTeams:true")
 	}
@@ -234,7 +239,7 @@ func TestReadOnlyMemberRunsGitInWorktreeEndToEnd(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	teamID, _, err := svc.CreateTeam(ctx, repo, "inspect",
+	teamID, _, err := svc.CreateTeam(ctx, repo, "inspect", "",
 		[]agent.MemberSpec{{Name: "lead", Lead: true, InitialPrompt: "inspect the history"}})
 	if err != nil {
 		t.Fatalf("CreateTeam: %v", err)
@@ -349,6 +354,107 @@ func teamServiceWithFactory(t *testing.T, factory server.MemberEngineFactory) *s
 		t.Fatalf("new service: %v", err)
 	}
 	return svc
+}
+
+// TestTeamReturnsConsolidatedReportEndToEnd is the gauntlet-style integration test:
+// a real server.Service drives a 2-member team (lead + worker) through CreateTeam →
+// RunTeam, and the outcome's Report is the lead's synthesis (NOT a header-only
+// concatenation). It also asserts both member sessions are persisted to the service's
+// Store under collision-free, namespaced ids that match agent.MemberSessionID — the
+// ids the InspectMember tool derives — so a human/RPC can load a member transcript
+// after the team finishes.
+func TestTeamReturnsConsolidatedReportEndToEnd(t *testing.T) {
+	store := memstore.New()
+
+	// Per-member scripts: the worker records a finding; the lead delegates then
+	// synthesises a consolidated report from the ledger.
+	recordFinding := session.NewToolCall("w1", "RecordFinding",
+		json.RawMessage(`{"finding":"WORKER_FINDING the leak is in the cache"}`))
+	scripts := map[string][]mockllm.Turn{
+		"lead": {
+			mockllm.TextTurn("delegating to worker"),
+			mockllm.TextTurn("CONSOLIDATED REPORT: the leak is in the cache; fix applied."),
+		},
+		"worker": {
+			mockllm.ToolCallTurn(recordFinding),
+			mockllm.TextTurn("recorded"),
+		},
+	}
+	factory := scriptedMemberFactory(t, scripts)
+
+	osfsWS := func(root string) tool.Workspace {
+		ws, err := osfs.NewWorkspace(root)
+		if err != nil {
+			t.Fatalf("osfs workspace %q: %v", root, err)
+		}
+		return ws
+	}
+	svc, err := server.NewService(server.Config{
+		Engine:       noopEngine(),
+		Store:        store,
+		Workspaces:   osfsWS,
+		Now:          func() time.Time { return time.Unix(0, 0) },
+		MemberEngine: factory,
+		Forker:       forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }),
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	ctx := context.Background()
+	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "e2e", "find and fix the leak",
+		[]agent.MemberSpec{
+			{Name: "lead", Lead: true, InitialPrompt: "coordinate"},
+			{Name: "worker", InitialPrompt: "investigate"},
+		})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+
+	outcome, err := svc.RunTeam(ctx, teamID, func(agent.TeamEvent) {})
+	if err != nil {
+		t.Fatalf("RunTeam: %v", err)
+	}
+	if !strings.Contains(outcome.Report, "CONSOLIDATED REPORT") {
+		t.Errorf("outcome.Report = %q, want the lead's synthesis", outcome.Report)
+	}
+	if strings.Contains(outcome.Report, "=== ") {
+		t.Errorf("Report must not be a header-only concatenation: %q", outcome.Report)
+	}
+
+	// Both member sessions are loadable from the store under namespaced ids.
+	for _, name := range []string{"lead", "worker"} {
+		id := agent.MemberSessionID(teamID, name)
+		sess, lerr := store.Load(ctx, id)
+		if lerr != nil {
+			t.Fatalf("member session %q not persisted: %v", id, lerr)
+		}
+		if sess.ID != id {
+			t.Errorf("loaded session id = %q, want %q", sess.ID, id)
+		}
+	}
+}
+
+// scriptedMemberFactory builds a server.MemberEngineFactory that scripts each member
+// by name with the given turns and registers that member's coordination tools — a
+// minimal but REAL per-member engine, sufficient to exercise the Service/Supervisor/
+// synthesis/persistence path end to end.
+func scriptedMemberFactory(t *testing.T, scripts map[string][]mockllm.Turn) server.MemberEngineFactory {
+	t.Helper()
+	allow := permpolicy.NewPolicy(defaultRules(), nil)
+	return func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+		turns, ok := scripts[spec.Name]
+		if !ok {
+			t.Fatalf("scriptedMemberFactory: no script for member %q", spec.Name)
+		}
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
+			LLM: mockllm.New(turns...), Catalog: cat, Policy: allow, Model: "mock",
+		})}
+	}
 }
 
 // noopEngine is a minimal engine for the Service's plain-session path, unused by the

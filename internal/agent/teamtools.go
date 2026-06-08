@@ -39,6 +39,7 @@ func MemberTools(t *team.Team, self string, hooks port.HookRunner) []tool.Tool {
 		claimTaskTool{team: t, self: self},
 		completeTaskTool{team: t, self: self, hooks: hooks},
 		listTasksTool{team: t, self: self},
+		recordFindingTool{team: t, self: self},
 	}
 }
 
@@ -335,4 +336,54 @@ func (t listTasksTool) Execute(_ context.Context, call session.ToolCall, _ tool.
 		fmt.Fprintf(&b, ": %s\n", task.Description)
 	}
 	return session.NewToolResult(call.ID, b.String()), nil
+}
+
+// --- RecordFinding --------------------------------------------------------
+
+// recordFindingTool is the PRIMARY, deterministic channel a member uses to
+// contribute to the lead's final synthesis: it appends a finding to the shared
+// team findings ledger. It mirrors sendMessageTool — bound to the shared team and
+// the calling member's name, mutating TEAM state (ReadOnly == false) but never the
+// workspace. Unlike AddTask/CompleteTask it fires no governance phase in v1.
+type recordFindingTool struct {
+	team *team.Team
+	self string
+}
+
+type recordFindingArgs struct {
+	Finding string `json:"finding"`
+}
+
+func (recordFindingTool) Spec() tool.ToolSpec {
+	return tool.ToolSpec{
+		Name: "RecordFinding",
+		Description: "Record a finding to the shared team findings ledger — a conclusion, result, or " +
+			"piece of evidence the lead will consolidate into the final report. Record findings as " +
+			"you reach them; the lead reads the whole ledger when it writes the team's consolidated " +
+			"report. Prefer this over relying on your last message: a finding here is durable even if " +
+			"you run out of turns.",
+		Schema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "finding": {"type": "string", "description": "The finding text — a conclusion, result, or piece of evidence."}
+  },
+  "required": ["finding"]
+}`),
+	}
+}
+
+func (recordFindingTool) ReadOnly() bool { return false }
+
+func (t recordFindingTool) Execute(_ context.Context, call session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+	var args recordFindingArgs
+	if msg, ok := session.ParseArgs(call, &args); !ok {
+		return session.NewToolError(call.ID, msg), nil
+	}
+	if strings.TrimSpace(args.Finding) == "" {
+		return session.NewToolError(call.ID, "RecordFinding: 'finding' is required"), nil
+	}
+	if err := t.team.AppendFinding(t.self, args.Finding); err != nil {
+		return session.NewToolError(call.ID, fmt.Sprintf("RecordFinding: %v", err)), nil
+	}
+	return session.NewToolResult(call.ID, "Finding recorded."), nil
 }

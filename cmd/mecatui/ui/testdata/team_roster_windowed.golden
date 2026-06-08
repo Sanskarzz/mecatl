@@ -1,23 +1,23 @@
  mecatui  ·  session sess-test-00  ·  mock-model  ·  mode default  ·  127.0.0.1:8080
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-  ┃                                                                                             ┃
-  ┃  agents · 20 members                                                                        ┃
-  ┃                                                                                             ┃
-  ┃    · +5 above                                                                               ┃
-  ┃    ◆ · member-e · working… · ↑0 ↓0 · worker                                                 ┃
-  ┃    ◆ · member-f · working… · ↑0 ↓0 · worker                                                 ┃
-  ┃    ◆ · member-g · working… · ↑0 ↓0 · worker                                                 ┃
-  ┃  ╭──────────────────────────────────────────────╮                                           ┃
-  ┃  │  › ◆ · member-h · working… · ↑0 ↓0 · worker  │                                           ┃
-  ┃  ╰──────────────────────────────────────────────╯                                           ┃
-  ┃    ◆ · member-i · working… · ↑0 ↓0 · worker                                                 ┃
-  ┃    ◆ · member-j · working… · ↑0 ↓0 · worker                                                 ┃
-  ┃    · +9 below                                                                               ┃
-  ┃                                                                                             ┃
-  ┃  ↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · t tasks · esc close  ┃
-  ┃                                                                                             ┃
-  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                                                                                                          ┃
+┃  agents · 20 members                                                                                     ┃
+┃                                                                                                          ┃
+┃    · +5 above                                                                                            ┃
+┃    ◆ · member-e · working… · ↑0 ↓0 · worker                                                              ┃
+┃    ◆ · member-f · working… · ↑0 ↓0 · worker                                                              ┃
+┃    ◆ · member-g · working… · ↑0 ↓0 · worker                                                              ┃
+┃  ╭──────────────────────────────────────────────╮                                                        ┃
+┃  │  › ◆ · member-h · working… · ↑0 ↓0 · worker  │                                                        ┃
+┃  ╰──────────────────────────────────────────────╯                                                        ┃
+┃    ◆ · member-i · working… · ↑0 ↓0 · worker                                                              ┃
+┃    ◆ · member-j · working… · ↑0 ↓0 · worker                                                              ┃
+┃    · +9 below                                                                                            ┃
+┃                                                                                                          ┃
+┃  ↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · t tasks · f findings · esc close  ┃
+┃                                                                                                          ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
 ┃
 ┃

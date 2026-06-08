@@ -456,11 +456,14 @@ func (m *Model) applyTeam(msg client.TeamMsg) {
 		m.conv.addTeamMember(msg)
 	case client.TeamTasks:
 		m.conv.setTeamTasks(msg.ParentCallID, msg.Tasks)
+	case client.TeamFindings:
+		m.conv.setTeamFindings(msg.ParentCallID, msg.Findings)
 	case client.TeamEnd:
 		m.conv.setTeamEnd(msg.ParentCallID, msg.TeamID, msg.Rounds, msg.Stop, msg.Usage)
-		// team.end carries the terminal task snapshot too, so the task sub-view lands
-		// the final state even if no member event followed the last transition.
+		// team.end carries the terminal task + findings snapshots too, so the sub-views
+		// land the final state even if no member event followed the last transition.
 		m.conv.setTeamTasks(msg.ParentCallID, msg.Tasks)
+		m.conv.setTeamFindings(msg.ParentCallID, msg.Findings)
 	}
 }
 

@@ -54,6 +54,13 @@ type keyMap struct {
 	// is open) nor with any global control binding.
 	Tasks key.Binding
 
+	// Findings flips the ctrl+a team overlay from the roster to the shared team
+	// findings-ledger sub-view (and back). Like Tasks it is a BARE 'f' consulted
+	// ONLY inside the overlay (onTeamRosterKey / the teamFindings branch intercept
+	// before any idle open key), so it never collides with the blurred textarea nor
+	// any global control binding.
+	Findings key.Binding
+
 	// Jump bindings for the windowed agent-team roster (tedious to traverse with
 	// ↑/↓ at the 20–32-member scale the overlay exists for): home/g jump to the
 	// first member, end/G to the last. Page up/down reuse ScrollU/ScrollD (pgup/
@@ -176,6 +183,10 @@ func defaultKeys() keyMap {
 		Tasks: key.NewBinding(
 			key.WithKeys("t"),
 			key.WithHelp("t", "tasks"),
+		),
+		Findings: key.NewBinding(
+			key.WithKeys("f"),
+			key.WithHelp("f", "findings"),
 		),
 		JumpTop: key.NewBinding(
 			key.WithKeys("home", "g"),

@@ -20,7 +20,9 @@ func TestRenderTurnPromptDelimitsUntrusted(t *testing.T) {
 	msgs := []team.Message{{Seq: 1, From: "alice", To: "bob", Body: injected}}
 	claimed := &team.Task{ID: "task-1", Description: "do " + untrustedFence + " evil"}
 
-	out := renderTurnPrompt("bob", msgs, claimed)
+	// A later-round non-lead turn (no goal/roster/role; just messages + claimed task),
+	// so the fence-count assertion below isolates the two untrusted fields.
+	out := renderTurnPrompt("bob", false, "", "", "lead", "", msgs, claimed)
 
 	// The harness must announce the untrusted-block contract.
 	if !strings.Contains(out, "UNTRUSTED") {

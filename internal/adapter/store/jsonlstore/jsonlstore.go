@@ -29,8 +29,10 @@ import (
 	"github.com/stacklok/mecatl/internal/session"
 )
 
-// ErrNotFound is returned by Load when no snapshot file exists for the id.
-var ErrNotFound = fmt.Errorf("jsonlstore: session not found")
+// ErrNotFound is returned by Load when no snapshot file exists for the id. It wraps
+// port.ErrSessionNotFound so a consumer that may not import this adapter can
+// distinguish not-found from an infra failure via errors.Is.
+var ErrNotFound = fmt.Errorf("jsonlstore: session not found: %w", port.ErrSessionNotFound)
 
 // Store is an append-only JSONL SessionStore and ToolCallRecorder rooted at a directory.
 type Store struct {

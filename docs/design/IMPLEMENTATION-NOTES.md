@@ -138,6 +138,43 @@ stays git-agnostic (the git knowledge is in `gitenv`/composition). The MAIN sess
 unhardened runner; a Mutating force-copy member's own `.git` makes config-hardening moot but it
 gets the hardened runner anyway.
 
+**Team result aggregation is a LEAD SYNTHESIS, not a `LastText` concatenation.** After the
+scheduling loop, `Supervisor.Run` drives ONE final synthesis turn on the lead (`synthesise` →
+the shared `driveOneTurn` helper, factored OUT of `runTurn` so the auto-deny / event-forward /
+terminal-text-capture logic lives in one place). Its output is `TeamOutcome.Report`, which the
+Team tool returns as its `ToolResult` (falling back to the labelled `joinTeamFallback`
+concatenation only when synthesis could not run); the gRPC `RunTeam` rides the report back on
+the outcome. Synthesis lives inside `Run`, so BOTH entry points share it. `buildSynthesisSources`
+assembles the prompt in three layers, ALL fenced UNTRUSTED via `writeUntrustedBlock`: (1) the
+**findings ledger** (`team.Team.Findings()`, the PRIMARY channel — members append with the
+`RecordFinding` coordination tool, a sixth member tool auto-exempted from the read-only-member
+mutating-tool backstop because `MemberToolNames()` derives from `MemberTools`); (2) a
+**LastText/completed-task digest** for members that recorded NO finding (rescues a limit-cut-off
+member whose `LastText` is otherwise the only trace); (3) the **lead's drained inbox**.
+`neutraliseFraming`'s header list is extended for every new synthesis/round-0 section header so
+an injected body cannot forge one. A lead stopped purely by its lifetime turn budget is still
+*resumable* (`memberRT.nonResumable` is set ONLY on `StopError`/`Reopen`-fail, NOT on budget), so
+the ONE synthesis turn runs even then (§5 special-case); a genuinely non-resumable lead yields an
+empty `Report` → `joinTeamFallback`.
+
+**Member sessions persist for out-of-band inspection.** The supervisor saves each member session
+to the injected `port.SessionStore` (`WithMemberStore`, never a concrete adapter — layering
+holds) after every turn and after synthesis, under collision-free ids namespaced by the team id:
+`MemberSessionID(teamID, member)` = `team-<teamID>-<member>` (the SINGLE source of truth both the
+supervisor's `sessionID` prefix and the `InspectMember` tool's id derivation route through, so
+they can't drift). The team id is the parent call id (Team tool) or the server-assigned
+`team-<NewID()>` (gRPC, computed BEFORE `NewSupervisor` so the prefix can carry it). The parent
+catalog's read-only **`InspectMember`** tool (`internal/agent/teaminspect.go`) loads ONE member's
+transcript by (team id, member) and returns a BOUNDED rendering — it is PULL, never auto-injects
+(gauntlet #7's no-auto-injection property holds: the transcript enters the parent conversation
+only as that tool's own `ToolResult`).
+
+**`EvTeamFindings` is fully wired to the wire.** A `team.findings` event mirrors `team.tasks`:
+the Team-tool sink emits it on ledger change (de-duped via `findingsEqual`, clamped via
+`clampPreview`) and on `EvTeamEnd` (terminal snapshot). It rides `session.TeamFindingSnapshot`
+(domain), maps to the proto `TeamFinding` (`toProtoTeam`), and the mecatui client decodes it to
+`client.TeamFinding` → the conversation block's `teamFindings`, consistent with the task path.
+
 **The Task subagent (read-only explorer) gets the SAME treatment** (Phase 2): when Bash is
 configured, `TaskTool` holds a worktree `childForker` (`WithChildForker`) and forks each child
 run into a throwaway git worktree BEFORE running it (`buildChildEngine` registers Bash via the

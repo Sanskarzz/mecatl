@@ -130,7 +130,7 @@ adapter) are split, and how Fork's child Engine is composed in `internal/app`.
 
 ## 5. Mechanics
 
-### 5.1 Members & the lead
+### 5.1 Members, the lead, and the synthesis deliverable
 
 The **lead** is an ordinary session whose catalog additionally has `SpawnTeammate`
 + the task/mailbox tools. **Teammates** are sessions spawned by the supervisor,
@@ -139,6 +139,37 @@ referenced agent-definition restricts other tools (Claude Code does the same: te
 tools bypass the allowlist). The lead is **fixed for the team's lifetime** and
 **teams do not nest** (a teammate cannot spawn a team) — both match Claude Code's
 limitations and our existing no-recursion guard.
+
+**Lead synthesis is the team's deliverable (implemented).** After the scheduling
+loop reaches quiescence (or the round/budget cap), `Supervisor.Run` drives ONE final
+**synthesis turn** on the lead (`synthesise` → the shared `driveOneTurn` helper). Its
+output is `TeamOutcome.Report`, which the Team tool returns as its `ToolResult` and
+the gRPC `RunTeam` rides back on the outcome — so both entry points get the
+consolidated report for free. The synthesis prompt's source material is assembled in
+three layers (`buildSynthesisSources`), all fenced UNTRUSTED:
+
+1. **The findings ledger** (`team.Team.Findings()`) — the PRIMARY, deterministic
+   channel: members record conclusions with the `RecordFinding` coordination tool as
+   they reach them, so a finding survives even if the member is later cut off at its
+   limits. Grouped by member in append order.
+2. **A LastText/completed-task digest** for members that recorded NO finding — the
+   fallback that rescues a member cut off mid-investigation (root cause: a `LastText`
+   that was frequently empty on a limit cutoff).
+3. **The lead's drained inbox** — peer messages addressed to the lead, appended last.
+
+If the lead is non-resumable (its last run failed / `Reopen` failed) or produces no
+text, `Report` is empty and the Team tool falls back to a clearly-labelled per-member
+concatenation (`joinTeamFallback`) — never an empty deliverable. A lead stopped purely
+by its lifetime turn budget is still resumable: the ONE synthesis turn runs even then
+(the report is the deliverable).
+
+**On-demand member inspection (PULL).** Member sessions are persisted to the injected
+`port.SessionStore` under collision-free, team-namespaced ids
+(`MemberSessionID(teamID, member)` = `team-<teamID>-<member>`). The parent catalog's
+`InspectMember` tool (read-only) loads ONE member's transcript by (team id, member)
+and returns a bounded rendering — it does NOT auto-inject; the pulled transcript
+enters the parent conversation only as that tool's own `ToolResult` (gauntlet #7's
+no-auto-injection property holds).
 
 ### 5.2 Message delivery: turn-boundary, not interrupt
 
@@ -342,6 +373,13 @@ Two gaps flagged in the original spike have since been **closed**:
   `CreateTeamResponse` echoes the enrolled roster. The common path is now a single
   `CreateTeam` → `RunTeam`. `SpawnTeammate` remains for incremental pre-run adds (and
   is still rejected once the team is running, `ErrTeamRunning`).
+- **Result aggregation — DONE.** The team's deliverable is now the lead's
+  **consolidated synthesis** (§5.1), not a header-only concatenation of member
+  `LastText`. Goal-to-lead threading (`WithTeamGoal` + `CreateTeamRequest.goal`), the
+  `RecordFinding` ledger channel, the three-layer synthesis source, member-session
+  persistence under `MemberSessionID` (`team-<teamID>-<member>`), the PULL
+  `InspectMember` tool, and the `EvTeamFindings` event projection (wired through the
+  proto + mecatui) all shipped together.
 
 Still deferred (intentional, not oversights):
 
@@ -363,8 +401,12 @@ Still deferred (intentional, not oversights):
   work). A teammate's lifetime budget (total turns across its life) is the
   supervisor's responsibility, enforced separately. See `session.Reopen`.
 - **Lead context growth** — the lead must NOT ingest teammates' full transcripts
-  (that defeats context isolation). It sees only mailbox messages + idle/Completed
-  notifications. Confirm the mailbox is the *only* lead-visible channel.
+  (that defeats context isolation). *Implemented:* the lead's synthesis turn reads a
+  fenced DIGEST — the findings ledger + a per-member LastText/completed-task summary +
+  its drained inbox (`buildSynthesisSources`), all bounded and fenced UNTRUSTED — never
+  the members' full transcripts. The mailbox + the findings ledger are the only
+  channels through which teammate work reaches the lead; an out-of-band reader uses the
+  PULL `InspectMember` tool, which never auto-injects.
 - **Token cost** — teams are linearly more expensive than one session (each member
   is a full loop). Worth a config cap on concurrent members + a global budget.
 

@@ -418,3 +418,116 @@ func TestAddMemberCap(t *testing.T) {
 		t.Fatalf("AddMember past cap: err = %v, want ErrTooManyMembers", err)
 	}
 }
+
+// TestAppendFindingUnknownMemberRejected asserts AppendFinding authenticates the
+// recording member against the roster (mirroring Send's sender authentication).
+func TestAppendFindingUnknownMemberRejected(t *testing.T) {
+	tm := newTeamWith(t, "lead")
+	if err := tm.AppendFinding("ghost", "the build passes"); !errors.Is(err, team.ErrUnknownMember) {
+		t.Fatalf("AppendFinding from non-member: err = %v, want ErrUnknownMember", err)
+	}
+	if err := tm.AppendFinding("lead", "the build passes"); err != nil {
+		t.Fatalf("AppendFinding from a roster member: %v", err)
+	}
+}
+
+// TestFindingsReturnedInAppendOrder asserts Findings returns recorded findings in
+// append order with a monotonic Seq, and that the returned slice is an independent
+// copy (mutating it does not affect the aggregate).
+func TestFindingsReturnedInAppendOrder(t *testing.T) {
+	tm := newTeamWith(t, "lead", "worker")
+	// Interleave two members' findings.
+	for _, f := range []struct{ who, body string }{
+		{"lead", "scoped the work"},
+		{"worker", "found the regression"},
+		{"lead", "drafted the plan"},
+		{"worker", "wrote a repro"},
+	} {
+		if err := tm.AppendFinding(f.who, f.body); err != nil {
+			t.Fatalf("AppendFinding(%q): %v", f.who, err)
+		}
+	}
+	got := tm.Findings()
+	want := []team.Finding{
+		{Seq: 1, Member: "lead", Body: "scoped the work"},
+		{Seq: 2, Member: "worker", Body: "found the regression"},
+		{Seq: 3, Member: "lead", Body: "drafted the plan"},
+		{Seq: 4, Member: "worker", Body: "wrote a repro"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Findings len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Findings[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	// Mutating the returned copy must not affect the aggregate.
+	got[0].Body = "tampered"
+	if again := tm.Findings(); again[0].Body != "scoped the work" {
+		t.Fatalf("Findings returned an aliasing slice: aggregate mutated to %q", again[0].Body)
+	}
+}
+
+// TestAppendFindingLedgerCapEnforced asserts AppendFinding returns
+// ErrTooManyFindings once the ledger is at MaxFindings.
+func TestAppendFindingLedgerCapEnforced(t *testing.T) {
+	tm := newTeamWith(t, "lead")
+	for i := 0; i < team.MaxFindings; i++ {
+		if err := tm.AppendFinding("lead", "datum"); err != nil {
+			t.Fatalf("AppendFinding #%d: %v", i, err)
+		}
+	}
+	if err := tm.AppendFinding("lead", "one too many"); !errors.Is(err, team.ErrTooManyFindings) {
+		t.Fatalf("AppendFinding past cap: err = %v, want ErrTooManyFindings", err)
+	}
+}
+
+// TestConcurrentAppendFindingNoLostAppends spins N goroutines recording findings
+// concurrently and asserts the ledger length and per-member counts are exact (no
+// lost or torn appends). Run under -race.
+func TestConcurrentAppendFindingNoLostAppends(t *testing.T) {
+	const (
+		workers          = 8
+		perWorkerEntries = 20
+	)
+	names := make([]string, workers)
+	for i := range names {
+		names[i] = workerName(i)
+	}
+	tm := newTeamWith(t, names...)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			for i := 0; i < perWorkerEntries; i++ {
+				if err := tm.AppendFinding(name, "datum"); err != nil {
+					t.Errorf("AppendFinding(%q): %v", name, err)
+					return
+				}
+			}
+		}(names[w])
+	}
+	wg.Wait()
+
+	got := tm.Findings()
+	if len(got) != workers*perWorkerEntries {
+		t.Fatalf("ledger len = %d, want %d", len(got), workers*perWorkerEntries)
+	}
+	perMember := make(map[string]int)
+	seqSeen := make(map[int]bool)
+	for _, f := range got {
+		perMember[f.Member]++
+		if seqSeen[f.Seq] {
+			t.Fatalf("duplicate Seq %d (torn append)", f.Seq)
+		}
+		seqSeen[f.Seq] = true
+	}
+	for _, name := range names {
+		if perMember[name] != perWorkerEntries {
+			t.Fatalf("member %q recorded %d findings, want %d", name, perMember[name], perWorkerEntries)
+		}
+	}
+}

@@ -84,6 +84,15 @@ const (
 	// the client routes to the ctrl+a agents task sub-view. Snapshots are emitted
 	// only on change (de-duped) to bound wire volume.
 	EvTeamTasks EventType = "team.tasks"
+	// EvTeamFindings is emitted when the team's SHARED FINDINGS LEDGER changes during
+	// a Team run (and as a terminal snapshot on EvTeamEnd's payload). Like EvTeamTasks
+	// it is a team-WIDE projection — NOT per-member — so it carries no Member; only
+	// TeamPayload.Findings (each member-authored finding's recording member + a BOUNDED
+	// body preview, in append order). The findings ledger is the PRIMARY channel the
+	// lead's synthesis consolidates; surfacing it on the stream lets a watching client
+	// see findings accrue. Snapshots are emitted only on change (de-duped) to bound
+	// wire volume, exactly like EvTeamTasks.
+	EvTeamFindings EventType = "team.findings"
 	// EvTeamEnd is emitted when a Team run terminates. It is a BOUNDED projection
 	// carrying only aggregate metadata — the number of rounds, the stop reason, and
 	// the team's cumulative usage — never member content. The team's joined summary
@@ -256,8 +265,22 @@ type TeamTaskSnapshot struct {
 	Deps []string
 }
 
+// TeamFindingSnapshot is one entry of the team findings ledger, projected onto the
+// event stream so a watching client (the ctrl+a agents overlay) can see findings
+// accrue. It is a plain value type carrying only the recording member's name and a
+// BOUNDED body preview (clampPreview), never the raw finding. Like TeamTaskSnapshot
+// it lives in session (session never imports team); the team.Finding → snapshot
+// bridge lives in internal/agent.
+type TeamFindingSnapshot struct {
+	// Member is the name of the member that recorded the finding.
+	Member string
+	// Body is a BOUNDED preview of the finding text (capped like every other
+	// member-derived preview).
+	Body string
+}
+
 // TeamPayload is the BOUNDED observability projection carried by the team.* events
-// (EvTeamStart / EvTeamMember / EvTeamTasks / EvTeamEnd). It is the ONLY information
+// (EvTeamStart / EvTeamMember / EvTeamTasks / EvTeamFindings / EvTeamEnd). It is the ONLY information
 // about an in-process team's run that surfaces to clients on the event stream.
 //
 // REDACTION CONTRACT — fuller-but-bounded. Unlike SubagentPayload (metadata only),
@@ -280,8 +303,10 @@ type TeamTaskSnapshot struct {
 //     relevant to InnerKind.
 //   - EvTeamTasks:  ParentCallID, TeamID, Tasks (the team-wide task snapshot; no
 //     Member).
+//   - EvTeamFindings: ParentCallID, TeamID, Findings (the team-wide findings ledger
+//     snapshot; no Member).
 //   - EvTeamEnd:    ParentCallID, TeamID, Rounds, Stop, Usage (cumulative), Tasks
-//     (the terminal task snapshot).
+//     (the terminal task snapshot), Findings (the terminal findings snapshot).
 type TeamPayload struct {
 	// ParentCallID is the parent's Team tool-call id, attributing every team.*
 	// event to the originating Team card. Set on all three kinds.
@@ -335,6 +360,12 @@ type TeamPayload struct {
 	// state always lands). It feeds the ctrl+a agents task sub-view; it carries only
 	// task metadata, never member content.
 	Tasks []TeamTaskSnapshot
+	// Findings is a snapshot of the team's SHARED FINDINGS LEDGER in append order. It
+	// is set on an EvTeamFindings event (emitted on change, de-duped) and on EvTeamEnd
+	// (the terminal snapshot). It feeds the ctrl+a agents findings view; each entry
+	// carries the recording member's name and a BOUNDED body preview, never the raw
+	// finding.
+	Findings []TeamFindingSnapshot
 }
 
 // Event is the domain-owned, provider-neutral unit of the streaming model. The

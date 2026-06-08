@@ -154,6 +154,10 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 	for _, tk := range p.Tasks {
 		tasks = append(tasks, toProtoTeamTaskSnapshot(tk))
 	}
+	findings := make([]*mecatlv1.TeamFinding, 0, len(p.Findings))
+	for _, f := range p.Findings {
+		findings = append(findings, &mecatlv1.TeamFinding{Member: f.Member, Body: f.Body})
+	}
 	return &mecatlv1.Team{
 		ParentCallId:  p.ParentCallID,
 		TeamId:        p.TeamID,
@@ -170,6 +174,7 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 		ContextUsed:   p.ContextUsed,
 		ContextWindow: p.ContextWindow,
 		Tasks:         tasks,
+		Findings:      findings,
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
+	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/governance"
 	"github.com/stacklok/mecatl/internal/session"
@@ -73,6 +74,12 @@ func TestTeamToolFormsTeamAndIsolatesContent(t *testing.T) {
 		mockllm.ChunksTurn(
 			mockllm.TextChunk("LEAD_SECRET: worker reported; team complete"),
 			mockllm.UsageChunk(session.Usage{InputTokens: 30, OutputTokens: 6}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+		// Synthesis turn: the lead consolidates into the team's deliverable.
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("CONSOLIDATED REPORT for lead and worker: bug fixed."),
+			mockllm.UsageChunk(session.Usage{InputTokens: 60, OutputTokens: 12}),
 			mockllm.DoneChunk(session.StopEndTurn),
 		),
 	)
@@ -186,8 +193,9 @@ func TestTeamToolFormsTeamAndIsolatesContent(t *testing.T) {
 	if end.Usage != wantUsage {
 		t.Errorf("team.end usage = %+v, want the summed member total %+v", end.Usage, wantUsage)
 	}
-	if end.Usage.InputTokens != 150 || end.Usage.OutputTokens != 30 {
-		t.Errorf("team.end usage = %+v, want in=150 out=30 (sum of the 5 scripted turns)", end.Usage)
+	// Sum of the 6 scripted member turns (5 scheduled + 1 synthesis): in=210 out=42.
+	if end.Usage.InputTokens != 210 || end.Usage.OutputTokens != 42 {
+		t.Errorf("team.end usage = %+v, want in=210 out=42 (sum of the 6 scripted turns)", end.Usage)
 	}
 
 	// --- CONTENT ISOLATION: only the joined summary enters the parent ------
@@ -201,12 +209,14 @@ func TestTeamToolFormsTeamAndIsolatesContent(t *testing.T) {
 		t.Fatalf("parent saw %d tool results, want exactly 1 (the Team summary)", len(parentResults))
 	}
 	summary := parentResults[0].Content
-	// The joined summary names members and reports their LAST text, which legitimately
-	// includes the lead/worker terminal lines. The isolation guarantee is about the
-	// parent CONVERSATION (the LLM context), asserted below: the per-member transcript
-	// (intermediate tool calls/results, mid-run messages) must not be in Conversation.
-	if !strings.Contains(summary, "lead") || !strings.Contains(summary, "worker") {
-		t.Errorf("joined summary should name both members: %q", summary)
+	// The returned deliverable is now the LEAD's consolidated synthesis (TeamOutcome
+	// .Report), NOT a header-only concatenation of member LastText. The isolation
+	// guarantee is about the parent CONVERSATION (the LLM context), asserted below: the
+	// per-member transcript (intermediate tool calls/results, mid-run messages) must not
+	// be in Conversation. The synthesis text is the lead's own authored summary, which
+	// legitimately names members.
+	if !strings.Contains(summary, "CONSOLIDATED REPORT") {
+		t.Errorf("returned result should be the lead's consolidated synthesis, got: %q", summary)
 	}
 
 	// The parent Conversation must contain ONLY: the user prompt, the parent's Team
@@ -319,6 +329,189 @@ func TestTeamToolStreamsTaskSnapshots(t *testing.T) {
 	if len(end.Tasks) != 1 || end.Tasks[0].State != string(team.TaskCompleted) {
 		t.Errorf("team.end should carry the final completed task list, got %+v", end.Tasks)
 	}
+}
+
+// TestTeamFindingsProjectedOnChangeAndOnEnd drives a scripted team whose worker
+// records findings and asserts the findings-snapshot stream contract (mirroring the
+// task-snapshot one): first-class team.findings events carry the ledger (no Member);
+// the snapshot is DE-DUPED (an unchanged ledger is not re-emitted); bodies are
+// clamped; and the terminal team.end carries the final findings snapshot.
+func TestTeamFindingsProjectedOnChangeAndOnEnd(t *testing.T) {
+	// The worker records two findings (one per turn) so the ledger changes twice.
+	f1 := session.NewToolCall("w1", "RecordFinding", json.RawMessage(`{"finding":"first finding"}`))
+	f2 := session.NewToolCall("w2", "RecordFinding", json.RawMessage(`{"finding":"second finding"}`))
+	leadProv := mockllm.New(
+		mockllm.TextTurn("delegating"), // round 0
+		mockllm.TextTurn("the report"), // synthesis
+	)
+	workerProv := mockllm.New(
+		mockllm.ToolCallTurn(f1), // round 0 turn 1
+		mockllm.ToolCallTurn(f2), // round 0 turn 2
+		mockllm.TextTurn("done"), // round 0 turn 3 (ends run)
+	)
+	providers := map[string]*mockllm.Provider{"lead": leadProv, "worker": workerProv}
+
+	teamTool := agent.NewTeamTool(teamToolFactory(t, providers))
+	parentCat := catalogWith(t, teamTool)
+	parentLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("p1", "Team",
+			`{"goal":"investigate","members":[{"name":"lead","role":"coordinate"},{"name":"worker","role":"investigate"}]}`)),
+		mockllm.TextTurn("parent received the report"),
+	)
+	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: parentCat})
+	sess := newSession(t, session.Limits{})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "investigate")
+	evs := drain(r)
+
+	var snapshots [][]session.TeamFindingSnapshot
+	var memberEvents int
+	for _, ev := range evs {
+		if ev.Type == session.EvTeamMember {
+			memberEvents++
+		}
+		if ev.Type == session.EvTeamFindings {
+			if ev.Team.Member != "" {
+				t.Errorf("a findings snapshot must carry no Member, got %q", ev.Team.Member)
+			}
+			snapshots = append(snapshots, ev.Team.Findings)
+		}
+	}
+	if len(snapshots) == 0 {
+		t.Fatalf("no findings-snapshot (team.findings) events streamed")
+	}
+	// De-dup: every consecutive snapshot must differ from its predecessor.
+	for i := 1; i < len(snapshots); i++ {
+		if findingsSnapshotEqual(snapshots[i-1], snapshots[i]) {
+			t.Errorf("snapshot %d duplicates snapshot %d (de-dup guard failed): %+v", i, i-1, snapshots[i])
+		}
+	}
+	// TRUE de-dup proof: the ledger changed exactly TWICE (two RecordFinding calls), so
+	// at most 2 team.findings events were emitted — even though the sink fires for EVERY
+	// member event. If the de-dup branch were a no-op, every member event would re-emit
+	// the unchanged ledger and this count would balloon to ~memberEvents.
+	if len(snapshots) > 2 {
+		t.Errorf("emitted %d findings snapshots for 2 ledger changes — de-dup not bounding emits", len(snapshots))
+	}
+	if memberEvents <= len(snapshots) {
+		t.Fatalf("test setup too weak to prove de-dup: %d member events vs %d snapshots (need many more member events than emits)",
+			memberEvents, len(snapshots))
+	}
+	// The ledger grew across snapshots: the last snapshot holds both findings.
+	last := snapshots[len(snapshots)-1]
+	if len(last) != 2 || last[0].Body != "first finding" || last[1].Body != "second finding" {
+		t.Errorf("last findings snapshot = %+v, want both findings in append order", last)
+	}
+	if last[0].Member != "worker" {
+		t.Errorf("finding member = %q, want worker", last[0].Member)
+	}
+
+	// team.end carries the terminal findings snapshot.
+	var end *session.TeamPayload
+	for _, ev := range evs {
+		if ev.Type == session.EvTeamEnd {
+			end = ev.Team
+		}
+	}
+	if end == nil {
+		t.Fatal("no team.end event")
+	}
+	if len(end.Findings) != 2 {
+		t.Errorf("team.end should carry the final findings ledger, got %+v", end.Findings)
+	}
+}
+
+// TestTeamFindingsBodyClamped asserts a long finding body is CLAMPED on the
+// projected snapshot (the same cap every member-derived preview uses), never copied
+// verbatim onto the stream.
+func TestTeamFindingsBodyClamped(t *testing.T) {
+	longBody := strings.Repeat("x", 500)
+	f := session.NewToolCall("w1", "RecordFinding",
+		json.RawMessage(`{"finding":"`+longBody+`"}`))
+	leadProv := mockllm.New(mockllm.TextTurn("delegating"), mockllm.TextTurn("report"))
+	workerProv := mockllm.New(mockllm.ToolCallTurn(f), mockllm.TextTurn("done"))
+	providers := map[string]*mockllm.Provider{"lead": leadProv, "worker": workerProv}
+
+	teamTool := agent.NewTeamTool(teamToolFactory(t, providers))
+	parentCat := catalogWith(t, teamTool)
+	parentLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("p1", "Team",
+			`{"goal":"g","members":[{"name":"lead","role":"c"},{"name":"worker","role":"w"}]}`)),
+		mockllm.TextTurn("ok"),
+	)
+	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: parentCat})
+	sess := newSession(t, session.Limits{})
+	evs := drain(e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "g"))
+
+	for _, ev := range evs {
+		if ev.Type == session.EvTeamFindings && len(ev.Team.Findings) > 0 {
+			body := ev.Team.Findings[0].Body
+			if len([]rune(body)) >= len(longBody) {
+				t.Fatalf("finding body was not clamped: len=%d", len([]rune(body)))
+			}
+			return
+		}
+	}
+	t.Fatal("no team.findings event carried the recorded finding")
+}
+
+// TestMemberSessionIDRoundTripsTeamToolPath pins the id-scheme contract on the Team
+// TOOL path: the member session the supervisor persists must load under
+// MemberSessionID(publishedTeamID, member), where publishedTeamID is the EXACT
+// EvTeamStart.TeamID the parent observed. This is the zero-wire-risk guard that the
+// producer (save) and consumer (InspectMember) cannot drift.
+func TestMemberSessionIDRoundTripsTeamToolPath(t *testing.T) {
+	leadProv := mockllm.New(mockllm.TextTurn("delegating"), mockllm.TextTurn("report"))
+	workerProv := mockllm.New(mockllm.TextTurn("done"))
+	providers := map[string]*mockllm.Provider{"lead": leadProv, "worker": workerProv}
+
+	store := memstore.New()
+	teamTool := agent.NewTeamTool(teamToolFactory(t, providers), agent.WithTeamToolStore(store))
+	parentCat := catalogWith(t, teamTool)
+	parentLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("p1", "Team",
+			`{"goal":"investigate","members":[{"name":"lead","role":"coordinate"},{"name":"worker","role":"investigate"}]}`)),
+		mockllm.TextTurn("parent received the report"),
+	)
+	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: parentCat})
+	sess := newSession(t, session.Limits{})
+	evs := drain(e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "investigate"))
+
+	// Capture the EXACT published team id off EvTeamStart — the value a parent (or a
+	// human) would feed back into InspectMember.
+	var publishedTeamID string
+	for _, ev := range evs {
+		if ev.Type == session.EvTeamStart && ev.Team != nil {
+			publishedTeamID = ev.Team.TeamID
+		}
+	}
+	if publishedTeamID == "" {
+		t.Fatal("no EvTeamStart team id observed")
+	}
+
+	// Each member's persisted session must load under MemberSessionID(publishedTeamID, name).
+	for _, name := range []string{"lead", "worker"} {
+		id := agent.MemberSessionID(publishedTeamID, name)
+		got, err := store.Load(context.Background(), id)
+		if err != nil {
+			t.Fatalf("member %q not persisted under MemberSessionID(%q,%q)=%q: %v", name, publishedTeamID, name, id, err)
+		}
+		if got.ID != id {
+			t.Errorf("loaded session id = %q, want %q", got.ID, id)
+		}
+	}
+}
+
+// findingsSnapshotEqual is the test-side mirror of teamtool.go's findingsEqual.
+func findingsSnapshotEqual(a, b []session.TeamFindingSnapshot) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Member != b[i].Member || a[i].Body != b[i].Body {
+			return false
+		}
+	}
+	return true
 }
 
 // tasksSnapshotEqual is the test-side mirror of teamtool.go's tasksEqual, comparing

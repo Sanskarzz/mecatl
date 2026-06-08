@@ -22,10 +22,11 @@ import (
 type teamView int
 
 const (
-	teamNone   teamView = iota // overlay closed
-	teamRoster                 // the full (uncapped) member roster
-	teamFocus                  // one selected member's full trace
-	teamTasks                  // the shared team task list (id · state · assignee · deps)
+	teamNone     teamView = iota // overlay closed
+	teamRoster                   // the full (uncapped) member roster
+	teamFocus                    // one selected member's full trace
+	teamTasks                    // the shared team task list (id · state · assignee · deps)
+	teamFindings                 // the shared team findings ledger (member · body)
 )
 
 // teamState holds the agent-team overlay state on the Model. It is value-
@@ -111,6 +112,15 @@ func (m Model) onTeamKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		}
 		return m, nil, true
 	}
+	if m.team.view == teamFindings {
+		// Findings sub-view: BOTH esc and 'f' return to the roster (f toggles, esc
+		// steps back), mirroring the task sub-view. Read-only, height-windowed, no
+		// live viewport.
+		if key.Matches(msg, m.keys.Close) || key.Matches(msg, m.keys.Findings) {
+			m.team.view = teamRoster
+		}
+		return m, nil, true
+	}
 	mm, cmd := m.onTeamRosterKey(msg, b)
 	return mm, cmd, true
 }
@@ -130,6 +140,9 @@ func (m Model) onTeamRosterKey(msg tea.KeyPressMsg, b *block) (tea.Model, tea.Cm
 		return m.closeTeam()
 	case key.Matches(msg, m.keys.Tasks):
 		m.team.view = teamTasks
+		return m, nil
+	case key.Matches(msg, m.keys.Findings):
+		m.team.view = teamFindings
 		return m, nil
 	case key.Matches(msg, m.keys.Up):
 		m.team.cursor = clampCursor(m.team.cursor-1, n)
@@ -235,6 +248,8 @@ func renderTeamOverlay(th theme.Theme, st teamState, b *block, width, height int
 		body = renderTeamFocus(th, b, st.member, height)
 	case teamTasks:
 		body = renderTeamTasks(th, b, height)
+	case teamFindings:
+		body = renderTeamFindings(th, b, height)
 	default:
 		return ""
 	}
@@ -335,7 +350,7 @@ func renderTeamRoster(th theme.Theme, st teamState, b *block, height int) string
 		out.WriteString(muted.Render(fmt.Sprintf("  · +%d below", below)) + "\n")
 	}
 
-	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · t tasks · esc close"))
+	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · t tasks · f findings · esc close"))
 	return out.String()
 }
 
@@ -612,4 +627,81 @@ func teamTasksSummary(tasks []teamTask) string {
 	}
 	return fmt.Sprintf("%d done · %d in-progress · %d pending(%d blocked)",
 		done, inProgress, pending, blocked)
+}
+
+// teamFindingsChromeLines is the number of NON-row lines the findings sub-view
+// always spends: the title, the summary sub-head, the blank line under it, the
+// blank line above the footer, and the footer (5). It mirrors teamTasksChromeLines
+// so the height-window math stays consistent across the two ledger sub-views.
+const teamFindingsChromeLines = 5
+
+// teamFindingsRows is how many finding rows fit in the findings sub-view for a card
+// of the given OUTER height. It mirrors teamTasksRows: subtract the card
+// border+padding and the fixed chrome, reserve one line for the "+N more" tail,
+// floor at teamMinRosterRows. A non-positive height (size unknown) shows all rows.
+func teamFindingsRows(height int) int {
+	if height <= 0 {
+		return 0
+	}
+	const cardChrome = 4 // border (2) + vertical padding (2)
+	const tailReserve = 1
+	rows := height - cardChrome - teamFindingsChromeLines - tailReserve
+	if rows < teamMinRosterRows {
+		return teamMinRosterRows
+	}
+	return rows
+}
+
+// renderTeamFindings draws the shared team findings ledger: a title, a one-line
+// summary (N findings from M members), then one height-windowed row per finding
+// (member · body). An empty ledger reads as a muted "(no findings)". All
+// finding-derived strings are terminal-sanitized. It mirrors renderTeamTasks's
+// chrome and height-window math so a long ledger never clips the footer.
+func renderTeamFindings(th theme.Theme, b *block, height int) string {
+	muted := th.Style("muted")
+	var out strings.Builder
+
+	out.WriteString(th.Style("askTitle").Render("findings"))
+	out.WriteString("\n")
+	out.WriteString(muted.Render(teamFindingsSummary(b.teamFindings)))
+	out.WriteString("\n\n")
+
+	if len(b.teamFindings) == 0 {
+		out.WriteString(muted.Render("(no findings)"))
+		out.WriteString("\n\n" + muted.Render("f roster · esc close"))
+		return out.String()
+	}
+
+	// Window the rows to the available height (cursor-free: the findings sub-view has
+	// no selection, so it always anchors at the top, surfacing only a "+N more" tail).
+	rows := teamFindingsRows(height)
+	start, end, _, below := teamWindow(0, len(b.teamFindings), rows)
+	for i := start; i < end; i++ {
+		out.WriteString("  " + muted.Render(findingRow(b.teamFindings[i])) + "\n")
+	}
+	if below > 0 {
+		out.WriteString(muted.Render(fmt.Sprintf("  · +%d more", below)) + "\n")
+	}
+
+	out.WriteString("\n" + muted.Render("f roster · esc close"))
+	return out.String()
+}
+
+// findingRow renders one finding row: "member · body". Both the member name and the
+// body are terminal-sanitized (member-authored, already bounded server-side by
+// clampPreview); newlines in the body are collapsed so a multi-line finding stays on
+// one scannable row.
+func findingRow(f teamFinding) string {
+	body := sanitizeTerminal(strings.ReplaceAll(f.body, "\n", " "))
+	return fmt.Sprintf("%s · %s", sanitizeTerminal(f.member), body)
+}
+
+// teamFindingsSummary renders the one-line ledger roll-up: "N finding(s) from M
+// member(s)". It is the at-a-glance header of the findings sub-view.
+func teamFindingsSummary(findings []teamFinding) string {
+	members := make(map[string]struct{}, len(findings))
+	for _, f := range findings {
+		members[f.member] = struct{}{}
+	}
+	return fmt.Sprintf("%d finding(s) from %d member(s)", len(findings), len(members))
 }

@@ -162,6 +162,23 @@ func TestEventToMsgTeam(t *testing.T) {
 					{ID: "task-2", Description: "fix", State: "pending", Deps: []string{"task-1"}},
 				}},
 		},
+		{
+			// The first-class team.findings event carries the shared findings ledger (no
+			// Member) and maps directly to the TeamFindings discriminant; each entry
+			// decodes member + body.
+			"team.findings snapshot",
+			&mecatlv1.Event{Type: "team.findings", Team: &mecatlv1.Team{
+				ParentCallId: "t1", TeamId: "team-t1",
+				Findings: []*mecatlv1.TeamFinding{
+					{Member: "scout", Body: "the cache key omits the tenant id"},
+					{Member: "fixer", Body: "patched the key"},
+				}}},
+			TeamMsg{Kind: TeamFindings, ParentCallID: "t1", TeamID: "team-t1",
+				Findings: []TeamFinding{
+					{Member: "scout", Body: "the cache key omits the tenant id"},
+					{Member: "fixer", Body: "patched the key"},
+				}},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

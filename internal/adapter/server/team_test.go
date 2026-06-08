@@ -18,6 +18,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/team"
 	"github.com/stacklok/mecatl/internal/tool"
 )
@@ -58,6 +59,77 @@ func teamService(t *testing.T, llm *mockllm.Provider) *server.Service {
 		t.Fatalf("new service: %v", err)
 	}
 	return svc
+}
+
+// teamServiceWithStore is teamService but returns the backing SessionStore too, so a
+// test can assert member sessions persist under their published-id-derived ids.
+func teamServiceWithStore(t *testing.T, llm *mockllm.Provider) (*server.Service, port.SessionStore) {
+	t.Helper()
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	store := memstore.New()
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
+			LLM: llm, Catalog: cat, Policy: allow, Model: "mock",
+		})}
+	}
+	engine := agent.NewEngine(agent.Deps{
+		LLM: mockllm.New(mockllm.TextTurn("x")), Catalog: tool.NewCatalog(), Policy: allow, Model: "mock",
+	})
+	svc, err := server.NewService(server.Config{
+		Engine:       engine,
+		Store:        store,
+		Workspaces:   func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		Now:          func() time.Time { return time.Unix(0, 0) },
+		MemberEngine: memberEngine,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	return svc, store
+}
+
+// TestMemberSessionIDRoundTripsGRPCPath pins the id-scheme contract on the gRPC
+// CreateTeam path: the member session the supervisor persists must load under
+// MemberSessionID(publishedTeamID, member), where publishedTeamID is the EXACT
+// CreateTeamResponse.team_id (which is itself "team-<NewID()>", so the saved id
+// carries the deliberate double "team-" prefix). Feeding the published id verbatim —
+// the SAME string InspectMember derives from — round-trips byte-for-byte.
+func TestMemberSessionIDRoundTripsGRPCPath(t *testing.T) {
+	svc, store := teamServiceWithStore(t, mockllm.New(
+		mockllm.TextTurn("delegating"), mockllm.TextTurn("report"),
+	))
+	h := server.NewHarnessServer(svc)
+	ctx := context.Background()
+
+	createResp, err := h.CreateTeam(ctx, newCreateTeamWith("/ws",
+		&mecatlv1.TeammateSpec{Name: "lead", Lead: true, InitialPrompt: "go"},
+	))
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	publishedTeamID := createResp.GetTeamId()
+	if publishedTeamID == "" {
+		t.Fatal("CreateTeam returned an empty team id")
+	}
+
+	if _, err := svc.RunTeam(ctx, publishedTeamID, func(agent.TeamEvent) {}); err != nil {
+		t.Fatalf("RunTeam: %v", err)
+	}
+
+	// The lead session must load under MemberSessionID(publishedTeamID, "lead") — the
+	// exact string a caller would feed InspectMember.
+	id := agent.MemberSessionID(publishedTeamID, "lead")
+	got, lerr := store.Load(ctx, id)
+	if lerr != nil {
+		t.Fatalf("lead session not persisted under MemberSessionID(%q,%q)=%q: %v", publishedTeamID, "lead", id, lerr)
+	}
+	if got.ID != id {
+		t.Errorf("loaded session id = %q, want %q", got.ID, id)
+	}
 }
 
 func newCreateTeam(workspace string) *mecatlv1.CreateTeamRequest {
@@ -299,7 +371,7 @@ func TestCreateTeamMaxTeams(t *testing.T) {
 		t.Fatalf("CreateTeam past MaxTeams: code = %v, want ResourceExhausted (err=%v)", status.Code(err), err)
 	}
 	// And the Service returns the mapped sentinel.
-	if _, _, serr := svc.CreateTeam(ctx, "/ws", "x", nil); !errors.Is(serr, server.ErrTooManyTeams) {
+	if _, _, serr := svc.CreateTeam(ctx, "/ws", "x", "", nil); !errors.Is(serr, server.ErrTooManyTeams) {
 		t.Fatalf("Service.CreateTeam past cap: err = %v, want ErrTooManyTeams", serr)
 	}
 
@@ -519,7 +591,7 @@ func TestSpawnTeammateRaceWithRunTeam(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < teams; i++ {
-		teamID, _, err := svc.CreateTeam(ctx, "/ws", "race", nil)
+		teamID, _, err := svc.CreateTeam(ctx, "/ws", "race", "", nil)
 		if err != nil {
 			t.Fatalf("CreateTeam #%d: %v", i, err)
 		}

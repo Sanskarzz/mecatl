@@ -20,7 +20,7 @@ func (h *HarnessServer) CreateTeam(ctx context.Context, req *mecatlv1.CreateTeam
 	if req.GetWorkspace() == "" {
 		return nil, status.Error(codes.InvalidArgument, "workspace is required")
 	}
-	id, enrolled, err := h.svc.CreateTeam(ctx, req.GetWorkspace(), req.GetName(), fromProtoTeammateSpecs(req.GetMembers()))
+	id, enrolled, err := h.svc.CreateTeam(ctx, req.GetWorkspace(), req.GetName(), req.GetGoal(), fromProtoTeammateSpecs(req.GetMembers()))
 	if err != nil {
 		return nil, toStatus(err)
 	}

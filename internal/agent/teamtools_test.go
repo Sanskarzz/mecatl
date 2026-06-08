@@ -36,9 +36,9 @@ func call(t *testing.T, tl tool.Tool, argsJSON string) session.ToolResult {
 	return res
 }
 
-func TestMemberToolsExposesTheFiveCoordinationTools(t *testing.T) {
+func TestMemberToolsExposesTheCoordinationTools(t *testing.T) {
 	tools := agent.MemberTools(team.New("t"), "alice", nil)
-	want := []string{"SendMessage", "AddTask", "ClaimTask", "CompleteTask", "ListTasks"}
+	want := []string{"SendMessage", "AddTask", "ClaimTask", "CompleteTask", "ListTasks", "RecordFinding"}
 	if len(tools) != len(want) {
 		t.Fatalf("got %d tools, want %d", len(tools), len(want))
 	}
@@ -51,6 +51,55 @@ func TestMemberToolsExposesTheFiveCoordinationTools(t *testing.T) {
 		if (tl.Spec().Name == "ListTasks") != ro {
 			t.Errorf("%s ReadOnly()=%v, want %v", tl.Spec().Name, ro, tl.Spec().Name == "ListTasks")
 		}
+	}
+}
+
+// TestMemberToolNamesIncludesRecordFinding asserts MemberToolNames (the set the
+// supervisor's workspace-mutating-tool backstop exempts) picks up RecordFinding
+// automatically, because it derives the set from MemberTools. This is load-bearing:
+// a base-sharing read-only member may hold RecordFinding (it mutates only TEAM
+// state) without tripping ErrReadOnlyMemberMutating.
+func TestMemberToolNamesIncludesRecordFinding(t *testing.T) {
+	names := agent.MemberToolNames()
+	if _, ok := names["RecordFinding"]; !ok {
+		t.Fatalf("MemberToolNames() = %v, want it to contain RecordFinding", names)
+	}
+}
+
+// TestRecordFindingTool exercises the RecordFinding coordination tool: a valid
+// finding appends to the ledger and returns the confirmation; an empty body is a
+// model-addressable error; a finding from a member not on the roster surfaces the
+// AppendFinding error rather than a harness fault.
+func TestRecordFindingTool(t *testing.T) {
+	tm := team.New("t")
+	_ = tm.AddMember("alice", "")
+	record := toolByName(t, agent.MemberTools(tm, "alice", nil), "RecordFinding")
+
+	// Empty body → model-addressable error result.
+	if res := call(t, record, `{"finding":""}`); !res.IsError {
+		t.Fatal("RecordFinding with empty body should be an error result")
+	}
+	if len(tm.Findings()) != 0 {
+		t.Fatalf("empty finding must not append; ledger = %+v", tm.Findings())
+	}
+
+	// Valid finding → appended, confirmation returned.
+	res := call(t, record, `{"finding":"the parser drops trailing commas"}`)
+	if res.IsError {
+		t.Fatalf("valid RecordFinding errored: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "recorded") {
+		t.Errorf("RecordFinding result = %q, want a 'recorded' confirmation", res.Content)
+	}
+	got := tm.Findings()
+	if len(got) != 1 || got[0].Member != "alice" || got[0].Body != "the parser drops trailing commas" {
+		t.Fatalf("ledger = %+v, want one finding from alice", got)
+	}
+
+	// A finding from a non-roster member surfaces the aggregate's error.
+	ghost := toolByName(t, agent.MemberTools(tm, "ghost", nil), "RecordFinding")
+	if res := call(t, ghost, `{"finding":"i am not here"}`); !res.IsError {
+		t.Fatal("RecordFinding from a non-member should be an error result")
 	}
 }
 

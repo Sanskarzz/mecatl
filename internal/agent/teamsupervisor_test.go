@@ -67,14 +67,17 @@ func TestSupervisorTwoMemberFlow(t *testing.T) {
 	addTask := session.NewToolCall("l1", "AddTask",
 		json.RawMessage(`{"description":"investigate the reported bug"}`))
 	leadProv := mockllm.New(
-		mockllm.ToolCallTurn(addTask),                           // round 0, turn 1
-		mockllm.TextTurn("Task created; waiting for worker."),   // round 0, turn 2 (ends run)
-		mockllm.TextTurn("Worker reports done. Team complete."), // round 2 (after worker's message)
+		mockllm.ToolCallTurn(addTask),                                                   // round 0, turn 1
+		mockllm.TextTurn("Task created; waiting for worker."),                           // round 0, turn 2 (ends run)
+		mockllm.TextTurn("CONSOLIDATED: root cause found; fix applied. Team complete."), // synthesis turn
 	)
 
+	// The worker completes the task and RECORDS A FINDING (the primary synthesis
+	// channel) rather than messaging the lead — so the lead is not re-scheduled and
+	// the synthesis phase produces the deliverable. The lead reads the ledger.
 	complete := session.NewToolCall("w1", "CompleteTask", json.RawMessage(`{"task_id":"task-1"}`))
-	report := session.NewToolCall("w2", "SendMessage",
-		json.RawMessage(`{"to":"lead","body":"done investigating; root cause found"}`))
+	report := session.NewToolCall("w2", "RecordFinding",
+		json.RawMessage(`{"finding":"done investigating; root cause found"}`))
 	workerProv := mockllm.New(
 		mockllm.ToolCallTurn(complete, report),      // round 1, turn 1
 		mockllm.TextTurn("Investigation complete."), // round 1, turn 2 (ends run)
@@ -122,8 +125,13 @@ func TestSupervisorTwoMemberFlow(t *testing.T) {
 	if !hasToolCall(events, "worker", "CompleteTask") {
 		t.Error("event stream missing worker's CompleteTask tool.call")
 	}
-	if !hasToolCall(events, "worker", "SendMessage") {
-		t.Error("event stream missing worker's SendMessage tool.call")
+	if !hasToolCall(events, "worker", "RecordFinding") {
+		t.Error("event stream missing worker's RecordFinding tool.call")
+	}
+
+	// The lead's synthesis is the team's deliverable.
+	if !strings.Contains(out.Report, "CONSOLIDATED") {
+		t.Errorf("outcome.Report = %q, want the lead's synthesis text", out.Report)
 	}
 
 	last := map[string]string{}
@@ -133,8 +141,8 @@ func TestSupervisorTwoMemberFlow(t *testing.T) {
 			t.Errorf("member %q ended stopped, want a clean finish", m.Name)
 		}
 	}
-	if !strings.Contains(last["lead"], "Team complete") {
-		t.Errorf("lead last text = %q, want it to mention completion", last["lead"])
+	if !strings.Contains(last["lead"], "CONSOLIDATED") {
+		t.Errorf("lead last text = %q, want the synthesis output", last["lead"])
 	}
 	if !strings.Contains(last["worker"], "Investigation complete") {
 		t.Errorf("worker last text = %q", last["worker"])

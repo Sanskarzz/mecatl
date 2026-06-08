@@ -37,6 +37,23 @@ func main() {
 	for _, ev := range events {
 		fmt.Println(formatEvent(ev))
 	}
+
+	// Second act (offline only): a 2-member agent team whose lead consolidates the
+	// worker's recorded finding into a single report — the team's deliverable.
+	if !*useOpenAI {
+		fmt.Println()
+		fmt.Println("=== mecatl team demo (offline) ===")
+		fmt.Println("A lead + worker coordinate; the worker records a finding; the lead synthesises the consolidated report.")
+		fmt.Println()
+		outcome, terr := RunTeamScenario(context.Background())
+		if terr != nil {
+			fmt.Fprintln(os.Stderr, "mecademo team:", terr)
+			os.Exit(1)
+		}
+		fmt.Printf("team finished in %d round(s); quiescent=%t\n", outcome.Rounds, outcome.Quiescent)
+		fmt.Println("--- consolidated report (the team's deliverable) ---")
+		fmt.Println(outcome.Report)
+	}
 }
 
 // selectProvider returns the configured LLMProvider and a human label. The

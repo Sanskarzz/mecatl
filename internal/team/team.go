@@ -46,6 +46,8 @@ const (
 	MaxInboxMessages = 256
 	// MaxMembers caps the roster size of one team.
 	MaxMembers = 32
+	// MaxFindings caps the findings ledger so a runaway member cannot exhaust memory.
+	MaxFindings = 512
 )
 
 // Errors returned by the Team aggregate.
@@ -77,6 +79,8 @@ var (
 	ErrTooManyMessages = errors.New("team: inbox limit reached")
 	// ErrTooManyMembers is returned by AddMember when the roster is at MaxMembers.
 	ErrTooManyMembers = errors.New("team: member limit reached")
+	// ErrTooManyFindings is returned by AppendFinding when the ledger is at MaxFindings.
+	ErrTooManyFindings = errors.New("team: findings ledger limit reached")
 )
 
 // MemberState is the lifecycle state of a teammate (or the lead).
@@ -151,6 +155,20 @@ type Message struct {
 	Body string
 }
 
+// Finding is one member-authored finding recorded to the shared ledger. Member is
+// the recording member's name (authenticated against the roster by AppendFinding);
+// Body is the finding text (UNTRUSTED — member-authored, fenced before it reaches
+// the lead). The ledger is the PRIMARY channel through which the lead's synthesis
+// turn consolidates the team's work into the final report.
+type Finding struct {
+	// Seq is a team-global monotonic sequence number that witnesses append order.
+	Seq int
+	// Member is the recording member's name (a current roster member).
+	Member string
+	// Body is the finding text.
+	Body string
+}
+
 // Team is the aggregate root for one agent team's coordination state. Construct it
 // with New. All methods are safe for concurrent use.
 type Team struct {
@@ -163,9 +181,11 @@ type Team struct {
 	tasks     map[TaskID]*Task
 	taskOrder []TaskID // creation order, for deterministic claiming
 	inbox     map[string][]Message
+	findings  []Finding // append-order ledger; the primary synthesis channel
 
 	nextTaskN int
 	nextMsg   int
+	nextFind  int // monotonic seq for findings, mirroring nextMsg
 }
 
 // New constructs an empty team identified by name.
@@ -440,6 +460,39 @@ func (t *Team) Drain(member string) ([]Message, error) {
 	msgs := t.inbox[member]
 	delete(t.inbox, member)
 	return msgs, nil
+}
+
+// AppendFinding records a member-authored finding to the shared ledger. The
+// recording member is authenticated against the roster (ErrUnknownMember
+// otherwise) exactly as Send authenticates a sender — but unlike Send there is no
+// OperatorSender case: only a real roster member records a finding (the operator
+// does not). The ledger is bounded: at MaxFindings the next append returns
+// ErrTooManyFindings, so a runaway member cannot exhaust memory. The Body is
+// UNTRUSTED member content; the supervisor fences it before it reaches the lead.
+func (t *Team) AppendFinding(member, body string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.members[member]; !ok {
+		return fmt.Errorf("%w: %q", ErrUnknownMember, member)
+	}
+	if len(t.findings) >= MaxFindings {
+		return fmt.Errorf("%w: %d", ErrTooManyFindings, MaxFindings)
+	}
+	t.nextFind++
+	t.findings = append(t.findings, Finding{Seq: t.nextFind, Member: member, Body: body})
+	return nil
+}
+
+// Findings returns a copy of the findings ledger in APPEND ORDER (witnessed by each
+// Finding's Seq), matching the copy-on-read discipline of Tasks/Members. Append
+// order is the consistent idiom for "things that happened over time" (like the
+// mailbox Drain's arrival order); the synthesis turn groups by member for
+// readability but does not depend on enrolment order. Finding has no slice fields,
+// so a shallow clone is a deep copy.
+func (t *Team) Findings() []Finding {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return slices.Clone(t.findings)
 }
 
 // Quiescent reports whether the team has reached a terminal-or-deadlocked resting

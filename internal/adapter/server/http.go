@@ -438,6 +438,7 @@ func (b teammateSpecBody) toMemberSpec() agent.MemberSpec {
 type createTeamBody struct {
 	Workspace string             `json:"workspace"`
 	Name      string             `json:"name,omitempty"`
+	Goal      string             `json:"goal,omitempty"`
 	Members   []teammateSpecBody `json:"members,omitempty"`
 }
 
@@ -469,7 +470,7 @@ func (h *HTTPHandler) createTeam(w http.ResponseWriter, r *http.Request) {
 			specs = append(specs, m.toMemberSpec())
 		}
 	}
-	id, enrolled, err := h.svc.CreateTeam(r.Context(), body.Workspace, body.Name, specs)
+	id, enrolled, err := h.svc.CreateTeam(r.Context(), body.Workspace, body.Name, body.Goal, specs)
 	if err != nil {
 		writeServiceError(w, err)
 		return

@@ -83,6 +83,14 @@ type teamTask struct {
 	deps     []string
 }
 
+// teamFinding is the ui-local projection of one entry in the team's shared findings
+// ledger, rendered by the ctrl+a agents findings view. It mirrors client.TeamFinding;
+// it holds only the recording member's name and a bounded body preview.
+type teamFinding struct {
+	member string
+	body   string
+}
+
 // blockKind classifies a scrollback block so the renderer knows how to style it.
 type blockKind int
 
@@ -154,14 +162,15 @@ type block struct {
 	// teamRounds/teamStop/teamUsage are the resolved end stats (teamDone gates
 	// them). Member content lives in each lane's capped trace; nothing here enters
 	// the parent conversation.
-	team       bool
-	teamID     string // the team's stable id (e.g. "team-p1"), shown in the live footer summary segment
-	teamLanes  []teamLane
-	teamTasks  []teamTask // the team's shared task list (ctrl+a task sub-view)
-	teamRounds int
-	teamStop   string
-	teamUsage  client.Usage
-	teamDone   bool
+	team         bool
+	teamID       string // the team's stable id (e.g. "team-p1"), shown in the live footer summary segment
+	teamLanes    []teamLane
+	teamTasks    []teamTask    // the team's shared task list (ctrl+a task sub-view)
+	teamFindings []teamFinding // the team's shared findings ledger (ctrl+a findings view)
+	teamRounds   int
+	teamStop     string
+	teamUsage    client.Usage
+	teamDone     bool
 
 	// Hook-block fields (blockHook): the structured phase/tool/decision used to
 	// render a hook notice distinctly from a compaction notice and colour a
@@ -545,6 +554,23 @@ func (c *conversation) setTeamTasks(parentCallID string, tasks []client.TeamTask
 	}
 	b.teamTasks = out
 	return true
+}
+
+// setTeamFindings replaces the cached findings-ledger snapshot on the Team block
+// identified by parentCallID. Like setTeamTasks, the server emits a fresh full
+// snapshot on every change (de-duped), so a replace is correct. Returns false on no
+// match. Findings carry only the recording member + a bounded body preview.
+func (c *conversation) setTeamFindings(parentCallID string, findings []client.TeamFinding) {
+	b := c.teamBlock(parentCallID)
+	if b == nil {
+		return
+	}
+	b.team = true
+	out := make([]teamFinding, 0, len(findings))
+	for _, f := range findings {
+		out = append(out, teamFinding{member: f.Member, body: f.Body})
+	}
+	b.teamFindings = out
 }
 
 // latestTeamBlock returns the most-recent tool block that carries team lanes (a

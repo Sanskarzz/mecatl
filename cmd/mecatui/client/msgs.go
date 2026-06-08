@@ -148,6 +148,10 @@ const (
 	// 1:1 from the first-class team.tasks proto Event.Type — a team-wide event with no
 	// Member — so the ui switches on a clean discriminant.
 	TeamTasks TeamKind = "tasks"
+	// TeamFindings marks a snapshot of the team's shared findings ledger (Findings
+	// set). It maps 1:1 from the first-class team.findings proto Event.Type — a
+	// team-wide event with no Member — mirroring TeamTasks.
+	TeamFindings TeamKind = "findings"
 )
 
 // TeamTask is one entry in the team's shared task list, as plain data the ctrl+a
@@ -159,6 +163,14 @@ type TeamTask struct {
 	State       string
 	Assignee    string
 	Deps        []string
+}
+
+// TeamFinding is one entry in the team's shared findings ledger, as plain data the
+// ctrl+a agents findings view renders. Mirrors mecatlv1.TeamFinding; carries only
+// the recording member's name and a bounded body preview, never the raw finding.
+type TeamFinding struct {
+	Member string
+	Body   string
 }
 
 // TeamMemberSpec is one roster entry forwarded on team.start, as plain data.
@@ -206,6 +218,10 @@ type TeamMsg struct {
 	// first-class team.tasks event) and on TeamEnd. It feeds the ctrl+a agents task
 	// sub-view.
 	Tasks []TeamTask
+	// Findings is the team's shared findings-ledger snapshot, set on a TeamFindings
+	// msg (the first-class team.findings event) and on TeamEnd. It feeds the ctrl+a
+	// agents findings view.
+	Findings []TeamFinding
 }
 
 // CompactionMsg is a muted "history compacted" notice.
@@ -318,6 +334,9 @@ func teamMsg(kind TeamKind, t *mecatlv1.Team) TeamMsg {
 			Deps:        tk.GetDeps(),
 		})
 	}
+	for _, f := range t.GetFindings() {
+		msg.Findings = append(msg.Findings, TeamFinding{Member: f.GetMember(), Body: f.GetBody()})
+	}
 	return msg
 }
 
@@ -414,6 +433,8 @@ func delegationEventToMsg(ev *mecatlv1.Event) tea.Msg {
 		return teamMsg(TeamMember, ev.GetTeam())
 	case "team.tasks":
 		return teamMsg(TeamTasks, ev.GetTeam())
+	case "team.findings":
+		return teamMsg(TeamFindings, ev.GetTeam())
 	case "team.end":
 		return teamMsg(TeamEnd, ev.GetTeam())
 	default:

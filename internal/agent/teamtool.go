@@ -61,7 +61,9 @@ type TeamMemberArg struct {
 // The MODEL specifies the roster: the first member is synthesized as the
 // coordinating lead.
 type teamArgs struct {
-	// Goal is the team's top-level objective, handed to the lead as its briefing.
+	// Goal is the team's top-level objective. It is threaded into the supervisor
+	// (WithTeamGoal) and rendered — fenced UNTRUSTED — into every member's round-0
+	// turn and into the lead's synthesis prompt.
 	Goal string `json:"goal"`
 	// Members is the roster the model formed. The first member is the lead.
 	Members []TeamMemberArg `json:"members"`
@@ -97,7 +99,9 @@ var teamSchema = json.RawMessage(`{
 // teamsupervisor.go). When executed it builds a fresh team.Team, enrols the
 // model-supplied roster (synthesizing the first member as the lead), drives the
 // existing Supervisor to quiescence over the SAME base workspace as the parent,
-// and returns ONLY the team's joined per-member summary as a single ToolResult.
+// and returns the LEAD's consolidated synthesis (TeamOutcome.Report) as a single
+// ToolResult — falling back to a labelled per-member concatenation
+// (joinTeamFallback) only when the lead could not synthesise.
 //
 // It is the team analogue of TaskTool/ForkTool, with two deliberate differences:
 //
@@ -111,8 +115,10 @@ var teamSchema = json.RawMessage(`{
 //     meant to be watched. permission.ask is dropped; every preview is capped.
 //
 // Context isolation holds exactly as for Task/Fork: the per-member transcripts are
-// never written to the parent Session's Conversation. Only the joined summary
-// (the ToolResult) folds back, so the LLM's context stays summary-only.
+// never written to the parent Session's Conversation. Only the lead's synthesis
+// (the ToolResult) folds back, so the LLM's context stays summary-only. (The PULL
+// InspectMember tool may later pull ONE member's transcript on the parent's
+// deliberate request — still not auto-injection.)
 //
 // The composition root injects the member-engine factory, the workspace Forker,
 // and the team hooks runner (mirroring Service.CreateTeam's wiring) so this tool
@@ -132,6 +138,10 @@ type TeamTool struct {
 	// hooks fires the team lifecycle hooks (TeammateIdle) — shared with the member
 	// coordination tools by the composition root. nil disables them.
 	hooks port.HookRunner
+	// store, when non-nil, persists each member session under its team-namespaced id
+	// so the parent can later inspect a member transcript via InspectMemberTool. It is
+	// the port.SessionStore the composition root passes; nil disables persistence.
+	store port.SessionStore
 	// idPrefix seeds the generated team name from the parent call id.
 	idPrefix string
 }
@@ -160,6 +170,14 @@ func WithTeamToolHooks(h port.HookRunner) TeamOption {
 	return func(t *TeamTool) { t.hooks = h }
 }
 
+// WithTeamToolStore injects the session store the Team tool threads into the
+// supervisor (WithMemberStore) to persist member sessions for out-of-band
+// inspection. nil disables persistence. The Team tool consumes the
+// port.SessionStore interface, never a concrete adapter (layering holds).
+func WithTeamToolStore(s port.SessionStore) TeamOption {
+	return func(t *TeamTool) { t.store = s }
+}
+
 // NewTeamTool constructs the Team tool over a per-member engine factory. factory
 // must be non-nil; NewTeamTool panics otherwise (a composition-root programming
 // error — a Team tool with no way to build member engines cannot run a team).
@@ -186,8 +204,8 @@ func (*TeamTool) Spec() tool.ToolSpec {
 			"coordinate via a shared task list and direct messages. A read-only member runs in " +
 			"an isolated throwaway git worktree with a full shell for INSPECTION (git log/show, " +
 			"cat, build, test) but cannot edit files; a mutating member runs in a self-contained " +
-			"copied workspace with edit/write/shell. Neither is merged back. Returns ONLY the " +
-			"team's final joined summary — the per-member " +
+			"copied workspace with edit/write/shell. Neither is merged back. Returns the " +
+			"lead's consolidated report — the per-member " +
 			"transcripts stay out of this conversation. Use for work that splits into " +
 			"specialist roles; for a single one-shot investigation use Task instead.",
 		Schema: teamSchema,
@@ -203,7 +221,7 @@ func (*TeamTool) Spec() tool.ToolSpec {
 func (*TeamTool) ReadOnly() bool { return false }
 
 // Execute runs a team with no observability (the emit == nil path): the team's
-// member activity is not forwarded, only the joined summary is returned. Existing
+// member activity is not forwarded, only the lead's consolidated report is returned. Existing
 // non-observing callers are unaffected by the observability seam.
 func (t *TeamTool) Execute(ctx context.Context, call session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
 	return t.run(ctx, call, ws, nil)
@@ -213,7 +231,7 @@ func (t *TeamTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 // BOUNDED projection of member activity to the parent run's stream via the three
 // team.* events. emit only sequences and channels events; it never touches the
 // parent's Conversation, so member content still never enters the parent context
-// (only the joined-summary ToolResult does). It is the observableTool seam the
+// (only the lead's synthesis ToolResult does). It is the observableTool seam the
 // dispatcher calls.
 func (t *TeamTool) ExecuteObserved(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
 	return t.run(ctx, call, ws, emit)
@@ -222,8 +240,9 @@ func (t *TeamTool) ExecuteObserved(ctx context.Context, call session.ToolCall, w
 // run is the shared implementation behind Execute (emit == nil) and
 // ExecuteObserved (emit != nil). It validates the roster, builds and drives the
 // Supervisor over the SAME base workspace, optionally forwards a bounded
-// projection of member activity, and returns the joined summary as the single
-// ToolResult that folds back into the parent conversation.
+// projection of member activity, and returns the lead's consolidated synthesis
+// (or the labelled fallback) as the single ToolResult that folds back into the
+// parent conversation.
 func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
 	var args teamArgs
 	if msg, ok := session.ParseArgs(call, &args); !ok {
@@ -237,7 +256,15 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	tm := team.New(teamID)
 	factory := func(spec MemberSpec) MemberBuild { return t.factory(tm, spec) }
 
-	opts := []SupervisorOption{}
+	opts := []SupervisorOption{
+		// Thread the goal so it frames every member's round-0 turn and the lead's
+		// synthesis, and namespace member-session ids by the team id (the parent call
+		// id) so two concurrent teams sharing a member name get distinct, collision-free
+		// stored ids. The prefix MUST match MemberSessionID's scheme so the inspect tool
+		// can derive the same id: "team-<teamID>" → ids "team-<teamID>-<member>".
+		WithTeamGoal(args.Goal),
+		WithMemberSessionPrefix(memberSessionIDPrefix + teamID),
+	}
 	if t.forker != nil {
 		opts = append(opts, WithForker(t.forker))
 	}
@@ -246,6 +273,9 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	}
 	if t.hooks != nil {
 		opts = append(opts, WithTeamHooks(t.hooks))
+	}
+	if t.store != nil {
+		opts = append(opts, WithMemberStore(t.store))
 	}
 	sup := NewSupervisor(tm, ws, factory, opts...)
 
@@ -278,6 +308,7 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	// member turns run concurrently — total needs no lock.
 	var total session.Usage
 	var lastTasks []session.TeamTaskSnapshot
+	var lastFindings []session.TeamFindingSnapshot
 	sink := func(te TeamEvent) {
 		total = total.Add(memberEventUsage(te.Event))
 		if emit == nil {
@@ -295,6 +326,15 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 		if !tasksEqual(snap, lastTasks) {
 			lastTasks = snap
 			emit(projectTeamTasks(string(call.ID), teamID, snap))
+		}
+		// Mirror the task de-dup for the findings ledger: emit a first-class
+		// team.findings event only when the ledger CHANGED (findings only ever grow,
+		// so an append is the sole change). Same clamp, same change-detection
+		// discipline, so findings observability is byte-for-byte consistent with tasks.
+		fsnap := projectTeamFindingsSnapshot(tm.Findings())
+		if !findingsEqual(fsnap, lastFindings) {
+			lastFindings = fsnap
+			emit(projectTeamFindings(string(call.ID), teamID, fsnap))
 		}
 	}
 
@@ -314,10 +354,21 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 			// sub-view reflects the final state even if no member event followed the
 			// last task transition.
 			Tasks: projectTeamTasksSnapshot(tm.Tasks()),
+			// The terminal findings snapshot likewise always lands, so the final ledger
+			// is observable even if no member event followed the last RecordFinding.
+			Findings: projectTeamFindingsSnapshot(tm.Findings()),
 		}})
 	}
 
-	return session.NewToolResult(call.ID, joinTeam(outcome)), nil
+	// The returned deliverable is the lead's consolidated synthesis (outcome.Report).
+	// When synthesis could not run (no lead, a non-resumable lead, or the lead produced
+	// no text) Report is empty; we then fall back to the labelled per-member
+	// concatenation so the parent always sees a non-empty, honest result.
+	result := outcome.Report
+	if strings.TrimSpace(result) == "" {
+		result = joinTeamFallback(outcome)
+	}
+	return session.NewToolResult(call.ID, result), nil
 }
 
 // validateTeamArgs enforces the roster preconditions: a non-empty goal, at least
@@ -521,6 +572,52 @@ func tasksEqual(a, b []session.TeamTaskSnapshot) bool {
 	return true
 }
 
+// projectTeamFindingsSnapshot maps the team's findings ledger (team.Finding copies)
+// onto the domain TeamFindingSnapshot projection carried on the event stream. The
+// mapping lives HERE (internal/agent), not in session: session must not import
+// internal/team (team imports session, never the reverse), so the team.Finding →
+// session.TeamFindingSnapshot bridge belongs in the application layer. Bodies pass
+// through clampPreview (the same cap every member-derived preview uses).
+func projectTeamFindingsSnapshot(findings []team.Finding) []session.TeamFindingSnapshot {
+	out := make([]session.TeamFindingSnapshot, 0, len(findings))
+	for _, f := range findings {
+		out = append(out, session.TeamFindingSnapshot{
+			Member: f.Member,
+			Body:   clampPreview(f.Body),
+		})
+	}
+	return out
+}
+
+// projectTeamFindings wraps a findings snapshot in a first-class EvTeamFindings event
+// — the team-WIDE projection mirroring EvTeamTasks. It carries no Member (the ledger
+// is team-wide, not per-member), so it does not borrow the per-member EvTeamMember
+// envelope.
+func projectTeamFindings(parentCallID, teamID string, findings []session.TeamFindingSnapshot) session.Event {
+	return session.Event{Type: session.EvTeamFindings, Team: &session.TeamPayload{
+		ParentCallID: parentCallID,
+		TeamID:       teamID,
+		Findings:     findings,
+	}}
+}
+
+// findingsEqual reports whether two findings snapshots are equal. It is the de-dup
+// guard in run's sink, mirroring tasksEqual: a snapshot equal to the last emitted one
+// is NOT re-sent, bounding wire volume (the sink fires per member event). Findings
+// only ever grow (append-only ledger), so a length change is the common signal, but
+// the per-entry comparison keeps it robust.
+func findingsEqual(a, b []session.TeamFindingSnapshot) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Member != b[i].Member || a[i].Body != b[i].Body {
+			return false
+		}
+	}
+	return true
+}
+
 // teamStop maps the team outcome to a terminal StopReason for EvTeamEnd: a
 // genuinely-quiescent team stopped on success; a non-quiescent one hit the round
 // cap or a stuck dependency.
@@ -545,11 +642,14 @@ func memberEventUsage(ev session.Event) session.Usage {
 	return session.Usage{}
 }
 
-// joinTeam renders the per-member terminal summaries into a single, clearly
-// delimited string — the ONLY thing that enters the parent conversation. It
-// mirrors fork.go's joinBranches: each member reports its status (stopped or done)
-// and its last text. The output is deterministic (enrolment order).
-func joinTeam(o TeamOutcome) string {
+// joinTeamFallback renders the per-member terminal summaries into a single, clearly
+// delimited string. It is the DEGRADED path: it is returned only when the lead could
+// not synthesise a consolidated report (no lead, a non-resumable lead, or an empty
+// synthesis), so the parent still receives a non-empty, honest result instead of an
+// empty deliverable. The PRIMARY return value is the lead's synthesis (TeamOutcome
+// .Report); this concatenation mirrors fork.go's joinBranches — each member reports
+// its status (stopped or done) and its last text — in deterministic enrolment order.
+func joinTeamFallback(o TeamOutcome) string {
 	var b strings.Builder
 	stopped := 0
 	for _, m := range o.Members {

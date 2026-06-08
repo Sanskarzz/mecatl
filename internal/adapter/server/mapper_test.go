@@ -283,6 +283,34 @@ func TestToProtoTable(t *testing.T) {
 			},
 		},
 		{
+			name: "team.findings snapshot",
+			in: session.Event{Type: session.EvTeamFindings, Seq: 35, Turn: 1,
+				Team: &session.TeamPayload{ParentCallID: "p1", TeamID: "team-p1",
+					Findings: []session.TeamFindingSnapshot{
+						{Member: "scout", Body: "the cache key omits the tenant id"},
+						{Member: "fixer", Body: "patched the key"},
+					}}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				if got.GetType() != "team.findings" {
+					t.Fatalf("event type = %q, want team.findings", got.GetType())
+				}
+				tm := got.GetTeam()
+				if tm == nil || tm.GetMember() != "" {
+					t.Fatalf("team.findings must carry no member: %+v", tm)
+				}
+				findings := tm.GetFindings()
+				if len(findings) != 2 {
+					t.Fatalf("findings len = %d, want 2: %+v", len(findings), findings)
+				}
+				if findings[0].GetMember() != "scout" || findings[0].GetBody() != "the cache key omits the tenant id" {
+					t.Errorf("finding[0] mapping mismatch: %+v", findings[0])
+				}
+				if findings[1].GetMember() != "fixer" {
+					t.Errorf("finding[1] member mismatch: %+v", findings[1])
+				}
+			},
+		},
+		{
 			name: "compaction",
 			in:   session.Event{Type: session.EvCompaction, Seq: 8, Turn: 2, Text: "summary"},
 			assert: func(t *testing.T, got *mecatlv1.Event) {
