@@ -119,7 +119,7 @@ func ctxPressureSlot(frac float64) string {
 	case frac >= ctxDangerFraction:
 		return "ctxDanger"
 	case frac >= ctxWarnFraction:
-		return "ctxWarn"
+		return slotCtxWarn
 	default:
 		return "ctxOk"
 	}
@@ -255,6 +255,10 @@ func formatDuration(ms int64) string {
 // spelling rather than scattering the literal.
 const stopError = "error"
 
+// slotCtxWarn is the themed warning slot name shared by the context-pressure meter
+// and the non-error LIMIT stop labels (turn/tool-call/repeated-failure/no-progress).
+const slotCtxWarn = "ctxWarn"
+
 // stopReasonLabel maps a run's terminal stop reason (client.ResultMsg.Stop, the
 // proto Result.stop / session.StopReason vocabulary) to the human footer status
 // text and the theme style slot it should carry. The non-error LIMIT stops
@@ -271,13 +275,17 @@ func stopReasonLabel(stop string) (text, slot string) {
 	case "end_turn", "":
 		return "done", "muted"
 	case "max_turns":
-		return "stopped · turn limit", "ctxWarn"
+		return "stopped · turn limit", slotCtxWarn
 	case "max_tool_calls":
-		return "stopped · tool-call limit", "ctxWarn"
+		return "stopped · tool-call limit", slotCtxWarn
 	case "max_consecutive_failures":
-		return "stopped · repeated failures", "ctxWarn"
+		return "stopped · repeated failures", slotCtxWarn
 	case "cancelled":
 		return "cancelled", "muted"
+	case "no_progress":
+		// The model went silent (no tool call, no text) across the nudge budget. Not a
+		// failure, but worth noticing — styled like the limit stops.
+		return "stopped · no progress", slotCtxWarn
 	case stopError:
 		return "error", "errorText"
 	default:

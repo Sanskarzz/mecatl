@@ -295,6 +295,7 @@ func TestStopReasonLabel(t *testing.T) {
 		{"max_tool_calls", "stopped · tool-call limit", "ctxWarn"},
 		{"max_consecutive_failures", "stopped · repeated failures", "ctxWarn"},
 		{"cancelled", "cancelled", "muted"},
+		{"no_progress", "stopped · no progress", "ctxWarn"},
 		{"error", "error", "errorText"},
 		{"some_future_reason", "some_future_reason", "muted"},
 	}

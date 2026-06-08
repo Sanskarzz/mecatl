@@ -410,8 +410,11 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.TeamMsg:
 		m.applyTeam(msg)
 		return m.afterEvent()
-	case client.CompactionMsg:
-		m.conv.addNotice("history compacted" + suffix(msg.Text))
+	case client.CompactionMsg, client.NoProgressMsg:
+		// Transient muted advisory notices that carry no model content: a compaction
+		// boundary, or a no-progress nudge/give-up (so a silent no-op turn is visible).
+		// Both render identically as a muted notice line.
+		m.conv.addNotice(noticeLine(msg))
 		return m.afterEvent()
 	case client.ResultMsg:
 		m.usage = sumUsage(m.usage, msg.Usage)
@@ -426,6 +429,20 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return mm, tea.Batch(m.refreshCmd(), drainCmd)
 	default:
 		return m, nil
+	}
+}
+
+// noticeLine renders the muted-notice text for a transient advisory message
+// (compaction or no-progress). Both carry only harness-authored Text and render as a
+// single muted line; this keeps updateStreamEvent's switch flat.
+func noticeLine(msg tea.Msg) string {
+	switch m := msg.(type) {
+	case client.CompactionMsg:
+		return "history compacted" + suffix(m.Text)
+	case client.NoProgressMsg:
+		return "no progress" + suffix(m.Text)
+	default:
+		return ""
 	}
 }
 

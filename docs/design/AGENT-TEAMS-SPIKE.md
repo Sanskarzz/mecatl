@@ -171,6 +171,25 @@ and returns a bounded rendering — it does NOT auto-inject; the pulled transcri
 enters the parent conversation only as that tool's own `ToolResult` (gauntlet #7's
 no-auto-injection property holds).
 
+**The Team ToolResult surfaces the team id (so `InspectMember` is reachable).** The
+team id is the published Team call id; it rides `EvTeamStart` (a client-only event the
+MODEL never sees). For the parent model to call `InspectMember` it must know that id —
+so `renderTeamResult` prepends a `Team id: <id>` line to the Team tool's `ToolResult`
+(BOTH the synthesis-report and the `joinTeamFallback` path), rendered VERBATIM so
+`MemberSessionID(teamID, member)` reconstructs the saved member id byte-for-byte. Without
+it the id was undiscoverable at runtime and `InspectMember` was unusable model-to-model
+(the original defect; pinned by `TestParentDiscoversTeamIDFromResultAndInspects`). The
+gRPC `RunTeam` consumer already holds the id from `CreateTeam`/`EvTeamStart`, so the
+in-result header is the in-process-tool fix only.
+
+**The lead's synthesis turn benefits from the loop's no-progress handler.** A lead whose
+synthesis turn comes back empty (a reasoning-only / no-text turn) used to terminate at
+once → `synthesise` returned `""` → `joinTeamFallback` skeleton. Because synthesis runs
+through the SHARED `Engine.drive` (`driveOneTurn`), the no-progress handler now nudges the
+lead up to `MaxNoProgressNudges` times INSIDE that one drive, so an empty first attempt is
+driven to a real report before falling back. Pinned by
+`TestLeadEmptySynthesisThenNudgedProducesReport`.
+
 ### 5.2 Message delivery: turn-boundary, not interrupt
 
 A running `Engine.Run` is turn-based and we must not corrupt an in-flight turn.

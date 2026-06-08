@@ -41,6 +41,16 @@ const (
 	EvHook EventType = "hook"
 	// EvCompaction is emitted when a compaction boundary is crossed.
 	EvCompaction EventType = "compaction"
+	// EvNoProgress is emitted when a completed turn produced NEITHER a tool call NOR
+	// meaningful assistant text (a reasoning-only / empty turn) and the loop is
+	// either injecting a bounded continuation nudge or, on the final attempt, giving
+	// up. Text carries a short human-readable reason and Turn is the no-progress
+	// turn index. It is ADVISORY — NOT recorded to the model's conversation history
+	// and NOT a diagnostics line (the event taxonomy owns the no-progress signal,
+	// mirroring how cancellation/tool-error are event-covered). Clients render it as
+	// a transient status line, like EvCompaction. It maps to the proto event-type
+	// string verbatim (no proto enum; the wire type field is a string passthrough).
+	EvNoProgress EventType = "no_progress"
 	// EvResult is the terminal event: success / limit / error / cancelled.
 	EvResult EventType = "result"
 

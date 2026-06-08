@@ -83,6 +83,62 @@ func TestTranslateReasoningTurnWithCachedTokens(t *testing.T) {
 	assertChunks(t, got, want)
 }
 
+// TestReasoningReplayUsesRealBlobNotSummary is the regression TRIPWIRE for the
+// standing (now-disproven) "the adapter replays the reasoning summary text as
+// encrypted_content, never the real blob" concern. It pins TWO load-bearing facts
+// that, if either regresses, silently degrade reasoning replay to a no-op (quality
+// loss / premature stops), never a loud 400:
+//
+//  1. The reasoning REPLAY item carries the opaque encrypted_content BLOB, NOT the
+//     human-readable summary. The fixture's summary ("Let me think"/" about this.")
+//     and its encrypted_content ("ENCRYPTED_BLOB") are deliberately DISTINCT, so an
+//     assertion that the ChunkReasoningItem equals the blob (and the ChunkReasoning
+//     deltas equal the summary) catches any swap of one for the other.
+//  2. The request asks the API to RETURN that blob via
+//     Include=[reasoning.encrypted_content] with Store=false. If a future provider
+//     entry drops the Include flag, the API returns no encrypted_content, the blob
+//     becomes "", and replay degrades to a no-op — this test fails first.
+func TestReasoningReplayUsesRealBlobNotSummary(t *testing.T) {
+	// Fact 1: the streamed reasoning item is the blob, the deltas are the summary.
+	got := decodeFixture(t, "reasoning_turn.sse")
+	var summary, blob string
+	for _, c := range got {
+		switch c.Kind {
+		case port.ChunkReasoning:
+			summary += c.Text
+		case port.ChunkReasoningItem:
+			blob += c.Text
+		}
+	}
+	if blob != "ENCRYPTED_BLOB" {
+		t.Errorf("reasoning REPLAY item = %q, want the encrypted_content blob %q", blob, "ENCRYPTED_BLOB")
+	}
+	if summary != "Let me think about this." {
+		t.Errorf("reasoning DISPLAY summary = %q, want %q", summary, "Let me think about this.")
+	}
+	if blob == summary {
+		t.Fatalf("replay blob must NOT equal the display summary (regression: summary replayed as encrypted_content)")
+	}
+
+	// Fact 2: the request enables Include=[reasoning.encrypted_content] + Store=false,
+	// so the API returns the real blob. Without Include the blob would be "".
+	req := port.LLMRequest{
+		Model:    "gpt-5.2",
+		System:   prompt.Layered{StablePrefix: "You are a coding agent."},
+		Messages: []session.Message{session.NewUserMessage("hi")},
+	}
+	params, err := buildParams(req)
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	if len(params.Include) != 1 || params.Include[0] != "reasoning.encrypted_content" {
+		t.Fatalf("Include = %v, want [reasoning.encrypted_content] (load-bearing: drops the blob if absent)", params.Include)
+	}
+	if params.Store.Value != false {
+		t.Errorf("Store = %v, want false (stateless replay)", params.Store.Value)
+	}
+}
+
 // TestTranslateErrorEvent verifies a top-level "error" stream event surfaces a
 // non-nil error carrying the provider's code, message, and offending param,
 // rather than a bare StopError chunk that drops the reason.

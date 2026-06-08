@@ -47,6 +47,29 @@ func TestReasoningOrderPreserved(t *testing.T) {
 	}
 }
 
+// TestReasoningEnvelopeRoundTripsSignature is the focused tripwire for the ONE
+// field Anthropic validates server-side: the thinking-block SIGNATURE. Extended
+// thinking requires every replayed thinking block to carry the signature the API
+// issued; if pack/unpack ever dropped or blanked it, the next turn's replay would
+// be rejected (or the model would re-stall), a silent reasoning-continuity break.
+// It is deliberately narrower than TestReasoningRoundTrip's whole-struct DeepEqual
+// so a regression names the signature directly. Verification corpus: the standing
+// "replays summary not the real blob" concern was disproven; this pins the
+// opposite — the real signature round-trips intact.
+func TestReasoningEnvelopeRoundTripsSignature(t *testing.T) {
+	const sig = "ANTHROPIC-THINKING-SIGNATURE=="
+	in := []reasoningBlock{
+		{Kind: reasoningKindThinking, Thinking: "reasoning text the summary path would NOT carry", Signature: sig},
+	}
+	out := unpackReasoning(packReasoning(in))
+	if len(out) != 1 {
+		t.Fatalf("round-trip produced %d blocks, want 1", len(out))
+	}
+	if out[0].Signature != sig {
+		t.Fatalf("signature dropped/altered across pack→unpack: got %q want %q", out[0].Signature, sig)
+	}
+}
+
 func TestUnpackReasoningFailSoft(t *testing.T) {
 	cases := []string{
 		"not json",

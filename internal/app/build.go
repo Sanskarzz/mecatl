@@ -136,6 +136,16 @@ type Config struct {
 	LLMBreakerThreshold  int
 	LLMBreakerCooldown   time.Duration
 
+	// MaxNoProgressNudges bounds how many continuation nudges the loop injects after
+	// a completed turn that produced NEITHER a tool call NOR meaningful text (a
+	// reasoning-only / empty turn that a reasoning model can emit). It is threaded
+	// through engineDepsForProvider to agent.Deps.MaxNoProgressNudges. Semantics
+	// (applied in agent.NewEngine): ZERO (the default; operators who never set it)
+	// uses the safety-net default of 2; NEGATIVE disables nudging; positive overrides.
+	// It is operator-tunable but defaults to the safe non-zero behaviour without any
+	// flag. Child/member/lead engines inherit it via engineDepsForProvider.
+	MaxNoProgressNudges int
+
 	// Memory: per-project memory store directory (empty disables the tools), plus
 	// the background consolidation (dream) interval (0 disables; only meaningful
 	// with MemoryDir set).
@@ -1128,6 +1138,10 @@ func engineDepsForProvider(
 		TokenCounter:        counter,
 		Compactor:           buildCompactor(modelCfg, provider, counter),
 		CommandExpander:     buildCommandExpander(cfg, mcpProvider),
+		// No-progress nudge budget: operator-tunable (cfg), inherited by children
+		// (childEngineDepsForProvider keeps this field). Zero → NewEngine applies the
+		// safe default of 2; negative disables.
+		MaxNoProgressNudges: cfg.MaxNoProgressNudges,
 	}
 }
 

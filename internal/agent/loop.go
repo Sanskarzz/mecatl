@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -28,6 +29,20 @@ import (
 // defaultCompactionRatio is the fraction of the context window at which the loop
 // triggers compaction when Deps.CompactionRatio is unset.
 const defaultCompactionRatio = 0.8
+
+// defaultNoProgressNudges is the safety-net cap applied in NewEngine when
+// Deps.MaxNoProgressNudges is zero (unset). It bounds how many continuation nudges
+// the loop injects after an empty/reasoning-only turn before it terminates the run
+// clearly with StopNoProgress. A negative MaxNoProgressNudges disables nudging.
+const defaultNoProgressNudges = 2
+
+// noProgressNudgeText is the bounded continuation injected as a NEW user message
+// after a no-progress turn. It is a fresh user message (NOT a forced text block and
+// NOT a re-send of the prior array), so it complies with the reasoning-model field
+// guidance ("do not naively retry the same message array"; "avoid emitting text
+// blocks right after tool results") and never forces tool use (no tool_choice).
+const noProgressNudgeText = "Please continue. Make concrete progress on the task using your tools, " +
+	"or — if you are blocked or believe the task is complete — say so explicitly in a short message."
 
 // Deps are the injected ports and configuration a single Engine is built from.
 // Every field is a port (an interface) or plain config, so the agent package
@@ -93,6 +108,19 @@ type Deps struct {
 	// reaches the model.
 	Role string
 
+	// MaxNoProgressNudges bounds how many times the loop injects a continuation
+	// ("please continue") user message after a completed turn that produced NEITHER a
+	// tool call NOR meaningful assistant text (a reasoning-only / empty turn). It is
+	// the blast-radius knob for the no-progress handler. Semantics (applied in
+	// NewEngine): a ZERO value (the default; existing Deps built without it) uses the
+	// safety-net default defaultNoProgressNudges (2); a NEGATIVE value DISABLES nudging
+	// entirely (a no-progress turn terminates immediately with StopNoProgress, the old
+	// behaviour minus the silent StopEndTurn mislabel); a positive value overrides the
+	// default. It is a loop concern, exactly like CompactionRatio — NOT a
+	// port.LLMRequest field (the request stays provider-neutral). Composition plumbs it
+	// from Config so it is operator-tunable; children inherit the default.
+	MaxNoProgressNudges int
+
 	// ProgressiveTools, when true, enables progressive tool disclosure
 	// (pattern 9): the per-turn request advertises lightweight specs for tools
 	// implementing tool.Disclosable plus a built-in ToolSearch tool the model
@@ -121,6 +149,12 @@ func NewEngine(deps Deps) *Engine {
 	}
 	if deps.CompactionRatio <= 0 || deps.CompactionRatio > 1 {
 		deps.CompactionRatio = defaultCompactionRatio
+	}
+	// No-progress nudge budget: zero (unset) → the safety-net default; a negative
+	// value is an explicit "disable nudging" sentinel and is left as-is (drive treats
+	// nudgeCap < 0 as disabled). A positive value overrides the default.
+	if deps.MaxNoProgressNudges == 0 {
+		deps.MaxNoProgressNudges = defaultNoProgressNudges
 	}
 	if deps.Instructions == nil {
 		deps.Instructions = prompt.RootAssembler{}
@@ -316,6 +350,11 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 
 	var total session.Usage
 	var lastText string
+	// no-progress nudge accounting (Workstream A). noProgressNudges counts the
+	// continuation messages injected this run; nudgeCap is the budget (defaulted in
+	// NewEngine to defaultNoProgressNudges; a negative cap DISABLES nudging).
+	var noProgressNudges int
+	nudgeCap := e.deps.MaxNoProgressNudges
 
 	for {
 		// Step 2: stop conditions BEFORE the model call.
@@ -383,14 +422,14 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 			return
 		}
 
-		// Step 5: no tool calls → the model is done.
+		// Step 5: a tool-call-free turn is either a real answer, a bounded no-progress
+		// nudge, or a clean give-up — finishTurnNoTools owns that classification (and
+		// the terminate/nudge side effects) so this loop stays flat.
 		if len(asst.ToolCalls) == 0 {
-			stop := session.StopEndTurn
-			if streamStop != session.StopNone {
-				stop = streamStop
+			if e.finishTurnNoTools(ctx, r, sess, asst, streamStop, turnIdx, lastText, total, &noProgressNudges, nudgeCap) {
+				return
 			}
-			e.terminateComplete(ctx, r, sess, stop, lastText, total)
-			return
+			continue
 		}
 
 		// Step 6: dispatch the tool calls, then loop back to step 2.
@@ -405,6 +444,76 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 		}
 		e.save(ctx, sess)
 	}
+}
+
+// finishTurnNoTools classifies and acts on a completed turn that produced NO tool
+// calls. The empty assistant message has ALREADY been recorded by the caller, so its
+// reasoning blob is on history for replay across a nudge (decision D-4). It returns
+// done=true when the run has terminated (a real answer, a provider terminal
+// condition, or a no-progress give-up) — the caller returns; done=false means a
+// continuation nudge was injected and the caller loops back to Step 2.
+// noProgressNudges is mutated through the pointer; nudgeCap < 0 disables nudging.
+//
+// streamStop discipline (the masking guard): the no-progress nudge applies ONLY when
+// the turn ended on a BENIGN end — StopEndTurn or StopNone (the model simply finished
+// its turn). Both adapters' mapStop relay a REAL terminal condition (max_tokens /
+// refusal / incomplete / failed → StopError; cancelled → StopCancelled; and any limit
+// reason) on the ChunkDone stop, NOT as a Go error. Such a turn can ALSO come back
+// empty (a truncated/refused response), and nudging "please continue" + relabeling it
+// StopNoProgress would MASK the real reason — the exact silent-mislabel we are fixing.
+// So a non-benign streamStop is surfaced verbatim (StopError → terminate as a failure;
+// any other non-benign stop → terminateComplete carrying that reason), never nudged.
+func (e *Engine) finishTurnNoTools(ctx context.Context, r *Run, sess *session.Session, asst session.Message, streamStop session.StopReason, turnIdx int, lastText string, total session.Usage, noProgressNudges *int, nudgeCap int) (done bool) {
+	// A turn with meaningful text is a real answer: end the run, honouring streamStop.
+	if strings.TrimSpace(asst.Text) != "" {
+		stop := session.StopEndTurn
+		if streamStop != session.StopNone {
+			stop = streamStop
+		}
+		e.terminateComplete(ctx, r, sess, stop, lastText, total)
+		return true
+	}
+
+	// A non-benign streamStop is a REAL terminal condition the provider reported on
+	// the stop chunk (truncation / refusal / incomplete / failed / cancelled / a
+	// limit). It is NOT a no-progress stall: surface it, never nudge or relabel it.
+	if streamStop != session.StopNone && streamStop != session.StopEndTurn {
+		if streamStop == session.StopError {
+			e.terminate(ctx, r, sess, session.StopError, lastText, total,
+				fmt.Errorf("agent: model ended turn with no output and a terminal stop reason %q", streamStop))
+			return true
+		}
+		e.terminateComplete(ctx, r, sess, streamStop, lastText, total)
+		return true
+	}
+
+	// NO PROGRESS: benign end, no tool calls AND no meaningful text (a reasoning-only
+	// / empty turn). When nudging is disabled (nudgeCap < 0) or the budget is
+	// exhausted, terminate CLEARLY via the completed path with StopNoProgress — never
+	// silently as StopEndTurn, and never an unbounded loop. StopNoProgress is a
+	// non-error terminal, so the session ends COMPLETED and stays Reopen-recoverable.
+	if nudgeCap < 0 || *noProgressNudges >= nudgeCap {
+		e.emit(r, session.Event{Type: session.EvNoProgress, Turn: turnIdx,
+			Text: "no progress after continuation attempts; ending run"})
+		e.terminateComplete(ctx, r, sess, session.StopNoProgress, lastText, total)
+		return true
+	}
+
+	// Inject ONE bounded continuation nudge as a NEW user message, emit a visible
+	// (advisory, non-recorded) EvNoProgress event, then signal the caller to loop back
+	// to Step 2 (stop conditions, BeginTurn — which independently bounds the loop by
+	// Limits.MaxTurns and re-checks cancellation). The empty assistant turn (with its
+	// reasoning blob) precedes the nudge, so the next turn replays the model's own
+	// reasoning.
+	*noProgressNudges++
+	e.emit(r, session.Event{Type: session.EvNoProgress, Turn: turnIdx,
+		Text: "model produced no tool call or text; nudging to continue"})
+	if err := sess.RecordUserPrompt(noProgressNudgeText, nil); err != nil {
+		e.terminate(ctx, r, sess, session.StopError, lastText, total, err)
+		return true
+	}
+	e.save(ctx, sess)
+	return false
 }
 
 // recordPrompt produces the effective user prompt and records it (with, on the

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stacklok/mecatl/internal/adapter/agents"
@@ -51,8 +52,8 @@ func TestMemberMutatingDefKeepsEditWhenMutating(t *testing.T) {
 	var events []agent.TeamEvent
 	sup.Run(context.Background(), func(ev agent.TeamEvent) { events = append(events, ev) })
 
-	if !sawToolCall(events, "w", "Edit") {
-		t.Fatalf("Mutating member with a def listing Edit should dispatch an Edit tool.call; events=%d", len(events))
+	if !sawToolDispatched(events, "w", "Edit") {
+		t.Fatalf("Mutating member with a def listing Edit should EXECUTE an Edit tool call; events=%d", len(events))
 	}
 }
 
@@ -78,8 +79,10 @@ func TestMemberReadOnlyDefDropsMutating(t *testing.T) {
 
 	var events []agent.TeamEvent
 	sup.Run(context.Background(), func(ev agent.TeamEvent) { events = append(events, ev) })
-	if sawToolCall(events, "reviewer", "Edit") {
-		t.Fatal("read-only member dispatched Edit; it should have been dropped from the catalog")
+	// Edit dropped from the catalog → it is an UNKNOWN tool: it now opens a card
+	// (card-before-result invariant) AND yields an error result, but it never EXECUTES.
+	if sawToolDispatched(events, "reviewer", "Edit") {
+		t.Fatal("read-only member executed Edit; it should have been dropped from the catalog")
 	}
 }
 
@@ -184,6 +187,33 @@ func sawToolCall(events []agent.TeamEvent, member, toolName string) bool {
 		if ev.Member == member && ev.Event.Type == session.EvToolCall &&
 			ev.Event.ToolCall != nil && ev.Event.ToolCall.Name == toolName {
 			return true
+		}
+	}
+	return false
+}
+
+// sawToolDispatched reports whether toolName was in the member's catalog and was
+// actually DISPATCHED to a real tool — as opposed to dropped from the catalog (an
+// unknown tool). It is the correct signal now that an UNKNOWN/dropped tool ALSO
+// emits an EvToolCall card (the card-before-result invariant): a dropped tool yields
+// an EvToolCall card AND an error tool.result whose content is "unknown tool ...",
+// so the presence of a card no longer distinguishes dispatch from rejection. We
+// match the result to its call by id (EvToolResult carries the call id, not the tool
+// name) and treat the unknown-tool sentinel content as "NOT dispatched"; any other
+// outcome (success OR a real tool error like a missing file) counts as dispatched.
+func sawToolDispatched(events []agent.TeamEvent, member, toolName string) bool {
+	var wantID string
+	for _, ev := range events {
+		if ev.Member != member {
+			continue
+		}
+		if ev.Event.Type == session.EvToolCall && ev.Event.ToolCall != nil && ev.Event.ToolCall.Name == toolName {
+			wantID = string(ev.Event.ToolCall.ID)
+			continue
+		}
+		if ev.Event.Type == session.EvToolResult && ev.Event.ToolResult != nil &&
+			wantID != "" && string(ev.Event.ToolResult.CallID) == wantID {
+			return !strings.Contains(ev.Event.ToolResult.Content, "unknown tool")
 		}
 	}
 	return false

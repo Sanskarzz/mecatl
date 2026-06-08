@@ -227,6 +227,12 @@ type TeamMsg struct {
 // CompactionMsg is a muted "history compacted" notice.
 type CompactionMsg struct{ Text string }
 
+// NoProgressMsg is a muted advisory notice emitted when a completed turn produced
+// no tool call and no meaningful text and the loop is nudging the model to continue
+// (or giving up after the budget). It is rendered as a transient status line, like
+// CompactionMsg; it carries only the harness-authored reason Text (no model content).
+type NoProgressMsg struct{ Text string }
+
 // ResultMsg is the terminal event: stop reason, final text, error, usage.
 type ResultMsg struct {
 	Stop  string
@@ -395,6 +401,8 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 		}
 	case "compaction":
 		return CompactionMsg{Text: ev.GetText()}
+	case "no_progress":
+		return NoProgressMsg{Text: ev.GetText()}
 	case "result":
 		r := ev.GetResult()
 		return ResultMsg{

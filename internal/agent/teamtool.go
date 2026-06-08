@@ -368,7 +368,25 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	if strings.TrimSpace(result) == "" {
 		result = joinTeamFallback(outcome)
 	}
+	// Surface the team id INSIDE the returned text so the parent MODEL can discover
+	// the id it must pass to InspectMember. The id rides only EvTeamStart otherwise
+	// (a client-only event the model never sees), so without this the model can never
+	// form a valid InspectMember call. teamID is the EXACT published id (the Team call
+	// id), rendered verbatim per the MemberSessionID contract. Applies to BOTH the
+	// synthesis-report and the joinTeamFallback path.
+	result = renderTeamResult(teamID, result)
 	return session.NewToolResult(call.ID, result), nil
+}
+
+// renderTeamResult prepends a machine-extractable team-id line so the parent MODEL
+// can discover the id it must pass to InspectMember (the id otherwise rides only the
+// client-only EvTeamStart event). teamID MUST be the EXACT published id (the Team
+// call id) per the MemberSessionID contract — rendered VERBATIM, never trimmed or
+// normalised — so MemberSessionID(teamID, member) reconstructs the saved member
+// session id byte-for-byte and InspectMember resolves it.
+func renderTeamResult(teamID, body string) string {
+	return fmt.Sprintf("Team id: %s\n(To read one member's full transcript, call InspectMember "+
+		"with this exact team_id and the member's name.)\n\n%s", teamID, body)
 }
 
 // validateTeamArgs enforces the roster preconditions: a non-empty goal, at least

@@ -100,6 +100,15 @@ const (
 	StopCancelled StopReason = "cancelled"
 	// StopError means the run failed with an unrecoverable error.
 	StopError StopReason = "error"
+	// StopNoProgress means the model produced NEITHER tool calls NOR meaningful text
+	// across the bounded continuation-nudge budget; the run ended without a
+	// deliverable. It is a CLEAN terminal (not StopError — nothing failed), routed
+	// through the same completed path as StopEndTurn, so the session ends COMPLETED
+	// and stays Reopen-recoverable. It is distinguishable from StopEndTurn so a
+	// client/team can tell "the model went silent" from "the model finished". It maps
+	// to the proto stop string verbatim (no proto enum; the wire stop field is a
+	// string passthrough).
+	StopNoProgress StopReason = "no_progress"
 )
 
 // Limits are the configured stop conditions for a session. A zero value in any

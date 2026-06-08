@@ -260,7 +260,7 @@ func TestMemberReadOnlyDefWithEditStillRejected(t *testing.T) {
 
 	var events []agent.TeamEvent
 	sup.Run(context.Background(), func(ev agent.TeamEvent) { events = append(events, ev) })
-	if sawToolCall(events, "mixed", "Edit") {
-		t.Fatal("read-only member must not hold Edit; it should have been dropped")
+	if sawToolDispatched(events, "mixed", "Edit") {
+		t.Fatal("read-only member must not hold Edit; it should have been dropped (dropped → unknown tool, card+error, never executed)")
 	}
 }

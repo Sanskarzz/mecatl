@@ -86,6 +86,7 @@ func TestEventToMsg(t *testing.T) {
 				Stop: "max_tool_calls", DurationMs: 1234, Usage: Usage{InputTokens: 90, OutputTokens: 12}},
 		},
 		{"compaction", &mecatlv1.Event{Type: "compaction", Text: "compacted"}, CompactionMsg{Text: "compacted"}},
+		{"no_progress", &mecatlv1.Event{Type: "no_progress", Text: "nudging to continue"}, NoProgressMsg{Text: "nudging to continue"}},
 		{
 			"result",
 			&mecatlv1.Event{Type: "result", Result: &mecatlv1.Result{

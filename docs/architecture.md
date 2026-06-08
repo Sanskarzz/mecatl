@@ -253,6 +253,7 @@ API. The real constants:
 | `permission.ask` | `EvPermissionAsk` | loop paused for client approval |
 | `hook` | `EvHook` | a hook fired (e.g. PreToolUse block) |
 | `compaction` | `EvCompaction` | a compaction boundary crossed |
+| `no_progress` | `EvNoProgress` | a completed turn produced no tool call and no meaningful text; the loop is nudging (or giving up) |
 | `result` | `EvResult` | terminal: carries `ResultPayload{Stop, Text, Usage}` |
 
 `Event` carries `Type, Seq, Turn, Text` plus optional pointers `ToolCall`,

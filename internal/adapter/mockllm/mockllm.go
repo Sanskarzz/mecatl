@@ -151,10 +151,64 @@ func TextTurn(text string) Turn {
 	}}
 }
 
+// EmptyTurn builds an UNCOOPERATIVE turn that emits NO text and NO tool call —
+// only a zero usage chunk and a ChunkDone(StopEndTurn). It scripts the "completed
+// turn with no progress" shape a reasoning model can produce (it "finished" without
+// a deliverable), which the loop's no-progress handler must catch and nudge rather
+// than terminate silently. A cooperative happy-path mock (TextTurn/ToolCallTurn)
+// can never produce this shape — that is exactly the gap this helper closes.
+func EmptyTurn() Turn {
+	return EmptyTurnWithStop(session.StopEndTurn)
+}
+
+// EmptyTurnWithStop builds an UNCOOPERATIVE turn that emits NO text and NO tool
+// call, then a zero usage chunk and a ChunkDone carrying the GIVEN stop reason. It
+// scripts the "empty turn caused by a real terminal condition" shape: both adapters'
+// mapStop relay max_tokens / refusal / incomplete / failed as session.StopError (and
+// cancelled as StopCancelled) on the ChunkDone stop, NOT as a Go error — and such a
+// truncated/refused response can come back with no text. The loop must SURFACE that
+// real stop reason, NOT nudge "please continue" or relabel it StopNoProgress. This is
+// the regression guard for the streamStop-masking bug. EmptyTurn() is this with a
+// benign StopEndTurn (the genuine no-progress shape that DOES get nudged).
+func EmptyTurnWithStop(stop session.StopReason) Turn {
+	return Turn{Chunks: []port.Chunk{
+		{Kind: port.ChunkUsage, Usage: &session.Usage{}},
+		{Kind: port.ChunkDone, Stop: stop},
+	}}
+}
+
+// ReasoningOnlyTurn builds an UNCOOPERATIVE turn that emits a reasoning DISPLAY
+// delta (displaySummary, human-readable, display-only) and a reasoning REPLAY-item
+// blob (replayBlob, the opaque encrypted_content analogue) but NO visible text and
+// NO tool call, then a zero usage chunk and a ChunkDone(StopEndTurn). It scripts a
+// reasoning-model turn that "thought" but produced no deliverable — the exact
+// no-progress trigger — with the replay blob present so a test can also assert the
+// blob is preserved on the recorded empty assistant message and replayed across the
+// nudge. Either argument may be empty to omit that chunk.
+func ReasoningOnlyTurn(displaySummary, replayBlob string) Turn {
+	chunks := make([]port.Chunk, 0, 4)
+	if displaySummary != "" {
+		chunks = append(chunks, port.Chunk{Kind: port.ChunkReasoning, Text: displaySummary})
+	}
+	if replayBlob != "" {
+		chunks = append(chunks, port.Chunk{Kind: port.ChunkReasoningItem, Text: replayBlob})
+	}
+	chunks = append(chunks,
+		port.Chunk{Kind: port.ChunkUsage, Usage: &session.Usage{}},
+		port.Chunk{Kind: port.ChunkDone, Stop: session.StopEndTurn},
+	)
+	return Turn{Chunks: chunks}
+}
+
 // ToolCallTurn builds a turn that emits one or more fully-assembled tool calls,
 // then a usage chunk (zero usage) and a ChunkDone carrying StopEndTurn (the loop
 // continues because tool calls were produced). At least one call is expected;
 // calling it with none yields a turn that just stops.
+//
+// The call NAME is NOT validated against any catalog: a test can script a
+// wrong/unknown tool name (e.g. session.NewToolCall("c1", "Nonexistent", nil)) to
+// exercise the loop's unknown-tool path (which must open a visible card before the
+// error result). That is the adversarial shape this helper supports unchanged.
 func ToolCallTurn(calls ...session.ToolCall) Turn {
 	chunks := make([]port.Chunk, 0, len(calls)+2)
 	for i := range calls {

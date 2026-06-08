@@ -104,6 +104,60 @@ config resolves per-session against that root without a mutate-capable handle; `
 The loop (`Engine`/`Run`), dispatch, permission pause/resume, compaction, the Task subagent,
 and the agent-team `Supervisor`/`TeamTool`. (See `AGENT-TEAMS-SPIKE.md`.)
 
+**No-progress handler (loop Step 5, `finishTurnNoTools`).** A reasoning model can complete a
+turn producing NEITHER a tool call NOR meaningful text — only a reasoning blob (a
+"reasoning-only"/empty turn). The pre-fix loop terminated on zero tool calls regardless of
+text, silently completing with `StopEndTurn` and an empty deliverable. Now: a turn with
+meaningful text still ends the run (honouring `streamStop`); a no-progress turn is RECORDED first
+(its reasoning blob is preserved on history for replay — decision D-4), then the loop injects a
+BOUNDED continuation
+user message (`noProgressNudgeText`, a *new* user message, not a re-send and not a forced text
+block) up to `Deps.MaxNoProgressNudges` times (default `defaultNoProgressNudges`=2 applied in
+`NewEngine`; `Config.MaxNoProgressNudges` threads an operator override through
+`engineDepsForProvider`; `<0` disables). Each nudge emits a visible `EvNoProgress` event
+(transient, advisory, NOT recorded to history, NOT a diagnostics line — the event taxonomy owns
+it, so the "loop emits exactly TWO diagnostic lines" invariant holds). On budget exhaustion the
+run terminates CLEANLY via `terminateComplete` with `StopNoProgress` — a NON-error terminal, so
+the session ends `completed` and stays Reopen-recoverable (never `StopError`, never an infinite
+loop). The nudge loop is ALSO independently bounded by `Limits.MaxTurns` (each nudged turn goes
+through `BeginTurn`), and a stop-condition/cancellation trips at Step 2 before a nudged turn.
+
+**`streamStop` discipline — the masking guard (load-bearing predicate).** The no-progress nudge
+applies ONLY when the empty turn ended on a BENIGN end: `streamStop ∈ {StopEndTurn, StopNone}`
+(the model simply finished). Both adapters' `mapStop` relay a REAL terminal condition on the
+ChunkDone stop, NOT as a Go error: `max_tokens`/`refusal`/`incomplete`/`failed` → `StopError`,
+`cancelled` → `StopCancelled` (and any limit reason). Such a turn can ALSO come back empty (a
+truncated/refused response), and nudging "please continue" + relabeling it `StopNoProgress` would
+MASK the real reason — the very silent-mislabel disease the handler fixes. So `finishTurnNoTools`
+surfaces a non-benign `streamStop` BEFORE the no-progress branch: `StopError` → `terminate` as a
+failure (carrying a diagnostic cause); any other non-benign stop → `terminateComplete` carrying
+that reason verbatim — never nudged, never relabeled. This composes with the meaningful-text path
+above, which already honours `streamStop`. Pinned by `TestEmptyTurnWithTerminalStopNotNudged`
+(StopError) and `TestEmptyTurnWithNonErrorTerminalStopSurfaced` (a non-error non-benign stop),
+both of which FAIL on the pre-fix code (the masking bug).
+Because the fix lives in the SHARED `Engine.drive`, it covers main + Task children + fork
+branches + every team member + the team lead's synthesis turn (a no-progress synthesis is driven
+to a real report, not an empty `joinTeamFallback` skeleton). **No `tool_choice` forcing**: forcing
+tool use is incompatible with Anthropic extended thinking and the OpenAI reasoning path — the
+provider-agnostic route is the bounded nudge + the per-model persistence prompt (`agencyDelta`,
+composition layer). `EvNoProgress`/`StopNoProgress` are STRING passthroughs on the wire (proto
+`type`/`stop` are strings, not enums), so no proto regen was needed; mecatui renders
+`EvNoProgress` as a muted notice and `StopNoProgress` as a `stopped · no progress` footer label.
+
+**Unknown-tool card (dispatch `runOne`).** An unknown/unresolved tool-call name now opens an
+`EvToolCall` card BEFORE its `EvToolResult` error (`unknown tool %q`), preserving the
+card-before-the-gate ordering so a client (ACP/mecatui) keys the failure to a card it already
+opened rather than dropping a result for a `tool_call` it never saw. The read-batch path cannot
+carry an unknown tool (the batcher only groups resolved read-only tools), so `runOne` is the
+single fix site.
+
+**Reasoning replay is verified, not buggy.** The OpenAI adapter replays the REAL
+`encrypted_content` blob (not the human-readable summary) and requests it via
+`Include=[reasoning.encrypted_content]` + `Store=false`; Anthropic packs the thinking
+*signature* across pack→unpack. Pinning tests (`TestReasoningReplayUsesRealBlobNotSummary`,
+`TestReasoningEnvelopeRoundTripsSignature`) tripwire any regression that swaps the blob for the
+summary or drops the load-bearing `Include` flag. See `OPENAI-RESPONSES-API.md`.
+
 **Team-member workspace policy is THREE-TIER** (isolation is the security boundary; capability
 flows down from the parent, which has Bash): a base-sharing read-only member (no forker wired)
 gets NO shell; a read-only member the factory marks `MemberBuild.IsolateReadOnly` runs in a

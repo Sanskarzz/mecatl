@@ -14,12 +14,15 @@ import (
 
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/forker"
+	"github.com/stacklok/mecatl/internal/adapter/hookexec"
+	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/team"
 	"github.com/stacklok/mecatl/internal/tool"
@@ -432,6 +435,113 @@ func TestTeamReturnsConsolidatedReportEndToEnd(t *testing.T) {
 		if sess.ID != id {
 			t.Errorf("loaded session id = %q, want %q", sess.ID, id)
 		}
+	}
+}
+
+// TestTeamRunTeamPathSurfacesTeamID pins AC-6 for the SECOND entry point (gRPC
+// RunTeam). Per decision D-6, the wire client already knows the team id — CreateTeam
+// RETURNS it — and the model never consumes the RunTeam outcome string model-to-model
+// (the in-process Team-tool path, where a model DOES consume the ToolResult, is the
+// one that needed the in-result header; it is covered by
+// TestParentDiscoversTeamIDFromResultAndInspects). So this path's discovery contract
+// is: CreateTeam returns the id, RunTeam accepts THAT id, and member sessions persist
+// under ids the consumer can derive from it via MemberSessionID (so an out-of-band
+// InspectMember works). This test pins that the second entry point is served and its
+// id round-trips to the persisted member ids.
+func TestTeamRunTeamPathSurfacesTeamID(t *testing.T) {
+	store := memstore.New()
+	scripts := map[string][]mockllm.Turn{
+		"lead":   {mockllm.TextTurn("coordinating"), mockllm.TextTurn("REPORT")},
+		"worker": {mockllm.TextTurn("working"), mockllm.TextTurn("done")},
+	}
+	osfsWS := func(root string) tool.Workspace {
+		ws, err := osfs.NewWorkspace(root)
+		if err != nil {
+			t.Fatalf("osfs workspace %q: %v", root, err)
+		}
+		return ws
+	}
+	svc, err := server.NewService(server.Config{
+		Engine:       noopEngine(),
+		Store:        store,
+		Workspaces:   osfsWS,
+		Now:          func() time.Time { return time.Unix(0, 0) },
+		MemberEngine: scriptedMemberFactory(t, scripts),
+		Forker:       forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }),
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	ctx := context.Background()
+	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "e2e", "do it",
+		[]agent.MemberSpec{
+			{Name: "lead", Lead: true, InitialPrompt: "coordinate"},
+			{Name: "worker", InitialPrompt: "work"},
+		})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	if teamID == "" {
+		t.Fatal("CreateTeam returned an empty team id (the wire client's discovery source)")
+	}
+
+	if _, err := svc.RunTeam(ctx, teamID, func(agent.TeamEvent) {}); err != nil {
+		t.Fatalf("RunTeam(%q): %v", teamID, err)
+	}
+
+	// The returned id round-trips to the persisted member sessions via MemberSessionID
+	// — so a wire consumer holding the CreateTeam id can drive InspectMember.
+	for _, name := range []string{"lead", "worker"} {
+		id := agent.MemberSessionID(teamID, name)
+		if _, lerr := store.Load(ctx, id); lerr != nil {
+			t.Fatalf("member %q not persisted under MemberSessionID(%q,%q)=%q: %v", name, teamID, name, id, lerr)
+		}
+	}
+}
+
+// TestAgencyDeltaReachesTeamMemberAndLead pins AC-9: the per-model persistence
+// "agency" delta reaches the system prompt of a NON-Claude team member/lead engine
+// built by the REAL composition factory, and is OMITTED for a Claude member. It is
+// the regression tripwire for a future refactor that drops the delta from
+// childEngineDepsForProvider's PromptConfig.
+func TestAgencyDeltaReachesTeamMemberAndLead(t *testing.T) {
+	const agencyMarker = "Keep going until the task is actually resolved"
+
+	capturePrompt := func(t *testing.T, parentModel string) string {
+		t.Helper()
+		var captured string
+		obs := mockllm.WithRequestObserver(func(req port.LLMRequest) {
+			if captured == "" {
+				captured = req.System.StablePrefix + "\n" + req.System.VolatileSuffix
+			}
+		})
+		prov := mockllm.NewWith([]mockllm.Option{obs}, mockllm.TextTurn("ok"))
+		cfg := Config{Workspace: t.TempDir(), Model: parentModel}
+		factory := memberFactoryForTest(cfg, prov, hookexec.New(nil), agents.NewRegistry(nil), nil, nil, false, nil)
+
+		tm := team.New("t")
+		sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"),
+			func(spec agent.MemberSpec) agent.MemberBuild { return factory(tm, spec) })
+		if err := sup.AddMember(context.Background(), agent.MemberSpec{
+			Name: "lead", Lead: true, AgentType: "", InitialPrompt: "go",
+		}); err != nil {
+			t.Fatalf("AddMember: %v", err)
+		}
+		sup.Run(context.Background(), func(agent.TeamEvent) {})
+		if captured == "" {
+			t.Fatal("no request reached the member provider; cannot assert the system prompt")
+		}
+		return captured
+	}
+
+	// A non-Claude model (here a gpt-style id) MUST get the persistence delta.
+	if got := capturePrompt(t, "gpt-5.2"); !strings.Contains(got, agencyMarker) {
+		t.Fatalf("non-Claude member system prompt is MISSING the agency persistence delta:\n%s", got)
+	}
+	// A Claude model must NOT (it over-steers Claude; the delta is family-gated).
+	if got := capturePrompt(t, "claude-sonnet-4"); strings.Contains(got, agencyMarker) {
+		t.Fatalf("Claude member system prompt unexpectedly carries the agency delta:\n%s", got)
 	}
 }
 

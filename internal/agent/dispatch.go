@@ -158,6 +158,13 @@ func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session
 // pre-hook, execute, post-hook. It returns the result and a cancelled flag.
 func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool, known bool, enqueue time.Time) (session.ToolResult, bool) {
 	if !known {
+		// Open a card for the unknown tool BEFORE its error result, exactly like the
+		// known-tool path opens one before the gate. A client (ACP/mecatui) keys a
+		// tool.result update to a prior tool.call card; without an open card the failure
+		// for a tool_call the client never saw is droppable (the "ToolCall card before
+		// the gate" invariant). The card carries the unknown name + args so the client
+		// can render it and then mark it failed when the error result arrives.
+		e.openCard(r, turnIdx, c)
 		res := session.NewToolError(c.ID, fmt.Sprintf("unknown tool %q", c.Name))
 		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
 		return res, false
@@ -165,8 +172,7 @@ func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws t
 
 	// Open the tool card BEFORE the permission/hook gate so any synthesized failure
 	// (a deny result or a PreToolUse veto) lands on a card the client has already
-	// seen. Only known tools get a card; the unknown-tool branch above emits only
-	// its error result, since there is no real tool to open a card for.
+	// seen.
 	e.openCard(r, turnIdx, c)
 
 	decision, cancelled := e.authorize(ctx, r, sess, ws, turnIdx, c)
