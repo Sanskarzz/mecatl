@@ -340,7 +340,7 @@ func (r *renderer) renderBlock(idx int, b *block, expand bool) string {
 	switch b.kind {
 	case blockUser:
 		label := r.th.Style("userLabel").Render("you")
-		body := r.th.Style("userBlock").Render(sanitizeTerminal(b.raw))
+		body := r.wrapStyled(sanitizeTerminal(b.raw), r.th.Style("userBlock"))
 		out := label + "\n" + body
 		// Render one muted placeholder line per attached media part, so a multimodal
 		// prompt is never silently shown as text-only. Media is attached via the
@@ -348,7 +348,7 @@ func (r *renderer) renderBlock(idx int, b *block, expand bool) string {
 		// gated on the server's advertised image/audio caps — see mention.go and
 		// client.ExpandMentions.
 		for _, m := range b.media {
-			out += "\n" + r.th.Style("muted").Render("📎 "+sanitizeTerminal(m))
+			out += "\n" + r.wrapPrefixed("📎 ", sanitizeTerminal(m), r.th.Style("muted"))
 		}
 		return out
 	case blockAssistant:
@@ -364,15 +364,15 @@ func (r *renderer) renderBlock(idx int, b *block, expand bool) string {
 	case blockTool:
 		return r.renderTool(b, expand)
 	case blockNotice:
-		return r.th.Style("muted").Render("• " + sanitizeTerminal(b.raw))
+		return r.wrapPrefixed("• ", sanitizeTerminal(b.raw), r.th.Style("muted"))
 	case blockHook:
 		return r.renderHook(b)
 	case blockTurnStat:
-		return r.th.Style("muted").Render(sanitizeTerminal(b.raw))
+		return r.wrapStyled(sanitizeTerminal(b.raw), r.th.Style("muted"))
 	case blockError:
-		return r.th.Style("errorText").Render("✗ " + sanitizeTerminal(b.raw))
+		return r.wrapPrefixed("✗ ", sanitizeTerminal(b.raw), r.th.Style("errorText"))
 	default:
-		return sanitizeTerminal(b.raw)
+		return r.wrapStyled(sanitizeTerminal(b.raw), lipgloss.NewStyle())
 	}
 }
 
@@ -412,7 +412,50 @@ func (r *renderer) renderReasoning(b *block, expand bool) string {
 	}
 	header := style.Render("reasoning summary · " + plural(n, "line") + " · ctrl+t collapse")
 	body := truncateLinesTail(text, maxReasoningLines, "  …(truncated)")
-	return header + "\n" + style.Render(reasoningCaveat) + "\n" + style.Render(body)
+	return header + "\n" + r.wrapStyled(reasoningCaveat, style) + "\n" + r.wrapStyled(body, style)
+}
+
+// wrapStyled word-wraps s to the live terminal width MINUS the style's own
+// horizontal frame (border+padding+margin, via GetHorizontalFrameSize — the
+// single source of truth, so the wrap budget tracks theme.go edits automatically
+// and never drifts behind a hardcoded inset) and renders it through st. A width
+// at or below the frame (e.g. the width-0 team focus renderer, team.go) means
+// "unknown/tiny: do not wrap" and the body renders unwrapped.
+func (r *renderer) wrapStyled(s string, st lipgloss.Style) string {
+	frame := st.GetHorizontalFrameSize()
+	if r.width <= frame+1 {
+		return st.Render(s)
+	}
+	// Normalise emoji presentation BEFORE ansi.Wrap, for the same reason the
+	// glamour path does (see markdown's long comment): ansi.Wrap measures cells
+	// on GraphemeWidth while the viewport paints on WcWidth, so a divergent
+	// cluster (e.g. a VS16 emoji) would wrap to a line that then overflows under
+	// the paint width — the exact overflow this wrapping exists to prevent.
+	return st.Render(ansi.Wrap(normalizeEmojiWidth(s), r.width-frame, ""))
+}
+
+// wrapPrefixed word-wraps body to the live width while reserving columns for a
+// leading marker (e.g. "• "/"✗ ") that is CONTENT, not style frame: the marker
+// sits on the first line and continuation lines hang-indent under the text so a
+// wrapped multi-line notice/error reads as one bulleted item. width at or below
+// the marker width means no wrap. Renders through st.
+func (r *renderer) wrapPrefixed(prefix, body string, st lipgloss.Style) string {
+	pw := lipgloss.Width(prefix)
+	if r.width <= pw+1 {
+		return st.Render(prefix + body)
+	}
+	// Normalise the body's emoji presentation before ansi.Wrap (see wrapStyled);
+	// the marker prefix is a fixed literal, so its width is taken as-is.
+	wrapped := ansi.Wrap(normalizeEmojiWidth(body), r.width-pw, "")
+	lines := strings.Split(wrapped, "\n")
+	for i, ln := range lines {
+		if i == 0 {
+			lines[i] = prefix + ln
+		} else {
+			lines[i] = strings.Repeat(" ", pw) + ln
+		}
+	}
+	return st.Render(strings.Join(lines, "\n"))
 }
 
 // plural formats a count with a noun, pluralising with a trailing "s" for any
@@ -450,17 +493,17 @@ func (r *renderer) renderHook(b *block) string {
 		// owned client-side ("blocked"), and the server Text rides as the trailing
 		// reason only — a redundant leading phase/verb echo is stripped so the phase
 		// appears exactly once (on the label).
-		return r.th.Style("errorText").Render("✗ " + label + ": blocked" + hookReason(b.raw, b.hookPhase))
+		return r.wrapPrefixed("✗ ", label+": blocked"+hookReason(b.raw, b.hookPhase), r.th.Style("errorText"))
 	case string(client.HookModified):
 		// Modified: info-coloured "✎" — an action was rewritten, notable but benign.
-		return r.th.Style("hookModified").Render("✎ " + label + ": modified" + hookReason(b.raw, b.hookPhase))
+		return r.wrapPrefixed("✎ ", label+": modified"+hookReason(b.raw, b.hookPhase), r.th.Style("hookModified"))
 	default:
 		// Info (the baseline): dim "•" hook notice — the server Text is the body.
 		line := label
 		if b.raw != "" {
 			line += ": " + sanitizeTerminal(b.raw)
 		}
-		return r.th.Style("muted").Render("• " + line)
+		return r.wrapPrefixed("• ", line, r.th.Style("muted"))
 	}
 }
 
