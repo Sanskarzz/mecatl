@@ -739,6 +739,11 @@ func (s *Supervisor) Run(ctx context.Context, sink func(TeamEvent)) TeamOutcome 
 		// error — a member's failure is captured on its memberRT (stopped) — so the
 		// group's Wait error is always nil and ignored.
 		var g errgroup.Group
+		// BOUND the round: SetLimit caps how many member turns run at once at
+		// s.concurrency (default defaultTeamConcurrency, override WithTeamConcurrency).
+		// This is the team's fan-out brake — do NOT drop it in a refactor; a round with
+		// more planned members than the cap must never exceed it. Guarded by
+		// TestSupervisorRoundConcurrencyBounded.
 		g.SetLimit(s.concurrency)
 		for _, ti := range plan {
 			g.Go(func() error {

@@ -114,6 +114,10 @@ type config struct {
 	llmBreakerThreshold  int
 	llmBreakerCooldown   time.Duration
 
+	// maxRunTokens is the loop-level cumulative token ceiling for a single run (the
+	// shared runaway brake). 0 (default) disables it.
+	maxRunTokens int
+
 	// Observability: the Prometheus /metrics listen address (empty disables it),
 	// plus the OTLP trace exporter knobs (empty endpoint disables tracing).
 	metricsAddr  string
@@ -634,6 +638,7 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		LLMStreamIdleTimeout:         cfg.llmStreamIdleTimeout,
 		LLMBreakerThreshold:          cfg.llmBreakerThreshold,
 		LLMBreakerCooldown:           cfg.llmBreakerCooldown,
+		MaxRunTokens:                 cfg.maxRunTokens,
 		MemoryDir:                    cfg.memoryDir,
 		MemoryConsolidateInterval:    cfg.memoryConsolidateInterval,
 		SoulPath:                     cfg.soulFile,
@@ -726,6 +731,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.DurationVar(&cfg.llmStreamIdleTimeout, "llm-stream-idle-timeout", 120*time.Second, "max idle gap between LLM stream chunks after the first chunk; a longer stall terminates the turn (0 disables)")
 	fs.IntVar(&cfg.llmBreakerThreshold, "llm-breaker-threshold", 5, "consecutive LLM failures that open the circuit breaker (0 disables)")
 	fs.DurationVar(&cfg.llmBreakerCooldown, "llm-breaker-cooldown", 30*time.Second, "how long the LLM circuit breaker stays open before half-opening")
+	fs.IntVar(&cfg.maxRunTokens, "max-run-tokens", 0, "loop-level cumulative token ceiling per run (input+output); a run that crosses it ends cleanly with stop=budget. Inherited by every subagent/team member. 0 (default) disables")
 
 	fs.StringVar(&cfg.metricsAddr, "metrics-addr", defaultMetricsAddr, "Prometheus /metrics listen address (empty disables the metrics endpoint)")
 

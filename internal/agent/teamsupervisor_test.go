@@ -364,6 +364,112 @@ func limitedMemberFactory(t *testing.T, tm *team.Team, providers map[string]*moc
 	}
 }
 
+// barrierMemberTool is a read-only member tool that signals each Execute entry on
+// `entered` and blocks until `release` is closed, tracking peak concurrency. It is the
+// instrument for the team-concurrency guard test.
+type barrierMemberTool struct {
+	mu      sync.Mutex
+	live    int
+	peak    int
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (*barrierMemberTool) Spec() tool.ToolSpec {
+	return tool.ToolSpec{Name: "Barrier", Description: "barrier", Schema: json.RawMessage(`{"type":"object"}`)}
+}
+func (*barrierMemberTool) ReadOnly() bool { return true }
+func (b *barrierMemberTool) Execute(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+	b.mu.Lock()
+	b.live++
+	if b.live > b.peak {
+		b.peak = b.live
+	}
+	b.mu.Unlock()
+	b.entered <- struct{}{}
+	<-b.release
+	b.mu.Lock()
+	b.live--
+	b.mu.Unlock()
+	return session.NewToolResult(in.ID, "ok"), nil
+}
+func (b *barrierMemberTool) peakLive() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.peak
+}
+
+// TestSupervisorRoundConcurrencyBounded is the guard test the plan asks for: the
+// Supervisor bounds a scheduling round via errgroup.SetLimit(concurrency), so a round
+// with MORE planned members than the concurrency cap NEVER runs more than `concurrency`
+// member turns at once. It is the tripwire against a future refactor silently dropping
+// SetLimit (the F1 "unbounded errgroup" claim was stale — this keeps it stale). Each
+// member blocks inside a barrier tool so the test can hold the in-flight set and read
+// the peak.
+func TestSupervisorRoundConcurrencyBounded(t *testing.T) {
+	const concurrency = 2
+	const members = 6
+
+	tm := team.New("conc")
+	barrier := &barrierMemberTool{entered: make(chan struct{}, members), release: make(chan struct{})}
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+
+	providers := map[string]*mockllm.Provider{}
+	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+		prov := providers[spec.Name]
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		cat.MustRegister(barrier)
+		return agent.MemberBuild{
+			Engine: agent.NewEngine(agent.Deps{LLM: prov, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "mock"}),
+		}
+	}
+
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory,
+		agent.WithMaxRounds(1),
+		agent.WithTeamConcurrency(concurrency),
+	)
+	for i := 0; i < members; i++ {
+		name := "m" + string(rune('0'+i))
+		// Each member calls Barrier (blocks) then ends its turn — all scheduled in round 0.
+		providers[name] = mockllm.New(
+			mockllm.ToolCallTurn(session.NewToolCall(session.ToolCallID(name+"b"), "Barrier", json.RawMessage(`{}`))),
+			mockllm.TextTurn("done"),
+		)
+		if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: name, InitialPrompt: "go"}); err != nil {
+			t.Fatalf("AddMember(%s): %v", name, err)
+		}
+	}
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		sup.Run(context.Background(), nil)
+	}()
+
+	// Hold until exactly `concurrency` members are inside the barrier; the rest must be
+	// blocked on the errgroup limit, not the barrier.
+	for i := 0; i < concurrency; i++ {
+		<-barrier.entered
+	}
+	if got := barrier.peakLive(); got > concurrency {
+		close(barrier.release)
+		<-runDone
+		t.Fatalf("%d member turns live at once, want <= concurrency=%d (the round errgroup must bound concurrency)", got, concurrency)
+	}
+
+	// Release everything; remaining members pass the now-open barrier as the group admits
+	// them. `entered` is buffered to `members`, so no Execute blocks on it.
+	close(barrier.release)
+	<-runDone
+
+	if peak := barrier.peakLive(); peak > concurrency {
+		t.Fatalf("peak concurrent member turns = %d, want <= concurrency=%d", peak, concurrency)
+	}
+}
+
 // TestSupervisorMemberLimitsBindSession proves a member's per-def Limits
 // (MemberBuild.Limits) bound its per-round session: with MaxTurns=2 the member makes
 // exactly 2 model calls in round 0, even though its script and the team-wide default

@@ -3,8 +3,10 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"iter"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
@@ -567,4 +569,109 @@ func lastLeadPrompt(t *testing.T, rec *promptRecorder) string {
 		t.Fatal("lead recorded no prompts")
 	}
 	return turns[len(turns)-1]
+}
+
+// budgetLeadProvider is a stateful lead provider for the budget-stopped-lead-synthesis
+// guard: on a WORKING-round run (the synthesis marker absent from the request) it loops
+// — emitting a RecordFinding tool call plus a fixed per-turn usage and a benign
+// StopEndTurn, never ending — so the engine's per-run MaxRunTokens ceiling trips and the
+// round ends StopBudget. On the SYNTHESIS run (a FRESH Run with the token accumulator
+// reset, detected by the synthesis instruction header in the request) it returns a
+// single clean report-text turn that fits under the budget. It proves the synthesis turn
+// runs even after the lead's working run was budget-stopped.
+type budgetLeadProvider struct {
+	perTurn  session.Usage
+	report   string
+	working  atomic.Int64 // working-run model calls
+	synthRan atomic.Bool
+}
+
+func (*budgetLeadProvider) Capabilities() port.ProviderCapabilities {
+	return port.ProviderCapabilities{}
+}
+
+func (p *budgetLeadProvider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
+	synthesis := false
+	for _, m := range req.Messages {
+		if m.Role == session.RoleUser && strings.Contains(m.Text, "the team has finished") {
+			synthesis = true
+		}
+	}
+	if synthesis {
+		p.synthRan.Store(true)
+		report := p.report
+		return func(yield func(port.Chunk, error) bool) {
+			if ctx.Err() != nil {
+				return
+			}
+			if !yield(port.Chunk{Kind: port.ChunkText, Text: report}, nil) {
+				return
+			}
+			if !yield(port.Chunk{Kind: port.ChunkUsage, Usage: &session.Usage{InputTokens: 5, OutputTokens: 5}}, nil) {
+				return
+			}
+			yield(port.Chunk{Kind: port.ChunkDone, Stop: session.StopEndTurn}, nil)
+		}, nil
+	}
+	p.working.Add(1)
+	usage := p.perTurn
+	return func(yield func(port.Chunk, error) bool) {
+		if ctx.Err() != nil {
+			return
+		}
+		tc := session.NewToolCall("rf", "RecordFinding", []byte(`{"finding":"partial progress"}`))
+		if !yield(port.Chunk{Kind: port.ChunkToolCall, ToolCall: &tc}, nil) {
+			return
+		}
+		if !yield(port.Chunk{Kind: port.ChunkUsage, Usage: &usage}, nil) {
+			return
+		}
+		yield(port.Chunk{Kind: port.ChunkDone, Stop: session.StopEndTurn}, nil)
+	}, nil
+}
+
+// TestBudgetStoppedLeadStillSynthesises is the TEAM-TIER load-bearing guard (QA #2b): a
+// lead whose WORKING run is stopped by its engine-level MaxRunTokens (StopBudget) is NOT
+// non-resumable, so the supervisor still drives its ONE synthesis turn — a FRESH Run with
+// the token accumulator reset — and the team's deliverable is the real synthesis report,
+// not a degraded fallback. If a budget stop wrongly marked the lead non-resumable, the
+// synthesis turn would be skipped and this would fail.
+func TestBudgetStoppedLeadStillSynthesises(t *testing.T) {
+	tm := team.New("budgetlead")
+	const budget = 250
+	leadProv := &budgetLeadProvider{
+		perTurn: session.Usage{InputTokens: 60, OutputTokens: 40},
+		report:  "CONSOLIDATED: budget-stopped lead still produced this report.",
+	}
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
+			LLM: leadProv, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil),
+			Model: "mock", MaxRunTokens: budget,
+		})}
+	}
+
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory,
+		agent.WithMaxRounds(2),
+		agent.WithTeamGoal("investigate the issue"))
+	mustAdd(t, sup, agent.MemberSpec{Name: "lead", Lead: true, InitialPrompt: "investigate"})
+
+	out := sup.Run(context.Background(), nil)
+
+	// The working run must have run multiple turns (the budget bound it, not turn 1).
+	if got := leadProv.working.Load(); got < 2 {
+		t.Fatalf("lead working run made %d model calls, want >= 2 (the engine budget should bound the working run)", got)
+	}
+	// The synthesis turn MUST have run despite the budget-stopped working run.
+	if !leadProv.synthRan.Load() {
+		t.Fatal("synthesis turn did not run; a budget-stopped (resumable) lead must still synthesise")
+	}
+	// The deliverable is the real synthesis report, not a degraded fallback.
+	if !strings.Contains(out.Report, "CONSOLIDATED") {
+		t.Fatalf("outcome.Report = %q, want the lead's synthesis report", out.Report)
+	}
 }

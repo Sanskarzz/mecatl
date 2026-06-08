@@ -192,10 +192,26 @@ synthesis). The data (`TeamOutcome.Findings`, `MemberOutcome.Completed`/`.Lead`)
 snapshotted in `outcome()`, so the gRPC path gets the same rich fallback. Headline guard:
 `TestTeamToolRefusalSynthesisFallsBackToLedger`.
 
-> **Deferred (4A) — team-wide token budget.** A config-only `WithTeamTokenBudget` that
-> stops scheduling after the current round when the accumulated `session.Usage` crosses a
-> ceiling, making `stop:max-tokens` trip this same fallback. The brake the 2.2M-token
-> runaway needed; this bundle is the safety net. Orthogonal, not implemented here.
+> **PARTIAL (4A) — per-engine token ceiling SHIPPED; team-AGGREGATE budget still DEFERRED.**
+> A SHARED loop-level *per-engine* token ceiling shipped: `agent.Deps.MaxRunTokens`
+> (0 = disabled), checked at the turn boundary in `Engine.drive` against THAT run's cumulative
+> `session.Usage` (input+output, via `Usage.TotalTokens`). When the total crosses the ceiling
+> the loop terminates CLEANLY via the completed path with `session.StopBudget` (a non-error
+> terminal, Reopen-recoverable, string-passthrough on the wire — mirrors `StopNoProgress`
+> exactly), so an in-flight turn always completes (no mid-stream abort → no-replay-after-first-chunk
+> holds). It is composition-tunable (`app.Config.MaxRunTokens` → `--max-run-tokens`) and
+> INHERITED by EVERY engine — main + Task + team member + lead synthesis + Fork — via
+> `engineDepsForProvider`/`childEngineDepsForProvider`. A per-call override may only TIGHTEN it.
+> So each individual member run is now bounded, and a budget-stopped member surfaces the
+> resilient-deliverable fallback the same way any stopped member does.
+>
+> **What is NOT yet closed:** there is NO team-AGGREGATE budget. The ceiling is per-engine /
+> per-run; `session.Reopen` resets the accumulator each round, so an N-member team can still
+> spend on the order of N×`MaxRunTokens` across a round, and the lifetime spend across rounds
+> is bounded only by `WithMemberTurnBudget` (a TURN count, not tokens). The 2.2M-token-runaway
+> the spike named is mitigated per-member but the team-wide token ceiling — a supervisor-level
+> accumulator that stops scheduling after the current round when the SUMMED `session.Usage`
+> crosses a team budget — remains DEFERRED. That is the residual 4A item.
 
 **On-demand member inspection (PULL).** Member sessions are persisted to the injected
 `port.SessionStore` under collision-free, team-namespaced ids

@@ -154,6 +154,23 @@ type Deps struct {
 	// with no declared approver auto-denies a subagent ask rather than hanging).
 	Interactive bool
 
+	// MaxRunTokens is the loop-level cumulative TOKEN ceiling for a single run: when
+	// the run's accumulated session.Usage (input+output, via Usage.TotalTokens) crosses
+	// this value, the loop terminates CLEANLY at the next turn boundary with
+	// session.StopBudget. It is the shared runaway brake the AGENT-TEAMS-SPIKE named the
+	// missing token budget — checked in drive Step 2, so it serves EVERY engine: main +
+	// Task + Team member + lead synthesis + Fork branch. Semantics: 0 (the default;
+	// existing Deps built without it) DISABLES the budget (behaviour byte-identical to
+	// before); a positive value is the ceiling. It is a turn-BOUNDARY check (never a
+	// mid-stream abort), so an in-flight turn always completes and
+	// no-replay-after-first-chunk holds; the terminal is non-error, so the session ends
+	// COMPLETED and stays Reopen-recoverable (mirrors StopNoProgress exactly). It is a
+	// loop concern, like CompactionRatio / MaxNoProgressNudges — NOT a port.LLMRequest
+	// field (the request stays provider-neutral). Composition plumbs it from Config so it
+	// is operator-tunable; children INHERIT it (childEngineDepsForProvider keeps it) and a
+	// per-call override may only TIGHTEN it.
+	MaxRunTokens int
+
 	// ProgressiveTools, when true, enables progressive tool disclosure
 	// (pattern 9): the per-turn request advertises lightweight specs for tools
 	// implementing tool.Disclosable plus a built-in ToolSearch tool the model
@@ -434,13 +451,10 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 	nudgeCap := e.deps.MaxNoProgressNudges
 
 	for {
-		// Step 2: stop conditions BEFORE the model call.
-		if reason, stopped := sess.StopReason(); stopped {
-			e.terminate(ctx, r, sess, reason, lastText, total, nil)
-			return
-		}
-		if ctx.Err() != nil {
-			e.terminate(ctx, r, sess, session.StopCancelled, lastText, total, nil)
+		// Step 2: stop conditions BEFORE the model call (limit / cancellation / token
+		// budget). preTurnTerminal owns the precedence and the matching terminate call;
+		// it returns true once the run has ended so this loop stays flat.
+		if e.preTurnTerminal(ctx, r, sess, lastText, total) {
 			return
 		}
 
@@ -612,6 +626,38 @@ func (e *Engine) finishTurnNoTools(ctx context.Context, r *Run, sess *session.Se
 		return true
 	}
 	e.save(ctx, sess)
+	return false
+}
+
+// budgetExhausted reports whether the run's cumulative usage has crossed the
+// configured loop-level token ceiling (Deps.MaxRunTokens). A non-positive ceiling
+// (the default) disables the budget and always returns false.
+func (e *Engine) budgetExhausted(total session.Usage) bool {
+	return e.deps.MaxRunTokens > 0 && total.TotalTokens() >= e.deps.MaxRunTokens
+}
+
+// preTurnTerminal runs the turn-BOUNDARY stop checks before a model call, in
+// precedence order, and terminates the run on the first that fires. It returns true
+// once the run has ended (the caller returns). Precedence:
+//  1. an already-recorded/limit stop reason (sess.StopReason) → terminate verbatim;
+//  2. ctx cancellation → StopCancelled;
+//  3. the loop-level token budget (StopBudget) — a CLEAN terminal (completed path,
+//     Reopen-recoverable, like StopNoProgress). It is LAST so a tripped limit /
+//     cancellation still wins. The boundary check means an in-flight turn always
+//     completes (no mid-stream abort → no-replay-after-first-chunk holds).
+func (e *Engine) preTurnTerminal(ctx context.Context, r *Run, sess *session.Session, lastText string, total session.Usage) bool {
+	if reason, stopped := sess.StopReason(); stopped {
+		e.terminate(ctx, r, sess, reason, lastText, total, nil)
+		return true
+	}
+	if ctx.Err() != nil {
+		e.terminate(ctx, r, sess, session.StopCancelled, lastText, total, nil)
+		return true
+	}
+	if e.budgetExhausted(total) {
+		e.terminateComplete(ctx, r, sess, session.StopBudget, lastText, total)
+		return true
+	}
 	return false
 }
 

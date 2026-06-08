@@ -921,8 +921,8 @@ func TestSubagentCtxCancelledBeforeIsolation(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("Task result = %+v, want an error result (ctx cancelled before isolation)", res)
 	}
-	if !strings.Contains(res.Content, "cancelled before workspace isolation") {
-		t.Fatalf("Task error = %q, want it to mention cancellation before isolation", res.Content)
+	if !strings.Contains(res.Content, "cancelled before acquiring a concurrency slot") {
+		t.Fatalf("Task error = %q, want it to mention cancellation before the slot acquire", res.Content)
 	}
 	// Only the FIRST call ever forked; the cancelled call must NOT have forked.
 	if got := fk.callCount(); got != 1 {
@@ -977,5 +977,110 @@ func TestSubagentMaxConcurrentTaskShellsZeroClamps(t *testing.T) {
 	}
 	if fk.cleanups != 1 {
 		t.Errorf("fork cleanups = %d, want 1 (the slot must be released after the call)", fk.cleanups)
+	}
+}
+
+// barrierChildTool is a read-only child tool that signals each Execute entry on
+// `entered` and blocks until `release` is closed, so a test can hold N children
+// in-flight at once and observe the peak concurrency. It is the FORKER-LESS analogue
+// of concurrencyForker's contention point.
+type barrierChildTool struct {
+	mu      sync.Mutex
+	live    int
+	peak    int
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (*barrierChildTool) Spec() tool.ToolSpec {
+	return tool.ToolSpec{Name: "Barrier", Description: "barrier", Schema: json.RawMessage(`{"type":"object"}`)}
+}
+func (*barrierChildTool) ReadOnly() bool { return true }
+func (b *barrierChildTool) Execute(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+	b.mu.Lock()
+	b.live++
+	if b.live > b.peak {
+		b.peak = b.live
+	}
+	b.mu.Unlock()
+	b.entered <- struct{}{}
+	<-b.release
+	b.mu.Lock()
+	b.live--
+	b.mu.Unlock()
+	return session.NewToolResult(in.ID, "done"), nil
+}
+func (b *barrierChildTool) peakLive() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.peak
+}
+
+// TestSubagentChildGateCapsForkerlessConcurrency closes the genuinely-unbounded path
+// the plan identified: a FORKER-LESS Task fan-out. With a cap of N and more than N
+// concurrent Task calls (no forker wired), at most N children ever run at once. Each
+// child blocks inside a barrier tool so the test can hold the in-flight set and read
+// the peak. Pre-fix the gate was acquired only on the forking path, so a forker-less
+// fan-out was unbounded and this would observe peak == fanout.
+func TestSubagentChildGateCapsForkerlessConcurrency(t *testing.T) {
+	const maxChildren = 2
+	const fanout = 6
+
+	barrier := &barrierChildTool{entered: make(chan struct{}, fanout), release: make(chan struct{})}
+	// Each child calls Barrier (blocks) then summarises. The child engine is SHARED
+	// across calls; the per-tool childGate is what bounds concurrency, not the engine.
+	childCat := catalogWith(t, barrier)
+	newChildLLM := func() *mockllm.Provider {
+		return mockllm.New(
+			mockllm.ToolCallTurn(toolCall("b1", "Barrier", `{}`)),
+			mockllm.TextTurn("child done"),
+		)
+	}
+	// One Task tool, NO forker (the forker-less path), shared across concurrent calls.
+	// A distinct child engine per call so the shared mockllm cursor can't interleave.
+	engines := map[string]*agent.Engine{}
+	var meta []agent.AgentMeta
+	for i := 0; i < fanout; i++ {
+		name := "a" + string(rune('0'+i))
+		engines[name] = childEngineWith(newChildLLM(), childCat)
+		meta = append(meta, agent.AgentMeta{Name: name, Description: "d"})
+	}
+	task := agent.NewTaskTool(
+		childEngineWith(newChildLLM(), childCat),
+		agent.WithAgentEngines(engines, meta),
+		agent.WithMaxConcurrentChildren(maxChildren),
+	)
+
+	var wg sync.WaitGroup
+	for i := 0; i < fanout; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			name := "a" + string(rune('0'+n))
+			_, _ = task.Execute(context.Background(),
+				session.NewToolCall(session.ToolCallID("c"+string(rune('0'+n))), "Task",
+					json.RawMessage(`{"prompt":"go","agent":"`+name+`"}`)),
+				memfs.NewWorkspace("/base"))
+		}(i)
+	}
+
+	// Wait until exactly `cap` children have entered the barrier; the rest must be
+	// blocked on the childGate (not on the barrier).
+	for i := 0; i < maxChildren; i++ {
+		<-barrier.entered
+	}
+	if got := barrier.peakLive(); got > maxChildren {
+		close(barrier.release)
+		wg.Wait()
+		t.Fatalf("%d children live at once, want <= maxChildren=%d (the child gate must bound a forker-less fan-out)", got, maxChildren)
+	}
+
+	// Release everything; the remaining children pass the (now-open) barrier as the
+	// gate admits them. `entered` is buffered to fanout, so no Execute blocks on it.
+	close(barrier.release)
+	wg.Wait()
+
+	if peak := barrier.peakLive(); peak > maxChildren {
+		t.Fatalf("peak concurrent forker-less children = %d, want <= maxChildren=%d", peak, maxChildren)
 	}
 }

@@ -155,6 +155,49 @@ composition layer). `EvNoProgress`/`StopNoProgress` are STRING passthroughs on t
 `type`/`stop` are strings, not enums), so no proto regen was needed; mecatui renders
 `EvNoProgress` as a muted notice and `StopNoProgress` as a `stopped · no progress` footer label.
 
+**Token budget — the shared loop-level ceiling (`StopBudget`).** `agent.Deps.MaxRunTokens`
+(0 = disabled) is a per-RUN cumulative token ceiling checked at the turn BOUNDARY in
+`Engine.drive` (Step 2, after the existing `sess.StopReason()` and `ctx.Err()` checks, before
+`BeginTurn`) against the run's accumulated `session.Usage` via `Usage.TotalTokens()`
+(input+output; cache tokens excluded — `CacheReadTokens` is a subset of `InputTokens`,
+`CacheWriteTokens` is a side cost). When `total.TotalTokens() >= MaxRunTokens` the loop ends via
+`terminateComplete(…, session.StopBudget, …)` — a NON-error CLEAN terminal (completed path,
+Reopen-recoverable), so it mirrors `StopNoProgress` exactly. The boundary check means an
+in-flight turn always COMPLETES (no mid-stream abort → no-replay-after-first-chunk holds); a turn
+whose usage massively overshoots still finishes, then the budget trips before the next turn. It
+is NOT a `port.LLMRequest` field (the request stays provider-neutral) — it is composition-tunable
+(`app.Config.MaxRunTokens` → `--max-run-tokens`) and INHERITED by every engine via
+`engineDepsForProvider`; `childEngineDepsForProvider` delegates there and does NOT clear it, so
+Task/team-member/lead/Fork children inherit the same ceiling. `StopBudget` is the
+AGENT-TEAMS-SPIKE's named "Deferred 4A" brake, now landed once for every delegation path. It is a
+STRING passthrough on the wire (`session.StopBudget = "budget"`, no proto enum). Guards:
+`agent.TestBudget*`, `session.TestStopBudgetIsCleanReopenableTerminal`,
+`server.TestServiceBudgetSurfacesAndReopens`, `app.TestMaxRunTokensPropagatesToParentAndChild`.
+
+**Task per-call limits + wall-clock deadline (domain-only).** `taskArgs` gains three OPTIONAL
+pointer fields — `MaxTurns`/`MaxToolCalls` (TIGHTEN-ONLY via `tightenLimit`: a present positive
+override applies only if it LOWERS the inherited `session.Limits`, so the model can make its child
+stricter than the operator's bound but never looser; nil / non-positive ignored) and `TimeoutMs`
+(a `context.WithTimeout` wrapping the child ctx). A deadline hit is detected by holding the
+timeout ctx separately and checking `timeoutCtx.Err() == context.DeadlineExceeded` AFTER the
+drain, rendered as a model-addressable time-budget tool error (distinct from a parent
+cancellation). No wire/proto change (`session.Limits` semantics unchanged). Guards:
+`agent.TestTaskPerCall*`.
+
+**Task child concurrency cap.** `TaskTool.childGate` (a counting-semaphore channel, default
+`defaultMaxConcurrentChildren = 4`, override `WithMaxConcurrentChildren`; the old
+`WithMaxConcurrentTaskShells` is a deprecated alias) is now acquired at the TOP of `run()` for
+ALL Task children — forking AND forker-less — not only the worktree-forking path. Task is
+read-only so the dispatcher fans out N concurrent Task calls in one turn; each consumes a child
+session + an LLM slot (and, when shell-bearing, a forked worktree), so the gate is the single
+fan-out brake bounding how many children run at once. This closes the previously-unbounded
+forker-LESS fan-out. The team supervisor's round was ALREADY bounded
+(`errgroup.SetLimit(s.concurrency)`, `WithTeamConcurrency`, default 4) — a code comment + the
+`TestSupervisorRoundConcurrencyBounded` guard keep a future refactor from silently dropping it.
+read-parallel/mutate-serial is UNCHANGED (the gate bounds child START, not dispatch ordering).
+Guards: `agent.TestSubagentChildGateCapsForkerlessConcurrency`,
+`agent.TestSubagentShellGateCapsConcurrentForks`, `agent.TestSupervisorRoundConcurrencyBounded`.
+
 **Unknown-tool card (dispatch `runOne`).** An unknown/unresolved tool-call name now opens an
 `EvToolCall` card BEFORE its `EvToolResult` error (`unknown tool %q`), preserving the
 card-before-the-gate ordering so a client (ACP/mecatui) keys the failure to a card it already
@@ -310,11 +353,19 @@ reaching into the live `*team.Team`. The headline regression guard is
 `TestTeamToolRefusalSynthesisFallsBackToLedger`: a refusal synthesis over a populated ledger must never
 reach the parent.
 
-> **Deferred next item — 4A team-wide token budget.** A `WithTeamTokenBudget` SupervisorOption +
-> gRPC/CLI knob that reads the accumulated `total session.Usage`, stops scheduling after the current
-> round, and makes `stop:max-tokens` a first-class terminal tripping this SAME fallback. This bundle
-> is the *safety net* (never return junk); 4A is the *brake* (the real ceiling the incident needed).
-> Orthogonal — config-only, not implemented here.
+> **PARTIAL — 4A: per-engine token ceiling SHIPPED, team-AGGREGATE budget DEFERRED.** The
+> per-RUN ceiling ships as the SHARED `agent.Deps.MaxRunTokens` loop ceiling (see the
+> Token-budget note above), NOT a team-only `WithTeamTokenBudget`: a runaway team member crosses
+> the per-run `MaxRunTokens` ceiling and ends with `session.StopBudget`, which the supervisor
+> handles exactly like any other stopped member (the resilient-deliverable safety-net fallback
+> still applies; a budget-stopped lead stays RESUMABLE so its one synthesis turn still runs —
+> guarded by `TestBudgetStoppedLeadStillSynthesises`). This bundle remains the *safety net*
+> (never return junk); the per-engine budget is the *per-member brake*. **Still open:** there is
+> NO team-aggregate ceiling — the budget is per-run and `session.Reopen` resets the accumulator
+> each round, so an N-member team can still spend ~N×`MaxRunTokens` across a round (cross-round
+> lifetime is bounded only by `WithMemberTurnBudget`, a TURN count, not tokens). A supervisor-level
+> summed-`session.Usage` budget that stops scheduling after the current round remains the residual
+> 4A item.
 
 **Member sessions persist for out-of-band inspection.** The supervisor saves each member session
 to the injected `port.SessionStore` (`WithMemberStore`, never a concrete adapter — layering
@@ -362,8 +413,10 @@ one forker). So a `Task` to "investigate X" can now `git log`/`git show`/`cat`/b
 isolated checkout — Edit/Write still dropped, no Task/Fork recursion. `TaskTool.ReadOnly()`
 stays **true**: isolation (not catalog read-only-ness) is what keeps Task read-parallel — its
 writes land in the worktree, never the shared base; a fork FAILURE is a tool error, NOT a
-silent fallback to the shared ws. A `WithMaxConcurrentTaskShells` (default 4) semaphore bounds
-concurrent worktree-bearing children (Task is read-parallel, so the model can fan out). Same
+silent fallback to the shared ws. A `WithMaxConcurrentChildren` (default 4; old
+`WithMaxConcurrentTaskShells` is a deprecated alias) semaphore bounds concurrent children —
+ALL of them now, forking and forker-less (Task is read-parallel, so the model can fan out; see
+the Task-concurrency-cap note above). Same
 `gitenv` hardening + same untrusted-`.gitattributes` residual as team members; the
 workspace-trust gate is the SHARED follow-up for both Team + Task.
 

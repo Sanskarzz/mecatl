@@ -417,6 +417,31 @@ func TestExplicitStopReasonTakesPrecedence(t *testing.T) {
 	}
 }
 
+// TestStopBudgetIsCleanReopenableTerminal pins that StopBudget is a CLEAN terminal,
+// parallel to StopNoProgress: Stop(StopBudget) drives the session to COMPLETED (not
+// failed) and the completed session is Reopen-recoverable.
+func TestStopBudgetIsCleanReopenableTerminal(t *testing.T) {
+	s := newTestSession(Limits{})
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	if err := s.Stop(StopBudget); err != nil {
+		t.Fatalf("Stop(StopBudget): %v", err)
+	}
+	if s.State != StateCompleted {
+		t.Fatalf("state after Stop(StopBudget) = %q, want completed (clean terminal)", s.State)
+	}
+	if r, ok := s.RecordedStopReason(); !ok || r != StopBudget {
+		t.Fatalf("recorded stop = %q (ok=%v), want %q", r, ok, StopBudget)
+	}
+	if err := s.Reopen(); err != nil {
+		t.Fatalf("Reopen after StopBudget: %v (a budget terminal must stay recoverable)", err)
+	}
+	if s.State != StateIdle {
+		t.Fatalf("state after Reopen = %q, want idle", s.State)
+	}
+}
+
 func TestReopenFromCompletedReturnsToIdleAndResetsCounters(t *testing.T) {
 	s := newTestSession(Limits{MaxTurns: 5})
 	// Drive one turn and complete cleanly.

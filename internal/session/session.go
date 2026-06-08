@@ -109,6 +109,17 @@ const (
 	// to the proto stop string verbatim (no proto enum; the wire stop field is a
 	// string passthrough).
 	StopNoProgress StopReason = "no_progress"
+	// StopBudget means the run's cumulative token usage crossed the configured
+	// loop-level ceiling (Deps.MaxRunTokens), checked at a turn boundary. It is the
+	// shared runaway brake serving every delegation path (main + Task + Team + Fork):
+	// each engine inherits the ceiling and a per-call override may TIGHTEN it. Like
+	// StopNoProgress it is a CLEAN terminal (not StopError — nothing failed), routed
+	// through the same completed path as StopEndTurn, so the session ends COMPLETED and
+	// stays Reopen-recoverable. The check is at the turn boundary (never mid-stream), so
+	// the in-flight turn always completes and the no-replay-after-first-chunk invariant
+	// holds. It maps to the proto stop string verbatim (no proto enum; the wire stop
+	// field is a string passthrough, exactly like StopNoProgress).
+	StopBudget StopReason = "budget"
 )
 
 // Limits are the configured stop conditions for a session. A zero value in any

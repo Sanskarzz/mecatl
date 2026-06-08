@@ -146,6 +146,16 @@ type Config struct {
 	// flag. Child/member/lead engines inherit it via engineDepsForProvider.
 	MaxNoProgressNudges int
 
+	// MaxRunTokens is the loop-level cumulative token ceiling for a single run (the
+	// shared runaway brake serving main + Task + Team + Fork). It is threaded through
+	// engineDepsForProvider to agent.Deps.MaxRunTokens and INHERITED by every child/
+	// member/lead engine (childEngineDepsForProvider keeps it). Semantics (in the loop):
+	// 0 (the default; operators who never set it) DISABLES the budget, so existing
+	// behaviour is byte-identical; a positive value is the ceiling and a run that crosses
+	// it terminates cleanly with session.StopBudget (Reopen-recoverable). Operator-tunable
+	// via --max-run-tokens.
+	MaxRunTokens int
+
 	// Memory: per-project memory store directory (empty disables the tools), plus
 	// the background consolidation (dream) interval (0 disables; only meaningful
 	// with MemoryDir set).
@@ -1153,6 +1163,10 @@ func engineDepsForProvider(
 		// (childEngineDepsForProvider keeps this field). Zero → NewEngine applies the
 		// safe default of 2; negative disables.
 		MaxNoProgressNudges: cfg.MaxNoProgressNudges,
+		// Token budget: the shared loop-level runaway brake, operator-tunable (cfg) and
+		// INHERITED by children (childEngineDepsForProvider, which delegates here, keeps
+		// it). 0 disables (behaviour byte-identical to pre-budget).
+		MaxRunTokens: cfg.MaxRunTokens,
 		// Interactivity: the MAIN engine surfaces a subagent's unresolved permission ask
 		// to the human when a client is attached. childEngineDepsForProvider forces this
 		// back to false (a child never surfaces further).

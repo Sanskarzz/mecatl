@@ -23,6 +23,27 @@ func TestUsageCacheHitRate(t *testing.T) {
 	}
 }
 
+func TestUsageTotalTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		u    Usage
+		want int
+	}{
+		{"zero", Usage{}, 0},
+		{"input+output only", Usage{InputTokens: 30, OutputTokens: 12}, 42},
+		// Cache tokens are EXCLUDED: CacheReadTokens is a subset of InputTokens (so
+		// counting it would double-count) and CacheWriteTokens is a side cost.
+		{"cache tokens excluded", Usage{InputTokens: 100, OutputTokens: 50, CacheReadTokens: 40, CacheWriteTokens: 20}, 150},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.u.TotalTokens(); got != tc.want {
+				t.Fatalf("TotalTokens() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestUsageAdd(t *testing.T) {
 	a := Usage{InputTokens: 10, OutputTokens: 1, CacheReadTokens: 2, CacheWriteTokens: 3}
 	b := Usage{InputTokens: 5, OutputTokens: 4, CacheReadTokens: 1, CacheWriteTokens: 1}

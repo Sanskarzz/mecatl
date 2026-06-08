@@ -229,6 +229,28 @@ func TestSubproviderChildTelemetryOff(t *testing.T) {
 	}
 }
 
+// TestMaxRunTokensPropagatesToParentAndChild asserts the loop-level token budget
+// (Config.MaxRunTokens) is threaded onto the MAIN engine deps via engineDepsForProvider
+// AND INHERITED by a child/member engine via childEngineDepsForProvider (the child
+// delegates to engineDepsForProvider and never clears it). This is the
+// "every delegation path inherits the budget" contract.
+func TestMaxRunTokensPropagatesToParentAndChild(t *testing.T) {
+	const budget = 250_000
+	cfg := Config{Model: "gpt-5", MaxRunTokens: budget}
+	provider := mockllm.New()
+
+	parent := engineDepsForProvider(cfg, provider, cfg.Model, 0, nil,
+		permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil), hookexec.New(nil), nil, nil)
+	if parent.MaxRunTokens != budget {
+		t.Fatalf("parent Deps.MaxRunTokens = %d, want %d (engineDepsForProvider must thread the budget)", parent.MaxRunTokens, budget)
+	}
+
+	child := childEngineDepsForProvider(cfg, "member:explorer", provider, cfg.Model, 0, tool.NewCatalog(), promptConfig(cfg, ""), nil)
+	if child.MaxRunTokens != budget {
+		t.Fatalf("child Deps.MaxRunTokens = %d, want %d (children must INHERIT the budget)", child.MaxRunTokens, budget)
+	}
+}
+
 // TestDefaultConfigPolicyEvaluatesWithoutPanic is the permconfig typed-nil
 // regression guard. With a DEFAULT Config (no PermissionsConventional, no
 // PermissionConfigs, no AllowAllTools) permconfig.New returns a TYPED-nil

@@ -23,15 +23,15 @@ const taskToolName = "Task"
 // is echoed to the event stream.
 const maxSubagentGoalLen = 60
 
-// defaultMaxConcurrentTaskShells bounds how many shell-bearing Task children may
-// hold a forked worktree at once. Task is read-only (ReadOnly()==true), so the
-// dispatcher runs Task calls concurrently and the model can fan many out; each
-// shell-bearing child now forks a git worktree (disk + a `git worktree add`
-// process), so an unbounded fan-out is real resource pressure. The gate is
-// acquired only on the forking path (childForker != nil); a forker-less Task is
-// not bounded (it allocates nothing per call beyond the child session). The
-// default mirrors the team supervisor's defaultTeamConcurrency.
-const defaultMaxConcurrentTaskShells = 4
+// defaultMaxConcurrentChildren bounds how many Task children may run at once.
+// Task is read-only (ReadOnly()==true), so the dispatcher runs Task calls
+// concurrently and the model can fan MANY out in a single turn; each child consumes
+// a child session + an LLM slot (and, when shell-bearing, a forked git worktree —
+// disk + a `git worktree add` process), so an unbounded fan-out is real resource
+// pressure. The gate bounds ALL Task children — forking AND forker-less — so the
+// read-parallel fan-out cannot create unbounded child runs at once. The default
+// mirrors the team supervisor's defaultTeamConcurrency and the fork concurrency cap.
+const defaultMaxConcurrentChildren = 4
 
 // observableTool is the agent-internal seam by which a tool may forward a
 // REDACTED, allowlisted projection of its internal activity to the parent run's
@@ -122,6 +122,22 @@ type taskArgs struct {
 	// the default anonymous read-only explorer runs (unchanged behaviour). An
 	// unknown name returns a model-addressable error listing the valid names.
 	Agent string `json:"agent,omitempty"`
+
+	// MaxTurns optionally TIGHTENS the child's per-run turn limit for THIS call. It is
+	// a pointer so an omitted value (nil) is distinguishable from an explicit 0; when
+	// present it overrides the inherited limit only if it is LOWER (tighten-only — the
+	// model may make its child stricter than the operator's bound, never looser, so a
+	// per-call arg can't be used to escape the configured ceiling). A non-positive value
+	// is ignored (treated as "no override").
+	MaxTurns *int `json:"max_turns,omitempty"`
+	// MaxToolCalls optionally TIGHTENS the child's per-run tool-call limit for THIS
+	// call. Same pointer + tighten-only + non-positive-ignored semantics as MaxTurns.
+	MaxToolCalls *int `json:"max_tool_calls,omitempty"`
+	// TimeoutMs optionally imposes a WALL-CLOCK deadline (milliseconds) on this child
+	// run via context.WithTimeout. It is a hard ceiling independent of the turn/tool
+	// limits: a child that exceeds it is cancelled and the result is a time-budget tool
+	// error. A non-positive value is ignored (no deadline).
+	TimeoutMs *int `json:"timeout_ms,omitempty"`
 }
 
 // AgentMeta is the plain (name, description) summary of one registered agent
@@ -163,6 +179,18 @@ var taskSchema = json.RawMessage(`{
     "agent": {
       "type": "string",
       "description": "Optional name of a configured specialist agent to route this delegation to (see the list in the tool description). Omit to use the default read-only explorer."
+    },
+    "max_turns": {
+      "type": "integer",
+      "description": "Optional cap on the subagent's model turns for THIS call. Tighten-only: it can make the subagent stricter than the default, never looser. Omit to use the default."
+    },
+    "max_tool_calls": {
+      "type": "integer",
+      "description": "Optional cap on the subagent's total tool calls for THIS call. Tighten-only (as max_turns). Omit to use the default."
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "description": "Optional wall-clock deadline in milliseconds for the whole subagent run; if it exceeds this it is cancelled and returns a time-budget error. Omit for no deadline."
     }
   },
   "required": ["prompt"]
@@ -244,12 +272,16 @@ type TaskTool struct {
 	// shared base would be the exact hazard isolation exists to prevent.
 	childForker tool.WorkspaceForker
 
-	// shellGate bounds how many shell-bearing Task children may hold a forked
-	// worktree concurrently. It is a buffered channel used as a counting semaphore,
-	// acquired before Fork and released after the fork's cleanup, ONLY on the forking
-	// path. nil disables bounding (the forker-less path never touches it). Capacity is
-	// defaultMaxConcurrentTaskShells unless overridden by WithMaxConcurrentTaskShells.
-	shellGate chan struct{}
+	// childGate bounds how many Task children may run CONCURRENTLY — forking AND
+	// forker-less. It is a buffered channel used as a counting semaphore, acquired at
+	// the top of run() (before any fork) and released when the call returns, so the
+	// dispatcher's read-parallel fan-out of N Task calls in one turn can never start more
+	// than cap children at once (each consumes a child session + an LLM slot, and a
+	// shell-bearing child additionally a forked worktree). It is always sized in
+	// NewTaskTool (never nil), so the gate is the single fan-out brake for every Task
+	// child. Capacity is defaultMaxConcurrentChildren unless overridden by
+	// WithMaxConcurrentChildren (or its deprecated alias WithMaxConcurrentTaskShells).
+	childGate chan struct{}
 
 	// idPrefix seeds the generated child SessionID so child sessions are
 	// distinguishable in logs/stores.
@@ -297,18 +329,28 @@ func WithChildForker(f tool.WorkspaceForker) TaskOption {
 	return func(t *TaskTool) { t.childForker = f }
 }
 
-// WithMaxConcurrentTaskShells bounds how many shell-bearing Task children may hold a
-// forked worktree at once (default defaultMaxConcurrentTaskShells). It applies ONLY
-// when a child forker is wired (the forker-less path allocates nothing per call worth
-// bounding). A value < 1 is clamped to 1 (a zero-capacity gate would deadlock). It is
-// a no-op when no forker is wired.
-func WithMaxConcurrentTaskShells(n int) TaskOption {
+// WithMaxConcurrentChildren bounds how many Task children may run CONCURRENTLY —
+// forking AND forker-less (default defaultMaxConcurrentChildren). It is the single
+// fan-out brake on the dispatcher's read-parallel batch: N Task calls in one turn each
+// block on the gate, so at most cap children run at once. A value < 1 is clamped to 1
+// (a zero-capacity gate would deadlock).
+func WithMaxConcurrentChildren(n int) TaskOption {
 	return func(t *TaskTool) {
 		if n < 1 {
 			n = 1
 		}
-		t.shellGate = make(chan struct{}, n)
+		t.childGate = make(chan struct{}, n)
 	}
+}
+
+// WithMaxConcurrentTaskShells is the DEPRECATED alias of WithMaxConcurrentChildren,
+// kept for callers wired before the gate was widened from shell-bearing children only
+// to ALL Task children. It now bounds every Task child (not just the forking path).
+// Prefer WithMaxConcurrentChildren.
+//
+// Deprecated: use WithMaxConcurrentChildren.
+func WithMaxConcurrentTaskShells(n int) TaskOption {
+	return WithMaxConcurrentChildren(n)
 }
 
 // WithAgentEngines injects the per-definition child engines (keyed by agent name)
@@ -378,12 +420,12 @@ func NewTaskTool(childEngine *Engine, opts ...TaskOption) tool.Tool {
 	for _, o := range opts {
 		o(t)
 	}
-	// When a child forker is wired but the operator did not explicitly size the shell
-	// gate, default it: each shell-bearing child holds a forked worktree, so an
-	// unbounded read-parallel fan-out must be capped. The gate is irrelevant (and left
-	// nil) on the forker-less path.
-	if t.childForker != nil && t.shellGate == nil {
-		t.shellGate = make(chan struct{}, defaultMaxConcurrentTaskShells)
+	// Always size the child-concurrency gate (forking AND forker-less): a read-parallel
+	// fan-out of N Task calls in one turn each consumes a child session + an LLM slot, so
+	// the gate is the single fan-out brake bounding how many children run at once. The
+	// operator may override the default via WithMaxConcurrentChildren.
+	if t.childGate == nil {
+		t.childGate = make(chan struct{}, defaultMaxConcurrentChildren)
 	}
 	return t
 }
@@ -525,6 +567,38 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 		}
 	}
 
+	// Per-call limit overrides (tighten-only): the model may make THIS child stricter
+	// than the inherited bound, never looser, so a per-call arg can't escape the
+	// operator's ceiling. tightenLimit ignores nil / non-positive values and only lowers.
+	limits.MaxTurns = tightenLimit(limits.MaxTurns, args.MaxTurns)
+	limits.MaxToolCalls = tightenLimit(limits.MaxToolCalls, args.MaxToolCalls)
+
+	// Per-call wall-clock deadline: a hard ceiling on the whole child run, independent
+	// of the turn/tool limits. A child that exceeds it is ctx-cancelled (the loop
+	// terminates with StopCancelled), which the terminal switch below renders as a
+	// time-budget tool error. nil / non-positive ⇒ no deadline (ctx unchanged). The
+	// timeout ctx is held separately (timeoutCtx) so the terminal switch can tell a
+	// deadline-kill (DeadlineExceeded) apart from a parent cancellation.
+	var timeoutCtx context.Context
+	if args.TimeoutMs != nil && *args.TimeoutMs > 0 {
+		var cancelTimeout context.CancelFunc
+		ctx, cancelTimeout = context.WithTimeout(ctx, time.Duration(*args.TimeoutMs)*time.Millisecond)
+		defer cancelTimeout()
+		timeoutCtx = ctx
+	}
+
+	// Bound concurrent children FIRST, for ALL Task children (forking AND forker-less):
+	// the dispatcher fans Task calls out read-parallel, and each child consumes a child
+	// session + an LLM slot (and, when shell-bearing, a forked worktree). Acquire at the
+	// top of the call and release when it returns, so at most cap children run at once.
+	release := t.acquireChildSlot(ctx)
+	if release == nil {
+		// ctx cancelled while waiting for a slot — surface it as a tool error; the parent
+		// ctx governs the whole call.
+		return session.NewToolError(call.ID, "Task: cancelled before acquiring a concurrency slot"), nil
+	}
+	defer release()
+
 	// Workspace selection. When a child forker is wired (the child catalog has Bash),
 	// run the child in its OWN isolated git worktree so its shell's writes never touch
 	// the shared parent base — what keeps Task read-parallel-safe (see ReadOnly). A
@@ -534,18 +608,8 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	// (the run is drained below in this call), so a deferred cleanup is correct.
 	runWS := ws
 	if t.childForker != nil {
-		// Bound concurrent shell-bearing children (each holds a worktree): acquire
-		// before Fork, release after cleanup. The gate is honored per-call so a
-		// read-parallel fan-out cannot create unbounded worktrees at once.
-		release := t.acquireShellSlot(ctx)
-		if release == nil {
-			// ctx cancelled while waiting for a slot — surface it as a tool error rather
-			// than forking; the parent ctx governs the whole call.
-			return session.NewToolError(call.ID, "Task: cancelled before workspace isolation"), nil
-		}
 		forkWS, cleanup, err := t.childForker.Fork(ctx, ws, subagentGoal(args))
 		if err != nil {
-			release()
 			return session.NewToolError(call.ID, "Task: workspace isolation failed: "+err.Error()), nil
 		}
 		runWS = forkWS
@@ -553,7 +617,6 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 			if cleanup != nil {
 				_ = cleanup()
 			}
-			release()
 		}()
 	}
 
@@ -610,6 +673,15 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	// Fire SubagentStop best-effort, regardless of how the child ended.
 	t.fireSubagentStop(ctx, child)
 
+	// Time-budget terminal: the per-call deadline fired (timeoutCtx deadline exceeded)
+	// rather than a parent cancellation, so the child stopped because it ran out of its
+	// allotted wall-clock time. Render it as a model-addressable time-budget tool error
+	// so the model learns the call hit its own limit (distinct from a generic failure).
+	if timeoutCtx != nil && timeoutCtx.Err() == context.DeadlineExceeded {
+		return session.NewToolError(call.ID,
+			fmt.Sprintf("Task: subagent exceeded its time budget (%dms) and was stopped", *args.TimeoutMs)), nil
+	}
+
 	if stop == session.StopError {
 		msg := final
 		if msg == "" {
@@ -623,20 +695,41 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	return session.NewToolResult(call.ID, final), nil
 }
 
-// acquireShellSlot acquires one slot of the shell-bearing-child concurrency gate,
-// blocking until a slot is free or ctx is cancelled. It returns a release func to
-// return the slot (idempotent-safe to call once), or nil if ctx was cancelled while
-// waiting — the caller then aborts the call without forking. A nil gate (no bound)
-// returns an inert release immediately. It is only ever consulted on the forking
-// path (childForker != nil), where NewTaskTool always sized a gate.
-func (t *TaskTool) acquireShellSlot(ctx context.Context) func() {
-	if t.shellGate == nil {
+// tightenLimit applies a per-call TIGHTEN-ONLY override to an inherited session limit:
+// it returns the LOWER of the inherited value and the requested override, ignoring a
+// nil or non-positive request. Because a 0 inherited value means "unlimited", a present
+// positive override always wins against 0; otherwise the override applies only when it
+// is strictly lower than the inherited bound. The model can therefore make its child
+// stricter than the operator's configured limit, never looser.
+//
+// It relies on session.Limits treating a 0 field as UNLIMITED (see session.Limits): a
+// positive override against an unlimited (0) inherited bound TIGHTENS, which is why
+// inherited<=0 returns the override rather than the (looser) 0. If session.Limits ever
+// changes its zero-semantics, this branch must change with it.
+func tightenLimit(inherited int, override *int) int {
+	if override == nil || *override <= 0 {
+		return inherited
+	}
+	if inherited <= 0 || *override < inherited {
+		return *override
+	}
+	return inherited
+}
+
+// acquireChildSlot acquires one slot of the per-child concurrency gate, blocking
+// until a slot is free or ctx is cancelled. It returns a release func to return the
+// slot (idempotent-safe to call once), or nil if ctx was cancelled while waiting — the
+// caller then aborts the call without spawning a child. A nil gate (no bound) returns
+// an inert release immediately, though NewTaskTool always sizes one so every Task child
+// is bounded.
+func (t *TaskTool) acquireChildSlot(ctx context.Context) func() {
+	if t.childGate == nil {
 		return func() {}
 	}
 	select {
-	case t.shellGate <- struct{}{}:
+	case t.childGate <- struct{}{}:
 		var once sync.Once
-		return func() { once.Do(func() { <-t.shellGate }) }
+		return func() { once.Do(func() { <-t.childGate }) }
 	case <-ctx.Done():
 		return nil
 	}

@@ -27,6 +27,16 @@ func (u Usage) CacheHitRate() float64 {
 	return float64(u.CacheReadTokens) / float64(u.InputTokens)
 }
 
+// TotalTokens returns the spend proxy used by the loop-level token budget
+// (Deps.MaxRunTokens / StopBudget): InputTokens + OutputTokens. Cache tokens are
+// DELIBERATELY excluded — CacheReadTokens is a subset of InputTokens (double
+// counting it would inflate the total) and CacheWriteTokens is a write-through
+// side cost, not the model-call spend the budget bounds. The budget is a coarse
+// runaway brake, so input+output is the right, simple proxy.
+func (u Usage) TotalTokens() int {
+	return u.InputTokens + u.OutputTokens
+}
+
 // Add returns a new Usage that is the element-wise sum of u and other. Usage is
 // immutable, so accumulation is expressed by replacement, not mutation.
 func (u Usage) Add(other Usage) Usage {
