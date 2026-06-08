@@ -46,7 +46,12 @@ Example:
 Limits:
 - Output is truncated to ~25000 bytes; redirect to a file and Read it in pages
   if you need more.
-- Whether a given command is permitted is decided by the harness, not this tool.`
+- Whether a given command is permitted is decided by the harness, not this tool.
+- Command/process substitution or subshell grouping ($(...), backticks, <(...),
+  (...)) may require approval and, in a non-interactive subagent shell, may be
+  denied unless every part is read-only or a worktree-safe go test/build/vet/list.
+  Prefer a direct command for inspection (run the inner command first, then use its
+  output) when a substitution is not essential.`
 
 // BashTool runs a shell command via an injected tool.CommandRunner. It is
 // statically classified as non-read-only: deciding whether a specific command is

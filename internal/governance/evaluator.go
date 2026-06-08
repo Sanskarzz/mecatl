@@ -37,15 +37,40 @@ var mutatingTools = map[string]bool{
 //     client) — the harness never silently allows an unconfigured call.
 type Evaluator struct {
 	rules []Rule
+	// looseSubstitution, when true, DISABLES the built-in substitution Ask floor in
+	// resolveBash: a substitution/subshell segment that is NOT SubstitutionReadOnly is
+	// resolved by resolveSimple's own decision (so a higher-scope allow-all loosens it)
+	// instead of being floored at Ask. It is the substitution analogue of the
+	// mutate-ask floor loosening the --yolo allow-all already grants. Deny-dominance is
+	// unaffected: a configured Deny (or Ask) on any segment still wins through the fold,
+	// because the floor was only ever an ADDITIONAL escalation. DEFAULT false (the floor
+	// stands). Set via WithLooseSubstitution in composition (Config.AllowAllTools).
+	looseSubstitution bool
+}
+
+// EvaluatorOption configures an Evaluator at construction.
+type EvaluatorOption func(*Evaluator)
+
+// WithLooseSubstitution loosens the built-in substitution Ask floor (the --yolo
+// posture): a substitution segment that is not classifiable as read-only is resolved
+// by the ordinary rule fold (so an allow-all rule allows it) rather than floored at
+// Ask. A configured Deny/Ask in any scope still wins. DEFAULT (no option) keeps the
+// floor — the substitution still prompts.
+func WithLooseSubstitution(loose bool) EvaluatorOption {
+	return func(e *Evaluator) { e.looseSubstitution = loose }
 }
 
 // NewEvaluator constructs an Evaluator over the given merged rules. The rules may
 // come from any mix of Scopes; precedence is resolved at evaluation time. The
 // slice is copied so later mutation by the caller cannot affect the policy.
-func NewEvaluator(rules []Rule) *Evaluator {
+func NewEvaluator(rules []Rule, opts ...EvaluatorOption) *Evaluator {
 	cp := make([]Rule, len(rules))
 	copy(cp, rules)
-	return &Evaluator{rules: cp}
+	e := &Evaluator{rules: cp}
+	for _, o := range opts {
+		o(e)
+	}
+	return e
 }
 
 // Evaluate resolves the decision for a tool call. tool is the tool name, args is
@@ -199,14 +224,26 @@ func (e *Evaluator) resolveBash(rules []Rule, args json.RawMessage) PermissionDe
 		var d PermissionDecision
 		if HasSubstitutionOrGrouping(sub) {
 			// Command/process substitution or subshell grouping can smuggle an
-			// arbitrary inner command past the operator splitter. We cannot
-			// soundly extract the inner program, so fail safe: evaluate the
-			// segment AND floor the result at Ask so an allow rule for the outer
-			// literal can never silently approve a hidden destructive command.
+			// arbitrary inner command past the operator splitter. Three cases, in
+			// order:
+			//   (A1) the substitution is fully READ-ONLY (every extracted inner is
+			//        read-only AND the blanked outer is read-only) — do NOT floor:
+			//        let resolveSimple's decision stand, so `cat $(ls)` resolves as
+			//        the read-only Bash it is (Allow under allow-all / the read floor).
+			//   (yolo) looseSubstitution disables the floor entirely — resolveSimple's
+			//        decision stands so an allow-all rule loosens it.
+			//   (default) we cannot soundly extract the inner program, so fail safe:
+			//        evaluate the segment AND floor the result at Ask so an allow rule
+			//        for the outer literal can never silently approve a hidden command.
 			seg := e.resolveSimple(rules, "Bash", Canonicalize(sub))
-			if effectRank(seg.Effect) >= effectRank(Ask) {
+			switch {
+			case SubstitutionReadOnly(sub):
+				d = seg // read-only substitution: no floor, the ordinary decision stands.
+			case e.looseSubstitution:
+				d = seg // yolo: the floor is loosened, the ordinary decision stands.
+			case effectRank(seg.Effect) >= effectRank(Ask):
 				d = seg // already Ask or Deny: keep its (more specific) reason
-			} else {
+			default:
 				d = PermissionDecision{
 					Effect: Ask,
 					Reason: "Bash command contains command/process substitution or subshell grouping that may hide an inner command; client approval required",

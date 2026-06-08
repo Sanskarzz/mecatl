@@ -237,7 +237,17 @@ func (*TeamTool) ReadOnly() bool { return false }
 // member activity is not forwarded, only the lead's consolidated report is returned. Existing
 // non-observing callers are unaffected by the observability seam.
 func (t *TeamTool) Execute(ctx context.Context, call session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
-	return t.run(ctx, call, ws, nil)
+	return t.run(ctx, call, ws, nil, parentCaps{})
+}
+
+// ExecuteWithParent is the childCapableTool seam: it runs the team like ExecuteObserved
+// but threads the PARENT's capabilities (interactivity + surface back-channel) into the
+// supervisor, so a member's permission ask that A2 (isolation auto-approve) did not
+// resolve is SURFACED to the human (interactive parent) or auto-denied with the accurate
+// message + operator diagnostic (headless). The in-loop Team tool's goal stays trusted;
+// only the ask resolution posture changes.
+func (t *TeamTool) ExecuteWithParent(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error) {
+	return t.run(ctx, call, ws, emit, caps)
 }
 
 // ExecuteObserved runs a team like Execute but, when emit is non-nil, forwards a
@@ -247,7 +257,7 @@ func (t *TeamTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 // (only the lead's synthesis ToolResult does). It is the observableTool seam the
 // dispatcher calls.
 func (t *TeamTool) ExecuteObserved(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
-	return t.run(ctx, call, ws, emit)
+	return t.run(ctx, call, ws, emit, parentCaps{})
 }
 
 // run is the shared implementation behind Execute (emit == nil) and
@@ -256,7 +266,7 @@ func (t *TeamTool) ExecuteObserved(ctx context.Context, call session.ToolCall, w
 // projection of member activity, and returns the lead's consolidated synthesis
 // (or the labelled fallback) as the single ToolResult that folds back into the
 // parent conversation.
-func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
+func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error) {
 	var args teamArgs
 	if msg, ok := session.ParseArgs(call, &args); !ok {
 		return session.NewToolError(call.ID, "Team: "+msg), nil
@@ -294,6 +304,11 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	if t.store != nil {
 		opts = append(opts, WithMemberStore(t.store))
 	}
+	// Thread the parent's caps so an unresolved member permission ask is surfaced to the
+	// human (interactive parent) or auto-denied with the accurate message (headless). The
+	// member askIDs are child-namespaced (team-<teamID>-<member>), so the parent router
+	// routes a verdict back without a wire change.
+	opts = append(opts, withParentCaps(caps))
 	sup := NewSupervisor(tm, ws, factory, opts...)
 
 	roster := teamRoster(args.Members)
@@ -531,14 +546,21 @@ func projectTeamEvent(parentCallID, teamID string, te TeamEvent) (session.Event,
 }
 
 // clampPreview normalises a forwarded text/preview (a member tool-call/result
-// Detail, a member's message Text, or a task Description) into a single bounded
-// line: it collapses newlines/tabs to spaces (so a multi-line body cannot break the
-// one-line stream rendering) and clamps to maxTeamPreview runes, appending an
-// ellipsis on overflow. It is rune-aware, so it never splits a multi-byte
-// character. This is the cap that keeps the fuller member content BOUNDED.
+// Detail, a member's message Text, a task Description, or a SURFACED subagent command)
+// into a single bounded, control-byte-free line: it replaces every C0/C1 control
+// character (incl. newlines, tabs, ESC/0x1b and the rest of 0x00–0x1f / 0x7f–0x9f) with
+// a space and clamps to maxTeamPreview runes, appending an ellipsis on overflow. The
+// control-byte scrub is a security boundary (CWE-117/150): a surfaced command or member
+// preview can carry PEER-CONTROLLED text, and a non-mecatui gRPC client rendering it
+// verbatim must not be exposed to ANSI/escape-sequence injection. It is rune-aware, so
+// it never splits a multi-byte character. This is the cap+sanitiser that keeps the
+// fuller member content BOUNDED and inert.
 func clampPreview(s string) string {
 	s = strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r == '\t' {
+		// Drop the Unicode replacement char's source aside, neutralise every C0 (0x00–
+		// 0x1f, includes \n \r \t and ESC 0x1b) and C1/DEL (0x7f–0x9f) control byte to a
+		// space so no escape/ANSI sequence rides a verbatim render.
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
 			return ' '
 		}
 		return r

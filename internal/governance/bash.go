@@ -143,6 +143,597 @@ func hasSubstitutionTrigger(c, next rune) bool {
 	return false
 }
 
+// substitutionPlaceholder is the inert token outerWithSubstitutionsBlanked
+// substitutes for each extracted substitution/grouping span. It is a bare path-shaped
+// argument (no leading verb, no redirection char, no shell operator), so the blanked
+// outer command reads to simpleReadOnly exactly as if the substitution had produced a
+// single literal filename — never a verb, never a write indicator. It deliberately
+// contains no characters HasSubstitutionOrGrouping would re-flag.
+const substitutionPlaceholder = "MECATL_SUBST"
+
+// extractSubstitutions returns the inner command text of EVERY command/process
+// substitution or subshell/group-command grouping in a single Bash segment, scanned
+// quote-aware and RECURSIVELY (a nested `$( … $(…) … )` contributes both the inner
+// and the outer inner-text). It is the read-only-aware companion to
+// HasSubstitutionOrGrouping: where that only reports presence, this extracts the
+// inner programs so SubstitutionReadOnly / IsolationApprovable can classify them.
+//
+// ok=false (fail-safe, empty inner) on ANY ambiguity: an unbalanced opener, an
+// unterminated backtick, a "${…}" parameter expansion (NOT a command — but it can
+// embed `${x:-$(cmd)}`, which we cannot soundly decompose), or input the scanner
+// cannot resolve. A caller MUST treat ok=false as "not classifiable" and fail safe
+// (escalate to Ask / refuse auto-approval). A segment with NO substitution at all
+// returns (nil, true): there is nothing to extract and nothing ambiguous.
+//
+// The recognised openers mirror HasSubstitutionOrGrouping: "$(" and backticks
+// (command substitution), "<(" / ">(" (process substitution), and a bare unquoted
+// "(" (subshell) — each closed by its matching ")" (or the matching backtick). A
+// bare unquoted "{" (group command) makes extraction ambiguous (its body is the rest
+// of the segment up to a "}" that may not exist and is whitespace-significant), so it
+// returns ok=false — the conservative choice, exactly as HasSubstitutionOrGrouping
+// treats "{" as fail-safe grouping.
+func extractSubstitutions(seg string) (inner []string, ok bool) {
+	runes := []rune(seg)
+	var out []string
+	var ok2 bool
+	out, ok2 = extractFrom(runes, 0, len(runes), 0)
+	return out, ok2
+}
+
+// maxSubstitutionDepth bounds the recursion in extractFrom so a pathological deeply
+// nested input cannot exhaust the stack. Beyond it, extraction fails safe (ok=false).
+const maxSubstitutionDepth = 32
+
+// span describes one substitution/grouping opener found by walkSubstitutions: the inner
+// body bounds [bodyStart, bodyEnd) and the index of the matching close rune.
+type span struct {
+	bodyStart, bodyEnd int
+	closeIdx           int
+}
+
+// nextSpanOpener reports whether runes[i] (with following rune next) opens a
+// substitution/grouping span OUTSIDE quotes, given the current double-quote state, and
+// returns the index just past the opener (the body start). It mirrors
+// hasSubstitutionTrigger plus the bare "(" subshell. A bare "{" is signalled via
+// isBrace so the caller fails safe. The "${" form is signalled via isParamExpansion.
+func nextSpanOpener(c, next rune, inDouble bool) (bodyStart int, kind byte, ok bool) {
+	switch {
+	case c == '$' && next == '{':
+		return 0, 'P', true // ${…} parameter expansion: ambiguous, fail safe.
+	case c == '$' && next == '(':
+		return 2, '(', true
+	case (c == '<' || c == '>') && next == '(' && !inDouble:
+		return 2, '(', true
+	case c == '`':
+		return 1, '`', true
+	case c == '(' && !inDouble:
+		return 1, '(', true
+	case c == '{' && !inDouble:
+		return 0, 'B', true // bare group command: ambiguous, fail safe.
+	}
+	return 0, 0, false
+}
+
+// walkSubstitutions scans runes[start:end] quote-aware, invoking onSpan for each
+// top-level substitution/grouping span (with the index just past it so the caller can
+// advance) and onRune for each literal rune outside a span. It returns ok=false on any
+// ambiguity (unterminated quote, "${" expansion, bare "{" group, or an unclosed
+// opener). It is the single quote/opener scanner shared by extractFrom and blankFrom, so
+// their classification of what is a span cannot drift. The callbacks may return false to
+// abort (propagated as ok=false).
+func walkSubstitutions(runes []rune, start, end int, onSpan func(s span) bool, onRune func(c rune)) bool {
+	var inSingle, inDouble bool
+	for i := start; i < end; i++ {
+		c := runes[i]
+		next := rune(0)
+		if i+1 < end {
+			next = runes[i+1]
+		}
+		switch {
+		case inSingle:
+			onRune(c)
+			if c == '\'' {
+				inSingle = false
+			}
+			continue
+		case c == '\'' && !inDouble:
+			inSingle = true
+			onRune(c)
+			continue
+		case c == '"':
+			inDouble = !inDouble
+			onRune(c)
+			continue
+		}
+		bodyOff, kind, isOpener := nextSpanOpener(c, next, inDouble)
+		if !isOpener {
+			onRune(c)
+			continue
+		}
+		if kind == 'P' || kind == 'B' {
+			return false // ${…} expansion or bare "{" group: cannot soundly decompose.
+		}
+		var s span
+		var okSpan bool
+		if kind == '`' {
+			var b [2]int
+			b, s.closeIdx, okSpan = spanBacktick(runes, i+bodyOff, end)
+			s.bodyStart, s.bodyEnd = b[0], b[1]
+		} else {
+			var b [2]int
+			b, s.closeIdx, okSpan = spanParen(runes, i+bodyOff, end)
+			s.bodyStart, s.bodyEnd = b[0], b[1]
+		}
+		if !okSpan || !onSpan(s) {
+			return false
+		}
+		i = s.closeIdx
+	}
+	return !inSingle && !inDouble
+}
+
+// extractFrom scans runes[start:end] for substitution/grouping spans, appending each
+// span's inner text and recursing into it. It returns the accumulated inner commands
+// and ok=false on any ambiguity (unbalanced opener/backtick, a "{" group, "${"
+// parameter expansion, or excessive depth).
+func extractFrom(runes []rune, start, end, depth int) ([]string, bool) {
+	if depth > maxSubstitutionDepth {
+		return nil, false
+	}
+	var out []string
+	ok := walkSubstitutions(runes, start, end,
+		func(s span) bool {
+			rec, okRec := extractFrom(runes, s.bodyStart, s.bodyEnd, depth+1)
+			if !okRec {
+				return false
+			}
+			out = append(out, string(runes[s.bodyStart:s.bodyEnd]))
+			out = append(out, rec...)
+			return true
+		},
+		func(rune) {}, // literal runes do not contribute inner commands.
+	)
+	if !ok {
+		return nil, false
+	}
+	return out, true
+}
+
+// spanParen finds the matching ")" for an opener whose body starts at index `from`,
+// honouring nested parens and quotes. It returns the inner [start,end) bounds (the
+// text between the opener and its matching close), the index of the close paren, and
+// ok=false if the paren is never closed. Nested "(" inside increases the depth so a
+// `$( ( ) )` closes correctly.
+func spanParen(runes []rune, from, end int) (bounds [2]int, closeIdx int, ok bool) {
+	depth := 1
+	var inSingle, inDouble bool
+	for i := from; i < end; i++ {
+		c := runes[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if c == '"' {
+				inDouble = false
+			}
+		case c == '\'':
+			inSingle = true
+		case c == '"':
+			inDouble = true
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				return [2]int{from, i}, i, true
+			}
+		}
+	}
+	return [2]int{}, 0, false
+}
+
+// spanBacktick finds the matching closing backtick for an opener whose body starts at
+// index `from`. Backticks do not nest, so the first unescaped backtick closes it. It
+// returns the inner bounds, the index of the close backtick, and ok=false if it is
+// never closed.
+func spanBacktick(runes []rune, from, end int) (bounds [2]int, closeIdx int, ok bool) {
+	for i := from; i < end; i++ {
+		if runes[i] == '\\' { // skip an escaped char inside the backtick body
+			i++
+			continue
+		}
+		if runes[i] == '`' {
+			return [2]int{from, i}, i, true
+		}
+	}
+	return [2]int{}, 0, false
+}
+
+// outerWithSubstitutionsBlanked replaces every substitution/grouping span in seg with
+// the inert substitutionPlaceholder token, so simpleReadOnly can classify the OUTER
+// command's verb/redirection without HasSubstitutionOrGrouping short-circuiting it to
+// false. It returns ok=false on the same ambiguity extractSubstitutions rejects (so a
+// caller never classifies an outer it could not soundly blank). The placeholder is a
+// path-shaped argument, so e.g. `cat $(ls)` blanks to `cat MECATL_SUBST` (read-only
+// verb + one arg) while `$(rm x) foo` blanks to `MECATL_SUBST foo` (placeholder as the
+// verb → unknown → not read-only, the fail-safe outcome for a substitution-as-verb).
+func outerWithSubstitutionsBlanked(seg string) (string, bool) {
+	runes := []rune(seg)
+	var b strings.Builder
+	ok := walkSubstitutions(runes, 0, len(runes),
+		func(span) bool {
+			// Replace the whole span (NOT recursing into its body) with the inert
+			// placeholder, so simpleReadOnly classifies the outer command.
+			b.WriteString(substitutionPlaceholder)
+			return true
+		},
+		func(c rune) { b.WriteRune(c) },
+	)
+	if !ok {
+		return "", false
+	}
+	return b.String(), true
+}
+
+// shellControlKeywords are the Bash compound-command / control-flow keywords that
+// PREFIX a real command inside a loop/conditional segment (after SplitCommands breaks
+// on `;`/newlines). They are not programs; stripping them exposes the actual command
+// to classify. `in` and the loop variable in `for VAR in LIST` are handled by
+// stripShellKeywords specially (the LIST is the substitution we already classified).
+var shellControlKeywords = map[string]bool{
+	"do": true, "then": true, "else": true, "elif": true,
+	"while": true, "until": true, "if": true,
+}
+
+// stripShellKeywords removes leading shell control-flow scaffolding from a blanked
+// segment so the residual real command (if any) can be classified. It handles:
+//   - a leading `do`/`then`/`else`/`elif`/`while`/`until`/`if` keyword (and repeats);
+//   - a `for VAR in LIST` / `select VAR in LIST` header, whose LIST is the iteration
+//     source (already validated as a read-only inner when it was a substitution) — the
+//     header itself runs no command, so it strips to empty;
+//   - trailing structural tokens `done`/`fi`/`;;`.
+//
+// It returns the residual command string ("" when the segment is pure scaffolding,
+// which the caller treats as read-only — it runs no program). It is purely
+// lexical/conservative: an unrecognised head is returned unchanged.
+func stripShellKeywords(seg string) string {
+	fields := strings.Fields(seg)
+	for len(fields) > 0 {
+		head := fields[0]
+		switch {
+		case head == "done" || head == "fi" || head == "esac" || head == ";;":
+			fields = fields[1:]
+		case head == "for" || head == "select":
+			// `for VAR in LIST` (LIST already validated). Everything up to and including
+			// the closing structural token is scaffolding; the body is a SEPARATE segment
+			// (SplitCommands broke on the `;` before `do`). So the whole `for … in …`
+			// header runs no command → strip to empty.
+			return ""
+		case shellControlKeywords[head]:
+			fields = fields[1:]
+		default:
+			return strings.Join(fields, " ")
+		}
+	}
+	return ""
+}
+
+// isPureSubshell reports whether a segment is exactly a bare `(...)` subshell wrapping
+// a body (optionally with surrounding whitespace), e.g. `(git status)`. A bare subshell
+// just GROUPS and runs its body directly, so its blanked-to-a-lone-placeholder outer is
+// safe (the body was validated as the inner). This is DISTINCT from command
+// substitution `$(...)`/backticks in command position (e.g. `$(echo ls)`), which
+// executes the substitution's OUTPUT as a command — a code-execution vector that must
+// NEVER be treated as pure grouping.
+func isPureSubshell(seg string) bool {
+	t := strings.TrimSpace(seg)
+	runes := []rune(t)
+	if len(runes) < 2 || runes[0] != '(' {
+		return false
+	}
+	_, closeIdx, ok := spanParen(runes, 1, len(runes))
+	if !ok {
+		return false
+	}
+	// The matching ")" must be the LAST non-space rune (nothing trails the subshell).
+	return closeIdx == len(runes)-1
+}
+
+// outerReadOnlyAfterBlanking reports whether the blanked OUTER of a substitution
+// segment is read-only. The seg argument is the ORIGINAL (un-blanked) segment, needed
+// to tell a safe bare subshell from an unsafe command-substitution-as-verb. A blanked
+// outer that is exactly the placeholder is pure grouping ONLY when the original was a
+// bare `(...)` subshell — the inner was already validated, so the outer is vacuously
+// read-only. A lone-placeholder outer from `$(...)`/backticks (command substitution in
+// command position) is the fail-safe case (false): its OUTPUT would be executed.
+// Otherwise control-flow scaffolding is stripped and the residual (if any) is classified
+// by simpleReadOnly.
+func outerReadOnlyAfterBlanking(seg, blanked string) bool {
+	trimmed := strings.TrimSpace(blanked)
+	if trimmed == substitutionPlaceholder {
+		return isPureSubshell(seg) // safe only for a bare subshell, not command substitution.
+	}
+	residual := stripShellKeywords(blanked)
+	if strings.TrimSpace(residual) == "" {
+		return true // pure scaffolding (e.g. a `for … in …` header) runs no command.
+	}
+	if strings.TrimSpace(residual) == substitutionPlaceholder {
+		// A residual that is a lone placeholder after stripping scaffolding (e.g. a
+		// `for x in MECATL_SUBST` list source) is the iteration source, not a command in
+		// command position — read-only.
+		return true
+	}
+	return simpleReadOnly(residual)
+}
+
+// SubstitutionReadOnly reports whether a single Bash SEGMENT that contains command/
+// process substitution or subshell grouping is nonetheless safe to treat as read-only:
+// every extracted inner command is ReadOnlyBash-true AND the outer command (with each
+// substitution blanked to an inert placeholder) is simpleReadOnly-true. It is the
+// SEPARATE read-only-aware classifier (A1) the evaluator consults to AVOID flooring a
+// fully-read-only substitution (e.g. `cat $(ls)`, `echo $(git rev-parse HEAD)`) at Ask.
+//
+// It fails safe (false) on: a segment with NO substitution (use simpleReadOnly
+// directly — there is nothing for this classifier to do), any extraction ambiguity
+// (extractSubstitutions ok=false / the blank ok=false), any inner command that is not
+// read-only, or an outer that is not read-only once blanked. It NEVER widens
+// ReadOnlyBash/simpleReadOnly/plan-mode — those stay byte-for-byte unchanged; this is
+// an ADDITIONAL allow path, consulted only where the substitution floor would otherwise
+// apply.
+func SubstitutionReadOnly(seg string) bool {
+	if !HasSubstitutionOrGrouping(seg) {
+		// No substitution: this classifier does not apply. The caller's ordinary
+		// simpleReadOnly path already handles a plain segment; returning false here keeps
+		// the responsibilities crisp (and a non-substituted segment is never floored).
+		return false
+	}
+	inner, ok := extractSubstitutions(seg)
+	if !ok {
+		return false
+	}
+	for _, in := range inner {
+		// An inner may itself be a substitution-bearing read-only command (a nested
+		// `cat $(ls)`), so accept either plain read-only OR a read-only substitution.
+		if !ReadOnlyBash(in) && !SubstitutionReadOnly(in) {
+			return false
+		}
+	}
+	blanked, ok := outerWithSubstitutionsBlanked(seg)
+	if !ok {
+		return false
+	}
+	return outerReadOnlyAfterBlanking(seg, blanked)
+}
+
+// worktreeEscapeVerbs are git invocations a SANDBOXED subagent must NEVER auto-run even
+// in an isolated worktree, because they reach OUTSIDE the throwaway checkout: `git push`
+// publishes to a remote, `git config` writes shared `.git/config` (a code-execution
+// vector — alias/pager/sshCommand), `git remote` rewrites remote config, `git worktree`/
+// `git submodule` add or rewrite checkouts/submodules outside the throwaway tree. They
+// are hard-rejected by IsolationApprovable regardless of read-only-ness. The keys are the
+// resolved git SUBCOMMAND (after gitSubcommand skips any leading global flags).
+var worktreeEscapeGitSubcommands = map[string]bool{
+	"push":      true,
+	"config":    true,
+	"remote":    true,
+	"fetch":     true,
+	"pull":      true,
+	"clone":     true,
+	"worktree":  true,
+	"submodule": true,
+}
+
+// gitGlobalValueFlags are git GLOBAL flags (before the subcommand) that consume a
+// SEPARATE following value (the space form, e.g. `git -C <path>` / `git -c <kv>`). The
+// `=` form (`--git-dir=<path>`) carries its own value in the same token. gitSubcommand
+// skips these to find the real subcommand, so `git -C /x push` does not slip past the
+// escape-verb check by shifting `push` out of fields[1].
+var gitGlobalValueFlags = map[string]bool{
+	"-C": true, "-c": true,
+	"--git-dir": true, "--work-tree": true, "--namespace": true,
+	"--exec-path": true, "--config-env": true,
+}
+
+// gitPathBearingGlobalFlags are git GLOBAL flags that POINT git at a different repo,
+// working tree, or directory — i.e. OUTSIDE the throwaway worktree. Their presence makes
+// a command NOT isolation-approvable regardless of the subcommand: `git -C /outside log`,
+// `git --git-dir=/x status` and `git --work-tree=/y status` all operate outside the
+// sandbox. Matched on the bare flag name (the `=` form is split off before lookup).
+var gitPathBearingGlobalFlags = map[string]bool{
+	"-C": true, "--git-dir": true, "--work-tree": true,
+}
+
+// gitSubcommand resolves the real git SUBCOMMAND from a `git …` field slice (fields[0]
+// == "git"), skipping any leading GLOBAL flags. It returns the subcommand, whether a
+// PATH-bearing global flag (`-C`/`--git-dir`/`--work-tree`) was seen (which escapes the
+// worktree → caller must reject), and ok=false when no subcommand could be resolved
+// (a bare `git` or a dangling value flag — fail safe). Both the `--flag=value` and the
+// `--flag value` forms are handled.
+func gitSubcommand(fields []string) (sub string, escapesPath bool, ok bool) {
+	i := 1 // fields[0] == "git"
+	for i < len(fields) {
+		f := fields[i]
+		if !strings.HasPrefix(f, "-") {
+			return f, escapesPath, true // first non-flag token is the subcommand
+		}
+		name := f
+		if eq := strings.IndexByte(f, '='); eq >= 0 {
+			name = f[:eq] // `--git-dir=/x` → `--git-dir`
+		}
+		if gitPathBearingGlobalFlags[name] {
+			escapesPath = true
+		}
+		// A space-form value flag (`-C <path>`, `-c <kv>`) consumes the next token too,
+		// UNLESS it already carried an `=` value in this token.
+		i++
+		if gitGlobalValueFlags[name] && !strings.Contains(f, "=") {
+			i++
+		}
+	}
+	return "", escapesPath, false // bare `git` or dangling value flag: fail safe.
+}
+
+// goWorktreeEscapeFlags are `go` build/test flags that escape the worktree sandbox —
+// either by running an ARBITRARY EXTERNAL program rather than the repo's own (trusted)
+// code, or by WRITING to an arbitrary (possibly absolute / `../`-escaping) path:
+//   - `-exec` (run the test/built binary via a named program),
+//   - `-toolexec` (run a program for every tool invocation),
+//   - `-overlay` (substitute arbitrary files into the build via a JSON map),
+//   - `-o` (write the compiled binary to a named path — e.g. `go build -o /etc/cron.d/x`,
+//     which drops an executable OUTSIDE the throwaway worktree → persistence/code-exec).
+//
+// The worktree isolates the FILESYSTEM checkout, NOT the process and NOT an `-o`
+// destination — so these escape isolation and must NOT auto-approve (they SURFACE to the
+// human instead). Matched on the bare flag name (the `=` form is split off before lookup),
+// so both `-exec /x`, `-exec=/x`, `--exec /x`, `--exec=/x`, `-o /x` and `-o=/x` are caught.
+var goWorktreeEscapeFlags = map[string]bool{
+	"-exec": true, "--exec": true,
+	"-toolexec": true, "--toolexec": true,
+	"-overlay": true, "--overlay": true,
+	"-o": true, "--o": true,
+}
+
+// goArgsEscapeWorktree reports whether any arg in a `go {test,build,…}` invocation is one
+// of goWorktreeEscapeFlags — meaning the command would run an arbitrary external program
+// or write to an arbitrary path, neither of which the worktree's filesystem isolation
+// contains. It normalises a flag's `=value` form to the bare flag name before lookup.
+func goArgsEscapeWorktree(args []string) bool {
+	for _, a := range args {
+		name := a
+		if eq := strings.IndexByte(a, '='); eq >= 0 {
+			name = a[:eq]
+		}
+		if goWorktreeEscapeFlags[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// worktreeSafeGoSubcommands is the MINIMAL audited set of `go` subcommands an isolated
+// subagent may auto-run beyond the read-only set: build/test/vet/list inspect or
+// compile within the worktree and do not escape it. `go run` (executes arbitrary code),
+// `go get`/`go mod`/`go install` (mutate modules / the module cache / GOBIN) are
+// deliberately EXCLUDED — anything not here SURFACES to the human rather than
+// auto-approving, so the set stays conservative.
+var worktreeSafeGoSubcommands = map[string]bool{
+	"test":  true,
+	"build": true,
+	"vet":   true,
+	"list":  true,
+}
+
+// segmentIsolationApprovable classifies a SINGLE simple command (no shell operators,
+// no substitution — the caller decomposes those) for isolated-subagent auto-approval:
+// it is read-only (simpleReadOnly) OR a worktree-safe `go {test,build,vet,list}`, AND
+// it is NOT a worktree-escape verb. It mirrors simpleReadOnly's wrapper/redirection
+// discipline for the go-verb case so `go test > out` is rejected (the redirection
+// makes it a write).
+// segmentIsolationApprovable classifies a single command for isolated-subagent
+// auto-approval. classifyText is the text to classify (the segment itself, or its
+// substitution-blanked outer); orig is the ORIGINAL segment, used only to tell a safe
+// bare `(...)` subshell from an unsafe command-substitution-as-verb when classifyText
+// blanks to a lone placeholder.
+func segmentIsolationApprovable(orig, classifyText string) bool {
+	// Strip leading control-flow scaffolding (`do`, `for … in …`, etc.) so the real
+	// command is classified. Pure scaffolding (empty residual) runs no program and is
+	// trivially approvable.
+	residual := stripShellKeywords(classifyText)
+	if strings.TrimSpace(residual) == "" {
+		return true
+	}
+	if strings.TrimSpace(residual) == substitutionPlaceholder {
+		// A lone placeholder is pure grouping ONLY for a bare subshell; a command
+		// substitution in command position executes its output → fail safe.
+		return isPureSubshell(orig)
+	}
+	canon := Canonicalize(residual)
+	fields := strings.Fields(canon)
+	if len(fields) == 0 {
+		return false
+	}
+	// git: resolve the REAL subcommand past any leading global flags (`git -C <path>`,
+	// `git --git-dir=<x>`, `git -c <kv>` shift the subcommand right), then reject a
+	// worktree-escape subcommand OR any path-bearing global flag that points git OUTSIDE
+	// the throwaway worktree. This runs BEFORE the simpleReadOnly shortcut below, because
+	// simpleReadOnly reads fields[1] as the subcommand and would otherwise green-light
+	// `git -C /outside log` as a read-only `git -C`.
+	if fields[0] == "git" {
+		sub, escapesPath, ok := gitSubcommand(fields)
+		if !ok || escapesPath || worktreeEscapeGitSubcommands[sub] {
+			return false
+		}
+	}
+	// A read-only residual is always isolation-approvable (read-only git subcommands,
+	// ls/cat/grep/…). git with global flags has already passed the escape check above.
+	if simpleReadOnly(residual) {
+		return true
+	}
+	// The MINIMAL worktree-safe extension: `go {test,build,vet,list}` with no output
+	// redirection (a redirection would write outside the verb's normal scope).
+	if strings.ContainsAny(canon, ">") {
+		return false
+	}
+	if fields[0] == "go" && len(fields) >= 2 && worktreeSafeGoSubcommands[fields[1]] {
+		// Reject the worktree-escape flags (-exec/-toolexec/-overlay run an external
+		// program; -o writes the binary to an arbitrary path): the worktree isolates the
+		// FILESYSTEM checkout, not the PROCESS and not an -o destination, so these escape
+		// isolation. Plain `go test`/`go build` runs the repo's own trusted code, which is
+		// the accepted worktree-safe case.
+		if goArgsEscapeWorktree(fields[2:]) {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// IsolationApprovable reports whether a (possibly compound) Bash command line is safe
+// to AUTO-APPROVE for an ISOLATED (forked-worktree / force-copy) subagent that would
+// otherwise hit the permission Ask floor (A2). It is a strict superset of
+// SubstitutionReadOnly: every command — each SplitCommands segment AND every
+// recursively-extracted substitution inner — must be read-only OR a worktree-safe
+// `go {test,build,vet,list}`, none may be a worktree-escape verb (git push/config/
+// remote/fetch/pull/clone), and substitution extraction must succeed. It fails safe
+// (false) on any extraction ambiguity, any unrecognised/destructive command, or any
+// escape verb — so a borderline command SURFACES to the human rather than auto-running
+// in the sandbox. It NEVER mutates the read-only/plan-mode classifiers.
+func IsolationApprovable(cmd string) bool {
+	segs := SplitCommands(cmd)
+	if len(segs) == 0 {
+		return false
+	}
+	for _, seg := range segs {
+		if HasSubstitutionOrGrouping(seg) {
+			// Every inner command must itself be isolation-approvable, AND the blanked
+			// outer must be too. Recurse via the inner extraction.
+			inner, ok := extractSubstitutions(seg)
+			if !ok {
+				return false
+			}
+			for _, in := range inner {
+				if !IsolationApprovable(in) {
+					return false
+				}
+			}
+			blanked, ok := outerWithSubstitutionsBlanked(seg)
+			if !ok {
+				return false
+			}
+			if !segmentIsolationApprovable(seg, blanked) {
+				return false
+			}
+			continue
+		}
+		if !segmentIsolationApprovable(seg, seg) {
+			return false
+		}
+	}
+	return true
+}
+
 // wrapperFlagsTakeValue records, per stripped wrapper, the long/short flags that
 // consume a following argument (so we skip the value too, not just the flag).
 // Conservative: unknown flags that look like options are skipped as valueless.

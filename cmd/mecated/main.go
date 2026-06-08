@@ -668,9 +668,14 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		TrustProject:                 cfg.trustProject,
 		PermissionConfigs:            cfg.permissionConfigs,
 		AllowAllTools:                cfg.allowAllTools,
-		Sink:                         sink,
-		ToolCallRecorder:             recorder,
-		Diagnostics:                  diag,
+		// mecated serves the bidi Converse + HTTP-SSE surfaces, whose clients CAN answer
+		// a permission ask (ResumeApproval). So a subagent's unresolved Bash ask is
+		// SURFACED to the attached human rather than auto-denied. (A headless embedding —
+		// the offline demo — leaves app.Config.Interactive false and auto-denies.)
+		Interactive:      true,
+		Sink:             sink,
+		ToolCallRecorder: recorder,
+		Diagnostics:      diag,
 	}
 }
 

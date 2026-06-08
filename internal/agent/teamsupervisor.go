@@ -269,6 +269,15 @@ type Supervisor struct {
 	// synthesis phase and persistence find the lead without re-scanning the roster.
 	leadName string
 
+	// caps carries the PARENT run's interactivity + surface back-channel, so a member's
+	// permission ask that A2 (isolation auto-approve) did not resolve is SURFACED to the
+	// human (interactive parent) or auto-denied with the accurate message + operator
+	// diagnostic (headless). Zero value (headless auto-deny) unless WithParentCaps wires
+	// it. A surfaced member ask parks ONLY that member's loop goroutine; peers keep
+	// running (members drain on independent errgroup goroutines), and the late verdict
+	// routes back via the parent router keyed on the member's child-namespaced askID.
+	caps parentCaps
+
 	members map[string]*memberRT
 	order   []string
 }
@@ -277,11 +286,16 @@ type Supervisor struct {
 // plan per round, so exactly one goroutine touches a given memberRT at a time;
 // fields are read by the (single) planning goroutine between rounds.
 type memberRT struct {
-	spec       MemberSpec
-	engine     *Engine
-	ws         tool.Workspace
-	cleanup    func() error
-	sess       *session.Session
+	spec    MemberSpec
+	engine  *Engine
+	ws      tool.Workspace
+	cleanup func() error
+	sess    *session.Session
+	// isolated reports that this member runs in its OWN isolated workspace (a Mutating
+	// force-copy fork or a read-only worktree) — so its Bash asks are eligible for the A2
+	// worktree-safe auto-approve. false for a base-sharing read-only member (which has no
+	// shell anyway). Set in AddMember from needFork.
+	isolated   bool
 	ranInitial bool
 	stopped    bool
 	// nonResumable is true when the member's session can NO LONGER be driven — its
@@ -398,6 +412,16 @@ func WithTeamGoal(goal string) SupervisorOption {
 // known); the supervisor is pure mechanism and only takes the bool.
 func WithUntrustedGoal(untrusted bool) SupervisorOption {
 	return func(s *Supervisor) { s.untrustedGoal = untrusted }
+}
+
+// withParentCaps threads the parent run's capabilities (interactivity + surface
+// back-channel) into the supervisor so an unresolved member permission ask is surfaced
+// to the human (interactive parent) or auto-denied with the accurate message + operator
+// diagnostic (headless). It is an internal seam set by the Team tool's ExecuteWithParent
+// path; the gRPC RunTeam path leaves it zero (headless auto-deny) unless wired. It takes
+// the agent-internal parentCaps, so it is unexported (no adapter type crosses).
+func withParentCaps(caps parentCaps) SupervisorOption {
+	return func(s *Supervisor) { s.caps = caps }
 }
 
 // WithMemberStore injects the optional session store the supervisor uses to persist
@@ -544,7 +568,7 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 	sess := session.New(s.sessionID(spec.Name), mode, ws.Root(), limits, time.Now())
 	_ = s.team.SetMemberSession(spec.Name, sess.ID)
 
-	s.members[spec.Name] = &memberRT{spec: spec, engine: eng, ws: ws, cleanup: cleanup, sess: sess}
+	s.members[spec.Name] = &memberRT{spec: spec, engine: eng, ws: ws, cleanup: cleanup, sess: sess, isolated: needFork}
 	s.order = append(s.order, spec.Name)
 	// Cache the lead's name on first enrolment of a Lead member, so the synthesis
 	// phase finds it without re-scanning. The Team tool synthesises member 0 as the
@@ -898,11 +922,12 @@ func (s *Supervisor) fireTeammateIdle(ctx context.Context, m *memberRT) {
 // auto-deny / event-forward / terminal-text-capture logic lives, shared by runTurn
 // (per round) and synthesise (the lead's one final turn). It does NOT Reopen, persist,
 // or do budget bookkeeping — that stays with the callers.
-func (*Supervisor) driveOneTurn(ctx context.Context, m *memberRT, prompt string, evCh chan<- TeamEvent) (text string, stop session.StopReason) {
+func (s *Supervisor) driveOneTurn(ctx context.Context, m *memberRT, prompt string, evCh chan<- TeamEvent) (text string, stop session.StopReason) {
 	run := m.engine.Run(ctx, m.sess, m.ws, prompt)
+	posture := childPosture{isolated: m.isolated, caps: s.caps, role: m.spec.Name}
 	stop = session.StopNone
 	for ev := range run.Events() {
-		if t, st, ok := handleChildEvent(run, ev); ok {
+		if t, st, ok := handleChildEvent(run, ev, posture); ok {
 			stop = st
 			if t != "" {
 				text = t

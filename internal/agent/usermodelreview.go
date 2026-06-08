@@ -112,7 +112,9 @@ func (r *UserModelReviewer) Review(ctx context.Context, sessionID string) error 
 	// Drain the child entirely (auto-denying any ask — the extraction child is
 	// non-interactive). We discard the summary text; the user-model writes are the
 	// only durable effect.
-	_, _ = drainChild(run)
+	// The extraction child is non-interactive and tool-less for Bash; the zero
+	// childPosture (headless auto-deny) is correct.
+	_, _ = drainChild(run, childPosture{role: "usermodel-review"})
 	return nil
 }
 

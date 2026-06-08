@@ -267,9 +267,20 @@ type Config struct {
 
 	// AllowAllTools, when set, injects a single ScopeCLI allow-all rule into the
 	// MAIN engine's static ruleset alongside defaultRules(). It loosens ONLY the
-	// built-in mutate-ask floor; a Deny in any scope and any CONFIGURED Ask still
-	// win (see docs/design/ALLOW-ALL-POSTURE.md). Children are already allow-all.
+	// built-in mutate-ask floor AND the built-in substitution Ask floor (via
+	// WithLooseSubstitution); a Deny in any scope and any CONFIGURED Ask still win
+	// (see docs/design/ALLOW-ALL-POSTURE.md). Children are already allow-all.
 	AllowAllTools bool
+
+	// Interactive reports whether a HUMAN approver is attached to the main engine's
+	// runs (a live Converse / HTTP-SSE client that can answer a permission ask). It is
+	// threaded onto the MAIN engine's agent.Deps.Interactive (per session, via
+	// engineDepsForProvider) so a SUBAGENT's permission ask that A1/A2 did not
+	// auto-resolve can be SURFACED to the human (interactive) instead of auto-denied
+	// (headless). DEFAULT false (fail-safe): a daemon launched without a known approver
+	// auto-denies subagent asks rather than parking them forever. cmd/mecated sets it
+	// true (the bidi/HTTP surfaces have a client); the offline demo leaves it false.
+	Interactive bool
 
 	// Observability relays, injected by the caller (mecated wires telemetry; the
 	// embedded TUI server leaves both nil). The engine nil-guards each.
@@ -873,9 +884,9 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// holds (the no-config default — built-ins + learned only).
 	var policy *permpolicy.Policy
 	if resolver != nil {
-		policy = permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, resolver)
+		policy = permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, resolver, mainEvaluatorOptions(cfg)...)
 	} else {
-		policy = permpolicy.NewPolicy(mainRules(cfg), learned)
+		policy = permpolicy.NewPolicy(mainRules(cfg), learned, mainEvaluatorOptions(cfg)...)
 	}
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
@@ -1142,6 +1153,10 @@ func engineDepsForProvider(
 		// (childEngineDepsForProvider keeps this field). Zero → NewEngine applies the
 		// safe default of 2; negative disables.
 		MaxNoProgressNudges: cfg.MaxNoProgressNudges,
+		// Interactivity: the MAIN engine surfaces a subagent's unresolved permission ask
+		// to the human when a client is attached. childEngineDepsForProvider forces this
+		// back to false (a child never surfaces further).
+		Interactive: cfg.Interactive,
 	}
 }
 
@@ -2014,6 +2029,12 @@ func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvid
 	// ToolCallRecorder remain silent.
 	deps.Diagnostics = cfg.diag()
 	deps.Role = role
+	// A child engine never surfaces a further-nested subagent ask (subagents cannot
+	// recurse), so it installs no child-ask router: force Interactive false regardless
+	// of the parent's cfg.Interactive. The child's OWN asks resolve via the per-child
+	// posture (isolation auto-approve → surface-via-parent → headless auto-deny), driven
+	// by the PARENT run's caps, not by the child engine's interactivity.
+	deps.Interactive = false
 	return deps
 }
 
@@ -2669,6 +2690,22 @@ func mainRules(cfg Config) []governance.Rule {
 		rules = append([]governance.Rule{{Scope: governance.ScopeCLI, Effect: governance.Allow}}, rules...)
 	}
 	return rules
+}
+
+// mainEvaluatorOptions returns the governance.Evaluator construction options for the
+// MAIN engine's policy. Under --yolo (cfg.AllowAllTools) it loosens the built-in
+// substitution Ask floor (WithLooseSubstitution) — consistent with the mutate-ask floor
+// the ScopeCLI allow-all rule already loosens, so a substitution command no longer
+// prompts under yolo. A configured Deny/Ask in any scope still wins (deny-dominance and
+// the configured-ask floor are unaffected). Without --yolo it returns no options (the
+// floor stands). Child/member policies are built with their own allow-all rules
+// elsewhere; the substitution loosening rides this main-policy seam, and subagents'
+// surface/isolation posture handles their substitutions independently.
+func mainEvaluatorOptions(cfg Config) []governance.EvaluatorOption {
+	if cfg.AllowAllTools {
+		return []governance.EvaluatorOption{governance.WithLooseSubstitution(true)}
+	}
+	return nil
 }
 
 // defaultLimits returns the non-zero stop limits injected for sessions created

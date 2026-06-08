@@ -142,6 +142,18 @@ type Deps struct {
 	// from Config so it is operator-tunable; children inherit the default.
 	MaxNoProgressNudges int
 
+	// Interactive reports whether a HUMAN approver is attached to this engine's runs:
+	// true for the bidi Converse / HTTP-SSE surfaces where a client can answer a
+	// permission ask, false for a headless/in-process run (the demo, a RunTeam with no
+	// attached client). It is composition's knowledge of whether an approval UI exists,
+	// set on the MAIN engine only and read once per run (drive) to (a) install the
+	// child-ask router so a subagent's ask can be SURFACED to the human, and (b) tell a
+	// subagent posture whether to surface (interactive) or auto-deny (headless). It is a
+	// plain bool — NOT a port.LLMRequest field and never reaches the model. Child engines
+	// leave it false (a child never surfaces further). DEFAULT false (fail-safe: a run
+	// with no declared approver auto-denies a subagent ask rather than hanging).
+	Interactive bool
+
 	// ProgressiveTools, when true, enables progressive tool disclosure
 	// (pattern 9): the per-turn request advertises lightweight specs for tools
 	// implementing tool.Disclosable plus a built-in ToolSearch tool the model
@@ -278,6 +290,13 @@ type Run struct {
 	// NopDiagnostics returns NopDiagnostics. It is set before the run goroutine
 	// starts and only read after, so it needs no synchronisation.
 	diag port.Diagnostics
+	// childAsks, when non-nil, routes a foreign (child-namespaced) askID passed to
+	// Approve down to the child Run that owns it (a SURFACED subagent ask). It is set
+	// only on an INTERACTIVE main engine's run (drive); a child run's own ask always
+	// resolves through r.asks. nil on a child run and on a headless run. It is set before
+	// the run goroutine starts and only read after, so it needs no synchronisation; the
+	// router itself is concurrency-safe for the cross-goroutine register/route.
+	childAsks *childAskRouter
 }
 
 // Events returns the channel of domain Events for this run. It is closed when the
@@ -289,7 +308,37 @@ func (r *Run) Events() <-chan session.Event { return r.events }
 // and VerdictAllowAlways permits it AND asks the policy to learn a per-session
 // allow rule for the matching tool+pattern. It is non-blocking and safe to call
 // from another goroutine; an unknown or already-resolved askID is ignored.
-func (r *Run) Approve(askID string, v session.ApprovalVerdict) { r.asks.resolve(askID, v) }
+func (r *Run) Approve(askID string, v session.ApprovalVerdict) {
+	// Router-first: a foreign (child-namespaced) askID belongs to a SURFACED subagent
+	// ask — route the verdict to the owning child Run. Because child askIDs are prefixed
+	// by a distinct child session id, they never collide with this run's own asks, so a
+	// router miss (route==false) safely falls through to our own registry. A nil router
+	// (child run / headless) skips straight to the own-registry path.
+	if r.childAsks != nil && r.childAsks.route(askID, v) {
+		return
+	}
+	r.asks.resolve(askID, v)
+}
+
+// registerChildAsk records a surfaced child ask in this run's router so a later
+// Approve(askID) is routed to the owning child. It is a no-op when this run has no
+// router (a non-interactive or child run never surfaces). The router auto-removes the
+// entry on the routed verdict (childAskRouter.route), so there is no explicit
+// unregister on the resolution path.
+func (r *Run) registerChildAsk(askID string, child *Run) {
+	if r.childAsks != nil {
+		r.childAsks.registerChild(askID, child)
+	}
+}
+
+// autoDenyChildAsk resolves THIS (child) run's own ask askID with a Deny carrying the
+// accurate, model-facing reason (the headless subagent auto-deny message), so the
+// denied tool result the model sees names the real cause rather than "denied by user".
+// It is always a self-resolution (a child run has no childAsks router), so it bypasses
+// the router-first Approve path and writes directly to the ask registry.
+func (r *Run) autoDenyChildAsk(askID, reason string) {
+	r.asks.resolveWith(askID, approval{verdict: session.VerdictDeny, denyReason: reason})
+}
 
 // Cancel aborts the in-flight run by cancelling its context. The loop observes
 // the cancellation (mid-stream, mid-tool, or while awaiting an approval) and
@@ -323,6 +372,13 @@ func (e *Engine) RunContent(ctx context.Context, sess *session.Session, ws tool.
 		// only the "session" key is bound. With on NopDiagnostics returns Nop, so an
 		// engine with no injected sink stays silent.
 		diag: e.bindRunDiag(sess.ID),
+	}
+	// An interactive engine's run installs the child-ask router so a subagent's
+	// surfaced ask can be routed back through this (parent) Run.Approve. A headless or
+	// child engine leaves it nil (no human to surface to; a child never surfaces
+	// further).
+	if e.deps.Interactive {
+		r.childAsks = newChildAskRouter()
 	}
 	go func() {
 		defer close(r.events)

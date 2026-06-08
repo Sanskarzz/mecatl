@@ -74,16 +74,19 @@ type Policy struct {
 // per call by the underlying Evaluator. A nil store disables rule learning: Learn
 // is a no-op and Evaluate consults only the static rules.
 //
-// The resolver (file-based config) is unset; use NewPolicyWithResolver to wire it.
-func NewPolicy(rules []governance.Rule, store port.PermissionStore) *Policy {
-	return &Policy{eval: governance.NewEvaluator(rules), store: store}
+// Optional governance.EvaluatorOptions (e.g. WithLooseSubstitution for the --yolo
+// posture) are forwarded to the underlying Evaluator. The resolver (file-based config)
+// is unset; use NewPolicyWithResolver to wire it.
+func NewPolicy(rules []governance.Rule, store port.PermissionStore, evalOpts ...governance.EvaluatorOption) *Policy {
+	return &Policy{eval: governance.NewEvaluator(rules, evalOpts...), store: store}
 }
 
 // NewPolicyWithResolver is NewPolicy plus a RuleResolver that supplies file-based
 // permission rules re-resolved per session against the session's workspace root
-// (issue #13). A nil resolver behaves exactly like NewPolicy.
-func NewPolicyWithResolver(rules []governance.Rule, store port.PermissionStore, resolver RuleResolver) *Policy {
-	return &Policy{eval: governance.NewEvaluator(rules), store: store, resolver: resolver}
+// (issue #13). A nil resolver behaves exactly like NewPolicy. Optional
+// governance.EvaluatorOptions are forwarded to the underlying Evaluator.
+func NewPolicyWithResolver(rules []governance.Rule, store port.PermissionStore, resolver RuleResolver, evalOpts ...governance.EvaluatorOption) *Policy {
+	return &Policy{eval: governance.NewEvaluator(rules, evalOpts...), store: store, resolver: resolver}
 }
 
 // Evaluate returns the permission decision for tool call c under mode, scoped to

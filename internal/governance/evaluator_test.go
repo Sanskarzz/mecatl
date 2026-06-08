@@ -241,6 +241,72 @@ func TestSubstitutionPreservesDeny(t *testing.T) {
 	}
 }
 
+// A1: a fully read-only substitution is NOT floored at Ask — it resolves by the
+// ordinary rule fold (Allow under an allow-all rule), while a non-read-only
+// substitution still escalates and a configured Deny on the inner still wins.
+func TestResolveBashSubstitutionLoosening(t *testing.T) {
+	allowAll := []Rule{{Scope: ScopeCLI, Effect: Allow}}
+	e := NewEvaluator(allowAll)
+
+	// Read-only substitution: allowed, not floored.
+	if got := e.Evaluate("Bash", bashArgs("cat $(ls)"), false); got.Effect != Allow {
+		t.Fatalf("read-only substitution: Evaluate = %v (%s); want Allow", got.Effect, got.Reason)
+	}
+	if got := e.Evaluate("Bash", bashArgs(`for p in $(git ls-files); do cat "$p"; done`), false); got.Effect != Allow {
+		t.Fatalf("read-only loop substitution: Evaluate = %v (%s); want Allow", got.Effect, got.Reason)
+	}
+	// Non-read-only substitution (innocuous stand-in `zap`): still floored to Ask
+	// even under allow-all (the floor stands without yolo).
+	if got := e.Evaluate("Bash", bashArgs("cat $(zap)"), false); got.Effect != Ask {
+		t.Fatalf("non-read-only substitution: Evaluate = %v (%s); want Ask", got.Effect, got.Reason)
+	}
+	// A configured Deny on the inner stand-in still wins (deny-dominance).
+	eDeny := NewEvaluator([]Rule{
+		{Scope: ScopeCLI, Effect: Allow},
+		{Scope: ScopeManaged, Tool: "Bash", Pattern: "*zap*", Effect: Deny},
+	})
+	if got := eDeny.Evaluate("Bash", bashArgs("echo $(zap)"), false); got.Effect != Deny {
+		t.Fatalf("configured deny on inner: Evaluate = %v (%s); want Deny", got.Effect, got.Reason)
+	}
+}
+
+// yolo: WithLooseSubstitution disables the substitution Ask floor — a non-read-only
+// substitution resolves by the ordinary fold (Allow under allow-all). A configured
+// Deny still wins.
+func TestResolveBashYoloLoosensFloor(t *testing.T) {
+	allowAll := []Rule{{Scope: ScopeCLI, Effect: Allow}}
+	e := NewEvaluator(allowAll, WithLooseSubstitution(true))
+
+	// A non-read-only substitution (stand-in) is now allowed under loose+allow-all.
+	if got := e.Evaluate("Bash", bashArgs("cat $(zap)"), false); got.Effect != Allow {
+		t.Fatalf("loose substitution: Evaluate = %v (%s); want Allow", got.Effect, got.Reason)
+	}
+	// A configured Deny on the inner stand-in still wins even with loose substitution.
+	eDeny := NewEvaluator([]Rule{
+		{Scope: ScopeCLI, Effect: Allow},
+		{Scope: ScopeManaged, Tool: "Bash", Pattern: "*zap*", Effect: Deny},
+	}, WithLooseSubstitution(true))
+	if got := eDeny.Evaluate("Bash", bashArgs("echo $(zap)"), false); got.Effect != Deny {
+		t.Fatalf("loose + configured deny: Evaluate = %v (%s); want Deny", got.Effect, got.Reason)
+	}
+	// T4: floor loosening must NEVER suppress a CONFIGURED Ask. A ScopeManaged Ask on the
+	// inner stand-in still wins over the ScopeCLI allow-all even with loose substitution —
+	// yolo loosens only the built-in substitution FLOOR, never an author-configured Ask.
+	eAsk := NewEvaluator([]Rule{
+		{Scope: ScopeCLI, Effect: Allow},
+		{Scope: ScopeManaged, Tool: "Bash", Pattern: "*zap*", Effect: Ask},
+	}, WithLooseSubstitution(true))
+	if got := eAsk.Evaluate("Bash", bashArgs("echo $(zap)"), false); got.Effect != Ask {
+		t.Fatalf("loose + configured Ask: Evaluate = %v (%s); want Ask (a configured Ask must survive yolo)", got.Effect, got.Reason)
+	}
+	// Without loose (and without yolo) the same call floors at Ask — proves the
+	// default is unchanged.
+	ePlain := NewEvaluator(allowAll)
+	if got := ePlain.Evaluate("Bash", bashArgs("cat $(zap)"), false); got.Effect != Ask {
+		t.Fatalf("default (no loose): Evaluate = %v (%s); want Ask", got.Effect, got.Reason)
+	}
+}
+
 // Plan mode hard-denies non-read-only Bash; substitution/grouping/newline forms
 // must be classified non-read-only so plan mode is not fooled.
 func TestPlanModeDeniesSubstitutionAndNewline(t *testing.T) {

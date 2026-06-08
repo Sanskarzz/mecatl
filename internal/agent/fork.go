@@ -341,6 +341,22 @@ func (t *ForkTool) preserveWinner(w branchResult) {
 // summary without aborting the others; the call returns a harness-level error only
 // for a setup failure (invalid args / cap exceeded).
 func (t *ForkTool) Execute(ctx context.Context, call session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
+	return t.run(ctx, call, ws, parentCaps{})
+}
+
+// ReadOnly stays true (each branch isolates its writes); see ReadOnly. ForkTool
+// implements childCapableTool so a branch's Bash ask can be surfaced to the human
+// (interactive) or auto-denied with the accurate message (headless) — every branch is
+// isolated, so most such asks auto-approve via A2 first.
+
+// ExecuteWithParent is the childCapableTool seam: it runs Fork like Execute but threads
+// the PARENT's caps (interactivity + surface back-channel) into each branch's posture.
+func (t *ForkTool) ExecuteWithParent(ctx context.Context, call session.ToolCall, ws tool.Workspace, _ func(session.Event), caps parentCaps) (session.ToolResult, error) {
+	return t.run(ctx, call, ws, caps)
+}
+
+// run is the shared implementation behind Execute (caps zero) and ExecuteWithParent.
+func (t *ForkTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, caps parentCaps) (session.ToolResult, error) {
 	var args forkArgs
 	if msg, ok := session.ParseArgs(call, &args); !ok {
 		return session.NewToolError(call.ID, "Fork: "+msg), nil
@@ -370,13 +386,13 @@ func (t *ForkTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 
 	switch join {
 	case joinFirst:
-		return t.executeFirst(ctx, call.ID, tasks, args.Shared, ws), nil
+		return t.executeFirst(ctx, call.ID, tasks, args.Shared, ws, caps), nil
 	case joinJudge:
-		return t.executeJudge(ctx, call.ID, tasks, args.Shared, args.Criteria, ws), nil
+		return t.executeJudge(ctx, call.ID, tasks, args.Shared, args.Criteria, ws, caps), nil
 	default: // joinAll
 		// Today's behaviour, byte-for-byte: run every branch, clean EVERY fork,
 		// return the index-sorted per-branch summary.
-		results := t.runBranches(ctx, call.ID, tasks, args.Shared, ws)
+		results := t.runBranches(ctx, call.ID, tasks, args.Shared, ws, caps)
 		for _, r := range results {
 			r.runCleanup()
 		}
@@ -388,13 +404,13 @@ func (t *ForkTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 // order, cancels the remaining in-flight branches, cleans every loser fork, and
 // PRESERVES the winner's fork (its cleanup is dropped). With no success it
 // degrades to the all-failed report (every fork cleaned).
-func (t *ForkTool) executeFirst(ctx context.Context, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace) session.ToolResult {
+func (t *ForkTool) executeFirst(ctx context.Context, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace, caps parentCaps) session.ToolResult {
 	// A per-call child context so we can cancel the losers the instant a winner
 	// finishes, without disturbing the parent ctx. Cancelled in all paths.
 	branchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	results, winner := t.runBranchesFirst(branchCtx, cancel, callID, tasks, shared, ws)
+	results, winner := t.runBranchesFirst(branchCtx, cancel, callID, tasks, shared, ws, caps)
 
 	if winner < 0 {
 		// No branch succeeded: clean everything and report the failures.
@@ -420,8 +436,8 @@ func (t *ForkTool) executeFirst(ctx context.Context, callID session.ToolCallID, 
 // success → that branch wins with no judge call. The winner's fork is PRESERVED;
 // every loser's fork is cleaned. A misbehaving judge falls back to the first
 // successful branch — Fork never hard-fails because the judge erred.
-func (t *ForkTool) executeJudge(ctx context.Context, callID session.ToolCallID, tasks []string, shared, criteria string, ws tool.Workspace) session.ToolResult {
-	results := t.runBranches(ctx, callID, tasks, shared, ws)
+func (t *ForkTool) executeJudge(ctx context.Context, callID session.ToolCallID, tasks []string, shared, criteria string, ws tool.Workspace, caps parentCaps) session.ToolResult {
+	results := t.runBranches(ctx, callID, tasks, shared, ws, caps)
 
 	// Successful branches in index order (so "first successful" is deterministic).
 	var succeeded []int
@@ -481,7 +497,7 @@ func (t *ForkTool) judgeWinner(ctx context.Context, results []branchResult, succ
 // runBranches forks and runs every branch in parallel under a worker-limited
 // semaphore, returning the per-branch results in branch order. The caller owns
 // cleanup of every returned branchResult.cleanup (lifted out of runBranch).
-func (t *ForkTool) runBranches(ctx context.Context, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace) []branchResult {
+func (t *ForkTool) runBranches(ctx context.Context, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace, caps parentCaps) []branchResult {
 	results := make([]branchResult, len(tasks))
 	sem := make(chan struct{}, t.concurrency)
 	var wg sync.WaitGroup
@@ -497,7 +513,7 @@ func (t *ForkTool) runBranches(ctx context.Context, callID session.ToolCallID, t
 				results[i] = branchResult{index: i, label: branchLabel(i), failed: true, failReason: "cancelled before start"}
 				return
 			}
-			results[i] = t.runBranch(ctx, callID, i, task, shared, ws)
+			results[i] = t.runBranch(ctx, callID, i, task, shared, ws, caps)
 		}(i, task)
 	}
 	wg.Wait()
@@ -512,7 +528,7 @@ func (t *ForkTool) runBranches(ctx context.Context, callID session.ToolCallID, t
 // a loser cancelled mid-flight still returns its (possibly partial) branchResult
 // with its cleanup attached. The returned winner is the index of the first
 // successful branch, or -1 if none succeeded.
-func (t *ForkTool) runBranchesFirst(ctx context.Context, cancel context.CancelFunc, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace) ([]branchResult, int) {
+func (t *ForkTool) runBranchesFirst(ctx context.Context, cancel context.CancelFunc, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace, caps parentCaps) ([]branchResult, int) {
 	results := make([]branchResult, len(tasks))
 	sem := make(chan struct{}, t.concurrency)
 	done := make(chan int, len(tasks)) // carries the index of each finished branch
@@ -530,7 +546,7 @@ func (t *ForkTool) runBranchesFirst(ctx context.Context, cancel context.CancelFu
 				results[i] = branchResult{index: i, label: branchLabel(i), failed: true, failReason: "cancelled before start"}
 				return
 			}
-			results[i] = t.runBranch(ctx, callID, i, task, shared, ws)
+			results[i] = t.runBranch(ctx, callID, i, task, shared, ws, caps)
 		}(i, task)
 	}
 
@@ -570,7 +586,7 @@ func normalizeJoin(join string) string {
 // to tear down and which to preserve, so a winning branch's fork can survive the
 // call. A fork or child failure is captured in the result, never propagated as a
 // harness error (one failing branch must not kill the others).
-func (t *ForkTool) runBranch(ctx context.Context, callID session.ToolCallID, i int, task, shared string, ws tool.Workspace) branchResult {
+func (t *ForkTool) runBranch(ctx context.Context, callID session.ToolCallID, i int, task, shared string, ws tool.Workspace, caps parentCaps) branchResult {
 	label := branchLabel(i)
 	res := branchResult{index: i, label: label}
 
@@ -592,7 +608,10 @@ func (t *ForkTool) runBranch(ctx context.Context, callID session.ToolCallID, i i
 	)
 
 	run := t.childEngine.Run(ctx, childSess, child, composePrompt(shared, task))
-	final, stop := drainChild(run)
+	// A Fork branch always runs in its OWN isolated fork, so its Bash asks are eligible
+	// for the A2 worktree-safe auto-approve; the parent caps carry surface/headless
+	// posture (threaded from Execute → runBranches → runBranch).
+	final, stop := drainChild(run, childPosture{isolated: true, caps: caps, role: label})
 	t.fireSubagentStop(ctx, childSess)
 
 	switch stop {

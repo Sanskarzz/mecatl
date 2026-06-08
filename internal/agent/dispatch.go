@@ -237,7 +237,8 @@ func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, w
 	a := ask
 	e.emit(r, session.Event{Type: session.EvPermissionAsk, Turn: turnIdx, Ask: &a})
 
-	verdict, ok := r.asks.await(ctx, askID, ch)
+	verdictResult, ok := r.asks.await(ctx, askID, ch)
+	verdict := verdictResult.verdict
 
 	// Resume the session regardless of verdict; the loop (below) owns acting on
 	// the decision, so the aggregate only reconciles its own lifecycle.
@@ -266,7 +267,14 @@ func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, w
 		// Permit THIS call only; nothing learned.
 		return governance.PermissionDecision{Effect: governance.Allow}, false
 	default:
-		// VerdictDeny (incl. the zero value / fail-safe).
+		// VerdictDeny (incl. the zero value / fail-safe). A HEADLESS subagent auto-deny
+		// carries an accurate denyReason ("not permitted in a non-interactive subagent
+		// shell: …"); use it verbatim so the model sees the real cause and what to do.
+		// Without one (a real user / surfaced-human deny) keep the "denied by user"
+		// wording, which is accurate there.
+		if verdictResult.denyReason != "" {
+			return governance.PermissionDecision{Effect: governance.Deny, Reason: verdictResult.denyReason}, false
+		}
 		return governance.PermissionDecision{
 			Effect: governance.Deny,
 			Reason: fmt.Sprintf("denied by user: %s", decision.Reason),
@@ -411,13 +419,20 @@ func (e *Engine) timeExecute(ctx context.Context, r *Run, ws tool.Workspace, tur
 		res session.ToolResult
 		err error
 	)
-	if ot, ok := t.(observableTool); ok {
-		emit := func(ev session.Event) {
-			ev.Turn = turnIdx
-			e.emit(r, ev)
-		}
-		res, err = ot.ExecuteObserved(ctx, c, ws, emit)
-	} else {
+	emit := func(ev session.Event) {
+		ev.Turn = turnIdx
+		e.emit(r, ev)
+	}
+	switch ct := t.(type) {
+	case childCapableTool:
+		// A subagent-spawning tool (Task/Team/Fork) also receives the parent's caps so a
+		// child's permission ask can be SURFACED to the human (interactive) or auto-denied
+		// with the accurate message + operator diagnostic (headless). The surface seam is
+		// bound to THIS parent Run (register-then-emit), symmetric to the emit closure.
+		res, err = ct.ExecuteWithParent(ctx, c, ws, emit, e.parentCaps(r, turnIdx))
+	case observableTool:
+		res, err = ct.ExecuteObserved(ctx, c, ws, emit)
+	default:
 		res, err = t.Execute(ctx, c, ws)
 	}
 	if err != nil {
@@ -428,6 +443,58 @@ func (e *Engine) timeExecute(ctx context.Context, r *Run, ws tool.Workspace, tur
 		dur = e.deps.Clock.Now().Sub(start)
 	}
 	return res, dur
+}
+
+// parentCaps builds the parent-capability bundle threaded into a subagent-spawning
+// tool (childCapableTool). It exposes the parent run's interactivity (a non-nil router
+// ⇔ an interactive engine installed one in RunContent) plus the register-then-emit
+// surface seam: surfaceAsk registers the child Run in this parent's router and then
+// emits a REDACTED parent EvPermissionAsk for the child's ask, so the existing client
+// approval UI + ResumeApproval→Run.Approve routing resolve it and the verdict routes
+// back to the child. The surfaced ask carries a CLAMPED command (clampPreview) framed as
+// a subagent request — peer-injected/untrusted args in a member command never ride raw
+// (gauntlet #7: an ASK with a tool name + clamped command + static-framed reason, never
+// transcript content). diag is the parent run's run-scoped diagnostics for the headless
+// auto-deny operator line.
+func (e *Engine) parentCaps(r *Run, turnIdx int) parentCaps {
+	interactive := r.childAsks != nil
+	caps := parentCaps{
+		interactive: interactive,
+		diag:        r.diag,
+	}
+	if interactive {
+		caps.surfaceAsk = func(askID string, child *Run, ask session.PendingAsk) {
+			// Register BEFORE emitting so a fast ResumeApproval cannot race ahead of
+			// registration (mirror askRegistry.register-before-emit).
+			r.registerChildAsk(askID, child)
+			surfaced := session.PendingAsk{
+				AskID: askID,
+				Tool:  ask.Tool,
+				// Clamp/redact the command: a subagent's Bash args can contain peer-injected
+				// untrusted text. Frame it explicitly as a quoted subagent REQUEST so the
+				// human reads it as "the subagent wants to run X", never as a trusted
+				// instruction. The original args are NOT forwarded.
+				Args: nil,
+				Reason: fmt.Sprintf("subagent requests approval to run %s: %s",
+					ask.Tool, clampPreview(surfacedCommandPreview(ask))),
+			}
+			e.emit(r, session.Event{Type: session.EvPermissionAsk, Turn: turnIdx, Ask: &surfaced})
+		}
+	}
+	return caps
+}
+
+// surfacedCommandPreview returns the human-facing preview of a surfaced child ask: for
+// a Bash ask, the command string; otherwise the ask reason (already policy-authored, not
+// peer content). It is the single text that rides the surfaced EvPermissionAsk and is
+// always clampPreview'd by the caller before emission.
+func surfacedCommandPreview(ask session.PendingAsk) string {
+	if ask.Tool == "Bash" {
+		if cmd := bashCmdFromArgs(ask.Args); cmd != "" {
+			return cmd
+		}
+	}
+	return ask.Reason
 }
 
 // resultPayload is the JSON shape of the PostToolUse hook's view of a tool

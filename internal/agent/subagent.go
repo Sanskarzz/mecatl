@@ -48,6 +48,45 @@ type observableTool interface {
 	ExecuteObserved(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error)
 }
 
+// parentCaps carries the PARENT run's interactivity and the surface seam down to a
+// subagent-spawning tool (Task/Team/Fork), so a child's permission ask can be SURFACED
+// to the human when the parent is interactive (and auto-denied with an accurate message
+// + operator diagnostic when it is headless). It is the symmetric back-channel to the
+// emit closure: where emit pushes child observability UP, surfaceAsk routes a parent
+// verdict back DOWN to the child Run.
+//
+// It is layering-clean: every field is an agent-layer closure or a plain bool; no
+// adapter/server/proto type crosses. A tool that does not implement childCapableTool
+// (or a nil caps) gets the legacy headless auto-deny posture, unchanged.
+type parentCaps struct {
+	// interactive is the PARENT run's interactivity: true when a human approver is
+	// attached (the surfaced ask can be answered), false for a headless run.
+	interactive bool
+	// surfaceAsk registers the child Run in the parent router (so the parent's
+	// Approve routes the verdict to it) and emits a REDACTED parent EvPermissionAsk for
+	// the child's ask. It is register-then-emit: registration happens before the emit so
+	// a fast verdict cannot race ahead. nil when the parent installed no router (headless
+	// / no surface). The emitted ask carries the SURFACED askID (the child's own askID,
+	// already parent-distinguishable).
+	// the router auto-unregisters the askID on the routed verdict
+	// (childAskRouter.route); a stale entry (child cancelled while parked) is a harmless
+	// no-op against the idempotent registry, so no explicit unsurface seam is needed.
+	surfaceAsk func(askID string, child *Run, ask session.PendingAsk)
+	// diag is the parent run's run-scoped diagnostics, used to emit the headless
+	// auto-deny operator diagnostic (LevelInfo, tagged with the child agent role). nil →
+	// no diagnostic (NopDiagnostics-safe via the caller).
+	diag port.Diagnostics
+}
+
+// childCapableTool is the optional seam by which a subagent-spawning tool also receives
+// the parent's capabilities (interactivity + the surface back-channel). A tool that
+// implements it is driven via ExecuteWithParent when the dispatcher has a parentCaps to
+// pass; one that does not falls back to ExecuteObserved/Execute with the legacy headless
+// posture. Task/Team/Fork implement it.
+type childCapableTool interface {
+	ExecuteWithParent(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error)
+}
+
 // defaultChildLimits are the (deliberately tight) stop conditions a subagent run
 // is bounded by when the caller does not override them via WithChildLimits. A
 // subagent is a one-shot, focused investigation: it must not run away. These
@@ -429,7 +468,7 @@ func (t *TaskTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 	// The plain Execute path forwards nothing: a nil emit makes the run silent, so
 	// existing callers (and the team supervisor's reuse of the drain contract) are
 	// unaffected by the observability seam.
-	return t.run(ctx, call, ws, nil)
+	return t.run(ctx, call, ws, nil, parentCaps{})
 }
 
 // ExecuteObserved runs the subagent like Execute but, when emit is non-nil,
@@ -439,7 +478,16 @@ func (t *TaskTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 // orthogonal to context isolation (gauntlet #7): the child's CONTENT still never
 // enters the parent context. It is the observableTool seam the dispatcher calls.
 func (t *TaskTool) ExecuteObserved(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
-	return t.run(ctx, call, ws, emit)
+	return t.run(ctx, call, ws, emit, parentCaps{})
+}
+
+// ExecuteWithParent is the childCapableTool seam: it runs the subagent like
+// ExecuteObserved but threads the PARENT's capabilities (interactivity + the surface
+// back-channel) into the child posture, so a child Bash ask that A1/A2 did not
+// auto-resolve is SURFACED to the human (interactive) or auto-denied with the accurate
+// message + operator diagnostic (headless).
+func (t *TaskTool) ExecuteWithParent(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error) {
+	return t.run(ctx, call, ws, emit, caps)
 }
 
 // run is the shared implementation behind Execute (emit == nil) and
@@ -447,7 +495,7 @@ func (t *TaskTool) ExecuteObserved(ctx context.Context, call session.ToolCall, w
 // loop against the SAME workspace, drains the child's entire Event stream
 // internally, optionally forwards a redacted projection of that activity, and
 // returns only the child's final summary text as a single ToolResult.
-func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
+func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error) {
 	var args taskArgs
 	if msg, ok := session.ParseArgs(call, &args); !ok {
 		return session.NewToolError(call.ID, "Task: "+msg), nil
@@ -539,7 +587,12 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	// observed, the redacted subagent.* metadata. Auto-deny any permission ask so
 	// the child can never block on a human (defensive: the recommended wiring is an
 	// allow-all read-only policy that never asks).
-	final, stop, usage, toolCount := drainChildObserved(run, emit, string(call.ID), string(childID))
+	// A child forking a worktree (childForker != nil) runs ISOLATED, so its Bash asks
+	// are eligible for the A2 worktree-safe auto-approve; a forker-less child is
+	// base-sharing (no auto-approve). The parent caps carry interactivity + the surface
+	// back-channel for an interactive parent; headless leaves them zero (auto-deny).
+	posture := childPosture{isolated: t.childForker != nil, caps: caps, role: t.idPrefix}
+	final, stop, usage, toolCount := drainChildObserved(run, emit, string(call.ID), string(childID), posture)
 
 	if emit != nil {
 		emit(session.Event{Type: session.EvSubagentEnd, Subagent: &session.SubagentPayload{
@@ -630,7 +683,7 @@ func truncateGoal(s string) string {
 // child message.delta text. This keeps gauntlet #7 intact while giving the UI
 // metadata-only visibility. With a nil emit it discards every intermediate event
 // exactly as the original drainChild did.
-func drainChildObserved(run *Run, emit func(session.Event), parentCallID, childID string) (finalText string, stop session.StopReason, usage session.Usage, toolCount int) {
+func drainChildObserved(run *Run, emit func(session.Event), parentCallID, childID string, posture childPosture) (finalText string, stop session.StopReason, usage session.Usage, toolCount int) {
 	// Track child callID → tool name so a tool.result can be attributed to its
 	// tool.call name without forwarding the call's (redacted) args.
 	names := map[session.ToolCallID]string{}
@@ -650,7 +703,7 @@ func drainChildObserved(run *Run, emit func(session.Event), parentCallID, childI
 				}})
 			}
 		}
-		if text, st, ok := handleChildEvent(run, ev); ok {
+		if text, st, ok := handleChildEvent(run, ev, posture); ok {
 			finalText, stop = text, st
 			if ev.Result != nil {
 				usage = ev.Result.Usage
@@ -667,26 +720,122 @@ func drainChildObserved(run *Run, emit func(session.Event), parentCallID, childI
 // of them can reach the parent — this is the context-isolation guarantee of
 // gauntlet #7. It is the silent variant used by fork.go and the team supervisor;
 // the observed Task path uses drainChildObserved.
-func drainChild(run *Run) (finalText string, stop session.StopReason) {
-	final, st, _, _ := drainChildObserved(run, nil, "", "")
+func drainChild(run *Run, posture childPosture) (finalText string, stop session.StopReason) {
+	final, st, _, _ := drainChildObserved(run, nil, "", "", posture)
 	return final, st
 }
 
-// handleChildEvent applies the non-interactive CHILD contract to a single event of
-// a child/member run: it auto-denies any permission ask (no human is attached to a
-// child loop, so it must never block) and, when the event is the terminal result,
-// reports its text and stop reason via isResult=true. It is the SINGLE definition
-// of that contract, shared by drainChild (which discards events) and the team
-// supervisor's runTurn (which forwards them) so the auto-deny rule and the
-// result/stop capture cannot drift between the two.
-func handleChildEvent(run *Run, ev session.Event) (text string, stop session.StopReason, isResult bool) {
+// childPosture carries the per-child permission resolution context applied to a child/
+// member run's permission asks (the 4-step model). It is threaded by every drain path
+// (drainChildObserved, drainChild, the team supervisor's driveOneTurn) so the resolution
+// order — isolation auto-approve → surface-to-human → headless auto-deny — is identical
+// everywhere and cannot drift.
+//
+// The zero value is the legacy posture: not isolated, not interactive, no surface →
+// every ask auto-denies (with the accurate message). A child run that is isolated sets
+// isolated=true; an interactive parent supplies caps with a non-nil surfaceAsk.
+type childPosture struct {
+	// isolated reports that the child runs in an ISOLATED workspace (a git worktree or a
+	// force-copy fork) — so an IsolationApprovable Bash ask (read-only ∪ worktree-safe
+	// go verbs) auto-APPROVES (A2). false for a base-sharing child (no auto-approve).
+	isolated bool
+	// caps carries the parent's interactivity + surface back-channel (zero value =
+	// headless: no surface). When caps.interactive && caps.surfaceAsk != nil, an ask that
+	// steps 1-2 did not resolve is SURFACED to the human; otherwise it auto-denies.
+	caps parentCaps
+	// role is the child's agent role (Task/member name/fork label) for the headless
+	// auto-deny operator diagnostic. Empty falls back to a generic label.
+	role string
+}
+
+// childAutoDenyMessage is the ACCURATE message a headless (non-interactive) subagent's
+// auto-denied ask carries — NOT the misleading "denied by user … client approval
+// required" of the interactive path. It names the real cause (a non-interactive subagent
+// shell) and what the model can do about it. reason is the policy's ask reason.
+func childAutoDenyMessage(reason string) string {
+	return "not permitted in a non-interactive subagent shell: " + reason +
+		"; rephrase to avoid command substitution/subshell grouping, or use an auto-approved tool (read-only commands, or go test/build/vet/list)"
+}
+
+// handleChildEvent applies the per-child permission contract to a single event of a
+// child/member run and, when the event is the terminal result, reports its text and
+// stop reason via isResult=true. It is the SINGLE definition of that contract, shared
+// by drainChildObserved (Task), drainChild (Fork, silent), and the team supervisor's
+// driveOneTurn, so the resolution order cannot drift.
+//
+// Resolution order on a permission ask (the 4-step model):
+//  1. ISOLATION auto-approve (A2): an isolated child whose ask is IsolationApprovable
+//     (read-only ∪ worktree-safe go verbs, no worktree-escape verb) → AllowOnce. (A1's
+//     read-only substitution carve-out already turns most read-only substitutions into
+//     Allow upstream so they never reach here as an ask; this catches the worktree-safe
+//     `go test` superset.)
+//  2. SURFACE to human: an interactive parent with a surface seam registers the child in
+//     the parent router and emits a REDACTED parent EvPermissionAsk, then RETURNS without
+//     resolving — the child's authorize stays parked in await until the parent routes a
+//     verdict back via the router (child.Approve). The drain loop blocks on this child's
+//     channel until then (single-child) or keeps consuming peers (concurrent members).
+//  3. HEADLESS auto-deny: no surface (headless / no router) → Deny with the ACCURATE
+//     message + a correlated operator diagnostic (LevelInfo, agent=<role>) — never the
+//     misleading "denied by user".
+func handleChildEvent(run *Run, ev session.Event, posture childPosture) (text string, stop session.StopReason, isResult bool) {
 	if ev.Type == session.EvPermissionAsk && ev.Ask != nil {
-		run.Approve(ev.Ask.AskID, session.VerdictDeny)
+		resolveChildAsk(run, *ev.Ask, posture)
 	}
 	if ev.Type == session.EvResult && ev.Result != nil {
 		return ev.Result.Text, ev.Result.Stop, true
 	}
 	return "", session.StopNone, false
+}
+
+// resolveChildAsk applies the 4-step resolution to one child permission ask.
+func resolveChildAsk(run *Run, ask session.PendingAsk, posture childPosture) {
+	// Step 1-2 (A2): isolated child + isolation-approvable Bash → auto-approve.
+	if posture.isolated && ask.Tool == "Bash" && governance.IsolationApprovable(bashCmdFromArgs(ask.Args)) {
+		run.Approve(ask.AskID, session.VerdictAllowOnce)
+		return
+	}
+	// Step 3: surface to the human when the parent is interactive and a surface seam is
+	// wired. Register-then-emit lives inside surfaceAsk; we DO NOT resolve here — the
+	// child stays parked until the parent routes a verdict back.
+	if posture.caps.interactive && posture.caps.surfaceAsk != nil {
+		posture.caps.surfaceAsk(ask.AskID, run, ask)
+		return
+	}
+	// Step 4: headless / no surface → auto-deny with the accurate message + an operator
+	// diagnostic, then resolve the child's own ask. The child's authorize maps a Deny
+	// verdict to a denied result carrying decision.Reason (the policy's), so we ALSO emit
+	// the operator-visible diagnostic here (the deny otherwise reaches only the child's
+	// errored tool-result, which default clients bury). The denied RESULT message the
+	// model sees is rebuilt by authorize; the accurate phrasing is surfaced via the
+	// diagnostic and the bash tool description.
+	if posture.caps.diag != nil {
+		posture.caps.diag.Log(context.Background(), port.LevelInfo,
+			"subagent permission ask auto-denied (non-interactive shell)",
+			"agent", posture.role, "tool", ask.Tool, "reason", ask.Reason)
+	}
+	run.autoDenyChildAsk(ask.AskID, childAutoDenyMessage(ask.Reason))
+}
+
+// bashCmdFromArgs extracts the Bash command string from a pending ask's raw args,
+// reusing the same field tolerance the governance evaluator uses. Empty on a parse
+// failure (then IsolationApprovable("") is false — fail safe).
+func bashCmdFromArgs(args json.RawMessage) string {
+	if len(args) == 0 {
+		return ""
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(args, &m); err != nil {
+		return ""
+	}
+	for _, key := range []string{"command", "cmd"} {
+		if raw, ok := m[key]; ok {
+			var s string
+			if json.Unmarshal(raw, &s) == nil && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 // fireSubagentStop runs the SubagentStop lifecycle hook for a finished child run.

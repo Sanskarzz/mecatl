@@ -229,6 +229,160 @@ func FuzzReadOnlyBash(f *testing.F) {
 	})
 }
 
+// FuzzSubstitutionReadOnly asserts the A1 classifier never panics and, when it
+// returns true, every extracted inner command is read-only AND the blanked outer has
+// no destructive token or output redirection — the security crux of the read-only
+// substitution carve-out.
+func FuzzSubstitutionReadOnly(f *testing.F) {
+	seedGovernance(f)
+	// Nested read-only subshells/substitutions: the recursive inner case the soundness
+	// assertion must model (a regression seed for the `ReadOnlyBash || SubstitutionReadOnly`
+	// inner contract).
+	f.Add("( (cat))")
+	f.Add("echo $(cat $(ls))")
+	f.Fuzz(func(t *testing.T, cmd string) {
+		// Run per-segment, as the evaluator does.
+		for _, seg := range SplitCommands(cmd) {
+			if !SubstitutionReadOnly(seg) {
+				continue
+			}
+			assertSubstReadOnlySound(t, seg)
+		}
+	})
+}
+
+// assertSubstReadOnlySound recursively verifies that a segment SubstitutionReadOnly
+// cleared decomposes to ONLY read-only programs: every extracted inner is either plain
+// ReadOnlyBash OR itself a sound read-only substitution (the recursive case — a nested
+// `( (cat))` / `cat $(cat $(ls))`), and the blanked outer carries no output redirection
+// or destructive token. This mirrors the classifier's own `ReadOnlyBash(in) ||
+// SubstitutionReadOnly(in)` inner contract, so the fuzzer asserts genuine soundness
+// rather than a stricter shape the classifier never promised.
+func assertSubstReadOnlySound(t *testing.T, seg string) {
+	t.Helper()
+	inner, ok := extractSubstitutions(seg)
+	if !ok {
+		t.Fatalf("SECURITY: SubstitutionReadOnly(%q)=true but extraction failed", seg)
+	}
+	for _, in := range inner {
+		switch {
+		case ReadOnlyBash(in):
+			// plain read-only inner — sound.
+		case SubstitutionReadOnly(in):
+			assertSubstReadOnlySound(t, in) // nested read-only substitution — recurse.
+		default:
+			t.Fatalf("SECURITY: SubstitutionReadOnly(%q)=true but inner %q is neither read-only nor a sound substitution", seg, in)
+		}
+	}
+	// The blanked outer must have no destructive token / output redirection.
+	blanked, ok := outerWithSubstitutionsBlanked(seg)
+	if !ok {
+		t.Fatalf("SECURITY: SubstitutionReadOnly(%q)=true but blanking failed", seg)
+	}
+	canon := Canonicalize(blanked)
+	if strings.ContainsAny(canon, ">") {
+		t.Fatalf("SECURITY: SubstitutionReadOnly(%q)=true but blanked outer %q has a redirection", seg, canon)
+	}
+	fs := fieldSet(canon)
+	for _, tok := range destructiveTokens {
+		if fs[tok] {
+			t.Fatalf("SECURITY: SubstitutionReadOnly(%q)=true but blanked outer %q has destructive token %q", seg, canon, tok)
+		}
+	}
+}
+
+// FuzzIsolationApprovable asserts the A2 classifier never panics and, when it returns
+// true, no segment (outer or extracted inner) contains a worktree-escape verb and
+// substitution extraction succeeded — the security crux of the isolated-subagent
+// auto-approve.
+func FuzzIsolationApprovable(f *testing.F) {
+	seedGovernance(f)
+	f.Add("go test ./...")
+	f.Add(`for p in $(go list ./...); do go test -cover "$p"; done`)
+	f.Add("git push origin main")
+	f.Add("go test -exec /x ./...")
+	f.Add("git -C /x log")
+	f.Fuzz(func(t *testing.T, cmd string) {
+		if !IsolationApprovable(cmd) {
+			return
+		}
+		// POSITIVE soundness (mirrors FuzzSubstitutionReadOnly): if the WHOLE command
+		// cleared, EVERY segment — outer (substitution-blanked) and every recursively
+		// extracted inner — must be independently isolation-sound. A cleared segment may
+		// only be: pure scaffolding/grouping, simpleReadOnly, or a worktree-safe
+		// `go {test,build,vet,list}` with no output redirection and no arbitrary-exec flag;
+		// and never a worktree-escape verb or a path-escaping git global flag.
+		for _, seg := range SplitCommands(cmd) {
+			assertSegmentIsolationSound(t, cmd, seg)
+		}
+	})
+}
+
+// assertSegmentIsolationSound fails the fuzzer if seg (a SplitCommands segment of a
+// command IsolationApprovable cleared) is not independently isolation-sound. It mirrors
+// the classifier's own contract from the OUTSIDE: blank any substitution, strip
+// control-flow scaffolding, then require the residual to be empty/placeholder OR
+// simpleReadOnly OR a worktree-safe go verb with no `>`/exec-flag — and reject any git
+// escape verb / path-escaping global flag. It recurses into every extracted inner.
+func assertSegmentIsolationSound(t *testing.T, cmd, seg string) {
+	t.Helper()
+	if HasSubstitutionOrGrouping(seg) {
+		inner, ok := extractSubstitutions(seg)
+		if !ok {
+			t.Fatalf("SECURITY: IsolationApprovable(%q)=true but extraction failed on %q", cmd, seg)
+		}
+		for _, in := range inner {
+			for _, innerSeg := range SplitCommands(in) {
+				assertSegmentIsolationSound(t, cmd, innerSeg)
+			}
+		}
+		blanked, okB := outerWithSubstitutionsBlanked(seg)
+		if !okB {
+			t.Fatalf("SECURITY: IsolationApprovable(%q)=true but blanking failed on %q", cmd, seg)
+		}
+		assertClearedResidualSound(t, cmd, seg, blanked)
+		return
+	}
+	assertClearedResidualSound(t, cmd, seg, seg)
+}
+
+// assertClearedResidualSound checks the residual of a cleared segment after blanking +
+// scaffolding-strip is one of the sound shapes. orig is the original segment (for the
+// pure-subshell placeholder case).
+func assertClearedResidualSound(t *testing.T, cmd, orig, classifyText string) {
+	t.Helper()
+	residual := strings.TrimSpace(stripShellKeywords(classifyText))
+	if residual == "" {
+		return // pure scaffolding (e.g. a for-header) runs no program.
+	}
+	if residual == substitutionPlaceholder {
+		if !isPureSubshell(orig) {
+			t.Fatalf("SECURITY: IsolationApprovable(%q)=true but lone-placeholder residual of %q is not a pure subshell", cmd, orig)
+		}
+		return
+	}
+	fields := strings.Fields(Canonicalize(residual))
+	if len(fields) == 0 {
+		t.Fatalf("SECURITY: IsolationApprovable(%q)=true but residual %q has no fields", cmd, residual)
+	}
+	// git: no escape verb, no path-escaping global flag.
+	if fields[0] == "git" {
+		sub, escapesPath, ok := gitSubcommand(fields)
+		if !ok || escapesPath || worktreeEscapeGitSubcommands[sub] {
+			t.Fatalf("SECURITY: IsolationApprovable(%q)=true but git residual %q escapes (sub=%q escapesPath=%v ok=%v)", cmd, residual, sub, escapesPath, ok)
+		}
+	}
+	if simpleReadOnly(residual) {
+		return
+	}
+	// The only non-read-only sound shape: a worktree-safe go verb, no `>`, no exec flag.
+	if fields[0] == "go" && len(fields) >= 2 && worktreeSafeGoSubcommands[fields[1]] &&
+		!strings.ContainsAny(Canonicalize(residual), ">") && !goArgsEscapeWorktree(fields[2:]) {
+		return
+	}
+	t.Fatalf("SECURITY: IsolationApprovable(%q)=true but residual %q is neither read-only nor a worktree-safe go verb", cmd, residual)
+}
+
 // fieldSet returns the set of whitespace-delimited fields of s.
 func fieldSet(s string) map[string]bool {
 	out := make(map[string]bool)

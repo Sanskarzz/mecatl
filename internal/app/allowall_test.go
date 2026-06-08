@@ -71,3 +71,29 @@ func TestMainRulesPolicyAutoAllowsAskFloor(t *testing.T) {
 		t.Fatalf("AllowAllTools=false Edit: expected Ask, got %v", got.Effect)
 	}
 }
+
+// TestYoloLoosensSubstitutionFloorViaComposition (T3) proves the COMPOSITION wiring that
+// connects Config.AllowAllTools → governance.WithLooseSubstitution is real, not silently
+// disconnected. It builds the main policy the EXACT way buildEngine does (mainRules +
+// mainEvaluatorOptions), then drives a substitution command through the real evaluator:
+// with --yolo a non-read-only substitution resolves Allow; without it floors at Ask. A
+// silent break in mainEvaluatorOptions would flip the yolo case back to Ask and fail
+// here. Uses the innocuous stand-in `zap` (a non-read-only inner); nothing executes.
+func TestYoloLoosensSubstitutionFloorViaComposition(t *testing.T) {
+	const sid = session.SessionID("s1")
+	args, _ := json.Marshal(map[string]string{"command": "cat $(zap)"})
+	call := session.NewToolCall("c1", "Bash", args)
+
+	// Built the SAME way buildEngine builds the main policy.
+	yoloCfg := Config{AllowAllTools: true}
+	yolo := permpolicy.NewPolicy(mainRules(yoloCfg), nil, mainEvaluatorOptions(yoloCfg)...)
+	if got := yolo.Evaluate(context.Background(), sid, session.ModeDefault, call, nil); got.Effect != governance.Allow {
+		t.Fatalf("--yolo substitution: expected Allow (the loose-substitution option must be wired), got %v (%s)", got.Effect, got.Reason)
+	}
+
+	plainCfg := Config{AllowAllTools: false}
+	plain := permpolicy.NewPolicy(mainRules(plainCfg), nil, mainEvaluatorOptions(plainCfg)...)
+	if got := plain.Evaluate(context.Background(), sid, session.ModeDefault, call, nil); got.Effect != governance.Ask {
+		t.Fatalf("no-yolo substitution: expected Ask (floor stands), got %v (%s)", got.Effect, got.Reason)
+	}
+}

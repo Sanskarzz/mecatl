@@ -333,6 +333,43 @@ the member's own fork/worktree, never the shared base).
 > harness's "untrusted degrades to ask-the-human" posture). This is a tracked follow-up,
 > not yet implemented.
 
+### 5.3.1 Member permission asks (4-step resolution, not a blanket deny)
+
+A member's Bash permission ask was once auto-DENIED unconditionally, so a read-only member
+could never run a command containing substitution/subshell (`$(go list ./...)`, a per-package
+coverage loop) — it hard-failed with a misleading "denied by user" even though no user was
+asked. Members (and Task/Fork children) now resolve an ask in four steps (`resolveChildAsk`,
+threaded by a per-child `childPosture`; the same path Task/Fork share, so it cannot drift):
+
+1. **Read-only substitution (A1, global).** `governance.SubstitutionReadOnly` lets a
+   substitution whose every recursively-extracted inner command is read-only AND whose blanked
+   outer is read-only resolve normally instead of flooring at Ask. A SEPARATE classifier —
+   `ReadOnlyBash`/plan-mode/fuzz Inv-5 are unchanged.
+2. **Isolation auto-approve (A2).** An ISOLATED member (worktree or force-copy fork — every
+   shell-bearing member is isolated) auto-APPROVES `governance.IsolationApprovable`: read-only ∪
+   a MINIMAL worktree-safe `{go test,build,vet,list}`, minus worktree-escape verbs
+   (`git push/config/remote/fetch/pull/clone/worktree/submodule`). The git subcommand is
+   resolved past leading global flags (a path-bearing `git -C`/`--git-dir`/`--work-tree` escapes
+   the worktree ⇒ not approvable), and a worktree-safe `go` verb carrying
+   `-exec`/`-toolexec`/`-overlay` (arbitrary external-program execution that FS isolation does not
+   contain) is rejected. Fail-safe false on any ambiguity.
+3. **Surface to the human.** When the parent run is interactive (the in-loop Team tool threads
+   the parent's `parentCaps` into the supervisor), an unresolved member ask is register-then-emit
+   SURFACED as a real parent `EvPermissionAsk` (command clamped, framed as a quoted subagent
+   request, raw args dropped — gauntlet #7), and the parent's `Run.Approve` routes the verdict
+   back to the member by its child-namespaced askID (`team-<teamID>-<member>:…` — NO wire change).
+   A member parked awaiting the human blocks ONLY its own errgroup goroutine; peers keep running
+   (the supervisor drains members concurrently and the forwarder is a single goroutine over a
+   buffered channel — a parked member simply emits nothing until resolved).
+4. **Headless auto-deny.** With no interactive parent (the gRPC `RunTeam` direct path, the offline
+   demo), the ask auto-denies with the ACCURATE message ("not permitted in a non-interactive
+   subagent shell: …") and a correlated operator diagnostic (`LevelInfo`, `agent=<member>`), never
+   the misleading "denied by user" and never a parent-stream content leak.
+
+Security: the discarded worktree, the clamped surfaced command, and the gauntlet-#7 content
+isolation are all preserved; worktree-escape verbs stay denied even in isolation; a substitution
+hiding a non-read-only inner is NOT auto-approved even when isolated (it surfaces or denies).
+
 ### 5.4 Quiescence & deadlock
 
 The team is **done** when every member is `Idle`/`Stopped`, no task is

@@ -203,6 +203,64 @@ stays git-agnostic (the git knowledge is in `gitenv`/composition). The MAIN sess
 unhardened runner; a Mutating force-copy member's own `.git` makes config-hardening moot but it
 gets the hardened runner anyway.
 
+**Subagent Bash permission asks resolve in a 4-step model (NOT a blanket auto-deny).** The
+old contract auto-DENIED every subagent permission ask, so a team member / Task child could
+NEVER run a command containing substitution/subshell — the `$(go list ./...)`-per-package
+coverage loop hard-failed with a misleading "denied by user". The fix (`handleChildEvent` →
+`resolveChildAsk`, threaded by a per-child `childPosture` through `drainChildObserved` /
+`drainChild` / `driveOneTurn`):
+
+- **Step 1 — A1 read-only substitution (GLOBAL).** `governance.SubstitutionReadOnly(seg)`
+  extracts every recursively-nested inner command (`extractSubstitutions`) and blanks the outer
+  (`outerWithSubstitutionsBlanked` → an inert `MECATL_SUBST` placeholder); if every inner is
+  `ReadOnlyBash` and the blanked outer is `simpleReadOnly`, `resolveBash` does NOT floor at Ask
+  (the ordinary fold stands). It is a SEPARATE classifier — `ReadOnlyBash`/`simpleReadOnly`/
+  plan-mode and the `FuzzReadOnlyBash`/`FuzzSplitCommands` Inv-5 are byte-for-byte unchanged. A
+  bare `(subshell)` is safe grouping; `$(...)`/backticks in command position are NOT (the output
+  is executed), so a lone-placeholder outer is accepted only for `isPureSubshell`. Shell
+  control-flow keywords (`for … in …; do …; done`) are stripped (`stripShellKeywords`) so the
+  real command is classified.
+- **Step 2 — A2 isolation auto-approve.** `governance.IsolationApprovable(cmd)` clears, for an
+  ISOLATED subagent only (`childPosture.isolated`: a worktree/force-copy fork), read-only ∪ a
+  MINIMAL worktree-safe verb set `{go test,build,vet,list}`, minus worktree-escape verbs
+  (`git push/config/remote/fetch/pull/clone/worktree/submodule`). Two hardening points the
+  flag-agnostic first cut missed (panel iter-1 S1/S2): the git subcommand is resolved PAST
+  leading global flags (`gitSubcommand`) so `git -C /outside push` can't slip the escape check
+  by shifting the subcommand right, and a PATH-bearing global flag (`-C`/`--git-dir`/`--work-tree`)
+  is itself disqualifying (it points git outside the worktree, even for a read-only subcommand);
+  and a worktree-safe `go test`/`go build` is REJECTED if it carries `-exec`/`-toolexec`/`-overlay`
+  (`goArgsRunExternalProgram`) — those run an arbitrary external program, which the worktree's
+  FILESYSTEM isolation does not contain. Fail-safe false on any ambiguity, any
+  unrecognised/destructive command, or any escape verb. `FuzzIsolationApprovable` asserts POSITIVE
+  soundness (every cleared segment, outer-blanked + inner, is scaffolding/read-only/worktree-safe-go
+  with no `>`/exec flag and no git escape), mirroring `FuzzSubstitutionReadOnly`.
+- **Step 3 — surface to human.** An interactive parent run installs `Run.childAsks`
+  (`childAskRouter`) when `Deps.Interactive`. The dispatcher passes a `parentCaps`
+  (interactivity + a register-then-emit `surfaceAsk`) to a `childCapableTool`
+  (Task/Team/Fork's `ExecuteWithParent`). `resolveChildAsk` registers the child Run in the
+  parent router and emits a REDACTED parent `EvPermissionAsk` (command `clampPreview`'d, framed
+  "subagent requests approval to run Bash: …", raw `Args` dropped — gauntlet #7), then returns
+  WITHOUT resolving; the child parks in its own goroutine. The parent's `Run.Approve` routes the
+  verdict to the child by the child-namespaced askID (`childAskRouter.route` → `child.Approve`);
+  NO proto change (the child session id IS the namespace). A parked team member blocks only its
+  own errgroup goroutine; peers keep running.
+- **Step 4 — headless auto-deny.** No router → `run.autoDenyChildAsk(askID, childAutoDenyMessage(reason))`,
+  which carries the ACCURATE model-facing message ("not permitted in a non-interactive subagent
+  shell: …; rephrase to avoid substitution or use an auto-approved tool") via
+  `approval.denyReason` — NOT "denied by user". It ALSO emits a correlated operator diagnostic
+  (`caps.diag.Log(LevelInfo, …, "agent", role)`), never a parent-stream content event.
+
+**`--yolo` loosens the substitution floor for the MAIN agent.** `Config.AllowAllTools` now also
+threads `governance.WithLooseSubstitution(true)` (`mainEvaluatorOptions`) into the main policy's
+Evaluator, so a substitution command resolves by the allow-all fold instead of the Ask floor —
+consistent with the mutate-ask floor the ScopeCLI allow-all rule already loosens. A configured
+Deny/Ask in any scope still wins (deny-dominance unaffected). The default (no `--yolo`) keeps the
+floor. `Deps.Interactive` is set on the MAIN engine from `Config.Interactive` (mecated → true, the
+bidi/HTTP surfaces have a client; the offline demo → false); child engines force it false
+(subagents cannot recurse, so they install no router — their OWN asks resolve via the parent's
+caps). The gRPC `RunTeam` direct path leaves `parentCaps` zero (headless auto-deny) — the in-loop
+Team tool is the surfacing path.
+
 **Team result aggregation is a LEAD SYNTHESIS, not a `LastText` concatenation.** After the
 scheduling loop, `Supervisor.Run` drives ONE final synthesis turn on the lead (`synthesise` →
 the shared `driveOneTurn` helper, factored OUT of `runTurn` so the auto-deny / event-forward /
