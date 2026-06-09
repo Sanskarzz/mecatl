@@ -132,7 +132,37 @@ func toProto(ev session.Event) *mecatlv1.Event {
 	if ev.Team != nil {
 		out.Team = toProtoTeam(*ev.Team)
 	}
+	if ev.Parallel != nil {
+		out.Parallel = toProtoParallel(*ev.Parallel)
+	}
 	return out
+}
+
+// toProtoParallel maps a session.ParallelPayload to its proto Parallel form: the
+// redacted, metadata-only projection of a Parallel fork-join run. Usage is always
+// emitted (zero on the start/branch_start/branch_tool kinds); the per-kind field
+// population mirrors the domain payload's documented contract. It copies only the
+// already-redacted scalars — no branch content — preserving gauntlet #7.
+func toProtoParallel(p session.ParallelPayload) *mecatlv1.Parallel {
+	return &mecatlv1.Parallel{
+		ParentCallId:    p.ParentCallID,
+		Kind:            string(p.Kind),
+		Join:            p.Join,
+		BranchCount:     clampInt32(p.BranchCount),
+		BranchIndex:     clampInt32(p.BranchIndex),
+		BranchLabel:     p.BranchLabel,
+		Goal:            p.Goal,
+		ToolName:        p.ToolName,
+		IsError:         p.IsError,
+		ToolCount:       clampInt32(p.ToolCount),
+		Failed:          p.Failed,
+		Workspace:       p.Workspace,
+		Stop:            string(p.Stop),
+		Usage:           toProtoUsage(p.Usage),
+		DurationMs:      p.DurationMs,
+		Winner:          clampInt32(p.Winner),
+		WinnerWorkspace: p.WinnerWorkspace,
+	}
 }
 
 // toProtoTeam maps a session.TeamPayload to its proto Team form: the bounded

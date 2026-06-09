@@ -233,6 +233,12 @@ type conversation struct {
 	// repeated tool/end events for a child update the same lane in O(1).
 	subagentFleet []subagentLane
 	fleetIndex    map[string]int
+	// parallelGroups preserves first-seen order; parallelIndex maps ParentCallID → its
+	// slot so repeated branch/end events for a Parallel call update the same group in
+	// O(1). A Parallel run is a GROUP (not a flat fleet), so each group holds its own
+	// ordered branches. Part of the conversation, so /clear drops it too.
+	parallelGroups []parallelGroup
+	parallelIndex  map[string]int
 }
 
 // isEmpty reports whether the conversation has no blocks yet — the first-run
@@ -465,18 +471,26 @@ func (c *conversation) fleetEnd(childID string, usage client.Usage, toolCount in
 	ln.durationMs = durationMs
 }
 
-// subagentFleetCounts classifies the fleet into (running, done). A child is done once
-// its subagent.end arrived (lane.done); the rest are running. It is the footer
-// segment's aggregate and the Subagents-tab header count.
-func (c *conversation) subagentFleetCounts() (running, done int) {
-	for i := range c.subagentFleet {
-		if c.subagentFleet[i].done {
-			done++
+// countDone classifies a slice into (running, done) by a per-element done predicate. It
+// is the single loop behind the four agent-roster count helpers (subagentFleetCounts /
+// fleetCounts / parallelGroupCounts / parallelCounts) — Rule of Three is met, so the loop
+// body lives once here and each helper supplies only its element type + done accessor.
+func countDone[T any](xs []T, done func(T) bool) (running, doneN int) {
+	for i := range xs {
+		if done(xs[i]) {
+			doneN++
 		} else {
 			running++
 		}
 	}
-	return running, done
+	return running, doneN
+}
+
+// subagentFleetCounts classifies the fleet into (running, done). A child is done once
+// its subagent.end arrived (lane.done); the rest are running. It is the footer
+// segment's aggregate and the Subagents-tab header count.
+func (c *conversation) subagentFleetCounts() (running, done int) {
+	return fleetCounts(c.subagentFleet)
 }
 
 // hasSubagents reports whether ≥1 subagent has started this session — the gate for
@@ -486,6 +500,178 @@ func (c *conversation) subagentFleetCounts() (running, done int) {
 // is still reviewable, mirroring how the Teams tab reviews a finished team), unless a
 // team is live.
 func (c *conversation) hasSubagents() bool { return len(c.subagentFleet) > 0 }
+
+// parallelBranch is the per-branch projection of ONE Parallel branch, keyed by its 0-based
+// BranchIndex WITHIN a group. It mirrors subagentLane (a current tool, a capped chip trace,
+// terminal stats) but is GROUPED under a parallelGroup — a Parallel run is a fan-out group,
+// not a flat fleet. It carries only the REDACTED metadata the parallel.* events forward
+// (gauntlet #7) — never branch content. workspace is the branch's fork-root path (a handle,
+// not content).
+type parallelBranch struct {
+	index      int
+	label      string
+	goal       string
+	current    string // latest branch tool name, "" when none yet
+	trace      []subToolChip
+	toolCount  int
+	usage      client.Usage
+	isError    bool // the most-recent branch tool errored (transient)
+	done       bool
+	failed     bool
+	stop       string
+	durationMs int64
+	workspace  string
+}
+
+// parallelGroup is the fan-out GROUP projection of ONE Parallel call, keyed by
+// ParentCallID. It holds the run-level facts that have no home on a flat per-branch row —
+// the join strategy, the single winner index (-1 = none/all), the preserved winner fork
+// path, the run-level stop — plus the ordered list of its branches. It is the grouped
+// analogue of the subagentFleet (which is flat). branches preserves first-seen index order
+// via branchIndex (BranchIndex → slot).
+type parallelGroup struct {
+	parentCallID    string
+	join            string
+	branchCount     int
+	winner          int // -1 until parallel.end resolves a winner (join=all stays -1)
+	winnerWorkspace string
+	stop            string
+	done            bool
+	branches        []parallelBranch
+	branchIndex     map[int]int // BranchIndex → slot in branches
+}
+
+// parallelGroups is the insertion-ordered collection of Parallel groups keyed by
+// ParentCallID; parallelIndex maps ParentCallID → its slot so repeated branch/end events
+// update the same group in O(1). Like subagentFleet it is part of the conversation, so a
+// /clear (which rebuilds the conversation) drops it too.
+//
+// (These live on the conversation struct; declared here next to the helpers for locality.)
+
+// parallelGroupFor returns the existing parallelGroup for parentCallID (creating one in
+// first-seen order if absent). winner defaults to -1 (no winner yet / join=all).
+func (c *conversation) parallelGroupFor(parentCallID string) *parallelGroup {
+	if c.parallelIndex == nil {
+		c.parallelIndex = make(map[string]int)
+	}
+	if i, ok := c.parallelIndex[parentCallID]; ok {
+		return &c.parallelGroups[i]
+	}
+	c.parallelIndex[parentCallID] = len(c.parallelGroups)
+	c.parallelGroups = append(c.parallelGroups, parallelGroup{
+		parentCallID: parentCallID,
+		winner:       -1,
+		branchIndex:  map[int]int{},
+	})
+	return &c.parallelGroups[len(c.parallelGroups)-1]
+}
+
+// parallelBranchFor returns the branch slot for index within a group (creating one in
+// first-seen order if absent), so the branch_start/tool/end accumulators converge on one
+// branch per index.
+func (g *parallelGroup) parallelBranchFor(index int) *parallelBranch {
+	if g.branchIndex == nil {
+		g.branchIndex = map[int]int{}
+	}
+	if i, ok := g.branchIndex[index]; ok {
+		return &g.branches[i]
+	}
+	g.branchIndex[index] = len(g.branches)
+	g.branches = append(g.branches, parallelBranch{index: index})
+	return &g.branches[len(g.branches)-1]
+}
+
+// parallelStart records the run-level join + branch count on a group (creating it). A
+// missing parentCallID is dropped (no stable group key).
+func (c *conversation) parallelStart(parentCallID, join string, branchCount int) {
+	if parentCallID == "" {
+		return
+	}
+	g := c.parallelGroupFor(parentCallID)
+	g.join = join
+	g.branchCount = branchCount
+}
+
+// parallelBranchStart records a branch's label + goal on its group branch (creating both).
+func (c *conversation) parallelBranchStart(parentCallID string, index int, label, goal string) {
+	if parentCallID == "" {
+		return
+	}
+	br := c.parallelGroupFor(parentCallID).parallelBranchFor(index)
+	br.label = label
+	br.goal = goal
+}
+
+// parallelBranchTool records a resolved branch tool: the latest tool name (liveness),
+// the running count, the last-error cue, and an appended capped trace chip (mirroring
+// fleetTool).
+func (c *conversation) parallelBranchTool(parentCallID string, index int, toolName string, isError bool, toolCount int) {
+	if parentCallID == "" {
+		return
+	}
+	br := c.parallelGroupFor(parentCallID).parallelBranchFor(index)
+	br.current = toolName
+	br.isError = isError
+	br.toolCount = toolCount
+	br.trace = append(br.trace, subToolChip{name: toolName, isError: isError})
+	if len(br.trace) > maxSubagentTrace {
+		br.trace = br.trace[len(br.trace)-maxSubagentTrace:]
+	}
+}
+
+// parallelBranchEnd records a branch's resolved terminal stats (done gates them).
+func (c *conversation) parallelBranchEnd(parentCallID string, index int, usage client.Usage, toolCount int, stop string, failed bool, workspace string, durationMs int64) {
+	if parentCallID == "" {
+		return
+	}
+	br := c.parallelGroupFor(parentCallID).parallelBranchFor(index)
+	br.done = true
+	br.usage = usage
+	br.toolCount = toolCount
+	br.stop = stop
+	br.failed = failed
+	br.workspace = workspace
+	br.durationMs = durationMs
+}
+
+// parallelEnd records the run-level terminal facts on a group: the join, the resolved
+// winner index (-1 = none/all), the preserved winner workspace, and the run stop.
+func (c *conversation) parallelEnd(parentCallID, join string, branchCount, winner int, winnerWorkspace, stop string) {
+	if parentCallID == "" {
+		return
+	}
+	g := c.parallelGroupFor(parentCallID)
+	g.done = true
+	g.join = join
+	if branchCount > 0 {
+		g.branchCount = branchCount
+	}
+	g.winner = winner
+	g.winnerWorkspace = winnerWorkspace
+	g.stop = stop
+}
+
+// parallelGroupCounts classifies the Parallel groups into (running, done). A group is done
+// once its parallel.end arrived. Footer segment aggregate + Parallel-tab header count.
+func (c *conversation) parallelGroupCounts() (running, done int) {
+	return parallelCounts(c.parallelGroups)
+}
+
+// hasParallel reports whether ≥1 Parallel run has started this session — the gate for the
+// fleet footer segment and the ctrl+a Parallel tab (mirroring hasSubagents).
+func (c *conversation) hasParallel() bool { return len(c.parallelGroups) > 0 }
+
+// liveParallel reports whether any Parallel group is still RUNNING (no parallel.end yet) —
+// the "richest live surface" signal for the default-tab precedence (mirroring how
+// liveTeamBlock gates the Teams default).
+func (c *conversation) liveParallel() bool {
+	for i := range c.parallelGroups {
+		if !c.parallelGroups[i].done {
+			return true
+		}
+	}
+	return false
+}
 
 // teamBlock returns the Team tool block whose toolID matches parentCallID, or nil
 // if none. Matching is by id only — the SAME contract as resolveTool/subagentBlock

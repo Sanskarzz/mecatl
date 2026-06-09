@@ -112,6 +112,45 @@ const (
 	// joined summary folds back into the parent conversation exclusively via the Team
 	// tool's ToolResult.
 	EvTeamEnd EventType = "team.end"
+
+	// EvParallelStart is emitted when a Parallel (fork-join fan-out) tool run begins.
+	// It is a REDACTED, RUN-LEVEL projection: it carries the parent call id, the join
+	// strategy, and the branch count so a client can frame the group from the first
+	// event — never any branch content. See ParallelPayload for the redaction contract.
+	EvParallelStart EventType = "parallel.start"
+	// EvParallelBranch is emitted for each per-branch lifecycle transition of a Parallel
+	// run, discriminated by ParallelPayload.Kind (branch_start / branch_tool / branch_end).
+	// Like EvSubagentTool it is METADATA ONLY: a branch_tool carries only the child tool's
+	// NAME + error bool + running count (forwarded via the SAME drainChildObserved
+	// chokepoint Subagent uses), and a branch_end carries only the branch's stop / usage /
+	// duration / failed flag / fork-root path — never branch args, result bodies, or
+	// message text. This keeps gauntlet #7 intact.
+	EvParallelBranch EventType = "parallel.branch"
+	// EvParallelEnd is emitted when a Parallel run terminates. It is a REDACTED, RUN-LEVEL
+	// projection carrying the join strategy, the WINNER branch index (-1 for join=all /
+	// none-succeeded), the PRESERVED winner fork root, the run-total usage, the branch
+	// count, and the run-level stop — never any branch content. The branches' summaries
+	// fold back into the parent conversation exclusively via the Parallel tool's
+	// ToolResult.
+	EvParallelEnd EventType = "parallel.end"
+)
+
+// ParallelEventKind discriminates which lifecycle transition an EvParallelBranch event
+// projects (mirroring the way the client switches on a kind, like client.SubagentKind).
+// The run-level EvParallelStart / EvParallelEnd events carry their own implicit kind via
+// their event type; ParallelEventKind is set only on EvParallelBranch.
+type ParallelEventKind string
+
+const (
+	// ParallelBranchStart marks a branch beginning its child run. Sets BranchIndex,
+	// BranchLabel, Goal.
+	ParallelBranchStart ParallelEventKind = "branch_start"
+	// ParallelBranchTool marks a branch's child tool call resolving. Sets BranchIndex,
+	// ToolName, IsError, ToolCount — metadata only (the drainChildObserved projection).
+	ParallelBranchTool ParallelEventKind = "branch_tool"
+	// ParallelBranchEnd marks a branch's child run terminating. Sets BranchIndex,
+	// ToolCount, Stop, Usage, DurationMs, Failed, Workspace.
+	ParallelBranchEnd ParallelEventKind = "branch_end"
 )
 
 // HookDecision is the outcome a hook fire produced, so a client can colour and
@@ -199,6 +238,26 @@ type TurnEndPayload struct {
 	InterTokenMaxMs int64
 }
 
+// The three DELEGATION observability families — SubagentPayload / ParallelPayload /
+// TeamPayload — all project the SAME underlying child-loop LIFECYCLE: a redacted child
+// doing tool work, start → tool → end. The shared scalar lifecycle is the parent call
+// id, a child/branch/member identity, a tool name / error bool / running count, usage,
+// stop reason, and duration; and the per-tool redaction of that lifecycle is shared in
+// EXACTLY ONE place — agent.drainChildObserved (the single redaction chokepoint all
+// three reuse). The three payloads therefore differ ONLY in their AGGREGATION shape, not
+// their lifecycle:
+//   - SubagentPayload — a FLAT fleet (one row per child, no grouping).
+//   - ParallelPayload — a fan-out GROUP (branches share a join mode + a single winner +
+//     preserved per-branch fork paths).
+//   - TeamPayload     — a coordinating ROSTER (a task board + findings ledger + mailbox).
+//
+// Do NOT merge these three into one discriminated payload: the shared part is already
+// shared (drainChildObserved), and the divergent parts (join/winner/fork-paths vs
+// tasks/findings/dispositions vs flat fleet) are exactly what each family exists to
+// carry. TRIP-WIRE: a 4th delegation family is the point to extract a shared
+// ChildActivity value object for the common lifecycle scalars — NOT before (three, with
+// the redaction already shared, does not warrant the shipped-contract migration cost).
+
 // SubagentPayload is the REDACTED observability projection carried by the three
 // subagent.* events (EvSubagentStart / EvSubagentTool / EvSubagentEnd). It is the
 // ONLY information about a Subagent tool's child run that surfaces to clients, and
@@ -239,6 +298,90 @@ type SubagentPayload struct {
 	// DurationMs is the child run's wall-clock duration in milliseconds
 	// (best-effort). Set on EvSubagentEnd only.
 	DurationMs int64
+}
+
+// ParallelPayload is the REDACTED observability projection carried by the parallel.*
+// events (EvParallelStart / EvParallelBranch / EvParallelEnd). Like SubagentPayload it is
+// METADATA ONLY — it carries no branch content (no message text, no tool args, no tool
+// result bodies), only metadata plus the per-branch fork-root PATHS (a handle the model
+// is already given in the Parallel ToolResult text, not branch content). This keeps the
+// context-isolation guarantee (gauntlet #7) intact: forwarding metadata to the event
+// stream never touches the parent's Conversation.
+//
+// Unlike the FLAT SubagentPayload, a Parallel run is a GROUP: N branches of ONE call
+// (keyed by ParentCallID) sharing a join strategy, a single winner (join=first/judge),
+// and preserved per-branch fork paths. Those are RUN-LEVEL facts carried on the
+// start/end events; the per-branch events carry per-branch metadata keyed by BranchIndex.
+//
+// Which fields are set depends on the event kind:
+//   - EvParallelStart:                       ParentCallID, Join, BranchCount.
+//   - EvParallelBranch (Kind=branch_start):  ParentCallID, Kind, BranchIndex, BranchLabel, Goal.
+//   - EvParallelBranch (Kind=branch_tool):   ParentCallID, Kind, BranchIndex, ToolName, IsError, ToolCount.
+//   - EvParallelBranch (Kind=branch_end):    ParentCallID, Kind, BranchIndex, ToolCount, Stop, Usage, DurationMs, Failed, Workspace.
+//   - EvParallelEnd:                         ParentCallID, Join, BranchCount, Winner, WinnerWorkspace, Usage (run total), Stop.
+type ParallelPayload struct {
+	// ParentCallID is the parent's Parallel tool-call id; it is the GROUP key (one
+	// Parallel call = one group) and attributes every parallel.* event to the
+	// originating Parallel card. Set on all kinds.
+	ParentCallID string
+	// Kind discriminates the per-branch lifecycle transition (branch_start /
+	// branch_tool / branch_end). Set on EvParallelBranch only; empty on the run-level
+	// start/end events.
+	Kind ParallelEventKind
+
+	// Join is the normalized join strategy ("all" / "first" / "judge"). Set on
+	// EvParallelStart and EvParallelEnd (run-level).
+	Join string
+	// BranchCount is the number of branches in the run. Set on EvParallelStart and
+	// EvParallelEnd (run-level).
+	BranchCount int
+
+	// BranchIndex is the 0-based branch index — the stable per-branch group key within
+	// a Parallel call. Set on every EvParallelBranch kind. (It is NOT a child session id:
+	// Parallel branch ids are throwaway and never addressed; the index is the row key.)
+	BranchIndex int
+	// BranchLabel is the humanized 1-based branch label ("branch-1" …). Set on the
+	// branch_start kind.
+	BranchLabel string
+	// Goal is a short, plain-text label for the branch's task (a truncation of the
+	// model-authored branch prompt — the parent's own instruction, NOT branch content).
+	// Set on the branch_start kind. Clamped identically to SubagentPayload.Goal.
+	Goal string
+
+	// ToolName is the name of a branch's child tool that just ran. Set on the
+	// branch_tool kind only. It is the tool NAME alone — never branch args/result.
+	ToolName string
+	// IsError reports whether that branch tool call failed. Set on branch_tool only.
+	IsError bool
+	// ToolCount is the running (branch_tool) or final (branch_end) number of a branch's
+	// child tool calls observed.
+	ToolCount int
+
+	// Failed reports whether the branch's child run failed (StopError / cancelled /
+	// fork failure). Set on the branch_end kind.
+	Failed bool
+	// Workspace is this branch's forked workspace ROOT path — the no-auto-merge handle
+	// (the same path surfaced in the Parallel ToolResult text). It is server-side path
+	// text, NOT branch conversation content. Set on the branch_end kind.
+	Workspace string
+
+	// Stop is the branch's terminal stop reason (branch_end) or the run-level stop
+	// (EvParallelEnd; the winner's stop for join=first/judge, zero/omitted for join=all).
+	Stop StopReason
+	// Usage is the branch's cumulative usage (branch_end) or the run TOTAL (EvParallelEnd,
+	// summed across branches).
+	Usage Usage
+	// DurationMs is the branch's wall-clock duration in milliseconds. Set on branch_end.
+	DurationMs int64
+
+	// Winner is the branch index of the selected winner on EvParallelEnd — a real
+	// BranchIndex for join=first/judge, or -1 for join=all and none-succeeded. Set on
+	// EvParallelEnd only.
+	Winner int
+	// WinnerWorkspace is the PRESERVED winner fork root on EvParallelEnd (the deliverable
+	// handle for join=first/judge); empty for join=all / none-succeeded. Set on
+	// EvParallelEnd only.
+	WinnerWorkspace string
 }
 
 // TeamMemberSpec is one roster entry forwarded on EvTeamStart: the member name,
@@ -444,4 +587,8 @@ type Event struct {
 	// content is capped and permission.ask is dropped, and never enters the parent
 	// conversation).
 	Team *TeamPayload
+	// Parallel is set on the parallel.* events (start / branch / end): the REDACTED,
+	// metadata-only observability projection of a Parallel fork-join run (group-level
+	// join/winner facts + per-branch metadata + fork paths, never branch content).
+	Parallel *ParallelPayload
 }

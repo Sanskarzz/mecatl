@@ -324,12 +324,12 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 | `esc` (with an active selection) | **clear the selection** first — before any other `esc` meaning |
 | `?` | help overlay (on an empty prompt) |
 | `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`, `/soul`, `/usermodel`, `/models`; plus workspace commands) |
-| `ctrl+a` | open the **unified agents overlay** — ONE surface with two tabs: **Subagents** (the flat Task-child fleet) and **Teams** (the full roster + per-member focus of the most-recent team). `tab` switches tabs, `enter` focuses a row, `esc` steps back / closes. The default tab is **context-sensitive**: Teams when a team is live, else Subagents when subagents have run. Works **while idle and mid-run**; inert under a permission modal. `/team` opens it pinned to the Teams tab. |
+| `ctrl+a` | open the **unified agents overlay** — ONE surface with three tabs: **Subagents** (the flat Task-child fleet), **Parallel** (the fork-join GROUP roster — join mode, branches, winner, fork paths), and **Teams** (the full roster + per-member focus of the most-recent team). `tab` cycles tabs, `enter` focuses a row/group, `esc` steps back / closes. The default tab is **context-sensitive** (team live → parallel live → subagents → parallel → team). Works **while idle and mid-run**; inert under a permission modal. `/team` opens it pinned to the Teams tab. |
 | `@` | file-mention menu — complete a workspace path, then attach it on submit (see below) |
 
 The `?` overlay enumerates the rest of the chords — `ctrl+v` (paste a clipboard
 image), `ctrl+o`/`ctrl+r`/`ctrl+p` (MCP inventory / resources / prompts), `ctrl+a`
-(unified agents overlay — Subagents / Teams tabs — available idle **and** mid-run), `ctrl+t`
+(unified agents overlay — Subagents / Parallel / Teams tabs — available idle **and** mid-run), `ctrl+t`
 (expand/collapse details), and the scroll keys (`pgup`/`pgdn`, `home`/`end`, mouse
 wheel) — and greys out any whose feature the connected server has not enabled
 (driven by the server's relayed capabilities). When the server serves agent
@@ -353,33 +353,46 @@ sits or how tall it is. When a transient region appears the viewport **shrinks**
 make room and the footer stays on-screen — a transient never pushes the footer off
 the bottom (and the viewport grows back when the transient clears).
 
-### Watching subagents and teams — the fleet footer + the unified `ctrl+a` overlay
+### Watching subagents, parallel runs, and teams — the fleet footer + the unified `ctrl+a` overlay
 
-Two surfaces watch concurrent **Task subagents** and **agent teams**, both built
-purely from the relayed `subagent.*` / `team.*` event projection (REDACTED,
-metadata-only — never child content):
+Three surfaces watch concurrent **Task subagents**, **Parallel fork-join runs**, and
+**agent teams**, all built purely from the relayed `subagent.*` / `parallel.*` / `team.*`
+event projection (REDACTED, metadata-only — never child/branch content):
 
-- **Fleet status footer segment.** Once **≥1 subagent has started** this session the
+- **Fleet status footer segments.** Once **≥1 subagent has started** this session the
   footer carries a peripheral cue — **`⛭ subagents 3◐ 1✓ · ctrl+a`** (N running ◐ / M
-  done ✓) — so the parallel case is discoverable without opening anything. It is built
-  from a flat fleet collection keyed by `ChildID`, fed alongside the inline Task-card
-  routing. It sheds before the context meter as width tightens (full → `⛭ 3◐ 1✓ · ctrl+a`
-  → `⛭ 3◐ 1✓` → dropped), exactly like the live-team segment, and the two coexist when a
-  session runs both. With no subagent the footer is byte-identical to before.
+  done ✓). A **Parallel** run adds its own segment — **`⑂ parallel 1◐ 2✓ · ctrl+a`** —
+  once **≥1 Parallel run has started**, so the fan-out is discoverable without opening
+  anything. Both are built from collections fed alongside the inline tool-card routing and
+  shed before the context meter as width tightens (full → `⑂ 1◐ 2✓ · ctrl+a` → `⑂ 1◐ 2✓`
+  → dropped), exactly like the live-team segment; all three coexist when a session runs
+  them. With no agent activity the footer is byte-identical to before. (Glyphs: `⛭`
+  subagents, `⑂` parallel, `⟳` live team — distinct so they never collide.)
 
-- **Unified `ctrl+a` agents overlay.** ONE surface with two tabs:
+- **Unified `ctrl+a` agents overlay.** ONE surface with **three tabs — Subagents |
+  Parallel | Teams**:
   - **Subagents** — one row per Task child: a state glyph (**◐** running / **✓** done /
     **✗** error), the goal label, a short `#<hash>` of the `ChildID` (so two similar
     goals are unambiguous), the current/last child tool, the running tool count, and
     token usage. `enter` focuses one child's redacted `✓/✗` tool-chip trace (args/results
     stay hidden — context-isolated; gauntlet #7). The roster is windowed (pgup/pgdn,
     home/g·end/G, `+K above/below` tails) like the team roster.
+  - **Parallel** — a Parallel run is a **GROUP**, not a flat fleet, so the roster lists one
+    row per Parallel call: a state glyph (**◐** running / **✓** done), the **join strategy**
+    (all / first / judge), the running/total **branch tally**, and the **winner** branch
+    once a first/judge run resolves. `enter` focuses ONE group (one level — plan Q4),
+    showing **all its branches inline** with the **winner row highlighted (★)** and the
+    **preserved winner fork path** (`winner fork (preserved): <path>`). Each branch row
+    carries its own glyph (**◐**/**✓**/**✗** failed), label, goal, current/last tool,
+    count, and usage. Branch args/results stay hidden (context-isolated; gauntlet #7). The
+    fork paths are the model's no-auto-merge handle and ride the tool RESULT too — these
+    events are the client observability channel only.
   - **Teams** — the existing agent-team roster + per-member focus + task / findings
     sub-views, verbatim.
-  - `tab` switches tabs; `esc` steps back from a focus pane to its roster, then closes.
-    The **default tab is context-sensitive**: Teams when a team is live, else Subagents
-    when subagents have run, else the most-relevant available tab. `/team` opens the same
-    overlay pinned to the Teams tab.
+  - `tab` cycles tabs (Subagents → Parallel → Teams); `esc` steps back from a focus pane
+    to its roster, then closes. The **default tab is context-sensitive** (precedence:
+    team live → Teams; parallel live → Parallel; subagents ran → Subagents; parallel ran →
+    Parallel; team ran → Teams). `/team` opens the same overlay pinned to the Teams tab.
 
   A subagent that ended via a non-`end_turn` terminal renders a sensible label — the
   newer Task/Team stop reasons (`budget` → "budget", `structured_output` → "schema",

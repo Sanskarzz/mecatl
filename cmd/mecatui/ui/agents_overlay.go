@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -22,8 +23,31 @@ type agentsTab int
 
 const (
 	tabSubagents agentsTab = iota // the flat Subagent-child fleet roster + per-child focus
+	tabParallel                   // the Parallel fork-join GROUP roster + per-group (branch) focus
 	tabTeams                      // the agent-team roster + per-member focus (the former team overlay)
 )
+
+// parallelView is the active Parallel-tab sub-view: the GROUP roster (one row per Parallel
+// call) or one focused group showing its branches inline (ONE level — plan Q4). A Parallel
+// run is a fan-out group, so the focus shows ALL branches of a group at once (winner
+// highlighted) rather than drilling into a single branch.
+type parallelView int
+
+const (
+	parallelRoster    parallelView = iota // the group roster (one row per Parallel call)
+	parallelGroupView                     // one focused group's branches inline (winner highlighted)
+)
+
+// parallelState holds the Parallel-tab overlay state on the Model. Like subagentState it
+// is value-embedded and holds only a sub-view, a selection cursor, and the focused group's
+// ParentCallID (never a copy of the groups — the panel reads the live groups off the
+// conversation each render). Focus is keyed by ParentCallID (not index) so a group list
+// that grows under the overlay can't shift focus onto the wrong group.
+type parallelState struct {
+	view   parallelView
+	cursor int    // selected row in the group roster (index into the group order)
+	group  string // the focused group's ParentCallID (parallelGroupView)
+}
 
 // subagentView is the active Subagents-tab sub-view (parallel to teamView): the flat
 // fleet roster or one focused child's redacted chip trace. There is no none state —
@@ -61,36 +85,41 @@ func (m Model) openAgents() (tea.Model, tea.Cmd) {
 	teamLive := m.conv.liveTeamBlock() != nil
 	haveTeam := m.conv.latestTeamBlock() != nil
 	haveSub := m.conv.hasSubagents()
-	if !haveTeam && !haveSub {
+	parallelLive := m.conv.liveParallel()
+	haveParallel := m.conv.hasParallel()
+	if !haveTeam && !haveSub && !haveParallel {
 		// Nothing to show — surface a brief hint rather than opening an empty overlay,
 		// distinguishing "teams not enabled on this server" from "nothing has run yet".
 		if !m.caps.Teams {
 			m.statusMsg = "agent teams are not enabled on this server"
 		} else {
-			m.statusMsg = "no team or subagent has run yet"
+			m.statusMsg = "no team, subagent, or parallel run has run yet"
 		}
 		return m, nil
 	}
 	m.ta.Blur() // the overlay owns the keyboard while open
-	// Context-sensitive default tab: Teams when one is LIVE; else Subagents when any
-	// subagent has run; else Teams (a finished team is still reviewable). preferSubagentTab
-	// is the single predicate, tested in isolation.
-	m.agentsTab = m.preferredAgentsTab(teamLive, haveTeam, haveSub)
+	// Context-sensitive default tab (preferredAgentsTab is the single predicate, tested in
+	// isolation): the richest LIVE surface wins, else the tab that has content.
+	m.agentsTab = m.preferredAgentsTab(teamLive, haveTeam, haveSub, parallelLive, haveParallel)
 	m.team = teamState{view: teamRoster} // container open flag (+ Teams-tab state)
 	m.subagents = subagentState{view: subagentRoster}
+	m.parallel = parallelState{view: parallelRoster}
 	return m, nil
 }
 
-// preferredAgentsTab is the context-sensitive default-tab predicate (its own function
-// so it is testable in isolation): open on Subagents when subagents are running and no
-// team is live; open on Teams when a team is live; otherwise prefer the tab that has
-// content (Subagents if only subagents ran, else Teams).
-func (Model) preferredAgentsTab(teamLive, haveTeam, haveSub bool) agentsTab {
+// preferredAgentsTab is the context-sensitive default-tab predicate (its own function so
+// it is testable in isolation). Precedence (plan Q5, "richest live surface wins"):
+// teamLive > parallelLive > haveSub > haveParallel > haveTeam > Subagents.
+func (Model) preferredAgentsTab(teamLive, haveTeam, haveSub, parallelLive, haveParallel bool) agentsTab {
 	switch {
 	case teamLive:
 		return tabTeams
+	case parallelLive:
+		return tabParallel
 	case haveSub:
 		return tabSubagents
+	case haveParallel:
+		return tabParallel
 	case haveTeam:
 		return tabTeams
 	default:
@@ -102,18 +131,23 @@ func (Model) preferredAgentsTab(teamLive, haveTeam, haveSub bool) agentsTab {
 func (m Model) closeAgents() (tea.Model, tea.Cmd) {
 	m.team = teamState{}
 	m.subagents = subagentState{}
+	m.parallel = parallelState{}
 	cmd := m.ta.Focus()
 	return m, cmd
 }
 
-// switchAgentsTab flips the active tab (Subagents↔Teams) and resets the incoming
-// tab's sub-view to its roster, so `tab` is always a clean tab switch (never lands
-// mid-focus on the other tab). It does NOT close the overlay.
+// switchAgentsTab cycles the active tab (Subagents→Parallel→Teams→Subagents) and resets
+// the incoming tab's sub-view to its roster, so `tab` is always a clean tab switch (never
+// lands mid-focus on another tab). It does NOT close the overlay.
 func (m Model) switchAgentsTab() Model {
-	if m.agentsTab == tabSubagents {
+	switch m.agentsTab {
+	case tabSubagents:
+		m.agentsTab = tabParallel
+		m.parallel.view = parallelRoster
+	case tabParallel:
 		m.agentsTab = tabTeams
 		m.team.view = teamRoster
-	} else {
+	default:
 		m.agentsTab = tabSubagents
 		m.subagents.view = subagentRoster
 	}
@@ -134,20 +168,28 @@ func (m Model) onAgentsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if key.Matches(msg, m.keys.NextTab) && m.atAgentsRoster() {
 		return m.switchAgentsTab(), nil, true
 	}
-	if m.agentsTab == tabSubagents {
+	switch m.agentsTab {
+	case tabSubagents:
 		return m.onSubagentKey(msg)
+	case tabParallel:
+		return m.onParallelKey(msg)
+	default:
+		return m.onTeamKey(msg)
 	}
-	return m.onTeamKey(msg)
 }
 
 // atAgentsRoster reports whether the active tab is showing its top-level roster (not a
 // focus/sub-view), so `tab` only switches tabs from a roster — a focus pane's esc must
-// step back to its own roster first (consistent across both tabs).
+// step back to its own roster first (consistent across all tabs).
 func (m Model) atAgentsRoster() bool {
-	if m.agentsTab == tabSubagents {
+	switch m.agentsTab {
+	case tabSubagents:
 		return m.subagents.view == subagentRoster
+	case tabParallel:
+		return m.parallel.view == parallelRoster
+	default:
+		return m.team.view == teamRoster
 	}
-	return m.team.view == teamRoster
 }
 
 // onSubagentKey routes keys while the Subagents tab is active. It mirrors onTeamKey:
@@ -205,20 +247,78 @@ func (m Model) onSubagentRosterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// onParallelKey routes keys while the Parallel tab is active. It mirrors onSubagentKey:
+// esc steps back from group focus to the roster, then closes; the roster handler drives
+// selection/focus. ONE level of focus (plan Q4) — a focused group shows all its branches
+// inline, so there is no deeper branch focus to step back through.
+func (m Model) onParallelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	if m.parallel.view == parallelGroupView {
+		if key.Matches(msg, m.keys.Close) {
+			m.parallel.view = parallelRoster
+			m.parallel.group = ""
+		}
+		return m, nil, true
+	}
+	mm, cmd := m.onParallelRosterKey(msg)
+	return mm, cmd, true
+}
+
+// onParallelRosterKey drives the Parallel group roster: up/down move the selection,
+// pgup/pgdn page it, home/g·end/G jump to first/last, enter focuses the selected group by
+// ParentCallID, esc closes the overlay. It mirrors onSubagentRosterKey one-for-one.
+func (m Model) onParallelRosterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	groups := m.conv.parallelGroups
+	n := len(groups)
+	page := teamRosterRows(m.vp.Height())
+	switch {
+	case key.Matches(msg, m.keys.Close):
+		return m.closeAgents()
+	case key.Matches(msg, m.keys.Up):
+		m.parallel.cursor = clampCursor(m.parallel.cursor-1, n)
+		return m, nil
+	case key.Matches(msg, m.keys.Down):
+		m.parallel.cursor = clampCursor(m.parallel.cursor+1, n)
+		return m, nil
+	case key.Matches(msg, m.keys.ScrollU):
+		m.parallel.cursor = clampCursor(m.parallel.cursor-page, n)
+		return m, nil
+	case key.Matches(msg, m.keys.ScrollD):
+		m.parallel.cursor = clampCursor(m.parallel.cursor+page, n)
+		return m, nil
+	case key.Matches(msg, m.keys.JumpTop):
+		m.parallel.cursor = 0
+		return m, nil
+	case key.Matches(msg, m.keys.JumpEnd):
+		m.parallel.cursor = clampCursor(n-1, n)
+		return m, nil
+	case key.Matches(msg, m.keys.Choose):
+		if m.parallel.cursor < 0 || m.parallel.cursor >= n {
+			return m, nil
+		}
+		m.parallel.group = groups[m.parallel.cursor].parentCallID
+		m.parallel.view = parallelGroupView
+		return m, nil
+	}
+	return m, nil
+}
+
 // renderAgentsOverlay draws the active unified agents overlay centred over the
-// conversation region. It prepends a one-line tab bar (Subagents | Teams, active tab
-// highlighted) above the active tab's body, then frames the whole thing in the shared
-// card. The team block may be nil (no team yet) — the Teams tab then shows an honest
-// empty note rather than borrowing the Subagents body.
-func renderAgentsOverlay(th theme.Theme, tab agentsTab, sub subagentState, team teamState, b *block, fleet []subagentLane, width, height int) string {
+// conversation region. It prepends a one-line tab bar (Subagents | Parallel | Teams,
+// active tab highlighted) above the active tab's body, then frames the whole thing in the
+// shared card. The team block may be nil (no team yet) — the Teams tab then shows an
+// honest empty note rather than borrowing another tab's body.
+func renderAgentsOverlay(th theme.Theme, tab agentsTab, sub subagentState, par parallelState, team teamState, b *block, fleet []subagentLane, groups []parallelGroup, width, height int) string {
 	bar := agentsTabBar(th, tab)
 	// The body gets the height MINUS the tab bar + its blank line (agentsTabBarLines),
 	// so the window math in the tab bodies still keeps the footer hint on-screen.
 	bodyHeight := agentsBodyHeight(height)
 	var body string
-	if tab == tabSubagents {
+	switch tab {
+	case tabSubagents:
 		body = renderSubagentTab(th, sub, fleet, bodyHeight)
-	} else {
+	case tabParallel:
+		body = renderParallelTab(th, par, groups, bodyHeight)
+	default:
 		body = renderTeamsTab(th, team, b, bodyHeight)
 	}
 	return centerCard(th, bar+"\n\n"+body, width, height)
@@ -240,18 +340,22 @@ func agentsBodyHeight(height int) int {
 	return height - agentsTabBarLines
 }
 
-// agentsTabBar renders the "Subagents | Teams" tab strip: the active tab in the title
-// style, the inactive in muted, joined by a muted separator. It is glyph-free so it
-// reads identically with ANSI stripped; the active tab is distinguished by a leading
-// "▸" marker (not colour alone) so a golden's stripANSI still shows which is active.
+// agentsTabBar renders the "Subagents | Parallel | Teams" tab strip: the active tab in the
+// title style, the inactive ones in muted. It is glyph-free for label text so it reads
+// identically with ANSI stripped; the active tab is distinguished by a leading "▸" marker
+// (not colour alone) so a golden's stripANSI still shows which is active.
 func agentsTabBar(th theme.Theme, tab agentsTab) string {
 	active := th.Style("askTitle")
 	muted := th.Style("muted")
-	sub, teams := "Subagents", "Teams"
-	if tab == tabSubagents {
-		return active.Render("▸ "+sub) + muted.Render("   "+teams)
+	seg := func(t agentsTab, label string) string {
+		if tab == t {
+			return active.Render("▸ " + label)
+		}
+		return muted.Render("  " + label)
 	}
-	return muted.Render("  "+sub) + active.Render("   ▸ "+teams)
+	return seg(tabSubagents, "Subagents") + muted.Render("  ") +
+		seg(tabParallel, "Parallel") + muted.Render("  ") +
+		seg(tabTeams, "Teams")
 }
 
 // renderTeamsTab renders the Teams tab body — the EXISTING team overlay roster /
@@ -261,7 +365,7 @@ func renderTeamsTab(th theme.Theme, st teamState, b *block, height int) string {
 	if b == nil {
 		muted := th.Style("muted")
 		return muted.Render("no team has run this session") + "\n\n" +
-			muted.Render("tab subagents · esc close")
+			muted.Render("tab switch · esc close")
 	}
 	switch st.view {
 	case teamFocus:
@@ -298,7 +402,7 @@ func renderSubagentRoster(th theme.Theme, st subagentState, fleet []subagentLane
 
 	if len(fleet) == 0 {
 		out.WriteString(muted.Render("(no subagents)"))
-		out.WriteString("\n\n" + muted.Render("tab teams · esc close"))
+		out.WriteString("\n\n" + muted.Render("tab switch · esc close"))
 		return out.String()
 	}
 
@@ -319,7 +423,7 @@ func renderSubagentRoster(th theme.Theme, st subagentState, fleet []subagentLane
 		out.WriteString(muted.Render(fmt.Sprintf("  · +%d below", below)) + "\n")
 	}
 
-	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · tab teams · esc close"))
+	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · tab switch · esc close"))
 	return out.String()
 }
 
@@ -331,14 +435,7 @@ func subagentRosterHeader(running, done int) string {
 // fleetCounts classifies the fleet slice into (running, done) — the standalone form of
 // conversation.subagentFleetCounts, used by the render path which holds only the slice.
 func fleetCounts(fleet []subagentLane) (running, done int) {
-	for i := range fleet {
-		if fleet[i].done {
-			done++
-		} else {
-			running++
-		}
-	}
-	return running, done
+	return countDone(fleet, func(ln subagentLane) bool { return ln.done })
 }
 
 // subagentRosterLine is one fleet row: a state glyph (◐ running / ✓ done / ✗ error),
@@ -494,4 +591,226 @@ func subagentStopErrored(stop string) bool {
 	default:
 		return false
 	}
+}
+
+// --- Parallel tab -------------------------------------------------------------------
+
+// renderParallelTab renders the Parallel tab body: the GROUP roster (one row per Parallel
+// call) or one focused group's branches inline.
+func renderParallelTab(th theme.Theme, st parallelState, groups []parallelGroup, height int) string {
+	if st.view == parallelGroupView {
+		return renderParallelGroupFocus(th, groups, st.group, height)
+	}
+	return renderParallelRoster(th, st, groups, height)
+}
+
+// renderParallelRoster renders the Parallel group roster WINDOWED to the available height,
+// mirroring renderSubagentRoster: a header (running/done group counts), the slice of rows
+// that fits with the selected row highlighted, "+K above/below" tails, and a footer hint.
+// An empty group list reads as a muted "(no parallel runs)". height<=0 shows all.
+func renderParallelRoster(th theme.Theme, st parallelState, groups []parallelGroup, height int) string {
+	muted := th.Style("muted")
+	var out strings.Builder
+
+	running, done := parallelCounts(groups)
+	out.WriteString(th.Style("askTitle").Render(fmt.Sprintf("parallel · %d running · %d done", running, done)))
+	out.WriteString("\n\n")
+
+	if len(groups) == 0 {
+		out.WriteString(muted.Render("(no parallel runs)"))
+		out.WriteString("\n\n" + muted.Render("tab switch · esc close"))
+		return out.String()
+	}
+
+	cursor := clampCursor(st.cursor, len(groups))
+	start, end, above, below := teamWindow(cursor, len(groups), teamRosterRows(height))
+	if above > 0 {
+		out.WriteString(muted.Render(fmt.Sprintf("  · +%d above", above)) + "\n")
+	}
+	for row := start; row < end; row++ {
+		line := parallelRosterLine(&groups[row])
+		if row == cursor {
+			out.WriteString(th.Style("askButtonActive").Render("› "+line) + "\n")
+		} else {
+			out.WriteString(muted.Render("  "+line) + "\n")
+		}
+	}
+	if below > 0 {
+		out.WriteString(muted.Render(fmt.Sprintf("  · +%d below", below)) + "\n")
+	}
+
+	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · tab switch · esc close"))
+	return out.String()
+}
+
+// parallelCounts classifies the group slice into (running, done) — a group is done once
+// its parallel.end arrived.
+func parallelCounts(groups []parallelGroup) (running, done int) {
+	return countDone(groups, func(g parallelGroup) bool { return g.done })
+}
+
+// parallelRosterLine is one group row: a state glyph (◐ running / ✓ done), the join
+// strategy, the running/total branch tally, and the winner (for first/judge once
+// resolved). It holds only redacted run-level metadata.
+func parallelRosterLine(g *parallelGroup) string {
+	glyph := "◐"
+	if g.done {
+		glyph = "✓"
+	}
+	join := g.join
+	if join == "" {
+		join = "all"
+	}
+	branchesDone := 0
+	for i := range g.branches {
+		if g.branches[i].done {
+			branchesDone++
+		}
+	}
+	total := g.branchCount
+	if total < len(g.branches) {
+		total = len(g.branches)
+	}
+	line := fmt.Sprintf("%s %s · %d/%d branches", glyph, join, branchesDone, total)
+	if w := parallelWinnerLabel(g); w != "" {
+		line += " · winner " + w
+	}
+	return line
+}
+
+// parallelWinnerLabel renders the winner's branch label once a group resolves a winner
+// (join=first/judge). join=all (winner=-1) and an unresolved run return "".
+func parallelWinnerLabel(g *parallelGroup) string {
+	if g.winner < 0 {
+		return ""
+	}
+	return branchHumanLabel(g, g.winner)
+}
+
+// branchHumanLabel returns the human label for a branch index within a group, preferring
+// the branch's own label (from branch_start) and falling back to the 1-based "branch-N".
+func branchHumanLabel(g *parallelGroup, index int) string {
+	for i := range g.branches {
+		if g.branches[i].index == index && g.branches[i].label != "" {
+			return sanitizeTerminal(g.branches[i].label)
+		}
+	}
+	return fmt.Sprintf("branch-%d", index+1)
+}
+
+// renderParallelGroupFocus renders ONE Parallel group's detail (ONE level — plan Q4): a
+// header (join + branch tally + run stop), the context-isolation honesty note (Parallel
+// never forwards branch content — gauntlet #7), every branch inline (glyph + label + goal
+// + current/last tool + count + usage, the WINNER row highlighted), and the preserved
+// winner fork path. A focused ParentCallID with no matching group reads as a muted note.
+func renderParallelGroupFocus(th theme.Theme, groups []parallelGroup, parentCallID string, height int) string {
+	muted := th.Style("muted")
+	g := findParallelGroup(groups, parentCallID)
+	if g == nil {
+		return th.Style("askTitle").Render("parallel") + "\n\n" +
+			muted.Render("this parallel run is no longer tracked") + "\n\n" +
+			muted.Render("esc back")
+	}
+
+	var out strings.Builder
+	join := g.join
+	if join == "" {
+		join = "all"
+	}
+	out.WriteString(th.Style("askTitle").Render("parallel · join=" + join))
+	out.WriteString("\n")
+	out.WriteString(muted.Render(parallelRosterLine(g)))
+	out.WriteString("\n")
+	out.WriteString(muted.Render("  branch args/results hidden (context-isolated)"))
+	out.WriteString("\n\n")
+
+	// Branch events arrive concurrently and OUT OF ORDER on the wire (branch-2's events can
+	// precede branch-0's), so g.branches is in first-seen order. Render BY INDEX so the
+	// roster reads branch-1, branch-2, branch-3 deterministically regardless of arrival.
+	ordered := branchesByIndex(g.branches)
+	rows := teamFocusRows(height)
+	shown := 0
+	for i := range ordered {
+		if rows > 0 && shown >= rows {
+			out.WriteString(muted.Render(fmt.Sprintf("  · +%d more branch(es)", len(ordered)-shown)) + "\n")
+			break
+		}
+		br := &ordered[i]
+		line := parallelBranchLine(br)
+		if br.index == g.winner {
+			out.WriteString(th.Style("askButtonActive").Render("★ "+line) + "\n")
+		} else {
+			out.WriteString(muted.Render("  "+line) + "\n")
+		}
+		shown++
+	}
+
+	if g.winnerWorkspace != "" {
+		out.WriteString("\n" + muted.Render("winner fork (preserved): "+sanitizeTerminal(g.winnerWorkspace)))
+	}
+	out.WriteString("\n\n" + muted.Render("esc back"))
+	return out.String()
+}
+
+// parallelBranchLine is one branch row within a focused group: a state glyph (◐ running /
+// ✓ done / ✗ failed), the branch label, its goal, the current/last tool, the tool count,
+// and token usage. It holds only redacted metadata.
+func parallelBranchLine(br *parallelBranch) string {
+	glyph := "◐"
+	if br.done {
+		if br.failed {
+			glyph = "✗"
+		} else {
+			glyph = "✓"
+		}
+	}
+	label := br.label
+	if label == "" {
+		label = fmt.Sprintf("branch-%d", br.index+1)
+	}
+	goal := truncate(sanitizeTerminal(br.goal), maxSubagentGoalLen)
+	state := "working…"
+	if br.done {
+		state = parallelBranchStopLabel(br)
+	} else if br.current != "" {
+		state = sanitizeTerminal(br.current) + "…"
+	}
+	return fmt.Sprintf("%s %s · %s · %s · %s · ↑%s ↓%s",
+		glyph, sanitizeTerminal(label), goal, state,
+		plural(br.toolCount, "tool"),
+		humanizeTokens(br.usage.InputTokens),
+		humanizeTokens(br.usage.OutputTokens))
+}
+
+// parallelBranchStopLabel labels a finished branch: "failed" (with the stop reason when
+// it adds signal) for a failed branch, else the benign stop label.
+func parallelBranchStopLabel(br *parallelBranch) string {
+	if br.failed {
+		if br.stop != "" {
+			return "failed · " + subagentStopLabel(br.stop)
+		}
+		return "failed"
+	}
+	return subagentStopLabel(br.stop)
+}
+
+// findParallelGroup returns the group with the given ParentCallID off the slice, or nil.
+func findParallelGroup(groups []parallelGroup, parentCallID string) *parallelGroup {
+	for i := range groups {
+		if groups[i].parentCallID == parentCallID {
+			return &groups[i]
+		}
+	}
+	return nil
+}
+
+// branchesByIndex returns a copy of the group's branches sorted by BranchIndex, so the
+// focus view renders deterministically BY INDEX (branch-1, branch-2, …) even though the
+// branches arrive — and are stored — in first-seen (concurrent, out-of-order) order. It
+// copies so the conversation's insertion-ordered slice is never mutated.
+func branchesByIndex(branches []parallelBranch) []parallelBranch {
+	ordered := make([]parallelBranch, len(branches))
+	copy(ordered, branches)
+	slices.SortFunc(ordered, func(a, b parallelBranch) int { return a.index - b.index })
+	return ordered
 }

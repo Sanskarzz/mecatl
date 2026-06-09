@@ -479,6 +479,15 @@ message Event {
   // and a member's permission.ask is DROPPED, never forwarded. The per-member
   // transcripts never enter the parent conversation (only the joined summary does).
   Team team = 13;
+  // parallel is set on the three parallel.* events (parallel.start /
+  // parallel.branch / parallel.end): a REDACTED, metadata-only projection of a
+  // Parallel fork-join run. Like subagent it NEVER carries branch content (no
+  // message text, tool args, or result bodies) — only ids, a goal label, tool
+  // names/counts, usage, stop, duration, the join strategy, the winner index, and
+  // the per-branch / winner fork-root PATHS (a handle already in the result text,
+  // not branch content). The branch summaries fold into the parent conversation
+  // only via the Parallel tool result.
+  Parallel parallel = 14;
 }
 
 // HookDecision is the outcome a hook fire produced. Mirrors
@@ -633,6 +642,78 @@ message Team {
   // member distinctly from a clean "done" instead of recomputing it. Closed-enum
   // supervisor verdicts only, never member content.
   repeated TeamMemberDisposition dispositions = 17;
+}
+
+// Parallel is the REDACTED observability projection carried by the three parallel.*
+// events (parallel.start / parallel.branch / parallel.end). Mirrors
+// session.ParallelPayload. Like Subagent it carries metadata ONLY — no branch message
+// text, tool args, or result bodies — so a client can render a Parallel fork-join run's
+// activity (a join strategy, a grouped roster of branches with tool traces, a winner
+// highlight, and fork paths) without ever seeing branch content, preserving context
+// isolation. The fork-root paths it carries are the no-auto-merge handles already
+// surfaced in the Parallel tool result, not branch content.
+//
+// Unlike the FLAT Subagent fleet, a Parallel run is a GROUP: N branches of ONE call
+// (keyed by parent_call_id) sharing a join strategy + a single winner + preserved
+// per-branch fork paths. Those are RUN-LEVEL facts on the start/end events; the
+// per-branch events carry per-branch metadata keyed by branch_index.
+//
+// Which fields are set depends on the event kind:
+//   - parallel.start:                  parent_call_id, join, branch_count.
+//   - parallel.branch (branch_start):  parent_call_id, kind, branch_index, branch_label, goal.
+//   - parallel.branch (branch_tool):   parent_call_id, kind, branch_index, tool_name, is_error, tool_count.
+//   - parallel.branch (branch_end):    parent_call_id, kind, branch_index, tool_count, stop, usage, duration_ms, failed, workspace.
+//   - parallel.end:                    parent_call_id, join, branch_count, winner, winner_workspace, usage (run total), stop.
+message Parallel {
+  // parent_call_id is the parent's Parallel tool-call id and the GROUP key (one
+  // Parallel call = one group); attributes the event to the originating card.
+  string parent_call_id = 1;
+  // kind discriminates the per-branch lifecycle transition on a parallel.branch event
+  // (branch_start / branch_tool / branch_end); empty on the run-level start/end events.
+  string kind = 2;
+  // join is the normalized join strategy (all / first / judge); set on
+  // parallel.start and parallel.end.
+  string join = 3;
+  // branch_count is the number of branches in the run; set on parallel.start and
+  // parallel.end.
+  int32 branch_count = 4;
+  // branch_index is the 0-based stable per-branch group key; set on every
+  // parallel.branch kind.
+  int32 branch_index = 5;
+  // branch_label is the humanized 1-based branch label ("branch-1" …); set on
+  // branch_start.
+  string branch_label = 6;
+  // goal is a short, plain-text label for the branch task (a truncation of the
+  // model-authored branch prompt — the parent's own instruction, never branch
+  // content); set on branch_start.
+  string goal = 7;
+  // tool_name is the name of a branch's child tool that just ran (branch_tool) — the
+  // name alone, never branch args or result.
+  string tool_name = 8;
+  // is_error reports whether that branch tool call failed (branch_tool).
+  bool is_error = 9;
+  // tool_count is the running (branch_tool) or final (branch_end) child tool-call
+  // count for the branch.
+  int32 tool_count = 10;
+  // failed reports whether the branch's child run failed (branch_end).
+  bool failed = 11;
+  // workspace is the branch's forked workspace ROOT path — the no-auto-merge handle
+  // (branch_end). Server-side path text, not branch content.
+  string workspace = 12;
+  // stop is the branch's terminal stop reason (branch_end) or the run-level stop
+  // (parallel.end; the winner's stop for first/judge, empty for all).
+  string stop = 13;
+  // usage is the branch's cumulative usage (branch_end) or the run TOTAL summed across
+  // branches (parallel.end).
+  Usage usage = 14;
+  // duration_ms is the branch's wall-clock duration in milliseconds (branch_end).
+  int64 duration_ms = 15;
+  // winner is the branch index of the selected winner on parallel.end — a real
+  // branch_index for first/judge, or -1 for all / none-succeeded.
+  int32 winner = 16;
+  // winner_workspace is the PRESERVED winner fork root on parallel.end (the deliverable
+  // handle for first/judge); empty for all / none-succeeded.
+  string winner_workspace = 17;
 }
 
 // ToolCall is a request from the model to invoke a named tool. Mirrors

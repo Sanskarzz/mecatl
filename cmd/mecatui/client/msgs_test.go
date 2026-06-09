@@ -85,6 +85,48 @@ func TestEventToMsg(t *testing.T) {
 			SubagentMsg{Kind: SubagentEnd, ParentCallID: "p1", ChildID: "subagent-p1", ToolCount: 5,
 				Stop: "max_tool_calls", DurationMs: 1234, Usage: Usage{InputTokens: 90, OutputTokens: 12}},
 		},
+		{
+			"parallel.start",
+			&mecatlv1.Event{Type: "parallel.start", Parallel: &mecatlv1.Parallel{
+				ParentCallId: "p1", Join: "judge", BranchCount: 3}},
+			ParallelMsg{Kind: ParallelStart, ParentCallID: "p1", Join: "judge", BranchCount: 3},
+		},
+		{
+			"parallel.branch branch_start",
+			&mecatlv1.Event{Type: "parallel.branch", Parallel: &mecatlv1.Parallel{
+				ParentCallId: "p1", Kind: "branch_start", BranchIndex: 1, BranchLabel: "branch-2", Goal: "explore beta"}},
+			ParallelMsg{Kind: ParallelBranchStart, ParentCallID: "p1", BranchIndex: 1, BranchLabel: "branch-2", Goal: "explore beta"},
+		},
+		{
+			"parallel.branch branch_tool",
+			&mecatlv1.Event{Type: "parallel.branch", Parallel: &mecatlv1.Parallel{
+				ParentCallId: "p1", Kind: "branch_tool", BranchIndex: 0, ToolName: "Grep", IsError: true, ToolCount: 2}},
+			ParallelMsg{Kind: ParallelBranchTool, ParentCallID: "p1", BranchIndex: 0, ToolName: "Grep", IsError: true, ToolCount: 2},
+		},
+		{
+			"parallel.branch branch_end",
+			&mecatlv1.Event{Type: "parallel.branch", Parallel: &mecatlv1.Parallel{
+				ParentCallId: "p1", Kind: "branch_end", BranchIndex: 2, ToolCount: 4, Failed: true,
+				Workspace: "/fork/branch-3", Stop: "error", DurationMs: 555,
+				Usage: &mecatlv1.Usage{InputTokens: 12, OutputTokens: 3}}},
+			ParallelMsg{Kind: ParallelBranchEnd, ParentCallID: "p1", BranchIndex: 2, ToolCount: 4, Failed: true,
+				Workspace: "/fork/branch-3", Stop: "error", DurationMs: 555,
+				Usage: Usage{InputTokens: 12, OutputTokens: 3}},
+		},
+		{
+			"parallel.end winner",
+			&mecatlv1.Event{Type: "parallel.end", Parallel: &mecatlv1.Parallel{
+				ParentCallId: "p1", Join: "judge", BranchCount: 3, Winner: 1, WinnerWorkspace: "/fork/branch-2",
+				Stop: "end_turn", Usage: &mecatlv1.Usage{InputTokens: 100, OutputTokens: 20}}},
+			ParallelMsg{Kind: ParallelEnd, ParentCallID: "p1", Join: "judge", BranchCount: 3, Winner: 1,
+				WinnerWorkspace: "/fork/branch-2", Stop: "end_turn", Usage: Usage{InputTokens: 100, OutputTokens: 20}},
+		},
+		{
+			"parallel.end join=all no winner",
+			&mecatlv1.Event{Type: "parallel.end", Parallel: &mecatlv1.Parallel{
+				ParentCallId: "p1", Join: "all", BranchCount: 2, Winner: -1}},
+			ParallelMsg{Kind: ParallelEnd, ParentCallID: "p1", Join: "all", BranchCount: 2, Winner: -1},
+		},
 		{"compaction", &mecatlv1.Event{Type: "compaction", Text: "compacted"}, CompactionMsg{Text: "compacted"}},
 		{"no_progress", &mecatlv1.Event{Type: "no_progress", Text: "nudging to continue"}, NoProgressMsg{Text: "nudging to continue"}},
 		{

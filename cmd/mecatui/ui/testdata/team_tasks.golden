@@ -5,7 +5,7 @@
 
                         ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
                         ┃                                                 ┃
-                        ┃    Subagents   ▸ Teams                          ┃
+                        ┃    Subagents    Parallel  ▸ Teams               ┃
                         ┃                                                 ┃
                         ┃  tasks                                          ┃
                         ┃  1 done · 1 in-progress · 2 pending(1 blocked)  ┃

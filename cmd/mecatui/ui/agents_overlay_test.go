@@ -282,20 +282,26 @@ func TestCtrlAOpensTeamsTabWhenTeamLive(t *testing.T) {
 func TestPreferredAgentsTab(t *testing.T) {
 	var m Model
 	cases := []struct {
-		name                        string
-		teamLive, haveTeam, haveSub bool
-		want                        agentsTab
+		name                                                    string
+		teamLive, haveTeam, haveSub, parallelLive, haveParallel bool
+		want                                                    agentsTab
 	}{
-		{"team live wins", true, true, true, tabTeams},
-		{"team live, no sub", true, true, false, tabTeams},
-		{"subs only", false, false, true, tabSubagents},
-		{"finished team only", false, true, false, tabTeams},
-		{"both present, team not live → subs", false, true, true, tabSubagents},
+		{"team live wins over parallel live", true, true, true, true, true, tabTeams},
+		{"team live, no sub", true, true, false, false, false, tabTeams},
+		{"subs only", false, false, true, false, false, tabSubagents},
+		{"finished team only", false, true, false, false, false, tabTeams},
+		{"both present, team not live → subs", false, true, true, false, false, tabSubagents},
+		{"parallel live wins over haveSub", false, false, true, true, true, tabParallel},
+		{"parallel live, no sub", false, false, false, true, true, tabParallel},
+		{"finished parallel only", false, false, false, false, true, tabParallel},
+		{"haveSub beats finished parallel", false, false, true, false, true, tabSubagents},
+		{"finished parallel beats finished team", false, true, false, false, true, tabParallel},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := m.preferredAgentsTab(c.teamLive, c.haveTeam, c.haveSub); got != c.want {
-				t.Errorf("preferredAgentsTab(%v,%v,%v) = %v, want %v", c.teamLive, c.haveTeam, c.haveSub, got, c.want)
+			if got := m.preferredAgentsTab(c.teamLive, c.haveTeam, c.haveSub, c.parallelLive, c.haveParallel); got != c.want {
+				t.Errorf("preferredAgentsTab(%v,%v,%v,%v,%v) = %v, want %v",
+					c.teamLive, c.haveTeam, c.haveSub, c.parallelLive, c.haveParallel, got, c.want)
 			}
 		})
 	}
@@ -315,7 +321,7 @@ func TestTabSwitchesSubagentsToTeams(t *testing.T) {
 	if m.agentsTab != tabTeams {
 		t.Fatalf("expected Teams tab on open, got %v", m.agentsTab)
 	}
-	// tab → Subagents.
+	// tab cycles Teams → Subagents (the default case wraps from the last tab).
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = mm.(Model)
 	if m.agentsTab != tabSubagents {
@@ -323,6 +329,12 @@ func TestTabSwitchesSubagentsToTeams(t *testing.T) {
 	}
 	if !strings.Contains(stripANSIstr(m.View().Content), "subagents · 1 running") {
 		t.Errorf("Subagents tab body not shown after switch")
+	}
+	// tab → Parallel (the new third tab between Subagents and Teams).
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = mm.(Model)
+	if m.agentsTab != tabParallel {
+		t.Fatalf("tab did not switch to Parallel, got %v", m.agentsTab)
 	}
 	// tab → back to Teams.
 	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
@@ -654,9 +666,9 @@ func TestAgentsTeamsTabGolden(t *testing.T) {
 	m = seedSubagents(m, "p1", startSub("p1", "explorer-a3f1", "audit auth flow"))
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
-	// The team is not live in this seed (no live members streaming → liveTeamBlock may
-	// be non-nil; force the Teams tab to lock its golden regardless of default).
-	if m.agentsTab != tabTeams {
+	// The team is not live in this seed; cycle `tab` (now Subagents→Parallel→Teams) until
+	// the Teams tab is active to lock its golden regardless of default.
+	for i := 0; i < 3 && m.agentsTab != tabTeams; i++ {
 		mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 		m = mm.(Model)
 	}
@@ -665,6 +677,93 @@ func TestAgentsTeamsTabGolden(t *testing.T) {
 	}
 	got := stripANSI([]byte(m.View().Content))
 	compareGolden(t, "agents_teams_tab.golden", got)
+}
+
+// goldenParallel builds a representative finished Parallel run for the overlay goldens: a
+// judge join over three branches where branch-2 (a non-zero index) wins, exercising the
+// ◐/✓/✗ branch glyphs, the winner highlight, and the preserved fork path.
+func goldenParallel(m Model) Model {
+	return seedParallel(m, "par-1",
+		startPar("par-1", "judge", 3),
+		branchStartPar("par-1", 0, "branch-1", "refactor with a map"),
+		branchStartPar("par-1", 1, "branch-2", "refactor with a slice"),
+		branchStartPar("par-1", 2, "branch-3", "refactor inline"),
+		branchToolPar("par-1", 0, "Edit", false, 2),
+		branchToolPar("par-1", 1, "Edit", false, 3),
+		branchToolPar("par-1", 2, "Bash", true, 1),
+		branchEndPar("par-1", 0, 12000, 3000, 2, "end_turn", false, "/fork/branch-1"),
+		branchEndPar("par-1", 1, 15000, 4200, 3, "end_turn", false, "/fork/branch-2"),
+		branchEndPar("par-1", 2, 4000, 600, 1, "error", true, "/fork/branch-3"),
+		endPar("par-1", "judge", 3, 1, "/fork/branch-2", "end_turn"),
+	)
+}
+
+// TestParallelRosterGolden locks the Parallel-tab group roster overlay.
+func TestParallelRosterGolden(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = goldenParallel(m)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.agentsTab != tabParallel {
+		t.Fatalf("expected Parallel tab, got %v", m.agentsTab)
+	}
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "parallel_roster.golden", got)
+}
+
+// TestParallelGroupFocusGolden locks one Parallel group's focus pane (the branches inline,
+// the winner highlight, the preserved fork path, the context-isolation note).
+func TestParallelGroupFocusGolden(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = goldenParallel(m)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if m.parallel.view != parallelGroupView {
+		t.Fatalf("expected parallelGroupView, got %v", m.parallel.view)
+	}
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "parallel_group_focus.golden", got)
+}
+
+// TestFooterParallelGolden locks the footer when a Parallel run is present, alongside the
+// fleet segment, across tiers (a Parallel run + a subagent fleet both advertised).
+func TestFooterParallelGolden(t *testing.T) {
+	left := aztec().Style("muted").Render("connected")
+
+	parOnly := goldenParallel(newMCPModel(t, aztec(), nil))
+	parPlusSub := seedSubagents(goldenParallel(newMCPModel(t, aztec(), nil)), "s1",
+		startSub("s1", "c1", "audit auth"))
+
+	var b strings.Builder
+	b.WriteString("parallel only (judge, 3 done):\n")
+	b.WriteString(stripANSIstr(parOnly.fitFooter(left, 160)) + "\n\n")
+	b.WriteString("parallel + subagent fleet:\n")
+	b.WriteString(stripANSIstr(parPlusSub.fitFooter(left, 160)) + "\n\n")
+	b.WriteString("parallel + sub, narrow (medium tier):\n")
+	b.WriteString(stripANSIstr(parPlusSub.fitFooter(left, 70)) + "\n")
+	compareGolden(t, "footer_parallel.golden", []byte(b.String()))
+}
+
+// TestParallelFooterTiers asserts the Parallel footer segment renders at each tier and the
+// counts are correct, mirroring the subagent fleet footer tier test.
+func TestParallelFooterTiers(t *testing.T) {
+	th := aztec()
+	full := stripANSIstr(parallelFooterFull(th, 1, 2))
+	medium := stripANSIstr(parallelFooterMedium(1, 2))
+	compact := stripANSIstr(parallelFooterCompact(1, 2))
+	if !strings.Contains(full, "parallel") || !strings.Contains(full, "ctrl+a") {
+		t.Errorf("full tier should name parallel + ctrl+a: %q", full)
+	}
+	for _, s := range []string{full, medium, compact} {
+		if !strings.Contains(s, "1◐") || !strings.Contains(s, "2✓") {
+			t.Errorf("tier missing running/done counts: %q", s)
+		}
+	}
+	if strings.Contains(compact, "ctrl+a") {
+		t.Errorf("compact tier should drop ctrl+a: %q", compact)
+	}
 }
 
 // TestAgentsOverlayNothingRanHint asserts ctrl+a with neither a team nor subagents
@@ -677,7 +776,7 @@ func TestAgentsOverlayNothingRanHint(t *testing.T) {
 	if m.team.view != teamNone {
 		t.Errorf("ctrl+a with nothing running should not open the overlay, view = %v", m.team.view)
 	}
-	if !strings.Contains(m.statusMsg, "no team or subagent has run yet") {
+	if !strings.Contains(m.statusMsg, "no team, subagent, or parallel run has run yet") {
 		t.Errorf("expected the nothing-ran hint, got %q", m.statusMsg)
 	}
 }

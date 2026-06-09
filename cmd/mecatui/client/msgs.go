@@ -238,6 +238,63 @@ type TeamMsg struct {
 	Dispositions []TeamMemberDisposition
 }
 
+// ParallelKind discriminates the parallel.* event kinds carried by a ParallelMsg, so
+// the ui switches on a plain value rather than re-deriving it from the proto. The
+// run-level start/end are their own kinds; the per-branch events carry the branch_*
+// kinds (from the proto Parallel.kind discriminant).
+type ParallelKind string
+
+const (
+	// ParallelStart marks a Parallel fork-join run beginning (Join/BranchCount set).
+	ParallelStart ParallelKind = "start"
+	// ParallelBranchStart marks one branch beginning (BranchIndex/BranchLabel/Goal set).
+	ParallelBranchStart ParallelKind = "branch_start"
+	// ParallelBranchTool marks one branch's child tool resolving (ToolName/IsError/ToolCount set).
+	ParallelBranchTool ParallelKind = "branch_tool"
+	// ParallelBranchEnd marks one branch finishing (Stop/Usage/DurationMs/Failed/Workspace set).
+	ParallelBranchEnd ParallelKind = "branch_end"
+	// ParallelEnd marks a Parallel run finishing (Join/Winner/WinnerWorkspace/Usage/Stop set).
+	ParallelEnd ParallelKind = "end"
+)
+
+// ParallelMsg is the REDACTED, metadata-only projection of a Parallel fork-join run, as
+// plain data the ui renders in the ctrl+a Parallel tab. Unlike the FLAT SubagentMsg, a
+// Parallel run is a GROUP: N branches of ONE call (keyed by ParentCallID) sharing a join
+// strategy + a single winner + preserved per-branch fork paths. It carries NO branch
+// content — only ids, a goal label, child tool names/counts, usage, stop, duration, the
+// join strategy, the winner index, and the fork-root PATHS (handles already in the result
+// text, not branch content). ParentCallID is the group key.
+type ParallelMsg struct {
+	Kind         ParallelKind
+	ParentCallID string
+	// Join / BranchCount are set on ParallelStart and ParallelEnd (run-level).
+	Join        string
+	BranchCount int
+	// BranchIndex is the stable per-branch key, set on every branch_* kind.
+	BranchIndex int
+	// BranchLabel / Goal are set on ParallelBranchStart.
+	BranchLabel string
+	Goal        string
+	// ToolName / IsError / ToolCount carry per-branch tool activity (branch_tool;
+	// ToolCount is also final on branch_end).
+	ToolName  string
+	IsError   bool
+	ToolCount int
+	// Failed / Workspace are set on ParallelBranchEnd (Workspace is the branch's fork root).
+	Failed    bool
+	Workspace string
+	// Stop is the branch terminal (branch_end) or the run-level stop (end).
+	Stop string
+	// Usage is the branch's cumulative usage (branch_end) or the run total (end).
+	Usage Usage
+	// DurationMs is the branch's wall-clock duration (branch_end).
+	DurationMs int64
+	// Winner / WinnerWorkspace are set on ParallelEnd: the real winning branch index
+	// (-1 for join=all / none-succeeded) and its preserved fork root.
+	Winner          int
+	WinnerWorkspace string
+}
+
 // CompactionMsg is a muted "history compacted" notice.
 type CompactionMsg struct{ Text string }
 
@@ -313,6 +370,46 @@ func subagentMsg(kind SubagentKind, s *mecatlv1.Subagent) SubagentMsg {
 		Usage:        usageFrom(s.GetUsage()),
 		Stop:         s.GetStop(),
 		DurationMs:   s.GetDurationMs(),
+	}
+}
+
+// parallelMsg builds a ParallelMsg from a proto Parallel payload (nil-safe via the
+// generated getters). The kind is derived from the event type (start/end) or, for a
+// parallel.branch event, the proto kind discriminant (branch_start/tool/end). It is the
+// single translation point for the parallel.* event family.
+func parallelMsg(kind ParallelKind, p *mecatlv1.Parallel) ParallelMsg {
+	return ParallelMsg{
+		Kind:            kind,
+		ParentCallID:    p.GetParentCallId(),
+		Join:            p.GetJoin(),
+		BranchCount:     int(p.GetBranchCount()),
+		BranchIndex:     int(p.GetBranchIndex()),
+		BranchLabel:     p.GetBranchLabel(),
+		Goal:            p.GetGoal(),
+		ToolName:        p.GetToolName(),
+		IsError:         p.GetIsError(),
+		ToolCount:       int(p.GetToolCount()),
+		Failed:          p.GetFailed(),
+		Workspace:       p.GetWorkspace(),
+		Stop:            p.GetStop(),
+		Usage:           usageFrom(p.GetUsage()),
+		DurationMs:      p.GetDurationMs(),
+		Winner:          int(p.GetWinner()),
+		WinnerWorkspace: p.GetWinnerWorkspace(),
+	}
+}
+
+// parallelBranchKind maps the proto parallel.branch kind discriminant to its
+// ParallelKind. An unknown/empty kind falls back to ParallelBranchTool (the benign
+// metadata-only kind) so a future kind never crashes the reader.
+func parallelBranchKind(protoKind string) ParallelKind {
+	switch protoKind {
+	case "branch_start":
+		return ParallelBranchStart
+	case "branch_end":
+		return ParallelBranchEnd
+	default:
+		return ParallelBranchTool
 	}
 }
 
@@ -482,6 +579,12 @@ func delegationEventToMsg(ev *mecatlv1.Event) tea.Msg {
 		return teamMsg(TeamFindings, ev.GetTeam())
 	case "team.end":
 		return teamMsg(TeamEnd, ev.GetTeam())
+	case "parallel.start":
+		return parallelMsg(ParallelStart, ev.GetParallel())
+	case "parallel.branch":
+		return parallelMsg(parallelBranchKind(ev.GetParallel().GetKind()), ev.GetParallel())
+	case "parallel.end":
+		return parallelMsg(ParallelEnd, ev.GetParallel())
 	default:
 		return nil
 	}

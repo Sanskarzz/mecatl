@@ -1022,3 +1022,49 @@ name/error/count/usage/stop/duration). Two pieces:
   `subagentLaneGlyph`: cap-family ✓, error/cancel-family ✗). Help/zero-state `ctrl+a` row is no
   longer teams-gated (subagents are always available via Subagent). Gauntlet #7 holds: the focus pane
   shows redacted chips only, never child content.
+
+**The `parallel.*` observability family** (`Parallel` fork-join tool watchability) is the
+THIRD delegation family alongside `subagent.*` and `team.*`. It was chosen as a DEDICATED
+family (Option A) over consolidating into the subagent/team families — see
+`.scratch/task-research/REVIEW-event-consolidation.md`: the only genuinely-shared part (the
+redacted per-tool child lifecycle) is ALREADY shared in `agent.drainChildObserved` (the single
+redaction chokepoint), so consolidation would couple two shipped contracts to absorb a third
+for near-zero saving. The three families share a LIFECYCLE (parent call id, child/branch/member
+identity, tool name/error/count, usage, stop, duration) but differ in AGGREGATION shape:
+subagent = flat fleet, parallel = fan-out GROUP (join + winner + preserved fork paths), team =
+coordinating roster (tasks + findings + mailbox). **TRIP-WIRE: a 4th delegation family is the
+point to extract a shared `ChildActivity` value object — not before** (recorded in the
+`session.event.go` doc-comment above the three payloads).
+
+- **Server** (`internal/session/event.go`): `EvParallelStart` / `EvParallelBranch` /
+  `EvParallelEnd` + `session.ParallelPayload` (string-passthrough like `subagent.*`; a
+  `ParallelEventKind` discriminates the per-branch `branch_start`/`branch_tool`/`branch_end`
+  transitions). It is METADATA ONLY — no branch message text, tool args, or result bodies; it
+  carries fork-root PATHS (handles already in the result text, not branch content). `Event.Parallel`
+  mirrors `Event.Subagent`/`Event.Team`.
+- **Emission** (`internal/agent/parallel.go`): `ExecuteWithParent` (the `childCapableTool` seam the
+  dispatcher prefers — emit was already plumbed) brackets the run with `parallel.start`/`parallel.end`
+  and each branch with `branch_start`/`branch_end` via a small `branchEmitter` carrier (the plan's
+  Q1 carrier: `emit` + `parentCallID`, nil-safe so the plain `Execute` path is byte-identical).
+  Per-branch tool activity REUSES `drainChildObserved` (was `drainChild`) with a per-branch
+  TRANSLATION closure (`branchEmitter.branchTool`) that RE-TAGS its redacted `subagent.tool` emit
+  into a `parallel.branch{branch_tool}` — copying only already-redacted fields, opening NO new
+  content path. `parallel.end.Winner` carries the REAL `branchResult.index` (-1 for join=all /
+  none-succeeded); run Stop is the winner's stop for first/judge and omitted (zero) for all (plan
+  Q3). `branchResult.usage` was added so `sumBranchUsage` can carry the run-total.
+- **Proto + mapper**: `Event.parallel = 14` + a new `Parallel` message (additive, non-breaking) +
+  `toProtoParallel` (mirrors `toProtoSubagent`).
+- **Gauntlet #7**: enforced by a STRUCTURAL test (`TestParallelPayloadHasNoContentFields` — an
+  allow-list of metadata field names; trips if a content-shaped field appears) AND a BEHAVIORAL
+  sentinel test (`TestParallelNoContentLeakBehavioral` — a branch whose args/result/message carry a
+  canary; the canary never appears in any emitted `parallel.*` field). Model-facing e2e:
+  `TestParallelEmitsObservabilityStreamAll` / `TestParallelEmitsWinnerJudge` (winner at a non-zero
+  index — off-by-one guard) / `TestParallelEmitsWinnerFirst` / `TestParallelBranchErrorRepresented`
+  (a fork-failed branch still emits a coherent `branch_end` with `Failed=true`).
+- **Client/UI** (`cmd/mecatui`): `client.ParallelMsg`/`ParallelKind` + `applyParallel` build GROUPED
+  `parallelGroup`/`parallelBranch` state (deterministic, insertion-ordered, no map-iteration flake);
+  a third `Parallel` tab in the unified `ctrl+a` overlay (`Subagents | Parallel | Teams`) renders the
+  grouped roster (join + branch counts + winner) → ONE-level group focus (branches inline with chip
+  traces, the winner highlighted, the preserved fork path, an honesty note). It folds into the fleet
+  footer (a `⑂` segment). Default-tab precedence (plan Q5): `teamLive > parallelLive > haveSubagents >
+  haveParallel > haveTeam > Subagents`. Rendered from relayed Events ONLY (no internal/proto import).

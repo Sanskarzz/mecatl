@@ -343,6 +343,96 @@ func TestToProtoTable(t *testing.T) {
 			},
 		},
 		{
+			name: "parallel.start",
+			in: session.Event{Type: session.EvParallelStart, Seq: 40, Turn: 1,
+				Parallel: &session.ParallelPayload{ParentCallID: "p1", Join: "judge", BranchCount: 3}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				p := got.GetParallel()
+				if got.GetType() != "parallel.start" {
+					t.Fatalf("type = %q, want parallel.start", got.GetType())
+				}
+				if p == nil || p.GetParentCallId() != "p1" || p.GetJoin() != "judge" || p.GetBranchCount() != 3 {
+					t.Fatalf("parallel.start payload mismatch: %+v", p)
+				}
+			},
+		},
+		{
+			name: "parallel.branch branch_start",
+			in: session.Event{Type: session.EvParallelBranch, Seq: 41, Turn: 1,
+				Parallel: &session.ParallelPayload{ParentCallID: "p1", Kind: session.ParallelBranchStart,
+					BranchIndex: 1, BranchLabel: "branch-2", Goal: "explore beta"}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				p := got.GetParallel()
+				if p == nil || p.GetKind() != "branch_start" || p.GetBranchIndex() != 1 ||
+					p.GetBranchLabel() != "branch-2" || p.GetGoal() != "explore beta" {
+					t.Fatalf("parallel branch_start payload mismatch: %+v", p)
+				}
+			},
+		},
+		{
+			name: "parallel.branch branch_tool",
+			in: session.Event{Type: session.EvParallelBranch, Seq: 42, Turn: 1,
+				Parallel: &session.ParallelPayload{ParentCallID: "p1", Kind: session.ParallelBranchTool,
+					BranchIndex: 0, ToolName: "Grep", IsError: true, ToolCount: 2}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				p := got.GetParallel()
+				if p == nil || p.GetKind() != "branch_tool" || p.GetToolName() != "Grep" ||
+					!p.GetIsError() || p.GetToolCount() != 2 {
+					t.Fatalf("parallel branch_tool payload mismatch: %+v", p)
+				}
+			},
+		},
+		{
+			name: "parallel.branch branch_end",
+			in: session.Event{Type: session.EvParallelBranch, Seq: 43, Turn: 1,
+				Parallel: &session.ParallelPayload{ParentCallID: "p1", Kind: session.ParallelBranchEnd,
+					BranchIndex: 2, ToolCount: 4, Failed: true, Workspace: "/fork/branch-3",
+					Stop: session.StopError, DurationMs: 555,
+					Usage: session.Usage{InputTokens: 12, OutputTokens: 3}}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				p := got.GetParallel()
+				if p == nil || p.GetKind() != "branch_end" || p.GetBranchIndex() != 2 ||
+					!p.GetFailed() || p.GetWorkspace() != "/fork/branch-3" ||
+					p.GetStop() != "error" || p.GetDurationMs() != 555 || p.GetToolCount() != 4 {
+					t.Fatalf("parallel branch_end payload mismatch: %+v", p)
+				}
+				if u := p.GetUsage(); u.GetInputTokens() != 12 || u.GetOutputTokens() != 3 {
+					t.Fatalf("parallel branch_end usage mismatch: %+v", u)
+				}
+			},
+		},
+		{
+			name: "parallel.end winner",
+			in: session.Event{Type: session.EvParallelEnd, Seq: 44, Turn: 1,
+				Parallel: &session.ParallelPayload{ParentCallID: "p1", Join: "judge", BranchCount: 3,
+					Winner: 1, WinnerWorkspace: "/fork/branch-2", Stop: session.StopEndTurn,
+					Usage: session.Usage{InputTokens: 100, OutputTokens: 20}}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				p := got.GetParallel()
+				if got.GetType() != "parallel.end" {
+					t.Fatalf("type = %q, want parallel.end", got.GetType())
+				}
+				if p == nil || p.GetWinner() != 1 || p.GetWinnerWorkspace() != "/fork/branch-2" ||
+					p.GetJoin() != "judge" || p.GetBranchCount() != 3 || p.GetStop() != "end_turn" {
+					t.Fatalf("parallel.end payload mismatch: %+v", p)
+				}
+				if u := p.GetUsage(); u.GetInputTokens() != 100 || u.GetOutputTokens() != 20 {
+					t.Fatalf("parallel.end usage mismatch: %+v", u)
+				}
+			},
+		},
+		{
+			name: "parallel.end join=all no winner",
+			in: session.Event{Type: session.EvParallelEnd, Seq: 45, Turn: 1,
+				Parallel: &session.ParallelPayload{ParentCallID: "p1", Join: "all", BranchCount: 2, Winner: -1}},
+			assert: func(t *testing.T, got *mecatlv1.Event) {
+				p := got.GetParallel()
+				if p == nil || p.GetWinner() != -1 || p.GetWinnerWorkspace() != "" {
+					t.Fatalf("parallel.end (all) should carry Winner=-1, no workspace: %+v", p)
+				}
+			},
+		},
+		{
 			name: "compaction",
 			in:   session.Event{Type: session.EvCompaction, Seq: 8, Turn: 2, Text: "summary"},
 			assert: func(t *testing.T, got *mecatlv1.Event) {
@@ -393,7 +483,7 @@ func TestToProtoNoSubmessages(t *testing.T) {
 	got := toProto(session.Event{Type: session.EvTurnStart})
 	if got.GetToolCall() != nil || got.GetToolResult() != nil || got.GetAsk() != nil ||
 		got.GetResult() != nil || got.GetTurnEnd() != nil || got.GetUsage() != nil ||
-		got.GetSubagent() != nil || got.GetTeam() != nil {
+		got.GetSubagent() != nil || got.GetTeam() != nil || got.GetParallel() != nil {
 		t.Fatalf("unexpected submessage on bare event: %+v", got)
 	}
 }

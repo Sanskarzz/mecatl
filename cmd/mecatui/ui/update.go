@@ -410,6 +410,9 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.TeamMsg:
 		m.applyTeam(msg)
 		return m.afterEvent()
+	case client.ParallelMsg:
+		m.applyParallel(msg)
+		return m.afterEvent()
 	case client.CompactionMsg:
 		// A compaction boundary is a DURABLE fact worth keeping in the transcript, so it
 		// stays a scrollback notice.
@@ -482,6 +485,27 @@ func (m *Model) applySubagent(msg client.SubagentMsg) {
 	case client.SubagentEnd:
 		m.conv.setSubagentEnd(msg.ParentCallID, msg.Usage, msg.ToolCount, msg.Stop, msg.DurationMs)
 		m.conv.fleetEnd(msg.ChildID, msg.Usage, msg.ToolCount, msg.Stop, msg.DurationMs)
+	}
+}
+
+// applyParallel routes a REDACTED Parallel fork-join projection into the GROUPED
+// parallelGroups state (keyed by ParentCallID), which backs the fleet footer segment and
+// the ctrl+a Parallel tab. Unlike Subagent it has no second inline-card destination: a
+// Parallel run's deliverable (the winner + fork paths) rides the tool RESULT text the
+// model reads; these events are the client observability channel only. All fields are
+// redacted, metadata-only — none carries branch content (gauntlet #7).
+func (m *Model) applyParallel(msg client.ParallelMsg) {
+	switch msg.Kind {
+	case client.ParallelStart:
+		m.conv.parallelStart(msg.ParentCallID, msg.Join, msg.BranchCount)
+	case client.ParallelBranchStart:
+		m.conv.parallelBranchStart(msg.ParentCallID, msg.BranchIndex, msg.BranchLabel, msg.Goal)
+	case client.ParallelBranchTool:
+		m.conv.parallelBranchTool(msg.ParentCallID, msg.BranchIndex, msg.ToolName, msg.IsError, msg.ToolCount)
+	case client.ParallelBranchEnd:
+		m.conv.parallelBranchEnd(msg.ParentCallID, msg.BranchIndex, msg.Usage, msg.ToolCount, msg.Stop, msg.Failed, msg.Workspace, msg.DurationMs)
+	case client.ParallelEnd:
+		m.conv.parallelEnd(msg.ParentCallID, msg.Join, msg.BranchCount, msg.Winner, msg.WinnerWorkspace, msg.Stop)
 	}
 }
 

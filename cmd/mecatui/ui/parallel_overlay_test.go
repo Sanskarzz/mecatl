@@ -1,0 +1,365 @@
+package ui
+
+// Tests for the third ctrl+a tab — Parallel (the fork-join GROUP roster + per-group
+// focus). A Parallel run is a GROUP (not a flat fleet): branches share a join mode + a
+// single winner + preserved fork paths. Everything renders from the REDACTED,
+// metadata-only parallel.* event projection — no branch content (gauntlet #7). The seeds
+// drive the REAL client.ParallelMsg flow through Update/applyParallel (NOT struct
+// literals), so a regression in apply is caught.
+
+import (
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/stacklok/mecatl/cmd/mecatui/client"
+)
+
+// startPar / branchStartPar / branchToolPar / branchEndPar / endPar build the parallel.*
+// projections for a Parallel run.
+func startPar(parent, join string, count int) client.ParallelMsg {
+	return client.ParallelMsg{Kind: client.ParallelStart, ParentCallID: parent, Join: join, BranchCount: count}
+}
+
+func branchStartPar(parent string, idx int, label, goal string) client.ParallelMsg {
+	return client.ParallelMsg{Kind: client.ParallelBranchStart, ParentCallID: parent, BranchIndex: idx, BranchLabel: label, Goal: goal}
+}
+
+func branchToolPar(parent string, idx int, tool string, isErr bool, count int) client.ParallelMsg {
+	return client.ParallelMsg{Kind: client.ParallelBranchTool, ParentCallID: parent, BranchIndex: idx, ToolName: tool, IsError: isErr, ToolCount: count}
+}
+
+func branchEndPar(parent string, idx int, in, out int64, count int, stop string, failed bool, ws string) client.ParallelMsg {
+	return client.ParallelMsg{
+		Kind: client.ParallelBranchEnd, ParentCallID: parent, BranchIndex: idx,
+		Usage: client.Usage{InputTokens: in, OutputTokens: out}, ToolCount: count,
+		Stop: stop, Failed: failed, Workspace: ws, DurationMs: 900,
+	}
+}
+
+func endPar(parent, join string, count, winner int, winnerWS, stop string) client.ParallelMsg {
+	return client.ParallelMsg{
+		Kind: client.ParallelEnd, ParentCallID: parent, Join: join, BranchCount: count,
+		Winner: winner, WinnerWorkspace: winnerWS, Stop: stop,
+	}
+}
+
+// seedParallel applies a sequence of parallel.* msgs through the real Update path so the
+// model's grouped parallelGroups state is built exactly as it would be at runtime. It
+// seeds a Parallel tool card for the inline-card routing first.
+func seedParallel(m Model, parent string, msgs ...client.ParallelMsg) Model {
+	m.conv.addTool(parent, "Parallel", `{"tasks":["a","b"]}`)
+	for _, msg := range msgs {
+		mm, _ := m.Update(msg)
+		m = mm.(Model)
+	}
+	return m
+}
+
+// TestParallelGroupCountsThroughWire locks the (running, done) group classification built
+// through the REAL wire path (Update → applyParallel): a group is done once its
+// parallel.end arrived.
+func TestParallelGroupCountsThroughWire(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedParallel(m, "p1",
+		startPar("p1", "all", 2),
+		branchStartPar("p1", 0, "branch-1", "explore A"),
+		branchStartPar("p1", 1, "branch-2", "explore B"),
+		branchEndPar("p1", 0, 100, 20, 3, "end_turn", false, "/fork/branch-1"),
+	)
+	running, done := m.conv.parallelGroupCounts()
+	if running != 1 || done != 0 {
+		t.Fatalf("before end: running=%d done=%d want 1/0", running, done)
+	}
+	mm, _ := m.Update(endPar("p1", "all", 2, -1, "", "end_turn"))
+	m = mm.(Model)
+	running, done = m.conv.parallelGroupCounts()
+	if running != 0 || done != 1 {
+		t.Fatalf("after end: running=%d done=%d want 0/1", running, done)
+	}
+}
+
+// TestParallelRosterRendersGroup asserts the Parallel tab roster shows the group with its
+// join mode, branch tally, and winner once resolved.
+func TestParallelRosterRendersGroup(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedParallel(m, "p1",
+		startPar("p1", "judge", 2),
+		branchStartPar("p1", 0, "branch-1", "approach A"),
+		branchStartPar("p1", 1, "branch-2", "approach B"),
+		branchEndPar("p1", 0, 100, 20, 2, "end_turn", false, "/fork/branch-1"),
+		branchEndPar("p1", 1, 120, 25, 3, "end_turn", false, "/fork/branch-2"),
+		endPar("p1", "judge", 2, 1, "/fork/branch-2", "end_turn"),
+	)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.agentsTab != tabParallel {
+		t.Fatalf("expected Parallel tab as default (a finished parallel run, no team/sub), got %v", m.agentsTab)
+	}
+	out := stripANSIstr(m.View().Content)
+	for _, want := range []string{"parallel ·", "judge", "2/2 branches", "winner branch-2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("roster missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestParallelGroupFocusWinnerHighlight asserts enter on a group focuses it, shows the
+// branches inline with the WINNER row marked (★) and the preserved fork path, and esc
+// steps back to the roster.
+func TestParallelGroupFocusWinnerHighlight(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedParallel(m, "p1",
+		startPar("p1", "judge", 2),
+		branchStartPar("p1", 0, "branch-1", "approach A"),
+		branchStartPar("p1", 1, "branch-2", "approach B"),
+		branchToolPar("p1", 1, "Edit", false, 1),
+		branchEndPar("p1", 0, 100, 20, 2, "end_turn", false, "/fork/branch-1"),
+		branchEndPar("p1", 1, 120, 25, 3, "end_turn", false, "/fork/branch-2"),
+		endPar("p1", "judge", 2, 1, "/fork/branch-2", "end_turn"),
+	)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if m.parallel.view != parallelGroupView {
+		t.Fatalf("enter should focus the group, view = %v", m.parallel.view)
+	}
+	if m.parallel.group != "p1" {
+		t.Fatalf("focused group = %q want p1", m.parallel.group)
+	}
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "★") {
+		t.Errorf("group focus should highlight the winner row with ★:\n%s", out)
+	}
+	if !strings.Contains(out, "branch-1") || !strings.Contains(out, "branch-2") {
+		t.Errorf("group focus should list all branches inline:\n%s", out)
+	}
+	if !strings.Contains(out, "winner fork (preserved)") || !strings.Contains(out, "/fork/branch-2") {
+		t.Errorf("group focus should show the preserved winner fork path:\n%s", out)
+	}
+	if !strings.Contains(out, "context-isolated") {
+		t.Errorf("group focus should carry the no-content honesty note:\n%s", out)
+	}
+	// esc steps back to the roster (ONE level — no deeper branch focus).
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = mm.(Model)
+	if m.parallel.view != parallelRoster {
+		t.Fatalf("esc should step back to the roster, view = %v", m.parallel.view)
+	}
+}
+
+// TestParallelFailedBranchGlyph asserts a failed branch renders with the ✗ glyph and a
+// "failed" label in the group focus, distinct from a clean branch's ✓.
+func TestParallelFailedBranchGlyph(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedParallel(m, "p1",
+		startPar("p1", "all", 2),
+		branchStartPar("p1", 0, "branch-1", "explore A"),
+		branchStartPar("p1", 1, "branch-2", "explore B"),
+		branchEndPar("p1", 0, 100, 20, 2, "error", true, "/fork/branch-1"),
+		branchEndPar("p1", 1, 120, 25, 3, "end_turn", false, "/fork/branch-2"),
+		endPar("p1", "all", 2, -1, "", "end_turn"),
+	)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "✗") {
+		t.Errorf("a failed branch should render the ✗ glyph:\n%s", out)
+	}
+	if !strings.Contains(out, "failed") {
+		t.Errorf("a failed branch should carry the 'failed' label:\n%s", out)
+	}
+}
+
+// TestParallelTabRoutingAndEsc asserts ctrl+a → tab reaches the Parallel tab and esc
+// from the roster closes the overlay.
+func TestParallelTabRoutingAndEsc(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	// Seed BOTH a subagent and a parallel run so the default tab is Subagents (haveSub
+	// beats finished parallel), and tab must reach Parallel.
+	m = seedSubagents(m, "s1", startSub("s1", "c1", "audit"))
+	m = seedParallel(m, "p1", startPar("p1", "all", 1), branchStartPar("p1", 0, "branch-1", "go"))
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.agentsTab != tabParallel {
+		// parallel is LIVE (no branch_end) so parallelLive beats haveSub.
+		t.Fatalf("expected Parallel tab (a live parallel run), got %v", m.agentsTab)
+	}
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "▸ Parallel") {
+		t.Errorf("tab strip should mark Parallel active:\n%s", out)
+	}
+	// esc from the roster closes the overlay.
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = mm.(Model)
+	if m.team.view != teamNone {
+		t.Errorf("esc from the Parallel roster should close the overlay")
+	}
+}
+
+// TestParallelNoContentLeakOverlay is the gauntlet-#7 client guard: a branch_tool /
+// branch_end whose (hypothetical) fields carry a canary must never surface in the rendered
+// overlay — only names/glyphs/paths/labels. The ParallelMsg carries no content field, so
+// this asserts the render path never echoes a tool NAME-shaped canary into a body region
+// it shouldn't, mirroring the subagent overlay leak guard.
+func TestParallelNoContentLeakOverlay(t *testing.T) {
+	const canary = "CANARYLEAK"
+	m := newMCPModel(t, aztec(), nil)
+	// The only content-ish channel ParallelMsg has is ToolName/Goal/Workspace — all
+	// redacted metadata. Feed a canary into a place it would NOT be allowed to render as
+	// content: the workspace path renders (it is a handle), so use the canary as a tool
+	// name and assert it appears ONLY as a chip name, never as a result body line.
+	m = seedParallel(m, "p1",
+		startPar("p1", "all", 1),
+		branchStartPar("p1", 0, "branch-1", "explore"),
+		branchToolPar("p1", 0, canary, false, 1),
+		branchEndPar("p1", 0, 10, 2, 1, "end_turn", false, "/fork/branch-1"),
+		endPar("p1", "all", 1, -1, "", "end_turn"),
+	)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	out := stripANSIstr(m.View().Content)
+	// The tool name (the only place a canary could legitimately appear) shows as the
+	// branch's last tool — that is metadata, not content. There must be NO args/result
+	// body line. The honesty note asserts the render is redacted.
+	if !strings.Contains(out, "context-isolated") {
+		t.Errorf("group focus must carry the redaction honesty note:\n%s", out)
+	}
+	// No "result"/"args" body region exists for a branch — assert the overlay never grows
+	// a content line (the canary may appear as a tool-name chip; that is allowed).
+	for _, banned := range []string{canary + " =", "result: " + canary, "args: " + canary} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("overlay leaked branch content %q:\n%s", banned, out)
+		}
+	}
+}
+
+// TestParallelRosterWindowed asserts a group list larger than the height windows like the
+// subagent roster (only fitting rows render, footer hint stays, "+K below" surfaces).
+func TestParallelRosterWindowed(t *testing.T) {
+	const n = 20
+	m := newMCPModel(t, aztec(), nil)
+	m = resize(m, 100, 24)
+	for i := 0; i < n; i++ {
+		parent := "p" + string(rune('a'+i))
+		m = seedParallel(m, parent, startPar(parent, "all", 1), branchStartPar(parent, 0, "branch-1", "go"))
+	}
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.agentsTab != tabParallel {
+		t.Fatalf("expected Parallel tab, got %v", m.agentsTab)
+	}
+	out := stripANSIstr(m.View().Content)
+	rows := teamRosterRows(agentsBodyHeight(m.vp.Height()))
+	if rows >= n {
+		t.Fatalf("test premise broken: window %d must be < groups %d", rows, n)
+	}
+	if !strings.Contains(out, "below") {
+		t.Errorf("a windowed group list should show a '+K below' tail:\n%s", out)
+	}
+	if !strings.Contains(out, "enter focus") {
+		t.Errorf("footer hint clipped by the window:\n%s", out)
+	}
+}
+
+// TestParallelRosterOrderInsertionStable guards group row ORDER against a regression to
+// map iteration: parallelGroupFor uses an insertion-order index map, so two groups must
+// render in the order their parallel.start events arrived (p_a before p_b), every time.
+// A regression to ranging a map would make this flake. Seeding p_b FIRST then p_a (so the
+// insertion order is the reverse of any lexical sort) makes the assertion bite.
+func TestParallelRosterOrderInsertionStable(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	// Insert p_b before p_a — render order must follow INSERTION, not the ids' sort order.
+	m = seedParallel(m, "p_b", startPar("p_b", "all", 1), branchStartPar("p_b", 0, "branch-1", "second-seeded BBB"))
+	m = seedParallel(m, "p_a", startPar("p_a", "judge", 1), branchStartPar("p_a", 0, "branch-1", "first-after AAA"))
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.agentsTab != tabParallel {
+		t.Fatalf("expected Parallel tab, got %v", m.agentsTab)
+	}
+	// Run several renders; insertion order must be byte-stable (a map-iteration regression
+	// would shuffle it across iterations).
+	for iter := 0; iter < 8; iter++ {
+		out := stripANSIstr(m.View().Content)
+		// The roster lines carry the join mode; p_b was seeded first (all), p_a second
+		// (judge), so "all" must appear BEFORE "judge" in the rendered roster.
+		ai := strings.Index(out, "all ·")
+		ji := strings.Index(out, "judge ·")
+		if ai < 0 || ji < 0 {
+			t.Fatalf("iter %d: roster missing both group rows:\n%s", iter, out)
+		}
+		if ai > ji {
+			t.Fatalf("iter %d: groups not in insertion order — first-seeded (all) must precede second (judge):\n%s", iter, out)
+		}
+	}
+}
+
+// TestParallelBranchOrderByIndex guards branch row ORDER inside a focused group: branch
+// events arriving OUT OF ORDER (branch 2's events before branch 0's) must still render BY
+// INDEX (branch-1, branch-2, branch-3), because parallelBranchFor keys on a first-seen
+// index map and the render walks the branch slice. The seed delivers indices 2,0,1 so a
+// regression to map iteration / arrival order would reorder the rows.
+func TestParallelBranchOrderByIndex(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedParallel(m, "p1",
+		startPar("p1", "all", 3),
+		// Out of order: index 2 first, then 0, then 1.
+		branchStartPar("p1", 2, "branch-3", "third"),
+		branchStartPar("p1", 0, "branch-1", "first"),
+		branchStartPar("p1", 1, "branch-2", "second"),
+		branchEndPar("p1", 2, 30, 6, 1, "end_turn", false, "/fork/branch-3"),
+		branchEndPar("p1", 0, 10, 2, 1, "end_turn", false, "/fork/branch-1"),
+		branchEndPar("p1", 1, 20, 4, 1, "end_turn", false, "/fork/branch-2"),
+		endPar("p1", "all", 3, -1, "", "end_turn"),
+	)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if m.parallel.view != parallelGroupView {
+		t.Fatalf("enter should focus the group, view = %v", m.parallel.view)
+	}
+	out := stripANSIstr(m.View().Content)
+	i1 := strings.Index(out, "branch-1")
+	i2 := strings.Index(out, "branch-2")
+	i3 := strings.Index(out, "branch-3")
+	if i1 < 0 || i2 < 0 || i3 < 0 {
+		t.Fatalf("group focus missing a branch row:\n%s", out)
+	}
+	if i1 >= i2 || i2 >= i3 {
+		t.Fatalf("branches not rendered BY INDEX (want branch-1<branch-2<branch-3 despite out-of-order events): "+
+			"i1=%d i2=%d i3=%d\n%s", i1, i2, i3, out)
+	}
+}
+
+// TestParallelBranchTransientToolGlyph (the optional add) asserts a RUNNING branch's
+// transient tool activity surfaces in the group focus row: a branch_tool with IsError
+// shows the current tool name as the row's live state (no terminal Failed ✗ yet — the
+// branch has not ended). It complements TestParallelFailedBranchGlyph (terminal ✗).
+func TestParallelBranchTransientToolGlyph(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedParallel(m, "p1",
+		startPar("p1", "all", 1),
+		branchStartPar("p1", 0, "branch-1", "explore"),
+		branchToolPar("p1", 0, "Grep", true, 1), // a tool errored, but the branch is still RUNNING
+	)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	out := stripANSIstr(m.View().Content)
+	// The running branch shows its current tool ("Grep…") as the live state, with the
+	// in-flight ◐ glyph (NOT a terminal ✗ — the branch has not ended).
+	if !strings.Contains(out, "Grep…") {
+		t.Errorf("running branch should surface its current tool as live state:\n%s", out)
+	}
+	if !strings.Contains(out, "◐ branch-1") {
+		t.Errorf("a still-running branch (transient tool error) should keep the ◐ glyph, not a terminal ✗:\n%s", out)
+	}
+}

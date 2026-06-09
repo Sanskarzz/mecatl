@@ -255,9 +255,21 @@ API. The real constants:
 | `compaction` | `EvCompaction` | a compaction boundary crossed |
 | `no_progress` | `EvNoProgress` | a completed turn produced no tool call and no meaningful text; the loop is nudging (gentle, then a final best-effort extraction) or giving up |
 | `result` | `EvResult` | terminal: carries `ResultPayload{Stop, Text, Usage}` |
+| `subagent.start/tool/end` | `EvSubagent*` | a `Subagent` child run's REDACTED, metadata-only projection (flat fleet) |
+| `team.start/member/tasks/findings/end` | `EvTeam*` | an in-process `Team` run's BOUNDED projection (coordinating roster) |
+| `parallel.start/branch/end` | `EvParallel*` | a `Parallel` fork-join run's REDACTED, metadata-only GROUP projection (join + winner + fork paths) |
 
 `Event` carries `Type, Seq, Turn, Text` plus optional pointers `ToolCall`,
-`ToolResult`, `Ask *PendingAsk`, `Result *ResultPayload`, `Usage *Usage`.
+`ToolResult`, `Ask *PendingAsk`, `Result *ResultPayload`, `Usage *Usage`,
+`Subagent`, `Team`, `Parallel`.
+
+The three DELEGATION families (`subagent.*` / `team.*` / `parallel.*`) project the SAME
+redacted child-loop lifecycle (the per-tool redaction is shared in
+`agent.drainChildObserved`, the single chokepoint) and differ only in AGGREGATION shape —
+flat fleet vs coordinating roster vs fan-out group. They are deliberately NOT merged; a
+4th family is the trip-wire to extract a shared lifecycle value object (see
+`docs/design/IMPLEMENTATION-NOTES.md`). Gauntlet #7: none carries branch/child content
+into the parent conversation — only metadata (and, for Parallel, fork-root path handles).
 
 ## 4. The ports (`internal/port`)
 

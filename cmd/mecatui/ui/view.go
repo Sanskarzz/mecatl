@@ -64,7 +64,7 @@ func (m Model) View() tea.View {
 	case m.mcp.view != mcpNone:
 		body = renderMCPOverlay(m.deps.Theme, m.mcp, m.caps, m.width, m.vp.Height())
 	case m.team.view != teamNone:
-		body = renderAgentsOverlay(m.deps.Theme, m.agentsTab, m.subagents, m.team, m.conv.latestTeamBlock(), m.conv.subagentFleet, m.width, m.vp.Height())
+		body = renderAgentsOverlay(m.deps.Theme, m.agentsTab, m.subagents, m.parallel, m.team, m.conv.latestTeamBlock(), m.conv.subagentFleet, m.conv.parallelGroups, m.width, m.vp.Height())
 	case m.agentsInv.view != agentsInvNone:
 		body = renderAgentsInvOverlay(m.deps.Theme, m.agentsInv, m.caps, m.width, m.vp.Height())
 	case m.skills.view != skillsNone:
@@ -333,9 +333,19 @@ func (m Model) fitFooter(left string, width int) string {
 		subMedium = th.Style("spinner").Render(subagentFooterMedium(running, done))
 		subCompact = th.Style("spinner").Render(subagentFooterCompact(running, done))
 	}
-	agentsFull := joinSeg(sep, teamFull, subFull)
-	agentsMedium := joinSeg(sep, teamMedium, subMedium)
-	agentsCompact := joinSeg(sep, teamCompact, subCompact)
+	// The Parallel segment, non-empty whenever ≥1 Parallel run has STARTED this session
+	// (hasParallel) — like the fleet segment it stays visible after the run finishes (the
+	// "1◐ 2✓" counts still inform), matching the subagent-fleet footer behaviour.
+	var parFull, parMedium, parCompact string
+	if m.conv.hasParallel() {
+		running, done := m.conv.parallelGroupCounts()
+		parFull = parallelFooterFull(th, running, done)
+		parMedium = th.Style("spinner").Render(parallelFooterMedium(running, done))
+		parCompact = th.Style("spinner").Render(parallelFooterCompact(running, done))
+	}
+	agentsFull := joinSeg(sep, teamFull, parFull, subFull)
+	agentsMedium := joinSeg(sep, teamMedium, parMedium, subMedium)
+	agentsCompact := joinSeg(sep, teamCompact, parCompact, subCompact)
 
 	var candidates []string
 	if agentsFull != "" {

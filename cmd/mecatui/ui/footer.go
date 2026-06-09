@@ -395,3 +395,27 @@ func subagentFooterMedium(running, done int) string {
 func subagentFooterCompact(running, done int) string {
 	return fmt.Sprintf("%s %d%s %d%s", subagentFleetGlyph, running, subagentRunGlyph, done, subagentDoneGlyph)
 }
+
+// parallelFleetGlyph leads the footer Parallel-summary segment when ≥1 Parallel run has
+// started this session. Like subagentFleetGlyph / teamLiveGlyph it is a STATIC literal (a
+// fork glyph distinct from ⛭ subagents and ⟳ team), deliberately NOT the animated spinner.
+const parallelFleetGlyph = "⑂"
+
+// parallelFooterFull is the richest Parallel footer tier: "⑂ parallel 1◐ 2✓ · ctrl+a".
+// Like the fleet segment it is shown whenever ≥1 Parallel run has STARTED this session
+// (running+done > 0) and reuses the ◐/✓ count vocabulary so footer + overlay agree.
+func parallelFooterFull(th theme.Theme, running, done int) string {
+	seg := fmt.Sprintf("%s parallel %d%s %d%s · ctrl+a", parallelFleetGlyph, running, subagentRunGlyph, done, subagentDoneGlyph)
+	return th.Style("spinner").Render(seg)
+}
+
+// parallelFooterMedium drops the "parallel" word: "⑂ 1◐ 2✓ · ctrl+a". It carries no theme
+// styling itself so it composes when styled by the caller (view.go).
+func parallelFooterMedium(running, done int) string {
+	return fmt.Sprintf("%s %d%s %d%s · ctrl+a", parallelFleetGlyph, running, subagentRunGlyph, done, subagentDoneGlyph)
+}
+
+// parallelFooterCompact is the poorest Parallel tier: "⑂ 1◐ 2✓" — glyph + counts only.
+func parallelFooterCompact(running, done int) string {
+	return fmt.Sprintf("%s %d%s %d%s", parallelFleetGlyph, running, subagentRunGlyph, done, subagentDoneGlyph)
+}

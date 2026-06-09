@@ -335,7 +335,7 @@ func renderTeamRoster(th theme.Theme, st teamState, b *block, height int) string
 		out.WriteString(muted.Render(fmt.Sprintf("  · +%d below", below)) + "\n")
 	}
 
-	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · t tasks · f findings · tab subagents · esc close"))
+	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · t tasks · f findings · tab switch · esc close"))
 	return out.String()
 }
 
