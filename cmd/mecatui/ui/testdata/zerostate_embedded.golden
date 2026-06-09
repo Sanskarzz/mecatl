@@ -11,7 +11,7 @@
               ┃                                                                     ┃
               ┃    ?             keys & features                                    ┃
               ┃    /             slash commands                                     ┃
-              ┃    ctrl+a        agent team (when running)                          ┃
+              ┃    ctrl+a        agents (when running)                              ┃
               ┃    ctrl+t        details                                            ┃
               ┃                                                                     ┃
               ┃    Cross-session memory is on — I'll remember context across runs.  ┃

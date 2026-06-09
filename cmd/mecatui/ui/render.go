@@ -1083,6 +1083,16 @@ func subagentStopLabel(stop string) string {
 		return "cancelled"
 	case stopError:
 		return "error"
+	// The newer Task/Team terminal reasons (Package A/B) ride the same string `stop`
+	// field on the wire (no proto enum) — map them to compact labels so a subagent
+	// that ended via a budget / structured-output / no-progress terminal renders a
+	// sensible label here and in the fleet roster, never a blank or the raw token.
+	case "budget":
+		return "budget"
+	case "structured_output":
+		return "schema"
+	case "no_progress":
+		return "no-progress"
 	default:
 		return sanitizeTerminal(stop)
 	}

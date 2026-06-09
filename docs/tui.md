@@ -161,8 +161,9 @@ dirs and even when server slash-command expansion is off. `/clear` (reset the
 conversation and scrollback) and `/help` (open the keys-&-features overlay) are
 *always* available because they act purely on the TUI's own state; `/mcp` (browse
 the MCP inventory), `/agents` (browse the agent-definition inventory — the
-resolved registry the `Task` tool routes delegations to), `/team` (the live
-agent-team overlay, also on `ctrl+a`), `/skills` (browse the skills inventory),
+resolved registry the `Task` tool routes delegations to), `/team` (the unified
+agents overlay pinned to the Teams tab — same surface as `ctrl+a`, which picks a
+context-sensitive default tab), `/skills` (browse the skills inventory),
 `/soul` (inspect the persona — read-only), `/usermodel` (inspect the user
 model — read-only), and `/models` (pick the model for the next session) appear
 only when the connected server advertises those capabilities (and, for
@@ -323,12 +324,12 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 | `esc` (with an active selection) | **clear the selection** first — before any other `esc` meaning |
 | `?` | help overlay (on an empty prompt) |
 | `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`, `/soul`, `/usermodel`, `/models`; plus workspace commands) |
-| `ctrl+a` | open the **live agent-team overlay** (the full roster + per-member focus of the most-recent team) — works **while idle and mid-run**; inert under a permission modal. Same surface as `/team`. |
+| `ctrl+a` | open the **unified agents overlay** — ONE surface with two tabs: **Subagents** (the flat Task-child fleet) and **Teams** (the full roster + per-member focus of the most-recent team). `tab` switches tabs, `enter` focuses a row, `esc` steps back / closes. The default tab is **context-sensitive**: Teams when a team is live, else Subagents when subagents have run. Works **while idle and mid-run**; inert under a permission modal. `/team` opens it pinned to the Teams tab. |
 | `@` | file-mention menu — complete a workspace path, then attach it on submit (see below) |
 
 The `?` overlay enumerates the rest of the chords — `ctrl+v` (paste a clipboard
 image), `ctrl+o`/`ctrl+r`/`ctrl+p` (MCP inventory / resources / prompts), `ctrl+a`
-(live agent-team overlay, available idle **and** mid-run), `ctrl+t`
+(unified agents overlay — Subagents / Teams tabs — available idle **and** mid-run), `ctrl+t`
 (expand/collapse details), and the scroll keys (`pgup`/`pgdn`, `home`/`end`, mouse
 wheel) — and greys out any whose feature the connected server has not enabled
 (driven by the server's relayed capabilities). When the server serves agent
@@ -351,6 +352,40 @@ selection maps clicks through it, so they can never disagree about where the bod
 sits or how tall it is. When a transient region appears the viewport **shrinks** to
 make room and the footer stays on-screen — a transient never pushes the footer off
 the bottom (and the viewport grows back when the transient clears).
+
+### Watching subagents and teams — the fleet footer + the unified `ctrl+a` overlay
+
+Two surfaces watch concurrent **Task subagents** and **agent teams**, both built
+purely from the relayed `subagent.*` / `team.*` event projection (REDACTED,
+metadata-only — never child content):
+
+- **Fleet status footer segment.** Once **≥1 subagent has started** this session the
+  footer carries a peripheral cue — **`⛭ subagents 3◐ 1✓ · ctrl+a`** (N running ◐ / M
+  done ✓) — so the parallel case is discoverable without opening anything. It is built
+  from a flat fleet collection keyed by `ChildID`, fed alongside the inline Task-card
+  routing. It sheds before the context meter as width tightens (full → `⛭ 3◐ 1✓ · ctrl+a`
+  → `⛭ 3◐ 1✓` → dropped), exactly like the live-team segment, and the two coexist when a
+  session runs both. With no subagent the footer is byte-identical to before.
+
+- **Unified `ctrl+a` agents overlay.** ONE surface with two tabs:
+  - **Subagents** — one row per Task child: a state glyph (**◐** running / **✓** done /
+    **✗** error), the goal label, a short `#<hash>` of the `ChildID` (so two similar
+    goals are unambiguous), the current/last child tool, the running tool count, and
+    token usage. `enter` focuses one child's redacted `✓/✗` tool-chip trace (args/results
+    stay hidden — context-isolated; gauntlet #7). The roster is windowed (pgup/pgdn,
+    home/g·end/G, `+K above/below` tails) like the team roster.
+  - **Teams** — the existing agent-team roster + per-member focus + task / findings
+    sub-views, verbatim.
+  - `tab` switches tabs; `esc` steps back from a focus pane to its roster, then closes.
+    The **default tab is context-sensitive**: Teams when a team is live, else Subagents
+    when subagents have run, else the most-relevant available tab. `/team` opens the same
+    overlay pinned to the Teams tab.
+
+  A subagent that ended via a non-`end_turn` terminal renders a sensible label — the
+  newer Task/Team stop reasons (`budget` → "budget", `structured_output` → "schema",
+  `no_progress` → "no-progress", the `max_*` limits → "max-turns"/"max-tools") ride the
+  same string `stop` field on the wire (no proto enum) and map to compact labels; the
+  cap-family stops read as **✓** (a partial is still usable), error/cancel-family as **✗**.
 
 **Advisory vs durable notices.** A **compaction** boundary (`compaction` event) is a
 durable fact, so it lands as a muted **scrollback notice** that stays in the transcript.

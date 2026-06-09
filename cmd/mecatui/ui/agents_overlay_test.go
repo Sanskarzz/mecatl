@@ -1,0 +1,683 @@
+package ui
+
+// Tests for the unified ctrl+a "agents" overlay (Package C, iteration 7) and the
+// fleet status footer segment (iteration 6). The overlay is ONE surface with two
+// tabs — Subagents (the flat Task-child fleet) and Teams (the former team overlay,
+// reused verbatim). `tab` switches tabs, `enter` focuses a row, `esc` steps back /
+// closes. The default tab is context-sensitive (Teams when a team is live, else
+// Subagents when subagents ran). Everything renders from the REDACTED, metadata-only
+// subagent.* / team.* event projection — no child content (gauntlet #7).
+
+import (
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/stacklok/mecatl/cmd/mecatui/client"
+)
+
+// startSub / toolSub / endSub build the three subagent.* projections for a child.
+func startSub(parent, child, goal string) client.SubagentMsg {
+	return client.SubagentMsg{Kind: client.SubagentStart, ParentCallID: parent, ChildID: child, Goal: goal}
+}
+
+func toolSub(parent, child, tool string, isErr bool, count int) client.SubagentMsg {
+	return client.SubagentMsg{Kind: client.SubagentTool, ParentCallID: parent, ChildID: child, ToolName: tool, IsError: isErr, ToolCount: count}
+}
+
+func endSub(parent, child string, in, out int64, count int, stop string) client.SubagentMsg {
+	return client.SubagentMsg{
+		Kind: client.SubagentEnd, ParentCallID: parent, ChildID: child,
+		Usage: client.Usage{InputTokens: in, OutputTokens: out}, ToolCount: count, Stop: stop, DurationMs: 1200,
+	}
+}
+
+// seedSubagents applies a sequence of subagent.* msgs through the real Update path so
+// the model's fleet collection is built exactly as it would be at runtime. It seeds a
+// Task tool card for the inline-card routing first (the fleet routing keys on ChildID
+// and is independent, but a card keeps the inline path realistic).
+func seedSubagents(m Model, parent string, msgs ...client.SubagentMsg) Model {
+	m.conv.addTool(parent, "Task", `{"prompt":"investigate"}`)
+	for _, msg := range msgs {
+		mm, _ := m.Update(msg)
+		m = mm.(Model)
+	}
+	return m
+}
+
+// --- iteration 6: fleet footer segment ------------------------------------
+
+// TestSubagentFleetCounts locks the (running, done) classification the footer segment
+// and the Subagents-tab header derive from the fleet: a child is done once its
+// subagent.end arrived, the rest are running.
+func TestSubagentFleetCounts(t *testing.T) {
+	c := &conversation{}
+	c.addTool("p1", "Task", `{}`)
+	c.fleetStart("c1", "audit auth")
+	c.fleetStart("c2", "map coverage")
+	c.fleetStart("c3", "trace config")
+	c.fleetEnd("c3", client.Usage{}, 4, "end_turn", 1000)
+	running, done := c.subagentFleetCounts()
+	if running != 2 || done != 1 {
+		t.Errorf("subagentFleetCounts = (%d, %d), want (2, 1)", running, done)
+	}
+	if !c.hasSubagents() {
+		t.Error("hasSubagents should be true after a fleetStart")
+	}
+}
+
+// TestSubagentFleetEmpty asserts no fleet → no footer segment + no overlay-enabling.
+func TestSubagentFleetEmpty(t *testing.T) {
+	c := &conversation{}
+	if c.hasSubagents() {
+		t.Error("an empty fleet must not report hasSubagents")
+	}
+	r, d := c.subagentFleetCounts()
+	if r != 0 || d != 0 {
+		t.Errorf("empty fleet counts = (%d, %d), want (0, 0)", r, d)
+	}
+}
+
+// TestFleetMissingChildIDDropped asserts a subagent event with no ChildID is dropped
+// from the fleet (the fleet keys on ChildID); the inline card still routes by
+// ParentCallID.
+func TestFleetMissingChildIDDropped(t *testing.T) {
+	c := &conversation{}
+	c.fleetStart("", "no id")
+	if c.hasSubagents() {
+		t.Error("a childID-less start must not create a fleet lane")
+	}
+}
+
+// TestFooterHiddenWithoutSubagents asserts the footer has NO fleet segment when no
+// subagent has run — the no-subagent footer stays byte-identical to before.
+func TestFooterHiddenWithoutSubagents(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	out := stripANSIstr(m.fitFooter(m.deps.Theme.Style("muted").Render("connected"), 120))
+	if strings.Contains(out, "subagents") || strings.Contains(out, subagentFleetGlyph) {
+		t.Errorf("footer should carry no fleet segment with zero subagents, got %q", out)
+	}
+}
+
+// TestFooterShowsRunningAndDone asserts the footer fleet segment shows the
+// running/done counts and the ctrl+a cue once subagents have run (mixed live+done).
+func TestFooterShowsRunningAndDone(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedSubagents(m, "p1",
+		startSub("p1", "c1", "audit auth"),
+		toolSub("p1", "c1", "Grep", false, 1),
+		startSub("p1", "c2", "map coverage"),
+		startSub("p1", "c3", "trace config"),
+		endSub("p1", "c3", 15000, 4000, 9, "end_turn"),
+	)
+	out := stripANSIstr(m.fitFooter(m.deps.Theme.Style("muted").Render("connected"), 160))
+	if !strings.Contains(out, "subagents") {
+		t.Errorf("footer should show the fleet segment, got %q", out)
+	}
+	// 2 running (c1, c2), 1 done (c3).
+	if !strings.Contains(out, "2"+subagentRunGlyph) || !strings.Contains(out, "1"+subagentDoneGlyph) {
+		t.Errorf("footer should show 2 running / 1 done, got %q", out)
+	}
+	if !strings.Contains(out, "ctrl+a") {
+		t.Errorf("footer fleet segment should advertise ctrl+a, got %q", out)
+	}
+}
+
+// TestFooterFleetTiers asserts the three fleet footer tiers degrade cleanly at
+// narrowing widths (full → medium → compact → dropped), like the team segment.
+func TestFooterFleetTiers(t *testing.T) {
+	th := aztec()
+	full := stripANSIstr(subagentFooterFull(th, 3, 1))
+	medium := stripANSIstr(subagentFooterMedium(3, 1))
+	compact := stripANSIstr(subagentFooterCompact(3, 1))
+	if !strings.Contains(full, "subagents") {
+		t.Errorf("full tier should name 'subagents', got %q", full)
+	}
+	if strings.Contains(medium, "subagents") {
+		t.Errorf("medium tier should drop the word 'subagents', got %q", medium)
+	}
+	if !strings.Contains(medium, "ctrl+a") {
+		t.Errorf("medium tier should keep the ctrl+a cue, got %q", medium)
+	}
+	if strings.Contains(compact, "ctrl+a") {
+		t.Errorf("compact tier should drop the ctrl+a cue, got %q", compact)
+	}
+	for _, s := range []string{full, medium, compact} {
+		if !strings.Contains(s, "3"+subagentRunGlyph) || !strings.Contains(s, "1"+subagentDoneGlyph) {
+			t.Errorf("tier %q should carry the counts", s)
+		}
+	}
+}
+
+// TestFooterFleetTierSelection proves the SELECTION wiring (not just the builders):
+// fitFooter picks the medium tier (drops the "subagents" word, keeps "ctrl+a") when the
+// full tier won't fit, and the compact tier (drops "ctrl+a") when even medium won't fit.
+//
+// The candidate widths are reconstructed EXACTLY as fitFooter builds them (agents prefix
+// + sep + the matching ctx-meter tier), so the chosen test widths are deterministic
+// regardless of glyph widths. With no team and no ctx window the agents prefix is the
+// fleet segment alone and the meter tiers collapse to a short "ctx <n>" form, so the
+// agents tier drives the choice.
+func TestFooterFleetTierSelection(t *testing.T) {
+	th := aztec()
+	m := newMCPModel(t, aztec(), nil)
+	m = seedSubagents(m, "p1",
+		startSub("p1", "c1", "audit auth"),
+		startSub("p1", "c2", "map coverage"),
+		startSub("p1", "c3", "trace config"),
+	) // 3 running, 0 done
+	left := th.Style("muted").Render("connected")
+	leftW := lipgloss.Width(left)
+
+	// Rebuild the four agents-bearing candidates fitFooter forms (see view.go fitFooter).
+	const sep = "  "
+	meter := renderContextMeter(th, m.contextTokens, m.deps.ContextWindow)
+	meterCompact := renderContextMeterCompact(th, m.contextTokens, m.deps.ContextWindow)
+	meterMinimal := renderContextMeterMinimal(th, m.contextTokens, m.deps.ContextWindow)
+	full := subagentFooterFull(th, 3, 0)
+	medium := th.Style("spinner").Render(subagentFooterMedium(3, 0))
+	compact := th.Style("spinner").Render(subagentFooterCompact(3, 0))
+	cand0 := full + sep + meter + " · " + renderUsageFacets(m.usage) // richest
+	cand1 := full + sep + meter
+	cand2 := medium + sep + meterCompact
+	cand3 := compact + sep + meterMinimal
+	w := func(s string) int { return leftW + lipgloss.Width(s) + footerGapPad }
+
+	// Sanity: the candidates strictly narrow, so a between-width selects a single tier.
+	if w(cand0) <= w(cand1) || w(cand1) <= w(cand2) || w(cand2) <= w(cand3) {
+		t.Fatalf("test premise broken: candidate widths not strictly decreasing: %d %d %d %d",
+			w(cand0), w(cand1), w(cand2), w(cand3))
+	}
+
+	// At a width that fits cand2 (medium tier) but NOT cand1 (full tier): medium chosen —
+	// the "subagents" word is dropped, the ctrl+a cue survives.
+	out := stripANSIstr(m.fitFooter(left, w(cand2)))
+	if strings.Contains(out, "subagents") {
+		t.Errorf("medium-width footer should drop the 'subagents' word, got %q", out)
+	}
+	if !strings.Contains(out, "ctrl+a") {
+		t.Errorf("medium-width footer should keep the ctrl+a cue, got %q", out)
+	}
+
+	// At a width that fits cand3 (compact tier) but NOT cand2 (medium tier): compact
+	// chosen — the ctrl+a cue is dropped, the counts survive.
+	out = stripANSIstr(m.fitFooter(left, w(cand3)))
+	if strings.Contains(out, "ctrl+a") {
+		t.Errorf("compact-width footer should drop the ctrl+a cue, got %q", out)
+	}
+	if !strings.Contains(out, "3"+subagentRunGlyph) {
+		t.Errorf("compact-width footer should still render the counts, got %q", out)
+	}
+}
+
+// TestFooterFleetAndTeamCoexist asserts a session running BOTH a live team and
+// subagents shows BOTH segments in the footer at full width (the unified-overlay
+// premise: both are reachable).
+func TestFooterFleetAndTeamCoexist(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(c *conversation) {
+		c.setTeamStart("t1", "team-x", roster())
+		c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Grep"}))
+	})
+	m = seedSubagents(m, "p1", startSub("p1", "c1", "audit auth"))
+	out := stripANSIstr(m.fitFooter(m.deps.Theme.Style("muted").Render("connected"), 200))
+	if !strings.Contains(out, "team-x") {
+		t.Errorf("footer should keep the live-team segment, got %q", out)
+	}
+	if !strings.Contains(out, "subagents") {
+		t.Errorf("footer should also show the fleet segment, got %q", out)
+	}
+}
+
+// --- iteration 7: unified tabbed overlay ----------------------------------
+
+// TestCtrlAOpensSubagentsTabWhenNoTeam asserts the context-sensitive default: with
+// subagents running and no team, ctrl+a opens the overlay on the Subagents tab.
+func TestCtrlAOpensSubagentsTabWhenNoTeam(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedSubagents(m, "p1",
+		startSub("p1", "c1", "audit auth"),
+		toolSub("p1", "c1", "Grep", false, 1),
+	)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.team.view == teamNone {
+		t.Fatal("ctrl+a should open the agents overlay")
+	}
+	if m.agentsTab != tabSubagents {
+		t.Errorf("default tab = %v, want tabSubagents (subagents live, no team)", m.agentsTab)
+	}
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "subagents · 1 running · 0 done") {
+		t.Errorf("Subagents roster header missing, got %q", out)
+	}
+	if !strings.Contains(out, "audit auth") {
+		t.Errorf("fleet row goal missing, got %q", out)
+	}
+}
+
+// TestCtrlAOpensTeamsTabWhenTeamLive asserts the context-sensitive default: with a
+// LIVE team, ctrl+a opens on the Teams tab even if subagents also ran.
+func TestCtrlAOpensTeamsTabWhenTeamLive(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(c *conversation) {
+		c.setTeamStart("t1", "team-x", roster())
+		c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Grep"}))
+	})
+	m = seedSubagents(m, "p1", startSub("p1", "c1", "audit auth"))
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.agentsTab != tabTeams {
+		t.Errorf("default tab = %v, want tabTeams (team live)", m.agentsTab)
+	}
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "agents · 2 members") {
+		t.Errorf("Teams roster header missing, got %q", out)
+	}
+}
+
+// TestPreferredAgentsTab pins the context-sensitive default-tab predicate in isolation.
+func TestPreferredAgentsTab(t *testing.T) {
+	var m Model
+	cases := []struct {
+		name                        string
+		teamLive, haveTeam, haveSub bool
+		want                        agentsTab
+	}{
+		{"team live wins", true, true, true, tabTeams},
+		{"team live, no sub", true, true, false, tabTeams},
+		{"subs only", false, false, true, tabSubagents},
+		{"finished team only", false, true, false, tabTeams},
+		{"both present, team not live → subs", false, true, true, tabSubagents},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := m.preferredAgentsTab(c.teamLive, c.haveTeam, c.haveSub); got != c.want {
+				t.Errorf("preferredAgentsTab(%v,%v,%v) = %v, want %v", c.teamLive, c.haveTeam, c.haveSub, got, c.want)
+			}
+		})
+	}
+}
+
+// TestTabSwitchesSubagentsToTeams asserts `tab` flips the active tab both ways.
+func TestTabSwitchesSubagentsToTeams(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(c *conversation) {
+		c.setTeamStart("t1", "team-x", roster())
+		c.addTeamMember(member("scout", "tool.call", client.TeamMsg{ToolName: "Grep"}))
+	})
+	m = seedSubagents(m, "p1", startSub("p1", "c1", "audit auth"))
+	// Open: team live → Teams tab.
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.agentsTab != tabTeams {
+		t.Fatalf("expected Teams tab on open, got %v", m.agentsTab)
+	}
+	// tab → Subagents.
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = mm.(Model)
+	if m.agentsTab != tabSubagents {
+		t.Fatalf("tab did not switch to Subagents, got %v", m.agentsTab)
+	}
+	if !strings.Contains(stripANSIstr(m.View().Content), "subagents · 1 running") {
+		t.Errorf("Subagents tab body not shown after switch")
+	}
+	// tab → back to Teams.
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = mm.(Model)
+	if m.agentsTab != tabTeams {
+		t.Fatalf("tab did not switch back to Teams, got %v", m.agentsTab)
+	}
+}
+
+// TestEnterFocusesSubagentChild asserts enter on a fleet row opens the child's focus
+// pane (its redacted chip trace), and esc steps back to the roster.
+func TestEnterFocusesSubagentChild(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedSubagents(m, "p1",
+		startSub("p1", "c1", "audit auth"),
+		toolSub("p1", "c1", "Grep", false, 1),
+		toolSub("p1", "c1", "Read", true, 2),
+	)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.agentsTab != tabSubagents {
+		t.Fatalf("expected Subagents tab, got %v", m.agentsTab)
+	}
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if m.subagents.view != subagentFocus {
+		t.Fatalf("enter should focus a child, view = %v", m.subagents.view)
+	}
+	if m.subagents.child != "c1" {
+		t.Errorf("focused child = %q, want c1", m.subagents.child)
+	}
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "args/results hidden (context-isolated)") {
+		t.Errorf("focus pane should carry the context-isolation note, got %q", out)
+	}
+	if !strings.Contains(out, "Grep") || !strings.Contains(out, "Read") {
+		t.Errorf("focus pane should show the child's tool chips, got %q", out)
+	}
+	// esc steps back to the roster (does NOT close the overlay).
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = mm.(Model)
+	if m.subagents.view != subagentRoster {
+		t.Fatalf("esc from focus should return to the roster, view = %v", m.subagents.view)
+	}
+	if m.team.view == teamNone {
+		t.Fatal("esc from focus must NOT close the overlay")
+	}
+}
+
+// TestEscClosesSubagentOverlay asserts esc from the Subagents roster closes the
+// overlay entirely.
+func TestEscClosesSubagentOverlay(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedSubagents(m, "p1", startSub("p1", "c1", "audit auth"))
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = mm.(Model)
+	if m.team.view != teamNone {
+		t.Errorf("esc from the subagents roster should close the overlay, view = %v", m.team.view)
+	}
+}
+
+// TestSubagentOverlayRedactsChildContent is the gauntlet-#7 ABSENCE guard for the
+// Subagents tab: the only child-derived strings the overlay ever renders are the goal
+// label, the ChildID, and child tool NAMES (the redacted subagent.* projection carries
+// no args/result bodies at all). This test seeds a child whose goal and tool name carry
+// a SENTINEL ("SECRETCONTENT") plus a control byte (0x1b), then asserts in BOTH the
+// roster and the focused child's chip trace that:
+//   - the raw 0x1b ESC never reaches the rendered output (sanitizeTerminal applied), and
+//   - the metadata-only note "args/results hidden (context-isolated)" is present, and
+//   - the only place the sentinel appears is the goal/tool-name metadata that is
+//     LEGITIMATELY surfaced — it must never appear as a leaked arg/result body.
+//
+// A regression that started forwarding a child's tool ARGS or RESULT into the overlay
+// would have no field carrying it (the projection drops them), so this also fails-loud
+// if a future change widened SubagentMsg and piped a body through the chip trace: the
+// chip would then carry more than the bare tool name, which this pins by asserting the
+// chip line is EXACTLY the glyph + sanitized name.
+func TestSubagentOverlayRedactsChildContent(t *testing.T) {
+	// Per the no-destructive-test-literals rule the control byte is an innocuous ANSI/OSC
+	// escape, and the sentinel is a plain marker — never a destructive-looking command.
+	const sentinel = "SECRETCONTENT"
+	const evilTool = "\x1b]0;" + sentinel + "\x07Grep"
+	m := newMCPModel(t, aztec(), nil)
+	m = seedSubagents(m, "p1",
+		startSub("p1", "c1", "\x1b[31m"+sentinel+" goal\x1b[0m"),
+		toolSub("p1", "c1", evilTool, false, 1),
+	)
+
+	// Roster: the goal + tool-derived state are sanitized — no raw ESC, and the sentinel
+	// only ever appears as inert text (never as a control sequence).
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	roster := stripANSIstr(m.View().Content)
+	if strings.ContainsRune(roster, 0x1b) {
+		t.Errorf("raw ESC (0x1b) leaked into the subagents roster; sanitizeTerminal not applied:\n%q", roster)
+	}
+
+	// Focus pane: the chip trace + sub-header are sanitized and metadata-only.
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if m.subagents.view != subagentFocus {
+		t.Fatalf("enter should focus the child, view = %v", m.subagents.view)
+	}
+	focus := stripANSIstr(m.View().Content)
+	if strings.ContainsRune(focus, 0x1b) {
+		t.Errorf("raw ESC (0x1b) leaked into the subagent focus pane; sanitizeTerminal not applied:\n%q", focus)
+	}
+	// The context-isolation note must be present (PRESENCE half of the guard).
+	if !strings.Contains(focus, "args/results hidden (context-isolated)") {
+		t.Errorf("focus pane missing the context-isolation note:\n%q", focus)
+	}
+	// ABSENCE half: the OSC payload that wrapped the sentinel must render inert (no raw
+	// escape), i.e. the sanitized form "]0;SECRETCONTENTGrep" — the escape bytes gone.
+	// There is no SubagentMsg field that carries child args/result, so a body can never
+	// reach here; this asserts the one child-derived string (the tool name) is rendered
+	// only after sanitization, never as a live control sequence.
+	if strings.Contains(focus, "\x07") {
+		t.Errorf("raw BEL (0x07) leaked into the subagent focus pane:\n%q", focus)
+	}
+	if !strings.Contains(focus, "]0;"+sentinel+"Grep") {
+		t.Errorf("sanitized tool name not rendered as inert text in the focus chip trace:\n%q", focus)
+	}
+}
+
+// TestSubagentFocusDisambiguatesByHash asserts two children with the SAME goal are
+// disambiguated by the #<hash> ChildID suffix on the fleet rows (F2 §1.4 item 6).
+func TestSubagentFocusDisambiguatesByHash(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedSubagents(m, "p1",
+		startSub("p1", "explorer-aaa111", "audit auth"),
+		startSub("p1", "explorer-bbb222", "audit auth"),
+	)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "#aaa111") || !strings.Contains(out, "#bbb222") {
+		t.Errorf("identical goals should be disambiguated by the #hash suffix, got %q", out)
+	}
+}
+
+// TestSubagentNewTerminalReasonsRender asserts a child that ended via budget /
+// structured-output / a limit renders a sensible glyph + label, not a blank or the
+// raw token. The error-family stops get ✗; the cap-family stops get ✓ (a partial is
+// still usable) with the cap named.
+func TestSubagentNewTerminalReasonsRender(t *testing.T) {
+	cases := []struct {
+		stop      string
+		wantLabel string
+		wantGlyph string
+	}{
+		{"budget", "budget", "✓"},
+		{"structured_output", "schema", "✗"},
+		{"max_turns", "max-turns", "✓"},
+		{"max_tool_calls", "max-tools", "✓"},
+		{"error", "error", "✗"},
+		{"cancelled", "cancelled", "✗"},
+		{"no_progress", "no-progress", "✓"},
+		{"end_turn", "done", "✓"},
+	}
+	for _, c := range cases {
+		t.Run(c.stop, func(t *testing.T) {
+			ln := &subagentLane{childID: "c1", goal: "g", done: true, stop: c.stop, toolCount: 3}
+			if got := subagentLaneGlyph(ln); got != c.wantGlyph {
+				t.Errorf("glyph for stop=%q = %q, want %q", c.stop, got, c.wantGlyph)
+			}
+			line := subagentRosterLine(ln)
+			if !strings.Contains(line, c.wantLabel) {
+				t.Errorf("roster line for stop=%q = %q, want label %q", c.stop, line, c.wantLabel)
+			}
+		})
+	}
+}
+
+// TestSubagentBudgetStopThroughWire drives a `budget` terminal through the REAL path
+// (endSub → Update → applySubagent → fleetEnd) — NOT a struct literal — so a regression
+// in fleetEnd's stop threading (e.g. dropping the Stop field) is caught. It asserts the
+// rendered roster row carries the "budget" label and the ✓ glyph (a budget-stopped
+// child produced a usable partial), proving the stop reason survives the wire→lane→render
+// chain end-to-end.
+func TestSubagentBudgetStopThroughWire(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedSubagents(m, "p1",
+		startSub("p1", "c1", "audit auth"),
+		toolSub("p1", "c1", "Grep", false, 4),
+		endSub("p1", "c1", 200000, 50000, 4, "budget"),
+	)
+	// The lane built from the wire must carry the budget stop verbatim.
+	ln := findFleetLane(m.conv.subagentFleet, "c1")
+	if ln == nil {
+		t.Fatal("fleet lane c1 missing after the wire end event")
+	}
+	if ln.stop != "budget" {
+		t.Fatalf("fleetEnd did not thread the stop reason: lane.stop = %q, want \"budget\"", ln.stop)
+	}
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	out := stripANSIstr(m.View().Content)
+	if !strings.Contains(out, "audit auth") || !strings.Contains(out, "budget") {
+		t.Errorf("roster should show the budget-stopped child's label, got %q", out)
+	}
+	// The cap-family budget stop reads as a ✓ (usable partial), not a ✗.
+	if !strings.Contains(out, "✓") {
+		t.Errorf("a budget-stopped child should render the ✓ glyph, got %q", out)
+	}
+	if got := subagentLaneGlyph(ln); got != "✓" {
+		t.Errorf("subagentLaneGlyph for a wire-budget lane = %q, want ✓", got)
+	}
+}
+
+// TestSubagentRosterWindowed asserts a fleet larger than the available height windows
+// like the team roster: only the rows that fit render, the footer hint stays visible,
+// and hidden rows surface via "+K below".
+func TestSubagentRosterWindowed(t *testing.T) {
+	const n = 20
+	m := newMCPModel(t, aztec(), nil)
+	m = resize(m, 100, 24)
+	msgs := make([]client.SubagentMsg, 0, n)
+	for i := 0; i < n; i++ {
+		child := "child-" + string(rune('a'+i))
+		msgs = append(msgs, startSub("p1", child, "explore "+child))
+	}
+	m = seedSubagents(m, "p1", msgs...)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.agentsTab != tabSubagents {
+		t.Fatalf("expected Subagents tab, got %v", m.agentsTab)
+	}
+	out := stripANSIstr(m.View().Content)
+	rows := teamRosterRows(agentsBodyHeight(m.vp.Height()))
+	if rows >= n {
+		t.Fatalf("test premise broken: window %d must be < fleet %d", rows, n)
+	}
+	if !strings.Contains(out, "below") {
+		t.Errorf("a windowed fleet with the cursor at the top should show a '+K below' tail, got %q", out)
+	}
+	if !strings.Contains(out, "enter focus") {
+		t.Errorf("footer hint clipped by the window, got %q", out)
+	}
+}
+
+// --- footer goldens -------------------------------------------------------
+
+// TestFooterFleetGolden locks the three footer fleet states (no subagents / N running
+// / mixed running+done) as a single stripped golden of the fitFooter output, so a
+// regression in the segment format or the tiering is caught.
+func TestFooterFleetGolden(t *testing.T) {
+	left := aztec().Style("muted").Render("connected")
+
+	none := newMCPModel(t, aztec(), nil)
+	running := seedSubagents(newMCPModel(t, aztec(), nil), "p1",
+		startSub("p1", "c1", "audit auth"),
+		startSub("p1", "c2", "map coverage"),
+		startSub("p1", "c3", "trace config"),
+	)
+	mixed := seedSubagents(newMCPModel(t, aztec(), nil), "p1",
+		startSub("p1", "c1", "audit auth"),
+		startSub("p1", "c2", "map coverage"),
+		startSub("p1", "c3", "trace config"),
+		endSub("p1", "c3", 15000, 4000, 9, "end_turn"),
+	)
+
+	var b strings.Builder
+	b.WriteString("no subagents:\n")
+	b.WriteString(stripANSIstr(none.fitFooter(left, 160)) + "\n\n")
+	b.WriteString("3 running:\n")
+	b.WriteString(stripANSIstr(running.fitFooter(left, 160)) + "\n\n")
+	b.WriteString("mixed 2 running + 1 done:\n")
+	b.WriteString(stripANSIstr(mixed.fitFooter(left, 160)) + "\n")
+	compareGolden(t, "footer_fleet.golden", []byte(b.String()))
+}
+
+// --- overlay goldens ------------------------------------------------------
+
+// goldenFleet builds a representative mixed fleet for the overlay goldens: three
+// running children (with varied current tools) + one done + one errored, so the
+// roster exercises the ◐/✓/✗ glyphs, the current-tool column, and the #hash suffix.
+func goldenFleet(m Model) Model {
+	return seedSubagents(m, "p1",
+		startSub("p1", "explorer-a3f1", "audit auth flow"),
+		toolSub("p1", "explorer-a3f1", "Grep", false, 7),
+		startSub("p1", "explorer-b2e2", "find dead code"),
+		toolSub("p1", "explorer-b2e2", "Read", false, 4),
+		startSub("p1", "explorer-c1d3", "trace config loading"),
+		toolSub("p1", "explorer-c1d3", "Bash", false, 11),
+		startSub("p1", "explorer-d0c4", "map test coverage"),
+		toolSub("p1", "explorer-d0c4", "Glob", false, 9),
+		endSub("p1", "explorer-d0c4", 15000, 4000, 9, "end_turn"),
+		startSub("p1", "explorer-e9b5", "check error handling"),
+		endSub("p1", "explorer-e9b5", 3000, 500, 2, "error"),
+	)
+}
+
+// TestSubagentRosterGolden locks the Subagents-tab fleet roster overlay.
+func TestSubagentRosterGolden(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = goldenFleet(m)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.agentsTab != tabSubagents {
+		t.Fatalf("expected Subagents tab, got %v", m.agentsTab)
+	}
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "subagent_roster.golden", got)
+}
+
+// TestSubagentFocusGolden locks one child's focus pane (its redacted chip trace + the
+// context-isolation note).
+func TestSubagentFocusGolden(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = goldenFleet(m)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	if m.subagents.view != subagentFocus {
+		t.Fatalf("expected subagentFocus, got %v", m.subagents.view)
+	}
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "subagent_focus.golden", got)
+}
+
+// TestAgentsTeamsTabGolden locks the Teams tab of the unified overlay (the tab bar +
+// the former team roster), reached by `tab` from the Subagents-default view.
+func TestAgentsTeamsTabGolden(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, agentsGoldenTeam)
+	m = seedSubagents(m, "p1", startSub("p1", "explorer-a3f1", "audit auth flow"))
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	// The team is not live in this seed (no live members streaming → liveTeamBlock may
+	// be non-nil; force the Teams tab to lock its golden regardless of default).
+	if m.agentsTab != tabTeams {
+		mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+		m = mm.(Model)
+	}
+	if m.agentsTab != tabTeams {
+		t.Fatalf("expected Teams tab, got %v", m.agentsTab)
+	}
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "agents_teams_tab.golden", got)
+}
+
+// TestAgentsOverlayNothingRanHint asserts ctrl+a with neither a team nor subagents
+// surfaces the honest "nothing ran" hint and does NOT open the overlay.
+func TestAgentsOverlayNothingRanHint(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m.caps.Teams = true
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.team.view != teamNone {
+		t.Errorf("ctrl+a with nothing running should not open the overlay, view = %v", m.team.view)
+	}
+	if !strings.Contains(m.statusMsg, "no team or subagent has run yet") {
+		t.Errorf("expected the nothing-ran hint, got %q", m.statusMsg)
+	}
+}

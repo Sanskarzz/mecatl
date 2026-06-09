@@ -64,7 +64,7 @@ func (m Model) View() tea.View {
 	case m.mcp.view != mcpNone:
 		body = renderMCPOverlay(m.deps.Theme, m.mcp, m.caps, m.width, m.vp.Height())
 	case m.team.view != teamNone:
-		body = renderTeamOverlay(m.deps.Theme, m.team, m.conv.latestTeamBlock(), m.width, m.vp.Height())
+		body = renderAgentsOverlay(m.deps.Theme, m.agentsTab, m.subagents, m.team, m.conv.latestTeamBlock(), m.conv.subagentFleet, m.width, m.vp.Height())
 	case m.agentsInv.view != agentsInvNone:
 		body = renderAgentsInvOverlay(m.deps.Theme, m.agentsInv, m.caps, m.width, m.vp.Height())
 	case m.skills.view != skillsNone:
@@ -307,12 +307,18 @@ func (m Model) fitFooter(left string, width int) string {
 	meterCompact := renderContextMeterCompact(th, m.contextTokens, m.deps.ContextWindow)
 	meterMinimal := renderContextMeterMinimal(th, m.contextTokens, m.deps.ContextWindow)
 
-	// The team segment is non-empty ONLY for a LIVE team — liveTeamBlock returns the
-	// latest team that is still running (not teamDone). This DELIBERATELY differs
-	// from the ctrl+a overlay's gate: the footer is a live-activity advertisement
-	// and hides once the team is done, whereas openTeam opens on the last-seen
-	// team done-or-not (so the user can still review a finished roster). The two are
-	// meant to disagree in the done state — do not unify them.
+	// The agents prefix is the combined team + subagent-fleet advertisement, prepended
+	// to the right side at three tiers (full/medium/compact). Each is built from up to
+	// two sub-segments joined by sep:
+	//   - the team segment, non-empty ONLY for a LIVE team (liveTeamBlock — not teamDone).
+	//     This DELIBERATELY differs from the ctrl+a overlay's gate: the footer is a
+	//     live-activity advertisement and hides once the team is done, whereas the
+	//     overlay opens on the last-seen team done-or-not (so the user can still review a
+	//     finished roster). The two are meant to disagree in the done state — don't unify.
+	//   - the fleet segment, non-empty whenever ≥1 subagent has STARTED this session
+	//     (hasSubagents). Unlike the team segment this stays visible after the children
+	//     finish (the "3◐ 1✓" counts still inform), matching the F2 "3/4 done" cue.
+	const sep = "  " // gap between the agents prefix and the ctx segment, and between sub-segments
 	var teamFull, teamMedium, teamCompact string
 	if b := m.conv.liveTeamBlock(); b != nil {
 		working, total := teamWorkingCounts(b.teamLanes)
@@ -320,19 +326,27 @@ func (m Model) fitFooter(left string, width int) string {
 		teamMedium = th.Style("spinner").Render(teamFooterMedium(b.teamID, working, total))
 		teamCompact = th.Style("spinner").Render(teamFooterCompact(working, total))
 	}
-
-	const sep = "  " // gap between the team segment and the ctx segment
+	var subFull, subMedium, subCompact string
+	if m.conv.hasSubagents() {
+		running, done := m.conv.subagentFleetCounts()
+		subFull = subagentFooterFull(th, running, done)
+		subMedium = th.Style("spinner").Render(subagentFooterMedium(running, done))
+		subCompact = th.Style("spinner").Render(subagentFooterCompact(running, done))
+	}
+	agentsFull := joinSeg(sep, teamFull, subFull)
+	agentsMedium := joinSeg(sep, teamMedium, subMedium)
+	agentsCompact := joinSeg(sep, teamCompact, subCompact)
 
 	var candidates []string
-	if teamFull != "" {
-		// Richest-to-poorest cross-product. The team segment sheds before the ctx
-		// meter: the last team-bearing tier (team-compact + ctx-minimal) is followed
-		// by the team-LESS ctx-minimal so context wins when width is tight.
+	if agentsFull != "" {
+		// Richest-to-poorest cross-product. The agents prefix sheds before the ctx
+		// meter: the last agents-bearing tier (compact + ctx-minimal) is followed by the
+		// agents-LESS ctx-minimal so context wins when width is tight.
 		candidates = append(candidates,
-			teamFull+sep+meter+" · "+renderUsageFacets(m.usage),
-			teamFull+sep+meter,
-			teamMedium+sep+meterCompact,
-			teamCompact+sep+meterMinimal,
+			agentsFull+sep+meter+" · "+renderUsageFacets(m.usage),
+			agentsFull+sep+meter,
+			agentsMedium+sep+meterCompact,
+			agentsCompact+sep+meterMinimal,
 		)
 	}
 	candidates = append(candidates,
@@ -349,6 +363,21 @@ func (m Model) fitFooter(left string, width int) string {
 		}
 	}
 	return left
+}
+
+// joinSeg joins the non-empty segments with sep, so a footer prefix built from up to
+// two optional sub-segments (team + subagent fleet) collapses cleanly: with neither
+// it is "", with one it is that segment alone (no leading/trailing sep), with both it
+// is "<a><sep><b>". This keeps the no-agents footer byte-identical to the historical
+// ctx-only footer (agentsFull == "" drops the whole prefix branch).
+func joinSeg(sep string, segs ...string) string {
+	parts := make([]string, 0, len(segs))
+	for _, s := range segs {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, sep)
 }
 
 // queuePreviewLimit is the number of staged follow-ups previewed in the queue

@@ -993,3 +993,32 @@ hard-fails connect with `InvalidArgument`. `/models` is gated on `caps.ModelSele
 m.deps.Models != nil` (same mechanism as `/soul`/`/usermodel`); palette-only open (NO `ctrl+m` —
 it collides with enter); fixed builtin order now `clear, help, mcp, agents, team, skills, soul,
 usermodel, models`.
+
+**Unified `ctrl+a` agents overlay + fleet footer** (Task subagent watchability, Package C) is
+CLIENT-ONLY — built purely from the relayed `subagent.*`/`team.*` projection, NO new server
+event/field (the F2 finding: the three `subagent.*` events already carry ChildID/goal/tool
+name/error/count/usage/stop/duration). Two pieces:
+- **Fleet state** (`conversation.subagentFleet`, keyed by `ChildID`): a flat `[]subagentLane`
+  fed by `applySubagent` ALONGSIDE the inline Task-card routing (the inline card keys on
+  `ParentCallID`, the fleet on `ChildID` — so two children of one Task call are distinct rows).
+  Part of the conversation, so `/clear` drops it. `subagentFleetCounts`/`hasSubagents` drive the
+  footer + the Subagents tab.
+- **Fleet footer segment** (`footer.go` `subagentFooter{Full,Medium,Compact}`, mirroring the team
+  segment): `⛭ subagents N◐ M✓ · ctrl+a`, shown once ≥1 subagent started; `view.go` `fitFooter`
+  composes it into an "agents prefix" (team segment + fleet segment via `joinSeg`) that sheds
+  before the ctx meter. No-subagent footer is byte-identical to before.
+- **Unified overlay** (`agents_overlay.go`): ONE `ctrl+a` surface with two tabs (`agentsTab`
+  Subagents|Teams). The container open flag + Teams-tab state STILL live on `m.team` (teamState) —
+  the existing team overlay became the Teams tab verbatim (`renderTeamsTab` dispatches to the
+  unchanged `renderTeamRoster`/`Focus`/`Tasks`/`Findings`; the standalone `renderTeamOverlay` is
+  gone, the container owns the `centerCard` framing now). The Subagents tab (`subagentState`,
+  `renderSubagentRoster`/`Focus`) reuses the team roster's window/clamp/focus patterns; rows are
+  metadata-only with a `#<hash>` ChildID disambiguator and the latest child tool as the liveness
+  signal. `tab` (`keys.NextTab`) switches tabs (only from a roster); `enter` focuses; `esc` steps
+  back then closes. **Default tab is context-sensitive** (`preferredAgentsTab`, tested in isolation):
+  Teams when a team is LIVE, else Subagents when subagents ran, else the available tab. The newer
+  Task/Team terminal stop reasons (`budget`/`structured_output`/`no_progress`/`max_*`) ride the
+  string `stop` field and map to compact labels in `subagentStopLabel` (+ a ✓/✗ glyph split in
+  `subagentLaneGlyph`: cap-family ✓, error/cancel-family ✗). Help/zero-state `ctrl+a` row is no
+  longer teams-gated (subagents are always available via Task). Gauntlet #7 holds: the focus pane
+  shows redacted chips only, never child content.

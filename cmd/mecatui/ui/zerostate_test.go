@@ -72,7 +72,9 @@ func TestZeroStateVanishesAfterPrompt(t *testing.T) {
 
 // TestZeroStateCapsTailoring asserts the affordance list tracks caps WITHOUT
 // pinning layout: "/" ALWAYS appears (built-in slash commands always exist),
-// "ctrl+a" only when teams are enabled, and notes only when their cap is on.
+// "ctrl+a" ALWAYS appears (the unified agents overlay — subagents are always
+// available via Task, so it is no longer gated on the teams cap), and notes only
+// when their cap is on.
 func TestZeroStateCapsTailoring(t *testing.T) {
 	embedded := stripANSIstr(renderZeroState(aztec(), embeddedCaps(), 100, 24))
 	allOn := stripANSIstr(renderZeroState(aztec(), allOnCaps(), 100, 24))
@@ -85,9 +87,9 @@ func TestZeroStateCapsTailoring(t *testing.T) {
 	if !strings.Contains(allOn, "slash commands") {
 		t.Errorf("all-on zero-state should advertise / slash commands:\n%s", allOn)
 	}
-	// teams on in both fixtures → ctrl+a present in both.
-	if !strings.Contains(embedded, "agent team") {
-		t.Errorf("embedded zero-state should advertise ctrl+a (teams on):\n%s", embedded)
+	// ctrl+a is the unified agents overlay (subagents + teams) — always advertised.
+	if !strings.Contains(embedded, "agents") {
+		t.Errorf("embedded zero-state should advertise ctrl+a agents:\n%s", embedded)
 	}
 	// memory note gated on caps.Memory (on in both).
 	if !strings.Contains(embedded, "memory is on") {
@@ -95,12 +97,15 @@ func TestZeroStateCapsTailoring(t *testing.T) {
 	}
 
 	// A bare-bones server (everything off) still shows "/" (built-ins) + "?" +
-	// "ctrl+t", but no teams/memory affordances.
+	// "ctrl+a" (agents — always available) + "ctrl+t", but no memory affordance.
 	bare := stripANSIstr(renderZeroState(aztec(), client.Capabilities{}, 100, 24))
 	if !strings.Contains(bare, "slash commands") {
 		t.Errorf("bare zero-state should still advertise / (built-ins always exist):\n%s", bare)
 	}
-	if strings.Contains(bare, "agent team") || strings.Contains(bare, "memory is on") {
-		t.Errorf("bare zero-state should not advertise teams/memory:\n%s", bare)
+	if !strings.Contains(bare, "agents") {
+		t.Errorf("bare zero-state should still advertise ctrl+a agents (subagents always available):\n%s", bare)
+	}
+	if strings.Contains(bare, "memory is on") {
+		t.Errorf("bare zero-state should not advertise memory:\n%s", bare)
 	}
 }

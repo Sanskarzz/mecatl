@@ -68,13 +68,21 @@ type keyMap struct {
 	JumpTop key.Binding
 	JumpEnd key.Binding
 
-	// Agents (ctrl+a) opens the live agent-team overlay: the FULL (uncapped)
-	// roster of the most-recent Team tool card, with per-member focus. Like the
-	// MCP bindings it is control-modified so it never collides with textarea
-	// input. It is live both while idle AND mid-run (Gap B) — the deep view is
-	// most useful while the team streams; it stays inert under a permission modal.
-	// (Mapped from /team in the palette; /agents is the def inventory, palette-only.)
+	// Agents (ctrl+a) opens the unified live agents overlay: ONE surface with two
+	// tabs — Subagents (the flat Task-child fleet) and Teams (the agent-team roster
+	// with per-member focus). The default tab is context-sensitive (Teams when a team
+	// is live, else Subagents when subagents ran). Like the MCP bindings it is
+	// control-modified so it never collides with textarea input. It is live both while
+	// idle AND mid-run (Gap B) — the deep view is most useful while agents stream; it
+	// stays inert under a permission modal. (Mapped from /team in the palette; /agents
+	// is the def inventory, palette-only.)
 	Agents key.Binding
+
+	// NextTab (tab) switches the active tab inside the unified agents overlay
+	// (Subagents↔Teams). Like Tasks/Findings/Refresh it is a BARE key consulted ONLY
+	// inside the overlay (onAgentsKey intercepts before any idle open key), so it
+	// never collides with the blurred textarea nor any global control binding.
+	NextTab key.Binding
 
 	// ExpandTools is the general "show details" toggle: full vs line-capped
 	// tool-result bodies + Edit/Write diffs, and collapsed vs expanded reasoning
@@ -155,10 +163,16 @@ func defaultKeys() keyMap {
 			key.WithKeys("ctrl+p"),
 			key.WithHelp("ctrl+p", "MCP prompts"),
 		),
-		// ctrl+a: the Agent-team hierarchy overlay (full roster + per-member focus).
+		// ctrl+a: the unified agents overlay (Subagents + Teams tabs).
 		Agents: key.NewBinding(
 			key.WithKeys("ctrl+a"),
-			key.WithHelp("ctrl+a", "agent team"),
+			key.WithHelp("ctrl+a", "agents (subagents / teams)"),
+		),
+		// tab: switch tabs inside the agents overlay. Consulted only while the overlay
+		// owns the keyboard.
+		NextTab: key.NewBinding(
+			key.WithKeys("tab"),
+			key.WithHelp("tab", "switch tab"),
 		),
 		Up: key.NewBinding(
 			key.WithKeys("up", "k"),

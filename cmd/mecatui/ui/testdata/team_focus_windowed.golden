@@ -2,6 +2,8 @@
 ────────────────────────────────────────────────────────────────────────────────────────────────────
                                ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
                                ┃                                    ┃
+                               ┃    Subagents   ▸ Teams             ┃
+                               ┃                                    ┃
                                ┃  agent · scout                     ┃
                                ┃  ◆ · scout [lead] · Read… · ↑0 ↓0  ┃
                                ┃                                    ┃
@@ -9,9 +11,7 @@
                                ┃    ✓ Read — 101 lines              ┃
                                ┃    ✓ Read — 102 lines              ┃
                                ┃    ✓ Read — 103 lines              ┃
-                               ┃    ✓ Read — 104 lines              ┃
-                               ┃    ✓ Read — 105 lines              ┃
-                               ┃    … +6 more lines                 ┃
+                               ┃    … +8 more lines                 ┃
                                ┃                                    ┃
                                ┃  esc back                          ┃
                                ┃                                    ┃

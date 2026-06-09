@@ -468,13 +468,20 @@ func noticeLine(msg tea.Msg) string {
 // carries no child content either way, so a lost subagent event only costs the
 // trace, never correctness or isolation.
 func (m *Model) applySubagent(msg client.SubagentMsg) {
+	// Two destinations, fed from the SAME event: (1) the inline Task card, keyed by
+	// ParentCallID (the calm in-context default); (2) the flat fleet collection, keyed
+	// by ChildID, which backs the fleet footer segment and the ctrl+a Subagents tab.
+	// Both are redacted, metadata-only — neither carries child content (gauntlet #7).
 	switch msg.Kind {
 	case client.SubagentStart:
 		m.conv.setSubagentStart(msg.ParentCallID, msg.Goal)
+		m.conv.fleetStart(msg.ChildID, msg.Goal)
 	case client.SubagentTool:
 		m.conv.addSubagentTool(msg.ParentCallID, msg.ToolName, msg.IsError, msg.ToolCount)
+		m.conv.fleetTool(msg.ChildID, msg.ToolName, msg.IsError, msg.ToolCount)
 	case client.SubagentEnd:
 		m.conv.setSubagentEnd(msg.ParentCallID, msg.Usage, msg.ToolCount, msg.Stop, msg.DurationMs)
+		m.conv.fleetEnd(msg.ChildID, msg.Usage, msg.ToolCount, msg.Stop, msg.DurationMs)
 	}
 }
 
@@ -655,7 +662,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) onOverlayKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	overlays := []func(tea.KeyPressMsg) (tea.Model, tea.Cmd, bool){
 		m.onMCPKey,
-		m.onTeamKey,
+		m.onAgentsKey,
 		m.onAgentsInvKey,
 		m.onSkillsKey,
 		m.onSoulKey,
@@ -852,11 +859,11 @@ func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	switch {
 	case key.Matches(msg, m.keys.Agents):
-		// ctrl+a opens the live agent-team overlay MID-RUN (Gap B): the deep view is
-		// most useful while the team streams. openTeam permits phaseRunning and reads
-		// the live lanes; pre-empt the textarea default so the keypress drives the
-		// overlay, never the input.
-		return m.openTeam()
+		// ctrl+a opens the unified agents overlay MID-RUN (Gap B): the deep view is
+		// most useful while agents stream. openAgents permits phaseRunning, reads the
+		// live lanes/fleet, and picks the context-sensitive default tab; pre-empt the
+		// textarea default so the keypress drives the overlay, never the input.
+		return m.openAgents()
 	case key.Matches(msg, m.keys.Cancel):
 		if strings.TrimSpace(m.ta.Value()) != "" {
 			// Staged-but-unsent input: esc clears it first (mirrors a text editor's
@@ -964,7 +971,7 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Prompts):
 		return m.openMCP(mcpPrompts)
 	case key.Matches(msg, m.keys.Agents):
-		return m.openTeam()
+		return m.openAgents()
 	case key.Matches(msg, m.keys.Cancel) && m.queuePaused != "":
 		// A run ended on a non-clean stop with staged follow-ups still queued (the
 		// paused state). Mirror the running-phase esc layering: a non-empty input is

@@ -209,7 +209,9 @@ type Model struct {
 	mention      mentionState   // @-file-mention completion menu (open when the trailing word is an "@token"); mutually exclusive with palette
 	queued       []string       // follow-up prompts staged while a run streams; drained FIFO on a clean stop (see drainQueue)
 	queuePaused  string         // non-empty when a run ended on a non-clean stop with a non-empty queue: the stop reason holding the queue (see drainQueue/renderQueue)
-	team         teamState      // live agent-team overlay state (view==teamNone when closed)
+	team         teamState      // unified ctrl+a agents overlay: container open flag + Teams-tab state (view==teamNone when closed)
+	agentsTab    agentsTab      // active tab in the unified agents overlay (Subagents | Teams)
+	subagents    subagentState  // Subagents-tab state of the unified agents overlay (roster | focus)
 	agentsInv    agentsInvState // agent-definition inventory overlay state (view==agentsInvNone when closed)
 	soul         soulState      // soul (persona) inspection overlay state (view==soulNone when closed)
 	userModel    userModelState // user-model inspection overlay state (view==userModelNone when closed)

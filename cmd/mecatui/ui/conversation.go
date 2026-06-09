@@ -193,10 +193,46 @@ type block struct {
 	hookDecision string // "info" | "blocked" | "modified"
 }
 
+// subagentLane is the flat, fleet-level projection of ONE Task child run, keyed by
+// ChildID. It mirrors the per-Task-block subagent fields (subGoal/subTrace/…) but is
+// collected ACROSS all Task cards into conversation.subagentFleet, so the footer
+// segment can show aggregate running/done counts and the ctrl+a Subagents tab can
+// list one row per child regardless of where its inline card sits in scrollback. It
+// carries only the REDACTED metadata the subagent.* events forward (gauntlet #7) —
+// never child content.
+//
+// current is the latest child tool NAME (the most-recent subagent.tool ToolName);
+// the inline card deliberately omits it, but the fleet roster surfaces it as the
+// per-row liveness signal (mirroring teamLane.current). done/stop/usage/durationMs
+// are the resolved end stats (done gates them). isError marks the LAST child tool
+// errored (a transient cue); the terminal disposition rides stop.
+type subagentLane struct {
+	childID    string
+	goal       string
+	current    string // latest child tool name, "" when none yet
+	trace      []subToolChip
+	toolCount  int
+	usage      client.Usage
+	isError    bool // the most-recent child tool errored (transient)
+	done       bool
+	stop       string
+	durationMs int64
+}
+
 // conversation is the ordered scrollback. It owns block creation/mutation so the
 // model never pokes blocks directly; render.go turns it into the viewport string.
+//
+// subagentFleet is the flat, insertion-ordered collection of Task child lanes keyed
+// by ChildID (see subagentLane). It is fed alongside the inline-card routing by
+// applySubagent/upsertSubagentLane, and read by the fleet footer segment and the
+// ctrl+a Subagents tab. It is part of the conversation so a /clear (which rebuilds
+// the conversation) drops it too.
 type conversation struct {
 	blocks []block
+	// subagentFleet preserves first-seen order; fleetIndex maps ChildID → its slot so
+	// repeated tool/end events for a child update the same lane in O(1).
+	subagentFleet []subagentLane
+	fleetIndex    map[string]int
 }
 
 // isEmpty reports whether the conversation has no blocks yet — the first-run
@@ -369,6 +405,87 @@ func (c *conversation) setSubagentEnd(parentCallID string, usage client.Usage, t
 	b.subDurationMs = durationMs
 	return true
 }
+
+// fleetLane returns the existing subagentLane for childID (creating one in first-seen
+// order if absent), so the start/tool/end accumulators all converge on one lane per
+// child. childID is the stable per-child discriminator carried on every subagent.*
+// event — unlike the inline card (keyed by ParentCallID), the fleet keys by ChildID
+// so two children of the SAME Task call are still distinct rows.
+func (c *conversation) fleetLane(childID string) *subagentLane {
+	if c.fleetIndex == nil {
+		c.fleetIndex = make(map[string]int)
+	}
+	if i, ok := c.fleetIndex[childID]; ok {
+		return &c.subagentFleet[i]
+	}
+	c.fleetIndex[childID] = len(c.subagentFleet)
+	c.subagentFleet = append(c.subagentFleet, subagentLane{childID: childID})
+	return &c.subagentFleet[len(c.subagentFleet)-1]
+}
+
+// fleetStart records a child's goal label on its fleet lane (creating the lane). A
+// missing childID is dropped: the fleet keys on ChildID, so without one there is no
+// stable row — the inline card (keyed by ParentCallID) still renders regardless.
+func (c *conversation) fleetStart(childID, goal string) {
+	if childID == "" {
+		return
+	}
+	ln := c.fleetLane(childID)
+	ln.goal = goal
+}
+
+// fleetTool records a resolved child tool on the fleet lane: the latest tool name
+// (the per-row liveness signal), the running count (authoritative from the event),
+// the last-error cue, and an appended capped trace chip (mirroring addSubagentTool).
+func (c *conversation) fleetTool(childID, toolName string, isError bool, toolCount int) {
+	if childID == "" {
+		return
+	}
+	ln := c.fleetLane(childID)
+	ln.current = toolName
+	ln.isError = isError
+	ln.toolCount = toolCount
+	ln.trace = append(ln.trace, subToolChip{name: toolName, isError: isError})
+	if len(ln.trace) > maxSubagentTrace {
+		ln.trace = ln.trace[len(ln.trace)-maxSubagentTrace:]
+	}
+}
+
+// fleetEnd records the resolved end stats on the fleet lane (done gates them), so the
+// footer count and the Subagents-tab glyph flip to terminal.
+func (c *conversation) fleetEnd(childID string, usage client.Usage, toolCount int, stop string, durationMs int64) {
+	if childID == "" {
+		return
+	}
+	ln := c.fleetLane(childID)
+	ln.done = true
+	ln.usage = usage
+	ln.toolCount = toolCount
+	ln.stop = stop
+	ln.durationMs = durationMs
+}
+
+// subagentFleetCounts classifies the fleet into (running, done). A child is done once
+// its subagent.end arrived (lane.done); the rest are running. It is the footer
+// segment's aggregate and the Subagents-tab header count.
+func (c *conversation) subagentFleetCounts() (running, done int) {
+	for i := range c.subagentFleet {
+		if c.subagentFleet[i].done {
+			done++
+		} else {
+			running++
+		}
+	}
+	return running, done
+}
+
+// hasSubagents reports whether ≥1 subagent has started this session — the gate for
+// showing the fleet footer segment and enabling the ctrl+a Subagents tab. The
+// context-sensitive default tab (preferredAgentsTab) keys off this plus liveTeamBlock:
+// it prefers Subagents whenever ANY subagent ran (running OR done, so a finished fleet
+// is still reviewable, mirroring how the Teams tab reviews a finished team), unless a
+// team is live.
+func (c *conversation) hasSubagents() bool { return len(c.subagentFleet) > 0 }
 
 // teamBlock returns the Team tool block whose toolID matches parentCallID, or nil
 // if none. Matching is by id only — the SAME contract as resolveTool/subagentBlock

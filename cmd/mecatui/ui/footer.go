@@ -359,3 +359,39 @@ func teamFooterMedium(_ string, working, total int) string {
 func teamFooterCompact(working, total int) string {
 	return fmt.Sprintf("%s %d/%d", teamLiveGlyph, working, total)
 }
+
+// subagentFleetGlyph leads the footer fleet-summary segment when ≥1 subagent has run
+// this session. Like teamLiveGlyph it is a STATIC literal (the F2 mockup's gear),
+// deliberately NOT the animated spinner — the segment is a peripheral discoverability
+// cue, not a per-frame activity indicator, so it must not force a re-render every tick.
+const subagentFleetGlyph = "⛭"
+
+// subagentRunGlyph / subagentDoneGlyph are the running / done count markers on the
+// fleet footer segment, matching the Subagents-tab roster vocabulary (◐ in flight,
+// ✓ finished) so the footer and the overlay never use a different glyph for the same
+// state. They are glyph-not-colour cues so they read with ANSI stripped.
+const (
+	subagentRunGlyph  = "◐"
+	subagentDoneGlyph = "✓"
+)
+
+// subagentFooterFull is the richest fleet footer tier:
+// "⛭ subagents 3◐ 1✓ · ctrl+a". It is shown whenever ≥1 subagent has STARTED this
+// session (running+done > 0), so the parallel case is discoverable even before the
+// overlay is opened — the missing "3/4 done" peripheral cue. It carries the spinner
+// (accent) slot so the live fleet reads as active without animation.
+func subagentFooterFull(th theme.Theme, running, done int) string {
+	seg := fmt.Sprintf("%s subagents %d%s %d%s · ctrl+a", subagentFleetGlyph, running, subagentRunGlyph, done, subagentDoneGlyph)
+	return th.Style("spinner").Render(seg)
+}
+
+// subagentFooterMedium drops the "subagents" word: "⛭ 3◐ 1✓ · ctrl+a". It carries no
+// theme styling itself so it composes when styled by the caller (view.go).
+func subagentFooterMedium(running, done int) string {
+	return fmt.Sprintf("%s %d%s %d%s · ctrl+a", subagentFleetGlyph, running, subagentRunGlyph, done, subagentDoneGlyph)
+}
+
+// subagentFooterCompact is the poorest fleet tier: "⛭ 3◐ 1✓" — glyph + counts only.
+func subagentFooterCompact(running, done int) string {
+	return fmt.Sprintf("%s %d%s %d%s", subagentFleetGlyph, running, subagentRunGlyph, done, subagentDoneGlyph)
+}

@@ -614,7 +614,7 @@ func TestAgentsRosterWindowed(t *testing.T) {
 	m = mm.(Model)
 	out := stripANSIstr(m.View().Content)
 
-	rows := teamRosterRows(m.vp.Height())
+	rows := teamRosterRows(agentsBodyHeight(m.vp.Height()))
 	if rows >= n {
 		t.Fatalf("test premise broken: window %d must be smaller than roster %d", rows, n)
 	}

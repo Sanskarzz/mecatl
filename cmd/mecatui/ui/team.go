@@ -59,7 +59,8 @@ func (m Model) openTeam() (tea.Model, tea.Cmd) {
 		// No team to show — surface a brief hint rather than opening an empty panel.
 		// Distinguish "teams not enabled on this server" from "no team has run yet"
 		// using the relayed caps, the same honest-affordance treatment the inventory
-		// panels use.
+		// panels use. (The unified ctrl+a still opens onto the Subagents tab when only
+		// subagents ran; the /team command is team-specific, so it hints here.)
 		if !m.caps.Teams {
 			m.statusMsg = "agent teams are not enabled on this server"
 		} else {
@@ -68,15 +69,19 @@ func (m Model) openTeam() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.ta.Blur() // overlay owns the keyboard while open
+	// The /team command opens the unified overlay pinned to the Teams tab (its
+	// team-specific entry point); ctrl+a uses openAgents for the context-sensitive tab.
+	m.agentsTab = tabTeams
 	m.team = teamState{view: teamRoster}
+	m.subagents = subagentState{view: subagentRoster}
 	return m, nil
 }
 
-// closeTeam dismisses the overlay and returns focus to the prompt input.
+// closeTeam dismisses the unified agents overlay (the Teams tab's esc path) and
+// returns focus to the prompt input. It delegates to closeAgents so the container's
+// full state (both tabs) is cleared uniformly however the overlay is closed.
 func (m Model) closeTeam() (tea.Model, tea.Cmd) {
-	m.team = teamState{}
-	cmd := m.ta.Focus()
-	return m, cmd
+	return m.closeAgents()
 }
 
 // onTeamKey routes key presses while the agent-team overlay is open. esc steps
@@ -231,30 +236,10 @@ func teamFocusRows(height int) int {
 	return rows
 }
 
-// renderTeamOverlay draws the active agent-team overlay centred over the
-// conversation region via lipgloss.Place, mirroring renderMCPOverlay's treatment
-// (a bordered card). It reads the live lanes off the latest Team block; a nil
-// block (team gone) yields "" so the caller falls back to the conversation. All
-// member-derived strings are terminal-sanitized.
-func renderTeamOverlay(th theme.Theme, st teamState, b *block, width, height int) string {
-	if b == nil {
-		return ""
-	}
-	var body string
-	switch st.view {
-	case teamRoster:
-		body = renderTeamRoster(th, st, b, height)
-	case teamFocus:
-		body = renderTeamFocus(th, b, st.member, height)
-	case teamTasks:
-		body = renderTeamTasks(th, b, height)
-	case teamFindings:
-		body = renderTeamFindings(th, b, height)
-	default:
-		return ""
-	}
-	return centerCard(th, body, width, height)
-}
+// The Teams tab of the unified ctrl+a overlay is rendered by renderTeamsTab
+// (agents_overlay.go), which dispatches to the renderTeamRoster/Focus/Tasks/Findings
+// builders below. The former standalone renderTeamOverlay (which framed the body in
+// its own centerCard) is gone — the unified container owns the framing now.
 
 // teamRosterChromeLines is the number of NON-lane lines the roster card always
 // spends on chrome: the title, the blank line under the header, the blank line
@@ -350,7 +335,7 @@ func renderTeamRoster(th theme.Theme, st teamState, b *block, height int) string
 		out.WriteString(muted.Render(fmt.Sprintf("  · +%d below", below)) + "\n")
 	}
 
-	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · t tasks · f findings · esc close"))
+	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · t tasks · f findings · tab subagents · esc close"))
 	return out.String()
 }
 

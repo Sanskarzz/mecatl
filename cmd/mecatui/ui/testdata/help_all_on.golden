@@ -20,7 +20,7 @@
 ┃    ctrl+o        MCP inventory                                                                                                                             ┃
 ┃    ctrl+r        MCP resources                                                                                                                             ┃
 ┃    ctrl+p        MCP prompts                                                                                                                               ┃
-┃    ctrl+a        agent team                                                                                                                                ┃
+┃    ctrl+a        agents overlay (subagents / teams · tab to switch)                                                                                        ┃
 ┃    ctrl+t        expand/collapse details                                                                                                                   ┃
 ┃                                                                                                                                                            ┃
 ┃  General                                                                                                                                                   ┃

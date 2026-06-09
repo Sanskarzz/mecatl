@@ -67,7 +67,7 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 		{key: "ctrl+o", action: "MCP inventory", available: caps.MCP, gated: true},
 		{key: "ctrl+r", action: "MCP resources", available: caps.MCP, gated: true},
 		{key: "ctrl+p", action: "MCP prompts", available: caps.MCP, gated: true},
-		{key: "ctrl+a", action: "agent team", available: caps.Teams, gated: true},
+		{key: "ctrl+a", action: "agents overlay (subagents / teams · tab to switch)"},
 		{key: "ctrl+t", action: "expand/collapse details"},
 	})
 
@@ -150,7 +150,7 @@ func renderZeroState(th theme.Theme, caps client.Capabilities, width, height int
 	b.WriteString(th.Style("askTitle").Render("Welcome to mecatui") + "\n\n")
 	b.WriteString(th.Style("toolArgs").Render("  Type a request below and press enter.") + "\n\n")
 
-	writeHelpRows(&b, th, zeroStateRows(caps))
+	writeHelpRows(&b, th, zeroStateRows())
 
 	if caps.Memory {
 		b.WriteString("\n" + muted.Render(
@@ -160,18 +160,18 @@ func renderZeroState(th theme.Theme, caps client.Capabilities, width, height int
 	return centerCard(th, b.String(), width, height)
 }
 
-// zeroStateRows is the caps-tailored affordance list on the welcome card: always
-// "?", always "/" (built-in commands always exist), "ctrl+a" only when teams are
-// enabled, and the always-available "ctrl+t". They are rendered as ungated rows
-// (no [not enabled] tags on the welcome card — it advertises only what's on).
-func zeroStateRows(caps client.Capabilities) []helpRow {
-	rows := []helpRow{
+// zeroStateRows is the affordance list on the welcome card. Every row is now
+// UNCONDITIONAL — "?" / "/" (built-in commands always exist) / "ctrl+t" were always
+// always-on, and "ctrl+a" (the unified agents overlay) is no longer caps-gated because
+// subagents are always available via Task (teams are the only optional half). So it
+// takes no caps argument; the caps-conditional welcome content (the memory note) lives
+// in renderZeroState. Rows are rendered ungated (no [not enabled] tags on the welcome
+// card — it advertises only what's on).
+func zeroStateRows() []helpRow {
+	return []helpRow{
 		{key: "?", action: "keys & features"},
 		{key: "/", action: "slash commands"},
+		{key: "ctrl+a", action: "agents (when running)"},
+		{key: "ctrl+t", action: "details"},
 	}
-	if caps.Teams {
-		rows = append(rows, helpRow{key: "ctrl+a", action: "agent team (when running)"})
-	}
-	rows = append(rows, helpRow{key: "ctrl+t", action: "details"})
-	return rows
 }
