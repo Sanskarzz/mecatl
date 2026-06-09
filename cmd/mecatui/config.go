@@ -294,9 +294,12 @@ func (c config) validate() error {
 	// resolvable: an OpenAI, Anthropic, or OpenRouter key in the environment, or the
 	// offline mock.
 	if c.server == "" && c.openAIKey == "" && c.openRouterKey == "" && c.anthropicKey == "" && !c.mock {
-		return errors.New("no external --server given and no OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY set: " +
-			"set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY to host an embedded server, pass --mock for an offline run, " +
-			"or point --server at a running mecated")
+		return errors.New("no LLM provider configured and no external --server given — mecatui has nothing to talk to: " +
+			"to host an embedded server set one of ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY, or " +
+			"OPENROUTER_API_KEY (one key, many models — a good first choice); for a compatible/proxy endpoint add " +
+			"--openai-base-url / --anthropic-base-url / --openrouter-base-url with the matching key; " +
+			"to try it offline with no key pass --mock; or point --server at an already-running mecated; " +
+			"see docs/usage.md for provider setup")
 	}
 	// Allow-all posture: only meaningful for the embedded server; refuse it when
 	// running privileged outside a declared sandbox. Dialling an external server

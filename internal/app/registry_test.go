@@ -133,7 +133,15 @@ func TestRegistryZeroKeys(t *testing.T) {
 		t.Fatalf("error = %v, want errNoProvider", err)
 	}
 	msg := err.Error()
-	for _, want := range []string{"OPENAI_API_KEY", "OPENROUTER_API_KEY", "--openai", "--mock"} {
+	// The copy must name every accepted credential env var (per adapter), the
+	// compatible/proxy base-URL overrides (the endpoint-without-public-key case),
+	// the offline --mock escape hatch, and the docs pointer — so first-run is
+	// self-explanatory without leaving the terminal.
+	for _, want := range []string{
+		"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+		"--openai-base-url", "--anthropic-base-url", "--openrouter-base-url",
+		"--mock", "docs/usage.md",
+	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error message %q does not mention %q", msg, want)
 		}

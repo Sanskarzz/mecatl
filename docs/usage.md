@@ -304,8 +304,12 @@ builds an N-provider registry and AUTO-DETECTS availability from the environment
 - `ANTHROPIC_API_KEY` set → the native `anthropic` Messages provider (extended
   thinking on, model-aware; default model `claude-sonnet-4-6`).
 - `--mock` → canned offline provider (single text turn; smoke tests only).
-- none of the above → startup error:
-  `no LLM provider available: set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY (run with --openai/--mock for offline)`.
+- none of the above → startup error (the daemon refuses to start; mecatui fails the
+  same check client-side before hosting an embedded server). The message enumerates
+  the accepted keys per adapter, the compatible/proxy base-URL overrides
+  (`--openai-base-url` / `--anthropic-base-url` / `--openrouter-base-url` for an
+  endpoint without a public key), the offline `--mock` escape hatch, and points here:
+  `no LLM provider available: set one of ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY (OpenAI), or OPENROUTER_API_KEY (one key, many models — a good first choice) in the environment; for an OpenAI- or Anthropic-compatible/proxy endpoint pass the matching key plus --openai-base-url / --anthropic-base-url / --openrouter-base-url; to try mecatl offline with no key run with --mock; see docs/usage.md for provider setup`.
 
 When more than one provider is available, `openai` is the default (single-provider
 back-compat) — a `CreateSession` with no selector uses it.

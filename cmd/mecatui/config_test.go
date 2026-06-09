@@ -468,9 +468,22 @@ func TestValidateWorkspaceRequired(t *testing.T) {
 // embedded path needs a resolvable provider (OpenAI key or --mock), and that an
 // external server or a provider satisfies the check.
 func TestValidateEmbeddedProviderRequired(t *testing.T) {
-	// No server, no key, no mock -> error (cannot host an embedded server).
+	// No server, no key, no mock -> error (cannot host an embedded server). The copy
+	// must be self-explanatory: every accepted key, the endpoint base-URL overrides,
+	// the --mock + --server escape hatches, and the docs pointer.
 	if err := (config{workspace: "/abs", mode: "default"}).validate(); err == nil {
 		t.Error("expected an error when embedding with no provider")
+	} else {
+		msg := err.Error()
+		for _, want := range []string{
+			"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+			"--openai-base-url", "--anthropic-base-url", "--openrouter-base-url",
+			"--mock", "--server", "docs/usage.md",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("validate() error %q does not mention %q", msg, want)
+			}
+		}
 	}
 	// --mock resolves the provider.
 	if err := (config{workspace: "/abs", mode: "default", mock: true}).validate(); err != nil {

@@ -165,10 +165,17 @@ func (*providerRegistry) DefaultModelFor(id string) string { return builtinDefau
 
 // errNoProvider is the named, actionable zero-keys error: when no provider's
 // credentials resolved AND the mock is not selected, Build cannot serve a useful
-// engine. It names BOTH env vars and the offline escape hatches so first-run is
-// self-explanatory (S4's picker renders the same copy as an empty-picker note).
+// engine. The copy enumerates every accepted credential env var (per adapter), the
+// compatible/proxy base-URL overrides (the "I have an endpoint but no public key"
+// case), the offline --mock escape hatch, and a docs pointer, so first-run is
+// self-explanatory. Keep it lowercase with NO trailing punctuation (ST1005);
+// TestRegistryZeroKeys pins the load-bearing substrings.
 var errNoProvider = errors.New(
-	"no LLM provider available: set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY (run with --openai/--mock for offline)")
+	"no LLM provider available: set one of ANTHROPIC_API_KEY (Claude), " +
+		"OPENAI_API_KEY (OpenAI), or OPENROUTER_API_KEY (one key, many models — a good first choice) " +
+		"in the environment; for an OpenAI- or Anthropic-compatible/proxy endpoint pass the matching key " +
+		"plus --openai-base-url / --anthropic-base-url / --openrouter-base-url; to try mecatl offline with " +
+		"no key run with --mock; see docs/usage.md for provider setup")
 
 // buildProviderRegistry constructs the registry from cfg and the injected env
 // detector. It builds (and resilience-wraps) ONLY the available providers — there
