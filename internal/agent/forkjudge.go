@@ -168,8 +168,12 @@ func buildJudgePrompt(candidates []BranchSummary, criteria string) string {
 	for i, c := range candidates {
 		fmt.Fprintf(&b, "Branch %d (%s): %s\n", i+1, c.Label, c.Summary)
 	}
-	b.WriteString("\nRespond with ONLY a JSON object: ")
-	b.WriteString(`{"winner": <1-based branch number>, "rationale": "<one sentence>"}.`)
+	b.WriteString("\nYou see ONLY each branch's final summary — not its actual changes or transcript — " +
+		"so judge on the summaries alone.\n")
+	b.WriteString("Evaluate each candidate against the criteria for correctness (is it right?), " +
+		"completeness (does it cover the whole task?), and clarity (is the result usable as-is?).\n")
+	b.WriteString("Respond with ONLY a single line of JSON and nothing else — no prose, no code fences: ")
+	b.WriteString(`{"winner": <1-based branch number>, "rationale": "<one or two sentences>"}.`)
 	return b.String()
 }
 

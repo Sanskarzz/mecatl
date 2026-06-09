@@ -73,8 +73,9 @@ type parentCaps struct {
 	// no-op against the idempotent registry, so no explicit unsurface seam is needed.
 	surfaceAsk func(askID string, child *Run, ask session.PendingAsk)
 	// diag is the parent run's run-scoped diagnostics, used to emit the headless
-	// auto-deny operator diagnostic (LevelInfo, tagged with the child agent role). nil →
-	// no diagnostic (NopDiagnostics-safe via the caller).
+	// auto-deny operator diagnostic (LevelInfo, tagged agent=<child identity>: the child
+	// session id "subagent-<callID>" for Subagent children; the member name / fork label
+	// for the others). nil → no diagnostic (NopDiagnostics-safe via the caller).
 	diag port.Diagnostics
 }
 
@@ -199,11 +200,11 @@ var subagentSchema = json.RawMessage(`{
   "properties": {
     "prompt": {
       "type": "string",
-      "description": "The full, self-contained instruction for the subagent. The subagent has a FRESH context window and cannot see this conversation, so include everything it needs."
+      "description": "The full, self-contained instruction for the subagent. It has a FRESH context window and cannot see this conversation, so include everything it needs — and state the expected output format of its final report (e.g. 'a bulleted list of file:line findings with a one-line conclusion')."
     },
     "description": {
       "type": "string",
-      "description": "Optional short label for the delegated task (for logs/UX only)."
+      "description": "A short (3-8 word) human-readable label for this task, shown wherever the subagent's progress is displayed (e.g. 'audit auth error paths'). Recommended."
     },
     "agent": {
       "type": "string",
@@ -231,7 +232,7 @@ var subagentSchema = json.RawMessage(`{
     },
     "output_schema": {
       "type": "object",
-      "description": "Optional JSON schema describing the structured result you want back. When present, the subagent must deliver by calling a SubmitResult tool with JSON matching this schema; the validated JSON is returned as the result. Supports a subset: type/properties/required/items/enum. Omit for a free-text summary."
+      "description": "Optional JSON schema describing the structured result you want back. Use it when you will mechanically consume the result (e.g. comparing or aggregating several subagents' answers); omit for a free-text summary. When present, the subagent must deliver by calling a SubmitResult tool with JSON matching this schema; the validated JSON is returned as the result. Supports a subset: type/properties/required/items/enum."
     }
   },
   "required": ["prompt"]
@@ -518,17 +519,18 @@ func NewSubagentTool(childEngine *Engine, opts ...SubagentOption) tool.Tool {
 // description (progressive disclosure, like the Skill tool enumerates skills) so
 // the model can choose a specialist via the optional `agent` arg.
 func (t *SubagentTool) Spec() tool.ToolSpec {
-	desc := "Delegate a focused read-only investigation — 'search → summarize', " +
-		"'read N files → report findings', 'check the git history' — to a subagent with " +
-		"its own fresh context. Returns only the subagent's final summary. Use when the " +
-		"investigation is multi-step or would bloat the main context; don't delegate a " +
-		"single quick read you can do yourself with Read/Grep. You may issue several Subagent " +
-		"calls in ONE turn to investigate independent questions concurrently. The subagent " +
-		"cannot see this conversation, so put everything it needs in `prompt`. It runs " +
-		"read-only tools (Read/Grep/Glob) PLUS a full shell (git log/show, cat, build, test) " +
-		"in an isolated, throwaway git worktree — so it can inspect history and run commands, " +
-		"but its changes are DISCARDED, it cannot edit the project's files (no Edit/Write), " +
-		"and it cannot delegate further."
+	desc := "Delegate a focused, self-contained task to a subagent with its own fresh context: " +
+		"a multi-step investigation ('search → summarize', 'trace this code path') or build/test/git " +
+		"work ('run the tests and report failures', 'bisect the history'). It runs read-only tools " +
+		"(Read/Grep/Glob) plus a full shell in an isolated, throwaway git worktree — it can build, " +
+		"test, and inspect history, but its file changes are DISCARDED (no Edit/Write) and it cannot " +
+		"delegate further. The subagent's FINAL MESSAGE is its deliverable — you receive only that — " +
+		"so state in `prompt` exactly what to report and in what format. It cannot see this " +
+		"conversation; include everything it needs. You may issue several Subagent calls in ONE turn " +
+		"for independent questions. Do NOT use it when you need the intermediate outputs in this " +
+		"conversation (do the work yourself), when file changes must be kept (use Parallel), or when " +
+		"workers must coordinate (use Team) — and don't delegate a single quick read you can do with " +
+		"Read/Grep."
 	desc += t.agentEnumeration()
 	return tool.ToolSpec{
 		Name:        subagentToolName,
@@ -796,7 +798,7 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// are eligible for the A2 worktree-safe auto-approve; a forker-less child is
 	// base-sharing (no auto-approve). The parent caps carry interactivity + the surface
 	// back-channel for an interactive parent; headless leaves them zero (auto-deny).
-	posture := childPosture{isolated: t.childForker != nil, caps: caps, role: t.idPrefix}
+	posture := childPosture{isolated: t.childForker != nil, caps: caps, role: string(childID)}
 
 	start := time.Now()
 	// Drain the child's Event stream entirely INSIDE the Subagent tool. Nothing from the
@@ -1102,8 +1104,9 @@ type childPosture struct {
 	// headless: no surface). When caps.interactive && caps.surfaceAsk != nil, an ask that
 	// steps 1-2 did not resolve is SURFACED to the human; otherwise it auto-denies.
 	caps parentCaps
-	// role is the child's agent role (Subagent/member name/fork label) for the headless
-	// auto-deny operator diagnostic. Empty falls back to a generic label.
+	// role is the child's identity for the headless auto-deny operator diagnostic: the
+	// child session id ("subagent-<callID>") for Subagent children, the member name for
+	// team members, the branch/judge label for forks. Empty falls back to a generic label.
 	role string
 }
 
@@ -1134,8 +1137,9 @@ func childAutoDenyMessage(reason string) string {
 //     verdict back via the router (child.Approve). The drain loop blocks on this child's
 //     channel until then (single-child) or keeps consuming peers (concurrent members).
 //  3. HEADLESS auto-deny: no surface (headless / no router) → Deny with the ACCURATE
-//     message + a correlated operator diagnostic (LevelInfo, agent=<role>) — never the
-//     misleading "denied by user".
+//     message + a correlated operator diagnostic (LevelInfo, agent=<child-session-id>
+//     for Subagent children, e.g. "subagent-<callID>"; member name / fork label for the
+//     others) — never the misleading "denied by user".
 func handleChildEvent(run *Run, ev session.Event, posture childPosture) (text string, stop session.StopReason, isResult bool) {
 	if ev.Type == session.EvPermissionAsk && ev.Ask != nil {
 		resolveChildAsk(run, *ev.Ask, posture)

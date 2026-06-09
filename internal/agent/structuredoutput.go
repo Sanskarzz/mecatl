@@ -49,8 +49,9 @@ func newSubmitResultTool(schema json.RawMessage) *submitResultTool {
 func (s *submitResultTool) Spec() tool.ToolSpec {
 	return tool.ToolSpec{
 		Name: submitResultToolName,
-		Description: "Submit your FINAL structured result. Call this exactly once, with arguments " +
-			"matching the requested schema, to deliver. Do not also write a free-text answer.",
+		Description: "Submit your FINAL structured result, with arguments matching the requested " +
+			"schema. If validation fails, fix the reported mismatch and call SubmitResult again " +
+			"until it is accepted. Do not also write a free-text answer.",
 		Schema: s.schema,
 	}
 }

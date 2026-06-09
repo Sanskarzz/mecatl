@@ -43,6 +43,17 @@ func TestTightenLimit(t *testing.T) {
 	}
 }
 
+// TestSubmitResultSpecCarriesRetryAffordance pins the retry affordance in the
+// SubmitResult description (Execute's own correction path tells the model to "call
+// SubmitResult again"; the description must agree, not contradict it with "exactly
+// once").
+func TestSubmitResultSpecCarriesRetryAffordance(t *testing.T) {
+	desc := newSubmitResultTool(json.RawMessage(`{"type":"object"}`)).Spec().Description
+	if !strings.Contains(desc, "call SubmitResult again") {
+		t.Fatalf("SubmitResult description must carry the retry affordance %q; got:\n%s", "call SubmitResult again", desc)
+	}
+}
+
 // TestDriveChildStructuredPlainTextExhaustsToCleanTerminal is the ADVERSARIAL exhaustion
 // case the e2e tests do NOT cover (QA MUST #1 + #2): an output_schema IS set but the
 // child returns PLAIN TEXT on every attempt and NEVER calls SubmitResult, so

@@ -130,6 +130,13 @@ Deliberately NOT emitted, because the `session.Event` taxonomy already owns them
 - **Permission ask / allow** — `EvPermissionAsk` / `EvToolCall` carry them; only
   the policy DENY is logged, never allow or ask.
 
+Two further emissions ride the PARENT run's diagnostics (`parentCaps.diag`) at the
+supervisor/child-posture level, OUTSIDE the agent loop's two-line contract (they are
+not loop lines and do not count against it): the headless subagent auto-deny INFO
+(`resolveChildAsk`, when a non-interactive child's permission ask cannot be surfaced)
+and the team member-reopen-failure WARN (`warnUnexpectedReopen`, when a member's
+`Reopen` fails for a reason other than the expected cancelled case).
+
 ## The ban + guard
 
 Global slog is banned in `internal/`: no `slog.Default()`, no `slog.SetDefault()`,

@@ -559,8 +559,8 @@ just custom Go `HookRunner` adapters).
 
 ## 8. Subagents (`internal/agent/subagent.go`)
 
-`SubagentTool` is a `tool.Tool` (catalog name `Subagent`) that delegates a focused
-read-only investigation to a **child agent loop**. Its `Execute`:
+`SubagentTool` is a `tool.Tool` (catalog name `Subagent`) that delegates a focused,
+self-contained task (multi-step investigation or build/test/git work) to a **child agent loop**. Its `Execute`:
 1. **Workspace selection.** When a child forker is wired (`WithChildForker` — the
    composition root wires it **iff** the child catalog includes Bash) it forks the
    incoming `ws` into an **isolated git worktree** (the forker DEFAULT mode — shares

@@ -77,7 +77,7 @@ var teamSchema = json.RawMessage(`{
   "properties": {
     "goal": {
       "type": "string",
-      "description": "The team's top-level objective — the team's trusted top-level instruction, handed to the lead (the first member) and every member as their briefing."
+      "description": "The team's top-level objective, shown to every member as their instruction. Be specific: state the desired outcome and any constraints — a vague goal produces a vague report."
     },
     "members": {
       "type": "array",
@@ -87,7 +87,7 @@ var teamSchema = json.RawMessage(`{
         "type": "object",
         "properties": {
           "name": {"type": "string", "description": "Unique member handle peers address messages to."},
-          "role": {"type": "string", "description": "The member's role briefing — its first-turn instruction (e.g. 'Investigate the auth code path and report findings')."},
+          "role": {"type": "string", "description": "The member's role briefing — its first-turn instruction. Lead example: 'Break the goal into tasks, track progress, and synthesise a final report that answers X'. Worker example: 'Investigate the auth code path; RecordFinding each conclusion; message the lead when done'."},
           "mutating": {"type": "boolean", "description": "True if the member needs to edit/write files (runs in a self-contained copied workspace with edit/write/shell). False (default) runs read-only in an isolated throwaway git worktree with full shell for INSPECTION (git log/show, cat, build, test) but no Edit/Write. Neither is merged back."}
         },
         "required": ["name", "role"]
@@ -202,28 +202,26 @@ func NewTeamTool(factory TeamMemberEngineFactory, opts ...TeamOption) tool.Tool 
 func (*TeamTool) Spec() tool.ToolSpec {
 	return tool.ToolSpec{
 		Name: teamToolName,
-		Description: "Form a team of coordinating subagents to tackle a goal that benefits from " +
-			"parallel specialists — e.g. an investigator + a fixer, or several role-focused " +
+		Description: "Form a team of coordinating subagents when a goal genuinely splits into " +
+			"parallel specialist roles — e.g. an investigator + a fixer, or several role-focused " +
 			"workers sharing a task list and mailbox. You specify the roster: each member has a " +
 			"name, a role (its briefing), and whether it needs to edit files (mutating). The " +
-			"FIRST member is the coordinating lead. Members run as long-lived subagents that " +
-			"coordinate via a shared task list and direct messages.\n\n" +
-			"A team is the MOST EXPENSIVE tool — it runs several long-lived agents in parallel " +
-			"over many rounds and can consume a very large number of tokens. Use it only when " +
-			"the work genuinely splits into independent specialist roles. For a single focused " +
-			"investigation use Subagent; for something you can do directly, do it directly.\n\n" +
-			"Keep the roster small (2-4 members is typical). In each member's role, tell it to " +
-			"RecordFinding as it works and to message the lead when it is done — findings are " +
-			"how the lead builds the consolidated report.\n\n" +
+			"FIRST member is the coordinating lead.\n\n" +
+			"A team is the MOST EXPENSIVE tool — several long-lived agents over many rounds. For " +
+			"a single focused investigation use Subagent; for something you can do directly, do " +
+			"it directly. Keep the roster small (2-4 members is typical).\n\n" +
+			"Write the FIRST member's role as a lead briefing: how to decompose the goal into " +
+			"tasks, what each task should produce, and what the final report must answer. Write " +
+			"every other member's role as a worker briefing: its specialty, where to look, and an " +
+			"instruction to RecordFinding each conclusion as it works and message the lead when " +
+			"done — findings are how the lead builds the consolidated report.\n\n" +
 			"Members are READ-ONLY by default: they inspect, build, and test in an isolated " +
-			"throwaway git worktree with a full shell (git log/show, cat, build, test) but " +
-			"CANNOT edit files. Set mutating: true only for a member that must write code (it " +
-			"then runs in a self-contained copied workspace with edit/write/shell). Neither tier " +
-			"is merged back.\n\n" +
-			"The returned report is the team's deliverable — a consolidated synthesis of the " +
-			"members' findings. USE IT as the result; do NOT redo the team's work yourself. If " +
-			"you need a specific member's full detail, call InspectMember with the returned team " +
-			"id. The per-member transcripts stay out of this conversation.",
+			"throwaway git worktree with a full shell, but CANNOT edit files. Set mutating: true " +
+			"only for a member that must write code (it runs in a self-contained copied " +
+			"workspace). Neither tier is merged back.\n\n" +
+			"The returned report is the team's deliverable — USE IT as the result; do NOT redo " +
+			"the team's work. For one member's full detail, call InspectMember with the returned " +
+			"team id.",
 		Schema: teamSchema,
 	}
 }

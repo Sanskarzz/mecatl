@@ -27,6 +27,8 @@ const inspectMemberToolName = "InspectMember"
 // and maxInspectMessageRunes caps each rendered message body — together bounding the
 // ToolResult so a long member transcript can never be copied verbatim onto the
 // parent's conversation (mirroring the clampPreview discipline the team stream uses).
+// NOTE: the InspectMember Spec().Description quotes "~40 messages"; keep that phrase in
+// sync if maxInspectMessages changes.
 const (
 	maxInspectMessages     = 40
 	maxInspectMessageRunes = 1000
@@ -74,11 +76,13 @@ func NewInspectMemberTool(store port.SessionStore) tool.Tool {
 func (*InspectMemberTool) Spec() tool.ToolSpec {
 	return tool.ToolSpec{
 		Name: inspectMemberToolName,
-		Description: "Read one team member's full transcript by team id and member name. Each " +
-			"call folds that member's transcript into this conversation and consumes context " +
-			"budget, so prefer the team's summary and use this ONLY when the summary is " +
-			"insufficient and you need a specific member's detailed work. Returns a bounded " +
-			"rendering of that member's conversation.",
+		Description: "Read one team member's transcript by team id (from the Team result's " +
+			"'Team id:' line) and member name. Returns a BOUNDED rendering — the last ~40 " +
+			"messages, each clamped — not the full raw transcript. Use it to debug a member " +
+			"that stopped or failed, to verify how a specific step was done, or to pull a " +
+			"detail the team's report omitted. Each call folds that transcript into this " +
+			"conversation and consumes context budget, so prefer the team's report when it " +
+			"suffices.",
 		Schema: inspectMemberSchema,
 	}
 }
