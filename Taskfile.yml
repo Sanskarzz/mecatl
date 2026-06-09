@@ -29,7 +29,8 @@ tasks:
     cmds:
       - go build -o bin/mecated ./cmd/mecated
       - go build -o bin/mecademo ./cmd/mecademo
-      - go build -o bin/mecatui ./cmd/mecatui
+      # mecatui stamps its build version into the welcome splash via -X main.version.
+      - go build -ldflags "-X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/mecatui ./cmd/mecatui
 
   test:golden:
     desc: Refresh mecatui View/teatest golden files (-update) then re-run them

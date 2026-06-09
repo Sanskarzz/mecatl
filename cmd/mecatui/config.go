@@ -31,6 +31,12 @@ type config struct {
 	// ui.Deps.NoAltScreen.
 	noAltScreen bool
 
+	// noBanner disables the rich first-run welcome SPLASH (mascot + gradient
+	// wordmark): the zero-state then shows the plain card (title + prompt hint +
+	// affordances). Off by default (full splash). main also forces it on under
+	// --quiet or a non-interactive stdin. Wired to ui.Deps.NoBanner.
+	noBanner bool
+
 	// noMouse disables mouse capture on the alt screen, so the terminal's OWN
 	// click-drag selection works again — at the cost of in-app mouse-wheel scroll
 	// and the in-app drag-select/copy layer (keyboard scroll stays). The escape
@@ -184,6 +190,7 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.noAltScreen, "inline", false, "alias for --no-alt-screen: render inline in the normal buffer, preserving native scrollback/search")
 	fs.BoolVar(&cfg.noMouse, "no-mouse", false, "disable mouse capture on the alt screen so the terminal's NATIVE click-drag selection works (for tmux/zellij/web terminals that strip OSC52, or when you prefer native select); trades away in-app mouse-wheel scroll and the in-app drag-select/copy layer. Keyboard scroll (pgup/pgdn/home/end) is unaffected. Or set MECATUI_NO_MOUSE=1")
 	fs.Int64Var(&cfg.contextWindow, "context-window", 0, "model context-window size in tokens for the footer meter (0 = unknown; not inferred from the model name)")
+	fs.BoolVar(&cfg.noBanner, "no-banner", false, "disable the welcome splash (mascot + gradient wordmark); the plain prompt hint and affordance list are still shown. Also forced on under --quiet or a non-interactive stdin")
 
 	fs.StringVar(&cfg.model, "model", "", "model identifier for the embedded server (empty: use the provider-appropriate default; ignored when dialling an external server)")
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")

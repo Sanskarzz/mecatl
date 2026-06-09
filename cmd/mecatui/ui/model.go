@@ -77,6 +77,17 @@ type Deps struct {
 	Mode      string
 	Model     string
 
+	// Version is the mecatui build version, shown on the first-run welcome splash
+	// (e.g. "v0.3.1" or "dev"). Threaded from cmd/mecatui's main.version (ldflags-set);
+	// "" omits the version line. Display-only.
+	Version string
+
+	// NoBanner suppresses the rich first-run welcome splash (mascot + gradient
+	// wordmark): the zero-state then renders the LEGACY plain card (title + prompt
+	// hint + affordances). Set by --no-banner, --quiet, or a non-interactive stdin
+	// (composed in main). Default false (full splash).
+	NoBanner bool
+
 	// ContextWindow is the model's context-window size in tokens, used as the
 	// denominator of the footer context meter. 0 means unknown (the meter then
 	// shows just the current context size, no bar/percentage). Computed in main
@@ -262,6 +273,28 @@ type Model struct {
 	// (all-false) until connect and for an older server. STORED, UNRENDERED in
 	// Phase A — Phase B consumes it.
 	caps client.Capabilities
+
+	// fullColor is true on a truecolor terminal, derived from the tea.ColorProfileMsg
+	// (msg.Profile == colorprofile.TrueColor) in the reducer. It gates the welcome
+	// wordmark's jade→gold gradient: on a non-truecolor profile the wordmark collapses
+	// to a single accent colour rather than banding the blend into mush. The ui passes
+	// a bool to the welcome package so welcome never imports colorprofile. Default false
+	// until the first ColorProfileMsg.
+	fullColor bool
+
+	// kittyActive is true once the terminal is detected Kitty-graphics-capable AND the
+	// mascot image has been transmitted (the transmit tea.Cmd has fired): the welcome
+	// splash then emits the Kitty Unicode-placeholder grid for the mascot instead of the
+	// half-block fallback. kittyTier is the cols the mascot was last transmitted at, so a
+	// size-tier change can re-transmit at the new footprint (re-fire guard). Default
+	// false (half-block path). The kitty escapes go out via tea.Raw, never View content.
+	// Reset to false (and kittyTier to 0) on the empty→non-empty transition so a later
+	// /clear back to the zero-state re-transmits.
+	kittyActive bool
+	// kittyTier is the mascot column count last transmitted. cols FULLY determines the
+	// cols×rows placement footprint (rows = cols/2), so it is the whole tier key: a
+	// resize that keeps the same cols needs no re-transmit, a tier-crossing resize does.
+	kittyTier int
 
 	// usage accumulates across the session for the footer.
 	usage client.Usage

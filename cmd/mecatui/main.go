@@ -143,6 +143,12 @@ func run(args []string) error {
 		Workspace:     cfg.workspace,
 		Mode:          cfg.mode,
 		Ctx:           ctx,
+		// Build version for the welcome splash (ldflags-set; "dev" by default).
+		Version: version,
+		// Suppress the rich welcome splash under --no-banner, --quiet, or a
+		// non-interactive stdin (the OR lives here so config.go stays pure — it owns
+		// only the flag). The plain prompt hint is still shown in all three cases.
+		NoBanner: cfg.noBanner || cfg.quiet || !term.IsTerminal(int(os.Stdin.Fd())),
 		// First-class opt-out: render inline in the normal buffer (preserving
 		// native scrollback) instead of the alternate screen. Default false.
 		NoAltScreen: cfg.noAltScreen,

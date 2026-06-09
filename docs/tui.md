@@ -73,6 +73,7 @@ absolute path (the server requires absolute).
 | `--tls-ca` | – | PEM CA bundle for external-server verification |
 | `--insecure` | off | skip TLS verification (testing only) |
 | `--list-themes` | – | print available themes and exit |
+| `--no-banner` | off | disable the first-run welcome **splash** (mascot + gradient wordmark); the plain prompt hint + affordance list still show. Auto-forced on under `--quiet` or a non-interactive stdin |
 | `--model` | – (provider default) | model id for the **embedded** server; empty = the provider-appropriate default (openai → `gpt-5`, openrouter → `openai/gpt-5`). Overridden per session by the `/models` picker |
 | `--openai-base-url` | – | OpenAI base URL override for the **embedded** server |
 | `--openrouter-base-url` | – | OpenRouter base URL override for the **embedded** server (default `https://openrouter.ai/api/v1`) |
@@ -298,6 +299,49 @@ Clipboard reads shell out to a platform tool — **wl-clipboard** (`wl-paste`, W
 none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads the
 `«class PNGf»` pasteboard flavour, so an image copied from a **Chromium/Electron** app
 (which uses the `public.png` flavour) may not paste as an image and falls back to text.
+
+## First-run welcome splash
+
+When the conversation is empty (the zero-state), mecatui shows a centered welcome
+splash instead of a bare prompt. It claims no keyboard — typing, `/`, and `?` flow
+straight over it — and it vanishes the instant the first message is sent. The splash
+has three parts, all rendered by the `cmd/mecatui/ui/welcome` subpackage (which imports
+only `theme` + the charm libraries + stdlib — never `client`/`ui`):
+
+- **Mascot** — the mecatito dog, rendered two ways:
+  - **Half-block** (the universal path): a truecolor `▀` half-block downscale of the
+    embedded PNG, responsive to terminal height (36 / 48 / 60 columns wide; taller
+    terminals get the larger, more detailed render). This is what Ptyxis (sixel-only),
+    tmux, and any non-Kitty terminal sees.
+  - **Kitty high-res** (zero new deps, via the already-present
+    `github.com/charmbracelet/x/ansi/kitty`): on a Kitty-graphics terminal —
+    **kitty**, **Ghostty**, **WezTerm**, **Konsole** — the full-resolution image is
+    transmitted out-of-band (via `tea.Raw`, never View content, so the alt-screen cell
+    renderer can't mangle it) and painted with **Unicode placeholders** (U+10EEEE), at
+    the SAME `cols×rows` cell footprint as the half-block, so the layout is identical
+    either way. Detection is conservative and env-based; a miss falls back to the
+    always-correct half-block. Override with `MECATUI_FORCE_KITTY=1` /
+    `MECATUI_NO_KITTY=1`.
+- **Wordmark** — "mecatl" in hand-authored 3-row block letterforms. On a **truecolor**
+  terminal it gets a per-column jade→gold gradient (theme `primary` → `accent`); on a
+  poorer color profile it collapses cleanly to the single accent color (never unstyled,
+  never a banded blend).
+- **Info block** — workspace path, active model, build version, a tagline, the
+  caps-tailored affordance rows (`?` / `/` / `ctrl+a` / `ctrl+t`), and a "memory is on"
+  note when cross-session memory is enabled.
+
+A **tiny terminal** (very narrow or very short) degrades to a minimal hint (title +
+prompt hint + affordances) without the mascot or wordmark, and never panics. Pass
+`--no-banner` (or run under `--quiet` / a non-interactive stdin) to skip the splash and
+show the plain prompt-hint card.
+
+> **Asset sync note:** `cmd/mecatui/ui/welcome/assets/mecatito.png` is a COPY of the
+> repo-root `assets/mecatito.png` (go:embed cannot reach a parent directory). The
+> repo-root file is canonical; keep the copy in sync if the mascot changes.
+
+> The Kitty high-res path is **unit-tested** (escape generation + the env detection
+> truth table) but **not live-verified** — the dev environment has no Kitty terminal.
+> The half-block path is the verified default.
 
 ## Keys
 

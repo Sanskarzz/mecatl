@@ -9,8 +9,10 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
+	"github.com/stacklok/mecatl/cmd/mecatui/ui/welcome"
 )
 
 // renderInterval is the coalescing window for streamed deltas: one frame at
@@ -108,6 +110,13 @@ func (m Model) markDirty() (Model, tea.Cmd) {
 // unchanged; only the per-token re-render churn is coalesced). refreshView clears
 // viewDirty, making "rendered ⟺ not dirty" an invariant.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Capture whether the welcome splash was showing (idle + empty) BEFORE this
+	// message, so the wrapper below can detect the empty→non-empty transition that
+	// retires the kitty mascot image (the splash's placeholder cells stop being
+	// emitted then anyway; an explicit a=d delete frees the terminal-side image and
+	// keeps the state machine symmetric).
+	wasKittyShowing := m.kittyActive && m.conv.isEmpty()
+
 	model, cmd := m.update(msg)
 	if mm, ok := model.(Model); ok {
 		// SINGLE source of truth for "an overlay/modal/help/fatal took the body, so a
@@ -141,6 +150,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// refreshView (height-changed only) re-renders, so a frame is never rendered twice
 		// (the clear path above already refreshed when it fired).
 		mm.relayout()
+		// Retire the kitty mascot on the empty→non-empty transition (the splash just
+		// left). Reset kittyActive so a later /clear back to the zero-state re-transmits,
+		// and batch the a=d delete out-of-band (tea.Raw) so the terminal frees the image.
+		// A no-op when the half-block path was used (kittyActive is false).
+		if wasKittyShowing && !mm.conv.isEmpty() {
+			mm.kittyActive = false
+			mm.kittyTier = 0
+			cmd = tea.Batch(cmd, tea.Raw(welcome.DeleteMascot()))
+		}
 		model = mm
 		// Test-only deterministic progress observer (nil in production). Fired on the
 		// update goroutine after the message is reduced so teatest can sequence on the
@@ -179,6 +197,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		return m.onResize(msg)
+
+	case tea.ColorProfileMsg:
+		return m.onColorProfile(msg)
 
 	case tea.MouseWheelMsg, tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
 		return m.onMouseMsg(msg)
@@ -261,7 +282,11 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		m.caps = msg.Capabilities // stored for Phase B; unrendered this phase
 		m.phase = phaseIdle
 		m.statusMsg = "connected"
-		return m, nil, true
+		// Now that we are idle + (still) empty, the welcome splash shows: transmit the
+		// Kitty mascot if the terminal supports it (no-op otherwise). The WindowSizeMsg
+		// path also fires this, but at connect the phase was still phaseConnecting when
+		// that arrived, so fire it here on the idle transition too.
+		return m, (&m).maybeKittyTransmit(), true
 	case client.ConnectErrMsg:
 		m.phase = phaseFatal
 		m.fatalErr = msg.Err.Error()
@@ -553,7 +578,52 @@ func (m Model) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	// the header arithmetic are GONE; the heights are measured via lipgloss.Height of
 	// the rendered regions in chrome().
 	m.relayout()
+	return m, m.maybeKittyTransmit()
+}
+
+// onColorProfile records whether the terminal is truecolor (from the
+// tea.ColorProfileMsg Bubble Tea sends once at startup). It gates the welcome
+// wordmark gradient: only a truecolor profile gets the per-column jade→gold blend;
+// anything poorer collapses to a single accent colour (set in the welcome package
+// off m.fullColor). The ui keeps colorprofile contained to the reducer — the
+// welcome package only ever sees the derived bool.
+func (m Model) onColorProfile(msg tea.ColorProfileMsg) (tea.Model, tea.Cmd) {
+	m.fullColor = msg.Profile == colorprofile.TrueColor
 	return m, nil
+}
+
+// maybeKittyTransmit fires the out-of-band Kitty mascot transmit (via tea.Raw)
+// when the welcome splash is about to show on a Kitty-capable terminal and the
+// image has not yet been transmitted at the CURRENT size tier. It is a no-op
+// (nil cmd) when the banner is suppressed, the terminal isn't Kitty-capable, the
+// zero-state isn't showing, the size is unknown, or the mascot is already
+// transmitted at this tier. A size-TIER change re-transmits at the new footprint.
+//
+// The transmit escape produces no visible output and no cursor move, so it is safe
+// to interleave with frames; it MUST go via tea.Raw (not View content), where the
+// ultraviolet renderer would otherwise parse it into cells and desync the cursor.
+func (m *Model) maybeKittyTransmit() tea.Cmd {
+	if m.deps.NoBanner || m.width <= 0 || m.height <= 0 {
+		return nil
+	}
+	// Only when the zero-state splash is what's on screen (idle + empty conversation).
+	if m.phase != phaseIdle || !m.conv.isEmpty() {
+		return nil
+	}
+	if !welcome.KittyCapable() {
+		return nil
+	}
+	cols, rows := welcome.TierForHeight(m.vp.Height())
+	if m.kittyActive && m.kittyTier == cols {
+		return nil // already transmitted at this tier.
+	}
+	esc := welcome.TransmitMascot(cols, rows)
+	if esc == "" {
+		return nil // decode failed → stay on the half-block path.
+	}
+	m.kittyActive = true
+	m.kittyTier = cols
+	return tea.Raw(esc)
 }
 
 // relayout sizes the conversation viewport HEIGHT to whatever the current region

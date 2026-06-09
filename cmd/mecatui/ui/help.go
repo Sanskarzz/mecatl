@@ -5,6 +5,7 @@ import (
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
+	"github.com/stacklok/mecatl/cmd/mecatui/ui/welcome"
 )
 
 // notEnabledTag is the muted annotation appended to a chord row whose feature is
@@ -138,26 +139,81 @@ func writeHelpRows(b *strings.Builder, th theme.Theme, rows []helpRow) {
 	}
 }
 
-// renderZeroState draws the first-run welcome card in the EMPTY viewport (when
+// renderZeroState draws the first-run welcome SPLASH in the EMPTY viewport (when
 // the conversation has no blocks yet). It is NOT an overlay — it claims no
 // keyboard, so typing / "/" / "?" all flow over it, and it vanishes the instant
-// the first block is appended. Content is tailored to caps: it only suggests
-// entry points that are reachable on this server.
-func renderZeroState(th theme.Theme, caps client.Capabilities, width, height int) string {
-	muted := th.Style("muted")
-	var b strings.Builder
+// the first block is appended. The body (mascot + gradient wordmark + info block)
+// is built by the welcome subpackage; this method assembles the caps-tailored
+// welcome.Info from the model and frames the result with centerCard.
+//
+// Under Deps.NoBanner it short-circuits to the LEGACY plain card (title + prompt
+// hint + affordance rows + memory note) with NO mascot or wordmark — the
+// quiet/non-interactive/--no-banner path.
+func (m Model) renderZeroState() string {
+	th := m.deps.Theme
+	width, height := m.width, m.vp.Height()
 
-	b.WriteString(th.Style("askTitle").Render("Welcome to mecatui") + "\n\n")
-	b.WriteString(th.Style("toolArgs").Render("  Type a request below and press enter.") + "\n\n")
-
-	writeHelpRows(&b, th, zeroStateRows())
-
-	if caps.Memory {
-		b.WriteString("\n" + muted.Render(
-			"  Cross-session memory is on — I'll remember context across runs.") + "\n")
+	if m.deps.NoBanner {
+		return centerCard(th, m.legacyZeroStateBody(), width, height)
 	}
 
-	return centerCard(th, b.String(), width, height)
+	in := welcome.Info{
+		Cwd:         m.deps.Workspace,
+		Model:       m.zeroStateModelName(),
+		Provider:    m.activeModel.ProviderID, // "" when no selection yet → modelLine omits it
+		Version:     m.deps.Version,
+		Tagline:     "your local agentic coding harness",
+		Affordances: m.zeroStateAffordanceRows(),
+		MemoryNote:  m.zeroStateMemoryNote(),
+		FullColor:   m.fullColor,
+		Kitty:       m.kittyActive,
+	}
+	return centerCard(th, welcome.Splash(th, in, width, height), width, height)
+}
+
+// legacyZeroStateBody is the plain (mascot-less, wordmark-less) welcome body used
+// under --no-banner / quiet / non-interactive. It is the historical zero-state
+// card content, kept so the suppressed path still advertises the affordances and
+// carries the greppable title.
+func (m Model) legacyZeroStateBody() string {
+	th := m.deps.Theme
+	var b strings.Builder
+	b.WriteString(th.Style("askTitle").Render("Welcome to mecatui") + "\n\n")
+	b.WriteString(th.Style("toolArgs").Render("  Type a request below and press enter.") + "\n\n")
+	writeHelpRows(&b, th, zeroStateRows())
+	if note := m.zeroStateMemoryNote(); note != "" {
+		b.WriteString("\n" + note + "\n")
+	}
+	return b.String()
+}
+
+// zeroStateAffordanceRows renders the caps-tailored affordance chord rows the
+// welcome splash lists, reusing the SAME zeroStateRows() + writeHelpRows path as
+// the legacy card so the rows stay byte-equivalent in semantics.
+func (m Model) zeroStateAffordanceRows() []string {
+	var b strings.Builder
+	writeHelpRows(&b, m.deps.Theme, zeroStateRows())
+	return strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+}
+
+// zeroStateMemoryNote is the caps.Memory-gated "memory is on" line (themed muted),
+// or "" when memory is off — the single caps-conditional welcome content,
+// preserved byte-equivalently from the legacy card.
+func (m Model) zeroStateMemoryNote() string {
+	if !m.caps.Memory {
+		return ""
+	}
+	return m.deps.Theme.Style("muted").Render(
+		"  Cross-session memory is on — I'll remember context across runs.")
+}
+
+// zeroStateModelName picks the model id shown on the splash: the picker's active
+// selection once set, else the launch-time --model display (mirrors the header).
+func (m Model) zeroStateModelName() string {
+	if name := m.activeModel.ModelID; name != "" {
+		return sanitizeTerminal(name)
+	}
+	return m.deps.Model
 }
 
 // zeroStateRows is the affordance list on the welcome card. Every row is now

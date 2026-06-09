@@ -14,6 +14,13 @@ import (
 // and the given caps — the first-run state the welcome card renders in.
 func zeroStateModel(t *testing.T, caps client.Capabilities) Model {
 	t.Helper()
+	// Hermeticity: the zero-state View path calls welcome.KittyCapable() (real env)
+	// via maybeKittyTransmit on SessionReadyMsg. On a kitty/Ghostty/WezTerm/Konsole
+	// machine that flips m.kittyActive true and Splash emits U+10EEEE placeholder
+	// cells (not ANSI — stripANSI keeps them), diverging the goldens. Pin the
+	// override that wins over everything, matching the MECATUI_NO_MOUSE isolation in
+	// config_test.go.
+	t.Setenv("MECATUI_NO_KITTY", "1")
 	recv := &fakeRecver{gate: make(chan struct{})}
 	conv := &fakeConv{recv: recv, send: &fakeSender{}, caps: caps}
 	m := New(Deps{
@@ -76,8 +83,8 @@ func TestZeroStateVanishesAfterPrompt(t *testing.T) {
 // available via Subagent, so it is no longer gated on the teams cap), and notes only
 // when their cap is on.
 func TestZeroStateCapsTailoring(t *testing.T) {
-	embedded := stripANSIstr(renderZeroState(aztec(), embeddedCaps(), 100, 24))
-	allOn := stripANSIstr(renderZeroState(aztec(), allOnCaps(), 100, 24))
+	embedded := stripANSIstr(zeroStateModel(t, embeddedCaps()).renderZeroState())
+	allOn := stripANSIstr(zeroStateModel(t, allOnCaps()).renderZeroState())
 
 	// "/" is always advertised now — built-ins (/clear, /help) exist regardless of
 	// server slash-command support.
@@ -98,7 +105,7 @@ func TestZeroStateCapsTailoring(t *testing.T) {
 
 	// A bare-bones server (everything off) still shows "/" (built-ins) + "?" +
 	// "ctrl+a" (agents — always available) + "ctrl+t", but no memory affordance.
-	bare := stripANSIstr(renderZeroState(aztec(), client.Capabilities{}, 100, 24))
+	bare := stripANSIstr(zeroStateModel(t, client.Capabilities{}).renderZeroState())
 	if !strings.Contains(bare, "slash commands") {
 		t.Errorf("bare zero-state should still advertise / (built-ins always exist):\n%s", bare)
 	}

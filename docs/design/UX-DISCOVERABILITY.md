@@ -566,6 +566,22 @@ Not an overlay (no keyboard capture) — it is just the empty-viewport content, 
 typing / `/` / `?` work over it. It vanishes the instant the first prompt is
 recorded. Center via the same `lipgloss.Place` the overlays use.
 
+**Update (welcome splash):** the plain card above was later replaced by a richer
+first-run **splash** built in the new `cmd/mecatui/ui/welcome` subpackage (which
+imports only `theme` + the charm libraries + stdlib — never `client`/`ui`, keeping
+the inward-only convention; `ui` imports it). `renderZeroState` is now a `Model`
+method that assembles a `welcome.Info` (cwd / model / version / tagline + the SAME
+caps-tailored `zeroStateRows()` affordances + the `caps.Memory` note, all
+byte-equivalent in semantics to the card above) and calls `welcome.Splash`, then
+frames it with `centerCard`. The splash adds a faithful **mascot** (truecolor
+half-block on any terminal, plus a zero-dependency Kitty Unicode-placeholder
+high-res path on kitty/Ghostty/WezTerm/Konsole) and a gradient **"mecatl"
+wordmark** (truecolor jade→gold, collapsing to the single accent color on a poorer
+profile) above the info block. `--no-banner` (and `--quiet` / a non-interactive
+stdin) short-circuits to the legacy plain card. The affordance/caps semantics are
+preserved exactly — only the surrounding presentation is richer. See
+`docs/tui.md` ("First-run welcome splash") for the user-facing description.
+
 ## B6. Agents-roster hint line — VERIFIED ALREADY PRESENT (stale review item)
 
 Prior review item #6 ("roster lacks an in-overlay hint line") is **stale**. The

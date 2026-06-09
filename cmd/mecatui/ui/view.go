@@ -78,7 +78,7 @@ func (m Model) View() tea.View {
 	case m.phase == phaseIdle && m.conv.isEmpty():
 		// First-run zero-state: a welcome card in the empty viewport. Not an overlay
 		// (claims no keyboard); typing flows over it and it vanishes on the first block.
-		body = renderZeroState(m.deps.Theme, m.caps, m.width, m.vp.Height())
+		body = m.renderZeroState()
 	default:
 		body = m.vp.View()
 	}
