@@ -280,6 +280,10 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	case client.SessionReadyMsg:
 		m.sessionID = msg.SessionID
 		m.caps = msg.Capabilities // stored for Phase B; unrendered this phase
+		// The EFFECTIVE provider+model the server resolved this session to (echoed
+		// verbatim). The header shows it from turn zero. The model is FIXED per session,
+		// so this is set once here. An older server yields the zero value → no segment.
+		m.effectiveModel = msg.ResolvedModel
 		m.phase = phaseIdle
 		m.statusMsg = "connected"
 		// Now that we are idle + (still) empty, the welcome splash shows: transmit the
@@ -2078,10 +2082,10 @@ func (m Model) createSessionCmd() tea.Cmd {
 	deps := m.deps
 	sel := m.activeModel // the reconciled apply-on-next-create selection (zero ⇒ server default)
 	return func() tea.Msg {
-		id, caps, err := deps.Session.CreateSession(deps.Ctx, sel)
+		id, caps, resolved, err := deps.Session.CreateSession(deps.Ctx, sel)
 		if err != nil {
 			return client.ConnectErrMsg{Err: err}
 		}
-		return client.SessionReadyMsg{SessionID: id, Capabilities: caps}
+		return client.SessionReadyMsg{SessionID: id, Capabilities: caps, ResolvedModel: resolved}
 	}
 }

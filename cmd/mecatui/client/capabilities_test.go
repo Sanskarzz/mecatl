@@ -94,3 +94,43 @@ func TestCapabilitiesFrom(t *testing.T) {
 		})
 	}
 }
+
+// TestResolvedModelFrom covers the proto→plain translation of the effective model,
+// including the nil (older-server) case that MUST degrade to the zero value rather
+// than panic — the backward-compat guarantee that drives the UI to show no model
+// segment.
+func TestResolvedModelFrom(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *mecatlv1.ResolvedModel
+		want ResolvedModel
+	}{
+		{
+			name: "nil (older server) → zero value",
+			in:   nil,
+			want: ResolvedModel{},
+		},
+		{
+			name: "empty proto → zero value",
+			in:   &mecatlv1.ResolvedModel{},
+			want: ResolvedModel{},
+		},
+		{
+			name: "populated maps each field",
+			in:   &mecatlv1.ResolvedModel{ProviderId: "openai", ModelId: "gpt-5", ContextWindow: 400000},
+			want: ResolvedModel{ProviderID: "openai", ModelID: "gpt-5", ContextWindow: 400000},
+		},
+		{
+			name: "passthrough model id with no provider still maps",
+			in:   &mecatlv1.ResolvedModel{ModelId: "some/passthrough"},
+			want: ResolvedModel{ModelID: "some/passthrough"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolvedModelFrom(tc.in); got != tc.want {
+				t.Fatalf("resolvedModelFrom(%v) = %+v, want %+v", tc.in, got, tc.want)
+			}
+		})
+	}
+}

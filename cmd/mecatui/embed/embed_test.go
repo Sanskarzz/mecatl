@@ -113,7 +113,7 @@ func TestStartServesOverSocket(t *testing.T) {
 	}
 	defer func() { _ = cl.Close() }()
 
-	sessID, _, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"), client.ModelSelection{})
+	sessID, _, _, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"), client.ModelSelection{})
 	if err != nil {
 		t.Fatalf("CreateSession over embedded socket: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestStartWithMemoryDirServes(t *testing.T) {
 	}
 	defer func() { _ = cl.Close() }()
 
-	sessID, caps, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"), client.ModelSelection{})
+	sessID, caps, resolved, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"), client.ModelSelection{})
 	if err != nil {
 		t.Fatalf("CreateSession over embedded socket (memory enabled): %v", err)
 	}
@@ -177,6 +177,17 @@ func TestStartWithMemoryDirServes(t *testing.T) {
 	}
 	if !caps.SlashCommands {
 		t.Errorf("caps.SlashCommands = false, want true (EnableCommands ⇒ command lister wired)")
+	}
+	// The EFFECTIVE model rides the create response too: a zero-selector default
+	// session resolves to the configured Model ("mock-model"), echoed verbatim from
+	// the composition single source (DefaultResolvedModel) — NOT the empty model_id
+	// the request carried. This is the end-to-end proof that resolved_model flows
+	// from composition through the wire to the client for the default path.
+	if resolved.ModelID != "mock-model" {
+		t.Errorf("resolved.ModelID = %q, want %q (zero-selector default echoes the resolved model, not the empty request)", resolved.ModelID, "mock-model")
+	}
+	if resolved.ProviderID == "" {
+		t.Errorf("resolved.ProviderID is empty, want the resolved default provider")
 	}
 }
 
@@ -226,7 +237,7 @@ func TestStartListAgentsOverSocket(t *testing.T) {
 	}
 	defer func() { _ = cl.Close() }()
 
-	_, caps, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"), client.ModelSelection{})
+	_, caps, _, err := cl.CreateSession(ctx, workspace, client.ModeFromString("default"), client.ModelSelection{})
 	if err != nil {
 		t.Fatalf("CreateSession over embedded socket: %v", err)
 	}

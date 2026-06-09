@@ -510,6 +510,19 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// which has no per-session selector in P0. A per-session SELECTOR session (see
 		// the modelCapability call below, evaluated post-Swap) DOES get the live value.
 		DefaultCapabilities: modelCapability(reg, reg.Default(), cfg.Model),
+		// DefaultResolvedModel: the EFFECTIVE provider+model the DEFAULT/shared engine
+		// resolved to (the registry default provider + the already-resolved cfg.Model +
+		// the catalog-seed context window for that pair), computed ONCE here in
+		// composition. Same single-source discipline as DefaultCapabilities above: the
+		// server echoes it verbatim on resolved_model for a session that uses no
+		// per-session engine, so nobody recomputes the resolution in a handler. cfg.Model
+		// was resolved just above (reg.DefaultModel() when no --model); the catalog window
+		// matches the ListModels-advertised context_limit. (multi-provider Phase 0.)
+		DefaultResolvedModel: server.ResolvedModel{
+			ProviderID:    reg.Default(),
+			ModelID:       cfg.Model,
+			ContextWindow: int64(catalogContextWindow(reg.Default(), cfg.Model)),
+		},
 		// ListSkills snapshot: the skills discovered once at build time (registerSkills),
 		// projected into the proto form. Skills are immutable for the process lifetime,
 		// so this is a startup snapshot (like Agents), not a live lister. nil/empty when
@@ -636,13 +649,20 @@ func sessionEngineFactory(
 	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig) (server.SessionEngineResult, error) {
 		// Resolve the provider/model selector FIRST (before any MCP connect), so an
 		// unknown provider fails fast without a wasted connection. The zero selector
-		// keeps the default provider + cfg.Model (pre-S3 behaviour) and window=0 (⇒ the
-		// 128k default, byte-identical). resolvedProviderID is threaded so the
-		// per-session capability intersection (modelCapability) keys on the right
-		// provider — the zero selector uses the registry default.
+		// keeps the default provider + cfg.Model (pre-S3 behaviour). resolvedProviderID
+		// is threaded so the per-session capability intersection (modelCapability) keys
+		// on the right provider — the zero selector uses the registry default.
 		resolvedProvider, resolvedModel := provider, cfg.Model
 		resolvedProviderID := reg.Default()
-		contextWindow := 0
+		// Seed the window from the catalog for the DEFAULT provider+model too, so a
+		// zero-selector session that only needs a per-session engine because client MCP
+		// specs are attached reports the SAME ResolvedModel.ContextWindow as
+		// Config.DefaultResolvedModel (which carries catalogContextWindow(reg.Default(),
+		// cfg.Model)) — the single-source value must not diverge on whether MCP is
+		// present. A non-default selector overrides this below from the catalog for the
+		// selected (provider, model). 0 still falls back to the 128k compaction default
+		// in engineDepsForProvider regardless.
+		contextWindow := catalogContextWindow(reg.Default(), cfg.Model)
 		if sel.ProviderID != "" {
 			entry, ok := reg.Lookup(sel.ProviderID)
 			if !ok {
@@ -769,7 +789,17 @@ func sessionEngineFactory(
 		return server.SessionEngineResult{
 			Engine:       agent.NewEngine(deps),
 			Capabilities: sessionCaps,
-			Close:        closeFn,
+			// The EFFECTIVE provider+model the session resolved to, taken from the SAME
+			// resolved locals that built the engine above (resolvedProviderID/resolvedModel/
+			// contextWindow) — NOT recomputed. The server echoes these verbatim on
+			// resolved_model, the SAME composition single-source rule as the capability
+			// intersection (see internal/app/capability.go modelCapability). contextWindow
+			// is seeded from the catalog even on the zero selector (above), so a default
+			// MCP-only session reports the SAME window as Config.DefaultResolvedModel.
+			ProviderID:    resolvedProviderID,
+			ModelID:       resolvedModel,
+			ContextWindow: int64(contextWindow),
+			Close:         closeFn,
 		}, nil
 	}
 }

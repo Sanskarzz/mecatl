@@ -93,6 +93,11 @@ type createSessionResp struct {
 	// ∩ adapter for THIS session's provider+model), so an HTTP client gates
 	// per-session @-attach UX on the same intersected value the gRPC client gets.
 	SessionCapabilities *sessionCapabilitiesJSON `json:"session_capabilities,omitempty"`
+	// ResolvedModel echoes the EFFECTIVE provider+model THIS session resolved to
+	// (the composition single source via Service.ResolvedModel), so an HTTP client
+	// shows the same effective model the gRPC client gets. Omitted (nil) when no
+	// model resolved (older-server-equivalent fallback).
+	ResolvedModel *resolvedModelJSON `json:"resolved_model,omitempty"`
 }
 
 // sessionCapabilitiesJSON mirrors mecatlv1.SessionCapabilities for the JSON
@@ -101,6 +106,24 @@ type createSessionResp struct {
 type sessionCapabilitiesJSON struct {
 	Image bool `json:"image"`
 	Audio bool `json:"audio"`
+}
+
+// resolvedModelJSON mirrors mecatlv1.ResolvedModel for the JSON surface. It carries
+// no secret material (provider id, model id, context window only).
+type resolvedModelJSON struct {
+	ProviderID    string `json:"provider_id"`
+	ModelID       string `json:"model_id"`
+	ContextWindow int64  `json:"context_window"`
+}
+
+// resolvedModelToJSON maps the server-side ResolvedModel to its JSON form, nil for
+// the zero value (round-trips to "absent" so the client falls back to today's
+// behavior). Mirrors resolvedModelToProto.
+func resolvedModelToJSON(rm ResolvedModel) *resolvedModelJSON {
+	if rm.ProviderID == "" && rm.ModelID == "" && rm.ContextWindow == 0 {
+		return nil
+	}
+	return &resolvedModelJSON{ProviderID: rm.ProviderID, ModelID: rm.ModelID, ContextWindow: rm.ContextWindow}
 }
 
 // serverCapabilitiesJSON mirrors mecatlv1.ServerCapabilities for the JSON
@@ -144,6 +167,11 @@ type sessionResp struct {
 	Workspace string `json:"workspace"`
 	Turns     int    `json:"turns"`
 	ToolCalls int    `json:"tool_calls"`
+	// ResolvedModel mirrors the gRPC Session snapshot's resolved_model so the HTTP
+	// read surface is consistent with gRPC GetSession: the EFFECTIVE provider+model
+	// this session resolved to (from Service.ResolvedModel, the composition single
+	// source). Omitted (nil) when no model resolved (older-server-equivalent).
+	ResolvedModel *resolvedModelJSON `json:"resolved_model,omitempty"`
 }
 
 type promptBody struct {
@@ -240,6 +268,7 @@ func (h *HTTPHandler) createSession(w http.ResponseWriter, r *http.Request) {
 		SessionID:           string(sess.ID),
 		Capabilities:        capabilitiesJSON(h.svc.capabilities()),
 		SessionCapabilities: &sessionCapabilitiesJSON{Image: scaps.Image, Audio: scaps.Audio},
+		ResolvedModel:       resolvedModelToJSON(h.svc.ResolvedModel(sess.ID)),
 	})
 }
 
@@ -252,12 +281,13 @@ func (h *HTTPHandler) getSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sessionResp{
-		SessionID: string(sess.ID),
-		State:     string(sess.State),
-		Mode:      string(sess.Mode),
-		Workspace: sess.Workspace,
-		Turns:     sess.Counters.Turns,
-		ToolCalls: sess.Counters.ToolCalls,
+		SessionID:     string(sess.ID),
+		State:         string(sess.State),
+		Mode:          string(sess.Mode),
+		Workspace:     sess.Workspace,
+		Turns:         sess.Counters.Turns,
+		ToolCalls:     sess.Counters.ToolCalls,
+		ResolvedModel: resolvedModelToJSON(h.svc.ResolvedModel(sess.ID)),
 	})
 }
 

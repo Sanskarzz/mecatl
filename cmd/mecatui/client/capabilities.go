@@ -53,3 +53,30 @@ func capabilitiesFrom(c *mecatlv1.ServerCapabilities) Capabilities {
 		Audio:          c.GetAudio(),
 	}
 }
+
+// ResolvedModel is the proto-free mirror of mecatlv1.ResolvedModel: the EFFECTIVE
+// provider+model THIS session resolved to (server-owned, echoed verbatim), plus its
+// context window. The ui shows the effective model in its header from turn zero
+// WITHOUT importing proto. The zero value (empty ids) is the safe default for an
+// older server that omits the field — the header then shows no model segment. The
+// human display NAME is resolved by the ui from its ListModels inventory keyed on
+// (ProviderID, ModelID); no display name is carried on the wire.
+type ResolvedModel struct {
+	ProviderID    string
+	ModelID       string
+	ContextWindow int64
+}
+
+// resolvedModelFrom maps a proto ResolvedModel (nil-safe) to the plain struct. A
+// nil message (older server) yields the zero value, which the ui renders as "no
+// model segment" — never a guessed default (the server owns the resolution).
+func resolvedModelFrom(m *mecatlv1.ResolvedModel) ResolvedModel {
+	if m == nil {
+		return ResolvedModel{}
+	}
+	return ResolvedModel{
+		ProviderID:    m.GetProviderId(),
+		ModelID:       m.GetModelId(),
+		ContextWindow: m.GetContextWindow(),
+	}
+}

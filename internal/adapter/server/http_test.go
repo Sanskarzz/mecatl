@@ -194,6 +194,81 @@ func TestHTTPGetSession(t *testing.T) {
 	}
 }
 
+// resolvedModelBody is the JSON shape of the resolved_model field on the HTTP
+// create + getSession responses (a local decode mirror — the handler owns the
+// encode side).
+type resolvedModelBody struct {
+	ProviderID    string `json:"provider_id"`
+	ModelID       string `json:"model_id"`
+	ContextWindow int64  `json:"context_window"`
+}
+
+// TestHTTPCreateSessionEchoesResolvedModel: the HTTP POST /v1/sessions JSON
+// response carries resolved_model from the composition single source
+// (Service.ResolvedModel → DefaultResolvedModel for a default session), NOT a raw
+// read-back of the (empty) request model. Sibling of the gRPC echo test.
+func TestHTTPCreateSessionEchoesResolvedModel(t *testing.T) {
+	dflt := server.ResolvedModel{ProviderID: "openai", ModelID: "gpt-default", ContextWindow: 128000}
+	svc := newResolvedModelService(t, dflt, nil)
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/sessions", "application/json", strings.NewReader(`{"workspace":"/ws"}`))
+	if err != nil {
+		t.Fatalf("POST /v1/sessions: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d", resp.StatusCode)
+	}
+	var out struct {
+		SessionID     string             `json:"session_id"`
+		ResolvedModel *resolvedModelBody `json:"resolved_model"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	if out.ResolvedModel == nil {
+		t.Fatalf("create response missing resolved_model")
+	}
+	if got := *out.ResolvedModel; got != (resolvedModelBody{ProviderID: "openai", ModelID: "gpt-default", ContextWindow: 128000}) {
+		t.Fatalf("resolved_model = %+v, want the composition default openai/gpt-default/128000", got)
+	}
+}
+
+// TestHTTPGetSessionEchoesResolvedModel: the HTTP GET /v1/sessions/{id} snapshot
+// carries resolved_model too (wire parity with gRPC GetSession), read from
+// Service.ResolvedModel.
+func TestHTTPGetSessionEchoesResolvedModel(t *testing.T) {
+	dflt := server.ResolvedModel{ProviderID: "anthropic", ModelID: "claude-x", ContextWindow: 200000}
+	svc := newResolvedModelService(t, dflt, nil)
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+
+	id := createHTTPSession(t, srv)
+	resp, err := http.Get(srv.URL + "/v1/sessions/" + id)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var out struct {
+		SessionID     string             `json:"session_id"`
+		ResolvedModel *resolvedModelBody `json:"resolved_model"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.ResolvedModel == nil {
+		t.Fatalf("getSession response missing resolved_model (wire parity with gRPC GetSession)")
+	}
+	if got := *out.ResolvedModel; got != (resolvedModelBody{ProviderID: "anthropic", ModelID: "claude-x", ContextWindow: 200000}) {
+		t.Fatalf("resolved_model = %+v, want anthropic/claude-x/200000", got)
+	}
+}
+
 // TestHTTPGetSessionNotFound returns 404 for an unknown id.
 func TestHTTPGetSessionNotFound(t *testing.T) {
 	svc := newService(t, mockllm.New(), allowRules())

@@ -103,7 +103,7 @@ func TestCreateSessionCarriesModelSelection(t *testing.T) {
 	t.Run("non-zero selection sets both fields", func(t *testing.T) {
 		fake := &fakeModelsClient{}
 		cl := newFakeClient(fake)
-		_, _, err := cl.CreateSession(context.Background(), "/ws",
+		_, _, _, err := cl.CreateSession(context.Background(), "/ws",
 			mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT,
 			ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"})
 		if err != nil {
@@ -120,7 +120,7 @@ func TestCreateSessionCarriesModelSelection(t *testing.T) {
 	t.Run("zero selection leaves both empty (server default)", func(t *testing.T) {
 		fake := &fakeModelsClient{}
 		cl := newFakeClient(fake)
-		_, _, err := cl.CreateSession(context.Background(), "/ws",
+		_, _, _, err := cl.CreateSession(context.Background(), "/ws",
 			mecatlv1.PermissionMode_PERMISSION_MODE_DEFAULT, ModelSelection{})
 		if err != nil {
 			t.Fatalf("CreateSession: %v", err)

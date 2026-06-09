@@ -104,13 +104,13 @@ func (m Model) renderHeader() string {
 		"mecatui",
 		"session " + short(sid),
 	}
-	// Prefer the picker's active selection once set (it is what the NEXT session
-	// will use); fall back to the launch-time --model display. sanitize: a model id
-	// can be server/provider-derived.
-	if name := m.activeModel.ModelID; name != "" {
+	// Model segment: show the EFFECTIVE model the server resolved THIS session to,
+	// from turn zero (it lands on SessionReadyMsg, set once — the model is FIXED per
+	// session). The header only CHOOSES which known string to display; it never
+	// resolves a default itself. While connecting (no create response yet) there is
+	// NO model segment — the server owns the value and we must not guess it.
+	if name := m.headerModelLabel(); name != "" {
 		parts = append(parts, truncate(sanitizeTerminal(name), maxModelLen))
-	} else if m.deps.Model != "" {
-		parts = append(parts, truncate(m.deps.Model, maxModelLen))
 	}
 	if m.deps.Mode != "" {
 		parts = append(parts, "mode "+m.deps.Mode)
@@ -135,6 +135,38 @@ func (m Model) renderHeader() string {
 		line = m.fitHeader(line, indicator, m.widthOr(80))
 	}
 	return m.deps.Theme.Style("header").Width(m.widthOr(80)).Render(line)
+}
+
+// headerModelLabel returns the model label for the header, or "" when none should
+// show. The header only CHOOSES which KNOWN string to display — it NEVER computes or
+// resolves a default itself. The order of preference:
+//
+//  1. While CONNECTING (no create response yet) ⇒ "" (no segment): the server owns
+//     the resolved value and we must not guess it.
+//  2. The EFFECTIVE model the server resolved THIS session to (m.effectiveModel,
+//     echoed verbatim on SessionReadyMsg) — shown from turn zero. Its human display
+//     name is resolved from the already-held ListModels inventory by (provider_id,
+//     model_id); when the inventory has no match (not yet loaded, or a passthrough
+//     id) it falls back to the raw model id.
+//  3. The picker's active selection (what the NEXT session will request), then the
+//     launch-time --model — the PRE-EXISTING fallbacks, kept as-is so an older server
+//     that omits resolved_model still shows the configured model after connect.
+func (m Model) headerModelLabel() string {
+	if m.phase == phaseConnecting {
+		return ""
+	}
+	if rm := m.effectiveModel; rm.ModelID != "" {
+		for _, mi := range m.models.models {
+			if mi.ProviderID == rm.ProviderID && mi.ID == rm.ModelID && mi.DisplayName != "" {
+				return mi.DisplayName
+			}
+		}
+		return rm.ModelID
+	}
+	if name := m.activeModel.ModelID; name != "" {
+		return name
+	}
+	return m.deps.Model
 }
 
 // scrollIndicator returns the muted "↑ NN%" header cue shown ONLY when the user

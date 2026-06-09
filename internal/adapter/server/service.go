@@ -69,8 +69,29 @@ type SessionEngineResult struct {
 	// Capabilities is the session's resolved input capability (catalog ∩ adapter),
 	// computed in composition. The server echoes it verbatim; it never recomputes.
 	Capabilities port.ProviderCapabilities
+	// ProviderID/ModelID/ContextWindow are the EFFECTIVE provider+model this session
+	// resolved to (the empty-selector default, an explicit selector, or a passthrough
+	// id), computed ONCE in composition from the SAME resolved locals that feed the
+	// engine — the server echoes them verbatim on CreateSessionResponse.resolved_model
+	// and never recomputes. Same single-source discipline as Capabilities.
+	ProviderID    string
+	ModelID       string
+	ContextWindow int64
 	// Close tears down the session's MCP manager. Never nil (a no-op when no specs).
 	Close func() error
+}
+
+// ResolvedModel is the per-session EFFECTIVE model echoed on the wire: the
+// provider+model id this session resolved to plus its context window. It is the
+// SINGLE composition-computed value (see Config.DefaultResolvedModel and the
+// per-session SessionEngineResult fields) — the server holds it and echoes it
+// verbatim, mirroring the capability-intersection single-source rule; a handler
+// must never read it back off the request (model_id is empty for a default
+// session and ambiguous for passthrough).
+type ResolvedModel struct {
+	ProviderID    string
+	ModelID       string
+	ContextWindow int64
 }
 
 // SessionEngineFactory builds a PER-SESSION agent engine over a non-default
@@ -167,6 +188,16 @@ type Config struct {
 	// catalog or registry. The zero value (text-only) is the safe default for a
 	// child/member service with no provider. (multi-provider Phase 0, S5.)
 	DefaultCapabilities port.ProviderCapabilities
+
+	// DefaultResolvedModel is the EFFECTIVE provider+model the DEFAULT/shared engine
+	// resolved to (the registry default provider + cfg.Model + the default context
+	// window), computed once in composition. It is the single source for the
+	// resolved_model echo of a session that uses no per-session engine, the SAME
+	// composition-computed single-source discipline as DefaultCapabilities — the
+	// server holds only this value and never recomputes the resolution in a handler.
+	// The zero value (empty ids) is the safe default for a child/member service with
+	// no provider; a client maps it to a no-model-segment header.
+	DefaultResolvedModel ResolvedModel
 
 	// Skills is the resolved skills-inventory snapshot taken at startup. It backs
 	// ListSkills and is a pure read of this snapshot (no live discovery — skills
@@ -356,8 +387,13 @@ type sessionEngine struct {
 	// in composition and echoed verbatim on CreateSessionResponse.session_capabilities
 	// via SessionCapabilities. Never recomputed here — the composition is the single
 	// source so the per-session echo cannot drift from the ListModels view.
-	caps  port.ProviderCapabilities
-	close func() error
+	caps port.ProviderCapabilities
+	// resolvedModel is the session's EFFECTIVE provider+model (catalog/registry
+	// resolution), computed in composition and echoed verbatim on
+	// CreateSessionResponse.resolved_model via ResolvedModel. Never recomputed here —
+	// same single-source discipline as caps.
+	resolvedModel ResolvedModel
+	close         func() error
 }
 
 // runState couples an in-flight *agent.Run with the live *session.Session the
@@ -536,7 +572,12 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 	// Reserve the slot under the lock so a concurrent create cannot also claim it,
 	// then persist OUTSIDE the lock (no I/O under the mutex). If the persist fails,
 	// evict the reservation and tear the engine down.
-	s.sessionEngines[sess.ID] = &sessionEngine{engine: eng, caps: res.Capabilities, close: closeFn}
+	s.sessionEngines[sess.ID] = &sessionEngine{
+		engine:        eng,
+		caps:          res.Capabilities,
+		resolvedModel: ResolvedModel{ProviderID: res.ProviderID, ModelID: res.ModelID, ContextWindow: res.ContextWindow},
+		close:         closeFn,
+	}
 	s.mu.Unlock()
 
 	if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
@@ -851,7 +892,12 @@ func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, 
 	if prior, ok := s.sessionEngines[id]; ok && prior.close != nil {
 		_ = prior.close()
 	}
-	s.sessionEngines[id] = &sessionEngine{engine: res.Engine, caps: res.Capabilities, close: res.Close}
+	s.sessionEngines[id] = &sessionEngine{
+		engine:        res.Engine,
+		caps:          res.Capabilities,
+		resolvedModel: ResolvedModel{ProviderID: res.ProviderID, ModelID: res.ModelID, ContextWindow: res.ContextWindow},
+		close:         res.Close,
+	}
 	s.mu.Unlock()
 	return sess, nil
 }
@@ -945,6 +991,24 @@ func (s *Service) SessionCapabilities(id session.SessionID) port.ProviderCapabil
 		return se.caps
 	}
 	return s.cfg.DefaultCapabilities
+}
+
+// ResolvedModel reports the EFFECTIVE provider+model for the session under id:
+// the per-session engine's precomputed resolved model when a per-session engine is
+// registered (a non-default provider/model selector or client MCP), else the
+// composition-computed DefaultResolvedModel (the shared/default-engine path). The
+// value was computed ONCE in composition and stored; ResolvedModel never recomputes
+// it, so the wire echo cannot drift from the engine the session actually runs on. It
+// backs the CreateSessionResponse.resolved_model echo. Mirrors SessionCapabilities
+// verbatim.
+func (s *Service) ResolvedModel(id session.SessionID) ResolvedModel {
+	s.mu.Lock()
+	se, ok := s.sessionEngines[id]
+	s.mu.Unlock()
+	if ok {
+		return se.resolvedModel
+	}
+	return s.cfg.DefaultResolvedModel
 }
 
 // LookupRun returns the in-flight run for a session and true, or false if no

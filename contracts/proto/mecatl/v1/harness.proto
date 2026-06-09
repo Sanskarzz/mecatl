@@ -277,6 +277,32 @@ message CreateSessionResponse {
   // @-attach UX on THIS, not the server-wide bits. Nil/absent from an older server
   // → fall back to `capabilities`. (multi-provider Phase 0, S5.)
   SessionCapabilities session_capabilities = 3;
+
+  // resolved_model reports the EFFECTIVE provider+model THIS session actually
+  // resolved to, plus its context window — the single value computed once in
+  // composition (internal/app), the SAME composition-computed single-source
+  // discipline as session_capabilities (NEVER recomputed in a handler). It is
+  // echoed VERBATIM: the server owns the resolution (the empty-selector default,
+  // an env-derived provider, a passthrough model), so a client must read THIS
+  // rather than the model_id it sent (which is empty for a default session and
+  // ambiguous for passthrough). The model is FIXED per session, so it is set once
+  // at create and never changes. Nil/absent from an older server → the client
+  // falls back to today's behavior (no model segment in the header).
+  ResolvedModel resolved_model = 4;
+}
+
+// ResolvedModel is the per-session EFFECTIVE model: the provider+model id this
+// session resolved to and its context window. Composition-computed once and
+// echoed verbatim (see CreateSessionResponse.resolved_model); the model is FIXED
+// per session. The client resolves a human display name from its ListModels
+// inventory by (provider_id, model_id) — no display_name is carried here.
+message ResolvedModel {
+  // provider_id is the resolved provider (e.g. "openai", "anthropic").
+  string provider_id = 1;
+  // model_id is the resolved model id (the opaque id the adapter was given).
+  string model_id = 2;
+  // context_window is the resolved model's context window in tokens (0 = unknown).
+  int64 context_window = 3;
 }
 
 // SessionCapabilities is the per-session resolved input capability: ONLY the
@@ -333,6 +359,12 @@ message Session {
   int32 tool_calls = 7;
   // created_at_unix is the creation timestamp in Unix seconds.
   int64 created_at_unix = 8;
+  // resolved_model is the EFFECTIVE provider+model this session resolved to
+  // (composition-computed, echoed verbatim; FIXED per session). Mirrors
+  // CreateSessionResponse.resolved_model so a snapshot reader (GetSession) sees
+  // the same effective model the create response carried. Nil/absent from an
+  // older server → client falls back to today's behavior.
+  ResolvedModel resolved_model = 9;
 }
 
 // ConverseRequest is a client-to-server frame on the Converse stream. The

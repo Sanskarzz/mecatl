@@ -23,9 +23,12 @@ import (
 // sessionAdapter); tests supply a fake. Keeping it an interface lets the ui be
 // driven entirely offline. Capabilities is the proto-free relayed truth the ui
 // stores for its honest discoverability affordances (Phase B); an older server
-// yields the all-false zero value.
+// yields the all-false zero value. ResolvedModel is the EFFECTIVE provider+model
+// the server resolved the session to (echoed verbatim); the ui shows it in the
+// header from turn zero, and an older server yields the zero value (no model
+// segment).
 type SessionCreator interface {
-	CreateSession(ctx context.Context, sel client.ModelSelection) (string, client.Capabilities, error)
+	CreateSession(ctx context.Context, sel client.ModelSelection) (string, client.Capabilities, client.ResolvedModel, error)
 }
 
 // SelectionStore persists + loads the client-side model selection (last-used). It
@@ -234,9 +237,18 @@ type Model struct {
 	// is the SOURCE of truth for the create selection; m.models.active mirrors it for
 	// the picker's ● marker. The header model display reads from it once non-zero.
 	activeModel client.ModelSelection
-	showHelp    bool           // the "?" keys-&-features overlay is open (caps-driven; see help.go)
-	stream      *client.Stream // current run's stream
-	cancelRun   context.CancelFunc
+	// effectiveModel is the EFFECTIVE provider+model the SERVER resolved THIS session
+	// to, echoed verbatim on SessionReadyMsg (the create response). The header shows
+	// its id from turn zero. DISTINCT from activeModel: activeModel is what the NEXT
+	// create will REQUEST (and may be the zero/empty default selection), whereas
+	// effectiveModel is what the CURRENT session actually RESOLVED to (server-owned).
+	// The header reads effectiveModel for the live model display, never resolving a
+	// default itself. Zero value (empty ids) until SessionReadyMsg and for an older
+	// server → the header shows no model segment. The model is FIXED per session.
+	effectiveModel client.ResolvedModel
+	showHelp       bool           // the "?" keys-&-features overlay is open (caps-driven; see help.go)
+	stream         *client.Stream // current run's stream
+	cancelRun      context.CancelFunc
 
 	// quitArmed is true after a first ctrl+c on an empty prompt: a second ctrl+c
 	// within quitArmWindow then quits (Claude Code's "press again to exit"

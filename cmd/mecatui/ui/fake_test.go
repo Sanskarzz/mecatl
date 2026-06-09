@@ -148,9 +148,12 @@ type fakeConv struct {
 	createdSel  client.ModelSelection
 	created     chan struct{}
 	createdOnce sync.Once
+	// resolvedModel is the EFFECTIVE model the fake's create response echoes back —
+	// the header e2e asserts it lands in m.effectiveModel and renders from turn zero.
+	resolvedModel client.ResolvedModel
 }
 
-func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection) (string, client.Capabilities, error) {
+func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection) (string, client.Capabilities, client.ResolvedModel, error) {
 	c.createdSel = sel
 	if c.created != nil {
 		c.createdOnce.Do(func() { close(c.created) })
@@ -162,7 +165,7 @@ func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection) (
 			close(c.sessionReady)
 		}
 	}
-	return "sess-test-0001", c.caps, nil
+	return "sess-test-0001", c.caps, c.resolvedModel, nil
 }
 
 func (c *fakeConv) OpenConverse(ctx context.Context) (*client.Stream, error) {

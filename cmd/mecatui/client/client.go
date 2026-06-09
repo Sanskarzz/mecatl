@@ -102,7 +102,10 @@ func (c *Client) Close() error {
 // plain ModelSelection and never sees the proto request. The Capabilities are the
 // proto-free mirror of the create response's ServerCapabilities; an older server
 // that omits the field yields the all-false zero value (see capabilitiesFrom).
-func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecatlv1.PermissionMode, sel ModelSelection) (string, Capabilities, error) {
+// The ResolvedModel is the EFFECTIVE provider+model the server resolved the session
+// to (echoed verbatim); an older server that omits the field yields the zero value
+// (see resolvedModelFrom), which the ui renders as no model segment.
+func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecatlv1.PermissionMode, sel ModelSelection) (string, Capabilities, ResolvedModel, error) {
 	resp, err := c.svc.CreateSession(ctx, &mecatlv1.CreateSessionRequest{
 		Workspace:  workspace,
 		Mode:       mode,
@@ -110,9 +113,9 @@ func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecat
 		ModelId:    sel.ModelID,
 	})
 	if err != nil {
-		return "", Capabilities{}, fmt.Errorf("create session: %w", err)
+		return "", Capabilities{}, ResolvedModel{}, fmt.Errorf("create session: %w", err)
 	}
-	return resp.GetSessionId(), capabilitiesFrom(resp.GetCapabilities()), nil
+	return resp.GetSessionId(), capabilitiesFrom(resp.GetCapabilities()), resolvedModelFrom(resp.GetResolvedModel()), nil
 }
 
 // OpenConverse opens a fresh bidi Converse stream and wraps it in a Stream

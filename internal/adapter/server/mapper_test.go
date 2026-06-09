@@ -493,7 +493,7 @@ func TestToProtoNoSubmessages(t *testing.T) {
 func TestSessionMapping(t *testing.T) {
 	sess := session.New("s1", session.ModePlan, "/ws",
 		session.Limits{MaxTurns: 4, MaxToolCalls: 8, MaxConsecutiveFailures: 2}, time.Unix(1000, 0))
-	got := toProtoSession(sess)
+	got := toProtoSession(sess, ResolvedModel{ProviderID: "openai", ModelID: "gpt-x", ContextWindow: 2048})
 	if got.GetSessionId() != "s1" || got.GetState() != "idle" {
 		t.Fatalf("got %+v", got)
 	}
@@ -505,6 +505,20 @@ func TestSessionMapping(t *testing.T) {
 	}
 	if got.GetCreatedAtUnix() != 1000 {
 		t.Fatalf("created_at = %d", got.GetCreatedAtUnix())
+	}
+	if rm := got.GetResolvedModel(); rm.GetProviderId() != "openai" || rm.GetModelId() != "gpt-x" || rm.GetContextWindow() != 2048 {
+		t.Fatalf("resolved_model = %+v", rm)
+	}
+}
+
+// TestResolvedModelToProtoZeroIsNil checks the zero ResolvedModel maps to nil so
+// an unresolved value round-trips to "absent" (older-server-equivalent fallback).
+func TestResolvedModelToProtoZeroIsNil(t *testing.T) {
+	if resolvedModelToProto(ResolvedModel{}) != nil {
+		t.Fatalf("zero ResolvedModel should map to nil proto")
+	}
+	if got := resolvedModelToProto(ResolvedModel{ModelID: "m"}); got == nil || got.GetModelId() != "m" {
+		t.Fatalf("non-zero ResolvedModel = %+v", got)
 	}
 }
 

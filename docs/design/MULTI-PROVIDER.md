@@ -358,6 +358,38 @@ The field is additive — an older server leaves it absent and the client falls 
 no adapter "can replay reasoning" authority bit in P0. If P1 wants reasoning intersected,
 add the adapter bit then — do not invent it speculatively.
 
+### Effective-model echo (`resolved_model`) — same single-source shape
+
+The client cannot show the model a fresh session resolved to, because the request it
+sent carries no usable id: `model_id` is **empty** for a default session and **ambiguous
+passthrough** for a non-catalogued selector. The server therefore echoes the EFFECTIVE
+(resolved) model — the SAME composition-computed-single-source pattern as
+`session_capabilities`, NOT a second mechanism:
+
+- proto: `ResolvedModel { string provider_id = 1; string model_id = 2; int64
+  context_window = 3; }`, echoed on `CreateSessionResponse.resolved_model` (field 4) and
+  mirrored in the `Session` snapshot (`resolved_model`, field 9). Additive — nil/absent
+  from an older server ⇒ the client falls back to today's behavior (no model segment in
+  the header).
+- composition (`internal/app/build.go`): the per-session factory returns the resolved
+  `ProviderID`/`ModelID`/`ContextWindow` on `SessionEngineResult` from the SAME locals
+  that built the engine (`resolvedProviderID`/`resolvedModel`/`contextWindow`) — never
+  recomputed; the zero-selector default's effective model is `Config.DefaultResolvedModel`
+  (the registry default provider + the resolved `cfg.Model` + the catalog context window),
+  set once in `Build` next to `DefaultCapabilities`.
+- server (`internal/adapter/server`): stored on `sessionEngine.resolvedModel`;
+  `Service.ResolvedModel(id)` mirrors `Service.SessionCapabilities(id)` VERBATIM
+  (per-session value when registered, else `Config.DefaultResolvedModel`). Echoed in
+  `grpc.go` CreateSession + `toProtoSession` and in `http.go`'s JSON response — always
+  from `Service.ResolvedModel(id)`, NEVER read back off `req.GetModelId()`.
+- client/ui (`cmd/mecatui`): a proto-free `client.ResolvedModel` (sibling of
+  `client.Capabilities`) + `resolvedModelFrom` mapper (nil ⇒ zero), threaded out of the
+  `CreateSession` wrapper and stored on `Model.effectiveModel`. The header shows the
+  effective model id from turn zero (no segment while connecting); it resolves a human
+  display name from the already-held `ListModels` inventory by `(provider_id, model_id)`
+  — no `display_name` is added to the proto. The header only CHOOSES which KNOWN string
+  to display; it never resolves a default itself.
+
 ### Right-sized OUT of P0 (deferred to P1)
 
 - **Per-session ACP capability gate.** ACP carries NO per-session provider/model
@@ -405,6 +437,7 @@ otherwise leak the available-provider set.
 | `registry.go` "LLM resilience enabled" | knobs (attempts/timeouts) only | clean |
 | `build.go` client-MCP warns/info | `server`/`url`/counts/`err` | clean — the URL is the client-supplied MCP server URL, not an LLM-provider credentialed URL |
 | `grpc.go` / `http.go` CreateSession echo | nothing logged | clean — `session_capabilities` is bools-only and unlogged |
+| `grpc.go` / `http.go` `resolved_model` echo | nothing logged | clean — `provider_id`/`model_id`/`context_window` are all PUBLIC catalog/registry values (the same opaque ids `ListModels` already discloses), no key/URL, and unlogged |
 
 `TestNoKeyInStartupLogs` captures the slog output of a real `buildProviderRegistry` with
 a sentinel key and asserts the key appears in no line. `TestModelSnapshotNoSecrets`,

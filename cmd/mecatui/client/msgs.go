@@ -329,6 +329,10 @@ type Usage struct {
 type SessionReadyMsg struct {
 	SessionID    string
 	Capabilities Capabilities
+	// ResolvedModel is the EFFECTIVE provider+model the session resolved to (server-
+	// owned, echoed verbatim). The ui shows it in the header from turn zero; an older
+	// server yields the zero value (no model segment).
+	ResolvedModel ResolvedModel
 }
 
 // ConnectErrMsg reports a dial/CreateSession failure.

@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
 	"github.com/stacklok/mecatl/internal/adapter/server"
@@ -234,6 +235,128 @@ func TestMultiProviderCapabilityEcho(t *testing.T) {
 	// wire echo for a default-engine session — both derive from DefaultCapabilities.
 	if def.Image {
 		t.Fatalf("default ProviderCapabilities Image = true, want false (default openai adapter Image:false)")
+	}
+}
+
+// TestMultiProviderResolvedModelEcho drives the FULL composition and asserts the
+// per-session EFFECTIVE-model echo (Service.ResolvedModel): a zero-selector default
+// session reports the composition DefaultResolvedModel (the registry default
+// provider + the resolved cfg.Model), and an explicit selector reports the RESOLVED
+// provider+model (the values the engine was bound to), NOT the raw request. The
+// context window comes from the catalog, agreeing with ListModels. All offline.
+func TestMultiProviderResolvedModelEcho(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+
+	built, err := Build(ctx, Config{
+		Workspace: workspace,
+		NoSoul:    true,
+		// Pin an explicit default model so the default echo is deterministic (no live
+		// fetch). It is catalogued for openai, so the context window resolves.
+		Model: "gpt-5",
+		envDetector: fakeEnv(map[string]string{
+			"OPENAI_API_KEY":     "sk-x",
+			"OPENROUTER_API_KEY": "sk-x",
+		}),
+		liveModelHTTPClient: offlineHTTPClient(),
+		providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
+			return mockllm.New(mockllm.TextTurn("REPLY-FROM-" + id))
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer built.Close()
+	svc := built.Service
+
+	// (a) zero-selector default session ⇒ DefaultResolvedModel: the default provider
+	// (openai) + the resolved cfg.Model ("gpt-5"), echoed verbatim — NOT the empty
+	// request model_id. The context window is the catalog's gpt-5 limit (>0).
+	zeroSess, err := svc.CreateSession(ctx, workspace, session.ModeDefault, defaultLimits())
+	if err != nil {
+		t.Fatalf("CreateSession(zero): %v", err)
+	}
+	got := svc.ResolvedModel(zeroSess.ID)
+	if got.ProviderID != providerOpenAI || got.ModelID != "gpt-5" {
+		t.Fatalf("zero-selector ResolvedModel = %+v, want provider=%q model=%q (the resolved default)", got, providerOpenAI, "gpt-5")
+	}
+	if got.ContextWindow <= 0 {
+		t.Fatalf("zero-selector ResolvedModel.ContextWindow = %d, want the catalog gpt-5 window (>0)", got.ContextWindow)
+	}
+
+	// (b) explicit selector ⇒ the RESOLVED provider+model (openrouter + a catalogued
+	// model), not the default and not a naive read-back. Use a real catalogued model
+	// so the window resolves from the catalog.
+	orModel, _ := firstImageModel(t, providerOpenRouter)
+	orSess, err := svc.CreateSessionWithProvider(ctx, workspace, session.ModeDefault, defaultLimits(),
+		server.ProviderSelector{ProviderID: providerOpenRouter, ModelID: orModel})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider(openrouter): %v", err)
+	}
+	gotOR := svc.ResolvedModel(orSess.ID)
+	if gotOR.ProviderID != providerOpenRouter || gotOR.ModelID != orModel {
+		t.Fatalf("openrouter ResolvedModel = %+v, want provider=%q model=%q (the resolved selector, not the default)", gotOR, providerOpenRouter, orModel)
+	}
+	if gotOR == got {
+		t.Fatalf("explicit-selector ResolvedModel %+v must differ from the default %+v", gotOR, got)
+	}
+}
+
+// TestResolvedModelMCPOnlySessionMatchesDefaultWindow pins the single-source
+// consistency fix: a ZERO-selector session that needs a per-session engine ONLY
+// because client MCP specs are attached must report the SAME ResolvedModel as
+// Config.DefaultResolvedModel — including ContextWindow. Before the fix the
+// MCP-only factory path left the window 0 while the default path carried the catalog
+// window, so the SAME default provider+model echoed two different windows depending
+// on whether MCP was present. The MCP spec points at an unreachable URL; the factory
+// is best-effort (mounts core tools, still returns a usable engine), so the create
+// still succeeds and exercises the per-session-engine path with a zero selector. All
+// offline.
+func TestResolvedModelMCPOnlySessionMatchesDefaultWindow(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+
+	built, err := Build(ctx, Config{
+		Workspace:           workspace,
+		NoSoul:              true,
+		Model:               "gpt-5", // catalogued for openai ⇒ a non-zero window
+		envDetector:         fakeEnv(map[string]string{"OPENAI_API_KEY": "sk-x"}),
+		liveModelHTTPClient: offlineHTTPClient(),
+		providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
+			return mockllm.New(mockllm.TextTurn("REPLY-FROM-" + id))
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer built.Close()
+	svc := built.Service
+
+	// The default-path window (no per-session engine) — the single-source value.
+	dfltSess, err := svc.CreateSession(ctx, workspace, session.ModeDefault, defaultLimits())
+	if err != nil {
+		t.Fatalf("CreateSession(default): %v", err)
+	}
+	wantWindow := svc.ResolvedModel(dfltSess.ID).ContextWindow
+	if wantWindow <= 0 {
+		t.Fatalf("default ResolvedModel.ContextWindow = %d, want the catalog gpt-5 window (>0)", wantWindow)
+	}
+
+	// A ZERO-selector session that needs a per-session engine because client MCP
+	// specs are attached. The unreachable URL degrades to core-only tools but the
+	// per-session-engine factory path still runs (the catalog-seed window fix lives
+	// there).
+	mcpSess, err := svc.CreateSessionWithMCP(ctx, workspace, session.ModeDefault, defaultLimits(),
+		[]mcp.ServerConfig{{Name: "docs", URL: "https://unreachable.invalid/mcp"}})
+	if err != nil {
+		t.Fatalf("CreateSessionWithMCP(zero selector + spec): %v", err)
+	}
+	got := svc.ResolvedModel(mcpSess.ID)
+	if got.ProviderID != providerOpenAI || got.ModelID != "gpt-5" {
+		t.Fatalf("MCP-only ResolvedModel = %+v, want the default provider+model", got)
+	}
+	if got.ContextWindow != wantWindow {
+		t.Fatalf("MCP-only ResolvedModel.ContextWindow = %d, want %d (must match DefaultResolvedModel regardless of MCP)", got.ContextWindow, wantWindow)
 	}
 }
 

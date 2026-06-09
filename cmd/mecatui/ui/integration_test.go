@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -312,10 +313,18 @@ func TestTeamOverlayCtrlAMidRunEndToEnd(t *testing.T) {
 }
 
 // TestHeaderTruncatesLongModel asserts a long model id is capped in the header.
+// The model segment renders from the EFFECTIVE model the server resolved (echoed on
+// SessionReadyMsg), so the test drives a create response with a long resolved id —
+// the header shows it (no model segment while still connecting, by design).
 func TestHeaderTruncatesLongModel(t *testing.T) {
 	long := "anthropic/claude-opus-4-8-with-a-really-long-suffix-2026"
-	m := New(Deps{Theme: theme.New("aztec", theme.AztecPalette()), Model: long})
-	m = applyAll(m, tea.WindowSizeMsg{Width: 200, Height: 30})
+	conv := &fakeConv{recv: &fakeRecver{}, send: &fakeSender{},
+		resolvedModel: client.ResolvedModel{ProviderID: "anthropic", ModelID: long}}
+	m := New(Deps{Theme: theme.New("aztec", theme.AztecPalette()), Session: conv, Conv: conv, Ctx: context.Background()})
+	m = applyAll(m,
+		tea.WindowSizeMsg{Width: 200, Height: 30},
+		client.SessionReadyMsg{SessionID: "sess-test-0001", ResolvedModel: client.ResolvedModel{ProviderID: "anthropic", ModelID: long}},
+	)
 	header := stripANSIstr(m.renderHeader())
 	if strings.Contains(header, long) {
 		t.Errorf("long model id should be truncated in header:\n%q", header)

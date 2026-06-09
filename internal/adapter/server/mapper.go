@@ -351,7 +351,7 @@ func toProtoUsage(u session.Usage) *mecatlv1.Usage {
 }
 
 // toProtoSession maps a session.Session aggregate to its proto snapshot.
-func toProtoSession(s *session.Session) *mecatlv1.Session {
+func toProtoSession(s *session.Session, rm ResolvedModel) *mecatlv1.Session {
 	return &mecatlv1.Session{
 		SessionId:     string(s.ID),
 		State:         string(s.State),
@@ -361,6 +361,23 @@ func toProtoSession(s *session.Session) *mecatlv1.Session {
 		Turns:         clampInt32(s.Counters.Turns),
 		ToolCalls:     clampInt32(s.Counters.ToolCalls),
 		CreatedAtUnix: s.CreatedAt.Unix(),
+		ResolvedModel: resolvedModelToProto(rm),
+	}
+}
+
+// resolvedModelToProto maps the server-side ResolvedModel value to its proto form.
+// A zero value (empty ids, no provider) yields nil so an older-server-equivalent
+// (no resolution) round-trips to "absent", letting the client fall back to today's
+// behavior. The value originates from the composition single source (see
+// Service.ResolvedModel) — this mapper never recomputes a resolution.
+func resolvedModelToProto(rm ResolvedModel) *mecatlv1.ResolvedModel {
+	if rm.ProviderID == "" && rm.ModelID == "" && rm.ContextWindow == 0 {
+		return nil
+	}
+	return &mecatlv1.ResolvedModel{
+		ProviderId:    rm.ProviderID,
+		ModelId:       rm.ModelID,
+		ContextWindow: rm.ContextWindow,
 	}
 }
 

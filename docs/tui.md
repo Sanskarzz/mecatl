@@ -390,7 +390,19 @@ the end, `end`, or the wheel — re-pins the view and resumes auto-follow.
 **Layout (one model).** The frame is a vertical stack of regions — header, the
 conversation body, zero or more **transient inline regions** (the slash-command
 palette, the `@`-mention menu, the queued-follow-ups card), then the input and
-footer. A single layout model (`layout.go`) is the source of truth: `View()` renders
+footer.
+
+**Header bar.** `mecatui · session <id> · <model> · mode <mode> · <server>`. The
+**model segment** shows the EFFECTIVE model the server resolved THIS session to —
+echoed verbatim on the create response (`CreateSessionResponse.resolved_model`) and
+shown from turn zero. While **connecting** (before the create response lands) there
+is NO model segment — the server owns the resolved value and the client never guesses
+it. The human display name is resolved from the held `/models` (ListModels) inventory
+by `(provider_id, model_id)`, falling back to the raw model id when the inventory has
+no entry yet (or a passthrough id). An older server that omits `resolved_model`
+degrades to the pre-existing fallback (the picker's active selection, then the
+launch-time `--model`). The header only CHOOSES which KNOWN string to display; it
+never resolves a default itself. A single layout model (`layout.go`) is the source of truth: `View()` renders
 it, the per-message relayout step sizes the viewport from it, and the mouse
 selection maps clicks through it, so they can never disagree about where the body
 sits or how tall it is. When a transient region appears the viewport **shrinks** to

@@ -48,6 +48,10 @@ func (h *HarnessServer) CreateSession(ctx context.Context, req *mecatlv1.CreateS
 	// server-wide capabilities when a non-default selector was supplied. Both read
 	// the composition's single source, so they cannot disagree.
 	scaps := h.svc.SessionCapabilities(sess.ID)
+	// resolved_model echoes the EFFECTIVE provider+model THIS session resolved to,
+	// read from the composition single source (Service.ResolvedModel) — NEVER from
+	// req.GetModelId(), which is empty for a default session and ambiguous for a
+	// passthrough id. Same single-source discipline as session_capabilities.
 	return &mecatlv1.CreateSessionResponse{
 		SessionId:    string(sess.ID),
 		Capabilities: h.svc.capabilities(),
@@ -55,6 +59,7 @@ func (h *HarnessServer) CreateSession(ctx context.Context, req *mecatlv1.CreateS
 			Image: scaps.Image,
 			Audio: scaps.Audio,
 		},
+		ResolvedModel: resolvedModelToProto(h.svc.ResolvedModel(sess.ID)),
 	}, nil
 }
 
@@ -67,7 +72,7 @@ func (h *HarnessServer) GetSession(ctx context.Context, req *mecatlv1.GetSession
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	return &mecatlv1.GetSessionResponse{Session: toProtoSession(sess)}, nil
+	return &mecatlv1.GetSessionResponse{Session: toProtoSession(sess, h.svc.ResolvedModel(sess.ID))}, nil
 }
 
 // CloseSession ends a session and releases its server-side resources. It returns

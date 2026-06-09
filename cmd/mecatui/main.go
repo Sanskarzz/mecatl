@@ -527,6 +527,6 @@ type sessionAdapter struct {
 	mode      mecatlv1.PermissionMode
 }
 
-func (s *sessionAdapter) CreateSession(ctx context.Context, sel client.ModelSelection) (string, client.Capabilities, error) {
+func (s *sessionAdapter) CreateSession(ctx context.Context, sel client.ModelSelection) (string, client.Capabilities, client.ResolvedModel, error) {
 	return s.cl.CreateSession(ctx, s.workspace, s.mode, sel)
 }
