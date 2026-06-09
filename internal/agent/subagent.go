@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -128,6 +129,14 @@ type subagentArgs struct {
 	// unknown name returns a model-addressable error listing the valid names.
 	Agent string `json:"agent,omitempty"`
 
+	// Resume optionally CONTINUES a previously-run subagent by its persisted session id
+	// (the value of the result trailer's `agentId:` line, verbatim). The child's prior
+	// conversation is reloaded and Prompt becomes its next instruction; the run gets a
+	// FRESH workspace fork (the original worktree is gone — a harness staleness note is
+	// prepended so the child knows). Mutually exclusive with Agent AND Model (v1 resumes
+	// on the default explorer engine only). Empty = start fresh (unchanged).
+	Resume string `json:"resume,omitempty"`
+
 	// MaxTurns optionally TIGHTENS the child's per-run turn limit for THIS call. It is
 	// a pointer so an omitted value (nil) is distinguishable from an explicit 0; when
 	// present it overrides the inherited limit only if it is LOWER (tighten-only — the
@@ -214,6 +223,10 @@ var subagentSchema = json.RawMessage(`{
       "type": "string",
       "description": "Optional name of a configured specialist agent to route this delegation to (see the list in the tool description). Omit to use the default read-only explorer."
     },
+    "resume": {
+      "type": "string",
+      "description": "Optional id of a previous subagent to RESUME (the value of the 'agentId:' line on its earlier Subagent result). The subagent continues with its full prior conversation, taking this call's prompt as its next instruction. It runs in a FRESH workspace checkout: file changes and build state from its earlier run are gone (its conversational memory survives; the working tree does not). Cannot be combined with the agent or model arguments. Omit to start a fresh subagent."
+    },
     "max_turns": {
       "type": "integer",
       "description": "Optional cap on the subagent's model turns for THIS call. Tighten-only: it can make the subagent stricter than the default, never looser. Omit to use the default."
@@ -266,6 +279,13 @@ var subagentSchema = json.RawMessage(`{
 // read-only explorer catalog (Read, Grep, Glob) that NEVER includes the Subagent tool
 // itself — so a subagent cannot recurse — and an allow-all policy over those
 // read-only tools so the child never needs to prompt a human. See NewSubagentTool.
+//
+// Resume: when a store is wired (WithSubagentStore), a Subagent call carrying `resume`
+// CONTINUES a previously-run child by its persisted id (the result trailer's `agentId:`
+// line) — the prior conversation is reloaded and its terminal state recovered (completed
+// →Reopen, cancelled→Interrupt; failed is not resumable), then it runs on the default
+// explorer engine in a FRESH workspace fork (the original worktree is gone; a staleness
+// note is prepended). An in-flight guard rejects a concurrent run on the same id.
 type SubagentTool struct {
 	// childEngine runs the subagent loop. It is pre-wired by the composition root
 	// with the scoped catalog, the (optionally cheaper) model, and an allow/deny
@@ -356,6 +376,17 @@ type SubagentTool struct {
 	// ids; the prefixes keep them disjoint by convention, and jsonlstore sanitizes any
 	// id into a safe filename, so no collision engineering is needed.
 	store port.SessionStore
+
+	// mu guards inFlight. It is a plain mutex held only for the map's read-modify-write,
+	// never across the child run.
+	mu sync.Mutex
+	// inFlight registers every child session id (FRESH and RESUME) currently being driven
+	// by this tool, so a second concurrent Execute on the SAME id is rejected with a
+	// model-visible error rather than racing two runs over one unlocked Session aggregate.
+	// It is correctness (the aggregate is not goroutine-safe) AND liveness (waiting would
+	// park a dispatcher goroutine + a gate slot). Registered BEFORE acquireChildSlot, so
+	// the conflict is detected even while the second call would otherwise block on the gate.
+	inFlight map[session.SessionID]struct{}
 }
 
 // defaultStructuredOutputRetries bounds how many CORRECTION re-drives a
@@ -381,6 +412,12 @@ const defaultStructuredOutputRetries = 2
 // structured-output child is given. It is run-scoped (RunOptions.ExtraTools), never
 // registered into any shared catalog.
 const submitResultToolName = "SubmitResult"
+
+// resumeStalenessNote is the honest harness preface prepended to a resumed child's
+// prompt: the conversation survives but the workspace does not (the original
+// worktree was torn down; this run gets a fresh fork), so the child must not trust
+// earlier filesystem observations. Same accuracy discipline as childAutoDenyMessage.
+const resumeStalenessNote = "[harness note: your conversation has been resumed, but you are running in a FRESH workspace checkout — file changes, build artifacts, and running processes from your earlier run are GONE. Re-run commands and re-read files before relying on earlier observations.]"
 
 // SubagentOption configures a SubagentTool.
 type SubagentOption func(*SubagentTool)
@@ -525,6 +562,7 @@ func NewSubagentTool(childEngine *Engine, opts ...SubagentOption) tool.Tool {
 		limits:      defaultChildLimits,
 		childMode:   session.ModeDefault,
 		idPrefix:    "subagent",
+		inFlight:    make(map[session.SessionID]struct{}),
 	}
 	for _, o := range opts {
 		o(t)
@@ -557,7 +595,8 @@ func (t *SubagentTool) Spec() tool.ToolSpec {
 		"workers must coordinate (use Team) — and don't delegate a single quick read you can do with " +
 		"Read/Grep." +
 		" Every result starts with an 'agentId:' line — pass that id to InspectSubagent to read the " +
-		"subagent's full transcript later."
+		"subagent's full transcript, or as `resume` to continue that subagent with a follow-up prompt " +
+		"(fresh workspace; its conversation survives)."
 	desc += t.agentEnumeration()
 	return tool.ToolSpec{
 		Name:        subagentToolName,
@@ -610,8 +649,10 @@ func (t *SubagentTool) agentEnumeration() string {
 func (*SubagentTool) ReadOnly() bool { return true }
 
 // Execute runs one subagent: it builds a FRESH child Session (own conversation,
-// own Limits, its configured mode), runs the child loop via the injected child
-// Engine against the SAME workspace ws, drains the child's entire Event stream
+// own Limits, its configured mode) — or, on `resume`, reloads the persisted child
+// session and recovers its terminal state (completed→Reopen, cancelled→Interrupt;
+// failed is not resumable) before driving it in a NEW workspace fork — runs the
+// child loop via the injected child Engine, drains the child's entire Event stream
 // internally, and returns only the child's final summary text as a single
 // ToolResult. The parent therefore never observes the child's intermediate
 // events (gauntlet #7).
@@ -704,6 +745,60 @@ func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagen
 	return engine, limits, session.ToolResult{}, true
 }
 
+// buildSubagentRunOptions assembles the per-call RunOptions, the synthetic SubmitResult
+// tool, and the effective child prompt for one Subagent run:
+//   - Per-call token ceiling (R4): a Run-scoped TIGHTEN-ONLY MaxRunTokens override carried
+//     via RunContentWith, bounding the SHARED child engine WITHOUT minting a fresh engine.
+//     0 ⇒ inherit the engine's operator-default budget; it folds tighten-only in the loop.
+//   - Resume staleness note: on RESUME the effective prompt is prefixed with the honest
+//     resumeStalenessNote (the conversation survives but the workspace does not) BEFORE the
+//     structured-output wrap, so the note rides inside the structured prompt too. A fresh
+//     call is unchanged.
+//   - Structured output (D1/D2): when an output_schema is supplied, a synthetic SubmitResult
+//     tool (run-scoped — never registered into the shared catalog) whose parameters ARE the
+//     schema is created and the prompt is wrapped to instruct the child to call it. Omitted
+//     ⇒ today's free-text path.
+func buildSubagentRunOptions(args subagentArgs, resuming bool) (RunOptions, *submitResultTool, string) {
+	var runOpts RunOptions
+	if args.MaxTokens != nil && *args.MaxTokens > 0 {
+		runOpts.MaxRunTokensOverride = *args.MaxTokens
+	}
+	prompt := args.Prompt
+	if resuming {
+		prompt = resumeStalenessNote + "\n\n" + args.Prompt
+	}
+	var submit *submitResultTool
+	if len(args.OutputSchema) > 0 && strings.TrimSpace(string(args.OutputSchema)) != "" {
+		submit = newSubmitResultTool(args.OutputSchema)
+		runOpts.ExtraTools = []tool.Tool{submit}
+		// Wrap the (possibly staleness-noted) prompt so a resumed structured-output child
+		// still sees the staleness note inside the structured-output instruction.
+		prompt = structuredOutputPrompt(prompt, args.OutputSchema)
+	}
+	return runOpts, submit, prompt
+}
+
+// validateResume checks a `resume` Subagent call's preconditions BEFORE any engine
+// selection or load: a store must be wired (resume needs persistence), `resume` is
+// mutually exclusive with `agent`/`model` (a resumed child runs on the default explorer
+// engine only), and the resume id must be a SUBAGENT id (the prefix gate rejects team
+// member / service ids — keyed on t.idPrefix+"-", NOT a literal). It returns the default
+// explorer engine on success, or a model-addressable error ToolResult (ok=false).
+func (t *SubagentTool) validateResume(callID session.ToolCallID, args subagentArgs) (engine *Engine, errResult session.ToolResult, ok bool) {
+	if t.store == nil {
+		return nil, session.NewToolError(callID, "Subagent: `resume` is not supported in this deployment (no session store wired)"), false
+	}
+	if strings.TrimSpace(args.Agent) != "" || strings.TrimSpace(args.Model) != "" {
+		return nil, session.NewToolError(callID,
+			"Subagent: `resume` cannot be combined with `agent` or `model` — a resumed subagent continues on the default explorer engine"), false
+	}
+	if !strings.HasPrefix(args.Resume, t.idPrefix+"-") {
+		return nil, session.NewToolError(callID,
+			fmt.Sprintf("Subagent: resume id %q is not a subagent session; only ids from a Subagent result's 'agentId:' line can be resumed (team member transcripts are read-only via InspectMember)", args.Resume)), false
+	}
+	return t.childEngine, session.ToolResult{}, true
+}
+
 func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error) {
 	var args subagentArgs
 	if msg, ok := session.ParseArgs(call, &args); !ok {
@@ -713,16 +808,37 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 		return session.NewToolError(call.ID, "Subagent: 'prompt' is required and must be non-empty"), nil
 	}
 
-	// Select the child engine + base limits from `agent`/`model` (mutually exclusive),
-	// returning a model-addressable error result for a bad selection.
-	engine, limits, errResult, ok := t.selectChildEngine(call.ID, args)
-	if !ok {
-		return errResult, nil
+	// Resume mode: CONTINUE a previously-run subagent by its persisted id. It forces the
+	// default explorer engine (v1: a resumed child runs on childEngine only) and is
+	// mutually exclusive with `agent`/`model` (those pin their own engine). The validation
+	// is checked BEFORE selectChildEngine so the exclusivity error is the model's first
+	// signal; the prefix check rejects non-subagent ids (e.g. a team member's transcript).
+	resuming := strings.TrimSpace(args.Resume) != ""
+	var engine *Engine
+	var limits session.Limits
+	if resuming {
+		eng, errResult, ok := t.validateResume(call.ID, args)
+		if !ok {
+			return errResult, nil
+		}
+		// A resumed child runs on the default explorer engine; its preserved Limits come
+		// from the loaded session below (tighten-only per-call override still applies).
+		engine = eng
+	} else {
+		// Select the child engine + base limits from `agent`/`model` (mutually exclusive),
+		// returning a model-addressable error result for a bad selection.
+		eng, lim, errResult, ok := t.selectChildEngine(call.ID, args)
+		if !ok {
+			return errResult, nil
+		}
+		engine, limits = eng, lim
 	}
 
 	// Per-call limit overrides (tighten-only): the model may make THIS child stricter
 	// than the inherited bound, never looser, so a per-call arg can't escape the
 	// operator's ceiling. tightenLimit ignores nil / non-positive values and only lowers.
+	// On resume, limits is overwritten below from the LOADED session's preserved Limits,
+	// then tightened against the per-call args there.
 	limits.MaxTurns = tightenLimit(limits.MaxTurns, args.MaxTurns)
 	limits.MaxToolCalls = tightenLimit(limits.MaxToolCalls, args.MaxToolCalls)
 
@@ -740,6 +856,23 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 		timeoutCtx = ctx
 	}
 
+	// Compute the child session id early (a FRESH call derives it from the parent call id;
+	// a RESUME continues the persisted id verbatim) so the in-flight guard can register it
+	// BEFORE acquiring the concurrency slot. The guard rejects a SECOND concurrent run on
+	// the SAME id with a model-visible error rather than waiting: two runs over one unlocked
+	// Session aggregate is a data race (correctness), and waiting would park a dispatcher
+	// goroutine + a gate slot (liveness). Registered BEFORE acquireChildSlot so the conflict
+	// is detected even while the second call would otherwise block on the gate.
+	childID := t.childSessionID(call.ID)
+	if resuming {
+		childID = session.SessionID(args.Resume)
+	}
+	if !t.tryAcquireChildID(childID) {
+		return session.NewToolError(call.ID,
+			fmt.Sprintf("Subagent: subagent %q is already running; wait for its result before resuming it", childID)), nil
+	}
+	defer t.releaseChildID(childID)
+
 	// Bound concurrent children FIRST, for ALL Subagent children (forking AND forker-less):
 	// the dispatcher fans Subagent calls out read-parallel, and each child consumes a child
 	// session + an LLM slot (and, when shell-bearing, a forked worktree). Acquire at the
@@ -752,39 +885,36 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	}
 	defer release()
 
-	// Workspace selection. When a child forker is wired (the child catalog has Bash),
-	// run the child in its OWN isolated git worktree so its shell's writes never touch
-	// the shared parent base — what keeps Subagent read-parallel-safe (see ReadOnly). A
-	// fork FAILURE is a tool error, NOT a silent fallback to the shared ws: the child
-	// has Bash precisely because isolation was available, so running it shared would be
-	// the exact hazard. cleanup tears the worktree down after the child fully drains
-	// (the run is drained below in this call), so a deferred cleanup is correct.
-	runWS := ws
-	if t.childForker != nil {
-		forkWS, cleanup, err := t.childForker.Fork(ctx, ws, subagentGoal(args))
-		if err != nil {
-			return session.NewToolError(call.ID, "Subagent: workspace isolation failed: "+err.Error()), nil
+	// Resume load + terminal recovery happen BEFORE the fork, so the common error cases
+	// (unknown id, failed/non-resumable state, broken store) FAIL FAST without paying a
+	// fork/unfork round-trip. The recovered session is re-homed AFTER the fork, once the
+	// fresh root exists.
+	var resumedChild *session.Session
+	if resuming {
+		loaded, errResult, ok := t.resolveResumeSession(ctx, call.ID, childID, args)
+		if !ok {
+			return errResult, nil
 		}
-		runWS = forkWS
-		defer func() {
-			if cleanup != nil {
-				_ = cleanup()
-			}
-		}()
+		resumedChild = loaded
 	}
 
-	// A fresh child session: own conversation, own (tighter) Limits, scoped to the
-	// run workspace root (the isolated worktree when forked, else the parent base) so
-	// the subagent explores the same project. When a named agent def pins limits, the
-	// child runs under THOSE; otherwise it uses the Subagent tool's default limits.
-	childID := t.childSessionID(call.ID)
-	child := session.New(
-		childID,
-		t.childMode,
-		runWS.Root(),
-		limits,
-		time.Now(),
-	)
+	// Workspace selection: fork an isolated worktree when a forker is wired (a fork
+	// failure is a tool error, never a silent fallback — see forkChildWorkspace). The
+	// returned cleanup is always non-nil and tears the worktree down after the child
+	// fully drains (the run is drained below in this call), so a deferred cleanup is
+	// correct.
+	runWS, cleanupWS, errResult, ok := t.forkChildWorkspace(ctx, call.ID, ws, subagentGoal(args))
+	if !ok {
+		return errResult, nil
+	}
+	defer func() { _ = cleanupWS() }()
+
+	// The child session: a fresh session.New on a FRESH call, or the recovered + re-homed
+	// loaded session on RESUME (see buildChildSession).
+	child, errResult, ok := t.buildChildSession(call.ID, childID, resumedChild, runWS.Root(), limits)
+	if !ok {
+		return errResult, nil
+	}
 
 	// Announce the subagent before it runs, carrying only the parent call id, the
 	// child id, and a short, plain-text goal label (sanitization happens in the
@@ -797,29 +927,10 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 		}})
 	}
 
-	// Per-call token ceiling (R4): a Run-scoped TIGHTEN-ONLY override carried into the
-	// child run via RunContentWith, so a per-call max_tokens bounds the SHARED child
-	// engine WITHOUT minting a fresh engine (the cleaner of the two R4 options). 0 ⇒
-	// inherit the engine's operator-default budget. It folds tighten-only in the loop
-	// (effectiveMaxRunTokens), so it can make the child stricter, never looser.
-	var runOpts RunOptions
-	if args.MaxTokens != nil && *args.MaxTokens > 0 {
-		runOpts.MaxRunTokensOverride = *args.MaxTokens
-	}
-
-	// Structured output (D1/D2): when an output_schema is supplied, give the child a
-	// synthetic SubmitResult tool (run-scoped — never registered into the shared
-	// catalog) whose parameters ARE the schema, instruct it to call SubmitResult to
-	// deliver, validate the submitted payload, and re-drive on a mismatch up to a
-	// bounded retry count. The validated JSON becomes the result text; exhaustion is a
-	// model-visible StopStructuredOutput tool error. Omitted ⇒ today's free-text path.
-	var submit *submitResultTool
-	prompt := args.Prompt
-	if len(args.OutputSchema) > 0 && strings.TrimSpace(string(args.OutputSchema)) != "" {
-		submit = newSubmitResultTool(args.OutputSchema)
-		runOpts.ExtraTools = []tool.Tool{submit}
-		prompt = structuredOutputPrompt(args.Prompt, args.OutputSchema)
-	}
+	// Build the run options (per-call token ceiling), the synthetic SubmitResult tool (when
+	// structured output is requested), and the effective prompt (with the resume staleness
+	// note prepended BEFORE the structured-output wrap). See buildSubagentRunOptions.
+	runOpts, submit, prompt := buildSubagentRunOptions(args, resuming)
 
 	// A child forking a worktree (childForker != nil) runs ISOLATED, so its Bash asks
 	// are eligible for the A2 worktree-safe auto-approve; a forker-less child is
@@ -937,7 +1048,7 @@ func renderSubagentResult(callID session.ToolCallID, childID session.SessionID, 
 // deterministic t.childSessionID(callID)) so a human can correlate the overlay row and
 // the parent can refer to "the subagent that did X" by id. It is the model's REAL
 // handle: InspectSubagent loads the persisted child transcript by this id (verbatim —
-// the id IS the session id, no derivation).
+// the id IS the session id, no derivation) and `resume` continues the child by it.
 func renderSubagentTrailer(childID session.SessionID, body string) string {
 	return fmt.Sprintf("agentId: %s\n\n%s", childID, body)
 }
@@ -1037,6 +1148,123 @@ func (t *SubagentTool) acquireChildSlot(ctx context.Context) func() {
 	case <-ctx.Done():
 		return nil
 	}
+}
+
+// tryAcquireChildID registers childID as in-flight, returning false if a run on the
+// SAME id is already in progress (a fresh duplicate is impossible — call ids are unique
+// — so this fires only for a concurrent RESUME of the same persisted id, or a fresh+resume
+// collision). It is the correctness brake: two runs over one unlocked Session aggregate
+// would race; the second call gets a model-visible "already running" error, not a wait.
+func (t *SubagentTool) tryAcquireChildID(childID session.SessionID) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.inFlight == nil {
+		t.inFlight = make(map[session.SessionID]struct{})
+	}
+	if _, busy := t.inFlight[childID]; busy {
+		return false
+	}
+	t.inFlight[childID] = struct{}{}
+	return true
+}
+
+// releaseChildID unregisters a previously-acquired in-flight child id.
+func (t *SubagentTool) releaseChildID(childID session.SessionID) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.inFlight, childID)
+}
+
+// resolveResumeSession loads a persisted subagent session for a `resume` call, recovers
+// its terminal state to StateIdle so it is runnable again, and tightens its preserved
+// Limits by the per-call args. It runs BEFORE the workspace fork so the common error
+// cases (unknown id, failed/non-resumable state, broken store) fail fast without paying
+// a fork/unfork round-trip; the caller re-homes the returned session onto the fresh fork
+// root afterwards (Session.Rehome — a field-consistency repair, not a prompt input). The
+// terminal recovery is the loadAndReopen discipline applied at the agent layer:
+// StateCompleted → Reopen, StateCancelled → Interrupt (history-repair), StateIdle → run
+// as-is, StateFailed → not resumable, any other state → not in a resumable state. It
+// returns the recovered session on success, or a model-addressable error ToolResult
+// (ok=false) on a load failure or non-resumable state.
+func (t *SubagentTool) resolveResumeSession(ctx context.Context, callID session.ToolCallID, id session.SessionID, args subagentArgs) (*session.Session, session.ToolResult, bool) {
+	loaded, err := t.store.Load(ctx, id)
+	switch {
+	case errors.Is(err, port.ErrSessionNotFound) || (err == nil && loaded == nil):
+		return nil, session.NewToolError(callID,
+			fmt.Sprintf("Subagent: no subagent found for resume id %q; use the id exactly as shown on the 'agentId:' line of a previous Subagent result", id)), false
+	case err != nil:
+		return nil, session.NewToolError(callID,
+			fmt.Sprintf("Subagent: failed to load subagent %q for resume: %v", id, err)), false
+	}
+	switch loaded.State {
+	case session.StateCompleted:
+		if rerr := loaded.Reopen(); rerr != nil {
+			return nil, session.NewToolError(callID,
+				fmt.Sprintf("Subagent: subagent %q is not in a resumable state (%q): %v", id, loaded.State, rerr)), false
+		}
+	case session.StateCancelled:
+		if rerr := loaded.Interrupt(); rerr != nil {
+			return nil, session.NewToolError(callID,
+				fmt.Sprintf("Subagent: subagent %q is not in a resumable state (%q): %v", id, loaded.State, rerr)), false
+		}
+	case session.StateIdle:
+		// Already runnable; run as-is.
+	case session.StateFailed:
+		return nil, session.NewToolError(callID,
+			fmt.Sprintf("Subagent: subagent %q ended in a failed state and is not resumable; start a fresh subagent instead", id)), false
+	default:
+		return nil, session.NewToolError(callID,
+			fmt.Sprintf("Subagent: subagent %q is not in a resumable state (%q)", id, loaded.State)), false
+	}
+	// Tighten the LOADED session's preserved Limits by the per-call args (tighten-only).
+	// Reopen/Interrupt already reset Counters, so each per-call bound applies afresh.
+	loaded.Limits.MaxTurns = tightenLimit(loaded.Limits.MaxTurns, args.MaxTurns)
+	loaded.Limits.MaxToolCalls = tightenLimit(loaded.Limits.MaxToolCalls, args.MaxToolCalls)
+	return loaded, session.ToolResult{}, true
+}
+
+// forkChildWorkspace selects the workspace one child run executes against. When a child
+// forker is wired (the child catalog has Bash), the child gets its OWN isolated git
+// worktree so its shell's writes never touch the shared parent base — what keeps
+// Subagent read-parallel-safe (see ReadOnly). A fork FAILURE is a tool error (ok=false),
+// NOT a silent fallback to the shared ws: the child has Bash precisely because isolation
+// was available, so running it shared would be the exact hazard. Without a forker the
+// child runs against the parent ws unchanged. The returned cleanup is ALWAYS non-nil
+// (a no-op when nothing was forked) so the caller can defer it unconditionally.
+func (t *SubagentTool) forkChildWorkspace(ctx context.Context, callID session.ToolCallID, ws tool.Workspace, label string) (runWS tool.Workspace, cleanup func() error, errResult session.ToolResult, ok bool) {
+	if t.childForker == nil {
+		return ws, func() error { return nil }, session.ToolResult{}, true
+	}
+	forkWS, forkCleanup, err := t.childForker.Fork(ctx, ws, label)
+	if err != nil {
+		return nil, nil, session.NewToolError(callID, "Subagent: workspace isolation failed: "+err.Error()), false
+	}
+	if forkCleanup == nil {
+		forkCleanup = func() error { return nil }
+	}
+	return forkWS, forkCleanup, session.ToolResult{}, true
+}
+
+// buildChildSession produces the session one child run drives. On a FRESH call
+// (resumedChild == nil): a new session — own conversation, own (tighter) Limits, scoped
+// to the run workspace root (the isolated worktree when forked, else the parent base).
+// On RESUME: the session was already reloaded + recovered (before the fork, in
+// resolveResumeSession); here it is RE-HOMED onto the run root so its recorded workspace
+// stays consistent with where this run actually executes — the original worktree is
+// torn down, and without the re-home the re-persisted snapshot would record a dead
+// path. (The child's prompt cwd is independently sourced from the engine's PromptConfig
+// and is NOT affected by this field.)
+func (t *SubagentTool) buildChildSession(callID session.ToolCallID, childID session.SessionID, resumedChild *session.Session, root string, limits session.Limits) (*session.Session, session.ToolResult, bool) {
+	if resumedChild == nil {
+		// When a named agent def pins limits, the child runs under THOSE; otherwise it uses
+		// the Subagent tool's default limits.
+		return session.New(childID, t.childMode, root, limits, time.Now()), session.ToolResult{}, true
+	}
+	if err := resumedChild.Rehome(root); err != nil {
+		return nil, session.NewToolError(callID,
+			fmt.Sprintf("Subagent: failed to re-home resumed subagent %q: %v", childID, err)), false
+	}
+	return resumedChild, session.ToolResult{}, true
 }
 
 // subagentGoal derives the short, plain-text goal label forwarded on

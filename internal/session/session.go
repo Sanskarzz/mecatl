@@ -499,6 +499,23 @@ func (s *Session) Interrupt() error {
 	return nil
 }
 
+// Rehome repoints the session's workspace root. Legal only from StateIdle (a
+// recovered, not-yet-running session). It keeps the persisted session's recorded
+// workspace consistent with where the resumed run actually executes: the resume
+// path re-forks a fresh checkout and the original worktree is torn down, so
+// without the re-home the re-persisted snapshot would record a dead path.
+//
+// NOTE: the child's prompt cwd is independently sourced from the engine's
+// PromptConfig and is NOT affected by this field (the loop's Workspace fallback
+// only fires when the configured prompt Env.Cwd is empty).
+func (s *Session) Rehome(workspace string) error {
+	if s.State != StateIdle {
+		return fmt.Errorf("%w: Rehome from %q", ErrIllegalTransition, s.State)
+	}
+	s.Workspace = workspace
+	return nil
+}
+
 // SetMode changes the session's permission posture. It is the intention-revealing
 // seam an out-of-band control surface (e.g. ACP session/set_mode) uses to switch
 // between default/plan/acceptEdits, so the change flows through the aggregate

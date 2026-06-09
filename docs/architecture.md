@@ -573,6 +573,13 @@ self-contained task (multi-step investigation or build/test/git work) to a **chi
 2. Builds a **fresh** child `session.New(...)` — own conversation, own (tighter)
    `Limits` (`defaultChildLimits`: 12 turns / 40 tool calls / 3 failures),
    scoped to the **run** workspace root (the worktree when forked, else the parent).
+   **On `resume`** (a Subagent call carrying `resume: <agentId>`) it instead RELOADS the
+   persisted child by that id and recovers its terminal state — `completed` → `Reopen()`,
+   `cancelled` → `Interrupt()` (history-repair), `failed` is **not** resumable — then
+   re-homes it onto the fresh fork (`session.Session.Rehome`) and prepends an honest
+   staleness note (the conversation survives, the workspace does NOT). Resume runs on the
+   **default explorer engine only** (rejected with `agent`/`model`); an in-flight guard
+   rejects a concurrent run on the same id.
 3. Runs the child via the injected `childEngine.Run(ctx, child, runWS, prompt)`.
 4. **Drains the child's entire Event stream inside `Execute`** (`drainChild`),
    discarding every intermediate `turn.start`/`message.delta`/`tool.call`/
@@ -593,8 +600,9 @@ by terminal reason (success / `[subagent stopped: …]` note / structured-output
 validation error / error) and carries an `agentId: <childID>` trailer on every terminal
 (model-visible, mirroring the Team-id line) so the parent can discover the child id and
 read its persisted transcript via the read-only `InspectSubagent` tool (the id is used
-verbatim). None of these widen `port.LLMRequest` — they are
-`subagentArgs`/`RunOptions`/factory concerns.
+verbatim), or pass it as `resume` to CONTINUE that subagent with a follow-up prompt
+(default engine only, fresh fork + staleness note; `failed` is not resumable). None of
+these widen `port.LLMRequest` — they are `subagentArgs`/`RunOptions`/factory concerns.
 
 The child is a **read-only explorer with a shell** — capability flows down from the
 parent (which has Bash); isolation, not catalog read-only-ness, is the security

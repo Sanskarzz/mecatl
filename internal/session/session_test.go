@@ -507,6 +507,43 @@ func TestReopenIllegalFromNonCompletedStates(t *testing.T) {
 	}
 }
 
+func TestRehomeFromIdleRepointsWorkspace(t *testing.T) {
+	s := newTestSession(Limits{})
+	if s.State != StateIdle {
+		t.Fatalf("precondition: state = %q, want idle", s.State)
+	}
+	if err := s.Rehome("/tmp/fresh-fork"); err != nil {
+		t.Fatalf("Rehome: %v", err)
+	}
+	if s.Workspace != "/tmp/fresh-fork" {
+		t.Fatalf("after Rehome workspace = %q, want /tmp/fresh-fork", s.Workspace)
+	}
+	if s.State != StateIdle {
+		t.Fatalf("after Rehome state = %q, want idle (unchanged)", s.State)
+	}
+}
+
+func TestRehomeIllegalFromNonIdleStates(t *testing.T) {
+	for _, mk := range []struct {
+		name  string
+		setup func(*Session)
+	}{
+		{"running", func(s *Session) { _ = s.BeginTurn() }},
+		{"awaiting", func(s *Session) { _ = s.BeginTurn(); _ = s.PauseForApproval(PendingAsk{}) }},
+		{"completed", func(s *Session) { _ = s.BeginTurn(); _ = s.Complete() }},
+		{"failed", func(s *Session) { _ = s.Fail() }},
+		{"cancelled", func(s *Session) { _ = s.Cancel() }},
+	} {
+		t.Run(mk.name, func(t *testing.T) {
+			s := newTestSession(Limits{})
+			mk.setup(s)
+			if err := s.Rehome("/tmp/fresh-fork"); !errors.Is(err, ErrIllegalTransition) {
+				t.Fatalf("Rehome from %s: err = %v, want ErrIllegalTransition", mk.name, err)
+			}
+		})
+	}
+}
+
 func TestInterruptFromCancelledReturnsToIdleAndResetsCounters(t *testing.T) {
 	s := newTestSession(Limits{MaxTurns: 5})
 	if err := s.RecordUserPrompt("first prompt", nil); err != nil {

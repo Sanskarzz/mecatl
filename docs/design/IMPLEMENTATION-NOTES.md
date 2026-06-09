@@ -283,6 +283,46 @@ subagent side. No `defaultRules()` entry (Ask floor, parity with `InspectMember`
 `TestInspectSubagentUnknownIDErrors`, `TestInspectSubagentStoreFailureDistinct`,
 `TestInspectSubagentForgedIDCleanError` (+ the existing subagent tests' substring assertions for the trailer).
 
+**Subagent resume (`subagentArgs.Resume`).** A Subagent call carrying `resume: <agentId>` CONTINUES a
+previously-run child by its persisted session id (the `agentId:` trailer value, verbatim) instead of
+starting fresh. v1 scope: it runs on the DEFAULT explorer engine only — `resume` is REJECTED together
+with `agent` or `model` (those pin their own engine; a resumed child cannot also be re-routed), with a
+clear model-visible error. A no-store deployment rejects `resume` (`no session store wired`). A PREFIX
+GATE (`!strings.HasPrefix(args.Resume, t.idPrefix+"-")`, NOT a literal) rejects non-subagent ids so a
+team-member transcript (`team-<teamID>-<member>`) cannot be resumed through Subagent (it is read-only
+via `InspectMember`) — the same gate `InspectSubagent` uses. The child is reloaded and its terminal
+state recovered at the AGENT layer (the `loadAndReopen` discipline): `StateCompleted` → `Reopen()`,
+`StateCancelled` → `Interrupt()` (history-repair, no dangling tool_use), `StateIdle` → run as-is,
+`StateFailed` → NOT resumable (start fresh), any other state → not-in-a-resumable-state. The load +
+recovery + limits-tighten run BEFORE the workspace fork, so the common error cases (unknown id, failed
+state, broken store) FAIL FAST without paying a fork/unfork round-trip; AFTER the fork the recovered
+session is re-homed onto the fresh root via the new domain method `session.Session.Rehome` (legal only
+from `StateIdle`) — a FIELD-CONSISTENCY repair: it keeps the persisted session's recorded workspace
+consistent with where the resumed run actually executes (the original worktree is torn down; without
+it the re-persisted snapshot would record a dead path). NOTE: the child's prompt cwd is independently
+sourced from the engine's `PromptConfig` and is NOT affected by this field (the loop's
+`sess.Workspace` fallback only fires when the configured prompt `Env.Cwd` is empty, and composition
+pre-populates it). The effective prompt is prefixed
+with the verbatim `resumeStalenessNote` (the conversation survives but file changes/build state/running
+processes do NOT — re-run/re-read before trusting earlier observations), computed BEFORE the
+structured-output wrap so a resumed structured-output child sees the note inside the wrap. The LOADED
+session keeps its STORED Limits; the per-call `max_turns`/`max_tool_calls` only TIGHTEN them (Reopen/
+Interrupt already reset Counters, so each bound applies afresh); `max_tokens` rides the same
+`RunOptions.MaxRunTokensOverride`. An IN-FLIGHT GUARD (`tryAcquireChildID`/`releaseChildID` over a
+mutex-guarded `inFlight` set) registers EVERY child id (fresh AND resume) BEFORE acquiring the
+concurrency slot and rejects a SECOND concurrent run on the SAME id with a model-visible "already
+running" error — NOT a wait: two runs over one unlocked `Session` aggregate is a data race (correctness),
+and waiting would park a dispatcher goroutine + a gate slot (liveness). Everything downstream is
+unchanged: the persist re-saves the SAME id (the grown conversation), the trailer carries the SAME id,
+the structured-output retry and `driveChild` work identically, and no-nesting holds by construction.
+Guards: `agent.TestParentResumesSubagentByTrailerID` (model-facing e2e), `TestSubagentResumeContinuesPriorConversation`,
+`TestSubagentResumeAfterMaxTurns`, `TestSubagentResumeCancelledInterrupts`, `TestSubagentResumeFailedRejected`,
+`TestSubagentResumeWithAgentRejected`/`TestSubagentResumeWithModelRejected`, `TestSubagentResumeUnknownIDErrors`,
+`TestSubagentResumeNoStoreRejected`, `TestSubagentConcurrentResumeGuard`, `TestSubagentResumeBudgetTightenOnly`,
+`TestSubagentResumeStructuredOutput`, `TestSubagentResumeTeamMemberIDRejected` (adversarial),
+`TestSubagentResumePreservesStoredLimits`, and `session.TestRehomeFromIdleRepointsWorkspace`/
+`TestRehomeIllegalFromNonIdleStates`.
+
 **Subagent per-call token ceiling (`max_tokens`, Run-scoped budget override — R4).** `subagentArgs.MaxTokens`
 rides the new `RunOptions.MaxRunTokensOverride` carried into `Engine.RunContentWith`, so a per-call
 token ceiling bounds the SHARED child engine WITHOUT minting a fresh engine. `effectiveMaxRunTokens`
