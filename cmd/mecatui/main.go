@@ -117,22 +117,30 @@ func run(args []string) error {
 	// before the create carries it (see ui.Init / updateModelsMsg).
 	store := newSelectionStore(xdgconfig.OSEnv)
 	initialSel := store.Load(cfg.workspace)
+	// Provenance inputs for the /models picker (display-only): the un-collapsed
+	// per-workspace entry and the global default, kept separate so the picker can tell
+	// "workspace default" from "global default" without a server round-trip.
+	wsDefault, wsDefaultSet := store.LoadWorkspace(cfg.workspace)
+	globalDefault := store.LoadGlobalDefault()
 
 	deps := ui.Deps{
-		Session:        &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: client.ModeFromString(cfg.mode)},
-		Conv:           cl,
-		MCP:            cl,
-		Cmds:           cl,
-		Skills:         cl,
-		Agents:         cl,
-		Soul:           cl,
-		UserModel:      cl,
-		Models:         cl,
-		SelectionStore: store,
-		InitialModel:   initialSel,
-		Clipboard:      client.NewClipboard(),
-		Theme:          th,
-		Server:         target,
+		Session:             &sessionAdapter{cl: cl, workspace: cfg.workspace, mode: client.ModeFromString(cfg.mode)},
+		Conv:                cl,
+		MCP:                 cl,
+		Cmds:                cl,
+		Skills:              cl,
+		Agents:              cl,
+		Soul:                cl,
+		UserModel:           cl,
+		Models:              cl,
+		SelectionStore:      store,
+		InitialModel:        initialSel,
+		WorkspaceDefault:    wsDefault,
+		WorkspaceDefaultSet: wsDefaultSet,
+		GlobalDefault:       globalDefault,
+		Clipboard:           client.NewClipboard(),
+		Theme:               th,
+		Server:              target,
 		// Model is best-effort display only. For an EXTERNAL --server it reflects
 		// the locally-configured --model flag and may NOT match the server's actual
 		// model (the server owns provider config); for an embedded server it is
@@ -529,4 +537,8 @@ type sessionAdapter struct {
 
 func (s *sessionAdapter) CreateSession(ctx context.Context, sel client.ModelSelection) (string, client.Capabilities, client.ResolvedModel, error) {
 	return s.cl.CreateSession(ctx, s.workspace, s.mode, sel)
+}
+
+func (s *sessionAdapter) CloseSession(ctx context.Context, id string) error {
+	return s.cl.CloseSession(ctx, id)
 }

@@ -118,6 +118,20 @@ func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecat
 	return resp.GetSessionId(), capabilitiesFrom(resp.GetCapabilities()), resolvedModelFrom(resp.GetResolvedModel()), nil
 }
 
+// CloseSession asks the server to end (and forget) the session under id, tearing
+// down its per-session engine + any per-session MCP manager server-side. The
+// /models restart-now handoff calls it on the OLD session before creating the new
+// one, so a model switch leaves no orphaned server-side session. A nil/unknown id
+// surfaces the server's error; the caller treats a close failure best-effort (the
+// new session is created regardless).
+func (c *Client) CloseSession(ctx context.Context, id string) error {
+	_, err := c.svc.CloseSession(ctx, &mecatlv1.CloseSessionRequest{SessionId: id})
+	if err != nil {
+		return fmt.Errorf("close session: %w", err)
+	}
+	return nil
+}
+
 // OpenConverse opens a fresh bidi Converse stream and wraps it in a Stream
 // (serialised Sends + a Recver for the reader goroutine). Each user prompt opens
 // one stream — matching the "one run per Converse" model. The stream's lifetime

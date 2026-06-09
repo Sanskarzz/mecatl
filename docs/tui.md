@@ -207,24 +207,45 @@ substring match (case-insensitive) over `provider_id`, model `id`, and display
 name — at 300+ live models this is how you find one fast. The list **scrolls** in a
 window clipped to the terminal height that follows the cursor (the selected row
 stays visible when you page past the top/bottom edge), so a large catalog never
-overruns the screen. `↑`/`↓` move the cursor over the **filtered** set, `pgup`/
-`pgdown` page, `home`/`end` jump, and `enter` **selects** the cursor model (a `●`
-marks the currently-active one). `esc` is **two-stage**: with a non-empty filter it
-clears the filter (the picker stays open); with an empty filter it closes the
-picker. (`j`/`k` type into the filter — they do **not** navigate here, unlike the
-read-only overlays — so a name like `kimi`/`jamba` filters as typed.) UNLIKE the
-read-only overlays it changes state: selecting **persists** the choice (last-used)
-and **applies to the NEXT
-session** (`provider_id`/`model_id` on the next `CreateSession`) — it does NOT
-re-route the live session (provider is fixed per session; a live switch is a
-deferred follow-up). The pick is persisted **client-side** to a state file:
+overruns the screen. A header line reads **`current: <model> (<provenance>)`** — a
+best-effort, client-derived hint of where the live model came from (`server default`
+/ `--model flag` / `picked this session` / `workspace default` / `global default`);
+it is a hint, not authority (the server owns the resolution). Each row carries a
+two-cell marker column: **`●`** on the pending selection (the one the next session
+will request) and **`★`** on the client **global default** (the model new/unseen
+workspaces inherit). `↑`/`↓` move the cursor over the **filtered** set, `pgup`/
+`pgdown` page, `home`/`end` jump. (`j`/`k` type into the filter — they do **not**
+navigate here, unlike the read-only overlays — so a name like `kimi`/`jamba` filters
+as typed.) `esc` is **two-stage**: with a non-empty filter it clears the filter (the
+picker stays open); with an empty filter it closes the picker.
+
+`enter` opens a **confirmation overlay** for the cursor model with three choices:
+
+- **`enter` — start a new session now** on the picked model. Because the provider is
+  FIXED per session, switching live means a real handoff: the old session is closed
+  (`CloseSession`) and a fresh one is created on the picked model. The conversation
+  transcript is reset and the header rebinds to the NEW session's effective model;
+  there is no history carryover (the server has no history-seed surface).
+- **`s` — keep this session; switch next time.** The pick becomes the pending-next
+  selection (applied on the NEXT `CreateSession`) and a notice names both the live
+  model and the queued-next one, so it's clear nothing changed *yet*.
+- **`esc` — cancel**, reverting the pending-next to what it was before the pick.
+
+`ctrl+g` sets the cursor row as the **client global default** (the `★` row) — used
+by new/unseen workspaces; it is control-modified so a bare `g` stays typeable in the
+filter. When the pending-next differs from the model the live session runs on, the
+**header** shows a muted **`next: <model>`** badge previewing it (the first segment
+dropped under width pressure). The pick is persisted **client-side** to a state file:
 `$XDG_STATE_HOME/mecatui/models.yaml` (fallback `~/.local/state/mecatui/models.yaml`)
-— a per-workspace map (realpath-keyed). A pick is scoped to its workspace only; an
-unseen/new repo falls back to the server default rather than inheriting another
-repo's pick. On launch the selection is **reconciled** against
-`ListModels` BEFORE the first `CreateSession`: if the persisted model's provider is
-no longer available (its key was removed), the selection falls back to the server
-default for that run with a loud notice and the state file is left intact (the
+— a per-workspace map (realpath-keyed) plus a global `default:` block. Read
+precedence on launch (highest → lowest): an in-session restart pick → the `--model`
+flag → the per-workspace entry → the client global default → the server's built-in
+default. A workspace pick is scoped to its workspace only; an unseen/new repo falls
+back to the global default (then the server default). On launch the selection is
+**reconciled** against `ListModels` BEFORE the first `CreateSession`: if the
+persisted model's provider is no longer available (its key was removed), the
+selection falls back to the server default for that run with a loud notice that names
+the model the session actually fell back to, and the state file is left intact (the
 preference returns next launch). The state file is machine-written **state** under
 `XDG_STATE_HOME`, a sibling of the human config — the same settings-vs-state split
 as `trust.yaml`.
@@ -392,8 +413,8 @@ conversation body, zero or more **transient inline regions** (the slash-command
 palette, the `@`-mention menu, the queued-follow-ups card), then the input and
 footer.
 
-**Header bar.** `mecatui · session <id> · <model> · mode <mode> · <server>`. The
-**model segment** shows the EFFECTIVE model the server resolved THIS session to —
+**Header bar.** `mecatui · session <id> · <model> · [next: <model>] · mode <mode> · <server>`.
+The **model segment** shows the EFFECTIVE model the server resolved THIS session to —
 echoed verbatim on the create response (`CreateSessionResponse.resolved_model`) and
 shown from turn zero. While **connecting** (before the create response lands) there
 is NO model segment — the server owns the resolved value and the client never guesses
@@ -401,8 +422,13 @@ it. The human display name is resolved from the held `/models` (ListModels) inve
 by `(provider_id, model_id)`, falling back to the raw model id when the inventory has
 no entry yet (or a passthrough id). An older server that omits `resolved_model`
 degrades to the pre-existing fallback (the picker's active selection, then the
-launch-time `--model`). The header only CHOOSES which KNOWN string to display; it
-never resolves a default itself. A single layout model (`layout.go`) is the source of truth: `View()` renders
+launch-time `--model`). The optional **`next:` badge** previews the pending-next
+`/models` selection when it differs from the live model (suppressed when they match
+or when no effective model is known yet); it is the FIRST segment shed under width
+pressure (before the socket). The header only CHOOSES which KNOWN string to display;
+it never resolves a default itself.
+
+A single layout model (`layout.go`) is the source of truth: `View()` renders
 it, the per-message relayout step sizes the viewport from it, and the mouse
 selection maps clicks through it, so they can never disagree about where the body
 sits or how tall it is. When a transient region appears the viewport **shrinks** to

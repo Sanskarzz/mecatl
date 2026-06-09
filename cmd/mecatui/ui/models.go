@@ -26,18 +26,21 @@ import (
 type modelsView int
 
 const (
-	modelsNone  modelsView = iota // overlay closed
-	modelsPanel                   // the flat, type-to-filter picker
+	modelsNone    modelsView = iota // overlay closed
+	modelsPanel                     // the flat, type-to-filter picker
+	modelsConfirm                   // the post-Enter confirmation overlay (restart-now / switch-next / undo)
 )
 
 // modelsChrome is the number of non-row lines renderModelsPanel writes around the
 // windowed row block (so the budget is one obvious expression, not magic numbers
-// sprinkled in the loop). It accounts for the in-card lines — title (1), the filter
-// input row (1), the blank after it (1), the footer's leading blank (1) + hint (1)
-// = 5 — plus the askCard border/padding the centred card adds (2). Mirrors
-// team.go's roster chrome accounting; any small over-count just shrinks the window
-// by a row, never overflows.
-const modelsChrome = 7
+// sprinkled in the loop). It accounts for the in-card lines — title (1), the
+// provenance line (1, always reserved; the picker is idle-only so a current model is
+// known), the filter input row (1), the blank after it (1), the footer's leading
+// blank (1) + the two-line footer hint+legend (2) = 7 — plus the askCard border/
+// padding the centred card adds (2). Mirrors team.go's roster chrome accounting; any
+// small over-count (e.g. the rare connecting frame with no provenance) just shrinks
+// the window by a row, never overflows.
+const modelsChrome = 9
 
 // modelsMinRows is the floor on visible rows so even a very short terminal still
 // shows a usable window (mirrors team.go's teamMinRosterRows). The window still
@@ -56,6 +59,19 @@ type modelsState struct {
 	filter   textinput.Model       // the type-to-filter input; focused while the picker is open
 	cursor   int                   // index into FILTERED (clamped to its bounds)
 	active   client.ModelSelection // the persisted/active selection (drives the ● marker)
+	// confirm holds the in-flight confirmation when view==modelsConfirm: the model the
+	// user just picked (candidate) plus the pendingNext selection from BEFORE the pick
+	// (priorActive) so esc can UNDO the pick. globalDefault is the global `default:`
+	// block (drives the ★ marker + the "global default" provenance label).
+	confirm       modelsConfirmState
+	globalDefault client.ModelSelection
+}
+
+// modelsConfirmState is the modelsConfirm overlay's data: the candidate model the
+// user picked and the selection that was active before the pick (so esc reverts).
+type modelsConfirmState struct {
+	candidate   client.ModelInfo
+	priorActive client.ModelSelection
 }
 
 // openModels opens the picker and fires the ListModels RPC. Only callable while
@@ -119,6 +135,11 @@ func (m Model) onModelsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if m.models.view == modelsNone {
 		return m, nil, false
 	}
+	// The post-Enter confirmation overlay owns the keyboard while open (restart-now /
+	// switch-next / undo) — route it FIRST so its keys never feed the filter input.
+	if m.models.view == modelsConfirm {
+		return m.onModelsConfirmKey(msg)
+	}
 	budget := m.modelsRowBudget()
 	switch {
 	case key.Matches(msg, m.keys.Close):
@@ -151,9 +172,11 @@ func (m Model) onModelsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	case key.Matches(msg, m.keys.ScrollBottom):
 		m.models.cursor = clampModelsCursor(len(m.models.filtered)-1, len(m.models.filtered))
 		return m, nil, true
-	case key.Matches(msg, m.keys.Choose):
-		mm, cmd := m.chooseModel()
+	case key.Matches(msg, m.keys.SetGlobalDefault):
+		mm, cmd := m.setGlobalDefault()
 		return mm, cmd, true
+	case key.Matches(msg, m.keys.Choose):
+		return m.chooseModel(), nil, true
 	}
 	// Everything else feeds the focused filter input (printable runes, backspace,
 	// ←/→, …); recompute the filtered slice + clamp the cursor afterwards.
@@ -207,21 +230,161 @@ func (m Model) syncModelsFilter() Model {
 	return m
 }
 
-// chooseModel selects the cursor model: it sets the active selection, fires the
-// persist Cmd (off the update goroutine, like every store write), and shows a
-// success notice. It does NOT recreate the session (apply-on-next-create) — the
-// notice says as much. A cursor past the list end is a no-op (defensive).
-func (m Model) chooseModel() (tea.Model, tea.Cmd) {
+// chooseModel handles Enter on the cursor row: it OPENS the confirmation overlay
+// (modelsConfirm) rather than silently applying-on-next-create. The overlay offers
+// the restart-now / switch-next / undo choices (see onModelsConfirmKey). It stashes
+// the candidate model AND the pendingNext selection from BEFORE this pick, so esc
+// can revert. A cursor past the list end (or an already-empty list) is a no-op.
+func (m Model) chooseModel() Model {
 	if m.models.cursor < 0 || m.models.cursor >= len(m.models.filtered) {
-		return m, nil
+		return m
 	}
 	chosen := m.models.filtered[m.models.cursor]
+	m.models.confirm = modelsConfirmState{candidate: chosen, priorActive: m.activeModel}
+	m.models.view = modelsConfirm
+	return m
+}
+
+// onModelsConfirmKey routes keys while the modelsConfirm overlay is open. Three
+// choices, mirroring the permission-modal's keyed-button pattern:
+//
+//   - enter — RESTART NOW: close the old session and create a fresh one on the picked
+//     model (the risky handoff — see restartOnModelCmd). The pick is persisted
+//     per-workspace.
+//   - s — SWITCH NEXT TIME (today's behavior): keep the live session, set pendingNext
+//     so the NEXT create uses the picked model, persist per-workspace, and show a
+//     notice naming BOTH the live model and the queued-next model (no "nothing
+//     happened" confusion).
+//   - esc — UNDO: revert pendingNext to what it was before this pick (no persist) and
+//     return to the picker panel.
+//
+// Any other key is swallowed (handled=true) so stray input can't leak to the prompt.
+func (m Model) onModelsConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	chosen := m.models.confirm.candidate
 	sel := client.ModelSelection{ProviderID: chosen.ProviderID, ModelID: chosen.ID}
+	switch {
+	case key.Matches(msg, m.keys.Choose): // enter — restart now
+		return m.restartOnModel(sel)
+	case msg.String() == "s": // keep this session; switch next time
+		m.models.active = sel
+		m.activeModel = sel // header next:/create reads from this
+		mm, cmd := m.closeModels()
+		m = mm.(Model)
+		live := m.liveModelLabel()
+		m.statusMsg = m.deps.Theme.Style("success").Render(
+			"next session will use " + sanitizeTerminal(modelLabel(chosen)) +
+				" (still running " + sanitizeTerminal(live) + ")")
+		return m, tea.Batch(cmd, m.saveSelectionCmd(sel)), true
+	case key.Matches(msg, m.keys.Close): // esc — undo
+		m.activeModel = m.models.confirm.priorActive
+		m.models.view = modelsPanel
+		m.models.confirm = modelsConfirmState{}
+		return m, nil, true
+	}
+	return m, nil, true
+}
+
+// restartOnModel performs the restart-now handoff: it persists the pick
+// per-workspace, records it as the explicit this-session pick (provenance), tears
+// down ALL per-session client state bound to the OLD session, resets the
+// conversation transcript, drives the phase back to phaseConnecting, and fires the
+// restartOnModelCmd (CloseSession(old) → CreateSession(new, selector)). The new
+// header/caps/effectiveModel all arrive on the resulting SessionReadyMsg, so the UI
+// rebinds entirely from the NEW session. See restartOnModelCmd for the teardown
+// rationale (esp. the stream-subscription invalidation).
+func (m Model) restartOnModel(sel client.ModelSelection) (tea.Model, tea.Cmd, bool) {
+	// Cancel any in-flight run FIRST: endRun bumps streamGen (invalidating the old
+	// reader) and tears down the stream/cancelRun, so no goroutine stays subscribed to
+	// the soon-to-be-closed session. Pass "" so endRun sets no stop-status (we set the
+	// "switching model" status below). Safe even when idle (endRun is a no-op then).
+	m = m.endRun("")
+
+	oldID := m.sessionID
 	m.models.active = sel
-	m.activeModel = sel // header display reads from this once set (see renderHeader)
-	m.statusMsg = m.deps.Theme.Style("success").Render(
-		"model set: " + sanitizeTerminal(modelLabel(chosen)) + " — applies to the next session")
-	return m, m.saveSelectionCmd(sel)
+	m.activeModel = sel
+	m.pickedThisSession = sel
+	// Suppress the first-run welcome splash for the rest of the run (resetSession
+	// empties the conversation; without this the restart's empty-idle frame re-fires
+	// the first-run splash on every model switch).
+	m.restartedThisRun = true
+
+	// Reset the conversation/transcript + all stream-accumulated session state via the
+	// single resetSession seam (changed-files, usage, context size, queue, selection…).
+	m = m.resetSession()
+
+	// Rebind the rest of the per-session client state to "no session yet": the new
+	// values arrive on the NEW session's SessionReadyMsg.
+	m.sessionID = ""
+	m.effectiveModel = client.ResolvedModel{}
+	m.caps = client.Capabilities{}
+	m.restartFailed = false // a fresh attempt; clear any prior failure flag
+	m.phase = phaseConnecting
+	m.statusMsg = "switching model — reconnecting…"
+
+	mm, cmd := m.closeModels() // dismiss the overlay, return focus to the prompt
+	m = mm.(Model)
+	m.refreshView()
+	return m, tea.Batch(cmd, m.restartOnModelCmd(oldID, sel), m.saveSelectionCmd(sel)), true
+}
+
+// restartOnModelCmd closes the OLD session (best-effort) then creates a NEW session
+// carrying the picked selector, off the update goroutine. On SUCCESS it returns the
+// same SessionReadyMsg the connect path uses, so the reducer rebinds the session id,
+// caps, and effectiveModel uniformly (no second code path). On FAILURE it returns a
+// DISTINCT restartFailedMsg (NOT client.ConnectErrMsg): a ConnectErrMsg would drive
+// the TERMINAL fatal screen, which is right for "never connected" but WRONG here — we
+// just destroyed a working session at the user's request, so a transient blip (server
+// hiccup, revoked key, rate limit) must stay RECOVERABLE. restartFailedMsg's reducer
+// keeps the app usable (idle, retryable). A CloseSession failure is swallowed —
+// orphaning a server-side session is preferable to blocking the re-create.
+func (m Model) restartOnModelCmd(oldID string, sel client.ModelSelection) tea.Cmd {
+	deps := m.deps
+	return func() tea.Msg {
+		if oldID != "" {
+			_ = deps.Session.CloseSession(deps.Ctx, oldID)
+		}
+		id, caps, resolved, err := deps.Session.CreateSession(deps.Ctx, sel)
+		if err != nil {
+			return restartFailedMsg{err: err, model: modelSelLabel(sel)}
+		}
+		return client.SessionReadyMsg{SessionID: id, Capabilities: caps, ResolvedModel: resolved}
+	}
+}
+
+// restartFailedMsg reports that a /models restart-now re-create FAILED. Distinct
+// from client.ConnectErrMsg (which is terminal): its reducer (updateLifecycle) leaves
+// the app RECOVERABLE — idle with no session, a loud error status naming the failed
+// model, and enter-to-retry armed. model is the human label of the model that failed
+// (for the status); err is the create error.
+type restartFailedMsg struct {
+	err   error
+	model string
+}
+
+// modelSelLabel is the human label for a selection used in the restart-failure
+// status — the model id (the part the user picked), falling back to the provider id.
+func modelSelLabel(sel client.ModelSelection) string {
+	if sel.ModelID != "" {
+		return sel.ModelID
+	}
+	return sel.ProviderID
+}
+
+// liveModelLabel is the human label for the model the LIVE (current) session is
+// running on — the effective model the server resolved, name-resolved from the
+// inventory, falling back to the raw id, then to "the current model" when nothing is
+// known yet. Used in the switch-next notice so it names both models honestly.
+func (m Model) liveModelLabel() string {
+	rm := m.effectiveModel
+	if rm.ModelID == "" {
+		return "the current model"
+	}
+	for _, mi := range m.models.models {
+		if mi.ProviderID == rm.ProviderID && mi.ID == rm.ModelID && mi.DisplayName != "" {
+			return mi.DisplayName
+		}
+	}
+	return rm.ModelID
 }
 
 // saveSelectionCmd persists the selection via the injected SelectionStore off the
@@ -242,6 +405,36 @@ func (m Model) saveSelectionCmd(sel client.ModelSelection) tea.Cmd {
 
 // selectionSavedMsg is the result of a SelectionStore.Save (nil err on success).
 type selectionSavedMsg struct{ err error }
+
+// setGlobalDefault sets the picker CURSOR row as the client global default: it
+// updates the in-memory ★ marker, shows a confirm toast, and fires the persist Cmd
+// (SaveGlobalDefault, off the update goroutine). It does NOT change the active
+// selection (the ● marker) or the live/next session — the global default only steers
+// NEW/unseen workspaces. A cursor past the list end is a no-op (defensive).
+func (m Model) setGlobalDefault() (tea.Model, tea.Cmd) {
+	if m.models.cursor < 0 || m.models.cursor >= len(m.models.filtered) {
+		return m, nil
+	}
+	chosen := m.models.filtered[m.models.cursor]
+	sel := client.ModelSelection{ProviderID: chosen.ProviderID, ModelID: chosen.ID}
+	m.models.globalDefault = sel // the ★ marker tracks it immediately
+	m.statusMsg = m.deps.Theme.Style("success").Render(
+		"global default set: " + sanitizeTerminal(modelLabel(chosen)) + " (used by new workspaces)")
+	return m, m.saveGlobalDefaultCmd(sel)
+}
+
+// saveGlobalDefaultCmd persists the global default via the injected SelectionStore
+// off the update goroutine. Fail-soft like saveSelectionCmd: a nil store or a write
+// failure surfaces as a muted notice (selectionSavedMsg), never a crash.
+func (m Model) saveGlobalDefaultCmd(sel client.ModelSelection) tea.Cmd {
+	store := m.deps.SelectionStore
+	return func() tea.Msg {
+		if store == nil {
+			return selectionSavedMsg{}
+		}
+		return selectionSavedMsg{err: store.SaveGlobalDefault(sel)}
+	}
+}
 
 // updateModelsMsg reduces the client.ModelsMsg into the picker AND performs the
 // key-removed reconcile (§4): when the loaded list does NOT contain the active
@@ -315,18 +508,86 @@ func (m Model) reconcileSelection() Model {
 	}
 	m.models.active = client.ModelSelection{}
 	m.activeModel = client.ModelSelection{}
-	m.statusMsg = m.deps.Theme.Style("warning").Render(
-		"saved model " + sanitizeTerminal(gone) + " is no longer available (provider key removed?) — using the server default")
+	notice := "saved model " + sanitizeTerminal(gone) +
+		" is no longer available (provider key removed?) — using the server default"
+	// Name the model the session actually fell back to, when known. The effective
+	// model lands on SessionReadyMsg; at connect-time reconcile it is usually not yet
+	// populated (reconcile precedes the create), so this only appends post-connect
+	// (e.g. a reconcile triggered by reopening the picker). Append only when populated
+	// so the notice never reads "now running " with an empty model.
+	if id := m.effectiveModel.ModelID; id != "" {
+		notice += " — now running " + sanitizeTerminal(id)
+	}
+	m.statusMsg = m.deps.Theme.Style("warning").Render(notice)
 	return m
 }
 
-// renderModelsOverlay draws the picker centred over the conversation region via
-// centerCard. All server-derived strings are terminal-sanitized.
-func renderModelsOverlay(th theme.Theme, st modelsState, caps client.Capabilities, width, height int) string {
-	if st.view != modelsPanel {
+// renderModelsOverlay draws the picker (or its post-Enter confirmation overlay)
+// centred over the conversation region via centerCard. prov is the precomputed
+// provenance line (modelProvenanceLine). All server-derived strings are
+// terminal-sanitized.
+func renderModelsOverlay(th theme.Theme, st modelsState, caps client.Capabilities, prov string, width, height int) string {
+	switch st.view {
+	case modelsConfirm:
+		return centerCard(th, renderModelsConfirm(th, st.confirm), width, height)
+	case modelsPanel:
+		return centerCard(th, renderModelsPanel(th, st, caps, prov, modelsRowBudgetFor(height)), width, height)
+	default:
 		return ""
 	}
-	return centerCard(th, renderModelsPanel(th, st, caps, modelsRowBudgetFor(height)), width, height)
+}
+
+// renderModelsConfirm draws the post-Enter confirmation card: the picked model and
+// the three keyed choices (restart now / switch next time / undo). It mirrors the
+// permission modal's title + keyed-button treatment (askTitle/askButton) so it reads
+// as the same kind of modal. The model label is terminal-sanitized.
+func renderModelsConfirm(th theme.Theme, c modelsConfirmState) string {
+	var b strings.Builder
+	b.WriteString(th.Style("askTitle").Render("Switch model") + "\n\n")
+	b.WriteString(th.Style("toolName").Render(sanitizeTerminal(modelLabel(c.candidate))) + "\n")
+	b.WriteString(th.Style("muted").Render(sanitizeTerminal(c.candidate.ProviderID)) + "\n\n")
+	b.WriteString(th.Style("askButton").Render("[enter]") + " start a new session now on this model\n")
+	b.WriteString(th.Style("askButton").Render("[s]") + "     keep this session; switch next time\n")
+	b.WriteString(th.Style("askButton").Render("[esc]") + "   cancel")
+	return b.String()
+}
+
+// modelProvenanceLine is the "current: <model> (<provenance>)" line for the picker
+// header — a best-effort DISPLAY hint derived ENTIRELY from client-held state (no
+// server round-trip, no resolution logic; the server owns the truth). It returns ""
+// when no current model is known yet (still connecting). Provenance is decided in
+// precedence order against the effective model the server resolved THIS session to:
+//
+//   - picked this session — the user explicitly chose it via a restart-now confirm.
+//   - --model flag — it equals the launch-time --model (and that flag was set).
+//   - workspace default — it equals the per-workspace state-file entry loaded at launch.
+//   - global default — it equals the global default block.
+//   - server default — none of the above matched (the server's own default).
+func (m Model) modelProvenanceLine() string {
+	eff := client.ModelSelection{ProviderID: m.effectiveModel.ProviderID, ModelID: m.effectiveModel.ModelID}
+	if eff.ModelID == "" {
+		return ""
+	}
+	label := m.liveModelLabel()
+	return "current: " + sanitizeTerminal(label) + " (" + m.modelProvenance(eff) + ")"
+}
+
+// modelProvenance returns the best-effort provenance word for the effective
+// selection eff (see modelProvenanceLine for the precedence). Split out so it is
+// unit-testable without rendering.
+func (m Model) modelProvenance(eff client.ModelSelection) string {
+	switch {
+	case !m.pickedThisSession.IsZero() && m.pickedThisSession == eff:
+		return "picked this session"
+	case m.deps.Model != "" && m.deps.Model == eff.ModelID:
+		return "--model flag"
+	case m.deps.WorkspaceDefaultSet && m.deps.WorkspaceDefault == eff:
+		return "workspace default"
+	case !m.deps.GlobalDefault.IsZero() && m.deps.GlobalDefault == eff:
+		return "global default"
+	default:
+		return "server default"
+	}
 }
 
 // modelsRowBudgetFor converts an available card height into the number of model
@@ -372,7 +633,7 @@ func modelsEmptyCopy(caps client.Capabilities) string {
 // (so it is still visible AND a filter target). EVERY server-derived string is
 // terminal-sanitized. rowBudget clips the list to the card height (the overflow
 // fix — centerCard centres but does not clip).
-func renderModelsPanel(th theme.Theme, st modelsState, caps client.Capabilities, rowBudget int) string {
+func renderModelsPanel(th theme.Theme, st modelsState, caps client.Capabilities, prov string, rowBudget int) string {
 	var b strings.Builder
 
 	// The title carries a scroll-position indicator in the default (row-list) case so
@@ -385,6 +646,15 @@ func renderModelsPanel(th theme.Theme, st modelsState, caps client.Capabilities,
 		title += "  " + modelsPositionLabel(start, end, len(st.filtered))
 	}
 	b.WriteString(th.Style("askTitle").Render(title) + "\n")
+	// Provenance line: the CURRENT (live) model + a best-effort label for where it
+	// came from (server default / --model flag / picked this session / workspace
+	// default / global default). Derived entirely from client-held state — a hint, not
+	// authority. Omitted when nothing is known yet (still connecting). prov is passed
+	// in by renderModelsPanel's caller (it needs Model-level state the modelsState
+	// alone doesn't carry).
+	if prov != "" {
+		b.WriteString(th.Style("muted").Render(prov) + "\n")
+	}
 	b.WriteString(st.filter.View() + "\n\n")
 
 	switch {
@@ -405,12 +675,13 @@ func renderModelsPanel(th theme.Theme, st modelsState, caps client.Capabilities,
 		start, end := scrollWindow(st.cursor, len(st.filtered), rowBudget)
 		for i := start; i < end; i++ {
 			mi := st.filtered[i]
-			b.WriteString(renderRow(th, modelRowText(st.active, mi), i == st.cursor) + "\n")
+			b.WriteString(renderRow(th, modelRowText(st.active, st.globalDefault, mi), i == st.cursor) + "\n")
 		}
 	}
 
 	b.WriteString("\n" + th.Style("muted").Render(
-		"type to filter · ↑/↓/pgup move · enter use · esc clear filter / close · ● = current"))
+		"type to filter · ↑/↓/pgup move · enter use · ctrl+g set global default · esc clear filter / close"))
+	b.WriteString("\n" + th.Style("muted").Render("● current  ★ global default"))
 	return b.String()
 }
 
@@ -427,15 +698,22 @@ func modelsPositionLabel(start, end, total int) string {
 	return "(" + strconv.Itoa(start+1) + "–" + strconv.Itoa(end) + " of " + strconv.Itoa(total) + ")"
 }
 
-// modelRowText builds one model row's content: the active marker, the
-// provider_id segment, the label, and the capability + context-window segments.
-// The active marker is a fixed-width "● "/"  " prefix so a stripANSI'd row is
-// layout-stable for goldens regardless of which row is active.
-func modelRowText(active client.ModelSelection, mi client.ModelInfo) string {
-	marker := "  "
+// modelRowText builds one model row's content: a fixed-width 2-marker prefix, the
+// provider_id segment, the label, and the capability + context-window segments. The
+// marker column is two FIXED cells so a stripANSI'd row is layout-stable for goldens
+// regardless of which markers a row carries: cell 1 is "●" on the ACTIVE/pending
+// selection (else " "), cell 2 is "★" on the GLOBAL-DEFAULT row (else " "). A row
+// that is both pending AND the global default shows "●★".
+func modelRowText(active, globalDefault client.ModelSelection, mi client.ModelInfo) string {
+	activeMark := " "
 	if active.Matches(mi) {
-		marker = "● "
+		activeMark = "●"
 	}
+	defMark := " "
+	if !globalDefault.IsZero() && globalDefault.Matches(mi) {
+		defMark = "★"
+	}
+	marker := activeMark + defMark + " "
 	segs := modelCapSegments(mi)
 	line := marker + sanitizeTerminal(mi.ProviderID) + " · " + sanitizeTerminal(modelLabel(mi))
 	if len(segs) > 0 {

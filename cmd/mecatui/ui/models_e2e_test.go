@@ -140,11 +140,13 @@ func TestModelsE2EFilterAndSelect(t *testing.T) {
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	// Type a filter that uniquely narrows to the openrouter/claude row, then select.
+	// Type a filter that uniquely narrows to the openrouter/claude row, press enter to
+	// open the confirm overlay, then 's' (switch next time) to set pendingNext.
 	for _, r := range "claude" {
 		tm.Send(tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: 's', Text: "s"})
 
 	// Graceful double-ctrl+c quit.
 	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})

@@ -1,0 +1,30 @@
+ mecatui  ·  session sess-test-00  ·  GPT-5  ·  mode default  ·  127.0.0.1:8080
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+                     ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+                     ┃                                                       ┃
+                     ┃  Switch model                                         ┃
+                     ┃                                                       ┃
+                     ┃  Claude                                               ┃
+                     ┃  openrouter                                           ┃
+                     ┃                                                       ┃
+                     ┃  ╭───────────╮                                        ┃
+                     ┃  │  [enter]  │                                        ┃
+                     ┃  ╰───────────╯ start a new session now on this model  ┃
+                     ┃  ╭───────╮                                            ┃
+                     ┃  │  [s]  │                                            ┃
+                     ┃  ╰───────╯     keep this session; switch next time    ┃
+                     ┃  ╭─────────╮                                          ┃
+                     ┃  │  [esc]  │                                          ┃
+                     ┃  ╰─────────╯   cancel                                 ┃
+                     ┃                                                       ┃
+                     ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+
+┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
+┃
+┃
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ connected                                                                   ctx 0 · ↑0 ↓0 cache 0%
+? help · / commands · ctrl+c quit

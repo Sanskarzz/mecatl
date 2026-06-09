@@ -96,6 +96,85 @@ func TestSelectionStoreRealpathKeying(t *testing.T) {
 	}
 }
 
+// TestSelectionStoreSaveGlobalDefault covers the global-default writer: it
+// round-trips, is read by LoadGlobalDefault, and PRESERVES the per-workspace map +
+// version (read-modify-write touching only the default block).
+func TestSelectionStoreSaveGlobalDefault(t *testing.T) {
+	stateHome := t.TempDir()
+	ws := t.TempDir()
+	store := newSelectionStore(fakeStateEnv(stateHome))
+
+	// Seed a per-workspace entry first, so the global save must preserve it.
+	wsSel := client.ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"}
+	if err := store.Save(ws, wsSel); err != nil {
+		t.Fatalf("Save(ws): %v", err)
+	}
+	def := client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5"}
+	if err := store.SaveGlobalDefault(def); err != nil {
+		t.Fatalf("SaveGlobalDefault: %v", err)
+	}
+
+	// A fresh store (relaunch) reads the global default back AND still has the
+	// per-workspace entry — the global write did not clobber it.
+	store2 := newSelectionStore(fakeStateEnv(stateHome))
+	if got := store2.LoadGlobalDefault(); got != def {
+		t.Fatalf("LoadGlobalDefault = %+v, want %+v", got, def)
+	}
+	if got, ok := store2.LoadWorkspace(ws); !ok || got != wsSel {
+		t.Fatalf("LoadWorkspace(ws) = %+v ok=%v, want %+v (global save must preserve workspaces)", got, ok, wsSel)
+	}
+
+	// Updating the global default again leaves the per-workspace entry intact.
+	def2 := client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5-mini"}
+	if err := store2.SaveGlobalDefault(def2); err != nil {
+		t.Fatalf("SaveGlobalDefault(2): %v", err)
+	}
+	store3 := newSelectionStore(fakeStateEnv(stateHome))
+	if got := store3.LoadGlobalDefault(); got != def2 {
+		t.Fatalf("LoadGlobalDefault(2) = %+v, want %+v", got, def2)
+	}
+	if got, ok := store3.LoadWorkspace(ws); !ok || got != wsSel {
+		t.Fatalf("LoadWorkspace(ws) after global update = %+v ok=%v, want %+v", got, ok, wsSel)
+	}
+}
+
+// TestSelectionStoreLoadPrefersWorkspaceOverDefault asserts Load() precedence: a
+// workspace WITH a per-workspace entry resolves to THAT entry (not the global
+// default), while an unseen workspace falls back to the global default. LoadWorkspace
+// reports the distinction (ok=false for the unseen one) the picker provenance needs.
+func TestSelectionStoreLoadPrefersWorkspaceOverDefault(t *testing.T) {
+	stateHome := t.TempDir()
+	wsWith := t.TempDir()
+	wsWithout := t.TempDir()
+	store := newSelectionStore(fakeStateEnv(stateHome))
+
+	def := client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5"}
+	if err := store.SaveGlobalDefault(def); err != nil {
+		t.Fatalf("SaveGlobalDefault: %v", err)
+	}
+	wsSel := client.ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"}
+	if err := store.Save(wsWith, wsSel); err != nil {
+		t.Fatalf("Save(wsWith): %v", err)
+	}
+
+	store2 := newSelectionStore(fakeStateEnv(stateHome))
+	// The workspace WITH an entry resolves to its entry, NOT the global default.
+	if got := store2.Load(wsWith); got != wsSel {
+		t.Fatalf("Load(wsWith) = %+v, want the workspace entry %+v (workspace wins over default)", got, wsSel)
+	}
+	if got, ok := store2.LoadWorkspace(wsWith); !ok || got != wsSel {
+		t.Fatalf("LoadWorkspace(wsWith) = %+v ok=%v, want %+v / true", got, ok, wsSel)
+	}
+	// The unseen workspace falls back to the global default; LoadWorkspace says "no
+	// per-workspace entry" (ok=false) so provenance can distinguish the two cases.
+	if got := store2.Load(wsWithout); got != def {
+		t.Fatalf("Load(wsWithout) = %+v, want the global default %+v", got, def)
+	}
+	if _, ok := store2.LoadWorkspace(wsWithout); ok {
+		t.Fatalf("LoadWorkspace(wsWithout) ok=true, want false (no per-workspace entry)")
+	}
+}
+
 // TestSelectionStoreFailSoftRead covers the fail-soft read paths: a missing file
 // and a malformed file both yield the zero selection, never a crash.
 func TestSelectionStoreFailSoftRead(t *testing.T) {

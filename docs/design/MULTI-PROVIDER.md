@@ -463,13 +463,27 @@ across `ListModels` and the `CreateSessionResponse` (incl. the capability echo).
   per-session live-capability closer; Chat-Completions adapter.
 - **P3:** secrets store + OAuth + per-client/profile key custody + tenant isolation.
 
-Model-selection persistence is **per-workspace only** (realpath-keyed); a pick never
-writes the global `default`, so an unseen repo falls back to the server default rather
-than inheriting the last pick made elsewhere. An explicit "set as default" affordance
-(the only writer of the global `default`) is a deferred follow-up.
+Model-selection persistence (mecatui client state, `models.yaml`) is a per-workspace
+map (realpath-keyed) **plus** a global `default:` block. A normal pick writes only the
+per-workspace entry; the global `default` is written ONLY by the explicit **`ctrl+g`
+"set as global default"** affordance in the `/models` picker (`SaveGlobalDefault`,
+read-modify-write preserving the workspaces map). **Effective-model precedence**
+(highest → lowest), as the client resolves what the next `CreateSession` requests and
+labels the picker's `current: …(<provenance>)` line: **in-session restart pick →
+`--model` flag → per-workspace default → client global default → server built-in
+default.** An unseen repo with no per-workspace entry falls back to the global default
+(then the server default), never inheriting another repo's per-workspace pick.
 
-Open / deferred items: an explicit "set as default" gesture, a `small_model` tier
-(sub-agent cheap model), mid-session same-family model switch, and a zero-keys
+**Mid-session model switch — shipped (client-side restart):** the `/models` picker's
+`enter` confirm offers "start a new session now" (a `CloseSession` of the old session
++ a fresh `CreateSession` on the picked model, with a clean transcript) or "switch
+next time" (the pending-next selection applied on the next create). Provider stays
+FIXED per session (the switch is a NEW session, never a live re-route); there is no
+history carryover (the server has no history-seed surface). The header `next:` badge
+previews a pending-next that differs from the live model.
+
+Open / deferred items: a `small_model` tier (sub-agent cheap model), a server-side
+history-seed surface (to carry context across a restart-now switch), and a zero-keys
 first-run UX.
 
 ## 10. Per-sub-agent provider selection (SHIPPED — both halves)

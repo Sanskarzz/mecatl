@@ -342,3 +342,5 @@ type errSession struct{}
 func (errSession) CreateSession(_ context.Context, _ client.ModelSelection) (string, client.Capabilities, client.ResolvedModel, error) {
 	return "", client.Capabilities{}, client.ResolvedModel{}, context.DeadlineExceeded
 }
+
+func (errSession) CloseSession(_ context.Context, _ string) error { return nil }

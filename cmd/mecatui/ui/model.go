@@ -29,15 +29,23 @@ import (
 // segment).
 type SessionCreator interface {
 	CreateSession(ctx context.Context, sel client.ModelSelection) (string, client.Capabilities, client.ResolvedModel, error)
+	// CloseSession ends a server-side session by id. The /models restart-now handoff
+	// closes the OLD session before creating the new one so a model switch leaves no
+	// orphaned server-side session. Best-effort: the caller proceeds with the new
+	// create even if the close errors.
+	CloseSession(ctx context.Context, id string) error
 }
 
 // SelectionStore persists + loads the client-side model selection (last-used). It
 // is satisfied by a main-owned concrete type backed by an XDG state file; nil
 // cleanly disables persistence (the active selection then lives only for the run).
 // The ui touches no os/xdg itself — persistence is composition-side, like
-// SessionCreator. Save is given the workspace so the store can key per-workspace.
+// SessionCreator. Save is given the workspace so the store can key per-workspace;
+// SaveGlobalDefault writes the workspace-agnostic global `default:` block (the
+// model new/unseen workspaces inherit) — the picker's ctrl+g affordance.
 type SelectionStore interface {
 	Save(workspace string, sel client.ModelSelection) error
+	SaveGlobalDefault(sel client.ModelSelection) error
 }
 
 // Converser opens one Converse run as a *client.Stream. *client.Client satisfies
@@ -68,6 +76,16 @@ type Deps struct {
 	// marker) and the startup CreateSession carries it — AFTER the connect-time
 	// ListModels reconcile clears it if its provider is no longer available.
 	InitialModel client.ModelSelection
+	// WorkspaceDefault / GlobalDefault are the SEPARATE raw state-file values loaded at
+	// launch (composition-side): the per-workspace entry (zero when none — see
+	// WorkspaceDefaultSet) and the global `default:` block. They are display-only
+	// provenance inputs for the /models picker's "current: <model> (<provenance>)"
+	// line and the ★ global-default row marker — the ui derives a best-effort label
+	// from client-held state, never a server round-trip. (InitialModel is the RESOLVED
+	// Load result = workspace-or-global; these are the un-collapsed pieces.)
+	WorkspaceDefault    client.ModelSelection
+	WorkspaceDefaultSet bool
+	GlobalDefault       client.ModelSelection
 	// Clipboard reads the OS clipboard for ctrl+v paste (image-first, text-fallback).
 	// nil cleanly disables ctrl+v image paste (same convention as nil MCP/Cmds);
 	// main.go populates it with client.NewClipboard().
@@ -246,9 +264,15 @@ type Model struct {
 	// default itself. Zero value (empty ids) until SessionReadyMsg and for an older
 	// server → the header shows no model segment. The model is FIXED per session.
 	effectiveModel client.ResolvedModel
-	showHelp       bool           // the "?" keys-&-features overlay is open (caps-driven; see help.go)
-	stream         *client.Stream // current run's stream
-	cancelRun      context.CancelFunc
+	// pickedThisSession is the (provider, model) the user EXPLICITLY chose via the
+	// /models picker's restart-now confirm during THIS process — set when a restart-now
+	// handoff rebinds the session to a picked model. It is the provenance signal that
+	// lets the picker label the current model "picked this session" (vs a launch-time
+	// workspace/global default). Zero until a restart-now pick. Display-only.
+	pickedThisSession client.ModelSelection
+	showHelp          bool           // the "?" keys-&-features overlay is open (caps-driven; see help.go)
+	stream            *client.Stream // current run's stream
+	cancelRun         context.CancelFunc
 
 	// quitArmed is true after a first ctrl+c on an empty prompt: a second ctrl+c
 	// within quitArmWindow then quits (Claude Code's "press again to exit"
@@ -307,6 +331,23 @@ type Model struct {
 	// cols×rows placement footprint (rows = cols/2), so it is the whole tier key: a
 	// resize that keeps the same cols needs no re-transmit, a tier-crossing resize does.
 	kittyTier int
+
+	// restartedThisRun is set once a /models restart-now handoff has rebound the app
+	// to a NEW session. It SUPPRESSES the first-run welcome splash (+ the Kitty mascot
+	// transmit) for the rest of the process: the splash is a genuine first-run
+	// affordance, and resetSession empties the conversation, so without this guard the
+	// restart's empty-conversation idle frame would re-show the splash on every model
+	// switch. The genuine first session AND /clear keep the splash unchanged (only a
+	// restart sets this); it is never cleared (a restart is one-way for the run).
+	restartedThisRun bool
+
+	// restartFailed is true while a /models restart-now handoff's re-create FAILED and
+	// the app is in the RECOVERABLE no-session state (phaseIdle, sessionID==""). It is
+	// NOT phaseFatal: a transient blip on a deliberate model switch must leave a usable
+	// app. While set, enter on an empty prompt RETRIES createSessionCmd (the selection
+	// still lives in m.activeModel). Cleared the moment a session is (re)established
+	// (SessionReadyMsg) or a retry is fired.
+	restartFailed bool
 
 	// usage accumulates across the session for the footer.
 	usage client.Usage
@@ -424,7 +465,7 @@ func New(deps Deps) Model {
 		// server default if its provider is no longer available, BEFORE the create that
 		// carries it (so a removed key never hard-fails the connect with InvalidArgument).
 		activeModel: deps.InitialModel,
-		models:      modelsState{active: deps.InitialModel},
+		models:      modelsState{active: deps.InitialModel, globalDefault: deps.GlobalDefault},
 	}
 }
 
@@ -479,6 +520,12 @@ func (m Model) resetSession() Model {
 	m.contextTokens = 0
 	m.activeTool = ""
 	m.toolProgress = ""
+	// Drop any pending permission modal: an ask is session-derived in-flight state
+	// (its AskID correlates to a run on the OLD session), so a reset must not leave a
+	// stale modal dangling. Latent today (the picker/clear paths are idle-only, so no
+	// ask is open), but keeps this seam's "owns all session-derived state" invariant
+	// honest — and the restart-now handoff goes through here.
+	m.ask = pendingAsk{}
 	m.queued = nil
 	m.queuePaused = ""
 	// Drop staged-but-unsent media attachments: /clear wipes the session-derived

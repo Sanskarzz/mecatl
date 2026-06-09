@@ -148,6 +148,65 @@ func (s *selectionStore) Save(workspace string, sel client.ModelSelection) error
 	return writeStateFile(s.path, out)
 }
 
+// LoadWorkspace returns ONLY the per-workspace (realpath-keyed) entry for
+// workspace, with ok=false when there is no such entry (so the caller can tell a
+// workspace-set selection apart from a global-default one — the /models picker
+// provenance line needs that distinction). Fail-soft like Load.
+func (s *selectionStore) LoadWorkspace(workspace string) (client.ModelSelection, bool) {
+	if s == nil || s.path == "" {
+		return client.ModelSelection{}, false
+	}
+	sf, ok := s.read()
+	if !ok {
+		return client.ModelSelection{}, false
+	}
+	key, err := realpathState(workspace)
+	if err != nil {
+		return client.ModelSelection{}, false
+	}
+	e, found := sf.Workspaces[key]
+	if !found {
+		return client.ModelSelection{}, false
+	}
+	return client.ModelSelection{ProviderID: e.ProviderID, ModelID: e.ModelID}, true
+}
+
+// LoadGlobalDefault returns the global `default:` block (the zero selection when
+// none is set). Fail-soft like Load. The /models picker reads it to mark the ★
+// global-default row and to derive the "global default" provenance label.
+func (s *selectionStore) LoadGlobalDefault() client.ModelSelection {
+	if s == nil || s.path == "" {
+		return client.ModelSelection{}
+	}
+	sf, ok := s.read()
+	if !ok {
+		return client.ModelSelection{}
+	}
+	return client.ModelSelection{ProviderID: sf.Default.ProviderID, ModelID: sf.Default.ModelID}
+}
+
+// SaveGlobalDefault persists sel as the global `default:` block (the model used by
+// a NEW/unseen workspace that has no per-workspace entry). It is the explicit "set
+// as global default" writer the package header anticipated — the ONLY writer of
+// Default — and is invoked by the picker's ctrl+g. It is read-modify-write: it
+// preserves the existing per-workspace map and the schema version, touching only the
+// default block. The write is atomic (same temp+rename / O_NOFOLLOW discipline as
+// Save). A nil store / unresolved state path returns an error the ui surfaces
+// fail-soft.
+func (s *selectionStore) SaveGlobalDefault(sel client.ModelSelection) error {
+	if s == nil || s.path == "" {
+		return errors.New("mecatui: no XDG state dir to persist the global default model")
+	}
+	sf, _ := s.read() // a corrupt/absent file ⇒ start fresh (never block a write)
+	sf.Version = stateVersion
+	sf.Default = modelSelectionEntry{ProviderID: sel.ProviderID, ModelID: sel.ModelID}
+	out, err := yaml.Marshal(sf)
+	if err != nil {
+		return err
+	}
+	return writeStateFile(s.path, out)
+}
+
 // read loads + parses the state file. ok is false (and the file is ignored
 // fail-soft) on any read/parse failure or an unknown schema version. The open is
 // O_NOFOLLOW (symmetric with the WRITE path's symlink guard, CWE-59): a symlinked

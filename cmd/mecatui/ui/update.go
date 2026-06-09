@@ -284,6 +284,7 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		// verbatim). The header shows it from turn zero. The model is FIXED per session,
 		// so this is set once here. An older server yields the zero value → no segment.
 		m.effectiveModel = msg.ResolvedModel
+		m.restartFailed = false // a session is (re)established; any prior failure clears
 		m.phase = phaseIdle
 		m.statusMsg = "connected"
 		// Now that we are idle + (still) empty, the welcome splash shows: transmit the
@@ -294,6 +295,21 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	case client.ConnectErrMsg:
 		m.phase = phaseFatal
 		m.fatalErr = msg.Err.Error()
+		return m, nil, true
+	case restartFailedMsg:
+		// A /models restart-now re-create failed. Unlike ConnectErrMsg this is NOT
+		// terminal: we deliberately destroyed a working session, so leave the app
+		// RECOVERABLE (idle, no session) with a loud status naming the failed model and
+		// enter-to-retry armed (the selection still lives in m.activeModel). The
+		// transcript is gone, but the app stays usable.
+		m.phase = phaseIdle
+		m.sessionID = ""
+		m.restartFailed = true
+		m.statusMsg = m.deps.Theme.Style("errorText").Render(
+			"could not switch to " + sanitizeTerminal(msg.model) + ": " +
+				sanitizeTerminal(msg.err.Error()) + " — press enter to retry")
+		_ = m.ta.Focus()
+		m.refreshView()
 		return m, nil, true
 	case client.StreamErrMsg:
 		// An error PAUSES the queue (shouldDrain(stopError) is false): the staged
@@ -610,8 +626,11 @@ func (m *Model) maybeKittyTransmit() tea.Cmd {
 	if m.deps.NoBanner || m.width <= 0 || m.height <= 0 {
 		return nil
 	}
-	// Only when the zero-state splash is what's on screen (idle + empty conversation).
-	if m.phase != phaseIdle || !m.conv.isEmpty() {
+	// Only when the zero-state splash is what's on screen (idle + empty conversation),
+	// and never after a restart-now handoff (the splash is suppressed then — see the
+	// view.go body switch — so transmitting the mascot would orphan a placeholder grid
+	// that never renders).
+	if m.phase != phaseIdle || !m.conv.isEmpty() || m.restartedThisRun {
 		return nil
 	}
 	if !welcome.KittyCapable() {
@@ -1095,13 +1114,7 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.ta.InsertRune('\n')
 		return m.afterInputEdit(nil)
 	case key.Matches(msg, m.keys.Submit):
-		// While paused, enter on an EMPTY line RESUMES: fire the next staged prompt
-		// manually. A non-empty line falls through to a normal submit (which also
-		// clears the pause and lets the queue drain at the new run's clean end).
-		if m.queuePaused != "" && len(m.queued) > 0 && strings.TrimSpace(m.ta.Value()) == "" {
-			return m.resumeQueue()
-		}
-		return m.submitPrompt()
+		return m.onIdleSubmit()
 	case key.Matches(msg, m.keys.ScrollU), key.Matches(msg, m.keys.ScrollD),
 		key.Matches(msg, m.keys.ScrollTop), key.Matches(msg, m.keys.ScrollBottom):
 		return m.onScrollKey(msg)
@@ -1110,6 +1123,34 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.ta, cmd = m.ta.Update(msg)
 		return m.afterInputEdit(cmd)
 	}
+}
+
+// onIdleSubmit handles enter at idle, in priority order (extracted from onIdleKey to
+// keep its cyclomatic complexity under the cap):
+//   - RETRY a failed restart-now re-create: in the recoverable state (restartFailed +
+//     no session) enter on an EMPTY line re-fires the RECOVERABLE create path
+//     (restartOnModelCmd with an empty oldID — no CloseSession) carrying the pending
+//     selection (m.activeModel). Routing through restartOnModelCmd (NOT the generic
+//     createSessionCmd) is what keeps a re-FAILED retry recoverable: a re-failure
+//     emits restartFailedMsg again (looping back to this same recoverable state),
+//     never client.ConnectErrMsg → phaseFatal. restartFailed is NOT cleared eagerly —
+//     the resolving msg owns its lifecycle (SessionReadyMsg clears it on success;
+//     restartFailedMsg re-sets it on a re-failure). The in-flight phaseConnecting
+//     window swallows idle keys, so the un-cleared flag can't misfire meanwhile.
+//   - RESUME a paused queue: enter on an EMPTY line fires the next staged prompt.
+//   - otherwise a normal submitPrompt (a no-op on an empty sessionID).
+func (m Model) onIdleSubmit() (tea.Model, tea.Cmd) {
+	empty := strings.TrimSpace(m.ta.Value()) == ""
+	if m.restartFailed && m.sessionID == "" && empty {
+		m.phase = phaseConnecting
+		m.statusMsg = "retrying — reconnecting…"
+		m.refreshView()
+		return m, m.restartOnModelCmd("", m.activeModel)
+	}
+	if m.queuePaused != "" && len(m.queued) > 0 && empty {
+		return m.resumeQueue()
+	}
+	return m.submitPrompt()
 }
 
 // onPaletteKey handles keys while the slash-command palette is open. It returns

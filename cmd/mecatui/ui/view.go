@@ -74,10 +74,14 @@ func (m Model) View() tea.View {
 	case m.userModel.view != userModelNone:
 		body = renderUserModelOverlay(m.deps.Theme, m.userModel, m.caps, m.width, m.vp.Height())
 	case m.models.view != modelsNone:
-		body = renderModelsOverlay(m.deps.Theme, m.models, m.caps, m.width, m.vp.Height())
-	case m.phase == phaseIdle && m.conv.isEmpty():
+		body = renderModelsOverlay(m.deps.Theme, m.models, m.caps, m.modelProvenanceLine(), m.width, m.vp.Height())
+	case m.phase == phaseIdle && m.conv.isEmpty() && !m.restartedThisRun:
 		// First-run zero-state: a welcome card in the empty viewport. Not an overlay
 		// (claims no keyboard); typing flows over it and it vanishes on the first block.
+		// Suppressed after a /models restart-now handoff (restartedThisRun): the splash
+		// is a first-run affordance, not a per-model-switch one — a restart's empty
+		// conversation must NOT re-fire it. (A genuine first session and /clear are
+		// unchanged.)
 		body = m.renderZeroState()
 	default:
 		body = m.vp.View()
@@ -100,25 +104,17 @@ func (m Model) renderHeader() string {
 	if sid == "" {
 		sid = "connecting…"
 	}
-	parts := []string{
-		"mecatui",
-		"session " + short(sid),
+	// next: badge — the pendingNext (apply-on-next-create) selection, shown ONLY when
+	// it is set AND differs from the effective model this session runs on (same model
+	// ⇒ nothing to preview). It is the FIRST segment shed under width pressure: the
+	// line is assembled WITH it, and dropped to the without-it form when the with-it
+	// line would overflow the header width.
+	nextBadge := m.headerNextBadge()
+	withBadge := m.headerIdentityParts(sid, nextBadge)
+	line := strings.Join(withBadge, "  ·  ")
+	if nextBadge != "" && lipgloss.Width(line) > m.widthOr()-headerIdentityPad {
+		line = strings.Join(m.headerIdentityParts(sid, ""), "  ·  ")
 	}
-	// Model segment: show the EFFECTIVE model the server resolved THIS session to,
-	// from turn zero (it lands on SessionReadyMsg, set once — the model is FIXED per
-	// session). The header only CHOOSES which known string to display; it never
-	// resolves a default itself. While connecting (no create response yet) there is
-	// NO model segment — the server owns the value and we must not guess it.
-	if name := m.headerModelLabel(); name != "" {
-		parts = append(parts, truncate(sanitizeTerminal(name), maxModelLen))
-	}
-	if m.deps.Mode != "" {
-		parts = append(parts, "mode "+m.deps.Mode)
-	}
-	if m.deps.Server != "" {
-		parts = append(parts, m.deps.Server)
-	}
-	line := strings.Join(parts, "  ·  ")
 	// Right-align ONE muted indicator on the header line when it fits beside the
 	// identity segment; otherwise drop it (so the indicator never forces a wrap — the
 	// identity line itself still wraps when it alone exceeds the width). The header is
@@ -132,9 +128,9 @@ func (m Model) renderHeader() string {
 		indicator = m.changedFilesIndicator()
 	}
 	if indicator != "" {
-		line = m.fitHeader(line, indicator, m.widthOr(80))
+		line = m.fitHeader(line, indicator, m.widthOr())
 	}
-	return m.deps.Theme.Style("header").Width(m.widthOr(80)).Render(line)
+	return m.deps.Theme.Style("header").Width(m.widthOr()).Render(line)
 }
 
 // headerModelLabel returns the model label for the header, or "" when none should
@@ -167,6 +163,64 @@ func (m Model) headerModelLabel() string {
 		return name
 	}
 	return m.deps.Model
+}
+
+// headerIdentityPad is the slack subtracted from the header width when deciding
+// whether the next: badge fits: the header's 1-cell padding each side (2) plus the
+// fitHeader gap+indicator headroom, so the badge is dropped a touch EARLY rather than
+// fighting the right-aligned indicator for the last cells.
+const headerIdentityPad = 4
+
+// headerIdentityParts builds the header identity segments. withNext is the next:
+// badge ("" to omit it). Order: mecatui · session · model · [next: …] · mode ·
+// socket. The next: badge sits AFTER the current model so the eye reads "running X,
+// next Y", and is the FIRST segment renderHeader sheds under width pressure.
+func (m Model) headerIdentityParts(sid, withNext string) []string {
+	parts := []string{"mecatui", "session " + short(sid)}
+	// Model segment: the EFFECTIVE model the server resolved THIS session to (set once
+	// on SessionReadyMsg). The header only CHOOSES which known string to display; it
+	// never resolves a default itself. While connecting there is NO model segment.
+	if name := m.headerModelLabel(); name != "" {
+		parts = append(parts, truncate(sanitizeTerminal(name), maxModelLen))
+	}
+	if withNext != "" {
+		parts = append(parts, withNext)
+	}
+	if m.deps.Mode != "" {
+		parts = append(parts, "mode "+m.deps.Mode)
+	}
+	if m.deps.Server != "" {
+		parts = append(parts, m.deps.Server)
+	}
+	return parts
+}
+
+// headerNextBadge is the muted "next: <model>" header badge previewing the
+// pendingNext (apply-on-next-create) selection. It shows ONLY when there is a KNOWN
+// effective model to contrast against (m.effectiveModel set) AND the pendingNext
+// resolves to a DIFFERENT (provider, model). Both guards matter: when no effective
+// model is known yet (connecting / older server) the model SEGMENT already shows the
+// pendingNext, so a "next:" badge would just duplicate it; and a same-model next is
+// nothing to preview. The display name is resolved from the ListModels inventory by
+// (provider_id, model_id), falling back to the raw id — the same lookup the
+// effective-model label uses. Returns "" when there is no distinct next model.
+func (m Model) headerNextBadge() string {
+	next := m.activeModel
+	eff := m.effectiveModel
+	if next.ModelID == "" || eff.ModelID == "" {
+		return ""
+	}
+	if next.ModelID == eff.ModelID && next.ProviderID == eff.ProviderID {
+		return ""
+	}
+	label := next.ModelID
+	for _, mi := range m.models.models {
+		if mi.ProviderID == next.ProviderID && mi.ID == next.ModelID && mi.DisplayName != "" {
+			label = mi.DisplayName
+			break
+		}
+	}
+	return "next: " + truncate(sanitizeTerminal(label), maxModelLen)
 }
 
 // scrollIndicator returns the muted "↑ NN%" header cue shown ONLY when the user
@@ -280,7 +334,7 @@ func (m Model) renderFooter() string {
 		help = m.deps.Theme.Style("ctxWarn").Render("ctrl+c again to quit") + " · " + help
 	}
 
-	width := m.widthOr(80)
+	width := m.widthOr()
 	line := m.fitFooter(left, width)
 	footer := m.deps.Theme.Style("footer").Width(width).Render(line)
 	return footer + "\n" + m.deps.Theme.Style("muted").Render(help)
@@ -514,10 +568,15 @@ func truncate(s string, limit int) string {
 	return string(r[:limit-1]) + "…"
 }
 
-// widthOr returns the terminal width or a fallback when unset (pre-first-resize).
-func (m Model) widthOr(fallback int) int {
+// defaultHeaderWidth is the assumed terminal width before the first resize (every
+// widthOr caller wants this same fallback, so it is a const, not a parameter).
+const defaultHeaderWidth = 80
+
+// widthOr returns the terminal width, or defaultHeaderWidth when unset
+// (pre-first-resize).
+func (m Model) widthOr() int {
 	if m.width > 0 {
 		return m.width
 	}
-	return fallback
+	return defaultHeaderWidth
 }

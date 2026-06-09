@@ -47,9 +47,16 @@ func newModelsModelSized(t *testing.T, fm *fakeModels, store SelectionStore, cap
 		Ctx:            context.Background(),
 		NoAltScreen:    true,
 	})
+	// Deliver an effective model in the create response so the picker's provenance
+	// line + the header model segment render from a KNOWN server-resolved model (the
+	// session is FIXED on it). gpt-5/openai matches sampleModels()'s default row.
 	m = applyAll(m,
 		tea.WindowSizeMsg{Width: w, Height: h},
-		client.SessionReadyMsg{SessionID: "sess-test-0001", Capabilities: caps},
+		client.SessionReadyMsg{
+			SessionID:     "sess-test-0001",
+			Capabilities:  caps,
+			ResolvedModel: client.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5"},
+		},
 	)
 	return m
 }
@@ -211,8 +218,12 @@ func TestModelsFilterNarrows(t *testing.T) {
 	if m.models.cursor != 0 {
 		t.Errorf("cursor after narrowing = %d, want 0 (clamped to filtered bounds)", m.models.cursor)
 	}
-	// enter selects the filtered cursor model.
-	mm, _, _ = m.onModelsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	// enter opens the confirm overlay; [s] (switch next time) applies it to pendingNext.
+	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.models.view != modelsConfirm {
+		t.Fatalf("enter should open the confirm overlay, view = %v", m.models.view)
+	}
+	mm, _, _ = m.onModelsKey(tea.KeyPressMsg{Code: 's', Text: "s"})
 	m = mm.(Model)
 	want := client.ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"}
 	if m.activeModel != want {
@@ -478,19 +489,26 @@ func TestModelsNoMatchNote(t *testing.T) {
 	}
 }
 
-// TestModelsChooseSetsActiveAndPersists asserts enter on the cursor row sets the
-// active selection, fires the Save, and emits a status notice.
-func TestModelsChooseSetsActiveAndPersists(t *testing.T) {
+// TestModelsChooseSwitchNextSetsActiveAndPersists asserts enter→[s] (keep this
+// session; switch next time) sets the active/pendingNext selection, fires the Save,
+// and emits a notice naming both the live + next models. This is the DEFER path
+// (today's apply-on-next-create behavior) now reached via the confirm overlay.
+func TestModelsChooseSwitchNextSetsActiveAndPersists(t *testing.T) {
 	store := &fakeStore{}
 	m := newModelsModel(t, sampleModels(), store, modelsCaps(), client.ModelSelection{})
 	mm, cmd := m.runModels()
 	m = feedCmd(t, mm.(Model), cmd)
 
-	// Move to the 4th row (openrouter/claude) and select it.
+	// Move to the 4th row (openrouter/claude) and press enter to open the confirm.
 	for i := 0; i < 3; i++ {
 		m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	mm, cmd = m.onModelsKeyTuple(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.models.view != modelsConfirm {
+		t.Fatalf("enter should open the confirm overlay, view = %v", m.models.view)
+	}
+	// [s] = switch next time: applies to pendingNext, closes the picker, persists.
+	mm, cmd = m.onModelsKeyTuple(tea.KeyPressMsg{Code: 's', Text: "s"})
 	m = mm.(Model)
 	want := client.ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"}
 	if m.activeModel != want {
@@ -499,8 +517,18 @@ func TestModelsChooseSetsActiveAndPersists(t *testing.T) {
 	if m.models.active != want {
 		t.Fatalf("models.active = %+v, want %+v", m.models.active, want)
 	}
-	if !strings.Contains(stripANSIstr(m.statusMsg), "model set") {
-		t.Errorf("status should read 'model set', got %q", stripANSIstr(m.statusMsg))
+	if m.models.view != modelsNone {
+		t.Errorf("the switch-next path should close the picker, view = %v", m.models.view)
+	}
+	// The notice names BOTH the next model AND the live/effective one (no "nothing
+	// happened" confusion). newModelsModel delivered openai/gpt-5 as the effective
+	// model, so the "still running <live>" half must name GPT-5.
+	st := stripANSIstr(m.statusMsg)
+	if !strings.Contains(st, "next session will use") || !strings.Contains(st, "Claude") {
+		t.Errorf("status should name the next model, got %q", st)
+	}
+	if !strings.Contains(st, "still running") || !strings.Contains(st, "GPT-5") {
+		t.Errorf("status should also name the LIVE/effective model (still running GPT-5), got %q", st)
 	}
 	// Run the Save cmd and assert the store recorded the pick for the workspace.
 	m = feedCmd(t, m, cmd)
@@ -602,7 +630,8 @@ func TestModelsSaveFailureFailSoft(t *testing.T) {
 	m := newModelsModel(t, sampleModels(), store, modelsCaps(), client.ModelSelection{})
 	mm, cmd := m.runModels()
 	m = feedCmd(t, mm.(Model), cmd)
-	mm, cmd = m.onModelsKeyTuple(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})       // open confirm
+	mm, cmd = m.onModelsKeyTuple(tea.KeyPressMsg{Code: 's', Text: "s"}) // switch next
 	m = mm.(Model)
 	want := client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5"}
 	if m.activeModel != want {
@@ -769,6 +798,38 @@ func TestModelsPickerNoMatchGolden(t *testing.T) {
 	m = typeFilter(t, m, "zzzzz")
 	got := stripANSI([]byte(m.View().Content))
 	compareGolden(t, "models_nomatch.golden", got)
+}
+
+// TestModelsPickerGlobalDefaultGolden locks a picker where a DIFFERENT row carries
+// the ★ global-default marker (and the active ● is on another row), so the two-marker
+// column + the provenance line render together.
+func TestModelsPickerGlobalDefaultGolden(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(),
+		client.ModelSelection{ProviderID: "openai", ModelID: "gpt-5"})
+	// Set claude as the global default (the ★ row), distinct from the ● active gpt-5.
+	m.models.globalDefault = client.ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"}
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "models_global_default.golden", got)
+}
+
+// TestModelsConfirmOverlayGolden locks the post-Enter confirmation overlay (the
+// restart-now / switch-next / undo choices).
+func TestModelsConfirmOverlayGolden(t *testing.T) {
+	m := newModelsModel(t, sampleModels(), &fakeStore{}, modelsCaps(), client.ModelSelection{})
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+	// Move to claude and open the confirm overlay.
+	for i := 0; i < 3; i++ {
+		m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	m = pressModelsKey(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.models.view != modelsConfirm {
+		t.Fatalf("view = %v, want modelsConfirm", m.models.view)
+	}
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "models_confirm.golden", got)
 }
 
 // pressModelsKey routes a key through onModelsKey, asserting it was handled.

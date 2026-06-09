@@ -96,6 +96,14 @@ type keyMap struct {
 	// before this binding is ever consulted, so "?" never opens help over another
 	// overlay.
 	Help key.Binding
+
+	// SetGlobalDefault (ctrl+g) sets the /models picker's CURSOR row as the client
+	// global default (the model new/unseen workspaces inherit). It is CONTROL-modified
+	// deliberately: a bare 'g' is ScrollTop/JumpTop (key.Matches), and the picker's
+	// filter input is focused, so a bare 'g' must stay typeable in a model name
+	// ("gemini"/"gpt"). Consulted ONLY inside the /models picker (onModelsKey), so it
+	// never collides with the conversation scrollback or the blurred textarea.
+	SetGlobalDefault key.Binding
 }
 
 // defaultKeys returns the standard bindings.
@@ -217,6 +225,12 @@ func defaultKeys() keyMap {
 		Help: key.NewBinding(
 			key.WithKeys("?"),
 			key.WithHelp("?", "help"),
+		),
+		// ctrl+g: set the picker cursor row as the global default. ctrl-modified so a
+		// bare 'g' stays typeable in the picker's filter (it is also ScrollTop/JumpTop).
+		SetGlobalDefault: key.NewBinding(
+			key.WithKeys("ctrl+g"),
+			key.WithHelp("ctrl+g", "set global default"),
 		),
 	}
 }

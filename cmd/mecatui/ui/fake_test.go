@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"io"
+	"strconv"
 	"sync"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
@@ -151,12 +152,43 @@ type fakeConv struct {
 	// resolvedModel is the EFFECTIVE model the fake's create response echoes back —
 	// the header e2e asserts it lands in m.effectiveModel and renders from turn zero.
 	resolvedModel client.ResolvedModel
+	// echoSelAsResolved, when true, makes CreateSession echo the REQUESTED selector
+	// back as the resolved model (so the restart-now handoff e2e sees the new effective
+	// model match the picked one). A zero selector still echoes the canned
+	// resolvedModel. createCount counts CreateSession calls so the restart-now id
+	// differs from the first session's; mu guards the recorders touched by the command
+	// goroutine + the test goroutine. closedIDs records CloseSession arguments.
+	echoSelAsResolved bool
+	createCount       int
+	closedIDs         []string
+	mu                sync.Mutex
+	// recreated, when non-nil, is closed on the SECOND CreateSession (the restart-now
+	// handoff's re-create) — the deterministic signal a teatest sequences the model
+	// switch on, output-independent. createdOnce guards `created`; a dedicated Once
+	// guards this.
+	recreated     chan struct{}
+	recreatedOnce sync.Once
+	// secondCreateErr, when non-nil, is returned ONLY by the SECOND CreateSession (the
+	// restart-now re-create) — the first (startup connect) still succeeds. Drives the
+	// restart-create-failure recovery test. recreated still closes (the attempt fired).
+	secondCreateErr error
+	// createErr, when non-nil, is returned by EVERY CreateSession (a persistent
+	// transient failure) — drives the retry-re-failure-stays-recoverable test, where
+	// the same condition that failed the first re-create is still present on the retry.
+	createErr error
 }
 
 func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection) (string, client.Capabilities, client.ResolvedModel, error) {
+	c.mu.Lock()
 	c.createdSel = sel
+	c.createCount++
+	n := c.createCount
+	c.mu.Unlock()
 	if c.created != nil {
 		c.createdOnce.Do(func() { close(c.created) })
+	}
+	if n >= 2 && c.recreated != nil {
+		c.recreatedOnce.Do(func() { close(c.recreated) })
 	}
 	if c.sessionReady != nil {
 		select {
@@ -165,7 +197,41 @@ func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection) (
 			close(c.sessionReady)
 		}
 	}
-	return "sess-test-0001", c.caps, c.resolvedModel, nil
+	// A persistent create error fails EVERY call (the retry-re-failure path).
+	if c.createErr != nil {
+		return "", client.Capabilities{}, client.ResolvedModel{}, c.createErr
+	}
+	// The SECOND create (restart-now re-create) can be forced to fail, leaving the
+	// first (startup connect) succeeding — exercising the recoverable failure path.
+	if n >= 2 && c.secondCreateErr != nil {
+		return "", client.Capabilities{}, client.ResolvedModel{}, c.secondCreateErr
+	}
+	// The first session keeps the historical id; a re-create (restart-now) gets a
+	// distinct id so the handoff e2e can prove the session was rebound.
+	id := "sess-test-0001"
+	if n > 1 {
+		id = "sess-test-000" + strconv.Itoa(n)
+	}
+	resolved := c.resolvedModel
+	if c.echoSelAsResolved && !sel.IsZero() {
+		resolved = client.ResolvedModel{ProviderID: sel.ProviderID, ModelID: sel.ModelID}
+	}
+	return id, c.caps, resolved, nil
+}
+
+// CloseSession records the id closed (restart-now closes the old session first).
+func (c *fakeConv) CloseSession(_ context.Context, id string) error {
+	c.mu.Lock()
+	c.closedIDs = append(c.closedIDs, id)
+	c.mu.Unlock()
+	return nil
+}
+
+// closed returns a copy of the recorded CloseSession ids (test-goroutine read).
+func (c *fakeConv) closed() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.closedIDs...)
 }
 
 func (c *fakeConv) OpenConverse(ctx context.Context) (*client.Stream, error) {
@@ -397,17 +463,25 @@ func (f *fakeModels) ListModels(_ context.Context) ([]client.ModelInfo, error) {
 }
 
 // fakeStore is a spy client SelectionStore (ui.SelectionStore) for the /models
-// tests: it records the last Save and can be made to fail.
+// tests: it records the last Save / SaveGlobalDefault and can be made to fail.
 type fakeStore struct {
-	lastWS  string
-	lastSel client.ModelSelection
-	saves   int
-	err     error
+	lastWS        string
+	lastSel       client.ModelSelection
+	saves         int
+	err           error
+	lastGlobalSel client.ModelSelection
+	globalSaves   int
 }
 
 func (s *fakeStore) Save(ws string, sel client.ModelSelection) error {
 	s.saves++
 	s.lastWS = ws
 	s.lastSel = sel
+	return s.err
+}
+
+func (s *fakeStore) SaveGlobalDefault(sel client.ModelSelection) error {
+	s.globalSaves++
+	s.lastGlobalSel = sel
 	return s.err
 }
