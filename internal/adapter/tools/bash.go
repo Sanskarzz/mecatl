@@ -70,7 +70,7 @@ Limits:
 // cwd via absolute paths or `cd` — that is inherent to running a shell, the same
 // as in the main session. The fix removes the ACCIDENTAL shared-base mutation
 // (a fork branch's relative-path Bash landing in the parent base), which is what
-// ForkTool.ReadOnly() / the read-only-share / mutating-fork isolation needs.
+// ParallelTool.ReadOnly() / the read-only-share / mutating-fork isolation needs.
 type BashTool struct {
 	runner tool.CommandRunner
 }

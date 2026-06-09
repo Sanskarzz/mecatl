@@ -137,7 +137,7 @@ github.com/stacklok/mecatl
 │   │   ├── cascade.go                  #   CascadeCompactor (snip→strip→collapse→summarize)
 │   │   ├── tokencount.go               #   TokenCounter seam + HeuristicTokenCounter
 │   │   ├── subagent.go                 #   Task: fresh context, scoped tools, one-shot
-│   │   └── fork.go                     #   ForkTool: fork-join fan-out (NewForkTool)
+│   │   └── parallel.go                 #   ParallelTool: fork-join fan-out (NewParallelTool)
 │   └── adapter/                        # ADAPTERS: implement ports / seams
 │       ├── openai/                     #   LLMProvider over OpenAI Responses API (SSE)
 │       ├── mockllm/                    #   scripted fake LLMProvider (no network)
@@ -661,7 +661,7 @@ was designed for. The authoritative tracker is
 | Repo map / embeddings | **Removed (repo map); embeddings unbuilt** | The Aider-style repo-map tool (`internal/adapter/repomap`, tree-sitter + PageRank) was **retired and removed** — the WASM tree-sitter binding leaked and hung after ~160 files. See `docs/design/REPOMAP-TREE-SITTER.md`. May be reintroduced later from a clean design. Embeddings remain unbuilt. |
 | Persistent cross-session memory | **Done** | `tool.MemoryStore` seam + file-backed `internal/adapter/memory` (Remember/Recall tools, per-project), plus opt-in `dream` consolidation. The `SessionStore` + AGENTS.md/CLAUDE.md discovery still cover the file-as-memory case. |
 | Slash commands / skills | **Done (commands)** | `prompt.CommandExpander` seam + `DirCommandExpander` (`.mecatl/commands` / `.claude/commands` templates). Skill packaging remains future. |
-| Fork-join parallelism (pattern 8) | **Done** | `tool.WorkspaceForker` seam + `internal/adapter/forker` (git-worktree / copy isolation) + `agent.NewForkTool`. |
+| Fork-join parallelism (pattern 8) | **Done** | `tool.WorkspaceForker` seam + `internal/adapter/forker` (git-worktree / copy isolation) + `agent.NewParallelTool`. |
 | Multi-vendor model routing | Optional, unbuilt | `LLMProvider` port already abstracts it; a router would be a convenience adapter. |
 | **OS-level sandbox (Landlock/seccomp/Seatbelt)** | **Deliberately deferred** | The `tool.CommandRunner` seam is the chokepoint; a Landlock(+seccomp) wrapper drops in as a `CommandRunner` adapter without touching the loop. Bash is also fully optional (shell-less deploys avoid the surface entirely), so this is not a blocker for those. |
 

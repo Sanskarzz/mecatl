@@ -15,20 +15,20 @@ import (
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
-// forkToolName is the catalog name of the fork-join fan-out tool.
-const forkToolName = "Fork"
+// parallelToolName is the catalog name of the fork-join fan-out tool.
+const parallelToolName = "Parallel"
 
-// defaultMaxBranches caps the fan-out of a single Fork call. A model that asks
+// defaultMaxBranches caps the fan-out of a single Parallel call. A model that asks
 // for an absurd number of branches is rejected rather than allowed to spawn an
 // unbounded number of child loops (and forked workspaces). Override with
 // WithMaxBranches.
 const defaultMaxBranches = 8
 
-// defaultForkConcurrency bounds how many child branches run at once. Forking and
+// defaultParallelConcurrency bounds how many child branches run at once. Forking and
 // running N child loops simultaneously is the point of fork-join, but it is also
 // N times the resource cost, so a worker limit keeps it bounded. Override with
-// WithForkConcurrency.
-const defaultForkConcurrency = 4
+// WithParallelConcurrency.
+const defaultParallelConcurrency = 4
 
 // Join strategies. join is normalised (trim + lower) before comparison; "" maps
 // to joinAll (today's default behaviour) and "best" is an alias of joinJudge.
@@ -39,8 +39,8 @@ const (
 	joinBest  = "best" // alias of joinJudge
 )
 
-// forkArgs is the argument payload the model supplies when calling the Fork tool.
-type forkArgs struct {
+// parallelArgs is the argument payload the model supplies when calling the Parallel tool.
+type parallelArgs struct {
 	// Tasks is the list of self-contained branch prompts. Each runs in its OWN
 	// isolated forked workspace and its OWN fresh child context. Because every
 	// child has a fresh context window and cannot see this conversation, each task
@@ -60,8 +60,8 @@ type forkArgs struct {
 	Criteria string `json:"criteria,omitempty"`
 }
 
-// forkSchema is the JSON schema the model sees for the Fork tool's arguments.
-var forkSchema = json.RawMessage(`{
+// parallelSchema is the JSON schema the model sees for the Parallel tool's arguments.
+var parallelSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "tasks": {
@@ -87,7 +87,7 @@ var forkSchema = json.RawMessage(`{
   "required": ["tasks"]
 }`)
 
-// ForkTool is the fork-join fan-out tool (harness pattern 8). When executed it
+// ParallelTool is the fork-join fan-out tool (harness pattern 8). When executed it
 // forks N ISOLATED child workspaces from the parent's workspace (via the injected
 // tool.WorkspaceForker), runs one CHILD agent loop per branch in PARALLEL (bounded
 // by a worker limit) over the injected child *Engine — each with its own fresh
@@ -109,8 +109,8 @@ var forkSchema = json.RawMessage(`{
 // has been captured.
 //
 // The child Engine is built by the composition root with a scoped catalog (no
-// Fork, no Subagent — children cannot fan out further) exactly as for SubagentTool.
-type ForkTool struct {
+// Parallel, no Subagent — children cannot fan out further) exactly as for SubagentTool.
+type ParallelTool struct {
 	// childEngine runs each branch's child loop. It is pre-wired by the composition
 	// root with a scoped catalog and a non-interactive policy. It is never the
 	// parent Engine.
@@ -126,7 +126,7 @@ type ForkTool struct {
 	// session.ModeDefault.
 	childMode session.PermissionMode
 
-	// maxBranches caps the fan-out per Fork call.
+	// maxBranches caps the fan-out per Parallel call.
 	maxBranches int
 
 	// concurrency bounds how many branches run at once.
@@ -139,7 +139,7 @@ type ForkTool struct {
 	idPrefix string
 
 	// judge selects a winner for the "judge"/"best" strategy. It is injected by the
-	// composition root via WithForkJudge (kept as an interface so internal/agent
+	// composition root via WithParallelJudge (kept as an interface so internal/agent
 	// never imports an adapter, and so a non-LLM scorer can be substituted). nil ⇒
 	// the "judge"/"best" strategy returns a model-addressable "judging unavailable"
 	// error; "all"/"first" never touch it.
@@ -148,97 +148,97 @@ type ForkTool struct {
 	// winnerReaper bounds the PRESERVED winner forks (join=first / join=judge). When
 	// non-nil, a winner's fork cleanup is handed to the reaper instead of dropped, so
 	// the reaper can LRU-evict (and tear down) the oldest preserved fork once the cap
-	// is exceeded — bounding disk growth across many Fork calls while keeping the most
+	// is exceeded — bounding disk growth across many Parallel calls while keeping the most
 	// recent winners inspectable. nil ⇒ the original behaviour: a winner fork is
 	// preserved indefinitely (its cleanup is simply never called).
 	winnerReaper PreservedForkStore
 }
 
-// ForkOption configures a ForkTool.
-type ForkOption func(*ForkTool)
+// ParallelOption configures a ParallelTool.
+type ParallelOption func(*ParallelTool)
 
-// WithForkChildLimits overrides the per-branch stop conditions (default
+// WithParallelChildLimits overrides the per-branch stop conditions (default
 // defaultChildLimits).
-func WithForkChildLimits(l session.Limits) ForkOption {
-	return func(t *ForkTool) { t.limits = l }
+func WithParallelChildLimits(l session.Limits) ParallelOption {
+	return func(t *ParallelTool) { t.limits = l }
 }
 
-// WithForkChildMode sets the permission mode each child branch session runs under
+// WithParallelChildMode sets the permission mode each child branch session runs under
 // (default session.ModeDefault).
-func WithForkChildMode(m session.PermissionMode) ForkOption {
-	return func(t *ForkTool) { t.childMode = m }
+func WithParallelChildMode(m session.PermissionMode) ParallelOption {
+	return func(t *ParallelTool) { t.childMode = m }
 }
 
-// WithMaxBranches caps the number of branches a single Fork call may fan out to
+// WithMaxBranches caps the number of branches a single Parallel call may fan out to
 // (default defaultMaxBranches). A non-positive value is ignored.
-func WithMaxBranches(n int) ForkOption {
-	return func(t *ForkTool) {
+func WithMaxBranches(n int) ParallelOption {
+	return func(t *ParallelTool) {
 		if n > 0 {
 			t.maxBranches = n
 		}
 	}
 }
 
-// WithForkConcurrency bounds how many branches run simultaneously (default
-// defaultForkConcurrency). A non-positive value is ignored.
-func WithForkConcurrency(n int) ForkOption {
-	return func(t *ForkTool) {
+// WithParallelConcurrency bounds how many branches run simultaneously (default
+// defaultParallelConcurrency). A non-positive value is ignored.
+func WithParallelConcurrency(n int) ParallelOption {
+	return func(t *ParallelTool) {
 		if n > 0 {
 			t.concurrency = n
 		}
 	}
 }
 
-// WithForkSubagentStopHook injects the HookRunner that fires SubagentStop when a
+// WithParallelSubagentStopHook injects the HookRunner that fires SubagentStop when a
 // branch run finishes (best-effort; nil disables it).
-func WithForkSubagentStopHook(h port.HookRunner) ForkOption {
-	return func(t *ForkTool) { t.hooks = h }
+func WithParallelSubagentStopHook(h port.HookRunner) ParallelOption {
+	return func(t *ParallelTool) { t.hooks = h }
 }
 
-// WithForkChildSessionPrefix sets the prefix used to derive child branch
-// SessionIDs (default "fork"). Child ids are of the form "<prefix>-<callID>-<i>".
-func WithForkChildSessionPrefix(p string) ForkOption {
-	return func(t *ForkTool) { t.idPrefix = p }
+// WithParallelChildSessionPrefix sets the prefix used to derive child branch
+// SessionIDs (default "parallel"). Child ids are of the form "<prefix>-<callID>-<i>".
+func WithParallelChildSessionPrefix(p string) ParallelOption {
+	return func(t *ParallelTool) { t.idPrefix = p }
 }
 
-// WithForkJudge injects the BranchJudge used by the "judge"/"best" join strategy
+// WithParallelJudge injects the BranchJudge used by the "judge"/"best" join strategy
 // (nil disables judging — the strategy then returns a model-addressable error).
 // The default build wires an engineJudge over a dedicated, tool-less read-only
 // child Engine; see internal/app.
-func WithForkJudge(j BranchJudge) ForkOption {
-	return func(t *ForkTool) { t.judge = j }
+func WithParallelJudge(j BranchJudge) ParallelOption {
+	return func(t *ParallelTool) { t.judge = j }
 }
 
 // WithWinnerReaper injects a bounded PreservedForkStore that caps how many
 // PRESERVED winner forks (join=first / join=judge) survive at once: a new winner
 // beyond the cap reaps the oldest. nil (the default) preserves winner forks
 // indefinitely. See NewLRUForkReaper for the default bounded implementation.
-func WithWinnerReaper(s PreservedForkStore) ForkOption {
-	return func(t *ForkTool) { t.winnerReaper = s }
+func WithWinnerReaper(s PreservedForkStore) ParallelOption {
+	return func(t *ParallelTool) { t.winnerReaper = s }
 }
 
-// NewForkTool constructs the Fork fan-out tool over a pre-built child *Engine and
-// a WorkspaceForker. The composition root builds childEngine with the SCOPED
+// NewParallelTool constructs the Parallel fan-out tool over a pre-built child *Engine
+// and a WorkspaceForker. The composition root builds childEngine with the SCOPED
 // child catalog and a non-interactive policy (see NewSubagentTool's guidance); the
-// child catalog MUST NOT contain Fork or Subagent (so a branch cannot fan out
-// further). childEngine and forker must be non-nil; NewForkTool panics otherwise,
-// because a Fork tool with no child loop or no isolation seam is a composition-root
+// child catalog MUST NOT contain Parallel or Subagent (so a branch cannot fan out
+// further). childEngine and forker must be non-nil; NewParallelTool panics otherwise,
+// because a Parallel tool with no child loop or no isolation seam is a composition-root
 // programming error.
-func NewForkTool(childEngine *Engine, forker tool.WorkspaceForker, opts ...ForkOption) tool.Tool {
+func NewParallelTool(childEngine *Engine, forker tool.WorkspaceForker, opts ...ParallelOption) tool.Tool {
 	if childEngine == nil {
-		panic("agent: NewForkTool requires a non-nil child Engine")
+		panic("agent: NewParallelTool requires a non-nil child Engine")
 	}
 	if forker == nil {
-		panic("agent: NewForkTool requires a non-nil WorkspaceForker")
+		panic("agent: NewParallelTool requires a non-nil WorkspaceForker")
 	}
-	t := &ForkTool{
+	t := &ParallelTool{
 		childEngine: childEngine,
 		forker:      forker,
 		limits:      defaultChildLimits,
 		childMode:   session.ModeDefault,
 		maxBranches: defaultMaxBranches,
-		concurrency: defaultForkConcurrency,
-		idPrefix:    "fork",
+		concurrency: defaultParallelConcurrency,
+		idPrefix:    "parallel",
 	}
 	for _, o := range opts {
 		o(t)
@@ -246,15 +246,15 @@ func NewForkTool(childEngine *Engine, forker tool.WorkspaceForker, opts ...ForkO
 	return t
 }
 
-// Spec returns the model-facing specification for the Fork tool.
-func (*ForkTool) Spec() tool.ToolSpec {
+// Spec returns the model-facing specification for the Parallel tool.
+func (*ParallelTool) Spec() tool.ToolSpec {
 	return tool.ToolSpec{
-		Name: forkToolName,
+		Name: parallelToolName,
 		Description: "Fan out several independent tasks (up to 8) to run in PARALLEL, each in " +
 			"its own isolated forked workspace and fresh context, then join their results into " +
 			"one summary. Use to explore multiple approaches at once or to split independent " +
 			"work. For a single task just do it yourself or use Subagent; for work where the " +
-			"branches must coordinate or share state, use Team — Fork branches are fully " +
+			"branches must coordinate or share state, use Team — Parallel branches are fully " +
 			"independent and never communicate. " +
 			"Each branch runs in an isolated fork, so a branch may IMPLEMENT by editing, " +
 			"writing files, and running shell commands (Bash), not just explore — its changes " +
@@ -268,19 +268,19 @@ func (*ForkTool) Spec() tool.ToolSpec {
 			"against `criteria`. Branches do NOT auto-merge — forked workspace paths are reported " +
 			"so you can inspect or merge them yourself; for 'first'/'judge' the WINNER's fork is " +
 			"PRESERVED (not torn down) so its changes survive for inspection.",
-		Schema: forkSchema,
+		Schema: parallelSchema,
 	}
 }
 
-// ReadOnly reports that the Fork tool is read-only with respect to the PARENT's
+// ReadOnly reports that the Parallel tool is read-only with respect to the PARENT's
 // shared workspace, which lets the parent dispatcher run it concurrently with
 // other read-only tools (read-parallel / mutate-serial; see dispatch.go).
 //
-// INVARIANT — this is the same invariant SubagentTool documents, but Fork makes it
+// INVARIANT — this is the same invariant SubagentTool documents, but Parallel makes it
 // strictly safer: every child branch runs in its OWN forked workspace, never the
 // shared base. So the child's filesystem-mutating tools (Edit / Write) land in the
 // isolated fork and CANNOT race on, or mutate, the parent's shared base. Bash is
-// now workspace-aware (see app.buildForkChildEngine): BashTool.Execute passes the
+// now workspace-aware (see app.buildParallelChildEngine): BashTool.Execute passes the
 // per-branch forked Workspace.Root() to its CommandRunner as the working directory,
 // so a branch's Bash runs in its OWN fork — its DEFAULT cwd is the fork, not the
 // shared parent base. (Residual: unlike path-scoped Edit/Write, Bash can still
@@ -291,12 +291,12 @@ func (*ForkTool) Spec() tool.ToolSpec {
 // children — for the SAME reason SubagentTool.ReadOnly() stays true: each tool isolates
 // its mutating child so the child's writes never touch the shared parent base.
 // Isolation, not catalog read-only-ness, is the boundary (after Phase 2 a Subagent child
-// with Bash runs in its OWN git worktree exactly as a Fork branch runs in its own
-// force-copy). The remaining distinction is only WHICH tools the child gets: a Fork
+// with Bash runs in its OWN git worktree exactly as a Parallel branch runs in its own
+// force-copy). The remaining distinction is only WHICH tools the child gets: a Parallel
 // branch keeps Edit/Write (it is meant to IMPLEMENT in its fork), while a Subagent child
 // drops them and is shell-only (a read-only explorer that may run git/build/test but
 // cannot edit the project).
-func (*ForkTool) ReadOnly() bool { return true }
+func (*ParallelTool) ReadOnly() bool { return true }
 
 // branchResult is the joined outcome of one branch.
 type branchResult struct {
@@ -330,7 +330,7 @@ func (r branchResult) runCleanup() {
 // behaviour: the fork survives for the operator and is never auto-deleted). The
 // winner's fork is the deliverable either way; the reaper only bounds how many
 // survive at once.
-func (t *ForkTool) preserveWinner(w branchResult) {
+func (t *ParallelTool) preserveWinner(w branchResult) {
 	if t.winnerReaper != nil {
 		t.winnerReaper.Preserve(w.childRoot, w.cleanup)
 	}
@@ -343,34 +343,34 @@ func (t *ForkTool) preserveWinner(w branchResult) {
 // it cancels every in-flight branch. A branch that fails is reported in the joined
 // summary without aborting the others; the call returns a harness-level error only
 // for a setup failure (invalid args / cap exceeded).
-func (t *ForkTool) Execute(ctx context.Context, call session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
+func (t *ParallelTool) Execute(ctx context.Context, call session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
 	return t.run(ctx, call, ws, parentCaps{})
 }
 
-// ReadOnly stays true (each branch isolates its writes); see ReadOnly. ForkTool
+// ReadOnly stays true (each branch isolates its writes); see ReadOnly. ParallelTool
 // implements childCapableTool so a branch's Bash ask can be surfaced to the human
 // (interactive) or auto-denied with the accurate message (headless) — every branch is
 // isolated, so most such asks auto-approve via A2 first.
 
-// ExecuteWithParent is the childCapableTool seam: it runs Fork like Execute but threads
+// ExecuteWithParent is the childCapableTool seam: it runs Parallel like Execute but threads
 // the PARENT's caps (interactivity + surface back-channel) into each branch's posture.
-func (t *ForkTool) ExecuteWithParent(ctx context.Context, call session.ToolCall, ws tool.Workspace, _ func(session.Event), caps parentCaps) (session.ToolResult, error) {
+func (t *ParallelTool) ExecuteWithParent(ctx context.Context, call session.ToolCall, ws tool.Workspace, _ func(session.Event), caps parentCaps) (session.ToolResult, error) {
 	return t.run(ctx, call, ws, caps)
 }
 
 // run is the shared implementation behind Execute (caps zero) and ExecuteWithParent.
-func (t *ForkTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, caps parentCaps) (session.ToolResult, error) {
-	var args forkArgs
+func (t *ParallelTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, caps parentCaps) (session.ToolResult, error) {
+	var args parallelArgs
 	if msg, ok := session.ParseArgs(call, &args); !ok {
-		return session.NewToolError(call.ID, "Fork: "+msg), nil
+		return session.NewToolError(call.ID, "Parallel: "+msg), nil
 	}
 	tasks := nonEmptyTasks(args.Tasks)
 	if len(tasks) == 0 {
-		return session.NewToolError(call.ID, "Fork: 'tasks' is required and must contain at least one non-empty prompt"), nil
+		return session.NewToolError(call.ID, "Parallel: 'tasks' is required and must contain at least one non-empty prompt"), nil
 	}
 	if len(tasks) > t.maxBranches {
 		return session.NewToolError(call.ID, fmt.Sprintf(
-			"Fork: %d tasks exceeds the maximum fan-out of %d; split the work or batch it",
+			"Parallel: %d tasks exceeds the maximum fan-out of %d; split the work or batch it",
 			len(tasks), t.maxBranches)), nil
 	}
 
@@ -380,11 +380,11 @@ func (t *ForkTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 		// ok
 	default:
 		return session.NewToolError(call.ID, fmt.Sprintf(
-			"Fork: unknown join strategy %q; want all|first|judge|best", strings.TrimSpace(args.Join))), nil
+			"Parallel: unknown join strategy %q; want all|first|judge|best", strings.TrimSpace(args.Join))), nil
 	}
 	if join == joinJudge && t.judge == nil {
 		return session.NewToolError(call.ID,
-			"Fork: judge selection is unavailable (no judge wired); use join=all and pick a branch yourself"), nil
+			"Parallel: judge selection is unavailable (no judge wired); use join=all and pick a branch yourself"), nil
 	}
 
 	switch join {
@@ -407,7 +407,7 @@ func (t *ForkTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 // order, cancels the remaining in-flight branches, cleans every loser fork, and
 // PRESERVES the winner's fork (its cleanup is dropped). With no success it
 // degrades to the all-failed report (every fork cleaned).
-func (t *ForkTool) executeFirst(ctx context.Context, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace, caps parentCaps) session.ToolResult {
+func (t *ParallelTool) executeFirst(ctx context.Context, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace, caps parentCaps) session.ToolResult {
 	// A per-call child context so we can cancel the losers the instant a winner
 	// finishes, without disturbing the parent ctx. Cancelled in all paths.
 	branchCtx, cancel := context.WithCancel(ctx)
@@ -438,8 +438,8 @@ func (t *ForkTool) executeFirst(ctx context.Context, callID session.ToolCallID, 
 // Degradations: 0 successes → all-failed report (all forks cleaned); exactly 1
 // success → that branch wins with no judge call. The winner's fork is PRESERVED;
 // every loser's fork is cleaned. A misbehaving judge falls back to the first
-// successful branch — Fork never hard-fails because the judge erred.
-func (t *ForkTool) executeJudge(ctx context.Context, callID session.ToolCallID, tasks []string, shared, criteria string, ws tool.Workspace, caps parentCaps) session.ToolResult {
+// successful branch — Parallel never hard-fails because the judge erred.
+func (t *ParallelTool) executeJudge(ctx context.Context, callID session.ToolCallID, tasks []string, shared, criteria string, ws tool.Workspace, caps parentCaps) session.ToolResult {
 	results := t.runBranches(ctx, callID, tasks, shared, ws, caps)
 
 	// Successful branches in index order (so "first successful" is deterministic).
@@ -481,7 +481,7 @@ func (t *ForkTool) executeJudge(ctx context.Context, callID session.ToolCallID, 
 // and falls back to the first successful branch on any judge error / out-of-range
 // verdict (the judge sees only summaries — never transcripts — preserving
 // isolation).
-func (t *ForkTool) judgeWinner(ctx context.Context, results []branchResult, succeeded []int, criteria string) (winner int, rationale string) {
+func (t *ParallelTool) judgeWinner(ctx context.Context, results []branchResult, succeeded []int, criteria string) (winner int, rationale string) {
 	candidates := make([]BranchSummary, 0, len(succeeded))
 	for _, idx := range succeeded {
 		candidates = append(candidates, BranchSummary{
@@ -500,7 +500,7 @@ func (t *ForkTool) judgeWinner(ctx context.Context, results []branchResult, succ
 // runBranches forks and runs every branch in parallel under a worker-limited
 // semaphore, returning the per-branch results in branch order. The caller owns
 // cleanup of every returned branchResult.cleanup (lifted out of runBranch).
-func (t *ForkTool) runBranches(ctx context.Context, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace, caps parentCaps) []branchResult {
+func (t *ParallelTool) runBranches(ctx context.Context, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace, caps parentCaps) []branchResult {
 	results := make([]branchResult, len(tasks))
 	sem := make(chan struct{}, t.concurrency)
 	var wg sync.WaitGroup
@@ -531,7 +531,7 @@ func (t *ForkTool) runBranches(ctx context.Context, callID session.ToolCallID, t
 // a loser cancelled mid-flight still returns its (possibly partial) branchResult
 // with its cleanup attached. The returned winner is the index of the first
 // successful branch, or -1 if none succeeded.
-func (t *ForkTool) runBranchesFirst(ctx context.Context, cancel context.CancelFunc, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace, caps parentCaps) ([]branchResult, int) {
+func (t *ParallelTool) runBranchesFirst(ctx context.Context, cancel context.CancelFunc, callID session.ToolCallID, tasks []string, shared string, ws tool.Workspace, caps parentCaps) ([]branchResult, int) {
 	results := make([]branchResult, len(tasks))
 	sem := make(chan struct{}, t.concurrency)
 	done := make(chan int, len(tasks)) // carries the index of each finished branch
@@ -589,7 +589,7 @@ func normalizeJoin(join string) string {
 // to tear down and which to preserve, so a winning branch's fork can survive the
 // call. A fork or child failure is captured in the result, never propagated as a
 // harness error (one failing branch must not kill the others).
-func (t *ForkTool) runBranch(ctx context.Context, callID session.ToolCallID, i int, task, shared string, ws tool.Workspace, caps parentCaps) branchResult {
+func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID, i int, task, shared string, ws tool.Workspace, caps parentCaps) branchResult {
 	label := branchLabel(i)
 	res := branchResult{index: i, label: label}
 
@@ -611,7 +611,7 @@ func (t *ForkTool) runBranch(ctx context.Context, callID session.ToolCallID, i i
 	)
 
 	run := t.childEngine.Run(ctx, childSess, child, composePrompt(shared, task))
-	// A Fork branch always runs in its OWN isolated fork, so its Bash asks are eligible
+	// A Parallel branch always runs in its OWN isolated fork, so its Bash asks are eligible
 	// for the A2 worktree-safe auto-approve; the parent caps carry surface/headless
 	// posture (threaded from Execute → runBranches → runBranch).
 	final, stop := drainChild(run, childPosture{isolated: true, caps: caps, role: label})
@@ -639,7 +639,7 @@ func (t *ForkTool) runBranch(ctx context.Context, callID session.ToolCallID, i i
 
 // fireSubagentStop runs the SubagentStop hook for a finished branch run
 // (best-effort; mirrors SubagentTool.fireSubagentStop).
-func (t *ForkTool) fireSubagentStop(ctx context.Context, child *session.Session) {
+func (t *ParallelTool) fireSubagentStop(ctx context.Context, child *session.Session) {
 	fireNotify(ctx, t.hooks, governance.HookEvent{
 		Phase:     governance.PhaseSubagentStop,
 		SessionID: string(child.ID),
@@ -647,7 +647,7 @@ func (t *ForkTool) fireSubagentStop(ctx context.Context, child *session.Session)
 }
 
 // childSessionID derives a stable, unique id for a branch's child session.
-func (t *ForkTool) childSessionID(callID session.ToolCallID, i int) session.SessionID {
+func (t *ParallelTool) childSessionID(callID session.ToolCallID, i int) session.SessionID {
 	return session.SessionID(fmt.Sprintf("%s-%s-%d", t.idPrefix, callID, i))
 }
 
@@ -684,7 +684,7 @@ func joinBranches(results []branchResult) string {
 	ok := countOK(sorted)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Fork joined %d branch(es): %d succeeded, %d failed.\n",
+	fmt.Fprintf(&b, "Parallel joined %d branch(es): %d succeeded, %d failed.\n",
 		len(sorted), ok, len(sorted)-ok)
 	for _, r := range sorted {
 		b.WriteString("\n=== ")
@@ -734,7 +734,7 @@ func countOK(results []branchResult) int {
 func joinFirstResult(results []branchResult, winner int) string {
 	w := results[winner]
 	var b strings.Builder
-	fmt.Fprintf(&b, "Fork (join=first): %s succeeded first of %d branch(es).\n", w.label, len(results))
+	fmt.Fprintf(&b, "Parallel (join=first): %s succeeded first of %d branch(es).\n", w.label, len(results))
 	writeWinnerWorkspace(&b, w)
 	fmt.Fprintf(&b, "\n=== %s [WINNER] ===\n", w.label)
 	if w.summary != "" {
@@ -757,7 +757,7 @@ func joinJudgeResult(results []branchResult, winner int, rationale string) strin
 	w := results[winner]
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Fork (join=judge): selected %s of %d branch(es) (%d succeeded, %d failed).\n",
+	fmt.Fprintf(&b, "Parallel (join=judge): selected %s of %d branch(es) (%d succeeded, %d failed).\n",
 		w.label, len(results), ok, len(results)-ok)
 	if rationale != "" {
 		fmt.Fprintf(&b, "rationale: %s\n", rationale)
@@ -788,7 +788,7 @@ func joinJudgeResult(results []branchResult, winner int, rationale string) strin
 // contents (a branch that may have IMPLEMENTED changes in its isolated fork) are
 // the deliverable. The harness does not reap it; the CALLER/OPERATOR owns it and
 // must clean it up when done. There is no auto-merge to the base (that would mutate
-// the parent and break ForkTool.ReadOnly()==true); merge is a manual follow-up
+// the parent and break ParallelTool.ReadOnly()==true); merge is a manual follow-up
 // against this path.
 func writeWinnerWorkspace(b *strings.Builder, w branchResult) {
 	if w.childRoot != "" {
@@ -807,5 +807,5 @@ func firstLine(s string) string {
 	return ""
 }
 
-// Compile-time assertion that ForkTool satisfies the Tool contract.
-var _ tool.Tool = (*ForkTool)(nil)
+// Compile-time assertion that ParallelTool satisfies the Tool contract.
+var _ tool.Tool = (*ParallelTool)(nil)

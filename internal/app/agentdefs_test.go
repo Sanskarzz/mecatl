@@ -54,20 +54,20 @@ func TestScopedToolNamesAllowlistIntersection(t *testing.T) {
 	base := baseSubagentTools(Config{}) // no shell => no Bash
 	def := agents.AgentDef{
 		Name:  "reviewer",
-		Tools: []string{"Read", "Grep", "Bogus", "Subagent", "Fork", "ToolSearch"},
+		Tools: []string{"Read", "Grep", "Bogus", "Subagent", "Parallel", "ToolSearch"},
 	}
 	names, diags := scopedToolNames(def, base)
 	sort.Strings(names)
 	if strings.Join(names, ",") != "Grep,Read" {
 		t.Fatalf("kept = %v, want [Grep Read] (allowlist ∩ available, RO only)", names)
 	}
-	// Distinct diagnostics: Bogus=unknown, Subagent/Fork/ToolSearch=excluded-at-callsite.
+	// Distinct diagnostics: Bogus=unknown, Subagent/Parallel/ToolSearch=excluded-at-callsite.
 	var unknown, excluded int
 	for _, d := range diags {
 		switch {
 		case d.tool == "Bogus" && strings.Contains(d.reason, "unknown tool"):
 			unknown++
-		case (d.tool == "Subagent" || d.tool == "Fork" || d.tool == "ToolSearch") && strings.Contains(d.reason, "excluded at this call site"):
+		case (d.tool == "Subagent" || d.tool == "Parallel" || d.tool == "ToolSearch") && strings.Contains(d.reason, "excluded at this call site"):
 			excluded++
 		default:
 			t.Fatalf("unexpected diag %+v", d)

@@ -47,7 +47,7 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   Role (a cache-stable StablePrefix layer; one byte-stable prefix per def).
 - **Scoped CORE tools.** The def's `tools` allowlist (minus `disallowedTools`) is
   intersected with the call site's available **core** toolset (Read/Edit/Write/Grep/
-  Glob/WebFetch/Bash). `Subagent`/`Fork`/`ToolSearch` are ALWAYS excluded (no nesting / no
+  Glob/WebFetch/Bash). `Subagent`/`Parallel`/`ToolSearch` are ALWAYS excluded (no nesting / no
   silent disclosure tool).
   - **Subagent delegates are read-only EXPLORERS WITH A SHELL** — `Subagent.ReadOnly()` stays
     `true`, but a Subagent child now runs in an isolated git **worktree** (when Bash is
@@ -56,7 +56,7 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
     def's Bash survives via `scopedToolNamesMode`'s `allowShell`. Its writes land in the
     throwaway worktree, never the shared base, which is why `ReadOnly()` stays true. A
     truly **mutating** specialist (edits the project's files) is a **team member**
-    (force-copy fork) or a **Fork** branch, not a Subagent.
+    (force-copy fork) or a **Parallel** branch, not a Subagent.
   - **Team members** obey read-only-share / mutating-fork: a `Mutating` member (runs
     in an isolated fork) MAY keep Edit/Write/Bash; a read-only (base-sharing) member
     has them dropped (so the supervisor's `ErrReadOnlyMemberMutating` backstop never
@@ -103,7 +103,7 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
     skipped (CLAUDE.md: no stdio MCP, ever).
   - The MCP tools are added to the def's catalog directly (a def opting into a server
     gets that server's tools); they do NOT go through the `tools:` core allowlist, and
-    `Subagent`/`Fork`/`ToolSearch` exclusion + the def's core `tools`/`disallowedTools`
+    `Subagent`/`Parallel`/`ToolSearch` exclusion + the def's core `tools`/`disallowedTools`
     semantics are unchanged.
   - **Read-only backstop interaction.** MCP tools report `ReadOnly()==false` but never
     touch the workspace, so they are EXEMPT from the supervisor's read-only-member
@@ -136,7 +136,7 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
 - **No mutating Subagent delegates.** CC lets a `Task(subagent_type=...)` inherit Edit/
   Write and the project's tools. Our read-parallel/mutate-serial dispatcher makes a
   mutating Subagent a workspace-race hazard, so mutation is routed through the isolation
-  mechanisms that already exist (member fork / Fork worktree). On the Subagent path the
+  mechanisms that already exist (member fork / Parallel worktree). On the Subagent path the
   only thing a def adds over the anonymous explorer is a different prompt + model +
   read-only tool scope.
 - **Per-agent MCP `tools:` allowlisting still core-only.** A def's `mcpServers:` adds the
@@ -146,7 +146,7 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   arrive via `mcpServers:`, not the core allowlist.
 - **No `--agents` inline JSON.** Definitions come only from `<name>.md` files under
   `--agents-dir` / the conventional dirs.
-- **No Agent-as-tool nesting.** A def cannot re-add `Subagent`/`Fork`/`ToolSearch`; a child
+- **No Agent-as-tool nesting.** A def cannot re-add `Subagent`/`Parallel`/`ToolSearch`; a child
   never recurses or fans out further.
 - **No file-path scoping** (Roo's file allowlist) yet.
 
@@ -161,4 +161,4 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
 ```
 
 The TUI's embedded server (`cmd/mecatui`) enables `AgentsConventional` by default,
-consistent with `EnableTeams`/`EnableFork`.
+consistent with `EnableTeams`/`EnableParallel`.

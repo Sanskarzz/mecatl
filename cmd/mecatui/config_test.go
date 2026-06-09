@@ -12,15 +12,15 @@ import (
 )
 
 // TestEmbeddedConfigEnablesAgentDefs asserts the embedded server enables conventional
-// agent-definition discovery (consistent with EnableTeams/EnableFork; inert until a
+// agent-definition discovery (consistent with EnableTeams/EnableParallel; inert until a
 // <name>.md exists under a conventional dir).
 func TestEmbeddedConfigEnablesAgentDefs(t *testing.T) {
 	ac := embeddedConfig(config{workspace: "/ws", model: "m", mock: true}, port.NopDiagnostics{})
 	if !ac.AgentsConventional {
 		t.Error("embeddedConfig AgentsConventional = false, want true")
 	}
-	if !ac.EnableTeams || !ac.EnableFork {
-		t.Errorf("embeddedConfig should also keep teams/fork on (teams=%v fork=%v)", ac.EnableTeams, ac.EnableFork)
+	if !ac.EnableTeams || !ac.EnableParallel {
+		t.Errorf("embeddedConfig should also keep teams/fork on (teams=%v fork=%v)", ac.EnableTeams, ac.EnableParallel)
 	}
 }
 

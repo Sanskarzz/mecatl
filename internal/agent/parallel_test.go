@@ -105,10 +105,10 @@ func (m *memForker) counts() (forks, cleaned int) {
 	return m.forks, m.cleaned
 }
 
-// TestForkJoinsAllBranches runs 3 scripted child branches in parallel and asserts
+// TestParallelJoinsAllBranches runs 3 scripted child branches in parallel and asserts
 // the parent receives ONE ToolResult joining all branch summaries, with no child
 // intermediate events leaking, and every fork cleaned up.
-func TestForkJoinsAllBranches(t *testing.T) {
+func TestParallelJoinsAllBranches(t *testing.T) {
 	// Each child branch reads then summarizes; the summary text is unique per branch
 	// so we can assert all three landed in the joined result.
 	childRead := &fakeTool{name: "Read", readOnly: true,
@@ -120,11 +120,11 @@ func TestForkJoinsAllBranches(t *testing.T) {
 	childEngine := childEngineWith(&branchProvider{summary: "branch summary X"}, catalogWith(t, childRead))
 
 	mf := &memForker{}
-	fork := agent.NewForkTool(childEngine, mf)
+	fork := agent.NewParallelTool(childEngine, mf)
 	parentCat := catalogWith(t, fork)
 
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Fork",
+		mockllm.ToolCallTurn(toolCall("p1", "Parallel",
 			`{"tasks":["explore A","explore B","explore C"],"shared":"common"}`)),
 		mockllm.TextTurn("parent joined the branches"),
 	)
@@ -172,10 +172,10 @@ func TestForkJoinsAllBranches(t *testing.T) {
 	}
 }
 
-// TestForkFailingBranchDoesNotKillOthers asserts that one branch whose fork fails
+// TestParallelFailingBranchDoesNotKillOthers asserts that one branch whose fork fails
 // is reported as FAILED in the joined summary while the other branches still run
 // and succeed.
-func TestForkFailingBranchDoesNotKillOthers(t *testing.T) {
+func TestParallelFailingBranchDoesNotKillOthers(t *testing.T) {
 	childRead := &fakeTool{name: "Read", readOnly: true,
 		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 			return session.NewToolResult(in.ID, "ok"), nil
@@ -189,10 +189,10 @@ func TestForkFailingBranchDoesNotKillOthers(t *testing.T) {
 	// Fail the fork for branch-2 deterministically by LABEL (labels encode the
 	// 1-based branch index regardless of which goroutine forks first).
 	mf := &memForker{failOnLabel: "branch-2"}
-	fork := agent.NewForkTool(childEngine, mf)
+	fork := agent.NewParallelTool(childEngine, mf)
 
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Fork",
+		mockllm.ToolCallTurn(toolCall("p1", "Parallel",
 			`{"tasks":["A","B","C"]}`)),
 		mockllm.TextTurn("ok"),
 	)
@@ -212,9 +212,9 @@ func TestForkFailingBranchDoesNotKillOthers(t *testing.T) {
 	}
 }
 
-// TestForkRunsInParallel asserts the branches actually overlap in time (bounded by
+// TestParallelRunsInParallel asserts the branches actually overlap in time (bounded by
 // the worker limit), not run serially.
-func TestForkRunsInParallel(t *testing.T) {
+func TestParallelRunsInParallel(t *testing.T) {
 	var (
 		mu      sync.Mutex
 		running int
@@ -249,9 +249,9 @@ func TestForkRunsInParallel(t *testing.T) {
 	childEngine := childEngineWith(&branchProvider{summary: "branch done"}, catalogWith(t, childTool))
 
 	mf := &memForker{}
-	fork := agent.NewForkTool(childEngine, mf, agent.WithForkConcurrency(3))
+	fork := agent.NewParallelTool(childEngine, mf, agent.WithParallelConcurrency(3))
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Fork", `{"tasks":["A","B","C"]}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Parallel", `{"tasks":["A","B","C"]}`)),
 		mockllm.TextTurn("ok"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, fork)})
@@ -276,9 +276,9 @@ func TestForkRunsInParallel(t *testing.T) {
 	}
 }
 
-// TestForkConcurrencyCapBounded asserts the worker limit caps simultaneous
+// TestParallelConcurrencyCapBounded asserts the worker limit caps simultaneous
 // branches: with concurrency 1, branches never overlap.
-func TestForkConcurrencyCapBounded(t *testing.T) {
+func TestParallelConcurrencyCapBounded(t *testing.T) {
 	var (
 		mu      sync.Mutex
 		running int
@@ -300,9 +300,9 @@ func TestForkConcurrencyCapBounded(t *testing.T) {
 		}}
 	childEngine := childEngineWith(&branchProvider{summary: "branch done"}, catalogWith(t, childTool))
 	mf := &memForker{}
-	fork := agent.NewForkTool(childEngine, mf, agent.WithForkConcurrency(1))
+	fork := agent.NewParallelTool(childEngine, mf, agent.WithParallelConcurrency(1))
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Fork", `{"tasks":["A","B","C"]}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Parallel", `{"tasks":["A","B","C"]}`)),
 		mockllm.TextTurn("ok"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, fork)})
@@ -317,16 +317,16 @@ func TestForkConcurrencyCapBounded(t *testing.T) {
 	}
 }
 
-// TestForkFanOutCapEnforced asserts an over-cap fan-out is rejected with an error
+// TestParallelFanOutCapEnforced asserts an over-cap fan-out is rejected with an error
 // result and NO forks are created.
-func TestForkFanOutCapEnforced(t *testing.T) {
+func TestParallelFanOutCapEnforced(t *testing.T) {
 	childEngine := childEngineWith(mockllm.New(), tool.NewCatalog())
 	mf := &memForker{}
-	fork := agent.NewForkTool(childEngine, mf, agent.WithMaxBranches(2))
+	fork := agent.NewParallelTool(childEngine, mf, agent.WithMaxBranches(2))
 
 	tasks, _ := json.Marshal(map[string]any{"tasks": []string{"a", "b", "c"}})
 	res, err := fork.Execute(context.Background(),
-		session.NewToolCall("c1", "Fork", tasks), memfs.NewWorkspace("/ws"))
+		session.NewToolCall("c1", "Parallel", tasks), memfs.NewWorkspace("/ws"))
 	if err != nil {
 		t.Fatalf("unexpected harness error: %v", err)
 	}
@@ -338,13 +338,13 @@ func TestForkFanOutCapEnforced(t *testing.T) {
 	}
 }
 
-// TestForkRejectsEmptyTasks asserts empty/blank tasks yield an error result.
-func TestForkRejectsEmptyTasks(t *testing.T) {
+// TestParallelRejectsEmptyTasks asserts empty/blank tasks yield an error result.
+func TestParallelRejectsEmptyTasks(t *testing.T) {
 	childEngine := childEngineWith(mockllm.New(), tool.NewCatalog())
-	fork := agent.NewForkTool(childEngine, &memForker{})
+	fork := agent.NewParallelTool(childEngine, &memForker{})
 
 	res, err := fork.Execute(context.Background(),
-		session.NewToolCall("c1", "Fork", json.RawMessage(`{"tasks":["  ",""]}`)),
+		session.NewToolCall("c1", "Parallel", json.RawMessage(`{"tasks":["  ",""]}`)),
 		memfs.NewWorkspace("/ws"))
 	if err != nil {
 		t.Fatalf("unexpected harness error: %v", err)
@@ -354,9 +354,9 @@ func TestForkRejectsEmptyTasks(t *testing.T) {
 	}
 }
 
-// TestForkParentCancelPropagates asserts cancelling the parent ctx cancels the
+// TestParallelParentCancelPropagates asserts cancelling the parent ctx cancels the
 // in-flight branches: Execute returns without hanging.
-func TestForkParentCancelPropagates(t *testing.T) {
+func TestParallelParentCancelPropagates(t *testing.T) {
 	started := make(chan struct{}, 8)
 	var once sync.Once
 	// A child tool that signals it started then blocks until ctx is cancelled.
@@ -368,9 +368,9 @@ func TestForkParentCancelPropagates(t *testing.T) {
 		}}
 	childEngine := childEngineWith(&branchProvider{summary: "branch done"}, catalogWith(t, childTool))
 	mf := &memForker{}
-	fork := agent.NewForkTool(childEngine, mf, agent.WithForkConcurrency(2))
+	fork := agent.NewParallelTool(childEngine, mf, agent.WithParallelConcurrency(2))
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Fork", `{"tasks":["A","B"]}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Parallel", `{"tasks":["A","B"]}`)),
 		mockllm.TextTurn("recovered"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, fork)})
@@ -397,24 +397,24 @@ func TestForkParentCancelPropagates(t *testing.T) {
 	}
 }
 
-// TestNewForkToolNilArgsPanic asserts the composition-root contracts.
-func TestNewForkToolNilArgsPanic(t *testing.T) {
+// TestNewParallelToolNilArgsPanic asserts the composition-root contracts.
+func TestNewParallelToolNilArgsPanic(t *testing.T) {
 	t.Run("nil engine", func(t *testing.T) {
 		defer func() {
 			if recover() == nil {
-				t.Fatalf("NewForkTool(nil engine) did not panic")
+				t.Fatalf("NewParallelTool(nil engine) did not panic")
 			}
 		}()
-		_ = agent.NewForkTool(nil, &memForker{})
+		_ = agent.NewParallelTool(nil, &memForker{})
 	})
 	t.Run("nil forker", func(t *testing.T) {
 		childEngine := childEngineWith(mockllm.New(), tool.NewCatalog())
 		defer func() {
 			if recover() == nil {
-				t.Fatalf("NewForkTool(nil forker) did not panic")
+				t.Fatalf("NewParallelTool(nil forker) did not panic")
 			}
 		}()
-		_ = agent.NewForkTool(childEngine, nil)
+		_ = agent.NewParallelTool(childEngine, nil)
 	})
 }
 

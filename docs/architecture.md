@@ -56,7 +56,7 @@ flowchart LR
   end
 
   subgraph APP["application — internal/agent"]
-    engine["Engine / Run\nloop · dispatch · permission · hooks\ncompaction · cascade · tokencount\nsubagent (Subagent) · fork (Fork)"]
+    engine["Engine / Run\nloop · dispatch · permission · hooks\ncompaction · cascade · tokencount\nsubagent (Subagent) · parallel (Parallel)"]
   end
 
   subgraph PORTS["ports — internal/port"]
@@ -588,7 +588,7 @@ boundary:
 - The composition layer wires `childEngine` with **Read/Grep/Glob plus Bash**
   (`buildChildEngine` registers Bash via the **sandboxed** runner —
   `buildSandboxedCommandRunner`, the SAME hardening team members get, since the
-  worktree shares the parent `.git`), **never `Subagent`/`Fork`/`ToolSearch`** (no
+  worktree shares the parent `.git`), **never `Subagent`/`Parallel`/`ToolSearch`** (no
   recursion / fan-out) and **never Edit/Write** (it inspects, it does not edit the
   project). Per-def Subagent engines keep Bash via `scopedToolNamesMode`'s `allowShell`
   and share the one `SubagentTool` forker. With no runner (`--no-bash`) the child is a
@@ -853,9 +853,9 @@ system rules, not this block.
 func. The default `internal/adapter/forker` picks its strategy per base —
 a **git worktree** (`git worktree add --detach … HEAD`) when the root is inside a
 repo, else a **recursive copy** — so a child can never write back into the
-parent's tree. `agent.NewForkTool(childEngine, forker, …)` is the fan-out tool
-(catalog name `Fork`): it runs several isolated child loops on independent
-branches and joins their results. It is opt-in via `--enable-fork`; like Subagent,
+parent's tree. `agent.NewParallelTool(childEngine, forker, …)` is the fan-out tool
+(catalog name `Parallel`): it runs several isolated child loops on independent
+branches and joins their results. It is opt-in via `--enable-parallel`; like Subagent,
 the children's intermediate events are drained internally.
 
 The same seam serves **agent teams** (`agent.Supervisor`/`TeamTool`) with a

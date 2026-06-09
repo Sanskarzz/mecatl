@@ -109,7 +109,7 @@ var teamSchema = json.RawMessage(`{
 // honest floor when even the ledger is empty. A non-convergence header is prepended when
 // the team did NOT converge. The ToolResult is therefore NEVER a bare refusal or empty.
 //
-// It is the team analogue of SubagentTool/ForkTool, with two deliberate differences:
+// It is the team analogue of SubagentTool/ParallelTool, with two deliberate differences:
 //
 //   - ReadOnly() == false. A team spawns Mutating members and is long-lived and
 //     stateful, so the dispatcher must SERIALISE it (mutate-serial) rather than
@@ -232,7 +232,7 @@ func (*TeamTool) Spec() tool.ToolSpec {
 // SERIALISES it (mutate-serial) — it never runs concurrently with another tool.
 // A team is long-lived, stateful, and may spawn Mutating members; its Supervisor
 // drives unsynchronised member state, so it must not race the parent's other tool
-// calls. This is the deliberate opposite of SubagentTool/ForkTool, which are
+// calls. This is the deliberate opposite of SubagentTool/ParallelTool, which are
 // read-parallel.
 func (*TeamTool) ReadOnly() bool { return false }
 

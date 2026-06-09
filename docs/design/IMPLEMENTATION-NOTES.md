@@ -168,7 +168,7 @@ whose usage massively overshoots still finishes, then the budget trips before th
 is NOT a `port.LLMRequest` field (the request stays provider-neutral) — it is composition-tunable
 (`app.Config.MaxRunTokens` → `--max-run-tokens`) and INHERITED by every engine via
 `engineDepsForProvider`; `childEngineDepsForProvider` delegates there and does NOT clear it, so
-Subagent/team-member/lead/Fork children inherit the same ceiling. `StopBudget` is the
+Subagent/team-member/lead/Parallel children inherit the same ceiling. `StopBudget` is the
 AGENT-TEAMS-SPIKE's named "Deferred 4A" brake, now landed once for every delegation path. It is a
 STRING passthrough on the wire (`session.StopBudget = "budget"`, no proto enum). Guards:
 `agent.TestBudget*`, `session.TestStopBudgetIsCleanReopenableTerminal`,
@@ -358,7 +358,7 @@ coverage loop hard-failed with a misleading "denied by user". The fix (`handleCh
 - **Step 3 — surface to human.** An interactive parent run installs `Run.childAsks`
   (`childAskRouter`) when `Deps.Interactive`. The dispatcher passes a `parentCaps`
   (interactivity + a register-then-emit `surfaceAsk`) to a `childCapableTool`
-  (Subagent/Team/Fork's `ExecuteWithParent`). `resolveChildAsk` registers the child Run in the
+  (Subagent/Team/Parallel's `ExecuteWithParent`). `resolveChildAsk` registers the child Run in the
   parent router and emits a REDACTED parent `EvPermissionAsk` (command `clampPreview`'d, framed
   "subagent requests approval to run Bash: …", raw `Args` dropped — gauntlet #7), then returns
   WITHOUT resolving; the child parks in its own goroutine. The parent's `Run.Approve` routes the
@@ -488,7 +488,7 @@ run into a throwaway git worktree BEFORE running it (`buildChildEngine` register
 SAME `buildSandboxedCommandRunner`; `buildSubagentTool` wires the worktree forker iff a runner
 exists; per-def Subagent engines keep Bash via `scopedToolNamesMode`'s `allowShell` and share the
 one forker). So a `Subagent` to "investigate X" can now `git log`/`git show`/`cat`/build/test in an
-isolated checkout — Edit/Write still dropped, no Subagent/Fork recursion. `SubagentTool.ReadOnly()`
+isolated checkout — Edit/Write still dropped, no Subagent/Parallel recursion. `SubagentTool.ReadOnly()`
 stays **true**: isolation (not catalog read-only-ness) is what keeps Subagent read-parallel — its
 writes land in the worktree, never the shared base; a fork FAILURE is a tool error, NOT a
 silent fallback to the shared ws. A `WithMaxConcurrentChildren` (default 4; old
@@ -704,7 +704,7 @@ ceiling, captured for the resolvers)/`architecture.input_modalities`/`supported_
 → the SDK omits it → upstream default applies). Strict mode would require every tool schema's
 `required` to list ALL of its `properties`, but many built-in tools carry genuinely optional
 params (Bash `timeout_ms`, Edit `replace_all`, Read `offset`/`limit`, Grep `path`, memory
-Remember/query, ToolSearch, Fork, Team, Subagent, …); a strict-enforcing OpenAI-compatible
+Remember/query, ToolSearch, Parallel, Team, Subagent, …); a strict-enforcing OpenAI-compatible
 upstream (Azure reached via OpenRouter) `400`s those. We don't need the guarantee: **argument
 validation lives at the execution edge** — every tool re-parses/validates via
 `session.ParseArgs` / `NewToolError` before acting. The openai adapter is shared by the

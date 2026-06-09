@@ -104,7 +104,7 @@ go run ./cmd/mecated --openai \
   --memory-dir ./mem --memory-consolidate-interval 1h \
   --otlp-endpoint localhost:4317 \        # export OTel traces; /metrics is always on --metrics-addr
   --compaction cascade --tokenizer tiktoken \
-  --enable-fork \                         # default on; --no-bash for shell-less
+  --enable-parallel \                     # default on; --no-bash for shell-less
   --commands-dir .mecatl/commands            # slash-command templates
 ```
 

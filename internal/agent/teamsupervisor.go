@@ -100,7 +100,7 @@ var (
 const defaultMaxRounds = 24
 
 // defaultTeamConcurrency bounds how many member turns run at once within a single
-// scheduling round, mirroring fork.go's defaultForkConcurrency. Running every
+// scheduling round, mirroring parallel.go's defaultParallelConcurrency. Running every
 // planned member concurrently is the point of a round, but it is also N times the
 // resource cost, so a worker limit keeps it bounded. Override with
 // WithTeamConcurrency.
@@ -735,7 +735,7 @@ func (s *Supervisor) Run(ctx context.Context, sink func(TeamEvent)) TeamOutcome 
 		}
 		rounds++
 		// Run the round's planned member turns concurrently, but bounded: a worker
-		// limit caps how many run at once (mirroring fork.go). runTurn returns no
+		// limit caps how many run at once (mirroring parallel.go). runTurn returns no
 		// error — a member's failure is captured on its memberRT (stopped) — so the
 		// group's Wait error is always nil and ignored.
 		var g errgroup.Group

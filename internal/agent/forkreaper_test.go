@@ -120,7 +120,7 @@ func (m *uniqueForker) wasCleaned(root string) bool {
 }
 
 // TestForkWinnerReaperBoundsPreservedForks runs several join=judge Forks through one
-// ForkTool wired with a small-cap reaper and asserts that only `cap` winner forks
+// ParallelTool wired with a small-cap reaper and asserts that only `cap` winner forks
 // remain un-cleaned: the oldest winners beyond the cap are reaped, while the most
 // recent winner stays inspectable (its fork is NOT cleaned).
 func TestForkWinnerReaperBoundsPreservedForks(t *testing.T) {
@@ -133,15 +133,15 @@ func TestForkWinnerReaperBoundsPreservedForks(t *testing.T) {
 	uf := newUniqueForker()
 	judge := &fakeJudge{pick: "WIN", rationale: "beta wins"}
 	reaper := agent.NewLRUForkReaper(capN)
-	fork := agent.NewForkTool(childEngine, uf,
-		agent.WithForkConcurrency(1),
-		agent.WithForkJudge(judge),
+	fork := agent.NewParallelTool(childEngine, uf,
+		agent.WithParallelConcurrency(1),
+		agent.WithParallelJudge(judge),
 		agent.WithWinnerReaper(reaper))
 
 	var winnerRoots []string
 	for i := 0; i < calls; i++ {
 		res, err := fork.Execute(context.Background(),
-			session.NewToolCall(session.ToolCallID(fmt.Sprintf("c%d", i)), "Fork",
+			session.NewToolCall(session.ToolCallID(fmt.Sprintf("c%d", i)), "Parallel",
 				json.RawMessage(`{"tasks":["do alpha","do beta"],"join":"judge","criteria":"pick beta"}`)),
 			memfs.NewWorkspace("/ws"))
 		if err != nil || res.IsError {

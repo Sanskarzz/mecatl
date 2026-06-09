@@ -235,13 +235,13 @@ type Config struct {
 	EnableCommands bool
 
 	// Optional tools, on by default in the standalone server.
-	EnableFork bool
+	EnableParallel bool
 
 	// ForkPreservedCap bounds how many PRESERVED winner forks (join=first /
 	// join=judge) survive at once across the process: a new winner beyond the cap
 	// LRU-reaps the oldest preserved fork. Zero uses agent.DefaultPreservedForkCap.
 	// Preserved forks remain the deliverable — they are inspectable/mergeable — but
-	// are capped so many Fork calls cannot grow disk without bound.
+	// are capped so many Parallel calls cannot grow disk without bound.
 	ForkPreservedCap int
 
 	// EnableTeams turns on the agent-teams capability (the CreateTeam /
@@ -1478,38 +1478,38 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	// Built.Close tears them ALL down on shutdown (process-lifetime engines).
 	mcpClose = composeClose(cfg.diag(), taskMCPClose, mcpClose)
 
-	// Fork fan-out tool: a scoped child Engine (no Fork/Subagent/ToolSearch, so a branch
+	// Parallel fan-out tool: a scoped child Engine (no Parallel/Subagent/ToolSearch, so a branch
 	// cannot recurse) run against an ISOLATED forked workspace. Unlike the Subagent
-	// subagent, the Fork branch child MAY mutate (Edit/Write/Bash-if-configured):
+	// subagent, the Parallel branch child MAY mutate (Edit/Write/Bash-if-configured):
 	// that is safe because every branch writes only to its own fork, never the
-	// parent base, so ForkTool.ReadOnly() stays true. The judge is a SEPARATE,
+	// parent base, so ParallelTool.ReadOnly() stays true. The judge is a SEPARATE,
 	// tool-less read-only Engine built from a distinct provider concern so its LLM
 	// calls never interleave with the branches' (matters for the mockllm cursor in
 	// tests; harmless for the stateless OpenAI adapter).
-	if cfg.EnableFork {
-		// WithForceCopy: Fork branches MUTATE and run Bash (incl. git), so they get
+	if cfg.EnableParallel {
+		// WithForceCopy: Parallel branches MUTATE and run Bash (incl. git), so they get
 		// FULLY isolated forks (a full copy incl. .git — own object DB/refs) rather
 		// than a worktree that shares the base repo's .git. This stops a branch's
 		// git commit/push/update-ref from escaping into the base repo.
 		fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }, forker.WithForceCopy())
-		forkChild := buildForkChildEngine(cfg, provider, buildCommandRunner(cfg))
-		judge := agent.NewEngineJudge(buildForkJudgeEngine(cfg, provider))
+		parallelChild := buildParallelChildEngine(cfg, provider, buildCommandRunner(cfg))
+		judge := agent.NewEngineJudge(buildParallelJudgeEngine(cfg, provider))
 		// Bound the PRESERVED winner forks (join=first/judge): an LRU reaper keeps the
 		// most-recent N and tears down the oldest beyond the cap, so a long-lived
-		// process running many Fork calls cannot leak winner forks unboundedly. The
+		// process running many Parallel calls cannot leak winner forks unboundedly. The
 		// winner stays inspectable until it falls off the LRU tail.
 		preservedCap := cfg.ForkPreservedCap
 		if preservedCap <= 0 {
 			preservedCap = agent.DefaultPreservedForkCap
 		}
-		cat.MustRegister(agent.NewForkTool(forkChild, fk,
-			agent.WithForkSubagentStopHook(hooks),
-			agent.WithForkJudge(judge),
+		cat.MustRegister(agent.NewParallelTool(parallelChild, fk,
+			agent.WithParallelSubagentStopHook(hooks),
+			agent.WithParallelJudge(judge),
 			agent.WithWinnerReaper(agent.NewLRUForkReaper(preservedCap))))
-		cfg.diag().Log(ctx, port.LevelInfo, "Fork tool ENABLED (parallel isolated MUTATING child branches; judge selection wired)",
+		cfg.diag().Log(ctx, port.LevelInfo, "Parallel tool ENABLED (parallel isolated MUTATING child branches; judge selection wired)",
 			"preserved_fork_cap", preservedCap)
 	} else {
-		cfg.diag().Log(ctx, port.LevelInfo, "Fork tool DISABLED")
+		cfg.diag().Log(ctx, port.LevelInfo, "Parallel tool DISABLED")
 	}
 
 	// Team tool: forms a team of coordinating subagents in-process, driving a
@@ -2078,10 +2078,10 @@ func buildChildEngine(cfg Config, provider port.LLMProvider, runner tool.Command
 // readOnlyExplorerCatalog builds the canonical read-only explorer tool surface a Subagent
 // child (and a read-only Fork/member base) is scoped to: Read/Grep/Glob, PLUS the
 // SANDBOXED Bash tool when a runner is wired (runner != nil). It NEVER includes
-// Edit/Write (the explorer inspects, it does not edit the project) nor Subagent/Fork/
+// Edit/Write (the explorer inspects, it does not edit the project) nor Subagent/Parallel/
 // ToolSearch (no recursion/fan-out). It is the ONE definition of that surface, shared by
 // buildChildEngine (default Subagent explorer), buildSubagentEngineFactory (per-call model
-// override — byte-identical to the default), and buildForkChildEngine's read-only base
+// override — byte-identical to the default), and buildParallelChildEngine's read-only base
 // (which then layers Edit/Write on top). The team-member catalog is DELIBERATELY NOT
 // built from here: its Bash gating differs (spec.Mutating || roIsolationAvailable, with
 // the isolateReadOnly side-effect), so it keeps its own tiering.
@@ -2119,9 +2119,9 @@ const explorerReferencesInstruction = "When you finish, END your summary with a 
 	"to the task, so the caller can navigate directly to them without searching again. " +
 	"List concrete paths, not prose."
 
-// buildForkChildEngine constructs the child *Engine each Fork branch runs. Unlike
-// buildChildEngine (the read-only Subagent explorer), a Fork branch child MAY MUTATE
-// its OWN fork: it gets Read/Grep/Glob/Edit/Write, still EXCLUDING Subagent/Fork/
+// buildParallelChildEngine constructs the child *Engine each Parallel branch runs. Unlike
+// buildChildEngine (the read-only Subagent explorer), a Parallel branch child MAY MUTATE
+// its OWN fork: it gets Read/Grep/Glob/Edit/Write, still EXCLUDING Subagent/Parallel/
 // ToolSearch (a branch must not recurse or fan out further).
 //
 // Bash IS registered when a runner is configured (runner != nil). The runner is
@@ -2131,9 +2131,9 @@ const explorerReferencesInstruction = "When you finish, END your summary with a 
 // shared parent base. (A shell-less deployment passes a nil runner and the branch
 // simply runs without Bash, exactly like the main session.)
 //
-// This is the behavioural shift Tier 3 enables: Fork branches can now IMPLEMENT
+// This is the behavioural shift Tier 3 enables: Parallel branches can now IMPLEMENT
 // (via Edit/Write AND Bash), not merely explore. It is safe — and
-// ForkTool.ReadOnly() stays true — because every branch runs in its OWN isolated
+// ParallelTool.ReadOnly() stays true — because every branch runs in its OWN isolated
 // forked workspace, so a branch's Edit/Write/Bash land in its fork and (for
 // relative-path operations) never touch the parent base. Bash can still escape
 // its cwd via absolute paths / `cd` — that is the inherent Bash trust model, the
@@ -2141,27 +2141,27 @@ const explorerReferencesInstruction = "When you finish, END your summary with a 
 // the fork, removing the accidental shared-base mutation a parent-rooted runner
 // caused. The mutating winner's fork is what winner-preservation
 // (join=first/judge) keeps.
-func buildForkChildEngine(cfg Config, provider port.LLMProvider, runner tool.CommandRunner) *agent.Engine {
+func buildParallelChildEngine(cfg Config, provider port.LLMProvider, runner tool.CommandRunner) *agent.Engine {
 	// Start from the read-only explorer surface (Read/Grep/Glob + sandboxed Bash) then
-	// LAYER Edit/Write on top — a Fork branch MAY mutate its OWN fork. Bash is
+	// LAYER Edit/Write on top — a Parallel branch MAY mutate its OWN fork. Bash is
 	// workspace-aware (BashTool.Execute passes the per-branch forked Workspace.Root() as
-	// workdir), so a branch's Bash runs in its OWN fork. (Subagent/Fork/ToolSearch stay
+	// workdir), so a branch's Bash runs in its OWN fork. (Subagent/Parallel/ToolSearch stay
 	// excluded — readOnlyExplorerCatalog never adds them — so a branch can't recurse.)
 	childCat := readOnlyExplorerCatalog(runner)
 	childCat.MustRegister(tools.EditTool{})
 	childCat.MustRegister(tools.WriteTool{})
 
-	return newChildEngine(cfg.diag(), "fork", provider, childCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	return newChildEngine(cfg.diag(), "parallel", provider, childCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
-// buildForkJudgeEngine constructs the minimal, tool-less read-only child *Engine
-// the Fork join=judge/best strategy runs to SELECT a winner. It scores text only,
+// buildParallelJudgeEngine constructs the minimal, tool-less read-only child *Engine
+// the Parallel join=judge/best strategy runs to SELECT a winner. It scores text only,
 // so it gets an EMPTY catalog (no tools) under an allow-all policy. It is a DISTINCT
 // Engine instance from the branch child so, with the mockllm shared-cursor provider
 // in tests, the judge's LLM calls never interleave with the branches'; with the
 // stateless OpenAI adapter this separation is naturally harmless.
-func buildForkJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
-	return newChildEngine(cfg.diag(), "fork-judge", provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, cfg.gitStatus))
+func buildParallelJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
+	return newChildEngine(cfg.diag(), "parallel-judge", provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
 // buildSubagentTool constructs the Subagent tool tool over a default child Engine

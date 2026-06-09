@@ -158,7 +158,7 @@ func (j *fakeJudge) Judge(_ context.Context, candidates []agent.BranchSummary, c
 			return i, j.rationale, nil
 		}
 	}
-	return -1, "", nil // out of range -> ForkTool falls back to first success
+	return -1, "", nil // out of range -> ParallelTool falls back to first success
 }
 
 func (j *fakeJudge) called() bool {
@@ -169,19 +169,19 @@ func (j *fakeJudge) called() bool {
 
 // --- all: byte-for-byte unchanged --------------------------------------------
 
-// TestForkJoinAllUnchanged asserts that an explicit join="all" and an ABSENT join
+// TestParallelJoinAllUnchanged asserts that an explicit join="all" and an ABSENT join
 // produce byte-identical ToolResult content (the backward-compat guarantee).
-func TestForkJoinAllUnchanged(t *testing.T) {
+func TestParallelJoinAllUnchanged(t *testing.T) {
 	build := func() tool.Tool {
 		childEngine := childEngineWith(&routingBranchProvider{summaries: map[string]string{
 			"A": "summary A", "B": "summary B",
 		}}, tool.NewCatalog())
-		return agent.NewForkTool(childEngine, newLabeledForker(), agent.WithForkConcurrency(1))
+		return agent.NewParallelTool(childEngine, newLabeledForker(), agent.WithParallelConcurrency(1))
 	}
 
 	exec := func(args string) string {
 		res, err := build().Execute(context.Background(),
-			session.NewToolCall("c1", "Fork", json.RawMessage(args)), memfs.NewWorkspace("/ws"))
+			session.NewToolCall("c1", "Parallel", json.RawMessage(args)), memfs.NewWorkspace("/ws"))
 		if err != nil {
 			t.Fatalf("unexpected harness error: %v", err)
 		}
@@ -197,22 +197,22 @@ func TestForkJoinAllUnchanged(t *testing.T) {
 		t.Fatalf("join=all differs from absent join:\n--- absent ---\n%s\n--- explicit ---\n%s", absent, explicit)
 	}
 	// Sanity: it really is the legacy joinBranches shape.
-	if !strings.Contains(absent, "Fork joined 2 branch(es)") {
+	if !strings.Contains(absent, "Parallel joined 2 branch(es)") {
 		t.Fatalf("join=all is not the legacy shape:\n%s", absent)
 	}
 }
 
-// TestForkJoinAllCleansEveryFork asserts join=all tears down EVERY fork (no
+// TestParallelJoinAllCleansEveryFork asserts join=all tears down EVERY fork (no
 // preservation), matching today's contract.
-func TestForkJoinAllCleansEveryFork(t *testing.T) {
+func TestParallelJoinAllCleansEveryFork(t *testing.T) {
 	childEngine := childEngineWith(&routingBranchProvider{summaries: map[string]string{
 		"A": "sa", "B": "sb", "C": "sc",
 	}}, tool.NewCatalog())
 	rf := newLabeledForker()
-	fork := agent.NewForkTool(childEngine, rf, agent.WithForkConcurrency(1))
+	fork := agent.NewParallelTool(childEngine, rf, agent.WithParallelConcurrency(1))
 
 	res, err := fork.Execute(context.Background(),
-		session.NewToolCall("c1", "Fork", json.RawMessage(`{"tasks":["task A","task B","task C"],"join":"all"}`)),
+		session.NewToolCall("c1", "Parallel", json.RawMessage(`{"tasks":["task A","task B","task C"],"join":"all"}`)),
 		memfs.NewWorkspace("/ws"))
 	if err != nil || res.IsError {
 		t.Fatalf("unexpected: err=%v res=%+v", err, res)
@@ -226,21 +226,21 @@ func TestForkJoinAllCleansEveryFork(t *testing.T) {
 
 // --- judge -------------------------------------------------------------------
 
-// TestForkJoinJudgeSelectsWinnerPreservesFork asserts join=judge selects the
+// TestParallelJoinJudgeSelectsWinnerPreservesFork asserts join=judge selects the
 // scripted winner, PRESERVES the winner's fork (cleanup NOT called), CLEANS the
 // losers, surfaces the rationale, and reports the preserved path.
-func TestForkJoinJudgeSelectsWinnerPreservesFork(t *testing.T) {
+func TestParallelJoinJudgeSelectsWinnerPreservesFork(t *testing.T) {
 	childEngine := childEngineWith(&routingBranchProvider{summaries: map[string]string{
 		"alpha": "alpha result", "beta": "WINNINGRESULT beta", "gamma": "gamma result",
 	}}, tool.NewCatalog())
 	rf := newLabeledForker()
 	// Judge picks the branch whose summary contains "WINNINGRESULT" (branch-2).
 	judge := &fakeJudge{pick: "WINNINGRESULT", rationale: "beta is best"}
-	fork := agent.NewForkTool(childEngine, rf,
-		agent.WithForkConcurrency(1), agent.WithForkJudge(judge))
+	fork := agent.NewParallelTool(childEngine, rf,
+		agent.WithParallelConcurrency(1), agent.WithParallelJudge(judge))
 
 	res, err := fork.Execute(context.Background(),
-		session.NewToolCall("c1", "Fork",
+		session.NewToolCall("c1", "Parallel",
 			json.RawMessage(`{"tasks":["do alpha","do beta","do gamma"],"join":"judge","criteria":"pick beta"}`)),
 		memfs.NewWorkspace("/ws"))
 	if err != nil || res.IsError {
@@ -274,17 +274,17 @@ func TestForkJoinJudgeSelectsWinnerPreservesFork(t *testing.T) {
 	}
 }
 
-// TestForkJoinBestAliasesJudge asserts join="best" behaves as join="judge".
-func TestForkJoinBestAliasesJudge(t *testing.T) {
+// TestParallelJoinBestAliasesJudge asserts join="best" behaves as join="judge".
+func TestParallelJoinBestAliasesJudge(t *testing.T) {
 	childEngine := childEngineWith(&routingBranchProvider{summaries: map[string]string{
 		"x": "rx", "y": "WIN ry",
 	}}, tool.NewCatalog())
 	rf := newLabeledForker()
 	judge := &fakeJudge{pick: "WIN", rationale: "y wins"}
-	fork := agent.NewForkTool(childEngine, rf, agent.WithForkConcurrency(1), agent.WithForkJudge(judge))
+	fork := agent.NewParallelTool(childEngine, rf, agent.WithParallelConcurrency(1), agent.WithParallelJudge(judge))
 
 	res, err := fork.Execute(context.Background(),
-		session.NewToolCall("c1", "Fork", json.RawMessage(`{"tasks":["do x","do y"],"join":"best"}`)),
+		session.NewToolCall("c1", "Parallel", json.RawMessage(`{"tasks":["do x","do y"],"join":"best"}`)),
 		memfs.NewWorkspace("/ws"))
 	if err != nil || res.IsError {
 		t.Fatalf("unexpected: err=%v res=%+v", err, res)
@@ -294,19 +294,19 @@ func TestForkJoinBestAliasesJudge(t *testing.T) {
 	}
 }
 
-// TestForkJoinJudgeFallbackOnBadVerdict asserts that when the judge errors (or
+// TestParallelJoinJudgeFallbackOnBadVerdict asserts that when the judge errors (or
 // returns out-of-range), Fork FALLS BACK to the first successful branch instead of
 // hard-failing, and still preserves that branch's fork.
-func TestForkJoinJudgeFallbackOnBadVerdict(t *testing.T) {
+func TestParallelJoinJudgeFallbackOnBadVerdict(t *testing.T) {
 	childEngine := childEngineWith(&routingBranchProvider{summaries: map[string]string{
 		"A": "sa", "B": "sb",
 	}}, tool.NewCatalog())
 	rf := newLabeledForker()
 	judge := &fakeJudge{errOut: fmt.Errorf("judge exploded")}
-	fork := agent.NewForkTool(childEngine, rf, agent.WithForkConcurrency(1), agent.WithForkJudge(judge))
+	fork := agent.NewParallelTool(childEngine, rf, agent.WithParallelConcurrency(1), agent.WithParallelJudge(judge))
 
 	res, err := fork.Execute(context.Background(),
-		session.NewToolCall("c1", "Fork", json.RawMessage(`{"tasks":["do A","do B"],"join":"judge"}`)),
+		session.NewToolCall("c1", "Parallel", json.RawMessage(`{"tasks":["do A","do B"],"join":"judge"}`)),
 		memfs.NewWorkspace("/ws"))
 	if err != nil {
 		t.Fatalf("unexpected harness error: %v", err)
@@ -326,9 +326,9 @@ func TestForkJoinJudgeFallbackOnBadVerdict(t *testing.T) {
 	}
 }
 
-// TestForkJoinJudgeSingleSuccessSkipsJudge asserts that with exactly ONE successful
+// TestParallelJoinJudgeSingleSuccessSkipsJudge asserts that with exactly ONE successful
 // branch the judge is NOT called (trivial winner) and that branch is preserved.
-func TestForkJoinJudgeSingleSuccessSkipsJudge(t *testing.T) {
+func TestParallelJoinJudgeSingleSuccessSkipsJudge(t *testing.T) {
 	// branch-1 succeeds; branch-2's fork fails (so only one success).
 	childEngine := childEngineWith(&routingBranchProvider{summaries: map[string]string{
 		"A": "only A", "B": "sb",
@@ -337,10 +337,10 @@ func TestForkJoinJudgeSingleSuccessSkipsJudge(t *testing.T) {
 	// Make branch-2 fail by failing its fork via a wrapper.
 	failing := &labelFailForker{inner: rf, failLabel: "branch-2"}
 	judge := &fakeJudge{pick: "nonexistent"}
-	fork := agent.NewForkTool(childEngine, failing, agent.WithForkConcurrency(1), agent.WithForkJudge(judge))
+	fork := agent.NewParallelTool(childEngine, failing, agent.WithParallelConcurrency(1), agent.WithParallelJudge(judge))
 
 	res, err := fork.Execute(context.Background(),
-		session.NewToolCall("c1", "Fork", json.RawMessage(`{"tasks":["do A","do B"],"join":"judge"}`)),
+		session.NewToolCall("c1", "Parallel", json.RawMessage(`{"tasks":["do A","do B"],"join":"judge"}`)),
 		memfs.NewWorkspace("/ws"))
 	if err != nil || res.IsError {
 		t.Fatalf("unexpected: err=%v res=%+v", err, res)
@@ -359,19 +359,19 @@ func TestForkJoinJudgeSingleSuccessSkipsJudge(t *testing.T) {
 	}
 }
 
-// TestForkJoinJudgeNoSuccessAllFailedReport asserts 0 successful branches yield the
+// TestParallelJoinJudgeNoSuccessAllFailedReport asserts 0 successful branches yield the
 // all-failed report (no judge call) and every fork is cleaned.
-func TestForkJoinJudgeNoSuccessAllFailedReport(t *testing.T) {
+func TestParallelJoinJudgeNoSuccessAllFailedReport(t *testing.T) {
 	childEngine := childEngineWith(&routingBranchProvider{summaries: map[string]string{}},
 		tool.NewCatalog())
 	rf := newLabeledForker()
 	// Both forks fail.
 	failing := &labelFailForker{inner: rf, failAll: true}
 	judge := &fakeJudge{pick: "x"}
-	fork := agent.NewForkTool(childEngine, failing, agent.WithForkConcurrency(1), agent.WithForkJudge(judge))
+	fork := agent.NewParallelTool(childEngine, failing, agent.WithParallelConcurrency(1), agent.WithParallelJudge(judge))
 
 	res, err := fork.Execute(context.Background(),
-		session.NewToolCall("c1", "Fork", json.RawMessage(`{"tasks":["do A","do B"],"join":"judge"}`)),
+		session.NewToolCall("c1", "Parallel", json.RawMessage(`{"tasks":["do A","do B"],"join":"judge"}`)),
 		memfs.NewWorkspace("/ws"))
 	if err != nil || res.IsError {
 		t.Fatalf("unexpected: err=%v res=%+v", err, res)
@@ -385,15 +385,15 @@ func TestForkJoinJudgeNoSuccessAllFailedReport(t *testing.T) {
 	}
 }
 
-// TestForkJoinJudgeUnavailable asserts join=judge with NO judge wired returns a
+// TestParallelJoinJudgeUnavailable asserts join=judge with NO judge wired returns a
 // model-addressable error result (not a panic / not a silent fallback).
-func TestForkJoinJudgeUnavailable(t *testing.T) {
+func TestParallelJoinJudgeUnavailable(t *testing.T) {
 	childEngine := childEngineWith(&routingBranchProvider{summaries: map[string]string{}}, tool.NewCatalog())
 	rf := newLabeledForker()
-	fork := agent.NewForkTool(childEngine, rf, agent.WithForkConcurrency(1)) // no WithForkJudge
+	fork := agent.NewParallelTool(childEngine, rf, agent.WithParallelConcurrency(1)) // no WithParallelJudge
 
 	res, err := fork.Execute(context.Background(),
-		session.NewToolCall("c1", "Fork", json.RawMessage(`{"tasks":["a","b"],"join":"judge"}`)),
+		session.NewToolCall("c1", "Parallel", json.RawMessage(`{"tasks":["a","b"],"join":"judge"}`)),
 		memfs.NewWorkspace("/ws"))
 	if err != nil {
 		t.Fatalf("unexpected harness error: %v", err)
@@ -409,12 +409,12 @@ func TestForkJoinJudgeUnavailable(t *testing.T) {
 
 // --- first -------------------------------------------------------------------
 
-// TestForkJoinFirstReturnsFirstSuccessCancelsLosers asserts join=first returns the
+// TestParallelJoinFirstReturnsFirstSuccessCancelsLosers asserts join=first returns the
 // FIRST branch to succeed by COMPLETION ORDER (not index), cancels the in-flight
 // losers, cleans loser forks, and PRESERVES the winner's fork. Determinism: a gated
 // child tool lets branch-2 finish first while branch-1 and branch-3 block until the
 // winner's completion cancels them — so completion order != index order.
-func TestForkJoinFirstReturnsFirstSuccessCancelsLosers(t *testing.T) {
+func TestParallelJoinFirstReturnsFirstSuccessCancelsLosers(t *testing.T) {
 	winnerDone := make(chan struct{})
 	// Child tool: the "fast" branch (prompt contains FAST) returns immediately and
 	// closes winnerDone; the others block until ctx is cancelled (losers) — proving
@@ -435,12 +435,12 @@ func TestForkJoinFirstReturnsFirstSuccessCancelsLosers(t *testing.T) {
 	// Each branch reads once then summarizes (stateless, history-driven).
 	childEngine := childEngineWith(&firstBranchProvider{}, catalogWith(t, childTool))
 	rf := newLabeledForker()
-	fork := agent.NewForkTool(childEngine, rf, agent.WithForkConcurrency(3))
+	fork := agent.NewParallelTool(childEngine, rf, agent.WithParallelConcurrency(3))
 
 	done := make(chan session.ToolResult, 1)
 	go func() {
 		res, _ := fork.Execute(context.Background(),
-			session.NewToolCall("c1", "Fork",
+			session.NewToolCall("c1", "Parallel",
 				json.RawMessage(`{"tasks":["slow one","FAST two","slow three"],"join":"first"}`)),
 			memfs.NewWorkspace("/ws"))
 		done <- res
@@ -469,16 +469,16 @@ func TestForkJoinFirstReturnsFirstSuccessCancelsLosers(t *testing.T) {
 	<-winnerDone // ensure the winner actually ran
 }
 
-// TestForkJoinFirstAllFailDegrades asserts join=first with NO success degrades to
+// TestParallelJoinFirstAllFailDegrades asserts join=first with NO success degrades to
 // the all-failed report and cleans every fork.
-func TestForkJoinFirstAllFailDegrades(t *testing.T) {
+func TestParallelJoinFirstAllFailDegrades(t *testing.T) {
 	childEngine := childEngineWith(&routingBranchProvider{summaries: map[string]string{}}, tool.NewCatalog())
 	rf := newLabeledForker()
 	failing := &labelFailForker{inner: rf, failAll: true}
-	fork := agent.NewForkTool(childEngine, failing, agent.WithForkConcurrency(2))
+	fork := agent.NewParallelTool(childEngine, failing, agent.WithParallelConcurrency(2))
 
 	res, err := fork.Execute(context.Background(),
-		session.NewToolCall("c1", "Fork", json.RawMessage(`{"tasks":["a","b"],"join":"first"}`)),
+		session.NewToolCall("c1", "Parallel", json.RawMessage(`{"tasks":["a","b"],"join":"first"}`)),
 		memfs.NewWorkspace("/ws"))
 	if err != nil || res.IsError {
 		t.Fatalf("unexpected: err=%v res=%+v", err, res)
@@ -490,15 +490,15 @@ func TestForkJoinFirstAllFailDegrades(t *testing.T) {
 
 // --- unknown join ------------------------------------------------------------
 
-// TestForkJoinUnknownStrategyErrors asserts an unknown join value yields a
+// TestParallelJoinUnknownStrategyErrors asserts an unknown join value yields a
 // model-addressable error result and creates no forks.
-func TestForkJoinUnknownStrategyErrors(t *testing.T) {
+func TestParallelJoinUnknownStrategyErrors(t *testing.T) {
 	childEngine := childEngineWith(&routingBranchProvider{summaries: map[string]string{}}, tool.NewCatalog())
 	rf := newLabeledForker()
-	fork := agent.NewForkTool(childEngine, rf, agent.WithForkConcurrency(1))
+	fork := agent.NewParallelTool(childEngine, rf, agent.WithParallelConcurrency(1))
 
 	res, err := fork.Execute(context.Background(),
-		session.NewToolCall("c1", "Fork", json.RawMessage(`{"tasks":["a"],"join":"bogus"}`)),
+		session.NewToolCall("c1", "Parallel", json.RawMessage(`{"tasks":["a"],"join":"bogus"}`)),
 		memfs.NewWorkspace("/ws"))
 	if err != nil {
 		t.Fatalf("unexpected harness error: %v", err)

@@ -317,7 +317,7 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		LLMStreamIdleTimeout: 120 * time.Second,
 		LLMBreakerThreshold:  5,
 		LLMBreakerCooldown:   30 * time.Second,
-		EnableFork:           true,
+		EnableParallel:       true,
 		EnableTeams:          true,
 		AgentsConventional:   true,
 		// Memory is ON by default, per-project. MemoryConsolidateInterval is left

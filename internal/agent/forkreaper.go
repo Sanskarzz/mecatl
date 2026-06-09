@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-// PreservedForkStore is the seam the Fork tool uses to retain a winning branch's
+// PreservedForkStore is the seam the Parallel tool uses to retain a winning branch's
 // PRESERVED fork (join=first / join=judge) under a BOUNDED policy. A winner's
 // fork is intentionally not torn down at the end of the call — its contents are
 // the deliverable, inspectable/mergeable by the operator — but without a bound
@@ -14,12 +14,12 @@ import (
 // once: when a new winner pushes the count past the cap, the OLDEST preserved
 // fork is reaped (its captured cleanup invoked).
 //
-// LAYERING: this lives in internal/agent (application layer) so ForkTool can be
+// LAYERING: this lives in internal/agent (application layer) so ParallelTool can be
 // injected with it without importing an adapter. The cleanup func is the SAME
 // teardown the forker handed runBranch — the reaper simply defers calling it
 // (for the winner) until eviction, instead of the caller dropping it on the floor.
 //
-// Implementations must be safe for concurrent use: several Fork calls can finish
+// Implementations must be safe for concurrent use: several Parallel calls can finish
 // concurrently and each preserves at most one winner.
 type PreservedForkStore interface {
 	// Preserve records a winning fork's root path and the cleanup that tears it
@@ -36,7 +36,7 @@ type PreservedForkStore interface {
 // inspectable. It is safe for concurrent use.
 //
 // A non-positive cap is normalised to DefaultPreservedForkCap. A reaper is NOT
-// required for Fork to work — without one, ForkTool falls back to the original
+// required for Parallel to work — without one, ParallelTool falls back to the original
 // behaviour (winner forks are preserved forever); the reaper is the bound.
 type LRUForkReaper struct {
 	cap int
@@ -75,7 +75,7 @@ func NewLRUForkReaper(capacity int) *LRUForkReaper {
 // Preserve records a winner fork and reaps the oldest beyond the cap. Re-preserving
 // the same root refreshes its recency (and adopts the new cleanup) rather than
 // double-counting. A nil cleanup is ignored. Eviction cleanup runs OUTSIDE the lock
-// so a slow filesystem teardown does not serialize concurrent Fork calls.
+// so a slow filesystem teardown does not serialize concurrent Parallel calls.
 func (r *LRUForkReaper) Preserve(root string, cleanup func() error) {
 	if cleanup == nil {
 		return

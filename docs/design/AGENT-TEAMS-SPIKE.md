@@ -11,7 +11,7 @@ mecatl today has two delegation tools, both one-shot and context-isolated:
 
 - **`Subagent`** (`internal/agent/subagent.go`) — one read-only explorer child, shared
   workspace, drained internally, returns only final text.
-- **`Fork`** (`internal/agent/fork.go`) — N parallel children, each in an isolated
+- **`Parallel`** (`internal/agent/parallel.go`) — N parallel children, each in an isolated
   forked workspace, drained internally, joined into one summary, no auto-merge.
 
 Both are **agents-as-tools** (the OpenAI SDK term): the parent calls a child, the
@@ -22,7 +22,7 @@ coordinate** over time. That is exactly the gap Claude Code's *agent teams*
 
 The key difference between *subagents* and *teams*:
 
-| | Subagents (Subagent/Fork) | Agent teams |
+| | Subagents (Subagent/Parallel) | Agent teams |
 |---|---|---|
 | Lifetime | one-shot | long-lived, multi-message |
 | Visibility | drained internally | streamed to the client |
@@ -36,9 +36,9 @@ substrate** — shared task list, mailbox, lead/teammate lifecycle — exposed o
 the gRPC surface so any client (including `cmd/mecatui` later) can drive and
 observe a team. The substrate is the reusable, architecture-aligned part.
 
-## 2. The reframing: a team is "Fork, but long-lived and talking"
+## 2. The reframing: a team is "Parallel, but long-lived and talking"
 
-The single most useful realisation from the spike: **`Fork` is already ~70% of the
+The single most useful realisation from the spike: **`Parallel` is already ~70% of the
 plumbing.** It already:
 
 - runs **N concurrent `Engine.Run` loops** (proven concurrency-safe; the Engine
@@ -47,7 +47,7 @@ plumbing.** It already:
   via `tool.WorkspaceForker`,
 - bounds fan-out and concurrency, fires `SubagentStop` per branch.
 
-What a team adds on top of Fork:
+What a team adds on top of Parallel:
 
 1. branches are **long-lived** (they don't terminate after one turn),
 2. branches **stream to the client** instead of being drained internally,
@@ -126,7 +126,7 @@ in without violating it:
   agreed stance).
 
 This mirrors exactly how `governance` (rules) and `permpolicy` (session-aware
-adapter) are split, and how Fork's child Engine is composed in `internal/app`.
+adapter) are split, and how Parallel's child Engine is composed in `internal/app`.
 
 ## 5. Mechanics
 
@@ -200,7 +200,7 @@ snapshotted in `outcome()`, so the gRPC path gets the same rich fallback. Headli
 > terminal, Reopen-recoverable, string-passthrough on the wire — mirrors `StopNoProgress`
 > exactly), so an in-flight turn always completes (no mid-stream abort → no-replay-after-first-chunk
 > holds). It is composition-tunable (`app.Config.MaxRunTokens` → `--max-run-tokens`) and
-> INHERITED by EVERY engine — main + Subagent + team member + lead synthesis + Fork — via
+> INHERITED by EVERY engine — main + Subagent + team member + lead synthesis + Parallel — via
 > `engineDepsForProvider`/`childEngineDepsForProvider`. A per-call override may only TIGHTEN it.
 > So each individual member run is now bounded, and a budget-stopped member surfaces the
 > resilient-deliverable fallback the same way any stopped member does.
@@ -282,7 +282,7 @@ picks the tier from `spec.Mutating` and the factory's `MemberBuild.IsolateReadOn
   **force-copy** fork (own `.git`) with Edit/Write/Bash — parallel writes are safe
   because isolated.
 
-- **merge/selection stays manual in v1** (consistent with Fork's no-auto-merge):
+- **merge/selection stays manual in v1** (consistent with Parallel's no-auto-merge):
   the team reports each mutating teammate's fork path; a later phase can add a
   judge/merge step (the "tournament" join). A read-only worktree is throwaway — never
   merged.
@@ -354,8 +354,8 @@ the member's own fork/worktree, never the shared base).
 A member's Bash permission ask was once auto-DENIED unconditionally, so a read-only member
 could never run a command containing substitution/subshell (`$(go list ./...)`, a per-package
 coverage loop) — it hard-failed with a misleading "denied by user" even though no user was
-asked. Members (and Subagent/Fork children) now resolve an ask in four steps (`resolveChildAsk`,
-threaded by a per-child `childPosture`; the same path Subagent/Fork share, so it cannot drift):
+asked. Members (and Subagent/Parallel children) now resolve an ask in four steps (`resolveChildAsk`,
+threaded by a per-child `childPosture`; the same path Subagent/Parallel share, so it cannot drift):
 
 1. **Read-only substitution (A1, global).** `governance.SubstitutionReadOnly` lets a
    substitution whose every recursively-extracted inner command is read-only AND whose blanked
@@ -406,7 +406,7 @@ Teammates inherit the lead's permission mode at spawn (matches Claude Code:
 "permissions set at spawn"). For headless operation, a teammate's permission asks
 route to the **lead** (the lead arbitrates, as it does plan approval) or, if the
 team runs unattended, fall back to the existing non-interactive auto-deny used by
-Subagent/Fork. Plan-approval (teammate plans read-only, lead approves) maps cleanly
+Subagent/Parallel. Plan-approval (teammate plans read-only, lead approves) maps cleanly
 onto the existing `WithChildMode(session.ModePlan)` + the lead arbitration channel.
 
 ## 6. The coordination kernel (delivered prototype)

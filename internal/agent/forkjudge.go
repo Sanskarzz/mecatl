@@ -15,14 +15,14 @@ import (
 // BranchSummary is the compact, transcript-free view of one candidate branch the
 // judge scores. It is exactly the information a human would get from the joined
 // summary — Label + Summary (and whether the branch Failed) — never the branch's
-// intermediate transcript, so judging preserves Fork's context-isolation
+// intermediate transcript, so judging preserves Parallel's context-isolation
 // guarantee.
 type BranchSummary struct {
 	// Label is the branch's stable, human-meaningful tag (e.g. "branch-2").
 	Label string
 	// Summary is the branch's terminal result text.
 	Summary string
-	// Failed reports whether the branch failed. ForkTool only ever passes
+	// Failed reports whether the branch failed. ParallelTool only ever passes
 	// SUCCESSFUL candidates to a judge (you cannot pick a crashed branch), so this
 	// is false in the default flow; the field exists so a future caller (e.g. a
 	// team tournament) can pass the full set if it wants.
@@ -30,14 +30,14 @@ type BranchSummary struct {
 }
 
 // BranchJudge selects a winning branch from candidate summaries. It is the reusable
-// selection seam for the Fork "judge"/"best" strategy (and, later, a team
+// selection seam for the Parallel "judge"/"best" strategy (and, later, a team
 // tournament finish — AGENT-TEAMS-SPIKE §8.7). It is an interface so internal/agent
 // never imports an adapter (the default impl runs an *Engine injected by the
 // composition root) and so a non-LLM scorer can be substituted in tests/future.
 type BranchJudge interface {
 	// Judge picks the winner among candidates, guided by criteria. It returns the
 	// 0-based position WITHIN candidates (not a branch index) and a short rationale.
-	// Implementations MUST be non-interactive and bounded. ForkTool treats a nil
+	// Implementations MUST be non-interactive and bounded. ParallelTool treats a nil
 	// error with an out-of-range index — or any error — as "fall back to the first
 	// successful branch", so a judge must never be load-bearing for correctness.
 	Judge(ctx context.Context, candidates []BranchSummary, criteria string) (winner int, rationale string, err error)
@@ -50,10 +50,10 @@ const defaultJudgeRubric = "pick the most correct, complete, and maintainable re
 // engineJudge is the default BranchJudge: it runs a dedicated, injected child
 // *Engine (built in the composition root — tool-less / read-only so a text scorer
 // needs no workspace) over a prompt assembled from the candidate summaries, drains
-// it with the SAME drainChild used by Subagent/Fork (so it inherits the non-interactive
+// it with the SAME drainChild used by Subagent/Parallel (so it inherits the non-interactive
 // contract for free), and parses a tolerant JSON verdict. It imports only
 // session/tool — layer-clean — and is constructed in app where the judge Engine is
-// built (mirroring how ForkTool/SubagentTool are constructed there).
+// built (mirroring how ParallelTool/SubagentTool are constructed there).
 type engineJudge struct {
 	engine    *Engine
 	limits    session.Limits
@@ -111,9 +111,9 @@ type judgeVerdict struct {
 
 // Judge runs the judge Engine over the candidate summaries and returns the chosen
 // 0-based position within candidates. Any parse failure / out-of-range winner /
-// run error returns (0, <note>, nil) — ForkTool then keeps the first successful
-// branch — so the judge can never hard-fail a Fork call. An empty candidate set is
-// a programming error (ForkTool only calls with ≥2) and returns an error.
+// run error returns (0, <note>, nil) — ParallelTool then keeps the first successful
+// branch — so the judge can never hard-fail a Parallel call. An empty candidate set is
+// a programming error (ParallelTool only calls with ≥2) and returns an error.
 func (j *engineJudge) Judge(ctx context.Context, candidates []BranchSummary, criteria string) (int, string, error) {
 	if len(candidates) == 0 {
 		return 0, "", fmt.Errorf("engineJudge: no candidates to judge")

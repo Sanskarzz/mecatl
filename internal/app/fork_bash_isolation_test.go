@@ -126,13 +126,13 @@ func TestForkBashWritesIntoForkNotBase(t *testing.T) {
 	})}
 
 	provider := &bashWriteProvider{command: "echo hi > marker.txt", marker: "marker.txt"}
-	childEngine := buildForkChildEngine(cfg, provider, runner)
+	childEngine := buildParallelChildEngine(cfg, provider, runner)
 
 	// join=first PRESERVES the winning branch's fork (cleanup not called), so the
 	// marker survives for the assertion below.
-	fork := agent.NewForkTool(childEngine, rf)
+	fork := agent.NewParallelTool(childEngine, rf)
 
-	call := session.NewToolCall("c1", "Fork",
+	call := session.NewToolCall("c1", "Parallel",
 		json.RawMessage(`{"tasks":["write the marker"],"join":"first"}`))
 	res, err := fork.Execute(context.Background(), call, baseWS)
 	if err != nil {
@@ -201,12 +201,12 @@ func TestForkGitCommitDoesNotTouchBaseRepo(t *testing.T) {
 		command: "echo branchwork > branch.txt && git add -A && git commit -m 'branch commit' && git update-ref refs/heads/sneaky HEAD",
 		marker:  "branch.txt",
 	}
-	childEngine := buildForkChildEngine(cfg, provider, runner)
+	childEngine := buildParallelChildEngine(cfg, provider, runner)
 
 	// join=first PRESERVES the winner's fork so we can inspect it.
-	fork := agent.NewForkTool(childEngine, rf)
+	fork := agent.NewParallelTool(childEngine, rf)
 
-	call := session.NewToolCall("c1", "Fork",
+	call := session.NewToolCall("c1", "Parallel",
 		json.RawMessage(`{"tasks":["commit the work"],"join":"first"}`))
 	res, err := fork.Execute(context.Background(), call, baseWS)
 	if err != nil {

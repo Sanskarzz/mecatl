@@ -347,7 +347,7 @@ func toolKindFor(name string) string {
 		return "execute"
 	case "WebFetch":
 		return "fetch"
-	case "Subagent", "Team", "Fork":
+	case "Subagent", "Team", "Parallel":
 		return "think"
 	default:
 		return "other"

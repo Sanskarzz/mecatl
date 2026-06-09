@@ -86,7 +86,7 @@ func drainEngine(t *testing.T, eng *agent.Engine) []session.Event {
 	return events
 }
 
-// TestForkChildEngineHasBashAndEdit proves buildForkChildEngine's catalog now
+// TestForkChildEngineHasBashAndEdit proves buildParallelChildEngine's catalog now
 // contains BOTH Edit and Bash when a runner is configured — Bash is workspace-aware
 // and runs in the branch's fork, so it is safe to re-enable.
 func TestForkChildEngineHasBashAndEdit(t *testing.T) {
@@ -95,7 +95,7 @@ func TestForkChildEngineHasBashAndEdit(t *testing.T) {
 	if runner == nil {
 		t.Fatal("precondition: expected a non-nil command runner with Shell set")
 	}
-	eng := buildForkChildEngine(cfg, bashThenEdit(), runner)
+	eng := buildParallelChildEngine(cfg, bashThenEdit(), runner)
 
 	events := drainEngine(t, eng)
 
@@ -115,7 +115,7 @@ func TestForkChildEngineHasBashAndEdit(t *testing.T) {
 // the main session.
 func TestForkChildEngineNoRunnerHasNoBash(t *testing.T) {
 	cfg := teamCfg(t)
-	eng := buildForkChildEngine(cfg, bashThenEdit(), nil)
+	eng := buildParallelChildEngine(cfg, bashThenEdit(), nil)
 
 	events := drainEngine(t, eng)
 

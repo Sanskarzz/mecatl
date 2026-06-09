@@ -207,7 +207,7 @@ func TestUserModelConsolidationOffByDefault(t *testing.T) {
 
 // TestUserModelReviewEngineCatalogIsMinimal pins the security claim the review
 // relied on: the child engine the 2b reviewer runs has EXACTLY one tool, RememberUser
-// — no Read/Edit/Write/Bash/Subagent/Fork. So the reviewer can WRITE the user model but
+// — no Read/Edit/Write/Bash/Subagent/Parallel. So the reviewer can WRITE the user model but
 // has no other capability.
 func TestUserModelReviewEngineCatalogIsMinimal(t *testing.T) {
 	um, err := memory.New(t.TempDir())
@@ -227,7 +227,7 @@ func TestUserModelReviewEngineCatalogIsMinimal(t *testing.T) {
 		t.Errorf("review engine sole tool = %q, want %q", names[0], memory.RememberUserToolName)
 	}
 	// Defensive: none of the dangerous tools are present.
-	for _, banned := range []string{"Read", "Edit", "Write", "Bash", "Subagent", "Fork", memory.RecallUserToolName, memory.SearchUserModelToolName} {
+	for _, banned := range []string{"Read", "Edit", "Write", "Bash", "Subagent", "Parallel", memory.RecallUserToolName, memory.SearchUserModelToolName} {
 		for _, got := range names {
 			if got == banned {
 				t.Errorf("review engine catalog must NOT contain %q", banned)

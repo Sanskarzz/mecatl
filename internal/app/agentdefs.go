@@ -20,14 +20,14 @@ import (
 )
 
 // callSiteExcluded is the set of tool names a scoped agent-def catalog NEVER
-// contains, regardless of the def's allowlist. Subagent/Fork enforce the no-nesting
+// contains, regardless of the def's allowlist. Subagent/Parallel enforce the no-nesting
 // guard (a child must not recurse or fan out further); ToolSearch is excluded
 // because child engines run with progressive disclosure OFF and a def must not
 // silently gain a hydration tool it never listed (critique M1). The exclusion is
 // applied AFTER the allowlist so a def cannot re-add any of these.
 var callSiteExcluded = map[string]struct{}{
 	"Subagent":          {},
-	"Fork":              {},
+	"Parallel":          {},
 	tool.ToolSearchName: {}, // "ToolSearch"
 }
 

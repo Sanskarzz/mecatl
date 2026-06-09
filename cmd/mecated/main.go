@@ -222,8 +222,8 @@ type config struct {
 	commandsDir    string
 	enableCommands bool
 
-	// Fork: enable the Fork fan-out tool (parallel isolated child branches).
-	enableFork bool
+	// Parallel: enable the Parallel fan-out tool (parallel isolated child branches).
+	enableParallel bool
 	// forkPreservedCap bounds how many PRESERVED winner forks (join=first/judge)
 	// survive at once; the oldest beyond the cap is LRU-reaped. 0 => the default.
 	forkPreservedCap int
@@ -660,7 +660,7 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		ModelAliases:                 cfg.modelAliases,
 		CommandsDir:                  cfg.commandsDir,
 		EnableCommands:               cfg.enableCommands,
-		EnableFork:                   cfg.enableFork,
+		EnableParallel:               cfg.enableParallel,
 		ForkPreservedCap:             cfg.forkPreservedCap,
 		EnableTeams:                  cfg.enableTeams,
 		MCPServers:                   cfg.mcpServers,
@@ -776,7 +776,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "directory of slash-command templates (<name>.md); setting it enables command expansion. Empty + --enable-commands uses the defaults (.mecatl/commands, .claude/commands)")
 	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.mecatl/commands, .claude/commands) when --commands-dir is empty")
 
-	fs.BoolVar(&cfg.enableFork, "enable-fork", true, "register the Fork fan-out tool (parallel isolated child branches)")
+	fs.BoolVar(&cfg.enableParallel, "enable-parallel", true, "register the Parallel fan-out tool (parallel isolated child branches)")
 	fs.IntVar(&cfg.forkPreservedCap, "fork-preserved-cap", agent.DefaultPreservedForkCap, "max PRESERVED winner forks (join=first/judge) kept on disk at once; the oldest beyond this is LRU-reaped. Preserved forks stay inspectable until reaped")
 	fs.BoolVar(&cfg.enableTeams, "enable-teams", true, "register the experimental agent-teams capability (CreateTeam/SpawnTeammate/RunTeam); on by default and inert until a client drives a team. Pass --enable-teams=false to disable")
 

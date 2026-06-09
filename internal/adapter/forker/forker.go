@@ -29,7 +29,7 @@
 // The git-worktree path isolates the WORKING TREE and INDEX but SHARES the object
 // database and refs. Forked children CAN mutate their working tree: Edit/Write land
 // in the fork, and Bash is workspace-aware (its CommandRunner runs with the forked
-// child's Workspace.Root() as the working directory; see app.buildForkChildEngine /
+// child's Workspace.Root() as the working directory; see app.buildParallelChildEngine /
 // buildMemberEngine and internal/adapter/tools/bash.go), so a child's Bash — and any
 // git it runs — defaults to the fork's working tree, not the parent base. But in a
 // worktree, a child that runs `git commit` / `git push` / `git update-ref` via Bash
@@ -70,7 +70,7 @@
 // The copy path is bounded only by available disk and the size of the base tree; it
 // copies regular files and directories and SKIPS symlinks (so a symlink cannot
 // smuggle the copy outside the base). Neither path auto-merges results back — see
-// the ForkTool docs (no-auto-merge boundary).
+// the ParallelTool docs (no-auto-merge boundary).
 package forker
 
 import (
@@ -131,7 +131,7 @@ func WithTempBase(dir string) Option {
 // repository with its own object database and refs, so a child branch's git/Bash
 // writes (commits, refs, objects, working-tree edits) CANNOT reach the base repo.
 //
-// This is the mode for MUTATING forks (the Fork tool's branches and mutating team
+// This is the mode for MUTATING forks (the Parallel tool's branches and mutating team
 // members), where isolation matters more than speed: a full copy — `.git` and all
 // — is heavier than a worktree (which copies no file contents), which is why the
 // default leaves the cheaper auto worktree-vs-copy behaviour in place. Symlinks are
