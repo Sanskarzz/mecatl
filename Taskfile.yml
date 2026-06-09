@@ -32,6 +32,13 @@ tasks:
       # mecatui stamps its build version into the welcome splash via -X main.version.
       - go build -ldflags "-X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/mecatui ./cmd/mecatui
 
+  install:
+    desc: Install mecated and mecatui into GOBIN/GOPATH/bin
+    cmds:
+      - go install ./cmd/mecated
+      # mecatui stamps its build version into the welcome splash via -X main.version.
+      - go install -ldflags "-X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" ./cmd/mecatui
+
   test:golden:
     desc: Refresh mecatui View/teatest golden files (-update) then re-run them
     cmds:

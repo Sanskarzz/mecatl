@@ -31,15 +31,26 @@ Build the binaries into `bin/`:
 $ task build
 go build -o bin/mecated ./cmd/mecated
 go build -o bin/mecademo ./cmd/mecademo
+go build -ldflags "-X main.version=..." -o bin/mecatui ./cmd/mecatui
 ```
 
-This produces `bin/mecated` (the server) and `bin/mecademo` (the offline demo).
+This produces `bin/mecated` (the server), `bin/mecatui` (the terminal UI), and
+`bin/mecademo` (the offline demo). To install the operator-facing binaries into
+`GOBIN` / `GOPATH/bin`:
+
+```console
+$ task install
+```
+
+`task install` installs `mecated` and `mecatui`; it intentionally skips
+`mecademo`, which is only a demo binary.
 
 Other handy targets (`task --list` for the full set):
 
 | Task | What it does |
 | --- | --- |
-| `task build` | compile `bin/mecated`, `bin/mecademo` |
+| `task build` | compile `bin/mecated`, `bin/mecatui`, `bin/mecademo` |
+| `task install` | install `mecated` and `mecatui` into `GOBIN` / `GOPATH/bin` |
 | `task test` | `go test -race ./...` |
 | `task test:cover` | tests + `coverage/coverage.{out,html}` |
 | `task lint` | `golangci-lint run` + `go vet` |

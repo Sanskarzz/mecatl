@@ -52,7 +52,8 @@ Requires **Go 1.26.3** (the `go.mod` toolchain directive auto-fetches it) and
 [buf](https://buf.build) only to regenerate the proto.
 
 ```sh
-task build          # compile → bin/mecated (server) and bin/mecademo (demo)
+task build          # compile → bin/mecated, bin/mecatui, and bin/mecademo
+task install        # install mecated + mecatui into GOBIN/GOPATH/bin
 task test           # full suite, with -race
 task lint           # golangci-lint (parallel-safe) + go vet
 ```
