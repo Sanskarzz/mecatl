@@ -34,8 +34,13 @@ func zeroStateModel(t *testing.T, caps client.Capabilities) Model {
 		Ctx:         context.Background(),
 		NoAltScreen: true,
 	})
+	// A tall viewport so the FULL welcome card shows (mascot + wordmark + cwd +
+	// model + tagline + affordances + memory note) — the splash now fits its body to
+	// height-cardChrome and trades the low-priority info away on short terminals, so a
+	// short test window would trim the memory note and make the caps-tailoring
+	// assertions vacuous. 100x60 leaves room for everything.
 	m = applyAll(m,
-		tea.WindowSizeMsg{Width: 100, Height: 30},
+		tea.WindowSizeMsg{Width: 100, Height: 80},
 		client.SessionReadyMsg{SessionID: "sess-test-0001", Capabilities: caps},
 	)
 	return m

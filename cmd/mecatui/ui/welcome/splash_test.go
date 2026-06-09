@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi/kitty"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
@@ -52,47 +53,121 @@ func TestSplashKittyEmitsPlaceholderGrid(t *testing.T) {
 	}
 }
 
-// TestSplashKittyGridColumnsMatchTier asserts the placeholder grid's per-row cell
-// count equals the tier's column count for the chosen height — the kitty grid and
-// the half-block share the same cols×rows footprint, so layout is identical.
+// TestSplashKittyGridColumnsMatchTier asserts the placeholder grid Splash emits
+// has exactly Tier(width,height) rows of Tier cols placeholders each — so the
+// IN-CONTENT grid matches the footprint TransmitMascot would bake (the kitty
+// virtual placement Columns/Rows), keeping the two mascot paths in lockstep.
 func TestSplashKittyGridColumnsMatchTier(t *testing.T) {
-	const height = 20 // small tier
-	wantCols, _ := TierForHeight(height)
-	out := Splash(splashTheme(), splashInfo(true), 100, height)
+	const w, height = 100, 40 // a tier-fitting size (Tier(100,40) != 0)
+	wantCols, wantRows := Tier(w, height)
+	if wantCols == 0 {
+		t.Fatalf("test precondition: Tier(%d,%d) should fit a mascot", w, height)
+	}
+	out := Splash(splashTheme(), splashInfo(true), w, height)
 	ph := string(kitty.Placeholder)
-	// Find the first placeholder-bearing line and count its cells.
-	var found bool
+	var phRows, perRow int
 	for _, ln := range strings.Split(out, "\n") {
-		if strings.Contains(ln, ph) {
-			if got := strings.Count(ln, ph); got != wantCols {
-				t.Fatalf("placeholder cells per row = %d, want %d (tier cols for height %d)",
-					got, wantCols, height)
+		if c := strings.Count(ln, ph); c > 0 {
+			phRows++
+			if perRow == 0 {
+				perRow = c
+			} else if c != perRow {
+				t.Fatalf("ragged placeholder grid: row has %d cells, expected %d", c, perRow)
 			}
-			found = true
-			break
 		}
 	}
-	if !found {
-		t.Fatal("no placeholder row found in the kitty Splash")
+	if perRow != wantCols {
+		t.Errorf("placeholder cells per row = %d, want Tier cols %d", perRow, wantCols)
+	}
+	if phRows != wantRows {
+		t.Errorf("placeholder rows = %d, want Tier rows %d", phRows, wantRows)
 	}
 }
 
-// TestTierForHeightBoundaries tripwires the responsive thresholds: <=24 → 36,
-// 25..43 → 48, >=44 → 60.
-func TestTierForHeightBoundaries(t *testing.T) {
+// TestTierFitsWidthAndHeight tripwires the fit-aware footprint: Tier picks the
+// largest mascot whose width (cols+margin) AND height (cols/2 + essentialReserve)
+// fit, returning (0,0) when none does. Values are computed straight from the
+// formula (margin 4, reserve 12).
+func TestTierFitsWidthAndHeight(t *testing.T) {
 	cases := []struct {
-		h, want int
+		name string
+		w, h int
+		want int // expected cols (0 = no mascot)
 	}{
-		{24, tierSmallCols},
-		{25, tierMediumCols},
-		{43, tierMediumCols},
-		{44, tierLargeCols},
-		{0, tierSmallCols}, // 0 <= shortHeight(24) → small tier (the clamp guards real 0-height)
+		{"large fits", 64, 50, tierLargeCols},                 // 60+4<=64, 30+12<=50
+		{"medium (width caps large)", 52, 40, tierMediumCols}, // 60+4>52; 48+4<=52, 24+12<=40
+		{"small (width caps medium)", 40, 32, tierSmallCols},  // 48+4>40; 36+4<=40, 18+12<=32
+		{"too short for any", 40, 20, 0},                      // 36 needs 18+12=30 > 20
+		{"too narrow for any", 38, 60, 0},                     // 36+4=40 > 38
 	}
 	for _, tc := range cases {
-		if got := tierForHeight(tc.h); got != tc.want {
-			t.Errorf("tierForHeight(%d) = %d, want %d", tc.h, got, tc.want)
+		t.Run(tc.name, func(t *testing.T) {
+			cols, rows := Tier(tc.w, tc.h)
+			if cols != tc.want {
+				t.Errorf("Tier(%d,%d) cols = %d, want %d", tc.w, tc.h, cols, tc.want)
+			}
+			if rows != cols/2 {
+				t.Errorf("Tier(%d,%d) rows = %d, want cols/2 = %d", tc.w, tc.h, rows, cols/2)
+			}
+		})
+	}
+}
+
+// TestSplashFitsHeightBudget is the core regression guard for the clip bug: across
+// a wide range of heights the rendered body must never exceed height-cardChrome
+// (the room centerCard leaves), the title must always survive, and the mascot/info
+// degrade gracefully (tall: mascot + full info; short: mascot shrinks/drops but the
+// wordmark + title + hint remain).
+func TestSplashFitsHeightBudget(t *testing.T) {
+	const w = 100
+	in := splashInfo(false)
+	for _, h := range []int{12, 16, 20, 24, 30, 36, 42, 50, 60} {
+		body := Splash(splashTheme(), in, w, h)
+		got := lipgloss.Height(body)
+		if got > h-cardChrome {
+			t.Errorf("height %d: body is %d lines, exceeds budget %d (clips):\n%s",
+				h, got, h-cardChrome, body)
 		}
+		plain := stripSGR(body)
+		if !strings.Contains(plain, "Welcome to mecatui") {
+			t.Errorf("height %d: title missing", h)
+		}
+		// The wordmark + hint are part of the always-present head above the tiny clamp.
+		if h >= minSplashHeight {
+			if !strings.Contains(plain, "Type a request") {
+				t.Errorf("height %d: prompt hint missing", h)
+			}
+		}
+	}
+}
+
+// TestSplashTallShowsMascotAndInfo confirms a generous height shows BOTH the mascot
+// and the full info block (affordances + memory), while a constrained height drops
+// the mascot but keeps the functional content (the user's reported tradeoff).
+func TestSplashTallShowsMascotAndInfo(t *testing.T) {
+	in := splashInfo(false) // half-block path
+	tall := stripSGR(Splash(splashTheme(), in, 100, 60))
+	if !strings.Contains(tall, "▀▀▀▀▀▀▀▀") {
+		t.Error("tall splash should show the mascot")
+	}
+	if !strings.Contains(tall, "█") {
+		t.Error("tall splash should show the wordmark")
+	}
+	if !strings.Contains(tall, "memory is on") {
+		t.Error("tall splash should show the memory note")
+	}
+
+	// A height that fits the head but not the mascot: no mascot, but wordmark + title
+	// + hint survive (Tier returns 0, head leads).
+	short := stripSGR(Splash(splashTheme(), in, 100, minSplashHeight))
+	if strings.Contains(short, "▀▀▀▀▀▀▀▀") {
+		t.Error("a head-only height must drop the mascot")
+	}
+	if !strings.Contains(short, "█") {
+		t.Error("a head-only height must keep the wordmark")
+	}
+	if !strings.Contains(short, "Welcome to mecatui") {
+		t.Error("a head-only height must keep the title")
 	}
 }
 
@@ -121,13 +196,15 @@ func TestModelLine(t *testing.T) {
 // TestSplashVersionOmittedWhenEmpty asserts a "" Version omits the version line
 // (no bare "mecatui " label), while a set Version includes it.
 func TestSplashVersionOmittedWhenEmpty(t *testing.T) {
-	with := Splash(splashTheme(), splashInfo(false), 100, 40)
+	// A generous height so the (low keep-priority) version line is INCLUDED by the
+	// greedy fit — the omit-when-empty check below is then unambiguous.
+	with := Splash(splashTheme(), splashInfo(false), 100, 60)
 	if !strings.Contains(stripSGR(with), "mecatui v9.9.9-test") {
-		t.Error("a set Version should render the version line")
+		t.Error("a set Version should render the version line at a generous height")
 	}
 	in := splashInfo(false)
 	in.Version = ""
-	without := stripSGR(Splash(splashTheme(), in, 100, 40))
+	without := stripSGR(Splash(splashTheme(), in, 100, 60))
 	if strings.Contains(without, "  mecatui v") {
 		t.Error("an empty Version must omit the version line")
 	}

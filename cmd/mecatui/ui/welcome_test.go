@@ -192,8 +192,10 @@ func TestSplashShowsProvider(t *testing.T) {
 		InitialModel: client.ModelSelection{ProviderID: "anthropic", ModelID: "claude-opus-4"},
 		Ctx:          t.Context(), NoAltScreen: true,
 	})
+	// A tall terminal so the (low keep-priority) model·provider line is included by
+	// the greedy fit — on a short terminal it is correctly traded away for the head.
 	m = applyAll(m,
-		tea.WindowSizeMsg{Width: 100, Height: 40},
+		tea.WindowSizeMsg{Width: 100, Height: 70},
 		client.SessionReadyMsg{SessionID: "sess-test-0001", Capabilities: caps},
 	)
 	plain := stripANSIstr(m.renderZeroState())
@@ -220,23 +222,28 @@ func TestKittyTransmitLifecycle(t *testing.T) {
 		})
 	}
 
-	// (a) activates after connect at the tier derived from the viewport height.
+	// (a) activates after connect at the (width,height) tier — and the transmit's
+	// footprint matches welcome.Tier(width, vpHeight), the SAME function Splash uses.
 	m := newM(false)
 	m = applyAll(m,
-		tea.WindowSizeMsg{Width: 100, Height: 50},
+		tea.WindowSizeMsg{Width: 120, Height: 70},
 		client.SessionReadyMsg{SessionID: "s1", Capabilities: embeddedCaps()},
 	)
 	if !m.kittyActive {
 		t.Fatal("kitty should be active after connect on a forced-kitty terminal")
 	}
-	wantCols, _ := welcome.TierForHeight(m.vp.Height())
+	wantCols, _ := welcome.Tier(m.width, m.vp.Height())
+	if wantCols == 0 {
+		t.Fatalf("test precondition: a 120x70 terminal should fit a mascot (vp=%d)", m.vp.Height())
+	}
 	if m.kittyTier != wantCols {
-		t.Fatalf("kittyTier = %d, want %d (TierForHeight of vp height %d)", m.kittyTier, wantCols, m.vp.Height())
+		t.Fatalf("kittyTier = %d, want %d (Tier of width %d, vp %d)", m.kittyTier, wantCols, m.width, m.vp.Height())
 	}
 
-	// (b) a SAME-tier resize must NOT re-transmit (tier unchanged, cmd nil).
+	// (b) a SAME-tier resize (still wide+tall enough for the same cols) must NOT
+	// re-transmit (tier unchanged, cmd nil). 120→125 keeps the large tier.
 	prevTier := m.kittyTier
-	mm, cmd := m.Update(tea.WindowSizeMsg{Width: 110, Height: 50})
+	mm, cmd := m.Update(tea.WindowSizeMsg{Width: 125, Height: 70})
 	m = mm.(Model)
 	if m.kittyTier != prevTier {
 		t.Errorf("same-tier resize changed kittyTier %d→%d", prevTier, m.kittyTier)
@@ -245,10 +252,14 @@ func TestKittyTransmitLifecycle(t *testing.T) {
 		t.Error("same-tier resize should not fire a (re-)transmit cmd")
 	}
 
-	// (c) a tier-CROSSING resize (tall→short) re-fires and updates the tier.
-	mm, cmd = m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	// (c) a tier-CROSSING resize (still mascot-bearing, smaller tier) re-fires and
+	// updates the tier. A height that drops to a smaller-but-nonzero tier.
+	mm, cmd = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	m = mm.(Model)
-	crossCols, _ := welcome.TierForHeight(m.vp.Height())
+	crossCols, _ := welcome.Tier(m.width, m.vp.Height())
+	if crossCols == 0 {
+		t.Fatalf("test precondition: 100x40 should still fit a (smaller) mascot (vp=%d)", m.vp.Height())
+	}
 	if m.kittyTier != crossCols {
 		t.Errorf("tier-crossing resize: kittyTier = %d, want %d", m.kittyTier, crossCols)
 	}
@@ -256,10 +267,22 @@ func TestKittyTransmitLifecycle(t *testing.T) {
 		t.Error("tier-crossing resize should fire a re-transmit cmd")
 	}
 
+	// (c2) shrinking below ANY mascot tier deactivates kitty (Tier returns 0 → no
+	// image to transmit; the splash renders mascot-less).
+	mm, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 14})
+	m = mm.(Model)
+	if cols, _ := welcome.Tier(m.width, m.vp.Height()); cols == 0 && m.kittyActive {
+		// kittyActive may stay true from a prior tier until the next transmit attempt,
+		// but maybeKittyTransmit must not (re-)activate when Tier is 0. Re-fire it:
+		if c := (&m).maybeKittyTransmit(); c != nil {
+			t.Error("maybeKittyTransmit should not transmit when no mascot tier fits")
+		}
+	}
+
 	// (d) NoBanner never activates.
 	mb := newM(true)
 	mb = applyAll(mb,
-		tea.WindowSizeMsg{Width: 100, Height: 50},
+		tea.WindowSizeMsg{Width: 120, Height: 70},
 		client.SessionReadyMsg{SessionID: "s2", Capabilities: embeddedCaps()},
 	)
 	if mb.kittyActive {

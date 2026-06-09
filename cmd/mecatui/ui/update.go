@@ -613,7 +613,14 @@ func (m *Model) maybeKittyTransmit() tea.Cmd {
 	if !welcome.KittyCapable() {
 		return nil
 	}
-	cols, rows := welcome.TierForHeight(m.vp.Height())
+	// Size the kitty footprint with the SAME (width, height) tier Splash uses, so the
+	// transmitted virtual placement (cols×rows) matches the placeholder grid Splash
+	// emits. Tier returns (0,0) when no mascot fits the budget — then there is no kitty
+	// image to transmit (Splash renders mascot-less too), so leave kittyActive false.
+	cols, rows := welcome.Tier(m.width, m.vp.Height())
+	if cols == 0 {
+		return nil
+	}
 	if m.kittyActive && m.kittyTier == cols {
 		return nil // already transmitted at this tier.
 	}
