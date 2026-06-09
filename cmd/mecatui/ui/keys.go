@@ -69,7 +69,7 @@ type keyMap struct {
 	JumpEnd key.Binding
 
 	// Agents (ctrl+a) opens the unified live agents overlay: ONE surface with two
-	// tabs — Subagents (the flat Task-child fleet) and Teams (the agent-team roster
+	// tabs — Subagents (the flat Subagent-child fleet) and Teams (the agent-team roster
 	// with per-member focus). The default tab is context-sensitive (Teams when a team
 	// is live, else Subagents when subagents ran). Like the MCP bindings it is
 	// control-modified so it never collides with textarea input. It is live both while

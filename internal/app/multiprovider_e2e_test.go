@@ -323,7 +323,7 @@ func TestSessionCapabilitiesNoSecrets(t *testing.T) {
 
 // TestSubAgentPinsAnthropic drives the FULL composition with three mock-backed
 // providers and a real on-disk agent def pinning provider=anthropic. A DEFAULT
-// session (running on the openai default) routes a Task to that def; the sub-agent
+// session (running on the openai default) routes a Subagent to that def; the sub-agent
 // reply proves it ran on the native-Anthropic-bound provider — closing the
 // per-sub-agent-provider claim for anthropic with NO registry/agent change.
 func TestSubAgentPinsAnthropic(t *testing.T) {
@@ -340,7 +340,7 @@ func TestSubAgentPinsAnthropic(t *testing.T) {
 		Workspace:     workspace,
 		NoSoul:        true,
 		AgentsDirs:    []string{agentsDir},
-		AllowAllTools: true, // --yolo: auto-approve the routed Task
+		AllowAllTools: true, // --yolo: auto-approve the routed Subagent
 		envDetector: fakeEnv(map[string]string{
 			"OPENAI_API_KEY":    "sk-x",
 			"ANTHROPIC_API_KEY": "sk-x",
@@ -350,7 +350,7 @@ func TestSubAgentPinsAnthropic(t *testing.T) {
 		providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
 			reply := "REPLY-FROM-" + id
 			return mockllm.New(
-				mockllm.ToolCallTurn(session.NewToolCall("p1", "Task", []byte(`{"prompt":"go","agent":"claudespec"}`))),
+				mockllm.ToolCallTurn(session.NewToolCall("p1", "Subagent", []byte(`{"prompt":"go","agent":"claudespec"}`))),
 				mockllm.TextTurn(reply), mockllm.TextTurn(reply), mockllm.TextTurn(reply),
 			)
 		},
@@ -376,7 +376,7 @@ func TestSubAgentPinsAnthropic(t *testing.T) {
 		}
 	}
 	if !strings.Contains(taskResult, "REPLY-FROM-anthropic") {
-		t.Fatalf("Task sub-agent (provider: anthropic) reply = %q, want it to contain REPLY-FROM-anthropic", taskResult)
+		t.Fatalf("Subagent sub-agent (provider: anthropic) reply = %q, want it to contain REPLY-FROM-anthropic", taskResult)
 	}
 }
 

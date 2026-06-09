@@ -153,8 +153,8 @@ type block struct {
 	resultBody  string
 	resultError bool
 
-	// Subagent fields (attached to a Task tool block): the REDACTED,
-	// metadata-only projection of the Task's child run. They never carry child
+	// Subagent fields (attached to a Subagent tool block): the REDACTED,
+	// metadata-only projection of the Subagent's child run. They never carry child
 	// content. subagent is true once a subagent.start has been attributed to this
 	// block; subGoal is the card title; subTrace is a capped trace of child tool
 	// chips; subToolCount is the running/final child tool count; subUsage,
@@ -193,9 +193,9 @@ type block struct {
 	hookDecision string // "info" | "blocked" | "modified"
 }
 
-// subagentLane is the flat, fleet-level projection of ONE Task child run, keyed by
-// ChildID. It mirrors the per-Task-block subagent fields (subGoal/subTrace/…) but is
-// collected ACROSS all Task cards into conversation.subagentFleet, so the footer
+// subagentLane is the flat, fleet-level projection of ONE Subagent child run, keyed by
+// ChildID. It mirrors the per-Subagent-block subagent fields (subGoal/subTrace/…) but is
+// collected ACROSS all Subagent cards into conversation.subagentFleet, so the footer
 // segment can show aggregate running/done counts and the ctrl+a Subagents tab can
 // list one row per child regardless of where its inline card sits in scrollback. It
 // carries only the REDACTED metadata the subagent.* events forward (gauntlet #7) —
@@ -222,7 +222,7 @@ type subagentLane struct {
 // conversation is the ordered scrollback. It owns block creation/mutation so the
 // model never pokes blocks directly; render.go turns it into the viewport string.
 //
-// subagentFleet is the flat, insertion-ordered collection of Task child lanes keyed
+// subagentFleet is the flat, insertion-ordered collection of Subagent child lanes keyed
 // by ChildID (see subagentLane). It is fed alongside the inline-card routing by
 // applySubagent/upsertSubagentLane, and read by the fleet footer segment and the
 // ctrl+a Subagents tab. It is part of the conversation so a /clear (which rebuilds
@@ -345,10 +345,10 @@ func (c *conversation) resolveTool(callID, body string, isErr bool) bool {
 	return false
 }
 
-// subagentBlock returns the unresolved Task tool block whose toolID matches
+// subagentBlock returns the unresolved Subagent tool block whose toolID matches
 // parentCallID, or nil if none. Matching is by id only — the SAME contract as
-// resolveTool — so a subagent.* event is attributed to its originating Task card
-// even with several Task cards interleaved. It scans from the end so the most
+// resolveTool — so a subagent.* event is attributed to its originating Subagent card
+// even with several Subagent cards interleaved. It scans from the end so the most
 // recent matching call wins.
 func (c *conversation) subagentBlock(parentCallID string) *block {
 	for i := len(c.blocks) - 1; i >= 0; i-- {
@@ -360,7 +360,7 @@ func (c *conversation) subagentBlock(parentCallID string) *block {
 	return nil
 }
 
-// setSubagentStart marks the Task block matching parentCallID as a subagent and
+// setSubagentStart marks the Subagent block matching parentCallID as a subagent and
 // records its goal title. Returns false when no matching block exists.
 func (c *conversation) setSubagentStart(parentCallID, goal string) bool {
 	b := c.subagentBlock(parentCallID)
@@ -372,7 +372,7 @@ func (c *conversation) setSubagentStart(parentCallID, goal string) bool {
 	return true
 }
 
-// addSubagentTool appends a child-tool chip (name + error) to the matching Task
+// addSubagentTool appends a child-tool chip (name + error) to the matching Subagent
 // block's trace and bumps its running tool count. The trace is capped at
 // maxSubagentTrace (oldest chips dropped); the count is the authoritative running
 // total carried by the event, not len(trace). Returns false when no match.
@@ -391,7 +391,7 @@ func (c *conversation) addSubagentTool(parentCallID, toolName string, isError bo
 }
 
 // setSubagentEnd records the resolved end stats (usage, final tool count, stop,
-// duration) on the matching Task block. Returns false when no match.
+// duration) on the matching Subagent block. Returns false when no match.
 func (c *conversation) setSubagentEnd(parentCallID string, usage client.Usage, toolCount int, stop string, durationMs int64) bool {
 	b := c.subagentBlock(parentCallID)
 	if b == nil {
@@ -410,7 +410,7 @@ func (c *conversation) setSubagentEnd(parentCallID string, usage client.Usage, t
 // order if absent), so the start/tool/end accumulators all converge on one lane per
 // child. childID is the stable per-child discriminator carried on every subagent.*
 // event — unlike the inline card (keyed by ParentCallID), the fleet keys by ChildID
-// so two children of the SAME Task call are still distinct rows.
+// so two children of the SAME Subagent call are still distinct rows.
 func (c *conversation) fleetLane(childID string) *subagentLane {
 	if c.fleetIndex == nil {
 		c.fleetIndex = make(map[string]int)

@@ -463,12 +463,12 @@ func noticeLine(msg tea.Msg) string {
 	}
 }
 
-// applySubagent attributes a REDACTED subagent projection to its Task tool card by
+// applySubagent attributes a REDACTED subagent projection to its Subagent tool card by
 // ParentCallID (id match, like resolveTool). A miss is silently dropped: the card
 // carries no child content either way, so a lost subagent event only costs the
 // trace, never correctness or isolation.
 func (m *Model) applySubagent(msg client.SubagentMsg) {
-	// Two destinations, fed from the SAME event: (1) the inline Task card, keyed by
+	// Two destinations, fed from the SAME event: (1) the inline Subagent card, keyed by
 	// ParentCallID (the calm in-context default); (2) the flat fleet collection, keyed
 	// by ChildID, which backs the fleet footer segment and the ctrl+a Subagents tab.
 	// Both are redacted, metadata-only — neither carries child content (gauntlet #7).

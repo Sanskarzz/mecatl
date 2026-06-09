@@ -14,7 +14,7 @@ import (
 // regForTest builds a single-provider *providerRegistry backed by the given
 // provider under id, with model as its default model. It is the test-side analogue
 // of the build-time registry for the per-sub-agent-provider call sites
-// (buildAgentTaskEngines / buildTaskTool / buildMemberEngine / buildTeamWiring),
+// (buildAgentSubagentEngines / buildSubagentTool / buildMemberEngine / buildTeamWiring),
 // which now take a *providerRegistry + a parent provider id + a parent model. The
 // parent id/model these call sites are exercised with is (id, model).
 func regForTest(provider port.LLMProvider, id, model string) *providerRegistry {
@@ -51,19 +51,19 @@ func memberFactoryForTest(cfg Config, provider port.LLMProvider, teamHooks port.
 		teamHooks, reg, skillIdx, runner, roIsolationAvailable, mainMgr)
 }
 
-// agentTaskEnginesForTest is the OLD-arity buildAgentTaskEngines wrapper for
+// agentSubagentEnginesForTest is the OLD-arity buildAgentSubagentEngines wrapper for
 // existing tests: it builds a single-provider registry (id=providerMock,
 // model=cfg.Model) for `provider` and threads it as the parent. The historical
 // per-def engine tests don't exercise a provider switch.
-func agentTaskEnginesForTest(ctx context.Context, cfg Config, provider port.LLMProvider, reg *agents.Registry, skillIdx skillIndex, defaultHooks port.HookRunner, runner tool.CommandRunner, mainMgr *mcp.Manager) (map[string]*agent.Engine, []agent.AgentMeta, func() error) {
-	return buildAgentTaskEngines(ctx, cfg, provider, regForTest(provider, providerMock, cfg.Model), providerMock, cfg.Model,
+func agentSubagentEnginesForTest(ctx context.Context, cfg Config, provider port.LLMProvider, reg *agents.Registry, skillIdx skillIndex, defaultHooks port.HookRunner, runner tool.CommandRunner, mainMgr *mcp.Manager) (map[string]*agent.Engine, []agent.AgentMeta, func() error) {
+	return buildAgentSubagentEngines(ctx, cfg, provider, regForTest(provider, providerMock, cfg.Model), providerMock, cfg.Model,
 		reg, skillIdx, defaultHooks, runner, mainMgr)
 }
 
-// taskToolForTest is the OLD-arity buildTaskTool wrapper for existing tests: it
+// taskToolForTest is the OLD-arity buildSubagentTool wrapper for existing tests: it
 // builds a single-provider registry (id=providerMock, model=cfg.Model) for
 // `provider` and threads it as the parent.
 func taskToolForTest(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager) (tool.Tool, func() error) {
-	return buildTaskTool(ctx, cfg, regForTest(provider, providerMock, cfg.Model), provider, providerMock, cfg.Model,
+	return buildSubagentTool(ctx, cfg, regForTest(provider, providerMock, cfg.Model), provider, providerMock, cfg.Model,
 		hooks, reg, mainMgr)
 }

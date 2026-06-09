@@ -9,7 +9,7 @@
 
 mecatl today has two delegation tools, both one-shot and context-isolated:
 
-- **`Task`** (`internal/agent/subagent.go`) — one read-only explorer child, shared
+- **`Subagent`** (`internal/agent/subagent.go`) — one read-only explorer child, shared
   workspace, drained internally, returns only final text.
 - **`Fork`** (`internal/agent/fork.go`) — N parallel children, each in an isolated
   forked workspace, drained internally, joined into one summary, no auto-merge.
@@ -22,7 +22,7 @@ coordinate** over time. That is exactly the gap Claude Code's *agent teams*
 
 The key difference between *subagents* and *teams*:
 
-| | Subagents (Task/Fork) | Agent teams |
+| | Subagents (Subagent/Fork) | Agent teams |
 |---|---|---|
 | Lifetime | one-shot | long-lived, multi-message |
 | Visibility | drained internally | streamed to the client |
@@ -200,7 +200,7 @@ snapshotted in `outcome()`, so the gRPC path gets the same rich fallback. Headli
 > terminal, Reopen-recoverable, string-passthrough on the wire — mirrors `StopNoProgress`
 > exactly), so an in-flight turn always completes (no mid-stream abort → no-replay-after-first-chunk
 > holds). It is composition-tunable (`app.Config.MaxRunTokens` → `--max-run-tokens`) and
-> INHERITED by EVERY engine — main + Task + team member + lead synthesis + Fork — via
+> INHERITED by EVERY engine — main + Subagent + team member + lead synthesis + Fork — via
 > `engineDepsForProvider`/`childEngineDepsForProvider`. A per-call override may only TIGHTEN it.
 > So each individual member run is now bounded, and a budget-stopped member surfaces the
 > resilient-deliverable fallback the same way any stopped member does.
@@ -354,8 +354,8 @@ the member's own fork/worktree, never the shared base).
 A member's Bash permission ask was once auto-DENIED unconditionally, so a read-only member
 could never run a command containing substitution/subshell (`$(go list ./...)`, a per-package
 coverage loop) — it hard-failed with a misleading "denied by user" even though no user was
-asked. Members (and Task/Fork children) now resolve an ask in four steps (`resolveChildAsk`,
-threaded by a per-child `childPosture`; the same path Task/Fork share, so it cannot drift):
+asked. Members (and Subagent/Fork children) now resolve an ask in four steps (`resolveChildAsk`,
+threaded by a per-child `childPosture`; the same path Subagent/Fork share, so it cannot drift):
 
 1. **Read-only substitution (A1, global).** `governance.SubstitutionReadOnly` lets a
    substitution whose every recursively-extracted inner command is read-only AND whose blanked
@@ -406,7 +406,7 @@ Teammates inherit the lead's permission mode at spawn (matches Claude Code:
 "permissions set at spawn"). For headless operation, a teammate's permission asks
 route to the **lead** (the lead arbitrates, as it does plan approval) or, if the
 team runs unattended, fall back to the existing non-interactive auto-deny used by
-Task/Fork. Plan-approval (teammate plans read-only, lead approves) maps cleanly
+Subagent/Fork. Plan-approval (teammate plans read-only, lead approves) maps cleanly
 onto the existing `WithChildMode(session.ModePlan)` + the lead arbitration channel.
 
 ## 6. The coordination kernel (delivered prototype)

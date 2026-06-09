@@ -115,7 +115,7 @@ func (l diagLine) argValue(key string) any {
 // TestChildAskRouterRoutesVerdict proves the parent Run.Approve routes a child-
 // namespaced askID to the child's own registry, falls through to the parent's own
 // resolve on an unknown id, and is a safe no-op on a stale id. It drives a real
-// interactive parent engine whose Task child surfaces an ask, then approves via the
+// interactive parent engine whose Subagent child surfaces an ask, then approves via the
 // surfaced (child) askID.
 func TestChildAskRouterRoutesVerdict(t *testing.T) {
 	bash := &fakeBash{}
@@ -126,10 +126,10 @@ func TestChildAskRouterRoutesVerdict(t *testing.T) {
 		mockllm.TextTurn("child done"),
 	)
 	childEngine := bashChildEngine(childLLM, bash)
-	task := agent.NewTaskTool(childEngine, agent.WithChildForker(&recordingTaskForker{}))
+	task := agent.NewSubagentTool(childEngine, agent.WithChildForker(&recordingSubagentForker{}))
 
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"run it"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"run it"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	e := interactiveEngine(t, agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
@@ -162,10 +162,10 @@ func TestSurfacedAskRedaction(t *testing.T) {
 		mockllm.TextTurn("child done"),
 	)
 	childEngine := bashChildEngine(childLLM, bash)
-	task := agent.NewTaskTool(childEngine, agent.WithChildForker(&recordingTaskForker{}))
+	task := agent.NewSubagentTool(childEngine, agent.WithChildForker(&recordingSubagentForker{}))
 
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"x"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	e := interactiveEngine(t, agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
@@ -210,7 +210,7 @@ func jsonString(s string) string {
 	return string(b)
 }
 
-// TestIsolatedSubagentAutoApprovesWorktreeSafe proves an ISOLATED Task child's
+// TestIsolatedSubagentAutoApprovesWorktreeSafe proves an ISOLATED Subagent child's
 // worktree-safe Bash (the motivating per-package coverage loop: substitution +
 // go test/list) auto-APPROVES (A2) — the child executes it without surfacing or
 // denying — even on a NON-interactive parent (so it is the isolation auto-approve, not
@@ -223,11 +223,11 @@ func TestIsolatedSubagentAutoApprovesWorktreeSafe(t *testing.T) {
 		mockllm.TextTurn("child done"),
 	)
 	childEngine := bashChildEngine(childLLM, bash)
-	task := agent.NewTaskTool(childEngine, agent.WithChildForker(&recordingTaskForker{}))
+	task := agent.NewSubagentTool(childEngine, agent.WithChildForker(&recordingSubagentForker{}))
 
 	// NON-interactive parent: no surface path. Only A2 can clear the ask.
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"coverage"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"coverage"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)}) // Interactive=false
@@ -251,11 +251,11 @@ func TestNonIsolatedHeadlessChildAutoDenies(t *testing.T) {
 	)
 	childEngine := bashChildEngine(childLLM, bash)
 	// No forker → not isolated. No Interactive → headless. So the ask auto-denies.
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
 	diag := newRecordingDiag()
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"x"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task), Diagnostics: diag})

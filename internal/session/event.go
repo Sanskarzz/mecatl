@@ -54,23 +54,23 @@ const (
 	// EvResult is the terminal event: success / limit / error / cancelled.
 	EvResult EventType = "result"
 
-	// EvSubagentStart is emitted when a Task subagent run begins. It is a
+	// EvSubagentStart is emitted when a Subagent tool run begins. It is a
 	// REDACTED observability projection of a child loop — never the child's
 	// content. It carries only the parent call id, the child session id, and a
 	// short goal label so a client can attribute and title the subagent card.
 	EvSubagentStart EventType = "subagent.start"
-	// EvSubagentTool is emitted each time a Task subagent's child tool call
+	// EvSubagentTool is emitted each time a Subagent tool's child tool call
 	// resolves. It is a REDACTED observability projection: it forwards ONLY the
 	// child tool's NAME and error bool plus a running count — never the child's
 	// tool args or result content, and never the child's message text. This keeps
 	// the context-isolation guarantee (gauntlet #7) intact: nothing the child
 	// produces enters the parent's conversation.
 	EvSubagentTool EventType = "subagent.tool"
-	// EvSubagentEnd is emitted when a Task subagent run terminates. It is a
+	// EvSubagentEnd is emitted when a Subagent tool run terminates. It is a
 	// REDACTED observability projection carrying only aggregate metadata — the
 	// child's tool count, token usage, stop reason, and wall-clock duration —
 	// never any child content. The child's terminal summary still folds back into
-	// the parent conversation exclusively via the Task tool's ToolResult.
+	// the parent conversation exclusively via the Subagent tool's ToolResult.
 	EvSubagentEnd EventType = "subagent.end"
 
 	// EvTeamStart is emitted when a Team tool run begins. It is a BOUNDED
@@ -201,7 +201,7 @@ type TurnEndPayload struct {
 
 // SubagentPayload is the REDACTED observability projection carried by the three
 // subagent.* events (EvSubagentStart / EvSubagentTool / EvSubagentEnd). It is the
-// ONLY information about a Task subagent's child run that surfaces to clients, and
+// ONLY information about a Subagent tool's child run that surfaces to clients, and
 // it deliberately carries no child content — no message text, no tool args, no
 // tool result bodies — only metadata. This is orthogonal to the context-isolation
 // guarantee (gauntlet #7): forwarding metadata to the event stream never touches
@@ -213,13 +213,13 @@ type TurnEndPayload struct {
 //   - EvSubagentTool:  ParentCallID, ChildID, ToolName, IsError, ToolCount.
 //   - EvSubagentEnd:   ParentCallID, ChildID, ToolCount, Usage, Stop, DurationMs.
 type SubagentPayload struct {
-	// ParentCallID is the parent's Task tool-call id, used by clients to attribute
-	// this event to the originating Task card. Set on all three kinds.
+	// ParentCallID is the parent's Subagent tool-call id, used by clients to attribute
+	// this event to the originating Subagent card. Set on all three kinds.
 	ParentCallID string
 	// ChildID is the child session id, distinguishing concurrent subagents. Set on
 	// all three kinds.
 	ChildID string
-	// Goal is a short, plain-text label for the delegated task (the Task call's
+	// Goal is a short, plain-text label for the delegated task (the Subagent call's
 	// description, or a truncation of its prompt). Set on EvSubagentStart only.
 	Goal string
 	// ToolName is the name of a child tool that just ran. Set on EvSubagentTool
@@ -327,7 +327,7 @@ type TeamMemberDisposition struct {
 // stream. This forwarding is orthogonal to the parent conversation: the team's
 // per-member transcripts NEVER enter the parent Session's Conversation; only the
 // Team tool's joined-summary ToolResult does. So the LLM's context still sees only
-// the summary, exactly like Task/Fork.
+// the summary, exactly like Subagent/Fork.
 //
 // Which fields are set depends on the event kind:
 //   - EvTeamStart:  ParentCallID, TeamID, Roster.
@@ -437,7 +437,7 @@ type Event struct {
 	// total; turn.end carries its per-turn usage in TurnEnd, NOT here.
 	Usage *Usage
 	// Subagent is set on the three subagent.* events: the REDACTED observability
-	// projection of a Task child run (metadata only, never child content).
+	// projection of a Subagent child run (metadata only, never child content).
 	Subagent *SubagentPayload
 	// Team is set on the team.* events (start / member / tasks / end): the BOUNDED
 	// observability projection of an in-process team run (fuller-but-bounded; member

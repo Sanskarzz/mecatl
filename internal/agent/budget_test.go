@@ -144,12 +144,12 @@ func TestBudgetBoundaryCheckCompletesInFlightTurn(t *testing.T) {
 	}
 }
 
-// TestTaskChildInheritsBudgetAndReturnsCleanResult is the CHILD-PATH behavioral guard
-// (not a field-copy assertion): a Task child whose engine carries MaxRunTokens and is
-// driven by a never-stopping runawayProvider actually hits StopBudget and the Task tool
+// TestSubagentChildInheritsBudgetAndReturnsCleanResult is the CHILD-PATH behavioral guard
+// (not a field-copy assertion): a Subagent child whose engine carries MaxRunTokens and is
+// driven by a never-stopping runawayProvider actually hits StopBudget and the Subagent tool
 // returns a CLEAN tool result (not an error) — StopBudget is a non-error terminal, so it
 // folds back as the child's summary, never a tool error like StopError would.
-func TestTaskChildInheritsBudgetAndReturnsCleanResult(t *testing.T) {
+func TestSubagentChildInheritsBudgetAndReturnsCleanResult(t *testing.T) {
 	const budget = 250
 	childLLM := &runawayProvider{perTurn: session.Usage{InputTokens: 60, OutputTokens: 40}}
 	childEngine := agent.NewEngine(agent.Deps{
@@ -159,13 +159,13 @@ func TestTaskChildInheritsBudgetAndReturnsCleanResult(t *testing.T) {
 		Model:        "child-model",
 		MaxRunTokens: budget,
 	})
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
 	res, err := task.Execute(context.Background(),
-		session.NewToolCall("p1", "Task", []byte(`{"prompt":"run forever"}`)),
+		session.NewToolCall("p1", "Subagent", []byte(`{"prompt":"run forever"}`)),
 		memfs.NewWorkspace("/ws"))
 	if err != nil {
-		t.Fatalf("Task.Execute returned a transport error: %v", err)
+		t.Fatalf("Subagent.Execute returned a transport error: %v", err)
 	}
 	// A budget-stopped child is a CLEAN terminal → a normal tool result, NOT an error.
 	if res.IsError {

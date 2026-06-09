@@ -9,15 +9,15 @@ import (
 	"github.com/stacklok/mecatl/internal/session"
 )
 
-// TestTaskPerCallModelRoutesToFactory is the MODEL-FACING e2e: a Task call with
+// TestSubagentPerCallModelRoutesToFactory is the MODEL-FACING e2e: a Subagent call with
 // `model: X` runs on the engine the factory minted for X (distinguished by a marker
 // mockllm summary), NOT the default explorer.
-func TestTaskPerCallModelRoutesToFactory(t *testing.T) {
+func TestSubagentPerCallModelRoutesToFactory(t *testing.T) {
 	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
 	overrideEngine := childEngineWith(mockllm.New(mockllm.TextTurn("OVERRIDE-X")), catalogWith(t))
 
 	var sawModel string
-	task := agent.NewTaskTool(defaultEngine, agent.WithTaskEngineFactory(
+	task := agent.NewSubagentTool(defaultEngine, agent.WithSubagentEngineFactory(
 		func(model string) (*agent.Engine, bool) {
 			sawModel = model
 			if model == "fast-mini" {
@@ -26,8 +26,8 @@ func TestTaskPerCallModelRoutesToFactory(t *testing.T) {
 			return nil, false
 		}))
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"explore","model":"fast-mini"}`)),
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"explore","model":"fast-mini"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if len(results) != 1 || results[0].IsError {
@@ -41,17 +41,17 @@ func TestTaskPerCallModelRoutesToFactory(t *testing.T) {
 	}
 }
 
-// TestTaskPerCallModelUnknownErrors is the ADVERSARIAL test: a bogus model the factory
-// cannot route returns (nil,false), so Task yields a model-addressable error and spawns
+// TestSubagentPerCallModelUnknownErrors is the ADVERSARIAL test: a bogus model the factory
+// cannot route returns (nil,false), so Subagent yields a model-addressable error and spawns
 // NO child (the default engine's summary never appears).
-func TestTaskPerCallModelUnknownErrors(t *testing.T) {
+func TestSubagentPerCallModelUnknownErrors(t *testing.T) {
 	defaultLLM := mockllm.New(mockllm.TextTurn("DEFAULT"))
 	defaultEngine := childEngineWith(defaultLLM, catalogWith(t))
-	task := agent.NewTaskTool(defaultEngine, agent.WithTaskEngineFactory(
+	task := agent.NewSubagentTool(defaultEngine, agent.WithSubagentEngineFactory(
 		func(string) (*agent.Engine, bool) { return nil, false }))
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"x","model":"bogus"}`)),
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x","model":"bogus"}`)),
 		mockllm.TextTurn("parent recovered"),
 	)
 	if len(results) != 1 || !results[0].IsError {
@@ -65,20 +65,20 @@ func TestTaskPerCallModelUnknownErrors(t *testing.T) {
 	}
 }
 
-// TestTaskAgentAndModelTogetherRejected proves a call that sets BOTH `agent` and `model`
+// TestSubagentAgentAndModelTogetherRejected proves a call that sets BOTH `agent` and `model`
 // is rejected with a clear error (R9): a specialist already pins its own engine/model.
-func TestTaskAgentAndModelTogetherRejected(t *testing.T) {
+func TestSubagentAgentAndModelTogetherRejected(t *testing.T) {
 	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
 	reviewerEngine := childEngineWith(mockllm.New(mockllm.TextTurn("REVIEWER")), catalogWith(t))
-	task := agent.NewTaskTool(defaultEngine,
+	task := agent.NewSubagentTool(defaultEngine,
 		agent.WithAgentEngines(
 			map[string]*agent.Engine{"reviewer": reviewerEngine},
 			[]agent.AgentMeta{{Name: "reviewer", Description: "reviews"}}),
-		agent.WithTaskEngineFactory(func(string) (*agent.Engine, bool) { return reviewerEngine, true }),
+		agent.WithSubagentEngineFactory(func(string) (*agent.Engine, bool) { return reviewerEngine, true }),
 	)
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"x","agent":"reviewer","model":"fast"}`)),
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x","agent":"reviewer","model":"fast"}`)),
 		mockllm.TextTurn("parent recovered"),
 	)
 	if len(results) != 1 || !results[0].IsError {
@@ -89,12 +89,12 @@ func TestTaskAgentAndModelTogetherRejected(t *testing.T) {
 	}
 }
 
-// TestTaskPerCallMaxTokensHitsBudgetTerminal is the MODEL-FACING e2e + ADVERSARIAL: a
+// TestSubagentPerCallMaxTokensHitsBudgetTerminal is the MODEL-FACING e2e + ADVERSARIAL: a
 // runaway child (never stops on its own) with a tighten-only per-call max_tokens hits the
-// token-budget terminal. StopBudget is a clean terminal, so the Task RESULT is a SUCCESS
+// token-budget terminal. StopBudget is a clean terminal, so the Subagent RESULT is a SUCCESS
 // (best-effort), annotated with the budget note. The Run-scoped override works on the
 // SHARED child engine (which carries NO operator budget of its own).
-func TestTaskPerCallMaxTokensHitsBudgetTerminal(t *testing.T) {
+func TestSubagentPerCallMaxTokensHitsBudgetTerminal(t *testing.T) {
 	childLLM := &runawayProvider{perTurn: session.Usage{InputTokens: 60, OutputTokens: 40}}
 	// The shared child engine has NO MaxRunTokens; the per-call max_tokens is the only brake.
 	childEngine := agent.NewEngine(agent.Deps{
@@ -103,10 +103,10 @@ func TestTaskPerCallMaxTokensHitsBudgetTerminal(t *testing.T) {
 		Policy:  allowAll(),
 		Model:   "child-model",
 	})
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"run forever","max_tokens":250}`)),
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"run forever","max_tokens":250}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if len(results) != 1 {
@@ -126,11 +126,11 @@ func TestTaskPerCallMaxTokensHitsBudgetTerminal(t *testing.T) {
 	}
 }
 
-// TestTaskPerCallMaxTokensTightenOnly proves the per-call max_tokens is TIGHTEN-ONLY: a
+// TestSubagentPerCallMaxTokensTightenOnly proves the per-call max_tokens is TIGHTEN-ONLY: a
 // per-call value HIGHER than the engine's operator default does NOT loosen it — the
 // engine's lower budget still trips. The child runs on an engine with a TIGHT operator
 // budget and a generous per-call max_tokens; the operator budget must win.
-func TestTaskPerCallMaxTokensTightenOnly(t *testing.T) {
+func TestSubagentPerCallMaxTokensTightenOnly(t *testing.T) {
 	childLLM := &runawayProvider{perTurn: session.Usage{InputTokens: 60, OutputTokens: 40}}
 	childEngine := agent.NewEngine(agent.Deps{
 		LLM:          childLLM,
@@ -139,11 +139,11 @@ func TestTaskPerCallMaxTokensTightenOnly(t *testing.T) {
 		Model:        "child-model",
 		MaxRunTokens: 250, // tight operator budget
 	})
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
-	results, _ := taskParentResults(t, task,
+	results, _ := subagentParentResults(t, task,
 		// A generous per-call max_tokens that must NOT loosen the tight operator budget.
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"run forever","max_tokens":100000}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"run forever","max_tokens":100000}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if len(results) != 1 || results[0].IsError {

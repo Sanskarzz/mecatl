@@ -28,7 +28,7 @@ import (
 //	                    tool-call id, a tool_call_update marking that exact call
 //	                    FAILED with the reason (the card was opened before the gate);
 //	                    PostToolUse blocks and all others -> an agent_thought_chunk note.
-//	EvSubagentTool/  -> tool_call_update on the PARENT Task call (keyed by
+//	EvSubagentTool/  -> tool_call_update on the PARENT Subagent call (keyed by
 //	  EvSubagentEnd      SubagentPayload.ParentCallID): progress content lines while
 //	                     the child runs; completed/failed on end.
 //	EvTeamMember/    -> tool_call_update on the PARENT Team call (keyed by
@@ -213,10 +213,10 @@ func hookNote(h *session.HookPayload, text string) string {
 }
 
 // projectSubagent maps a subagent.tool / subagent.end event to a tool_call_update
-// on the PARENT Task tool call (keyed by SubagentPayload.ParentCallID), so the
-// child's redacted activity surfaces as progress on the editor's Task card.
+// on the PARENT Subagent tool call (keyed by SubagentPayload.ParentCallID), so the
+// child's redacted activity surfaces as progress on the editor's Subagent card.
 // subagent.tool appends an in_progress progress line (the child tool name); the
-// terminal subagent.end finalizes the Task call status. Nothing here carries child
+// terminal subagent.end finalizes the Subagent call status. Nothing here carries child
 // content beyond the already-redacted metadata on the payload.
 func projectSubagent(ev session.Event) (any, bool) {
 	p := ev.Subagent
@@ -347,7 +347,7 @@ func toolKindFor(name string) string {
 		return "execute"
 	case "WebFetch":
 		return "fetch"
-	case "Task", "Team", "Fork":
+	case "Subagent", "Team", "Fork":
 		return "think"
 	default:
 		return "other"

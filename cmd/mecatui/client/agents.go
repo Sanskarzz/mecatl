@@ -18,8 +18,8 @@ import (
 // Agent is one resolved agent definition (proto AgentInfo, proto-free): the
 // def's routing name, its one-line routing description, the resolved provider
 // model (empty = inherit parent), the raw frontmatter permission mode, the
-// optional colour UX hint, and the effective read-only tool scope at the Task
-// call site. Definitions are the routing targets for Task delegations — this is
+// optional colour UX hint, and the effective read-only tool scope at the Subagent
+// call site. Definitions are the routing targets for Subagent delegations — this is
 // discovery only; activation stays the model's run-path concern.
 type Agent struct {
 	Name           string

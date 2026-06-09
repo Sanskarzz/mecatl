@@ -4,11 +4,11 @@
 // files. It is the agents analogue of the skills Source seam
 // (internal/adapter/skills): a pluggable Source over precedence-ordered
 // directories, a forgiving frontmatter parser, and a name-indexed Registry the
-// composition root threads into BOTH the Task subagent and (in a later slice)
+// composition root threads into BOTH the Subagent tool and (in a later slice)
 // the team-member factory.
 //
 // ONE DEFINITION, TWO CONSUMERS. A `<name>.md` file under a conventional dir is
-// reusable as a Task delegate (Task(agent="<name>")) and, in a following slice,
+// reusable as a Subagent delegate (Subagent(agent="<name>")) and, in a following slice,
 // as a team-member role (MemberSpec.AgentType). This package only PRODUCES the
 // definitions; the registry→engine translation lives in internal/app, exactly
 // where buildChildEngine/buildMemberEngine already live.
@@ -32,13 +32,13 @@ import "strings"
 // and system-prompt body. It carries no behaviour and no infrastructure types,
 // so it is safe to construct in tests and to pass across the adapter boundary.
 //
-// Only Name and Description are REQUIRED (they are the routing metadata the Task
+// Only Name and Description are REQUIRED (they are the routing metadata the Subagent
 // tool enumerates always-in-context). Everything else is optional: a def with
 // only name+description+body is a pure prompt persona on the call site's default
 // tool set and the parent model.
 type AgentDef struct {
 	// Name is the def's stable identifier, from the frontmatter `name`. It is the
-	// value the model passes to the Task tool's `agent` arg to route to this def,
+	// value the model passes to the Subagent tool's `agent` arg to route to this def,
 	// and the future team-member AgentType handle. Agent names live in their OWN
 	// namespace and are NOT validated against the tool catalog (an agent may share
 	// a name with a tool without conflict).
@@ -72,7 +72,7 @@ type AgentDef struct {
 	MaxTurns int
 	// MaxToolCalls is the OPTIONAL per-run tool-call cap. Zero => the caller
 	// default. It mirrors MaxTurns: the composition layer maps it into the def's
-	// session.Limits so a def's Task-routed child (and its team-member session) is
+	// session.Limits so a def's Subagent-routed child (and its team-member session) is
 	// bounded by it; a zero field falls back to the call site's default limit.
 	MaxToolCalls int
 	// Color is an OPTIONAL UX hint only (e.g. a TUI tag colour); it NEVER affects

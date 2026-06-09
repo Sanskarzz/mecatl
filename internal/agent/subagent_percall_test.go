@@ -14,16 +14,16 @@ import (
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
-// TestTaskPerCallMaxTurnsTightens is the MODEL-FACING e2e: a Task call that supplies
+// TestSubagentPerCallMaxTurnsTightens is the MODEL-FACING e2e: a Subagent call that supplies
 // max_turns lower than the default makes its child STRICTER for that call. The child
 // would loop far longer (20 scripted tool-call turns) but the per-call max_turns=3 caps
 // it at exactly 3 model calls.
-func TestTaskPerCallMaxTurnsTightens(t *testing.T) {
+func TestSubagentPerCallMaxTurnsTightens(t *testing.T) {
 	boundedEngine, boundedLLM := readLoopChild(t, 20)
-	task := agent.NewTaskTool(boundedEngine)
+	task := agent.NewSubagentTool(boundedEngine)
 
-	taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"loop","max_turns":3}`)),
+	subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"loop","max_turns":3}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if got := boundedLLM.Calls(); got != 3 {
@@ -31,15 +31,15 @@ func TestTaskPerCallMaxTurnsTightens(t *testing.T) {
 	}
 }
 
-// TestTaskPerCallMaxToolCallsTightens proves the per-call max_tool_calls override caps
+// TestSubagentPerCallMaxToolCallsTightens proves the per-call max_tool_calls override caps
 // the child's total tool invocations. With max_tool_calls=2 and a child that would call
 // a tool every turn, the child stops after the tool-call limit trips.
-func TestTaskPerCallMaxToolCallsTightens(t *testing.T) {
+func TestSubagentPerCallMaxToolCallsTightens(t *testing.T) {
 	boundedEngine, boundedLLM := readLoopChild(t, 20)
-	task := agent.NewTaskTool(boundedEngine)
+	task := agent.NewSubagentTool(boundedEngine)
 
-	taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"loop","max_tool_calls":2}`)),
+	subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"loop","max_tool_calls":2}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	// Each turn issues exactly one tool call; MaxToolCalls=2 stops the run at the next
@@ -50,16 +50,16 @@ func TestTaskPerCallMaxToolCallsTightens(t *testing.T) {
 	}
 }
 
-// TestTaskPerCallTightenOnlyCannotLoosen proves the TIGHTEN-ONLY guarantee: a per-call
+// TestSubagentPerCallTightenOnlyCannotLoosen proves the TIGHTEN-ONLY guarantee: a per-call
 // max_turns HIGHER than the inherited (default) limit is ignored — the model cannot use
 // a per-call arg to escape the operator's bound. The child still stops at the inherited
 // default MaxTurns (12), not the requested 100.
-func TestTaskPerCallTightenOnlyCannotLoosen(t *testing.T) {
+func TestSubagentPerCallTightenOnlyCannotLoosen(t *testing.T) {
 	boundedEngine, boundedLLM := readLoopChild(t, 50)
-	task := agent.NewTaskTool(boundedEngine)
+	task := agent.NewSubagentTool(boundedEngine)
 
-	taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"loop","max_turns":100}`)),
+	subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"loop","max_turns":100}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if got := boundedLLM.Calls(); got != agent.DefaultChildLimits().MaxTurns {
@@ -90,11 +90,11 @@ func (s *sleepThenLoopTool) Execute(ctx context.Context, in session.ToolCall, _ 
 	return session.NewToolResult(in.ID, "slow ok"), nil
 }
 
-// TestTaskPerCallTimeoutProducesTimeBudgetError is the MODEL-FACING e2e + ADVERSARIAL
-// (uncooperative-mock) test: a Task call with a short timeout_ms drives a child that
+// TestSubagentPerCallTimeoutProducesTimeBudgetError is the MODEL-FACING e2e + ADVERSARIAL
+// (uncooperative-mock) test: a Subagent call with a short timeout_ms drives a child that
 // IGNORES the deadline and keeps emitting tool calls / sleeping. The ctx deadline must
 // terminate it, and the RESULT must be a model-addressable time-budget tool error.
-func TestTaskPerCallTimeoutProducesTimeBudgetError(t *testing.T) {
+func TestSubagentPerCallTimeoutProducesTimeBudgetError(t *testing.T) {
 	slow := &sleepThenLoopTool{sleep: 50 * time.Millisecond}
 	// A child whose every turn calls the slow tool — it never stops on its own.
 	var script []mockllm.Turn
@@ -102,10 +102,10 @@ func TestTaskPerCallTimeoutProducesTimeBudgetError(t *testing.T) {
 		script = append(script, mockllm.ToolCallTurn(toolCall("k", "Slow", `{}`)))
 	}
 	childEngine := childEngineWith(mockllm.New(script...), catalogWith(t, slow))
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"loop forever","timeout_ms":120}`)),
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"loop forever","timeout_ms":120}`)),
 		mockllm.TextTurn("parent recovered"),
 	)
 	if len(results) != 1 {
@@ -136,20 +136,20 @@ func (b *signalThenBlockTool) Execute(ctx context.Context, in session.ToolCall, 
 	return session.NewToolResult(in.ID, "blocked ok"), nil
 }
 
-// TestTaskParentCancelWithTimeoutIsNotTimeBudget is the BRANCH-GAP guard (QA #1): when
+// TestSubagentParentCancelWithTimeoutIsNotTimeBudget is the BRANCH-GAP guard (QA #1): when
 // timeout_ms is ALSO set, a PARENT cancellation must take the cancellation path, NOT be
 // mislabeled "exceeded its time budget". The terminal branch keys off the SEPARATE
 // timeoutCtx (DeadlineExceeded) rather than the merged ctx; if it regressed to ctx.Err()
 // a parent cancel would falsely read as a deadline. A generous timeout_ms (that must NOT
 // fire) is set; the child blocks in-flight; the test cancels the PARENT ctx. The result
 // must be an error result that does NOT mention the time budget.
-func TestTaskParentCancelWithTimeoutIsNotTimeBudget(t *testing.T) {
+func TestSubagentParentCancelWithTimeoutIsNotTimeBudget(t *testing.T) {
 	block := &signalThenBlockTool{entered: make(chan struct{}, 1)}
 	childEngine := childEngineWith(mockllm.New(
 		mockllm.ToolCallTurn(toolCall("k", "Block", `{}`)),
 		mockllm.TextTurn("should not reach"),
 	), catalogWith(t, block))
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
 	// A GENEROUS deadline that must not fire within the test; the parent cancel wins.
 	parentCtx, cancel := context.WithCancel(context.Background())
@@ -162,7 +162,7 @@ func TestTaskParentCancelWithTimeoutIsNotTimeBudget(t *testing.T) {
 	done := make(chan out, 1)
 	go func() {
 		res, err := task.Execute(parentCtx,
-			session.NewToolCall("c1", "Task", []byte(`{"prompt":"block","timeout_ms":600000}`)),
+			session.NewToolCall("c1", "Subagent", []byte(`{"prompt":"block","timeout_ms":600000}`)),
 			memfs.NewWorkspace("/base"))
 		done <- out{res, err}
 	}()
@@ -172,7 +172,7 @@ func TestTaskParentCancelWithTimeoutIsNotTimeBudget(t *testing.T) {
 
 	got := <-done
 	if got.err != nil {
-		t.Fatalf("Task.Execute returned a transport error: %v", got.err)
+		t.Fatalf("Subagent.Execute returned a transport error: %v", got.err)
 	}
 	// A parent cancel must NOT be mislabeled as a time-budget overrun. The exact
 	// rendering of a cancellation is not under test here; the load-bearing assertion is
@@ -182,15 +182,15 @@ func TestTaskParentCancelWithTimeoutIsNotTimeBudget(t *testing.T) {
 	}
 }
 
-// TestTaskOmittedPerCallArgsUnchanged is the regression guard: a Task call with NONE of
+// TestSubagentOmittedPerCallArgsUnchanged is the regression guard: a Subagent call with NONE of
 // the per-call knobs behaves exactly as before — the child runs to its scripted text
 // answer under the inherited default limits, and the result is the child's summary.
-func TestTaskOmittedPerCallArgsUnchanged(t *testing.T) {
+func TestSubagentOmittedPerCallArgsUnchanged(t *testing.T) {
 	childEngine := childEngineWith(mockllm.New(mockllm.TextTurn("CHILD SUMMARY")), catalogWith(t))
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"investigate"}`)),
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"investigate"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if len(results) != 1 || results[0].IsError || !strings.Contains(results[0].Content, "CHILD SUMMARY") {
@@ -198,19 +198,19 @@ func TestTaskOmittedPerCallArgsUnchanged(t *testing.T) {
 	}
 }
 
-// TestTaskPerCallTimeoutOmittedNoDeadline proves an omitted timeout_ms imposes NO
+// TestSubagentPerCallTimeoutOmittedNoDeadline proves an omitted timeout_ms imposes NO
 // deadline: a child with a brief sleep finishes normally (no time-budget error) even
 // though the same sleep would blow a tight deadline if one were set.
-func TestTaskPerCallTimeoutOmittedNoDeadline(t *testing.T) {
+func TestSubagentPerCallTimeoutOmittedNoDeadline(t *testing.T) {
 	slow := &sleepThenLoopTool{sleep: 5 * time.Millisecond}
 	childEngine := childEngineWith(mockllm.New(
 		mockllm.ToolCallTurn(toolCall("k", "Slow", `{}`)),
 		mockllm.TextTurn("finished"),
 	), catalogWith(t, slow))
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"go"}`)),
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"go"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if len(results) != 1 || results[0].IsError {

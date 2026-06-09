@@ -97,7 +97,7 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 				"list; watch the transcript for Skill tool calls.") + "\n")
 	}
 	// Agent definitions, when served, are browsable via /agents (the inventory the
-	// Task tool routes delegations to). Distinct from caps.Teams / ctrl+a, which is
+	// Subagent tool routes delegations to). Distinct from caps.Teams / ctrl+a, which is
 	// the live overlay of a team that has actually run.
 	if caps.Agents {
 		b.WriteString(muted.Render("Type /agents to browse the agent-definition inventory.") + "\n")
@@ -163,7 +163,7 @@ func renderZeroState(th theme.Theme, caps client.Capabilities, width, height int
 // zeroStateRows is the affordance list on the welcome card. Every row is now
 // UNCONDITIONAL — "?" / "/" (built-in commands always exist) / "ctrl+t" were always
 // always-on, and "ctrl+a" (the unified agents overlay) is no longer caps-gated because
-// subagents are always available via Task (teams are the only optional half). So it
+// subagents are always available via Subagent (teams are the only optional half). So it
 // takes no caps argument; the caps-conditional welcome content (the memory note) lives
 // in renderZeroState. Rows are rendered ungated (no [not enabled] tags on the welcome
 // card — it advertises only what's on).

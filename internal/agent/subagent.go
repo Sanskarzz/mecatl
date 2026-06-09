@@ -14,8 +14,8 @@ import (
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
-// taskToolName is the catalog name of the subagent delegation tool.
-const taskToolName = "Task"
+// subagentToolName is the catalog name of the subagent delegation tool.
+const subagentToolName = "Subagent"
 
 // maxSubagentGoalLen caps the prompt-derived goal label forwarded on
 // EvSubagentStart when no explicit description is supplied. It keeps the
@@ -23,12 +23,12 @@ const taskToolName = "Task"
 // is echoed to the event stream.
 const maxSubagentGoalLen = 60
 
-// defaultMaxConcurrentChildren bounds how many Task children may run at once.
-// Task is read-only (ReadOnly()==true), so the dispatcher runs Task calls
+// defaultMaxConcurrentChildren bounds how many Subagent children may run at once.
+// Subagent is read-only (ReadOnly()==true), so the dispatcher runs Subagent calls
 // concurrently and the model can fan MANY out in a single turn; each child consumes
 // a child session + an LLM slot (and, when shell-bearing, a forked git worktree —
 // disk + a `git worktree add` process), so an unbounded fan-out is real resource
-// pressure. The gate bounds ALL Task children — forking AND forker-less — so the
+// pressure. The gate bounds ALL Subagent children — forking AND forker-less — so the
 // read-parallel fan-out cannot create unbounded child runs at once. The default
 // mirrors the team supervisor's defaultTeamConcurrency and the fork concurrency cap.
 const defaultMaxConcurrentChildren = 4
@@ -40,7 +40,7 @@ const defaultMaxConcurrentChildren = 4
 // Run, so events are sequenced and mirrored to the sink exactly like the loop's
 // own emits); a tool that does not is executed via the ordinary Execute path.
 //
-// The Task subagent implements this to surface subagent.start/tool/end metadata.
+// The Subagent tool implements this to surface subagent.start/tool/end metadata.
 // Crucially, the emit closure only sequences and channels events — it NEVER
 // touches the parent's session.Conversation — so this observability is orthogonal
 // to the context-isolation guarantee (gauntlet #7).
@@ -49,7 +49,7 @@ type observableTool interface {
 }
 
 // parentCaps carries the PARENT run's interactivity and the surface seam down to a
-// subagent-spawning tool (Task/Team/Fork), so a child's permission ask can be SURFACED
+// subagent-spawning tool (Subagent/Team/Fork), so a child's permission ask can be SURFACED
 // to the human when the parent is interactive (and auto-denied with an accurate message
 // + operator diagnostic when it is headless). It is the symmetric back-channel to the
 // emit closure: where emit pushes child observability UP, surfaceAsk routes a parent
@@ -82,7 +82,7 @@ type parentCaps struct {
 // the parent's capabilities (interactivity + the surface back-channel). A tool that
 // implements it is driven via ExecuteWithParent when the dispatcher has a parentCaps to
 // pass; one that does not falls back to ExecuteObserved/Execute with the legacy headless
-// posture. Task/Team/Fork implement it.
+// posture. Subagent/Team/Fork implement it.
 type childCapableTool interface {
 	ExecuteWithParent(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error)
 }
@@ -98,18 +98,18 @@ var defaultChildLimits = session.Limits{
 }
 
 // DefaultChildLimits returns the default per-child/per-member stop conditions a
-// Task subagent (and a team member, via WithTeamLimits) runs under when the
+// Subagent tool (and a team member, via WithTeamLimits) runs under when the
 // caller does not override them. The composition layer uses it as the per-field
 // FALLBACK when deriving a def's session.Limits from its maxTurns/maxToolCalls:
 // a zero def field inherits the matching default here, so a def that sets neither
 // is bounded exactly as before.
 func DefaultChildLimits() session.Limits { return defaultChildLimits }
 
-// taskArgs is the argument payload the model supplies when calling the Task tool.
+// subagentArgs is the argument payload the model supplies when calling the Subagent tool.
 // A subagent gets a single, self-contained instruction (its whole prompt — it has
 // no shared context with the parent) and an optional short description used only
 // for observability.
-type taskArgs struct {
+type subagentArgs struct {
 	// Prompt is the full, self-contained instruction the subagent runs against.
 	// Because the child has a FRESH context window, this must include everything
 	// the subagent needs; it cannot see the parent conversation.
@@ -155,7 +155,7 @@ type taskArgs struct {
 	// parameters ARE this schema and is instructed to call it to deliver; the submitted
 	// payload is validated against the schema (session.ValidateJSON) and, on a mismatch,
 	// a model-visible correction is re-injected and the child re-driven, BOUNDED. The
-	// validated payload becomes the Task result text. Omitted (the default) = today's
+	// validated payload becomes the Subagent result text. Omitted (the default) = today's
 	// free-text behaviour, unchanged.
 	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
 
@@ -170,7 +170,7 @@ type taskArgs struct {
 }
 
 // AgentMeta is the plain (name, description) summary of one registered agent
-// definition, surfaced in the Task tool's Spec().Description for progressive
+// definition, surfaced in the Subagent tool's Spec().Description for progressive
 // disclosure. It is a layering-clean value type: the composition root translates
 // the agents adapter's Registry into a []AgentMeta + a map[string]*Engine and
 // injects both via WithAgentEngines, so internal/agent never imports the agents
@@ -182,19 +182,19 @@ type AgentMeta struct {
 	Description string
 	// Limits are the per-def session stop conditions the child session runs under
 	// when this agent is selected. The composition root derives them from the def's
-	// maxTurns/maxToolCalls (per-field falling back to the Task tool's default
+	// maxTurns/maxToolCalls (per-field falling back to the Subagent tool's default
 	// limits), so a def with no limits carries the same bound as the default
 	// explorer. A zero Limits value is treated as "no per-def override" — Execute
-	// then uses the Task tool's default limits, exactly as the no-`agent` path does.
+	// then uses the Subagent tool's default limits, exactly as the no-`agent` path does.
 	Limits session.Limits
 }
 
-// taskSchema is the JSON schema the model sees for the Task tool's arguments. The
+// subagentSchema is the JSON schema the model sees for the Subagent tool's arguments. The
 // `agent` property is always present (optional); the available agent NAMES are
 // enumerated in the tool's Spec().Description tail (progressive disclosure), not
 // baked into this schema, so the schema stays byte-stable regardless of how many
 // defs are configured.
-var taskSchema = json.RawMessage(`{
+var subagentSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "prompt": {
@@ -237,7 +237,7 @@ var taskSchema = json.RawMessage(`{
   "required": ["prompt"]
 }`)
 
-// TaskTool is the subagent delegation tool (gauntlet #7). It is a tool.Tool that,
+// SubagentTool is the subagent delegation tool (gauntlet #7). It is a tool.Tool that,
 // when executed, spins up a CHILD agent loop with its own fresh Session, its own
 // (tighter) Limits, and a SCOPED tool catalog — supplied by the injected child
 // *Engine — runs it to completion, and returns ONLY the child's final summary
@@ -249,7 +249,7 @@ var taskSchema = json.RawMessage(`{
 // can inspect (git log/show, cat, build, test) without its writes touching the shared
 // parent workspace; the worktree is torn down after the child drains. Without a
 // forker the child has no Bash and runs against the parent workspace, exactly as it
-// originally did. Either way Task stays read-parallel-safe (see ReadOnly).
+// originally did. Either way Subagent stays read-parallel-safe (see ReadOnly).
 //
 // Context isolation is the whole point: the parent never observes the child's
 // intermediate tool.call / tool.result / message.delta events. The child's Event
@@ -258,10 +258,10 @@ var taskSchema = json.RawMessage(`{
 // summarize" investigation from bloating the main context window.
 //
 // The child Engine is built by the composition root (cmd/mecated, WP11) with a
-// read-only explorer catalog (Read, Grep, Glob) that NEVER includes the Task tool
+// read-only explorer catalog (Read, Grep, Glob) that NEVER includes the Subagent tool
 // itself — so a subagent cannot recurse — and an allow-all policy over those
-// read-only tools so the child never needs to prompt a human. See NewTaskTool.
-type TaskTool struct {
+// read-only tools so the child never needs to prompt a human. See NewSubagentTool.
+type SubagentTool struct {
 	// childEngine runs the subagent loop. It is pre-wired by the composition root
 	// with the scoped catalog, the (optionally cheaper) model, and an allow/deny
 	// policy appropriate for a non-interactive child. It is never the parent
@@ -271,9 +271,9 @@ type TaskTool struct {
 
 	// agentEngines maps an agent-definition NAME to its pre-built, read-only child
 	// Engine. The composition root builds one per def (scoped catalog + resolved
-	// model + body→Role prompt) and injects the map via WithAgentEngines. A Task
+	// model + body→Role prompt) and injects the map via WithAgentEngines. A Subagent
 	// call with a known `agent` runs that engine instead of childEngine; an empty
-	// map (the default) means no specialists are configured and Task behaves
+	// map (the default) means no specialists are configured and Subagent behaves
 	// exactly as before. nil/empty is valid.
 	agentEngines map[string]*Engine
 
@@ -306,31 +306,31 @@ type TaskTool struct {
 	// running against the shared parent workspace. The composition root wires it ONLY
 	// when the child catalog includes Bash, so a shell-bearing read-only explorer runs
 	// its (mutating-classified) Bash in a throwaway worktree, never the shared base —
-	// which is what keeps Task read-parallel-safe (see ReadOnly). When nil, the child
+	// which is what keeps Subagent read-parallel-safe (see ReadOnly). When nil, the child
 	// runs against the parent ws exactly as before (no shell wired). A fork FAILURE on
 	// this path is a tool error, NOT a silent fallback to the shared ws: the child's
 	// catalog has Bash precisely because isolation was available, so running it in the
 	// shared base would be the exact hazard isolation exists to prevent.
 	childForker tool.WorkspaceForker
 
-	// childGate bounds how many Task children may run CONCURRENTLY — forking AND
+	// childGate bounds how many Subagent children may run CONCURRENTLY — forking AND
 	// forker-less. It is a buffered channel used as a counting semaphore, acquired at
 	// the top of run() (before any fork) and released when the call returns, so the
-	// dispatcher's read-parallel fan-out of N Task calls in one turn can never start more
+	// dispatcher's read-parallel fan-out of N Subagent calls in one turn can never start more
 	// than cap children at once (each consumes a child session + an LLM slot, and a
 	// shell-bearing child additionally a forked worktree). It is always sized in
-	// NewTaskTool (never nil), so the gate is the single fan-out brake for every Task
+	// NewSubagentTool (never nil), so the gate is the single fan-out brake for every Subagent
 	// child. Capacity is defaultMaxConcurrentChildren unless overridden by
-	// WithMaxConcurrentChildren (or its deprecated alias WithMaxConcurrentTaskShells).
+	// WithMaxConcurrentChildren.
 	childGate chan struct{}
 
 	// engineFactory, when non-nil, mints a child engine for a per-call `model`
-	// override. It is a composition-supplied closure (WithTaskEngineFactory) closing
+	// override. It is a composition-supplied closure (WithSubagentEngineFactory) closing
 	// over the provider registry: given an opaque model string it returns a child
 	// engine built through the SAME contamination-safe per-provider path the named-agent
 	// engines use (engineDepsForProvider re-derives Compactor/TokenCounter/Env.Model/
 	// ContextWindow for the override model) — NEVER a clone-and-swap of the LLM on an
-	// existing engine. It returns ok=false for an unknown/unroutable model, which Task
+	// existing engine. It returns ok=false for an unknown/unroutable model, which Subagent
 	// renders as a model-addressable error. nil (the default) means no per-call model
 	// override is wired (a `model` arg then errors with a clear "not supported" message).
 	// It is layering-clean: the closure takes a string and returns *Engine — both
@@ -345,7 +345,7 @@ type TaskTool struct {
 
 // defaultStructuredOutputRetries bounds how many CORRECTION re-drives a
 // structured-output child gets after a SubmitResult payload fails schema validation
-// (or the child never calls SubmitResult), before the Task tool gives up with
+// (or the child never calls SubmitResult), before the Subagent tool gives up with
 // StopStructuredOutput. It mirrors defaultNoProgressNudges (2): the FIRST attempt plus
 // this many corrections. It is a bounded retry counter — NOT tool_choice forcing
 // (incompatible with Anthropic thinking + the OpenAI reasoning path).
@@ -367,54 +367,54 @@ const defaultStructuredOutputRetries = 2
 // registered into any shared catalog.
 const submitResultToolName = "SubmitResult"
 
-// TaskOption configures a TaskTool.
-type TaskOption func(*TaskTool)
+// SubagentOption configures a SubagentTool.
+type SubagentOption func(*SubagentTool)
 
 // WithChildLimits overrides the subagent's stop conditions. Use it to make a
 // child even tighter (or, rarely, looser) than the defaults.
-func WithChildLimits(l session.Limits) TaskOption {
-	return func(t *TaskTool) { t.limits = l }
+func WithChildLimits(l session.Limits) SubagentOption {
+	return func(t *SubagentTool) { t.limits = l }
 }
 
 // WithChildMode sets the permission mode the child session runs under (default
 // session.ModeDefault). session.ModePlan additionally hides any non-read-only
 // tools from the child at the catalog level.
-func WithChildMode(m session.PermissionMode) TaskOption {
-	return func(t *TaskTool) { t.childMode = m }
+func WithChildMode(m session.PermissionMode) SubagentOption {
+	return func(t *SubagentTool) { t.childMode = m }
 }
 
 // WithSubagentStopHook injects the HookRunner that fires the SubagentStop hook
 // when a child run finishes. It is best-effort: a hook error or block never fails
-// the Task call. Passing nil disables the hook.
-func WithSubagentStopHook(h port.HookRunner) TaskOption {
-	return func(t *TaskTool) { t.hooks = h }
+// the Subagent call. Passing nil disables the hook.
+func WithSubagentStopHook(h port.HookRunner) SubagentOption {
+	return func(t *SubagentTool) { t.hooks = h }
 }
 
 // WithChildSessionPrefix sets the prefix used to derive child SessionIDs (default
 // "subagent"). Child ids are of the form "<prefix>-<callID>".
-func WithChildSessionPrefix(p string) TaskOption {
-	return func(t *TaskTool) { t.idPrefix = p }
+func WithChildSessionPrefix(p string) SubagentOption {
+	return func(t *SubagentTool) { t.idPrefix = p }
 }
 
 // WithChildForker injects the workspace-isolation seam each child run forks before
 // executing. The composition root wires it ONLY when the child catalog includes Bash
 // (the read-only explorer's shell), so the child's mutating-classified Bash lands in
-// a throwaway git worktree, never the shared parent base — preserving Task's
+// a throwaway git worktree, never the shared parent base — preserving Subagent's
 // read-parallel safety (see ReadOnly). It should be the forker's DEFAULT mode (git
 // worktree: shares the base repo's `.git` ⇒ full history for git log/show). When the
 // forker is nil (the default), the child runs against the parent workspace exactly as
 // before. A fork failure on this path is a tool error, not a silent fallback.
-func WithChildForker(f tool.WorkspaceForker) TaskOption {
-	return func(t *TaskTool) { t.childForker = f }
+func WithChildForker(f tool.WorkspaceForker) SubagentOption {
+	return func(t *SubagentTool) { t.childForker = f }
 }
 
-// WithMaxConcurrentChildren bounds how many Task children may run CONCURRENTLY —
+// WithMaxConcurrentChildren bounds how many Subagent children may run CONCURRENTLY —
 // forking AND forker-less (default defaultMaxConcurrentChildren). It is the single
-// fan-out brake on the dispatcher's read-parallel batch: N Task calls in one turn each
+// fan-out brake on the dispatcher's read-parallel batch: N Subagent calls in one turn each
 // block on the gate, so at most cap children run at once. A value < 1 is clamped to 1
 // (a zero-capacity gate would deadlock).
-func WithMaxConcurrentChildren(n int) TaskOption {
-	return func(t *TaskTool) {
+func WithMaxConcurrentChildren(n int) SubagentOption {
+	return func(t *SubagentTool) {
 		if n < 1 {
 			n = 1
 		}
@@ -422,42 +422,32 @@ func WithMaxConcurrentChildren(n int) TaskOption {
 	}
 }
 
-// WithMaxConcurrentTaskShells is the DEPRECATED alias of WithMaxConcurrentChildren,
-// kept for callers wired before the gate was widened from shell-bearing children only
-// to ALL Task children. It now bounds every Task child (not just the forking path).
-// Prefer WithMaxConcurrentChildren.
-//
-// Deprecated: use WithMaxConcurrentChildren.
-func WithMaxConcurrentTaskShells(n int) TaskOption {
-	return WithMaxConcurrentChildren(n)
-}
-
-// WithTaskEngineFactory injects the composition-supplied factory that mints a child
+// WithSubagentEngineFactory injects the composition-supplied factory that mints a child
 // engine for a per-call `model` override. The closure closes over the provider
 // registry and builds the override child through the contamination-safe per-provider
 // path (engineDepsForProvider) — Compactor/TokenCounter/Env.Model/ContextWindow are
 // re-derived for the override model, NEVER a clone-and-swap of the LLM on an existing
 // engine. It returns (engine, true) for a routable model and (nil, false) otherwise
-// (an unknown/unroutable model, which Task surfaces as a model-addressable error).
-// nil (the default) leaves Task without a per-call model override (a `model` arg then
+// (an unknown/unroutable model, which Subagent surfaces as a model-addressable error).
+// nil (the default) leaves Subagent without a per-call model override (a `model` arg then
 // errors). It is the layering-clean seam: only func(string)(*Engine,bool) crosses into
 // internal/agent (same shape as WithAgentEngines).
-func WithTaskEngineFactory(f func(model string) (*Engine, bool)) TaskOption {
-	return func(t *TaskTool) { t.engineFactory = f }
+func WithSubagentEngineFactory(f func(model string) (*Engine, bool)) SubagentOption {
+	return func(t *SubagentTool) { t.engineFactory = f }
 }
 
 // WithAgentEngines injects the per-definition child engines (keyed by agent name)
 // and their (name, description) metadata for progressive disclosure. The
-// composition root builds each engine with a SCOPED, read-only catalog (the Task
+// composition root builds each engine with a SCOPED, read-only catalog (the Subagent
 // read-only invariant is preserved — see ReadOnly) and the def's resolved
 // model/prompt, then passes the map and a name-sorted meta slice here.
 //
 // engines and meta should describe the same set of names; meta drives the Spec
-// enumeration while engines drives routing. A nil/empty map leaves Task with only
+// enumeration while engines drives routing. A nil/empty map leaves Subagent with only
 // the default explorer (no behaviour change). It is the agent-package boundary the
 // agents adapter never crosses: only plain map + structs flow in.
-func WithAgentEngines(engines map[string]*Engine, meta []AgentMeta) TaskOption {
-	return func(t *TaskTool) {
+func WithAgentEngines(engines map[string]*Engine, meta []AgentMeta) SubagentOption {
+	return func(t *SubagentTool) {
 		t.agentEngines = engines
 		t.agentMeta = meta
 		// Index each def's per-run limits by name so Execute can bound the child
@@ -477,14 +467,14 @@ func WithAgentEngines(engines map[string]*Engine, meta []AgentMeta) TaskOption {
 	}
 }
 
-// NewTaskTool constructs the Task subagent tool over a pre-built child *Engine.
+// NewSubagentTool constructs the Subagent tool tool over a pre-built child *Engine.
 //
 // The composition root (cmd/mecated, WP11) is responsible for building childEngine
 // with the SCOPED child catalog and policy. The recommended, deterministic wiring
 // is:
 //
 //   - Catalog: a read-only explorer set — Read, Grep, Glob ONLY. It MUST NOT
-//     contain the Task tool (otherwise a subagent could spawn subagents — infinite
+//     contain the Subagent tool (otherwise a subagent could spawn subagents — infinite
 //     recursion) and SHOULD NOT contain mutating tools (Edit/Write/non-RO Bash):
 //     the default explorer subagent cannot mutate the workspace.
 //   - Policy: allow-all over those read-only tools (e.g.
@@ -497,14 +487,14 @@ func WithAgentEngines(engines map[string]*Engine, meta []AgentMeta) TaskOption {
 // the child can never block waiting for a human. This keeps the subagent
 // deterministic regardless of the policy it is given.
 //
-// childEngine must be non-nil; NewTaskTool panics otherwise, because a Task tool
+// childEngine must be non-nil; NewSubagentTool panics otherwise, because a Subagent tool
 // with no child loop to delegate to is a programming error at the composition
 // root.
-func NewTaskTool(childEngine *Engine, opts ...TaskOption) tool.Tool {
+func NewSubagentTool(childEngine *Engine, opts ...SubagentOption) tool.Tool {
 	if childEngine == nil {
-		panic("agent: NewTaskTool requires a non-nil child Engine")
+		panic("agent: NewSubagentTool requires a non-nil child Engine")
 	}
-	t := &TaskTool{
+	t := &SubagentTool{
 		childEngine: childEngine,
 		limits:      defaultChildLimits,
 		childMode:   session.ModeDefault,
@@ -514,7 +504,7 @@ func NewTaskTool(childEngine *Engine, opts ...TaskOption) tool.Tool {
 		o(t)
 	}
 	// Always size the child-concurrency gate (forking AND forker-less): a read-parallel
-	// fan-out of N Task calls in one turn each consumes a child session + an LLM slot, so
+	// fan-out of N Subagent calls in one turn each consumes a child session + an LLM slot, so
 	// the gate is the single fan-out brake bounding how many children run at once. The
 	// operator may override the default via WithMaxConcurrentChildren.
 	if t.childGate == nil {
@@ -523,16 +513,16 @@ func NewTaskTool(childEngine *Engine, opts ...TaskOption) tool.Tool {
 	return t
 }
 
-// Spec returns the model-facing specification for the Task tool. When named agent
+// Spec returns the model-facing specification for the Subagent tool. When named agent
 // definitions are configured, their names+descriptions are appended to the
 // description (progressive disclosure, like the Skill tool enumerates skills) so
 // the model can choose a specialist via the optional `agent` arg.
-func (t *TaskTool) Spec() tool.ToolSpec {
+func (t *SubagentTool) Spec() tool.ToolSpec {
 	desc := "Delegate a focused read-only investigation — 'search → summarize', " +
 		"'read N files → report findings', 'check the git history' — to a subagent with " +
 		"its own fresh context. Returns only the subagent's final summary. Use when the " +
 		"investigation is multi-step or would bloat the main context; don't delegate a " +
-		"single quick read you can do yourself with Read/Grep. You may issue several Task " +
+		"single quick read you can do yourself with Read/Grep. You may issue several Subagent " +
 		"calls in ONE turn to investigate independent questions concurrently. The subagent " +
 		"cannot see this conversation, so put everything it needs in `prompt`. It runs " +
 		"read-only tools (Read/Grep/Glob) PLUS a full shell (git log/show, cat, build, test) " +
@@ -541,9 +531,9 @@ func (t *TaskTool) Spec() tool.ToolSpec {
 		"and it cannot delegate further."
 	desc += t.agentEnumeration()
 	return tool.ToolSpec{
-		Name:        taskToolName,
+		Name:        subagentToolName,
 		Description: desc,
-		Schema:      taskSchema,
+		Schema:      subagentSchema,
 	}
 }
 
@@ -551,7 +541,7 @@ func (t *TaskTool) Spec() tool.ToolSpec {
 // def's "name: description", or "" when none are configured. The list is taken in
 // the (already name-sorted) order the composition root supplied, so the spec is
 // byte-stable across turns.
-func (t *TaskTool) agentEnumeration() string {
+func (t *SubagentTool) agentEnumeration() string {
 	if len(t.agentMeta) == 0 {
 		return ""
 	}
@@ -563,12 +553,12 @@ func (t *TaskTool) agentEnumeration() string {
 	return b.String()
 }
 
-// ReadOnly reports that the Task tool is read-only, which lets the parent's
-// dispatcher run Task CONCURRENTLY with other read-only tools that share the same
+// ReadOnly reports that the Subagent tool is read-only, which lets the parent's
+// dispatcher run Subagent CONCURRENTLY with other read-only tools that share the same
 // Workspace (read-parallel / mutate-serial; see dispatch.go).
 //
 // INVARIANT — what keeps this safe is WORKSPACE ISOLATION, not catalog
-// read-only-ness. A Task child may now WRITE via Bash (the read-only explorer's
+// read-only-ness. A Subagent child may now WRITE via Bash (the read-only explorer's
 // shell — git, build, test, cat), but when a child forker is wired (childForker !=
 // nil — the composition root wires it iff the child catalog has Bash) the child runs
 // in an ISOLATED git WORKTREE, so its writes land in a throwaway checkout and NEVER
@@ -586,9 +576,9 @@ func (t *TaskTool) agentEnumeration() string {
 //
 // When NO forker is wired the child has no Bash (the catalog stays a pure read-only
 // explorer) and runs against the shared ws — also safe, by catalog read-only-ness,
-// exactly as it always was. Either way Task is read-parallel-safe and ReadOnly()
+// exactly as it always was. Either way Subagent is read-parallel-safe and ReadOnly()
 // honestly returns true.
-func (*TaskTool) ReadOnly() bool { return true }
+func (*SubagentTool) ReadOnly() bool { return true }
 
 // Execute runs one subagent: it builds a FRESH child Session (own conversation,
 // own Limits, its configured mode), runs the child loop via the injected child
@@ -601,7 +591,7 @@ func (*TaskTool) ReadOnly() bool { return true }
 // child. Any permission ask the child raises is auto-denied so the child is
 // non-interactive. When the child finishes, the SubagentStop hook fires
 // best-effort.
-func (t *TaskTool) Execute(ctx context.Context, call session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
+func (t *SubagentTool) Execute(ctx context.Context, call session.ToolCall, ws tool.Workspace) (session.ToolResult, error) {
 	// The plain Execute path forwards nothing: a nil emit makes the run silent, so
 	// existing callers (and the team supervisor's reuse of the drain contract) are
 	// unaffected by the observability seam.
@@ -614,7 +604,7 @@ func (t *TaskTool) Execute(ctx context.Context, call session.ToolCall, ws tool.W
 // and channels events; it never touches the parent's Conversation, so this is
 // orthogonal to context isolation (gauntlet #7): the child's CONTENT still never
 // enters the parent context. It is the observableTool seam the dispatcher calls.
-func (t *TaskTool) ExecuteObserved(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
+func (t *SubagentTool) ExecuteObserved(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
 	return t.run(ctx, call, ws, emit, parentCaps{})
 }
 
@@ -623,7 +613,7 @@ func (t *TaskTool) ExecuteObserved(ctx context.Context, call session.ToolCall, w
 // back-channel) into the child posture, so a child Bash ask that A1/A2 did not
 // auto-resolve is SURFACED to the human (interactive) or auto-denied with the accurate
 // message + operator diagnostic (headless).
-func (t *TaskTool) ExecuteWithParent(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error) {
+func (t *SubagentTool) ExecuteWithParent(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error) {
 	return t.run(ctx, call, ws, emit, caps)
 }
 
@@ -632,13 +622,13 @@ func (t *TaskTool) ExecuteWithParent(ctx context.Context, call session.ToolCall,
 // loop against the SAME workspace, drains the child's entire Event stream
 // internally, optionally forwards a redacted projection of that activity, and
 // returns only the child's final summary text as a single ToolResult.
-// selectChildEngine resolves the child engine + base session limits for a Task call
+// selectChildEngine resolves the child engine + base session limits for a Subagent call
 // from its `agent` / `model` arguments (mutually exclusive — R9). It returns
 // ok=false with a model-addressable error ToolResult on a bad selection (agent+model
 // together, an unknown agent, an unwired/unroutable model), and the chosen engine +
-// limits on success. The default explorer + the Task tool's default limits is the
+// limits on success. The default explorer + the Subagent tool's default limits is the
 // no-arg case.
-func (t *TaskTool) selectChildEngine(callID session.ToolCallID, args taskArgs) (engine *Engine, limits session.Limits, errResult session.ToolResult, ok bool) {
+func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagentArgs) (engine *Engine, limits session.Limits, errResult session.ToolResult, ok bool) {
 	// `agent` and `model` are mutually exclusive: a named specialist already pins its
 	// own engine/model/prompt/scope, so layering a call-time model over it would
 	// silently break the def's contract. Reject the combination with a clear error.
@@ -646,7 +636,7 @@ func (t *TaskTool) selectChildEngine(callID session.ToolCallID, args taskArgs) (
 	wantModel := strings.TrimSpace(args.Model)
 	if wantAgent != "" && wantModel != "" {
 		return nil, session.Limits{}, session.NewToolError(callID,
-			"Task: specify `agent` OR `model`, not both — a specialist agent already pins its own model"), false
+			"Subagent: specify `agent` OR `model`, not both — a specialist agent already pins its own model"), false
 	}
 
 	// Route to a named specialist when requested; otherwise the default explorer. An
@@ -657,7 +647,7 @@ func (t *TaskTool) selectChildEngine(callID session.ToolCallID, args taskArgs) (
 	if wantAgent != "" {
 		eng, found := t.agentEngines[wantAgent]
 		if !found {
-			return nil, session.Limits{}, session.NewToolError(callID, "Task: "+t.unknownAgentHint(wantAgent)), false
+			return nil, session.Limits{}, session.NewToolError(callID, "Subagent: "+t.unknownAgentHint(wantAgent)), false
 		}
 		engine = eng
 		if l, found := t.agentLimits[wantAgent]; found {
@@ -673,25 +663,25 @@ func (t *TaskTool) selectChildEngine(callID session.ToolCallID, args taskArgs) (
 	if wantModel != "" {
 		if t.engineFactory == nil {
 			return nil, session.Limits{}, session.NewToolError(callID,
-				"Task: per-call `model` override is not supported in this deployment"), false
+				"Subagent: per-call `model` override is not supported in this deployment"), false
 		}
 		eng, found := t.engineFactory(wantModel)
 		if !found || eng == nil {
 			return nil, session.Limits{}, session.NewToolError(callID,
-				fmt.Sprintf("Task: unknown or unroutable model %q; omit `model` to inherit the parent's model", wantModel)), false
+				fmt.Sprintf("Subagent: unknown or unroutable model %q; omit `model` to inherit the parent's model", wantModel)), false
 		}
 		engine = eng
 	}
 	return engine, limits, session.ToolResult{}, true
 }
 
-func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error) {
-	var args taskArgs
+func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error) {
+	var args subagentArgs
 	if msg, ok := session.ParseArgs(call, &args); !ok {
-		return session.NewToolError(call.ID, "Task: "+msg), nil
+		return session.NewToolError(call.ID, "Subagent: "+msg), nil
 	}
 	if strings.TrimSpace(args.Prompt) == "" {
-		return session.NewToolError(call.ID, "Task: 'prompt' is required and must be non-empty"), nil
+		return session.NewToolError(call.ID, "Subagent: 'prompt' is required and must be non-empty"), nil
 	}
 
 	// Select the child engine + base limits from `agent`/`model` (mutually exclusive),
@@ -721,21 +711,21 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 		timeoutCtx = ctx
 	}
 
-	// Bound concurrent children FIRST, for ALL Task children (forking AND forker-less):
-	// the dispatcher fans Task calls out read-parallel, and each child consumes a child
+	// Bound concurrent children FIRST, for ALL Subagent children (forking AND forker-less):
+	// the dispatcher fans Subagent calls out read-parallel, and each child consumes a child
 	// session + an LLM slot (and, when shell-bearing, a forked worktree). Acquire at the
 	// top of the call and release when it returns, so at most cap children run at once.
 	release := t.acquireChildSlot(ctx)
 	if release == nil {
 		// ctx cancelled while waiting for a slot — surface it as a tool error; the parent
 		// ctx governs the whole call.
-		return session.NewToolError(call.ID, "Task: cancelled before acquiring a concurrency slot"), nil
+		return session.NewToolError(call.ID, "Subagent: cancelled before acquiring a concurrency slot"), nil
 	}
 	defer release()
 
 	// Workspace selection. When a child forker is wired (the child catalog has Bash),
 	// run the child in its OWN isolated git worktree so its shell's writes never touch
-	// the shared parent base — what keeps Task read-parallel-safe (see ReadOnly). A
+	// the shared parent base — what keeps Subagent read-parallel-safe (see ReadOnly). A
 	// fork FAILURE is a tool error, NOT a silent fallback to the shared ws: the child
 	// has Bash precisely because isolation was available, so running it shared would be
 	// the exact hazard. cleanup tears the worktree down after the child fully drains
@@ -744,7 +734,7 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	if t.childForker != nil {
 		forkWS, cleanup, err := t.childForker.Fork(ctx, ws, subagentGoal(args))
 		if err != nil {
-			return session.NewToolError(call.ID, "Task: workspace isolation failed: "+err.Error()), nil
+			return session.NewToolError(call.ID, "Subagent: workspace isolation failed: "+err.Error()), nil
 		}
 		runWS = forkWS
 		defer func() {
@@ -757,7 +747,7 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	// A fresh child session: own conversation, own (tighter) Limits, scoped to the
 	// run workspace root (the isolated worktree when forked, else the parent base) so
 	// the subagent explores the same project. When a named agent def pins limits, the
-	// child runs under THOSE; otherwise it uses the Task tool's default limits.
+	// child runs under THOSE; otherwise it uses the Subagent tool's default limits.
 	childID := t.childSessionID(call.ID)
 	child := session.New(
 		childID,
@@ -809,7 +799,7 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	posture := childPosture{isolated: t.childForker != nil, caps: caps, role: t.idPrefix}
 
 	start := time.Now()
-	// Drain the child's Event stream entirely INSIDE the Task tool. Nothing from the
+	// Drain the child's Event stream entirely INSIDE the Subagent tool. Nothing from the
 	// child surfaces to the parent except the final summary string and, when observed,
 	// the redacted subagent.* metadata. The structured-output retry loop re-drives the
 	// SAME child session (Reopen) with a correction prompt on a validation miss; the
@@ -836,13 +826,13 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	// so the model learns the call hit its own limit (distinct from a generic failure).
 	if timeoutCtx != nil && timeoutCtx.Err() == context.DeadlineExceeded {
 		return session.NewToolError(call.ID,
-			fmt.Sprintf("Task: subagent exceeded its time budget (%dms) and was stopped", *args.TimeoutMs)), nil
+			fmt.Sprintf("Subagent: subagent exceeded its time budget (%dms) and was stopped", *args.TimeoutMs)), nil
 	}
 
-	return renderTaskResult(call.ID, childID, final, stop, submit), nil
+	return renderSubagentResult(call.ID, childID, final, stop, submit), nil
 }
 
-// renderTaskResult labels the child's terminal by stop reason (D4 — the typed result
+// renderSubagentResult labels the child's terminal by stop reason (D4 — the typed result
 // taxonomy), surfaced in the MODEL-VISIBLE result, and stamps the agentId trailer (D5).
 // The mapping:
 //   - StopError                         → tool error (the child crashed).
@@ -857,7 +847,7 @@ func (t *TaskTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 // so the parent MODEL can discover the child id (mirroring renderTeamResult's Team-id
 // line — the runtime-discoverability axis: the id must be where the model reads it, not
 // only on the client-only subagent.* events).
-func renderTaskResult(callID session.ToolCallID, childID session.SessionID, final string, stop session.StopReason, submit *submitResultTool) session.ToolResult {
+func renderSubagentResult(callID session.ToolCallID, childID session.SessionID, final string, stop session.StopReason, submit *submitResultTool) session.ToolResult {
 	// Structured-output failure: the retry budget was exhausted without a schema-valid
 	// payload. Surface the last validation error AS the tool error (model-visible),
 	// never only a log line.
@@ -868,14 +858,14 @@ func renderTaskResult(callID session.ToolCallID, childID session.SessionID, fina
 				msg += ": " + last
 			}
 		}
-		return session.NewToolError(callID, "Task: "+msg)
+		return session.NewToolError(callID, "Subagent: "+msg)
 	}
 	if stop == session.StopError {
 		msg := final
 		if msg == "" {
 			msg = "subagent failed without producing a summary"
 		}
-		return session.NewToolError(callID, "Task: "+msg)
+		return session.NewToolError(callID, "Subagent: "+msg)
 	}
 
 	// Success family. A structured-output run returns the validated payload; otherwise
@@ -900,15 +890,15 @@ func renderTaskResult(callID session.ToolCallID, childID session.SessionID, fina
 	case session.StopBudget:
 		body = "[subagent stopped: reached its token budget]\n\n" + body
 	}
-	return session.NewToolResult(callID, renderTaskTrailer(childID, body))
+	return session.NewToolResult(callID, renderSubagentTrailer(childID, body))
 }
 
-// renderTaskTrailer prepends the model-visible agentId line to a Task result body,
+// renderSubagentTrailer prepends the model-visible agentId line to a Subagent result body,
 // mirroring renderTeamResult's Team-id line. The childID is rendered VERBATIM (the
 // deterministic t.childSessionID(callID)) so a human can correlate the overlay row and
 // the parent can refer to "the subagent that did X" by id. It pre-positions the seam
 // for a future inspect/resume without a second wire change (R2: trailer only this round).
-func renderTaskTrailer(childID session.SessionID, body string) string {
+func renderSubagentTrailer(childID session.SessionID, body string) string {
 	return fmt.Sprintf("agentId: %s\n\n%s", childID, body)
 }
 
@@ -924,7 +914,7 @@ func renderTaskTrailer(childID session.SessionID, body string) string {
 // was INVALID or SubmitResult was never called, re-inject a model-visible correction
 // (Reopen + re-drive) up to defaultStructuredOutputRetries times, then give up with
 // StopStructuredOutput. The retry is a SEPARATE bounded loop owned here (NOT a change
-// to finishTurnNoTools — that hot shared path stays Task-agnostic, decision D2), and
+// to finishTurnNoTools — that hot shared path stays Subagent-agnostic, decision D2), and
 // uses NO tool_choice forcing (incompatible with the reasoning paths).
 func driveChild(ctx context.Context, engine *Engine, child *session.Session, runWS tool.Workspace, prompt string, runOpts RunOptions, emit func(session.Event), call session.ToolCall, childID session.SessionID, posture childPosture, submit *submitResultTool, schema json.RawMessage) (finalText string, stop session.StopReason, usage session.Usage, toolCount int) {
 	drivePrompt := prompt
@@ -964,7 +954,7 @@ func driveChild(ctx context.Context, engine *Engine, child *session.Session, run
 		// Structured miss: build the correction prompt for the next attempt (if any).
 		drivePrompt = structuredCorrectionPrompt(schema, submit.lastError())
 	}
-	// Retry budget exhausted with no valid payload: a CLEAN terminal the Task result
+	// Retry budget exhausted with no valid payload: a CLEAN terminal the Subagent result
 	// renders as a model-visible validation-failure tool error (recoverable, not failed).
 	return finalText, session.StopStructuredOutput, usage, toolCount
 }
@@ -994,9 +984,9 @@ func tightenLimit(inherited int, override *int) int {
 // until a slot is free or ctx is cancelled. It returns a release func to return the
 // slot (idempotent-safe to call once), or nil if ctx was cancelled while waiting — the
 // caller then aborts the call without spawning a child. A nil gate (no bound) returns
-// an inert release immediately, though NewTaskTool always sizes one so every Task child
+// an inert release immediately, though NewSubagentTool always sizes one so every Subagent child
 // is bounded.
-func (t *TaskTool) acquireChildSlot(ctx context.Context) func() {
+func (t *SubagentTool) acquireChildSlot(ctx context.Context) func() {
 	if t.childGate == nil {
 		return func() {}
 	}
@@ -1015,7 +1005,7 @@ func (t *TaskTool) acquireChildSlot(ctx context.Context) func() {
 // (the prompt is the parent's own instruction to the child). Both paths are
 // clamped identically so the goal always stays a single, bounded line — an
 // explicit description is just as capable of being long or multi-line as a prompt.
-func subagentGoal(args taskArgs) string {
+func subagentGoal(args subagentArgs) string {
 	if g := strings.TrimSpace(args.Description); g != "" {
 		return truncateGoal(g)
 	}
@@ -1024,7 +1014,7 @@ func subagentGoal(args taskArgs) string {
 
 // truncateGoal normalizes a goal label into a single bounded line: it collapses
 // any newlines (and tabs) to spaces so a multi-line value can't break the one-line
-// Task-card title, then clamps to maxSubagentGoalLen runes, appending an ellipsis
+// Subagent-card title, then clamps to maxSubagentGoalLen runes, appending an ellipsis
 // when it overflows. It is rune-aware so it never splits a multi-byte character.
 func truncateGoal(s string) string {
 	s = strings.Map(func(r rune) rune {
@@ -1088,7 +1078,7 @@ func drainChildObserved(run *Run, emit func(session.Event), parentCallID, childI
 // (turn.start, message.delta, tool.call, tool.result, hook, compaction) so none
 // of them can reach the parent — this is the context-isolation guarantee of
 // gauntlet #7. It is the silent variant used by fork.go and the team supervisor;
-// the observed Task path uses drainChildObserved.
+// the observed Subagent path uses drainChildObserved.
 func drainChild(run *Run, posture childPosture) (finalText string, stop session.StopReason) {
 	final, st, _, _ := drainChildObserved(run, nil, "", "", posture)
 	return final, st
@@ -1112,7 +1102,7 @@ type childPosture struct {
 	// headless: no surface). When caps.interactive && caps.surfaceAsk != nil, an ask that
 	// steps 1-2 did not resolve is SURFACED to the human; otherwise it auto-denies.
 	caps parentCaps
-	// role is the child's agent role (Task/member name/fork label) for the headless
+	// role is the child's agent role (Subagent/member name/fork label) for the headless
 	// auto-deny operator diagnostic. Empty falls back to a generic label.
 	role string
 }
@@ -1129,7 +1119,7 @@ func childAutoDenyMessage(reason string) string {
 // handleChildEvent applies the per-child permission contract to a single event of a
 // child/member run and, when the event is the terminal result, reports its text and
 // stop reason via isResult=true. It is the SINGLE definition of that contract, shared
-// by drainChildObserved (Task), drainChild (Fork, silent), and the team supervisor's
+// by drainChildObserved (Subagent), drainChild (Fork, silent), and the team supervisor's
 // driveOneTurn, so the resolution order cannot drift.
 //
 // Resolution order on a permission ask (the 4-step model):
@@ -1210,17 +1200,17 @@ func bashCmdFromArgs(args json.RawMessage) string {
 // fireSubagentStop runs the SubagentStop lifecycle hook for a finished child run.
 // It is best-effort: a hook error or a block outcome is ignored (a subagent's
 // completion cannot be vetoed after the fact).
-func (t *TaskTool) fireSubagentStop(ctx context.Context, child *session.Session) {
+func (t *SubagentTool) fireSubagentStop(ctx context.Context, child *session.Session) {
 	fireNotify(ctx, t.hooks, governance.HookEvent{
 		Phase:     governance.PhaseSubagentStop,
 		SessionID: string(child.ID),
 	})
 }
 
-// unknownAgentHint builds the model-addressable error text for a Task call that
+// unknownAgentHint builds the model-addressable error text for a Subagent call that
 // names an agent that is not registered. It lists the valid names so the model can
 // retry, mirroring the Skill tool's available-names hint.
-func (t *TaskTool) unknownAgentHint(name string) string {
+func (t *SubagentTool) unknownAgentHint(name string) string {
 	if len(t.agentMeta) == 0 {
 		return fmt.Sprintf("unknown agent %q (no specialist agents are configured; omit `agent` to use the default explorer)", name)
 	}
@@ -1233,13 +1223,13 @@ func (t *TaskTool) unknownAgentHint(name string) string {
 
 // childSessionID derives a stable, unique id for a child session from the parent
 // tool call id.
-func (t *TaskTool) childSessionID(callID session.ToolCallID) session.SessionID {
+func (t *SubagentTool) childSessionID(callID session.ToolCallID) session.SessionID {
 	return session.SessionID(fmt.Sprintf("%s-%s", t.idPrefix, callID))
 }
 
-// Compile-time assertion that TaskTool satisfies the Tool contract and the
+// Compile-time assertion that SubagentTool satisfies the Tool contract and the
 // agent-internal observableTool seam.
 var (
-	_ tool.Tool      = (*TaskTool)(nil)
-	_ observableTool = (*TaskTool)(nil)
+	_ tool.Tool      = (*SubagentTool)(nil)
+	_ observableTool = (*SubagentTool)(nil)
 )

@@ -6,7 +6,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 )
 
-// TestBuildTaskEngineFactoryReDerivesForOverrideModel is the CONTAMINATION guard for the
+// TestBuildSubagentEngineFactoryReDerivesForOverrideModel is the CONTAMINATION guard for the
 // per-call model override (Iteration 4): the factory must mint the override child engine
 // through newChildEngineForProvider (engineDepsForProvider re-derives Compactor/
 // TokenCounter/Env.Model/ContextWindow for the OVERRIDE model), NEVER a clone-and-swap of
@@ -14,16 +14,16 @@ import (
 // an override model with a catalogued 200k window yields a child engine whose window is
 // 200k, distinct from the parent default's 128k. A clone-and-swap that reused the parent's
 // derived window (or window=0 → 128k) would FAIL this.
-func TestBuildTaskEngineFactoryReDerivesForOverrideModel(t *testing.T) {
+func TestBuildSubagentEngineFactoryReDerivesForOverrideModel(t *testing.T) {
 	// Parent provider = anthropic; the override model has a catalogued 200k window.
 	const overrideModel = catAnthropicModel // catalogued 200k
 	prov := mockllm.New()
 	reg := regForTest(prov, providerAnthropic, "claude-default")
 	cfg := Config{Model: "claude-default"}
 
-	factory := buildTaskEngineFactory(cfg, reg, prov, providerAnthropic, nil)
+	factory := buildSubagentEngineFactory(cfg, reg, prov, providerAnthropic, nil)
 
-	// An empty model is unroutable (ok=false), so Task surfaces a model-addressable error.
+	// An empty model is unroutable (ok=false), so Subagent surfaces a model-addressable error.
 	if _, ok := factory(""); ok {
 		t.Fatal("empty model must be unroutable (ok=false)")
 	}

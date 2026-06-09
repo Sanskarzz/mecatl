@@ -2,8 +2,8 @@
 
 Named subagent specialists discovered from operator-controlled markdown files
 (`<dir>/<name>.md`, YAML frontmatter + body), mirroring the skills Source seam. **One
-definition, two consumers**: a `<name>.md` is reusable both as a Task delegate
-(`Task(agent="<name>")`) and as a team-member role (`MemberSpec.AgentType` /
+definition, two consumers**: a `<name>.md` is reusable both as a Subagent delegate
+(`Subagent(agent="<name>")`) and as a team-member role (`MemberSpec.AgentType` /
 `SpawnTeammate(agent_type=...)`).
 
 See `internal/adapter/agents/` (discovery + `Registry`) and
@@ -47,16 +47,16 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   Role (a cache-stable StablePrefix layer; one byte-stable prefix per def).
 - **Scoped CORE tools.** The def's `tools` allowlist (minus `disallowedTools`) is
   intersected with the call site's available **core** toolset (Read/Edit/Write/Grep/
-  Glob/WebFetch/Bash). `Task`/`Fork`/`ToolSearch` are ALWAYS excluded (no nesting / no
+  Glob/WebFetch/Bash). `Subagent`/`Fork`/`ToolSearch` are ALWAYS excluded (no nesting / no
   silent disclosure tool).
-  - **Task delegates are read-only EXPLORERS WITH A SHELL** — `Task.ReadOnly()` stays
-    `true`, but a Task child now runs in an isolated git **worktree** (when Bash is
+  - **Subagent delegates are read-only EXPLORERS WITH A SHELL** — `Subagent.ReadOnly()` stays
+    `true`, but a Subagent child now runs in an isolated git **worktree** (when Bash is
     configured), so it KEEPS Bash for inspection (git log/show, cat, build, test) while
-    **Edit/Write are still dropped** on the Task path (with a startup diagnostic) — a
+    **Edit/Write are still dropped** on the Subagent path (with a startup diagnostic) — a
     def's Bash survives via `scopedToolNamesMode`'s `allowShell`. Its writes land in the
     throwaway worktree, never the shared base, which is why `ReadOnly()` stays true. A
     truly **mutating** specialist (edits the project's files) is a **team member**
-    (force-copy fork) or a **Fork** branch, not a Task.
+    (force-copy fork) or a **Fork** branch, not a Subagent.
   - **Team members** obey read-only-share / mutating-fork: a `Mutating` member (runs
     in an isolated fork) MAY keep Edit/Write/Bash; a read-only (base-sharing) member
     has them dropped (so the supervisor's `ErrReadOnlyMemberMutating` backstop never
@@ -68,10 +68,10 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   unknown alias warns and inherits.
 - **Per-def run limits (`maxTurns`/`maxToolCalls`).** A def's `maxTurns`/`maxToolCalls`
   map to the child session's `session.Limits`, **per-field** over the call site's
-  default (the Task tool's `agent.DefaultChildLimits()` / the team's `WithTeamLimits`):
+  default (the Subagent tool's `agent.DefaultChildLimits()` / the team's `WithTeamLimits`):
   a def that pins only `maxTurns` keeps the default tool-call/failure caps, and a def
-  that pins neither runs on the default unchanged. Wired on BOTH paths — the Task path
-  carries the limits on `agent.AgentMeta.Limits` (the Task tool builds the routed
+  that pins neither runs on the default unchanged. Wired on BOTH paths — the Subagent path
+  carries the limits on `agent.AgentMeta.Limits` (the Subagent tool builds the routed
   child session under them), and the member path carries them on
   `agent.MemberBuild.Limits` (the supervisor's `AddMember` per-field merges them onto
   the team default `s.limits`). The int→`Limits` mapping (`defLimits`) lives in the
@@ -86,11 +86,11 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   the matched skill BODIES are injected into the def's system-prompt Role — Claude-Code-
   style skill preloading, so the specialist starts with those playbooks in context
   rather than having to activate them. An unknown skill name is a non-fatal startup
-  diagnostic (not preloaded). Wired in BOTH the per-def Task engine
-  (`buildAgentTaskEngines`) and the team-member engine (`buildMemberEngine`) via
+  diagnostic (not preloaded). Wired in BOTH the per-def Subagent engine
+  (`buildAgentSubagentEngines`) and the team-member engine (`buildMemberEngine`) via
   `resolveSkillIndex` + `preloadedSkillBodies`.
 - **Per-agent MCP servers (`mcpServers:`).** A def's `mcpServers:` scopes specific MCP
-  servers' tools to THAT def's engine, in BOTH call sites (Task delegate and team
+  servers' tools to THAT def's engine, in BOTH call sites (Subagent delegate and team
   member). Two forms, mixable in one list:
   - **REFERENCE** (a bare server name, or a mapping with only `name`): the def gets the
     tools of an ALREADY-configured main server, pulled from the process MCP manager. No
@@ -103,7 +103,7 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
     skipped (CLAUDE.md: no stdio MCP, ever).
   - The MCP tools are added to the def's catalog directly (a def opting into a server
     gets that server's tools); they do NOT go through the `tools:` core allowlist, and
-    `Task`/`Fork`/`ToolSearch` exclusion + the def's core `tools`/`disallowedTools`
+    `Subagent`/`Fork`/`ToolSearch` exclusion + the def's core `tools`/`disallowedTools`
     semantics are unchanged.
   - **Read-only backstop interaction.** MCP tools report `ReadOnly()==false` but never
     touch the workspace, so they are EXEMPT from the supervisor's read-only-member
@@ -112,8 +112,8 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
     tools; a genuine workspace-mutating tool (Edit/Write/non-RO Bash) is still rejected.
     The exemption is carried as `MemberBuild.MCPToolNames`, which the supervisor folds
     into its exemption set.
-  - **Lifetime model.** A **Task-path** def engine is built once at composition
-    (`buildAgentTaskEngines`); its inline managers' `Close` is aggregated into
+  - **Lifetime model.** A **Subagent-path** def engine is built once at composition
+    (`buildAgentSubagentEngines`); its inline managers' `Close` is aggregated into
     `Built.Close` (process-lifetime, torn down on shutdown). A **team-member** def engine
     is built per spawn (the `MemberEngine` factory); its inline-MCP `Close` rides on
     `MemberBuild.Close`, which the supervisor composes with the member's fork cleanup so
@@ -128,15 +128,15 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   change). See `defHookRunner` + `newChildEngineWithHooks`.
 - **Forgiving resolution.** Conventional discovery is on by default and **inert** when
   no dir exists. An unknown member `AgentType` falls back to the default member
-  catalog (warn, never fail the spawn). An unknown Task `agent` arg is a
+  catalog (warn, never fail the spawn). An unknown Subagent `agent` arg is a
   model-addressable error listing valid names (the model can retry).
 
 ## What v1 does NOT do (honest parity vs Claude Code)
 
-- **No mutating Task delegates.** CC lets a `Task(subagent_type=...)` inherit Edit/
+- **No mutating Subagent delegates.** CC lets a `Task(subagent_type=...)` inherit Edit/
   Write and the project's tools. Our read-parallel/mutate-serial dispatcher makes a
-  mutating Task a workspace-race hazard, so mutation is routed through the isolation
-  mechanisms that already exist (member fork / Fork worktree). On the Task path the
+  mutating Subagent a workspace-race hazard, so mutation is routed through the isolation
+  mechanisms that already exist (member fork / Fork worktree). On the Subagent path the
   only thing a def adds over the anonymous explorer is a different prompt + model +
   read-only tool scope.
 - **Per-agent MCP `tools:` allowlisting still core-only.** A def's `mcpServers:` adds the
@@ -146,7 +146,7 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   arrive via `mcpServers:`, not the core allowlist.
 - **No `--agents` inline JSON.** Definitions come only from `<name>.md` files under
   `--agents-dir` / the conventional dirs.
-- **No Agent-as-tool nesting.** A def cannot re-add `Task`/`Fork`/`ToolSearch`; a child
+- **No Agent-as-tool nesting.** A def cannot re-add `Subagent`/`Fork`/`ToolSearch`; a child
   never recurses or fans out further.
 - **No file-path scoping** (Roo's file allowlist) yet.
 
@@ -156,7 +156,7 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
 --agents-dir <dir>            repeatable; explicit dirs, highest precedence
 --agents-conventional[=true]  also discover .mecatl/agents, .claude/agents, user dirs
                               (ON by default, inert when absent; like teams/fork)
---subagent-model <id|alias>   global model override for Task/member children
+--subagent-model <id|alias>   global model override for Subagent/member children
 --model-alias name=id         repeatable alias→id map (composition layer only)
 ```
 

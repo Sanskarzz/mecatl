@@ -56,7 +56,7 @@ flowchart LR
   end
 
   subgraph APP["application — internal/agent"]
-    engine["Engine / Run\nloop · dispatch · permission · hooks\ncompaction · cascade · tokencount\nsubagent (Task) · fork (Fork)"]
+    engine["Engine / Run\nloop · dispatch · permission · hooks\ncompaction · cascade · tokencount\nsubagent (Subagent) · fork (Fork)"]
   end
 
   subgraph PORTS["ports — internal/port"]
@@ -483,7 +483,7 @@ keyed by session id so the verdict reaches the right run
 Hook lifecycle phases (`governance/hookevent.go`): `SessionStart`,
 `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStop`. **All
 six now fire** — the per-tool pair from `dispatch.go`, the run-level trio from
-`agent/hooks.go`, and `SubagentStop` from the Task tool.
+`agent/hooks.go`, and `SubagentStop` from the Subagent tool.
 
 Per-tool placement (`dispatch.go`):
 - **PreToolUse** (`preHook`) runs after permission clears, before execution, for
@@ -531,7 +531,7 @@ fires `Stop`:
   command expansion runs first, then the hook, then recording; first-turn
   instruction assembly is unchanged.
 - **Stop** (`fireStop`) runs exactly once at the terminal end of any run path,
-  even if `ctx` is already cancelled (it is a terminal notification). The Task
+  even if `ctx` is already cancelled (it is a terminal notification). The Subagent
   subagent mirrors this with **SubagentStop**.
 
 Exit-code semantics live in the `hookexec` adapter
@@ -547,7 +547,7 @@ just custom Go `HookRunner` adapters).
 
 ## 8. Subagents (`internal/agent/subagent.go`)
 
-`TaskTool` is a `tool.Tool` (catalog name `Task`) that delegates a focused
+`SubagentTool` is a `tool.Tool` (catalog name `Subagent`) that delegates a focused
 read-only investigation to a **child agent loop**. Its `Execute`:
 1. **Workspace selection.** When a child forker is wired (`WithChildForker` — the
    composition root wires it **iff** the child catalog includes Bash) it forks the
@@ -567,20 +567,20 @@ read-only investigation to a **child agent loop**. Its `Execute`:
    `tool.result`/`hook`/`compaction` event, and **returns only the final
    summary string** as one `ToolResult` (gauntlet #7).
 
-**Per-call knobs (`taskArgs`).** Beyond `prompt`/`description`/`agent`, a Task call may
+**Per-call knobs (`subagentArgs`).** Beyond `prompt`/`description`/`agent`, a Subagent call may
 supply: `max_turns`/`max_tool_calls`/`max_tokens` (TIGHTEN-ONLY caps — the model can
 make its child stricter than the operator's bound, never looser); `timeout_ms` (a
 wall-clock deadline → a time-budget tool error); `model` (pin THIS child to a specific
-provider model — minted via the composition-supplied `WithTaskEngineFactory` closure
+provider model — minted via the composition-supplied `WithSubagentEngineFactory` closure
 through the contamination-safe `newChildEngineForProvider` path, NEVER a clone-and-swap;
 mutually exclusive with `agent`); and `output_schema` (a model-authored JSON schema —
 the child is given a synthetic `SubmitResult` tool whose params ARE the schema, must
 call it to deliver, and the submitted payload is validated by `session.ValidateJSON`
-with a bounded correction-retry, NO `tool_choice` forcing). The Task RESULT is labelled
+with a bounded correction-retry, NO `tool_choice` forcing). The Subagent RESULT is labelled
 by terminal reason (success / `[subagent stopped: …]` note / structured-output
 validation error / error) and carries an `agentId: <childID>` trailer (model-visible,
 mirroring the Team-id line) so the parent can discover the child id. None of these widen
-`port.LLMRequest` — they are `taskArgs`/`RunOptions`/factory concerns.
+`port.LLMRequest` — they are `subagentArgs`/`RunOptions`/factory concerns.
 
 The child is a **read-only explorer with a shell** — capability flows down from the
 parent (which has Bash); isolation, not catalog read-only-ness, is the security
@@ -588,20 +588,20 @@ boundary:
 - The composition layer wires `childEngine` with **Read/Grep/Glob plus Bash**
   (`buildChildEngine` registers Bash via the **sandboxed** runner —
   `buildSandboxedCommandRunner`, the SAME hardening team members get, since the
-  worktree shares the parent `.git`), **never `Task`/`Fork`/`ToolSearch`** (no
+  worktree shares the parent `.git`), **never `Subagent`/`Fork`/`ToolSearch`** (no
   recursion / fan-out) and **never Edit/Write** (it inspects, it does not edit the
-  project). Per-def Task engines keep Bash via `scopedToolNamesMode`'s `allowShell`
-  and share the one `TaskTool` forker. With no runner (`--no-bash`) the child is a
+  project). Per-def Subagent engines keep Bash via `scopedToolNamesMode`'s `allowShell`
+  and share the one `SubagentTool` forker. With no runner (`--no-bash`) the child is a
   Bash-less read-only explorer and no forker is wired — the original behaviour. The
   policy is **allow-all** so the child never prompts a human (`internal/app`:
-  `buildTaskTool` / `buildChildEngine` / `buildAgentTaskEngines`).
-- `TaskTool.ReadOnly()` stays **`true`**, letting the parent run `Task` concurrently
+  `buildSubagentTool` / `buildChildEngine` / `buildAgentSubagentEngines`).
+- `SubagentTool.ReadOnly()` stays **`true`**, letting the parent run `Subagent` concurrently
   with other read-only tools. This is safe because the child's (mutating-classified)
   Bash writes land in the **isolated worktree**, never the shared base the parent's
   other read-only calls race over; the only shared surface is the `.git` object
   DB/refs (git-locked; config-driven code-exec vectors neutralised via `gitenv`).
-- `WithMaxConcurrentTaskShells` (default 4) is a semaphore bounding how many
-  worktree-bearing children fork at once — Task is read-parallel, so the model can
+- `WithMaxConcurrentSubagentShells` (default 4) is a semaphore bounding how many
+  worktree-bearing children fork at once — Subagent is read-parallel, so the model can
   fan many out; each shell-bearing child holds a worktree (`git worktree add` +
   disk). The gate is acquired before `Fork` and released after cleanup, only on the
   forking path.
@@ -609,11 +609,11 @@ boundary:
   so a child can never block on a human regardless of policy.
 - The child run is bounded by the parent `ctx`; `SubagentStop` fires
   best-effort (on a detached short-lived context if the parent is already
-  cancelled). `NewTaskTool` panics on a nil child Engine.
+  cancelled). `NewSubagentTool` panics on a nil child Engine.
 
 This mirrors the **team-member** worktree treatment (§ below): same `gitenv`
 hardening, same untrusted-`.gitattributes` residual, and the workspace-trust gate is
-the **shared follow-up** for both Team and Task.
+the **shared follow-up** for both Team and Subagent.
 
 ## 9. The OpenAI Responses adapter (`internal/adapter/openai`)
 
@@ -855,7 +855,7 @@ a **git worktree** (`git worktree add --detach … HEAD`) when the root is insid
 repo, else a **recursive copy** — so a child can never write back into the
 parent's tree. `agent.NewForkTool(childEngine, forker, …)` is the fan-out tool
 (catalog name `Fork`): it runs several isolated child loops on independent
-branches and joins their results. It is opt-in via `--enable-fork`; like Task,
+branches and joins their results. It is opt-in via `--enable-fork`; like Subagent,
 the children's intermediate events are drained internally.
 
 The same seam serves **agent teams** (`agent.Supervisor`/`TeamTool`) with a
@@ -875,8 +875,8 @@ add` would otherwise fire the base repo's `post-checkout` hook at fork time) and
 member runner share it and can't drift: `Scrub` drops inherited `GIT_*` danger
 (`GIT_EXTERNAL_DIFF`/`GIT_SSH_COMMAND`/…) and forces `core.hooksPath=/dev/null`,
 `core.pager=cat`, `core.fsmonitor=false`, empty `diff.external`, `GIT_PAGER`/`PAGER=cat`,
-`GIT_CONFIG_NOSYSTEM`. The main session keeps its unhardened runner. **The Task
-subagent (§8) shares this exact treatment**: when Bash is configured `TaskTool` holds
+`GIT_CONFIG_NOSYSTEM`. The main session keeps its unhardened runner. **The Subagent
+subagent (§8) shares this exact treatment**: when Bash is configured `SubagentTool` holds
 its own worktree forker (`WithChildForker`) and forks each child into a throwaway
 worktree, with the SAME `buildSandboxedCommandRunner` + `gitenv` hardening and the
 SAME untrusted-`.gitattributes` residual; the workspace-trust gate is the shared
@@ -1248,10 +1248,10 @@ ONE neutral `port.ProviderCapabilities` feeds three sinks so they cannot disagre
 The server/acp adapters receive only the computed value — no catalog/registry type
 crosses inward. Keys are never on the wire — only the provider id.
 
-**Per-sub-agent provider (shipped).** A Task agent def or team member may pin a
+**Per-sub-agent provider (shipped).** A Subagent agent def or team member may pin a
 `provider:` (orthogonal to `model:`) to run its child engine on a DIFFERENT provider
 than the parent, and a provider-selected session propagates its provider to the
-sub-agents it spawns (which it now CAN — Half B builds it a per-session Task/Team
+sub-agents it spawns (which it now CAN — Half B builds it a per-session Subagent/Team
 tool). Precedence: `def.Provider > session-selected provider > build-time default`;
 every child routes through `engineDepsForProvider` so it never contaminates the
 parent's compactor/counter. Composition-only — the registry never reaches the child

@@ -164,10 +164,10 @@ func TestDefMCPToolsUnknownReferenceSkipped(t *testing.T) {
 	}
 }
 
-// TestTaskDefInlineMCPCloseAggregated asserts the Task-path wiring connects a def's
+// TestSubagentDefInlineMCPCloseAggregated asserts the Subagent-path wiring connects a def's
 // inline server (tools enter the def engine) and that the aggregated close returned by
-// buildAgentTaskEngines tears the inline session down (Built.Close lifetime model).
-func TestTaskDefInlineMCPCloseAggregated(t *testing.T) {
+// buildAgentSubagentEngines tears the inline session down (Built.Close lifetime model).
+func TestSubagentDefInlineMCPCloseAggregated(t *testing.T) {
 	url, stop := newMCPTestServer(t)
 	defer stop()
 
@@ -178,15 +178,15 @@ func TestTaskDefInlineMCPCloseAggregated(t *testing.T) {
 		MCPServers:  []agents.AgentMCPServer{{Name: "inline", URL: url}},
 	}})
 	mcpProv := mockllm.New()
-	engines, _, closeFn := buildAgentTaskEngines(context.Background(), Config{Model: "m"}, mcpProv, regForTest(mcpProv, providerMock, "m"), providerMock, "m", reg, nil, hookexec.New(nil), nil, nil)
+	engines, _, closeFn := buildAgentSubagentEngines(context.Background(), Config{Model: "m"}, mcpProv, regForTest(mcpProv, providerMock, "m"), providerMock, "m", reg, nil, hookexec.New(nil), nil, nil)
 	if engines["inline-task"] == nil {
 		t.Fatal("inline-task engine not built")
 	}
 	if closeFn == nil {
-		t.Fatal("a Task def with an inline server must yield a non-nil aggregated close")
+		t.Fatal("a Subagent def with an inline server must yield a non-nil aggregated close")
 	}
 	if err := closeFn(); err != nil {
-		t.Fatalf("aggregated Task inline MCP close: %v", err)
+		t.Fatalf("aggregated Subagent inline MCP close: %v", err)
 	}
 }
 

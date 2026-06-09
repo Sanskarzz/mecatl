@@ -109,7 +109,7 @@ func (m Model) onTeamKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 	if m.team.view == teamTasks {
-		// Task sub-view: BOTH esc and 't' return to the roster (t toggles, esc steps
+		// Subagent sub-view: BOTH esc and 't' return to the roster (t toggles, esc steps
 		// back). It is a calm read-only surface like the focus pane — no other key is
 		// consumed (the list is height-windowed, no live viewport).
 		if key.Matches(msg, m.keys.Close) || key.Matches(msg, m.keys.Tasks) {
@@ -460,7 +460,7 @@ func teamFindLane(b *block, member string) *teamLane {
 	return nil
 }
 
-// Task-list state strings (mirror team.TaskState / TeamTask.State on the wire).
+// Subagent-list state strings (mirror team.TaskState / TeamTask.State on the wire).
 const (
 	taskStatePending    = "pending"
 	taskStateInProgress = "in_progress"

@@ -50,10 +50,10 @@ const defaultJudgeRubric = "pick the most correct, complete, and maintainable re
 // engineJudge is the default BranchJudge: it runs a dedicated, injected child
 // *Engine (built in the composition root — tool-less / read-only so a text scorer
 // needs no workspace) over a prompt assembled from the candidate summaries, drains
-// it with the SAME drainChild used by Task/Fork (so it inherits the non-interactive
+// it with the SAME drainChild used by Subagent/Fork (so it inherits the non-interactive
 // contract for free), and parses a tolerant JSON verdict. It imports only
 // session/tool — layer-clean — and is constructed in app where the judge Engine is
-// built (mirroring how ForkTool/TaskTool are constructed there).
+// built (mirroring how ForkTool/SubagentTool are constructed there).
 type engineJudge struct {
 	engine    *Engine
 	limits    session.Limits

@@ -109,18 +109,18 @@ var teamSchema = json.RawMessage(`{
 // honest floor when even the ledger is empty. A non-convergence header is prepended when
 // the team did NOT converge. The ToolResult is therefore NEVER a bare refusal or empty.
 //
-// It is the team analogue of TaskTool/ForkTool, with two deliberate differences:
+// It is the team analogue of SubagentTool/ForkTool, with two deliberate differences:
 //
 //   - ReadOnly() == false. A team spawns Mutating members and is long-lived and
 //     stateful, so the dispatcher must SERIALISE it (mutate-serial) rather than
-//     run it read-parallel like Task. (Mutating members run in isolated forks, but
+//     run it read-parallel like Subagent. (Mutating members run in isolated forks, but
 //     the supervisor's member maps are not safe to drive alongside other tools.)
 //   - Member activity is OBSERVABLE and fuller. Via the observableTool seam, each
 //     member event is projected to the parent run's stream as a team.member event
 //     carrying the member's message text and BOUNDED tool previews — a team is
 //     meant to be watched. permission.ask is dropped; every preview is capped.
 //
-// Context isolation holds exactly as for Task/Fork: the per-member transcripts are
+// Context isolation holds exactly as for Subagent/Fork: the per-member transcripts are
 // never written to the parent Session's Conversation. Only the lead's synthesis
 // (the ToolResult) folds back, so the LLM's context stays summary-only. (The PULL
 // InspectMember tool may later pull ONE member's transcript on the parent's
@@ -211,7 +211,7 @@ func (*TeamTool) Spec() tool.ToolSpec {
 			"A team is the MOST EXPENSIVE tool — it runs several long-lived agents in parallel " +
 			"over many rounds and can consume a very large number of tokens. Use it only when " +
 			"the work genuinely splits into independent specialist roles. For a single focused " +
-			"investigation use Task; for something you can do directly, do it directly.\n\n" +
+			"investigation use Subagent; for something you can do directly, do it directly.\n\n" +
 			"Keep the roster small (2-4 members is typical). In each member's role, tell it to " +
 			"RecordFinding as it works and to message the lead when it is done — findings are " +
 			"how the lead builds the consolidated report.\n\n" +
@@ -232,7 +232,7 @@ func (*TeamTool) Spec() tool.ToolSpec {
 // SERIALISES it (mutate-serial) — it never runs concurrently with another tool.
 // A team is long-lived, stateful, and may spawn Mutating members; its Supervisor
 // drives unsynchronised member state, so it must not race the parent's other tool
-// calls. This is the deliberate opposite of TaskTool/ForkTool, which are
+// calls. This is the deliberate opposite of SubagentTool/ForkTool, which are
 // read-parallel.
 func (*TeamTool) ReadOnly() bool { return false }
 

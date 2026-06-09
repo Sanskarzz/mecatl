@@ -17,7 +17,7 @@ import (
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
-// TestE2E_SurfacedAskAllowed drives a REAL interactive parent Engine whose Task child
+// TestE2E_SurfacedAskAllowed drives a REAL interactive parent Engine whose Subagent child
 // (isolated, but with a substitution that is NOT worktree-auto-approvable) surfaces a
 // Bash ask. A scripted approver goroutine reads the parent stream and APPROVES via the
 // surfaced (child) askID; the child then executes the command and the parent run
@@ -31,10 +31,10 @@ func TestE2E_SurfacedAskAllowed(t *testing.T) {
 		mockllm.TextTurn("child: command output processed"),
 	)
 	childEngine := bashChildEngine(childLLM, bash)
-	task := agent.NewTaskTool(childEngine, agent.WithChildForker(&recordingTaskForker{}))
+	task := agent.NewSubagentTool(childEngine, agent.WithChildForker(&recordingSubagentForker{}))
 
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"run the command"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"run the command"}`)),
 		mockllm.TextTurn("parent: done"),
 	)
 	e := interactiveEngine(t, agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
@@ -50,7 +50,7 @@ func TestE2E_SurfacedAskAllowed(t *testing.T) {
 	if res.Stop == session.StopError {
 		t.Fatalf("parent run failed: %q", res.Error)
 	}
-	// The parent's single Task tool result is the child's summary (not an error).
+	// The parent's single Subagent tool result is the child's summary (not an error).
 	var taskResult *session.ToolResult
 	for _, ev := range evs {
 		if ev.Type == session.EvToolResult && ev.ToolResult != nil {
@@ -58,7 +58,7 @@ func TestE2E_SurfacedAskAllowed(t *testing.T) {
 		}
 	}
 	if taskResult == nil || taskResult.IsError {
-		t.Fatalf("expected a non-error Task result after approval; got %+v", taskResult)
+		t.Fatalf("expected a non-error Subagent result after approval; got %+v", taskResult)
 	}
 }
 
@@ -72,10 +72,10 @@ func TestE2E_SurfacedAskDenied(t *testing.T) {
 		mockllm.TextTurn("child: proceeding without that command"),
 	)
 	childEngine := bashChildEngine(childLLM, bash)
-	task := agent.NewTaskTool(childEngine, agent.WithChildForker(&recordingTaskForker{}))
+	task := agent.NewSubagentTool(childEngine, agent.WithChildForker(&recordingSubagentForker{}))
 
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"x"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x"}`)),
 		mockllm.TextTurn("parent: done"),
 	)
 	e := interactiveEngine(t, agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
@@ -105,11 +105,11 @@ func TestE2E_HeadlessAutoDeny(t *testing.T) {
 		mockllm.TextTurn("child: adapted"),
 	)
 	childEngine := bashChildEngine(childLLM, bash)
-	task := agent.NewTaskTool(childEngine, agent.WithChildForker(&recordingTaskForker{}))
+	task := agent.NewSubagentTool(childEngine, agent.WithChildForker(&recordingSubagentForker{}))
 
 	diag := newRecordingDiag()
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"x"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x"}`)),
 		mockllm.TextTurn("parent: done"),
 	)
 	// newEngine ⇒ Interactive=false (headless).
@@ -144,10 +144,10 @@ func TestE2E_AdversarialSubstitutionHidesDestructiveStillDenied(t *testing.T) {
 		mockllm.TextTurn("child: adapted"),
 	)
 	childEngine := bashChildEngine(childLLM, bash)
-	task := agent.NewTaskTool(childEngine, agent.WithChildForker(&recordingTaskForker{}))
+	task := agent.NewSubagentTool(childEngine, agent.WithChildForker(&recordingSubagentForker{}))
 
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"x"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x"}`)),
 		mockllm.TextTurn("parent: done"),
 	)
 	// Headless: no surface, so A2 is the ONLY thing that could clear it — and it must not.
@@ -194,7 +194,7 @@ func TestE2E_SurfacedTeamMemberAskDoesNotBlockPeers(t *testing.T) {
 		}
 	}
 
-	roFk := &recordingTaskForker{}
+	roFk := &recordingSubagentForker{}
 	tt := agent.NewTeamTool(factory, agent.WithTeamToolReadOnlyForker(roFk))
 
 	parentLLM := mockllm.New(
@@ -311,7 +311,7 @@ func TestE2E_HeadlessTeamMemberDeniedResultIsAccurate(t *testing.T) {
 		eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "m"})
 		return agent.MemberBuild{Engine: eng, IsolateReadOnly: true}
 	}
-	roFk := &recordingTaskForker{}
+	roFk := &recordingSubagentForker{}
 	tt := agent.NewTeamTool(factory, agent.WithTeamToolReadOnlyForker(roFk))
 
 	parentLLM := mockllm.New(

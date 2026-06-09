@@ -101,7 +101,7 @@ config resolves per-session against that root without a mutate-capable handle; `
 
 ## Application — `internal/agent/` (subagent workspace policy)
 
-The loop (`Engine`/`Run`), dispatch, permission pause/resume, compaction, the Task subagent,
+The loop (`Engine`/`Run`), dispatch, permission pause/resume, compaction, the Subagent delegation tool,
 and the agent-team `Supervisor`/`TeamTool`. (See `AGENT-TEAMS-SPIKE.md`.)
 
 **No-progress handler (loop Step 5, `finishTurnNoTools`).** A reasoning model can complete a
@@ -146,7 +146,7 @@ that reason verbatim — never nudged, never relabeled. This composes with the m
 above, which already honours `streamStop`. Pinned by `TestEmptyTurnWithTerminalStopNotNudged`
 (StopError) and `TestEmptyTurnWithNonErrorTerminalStopSurfaced` (a non-error non-benign stop),
 both of which FAIL on the pre-fix code (the masking bug).
-Because the fix lives in the SHARED `Engine.drive`, it covers main + Task children + fork
+Because the fix lives in the SHARED `Engine.drive`, it covers main + Subagent children + fork
 branches + every team member + the team lead's synthesis turn (a no-progress synthesis is driven
 to a real report, not an empty `joinTeamFallback` skeleton). **No `tool_choice` forcing**: forcing
 tool use is incompatible with Anthropic extended thinking and the OpenAI reasoning path — the
@@ -168,13 +168,13 @@ whose usage massively overshoots still finishes, then the budget trips before th
 is NOT a `port.LLMRequest` field (the request stays provider-neutral) — it is composition-tunable
 (`app.Config.MaxRunTokens` → `--max-run-tokens`) and INHERITED by every engine via
 `engineDepsForProvider`; `childEngineDepsForProvider` delegates there and does NOT clear it, so
-Task/team-member/lead/Fork children inherit the same ceiling. `StopBudget` is the
+Subagent/team-member/lead/Fork children inherit the same ceiling. `StopBudget` is the
 AGENT-TEAMS-SPIKE's named "Deferred 4A" brake, now landed once for every delegation path. It is a
 STRING passthrough on the wire (`session.StopBudget = "budget"`, no proto enum). Guards:
 `agent.TestBudget*`, `session.TestStopBudgetIsCleanReopenableTerminal`,
 `server.TestServiceBudgetSurfacesAndReopens`, `app.TestMaxRunTokensPropagatesToParentAndChild`.
 
-**Task per-call limits + wall-clock deadline (domain-only).** `taskArgs` gains three OPTIONAL
+**Subagent per-call limits + wall-clock deadline (domain-only).** `subagentArgs` gains three OPTIONAL
 pointer fields — `MaxTurns`/`MaxToolCalls` (TIGHTEN-ONLY via `tightenLimit`: a present positive
 override applies only if it LOWERS the inherited `session.Limits`, so the model can make its child
 stricter than the operator's bound but never looser; nil / non-positive ignored) and `TimeoutMs`
@@ -182,13 +182,13 @@ stricter than the operator's bound but never looser; nil / non-positive ignored)
 timeout ctx separately and checking `timeoutCtx.Err() == context.DeadlineExceeded` AFTER the
 drain, rendered as a model-addressable time-budget tool error (distinct from a parent
 cancellation). No wire/proto change (`session.Limits` semantics unchanged). Guards:
-`agent.TestTaskPerCall*`.
+`agent.TestSubagentPerCall*`.
 
-**Task child concurrency cap.** `TaskTool.childGate` (a counting-semaphore channel, default
+**Subagent child concurrency cap.** `SubagentTool.childGate` (a counting-semaphore channel, default
 `defaultMaxConcurrentChildren = 4`, override `WithMaxConcurrentChildren`; the old
-`WithMaxConcurrentTaskShells` is a deprecated alias) is now acquired at the TOP of `run()` for
-ALL Task children — forking AND forker-less — not only the worktree-forking path. Task is
-read-only so the dispatcher fans out N concurrent Task calls in one turn; each consumes a child
+`WithMaxConcurrentSubagentShells` is a deprecated alias) is now acquired at the TOP of `run()` for
+ALL Subagent children — forking AND forker-less — not only the worktree-forking path. Subagent is
+read-only so the dispatcher fans out N concurrent Subagent calls in one turn; each consumes a child
 session + an LLM slot (and, when shell-bearing, a forked worktree), so the gate is the single
 fan-out brake bounding how many children run at once. This closes the previously-unbounded
 forker-LESS fan-out. The team supervisor's round was ALREADY bounded
@@ -198,24 +198,24 @@ read-parallel/mutate-serial is UNCHANGED (the gate bounds child START, not dispa
 Guards: `agent.TestSubagentChildGateCapsForkerlessConcurrency`,
 `agent.TestSubagentShellGateCapsConcurrentForks`, `agent.TestSupervisorRoundConcurrencyBounded`.
 
-**Task per-call model override (`WithTaskEngineFactory`).** `taskArgs.Model` (optional opaque
-string) pins THIS child to a specific provider model. The TaskTool cannot build engines
+**Subagent per-call model override (`WithSubagentEngineFactory`).** `subagentArgs.Model` (optional opaque
+string) pins THIS child to a specific provider model. The SubagentTool cannot build engines
 (composition layer's job), so the composition root injects a closure
-`func(model string) (*agent.Engine, bool)` via `WithTaskEngineFactory`; `buildTaskEngineFactory`
+`func(model string) (*agent.Engine, bool)` via `WithSubagentEngineFactory`; `buildSubagentEngineFactory`
 (internal/app) builds the override child through `newChildEngineForProvider` — the SAME
 contamination-safe per-provider path the named-agent engines use — so Compactor/TokenCounter/
 `Env.Model`/ContextWindow are RE-DERIVED for the override model, NEVER a clone-and-swap of an
 existing engine's LLM (the "Provider is FIXED per session" invariant). The factory routes the
 model on the parent's provider (the registry is keyed by provider, not model — cross-provider
 routing by a bare model id stays a def's `provider:` concern), re-derives the window live-first via
-`provReg.meta.contextWindowFor`, and returns `(nil,false)` for a blank/unroutable model (Task then
+`provReg.meta.contextWindowFor`, and returns `(nil,false)` for a blank/unroutable model (Subagent then
 surfaces a model-addressable error). `agent` + `model` together is REJECTED (R9): a specialist
 already pins its own engine/model. Reasoning-effort stays an adapter-construction Option (the
 factory owns adapter construction), never a `taskArgs`/`port.LLMRequest` field. Guards:
-`agent.TestTaskPerCallModelRoutesToFactory`, `agent.TestTaskPerCallModelUnknownErrors`,
-`agent.TestTaskAgentAndModelTogetherRejected`, `app.TestBuildTaskEngineFactoryReDerivesForOverrideModel`.
+`agent.TestSubagentPerCallModelRoutesToFactory`, `agent.TestSubagentPerCallModelUnknownErrors`,
+`agent.TestSubagentAgentAndModelTogetherRejected`, `app.TestBuildSubagentEngineFactoryReDerivesForOverrideModel`.
 
-**Task structured output (`output_schema` + `SubmitResult` + bounded validation-retry).** When
+**Subagent structured output (`output_schema` + `SubmitResult` + bounded validation-retry).** When
 `taskArgs.OutputSchema` (a model-authored JSON schema) is present, the child is given a synthetic
 `SubmitResult` tool (`internal/agent/structuredoutput.go`) whose PARAMETERS ARE that schema,
 injected run-scoped via the new `RunOptions.ExtraTools` (never registered into the shared catalog,
@@ -226,7 +226,7 @@ via `session.ValidateJSON` (a JSON-schema SUBSET validator — object/array/stri
 boolean/null/properties/required/items/enum, FAIL-OPEN on any unsupported keyword; a domain helper,
 the SINGLE structured-output validation choke point, DISTINCT from `ValidateMediaParts`) and records
 the payload + validity onto the per-run tool struct. On a validation miss (or a child that never
-called SubmitResult) the Task tool re-injects a model-visible correction prompt and re-drives the
+called SubmitResult) the Subagent tool re-injects a model-visible correction prompt and re-drives the
 SAME child session (`session.Reopen` + `Engine.RunContentWith`) up to `defaultStructuredOutputRetries`
 (2), then gives up with the new `session.StopStructuredOutput` CLEAN terminal. The retry is a
 SEPARATE bounded loop owned by `driveChild` — NOT a change to the hot shared `finishTurnNoTools`
@@ -237,7 +237,7 @@ re-drive `Reopen()`s the child, RESETTING its `Counters`, so per-call `MaxTurns`
 (and `WithChildLimits`) bound EACH attempt — up to `(1+defaultStructuredOutputRetries)×` across the
 call (bounded, not a runaway); the cross-attempt brake is the TOKEN budget, which `driveChild` SUMS
 across drives and re-passes (the `runOpts` override) to each `RunContentWith`. Guards:
-`session.TestValidateJSONSubset`, `agent.TestTaskStructuredOutputHappyPath/RetryCorrects/
+`session.TestValidateJSONSubset`, `agent.TestSubagentStructuredOutputHappyPath/RetryCorrects/
 ExhaustionFails/FreeTextUnchanged`, `agent.TestDriveChildStructuredPlainTextExhaustsToCleanTerminal`
 (plain-text-never-SubmitResult exhaustion → StopStructuredOutput, child COMPLETED + Reopen-recoverable),
 `agent.TestSubmitResultOverlayWinsAndIsAdvertised` (RunOptions overlay-first + advertised once).
@@ -249,12 +249,12 @@ path:line) — model-visible by construction (it shapes the child's output → t
 DISTINCT from the shared `defaultTone` "Cite code as file_path:line" inline-citation sentence. The
 read-only explorer tool surface `{Read, Grep, Glob, +sandboxed Bash when runner != nil}` is now
 `readOnlyExplorerCatalog(runner)` — ONE definition shared by `buildChildEngine`,
-`buildTaskEngineFactory` (byte-identical), and `buildForkChildEngine`'s read-only base (which then
+`buildSubagentEngineFactory` (byte-identical), and `buildForkChildEngine`'s read-only base (which then
 layers Edit/Write). The team-member catalog is DELIBERATELY NOT built from it (its Bash gating
 differs: `spec.Mutating || roIsolationAvailable` + the `isolateReadOnly` side-effect). Guard:
 `app.TestExplorerPromptInstructsReferences`.
 
-**Task typed result taxonomy + agentId trailer (`renderTaskResult`/`renderTaskTrailer`).** The Task
+**Subagent typed result taxonomy + agentId trailer (`renderSubagentResult`/`renderSubagentTrailer`).** The Subagent
 RESULT is now LABELLED by terminal stop reason: `StopError` → tool error; `StopStructuredOutput` →
 tool error carrying the last validation failure; `StopMaxTurns`/`StopMaxToolCalls`/`StopBudget` →
 success-with-note (`[subagent stopped: …]` prefix); everything else (`StopEndTurn`/`StopNoProgress`/
@@ -262,19 +262,19 @@ success-with-note (`[subagent stopped: …]` prefix); everything else (`StopEndT
 (mirroring `renderTeamResult`'s Team-id line) so the parent MODEL can DISCOVER the deterministic
 child id (`subagent-<callID>`) — the runtime-discoverability axis: the id must be where the model
 reads it, not only on the client-only `subagent.*` events. It is INFORMATIONAL this round (no
-`InspectTask` tool yet — R2), pre-positioning the seam. Guard:
-`agent.TestTaskAgentIdTrailerInResultText` (+ the existing subagent tests updated from exact-equality
+`InspectSubagent` tool yet — R2), pre-positioning the seam. Guard:
+`agent.TestSubagentAgentIdTrailerInResultText` (+ the existing subagent tests updated from exact-equality
 to substring assertions for the trailer).
 
-**Task per-call token ceiling (`max_tokens`, Run-scoped budget override — R4).** `taskArgs.MaxTokens`
+**Subagent per-call token ceiling (`max_tokens`, Run-scoped budget override — R4).** `subagentArgs.MaxTokens`
 rides the new `RunOptions.MaxRunTokensOverride` carried into `Engine.RunContentWith`, so a per-call
 token ceiling bounds the SHARED child engine WITHOUT minting a fresh engine. `effectiveMaxRunTokens`
 folds it TIGHTEN-ONLY with `Deps.MaxRunTokens` (the lower non-zero value wins), so a per-call ceiling
 can make the child stricter than the operator default, never looser. A budget-stopped child ends
-`StopBudget` (clean terminal) → a success-with-note Task result, not an error. The `RunOptions`
+`StopBudget` (clean terminal) → a success-with-note Subagent result, not an error. The `RunOptions`
 override is the cleaner of the two R4 options (it generalises and works on the shared engine);
 `RunContent`/`Run` delegate to `RunContentWith` with a zero `RunOptions` (legacy run, unchanged).
-Guards: `agent.TestTaskPerCallMaxTokensHitsBudgetTerminal`, `agent.TestTaskPerCallMaxTokensTightenOnly`.
+Guards: `agent.TestSubagentPerCallMaxTokensHitsBudgetTerminal`, `agent.TestSubagentPerCallMaxTokensTightenOnly`.
 
 **Unknown-tool card (dispatch `runOne`).** An unknown/unresolved tool-call name now opens an
 `EvToolCall` card BEFORE its `EvToolResult` error (`unknown tool %q`), preserving the
@@ -325,7 +325,7 @@ unhardened runner; a Mutating force-copy member's own `.git` makes config-harden
 gets the hardened runner anyway.
 
 **Subagent Bash permission asks resolve in a 4-step model (NOT a blanket auto-deny).** The
-old contract auto-DENIED every subagent permission ask, so a team member / Task child could
+old contract auto-DENIED every subagent permission ask, so a team member / Subagent child could
 NEVER run a command containing substitution/subshell — the `$(go list ./...)`-per-package
 coverage loop hard-failed with a misleading "denied by user". The fix (`handleChildEvent` →
 `resolveChildAsk`, threaded by a per-child `childPosture` through `drainChildObserved` /
@@ -358,7 +358,7 @@ coverage loop hard-failed with a misleading "denied by user". The fix (`handleCh
 - **Step 3 — surface to human.** An interactive parent run installs `Run.childAsks`
   (`childAskRouter`) when `Deps.Interactive`. The dispatcher passes a `parentCaps`
   (interactivity + a register-then-emit `surfaceAsk`) to a `childCapableTool`
-  (Task/Team/Fork's `ExecuteWithParent`). `resolveChildAsk` registers the child Run in the
+  (Subagent/Team/Fork's `ExecuteWithParent`). `resolveChildAsk` registers the child Run in the
   parent router and emits a REDACTED parent `EvPermissionAsk` (command `clampPreview`'d, framed
   "subagent requests approval to run Bash: …", raw `Args` dropped — gauntlet #7), then returns
   WITHOUT resolving; the child parks in its own goroutine. The parent's `Run.Approve` routes the
@@ -482,21 +482,21 @@ model already gets `[STOPPED]` in the lead's report via `joinTeamFallback`), so 
 supervisor. It is a supervisor verdict (closed enums, `Name` already on the roster), kept OFF the
 `EvTeamMember` redaction channel exactly like the tasks/findings discipline.
 
-**The Task subagent (read-only explorer) gets the SAME treatment** (Phase 2): when Bash is
-configured, `TaskTool` holds a worktree `childForker` (`WithChildForker`) and forks each child
+**The Subagent delegation tool (read-only explorer) gets the SAME treatment** (Phase 2): when Bash is
+configured, `SubagentTool` holds a worktree `childForker` (`WithChildForker`) and forks each child
 run into a throwaway git worktree BEFORE running it (`buildChildEngine` registers Bash via the
-SAME `buildSandboxedCommandRunner`; `buildTaskTool` wires the worktree forker iff a runner
-exists; per-def Task engines keep Bash via `scopedToolNamesMode`'s `allowShell` and share the
-one forker). So a `Task` to "investigate X" can now `git log`/`git show`/`cat`/build/test in an
-isolated checkout — Edit/Write still dropped, no Task/Fork recursion. `TaskTool.ReadOnly()`
-stays **true**: isolation (not catalog read-only-ness) is what keeps Task read-parallel — its
+SAME `buildSandboxedCommandRunner`; `buildSubagentTool` wires the worktree forker iff a runner
+exists; per-def Subagent engines keep Bash via `scopedToolNamesMode`'s `allowShell` and share the
+one forker). So a `Subagent` to "investigate X" can now `git log`/`git show`/`cat`/build/test in an
+isolated checkout — Edit/Write still dropped, no Subagent/Fork recursion. `SubagentTool.ReadOnly()`
+stays **true**: isolation (not catalog read-only-ness) is what keeps Subagent read-parallel — its
 writes land in the worktree, never the shared base; a fork FAILURE is a tool error, NOT a
 silent fallback to the shared ws. A `WithMaxConcurrentChildren` (default 4; old
-`WithMaxConcurrentTaskShells` is a deprecated alias) semaphore bounds concurrent children —
-ALL of them now, forking and forker-less (Task is read-parallel, so the model can fan out; see
-the Task-concurrency-cap note above). Same
+`WithMaxConcurrentSubagentShells` is a deprecated alias) semaphore bounds concurrent children —
+ALL of them now, forking and forker-less (Subagent is read-parallel, so the model can fan out; see
+the Subagent-concurrency-cap note above). Same
 `gitenv` hardening + same untrusted-`.gitattributes` residual as team members; the
-workspace-trust gate is the SHARED follow-up for both Team + Task.
+workspace-trust gate is the SHARED follow-up for both Team + Subagent.
 
 **Compaction never emits unpaired history (tool-pairing invariant).** Both compactors
 (`HeuristicCompactor` in `compaction.go`, `CascadeCompactor` in `cascade.go`) slice a kept
@@ -704,7 +704,7 @@ ceiling, captured for the resolvers)/`architecture.input_modalities`/`supported_
 → the SDK omits it → upstream default applies). Strict mode would require every tool schema's
 `required` to list ALL of its `properties`, but many built-in tools carry genuinely optional
 params (Bash `timeout_ms`, Edit `replace_all`, Read `offset`/`limit`, Grep `path`, memory
-Remember/query, ToolSearch, Fork, Team, Task, …); a strict-enforcing OpenAI-compatible
+Remember/query, ToolSearch, Fork, Team, Subagent, …); a strict-enforcing OpenAI-compatible
 upstream (Azure reached via OpenRouter) `400`s those. We don't need the guarantee: **argument
 validation lives at the execution edge** — every tool re-parses/validates via
 `session.ParseArgs` / `NewToolError` before acting. The openai adapter is shared by the
@@ -818,7 +818,7 @@ frees a slot. `modelSnapshot(reg)` projects registry.Available() × catalog →
 `[]*mecatlv1.ModelInfo` (public metadata only, mock-skipped, sorted), injected into
 `server.Config.Models` (the ListAgents idiom).
 
-**Per-sub-agent provider (SHIPPED, both halves):** a Task agent def / team member may pin a
+**Per-sub-agent provider (SHIPPED, both halves):** a Subagent agent def / team member may pin a
 `provider:` frontmatter field (`agents.AgentDef.Provider` — PURE DATA, the adapter never imports
 the registry) to route its CHILD engine to a different provider than the parent; resolution is
 composition-only via `resolveProviderModel(cfg, reg, def, parentProviderID, parentModel)`
@@ -833,9 +833,9 @@ compacts/counts/prompts through X+model's window; a non-switching child keeps wi
 byte-identical). Unknown/unavailable `provider:` ⇒ loud `slog.Warn` + parent fallback (mirrors
 every other forgiving def-error handler). **Half B** gives a provider-SELECTED session its
 sub-agent tools (the build-time per-session catalog is core-tools-only and could not spawn
-Task/Team) by building a per-session Task tool (+ in-catalog Team tool under `--enable-teams`)
-inside `sessionEngineFactory` over the SAME `buildTaskTool`/`buildTeamWiring` builders (no
-per-session-catalog drift), wired to the session provider as parent; the Task tool's inline-MCP
+Subagent/Team) by building a per-session Subagent tool (+ in-catalog Team tool under `--enable-teams`)
+inside `sessionEngineFactory` over the SAME `buildSubagentTool`/`buildTeamWiring` builders (no
+per-session-catalog drift), wired to the session provider as parent; the Subagent tool's inline-MCP
 close folds into `SessionEngineResult.Close` (torn down by `CloseSession`/`Service.Close`),
 bounded by `MaxSessionEngines`. The registry NEVER leaves composition — the child engine gets a
 bare `port.LLMProvider`. **DEFERRED:** the standalone gRPC `CreateTeam` RPC stays on the default
@@ -850,7 +850,7 @@ MCP. `Build` threads the shared, already-connected `mainMgr` into the factory as
 `registerCoreTools` and BEFORE the client specs. Before this, a selector session (any
 `provider_id`/`model_id` — what the mecatui `/models` picker always sends) got a fresh
 core-only catalog and silently dropped all ~100 server-global MCP tools. Mount order
-**core → global MCP → client MCP → per-session Task/Team** yields **global-wins**
+**core → global MCP → client MCP → per-session Subagent/Team** yields **global-wins**
 collision precedence: `mcp.Register` is **first-wins + skip-and-continue** — a colliding
 client tool is skipped (the global one stays) while EVERY other non-colliding client tool
 is still registered, the skipped names accumulating into one aggregated `ErrDuplicateTool`
@@ -868,16 +868,16 @@ diagnostics invariant does not apply. (Identity-dedup, a `CreateSessionResponse`
 field, and TUI rendering are a deferred follow-up — out of scope.) **Lifecycle:**
 `globalMgr` is owned by `Build` — it is reused (NOT reconnected) and its `Close` is NEVER
 folded into `SessionEngineResult.Close` (a per-session `CloseSession` closing the shared
-manager would kill MCP for all other sessions). **Task/Team parity:** the factory threads
+manager would kill MCP for all other sessions). **Subagent/Team parity:** the factory threads
 `globalMgr` (falling back to the per-session client `mgr` only when nil) as the
-`reference:`-resolution mainMgr into `buildTaskTool`/`buildTeamWiring`, so a selector
+`reference:`-resolution mainMgr into `buildSubagentTool`/`buildTeamWiring`, so a selector
 session's subagent `reference: <name>` resolves against the global servers like the
 build-time path; managers are NOT merged (no entangled lifecycles) and per-def INLINE MCP
 entries connect independently. Guards: `TestSessionEngineFactoryMountsGlobalMCPToolsForSelector`
 (catalog + dispatch proof), `TestSessionEngineFactorySelectorCloseKeepsGlobalMCP` (DELETE-counter
 proof the shared manager survives a per-session close), `TestSessionEngineFactorySelectorNilGlobalMCP`
-(nil-globalMgr: core present, no global tool), `TestSelectorTaskRefResolvesGlobalMCP` /
-`TestSelectorTaskRefResolvesClientMCPWhenNoGlobal` (Task reference parity, both refMgr branches
+(nil-globalMgr: core present, no global tool), `TestSelectorSubagentRefResolvesGlobalMCP` /
+`TestSelectorSubagentRefResolvesClientMCPWhenNoGlobal` (Subagent reference parity, both refMgr branches
 driven through the factory), `TestSelectorClientToolCollisionGlobalWins` (skip-and-continue: global
 wins, the other client tool survives), and `mcp.TestRegisterSkipAndContinueOnCollision` (the
 Register-level contract — asserts the returned `skipped []string` names exactly the collider
@@ -994,13 +994,13 @@ m.deps.Models != nil` (same mechanism as `/soul`/`/usermodel`); palette-only ope
 it collides with enter); fixed builtin order now `clear, help, mcp, agents, team, skills, soul,
 usermodel, models`.
 
-**Unified `ctrl+a` agents overlay + fleet footer** (Task subagent watchability, Package C) is
+**Unified `ctrl+a` agents overlay + fleet footer** (Subagent delegation-tool watchability, Package C) is
 CLIENT-ONLY — built purely from the relayed `subagent.*`/`team.*` projection, NO new server
 event/field (the F2 finding: the three `subagent.*` events already carry ChildID/goal/tool
 name/error/count/usage/stop/duration). Two pieces:
 - **Fleet state** (`conversation.subagentFleet`, keyed by `ChildID`): a flat `[]subagentLane`
-  fed by `applySubagent` ALONGSIDE the inline Task-card routing (the inline card keys on
-  `ParentCallID`, the fleet on `ChildID` — so two children of one Task call are distinct rows).
+  fed by `applySubagent` ALONGSIDE the inline Subagent-card routing (the inline card keys on
+  `ParentCallID`, the fleet on `ChildID` — so two children of one Subagent call are distinct rows).
   Part of the conversation, so `/clear` drops it. `subagentFleetCounts`/`hasSubagents` drive the
   footer + the Subagents tab.
 - **Fleet footer segment** (`footer.go` `subagentFooter{Full,Medium,Compact}`, mirroring the team
@@ -1017,8 +1017,8 @@ name/error/count/usage/stop/duration). Two pieces:
   signal. `tab` (`keys.NextTab`) switches tabs (only from a roster); `enter` focuses; `esc` steps
   back then closes. **Default tab is context-sensitive** (`preferredAgentsTab`, tested in isolation):
   Teams when a team is LIVE, else Subagents when subagents ran, else the available tab. The newer
-  Task/Team terminal stop reasons (`budget`/`structured_output`/`no_progress`/`max_*`) ride the
+  Subagent/Team terminal stop reasons (`budget`/`structured_output`/`no_progress`/`max_*`) ride the
   string `stop` field and map to compact labels in `subagentStopLabel` (+ a ✓/✗ glyph split in
   `subagentLaneGlyph`: cap-family ✓, error/cancel-family ✗). Help/zero-state `ctrl+a` row is no
-  longer teams-gated (subagents are always available via Task). Gauntlet #7 holds: the focus pane
+  longer teams-gated (subagents are always available via Subagent). Gauntlet #7 holds: the focus pane
   shows redacted chips only, never child content.

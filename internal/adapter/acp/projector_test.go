@@ -323,7 +323,7 @@ func TestProjectHookPostToolUseBlockedWithCallID(t *testing.T) {
 }
 
 // TestProjectSubagent asserts subagent.tool/end project as tool_call_update on the
-// PARENT Task call id.
+// PARENT Subagent call id.
 func TestProjectSubagent(t *testing.T) {
 	toolEv := session.Event{
 		Type:     session.EvSubagentTool,
@@ -356,7 +356,7 @@ func TestProjectSubagent(t *testing.T) {
 }
 
 // TestProjectSubagentEndError asserts a subagent that ended in error marks the
-// parent Task call failed.
+// parent Subagent call failed.
 func TestProjectSubagentEndError(t *testing.T) {
 	got, _ := projectUpdate(session.Event{
 		Type:     session.EvSubagentEnd,

@@ -147,7 +147,7 @@ type Config struct {
 	MaxNoProgressNudges int
 
 	// MaxRunTokens is the loop-level cumulative token ceiling for a single run (the
-	// shared runaway brake serving main + Task + Team + Fork). It is threaded through
+	// shared runaway brake serving main + Subagent + Team + Fork). It is threaded through
 	// engineDepsForProvider to agent.Deps.MaxRunTokens and INHERITED by every child/
 	// member/lead engine (childEngineDepsForProvider keeps it). Semantics (in the loop):
 	// 0 (the default; operators who never set it) DISABLES the budget, so existing
@@ -214,11 +214,11 @@ type Config struct {
 	// read-only catalog + per-def model) discovered from <name>.md files. Mirrors
 	// the Skills fields: explicit dirs (highest precedence) plus the conventional
 	// project/user locations when AgentsConventional is set. Strict opt-in — zero
-	// sources means Task keeps only the default explorer (no behaviour change).
+	// sources means Subagent keeps only the default explorer (no behaviour change).
 	AgentsDirs         []string
 	AgentsConventional bool
 
-	// SubagentModel is the global override applied to every Task/member child
+	// SubagentModel is the global override applied to every Subagent/member child
 	// engine that does not pin its own model (the analogue of
 	// CLAUDE_CODE_SUBAGENT_MODEL). Resolution precedence per def is:
 	// def.Model > SubagentModel > parent Model. Empty disables the override. It is
@@ -486,7 +486,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		MCPSourceProber: mcpSourceProber(cfg),
 		// ListAgents snapshot: resolve the agent registry once here and project it
 		// into the proto form. Discovery is idempotent file scanning (buildCatalog
-		// resolves the same registry for the Task tool), so this re-resolution is
+		// resolves the same registry for the Subagent tool), so this re-resolution is
 		// cheap and keeps the snapshot a pure read at request time.
 		Agents: agentSnapshot(cfg, resolveAgentRegistry(ctx, cfg)),
 		// ListModels snapshot: join the provider registry's AVAILABLE providers to the
@@ -592,12 +592,12 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 // SERVER-GLOBAL MCP tools (globalMgr.Tools() — cfg.MCPServers + ToolHive, the same
 // tools buildCatalog→registerMCP mounts on the main engine, reused from Build's
 // already-connected shared manager — NOT reconnected, and NOT in the per-session
-// closeFn), then the client MCP tools, then a per-session Task/Team. It builds an
+// closeFn), then the client MCP tools, then a per-session Subagent/Team. It builds an
 // engine whose every NON-provider collaborator MATCHES the main engine via
 // engineDepsForProvider (so a per-session engine compacts, expands commands,
 // persists, and emits telemetry exactly like the shared one — only the catalog and
 // the resolved provider/model differ). globalMgr is also the `reference:`-resolution
-// mainMgr for per-session Task/Team subagent defs (falling back to the client mgr
+// mainMgr for per-session Subagent/Team subagent defs (falling back to the client mgr
 // when there is no global manager), parity with the build-time path.
 //
 // PROVIDER/MODEL RESOLUTION (the §0.2 resolution table): the zero selector keeps
@@ -719,13 +719,13 @@ func sessionEngineFactory(
 		}
 
 		// Half B — per-session sub-agent tools. The per-session catalog already carries
-		// core + server-global MCP + client MCP (above); here we add a per-session Task
+		// core + server-global MCP + client MCP (above); here we add a per-session Subagent
 		// tool (and, under EnableTeams, an in-catalog Team tool) wired to THIS session's
 		// resolved (provider, providerID, model) as the inherited parent — reusing the
 		// SAME builders the build-time path uses so the two catalogs cannot drift. A
 		// def's own `provider:` still overrides per-def.
 		//
-		// refMgr is the mainMgr for Task/member defs' MCP `reference:` resolution: prefer
+		// refMgr is the mainMgr for Subagent/member defs' MCP `reference:` resolution: prefer
 		// the SHARED globalMgr (parity with the build-time path, which passes the global
 		// mainMgr — so a per-session subagent's `reference: <name>` resolves against the
 		// SERVER-global servers), falling back to the per-session client mgr when there is
@@ -733,14 +733,14 @@ func sessionEngineFactory(
 		// entangle their lifecycles); per-def INLINE MCP entries connect independently of
 		// refMgr and are unaffected.
 		//
-		// The Task tool's inline-MCP close is FOLDED into the returned Close so a def's
+		// The Subagent tool's inline-MCP close is FOLDED into the returned Close so a def's
 		// inline MCP managers are torn down with the session (CloseSession/Service.Close).
 		// globalMgr is NEVER in that Close — Build owns its lifecycle.
 		refMgr := globalMgr
 		if refMgr == nil {
 			refMgr = mgr
 		}
-		taskTool, taskClose := buildTaskTool(ctx, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, hooks, agentReg, refMgr)
+		taskTool, taskClose := buildSubagentTool(ctx, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, hooks, agentReg, refMgr)
 		cat.MustRegister(taskTool)
 		closeFn = composeCloseErr(taskClose, closeFn)
 		if cfg.EnableTeams {
@@ -848,7 +848,7 @@ func buildStore(cfg Config) (port.SessionStore, error) {
 }
 
 // buildEngine assembles the parent agent.Engine: the core tool catalog (plus an
-// optional Bash tool and a read-only Task subagent), the permission policy, hooks,
+// optional Bash tool and a read-only Subagent tool), the permission policy, hooks,
 // prompt config, and the shared provider/store. It also connects any configured
 // MCP servers, returning a close func that tears the MCP manager down on shutdown
 // (a no-op when no servers are configured), and the per-session client-MCP engine
@@ -901,8 +901,8 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
 	// Resolve the agent-definition registry ONCE here and share it with BOTH the
-	// build-time catalog's Task/Team tools and the per-session engine factory (Half B
-	// builds a per-session Task/Team tool over the SAME registry, closed over below).
+	// build-time catalog's Subagent/Team tools and the per-session engine factory (Half B
+	// builds a per-session Subagent/Team tool over the SAME registry, closed over below).
 	// Discovery is idempotent file scanning; resolving once avoids per-session
 	// re-discovery (the registry does not vary per session).
 	agentReg := resolveAgentRegistry(ctx, cfg)
@@ -1450,7 +1450,7 @@ func registerCoreTools(cfg Config, cat *tool.Catalog, log bool) {
 }
 
 // buildCatalog registers the always-available core tools (Read, Edit, Write, Grep,
-// Glob, WebFetch), a read-only Task subagent, and — only when a shell is configured
+// Glob, WebFetch), a read-only Subagent tool, and — only when a shell is configured
 // — the optional Bash tool. It then optionally registers Fork, memory, skills, the
 // repo map, and connects any MCP servers. The returned close func tears down the
 // MCP manager on shutdown.
@@ -1460,26 +1460,26 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	// memStore is the per-project memory store, returned so the caller can bind it
 	// to the prompt tier-0 index source. It stays nil when memory is disabled.
 	var memStore *memory.Store
-	// Connect the MAIN MCP servers FIRST, so the per-agent-def Task engines built by
-	// buildTaskTool can (a) pull a REFERENCED main server's tools out of this manager
+	// Connect the MAIN MCP servers FIRST, so the per-agent-def Subagent engines built by
+	// buildSubagentTool can (a) pull a REFERENCED main server's tools out of this manager
 	// and (b) connect their own INLINE servers. The main manager is registered into
 	// the parent catalog here; the def engines get only the servers their mcpServers
 	// opts into. mainMgr is nil when no main servers are configured (reference
 	// entries then resolve to a clear "unknown server" diagnostic).
 	mainMgr, mcpProvider, mcpInventory, mcpClose := registerMCP(ctx, cfg, cat)
 
-	// Build-time Task tool: the inherited parent is the build-time DEFAULT provider +
+	// Build-time Subagent tool: the inherited parent is the build-time DEFAULT provider +
 	// model (reg.Default()/cfg.Model), so a def that pins no provider runs on the
 	// default exactly as before. A def's own `provider:` overrides per-def. agentReg
 	// is resolved ONCE in buildEngine and shared with the per-session factory (Half B).
-	taskTool, taskMCPClose := buildTaskTool(ctx, cfg, reg, provider, reg.Default(), cfg.Model, hooks, agentReg, mainMgr)
+	taskTool, taskMCPClose := buildSubagentTool(ctx, cfg, reg, provider, reg.Default(), cfg.Model, hooks, agentReg, mainMgr)
 	cat.MustRegister(taskTool)
 	// Aggregate the per-def INLINE MCP managers' teardown into the main MCP close, so
 	// Built.Close tears them ALL down on shutdown (process-lifetime engines).
 	mcpClose = composeClose(cfg.diag(), taskMCPClose, mcpClose)
 
-	// Fork fan-out tool: a scoped child Engine (no Fork/Task/ToolSearch, so a branch
-	// cannot recurse) run against an ISOLATED forked workspace. Unlike the Task
+	// Fork fan-out tool: a scoped child Engine (no Fork/Subagent/ToolSearch, so a branch
+	// cannot recurse) run against an ISOLATED forked workspace. Unlike the Subagent
 	// subagent, the Fork branch child MAY mutate (Edit/Write/Bash-if-configured):
 	// that is safe because every branch writes only to its own fork, never the
 	// parent base, so ForkTool.ReadOnly() stays true. The judge is a SEPARATE,
@@ -1516,7 +1516,7 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	// Supervisor over the SAME member-engine wiring the gRPC CreateTeam path uses
 	// (buildTeamWiring is the single source of that wiring truth, so the two paths
 	// cannot drift). Registered ONLY when teams are enabled. It is mutate-serial
-	// (unlike the read-parallel Task/Fork) and defaults to ASK (see defaultRules).
+	// (unlike the read-parallel Subagent/Fork) and defaults to ASK (see defaultRules).
 	if cfg.EnableTeams {
 		// buildTeamWiring always returns a non-nil forker and hooks runner under
 		// EnableTeams, so they are wired unconditionally (no nil guards).
@@ -1843,7 +1843,7 @@ func maybeWrapUserModelReview(cfg Config, hooks port.HookRunner, store port.Sess
 // runs: a catalog containing ONLY the RememberUser tool bound to the user-model
 // store, under the standard allow-all, non-interactive child policy. So the
 // reviewer can WRITE the user model but has no other capability (no Read/Edit/Bash,
-// no Task/Fork). RememberUser carries the write-time injection scan, so a
+// no Subagent/Fork). RememberUser carries the write-time injection scan, so a
 // transcript-poisoning attempt cannot land in the user-model block.
 func buildUserModelReviewEngine(cfg Config, provider port.LLMProvider, store *memory.Store) *agent.Engine {
 	cat := tool.NewCatalog()
@@ -1937,14 +1937,14 @@ func bashDisabledReason(cfg Config) string {
 // standard context-window / compaction-trigger settings. Call sites supply only
 // what actually varies between them — the scoped catalog, the resolved model, and
 // the prompt config. It is the single source of truth for that boilerplate so the
-// five child-engine builders (Task explorer, Fork branch, Fork judge, per-def Task
+// five child-engine builders (Subagent explorer, Fork branch, Fork judge, per-def Subagent
 // engine, team member) cannot drift apart.
 func newChildEngine(diag port.Diagnostics, role string, provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config) *agent.Engine {
 	return newChildEngineWithHooks(diag, role, provider, cat, model, pc, hookexec.New(nil))
 }
 
 // newChildEngineWithHooks is newChildEngine with an explicit HookRunner, so a
-// per-def Task/member engine can scope its own lifecycle hooks (from a def's
+// per-def Subagent/member engine can scope its own lifecycle hooks (from a def's
 // `hooks:` map) instead of the inert default. A nil hooks runner falls back to an
 // inert one, preserving the no-hooks contract.
 func newChildEngineWithHooks(diag port.Diagnostics, role string, provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config, hooks port.HookRunner) *agent.Engine {
@@ -2052,14 +2052,14 @@ func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvid
 	return deps
 }
 
-// buildChildEngine constructs the default Task explorer child *Engine: the read-only
-// explorer toolset (Read/Grep/Glob — never Fork/Task/ToolSearch, so a child can never
+// buildChildEngine constructs the default Subagent explorer child *Engine: the read-only
+// explorer toolset (Read/Grep/Glob — never Fork/Subagent/ToolSearch, so a child can never
 // recurse or fan out further, and never Edit/Write, so it cannot edit the project)
 // under an allow-all, non-interactive policy.
 //
 // Bash IS registered when a runner is configured (runner != nil), using the SANDBOXED
-// runner: a Task child now runs in an isolated git WORKTREE (wired via the Task tool's
-// child forker — see buildTaskTool) that SHARES the parent repo's `.git`, so its shell
+// runner: a Subagent child now runs in an isolated git WORKTREE (wired via the Subagent tool's
+// child forker — see buildSubagentTool) that SHARES the parent repo's `.git`, so its shell
 // can inspect history (git log/show), build, and test confined to a throwaway
 // checkout. Because the worktree shares `.git/config` and `.git/hooks`, the runner
 // must be the hardened buildSandboxedCommandRunner (same rationale as team members —
@@ -2075,12 +2075,12 @@ func buildChildEngine(cfg Config, provider port.LLMProvider, runner tool.Command
 	return newChildEngine(cfg.diag(), "task", provider, readOnlyExplorerCatalog(runner), cfg.Model, explorerPromptConfig(cfg))
 }
 
-// readOnlyExplorerCatalog builds the canonical read-only explorer tool surface a Task
+// readOnlyExplorerCatalog builds the canonical read-only explorer tool surface a Subagent
 // child (and a read-only Fork/member base) is scoped to: Read/Grep/Glob, PLUS the
 // SANDBOXED Bash tool when a runner is wired (runner != nil). It NEVER includes
-// Edit/Write (the explorer inspects, it does not edit the project) nor Task/Fork/
+// Edit/Write (the explorer inspects, it does not edit the project) nor Subagent/Fork/
 // ToolSearch (no recursion/fan-out). It is the ONE definition of that surface, shared by
-// buildChildEngine (default Task explorer), buildTaskEngineFactory (per-call model
+// buildChildEngine (default Subagent explorer), buildSubagentEngineFactory (per-call model
 // override — byte-identical to the default), and buildForkChildEngine's read-only base
 // (which then layers Edit/Write on top). The team-member catalog is DELIBERATELY NOT
 // built from here: its Bash gating differs (spec.Mutating || roIsolationAvailable, with
@@ -2096,14 +2096,14 @@ func readOnlyExplorerCatalog(runner tool.CommandRunner) *tool.Catalog {
 	return cat
 }
 
-// explorerPromptConfig is promptConfig for the DEFAULT Task explorer child: it appends
+// explorerPromptConfig is promptConfig for the DEFAULT Subagent explorer child: it appends
 // the References convention (D5b) to the explorer's Role so the child ENDS its summary
 // with a `References:` block listing the relevant file paths (path or path:line). This
-// makes the most common Task deliverable navigable without re-searching, and it lands in
+// makes the most common Subagent deliverable navigable without re-searching, and it lands in
 // the model-visible RESULT by construction (it shapes the child's output). It augments
 // the explorer Role specifically — NOT the shared defaultTone "Cite code as
 // file_path:line" sentence (that already exists and is a different, inline-citation
-// instruction). A per-def Task engine builds its Role via agentPromptConfig instead, so
+// instruction). A per-def Subagent engine builds its Role via agentPromptConfig instead, so
 // this applies to the anonymous explorer (the no-`agent` path) where it is most useful.
 func explorerPromptConfig(cfg Config) prompt.Config {
 	pc := promptConfig(cfg, cfg.gitStatus)
@@ -2120,8 +2120,8 @@ const explorerReferencesInstruction = "When you finish, END your summary with a 
 	"List concrete paths, not prose."
 
 // buildForkChildEngine constructs the child *Engine each Fork branch runs. Unlike
-// buildChildEngine (the read-only Task explorer), a Fork branch child MAY MUTATE
-// its OWN fork: it gets Read/Grep/Glob/Edit/Write, still EXCLUDING Task/Fork/
+// buildChildEngine (the read-only Subagent explorer), a Fork branch child MAY MUTATE
+// its OWN fork: it gets Read/Grep/Glob/Edit/Write, still EXCLUDING Subagent/Fork/
 // ToolSearch (a branch must not recurse or fan out further).
 //
 // Bash IS registered when a runner is configured (runner != nil). The runner is
@@ -2145,7 +2145,7 @@ func buildForkChildEngine(cfg Config, provider port.LLMProvider, runner tool.Com
 	// Start from the read-only explorer surface (Read/Grep/Glob + sandboxed Bash) then
 	// LAYER Edit/Write on top — a Fork branch MAY mutate its OWN fork. Bash is
 	// workspace-aware (BashTool.Execute passes the per-branch forked Workspace.Root() as
-	// workdir), so a branch's Bash runs in its OWN fork. (Task/Fork/ToolSearch stay
+	// workdir), so a branch's Bash runs in its OWN fork. (Subagent/Fork/ToolSearch stay
 	// excluded — readOnlyExplorerCatalog never adds them — so a branch can't recurse.)
 	childCat := readOnlyExplorerCatalog(runner)
 	childCat.MustRegister(tools.EditTool{})
@@ -2164,49 +2164,49 @@ func buildForkJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 	return newChildEngine(cfg.diag(), "fork-judge", provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
-// buildTaskTool constructs the Task subagent tool over a default child Engine
+// buildSubagentTool constructs the Subagent tool tool over a default child Engine
 // scoped to the read-only explorer toolset, PLUS the per-definition read-only
 // child engines resolved from the agent registry (Tier 1). When the registry is
-// empty the per-def map is nil and Task behaves exactly as before (default
+// empty the per-def map is nil and Subagent behaves exactly as before (default
 // explorer only); otherwise the model can route to a named specialist via the
-// Task `agent` arg, and the specialist names+descriptions are surfaced in the
-// Task spec for progressive disclosure.
+// Subagent `agent` arg, and the specialist names+descriptions are surfaced in the
+// Subagent spec for progressive disclosure.
 // It also threads the MAIN MCP manager so a def's mcpServers can REFERENCE a
 // configured server's tools, and connects each def's INLINE servers; the returned
 // close func tears those inline managers down (it is aggregated into Built.Close —
 // these are process-lifetime engines). The close is nil when no def opens an inline
 // server.
 //
-// Workspace isolation (Phase 2): when Bash is configured, the Task tool is wired with
+// Workspace isolation (Phase 2): when Bash is configured, the Subagent tool is wired with
 // a SANDBOXED command runner AND a worktree forker (the forker DEFAULT mode — no
 // WithForceCopy — so the child shares the parent repo's `.git` for full history). The
-// Task tool then forks each child run into a throwaway git worktree before running it,
+// Subagent tool then forks each child run into a throwaway git worktree before running it,
 // so a read-only explorer's shell (git log/show, build, test) is confined to that
-// worktree and never touches the shared parent base — which is what keeps Task
-// read-parallel-safe (see agent.TaskTool.ReadOnly). The sandboxed runner neutralises
+// worktree and never touches the shared parent base — which is what keeps Subagent
+// read-parallel-safe (see agent.SubagentTool.ReadOnly). The sandboxed runner neutralises
 // the git config-driven code-execution vectors in the shared `.git` (same rationale
 // and residual as team members — see buildSandboxedCommandRunner). When Bash is
 // disabled (nil runner) no forker is wired and the child stays a base-sharing
 // read-only explorer with no shell, exactly as before.
 //
 // PER-SUB-AGENT PROVIDER: provReg + parentProviderID + parentModel are the
-// inheritance point threaded down to buildAgentTaskEngines so a def's `provider:`
+// inheritance point threaded down to buildAgentSubagentEngines so a def's `provider:`
 // can route its child to a different provider (Half A) and a def that pins none
 // inherits whatever the call site supplies — the build-time default (buildCatalog)
-// or a session-selected provider (Half B). The registry never reaches the Task
-// tool itself; it is consumed only inside buildAgentTaskEngines' resolution loop.
-func buildTaskTool(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager) (tool.Tool, func() error) {
+// or a session-selected provider (Half B). The registry never reaches the Subagent
+// tool itself; it is consumed only inside buildAgentSubagentEngines' resolution loop.
+func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager) (tool.Tool, func() error) {
 	// Resolve the active skills once so a def's `skills:` can preload skill bodies
 	// into its engine prompt. The same index is the operator-controlled skill set
 	// the Skill tool serves. `hooks` is the inert default each def adopts unless its
 	// own `hooks:` map scopes lifecycle hooks to its engine.
 	skillIdx := resolveSkillIndex(ctx, cfg)
-	// The Task child's Bash runs over a worktree that SHARES the parent `.git`, so it
+	// The Subagent child's Bash runs over a worktree that SHARES the parent `.git`, so it
 	// gets the HARDENED runner (the main session keeps its own unhardened runner). nil
 	// when Bash is disabled — then no shell, no forker.
 	sandboxedRunner := buildSandboxedCommandRunner(cfg)
-	engines, meta, mcpClose := buildAgentTaskEngines(ctx, cfg, provider, provReg, parentProviderID, parentModel, reg, skillIdx, hooks, sandboxedRunner, mainMgr)
-	opts := []agent.TaskOption{
+	engines, meta, mcpClose := buildAgentSubagentEngines(ctx, cfg, provider, provReg, parentProviderID, parentModel, reg, skillIdx, hooks, sandboxedRunner, mainMgr)
+	opts := []agent.SubagentOption{
 		agent.WithSubagentStopHook(hooks),
 		agent.WithAgentEngines(engines, meta),
 	}
@@ -2226,15 +2226,15 @@ func buildTaskTool(ctx context.Context, cfg Config, provReg *providerRegistry, p
 	// override model) — never a clone-and-swap of the LLM on an existing engine. The
 	// closure hands internal/agent only func(string)(*Engine,bool); the registry never
 	// crosses (same shape/spirit as WithAgentEngines).
-	opts = append(opts, agent.WithTaskEngineFactory(
-		buildTaskEngineFactory(cfg, provReg, provider, parentProviderID, sandboxedRunner)))
-	return agent.NewTaskTool(
+	opts = append(opts, agent.WithSubagentEngineFactory(
+		buildSubagentEngineFactory(cfg, provReg, provider, parentProviderID, sandboxedRunner)))
+	return agent.NewSubagentTool(
 		buildChildEngine(cfg, provider, sandboxedRunner),
 		opts...,
 	), mcpClose
 }
 
-// buildTaskEngineFactory returns the per-call model-override factory the Task tool
+// buildSubagentEngineFactory returns the per-call model-override factory the Subagent tool
 // invokes when a call sets `model`. Given an opaque model id it builds a fresh
 // read-only explorer child engine pinned to that model on the parent's provider,
 // re-deriving the provider-closing Deps (Compactor/TokenCounter/Env.Model/ContextWindow)
@@ -2244,13 +2244,13 @@ func buildTaskTool(ctx context.Context, cfg Config, provReg *providerRegistry, p
 // Bash when a sandboxed runner is wired), so a model-override child has the same tool
 // surface and worktree isolation as the default explorer.
 //
-// Routability: a blank model is unroutable (ok=false → Task surfaces a model-addressable
+// Routability: a blank model is unroutable (ok=false → Subagent surfaces a model-addressable
 // error). Any non-blank model is routed on the parent provider (the provider validates
 // the exact id at request time); its context window is re-derived live-first via the
 // registry meta so the override child compacts on the right window. Cross-provider
 // routing by a bare model id is intentionally out of scope this round (the registry is
 // keyed by provider, not model) — a def's `provider:` remains the cross-provider seam.
-func buildTaskEngineFactory(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID string, runner tool.CommandRunner) func(model string) (*agent.Engine, bool) {
+func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID string, runner tool.CommandRunner) func(model string) (*agent.Engine, bool) {
 	return func(model string) (*agent.Engine, bool) {
 		model = strings.TrimSpace(model)
 		if model == "" {
@@ -2285,7 +2285,7 @@ func buildTaskEngineFactory(cfg Config, provReg *providerRegistry, provider port
 // one factory value satisfies both the gRPC Config.MemberEngine and NewTeamTool.
 //
 // It resolves the agent-definition registry and skill index ONCE (exactly as
-// buildCatalog shares the registry with the Task tool). The two forkers:
+// buildCatalog shares the registry with the Subagent tool). The two forkers:
 //   - fk (force-copy, WithForceCopy): a Mutating member runs in a FULLY isolated fork
 //     (own .git object DB/refs), matching buildCatalog's Fork branch wiring, so its
 //     git commit/push/update-ref cannot escape into the base repo.
@@ -2317,7 +2317,7 @@ func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry,
 	// but it is the injection seam once it is.
 	teamHooks := hookexec.New(nil)
 	// Resolve the agent-definition registry ONCE and share it with the member
-	// factory, exactly as buildCatalog shares it with the Task tool — ONE registry,
+	// factory, exactly as buildCatalog shares it with the Subagent tool — ONE registry,
 	// TWO consumers. A member whose spec.AgentType names a def adopts that def's
 	// scoped catalog/model/prompt/permissionMode.
 	agentReg := resolveAgentRegistry(ctx, cfg)
@@ -2384,7 +2384,7 @@ func modelCfgFor(cfg Config, model string) Config {
 //     for a Mutating member only. Bash is workspace-aware (it runs in the member's
 //     forked Workspace.Root()), so a Mutating member's Bash is fork-confined.
 //   - DEFINED (known AgentType): the def's tools allowlist ∩ the member's AVAILABLE
-//     base toolset, minus disallowedTools, ALWAYS excluding Task/Fork/ToolSearch.
+//     base toolset, minus disallowedTools, ALWAYS excluding Subagent/Fork/ToolSearch.
 //     The available base differs by spec.Mutating: a Mutating member (isolated fork)
 //     may keep Edit/Write/Bash, so the def MAY scope them in; a read-only
 //     (base-sharing) member has mutating tools DROPPED with a diagnostic, so the
@@ -2394,12 +2394,12 @@ func modelCfgFor(cfg Config, model string) Config {
 //     a per-member session mode returned in the MemberBuild.
 //
 // In BOTH cases the team coordination tools (MemberTools) are ALWAYS appended after
-// scoping — they bypass the def allowlist — and Task/Fork are NEVER included (a
+// scoping — they bypass the def allowlist — and Subagent/Fork are NEVER included (a
 // member must not recurse or fan out further).
 //
 // Unknown AgentType is FORGIVING (the skills/teams philosophy): it logs a warning
 // and falls back to the DEFAULT member catalog/model/mode rather than failing the
-// spawn, so a stale roster reference never wedges a team. (An unknown Task `agent`
+// spawn, so a stale roster reference never wedges a team. (An unknown Subagent `agent`
 // arg, by contrast, is a model-addressable error — the model can retry; an operator
 // roster entry cannot.)
 //
@@ -2456,7 +2456,7 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			// shared parent base. For a read-only member that we can isolate in a
 			// worktree (allowShell), scopedToolNamesMode keeps Bash but still drops
 			// Edit/Write; for a base-sharing read-only member it drops all three.
-			base := baseTaskTools(cfg)
+			base := baseSubagentTools(cfg)
 			// allowShell: a non-mutating member may keep Bash ONLY when a runner is
 			// wired AND a read-only forker is available to isolate it in a worktree.
 			allowShell := !spec.Mutating && runner != nil && roIsolationAvailable
@@ -2467,7 +2467,7 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			}
 			for _, name := range names {
 				// Bash registers with the HARDENED member runner (passed in), not the
-				// unhardened baseTaskTools one used purely to compute the name set — so a
+				// unhardened baseSubagentTools one used purely to compute the name set — so a
 				// member's shell over the shared `.git` cannot be hijacked via git config
 				// (core.pager/hooksPath/fsmonitor/external-diff). Every other tool registers
 				// as-is. Note: there is NO unhardened member-Bash fall-through — `runner` is
@@ -2720,7 +2720,7 @@ func shellOr(shell string) string {
 const SoulApplyAction = "soul:apply"
 
 // defaultRules is the built-in permission ruleset: read-only tools (Read, Grep,
-// Glob, WebFetch, the Task explorer) are allowed; mutating tools (Bash, Edit, Write)
+// Glob, WebFetch, the Subagent explorer) are allowed; mutating tools (Bash, Edit, Write)
 // and the writable SkillDraft tool ask for approval. Anything unmatched defaults to
 // ask via the evaluator.
 //
@@ -2749,13 +2749,13 @@ func defaultRules() []governance.Rule {
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Grep", Effect: governance.Allow},
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Glob", Effect: governance.Allow},
 		{Scope: governance.ScopeBuiltinDefault, Tool: "WebFetch", Effect: governance.Allow},
-		{Scope: governance.ScopeBuiltinDefault, Tool: "Task", Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: "Subagent", Effect: governance.Allow},
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Bash", Effect: governance.Ask},
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Edit", Effect: governance.Ask},
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Write", Effect: governance.Ask},
 		{Scope: governance.ScopeBuiltinDefault, Tool: skills.DraftToolName, Effect: governance.Ask},
 		// Team spawns coordinating subagents that may mutate the workspace (Mutating
-		// members), so it ASKS — unlike the read-only Task explorer, which is allowed.
+		// members), so it ASKS — unlike the read-only Subagent explorer, which is allowed.
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Team", Effect: governance.Ask},
 		// Memory capability (per-project + cross-project), pre-approved at the floor:
 		// reading/writing the agent's own saved facts is part of "having a memory", not

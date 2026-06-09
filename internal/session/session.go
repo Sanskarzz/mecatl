@@ -111,7 +111,7 @@ const (
 	StopNoProgress StopReason = "no_progress"
 	// StopBudget means the run's cumulative token usage crossed the configured
 	// loop-level ceiling (Deps.MaxRunTokens), checked at a turn boundary. It is the
-	// shared runaway brake serving every delegation path (main + Task + Team + Fork):
+	// shared runaway brake serving every delegation path (main + Subagent + Team + Fork):
 	// each engine inherits the ceiling and a per-call override may TIGHTEN it. Like
 	// StopNoProgress it is a CLEAN terminal (not StopError — nothing failed), routed
 	// through the same completed path as StopEndTurn, so the session ends COMPLETED and
@@ -125,7 +125,7 @@ const (
 	// producing a schema-valid payload. Like StopNoProgress / StopBudget it is a
 	// CLEAN terminal (not StopError — the run did not crash, it just failed to
 	// satisfy the requested schema), routed through the completed path so the session
-	// ends COMPLETED and stays Reopen-recoverable. The Task tool renders it as a
+	// ends COMPLETED and stays Reopen-recoverable. The Subagent tool renders it as a
 	// model-visible tool error carrying the last validation failure, so the failure
 	// reaches the model (never only a log line). It maps to the proto stop string
 	// verbatim (no proto enum; the wire stop field is a string passthrough, exactly

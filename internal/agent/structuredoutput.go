@@ -10,17 +10,17 @@ import (
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
-// submitResultTool is the synthetic deliverable tool a structured-output Task child is
+// submitResultTool is the synthetic deliverable tool a structured-output Subagent child is
 // given (run-scoped — injected via RunOptions.ExtraTools, NEVER registered into the
 // shared catalog). Its parameters ARE the model-authored output schema; when the child
 // calls it, Execute validates the submitted payload against that schema (the single
 // session.ValidateJSON choke point) and RECORDS the payload + validity onto this
-// per-run struct, which the Task tool reads to decide success vs a correction re-drive.
+// per-run struct, which the Subagent tool reads to decide success vs a correction re-drive.
 //
 // It is ReadOnly (it performs no workspace mutation — it only records into this struct),
 // so it dispatches on the read-parallel path exactly like Read/Grep, and a child that
 // calls it concurrently with other read-only tools is safe. It is per-call: a fresh one
-// is built for each structured-output Task call, so its mutable state is never shared.
+// is built for each structured-output Subagent call, so its mutable state is never shared.
 type submitResultTool struct {
 	// schema is the model-authored output schema; it doubles as the tool's parameter
 	// schema (so the model authors the result shape) and the validation target.
@@ -33,7 +33,7 @@ type submitResultTool struct {
 	raw string
 	// lastValidationError is the most recent schema-validation failure message,
 	// surfaced to the model in the correction prompt and, on retry-exhaustion, in the
-	// Task result tool error.
+	// Subagent result tool error.
 	lastValidationError string
 }
 

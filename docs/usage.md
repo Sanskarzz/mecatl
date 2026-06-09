@@ -122,7 +122,7 @@ Without `--openai` the demo is fully offline. With `--openai` and no
 
 `mecated` is a composition root: it parses flags/env, then delegates the
 assembly — an LLM provider, the seven-tool catalog plus a read-only-explorer
-`Task` subagent (which gets a full shell inside an isolated git worktree when Bash
+`Subagent` delegation tool (which gets a full shell inside an isolated git worktree when Bash
 is configured), the permission policy, lifecycle hooks, the session store, and the
 two-layer system prompt — to the shared `internal/app` package (`app.Build`),
 and serves the resulting `HarnessService` over gRPC and HTTP/SSE concurrently.
@@ -1267,7 +1267,7 @@ can adapt) and to the client (on ask).
 
 | Tool | Default effect |
 | --- | --- |
-| `Read`, `Grep`, `Glob`, `WebFetch`, `Task` | `allow` |
+| `Read`, `Grep`, `Glob`, `WebFetch`, `Subagent` | `allow` |
 | `Bash`, `Edit`, `Write` | `ask` |
 
 Read-only exploration runs without interruption; anything that can mutate the

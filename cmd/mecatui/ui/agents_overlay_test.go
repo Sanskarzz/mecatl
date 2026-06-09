@@ -2,7 +2,7 @@ package ui
 
 // Tests for the unified ctrl+a "agents" overlay (Package C, iteration 7) and the
 // fleet status footer segment (iteration 6). The overlay is ONE surface with two
-// tabs — Subagents (the flat Task-child fleet) and Teams (the former team overlay,
+// tabs — Subagents (the flat Subagent-child fleet) and Teams (the former team overlay,
 // reused verbatim). `tab` switches tabs, `enter` focuses a row, `esc` steps back /
 // closes. The default tab is context-sensitive (Teams when a team is live, else
 // Subagents when subagents ran). Everything renders from the REDACTED, metadata-only
@@ -36,10 +36,10 @@ func endSub(parent, child string, in, out int64, count int, stop string) client.
 
 // seedSubagents applies a sequence of subagent.* msgs through the real Update path so
 // the model's fleet collection is built exactly as it would be at runtime. It seeds a
-// Task tool card for the inline-card routing first (the fleet routing keys on ChildID
+// Subagent tool card for the inline-card routing first (the fleet routing keys on ChildID
 // and is independent, but a card keeps the inline path realistic).
 func seedSubagents(m Model, parent string, msgs ...client.SubagentMsg) Model {
-	m.conv.addTool(parent, "Task", `{"prompt":"investigate"}`)
+	m.conv.addTool(parent, "Subagent", `{"prompt":"investigate"}`)
 	for _, msg := range msgs {
 		mm, _ := m.Update(msg)
 		m = mm.(Model)
@@ -54,7 +54,7 @@ func seedSubagents(m Model, parent string, msgs ...client.SubagentMsg) Model {
 // subagent.end arrived, the rest are running.
 func TestSubagentFleetCounts(t *testing.T) {
 	c := &conversation{}
-	c.addTool("p1", "Task", `{}`)
+	c.addTool("p1", "Subagent", `{}`)
 	c.fleetStart("c1", "audit auth")
 	c.fleetStart("c2", "map coverage")
 	c.fleetStart("c3", "trace config")

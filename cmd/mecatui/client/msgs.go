@@ -106,19 +106,19 @@ type HookMsg struct {
 type SubagentKind string
 
 const (
-	// SubagentStart marks a Task subagent run beginning (Goal set).
+	// SubagentStart marks a Subagent tool run beginning (Goal set).
 	SubagentStart SubagentKind = "start"
 	// SubagentTool marks a child tool call resolving (ToolName/IsError/ToolCount set).
 	SubagentTool SubagentKind = "tool"
-	// SubagentEnd marks a Task subagent run finishing (ToolCount/Usage/Stop/DurationMs set).
+	// SubagentEnd marks a Subagent tool run finishing (ToolCount/Usage/Stop/DurationMs set).
 	SubagentEnd SubagentKind = "end"
 )
 
-// SubagentMsg is the REDACTED, metadata-only projection of a Task subagent's
+// SubagentMsg is the REDACTED, metadata-only projection of a Subagent tool's
 // child run. It carries NO child content — only ids, a goal label, child tool
 // names/counts, usage, stop, and duration — so the ui can render a subagent's
-// activity under its Task card while the child's content stays isolated.
-// ParentCallID attributes the msg to the originating Task tool block.
+// activity under its Subagent card while the child's content stays isolated.
+// ParentCallID attributes the msg to the originating Subagent tool block.
 type SubagentMsg struct {
 	Kind         SubagentKind
 	ParentCallID string

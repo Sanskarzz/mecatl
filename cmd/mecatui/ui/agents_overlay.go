@@ -11,7 +11,7 @@ import (
 )
 
 // agentsTab selects which body the unified ctrl+a "agents" overlay renders. The
-// overlay is ONE surface with two tabs — Subagents (the flat Task-child fleet) and
+// overlay is ONE surface with two tabs — Subagents (the flat Subagent-child fleet) and
 // Teams (the in-process agent-team roster) — matching the field's "one consolidated
 // agents window" convergence (Cursor's Agents Window, Claude Code's Agent View). The
 // container's open/closed flag and the Teams-tab state still live on m.team
@@ -21,7 +21,7 @@ import (
 type agentsTab int
 
 const (
-	tabSubagents agentsTab = iota // the flat Task-child fleet roster + per-child focus
+	tabSubagents agentsTab = iota // the flat Subagent-child fleet roster + per-child focus
 	tabTeams                      // the agent-team roster + per-member focus (the former team overlay)
 )
 
@@ -411,11 +411,11 @@ func shortChildID(id string) string {
 const childIDHashLen = 6
 
 // renderSubagentFocus renders ONE child's detail: a header line (glyph + goal +
-// current/last tool + count + usage), the context-isolation honesty note (Task never
+// current/last tool + count + usage), the context-isolation honesty note (Subagent never
 // forwards child content — gauntlet #7), and the redacted tool-chip trace, height-
 // bounded to the rows that fit. A focused ChildID with no matching lane (the child
 // vanished — defensive) reads as a muted note. It mirrors renderTeamFocus minus the
-// message lines Task never carries.
+// message lines Subagent never carries.
 func renderSubagentFocus(th theme.Theme, fleet []subagentLane, child string, height int) string {
 	muted := th.Style("muted")
 	ln := findFleetLane(fleet, child)

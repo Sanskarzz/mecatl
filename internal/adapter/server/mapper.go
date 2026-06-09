@@ -222,7 +222,7 @@ func toProtoTeamTaskSnapshot(t session.TeamTaskSnapshot) *mecatlv1.TeamTask {
 }
 
 // toProtoSubagent maps a session.SubagentPayload to its proto Subagent form: the
-// redacted, metadata-only projection of a Task child run. Usage is always emitted
+// redacted, metadata-only projection of a Subagent child run. Usage is always emitted
 // (zero on the start/tool kinds); the per-kind field population mirrors the domain
 // payload's documented contract.
 func toProtoSubagent(p session.SubagentPayload) *mecatlv1.Subagent {

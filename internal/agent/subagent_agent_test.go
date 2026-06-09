@@ -12,10 +12,10 @@ import (
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
-// taskParentResults runs a parent engine whose only tool is the given Task tool,
+// subagentParentResults runs a parent engine whose only tool is the given Subagent tool,
 // driving it with the supplied parent turns, and returns every ToolResult the
 // parent observed plus the parent's final text.
-func taskParentResults(t *testing.T, task tool.Tool, parentTurns ...mockllm.Turn) ([]*session.ToolResult, string) {
+func subagentParentResults(t *testing.T, task tool.Tool, parentTurns ...mockllm.Turn) ([]*session.ToolResult, string) {
 	t.Helper()
 	parentLLM := mockllm.New(parentTurns...)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
@@ -30,21 +30,21 @@ func taskParentResults(t *testing.T, task tool.Tool, parentTurns ...mockllm.Turn
 	return results, lastResult(t, evs).Text
 }
 
-// TestTaskRoutesToNamedAgent proves that Task(agent="reviewer") runs the named
+// TestSubagentRoutesToNamedAgent proves that Subagent(agent="reviewer") runs the named
 // engine (distinct behaviour) rather than the default explorer.
-func TestTaskRoutesToNamedAgent(t *testing.T) {
+func TestSubagentRoutesToNamedAgent(t *testing.T) {
 	// Default explorer: a child whose summary is "DEFAULT".
 	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
 	// Named specialist "reviewer": a distinct child whose summary is "REVIEWER".
 	reviewerEngine := childEngineWith(mockllm.New(mockllm.TextTurn("REVIEWER")), catalogWith(t))
 
-	task := agent.NewTaskTool(defaultEngine, agent.WithAgentEngines(
+	task := agent.NewSubagentTool(defaultEngine, agent.WithAgentEngines(
 		map[string]*agent.Engine{"reviewer": reviewerEngine},
 		[]agent.AgentMeta{{Name: "reviewer", Description: "reviews diffs"}},
 	))
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"check it","agent":"reviewer"}`)),
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"check it","agent":"reviewer"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if len(results) != 1 {
@@ -55,19 +55,19 @@ func TestTaskRoutesToNamedAgent(t *testing.T) {
 	}
 }
 
-// TestTaskDefaultExplorerUnchanged proves no regression: a Task call with NO
+// TestSubagentDefaultExplorerUnchanged proves no regression: a Subagent call with NO
 // `agent` arg runs the default explorer even when specialists are configured.
-func TestTaskDefaultExplorerUnchanged(t *testing.T) {
+func TestSubagentDefaultExplorerUnchanged(t *testing.T) {
 	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
 	reviewerEngine := childEngineWith(mockllm.New(mockllm.TextTurn("REVIEWER")), catalogWith(t))
 
-	task := agent.NewTaskTool(defaultEngine, agent.WithAgentEngines(
+	task := agent.NewSubagentTool(defaultEngine, agent.WithAgentEngines(
 		map[string]*agent.Engine{"reviewer": reviewerEngine},
 		[]agent.AgentMeta{{Name: "reviewer", Description: "reviews diffs"}},
 	))
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"explore"}`)),
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"explore"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if len(results) != 1 || !strings.Contains(results[0].Content, "DEFAULT") {
@@ -75,19 +75,19 @@ func TestTaskDefaultExplorerUnchanged(t *testing.T) {
 	}
 }
 
-// TestTaskUnknownAgentErrors proves an unknown name yields a model-addressable
+// TestSubagentUnknownAgentErrors proves an unknown name yields a model-addressable
 // error result listing the valid names (no silent fallback).
-func TestTaskUnknownAgentErrors(t *testing.T) {
+func TestSubagentUnknownAgentErrors(t *testing.T) {
 	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
 	reviewerEngine := childEngineWith(mockllm.New(mockllm.TextTurn("REVIEWER")), catalogWith(t))
 
-	task := agent.NewTaskTool(defaultEngine, agent.WithAgentEngines(
+	task := agent.NewSubagentTool(defaultEngine, agent.WithAgentEngines(
 		map[string]*agent.Engine{"reviewer": reviewerEngine},
 		[]agent.AgentMeta{{Name: "reviewer", Description: "reviews diffs"}},
 	))
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"x","agent":"nope"}`)),
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x","agent":"nope"}`)),
 		mockllm.TextTurn("parent recovered"),
 	)
 	if len(results) != 1 {
@@ -101,12 +101,12 @@ func TestTaskUnknownAgentErrors(t *testing.T) {
 	}
 }
 
-// TestTaskSpecEnumeratesAgents proves the available specialists appear in the
-// Task tool's Spec().Description (progressive disclosure), and that Task.ReadOnly
+// TestSubagentSpecEnumeratesAgents proves the available specialists appear in the
+// Subagent tool's Spec().Description (progressive disclosure), and that Subagent.ReadOnly
 // stays unconditionally true.
-func TestTaskSpecEnumeratesAgents(t *testing.T) {
+func TestSubagentSpecEnumeratesAgents(t *testing.T) {
 	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("x")), catalogWith(t))
-	task := agent.NewTaskTool(defaultEngine, agent.WithAgentEngines(
+	task := agent.NewSubagentTool(defaultEngine, agent.WithAgentEngines(
 		map[string]*agent.Engine{"reviewer": defaultEngine, "doc-writer": defaultEngine},
 		[]agent.AgentMeta{
 			{Name: "doc-writer", Description: "writes docs"},
@@ -118,7 +118,7 @@ func TestTaskSpecEnumeratesAgents(t *testing.T) {
 		t.Fatalf("spec must enumerate specialists, got:\n%s", desc)
 	}
 	if !task.ReadOnly() {
-		t.Fatalf("Task.ReadOnly() must stay true")
+		t.Fatalf("Subagent.ReadOnly() must stay true")
 	}
 }
 
@@ -142,14 +142,14 @@ func readLoopChild(t *testing.T, turns int) (*agent.Engine, *mockllm.Provider) {
 	return childEngineWith(llm, catalogWith(t, read)), llm
 }
 
-// TestTaskNamedAgentLimitsBindChildSession proves a def's per-run limits (carried
+// TestSubagentNamedAgentLimitsBindChildSession proves a def's per-run limits (carried
 // on AgentMeta.Limits) bound the child session: a def with MaxTurns=2 makes exactly
 // 2 model calls even though the child would otherwise loop far longer.
-func TestTaskNamedAgentLimitsBindChildSession(t *testing.T) {
+func TestSubagentNamedAgentLimitsBindChildSession(t *testing.T) {
 	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
 	boundedEngine, boundedLLM := readLoopChild(t, 8)
 
-	task := agent.NewTaskTool(defaultEngine, agent.WithAgentEngines(
+	task := agent.NewSubagentTool(defaultEngine, agent.WithAgentEngines(
 		map[string]*agent.Engine{"bounded": boundedEngine},
 		[]agent.AgentMeta{{
 			Name:        "bounded",
@@ -158,8 +158,8 @@ func TestTaskNamedAgentLimitsBindChildSession(t *testing.T) {
 		}},
 	))
 
-	taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"loop","agent":"bounded"}`)),
+	subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"loop","agent":"bounded"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if got := boundedLLM.Calls(); got != 2 {
@@ -167,22 +167,22 @@ func TestTaskNamedAgentLimitsBindChildSession(t *testing.T) {
 	}
 }
 
-// TestTaskNamedAgentNoLimitsUsesDefault proves a def with NO per-run limits (a zero
-// AgentMeta.Limits) runs under the Task tool's DEFAULT child limits, unchanged: the
+// TestSubagentNamedAgentNoLimitsUsesDefault proves a def with NO per-run limits (a zero
+// AgentMeta.Limits) runs under the Subagent tool's DEFAULT child limits, unchanged: the
 // child loops past 2 turns up to the default MaxTurns (12).
-func TestTaskNamedAgentNoLimitsUsesDefault(t *testing.T) {
+func TestSubagentNamedAgentNoLimitsUsesDefault(t *testing.T) {
 	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("DEFAULT")), catalogWith(t))
 	// Script more turns than the default MaxTurns (12) so the DEFAULT cap, not script
 	// exhaustion, is what stops the run.
 	looseEngine, looseLLM := readLoopChild(t, 20)
 
-	task := agent.NewTaskTool(defaultEngine, agent.WithAgentEngines(
+	task := agent.NewSubagentTool(defaultEngine, agent.WithAgentEngines(
 		map[string]*agent.Engine{"loose": looseEngine},
 		[]agent.AgentMeta{{Name: "loose", Description: "no pinned limits"}}, // zero Limits
 	))
 
-	taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"loop","agent":"loose"}`)),
+	subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"loop","agent":"loose"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if got := looseLLM.Calls(); got != agent.DefaultChildLimits().MaxTurns {
@@ -191,11 +191,11 @@ func TestTaskNamedAgentNoLimitsUsesDefault(t *testing.T) {
 	}
 }
 
-// TestTaskNoAgentsNoEnumeration proves the spec is unchanged when no specialists
+// TestSubagentNoAgentsNoEnumeration proves the spec is unchanged when no specialists
 // are configured (the default-explorer-only case).
-func TestTaskNoAgentsNoEnumeration(t *testing.T) {
+func TestSubagentNoAgentsNoEnumeration(t *testing.T) {
 	defaultEngine := childEngineWith(mockllm.New(mockllm.TextTurn("x")), catalogWith(t))
-	task := agent.NewTaskTool(defaultEngine)
+	task := agent.NewSubagentTool(defaultEngine)
 	if strings.Contains(task.Spec().Description, "Available specialist agents") {
 		t.Fatalf("no agents configured: spec must not have an enumeration tail")
 	}

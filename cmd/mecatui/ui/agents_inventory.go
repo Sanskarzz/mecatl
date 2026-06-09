@@ -47,7 +47,7 @@ func agentNameStyle(th theme.Theme, color string) lipgloss.Style {
 // closed). Like the /skills panel it is a read-only inventory layered over the
 // conversation: it does not change the run phase, opens only while idle, and is
 // dismissed with esc. It is the DEFINITION inventory (the resolved registry the
-// Task tool routes delegations to) — distinct from the live-team overlay (/team,
+// Subagent tool routes delegations to) — distinct from the live-team overlay (/team,
 // ctrl+a), which shows a team that has actually run. Activation stays the
 // model's run-path concern; the panel is discovery only.
 type agentsInvView int
@@ -208,6 +208,6 @@ func renderAgentsInvPanel(th theme.Theme, st agentsInvState, caps client.Capabil
 		}
 	}
 
-	b.WriteString("\n" + th.Style("muted").Render("agent definitions route Task delegations · esc close"))
+	b.WriteString("\n" + th.Style("muted").Render("agent definitions route Subagent delegations · esc close"))
 	return b.String()
 }

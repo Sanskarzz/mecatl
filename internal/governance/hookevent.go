@@ -5,7 +5,7 @@ import "encoding/json"
 // HookPhase identifies the lifecycle point at which a hook fires. The run-level
 // trio (SessionStart, UserPromptSubmit, Stop) fires from internal/agent/hooks.go,
 // the per-tool pair (PreToolUse, PostToolUse) from internal/agent/dispatch.go, and
-// SubagentStop from the Task subagent. The agent-team trio (TeammateIdle,
+// SubagentStop from the Subagent tool. The agent-team trio (TeammateIdle,
 // TaskCreated, TaskCompleted) fires from the team supervisor and coordination tools
 // (internal/agent/teamsupervisor.go, teamtools.go).
 type HookPhase string

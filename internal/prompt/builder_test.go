@@ -136,7 +136,7 @@ func TestEnvBlockDeterministicAndComplete(t *testing.T) {
 func TestToolDisciplineHints(t *testing.T) {
 	full := []tool.ToolSpec{
 		{Name: "Read"}, {Name: "Edit"}, {Name: "Write"}, {Name: "Glob"},
-		{Name: "Grep"}, {Name: "Bash"}, {Name: "Task"}, {Name: "Remember"},
+		{Name: "Grep"}, {Name: "Bash"}, {Name: "Subagent"}, {Name: "Remember"},
 	}
 	got := prompt.Build(prompt.Config{Tools: full}).StablePrefix
 	for _, want := range []string{
@@ -147,7 +147,7 @@ func TestToolDisciplineHints(t *testing.T) {
 		"Glob (not find/ls) to locate files",
 		"Grep (not grep/rg) to search contents",
 		"Reserve Bash for real system/terminal commands.",
-		"Use Task to delegate independent read-only exploration.",
+		"Use Subagent to delegate independent read-only exploration.",
 		"Use the memory tools to persist or recall durable facts across sessions.",
 		"Make independent tool calls in parallel; never pass placeholder or guessed arguments.",
 	} {

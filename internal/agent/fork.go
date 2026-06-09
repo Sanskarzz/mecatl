@@ -95,21 +95,21 @@ var forkSchema = json.RawMessage(`{
 // child's Event stream internally, and JOINS the results into a SINGLE
 // session.ToolResult that summarizes all branches.
 //
-// Like TaskTool (gauntlet #7), the parent NEVER observes any child's intermediate
+// Like SubagentTool (gauntlet #7), the parent NEVER observes any child's intermediate
 // tool.call / tool.result / message.delta / permission.ask events: each child's
 // stream is drained entirely inside Execute and only the terminal summary folds
 // back. A child permission ask is auto-denied so children stay non-interactive.
 //
 // Isolation: each branch runs in its OWN forked workspace, so even a child wired
 // with mutating tools writes only to its fork — parallel writes are SAFE because
-// they are isolated (this is strictly safer than concurrent TaskTool calls, which
+// they are isolated (this is strictly safer than concurrent SubagentTool calls, which
 // share the base). v1 does NOT auto-merge: Execute returns the per-branch
 // summaries and the child workspace ROOT paths so a human or the parent can
 // inspect/merge the forked trees. cleanup tears each fork down after its summary
 // has been captured.
 //
 // The child Engine is built by the composition root with a scoped catalog (no
-// Fork, no Task — children cannot fan out further) exactly as for TaskTool.
+// Fork, no Subagent — children cannot fan out further) exactly as for SubagentTool.
 type ForkTool struct {
 	// childEngine runs each branch's child loop. It is pre-wired by the composition
 	// root with a scoped catalog and a non-interactive policy. It is never the
@@ -219,8 +219,8 @@ func WithWinnerReaper(s PreservedForkStore) ForkOption {
 
 // NewForkTool constructs the Fork fan-out tool over a pre-built child *Engine and
 // a WorkspaceForker. The composition root builds childEngine with the SCOPED
-// child catalog and a non-interactive policy (see NewTaskTool's guidance); the
-// child catalog MUST NOT contain Fork or Task (so a branch cannot fan out
+// child catalog and a non-interactive policy (see NewSubagentTool's guidance); the
+// child catalog MUST NOT contain Fork or Subagent (so a branch cannot fan out
 // further). childEngine and forker must be non-nil; NewForkTool panics otherwise,
 // because a Fork tool with no child loop or no isolation seam is a composition-root
 // programming error.
@@ -253,7 +253,7 @@ func (*ForkTool) Spec() tool.ToolSpec {
 		Description: "Fan out several independent tasks (up to 8) to run in PARALLEL, each in " +
 			"its own isolated forked workspace and fresh context, then join their results into " +
 			"one summary. Use to explore multiple approaches at once or to split independent " +
-			"work. For a single task just do it yourself or use Task; for work where the " +
+			"work. For a single task just do it yourself or use Subagent; for work where the " +
 			"branches must coordinate or share state, use Team — Fork branches are fully " +
 			"independent and never communicate. " +
 			"Each branch runs in an isolated fork, so a branch may IMPLEMENT by editing, " +
@@ -276,7 +276,7 @@ func (*ForkTool) Spec() tool.ToolSpec {
 // shared workspace, which lets the parent dispatcher run it concurrently with
 // other read-only tools (read-parallel / mutate-serial; see dispatch.go).
 //
-// INVARIANT — this is the same invariant TaskTool documents, but Fork makes it
+// INVARIANT — this is the same invariant SubagentTool documents, but Fork makes it
 // strictly safer: every child branch runs in its OWN forked workspace, never the
 // shared base. So the child's filesystem-mutating tools (Edit / Write) land in the
 // isolated fork and CANNOT race on, or mutate, the parent's shared base. Bash is
@@ -288,12 +288,12 @@ func (*ForkTool) Spec() tool.ToolSpec {
 // the same as the main session. What the fix guarantees is that no ACCIDENTAL
 // shared-base mutation happens — a branch's relative-path Bash lands in the fork.)
 // That is why ReadOnly() can safely return true even for mutating (Edit/Write/Bash)
-// children — for the SAME reason TaskTool.ReadOnly() stays true: each tool isolates
+// children — for the SAME reason SubagentTool.ReadOnly() stays true: each tool isolates
 // its mutating child so the child's writes never touch the shared parent base.
-// Isolation, not catalog read-only-ness, is the boundary (after Phase 2 a Task child
+// Isolation, not catalog read-only-ness, is the boundary (after Phase 2 a Subagent child
 // with Bash runs in its OWN git worktree exactly as a Fork branch runs in its own
 // force-copy). The remaining distinction is only WHICH tools the child gets: a Fork
-// branch keeps Edit/Write (it is meant to IMPLEMENT in its fork), while a Task child
+// branch keeps Edit/Write (it is meant to IMPLEMENT in its fork), while a Subagent child
 // drops them and is shell-only (a read-only explorer that may run git/build/test but
 // cannot edit the project).
 func (*ForkTool) ReadOnly() bool { return true }
@@ -638,7 +638,7 @@ func (t *ForkTool) runBranch(ctx context.Context, callID session.ToolCallID, i i
 }
 
 // fireSubagentStop runs the SubagentStop hook for a finished branch run
-// (best-effort; mirrors TaskTool.fireSubagentStop).
+// (best-effort; mirrors SubagentTool.fireSubagentStop).
 func (t *ForkTool) fireSubagentStop(ctx context.Context, child *session.Session) {
 	fireNotify(ctx, t.hooks, governance.HookEvent{
 		Phase:     governance.PhaseSubagentStop,

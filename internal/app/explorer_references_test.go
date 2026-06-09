@@ -8,7 +8,7 @@ import (
 // TestExplorerPromptInstructsReferences pins the References convention (iteration-5
 // D5b): the DEFAULT read-only explorer child's Role instructs the child to END its
 // summary with a "References:" section listing relevant file paths, so the most common
-// Task deliverable is navigable without re-searching. It asserts on explorerPromptConfig
+// Subagent deliverable is navigable without re-searching. It asserts on explorerPromptConfig
 // (the single site that augments the explorer Role) — distinct from the shared
 // defaultTone "Cite code as file_path:line" inline-citation sentence, which is a
 // different instruction.

@@ -25,10 +25,10 @@ import (
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
-// These tests cover Phase 2 — the Task subagent (read-only explorer) gets full Bash
+// These tests cover Phase 2 — the Subagent tool (read-only explorer) gets full Bash
 // inside an isolated git worktree, mirroring the Phase 1 team-member treatment.
 
-// TestBuildChildEngineWithRunnerHasBash proves the default Task explorer's catalog
+// TestBuildChildEngineWithRunnerHasBash proves the default Subagent explorer's catalog
 // gains Bash when a runner is configured (the worktree-isolation path), while still
 // excluding Edit (a read-only explorer cannot edit the project).
 func TestBuildChildEngineWithRunnerHasBash(t *testing.T) {
@@ -41,13 +41,13 @@ func TestBuildChildEngineWithRunnerHasBash(t *testing.T) {
 
 	events := drainEngine(t, eng)
 	if unknownToolResult(events, "b1") {
-		t.Error("Task child did NOT have Bash; the worktree-isolated explorer must get a shell")
+		t.Error("Subagent child did NOT have Bash; the worktree-isolated explorer must get a shell")
 	}
 	if !sawDispatchedTool(events, "b1") {
-		t.Error("Task child did not dispatch Bash; it must be present in the catalog")
+		t.Error("Subagent child did not dispatch Bash; it must be present in the catalog")
 	}
 	if !unknownToolResult(events, "e1") {
-		t.Error("Task child got Edit; a read-only explorer must NOT be able to edit the project")
+		t.Error("Subagent child got Edit; a read-only explorer must NOT be able to edit the project")
 	}
 }
 
@@ -60,19 +60,19 @@ func TestBuildChildEngineNoRunnerHasNoBash(t *testing.T) {
 
 	events := drainEngine(t, eng)
 	if !unknownToolResult(events, "b1") {
-		t.Error("Task child with a nil runner dispatched Bash; without a runner there must be no shell")
+		t.Error("Subagent child with a nil runner dispatched Bash; without a runner there must be no shell")
 	}
 	if !unknownToolResult(events, "e1") {
-		t.Error("Task child got Edit; a read-only explorer must never have Edit")
+		t.Error("Subagent child got Edit; a read-only explorer must never have Edit")
 	}
 }
 
-// TestBuildTaskToolWiresForkerWhenShell proves buildTaskTool wires a child forker iff
-// Bash is configured: with a shell the Task tool isolates each child in a real git
+// TestBuildSubagentToolWiresForkerWhenShell proves buildSubagentTool wires a child forker iff
+// Bash is configured: with a shell the Subagent tool isolates each child in a real git
 // worktree (the child's working dir is NOT the parent repo root); with no shell no
 // forker is wired (the child shares the parent base). The proof uses a real git repo
 // and a real `pwd` so it cannot be faked by the scripted summary.
-func TestBuildTaskToolWiresForkerWhenShell(t *testing.T) {
+func TestBuildSubagentToolWiresForkerWhenShell(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -92,17 +92,17 @@ func TestBuildTaskToolWiresForkerWhenShell(t *testing.T) {
 		mockllm.TextTurn("done"),
 	)
 	taskWS := t.TempDir() // known worktree base for the cleanup assertion
-	task := newTaskToolForTest(t, cfg, childProvider, rec, taskWS)
+	task := newSubagentToolForTest(t, cfg, childProvider, rec, taskWS)
 
 	parentWS := osfsWSForTest(t, repo)
 	res, err := task.Execute(context.Background(),
-		session.NewToolCall("c1", "Task", json.RawMessage(`{"prompt":"run pwd"}`)),
+		session.NewToolCall("c1", "Subagent", json.RawMessage(`{"prompt":"run pwd"}`)),
 		parentWS)
 	if err != nil {
-		t.Fatalf("Task.Execute: %v", err)
+		t.Fatalf("Subagent.Execute: %v", err)
 	}
 	if res.IsError {
-		t.Fatalf("Task result is an error: %q", res.Content)
+		t.Fatalf("Subagent result is an error: %q", res.Content)
 	}
 
 	pwd := strings.TrimSpace(rec.contentForCall("p1"))
@@ -118,11 +118,11 @@ func TestBuildTaskToolWiresForkerWhenShell(t *testing.T) {
 	}
 }
 
-// TestBuildAgentTaskEnginesWithRunnerKeepsBashDropsEdit proves a per-def Task engine
+// TestBuildAgentSubagentEnginesWithRunnerKeepsBashDropsEdit proves a per-def Subagent engine
 // that scopes Bash keeps it (registered with the hardened runner) when a runner is
 // wired, while Edit/Write stay dropped (read-only explorer). Without a runner, Bash is
 // dropped too.
-func TestBuildAgentTaskEnginesWithRunnerKeepsBashDropsEdit(t *testing.T) {
+func TestBuildAgentSubagentEnginesWithRunnerKeepsBashDropsEdit(t *testing.T) {
 	cfg := teamCfg(t)
 	runner := buildSandboxedCommandRunner(cfg)
 	if runner == nil {
@@ -133,43 +133,43 @@ func TestBuildAgentTaskEnginesWithRunnerKeepsBashDropsEdit(t *testing.T) {
 	})
 
 	// With a runner: Bash kept, Edit dropped.
-	engines, _, _ := agentTaskEnginesForTest(context.Background(), cfg, bashThenEdit(), reg, nil, hookexec.New(nil), runner, nil)
+	engines, _, _ := agentSubagentEnginesForTest(context.Background(), cfg, bashThenEdit(), reg, nil, hookexec.New(nil), runner, nil)
 	eng := engines["inspector"]
 	if eng == nil {
 		t.Fatal("inspector engine not built")
 	}
 	events := drainEngine(t, eng)
 	if unknownToolResult(events, "b1") {
-		t.Error("per-def Task engine scoping Bash did NOT get Bash; it must keep it for worktree-isolated inspection")
+		t.Error("per-def Subagent engine scoping Bash did NOT get Bash; it must keep it for worktree-isolated inspection")
 	}
 	if !sawDispatchedTool(events, "b1") {
-		t.Error("per-def Task engine did not dispatch Bash; a def listing Bash must yield it")
+		t.Error("per-def Subagent engine did not dispatch Bash; a def listing Bash must yield it")
 	}
 	if !unknownToolResult(events, "e1") {
-		t.Error("per-def Task engine got Edit; Edit/Write must be dropped for a read-only explorer")
+		t.Error("per-def Subagent engine got Edit; Edit/Write must be dropped for a read-only explorer")
 	}
 
 	// Without a runner: Bash dropped too (no shell, no isolation).
-	enginesNoShell, _, _ := agentTaskEnginesForTest(context.Background(), cfg, bashThenEdit(), reg, nil, hookexec.New(nil), nil, nil)
+	enginesNoShell, _, _ := agentSubagentEnginesForTest(context.Background(), cfg, bashThenEdit(), reg, nil, hookexec.New(nil), nil, nil)
 	engNoShell := enginesNoShell["inspector"]
 	if engNoShell == nil {
 		t.Fatal("inspector engine (no shell) not built")
 	}
 	eventsNoShell := drainEngine(t, engNoShell)
 	if !unknownToolResult(eventsNoShell, "b1") {
-		t.Error("per-def Task engine kept Bash with a nil runner; without isolation there must be no shell")
+		t.Error("per-def Subagent engine kept Bash with a nil runner; without isolation there must be no shell")
 	}
 }
 
-// TestTaskRunsGitInWorktreeEndToEnd is the key Phase 2 proof: a Task subagent, driven
-// through a real parent engine whose catalog has the Task tool wired with a real
+// TestSubagentRunsGitInWorktreeEndToEnd is the key Phase 2 proof: a Subagent tool, driven
+// through a real parent engine whose catalog has the Subagent tool wired with a real
 // worktree forker + sandboxed runner, runs git (log/show) over a cheap worktree that
 // SHARES the base repo's .git — so it sees the full history — confined to a throwaway
 // checkout, and the worktree is cleaned up afterwards (no leak). The child never edits
 // anything; it only inspects. The REAL git output is captured via a recording logger
 // on the child engine, so the history assertion proves git actually ran (the scripted
 // child summary cannot fake it).
-func TestTaskRunsGitInWorktreeEndToEnd(t *testing.T) {
+func TestSubagentRunsGitInWorktreeEndToEnd(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -196,13 +196,13 @@ func TestTaskRunsGitInWorktreeEndToEnd(t *testing.T) {
 	)
 
 	worktreeBase := t.TempDir() // scope worktrees here so we can assert cleanup
-	task := newTaskToolForTest(t, cfg, childProvider, rec, worktreeBase)
+	task := newSubagentToolForTest(t, cfg, childProvider, rec, worktreeBase)
 
 	parentWS := osfsWSForTest(t, repo)
 
-	// Drive a real parent engine that calls Task once.
+	// Drive a real parent engine that calls Subagent once.
 	parentProvider := mockllm.New(
-		mockllm.ToolCallTurn(session.ToolCall{ID: "t1", Name: "Task", Args: json.RawMessage(`{"prompt":"run git log and git show and report"}`)}),
+		mockllm.ToolCallTurn(session.ToolCall{ID: "t1", Name: "Subagent", Args: json.RawMessage(`{"prompt":"run git log and git show and report"}`)}),
 		mockllm.TextTurn("parent received the child report"),
 	)
 	parentCat := tool.NewCatalog()
@@ -212,21 +212,21 @@ func TestTaskRunsGitInWorktreeEndToEnd(t *testing.T) {
 	sess := session.New("parent", session.ModeDefault, repo, session.Limits{MaxTurns: 5}, time.Now())
 	run := parentEng.Run(context.Background(), sess, parentWS, "go")
 
-	var sawTaskResult bool
+	var sawSubagentResult bool
 	for ev := range run.Events() {
 		if ev.Type == session.EvToolResult && ev.ToolResult != nil && ev.ToolResult.CallID == "t1" {
 			if ev.ToolResult.IsError {
-				t.Fatalf("Task tool result is an error: %q", ev.ToolResult.Content)
+				t.Fatalf("Subagent tool result is an error: %q", ev.ToolResult.Content)
 			}
-			sawTaskResult = true
+			sawSubagentResult = true
 		}
 	}
-	if !sawTaskResult {
-		t.Fatal("parent never observed the Task tool result")
+	if !sawSubagentResult {
+		t.Fatal("parent never observed the Subagent tool result")
 	}
 
 	// The REAL git output (captured from the child's Bash tool results) must reflect the
-	// repo history — proving a Task subagent ran git in its worktree.
+	// repo history — proving a Subagent tool ran git in its worktree.
 	gitLog := rec.contentForCall("g1")
 	gitShow := rec.contentForCall("g2")
 	dotgit := rec.contentForCall("g3")
@@ -258,18 +258,18 @@ func TestTaskRunsGitInWorktreeEndToEnd(t *testing.T) {
 	}
 }
 
-// TestBuildTaskToolRealWiringForksChildShellWhenShell drives the REAL buildTaskTool
-// (the live Phase 2 composition seam) — NOT the hand-wired newTaskToolForTest helper —
+// TestBuildSubagentToolRealWiringForksChildShellWhenShell drives the REAL buildSubagentTool
+// (the live Phase 2 composition seam) — NOT the hand-wired newSubagentToolForTest helper —
 // to prove the Bash⟺forker coupling at the composition layer. With a shell-configured
-// cfg over a real git repo, the resulting Task tool, when invoked, must run the child's
+// cfg over a real git repo, the resulting Subagent tool, when invoked, must run the child's
 // Bash in an ISOLATED git WORKTREE: the child's pwd is NOT the parent repo root and its
 // `.git` is a worktree POINTER FILE (a force-copy would be a directory). The child has
-// no recording logger we can inject (buildTaskTool builds an opaque child engine), so
+// no recording logger we can inject (buildSubagentTool builds an opaque child engine), so
 // the child's Bash writes its pwd + `.git` status into an EXTERNAL probe file we read
 // back — the same proof the E2E uses, routed through the real builder. A regression that
 // wired the forker unconditionally OR never (a Bash child in the SHARED base) would
 // surface here: the probe would show the parent repo root / a `.git` directory.
-func TestBuildTaskToolRealWiringForksChildShellWhenShell(t *testing.T) {
+func TestBuildSubagentToolRealWiringForksChildShellWhenShell(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -292,7 +292,7 @@ func TestBuildTaskToolRealWiringForksChildShellWhenShell(t *testing.T) {
 	cfg := teamCfg(t)
 	cfg.Workspace = repo
 
-	// The child provider drives the Task child engine buildTaskTool builds: one Bash
+	// The child provider drives the Subagent child engine buildSubagentTool builds: one Bash
 	// call (the probe) then a summary. The parent provider is SEPARATE so the two
 	// engines never share a mockllm cursor (the E2E does the same).
 	childProvider := mockllm.New(
@@ -306,7 +306,7 @@ func TestBuildTaskToolRealWiringForksChildShellWhenShell(t *testing.T) {
 	}
 
 	parentProvider := mockllm.New(
-		mockllm.ToolCallTurn(session.ToolCall{ID: "t1", Name: "Task", Args: json.RawMessage(`{"prompt":"probe the workspace"}`)}),
+		mockllm.ToolCallTurn(session.ToolCall{ID: "t1", Name: "Subagent", Args: json.RawMessage(`{"prompt":"probe the workspace"}`)}),
 		mockllm.TextTurn("parent received the child report"),
 	)
 	parentWS := osfsWSForTest(t, repo)
@@ -318,7 +318,7 @@ func TestBuildTaskToolRealWiringForksChildShellWhenShell(t *testing.T) {
 	run := parentEng.Run(context.Background(), sess, parentWS, "go")
 	for ev := range run.Events() {
 		if ev.Type == session.EvToolResult && ev.ToolResult != nil && ev.ToolResult.CallID == "t1" && ev.ToolResult.IsError {
-			t.Fatalf("Task tool result is an error: %q", ev.ToolResult.Content)
+			t.Fatalf("Subagent tool result is an error: %q", ev.ToolResult.Content)
 		}
 	}
 
@@ -345,13 +345,13 @@ func TestBuildTaskToolRealWiringForksChildShellWhenShell(t *testing.T) {
 	}
 }
 
-// TestBuildTaskToolRealWiringNoShellNoForker drives the REAL buildTaskTool with a
-// nil-runner cfg (NoBash) and proves the other side of the coupling: the resulting Task
+// TestBuildSubagentToolRealWiringNoShellNoForker drives the REAL buildSubagentTool with a
+// nil-runner cfg (NoBash) and proves the other side of the coupling: the resulting Subagent
 // child has NO Bash and NO forker, so it cannot run a shell at all. The child's Bash
 // call returns an unknown-tool result (the tool is absent from the catalog) and the
 // external probe file is NEVER written (no worktree, no shell). This locks the
 // "no shell ⇒ no forker" half of the composition coupling.
-func TestBuildTaskToolRealWiringNoShellNoForker(t *testing.T) {
+func TestBuildSubagentToolRealWiringNoShellNoForker(t *testing.T) {
 	repo := t.TempDir()
 
 	probeDir := t.TempDir()
@@ -378,7 +378,7 @@ func TestBuildTaskToolRealWiringNoShellNoForker(t *testing.T) {
 	}
 
 	parentProvider := mockllm.New(
-		mockllm.ToolCallTurn(session.ToolCall{ID: "t1", Name: "Task", Args: json.RawMessage(`{"prompt":"try to run a shell"}`)}),
+		mockllm.ToolCallTurn(session.ToolCall{ID: "t1", Name: "Subagent", Args: json.RawMessage(`{"prompt":"try to run a shell"}`)}),
 		mockllm.TextTurn("parent done"),
 	)
 	parentWS := osfsWSForTest(t, repo)
@@ -399,12 +399,12 @@ func TestBuildTaskToolRealWiringNoShellNoForker(t *testing.T) {
 	}
 }
 
-// newTaskToolForTest builds a Task tool wired exactly like buildTaskTool's shell path
+// newSubagentToolForTest builds a Subagent tool wired exactly like buildSubagentTool's shell path
 // — a sandboxed command runner + a worktree forker (rooted under worktreeBase for the
 // cleanup assertion) — but with a child engine carrying the given recording logger so a
 // test can read the child's REAL Bash output. It mirrors the composition wiring without
-// going through buildTaskTool (which builds an opaque child engine).
-func newTaskToolForTest(t *testing.T, cfg Config, childProvider *mockllm.Provider, logger *recordingToolLogger, worktreeBase string) tool.Tool {
+// going through buildSubagentTool (which builds an opaque child engine).
+func newSubagentToolForTest(t *testing.T, cfg Config, childProvider *mockllm.Provider, logger *recordingToolLogger, worktreeBase string) tool.Tool {
 	t.Helper()
 	runner := buildSandboxedCommandRunner(cfg)
 	if runner == nil {
@@ -425,7 +425,7 @@ func newTaskToolForTest(t *testing.T, cfg Config, childProvider *mockllm.Provide
 	})
 	roFk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) },
 		forker.WithTempBase(worktreeBase))
-	return agent.NewTaskTool(childEng, agent.WithChildForker(roFk))
+	return agent.NewSubagentTool(childEng, agent.WithChildForker(roFk))
 }
 
 // osfsWSForTest builds an osfs workspace rooted at dir, failing the test on error.

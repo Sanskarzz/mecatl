@@ -21,7 +21,7 @@ import (
 // teamsupervisor.go is the APPLICATION-layer orchestrator for agent teams (see
 // docs/design/AGENT-TEAMS-SPIKE.md). It owns one shared *team.Team and drives a
 // set of long-lived member sessions that coordinate through that team's task list
-// and mailbox. Unlike Task/Fork (one-shot, drained internally), team members are
+// and mailbox. Unlike Subagent/Fork (one-shot, drained internally), team members are
 // re-driven across rounds and their events are STREAMED to the caller (tagged with
 // the member name), never drained — the headless analogue of Claude Code's
 // split-pane teammates.
@@ -840,7 +840,7 @@ func (s *Supervisor) rosterNames() string {
 
 // runTurn runs one member's turn-loop to completion, forwarding every event (tagged
 // with the member name) to evCh, auto-denying any permission ask (members are
-// non-interactive in v1, matching Task/Fork), then re-opening the session for the
+// non-interactive in v1, matching Subagent/Fork), then re-opening the session for the
 // next round. A run that ends non-resumably marks the member stopped.
 func (s *Supervisor) runTurn(ctx context.Context, ti turnInput, evCh chan<- TeamEvent) {
 	m := ti.m
@@ -910,7 +910,7 @@ func (s *Supervisor) runTurn(ctx context.Context, ti turnInput, evCh chan<- Team
 // fireTeammateIdle runs the TeammateIdle hook for a member that just went idle
 // (best-effort; a hook error or block is ignored — going idle cannot be vetoed in
 // v1, matching SubagentStop). It delegates to fireNotify, which owns the
-// cancelled-ctx detach rule shared with the Task/Fork SubagentStop fires.
+// cancelled-ctx detach rule shared with the Subagent/Fork SubagentStop fires.
 func (s *Supervisor) fireTeammateIdle(ctx context.Context, m *memberRT) {
 	input, _ := json.Marshal(map[string]string{"member": m.spec.Name})
 	fireNotify(ctx, s.hooks, governance.HookEvent{
@@ -922,7 +922,7 @@ func (s *Supervisor) fireTeammateIdle(ctx context.Context, m *memberRT) {
 
 // driveOneTurn runs one member turn-loop to completion against the given prompt,
 // forwarding every event (tagged with the member name) to evCh and auto-denying any
-// permission ask (members are non-interactive in v1, matching Task/Fork). It returns
+// permission ask (members are non-interactive in v1, matching Subagent/Fork). It returns
 // the terminal assistant text and the run's stop reason. It is the SINGLE place the
 // auto-deny / event-forward / terminal-text-capture logic lives, shared by runTurn
 // (per round) and synthesise (the lead's one final turn). It does NOT Reopen, persist,

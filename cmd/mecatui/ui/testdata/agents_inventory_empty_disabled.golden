@@ -13,7 +13,7 @@
                 ┃  agent definitions are not enabled on this server.              ┃
                 ┃  Add .claude/agents/*.md (or pass --agents-dir) and reconnect.  ┃
                 ┃                                                                 ┃
-                ┃  agent definitions route Task delegations · esc close           ┃
+                ┃  agent definitions route Subagent delegations · esc close       ┃
                 ┃                                                                 ┃
                 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 

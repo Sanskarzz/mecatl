@@ -141,7 +141,7 @@ func TestSubproviderChildContextWindow(t *testing.T) {
 	switched := agents.NewRegistry([]agents.AgentDef{
 		{Name: "big", Description: "big-context", Provider: providerOpenRouter, Model: "anthropic/claude-sonnet-4.5"},
 	})
-	engines, _, _ := buildAgentTaskEngines(context.Background(), cfg, reg.entries[providerOpenAI].provider,
+	engines, _, _ := buildAgentSubagentEngines(context.Background(), cfg, reg.entries[providerOpenAI].provider,
 		reg, providerOpenAI, "gpt-5", switched, nil, nil, nil, nil)
 	if engines["big"] == nil {
 		t.Fatal("provider-switched def engine not built")
@@ -152,7 +152,7 @@ func TestSubproviderChildContextWindow(t *testing.T) {
 
 	// (b) inherited-default def => 128k (byte-identical default path).
 	inherit := agents.NewRegistry([]agents.AgentDef{{Name: "plain", Description: "default"}})
-	engines2, _, _ := buildAgentTaskEngines(context.Background(), cfg, reg.entries[providerOpenAI].provider,
+	engines2, _, _ := buildAgentSubagentEngines(context.Background(), cfg, reg.entries[providerOpenAI].provider,
 		reg, providerOpenAI, "gpt-5", inherit, nil, nil, nil, nil)
 	if got := engines2["plain"].ContextWindow(); got != defaultContextWindowTokens {
 		t.Fatalf("inherited-default child ContextWindow = %d, want %d (unchanged)", got, defaultContextWindowTokens)
@@ -307,9 +307,9 @@ func TestDefaultConfigPolicyEvaluatesWithoutPanic(t *testing.T) {
 	}
 }
 
-// --- Half A: def-pinned provider routes through the REAL Task path -----------
+// --- Half A: def-pinned provider routes through the REAL Subagent path -----------
 
-// TestSubproviderHalfADefPinsProvider drives the REAL Task path: an agent def
+// TestSubproviderHalfADefPinsProvider drives the REAL Subagent path: an agent def
 // pinning provider=openrouter routes its child engine to the openrouter-bound mock
 // (distinct reply), while a def pinning nothing runs on the default (openai) mock.
 func TestSubproviderHalfADefPinsProvider(t *testing.T) {
@@ -321,31 +321,31 @@ func TestSubproviderHalfADefPinsProvider(t *testing.T) {
 	defs := agents.NewRegistry([]agents.AgentDef{
 		{Name: "pinned", Description: "on openrouter", Provider: providerOpenRouter},
 	})
-	engines, meta, _ := buildAgentTaskEngines(context.Background(), cfg, oa, reg, providerOpenAI, "gpt-5", defs, nil, nil, nil, nil)
+	engines, meta, _ := buildAgentSubagentEngines(context.Background(), cfg, oa, reg, providerOpenAI, "gpt-5", defs, nil, nil, nil, nil)
 
-	if got := runTaskAgent(t, oa, engines, meta, "pinned"); !strings.Contains(got, "REPLY-FROM-openrouter") {
+	if got := runSubagentAgent(t, oa, engines, meta, "pinned"); !strings.Contains(got, "REPLY-FROM-openrouter") {
 		t.Fatalf("def pinned to openrouter routed to %q, want it to contain REPLY-FROM-openrouter", got)
 	}
 }
 
 // TestSubproviderHalfAFullBuildE2E drives the FULL composition (app.Build →
 // server.Service) with TWO providers backed by distinct mocks and a real agent def
-// on disk pinning provider=openrouter. A DEFAULT session routes a Task to that def;
+// on disk pinning provider=openrouter. A DEFAULT session routes a Subagent to that def;
 // the sub-agent's reply proves it ran on openrouter while the main session runs on
 // the default openai provider. Offline. The session is created with --yolo
-// (AllowAllTools) so the routed Task is auto-approved without an interactive gate.
+// (AllowAllTools) so the routed Subagent is auto-approved without an interactive gate.
 func TestSubproviderHalfAFullBuildE2E(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
 	agentsDir := t.TempDir()
-	// A def pinning openrouter, read-only (Read), routable by Task(agent="orspec").
+	// A def pinning openrouter, read-only (Read), routable by Subagent(agent="orspec").
 	writeFile(t, agentsDir, "orspec.md", "---\nname: orspec\ndescription: runs on openrouter\nprovider: openrouter\ntools: [Read]\n---\nYou run on openrouter.\n")
 
 	built, err := Build(ctx, Config{
 		Workspace:     workspace,
 		NoSoul:        true,
 		AgentsDirs:    []string{agentsDir},
-		AllowAllTools: true, // --yolo: auto-approve the routed Task (no interactive gate)
+		AllowAllTools: true, // --yolo: auto-approve the routed Subagent (no interactive gate)
 		envDetector: fakeEnv(map[string]string{
 			"OPENAI_API_KEY":     "sk-x",
 			"OPENROUTER_API_KEY": "sk-x",
@@ -355,7 +355,7 @@ func TestSubproviderHalfAFullBuildE2E(t *testing.T) {
 		providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
 			reply := "REPLY-FROM-" + id
 			return mockllm.New(
-				mockllm.ToolCallTurn(session.NewToolCall("p1", "Task", []byte(`{"prompt":"go","agent":"orspec"}`))),
+				mockllm.ToolCallTurn(session.NewToolCall("p1", "Subagent", []byte(`{"prompt":"go","agent":"orspec"}`))),
 				mockllm.TextTurn(reply), mockllm.TextTurn(reply), mockllm.TextTurn(reply),
 			)
 		},
@@ -381,7 +381,7 @@ func TestSubproviderHalfAFullBuildE2E(t *testing.T) {
 		}
 	}
 	if !strings.Contains(taskResult, "REPLY-FROM-openrouter") {
-		t.Fatalf("Task sub-agent (provider: openrouter) reply = %q, want it to contain REPLY-FROM-openrouter", taskResult)
+		t.Fatalf("Subagent sub-agent (provider: openrouter) reply = %q, want it to contain REPLY-FROM-openrouter", taskResult)
 	}
 }
 
@@ -393,18 +393,18 @@ func writeFile(t *testing.T, dir, name, content string) {
 	}
 }
 
-// runTaskAgent wires a parent engine on parentProvider whose only move is to call
-// Task(agent=name), runs one parent turn through the REAL Task tool over the per-def
+// runSubagentAgent wires a parent engine on parentProvider whose only move is to call
+// Subagent(agent=name), runs one parent turn through the REAL Subagent tool over the per-def
 // engines, and returns the sub-agent's terminal text.
-func runTaskAgent(t *testing.T, _ *mockllm.Provider, engines map[string]*agent.Engine, meta []agent.AgentMeta, name string) string {
+func runSubagentAgent(t *testing.T, _ *mockllm.Provider, engines map[string]*agent.Engine, meta []agent.AgentMeta, name string) string {
 	t.Helper()
 	defaultEngine := agent.NewEngine(agent.Deps{LLM: mockllm.New(), Catalog: tool.NewCatalog(), Model: "gpt-5"})
-	task := agent.NewTaskTool(defaultEngine, agent.WithAgentEngines(engines, meta))
+	task := agent.NewSubagentTool(defaultEngine, agent.WithAgentEngines(engines, meta))
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
 
 	parent := mockllm.New(
-		mockllm.ToolCallTurn(session.NewToolCall("p1", "Task", []byte(`{"prompt":"go","agent":"`+name+`"}`))),
+		mockllm.ToolCallTurn(session.NewToolCall("p1", "Subagent", []byte(`{"prompt":"go","agent":"`+name+`"}`))),
 		mockllm.TextTurn("parent done"),
 	)
 	e := agent.NewEngine(agent.Deps{
@@ -430,15 +430,15 @@ func runTaskAgent(t *testing.T, _ *mockllm.Provider, engines map[string]*agent.E
 
 // twoProviderFactoryWithAgents builds a sessionEngineFactory over a two-provider
 // registry (openai default + openrouter) with the supplied agent defs in scope, so
-// a SELECTED session gets a per-session Task tool wired to its provider as parent.
-// Each provider mock is scripted with: a Task tool call (the session/parent turn),
+// a SELECTED session gets a per-session Subagent tool wired to its provider as parent.
+// Each provider mock is scripted with: a Subagent tool call (the session/parent turn),
 // the sub-agent's reply, then a parent-done turn — so a single provider can back
 // BOTH the session engine and a child that inherited it (shared mockllm cursor).
-func twoProviderFactoryWithAgents(t *testing.T, defs *agents.Registry, taskAgent string, diag ...port.Diagnostics) (server.SessionEngineFactory, *providerRegistry) {
+func twoProviderFactoryWithAgents(t *testing.T, defs *agents.Registry, subagentName string, diag ...port.Diagnostics) (server.SessionEngineFactory, *providerRegistry) {
 	t.Helper()
 	mkMock := func(id string) *mockllm.Provider {
 		return mockllm.New(
-			mockllm.ToolCallTurn(session.NewToolCall("p1", "Task", []byte(`{"prompt":"go","agent":"`+taskAgent+`"}`))),
+			mockllm.ToolCallTurn(session.NewToolCall("p1", "Subagent", []byte(`{"prompt":"go","agent":"`+subagentName+`"}`))),
 			mockllm.TextTurn("CHILD-FROM-"+id),
 			mockllm.TextTurn("parent done"),
 		)
@@ -456,23 +456,23 @@ func twoProviderFactoryWithAgents(t *testing.T, defs *agents.Registry, taskAgent
 	return factory, reg
 }
 
-// TestHalfBSelectedSessionHasTaskTool is the crux regression guard: a session that
-// SELECTS a provider gets a per-session catalog WITH the Task tool — today (pre-Half
+// TestHalfBSelectedSessionHasSubagentTool is the crux regression guard: a session that
+// SELECTS a provider gets a per-session catalog WITH the Subagent tool — today (pre-Half
 // B) the per-session catalog was core-tools-only and could not spawn sub-agents.
-func TestHalfBSelectedSessionHasTaskTool(t *testing.T) {
+func TestHalfBSelectedSessionHasSubagentTool(t *testing.T) {
 	factory, _ := twoProviderFactoryWithAgents(t, agents.NewRegistry(nil), "")
 	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil)
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
 	defer func() { _ = res.Close() }()
-	if !res.Engine.HasTool("Task") {
-		t.Fatal("a provider-selected session must now carry the Task tool (Half B); it does not")
+	if !res.Engine.HasTool("Subagent") {
+		t.Fatal("a provider-selected session must now carry the Subagent tool (Half B); it does not")
 	}
 }
 
 // TestHalfBSessionProviderInheritance: a session selecting provider B, routing a
-// Task to a def that pins NO provider, runs the sub-agent on the SESSION provider
+// Subagent to a def that pins NO provider, runs the sub-agent on the SESSION provider
 // (B) — not the build-time default (A). A default (zero-selector) session is NOT
 // covered by the factory (it uses the shared engine), so this is asserted via the
 // selected path only, contrasting openrouter vs the default openai by selecting each.
@@ -481,19 +481,19 @@ func TestHalfBSessionProviderInheritance(t *testing.T) {
 
 	// Select openrouter: the no-provider def inherits openrouter.
 	orFactory, _ := twoProviderFactoryWithAgents(t, defs, "plain")
-	if got := runFactoryTaskTurn(t, orFactory, server.ProviderSelector{ProviderID: providerOpenRouter}); !strings.Contains(got, "CHILD-FROM-openrouter") {
+	if got := runFactorySubagentTurn(t, orFactory, server.ProviderSelector{ProviderID: providerOpenRouter}); !strings.Contains(got, "CHILD-FROM-openrouter") {
 		t.Fatalf("no-provider def on an openrouter session ran on %q, want it to contain CHILD-FROM-openrouter (inherited session provider)", got)
 	}
 
 	// Select openai: the same def inherits openai.
 	oaFactory, _ := twoProviderFactoryWithAgents(t, defs, "plain")
-	if got := runFactoryTaskTurn(t, oaFactory, server.ProviderSelector{ProviderID: providerOpenAI}); !strings.Contains(got, "CHILD-FROM-openai") {
+	if got := runFactorySubagentTurn(t, oaFactory, server.ProviderSelector{ProviderID: providerOpenAI}); !strings.Contains(got, "CHILD-FROM-openai") {
 		t.Fatalf("no-provider def on an openai session ran on %q, want it to contain CHILD-FROM-openai", got)
 	}
 }
 
 // TestHalfBDefProviderOverridesSession: a session selecting provider B, routing a
-// Task to a def pinning provider A, runs the sub-agent on A (def wins — highest
+// Subagent to a def pinning provider A, runs the sub-agent on A (def wins — highest
 // precedence). The session is openrouter; the def pins openai.
 func TestHalfBDefProviderOverridesSession(t *testing.T) {
 	defs := agents.NewRegistry([]agents.AgentDef{
@@ -501,13 +501,13 @@ func TestHalfBDefProviderOverridesSession(t *testing.T) {
 	})
 	factory, _ := twoProviderFactoryWithAgents(t, defs, "pinned")
 	// Session selects openrouter; the def pins openai => the CHILD must run on openai.
-	if got := runFactoryTaskTurn(t, factory, server.ProviderSelector{ProviderID: providerOpenRouter}); !strings.Contains(got, "CHILD-FROM-openai") {
+	if got := runFactorySubagentTurn(t, factory, server.ProviderSelector{ProviderID: providerOpenRouter}); !strings.Contains(got, "CHILD-FROM-openai") {
 		t.Fatalf("def pinning openai on an openrouter session ran on %q, want it to contain CHILD-FROM-openai (def overrides session)", got)
 	}
 }
 
 // TestHalfBSelectedSessionUnknownProviderFallsBack drives the fail-safe through the
-// REAL selected-session Task path: a session selecting provider B routes a Task to a
+// REAL selected-session Subagent path: a session selecting provider B routes a Subagent to a
 // def naming a BOGUS provider. The child must still RUN — falling back to the SESSION
 // provider (B), not the build-time default A and not an error — and the
 // unknown-provider warn must fire. This complements the unit-level
@@ -522,7 +522,7 @@ func TestHalfBSelectedSessionUnknownProviderFallsBack(t *testing.T) {
 	factory, _ := twoProviderFactoryWithAgents(t, defs, "bogus", diag)
 	// Session selects openrouter; the def's bogus provider is unknown => the child
 	// falls back to the SESSION provider (openrouter), runs, and does NOT error.
-	if got := runFactoryTaskTurn(t, factory, server.ProviderSelector{ProviderID: providerOpenRouter}); !strings.Contains(got, "CHILD-FROM-openrouter") {
+	if got := runFactorySubagentTurn(t, factory, server.ProviderSelector{ProviderID: providerOpenRouter}); !strings.Contains(got, "CHILD-FROM-openrouter") {
 		t.Fatalf("def with a bogus provider on an openrouter session ran on %q, want it to contain CHILD-FROM-openrouter (fall back to session provider, not error)", got)
 	}
 	if !strings.Contains(buf.String(), "unknown/unavailable provider") {
@@ -530,12 +530,12 @@ func TestHalfBSelectedSessionUnknownProviderFallsBack(t *testing.T) {
 	}
 }
 
-// TestHalfBSelectedSessionTeardownFoldsTaskClose proves the per-session Task tool's
-// inline-MCP teardown is FOLDED into SessionEngineResult.Close: a Task def with an
+// TestHalfBSelectedSessionTeardownFoldsSubagentClose proves the per-session Subagent tool's
+// inline-MCP teardown is FOLDED into SessionEngineResult.Close: a Subagent def with an
 // inline MCP server connects through the per-session path (its mcp__ tool lands in
 // the per-session engine catalog), and res.Close() runs the folded close cleanly —
 // so CloseSession/Service.Close tear the def's inline manager down with the session.
-func TestHalfBSelectedSessionTeardownFoldsTaskClose(t *testing.T) {
+func TestHalfBSelectedSessionTeardownFoldsSubagentClose(t *testing.T) {
 	url, stop := newMCPTestServer(t)
 	defer stop()
 
@@ -556,15 +556,15 @@ func TestHalfBSelectedSessionTeardownFoldsTaskClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
-	// The per-session catalog carries the Task tool (so the inline def engine was
+	// The per-session catalog carries the Subagent tool (so the inline def engine was
 	// built through the per-session path, connecting its inline MCP server).
-	if !res.Engine.HasTool("Task") {
-		t.Fatal("selected session missing the Task tool")
+	if !res.Engine.HasTool("Subagent") {
+		t.Fatal("selected session missing the Subagent tool")
 	}
-	// The folded close runs cleanly (it aggregates the Task-def inline MCP manager's
+	// The folded close runs cleanly (it aggregates the Subagent-def inline MCP manager's
 	// Close into the session's teardown). A nil/leaking close would fail here.
 	if res.Close == nil {
-		t.Fatal("SessionEngineResult.Close is nil; the per-session Task close was not folded in")
+		t.Fatal("SessionEngineResult.Close is nil; the per-session Subagent close was not folded in")
 	}
 	if cerr := res.Close(); cerr != nil {
 		t.Fatalf("folded per-session close: %v", cerr)
@@ -572,7 +572,7 @@ func TestHalfBSelectedSessionTeardownFoldsTaskClose(t *testing.T) {
 }
 
 // TestHalfBSelectedSessionCapBounded proves a selected session is ONE
-// sessionEngines entry regardless of how many per-def Task child engines it builds,
+// sessionEngines entry regardless of how many per-def Subagent child engines it builds,
 // and that the MaxSessionEngines cap still holds (the per-def children are GC'd with
 // the map entry; only the inline MCP managers need explicit close, folded above).
 func TestHalfBSelectedSessionCapBounded(t *testing.T) {
@@ -628,10 +628,10 @@ func TestHalfBSelectedSessionCapBounded(t *testing.T) {
 	}
 }
 
-// runFactoryTaskTurn builds the per-session engine for sel, drives one turn (the
-// session engine's mock issues a Task call), and returns the sub-agent's terminal
+// runFactorySubagentTurn builds the per-session engine for sel, drives one turn (the
+// session engine's mock issues a Subagent call), and returns the sub-agent's terminal
 // tool-result text (so a test can assert WHICH provider the child ran on).
-func runFactoryTaskTurn(t *testing.T, factory server.SessionEngineFactory, sel server.ProviderSelector) string {
+func runFactorySubagentTurn(t *testing.T, factory server.SessionEngineFactory, sel server.ProviderSelector) string {
 	t.Helper()
 	res, err := factory(context.Background(), sel, nil)
 	if err != nil {

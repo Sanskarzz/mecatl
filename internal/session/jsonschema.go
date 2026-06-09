@@ -10,8 +10,8 @@ import (
 
 // ValidateJSON validates a JSON payload against a DELIBERATE SUBSET of JSON Schema.
 // It is the SINGLE validation choke point for model-authored structured output (the
-// Task tool's output_schema): the child calls a synthetic SubmitResult tool whose
-// parameters ARE the schema, and the Task tool validates the submitted payload here
+// Subagent tool's output_schema): the child calls a synthetic SubmitResult tool whose
+// parameters ARE the schema, and the Subagent tool validates the submitted payload here
 // before accepting it as the delegation's deliverable.
 //
 // It is a DOMAIN helper (it validates the shape of arbitrary model output, a domain

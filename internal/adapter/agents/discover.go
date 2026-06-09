@@ -19,7 +19,7 @@ import (
 const AgentFileExt = ".md"
 
 // maxDescriptionBytes caps a def's one-line description. The description is the
-// ALWAYS-IN-CONTEXT routing metadata (it lives in the Task tool's
+// ALWAYS-IN-CONTEXT routing metadata (it lives in the Subagent tool's
 // Spec().Description tail, on every request), so an unbounded one would inflate
 // every prompt and break the byte-stable prompt-prefix caching the OpenAI adapter
 // relies on. parseAgentDef truncates (rune-safe, with an ellipsis) and records a

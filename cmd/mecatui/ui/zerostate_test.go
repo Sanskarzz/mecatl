@@ -73,7 +73,7 @@ func TestZeroStateVanishesAfterPrompt(t *testing.T) {
 // TestZeroStateCapsTailoring asserts the affordance list tracks caps WITHOUT
 // pinning layout: "/" ALWAYS appears (built-in slash commands always exist),
 // "ctrl+a" ALWAYS appears (the unified agents overlay — subagents are always
-// available via Task, so it is no longer gated on the teams cap), and notes only
+// available via Subagent, so it is no longer gated on the teams cap), and notes only
 // when their cap is on.
 func TestZeroStateCapsTailoring(t *testing.T) {
 	embedded := stripANSIstr(renderZeroState(aztec(), embeddedCaps(), 100, 24))

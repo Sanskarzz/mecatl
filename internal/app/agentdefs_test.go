@@ -51,23 +51,23 @@ func (p *recordingProvider) lastModel() string {
 // --- scopedToolNames ---------------------------------------------------------
 
 func TestScopedToolNamesAllowlistIntersection(t *testing.T) {
-	base := baseTaskTools(Config{}) // no shell => no Bash
+	base := baseSubagentTools(Config{}) // no shell => no Bash
 	def := agents.AgentDef{
 		Name:  "reviewer",
-		Tools: []string{"Read", "Grep", "Bogus", "Task", "Fork", "ToolSearch"},
+		Tools: []string{"Read", "Grep", "Bogus", "Subagent", "Fork", "ToolSearch"},
 	}
 	names, diags := scopedToolNames(def, base)
 	sort.Strings(names)
 	if strings.Join(names, ",") != "Grep,Read" {
 		t.Fatalf("kept = %v, want [Grep Read] (allowlist ∩ available, RO only)", names)
 	}
-	// Distinct diagnostics: Bogus=unknown, Task/Fork/ToolSearch=excluded-at-callsite.
+	// Distinct diagnostics: Bogus=unknown, Subagent/Fork/ToolSearch=excluded-at-callsite.
 	var unknown, excluded int
 	for _, d := range diags {
 		switch {
 		case d.tool == "Bogus" && strings.Contains(d.reason, "unknown tool"):
 			unknown++
-		case (d.tool == "Task" || d.tool == "Fork" || d.tool == "ToolSearch") && strings.Contains(d.reason, "excluded at this call site"):
+		case (d.tool == "Subagent" || d.tool == "Fork" || d.tool == "ToolSearch") && strings.Contains(d.reason, "excluded at this call site"):
 			excluded++
 		default:
 			t.Fatalf("unexpected diag %+v", d)
@@ -79,7 +79,7 @@ func TestScopedToolNamesAllowlistIntersection(t *testing.T) {
 }
 
 func TestScopedToolNamesDisallowedSubtraction(t *testing.T) {
-	base := baseTaskTools(Config{})
+	base := baseSubagentTools(Config{})
 	def := agents.AgentDef{Name: "x", Tools: []string{"Read", "Grep"}, DisallowedTools: []string{"Grep"}}
 	names, _ := scopedToolNames(def, base)
 	if strings.Join(names, ",") != "Read" {
@@ -87,12 +87,12 @@ func TestScopedToolNamesDisallowedSubtraction(t *testing.T) {
 	}
 }
 
-func TestScopedToolNamesDropsMutatingForTask(t *testing.T) {
-	// Bash is available (shell configured) but mutating: a Task def listing it (and
+func TestScopedToolNamesDropsMutatingForSubagent(t *testing.T) {
+	// Bash is available (shell configured) but mutating: a Subagent def listing it (and
 	// Edit/Write) must have them dropped with the read-only diagnostic, so
-	// Task.ReadOnly() stays honestly true.
+	// Subagent.ReadOnly() stays honestly true.
 	cfg := Config{Shell: "/bin/sh", Workspace: t.TempDir()}
-	base := baseTaskTools(cfg)
+	base := baseSubagentTools(cfg)
 	if _, ok := base["Bash"]; !ok {
 		t.Fatalf("expected Bash in base when a shell is configured")
 	}
@@ -118,12 +118,12 @@ func TestScopedToolNamesDropsMutatingForTask(t *testing.T) {
 // combinations a team member can be scoped under:
 //   - (false, true)  — a worktree-isolated read-only member: Bash survives,
 //     Edit/Write are still dropped.
-//   - (false, false) — a base-sharing read-only member (or a Task child): all three
+//   - (false, false) — a base-sharing read-only member (or a Subagent child): all three
 //     mutating tools are dropped.
 //   - (true, _)      — a mutating member: all three survive.
 func TestScopedToolNamesModeAllowShell(t *testing.T) {
 	cfg := Config{Shell: "/bin/sh", Workspace: t.TempDir()}
-	base := baseTaskTools(cfg)
+	base := baseSubagentTools(cfg)
 	if _, ok := base["Bash"]; !ok {
 		t.Fatalf("expected Bash in base when a shell is configured")
 	}
@@ -153,7 +153,7 @@ func TestScopedToolNamesModeAllowShell(t *testing.T) {
 func TestScopedToolNamesDefaultSetIsReadOnly(t *testing.T) {
 	// No Tools allowlist => default to the available base, but still read-only-only.
 	cfg := Config{Shell: "/bin/sh", Workspace: t.TempDir()}
-	base := baseTaskTools(cfg)
+	base := baseSubagentTools(cfg)
 	def := agents.AgentDef{Name: "x"}
 	names, _ := scopedToolNames(def, base)
 	sort.Strings(names)
@@ -214,7 +214,7 @@ func TestResolveModelUnknownAliasWarnsInherits(t *testing.T) {
 	}
 }
 
-// --- buildAgentTaskEngines + end-to-end model on the request -----------------
+// --- buildAgentSubagentEngines + end-to-end model on the request -----------------
 
 // --- agentSnapshot (ListAgents projection) -----------------------------------
 
@@ -233,8 +233,8 @@ func TestAgentSnapshotProjectsResolvedFields(t *testing.T) {
 		{
 			Name:           "speedy",
 			Description:    "fast one",
-			Model:          "fast",                                   // alias => resolves to cheap-id
-			Tools:          []string{"Read", "Grep", "Edit", "Task"}, // Edit mutating, Task excluded
+			Model:          "fast",                                       // alias => resolves to cheap-id
+			Tools:          []string{"Read", "Grep", "Edit", "Subagent"}, // Edit mutating, Subagent excluded
 			PermissionMode: "plan",
 			Color:          "green",
 		},
@@ -256,7 +256,7 @@ func TestAgentSnapshotProjectsResolvedFields(t *testing.T) {
 	if speedy.GetPermissionMode() != "plan" || speedy.GetColor() != "green" {
 		t.Fatalf("speedy mode/color = %q/%q", speedy.GetPermissionMode(), speedy.GetColor())
 	}
-	// Effective read-only Task scope: Edit (mutating) and Task (excluded) dropped.
+	// Effective read-only Subagent scope: Edit (mutating) and Subagent (excluded) dropped.
 	if strings.Join(speedy.GetTools(), ",") != "Grep,Read" {
 		t.Fatalf("speedy tools = %v, want [Grep Read] (read-only scope)", speedy.GetTools())
 	}
@@ -265,8 +265,8 @@ func TestAgentSnapshotProjectsResolvedFields(t *testing.T) {
 	}
 }
 
-func TestBuildAgentTaskEnginesEmptyRegistry(t *testing.T) {
-	engines, meta, closeFn := agentTaskEnginesForTest(context.Background(), Config{}, mockllm.New(), agents.NewRegistry(nil), nil, nil, nil, nil)
+func TestBuildAgentSubagentEnginesEmptyRegistry(t *testing.T) {
+	engines, meta, closeFn := agentSubagentEnginesForTest(context.Background(), Config{}, mockllm.New(), agents.NewRegistry(nil), nil, nil, nil, nil)
 	if engines != nil || meta != nil || closeFn != nil {
 		t.Fatalf("empty registry must yield nil engines/meta/close, got engines=%v meta=%v close!=nil=%v", engines, meta, closeFn != nil)
 	}
@@ -291,16 +291,16 @@ func TestDefLimitsPerFieldFallback(t *testing.T) {
 	}
 }
 
-// TestBuildAgentTaskEnginesCarriesPerDefLimits proves a def's maxTurns/maxToolCalls
-// flow onto AgentMeta.Limits (per-field over the Task default child limits), and a
+// TestBuildAgentSubagentEnginesCarriesPerDefLimits proves a def's maxTurns/maxToolCalls
+// flow onto AgentMeta.Limits (per-field over the Subagent default child limits), and a
 // def with no limits carries the default unchanged.
-func TestBuildAgentTaskEnginesCarriesPerDefLimits(t *testing.T) {
+func TestBuildAgentSubagentEnginesCarriesPerDefLimits(t *testing.T) {
 	cfg := Config{Model: "parent-model"}
 	reg := agents.NewRegistry([]agents.AgentDef{
 		{Name: "bounded", Description: "b", MaxTurns: 2, MaxToolCalls: 9},
 		{Name: "plain", Description: "p"},
 	})
-	_, meta, _ := agentTaskEnginesForTest(context.Background(), cfg, mockllm.New(), reg, nil, nil, nil, nil)
+	_, meta, _ := agentSubagentEnginesForTest(context.Background(), cfg, mockllm.New(), reg, nil, nil, nil, nil)
 
 	byName := map[string]agent.AgentMeta{}
 	for _, m := range meta {
@@ -316,29 +316,29 @@ func TestBuildAgentTaskEnginesCarriesPerDefLimits(t *testing.T) {
 	}
 }
 
-// TestBuildAgentTaskEnginesResolvedModelOnRequest builds per-def engines, runs one
-// via the Task tool, and asserts the recorded LLMRequest.Model equals the
+// TestBuildAgentSubagentEnginesResolvedModelOnRequest builds per-def engines, runs one
+// via the Subagent tool, and asserts the recorded LLMRequest.Model equals the
 // resolved per-def model (def.Model alias > parent).
-func TestBuildAgentTaskEnginesResolvedModelOnRequest(t *testing.T) {
+func TestBuildAgentSubagentEnginesResolvedModelOnRequest(t *testing.T) {
 	rec := &recordingProvider{inner: mockllm.New(mockllm.TextTurn("done"))}
 	cfg := Config{Model: "parent-model", ModelAliases: map[string]string{"fast": "cheap-id"}}
 	reg := agents.NewRegistry([]agents.AgentDef{
 		{Name: "speedy", Description: "fast one", Model: "fast", Body: "Be quick."},
 	})
 
-	engines, meta, _ := agentTaskEnginesForTest(context.Background(), cfg, rec, reg, nil, nil, nil, nil)
+	engines, meta, _ := agentSubagentEnginesForTest(context.Background(), cfg, rec, reg, nil, nil, nil, nil)
 	if len(engines) != 1 || len(meta) != 1 || meta[0].Name != "speedy" {
 		t.Fatalf("want 1 engine+meta for 'speedy', got engines=%d meta=%+v", len(engines), meta)
 	}
 
-	// Run the named engine via Task and assert the recorded request model.
+	// Run the named engine via Subagent and assert the recorded request model.
 	defaultEngine := agent.NewEngine(agent.Deps{LLM: mockllm.New(), Catalog: tool.NewCatalog(), Model: "parent-model"})
-	task := agent.NewTaskTool(defaultEngine, agent.WithAgentEngines(engines, meta))
+	task := agent.NewSubagentTool(defaultEngine, agent.WithAgentEngines(engines, meta))
 
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
 	parent := mockllm.New(
-		mockllm.ToolCallTurn(session.NewToolCall("p1", "Task", []byte(`{"prompt":"go","agent":"speedy"}`))),
+		mockllm.ToolCallTurn(session.NewToolCall("p1", "Subagent", []byte(`{"prompt":"go","agent":"speedy"}`))),
 		mockllm.TextTurn("parent done"),
 	)
 	e := agent.NewEngine(agent.Deps{

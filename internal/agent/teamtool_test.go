@@ -719,7 +719,7 @@ func tasksSnapshotEqual(a, b []session.TeamTaskSnapshot) bool {
 }
 
 // TestTeamToolReadOnlyIsFalse pins the mutate-serial contract: unlike the
-// read-parallel Task/Fork tools, the Team tool reports ReadOnly() == false so the
+// read-parallel Subagent/Fork tools, the Team tool reports ReadOnly() == false so the
 // dispatcher serialises it.
 func TestTeamToolReadOnlyIsFalse(t *testing.T) {
 	tt := agent.NewTeamTool(func(*team.Team, agent.MemberSpec) agent.MemberBuild { return agent.MemberBuild{} })

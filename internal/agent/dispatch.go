@@ -405,7 +405,7 @@ func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws 
 // harness-level execution error becomes an error ToolResult so the model can
 // recover; the loop never aborts on a single tool failure.
 //
-// Observability seam: a tool that implements observableTool (the Task subagent)
+// Observability seam: a tool that implements observableTool (the Subagent tool)
 // is run via ExecuteObserved with an emit closure bound to THIS run, so it can
 // forward a redacted, metadata-only projection of its internal activity (the
 // subagent.* events) onto the same sequenced event stream the loop emits. The
@@ -425,7 +425,7 @@ func (e *Engine) timeExecute(ctx context.Context, r *Run, ws tool.Workspace, tur
 	}
 	switch ct := t.(type) {
 	case childCapableTool:
-		// A subagent-spawning tool (Task/Team/Fork) also receives the parent's caps so a
+		// A subagent-spawning tool (Subagent/Team/Fork) also receives the parent's caps so a
 		// child's permission ask can be SURFACED to the human (interactive) or auto-denied
 		// with the accurate message + operator diagnostic (headless). The surface seam is
 		// bound to THIS parent Run (register-then-emit), symmetric to the emit closure.

@@ -1,6 +1,6 @@
 package ui
 
-// Tests for inline Task subagent visibility: a Task tool card renders a REDACTED,
+// Tests for inline Subagent tool visibility: a Subagent tool card renders a REDACTED,
 // metadata-only projection of its child run (goal title, live counts, expanded
 // tool-name chips with an "args/results hidden" honesty note, and a resolved stat
 // line with stop reason). The child's interior is isolated by design and never
@@ -15,13 +15,13 @@ import (
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 )
 
-// subagentCard builds a Task tool block, applies the given subagent.* projection
+// subagentCard builds a Subagent tool block, applies the given subagent.* projection
 // via the conversation accumulators (by ParentCallID == toolID), and renders it.
 func subagentCard(t *testing.T, expand bool, build func(c *conversation)) string {
 	t.Helper()
 	r := newTestRenderer()
 	c := &conversation{}
-	c.addTool("p1", "Task", `{"prompt":"investigate the loop"}`)
+	c.addTool("p1", "Subagent", `{"prompt":"investigate the loop"}`)
 	build(c)
 	return stripANSIstr(r.renderBlock(0, &c.blocks[0], expand))
 }
@@ -123,7 +123,7 @@ func TestSubagentExpandedWrapsNarrow(t *testing.T) {
 	r := newTestRenderer()
 	r.setWidth(24) // narrow card
 	c := &conversation{}
-	c.addTool("p1", "Task", `{"prompt":"x"}`)
+	c.addTool("p1", "Subagent", `{"prompt":"x"}`)
 	c.setSubagentStart("p1", "narrow")
 	for i := 0; i < 6; i++ {
 		c.addSubagentTool("p1", "Read", false, i+1)
@@ -172,13 +172,13 @@ func TestSubagentResolved(t *testing.T) {
 	}
 }
 
-// TestSubagentErrorResolves asserts a child error resolves the Task card with a
+// TestSubagentErrorResolves asserts a child error resolves the Subagent card with a
 // "✗" glyph, stop:error, and the error text in the result slot.
 func TestSubagentErrorResolves(t *testing.T) {
 	out := subagentCard(t, false, func(c *conversation) {
 		c.setSubagentStart("p1", "investigate the loop")
 		c.setSubagentEnd("p1", client.Usage{}, 0, "error", 100)
-		c.resolveTool("p1", "Task: subagent failed without producing a summary", true)
+		c.resolveTool("p1", "Subagent: subagent failed without producing a summary", true)
 	})
 	if !strings.Contains(out, "✗") {
 		t.Errorf("errored card should carry the error glyph, got %q", out)
@@ -192,11 +192,11 @@ func TestSubagentErrorResolves(t *testing.T) {
 }
 
 // TestSubagentAttributionByParentCallID asserts subagent.* events are attributed
-// to the correct Task card by ParentCallID, even with two Task cards interleaved.
+// to the correct Subagent card by ParentCallID, even with two Subagent cards interleaved.
 func TestSubagentAttributionByParentCallID(t *testing.T) {
 	c := &conversation{}
-	c.addTool("pa", "Task", `{"prompt":"alpha"}`)
-	c.addTool("pb", "Task", `{"prompt":"bravo"}`)
+	c.addTool("pa", "Subagent", `{"prompt":"alpha"}`)
+	c.addTool("pb", "Subagent", `{"prompt":"bravo"}`)
 
 	if !c.setSubagentStart("pa", "alpha goal") || !c.setSubagentStart("pb", "bravo goal") {
 		t.Fatalf("both starts should attribute")
@@ -213,16 +213,16 @@ func TestSubagentAttributionByParentCallID(t *testing.T) {
 }
 
 // TestSubagentMissAttributionIsSafe asserts a subagent.* event with no matching
-// Task card is silently dropped (no panic, returns false).
+// Subagent card is silently dropped (no panic, returns false).
 func TestSubagentMissAttributionIsSafe(t *testing.T) {
 	c := &conversation{}
 	if c.setSubagentStart("nope", "goal") {
-		t.Errorf("setSubagentStart should miss when no Task card matches")
+		t.Errorf("setSubagentStart should miss when no Subagent card matches")
 	}
 	if c.addSubagentTool("nope", "Read", false, 1) {
-		t.Errorf("addSubagentTool should miss when no Task card matches")
+		t.Errorf("addSubagentTool should miss when no Subagent card matches")
 	}
 	if c.setSubagentEnd("nope", client.Usage{}, 0, "end_turn", 0) {
-		t.Errorf("setSubagentEnd should miss when no Task card matches")
+		t.Errorf("setSubagentEnd should miss when no Subagent card matches")
 	}
 }

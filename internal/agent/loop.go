@@ -121,7 +121,7 @@ type Deps struct {
 
 	// Role is the operator-facing label this engine logs under in diagnostics: the
 	// empty string for the MAIN engine (correlated by session only), or a non-empty
-	// role for a child/subagent engine (e.g. "task" for the Task subagent, a team
+	// role for a child/subagent engine (e.g. "task" for the Subagent tool, a team
 	// member's name, or a fork-branch label) so interleaved child diagnostics are
 	// readable. It is read once per run when binding the run-scoped Diagnostics (see
 	// drive): empty → only the "session" key; set → "session"+"agent" keys. It is
@@ -159,7 +159,7 @@ type Deps struct {
 	// this value, the loop terminates CLEANLY at the next turn boundary with
 	// session.StopBudget. It is the shared runaway brake the AGENT-TEAMS-SPIKE named the
 	// missing token budget — checked in drive Step 2, so it serves EVERY engine: main +
-	// Task + Team member + lead synthesis + Fork branch. Semantics: 0 (the default;
+	// Subagent + Team member + lead synthesis + Fork branch. Semantics: 0 (the default;
 	// existing Deps built without it) DISABLES the budget (behaviour byte-identical to
 	// before); a positive value is the ceiling. It is a turn-BOUNDARY check (never a
 	// mid-stream abort), so an in-flight turn always completes and
@@ -316,7 +316,7 @@ type Run struct {
 	childAsks *childAskRouter
 	// opts are the per-RUN overrides supplied at RunContentWith: a TIGHTEN-ONLY token
 	// ceiling and a set of run-scoped EXTRA tools (e.g. the synthetic SubmitResult tool
-	// for a structured-output Task child). They are read-only after the goroutine starts
+	// for a structured-output Subagent child). They are read-only after the goroutine starts
 	// and are NEVER folded into the shared Engine.deps — that is the whole point: a
 	// per-call override must not mutate the shared child engine (the "Provider is FIXED
 	// per session" / no-clone-swap discipline applied to run-scoped knobs). The zero
@@ -341,7 +341,7 @@ type RunOptions struct {
 	// but they are never registered into the shared catalog (so concurrent runs of the
 	// same engine never see them, and the engine is not mutated). A name collision with a
 	// catalog tool resolves to the EXTRA tool (the run-scoped overlay wins) for THIS run.
-	// The Task tool uses this to inject the synthetic SubmitResult deliverable tool for a
+	// The Subagent tool uses this to inject the synthetic SubmitResult deliverable tool for a
 	// structured-output child. Every ExtraTool MUST be ReadOnly (it is dispatched on the
 	// read-parallel path); a structured-output SubmitResult records into a per-run sink
 	// and performs no workspace mutation, so it is read-only.
@@ -413,7 +413,7 @@ func (e *Engine) RunContent(ctx context.Context, sess *session.Session, ws tool.
 }
 
 // RunContentWith is RunContent plus per-RUN overrides (RunOptions): a tighten-only
-// token ceiling and run-scoped extra tools. It is the seam a per-call Task knob uses
+// token ceiling and run-scoped extra tools. It is the seam a per-call Subagent knob uses
 // to bound or augment a SHARED child engine for one delegation without minting a fresh
 // engine or mutating the engine other runs share. RunContent delegates here with a
 // zero RunOptions (the legacy run).

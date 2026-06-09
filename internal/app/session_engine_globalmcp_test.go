@@ -178,18 +178,18 @@ func TestSessionEngineFactorySelectorCloseKeepsGlobalMCP(t *testing.T) {
 	}
 }
 
-// runSelectorTaskRefAndCheckEcho drives the FACTORY end to end for a selector
-// session whose Task def `reference: globe` should resolve a "globe" MCP server, and
+// runSelectorSubagentRefAndCheckEcho drives the FACTORY end to end for a selector
+// session whose Subagent def `reference: globe` should resolve a "globe" MCP server, and
 // reports whether the child actually DISPATCHED mcp__globe__echo successfully.
 //
 // It exercises the factory's `refMgr := globalMgr; if refMgr==nil { refMgr=mgr }`
-// selection (NOT buildAgentTaskEngines directly), so reverting refMgr→mgr flips the
-// global-manager branch RED. The child runs with its Sink OFF, but the Task tool
+// selection (NOT buildAgentSubagentEngines directly), so reverting refMgr→mgr flips the
+// global-manager branch RED. The child runs with its Sink OFF, but the Subagent tool
 // forwards a REDACTED projection of child tool activity to the parent run stream as
 // EvSubagentTool{ToolName, IsError} — the factory-observable discriminator: a
 // resolved ref ⇒ a non-error mcp__globe__echo subagent-tool event; an unresolved one
 // ⇒ IsError (the child dispatched an "unknown tool").
-func runSelectorTaskRefAndCheckEcho(t *testing.T, globalMgr *mcp.Manager, specs []mcp.ServerConfig) bool {
+func runSelectorSubagentRefAndCheckEcho(t *testing.T, globalMgr *mcp.Manager, specs []mcp.ServerConfig) bool {
 	t.Helper()
 	const toolName = "mcp__globe__echo"
 	defs := agents.NewRegistry([]agents.AgentDef{{
@@ -201,11 +201,11 @@ func runSelectorTaskRefAndCheckEcho(t *testing.T, globalMgr *mcp.Manager, specs 
 
 	// One shared mockllm cursor backs BOTH the parent session engine and the child
 	// (the child inherits the openrouter session provider). Sequence across the shared
-	// cursor: parent → Task(ref-task); child → mcp__globe__echo; child → "child done";
+	// cursor: parent → Subagent(ref-task); child → mcp__globe__echo; child → "child done";
 	// parent → "parent done".
 	mk := func() *mockllm.Provider {
 		return mockllm.New(
-			mockllm.ToolCallTurn(session.NewToolCall("p1", "Task", []byte(`{"prompt":"go","agent":"ref-task"}`))),
+			mockllm.ToolCallTurn(session.NewToolCall("p1", "Subagent", []byte(`{"prompt":"go","agent":"ref-task"}`))),
 			mockllm.ToolCallTurn(session.NewToolCall("c1", toolName, []byte(`{"text":"hi"}`))),
 			mockllm.TextTurn("child done"),
 			mockllm.TextTurn("parent done"),
@@ -246,35 +246,35 @@ func runSelectorTaskRefAndCheckEcho(t *testing.T, globalMgr *mcp.Manager, specs 
 	return resolved
 }
 
-// TestSelectorTaskRefResolvesGlobalMCP proves the Task PARITY half of the fix through
-// the FACTORY: a selector session's Task def `reference: globe` resolves the
+// TestSelectorSubagentRefResolvesGlobalMCP proves the Subagent PARITY half of the fix through
+// the FACTORY: a selector session's Subagent def `reference: globe` resolves the
 // SERVER-GLOBAL servers because the factory threads globalMgr as the
 // reference-resolution mainMgr (refMgr). Driven end to end; reverting refMgr→mgr
 // makes this case RED (the global ref would no longer resolve).
-func TestSelectorTaskRefResolvesGlobalMCP(t *testing.T) {
+func TestSelectorSubagentRefResolvesGlobalMCP(t *testing.T) {
 	url, stop := newMCPTestServer(t)
 	defer stop()
 	globalMgr := connectMainManager(t, "globe", url)
 
-	if !runSelectorTaskRefAndCheckEcho(t, globalMgr, nil) {
-		t.Fatal("selector session's Task `reference: globe` did not resolve the SERVER-GLOBAL MCP tool through the factory (refMgr==globalMgr branch regressed)")
+	if !runSelectorSubagentRefAndCheckEcho(t, globalMgr, nil) {
+		t.Fatal("selector session's Subagent `reference: globe` did not resolve the SERVER-GLOBAL MCP tool through the factory (refMgr==globalMgr branch regressed)")
 	}
 }
 
-// TestSelectorTaskRefResolvesClientMCPWhenNoGlobal covers the FALLBACK branch the
+// TestSelectorSubagentRefResolvesClientMCPWhenNoGlobal covers the FALLBACK branch the
 // global case never exercises: globalMgr==nil, so the factory's refMgr falls back to
-// the per-session CLIENT manager (built from the spec list). A Task def
+// the per-session CLIENT manager (built from the spec list). A Subagent def
 // `reference: globe` must then resolve against the client-supplied "globe" server.
 // This is the branch that goes RED if `refMgr := globalMgr; if refMgr==nil {
 // refMgr=mgr }` is reduced to just `refMgr := globalMgr`.
-func TestSelectorTaskRefResolvesClientMCPWhenNoGlobal(t *testing.T) {
+func TestSelectorSubagentRefResolvesClientMCPWhenNoGlobal(t *testing.T) {
 	url, stop := newMCPTestServer(t)
 	defer stop()
 
 	// No global manager; the "globe" server arrives as a CLIENT spec, so the factory
 	// connects a per-session client mgr and refMgr falls back to it.
-	if !runSelectorTaskRefAndCheckEcho(t, nil, []mcp.ServerConfig{{Name: "globe", URL: url}}) {
-		t.Fatal("with no global manager, the Task `reference: globe` did not resolve against the per-session CLIENT manager (refMgr==nil → mgr fallback regressed)")
+	if !runSelectorSubagentRefAndCheckEcho(t, nil, []mcp.ServerConfig{{Name: "globe", URL: url}}) {
+		t.Fatal("with no global manager, the Subagent `reference: globe` did not resolve against the per-session CLIENT manager (refMgr==nil → mgr fallback regressed)")
 	}
 }
 

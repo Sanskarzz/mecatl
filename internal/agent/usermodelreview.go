@@ -40,7 +40,7 @@ const maxReviewTranscriptBytes = 24 * 1024
 // LAYERING: it depends ONLY on port.SessionStore, *Engine, session, and tool. The
 // child engine (scoped to ONLY the RememberUser tool over the user-model store)
 // and that tool are built and INJECTED by the composition root — internal/agent
-// imports no adapter, exactly like the Task subagent.
+// imports no adapter, exactly like the Subagent tool.
 type UserModelReviewer struct {
 	// store re-loads the just-finished session's transcript (a read). It is the
 	// SAME port the loop persists through; no new transcript port is introduced.

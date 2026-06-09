@@ -13,7 +13,7 @@ import (
 )
 
 // Tests for the /agents agent-definition INVENTORY panel: a read-only, idle-only
-// overlay that fires ListAgents and renders the resolved registry the Task tool
+// overlay that fires ListAgents and renders the resolved registry the Subagent tool
 // routes delegations to (name + description + model/perm/tools metadata).
 // Distinct from the live-team overlay (/team, ctrl+a) in team_overlay_test.go.
 

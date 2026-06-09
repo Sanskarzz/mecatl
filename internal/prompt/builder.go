@@ -203,8 +203,8 @@ func toolDisciplineHints(tools []tool.ToolSpec) string {
 	if present["Bash"] {
 		writeSentence(&b, "Reserve Bash for real system/terminal commands.")
 	}
-	if present["Task"] {
-		writeSentence(&b, "Use Task to delegate independent read-only exploration.")
+	if present["Subagent"] {
+		writeSentence(&b, "Use Subagent to delegate independent read-only exploration.")
 	}
 	if present["Remember"] || present["Recall"] || present["SearchMemory"] ||
 		present["RememberUser"] || present["RecallUser"] || present["SearchUserModel"] {

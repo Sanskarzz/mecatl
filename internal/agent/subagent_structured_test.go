@@ -12,20 +12,20 @@ import (
 // with a required string `name` and an integer `age`.
 const personSchema = `{"type":"object","properties":{"name":{"type":"string"},"age":{"type":"integer"}},"required":["name","age"]}`
 
-// TestTaskStructuredOutputHappyPath is the MODEL-FACING e2e: a Task call with an
-// output_schema where the child calls SubmitResult with a VALID payload. The Task
+// TestSubagentStructuredOutputHappyPath is the MODEL-FACING e2e: a Subagent call with an
+// output_schema where the child calls SubmitResult with a VALID payload. The Subagent
 // RESULT is the validated JSON (carried after the agentId trailer), and the child only
 // drove once (no correction needed).
-func TestTaskStructuredOutputHappyPath(t *testing.T) {
+func TestSubagentStructuredOutputHappyPath(t *testing.T) {
 	childLLM := mockllm.New(
 		mockllm.ToolCallTurn(toolCall("k1", "SubmitResult", `{"name":"Ada","age":36}`)),
 		mockllm.TextTurn("done"),
 	)
 	childEngine := childEngineWith(childLLM, catalogWith(t))
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task",
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent",
 			`{"prompt":"profile Ada","output_schema":`+personSchema+`}`)),
 		mockllm.TextTurn("parent done"),
 	)
@@ -45,11 +45,11 @@ func TestTaskStructuredOutputHappyPath(t *testing.T) {
 	}
 }
 
-// TestTaskStructuredOutputRetryCorrects is the ADVERSARIAL/uncooperative-mock test: the
+// TestSubagentStructuredOutputRetryCorrects is the ADVERSARIAL/uncooperative-mock test: the
 // child submits a SCHEMA-VIOLATING payload twice (missing the required `age`, then a
 // wrong type) before a valid one. The bounded retry must correct it and the run must
 // succeed with the eventually-valid payload.
-func TestTaskStructuredOutputRetryCorrects(t *testing.T) {
+func TestSubagentStructuredOutputRetryCorrects(t *testing.T) {
 	childLLM := mockllm.New(
 		// Attempt 0: missing required `age`.
 		mockllm.ToolCallTurn(toolCall("k1", "SubmitResult", `{"name":"Ada"}`)),
@@ -62,10 +62,10 @@ func TestTaskStructuredOutputRetryCorrects(t *testing.T) {
 		mockllm.TextTurn("done"),
 	)
 	childEngine := childEngineWith(childLLM, catalogWith(t))
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task",
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent",
 			`{"prompt":"profile Ada","output_schema":`+personSchema+`}`)),
 		mockllm.TextTurn("parent done"),
 	)
@@ -77,12 +77,12 @@ func TestTaskStructuredOutputRetryCorrects(t *testing.T) {
 	}
 }
 
-// TestTaskStructuredOutputExhaustionFails is the ADVERSARIAL exhaustion test: the child
-// NEVER produces a valid payload. The bounded retry must give up and the Task RESULT
+// TestSubagentStructuredOutputExhaustionFails is the ADVERSARIAL exhaustion test: the child
+// NEVER produces a valid payload. The bounded retry must give up and the Subagent RESULT
 // must be a MODEL-VISIBLE structured-output validation-failure tool error (a recoverable
 // terminal — StopStructuredOutput — never `failed`/StopError), carrying the last
 // validation message.
-func TestTaskStructuredOutputExhaustionFails(t *testing.T) {
+func TestSubagentStructuredOutputExhaustionFails(t *testing.T) {
 	// Every SubmitResult is missing the required `age` — never valid. Script enough
 	// turns to outlast the bounded retry budget.
 	var script []mockllm.Turn
@@ -94,10 +94,10 @@ func TestTaskStructuredOutputExhaustionFails(t *testing.T) {
 	}
 	childLLM := mockllm.New(script...)
 	childEngine := childEngineWith(childLLM, catalogWith(t))
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task",
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent",
 			`{"prompt":"profile Ada","output_schema":`+personSchema+`}`)),
 		mockllm.TextTurn("parent recovered"),
 	)
@@ -116,15 +116,15 @@ func TestTaskStructuredOutputExhaustionFails(t *testing.T) {
 	}
 }
 
-// TestTaskFreeTextUnchangedByStructuredPath is the regression guard: a Task call with NO
+// TestSubagentFreeTextUnchangedByStructuredPath is the regression guard: a Subagent call with NO
 // output_schema is byte-identical to today — the child's free-text summary is returned
 // (after the agentId trailer), no SubmitResult involved.
-func TestTaskFreeTextUnchangedByStructuredPath(t *testing.T) {
+func TestSubagentFreeTextUnchangedByStructuredPath(t *testing.T) {
 	childEngine := childEngineWith(mockllm.New(mockllm.TextTurn("FREE TEXT SUMMARY")), catalogWith(t))
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"investigate"}`)),
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"investigate"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if len(results) != 1 || results[0].IsError {
@@ -135,15 +135,15 @@ func TestTaskFreeTextUnchangedByStructuredPath(t *testing.T) {
 	}
 }
 
-// TestTaskAgentIdTrailerInResultText is the RUNTIME-DISCOVERABILITY guard (R2/D5): the
+// TestSubagentAgentIdTrailerInResultText is the RUNTIME-DISCOVERABILITY guard (R2/D5): the
 // child session id must appear IN THE RESULT TEXT (where the model reads it), not only on
 // the client-only subagent.* events. The id is the deterministic "subagent-<callID>".
-func TestTaskAgentIdTrailerInResultText(t *testing.T) {
+func TestSubagentAgentIdTrailerInResultText(t *testing.T) {
 	childEngine := childEngineWith(mockllm.New(mockllm.TextTurn("summary")), catalogWith(t))
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
-	results, _ := taskParentResults(t, task,
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"x"}`)),
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	if len(results) != 1 || results[0].IsError {

@@ -6,7 +6,7 @@ import (
 )
 
 // Registry is an immutable, name-indexed view of the discovered agent
-// definitions: the ONE registry both consumers (the Task tool now; the team
+// definitions: the ONE registry both consumers (the Subagent tool now; the team
 // member factory in a later slice) share. It is built once at composition time
 // from a resolved Source and never mutated thereafter, so it is safe to read
 // concurrently.

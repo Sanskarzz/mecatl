@@ -567,7 +567,7 @@ func (r *renderer) renderTool(b *block, expand bool) string {
 
 	head := glyph + " " + r.th.Style("toolName").Render(sanitizeTerminal(b.toolName))
 
-	// A subagent (Task) card renders its REDACTED child activity in place of raw
+	// A subagent (Subagent) card renders its REDACTED child activity in place of raw
 	// JSON args: a goal title plus a live/expanded/resolved status region. The
 	// child's interior (args, results, message text) is isolated by design and is
 	// never shown — only metadata.
@@ -609,7 +609,7 @@ func (r *renderer) renderTool(b *block, expand bool) string {
 	return card.Render(head)
 }
 
-// renderSubagent renders a Task card's REDACTED subagent region. It has three
+// renderSubagent renders a Subagent card's REDACTED subagent region. It has three
 // states, per the agreed UX, and shows only metadata — never the child's interior
 // (args/results/message text are isolated by design):
 //
@@ -1083,7 +1083,7 @@ func subagentStopLabel(stop string) string {
 		return "cancelled"
 	case stopError:
 		return "error"
-	// The newer Task/Team terminal reasons (Package A/B) ride the same string `stop`
+	// The newer Subagent/Team terminal reasons (Package A/B) ride the same string `stop`
 	// field on the wire (no proto enum) — map them to compact labels so a subagent
 	// that ended via a budget / structured-output / no-progress terminal renders a
 	// sensible label here and in the fleet roster, never a blank or the raw token.

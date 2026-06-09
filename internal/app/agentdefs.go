@@ -20,13 +20,13 @@ import (
 )
 
 // callSiteExcluded is the set of tool names a scoped agent-def catalog NEVER
-// contains, regardless of the def's allowlist. Task/Fork enforce the no-nesting
+// contains, regardless of the def's allowlist. Subagent/Fork enforce the no-nesting
 // guard (a child must not recurse or fan out further); ToolSearch is excluded
 // because child engines run with progressive disclosure OFF and a def must not
 // silently gain a hydration tool it never listed (critique M1). The exclusion is
 // applied AFTER the allowlist so a def cannot re-add any of these.
 var callSiteExcluded = map[string]struct{}{
-	"Task":              {},
+	"Subagent":          {},
 	"Fork":              {},
 	tool.ToolSearchName: {}, // "ToolSearch"
 }
@@ -121,7 +121,7 @@ func resolveProviderModel(cfg Config, provReg *providerRegistry, def agents.Agen
 // SWITCHED provider looks up the registry entry's provider + its catalogued context
 // window; for the inherited-default path it returns the supplied parentProvider with
 // window=0 (byte-identical 128k). It is the shared resolution step both
-// buildAgentTaskEngines and buildMemberEngine use, so the per-def provider-switch
+// buildAgentSubagentEngines and buildMemberEngine use, so the per-def provider-switch
 // logic lives in ONE place (and keeps buildMemberEngine under the gocyclo budget).
 func resolveChildProvider(cfg Config, provReg *providerRegistry, def agents.AgentDef, parentProvider port.LLMProvider, parentProviderID, parentModel string) (childProvider port.LLMProvider, providerID, model string, childWindow int) {
 	pid, model := resolveProviderModel(cfg, provReg, def, parentProviderID, parentModel)
@@ -208,7 +208,7 @@ func resolvePermissionMode(d port.Diagnostics, def agents.AgentDef) session.Perm
 // defLimits maps a def's frontmatter maxTurns/maxToolCalls into a session.Limits,
 // in the composition layer (the domain stays free of the def-int → Limits mapping).
 // It is per-field forgiving: a zero def field inherits the corresponding field of
-// the supplied fallback (the call site's default limits — the Task tool's
+// the supplied fallback (the call site's default limits — the Subagent tool's
 // agent.DefaultChildLimits or the team's WithTeamLimits), so a def that pins only
 // maxTurns keeps the default tool-call / failure caps, and a def that pins nothing
 // yields the fallback unchanged. MaxConsecutiveFailures is never set by a def, so it
@@ -233,10 +233,10 @@ type scopeDiag struct {
 }
 
 // scopedToolNames computes a def's effective, read-only tool NAME set for a
-// Task-routed child (allowMutating == false), as a pure set operation over the
+// Subagent-routed child (allowMutating == false), as a pure set operation over the
 // AVAILABLE base tools. It is the read-only shim over scopedToolNamesMode; see that
-// for the full algorithm. Task children are unconditionally read-only so
-// Task.ReadOnly() stays honestly true.
+// for the full algorithm. Subagent children are unconditionally read-only so
+// Subagent.ReadOnly() stays honestly true.
 func scopedToolNames(def agents.AgentDef, available map[string]tool.Tool) ([]string, []scopeDiag) {
 	return scopedToolNamesMode(def, available, false, false)
 }
@@ -246,7 +246,7 @@ func scopedToolNames(def agents.AgentDef, available map[string]tool.Tool) ([]str
 //
 //  1. start from def.Tools if non-empty, else every available base tool name;
 //  2. subtract def.DisallowedTools;
-//  3. drop the always-excluded set (Task/Fork/ToolSearch) — the no-nesting /
+//  3. drop the always-excluded set (Subagent/Fork/ToolSearch) — the no-nesting /
 //     no-disclosure guard, applied AFTER the allowlist so a def cannot re-add them;
 //  4. drop any name not in the available base set (DISTINCT "unknown tool"
 //     diagnostic — a typo or an MCP/skills tool this Tier-1 call site can't see);
@@ -256,7 +256,7 @@ func scopedToolNames(def agents.AgentDef, available map[string]tool.Tool) ([]str
 //     isolated force-copy fork) keeps every mutating tool (Edit/Write/Bash).
 //     allowMutating == false + allowShell == true (a read-only team member that the
 //     supervisor will isolate in a git worktree) keeps Bash for inspection but still
-//     drops Edit/Write. allowMutating == false + allowShell == false (a Task child or
+//     drops Edit/Write. allowMutating == false + allowShell == false (a Subagent child or
 //     a base-sharing read-only member) drops every mutating tool.
 //
 // available maps an available base tool name to its tool.Tool (used to read
@@ -306,7 +306,7 @@ func scopedToolNamesMode(def agents.AgentDef, available map[string]tool.Tool, al
 			continue
 		}
 		if !allowMutating && !t.ReadOnly() {
-			// Step 5: read-only call site (Task, or a read-only team member). A
+			// Step 5: read-only call site (Subagent, or a read-only team member). A
 			// workspace-mutating tool is dropped — EXCEPT Bash when allowShell is true,
 			// i.e. a read-only member the supervisor isolates in a git worktree, where a
 			// shell is used for inspection (git log/show, build, test) but Edit/Write
@@ -323,12 +323,12 @@ func scopedToolNamesMode(def agents.AgentDef, available map[string]tool.Tool, al
 	return kept, diags
 }
 
-// baseTaskTools returns the AVAILABLE base toolset a Task-def catalog is scoped
+// baseSubagentTools returns the AVAILABLE base toolset a Subagent-def catalog is scoped
 // over: the core read-only/explorer tools plus Bash-if-configured (mirroring what
 // buildChildEngine/buildMemberEngine register). Bash is included so a def that
 // allow-lists it gets a DISTINCT "mutating; dropped" diagnostic rather than a
-// misleading "unknown tool" — it exists but is forbidden for read-only Task.
-func baseTaskTools(cfg Config) map[string]tool.Tool {
+// misleading "unknown tool" — it exists but is forbidden for read-only Subagent.
+func baseSubagentTools(cfg Config) map[string]tool.Tool {
 	out := map[string]tool.Tool{}
 	for _, t := range tools.All() { // Read, Edit, Write, Grep, Glob, WebFetch
 		out[t.Spec().Name] = t
@@ -408,7 +408,7 @@ func preloadedSkillBodies(def agents.AgentDef, idx skillIndex) (bodies []string,
 // defMCPTools resolves a def's mcpServers into the tools to add to its engine's
 // catalog, the tool NAMES (so the read-only backstop can exempt them), and a Close
 // that tears down any INLINE managers this def connected (nil when the def opened no
-// inline server). It is the SINGLE place both call sites (Task path and team-member
+// inline server). It is the SINGLE place both call sites (Subagent path and team-member
 // path) resolve per-agent MCP, so reference/inline semantics cannot drift.
 //
 //   - REFERENCE entries (URL empty) take the named server's tools out of mainMgr —
@@ -520,32 +520,32 @@ func defHookRunner(cfg Config, def agents.AgentDef, fallback port.HookRunner) po
 	return hookexec.New(hooks, opts...)
 }
 
-// buildAgentTaskEngines turns the registry into the per-def child engines +
-// metadata the Task tool routes over. Each engine gets:
+// buildAgentSubagentEngines turns the registry into the per-def child engines +
+// metadata the Subagent tool routes over. Each engine gets:
 //   - a SCOPED catalog = (def.Tools allowlist ∩ available base tools) minus
-//     def.DisallowedTools, never Task/Fork/ToolSearch and never Edit/Write (a Task
-//     child is a read-only explorer), but KEEPING Bash when the Task tool can isolate
+//     def.DisallowedTools, never Subagent/Fork/ToolSearch and never Edit/Write (a Subagent
+//     child is a read-only explorer), but KEEPING Bash when the Subagent tool can isolate
 //     the child in a worktree (runner != nil — see allowShell below);
 //   - a resolved model (def.Model > SubagentModel > parent);
 //   - the def.Body composed into the system prompt as the Role (composition-layer
 //     only; no prompt.Config domain change — critique M2/M3);
 //   - an allow-all policy and progressive disclosure OFF (tiny catalog).
 //
-// A def whose entire allowlist is stripped (e.g. a pure-Edit/Write Task def) still
+// A def whose entire allowlist is stripped (e.g. a pure-Edit/Write Subagent def) still
 // gets an engine with an empty-but-valid catalog; the diagnostics explain why,
 // and the model still receives a clear "no tools" inventory. Returns nil/empty
-// when the registry is empty so Task behaves exactly as before.
+// when the registry is empty so Subagent behaves exactly as before.
 //
 // The skillIdx preloads each def's `skills:` bodies into its prompt; defaultHooks
 // is the inert fallback HookRunner a def with no scoped `hooks:` adopts (so the
-// default Task engine behaviour is unchanged).
+// default Subagent engine behaviour is unchanged).
 //
 // runner is the SANDBOXED command runner (nil when Bash is disabled). When non-nil
-// the Task tool forks every child into a worktree, so a per-def Task explorer that
+// the Subagent tool forks every child into a worktree, so a per-def Subagent explorer that
 // scopes Bash KEEPS it (allowShell) — registered with the hardened runner — and runs
 // it in that isolated worktree, exactly like the default explorer; Edit/Write are
-// still dropped. The per-def engines share the SAME TaskTool child forker (the fork
-// happens in TaskTool.run regardless of which engine handles the call), so they only
+// still dropped. The per-def engines share the SAME SubagentTool child forker (the fork
+// happens in SubagentTool.run regardless of which engine handles the call), so they only
 // need Bash in their catalog. When runner is nil, allowShell is false and Bash is
 // dropped — the def stays a base-sharing read-only explorer with no shell.
 //
@@ -558,13 +558,13 @@ func defHookRunner(cfg Config, def agents.AgentDef, fallback port.HookRunner) po
 // no cross-provider contamination); an unknown provider is a loud fallback. The
 // registry NEVER leaves this resolution point — the child engine receives a bare
 // port.LLMProvider (the resolved entry's provider), exactly as before.
-func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMProvider, provReg *providerRegistry, parentProviderID, parentModel string, reg *agents.Registry, skillIdx skillIndex, defaultHooks port.HookRunner, runner tool.CommandRunner, mainMgr *mcp.Manager) (map[string]*agent.Engine, []agent.AgentMeta, func() error) {
+func buildAgentSubagentEngines(ctx context.Context, cfg Config, provider port.LLMProvider, provReg *providerRegistry, parentProviderID, parentModel string, reg *agents.Registry, skillIdx skillIndex, defaultHooks port.HookRunner, runner tool.CommandRunner, mainMgr *mcp.Manager) (map[string]*agent.Engine, []agent.AgentMeta, func() error) {
 	if reg == nil || reg.Len() == 0 {
 		return nil, nil, nil
 	}
-	base := baseTaskTools(cfg)
-	// allowShell: a per-def Task explorer keeps Bash ONLY when a (sandboxed) runner is
-	// wired — the Task tool then isolates the child in a worktree where its shell is
+	base := baseSubagentTools(cfg)
+	// allowShell: a per-def Subagent explorer keeps Bash ONLY when a (sandboxed) runner is
+	// wired — the Subagent tool then isolates the child in a worktree where its shell is
 	// confined. Edit/Write stay dropped regardless (read-only explorer).
 	allowShell := runner != nil
 
@@ -582,7 +582,7 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 		cat := tool.NewCatalog()
 		for _, name := range names {
 			// Bash registers with the HARDENED runner (the base map's Bash is the
-			// unhardened one used only to compute the name set), since the Task child's
+			// unhardened one used only to compute the name set), since the Subagent child's
 			// shell runs over a worktree that shares the parent `.git`. Every other tool
 			// registers as-is. allowShell is true iff runner != nil, so this branch only
 			// fires with a non-nil runner.
@@ -596,8 +596,8 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 		// Per-agent MCP: a def's mcpServers add the referenced/inline servers' tools to
 		// THIS def's catalog (not the main conversation's). The inline managers' Close is
 		// aggregated into closeFn → Built.Close (process-lifetime engines, torn down on
-		// shutdown). MCP tool names are NOT relevant to a Task def's read-only backstop
-		// (Task defs are not team members), so the names return is ignored here.
+		// shutdown). MCP tool names are NOT relevant to a Subagent def's read-only backstop
+		// (Subagent defs are not team members), so the names return is ignored here.
 		mcpTools, _, mcpClose := defMCPTools(ctx, cfg.diag(), def, mainMgr)
 		for _, mt := range mcpTools {
 			if err := cat.Register(mt); err != nil {
@@ -624,8 +624,8 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 		// its zero value (off), matching the original explicit omission, AND routes the
 		// child's compactor/counter/window through pid+model (contamination fix).
 		engines[def.Name] = newChildEngineForProvider(cfg, "task:"+def.Name, childProvider, model, childWindow, cat, agentPromptConfig(cfg, def, model, bodies...), hooks)
-		// Per-def limits ride on AgentMeta so the Task tool bounds THIS def's child
-		// session by them (per-field falling back to the Task default child limits for
+		// Per-def limits ride on AgentMeta so the Subagent tool bounds THIS def's child
+		// session by them (per-field falling back to the Subagent default child limits for
 		// any zero field). A def that sets neither yields the default, unchanged.
 		meta = append(meta, agent.AgentMeta{
 			Name:        def.Name,
@@ -638,7 +638,7 @@ func buildAgentTaskEngines(ctx context.Context, cfg Config, provider port.LLMPro
 			"preloaded_skills", len(bodies), "path", def.Path)
 	}
 
-	// meta in registry (name-sorted) order for a byte-stable Task spec.
+	// meta in registry (name-sorted) order for a byte-stable Subagent spec.
 	sort.Slice(meta, func(i, j int) bool { return meta[i].Name < meta[j].Name })
 	return engines, meta, closeFn
 }
@@ -667,7 +667,7 @@ func composeCloseErr(first, second func() error) func() error {
 
 // composeClose adapts an error-returning close (the aggregated inline MCP teardown)
 // and a plain func() (the main MCP close) into ONE func() that runs both — MCP-def
-// teardown first, then the main manager. It is how buildCatalog folds the Task-def
+// teardown first, then the main manager. It is how buildCatalog folds the Subagent-def
 // inline managers into the single mcpClose that feeds Built.Close.
 func composeClose(d port.Diagnostics, errClose func() error, plainClose func()) func() {
 	return func() {
@@ -725,8 +725,8 @@ func agentPromptConfig(cfg Config, def agents.AgentDef, resolvedModel string, sk
 
 // agentSnapshot projects the resolved registry into the proto AgentInfo list the
 // server's ListAgents RPC returns. The model is RESOLVED (alias → concrete id,
-// "" meaning inherit) and the tools field is the def's EFFECTIVE read-only Task
-// scope (the same allowlist∩base, minus mutating/excluded, that Task children
+// "" meaning inherit) and the tools field is the def's EFFECTIVE read-only Subagent
+// scope (the same allowlist∩base, minus mutating/excluded, that Subagent children
 // get) so the snapshot reflects what the model can actually route to — not the
 // raw frontmatter. It is a pure projection: name-sorted (registry order), no I/O,
 // nil-safe (an empty/nil registry yields an empty slice, never nil-as-error).
@@ -734,7 +734,7 @@ func agentSnapshot(cfg Config, reg *agents.Registry) []*mecatlv1.AgentInfo {
 	if reg == nil || reg.Len() == 0 {
 		return nil
 	}
-	base := baseTaskTools(cfg)
+	base := baseSubagentTools(cfg)
 	out := make([]*mecatlv1.AgentInfo, 0, reg.Len())
 	for _, def := range reg.List() {
 		names, _ := scopedToolNames(def, base)

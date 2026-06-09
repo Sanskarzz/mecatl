@@ -70,7 +70,7 @@ func childEngineWith(llm port.LLMProvider, cat *tool.Catalog) *agent.Engine {
 // no child message text, no child tool args, no child result bodies. Forwarding
 // that projection is orthogonal to isolation: it never touches Conversation.
 func TestSubagentReturnsOnlyFinalString(t *testing.T) {
-	// Child catalog: a read-only Read explorer tool (no Task, no mutating tools).
+	// Child catalog: a read-only Read explorer tool (no Subagent, no mutating tools).
 	childRead := &fakeTool{name: "Read", readOnly: true,
 		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 			return session.NewToolResult(in.ID, "child read the file: package main"), nil
@@ -89,12 +89,12 @@ func TestSubagentReturnsOnlyFinalString(t *testing.T) {
 	)
 	childEngine := childEngineWith(childLLM, childCat)
 
-	// Parent catalog contains only the Task tool.
-	task := agent.NewTaskTool(childEngine)
+	// Parent catalog contains only the Subagent tool.
+	task := agent.NewSubagentTool(childEngine)
 	parentCat := catalogWith(t, task)
 
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"investigate main.go"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"investigate main.go"}`)),
 		mockllm.TextTurn("parent received the summary"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: parentCat})
@@ -144,13 +144,13 @@ func TestSubagentReturnsOnlyFinalString(t *testing.T) {
 	// Conversation (the context sent to the LLM). The child's message text ("let
 	// me read it"), its tool args ("main.go" in the Read call), and its tool result
 	// body ("child read the file …") must appear nowhere in any parent message.
-	// Only the child's final summary (folded back as the Task tool result) is
+	// Only the child's final summary (folded back as the Subagent tool result) is
 	// allowed. We scan every field of every message.
 	// The child's distinctive content: its message text, its Read tool CALL (a
 	// "Read" tool call never appears in the parent's own history — the parent only
-	// calls Task), and its tool result body. None may appear anywhere in the parent
+	// calls Subagent), and its tool result body. None may appear anywhere in the parent
 	// Conversation. (We do not key off "main.go" because that token also legitimately
-	// appears in the parent's own Task prompt — only CHILD-specific content counts.)
+	// appears in the parent's own Subagent prompt — only CHILD-specific content counts.)
 	const childMsgText = "let me read it"
 	const childResultBody = "child read the file"
 	for _, msg := range sess.Conversation.Messages {
@@ -228,14 +228,14 @@ func TestSubagentReturnsOnlyFinalString(t *testing.T) {
 // stays a single, bounded line even when the model supplies a long, MULTI-LINE
 // explicit description — the description path is clamped identically to the prompt
 // fallback (newlines collapsed to spaces, truncated to the goal cap with an
-// ellipsis), so a long description can't break the one-line Task-card title.
+// ellipsis), so a long description can't break the one-line Subagent-card title.
 func TestSubagentGoalClampedSymmetrically(t *testing.T) {
 	childRead := &fakeTool{name: "Read", readOnly: true,
 		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 			return session.NewToolResult(in.ID, "ok"), nil
 		}}
 	childEngine := childEngineWith(mockllm.New(mockllm.TextTurn("child summary")), catalogWith(t, childRead))
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
 	// A long description with embedded newlines and tabs.
 	desc := "line one of a very long description that easily exceeds the cap\nsecond line\tand a tab"
@@ -247,7 +247,7 @@ func TestSubagentGoalClampedSymmetrically(t *testing.T) {
 		t.Fatalf("marshal args: %v", err)
 	}
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", string(argsJSON))),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", string(argsJSON))),
 		mockllm.TextTurn("done"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
@@ -279,7 +279,7 @@ func TestSubagentGoalClampedSymmetrically(t *testing.T) {
 }
 
 // TestSubagentConcurrentAttribution proves the redacted subagent.* events from
-// TWO Task calls that run concurrently (both read-only → one read batch, parallel
+// TWO Subagent calls that run concurrently (both read-only → one read batch, parallel
 // goroutines) are attributed to the correct parent call. Each child runs a single,
 // distinctly-named tool; we assert each subagent.tool event's ParentCallID is
 // paired with the tool name that child actually ran, and that start/end counts are
@@ -299,12 +299,12 @@ func TestSubagentConcurrentAttribution(t *testing.T) {
 		return childEngineWith(llm, catalogWith(t, ct))
 	}
 
-	// Two distinct Task tools, each delegating to its own child engine, registered
+	// Two distinct Subagent tools, each delegating to its own child engine, registered
 	// under DISTINCT catalog names so the parent can call both in one turn. (The
-	// catalog keys on Spec().Name, which is "Task" for both, so we wrap to rename.)
-	taskA := agent.NewTaskTool(childEngineFor("Alpha"), agent.WithChildSessionPrefix("subA"))
-	taskB := agent.NewTaskTool(childEngineFor("Bravo"), agent.WithChildSessionPrefix("subB"))
-	parentCat := catalogWith(t, renamedTask{Tool: taskA, name: "TaskA"}, renamedTask{Tool: taskB, name: "TaskB"})
+	// catalog keys on Spec().Name, which is "Subagent" for both, so we wrap to rename.)
+	taskA := agent.NewSubagentTool(childEngineFor("Alpha"), agent.WithChildSessionPrefix("subA"))
+	taskB := agent.NewSubagentTool(childEngineFor("Bravo"), agent.WithChildSessionPrefix("subB"))
+	parentCat := catalogWith(t, renamedSubagent{Tool: taskA, name: "TaskA"}, renamedSubagent{Tool: taskB, name: "TaskB"})
 
 	parentLLM := mockllm.New(
 		mockllm.ToolCallTurn(
@@ -344,40 +344,40 @@ func TestSubagentConcurrentAttribution(t *testing.T) {
 	}
 }
 
-// renamedTask wraps a Task tool to advertise a different catalog name (so two Task
+// renamedSubagent wraps a Subagent tool to advertise a different catalog name (so two Subagent
 // tools can coexist in one catalog), forwarding both the Tool and observableTool
 // methods so the dispatcher still routes it through ExecuteObserved.
-type renamedTask struct {
+type renamedSubagent struct {
 	tool.Tool
 	name string
 }
 
-func (rt renamedTask) Spec() tool.ToolSpec {
+func (rt renamedSubagent) Spec() tool.ToolSpec {
 	s := rt.Tool.Spec()
 	s.Name = rt.name
 	return s
 }
 
-func (rt renamedTask) ExecuteObserved(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
+func (rt renamedSubagent) ExecuteObserved(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event)) (session.ToolResult, error) {
 	return rt.Tool.(interface {
 		ExecuteObserved(context.Context, session.ToolCall, tool.Workspace, func(session.Event)) (session.ToolResult, error)
 	}).ExecuteObserved(ctx, call, ws, emit)
 }
 
-// TestSubagentChildScopeExcludesTaskAndMutators asserts the child catalog the
-// composition root wires excludes Task (no recursion) and mutating tools. The
-// child here tries to call Task and Write; both must come back as unknown-tool
+// TestSubagentChildScopeExcludesSubagentAndMutators asserts the child catalog the
+// composition root wires excludes Subagent (no recursion) and mutating tools. The
+// child here tries to call Subagent and Write; both must come back as unknown-tool
 // errors inside the child, and the parent still gets a single clean summary.
-func TestSubagentChildScopeExcludesTaskAndMutators(t *testing.T) {
+func TestSubagentChildScopeExcludesSubagentAndMutators(t *testing.T) {
 	childRead := &fakeTool{name: "Read", readOnly: true,
 		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 			return session.NewToolResult(in.ID, "ok"), nil
 		}}
-	// Scoped child catalog: read-only explorer only. No Task, no Write.
+	// Scoped child catalog: read-only explorer only. No Subagent, no Write.
 	childCat := catalogWith(t, childRead)
 
-	if _, ok := childCat.Lookup("Task"); ok {
-		t.Fatalf("child catalog must not contain Task (recursion risk)")
+	if _, ok := childCat.Lookup("Subagent"); ok {
+		t.Fatalf("child catalog must not contain Subagent (recursion risk)")
 	}
 	if _, ok := childCat.Lookup("Write"); ok {
 		t.Fatalf("child catalog must not contain mutating tools")
@@ -386,16 +386,16 @@ func TestSubagentChildScopeExcludesTaskAndMutators(t *testing.T) {
 	// The child tries forbidden tools, then summarizes.
 	childLLM := mockllm.New(
 		mockllm.ToolCallTurn(
-			toolCall("k1", "Task", `{"prompt":"recurse"}`),
+			toolCall("k1", "Subagent", `{"prompt":"recurse"}`),
 			toolCall("k2", "Write", `{"path":"x"}`),
 		),
 		mockllm.TextTurn("done despite blocks"),
 	)
 	childEngine := childEngineWith(childLLM, childCat)
 
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"go"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"go"}`)),
 		mockllm.TextTurn("ok"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
@@ -424,12 +424,12 @@ func TestSubagentParentCancelPropagates(t *testing.T) {
 	blocking := &blockingProvider{started: make(chan struct{})}
 	childEngine := childEngineWith(blocking, catalogWith(t))
 
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
-	// The parent calls Task; we instrument the child-start by reading the
+	// The parent calls Subagent; we instrument the child-start by reading the
 	// blockingProvider's started channel from the parent goroutine.
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"go"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"go"}`)),
 		mockllm.TextTurn("recovered"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
@@ -461,10 +461,10 @@ func TestSubagentStopHookFires(t *testing.T) {
 	childEngine := childEngineWith(childLLM, catalogWith(t, childRead))
 
 	hook := &recordingHook{}
-	task := agent.NewTaskTool(childEngine, agent.WithSubagentStopHook(hook))
+	task := agent.NewSubagentTool(childEngine, agent.WithSubagentStopHook(hook))
 
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"go"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"go"}`)),
 		mockllm.TextTurn("ok"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
@@ -498,9 +498,9 @@ func TestSubagentAutoDeniesAsk(t *testing.T) {
 		Model:   "child-model",
 	})
 
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"go"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"go"}`)),
 		mockllm.TextTurn("ok"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
@@ -515,14 +515,14 @@ func TestSubagentAutoDeniesAsk(t *testing.T) {
 	select {
 	case evs = <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatalf("Task did not complete — child likely blocked on a permission ask")
+		t.Fatalf("Subagent did not complete — child likely blocked on a permission ask")
 	}
 
 	if executed.Load() {
 		t.Fatalf("the denied child tool was executed")
 	}
 	// Parent must NEVER see a permission.ask: the child's ask is resolved inside
-	// the Task tool, never surfaced.
+	// the Subagent tool, never surfaced.
 	for _, ev := range evs {
 		if ev.Type == session.EvPermissionAsk {
 			t.Fatalf("child permission.ask leaked to the parent stream")
@@ -543,10 +543,10 @@ func TestSubagentAutoDeniesAsk(t *testing.T) {
 // ToolResult without spinning up a child.
 func TestSubagentRejectsEmptyPrompt(t *testing.T) {
 	childEngine := childEngineWith(mockllm.New(), tool.NewCatalog())
-	task := agent.NewTaskTool(childEngine)
+	task := agent.NewSubagentTool(childEngine)
 
 	res, err := task.Execute(context.Background(),
-		session.NewToolCall("c1", "Task", json.RawMessage(`{"prompt":"   "}`)),
+		session.NewToolCall("c1", "Subagent", json.RawMessage(`{"prompt":"   "}`)),
 		memfs.NewWorkspace("/ws"))
 	if err != nil {
 		t.Fatalf("unexpected harness error: %v", err)
@@ -556,27 +556,27 @@ func TestSubagentRejectsEmptyPrompt(t *testing.T) {
 	}
 }
 
-// TestNewTaskToolNilEnginePanics asserts the composition-root contract: a nil
+// TestNewSubagentToolNilEnginePanics asserts the composition-root contract: a nil
 // child Engine is a programming error.
-func TestNewTaskToolNilEnginePanics(t *testing.T) {
+func TestNewSubagentToolNilEnginePanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Fatalf("NewTaskTool(nil) did not panic")
+			t.Fatalf("NewSubagentTool(nil) did not panic")
 		}
 	}()
-	_ = agent.NewTaskTool(nil)
+	_ = agent.NewSubagentTool(nil)
 }
 
-// recordingTaskForker is a fake tool.WorkspaceForker that hands out in-memory
+// recordingSubagentForker is a fake tool.WorkspaceForker that hands out in-memory
 // workspaces rooted at a fork-specific path and records the fork labels and cleanup
 // calls. It mirrors the team supervisor's recordingForker.
-type recordingTaskForker struct {
+type recordingSubagentForker struct {
 	mu       sync.Mutex
 	labels   []string
 	cleanups int
 }
 
-func (f *recordingTaskForker) Fork(_ context.Context, _ tool.Workspace, label string) (tool.Workspace, func() error, error) {
+func (f *recordingSubagentForker) Fork(_ context.Context, _ tool.Workspace, label string) (tool.Workspace, func() error, error) {
 	f.mu.Lock()
 	f.labels = append(f.labels, label)
 	f.mu.Unlock()
@@ -625,12 +625,12 @@ func (rt *rootRecordingTool) seenRoots() []string {
 	return out
 }
 
-// runTaskOnce drives a parent engine that calls Task once with the given prompt, over
-// the given parent workspace, and returns the parent's single Task tool.result.
-func runTaskOnce(t *testing.T, task tool.Tool, parentWS tool.Workspace, prompt string) *session.ToolResult {
+// runSubagentOnce drives a parent engine that calls Subagent once with the given prompt, over
+// the given parent workspace, and returns the parent's single Subagent tool.result.
+func runSubagentOnce(t *testing.T, task tool.Tool, parentWS tool.Workspace, prompt string) *session.ToolResult {
 	t.Helper()
 	parentLLM := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("p1", "Task", `{"prompt":"`+prompt+`"}`)),
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"`+prompt+`"}`)),
 		mockllm.TextTurn("parent done"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
@@ -643,12 +643,12 @@ func runTaskOnce(t *testing.T, task tool.Tool, parentWS tool.Workspace, prompt s
 		}
 	}
 	if got == nil {
-		t.Fatalf("parent saw no Task tool result; events: %v", typesOf(evs))
+		t.Fatalf("parent saw no Subagent tool result; events: %v", typesOf(evs))
 	}
 	return got
 }
 
-// TestSubagentForksBeforeRunning asserts that, with a child forker wired, the Task
+// TestSubagentForksBeforeRunning asserts that, with a child forker wired, the Subagent
 // child runs in the FORKED workspace (its tools see the fork root, not the parent
 // base), the fork is labelled from the goal, and the fork's cleanup runs after the
 // child drains.
@@ -661,15 +661,15 @@ func TestSubagentForksBeforeRunning(t *testing.T) {
 	)
 	childEngine := childEngineWith(childLLM, childCat)
 
-	fk := &recordingTaskForker{}
-	task := agent.NewTaskTool(childEngine, agent.WithChildForker(fk))
+	fk := &recordingSubagentForker{}
+	task := agent.NewSubagentTool(childEngine, agent.WithChildForker(fk))
 
-	got := runTaskOnce(t, task, memfs.NewWorkspace("/base"), "inspect history")
+	got := runSubagentOnce(t, task, memfs.NewWorkspace("/base"), "inspect history")
 	if got.IsError {
-		t.Fatalf("Task result is an error: %q", got.Content)
+		t.Fatalf("Subagent result is an error: %q", got.Content)
 	}
 	if !strings.Contains(got.Content, "inspected the fork") {
-		t.Fatalf("Task result = %q, want it to contain the child summary", got.Content)
+		t.Fatalf("Subagent result = %q, want it to contain the child summary", got.Content)
 	}
 
 	// The child's tool must have run against the FORK root, never the parent base.
@@ -702,11 +702,11 @@ func TestSubagentNilForkerRunsAgainstParent(t *testing.T) {
 	)
 	childEngine := childEngineWith(childLLM, catalogWith(t, probe))
 
-	task := agent.NewTaskTool(childEngine) // no WithChildForker
+	task := agent.NewSubagentTool(childEngine) // no WithChildForker
 
-	got := runTaskOnce(t, task, memfs.NewWorkspace("/base"), "look around")
+	got := runSubagentOnce(t, task, memfs.NewWorkspace("/base"), "look around")
 	if got.IsError {
-		t.Fatalf("Task result is an error: %q", got.Content)
+		t.Fatalf("Subagent result is an error: %q", got.Content)
 	}
 	roots := probe.seenRoots()
 	if len(roots) != 1 || roots[0] != "/base" {
@@ -715,7 +715,7 @@ func TestSubagentNilForkerRunsAgainstParent(t *testing.T) {
 }
 
 // TestSubagentForkErrorIsToolError asserts the no-silent-fallback contract: when a
-// child forker is wired but Fork fails, Task returns a tool ERROR and the child NEVER
+// child forker is wired but Fork fails, Subagent returns a tool ERROR and the child NEVER
 // runs (so its Bash cannot land in the shared parent base).
 func TestSubagentForkErrorIsToolError(t *testing.T) {
 	probe := &rootRecordingTool{}
@@ -726,14 +726,14 @@ func TestSubagentForkErrorIsToolError(t *testing.T) {
 	)
 	childEngine := childEngineWith(childLLM, catalogWith(t, probe))
 
-	task := agent.NewTaskTool(childEngine, agent.WithChildForker(erroringForker{}))
+	task := agent.NewSubagentTool(childEngine, agent.WithChildForker(erroringForker{}))
 
-	got := runTaskOnce(t, task, memfs.NewWorkspace("/base"), "inspect")
+	got := runSubagentOnce(t, task, memfs.NewWorkspace("/base"), "inspect")
 	if !got.IsError {
-		t.Fatalf("Task result = %+v, want an error result (fork failure must not silently fall back)", got)
+		t.Fatalf("Subagent result = %+v, want an error result (fork failure must not silently fall back)", got)
 	}
 	if !strings.Contains(got.Content, "workspace isolation failed") {
-		t.Fatalf("Task error = %q, want it to mention workspace isolation failure", got.Content)
+		t.Fatalf("Subagent error = %q, want it to mention workspace isolation failure", got.Content)
 	}
 	if roots := probe.seenRoots(); len(roots) != 0 {
 		t.Fatalf("child ran (roots=%v) despite the fork failure; it must NOT run against the parent base", roots)
@@ -775,9 +775,9 @@ func (f *concurrencyForker) Fork(_ context.Context, _ tool.Workspace, label stri
 	return ws, cleanup, nil
 }
 
-// TestSubagentShellGateCapsConcurrentForks asserts WithMaxConcurrentTaskShells bounds
-// how many shell-bearing Task children hold a forked worktree at once: with a cap of
-// N and more than N concurrent Task calls, no more than N forks are ever live.
+// TestSubagentShellGateCapsConcurrentForks asserts WithMaxConcurrentChildren bounds
+// how many shell-bearing Subagent children hold a forked worktree at once: with a cap of
+// N and more than N concurrent Subagent calls, no more than N forks are ever live.
 func TestSubagentShellGateCapsConcurrentForks(t *testing.T) {
 	const maxShells = 2
 	const fanout = 6
@@ -790,10 +790,10 @@ func TestSubagentShellGateCapsConcurrentForks(t *testing.T) {
 	newChild := func() *agent.Engine {
 		return childEngineWith(mockllm.New(mockllm.TextTurn("done")), catalogWith(t))
 	}
-	// One Task tool, shared across concurrent calls (the gate is per-tool).
-	task := agent.NewTaskTool(newChild(),
+	// One Subagent tool, shared across concurrent calls (the gate is per-tool).
+	task := agent.NewSubagentTool(newChild(),
 		agent.WithChildForker(fk),
-		agent.WithMaxConcurrentTaskShells(maxShells),
+		agent.WithMaxConcurrentChildren(maxShells),
 	)
 
 	var wg sync.WaitGroup
@@ -802,7 +802,7 @@ func TestSubagentShellGateCapsConcurrentForks(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			_, _ = task.Execute(context.Background(),
-				session.NewToolCall(session.ToolCallID("c"+string(rune('0'+n))), "Task",
+				session.NewToolCall(session.ToolCallID("c"+string(rune('0'+n))), "Subagent",
 					json.RawMessage(`{"prompt":"go"}`)),
 				memfs.NewWorkspace("/base"))
 		}(i)
@@ -838,7 +838,7 @@ func TestSubagentShellGateCapsConcurrentForks(t *testing.T) {
 }
 
 // forkLabels returns the labels Fork was called with (concurrency-safe).
-func (f *recordingTaskForker) forkLabels() []string {
+func (f *recordingSubagentForker) forkLabels() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]string, len(f.labels))
@@ -894,9 +894,9 @@ func TestSubagentCtxCancelledBeforeIsolation(t *testing.T) {
 	fk := &blockingForker{entered: make(chan struct{}), release: make(chan struct{})}
 	// Gate capacity 1: the first (blocking) Fork fills it, so the second call's
 	// acquireShellSlot finds the send blocked and its cancelled ctx is the only ready case.
-	task := agent.NewTaskTool(childEngine,
+	task := agent.NewSubagentTool(childEngine,
 		agent.WithChildForker(fk),
-		agent.WithMaxConcurrentTaskShells(1),
+		agent.WithMaxConcurrentChildren(1),
 	)
 
 	// First call: acquires the only slot and blocks inside Fork (holding the gate).
@@ -904,7 +904,7 @@ func TestSubagentCtxCancelledBeforeIsolation(t *testing.T) {
 	go func() {
 		defer close(firstDone)
 		_, _ = task.Execute(context.Background(),
-			session.NewToolCall("c0", "Task", json.RawMessage(`{"prompt":"hold the slot"}`)),
+			session.NewToolCall("c0", "Subagent", json.RawMessage(`{"prompt":"hold the slot"}`)),
 			memfs.NewWorkspace("/base"))
 	}()
 	<-fk.entered // the gate is now full and held
@@ -913,16 +913,16 @@ func TestSubagentCtxCancelledBeforeIsolation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	res, err := task.Execute(ctx,
-		session.NewToolCall("c1", "Task", json.RawMessage(`{"prompt":"inspect"}`)),
+		session.NewToolCall("c1", "Subagent", json.RawMessage(`{"prompt":"inspect"}`)),
 		memfs.NewWorkspace("/base"))
 	if err != nil {
-		t.Fatalf("Task.Execute returned a transport error: %v", err)
+		t.Fatalf("Subagent.Execute returned a transport error: %v", err)
 	}
 	if !res.IsError {
-		t.Fatalf("Task result = %+v, want an error result (ctx cancelled before isolation)", res)
+		t.Fatalf("Subagent result = %+v, want an error result (ctx cancelled before isolation)", res)
 	}
 	if !strings.Contains(res.Content, "cancelled before acquiring a concurrency slot") {
-		t.Fatalf("Task error = %q, want it to mention cancellation before the slot acquire", res.Content)
+		t.Fatalf("Subagent error = %q, want it to mention cancellation before the slot acquire", res.Content)
 	}
 	// Only the FIRST call ever forked; the cancelled call must NOT have forked.
 	if got := fk.callCount(); got != 1 {
@@ -938,12 +938,12 @@ func TestSubagentCtxCancelledBeforeIsolation(t *testing.T) {
 	<-firstDone
 }
 
-// TestSubagentMaxConcurrentTaskShellsZeroClamps asserts that
-// WithMaxConcurrentTaskShells(0) clamps the gate to capacity 1 rather than building a
+// TestSubagentMaxConcurrentChildrenZeroClamps asserts that
+// WithMaxConcurrentChildren(0) clamps the gate to capacity 1 rather than building a
 // zero-capacity channel (which would DEADLOCK the very first acquire). A single forking
-// Task call must complete; a short-ctx deadlock backstop fails the test if it ever
+// Subagent call must complete; a short-ctx deadlock backstop fails the test if it ever
 // blocks forever.
-func TestSubagentMaxConcurrentTaskShellsZeroClamps(t *testing.T) {
+func TestSubagentMaxConcurrentChildrenZeroClamps(t *testing.T) {
 	probe := &rootRecordingTool{}
 	childLLM := mockllm.New(
 		mockllm.ToolCallTurn(toolCall("k1", "Probe", `{}`)),
@@ -951,10 +951,10 @@ func TestSubagentMaxConcurrentTaskShellsZeroClamps(t *testing.T) {
 	)
 	childEngine := childEngineWith(childLLM, catalogWith(t, probe))
 
-	fk := &recordingTaskForker{}
-	task := agent.NewTaskTool(childEngine,
+	fk := &recordingSubagentForker{}
+	task := agent.NewSubagentTool(childEngine,
 		agent.WithChildForker(fk),
-		agent.WithMaxConcurrentTaskShells(0), // clamps to 1; a zero-cap gate would deadlock
+		agent.WithMaxConcurrentChildren(0), // clamps to 1; a zero-cap gate would deadlock
 	)
 
 	// Short ctx as a deadlock backstop: a zero-cap (unclamped) gate would block the
@@ -963,17 +963,17 @@ func TestSubagentMaxConcurrentTaskShellsZeroClamps(t *testing.T) {
 	defer cancel()
 
 	res, err := task.Execute(ctx,
-		session.NewToolCall("c1", "Task", json.RawMessage(`{"prompt":"go"}`)),
+		session.NewToolCall("c1", "Subagent", json.RawMessage(`{"prompt":"go"}`)),
 		memfs.NewWorkspace("/base"))
 	if err != nil {
-		t.Fatalf("Task.Execute returned a transport error: %v", err)
+		t.Fatalf("Subagent.Execute returned a transport error: %v", err)
 	}
 	if res.IsError {
-		t.Fatalf("Task result is an error: %q (a clamped gate must let a single call complete)", res.Content)
+		t.Fatalf("Subagent result is an error: %q (a clamped gate must let a single call complete)", res.Content)
 	}
 	// The single call must have acquired its slot, forked, run, and cleaned up.
 	if labels := fk.forkLabels(); len(labels) != 1 {
-		t.Fatalf("Fork called %d times, want exactly 1 (the single Task call must proceed): %v", len(labels), labels)
+		t.Fatalf("Fork called %d times, want exactly 1 (the single Subagent call must proceed): %v", len(labels), labels)
 	}
 	if fk.cleanups != 1 {
 		t.Errorf("fork cleanups = %d, want 1 (the slot must be released after the call)", fk.cleanups)
@@ -1017,8 +1017,8 @@ func (b *barrierChildTool) peakLive() int {
 }
 
 // TestSubagentChildGateCapsForkerlessConcurrency closes the genuinely-unbounded path
-// the plan identified: a FORKER-LESS Task fan-out. With a cap of N and more than N
-// concurrent Task calls (no forker wired), at most N children ever run at once. Each
+// the plan identified: a FORKER-LESS Subagent fan-out. With a cap of N and more than N
+// concurrent Subagent calls (no forker wired), at most N children ever run at once. Each
 // child blocks inside a barrier tool so the test can hold the in-flight set and read
 // the peak. Pre-fix the gate was acquired only on the forking path, so a forker-less
 // fan-out was unbounded and this would observe peak == fanout.
@@ -1036,7 +1036,7 @@ func TestSubagentChildGateCapsForkerlessConcurrency(t *testing.T) {
 			mockllm.TextTurn("child done"),
 		)
 	}
-	// One Task tool, NO forker (the forker-less path), shared across concurrent calls.
+	// One Subagent tool, NO forker (the forker-less path), shared across concurrent calls.
 	// A distinct child engine per call so the shared mockllm cursor can't interleave.
 	engines := map[string]*agent.Engine{}
 	var meta []agent.AgentMeta
@@ -1045,7 +1045,7 @@ func TestSubagentChildGateCapsForkerlessConcurrency(t *testing.T) {
 		engines[name] = childEngineWith(newChildLLM(), childCat)
 		meta = append(meta, agent.AgentMeta{Name: name, Description: "d"})
 	}
-	task := agent.NewTaskTool(
+	task := agent.NewSubagentTool(
 		childEngineWith(newChildLLM(), childCat),
 		agent.WithAgentEngines(engines, meta),
 		agent.WithMaxConcurrentChildren(maxChildren),
@@ -1058,7 +1058,7 @@ func TestSubagentChildGateCapsForkerlessConcurrency(t *testing.T) {
 			defer wg.Done()
 			name := "a" + string(rune('0'+n))
 			_, _ = task.Execute(context.Background(),
-				session.NewToolCall(session.ToolCallID("c"+string(rune('0'+n))), "Task",
+				session.NewToolCall(session.ToolCallID("c"+string(rune('0'+n))), "Subagent",
 					json.RawMessage(`{"prompt":"go","agent":"`+name+`"}`)),
 				memfs.NewWorkspace("/base"))
 		}(i)

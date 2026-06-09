@@ -70,7 +70,7 @@ func TestDriveChildStructuredPlainTextExhaustsToCleanTerminal(t *testing.T) {
 	childID := session.SessionID("subagent-c1")
 	child := session.New(childID, session.ModeDefault, ws.Root(), session.Limits{}, time.Now())
 	submit := newSubmitResultTool(schema)
-	call := session.NewToolCall("c1", taskToolName, nil)
+	call := session.NewToolCall("c1", subagentToolName, nil)
 
 	_, stop, _, _ := driveChild(context.Background(), engine, child, ws,
 		"profile someone", RunOptions{ExtraTools: []tool.Tool{submit}},

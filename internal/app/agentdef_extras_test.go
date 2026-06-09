@@ -128,11 +128,11 @@ func TestDefHookRunnerNoHooksReturnsFallback(t *testing.T) {
 	}
 }
 
-// TestBuildAgentTaskEnginesWithSkillsAndHooks is an end-to-end wiring smoke test:
+// TestBuildAgentSubagentEnginesWithSkillsAndHooks is an end-to-end wiring smoke test:
 // a def carrying both skills and hooks builds an engine without error and produces
 // one meta entry (the per-def routing metadata) — exercising the full
-// buildAgentTaskEngines path with the new params populated.
-func TestBuildAgentTaskEnginesWithSkillsAndHooks(t *testing.T) {
+// buildAgentSubagentEngines path with the new params populated.
+func TestBuildAgentSubagentEnginesWithSkillsAndHooks(t *testing.T) {
 	dir := t.TempDir()
 	writeSkill(t, dir, "playbook", "a playbook", "PLAYBOOK BODY")
 	idx := resolveSkillIndex(context.Background(), Config{SkillsDirs: []string{dir}})
@@ -144,7 +144,7 @@ func TestBuildAgentTaskEnginesWithSkillsAndHooks(t *testing.T) {
 		Hooks:       map[string]string{"PreToolUse": "exit 0"},
 	}})
 	prov := mockllm.New()
-	engines, meta, _ := buildAgentTaskEngines(context.Background(), Config{Model: "m", Shell: "/bin/sh"}, prov, regForTest(prov, providerMock, "m"), providerMock, "m", reg, idx, hookexec.New(nil), nil, nil)
+	engines, meta, _ := buildAgentSubagentEngines(context.Background(), Config{Model: "m", Shell: "/bin/sh"}, prov, regForTest(prov, providerMock, "m"), providerMock, "m", reg, idx, hookexec.New(nil), nil, nil)
 	if len(engines) != 1 || engines["spec"] == nil {
 		t.Fatalf("want 1 engine for 'spec', got %d", len(engines))
 	}
