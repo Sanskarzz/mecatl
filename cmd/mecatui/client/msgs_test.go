@@ -339,27 +339,46 @@ func TestReadLoopCancelUnblocks(t *testing.T) {
 }
 
 // TestAskRoundTrip asserts SendApproval emits a ResumeApproval frame carrying the
-// EXACT ask_id (the only correlation) and the allow bool. This is the load-
-// bearing round-trip the permission flow depends on.
+// EXACT ask_id (the only correlation) and sets BOTH the verdict enum AND the legacy
+// allow bool (so an older server that ignores the verdict still resolves correctly,
+// and a newer server can learn an always-allow rule). This is the load-bearing
+// round-trip the permission flow depends on.
 func TestAskRoundTrip(t *testing.T) {
-	fs := newFakeStream()
-	st := NewStream(fs, fs)
-	if err := st.SendApproval("ask-write-1", true); err != nil {
-		t.Fatalf("SendApproval: %v", err)
+	tests := []struct {
+		name        string
+		verdict     Verdict
+		wantAllow   bool
+		wantVerdict mecatlv1.ApprovalVerdict
+	}{
+		{"allow once", VerdictAllowOnce, true, mecatlv1.ApprovalVerdict_APPROVAL_VERDICT_ALLOW_ONCE},
+		{"allow always", VerdictAllowAlways, true, mecatlv1.ApprovalVerdict_APPROVAL_VERDICT_ALLOW_ALWAYS},
+		{"deny", VerdictDeny, false, mecatlv1.ApprovalVerdict_APPROVAL_VERDICT_DENY},
 	}
-	frames := fs.sentFrames()
-	if len(frames) != 1 {
-		t.Fatalf("sent %d frames, want 1", len(frames))
-	}
-	ra := frames[0].GetResumeApproval()
-	if ra == nil {
-		t.Fatalf("frame is not a ResumeApproval: %#v", frames[0])
-	}
-	if ra.GetAskId() != "ask-write-1" {
-		t.Errorf("ask_id = %q, want ask-write-1", ra.GetAskId())
-	}
-	if !ra.GetAllow() {
-		t.Error("allow = false, want true")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeStream()
+			st := NewStream(fs, fs)
+			if err := st.SendApproval("ask-write-1", tc.verdict); err != nil {
+				t.Fatalf("SendApproval: %v", err)
+			}
+			frames := fs.sentFrames()
+			if len(frames) != 1 {
+				t.Fatalf("sent %d frames, want 1", len(frames))
+			}
+			ra := frames[0].GetResumeApproval()
+			if ra == nil {
+				t.Fatalf("frame is not a ResumeApproval: %#v", frames[0])
+			}
+			if ra.GetAskId() != "ask-write-1" {
+				t.Errorf("ask_id = %q, want ask-write-1", ra.GetAskId())
+			}
+			if ra.GetAllow() != tc.wantAllow {
+				t.Errorf("allow = %v, want %v", ra.GetAllow(), tc.wantAllow)
+			}
+			if ra.GetVerdict() != tc.wantVerdict {
+				t.Errorf("verdict = %v, want %v", ra.GetVerdict(), tc.wantVerdict)
+			}
+		})
 	}
 }
 

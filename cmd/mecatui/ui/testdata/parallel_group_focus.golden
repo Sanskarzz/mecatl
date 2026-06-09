@@ -1,26 +1,26 @@
  mecatui  ·  session sess-test-00  ·  mock-model  ·  mode default  ·  127.0.0.1:8080
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 
-           ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-           ┃                                                                            ┃
-           ┃    Subagents  ▸ Parallel    Teams                                          ┃
-           ┃                                                                            ┃
-           ┃  parallel · join=judge                                                     ┃
-           ┃  ✓ judge · 3/3 branches · winner branch-2                                  ┃
-           ┃    branch args/results hidden (context-isolated)                           ┃
-           ┃                                                                            ┃
-           ┃    ✓ branch-1 · refactor with a map · done · 2 tools · ↑12K ↓3K            ┃
-           ┃  ╭──────────────────────────────────────────────────────────────────────╮  ┃
-           ┃  │  ★ ✓ branch-2 · refactor with a slice · done · 3 tools · ↑15K ↓4.2K  │  ┃
-           ┃  ╰──────────────────────────────────────────────────────────────────────╯  ┃
-           ┃    ✗ branch-3 · refactor inline · failed · error · 1 tool · ↑4K ↓600       ┃
-           ┃                                                                            ┃
-           ┃  winner fork (preserved): /fork/branch-2                                   ┃
-           ┃                                                                            ┃
-           ┃  esc back                                                                  ┃
-           ┃                                                                            ┃
-           ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
+       ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+       ┃                                                                                    ┃
+       ┃    Subagents  ▸ Parallel    Teams                                                  ┃
+       ┃                                                                                    ┃
+       ┃  parallel · join=judge                                                             ┃
+       ┃  ✓ judge · 3/3 branches · winner branch-2                                          ┃
+       ┃  run stop: done                                                                    ┃
+       ┃    branch args/results hidden (context-isolated)                                   ┃
+       ┃                                                                                    ┃
+       ┃    ✓ branch-1 · refactor with a map · done · 900ms · 2 tools · ↑12K ↓3K            ┃
+       ┃  ╭──────────────────────────────────────────────────────────────────────────────╮  ┃
+       ┃  │  ★ ✓ branch-2 · refactor with a slice · done · 900ms · 3 tools · ↑15K ↓4.2K  │  ┃
+       ┃  ╰──────────────────────────────────────────────────────────────────────────────╯  ┃
+       ┃    ✗ branch-3 · refactor inline · failed · error · 900ms · 1 tool · ↑4K ↓600       ┃
+       ┃                                                                                    ┃
+       ┃  winner fork (preserved): /fork/branch-2                                           ┃
+       ┃                                                                                    ┃
+       ┃  esc back                                                                          ┃
+       ┃                                                                                    ┃
+       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 ┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
 ┃

@@ -18,6 +18,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
+	"github.com/stacklok/mecatl/internal/adapter/permstore"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/agent"
@@ -218,6 +219,143 @@ func TestGRPCConversePermissionApprove(t *testing.T) {
 	res := lastResult(t, events)
 	if res.GetStop() != "end_turn" {
 		t.Fatalf("stop = %q, want end_turn", res.GetStop())
+	}
+}
+
+// newLearningService mirrors newService but wires a REAL learn store
+// (permstore.Memory) into the policy, so an ALLOW_ALWAYS verdict actually learns a
+// session-keyed rule (newService's nil store makes Learn a no-op — fine for the
+// allow-once tests, useless here). It also wires the SHARED session store into the
+// engine Deps (like the resume tests): the ENGINE persists the terminal session
+// state at run end, so a second Converse on the same session loads the completed
+// snapshot rather than the stale "awaiting" one saved at the ask pause.
+func newLearningService(t *testing.T, llm *mockllm.Provider, rules []governance.Rule, tools ...tool.Tool) *server.Service {
+	t.Helper()
+	cat := tool.NewCatalog()
+	for _, tl := range tools {
+		cat.MustRegister(tl)
+	}
+	store := memstore.New()
+	engine := agent.NewEngine(agent.Deps{
+		LLM:     llm,
+		Catalog: cat,
+		Policy:  permpolicy.NewPolicy(rules, permstore.New()),
+		Model:   "test-model",
+		Store:   store,
+	})
+	svc, err := server.NewService(server.Config{
+		Engine:              engine,
+		Store:               store,
+		Workspaces:          func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		Now:                 func() time.Time { return time.Unix(0, 0) },
+		DefaultCapabilities: llm.Capabilities(),
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	return svc
+}
+
+// TestGRPCConverseAllowAlwaysLearns drives the new verdict enum through the REAL
+// RPC path end to end: the first run pauses on a permission.ask and the client
+// resolves it with ResumeApproval{Verdict: ALLOW_ALWAYS} (the enum, not just the
+// legacy bool); a SECOND run on the SAME session issues the identical tool call and
+// must complete WITHOUT a second permission.ask — the learned session-keyed rule
+// suppressed the re-ask (the gRPC mirror of agent's TestAllowAlwaysLearnsThenNoAsk).
+func TestGRPCConverseAllowAlwaysLearns(t *testing.T) {
+	write := &scriptTool{name: "Write", readOnly: false, content: "wrote"}
+	// One shared turn script across BOTH runs (the mock advances its cursor per
+	// Stream call): each run proposes the IDENTICAL Write call, then finishes.
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(call("c1", "Write", `{"path":"a"}`)),
+		mockllm.TextTurn("done"),
+		mockllm.ToolCallTurn(call("c2", "Write", `{"path":"a"}`)),
+		mockllm.TextTurn("done again"),
+	)
+	// nil rules => Write asks by default; the learn store is what ALLOW_ALWAYS writes to.
+	svc := newLearningService(t, llm, nil, write)
+	client, cleanup := dialGRPC(t, svc)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cs, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Run 1: approve the ask with the ALLOW_ALWAYS verdict enum.
+	stream1, err := client.Converse(ctx)
+	if err != nil {
+		t.Fatalf("Converse 1: %v", err)
+	}
+	if err := stream1.Send(&mecatlv1.ConverseRequest{
+		Kind: &mecatlv1.ConverseRequest_Prompt{Prompt: &mecatlv1.Prompt{SessionId: cs.GetSessionId(), Text: "go"}},
+	}); err != nil {
+		t.Fatalf("Send prompt 1: %v", err)
+	}
+	// Drain run 1 to EOF (not just to the result event): the server saves the
+	// completed session snapshot before it closes the stream, so EOF is the
+	// barrier guaranteeing the second Converse loads the terminal snapshot, not
+	// the mid-run "awaiting" one persisted at the ask pause.
+	asks1 := 0
+	for {
+		resp, err := stream1.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Recv 1: %v", err)
+		}
+		ev := resp.GetEvent()
+		if ev.GetType() == "permission.ask" {
+			asks1++
+			if err := stream1.Send(&mecatlv1.ConverseRequest{
+				Kind: &mecatlv1.ConverseRequest_ResumeApproval{
+					ResumeApproval: &mecatlv1.ResumeApproval{
+						AskId:   ev.GetAsk().GetAskId(),
+						Allow:   true,
+						Verdict: mecatlv1.ApprovalVerdict_APPROVAL_VERDICT_ALLOW_ALWAYS,
+					},
+				},
+			}); err != nil {
+				t.Fatalf("Send always-allow: %v", err)
+			}
+		}
+		if ev.GetType() == "result" {
+			_ = stream1.CloseSend()
+		}
+	}
+	if asks1 != 1 {
+		t.Fatalf("run 1: expected exactly 1 permission.ask, got %d", asks1)
+	}
+	if write.runs() != 1 {
+		t.Fatalf("run 1: approved tool should have run once, runs=%d", write.runs())
+	}
+
+	// Run 2 (same session, identical command): the learned rule must suppress the
+	// re-ask — the run streams straight to its terminal result with NO permission.ask.
+	stream2, err := client.Converse(ctx)
+	if err != nil {
+		t.Fatalf("Converse 2: %v", err)
+	}
+	if err := stream2.Send(&mecatlv1.ConverseRequest{
+		Kind: &mecatlv1.ConverseRequest_Prompt{Prompt: &mecatlv1.Prompt{SessionId: cs.GetSessionId(), Text: "again"}},
+	}); err != nil {
+		t.Fatalf("Send prompt 2: %v", err)
+	}
+	_ = stream2.CloseSend()
+	events2 := recvAll(t, stream2)
+	if hasType(events2, "permission.ask") {
+		t.Fatalf("run 2: the learned allow-always rule should suppress the re-ask, got events %v", typesOf(events2))
+	}
+	if write.runs() != 2 {
+		t.Fatalf("run 2: the identical call should still execute (learned allow), runs=%d", write.runs())
+	}
+	res := lastResult(t, events2)
+	if res.GetStop() != "end_turn" {
+		t.Fatalf("run 2 stop = %q, want end_turn", res.GetStop())
 	}
 }
 

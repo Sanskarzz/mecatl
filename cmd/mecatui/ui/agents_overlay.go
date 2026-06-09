@@ -720,6 +720,11 @@ func renderParallelGroupFocus(th theme.Theme, groups []parallelGroup, parentCall
 	out.WriteString(th.Style("askTitle").Render("parallel · join=" + join))
 	out.WriteString("\n")
 	out.WriteString(muted.Render(parallelRosterLine(g)))
+	// Run-level stop, focus-only (NOT on the shared parallelRosterLine). Empty-guarded:
+	// a join=all run carries no winner-bearing stop by contract, so it renders no line.
+	if g.done && g.stop != "" {
+		out.WriteString("\n" + muted.Render("run stop: "+subagentStopLabel(g.stop)))
+	}
 	out.WriteString("\n")
 	out.WriteString(muted.Render("  branch args/results hidden (context-isolated)"))
 	out.WriteString("\n\n")
@@ -772,6 +777,9 @@ func parallelBranchLine(br *parallelBranch) string {
 	state := "working…"
 	if br.done {
 		state = parallelBranchStopLabel(br)
+		if br.durationMs > 0 {
+			state += " · " + humanizeDuration(br.durationMs)
+		}
 	} else if br.current != "" {
 		state = sanitizeTerminal(br.current) + "…"
 	}

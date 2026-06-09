@@ -944,7 +944,8 @@ func (s *Supervisor) fireTeammateIdle(ctx context.Context, m *memberRT) {
 // or do budget bookkeeping — that stays with the callers.
 func (s *Supervisor) driveOneTurn(ctx context.Context, m *memberRT, prompt string, evCh chan<- TeamEvent) (text string, stop session.StopReason) {
 	run := m.engine.Run(ctx, m.sess, m.ws, prompt)
-	posture := childPosture{isolated: m.isolated, caps: s.caps, role: m.spec.Name}
+	posture := childPosture{isolated: m.isolated, caps: s.caps, role: m.spec.Name,
+		askLabel: fmt.Sprintf("team member %q", m.spec.Name)}
 	stop = session.StopNone
 	for ev := range run.Events() {
 		if t, st, ok := handleChildEvent(run, ev, posture); ok {

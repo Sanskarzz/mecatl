@@ -377,9 +377,10 @@ show the plain prompt-hint card.
 | `enter` (idle, **paused queue**, empty input) | resume — send the next staged follow-up |
 | `esc` (idle, **paused queue**) | clear staged input → else clear the queue |
 | `ctrl+c` | graceful quit (double-press): with a non-empty prompt the first press **clears the input**; on an empty prompt it **arms** the guard and shows a footer hint — press `ctrl+c` again within 3s to exit. Any other key disarms. The fatal (dead-connection) screen exits on a single press. |
-| in the permission modal: `a`/`y`/`enter` | allow |
+| in the permission modal: `a`/`y` | allow once |
+| in the permission modal: `w` | always allow (this session; offered for the main agent's asks only, not surfaced subagent asks) |
 | in the permission modal: `d`/`n`/`esc` | deny |
-| in the permission modal: `←`/`→`/`tab` | toggle the focused button |
+| in the permission modal: `←`/`→`/`tab` | cycle the focused button; `enter` activates it |
 | `pgup` / `pgdn` | scroll the conversation up / down |
 | `home` / `end` | jump to the top / bottom of the conversation (`end` resumes auto-follow) |
 | mouse wheel | scroll the conversation (**alt screen only**; see below) |
@@ -391,6 +392,15 @@ show the plain prompt-hint card.
 | `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`, `/soul`, `/usermodel`, `/models`; plus workspace commands) |
 | `ctrl+a` | open the **unified agents overlay** — ONE surface with three tabs: **Subagents** (the flat Subagent-child fleet), **Parallel** (the fork-join GROUP roster — join mode, branches, winner, fork paths), and **Teams** (the full roster + per-member focus of the most-recent team). `tab` cycles tabs, `enter` focuses a row/group, `esc` steps back / closes. The default tab is **context-sensitive** (team live → parallel live → subagents → parallel → team). Works **while idle and mid-run**; inert under a permission modal. `/team` opens it pinned to the Teams tab. |
 | `@` | file-mention menu — complete a workspace path, then attach it on submit (see below) |
+
+**Always-allow (the `w` button).** A main-agent ask offers a third button, **Al[w]ays**,
+alongside allow-once and deny. Choosing it permits the current call AND learns a rule that
+suppresses the re-ask for the **exact same command** for the rest of this session
+(session-scoped, evicted when the session closes). It never overrides a configured
+deny/ask — a deny in any scope is still absolute, and a configured ask is never silenced
+(it only loosens the built-in default). It is offered for the **main agent's** asks only:
+a surfaced subagent ask keeps the two-button (allow-once / deny) modal, because a child
+engine's permission policy learns no rules.
 
 The `?` overlay enumerates the rest of the chords — `ctrl+v` (paste a clipboard
 image), `ctrl+o`/`ctrl+r`/`ctrl+p` (MCP inventory / resources / prompts), `ctrl+a`
@@ -463,14 +473,17 @@ event projection (REDACTED, metadata-only — never child/branch content):
     row per Parallel call: a state glyph (**◐** running / **✓** done), the **join strategy**
     (all / first / judge), the running/total **branch tally**, and the **winner** branch
     once a first/judge run resolves. `enter` focuses ONE group (one level — plan Q4),
-    showing **all its branches inline** with the **winner row highlighted (★)** and the
-    **preserved winner fork path** (`winner fork (preserved): <path>`). Each branch row
-    carries its own glyph (**◐**/**✓**/**✗** failed), label, goal, current/last tool,
-    count, and usage. Branch args/results stay hidden (context-isolated; gauntlet #7). The
-    fork paths are the model's no-auto-merge handle and ride the tool RESULT too — these
-    events are the client observability channel only.
+    showing **all its branches inline** with the **winner row highlighted (★)**, the
+    **run-level stop** (`run stop: <label>`, when a first/judge run resolves one — a
+    join=all run carries none, so the line is omitted), and the **preserved winner fork
+    path** (`winner fork (preserved): <path>`). Each branch row carries its own glyph
+    (**◐**/**✓**/**✗** failed), label, goal, current/last tool (or, once done, its stop
+    label and **wall-clock duration**), count, and usage. Branch args/results stay hidden
+    (context-isolated; gauntlet #7). The fork paths are the model's no-auto-merge handle
+    and ride the tool RESULT too — these events are the client observability channel only.
   - **Teams** — the existing agent-team roster + per-member focus + task / findings
-    sub-views, verbatim.
+    sub-views, verbatim. The tasks sub-view rows show the truncated task **description**
+    between the id and state (a description-less task keeps the compact id/state row).
   - `tab` cycles tabs (Subagents → Parallel → Teams); `esc` steps back from a focus pane
     to its roster, then closes. The **default tab is context-sensitive** (precedence:
     team live → Teams; parallel live → Parallel; subagents ran → Subagents; parallel ran →

@@ -429,11 +429,12 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activeTool = ""
 		m.toolProgress = ""
 		m.ask = pendingAsk{
-			AskID:        msg.AskID,
-			Tool:         msg.Tool,
-			Args:         msg.Args,
-			Reason:       msg.Reason,
-			allowFocused: true,
+			AskID:       msg.AskID,
+			Tool:        msg.Tool,
+			Args:        msg.Args,
+			Reason:      msg.Reason,
+			focus:       0,
+			offerAlways: !isChildAsk(msg.AskID, m.sessionID),
 		}
 		// Force-flush via afterEvent (refreshView + reader re-arm), like every other
 		// non-delta boundary: any pending coalesced assistant tail must be rendered
@@ -574,6 +575,10 @@ func (m *Model) applyTeam(msg client.TeamMsg) {
 		// land the final state even if no member event followed the last transition.
 		m.conv.setTeamTasks(msg.ParentCallID, msg.Tasks)
 		m.conv.setTeamFindings(msg.ParentCallID, msg.Findings)
+		// A team boundary is transient (like a no-progress notice): a brief muted footer
+		// status, never a durable scrollback notice. The durable team outcome already rides
+		// the team card + the run's ResultMsg.
+		m.statusMsg = m.deps.Theme.Style("muted").Render(fmt.Sprintf("team done · %s", plural(msg.Rounds, "round")))
 	}
 }
 
@@ -885,23 +890,73 @@ func (m Model) onPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	return m.afterInputEdit(cmd)
 }
 
-// onApprovalKey resolves the open permission modal. Left/right (or tab) toggle
-// the focused button; allow/deny keys send ResumeApproval with the exact ask_id.
+// isChildAsk reports whether askID identifies a surfaced SUBAGENT (child)
+// permission ask rather than one from the main session. The askID namespace
+// contract (internal/agent/dispatch.go newAskID; CLAUDE.md: "the child session id
+// IS the namespace") is "<sessionID>:<n>:<callID>" — a MAIN-agent ask is prefixed
+// with the live session id, a child ask is prefixed with the CHILD session id. So
+// an askID that contains a colon but is NOT prefixed by "<sessionID>:" is a child
+// ask. Fail-safe both directions: a colon-free fixture id classifies as the main
+// agent (offers always-allow), and if sessionID were empty everything would
+// classify as a child (the always button is merely withheld — never a wrong
+// allow).
+func isChildAsk(askID, sessionID string) bool {
+	return strings.Contains(askID, ":") && !strings.HasPrefix(askID, sessionID+":")
+}
+
+// onApprovalKey resolves the open permission modal. Left/right (or tab) cycle the
+// focused button (over {allow, deny} or {allow, always, deny} per offerAlways);
+// allow/always/deny keys send ResumeApproval with the exact ask_id. The always
+// key (w) is ignored unless always-allow is offered for this ask.
 func (m Model) onApprovalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// The focus ring is {0:allow, 2:deny} for a two-button modal and
+	// {0:allow, 1:always, 2:deny} when always-allow is offered.
+	ring := []int{0, 2}
+	if m.ask.offerAlways {
+		ring = []int{0, 1, 2}
+	}
+	idx := 0
+	for i, v := range ring {
+		if v == m.ask.focus {
+			idx = i
+			break
+		}
+	}
 	switch msg.String() {
-	case "left", "right", "tab":
-		m.ask.allowFocused = !m.ask.allowFocused
+	case "right", "tab":
+		m.ask.focus = ring[(idx+1)%len(ring)]
+		return m, nil
+	case "left":
+		m.ask.focus = ring[(idx-1+len(ring))%len(ring)]
 		return m, nil
 	case "enter":
-		return m.resolveAsk(m.ask.allowFocused)
+		return m.resolveAsk(focusVerdict(m.ask.focus))
+	}
+	if key.Matches(msg, m.keys.AllowAlways) {
+		if m.ask.offerAlways {
+			return m.resolveAsk(client.VerdictAllowAlways)
+		}
+		return m, nil
 	}
 	if key.Matches(msg, m.keys.Allow) {
-		return m.resolveAsk(true)
+		return m.resolveAsk(client.VerdictAllowOnce)
 	}
 	if key.Matches(msg, m.keys.Deny) {
-		return m.resolveAsk(false)
+		return m.resolveAsk(client.VerdictDeny)
 	}
 	return m, nil
+}
+
+// focusVerdict maps a focus index (0=allow-once, 1=always, 2=deny) to its verdict.
+func focusVerdict(focus int) client.Verdict {
+	switch focus {
+	case 1:
+		return client.VerdictAllowAlways
+	case 2:
+		return client.VerdictDeny
+	default:
+		return client.VerdictAllowOnce
+	}
 }
 
 // resolveAsk sends the approval/denial on the SAME stream (ask_id correlation),
@@ -915,24 +970,29 @@ func (m Model) onApprovalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // would leak an extra reader that outlives the run (see streamMsg / the streamGen
 // guard for why a leaked reader is dangerous across a queue-drain). One send, no
 // reader: the existing one delivers the resume events.
-func (m Model) resolveAsk(allow bool) (tea.Model, tea.Cmd) {
+func (m Model) resolveAsk(v client.Verdict) (tea.Model, tea.Cmd) {
 	askID := m.ask.AskID
 	stream := m.stream
 	m.ask = pendingAsk{}
 	m.phase = phaseRunning
 
-	verb := "denied"
-	if allow {
-		verb = "allowed"
+	var notice string
+	switch v {
+	case client.VerdictAllowAlways:
+		notice = "permission allowed (always, this session)"
+	case client.VerdictDeny:
+		notice = "permission denied"
+	default:
+		notice = "permission allowed"
 	}
-	m.conv.addNotice("permission " + verb)
+	m.conv.addNotice(notice)
 	m.refreshView()
 
 	send := func() tea.Msg {
 		if stream == nil {
 			return nil
 		}
-		if err := stream.SendApproval(askID, allow); err != nil {
+		if err := stream.SendApproval(askID, v); err != nil {
 			return client.StreamErrMsg{Err: err}
 		}
 		return nil

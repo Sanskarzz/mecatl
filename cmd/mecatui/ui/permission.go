@@ -8,13 +8,18 @@ import (
 
 // pendingAsk holds the state of an open permission modal. AskID is the exact
 // correlation key sent back in ResumeApproval — it is never derived from the
-// tool name. allowFocused tracks which button is highlighted (Allow vs Deny).
+// tool name. focus tracks which button is highlighted (0=allow-once, 1=always,
+// 2=deny). offerAlways gates the middle "always" button: it is offered only for
+// the MAIN agent's asks, never for a surfaced subagent ask (a child engine's
+// permission policy has a nil learn store, so always-allow would be a silent
+// no-op there).
 type pendingAsk struct {
-	AskID        string
-	Tool         string
-	Args         string
-	Reason       string
-	allowFocused bool
+	AskID       string
+	Tool        string
+	Args        string
+	Reason      string
+	focus       int
+	offerAlways bool
 }
 
 // renderPermissionModal renders the centred approval card. It is drawn with
@@ -53,15 +58,28 @@ func (r *renderer) renderPermissionModal(ask pendingAsk, expand bool, width, hei
 		b.WriteString("\n" + th.Style("muted").Render(sanitizeTerminal(ask.Reason)) + "\n")
 	}
 
-	allow := th.Style("askButton").Render("[A]llow")
-	deny := th.Style("askButton").Render("[D]eny")
-	if ask.allowFocused {
-		allow = th.Style("askButtonActive").Render("[A]llow")
-	} else {
-		deny = th.Style("askButtonActive").Render("[D]eny")
+	// Three buttons when always-allow is offered (main-agent asks), two otherwise
+	// (surfaced subagent asks). focus indexes {allow-once, always, deny}; for a
+	// two-button modal focus only ever takes 0 (allow) or 2 (deny).
+	btnStyle := func(idx int) string {
+		if ask.focus == idx {
+			return "askButtonActive"
+		}
+		return "askButton"
 	}
-	buttons := lipgloss.JoinHorizontal(lipgloss.Top, allow, "  ", deny)
+	allow := th.Style(btnStyle(0)).Render("[A]llow")
+	deny := th.Style(btnStyle(2)).Render("[D]eny")
+	var buttons string
+	if ask.offerAlways {
+		always := th.Style(btnStyle(1)).Render("Al[w]ays")
+		buttons = lipgloss.JoinHorizontal(lipgloss.Top, allow, "  ", always, "  ", deny)
+	} else {
+		buttons = lipgloss.JoinHorizontal(lipgloss.Top, allow, "  ", deny)
+	}
 	b.WriteString("\n" + buttons)
+	if ask.offerAlways {
+		b.WriteString("\n" + th.Style("muted").Render("al[w]ays allows this exact command for the rest of this session"))
+	}
 
 	return centerCard(th, b.String(), width, height)
 }

@@ -121,12 +121,41 @@ func (s *Stream) SendPrompt(sessionID, text string, parts []*mecatlv1.Content) e
 	})
 }
 
+// Verdict is the client-local three-way resolution of a permission.ask. It keeps
+// the proto ApprovalVerdict enum out of the ui package (which never imports
+// contracts/gen): the ui chooses a Verdict, SendApproval translates it. The zero
+// value is VerdictAllowOnce (the safe, transient allow).
+type Verdict int
+
+const (
+	// VerdictAllowOnce permits this single call only (no rule learned).
+	VerdictAllowOnce Verdict = iota
+	// VerdictAllowAlways permits this call AND learns a session-scoped rule so the
+	// same exact command is not re-asked for the rest of the session.
+	VerdictAllowAlways
+	// VerdictDeny denies this call.
+	VerdictDeny
+)
+
 // SendApproval resolves a paused permission.ask. askID is the exact value from
-// the PermissionAskMsg; allow=false denies.
-func (s *Stream) SendApproval(askID string, allow bool) error {
+// the PermissionAskMsg. It sets BOTH the legacy allow bool (so an older server
+// that ignores the verdict enum still gets the right allow/deny) AND the verdict
+// enum (so a newer server can learn the always-allow rule); the server's mapper
+// prefers the verdict and falls back to the bool for UNSPECIFIED.
+func (s *Stream) SendApproval(askID string, v Verdict) error {
+	allow := v == VerdictAllowOnce || v == VerdictAllowAlways
+	var verdict mecatlv1.ApprovalVerdict
+	switch v {
+	case VerdictAllowOnce:
+		verdict = mecatlv1.ApprovalVerdict_APPROVAL_VERDICT_ALLOW_ONCE
+	case VerdictAllowAlways:
+		verdict = mecatlv1.ApprovalVerdict_APPROVAL_VERDICT_ALLOW_ALWAYS
+	case VerdictDeny:
+		verdict = mecatlv1.ApprovalVerdict_APPROVAL_VERDICT_DENY
+	}
 	return s.sendFrame(&mecatlv1.ConverseRequest{
 		Kind: &mecatlv1.ConverseRequest_ResumeApproval{
-			ResumeApproval: &mecatlv1.ResumeApproval{AskId: askID, Allow: allow},
+			ResumeApproval: &mecatlv1.ResumeApproval{AskId: askID, Allow: allow, Verdict: verdict},
 		},
 	})
 }

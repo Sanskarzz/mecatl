@@ -654,9 +654,9 @@ func TestNoQueueDuringApproval(t *testing.T) {
 
 	// Typing then enter must NOT stage anything — the modal claims enter (resolves
 	// the default-focused "allow"), returning to phaseRunning. The probe text avoids
-	// the modal's own keys (a/y/d/n) so it can't accidentally resolve the modal
-	// mid-typing; the modal swallows it regardless (it owns the keyboard).
-	m = typeText(t, m, "wxqz")
+	// the modal's own keys (a/y/d/n and w for always-allow) so it can't accidentally
+	// resolve the modal mid-typing; the modal swallows it regardless (it owns the keyboard).
+	m = typeText(t, m, "xqz")
 	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = mm.(Model)
 

@@ -71,7 +71,11 @@ type parentCaps struct {
 	// the router auto-unregisters the askID on the routed verdict
 	// (childAskRouter.route); a stale entry (child cancelled while parked) is a harmless
 	// no-op against the idempotent registry, so no explicit unsurface seam is needed.
-	surfaceAsk func(askID string, child *Run, ask session.PendingAsk)
+	// requester is the pre-composed, already-clamp-safe attribution phrase (e.g.
+	// `subagent "fix flaky tests"`, `team member "researcher"`, `parallel branch
+	// "branch-2"`) the parent frames the surfaced ask with; empty keeps the legacy
+	// generic "subagent" framing.
+	surfaceAsk func(askID string, child *Run, ask session.PendingAsk, requester string)
 	// diag is the parent run's run-scoped diagnostics, used to emit the headless
 	// auto-deny operator diagnostic (LevelInfo, tagged agent=<child identity>: the child
 	// session id "subagent-<callID>" for Subagent children; the member name / fork label
@@ -798,7 +802,8 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// are eligible for the A2 worktree-safe auto-approve; a forker-less child is
 	// base-sharing (no auto-approve). The parent caps carry interactivity + the surface
 	// back-channel for an interactive parent; headless leaves them zero (auto-deny).
-	posture := childPosture{isolated: t.childForker != nil, caps: caps, role: string(childID)}
+	posture := childPosture{isolated: t.childForker != nil, caps: caps, role: string(childID),
+		askLabel: fmt.Sprintf("subagent %q", subagentGoal(args))}
 
 	start := time.Now()
 	// Drain the child's Event stream entirely INSIDE the Subagent tool. Nothing from the
@@ -1108,6 +1113,13 @@ type childPosture struct {
 	// child session id ("subagent-<callID>") for Subagent children, the member name for
 	// team members, the branch/judge label for forks. Empty falls back to a generic label.
 	role string
+	// askLabel is the pre-composed human-facing requester phrase passed to surfaceAsk so
+	// a surfaced ask is ATTRIBUTED to its delegation (e.g. `subagent "fix flaky tests"`,
+	// `team member "researcher"`, `parallel branch "branch-2"`). It is plain metadata
+	// (no raw args; the goal/name/label is already collapsed + clamped at the call site),
+	// re-clamped by the parent before emission. Empty for headless postures that never
+	// surface (fork judge, user-model review) — they keep the legacy framing.
+	askLabel string
 }
 
 // childAutoDenyMessage is the ACCURATE message a headless (non-interactive) subagent's
@@ -1161,7 +1173,7 @@ func resolveChildAsk(run *Run, ask session.PendingAsk, posture childPosture) {
 	// wired. Register-then-emit lives inside surfaceAsk; we DO NOT resolve here — the
 	// child stays parked until the parent routes a verdict back.
 	if posture.caps.interactive && posture.caps.surfaceAsk != nil {
-		posture.caps.surfaceAsk(ask.AskID, run, ask)
+		posture.caps.surfaceAsk(ask.AskID, run, ask, posture.askLabel)
 		return
 	}
 	// Step 4: headless / no surface → auto-deny with the accurate message + an operator

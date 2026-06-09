@@ -463,10 +463,19 @@ func (e *Engine) parentCaps(r *Run, turnIdx int) parentCaps {
 		diag:        r.diag,
 	}
 	if interactive {
-		caps.surfaceAsk = func(askID string, child *Run, ask session.PendingAsk) {
+		caps.surfaceAsk = func(askID string, child *Run, ask session.PendingAsk, requesterLabel string) {
 			// Register BEFORE emitting so a fast ResumeApproval cannot race ahead of
 			// registration (mirror askRegistry.register-before-emit).
 			r.registerChildAsk(askID, child)
+			// requester ATTRIBUTES the ask to its delegation (subagent goal / team member
+			// name / parallel branch label). It is clamped metadata (clampPreview neutralises
+			// C0/C1 + rune-caps), already composed at the child posture; an empty label keeps
+			// today's generic "subagent" framing. The raw args are still NOT forwarded
+			// (gauntlet #7) — only this static-framed requester + clamped command preview.
+			requester := "subagent"
+			if requesterLabel != "" {
+				requester = clampPreview(requesterLabel)
+			}
 			surfaced := session.PendingAsk{
 				AskID: askID,
 				Tool:  ask.Tool,
@@ -475,8 +484,8 @@ func (e *Engine) parentCaps(r *Run, turnIdx int) parentCaps {
 				// human reads it as "the subagent wants to run X", never as a trusted
 				// instruction. The original args are NOT forwarded.
 				Args: nil,
-				Reason: fmt.Sprintf("subagent requests approval to run %s: %s",
-					ask.Tool, clampPreview(surfacedCommandPreview(ask))),
+				Reason: fmt.Sprintf("%s requests approval to run %s: %s",
+					requester, ask.Tool, clampPreview(surfacedCommandPreview(ask))),
 			}
 			e.emit(r, session.Event{Type: session.EvPermissionAsk, Turn: turnIdx, Ask: &surfaced})
 		}
@@ -612,7 +621,11 @@ func ptr(v session.ToolResult) *session.ToolResult {
 	return &c
 }
 
-// newAskID derives a stable, unique ask id for a permission pause.
+// newAskID derives a stable, unique ask id for a permission pause. The leading
+// "<sessionID>:" prefix is a CONSUMED CONTRACT, not an implementation detail:
+// cmd/mecatui's isChildAsk classifies a surfaced ask as main-agent vs subagent by
+// whether the askID is prefixed with the live session id (the child session id IS
+// the namespace) — don't change the format without updating that consumer.
 func newAskID(id session.SessionID, n int, callID session.ToolCallID) string {
 	return fmt.Sprintf("%s:%d:%s", id, n, callID)
 }

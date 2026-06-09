@@ -118,5 +118,40 @@ func TestPermissionModalExpandRevealsFullDiff(t *testing.T) {
 	}
 }
 
+// TestPermissionModalOffersAlways: a main-agent ask (offerAlways) shows three
+// buttons — [A]llow / Al[w]ays / [D]eny — plus the muted always-allow caption.
+func TestPermissionModalOffersAlways(t *testing.T) {
+	plain := modalPlain(pendingAsk{
+		Tool:        "Bash",
+		Args:        `{"command":"ls"}`,
+		offerAlways: true,
+	}, false)
+	if !strings.Contains(plain, "[A]llow") || !strings.Contains(plain, "Al[w]ays") || !strings.Contains(plain, "[D]eny") {
+		t.Errorf("expected three buttons (allow / always / deny), got %q", plain)
+	}
+	if !strings.Contains(plain, "al[w]ays allows this exact command for the rest of this session") {
+		t.Errorf("expected the always-allow caption, got %q", plain)
+	}
+}
+
+// TestPermissionModalNoAlwaysForChild: a surfaced subagent ask (offerAlways=false)
+// shows only the two buttons and no always-allow caption.
+func TestPermissionModalNoAlwaysForChild(t *testing.T) {
+	plain := modalPlain(pendingAsk{
+		Tool:        "Bash",
+		Args:        `{"command":"ls"}`,
+		offerAlways: false,
+	}, false)
+	if !strings.Contains(plain, "[A]llow") || !strings.Contains(plain, "[D]eny") {
+		t.Errorf("expected allow/deny buttons, got %q", plain)
+	}
+	if strings.Contains(plain, "Al[w]ays") {
+		t.Errorf("a child ask must NOT offer the always button, got %q", plain)
+	}
+	if strings.Contains(plain, "al[w]ays allows this exact command") {
+		t.Errorf("a child ask must NOT show the always-allow caption, got %q", plain)
+	}
+}
+
 // countLines counts newline-separated lines for the taller-than assertion.
 func countLines(s string) int { return strings.Count(s, "\n") + 1 }

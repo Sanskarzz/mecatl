@@ -568,9 +568,14 @@ func renderTeamTasks(th theme.Theme, b *block, height int) string {
 	return out.String()
 }
 
-// taskRow renders one task row: glyph · id · state · assignee (or "—") · deps. All
-// task-derived strings are sanitized (the description is not shown — the row keys
-// off id/state to stay scannable; the description rides the focus/inline surfaces).
+// maxTaskDescLen bounds the inline task description so a row stays one line (the
+// task sub-view's window-height math counts one line per task).
+const maxTaskDescLen = 40
+
+// taskRow renders one task row: glyph · id · [desc ·] state · assignee (or "—") ·
+// deps. All task-derived strings are sanitized; the description is truncated to
+// maxTaskDescLen so the row stays a single scannable line. A task with no
+// description keeps the 5-field form (no empty cell).
 func taskRow(t teamTask, byID map[string]string) string {
 	assignee := "—"
 	if t.assignee != "" {
@@ -584,12 +589,14 @@ func taskRow(t teamTask, byID map[string]string) string {
 		}
 		deps = strings.Join(sane, ",")
 	}
-	return fmt.Sprintf("%s %s · %s · %s · deps:%s",
-		taskGlyph(t.state, taskBlocked(t, byID)),
-		sanitizeTerminal(t.id),
-		sanitizeTerminal(t.state),
-		assignee,
-		deps)
+	glyph := taskGlyph(t.state, taskBlocked(t, byID))
+	id := sanitizeTerminal(t.id)
+	state := sanitizeTerminal(t.state)
+	if t.desc == "" {
+		return fmt.Sprintf("%s %s · %s · %s · deps:%s", glyph, id, state, assignee, deps)
+	}
+	desc := truncate(sanitizeTerminal(t.desc), maxTaskDescLen)
+	return fmt.Sprintf("%s %s · %s · %s · %s · deps:%s", glyph, id, desc, state, assignee, deps)
 }
 
 // teamTasksSummary renders the one-line task roll-up: "N done · N in-progress ·

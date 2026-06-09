@@ -191,8 +191,8 @@ func TestSurfacedAskRedaction(t *testing.T) {
 	if sawChildText {
 		t.Fatalf("gauntlet #7: child message.delta text leaked to the parent stream")
 	}
-	if !strings.Contains(surfaced.Reason, "subagent requests approval to run Bash") {
-		t.Fatalf("surfaced ask must be framed as a subagent request, got reason: %q", surfaced.Reason)
+	if !strings.Contains(surfaced.Reason, `subagent "x" requests approval to run Bash`) {
+		t.Fatalf("surfaced ask must be framed as an attributed subagent request, got reason: %q", surfaced.Reason)
 	}
 	// The command is clamped (rune-bounded); the 400-X blob must not ride in full.
 	if strings.Contains(surfaced.Reason, strings.Repeat("X", 300)) {

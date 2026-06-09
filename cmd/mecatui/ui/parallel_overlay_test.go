@@ -175,6 +175,57 @@ func TestParallelFailedBranchGlyph(t *testing.T) {
 	}
 }
 
+// TestParallelGroupFocusBranchDurationAndRunStop covers WI-5 (a finished branch row
+// carries its wall-clock duration) and WI-6 (a resolved group's focus shows the
+// run-level stop). The seeded branchEndPar sets DurationMs=900 and the judge endPar
+// carries stop="end_turn".
+func TestParallelGroupFocusBranchDurationAndRunStop(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedParallel(m, "p1",
+		startPar("p1", "judge", 2),
+		branchStartPar("p1", 0, "branch-1", "approach A"),
+		branchStartPar("p1", 1, "branch-2", "approach B"),
+		branchEndPar("p1", 0, 100, 20, 2, "end_turn", false, "/fork/branch-1"),
+		branchEndPar("p1", 1, 120, 25, 3, "end_turn", false, "/fork/branch-2"),
+		endPar("p1", "judge", 2, 1, "/fork/branch-2", "end_turn"),
+	)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	out := stripANSIstr(m.View().Content)
+	// WI-5: branch duration adjacent to the stop label.
+	if !strings.Contains(out, "done · 900ms") {
+		t.Errorf("a finished branch should show its duration (done · 900ms):\n%s", out)
+	}
+	// WI-6: the resolved group's run-level stop.
+	if !strings.Contains(out, "run stop: done") {
+		t.Errorf("a resolved group focus should show the run-level stop:\n%s", out)
+	}
+}
+
+// TestParallelGroupFocusNoRunStopForJoinAll covers the WI-6 empty-guard: a join=all run
+// carries no winner-bearing stop, so the focus shows NO "run stop:" line.
+func TestParallelGroupFocusNoRunStopForJoinAll(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedParallel(m, "p1",
+		startPar("p1", "all", 2),
+		branchStartPar("p1", 0, "branch-1", "explore A"),
+		branchStartPar("p1", 1, "branch-2", "explore B"),
+		branchEndPar("p1", 0, 100, 20, 2, "end_turn", false, "/fork/branch-1"),
+		branchEndPar("p1", 1, 120, 25, 3, "end_turn", false, "/fork/branch-2"),
+		endPar("p1", "all", 2, -1, "", ""), // join=all: no winner, no run stop
+	)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = mm.(Model)
+	out := stripANSIstr(m.View().Content)
+	if strings.Contains(out, "run stop:") {
+		t.Errorf("a join=all group (no run stop) must render no run-stop line:\n%s", out)
+	}
+}
+
 // TestParallelTabRoutingAndEsc asserts ctrl+a → tab reaches the Parallel tab and esc
 // from the roster closes the overlay.
 func TestParallelTabRoutingAndEsc(t *testing.T) {

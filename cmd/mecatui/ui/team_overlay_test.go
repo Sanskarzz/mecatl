@@ -912,6 +912,47 @@ func TestAgentsTasksToggle(t *testing.T) {
 	}
 }
 
+// TestTaskRowShowsDescription: a task with a description renders the 6-field row
+// (glyph · id · desc · state · assignee · deps) with the truncated description.
+func TestTaskRowShowsDescription(t *testing.T) {
+	row := taskRow(teamTask{id: "task-1", desc: "wire the gRPC echo", state: "in-progress", assignee: "researcher"}, nil)
+	if !strings.Contains(row, "task-1") || !strings.Contains(row, "wire the gRPC echo") {
+		t.Errorf("row must show id + description, got %q", row)
+	}
+	if !strings.Contains(row, "in-progress") || !strings.Contains(row, "researcher") {
+		t.Errorf("row must still show state + assignee, got %q", row)
+	}
+	// desc sits between id and state.
+	di := strings.Index(row, "wire the gRPC echo")
+	si := strings.Index(row, "in-progress")
+	if di < 0 || si < 0 || di > si {
+		t.Errorf("description must render before state, got %q", row)
+	}
+}
+
+// TestTaskRowDescLessKeepsFiveFields: a description-less task keeps the original
+// 5-field row with no empty desc cell.
+func TestTaskRowDescLessKeepsFiveFields(t *testing.T) {
+	row := taskRow(teamTask{id: "task-2", state: "pending"}, nil)
+	want := "task-2 · pending · — · deps:—"
+	if !strings.HasSuffix(stripANSIstr(row), want) {
+		t.Errorf("desc-less row = %q, want suffix %q (no empty desc cell)", row, want)
+	}
+}
+
+// TestTaskRowTruncatesLongDesc: a description longer than maxTaskDescLen is
+// ellipsised so the row stays one line.
+func TestTaskRowTruncatesLongDesc(t *testing.T) {
+	long := strings.Repeat("x", maxTaskDescLen+20)
+	row := taskRow(teamTask{id: "task-3", desc: long, state: "pending"}, nil)
+	if strings.Contains(row, long) {
+		t.Errorf("over-cap description must be truncated, got %q", row)
+	}
+	if !strings.Contains(row, "…") {
+		t.Errorf("truncated description should carry an ellipsis, got %q", row)
+	}
+}
+
 // TestAgentsTasksEmpty asserts a team with no tasks reads as a muted "(no tasks)"
 // with a zeroed summary and never panics.
 func TestAgentsTasksEmpty(t *testing.T) {
@@ -1055,6 +1096,32 @@ func TestAgentsFindingsShowsBody(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 finding(s) from 1 member(s)") {
 		t.Errorf("findings summary mismatch, got:\n%s", out)
+	}
+}
+
+// TestTeamEndSetsTransientNotice (WI-4) asserts a team.end sets the transient footer
+// status "team done · N rounds" and adds NO durable scrollback notice.
+func TestTeamEndSetsTransientNotice(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = seedTeam(m, func(c *conversation) { c.setTeamStart("t1", "team-x", roster()) })
+	before := len(m.conv.blocks)
+	mm, _ := m.Update(client.TeamMsg{
+		Kind:         client.TeamEnd,
+		ParentCallID: "t1",
+		TeamID:       "team-x",
+		Rounds:       3,
+		Stop:         "end_turn",
+	})
+	m = mm.(Model)
+	if got := stripANSIstr(m.statusMsg); got != "team done · 3 rounds" {
+		t.Errorf("team.end status = %q, want %q", got, "team done · 3 rounds")
+	}
+	// No durable notice block was added by the team.end (the card + ResultMsg carry
+	// the durable signal); only the team card may have updated, never a new notice.
+	for i := before; i < len(m.conv.blocks); i++ {
+		if m.conv.blocks[i].kind == blockNotice {
+			t.Errorf("team.end must NOT add a scrollback notice; got %q", m.conv.blocks[i].raw)
+		}
 	}
 }
 

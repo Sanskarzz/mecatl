@@ -13,12 +13,16 @@ type keyMap struct {
 	// Paste (ctrl+v) reads the OS clipboard: an image stages as an inline media
 	// attachment ([Image #N]), text inserts into the prompt. Distinct from a
 	// bracketed paste (tea.PasteMsg, handled by onPaste) which never reaches here.
-	Paste   key.Binding
-	Quit    key.Binding
-	Allow   key.Binding
-	Deny    key.Binding
-	ScrollU key.Binding
-	ScrollD key.Binding
+	Paste key.Binding
+	Quit  key.Binding
+	Allow key.Binding
+	// AllowAlways (w) resolves the permission modal as always-allow: permit this
+	// call AND learn a session-scoped rule so the exact command is not re-asked.
+	// Offered only for the main agent's asks (never a surfaced subagent ask).
+	AllowAlways key.Binding
+	Deny        key.Binding
+	ScrollU     key.Binding
+	ScrollD     key.Binding
 	// ScrollTop / ScrollBottom jump the conversation viewport to its top / bottom
 	// (End naturally re-sticks auto-follow). These are DEDICATED scrollback keys
 	// bound to "home"/"end" ONLY — deliberately NOT g/G, which must stay typeable
@@ -132,6 +136,10 @@ func defaultKeys() keyMap {
 		Allow: key.NewBinding(
 			key.WithKeys("a", "y", "enter"),
 			key.WithHelp("a", "allow"),
+		),
+		AllowAlways: key.NewBinding(
+			key.WithKeys("w"),
+			key.WithHelp("w", "always allow (session)"),
 		),
 		Deny: key.NewBinding(
 			key.WithKeys("d", "n", "esc"),

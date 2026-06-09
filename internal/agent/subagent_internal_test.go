@@ -11,9 +11,83 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/internal/port"
 	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/tool"
 )
+
+// TestSurfaceAskAttribution proves the parentCaps.surfaceAsk closure ATTRIBUTES the
+// surfaced parent EvPermissionAsk to its delegation family: a subagent goal, a team
+// member name, or a parallel branch label rides the framed Reason (the pre-composed
+// requester phrase), while an empty label falls back to the generic "subagent" framing.
+// It also asserts the attribution is CLAMPED — a control-character-bearing label arrives
+// neutralised (clampPreview strips C0/C1) — and that the raw child args never ride.
+func TestSurfaceAskAttribution(t *testing.T) {
+	e := NewEngine(Deps{
+		LLM:         mockllm.New(mockllm.TextTurn("x")),
+		Catalog:     tool.NewCatalog(),
+		Policy:      permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Model:       "m",
+		Interactive: true,
+	})
+
+	tests := []struct {
+		name       string
+		label      string
+		wantPrefix string
+		wantClean  bool // assert no raw control byte survived in the Reason
+	}{
+		{"subagent goal", `subagent "fix flaky tests"`, `subagent "fix flaky tests" requests approval to run Bash`, false},
+		{"team member name", `team member "researcher"`, `team member "researcher" requests approval to run Bash`, false},
+		{"parallel branch label", `parallel branch "branch-2"`, `parallel branch "branch-2" requests approval to run Bash`, false},
+		{"empty label keeps generic framing", "", "subagent requests approval to run Bash", false},
+		{"control-bearing label is neutralised", "team member \"a\x07b\"", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Run{
+				events:    make(chan session.Event, 8),
+				asks:      newAskRegistry(),
+				ctx:       context.Background(),
+				diag:      port.NopDiagnostics{},
+				childAsks: newChildAskRouter(),
+			}
+			caps := e.parentCaps(r, 0)
+			if caps.surfaceAsk == nil {
+				t.Fatalf("interactive engine must install a surfaceAsk seam")
+			}
+			child := &Run{events: make(chan session.Event, 1), asks: newAskRegistry()}
+			ask := session.PendingAsk{
+				AskID:  "child-sess:1:k1",
+				Tool:   "Bash",
+				Args:   json.RawMessage(`{"command":"cat data.txt"}`),
+				Reason: "command substitution requires approval",
+			}
+			caps.surfaceAsk(ask.AskID, child, ask, tc.label)
+
+			var got session.Event
+			select {
+			case got = <-r.events:
+			default:
+				t.Fatalf("surfaceAsk emitted no event")
+			}
+			if got.Type != session.EvPermissionAsk || got.Ask == nil {
+				t.Fatalf("expected a surfaced EvPermissionAsk, got %v", got.Type)
+			}
+			if tc.wantPrefix != "" && !strings.Contains(got.Ask.Reason, tc.wantPrefix) {
+				t.Fatalf("surfaced reason %q must contain %q", got.Ask.Reason, tc.wantPrefix)
+			}
+			if tc.wantClean && strings.ContainsRune(got.Ask.Reason, '\x07') {
+				t.Fatalf("control byte leaked into surfaced reason: %q", got.Ask.Reason)
+			}
+			// Gauntlet #7: the raw JSON args field is NEVER forwarded (only the framed
+			// reason + clamped command preview ride).
+			if len(got.Ask.Args) != 0 {
+				t.Fatalf("gauntlet #7: raw child args must not ride the surfaced ask; got %q", string(got.Ask.Args))
+			}
+		})
+	}
+}
 
 // TestTightenLimit is the unit table for the tighten-only clamp, including the
 // inherited==0 (unlimited) branch: a positive override against an unlimited (0) bound

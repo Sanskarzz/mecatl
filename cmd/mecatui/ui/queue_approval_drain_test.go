@@ -37,12 +37,14 @@ func TestResolveAskArmsNoExtraStreamReader(t *testing.T) {
 	// Both the allow and deny paths are reader-identical (resolveAsk returns the same
 	// send-only command either way; allow/deny only changes the frame payload), so
 	// both must leave the afterEvent reader as the sole reader.
-	for _, allow := range []bool{true, false} {
-		name := "allow"
-		if !allow {
-			name = "deny"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		verdict client.Verdict
+	}{
+		{"allow", client.VerdictAllowOnce},
+		{"deny", client.VerdictDeny},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			th := theme.New("aztec", theme.AztecPalette())
 			conv := &fakeConv{recv: &fakeRecver{}, send: &fakeSender{}}
 			m := New(Deps{
@@ -64,10 +66,10 @@ func TestResolveAskArmsNoExtraStreamReader(t *testing.T) {
 			m.stream = client.NewStream(&fakeRecver{}, &fakeSender{})
 			m.streamCh = ch
 			m.phase = phaseAwaitingApproval
-			m.ask = pendingAsk{AskID: "ask-1", Tool: "Write", allowFocused: true}
+			m.ask = pendingAsk{AskID: "ask-1", Tool: "Write", focus: 0}
 			ch <- client.StreamClosedMsg{} // the message the in-flight reader will eventually take
 
-			_, cmd := m.resolveAsk(allow)
+			_, cmd := m.resolveAsk(tc.verdict)
 			runBatchLeaves(cmd) // execute the send + any (wrongly) batched reader
 
 			// The parked message must still be on the channel. If resolveAsk armed a second

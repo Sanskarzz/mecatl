@@ -770,7 +770,8 @@ func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID,
 	final, stop, usage, toolCount := drainChildObserved(
 		run, be.branchTool(i),
 		string(callID), string(childSess.ID),
-		childPosture{isolated: true, caps: caps, role: label},
+		childPosture{isolated: true, caps: caps, role: label,
+			askLabel: fmt.Sprintf("parallel branch %q", label)},
 	)
 	res.usage = usage
 	t.fireSubagentStop(ctx, childSess)
