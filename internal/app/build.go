@@ -760,9 +760,14 @@ func sessionEngineFactory(
 		if refMgr == nil {
 			refMgr = mgr
 		}
-		taskTool, taskClose := buildSubagentTool(ctx, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, hooks, agentReg, refMgr)
+		taskTool, taskClose := buildSubagentTool(ctx, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, hooks, agentReg, refMgr, store)
 		cat.MustRegister(taskTool)
 		closeFn = composeCloseErr(taskClose, closeFn)
+		// The PULL subagent-transcript inspect tool: read-only, reads the SAME shared
+		// session store the Subagent tool persists children to (ids verbatim from the
+		// result's agentId trailer). Registered unconditionally wherever Subagent is —
+		// unlike InspectMember it is not gated on EnableTeams.
+		cat.MustRegister(agent.NewInspectSubagentTool(store))
 		if cfg.EnableTeams {
 			// In-catalog Team tool over a per-session member factory wired to the session
 			// provider as parent. (The standalone gRPC CreateTeam RPC stays on the default
@@ -1502,8 +1507,13 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	// model (reg.Default()/cfg.Model), so a def that pins no provider runs on the
 	// default exactly as before. A def's own `provider:` overrides per-def. agentReg
 	// is resolved ONCE in buildEngine and shared with the per-session factory (Half B).
-	taskTool, taskMCPClose := buildSubagentTool(ctx, cfg, reg, provider, reg.Default(), cfg.Model, hooks, agentReg, mainMgr)
+	taskTool, taskMCPClose := buildSubagentTool(ctx, cfg, reg, provider, reg.Default(), cfg.Model, hooks, agentReg, mainMgr, store)
 	cat.MustRegister(taskTool)
+	// The PULL subagent-transcript inspect tool: read-only, reads the SAME shared
+	// session store the Subagent tool persists children to (ids verbatim from the
+	// result's agentId trailer). Registered unconditionally wherever Subagent is —
+	// unlike InspectMember it is not gated on EnableTeams.
+	cat.MustRegister(agent.NewInspectSubagentTool(store))
 	// Aggregate the per-def INLINE MCP managers' teardown into the main MCP close, so
 	// Built.Close tears them ALL down on shutdown (process-lifetime engines).
 	mcpClose = composeClose(cfg.diag(), taskMCPClose, mcpClose)
@@ -2225,7 +2235,7 @@ func buildParallelJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engi
 // inherits whatever the call site supplies — the build-time default (buildCatalog)
 // or a session-selected provider (Half B). The registry never reaches the Subagent
 // tool itself; it is consumed only inside buildAgentSubagentEngines' resolution loop.
-func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager) (tool.Tool, func() error) {
+func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager, store port.SessionStore) (tool.Tool, func() error) {
 	// Resolve the active skills once so a def's `skills:` can preload skill bodies
 	// into its engine prompt. The same index is the operator-controlled skill set
 	// the Skill tool serves. `hooks` is the inert default each def adopts unless its
@@ -2239,6 +2249,10 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 	opts := []agent.SubagentOption{
 		agent.WithSubagentStopHook(hooks),
 		agent.WithAgentEngines(engines, meta),
+		// Best-effort persist each child session to the SHARED session store so the
+		// InspectSubagent tool can load its transcript by the agentId trailer (ids verbatim;
+		// the namespace stays disjoint by prefix convention, not engineering).
+		agent.WithSubagentStore(store),
 	}
 	// Wire the worktree forker ONLY when Bash is available: the child catalog has Bash
 	// iff sandboxedRunner != nil, and the forker is what isolates that shell. The two

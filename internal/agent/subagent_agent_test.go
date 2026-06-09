@@ -7,6 +7,7 @@ import (
 
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/tool"
@@ -119,6 +120,21 @@ func TestSubagentSpecEnumeratesAgents(t *testing.T) {
 	}
 	if !task.ReadOnly() {
 		t.Fatalf("Subagent.ReadOnly() must stay true")
+	}
+	// The description must name the agentId discovery channel and the InspectSubagent
+	// tool so the model knows to pass the trailer id along (runtime-discoverability).
+	if !strings.Contains(desc, "agentId:") || !strings.Contains(desc, "InspectSubagent") {
+		t.Fatalf("spec must name 'agentId:' and InspectSubagent, got:\n%s", desc)
+	}
+}
+
+// TestInspectSubagentSpecNamesProvenance proves the InspectSubagent description names the
+// 'agentId:' line provenance and the ~40-message bound (kept in sync with
+// maxInspectMessages).
+func TestInspectSubagentSpecNamesProvenance(t *testing.T) {
+	desc := agent.NewInspectSubagentTool(memstore.New()).Spec().Description
+	if !strings.Contains(desc, "'agentId:' line") || !strings.Contains(desc, "~40") {
+		t.Fatalf("InspectSubagent spec must name the 'agentId:' line and the ~40-message bound, got:\n%s", desc)
 	}
 }
 

@@ -114,6 +114,11 @@ func TestSubagentStructuredOutputExhaustionFails(t *testing.T) {
 	if !strings.Contains(results[0].Content, "required") {
 		t.Fatalf("failure should carry the last validation error, got %q", results[0].Content)
 	}
+	// The agentId trailer is UNIVERSAL — it must ride the StopStructuredOutput error
+	// path too, so the model can InspectSubagent the failed child.
+	if !strings.Contains(results[0].Content, "agentId: subagent-p1") {
+		t.Fatalf("structured-output failure must carry the agentId trailer, got %q", results[0].Content)
+	}
 }
 
 // TestSubagentFreeTextUnchangedByStructuredPath is the regression guard: a Subagent call with NO

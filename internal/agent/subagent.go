@@ -346,6 +346,16 @@ type SubagentTool struct {
 	// idPrefix seeds the generated child SessionID so child sessions are
 	// distinguishable in logs/stores.
 	idPrefix string
+
+	// store, when non-nil, best-effort persists each child session after its run so an
+	// out-of-band reader (the InspectSubagent tool) can load its transcript by the
+	// agentId the result trailer surfaces. nil disables persistence (persistMember
+	// discipline: advisory, save failures swallowed). NAMESPACE NOTE (document-don't-
+	// engineer): child ids ("subagent-<callID>") share the one session store with the
+	// service's crypto-random session ids and the team members' "team-<teamID>-<member>"
+	// ids; the prefixes keep them disjoint by convention, and jsonlstore sanitizes any
+	// id into a safe filename, so no collision engineering is needed.
+	store port.SessionStore
 }
 
 // defaultStructuredOutputRetries bounds how many CORRECTION re-drives a
@@ -411,6 +421,17 @@ func WithChildSessionPrefix(p string) SubagentOption {
 // before. A fork failure on this path is a tool error, not a silent fallback.
 func WithChildForker(f tool.WorkspaceForker) SubagentOption {
 	return func(t *SubagentTool) { t.childForker = f }
+}
+
+// WithSubagentStore injects the optional session store each child session is
+// best-effort persisted to after its run (ALL terminals: clean, limit-stopped,
+// structured-output-exhausted, errored, cancelled/timed out — the final state after
+// any structured-output re-drives). Nil disables persistence. Mirrors the team
+// supervisor's WithMemberStore/persistMember discipline: the save is advisory and a
+// failure is swallowed (no diagnostic). The tool consumes the port.SessionStore
+// interface, never a concrete adapter, so no layering rule is crossed.
+func WithSubagentStore(store port.SessionStore) SubagentOption {
+	return func(t *SubagentTool) { t.store = store }
 }
 
 // WithMaxConcurrentChildren bounds how many Subagent children may run CONCURRENTLY —
@@ -534,7 +555,9 @@ func (t *SubagentTool) Spec() tool.ToolSpec {
 		"for independent questions. Do NOT use it when you need the intermediate outputs in this " +
 		"conversation (do the work yourself), when file changes must be kept (use Parallel), or when " +
 		"workers must coordinate (use Team) — and don't delegate a single quick read you can do with " +
-		"Read/Grep."
+		"Read/Grep." +
+		" Every result starts with an 'agentId:' line — pass that id to InspectSubagent to read the " +
+		"subagent's full transcript later."
 	desc += t.agentEnumeration()
 	return tool.ToolSpec{
 		Name:        subagentToolName,
@@ -813,6 +836,15 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// free-text path runs exactly one drive.
 	final, stop, usage, toolCount := driveChild(ctx, engine, child, runWS, prompt, runOpts, emit, call, childID, posture, submit, args.OutputSchema)
 
+	// Best-effort persist of the child's FINAL state (after any structured-output
+	// re-drives) so InspectSubagent can load it by the trailer id. persistMember
+	// discipline: nil store disables; a save failure is advisory and swallowed.
+	// NOTE: ctx may already be cancelled here (parent cancel / timeout_ms) — both
+	// shipped stores ignore ctx on Save, mirroring persistMember; a future
+	// ctx-honouring store would drop the save on that path (same documented
+	// residual the supervisor carries).
+	t.persistChild(ctx, child)
+
 	if emit != nil {
 		emit(session.Event{Type: session.EvSubagentEnd, Subagent: &session.SubagentPayload{
 			ParentCallID: string(call.ID),
@@ -833,7 +865,7 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// so the model learns the call hit its own limit (distinct from a generic failure).
 	if timeoutCtx != nil && timeoutCtx.Err() == context.DeadlineExceeded {
 		return session.NewToolError(call.ID,
-			fmt.Sprintf("Subagent: subagent exceeded its time budget (%dms) and was stopped", *args.TimeoutMs)), nil
+			fmt.Sprintf("Subagent: subagent exceeded its time budget (%dms) and was stopped\n\nagentId: %s", *args.TimeoutMs, childID)), nil
 	}
 
 	return renderSubagentResult(call.ID, childID, final, stop, submit), nil
@@ -849,7 +881,7 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 //   - StopBudget                        → success-with-note (stopped at the token budget).
 //   - everything else (StopEndTurn / StopNoProgress / …) → success.
 //
-// On every NON-error terminal the result text carries the structured payload (when a
+// On EVERY terminal the result text carries the structured payload (when a
 // schema was satisfied) else the free-text summary, prefixed with the agentId trailer
 // so the parent MODEL can discover the child id (mirroring renderTeamResult's Team-id
 // line — the runtime-discoverability axis: the id must be where the model reads it, not
@@ -865,14 +897,14 @@ func renderSubagentResult(callID session.ToolCallID, childID session.SessionID, 
 				msg += ": " + last
 			}
 		}
-		return session.NewToolError(callID, "Subagent: "+msg)
+		return session.NewToolError(callID, "Subagent: "+msg+"\n\nagentId: "+string(childID))
 	}
 	if stop == session.StopError {
 		msg := final
 		if msg == "" {
 			msg = "subagent failed without producing a summary"
 		}
-		return session.NewToolError(callID, "Subagent: "+msg)
+		return session.NewToolError(callID, "Subagent: "+msg+"\n\nagentId: "+string(childID))
 	}
 
 	// Success family. A structured-output run returns the validated payload; otherwise
@@ -903,8 +935,9 @@ func renderSubagentResult(callID session.ToolCallID, childID session.SessionID, 
 // renderSubagentTrailer prepends the model-visible agentId line to a Subagent result body,
 // mirroring renderTeamResult's Team-id line. The childID is rendered VERBATIM (the
 // deterministic t.childSessionID(callID)) so a human can correlate the overlay row and
-// the parent can refer to "the subagent that did X" by id. It pre-positions the seam
-// for a future inspect/resume without a second wire change (R2: trailer only this round).
+// the parent can refer to "the subagent that did X" by id. It is the model's REAL
+// handle: InspectSubagent loads the persisted child transcript by this id (verbatim —
+// the id IS the session id, no derivation).
 func renderSubagentTrailer(childID session.SessionID, body string) string {
 	return fmt.Sprintf("agentId: %s\n\n%s", childID, body)
 }
@@ -1221,6 +1254,17 @@ func (t *SubagentTool) fireSubagentStop(ctx context.Context, child *session.Sess
 		Phase:     governance.PhaseSubagentStop,
 		SessionID: string(child.ID),
 	})
+}
+
+// persistChild best-effort saves the child session to the injected store so the
+// InspectSubagent tool can later load its transcript by the agentId trailer. A nil
+// store disables persistence; a save failure is advisory and swallowed (persistMember
+// discipline).
+func (t *SubagentTool) persistChild(ctx context.Context, child *session.Session) {
+	if t.store == nil {
+		return
+	}
+	_ = t.store.Save(ctx, child)
 }
 
 // unknownAgentHint builds the model-addressable error text for a Subagent call that

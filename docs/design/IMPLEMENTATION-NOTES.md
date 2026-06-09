@@ -258,13 +258,30 @@ differs: `spec.Mutating || roIsolationAvailable` + the `isolateReadOnly` side-ef
 RESULT is now LABELLED by terminal stop reason: `StopError` → tool error; `StopStructuredOutput` →
 tool error carrying the last validation failure; `StopMaxTurns`/`StopMaxToolCalls`/`StopBudget` →
 success-with-note (`[subagent stopped: …]` prefix); everything else (`StopEndTurn`/`StopNoProgress`/
-…) → success. On every non-error terminal the result text carries an `agentId: <childID>` trailer
-(mirroring `renderTeamResult`'s Team-id line) so the parent MODEL can DISCOVER the deterministic
-child id (`subagent-<callID>`) — the runtime-discoverability axis: the id must be where the model
-reads it, not only on the client-only `subagent.*` events. It is INFORMATIONAL this round (no
-`InspectSubagent` tool yet — R2), pre-positioning the seam. Guard:
-`agent.TestSubagentAgentIdTrailerInResultText` (+ the existing subagent tests updated from exact-equality
-to substring assertions for the trailer).
+…) → success. On EVERY terminal — including the error/timeout terminals (`StopError`,
+`StopStructuredOutput`, the `timeout_ms` deadline) — the result text carries an `agentId: <childID>`
+trailer (mirroring `renderTeamResult`'s Team-id line; TRAILING on errors so the error headline stays
+first) so the parent MODEL can DISCOVER the deterministic child id (`subagent-<callID>`) — the
+runtime-discoverability axis: the id must be where the model reads it, not only on the client-only
+`subagent.*` events. The trailer is now the model's REAL handle: each child session is best-effort
+persisted via `WithSubagentStore` (the shared session store, `persistMember` discipline — nil
+disables, failures swallowed; persisted on ALL terminals after any structured-output re-drives), and
+the read-only `InspectSubagent` PULL tool (`subagentinspect.go`, sibling of `InspectMember`) loads
+that transcript by the id VERBATIM (the `agent_id` IS the session id — no derivation), rendering it
+through the SHARED `renderInspectTranscript(header, sess)` (extracted from `renderMemberTranscript`,
+byte-identical bounds 40/1000/8000). A PREFIX GATE rejects any `agent_id` not starting with the
+subagent child prefix (`requiredPrefix`, default `"subagent-"`) BEFORE the store is touched, so the
+model cannot read team-member (`team-<teamID>-<member>`) or service-session transcripts through this
+tool, bypassing `InspectMember`'s team_id+member framing — the same gate the planned `resume` path
+(B2.1) specifies. `InspectSubagent` is registered UNCONDITIONALLY wherever the
+Subagent tool is (NOT gated on `EnableTeams`, unlike `InspectMember`); both inspect tools share the
+one store, ids kept disjoint by prefix convention (`subagent-…` / `team-…`), the gate enforcing the
+subagent side. No `defaultRules()` entry (Ask floor, parity with `InspectMember`). Guards:
+`agent.TestParentDiscoversAgentIDFromResultAndInspects` (model-facing e2e), `TestSubagentPersistsChildAfterRun`,
+`TestSubagentPersistsFinalStateAfterStructuredRetry`, `TestSubagentPersistsAfterErrorTerminal`,
+`TestSubagentPersistsAfterTimeoutTerminal`, `TestSubagentNilStoreSkipsPersist`, `TestInspectSubagentHappyPath`,
+`TestInspectSubagentUnknownIDErrors`, `TestInspectSubagentStoreFailureDistinct`,
+`TestInspectSubagentForgedIDCleanError` (+ the existing subagent tests' substring assertions for the trailer).
 
 **Subagent per-call token ceiling (`max_tokens`, Run-scoped budget override — R4).** `subagentArgs.MaxTokens`
 rides the new `RunOptions.MaxRunTokensOverride` carried into `Engine.RunContentWith`, so a per-call

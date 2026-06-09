@@ -469,6 +469,12 @@ func TestHalfBSelectedSessionHasSubagentTool(t *testing.T) {
 	if !res.Engine.HasTool("Subagent") {
 		t.Fatal("a provider-selected session must now carry the Subagent tool (Half B); it does not")
 	}
+	// InspectSubagent is registered UNCONDITIONALLY wherever Subagent is — including the
+	// per-session (sessionEngineFactory) catalog, the historically-fragile registration
+	// site (the MCP-strip regression class).
+	if !res.Engine.HasTool("InspectSubagent") {
+		t.Fatal("a provider-selected session must carry the InspectSubagent tool alongside Subagent; it does not")
+	}
 }
 
 // TestHalfBSessionProviderInheritance: a session selecting provider B, routing a

@@ -590,9 +590,11 @@ the child is given a synthetic `SubmitResult` tool whose params ARE the schema, 
 call it to deliver, and the submitted payload is validated by `session.ValidateJSON`
 with a bounded correction-retry, NO `tool_choice` forcing). The Subagent RESULT is labelled
 by terminal reason (success / `[subagent stopped: …]` note / structured-output
-validation error / error) and carries an `agentId: <childID>` trailer (model-visible,
-mirroring the Team-id line) so the parent can discover the child id. None of these widen
-`port.LLMRequest` — they are `subagentArgs`/`RunOptions`/factory concerns.
+validation error / error) and carries an `agentId: <childID>` trailer on every terminal
+(model-visible, mirroring the Team-id line) so the parent can discover the child id and
+read its persisted transcript via the read-only `InspectSubagent` tool (the id is used
+verbatim). None of these widen `port.LLMRequest` — they are
+`subagentArgs`/`RunOptions`/factory concerns.
 
 The child is a **read-only explorer with a shell** — capability flows down from the
 parent (which has Bash); isolation, not catalog read-only-ness, is the security

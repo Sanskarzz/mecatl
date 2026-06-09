@@ -121,17 +121,19 @@ func (t *InspectMemberTool) Execute(ctx context.Context, call session.ToolCall, 
 		return session.NewToolError(call.ID, fmt.Sprintf(
 			"InspectMember: failed to load member %q in team %q: %v", member, teamID, err)), nil
 	}
-	return session.NewToolResult(call.ID, renderMemberTranscript(member, teamID, sess)), nil
+	return session.NewToolResult(call.ID, renderInspectTranscript(
+		fmt.Sprintf("Transcript of member %q in team %q:", member, teamID), sess)), nil
 }
 
-// renderTranscript renders the BOUNDED trailing tail of a member session's
-// conversation into a single, readable string for the parent's ToolResult. It clamps
-// the number of messages (maxInspectMessages), each message body
-// (maxInspectMessageRunes), and the overall length (maxInspectTotalRunes), so an
-// arbitrarily long member transcript can never be copied verbatim.
-func renderMemberTranscript(member, teamID string, sess *session.Session) string {
+// renderInspectTranscript renders the BOUNDED trailing tail of a session's
+// conversation into a single, readable string for the parent's ToolResult, under the
+// supplied header line. It clamps the number of messages (maxInspectMessages), each
+// message body (maxInspectMessageRunes), and the overall length (maxInspectTotalRunes),
+// so an arbitrarily long transcript can never be copied verbatim. It is shared by both
+// PULL inspect tools (InspectMember, InspectSubagent) so their output stays identical.
+func renderInspectTranscript(header string, sess *session.Session) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Transcript of member %q in team %q:\n", member, teamID)
+	b.WriteString(header + "\n")
 
 	msgs := sess.Conversation.Messages
 	if len(msgs) == 0 {
