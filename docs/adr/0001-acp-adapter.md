@@ -165,7 +165,7 @@ and `Service.StartRunContent(ctx, id, text, parts)` carries them into the run.
 | `EvToolCall`                  | `session/update` `tool_call{toolCallId,title,kind,rawInput,status:pending}` — for Edit/Write a `diff` content block is attached (Phase 2) |
 | `EvToolResult`                | `session/update` `tool_call_update{toolCallId,status:completed\|failed,content:[text]}` |
 | `EvHook`                      | blocked **PreToolUse** w/ call id → `tool_call_update{toolCallId,status:failed,content:reason}` on the card opened before the gate (issue #6); PostToolUse blocks + all others → `agent_thought_chunk{content:reason}` |
-| `EvSubagentTool`/`EvSubagentEnd` | `session/update` `tool_call_update` on the PARENT Task call id (Phase 2) |
+| `EvSubagentTool`/`EvSubagentEnd` | `session/update` `tool_call_update` on the PARENT Subagent call id (Phase 2) |
 | `EvTeamMember`/`EvTeamEnd`    | `session/update` `tool_call_update` on the PARENT Team call id (Phase 2) |
 | `EvPermissionAsk`             | OUTBOUND `session/request_permission` (4 options); reply → `run.Approve` |
 | `EvResult`                    | the prompt's return `{stopReason}` |
@@ -177,7 +177,7 @@ still reaches the editor via the preceding message chunks).
 
 **Dropped / folded**: `session.init`, `turn.start`, `turn.end`, `compaction`,
 `subagent.start`, `team.start`. The two `.start` events are dropped because the
-parent `tool_call` (Task / Team) already names the delegated work; the roster/goal
+parent `tool_call` (Subagent / Team) already names the delegated work; the roster/goal
 would add noise before the first progress line.
 
 ## Phase 2 fidelity
@@ -193,7 +193,7 @@ would add noise before the first progress line.
    no diff (nil content)**, and the editor still gets the plain-text result on the
    later `tool_call_update` (graceful fallback). The tool-`kind` mapping
    (`toolKindFor`) covers Read/Grep/Glob→`read`, Edit/Write→`edit`, Bash→`execute`,
-   WebFetch→`fetch`, Task/Team/Fork→`think`, everything else (incl. MCP)→`other`.
+   WebFetch→`fetch`, Subagent/Team/Parallel→`think`, everything else (incl. MCP)→`other`.
 
 2. **Subagent + team fidelity.** Phase 1 DROPPED `subagent.*`/`team.*`. Phase 2
    projects them as `tool_call_update` **progress on the PARENT tool_call** keyed by

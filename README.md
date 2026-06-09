@@ -20,9 +20,9 @@ API. No TUI — it's a service and a library.
 
 **The loop & tools**
 - **Streaming agent loop** (`iter.Seq2`) with pause, resume, and cancel — every step is a typed `Event`.
-- **Core tool kit** — Read (line-numbered), Edit (read-before-edit / exact-match / uniqueness invariants), Write, Grep, Glob, a WebFetch stub, and an **optional** Bash (behind a `CommandRunner` seam, so the harness runs shell-less in a locked-down pod). Plus opt-in tools: **memory** (Remember/Recall), **fork-join** (parallel isolated branches), and **ToolSearch** for progressive disclosure.
+- **Core tool kit** — Read (line-numbered), Edit (read-before-edit / exact-match / uniqueness invariants), Write, Grep, Glob, a WebFetch stub, and an **optional** Bash (behind a `CommandRunner` seam, so the harness runs shell-less in a locked-down pod). Plus opt-in tools: **memory** (Remember/Recall), the **Parallel** delegation tool (N isolated branches), and **ToolSearch** for progressive disclosure.
 - **Read-parallel / mutate-serial dispatch** — read-only tools run concurrently; mutating tools never do (a correctness guarantee, not an optimization).
-- **One-shot subagents** — the Task tool runs an isolated child loop and returns only its final string; **fork-join** generalizes it to N parallel branches in isolated workspaces.
+- **Delegation — one-shot, parallel, or a crew.** Three tools share an isolated read-only child loop: **Subagent** runs one isolated child and returns its result (plus an agentId trailer); **Parallel** fans out N isolated branches in forked workspaces and joins them (all / first / judge), returning the winner or all results with the preserved fork-workspace paths; **Team** coordinates a crew over a shared task list, findings ledger, and mailbox. All three honour a shared token budget (`--max-run-tokens`), a child-concurrency cap, per-call limits/model overrides, and opt-in structured output.
 
 **Safety & governance**
 - **Permission model** — `deny → ask → allow` across merged scopes; a deny in any scope wins; compound-bash and command-substitution aware; plan mode hard-denies mutations. Optional **model-based layer-2 risk classifier** (monotonic, fail-safe).

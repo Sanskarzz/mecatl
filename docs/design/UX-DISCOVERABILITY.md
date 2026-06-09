@@ -509,7 +509,7 @@ matching commands, `renderPalette` shows a one-line muted note instead of "".
 > **Update — issue #15: `/agents` vs `/team` split.** `/agents` is now the
 > agent-**definition inventory** (palette-only, gated on `caps.agents` + a wired
 > `AgentLister`): a read-only `ListAgents` panel listing the resolved registry the
-> `Task` tool routes delegations to (name · description · `model:`/`perm:`/`tools:`
+> `Subagent` tool routes delegations to (name · description · `model:`/`perm:`/`tools:`
 > metadata), modelled on the `/skills` panel (`agents_inventory.go`). The
 > live-agent-team overlay moved to a new `/team` built-in (gated on `caps.teams`),
 > still bound to `ctrl+a` (`team.go`, renamed from `agents.go`). `caps.agents` is a

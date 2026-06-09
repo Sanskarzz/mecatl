@@ -615,8 +615,8 @@ boundary:
 - `WithMaxConcurrentSubagentShells` (default 4) is a semaphore bounding how many
   worktree-bearing children fork at once — Subagent is read-parallel, so the model can
   fan many out; each shell-bearing child holds a worktree (`git worktree add` +
-  disk). The gate is acquired before `Fork` and released after cleanup, only on the
-  forking path.
+  disk). The gate is acquired before the **worktree fork** (the `WorkspaceForker`
+  operation) and released after cleanup, only on the forking path.
 - Defensively, `drainChild` **auto-denies** any permission ask the child raises,
   so a child can never block on a human regardless of policy.
 - The child run is bounded by the parent `ctx`; `SubagentStop` fires

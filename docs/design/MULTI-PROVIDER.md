@@ -230,14 +230,14 @@ the 128k default). This is the cross-provider contamination guard: a shallow clo
 swapping only the LLM would compact and count through the wrong model.
 
 **Per-session catalog = core + server-global MCP + client MCP + per-session
-Task/Team.** The factory does NOT build a core-only catalog. After `registerCoreTools`
+Subagent/Team.** The factory does NOT build a core-only catalog. After `registerCoreTools`
 it mounts the **server-global** MCP tools (`cfg.MCPServers` + ToolHive — the same tools
 `buildCatalog→registerMCP` mounts on the main engine) by reusing the **shared** manager
 Build already connected (`mainMgr.Tools()`), threaded into the factory as `globalMgr`.
 This closes the selector-strips-MCP bug: before the fix, selecting any non-default
 provider/model (what the mecatui `/models` picker always does) silently dropped every
 server-global MCP tool (github/slack/fetch/…). Mount order is **core → global MCP →
-client MCP → per-session Task/Team**, which gives **global-wins** collision precedence:
+client MCP → per-session Subagent/Team**, which gives **global-wins** collision precedence:
 `mcp.Register` is **first-wins + skip-and-continue** — a client tool whose namespaced
 name collides with an already-registered global one is SKIPPED (the global tool stays),
 and **every other non-colliding client tool is still registered**. This is the
@@ -255,7 +255,7 @@ logs, so the loop's "exactly two diagnostics lines" invariant does not apply.
 reconnected, and its `Close` is **NEVER** folded into the per-session
 `SessionEngineResult.Close` — a per-session `CloseSession` tearing down the shared
 manager would kill MCP for every other live session. `globalMgr` is also the
-`reference:`-resolution mainMgr for per-session Task/Team subagent defs (falling back to
+`reference:`-resolution mainMgr for per-session Subagent/Team subagent defs (falling back to
 the client mgr only when there is no global manager), so a selector session's
 `reference: <name>` resolves against the server-global servers — parity with the
 build-time path.
@@ -441,7 +441,7 @@ first-run UX.
 
 ## 10. Per-sub-agent provider selection (SHIPPED — both halves)
 
-A Task agent definition and a team member may resolve to a DIFFERENT provider (+
+A Subagent agent definition and a team member may resolve to a DIFFERENT provider (+
 model) than the parent, routed through the same `providerRegistry` — without leaking
 the registry past the composition layer (`internal/app`). Both halves are SHIPPED:
 
@@ -451,12 +451,12 @@ the registry past the composition layer (`internal/app`). Both halves are SHIPPE
   to `model:` (two fields, mirroring the wire's `provider_id`/`model_id` — never a
   slash-joined string).
 - **Half B — session-provider propagation.** A session that SELECTED provider P over
-  the Phase-0 wire now gets a per-session Task tool (and, under `--enable-teams`, an
+  the Phase-0 wire now gets a per-session Subagent tool (and, under `--enable-teams`, an
   in-catalog Team tool) wired to P as the inherited parent — so its sub-agents that
   pin NO provider inherit P, not the build-time default. The build-time per-session
   catalog was core-tools-only, so a selected session previously could not spawn
   sub-agents at all; Half B closes that gap by reusing the SAME `buildTaskTool`/
-  `buildTeamWiring` builders (no per-session-catalog drift), folding the Task tool's
+  `buildTeamWiring` builders (no per-session-catalog drift), folding the Subagent tool's
   inline-MCP close into `SessionEngineResult.Close`, bounded by `MaxSessionEngines`.
 
 **Three-level provider precedence:** `def.Provider > session-selected provider >

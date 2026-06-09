@@ -161,7 +161,7 @@ dirs and even when server slash-command expansion is off. `/clear` (reset the
 conversation and scrollback) and `/help` (open the keys-&-features overlay) are
 *always* available because they act purely on the TUI's own state; `/mcp` (browse
 the MCP inventory), `/agents` (browse the agent-definition inventory — the
-resolved registry the `Task` tool routes delegations to), `/team` (the unified
+resolved registry the `Subagent` tool routes delegations to), `/team` (the unified
 agents overlay pinned to the Teams tab — same surface as `ctrl+a`, which picks a
 context-sensitive default tab), `/skills` (browse the skills inventory),
 `/soul` (inspect the persona — read-only), `/usermodel` (inspect the user
@@ -324,7 +324,7 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 | `esc` (with an active selection) | **clear the selection** first — before any other `esc` meaning |
 | `?` | help overlay (on an empty prompt) |
 | `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`, `/soul`, `/usermodel`, `/models`; plus workspace commands) |
-| `ctrl+a` | open the **unified agents overlay** — ONE surface with three tabs: **Subagents** (the flat Task-child fleet), **Parallel** (the fork-join GROUP roster — join mode, branches, winner, fork paths), and **Teams** (the full roster + per-member focus of the most-recent team). `tab` cycles tabs, `enter` focuses a row/group, `esc` steps back / closes. The default tab is **context-sensitive** (team live → parallel live → subagents → parallel → team). Works **while idle and mid-run**; inert under a permission modal. `/team` opens it pinned to the Teams tab. |
+| `ctrl+a` | open the **unified agents overlay** — ONE surface with three tabs: **Subagents** (the flat Subagent-child fleet), **Parallel** (the fork-join GROUP roster — join mode, branches, winner, fork paths), and **Teams** (the full roster + per-member focus of the most-recent team). `tab` cycles tabs, `enter` focuses a row/group, `esc` steps back / closes. The default tab is **context-sensitive** (team live → parallel live → subagents → parallel → team). Works **while idle and mid-run**; inert under a permission modal. `/team` opens it pinned to the Teams tab. |
 | `@` | file-mention menu — complete a workspace path, then attach it on submit (see below) |
 
 The `?` overlay enumerates the rest of the chords — `ctrl+v` (paste a clipboard
@@ -355,7 +355,7 @@ the bottom (and the viewport grows back when the transient clears).
 
 ### Watching subagents, parallel runs, and teams — the fleet footer + the unified `ctrl+a` overlay
 
-Three surfaces watch concurrent **Task subagents**, **Parallel fork-join runs**, and
+Three surfaces watch concurrent **Subagent children**, **Parallel fork-join runs**, and
 **agent teams**, all built purely from the relayed `subagent.*` / `parallel.*` / `team.*`
 event projection (REDACTED, metadata-only — never child/branch content):
 
@@ -371,7 +371,7 @@ event projection (REDACTED, metadata-only — never child/branch content):
 
 - **Unified `ctrl+a` agents overlay.** ONE surface with **three tabs — Subagents |
   Parallel | Teams**:
-  - **Subagents** — one row per Task child: a state glyph (**◐** running / **✓** done /
+  - **Subagents** — one row per Subagent child: a state glyph (**◐** running / **✓** done /
     **✗** error), the goal label, a short `#<hash>` of the `ChildID` (so two similar
     goals are unambiguous), the current/last child tool, the running tool count, and
     token usage. `enter` focuses one child's redacted `✓/✗` tool-chip trace (args/results
@@ -395,7 +395,7 @@ event projection (REDACTED, metadata-only — never child/branch content):
     Parallel; team ran → Teams). `/team` opens the same overlay pinned to the Teams tab.
 
   A subagent that ended via a non-`end_turn` terminal renders a sensible label — the
-  newer Task/Team stop reasons (`budget` → "budget", `structured_output` → "schema",
+  newer Subagent/Team stop reasons (`budget` → "budget", `structured_output` → "schema",
   `no_progress` → "no-progress", the `max_*` limits → "max-turns"/"max-tools") ride the
   same string `stop` field on the wire (no proto enum) and map to compact labels; the
   cap-family stops read as **✓** (a partial is still usable), error/cancel-family as **✗**.

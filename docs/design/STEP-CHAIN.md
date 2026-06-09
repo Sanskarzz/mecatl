@@ -181,11 +181,11 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
 - **Done:** the loop runs a scripted multi-turn session with a tool call and a permission
   ask entirely offline; gauntlet items 1,4,5 demonstrably pass.
 
-### WP9 — Subagent / Task  *(after WP8)*
-- **Goal:** A `Task` tool that spins up a **child loop** with a fresh Conversation, a
+### WP9 — Subagent  *(after WP8)*
+- **Goal:** A `Subagent` tool that spins up a **child loop** with a fresh Conversation, a
   scoped tool subset, its own Limits, runs to completion, and returns **only its final
   string** as one `ToolResult`. SubagentStop hook fires.
-- **Owns:** `internal/agent/subagent.go`, the `Task` tool registration.
+- **Owns:** `internal/agent/subagent.go`, the `Subagent` tool registration.
 - **Honors:** reuses WP8's `Run`; `tool.Tool` interface.
 - **Tests:** parent sees one ToolResult, never the child's intermediate ToolCalls
   (gauntlet #7); child tool-scope enforced; child cancellation bounded by parent ctx.

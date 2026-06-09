@@ -174,6 +174,39 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--block-profile-rate` | `0` | `runtime.SetBlockProfileRate` rate in ns (0 = off). Populates `/debug/pprof/block`; has runtime overhead — enable only while investigating blocking. |
 | `--perf-mcp` | `false` | mount the **read-only perf MCP server** at `/mcp` on the admin listener (see the observability note). Requires `--metrics-addr`, and that address **must be loopback** — a non-loopback `--metrics-addr` with `--perf-mcp` is **refused** (fail-closed). |
 
+#### Delegation & sub-agents
+
+mecatl ships three delegation tools that each spin up an **isolated read-only
+child loop** (full shell inside a per-child git worktree when Bash is configured —
+see the architecture doc): **Subagent** (one isolated child, returns its result),
+**Parallel** (N isolated branches fanned out, joined `all`/`first`/`judge`), and
+**Team** (a coordinating crew over a shared task list, findings ledger, and
+mailbox). See the delegation-capabilities note below.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--max-run-tokens` | `0` | loop-level **cumulative token ceiling per run** (input + output). A run that crosses it ends cleanly with `stop=budget` (terminal `StopBudget`). The budget is **inherited by every Subagent / Parallel branch / team member**, so a delegation fan-out cannot blow past it. `0` (the default) **disables** it. |
+| `--enable-parallel` | `true` | register the **Parallel** fan-out tool (N parallel isolated child branches). On by default; `=false` disables it. *(Renamed from the former `--enable-fork`.)* |
+| `--fork-preserved-cap` | `agent.DefaultPreservedForkCap` | max **PRESERVED** winner forks (for `join=first`/`judge`) kept on disk at once — the oldest beyond this is LRU-reaped. Preserved fork workspaces stay inspectable (their paths ride the Parallel result) until reaped. |
+| `--enable-teams` | `true` | register the experimental **agent-teams** capability (`CreateTeam`/`SpawnTeammate`/`RunTeam` + the in-loop `Team` tool). On by default and **inert** until a client drives a team; `=false` disables it. |
+| `--subagent-model` | `""` | global model override applied to every Subagent / team-member child that does not pin its own `model:` in its definition (the analogue of `CLAUDE_CODE_SUBAGENT_MODEL`). A concrete id or a `--model-alias`. Empty inherits the parent `--model`. |
+| `--agents-dir` | `""` | directory of named **agent definitions** (`<name>.md` + YAML frontmatter), reusable as a `Subagent(agent=<name>)` delegate and as a team-member role (repeatable; highest precedence). **TRUST BOUNDARY:** a def body steers the model like `AGENTS.md`/`CLAUDE.md`. |
+| `--agents-conventional` | `true` | also discover agent defs from the conventional locations (`<workspace>/.mecatl/agents`, `<workspace>/.claude/agents`, `$XDG_CONFIG_HOME/mecatl/agents`, `~/.claude/agents`; lower precedence than `--agents-dir`). ON and **inert** until such a dir exists. Project-tier defs are **trust-gated** (`--trust-project`). |
+| `--model-alias` | `""` | model alias mapping `name=model-id` (repeatable), resolved only in composition — an agent def's `model: <alias>` resolves through this map (then the built-in sonnet/opus/haiku aliases). |
+
+> **Delegation capabilities (Subagent / Parallel / Team).** Beyond the shared
+> `--max-run-tokens` budget, every delegation supports: an explicit **child-concurrency
+> cap** (default 10) bounding how many children run at once; **per-call limits**
+> (`max_turns` / `max_tool_calls` / `timeout`, **tighten-only** — a call can never
+> loosen the inherited bounds) plus a **per-call model override** and a **per-call
+> token ceiling**; **opt-in structured output** (a synthetic `SubmitResult` tool with
+> bounded validation-retry when the caller supplies a result schema); and, on a
+> Subagent, an **agentId trailer** on the returned result plus a `References:`
+> convention the explorer uses to cite the files it read. **Parallel** is observable
+> over a dedicated `parallel.*` event family, and its result carries the preserved
+> fork-workspace paths. (The `mecatui` `ctrl+a` overlay surfaces all three under
+> **Subagents | Parallel | Teams** tabs with a fleet-status footer — see `docs/tui.md`.)
+
 #### LLM resilience knobs
 
 These tune the resilience decorator wrapped around every provider (see
@@ -950,7 +983,8 @@ message Event {
 ```
 
 `Result.stop` is one of: `end_turn`, `max_turns`, `max_tool_calls`,
-`max_consecutive_failures`, `cancelled`, `error`.
+`max_consecutive_failures`, `budget` (the `--max-run-tokens` ceiling crossed —
+a clean, reopen-able terminal), `no_progress`, `cancelled`, `error`.
 
 ### Go client snippet
 
