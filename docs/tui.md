@@ -391,6 +391,7 @@ show the plain prompt-hint card.
 | `?` | help overlay (on an empty prompt) |
 | `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`, `/soul`, `/usermodel`, `/models`; plus workspace commands) |
 | `ctrl+a` | open the **unified agents overlay** — ONE surface with three tabs: **Subagents** (the flat Subagent-child fleet), **Parallel** (the fork-join GROUP roster — join mode, branches, winner, fork paths), and **Teams** (the full roster + per-member focus of the most-recent team). `tab` cycles tabs, `enter` focuses a row/group, `esc` steps back / closes. The default tab is **context-sensitive** (team live → parallel live → subagents → parallel → team). Works **while idle and mid-run**; inert under a permission modal. `/team` opens it pinned to the Teams tab. |
+| `x` (Subagents tab, on a **running** lane — roster or focus pane) | **cancel that subagent** (sends `CancelChild` with the lane's child id; the run itself keeps streaming). Confirm-less, because it is recoverable: the child is persisted with a `[subagent cancelled by user]` result and stays **resumable** by its `agentId`. Inert on a done lane. If the child was parked on a surfaced permission ask, the server retracts it (`permission.retract`) and the approval modal dismisses itself. |
 | `@` | file-mention menu — complete a workspace path, then attach it on submit (see below) |
 
 **Always-allow (the `w` button).** A main-agent ask offers a third button, **Al[w]ays**,

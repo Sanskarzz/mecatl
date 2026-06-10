@@ -15,6 +15,15 @@ var (
 	// message rather than "session not found: team X". Adapters map it to the same
 	// codes.NotFound / HTTP 404 as ErrNotFound.
 	ErrTeamNotFound = errors.New("server: team not found")
+	// ErrChildNotFound signals a CancelChild for a child id the session's
+	// in-flight run does not hold live — unknown, or already finished (the
+	// finished-as-you-pressed race). The wording is FAMILY-NEUTRAL ("child
+	// agent", never "subagent"): the same error will cover team-member and
+	// parallel-branch ids once their cancel wiring lands. Distinct from
+	// ErrNotFound (whose message names a session) so the HTTP /cancel-child
+	// mirror reports a child-appropriate message; adapters map it to the same
+	// codes.NotFound / HTTP 404.
+	ErrChildNotFound = errors.New("server: child agent not found or already finished")
 	// ErrNoMCPProvider signals that an MCP inspection RPC requiring a live
 	// provider (ReadMcpResource / GetMcpPrompt) was called but no MCP provider
 	// is configured. Adapters map it to FailedPrecondition / HTTP 412.

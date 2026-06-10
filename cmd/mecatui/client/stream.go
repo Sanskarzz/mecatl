@@ -168,6 +168,17 @@ func (s *Stream) SendCancel() error {
 	})
 }
 
+// SendCancelChild cancels ONE child (a subagent) of the in-flight run, addressed
+// by its child session id — the SubagentMsg ChildID, verbatim. The run itself
+// keeps streaming; the child ends with a "cancelled by user" terminal and stays
+// resumable. The server ignores an unknown/already-finished id (the
+// finished-as-you-pressed race is benign).
+func (s *Stream) SendCancelChild(childID string) error {
+	return s.sendFrame(&mecatlv1.ConverseRequest{
+		Kind: &mecatlv1.ConverseRequest_CancelChild{CancelChild: &mecatlv1.CancelChild{ChildId: childID}},
+	})
+}
+
 // sendFrame serialises one Send under the mutex.
 func (s *Stream) sendFrame(req *mecatlv1.ConverseRequest) error {
 	s.mu.Lock()

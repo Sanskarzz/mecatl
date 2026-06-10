@@ -357,6 +357,77 @@ Guards: `agent.TestParentResumesSubagentByTrailerID` (model-facing e2e), `TestSu
 `TestSubagentResumePreservesStoredLimits`, and `session.TestRehomeFromIdleRepointsWorkspace`/
 `TestRehomeIllegalFromNonIdleStates`.
 
+**Per-child cancel — the child-run registry + `CancelChild` (BACKGROUND-SUBAGENTS I1).** The parent
+`agent.Run` now owns a `childRunRegistry` (`childregistry.go`) alongside `childAsks`, created
+UNCONDITIONALLY in `RunContentWith` (cancel arrives only on interactive surfaces, but the registry's
+bookkeeping must work headless too) — one flat map keyed by the child SESSION id (the `agentId:`
+trailer / overlay ChildID / store key: the single handle convention; family prefixes disjoint by the
+existing convention). The registry is handed to spawning tools DIRECTLY as `parentCaps.children`
+(an agent-package handle — zero layering cost; the panel replaced the original three pass-through
+closures; `surfaceAsk` stays a closure because it genuinely composes router registration + redaction
++ the parent emit) with nil-safe wrappers `registerChildRun`/`finishChildRun`/
+`childWasClientCancelled`: a per-CALL `context.WithCancel` is minted after the in-flight guard and
+registered BEFORE `acquireChildSlot`, so a child QUEUED on the concurrency gate is already
+cancellable (the gate's ctx select unblocks; the error then names the CLIENT cancellation, not a
+generic cancel). Re-registration of a resumed id within one run OVERWRITES the done entry with a
+fresh `doneCh` (never double-closed — A5); `markDone` is idempotent. The
+`sealed`/`background`/`result`/`delivered`/`doneCh` fields are present per the registry design but
+only the cancel-relevant paths are exercised. LOCKING is split per concern: `mu` guards the entries
+map (short sections, never across a send) and a separate `emitMu` guards `sealed` + the retract send
+as ONE locked section (A4a holds; a send waiting on the events channel can never wedge markDone /
+sibling registration behind it). The retract send itself is `Run.tryEmit` — it selects on the run
+ctx instead of blocking, so a wedged consumer cannot park the readControl goroutine inside
+CancelChild (retraction is a UX courtesy; the router unregister already happened, so dropping is
+safe); the run goroutine's teardown order is cancel → seal → close, so an in-flight blocked send
+aborts before seal waits on emitMu. `Run.CancelChild(childID) bool` is the Approve
+mirror: idempotent, unknown/done → false; on a live child it sets `clientCancelled`, snapshots+clears
+the child's surfaced askIDs, invokes `cancel()` OUTSIDE the registry lock, then per askID
+`childAskRouter.unregister` (a locked delete) BEFORE emitting the new `permission.retract` event
+(string-passthrough EventType; payload rides the existing `Event.Ask` carrying the AskID ONLY) — a
+racing late approval falls through to the parent's own registry and dies as an unknown-ask no-op.
+askIDs additionally carry a per-RUN ":r<runSerial>" SUFFIX (`newAskID`; the leading "<sessionID>:"
+prefix isChildAsk consumes is untouched): without it, cancel-a-parked-ask → `resume` the same child
+id in the same run (Counters reset) → the provider re-mints the same call id → the new ask would
+COLLIDE with the retracted one and a stale queued ResumeApproval could resolve it (CWE-863).
+Ask OWNERSHIP is recorded at the single surfacing seam: `childPosture` gains an explicit `childID`
+field (set at ALL THREE construction sites — subagent: childID; team: `m.sess.ID`; parallel:
+`childSess.ID` — because `role` does NOT universally carry the session id), passed through
+`surfaceAsk` to `recordAsk` (team/parallel cancel itself is the next iteration; the seam is uniform
+now). Terminal rendering: `renderSubagentResult` gains the `StopCancelled + clientCancelled` arm —
+success-with-note `[subagent cancelled by user]` + partial text + the resumable trailer (an error
+would teach the model the delegation mechanism failed); the `timeoutCtx` deadline check stays first
+and a PARENT-run cancel keeps the legacy un-noted rendering. A client-cancelled child persists
+(state cancelled) and resumes via the existing cancelled→Interrupt recovery. Wire: proto
+`ConverseRequest` oneof `CancelChild cancel_child = 12` (`{string child_id = 1}`);
+`readControl` dispatches it (false ignored by design on the stream — the finished-as-you-pressed
+race is benign); `Service.CancelChild` (Approve-mirror: LookupRun → `ErrChildNotFound` on false —
+worded FAMILY-NEUTRALLY ("child agent …") so it stays truthful when team/parallel cancel lands;
+store fallback ErrNotFound/ErrNoActiveRun) backs HTTP `POST /v1/sessions/{id}/cancel-child`. The
+SAME regen landed the three DORMANT fields for the next iterations (A10): `Subagent.background=10`,
+`Parallel.child_id=18`, `Team.member_session_id=18` (17 is taken by dispositions — A1); no mapper
+writes them yet. mecatui: the ctrl+a Subagents tab gains an `x` cancel key (roster + focus pane,
+non-terminal lanes only, confirm-less — recoverable) sending `client.Stream.SendCancelChild`;
+`permission.retract` maps to `PermissionRetractMsg` and dismisses the approval modal iff the pending
+`m.ask.AskID` matches (there is NO ask queue — a single modal slot; non-matching/stale retracts are
+ignored). The Subagents-tab roster hint is deliberately SHORTER than the team/parallel ones (the
+"x cancel" segment would otherwise push the centred card past a 100-col terminal — the hint is the
+card's widest line and centerCard does not wrap), and the two subagent golden tests carry an
+`assertFitsViewport` width guard so a future overflow cannot be silently absorbed by a golden
+refresh. Guards: `agent.TestCancelChildMidDrive`/`TestCancelChildWhileParkedOnAsk` (full unwind
+e2e: retract + late-approval-no-op + command-never-ran)/`TestCancelChildAfterDoneAndUnknownNoOp`/
+`TestCancelChildPersistResumeRoundTrip`/`TestCancelChildNaturalCompletionRace` (legal-renderings +
+trailer, half the iterations synced on EvSubagentStart)/`TestCancelChildMidGateWait`/
+`TestParentRunCancelNoClientNoteOnStream` + the internal `TestParentRunCancelKeepsUnNotedRendering`
+(the D6 negatives — a hardcoded clientCancelled mutation fails both)/
+`TestResumeWithinRunReRegistersAndIsCancellable` (the reachable-path A5 e2e)/
+`TestStaleVerdictAfterCancelResumeDoesNotResolveNewAsk` + `TestNewAskIDRunSerialDisjoint` (the
+CWE-863 regression pair), the `TestChildRegistry*` unit+race suite incl.
+`TestChildRegistrySealVsEmitRace` (adversarial seal-vs-emit, real channel close) and
+`TestCancelChildUnregistersBeforeRetract` (deterministic ordering pin — the flipped
+unregister/retract order fails it), `server.TestGRPCConverseCancelChild` (real-stream wire e2e)
+/`TestServiceCancelChildFallbacks`/`TestHTTPCancelChild`, `client.TestSendCancelChildFrame` + the
+`permission.retract` EventToMsg case, and `ui.TestSubagent*CancelKey*`/`TestPermissionRetract*`.
+
 **Subagent per-call token ceiling (`max_tokens`, Run-scoped budget override — R4).** `subagentArgs.MaxTokens`
 rides the new `RunOptions.MaxRunTokensOverride` carried into `Engine.RunContentWith`, so a per-call
 token ceiling bounds the SHARED child engine WITHOUT minting a fresh engine. `effectiveMaxRunTokens`

@@ -219,7 +219,7 @@ func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, w
 		return decision, false
 	}
 
-	askID := newAskID(sess.ID, sess.Counters.ToolCalls, c.ID)
+	askID := newAskID(sess.ID, sess.Counters.ToolCalls, c.ID, r.serial)
 	ask := session.PendingAsk{
 		AskID:  askID,
 		Tool:   c.Name,
@@ -461,12 +461,23 @@ func (e *Engine) parentCaps(r *Run, turnIdx int) parentCaps {
 	caps := parentCaps{
 		interactive: interactive,
 		diag:        r.diag,
+		// The child-run registry is handed down DIRECTLY and UNCONDITIONALLY (it
+		// exists on every run; cancel frames arrive only on interactive surfaces but
+		// the bookkeeping — and the clientCancelled read — must work headless too).
+		// It is an agent-package handle, so no layering rule is crossed; the spawning
+		// tools go through parentCaps' nil-safe wrappers.
+		children: r.children,
 	}
 	if interactive {
-		caps.surfaceAsk = func(askID string, child *Run, ask session.PendingAsk, requesterLabel string) {
+		caps.surfaceAsk = func(askID, childID string, child *Run, ask session.PendingAsk, requesterLabel string) {
 			// Register BEFORE emitting so a fast ResumeApproval cannot race ahead of
 			// registration (mirror askRegistry.register-before-emit).
 			r.registerChildAsk(askID, child)
+			// Record ask OWNERSHIP at this single surfacing seam (all three delegation
+			// families thread their child session id through childPosture.childID), so
+			// a later CancelChild can retract the parked ask. recordAsk no-ops for an
+			// id the registry does not hold (team/parallel until they register).
+			r.children.recordAsk(childID, askID)
 			// requester ATTRIBUTES the ask to its delegation (subagent goal / team member
 			// name / parallel branch label). It is clamped metadata (clampPreview neutralises
 			// C0/C1 + rune-caps), already composed at the child posture; an empty label keeps
@@ -621,11 +632,19 @@ func ptr(v session.ToolResult) *session.ToolResult {
 	return &c
 }
 
-// newAskID derives a stable, unique ask id for a permission pause. The leading
+// newAskID derives a unique ask id for a permission pause. The leading
 // "<sessionID>:" prefix is a CONSUMED CONTRACT, not an implementation detail:
 // cmd/mecatui's isChildAsk classifies a surfaced ask as main-agent vs subagent by
 // whether the askID is prefixed with the live session id (the child session id IS
-// the namespace) — don't change the format without updating that consumer.
-func newAskID(id session.SessionID, n int, callID session.ToolCallID) string {
-	return fmt.Sprintf("%s:%d:%s", id, n, callID)
+// the namespace) — don't change the PREFIX without updating that consumer.
+//
+// The trailing ":r<runSerial>" component is the per-RUN discriminator (a SUFFIX,
+// so the consumed prefix contract is untouched): without it, two RUNS of the same
+// session can re-mint an identical askID — cancel a parked ask, `resume` the same
+// child id in the same parent run (Counters reset on Interrupt), and the provider
+// re-mints the same call id — letting a stale/queued ResumeApproval for the
+// RETRACTED ask resolve the NEW one (CWE-863). The serial makes every run's askIDs
+// disjoint, so a replayed old verdict dies as an unknown-ask no-op.
+func newAskID(id session.SessionID, n int, callID session.ToolCallID, runSerial int64) string {
+	return fmt.Sprintf("%s:%d:%s:r%d", id, n, callID, runSerial)
 }

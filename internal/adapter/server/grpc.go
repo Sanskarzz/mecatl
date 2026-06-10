@@ -145,8 +145,9 @@ func (h *HarnessServer) Converse(stream mecatlv1.HarnessService_ConverseServer) 
 	return nil
 }
 
-// readControl reads ResumeApproval / Cancel frames until the client closes its
-// send half or the context is cancelled, dispatching each onto run.
+// readControl reads ResumeApproval / Cancel / CancelChild frames until the
+// client closes its send half or the context is cancelled, dispatching each
+// onto run.
 func (*HarnessServer) readControl(ctx context.Context, stream mecatlv1.HarnessService_ConverseServer, run *agent.Run) {
 	for {
 		if ctx.Err() != nil {
@@ -166,6 +167,14 @@ func (*HarnessServer) readControl(ctx context.Context, stream mecatlv1.HarnessSe
 			}
 		case *mecatlv1.ConverseRequest_Cancel:
 			run.Cancel()
+		case *mecatlv1.ConverseRequest_CancelChild:
+			if k.CancelChild != nil {
+				// Per-child cancel, addressed by the child session id. A false return
+				// (unknown / already-done child) is ignored by design on the stream: the
+				// finished-as-you-pressed race is benign and the observable outcome is the
+				// child's terminal event (clients disable the key for done lanes).
+				_ = run.CancelChild(k.CancelChild.GetChildId())
+			}
 		default:
 			// A second Prompt or an unknown frame is ignored: the run is
 			// already driving and a new prompt cannot start a second run here.
@@ -287,6 +296,8 @@ func toStatus(err error) error {
 	case errors.Is(err, ErrNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, ErrTeamNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, ErrChildNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, ErrFailedPrecondition):
 		return status.Error(codes.FailedPrecondition, err.Error())

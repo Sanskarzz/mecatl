@@ -88,6 +88,13 @@ type keyMap struct {
 	// never collides with the blurred textarea nor any global control binding.
 	NextTab key.Binding
 
+	// CancelChild (x) cancels the selected/focused subagent lane inside the ctrl+a
+	// agents overlay (non-terminal lanes only). Like Tasks/Findings it is a BARE
+	// key consulted ONLY inside the overlay, so it never collides with the blurred
+	// textarea nor any global control binding. Confirm-less single keypress —
+	// recoverable: the child is persisted and resumable.
+	CancelChild key.Binding
+
 	// ExpandTools is the general "show details" toggle: full vs line-capped
 	// tool-result bodies + Edit/Write diffs, and collapsed vs expanded reasoning
 	// summaries. Control-modified so it never collides with textarea input.
@@ -189,6 +196,11 @@ func defaultKeys() keyMap {
 		NextTab: key.NewBinding(
 			key.WithKeys("tab"),
 			key.WithHelp("tab", "switch tab"),
+		),
+		// x: cancel the selected/focused subagent lane inside the agents overlay.
+		CancelChild: key.NewBinding(
+			key.WithKeys("x"),
+			key.WithHelp("x", "cancel subagent"),
 		),
 		Up: key.NewBinding(
 			key.WithKeys("up", "k"),

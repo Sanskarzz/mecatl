@@ -22,6 +22,7 @@ import (
 //	POST   /v1/sessions/{id}/prompt   -> start a run; text/event-stream of Events
 //	POST   /v1/sessions/{id}/approve  -> resolve the paused ask on the run
 //	POST   /v1/sessions/{id}/cancel   -> cancel the in-flight run
+//	POST   /v1/sessions/{id}/cancel-child -> cancel ONE child (subagent) of the run
 //
 // Every Event is emitted as one SSE `data:` line carrying the proto Event
 // marshalled to JSON, so the HTTP and gRPC surfaces share one event shape.
@@ -40,6 +41,7 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h.mux.HandleFunc("POST /v1/sessions/{id}/prompt", h.prompt)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/approve", h.approve)
 	h.mux.HandleFunc("POST /v1/sessions/{id}/cancel", h.cancel)
+	h.mux.HandleFunc("POST /v1/sessions/{id}/cancel-child", h.cancelChild)
 	h.mux.HandleFunc("GET /v1/mcp/resources", h.listMcpResources)
 	h.mux.HandleFunc("GET /v1/mcp/resources/read", h.readMcpResource)
 	h.mux.HandleFunc("GET /v1/mcp/prompts", h.listMcpPrompts)
@@ -441,6 +443,35 @@ func (h *HTTPHandler) cancel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// cancelChildBody is the JSON body of POST /v1/sessions/{id}/cancel-child.
+type cancelChildBody struct {
+	// ChildID is the child session id, verbatim (the Subagent result's `agentId:`
+	// line / the subagent.start child_id).
+	ChildID string `json:"child_id"`
+}
+
+// cancelChild handles POST /v1/sessions/{id}/cancel-child, cancelling ONE child
+// (a subagent) of the session's in-flight run while the run itself keeps
+// streaming. Mirrors /approve: 204 on success, 404 for an unknown session OR an
+// unknown/already-finished child, 409 for a known-but-runless session.
+func (h *HTTPHandler) cancelChild(w http.ResponseWriter, r *http.Request) {
+	id := session.SessionID(r.PathValue("id"))
+	var body cancelChildBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.ChildID == "" {
+		writeError(w, http.StatusBadRequest, "child_id is required")
+		return
+	}
+	if err := h.svc.CancelChild(r.Context(), id, body.ChildID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // --- team request bodies -----------------------------------------------------
 
 // teammateSpecBody is one member's enrolment fields, shared by createTeam's
@@ -801,6 +832,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrTeamNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrChildNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrFailedPrecondition):
 		writeError(w, http.StatusPreconditionFailed, err.Error())

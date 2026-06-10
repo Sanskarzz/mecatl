@@ -51,6 +51,7 @@ func TestSurfaceAskAttribution(t *testing.T) {
 				ctx:       context.Background(),
 				diag:      port.NopDiagnostics{},
 				childAsks: newChildAskRouter(),
+				children:  newChildRunRegistry(),
 			}
 			caps := e.parentCaps(r, 0)
 			if caps.surfaceAsk == nil {
@@ -63,7 +64,7 @@ func TestSurfaceAskAttribution(t *testing.T) {
 				Args:   json.RawMessage(`{"command":"cat data.txt"}`),
 				Reason: "command substitution requires approval",
 			}
-			caps.surfaceAsk(ask.AskID, child, ask, tc.label)
+			caps.surfaceAsk(ask.AskID, "child-sess", child, ask, tc.label)
 
 			var got session.Event
 			select {

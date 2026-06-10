@@ -771,6 +771,10 @@ func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID,
 		run, be.branchTool(i),
 		string(callID), string(childSess.ID),
 		childPosture{isolated: true, caps: caps, role: label,
+			// childID is the branch SESSION id ("parallel-<callID>-<i>" — NOT the branch
+			// label role carries), the uniform ask-ownership/cancel handle (A6). Branch
+			// cancel itself is a later iteration; the ownership seam lands with the registry.
+			childID:  string(childSess.ID),
 			askLabel: fmt.Sprintf("parallel branch %q", label)},
 	)
 	res.usage = usage

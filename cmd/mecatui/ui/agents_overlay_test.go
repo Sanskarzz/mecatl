@@ -629,6 +629,19 @@ func goldenFleet(m Model) Model {
 	)
 }
 
+// assertFitsViewport fails if any rendered (ANSI-stripped) line exceeds the
+// viewport width — the overflow guard for the centred overlay card, whose widest
+// line (the footer hint) directly sets its width and is NOT wrapped by centerCard.
+// A golden refresh alone can silently absorb an overflow; this keeps it loud.
+func assertFitsViewport(t *testing.T, got []byte, width int) {
+	t.Helper()
+	for i, line := range strings.Split(string(got), "\n") {
+		if w := lipgloss.Width(line); w > width {
+			t.Errorf("rendered line %d overflows the %d-col viewport (width %d): %q", i, width, w, line)
+		}
+	}
+}
+
 // TestSubagentRosterGolden locks the Subagents-tab fleet roster overlay.
 func TestSubagentRosterGolden(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
@@ -639,6 +652,7 @@ func TestSubagentRosterGolden(t *testing.T) {
 		t.Fatalf("expected Subagents tab, got %v", m.agentsTab)
 	}
 	got := stripANSI([]byte(m.View().Content))
+	assertFitsViewport(t, got, m.width)
 	compareGolden(t, "subagent_roster.golden", got)
 }
 
@@ -655,6 +669,7 @@ func TestSubagentFocusGolden(t *testing.T) {
 		t.Fatalf("expected subagentFocus, got %v", m.subagents.view)
 	}
 	got := stripANSI([]byte(m.View().Content))
+	assertFitsViewport(t, got, m.width)
 	compareGolden(t, "subagent_focus.golden", got)
 }
 

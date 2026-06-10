@@ -131,6 +131,18 @@ func (r *childAskRouter) route(askID string, v session.ApprovalVerdict) bool {
 	return true
 }
 
+// unregister drops a surfaced child ask from the router without routing a
+// verdict. Run.CancelChild calls it (BEFORE emitting the permission.retract)
+// when the owning child is cancelled while parked: the child's own await unwinds
+// via its ctx, and a late ResumeApproval for the dropped askID then falls
+// through to the parent's OWN registry, where it dies as an unknown-ask no-op —
+// the documented stale-verdict behaviour. Idempotent; unknown ids are no-ops.
+func (r *childAskRouter) unregister(askID string) {
+	r.mu.Lock()
+	delete(r.byAskID, askID)
+	r.mu.Unlock()
+}
+
 // await blocks until the client resolves askID via resolve, or ctx is cancelled.
 // It reports the verdict and ok=true on resolution; ok=false means the wait was
 // abandoned (ctx cancelled), in which case the verdict is the zero value

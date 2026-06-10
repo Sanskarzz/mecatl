@@ -450,6 +450,35 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.HookMsg:
 		m.conv.addHook(msg.Text, msg.Phase, msg.Tool, string(msg.Decision))
 		return m.afterEvent()
+	case client.ResultMsg:
+		return m.applyResult(msg)
+	default:
+		// The delegation projections (subagent/team/parallel), the transient notices,
+		// and the permission retraction are reduced by updateStreamSecondary (a second
+		// switch) to keep this dispatcher under the cyclomatic-complexity bound — the
+		// same split EventToMsg/delegationEventToMsg carries. Together the two switches
+		// remain total over the stream msg taxonomy; a new delegation/notice msg must
+		// be added there, not here. Unknown msgs are a no-op.
+		return m.updateStreamSecondary(msg)
+	}
+}
+
+// updateStreamSecondary is the back half of updateStreamEvent: the delegation
+// projections, the transient notices, and the permission retraction. Split out
+// only so neither dispatcher grows past the cyclomatic-complexity bound.
+func (m Model) updateStreamSecondary(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case client.PermissionRetractMsg:
+		// The harness WITHDREW a surfaced ask (its owning subagent was cancelled while
+		// parked). Dismiss the modal iff the pending ask matches; otherwise ignore —
+		// there is NO ask queue (a single m.ask slot), so a non-matching retract is
+		// stale by definition and idempotently dropped.
+		if m.phase == phaseAwaitingApproval && m.ask.AskID == msg.AskID {
+			m.ask = pendingAsk{}
+			m.phase = phaseRunning
+			m.conv.addNotice("permission request withdrawn (subagent cancelled)")
+		}
+		return m.afterEvent()
 	case client.SubagentMsg:
 		m.applySubagent(msg)
 		return m.afterEvent()
@@ -474,8 +503,6 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// liveness; that is the intended, non-intrusive behaviour.)
 		m.statusMsg = m.deps.Theme.Style("muted").Render(noticeLine(msg))
 		return m.afterEvent()
-	case client.ResultMsg:
-		return m.applyResult(msg)
 	default:
 		return m, nil
 	}
@@ -893,13 +920,15 @@ func (m Model) onPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 // isChildAsk reports whether askID identifies a surfaced SUBAGENT (child)
 // permission ask rather than one from the main session. The askID namespace
 // contract (internal/agent/dispatch.go newAskID; CLAUDE.md: "the child session id
-// IS the namespace") is "<sessionID>:<n>:<callID>" — a MAIN-agent ask is prefixed
-// with the live session id, a child ask is prefixed with the CHILD session id. So
-// an askID that contains a colon but is NOT prefixed by "<sessionID>:" is a child
-// ask. Fail-safe both directions: a colon-free fixture id classifies as the main
-// agent (offers always-allow), and if sessionID were empty everything would
-// classify as a child (the always button is merely withheld — never a wrong
-// allow).
+// IS the namespace") is "<sessionID>:<n>:<callID>:r<runSerial>" — only the
+// LEADING "<sessionID>:" prefix is consumed here (the trailing run-serial is the
+// server's per-run uniqueness suffix and is opaque to the client). A MAIN-agent
+// ask is prefixed with the live session id, a child ask is prefixed with the
+// CHILD session id. So an askID that contains a colon but is NOT prefixed by
+// "<sessionID>:" is a child ask. Fail-safe both directions: a colon-free fixture
+// id classifies as the main agent (offers always-allow), and if sessionID were
+// empty everything would classify as a child (the always button is merely
+// withheld — never a wrong allow).
 func isChildAsk(askID, sessionID string) bool {
 	return strings.Contains(askID, ":") && !strings.HasPrefix(askID, sessionID+":")
 }

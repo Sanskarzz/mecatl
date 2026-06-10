@@ -37,6 +37,16 @@ const (
 	EvToolProgress EventType = "tool.progress"
 	// EvPermissionAsk is emitted when the loop pauses for client approval.
 	EvPermissionAsk EventType = "permission.ask"
+	// EvPermissionRetract is emitted when a previously surfaced permission.ask is
+	// WITHDRAWN by the harness — the owning subagent child was cancelled by the
+	// client (Run.CancelChild) while parked on the ask, so there is nothing left to
+	// approve. The payload rides the existing Ask field carrying ONLY the AskID
+	// (server-authored; no tool/args/reason — there is no spoofing surface). Clients
+	// dismiss a pending approval modal iff its AskID matches; an unknown/stale id is
+	// ignored (idempotent). It maps to the proto event-type string verbatim (the
+	// wire type field is a string passthrough; PermissionAsk's fields are optional,
+	// so an ask_id-only payload is wire-legal with no proto change).
+	EvPermissionRetract EventType = "permission.retract"
 	// EvHook is emitted when a hook fires (e.g. PreToolUse blocked).
 	EvHook EventType = "hook"
 	// EvCompaction is emitted when a compaction boundary is crossed.

@@ -1053,6 +1053,24 @@ func (s *Service) Cancel(ctx context.Context, id session.SessionID) error {
 	return s.noActiveRun(ctx, id)
 }
 
+// CancelChild cancels ONE child (a subagent) of the session's in-flight run,
+// addressed by its child session id (the `agentId:` trailer / subagent.start
+// child_id). It mirrors Approve exactly: LookupRun, then the store fallback —
+// ErrNotFound for an unknown session, ErrNoActiveRun for a known-but-runless
+// one. A live run that does not hold the child (unknown id, or the child
+// already finished) yields ErrChildNotFound (HTTP 404; the stream-frame path
+// ignores that race by design instead).
+func (s *Service) CancelChild(ctx context.Context, id session.SessionID, childID string) error {
+	run, ok := s.LookupRun(id)
+	if ok {
+		if !run.CancelChild(childID) {
+			return ErrChildNotFound
+		}
+		return nil
+	}
+	return s.noActiveRun(ctx, id)
+}
+
 // noActiveRun distinguishes "unknown session" (ErrNotFound) from "known session,
 // no in-flight run" (ErrNoActiveRun) by loading from the store.
 func (s *Service) noActiveRun(ctx context.Context, id session.SessionID) error {

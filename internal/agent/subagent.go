@@ -64,11 +64,13 @@ type parentCaps struct {
 	// attached (the surfaced ask can be answered), false for a headless run.
 	interactive bool
 	// surfaceAsk registers the child Run in the parent router (so the parent's
-	// Approve routes the verdict to it) and emits a REDACTED parent EvPermissionAsk for
-	// the child's ask. It is register-then-emit: registration happens before the emit so
-	// a fast verdict cannot race ahead. nil when the parent installed no router (headless
-	// / no surface). The emitted ask carries the SURFACED askID (the child's own askID,
-	// already parent-distinguishable).
+	// Approve routes the verdict to it), records the ask's OWNERSHIP against childID in
+	// the parent's child-run registry (so a CancelChild can retract it), and emits a
+	// REDACTED parent EvPermissionAsk for the child's ask. It is register-then-emit:
+	// registration happens before the emit so a fast verdict cannot race ahead. nil when
+	// the parent installed no router (headless / no surface). The emitted ask carries
+	// the SURFACED askID (the child's own askID, already parent-distinguishable).
+	// childID is the child SESSION id (childPosture.childID) the ask is owned by.
 	// the router auto-unregisters the askID on the routed verdict
 	// (childAskRouter.route); a stale entry (child cancelled while parked) is a harmless
 	// no-op against the idempotent registry, so no explicit unsurface seam is needed.
@@ -76,12 +78,46 @@ type parentCaps struct {
 	// `subagent "fix flaky tests"`, `team member "researcher"`, `parallel branch
 	// "branch-2"`) the parent frames the surfaced ask with; empty keeps the legacy
 	// generic "subagent" framing.
-	surfaceAsk func(askID string, child *Run, ask session.PendingAsk, requester string)
+	surfaceAsk func(askID, childID string, child *Run, ask session.PendingAsk, requester string)
+	// children is the parent run's child-run registry, handed down DIRECTLY — it is
+	// an agent-package type, so passing the handle has zero layering cost (unlike
+	// surfaceAsk, which stays a closure because it genuinely composes router
+	// registration + redaction + the parent emit). The spawning tool registers each
+	// child's per-CALL cancel here (BEFORE the concurrency gate, so a queued child
+	// is already cancellable), lands its terminal stop, and reads the
+	// clientCancelled disambiguation — all via the nil-safe wrappers below; a later
+	// iteration's SubagentStatus reads come free off the same handle. nil when the
+	// tool is driven without parent caps (plain Execute/ExecuteObserved) — the
+	// child then simply is not client-cancellable, unchanged behaviour.
+	children *childRunRegistry
 	// diag is the parent run's run-scoped diagnostics, used to emit the headless
 	// auto-deny operator diagnostic (LevelInfo, tagged agent=<child identity>: the child
 	// session id "subagent-<callID>" for Subagent children; the member name / fork label
 	// for the others). nil → no diagnostic (NopDiagnostics-safe via the caller).
 	diag port.Diagnostics
+}
+
+// registerChildRun is the nil-safe registration wrapper a spawning tool calls: a
+// zero parentCaps (plain Execute/ExecuteObserved, no parent run threaded) makes it a
+// no-op — the child then simply is not client-cancellable, unchanged behaviour.
+func (c parentCaps) registerChildRun(childID session.SessionID, family childFamily, goal string, cancel context.CancelFunc) {
+	if c.children != nil {
+		c.children.register(string(childID), family, goal, cancel, false)
+	}
+}
+
+// finishChildRun is the nil-safe terminal-stop wrapper (deferred by the spawning
+// tool so every exit path lands the terminal stop in the registry).
+func (c parentCaps) finishChildRun(childID session.SessionID, stop session.StopReason) {
+	if c.children != nil {
+		c.children.markDone(string(childID), stop)
+	}
+}
+
+// childWasClientCancelled is the nil-safe clientCancelled read (false when no
+// parent caps were threaded).
+func (c parentCaps) childWasClientCancelled(childID session.SessionID) bool {
+	return c.children != nil && c.children.clientCancelled(string(childID))
 }
 
 // childCapableTool is the optional seam by which a subagent-spawning tool also receives
@@ -873,6 +909,23 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	}
 	defer t.releaseChildID(childID)
 
+	// Per-child cancel: mint the per-CALL cancelable context the parent's CancelChild
+	// targets and register it in the parent run's child registry. The per-CALL ctx (not
+	// any single drive's) is the cancel target so a structured-output re-drive sequence
+	// is cancelled as a whole; it wraps the (possibly timeout-bearing) ctx, so the
+	// per-call timeout and a parent-run cancel keep their existing semantics — the
+	// timeoutCtx deadline check below stays first, and a parent cancel leaves
+	// clientCancelled false. Registration happens BEFORE acquireChildSlot so a child
+	// queued on the gate is already cancellable (the gate's ctx select unblocks). The
+	// deferred markChildDone lands the terminal stop on EVERY exit path (a pre-drive
+	// error leaves it StopNone). A `resume` of an id already run THIS run re-registers
+	// and OVERWRITES the done entry (fresh doneCh — A5).
+	ctx, cancelCall := context.WithCancel(ctx)
+	defer cancelCall()
+	caps.registerChildRun(childID, childFamilySubagent, subagentGoal(args), cancelCall)
+	var terminalStop session.StopReason
+	defer func() { caps.finishChildRun(childID, terminalStop) }()
+
 	// Bound concurrent children FIRST, for ALL Subagent children (forking AND forker-less):
 	// the dispatcher fans Subagent calls out read-parallel, and each child consumes a child
 	// session + an LLM slot (and, when shell-bearing, a forked worktree). Acquire at the
@@ -880,7 +933,13 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	release := t.acquireChildSlot(ctx)
 	if release == nil {
 		// ctx cancelled while waiting for a slot — surface it as a tool error; the parent
-		// ctx governs the whole call.
+		// ctx governs the whole call. A CLIENT cancel (CancelChild while queued) is named
+		// accurately so the model knows the user withdrew this delegation, not that the
+		// run is collapsing.
+		if caps.childWasClientCancelled(childID) {
+			return session.NewToolError(call.ID,
+				"Subagent: subagent was cancelled by the user while waiting for a concurrency slot"), nil
+		}
 		return session.NewToolError(call.ID, "Subagent: cancelled before acquiring a concurrency slot"), nil
 	}
 	defer release()
@@ -937,6 +996,7 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// base-sharing (no auto-approve). The parent caps carry interactivity + the surface
 	// back-channel for an interactive parent; headless leaves them zero (auto-deny).
 	posture := childPosture{isolated: t.childForker != nil, caps: caps, role: string(childID),
+		childID:  string(childID),
 		askLabel: fmt.Sprintf("subagent %q", subagentGoal(args))}
 
 	start := time.Now()
@@ -946,6 +1006,7 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// SAME child session (Reopen) with a correction prompt on a validation miss; the
 	// free-text path runs exactly one drive.
 	final, stop, usage, toolCount := driveChild(ctx, engine, child, runWS, prompt, runOpts, emit, call, childID, posture, submit, args.OutputSchema)
+	terminalStop = stop
 
 	// Best-effort persist of the child's FINAL state (after any structured-output
 	// re-drives) so InspectSubagent can load it by the trailer id. persistMember
@@ -979,7 +1040,10 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 			fmt.Sprintf("Subagent: subagent exceeded its time budget (%dms) and was stopped\n\nagentId: %s", *args.TimeoutMs, childID)), nil
 	}
 
-	return renderSubagentResult(call.ID, childID, final, stop, submit), nil
+	// Client cancel (CancelChild): distinguished from a parent-run cancel by the
+	// registry flag, read AFTER the timeout check above so a real deadline keeps its
+	// time-budget error.
+	return renderSubagentResult(call.ID, childID, final, stop, submit, caps.childWasClientCancelled(childID)), nil
 }
 
 // renderSubagentResult labels the child's terminal by stop reason (D4 — the typed result
@@ -990,6 +1054,11 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 //     failure (the child never produced a schema-valid payload within the retry budget).
 //   - StopMaxTurns / StopMaxToolCalls   → success-with-note (stopped at a limit).
 //   - StopBudget                        → success-with-note (stopped at the token budget).
+//   - StopCancelled + clientCancelled   → success-with-note "[subagent cancelled by
+//     user]": the partial work is usable and the trailer keeps the child resumable
+//     (cancel-then-resume-with-a-narrower-prompt is the intended workflow); an error
+//     result would teach the model the delegation mechanism failed. A parent-run
+//     cancel (clientCancelled false) keeps today's un-noted success rendering.
 //   - everything else (StopEndTurn / StopNoProgress / …) → success.
 //
 // On EVERY terminal the result text carries the structured payload (when a
@@ -997,7 +1066,7 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 // so the parent MODEL can discover the child id (mirroring renderTeamResult's Team-id
 // line — the runtime-discoverability axis: the id must be where the model reads it, not
 // only on the client-only subagent.* events).
-func renderSubagentResult(callID session.ToolCallID, childID session.SessionID, final string, stop session.StopReason, submit *submitResultTool) session.ToolResult {
+func renderSubagentResult(callID session.ToolCallID, childID session.SessionID, final string, stop session.StopReason, submit *submitResultTool, clientCancelled bool) session.ToolResult {
 	// Structured-output failure: the retry budget was exhausted without a schema-valid
 	// payload. Surface the last validation error AS the tool error (model-visible),
 	// never only a log line.
@@ -1039,6 +1108,12 @@ func renderSubagentResult(callID session.ToolCallID, childID session.SessionID, 
 		body = "[subagent stopped: reached its max-tool-calls limit]\n\n" + body
 	case session.StopBudget:
 		body = "[subagent stopped: reached its token budget]\n\n" + body
+	case session.StopCancelled:
+		// Only a CLIENT cancel (CancelChild) is noted; a parent-run cancel keeps the
+		// legacy un-noted rendering (every child dies with the run anyway).
+		if clientCancelled {
+			body = "[subagent cancelled by user]\n\n" + body
+		}
 	}
 	return session.NewToolResult(callID, renderSubagentTrailer(childID, body))
 }
@@ -1370,6 +1445,12 @@ type childPosture struct {
 	// headless: no surface). When caps.interactive && caps.surfaceAsk != nil, an ask that
 	// steps 1-2 did not resolve is SURFACED to the human; otherwise it auto-denies.
 	caps parentCaps
+	// childID is the child SESSION id (the registry/cancel handle: "subagent-<callID>",
+	// "team-<teamID>-<member>", "parallel-<callID>-<i>") — threaded EXPLICITLY because
+	// role does NOT universally carry it (a team posture's role is the member NAME, a
+	// parallel posture's the branch label). surfaceAsk passes it to recordAsk so a
+	// surfaced ask's ownership is recorded uniformly across all three families.
+	childID string
 	// role is the child's identity for the headless auto-deny operator diagnostic: the
 	// child session id ("subagent-<callID>") for Subagent children, the member name for
 	// team members, the branch/judge label for forks. Empty falls back to a generic label.
@@ -1434,7 +1515,7 @@ func resolveChildAsk(run *Run, ask session.PendingAsk, posture childPosture) {
 	// wired. Register-then-emit lives inside surfaceAsk; we DO NOT resolve here — the
 	// child stays parked until the parent routes a verdict back.
 	if posture.caps.interactive && posture.caps.surfaceAsk != nil {
-		posture.caps.surfaceAsk(ask.AskID, run, ask, posture.askLabel)
+		posture.caps.surfaceAsk(ask.AskID, posture.childID, run, ask, posture.askLabel)
 		return
 	}
 	// Step 4: headless / no surface → auto-deny with the accurate message + an operator

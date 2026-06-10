@@ -290,6 +290,15 @@ type Run struct {
 	asks   *askRegistry
 	cancel context.CancelFunc
 	seq    atomic.Int64
+	// serial is this Run's process-unique discriminator (minted from runSerial in
+	// RunContentWith), suffixed into every askID (newAskID) so two RUNS of the SAME
+	// session can never re-mint the same askID. Without it, cancel-a-parked-ask →
+	// resume the same child id in the same parent run → Counters reset → the
+	// provider re-mints the same call id → the new ask's id COLLIDES with the
+	// retracted one, and a stale queued ResumeApproval for the old ask would
+	// resolve the new one (CWE-863). Set once before the run goroutine starts and
+	// only read after, so it needs no synchronisation.
+	serial int64
 	// ctx is the run's context, captured at RunContent. Engine.emit forwards it
 	// to the injected EventSink so telemetry adapters can read a trace span from
 	// it and correlate spans/metrics to the originating request. Each run (including
@@ -314,6 +323,14 @@ type Run struct {
 	// the run goroutine starts and only read after, so it needs no synchronisation; the
 	// router itself is concurrency-safe for the cross-goroutine register/route.
 	childAsks *childAskRouter
+	// children registers every child run spawned under this run (Subagent this
+	// iteration; the other delegation families follow), keyed by child session id.
+	// Unlike childAsks (interactive-only) it is created UNCONDITIONALLY in
+	// RunContentWith: cancel arrives over the wire only on interactive surfaces, but
+	// the registry also carries headless bookkeeping, and it is a mutex + map. It is
+	// set before the run goroutine starts and only read after; the registry itself
+	// is concurrency-safe.
+	children *childRunRegistry
 	// opts are the per-RUN overrides supplied at RunContentWith: a TIGHTEN-ONLY token
 	// ceiling and a set of run-scoped EXTRA tools (e.g. the synthetic SubmitResult tool
 	// for a structured-output Subagent child). They are read-only after the goroutine starts
@@ -323,6 +340,9 @@ type Run struct {
 	// value is the legacy run (no override, no extras), so Run/RunContent are unchanged.
 	opts RunOptions
 }
+
+// runSerial mints the process-unique Run.serial discriminator (see Run.serial).
+var runSerial atomic.Int64
 
 // RunOptions are per-RUN overrides a caller threads into RunContentWith. They are
 // run-scoped: they live on the Run, never on the shared Engine.Deps, so a per-call
@@ -394,6 +414,39 @@ func (r *Run) autoDenyChildAsk(askID, reason string) {
 // terminates with a result carrying StopCancelled.
 func (r *Run) Cancel() { r.cancel() }
 
+// CancelChild requests cancellation of ONE child of this run, addressed by its
+// child session id (the `agentId:` trailer on the Subagent result / the overlay
+// ChildID — the single handle convention; no per-family interpretation). It is
+// the per-child mirror of Approve's routing role: a client frame addressed at a
+// child, routed by the parent Run.
+//
+// It is idempotent and safe from any goroutine; an unknown or already-done id
+// returns false (the finished-as-you-pressed race is benign). On a live child it:
+// marks the registry entry clientCancelled (so the Subagent terminal renders
+// "[subagent cancelled by user]" rather than a generic cancel), snapshots+clears
+// the child's surfaced askIDs, cancels the child's per-call context OUTSIDE the
+// registry lock (unwinding a mid-drive turn, a gate wait, or a parked
+// askRegistry.await alike), then for each owned askID unregisters it from the
+// parent's childAskRouter BEFORE emitting a permission.retract event — so a
+// racing late approval falls through to the parent's own registry and dies as an
+// unknown-ask no-op (fail-safe ordering), while the client dismisses its modal.
+func (r *Run) CancelChild(childID string) bool {
+	cancel, askIDs, ok := r.children.requestCancel(childID)
+	if !ok {
+		return false
+	}
+	if cancel != nil {
+		cancel()
+	}
+	for _, askID := range askIDs {
+		if r.childAsks != nil {
+			r.childAsks.unregister(askID)
+		}
+		r.children.emitRetract(askID)
+	}
+	return true
+}
+
 // Run starts processing userText against sess in a background goroutine and
 // returns immediately with a Run handle. The loop runs until it produces a
 // terminal result Event, then closes the Events channel. ws is the session-scoped
@@ -425,6 +478,7 @@ func (e *Engine) RunContentWith(ctx context.Context, sess *session.Session, ws t
 		cancel: cancel,
 		ctx:    ctx,
 		opts:   opts,
+		serial: runSerial.Add(1),
 		// Bind the run-scoped diagnostics ONCE here, where the live session is in
 		// scope: correlate every emitted line to this session id, and (for a child
 		// engine, Role != "") to its agent role too. The main engine has Role=="" so
@@ -439,8 +493,26 @@ func (e *Engine) RunContentWith(ctx context.Context, sess *session.Session, ws t
 	if e.deps.Interactive {
 		r.childAsks = newChildAskRouter()
 	}
+	// The child-run registry is created UNCONDITIONALLY (cancel is interactive-only
+	// but the registry's bookkeeping is not), with its emit bound to this run's
+	// sequenced stream via tryEmit — a send that gives up when the run context ends,
+	// so a CancelChild retraction can never park the readControl goroutine behind a
+	// wedged consumer (retraction is a UX courtesy; the router unregister already
+	// happened, so dropping it is safe). A delivered retraction mirrors to the sink
+	// like every loop emit.
+	r.children = newChildRunRegistry()
+	r.children.emit = func(ev session.Event) {
+		if r.tryEmit(ev) && e.deps.Sink != nil {
+			e.deps.Sink.Emit(r.ctx, ev)
+		}
+	}
 	go func() {
+		// Defers run LIFO: cancel FIRST (so an in-flight retract send blocked on a
+		// full channel aborts via its ctx select and releases the registry's emitMu),
+		// then seal (a concurrent CancelChild retraction either completes/aborts
+		// before the channel closes or becomes a safe no-op), then close.
 		defer close(r.events)
+		defer r.children.seal()
 		defer cancel()
 		e.drive(ctx, r, sess, ws, userText, parts)
 	}()
@@ -1025,6 +1097,24 @@ func (r *Run) emit(ev session.Event) session.Event {
 	ev.Seq = r.seq.Add(1)
 	r.events <- ev
 	return ev
+}
+
+// tryEmit is emit's give-up-on-teardown sibling for OUT-OF-BAND emitters (the
+// child registry's permission.retract): it publishes ev like emit but selects on
+// the run context instead of blocking indefinitely, so a caller on a foreign
+// goroutine (readControl driving CancelChild) can never wedge behind a consumer
+// that stopped draining. It reports whether the event was delivered; a dropped
+// event consumes its Seq (monotonicity holds, gaps are fine — clients order by
+// Seq, they do not count it). The loop's own emits keep the plain blocking emit
+// (their backpressure is intended).
+func (r *Run) tryEmit(ev session.Event) bool {
+	ev.Seq = r.seq.Add(1)
+	select {
+	case r.events <- ev:
+		return true
+	case <-r.ctx.Done():
+		return false
+	}
 }
 
 // terminate ends the run with a non-success terminal state. It moves the session

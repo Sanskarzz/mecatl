@@ -77,6 +77,15 @@ type PermissionAskMsg struct {
 	Reason string
 }
 
+// PermissionRetractMsg withdraws a previously surfaced permission ask: the
+// owning subagent was cancelled while parked on it, so there is nothing left to
+// approve. The ui dismisses the approval modal iff its pending AskID matches
+// (there is no ask queue — a single modal slot); a non-matching/stale id is
+// ignored (idempotent).
+type PermissionRetractMsg struct {
+	AskID string
+}
+
 // HookDecision is the outcome a hook fire produced, as plain data the ui colours
 // and ranks without touching proto. Mirrors mecatlv1.HookDecision.
 type HookDecision string
@@ -529,6 +538,10 @@ func EventToMsg(ev *mecatlv1.Event) tea.Msg {
 	case "permission.ask":
 		a := ev.GetAsk()
 		return PermissionAskMsg{AskID: a.GetAskId(), Tool: a.GetTool(), Args: a.GetArgs(), Reason: a.GetReason()}
+	case "permission.retract":
+		// The retraction payload rides the same ask field, carrying the AskID only
+		// (server-authored; no tool/args/reason).
+		return PermissionRetractMsg{AskID: ev.GetAsk().GetAskId()}
 	case "hook":
 		h := ev.GetHook()
 		return HookMsg{

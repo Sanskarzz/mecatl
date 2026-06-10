@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
 
@@ -194,12 +195,18 @@ func (m Model) atAgentsRoster() bool {
 
 // onSubagentKey routes keys while the Subagents tab is active. It mirrors onTeamKey:
 // esc steps back from focus to the roster, then closes the overlay; the roster handler
-// drives selection/focus. Returns handled=true (the overlay owns the keyboard).
+// drives selection/focus; x cancels the focused child (non-terminal only). Returns
+// handled=true (the overlay owns the keyboard).
 func (m Model) onSubagentKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if m.subagents.view == subagentFocus {
-		if key.Matches(msg, m.keys.Close) {
+		switch {
+		case key.Matches(msg, m.keys.Close):
 			m.subagents.view = subagentRoster
 			m.subagents.child = ""
+		case key.Matches(msg, m.keys.CancelChild):
+			ln := findFleetLane(m.conv.subagentFleet, m.subagents.child)
+			mm, cmd := m.cancelSubagentLane(ln)
+			return mm, cmd, true
 		}
 		return m, nil, true
 	}
@@ -207,10 +214,35 @@ func (m Model) onSubagentKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	return mm, cmd, true
 }
 
+// cancelSubagentLane sends a CancelChild frame for the given lane's child over the
+// run's stream. It is a no-op for a nil or already-done lane (the key is only shown
+// for non-terminal lanes; the finished-as-you-pressed race is benign — the server
+// ignores a done id). Confirm-less single keypress, matching esc's confirm-less
+// whole-run cancel: the cancel is recoverable (the child is persisted + resumable).
+// The send is wrapped in a command so a send error surfaces as a StreamErrMsg.
+func (m Model) cancelSubagentLane(ln *subagentLane) (tea.Model, tea.Cmd) {
+	if ln == nil || ln.done {
+		return m, nil
+	}
+	stream := m.stream
+	childID := ln.childID
+	m.statusMsg = m.deps.Theme.Style("muted").Render("cancelling subagent #" + shortChildID(childID) + "…")
+	return m, func() tea.Msg {
+		if stream == nil {
+			return nil
+		}
+		if err := stream.SendCancelChild(childID); err != nil {
+			return client.StreamErrMsg{Err: err}
+		}
+		return nil
+	}
+}
+
 // onSubagentRosterKey drives the fleet roster: up/down move the selection, pgup/pgdn
 // page it, home/g·end/G jump to first/last, enter focuses the selected child by
-// ChildID, esc closes the overlay. It mirrors onTeamRosterKey one-for-one (cursor is
-// the single source of truth; the visible window is derived at render time).
+// ChildID, x cancels the selected child (non-terminal lanes only), esc closes the
+// overlay. It mirrors onTeamRosterKey one-for-one (cursor is the single source of
+// truth; the visible window is derived at render time).
 func (m Model) onSubagentRosterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	fleet := m.conv.subagentFleet
 	n := len(fleet)
@@ -243,6 +275,11 @@ func (m Model) onSubagentRosterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.subagents.child = fleet[m.subagents.cursor].childID
 		m.subagents.view = subagentFocus
 		return m, nil
+	case key.Matches(msg, m.keys.CancelChild):
+		if m.subagents.cursor < 0 || m.subagents.cursor >= n {
+			return m, nil
+		}
+		return m.cancelSubagentLane(&fleet[m.subagents.cursor])
 	}
 	return m, nil
 }
@@ -423,7 +460,11 @@ func renderSubagentRoster(th theme.Theme, st subagentState, fleet []subagentLane
 		out.WriteString(muted.Render(fmt.Sprintf("  · +%d below", below)) + "\n")
 	}
 
-	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · tab switch · esc close"))
+	// SHORTER than the team/parallel roster hint: the extra "x cancel" segment would
+	// otherwise push this card past a 100-col terminal (the hint is the card's widest
+	// line, so it directly sets the overlay width — the centred card does not wrap).
+	// home/g·end/G and pgup/pgdn paging still work; the hint names the primary chords.
+	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn · home/end · enter focus · x cancel · tab switch · esc close"))
 	return out.String()
 }
 
@@ -542,7 +583,13 @@ func renderSubagentFocus(th theme.Theme, fleet []subagentLane, child string, hei
 		out.WriteString(capRenderedLines(th, trace, teamFocusRows(height)))
 	}
 
-	out.WriteString("\n\n" + muted.Render("esc back"))
+	// The cancel hint is shown only for a NON-terminal child (the key no-ops on a
+	// done lane).
+	hint := "esc back"
+	if !ln.done {
+		hint = "x cancel · esc back"
+	}
+	out.WriteString("\n\n" + muted.Render(hint))
 	return out.String()
 }
 

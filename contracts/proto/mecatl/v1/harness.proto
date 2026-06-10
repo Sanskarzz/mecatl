@@ -378,6 +378,9 @@ message ConverseRequest {
     ResumeApproval resume_approval = 10;
     // cancel aborts the in-flight run.
     Cancel cancel = 11;
+    // cancel_child cancels ONE child run (a subagent) of the in-flight run,
+    // leaving the run itself (and any sibling children) untouched.
+    CancelChild cancel_child = 12;
   }
 }
 
@@ -466,6 +469,20 @@ enum ApprovalVerdict {
 // Cancel aborts the in-flight run. The loop observes the cancellation and
 // terminates with a result carrying stop = "cancelled".
 message Cancel {}
+
+// CancelChild cancels ONE child of the in-flight run, addressed by its child
+// SESSION id — the same handle the model reads on the Subagent result's
+// "agentId:" line and clients read on subagent.start's child_id (no derivation;
+// one handle everywhere). The child unwinds (mid-drive, mid-gate-wait, or parked
+// on a surfaced permission.ask — the server then emits a permission.retract for
+// each withdrawn ask), ends StopCancelled, is persisted, and stays resumable;
+// the parent run keeps streaming. Unknown or already-finished ids are ignored on
+// the stream (the finished-as-you-pressed race is benign); the HTTP mirror
+// (POST /v1/sessions/{id}/cancel-child) reports them as 404.
+message CancelChild {
+  // child_id is the child session id, verbatim (e.g. "subagent-<callID>").
+  string child_id = 1 [(buf.validate.field).string.min_len = 1];
+}
 
 // Event mirrors the domain session.Event one-for-one. `type` is the string
 // event kind; the structured submessages are populated per kind.
@@ -585,6 +602,10 @@ message Subagent {
   // duration_ms is the child run's wall-clock duration in milliseconds
   // (subagent.end; best-effort).
   int64 duration_ms = 9;
+  // background reports a background (detached-delivery) child on subagent.start.
+  // DORMANT: reserved for the background-subagents iteration; the server does not
+  // set it yet.
+  bool background = 10;
 }
 
 // TeamMemberSpec is one roster entry forwarded on team.start. Mirrors
@@ -674,6 +695,12 @@ message Team {
   // member distinctly from a clean "done" instead of recomputing it. Closed-enum
   // supervisor verdicts only, never member content.
   repeated TeamMemberDisposition dispositions = 17;
+  // member_session_id is the member's child SESSION id ("team-<teamID>-<member>")
+  // on member-tagged events — the CancelChild handle, carried explicitly so a
+  // client never derives ids from the (internal) id grammar. DORMANT: reserved
+  // for the team-cancel iteration; the server does not set it yet. (17 is taken
+  // by dispositions.)
+  string member_session_id = 18;
 }
 
 // Parallel is the REDACTED observability projection carried by the three parallel.*
@@ -746,6 +773,11 @@ message Parallel {
   // winner_workspace is the PRESERVED winner fork root on parallel.end (the deliverable
   // handle for first/judge); empty for all / none-succeeded.
   string winner_workspace = 17;
+  // child_id is the branch's child SESSION id ("parallel-<callID>-<i>") on
+  // branch_start/branch_end — the CancelChild handle, carried explicitly so a
+  // client never derives ids from the (internal) id grammar. DORMANT: reserved
+  // for the parallel-cancel iteration; the server does not set it yet.
+  string child_id = 18;
 }
 
 // ToolCall is a request from the model to invoke a named tool. Mirrors

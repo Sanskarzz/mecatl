@@ -55,6 +55,11 @@ func TestEventToMsg(t *testing.T) {
 			PermissionAskMsg{AskID: "a1", Tool: "Write", Args: "{}", Reason: "why"},
 		},
 		{
+			"permission.retract",
+			&mecatlv1.Event{Type: "permission.retract", Ask: &mecatlv1.PermissionAsk{AskId: "a1"}},
+			PermissionRetractMsg{AskID: "a1"},
+		},
+		{
 			"hook blocked",
 			&mecatlv1.Event{Type: "hook", Text: "blocked by policy", Hook: &mecatlv1.Hook{
 				Phase: "PreToolUse", Tool: "Bash", Decision: mecatlv1.HookDecision_HOOK_DECISION_BLOCKED}},
@@ -403,6 +408,28 @@ func TestPromptAndCancelFrames(t *testing.T) {
 	}
 	if frames[1].GetCancel() == nil {
 		t.Errorf("second frame = %#v, want Cancel", frames[1])
+	}
+}
+
+// TestSendCancelChildFrame asserts SendCancelChild emits a CancelChild frame
+// carrying the child session id VERBATIM (the agentId/ChildID handle — the only
+// correlation the server uses).
+func TestSendCancelChildFrame(t *testing.T) {
+	fs := newFakeStream()
+	st := NewStream(fs, fs)
+	if err := st.SendCancelChild("subagent-p1"); err != nil {
+		t.Fatalf("SendCancelChild: %v", err)
+	}
+	frames := fs.sentFrames()
+	if len(frames) != 1 {
+		t.Fatalf("sent %d frames, want 1", len(frames))
+	}
+	cc := frames[0].GetCancelChild()
+	if cc == nil {
+		t.Fatalf("frame is not a CancelChild: %#v", frames[0])
+	}
+	if cc.GetChildId() != "subagent-p1" {
+		t.Errorf("child_id = %q, want subagent-p1 (verbatim)", cc.GetChildId())
 	}
 }
 

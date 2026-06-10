@@ -1009,6 +1009,10 @@ func (s *Supervisor) fireTeammateIdle(ctx context.Context, m *memberRT) {
 func (s *Supervisor) driveOneTurn(ctx context.Context, m *memberRT, prompt string, evCh chan<- TeamEvent) (text string, stop session.StopReason, usage session.Usage) {
 	run := m.engine.Run(ctx, m.sess, m.ws, prompt)
 	posture := childPosture{isolated: m.isolated, caps: s.caps, role: m.spec.Name,
+		// childID is the member SESSION id (MemberSessionID — NOT the member name role
+		// carries), the uniform ask-ownership/cancel handle (A6). Member cancel itself
+		// is a later iteration; the ownership seam lands with the registry.
+		childID:  string(m.sess.ID),
 		askLabel: fmt.Sprintf("team member %q", m.spec.Name)}
 	stop = session.StopNone
 	for ev := range run.Events() {
