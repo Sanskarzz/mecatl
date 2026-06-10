@@ -1267,19 +1267,28 @@ func (t *SubagentTool) startBackground(ctx context.Context, b backgroundChild) s
 // It is run-scoped (D8): its ctx derives from the parent run's, the run-end drain
 // cancels and joins it (doneCh closes in the deferred finishChildRunResult), and
 // every emit it makes goes through the registry's seal guard, so a residual emit
-// after an abandon is a safe no-op. The deferred block also releases the gate
-// slot, the in-flight id, and both cancels — the ownership transferred from run().
+// after an abandon is a safe no-op. The deferred block releases the gate slot,
+// the in-flight id, and both cancels — the ownership transferred from run() —
+// strictly BEFORE the doneCh close, so a drain-join happens-after every release.
 func (t *SubagentTool) driveBackground(ctx context.Context, b backgroundChild) {
 	var (
 		res  session.ToolResult
 		stop = session.StopError
 	)
 	defer func() {
-		b.caps.finishChildRunResult(b.childID, stop, &res)
+		// Ownership releases FIRST, the done signal LAST. markDoneResult (inside
+		// finishChildRunResult) closes the registry doneCh the run-end drain JOINS
+		// on, so everything a successor run can observe — the gate slot, the
+		// in-flight child id — must be released happens-before that close.
+		// Signalling first let a freshly-joined drain's NEXT run race the deferred
+		// releaseChildID and bounce a legitimate resume of this very child with a
+		// spurious "already running" (the TestBackgroundChildCancelledAtRunEnd CI
+		// flake — a real model-visible bug, not test noise).
 		b.cancelCall()
 		b.cancelTimeout()
 		b.release()
 		t.releaseChildID(b.childID)
+		b.caps.finishChildRunResult(b.childID, stop, &res)
 	}()
 
 	goal := subagentGoal(b.args)
