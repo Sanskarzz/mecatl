@@ -176,6 +176,15 @@ type fakeConv struct {
 	// transient failure) — drives the retry-re-failure-stays-recoverable test, where
 	// the same condition that failed the first re-create is still present on the retry.
 	createErr error
+	// rejectSelector, when non-nil, is returned by CreateSession ONLY when the
+	// carried selection is non-zero — modelling a server that fails the named
+	// provider/model while a zero-selection (server default) create proceeds (to
+	// success, or to createErr when that is ALSO set, letting a test give the two
+	// legs DISTINCT errors). Checked BEFORE createErr. A gRPC InvalidArgument
+	// status here models a REJECTION (the issue #41 fallback leg: createSessionCmd
+	// retries once with the zero selection); any other error models a transient
+	// selector-leg failure (no retry — the unchanged fatal path).
+	rejectSelector error
 }
 
 func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection) (string, client.Capabilities, client.ResolvedModel, error) {
@@ -197,7 +206,14 @@ func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection) (
 			close(c.sessionReady)
 		}
 	}
-	// A persistent create error fails EVERY call (the retry-re-failure path).
+	// A selector rejection fails only a NON-ZERO selection (the issue #41
+	// server-rejection path). Checked FIRST so a test can pair it with createErr
+	// and give the selector create and the zero-selection retry DISTINCT errors.
+	if c.rejectSelector != nil && !sel.IsZero() {
+		return "", client.Capabilities{}, client.ResolvedModel{}, c.rejectSelector
+	}
+	// A persistent create error fails EVERY (remaining) call — the retry-re-failure
+	// path; with rejectSelector also set, this is the zero-selection retry's error.
 	if c.createErr != nil {
 		return "", client.Capabilities{}, client.ResolvedModel{}, c.createErr
 	}

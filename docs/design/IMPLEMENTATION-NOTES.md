@@ -1448,9 +1448,19 @@ client-side state file `$XDG_STATE_HOME/mecatui/models.yaml` (state, not config 
 `xdgconfig.UserStateDir`; the settings-vs-state split, like `trust.yaml`) — a per-workspace map
 (realpath-keyed) + a global `default` (a new repo inherits the last choice), atomic `0o600`
 temp-rename write, fail-soft read. Connect SEQUENCES `ListModels` → reconcile → `CreateSession`:
-a persisted selection whose provider is no longer available is cleared to the server default for
+a persisted selection whose PROVIDER is no longer available is cleared to the server default for
 that run (loud notice, state file untouched) BEFORE the create carries it — so a removed key never
-hard-fails connect with `InvalidArgument`. `/models` is gated on `caps.ModelSelection &&
+hard-fails connect with `InvalidArgument`. The reconcile rule is **PROVIDER-level only** (issue
+#41): a saved model absent from the snapshot is KEPT and sent verbatim — the boot snapshot is the
+EMBEDDED catalog floor until the async live refresh lands (which the connect race always wins),
+and the server is the model-string authority (an unknown provider errors loudly; a non-empty
+`model_id` on a known provider is passthrough). The exact-row clear was an implementation drift
+that silently downgraded boot sessions to the server default. The companion FALLBACK leg
+(`createSessionCmd` + `connectFallbackMsg`): a connect-time create whose non-zero selection the
+server REJECTS retries ONCE with the zero selection — success applies the session like
+SessionReadyMsg, clears the bad selection for the run, and sets a loud warning naming the
+rejected model + the error (state file untouched); both failing keeps the unchanged fatal path
+with the ORIGINAL error. `/models` is gated on `caps.ModelSelection &&
 m.deps.Models != nil` (same mechanism as `/soul`/`/usermodel`); palette-only open (NO `ctrl+m` —
 it collides with enter); fixed builtin order now `clear, help, mcp, agents, team, skills, soul,
 usermodel, models`.

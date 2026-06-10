@@ -404,7 +404,11 @@ launch the persisted selection is **reconciled** against `ListModels` BEFORE the
 first `CreateSession`: if its provider is no longer available (a removed key), it
 falls back to the server default for that run with a loud notice — the state file is
 left intact (the preference returns next launch), and connect never hard-fails with
-`InvalidArgument`.
+`InvalidArgument`. The reconcile is **provider-level only** (issue #41): a saved
+model missing from the (possibly embedded-floor, pre-live-refresh) snapshot is sent
+anyway — the server validates the model string verbatim. A server-**rejected** saved
+selection retries once on the server default and surfaces a **loud warning** naming
+the rejected model, never a silent downgrade; the state file is not rewritten.
 
 > **`--model` vs the picker.** For the embedded `mecatui` server, `--model` is the
 > server's **default** model (what it resolves when the client sends no `model_id`);

@@ -246,7 +246,17 @@ back to the global default (then the server default). On launch the selection is
 persisted model's provider is no longer available (its key was removed), the
 selection falls back to the server default for that run with a loud notice that names
 the model the session actually fell back to, and the state file is left intact (the
-preference returns next launch). The state file is machine-written **state** under
+preference returns next launch). The reconcile is **provider-level only** (issue
+#41): a saved model absent from the snapshot is **sent anyway** — the boot snapshot
+may still be the *embedded* catalog floor (the async live refresh always loses the
+connect race), and the server validates the model string verbatim. If the server
+then **rejects** the saved selection, the create retries once on the server default
+and connect completes **with a loud warning** naming the rejected model and the
+server's error — never silently; the state file is still not rewritten. Accepted
+trade-off: a model genuinely gone from the live provider now creates a session
+successfully (the header echoes the selector verbatim) and fails at the **first
+run** with a visible stream error — server-authoritative, recoverable via
+`/models`. The state file is machine-written **state** under
 `XDG_STATE_HOME`, a sibling of the human config — the same settings-vs-state split
 as `trust.yaml`.
 

@@ -599,7 +599,11 @@ result via `Service.SetModels` (an `atomic.Pointer[[]*ModelInfo]` inside the Ser
 `ListModels`/`ModelSelection` read lock-free). The goroutine is cancelled by `Close`
 (no leak; verified under `-race`). A composition-only `liveModelRefreshSync` test seam runs
 the refresh inline for deterministic offline e2e (no sleeps). When no available provider
-has a lister (mock/openai-only), the refresh is a no-op — no goroutine.
+has a lister (mock/openai-only), the refresh is a no-op — no goroutine. Consequence for
+clients (issue #41): a `ListModels` fired at connect time sees the EMBEDDED floor (the
+async swap always loses the boot race), so client-side reconciliation must not treat
+snapshot absence as model absence — the TUI reconciles at PROVIDER level only and lets
+the server validate the model string verbatim.
 
 ---
 

@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/stacklok/mecatl/cmd/mecatui/client"
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
@@ -727,6 +729,262 @@ func TestInitNoListerFiresCreateDirectly(t *testing.T) {
 	}
 	if !conv.createdSel.IsZero() {
 		t.Errorf("no-lister create carried %+v, want the empty selection", conv.createdSel)
+	}
+}
+
+// TestModelsReconcileKeepsModelMissingFromSnapshot is the issue #41 fix at the
+// reducer level: the connect-time reconcile is PROVIDER-level, so a persisted
+// selection whose provider IS in the inventory but whose exact model is NOT (the
+// boot snapshot may be the embedded catalog floor before the live refresh lands)
+// must be KEPT and carried into the create verbatim — no clear, no notice.
+func TestModelsReconcileKeepsModelMissingFromSnapshot(t *testing.T) {
+	persisted := client.ModelSelection{ProviderID: "openrouter", ModelID: "openai/gpt-5.5"}
+	// The openrouter PROVIDER is present, but the exact saved model is absent
+	// (an embedded-floor snapshot that predates the model).
+	inventory := []client.ModelInfo{
+		{ID: "openai/gpt-5.1", ProviderID: "openrouter", DisplayName: "GPT-5.1", ContextLimit: 400000},
+		{ID: "openai/gpt-5", ProviderID: "openrouter", DisplayName: "GPT-5", ContextLimit: 400000},
+	}
+	recv := &fakeRecver{gate: make(chan struct{})}
+	conv := &fakeConv{recv: recv, send: &fakeSender{}, caps: modelsCaps()}
+	m := New(Deps{
+		Session:      conv,
+		Conv:         conv,
+		Models:       &fakeModels{models: inventory},
+		Theme:        theme.New("aztec", theme.AztecPalette()),
+		Ctx:          context.Background(),
+		InitialModel: persisted,
+	})
+	if m.phase != phaseConnecting {
+		t.Fatalf("precondition: phase = %v, want phaseConnecting", m.phase)
+	}
+
+	// Drive the connect-time ListModels result through the reducer.
+	mm, cmd, handled := m.updateModelsMsg(client.ModelsMsg{Models: inventory})
+	m = mm.(Model)
+	if !handled {
+		t.Fatal("connect-time ModelsMsg should be handled")
+	}
+	if cmd == nil {
+		t.Fatal("connect-time ModelsMsg must fire CreateSession")
+	}
+	if m.activeModel != persisted {
+		t.Errorf("activeModel = %+v, want the KEPT persisted %+v (provider present ⇒ no clear)", m.activeModel, persisted)
+	}
+	if m.models.active != persisted {
+		t.Errorf("models.active = %+v, want the KEPT persisted %+v", m.models.active, persisted)
+	}
+	if st := stripANSIstr(m.statusMsg); strings.Contains(st, "no longer available") {
+		t.Errorf("no key-removed notice must fire when only the MODEL is absent, got %q", st)
+	}
+	// The create carries the persisted selection verbatim and connect completes.
+	m = feedCmd(t, applyAll(m, tea.WindowSizeMsg{Width: 100, Height: 30}), cmd)
+	if m.phase != phaseIdle {
+		t.Errorf("phase after the create = %v, want phaseIdle (connected)", m.phase)
+	}
+	if conv.createdSel != persisted {
+		t.Errorf("CreateSession carried %+v, want the persisted %+v", conv.createdSel, persisted)
+	}
+}
+
+// TestConnectCreateRejectedFallsBackToDefault is the issue #41 fallback leg: the
+// kept selection is the SERVER's to validate, so when the connect-time create
+// REJECTS it (gRPC InvalidArgument — the code the server maps a bad selector to),
+// createSessionCmd retries ONCE with the zero selection (server default). Connect
+// must complete (idle), the now-known-bad selection clears for this run (BOTH
+// m.activeModel and the picker's m.models.active — a stale models.active would
+// re-seed the picker with the known-bad selection), a LOUD warning names the
+// rejected model, and the state file is NOT rewritten. Exactly TWO creates fire:
+// the rejected one + the single zero retry — never more.
+func TestConnectCreateRejectedFallsBackToDefault(t *testing.T) {
+	persisted := client.ModelSelection{ProviderID: "openrouter", ModelID: "openai/gpt-5.5"}
+	// The provider IS in the inventory, so the reconcile keeps the selection — the
+	// rejection comes from the server at create time.
+	inventory := []client.ModelInfo{
+		{ID: "openai/gpt-5.1", ProviderID: "openrouter", DisplayName: "GPT-5.1", ContextLimit: 400000},
+	}
+	recv := &fakeRecver{gate: make(chan struct{})}
+	store := &fakeStore{}
+	conv := &fakeConv{
+		recv:           recv,
+		send:           &fakeSender{},
+		caps:           modelsCaps(),
+		rejectSelector: status.Error(codes.InvalidArgument, "unknown or unavailable provider"),
+	}
+	m := New(Deps{
+		Session:        conv,
+		Conv:           conv,
+		Models:         &fakeModels{models: inventory},
+		SelectionStore: store,
+		Theme:          theme.New("aztec", theme.AztecPalette()),
+		Ctx:            context.Background(),
+		InitialModel:   persisted,
+	})
+
+	mm, cmd, handled := m.updateModelsMsg(client.ModelsMsg{Models: inventory})
+	m = mm.(Model)
+	if !handled || cmd == nil {
+		t.Fatal("connect-time ModelsMsg must be handled and fire CreateSession")
+	}
+	// The create cmd runs both legs (reject → zero-selection retry) and its
+	// connectFallbackMsg lands in the reducer.
+	m = feedCmd(t, applyAll(m, tea.WindowSizeMsg{Width: 100, Height: 30}), cmd)
+	if m.phase != phaseIdle {
+		t.Errorf("phase after the fallback create = %v, want phaseIdle (connect completed)", m.phase)
+	}
+	if !conv.createdSel.IsZero() {
+		t.Errorf("the LAST create carried %+v, want the zero selection (the fallback create)", conv.createdSel)
+	}
+	if conv.createCount != 2 {
+		t.Errorf("CreateSession fired %d times, want exactly 2 (the rejected create + ONE zero retry)", conv.createCount)
+	}
+	if !m.activeModel.IsZero() {
+		t.Errorf("activeModel = %+v, want zero (the rejected selection clears for this run)", m.activeModel)
+	}
+	if !m.models.active.IsZero() {
+		t.Errorf("models.active = %+v, want zero (a stale picker selection would re-seed the known-bad pick)", m.models.active)
+	}
+	st := stripANSIstr(m.statusMsg)
+	if !strings.Contains(st, "openai/gpt-5.5") {
+		t.Errorf("the fallback warning must name the rejected model, got %q", st)
+	}
+	if !strings.Contains(st, "server default") {
+		t.Errorf("the fallback warning must say the session fell back to the server default, got %q", st)
+	}
+	if store.saves != 0 {
+		t.Errorf("the state file must NOT be rewritten on a server rejection, got %d saves", store.saves)
+	}
+}
+
+// TestConnectCreateBothFailStaysFatal guards the issue #41 fallback leg's failure
+// path: the carried selection is REJECTED (InvalidArgument, so the zero-selection
+// retry fires) and the retry ALSO fails — today's fatal path is unchanged:
+// ConnectErrMsg → phaseFatal carrying the ORIGINAL (rejection) error, not the
+// retry's.
+func TestConnectCreateBothFailStaysFatal(t *testing.T) {
+	persisted := client.ModelSelection{ProviderID: "openrouter", ModelID: "openai/gpt-5.5"}
+	inventory := []client.ModelInfo{
+		{ID: "openai/gpt-5.1", ProviderID: "openrouter", DisplayName: "GPT-5.1", ContextLimit: 400000},
+	}
+	recv := &fakeRecver{gate: make(chan struct{})}
+	conv := &fakeConv{
+		recv: recv,
+		send: &fakeSender{},
+		caps: modelsCaps(),
+		// The selector create is REJECTED; the zero-selection retry then fails with a
+		// DISTINCT error, so the original-error assertion below is non-vacuous.
+		rejectSelector: status.Error(codes.InvalidArgument, "unknown or unavailable provider"),
+		createErr:      errors.New("server unavailable"),
+	}
+	m := New(Deps{
+		Session:      conv,
+		Conv:         conv,
+		Models:       &fakeModels{models: inventory},
+		Theme:        theme.New("aztec", theme.AztecPalette()),
+		Ctx:          context.Background(),
+		InitialModel: persisted,
+	})
+
+	mm, cmd, handled := m.updateModelsMsg(client.ModelsMsg{Models: inventory})
+	m = mm.(Model)
+	if !handled || cmd == nil {
+		t.Fatal("connect-time ModelsMsg must be handled and fire CreateSession")
+	}
+	m = feedCmd(t, applyAll(m, tea.WindowSizeMsg{Width: 100, Height: 30}), cmd)
+	if m.phase != phaseFatal {
+		t.Errorf("phase after both creates failed = %v, want phaseFatal (unchanged fatal path)", m.phase)
+	}
+	if conv.createCount != 2 {
+		t.Errorf("CreateSession fired %d times, want 2 (the rejected create + the failed zero retry)", conv.createCount)
+	}
+	if !strings.Contains(m.fatalErr, "unknown or unavailable provider") {
+		t.Errorf("fatalErr = %q, want it to carry the ORIGINAL (rejection) error", m.fatalErr)
+	}
+	if strings.Contains(m.fatalErr, "server unavailable") {
+		t.Errorf("fatalErr = %q, must NOT be the retry's error (the original must surface)", m.fatalErr)
+	}
+}
+
+// TestConnectCreateTransientFailureStaysFatal is the missing cell {saved selection
+// valid} × {transient failure}: a connect-time create that fails for a
+// NON-rejection reason (deadline, unavailable — anything but gRPC InvalidArgument)
+// must NOT trigger the zero-selection fallback, even though that retry WOULD
+// succeed — landing the user on the server default with a dishonest "rejected"
+// warning over a server blip. It keeps today's fatal path with the original error,
+// the selection intact, and exactly ONE create fired.
+func TestConnectCreateTransientFailureStaysFatal(t *testing.T) {
+	persisted := client.ModelSelection{ProviderID: "openrouter", ModelID: "openai/gpt-5.5"}
+	inventory := []client.ModelInfo{
+		{ID: "openai/gpt-5.1", ProviderID: "openrouter", DisplayName: "GPT-5.1", ContextLimit: 400000},
+	}
+	recv := &fakeRecver{gate: make(chan struct{})}
+	conv := &fakeConv{
+		recv: recv,
+		send: &fakeSender{},
+		caps: modelsCaps(),
+		// A NON-InvalidArgument failure on the selector create; the fake's
+		// zero-selection create would SUCCEED, so an any-error fallback would
+		// (wrongly) complete connect on the server default.
+		rejectSelector: errors.New("context deadline exceeded"),
+	}
+	m := New(Deps{
+		Session:      conv,
+		Conv:         conv,
+		Models:       &fakeModels{models: inventory},
+		Theme:        theme.New("aztec", theme.AztecPalette()),
+		Ctx:          context.Background(),
+		InitialModel: persisted,
+	})
+
+	mm, cmd, handled := m.updateModelsMsg(client.ModelsMsg{Models: inventory})
+	m = mm.(Model)
+	if !handled || cmd == nil {
+		t.Fatal("connect-time ModelsMsg must be handled and fire CreateSession")
+	}
+	m = feedCmd(t, applyAll(m, tea.WindowSizeMsg{Width: 100, Height: 30}), cmd)
+	if m.phase != phaseFatal {
+		t.Errorf("phase after a transient create failure = %v, want phaseFatal (no fallback on a non-rejection)", m.phase)
+	}
+	if !strings.Contains(m.fatalErr, "context deadline exceeded") {
+		t.Errorf("fatalErr = %q, want the original transient error", m.fatalErr)
+	}
+	if conv.createCount != 1 {
+		t.Errorf("CreateSession fired %d times, want exactly 1 (no zero-selection retry on a transient failure)", conv.createCount)
+	}
+	if m.activeModel != persisted {
+		t.Errorf("activeModel = %+v, want the UNTOUCHED persisted %+v (a transient failure must not clear the pick)", m.activeModel, persisted)
+	}
+	if st := stripANSIstr(m.statusMsg); strings.Contains(st, "rejected") {
+		t.Errorf("no dishonest 'rejected' warning may fire on a transient failure, got %q", st)
+	}
+}
+
+// TestModelsPickerNoActiveMarkerWhenSelectionAbsent: a KEPT-but-absent active
+// selection (provider present, exact model missing from the snapshot — the issue
+// #41 keep) renders the picker with NO ● marker — no phantom row, no misplaced
+// marker; rows otherwise render normally.
+func TestModelsPickerNoActiveMarkerWhenSelectionAbsent(t *testing.T) {
+	fm := &fakeModels{models: []client.ModelInfo{
+		{ID: "openai/gpt-5.1", ProviderID: "openrouter", DisplayName: "GPT-5.1", ContextLimit: 400000},
+		{ID: "openai/gpt-5", ProviderID: "openrouter", DisplayName: "GPT-5", ContextLimit: 400000},
+	}}
+	kept := client.ModelSelection{ProviderID: "openrouter", ModelID: "openai/gpt-5.5"}
+	m := newModelsModel(t, fm, &fakeStore{}, modelsCaps(), kept)
+	mm, cmd := m.runModels()
+	m = feedCmd(t, mm.(Model), cmd)
+	// The reconcile (provider present) keeps the selection.
+	if m.models.active != kept {
+		t.Fatalf("models.active = %+v, want the kept %+v", m.models.active, kept)
+	}
+	panel := renderModelsPanel(m.deps.Theme, m.models, m.caps, "", modelsRowBudgetFor(30))
+	rows := strings.Split(stripANSIstr(panel), "\n")
+	for _, row := range rows {
+		if strings.Contains(row, "●") && !strings.Contains(row, "● current") {
+			t.Errorf("no row should carry the ● marker for an absent selection, got %q", row)
+		}
+	}
+	if !strings.Contains(stripANSIstr(panel), "GPT-5.1") {
+		t.Errorf("rows should still render normally:\n%s", stripANSIstr(panel))
 	}
 }
 

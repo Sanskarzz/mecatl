@@ -440,10 +440,14 @@ func (m Model) saveGlobalDefaultCmd(sel client.ModelSelection) tea.Cmd {
 
 // updateModelsMsg reduces the client.ModelsMsg into the picker AND performs the
 // key-removed reconcile (§4): when the loaded list does NOT contain the active
-// selection, the active selection is CLEARED to the server default (so subsequent
-// creates don't send a now-unavailable provider — which the server would reject
-// with InvalidArgument) and a loud notice fires. The state file is NOT rewritten
-// (the key may return next launch).
+// selection's PROVIDER, the active selection is CLEARED to the server default (so
+// subsequent creates don't send a now-unavailable provider — which the server
+// would reject with InvalidArgument) and a loud notice fires. The reconcile is
+// PROVIDER-level only (issue #41): a selection whose provider is present but whose
+// exact model is absent from the snapshot is KEPT — the server validates the model
+// string verbatim, and the boot snapshot may be the embedded catalog floor before
+// the async live refresh lands. The state file is NOT rewritten (the key may
+// return next launch).
 //
 // During CONNECT (phaseConnecting), this is the first leg of the §4 sequence:
 // ListModels lands, the persisted selection is reconciled, THEN it fires
@@ -487,21 +491,40 @@ func (m Model) updateModelsMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	}
 }
 
-// reconcileSelection clears the active selection to the server default when it
-// names a model absent from the loaded list (the key-removed fallback) and fires a
-// loud notice. A zero active selection (server default already in use) or a still-
-// available one is left untouched. It returns the model with the (possibly
-// cleared) selection; the state file is never rewritten here.
+// reconcileSelection clears the active selection to the server default when its
+// PROVIDER has no row in the loaded list (the key-removed fallback) and fires a
+// loud notice. The check is PROVIDER-level, not exact-row (issue #41): the server
+// validates the MODEL string verbatim on CreateSession (an unknown provider errors
+// loudly; a non-empty model_id on a known provider is passthrough), and the boot
+// snapshot may still be the EMBEDDED catalog floor before the async live refresh
+// lands — so a saved model missing from the snapshot is KEPT and sent anyway
+// (clearing it here silently downgraded the boot session to the server default).
+// A server-rejected selection is handled by createSessionCmd's loud fallback leg,
+// not here. A kept-but-absent selection simply renders no ● row in the picker (no
+// phantom row). A zero active selection (server default already in use) is left
+// untouched. It returns the model with the (possibly cleared) selection; the
+// state file is never rewritten here.
 func (m Model) reconcileSelection() Model {
 	if m.models.active.IsZero() {
 		return m
 	}
+	providerAvailable := false
 	for _, mi := range m.models.models {
 		if m.models.active.Matches(mi) {
-			return m // still available — keep it
+			return m // exact row still available — keep it
+		}
+		if mi.ProviderID == m.models.active.ProviderID {
+			providerAvailable = true
 		}
 	}
-	// The persisted provider/model is gone (key removed since last launch). Fall
+	if providerAvailable {
+		// The provider is still available; the exact model is just absent from this
+		// snapshot (likely the embedded floor pre-live-refresh, or a fresh release the
+		// curated subset doesn't carry). Keep the selection — the server is the
+		// authority on the model string (issue #41).
+		return m
+	}
+	// The persisted provider is gone (key removed since last launch). Fall
 	// back to the server default for THIS run, loudly, without rewriting the state
 	// file (the preference may come back next launch).
 	gone := m.models.active.ModelID

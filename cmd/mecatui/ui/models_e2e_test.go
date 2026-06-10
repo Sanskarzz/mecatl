@@ -116,6 +116,41 @@ func TestModelsE2EKeyRemovedFallback(t *testing.T) {
 	}
 }
 
+// TestModelsE2EStaleSnapshotCarriesSavedSelection is the issue #41 headline e2e:
+// connect with a persisted selection whose PROVIDER is in the inventory but whose
+// exact MODEL is not (the boot ListModels snapshot is the embedded catalog floor
+// until the async live refresh lands, which the connect race always wins). The
+// provider-level reconcile must KEEP the selection, so the startup create carries
+// it verbatim — the server, not the stale snapshot, validates the model string.
+func TestModelsE2EStaleSnapshotCarriesSavedSelection(t *testing.T) {
+	persisted := client.ModelSelection{ProviderID: "openrouter", ModelID: "openai/gpt-5.5"}
+	// The openrouter provider is present; the exact saved model is absent (the
+	// embedded floor predates it).
+	models := []client.ModelInfo{
+		{ID: "openai/gpt-5.1", ProviderID: "openrouter", DisplayName: "GPT-5.1", ContextLimit: 400000},
+		{ID: "openai/gpt-5", ProviderID: "openrouter", DisplayName: "GPT-5", ContextLimit: 400000},
+	}
+	m, conv, prog := newModelsProgram(t, models, persisted)
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+
+	// Sequence on the create-happened signal (goroutine signal), not output.
+	waitClosed(t, "CreateSession after provider-level reconcile", conv.created, 5*time.Second)
+	if conv.createdSel != persisted {
+		t.Fatalf("CreateSession carried %+v, want the KEPT persisted %+v (issue #41)", conv.createdSel, persisted)
+	}
+	prog.wait(t, phaseIdle, 5*time.Second)
+
+	// Graceful double-ctrl+c quit.
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.Send(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(scaleWait(3*time.Second)))
+
+	fm := tm.FinalModel(t).(Model)
+	if fm.activeModel != persisted {
+		t.Errorf("final activeModel = %+v, want the kept %+v", fm.activeModel, persisted)
+	}
+}
+
 // TestModelsE2EFilterAndSelect drives the headline scroll+filter flow end-to-end:
 // after connect, open /models (via the slash-command submit path), type a filter
 // that uniquely narrows the list, press enter, and assert the FILTERED+chosen model

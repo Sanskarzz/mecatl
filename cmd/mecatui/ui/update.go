@@ -278,6 +278,31 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// applySessionReady binds an established session into the model: the
+// SessionReadyMsg arm's body, extracted so the connectFallbackMsg arm (the
+// server-rejected-selection fallback, issue #41) can reuse it before layering its
+// warning on top.
+func (m Model) applySessionReady(msg client.SessionReadyMsg) (tea.Model, tea.Cmd, bool) {
+	m.sessionID = msg.SessionID
+	m.caps = msg.Capabilities // stored for Phase B; unrendered this phase
+	// The EFFECTIVE provider+model the server resolved this session to (echoed
+	// verbatim). The header shows it from turn zero. The model is FIXED per session,
+	// so this is set once here. An older server yields the zero value → no segment.
+	m.effectiveModel = msg.ResolvedModel
+	m.restartFailed = false // a session is (re)established; any prior failure clears
+	m.phase = phaseIdle
+	m.statusMsg = "connected"
+	// Now that we are idle + (still) empty, the welcome splash shows: transmit the
+	// Kitty mascot if the terminal supports it (no-op otherwise). The WindowSizeMsg
+	// path also fires this, but at connect the phase was still phaseConnecting when
+	// that arrived, so fire it here on the idle transition too. Two-step form: the
+	// pointer call mutates m (kittyActive/kittyTier), and mixing it with m as a
+	// sibling return operand leaves the copy order UNSPECIFIED (see markDirty's
+	// doc) — the cmd is taken first so the returned model carries the mutation.
+	cmd := (&m).maybeKittyTransmit()
+	return m, cmd, true
+}
+
 // updateLifecycle reduces the transport/lifecycle msgs (session-ready, connect &
 // stream errors, stream close, clipboard results, slash-command discovery). It is
 // split out of update so the top-level dispatcher stays under the cyclomatic cap;
@@ -286,20 +311,30 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case client.SessionReadyMsg:
-		m.sessionID = msg.SessionID
-		m.caps = msg.Capabilities // stored for Phase B; unrendered this phase
-		// The EFFECTIVE provider+model the server resolved this session to (echoed
-		// verbatim). The header shows it from turn zero. The model is FIXED per session,
-		// so this is set once here. An older server yields the zero value → no segment.
-		m.effectiveModel = msg.ResolvedModel
-		m.restartFailed = false // a session is (re)established; any prior failure clears
-		m.phase = phaseIdle
-		m.statusMsg = "connected"
-		// Now that we are idle + (still) empty, the welcome splash shows: transmit the
-		// Kitty mascot if the terminal supports it (no-op otherwise). The WindowSizeMsg
-		// path also fires this, but at connect the phase was still phaseConnecting when
-		// that arrived, so fire it here on the idle transition too.
-		return m, (&m).maybeKittyTransmit(), true
+		return m.applySessionReady(msg)
+	case connectFallbackMsg:
+		// The connect-time create REJECTED the saved selection; the zero-selection
+		// retry succeeded (createSessionCmd's fallback leg, issue #41). The session is
+		// live on the SERVER DEFAULT: apply the ready payload as usual, then clear the
+		// now-known-bad selection for THIS run (the next create must not re-send it)
+		// and overwrite the "connected" status with a LOUD warning naming the rejected
+		// model + the server's error — never a silent downgrade. The state file is NOT
+		// rewritten (the pick may become valid again next launch).
+		mm, cmd, handled := m.applySessionReady(msg.ready)
+		m = mm.(Model)
+		m.activeModel = client.ModelSelection{}
+		m.models.active = client.ModelSelection{}
+		notice := "saved model " + sanitizeTerminal(modelSelLabel(msg.rejected)) +
+			" was rejected by the server (" + sanitizeTerminal(msg.err.Error()) +
+			") — using the server default"
+		// Name the model the session actually fell back to, when known — mirroring
+		// the key-removed reconcile notice. The fallback create's response already
+		// carries it (applySessionReady set m.effectiveModel from msg.ready).
+		if id := m.effectiveModel.ModelID; id != "" {
+			notice += " — now running " + sanitizeTerminal(id)
+		}
+		m.statusMsg = m.deps.Theme.Style("warning").Render(notice)
+		return m, cmd, handled
 	case client.ConnectErrMsg:
 		m.phase = phaseFatal
 		m.fatalErr = msg.Err.Error()
@@ -2353,15 +2388,53 @@ func sumUsage(a, b client.Usage) client.Usage {
 }
 
 // createSessionCmd runs CreateSession off the update goroutine; result arrives as
-// SessionReadyMsg or ConnectErrMsg.
+// SessionReadyMsg, connectFallbackMsg, or ConnectErrMsg.
+//
+// The fallback leg (issue #41): the connect-time reconcile is PROVIDER-level, so
+// the carried selection's model string is the SERVER's to validate. When the
+// create REJECTS a non-zero selection (gRPC InvalidArgument — the code the server
+// maps a bad provider_id/model_id selector to; see client.IsInvalidArgument),
+// retry ONCE with the zero selection (server default): success surfaces as
+// connectFallbackMsg (a LOUD warning, never a silent downgrade); both failing
+// keeps today's fatal path with the ORIGINAL error. Any OTHER failure (transient:
+// unavailable, deadline, auth) goes straight to ConnectErrMsg — a valid saved
+// selection must never be downgraded to the server default with a dishonest
+// "rejected" warning over a server blip. A zero-selection create that fails also
+// goes straight to ConnectErrMsg.
 func (m Model) createSessionCmd() tea.Cmd {
 	deps := m.deps
 	sel := m.activeModel // the reconciled apply-on-next-create selection (zero ⇒ server default)
 	return func() tea.Msg {
 		id, caps, resolved, err := deps.Session.CreateSession(deps.Ctx, sel)
-		if err != nil {
+		if err == nil {
+			return client.SessionReadyMsg{SessionID: id, Capabilities: caps, ResolvedModel: resolved}
+		}
+		if sel.IsZero() || !client.IsInvalidArgument(err) {
 			return client.ConnectErrMsg{Err: err}
 		}
-		return client.SessionReadyMsg{SessionID: id, Capabilities: caps, ResolvedModel: resolved}
+		id, caps, resolved, retryErr := deps.Session.CreateSession(deps.Ctx, client.ModelSelection{})
+		if retryErr != nil {
+			// Both creates failed: the selection wasn't the problem. Surface the
+			// ORIGINAL error on the unchanged fatal path.
+			return client.ConnectErrMsg{Err: err}
+		}
+		return connectFallbackMsg{
+			ready:    client.SessionReadyMsg{SessionID: id, Capabilities: caps, ResolvedModel: resolved},
+			rejected: sel,
+			err:      err,
+		}
 	}
+}
+
+// connectFallbackMsg reports a connect-time CreateSession whose carried model
+// selection the server REJECTED, where the immediate zero-selection retry
+// succeeded: the session is live on the SERVER DEFAULT, not the saved pick. The
+// reducer applies the ready payload like SessionReadyMsg, clears the now-known-bad
+// active selection for this run, and sets a WARNING status naming the rejected
+// model + the server's error — NEVER silent (issue #41). The state file is NOT
+// rewritten (the pick may become valid again, e.g. when the key returns).
+type connectFallbackMsg struct {
+	ready    client.SessionReadyMsg
+	rejected client.ModelSelection
+	err      error
 }

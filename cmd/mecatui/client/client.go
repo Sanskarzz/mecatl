@@ -10,8 +10,10 @@ import (
 	"strings"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 )
@@ -116,6 +118,21 @@ func (c *Client) CreateSession(ctx context.Context, workspace string, mode mecat
 		return "", Capabilities{}, ResolvedModel{}, fmt.Errorf("create session: %w", err)
 	}
 	return resp.GetSessionId(), capabilitiesFrom(resp.GetCapabilities()), resolvedModelFrom(resp.GetResolvedModel()), nil
+}
+
+// IsInvalidArgument reports whether err carries gRPC codes.InvalidArgument — the
+// code the server maps a REJECTED CreateSession selector to (an unknown
+// provider_id surfaces as server.ErrInvalidArgument → codes.InvalidArgument via
+// toStatus; both the in-process UNIX-socket server and a remote mecated speak the
+// same gRPC path). status.Code traverses wrapped errors, so CreateSession's
+// "create session: %w" wrap above survives classification. The ui's connect-time
+// fallback (issue #41) gates its zero-selection retry on this: only a genuine
+// REJECTION of the carried selector falls back to the server default — a
+// transient failure (unavailable, deadline) keeps the fatal path with the
+// original error, never a dishonest "rejected" warning. Nil → false (codes.OK);
+// a non-status error → false (codes.Unknown).
+func IsInvalidArgument(err error) bool {
+	return status.Code(err) == codes.InvalidArgument
 }
 
 // CloseSession asks the server to end (and forget) the session under id, tearing

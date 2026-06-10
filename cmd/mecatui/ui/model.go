@@ -74,7 +74,10 @@ type Deps struct {
 	// InitialModel is the persisted selection loaded at launch (composition-side,
 	// from the state file). The picker seeds its active selection from it (the ●
 	// marker) and the startup CreateSession carries it — AFTER the connect-time
-	// ListModels reconcile clears it if its provider is no longer available.
+	// ListModels reconcile clears it if its PROVIDER is no longer available. The
+	// reconcile is provider-level only (issue #41): a model absent from the (possibly
+	// embedded-floor) snapshot is still carried verbatim — the server validates it,
+	// and a rejection falls back to the default loudly (connectFallbackMsg).
 	InitialModel client.ModelSelection
 	// WorkspaceDefault / GlobalDefault are the SEPARATE raw state-file values loaded at
 	// launch (composition-side): the per-workspace entry (zero when none — see
@@ -367,8 +370,10 @@ type Model struct {
 	// restartFailed is true while a /models restart-now handoff's re-create FAILED and
 	// the app is in the RECOVERABLE no-session state (phaseIdle, sessionID==""). It is
 	// NOT phaseFatal: a transient blip on a deliberate model switch must leave a usable
-	// app. While set, enter on an empty prompt RETRIES createSessionCmd (the selection
-	// still lives in m.activeModel). Cleared the moment a session is (re)established
+	// app. While set, enter on an empty prompt re-fires restartOnModelCmd (NEVER
+	// createSessionCmd — its issue-#41 fallback leg would clear the user's EXPLICIT
+	// pick on a rejection; see onIdleSubmit) with the selection still in
+	// m.activeModel. Cleared the moment a session is (re)established
 	// (SessionReadyMsg) or a retry is fired.
 	restartFailed bool
 
@@ -485,8 +490,11 @@ func New(deps Deps) Model {
 		stuck: true,
 		// Seed the active selection from the persisted last-used (composition loads it
 		// from the state file). The connect-time ListModels reconcile clears it to the
-		// server default if its provider is no longer available, BEFORE the create that
+		// server default if its PROVIDER is no longer available, BEFORE the create that
 		// carries it (so a removed key never hard-fails the connect with InvalidArgument).
+		// A model merely absent from the snapshot is kept (issue #41); if the server then
+		// rejects the create, createSessionCmd's fallback leg retries on the default and
+		// surfaces a loud warning (connectFallbackMsg) — connect still completes.
 		activeModel: deps.InitialModel,
 		models:      modelsState{active: deps.InitialModel, globalDefault: deps.GlobalDefault},
 	}
@@ -572,11 +580,13 @@ func (m Model) resetSession() Model {
 //
 // Connect SEQUENCING (§4 key-removed safety): when a model lister is wired, it
 // fetches ListModels FIRST and lets the connecting-phase ModelsMsg reconcile the
-// persisted selection against availability BEFORE firing CreateSession — so the
-// startup create carries only a validated selection and a removed provider key can
-// never hard-fail the connect with InvalidArgument. With no lister wired (old
-// server / persistence off) it fires CreateSession directly (the historical path,
-// with an empty selection).
+// persisted selection against PROVIDER availability BEFORE firing CreateSession —
+// so a removed provider key can never hard-fail the connect with InvalidArgument.
+// The reconcile is provider-level only (issue #41): the model string rides through
+// verbatim (the boot snapshot may be the embedded floor), the server validates it,
+// and a server rejection degrades to the default loudly via createSessionCmd's
+// fallback leg. With no lister wired (old server / persistence off) it fires
+// CreateSession directly (the historical path, with an empty selection).
 func (m Model) Init() tea.Cmd {
 	if m.deps.Models != nil {
 		return tea.Batch(m.sp.Tick, client.ListModelsCmd(m.deps.Ctx, m.deps.Models))
