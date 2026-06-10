@@ -1139,6 +1139,9 @@ func (m Model) onRunningKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		key.Matches(msg, m.keys.ScrollTop), key.Matches(msg, m.keys.ScrollBottom):
 		return m.onScrollKey(msg)
 	default:
+		if swallowWordLeftHang(m.ta, msg) {
+			return m, nil // upstream bubbles#1652 workaround — see textarea_guard.go
+		}
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
 		return m.afterInputEdit(cmd)
@@ -1235,6 +1238,9 @@ func (m Model) onIdleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		key.Matches(msg, m.keys.ScrollTop), key.Matches(msg, m.keys.ScrollBottom):
 		return m.onScrollKey(msg)
 	default:
+		if swallowWordLeftHang(m.ta, msg) {
+			return m, nil // upstream bubbles#1652 workaround — see textarea_guard.go
+		}
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
 		return m.afterInputEdit(cmd)

@@ -1356,6 +1356,18 @@ old client sends no selector ⇒ server default; reads an old server's
 
 ## TUI — `cmd/mecatui/` (see `docs/tui.md`)
 
+**Upstream textarea word-backward hang workaround** (`cmd/mecatui/ui/textarea_guard.go` + the two
+`default:` guards in `update.go`'s `onRunningKey`/`onIdleKey`): bubbles v2.1.0's
+`textarea.wordLeft()` has an unbounded loop — alt+left/alt+b with only whitespace strictly before
+the cursor (the subtle case: `" foo"` at the origin) spins forever, wedging the update goroutine
+at 100% CPU; this froze a live session. The guard predicts the hang (`wordLeftWouldHang`) and
+swallows the keypress (a semantic no-op: upstream's intended "no word to the left" is don't-move).
+Upstream refs: charmbracelet/bubbletea#1652; bubbles PRs #948 (incomplete) / #959 / #987
+(unmerged). Removal condition: once on a bubbles release whose `wordLeft` has an in-loop boundary
+guard, delete `textarea_guard.go`, the two call sites, and this paragraph. The textinput overlays
+need nothing (textinput is upstream-guarded), but any FUTURE textarea-bearing overlay needs the
+same one-line guard in front of its `textarea.Update`.
+
 **First-encounter workspace-trust prompt** (WORKSPACE-TRUST Phase 2c, `cmd/mecatui/trust.go`) is
 a **pre-TUI** prompt in this composition root — NOT in `ui/` (it imports `internal/app`'s
 `ResolveTrust`/`HasProjectAuthority`/`RememberTrust`, allowed here); it gates the embedded server
