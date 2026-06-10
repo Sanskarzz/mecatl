@@ -324,7 +324,9 @@ func (m Model) restartOnModel(sel client.ModelSelection) (tea.Model, tea.Cmd, bo
 	mm, cmd := m.closeModels() // dismiss the overlay, return focus to the prompt
 	m = mm.(Model)
 	m.refreshView()
-	return m, tea.Batch(cmd, m.restartOnModelCmd(oldID, sel), m.saveSelectionCmd(sel)), true
+	// m.sp.Tick re-arms the spinner for the transition into phaseConnecting (the
+	// phase-gated spinner.TickMsg handler dropped the chain in the prior phase).
+	return m, tea.Batch(cmd, m.restartOnModelCmd(oldID, sel), m.saveSelectionCmd(sel), m.sp.Tick), true
 }
 
 // restartOnModelCmd closes the OLD session (best-effort) then creates a NEW session

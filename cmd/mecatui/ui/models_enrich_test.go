@@ -652,11 +652,19 @@ func TestRestartFailedEnterRetries(t *testing.T) {
 		t.Fatalf("restartFailed must NOT be cleared eagerly on fire; the resolving msg owns it")
 	}
 	// The retry create carries the still-pending selection and (on success) yields a
-	// SessionReadyMsg whose reducer clears the flag and rebinds the session.
-	msg := cmd()
-	ready, ok := msg.(client.SessionReadyMsg)
-	if !ok {
-		t.Fatalf("retry cmd msg = %T, want SessionReadyMsg", msg)
+	// SessionReadyMsg whose reducer clears the flag and rebinds the session. The retry
+	// cmd is a batch (the create + the spinner re-arm tick), so locate the ready msg
+	// among the resolved leaves.
+	var ready client.SessionReadyMsg
+	found := false
+	for _, msg := range flattenLeafMsgs(cmd, scaleWait(3*time.Second)) {
+		if r, ok := msg.(client.SessionReadyMsg); ok {
+			ready, found = r, true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("retry cmd did not yield a SessionReadyMsg leaf")
 	}
 	want := client.ModelSelection{ProviderID: "openrouter", ModelID: "anthropic/claude"}
 	if conv.createdSel != want {
@@ -707,16 +715,22 @@ func TestRestartRetryReFailureStaysRecoverable(t *testing.T) {
 	}
 
 	// The retry re-create FAILS again: it must produce restartFailedMsg, NOT the fatal
-	// ConnectErrMsg.
-	msg := cmd()
-	if _, isFatal := msg.(client.ConnectErrMsg); isFatal {
-		t.Fatalf("a re-failed retry must NOT produce the fatal ConnectErrMsg")
+	// ConnectErrMsg. The retry cmd is a batch (the create + the spinner re-arm tick),
+	// so locate the failure msg among the resolved leaves.
+	var failMsg tea.Msg
+	for _, leaf := range flattenLeafMsgs(cmd, scaleWait(3*time.Second)) {
+		if _, isFatal := leaf.(client.ConnectErrMsg); isFatal {
+			t.Fatalf("a re-failed retry must NOT produce the fatal ConnectErrMsg")
+		}
+		if _, ok := leaf.(restartFailedMsg); ok {
+			failMsg = leaf
+		}
 	}
-	if _, ok := msg.(restartFailedMsg); !ok {
-		t.Fatalf("a re-failed retry must produce restartFailedMsg, got %T", msg)
+	if failMsg == nil {
+		t.Fatalf("a re-failed retry must produce a restartFailedMsg leaf")
 	}
 	// Reducing it loops back to the SAME recoverable state — never fatal.
-	mm2, _ := m.Update(msg)
+	mm2, _ := m.Update(failMsg)
 	m = mm2.(Model)
 	if m.phase == phaseFatal {
 		t.Fatalf("a re-failed retry must NOT strand on the fatal screen")

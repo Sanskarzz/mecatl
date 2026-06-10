@@ -189,6 +189,15 @@ const (
 	phaseFatal                         // connect/fatal error; input disabled
 )
 
+// spinnerVisible reports whether the footer renders the animated spinner in the
+// current phase (renderFooter's phaseRunning/phaseConnecting arms — keep in sync).
+// It gates the spinner.TickMsg handler: a tick in any other phase is dropped,
+// which terminates the self-perpetuating tick chain; every transition INTO a
+// visible phase must re-arm m.sp.Tick.
+func (m Model) spinnerVisible() bool {
+	return m.phase == phaseRunning || m.phase == phaseConnecting
+}
+
 // Model is the root Elm model. It owns the conversation, the bubbles widgets, the
 // renderer (glamour cache), the active run stream, and the per-run cancel func.
 type Model struct {

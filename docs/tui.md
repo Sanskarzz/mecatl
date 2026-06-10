@@ -708,6 +708,16 @@ The `renderer.mdRenders` counter (incremented only at the real `glamour` call si
 is the test seam: N coalesced deltas leave it unchanged, one flush bumps it by one
 (`coalesce_test.go`).
 
+**Spinner tick phase-gate.** The footer spinner's bubbles tick chain is
+self-perpetuating (every `sp.Update` returns the next tick cmd), so the reducer
+drops `spinner.TickMsg` in any phase where the spinner is not rendered
+(`spinnerVisible`: only `phaseRunning`/`phaseConnecting`) — terminating the chain
+instead of re-rendering the whole screen at 10fps forever. Every transition INTO a
+visible phase re-arms `m.sp.Tick` (submit, approval resolve, ask retraction,
+restart/retry, model-switch restart; bubbles' id+tag dedup makes the blanket
+re-arm safe). Together with the coalesced render tick above, an idle mecatui
+performs zero Update→View cycles (`spinner_gate_test.go`).
+
 Tests are fully offline and deterministic: the stream is driven from a scripted
 fake behind the `Recv()` interface (no gRPC, no network), and whole-program /
 View goldens are captured with teatest at a fixed terminal size. Refresh the

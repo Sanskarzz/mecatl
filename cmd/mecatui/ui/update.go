@@ -214,6 +214,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onPaste(msg)
 
 	case spinner.TickMsg:
+		if !m.spinnerVisible() {
+			// Spinner not rendered in this phase: drop the tick WITHOUT calling
+			// m.sp.Update (which always returns the next tick cmd). Returning nil
+			// terminates the self-perpetuating chain; each transition into a
+			// visible phase re-arms m.sp.Tick. (An idle 10fps tick chain drove a
+			// full Update→View re-render forever: ~12% CPU, ~3.7MB/s alloc idle.)
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.sp, cmd = m.sp.Update(msg)
 		return m, cmd
@@ -477,6 +485,12 @@ func (m Model) updateStreamSecondary(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ask = pendingAsk{}
 			m.phase = phaseRunning
 			m.conv.addNotice("permission request withdrawn (subagent cancelled)")
+			// Re-arm the spinner for the awaitingApproval→running transition (the
+			// phase-gated TickMsg handler dropped the chain while the modal was open).
+			// Two-step form, never mixing the old m with the helper's returned model
+			// in one expression (the unspecified-evaluation-order trap — see markDirty).
+			mm, cmd := m.afterEvent()
+			return mm, tea.Batch(cmd, mm.sp.Tick)
 		}
 		return m.afterEvent()
 	case client.SubagentMsg:
@@ -1035,7 +1049,11 @@ func (m Model) resolveAsk(v client.Verdict) (tea.Model, tea.Cmd) {
 		}
 		return nil
 	}
-	return m, send
+	// Re-arm the spinner: the awaitingApproval→running transition re-enters a
+	// spinner-visible phase, and the phase-gated TickMsg handler dropped the chain
+	// when the modal opened. m.sp.Tick is NOT a stream reader — the no-extra-reader
+	// invariant above is untouched.
+	return m, tea.Batch(send, m.sp.Tick)
 }
 
 // onRunningKey handles keys while a run streams. Type-while-running: the textarea
@@ -1243,7 +1261,9 @@ func (m Model) onIdleSubmit() (tea.Model, tea.Cmd) {
 		m.phase = phaseConnecting
 		m.statusMsg = "retrying — reconnecting…"
 		m.refreshView()
-		return m, m.restartOnModelCmd("", m.activeModel)
+		// m.sp.Tick re-arms the spinner for the idle→connecting transition (the
+		// phase-gated TickMsg handler dropped the chain at idle).
+		return m, tea.Batch(m.restartOnModelCmd("", m.activeModel), m.sp.Tick)
 	}
 	if m.queuePaused != "" && len(m.queued) > 0 && empty {
 		return m.resumeQueue()
