@@ -1,27 +1,28 @@
  mecatui  ·  session sess-test-00  ·  mock-model  ·  mode default  ·  127.0.0.1:8080
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-
-
-
-
-
-
          ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
          ┃                                                                               ┃
          ┃  Agent definitions                                                            ┃
          ┃                                                                               ┃
-         ┃  no agent definitions resolved on this server.                                ┃
+         ┃  agent-01                                                                     ┃
+         ┃  agent-02                                                                     ┃
+         ┃  agent-03                                                                     ┃
+         ┃  agent-04                                                                     ┃
+         ┃  agent-05                                                                     ┃
+         ┃  agent-06                                                                     ┃
+         ┃  agent-07                                                                     ┃
+         ┃  agent-08                                                                     ┃
+         ┃  agent-09                                                                     ┃
+         ┃  agent-10                                                                     ┃
+         ┃  agent-11                                                                     ┃
+         ┃  agent-12                                                                     ┃
+         ┃  agent-13                                                                     ┃
+         ┃  agent-14                                                                     ┃
+         ┃  lines 2–15 of 30                                                             ┃
          ┃                                                                               ┃
          ┃  agent definitions route Subagent delegations · pgup/pgdn scroll · esc close  ┃
          ┃                                                                               ┃
          ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
-
-
-
-
-
-
 ┃   1 Ask mecatl to do something…  (enter to send · shift+enter for newline · ? for help)
 ┃
 ┃

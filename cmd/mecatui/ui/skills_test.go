@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -230,16 +231,136 @@ func TestSkillsPanelSanitizesNames(t *testing.T) {
 	}
 }
 
-// TestSkillsKeySwallowsNonEsc asserts a non-esc key while the panel is open is
-// swallowed (handled=true) so it never leaks into idle input.
+// TestSkillsKeySwallowsNonEsc asserts a non-esc, non-scroll key while the panel
+// is open is swallowed (handled=true) so it never leaks into idle input — and
+// that a scroll key is HANDLED (not a close, not a leak) now that the panel
+// scrolls.
 func TestSkillsKeySwallowsNonEsc(t *testing.T) {
 	m := newSkillsModel(t, sampleSkills(), client.Capabilities{Skills: true})
 	mm, cmd := m.runSkills()
 	m = feedCmd(t, mm.(Model), cmd)
 
-	_, _, handled := m.onSkillsKey(tea.KeyPressMsg{Code: 'j'})
+	mm2, _, handled := m.onSkillsKey(tea.KeyPressMsg{Code: 'j'})
 	if !handled {
 		t.Error("a non-esc key while the panel is open should be swallowed (handled=true)")
+	}
+	if mm2.(Model).skills.scroll != 0 {
+		t.Error("a non-scroll key should not move the scroll offset")
+	}
+
+	// A scroll key is handled too (and keeps the panel open). The 2-skill sample
+	// fits the window, so the offset stays clamped at 0.
+	mm3, _, handled := m.onSkillsKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if !handled {
+		t.Error("pgdown while the panel is open should be handled")
+	}
+	m3 := mm3.(Model)
+	if m3.skills.view != skillsPanel {
+		t.Error("pgdown should not close the panel")
+	}
+	if m3.skills.scroll != 0 {
+		t.Errorf("a fitting inventory should clamp scroll at 0, got %d", m3.skills.scroll)
+	}
+}
+
+// scrollSkills returns n description-less skills ("skill-00".."skill-NN") — one
+// rendered row each, UNIQUE so a render bug that ignored st.scroll (always
+// showing the first window) would be caught (the TestSoulScroll fixture rationale).
+func scrollSkills(n int) *fakeSkills {
+	fs := &fakeSkills{}
+	for i := 0; i < n; i++ {
+		fs.skills = append(fs.skills, client.Skill{Name: fmt.Sprintf("skill-%02d", i)})
+	}
+	return fs
+}
+
+// TestSkillsScroll asserts the scroll keys move (and clamp) the inventory row
+// window AND that the rendered window content + the "lines X–Y of N" indicator
+// actually shift (mirrors TestSoulScroll). It also locks the scroll reset on a
+// fresh inventory result and that esc still closes the scrolled panel.
+func TestSkillsScroll(t *testing.T) {
+	// 30 one-row skills exceed skillsBodyLines (14), each window distinguishable.
+	m := newSkillsModel(t, scrollSkills(30), client.Capabilities{Skills: true})
+	mm, cmd := m.runSkills()
+	m = feedCmd(t, mm.(Model), cmd)
+
+	if m.skills.scroll != 0 {
+		t.Fatalf("initial scroll = %d, want 0", m.skills.scroll)
+	}
+	// At the top: window is rows 1–14 (skill-00..skill-13); the tail is NOT visible.
+	top := stripANSIstr(m.View().Content)
+	if !strings.Contains(top, "skill-00") || strings.Contains(top, "skill-29") {
+		t.Errorf("top window should show skill-00 and NOT skill-29, got:\n%s", top)
+	}
+	if !strings.Contains(top, "lines 1–14 of 30") {
+		t.Errorf("top indicator should read 'lines 1–14 of 30', got:\n%s", top)
+	}
+
+	// Page down once: skill-00 leaves the top, skill-14 enters.
+	mm, _, _ = m.onSkillsKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	m = mm.(Model)
+	if m.skills.scroll != 1 {
+		t.Errorf("scroll after pgdown = %d, want 1", m.skills.scroll)
+	}
+	pd := stripANSIstr(m.View().Content)
+	if strings.Contains(pd, "skill-00") {
+		t.Errorf("after pgdown the window should no longer show skill-00, got:\n%s", pd)
+	}
+	if !strings.Contains(pd, "skill-14") {
+		t.Errorf("after pgdown the window should reveal skill-14, got:\n%s", pd)
+	}
+	if !strings.Contains(pd, "lines 2–15 of 30") {
+		t.Errorf("after pgdown the indicator should read 'lines 2–15 of 30', got:\n%s", pd)
+	}
+
+	// Jump to bottom; max scroll = 30 - 14 = 16: the tail becomes visible.
+	mm, _, _ = m.onSkillsKey(tea.KeyPressMsg{Code: tea.KeyEnd})
+	m = mm.(Model)
+	if m.skills.scroll != 16 {
+		t.Errorf("scroll after End = %d, want 16 (30-14)", m.skills.scroll)
+	}
+	bot := stripANSIstr(m.View().Content)
+	if !strings.Contains(bot, "skill-29") || strings.Contains(bot, "skill-00") {
+		t.Errorf("bottom window should show skill-29 and NOT skill-00, got:\n%s", bot)
+	}
+	if !strings.Contains(bot, "lines 17–30 of 30") {
+		t.Errorf("bottom indicator should read 'lines 17–30 of 30', got:\n%s", bot)
+	}
+
+	// Pgdown past the end clamps.
+	mm, _, _ = m.onSkillsKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	m = mm.(Model)
+	if m.skills.scroll != 16 {
+		t.Errorf("scroll clamps at 16, got %d", m.skills.scroll)
+	}
+
+	// Page up moves back (pins the ScrollU arm — removing it must fail here).
+	mm, _, _ = m.onSkillsKey(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	m = mm.(Model)
+	if m.skills.scroll != 15 {
+		t.Errorf("scroll after pgup = %d, want 15", m.skills.scroll)
+	}
+
+	// Home returns to the top.
+	mm, _, _ = m.onSkillsKey(tea.KeyPressMsg{Code: tea.KeyHome})
+	m = mm.(Model)
+	if m.skills.scroll != 0 {
+		t.Errorf("scroll after Home = %d, want 0", m.skills.scroll)
+	}
+
+	// A fresh inventory result resets a stale offset (never opens mid-list).
+	mm, _, _ = m.onSkillsKey(tea.KeyPressMsg{Code: tea.KeyEnd})
+	m = mm.(Model)
+	mFresh, _ := m.updateSkillsMsg(client.SkillsMsg{Skills: scrollSkills(30).skills})
+	m = mFresh.(Model)
+	if m.skills.scroll != 0 {
+		t.Errorf("a fresh SkillsMsg should reset scroll to 0, got %d", m.skills.scroll)
+	}
+
+	// esc still closes the scrolled panel.
+	mm, _, _ = m.onSkillsKey(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if mm.(Model).skills.view != skillsNone {
+		t.Error("esc should still close the scrolled panel")
 	}
 }
 
@@ -261,6 +382,23 @@ func TestSkillsErrorClearedOnSuccess(t *testing.T) {
 	if m.skills.err != nil {
 		t.Errorf("a successful result should clear the prior error, got %v", m.skills.err)
 	}
+}
+
+// TestSkillsPanelScrollGolden locks the scrolled, overflowing inventory panel:
+// an inventory exceeding skillsBodyLines, paged down once, so the golden carries
+// the windowed rows + the "lines X–Y of N" indicator + the scroll footer hint
+// (the TestSoulPanelGolden pattern; the fixed window keeps it deterministic).
+func TestSkillsPanelScrollGolden(t *testing.T) {
+	m := newSkillsModel(t, scrollSkills(30), client.Capabilities{Skills: true})
+	mm, cmd := m.runSkills()
+	m = feedCmd(t, mm.(Model), cmd)
+	if m.skills.view != skillsPanel {
+		t.Fatalf("view = %v, want skillsPanel", m.skills.view)
+	}
+	mm, _, _ = m.onSkillsKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	m = mm.(Model)
+	got := stripANSI([]byte(m.View().Content))
+	compareGolden(t, "skills_scroll.golden", got)
 }
 
 // TestSkillsEmptyStateNotEnabled asserts the panel distinguishes "skills not

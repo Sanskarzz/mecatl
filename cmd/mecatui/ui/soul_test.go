@@ -167,6 +167,13 @@ func TestSoulScroll(t *testing.T) {
 		t.Error("clamped window indicator should still read 'lines 19–30 of 30'")
 	}
 
+	// Page up moves back (pins the ScrollU arm — removing it must fail here).
+	mm, _, _ = m.onSoulKey(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	m = mm.(Model)
+	if m.soul.scroll != 17 {
+		t.Errorf("scroll after pgup = %d, want 17", m.soul.scroll)
+	}
+
 	// Home returns to the top: window + indicator reset.
 	mm, _, _ = m.onSoulKey(tea.KeyPressMsg{Code: tea.KeyHome})
 	m = mm.(Model)

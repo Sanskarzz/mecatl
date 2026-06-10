@@ -1,5 +1,12 @@
 package ui
 
+import (
+	"fmt"
+	"strings"
+
+	"github.com/stacklok/mecatl/cmd/mecatui/theme"
+)
+
 // scrollWindow returns the [start,end) slice bounds of a scrolling window of size
 // limit over n rows, kept around the selected cursor so it stays visible. It is a
 // pure function of (cursor, n, limit) — the window FOLLOWS the cursor (no stored
@@ -21,4 +28,57 @@ func scrollWindow(cursor, n, limit int) (start, end int) {
 		start = end - limit
 	}
 	return start, end
+}
+
+// maxScrollOffset is the largest valid scroll offset for total lines viewed
+// through a fixed window: total minus the window, never negative. Shared by the
+// offset-scrolled overlay panels (/soul, /skills, /agents inventory), which keep
+// an explicit offset instead of a cursor (there is no selection to follow).
+func maxScrollOffset(total, window int) int {
+	if total <= window {
+		return 0
+	}
+	return total - window
+}
+
+// clampScroll bounds want into [0, maxScrollOffset(total, window)] — the shared
+// scroll clamp for the offset-scrolled overlay panels.
+func clampScroll(want, total, window int) int {
+	if want < 0 {
+		return 0
+	}
+	if mx := maxScrollOffset(total, window); want > mx {
+		return mx
+	}
+	return want
+}
+
+// windowRenderedLines windows ALREADY-RENDERED (ANSI-carrying) lines to a fixed
+// window starting at scroll, appending a muted "lines X–Y of N" indicator when
+// the content overflows the window. Each input line must be a COMPLETE styled
+// line (lipgloss renders multi-line strings with per-line SGR sequences — the
+// same property capRenderedLines relies on), so slicing never severs an escape.
+// Like capRenderedLines it must NOT sanitizeTerminal its input (that would strip
+// the embedded styling); the line TEXT is sanitized by the callers at render
+// time. Every emitted line carries a trailing newline so the callers' footer
+// concatenation stays uniform across the scrolled and unscrolled cases.
+func windowRenderedLines(th theme.Theme, lines []string, scroll, window int) string {
+	total := len(lines)
+	start := scroll
+	if start > total {
+		start = total
+	}
+	end := start + window
+	if end > total {
+		end = total
+	}
+
+	var b strings.Builder
+	for _, ln := range lines[start:end] {
+		b.WriteString(ln + "\n")
+	}
+	if total > window {
+		b.WriteString(th.Style("muted").Render(fmt.Sprintf("lines %d–%d of %d", start+1, end, total)) + "\n")
+	}
+	return b.String()
 }

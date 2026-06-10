@@ -23,15 +23,24 @@ const (
 	skillsPanel                   // read-only inventory (name + description)
 )
 
+// skillsBodyLines is the fixed number of inventory rows the panel shows at once
+// (the scroll window). A fixed budget keeps the panel — and its goldens —
+// deterministic regardless of terminal height (the /soul soulBodyLines
+// convention). A long inventory scrolls; a short one shows in full with no
+// scroll indicator.
+const skillsBodyLines = 14
+
 // skillsState holds the skills overlay state on the Model. It is value-embedded
 // so the Model stays a plain struct that Update copies. The skills slice is
 // replaced wholesale on each RPC result (never mutated in place) so the
-// value-copy semantics hold.
+// value-copy semantics hold. scroll is the 0-based index of the first visible
+// rendered row (clamped in the key handlers, reset on each RPC result).
 type skillsState struct {
 	view    skillsView
 	loading bool  // the ListSkills RPC is in flight
 	err     error // the ListSkills error, rendered distinctly (nil on success)
 	skills  []client.Skill
+	scroll  int // first visible rendered body row (clamped in the key handlers)
 }
 
 // openSkills opens the inventory panel and fires the ListSkills RPC. Only
@@ -55,18 +64,41 @@ func (m Model) closeSkills() (tea.Model, tea.Cmd) {
 }
 
 // onSkillsKey routes key presses while the skills overlay is open. esc closes
-// it (the panel is read-only — there is nothing else to navigate). Returns
-// handled=false when the overlay is closed so the caller falls through to normal
-// idle key handling.
+// it; the scroll keys (pgup/pgdown, up/down, home/end) move the row window over
+// a long inventory (the /soul onSoulKey pattern). Every other key is swallowed
+// (handled=true) so it never leaks into idle input. Returns handled=false only
+// when the overlay is closed so the caller falls through to normal idle key
+// handling.
 func (m Model) onSkillsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if m.skills.view == skillsNone {
 		return m, nil, false
 	}
-	if key.Matches(msg, m.keys.Close) {
+	switch {
+	case key.Matches(msg, m.keys.Close):
 		mm, cmd := m.closeSkills()
 		return mm, cmd, true
+	case key.Matches(msg, m.keys.ScrollD), key.Matches(msg, m.keys.Down):
+		m.skills.scroll = clampScroll(m.skills.scroll+1, m.skillsRowTotal(), skillsBodyLines)
+		return m, nil, true
+	case key.Matches(msg, m.keys.ScrollU), key.Matches(msg, m.keys.Up):
+		m.skills.scroll = clampScroll(m.skills.scroll-1, m.skillsRowTotal(), skillsBodyLines)
+		return m, nil, true
+	case key.Matches(msg, m.keys.ScrollBottom):
+		m.skills.scroll = maxScrollOffset(m.skillsRowTotal(), skillsBodyLines)
+		return m, nil, true
+	case key.Matches(msg, m.keys.ScrollTop):
+		m.skills.scroll = 0
+		return m, nil, true
 	}
 	return m, nil, true
+}
+
+// skillsRowTotal is the rendered body-row count the key handlers clamp the
+// scroll offset against — computed from the SAME row builder the render path
+// windows (skillsRowLines at the model's current wrap budget), so the clamp and
+// the window can never disagree about the line count.
+func (m Model) skillsRowTotal() int {
+	return len(skillsRowLines(m.deps.Theme, m.skills.skills, cardTextWidth(m.width)))
 }
 
 // updateSkillsMsg reduces a client.SkillsMsg into the overlay state. It fires no
@@ -85,6 +117,7 @@ func (m Model) updateSkillsMsg(msg tea.Msg) (tea.Model, bool) {
 	}
 	m.skills.err = nil
 	m.skills.skills = sm.Skills
+	m.skills.scroll = 0
 	return m, true
 }
 
@@ -156,9 +189,29 @@ func skillsEmptyCopy(caps client.Capabilities) string {
 	return "No skills configured on this server."
 }
 
+// skillsRowLines builds the rendered (ANSI-carrying) inventory body rows: per
+// skill, a name line plus the indented, word-wrapped description lines. EVERY
+// server-derived string is terminal-sanitized BEFORE styling, so the rows are
+// safe inputs for windowRenderedLines (which must not re-sanitize — that would
+// strip the styling). The multi-line description render is split per line
+// (lipgloss emits complete per-line SGR sequences) so the scroll window can
+// slice anywhere without severing an escape.
+func skillsRowLines(th theme.Theme, skills []client.Skill, budget int) []string {
+	var lines []string
+	for _, s := range skills {
+		lines = append(lines, th.Style("toolName").Render(sanitizeTerminal(s.Name)))
+		if s.Description != "" {
+			desc := th.Style("toolArgs").Render(indentWrap(sanitizeTerminal(s.Description), budget))
+			lines = append(lines, strings.Split(desc, "\n")...)
+		}
+	}
+	return lines
+}
+
 // renderSkillsPanel renders the read-only inventory: one row per skill (name +
-// description), name-sorted by the server. EVERY server-derived string is
-// terminal-sanitized.
+// description), name-sorted by the server, scroll-windowed to skillsBodyLines
+// with a "lines X–Y of N" indicator when the inventory overflows. EVERY
+// server-derived string is terminal-sanitized.
 func renderSkillsPanel(th theme.Theme, st skillsState, caps client.Capabilities, width int) string {
 	var b strings.Builder
 	b.WriteString(th.Style("askTitle").Render("Skills inventory") + "\n\n")
@@ -176,14 +229,9 @@ func renderSkillsPanel(th theme.Theme, st skillsState, caps client.Capabilities,
 	case len(st.skills) == 0:
 		b.WriteString(th.Style("muted").Render(skillsEmptyCopy(caps)) + "\n")
 	default:
-		for _, s := range st.skills {
-			b.WriteString(th.Style("toolName").Render(sanitizeTerminal(s.Name)) + "\n")
-			if s.Description != "" {
-				b.WriteString(th.Style("toolArgs").Render(indentWrap(sanitizeTerminal(s.Description), budget)) + "\n")
-			}
-		}
+		b.WriteString(windowRenderedLines(th, skillsRowLines(th, st.skills, budget), st.scroll, skillsBodyLines))
 	}
 
-	b.WriteString("\n" + th.Style("muted").Render("skills activate automatically when relevant · esc close"))
+	b.WriteString("\n" + th.Style("muted").Render("skills activate automatically when relevant · pgup/pgdn scroll · esc close"))
 	return b.String()
 }

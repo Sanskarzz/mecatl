@@ -113,22 +113,12 @@ func (m Model) updateSoulMsg(msg tea.Msg) (tea.Model, bool) {
 // soulMaxScroll is the largest valid scroll offset for content: total lines minus
 // the visible window, never negative.
 func soulMaxScroll(content string) int {
-	n := len(soulContentLines(content))
-	if n <= soulBodyLines {
-		return 0
-	}
-	return n - soulBodyLines
+	return maxScrollOffset(len(soulContentLines(content)), soulBodyLines)
 }
 
 // clampSoulScroll bounds want into [0, soulMaxScroll].
 func clampSoulScroll(want int, content string) int {
-	if want < 0 {
-		return 0
-	}
-	if mx := soulMaxScroll(content); want > mx {
-		return mx
-	}
-	return want
+	return clampScroll(want, len(soulContentLines(content)), soulBodyLines)
 }
 
 // soulContentLines splits the (already-sanitized at render time) content into
@@ -247,30 +237,14 @@ func renderSoulBody(th theme.Theme, st soulState, budget int) string {
 	// Wrap each raw line to the budget so a long persona line cannot overflow the
 	// card; the scroll window then operates on the wrapped lines for honest paging.
 	raw := soulContentLines(sanitizeTerminal(st.soul.Content))
-	var wrapped []string
+	var rendered []string
 	for _, ln := range raw {
 		if budget > 0 {
 			ln = ansi.Wrap(ln, budget, "")
 		}
-		wrapped = append(wrapped, strings.Split(ln, "\n")...)
+		for _, w := range strings.Split(ln, "\n") {
+			rendered = append(rendered, th.Style("toolArgs").Render(w))
+		}
 	}
-
-	total := len(wrapped)
-	start := st.scroll
-	if start > total {
-		start = total
-	}
-	end := start + soulBodyLines
-	if end > total {
-		end = total
-	}
-
-	var b strings.Builder
-	for _, ln := range wrapped[start:end] {
-		b.WriteString(th.Style("toolArgs").Render(ln) + "\n")
-	}
-	if total > soulBodyLines {
-		b.WriteString(th.Style("muted").Render(fmt.Sprintf("lines %d–%d of %d", start+1, end, total)) + "\n")
-	}
-	return b.String()
+	return windowRenderedLines(th, rendered, st.scroll, soulBodyLines)
 }

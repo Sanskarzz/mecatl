@@ -57,15 +57,25 @@ const (
 	agentsInvPanel                      // read-only inventory (name + description + metadata)
 )
 
+// agentsInvBodyLines is the fixed number of inventory rows the panel shows at
+// once (the scroll window). A fixed budget keeps the panel — and its goldens —
+// deterministic regardless of terminal height (the /soul soulBodyLines
+// convention). A long inventory scrolls; a short one shows in full with no
+// scroll indicator.
+const agentsInvBodyLines = 14
+
 // agentsInvState holds the agent-definition inventory overlay state on the
 // Model. It is value-embedded so the Model stays a plain struct that Update
 // copies. The agents slice is replaced wholesale on each RPC result (never
-// mutated in place) so the value-copy semantics hold.
+// mutated in place) so the value-copy semantics hold. scroll is the 0-based
+// index of the first visible rendered row (clamped in the key handlers, reset
+// on each RPC result).
 type agentsInvState struct {
 	view    agentsInvView
 	loading bool  // the ListAgents RPC is in flight
 	err     error // the ListAgents error, rendered distinctly (nil on success)
 	agents  []client.Agent
+	scroll  int // first visible rendered body row (clamped in the key handlers)
 }
 
 // openAgentsInv opens the inventory panel and fires the ListAgents RPC. Only
@@ -89,18 +99,41 @@ func (m Model) closeAgentsInv() (tea.Model, tea.Cmd) {
 }
 
 // onAgentsInvKey routes key presses while the inventory overlay is open. esc
-// closes it (the panel is read-only — there is nothing else to navigate).
-// Returns handled=false when the overlay is closed so the caller falls through
-// to normal idle key handling.
+// closes it; the scroll keys (pgup/pgdown, up/down, home/end) move the row
+// window over a long inventory (the /soul onSoulKey pattern). Every other key
+// is swallowed (handled=true) so it never leaks into idle input. Returns
+// handled=false only when the overlay is closed so the caller falls through to
+// normal idle key handling.
 func (m Model) onAgentsInvKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if m.agentsInv.view == agentsInvNone {
 		return m, nil, false
 	}
-	if key.Matches(msg, m.keys.Close) {
+	switch {
+	case key.Matches(msg, m.keys.Close):
 		mm, cmd := m.closeAgentsInv()
 		return mm, cmd, true
+	case key.Matches(msg, m.keys.ScrollD), key.Matches(msg, m.keys.Down):
+		m.agentsInv.scroll = clampScroll(m.agentsInv.scroll+1, m.agentsInvRowTotal(), agentsInvBodyLines)
+		return m, nil, true
+	case key.Matches(msg, m.keys.ScrollU), key.Matches(msg, m.keys.Up):
+		m.agentsInv.scroll = clampScroll(m.agentsInv.scroll-1, m.agentsInvRowTotal(), agentsInvBodyLines)
+		return m, nil, true
+	case key.Matches(msg, m.keys.ScrollBottom):
+		m.agentsInv.scroll = maxScrollOffset(m.agentsInvRowTotal(), agentsInvBodyLines)
+		return m, nil, true
+	case key.Matches(msg, m.keys.ScrollTop):
+		m.agentsInv.scroll = 0
+		return m, nil, true
 	}
 	return m, nil, true
+}
+
+// agentsInvRowTotal is the rendered body-row count the key handlers clamp the
+// scroll offset against — computed from the SAME row builder the render path
+// windows (agentsInvRowLines at the model's current wrap budget), so the clamp
+// and the window can never disagree about the line count.
+func (m Model) agentsInvRowTotal() int {
+	return len(agentsInvRowLines(m.deps.Theme, m.agentsInv.agents, cardTextWidth(m.width)))
 }
 
 // updateAgentsInvMsg reduces a client.AgentsMsg into the overlay state. It fires
@@ -119,6 +152,7 @@ func (m Model) updateAgentsInvMsg(msg tea.Msg) (tea.Model, bool) {
 	}
 	m.agentsInv.err = nil
 	m.agentsInv.agents = am.Agents
+	m.agentsInv.scroll = 0
 	return m, true
 }
 
@@ -173,13 +207,37 @@ func agentMetaLine(a client.Agent) string {
 	return strings.Join(segs, " · ")
 }
 
-// renderAgentsInvPanel renders the read-only inventory: one row per definition —
-// the routing name (toolName style, tinted with the def's colour hint when it
-// maps to a supported ANSI colour), the indented description (word-wrapped to the
-// card width, reusing the shared indentWrap/cardTextWidth), then a dim metadata
-// line (model · perm · tools). EVERY server-derived string is terminal-sanitized.
-// Colour is a UX hint only and never affects layout — it only tints the
-// already-rendered name foreground, so a stripANSI'd row is colour-invariant.
+// agentsInvRowLines builds the rendered (ANSI-carrying) inventory body rows: per
+// definition, the routing name (toolName style, tinted with the def's colour
+// hint when it maps to a supported ANSI colour), the indented word-wrapped
+// description lines, then the dim metadata lines (model · perm · tools). EVERY
+// server-derived string is terminal-sanitized BEFORE styling, so the rows are
+// safe inputs for windowRenderedLines (which must not re-sanitize — that would
+// strip the styling). The multi-line renders are split per line (lipgloss emits
+// complete per-line SGR sequences) so the scroll window can slice anywhere
+// without severing an escape.
+func agentsInvRowLines(th theme.Theme, agents []client.Agent, budget int) []string {
+	var lines []string
+	for _, a := range agents {
+		lines = append(lines, agentNameStyle(th, a.Color).Render(sanitizeTerminal(a.Name)))
+		if a.Description != "" {
+			desc := th.Style("toolArgs").Render(indentWrap(sanitizeTerminal(a.Description), budget))
+			lines = append(lines, strings.Split(desc, "\n")...)
+		}
+		if meta := agentMetaLine(a); meta != "" {
+			ml := th.Style("muted").Render(indentWrap(meta, budget))
+			lines = append(lines, strings.Split(ml, "\n")...)
+		}
+	}
+	return lines
+}
+
+// renderAgentsInvPanel renders the read-only inventory: one row per definition
+// (name + description + metadata — see agentsInvRowLines for the row anatomy and
+// the sanitize/colour invariants), scroll-windowed to agentsInvBodyLines with a
+// "lines X–Y of N" indicator when the inventory overflows. Colour is a UX hint
+// only and never affects layout — it only tints the already-rendered name
+// foreground, so a stripANSI'd row is colour-invariant.
 func renderAgentsInvPanel(th theme.Theme, st agentsInvState, caps client.Capabilities, width int) string {
 	var b strings.Builder
 	b.WriteString(th.Style("askTitle").Render("Agent definitions") + "\n\n")
@@ -197,17 +255,9 @@ func renderAgentsInvPanel(th theme.Theme, st agentsInvState, caps client.Capabil
 	case len(st.agents) == 0:
 		b.WriteString(th.Style("muted").Render(agentsInvEmptyCopy(caps)) + "\n")
 	default:
-		for _, a := range st.agents {
-			b.WriteString(agentNameStyle(th, a.Color).Render(sanitizeTerminal(a.Name)) + "\n")
-			if a.Description != "" {
-				b.WriteString(th.Style("toolArgs").Render(indentWrap(sanitizeTerminal(a.Description), budget)) + "\n")
-			}
-			if meta := agentMetaLine(a); meta != "" {
-				b.WriteString(th.Style("muted").Render(indentWrap(meta, budget)) + "\n")
-			}
-		}
+		b.WriteString(windowRenderedLines(th, agentsInvRowLines(th, st.agents, budget), st.scroll, agentsInvBodyLines))
 	}
 
-	b.WriteString("\n" + th.Style("muted").Render("agent definitions route Subagent delegations · esc close"))
+	b.WriteString("\n" + th.Style("muted").Render("agent definitions route Subagent delegations · pgup/pgdn scroll · esc close"))
 	return b.String()
 }

@@ -106,8 +106,11 @@ found (opt-in by presence), so with none, `caps.Skills` is false and the `?`
 overlay reflects that. When skills ARE discovered, `/skills` opens a read-only
 inventory panel listing each skill's name + one-line description (a startup
 snapshot via the `ListSkills` RPC — skills are immutable for the process
-lifetime). Activation stays the model's call (the `Skill` tool reads the body on
-demand); the panel is discovery only. Pass `--no-skills` to disable discovery entirely, or
+lifetime). A long inventory is **scrollable** the same way `/soul` is:
+`pgup`/`pgdn` (and `up`/`down`, `home`/`end`) move a fixed line-window over the
+rows, with a "lines X–Y of N" indicator when the inventory overflows; the
+`/agents` definition inventory scrolls identically. Activation stays the model's
+call (the `Skill` tool reads the body on demand); the panel is discovery only. Pass `--no-skills` to disable discovery entirely, or
 `--skills-dir` to scope it to a single vetted directory. Note the trust boundary:
 a skill auto-activates from its always-in-context metadata, so a `SKILL.md` in a
 workspace you didn't author (e.g. a cloned repo's `.claude/skills`) can steer the
