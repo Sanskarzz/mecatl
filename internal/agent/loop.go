@@ -65,6 +65,34 @@ const noProgressExtractiveNudgeText = "Stop investigating now and do not run any
 	"if it is incomplete or uncertain — note any gaps briefly. Do not plan further " +
 	"steps; deliver what you have."
 
+// backgroundNoticeText renders the turn-boundary background-completion NOTICE
+// injected as a harness-framed user message at Step 2a of drive (A2 —
+// notice-only injection). It carries ONLY harness-authored metadata: child ids
+// + their session.StopReason labels, NOTHING child-authored (no goal labels, no
+// result text — the body's sole channel is SubagentStatus). The substring
+// "background subagent(s) finished" is a stable test key — do not change it.
+func backgroundNoticeText(finished []childStatus) string {
+	items := make([]string, 0, len(finished))
+	for _, st := range finished {
+		items = append(items, fmt.Sprintf("%s (%s)", st.id, st.stop))
+	}
+	return fmt.Sprintf("[harness note: %d background subagent(s) finished: %s. "+
+		"Collect each result with SubagentStatus before relying on it.]",
+		len(finished), strings.Join(items, ", "))
+}
+
+// backgroundPendingNudgeText renders the ONCE-per-run background-pending nudge
+// (D10 as amended) injected as a harness-framed user message when the run would
+// otherwise end CLEANLY while background children are still live. It lists ids
+// ONLY (A9 — no goal labels, nothing model/child-authored). The substring
+// "background subagent(s) still running" is a stable test key — do not change it.
+func backgroundPendingNudgeText(ids []string) string {
+	return fmt.Sprintf("[harness note: %d background subagent(s) still running: %s. "+
+		"Collect or wait for them with SubagentStatus, cancel them, or finish — "+
+		"anything still running when you finish will be cancelled.]",
+		len(ids), strings.Join(ids, ", "))
+}
+
 // Deps are the injected ports and configuration a single Engine is built from.
 // Every field is a port (an interface) or plain config, so the agent package
 // never depends on a concrete adapter. The composition root wires real or fake
@@ -572,8 +600,30 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 	// NewEngine to defaultNoProgressNudges; a negative cap DISABLES nudging).
 	var noProgressNudges int
 	nudgeCap := e.deps.MaxNoProgressNudges
+	// bgPendingNudged bounds the background-pending nudge (D10 as amended) to ONCE
+	// per run, mirroring the noProgressNudges accounting; it is consumed only in
+	// finishTurnNoTools' real-clean-end branch.
+	var bgPendingNudged bool
 
 	for {
+		// Step 2a: background-completion NOTICE injection (A2 — notice-only), BEFORE
+		// the terminal checks so the notice is durable history even when the run ends
+		// at this very boundary. Newly-finished background children that were neither
+		// noticed nor collected are announced in ONE harness-framed user message (ids
+		// + stop labels only); their result bodies stay collectible via SubagentStatus.
+		// The seam is provider-legal: history here always ends on the user prompt,
+		// tool results, or a nudge message — never inside a tool_use pair — so the
+		// injected message replays cleanly (it IS ordinary history) and flows through
+		// compaction/ValidateToolPairing like any user message. It does NOT consume a
+		// no-progress nudge, emits no event, and does not itself consume a turn — the
+		// following BeginTurn does, which is what Limits.MaxTurns bounds. A child
+		// finishing between this scan and the rest of the iteration is simply noticed
+		// at the NEXT boundary.
+		if err := e.injectBackgroundNotice(ctx, r, sess); err != nil {
+			e.terminate(ctx, r, sess, session.StopError, lastText, total, err)
+			return
+		}
+
 		// Step 2: stop conditions BEFORE the model call (limit / cancellation / token
 		// budget). preTurnTerminal owns the precedence and the matching terminate call;
 		// it returns true once the run has ended so this loop stays flat.
@@ -640,7 +690,7 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 		// nudge, or a clean give-up — finishTurnNoTools owns that classification (and
 		// the terminate/nudge side effects) so this loop stays flat.
 		if len(asst.ToolCalls) == 0 {
-			if e.finishTurnNoTools(ctx, r, sess, asst, streamStop, turnIdx, lastText, total, &noProgressNudges, nudgeCap) {
+			if e.finishTurnNoTools(ctx, r, sess, asst, streamStop, turnIdx, lastText, total, &noProgressNudges, nudgeCap, &bgPendingNudged) {
 				return
 			}
 			continue
@@ -687,12 +737,50 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 // StopNoProgress would MASK the real reason — the exact silent-mislabel we are fixing.
 // So a non-benign streamStop is surfaced verbatim (StopError → terminate as a failure;
 // any other non-benign stop → terminateComplete carrying that reason), never nudged.
-func (e *Engine) finishTurnNoTools(ctx context.Context, r *Run, sess *session.Session, asst session.Message, streamStop session.StopReason, turnIdx int, lastText string, total session.Usage, noProgressNudges *int, nudgeCap int) (done bool) {
+//
+// Background-pending nudge (D10 as amended, I3b): a REAL clean end — meaningful
+// text on a benign stop, the StopEndTurn terminal — while BACKGROUND children are
+// still live is deferred ONCE per run (bgPendingNudged): a harness-framed user
+// message (ids only — A9) tells the model to collect/wait/cancel or finish, and
+// the loop re-drives one more turn. It MUST live here, before the clean-terminal
+// call sites — by the time terminate/terminateComplete run, drainChildren at
+// their top has already cancelled the children and sealed the registry (the I3a
+// placement note on drainChildren). Deliberate decisions, pinned by tests:
+//   - it fires ONLY on this real-clean-end branch: the no-progress machinery owns
+//     the empty turn first (an empty turn is nudged/given-up by ITS counter; even
+//     the StopNoProgress give-up below does not background-nudge), and every
+//     non-clean terminal (error/cancel/limits/budget) skips it entirely — the
+//     eventual stop reason is never relabelled.
+//   - it is EVENT-SILENT: ordinary recorded history like the notice (no
+//     EvNoProgress — that event means "the model stalled", a different taxonomy;
+//     clients see the continuation turn's activity instead).
+//   - foreground children cannot be live at a turn boundary (their tool calls are
+//     synchronous inside dispatch), so liveBackgroundIDs' background-only filter
+//     is exact, not an approximation.
+//   - on the SECOND would-be clean end (or if the model finishes after collecting)
+//     the guard is spent and the normal terminate path runs — drainChildren
+//     cancels + persists whatever is still live. A finished-but-never-collected
+//     child simply keeps its uncollected result (the entry dies with the run; the
+//     persisted child stays inspectable/resumable) — acceptable by design.
+//   - the nudged continuation re-enters Step 2 (notice injection + BeginTurn), so
+//     Limits.MaxTurns still bounds it exactly like a no-progress nudge.
+func (e *Engine) finishTurnNoTools(ctx context.Context, r *Run, sess *session.Session, asst session.Message, streamStop session.StopReason, turnIdx int, lastText string, total session.Usage, noProgressNudges *int, nudgeCap int, bgPendingNudged *bool) (done bool) {
 	// A turn with meaningful text is a real answer: end the run, honouring streamStop.
 	if strings.TrimSpace(asst.Text) != "" {
 		stop := session.StopEndTurn
 		if streamStop != session.StopNone {
 			stop = streamStop
+		}
+		if stop == session.StopEndTurn && !*bgPendingNudged && r.children != nil {
+			if ids := r.children.liveBackgroundIDs(); len(ids) > 0 {
+				*bgPendingNudged = true
+				if err := sess.RecordUserPrompt(backgroundPendingNudgeText(ids), nil); err != nil {
+					e.terminate(ctx, r, sess, session.StopError, lastText, total, err)
+					return true
+				}
+				e.save(ctx, sess)
+				return false
+			}
 		}
 		e.terminateComplete(ctx, r, sess, stop, lastText, total)
 		return true
@@ -750,6 +838,30 @@ func (e *Engine) finishTurnNoTools(ctx context.Context, r *Run, sess *session.Se
 	}
 	e.save(ctx, sess)
 	return false
+}
+
+// injectBackgroundNotice is drive's Step 2a: announce newly-finished background
+// children to the model as ONE harness-framed user message (backgroundNoticeText
+// — ids + stop labels only, A2) and persist immediately. noticeFinishedBackground
+// owns the exactly-once bookkeeping (every candidate is flipped to noticed before
+// the record; a record failure ends the run as StopError anyway, so a "noticed
+// but unrecorded" entry cannot leak into a live continuation). e.save runs right
+// after the record so the notice is durable in the replayed history across
+// resume/reload, independent of how the run later ends. A nil-or-empty scan is
+// the common case and costs one mutex'd map walk.
+func (e *Engine) injectBackgroundNotice(ctx context.Context, r *Run, sess *session.Session) error {
+	if r.children == nil {
+		return nil
+	}
+	finished := r.children.noticeFinishedBackground()
+	if len(finished) == 0 {
+		return nil
+	}
+	if err := sess.RecordUserPrompt(backgroundNoticeText(finished), nil); err != nil {
+		return fmt.Errorf("agent: record background completion notice: %w", err)
+	}
+	e.save(ctx, sess)
+	return nil
 }
 
 // effectiveMaxRunTokens folds the engine's Deps.MaxRunTokens with the run's optional

@@ -53,6 +53,22 @@ func main() {
 		fmt.Printf("team finished in %d round(s); quiescent=%t\n", outcome.Rounds, outcome.Quiescent)
 		fmt.Println("--- consolidated report (the team's deliverable) ---")
 		fmt.Println(outcome.Report)
+
+		// Third act: a background subagent — immediate started-result, the
+		// harness completion NOTICE injected at the next turn boundary (recorded
+		// history, not an event), and the SubagentStatus collection of the body.
+		fmt.Println()
+		fmt.Println("=== mecatl background subagent demo (offline) ===")
+		fmt.Println("A subagent runs in the background; the harness notice lands at the next turn boundary; SubagentStatus collects the result.")
+		fmt.Println()
+		bgEvents, notes := RunBackgroundScenario(context.Background())
+		for _, ev := range bgEvents {
+			fmt.Println(formatEvent(ev))
+		}
+		fmt.Println("--- harness notice(s) injected into the model's history at the turn boundary ---")
+		for _, n := range notes {
+			fmt.Println(n)
+		}
 	}
 }
 
@@ -98,6 +114,14 @@ func formatEvent(ev session.Event) string {
 		}
 	case session.EvHook:
 		fmt.Fprintf(&b, " %s", ev.Text)
+	case session.EvSubagentStart:
+		if ev.Subagent != nil {
+			fmt.Fprintf(&b, " child=%s background=%t goal=%q", ev.Subagent.ChildID, ev.Subagent.Background, ev.Subagent.Goal)
+		}
+	case session.EvSubagentEnd:
+		if ev.Subagent != nil {
+			fmt.Fprintf(&b, " child=%s stop=%s", ev.Subagent.ChildID, ev.Subagent.Stop)
+		}
 	case session.EvCompaction:
 		fmt.Fprintf(&b, " summary=%q", oneLine(ev.Text))
 	case session.EvResult:

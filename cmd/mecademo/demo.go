@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
@@ -166,6 +167,96 @@ func mockProvider() *mockllm.Provider {
 			mockllm.DoneChunk(session.StopEndTurn),
 		),
 	)
+}
+
+// demoBackgroundChildID is the deterministic child session id of the background
+// scenario's subagent ("subagent-<callID>" — the single handle convention), used
+// by the scripted collection turn and asserted by the e2e test.
+const demoBackgroundChildID = "subagent-call-bg-1"
+
+// RunBackgroundScenario drives the fully-offline background-subagent flow
+// (BACKGROUND-SUBAGENTS I3a+I3b) through a real agent.Engine: the model starts a
+// Subagent with background:true and gets the immediate started-result, a
+// SubagentStatus wait parks until the child's terminal lands, the harness
+// injects the completion NOTICE (a recorded user message — ids + stop labels
+// only) at the next turn boundary, and a SubagentStatus collection delivers the
+// child's result body through the tool-result channel. It returns every
+// streamed event PLUS the harness notes recorded into the session history
+// (notices are history, not events — they are what the MODEL sees at the
+// boundary), so main can print the whole flow and the e2e test can assert it.
+// It is infallible: the scenario is fully offline and self-contained.
+func RunBackgroundScenario(ctx context.Context) ([]session.Event, []string) {
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+
+	// The background child: a one-turn investigator with its own engine.
+	childLLM := mockllm.New(
+		mockllm.TextTurn("Background check complete: greeting.txt is intact and well-formed."),
+	)
+	childEngine := agent.NewEngine(agent.Deps{
+		LLM: childLLM, Catalog: tool.NewCatalog(), Policy: allow,
+		Hooks: hookexec.New(nil), Model: demoModel,
+	})
+
+	// The parent: start the child in the background, wait for any child to
+	// finish (the roster wait — it does NOT collect, so the next boundary's
+	// notice fires), then collect the body after the notice prompts it.
+	parentLLM := mockllm.New(
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("I'll start a background subagent to verify the greeting while I keep this turn."),
+			mockllm.ToolCallChunk(session.NewToolCall("call-bg-1", "Subagent",
+				json.RawMessage(`{"prompt":"verify the greeting file in the background","background":true}`))),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("Waiting for the background subagent to finish."),
+			mockllm.ToolCallChunk(session.NewToolCall("call-bg-wait", "SubagentStatus",
+				json.RawMessage(`{"wait_ms":30000}`))),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("The harness notice says it finished — collecting its result."),
+			mockllm.ToolCallChunk(session.NewToolCall("call-bg-collect", "SubagentStatus",
+				json.RawMessage(`{"agent_id":"`+demoBackgroundChildID+`"}`))),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+		mockllm.ChunksTurn(
+			mockllm.TextChunk("Done: the background subagent verified the greeting and I collected its result."),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+	)
+
+	cat := tool.NewCatalog()
+	cat.MustRegister(agent.NewSubagentTool(childEngine))
+	cat.MustRegister(agent.NewSubagentStatusTool())
+	engine := agent.NewEngine(agent.Deps{
+		LLM: parentLLM, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil),
+		Store: memstore.New(), Model: demoModel,
+	})
+
+	sess := session.New(
+		"demo-background-session",
+		session.ModeDefault,
+		demoWorkspaceRoot,
+		session.Limits{MaxTurns: 8, MaxToolCalls: 16, MaxConsecutiveFailures: 3},
+		time.Now(),
+	)
+	run := engine.Run(ctx, sess, memfs.NewWorkspace(demoWorkspaceRoot),
+		"Verify the greeting in the background, then report.")
+
+	var events []session.Event
+	for ev := range run.Events() {
+		events = append(events, ev)
+	}
+
+	// The injected harness notes live in the recorded HISTORY (they are ordinary
+	// user-role messages the model replays), not on the event stream.
+	var notes []string
+	for _, m := range sess.Conversation.Messages {
+		if m.Role == session.RoleUser && strings.HasPrefix(m.Text, "[harness note:") {
+			notes = append(notes, m.Text)
+		}
+	}
+	return events, notes
 }
 
 // RunTeamScenario drives a fully-offline 2-member agent team (a lead + a worker)

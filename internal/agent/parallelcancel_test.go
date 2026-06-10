@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
@@ -451,7 +452,31 @@ func TestCancelParallelBranchWhileQueued(t *testing.T) {
 			runningIdx = 1
 		}
 		queuedIdx := 1 - runningIdx
-		queuedOK = r.CancelChild(fmt.Sprintf("parallel-p1-%d", queuedIdx))
+		// The queued branch registers inside its OWN goroutine, which is not
+		// sequenced against the sibling's park — under scheduler load its
+		// registration can lag past park.started, and CancelChild on a not-yet-
+		// registered id is a documented false no-op (the branch would then run
+		// uncancelled and park forever → watchdog wedge). Retry (bounded) until
+		// the registration lands: the branch cannot leave the queue meanwhile,
+		// because the single worker slot is held by the parked running branch,
+		// which is only cancelled after this succeeds.
+		deadline := time.After(10 * time.Second)
+		for !queuedOK {
+			if queuedOK = r.CancelChild(fmt.Sprintf("parallel-p1-%d", queuedIdx)); queuedOK {
+				break
+			}
+			select {
+			case <-deadline:
+				// Fail CRISPLY: without a run cancel the parked running branch
+				// (and so the whole run) would only unwind via drainObserving's
+				// watchdog, masking this as a generic wedge. Errorf is
+				// goroutine-safe; the main goroutine still reports !queuedOK.
+				t.Errorf("queued branch parallel-p1-%d never became cancellable within the deadline", queuedIdx)
+				r.Cancel()
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
 		runningOK = r.CancelChild(fmt.Sprintf("parallel-p1-%d", runningIdx))
 	}()
 

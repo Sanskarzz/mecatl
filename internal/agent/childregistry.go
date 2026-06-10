@@ -179,9 +179,15 @@ type childEntry struct {
 	// foreground children (their result returned inline).
 	result *session.ToolResult
 	// delivered marks a background result as collected via SubagentStatus
-	// (exactly-once: a second collect reports "already delivered"). The separate
-	// `noticed` injection flag is the notice-injection iteration's (I3b).
+	// (exactly-once: a second collect reports "already delivered").
 	delivered bool
+	// noticed marks a finished background child as already announced by the
+	// turn-boundary completion NOTICE (A2 — the injected harness-note user
+	// message). It is DELIBERATELY separate from delivered: the notice carries
+	// only harness-authored metadata (id + stop label), so a noticed result is
+	// never re-noticed but REMAINS collectible — the body still has exactly one
+	// channel (SubagentStatus → delivered).
+	noticed bool
 	// doneCh is closed exactly once at the child's terminal (markDone); the
 	// run-end drain and SubagentStatus wait_ms park on it.
 	doneCh chan struct{}
@@ -405,9 +411,49 @@ func (g *childRunRegistry) collect(childID string) (res *session.ToolResult, st 
 	return e.result, st, collectOK
 }
 
+// noticeFinishedBackground returns the (id-sorted) statuses of every BACKGROUND
+// child that reached its terminal and has neither been NOTICED nor DELIVERED
+// yet, marking every scanned candidate noticed — the loop's turn-boundary
+// completion-notice source (A2). Semantics, all deliberate:
+//
+//   - noticed ≠ delivered: marking noticed leaves the stored result fully
+//     collectible via SubagentStatus; only `collect` ever sets delivered.
+//   - exactly-once notice: every candidate is flipped to noticed here, so a
+//     child can never appear in two notices.
+//   - an ALREADY-DELIVERED result is marked noticed but NOT returned: the model
+//     collected the body itself (e.g. a SubagentStatus wait_ms in the same
+//     turn), so announcing "finished — collect it" would only instruct it to
+//     re-collect into an "already delivered" reply. There is nothing left to
+//     announce.
+//   - foreground/team/parallel entries are excluded (background==false): their
+//     outcomes were delivered inline on their own tool calls.
+//
+// A child that lands its terminal AFTER this scan is simply picked up at the
+// NEXT turn boundary — the scan window needs no locking beyond the registry's.
+func (g *childRunRegistry) noticeFinishedBackground() []childStatus {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []childStatus
+	for id, e := range g.entries {
+		if !e.background || e.state != childDone || e.noticed {
+			continue
+		}
+		e.noticed = true
+		if e.delivered {
+			continue
+		}
+		out = append(out, childStatus{
+			id: id, family: e.family, goal: e.goal, background: e.background,
+			state: e.state, stop: e.stop, delivered: e.delivered,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].id < out[j].id })
+	return out
+}
+
 // liveBackgroundIDs returns the sorted ids of every background child that has not
 // reached its terminal — the gate-full fail-fast error's "currently running" list
-// (ids ONLY — A9).
+// and the background-pending nudge's id list (ids ONLY — A9).
 func (g *childRunRegistry) liveBackgroundIDs() []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()

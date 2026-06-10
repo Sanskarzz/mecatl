@@ -295,11 +295,12 @@ func TestSubagentStatusPollBeforeDone(t *testing.T) {
 	}
 }
 
-// TestBackgroundChildCancelledAtRunEnd is the D8 run-end contract (I3a: cancel,
-// drain, persist — the background-pending nudge is the NEXT iteration): a clean
+// TestBackgroundChildCancelledAtRunEnd is the D8 run-end contract: a clean
 // parent end with a live background child cancels it, joins it (no panic, no
 // leak), emits its subagent.end BEFORE the terminal EvResult (A4b ordering),
 // persists the cancelled child, and the child is RESUMABLE in a brand-new run.
+// Since I3b the FIRST clean-end attempt draws the background-pending nudge, so
+// the script ends twice — the drain contract under test is the second end's.
 func TestBackgroundChildCancelledAtRunEnd(t *testing.T) {
 	store := memstore.New()
 	gate := newBgGateTool() // never released: the child is still parked when the run ends
@@ -317,6 +318,7 @@ func TestBackgroundChildCancelledAtRunEnd(t *testing.T) {
 		// the clean end below ALWAYS catches a mid-flight child.
 		mockllm.ToolCallTurn(toolCall("pw", "AwaitChild", `{}`)),
 		mockllm.TextTurn("parent done"),
+		mockllm.TextTurn("parent really done"),
 	)
 	cat := catalogWith(t, task, agent.NewSubagentStatusTool(), &awaitSignalTool{ch: gate.started})
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: cat})
@@ -484,7 +486,10 @@ func TestBackgroundGateFullFailFast(t *testing.T) {
 		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"first","background":true}`)),
 		mockllm.ToolCallTurn(toolCall("p2", "Subagent", `{"prompt":"second","background":true}`)),
 		mockllm.ToolCallTurn(toolCall("p3", "SubagentStatus", `{}`)),
+		// The first clean-end attempt draws the I3b background-pending nudge (the
+		// gated child is still live); the second clean end terminates normally.
 		mockllm.TextTurn("parent done"),
+		mockllm.TextTurn("parent really done"),
 	)
 	e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task, agent.NewSubagentStatusTool())})
 	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")

@@ -78,6 +78,57 @@ func TestRunTeamScenarioOffline(t *testing.T) {
 	}
 }
 
+// TestRunBackgroundScenarioOffline runs the demo's background-subagent act and
+// asserts the whole I3a+I3b flow: the immediate started-result, the harness
+// completion NOTICE injected into history at the next turn boundary (ids + stop
+// labels only — exact text), the SubagentStatus collection delivering the
+// child's body, and a clean terminal.
+func TestRunBackgroundScenarioOffline(t *testing.T) {
+	events, notes := RunBackgroundScenario(context.Background())
+
+	var startedResult, collected string
+	var sawBackgroundStart bool
+	for _, ev := range events {
+		switch ev.Type {
+		case session.EvSubagentStart:
+			if ev.Subagent != nil && ev.Subagent.Background {
+				sawBackgroundStart = true
+			}
+		case session.EvToolResult:
+			if ev.ToolResult == nil {
+				continue
+			}
+			switch ev.ToolResult.CallID {
+			case "call-bg-1":
+				startedResult = ev.ToolResult.Content
+			case "call-bg-collect":
+				collected = ev.ToolResult.Content
+			}
+		}
+	}
+	if !sawBackgroundStart {
+		t.Error("no subagent.start with background=true was emitted")
+	}
+	if !strings.Contains(startedResult, "started in the background") ||
+		!strings.HasPrefix(startedResult, "agentId: "+demoBackgroundChildID) {
+		t.Errorf("Subagent call must return the immediate started-result with the agentId trailer first, got %q", startedResult)
+	}
+	if !strings.Contains(collected, "Background check complete") {
+		t.Errorf("SubagentStatus collection must deliver the child's body, got %q", collected)
+	}
+
+	wantNote := "[harness note: 1 background subagent(s) finished: " + demoBackgroundChildID +
+		" (end_turn). Collect each result with SubagentStatus before relying on it.]"
+	if len(notes) != 1 || notes[0] != wantNote {
+		t.Errorf("expected exactly one injected notice %q, got %v", wantNote, notes)
+	}
+
+	last := events[len(events)-1]
+	if last.Type != session.EvResult || last.Result == nil || last.Result.Stop != session.StopEndTurn {
+		t.Errorf("the background act must end on a clean end_turn result, got %+v", last)
+	}
+}
+
 // assertApprovalResumed verifies a permission.ask was emitted and the loop then
 // produced a non-error tool.result for the approved tool (Write) — i.e. the
 // approval round-trip resumed the loop rather than denying the call.

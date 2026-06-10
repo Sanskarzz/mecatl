@@ -480,7 +480,8 @@ mapper child_id/member_session_id cases, `client` EventToMsg cases, and
 `ui.TestParallelBranchCancel*`/`TestTeam*Cancel*` (send + done-lane/handle-less no-ops).
 
 **Background subagents — mechanics + SubagentStatus + seal/drain + gate fail-fast
-(BACKGROUND-SUBAGENTS I3a; I3b = notice injection + background-pending nudge is NEXT).**
+(BACKGROUND-SUBAGENTS I3a; I3b — the notice injection + background-pending nudge — is the
+following entry).**
 `subagentArgs.Background` detaches a Subagent child, RUN-scoped (D8): after validation/in-flight
 guard/registration, `startBackground` does a FAIL-FAST gate acquisition (`tryAcquireChildSlot`,
 D12 — a background child holds its slot ACROSS turns, so blocking could deadlock the model against
@@ -566,6 +567,62 @@ emitOrAbort binding), the updated `TestCancelChildMidGateWait` (StopCancelled pi
 `TestWaitForChildAnyReturnsPromptlyOnConcurrentTerminal` (the any-wait TOCTOU), and the A5
 sync-start ordering pin inside the happy path. The goleak gate (leakmain) covers the
 drain: a leaked background goroutine fails the whole agent package.
+
+**Background subagents — completion NOTICE injection + background-pending nudge
+(BACKGROUND-SUBAGENTS I3b; A2/A9/D10-as-amended).** Two loop-side additions complete the
+delivery story. **(1) Turn-boundary notice (Step 2a of `Engine.drive`, BEFORE `preTurnTerminal`
+— the design's injection seam, provider-legal because history at that boundary always ends on
+the user prompt / tool results / a nudge message):** `injectBackgroundNotice` asks the registry
+for newly-finished background children (`noticeFinishedBackground` — done ∧ background ∧
+¬noticed, candidates flipped to `noticed` under the lock, id-sorted) and records ONE
+harness-framed user message (`backgroundNoticeText`): ids + `session.StopReason` labels ONLY,
+nothing child-authored (A2 — no goal labels, no result text; the body's SOLE channel stays
+`SubagentStatus`). `noticed` is a flag SEPARATE from `delivered`: a noticed result is never
+re-noticed but remains collectible exactly once. A done child whose result was ALREADY
+collected (a same-turn `wait_ms` collection) is marked noticed SILENTLY and not listed —
+announcing "collect it" for a body the model holds would only provoke an "already delivered"
+round-trip (a deliberate I3b decision, pinned by `TestBackgroundNoticeSkipsDeliveredResult`).
+`e.save` runs immediately after the record, so the notice is durable in the replayed history
+independent of how the run later ends (the placement is witnessed by a RUNNING-state-save spy
+in `TestBackgroundNoticeDurableAcrossSave`). The injection emits NO event (not an
+`EvNoProgress` — it is ordinary history), consumes no no-progress nudge, and does not itself
+consume a turn (the following `BeginTurn` does, so `Limits.MaxTurns` semantics are unchanged);
+sitting before the terminal checks means a child finishing right at a terminal boundary may be
+noticed on a non-clean terminal too — durable for the resumed run. A child landing its terminal
+between the scan and the turn is simply noticed at the NEXT boundary. **(2) Background-pending
+nudge (`finishTurnNoTools`, the real-clean-end branch):** when the model produces a meaningful-
+text turn on a benign stop (the would-be `StopEndTurn` terminal) while background children are
+still LIVE, the loop — ONCE per run (`bgPendingNudged`, mirroring the `noProgressNudges`
+accounting) — records `backgroundPendingNudgeText` (ids ONLY — A9) and re-drives one more turn
+instead of terminating. It CANNOT live in `terminate`/`terminateComplete`: `drainChildren` at
+their top has already cancelled the children and sealed the registry (the I3a placement note on
+`drainChildren`). Pinned semantics: it fires ONLY on that branch — the no-progress machinery
+owns the empty turn first and even the `StopNoProgress` give-up is not background-nudged
+(`TestNoProgressPrecedesBackgroundPendingNudge` / `TestNoProgressGiveUpDoesNotBackgroundNudge`);
+every non-clean terminal (error/cancel/limits/budget) skips it and the eventual stop reason is
+never relabelled; it is EVENT-silent (no new event type, no `EvNoProgress` — that taxonomy
+means "the model stalled"); on the SECOND clean end the normal terminate path runs and the
+drain cancels + persists what is still live; the nudged continuation re-enters Step 2, so
+`MaxTurns` still bounds it. A finished-but-never-collected child at run end is the accepted
+disposition: the drain has nothing to cancel, the uncollected result dies with the run's
+registry, the persisted child stays inspectable/resumable. **mecademo** gained a third offline
+act (`RunBackgroundScenario`): background start → started-result → `wait_ms` roster wait → the
+injected notice (printed from recorded HISTORY — notices are not events) → `SubagentStatus`
+collection → clean end. Guards: `agent.TestBackgroundNoticeInjectedAtNextBoundary` (exact
+notice text + notice-precedes-collection + replay-valid pairing),
+`TestBackgroundNoticeBatchesTwoFinishedChildren` (ONE message for two children, id-sorted,
+internal — joins both registry doneChs as the deterministic anchor),
+`TestNoticeFinishedBackgroundSemantics` (registry unit: candidates/sorting/silent-delivered/
+never-renotice/still-collectible), `TestBackgroundNoticeSkipsDeliveredResult`,
+`TestBackgroundNoticeDurableAcrossSave`, `TestBackgroundPendingNudgeOneMoreTurn` (exact nudge
+text, event-silent, model collects on the granted turn),
+`TestBackgroundPendingNudgeIgnoredThenCancelledAtRunEnd` (adversarial: nudge once → second
+clean end → drain-cancel + persisted-resumable), `TestBackgroundPendingNudgeAbsentWithoutLiveChildren`
+(byte-identical clean end), `TestBackgroundPendingNudgeSkippedOnBudget`/`...SkippedOnCancel`,
+`TestBackgroundNudgeRespectsMaxTurns`, and `mecademo.TestRunBackgroundScenarioOffline`. The
+pre-existing I3a tests `TestBackgroundChildCancelledAtRunEnd` and `TestBackgroundGateFullFailFast`
+now script a second clean end (their first one legitimately draws the nudge). No diagnostics
+change: the loop still emits exactly THREE operator lines.
 
 **Subagent per-call token ceiling (`max_tokens`, Run-scoped budget override — R4).** `subagentArgs.MaxTokens`
 rides the new `RunOptions.MaxRunTokensOverride` carried into `Engine.RunContentWith`, so a per-call
