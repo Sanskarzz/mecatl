@@ -469,6 +469,108 @@ func TestBackgroundChildCancelledWhileParkedOnAsk(t *testing.T) {
 	}
 }
 
+// TestRunEndDrainRetractsParkedAsk pins the child-terminal retraction chokepoint
+// on the RUN-END path (bug: only Run.CancelChild used to retract — a child
+// cancelled by the run-end drain left the client holding a stale modal): a
+// background child parks on a surfaced ask that is NEVER answered; the run ends
+// cleanly (twice — the first clean end draws the background-pending nudge); the
+// drain cancels the child, whose registry terminal (markDoneResult) retracts the
+// still-pending ask BEFORE the doneCh join — so exactly ONE permission.retract
+// rides the parent stream at a LOWER index than the terminal EvResult. A late
+// post-run approval is a no-op (the router entry was unregistered before the
+// retract — fail-safe), and the cancelled child is persisted + resumable.
+func TestRunEndDrainRetractsParkedAsk(t *testing.T) {
+	store := memstore.New()
+	bash := &fakeBash{}
+	childLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("k1", "Bash", `{"command":"cat $(zap)"}`)),
+		mockllm.TextTurn("child resumed fine"),
+	)
+	task := agent.NewSubagentTool(bashChildEngine(childLLM, bash),
+		agent.WithChildForker(&recordingSubagentForker{}),
+		agent.WithSubagentStore(store))
+
+	// Deterministic anchor: the parent's second turn parks until the child's ask
+	// has genuinely SURFACED on the parent stream, so the clean ends below always
+	// catch a child parked on its ask.
+	askSeen := make(chan struct{})
+	parentLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"run it","background":true}`)),
+		mockllm.ToolCallTurn(toolCall("pw", "AwaitChild", `{}`)),
+		mockllm.TextTurn("parent done"),
+		mockllm.TextTurn("parent really done"),
+	)
+	cat := catalogWith(t, task, agent.NewSubagentStatusTool(), &awaitSignalTool{ch: askSeen})
+	e := interactiveEngine(t, agent.Deps{LLM: parentLLM, Catalog: cat})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+
+	var askID string
+	var askOnce sync.Once
+	var retracts []string
+	evs := drainObserving(t, r, func(ev session.Event) {
+		switch {
+		case ev.Type == session.EvPermissionAsk && ev.Ask != nil:
+			askID = ev.Ask.AskID
+			askOnce.Do(func() { close(askSeen) })
+			// Deliberately never answered: the run-end drain must clean it up.
+		case ev.Type == session.EvPermissionRetract && ev.Ask != nil:
+			retracts = append(retracts, ev.Ask.AskID)
+		}
+	})
+
+	if askID == "" {
+		t.Fatalf("expected the background child's ask to surface on the parent stream")
+	}
+	if len(retracts) != 1 || retracts[0] != askID {
+		t.Fatalf("run-end drain must retract the parked ask exactly once, got %v (want [%s])", retracts, askID)
+	}
+	// Ordering: the retract precedes the terminal EvResult (markDoneResult emits
+	// it before the doneCh close the drain joins on; EvResult follows the drain).
+	retractIdx, resultIdx := -1, -1
+	for i, ev := range evs {
+		switch ev.Type {
+		case session.EvPermissionRetract:
+			retractIdx = i
+		case session.EvResult:
+			resultIdx = i
+		}
+	}
+	if retractIdx == -1 || resultIdx == -1 || retractIdx > resultIdx {
+		t.Fatalf("permission.retract (idx %d) must precede the terminal EvResult (idx %d)", retractIdx, resultIdx)
+	}
+	if got := lastResult(t, evs); got.Stop != session.StopEndTurn {
+		t.Fatalf("parent run must end cleanly, got stop %q (err %q)", got.Stop, got.Error)
+	}
+
+	// The late approval (the user answered after the run ended): a safe no-op —
+	// the router entry is gone, the command must never run.
+	r.Approve(askID, session.VerdictAllowOnce)
+	if got := bash.ran(); len(got) != 0 {
+		t.Fatalf("a late approval after the run-end retract must be a no-op; command ran: %v", got)
+	}
+
+	// Persisted cancelled + resumable (the loss mitigation).
+	saved, err := store.Load(context.Background(), "subagent-p1")
+	if err != nil || saved == nil {
+		t.Fatalf("run-end-cancelled child must be persisted: %v", err)
+	}
+	if saved.State != session.StateCancelled {
+		t.Fatalf("persisted child state = %q, want cancelled", saved.State)
+	}
+	parent2 := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("q1", "Subagent", `{"prompt":"continue","resume":"subagent-p1"}`)),
+		mockllm.TextTurn("parent 2 done"),
+	)
+	e2 := newEngine(agent.Deps{LLM: parent2, Catalog: cat})
+	sess2 := session.New("s2", session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
+	r2 := e2.Run(context.Background(), sess2, memfs.NewWorkspace("/ws"), "go")
+	evs2 := drainObserving(t, r2, nil)
+	resumed := resultByCallID(evs2)["q1"]
+	if resumed == nil || resumed.IsError || !strings.Contains(resumed.Content, "child resumed fine") {
+		t.Fatalf("run-end-cancelled child must be resumable in a new run, got %+v", resumed)
+	}
+}
+
 // TestBackgroundGateFullFailFast pins D12: with the gate full, a second
 // BACKGROUND start fails FAST with a model-addressable error listing the live
 // background ids (ids ONLY — A9), the phantom registration is removed (A5 — the

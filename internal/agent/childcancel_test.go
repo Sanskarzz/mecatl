@@ -222,6 +222,85 @@ func TestCancelChildWhileParkedOnAsk(t *testing.T) {
 	}
 }
 
+// TestChildTimeoutRetractsSurfacedAskMidRun is the ghost-ask pin that justifies
+// the child-terminal retraction chokepoint: a FOREGROUND Subagent with a
+// per-call timeout_ms surfaces an ask and parks; the timeout — NOT CancelChild —
+// unwinds it, and the child's registry terminal (the deferred finishChildRun in
+// run()) must retract the still-pending ask MID-RUN: the permission.retract
+// lands on the parent stream BEFORE the Subagent call's own ToolResult (and so
+// before the terminal EvResult), a late verdict is a no-op, and the run
+// completes normally with the time-budget error as the model-visible outcome.
+func TestChildTimeoutRetractsSurfacedAskMidRun(t *testing.T) {
+	bash := &fakeBash{}
+	childLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("k1", "Bash", `{"command":"cat $(zap)"}`)),
+		mockllm.TextTurn("child: never reached"),
+	)
+	task := agent.NewSubagentTool(bashChildEngine(childLLM, bash),
+		agent.WithChildForker(&recordingSubagentForker{}))
+
+	parentLLM := mockllm.New(
+		// 100ms is comfortably past the in-memory fork + first mock turn + the
+		// surfaced-ask emit (all sub-ms), kept small so the test pays minimal
+		// real-clock time; the ask MUST surface before the deadline.
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"run it","timeout_ms":100}`)),
+		mockllm.TextTurn("parent: done"),
+	)
+	e := interactiveEngine(t, agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+
+	var askID string
+	var retracts []string
+	evs := drainObserving(t, r, func(ev session.Event) {
+		switch {
+		case ev.Type == session.EvPermissionAsk && ev.Ask != nil:
+			askID = ev.Ask.AskID // deliberately never answered: the timeout unwinds it
+		case ev.Type == session.EvPermissionRetract && ev.Ask != nil:
+			retracts = append(retracts, ev.Ask.AskID)
+		}
+	})
+
+	if askID == "" {
+		t.Fatalf("expected the child's ask to surface on the parent stream")
+	}
+	if len(retracts) != 1 || retracts[0] != askID {
+		t.Fatalf("the timed-out child's parked ask must be retracted exactly once, got %v (want [%s])", retracts, askID)
+	}
+	// MID-RUN ordering: the retract is emitted by the deferred registry terminal
+	// inside the Subagent call, so it precedes the call's OWN ToolResult — the
+	// run was still going when the client's modal was dismissed.
+	retractIdx, callResIdx, resultIdx := -1, -1, -1
+	for i, ev := range evs {
+		switch {
+		case ev.Type == session.EvPermissionRetract:
+			retractIdx = i
+		case ev.Type == session.EvToolResult && ev.ToolResult != nil && ev.ToolResult.CallID == "p1":
+			callResIdx = i
+		case ev.Type == session.EvResult:
+			resultIdx = i
+		}
+	}
+	if retractIdx == -1 || callResIdx == -1 || retractIdx > callResIdx {
+		t.Fatalf("permission.retract (idx %d) must precede the Subagent ToolResult (idx %d) — mid-run retraction", retractIdx, callResIdx)
+	}
+	if retractIdx > resultIdx {
+		t.Fatalf("permission.retract (idx %d) must precede the terminal EvResult (idx %d)", retractIdx, resultIdx)
+	}
+	res := subagentResultOf(t, evs)
+	if !strings.Contains(res.Content, "time budget") {
+		t.Fatalf("the timed-out call must surface the time-budget error, got %q", res.Content)
+	}
+	if got := lastResult(t, evs); got.Stop != session.StopEndTurn {
+		t.Fatalf("parent run must complete normally after the child timeout, got stop %q", got.Stop)
+	}
+	// Late verdict: a safe no-op — the router entry is gone (unregistered before
+	// the retract), the command must never run.
+	r.Approve(askID, session.VerdictAllowOnce)
+	if got := bash.ran(); len(got) != 0 {
+		t.Fatalf("a late approval after the timeout retract must be a no-op; command ran: %v", got)
+	}
+}
+
 // TestCancelChildAfterDoneAndUnknownNoOp pins the idempotence edges: CancelChild on
 // a child that already finished returns false (the finished-as-you-pressed race is
 // benign), and an unknown id returns false.

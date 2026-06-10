@@ -135,6 +135,17 @@ type childRunRegistry struct {
 	// goroutine starts and only read after; emitMu guards each call. nil (tests)
 	// silently drops.
 	emit func(session.Event)
+	// unregisterAsk is the ANSWERED-vs-PENDING gate for ask retraction: bound by
+	// RunContentWith (alongside emit) to Run.unregisterChildAsk (the parent run's
+	// childAskRouter.unregister), it reports whether the askID was still
+	// registered (pending) and removed. route() deletes an answered ask's entry,
+	// so false means the verdict already resolved the ask (or it never surfaced)
+	// and retractAsks must NOT emit a permission.retract for it. Like emit it is
+	// set once before the run goroutine starts and only read after. nil on an
+	// unbound registry (unit tests) ⇒ retracts are skipped, never a panic. A
+	// bound headless/child run has no router, so its gate returns false for every
+	// id — correct: nothing was ever surfaced, so there is nothing to retract.
+	unregisterAsk func(askID string) bool
 }
 
 // childEntry is one registered child's control block.
@@ -156,10 +167,12 @@ type childEntry struct {
 	clientCancelled bool
 	// askIDs are the surfaced permission asks currently owned by this child,
 	// recorded at the single surfacing seam (surfaceAsk → recordAsk) and snapshot+
-	// cleared by requestCancel so each gets a permission.retract. Verdict routing
-	// leaves the set slightly stale (an answered ask is not removed); harmless —
-	// retraction tolerates already-resolved ids (the router delete and the client
-	// dismiss are both idempotent).
+	// cleared (takeAsksLocked) by requestCancel AND by the child's registry
+	// terminal (markDoneResult — the retraction chokepoint) so each still-pending
+	// ask gets exactly one permission.retract. Verdict routing leaves the set
+	// slightly stale (an answered ask is not removed); harmless — retractAsks
+	// gates each id on childAskRouter.unregister's answered-vs-pending bool, so a
+	// stale already-answered id emits nothing.
 	askIDs map[string]struct{}
 	state  childState
 	// stop is the child's terminal stop reason (set by markDone).
@@ -272,11 +285,56 @@ func (g *childRunRegistry) markDone(childID string, stop session.StopReason) {
 // markDoneResult is markDone plus the BACKGROUND child's rendered terminal
 // ToolResult, stored for SubagentStatus collection (A2: the result body's sole
 // channel). Same idempotence as markDone.
+//
+// It is ALSO the ask-retraction chokepoint: every child that ran lands exactly
+// one terminal here (the spawning tools all defer it), and by then the child's
+// drive has returned — a surfaced permission ask that is STILL pending is dead
+// by definition (the parked await unwound via ctx; no verdict can ever resolve
+// it). So any unanswered surfaced asks the child owns are taken
+// (snapshot-and-cleared, the requestCancel pattern) and retracted HERE,
+// strictly BEFORE the done-transition closes doneCh: the run-end drain joins on
+// doneCh and only then seals, and the terminate paths emit the terminal
+// EvResult after the drain returns — so a joined child's permission.retract
+// always sequences before the seal AND before EvResult on the stream. This
+// covers EVERY ctx-driven unwind (run-end drain, per-call timeout_ms, a
+// parallel join=first loser, whole-run cancel, team teardown), not only
+// Run.CancelChild. The retract is a GUARDED emit (safeEmit — it gives up on
+// emitAbort/hardAbort like every child emit), not an ownership release, so it
+// correctly precedes the doneCh join signal. Idempotence holds both ways: a
+// second call takes an empty ask set and no-ops on the done check; a
+// requestCancel that raced first already cleared the set, so each ask is
+// retracted at most once — and the unregisterAsk gate (route deletes an
+// answered ask's router entry) keeps an answered ask from ever drawing a
+// spurious retract.
 func (g *childRunRegistry) markDoneResult(childID string, stop session.StopReason, result *session.ToolResult) {
+	// Capture the entry POINTER and take its asks under ONE mu hold, then
+	// retract OUTSIDE mu (retractAsks crosses into the router mutex and emitMu —
+	// the mu-never-across-a-send rule), then transition THAT pointer — never a
+	// re-lookup by id after the retract. The pointer capture is load-bearing:
+	// the retract emit can PARK on consumer backpressure, and the in-flight
+	// child id is released BEFORE this terminal lands (the ownership-before-
+	// done-signal ordering), so a same-run `resume` can re-register the id into
+	// that gap — register's replace-when-not-done semantics would then hand a
+	// re-lookup the NEW attempt's entry and the OLD child's terminal would land
+	// on it (premature done + the old result corrupting the new attempt).
+	// Transitioning the captured pointer stays correct when the entry was
+	// replaced (or removed) meanwhile: the old and new entries are DISTINCT
+	// structs, so the new one is untouched; the old pointer's doneCh close is
+	// exactly what the old child's joiners (the drain's join snapshot, a parked
+	// SubagentStatus wait) captured and need; and the old doneCh cannot already
+	// be closed — remove operates on the CURRENT map entry (the old pointer left
+	// the map at re-register), and for one child's own lifecycle remove
+	// (pre-start abort) and this terminal are mutually exclusive. The replaced
+	// old entry's stored result is unreachable via the map afterwards — the same
+	// disposition as any register-over-a-live-id overwrite.
+	e, askIDs := g.takeEntryAsks(childID)
+	g.retractAsks(askIDs)
+	if e == nil {
+		return
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	e, ok := g.entries[childID]
-	if !ok || e.state == childDone {
+	if e.state == childDone {
 		return
 	}
 	e.state = childDone
@@ -507,10 +565,11 @@ func (g *childRunRegistry) recordAsk(childID, askID string) {
 
 // requestCancel marks the child client-cancelled and returns its cancel func
 // plus a snapshot of its owned askIDs (cleared from the entry, so a second
-// cancel never re-retracts). It returns ok=false for an unknown or already-done
-// id — CancelChild is a no-op then. The returned cancel MUST be invoked outside
-// the registry lock (it may synchronously unwind code paths that re-enter the
-// registry, e.g. markDone).
+// cancel never re-retracts and the child's own terminal takes an empty set).
+// It returns ok=false for an unknown or already-done id — CancelChild is a
+// no-op then. The returned cancel MUST be invoked outside the registry lock
+// (it may synchronously unwind code paths that re-enter the registry, e.g.
+// markDone).
 func (g *childRunRegistry) requestCancel(childID string) (cancel context.CancelFunc, askIDs []string, ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -519,11 +578,77 @@ func (g *childRunRegistry) requestCancel(childID string) (cancel context.CancelF
 		return nil, nil, false
 	}
 	e.clientCancelled = true
+	return e.cancel, takeAsksLocked(e), true
+}
+
+// takeAsks snapshots and CLEARS the surfaced askIDs owned by childID (the
+// requestCancel pattern), id-sorted, under one mu hold. Unknown ids return nil;
+// a DONE entry is deliberately NOT skipped — a markDoneResult race may have
+// flipped the state first (its own take already emptied the set, so this take
+// is then empty: the clear is the exactly-once mechanism, not the state check).
+// Callers retract the returned set OUTSIDE the registry lock (retractAsks).
+func (g *childRunRegistry) takeAsks(childID string) []string {
+	_, askIDs := g.takeEntryAsks(childID)
+	return askIDs
+}
+
+// takeEntryAsks is takeAsks plus the entry POINTER, captured under the SAME mu
+// hold as the ask snapshot, so markDoneResult's later done-transition operates
+// on the exact entry that owned the taken asks — never on whatever a re-lookup
+// finds after the (parkable) retract emit. nil entry ⇔ unknown id.
+func (g *childRunRegistry) takeEntryAsks(childID string) (*childEntry, []string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e, ok := g.entries[childID]
+	if !ok {
+		return nil, nil
+	}
+	return e, takeAsksLocked(e)
+}
+
+// takeAsksLocked is the locked snapshot+clear core takeAsks and requestCancel
+// share. Callers hold mu. The ids are sorted (cancelLiveBackground's
+// determinism discipline).
+func takeAsksLocked(e *childEntry) []string {
+	if len(e.askIDs) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(e.askIDs))
 	for id := range e.askIDs {
-		askIDs = append(askIDs, id)
+		ids = append(ids, id)
 	}
 	clear(e.askIDs)
-	return e.cancel, askIDs, true
+	sort.Strings(ids)
+	return ids
+}
+
+// retractAsks unregisters each taken askID from the parent's router and emits a
+// permission.retract for the ones that were still PENDING: the bound
+// unregisterAsk gate reports whether the router actually removed an entry —
+// route() already deletes an answered ask's, so a stale already-answered id
+// fails the gate and emits nothing (no spurious retract racing a just-delivered
+// verdict). An UNBOUND registry (nil unregisterAsk — unit tests that never ran
+// RunContentWith) skips the retracts entirely, never panics. NO registry lock
+// is held here: the router has its own mutex and emitRetract→safeEmit takes
+// emitMu — the mu-never-across-a-send rule. Lock order is strictly sequential,
+// never nested: mu (take) → release → router mu (unregister) → emitMu (send).
+// Each retract is a guarded send that gives up on emitAbort/hardAbort like
+// every child emit.
+func (g *childRunRegistry) retractAsks(askIDs []string) {
+	g.retractAsksVia(g.unregisterAsk, askIDs)
+}
+
+// retractAsksVia is retractAsks' core with an EXPLICIT gate: Run.CancelChild
+// passes its own Run.unregisterChildAsk method value so the unregister-BEFORE-
+// emit ordering holds even on a Run whose registry was built outside
+// RunContentWith (the binding and the method are the same function in
+// production). nil-gate ids are skipped (do-not-retract, fail-safe).
+func (g *childRunRegistry) retractAsksVia(unregister func(askID string) bool, askIDs []string) {
+	for _, id := range askIDs {
+		if unregister != nil && unregister(id) {
+			g.emitRetract(id)
+		}
+	}
 }
 
 // clientCancelled reports whether CancelChild was requested for the child. The

@@ -504,10 +504,16 @@ func (r *Run) Cancel() {
 // "[subagent cancelled by user]" rather than a generic cancel), snapshots+clears
 // the child's surfaced askIDs, cancels the child's per-call context OUTSIDE the
 // registry lock (unwinding a mid-drive turn, a gate wait, or a parked
-// askRegistry.await alike), then for each owned askID unregisters it from the
-// parent's childAskRouter BEFORE emitting a permission.retract event — so a
-// racing late approval falls through to the parent's own registry and dies as an
-// unknown-ask no-op (fail-safe ordering), while the client dismisses its modal.
+// askRegistry.await alike), then retracts the taken asks via the shared
+// retractAsks: each askID is unregistered from the parent's childAskRouter
+// BEFORE its permission.retract event is emitted — so a racing late approval
+// falls through to the parent's own registry and dies as an unknown-ask no-op
+// (fail-safe ordering), while the client dismisses its modal. The unregister's
+// answered-vs-pending gate also means an ask whose verdict was JUST routed
+// (route deleted the router entry first) no longer draws a spurious retract.
+// Asks the cancel does not take here are taken at the child's own registry
+// terminal (markDoneResult — the retraction chokepoint); the requestCancel
+// clear keeps the two exactly-once.
 func (r *Run) CancelChild(childID string) bool {
 	cancel, askIDs, ok := r.children.requestCancel(childID)
 	if !ok {
@@ -516,13 +522,21 @@ func (r *Run) CancelChild(childID string) bool {
 	if cancel != nil {
 		cancel()
 	}
-	for _, askID := range askIDs {
-		if r.childAsks != nil {
-			r.childAsks.unregister(askID)
-		}
-		r.children.emitRetract(askID)
-	}
+	// The explicit-gate variant (rather than the registry's bound gate) so the
+	// ordering holds even on a Run built outside RunContentWith (unit tests); in
+	// production the bound gate IS this method.
+	r.children.retractAsksVia(r.unregisterChildAsk, askIDs)
 	return true
+}
+
+// unregisterChildAsk is the answered-vs-pending retraction gate: it drops askID
+// from this run's childAskRouter and reports whether an entry was actually
+// removed (false ⇒ the verdict was already routed, or this run never surfaces —
+// do NOT retract). RunContentWith binds it onto the child-run registry so the
+// child-terminal retraction (markDoneResult) and the drain's abandoned sweep
+// consult the SAME gate Run.CancelChild does.
+func (r *Run) unregisterChildAsk(askID string) bool {
+	return r.childAsks != nil && r.childAsks.unregister(askID)
 }
 
 // Run starts processing userText against sess in a background goroutine and
@@ -590,6 +604,15 @@ func (e *Engine) RunContentWith(ctx context.Context, sess *session.Session, ws t
 			e.deps.Sink.Emit(r.ctx, ev)
 		}
 	}
+	// unregisterAsk is the answered-vs-pending gate for ask retraction at a
+	// child's registry terminal (markDoneResult — the chokepoint every
+	// ctx-driven unwind funnels through) and the drain's abandoned sweep:
+	// route() removes an ANSWERED ask's router entry, so only an unregister that
+	// genuinely removed one (a still-pending surfaced ask) draws a
+	// permission.retract. A headless/child run installs no router, so every
+	// unregister reports false and no retract is ever emitted — correct:
+	// nothing was ever surfaced.
+	r.children.unregisterAsk = r.unregisterChildAsk
 	go func() {
 		// Defers run LIFO: cancel first (releases the run's ctx tree), then the
 		// belt-and-braces seal — its abort-before-emitMu ordering closes emitAbort,
@@ -1373,6 +1396,15 @@ var childDrainGrace = 1 * time.Second
 // the unhealthy path only: the post-abort end events are dropped instead of
 // delivered — they were going nowhere.
 //
+// Retract contract: a JOINED child's still-pending surfaced asks were already
+// retracted at its registry terminal (markDoneResult retracts BEFORE closing
+// doneCh, so the retract precedes both the seal here and the terminal EvResult
+// the terminate paths emit after this hook returns). Only an ABANDONED child
+// never reaches that terminal, so its taken asks are swept and retracted here,
+// pre-seal — the abandon WARN stays the only diagnostics line (the retract is
+// an EVENT), and the abandoned child's eventual late markDoneResult takes an
+// empty set against a sealed registry: it emits nothing.
+//
 // I3b note: the background-pending nudge must be checked in finishTurnNoTools
 // BEFORE its clean-terminal calls — by the time this hook runs, the children it
 // would ask about are already cancelled and the registry sealed.
@@ -1390,6 +1422,14 @@ func (*Engine) drainChildren(ctx context.Context, r *Run) {
 				r.diag.Log(ctx, port.LevelWarn,
 					"abandoning background subagents that did not stop within the run-end drain cap",
 					"ids", strings.Join(abandoned, ","), "cap", (childDrainCap + childDrainGrace).String())
+				// Abandoned-only ask sweep (joined children already retracted at
+				// their markDoneResult): retract each abandoned child's
+				// still-pending surfaced asks BEFORE the seal bars the emits, so
+				// no client is left holding a stale modal for a child this run
+				// will never answer for.
+				for _, j := range pending {
+					r.children.retractAsks(r.children.takeAsks(j.id))
+				}
 			}
 		}
 	}

@@ -132,15 +132,25 @@ func (r *childAskRouter) route(askID string, v session.ApprovalVerdict) bool {
 }
 
 // unregister drops a surfaced child ask from the router without routing a
-// verdict. Run.CancelChild calls it (BEFORE emitting the permission.retract)
-// when the owning child is cancelled while parked: the child's own await unwinds
-// via its ctx, and a late ResumeApproval for the dropped askID then falls
-// through to the parent's OWN registry, where it dies as an unknown-ask no-op —
-// the documented stale-verdict behaviour. Idempotent; unknown ids are no-ops.
-func (r *childAskRouter) unregister(askID string) {
+// verdict, reporting whether an entry was actually removed (a locked
+// check-and-delete). The bool is the ANSWERED-vs-PENDING gate the retraction
+// paths key on: route() already deletes an answered ask's entry, so false
+// means the verdict was routed (or the ask never surfaced) and the caller
+// must NOT emit a permission.retract — the client already resolved its modal.
+// The retraction paths (childRunRegistry.retractAsks, reached from
+// Run.CancelChild and from a cancelled child's registry terminal) call it
+// BEFORE emitting the retract: a late ResumeApproval for the dropped askID
+// then falls through to the parent's OWN registry, where it dies as an
+// unknown-ask no-op — the documented stale-verdict behaviour. Idempotent;
+// unknown ids return false.
+func (r *childAskRouter) unregister(askID string) bool {
 	r.mu.Lock()
-	delete(r.byAskID, askID)
+	_, ok := r.byAskID[askID]
+	if ok {
+		delete(r.byAskID, askID)
+	}
 	r.mu.Unlock()
+	return ok
 }
 
 // await blocks until the client resolves askID via resolve, or ctx is cancelled.

@@ -228,8 +228,20 @@ the run. Hardening found in review: ctx-cancel kills the Bash process immediatel
 
 Unchanged 4-step resolution; a background child's surfaced ask behaves like a team
 member's (parks its own goroutine only). The run-end drain cancelling a parked child
-unwinds it through the existing `await` ctx path; the retraction event clears the modal.
-The notice may land while an ask is pending — fine, asks are out-of-band of history.
+unwinds it through the existing `await` ctx path, and the retraction rides the
+child-terminal CHOKEPOINT (a post-arc fix — the drain path originally emitted no
+retract; only `Run.CancelChild` did): every child that ran lands exactly one registry
+terminal (`markDoneResult`, deferred by all spawning tools), and by then an unanswered
+surfaced ask is dead by definition — so the terminal takes (snapshot-and-clears) the
+child's still-pending askIDs and emits a `permission.retract` for each, gated on
+`childAskRouter.unregister`'s answered-vs-pending bool (route() already deleted an
+answered ask's entry → no spurious retract). The retract precedes the doneCh close ⇒
+precedes the drain's join ⇒ precedes the seal AND the terminal `EvResult` — so the
+client's modal clears on EVERY ctx-driven unwind, not just an explicit CancelChild:
+run-end drain, per-call `timeout_ms`, a parallel join=first loser, whole-run cancel,
+team teardown. A genuinely ABANDONED child (never reaches its terminal) gets the same
+sweep from `drainChildren` itself, pre-seal. The notice may land while an ask is
+pending — fine, asks are out-of-band of history.
 
 ### 2.5 Interplay matrix
 
@@ -309,12 +321,23 @@ snapshot+clear `entry.askIDs`; `cancel()` → `await` returns `ok=false` → dis
 deny-cancelled → child loop `StopCancelled` → family terminal per §3.2 (no parked
 goroutine; gate slot + worktree release via existing defers); then per snapshotted
 askID: `childAsks.unregister` (a late ResumeApproval dies as an unknown-ask no-op —
-documented stale-verdict behavior), then emit `permission.retract{ask_id}`. mecatui
+documented stale-verdict behavior), then emit `permission.retract{ask_id}` — both via
+the shared `childRunRegistry.retractAsks`, the SAME unregister-then-emit loop the
+child-terminal chokepoint uses (§2.4). mecatui
 keeps a FIFO ask queue behind the visible modal: a retract matching the VISIBLE
 ask dismisses it and advances the queue, a queued match is removed in place, an
 unknown/stale id is ignored. Ownership is recorded at the single surfacing seam (`surfaceAsk`)
 via the explicit `childPosture.childID` field; verdict-routing leaves the askID set
-slightly stale — harmless, retraction tolerates already-resolved ids.
+slightly stale, but the set is now CONSUMED at the child's registry terminal
+(`markDoneResult` → `takeAsks`), with each id gated on `unregister`'s
+answered-vs-pending bool — a stale already-answered id fails the gate and emits
+nothing, so a never-answered ask is retracted on every unwind path (drain / timeout /
+parallel loser / whole-run cancel / team teardown) and its router entry no longer
+leaks until Run GC. Scoped out, deliberately: (a) a budget-stopped team LEAD's
+synthesis-turn ask — `recordAsk` ignores done entries (the lead is marked done before
+its one synthesis drive), so such an ask is never registry-owned; pre-existing, rare,
+bounded by the synthesis turn itself; (b) the parent run's OWN pending ask at run
+end — clients already treat `EvResult` as end-of-asks.
 
 ### 3.4 TUI affordance
 
@@ -361,7 +384,8 @@ session, all 10 gauntlet tests passing. ALL proto fields landed in I1's single r
   dispatch-side.
 - **"loop emits exactly TWO lines"**: consciously AMENDED to THREE — the drain-abandon
   WARN (rare, ids only). Cancel/retraction/background events are EVENTS, never
-  diagnostics. CLAUDE.md carries the carve-out.
+  diagnostics (the child-terminal retract and the drain's abandoned-ask sweep emit no
+  diagnostics line). CLAUDE.md carries the carve-out.
 - **No-progress nudge vs the background machinery**: the notice precedes `BeginTurn`;
   `finishTurnNoTools`' masking-guard ordering is untouched; the background-pending nudge
   is a SEPARATE bounded counter that never relabels a stop reason and fires only on the
@@ -369,14 +393,16 @@ session, all 10 gauntlet tests passing. ALL proto fields landed in I1's single r
   `StopNoProgress` give-up is not background-nudged).
 - **Gauntlet #7**: the notice carries ids + stop labels only; the body returns as a tool
   RESULT through `renderSubagentResult` — the sanctioned channel; `subagent.*` stays
-  metadata-only via `drainChildObserved`; `permission.retract` carries an ask_id only.
+  metadata-only via `drainChildObserved`; `permission.retract` carries an ask_id only
+  (on the child-terminal/drain paths exactly as on CancelChild's).
 - **ChildActivity trip-wire**: background is NOT a 4th family — one boolean on
   `subagent.*`. The trip-wire stands.
 - **"Every run-entry path must reopen-if-completed"**: cancel-then-resume rides
   `resolveResumeSession`'s cancelled→Interrupt recovery — per-child cancel just makes it
   common.
 - **4-step child ask model**: preserved verbatim; the unwind/retraction is a new exit,
-  not a changed resolution order.
+  not a changed resolution order — and the child-terminal retraction chokepoint only
+  widens WHICH unwinds retract, never how an ask resolves.
 - **childGate single fan-out brake**: ONE gate with a documented acquisition-mode split.
 - **port.LLMRequest neutrality / layering**: untouched; all knobs are tool args,
   Run-scoped state, or proto wire fields; `parentCaps` remains closures+values; mecatui

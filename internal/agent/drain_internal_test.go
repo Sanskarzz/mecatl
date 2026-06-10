@@ -102,6 +102,76 @@ func TestDrainTwoPhaseJoinsEmitParkedChild(t *testing.T) {
 	}
 }
 
+// TestDrainTwoPhaseJoinsRetractParkedChild pins the NEW park point the
+// chokepoint introduced: markDoneResult's retract emit sits BEFORE the doneCh
+// close, so against a non-draining consumer the child's terminal can park
+// INSIDE the retract send — phase 2's abortEmits must unpark it so the child
+// reaches its done-transition, JOINS within the grace, and is never flipped to
+// abandoned (no WARN). Mirrors TestDrainTwoPhaseJoinsEmitParkedChild with the
+// park moved from the end-emit to the recorded ask's retract.
+func TestDrainTwoPhaseJoinsRetractParkedChild(t *testing.T) {
+	setDrainCaps(t, 100*time.Millisecond, 2*time.Second)
+	r, diag := newDrainRun(1)
+	r.events <- session.Event{} // buffer FULL; nobody drains — the wedged-consumer shape
+	const askID = "subagent-bg:0:k1:r1"
+	router := newChildAskRouter()
+	r.childAsks = router
+	r.children.unregisterAsk = r.unregisterChildAsk
+
+	// Entered-signal rebind so the test deterministically waits until the
+	// terminal goroutine is parked INSIDE the guarded retract send.
+	entered := make(chan struct{})
+	var once sync.Once
+	inner := r.children.emit
+	r.children.emit = func(ev session.Event) {
+		once.Do(func() { close(entered) })
+		inner(ev)
+	}
+
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.children.register("subagent-bg", childFamilySubagent, "g", cancel, true)
+	r.children.markRunning("subagent-bg")
+	r.children.recordAsk("subagent-bg", askID)
+	router.registerChild(askID, &Run{asks: newAskRegistry()})
+
+	go func() {
+		// The retract-parked terminal: the ask's retract parks on the full
+		// channel BEFORE doneCh closes; only after emits abort can the done
+		// transition land.
+		r.children.markDoneResult("subagent-bg", session.StopCancelled, nil)
+	}()
+	<-entered
+
+	done := make(chan struct{})
+	go func() {
+		(&Engine{}).drainChildren(context.Background(), r)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("drainChildren wedged")
+	}
+
+	if _, st, outcome := r.children.collect("subagent-bg"); outcome == collectUnknown || st.state != childDone {
+		t.Fatalf("the retract-parked child must have JOINED once emits aborted, got %v (%+v)", outcome, st)
+	}
+	if warns := warnsOf(diag); len(warns) != 0 {
+		t.Fatalf("a retract parked on consumer backpressure must NOT be misattributed as a wedged child; got WARNs %+v", warns)
+	}
+	// The dropped retract leaves the router entry behind only if unregister never
+	// ran — it DID run (unregister-before-emit), so the entry is gone even though
+	// the event itself was aborted: the stale-modal residual is the consumer's
+	// own wedge, not a routing leak.
+	router.mu.Lock()
+	_, present := router.byAskID[askID]
+	router.mu.Unlock()
+	if present {
+		t.Fatalf("the parked retract's askID must still have been unregistered before the emit")
+	}
+}
+
 // TestDrainAbandonsGenuinelyWedgedChildWithOneWarn pins the abandon path: a
 // child whose doneCh NEVER closes (even after emits abort) is abandoned with
 // exactly ONE LevelWarn whose attrs carry the ids ONLY (the child's goal label
@@ -141,6 +211,73 @@ func TestDrainAbandonsGenuinelyWedgedChildWithOneWarn(t *testing.T) {
 	close(r.events)
 	r.children.safeEmit(session.Event{Type: session.EvSubagentEnd,
 		Subagent: &session.SubagentPayload{ChildID: "subagent-wedged"}})
+}
+
+// drainEventsOf empties the run's buffered events channel non-blockingly and
+// returns what was delivered (the drain tests have no live consumer).
+func drainEventsOf(r *Run) []session.Event {
+	var evs []session.Event
+	for {
+		select {
+		case ev := <-r.events:
+			evs = append(evs, ev)
+		default:
+			return evs
+		}
+	}
+}
+
+// TestDrainAbandonedChildAskRetractedPreSeal pins the drain's abandoned-only ask
+// sweep: a genuinely WEDGED child (doneCh never closes) never reaches its
+// registry terminal, so the chokepoint retraction cannot fire — drainChildren
+// must sweep its still-pending surfaced ask itself, BEFORE the seal: the
+// permission.retract is delivered (a post-seal emit would have been dropped),
+// the router entry is gone, the abandon WARN stays exactly ONE line, and the
+// abandoned child's eventual LATE markDoneResult emits nothing (its ask set was
+// taken and the registry is sealed).
+func TestDrainAbandonedChildAskRetractedPreSeal(t *testing.T) {
+	setDrainCaps(t, 50*time.Millisecond, 50*time.Millisecond)
+	r, diag := newDrainRun(8)
+	const askID = "subagent-wedged:0:k1:r1"
+	router := newChildAskRouter()
+	r.childAsks = router
+	r.children.unregisterAsk = r.unregisterChildAsk
+
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.children.register("subagent-wedged", childFamilySubagent, "g", cancel, true)
+	r.children.markRunning("subagent-wedged")
+	r.children.recordAsk("subagent-wedged", askID)
+	router.registerChild(askID, &Run{asks: newAskRegistry()})
+	// No goroutine: the doneCh genuinely never closes — the child is abandoned.
+
+	(&Engine{}).drainChildren(context.Background(), r)
+
+	if warns := warnsOf(diag); len(warns) != 1 {
+		t.Fatalf("the abandoned child must still produce exactly ONE abandon WARN, got %d (%+v)", len(warns), warns)
+	}
+	var retracts []string
+	for _, ev := range drainEventsOf(r) {
+		if ev.Type == session.EvPermissionRetract && ev.Ask != nil {
+			retracts = append(retracts, ev.Ask.AskID)
+		}
+	}
+	if len(retracts) != 1 || retracts[0] != askID {
+		t.Fatalf("the abandoned child's parked ask must be retracted pre-seal exactly once, got %v (want [%s])", retracts, askID)
+	}
+	router.mu.Lock()
+	_, present := router.byAskID[askID]
+	router.mu.Unlock()
+	if present {
+		t.Fatalf("the swept ask must be unregistered from the router")
+	}
+
+	// The abandoned child's LATE terminal: the ask set was already taken and the
+	// registry is sealed — no retract, no panic, nothing on the channel.
+	r.children.markDoneResult("subagent-wedged", session.StopCancelled, nil)
+	if late := drainEventsOf(r); len(late) != 0 {
+		t.Fatalf("the late markDoneResult must emit nothing post-seal, got %+v", late)
+	}
 }
 
 // TestDrainCleanNoWarn pins the healthy path: children already at their terminal

@@ -431,6 +431,30 @@ CWE-863 regression pair), the `TestChildRegistry*` unit+race suite incl.
 unregister/retract order fails it), `server.TestGRPCConverseCancelChild` (real-stream wire e2e)
 /`TestServiceCancelChildFallbacks`/`TestHTTPCancelChild`, `client.TestSendCancelChildFrame` + the
 `permission.retract` EventToMsg case, and `ui.TestSubagent*CancelKey*`/`TestPermissionRetract*`.
+*Post-arc fix (ask retraction at the child terminal):* retraction no longer lives ONLY in
+`Run.CancelChild` — `markDoneResult` is now the CHOKEPOINT: every child that ran lands exactly one
+registry terminal there (deferred by all spawning tools), and by then an unanswered surfaced ask is
+dead by definition, so the terminal takes (snapshot+clears, `takeAsks`/`takeAsksLocked` — the locked
+core `requestCancel` now shares) the child's still-pending askIDs and retracts each via the shared
+`retractAsks`, strictly BEFORE the done-transition closes `doneCh` (⇒ before the drain's join ⇒
+before seal ⇒ before the terminal `EvResult`). Exactly-once is two atomic gates: the locked
+snapshot+clear, and `childAskRouter.unregister` now returning a BOOL (locked check-and-delete — the
+answered-vs-pending gate: route() already removed an answered ask's entry, so false means
+do-not-retract; a stale already-answered id emits nothing). The gate is bound onto the registry by
+`RunContentWith` (`unregisterAsk` = `Run.unregisterChildAsk`; nil on unbound unit-test registries ⇒
+retracts skipped, never a panic; a headless/child run's router is nil ⇒ gate false ⇒ no retract —
+nothing was ever surfaced). `Run.CancelChild` shares the loop via `retractAsksVia` (explicit gate, so
+the pinned unregister-BEFORE-emit ordering holds on manually-built Runs too), and a just-answered ask
+no longer draws a spurious retract. This covers every ctx-driven unwind (run-end drain, per-call
+`timeout_ms`, parallel join=first losers, whole-run cancel, team teardown) AND fixes the router-entry
+leak (a never-answered ask's entry lingered until Run GC). Guards:
+`TestRunEndDrainRetractsParkedAsk` (clean-end drain: one retract, before EvResult, late approval
+no-op, persisted+resumable), `TestChildTimeoutRetractsSurfacedAskMidRun` (the mid-run ghost-ask pin:
+retract precedes the Subagent ToolResult), `TestVerdictRacesTerminalRetract` (-race: exactly one of
+{verdict routed, retract emitted}), `TestRouterUnregisterAfterRouteNoRetract` /
+`TestRouterRouteAfterUnregisterFalse` (the deterministic direction pins),
+`TestRouterEntryClearedOnChildExit` (the leak fix), and
+`TestDrainAbandonedChildAskRetractedPreSeal` (the drain's abandoned-only sweep).
 
 **Per-child cancel for parallel branches + team members (BACKGROUND-SUBAGENTS I2).** The registry now
 covers ALL THREE delegation families. **Parallel** (`parallel.go`): the shared per-branch goroutine
@@ -579,7 +603,15 @@ emitOrAbort binding), the updated `TestCancelChildMidGateWait` (StopCancelled pi
 (failed-resume erase), `TestLiveGenerationSnapshotConsistent` +
 `TestWaitForChildAnyReturnsPromptlyOnConcurrentTerminal` (the any-wait TOCTOU), and the A5
 sync-start ordering pin inside the happy path. The goleak gate (leakmain) covers the
-drain: a leaked background goroutine fails the whole agent package.
+drain: a leaked background goroutine fails the whole agent package. *Post-arc fix:* the drain now
+participates in ask RETRACTION (the child-terminal chokepoint — see the per-child-cancel entry): a
+JOINED child retracts its own still-pending surfaced asks at `markDoneResult` (pre-doneCh-close, so
+pre-seal and pre-EvResult); only an ABANDONED child (still unjoined after both phases) gets a
+`drainChildren`-side sweep — `retractAsks(takeAsks(id))` per abandoned join, AFTER the abandon WARN
+and BEFORE `seal()` — so no client holds a stale modal for a child the run will never answer for.
+No diagnostics change (the retract is an EVENT; the abandon WARN stays the only line); the abandoned
+child's late `markDoneResult` then takes an empty ask set against a sealed registry and emits
+nothing (`TestDrainAbandonedChildAskRetractedPreSeal`).
 
 **Background subagents — completion NOTICE injection + background-pending nudge
 (BACKGROUND-SUBAGENTS I3b; A2/A9/D10-as-amended).** Two loop-side additions complete the

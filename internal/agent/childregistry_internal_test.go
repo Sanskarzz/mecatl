@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -152,6 +153,226 @@ func TestChildRegistryConcurrentCancelAndCompletion(t *testing.T) {
 		default:
 			t.Fatalf("entry must be done after the race")
 		}
+	}
+}
+
+// TestRetractPrecedesDoneChClose pins the chokepoint's load-bearing ordering
+// DETERMINISTICALLY (the e2e retract-before-EvResult index assertions can pass
+// by scheduling accident even with the retract moved AFTER the close — the
+// child goroutine outraces the drain's wakeup to the stream): AT RETRACT-EMIT
+// TIME the entry's doneCh must NOT yet be closed. Flipping markDoneResult's
+// retract/done-transition order fails this test; nothing else in the suite
+// catches it reliably. Same pattern as TestCancelChildUnregistersBeforeRetract.
+func TestRetractPrecedesDoneChClose(t *testing.T) {
+	reg := newChildRunRegistry()
+	router := newChildAskRouter()
+	reg.unregisterAsk = router.unregister
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reg.register("c", childFamilySubagent, "g", cancel, false)
+	reg.recordAsk("c", "ask-1")
+	router.registerChild("ask-1", &Run{asks: newAskRegistry()})
+	reg.mu.Lock()
+	doneCh := reg.entries["c"].doneCh
+	reg.mu.Unlock()
+
+	retracts := 0
+	reg.emit = func(ev session.Event) {
+		if ev.Type != session.EvPermissionRetract {
+			return
+		}
+		retracts++
+		// THE ordering pin: the done signal must not have fired yet.
+		select {
+		case <-doneCh:
+			t.Errorf("doneCh already closed AT retract-emit time — the retract must precede the done transition")
+		default:
+		}
+	}
+	reg.markDoneResult("c", session.StopCancelled, nil)
+	if retracts != 1 {
+		t.Fatalf("expected exactly one retract emit, got %d", retracts)
+	}
+	select {
+	case <-doneCh:
+	default:
+		t.Fatalf("markDoneResult must still close doneCh after the retract")
+	}
+}
+
+// TestTakeAsksIncludesDoneEntries pins the DOCUMENTED robustness contract of
+// takeAsks — a DONE entry is not skipped — rather than currently-observable
+// behavior: today a done entry's ask set is always already empty (recordAsk
+// drops asks for done entries; the first take/requestCancel cleared the rest),
+// so a done-skip would be an equivalent mutant. It becomes load-bearing the
+// moment a future markDoneResult reorder flips the done-transition BEFORE the
+// take — this pin keeps that reorder from silently stranding a pending ask.
+// The ask is seeded directly under mu, bypassing recordAsk's done-guard.
+func TestTakeAsksIncludesDoneEntries(t *testing.T) {
+	reg := newChildRunRegistry()
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reg.register("c", childFamilySubagent, "g", cancel, false)
+	reg.markDone("c", session.StopEndTurn)
+	reg.mu.Lock()
+	reg.entries["c"].askIDs["ask-late"] = struct{}{}
+	reg.mu.Unlock()
+
+	got := reg.takeAsks("c")
+	if len(got) != 1 || got[0] != "ask-late" {
+		t.Fatalf("takeAsks must NOT skip a done entry's asks, got %v", got)
+	}
+	if again := reg.takeAsks("c"); len(again) != 0 {
+		t.Fatalf("the take must CLEAR the set (exactly-once), second take got %v", again)
+	}
+}
+
+// TestVerdictRacesTerminalRetract is the -race brake for the answered-vs-pending
+// gate: a routed verdict (route deletes the router entry, delivers to the child)
+// races the child's registry terminal (markDoneResult takes the ask and
+// retracts-if-unregistered). The router mutex serialises the two deletes, so
+// EXACTLY ONE of {verdict routed, retract emitted} happens — never both (a
+// spurious retract racing a just-delivered verdict), never neither (a stale
+// modal), never a panic.
+func TestVerdictRacesTerminalRetract(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		reg := newChildRunRegistry()
+		router := newChildAskRouter()
+		reg.unregisterAsk = router.unregister
+		var retracts atomic.Int32
+		reg.emit = func(ev session.Event) {
+			if ev.Type == session.EvPermissionRetract {
+				retracts.Add(1)
+			}
+		}
+		_, cancel := context.WithCancel(context.Background())
+		reg.register("c", childFamilySubagent, "g", cancel, false)
+		reg.recordAsk("c", "ask-1")
+		child := &Run{asks: newAskRegistry()}
+		verdictCh := child.asks.register("ask-1")
+		router.registerChild("ask-1", child)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			router.route("ask-1", session.VerdictAllowOnce)
+		}()
+		go func() {
+			defer wg.Done()
+			reg.markDoneResult("c", session.StopEndTurn, nil)
+		}()
+		wg.Wait()
+		cancel()
+
+		routed := false
+		select {
+		case <-verdictCh:
+			routed = true
+		default:
+		}
+		retracted := retracts.Load() == 1
+		if routed == retracted {
+			t.Fatalf("iteration %d: exactly one of {verdict routed, retract emitted} must happen; routed=%v retracts=%d",
+				i, routed, retracts.Load())
+		}
+	}
+}
+
+// TestRouterUnregisterAfterRouteNoRetract is the deterministic direction pin for
+// the gate: when the verdict was ROUTED first (the entry is gone from the
+// router), the child's later registry terminal must take the (stale) askID and
+// emit NO retract — unregister reports false, the do-not-retract signal.
+func TestRouterUnregisterAfterRouteNoRetract(t *testing.T) {
+	reg := newChildRunRegistry()
+	router := newChildAskRouter()
+	reg.unregisterAsk = router.unregister
+	retracts := 0
+	reg.emit = func(ev session.Event) {
+		if ev.Type == session.EvPermissionRetract {
+			retracts++
+		}
+	}
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reg.register("c", childFamilySubagent, "g", cancel, false)
+	reg.recordAsk("c", "ask-1")
+	child := &Run{asks: newAskRegistry()}
+	verdictCh := child.asks.register("ask-1")
+	router.registerChild("ask-1", child)
+
+	if !router.route("ask-1", session.VerdictAllowOnce) {
+		t.Fatalf("route must deliver the registered ask's verdict")
+	}
+	select {
+	case <-verdictCh:
+	default:
+		t.Fatalf("the routed verdict must have reached the child's ask registry")
+	}
+	reg.markDoneResult("c", session.StopEndTurn, nil)
+	if retracts != 0 {
+		t.Fatalf("an ANSWERED ask must never draw a retract at the child terminal, got %d", retracts)
+	}
+}
+
+// TestRouterRouteAfterUnregisterFalse pins the other direction plus unregister's
+// bool semantics: a pending ask's first unregister reports removal (true), the
+// second is an idempotent false, and a route AFTER unregister misses (false) —
+// the caller then falls through to the parent's own registry where the stale
+// verdict dies as an unknown-ask no-op.
+func TestRouterRouteAfterUnregisterFalse(t *testing.T) {
+	router := newChildAskRouter()
+	router.registerChild("ask-1", &Run{asks: newAskRegistry()})
+	if !router.unregister("ask-1") {
+		t.Fatalf("first unregister of a pending ask must report removal (the retract-this signal)")
+	}
+	if router.unregister("ask-1") {
+		t.Fatalf("second unregister must be false (idempotent; never a second retract)")
+	}
+	if router.route("ask-1", session.VerdictAllowOnce) {
+		t.Fatalf("route after unregister must miss — the verdict falls through to the parent's own registry")
+	}
+	if router.unregister("ask-never-registered") {
+		t.Fatalf("unknown ids must report false")
+	}
+}
+
+// TestRouterEntryClearedOnChildExit pins the leak fix (bug 2): a never-answered
+// surfaced ask's router entry used to linger until Run GC; now the child's
+// registry terminal consumes it — after markDoneResult the router is EMPTY and
+// the one retract was emitted.
+func TestRouterEntryClearedOnChildExit(t *testing.T) {
+	const askID = "subagent-p1:0:k1:r1"
+	reg := newChildRunRegistry()
+	router := newChildAskRouter()
+	reg.unregisterAsk = router.unregister
+	var retracts []string
+	reg.emit = func(ev session.Event) {
+		if ev.Type == session.EvPermissionRetract && ev.Ask != nil {
+			retracts = append(retracts, ev.Ask.AskID)
+		}
+	}
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reg.register("subagent-p1", childFamilySubagent, "g", cancel, false)
+	reg.recordAsk("subagent-p1", askID)
+	router.registerChild(askID, &Run{asks: newAskRegistry()})
+
+	reg.markDoneResult("subagent-p1", session.StopCancelled, nil)
+
+	router.mu.Lock()
+	remaining := len(router.byAskID)
+	router.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("the never-answered ask's router entry must be cleared at the child terminal; %d remain", remaining)
+	}
+	if len(retracts) != 1 || retracts[0] != askID {
+		t.Fatalf("expected exactly one retract for %q, got %v", askID, retracts)
+	}
+	// Idempotence: a second terminal takes an empty set — no re-retract.
+	reg.markDoneResult("subagent-p1", session.StopCancelled, nil)
+	if len(retracts) != 1 {
+		t.Fatalf("a second markDoneResult must not re-retract, got %v", retracts)
 	}
 }
 
