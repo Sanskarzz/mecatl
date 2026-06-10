@@ -247,14 +247,16 @@ func TestE2E_SurfacedTeamMemberAskDoesNotBlockPeers(t *testing.T) {
 // emitted any event, and calls decide for each event with the current worker-seen flag.
 // When decide returns approve=true it routes the verdict via r.Approve(ask.AskID). It is
 // bounded by a watchdog so a sequential-drain regression (worker never runs before the
-// parked ask) fails as a deadlock rather than hanging the suite. It re-evaluates a
-// pending ask on EVERY subsequent event, so an ask seen before the worker emitted is
-// approved as soon as a worker event arrives.
+// parked ask) fails as a deadlock rather than hanging the suite. It holds EVERY pending
+// ask (a map, not a single slot — concurrent members can surface asks concurrently) and
+// re-evaluates each on EVERY subsequent event, sweeping until a pass makes no progress —
+// so resolving one ask can unblock another decided in the same pass (the two-concurrent-
+// asks test holds both until both are in flight).
 func drainTeamPinningConcurrency(t *testing.T, r *agent.Run, decide func(ev session.Event, workerSeen bool) (bool, session.ApprovalVerdict)) []session.Event {
 	t.Helper()
 	var evs []session.Event
 	var workerSeen bool
-	var pendingAsk *session.PendingAsk
+	pending := map[string]session.PendingAsk{}
 	deadline := time.After(10 * time.Second)
 	ch := r.Events()
 	for {
@@ -268,23 +270,120 @@ func drainTeamPinningConcurrency(t *testing.T, r *agent.Run, decide func(ev sess
 				workerSeen = true
 			}
 			if ev.Type == session.EvPermissionAsk && ev.Ask != nil {
-				a := *ev.Ask
-				pendingAsk = &a
+				pending[ev.Ask.AskID] = *ev.Ask
 			}
-			// Try to resolve a held ask now that state (workerSeen) may have advanced.
-			if pendingAsk != nil {
-				if approve, verdict := decide(session.Event{Type: session.EvPermissionAsk, Ask: pendingAsk}, workerSeen); approve {
-					r.Approve(pendingAsk.AskID, verdict)
-					pendingAsk = nil
-				}
-			} else {
+			if len(pending) == 0 {
 				_, _ = decide(ev, workerSeen)
+				continue
+			}
+			// Try to resolve every held ask now that state may have advanced; an
+			// approval can unblock another held ask, so re-sweep until quiescent.
+			for progressed := true; progressed; {
+				progressed = false
+				for id, a := range pending {
+					ask := a
+					if approve, verdict := decide(session.Event{Type: session.EvPermissionAsk, Ask: &ask}, workerSeen); approve {
+						r.Approve(id, verdict)
+						delete(pending, id)
+						progressed = true
+					}
+				}
 			}
 		case <-deadline:
 			r.Cancel()
 			t.Fatalf("team run did not converge within the deadline (possible sequential-drain wedge: a parked member blocked its peers)")
 			return evs
 		}
+	}
+}
+
+// TestE2E_TwoConcurrentSurfacedAsksBothResolved drives a REAL team via the Team tool
+// with an interactive parent where TWO members (alpha = lead, beta) each surface a Bash
+// ask in round 0 (substitutions — not isolation-approvable). Both asks are HELD until
+// both have been observed in flight SIMULTANEOUSLY (pinning that concurrent members
+// really do surface concurrent asks — the situation the client-side FIFO ask queue
+// exists for), then each is approved via its own surfaced (child) askID. Both members'
+// commands run exactly once and the team still converges to a deliverable — proving the
+// server keeps every concurrently-parked ask answerable, none clobbered or lost.
+//
+// Honest scope note: this pins the SERVER-side precondition (the askRegistry's routing
+// of concurrent surfaced asks, which already worked); the client-side single-slot
+// clobber bug itself is pinned by the reducer tests in cmd/mecatui/ui/ask_queue_test.go.
+func TestE2E_TwoConcurrentSurfacedAsksBothResolved(t *testing.T) {
+	alphaBash := &fakeBash{}
+	betaBash := &fakeBash{}
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+
+	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		switch spec.Name {
+		case "alpha": // the lead (first member): surfaces an ask, then synthesises.
+			cat.MustRegister(alphaBash)
+			llm := mockllm.New(
+				mockllm.ToolCallTurn(toolCall("a1", "Bash", `{"command":"cat $(zap-a)"}`)),
+				mockllm.TextTurn("alpha: command done"),
+				// Synthesis turn.
+				mockllm.TextTurn("CONSOLIDATED: both commands ran"),
+			)
+			eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "m"})
+			return agent.MemberBuild{Engine: eng, IsolateReadOnly: true}
+		default: // beta: surfaces its own ask concurrently.
+			cat.MustRegister(betaBash)
+			llm := mockllm.New(
+				mockllm.ToolCallTurn(toolCall("b1", "Bash", `{"command":"cat $(zap-b)"}`)),
+				mockllm.TextTurn("beta: command done"),
+			)
+			eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "m"})
+			return agent.MemberBuild{Engine: eng, IsolateReadOnly: true}
+		}
+	}
+
+	roFk := &recordingSubagentForker{}
+	tt := agent.NewTeamTool(factory, agent.WithTeamToolReadOnlyForker(roFk))
+
+	parentLLM := mockllm.New(
+		mockllm.ToolCallTurn(toolCall("p1", "Team",
+			`{"goal":"run both commands","members":[{"name":"alpha","role":"run command a"},{"name":"beta","role":"run command b"}]}`)),
+		mockllm.TextTurn("parent: done"),
+	)
+	e := interactiveEngine(t, agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, tt)})
+	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+
+	// HOLD every surfaced ask until BOTH have been observed; only then approve. Until
+	// the second ask arrives neither is answered, so when the threshold trips both
+	// children are parked simultaneously — pinning the concurrency. The drain's sweep
+	// then approves both (resolving one re-evaluates the other in the same pass).
+	seen := map[string]struct{}{}
+	var bothHeldInFlight bool
+	evs := drainTeamPinningConcurrency(t, r, func(ev session.Event, _ bool) (bool, session.ApprovalVerdict) {
+		if ev.Type == session.EvPermissionAsk && ev.Ask != nil {
+			seen[ev.Ask.AskID] = struct{}{}
+			if len(seen) >= 2 {
+				bothHeldInFlight = true
+				return true, session.VerdictAllowOnce
+			}
+		}
+		return false, session.VerdictDeny
+	})
+
+	if !bothHeldInFlight {
+		t.Fatalf("concurrency not pinned: both members' asks were never in flight simultaneously (asks seen: %d)", len(seen))
+	}
+	if got := alphaBash.ran(); len(got) != 1 {
+		t.Fatalf("alpha's surfaced ask should be approved and run exactly once; ran=%v", got)
+	}
+	if got := betaBash.ran(); len(got) != 1 {
+		t.Fatalf("beta's surfaced ask should be approved and run exactly once; ran=%v", got)
+	}
+	res := lastResult(t, evs)
+	if res.Stop == session.StopError {
+		t.Fatalf("team run failed: %q", res.Error)
+	}
+	if strings.TrimSpace(res.Text) == "" {
+		t.Fatalf("team must produce a deliverable")
 	}
 }
 

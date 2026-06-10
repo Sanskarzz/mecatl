@@ -79,9 +79,10 @@ type PermissionAskMsg struct {
 
 // PermissionRetractMsg withdraws a previously surfaced permission ask: the
 // owning subagent was cancelled while parked on it, so there is nothing left to
-// approve. The ui dismisses the approval modal iff its pending AskID matches
-// (there is no ask queue — a single modal slot); a non-matching/stale id is
-// ignored (idempotent).
+// approve. The ui keeps a FIFO queue of surfaced asks behind the visible modal
+// (concurrent subagents can surface asks concurrently): a retract matching the
+// VISIBLE ask dismisses the modal and advances the queue; a retract matching a
+// QUEUED ask removes it in place; an unknown/stale id is ignored (idempotent).
 type PermissionRetractMsg struct {
 	AskID string
 }

@@ -11,7 +11,7 @@ import (
 // existing diff_test.go style.
 func modalPlain(ask pendingAsk, expand bool) string {
 	r := newTestRenderer()
-	return stripANSIstr(r.renderPermissionModal(ask, expand, 80, 24))
+	return stripANSIstr(r.renderPermissionModal(ask, expand, 0, 80, 24))
 }
 
 // TestPermissionModalEditDiff: an Edit ask shows the -/+ diff, not raw JSON.

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -31,9 +32,16 @@ type pendingAsk struct {
 // global details toggle (ctrl+t): when on, the diff renders in full instead of
 // line-capped, so the collapse marker's "ctrl+t expand" hint is truthful — the
 // operator can genuinely reveal every line being authorized before deciding.
-func (r *renderer) renderPermissionModal(ask pendingAsk, expand bool, width, height int) string {
+// queued is the number of asks waiting FIFO behind this one (len(m.askQueue)):
+// when non-zero the title carries a "(1 of N)" badge so the operator knows more
+// approvals follow; at zero the modal is byte-identical to the single-ask frame.
+func (r *renderer) renderPermissionModal(ask pendingAsk, expand bool, queued, width, height int) string {
 	th := r.th
-	title := th.Style("askTitle").Render("Permission required")
+	titleText := "Permission required"
+	if queued > 0 {
+		titleText = fmt.Sprintf("Permission required (1 of %d)", queued+1)
+	}
+	title := th.Style("askTitle").Render(titleText)
 
 	// All ask.* fields are server-derived and rendered via lipgloss, so they MUST
 	// be terminal-sanitized: an attacker who controls a tool result could

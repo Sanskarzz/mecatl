@@ -241,9 +241,23 @@ type Model struct {
 	// thus its known ~1/3 -race flake — no worse than before.
 	tickArmed bool
 
-	activeTool   string         // tool name in flight, shown beside the spinner
-	toolProgress string         // transient progress line for the in-flight tool (cleared on result/turn boundary)
-	ask          pendingAsk     // current permission modal (when phaseAwaitingApproval)
+	activeTool   string     // tool name in flight, shown beside the spinner
+	toolProgress string     // transient progress line for the in-flight tool (cleared on result/turn boundary)
+	ask          pendingAsk // current permission modal (when phaseAwaitingApproval)
+	// askQueue is the FIFO of surfaced permission asks waiting BEHIND the visible
+	// modal — the head is always m.ask (invariant: phase==phaseAwaitingApproval ⟺
+	// m.ask.AskID != ""). Concurrent subagents (team members, parallel Subagent
+	// calls) can surface asks while one is already open; each parks its child
+	// server-side until answered, so a second ask must queue, never clobber the
+	// first. Bounded in practice by the server's child-concurrency gate — no
+	// client-side cap needed. Head-advancement funnels through advanceAsk.
+	askQueue []pendingAsk
+	// resolvedAsks is the set of askIDs answered/retracted THIS run — a defensive
+	// same-stream dedupe for re-delivered PermissionAskMsgs (the streamGen guard
+	// already kills stale-reader duplicates; this kills same-stream ones). Lazily
+	// initialised (markAskResolved); a reference type mutable through the
+	// value-receiver Model, same pattern as filesSeen below.
+	resolvedAsks map[string]struct{}
 	mcp          mcpState       // MCP overlay state (view==mcpNone when closed)
 	skills       skillsState    // skills-inventory overlay state (view==skillsNone when closed)
 	palette      paletteState   // slash-command palette (open when the input starts with "/")
@@ -529,12 +543,16 @@ func (m Model) resetSession() Model {
 	m.contextTokens = 0
 	m.activeTool = ""
 	m.toolProgress = ""
-	// Drop any pending permission modal: an ask is session-derived in-flight state
-	// (its AskID correlates to a run on the OLD session), so a reset must not leave a
-	// stale modal dangling. Latent today (the picker/clear paths are idle-only, so no
-	// ask is open), but keeps this seam's "owns all session-derived state" invariant
-	// honest — and the restart-now handoff goes through here.
+	// Drop any pending permission modal — and the FIFO queue behind it plus the
+	// answered-set dedupe: an ask is session-derived in-flight state (its AskID
+	// correlates to a run on the OLD session), so a reset must not leave a stale
+	// modal, stale queued asks, or a stale dedupe set dangling. Latent today (the
+	// picker/clear paths are idle-only, so no ask is open), but keeps this seam's
+	// "owns all session-derived state" invariant honest — and the restart-now
+	// handoff goes through here.
 	m.ask = pendingAsk{}
+	m.askQueue = nil
+	m.resolvedAsks = nil
 	m.queued = nil
 	m.queuePaused = ""
 	// Drop staged-but-unsent media attachments: /clear wipes the session-derived

@@ -3,7 +3,8 @@ package ui
 // Tests for the per-subagent cancel affordance: the ctrl+a overlay's `x` key sends
 // a CancelChild frame for the selected/focused NON-terminal lane (and only then),
 // and a permission.retract from the server dismisses the approval modal iff the
-// pending askID matches (there is no ask queue — a single modal slot).
+// pending askID matches the VISIBLE ask (advancing the FIFO ask queue — see
+// ask_queue_test.go for the queued-match and queue-advance cases).
 
 import (
 	"testing"
@@ -108,9 +109,10 @@ func TestPermissionRetractDismissesMatchingModal(t *testing.T) {
 	}
 }
 
-// TestPermissionRetractNonMatchingIgnored: a retract for a DIFFERENT askID leaves
-// the open modal untouched (idempotent stale-retract handling — there is no ask
-// queue to consult).
+// TestPermissionRetractNonMatchingIgnored: a retract for a DIFFERENT askID — one
+// neither visible nor in the FIFO ask queue (the queue is empty here, so the
+// queued-match lookup misses too) — leaves the open modal untouched (idempotent
+// stale-retract handling).
 func TestPermissionRetractNonMatchingIgnored(t *testing.T) {
 	m := approvalModel(t, pendingAsk{AskID: "subagent-p1:1:k1", Tool: "Bash"})
 	m = applyAll(m, client.PermissionRetractMsg{AskID: "subagent-OTHER:9:z9"})

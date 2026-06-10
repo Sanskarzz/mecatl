@@ -407,9 +407,10 @@ SAME regen landed the three DORMANT fields for the next iterations (A10): `Subag
 (now written by the mapper since I3a), `Parallel.child_id=18`, `Team.member_session_id=18` (17 is
 taken by dispositions — A1; both written since I2). mecatui: the ctrl+a Subagents tab gains an `x` cancel key (roster + focus pane,
 non-terminal lanes only, confirm-less — recoverable) sending `client.Stream.SendCancelChild`;
-`permission.retract` maps to `PermissionRetractMsg` and dismisses the approval modal iff the pending
-`m.ask.AskID` matches (there is NO ask queue — a single modal slot; non-matching/stale retracts are
-ignored). The Subagents-tab roster hint is deliberately SHORTER than the team/parallel ones (the
+`permission.retract` maps to `PermissionRetractMsg`; mecatui keeps a FIFO ask queue behind the
+visible modal (`m.ask` is always the head — concurrent subagents surface asks concurrently), so a
+retract matching the VISIBLE ask dismisses the modal and advances the queue, a retract matching a
+QUEUED ask removes it in place (with a notice), and an unknown/stale id is idempotently dropped. The Subagents-tab roster hint is deliberately SHORTER than the team/parallel ones (the
 "x cancel" segment would otherwise push the centred card past a 100-col terminal — the hint is the
 card's widest line and centerCard does not wrap), and the two subagent golden tests carry an
 `assertFitsViewport` width guard so a future overflow cannot be silently absorbed by a golden

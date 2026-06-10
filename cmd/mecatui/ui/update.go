@@ -433,10 +433,13 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.toolProgress = msg.Text
 		return m.afterEvent()
 	case client.PermissionAskMsg:
-		m.phase = phaseAwaitingApproval
-		m.activeTool = ""
-		m.toolProgress = ""
-		m.ask = pendingAsk{
+		// Defensive same-stream dedupe: an askID already visible, queued, or
+		// answered/retracted this run is dropped (the streamGen guard already kills
+		// stale-reader duplicates; this kills same-stream ones).
+		if m.askKnown(msg.AskID) {
+			return m.afterEvent()
+		}
+		next := pendingAsk{
 			AskID:       msg.AskID,
 			Tool:        msg.Tool,
 			Args:        msg.Args,
@@ -444,6 +447,20 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 			focus:       0,
 			offerAlways: !isChildAsk(msg.AskID, m.sessionID),
 		}
+		if m.phase == phaseAwaitingApproval {
+			// A modal is already open: concurrent subagents (team members, parallel
+			// Subagent calls) surface asks concurrently, and each parks its child
+			// server-side until answered — so a second ask ENQUEUES FIFO behind the
+			// visible head instead of clobbering it. The visible ask and the phase
+			// are untouched; the (1 of N) badge in the modal title and footer
+			// advertises the queue.
+			m.askQueue = append(m.askQueue, next)
+			return m.afterEvent()
+		}
+		m.phase = phaseAwaitingApproval
+		m.activeTool = ""
+		m.toolProgress = ""
+		m.ask = next
 		// Force-flush via afterEvent (refreshView + reader re-arm), like every other
 		// non-delta boundary: any pending coalesced assistant tail must be rendered
 		// into the viewport BEFORE the modal opens, so the transcript behind the modal
@@ -478,19 +495,36 @@ func (m Model) updateStreamSecondary(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case client.PermissionRetractMsg:
 		// The harness WITHDREW a surfaced ask (its owning subagent was cancelled while
-		// parked). Dismiss the modal iff the pending ask matches; otherwise ignore —
-		// there is NO ask queue (a single m.ask slot), so a non-matching retract is
-		// stale by definition and idempotently dropped.
+		// parked). Three cases against the FIFO ask queue (m.ask is the head): a match
+		// on the VISIBLE ask dismisses the modal and advances the queue; a match on a
+		// QUEUED ask removes it in place; an unknown/stale id is idempotently dropped.
 		if m.phase == phaseAwaitingApproval && m.ask.AskID == msg.AskID {
-			m.ask = pendingAsk{}
-			m.phase = phaseRunning
+			m.markAskResolved(msg.AskID)
 			m.conv.addNotice("permission request withdrawn (subagent cancelled)")
-			// Re-arm the spinner for the awaitingApproval→running transition (the
-			// phase-gated TickMsg handler dropped the chain while the modal was open).
-			// Two-step form, never mixing the old m with the helper's returned model
-			// in one expression (the unspecified-evaluation-order trap — see markDirty).
-			mm, cmd := m.afterEvent()
-			return mm, tea.Batch(cmd, mm.sp.Tick)
+			mm, rearm := m.advanceAsk()
+			if !rearm {
+				// A queued successor took the head: the phase STAYS awaitingApproval,
+				// so the spinner remains off-screen — no re-arm (re-arm fires only when
+				// leaving awaitingApproval INTO running; see advanceAsk).
+				return mm.afterEvent()
+			}
+			// Queue empty: modal closed, back to running. Re-arm the spinner for the
+			// awaitingApproval→running transition (the phase-gated TickMsg handler
+			// dropped the chain while the modal was open). Two-step form, never mixing
+			// the old m with the helper's returned model in one expression (the
+			// unspecified-evaluation-order trap — see markDirty).
+			mm2, cmd := mm.afterEvent()
+			return mm2, tea.Batch(cmd, mm2.sp.Tick)
+		}
+		if i := askQueueIndex(m.askQueue, msg.AskID); i >= 0 {
+			// A QUEUED (not-yet-visible) ask was withdrawn: remove it in place. The
+			// notice is a visible muted scrollback line because the (1 of N) count
+			// badge advertised the queued ask — its silent disappearance would
+			// otherwise need explaining. The visible modal is untouched.
+			m.markAskResolved(msg.AskID)
+			m.askQueue = append(m.askQueue[:i:i], m.askQueue[i+1:]...)
+			m.conv.addNotice("queued permission request withdrawn (subagent cancelled)")
+			return m.afterEvent()
 		}
 		return m.afterEvent()
 	case client.SubagentMsg:
@@ -1011,9 +1045,72 @@ func focusVerdict(focus int) client.Verdict {
 	}
 }
 
+// advanceAsk advances the FIFO ask queue's head: it pops the next queued ask into
+// the visible m.ask slot (phase STAYS phaseAwaitingApproval — the successor modal
+// opens immediately), or — when the queue is empty — clears the modal and returns
+// to phaseRunning. It is the ONLY head-ADVANCING writer of m.ask/m.askQueue: the
+// other writers are open/enqueue (the PermissionAskMsg reducer) or removal/clear
+// only (the queued-retract in-place removal, endRun, resetSession) — so what "the
+// next ask becomes visible" means lives in exactly one place. rearm reports
+// whether the caller must re-arm the spinner tick (m.sp.Tick): true only when the
+// modal actually closed (awaitingApproval → running, a spinner-visible
+// transition). With a queued successor the phase never leaves awaitingApproval and
+// spinnerVisible() is still false, so re-arming would start a dead chain — re-arm
+// fires only when leaving awaitingApproval INTO running (keep in sync with
+// TestSpinnerVisibleMatchesFooterRender).
+func (m Model) advanceAsk() (Model, bool) {
+	if len(m.askQueue) > 0 {
+		// Plain re-slice pop (no copy): the head is copied BY VALUE into m.ask, and
+		// the shared backing array is only ever touched through the one live Model
+		// the single-threaded Elm reducer returns — a stale alias in a discarded
+		// older Model copy is never observed. (The queued-retract removal uses the
+		// capacity-clamped append form instead because it appends into the very
+		// slice it splits.)
+		m.ask = m.askQueue[0]
+		m.askQueue = m.askQueue[1:]
+		return m, false
+	}
+	m.ask = pendingAsk{}
+	m.phase = phaseRunning
+	return m, true
+}
+
+// markAskResolved records an answered/retracted askID into the resolvedAsks
+// dedupe set, lazily initialising it (a reference type mutable through the
+// value-receiver Model, same pattern as recordFileChange/filesSeen).
+func (m *Model) markAskResolved(id string) {
+	if m.resolvedAsks == nil {
+		m.resolvedAsks = make(map[string]struct{})
+	}
+	m.resolvedAsks[id] = struct{}{}
+}
+
+// askKnown reports whether askID is already visible (the modal head), queued, or
+// answered/retracted this run — the duplicate-ask drop predicate.
+func (m Model) askKnown(id string) bool {
+	if _, ok := m.resolvedAsks[id]; ok {
+		return true
+	}
+	if m.ask.AskID == id {
+		return true
+	}
+	return askQueueIndex(m.askQueue, id) >= 0
+}
+
+// askQueueIndex returns the index of askID in the queue, or -1.
+func askQueueIndex(q []pendingAsk, id string) int {
+	for i, a := range q {
+		if a.AskID == id {
+			return i
+		}
+	}
+	return -1
+}
+
 // resolveAsk sends the approval/denial on the SAME stream (ask_id correlation),
-// closes the modal, and resumes the run (spinner restarts). The send is wrapped
-// in a command so a send error surfaces as a StreamErrMsg.
+// advances the ask queue — popping the next surfaced ask into the modal, or
+// closing it and resuming the run (spinner restarts) when the queue is empty. The
+// send is wrapped in a command so a send error surfaces as a StreamErrMsg.
 //
 // It MUST NOT re-arm the stream reader (no m.waitCmd()): unlike a stream-event
 // handler, an approval keypress consumes no message, and the PermissionAskMsg that
@@ -1021,12 +1118,13 @@ func focusVerdict(focus int) client.Verdict {
 // flight, since the paused run has put nothing on the channel. Arming a second here
 // would leak an extra reader that outlives the run (see streamMsg / the streamGen
 // guard for why a leaked reader is dangerous across a queue-drain). One send, no
-// reader: the existing one delivers the resume events.
+// reader: the existing one delivers the resume events — true on the queued-successor
+// path too (still one send, no reader).
 func (m Model) resolveAsk(v client.Verdict) (tea.Model, tea.Cmd) {
 	askID := m.ask.AskID
 	stream := m.stream
-	m.ask = pendingAsk{}
-	m.phase = phaseRunning
+	m.markAskResolved(askID)
+	m, rearm := m.advanceAsk()
 
 	var notice string
 	switch v {
@@ -1048,6 +1146,13 @@ func (m Model) resolveAsk(v client.Verdict) (tea.Model, tea.Cmd) {
 			return client.StreamErrMsg{Err: err}
 		}
 		return nil
+	}
+	if !rearm {
+		// A queued successor took the head: the phase STAYS awaitingApproval, so the
+		// spinner is still off-screen — no m.sp.Tick. Re-arm fires only when leaving
+		// awaitingApproval INTO running (see advanceAsk; keep in sync with
+		// TestSpinnerVisibleMatchesFooterRender).
+		return m, send
 	}
 	// Re-arm the spinner: the awaitingApproval→running transition re-enters a
 	// spinner-visible phase, and the phase-gated TickMsg handler dropped the chain
@@ -1575,6 +1680,12 @@ func (m Model) endRun(stop string) Model {
 	m.streamCh = nil
 	m.streamGen++ // invalidate any reader still bound to the torn-down run's channel
 	m.activeTool = ""
+	// A dead run's asks must not survive into idle: drop the visible modal, the FIFO
+	// queue behind it, and the answered-set dedupe (covers every endRun caller —
+	// ResultMsg, StreamErrMsg, StreamClosedMsg, cancel).
+	m.ask = pendingAsk{}
+	m.askQueue = nil
+	m.resolvedAsks = nil
 	m.phase = phaseIdle
 	// Ensure the input is focused now the run is done. With type-while-running the
 	// input is already focused during a run, so this is a no-op on the common path;

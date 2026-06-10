@@ -403,6 +403,15 @@ deny/ask — a deny in any scope is still absolute, and a configured ask is neve
 a surfaced subagent ask keeps the two-button (allow-once / deny) modal, because a child
 engine's permission policy learns no rules.
 
+**Concurrent asks queue.** Concurrent subagents (team members, parallel Subagent calls)
+can surface permission asks **concurrently** — each parks its child server-side until
+answered. The TUI keeps a FIFO queue behind the visible modal: a second ask never
+clobbers the first, and both the modal title and the footer show a **`(1 of N)`** badge
+while asks are queued. Answering or denying the visible ask advances the queue (the next
+modal opens immediately); a cancelled child's queued ask is withdrawn in place (with a
+notice, since the count badge advertised it); any asks still queued when the run ends are
+dropped. The keys are unchanged — you only ever answer one modal at a time.
+
 The `?` overlay enumerates the rest of the chords — `ctrl+v` (paste a clipboard
 image), `ctrl+o`/`ctrl+r`/`ctrl+p` (MCP inventory / resources / prompts), `ctrl+a`
 (unified agents overlay — Subagents / Parallel / Teams tabs — available idle **and** mid-run), `ctrl+t`

@@ -60,7 +60,7 @@ func (m Model) View() tea.View {
 		// the keyboard-owning one when set).
 		body = renderHelpOverlay(m.deps.Theme, m.caps, m.width, m.vp.Height())
 	case m.phase == phaseAwaitingApproval:
-		body = m.rend.renderPermissionModal(m.ask, m.expandTools, m.width, m.vp.Height())
+		body = m.rend.renderPermissionModal(m.ask, m.expandTools, len(m.askQueue), m.width, m.vp.Height())
 	case m.mcp.view != mcpNone:
 		body = renderMCPOverlay(m.deps.Theme, m.mcp, m.caps, m.width, m.vp.Height())
 	case m.team.view != teamNone:
@@ -288,7 +288,14 @@ func (m Model) renderFooter() string {
 			left = spin + " thinking…"
 		}
 	case phaseAwaitingApproval:
-		left = m.deps.Theme.Style("askTitle").Render("⚠ awaiting approval")
+		// With asks queued behind the visible modal, the footer carries the same
+		// "(1 of N)" badge as the modal title; the single-ask frame stays
+		// byte-identical.
+		label := "⚠ awaiting approval"
+		if n := len(m.askQueue); n > 0 {
+			label = fmt.Sprintf("⚠ awaiting approval (1 of %d)", 1+n)
+		}
+		left = m.deps.Theme.Style("askTitle").Render(label)
 	case phaseConnecting:
 		left = m.sp.View() + " connecting…"
 	default:
