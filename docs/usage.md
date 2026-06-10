@@ -197,6 +197,7 @@ mailbox). See the delegation-capabilities note below.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--max-run-tokens` | `0` | loop-level **cumulative token ceiling per run** (input + output). A run that crosses it ends cleanly with `stop=budget` (terminal `StopBudget`). The budget is **inherited by every Subagent / Parallel branch / team member**, so a delegation fan-out cannot blow past it. `0` (the default) **disables** it. |
+| `--max-team-tokens` | `0` | **team-wide cumulative token ceiling per team run** (input + output, summed across **all members and rounds**). When crossed the team stops scheduling new rounds — the **in-flight round and the lead's synthesis still complete**, and the report states the budget stop. Applies to the `Team` tool and gRPC `CreateTeam`; a per-call Team `max_team_tokens` may only **tighten** it. **Orthogonal** to `--max-run-tokens` (per-run; both compose). `0` (the default) **disables** it. |
 | `--enable-parallel` | `true` | register the **Parallel** fan-out tool (N parallel isolated child branches). On by default; `=false` disables it. *(Renamed from the former `--enable-fork`.)* |
 | `--fork-preserved-cap` | `agent.DefaultPreservedForkCap` | max **PRESERVED** winner forks (for `join=first`/`judge`) kept on disk at once — the oldest beyond this is LRU-reaped. Preserved fork workspaces stay inspectable (their paths ride the Parallel result) until reaped. |
 | `--enable-teams` | `true` | register the experimental **agent-teams** capability (`CreateTeam`/`SpawnTeammate`/`RunTeam` + the in-loop `Team` tool). On by default and **inert** until a client drives a team; `=false` disables it. |
@@ -215,7 +216,9 @@ mailbox). See the delegation-capabilities note below.
 > Subagent, an **agentId trailer** on the returned result plus a `References:`
 > convention the explorer uses to cite the files it read. **Parallel** is observable
 > over a dedicated `parallel.*` event family, and its result carries the preserved
-> fork-workspace paths. (The `mecatui` `ctrl+a` overlay surfaces all three under
+> fork-workspace paths. A **Team** additionally honours a **team-wide token budget**
+> (`--max-team-tokens`, tightenable per call) checked at the round boundary — orthogonal
+> to the per-run `--max-run-tokens`, which still bounds each member drive. (The `mecatui` `ctrl+a` overlay surfaces all three under
 > **Subagents | Parallel | Teams** tabs with a fleet-status footer — see `docs/tui.md`.)
 
 #### LLM resilience knobs

@@ -169,10 +169,44 @@ is NOT a `port.LLMRequest` field (the request stays provider-neutral) — it is 
 (`app.Config.MaxRunTokens` → `--max-run-tokens`) and INHERITED by every engine via
 `engineDepsForProvider`; `childEngineDepsForProvider` delegates there and does NOT clear it, so
 Subagent/team-member/lead/Parallel children inherit the same ceiling. `StopBudget` is the
-AGENT-TEAMS-SPIKE's named "Deferred 4A" brake, now landed once for every delegation path. It is a
+PER-ENGINE half of the AGENT-TEAMS-SPIKE's named "Deferred 4A" brake — landed once for every
+delegation path, but it bounds ONE run and `Reopen` resets its accumulator each round; the
+team-AGGREGATE half is the separate `WithTeamTokenBudget` below. It is a
 STRING passthrough on the wire (`session.StopBudget = "budget"`, no proto enum). Guards:
 `agent.TestBudget*`, `session.TestStopBudgetIsCleanReopenableTerminal`,
 `server.TestServiceBudgetSurfacesAndReopens`, `app.TestMaxRunTokensPropagatesToParentAndChild`.
+
+**Team-aggregate token budget — the supervisor-level ceiling (`WithTeamTokenBudget`).** The
+team-AGGREGATE companion to the per-engine `MaxRunTokens` closes the residual 4A item.
+`Supervisor.WithTeamTokenBudget(n)` (0 = disabled, no nonzero default) is a TEAM-WIDE cumulative
+token ceiling summed across ALL members and ALL rounds (the lead's synthesis included in the final
+accounting). The accumulator discipline is load-bearing: each member's per-drive `EvResult.Usage`
+(the run-CUMULATIVE figure — `driveOneTurn` returns it as a third value) is folded onto
+`memberRT.tokensUsed` in the SAME single-goroutine capture block as `turnsUsed`, BEFORE `Reopen` —
+NEVER also summed from `turn.end` (that double-counts; see `memberEventUsage`'s warning).
+`teamTokensUsed()` sums `tokensUsed` over the roster on the single Run goroutine between rounds. The
+trip sits in `Run`'s loop AFTER the `ctx` check and BEFORE `planRound` (whose `Drain`/`ClaimNext`
+side effects must not fire for a round that never runs): `if s.tokenBudget > 0 &&
+s.teamTokensUsed().TotalTokens() >= s.tokenBudget { s.budgetTripped = true; break }` (`>=` mirrors
+`Engine.budgetExhausted`). The in-flight round always completes and the lead's synthesis turn STILL
+runs after the loop — its drive usage folds into the OUTCOME (`TeamOutcome.Usage`) but never the
+GATE (it runs after the loop, structurally cannot trip). Members are NOT individually stopped (no
+new `MemberStopReason`); `TeamOutcome` gains `BudgetExhausted` + `Usage`, and `teamStop` returns
+`session.StopBudget` when `!Quiescent && BudgetExhausted` (a client distinguishes a budget-stop from
+a round-cap). The deliverable header (`convergenceHeader`) and the trusted synthesis-prompt "Team
+status:" line both state the budget stop, so BOTH entry points surface it. It is composition-tunable
+(`app.Config.MaxTeamTokens` → `--max-team-tokens`; `server.Config.TeamTokenBudget` for the gRPC
+CreateTeam path; `agent.WithTeamToolTokenBudget` for the in-catalog Team tool) and a per-call Team
+`max_team_tokens` may only TIGHTEN it (`tightenLimit`). It is ORTHOGONAL to the per-engine
+`MaxRunTokens` (which bounds ONE member drive and resets on `Reopen`) — both compose. The Supervisor
+sum (`TeamOutcome.Usage`) is authoritative for the budget gate; the TeamTool sink's `turn.end` sum
+(`memberEventUsage`) stays authoritative for the `EvTeamEnd` payload — they are equal by
+construction, documented not reconciled. Guards: `agent.TestTeamTokenBudget*` /
+`TestTeamToolTokenBudget*` / `TestConvergenceHeaderBudgetMatrix` /
+`TestDeliverableTier1ForcedByBudget`, `server.TestRunTeamBudgetExhaustedOutcome`,
+`app.TestMaxTeamTokensPropagates`, `cmd/mecated.TestAppConfigMapsMaxTeamTokens`. DEFERRED: the gRPC
+wire handlers still discard the `TeamOutcome`, so a `CreateTeamRequest.max_team_tokens` /
+`RunTeamResponse` outcome field stays deferred proto work.
 
 **Subagent per-call limits + wall-clock deadline (domain-only).** `subagentArgs` gains three OPTIONAL
 pointer fields — `MaxTurns`/`MaxToolCalls` (TIGHTEN-ONLY via `tightenLimit`: a present positive

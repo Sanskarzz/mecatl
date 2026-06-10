@@ -137,6 +137,9 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name, goal string, 
 	if s.cfg.Store != nil {
 		opts = append(opts, agent.WithMemberStore(s.cfg.Store))
 	}
+	if s.cfg.TeamTokenBudget > 0 {
+		opts = append(opts, agent.WithTeamTokenBudget(s.cfg.TeamTokenBudget))
+	}
 	sup := agent.NewSupervisor(t, base, factory, opts...)
 
 	// Enrol the initial roster BEFORE registering the team. A failure here abandons

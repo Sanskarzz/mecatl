@@ -118,6 +118,10 @@ type config struct {
 	// shared runaway brake). 0 (default) disables it.
 	maxRunTokens int
 
+	// maxTeamTokens is the team-wide cumulative token ceiling for a single team run
+	// (the round-boundary brake). 0 (default) disables it.
+	maxTeamTokens int
+
 	// Observability: the Prometheus /metrics listen address (empty disables it),
 	// plus the OTLP trace exporter knobs (empty endpoint disables tracing).
 	metricsAddr  string
@@ -639,6 +643,7 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		LLMBreakerThreshold:          cfg.llmBreakerThreshold,
 		LLMBreakerCooldown:           cfg.llmBreakerCooldown,
 		MaxRunTokens:                 cfg.maxRunTokens,
+		MaxTeamTokens:                cfg.maxTeamTokens,
 		MemoryDir:                    cfg.memoryDir,
 		MemoryConsolidateInterval:    cfg.memoryConsolidateInterval,
 		SoulPath:                     cfg.soulFile,
@@ -732,6 +737,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.IntVar(&cfg.llmBreakerThreshold, "llm-breaker-threshold", 5, "consecutive LLM failures that open the circuit breaker (0 disables)")
 	fs.DurationVar(&cfg.llmBreakerCooldown, "llm-breaker-cooldown", 30*time.Second, "how long the LLM circuit breaker stays open before half-opening")
 	fs.IntVar(&cfg.maxRunTokens, "max-run-tokens", 0, "loop-level cumulative token ceiling per run (input+output); a run that crosses it ends cleanly with stop=budget. Inherited by every subagent/team member. 0 (default) disables")
+	fs.IntVar(&cfg.maxTeamTokens, "max-team-tokens", 0, "team-wide cumulative token ceiling per team run (input+output summed across ALL members and rounds). When crossed the team stops scheduling new rounds — the in-flight round and the lead's synthesis still complete, and the report states the budget stop. Applies to the Team tool and gRPC CreateTeam; a per-call Team max_team_tokens may only tighten it. Orthogonal to --max-run-tokens (per-run). 0 (default) disables")
 
 	fs.StringVar(&cfg.metricsAddr, "metrics-addr", defaultMetricsAddr, "Prometheus /metrics listen address (empty disables the metrics endpoint)")
 

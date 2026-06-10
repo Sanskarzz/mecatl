@@ -69,6 +69,10 @@ type teamArgs struct {
 	Goal string `json:"goal"`
 	// Members is the roster the model formed. The first member is the lead.
 	Members []TeamMemberArg `json:"members"`
+	// MaxTeamTokens is an OPTIONAL per-call team-wide token budget. It is TIGHTEN-ONLY
+	// (tightenLimit semantics, like subagentArgs.MaxTurns): it may only lower a
+	// server-configured budget, never raise it. Omit or 0 to use the server default.
+	MaxTeamTokens *int `json:"max_team_tokens,omitempty"`
 }
 
 // teamSchema is the JSON schema the model sees for the Team tool's arguments.
@@ -92,7 +96,8 @@ var teamSchema = json.RawMessage(`{
         },
         "required": ["name", "role"]
       }
-    }
+    },
+    "max_team_tokens": {"type":"integer","description":"Optional team-wide token budget (input+output summed across all members and rounds). When crossed, no further round is scheduled; the in-flight round and the lead's synthesis still complete and the report states the budget stop. May only TIGHTEN a server-configured budget, never raise it. Omit or 0 to use the server default."}
   },
   "required": ["goal", "members"]
 }`)
@@ -148,6 +153,10 @@ type TeamTool struct {
 	// so the parent can later inspect a member transcript via InspectMemberTool. It is
 	// the port.SessionStore the composition root passes; nil disables persistence.
 	store port.SessionStore
+	// tokenBudget is the operator-configured team-wide token budget the tool threads
+	// into the supervisor (WithTeamTokenBudget). A per-call max_team_tokens arg may only
+	// TIGHTEN it (tightenLimit semantics). 0 disables.
+	tokenBudget int
 	// idPrefix seeds the generated team name from the parent call id.
 	idPrefix string
 }
@@ -182,6 +191,17 @@ func WithTeamToolHooks(h port.HookRunner) TeamOption {
 // port.SessionStore interface, never a concrete adapter (layering holds).
 func WithTeamToolStore(s port.SessionStore) TeamOption {
 	return func(t *TeamTool) { t.store = s }
+}
+
+// WithTeamToolTokenBudget sets the operator-configured team-wide token budget the
+// tool threads into the supervisor (WithTeamTokenBudget). A per-call
+// max_team_tokens arg may only TIGHTEN it (tightenLimit semantics). 0 disables.
+func WithTeamToolTokenBudget(n int) TeamOption {
+	return func(t *TeamTool) {
+		if n > 0 {
+			t.tokenBudget = n
+		}
+	}
 }
 
 // NewTeamTool constructs the Team tool over a per-member engine factory. factory
@@ -304,6 +324,14 @@ func (t *TeamTool) run(ctx context.Context, call session.ToolCall, ws tool.Works
 	}
 	if t.store != nil {
 		opts = append(opts, WithMemberStore(t.store))
+	}
+	// Team-wide token budget: the operator-configured ceiling, with the per-call
+	// max_team_tokens arg applied TIGHTEN-ONLY (tightenLimit, like subagentArgs.MaxTurns
+	// — the model can lower the operator's budget, never raise it). A non-positive
+	// effective budget disables it (no option appended).
+	budget := tightenLimit(t.tokenBudget, args.MaxTeamTokens)
+	if budget > 0 {
+		opts = append(opts, WithTeamTokenBudget(budget))
 	}
 	// Thread the parent's caps so an unresolved member permission ask is surfaced to the
 	// human (interactive parent) or auto-denied with the accurate message (headless). The
@@ -695,9 +723,14 @@ func findingsEqual(a, b []session.TeamFindingSnapshot) bool {
 }
 
 // teamStop maps the team outcome to a terminal StopReason for EvTeamEnd: a
-// genuinely-quiescent team stopped on success; a non-quiescent one hit the round
-// cap or a stuck dependency.
+// genuinely-quiescent team stopped on success; a non-quiescent team whose team-wide
+// token budget tripped stopped on budget (so a client can distinguish a budget-stop
+// from a round-cap); any other non-quiescent team hit the round cap or a stuck
+// dependency. StopBudget is a string passthrough on the wire (no proto enum).
 func teamStop(o TeamOutcome) session.StopReason {
+	if !o.Quiescent && o.BudgetExhausted {
+		return session.StopBudget
+	}
 	if o.Quiescent {
 		return session.StopEndTurn
 	}
@@ -711,6 +744,12 @@ func teamStop(o TeamOutcome) session.StopReason {
 // without double-counting the result's cumulative figure, so summing only turn.end
 // events yields the team total. The terminal result is excluded from the sum to
 // avoid double-counting; every other kind contributes the zero Usage.
+//
+// AUTHORITY: the supervisor independently accumulates the team total from the per-drive
+// EvResult.Usage (memberRT.tokensUsed → TeamOutcome.Usage) for the budget gate. The two
+// sums are equal BY CONSTRUCTION (EvResult.Usage == Σ that drive's turn.end usage), but
+// THIS sink's turn.end sum stays authoritative for the EvTeamEnd payload — they are not
+// reconciled, only documented as equal.
 func memberEventUsage(ev session.Event) session.Usage {
 	if ev.Type == session.EvTurnEnd && ev.TurnEnd != nil {
 		return ev.TurnEnd.Usage
@@ -783,12 +822,14 @@ func isNonDeliverable(text string, ledgerLen int) bool {
 }
 
 // convergenceHeader returns the deliverable's leading status line stating round count
-// and whether the team converged. On a non-quiescent team (stop:max-turns) it states the
-// team did NOT converge so the parent learns this even when the synthesis body looks
-// plausible. On a quiescent team it states clean completion. deliverable prepends it to
-// tiers 2 and 3 always, and to tier 1 ONLY when !o.Quiescent (a converged happy-path
-// synthesis needs no banner). The "stop: max-turns" label mirrors teamStop's
-// non-quiescent → StopMaxTurns mapping.
+// and whether the team converged. On a non-quiescent team (stop:max-turns, or stop:budget
+// when the team-wide token budget tripped) it states the team did NOT converge so the
+// parent learns this even when the synthesis body looks plausible. On a quiescent team it
+// states clean completion. When the team-wide token budget was exhausted it ALSO appends
+// the budget line (so the parent learns the stop reason in every tier). deliverable
+// prepends the header to tiers 2 and 3 always, and to tier 1 when !o.Quiescent ||
+// o.BudgetExhausted (a converged happy-path synthesis needs no banner). The "stop:
+// max-turns" / "stop: budget" label mirrors teamStop's non-quiescent mapping.
 func convergenceHeader(o TeamOutcome) string {
 	stopped := 0
 	for _, m := range o.Members {
@@ -796,12 +837,22 @@ func convergenceHeader(o TeamOutcome) string {
 			stopped++
 		}
 	}
+	budgetLine := ""
+	if o.BudgetExhausted {
+		budgetLine = fmt.Sprintf("Team token budget exhausted after %d round(s) (~%d tokens used); "+
+			"no further rounds were scheduled — the in-flight round and the lead's synthesis completed.\n\n",
+			o.Rounds, o.Usage.TotalTokens())
+	}
 	if o.Quiescent {
 		return fmt.Sprintf("Team finished in %d round(s) (converged): %d member(s), %d stopped.\n\n",
-			o.Rounds, len(o.Members), stopped)
+			o.Rounds, len(o.Members), stopped) + budgetLine
 	}
-	return fmt.Sprintf("Team ran %d round(s) and did NOT converge (stop: max-turns): %d member(s), %d stopped.\n\n",
-		o.Rounds, len(o.Members), stopped)
+	stopLabel := "max-turns"
+	if o.BudgetExhausted {
+		stopLabel = "budget"
+	}
+	return fmt.Sprintf("Team ran %d round(s) and did NOT converge (stop: %s): %d member(s), %d stopped.\n\n",
+		o.Rounds, stopLabel, len(o.Members), stopped) + budgetLine
 }
 
 // deliverable resolves the team's final deliverable through three tiers, guaranteeing a
@@ -811,13 +862,15 @@ func convergenceHeader(o TeamOutcome) string {
 // completed tasks, last text). Tier 3: an honest floor — "ran N rounds, did not converge,
 // M stopped" — which is always non-empty because round count and dispositions always
 // exist. The non-convergence header (convergenceHeader) is prepended to tiers 2 and 3
-// always, and to tier 1 only when !o.Quiescent.
+// always, and to tier 1 when !o.Quiescent || o.BudgetExhausted.
 func deliverable(o TeamOutcome) string {
 	report := strings.TrimSpace(o.Report)
 	if report != "" && !isNonDeliverable(o.Report, len(o.Findings)) {
-		// Tier 1 — the lead's usable synthesis. Prepend the non-convergence banner only
-		// when the team did NOT converge (a converged happy path needs no banner).
-		if !o.Quiescent {
+		// Tier 1 — the lead's usable synthesis. Prepend the non-convergence banner when
+		// the team did NOT converge OR the team-wide token budget tripped (so a
+		// quiescent-but-budget-stopped run still carries the budget line); a clean
+		// converged path needs no banner.
+		if !o.Quiescent || o.BudgetExhausted {
 			return convergenceHeader(o) + o.Report
 		}
 		return o.Report

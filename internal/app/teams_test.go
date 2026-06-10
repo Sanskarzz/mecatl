@@ -122,6 +122,80 @@ func TestTeamsEnabledEndToEnd(t *testing.T) {
 	}
 }
 
+// TestMaxTeamTokensPropagates mirrors TestMaxRunTokensPropagatesToParentAndChild for
+// the team-aggregate budget: it pins that Config.MaxTeamTokens reaches BOTH the gRPC
+// CreateTeam path (applyTeamConfig → server.Config.TeamTokenBudget → the supervisor)
+// AND the in-catalog Team tool site (NewTeamTool's WithTeamToolTokenBudget). The first
+// half is a direct applyTeamConfig assertion; the second drives a real CreateTeam/RunTeam
+// over that svcCfg and asserts the budget actually trips a usage-bearing team. Both
+// NewTeamTool sites (build-time and per-session Half B) read the SAME cfg.MaxTeamTokens,
+// so threading it once covers them.
+func TestMaxTeamTokensPropagates(t *testing.T) {
+	const budget = 500
+	cfg := teamCfg(t)
+	cfg.MaxTeamTokens = budget
+	cfg.EnableTeams = true
+
+	// Each member turn carries usage; the lead spends 600 in round 0 (crosses 500).
+	usageTurn := func(text string, in int) mockllm.Turn {
+		return mockllm.ChunksTurn(
+			mockllm.TextChunk(text),
+			mockllm.UsageChunk(session.Usage{InputTokens: in}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		)
+	}
+	provider := mockllm.New(
+		usageTurn("round-0 work", 600),
+		usageTurn("CONSOLIDATED report", 50),
+		usageTurn("EXTRA (should never run)", 600),
+	)
+	reg := regForTest(provider, providerMock, cfg.Model)
+
+	// --- Half 1: applyTeamConfig threads svcCfg.TeamTokenBudget --------------
+	var svcCfg server.Config
+	applyTeamConfig(&svcCfg, cfg, reg, provider, nil)
+	if svcCfg.TeamTokenBudget != budget {
+		t.Fatalf("svcCfg.TeamTokenBudget = %d, want %d (applyTeamConfig must thread MaxTeamTokens)", svcCfg.TeamTokenBudget, budget)
+	}
+
+	// --- Half 2: the threaded budget actually trips a usage-bearing team -----
+	// Build a Service over the SAME svcCfg.MemberEngine + svcCfg.TeamTokenBudget
+	// applyTeamConfig produced, so the budget that trips is the one that propagated.
+	osfsWS := func(root string) tool.Workspace {
+		ws, werr := osfs.NewWorkspace(root)
+		if werr != nil {
+			t.Fatalf("osfs workspace %q: %v", root, werr)
+		}
+		return ws
+	}
+	svc, err := server.NewService(server.Config{
+		Engine:          noopEngine(),
+		Store:           memstore.New(),
+		Workspaces:      osfsWS,
+		Now:             func() time.Time { return time.Unix(0, 0) },
+		MemberEngine:    svcCfg.MemberEngine,
+		Forker:          forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }),
+		ReadOnlyForker:  forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }),
+		TeamTokenBudget: svcCfg.TeamTokenBudget,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	ctx := context.Background()
+	teamID, _, err := svc.CreateTeam(ctx, t.TempDir(), "test", "do one round",
+		[]agent.MemberSpec{{Name: "lead", Lead: true, InitialPrompt: "do the work then stop"}})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	out, err := svc.RunTeam(ctx, teamID, func(agent.TeamEvent) {})
+	if err != nil {
+		t.Fatalf("RunTeam: %v", err)
+	}
+	if !out.BudgetExhausted {
+		t.Errorf("RunTeam outcome.BudgetExhausted = false, want true (threaded budget %d, round-0 spent 600)", budget)
+	}
+}
+
 // TestTeamsDisabledWhenNoFactory asserts that with EnableTeams effectively off
 // (MemberEngine nil) CreateTeam returns ErrTeamsDisabled. It also drives the real
 // Build seam to prove the flag controls the wiring: Build with EnableTeams:false

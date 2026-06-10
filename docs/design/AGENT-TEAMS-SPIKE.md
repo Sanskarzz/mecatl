@@ -192,7 +192,7 @@ synthesis). The data (`TeamOutcome.Findings`, `MemberOutcome.Completed`/`.Lead`)
 snapshotted in `outcome()`, so the gRPC path gets the same rich fallback. Headline guard:
 `TestTeamToolRefusalSynthesisFallsBackToLedger`.
 
-> **PARTIAL (4A) — per-engine token ceiling SHIPPED; team-AGGREGATE budget still DEFERRED.**
+> **SHIPPED (4A complete) — per-engine token ceiling AND team-AGGREGATE budget.**
 > A SHARED loop-level *per-engine* token ceiling shipped: `agent.Deps.MaxRunTokens`
 > (0 = disabled), checked at the turn boundary in `Engine.drive` against THAT run's cumulative
 > `session.Usage` (input+output, via `Usage.TotalTokens`). When the total crosses the ceiling
@@ -205,13 +205,31 @@ snapshotted in `outcome()`, so the gRPC path gets the same rich fallback. Headli
 > So each individual member run is now bounded, and a budget-stopped member surfaces the
 > resilient-deliverable fallback the same way any stopped member does.
 >
-> **What is NOT yet closed:** there is NO team-AGGREGATE budget. The ceiling is per-engine /
-> per-run; `session.Reopen` resets the accumulator each round, so an N-member team can still
-> spend on the order of N×`MaxRunTokens` across a round, and the lifetime spend across rounds
-> is bounded only by `WithMemberTurnBudget` (a TURN count, not tokens). The 2.2M-token-runaway
-> the spike named is mitigated per-member but the team-wide token ceiling — a supervisor-level
-> accumulator that stops scheduling after the current round when the SUMMED `session.Usage`
-> crosses a team budget — remains DEFERRED. That is the residual 4A item.
+> **The team-AGGREGATE budget now closes the residual.** `Supervisor.WithTeamTokenBudget`
+> (0 = disabled) is a supervisor-level accumulator: each member's per-drive `EvResult.Usage`
+> (the run-cumulative figure — NEVER also summed from `turn.end`, which would double-count) is
+> folded onto `memberRT.tokensUsed` in the same single-goroutine capture block as `turnsUsed`,
+> before `Reopen`; `teamTokensUsed()` sums them on the single Run goroutine between rounds. The
+> gate is checked at the ROUND boundary — BEFORE `planRound` (whose `Drain`/`ClaimNext` side
+> effects must not fire for a round that never runs) — so the in-flight round always completes
+> and the lead's synthesis turn still runs (its usage folds into `TeamOutcome.Usage` but never
+> into the GATE — it runs after the loop and structurally cannot trip). Members are NOT
+> individually stopped (no new `MemberStopReason`); the team simply stops scheduling.
+> `TeamOutcome` gains `BudgetExhausted` + `Usage`; `teamStop` returns `session.StopBudget` when
+> `!Quiescent && BudgetExhausted` (so a client distinguishes a budget-stop from a round-cap),
+> and the deliverable header + the trusted synthesis-prompt "Team status:" line both state the
+> budget stop. It is composition-tunable (`app.Config.MaxTeamTokens` → `--max-team-tokens`;
+> `server.Config.TeamTokenBudget` for the gRPC CreateTeam path), and a per-call Team
+> `max_team_tokens` may only TIGHTEN it (`tightenLimit`). It is ORTHOGONAL to the per-engine
+> `MaxRunTokens` (which bounds ONE member drive and resets on `Reopen` each round) — both
+> compose. Guards: `agent.TestTeamTokenBudget*` / `TestTeamToolTokenBudget*` /
+> `TestConvergenceHeaderBudgetMatrix`, `server.TestRunTeamBudgetExhaustedOutcome`,
+> `app.TestMaxTeamTokensPropagates`, `cmd/mecated.TestAppConfigMapsMaxTeamTokens`.
+>
+> **Deferred proto knob (the one residual):** the gRPC wire handlers
+> (`grpc_team.go`/`http.go`) still DISCARD the returned `TeamOutcome`, so on the wire the budget
+> signal rides only the streamed report text + `EvTeamEnd.Stop`; a `CreateTeamRequest.max_team_tokens`
+> / `RunTeamResponse` outcome field stays deferred proto work.
 
 **On-demand member inspection (PULL).** Member sessions are persisted to the injected
 `port.SessionStore` under collision-free, team-namespaced ids

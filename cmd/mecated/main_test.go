@@ -274,6 +274,26 @@ func TestAppConfigMapsAllowAll(t *testing.T) {
 	}
 }
 
+// TestAppConfigMapsMaxTeamTokens pins the --max-team-tokens flag → appConfig.MaxTeamTokens
+// mapping (the team-aggregate token budget), mirroring TestAppConfigMapsAllowAll.
+func TestAppConfigMapsMaxTeamTokens(t *testing.T) {
+	cfg, err := parseFlags([]string{"--max-team-tokens", "12345"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if ac := appConfig(cfg, nil, nil, nil); ac.MaxTeamTokens != 12345 {
+		t.Errorf("appConfig.MaxTeamTokens = %d, want 12345", ac.MaxTeamTokens)
+	}
+
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if ac := appConfig(def, nil, nil, nil); ac.MaxTeamTokens != 0 {
+		t.Errorf("appConfig.MaxTeamTokens = %d with flag absent, want 0 (disabled by default)", ac.MaxTeamTokens)
+	}
+}
+
 // TestNewAdminMuxServesIntrospectionEndpoints drives the REAL telemetry.NewAdminMux
 // helper (the one serve mounts) and asserts each runtime-introspection endpoint
 // serves a non-trivial body. Building the mux through the production helper —

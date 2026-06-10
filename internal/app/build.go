@@ -156,6 +156,15 @@ type Config struct {
 	// via --max-run-tokens.
 	MaxRunTokens int
 
+	// MaxTeamTokens is the TEAM-WIDE cumulative token budget threaded into every team
+	// (agent.WithTeamToolTokenBudget for the in-catalog Team tool, server.Config.TeamTokenBudget
+	// for the gRPC CreateTeam path). It is checked at the ROUND boundary: when crossed the
+	// team stops scheduling new rounds while the in-flight round and the lead's synthesis
+	// still complete. 0 (the default) disables it. It is ORTHOGONAL to MaxRunTokens, which
+	// bounds ONE member drive and resets on Reopen each round — both compose. Operator-tunable
+	// via --max-team-tokens.
+	MaxTeamTokens int
+
 	// Memory: per-project memory store directory (empty disables the tools), plus
 	// the background consolidation (dream) interval (0 disables; only meaningful
 	// with MemoryDir set).
@@ -779,6 +788,7 @@ func sessionEngineFactory(
 				agent.WithTeamToolReadOnlyForker(roFk),
 				agent.WithTeamToolHooks(teamHooks),
 				agent.WithTeamToolStore(store),
+				agent.WithTeamToolTokenBudget(cfg.MaxTeamTokens),
 			))
 			// The PULL member-transcript inspect tool reads the SAME shared store.
 			cat.MustRegister(agent.NewInspectMemberTool(store))
@@ -1571,6 +1581,7 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 			agent.WithTeamToolReadOnlyForker(roFk),
 			agent.WithTeamToolHooks(teamHooks),
 			agent.WithTeamToolStore(store),
+			agent.WithTeamToolTokenBudget(cfg.MaxTeamTokens),
 		))
 		// The PULL member-transcript inspect tool: read-only, reads the SAME session
 		// store the Team tool persists members to (collision-free MemberSessionID ids).
@@ -2399,6 +2410,7 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, p
 	svcCfg.Forker = fk
 	svcCfg.ReadOnlyForker = roFk
 	svcCfg.TeamHooks = teamHooks
+	svcCfg.TeamTokenBudget = cfg.MaxTeamTokens
 	cfg.diag().Log(context.Background(), port.LevelInfo, "agent teams ENABLED (experimental; CreateTeam/SpawnTeammate/RunTeam + Team tool)")
 }
 

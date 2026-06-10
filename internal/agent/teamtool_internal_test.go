@@ -402,6 +402,85 @@ func TestJoinTeamFallbackGroupsFindingsInFirstSeenOrder(t *testing.T) {
 	}
 }
 
+// TestConvergenceHeaderBudgetMatrix pins the budget×quiescence matrix on the
+// deliverable's leading status line: the stop label swaps to "budget" on a non-quiescent
+// budget trip, and the budget-exhausted line is appended whenever BudgetExhausted is set
+// (quiescent OR not), carrying the round count and the team token total. A run that did
+// NOT exhaust the budget carries neither the budget line nor the "stop: budget" label.
+func TestConvergenceHeaderBudgetMatrix(t *testing.T) {
+	const total = 4242
+	rows := []struct {
+		name        string
+		quiescent   bool
+		budgetTrip  bool
+		wantBudget  bool   // the "Team token budget exhausted after" line present
+		wantStopLbl string // the stop label fragment expected in the non-converged line
+	}{
+		{"non-quiescent + budget", false, true, true, "stop: budget"},
+		{"non-quiescent + no budget", false, false, false, "stop: max-turns"},
+		{"quiescent + budget", true, true, true, ""}, // converged line, no stop label, but budget line appended
+		{"quiescent + no budget", true, false, false, ""},
+	}
+	for _, c := range rows {
+		t.Run(c.name, func(t *testing.T) {
+			o := TeamOutcome{
+				Rounds:          6,
+				Quiescent:       c.quiescent,
+				BudgetExhausted: c.budgetTrip,
+				Usage:           session.Usage{InputTokens: total},
+				Members:         []MemberOutcome{{Name: "lead", Disposition: DispositionDone}},
+			}
+			got := convergenceHeader(o)
+			hasBudgetLine := strings.Contains(got, "Team token budget exhausted after")
+			if hasBudgetLine != c.wantBudget {
+				t.Errorf("budget line present = %v, want %v:\n%s", hasBudgetLine, c.wantBudget, got)
+			}
+			if c.wantBudget && !strings.Contains(got, "~4242 tokens used") {
+				t.Errorf("budget line must carry the team token total ~%d:\n%s", total, got)
+			}
+			if c.wantStopLbl != "" && !strings.Contains(got, c.wantStopLbl) {
+				t.Errorf("non-converged line must carry %q:\n%s", c.wantStopLbl, got)
+			}
+			// The non-quiescent + no-budget row must NOT carry "stop: budget".
+			if !c.budgetTrip && strings.Contains(got, "stop: budget") {
+				t.Errorf("a non-budget run must not carry the budget stop label:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestDeliverableTier1ForcedByBudget pins the tier-1 header forcing: a QUIESCENT team
+// that nonetheless tripped the team-wide budget still gets the convergence header (with
+// the appended budget line) prepended to its usable synthesis — without the budget trip
+// a quiescent tier-1 synthesis carries no banner (TestDeliverableNonConvergenceHeaderOn
+// PlausibleSynthesis covers the converged-no-budget case).
+func TestDeliverableTier1ForcedByBudget(t *testing.T) {
+	report := "All modules reviewed; the consolidated answer is X."
+	o := TeamOutcome{
+		Rounds:          3,
+		Quiescent:       true,
+		BudgetExhausted: true,
+		Usage:           session.Usage{InputTokens: 999},
+		Report:          report,
+		Findings:        []session.TeamFindingSnapshot{{Member: "scout", Body: "x"}},
+		Members:         []MemberOutcome{{Name: "lead", Disposition: DispositionDone}},
+	}
+	got := deliverable(o)
+	if !strings.Contains(got, "Team token budget exhausted after") {
+		t.Errorf("a quiescent-but-budget-tripped tier-1 deliverable must carry the budget line:\n%s", got)
+	}
+	if !strings.Contains(got, report) {
+		t.Errorf("tier-1 deliverable must still contain the report body:\n%s", got)
+	}
+	// Sanity: drop the budget trip and the SAME quiescent tier-1 report carries no banner.
+	clean := o
+	clean.BudgetExhausted = false
+	gotClean := deliverable(clean)
+	if strings.Contains(gotClean, "Team token budget exhausted") || strings.Contains(gotClean, "did NOT converge") {
+		t.Errorf("a converged no-budget tier-1 deliverable must carry no banner:\n%s", gotClean)
+	}
+}
+
 // TestDeliverableShortValidReportKept asserts AC2 at the pure layer: a SHORT but
 // non-refusal-shaped real report over a populated ledger passes through verbatim (tier 1),
 // NOT degraded to the structured fallback.

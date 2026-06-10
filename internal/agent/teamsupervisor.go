@@ -243,8 +243,20 @@ type Supervisor struct {
 	maxRounds   int
 	concurrency int
 	turnBudget  int
-	idPrefix    string
-	hooks       port.HookRunner
+	// tokenBudget is the TEAM-WIDE cumulative token ceiling (input+output,
+	// session.Usage.TotalTokens) summed across ALL members and ALL rounds, the lead's
+	// synthesis turn included in the final accounting. 0 (the default, no nonzero
+	// default) disables it; WithTeamTokenBudget is the sole writer (a negative value is
+	// ignored). It is checked at the ROUND boundary only (before planRound); see
+	// WithTeamTokenBudget for the full semantics.
+	tokenBudget int
+	// budgetTripped records that the team-wide token budget crossed and the scheduling
+	// loop stopped planning further rounds. It is read after the loop by outcome()
+	// (→ TeamOutcome.BudgetExhausted) and by writeStoppedMemberStatus (the trusted
+	// synthesis-prompt status line). Touched only by the single Run goroutine.
+	budgetTripped bool
+	idPrefix      string
+	hooks         port.HookRunner
 
 	// goal is the team's top-level objective, rendered as the TRUSTED top-level
 	// instruction into every member's round-0 turn and into the lead's synthesis
@@ -316,6 +328,14 @@ type memberRT struct {
 	// (between rounds) and by the member's own runTurn goroutine (it appears in at
 	// most one round plan at a time), never concurrently.
 	turnsUsed int
+	// tokensUsed is the cumulative token spend (input+output) this member has accrued
+	// across all rounds, the running total the team-wide budget gate sums. It mirrors
+	// turnsUsed's single-goroutine ownership exactly (touched only by the planning
+	// goroutine between rounds and by the member's own runTurn goroutine, never
+	// concurrently). It is captured from the drive's EvResult.Usage — the run-cumulative
+	// figure — NEVER also from turn.end (see memberEventUsage's double-count warning);
+	// folded in the same capture block as turnsUsed, before Reopen.
+	tokensUsed session.Usage
 }
 
 // SupervisorOption configures a Supervisor.
@@ -390,6 +410,25 @@ func WithMemberTurnBudget(n int) SupervisorOption {
 	return func(s *Supervisor) {
 		if n >= 0 {
 			s.turnBudget = n
+		}
+	}
+}
+
+// WithTeamTokenBudget sets the TEAM-WIDE cumulative token budget (input+output,
+// session.Usage.TotalTokens) summed across ALL members and ALL rounds, including
+// the lead's synthesis turn in the final accounting. It is checked at the ROUND
+// boundary only (before planRound): the in-flight round always completes, so the
+// overshoot is bounded by concurrency × one round's per-member spend (each drive
+// itself bounded by per-round Limits and any Deps.MaxRunTokens). When it trips the
+// TEAM stops scheduling — members are NOT individually stopped (no new
+// MemberStopReason) and the lead's synthesis turn still runs (the report is the
+// deliverable). It is ORTHOGONAL to the per-engine Deps.MaxRunTokens ceiling,
+// which bounds one member drive and resets on Reopen each round. 0 (the default)
+// disables it; a negative value is ignored.
+func WithTeamTokenBudget(n int) SupervisorOption {
+	return func(s *Supervisor) {
+		if n > 0 {
+			s.tokenBudget = n
 		}
 	}
 }
@@ -639,6 +678,15 @@ type TeamOutcome struct {
 	// the live *team.Team. Bodies are clamped identically to the wire/observability
 	// projection (projectTeamFindingsSnapshot).
 	Findings []session.TeamFindingSnapshot
+	// BudgetExhausted reports that the team-wide token budget (WithTeamTokenBudget)
+	// crossed at a round boundary and no further round was scheduled — the in-flight
+	// round and the lead's synthesis still completed. false when no budget was set or it
+	// never crossed.
+	BudgetExhausted bool
+	// Usage is the supervisor-accumulated team total — Σ per-drive EvResult.Usage across
+	// all members and rounds, synthesis included; equal by construction to the TeamTool
+	// sink's turn.end sum, which remains authoritative for the EvTeamEnd payload.
+	Usage session.Usage
 }
 
 // MemberDisposition is the terminal disposition of one team member at the end of a
@@ -727,6 +775,15 @@ func (s *Supervisor) Run(ctx context.Context, sink func(TeamEvent)) TeamOutcome 
 	rounds := 0
 	for r := 0; r < s.maxRounds; r++ {
 		if ctx.Err() != nil {
+			break
+		}
+		// Team-wide token budget: trip at the ROUND boundary, BEFORE planRound (which has
+		// side effects — Drain / ClaimNext — that must not fire for a round that never
+		// runs). The in-flight round always completes (this is checked before scheduling
+		// the next one), and the lead's synthesis still runs after the loop. >= mirrors
+		// Engine.budgetExhausted (loop.go).
+		if s.tokenBudget > 0 && s.teamTokensUsed().TotalTokens() >= s.tokenBudget {
+			s.budgetTripped = true
 			break
 		}
 		plan := s.planRound(r)
@@ -846,7 +903,7 @@ func (s *Supervisor) runTurn(ctx context.Context, ti turnInput, evCh chan<- Team
 	m := ti.m
 	_ = s.team.SetMemberState(m.spec.Name, team.MemberWorking)
 
-	text, stop := s.driveOneTurn(ctx, m, ti.prompt, evCh)
+	text, stop, usage := s.driveOneTurn(ctx, m, ti.prompt, evCh)
 	if text != "" {
 		m.lastText = text
 	}
@@ -863,6 +920,11 @@ func (s *Supervisor) runTurn(ctx context.Context, ti turnInput, evCh chan<- Team
 	// fold it into turnsUsed so the running total survives the reset that the
 	// per-round Limits cannot evade.
 	m.turnsUsed += m.sess.Counters.Turns
+	// Accumulate this member's LIFETIME token spend in the SAME capture block, from the
+	// drive's run-cumulative EvResult.Usage — NEVER also from turn.end (see
+	// memberEventUsage's double-count warning). It is the running total the team-wide
+	// budget gate (teamTokensUsed) sums between rounds.
+	m.tokensUsed = m.tokensUsed.Add(usage)
 
 	// A member whose run ENDED IN ERROR, that cannot be re-opened, OR that has
 	// exhausted its lifetime turn budget is stopped: it will not be scheduled again.
@@ -938,11 +1000,13 @@ func (s *Supervisor) fireTeammateIdle(ctx context.Context, m *memberRT) {
 // driveOneTurn runs one member turn-loop to completion against the given prompt,
 // forwarding every event (tagged with the member name) to evCh and auto-denying any
 // permission ask (members are non-interactive in v1, matching Subagent/Fork). It returns
-// the terminal assistant text and the run's stop reason. It is the SINGLE place the
+// the terminal assistant text, the run's stop reason, and the run's cumulative token
+// usage (the drive's EvResult.Usage — the run-cumulative figure, NEVER summed from
+// turn.end; see memberEventUsage's double-count warning). It is the SINGLE place the
 // auto-deny / event-forward / terminal-text-capture logic lives, shared by runTurn
 // (per round) and synthesise (the lead's one final turn). It does NOT Reopen, persist,
 // or do budget bookkeeping — that stays with the callers.
-func (s *Supervisor) driveOneTurn(ctx context.Context, m *memberRT, prompt string, evCh chan<- TeamEvent) (text string, stop session.StopReason) {
+func (s *Supervisor) driveOneTurn(ctx context.Context, m *memberRT, prompt string, evCh chan<- TeamEvent) (text string, stop session.StopReason, usage session.Usage) {
 	run := m.engine.Run(ctx, m.sess, m.ws, prompt)
 	posture := childPosture{isolated: m.isolated, caps: s.caps, role: m.spec.Name,
 		askLabel: fmt.Sprintf("team member %q", m.spec.Name)}
@@ -953,10 +1017,13 @@ func (s *Supervisor) driveOneTurn(ctx context.Context, m *memberRT, prompt strin
 			if t != "" {
 				text = t
 			}
+			if ev.Result != nil {
+				usage = ev.Result.Usage
+			}
 		}
 		evCh <- TeamEvent{Member: m.spec.Name, Event: ev, ContextWindow: m.engine.ContextWindow()}
 	}
-	return text, stop
+	return text, stop, usage
 }
 
 // persistMember best-effort saves a member's session to the injected store so an
@@ -999,11 +1066,16 @@ func (s *Supervisor) synthesise(ctx context.Context, evCh chan<- TeamEvent) (rep
 	prompt := s.buildSynthesisSources()
 
 	_ = s.team.SetMemberState(s.leadName, team.MemberWorking)
-	text, stop := s.driveOneTurn(ctx, lead, prompt, evCh)
+	text, stop, usage := s.driveOneTurn(ctx, lead, prompt, evCh)
 	if text != "" {
 		lead.lastText = text
 	}
 	lead.turnsUsed += lead.sess.Counters.Turns
+	// The synthesis drive's token spend counts toward the OUTCOME, never the gate (it
+	// runs after the loop — structurally cannot trip). Fold it into the accumulator next
+	// to lead.turnsUsed, from EvResult.Usage (the run-cumulative figure), so teamTokensUsed
+	// includes it in the final TeamOutcome.Usage.
+	lead.tokensUsed = lead.tokensUsed.Add(usage)
 	// Persist the lead's final transcript (with the synthesis turn) for inspection.
 	s.persistMember(ctx, lead)
 	_ = s.team.SetMemberState(s.leadName, team.MemberIdle)
@@ -1138,12 +1210,18 @@ func (s *Supervisor) writeStoppedMemberStatus(b *strings.Builder) {
 			stoppedParts = append(stoppedParts, fmt.Sprintf("%s (%s)", name, reason))
 		}
 	}
-	if len(stoppedParts) == 0 {
+	if len(stoppedParts) == 0 && !s.budgetTripped {
 		return
 	}
 	b.WriteString("\nTeam status:\n")
-	fmt.Fprintf(b, "Members %s stopped before finishing. Their work may be incomplete; "+
-		"note any resulting gaps in your report.\n", strings.Join(stoppedParts, ", "))
+	if len(stoppedParts) > 0 {
+		fmt.Fprintf(b, "Members %s stopped before finishing. Their work may be incomplete; "+
+			"note any resulting gaps in your report.\n", strings.Join(stoppedParts, ", "))
+	}
+	if s.budgetTripped {
+		b.WriteString("The team's token budget was exhausted before all work completed; remaining " +
+			"work was not scheduled. Note any resulting gaps in your report.\n")
+	}
 }
 
 // outcome assembles the final TeamOutcome from member runtime state. It snapshots
@@ -1154,6 +1232,11 @@ func (s *Supervisor) writeStoppedMemberStatus(b *strings.Builder) {
 func (s *Supervisor) outcome(rounds int) TeamOutcome {
 	o := TeamOutcome{Rounds: rounds, Quiescent: s.team.Quiescent()}
 	o.Findings = projectTeamFindingsSnapshot(s.team.Findings())
+	// The budget signal and the accumulated team total — the synthesis drive has already
+	// folded its usage into the accumulator (synthesise runs before outcome), so
+	// teamTokensUsed here is the WHOLE team's spend, synthesis included.
+	o.BudgetExhausted = s.budgetTripped
+	o.Usage = s.teamTokensUsed()
 	tasks := s.team.Tasks()
 	for _, name := range s.order {
 		m := s.members[name]
@@ -1178,6 +1261,22 @@ func (s *Supervisor) outcome(rounds int) TeamOutcome {
 		})
 	}
 	return o
+}
+
+// teamTokensUsed sums every member's lifetime tokensUsed (the per-drive EvResult.Usage
+// accumulated in runTurn / synthesise) into the team-wide running total the budget gate
+// compares against s.tokenBudget. It is callable ONLY on the single Run goroutine
+// between rounds (or after the loop, for outcome()): it reads each memberRT.tokensUsed,
+// which the member's own runTurn goroutine writes, and the round-boundary serialisation
+// is what makes the lock-free read safe.
+func (s *Supervisor) teamTokensUsed() session.Usage {
+	var total session.Usage
+	for _, name := range s.order {
+		if m := s.members[name]; m != nil {
+			total = total.Add(m.tokensUsed)
+		}
+	}
+	return total
 }
 
 // cleanupAll tears down every forked member workspace.

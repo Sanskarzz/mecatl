@@ -255,6 +255,10 @@ type Config struct {
 	// It is a composition decision (the deployment knows the goal's provenance); the
 	// supervisor only takes the bool.
 	TeamGoalUntrusted bool
+	// TeamTokenBudget is the team-wide cumulative token budget threaded into every
+	// CreateTeam supervisor (agent.WithTeamTokenBudget). 0 disables. The per-request
+	// proto knob is deferred.
+	TeamTokenBudget int
 	// Forker isolates a Mutating team member's workspace (force-copy: own `.git`).
 	// Optional; required only if a Mutating member is spawned.
 	Forker tool.WorkspaceForker
