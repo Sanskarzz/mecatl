@@ -100,7 +100,12 @@ jobs:
           # version used to build golangci-lint is lower than the targeted Go
           # version". v2.12.2 is the latest v2 release and is built with go1.26.x.
           version: v2.12.2
-          args: --timeout=5m
+          # 8m, not 5m: the repo outgrew the old budget on the 2-core runners —
+          # at 5m the run died with exit code 4 ("Timeout exceeded") and the
+          # interrupted staticcheck pass reported spurious SA5011s (partial
+          # no-return facts), failing every push since. Keep this below the
+          # job's timeout-minutes so the linter, not the job, reports it.
+          args: --timeout=8m
 
       - name: go vet
         run: go vet ./...
