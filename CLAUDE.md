@@ -53,7 +53,7 @@ Dependencies point **inward only**, machine-enforced two ways (both run under `t
 
 ## Things That Will Bite You
 
-- **`FileSystem`/`Workspace` live in `internal/tool`, NOT `internal/port`.** Moving them to `port` creates a `port↔tool` cycle (`port.LLMRequest` references `tool.ToolSpec`; `Tool.Execute` takes a `Workspace`). Leave them in `tool`.
+- **`FileSystem`/`Workspace` live in `internal/tool`, NOT `internal/port`.** Moving them to `port` creates a `port↔tool` cycle (`port.LLMRequest` references `tool.ToolSpec`; `Tool.Execute` takes a `Workspace`). Leave them in `tool`. The osfs Workspace also carries per-skill READ-ONLY allowed roots (`osfs.WithReadRoots`, fed from `catalogAssets.skillReadRoots`) so Read/Stat — never Write/Glob/Grep — serve an activated skill's out-of-workspace files by absolute path; don't strip the option from the workspace factory/fork constructors or out-of-workspace skills regress to unreadable.
 - **`port.PermissionPolicy` is implemented in `internal/adapter/permpolicy`, not `governance`** — `governance` can't import `session` (cycle), so the session-aware policy is an adapter over the session-free `governance.Evaluator`.
 - **Preserve these invariants — they have tests that fail if you regress them:**
   - Edit's three invariants: read-before-edit (+ unchanged-since), exact match, uniqueness-unless-`replace_all`.

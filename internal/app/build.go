@@ -469,7 +469,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, userModelStore, mcpClose, err := buildEngine(ctx, cfg, reg, provider, store)
+	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, assets, mcpClose, err := buildEngine(ctx, cfg, reg, provider, store)
 	if err != nil {
 		return nil, err
 	}
@@ -483,7 +483,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	svcCfg := server.Config{
 		Engine:        engine,
 		Store:         store,
-		Workspaces:    osfsWorkspaceFactory(cfg.diag()),
+		Workspaces:    osfsWorkspaceFactory(cfg.diag(), assets.skillReadRoots),
 		DefaultLimits: defaultLimits(),
 		MCPProvider:   mcpProvider,
 		MCPSources:    mcpInventory,
@@ -536,7 +536,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// projected into the proto form. Skills are immutable for the process lifetime,
 		// so this is a startup snapshot (like Agents), not a live lister. nil/empty when
 		// skills are disabled.
-		Skills: skillSnapshot(discoveredSkills),
+		Skills: skillSnapshot(assets.skills),
 		// GetSoul snapshot: re-run the same selection policy (selectSoulSource) once
 		// here and project the WINNING soul's content + meta into the proto form. The
 		// soul is selected deterministically at build time (USER-wins precedence, trust
@@ -549,7 +549,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// would violate the one-Store-per-dir lock invariant) so a fetch reflects the
 		// CURRENT entries. nil when user model is disabled (capabilities().UserModel
 		// then false).
-		UserModel: userModelLister(userModelStore),
+		UserModel: userModelLister(assets.userModelStore),
 		// ListCommands palette discovery: a workspace-aware lister over the same
 		// command expander build the engine uses. nil disables the RPC (empty list).
 		Commands: commandLister,
@@ -571,7 +571,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// eviction remains a follow-up; see docs/adr/0001-acp-adapter.md.
 		OnCloseSession: learned.Forget,
 	}
-	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr)
+	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, assets.skillReadRoots)
 
 	svc, err := server.NewService(svcCfg)
 	if err != nil {
@@ -844,12 +844,12 @@ func buildStore(cfg Config) (port.SessionStore, error) {
 // factory (built HERE because store/policy/hooks/counter/mcpProvider — the exact
 // collaborators a per-session engine must share with the main one — are all in
 // scope here, so the factory cannot drift from the main engine's Deps).
-func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, []skills.Skill, *memory.Store, func(), error) {
+func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, catalogAssets, func(), error) {
 	// SkillDraft trust boundary: when enabled, the quarantine dir must live OUTSIDE
 	// the workspace root (so the model's workspace-confined Write/Edit cannot reach
 	// it) and be disjoint from every active skills dir. Fatal on a misconfig.
 	if err := validateSkillDraftConfig(cfg); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, func() {}, err
+		return nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, err
 	}
 	warnSkillDraftResiduals(cfg)
 
@@ -934,7 +934,11 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// the UNWRAPPED hooks: the Phase-2b reviewer fires once per MAIN-engine Stop,
 	// not per per-session stop (one of the two sanctioned per-session deltas).
 	sessFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, mcpProvider, instructions, assets)
-	return agent.NewEngine(deps), assets.globalMgr, mcpProvider, mcpInventory, sessFactory, learned, assets.skills, userModelStore, mcpClose, nil
+	// The build-once assets travel back to Build whole: it reads assets.skills
+	// (ListSkills snapshot), assets.userModelStore (GetUserModel lister), and
+	// assets.skillReadRoots (the workspace factory + team fork closures) off the
+	// SAME value every catalog assembly shares.
+	return agent.NewEngine(deps), assets.globalMgr, mcpProvider, mcpInventory, sessFactory, learned, assets, mcpClose, nil
 }
 
 // buildInstructionAssembler composes the turn-0 instruction assembler in order:
@@ -1512,6 +1516,11 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 		memStore:       memStore,
 		userModelStore: userModelStore,
 		skills:         discoveredSkills,
+		// The ONE computation of the per-skill read-only allowed roots: derived
+		// from the SAME discovered slice (so the project-tier trust gate is
+		// inherited by construction) and threaded into every production osfs
+		// Workspace constructor via the assets — no second list to drift.
+		skillReadRoots: skillReadRoots(discoveredSkills),
 		forkReaper:     forkReaper,
 	}
 	// The build-time assembly: default provider + model, no client MCP, narrating
@@ -2145,7 +2154,7 @@ func buildParallelJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engi
 // inherits whatever the call site supplies — the build-time default (buildCatalog)
 // or a session-selected provider (Half B). The registry never reaches the Subagent
 // tool itself; it is consumed only inside buildAgentSubagentEngines' resolution loop.
-func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager, store port.SessionStore) (tool.Tool, func() error) {
+func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager, store port.SessionStore, skillReadRoots []string) (tool.Tool, func() error) {
 	// Resolve the active skills once so a def's `skills:` can preload skill bodies
 	// into its engine prompt. The same index is the operator-controlled skill set
 	// the Skill tool serves. `hooks` is the inert default each def adopts unless its
@@ -2171,7 +2180,7 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 	if sandboxedRunner != nil {
 		// Worktree default (no WithForceCopy): shares the base repo's `.git` ⇒ full
 		// history for git log/show, with its own throwaway working tree.
-		taskForker := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
+		taskForker := forker.New(newForkWorkspace(skillReadRoots))
 		opts = append(opts, agent.WithChildForker(taskForker))
 	}
 	// Per-call model override factory: mint an explorer child engine for a requested
@@ -2264,7 +2273,7 @@ func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider 
 // route its engine to a different provider, and a member that pins none inherits
 // whatever the caller supplies (the build-time default in buildCatalog/
 // applyTeamConfig, or a session-selected provider in Half B's in-catalog Team tool).
-func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, port.HookRunner) {
+func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager, skillReadRoots []string) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, port.HookRunner) {
 	// A single hooks runner shared by the supervisor and the member coordination
 	// tools. hookexec.New(nil) matches buildEngine's default: the configured-hook map
 	// is not yet wired from cfg anywhere, so this is an inert (no-op) runner today,
@@ -2280,8 +2289,8 @@ func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry,
 	// members the factory grants a shell. Read-only members run git in the shared
 	// .git of a worktree, so they get the SANDBOXED runner; the main session keeps its
 	// own unhardened runner elsewhere.
-	fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }, forker.WithForceCopy())
-	roFk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) })
+	fk := forker.New(newForkWorkspace(skillReadRoots), forker.WithForceCopy())
+	roFk := forker.New(newForkWorkspace(skillReadRoots))
 	memberRunner := buildSandboxedCommandRunner(cfg)
 	roIsolationAvailable := memberRunner != nil && roFk != nil
 	factory := buildMemberEngine(cfg, provReg, provider, parentProviderID, parentModel, teamHooks, agentReg, skillIdx, memberRunner, roIsolationAvailable, mainMgr)
@@ -2295,7 +2304,7 @@ func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry,
 // SAME wiring the Team tool uses (buildCatalog) — so the gRPC CreateTeam path and the
 // Team tool cannot drift. MaxTeams is left at zero so the server applies its own
 // default.
-func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, provider port.LLMProvider, mainMgr *mcp.Manager) {
+func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, provider port.LLMProvider, mainMgr *mcp.Manager, skillReadRoots []string) {
 	if !cfg.EnableTeams {
 		cfg.diag().Log(context.Background(), port.LevelInfo, "agent teams DISABLED (set --enable-teams to enable; experimental)")
 		return
@@ -2304,7 +2313,7 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, p
 	// DEFAULT provider as the inherited parent (reg.Default()/cfg.Model). Per-session
 	// provider propagation to the standalone CreateTeam RPC is DEFERRED (CreateTeam
 	// carries no selector today); the in-catalog Team tool IS covered in Half B.
-	factory, fk, roFk, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr)
+	factory, fk, roFk, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr, skillReadRoots)
 	svcCfg.MemberEngine = factory
 	svcCfg.Forker = fk
 	svcCfg.ReadOnlyForker = roFk
@@ -2768,15 +2777,27 @@ func defaultLimits() session.Limits {
 }
 
 // osfsWorkspaceFactory returns a server.WorkspaceFactory that builds an osfs
-// Workspace rooted at the session's workspace dir. A root that cannot be opened
+// Workspace rooted at the session's workspace dir, carrying the per-skill
+// read-only allowed roots (catalogAssets.skillReadRoots) so Read/Stat can serve
+// an activated skill's files by absolute path. A root that cannot be opened
 // yields a nil Workspace; tool calls against it return errors the model can read.
-func osfsWorkspaceFactory(d port.Diagnostics) server.WorkspaceFactory {
+func osfsWorkspaceFactory(d port.Diagnostics, skillReadRoots []string) server.WorkspaceFactory {
 	return func(root string) tool.Workspace {
-		ws, err := osfs.NewWorkspace(root)
+		ws, err := osfs.NewWorkspace(root, osfs.WithReadRoots(skillReadRoots...))
 		if err != nil {
 			d.Log(context.Background(), port.LevelError, "workspace factory: cannot open root", "root", root, "err", err)
 			return nil
 		}
 		return ws
+	}
+}
+
+// newForkWorkspace returns the ONE workspace constructor every fork family
+// (Subagent worktree, team member force-copy/worktree, Parallel branch) hands its
+// forker, so the per-skill read-only allowed roots reach ISOLATED worktrees too —
+// a single helper, not four closures that could drift on the allowlist.
+func newForkWorkspace(skillReadRoots []string) func(string) (tool.Workspace, error) {
+	return func(root string) (tool.Workspace, error) {
+		return osfs.NewWorkspace(root, osfs.WithReadRoots(skillReadRoots...))
 	}
 }

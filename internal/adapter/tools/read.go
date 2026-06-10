@@ -26,7 +26,9 @@ Output format:
   The line numbers are display aids; do not copy them into Edit's old_string.
 
 Arguments:
-- path     (required): workspace-relative path to the file.
+- path     (required): workspace-relative path to the file. Absolute paths are
+  accepted ONLY for activated-skill directories (as given by the Skill tool's
+  "Base directory" line); any other absolute path is rejected.
 - offset   (optional): 1-based line number to start reading from.
 - limit    (optional): maximum number of lines to return.
 
@@ -61,7 +63,7 @@ func (ReadTool) Spec() tool.ToolSpec {
 		Schema: schema(`{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "Workspace-relative path to the file to read."},
+    "path": {"type": "string", "description": "Workspace-relative path to the file to read. Absolute paths are accepted only under an activated skill's base directory (from the Skill tool)."},
     "offset": {"type": "integer", "description": "1-based line number to start reading from."},
     "limit": {"type": "integer", "description": "Maximum number of lines to return."}
   },

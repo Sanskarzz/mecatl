@@ -121,6 +121,44 @@ func activeSkillDirs(cfg Config) []string {
 	return dirs
 }
 
+// skillReadRoots returns the unique, canonicalized PER-SKILL directories of the
+// discovered skills — the read-only allowed roots every production osfs Workspace
+// is constructed with (osfs.WithReadRoots), so the model can Read an activated
+// skill's SKILL.md and bundled references/scripts/assets by the absolute path the
+// Skill tool's "Base directory" header advertises, even when the skill lives
+// outside the workspace (~/.claude/skills/…).
+//
+// PER-SKILL dirs, never whole source dirs: a shadowed skill's directory or a
+// random sibling under ~/.claude/skills must never become readable. The input is
+// resolveSkills' output, which goes through skillResolveOptions' project-tier
+// trust gate — an untrusted workspace's project-tier skills are never discovered,
+// so their dirs never enter this allowlist (trust-gating by construction). The
+// SkillDraft quarantine dir can never appear either: it is never a Source, so it
+// never yields a discovered skill. Canonicalization matches the osfs enforcement
+// layer (osfs.ResolveRoot — abs + EvalSymlinks), the same comparison-contract
+// discipline activeSkillDirs follows.
+func skillReadRoots(discovered []skills.Skill) []string {
+	seen := make(map[string]bool, len(discovered))
+	var roots []string
+	for _, sk := range discovered {
+		if sk.Path == "" {
+			continue
+		}
+		dir := filepath.Dir(sk.Path)
+		if resolved, err := osfs.ResolveRoot(dir); err == nil {
+			dir = resolved
+		} else {
+			dir = filepath.Clean(dir)
+		}
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		roots = append(roots, dir)
+	}
+	return roots
+}
+
 // dirsOverlap reports whether a and b are the same directory or one contains the
 // other. It compares cleaned paths via filepath.Rel so a nested relationship in
 // either direction counts as overlap.

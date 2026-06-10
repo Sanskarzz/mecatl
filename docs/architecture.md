@@ -985,7 +985,18 @@ read-only `Skill` tool (`skills.NewTool`, catalog name `Skill`,
 `ReadOnly()==true`) exposes them: its `Spec().Description` **enumerates every
 discovered skill's name + one-line description** — the cheap, always-in-context,
 cache-stable metadata layer — while `Execute({name})` returns that skill's full
-**body** only when the model activates it (the load-on-activation layer). Because
+**body** only when the model activates it (the load-on-activation layer),
+prefixed by a small header carrying the skill's canonical **base directory** plus
+one line of bundled-files guidance. The header is the runtime-discoverability
+half of the out-of-workspace fix: a user-scope skill lives outside the workspace,
+and without the path in the result the model can only guess. The enforcement half
+is the **read-root allowlist**: composition computes the unique per-skill
+directories from the discovered set (`internal/app.skillReadRoots`, stashed once
+on `catalogAssets.skillReadRoots`) and constructs every production osfs
+`Workspace` — the per-session factory and all fork closures — with
+`osfs.WithReadRoots`, so `Read`/`Stat` (and only they) serve those absolute paths
+through a per-root `os.Root` with the same symlink containment as the workspace
+root; every other absolute path keeps the byte-identical escape error. Because
 the tool is read-only it is also available in plan mode. The tool is registered
 **only when at least one valid skill is discovered** — an empty inventory
 advertises nothing.

@@ -29,7 +29,6 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/forker"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
-	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/port"
@@ -54,6 +53,10 @@ import (
 //     interface trap (see buildEngine's permconfig note) cannot arise.
 //   - skills: the skills resolved once at build time (resolveSkills) — the same
 //     slice the ListSkills snapshot projects.
+//   - skillReadRoots: the unique per-skill directories of those skills
+//     (skillReadRoots), computed ONCE here and threaded into EVERY production
+//     osfs Workspace constructor (main factory + all fork closures) via
+//     osfs.WithReadRoots — one computed value, no second list to drift.
 //   - forkReaper: ONE process-wide preserved-fork LRU shared by every Parallel
 //     tool, so ForkPreservedCap stays a PROCESS bound (a per-session reaper would
 //     multiply the cap by the number of sessions).
@@ -63,6 +66,7 @@ type catalogAssets struct {
 	memStore       *memory.Store
 	userModelStore *memory.Store
 	skills         []skills.Skill
+	skillReadRoots []string
 	forkReaper     *agent.LRUForkReaper
 }
 
@@ -111,7 +115,7 @@ func assembleCatalog(ctx context.Context, cfg Config, reg *providerRegistry, sto
 	}
 	subagentClose := registerSubagentTrio(ctx, cfg, cat, reg, store, hooks, a, s, refMgr)
 	registerParallelTool(ctx, cfg, cat, hooks, a, s)
-	registerTeamTools(ctx, cfg, cat, reg, store, s, refMgr)
+	registerTeamTools(ctx, cfg, cat, reg, store, a, s, refMgr)
 	registerMemoryFamilies(ctx, cfg, cat, a)
 	registerSkillFamily(ctx, cfg, cat, a, s)
 
@@ -180,7 +184,7 @@ func mountClientMCP(ctx context.Context, cfg Config, cat *tool.Catalog, s catalo
 // inherited sub-agent parent. The returned close tears down the Subagent per-def
 // inline-MCP managers (these connections belong to this catalog).
 func registerSubagentTrio(ctx context.Context, cfg Config, cat *tool.Catalog, reg *providerRegistry, store port.SessionStore, hooks port.HookRunner, a catalogAssets, s catalogSession, refMgr *mcp.Manager) func() error {
-	subagentTool, subagentClose := buildSubagentTool(ctx, cfg, reg, s.provider, s.providerID, s.model, hooks, a.agentReg, refMgr, store)
+	subagentTool, subagentClose := buildSubagentTool(ctx, cfg, reg, s.provider, s.providerID, s.model, hooks, a.agentReg, refMgr, store, a.skillReadRoots)
 	cat.MustRegister(subagentTool)
 	// The PULL subagent-transcript inspect tool: read-only, reads the SAME shared
 	// session store the Subagent tool persists children to (ids verbatim from the
@@ -208,7 +212,7 @@ func registerParallelTool(ctx context.Context, cfg Config, cat *tool.Catalog, ho
 		}
 		return
 	}
-	fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }, forker.WithForceCopy())
+	fk := forker.New(newForkWorkspace(a.skillReadRoots), forker.WithForceCopy())
 	pcfg := modelCfgFor(cfg, s.model)
 	parallelChild := buildParallelChildEngine(pcfg, s.provider, buildCommandRunner(cfg))
 	judge := agent.NewEngineJudge(buildParallelJudgeEngine(pcfg, s.provider))
@@ -239,14 +243,14 @@ func registerParallelTool(ctx context.Context, cfg Config, cat *tool.Catalog, ho
 // tool when teams are enabled, over the SAME wiring the gRPC CreateTeam path uses
 // (buildTeamWiring is the single wiring source), with the session's resolved
 // provider/model as the inherited parent.
-func registerTeamTools(ctx context.Context, cfg Config, cat *tool.Catalog, reg *providerRegistry, store port.SessionStore, s catalogSession, refMgr *mcp.Manager) {
+func registerTeamTools(ctx context.Context, cfg Config, cat *tool.Catalog, reg *providerRegistry, store port.SessionStore, a catalogAssets, s catalogSession, refMgr *mcp.Manager) {
 	if !cfg.EnableTeams {
 		if s.narrate {
 			cfg.diag().Log(ctx, port.LevelInfo, "Team tool DISABLED")
 		}
 		return
 	}
-	factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, s.provider, s.providerID, s.model, refMgr)
+	factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, s.provider, s.providerID, s.model, refMgr, a.skillReadRoots)
 	cat.MustRegister(agent.NewTeamTool(
 		agent.TeamMemberEngineFactory(factory),
 		agent.WithTeamToolForker(fk),

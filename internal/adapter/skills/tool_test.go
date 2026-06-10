@@ -3,9 +3,12 @@ package skills
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/tool"
 )
@@ -75,8 +78,98 @@ func TestToolExecuteReturnsBody(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("Execute errored: %s", res.Content)
 	}
-	if res.Content != "Look for correctness, then style." {
-		t.Errorf("Execute returned %q, want the review body", res.Content)
+	// The result is a small header (skill name; base directory when the skill has
+	// a source path — these fixtures have none) followed by the full body.
+	if !strings.HasPrefix(res.Content, "Skill: review\n") {
+		t.Errorf("Execute result should start with the skill header, got %q", res.Content)
+	}
+	if !strings.HasSuffix(res.Content, "\n\nLook for correctness, then style.") {
+		t.Errorf("Execute result should end with the full body after a blank line, got %q", res.Content)
+	}
+	if strings.Contains(res.Content, "Base directory:") {
+		t.Errorf("a skill with no source path must not advertise a base directory, got %q", res.Content)
+	}
+}
+
+// TestToolExecuteRendersBaseDirectory pins the runtime-discoverability header for
+// a skill that has a source path: the result must carry the skill's CANONICAL
+// base directory (the directory holding SKILL.md) and the bundled-files guidance,
+// so the model learns the absolute path the workspace read-root carve-out serves
+// (a user-scope skill lives outside the workspace; without the path the model
+// guesses and the workspace refuses the guess).
+func TestToolExecuteRendersBaseDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeSkill(t, dir, "with-files", "---\nname: with-files\ndescription: has bundled files\n---\nUse scripts/run.sh.\n")
+	discovered, skips, err := DirSource{Dir: dir}.Skills(context.Background())
+	if err != nil || len(skips) != 0 || len(discovered) != 1 {
+		t.Fatalf("discover: %v skips=%v n=%d", err, skips, len(discovered))
+	}
+	tl := NewTool(discovered)
+	res := exec(t, tl, call(t, map[string]any{"name": "with-files"}))
+	if res.IsError {
+		t.Fatalf("Execute errored: %s", res.Content)
+	}
+	// The advertised dir must be the CANONICAL (abs + symlink-evaluated) form —
+	// the exact key the osfs read-root allowlist matches on (t.TempDir on macOS
+	// and symlinked-home setups otherwise diverge from the discovery path).
+	canon, err := osfs.ResolveRoot(filepath.Join(dir, "with-files"))
+	if err != nil {
+		t.Fatalf("resolve %q: %v", dir, err)
+	}
+	want := "Base directory: " + canon + "\n"
+	if !strings.Contains(res.Content, want) {
+		t.Errorf("Execute result missing %q, got %q", want, res.Content)
+	}
+	if !strings.Contains(res.Content, "read them with the Read tool by absolute path") {
+		t.Errorf("Execute result missing the bundled-files guidance, got %q", res.Content)
+	}
+	if !strings.HasSuffix(res.Content, "Use scripts/run.sh.") {
+		t.Errorf("Execute result should end with the full body, got %q", res.Content)
+	}
+}
+
+// TestToolExecuteBaseDirectoryResolvesSymlinkAlias pins the CANONICALIZATION
+// contract of the base-directory header — the exact bug skillBaseDir's doc
+// comment names (a symlinked path prefix, e.g. /home → /var/home). t.TempDir is
+// already canonical on most CI hosts, so the divergence is MANUFACTURED here: the
+// skill is discovered through a symlink ALIAS of its real directory, and the
+// header must advertise the RESOLVED real path — the key the osfs read-root
+// allowlist matches on — never the raw alias (printing raw filepath.Dir would
+// advertise a path the workspace then refuses).
+func TestToolExecuteBaseDirectoryResolvesSymlinkAlias(t *testing.T) {
+	realDir := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realDir, alias); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	writeSkill(t, alias, "aliased", "---\nname: aliased\ndescription: via alias\n---\nBODY\n")
+
+	discovered, skips, err := DirSource{Dir: alias}.Skills(context.Background())
+	if err != nil || len(skips) != 0 || len(discovered) != 1 {
+		t.Fatalf("discover: %v skips=%v n=%d", err, skips, len(discovered))
+	}
+	rawDir := filepath.Clean(filepath.Dir(discovered[0].Path))
+	resolved, err := osfs.ResolveRoot(filepath.Join(realDir, "aliased"))
+	if err != nil {
+		t.Fatalf("resolve real dir: %v", err)
+	}
+	// Precondition: the discovery path really crosses the symlink, so the raw and
+	// resolved forms diverge — otherwise this test cannot detect a regression to
+	// the unresolved form.
+	if rawDir == resolved {
+		t.Fatalf("test setup did not produce a divergent alias: raw %q == resolved %q", rawDir, resolved)
+	}
+
+	tl := NewTool(discovered)
+	res := exec(t, tl, call(t, map[string]any{"name": "aliased"}))
+	if res.IsError {
+		t.Fatalf("Execute errored: %s", res.Content)
+	}
+	if want := "Base directory: " + resolved + "\n"; !strings.Contains(res.Content, want) {
+		t.Errorf("header must advertise the RESOLVED dir (%q), got %q", want, res.Content)
+	}
+	if strings.Contains(res.Content, "Base directory: "+rawDir+"\n") {
+		t.Errorf("header advertised the raw symlink-alias dir %q — the allowlist would refuse it; got %q", rawDir, res.Content)
 	}
 }
 

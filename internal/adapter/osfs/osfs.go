@@ -4,6 +4,14 @@
 // resolve outside the root (via "..", absolute paths, or symlink-style escapes)
 // are rejected as a correctness invariant.
 //
+// The ONE deliberate carve-out is the explicit READ-ONLY allowed roots
+// (WithReadRoots): absolute directories — in practice the per-skill directories
+// of discovered skills, which may live outside the workspace (~/.claude/skills/…)
+// — that Read and Stat, and ONLY Read and Stat, may serve by absolute path. Each
+// allowed root gets its own os.Root, so symlinks inside it that escape it are
+// refused exactly like workspace escapes. Write, Glob, Grep, and the Edit ledger's
+// mutation path stay workspace-only.
+//
 // The Workspace also carries the per-session Edit read-ledger
 // (RecordRead/WasReadUnchanged) backed by a sha256 content fingerprint, the seam
 // WP7's Edit tool uses to enforce read-before-edit-and-unchanged.
@@ -64,12 +72,55 @@ const maxCommandOutput = 1 << 20 // 1 MiB
 type FileSystem struct {
 	root string
 	r    *os.Root
+	// readRoots are the explicit READ-ONLY allowed roots (WithReadRoots), each
+	// canonicalized at construction and served through its OWN *os.Root so the same
+	// symlink containment that confines the workspace root applies inside each
+	// allowed root. Only Read and Stat consult them; Write/Glob/Grep never do.
+	readRoots []allowedRoot
+}
+
+// allowedRoot is one canonicalized read-only allowed root plus the os.Root it is
+// served through.
+type allowedRoot struct {
+	path string
+	r    *os.Root
+}
+
+// Option configures a FileSystem (and the Workspace composing it) at
+// construction.
+type Option func(*fsOptions)
+
+// fsOptions collects the construction-time options.
+type fsOptions struct {
+	readRoots []string
+}
+
+// WithReadRoots adds explicit READ-ONLY allowed roots: absolute directories that
+// Read and Stat — and ONLY Read and Stat — may serve by absolute path even though
+// they lie outside the workspace root. The composition root derives them from the
+// DISCOVERED skills (one directory per skill, never a whole source tree), so the
+// skills carve-out inherits the workspace-trust gate by construction. Each
+// directory is canonicalized (abs + EvalSymlinks) and opened as its own os.Root
+// at construction; a directory that does not exist is SKIPPED (a skill dir
+// deleted after discovery must not brick workspace construction — Read of its
+// files then fails with the ordinary escape error), while a present-but-
+// unopenable directory is a construction error. Write, Glob, Grep, and the Edit
+// mutation path remain workspace-only regardless of these roots.
+func WithReadRoots(dirs ...string) Option {
+	return func(o *fsOptions) {
+		o.readRoots = append(o.readRoots, dirs...)
+	}
 }
 
 // NewFileSystem returns a FileSystem rooted at the given directory. The root is
 // resolved to an absolute, symlink-evaluated path, created if missing, then
 // opened as an *os.Root so all subsequent operations are confined to it.
-func NewFileSystem(root string) (*FileSystem, error) {
+// Optional read-only allowed roots are attached via WithReadRoots.
+func NewFileSystem(root string, opts ...Option) (*FileSystem, error) {
+	var o fsOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	abs, err := resolveRoot(root)
 	if err != nil {
 		return nil, err
@@ -83,7 +134,36 @@ func NewFileSystem(root string) (*FileSystem, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &FileSystem{root: abs, r: r}, nil
+	f := &FileSystem{root: abs, r: r}
+	// Dedup canonical roots; the workspace root itself never needs an allowlist
+	// entry (relative paths already reach it; absolute aliases of it are still
+	// outside the contract).
+	seen := map[string]bool{abs: true}
+	for _, dir := range o.readRoots {
+		if dir == "" {
+			continue
+		}
+		canon, rerr := resolveRoot(dir)
+		if rerr != nil {
+			return nil, fmt.Errorf("osfs: read root %q: %w", dir, rerr)
+		}
+		if seen[canon] {
+			continue
+		}
+		rr, rerr := os.OpenRoot(canon)
+		if rerr != nil {
+			// Absent dir (deleted between discovery and construction): skip — the
+			// carve-out simply does not open, and reads under it fail with the
+			// ordinary escape error. Anything else (e.g. permissions) is loud.
+			if errors.Is(rerr, fs.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("osfs: read root %q: %w", dir, rerr)
+		}
+		seen[canon] = true
+		f.readRoots = append(f.readRoots, allowedRoot{path: canon, r: rr})
+	}
+	return f, nil
 }
 
 // Root returns the absolute workspace root.
@@ -129,18 +209,58 @@ func mapEscape(path string, err error) error {
 const maxReadBytes = 64 << 20 // 64 MiB
 
 func (f *FileSystem) Read(_ context.Context, path string) ([]byte, error) {
-	rel, err := rootRelative(path)
+	r, rel, err := f.resolveRead(path)
 	if err != nil {
 		return nil, err
 	}
-	if info, statErr := f.r.Stat(rel); statErr == nil && info.Size() > maxReadBytes {
+	if info, statErr := r.Stat(rel); statErr == nil && info.Size() > maxReadBytes {
 		return nil, fmt.Errorf("osfs: file %q is %d bytes, exceeds the %d-byte read limit", path, info.Size(), int64(maxReadBytes))
 	}
-	data, err := f.r.ReadFile(rel)
+	data, err := r.ReadFile(rel)
 	if err != nil {
 		return nil, mapEscape(path, err)
 	}
 	return data, nil
+}
+
+// resolveRead maps a Read/Stat path onto the os.Root that serves it: the
+// workspace root for the ordinary session-relative form, or — for an ABSOLUTE
+// path — the explicit read-only allowed root containing it (WithReadRoots).
+// Any other absolute path fails with the exact ErrPathEscape rootRelative
+// produced before allowed roots existed (byte-identical message). Read and Stat
+// are the ONLY callers; Write/Glob/Grep stay on rootRelative and never see an
+// allowed root.
+func (f *FileSystem) resolveRead(path string) (*os.Root, string, error) {
+	rel, err := rootRelative(path)
+	if err == nil {
+		return f.r, rel, nil
+	}
+	if r, sub, ok := f.allowedReadRoot(path); ok {
+		return r, sub, nil
+	}
+	return nil, "", err
+}
+
+// allowedReadRoot tests an absolute path against the explicit read-only allowed
+// roots and, on a match, returns that root's os.Root plus the root-relative
+// remainder ("." for the root itself). Matching is lexical on the CLEANED path
+// against each canonical root — exact equality or containment under the root.
+// A symlink INSIDE an allowed root that escapes it is refused later by that
+// root's os.Root (mapEscape), the same containment the workspace root has.
+func (f *FileSystem) allowedReadRoot(path string) (*os.Root, string, bool) {
+	if len(f.readRoots) == 0 || !filepath.IsAbs(path) {
+		return nil, "", false
+	}
+	cleaned := filepath.Clean(path)
+	for _, ar := range f.readRoots {
+		if cleaned == ar.path {
+			return ar.r, ".", true
+		}
+		if strings.HasPrefix(cleaned, ar.path+string(filepath.Separator)) {
+			return ar.r, cleaned[len(ar.path)+1:], true
+		}
+	}
+	return nil, "", false
 }
 
 // Write replaces the contents of the file at the session-relative path, creating
@@ -165,13 +285,14 @@ func (f *FileSystem) Write(_ context.Context, path string, data []byte) error {
 	return nil
 }
 
-// Stat returns metadata for the file at the session-relative path.
+// Stat returns metadata for the file at the session-relative path (or, like
+// Read, an absolute path under an explicit read-only allowed root).
 func (f *FileSystem) Stat(_ context.Context, path string) (tool.FileInfo, error) {
-	rel, err := rootRelative(path)
+	r, rel, err := f.resolveRead(path)
 	if err != nil {
 		return tool.FileInfo{}, err
 	}
-	fi, err := f.r.Stat(rel)
+	fi, err := r.Stat(rel)
 	if err != nil {
 		return tool.FileInfo{}, mapEscape(path, err)
 	}
@@ -309,9 +430,10 @@ type Workspace struct {
 
 // NewWorkspace returns a Workspace rooted at the given directory. The root is
 // created if it does not already exist (NewFileSystem creates it before opening
-// the os.Root).
-func NewWorkspace(root string) (*Workspace, error) {
-	fsys, err := NewFileSystem(root)
+// the os.Root). Options (e.g. WithReadRoots) are passed through to the
+// underlying FileSystem.
+func NewWorkspace(root string, opts ...Option) (*Workspace, error) {
+	fsys, err := NewFileSystem(root, opts...)
 	if err != nil {
 		return nil, err
 	}

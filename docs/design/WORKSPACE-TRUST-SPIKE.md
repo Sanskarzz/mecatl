@@ -201,8 +201,11 @@ anchor** (persona/commands/skills/soul) does re-prompt.
 > folded `TrustDecision` is untrusted, via `agents.ResolveOptions.IncludeProjectTier`
 > / `skills.ResolveOptions.IncludeProjectTier` (set to `decision.Trusted`) and a
 > `buildDirCommandExpander` branch that drops the default project-tier command dirs
-> (an explicit `--commands-dir` is operator-supplied and stays). The text below is
-> retained for the historical rationale.
+> (an explicit `--commands-dir` is operator-supplied and stays). The skill READ-ROOT
+> allowlist (the per-skill dirs every osfs Workspace serves Read/Stat by absolute
+> path — `internal/app.skillReadRoots`) derives from this same gated discovery, so
+> an untrusted workspace's project-tier skill dirs never become readable either.
+> The text below is retained for the historical rationale.
 
 `--trust-project` today gates **only** permission ALLOW rules
 (`permconfig.applyTrustGate`, `resolve.go:269-282`) and the project soul

@@ -136,7 +136,10 @@ type FileSystem interface {
 // makes the read-only contract a compile-time guarantee.
 //
 // Workspace embeds it, so any *Workspace is usable where a WorkspaceReader is
-// expected. All paths are session-relative; the adapter rejects escapes.
+// expected. All paths are session-relative; the adapter rejects escapes, EXCEPT
+// for any explicit READ-ONLY allowed roots the adapter was constructed with
+// (the activated-skill base-directory carve-out — see osfs.WithReadRoots),
+// which Read/Stat may serve by absolute path.
 type WorkspaceReader interface {
 	// Root returns the absolute session root all paths are scoped to.
 	Root() string
@@ -152,7 +155,11 @@ type WorkspaceReader interface {
 // per-session Edit read-ledger that lets the Edit tool enforce its invariants.
 //
 // All paths are relative to the session root unless documented otherwise;
-// adapters must reject any path that resolves outside the root.
+// adapters must reject any path that resolves outside the root. The ONE
+// sanctioned exception is read-only: an adapter may carry explicit allowed
+// roots (osfs.WithReadRoots — the per-skill directories of discovered skills)
+// that Read and Stat, and only Read and Stat, serve by absolute path. Write,
+// Glob, and Grep are workspace-only always.
 type Workspace interface {
 	// WorkspaceReader is the read-only subset (Root + Read + Stat); embedding it
 	// keeps the read methods defined once and lets a *Workspace satisfy a

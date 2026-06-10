@@ -1329,8 +1329,15 @@ STRUCTURAL rather than another hand-synced list: `buildCatalog` is now Phase A o
 stores — still the sole construction sites — start the consolidation goroutines,
 discover skills via `resolveSkills`) and produces the process-wide `catalogAssets`
 (global manager, agent registry, the two concrete `*memory.Store` pointers — concrete
-so the typed-nil interface trap cannot arise — the skills slice, and ONE process-wide
-`agent.LRUForkReaper` so `ForkPreservedCap` stays a process bound). `assembleCatalog`
+so the typed-nil interface trap cannot arise — the skills slice, the per-skill
+read-root allowlist `skillReadRoots` — computed ONCE from that same discovered slice
+(`internal/app.skillReadRoots`: unique `osfs.ResolveRoot(filepath.Dir(sk.Path))` per
+skill, so the trust gate is inherited by construction and there is no second list to
+drift) and threaded into EVERY production osfs Workspace constructor
+(`osfsWorkspaceFactory` + the shared `newForkWorkspace` fork closure) as
+`osfs.WithReadRoots`, making an activated skill's out-of-workspace files Read/Stat-able
+by the absolute path the Skill tool's "Base directory" header advertises — and ONE
+process-wide `agent.LRUForkReaper` so `ForkPreservedCap` stays a process bound). `assembleCatalog`
 is the single registration path both the build-time shared catalog and every
 `sessionEngineFactory` catalog run through, in the canonical order core → global MCP
 (+ `MCPResourceTools` meta-tools) → client MCP → Subagent trio → Parallel → Team →

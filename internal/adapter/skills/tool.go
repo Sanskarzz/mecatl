@@ -3,9 +3,11 @@ package skills
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/toolkit"
 	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/tool"
@@ -32,6 +34,9 @@ When NOT to use:
 - For reading project files (use Read) or searching code (use Grep/Glob). A skill
   is curated guidance, not a file browser.
 - When no skill below fits the task — just proceed without one.
+
+Activation output starts with the skill's base directory; any bundled files the
+skill references (references/, scripts/, assets/) live under that directory.
 
 Arguments:
 - name (required): the exact name of one of the skills listed below.
@@ -106,9 +111,17 @@ func (t Tool) Spec() tool.ToolSpec {
 // available in plan mode (read-only tools survive the plan-mode catalog filter).
 func (Tool) ReadOnly() bool { return true }
 
-// Execute looks up the named skill and returns its full body as the tool result.
-// An unknown (or empty) name is a model-addressable error result that lists the
-// available skill names so the model can recover, NOT a harness-level error.
+// Execute looks up the named skill and returns its full body as the tool result,
+// prefixed by a small header naming the skill and its BASE DIRECTORY — the
+// runtime-discoverability axis: a skill's bundled files (references/, scripts/,
+// assets/) live under that directory, which may be OUTSIDE the workspace
+// (~/.claude/skills/…), and without the path in the result the model can only
+// guess (and the workspace then refuses the guess). The composition root opens
+// every production Workspace with exactly these per-skill directories as
+// read-only allowed roots (osfs.WithReadRoots), so the absolute path the header
+// advertises is readable by construction. An unknown (or empty) name is a
+// model-addressable error result that lists the available skill names so the
+// model can recover, NOT a harness-level error.
 func (t Tool) Execute(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 	var args skillArgs
 	if msg, ok := toolkit.ParseArgs(in, &args); !ok {
@@ -123,7 +136,33 @@ func (t Tool) Execute(_ context.Context, in session.ToolCall, _ tool.Workspace) 
 		return session.NewToolError(in.ID,
 			fmt.Sprintf("unknown skill %q; %s", name, t.availableHint())), nil
 	}
-	return session.NewToolResult(in.ID, toolkit.Truncate(sk.Body, toolkit.MaxOutputBytes)), nil
+	var b strings.Builder
+	fmt.Fprintf(&b, "Skill: %s\n", sk.Name)
+	if dir := skillBaseDir(sk.Path); dir != "" {
+		fmt.Fprintf(&b, "Base directory: %s\n", dir)
+		b.WriteString("Bundled files (references/, scripts/, assets/) live under the base directory; read them with the Read tool by absolute path, and run bundled scripts via Bash with their absolute path.\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(sk.Body)
+	return session.NewToolResult(in.ID, toolkit.Truncate(b.String(), toolkit.MaxOutputBytes)), nil
+}
+
+// skillBaseDir returns the CANONICAL directory containing the skill's SKILL.md,
+// or "" when the skill has no source path (hand-constructed test values).
+// Canonicalization goes through osfs.ResolveRoot — the EXACT resolver the
+// Workspace's read-root allowlist is keyed on — so the path the model is told
+// matches the allowlist byte-for-byte even when the discovery path crosses a
+// symlink (e.g. /home → /var/home); a cleaned-but-unresolved Dir would advertise
+// a path the workspace then refuses, reintroducing the bug for symlinked homes.
+func skillBaseDir(path string) string {
+	if path == "" {
+		return ""
+	}
+	dir := filepath.Dir(path)
+	if resolved, err := osfs.ResolveRoot(dir); err == nil {
+		return resolved
+	}
+	return filepath.Clean(dir)
 }
 
 // availableHint returns a short "available skills are: ..." sentence (or a clear

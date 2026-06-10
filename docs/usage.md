@@ -465,6 +465,18 @@ description cap and the on-activation body truncation apply to **every** source,
 including the conventional ones. (An OS-level sandbox around tool execution remains
 future work — see the deferral note in the architecture doc.)
 
+A **discovered** skill's own directory (the one holding its `SKILL.md`) also
+becomes **read-visible** to the model — `Read` accepts that directory's absolute
+path even when it lies outside the workspace (e.g. `~/.claude/skills/<name>`), so
+an activated skill's bundled `references/`, `scripts/`, and `assets/` files are
+actually reachable (the `Skill` tool's result names the base directory). This is
+**read-only and per-skill**: `Write`/`Edit` still refuse those paths, `Glob`/`Grep`
+never enumerate them, a shadowed skill's directory or a sibling under a skills
+source never becomes readable, an untrusted workspace's project-tier skills are
+never discovered and therefore never readable, and the `SkillDraft` quarantine dir
+is never a source so it can never enter the read allowlist. Bundled scripts run
+via Bash by absolute path, under the same permission gates Bash always has.
+
 ### File-based permission config (`.mecatl/settings.yaml`, issue #13)
 
 The built-in permission policy (read-only tools allowed; `Bash`/`Edit`/`Write`/
