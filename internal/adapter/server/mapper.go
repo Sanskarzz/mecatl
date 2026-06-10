@@ -262,6 +262,7 @@ func toProtoSubagent(p session.SubagentPayload) *mecatlv1.Subagent {
 		ParentCallId: p.ParentCallID,
 		ChildId:      p.ChildID,
 		Goal:         p.Goal,
+		Background:   p.Background,
 		ToolName:     p.ToolName,
 		IsError:      p.IsError,
 		ToolCount:    clampInt32(p.ToolCount),

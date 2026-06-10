@@ -65,6 +65,12 @@ func (m *labeledForker) wasCleaned(label string) bool {
 	return m.cleaned[label]
 }
 
+func (m *labeledForker) wasForked(label string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.created[label]
+}
+
 func (m *labeledForker) root(label string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -457,8 +463,16 @@ func TestParallelJoinFirstReturnsFirstSuccessCancelsLosers(t *testing.T) {
 		if rf.wasCleaned("branch-2") {
 			t.Fatalf("first winner branch-2 fork was cleaned (should be preserved)")
 		}
-		if !rf.wasCleaned("branch-1") || !rf.wasCleaned("branch-3") {
-			t.Fatalf("loser forks not cleaned: b1=%v b3=%v", rf.wasCleaned("branch-1"), rf.wasCleaned("branch-3"))
+		// The real invariant is "no loser fork LEAKS" — cleaned-or-never-forked.
+		// A loser may legitimately never fork at all: launchBranch's slot select can
+		// see BOTH the semaphore slot and its (winner-triggered) cancelled ctx ready,
+		// and Go's select picks pseudo-randomly — a late loser then takes the
+		// cancelledBeforeStart path and there is no fork to clean. Asserting
+		// wasCleaned alone false-failed on that schedule (a pre-existing I2 flake).
+		for _, loser := range []string{"branch-1", "branch-3"} {
+			if rf.wasForked(loser) && !rf.wasCleaned(loser) {
+				t.Fatalf("loser %s fork LEAKED (forked but never cleaned)", loser)
+			}
 		}
 		if !strings.Contains(res.Content, rf.root("branch-2")) {
 			t.Fatalf("winner path not reported:\n%s", res.Content)

@@ -39,6 +39,16 @@ var ErrPathEscape = errors.New("osfs: path escapes workspace root")
 // no deadline of its own.
 const defaultCommandTimeout = 30 * time.Second
 
+// defaultCommandWaitDelay bounds how long cmd.Wait may block on the stdout/stderr
+// pipes AFTER the context is cancelled or the shell itself has exited (A7). The
+// hazard it closes: a GRANDCHILD that inherited the pipes (e.g. `slow-thing &`)
+// keeps them open after the shell exits/dies, and without a WaitDelay cmd.Wait
+// parks on the pipe-copy goroutines until the grandchild exits — the unbounded
+// residual the agent loop's run-end drain cap would otherwise be the only brake
+// on. After the delay exec closes the pipes and Wait returns (the captured
+// output so far stands).
+const defaultCommandWaitDelay = 5 * time.Second
+
 // maxCommandOutput caps each of stdout/stderr captured by CommandRunner.Run.
 const maxCommandOutput = 1 << 20 // 1 MiB
 
@@ -431,6 +441,10 @@ type CommandRunner struct {
 	// inherited git danger is REMOVED, not merely overridden. osfs stays free of
 	// git-specific knowledge — it just sets whatever complete env it is handed.
 	env []string
+	// waitDelay is the per-command cmd.WaitDelay (defaultCommandWaitDelay unless
+	// overridden via WithCommandWaitDelay — tests use a short one). See
+	// defaultCommandWaitDelay for the grandchild-pipe rationale (A7).
+	waitDelay time.Duration
 }
 
 // CommandRunnerOption configures a CommandRunner at construction.
@@ -449,6 +463,19 @@ type CommandRunnerOption func(*CommandRunner)
 func WithCommandEnvList(env []string) CommandRunnerOption {
 	return func(r *CommandRunner) {
 		r.env = append([]string(nil), env...)
+	}
+}
+
+// WithCommandWaitDelay overrides the runner's cmd.WaitDelay (default
+// defaultCommandWaitDelay): the bound on how long Run waits for the output pipes
+// inherited by grandchildren to close after the shell exits or the context is
+// cancelled. Non-positive values are ignored (keep the default — a zero WaitDelay
+// would restore the unbounded pipe wait). Primarily a test seam.
+func WithCommandWaitDelay(d time.Duration) CommandRunnerOption {
+	return func(r *CommandRunner) {
+		if d > 0 {
+			r.waitDelay = d
+		}
 	}
 }
 
@@ -473,7 +500,7 @@ func NewCommandRunnerShell(dir, shell string, opts ...CommandRunnerOption) (tool
 	if err != nil {
 		return nil, err
 	}
-	r := &CommandRunner{root: abs, shell: shell}
+	r := &CommandRunner{root: abs, shell: shell, waitDelay: defaultCommandWaitDelay}
 	for _, o := range opts {
 		o(r)
 	}
@@ -512,6 +539,12 @@ func (r *CommandRunner) Run(ctx context.Context, command, workdir string) (tool.
 	cmd.Dir = dir
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// Bound the post-exit/post-cancel pipe wait (A7): without it, a grandchild that
+	// inherited stdout/stderr (e.g. `slow-thing &`) keeps cmd.Wait parked on the
+	// pipe-copy goroutines until the grandchild exits, long after the shell itself
+	// is gone. WaitDelay closes the pipes after this bound; the output captured so
+	// far stands.
+	cmd.WaitDelay = r.waitDelay
 	// A hardened (team-member) runner carries a COMPLETE, pre-scrubbed environment
 	// (computed in composition via gitenv.Scrub: inherited GIT_* danger removed,
 	// neutralising config appended); use it verbatim so removal of an inherited
@@ -537,6 +570,14 @@ func (r *CommandRunner) Run(ctx context.Context, command, workdir string) (tool.
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			res.ExitCode = exitErr.ExitCode()
+			return res, nil
+		}
+		// WaitDelay expired with the pipes still open but the shell itself EXITED
+		// SUCCESSFULLY (a backgrounded grandchild holds the inherited fds — e.g.
+		// `daemon &`). That is a success with the output captured so far, not a
+		// harness failure: before WaitDelay existed this command simply blocked
+		// until the grandchild exited and then succeeded.
+		if errors.Is(err, exec.ErrWaitDelay) {
 			return res, nil
 		}
 		return res, err

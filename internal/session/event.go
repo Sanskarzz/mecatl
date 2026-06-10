@@ -291,6 +291,12 @@ type SubagentPayload struct {
 	// Goal is a short, plain-text label for the delegated task (the Subagent call's
 	// description, or a truncation of its prompt). Set on EvSubagentStart only.
 	Goal string
+	// Background marks a detached-delivery child (`background: true` on the Subagent
+	// call): the tool call returned an immediate started-result and the child keeps
+	// working while the parent continues; its result is collected via
+	// SubagentStatus. Set on EvSubagentStart only. NOT a fourth delegation family —
+	// one boolean on subagent.* (the ChildActivity trip-wire stands).
+	Background bool
 	// ToolName is the name of a child tool that just ran. Set on EvSubagentTool
 	// only. It is the tool NAME alone — never the child's tool args or result.
 	ToolName string

@@ -100,9 +100,19 @@ type parentCaps struct {
 // registerChildRun is the nil-safe registration wrapper a spawning tool calls: a
 // zero parentCaps (plain Execute/ExecuteObserved, no parent run threaded) makes it a
 // no-op — the child then simply is not client-cancellable, unchanged behaviour.
-func (c parentCaps) registerChildRun(childID session.SessionID, family childFamily, goal string, cancel context.CancelFunc) {
+// background marks a detached-delivery Subagent child (the other families always
+// pass false).
+func (c parentCaps) registerChildRun(childID session.SessionID, family childFamily, goal string, cancel context.CancelFunc, background bool) {
 	if c.children != nil {
-		c.children.register(string(childID), family, goal, cancel, false)
+		c.children.register(string(childID), family, goal, cancel, background)
+	}
+}
+
+// startChildRun is the nil-safe running-state advance (the child's drive has
+// genuinely started: concurrency slot held / first round driven).
+func (c parentCaps) startChildRun(childID session.SessionID) {
+	if c.children != nil {
+		c.children.markRunning(string(childID))
 	}
 }
 
@@ -112,6 +122,33 @@ func (c parentCaps) finishChildRun(childID session.SessionID, stop session.StopR
 	if c.children != nil {
 		c.children.markDone(string(childID), stop)
 	}
+}
+
+// finishChildRunResult is finishChildRun plus the rendered terminal ToolResult a
+// BACKGROUND child stores for SubagentStatus collection (A2: the sole body
+// channel).
+func (c parentCaps) finishChildRunResult(childID session.SessionID, stop session.StopReason, res *session.ToolResult) {
+	if c.children != nil {
+		c.children.markDoneResult(string(childID), stop, res)
+	}
+}
+
+// abortChildRun is the nil-safe PRE-START abort (the A5 state vocabulary): the
+// child never started driving and its failure already surfaced inline, so its
+// registry entry is removed rather than left as a done+StopNone phantom.
+func (c parentCaps) abortChildRun(childID session.SessionID) {
+	if c.children != nil {
+		c.children.remove(string(childID))
+	}
+}
+
+// liveBackgroundChildIDs is the nil-safe read of the currently-live background
+// child ids (the gate-full fail-fast error's list — ids only, A9).
+func (c parentCaps) liveBackgroundChildIDs() []string {
+	if c.children == nil {
+		return nil
+	}
+	return c.children.liveBackgroundIDs()
 }
 
 // childWasClientCancelled is the nil-safe clientCancelled read (false when no
@@ -217,6 +254,18 @@ type subagentArgs struct {
 	// value is ignored (inherit the engine's budget). A budget-stopped child returns its
 	// best-effort summary (StopBudget is a clean terminal), not an error.
 	MaxTokens *int `json:"max_tokens,omitempty"`
+
+	// Background detaches this child: the call returns IMMEDIATELY with a started-
+	// result carrying the agentId, the child keeps driving in its own goroutine, and
+	// its rendered result is stored in the parent run's child registry for collection
+	// via SubagentStatus (the SOLE body channel — A2). It composes with resume/
+	// output_schema/limits/timeout_ms/agent/model unchanged. Background lifetime is
+	// RUN-scoped (D8): a background child still live when the parent run terminates is
+	// cancelled, joined (bounded drain), and persisted — resumable in a later run.
+	// Acquiring the shared childGate is FAIL-FAST for background (D12): a full gate is
+	// a model-addressable error listing the live background ids, never a cross-turn
+	// block the model could deadlock itself on.
+	Background bool `json:"background,omitempty"`
 }
 
 // AgentMeta is the plain (name, description) summary of one registered agent
@@ -286,6 +335,10 @@ var subagentSchema = json.RawMessage(`{
     "output_schema": {
       "type": "object",
       "description": "Optional JSON schema describing the structured result you want back. Use it when you will mechanically consume the result (e.g. comparing or aggregating several subagents' answers); omit for a free-text summary. When present, the subagent must deliver by calling a SubmitResult tool with JSON matching this schema; the validated JSON is returned as the result. Supports a subset: type/properties/required/items/enum."
+    },
+    "background": {
+      "type": "boolean",
+      "description": "Run the subagent in the BACKGROUND: this call returns immediately with its agentId and the subagent keeps working while you continue. Use it for long investigations whose result you do not need before your next steps. Collect the result with SubagentStatus (pass the agentId; use wait_ms to wait on it). A background subagent still running when this run ends is CANCELLED (its transcript persists and is resumable). Omit (default false) to wait for the result inline."
     }
   },
   "required": ["prompt"]
@@ -835,6 +888,74 @@ func (t *SubagentTool) validateResume(callID session.ToolCallID, args subagentAr
 	return t.childEngine, session.ToolResult{}, true
 }
 
+// resolveEngineAndLimits resolves one Subagent call's child engine and base
+// session limits, then applies the per-call tighten-only overrides.
+//
+// Resume mode CONTINUES a previously-run subagent by its persisted id: it forces
+// the default explorer engine (v1: a resumed child runs on childEngine only) and
+// is mutually exclusive with `agent`/`model` (those pin their own engine) — the
+// validation runs BEFORE selectChildEngine so the exclusivity error is the
+// model's first signal, and the prefix check rejects non-subagent ids (e.g. a
+// team member's transcript). On resume, limits is later overwritten from the
+// LOADED session's preserved Limits (resolveResumeSession), then tightened
+// against the per-call args there.
+//
+// The tighten-only discipline: the model may make THIS child stricter than the
+// inherited bound, never looser, so a per-call arg can't escape the operator's
+// ceiling (tightenLimit ignores nil / non-positive values and only lowers).
+func (t *SubagentTool) resolveEngineAndLimits(callID session.ToolCallID, args subagentArgs, resuming bool) (engine *Engine, limits session.Limits, errResult session.ToolResult, ok bool) {
+	if resuming {
+		eng, errRes, vok := t.validateResume(callID, args)
+		if !vok {
+			return nil, session.Limits{}, errRes, false
+		}
+		engine = eng
+	} else {
+		eng, lim, errRes, sok := t.selectChildEngine(callID, args)
+		if !sok {
+			return nil, session.Limits{}, errRes, false
+		}
+		engine, limits = eng, lim
+	}
+	limits.MaxTurns = tightenLimit(limits.MaxTurns, args.MaxTurns)
+	limits.MaxToolCalls = tightenLimit(limits.MaxToolCalls, args.MaxToolCalls)
+	return engine, limits, session.ToolResult{}, true
+}
+
+// prepareChildSession resolves everything between the concurrency slot and the
+// drive for a FOREGROUND call: the resume load (+ terminal recovery), the
+// workspace fork, and the child session build.
+//
+// Ordering is load-bearing: resume load + terminal recovery happen BEFORE the
+// fork, so the common error cases (unknown id, failed/non-resumable state,
+// broken store) FAIL FAST without paying a fork/unfork round-trip; the recovered
+// session is re-homed AFTER the fork, once the fresh root exists (see
+// buildChildSession). A fork failure is a tool error, never a silent fallback
+// (forkChildWorkspace). The returned cleanup is ALWAYS non-nil (a no-op when
+// nothing survives) so the caller can defer it unconditionally; on a
+// session-build failure the just-created fork is torn down here.
+func (t *SubagentTool) prepareChildSession(ctx context.Context, call session.ToolCall, ws tool.Workspace, args subagentArgs, resuming bool, childID session.SessionID, limits session.Limits) (child *session.Session, runWS tool.Workspace, cleanup func() error, errResult session.ToolResult, ok bool) {
+	noop := func() error { return nil }
+	var resumedChild *session.Session
+	if resuming {
+		loaded, errRes, rok := t.resolveResumeSession(ctx, call.ID, childID, args)
+		if !rok {
+			return nil, nil, noop, errRes, false
+		}
+		resumedChild = loaded
+	}
+	runWS, cleanupWS, errRes, fok := t.forkChildWorkspace(ctx, call.ID, ws, subagentGoal(args))
+	if !fok {
+		return nil, nil, noop, errRes, false
+	}
+	child, errRes, bok := t.buildChildSession(call.ID, childID, resumedChild, runWS.Root(), limits)
+	if !bok {
+		_ = cleanupWS()
+		return nil, nil, noop, errRes, false
+	}
+	return child, runWS, cleanupWS, session.ToolResult{}, true
+}
+
 func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.Workspace, emit func(session.Event), caps parentCaps) (session.ToolResult, error) {
 	var args subagentArgs
 	if msg, ok := session.ParseArgs(call, &args); !ok {
@@ -844,52 +965,20 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 		return session.NewToolError(call.ID, "Subagent: 'prompt' is required and must be non-empty"), nil
 	}
 
-	// Resume mode: CONTINUE a previously-run subagent by its persisted id. It forces the
-	// default explorer engine (v1: a resumed child runs on childEngine only) and is
-	// mutually exclusive with `agent`/`model` (those pin their own engine). The validation
-	// is checked BEFORE selectChildEngine so the exclusivity error is the model's first
-	// signal; the prefix check rejects non-subagent ids (e.g. a team member's transcript).
 	resuming := strings.TrimSpace(args.Resume) != ""
-	var engine *Engine
-	var limits session.Limits
-	if resuming {
-		eng, errResult, ok := t.validateResume(call.ID, args)
-		if !ok {
-			return errResult, nil
-		}
-		// A resumed child runs on the default explorer engine; its preserved Limits come
-		// from the loaded session below (tighten-only per-call override still applies).
-		engine = eng
-	} else {
-		// Select the child engine + base limits from `agent`/`model` (mutually exclusive),
-		// returning a model-addressable error result for a bad selection.
-		eng, lim, errResult, ok := t.selectChildEngine(call.ID, args)
-		if !ok {
-			return errResult, nil
-		}
-		engine, limits = eng, lim
+	engine, limits, errResult, ok := t.resolveEngineAndLimits(call.ID, args, resuming)
+	if !ok {
+		return errResult, nil
 	}
 
-	// Per-call limit overrides (tighten-only): the model may make THIS child stricter
-	// than the inherited bound, never looser, so a per-call arg can't escape the
-	// operator's ceiling. tightenLimit ignores nil / non-positive values and only lowers.
-	// On resume, limits is overwritten below from the LOADED session's preserved Limits,
-	// then tightened against the per-call args there.
-	limits.MaxTurns = tightenLimit(limits.MaxTurns, args.MaxTurns)
-	limits.MaxToolCalls = tightenLimit(limits.MaxToolCalls, args.MaxToolCalls)
-
-	// Per-call wall-clock deadline: a hard ceiling on the whole child run, independent
-	// of the turn/tool limits. A child that exceeds it is ctx-cancelled (the loop
-	// terminates with StopCancelled), which the terminal switch below renders as a
-	// time-budget tool error. nil / non-positive ⇒ no deadline (ctx unchanged). The
-	// timeout ctx is held separately (timeoutCtx) so the terminal switch can tell a
-	// deadline-kill (DeadlineExceeded) apart from a parent cancellation.
-	var timeoutCtx context.Context
-	if args.TimeoutMs != nil && *args.TimeoutMs > 0 {
-		var cancelTimeout context.CancelFunc
-		ctx, cancelTimeout = context.WithTimeout(ctx, time.Duration(*args.TimeoutMs)*time.Millisecond)
-		defer cancelTimeout()
-		timeoutCtx = ctx
+	// Background requires the parent run's child registry: it is where the started
+	// child's rendered result lands for SubagentStatus collection and what the
+	// run-end drain joins. A caps-less drive (plain Execute/ExecuteObserved) has
+	// neither, so a background request there is an honest error, never a silent
+	// foreground fallback (the model was promised detached delivery).
+	if args.Background && caps.children == nil {
+		return session.NewToolError(call.ID,
+			"Subagent: `background` is not supported on this run (no child registry); omit it to run in the foreground"), nil
 	}
 
 	// Compute the child session id early (a FRESH call derives it from the parent call id;
@@ -898,7 +987,9 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// the SAME id with a model-visible error rather than waiting: two runs over one unlocked
 	// Session aggregate is a data race (correctness), and waiting would park a dispatcher
 	// goroutine + a gate slot (liveness). Registered BEFORE acquireChildSlot so the conflict
-	// is detected even while the second call would otherwise block on the gate.
+	// is detected even while the second call would otherwise block on the gate. A BACKGROUND
+	// child holds its id until its detached goroutine ends, so `resume` of a still-running
+	// background child is rejected here, unchanged.
 	childID := t.childSessionID(call.ID)
 	if resuming {
 		childID = session.SessionID(args.Resume)
@@ -907,7 +998,25 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 		return session.NewToolError(call.ID,
 			fmt.Sprintf("Subagent: subagent %q is already running; wait for its result before resuming it", childID)), nil
 	}
-	defer t.releaseChildID(childID)
+	// From here every exit path must release childID: the foreground path defers it
+	// below; the background path transfers ownership to the detached goroutine.
+
+	// Per-call wall-clock deadline: a hard ceiling on the whole child run, independent
+	// of the turn/tool limits. A child that exceeds it is ctx-cancelled (the loop
+	// terminates with StopCancelled), which the terminal rendering turns into a
+	// time-budget tool error. nil / non-positive ⇒ no deadline (ctx unchanged). The
+	// timeout ctx is held separately (timeoutCtx) so the terminal rendering can tell a
+	// deadline-kill (DeadlineExceeded) apart from a parent cancellation. cancelTimeout
+	// is an explicit func (not a bare defer) because the background path hands it to
+	// the detached goroutine.
+	var timeoutCtx context.Context
+	cancelTimeout := func() {}
+	if args.TimeoutMs != nil && *args.TimeoutMs > 0 {
+		var ct context.CancelFunc
+		ctx, ct = context.WithTimeout(ctx, time.Duration(*args.TimeoutMs)*time.Millisecond)
+		cancelTimeout = ct
+		timeoutCtx = ctx
+	}
 
 	// Per-child cancel: mint the per-CALL cancelable context the parent's CancelChild
 	// targets and register it in the parent run's child registry. The per-CALL ctx (not
@@ -916,15 +1025,40 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// per-call timeout and a parent-run cancel keep their existing semantics — the
 	// timeoutCtx deadline check below stays first, and a parent cancel leaves
 	// clientCancelled false. Registration happens BEFORE acquireChildSlot so a child
-	// queued on the gate is already cancellable (the gate's ctx select unblocks). The
-	// deferred markChildDone lands the terminal stop on EVERY exit path (a pre-drive
-	// error leaves it StopNone). A `resume` of an id already run THIS run re-registers
-	// and OVERWRITES the done entry (fresh doneCh — A5).
+	// queued on the gate is already cancellable (the gate's ctx select unblocks). A
+	// `resume` of an id already run THIS run re-registers and OVERWRITES the done
+	// entry (fresh doneCh — A5).
 	ctx, cancelCall := context.WithCancel(ctx)
+	caps.registerChildRun(childID, childFamilySubagent, subagentGoal(args), cancelCall, args.Background)
+
+	// BACKGROUND (D7/D8): fail-fast gate, synchronous start event, detach the drive.
+	if args.Background {
+		return t.startBackground(ctx, backgroundChild{
+			call: call, ws: ws, emit: emit, caps: caps, args: args,
+			engine: engine, limits: limits, resuming: resuming, childID: childID,
+			timeoutCtx: timeoutCtx, cancelCall: cancelCall, cancelTimeout: cancelTimeout,
+		}), nil
+	}
+
+	// FOREGROUND: the call owns its whole lifecycle inline.
+	defer t.releaseChildID(childID)
 	defer cancelCall()
-	caps.registerChildRun(childID, childFamilySubagent, subagentGoal(args), cancelCall)
+	defer cancelTimeout()
+	// Terminal accounting (the A5 state vocabulary): a child whose drive STARTED
+	// lands its real terminal stop; a pre-start CANCELLATION (gate wait) lands the
+	// meaningful StopCancelled; any other pre-start failure (resume-load / fork /
+	// session-build — its error already returned inline) ABORTS the entry (removed,
+	// never a done+StopNone phantom in the SubagentStatus roster).
+	started := false
 	var terminalStop session.StopReason
-	defer func() { caps.finishChildRun(childID, terminalStop) }()
+	defer func() {
+		switch {
+		case started || terminalStop != session.StopNone:
+			caps.finishChildRun(childID, terminalStop)
+		default:
+			caps.abortChildRun(childID)
+		}
+	}()
 
 	// Bound concurrent children FIRST, for ALL Subagent children (forking AND forker-less):
 	// the dispatcher fans Subagent calls out read-parallel, and each child consumes a child
@@ -935,7 +1069,9 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 		// ctx cancelled while waiting for a slot — surface it as a tool error; the parent
 		// ctx governs the whole call. A CLIENT cancel (CancelChild while queued) is named
 		// accurately so the model knows the user withdrew this delegation, not that the
-		// run is collapsing.
+		// run is collapsing. Either way the cancellation is a MEANINGFUL pre-start
+		// terminal (StopCancelled), not an abort.
+		terminalStop = session.StopCancelled
 		if caps.childWasClientCancelled(childID) {
 			return session.NewToolError(call.ID,
 				"Subagent: subagent was cancelled by the user while waiting for a concurrency slot"), nil
@@ -943,37 +1079,16 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 		return session.NewToolError(call.ID, "Subagent: cancelled before acquiring a concurrency slot"), nil
 	}
 	defer release()
+	caps.startChildRun(childID)
 
-	// Resume load + terminal recovery happen BEFORE the fork, so the common error cases
-	// (unknown id, failed/non-resumable state, broken store) FAIL FAST without paying a
-	// fork/unfork round-trip. The recovered session is re-homed AFTER the fork, once the
-	// fresh root exists.
-	var resumedChild *session.Session
-	if resuming {
-		loaded, errResult, ok := t.resolveResumeSession(ctx, call.ID, childID, args)
-		if !ok {
-			return errResult, nil
-		}
-		resumedChild = loaded
-	}
-
-	// Workspace selection: fork an isolated worktree when a forker is wired (a fork
-	// failure is a tool error, never a silent fallback — see forkChildWorkspace). The
-	// returned cleanup is always non-nil and tears the worktree down after the child
-	// fully drains (the run is drained below in this call), so a deferred cleanup is
-	// correct.
-	runWS, cleanupWS, errResult, ok := t.forkChildWorkspace(ctx, call.ID, ws, subagentGoal(args))
+	// Resume load + fork + session build (see prepareChildSession). The cleanup is
+	// always non-nil and tears the worktree down after the child fully drains (the
+	// run is drained below in this call), so a deferred cleanup is correct.
+	child, runWS, cleanupWS, errResult, ok := t.prepareChildSession(ctx, call, ws, args, resuming, childID, limits)
 	if !ok {
 		return errResult, nil
 	}
 	defer func() { _ = cleanupWS() }()
-
-	// The child session: a fresh session.New on a FRESH call, or the recovered + re-homed
-	// loaded session on RESUME (see buildChildSession).
-	child, errResult, ok := t.buildChildSession(call.ID, childID, resumedChild, runWS.Root(), limits)
-	if !ok {
-		return errResult, nil
-	}
 
 	// Announce the subagent before it runs, carrying only the parent call id, the
 	// child id, and a short, plain-text goal label (sanitization happens in the
@@ -1000,6 +1115,7 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 		askLabel: fmt.Sprintf("subagent %q", subagentGoal(args))}
 
 	start := time.Now()
+	started = true
 	// Drain the child's Event stream entirely INSIDE the Subagent tool. Nothing from the
 	// child surfaces to the parent except the final summary string and, when observed,
 	// the redacted subagent.* metadata. The structured-output retry loop re-drives the
@@ -1044,6 +1160,209 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// registry flag, read AFTER the timeout check above so a real deadline keeps its
 	// time-budget error.
 	return renderSubagentResult(call.ID, childID, final, stop, submit, caps.childWasClientCancelled(childID)), nil
+}
+
+// backgroundStartedBody is the immediate started-result body a background Subagent
+// call returns (D7, amended by A2: SubagentStatus is the SOLE body channel — the
+// model is told to COLLECT, not promised an auto-delivery). It is rendered through
+// renderSubagentTrailer, so the agentId rides the FIRST line exactly like every
+// other Subagent result (the existing trailer convention the model and the resume
+// path already parse).
+const backgroundStartedBody = "subagent started in the background.\n\n" +
+	"It keeps working while you continue. Collect its result with SubagentStatus " +
+	"(or wait on it with wait_ms); it will be cancelled if it is still running when " +
+	"this run ends."
+
+// backgroundChild bundles everything one detached background Subagent drive owns:
+// the original call/workspace/emit/caps, the resolved engine+limits, and the
+// lifecycle handles (per-call cancel, timeout cancel, gate release, in-flight id)
+// whose ownership the synchronous path TRANSFERS to the goroutine.
+type backgroundChild struct {
+	call     session.ToolCall
+	ws       tool.Workspace
+	emit     func(session.Event)
+	caps     parentCaps
+	args     subagentArgs
+	engine   *Engine
+	limits   session.Limits
+	resuming bool
+	// resumed is the loaded+recovered session on a resume call (loaded SYNCHRONOUSLY
+	// in startBackground so an unknown id / non-resumable state fails fast inline,
+	// not as a collectible background error).
+	resumed *session.Session
+	childID session.SessionID
+	// timeoutCtx is non-nil iff a per-call timeout_ms deadline applies (the
+	// DeadlineExceeded disambiguation read, same as the foreground path).
+	timeoutCtx    context.Context //nolint:containedctx // deadline-disambiguation handle, mirrors run()'s timeoutCtx local
+	cancelCall    context.CancelFunc
+	cancelTimeout context.CancelFunc
+	release       func()
+}
+
+// startBackground is the synchronous half of a background Subagent call: fail-fast
+// gate acquisition (D12), fail-fast resume load, the SYNCHRONOUS EvSubagentStart
+// (A5 — deterministic start-before-started-result ordering on the stream), then
+// the detached goroutine spawn and the immediate started-result. Every pre-spawn
+// failure unwinds completely (registry entry removed — no phantom queued entries,
+// A5 — gate slot and in-flight id released) and returns inline.
+func (t *SubagentTool) startBackground(ctx context.Context, b backgroundChild) session.ToolResult {
+	abort := func() {
+		b.caps.abortChildRun(b.childID)
+		b.cancelCall()
+		b.cancelTimeout()
+		t.releaseChildID(b.childID)
+	}
+	// D12: background acquisition is FAIL-FAST — a background child holds its slot
+	// ACROSS turns, so blocking here could deadlock the model against itself. The
+	// error lists the live background ids (ids only — A9) and the recoverable
+	// actions. ORDER is load-bearing: abort() FIRST, so the failing call's own
+	// pre-gate registration is gone before the live-ids read — read first, the
+	// error would list the very id that just failed to start as "currently
+	// running" (and a failed resume attempt would shadow the prior done entry the
+	// abort reinstates).
+	release, ok := t.tryAcquireChildSlot()
+	if !ok {
+		abort()
+		ids := b.caps.liveBackgroundChildIDs()
+		return session.NewToolError(b.call.ID, backgroundGateFullError(ids))
+	}
+	b.release = release
+	// Resume load fails FAST and inline (a cheap store read): an unknown id or a
+	// non-resumable state is the model's immediate, addressable error — never a
+	// "started" result whose collection later reveals the call never could run.
+	if b.resuming {
+		loaded, errResult, lok := t.resolveResumeSession(ctx, b.call.ID, b.childID, b.args)
+		if !lok {
+			b.release()
+			abort()
+			return errResult
+		}
+		b.resumed = loaded
+	}
+	b.caps.startChildRun(b.childID)
+	// A5: the start event is emitted SYNCHRONOUSLY before the goroutine spawns, so
+	// subagent.start always precedes the started-result on the stream.
+	if b.emit != nil {
+		b.emit(session.Event{Type: session.EvSubagentStart, Subagent: &session.SubagentPayload{
+			ParentCallID: string(b.call.ID),
+			ChildID:      string(b.childID),
+			Goal:         subagentGoal(b.args),
+			Background:   true,
+		}})
+	}
+	go t.driveBackground(ctx, b)
+	return session.NewToolResult(b.call.ID, renderSubagentTrailer(b.childID, backgroundStartedBody))
+}
+
+// driveBackground is the detached goroutine owning a background child's whole
+// remaining lifecycle: fork → drive → persist → markDone(rendered result + stop).
+// It is run-scoped (D8): its ctx derives from the parent run's, the run-end drain
+// cancels and joins it (doneCh closes in the deferred finishChildRunResult), and
+// every emit it makes goes through the registry's seal guard, so a residual emit
+// after an abandon is a safe no-op. The deferred block also releases the gate
+// slot, the in-flight id, and both cancels — the ownership transferred from run().
+func (t *SubagentTool) driveBackground(ctx context.Context, b backgroundChild) {
+	var (
+		res  session.ToolResult
+		stop = session.StopError
+	)
+	defer func() {
+		b.caps.finishChildRunResult(b.childID, stop, &res)
+		b.cancelCall()
+		b.cancelTimeout()
+		b.release()
+		t.releaseChildID(b.childID)
+	}()
+
+	goal := subagentGoal(b.args)
+	// A post-spawn failure (fork / session build) is NOT a registry abort: the model
+	// already holds the started-result, so the failure must be COLLECTIBLE — it lands
+	// as a done(StopError) entry whose stored result is the error text, and the start
+	// event gets its closing subagent.end so no client lane dangles.
+	endOnError := func(errResult session.ToolResult) {
+		res = errResult
+		if b.emit != nil {
+			b.emit(session.Event{Type: session.EvSubagentEnd, Subagent: &session.SubagentPayload{
+				ParentCallID: string(b.call.ID),
+				ChildID:      string(b.childID),
+				Stop:         session.StopError,
+			}})
+		}
+	}
+	runWS, cleanupWS, errResult, ok := t.forkChildWorkspace(ctx, b.call.ID, b.ws, goal)
+	if !ok {
+		endOnError(errResult)
+		return
+	}
+	defer func() { _ = cleanupWS() }()
+	child, errResult, ok := t.buildChildSession(b.call.ID, b.childID, b.resumed, runWS.Root(), b.limits)
+	if !ok {
+		endOnError(errResult)
+		return
+	}
+
+	runOpts, submit, prompt := buildSubagentRunOptions(b.args, b.resuming)
+	posture := childPosture{isolated: t.childForker != nil, caps: b.caps, role: string(b.childID),
+		childID:  string(b.childID),
+		askLabel: fmt.Sprintf("subagent %q", goal)}
+
+	start := time.Now()
+	final, st, usage, toolCount := driveChild(ctx, b.engine, child, runWS, prompt, runOpts, b.emit, b.call, b.childID, posture, submit, b.args.OutputSchema)
+	stop = st
+
+	// Best-effort persist on EVERY terminal — including the run-end drain's cancel —
+	// so the child is resumable in a later run (the loss-mitigation that makes
+	// cancel-at-end acceptable). Same documented ctx-on-Save residual as foreground.
+	t.persistChild(ctx, child)
+
+	if b.emit != nil {
+		b.emit(session.Event{Type: session.EvSubagentEnd, Subagent: &session.SubagentPayload{
+			ParentCallID: string(b.call.ID),
+			ChildID:      string(b.childID),
+			ToolCount:    toolCount,
+			Usage:        usage,
+			Stop:         st,
+			DurationMs:   time.Since(start).Milliseconds(),
+		}})
+	}
+	t.fireSubagentStop(ctx, child)
+
+	// Terminal rendering mirrors the foreground call exactly (renderSubagentResult is
+	// the single rendering chokepoint): time-budget first, then the client-cancel
+	// disambiguation. The rendered result is what SubagentStatus delivers verbatim.
+	if b.timeoutCtx != nil && b.timeoutCtx.Err() == context.DeadlineExceeded {
+		res = session.NewToolError(b.call.ID,
+			fmt.Sprintf("Subagent: subagent exceeded its time budget (%dms) and was stopped\n\nagentId: %s", *b.args.TimeoutMs, b.childID))
+		return
+	}
+	res = renderSubagentResult(b.call.ID, b.childID, final, st, submit, b.caps.childWasClientCancelled(b.childID))
+}
+
+// tryAcquireChildSlot is acquireChildSlot's NON-BLOCKING sibling for background
+// acquisition (D12 fail-fast): it returns (release, true) when a slot is free and
+// (nil, false) when the gate is full — never waits.
+func (t *SubagentTool) tryAcquireChildSlot() (func(), bool) {
+	if t.childGate == nil {
+		return func() {}, true
+	}
+	select {
+	case t.childGate <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-t.childGate }) }, true
+	default:
+		return nil, false
+	}
+}
+
+// backgroundGateFullError renders the D12 fail-fast error: model-addressable,
+// listing the currently-live background ids (ids ONLY — A9, nothing
+// model/child-authored) and the recoverable actions.
+func backgroundGateFullError(ids []string) string {
+	msg := "Subagent: background subagent concurrency limit reached"
+	if len(ids) > 0 {
+		msg += "; currently running in the background: " + strings.Join(ids, ", ")
+	}
+	return msg + ". Wait for one to finish with SubagentStatus (use wait_ms), or run this task in the foreground."
 }
 
 // renderSubagentResult labels the child's terminal by stop reason (D4 — the typed result

@@ -602,9 +602,10 @@ message Subagent {
   // duration_ms is the child run's wall-clock duration in milliseconds
   // (subagent.end; best-effort).
   int64 duration_ms = 9;
-  // background reports a background (detached-delivery) child on subagent.start.
-  // DORMANT: reserved for the background-subagents iteration; the server does not
-  // set it yet.
+  // background reports a background (detached-delivery) child on subagent.start:
+  // the Subagent call returned an immediate started-result and the child keeps
+  // working while the parent run continues (its result is collected via the
+  // SubagentStatus tool).
   bool background = 10;
 }
 

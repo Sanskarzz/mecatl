@@ -106,10 +106,11 @@ emitted, via `port.Diagnostics.With`:
   children — a sub-agent's turns/tool-calls must not double-count against the
   operator-facing metrics/audit. Only Diagnostics is live for children.
 
-### The two emitters (and what is deliberately NOT emitted)
+### The three emitters (and what is deliberately NOT emitted)
 
-The agent loop emits exactly TWO run-scoped diagnostics lines, both through the
-run-scoped sink:
+The agent loop emits exactly THREE run-scoped diagnostics lines, all through the
+run-scoped sink (the third was a CONSCIOUS amendment by the background-subagents
+design — see its invariant audit):
 
 1. **Compaction failure** (`maybeCompact`, `LevelWarn`, key `error`) — the two
    branches that previously SWALLOWED a compaction error (the `Compact` error and
@@ -120,6 +121,17 @@ run-scoped sink:
    site where the permission POLICY resolves a call to `Deny`, the deny reason
    (which otherwise reaches only the client event via `denyResult`) is surfaced on
    the operator channel.
+3. **Background drain abandon** (`drainChildren`, `LevelWarn`, keys `ids`, `cap`)
+   — at run end every live BACKGROUND subagent is cancelled and joined in TWO
+   phases: a hard cap (`childDrainCap`, 10s), then — because the cap can be
+   burned by the run's OWN emit backpressure, not a wedged child — an
+   `abortEmits()` that unblocks any child parked in its own end-emit, plus a
+   short grace re-join (`childDrainGrace`, 1s). Only a child still unjoined
+   after BOTH phases is ABANDONED (the registry seal makes its residual emits
+   safe no-ops) and this one warning names the abandoned ids (ids only) — so a
+   line here means a genuinely wedged child, never a slow consumer. Rare by
+   construction: ctx-cancel kills the child's stream and shell promptly, and
+   the osfs runner's `cmd.WaitDelay` bounds the grandchild-pipe residual.
 
 Deliberately NOT emitted, because the `session.Event` taxonomy already owns them
 (emitting here would be double-logging):
@@ -131,7 +143,7 @@ Deliberately NOT emitted, because the `session.Event` taxonomy already owns them
   the policy DENY is logged, never allow or ask.
 
 Two further emissions ride the PARENT run's diagnostics (`parentCaps.diag`) at the
-supervisor/child-posture level, OUTSIDE the agent loop's two-line contract (they are
+supervisor/child-posture level, OUTSIDE the agent loop's three-line contract (they are
 not loop lines and do not count against it): the headless subagent auto-deny INFO
 (`resolveChildAsk`, when a non-interactive child's permission ask cannot be surfaced)
 and the team member-reopen-failure WARN (`warnUnexpectedReopen`, when a member's

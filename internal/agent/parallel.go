@@ -668,7 +668,7 @@ func (t *ParallelTool) launchBranch(ctx context.Context, sem chan struct{}, call
 	branchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	childID := t.childSessionID(callID, i)
-	caps.registerChildRun(childID, childFamilyParallelBranch, branchLabel(i), cancel)
+	caps.registerChildRun(childID, childFamilyParallelBranch, branchLabel(i), cancel, false)
 	select {
 	case sem <- struct{}{}:
 		defer func() { <-sem }()
@@ -676,6 +676,7 @@ func (t *ParallelTool) launchBranch(ctx context.Context, sem chan struct{}, call
 		caps.finishChildRun(childID, session.StopCancelled)
 		return cancelledBeforeStart(i, be, caps.childWasClientCancelled(childID))
 	}
+	caps.startChildRun(childID)
 	res, stop := t.runBranch(branchCtx, callID, i, task, shared, ws, be, caps)
 	caps.finishChildRun(childID, stop)
 	return res

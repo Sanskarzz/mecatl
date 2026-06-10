@@ -205,11 +205,22 @@ func TestCancelChildMidGateWait(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("cancel did not unblock the gate wait")
 	}
-	// The deferred markChildDone landed (terminal stop recorded, doneCh closed).
+	// The deferred terminal landed (doneCh closed) with the MEANINGFUL
+	// StopCancelled — a cancel-while-queued is a real disposition, kept as a done
+	// entry under the A5 vocabulary (unlike pre-start FAILURES, which are removed).
+	reg.mu.Lock()
+	e := reg.entries["subagent-p1"]
+	reg.mu.Unlock()
+	if e == nil {
+		t.Fatalf("a cancelled-while-queued child must keep its registry entry (meaningful terminal)")
+	}
 	select {
-	case <-reg.entries["subagent-p1"].doneCh:
+	case <-e.doneCh:
 	default:
-		t.Fatalf("markChildDone must land on the gate-wait exit path")
+		t.Fatalf("the terminal must land on the gate-wait exit path")
+	}
+	if e.stop != session.StopCancelled {
+		t.Fatalf("gate-wait cancel must record StopCancelled, got %q", e.stop)
 	}
 }
 
@@ -265,6 +276,42 @@ func TestCancelChildUnregistersBeforeRetract(t *testing.T) {
 	}
 	if retracts != 1 {
 		t.Fatalf("expected exactly one retract emit, got %d", retracts)
+	}
+}
+
+// TestSealUnblocksEmitParkedSend pins THE deadlock-prevention mechanic of the
+// seal: emitAbort must close BEFORE seal acquires emitMu. A goroutine parked
+// INSIDE safeEmit (emitMu held, send blocked on a full channel with NO consumer)
+// can only release emitMu once its send aborts — if seal took emitMu first, it
+// would deadlock forever behind that send. Reverting the abort-before-emitMu
+// ordering fails this test on the watchdog; nothing else in the suite catches it.
+func TestSealUnblocksEmitParkedSend(t *testing.T) {
+	reg := newChildRunRegistry()
+	events := make(chan session.Event, 1)
+	events <- session.Event{} // buffer FULL; deliberately no consumer
+	entered := make(chan struct{})
+	reg.emit = func(ev session.Event) {
+		// Once this closure runs, emitMu is already HELD by the caller (safeEmit
+		// locks it before invoking the binding) — the entered signal is therefore a
+		// deterministic "the lock is held and the send is about to park" anchor.
+		close(entered)
+		select {
+		case events <- ev:
+		case <-reg.emitAbort:
+		}
+	}
+	go reg.safeEmit(session.Event{Type: session.EvSubagentEnd})
+	<-entered
+
+	done := make(chan struct{})
+	go func() {
+		reg.seal()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("seal deadlocked behind an emit-parked send — emitAbort must close BEFORE emitMu is acquired")
 	}
 }
 
@@ -341,12 +388,12 @@ func TestChildRegistrySealVsEmitRace(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		reg := newChildRunRegistry()
 		events := make(chan session.Event, 1)
-		ctx, cancel := context.WithCancel(context.Background())
-		// The production binding shape (Run.tryEmit): send, or give up at ctx end.
+		// The production binding shape (Run.emitOrAbort): a blocking send that gives
+		// up only when the registry's seal-abort channel closes.
 		reg.emit = func(ev session.Event) {
 			select {
 			case events <- ev:
-			case <-ctx.Done():
+			case <-reg.emitAbort:
 			}
 		}
 		var consumed sync.WaitGroup
@@ -370,9 +417,9 @@ func TestChildRegistrySealVsEmitRace(t *testing.T) {
 				}
 			}
 		}()
-		// Teardown in production order: cancel (frees a blocked send), seal (bars
-		// future sends + waits out an in-flight one), close (must now be safe).
-		cancel()
+		// Teardown in production order: seal (closes the abort channel FIRST —
+		// freeing a blocked send — then bars future sends + waits out an in-flight
+		// one), close (must now be safe).
 		reg.seal()
 		close(events)
 		// A post-seal emit against the CLOSED channel must be a silent no-op — if the

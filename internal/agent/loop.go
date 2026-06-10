@@ -496,22 +496,30 @@ func (e *Engine) RunContentWith(ctx context.Context, sess *session.Session, ws t
 	}
 	// The child-run registry is created UNCONDITIONALLY (cancel is interactive-only
 	// but the registry's bookkeeping is not), with its emit bound to this run's
-	// sequenced stream via tryEmit — a send that gives up when the run context ends,
-	// so a CancelChild retraction can never park the readControl goroutine behind a
-	// wedged consumer (retraction is a UX courtesy; the router unregister already
-	// happened, so dropping it is safe). A delivered retraction mirrors to the sink
-	// like every loop emit.
+	// sequenced stream via emitOrAbort — a send that blocks until delivered (the
+	// loop's own backpressure semantics, so a cancelled run's in-flight child
+	// events still reach the draining consumer — e.g. the bracketing
+	// parallel.branch events of a cancelled-before-start branch) and gives up ONLY
+	// when the registry seals (run end / drain abandon), so a child goroutine (or
+	// the readControl goroutine inside CancelChild) is never parked past the run's
+	// own teardown behind a wedged consumer. ALL child-originated emits route
+	// through registry.safeEmit over this binding (A4c); a delivered event mirrors
+	// to the sink like every loop emit.
 	r.children = newChildRunRegistry()
 	r.children.emit = func(ev session.Event) {
-		if r.tryEmit(ev) && e.deps.Sink != nil {
+		if r.emitOrAbort(ev, r.children.emitAbort) && e.deps.Sink != nil {
 			e.deps.Sink.Emit(r.ctx, ev)
 		}
 	}
 	go func() {
-		// Defers run LIFO: cancel FIRST (so an in-flight retract send blocked on a
-		// full channel aborts via its ctx select and releases the registry's emitMu),
-		// then seal (a concurrent CancelChild retraction either completes/aborts
-		// before the channel closes or becomes a safe no-op), then close.
+		// Defers run LIFO: cancel first (releases the run's ctx tree), then the
+		// belt-and-braces seal — its abort-before-emitMu ordering closes emitAbort,
+		// which is what unwinds any guarded send still parked on a full events
+		// channel (Run.emitOrAbort selects on it; the run ctx is NOT a guarded
+		// send's escape hatch), then sets sealed so every later emit is a safe
+		// no-op — and only THEN close(r.events): seal-before-close is the
+		// send-on-closed-channel panic guard. (drive's terminate paths normally
+		// drain+seal already; this defer covers them idempotently.)
 		defer close(r.events)
 		defer r.children.seal()
 		defer cancel()
@@ -1057,7 +1065,8 @@ func (e *Engine) maybeCompact(ctx context.Context, r *Run, sess *session.Session
 		// uncompacted is diagnosable. Behaviour is unchanged (still continue).
 		// ErrCompactionWouldOrphan (a compactor refusing to emit a tool-pairing-
 		// invalid history) lands here too, reusing this WARN — no new diagnostics
-		// line, preserving the "loop emits exactly TWO lines" invariant.
+		// line, preserving the "loop emits exactly THREE lines" invariant (the third
+		// is the run-end background drain-abandon WARN).
 		r.diag.Log(ctx, port.LevelWarn, "compaction failed; continuing without compaction", "error", err)
 		return false
 	}
@@ -1100,28 +1109,122 @@ func (r *Run) emit(ev session.Event) session.Event {
 	return ev
 }
 
-// tryEmit is emit's give-up-on-teardown sibling for OUT-OF-BAND emitters (the
-// child registry's permission.retract): it publishes ev like emit but selects on
-// the run context instead of blocking indefinitely, so a caller on a foreign
-// goroutine (readControl driving CancelChild) can never wedge behind a consumer
-// that stopped draining. It reports whether the event was delivered; a dropped
-// event consumes its Seq (monotonicity holds, gaps are fine — clients order by
-// Seq, they do not count it). The loop's own emits keep the plain blocking emit
-// (their backpressure is intended).
-func (r *Run) tryEmit(ev session.Event) bool {
+// emitOrAbort is emit's give-up-at-seal sibling for the OUT-OF-BAND child
+// emitters (the child registry's guarded emits — subagent.*, parallel.*,
+// surfaced asks, permission.retract). It publishes ev like emit — BLOCKING, the
+// intended backpressure, and crucially still delivering on a CANCELLED run whose
+// consumer drains until close (a cancelled-before-start branch's bracketing
+// events must be represented) — but selects on the registry's seal-abort channel
+// instead of blocking past the run's teardown: abort closes at seal-INTENT
+// (drainChildren / the run goroutine's deferred seal), so a send parked on a
+// full channel behind a consumer that stopped draining unwinds when the run
+// ends, releasing the registry's emitMu so seal itself can never deadlock. It
+// reports whether the event was delivered; a dropped event consumes its Seq
+// (monotonicity holds, gaps are fine — clients order by Seq, they do not count
+// it).
+func (r *Run) emitOrAbort(ev session.Event, abort <-chan struct{}) bool {
 	ev.Seq = r.seq.Add(1)
 	select {
 	case r.events <- ev:
 		return true
-	case <-r.ctx.Done():
+	case <-abort:
 		return false
 	}
+}
+
+// childDrainCap bounds phase 1 of the run-end join on cancelled background
+// children. A var only as a TEST seam (the drain tests shorten it; nothing
+// outside tests writes it) — operationally it is a constant, deliberately NOT a
+// Deps/Config knob (operator tuning would be overkill for a backstop):
+// ctx-cancel kills a child's in-flight model stream and Bash process promptly
+// (the adapters swallow the cancel; exec.CommandContext kills; the osfs runner's
+// cmd.WaitDelay bounds the residual grandchild-pipe wait), so a child that has
+// not joined within 10s is either genuinely wedged or parked on its own EMIT
+// (consumer backpressure) — which phase 2 disambiguates.
+var childDrainCap = 10 * time.Second
+
+// childDrainGrace bounds phase 2 of the join: after aborting emits (abortEmits)
+// a child that was merely EMIT-BLOCKED unwinds immediately — the grace only
+// needs to cover its post-emit teardown (persist, worktree cleanup). Same
+// test-seam-var rationale as childDrainCap.
+var childDrainGrace = 1 * time.Second
+
+// drainChildren is the shared pre-terminal hook (A4b — the TOP of both terminate
+// paths): cancel every live BACKGROUND child, join their doneChs, WARN once
+// about any GENUINELY-abandoned ids (ids only — A9), then SEAL the registry so a
+// residual post-seal emit is a safe no-op. Running it BEFORE the terminal emit
+// means a drained child's subagent.end precedes the run's EvResult on the stream
+// (healthy-consumer ordering unchanged). Foreground/team/parallel children are
+// synchronous inside their tool calls and cannot be live here; for the common
+// no-background run this is a map scan + a seal.
+//
+// The join is TWO-PHASE because phase 1's cap can be burned by the run's OWN
+// emit backpressure, not a wedged child: a child whose subagent.end send is
+// parked on a full events channel (the consumer stopped draining) cannot reach
+// markDone until that send aborts — and the abort signal (emitAbort) used to
+// close only in seal, AFTER the join had already given up. So: phase 1 joins
+// under childDrainCap; on expiry, abortEmits() unblocks every emit-parked child
+// NOW and phase 2 re-joins the remainder under childDrainGrace; only children
+// STILL unjoined after both phases are abandoned and WARNed — consumer
+// backpressure is never misattributed as a wedged child, and the abandon WARN
+// (the consciously-amended THIRD loop diagnostics line) stays truthful. Cost on
+// the unhealthy path only: the post-abort end events are dropped instead of
+// delivered — they were going nowhere.
+//
+// I3b note: the background-pending nudge must be checked in finishTurnNoTools
+// BEFORE its clean-terminal calls — by the time this hook runs, the children it
+// would ask about are already cancelled and the registry sealed.
+func (*Engine) drainChildren(ctx context.Context, r *Run) {
+	joins := r.children.cancelLiveBackground()
+	if len(joins) > 0 {
+		if pending := joinChildren(joins, childDrainCap); len(pending) > 0 {
+			// Phase 2: unblock emit-parked children, then grant the short grace.
+			r.children.abortEmits()
+			if pending = joinChildren(pending, childDrainGrace); len(pending) > 0 {
+				abandoned := make([]string, 0, len(pending))
+				for _, j := range pending {
+					abandoned = append(abandoned, j.id)
+				}
+				r.diag.Log(ctx, port.LevelWarn,
+					"abandoning background subagents that did not stop within the run-end drain cap",
+					"ids", strings.Join(abandoned, ","), "cap", (childDrainCap + childDrainGrace).String())
+			}
+		}
+	}
+	r.children.seal()
+}
+
+// joinChildren waits up to d for each join's doneCh under ONE shared timer and
+// returns the joins still pending when it expires (nil when all joined).
+func joinChildren(joins []backgroundJoin, d time.Duration) []backgroundJoin {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	var pending []backgroundJoin
+	expired := false
+	for _, j := range joins {
+		if !expired {
+			select {
+			case <-j.doneCh:
+				continue
+			case <-timer.C:
+				expired = true
+			}
+		}
+		// Budget elapsed: sweep the rest non-blockingly.
+		select {
+		case <-j.doneCh:
+		default:
+			pending = append(pending, j)
+		}
+	}
+	return pending
 }
 
 // terminate ends the run with a non-success terminal state. It moves the session
 // to the matching terminal state (Cancel for cancelled, Fail for error, Stop for
 // a tripped limit) and emits the terminal result Event.
 func (e *Engine) terminate(ctx context.Context, r *Run, sess *session.Session, reason session.StopReason, text string, usage session.Usage, cause error) {
+	e.drainChildren(ctx, r)
 	switch reason {
 	case session.StopCancelled:
 		_ = sess.Cancel()
@@ -1144,6 +1247,7 @@ func (e *Engine) terminate(ctx context.Context, r *Run, sess *session.Session, r
 // terminateComplete ends the run successfully (the model finished its turn),
 // recording the explicit stop reason and emitting the result Event.
 func (e *Engine) terminateComplete(ctx context.Context, r *Run, sess *session.Session, reason session.StopReason, text string, usage session.Usage) {
+	e.drainChildren(ctx, r)
 	if !sess.State.IsTerminal() {
 		_ = sess.Stop(reason)
 	}

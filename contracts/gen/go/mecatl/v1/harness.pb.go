@@ -2014,9 +2014,10 @@ type Subagent struct {
 	// duration_ms is the child run's wall-clock duration in milliseconds
 	// (subagent.end; best-effort).
 	DurationMs int64 `protobuf:"varint,9,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
-	// background reports a background (detached-delivery) child on subagent.start.
-	// DORMANT: reserved for the background-subagents iteration; the server does not
-	// set it yet.
+	// background reports a background (detached-delivery) child on subagent.start:
+	// the Subagent call returned an immediate started-result and the child keeps
+	// working while the parent run continues (its result is collected via the
+	// SubagentStatus tool).
 	Background    bool `protobuf:"varint,10,opt,name=background,proto3" json:"background,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

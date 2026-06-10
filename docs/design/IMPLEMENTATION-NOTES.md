@@ -125,7 +125,7 @@ guaranteed one more model turn before give-up — a model that answers on that t
 final one → extractive only, no gentle attempt (no `tool_choice` forcing on either nudge; both are
 plain `RoleUser` messages). Each nudge emits a visible `EvNoProgress` event (transient, advisory,
 NOT recorded to history, NOT a diagnostics line — the event taxonomy owns it, so the "loop emits
-exactly TWO diagnostic lines" invariant holds); the final/extractive attempt carries a DISTINCT
+exactly THREE diagnostic lines" invariant holds); the final/extractive attempt carries a DISTINCT
 advisory text ("final attempt: requesting a best-effort answer") so clients can render it as a
 last-ditch notice, while the gentle advisory and terminal give-up texts are unchanged. On budget exhaustion the
 run terminates CLEANLY via `terminateComplete` with `StopNoProgress` — a NON-error terminal, so
@@ -373,13 +373,13 @@ generic cancel). Re-registration of a resumed id within one run OVERWRITES the d
 fresh `doneCh` (never double-closed — A5); `markDone` is idempotent. The
 `sealed`/`background`/`result`/`delivered`/`doneCh` fields are present per the registry design but
 only the cancel-relevant paths are exercised. LOCKING is split per concern: `mu` guards the entries
-map (short sections, never across a send) and a separate `emitMu` guards `sealed` + the retract send
-as ONE locked section (A4a holds; a send waiting on the events channel can never wedge markDone /
-sibling registration behind it). The retract send itself is `Run.tryEmit` — it selects on the run
-ctx instead of blocking, so a wedged consumer cannot park the readControl goroutine inside
-CancelChild (retraction is a UX courtesy; the router unregister already happened, so dropping is
-safe); the run goroutine's teardown order is cancel → seal → close, so an in-flight blocked send
-aborts before seal waits on emitMu. `Run.CancelChild(childID) bool` is the Approve
+map (short sections, never across a send) and a separate `emitMu` guards `sealed` + every guarded
+send as ONE locked section (A4a holds; a send waiting on the events channel can never wedge markDone /
+sibling registration behind it). (I3a generalised the emit semantics: the bound send is now
+`Run.emitOrAbort` — blocking until delivered, giving up only when the registry's seal-abort channel
+`emitAbort` closes at seal-intent — so a cancelled run's in-flight child events still reach the
+draining consumer and seal can never deadlock behind a blocked send; the original ctx-select
+`tryEmit` is gone.) `Run.CancelChild(childID) bool` is the Approve
 mirror: idempotent, unknown/done → false; on a live child it sets `clientCancelled`, snapshots+clears
 the child's surfaced askIDs, invokes `cancel()` OUTSIDE the registry lock, then per askID
 `childAskRouter.unregister` (a locked delete) BEFORE emitting the new `permission.retract` event
@@ -403,9 +403,9 @@ and a PARENT-run cancel keeps the legacy un-noted rendering. A client-cancelled 
 race is benign); `Service.CancelChild` (Approve-mirror: LookupRun → `ErrChildNotFound` on false —
 worded FAMILY-NEUTRALLY ("child agent …") so it stays truthful when team/parallel cancel lands;
 store fallback ErrNotFound/ErrNoActiveRun) backs HTTP `POST /v1/sessions/{id}/cancel-child`. The
-SAME regen landed the three DORMANT fields for the next iterations (A10): `Subagent.background=10`,
-`Parallel.child_id=18`, `Team.member_session_id=18` (17 is taken by dispositions — A1); no mapper
-writes them yet. mecatui: the ctrl+a Subagents tab gains an `x` cancel key (roster + focus pane,
+SAME regen landed the three DORMANT fields for the next iterations (A10): `Subagent.background=10`
+(now written by the mapper since I3a), `Parallel.child_id=18`, `Team.member_session_id=18` (17 is
+taken by dispositions — A1; both written since I2). mecatui: the ctrl+a Subagents tab gains an `x` cancel key (roster + focus pane,
 non-terminal lanes only, confirm-less — recoverable) sending `client.Stream.SendCancelChild`;
 `permission.retract` maps to `PermissionRetractMsg` and dismisses the approval modal iff the pending
 `m.ask.AskID` matches (there is NO ask queue — a single modal slot; non-matching/stale retracts are
@@ -478,6 +478,94 @@ driven)/`TestCancelMemberUnknownFalse`/`TestCancelChildReachesTeamMember` (regis
 `team.member.member_session_id`, member disposed stopped/cancelled, team still delivers) + the
 mapper child_id/member_session_id cases, `client` EventToMsg cases, and
 `ui.TestParallelBranchCancel*`/`TestTeam*Cancel*` (send + done-lane/handle-less no-ops).
+
+**Background subagents — mechanics + SubagentStatus + seal/drain + gate fail-fast
+(BACKGROUND-SUBAGENTS I3a; I3b = notice injection + background-pending nudge is NEXT).**
+`subagentArgs.Background` detaches a Subagent child, RUN-scoped (D8): after validation/in-flight
+guard/registration, `startBackground` does a FAIL-FAST gate acquisition (`tryAcquireChildSlot`,
+D12 — a background child holds its slot ACROSS turns, so blocking could deadlock the model against
+itself; the error lists the live background ids, ids ONLY per A9, + the recoverable action — with
+abort() ORDERED BEFORE the ids read, so the failing call's own pre-gate registration is never
+listed as "currently running"), a
+fail-fast SYNCHRONOUS resume load (an unknown/non-resumable id errors inline, never as a collectible
+surprise), emits `EvSubagentStart{Background:true}` SYNCHRONOUSLY before the spawn (A5 deterministic
+start-before-started-result; proto `Subagent.background=10` now mapped), then spawns
+`driveBackground` — the goroutine owning fork → drive → persist → `markDoneResult(rendered result +
+stop)` plus the transferred lifecycle handles (per-call cancel, timeout cancel, gate release,
+in-flight id). The immediate started-result rides `renderSubagentTrailer` (agentId FIRST line, the
+existing convention) with the amended D7 body ("collect with SubagentStatus … wait_ms … cancelled if
+still running when this run ends"). A POST-spawn failure (fork/session-build) is COLLECTIBLE
+(done+StopError, the error text as the stored body, a closing subagent.end) — the model already holds
+"started". Background composes with resume/output_schema (retry loop runs inside the goroutine)/
+tighten-only limits/timeout_ms/agent/model; the in-flight guard still rejects resuming a
+still-running background id. **`SubagentStatus`** (`subagentstatus.go`, read-only, registered at both
+build.go sites alongside InspectSubagent — never in child catalogs) is the SOLE body channel (A2):
+no args → an id-sorted roster (id/family/background/state/stop — ids + enum labels only, A9, no goal);
+`agent_id` → state, or the stored rendered body for a done background child (collect marks
+`delivered`; a second collect reports "already delivered" — exactly-once, never re-bloats context;
+a done FOREGROUND child reports result-was-inline; error bodies re-key to the status call preserving
+IsError); `wait_ms` (capped `maxSubagentStatusWaitMs` 120000, documented dispatch-slot note — A3)
+parks ctx-aware on the target's `doneCh`, or — for any-child — on the registry's terminal-GENERATION
+channel taken via `liveGeneration()`, a SINGLE locked snapshot of (liveness, generation): separate
+anyLive/generationCh reads had a TOCTOU window where a terminal landing between them parked the
+waiter on the fresh generation for its full capped wait. State/collection wording is FAMILY-AWARE
+(`childKindLabel`): a done team-member/parallel-branch id points at the Team report (InspectMember) /
+the Parallel result, never at "its own Subagent call". **Run-end drain + seal (A4):**
+`drainChildren` sits at the TOP of BOTH `terminate` and `terminateComplete` — cancel every live
+background entry (`cancelLiveBackground`, cancels invoked outside the lock), then a TWO-PHASE join:
+phase 1 joins each `doneCh` under `childDrainCap` (10s; a var only as a test seam, operationally a
+constant — ctx-cancel kills stream+shell promptly and osfs `cmd.WaitDelay` bounds the
+grandchild-pipe residual per A7); on expiry, the cap may have been burned by the run's OWN emit
+backpressure (a child parked in its end-send on a full events channel cannot reach markDone until
+the send aborts), so phase 2 calls `registry.abortEmits()` (the same sealOnce'd emitAbort close seal
+performs) and re-joins under `childDrainGrace` (1s); only children STILL unjoined after both phases
+are ABANDONED with ONE operator WARN (ids only — the consciously-amended THIRD loop diagnostics
+line; CLAUDE.md + DIAGNOSTICS.md updated — never misattributing consumer backpressure as a wedged
+child), then `seal()` — so on the healthy path a drained child's subagent.end PRECEDES the terminal
+EvResult (A4b). ALL child-originated emits (subagent.start/tool/end, the surfaced-ask
+EvPermissionAsk in `parentCaps`, permission.retract) route through `registry.safeEmit` (A4c): a
+locked sealed-check+send (A4a), bound to `Run.emitOrAbort` — BLOCKING (a cancelled run's in-flight
+child events still reach the draining consumer; the bracketing parallel.branch events of a
+cancelled-before-start branch must be represented) and aborted only by `emitAbort`, which `seal`
+closes BEFORE taking `emitMu` so seal can never deadlock behind a blocked send (the single
+deadlock-prevention mechanic, pinned by `TestSealUnblocksEmitParkedSend`). **A5 state
+vocabulary** (documented in childregistry.go): `childQueued → childRunning → childDone`
+(`markRunning` at slot acquisition / branch start / member enrolment); a PRE-START failure whose
+error returned inline (fork/resume-load/session-build, the background gate-full path) REMOVES the
+entry (`remove` — closes doneCh so waiters wake, no done+StopNone phantom); a cancel-while-queued
+keeps a MEANINGFUL done+StopCancelled entry; a never-driven, never-cancelled team member is removed
+at `cleanupAll` (`memberRT.ran`, set in `driveOneTurn`) instead of fabricated done+StopEndTurn;
+`remove` is a no-op for done entries (never erase a real terminal). Register-over-done (a `resume`
+of an already-run id) STASHES the displaced terminal entry (`childEntry.displaced`); a pre-start
+abort of the resume attempt REINSTATES it — a failed resume can never erase the prior child's
+undelivered background result — and `markRunning`/`markDone` drop the stash (the overwrite is then
+permanent). **osfs (A7):** `cmd.WaitDelay`
+(default 5s, `WithCommandWaitDelay` test seam) bounds the post-exit/post-cancel pipe wait a
+grandchild's inherited fds caused; `exec.ErrWaitDelay` on a zero-exit shell is treated as success
+with the captured output. Guards: `agent.TestBackgroundSubagentHappyPath` (REAL-loop e2e: immediate
+started-result + same-turn second tool + wait_ms collection),
+`TestBackgroundSubagentAlreadyDelivered`, `TestSubagentStatusPollBeforeDone`,
+`TestBackgroundChildCancelledAtRunEnd` (drain + end-before-EvResult ordering + persisted-cancelled +
+resume in a NEW run), `TestBackgroundChildSurfacedAskAnsweredMidRun` (D11/A8),
+`TestBackgroundChildCancelledWhileParkedOnAsk` (retract + collectible cancel note),
+`TestBackgroundGateFullFailFast` (ids listed, self-id ABSENT, phantom removed) +
+`TestBackgroundGateFullAbortsPhantomAndListsIDs`, `TestBackgroundStructuredOutput`,
+`TestCompactionDuringLiveBackgroundChild`, `TestSubagentStatusWaitRespectsRunCancel`,
+`TestBackgroundComposesWithResume`, `TestSubagentBackgroundWithoutRegistryErrors`,
+`TestEffectiveStatusWaitClamp`, `TestChildRegistryCollectOutcomes`/`TestChildRegistryRemoveSemantics`,
+`TestSubagentForegroundForkFailureAbortsEntry`/`TestBackgroundForkFailureIsCollectible`,
+`TestChildRegistrySafeEmitSealedFullSurface` (+ the I1 seal-vs-emit race retuned to the
+emitOrAbort binding), the updated `TestCancelChildMidGateWait` (StopCancelled pinned) and
+`TestCleanupAllAttributesIdleClientCancel` (never-ran member removed), and
+`osfs.TestCommandRunnerWaitDelayUnblocksGrandchildPipeWait`. The post-panel hardening pass added:
+`TestDrainTwoPhaseJoinsEmitParkedChild` (consumer backpressure joins, no WARN) /
+`TestDrainAbandonsGenuinelyWedgedChildWithOneWarn` (exactly one ids-only WARN + post-seal no-op) /
+`TestDrainCleanNoWarn`, `TestSealUnblocksEmitParkedSend` (the abort-before-emitMu deadlock pin),
+`TestChildRegistryRemoveReinstatesDisplacedEntry` + `TestFailedResumeAttemptPreservesUndeliveredResult`
+(failed-resume erase), `TestLiveGenerationSnapshotConsistent` +
+`TestWaitForChildAnyReturnsPromptlyOnConcurrentTerminal` (the any-wait TOCTOU), and the A5
+sync-start ordering pin inside the happy path. The goleak gate (leakmain) covers the
+drain: a leaked background goroutine fails the whole agent package.
 
 **Subagent per-call token ceiling (`max_tokens`, Run-scoped budget override — R4).** `subagentArgs.MaxTokens`
 rides the new `RunOptions.MaxRunTokensOverride` carried into `Engine.RunContentWith`, so a per-call
@@ -734,7 +822,7 @@ The fix has three layers, all pure/offline:
   small `finish(conv,head,middle,tail,paths,notes)` helper so all five tier return points validate.
 - **Loop + aggregate backstop.** `maybeCompact` treats `ErrCompactionWouldOrphan` like the existing
   Compact-error branch (WARN + return false, no compaction Event, REUSING the existing WARN line so
-  the "loop emits exactly TWO diagnostics lines" invariant holds), and runs a defensive
+  the "loop emits exactly THREE diagnostics lines" invariant holds), and runs a defensive
   `ValidateToolPairing(compacted)` between `Compact` and `ReplaceHistory`. `Session.ReplaceHistory`
   itself now rejects an unpaired slice (aggregate-level guard), so the existing ReplaceHistory-reject
   branch catches pairing failures for free.
@@ -1076,7 +1164,7 @@ existing server-global tool of the same name (the global tool wins): <names>"* (
 client↔global tier, the line an end-user reads); the per-session GLOBAL mount and
 build-time `registerMCP` GLOBAL mount → *"server-global MCP: skipped duplicate tool
 name(s) (a server advertised a name already registered): <names>"* (a within-/across-global
-defective-server condition). These are composition logs, so the loop's two-line
+defective-server condition). These are composition logs, so the loop's three-line
 diagnostics invariant does not apply. (Identity-dedup, a `CreateSessionResponse` skipped
 field, and TUI rendering are a deferred follow-up — out of scope.) **Lifecycle:**
 `globalMgr` is owned by `Build` — it is reused (NOT reconnected) and its `Close` is NEVER

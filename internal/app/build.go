@@ -777,6 +777,11 @@ func sessionEngineFactory(
 		// result's agentId trailer). Registered unconditionally wherever Subagent is —
 		// unlike InspectMember it is not gated on EnableTeams.
 		cat.MustRegister(agent.NewInspectSubagentTool(store))
+		// The LIVE this-run child status / background-result collection tool: reads
+		// the parent run's child registry via parentCaps (no store), the sole body
+		// channel for `background: true` Subagent children. Registered wherever
+		// Subagent is (like InspectSubagent), never in child catalogs.
+		cat.MustRegister(agent.NewSubagentStatusTool())
 		if cfg.EnableTeams {
 			// In-catalog Team tool over a per-session member factory wired to the session
 			// provider as parent. (The standalone gRPC CreateTeam RPC stays on the default
@@ -1524,6 +1529,11 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	// result's agentId trailer). Registered unconditionally wherever Subagent is —
 	// unlike InspectMember it is not gated on EnableTeams.
 	cat.MustRegister(agent.NewInspectSubagentTool(store))
+	// The LIVE this-run child status / background-result collection tool: reads the
+	// parent run's child registry via parentCaps (no store), the sole body channel
+	// for `background: true` Subagent children. Registered wherever Subagent is
+	// (like InspectSubagent), never in child catalogs.
+	cat.MustRegister(agent.NewSubagentStatusTool())
 	// Aggregate the per-def INLINE MCP managers' teardown into the main MCP close, so
 	// Built.Close tears them ALL down on shutdown (process-lifetime engines).
 	mcpClose = composeClose(cfg.diag(), taskMCPClose, mcpClose)

@@ -419,9 +419,15 @@ func (e *Engine) timeExecute(ctx context.Context, r *Run, ws tool.Workspace, tur
 		res session.ToolResult
 		err error
 	)
+	// CHILD emits route through the registry's seal guard (A4c): a background
+	// child's goroutine outlives its dispatch slot and may emit subagent.tool/end
+	// while the loop is terminating — safeEmit makes a post-seal emit a silent
+	// no-op (never a send-on-closed-channel panic) and an in-drain emit a
+	// give-up-at-seal send (Run.emitOrAbort, bound in RunContentWith), which
+	// still sequences + sink-mirrors a delivered event exactly like e.emit.
 	emit := func(ev session.Event) {
 		ev.Turn = turnIdx
-		e.emit(r, ev)
+		r.children.safeEmit(ev)
 	}
 	switch ct := t.(type) {
 	case childCapableTool:
@@ -456,7 +462,7 @@ func (e *Engine) timeExecute(ctx context.Context, r *Run, ws tool.Workspace, tur
 // (gauntlet #7: an ASK with a tool name + clamped command + static-framed reason, never
 // transcript content). diag is the parent run's run-scoped diagnostics for the headless
 // auto-deny operator line.
-func (e *Engine) parentCaps(r *Run, turnIdx int) parentCaps {
+func (*Engine) parentCaps(r *Run, turnIdx int) parentCaps {
 	interactive := r.childAsks != nil
 	caps := parentCaps{
 		interactive: interactive,
@@ -498,7 +504,11 @@ func (e *Engine) parentCaps(r *Run, turnIdx int) parentCaps {
 				Reason: fmt.Sprintf("%s requests approval to run %s: %s",
 					requester, ask.Tool, clampPreview(surfacedCommandPreview(ask))),
 			}
-			e.emit(r, session.Event{Type: session.EvPermissionAsk, Turn: turnIdx, Ask: &surfaced})
+			// CHILD-originated emit: through the seal guard (A4c) — a BACKGROUND
+			// child can surface an ask from its own goroutine at any point, including
+			// while the run terminates; post-seal this is a safe no-op (the child's
+			// parked await then unwinds via its cancelled ctx, not a verdict).
+			r.children.safeEmit(session.Event{Type: session.EvPermissionAsk, Turn: turnIdx, Ask: &surfaced})
 		}
 	}
 	return caps

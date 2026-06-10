@@ -331,7 +331,16 @@ type memberRT struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	ranInitial bool
-	stopped    bool
+	// ran reports that this member was DRIVEN at least once (set at the top of
+	// driveOneTurn — rounds AND the lead-synthesis drive). cleanupAll reads it for
+	// the A5 ghost-entry vocabulary: a never-driven, never-cancelled member (an
+	// enrolment-failure teardown, or a member no round ever scheduled) has its
+	// registry entry REMOVED rather than fabricated done-with-StopEndTurn. Written
+	// by the member's own runTurn goroutine / the synthesis drive and read by
+	// cleanupAll on the Run goroutine AFTER the rounds join — the same
+	// single-goroutine happens-before discipline as turnsUsed.
+	ran     bool
+	stopped bool
 	// nonResumable is true when the member's session can NO LONGER be driven — its
 	// last run failed (StopError) or Reopen failed. It is DISTINCT from stopped: a
 	// member stopped purely by its lifetime turn budget is non-schedulable but its
@@ -641,7 +650,11 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 	// nothing and the member simply is not client-cancellable there (the whole-stream
 	// cancel covers it — D4). The member name is the registry's display goal.
 	memberCtx, memberCancel := context.WithCancel(context.Background())
-	s.caps.registerChildRun(sess.ID, childFamilyTeamMember, spec.Name, memberCancel)
+	s.caps.registerChildRun(sess.ID, childFamilyTeamMember, spec.Name, memberCancel, false)
+	// A member is long-lived: its entry advances to RUNNING at enrolment and stays
+	// there across rounds (idle-between-rounds is still cancellable — design §1.2);
+	// done means de-scheduled (see childFamilyTeamMember's caution).
+	s.caps.startChildRun(sess.ID)
 
 	s.members[spec.Name] = &memberRT{spec: spec, engine: eng, ws: ws, cleanup: cleanup, sess: sess,
 		isolated: needFork, ctx: memberCtx, cancel: memberCancel}
@@ -1086,6 +1099,9 @@ func (s *Supervisor) fireTeammateIdle(ctx context.Context, m *memberRT) {
 // (per round) and synthesise (the lead's one final turn). It does NOT Reopen, persist,
 // or do budget bookkeeping — that stays with the callers.
 func (s *Supervisor) driveOneTurn(ctx context.Context, m *memberRT, prompt string, evCh chan<- TeamEvent) (text string, stop session.StopReason, usage session.Usage) {
+	// This member has genuinely been driven: cleanupAll's A5 vocabulary keeps its
+	// registry entry (real terminal) rather than removing it as never-ran.
+	m.ran = true
 	// Each drive's ctx derives from BOTH the run ctx (the loop's whole-team bound)
 	// and the member's per-member cancel signal: a CancelMember/CancelChild fired
 	// mid-drive cancels THIS drive (the loop classifies it StopCancelled and runTurn
@@ -1380,28 +1396,42 @@ func (s *Supervisor) teamTokensUsed() session.Usage {
 }
 
 // cleanupAll tears down every forked member workspace, releases every per-member
-// cancel ctx, and marks every member's registry entry done (the team has ended —
-// idempotent markDone, so a member the supervisor already stopped keeps its real
-// terminal stop; the stop landed here covers only members no earlier path marked).
-// The registry stop is attributed from the member ctx BEFORE this loop fires its
-// own release-cancel: a member whose client cancel landed while idle in the FINAL
-// round (planRound never ran again to observe it) must read StopCancelled, not
-// StopEndTurn.
+// cancel ctx, and settles every member's registry entry (the team has ended).
+// The disposition follows the A5 state vocabulary:
+//
+//   - a member that RAN at least one drive (m.ran), or that was CANCELLED (its
+//     ctx died — even while idle), lands a real terminal: idempotent markDone, so
+//     a member the supervisor already stopped keeps its real terminal stop; the
+//     stop landed here covers only members no earlier path marked. The stop is
+//     attributed from the member ctx BEFORE this loop fires its own
+//     release-cancel: a member whose client cancel landed while idle in the FINAL
+//     round (planRound never ran again to observe it) must read StopCancelled,
+//     not StopEndTurn.
+//   - a member that NEVER ran and was never cancelled — an enrolment-failure
+//     teardown (the Team tool's cleanupAll on a failed AddMember), or a member no
+//     round ever scheduled — is a PRE-START ABORT: its registry entry is removed
+//     (nothing to inspect/resume), never fabricated done-with-StopEndTurn.
 func (s *Supervisor) cleanupAll() {
 	for _, name := range s.order {
 		m := s.members[name]
 		if m == nil {
 			continue
 		}
-		stop := session.StopEndTurn
-		if m.ctx != nil && m.ctx.Err() != nil {
-			stop = session.StopCancelled
-		}
+		cancelled := m.ctx != nil && m.ctx.Err() != nil
 		if m.cancel != nil {
 			m.cancel()
 		}
 		if m.sess != nil {
-			s.caps.finishChildRun(m.sess.ID, stop)
+			switch {
+			case m.ran || cancelled:
+				stop := session.StopEndTurn
+				if cancelled {
+					stop = session.StopCancelled
+				}
+				s.caps.finishChildRun(m.sess.ID, stop)
+			default:
+				s.caps.abortChildRun(m.sess.ID)
+			}
 		}
 		if m.cleanup != nil {
 			_ = m.cleanup()

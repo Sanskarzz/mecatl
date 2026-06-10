@@ -155,6 +155,32 @@ func TestCommandRunnerTimeout(t *testing.T) {
 	}
 }
 
+// TestCommandRunnerWaitDelayUnblocksGrandchildPipeWait pins the A7 hardening: a
+// GRANDCHILD that inherits the output pipes (`sleep 5 &`) used to park cmd.Wait
+// on the pipe-copy goroutines until the grandchild exited (~5s here; up to the
+// 30s default ctx timeout in general) even though the shell itself exited
+// immediately. With cmd.WaitDelay set, Run returns once the delay elapses after
+// the shell's exit — as a SUCCESS carrying the output captured so far (the
+// exec.ErrWaitDelay sentinel is not a command failure).
+func TestCommandRunnerWaitDelayUnblocksGrandchildPipeWait(t *testing.T) {
+	r, err := osfs.NewCommandRunnerShell(t.TempDir(), "/bin/sh", osfs.WithCommandWaitDelay(200*time.Millisecond))
+	if err != nil {
+		t.Fatalf("NewCommandRunnerShell: %v", err)
+	}
+	start := time.Now()
+	res, err := r.Run(context.Background(), "sleep 5 & echo started", "")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("a WaitDelay expiry on a successful command must be a success, got err = %v", err)
+	}
+	if res.ExitCode != 0 || !strings.Contains(res.Stdout, "started") {
+		t.Fatalf("captured output must survive the WaitDelay close, got exit=%d stdout=%q", res.ExitCode, res.Stdout)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("Run blocked %v on the grandchild's inherited pipe; WaitDelay must bound it", elapsed)
+	}
+}
+
 func TestCommandRunnerEmptyShellRejected(t *testing.T) {
 	if _, err := osfs.NewCommandRunnerShell(t.TempDir(), ""); err == nil {
 		t.Fatal("NewCommandRunnerShell with empty shell = nil err, want error")

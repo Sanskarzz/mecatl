@@ -189,7 +189,13 @@ func TestCleanupAllAttributesIdleClientCancel(t *testing.T) {
 		t.Fatalf("idle-cancelled member's registry stop = %q, want %q (attribution must precede the release-cancel)",
 			got, session.StopCancelled)
 	}
-	if got := stopOf(string(sup.members["lead"].sess.ID)); got != session.StopEndTurn {
-		t.Fatalf("clean member's registry stop = %q, want %q", got, session.StopEndTurn)
+	// The lead NEVER ran a drive and was never cancelled: under the A5 state
+	// vocabulary cleanupAll REMOVES its entry (a pre-start abort) rather than
+	// fabricating done-with-StopEndTurn — the ghost this team had before.
+	reg.mu.Lock()
+	_, leadPresent := reg.entries[string(sup.members["lead"].sess.ID)]
+	reg.mu.Unlock()
+	if leadPresent {
+		t.Fatalf("a never-driven, never-cancelled member must be REMOVED at cleanupAll (A5), not left as a done entry")
 	}
 }
