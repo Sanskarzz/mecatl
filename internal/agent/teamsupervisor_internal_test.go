@@ -134,3 +134,62 @@ func TestRunTurnCancelledMemberCapturesTurnsUsed(t *testing.T) {
 		t.Fatalf("stopReason = %q, want %q", m.stopReason, StopReasonCancelled)
 	}
 }
+
+// TestCleanupAllAttributesIdleClientCancel pins the cleanupAll stop attribution
+// (I2 panel fix): a member whose per-member cancel fired while it idled in the
+// FINAL round (so planRound never ran again to observe it) reaches cleanupAll
+// un-stopped — its registry entry must land StopCancelled, attributed from the
+// member ctx BEFORE cleanupAll's own release-cancel fires — while an untouched
+// member lands StopEndTurn.
+func TestCleanupAllAttributesIdleClientCancel(t *testing.T) {
+	tm := team.New("demo")
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	factory := func(spec MemberSpec) MemberBuild {
+		cat := tool.NewCatalog()
+		for _, tl := range MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		return MemberBuild{Engine: NewEngine(Deps{
+			LLM:     mockllm.New(mockllm.TextTurn("x")),
+			Catalog: cat,
+			Policy:  allow,
+			Hooks:   hookexec.New(nil),
+			Model:   "mock",
+		})}
+	}
+	reg := newChildRunRegistry()
+	sup := NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory,
+		withParentCaps(parentCaps{children: reg}))
+	ctx := context.Background()
+	if err := sup.AddMember(ctx, MemberSpec{Name: "lead", Lead: true}); err != nil {
+		t.Fatalf("AddMember(lead): %v", err)
+	}
+	if err := sup.AddMember(ctx, MemberSpec{Name: "worker"}); err != nil {
+		t.Fatalf("AddMember(worker): %v", err)
+	}
+
+	// The client cancel lands while the worker idles and NO further round plans
+	// (the final-round case): cleanupAll is the only path left to mark it done.
+	if !sup.CancelMember("worker") {
+		t.Fatalf("CancelMember must return true for an enrolled member")
+	}
+	sup.cleanupAll()
+
+	stopOf := func(id string) session.StopReason {
+		t.Helper()
+		reg.mu.Lock()
+		defer reg.mu.Unlock()
+		e := reg.entries[id]
+		if e == nil || e.state != childDone {
+			t.Fatalf("registry entry %q missing or not done", id)
+		}
+		return e.stop
+	}
+	if got := stopOf(string(sup.members["worker"].sess.ID)); got != session.StopCancelled {
+		t.Fatalf("idle-cancelled member's registry stop = %q, want %q (attribution must precede the release-cancel)",
+			got, session.StopCancelled)
+	}
+	if got := stopOf(string(sup.members["lead"].sess.ID)); got != session.StopEndTurn {
+		t.Fatalf("clean member's registry stop = %q, want %q", got, session.StopEndTurn)
+	}
+}

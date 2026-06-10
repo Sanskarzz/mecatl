@@ -215,12 +215,16 @@ type TeamMsg struct {
 	// Roster is set on TeamStart.
 	Roster []TeamMemberSpec
 	// Member / InnerKind and the per-event content are set on TeamMember.
-	Member    string
-	InnerKind string
-	Text      string
-	ToolName  string
-	Detail    string
-	IsError   bool
+	Member string
+	// MemberSessionID is the member's child SESSION id ("team-<teamID>-<member>") —
+	// the CancelChild handle, set on TeamMember msgs. Carried explicitly so the ui
+	// never derives the (server-internal) id grammar; empty from an older server.
+	MemberSessionID string
+	InnerKind       string
+	Text            string
+	ToolName        string
+	Detail          string
+	IsError         bool
 	// Rounds / Stop are set on TeamEnd.
 	Rounds int
 	Stop   string
@@ -281,6 +285,10 @@ type ParallelMsg struct {
 	BranchCount int
 	// BranchIndex is the stable per-branch key, set on every branch_* kind.
 	BranchIndex int
+	// ChildID is the branch's child SESSION id ("parallel-<callID>-<i>") — the
+	// CancelChild handle, set on branch_start/branch_end. Carried explicitly so the
+	// ui never derives the (server-internal) id grammar; empty from an older server.
+	ChildID string
 	// BranchLabel / Goal are set on ParallelBranchStart.
 	BranchLabel string
 	Goal        string
@@ -397,6 +405,7 @@ func parallelMsg(kind ParallelKind, p *mecatlv1.Parallel) ParallelMsg {
 		Join:            p.GetJoin(),
 		BranchCount:     int(p.GetBranchCount()),
 		BranchIndex:     int(p.GetBranchIndex()),
+		ChildID:         p.GetChildId(),
 		BranchLabel:     p.GetBranchLabel(),
 		Goal:            p.GetGoal(),
 		ToolName:        p.GetToolName(),
@@ -432,20 +441,21 @@ func parallelBranchKind(protoKind string) ParallelKind {
 // snapshot to plain TeamTask values.
 func teamMsg(kind TeamKind, t *mecatlv1.Team) TeamMsg {
 	msg := TeamMsg{
-		Kind:          kind,
-		ParentCallID:  t.GetParentCallId(),
-		TeamID:        t.GetTeamId(),
-		Member:        t.GetMember(),
-		InnerKind:     t.GetInnerKind(),
-		Text:          t.GetText(),
-		ToolName:      t.GetToolName(),
-		Detail:        t.GetDetail(),
-		IsError:       t.GetIsError(),
-		Rounds:        int(t.GetRounds()),
-		Stop:          t.GetStop(),
-		Usage:         usageFrom(t.GetUsage()),
-		ContextUsed:   t.GetContextUsed(),
-		ContextWindow: t.GetContextWindow(),
+		Kind:            kind,
+		ParentCallID:    t.GetParentCallId(),
+		TeamID:          t.GetTeamId(),
+		Member:          t.GetMember(),
+		MemberSessionID: t.GetMemberSessionId(),
+		InnerKind:       t.GetInnerKind(),
+		Text:            t.GetText(),
+		ToolName:        t.GetToolName(),
+		Detail:          t.GetDetail(),
+		IsError:         t.GetIsError(),
+		Rounds:          int(t.GetRounds()),
+		Stop:            t.GetStop(),
+		Usage:           usageFrom(t.GetUsage()),
+		ContextUsed:     t.GetContextUsed(),
+		ContextWindow:   t.GetContextWindow(),
 	}
 	for _, r := range t.GetRoster() {
 		msg.Roster = append(msg.Roster, TeamMemberSpec{

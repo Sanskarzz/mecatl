@@ -2272,10 +2272,9 @@ type Team struct {
 	// supervisor verdicts only, never member content.
 	Dispositions []*TeamMemberDisposition `protobuf:"bytes,17,rep,name=dispositions,proto3" json:"dispositions,omitempty"`
 	// member_session_id is the member's child SESSION id ("team-<teamID>-<member>")
-	// on member-tagged events — the CancelChild handle, carried explicitly so a
-	// client never derives ids from the (internal) id grammar. DORMANT: reserved
-	// for the team-cancel iteration; the server does not set it yet. (17 is taken
-	// by dispositions.)
+	// on member-tagged (team.member) events — the CancelChild handle, carried
+	// explicitly so a client never derives ids from the (internal) id grammar.
+	// (17 is taken by dispositions.)
 	MemberSessionId string `protobuf:"bytes,18,opt,name=member_session_id,json=memberSessionId,proto3" json:"member_session_id,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -2510,8 +2509,7 @@ type Parallel struct {
 	WinnerWorkspace string `protobuf:"bytes,17,opt,name=winner_workspace,json=winnerWorkspace,proto3" json:"winner_workspace,omitempty"`
 	// child_id is the branch's child SESSION id ("parallel-<callID>-<i>") on
 	// branch_start/branch_end — the CancelChild handle, carried explicitly so a
-	// client never derives ids from the (internal) id grammar. DORMANT: reserved
-	// for the parallel-cancel iteration; the server does not set it yet.
+	// client never derives ids from the (internal) id grammar.
 	ChildId       string `protobuf:"bytes,18,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

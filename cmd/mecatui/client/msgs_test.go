@@ -99,8 +99,8 @@ func TestEventToMsg(t *testing.T) {
 		{
 			"parallel.branch branch_start",
 			&mecatlv1.Event{Type: "parallel.branch", Parallel: &mecatlv1.Parallel{
-				ParentCallId: "p1", Kind: "branch_start", BranchIndex: 1, BranchLabel: "branch-2", Goal: "explore beta"}},
-			ParallelMsg{Kind: ParallelBranchStart, ParentCallID: "p1", BranchIndex: 1, BranchLabel: "branch-2", Goal: "explore beta"},
+				ParentCallId: "p1", Kind: "branch_start", BranchIndex: 1, ChildId: "parallel-p1-1", BranchLabel: "branch-2", Goal: "explore beta"}},
+			ParallelMsg{Kind: ParallelBranchStart, ParentCallID: "p1", BranchIndex: 1, ChildID: "parallel-p1-1", BranchLabel: "branch-2", Goal: "explore beta"},
 		},
 		{
 			"parallel.branch branch_tool",
@@ -111,10 +111,10 @@ func TestEventToMsg(t *testing.T) {
 		{
 			"parallel.branch branch_end",
 			&mecatlv1.Event{Type: "parallel.branch", Parallel: &mecatlv1.Parallel{
-				ParentCallId: "p1", Kind: "branch_end", BranchIndex: 2, ToolCount: 4, Failed: true,
+				ParentCallId: "p1", Kind: "branch_end", BranchIndex: 2, ChildId: "parallel-p1-2", ToolCount: 4, Failed: true,
 				Workspace: "/fork/branch-3", Stop: "error", DurationMs: 555,
 				Usage: &mecatlv1.Usage{InputTokens: 12, OutputTokens: 3}}},
-			ParallelMsg{Kind: ParallelBranchEnd, ParentCallID: "p1", BranchIndex: 2, ToolCount: 4, Failed: true,
+			ParallelMsg{Kind: ParallelBranchEnd, ParentCallID: "p1", BranchIndex: 2, ChildID: "parallel-p1-2", ToolCount: 4, Failed: true,
 				Workspace: "/fork/branch-3", Stop: "error", DurationMs: 555,
 				Usage: Usage{InputTokens: 12, OutputTokens: 3}},
 		},
@@ -177,11 +177,12 @@ func TestEventToMsgTeam(t *testing.T) {
 		{
 			"team.member",
 			&mecatlv1.Event{Type: "team.member", Team: &mecatlv1.Team{
-				ParentCallId: "t1", TeamId: "team-t1", Member: "scout", InnerKind: "turn.end",
+				ParentCallId: "t1", TeamId: "team-t1", Member: "scout",
+				MemberSessionId: "team-team-t1-scout", InnerKind: "turn.end",
 				Usage:       &mecatlv1.Usage{InputTokens: 40000, OutputTokens: 80},
 				ContextUsed: 40000, ContextWindow: 200000}},
 			TeamMsg{Kind: TeamMember, ParentCallID: "t1", TeamID: "team-t1", Member: "scout",
-				InnerKind:   "turn.end",
+				MemberSessionID: "team-team-t1-scout", InnerKind: "turn.end",
 				Usage:       Usage{InputTokens: 40000, OutputTokens: 80},
 				ContextUsed: 40000, ContextWindow: 200000},
 		},

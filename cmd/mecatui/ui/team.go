@@ -100,11 +100,16 @@ func (m Model) onTeamKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		return mm, cmd, true
 	}
 	if m.team.view == teamFocus {
-		// Focus pane: esc returns to the roster. The trace is height-bounded (no live
-		// viewport), so no other key is consumed — it stays a calm read-only surface.
-		if key.Matches(msg, m.keys.Close) {
+		// Focus pane: esc returns to the roster; x cancels the focused member (live
+		// teams only — the key no-ops once the team ended or the member stopped). The
+		// trace is height-bounded (no live viewport), so no other key is consumed.
+		switch {
+		case key.Matches(msg, m.keys.Close):
 			m.team.view = teamRoster
 			m.team.member = ""
+		case key.Matches(msg, m.keys.CancelChild):
+			mm, cmd := m.cancelTeamLane(b, teamFindLane(b, m.team.member))
+			return mm, cmd, true
 		}
 		return m, nil, true
 	}
@@ -175,8 +180,28 @@ func (m Model) onTeamRosterKey(msg tea.KeyPressMsg, b *block) (tea.Model, tea.Cm
 		m.team.member = b.teamLanes[order[m.team.cursor]].name
 		m.team.view = teamFocus
 		return m, nil
+	case key.Matches(msg, m.keys.CancelChild):
+		order := teamLaneOrder(b.teamLanes)
+		if m.team.cursor < 0 || m.team.cursor >= len(order) {
+			return m, nil
+		}
+		return m.cancelTeamLane(b, &b.teamLanes[order[m.team.cursor]])
 	}
 	return m, nil
+}
+
+// cancelTeamLane sends a CancelChild frame for one team member's session id (the
+// member's MemberSessionID handle, arriving on team.member events). It is a no-op for
+// a nil lane, a finished team, an already-stopped member, or a lane that never learned
+// its session id (older server / member yet to produce an event) — the x key is only
+// hinted for live teams; the finished-as-you-pressed race is benign (the server
+// ignores a done id). Confirm-less, mirroring cancelSubagentLane: a cancelled member
+// is de-scheduled, its tasks released, and its session persists for inspection.
+func (m Model) cancelTeamLane(b *block, ln *teamLane) (tea.Model, tea.Cmd) {
+	if ln == nil || b == nil || b.teamDone || ln.stopped {
+		return m, nil
+	}
+	return m.cancelChildByID(ln.sessionID, "member "+sanitizeTerminal(ln.name))
 }
 
 // clampCursor clamps a candidate cursor index to [0, n-1] (and to 0 when the
@@ -335,7 +360,11 @@ func renderTeamRoster(th theme.Theme, st teamState, b *block, height int) string
 		out.WriteString(muted.Render(fmt.Sprintf("  · +%d below", below)) + "\n")
 	}
 
-	out.WriteString("\n" + muted.Render("↑/↓ select · pgup/pgdn page · home/g·end/G first/last · enter focus · t tasks · f findings · tab switch · esc close"))
+	// SHORTER than the old roster hint (the paging chords still work, unnamed): the
+	// added "x cancel" segment would otherwise push this card past a 100-col terminal
+	// — the hint is the card's widest line, so it directly sets the overlay width
+	// (centerCard does not wrap). Same discipline as the Subagents-tab hint.
+	out.WriteString("\n" + muted.Render("↑/↓ select · enter focus · x cancel · t tasks · f findings · tab switch · esc close"))
 	return out.String()
 }
 
@@ -428,7 +457,13 @@ func renderTeamFocus(th theme.Theme, b *block, member string, height int) string
 		out.WriteString(capRenderedLines(th, trace, teamFocusRows(height)))
 	}
 
-	out.WriteString("\n\n" + muted.Render("esc back"))
+	// The cancel hint shows only for a CANCELLABLE member: a live team, a lane not
+	// already stopped, and a known session id (the CancelChild handle).
+	hint := "esc back"
+	if !b.teamDone && !ln.stopped && ln.sessionID != "" {
+		hint = "x cancel · esc back"
+	}
+	out.WriteString("\n\n" + muted.Render(hint))
 	return out.String()
 }
 

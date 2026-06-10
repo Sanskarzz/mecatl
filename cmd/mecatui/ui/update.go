@@ -572,11 +572,11 @@ func (m *Model) applyParallel(msg client.ParallelMsg) {
 	case client.ParallelStart:
 		m.conv.parallelStart(msg.ParentCallID, msg.Join, msg.BranchCount)
 	case client.ParallelBranchStart:
-		m.conv.parallelBranchStart(msg.ParentCallID, msg.BranchIndex, msg.BranchLabel, msg.Goal)
+		m.conv.parallelBranchStart(msg.ParentCallID, msg.BranchIndex, msg.ChildID, msg.BranchLabel, msg.Goal)
 	case client.ParallelBranchTool:
 		m.conv.parallelBranchTool(msg.ParentCallID, msg.BranchIndex, msg.ToolName, msg.IsError, msg.ToolCount)
 	case client.ParallelBranchEnd:
-		m.conv.parallelBranchEnd(msg.ParentCallID, msg.BranchIndex, msg.Usage, msg.ToolCount, msg.Stop, msg.Failed, msg.Workspace, msg.DurationMs)
+		m.conv.parallelBranchEnd(msg.ParentCallID, msg.BranchIndex, msg.ChildID, msg.Usage, msg.ToolCount, msg.Stop, msg.Failed, msg.Workspace, msg.DurationMs)
 	case client.ParallelEnd:
 		m.conv.parallelEnd(msg.ParentCallID, msg.Join, msg.BranchCount, msg.Winner, msg.WinnerWorkspace, msg.Stop)
 	}

@@ -323,8 +323,9 @@ type Run struct {
 	// the run goroutine starts and only read after, so it needs no synchronisation; the
 	// router itself is concurrency-safe for the cross-goroutine register/route.
 	childAsks *childAskRouter
-	// children registers every child run spawned under this run (Subagent this
-	// iteration; the other delegation families follow), keyed by child session id.
+	// children registers every child run spawned under this run (all three
+	// delegation families: Subagent children, Parallel branches, team members),
+	// keyed by child session id.
 	// Unlike childAsks (interactive-only) it is created UNCONDITIONALLY in
 	// RunContentWith: cancel arrives over the wire only on interactive surfaces, but
 	// the registry also carries headless bookkeeping, and it is a mutex + map. It is

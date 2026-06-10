@@ -321,12 +321,18 @@ func TestParallelNoContentLeakBehavioral(t *testing.T) {
 	saw := false
 	for _, p := range collectParallel(evs) {
 		saw = true
-		for _, s := range []string{
-			p.ParentCallID, string(p.Kind), p.Join, p.BranchLabel, p.Goal,
-			p.ToolName, p.Workspace, string(p.Stop), p.WinnerWorkspace,
-		} {
-			if strings.Contains(s, canary) {
-				t.Fatalf("canary leaked into a parallel.* field: %q", s)
+		// Scan EVERY string-kinded field by REFLECTION (not a hand-maintained list),
+		// so a future payload field (e.g. ChildID) is covered the moment it exists —
+		// the behavioral sentinel can never go stale against the structural
+		// allow-list in TestParallelPayloadHasNoContentFields.
+		rv := reflect.ValueOf(*p)
+		for i := 0; i < rv.NumField(); i++ {
+			f := rv.Field(i)
+			if f.Kind() != reflect.String {
+				continue
+			}
+			if s := f.String(); strings.Contains(s, canary) {
+				t.Fatalf("canary leaked into parallel.* field %s: %q", rv.Type().Field(i).Name, s)
 			}
 		}
 	}
@@ -358,6 +364,11 @@ func TestParallelPayloadHasNoContentFields(t *testing.T) {
 		"IsError": true, "ToolCount": true, "Failed": true, "Workspace": true,
 		"Stop": true, "Usage": true, "DurationMs": true, "Winner": true,
 		"WinnerWorkspace": true,
+		// ChildID is the branch's child SESSION id ("parallel-<callID>-<i>") — a
+		// HARNESS-derived addressing handle (the CancelChild target, D16), never
+		// branch content: it is composed of the id prefix + the parent call id + the
+		// branch index, none of which a branch authors.
+		"ChildID": true,
 	}
 	rt := reflect.TypeOf(session.ParallelPayload{})
 	for i := 0; i < rt.NumField(); i++ {

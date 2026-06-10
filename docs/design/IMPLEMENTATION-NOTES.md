@@ -428,6 +428,57 @@ unregister/retract order fails it), `server.TestGRPCConverseCancelChild` (real-s
 /`TestServiceCancelChildFallbacks`/`TestHTTPCancelChild`, `client.TestSendCancelChildFrame` + the
 `permission.retract` EventToMsg case, and `ui.TestSubagent*CancelKey*`/`TestPermissionRetract*`.
 
+**Per-child cancel for parallel branches + team members (BACKGROUND-SUBAGENTS I2).** The registry now
+covers ALL THREE delegation families. **Parallel** (`parallel.go`): the shared per-branch goroutine
+body is `launchBranch` — it mints each branch's OWN `context.WithCancel` (ALL join modes; previously
+only join=first had a shared cancelable ctx) and registers it (`childFamilyParallelBranch`, the
+branch label as the display goal, key = the deterministic `childSessionID` "parallel-<callID>-<i>")
+BEFORE the worker-semaphore wait, so a QUEUED branch is already cancellable (the slot select waits on
+the branch ctx; a client-cancelled queued branch reads "cancelled by user before start").
+`runBranch` now also returns the terminal stop, which `launchBranch` lands via `finishChildRun`. A
+client-cancelled mid-drive branch keeps the EXISTING `StopCancelled` arm but flips its failReason
+"cancelled" → "cancelled by user" (`childWasClientCancelled` — A8). Join-mode semantics fall out
+of failed=true with ZERO new join-path code: `all` → branch `[FAILED]`; `first` → a cancelled branch
+can never win (the winner test is `!failed`); `judge` → excluded from candidates, and cancelling the
+only success degrades to the all-failed report (judge never called). The JUDGE's own run stays
+UNREGISTERED (short, tool-less; whole-run cancel covers it) — documented v1 limitation. Bracketing
+`branch_start`/`branch_end` still fire for cancelled branches (incl. cancelled-before-start).
+**Team** (`teamsupervisor.go`): `AddMember` mints a DETACHED per-member `context.WithCancel`
+(`context.Background()`, NOT the enrolment ctx — on the gRPC path AddMember runs under the
+CreateTeam REQUEST ctx, which dies before RunTeam; deriving from it would insta-cancel every member)
+and registers it under `MemberSessionID` via `s.caps` (nil-safe: the RunTeam path registers nothing
+— D4's whole-stream cancel covers it). `driveOneTurn` MERGES the member ctx into each drive's ctx
+via `context.AfterFunc` (neither parent subsumes the other), so a mid-drive cancel rides the
+EXISTING `StopCancelled` classification in `runTurn` — which stays ordered BEFORE the reopenErr
+fold (don't disturb `warnUnexpectedReopen`'s suppression) — de-scheduling the member + `ReleaseTasks`.
+Idle-between-rounds: `planRound` gains an up-front `m.ctx.Err()` check → stopped +
+`StopReasonCancelled` + `SetMemberState(MemberStopped)` + `ReleaseTasks` + registry markDone BEFORE
+planning; the session stays resumable (D5 de-schedule, deliberate). `Supervisor.CancelMember(name)
+bool` is the shared seam (the registry-registered cancel IS the member cancel; a future RunTeam-path
+`CancelTeammate` unary — deferred, D4 — would call it directly). A supervisor-stopped member's
+registry entry is marked done WITHOUT cancelling its ctx (a budget-stopped lead must stay drivable
+for the one synthesis turn); `cleanupAll` cancels every member ctx + markDones the rest at team end.
+**Wire (D16, fields landed dormant in I1):** the mapper now sets `Parallel.child_id` (= 18; on
+branch_start/branch_end, from the new `session.ParallelPayload.ChildID` — added to the
+gauntlet-#7 structural allow-list as a harness-derived addressing handle, never branch content) and
+`Team.member_session_id` (= 18; on team.member events, threaded `driveOneTurn` →
+`TeamEvent.MemberSessionID` → `projectTeamEvent` → `session.TeamPayload.MemberSessionID`).
+**mecatui:** the `x` cancel key now covers parallel-branch lanes (the focused group gains a branch
+SELECTION cursor — `parallelState.branchCursor`, `↑/↓`) and team-member lanes (roster + focus pane;
+gated on a live team + a learned `teamLane.sessionID`); the shared sender is `cancelChildByID`
+(empty handle from an older server → no-op). The Teams-tab roster hint was SHORTENED (the same
+width-clamp discipline as the Subagents tab — the old 121-col hint actually overflowed the 100-col
+viewport) and the changed-hint goldens now carry `assertFitsViewport` guards. Guards:
+`agent.TestCancelParallelBranchJoinAll`/`...JoinFirstWinnerNeverCancelled`/`...JudgeExcluded`/
+`...JudgeOnlySuccessCancelled`/`...WhileQueued` (all driven via `Run.CancelChild` with ids read off
+the D16 events), `TestCancelMemberMidDrive` (disposition + task-release + the synthesis prompt's
+"Team status: worker (cancelled)" digest)/`TestCancelMemberIdleBetweenRounds` (provider never
+driven)/`TestCancelMemberUnknownFalse`/`TestCancelChildReachesTeamMember` (registry route, in-process),
+`server.TestGRPCConverseCancelTeamMember` (real-stream wire e2e: id learned from
+`team.member.member_session_id`, member disposed stopped/cancelled, team still delivers) + the
+mapper child_id/member_session_id cases, `client` EventToMsg cases, and
+`ui.TestParallelBranchCancel*`/`TestTeam*Cancel*` (send + done-lane/handle-less no-ops).
+
 **Subagent per-call token ceiling (`max_tokens`, Run-scoped budget override — R4).** `subagentArgs.MaxTokens`
 rides the new `RunOptions.MaxRunTokensOverride` carried into `Engine.RunContentWith`, so a per-call
 token ceiling bounds the SHARED child engine WITHOUT minting a fresh engine. `effectiveMaxRunTokens`

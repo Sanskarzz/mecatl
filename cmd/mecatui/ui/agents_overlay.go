@@ -48,6 +48,10 @@ type parallelState struct {
 	view   parallelView
 	cursor int    // selected row in the group roster (index into the group order)
 	group  string // the focused group's ParentCallID (parallelGroupView)
+	// branchCursor is the selected BRANCH row inside the focused group (an index into
+	// the by-index render order, branchesByIndex) — the selection the `x` cancel key
+	// addresses. Reset on focus enter/exit.
+	branchCursor int
 }
 
 // subagentView is the active Subagents-tab sub-view (parallel to teamView): the flat
@@ -224,9 +228,21 @@ func (m Model) cancelSubagentLane(ln *subagentLane) (tea.Model, tea.Cmd) {
 	if ln == nil || ln.done {
 		return m, nil
 	}
+	return m.cancelChildByID(ln.childID, "subagent #"+shortChildID(ln.childID))
+}
+
+// cancelChildByID sends a CancelChild frame for one child id (any family — the
+// single-handle convention) over the run's stream, with a transient "cancelling …"
+// status naming what. It is the shared sender behind the subagent / parallel-branch /
+// team-member x keys; an empty id (older server — the lane never learned its handle)
+// is a no-op. The send is wrapped in a command so a send error surfaces as a
+// StreamErrMsg.
+func (m Model) cancelChildByID(childID, what string) (tea.Model, tea.Cmd) {
+	if childID == "" {
+		return m, nil
+	}
 	stream := m.stream
-	childID := ln.childID
-	m.statusMsg = m.deps.Theme.Style("muted").Render("cancelling subagent #" + shortChildID(childID) + "…")
+	m.statusMsg = m.deps.Theme.Style("muted").Render("cancelling " + what + "…")
 	return m, func() tea.Msg {
 		if stream == nil {
 			return nil
@@ -287,17 +303,52 @@ func (m Model) onSubagentRosterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // onParallelKey routes keys while the Parallel tab is active. It mirrors onSubagentKey:
 // esc steps back from group focus to the roster, then closes; the roster handler drives
 // selection/focus. ONE level of focus (plan Q4) — a focused group shows all its branches
-// inline, so there is no deeper branch focus to step back through.
+// inline (with a branch SELECTION cursor), so there is no deeper branch focus to step
+// back through; `x` cancels the selected non-terminal branch by its child id (D16).
 func (m Model) onParallelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if m.parallel.view == parallelGroupView {
-		if key.Matches(msg, m.keys.Close) {
-			m.parallel.view = parallelRoster
-			m.parallel.group = ""
-		}
-		return m, nil, true
+		mm, cmd := m.onParallelGroupKey(msg)
+		return mm, cmd, true
 	}
 	mm, cmd := m.onParallelRosterKey(msg)
 	return mm, cmd, true
+}
+
+// onParallelGroupKey drives the focused group's inline branch list: up/down move the
+// branch selection (over the by-index render order), x cancels the selected branch
+// (non-terminal lanes with a known child id only — the key no-ops otherwise), esc steps
+// back to the group roster.
+func (m Model) onParallelGroupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	g := findParallelGroup(m.conv.parallelGroups, m.parallel.group)
+	n := 0
+	if g != nil {
+		n = len(g.branches)
+	}
+	switch {
+	case key.Matches(msg, m.keys.Close):
+		m.parallel.view = parallelRoster
+		m.parallel.group = ""
+		m.parallel.branchCursor = 0
+	case key.Matches(msg, m.keys.Up):
+		m.parallel.branchCursor = clampCursor(m.parallel.branchCursor-1, n)
+	case key.Matches(msg, m.keys.Down):
+		m.parallel.branchCursor = clampCursor(m.parallel.branchCursor+1, n)
+	case key.Matches(msg, m.keys.CancelChild):
+		if g == nil {
+			return m, nil
+		}
+		ordered := branchesByIndex(g.branches)
+		cursor := clampCursor(m.parallel.branchCursor, len(ordered))
+		if cursor >= len(ordered) {
+			return m, nil
+		}
+		br := &ordered[cursor]
+		if br.done {
+			return m, nil
+		}
+		return m.cancelChildByID(br.childID, "branch "+branchHumanLabel(g, br.index))
+	}
+	return m, nil
 }
 
 // onParallelRosterKey drives the Parallel group roster: up/down move the selection,
@@ -334,6 +385,7 @@ func (m Model) onParallelRosterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.parallel.group = groups[m.parallel.cursor].parentCallID
 		m.parallel.view = parallelGroupView
+		m.parallel.branchCursor = 0
 		return m, nil
 	}
 	return m, nil
@@ -646,7 +698,7 @@ func subagentStopErrored(stop string) bool {
 // call) or one focused group's branches inline.
 func renderParallelTab(th theme.Theme, st parallelState, groups []parallelGroup, height int) string {
 	if st.view == parallelGroupView {
-		return renderParallelGroupFocus(th, groups, st.group, height)
+		return renderParallelGroupFocus(th, st, groups, height)
 	}
 	return renderParallelRoster(th, st, groups, height)
 }
@@ -748,11 +800,12 @@ func branchHumanLabel(g *parallelGroup, index int) string {
 // renderParallelGroupFocus renders ONE Parallel group's detail (ONE level — plan Q4): a
 // header (join + branch tally + run stop), the context-isolation honesty note (Parallel
 // never forwards branch content — gauntlet #7), every branch inline (glyph + label + goal
-// + current/last tool + count + usage, the WINNER row highlighted), and the preserved
-// winner fork path. A focused ParentCallID with no matching group reads as a muted note.
-func renderParallelGroupFocus(th theme.Theme, groups []parallelGroup, parentCallID string, height int) string {
+// + current/last tool + count + usage; the SELECTED row carries the "›" cursor the `x`
+// cancel key addresses, the WINNER row a "★"), and the preserved winner fork path. A
+// focused ParentCallID with no matching group reads as a muted note.
+func renderParallelGroupFocus(th theme.Theme, st parallelState, groups []parallelGroup, height int) string {
 	muted := th.Style("muted")
-	g := findParallelGroup(groups, parentCallID)
+	g := findParallelGroup(groups, st.group)
 	if g == nil {
 		return th.Style("askTitle").Render("parallel") + "\n\n" +
 			muted.Render("this parallel run is no longer tracked") + "\n\n" +
@@ -780,18 +833,26 @@ func renderParallelGroupFocus(th theme.Theme, groups []parallelGroup, parentCall
 	// precede branch-0's), so g.branches is in first-seen order. Render BY INDEX so the
 	// roster reads branch-1, branch-2, branch-3 deterministically regardless of arrival.
 	ordered := branchesByIndex(g.branches)
+	cursor := clampCursor(st.branchCursor, len(ordered))
 	rows := teamFocusRows(height)
 	shown := 0
+	cancellable := false
 	for i := range ordered {
 		if rows > 0 && shown >= rows {
 			out.WriteString(muted.Render(fmt.Sprintf("  · +%d more branch(es)", len(ordered)-shown)) + "\n")
 			break
 		}
 		br := &ordered[i]
+		if !br.done && br.childID != "" {
+			cancellable = true
+		}
 		line := parallelBranchLine(br)
-		if br.index == g.winner {
+		switch {
+		case i == cursor && len(ordered) > 0:
+			out.WriteString(th.Style("askButtonActive").Render("› "+line) + "\n")
+		case br.index == g.winner:
 			out.WriteString(th.Style("askButtonActive").Render("★ "+line) + "\n")
-		} else {
+		default:
 			out.WriteString(muted.Render("  "+line) + "\n")
 		}
 		shown++
@@ -800,7 +861,16 @@ func renderParallelGroupFocus(th theme.Theme, groups []parallelGroup, parentCall
 	if g.winnerWorkspace != "" {
 		out.WriteString("\n" + muted.Render("winner fork (preserved): "+sanitizeTerminal(g.winnerWorkspace)))
 	}
-	out.WriteString("\n\n" + muted.Render("esc back"))
+	// The cancel hint shows only while some branch is still cancellable (running with a
+	// known child id); the selection arrows are always live on a populated list.
+	hint := "↑/↓ select · esc back"
+	if cancellable {
+		hint = "↑/↓ select · x cancel · esc back"
+	}
+	if len(ordered) == 0 {
+		hint = "esc back"
+	}
+	out.WriteString("\n\n" + muted.Render(hint))
 	return out.String()
 }
 

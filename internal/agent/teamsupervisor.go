@@ -121,6 +121,11 @@ const defaultMemberTurnBudget = 100
 type TeamEvent struct {
 	// Member is the name of the member whose session produced Event.
 	Member string
+	// MemberSessionID is the producing member's child SESSION id (MemberSessionID:
+	// "team-<teamID>-<member>") — the uniform cancel/inspect handle, forwarded onto
+	// the team.member projection so a client can address the member (CancelChild)
+	// without deriving the id grammar. The same for every event of a given member.
+	MemberSessionID string
 	// Event is the underlying session Event (turn.start, tool.call, result, ...).
 	Event session.Event
 	// ContextWindow is the producing member engine's context window in tokens
@@ -307,7 +312,24 @@ type memberRT struct {
 	// force-copy fork or a read-only worktree) — so its Bash asks are eligible for the A2
 	// worktree-safe auto-approve. false for a base-sharing read-only member (which has no
 	// shell anyway). Set in AddMember from needFork.
-	isolated   bool
+	isolated bool
+	// ctx/cancel are the member's PER-MEMBER cancellation pair, minted in AddMember
+	// rooted in context.Background() — a DETACHED cancel SIGNAL, deliberately NOT
+	// derived from the enrolment ctx: on the gRPC path AddMember runs under the
+	// CreateTeam REQUEST ctx, which dies before RunTeam, so deriving from it would
+	// mark every member cancelled before the team ever ran. cancel is what
+	// CancelMember and the parent registry's CancelChild invoke; the member is
+	// long-lived, so the pair covers its WHOLE life across rounds. Cancellation
+	// reaches a drive by MERGE, not parentage: driveOneTurn wraps each drive's run
+	// ctx in its own WithCancel and bridges this ctx into it via context.AfterFunc —
+	// and its `defer stopWatch()` is LOAD-BEARING: without it every drive would leave
+	// a registration accumulating on this long-lived ctx for the member's whole life.
+	// A cancel that fires BETWEEN drives (idle) is caught by planRound's up-front
+	// ctx-Err check instead. Both fields are immutable after AddMember, so
+	// CancelMember may be called from any goroutine. nil on a memberRT constructed
+	// outside AddMember (internal tests) — every reader nil-guards.
+	ctx        context.Context
+	cancel     context.CancelFunc
 	ranInitial bool
 	stopped    bool
 	// nonResumable is true when the member's session can NO LONGER be driven — its
@@ -607,7 +629,22 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 	sess := session.New(s.sessionID(spec.Name), mode, ws.Root(), limits, time.Now())
 	_ = s.team.SetMemberSession(spec.Name, sess.ID)
 
-	s.members[spec.Name] = &memberRT{spec: spec, engine: eng, ws: ws, cleanup: cleanup, sess: sess, isolated: needFork}
+	// Mint the per-member cancellation pair and register the member in the PARENT
+	// run's child-run registry under its session id (MemberSessionID — the uniform
+	// cancel/inspect handle), so a client CancelChild(member session id) reaches it.
+	// The member ctx is DETACHED (context.Background()), not derived from the
+	// enrolment ctx: on the gRPC path AddMember runs under the CreateTeam REQUEST ctx,
+	// which dies before RunTeam — deriving from it would mark every member cancelled
+	// before the team ever ran. It is purely the per-member cancel SIGNAL; run-level
+	// cancellation still flows through each drive's own ctx (driveOneTurn merges the
+	// two). Registration is nil-safe: the gRPC RunTeam path (no parent caps) registers
+	// nothing and the member simply is not client-cancellable there (the whole-stream
+	// cancel covers it — D4). The member name is the registry's display goal.
+	memberCtx, memberCancel := context.WithCancel(context.Background())
+	s.caps.registerChildRun(sess.ID, childFamilyTeamMember, spec.Name, memberCancel)
+
+	s.members[spec.Name] = &memberRT{spec: spec, engine: eng, ws: ws, cleanup: cleanup, sess: sess,
+		isolated: needFork, ctx: memberCtx, cancel: memberCancel}
 	s.order = append(s.order, spec.Name)
 	// Cache the lead's name on first enrolment of a Lead member, so the synthesis
 	// phase finds it without re-scanning. The Team tool synthesises member 0 as the
@@ -616,6 +653,28 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 		s.leadName = spec.Name
 	}
 	return nil
+}
+
+// CancelMember requests cancellation of ONE member by name: it fires the member's
+// per-member cancel, which unwinds a mid-drive turn (the drive ctx derives from the
+// member ctx → the existing StopCancelled classification in runTurn de-schedules it,
+// releasing its tasks) or, for a member idle between rounds, is caught by planRound's
+// up-front ctx check before the next round plans it (D5: de-schedule, never skip-turn).
+// It returns false for an unknown name; cancelling an already-stopped member is a
+// harmless no-op (its ctx just goes unobserved). Safe from any goroutine: members/
+// cancel are immutable after AddMember (which must precede Run).
+//
+// It is the seam BOTH cancel paths share: the Converse-path Team tool reaches members
+// through the parent registry's CancelChild (whose registered cancel IS this member
+// cancel), and a future RunTeam-path `CancelTeammate` unary (deferred — D4) would call
+// this directly.
+func (s *Supervisor) CancelMember(name string) bool {
+	m, ok := s.members[name]
+	if !ok || m.cancel == nil {
+		return false
+	}
+	m.cancel()
+	return true
 }
 
 // selectMemberWorkspace picks a member's workspace per the three-tier policy and
@@ -843,6 +902,20 @@ func (s *Supervisor) planRound(r int) []turnInput {
 		if m.stopped {
 			continue
 		}
+		// Idle-between-rounds cancel (D5): a member whose per-member ctx was cancelled
+		// while it sat idle is DE-SCHEDULED before this round plans it — stopped with
+		// the cancelled classification, its in-progress tasks released, its registry
+		// entry marked done — exactly the disposition a mid-drive cancel lands via
+		// runTurn's StopCancelled branch. Its session stays resumable (it ended its
+		// last round cleanly); deliberate — D5's "persists and is inspectable".
+		if m.ctx != nil && m.ctx.Err() != nil {
+			m.stopped = true
+			m.stopReason = StopReasonCancelled
+			_ = s.team.SetMemberState(m.spec.Name, team.MemberStopped)
+			s.team.ReleaseTasks(m.spec.Name)
+			s.caps.finishChildRun(m.sess.ID, session.StopCancelled)
+			continue
+		}
 		if r == 0 && !m.ranInitial && strings.TrimSpace(m.spec.InitialPrompt) != "" {
 			m.ranInitial = true
 			// Round 0 now renders through renderTurnPrompt (Fix B) so every member —
@@ -964,6 +1037,12 @@ func (s *Supervisor) runTurn(ctx context.Context, ti turnInput, evCh chan<- Team
 		}
 		_ = s.team.SetMemberState(m.spec.Name, team.MemberStopped)
 		s.team.ReleaseTasks(m.spec.Name)
+		// The supervisor stopped this member: land its terminal stop in the parent
+		// registry (nil-safe; a later CancelChild for it is then a clean false).
+		// Its per-member ctx is NOT cancelled here — a budget-stopped lead must stay
+		// drivable for the one synthesis turn (§5); cleanupAll releases the ctx at
+		// team end.
+		s.caps.finishChildRun(m.sess.ID, stop)
 		return
 	}
 	_ = s.team.SetMemberState(m.spec.Name, team.MemberIdle)
@@ -1007,11 +1086,28 @@ func (s *Supervisor) fireTeammateIdle(ctx context.Context, m *memberRT) {
 // (per round) and synthesise (the lead's one final turn). It does NOT Reopen, persist,
 // or do budget bookkeeping — that stays with the callers.
 func (s *Supervisor) driveOneTurn(ctx context.Context, m *memberRT, prompt string, evCh chan<- TeamEvent) (text string, stop session.StopReason, usage session.Usage) {
-	run := m.engine.Run(ctx, m.sess, m.ws, prompt)
+	// Each drive's ctx derives from BOTH the run ctx (the loop's whole-team bound)
+	// and the member's per-member cancel signal: a CancelMember/CancelChild fired
+	// mid-drive cancels THIS drive (the loop classifies it StopCancelled and runTurn
+	// de-schedules the member) without touching peers. context.AfterFunc is the merge
+	// — the member ctx is detached from the run ctx by construction (see AddMember),
+	// so neither parent subsumes the other. An already-cancelled member ctx (cancel
+	// raced the round plan / a cancelled lead reaching synthesis) fires immediately,
+	// so the drive no-ops to StopCancelled instead of running against the kill.
+	driveCtx := ctx
+	if m.ctx != nil {
+		var cancelDrive context.CancelFunc
+		driveCtx, cancelDrive = context.WithCancel(ctx)
+		defer cancelDrive()
+		stopWatch := context.AfterFunc(m.ctx, cancelDrive)
+		defer stopWatch()
+	}
+	run := m.engine.Run(driveCtx, m.sess, m.ws, prompt)
 	posture := childPosture{isolated: m.isolated, caps: s.caps, role: m.spec.Name,
 		// childID is the member SESSION id (MemberSessionID — NOT the member name role
-		// carries), the uniform ask-ownership/cancel handle (A6). Member cancel itself
-		// is a later iteration; the ownership seam lands with the registry.
+		// carries), the uniform ask-ownership/cancel handle (A6): a CancelChild for
+		// this id retracts the member's surfaced asks and fires the per-member cancel
+		// AddMember registered.
 		childID:  string(m.sess.ID),
 		askLabel: fmt.Sprintf("team member %q", m.spec.Name)}
 	stop = session.StopNone
@@ -1025,7 +1121,7 @@ func (s *Supervisor) driveOneTurn(ctx context.Context, m *memberRT, prompt strin
 				usage = ev.Result.Usage
 			}
 		}
-		evCh <- TeamEvent{Member: m.spec.Name, Event: ev, ContextWindow: m.engine.ContextWindow()}
+		evCh <- TeamEvent{Member: m.spec.Name, MemberSessionID: string(m.sess.ID), Event: ev, ContextWindow: m.engine.ContextWindow()}
 	}
 	return text, stop, usage
 }
@@ -1283,10 +1379,31 @@ func (s *Supervisor) teamTokensUsed() session.Usage {
 	return total
 }
 
-// cleanupAll tears down every forked member workspace.
+// cleanupAll tears down every forked member workspace, releases every per-member
+// cancel ctx, and marks every member's registry entry done (the team has ended —
+// idempotent markDone, so a member the supervisor already stopped keeps its real
+// terminal stop; the stop landed here covers only members no earlier path marked).
+// The registry stop is attributed from the member ctx BEFORE this loop fires its
+// own release-cancel: a member whose client cancel landed while idle in the FINAL
+// round (planRound never ran again to observe it) must read StopCancelled, not
+// StopEndTurn.
 func (s *Supervisor) cleanupAll() {
 	for _, name := range s.order {
-		if m := s.members[name]; m != nil && m.cleanup != nil {
+		m := s.members[name]
+		if m == nil {
+			continue
+		}
+		stop := session.StopEndTurn
+		if m.ctx != nil && m.ctx.Err() != nil {
+			stop = session.StopCancelled
+		}
+		if m.cancel != nil {
+			m.cancel()
+		}
+		if m.sess != nil {
+			s.caps.finishChildRun(m.sess.ID, stop)
+		}
+		if m.cleanup != nil {
 			_ = m.cleanup()
 		}
 	}

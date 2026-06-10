@@ -374,6 +374,21 @@ func (t *ParallelTool) ExecuteWithParent(ctx context.Context, call session.ToolC
 type branchEmitter struct {
 	emit         func(session.Event)
 	parentCallID string
+	// childID derives branch i's child SESSION id ("parallel-<callID>-<i>") for the
+	// branch_start/branch_end events, so a client can ADDRESS a branch (CancelChild)
+	// without deriving the id grammar (D16). It is deterministic (childSessionID), so
+	// even a never-ran branch (fork-failed / cancelled-before-start) carries it. nil
+	// (zero-value emitter in tests) leaves ChildID empty.
+	childID func(i int) string
+}
+
+// branchChildID resolves branch i's child session id via the childID closure
+// (empty when unwired — the zero-value emitter).
+func (e branchEmitter) branchChildID(i int) string {
+	if e.childID == nil {
+		return ""
+	}
+	return e.childID(i)
 }
 
 // active reports whether emission is wired (an observing parent supplied a closure).
@@ -400,6 +415,7 @@ func (e branchEmitter) branchStart(i int, goal string) {
 		ParentCallID: e.parentCallID,
 		Kind:         session.ParallelBranchStart,
 		BranchIndex:  i,
+		ChildID:      e.branchChildID(i),
 		BranchLabel:  branchLabel(i),
 		Goal:         truncateGoal(strings.TrimSpace(goal)),
 	}})
@@ -416,6 +432,7 @@ func (e branchEmitter) branchEnd(res branchResult, stop session.StopReason, usag
 		ParentCallID: e.parentCallID,
 		Kind:         session.ParallelBranchEnd,
 		BranchIndex:  res.index,
+		ChildID:      e.branchChildID(res.index),
 		ToolCount:    toolCount,
 		Failed:       res.failed,
 		Workspace:    res.childRoot,
@@ -498,7 +515,8 @@ func (t *ParallelTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 			"Parallel: judge selection is unavailable (no judge wired); use join=all and pick a branch yourself"), nil
 	}
 
-	be := branchEmitter{emit: emit, parentCallID: string(call.ID)}
+	be := branchEmitter{emit: emit, parentCallID: string(call.ID),
+		childID: func(i int) string { return string(t.childSessionID(call.ID, i)) }}
 	be.start(join, len(tasks))
 
 	switch join {
@@ -629,26 +647,53 @@ func (t *ParallelTool) runBranches(ctx context.Context, callID session.ToolCallI
 		wg.Add(1)
 		go func(i int, task string) {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				results[i] = cancelledBeforeStart(i, be)
-				return
-			}
-			results[i] = t.runBranch(ctx, callID, i, task, shared, ws, be, caps)
+			results[i] = t.launchBranch(ctx, sem, callID, i, task, shared, ws, be, caps)
 		}(i, task)
 	}
 	wg.Wait()
 	return results
 }
 
+// launchBranch is the shared per-branch goroutine body behind runBranches and
+// runBranchesFirst: it mints the branch's OWN cancelable context, registers the
+// branch in the parent's child-run registry BEFORE the worker-slot wait (so a
+// branch QUEUED on the semaphore is already client-cancellable — the cancel
+// unblocks the slot select), acquires a slot, runs the branch, and lands its
+// terminal stop in the registry. Every join mode gets the per-branch cancel this
+// way; join=first's shared loser-cancel still works because the per-branch ctx
+// derives from the strategy ctx. The JUDGE's own run is NOT a registered child
+// (it is short and tool-less; the whole-run cancel covers it) — a documented v1
+// limitation.
+func (t *ParallelTool) launchBranch(ctx context.Context, sem chan struct{}, callID session.ToolCallID, i int, task, shared string, ws tool.Workspace, be branchEmitter, caps parentCaps) branchResult {
+	branchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	childID := t.childSessionID(callID, i)
+	caps.registerChildRun(childID, childFamilyParallelBranch, branchLabel(i), cancel)
+	select {
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
+	case <-branchCtx.Done():
+		caps.finishChildRun(childID, session.StopCancelled)
+		return cancelledBeforeStart(i, be, caps.childWasClientCancelled(childID))
+	}
+	res, stop := t.runBranch(branchCtx, callID, i, task, shared, ws, be, caps)
+	caps.finishChildRun(childID, stop)
+	return res
+}
+
 // cancelledBeforeStart records the branchResult for a branch whose context was already
 // cancelled before it acquired a worker slot, and emits its bracketing parallel.branch
 // start+end so EVERY branch is represented on the observability stream (no missing
 // event), even one that never ran — the adversarial "branch never finishes" case.
-func cancelledBeforeStart(i int, be branchEmitter) branchResult {
-	res := branchResult{index: i, label: branchLabel(i), failed: true, failReason: "cancelled before start"}
+// clientCancelled distinguishes a per-branch CancelChild (the user killed THIS branch
+// while it queued) from a run-level/parent cancel, mirroring runBranch's failReason
+// split (A8).
+func cancelledBeforeStart(i int, be branchEmitter, clientCancelled bool) branchResult {
+	reason := "cancelled before start"
+	if clientCancelled {
+		reason = "cancelled by user before start"
+	}
+	res := branchResult{index: i, label: branchLabel(i), failed: true, failReason: reason}
 	be.branchStart(i, "")
 	be.branchEnd(res, session.StopCancelled, session.Usage{}, 0, 0)
 	return res
@@ -683,14 +728,7 @@ func (t *ParallelTool) runBranchesFirst(ctx context.Context, cancel context.Canc
 		go func(i int, task string) {
 			defer wg.Done()
 			defer func() { done <- i }()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				results[i] = cancelledBeforeStart(i, be)
-				return
-			}
-			results[i] = t.runBranch(ctx, callID, i, task, shared, ws, be, caps)
+			results[i] = t.launchBranch(ctx, sem, callID, i, task, shared, ws, be, caps)
 		}(i, task)
 	}
 
@@ -724,13 +762,15 @@ func normalizeJoin(join string) string {
 
 // runBranch forks an isolated workspace, runs one child loop in it, drains the
 // child stream internally, fires SubagentStop, and returns the branch's joined
-// result WITH its fork cleanup attached (res.cleanup). Cleanup ownership is
-// deliberately LIFTED out of this function: unlike the original (which deferred
-// cleanup here), the caller (Execute and its strategy helpers) decides which forks
-// to tear down and which to preserve, so a winning branch's fork can survive the
-// call. A fork or child failure is captured in the result, never propagated as a
-// harness error (one failing branch must not kill the others).
-func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID, i int, task, shared string, ws tool.Workspace, be branchEmitter, caps parentCaps) branchResult {
+// result WITH its fork cleanup attached (res.cleanup), plus the branch's terminal
+// stop reason (which launchBranch lands in the child-run registry). Cleanup
+// ownership is deliberately LIFTED out of this function: unlike the original
+// (which deferred cleanup here), the caller (Execute and its strategy helpers)
+// decides which forks to tear down and which to preserve, so a winning branch's
+// fork can survive the call. A fork or child failure is captured in the result,
+// never propagated as a harness error (one failing branch must not kill the
+// others).
+func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID, i int, task, shared string, ws tool.Workspace, be branchEmitter, caps parentCaps) (branchResult, session.StopReason) {
 	label := branchLabel(i)
 	res := branchResult{index: i, label: label}
 
@@ -746,7 +786,7 @@ func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID,
 		res.failed = true
 		res.failReason = fmt.Sprintf("fork failed: %v", err)
 		be.branchEnd(res, session.StopError, session.Usage{}, 0, time.Since(start))
-		return res
+		return res, session.StopError
 	}
 	res.cleanup = cleanup
 	res.childRoot = child.Root()
@@ -772,8 +812,9 @@ func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID,
 		string(callID), string(childSess.ID),
 		childPosture{isolated: true, caps: caps, role: label,
 			// childID is the branch SESSION id ("parallel-<callID>-<i>" — NOT the branch
-			// label role carries), the uniform ask-ownership/cancel handle (A6). Branch
-			// cancel itself is a later iteration; the ownership seam lands with the registry.
+			// label role carries), the uniform ask-ownership/cancel handle (A6): a
+			// CancelChild for this id retracts the branch's surfaced asks and cancels
+			// the per-branch ctx launchBranch registered.
 			childID:  string(childSess.ID),
 			askLabel: fmt.Sprintf("parallel branch %q", label)},
 	)
@@ -789,7 +830,12 @@ func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID,
 		res.failReason = final
 	case session.StopCancelled:
 		res.failed = true
+		// "cancelled" is the run-level/parent cancel; a per-branch CancelChild reads
+		// "cancelled by user" so the joined report attributes the kill correctly (A8).
 		res.failReason = "cancelled"
+		if caps.childWasClientCancelled(childSess.ID) {
+			res.failReason = "cancelled by user"
+		}
 		res.summary = final
 	default:
 		if final == "" {
@@ -798,7 +844,7 @@ func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID,
 		res.summary = final
 	}
 	be.branchEnd(res, stop, usage, toolCount, time.Since(start))
-	return res
+	return res, stop
 }
 
 // fireSubagentStop runs the SubagentStop hook for a finished branch run

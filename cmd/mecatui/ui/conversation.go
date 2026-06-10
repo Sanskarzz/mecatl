@@ -51,10 +51,15 @@ type teamTrace struct {
 // holds unbounded member content — the server caps every preview and the trace is
 // capped at maxTeamTrace.
 type teamLane struct {
-	name     string
-	role     string // the member's roster role (e.g. "researcher"); shown in the ctrl+a overlay roster, omitted from the calm inline card
-	mutating bool
-	lead     bool
+	name string
+	// sessionID is the member's child SESSION id ("team-<teamID>-<member>") — the
+	// CancelChild handle, backfilled from the first team.member event carrying it
+	// (D16). Empty until the member produces an event (or from an older server); the
+	// x cancel key no-ops then.
+	sessionID string
+	role      string // the member's roster role (e.g. "researcher"); shown in the ctrl+a overlay roster, omitted from the calm inline card
+	mutating  bool
+	lead      bool
 
 	current   string // last tool name run, or "" when none yet
 	toolCount int
@@ -508,7 +513,11 @@ func (c *conversation) hasSubagents() bool { return len(c.subagentFleet) > 0 }
 // (gauntlet #7) — never branch content. workspace is the branch's fork-root path (a handle,
 // not content).
 type parallelBranch struct {
-	index      int
+	index int
+	// childID is the branch's child SESSION id ("parallel-<callID>-<i>") — the
+	// CancelChild handle, arriving on branch_start/branch_end (D16). Empty from an
+	// older server (the x cancel key then no-ops for the lane).
+	childID    string
 	label      string
 	goal       string
 	current    string // latest branch tool name, "" when none yet
@@ -592,12 +601,17 @@ func (c *conversation) parallelStart(parentCallID, join string, branchCount int)
 	g.branchCount = branchCount
 }
 
-// parallelBranchStart records a branch's label + goal on its group branch (creating both).
-func (c *conversation) parallelBranchStart(parentCallID string, index int, label, goal string) {
+// parallelBranchStart records a branch's label + goal + child id on its group branch
+// (creating both). The child id (the CancelChild handle) is set only when non-empty,
+// so a later event from an older server never erases a known id.
+func (c *conversation) parallelBranchStart(parentCallID string, index int, childID, label, goal string) {
 	if parentCallID == "" {
 		return
 	}
 	br := c.parallelGroupFor(parentCallID).parallelBranchFor(index)
+	if childID != "" {
+		br.childID = childID
+	}
 	br.label = label
 	br.goal = goal
 }
@@ -620,11 +634,16 @@ func (c *conversation) parallelBranchTool(parentCallID string, index int, toolNa
 }
 
 // parallelBranchEnd records a branch's resolved terminal stats (done gates them).
-func (c *conversation) parallelBranchEnd(parentCallID string, index int, usage client.Usage, toolCount int, stop string, failed bool, workspace string, durationMs int64) {
+// The child id backfills defensively (branch_start can be missed), only when
+// non-empty.
+func (c *conversation) parallelBranchEnd(parentCallID string, index int, childID string, usage client.Usage, toolCount int, stop string, failed bool, workspace string, durationMs int64) {
 	if parentCallID == "" {
 		return
 	}
 	br := c.parallelGroupFor(parentCallID).parallelBranchFor(index)
+	if childID != "" {
+		br.childID = childID
+	}
 	br.done = true
 	br.usage = usage
 	br.toolCount = toolCount
@@ -748,6 +767,11 @@ func (c *conversation) addTeamMember(msg client.TeamMsg) bool {
 		b.teamID = msg.TeamID
 	}
 	ln := b.lane(msg.Member)
+	// Backfill the member's session id (the CancelChild handle) from any member event
+	// carrying it; only overwrite when non-empty so a known id is never erased.
+	if msg.MemberSessionID != "" {
+		ln.sessionID = msg.MemberSessionID
+	}
 	switch msg.InnerKind {
 	case "message.delta":
 		ln.idle = false

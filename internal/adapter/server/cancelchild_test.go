@@ -3,10 +3,12 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/internal/team"
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
@@ -154,6 +157,204 @@ func TestGRPCConverseCancelChild(t *testing.T) {
 	}
 	if bash.ran() {
 		t.Fatalf("the cancelled child's command must never execute")
+	}
+	if res := lastResult(t, evs); res.GetStop() == "error" || res.GetStop() == "cancelled" {
+		t.Fatalf("the PARENT run must complete cleanly, got stop %q", res.GetStop())
+	}
+}
+
+// parkTool is a read-only member tool that signals when it starts executing and
+// parks until its ctx is cancelled — the deterministic "member is mid-drive" anchor
+// the team-member cancel e2e sequences on.
+type parkTool struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func newParkTool() *parkTool { return &parkTool{started: make(chan struct{})} }
+
+func (*parkTool) Spec() tool.ToolSpec {
+	return tool.ToolSpec{Name: "Park", Description: "parks until cancelled", Schema: json.RawMessage(`{"type":"object"}`)}
+}
+func (*parkTool) ReadOnly() bool { return true }
+func (p *parkTool) Execute(ctx context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+	p.once.Do(func() { close(p.started) })
+	<-ctx.Done()
+	return session.NewToolResult(in.ID, "interrupted"), nil
+}
+
+// newTeamConverseService builds a Service whose parent engine carries a Team tool
+// with a lead (benign text turns) and a worker that PARKS mid-tool, so the
+// team-member cancel e2e can kill the worker through the real server stream. It
+// returns the service and the worker's parking tool (the mid-drive anchor).
+func newTeamConverseService(t *testing.T) (*server.Service, *parkTool) {
+	t.Helper()
+	park := newParkTool()
+	leadProv := mockllm.New(
+		mockllm.TextTurn("lead: briefed, waiting"),
+		mockllm.TextTurn("CONSOLIDATED: worker stopped; partials noted."),
+	)
+	workerProv := mockllm.New(
+		mockllm.ToolCallTurn(call("w1", "Park", `{}`)),
+		mockllm.TextTurn("worker: never reached"),
+	)
+	providers := map[string]*mockllm.Provider{"lead": leadProv, "worker": workerProv}
+	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+		prov, ok := providers[spec.Name]
+		if !ok {
+			t.Fatalf("no provider scripted for member %q", spec.Name)
+		}
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		cat.MustRegister(park)
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
+			LLM:     prov,
+			Catalog: cat,
+			Policy:  permpolicy.NewPolicy(allowRules(), nil),
+			Model:   "member-model",
+		})}
+	}
+	teamTool := agent.NewTeamTool(factory)
+
+	parentCat := tool.NewCatalog()
+	parentCat.MustRegister(teamTool)
+	parentLLM := mockllm.New(
+		mockllm.ToolCallTurn(call("p1", "Team",
+			`{"goal":"fix the bug","members":[{"name":"lead","role":"coordinate"},{"name":"worker","role":"investigate"}]}`)),
+		mockllm.TextTurn("parent: got the report"),
+	)
+	engine := agent.NewEngine(agent.Deps{
+		LLM:     parentLLM,
+		Catalog: parentCat,
+		Policy:  permpolicy.NewPolicy(allowRules(), nil),
+		Model:   "test-model",
+	})
+	svc, err := server.NewService(server.Config{
+		Engine:              engine,
+		Store:               memstore.New(),
+		Workspaces:          func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		Now:                 func() time.Time { return time.Unix(0, 0) },
+		DefaultCapabilities: parentLLM.Capabilities(),
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	return svc, park
+}
+
+// TestGRPCConverseCancelTeamMember is the wire e2e for the per-MEMBER cancel: the
+// Team tool runs on the Converse path; the worker parks mid-tool; the client reads
+// the worker's member_session_id off a team.member event (the D16 field — never a
+// derived id) and answers with a CancelChild frame. The member must stop (team.end
+// dispositions: stopped/cancelled), the team must still complete with a non-error
+// deliverable, and the parent run must end cleanly.
+func TestGRPCConverseCancelTeamMember(t *testing.T) {
+	svc, park := newTeamConverseService(t)
+	client, cleanup := dialGRPC(t, svc)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cs, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	stream, err := client.Converse(ctx)
+	if err != nil {
+		t.Fatalf("Converse: %v", err)
+	}
+	if err := stream.Send(&mecatlv1.ConverseRequest{
+		Kind: &mecatlv1.ConverseRequest_Prompt{Prompt: &mecatlv1.Prompt{SessionId: cs.GetSessionId(), Text: "go"}},
+	}); err != nil {
+		t.Fatalf("send prompt: %v", err)
+	}
+
+	// The cancel frame goes out from a separate goroutine ONLY once the worker is
+	// genuinely parked (the tool started), with the member id learned off the stream.
+	// Both waits select on the test ctx: if the member-id event never arrives (the
+	// D16 field went missing) the goroutine exits at the ctx deadline and the
+	// gotID=="" assertion below fails LOUD, instead of sendDone.Wait deadlocking the
+	// test to the go-test timeout.
+	memberID := make(chan string, 1)
+	var sendErr error
+	var sendDone sync.WaitGroup
+	sendDone.Add(1)
+	go func() {
+		defer sendDone.Done()
+		var id string
+		select {
+		case id = <-memberID:
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case <-park.started:
+		case <-ctx.Done():
+			return
+		}
+		sendErr = stream.Send(&mecatlv1.ConverseRequest{
+			Kind: &mecatlv1.ConverseRequest_CancelChild{CancelChild: &mecatlv1.CancelChild{ChildId: id}},
+		})
+	}()
+
+	var (
+		evs     []*mecatlv1.Event
+		gotID   string
+		teamEnd *mecatlv1.Team
+	)
+	for {
+		resp, rerr := stream.Recv()
+		if rerr != nil {
+			break // EOF (or ctx timeout — the assertions below fail loudly then)
+		}
+		ev := resp.GetEvent()
+		evs = append(evs, ev)
+		switch ev.GetType() {
+		case "team.member":
+			if tm := ev.GetTeam(); tm.GetMember() == "worker" && tm.GetMemberSessionId() != "" {
+				if gotID == "" {
+					gotID = tm.GetMemberSessionId()
+					memberID <- gotID
+				}
+			}
+		case "team.end":
+			teamEnd = ev.GetTeam()
+		}
+	}
+	sendDone.Wait()
+
+	if gotID == "" {
+		t.Fatalf("no team.member event carried the worker's member_session_id; events: %v", typesOf(evs))
+	}
+	if sendErr != nil {
+		t.Fatalf("send CancelChild: %v", sendErr)
+	}
+	if want := "team-p1-worker"; gotID != want {
+		t.Fatalf("member_session_id = %q, want %q (MemberSessionID of the published team id)", gotID, want)
+	}
+	if teamEnd == nil {
+		t.Fatalf("no team.end event; events: %v", typesOf(evs))
+	}
+	workerStopped := false
+	for _, d := range teamEnd.GetDispositions() {
+		if d.GetName() == "worker" {
+			workerStopped = d.GetStopped() &&
+				d.GetReason() == mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_CANCELLED
+		}
+	}
+	if !workerStopped {
+		t.Fatalf("team.end must dispose the worker stopped/cancelled, got %+v", teamEnd.GetDispositions())
+	}
+	var teamResult *mecatlv1.ToolResult
+	for _, ev := range evs {
+		if ev.GetType() == "tool.result" {
+			teamResult = ev.GetToolResult()
+		}
+	}
+	if teamResult == nil || teamResult.GetIsError() {
+		t.Fatalf("the Team tool must still fold back a non-error deliverable, got %+v", teamResult)
 	}
 	if res := lastResult(t, evs); res.GetStop() == "error" || res.GetStop() == "cancelled" {
 		t.Fatalf("the PARENT run must complete cleanly, got stop %q", res.GetStop())

@@ -211,12 +211,17 @@ func TestToProtoTable(t *testing.T) {
 			name: "team.member",
 			in: session.Event{Type: session.EvTeamMember, Seq: 31, Turn: 1,
 				Team: &session.TeamPayload{ParentCallID: "p1", TeamID: "team-p1", Member: "worker",
-					InnerKind: session.EvToolResult, ToolName: "Read", Detail: "capped body", IsError: true}},
+					MemberSessionID: "team-p1-worker",
+					InnerKind:       session.EvToolResult, ToolName: "Read", Detail: "capped body", IsError: true}},
 			assert: func(t *testing.T, got *mecatlv1.Event) {
 				tm := got.GetTeam()
 				if tm == nil || tm.GetMember() != "worker" || tm.GetInnerKind() != "tool.result" ||
 					tm.GetToolName() != "Read" || tm.GetDetail() != "capped body" || !tm.GetIsError() {
 					t.Fatalf("team.member payload mismatch: %+v", tm)
+				}
+				// member_session_id (the CancelChild handle — D16) crosses verbatim.
+				if tm.GetMemberSessionId() != "team-p1-worker" {
+					t.Fatalf("team.member member_session_id = %q, want team-p1-worker", tm.GetMemberSessionId())
 				}
 			},
 		},
@@ -360,12 +365,16 @@ func TestToProtoTable(t *testing.T) {
 			name: "parallel.branch branch_start",
 			in: session.Event{Type: session.EvParallelBranch, Seq: 41, Turn: 1,
 				Parallel: &session.ParallelPayload{ParentCallID: "p1", Kind: session.ParallelBranchStart,
-					BranchIndex: 1, BranchLabel: "branch-2", Goal: "explore beta"}},
+					BranchIndex: 1, ChildID: "parallel-p1-1", BranchLabel: "branch-2", Goal: "explore beta"}},
 			assert: func(t *testing.T, got *mecatlv1.Event) {
 				p := got.GetParallel()
 				if p == nil || p.GetKind() != "branch_start" || p.GetBranchIndex() != 1 ||
 					p.GetBranchLabel() != "branch-2" || p.GetGoal() != "explore beta" {
 					t.Fatalf("parallel branch_start payload mismatch: %+v", p)
+				}
+				// child_id (the CancelChild handle — D16) crosses verbatim.
+				if p.GetChildId() != "parallel-p1-1" {
+					t.Fatalf("parallel branch_start child_id = %q, want parallel-p1-1", p.GetChildId())
 				}
 			},
 		},
@@ -386,8 +395,9 @@ func TestToProtoTable(t *testing.T) {
 			name: "parallel.branch branch_end",
 			in: session.Event{Type: session.EvParallelBranch, Seq: 43, Turn: 1,
 				Parallel: &session.ParallelPayload{ParentCallID: "p1", Kind: session.ParallelBranchEnd,
-					BranchIndex: 2, ToolCount: 4, Failed: true, Workspace: "/fork/branch-3",
-					Stop: session.StopError, DurationMs: 555,
+					BranchIndex: 2, ChildID: "parallel-p1-2", ToolCount: 4, Failed: true,
+					Workspace: "/fork/branch-3",
+					Stop:      session.StopError, DurationMs: 555,
 					Usage: session.Usage{InputTokens: 12, OutputTokens: 3}}},
 			assert: func(t *testing.T, got *mecatlv1.Event) {
 				p := got.GetParallel()
@@ -395,6 +405,9 @@ func TestToProtoTable(t *testing.T) {
 					!p.GetFailed() || p.GetWorkspace() != "/fork/branch-3" ||
 					p.GetStop() != "error" || p.GetDurationMs() != 555 || p.GetToolCount() != 4 {
 					t.Fatalf("parallel branch_end payload mismatch: %+v", p)
+				}
+				if p.GetChildId() != "parallel-p1-2" {
+					t.Fatalf("parallel branch_end child_id = %q, want parallel-p1-2", p.GetChildId())
 				}
 				if u := p.GetUsage(); u.GetInputTokens() != 12 || u.GetOutputTokens() != 3 {
 					t.Fatalf("parallel branch_end usage mismatch: %+v", u)

@@ -18,6 +18,22 @@ type childFamily string
 const (
 	// childFamilySubagent is a flat-fleet Subagent child ("subagent-<callID>").
 	childFamilySubagent childFamily = "subagent"
+	// childFamilyParallelBranch is one Parallel fork-join branch
+	// ("parallel-<callID>-<i>").
+	childFamilyParallelBranch childFamily = "parallel-branch"
+	// childFamilyTeamMember is one long-lived team member ("team-<teamID>-<member>",
+	// MemberSessionID). Unlike the one-shot families its entry stays live ACROSS
+	// rounds (idle-between-rounds is still cancellable) and is marked done when the
+	// supervisor stops it or the team ends.
+	//
+	// CAUTION — for THIS family, done/doneCh means DE-SCHEDULED, not quiescent: a
+	// budget-stopped LEAD is marked done by the supervisor's stop path yet is
+	// deliberately driven ONE more time for the synthesis turn (its per-member ctx
+	// is not cancelled on stop for exactly that reason — see Supervisor.runTurn /
+	// cleanupAll). Any future reader of done state (the I3 status tool, a
+	// background-team future) must NOT treat a team-member done entry as
+	// fully-terminal; only the TEAM's own end (cleanupAll) is.
+	childFamilyTeamMember childFamily = "team-member"
 )
 
 // childState is a registered child's lifecycle position: queued (registered,
@@ -151,9 +167,8 @@ func (g *childRunRegistry) markDone(childID string, stop session.StopReason) {
 }
 
 // recordAsk records that the (live) child owns a surfaced ask, so a later
-// CancelChild can retract it. Unknown or already-done ids are ignored (a
-// team-member/parallel-branch ask in this iteration — those families register
-// in a later one — or a terminal race).
+// CancelChild can retract it. Unknown or already-done ids are ignored (a child
+// driven without parent caps, or a terminal race).
 func (g *childRunRegistry) recordAsk(childID, askID string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -186,9 +201,10 @@ func (g *childRunRegistry) requestCancel(childID string) (cancel context.CancelF
 }
 
 // clientCancelled reports whether CancelChild was requested for the child. The
-// Subagent tool reads it (via parentCaps.children) to render the
-// "[subagent cancelled by user]" terminal note, disambiguating a client cancel
-// from a parent-run cancel or a per-call timeout.
+// spawning tools read it (via parentCaps.children) to attribute the kill: the
+// Subagent tool renders the "[subagent cancelled by user]" terminal note and a
+// Parallel branch flips its failReason to "cancelled by user", disambiguating a
+// client cancel from a parent-run cancel or a per-call timeout.
 func (g *childRunRegistry) clientCancelled(childID string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()

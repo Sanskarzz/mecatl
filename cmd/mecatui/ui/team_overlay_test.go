@@ -462,6 +462,7 @@ func TestAgentsRosterStoppedGolden(t *testing.T) {
 	mm, _ := m.Update(ctrlKey('a'))
 	m = mm.(Model)
 	got := stripANSI([]byte(m.View().Content))
+	assertFitsViewport(t, got, m.width)
 	compareGolden(t, "team_roster_stopped.golden", got)
 
 	out := string(got)
@@ -1178,6 +1179,7 @@ func TestAgentsRosterGolden(t *testing.T) {
 		t.Fatalf("view = %v, want teamRoster", m.team.view)
 	}
 	got := stripANSI([]byte(m.View().Content))
+	assertFitsViewport(t, got, m.width)
 	compareGolden(t, "team_roster.golden", got)
 }
 
@@ -1207,6 +1209,7 @@ func TestAgentsRosterMidRunIdleGolden(t *testing.T) {
 		t.Fatalf("view = %v, want teamRoster", m.team.view)
 	}
 	got := stripANSI([]byte(m.View().Content))
+	assertFitsViewport(t, got, m.width)
 	compareGolden(t, "team_roster_midrun_idle.golden", got)
 }
 
@@ -1260,6 +1263,7 @@ func TestAgentsRosterWindowedGolden(t *testing.T) {
 		m = mm.(Model)
 	}
 	got := stripANSI([]byte(m.View().Content))
+	assertFitsViewport(t, got, m.width)
 	compareGolden(t, "team_roster_windowed.golden", got)
 }
 

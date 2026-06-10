@@ -325,9 +325,9 @@ type SubagentPayload struct {
 //
 // Which fields are set depends on the event kind:
 //   - EvParallelStart:                       ParentCallID, Join, BranchCount.
-//   - EvParallelBranch (Kind=branch_start):  ParentCallID, Kind, BranchIndex, BranchLabel, Goal.
+//   - EvParallelBranch (Kind=branch_start):  ParentCallID, Kind, BranchIndex, ChildID, BranchLabel, Goal.
 //   - EvParallelBranch (Kind=branch_tool):   ParentCallID, Kind, BranchIndex, ToolName, IsError, ToolCount.
-//   - EvParallelBranch (Kind=branch_end):    ParentCallID, Kind, BranchIndex, ToolCount, Stop, Usage, DurationMs, Failed, Workspace.
+//   - EvParallelBranch (Kind=branch_end):    ParentCallID, Kind, BranchIndex, ChildID, ToolCount, Stop, Usage, DurationMs, Failed, Workspace.
 //   - EvParallelEnd:                         ParentCallID, Join, BranchCount, Winner, WinnerWorkspace, Usage (run total), Stop.
 type ParallelPayload struct {
 	// ParentCallID is the parent's Parallel tool-call id; it is the GROUP key (one
@@ -347,9 +347,15 @@ type ParallelPayload struct {
 	BranchCount int
 
 	// BranchIndex is the 0-based branch index — the stable per-branch group key within
-	// a Parallel call. Set on every EvParallelBranch kind. (It is NOT a child session id:
-	// Parallel branch ids are throwaway and never addressed; the index is the row key.)
+	// a Parallel call. Set on every EvParallelBranch kind. (The index is the row key;
+	// ChildID below is the ADDRESSING handle.)
 	BranchIndex int
+	// ChildID is the branch's child SESSION id ("parallel-<callID>-<i>") — the uniform
+	// per-child cancel/inspect handle (the same single-handle convention as
+	// SubagentPayload.ChildID / the Team member session id), surfaced so a client can
+	// address a branch (CancelChild) WITHOUT deriving the id grammar. Set on the
+	// branch_start and branch_end kinds. It is an id, never branch content.
+	ChildID string
 	// BranchLabel is the humanized 1-based branch label ("branch-1" …). Set on the
 	// branch_start kind.
 	BranchLabel string
@@ -484,9 +490,9 @@ type TeamMemberDisposition struct {
 //
 // Which fields are set depends on the event kind:
 //   - EvTeamStart:  ParentCallID, TeamID, Roster.
-//   - EvTeamMember: ParentCallID, TeamID, Member, InnerKind, and the subset of
-//     {Text, ToolName, Detail, IsError, Usage, ContextUsed, ContextWindow}
-//     relevant to InnerKind.
+//   - EvTeamMember: ParentCallID, TeamID, Member, MemberSessionID, InnerKind, and
+//     the subset of {Text, ToolName, Detail, IsError, Usage, ContextUsed,
+//     ContextWindow} relevant to InnerKind.
 //   - EvTeamTasks:  ParentCallID, TeamID, Tasks (the team-wide task snapshot; no
 //     Member).
 //   - EvTeamFindings: ParentCallID, TeamID, Findings (the team-wide findings ledger
@@ -506,6 +512,12 @@ type TeamPayload struct {
 	// Member is the name of the member whose activity this event projects. Set on
 	// EvTeamMember only.
 	Member string
+	// MemberSessionID is the producing member's child SESSION id (MemberSessionID:
+	// "team-<teamID>-<member>") — the uniform per-child cancel/inspect handle (the
+	// same single-handle convention as SubagentPayload.ChildID), surfaced so a client
+	// can address a member (CancelChild) WITHOUT deriving the id grammar. Set on
+	// EvTeamMember only. It is an id, never member content.
+	MemberSessionID string
 	// InnerKind is the member's underlying session event kind being projected
 	// (e.g. "message.delta", "tool.call", "tool.result", "turn.end", "result").
 	// Set on EvTeamMember only. permission.ask is never projected.

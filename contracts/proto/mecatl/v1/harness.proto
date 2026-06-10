@@ -696,10 +696,9 @@ message Team {
   // supervisor verdicts only, never member content.
   repeated TeamMemberDisposition dispositions = 17;
   // member_session_id is the member's child SESSION id ("team-<teamID>-<member>")
-  // on member-tagged events — the CancelChild handle, carried explicitly so a
-  // client never derives ids from the (internal) id grammar. DORMANT: reserved
-  // for the team-cancel iteration; the server does not set it yet. (17 is taken
-  // by dispositions.)
+  // on member-tagged (team.member) events — the CancelChild handle, carried
+  // explicitly so a client never derives ids from the (internal) id grammar.
+  // (17 is taken by dispositions.)
   string member_session_id = 18;
 }
 
@@ -775,8 +774,7 @@ message Parallel {
   string winner_workspace = 17;
   // child_id is the branch's child SESSION id ("parallel-<callID>-<i>") on
   // branch_start/branch_end — the CancelChild handle, carried explicitly so a
-  // client never derives ids from the (internal) id grammar. DORMANT: reserved
-  // for the parallel-cancel iteration; the server does not set it yet.
+  // client never derives ids from the (internal) id grammar.
   string child_id = 18;
 }
 

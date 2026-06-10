@@ -691,6 +691,7 @@ func TestAgentsTeamsTabGolden(t *testing.T) {
 		t.Fatalf("expected Teams tab, got %v", m.agentsTab)
 	}
 	got := stripANSI([]byte(m.View().Content))
+	assertFitsViewport(t, got, m.width)
 	compareGolden(t, "agents_teams_tab.golden", got)
 }
 
@@ -739,6 +740,7 @@ func TestParallelGroupFocusGolden(t *testing.T) {
 		t.Fatalf("expected parallelGroupView, got %v", m.parallel.view)
 	}
 	got := stripANSI([]byte(m.View().Content))
+	assertFitsViewport(t, got, m.width)
 	compareGolden(t, "parallel_group_focus.golden", got)
 }
 
