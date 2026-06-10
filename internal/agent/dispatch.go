@@ -467,6 +467,10 @@ func (*Engine) parentCaps(r *Run, turnIdx int) parentCaps {
 	caps := parentCaps{
 		interactive: interactive,
 		diag:        r.diag,
+		// The run's explicit unwedge signal (fired hardAbortGrace after Run.Cancel)
+		// rides down so a delegation tool's internal forwarding sends can give up
+		// alongside the run's own guarded emits — see parentCaps.hardAbort.
+		hardAbort: r.hardAbort,
 		// The child-run registry is handed down DIRECTLY and UNCONDITIONALLY (it
 		// exists on every run; cancel frames arrive only on interactive surfaces but
 		// the bookkeeping — and the clientCancelled read — must work headless too).

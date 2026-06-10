@@ -376,10 +376,13 @@ only the cancel-relevant paths are exercised. LOCKING is split per concern: `mu`
 map (short sections, never across a send) and a separate `emitMu` guards `sealed` + every guarded
 send as ONE locked section (A4a holds; a send waiting on the events channel can never wedge markDone /
 sibling registration behind it). (I3a generalised the emit semantics: the bound send is now
-`Run.emitOrAbort` — blocking until delivered, giving up only when the registry's seal-abort channel
-`emitAbort` closes at seal-intent — so a cancelled run's in-flight child events still reach the
-draining consumer and seal can never deadlock behind a blocked send; the original ctx-select
-`tryEmit` is gone.) `Run.CancelChild(childID) bool` is the Approve
+`Run.emitOrAbort` — blocking until delivered, giving up when the registry's seal-abort channel
+`emitAbort` closes at seal-intent OR when the run's `hardAbort` fires (`Run.Cancel`'s explicit
+unwedge — a `hardAbortGrace`=1s timer armed BEFORE the ctx cancel; BACKGROUND-SUBAGENTS.md §2.3
+step 4) — so a cancelled run's in-flight child events still reach the draining consumer (the
+try-send-first shape delivers deterministically while the buffer has room, and the grace lets a
+backlogged-but-draining consumer absorb the tail; only a send still parked past the grace gives
+up) and seal can never deadlock behind a blocked send; the original ctx-select `tryEmit` is gone.) `Run.CancelChild(childID) bool` is the Approve
 mirror: idempotent, unknown/done → false; on a live child it sets `clientCancelled`, snapshots+clears
 the child's surfaced askIDs, invokes `cancel()` OUTSIDE the registry lock, then per askID
 `childAskRouter.unregister` (a locked delete) BEFORE emitting the new `permission.retract` event
@@ -528,9 +531,18 @@ EvResult (A4b). ALL child-originated emits (subagent.start/tool/end, the surface
 EvPermissionAsk in `parentCaps`, permission.retract) route through `registry.safeEmit` (A4c): a
 locked sealed-check+send (A4a), bound to `Run.emitOrAbort` — BLOCKING (a cancelled run's in-flight
 child events still reach the draining consumer; the bracketing parallel.branch events of a
-cancelled-before-start branch must be represented) and aborted only by `emitAbort`, which `seal`
+cancelled-before-start branch must be represented) and aborted by `emitAbort`, which `seal`
 closes BEFORE taking `emitMu` so seal can never deadlock behind a blocked send (the single
-deadlock-prevention mechanic, pinned by `TestSealUnblocksEmitParkedSend`). **A5 state
+seal-side deadlock-prevention mechanic, pinned by `TestSealUnblocksEmitParkedSend`), OR by the
+run's `hardAbort` (a `hardAbortGrace` timer armed by `Run.Cancel` BEFORE the ctx cancel — the
+explicit unwedge for a consumer that stopped draining mid-run, when the terminate paths that seal
+are themselves blocked, while the grace still lets a backlogged-but-draining consumer collect the
+post-cancel tail; threaded to the team supervisor's member forward as `parentCaps.hardAbort`; both
+relays additionally drain-to-discard `run.Events()` after their first Send/Write error — pinned by
+`TestCancelUnwedgesStalledTeamRun`, `TestCancelAbortNoChildLeakAfterSeal`,
+`TestEmitDeliversWithBufferRoomAfterHardAbort` (the try-send-first delivery shape),
+`TestCancelMemberUnparksEvChSend` (the member-forward's driveCtx arm),
+`TestRelaySendErrorDrainsBusyRun`, `TestSSEWriteErrorDrainsBusyRun`). **A5 state
 vocabulary** (documented in childregistry.go): `childQueued → childRunning → childDone`
 (`markRunning` at slot acquisition / branch start / member enrolment); a PRE-START failure whose
 error returned inline (fork/resume-load/session-build, the background gate-full path) REMOVES the

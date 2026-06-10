@@ -95,6 +95,14 @@ type parentCaps struct {
 	// session id "subagent-<callID>" for Subagent children; the member name / fork label
 	// for the others). nil → no diagnostic (NopDiagnostics-safe via the caller).
 	diag port.Diagnostics
+	// hardAbort is the parent Run's explicit unwedge signal (Run.hardAbort, fired
+	// a short grace after Run.Cancel — see hardAbortGrace), handed down so a delegation tool's own
+	// internal forwarding sends (the team supervisor's member→evCh forward) can give
+	// up when the parent run is cancelled while its consumer stopped draining — the
+	// state in which the parent's terminate paths (and so the registry seal) are
+	// unreachable. nil on a zero parentCaps (plain Execute/ExecuteObserved): a nil
+	// channel in a select blocks forever, which IS the correct no-abort behaviour.
+	hardAbort <-chan struct{}
 }
 
 // registerChildRun is the nil-safe registration wrapper a spawning tool calls: a

@@ -181,6 +181,41 @@ child run-end events precede the terminal `EvResult` on the stream):
    `Run.emitOrAbort` (a blocking send that gives up when the seal's abort channel
    closes; the abort channel closes BEFORE the emit lock is taken, or seal would
    deadlock — pinned by `TestSealUnblocksEmitParkedSend`).
+4. **Hard abort (the cancel unwedge)**: the seal escape above is reachable only from
+   the terminate paths — which are themselves BLOCKED when the consumer stops
+   draining mid-run (the loop parked in its own emit, the team forwarder parked in
+   `safeEmit`, members parked at the supervisor's evCh send: nothing can reach
+   `drainChildren`). `Run.Cancel` therefore arms `Run.hardAbort` (sticky, via a
+   `sync.Once` + a `hardAbortGrace`=1s timer, armed BEFORE cancelling the ctx),
+   and EVERY guarded send on the run — `emit`, `emitOrAbort`, the supervisor's
+   member→evCh forward (threaded down as `parentCaps.hardAbort`; nil without
+   parent caps = blocks forever = correct no-abort) — selects on it. The member
+   forward ALSO selects on `driveCtx.Done()`, and that arm is LOAD-BEARING for
+   member liveness, never redundant defense: the member run's OWN hardAbort is
+   never armed (per-member cancel is `m.ctx`, nobody calls `Run.Cancel` on a
+   member run), so on the no-parent-caps path (supervisor-direct / gRPC RunTeam)
+   driveCtx is the ONLY thing that can unpark a member wedged at the evCh send —
+   do not remove it (pinned by `TestCancelMemberUnparksEvChSend`). The
+   "emitOrAbort selects only on emitAbort, NOT ctx" rationale is PRESERVED, not
+   amended: hardAbort is an explicit signal, not ctx, and the
+   cancelled-but-drained delivery contract holds TWO ways — the try-send-first
+   shape (non-blocking attempt, then the guarded select) delivers
+   deterministically while the buffer has room (a bare two-arm select picks
+   RANDOMLY against a closed channel and flakily drops post-cancel events), and
+   the GRACE lets a merely-backlogged consumer (full buffer, still draining)
+   absorb the post-cancel tail — terminal EvResult included — before parked
+   sends give up; once fired the closed channel makes every later would-park
+   send drop instantly (the unwedge cost is per-run, never per-event). Pinned by
+   `TestCancelUnwedgesStalledTeamRun` (wedge → Cancel → session lands cancelled,
+   Interrupt-recoverable), `TestCancelAbortNoChildLeakAfterSeal` (undelivered +
+   sticky, not one-shot), and `TestEmitDeliversWithBufferRoomAfterHardAbort`
+   (the try-send-first delivery half — the executable form of the preserved
+   rationale). The relay
+   half: both relays (gRPC `Converse`, HTTP SSE) drain-to-discard after the FIRST
+   Send/Write error — record the error, `run.Cancel()`, keep ranging
+   `run.Events()` discarding until close, then return the error — so a busy run
+   never wedges in its own emits behind a dead client
+   (`TestRelaySendErrorDrainsBusyRun` / `TestSSEWriteErrorDrainsBusyRun`).
 
 A goroutine is owned by the Run (spawned under its ctx tree, joined at its end).
 Session close / server shutdown need nothing new in v1: a run-scoped child cannot
@@ -346,6 +381,20 @@ session, all 10 gauntlet tests passing. ALL proto fields landed in I1's single r
 - **port.LLMRequest neutrality / layering**: untouched; all knobs are tool args,
   Run-scoped state, or proto wire fields; `parentCaps` remains closures+values; mecatui
   imports no `internal/`.
+- **Cancel always unwedges (the hardAbort amendment, §2.3 step 4)**: `Run.Cancel` is
+  no longer a bare ctx cancel — it first arms the sticky `Run.hardAbort` (a
+  `hardAbortGrace` timer), the explicit "stop blocking anywhere" signal every
+  guarded send selects on (`emit`, `emitOrAbort`, the supervisor's member forward
+  via `parentCaps.hardAbort`), so a run whose consumer stopped draining still
+  terminates within the grace (session lands CANCELLED, Interrupt-recoverable —
+  identical to a healthy esc-cancel; the normal terminate path still runs after
+  the unwind, drainChildren → seal both idempotent). The "emitOrAbort selects on
+  emitAbort, NOT ctx" rationale is explicitly PRESERVED: hardAbort is a distinct
+  signal, and the try-send-first shape + the grace keep cancelled-but-drained
+  delivery (terminal EvResult included) intact even for a backlogged consumer. Layering: hardAbort is an agent-internal
+  channel + a `parentCaps` field — nothing from adapters/proto crosses into agent;
+  the relay drain-to-discard edits are adapter-side only. No new diagnostics line
+  (the loop still emits exactly THREE).
 
 ## 6. v2 — session-scoped background (future work, named not designed)
 

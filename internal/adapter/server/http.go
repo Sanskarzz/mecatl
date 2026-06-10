@@ -355,24 +355,38 @@ func (h *HTTPHandler) prompt(w http.ResponseWriter, r *http.Request) {
 		run.Cancel()
 	}()
 
+	// Relay events; the channel closes when the run ends. On the FIRST write
+	// error (the client is gone) cancel the run but KEEP RANGING, discarding
+	// events until the channel closes: a run that keeps emitting must never
+	// wedge in its own sends behind a dead relay. The failure flag is sticky —
+	// no further write (or the EvPermissionAsk Persist side-effect, which
+	// belongs to the healthy path only) happens after the first error.
 	enc := json.NewEncoder(w)
+	failed := false
+	fail := func() {
+		failed = true
+		run.Cancel()
+	}
 	for ev := range run.Events() {
+		if failed {
+			continue // drain-to-discard: keep the run unwedged after a dead client
+		}
 		// Persist when the run pauses awaiting approval so a restart leaves a
 		// loadable awaiting session a client can re-attach to.
 		if ev.Type == session.EvPermissionAsk {
 			h.svc.Persist(r.Context(), id)
 		}
 		if _, err := w.Write([]byte("data: ")); err != nil {
-			run.Cancel()
-			return
+			fail()
+			continue
 		}
 		if err := enc.Encode(toProto(ev)); err != nil { // Encode appends a newline
-			run.Cancel()
-			return
+			fail()
+			continue
 		}
 		if _, err := w.Write([]byte("\n")); err != nil {
-			run.Cancel()
-			return
+			fail()
+			continue
 		}
 		flusher.Flush()
 	}

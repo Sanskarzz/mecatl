@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -318,6 +319,25 @@ type Run struct {
 	asks   *askRegistry
 	cancel context.CancelFunc
 	seq    atomic.Int64
+	// hardAbort is closed a short grace AFTER Cancel (hardAbortOnce arms the
+	// hardAbortGrace timer BEFORE the ctx cancel) — the explicit "stop blocking
+	// anywhere" unwedge signal every guarded send on this run selects on (emit,
+	// emitOrAbort, the supervisor's member forward). It is DISTINCT from the
+	// child registry's emitAbort (which closes only at seal-INTENT, i.e. from the
+	// terminate paths — unreachable while the loop is itself parked in a blocked
+	// send) and from the run ctx (deliberately NOT a guarded send's escape hatch:
+	// a cancelled run with a draining consumer must still deliver in-flight
+	// events — see emit/emitOrAbort). The GRACE is what reconciles the two
+	// contracts: a cancelled consumer that is merely BACKLOGGED (buffer full but
+	// still draining) absorbs the post-cancel tail — the terminal StopCancelled
+	// EvResult included — before parked sends give up, while a consumer that
+	// genuinely stopped draining unwedges at Cancel+grace. Without the signal, a
+	// dead consumer wedges the run permanently: the buffers fill, every send
+	// parks, and the seal/abort escape can never be reached. Sticky (a closed
+	// channel): once it fires, any send that would BLOCK gives up instead.
+	// nil on a hand-built Run (tests); Cancel is nil-safe.
+	hardAbort     chan struct{}
+	hardAbortOnce sync.Once
 	// serial is this Run's process-unique discriminator (minted from runSerial in
 	// RunContentWith), suffixed into every askID (newAskID) so two RUNS of the SAME
 	// session can never re-mint the same askID. Without it, cancel-a-parked-ask →
@@ -438,10 +458,39 @@ func (r *Run) autoDenyChildAsk(askID, reason string) {
 	r.asks.resolveWith(askID, approval{verdict: session.VerdictDeny, denyReason: reason})
 }
 
-// Cancel aborts the in-flight run by cancelling its context. The loop observes
-// the cancellation (mid-stream, mid-tool, or while awaiting an approval) and
-// terminates with a result carrying StopCancelled.
-func (r *Run) Cancel() { r.cancel() }
+// hardAbortGrace is how long after Cancel the run's hardAbort signal fires. The
+// delay is load-bearing both ways: a cancelled consumer that is still DRAINING
+// (just backlogged — a full events buffer behind a slow client) gets this long
+// to absorb the post-cancel tail, so the terminal StopCancelled EvResult is
+// still delivered (the documented cancelled-but-drained contract, pinned by the
+// gRPC/loop cancel tests); a consumer that genuinely STOPPED draining unwedges
+// every parked send at Cancel+grace, after which the sticky closed channel makes
+// all later would-park sends give up instantly (no per-send re-wait — the
+// unwedge cost is paid once per run, never per event). A var only as a test
+// seam, mirroring childDrainCap/childDrainGrace.
+var hardAbortGrace = time.Second
+
+// Cancel aborts the in-flight run: it first arms the hardAbort grace timer (the
+// explicit unwedge signal — any send still parked on a full events channel
+// hardAbortGrace later gives up instead of blocking forever), THEN cancels the
+// run context. The arm-before-cancel order matters: a ctx-woken goroutine that
+// loops back into an emit must already be covered by the pending abort, or it
+// could park indefinitely. The AfterFunc timer is deliberately never Stop()ed:
+// at worst it fires once, shortly after a run that already ended, and closes a
+// channel nobody reads any more — a harmless once-per-run close (contrast
+// joinChildren's defer timer.Stop, which reclaims a shared 10s timer early on
+// the common all-joined-fast path — a different shape: that timer does real
+// work only on expiry; this one's entire job IS to fire). The loop observes the cancellation (mid-stream, mid-tool,
+// or while awaiting an approval) and terminates with a result carrying
+// StopCancelled.
+func (r *Run) Cancel() {
+	r.hardAbortOnce.Do(func() {
+		if r.hardAbort != nil {
+			time.AfterFunc(hardAbortGrace, func() { close(r.hardAbort) })
+		}
+	})
+	r.cancel()
+}
 
 // CancelChild requests cancellation of ONE child of this run, addressed by its
 // child session id (the `agentId:` trailer on the Subagent result / the overlay
@@ -502,12 +551,13 @@ func (e *Engine) RunContent(ctx context.Context, sess *session.Session, ws tool.
 func (e *Engine) RunContentWith(ctx context.Context, sess *session.Session, ws tool.Workspace, userText string, parts []session.Content, opts RunOptions) *Run {
 	ctx, cancel := context.WithCancel(ctx)
 	r := &Run{
-		events: make(chan session.Event, 64),
-		asks:   newAskRegistry(),
-		cancel: cancel,
-		ctx:    ctx,
-		opts:   opts,
-		serial: runSerial.Add(1),
+		events:    make(chan session.Event, 64),
+		asks:      newAskRegistry(),
+		cancel:    cancel,
+		ctx:       ctx,
+		opts:      opts,
+		hardAbort: make(chan struct{}),
+		serial:    runSerial.Add(1),
 		// Bind the run-scoped diagnostics ONCE here, where the live session is in
 		// scope: correlate every emitted line to this session id, and (for a child
 		// engine, Role != "") to its agent role too. The main engine has Role=="" so
@@ -528,7 +578,8 @@ func (e *Engine) RunContentWith(ctx context.Context, sess *session.Session, ws t
 	// loop's own backpressure semantics, so a cancelled run's in-flight child
 	// events still reach the draining consumer — e.g. the bracketing
 	// parallel.branch events of a cancelled-before-start branch) and gives up ONLY
-	// when the registry seals (run end / drain abandon), so a child goroutine (or
+	// when the registry seals (run end / drain abandon) or the run's hardAbort
+	// closes (Run.Cancel's explicit unwedge), so a child goroutine (or
 	// the readControl goroutine inside CancelChild) is never parked past the run's
 	// own teardown behind a wedged consumer. ALL child-originated emits route
 	// through registry.safeEmit over this binding (A4c); a delivered event mirrors
@@ -1215,9 +1266,30 @@ func (e *Engine) bindRunDiag(id session.SessionID) port.Diagnostics {
 
 // emit assigns the next monotonic Seq, publishes the event on the Run channel,
 // and returns the sequenced event (so callers can mirror it to a secondary sink).
+//
+// The send is guarded by the run's hardAbort signal (fires hardAbortGrace after
+// Cancel): a non-blocking attempt first, then a blocking send that gives up when
+// hardAbort fires. The try-send-first shape plus the grace are load-bearing —
+// together they preserve the documented rationale that a CANCELLED run with a
+// DRAINING consumer still delivers its in-flight events (the terminal
+// StopCancelled EvResult included): whenever the buffer has room the event is
+// delivered deterministically (a two-arm select alone would pick randomly
+// between a ready send and a closed abort, flakily dropping post-cancel events
+// on healthy runs), and a send that must PARK still gets the grace for a merely
+// BACKLOGGED consumer to catch up before giving up. A dropped event still
+// consumes its Seq — monotonic-with-gaps, exactly emitOrAbort's documented
+// contract — and is still returned for sink mirroring.
 func (r *Run) emit(ev session.Event) session.Event {
 	ev.Seq = r.seq.Add(1)
-	r.events <- ev
+	select {
+	case r.events <- ev:
+		return ev
+	default:
+	}
+	select {
+	case r.events <- ev:
+	case <-r.hardAbort:
+	}
 	return ev
 }
 
@@ -1226,7 +1298,7 @@ func (r *Run) emit(ev session.Event) session.Event {
 // surfaced asks, permission.retract). It publishes ev like emit — BLOCKING, the
 // intended backpressure, and crucially still delivering on a CANCELLED run whose
 // consumer drains until close (a cancelled-before-start branch's bracketing
-// events must be represented) — but selects on the registry's seal-abort channel
+// events must be represented) — but selects on the abort signals
 // instead of blocking past the run's teardown: abort closes at seal-INTENT
 // (drainChildren / the run goroutine's deferred seal), so a send parked on a
 // full channel behind a consumer that stopped draining unwinds when the run
@@ -1234,12 +1306,30 @@ func (r *Run) emit(ev session.Event) session.Event {
 // reports whether the event was delivered; a dropped event consumes its Seq
 // (monotonicity holds, gaps are fine — clients order by Seq, they do not count
 // it).
+//
+// It gives up on EITHER of two distinct signals: the registry's seal-abort
+// channel (abort — closes at seal-INTENT from the terminate paths) OR the run's
+// hardAbort (fires hardAbortGrace after Run.Cancel — the explicit unwedge for a
+// send parked behind a consumer that stopped draining, reachable even when the
+// terminate paths themselves are blocked). The run ctx remains deliberately
+// ABSENT from the select (the preserved rationale above: cancelled-but-drained
+// runs still deliver — the grace covers a backlogged-but-draining consumer);
+// hardAbort is an explicit signal, not ctx. The try-send-first shape mirrors
+// emit: delivery is deterministic whenever the buffer has room, so the abort
+// arms only ever claim a send that would genuinely park.
 func (r *Run) emitOrAbort(ev session.Event, abort <-chan struct{}) bool {
 	ev.Seq = r.seq.Add(1)
 	select {
 	case r.events <- ev:
 		return true
+	default:
+	}
+	select {
+	case r.events <- ev:
+		return true
 	case <-abort:
+		return false
+	case <-r.hardAbort:
 		return false
 	}
 }

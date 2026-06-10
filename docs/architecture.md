@@ -748,7 +748,16 @@ v1 enforces required checks in the Go server (protovalidate runtime is deferred)
 
 Closing either stream cancels the run: the SSE handler watches
 `r.Context().Done()` and calls `run.Cancel()`; the gRPC relay cancels on a send
-error.
+error. `Run.Cancel` first arms the run's sticky `hardAbort` signal (a short
+grace timer, armed before the ctx cancel), so every guarded send — the loop's
+`emit`, the child registry's `emitOrAbort`, the team supervisor's member
+forward — gives up instead of parking forever behind a consumer that stopped
+draining (the explicit unwedge; a cancelled run with a *draining* consumer
+still delivers its in-flight events — the grace covers even a backlogged one).
+Both relays are drain-to-discard after the FIRST Send/Write error: they record
+the error, cancel the run, and keep ranging `run.Events()` (discarding, no
+further writes) until the channel closes — a busy run never wedges in its own
+emits behind a dead client.
 
 ## 11. Observability & persistence
 

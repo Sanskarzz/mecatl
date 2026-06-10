@@ -1137,7 +1137,34 @@ func (s *Supervisor) driveOneTurn(ctx context.Context, m *memberRT, prompt strin
 				usage = ev.Result.Usage
 			}
 		}
-		evCh <- TeamEvent{Member: m.spec.Name, MemberSessionID: string(m.sess.ID), Event: ev, ContextWindow: m.engine.ContextWindow()}
+		te := TeamEvent{Member: m.spec.Name, MemberSessionID: string(m.sess.ID), Event: ev, ContextWindow: m.engine.ContextWindow()}
+		// The forward is a guarded send, not a bare one: a consumer that stops
+		// draining the PARENT stream parks the forwarder (sink → safeEmit), fills
+		// evCh, and would park this member goroutine forever — wedging Run (g.Wait
+		// / <-done can then never be reached, so the seal escape never fires). The
+		// try-send-first shape keeps delivery deterministic whenever evCh has room
+		// (a cancelled-but-drained run still forwards its in-flight member events);
+		// only a send that would PARK gives up, on either the drive ctx (the parent
+		// run ctx merged with the per-member cancel — fires on Run.Cancel and
+		// CancelMember alike) or the parent run's explicit hardAbort unwedge signal
+		// (parentCaps.hardAbort; nil without parent caps — blocks forever in the
+		// select, the correct no-abort behaviour). The driveCtx arm is LOAD-BEARING,
+		// not redundant defense: the member run's OWN hardAbort is never armed
+		// (per-member cancel is m.ctx, nobody calls Run.Cancel on a member run), so
+		// without parent caps it is the ONLY signal that can unpark a member wedged
+		// here — never remove it (pinned by TestCancelMemberUnparksEvChSend).
+		// Dropping the forward loses only the bounded observability projection,
+		// never member state: text/stop/usage were already captured above.
+		select {
+		case evCh <- te:
+			continue
+		default:
+		}
+		select {
+		case evCh <- te:
+		case <-driveCtx.Done():
+		case <-s.caps.hardAbort:
+		}
 	}
 	return text, stop, usage
 }

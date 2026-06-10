@@ -130,19 +130,29 @@ func (h *HarnessServer) Converse(stream mecatlv1.HarnessService_ConverseServer) 
 	// EOF (client closed its send half) or context cancellation.
 	go h.readControl(ctx, stream, run)
 
-	// Relay events on this goroutine; the channel closes when the run ends.
+	// Relay events on this goroutine; the channel closes when the run ends. On
+	// the FIRST Send error (the client is gone) the relay cancels the run but
+	// KEEPS RANGING, discarding events until the channel closes: a run that keeps
+	// emitting (a busy team / fan-out winding down) must never wedge in its own
+	// sends behind a dead relay. The error is sticky — no further Send (or the
+	// EvPermissionAsk Persist side-effect, which belongs to the healthy path
+	// only) happens after it — and is returned once the run has fully drained.
+	var sendErr error
 	for ev := range run.Events() {
+		if sendErr != nil {
+			continue // drain-to-discard: keep the run unwedged after a dead client
+		}
 		// Persist when the run pauses awaiting approval so a restart leaves a
 		// loadable awaiting session a client can re-attach to.
 		if ev.Type == session.EvPermissionAsk {
 			h.svc.Persist(ctx, id)
 		}
 		if err := stream.Send(&mecatlv1.ConverseResponse{Event: toProto(ev)}); err != nil {
+			sendErr = err
 			run.Cancel()
-			return err
 		}
 	}
-	return nil
+	return sendErr
 }
 
 // readControl reads ResumeApproval / Cancel / CancelChild frames until the
