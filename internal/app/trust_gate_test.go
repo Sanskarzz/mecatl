@@ -9,7 +9,6 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/prompt"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // trust_gate_test.go covers the Workspace-Trust Phase-2a composition gate
@@ -109,12 +108,11 @@ func TestUntrustedWorkspaceWithholdsProjectSkillsKeepsUser(t *testing.T) {
 	writeSkill(t, filepath.Join(ws, ".claude", "skills"), "repo-skill", "from the repo", "REPO BODY")
 	writeSkill(t, filepath.Join(xdg, "mecatl", "skills"), "user-skill", "my own", "USER BODY")
 
-	catUntrusted := tool.NewCatalog()
-	discUntrusted := registerSkills(context.Background(), Config{
+	discUntrusted := resolveSkills(context.Background(), Config{
 		Workspace:          ws,
 		SkillsConventional: true,
 		TrustProject:       false,
-	}, catUntrusted)
+	})
 	if skillsContain(discUntrusted, "repo-skill") {
 		t.Error("untrusted workspace admitted a PROJECT-tier skill (security gap)")
 	}
@@ -122,12 +120,11 @@ func TestUntrustedWorkspaceWithholdsProjectSkillsKeepsUser(t *testing.T) {
 		t.Error("untrusted workspace dropped the USER-tier skill (over-gating; must stay active)")
 	}
 
-	catTrusted := tool.NewCatalog()
-	discTrusted := registerSkills(context.Background(), Config{
+	discTrusted := resolveSkills(context.Background(), Config{
 		Workspace:          ws,
 		SkillsConventional: true,
 		TrustProject:       true,
-	}, catTrusted)
+	})
 	if !skillsContain(discTrusted, "repo-skill") {
 		t.Error("trusted workspace must admit the project-tier skill")
 	}
@@ -227,7 +224,7 @@ func TestUntrustedWorkspaceStillUsable(t *testing.T) {
 	}
 
 	// Skills: project withheld, user active.
-	disc := registerSkills(context.Background(), cfg, tool.NewCatalog())
+	disc := resolveSkills(context.Background(), cfg)
 	if skillsContain(disc, "proj-skill") {
 		t.Error("untrusted: project skill leaked")
 	}

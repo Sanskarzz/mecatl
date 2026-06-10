@@ -609,18 +609,22 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 // session with BOTH a non-default model and client MCP gets ONE engine over ONE
 // catalog from a single call. Each call connects a SCOPED mcp.NewManager for that
 // one session when specs are present (best-effort: a down server is logged-and-
-// skipped, never fatal), and assembles a fresh catalog in this order: the CORE
-// tools (registerCoreTools — the same core toolset the main engine gets), then the
-// SERVER-GLOBAL MCP tools (globalMgr.Tools() — cfg.MCPServers + ToolHive, the same
-// tools buildCatalog→registerMCP mounts on the main engine, reused from Build's
-// already-connected shared manager — NOT reconnected, and NOT in the per-session
-// closeFn), then the client MCP tools, then a per-session Subagent/Team. It builds an
+// skipped, never fatal), and assembles a fresh catalog through assembleCatalog —
+// the SAME assembly the build-time shared catalog goes through (issue #42), over
+// the SAME process-wide assets: the core tools, the SERVER-GLOBAL MCP tools (+
+// resource meta-tools) reused from Build's already-connected shared manager (NOT
+// reconnected, and NOT in the per-session closeFn), the client MCP tools, the
+// Subagent/InspectSubagent/SubagentStatus trio, Parallel, Team/InspectMember, the
+// six memory/user-model tools over the shared flocked stores, and Skill/SkillDraft.
+// The ONLY sanctioned deltas vs the shared catalog are the client MCP tools and
+// the unwrapped hooks (maybeWrapUserModelReview is main-engine-only). It builds an
 // engine whose every NON-provider collaborator MATCHES the main engine via
 // engineDepsForProvider (so a per-session engine compacts, expands commands,
 // persists, and emits telemetry exactly like the shared one — only the catalog and
-// the resolved provider/model differ). globalMgr is also the `reference:`-resolution
-// mainMgr for per-session Subagent/Team subagent defs (falling back to the client mgr
-// when there is no global manager), parity with the build-time path.
+// the resolved provider/model differ). assets.globalMgr is also the
+// `reference:`-resolution mainMgr for per-session Subagent/Team subagent defs
+// (falling back to the client mgr when there is no global manager), parity with
+// the build-time path.
 //
 // PROVIDER/MODEL RESOLUTION (the §0.2 resolution table): the zero selector keeps
 // the DEFAULT provider + cfg.Model (the pre-S3 MCP path, byte-identical). A
@@ -637,11 +641,13 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 //
 // It captures the SAME store/policy/hooks the main engine was built with (threaded
 // from Build), plus the registry (so it can resolve the selector), the DEFAULT
-// provider (the zero-selector fallback), and the SHARED global MCP manager
-// (globalMgr — owned by Build), so the two engines cannot drift on their shared
-// Deps or their MCP toolset. It returns the engine and a Close that tears down ONLY
-// this session's own MCP connections (client specs + per-def inline managers) — the
-// shared globalMgr is NEVER in that Close. Wired into server.Config.SessionEngine in Build, so neither the
+// provider (the zero-selector fallback), and the build-once catalogAssets (the
+// SHARED global MCP manager, agent registry, flocked memory/user-model stores,
+// resolved skills, and process-wide fork reaper — all owned by Build), so the two
+// engines cannot drift on their shared Deps or their toolset. It returns the
+// engine and a Close that tears down ONLY this session's own MCP connections
+// (client specs + per-def inline managers) — the shared assets.globalMgr is NEVER
+// in that Close. Wired into server.Config.SessionEngine in Build, so neither the
 // registry nor mcp/agent wiring leaks into the server or acp layers.
 func sessionEngineFactory(
 	cfg Config,
@@ -651,9 +657,8 @@ func sessionEngineFactory(
 	policy port.PermissionPolicy,
 	hooks port.HookRunner,
 	mcpProvider mcp.Provider,
-	globalMgr *mcp.Manager,
 	instructions prompt.InstructionAssembler,
-	agentReg *agents.Registry,
+	assets catalogAssets,
 ) server.SessionEngineFactory {
 	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig) (server.SessionEngineResult, error) {
 		// Resolve the provider/model selector FIRST (before any MCP connect), so an
@@ -714,90 +719,24 @@ func sessionEngineFactory(
 			mgr = m
 		}
 
-		cat := tool.NewCatalog()
-		registerCoreTools(cfg, cat, false)
-		closeFn := func() error { return nil }
-		// Mount the SERVER-GLOBAL MCP tools (cfg.MCPServers + ToolHive) that the main
-		// engine got via buildCatalog→registerMCP. globalMgr is the SHARED manager Build
-		// owns; we reuse its already-connected Tools() — we do NOT reconnect and we MUST
-		// NOT fold globalMgr.Close into closeFn (a per-session CloseSession must never
-		// tear down MCP for every other session). Mounted BEFORE the client specs so a
-		// client tool colliding with a global one loses: mcp.Register is FIRST-wins +
-		// skip-and-continue, so the global tool stays and every OTHER (non-colliding)
-		// client tool is still registered. Each mount logs ONE provenance-bearing WARN
-		// naming the dropped tools (Register returns the skipped names): the global mount
-		// is a within-/across-global clash (a defective server advertising a duplicate),
-		// the client mount is the client↔global tier (the global tool shadows the client
-		// one — the WARN an end-user reads to self-diagnose a vanished tool).
-		if globalMgr != nil {
-			if skipped, rerr := mcp.Register(cat, globalMgr.Tools()); rerr != nil {
-				cfg.diag().Log(ctx, port.LevelWarn,
-					"server-global MCP: skipped duplicate tool name(s) (a server advertised a name already registered): "+strings.Join(skipped, ", "),
-					"tools", strings.Join(skipped, ", "), "err", rerr)
-			}
-		}
-		if mgr != nil {
-			if skipped, rerr := mcp.Register(cat, mgr.Tools()); rerr != nil {
-				cfg.diag().Log(ctx, port.LevelWarn,
-					"client MCP: tool(s) shadowed by an existing server-global tool of the same name (the global tool wins): "+strings.Join(skipped, ", "),
-					"tools", strings.Join(skipped, ", "), "err", rerr)
-			}
-			closeFn = mgr.Close
-			cfg.diag().Log(ctx, port.LevelInfo, "client MCP mounted for session",
-				"servers", len(mgr.Servers()), "tools", len(mgr.Tools()))
-		}
-
-		// Half B — per-session sub-agent tools. The per-session catalog already carries
-		// core + server-global MCP + client MCP (above); here we add a per-session Subagent
-		// tool (and, under EnableTeams, an in-catalog Team tool) wired to THIS session's
-		// resolved (provider, providerID, model) as the inherited parent — reusing the
-		// SAME builders the build-time path uses so the two catalogs cannot drift. A
-		// def's own `provider:` still overrides per-def.
+		// Assemble the per-session catalog through the SAME assembleCatalog the
+		// build-time shared catalog uses (issue #42 — the anti-drift seam): core +
+		// server-global MCP (+ resource meta-tools) + client MCP + Subagent trio +
+		// Parallel + Team + memory/user-model + Skill/SkillDraft, with THIS session's
+		// resolved (provider, providerID, model) as the inherited sub-agent parent.
+		// narrate=false keeps the build-once narration quiet on this per-session path.
 		//
-		// refMgr is the mainMgr for Subagent/member defs' MCP `reference:` resolution: prefer
-		// the SHARED globalMgr (parity with the build-time path, which passes the global
-		// mainMgr — so a per-session subagent's `reference: <name>` resolves against the
-		// SERVER-global servers), falling back to the per-session client mgr when there is
-		// no global manager. We do NOT merge the two into a synthetic manager (that would
-		// entangle their lifecycles); per-def INLINE MCP entries connect independently of
-		// refMgr and are unaffected.
-		//
-		// The Subagent tool's inline-MCP close is FOLDED into the returned Close so a def's
-		// inline MCP managers are torn down with the session (CloseSession/Service.Close).
-		// globalMgr is NEVER in that Close — Build owns its lifecycle.
-		refMgr := globalMgr
-		if refMgr == nil {
-			refMgr = mgr
-		}
-		taskTool, taskClose := buildSubagentTool(ctx, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, hooks, agentReg, refMgr, store)
-		cat.MustRegister(taskTool)
-		closeFn = composeCloseErr(taskClose, closeFn)
-		// The PULL subagent-transcript inspect tool: read-only, reads the SAME shared
-		// session store the Subagent tool persists children to (ids verbatim from the
-		// result's agentId trailer). Registered unconditionally wherever Subagent is —
-		// unlike InspectMember it is not gated on EnableTeams.
-		cat.MustRegister(agent.NewInspectSubagentTool(store))
-		// The LIVE this-run child status / background-result collection tool: reads
-		// the parent run's child registry via parentCaps (no store), the sole body
-		// channel for `background: true` Subagent children. Registered wherever
-		// Subagent is (like InspectSubagent), never in child catalogs.
-		cat.MustRegister(agent.NewSubagentStatusTool())
-		if cfg.EnableTeams {
-			// In-catalog Team tool over a per-session member factory wired to the session
-			// provider as parent. (The standalone gRPC CreateTeam RPC stays on the default
-			// provider — deferred; CreateTeam carries no per-session selector today.)
-			factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, refMgr)
-			cat.MustRegister(agent.NewTeamTool(
-				agent.TeamMemberEngineFactory(factory),
-				agent.WithTeamToolForker(fk),
-				agent.WithTeamToolReadOnlyForker(roFk),
-				agent.WithTeamToolHooks(teamHooks),
-				agent.WithTeamToolStore(store),
-				agent.WithTeamToolTokenBudget(cfg.MaxTeamTokens),
-			))
-			// The PULL member-transcript inspect tool reads the SAME shared store.
-			cat.MustRegister(agent.NewInspectMemberTool(store))
-		}
+		// The returned close tears down ONLY this session's own connections (the
+		// Subagent per-def inline managers + the client mgr); assets.globalMgr is
+		// NEVER in it — Build owns its lifecycle (a per-session CloseSession must
+		// never tear down MCP for every other session).
+		cat, closeFn := assembleCatalog(ctx, cfg, reg, store, hooks, assets, catalogSession{
+			provider:   resolvedProvider,
+			providerID: resolvedProviderID,
+			model:      resolvedModel,
+			clientMgr:  mgr,
+			narrate:    false,
+		})
 
 		// Identical to the main engine in every NON-provider Deps field except the
 		// catalog (which carries the extra client MCP + per-session sub-agent tools):
@@ -957,7 +896,8 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// re-discovery (the registry does not vary per session).
 	agentReg := resolveAgentRegistry(ctx, cfg)
 
-	cat, mainMgr, mcpProvider, mcpInventory, memStore, userModelStore, discoveredSkills, mcpClose := buildCatalog(ctx, cfg, reg, provider, hooks, agentReg, store)
+	cat, assets, mcpProvider, mcpInventory, mcpClose := buildCatalog(ctx, cfg, reg, provider, hooks, agentReg, store)
+	memStore, userModelStore := assets.memStore, assets.userModelStore
 
 	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona source. ON
 	// by default reading the conventional ~/.config/mecatl/soul.md; --no-soul leaves
@@ -988,8 +928,13 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 
 	deps := baseEngineDeps(cfg, provider, store, policy, mainHooks, mcpProvider, instructions)
 	deps.Catalog = cat
-	sessFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, mcpProvider, mainMgr, instructions, agentReg)
-	return agent.NewEngine(deps), mainMgr, mcpProvider, mcpInventory, sessFactory, learned, discoveredSkills, userModelStore, mcpClose, nil
+	// The factory shares the build-once assets (global MCP manager, agent registry,
+	// flocked memory/user-model stores, skills, fork reaper) so every per-session
+	// catalog is assembled over the SAME collaborators as the shared one. It keeps
+	// the UNWRAPPED hooks: the Phase-2b reviewer fires once per MAIN-engine Stop,
+	// not per per-session stop (one of the two sanctioned per-session deltas).
+	sessFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, mcpProvider, instructions, assets)
+	return agent.NewEngine(deps), assets.globalMgr, mcpProvider, mcpInventory, sessFactory, learned, assets.skills, userModelStore, mcpClose, nil
 }
 
 // buildInstructionAssembler composes the turn-0 instruction assembler in order:
@@ -1499,121 +1444,38 @@ func registerCoreTools(cfg Config, cat *tool.Catalog, log bool) {
 	}
 }
 
-// buildCatalog registers the always-available core tools (Read, Edit, Write, Grep,
-// Glob, WebFetch), a read-only Subagent tool, and — only when a shell is configured
-// — the optional Bash tool. It then optionally registers Fork, memory, skills, the
-// repo map, and connects any MCP servers. The returned close func tears down the
-// MCP manager on shutdown.
-func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, hooks port.HookRunner, agentReg *agents.Registry, store port.SessionStore) (*tool.Catalog, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, *memory.Store, *memory.Store, []skills.Skill, func()) {
-	cat := tool.NewCatalog()
-	registerCoreTools(cfg, cat, true)
-	// memStore is the per-project memory store, returned so the caller can bind it
-	// to the prompt tier-0 index source. It stays nil when memory is disabled.
-	var memStore *memory.Store
+// buildCatalog is Phase A of catalog construction plus the ONE build-time
+// assembly call. Phase A produces the process-wide catalogAssets — it connects
+// the server-global MCP manager (connectMCP), opens the flocked memory and
+// user-model stores (the SOLE construction sites — one Store per dir), starts
+// the build-once consolidation goroutines, and resolves skills. It then runs
+// assembleCatalog ONCE with the build-time inputs (default provider/model,
+// no client MCP, narrate=true) to produce the shared engine's catalog.
+//
+// The returned catalogAssets are threaded (via buildEngine) into the per-session
+// engine factory, so EVERY per-session catalog is assembled by the SAME
+// assembleCatalog over the SAME assets — the issue-#42 anti-drift seam. The
+// returned close func tears down the global MCP manager AND the build-time
+// Subagent per-def inline managers on shutdown.
+func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, hooks port.HookRunner, agentReg *agents.Registry, store port.SessionStore) (*tool.Catalog, catalogAssets, mcp.Provider, []mcpsource.SourceInfo, func()) {
 	// Connect the MAIN MCP servers FIRST, so the per-agent-def Subagent engines built by
 	// buildSubagentTool can (a) pull a REFERENCED main server's tools out of this manager
-	// and (b) connect their own INLINE servers. The main manager is registered into
-	// the parent catalog here; the def engines get only the servers their mcpServers
-	// opts into. mainMgr is nil when no main servers are configured (reference
-	// entries then resolve to a clear "unknown server" diagnostic).
-	mainMgr, mcpProvider, mcpInventory, mcpClose := registerMCP(ctx, cfg, cat)
+	// and (b) connect their own INLINE servers. mainMgr is nil when no main servers are
+	// configured (reference entries then resolve to a clear "unknown server" diagnostic).
+	mainMgr, mcpProvider, mcpInventory, mcpClose := connectMCP(ctx, cfg)
 
-	// Build-time Subagent tool: the inherited parent is the build-time DEFAULT provider +
-	// model (reg.Default()/cfg.Model), so a def that pins no provider runs on the
-	// default exactly as before. A def's own `provider:` overrides per-def. agentReg
-	// is resolved ONCE in buildEngine and shared with the per-session factory (Half B).
-	taskTool, taskMCPClose := buildSubagentTool(ctx, cfg, reg, provider, reg.Default(), cfg.Model, hooks, agentReg, mainMgr, store)
-	cat.MustRegister(taskTool)
-	// The PULL subagent-transcript inspect tool: read-only, reads the SAME shared
-	// session store the Subagent tool persists children to (ids verbatim from the
-	// result's agentId trailer). Registered unconditionally wherever Subagent is —
-	// unlike InspectMember it is not gated on EnableTeams.
-	cat.MustRegister(agent.NewInspectSubagentTool(store))
-	// The LIVE this-run child status / background-result collection tool: reads the
-	// parent run's child registry via parentCaps (no store), the sole body channel
-	// for `background: true` Subagent children. Registered wherever Subagent is
-	// (like InspectSubagent), never in child catalogs.
-	cat.MustRegister(agent.NewSubagentStatusTool())
-	// Aggregate the per-def INLINE MCP managers' teardown into the main MCP close, so
-	// Built.Close tears them ALL down on shutdown (process-lifetime engines).
-	mcpClose = composeClose(cfg.diag(), taskMCPClose, mcpClose)
-
-	// Parallel fan-out tool: a scoped child Engine (no Parallel/Subagent/ToolSearch, so a branch
-	// cannot recurse) run against an ISOLATED forked workspace. Unlike the Subagent
-	// subagent, the Parallel branch child MAY mutate (Edit/Write/Bash-if-configured):
-	// that is safe because every branch writes only to its own fork, never the
-	// parent base, so ParallelTool.ReadOnly() stays true. The judge is a SEPARATE,
-	// tool-less read-only Engine built from a distinct provider concern so its LLM
-	// calls never interleave with the branches' (matters for the mockllm cursor in
-	// tests; harmless for the stateless OpenAI adapter).
-	if cfg.EnableParallel {
-		// WithForceCopy: Parallel branches MUTATE and run Bash (incl. git), so they get
-		// FULLY isolated forks (a full copy incl. .git — own object DB/refs) rather
-		// than a worktree that shares the base repo's .git. This stops a branch's
-		// git commit/push/update-ref from escaping into the base repo.
-		fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }, forker.WithForceCopy())
-		parallelChild := buildParallelChildEngine(cfg, provider, buildCommandRunner(cfg))
-		judge := agent.NewEngineJudge(buildParallelJudgeEngine(cfg, provider))
-		// Bound the PRESERVED winner forks (join=first/judge): an LRU reaper keeps the
-		// most-recent N and tears down the oldest beyond the cap, so a long-lived
-		// process running many Parallel calls cannot leak winner forks unboundedly. The
-		// winner stays inspectable until it falls off the LRU tail.
-		preservedCap := cfg.ForkPreservedCap
-		if preservedCap <= 0 {
-			preservedCap = agent.DefaultPreservedForkCap
-		}
-		cat.MustRegister(agent.NewParallelTool(parallelChild, fk,
-			agent.WithParallelSubagentStopHook(hooks),
-			agent.WithParallelJudge(judge),
-			agent.WithWinnerReaper(agent.NewLRUForkReaper(preservedCap))))
-		cfg.diag().Log(ctx, port.LevelInfo, "Parallel tool ENABLED (parallel isolated MUTATING child branches; judge selection wired)",
-			"preserved_fork_cap", preservedCap)
-	} else {
-		cfg.diag().Log(ctx, port.LevelInfo, "Parallel tool DISABLED")
-	}
-
-	// Team tool: forms a team of coordinating subagents in-process, driving a
-	// Supervisor over the SAME member-engine wiring the gRPC CreateTeam path uses
-	// (buildTeamWiring is the single source of that wiring truth, so the two paths
-	// cannot drift). Registered ONLY when teams are enabled. It is mutate-serial
-	// (unlike the read-parallel Subagent/Fork) and defaults to ASK (see defaultRules).
-	if cfg.EnableTeams {
-		// buildTeamWiring always returns a non-nil forker and hooks runner under
-		// EnableTeams, so they are wired unconditionally (no nil guards).
-		factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, provider, reg.Default(), cfg.Model, mainMgr)
-		// factory is a server.MemberEngineFactory; NewTeamTool wants the
-		// agent.TeamMemberEngineFactory of identical underlying shape — an explicit
-		// conversion bridges the two named types (both func(*team.Team, MemberSpec)
-		// MemberBuild), so a single wiring serves both team paths.
-		cat.MustRegister(agent.NewTeamTool(
-			agent.TeamMemberEngineFactory(factory),
-			agent.WithTeamToolForker(fk),
-			agent.WithTeamToolReadOnlyForker(roFk),
-			agent.WithTeamToolHooks(teamHooks),
-			agent.WithTeamToolStore(store),
-			agent.WithTeamToolTokenBudget(cfg.MaxTeamTokens),
-		))
-		// The PULL member-transcript inspect tool: read-only, reads the SAME session
-		// store the Team tool persists members to (collision-free MemberSessionID ids).
-		// Gated on EnableTeams (no teams → no transcripts to inspect).
-		cat.MustRegister(agent.NewInspectMemberTool(store))
-		cfg.diag().Log(ctx, port.LevelInfo, "Team tool ENABLED (in-process coordinating subagents; mutate-serial, ASK)")
-	} else {
-		cfg.diag().Log(ctx, port.LevelInfo, "Team tool DISABLED")
-	}
-
-	// Memory tools: opt-in, registered only when a per-project memory directory is
-	// configured via MemoryDir.
+	// Per-project memory store: opt-in via MemoryDir. Opened ONCE here (flocked;
+	// one Store per dir) and shared by the build-time catalog, every per-session
+	// catalog, the prompt tier-0 index source, and the consolidation goroutine.
+	var memStore *memory.Store
 	if cfg.MemoryDir != "" {
-		store, err := memory.New(cfg.MemoryDir)
+		st, err := memory.New(cfg.MemoryDir)
 		if err != nil {
 			cfg.diag().Log(ctx, port.LevelWarn, "could not open memory store; memory tools disabled", "dir", cfg.MemoryDir, "err", err)
-		} else if err := memory.Register(cat, store); err != nil {
-			cfg.diag().Log(ctx, port.LevelWarn, "registering memory tools failed; some tools may be missing", "err", err)
 		} else {
-			memStore = store
+			memStore = st
 			cfg.diag().Log(ctx, port.LevelInfo, "memory tools ENABLED (Remember/Recall/SearchMemory); permission: allow (built-in default, overridable to ask/deny via settings)", "dir", cfg.MemoryDir)
-			startMemoryConsolidation(ctx, cfg, store, provider)
+			startMemoryConsolidation(ctx, cfg, st, provider)
 		}
 	} else {
 		cfg.diag().Log(ctx, port.LevelInfo, "memory tools DISABLED (memory dir empty)")
@@ -1623,36 +1485,69 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 		}
 	}
 
-	// User-model tools (issue #14, Phase 2a): a SECOND, USER-scoped memory store
+	// User-model store (issue #14, Phase 2a): a SECOND, USER-scoped memory store
 	// (cross-project), exposed as RememberUser/RecallUser/SearchUserModel. ON by
 	// default reading the conventional <xdg>/mecatl/usermodel; --no-user-model
-	// disables it. userModelStore is returned so the caller can bind it to the
-	// prompt <user-model> source AND (for Phase 2b) to the background reviewer's
-	// write tool. It stays nil when disabled or unopenable (fail-soft).
+	// disables it. Carried on the assets so the caller can bind it to the prompt
+	// <user-model> source AND (for Phase 2b) to the background reviewer's write
+	// tool. It stays nil when disabled or unopenable (fail-soft).
 	userModelStore := buildUserModelStore(cfg)
 	if userModelStore != nil {
-		if err := memory.RegisterUserModel(cat, userModelStore); err != nil {
-			cfg.diag().Log(ctx, port.LevelWarn, "registering user-model tools failed; some tools may be missing", "err", err)
-		} else {
-			cfg.diag().Log(ctx, port.LevelInfo, "user-model tools ENABLED (RememberUser/RecallUser/SearchUserModel; cross-project); permission: allow (built-in default, overridable to ask/deny via settings)")
-			startUserModelConsolidation(ctx, cfg, userModelStore, provider)
+		cfg.diag().Log(ctx, port.LevelInfo, "user-model tools ENABLED (RememberUser/RecallUser/SearchUserModel; cross-project); permission: allow (built-in default, overridable to ask/deny via settings)")
+		startUserModelConsolidation(ctx, cfg, userModelStore, provider)
+	}
+
+	discoveredSkills := resolveSkills(ctx, cfg)
+
+	// ONE process-wide preserved-fork LRU shared by every Parallel tool (build-time
+	// AND per-session), so ForkPreservedCap stays a PROCESS bound.
+	var forkReaper *agent.LRUForkReaper
+	if cfg.EnableParallel {
+		forkReaper = agent.NewLRUForkReaper(forkPreservedCap(cfg))
+	}
+
+	assets := catalogAssets{
+		globalMgr:      mainMgr,
+		agentReg:       agentReg,
+		memStore:       memStore,
+		userModelStore: userModelStore,
+		skills:         discoveredSkills,
+		forkReaper:     forkReaper,
+	}
+	// The build-time assembly: default provider + model, no client MCP, narrating
+	// the ENABLED/DISABLED composition facts exactly once.
+	cat, assembledClose := assembleCatalog(ctx, cfg, reg, store, hooks, assets, catalogSession{
+		provider:   provider,
+		providerID: reg.Default(),
+		model:      cfg.Model,
+		narrate:    true,
+	})
+	// Aggregate the build-time Subagent per-def INLINE MCP managers' teardown into
+	// the main MCP close, so Built.Close tears them ALL down on shutdown
+	// (process-lifetime engines). The global manager itself stays in mcpClose only.
+	mcpClose = composeClose(cfg.diag(), assembledClose, mcpClose)
+
+	// Restore the pre-#42 advertises-implies-registered coupling: the old code set
+	// memStore only AFTER a successful memory.Register, so the turn-0 prompt index
+	// could never advertise a memory family the catalog lacked. Registration now
+	// happens inside assembleCatalog (which WARNs on the failure), so on that
+	// (name-collision, near-impossible) edge we DROP the store from the assets
+	// before it reaches buildInstructionAssembler — and before the per-session
+	// assemblies inherit it.
+	if assets.memStore != nil {
+		if _, ok := cat.Lookup(memory.RememberToolName); !ok {
+			assets.memStore = nil
+		}
+	}
+	if assets.userModelStore != nil {
+		if _, ok := cat.Lookup(memory.RememberUserToolName); !ok {
+			assets.userModelStore = nil
 		}
 	}
 
-	discoveredSkills := registerSkills(ctx, cfg, cat)
-
-	return cat, mainMgr, mcpProvider, mcpInventory, memStore, userModelStore, discoveredSkills, mcpClose
+	return cat, assets, mcpProvider, mcpInventory, mcpClose
 }
 
-// registerMCP RESOLVES the MCP server inventory from the pluggable source list
-// (static MCPServers entries first, then the live ToolHive workload source when
-// ToolHiveEnabled), connects the merged set, and registers their tools into cat.
-// It is non-fatal end to end: per-source SkipErrors and per-server connect failures
-// are logged and skipped; a manager that fails entirely is logged and skipped.
-//
-// It returns the concrete *mcp.Manager (nil when no servers connect) so the
-// per-agent-def wiring can pull a REFERENCED main server's tools out of it; the same
-// value is the mcp.Provider used for resources/prompts.
 // mcpResolveOptions derives the source-resolver options purely from cfg, so the
 // startup wiring (registerMCP) and the live re-probe (mcpSourceProber) resolve
 // the SAME ordered source list. Keeping this in one place stops the two paths
@@ -1684,7 +1579,18 @@ func mcpSourceProber(cfg Config) func(ctx context.Context) []mcpsource.SourceInf
 	}
 }
 
-func registerMCP(ctx context.Context, cfg Config, cat *tool.Catalog) (*mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, func()) {
+// connectMCP RESOLVES the MCP server inventory from the pluggable source list
+// (static MCPServers entries first, then the live ToolHive workload source when
+// ToolHiveEnabled) and connects the merged set. It is non-fatal end to end:
+// per-source SkipErrors and per-server connect failures are logged and skipped; a
+// manager that fails entirely is logged and skipped.
+//
+// It only CONNECTS — mounting the manager's tools into a catalog is
+// assembleCatalog's job (the same mount the per-session catalogs get). It returns
+// the concrete *mcp.Manager (nil when no servers connect) so the per-agent-def
+// wiring can pull a REFERENCED main server's tools out of it; the same value is
+// the mcp.Provider used for resources/prompts.
+func connectMCP(ctx context.Context, cfg Config) (*mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, func()) {
 	opts := mcpResolveOptions(cfg)
 	sources := mcpsource.ResolveSources(opts)
 
@@ -1706,29 +1612,7 @@ func registerMCP(ctx context.Context, cfg Config, cat *tool.Catalog) (*mcp.Manag
 		cfg.diag().Log(ctx, port.LevelWarn, "MCP manager construction failed; continuing without MCP tools", "err", err)
 		return nil, nil, inventory, func() {}
 	}
-	if skipped, err := mcp.Register(cat, mgr.Tools()); err != nil {
-		// Within-/across-global clash at build time: a defective server advertised a
-		// name another already-registered server (or the same server) exposes. The
-		// namespaced names (mcp__<server>__<tool>) carry the server provenance.
-		cfg.diag().Log(ctx, port.LevelWarn,
-			"server-global MCP: skipped duplicate tool name(s) (a server advertised a name already registered): "+strings.Join(skipped, ", "),
-			"tools", strings.Join(skipped, ", "), "err", err)
-	}
-	cfg.diag().Log(ctx, port.LevelInfo, "MCP tools registered", "servers", len(configs), "tools", len(mgr.Tools()))
-
-	if cfg.MCPResourceTools {
-		registered, rerr := mcp.RegisterResourceTools(cat, mgr)
-		switch {
-		case rerr != nil:
-			cfg.diag().Log(ctx, port.LevelWarn, "registering MCP resource tools failed", "err", rerr)
-		case registered:
-			cfg.diag().Log(ctx, port.LevelInfo, "MCP resource tools ENABLED (ListMcpResources/ReadMcpResource)")
-		default:
-			cfg.diag().Log(ctx, port.LevelInfo, "MCP resource tools DISABLED (no connected server exposes a resource)")
-		}
-	} else {
-		cfg.diag().Log(ctx, port.LevelInfo, "MCP resource tools DISABLED")
-	}
+	cfg.diag().Log(ctx, port.LevelInfo, "MCP servers connected", "servers", len(configs), "tools", len(mgr.Tools()))
 
 	return mgr, mgr, inventory, func() {
 		if err := mgr.Close(); err != nil {
@@ -1767,34 +1651,35 @@ func skillResolveOptions(cfg Config) skills.ResolveOptions {
 	}
 }
 
-// registerSkills wires the progressive-disclosure Skill tool from the resolved
+// resolveSkills DISCOVERS the progressive-disclosure skills from the resolved
 // Source list (explicit dirs + conventional locations when enabled). Skills stay
-// OPT-IN: with no sources, nothing is registered. The SkillDraft tool is registered
-// when SkillsDraftDir is set, even with no active sources (to close the
-// author→promote→active loop).
+// OPT-IN: with no sources, nothing is discovered. Registration of the Skill tool
+// over the discovered slice is assembleCatalog's job (so per-session catalogs get
+// it too); this is the build-once discovery + narration half.
 //
 // It returns the discovered skills so the composition root can project them into
-// the ListSkills snapshot (skillSnapshot). The slice is nil when no skills are
-// discovered (disabled, no sources, or none valid).
-func registerSkills(ctx context.Context, cfg Config, cat *tool.Catalog) []skills.Skill {
+// the ListSkills snapshot (skillSnapshot) and thread them into every catalog
+// assembly (catalogAssets.skills). The slice is nil when no skills are discovered
+// (disabled, no sources, or none valid).
+func resolveSkills(ctx context.Context, cfg Config) []skills.Skill {
 	sources := skills.ResolveSources(skillResolveOptions(cfg))
-	if len(sources) == 0 && cfg.SkillsDraftDir != "" {
-		registerSkillDraft(ctx, cfg, cat, nil)
-		return nil
-	}
 	if len(sources) == 0 {
 		cfg.diag().Log(ctx, port.LevelInfo, "skills DISABLED (no skills dirs configured)")
 		return nil
 	}
 
-	discovered, skips, err := skills.RegisterSource(ctx, cat, skills.NewMultiSource(sources...))
+	discovered, skips, err := skills.NewMultiSource(sources...).Skills(ctx)
 	for _, s := range skips {
 		cfg.diag().Log(ctx, port.LevelWarn, "skill skipped", "path", s.Path, "reason", s.Reason)
 	}
 	switch {
 	case err != nil:
-		cfg.diag().Log(ctx, port.LevelWarn, "registering skills failed; Skill tool disabled",
+		// DELIBERATE: a discovery error drops the WHOLE slice (nil — no partial
+		// inventory), unlike the old registerSkills which could return partial
+		// results on a late registration error; the WARN names the failure.
+		cfg.diag().Log(ctx, port.LevelWarn, "discovering skills failed; Skill tool disabled",
 			"dirs", strings.Join(cfg.SkillsDirs, ","), "conventional", cfg.SkillsConventional, "err", err)
+		return nil
 	case len(discovered) == 0:
 		cfg.diag().Log(ctx, port.LevelInfo, "skills DISABLED (no valid SKILL.md found in any source)",
 			"dirs", strings.Join(cfg.SkillsDirs, ","), "conventional", cfg.SkillsConventional)
@@ -1807,26 +1692,30 @@ func registerSkills(ctx context.Context, cfg Config, cat *tool.Catalog) []skills
 			"dirs", strings.Join(cfg.SkillsDirs, ","), "conventional", cfg.SkillsConventional,
 			"count", len(discovered), "skills", strings.Join(names, ","))
 	}
-
-	registerSkillDraft(ctx, cfg, cat, discovered)
 	return discovered
 }
 
 // registerSkillDraft registers the writable SkillDraft tool when SkillsDraftDir is
 // set, binding a DirDrafter to the quarantine dir and the snapshot of currently
 // active skills (for the offline novelty check). The structural trust boundary is
-// enforced by validateSkillDraftConfig at engine-build time.
-func registerSkillDraft(ctx context.Context, cfg Config, cat *tool.Catalog, existing []skills.Skill) {
+// enforced by validateSkillDraftConfig at engine-build time. It narrates the
+// ENABLED/DISABLED fact only when log is true (the build-time assembly), matching
+// registerCoreTools' discipline — the per-session assembly stays quiet.
+func registerSkillDraft(ctx context.Context, cfg Config, cat *tool.Catalog, existing []skills.Skill, log bool) {
 	if cfg.SkillsDraftDir == "" {
-		cfg.diag().Log(ctx, port.LevelInfo, "SkillDraft tool DISABLED (no skills-draft dir)")
+		if log {
+			cfg.diag().Log(ctx, port.LevelInfo, "SkillDraft tool DISABLED (no skills-draft dir)")
+		}
 		return
 	}
 	drafter := skills.NewDirDrafter(cfg.SkillsDraftDir, existing,
 		skills.WithSimilarityThreshold(cfg.SkillsDraftThreshold))
 	cat.MustRegister(skills.NewDraftTool(drafter))
-	cfg.diag().Log(ctx, port.LevelInfo, "SkillDraft tool ENABLED (model-authored skills -> quarantine -> operator promote)",
-		"quarantine", cfg.SkillsDraftDir, "similarity_threshold", cfg.SkillsDraftThreshold,
-		"snapshot_skills", len(existing))
+	if log {
+		cfg.diag().Log(ctx, port.LevelInfo, "SkillDraft tool ENABLED (model-authored skills -> quarantine -> operator promote)",
+			"quarantine", cfg.SkillsDraftDir, "similarity_threshold", cfg.SkillsDraftThreshold,
+			"snapshot_skills", len(existing))
+	}
 }
 
 // startMemoryConsolidation launches the dream consolidator on a background

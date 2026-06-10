@@ -31,7 +31,7 @@ func TestBuildCatalogRegistersMemorySearchWhenEnabled(t *testing.T) {
 
 	t.Run("enabled", func(t *testing.T) {
 		cfg := Config{MemoryDir: t.TempDir()}
-		cat, _, _, _, _, _, _, closeFn := buildCatalog(ctx, cfg, regForTest(provider, providerMock, cfg.Model), provider, hooks, agents.NewRegistry(nil), memstore.New())
+		cat, _, _, _, closeFn := buildCatalog(ctx, cfg, regForTest(provider, providerMock, cfg.Model), provider, hooks, agents.NewRegistry(nil), memstore.New())
 		defer closeFn()
 
 		for _, name := range memoryToolNames {
@@ -43,7 +43,7 @@ func TestBuildCatalogRegistersMemorySearchWhenEnabled(t *testing.T) {
 
 	t.Run("disabled", func(t *testing.T) {
 		cfg := Config{MemoryDir: ""}
-		cat, _, _, _, _, _, _, closeFn := buildCatalog(ctx, cfg, regForTest(provider, providerMock, cfg.Model), provider, hooks, agents.NewRegistry(nil), memstore.New())
+		cat, _, _, _, closeFn := buildCatalog(ctx, cfg, regForTest(provider, providerMock, cfg.Model), provider, hooks, agents.NewRegistry(nil), memstore.New())
 		defer closeFn()
 
 		for _, name := range memoryToolNames {

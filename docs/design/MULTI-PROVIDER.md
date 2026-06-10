@@ -229,15 +229,25 @@ selected model so the compaction trigger AGREES with the `ListModels`-advertised
 the 128k default). This is the cross-provider contamination guard: a shallow clone
 swapping only the LLM would compact and count through the wrong model.
 
-**Per-session catalog = core + server-global MCP + client MCP + per-session
-Subagent/Team.** The factory does NOT build a core-only catalog. After `registerCoreTools`
-it mounts the **server-global** MCP tools (`cfg.MCPServers` + ToolHive — the same tools
-`buildCatalog→registerMCP` mounts on the main engine) by reusing the **shared** manager
-Build already connected (`mainMgr.Tools()`), threaded into the factory as `globalMgr`.
-This closes the selector-strips-MCP bug: before the fix, selecting any non-default
-provider/model (what the mecatui `/models` picker always does) silently dropped every
-server-global MCP tool (github/slack/fetch/…). Mount order is **core → global MCP →
-client MCP → per-session Subagent/Team**, which gives **global-wins** collision precedence:
+**Per-session catalog = the FULL shared-catalog formula, assembled by the SAME
+`assembleCatalog`** (`internal/app/catalog.go`, issue #42): core + server-global MCP
+(+ the `MCPResourceTools` meta-tools) + client MCP + Subagent/InspectSubagent/
+SubagentStatus + Parallel + Team/InspectMember + the six memory/user-model tools +
+Skill/SkillDraft. The factory does NOT build its own registration list — it calls
+`assembleCatalog` over the process-wide `catalogAssets` Phase A (`buildCatalog`)
+produced once: the shared global MCP manager, the flocked memory/user-model stores
+(threaded, never re-opened), the resolved skills, and the one process-wide
+preserved-fork LRU. The only sanctioned per-session deltas are the client MCP tools
+and the unwrapped hooks (`maybeWrapUserModelReview` is main-engine-only); guarded by
+`TestPerSessionCatalogMatchesSharedCatalog`. The server-global MCP tools
+(`cfg.MCPServers` + ToolHive — the same tools the main engine gets) are mounted by
+reusing the **shared** manager Build already connected (`mainMgr.Tools()`, carried on
+`catalogAssets.globalMgr`). This closes the selector-strips-MCP bug: before the fix,
+selecting any non-default provider/model (what the mecatui `/models` picker always
+does) silently dropped every server-global MCP tool (github/slack/fetch/…); issue #42
+then closed the SAME drift class for memory/Parallel/skills/resource-tools. Mount
+order is **core → global MCP → client MCP → Subagent trio → Parallel → Team → memory →
+skills**, which gives **global-wins** collision precedence:
 `mcp.Register` is **first-wins + skip-and-continue** — a client tool whose namespaced
 name collides with an already-registered global one is SKIPPED (the global tool stays),
 and **every other non-colliding client tool is still registered**. This is the
@@ -248,7 +258,7 @@ each mount site emits ONE **provenance-bearing** WARN naming exactly which tools
 dropped and who won — distinct per tier: the per-session client mount says the tool(s)
 were *shadowed by an existing server-global tool of the same name (the global tool
 wins)* (the line an end-user reads to self-diagnose a vanished tool); the global mounts
-(per-session and build-time `registerMCP`) say a *server advertised a name already
+(per-session and build-time — the one `assembleCatalog` mount) say a *server advertised a name already
 registered* (a defective-server / within-global condition). These are composition-layer
 logs, so the loop's "exactly two diagnostics lines" invariant does not apply.
 **Lifecycle isolation:** `globalMgr` is owned by `Build`; it is reused, never

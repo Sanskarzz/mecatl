@@ -36,7 +36,7 @@ func globalMCPFactory(t *testing.T, globalMgr *mcp.Manager) (server.SessionEngin
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, globalMgr, prompt.RootAssembler{}, nil)
+	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr})
 	return factory, reg
 }
 
@@ -88,7 +88,7 @@ func TestSessionEngineFactoryMountsGlobalMCPToolsForSelector(t *testing.T) {
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	factory2 := sessionEngineFactory(Config{Model: "default-model"}, reg2, or2, store, policy, hookexec.New(nil), nil, globalMgr, prompt.RootAssembler{}, nil)
+	factory2 := sessionEngineFactory(Config{Model: "default-model"}, reg2, or2, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr})
 	res2, err := factory2(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil)
 	if err != nil {
 		t.Fatalf("factory(dispatch): %v", err)
@@ -222,7 +222,7 @@ func runSelectorSubagentRefAndCheckEcho(t *testing.T, globalMgr *mcp.Manager, sp
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, store, policy, hookexec.New(nil), nil, globalMgr, prompt.RootAssembler{}, defs)
+	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr, agentReg: defs})
 
 	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, specs)
 	if err != nil {
@@ -279,24 +279,44 @@ func TestSelectorSubagentRefResolvesClientMCPWhenNoGlobal(t *testing.T) {
 }
 
 // TestSelectorClientToolCollisionGlobalWins proves the mcp.Register skip-and-continue
-// contract end to end through the factory: a global "globe" server exposes
-// mcp__globe__echo; the CLIENT specs are [globe (collides), other (distinct, ordered
-// AFTER the collider)]. The selector engine must KEEP the GLOBAL echo (global wins,
-// mounted first) AND still carry the client's non-colliding mcp__other__echo — proof
-// the collision does not abort the rest of the client batch.
+// contract end to end through the factory, BEHAVIORALLY: the global "globe" server
+// and the colliding CLIENT "globe" server are deliberately DISTINCT (the global echo
+// answers "global:"+text, the client one "client:"+text), the surviving
+// mcp__globe__echo is actually EXECUTED, and the result must carry the GLOBAL
+// behavior. Two identical echo servers made the old HasTool-only assertion
+// tautological (QA mutant M3: mounting client-before-global still passed); now a
+// precedence flip changes the observed output and fails loudly. The client specs are
+// [globe (collides), other (distinct, ordered AFTER the collider)], so the test also
+// still proves the collision does not abort the rest of the client batch.
 func TestSelectorClientToolCollisionGlobalWins(t *testing.T) {
-	gURL, gStop := newMCPTestServer(t)
+	gURL, gStop := newMCPTestServerPrefixed(t, "global:")
 	defer gStop()
 	globalMgr := connectMainManager(t, "globe", gURL)
 
-	// Two client servers: "globe" (same namespace → mcp__globe__echo collides) FIRST,
-	// then a distinct "other" (→ mcp__other__echo) ordered after the collider.
-	cURL, cStop := newMCPTestServer(t)
+	// Two client servers: "globe" (same namespace → mcp__globe__echo collides,
+	// behaviorally distinct) FIRST, then a distinct "other" (→ mcp__other__echo)
+	// ordered after the collider.
+	cURL, cStop := newMCPTestServerPrefixed(t, "client:")
 	defer cStop()
 	oURL, oStop := newMCPTestServer(t)
 	defer oStop()
 
-	factory, _ := globalMCPFactory(t, globalMgr)
+	// A provider scripted to CALL the surviving mcp__globe__echo so the test
+	// observes WHICH server's tool executes, not merely that a name registered.
+	echoCall := session.NewToolCall("c1", "mcp__globe__echo", []byte(`{"text":"hi"}`))
+	or := mockllm.New(mockllm.ToolCallTurn(echoCall), mockllm.TextTurn("done"))
+	oa := mockllm.New(mockllm.TextTurn("unused"))
+	reg := &providerRegistry{
+		entries: map[string]providerEntry{
+			providerOpenAI:     {id: providerOpenAI, provider: oa, available: true},
+			providerOpenRouter: {id: providerOpenRouter, provider: or, available: true},
+		},
+		defaultID: providerOpenAI,
+	}
+	store := memstore.New()
+	policy := permpolicy.NewPolicy(defaultRules(), nil)
+	factory := sessionEngineFactory(Config{Model: "default-model"}, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr})
+
 	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter},
 		[]mcp.ServerConfig{{Name: "globe", URL: cURL}, {Name: "other", URL: oURL}})
 	if err != nil {
@@ -309,5 +329,23 @@ func TestSelectorClientToolCollisionGlobalWins(t *testing.T) {
 	}
 	if !res.Engine.HasTool("mcp__other__echo") {
 		t.Fatal("the client's non-colliding mcp__other__echo was dropped after the collider (abort-on-first-dup regression; Register must skip-and-continue)")
+	}
+
+	// Behavioral proof: execute the surviving tool and assert the GLOBAL server
+	// answered. "client:hi" here means the client tool shadowed the global one —
+	// the precedence inverted even though both names registered.
+	sess := session.New("s1", session.ModeDefault, "/ws", session.Limits{MaxTurns: 5}, time.Now())
+	run := res.Engine.RunContent(context.Background(), sess, memfs.NewWorkspace("/ws"), "go", nil)
+	var got string
+	for ev := range run.Events() {
+		if ev.Type == session.EvPermissionAsk && ev.Ask != nil {
+			run.Approve(ev.Ask.AskID, session.VerdictAllowOnce)
+		}
+		if ev.Type == session.EvToolResult && ev.ToolResult != nil {
+			got = ev.ToolResult.Content
+		}
+	}
+	if got != "global:hi" {
+		t.Fatalf("executing the surviving mcp__globe__echo returned %q, want %q — the GLOBAL server's tool must win the collision (client-before-global mount regression)", got, "global:hi")
 	}
 }

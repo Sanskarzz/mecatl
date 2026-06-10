@@ -1175,7 +1175,7 @@ trusted=… source=… drifted=…`), mirroring the soul-selection narration.
 agents/commands/skills, mirroring how the project ALLOWs and project soul are gated:
 the `agents`/`skills` adapters gained an additive `ResolveOptions.IncludeProjectTier`
 (set to `cfg.TrustProject`; the three `internal/app` skills callers —
-`registerSkills`, the agent-def skill-preload `resolveSkillIndex`, and the
+`resolveSkills`, the agent-def skill-preload `resolveSkillIndex`, and the
 draft-overlap `activeSkillDirs` — all pass it), and `buildDirCommandExpander` drops
 the default project-tier command dirs (`.mecatl/commands`, `.claude/commands`) when
 `cfg.Workspace != "" && !cfg.TrustProject`, degrading to the `NoopExpander` so raw

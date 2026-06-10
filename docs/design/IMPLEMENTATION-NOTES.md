@@ -1015,7 +1015,7 @@ onto `cfg.TrustProject` so permconfig AND the soul gate honour declared trust th
 untrusted, composition also withholds the **PROJECT TIER ONLY** of agent definitions, slash
 commands, and skills (`<workspace>/.mecatl/*`, `<workspace>/.claude/*`) — via the additive
 `agents`/`skills` `ResolveOptions.IncludeProjectTier` (set to `cfg.TrustProject` in
-`internal/app`; the three skills callers — `registerSkills`/`resolveSkillIndex`/`activeSkillDirs`
+`internal/app`; the three skills callers — `resolveSkills`/`resolveSkillIndex`/`activeSkillDirs`
 — all pass it) and a `buildDirCommandExpander` branch (gated on `cfg.Workspace!="" &&
 !cfg.TrustProject`) that drops the default project-tier command dirs (an explicit
 `--commands-dir`/`--agents-dir`/`--skills-dir` is operator-supplied and stays). User-tier
@@ -1235,8 +1235,9 @@ parent model — a bare `gpt-5` is invalid on openrouter); same-provider keeps t
 compacts/counts/prompts through X+model's window; a non-switching child keeps window=0 ⇒ 128k,
 byte-identical). Unknown/unavailable `provider:` ⇒ loud `slog.Warn` + parent fallback (mirrors
 every other forgiving def-error handler). **Half B** gives a provider-SELECTED session its
-sub-agent tools (the build-time per-session catalog is core-tools-only and could not spawn
-Subagent/Team) by building a per-session Subagent tool (+ in-catalog Team tool under `--enable-teams`)
+sub-agent tools (pre-Half-B the per-session catalog was core-tools-only and could not spawn
+Subagent/Team; since issue #42 the per-session catalog is the FULL shared formula — see the
+assembleCatalog paragraph below) by building a per-session Subagent tool (+ in-catalog Team tool under `--enable-teams`)
 inside `sessionEngineFactory` over the SAME `buildSubagentTool`/`buildTeamWiring` builders (no
 per-session-catalog drift), wired to the session provider as parent; the Subagent tool's inline-MCP
 close folds into `SessionEngineResult.Close` (torn down by `CloseSession`/`Service.Close`),
@@ -1247,7 +1248,7 @@ change).
 
 **Server-global MCP on every session (bug #3 fix, `sessionEngineFactory`):** the
 per-session catalog mounts the SERVER-GLOBAL MCP tools (`cfg.MCPServers` + ToolHive — the
-same tools `buildCatalog→registerMCP` mounts on the main engine), NOT just core + client
+same tools the build-time `buildCatalog`→`connectMCP`+`assembleCatalog` path mounts on the main engine), NOT just core + client
 MCP. `Build` threads the shared, already-connected `mainMgr` into the factory as
 `globalMgr`; the factory calls `mcp.Register(cat, globalMgr.Tools())` right after
 `registerCoreTools` and BEFORE the client specs. Before this, a selector session (any
@@ -1264,7 +1265,7 @@ error)`), so each of the three mount sites logs ONE **provenance-bearing** WARN 
 the dropped tools: the per-session CLIENT mount → *"client MCP: tool(s) shadowed by an
 existing server-global tool of the same name (the global tool wins): <names>"* (the
 client↔global tier, the line an end-user reads); the per-session GLOBAL mount and
-build-time `registerMCP` GLOBAL mount → *"server-global MCP: skipped duplicate tool
+build-time GLOBAL mount (both now in `assembleCatalog`) → *"server-global MCP: skipped duplicate tool
 name(s) (a server advertised a name already registered): <names>"* (a within-/across-global
 defective-server condition). These are composition logs, so the loop's three-line
 diagnostics invariant does not apply. (Identity-dedup, a `CreateSessionResponse` skipped
@@ -1285,6 +1286,51 @@ driven through the factory), `TestSelectorClientToolCollisionGlobalWins` (skip-a
 wins, the other client tool survives), and `mcp.TestRegisterSkipAndContinueOnCollision` (the
 Register-level contract — asserts the returned `skipped []string` names exactly the collider
 and the joined error still matches `errors.Is(_, tool.ErrDuplicateTool)`).
+
+**One catalog assembly for every engine (issue #42, `internal/app/catalog.go`):** the
+THIRD firing of the per-session-catalog drift class (first server-global MCP under bug
+#3, then Subagent/Team under Half B, then memory/user-model/Parallel/skills/
+resource-meta-tools — a selector session's turn-0 prompt advertised the
+`<memory-index>` while its catalog carried none of the six memory tools), so the fix is
+STRUCTURAL rather than another hand-synced list: `buildCatalog` is now Phase A only
+(connect the global MCP manager via `connectMCP`, open the flocked memory/user-model
+stores — still the sole construction sites — start the consolidation goroutines,
+discover skills via `resolveSkills`) and produces the process-wide `catalogAssets`
+(global manager, agent registry, the two concrete `*memory.Store` pointers — concrete
+so the typed-nil interface trap cannot arise — the skills slice, and ONE process-wide
+`agent.LRUForkReaper` so `ForkPreservedCap` stays a process bound). `assembleCatalog`
+is the single registration path both the build-time shared catalog and every
+`sessionEngineFactory` catalog run through, in the canonical order core → global MCP
+(+ `MCPResourceTools` meta-tools) → client MCP → Subagent trio → Parallel → Team →
+memory → user-model → Skill/SkillDraft (global-wins MCP precedence preserved). The
+per-catalog inputs ride `catalogSession` (resolved provider/providerID/model, the
+session's client manager, and `narrate` — the build-once-facts discipline: ENABLED/
+DISABLED narration fires only on the build-time call; WARNs are ungated). The returned
+close aggregates ONLY the Subagent inline-MCP close + the client manager's Close —
+never `globalMgr`. Permissions needed zero changes: the six memory floor-Allows key on
+tool NAMES in `defaultRules`, and the factory already shares the policy instance. The
+only sanctioned per-session deltas remain the client MCP tools and the unwrapped hooks
+(`maybeWrapUserModelReview` is main-engine-only). Guards: the kill-switch
+`TestPerSessionCatalogMatchesSharedCatalog` — its shared baseline is the catalog the
+REAL `buildCatalog` returns (not a direct `assembleCatalog` call), so a post-assembly
+`MustRegister` snuck into `buildCatalog`/`buildEngine` (the historical bug shape)
+shifts the baseline and fails; it then (a) pins a `requiredFamilyTools` list
+(Subagent trio, Parallel, Team/InspectMember, Skill/SkillDraft,
+ListMcpResources/ReadMcpResource, the global MCP tool — the QA-mutant-M2 fix: pure
+equality is blind to a family dropped from BOTH paths) and (b) asserts exact
+tool-name-set equality between that baseline and a selector assembly under a
+fully-loaded config, modulo an explicit `mcp__<client>__*` allowlist when client
+specs are attached, plus a factory-level superset check. Companions:
+`TestSessionEngineFactoryRegistersMemoryToolsForSelector` / `...ForClientMCP` /
+`TestSessionEngineFactoryOmitsMemoryToolsWhenUnconfigured`,
+`TestSelectorSessionMemoryPromptHasMatchingTools` (the wire-level symptom: the captured
+`port.LLMRequest` carries BOTH the `<memory-index>` message and the Recall tool spec),
+`TestBuildNarratesFamilyFactsExactlyOnceAcrossSessions` (the narrate gate stays
+build-once PAST the factory — a selector session adds zero family narration lines),
+and the now-BEHAVIORAL `TestSelectorClientToolCollisionGlobalWins` (the global and
+colliding client "globe" servers answer with distinct prefixes and the surviving tool
+is EXECUTED — a precedence flip changes the output, so the global-wins assertion is
+no longer tautological). The five bug-#3 guards above are unchanged and still green.
 
 **LIVE model listing (`modellister.go`):** an OPTIONAL composition-local `modelLister` interface
 (`ListModels(ctx) ([]modelEntry, error)` — NOT a port, single consumer; same reasoning as

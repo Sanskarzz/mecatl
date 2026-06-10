@@ -60,6 +60,52 @@ func newMCPTestServerCounting(t *testing.T) (string, func(), *int32) {
 	return httpSrv.URL, httpSrv.Close, &deletes
 }
 
+// newMCPTestServerPrefixed is newMCPTestServer with a DISTINGUISHABLE echo: the
+// tool returns prefix+text instead of "echo:"+text, so a test can prove WHICH of
+// two same-named servers' tools actually EXECUTED. Collision-precedence proofs
+// need behaviorally distinct servers — with two identical echoes the
+// "global wins" assertion is tautological (QA mutant M3: swapping the
+// client-before-global mount order still passed).
+func newMCPTestServerPrefixed(t *testing.T, prefix string) (string, func()) {
+	t.Helper()
+	srv := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "fake", Version: "v1"}, nil)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{Name: "echo", Description: "echoes the input text"},
+		func(_ context.Context, _ *mcpsdk.CallToolRequest, in mcpEchoArgs) (*mcpsdk.CallToolResult, any, error) {
+			return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: prefix + in.Text}}}, nil, nil
+		})
+	handler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil)
+	httpSrv := httptest.NewServer(handler)
+	return httpSrv.URL, httpSrv.Close
+}
+
+// newMCPTestServerWithResource is newMCPTestServer plus ONE text resource, so
+// mcp.RegisterResourceTools' "at least one connected server exposes a resource"
+// gate passes and the ListMcpResources/ReadMcpResource meta-tools register (the
+// catalog drift test pins them as a required family).
+func newMCPTestServerWithResource(t *testing.T) (string, func()) {
+	t.Helper()
+	srv := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "fake", Version: "v1"}, nil)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{Name: "echo", Description: "echoes the input text"},
+		func(_ context.Context, _ *mcpsdk.CallToolRequest, in mcpEchoArgs) (*mcpsdk.CallToolResult, any, error) {
+			return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: "echo:" + in.Text}}}, nil, nil
+		})
+	srv.AddResource(&mcpsdk.Resource{
+		URI:         "test://doc",
+		Name:        "doc",
+		Description: "a plain text resource",
+		MIMEType:    "text/plain",
+	}, func(_ context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
+		return &mcpsdk.ReadResourceResult{
+			Contents: []*mcpsdk.ResourceContents{
+				{URI: req.Params.URI, MIMEType: "text/plain", Text: "hello resource"},
+			},
+		}, nil
+	})
+	handler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil)
+	httpSrv := httptest.NewServer(handler)
+	return httpSrv.URL, httpSrv.Close
+}
+
 // connectMainManager builds a main *mcp.Manager with one server named `name` at url.
 func connectMainManager(t *testing.T, name, url string) *mcp.Manager {
 	t.Helper()

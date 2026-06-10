@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/session"
 	"github.com/stacklok/mecatl/internal/tool"
 )
 
@@ -136,6 +138,55 @@ func TestBuildEmitsConfigFactsExactlyOnce(t *testing.T) {
 			t.Errorf("Build emitted build-once fact %q %d times via the injected Diagnostics, "+
 				"want exactly 1. A count of 0 means the logBuildConfigFacts(cfg) call in Build "+
 				"was removed; >1 means it fires per derivation.", name, got)
+		}
+	}
+}
+
+// TestBuildNarratesFamilyFactsExactlyOnceAcrossSessions extends the build-once
+// guard PAST the factory (QA mutant M4 — TestBuildEmitsConfigFactsExactlyOnce
+// stops before any per-session engine is built): after a real Build, it creates a
+// SELECTOR session through the wired SessionEngine factory — the path that runs
+// assembleCatalog with narrate=false — and asserts each tool-family narration
+// line still appears EXACTLY ONCE. Dropping the narrate gate (or flipping it to
+// true on the per-session path) re-creates the N×-duplication regression class
+// CLAUDE.md records as having fired before (the per-derivation re-logging bug):
+// the count would become 2 here, and once-per-session/new in production.
+func TestBuildNarratesFamilyFactsExactlyOnceAcrossSessions(t *testing.T) {
+	diag := newCapturingDiagnostics()
+	built, err := Build(context.Background(), Config{
+		Workspace:      t.TempDir(),
+		Model:          "mock",
+		UseMock:        true,
+		MemoryDir:      t.TempDir(),
+		UserModelDir:   t.TempDir(),
+		EnableParallel: true,
+		EnableTeams:    true,
+		Diagnostics:    diag,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer built.Close()
+
+	// A non-zero selector forces a PER-SESSION engine — the factory invokes
+	// assembleCatalog a second time (narrate=false), which must add ZERO new
+	// family narration lines.
+	if _, err := built.Service.CreateSessionWithProvider(context.Background(), t.TempDir(),
+		session.ModeDefault, session.Limits{}, server.ProviderSelector{ProviderID: providerMock}); err != nil {
+		t.Fatalf("CreateSessionWithProvider(selector): %v", err)
+	}
+
+	families := []string{
+		"memory tools ENABLED",
+		"user-model tools ENABLED",
+		"Parallel tool ENABLED",
+		"Team tool ENABLED",
+		"SkillDraft tool DISABLED",
+	}
+	for _, substr := range families {
+		if got := diag.countContaining(substr); got != 1 {
+			t.Errorf("family narration %q emitted %d times via the injected Diagnostics, want exactly 1 "+
+				"(0 = the build-time narrate dropped; >1 = the per-session assembly narrates too — the N×-duplication class)", substr, got)
 		}
 	}
 }

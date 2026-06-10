@@ -1,0 +1,303 @@
+// Catalog assembly: the SINGLE registration path every full-session tool catalog
+// goes through — the build-time shared catalog (buildCatalog) AND each per-session
+// engine catalog (sessionEngineFactory). Issue #42 was the third firing of the
+// same drift class (per-session catalogs silently missing tool families the shared
+// catalog had: first MCP under bug #3, then Subagent/Team under Half B, then
+// memory/Parallel/skills/resource-tools); assembleCatalog is the structural fix —
+// there is no second registration list to forget to update.
+//
+// The split is Phase A vs assembly:
+//
+//   - Phase A (buildCatalog, ONCE per process): connect the global MCP manager,
+//     open the flocked memory/user-model stores, start the consolidation
+//     goroutines, resolve skills. Its outputs are the process-wide catalogAssets.
+//   - Assembly (assembleCatalog, once per catalog): register every tool family
+//     over those shared assets plus the per-session catalogSession inputs.
+//
+// The ONLY sanctioned per-session deltas vs the shared catalog are (1) the client
+// MCP tools (a session's own mcpServers) and (2) the unwrapped hooks
+// (maybeWrapUserModelReview decorates the MAIN engine only). Everything else must
+// match — guarded by TestPerSessionCatalogMatchesSharedCatalog.
+
+package app
+
+import (
+	"context"
+	"strings"
+
+	"github.com/stacklok/mecatl/internal/adapter/agents"
+	"github.com/stacklok/mecatl/internal/adapter/forker"
+	"github.com/stacklok/mecatl/internal/adapter/mcp"
+	"github.com/stacklok/mecatl/internal/adapter/memory"
+	"github.com/stacklok/mecatl/internal/adapter/osfs"
+	"github.com/stacklok/mecatl/internal/adapter/skills"
+	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/internal/tool"
+)
+
+// catalogAssets are the PHASE-A PRODUCTS: the collaborators buildCatalog itself
+// CONSTRUCTS exactly once per process (connect/open/discover/build) and that every
+// catalog assembly then shares. That is the membership criterion — "constructed by
+// Phase A", not merely "process-wide": reg/store/policy/hooks are also process-wide
+// but are constructed elsewhere and stay ordinary parameters. The assets are
+// threaded by value into every assembleCatalog call — never re-opened/re-connected
+// per session:
+//
+//   - globalMgr: the SHARED server-global MCP manager Build owns. Reused, never
+//     reconnected; its Close is NEVER folded into a per-session close (guarded by
+//     TestSessionEngineFactorySelectorCloseKeepsGlobalMCP).
+//   - memStore/userModelStore: the flocked *memory.Store instances — the SOLE
+//     construction sites are buildCatalog (project memory) and buildUserModelStore
+//     (one Store per dir, or the flock invariant breaks). CONCRETE pointers on
+//     purpose: registration checks `!= nil` on the concrete type, so the typed-nil
+//     interface trap (see buildEngine's permconfig note) cannot arise.
+//   - skills: the skills resolved once at build time (resolveSkills) — the same
+//     slice the ListSkills snapshot projects.
+//   - forkReaper: ONE process-wide preserved-fork LRU shared by every Parallel
+//     tool, so ForkPreservedCap stays a PROCESS bound (a per-session reaper would
+//     multiply the cap by the number of sessions).
+type catalogAssets struct {
+	globalMgr      *mcp.Manager
+	agentReg       *agents.Registry
+	memStore       *memory.Store
+	userModelStore *memory.Store
+	skills         []skills.Skill
+	forkReaper     *agent.LRUForkReaper
+}
+
+// catalogSession is the PER-CATALOG variation: the resolved provider/model the
+// session's sub-agent tools inherit as parent, the session's own client MCP
+// manager (nil for the build-time shared catalog), and the diagnostics posture.
+//
+// narrate follows the build-once-facts diagnostics discipline: true ONLY for the
+// build-time shared catalog, so the ENABLED/DISABLED narration lines fire once at
+// startup and never per session/new. WARNs (anomalies: duplicate MCP names,
+// registration failures) are NOT gated — they fire on whichever path hits them.
+type catalogSession struct {
+	provider   port.LLMProvider
+	providerID string
+	model      string
+	clientMgr  *mcp.Manager
+	narrate    bool
+}
+
+// assembleCatalog registers every tool family into a fresh catalog, in the
+// canonical order (which preserves the global-wins MCP precedence — mcp.Register
+// is first-wins + skip-and-continue):
+//
+//	core → server-global MCP (+ resource meta-tools) → client MCP →
+//	Subagent/InspectSubagent/SubagentStatus → Parallel → Team/InspectMember →
+//	memory → user-model → Skill → SkillDraft
+//
+// The returned close aggregates ONLY this catalog's own teardown — the Subagent
+// per-def inline-MCP managers and the session's client MCP manager. It NEVER
+// includes a.globalMgr (Build owns that lifecycle; a per-session CloseSession
+// closing it would kill MCP for every other session). The close is always
+// non-nil and safe to call.
+func assembleCatalog(ctx context.Context, cfg Config, reg *providerRegistry, store port.SessionStore, hooks port.HookRunner, a catalogAssets, s catalogSession) (*tool.Catalog, func() error) {
+	cat := tool.NewCatalog()
+	registerCoreTools(cfg, cat, s.narrate)
+
+	mountGlobalMCP(ctx, cfg, cat, a, s)
+	clientClose := mountClientMCP(ctx, cfg, cat, s)
+
+	// refMgr is the mainMgr for Subagent/member defs' MCP `reference:` resolution:
+	// prefer the SHARED global manager (parity with the build-time path), falling
+	// back to the session's client manager when there is no global one.
+	refMgr := a.globalMgr
+	if refMgr == nil {
+		refMgr = s.clientMgr
+	}
+	subagentClose := registerSubagentTrio(ctx, cfg, cat, reg, store, hooks, a, s, refMgr)
+	registerParallelTool(ctx, cfg, cat, hooks, a, s)
+	registerTeamTools(ctx, cfg, cat, reg, store, s, refMgr)
+	registerMemoryFamilies(ctx, cfg, cat, a)
+	registerSkillFamily(ctx, cfg, cat, a, s)
+
+	closeFn := composeCloseErr(subagentClose, clientClose)
+	if closeFn == nil {
+		closeFn = func() error { return nil }
+	}
+	return cat, closeFn
+}
+
+// mountGlobalMCP mounts the server-global MCP tools (cfg.MCPServers + ToolHive),
+// reused from the SHARED already-connected manager — never reconnected here.
+// Mounted BEFORE the client specs so a client tool colliding with a global one
+// loses. The WARN names the dropped tools: this tier is a within-/across-global
+// clash (a defective server advertising a duplicate name).
+func mountGlobalMCP(ctx context.Context, cfg Config, cat *tool.Catalog, a catalogAssets, s catalogSession) {
+	if a.globalMgr == nil {
+		return
+	}
+	if skipped, rerr := mcp.Register(cat, a.globalMgr.Tools()); rerr != nil {
+		cfg.diag().Log(ctx, port.LevelWarn,
+			"server-global MCP: skipped duplicate tool name(s) (a server advertised a name already registered): "+strings.Join(skipped, ", "),
+			"tools", strings.Join(skipped, ", "), "err", rerr)
+	}
+	// The MCP resource meta-tools (ListMcpResources/ReadMcpResource) ride the
+	// GLOBAL manager — issue #42 family (6): a selector session must carry them
+	// too when enabled.
+	if !cfg.MCPResourceTools {
+		if s.narrate {
+			cfg.diag().Log(ctx, port.LevelInfo, "MCP resource tools DISABLED")
+		}
+		return
+	}
+	registered, rerr := mcp.RegisterResourceTools(cat, a.globalMgr)
+	switch {
+	case rerr != nil:
+		cfg.diag().Log(ctx, port.LevelWarn, "registering MCP resource tools failed", "err", rerr)
+	case registered && s.narrate:
+		cfg.diag().Log(ctx, port.LevelInfo, "MCP resource tools ENABLED (ListMcpResources/ReadMcpResource)")
+	case !registered && s.narrate:
+		cfg.diag().Log(ctx, port.LevelInfo, "MCP resource tools DISABLED (no connected server exposes a resource)")
+	}
+}
+
+// mountClientMCP mounts the client MCP tools (the ACP session/new mcpServers)
+// AFTER the global tier: this WARN is the client↔global shadow tier — the one an
+// end-user reads to self-diagnose a vanished tool. The returned close is the
+// client manager's Close (nil when no client manager): it IS part of this
+// catalog's teardown, being session-scoped.
+func mountClientMCP(ctx context.Context, cfg Config, cat *tool.Catalog, s catalogSession) func() error {
+	if s.clientMgr == nil {
+		return nil
+	}
+	if skipped, rerr := mcp.Register(cat, s.clientMgr.Tools()); rerr != nil {
+		cfg.diag().Log(ctx, port.LevelWarn,
+			"client MCP: tool(s) shadowed by an existing server-global tool of the same name (the global tool wins): "+strings.Join(skipped, ", "),
+			"tools", strings.Join(skipped, ", "), "err", rerr)
+	}
+	cfg.diag().Log(ctx, port.LevelInfo, "client MCP mounted for session",
+		"servers", len(s.clientMgr.Servers()), "tools", len(s.clientMgr.Tools()))
+	return s.clientMgr.Close
+}
+
+// registerSubagentTrio registers the Subagent delegation tool plus its two
+// companion read-only tools, with the session's resolved provider/model as the
+// inherited sub-agent parent. The returned close tears down the Subagent per-def
+// inline-MCP managers (these connections belong to this catalog).
+func registerSubagentTrio(ctx context.Context, cfg Config, cat *tool.Catalog, reg *providerRegistry, store port.SessionStore, hooks port.HookRunner, a catalogAssets, s catalogSession, refMgr *mcp.Manager) func() error {
+	subagentTool, subagentClose := buildSubagentTool(ctx, cfg, reg, s.provider, s.providerID, s.model, hooks, a.agentReg, refMgr, store)
+	cat.MustRegister(subagentTool)
+	// The PULL subagent-transcript inspect tool: read-only, reads the SAME shared
+	// session store the Subagent tool persists children to (ids verbatim from the
+	// result's agentId trailer). Registered unconditionally wherever Subagent is —
+	// unlike InspectMember it is not gated on EnableTeams.
+	cat.MustRegister(agent.NewInspectSubagentTool(store))
+	// The LIVE this-run child status / background-result collection tool: reads the
+	// parent run's child registry via parentCaps (no store), the sole body channel
+	// for `background: true` Subagent children. Registered wherever Subagent is
+	// (like InspectSubagent), never in child catalogs.
+	cat.MustRegister(agent.NewSubagentStatusTool())
+	return subagentClose
+}
+
+// registerParallelTool registers the Parallel fan-out tool when enabled:
+// child/judge engines bound to the RESOLVED session provider/model (the same
+// inheritance the Subagent tool gets), each branch in its own FULLY isolated fork
+// (WithForceCopy — own .git, so a branch's git cannot escape into the base). The
+// preserved-winner reaper is the SHARED process-wide LRU from the assets, so
+// ForkPreservedCap bounds the process, not each session.
+func registerParallelTool(ctx context.Context, cfg Config, cat *tool.Catalog, hooks port.HookRunner, a catalogAssets, s catalogSession) {
+	if !cfg.EnableParallel {
+		if s.narrate {
+			cfg.diag().Log(ctx, port.LevelInfo, "Parallel tool DISABLED")
+		}
+		return
+	}
+	fk := forker.New(func(root string) (tool.Workspace, error) { return osfs.NewWorkspace(root) }, forker.WithForceCopy())
+	pcfg := modelCfgFor(cfg, s.model)
+	parallelChild := buildParallelChildEngine(pcfg, s.provider, buildCommandRunner(cfg))
+	judge := agent.NewEngineJudge(buildParallelJudgeEngine(pcfg, s.provider))
+	opts := []agent.ParallelOption{
+		agent.WithParallelSubagentStopHook(hooks),
+		agent.WithParallelJudge(judge),
+	}
+	// NO nil fallback here: Phase A builds exactly ONE reaper per process —
+	// silently minting a per-assembly LRU would multiply the ForkPreservedCap
+	// PROCESS bound by the number of sessions. A nil reaper (hand-rolled assets)
+	// leaves preserved winner forks unbounded, so it is a loud WARN, never a quiet
+	// mint. (The option is skipped entirely rather than passed nil, to avoid
+	// wrapping a typed-nil *LRUForkReaper in the PreservedForkStore interface.)
+	if a.forkReaper != nil {
+		opts = append(opts, agent.WithWinnerReaper(a.forkReaper))
+	} else {
+		cfg.diag().Log(ctx, port.LevelWarn,
+			"Parallel preserved-fork reaper missing from catalog assets; preserved winner forks will NOT be bounded (Phase A builds it under EnableParallel — hand-rolled assets?)")
+	}
+	cat.MustRegister(agent.NewParallelTool(parallelChild, fk, opts...))
+	if s.narrate {
+		cfg.diag().Log(ctx, port.LevelInfo, "Parallel tool ENABLED (parallel isolated MUTATING child branches; judge selection wired)",
+			"preserved_fork_cap", forkPreservedCap(cfg))
+	}
+}
+
+// registerTeamTools registers the Team tool + the PULL member-transcript inspect
+// tool when teams are enabled, over the SAME wiring the gRPC CreateTeam path uses
+// (buildTeamWiring is the single wiring source), with the session's resolved
+// provider/model as the inherited parent.
+func registerTeamTools(ctx context.Context, cfg Config, cat *tool.Catalog, reg *providerRegistry, store port.SessionStore, s catalogSession, refMgr *mcp.Manager) {
+	if !cfg.EnableTeams {
+		if s.narrate {
+			cfg.diag().Log(ctx, port.LevelInfo, "Team tool DISABLED")
+		}
+		return
+	}
+	factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, s.provider, s.providerID, s.model, refMgr)
+	cat.MustRegister(agent.NewTeamTool(
+		agent.TeamMemberEngineFactory(factory),
+		agent.WithTeamToolForker(fk),
+		agent.WithTeamToolReadOnlyForker(roFk),
+		agent.WithTeamToolHooks(teamHooks),
+		agent.WithTeamToolStore(store),
+		agent.WithTeamToolTokenBudget(cfg.MaxTeamTokens),
+	))
+	cat.MustRegister(agent.NewInspectMemberTool(store))
+	if s.narrate {
+		cfg.diag().Log(ctx, port.LevelInfo, "Team tool ENABLED (in-process coordinating subagents; mutate-serial, ASK)")
+	}
+}
+
+// registerMemoryFamilies registers the memory + user-model tools over the SHARED
+// flocked stores (opened once in Phase A — never re-opened here, upholding the
+// one-Store-per-dir invariant). The six tools are floor-scoped Allows in
+// defaultRules keyed on tool NAMES, so the per-session policy (the same instance)
+// governs them identically. The nil checks are on the CONCRETE *memory.Store
+// pointers (see catalogAssets) — no typed-nil interface trap.
+func registerMemoryFamilies(ctx context.Context, cfg Config, cat *tool.Catalog, a catalogAssets) {
+	if a.memStore != nil {
+		if err := memory.Register(cat, a.memStore); err != nil {
+			cfg.diag().Log(ctx, port.LevelWarn, "registering memory tools failed; some tools may be missing", "err", err)
+		}
+	}
+	if a.userModelStore != nil {
+		if err := memory.RegisterUserModel(cat, a.userModelStore); err != nil {
+			cfg.diag().Log(ctx, port.LevelWarn, "registering user-model tools failed; some tools may be missing", "err", err)
+		}
+	}
+}
+
+// registerSkillFamily registers the Skill tool over the build-time discovered
+// skills (resolveSkills), plus the SkillDraft author tool when a quarantine dir
+// is configured.
+func registerSkillFamily(ctx context.Context, cfg Config, cat *tool.Catalog, a catalogAssets, s catalogSession) {
+	if len(a.skills) > 0 {
+		if err := cat.Register(skills.NewTool(a.skills)); err != nil {
+			cfg.diag().Log(ctx, port.LevelWarn, "registering skills failed; Skill tool disabled", "err", err)
+		}
+	}
+	registerSkillDraft(ctx, cfg, cat, a.skills, s.narrate)
+}
+
+// forkPreservedCap normalises cfg.ForkPreservedCap to the effective preserved-fork
+// LRU bound (a non-positive value uses the default). It is read where the SHARED
+// reaper is built (buildCatalog) and echoed in the build-time narration.
+func forkPreservedCap(cfg Config) int {
+	if cfg.ForkPreservedCap > 0 {
+		return cfg.ForkPreservedCap
+	}
+	return agent.DefaultPreservedForkCap
+}

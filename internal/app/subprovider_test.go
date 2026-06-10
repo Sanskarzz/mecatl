@@ -452,7 +452,7 @@ func twoProviderFactoryWithAgents(t *testing.T, defs *agents.Registry, subagentN
 	}
 	store := memstore.New()
 	policy := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
-	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, nil, nil, defs)
+	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, nil, catalogAssets{agentReg: defs})
 	return factory, reg
 }
 
@@ -556,7 +556,7 @@ func TestHalfBSelectedSessionTeardownFoldsSubagentClose(t *testing.T) {
 	reg := twoProviderReg(oa, providerOpenAI, "gpt-5", or, providerOpenRouter)
 	store := memstore.New()
 	policy := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
-	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, store, policy, hookexec.New(nil), nil, nil, nil, defs)
+	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, store, policy, hookexec.New(nil), nil, nil, catalogAssets{agentReg: defs})
 
 	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil)
 	if err != nil {
@@ -594,7 +594,7 @@ func TestHalfBSelectedSessionCapBounded(t *testing.T) {
 
 	store := memstore.New()
 	policy := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
-	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, store, policy, hookexec.New(nil), nil, nil, nil, defs)
+	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, store, policy, hookexec.New(nil), nil, nil, catalogAssets{agentReg: defs})
 	wsFactory := func(root string) tool.Workspace {
 		ws, werr := osfs.NewWorkspace(root)
 		if werr != nil {
