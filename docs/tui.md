@@ -466,10 +466,15 @@ event projection (REDACTED, metadata-only — never child/branch content):
   Parallel | Teams**:
   - **Subagents** — one row per Subagent child: a state glyph (**◐** running / **✓** done /
     **✗** error), the goal label, a short `#<hash>` of the `ChildID` (so two similar
-    goals are unambiguous), the current/last child tool, the running tool count, and
-    token usage. `enter` focuses one child's redacted `✓/✗` tool-chip trace (args/results
-    stay hidden — context-isolated; gauntlet #7). The roster is windowed (pgup/pgdn,
-    home/g·end/G, `+K above/below` tails) like the team roster.
+    goals are unambiguous), a **`⇢ bg` marker** on a detached (`background: true`)
+    child, the current/last child tool, the running tool count, and token usage.
+    `enter` focuses one child's redacted `✓/✗` tool-chip trace (args/results stay
+    hidden — context-isolated; gauntlet #7); a background child's focus pane adds an
+    honest delivery line — *running detached* vs *done — result ready for the agent
+    (SubagentStatus)* — and never claims a collected/uncollected state (the registry's
+    `delivered` flag is not on the wire; the events carry only background + done). The
+    roster is windowed (pgup/pgdn, home/g·end/G, `+K above/below` tails) like the team
+    roster.
   - **Parallel** — a Parallel run is a **GROUP**, not a flat fleet, so the roster lists one
     row per Parallel call: a state glyph (**◐** running / **✓** done), the **join strategy**
     (all / first / judge), the running/total **branch tally**, and the **winner** branch
@@ -505,7 +510,12 @@ independently by the run's `ResultMsg` → the footer label **`stopped · no pro
 no-progress never enters scrollback; during an active run it is effectively silent (the
 spinner already shows liveness), surfacing at most as a brief idle footer status. No
 advisory-vs-terminal proto field is needed — the durable terminal signal rides
-`ResultMsg`.
+`ResultMsg`. A **background subagent finishing** (`subagent.end` on a `⇢ bg` lane) rides
+the same transient channel — *"background subagent #<hash> done — result ready for the
+agent"* — because the durable outcome is the **agent's** to collect (`SubagentStatus`),
+not this client's; a foreground end stays silent (its result already landed on its own
+Subagent card). The fleet footer counts (`⛭ 2◐ 1✓`) include detached background children
+until their `subagent.end` arrives, however many turns later that is.
 
 The **mouse wheel** is only active on the alternate screen (the default full-screen
 TUI). With `--inline` / `--no-alt-screen` the terminal's own scrollback and native

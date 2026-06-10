@@ -338,7 +338,7 @@ var subagentSchema = json.RawMessage(`{
     },
     "background": {
       "type": "boolean",
-      "description": "Run the subagent in the BACKGROUND: this call returns immediately with its agentId and the subagent keeps working while you continue. Use it for long investigations whose result you do not need before your next steps. Collect the result with SubagentStatus (pass the agentId; use wait_ms to wait on it). A background subagent still running when this run ends is CANCELLED (its transcript persists and is resumable). Omit (default false) to wait for the result inline."
+      "description": "Run the subagent in the BACKGROUND: this call returns immediately with its agentId and the subagent keeps working while you continue (a note tells you when it finishes). Use it for long investigations whose result you do not need before your next steps. Collect the result with SubagentStatus (pass the agentId; use wait_ms to wait on it). A background subagent still running when this run ends is CANCELLED (its transcript persists and is resumable). Omit (default false) to wait for the result inline."
     }
   },
   "required": ["prompt"]
@@ -676,16 +676,16 @@ func (t *SubagentTool) Spec() tool.ToolSpec {
 		"work ('run the tests and report failures', 'bisect the history'). It runs read-only tools " +
 		"(Read/Grep/Glob) plus a full shell in an isolated, throwaway git worktree — it can build, " +
 		"test, and inspect history, but its file changes are DISCARDED (no Edit/Write) and it cannot " +
-		"delegate further. The subagent's FINAL MESSAGE is its deliverable — you receive only that — " +
-		"so state in `prompt` exactly what to report and in what format. It cannot see this " +
-		"conversation; include everything it needs. You may issue several Subagent calls in ONE turn " +
-		"for independent questions. Do NOT use it when you need the intermediate outputs in this " +
-		"conversation (do the work yourself), when file changes must be kept (use Parallel), or when " +
-		"workers must coordinate (use Team) — and don't delegate a single quick read you can do with " +
-		"Read/Grep." +
-		" Every result starts with an 'agentId:' line — pass that id to InspectSubagent to read the " +
-		"subagent's full transcript, or as `resume` to continue that subagent with a follow-up prompt " +
-		"(fresh workspace; its conversation survives)."
+		"delegate further. The subagent's FINAL MESSAGE is its deliverable — you receive only that " +
+		"(see `prompt`; with `background: true` the call instead returns at once and you collect the " +
+		"result later). You may issue several Subagent calls in ONE turn. Do NOT use it when you need " +
+		"the intermediate outputs in this conversation (do the work yourself), when file changes must " +
+		"be kept (use Parallel), or when workers must coordinate (use Team) — and don't delegate a " +
+		"single quick read you can do with Read/Grep." +
+		" Every result starts with an 'agentId:' line — pass that id to SubagentStatus (this run's " +
+		"live state; collects background results), to InspectSubagent to read the full transcript, " +
+		"or as `resume` to continue that subagent with a follow-up prompt (fresh workspace; its " +
+		"conversation survives)."
 	desc += t.agentEnumeration()
 	return tool.ToolSpec{
 		Name:        subagentToolName,
@@ -1169,9 +1169,9 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 // other Subagent result (the existing trailer convention the model and the resume
 // path already parse).
 const backgroundStartedBody = "subagent started in the background.\n\n" +
-	"It keeps working while you continue. Collect its result with SubagentStatus " +
-	"(or wait on it with wait_ms); it will be cancelled if it is still running when " +
-	"this run ends."
+	"It keeps working while you continue; a note will tell you when it finishes. " +
+	"Collect its result with SubagentStatus (or wait on it with wait_ms); it will be " +
+	"cancelled if it is still running when this run ends."
 
 // backgroundChild bundles everything one detached background Subagent drive owns:
 // the original call/workspace/emit/caps, the resolved engine+limits, and the

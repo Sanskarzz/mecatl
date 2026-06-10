@@ -121,11 +121,15 @@ func TestSubagentSpecEnumeratesAgents(t *testing.T) {
 	if !task.ReadOnly() {
 		t.Fatalf("Subagent.ReadOnly() must stay true")
 	}
-	// The description must name the agentId discovery channel, the InspectSubagent tool,
-	// AND the `resume` continuation so the model knows to pass the trailer id along
-	// (runtime-discoverability), both to read the transcript and to resume the child.
-	if !strings.Contains(desc, "agentId:") || !strings.Contains(desc, "InspectSubagent") || !strings.Contains(desc, "resume") {
-		t.Fatalf("spec must name 'agentId:', InspectSubagent, and resume, got:\n%s", desc)
+	// The description must name the agentId discovery channel and every consumer of
+	// the trailer id — SubagentStatus (live state / background collection),
+	// InspectSubagent (persisted transcript), and the `resume` continuation — plus the
+	// `background` detached mode, so the model knows the full id workflow
+	// (runtime-discoverability).
+	for _, want := range []string{"agentId:", "SubagentStatus", "InspectSubagent", "resume", "background"} {
+		if !strings.Contains(desc, want) {
+			t.Fatalf("spec must name %q, got:\n%s", want, desc)
+		}
 	}
 }
 

@@ -210,10 +210,15 @@ type block struct {
 // the inline card deliberately omits it, but the fleet roster surfaces it as the
 // per-row liveness signal (mirroring teamLane.current). done/stop/usage/durationMs
 // are the resolved end stats (done gates them). isError marks the LAST child tool
-// errored (a transient cue); the terminal disposition rides stop.
+// errored (a transient cue); the terminal disposition rides stop. background marks
+// a detached-delivery child (subagent.start's Background field): its Subagent call
+// already returned a started-result and the result body is collected by the AGENT
+// via SubagentStatus — the events carry only background + done, never the
+// registry's delivered state, so the lane renders what it honestly knows.
 type subagentLane struct {
 	childID    string
 	goal       string
+	background bool
 	current    string // latest child tool name, "" when none yet
 	trace      []subToolChip
 	toolCount  int
@@ -434,15 +439,17 @@ func (c *conversation) fleetLane(childID string) *subagentLane {
 	return &c.subagentFleet[len(c.subagentFleet)-1]
 }
 
-// fleetStart records a child's goal label on its fleet lane (creating the lane). A
-// missing childID is dropped: the fleet keys on ChildID, so without one there is no
-// stable row — the inline card (keyed by ParentCallID) still renders regardless.
-func (c *conversation) fleetStart(childID, goal string) {
+// fleetStart records a child's goal label and background mode on its fleet lane
+// (creating the lane). A missing childID is dropped: the fleet keys on ChildID, so
+// without one there is no stable row — the inline card (keyed by ParentCallID)
+// still renders regardless.
+func (c *conversation) fleetStart(childID, goal string, background bool) {
 	if childID == "" {
 		return
 	}
 	ln := c.fleetLane(childID)
 	ln.goal = goal
+	ln.background = background
 }
 
 // fleetTool records a resolved child tool on the fleet lane: the latest tool name

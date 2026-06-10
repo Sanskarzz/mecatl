@@ -533,22 +533,34 @@ func fleetCounts(fleet []subagentLane) (running, done int) {
 
 // subagentRosterLine is one fleet row: a state glyph (◐ running / ✓ done / ✗ error),
 // the goal label, a short ChildID hash suffix (so two similar goals are unambiguous),
-// the current/last child tool, the running tool count, and token usage. It is the
-// Subagents analogue of teamRosterLine, holding only redacted metadata.
+// the background marker (detached children only), the current/last child tool, the
+// running tool count, and token usage. It is the Subagents analogue of
+// teamRosterLine, holding only redacted metadata.
 func subagentRosterLine(ln *subagentLane) string {
 	goal := truncate(sanitizeTerminal(ln.goal), maxSubagentGoalLen)
 	if goal == "" {
 		goal = "subagent"
 	}
-	return fmt.Sprintf("%s %s #%s · %s · %s · ↑%s ↓%s",
+	marker := ""
+	if ln.background {
+		marker = " " + subagentBackgroundMarker
+	}
+	return fmt.Sprintf("%s %s #%s%s · %s · %s · ↑%s ↓%s",
 		subagentLaneGlyph(ln),
 		goal,
 		shortChildID(ln.childID),
+		marker,
 		subagentLaneState(ln),
 		plural(ln.toolCount, "tool"),
 		humanizeTokens(ln.usage.InputTokens),
 		humanizeTokens(ln.usage.OutputTokens))
 }
+
+// subagentBackgroundMarker flags a detached-delivery (background: true) child on its
+// fleet roster row and focus header. Like the rest of the lane vocabulary it is a
+// glyph-PLUS-text cue (⇢ "moves on without waiting" + the literal "bg") so it reads
+// with ANSI stripped, and a STATIC literal so it never forces a per-tick re-render.
+const subagentBackgroundMarker = "⇢ bg"
 
 // maxSubagentGoalLen caps how many runes of a child's goal show on a fleet row so a
 // long goal can't blow out the row width (the ChildID hash + columns follow it).
@@ -625,6 +637,17 @@ func renderSubagentFocus(th theme.Theme, fleet []subagentLane, child string, hei
 	out.WriteString(muted.Render(subagentRosterLine(ln)))
 	out.WriteString("\n")
 	out.WriteString(muted.Render("  args/results hidden (context-isolated)"))
+	if ln.background {
+		// Honest limitation: the events carry background + done only — whether the
+		// AGENT has collected the result (the registry's delivered state) is not on
+		// the wire, so the pane states the delivery channel without claiming a state
+		// it cannot know.
+		note := "  background: runs detached; the agent collects its result via SubagentStatus"
+		if ln.done {
+			note = "  background: done — result ready for the agent (SubagentStatus)"
+		}
+		out.WriteString("\n" + muted.Render(note))
+	}
 	out.WriteString("\n\n")
 
 	r := &renderer{th: th} // width-0 renderer: chips don't wrap, trace renders full

@@ -604,6 +604,24 @@ verbatim), or pass it as `resume` to CONTINUE that subagent with a follow-up pro
 (default engine only, fresh fork + staleness note; `failed` is not resumable). None of
 these widen `port.LLMRequest` — they are `subagentArgs`/`RunOptions`/factory concerns.
 
+**Background, SubagentStatus & per-child cancel (`docs/design/BACKGROUND-SUBAGENTS.md`).**
+`background: true` DETACHES the child, RUN-scoped: the call returns an immediate
+started-result (agentId trailer first) and a goroutine owns fork → drive → persist →
+result-stash in the parent `Run`'s **child-run registry** (`childRunRegistry` — every
+run registers ALL children of all three families under their child session ids). The
+result body's sole channel is the read-only **`SubagentStatus`** tool (no args → this
+run's roster; `agent_id` → state + the stored body, delivered exactly once; `wait_ms`
+parks up to 120s) — a turn-boundary harness NOTICE (ids + stop labels only, nothing
+child-authored) tells the model when a background child finishes, and ONE
+background-pending nudge defers a would-be clean end so results aren't silently lost.
+At run end live background children are cancelled, joined (bounded two-phase drain),
+sealed (`safeEmit` makes post-seal child emits no-ops), and persisted — resumable
+next run. The registry also powers **per-child cancel**: `Run.CancelChild(childID)`
+(gRPC `ConverseRequest.cancel_child`, HTTP `POST /v1/sessions/{id}/cancel-child`,
+mecatui's `x` key) cancels ONE subagent / parallel branch / team member without
+touching the run, retracting any permission ask the child had parked
+(`permission.retract`); the child persists and stays resumable.
+
 The child is a **read-only explorer with a shell** — capability flows down from the
 parent (which has Bash); isolation, not catalog read-only-ness, is the security
 boundary:
@@ -622,13 +640,20 @@ boundary:
   Bash writes land in the **isolated worktree**, never the shared base the parent's
   other read-only calls race over; the only shared surface is the `.git` object
   DB/refs (git-locked; config-driven code-exec vectors neutralised via `gitenv`).
-- `WithMaxConcurrentSubagentShells` (default 4) is a semaphore bounding how many
-  worktree-bearing children fork at once — Subagent is read-parallel, so the model can
-  fan many out; each shell-bearing child holds a worktree (`git worktree add` +
-  disk). The gate is acquired before the **worktree fork** (the `WorkspaceForker`
-  operation) and released after cleanup, only on the forking path.
-- Defensively, `drainChild` **auto-denies** any permission ask the child raises,
-  so a child can never block on a human regardless of policy.
+- `WithMaxConcurrentChildren` (default 4; `WithMaxConcurrentSubagentShells` is a
+  deprecated alias) sizes the **child concurrency gate**, acquired at the top of
+  `run()` for ALL children (forking and forker-less) — Subagent is read-parallel, so
+  the model can fan many out; each child consumes a session + an LLM slot (and, when
+  forked, a worktree). Foreground acquisition blocks; a **background** child's
+  acquisition is **fail-fast** (a full gate is a model-addressable error listing the
+  live background ids — a background child holds its slot across turns, so blocking
+  could deadlock the model against itself).
+- A child's permission ask resolves through the **4-step model** (see CLAUDE.md's
+  subagent-shell gotcha): read-only-substitution and isolation auto-approve resolve
+  most asks in `governance`; what remains is **surfaced to the human** when the parent
+  run is interactive (the child parks; `Run.Approve` routes the verdict by the
+  child-namespaced askID) or **auto-denied with an accurate model-facing message**
+  when headless — never a blanket deny.
 - The child run is bounded by the parent `ctx`; `SubagentStop` fires
   best-effort (on a detached short-lived context if the parent is already
   cancelled). `NewSubagentTool` panics on a nil child Engine.

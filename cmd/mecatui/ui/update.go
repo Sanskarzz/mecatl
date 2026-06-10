@@ -551,13 +551,22 @@ func (m *Model) applySubagent(msg client.SubagentMsg) {
 	switch msg.Kind {
 	case client.SubagentStart:
 		m.conv.setSubagentStart(msg.ParentCallID, msg.Goal)
-		m.conv.fleetStart(msg.ChildID, msg.Goal)
+		m.conv.fleetStart(msg.ChildID, msg.Goal, msg.Background)
 	case client.SubagentTool:
 		m.conv.addSubagentTool(msg.ParentCallID, msg.ToolName, msg.IsError, msg.ToolCount)
 		m.conv.fleetTool(msg.ChildID, msg.ToolName, msg.IsError, msg.ToolCount)
 	case client.SubagentEnd:
 		m.conv.setSubagentEnd(msg.ParentCallID, msg.Usage, msg.ToolCount, msg.Stop, msg.DurationMs)
 		m.conv.fleetEnd(msg.ChildID, msg.Usage, msg.ToolCount, msg.Stop, msg.DurationMs)
+		// A BACKGROUND child finishing is otherwise invisible (its Subagent card
+		// resolved long ago with the started-result), so surface a brief transient
+		// footer notice — the same advisory channel as team-done / no-progress, never
+		// a durable scrollback line. The result body goes to the AGENT (via
+		// SubagentStatus), not to this client; the copy says exactly that.
+		if ln := findFleetLane(m.conv.subagentFleet, msg.ChildID); ln != nil && ln.background {
+			m.statusMsg = m.deps.Theme.Style("muted").Render(
+				"background subagent #" + shortChildID(msg.ChildID) + " done — result ready for the agent")
+		}
 	}
 }
 

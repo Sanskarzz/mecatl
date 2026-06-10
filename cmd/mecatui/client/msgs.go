@@ -128,11 +128,14 @@ const (
 // names/counts, usage, stop, and duration — so the ui can render a subagent's
 // activity under its Subagent card while the child's content stays isolated.
 // ParentCallID attributes the msg to the originating Subagent tool block.
+// Background marks a detached-delivery (background: true) child; the server sets
+// it on subagent.start only, and an older server yields false (no marker).
 type SubagentMsg struct {
 	Kind         SubagentKind
 	ParentCallID string
 	ChildID      string
 	Goal         string
+	Background   bool
 	ToolName     string
 	IsError      bool
 	ToolCount    int
@@ -385,6 +388,7 @@ func subagentMsg(kind SubagentKind, s *mecatlv1.Subagent) SubagentMsg {
 		ParentCallID: s.GetParentCallId(),
 		ChildID:      s.GetChildId(),
 		Goal:         s.GetGoal(),
+		Background:   s.GetBackground(),
 		ToolName:     s.GetToolName(),
 		IsError:      s.GetIsError(),
 		ToolCount:    int(s.GetToolCount()),

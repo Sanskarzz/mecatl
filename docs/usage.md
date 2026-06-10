@@ -208,13 +208,21 @@ mailbox). See the delegation-capabilities note below.
 
 > **Delegation capabilities (Subagent / Parallel / Team).** Beyond the shared
 > `--max-run-tokens` budget, every delegation supports: an explicit **child-concurrency
-> cap** (default 10) bounding how many children run at once; **per-call limits**
+> cap** (default 4) bounding how many children run at once; **per-call limits**
 > (`max_turns` / `max_tool_calls` / `timeout`, **tighten-only** — a call can never
 > loosen the inherited bounds) plus a **per-call model override** and a **per-call
 > token ceiling**; **opt-in structured output** (a synthetic `SubmitResult` tool with
 > bounded validation-retry when the caller supplies a result schema); and, on a
 > Subagent, an **agentId trailer** on the returned result plus a `References:`
-> convention the explorer uses to cite the files it read. **Parallel** is observable
+> convention the explorer uses to cite the files it read. A Subagent call may also run
+> **in the background** (`background: true` — returns immediately with the agentId; the
+> child keeps working, RUN-scoped, and the model collects the result via the
+> **`SubagentStatus`** tool, prompted by a turn-boundary notice; still running at run
+> end ⇒ cancelled but persisted + resumable), and every child — subagent, parallel
+> branch, team member — is **individually cancellable** by its id (gRPC `cancel_child`
+> frame / HTTP `POST /v1/sessions/{id}/cancel-child` / the `x` key in mecatui's
+> overlay) without touching the run; see `docs/design/BACKGROUND-SUBAGENTS.md`.
+> **Parallel** is observable
 > over a dedicated `parallel.*` event family, and its result carries the preserved
 > fork-workspace paths. A **Team** additionally honours a **team-wide token budget**
 > (`--max-team-tokens`, tightenable per call) checked at the round boundary — orthogonal

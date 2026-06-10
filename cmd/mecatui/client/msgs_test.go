@@ -77,6 +77,12 @@ func TestEventToMsg(t *testing.T) {
 			SubagentMsg{Kind: SubagentStart, ParentCallID: "p1", ChildID: "subagent-p1", Goal: "investigate main.go"},
 		},
 		{
+			"subagent.start background",
+			&mecatlv1.Event{Type: "subagent.start", Subagent: &mecatlv1.Subagent{
+				ParentCallId: "p2", ChildId: "subagent-p2", Goal: "long audit", Background: true}},
+			SubagentMsg{Kind: SubagentStart, ParentCallID: "p2", ChildID: "subagent-p2", Goal: "long audit", Background: true},
+		},
+		{
 			"subagent.tool",
 			&mecatlv1.Event{Type: "subagent.tool", Subagent: &mecatlv1.Subagent{
 				ParentCallId: "p1", ChildId: "subagent-p1", ToolName: "Grep", IsError: true, ToolCount: 3}},

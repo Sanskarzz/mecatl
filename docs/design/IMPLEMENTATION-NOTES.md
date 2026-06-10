@@ -624,6 +624,38 @@ pre-existing I3a tests `TestBackgroundChildCancelledAtRunEnd` and `TestBackgroun
 now script a second clean end (their first one legitimately draws the nudge). No diagnostics
 change: the loop still emits exactly THREE operator lines.
 
+**Background subagents — TUI surfaces + final description pass (BACKGROUND-SUBAGENTS I4, the
+arc's final iteration).** The client now decodes proto `Subagent.background` (field 10, mapped
+by the server since I3a) onto `client.SubagentMsg.Background` — set on subagent.start only, an
+older server yields false. The fleet lane (`subagentLane.background`, recorded by `fleetStart`)
+drives three surfaces: (1) a **`⇢ bg` marker** (`subagentBackgroundMarker`, glyph-plus-text so
+it survives ANSI stripping) after the roster row's `#hash` — the focus header reuses the roster
+line so it inherits the marker; (2) a **transient footer notice** on a background child's
+subagent.end ("background subagent #hash done — result ready for the agent" — the
+team-done/no-progress advisory channel, never a durable scrollback block; a FOREGROUND end stays
+silent, its result already landed on its own card); (3) an **honest delivery line** on the focus
+pane (*running detached* vs *done — result ready for the agent (SubagentStatus)*) that renders
+only what the events carry — background + done; the registry's `delivered` state is deliberately
+NOT on the wire, so the pane never claims a collected/uncollected state. The footer fleet count
+needed NO change (verified + pinned): the fleet is session-scoped and keyed on subagent.end, so a
+cross-turn background child keeps counting as ◐ running. The description pass tightened the
+Subagent Spec to one coherent id workflow — the trailer line now points at SubagentStatus (live
+state / background collection) AND InspectSubagent AND `resume`, the background mention rides the
+FINAL-MESSAGE sentence, and the duplicated report-format/fresh-context guidance (already in the
+`prompt` arg description) was trimmed so token cost stays ~flat; `backgroundStartedBody` and the
+`background` arg description now both name the turn-boundary note ("a note will tell you when it
+finishes"). The Spec guard test grew to require SubagentStatus + background. Docs finale: the
+design promoted to `docs/design/BACKGROUND-SUBAGENTS.md` (as-built, amendments folded, I1-I4
+hashes), architecture §8 gained the background/SubagentStatus/cancel paragraph (+ the stale
+forking-only-gate and blanket-auto-deny bullets corrected to the childGate/4-step reality),
+docs/tui.md gained the marker/notice/footer-count notes, docs/usage.md's delegation note gained
+background + per-child cancel (and the child-concurrency default corrected 10→4). Guards:
+`client.TestEventToMsg` (background decode), `ui.TestSubagentRosterLineBackgroundMarker` /
+`TestSubagentRosterBackgroundMarkerEndToEnd` / `TestSubagentFocusBackgroundNote` /
+`TestBackgroundSubagentEndTransientNotice` / `TestForegroundSubagentEndNoTransientNotice` /
+`TestFooterCountsCrossTurnBackgroundChild`, `agent.TestSubagentSpecEnumeratesAgents` (the
+widened description guard). Goldens: unchanged (no golden covers a background lane).
+
 **Subagent per-call token ceiling (`max_tokens`, Run-scoped budget override — R4).** `subagentArgs.MaxTokens`
 rides the new `RunOptions.MaxRunTokensOverride` carried into `Engine.RunContentWith`, so a per-call
 token ceiling bounds the SHARED child engine WITHOUT minting a fresh engine. `effectiveMaxRunTokens`

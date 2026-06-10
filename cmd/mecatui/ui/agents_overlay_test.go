@@ -55,9 +55,9 @@ func seedSubagents(m Model, parent string, msgs ...client.SubagentMsg) Model {
 func TestSubagentFleetCounts(t *testing.T) {
 	c := &conversation{}
 	c.addTool("p1", "Subagent", `{}`)
-	c.fleetStart("c1", "audit auth")
-	c.fleetStart("c2", "map coverage")
-	c.fleetStart("c3", "trace config")
+	c.fleetStart("c1", "audit auth", false)
+	c.fleetStart("c2", "map coverage", false)
+	c.fleetStart("c3", "trace config", false)
 	c.fleetEnd("c3", client.Usage{}, 4, "end_turn", 1000)
 	running, done := c.subagentFleetCounts()
 	if running != 2 || done != 1 {
@@ -85,7 +85,7 @@ func TestSubagentFleetEmpty(t *testing.T) {
 // ParentCallID.
 func TestFleetMissingChildIDDropped(t *testing.T) {
 	c := &conversation{}
-	c.fleetStart("", "no id")
+	c.fleetStart("", "no id", false)
 	if c.hasSubagents() {
 		t.Error("a childID-less start must not create a fleet lane")
 	}
@@ -671,6 +671,59 @@ func TestSubagentFocusGolden(t *testing.T) {
 	got := stripANSI([]byte(m.View().Content))
 	assertFitsViewport(t, got, m.width)
 	compareGolden(t, "subagent_focus.golden", got)
+}
+
+// goldenBackgroundFleet builds the background-variant fleet for the overlay goldens:
+// one RUNNING detached child seeded FIRST (so cursor 0 / enter focuses it), one DONE
+// background child (its result still with the registry — uncollected), and the
+// representative foreground mix in between. It exercises the ⇢ bg marker against
+// plain lanes, the done-background row, and (via the done child's subagent.end) the
+// transient footer notice — all on the REAL styled render path.
+func goldenBackgroundFleet(m Model) Model {
+	m = seedSubagents(m, "p1",
+		startBgSub("p1", "explorer-f8a6", "background deep audit"),
+		toolSub("p1", "explorer-f8a6", "Bash", false, 3),
+	)
+	m = goldenFleet(m)
+	return seedSubagents(m, "p2",
+		startBgSub("p2", "explorer-g7b7", "background doc sweep"),
+		endSub("p2", "explorer-g7b7", 8000, 1500, 5, "end_turn"),
+	)
+}
+
+// TestSubagentRosterBackgroundGolden locks the fleet roster with background lanes in
+// the mix: the styled bytes + layout around the ⇢ bg marker (running AND done
+// background rows) and the background-done transient footer notice are pinned, with
+// the same viewport-fit guard as the plain roster golden.
+func TestSubagentRosterBackgroundGolden(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = goldenBackgroundFleet(m)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	if m.agentsTab != tabSubagents {
+		t.Fatalf("expected Subagents tab, got %v", m.agentsTab)
+	}
+	got := stripANSI([]byte(m.View().Content))
+	assertFitsViewport(t, got, m.width)
+	compareGolden(t, "subagent_roster_background.golden", got)
+}
+
+// TestSubagentFocusBackgroundGolden locks a RUNNING background child's focus pane:
+// the ⇢ bg marker on the header line, the honest delivery note ("runs detached …
+// SubagentStatus"), and the cancel hint, with the viewport-fit guard.
+func TestSubagentFocusBackgroundGolden(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m = goldenBackgroundFleet(m)
+	mm, _ := m.Update(ctrlKey('a'))
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}) // cursor 0 = the running background lane
+	m = mm.(Model)
+	if m.subagents.view != subagentFocus || m.subagents.child != "explorer-f8a6" {
+		t.Fatalf("expected focus on the background child, got view=%v child=%q", m.subagents.view, m.subagents.child)
+	}
+	got := stripANSI([]byte(m.View().Content))
+	assertFitsViewport(t, got, m.width)
+	compareGolden(t, "subagent_focus_background.golden", got)
 }
 
 // TestAgentsTeamsTabGolden locks the Teams tab of the unified overlay (the tab bar +
