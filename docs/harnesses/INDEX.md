@@ -40,6 +40,7 @@ grep, read its frontmatter first to confirm relevance before reading the body.
 | 06 | [06-architecture-patterns.md](./06-architecture-patterns.md) | practice | **Cross-cutting design discipline**: loop, reasoning patterns, multi-agent, tool/prompt/hook/permission design, anti-patterns. |
 | 07 | [07-context-and-mcp.md](./07-context-and-mcp.md) | practice | **The plumbing**: context economics, prompt caching, compaction, discovery vs. indices, memory, MCP, tool result shaping, observability. |
 | 08 | [08-design-considerations.md](./08-design-considerations.md) | practice | **Opinionated synthesis**: 13 load-bearing decisions, MVP→v3 roadmap, cost/security levers, ideas to steal, unsettled bets, a sanity-check gauntlet. |
+| 09 | [09-agent-primitives-evaluation.md](./09-agent-primitives-evaluation.md) | evaluation | **mecatl vs the field (June 2026)**: delegation-primitives comparison vs Claude Code/opencode/Gemini/Codex/Amp/Goose/Cursor/Copilot/Factory/Crush; ahead/behind tables; the tiered roadmap that drove the 3b982bb..0bdcc21 work; remaining items = issues #28-#40. |
 
 **Layer meaning:** `meta` = orientation · `reference` = how a specific thing is
 built · `survey` = landscape · `practice` = what to do when building your own.
