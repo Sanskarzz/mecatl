@@ -150,8 +150,9 @@ Because the fix lives in the SHARED `Engine.drive`, it covers main + Subagent ch
 branches + every team member + the team lead's synthesis turn (a no-progress synthesis is driven
 to a real report, not an empty `joinTeamFallback` skeleton). **No `tool_choice` forcing**: forcing
 tool use is incompatible with Anthropic extended thinking and the OpenAI reasoning path — the
-provider-agnostic route is the bounded nudge + the per-model persistence prompt (`agencyDelta`,
-composition layer). `EvNoProgress`/`StopNoProgress` are STRING passthroughs on the wire (proto
+provider-agnostic route is the bounded nudge + the persistence prompt (`agencyDelta`,
+composition layer — supplied for ALL model families incl. Claude since issue #49, after Claude
+was observed announcing actions without emitting the tool calls). `EvNoProgress`/`StopNoProgress` are STRING passthroughs on the wire (proto
 `type`/`stop` are strings, not enums), so no proto regen was needed; mecatui renders
 `EvNoProgress` as a muted notice and `StopNoProgress` as a `stopped · no progress` footer label.
 

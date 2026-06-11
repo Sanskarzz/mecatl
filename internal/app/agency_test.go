@@ -11,25 +11,24 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 )
 
-// TestAgencyDelta verifies the per-model agency contract is OMITTED for the
-// Claude family (case-insensitive) and SUPPLIED for every other model family,
-// including the empty/unknown id.
+// TestAgencyDelta verifies the agency contract is SUPPLIED for EVERY model
+// family — Claude included (issue #49: Claude was observed announcing actions
+// without taking them, so the per-Claude omission was reversed) — and the
+// empty/unknown id.
 func TestAgencyDelta(t *testing.T) {
-	for _, model := range []string{"gpt-5.1", "", "o3", "codex", "GPT-4O"} {
+	for _, model := range []string{
+		"gpt-5.1", "", "o3", "codex", "GPT-4O",
+		"claude-opus-4-8", "Claude-Sonnet", "anthropic/CLAUDE-x",
+	} {
 		if agencyDelta(model) == "" {
 			t.Errorf("agencyDelta(%q): want non-empty delta, got empty", model)
-		}
-	}
-	for _, model := range []string{"claude-opus-4-8", "Claude-Sonnet", "anthropic/CLAUDE-x"} {
-		if agencyDelta(model) != "" {
-			t.Errorf("agencyDelta(%q): want empty (Claude omits the delta), got %q", model, agencyDelta(model))
 		}
 	}
 }
 
 // TestPromptConfigThreadsAgencyDelta proves promptConfig folds the agency delta
-// onto the role for a non-Claude model and leaves Role empty (built-in default)
-// for Claude.
+// onto the role for both a non-Claude and a Claude model (issue #49: Claude now
+// receives the contract too), in each case prefixed by the default framing.
 func TestPromptConfigThreadsAgencyDelta(t *testing.T) {
 	gpt := promptConfig(Config{Model: "gpt-x"}, "")
 	if !strings.Contains(gpt.Role, "Keep going until the task is actually resolved") {
@@ -40,8 +39,11 @@ func TestPromptConfigThreadsAgencyDelta(t *testing.T) {
 	}
 
 	claude := promptConfig(Config{Model: "claude-x"}, "")
-	if claude.Role != "" {
-		t.Errorf("Claude promptConfig: Role must stay empty (default framing), got %q", claude.Role)
+	if !strings.Contains(claude.Role, "Keep going until the task is actually resolved") {
+		t.Errorf("Claude promptConfig: Role missing agency delta\nRole=%q", claude.Role)
+	}
+	if !strings.HasPrefix(claude.Role, prompt.DefaultRole()) {
+		t.Errorf("Claude promptConfig: Role must start with the default framing\nRole=%q", claude.Role)
 	}
 }
 
@@ -69,24 +71,34 @@ func TestAgencyDeltaInStablePrefixCacheStable(t *testing.T) {
 }
 
 // TestAgentPromptConfigKeysDeltaOnResolvedModel proves R3: agentPromptConfig
-// keys the agency delta on the RESOLVED model, not cfg.Model. A def that runs on
-// Claude gets the def body in its role but NOT the GPT-only agency delta, even
-// when the parent Config.Model is a GPT model.
+// keys the prompt on the RESOLVED model, not cfg.Model — Env.Model reflects the
+// model the def will actually run on. Since issue #49 the agency contract is
+// uniform across families, so a def resolved to EITHER family carries the def
+// body AND the agency delta; the keying still governs Env.Model.
 func TestAgentPromptConfigKeysDeltaOnResolvedModel(t *testing.T) {
 	def := agents.AgentDef{Name: "explorer", Body: "EXPLORER PLAYBOOK BODY"}
-	pc := agentPromptConfig(Config{Model: "gpt-x"}, def, "claude-opus")
 
+	// A Claude-resolved def (parent on GPT) carries the body, the delta, and a
+	// Claude Env.Model.
+	pc := agentPromptConfig(Config{Model: "gpt-x"}, def, "claude-opus")
 	if !strings.Contains(pc.Role, "EXPLORER PLAYBOOK BODY") {
 		t.Errorf("agent role missing def body\nRole=%q", pc.Role)
 	}
-	if strings.Contains(pc.Role, "Keep going until the task is actually resolved") {
-		t.Errorf("Claude-resolved def must NOT carry the GPT agency delta\nRole=%q", pc.Role)
+	if !strings.Contains(pc.Role, "Keep going until the task is actually resolved") {
+		t.Errorf("Claude-resolved def must carry the agency delta (issue #49)\nRole=%q", pc.Role)
+	}
+	if pc.Env.Model != "claude-opus" {
+		t.Errorf("Env.Model must reflect the resolved model, got %q", pc.Env.Model)
 	}
 
-	// A GPT-resolved def keyed off resolvedModel DOES carry the delta.
+	// A GPT-resolved def (parent on Claude) likewise carries the delta and a GPT
+	// Env.Model.
 	pcGPT := agentPromptConfig(Config{Model: "claude-x"}, def, "gpt-5.1")
 	if !strings.Contains(pcGPT.Role, "Keep going until the task is actually resolved") {
 		t.Errorf("GPT-resolved def must carry the agency delta\nRole=%q", pcGPT.Role)
+	}
+	if pcGPT.Env.Model != "gpt-5.1" {
+		t.Errorf("Env.Model must reflect the resolved model, got %q", pcGPT.Env.Model)
 	}
 }
 

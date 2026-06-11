@@ -3040,17 +3040,22 @@ func promptConfig(cfg Config, gitStatus string) prompt.Config {
 	return pc
 }
 
-// agencyDelta returns the per-model emphatic task-persistence contract appended
-// to the role framing. Claude-family models already persist on a task without
-// it (and the extra wording can over-steer them), so it is OMITTED for Claude
-// and supplied for every other model family. The prompt package is model-neutral
-// by design; this model-family decision lives in the composition layer.
+// agencyDelta returns the emphatic task-persistence contract appended to the
+// role framing. It is supplied for ALL model families, Claude included: the
+// earlier assumption that Claude persists without it (and that the extra wording
+// over-steers it) was disproven in the field — Claude Opus repeatedly ANNOUNCED a
+// tool action as plain text ("launching all six subagents now") and then ended the
+// turn WITHOUT emitting the tool calls, an "intent without action" agency failure
+// (issue #49). So the contract now applies uniformly, with a same-turn-action
+// clause to close that gap and a strong ambiguity hedge so it does not over-steer
+// (push through genuine ambiguity or refuse to ever yield). The prompt package is
+// model-neutral by design; this composition layer owns the wording.
 func agencyDelta(model string) string {
-	if strings.Contains(strings.ToLower(model), "claude") {
-		return ""
-	}
+	_ = model // the contract is now uniform across families
 	return "Keep going until the task is actually resolved before ending your " +
-		"turn — implement the change rather than describing it, and do not stop " +
+		"turn — implement the change rather than describing it, and when you say " +
+		"you are going to call a tool or take an action, emit those tool calls in " +
+		"the SAME turn instead of ending on an announcement of intent. Do not stop " +
 		"at analysis or a partial fix. But when you are genuinely blocked or the " +
 		"request is ambiguous, stop and ask rather than guessing."
 }

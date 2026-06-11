@@ -666,13 +666,15 @@ func composeClose(d port.Diagnostics, errClose func() error, plainClose func()) 
 // agentPromptConfig is promptConfig with the def's body composed into the Role
 // (Option C from the critique: compose, do not replace, and keep the domain
 // prompt.Config untouched). The role is rebuilt from a DELTA-AWARE base keyed on
-// the resolvedModel — the default framing plus the per-model agency contract
-// (agencyDelta) — with the def body appended after it, so the specialist's
-// playbook rides in the cache-stable StablePrefix while the standard mecatl
-// framing AND the agency contract remain. The delta is keyed on resolvedModel,
-// NOT cfg.Model, so a def that overrides the model gets the contract matching the
-// model it will actually run on (and overrides the cfg.Model-keyed delta that
-// promptConfig set). The Env model is set to the caller's ALREADY-RESOLVED model
+// the resolvedModel — the default framing plus the agency contract (agencyDelta)
+// — with the def body appended after it, so the specialist's playbook rides in
+// the cache-stable StablePrefix while the standard mecatl framing AND the agency
+// contract remain. The delta is keyed on resolvedModel, NOT cfg.Model, the same
+// discipline as Env.Model: the def must reflect the model it will actually run on.
+// (Since issue #49 the contract itself is uniform across families, so the keying
+// no longer changes the contract text, but the resolvedModel still governs
+// Env.Model and keeps the keying honest for any future per-model wording.) The
+// Env model is set to the caller's ALREADY-RESOLVED model
 // id (threaded in, not re-resolved): resolving it a second time here would re-run
 // resolveModel and log the unknown-alias warning a second time per def. The caller
 // resolves the model ONCE and passes it.

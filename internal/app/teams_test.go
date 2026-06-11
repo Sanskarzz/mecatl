@@ -574,11 +574,11 @@ func TestTeamRunTeamPathSurfacesTeamID(t *testing.T) {
 	}
 }
 
-// TestAgencyDeltaReachesTeamMemberAndLead pins AC-9: the per-model persistence
-// "agency" delta reaches the system prompt of a NON-Claude team member/lead engine
-// built by the REAL composition factory, and is OMITTED for a Claude member. It is
-// the regression tripwire for a future refactor that drops the delta from
-// childEngineDepsForProvider's PromptConfig.
+// TestAgencyDeltaReachesTeamMemberAndLead pins AC-9: the persistence "agency"
+// delta reaches the system prompt of a team member/lead engine built by the REAL
+// composition factory, for EVERY model family — Claude included (issue #49: the
+// per-Claude omission was reversed). It is the regression tripwire for a future
+// refactor that drops the delta from childEngineDepsForProvider's PromptConfig.
 func TestAgencyDeltaReachesTeamMemberAndLead(t *testing.T) {
 	const agencyMarker = "Keep going until the task is actually resolved"
 
@@ -613,9 +613,10 @@ func TestAgencyDeltaReachesTeamMemberAndLead(t *testing.T) {
 	if got := capturePrompt(t, "gpt-5.2"); !strings.Contains(got, agencyMarker) {
 		t.Fatalf("non-Claude member system prompt is MISSING the agency persistence delta:\n%s", got)
 	}
-	// A Claude model must NOT (it over-steers Claude; the delta is family-gated).
-	if got := capturePrompt(t, "claude-sonnet-4"); strings.Contains(got, agencyMarker) {
-		t.Fatalf("Claude member system prompt unexpectedly carries the agency delta:\n%s", got)
+	// A Claude model MUST get it too (issue #49: Claude announced actions without
+	// taking them, so the contract now applies to every family).
+	if got := capturePrompt(t, "claude-sonnet-4"); !strings.Contains(got, agencyMarker) {
+		t.Fatalf("Claude member system prompt is MISSING the agency persistence delta:\n%s", got)
 	}
 }
 

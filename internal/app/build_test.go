@@ -138,8 +138,9 @@ func TestEngineDepsForProviderRebindsModel(t *testing.T) {
 		t.Error("Compactor.Counter and Deps.TokenCounter disagree — they must be ONE counter for the model")
 	}
 
-	// The agency delta differs by family: gpt-4* gets the delta, so the alt-model Role
-	// is the non-empty agency Role; assert it re-derived for the requested model.
+	// The agency Role is keyed on the model: assert it re-derived for the requested
+	// model (the contract is uniform across families since issue #49, but the Role
+	// must still be rebuilt from the requested model's promptConfig, not leaked).
 	wantRole := promptConfig(Config{Model: altModel}, "").Role
 	if deps.PromptConfig.Role != wantRole {
 		t.Errorf("PromptConfig.Role did not re-derive for the alternate model (agency-delta contamination):\n got %q\nwant %q",
