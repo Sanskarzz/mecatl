@@ -690,6 +690,12 @@ pre-existing I3a tests `TestBackgroundChildCancelledAtRunEnd` and `TestBackgroun
 now script a second clean end (their first one legitimately draws the nudge). No diagnostics
 change: the loop still emits exactly THREE operator lines.
 
+**TUI queue budget stop.** The type-while-running queue treats `StopBudget` like the other healthy
+size-bound stops (`max_turns` / `max_tool_calls`): the current run produced a usable partial and a
+queued follow-up should reopen the session with a fresh budget instead of pausing like error/cancel.
+`shouldDrain` therefore includes `budget`, and the footer renders it as `stopped · token budget`.
+Pinned by `ui.TestDrainOnSizeLimit` and `ui.TestStopReasonLabel`.
+
 **Background subagents — TUI surfaces + final description pass (BACKGROUND-SUBAGENTS I4, the
 arc's final iteration).** The client now decodes proto `Subagent.background` (field 10, mapped
 by the server since I3a) onto `client.SubagentMsg.Background` — set on subagent.start only, an
@@ -937,6 +943,15 @@ model already gets `[STOPPED]` in the lead's report via `joinTeamFallback`), so 
 `✗ stopped — <reason>` distinctly from `✓ done` instead of recomputing "done" and contradicting the
 supervisor. It is a supervisor verdict (closed enums, `Name` already on the roster), kept OFF the
 `EvTeamMember` redaction channel exactly like the tasks/findings discipline.
+
+**Team observability structural guard.** Because `TeamPayload` is deliberately
+fuller-than-metadata (bounded member message/tool previews, task descriptions, findings, and terminal
+dispositions), it now has the same review gate Parallel already had: `engine/session/team_payload_test.go`
+allow-lists every top-level and nested team projection field and rejects unreviewed content-shaped
+additions (`Args`, `Content`, `Message`, `Prompt`, `Transcript`, `PermissionAsk`, `Ask`). This pins the
+redaction contract in code: `team.member` may be watchable, but permission asks are never forwarded,
+every content-shaped field is explicitly reviewed as bounded, and member transcripts still reach the
+parent only through the Team result or an explicit `InspectMember` pull.
 
 **The Subagent delegation tool (read-only explorer) gets the SAME treatment** (Phase 2): when Bash is
 configured, `SubagentTool` holds a worktree `childForker` (`WithChildForker`) and forks each child
@@ -1820,13 +1835,13 @@ name/error/count/usage/stop/duration). Two pieces:
 THIRD delegation family alongside `subagent.*` and `team.*`. It was chosen as a DEDICATED
 family (Option A) over consolidating into the subagent/team families — see
 `.scratch/task-research/REVIEW-event-consolidation.md`: the only genuinely-shared part (the
-redacted per-tool child lifecycle) is ALREADY shared in `agent.drainChildObserved` (the single
-redaction chokepoint), so consolidation would couple two shipped contracts to absorb a third
-for near-zero saving. The three families share a LIFECYCLE (parent call id, child/branch/member
-identity, tool name/error/count, usage, stop, duration) but differ in AGGREGATION shape:
-subagent = flat fleet, parallel = fan-out GROUP (join + winner + preserved fork paths), team =
-coordinating roster (tasks + findings + mailbox). **TRIP-WIRE: a 4th delegation family is the
-point to extract a shared `ChildActivity` value object — not before** (recorded in the
+child lifecycle shape) is shared where safe, while Team remains intentionally
+fuller-than-metadata because a crew is meant to be watched. The three families share a
+LIFECYCLE (parent call id, child/branch/member identity, tool name/error/count, usage,
+stop, duration) but differ in AGGREGATION shape: subagent = flat fleet, parallel = fan-out
+GROUP (join + winner + preserved fork paths), team = coordinating roster (bounded member
+previews + tasks + findings + mailbox). **TRIP-WIRE: a 4th delegation family is the point
+to extract a shared `ChildActivity` value object — not before** (recorded in the
 `session.event.go` doc-comment above the three payloads).
 
 - **Server** (`engine/session/event.go`): `EvParallelStart` / `EvParallelBranch` /

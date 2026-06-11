@@ -294,6 +294,7 @@ func TestStopReasonLabel(t *testing.T) {
 		{"max_turns", "stopped · turn limit", "ctxWarn"},
 		{"max_tool_calls", "stopped · tool-call limit", "ctxWarn"},
 		{"max_consecutive_failures", "stopped · repeated failures", "ctxWarn"},
+		{"budget", "stopped · token budget", "ctxWarn"},
 		{"cancelled", "cancelled", "muted"},
 		{"no_progress", "stopped · no progress", "ctxWarn"},
 		{"error", "error", "errorText"},
