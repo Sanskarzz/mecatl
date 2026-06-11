@@ -29,6 +29,13 @@ import (
 type Turn struct {
 	// Chunks is the ordered sequence emitted for this turn.
 	Chunks []port.Chunk
+	// Err, when non-nil, is yielded as a GENUINE in-stream error (the iterator's
+	// error value) AFTER Chunks — the shape of a transient provider failure
+	// mid-stream (an upstream 5xx that exhausted the resilience layer's
+	// retries). The agent loop maps it to a StopError terminal that Fail()s the
+	// session, distinct from a provider-REPORTED terminal carried on the
+	// ChunkDone stop (see EmptyTurnWithStop). Build one with ErrorTurn.
+	Err error
 }
 
 // Provider is a deterministic, scripted port.LLMProvider. Each Stream call
@@ -104,12 +111,14 @@ func (p *Provider) Reset() {
 // Stream returns an iterator over the next scripted turn's chunks, advancing the
 // internal cursor. If the script is exhausted it returns an empty iterator (no
 // chunks, no error). The returned iterator stops early if ctx is cancelled. The
-// outer error is always nil; the mock never fails to start a stream.
+// outer error is always nil; the mock never fails to start a stream — a scripted
+// Turn.Err is yielded IN-stream after the turn's chunks (a mid-stream failure),
+// matching how the real adapters surface a broken stream.
 func (p *Provider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
 	p.mu.Lock()
-	var chunks []port.Chunk
+	var turn Turn
 	if p.cursor < len(p.turns) {
-		chunks = p.turns[p.cursor].Chunks
+		turn = p.turns[p.cursor]
 		p.cursor++
 	}
 	observer := p.observer
@@ -122,7 +131,7 @@ func (p *Provider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[p
 	}
 
 	return func(yield func(port.Chunk, error) bool) {
-		for _, c := range chunks {
+		for _, c := range turn.Chunks {
 			select {
 			case <-ctx.Done():
 				return
@@ -131,6 +140,9 @@ func (p *Provider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[p
 			if !yield(c, nil) {
 				return
 			}
+		}
+		if turn.Err != nil {
+			yield(port.Chunk{}, turn.Err)
 		}
 	}, nil
 }
@@ -175,6 +187,18 @@ func EmptyTurnWithStop(stop session.StopReason) Turn {
 		{Kind: port.ChunkUsage, Usage: &session.Usage{}},
 		{Kind: port.ChunkDone, Stop: stop},
 	}}
+}
+
+// ErrorTurn builds a turn that yields the given chunks (commonly none) and then
+// a GENUINE in-stream error — the mid-stream failure shape of a transient
+// provider outage (an upstream 5xx that exhausted the resilience layer's
+// retries). The agent loop maps a stream error to a StopError terminal that
+// calls session.Fail(), landing the session in StateFailed. It is DISTINCT from
+// EmptyTurnWithStop(session.StopError), which scripts a provider-REPORTED
+// terminal condition relayed on the ChunkDone stop with NO Go error. Use this
+// to exercise the failed-session recovery seam (Session.Recover, issue #51).
+func ErrorTurn(err error, chunks ...port.Chunk) Turn {
+	return Turn{Chunks: chunks, Err: err}
 }
 
 // ReasoningOnlyTurn builds an UNCOOPERATIVE turn that emits a reasoning DISPLAY

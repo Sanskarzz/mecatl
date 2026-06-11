@@ -97,8 +97,13 @@ beyond teams. The state machine becomes
 > interactive multi-turn — but via a SEPARATE seam, `session.Interrupt()`, not
 > `Reopen`. Interrupt is legal only from `StateCancelled`, recovers to `idle`,
 > and repairs the interrupted turn's history (closing out orphaned tool calls)
-> so the replay stays provider-valid. `Reopen` stays `completed`-only. A
-> `failed` session remains non-resumable from both seams.
+> so the replay stays provider-valid. `Reopen` stays `completed`-only.
+>
+> Scope update 2 (issue #51): a `failed` session now recovers too — via a THIRD
+> separate seam, `session.Recover()` (`failed → idle`, same history repair as
+> Interrupt). The spike's invariant is still honored: `Reopen` was never
+> widened (it stays `completed`-only, Interrupt stays `cancelled`-only); each
+> terminal state has its own narrow seam.
 
 ## 4. Layering: where each piece lives
 

@@ -16,9 +16,9 @@ Prefer updating the relevant design doc + this file over re-growing CLAUDE.md.
 ## Domain — `engine/session/` (lifecycle recovery)
 
 A turn always drives the `Session` aggregate to a terminal state within one
-`Engine.Run`; the engine never recovers it. Two intention-revealing seams
-re-enter the loop on a reused session (a `failed` session is never resumable
-from either):
+`Engine.Run`; the engine never recovers it. Three intention-revealing seams —
+one per terminal state, each legal ONLY from its own state — re-enter the loop
+on a reused session at the run-entry funnel (`loadAndReopen`):
 
 - **`Reopen()`** — `completed → idle` only. Clears stop + pending, resets per-run
   `Counters`, preserves history. The clean-end-of-run continuation seam.
@@ -28,25 +28,45 @@ from either):
   AFTER `RecordAssistant` but before `RecordToolResults`) leaves the trailing
   assistant message with `ToolCall`s that never got a result — a dangling
   `tool_use` (Anthropic) / `function_call` (OpenAI) that both providers 400 on at
-  replay. The private `closeOutInterruptedTurn()` finds the LAST assistant
+  replay. The private `closeOutInterruptedTurn(message)` finds the LAST assistant
   message, collects the `CallID`s already answered by the `RoleTool` messages
-  that follow it, and appends one `NewToolError(call.ID, "tool call interrupted
-  by cancellation")` per unanswered `ToolCall.ID` (in `ToolCalls` order) via the
-  same `Conversation.Append(NewToolMessage(...))` path `RecordToolResults` uses.
-  `IsError` here means *cancellation*, not a real tool failure. It is idempotent
-  and a NO-OP for clean shapes: an assistant with no tool calls, the
+  that follow it, and appends one `NewToolError(call.ID, message)` per
+  unanswered `ToolCall.ID` (in `ToolCalls` order) via the same
+  `Conversation.Append(NewToolMessage(...))` path `RecordToolResults` uses. The
+  message is SEAM-ACCURATE, durable model-facing history (the
+  childAutoDenyMessage discipline — never claim a user action that didn't
+  happen): Interrupt passes "tool call interrupted by cancellation"
+  (byte-identical to the pre-#51 text); Recover passes "tool call aborted: the
+  run failed before this call's result was recorded". `IsError` here means the
+  call never ran to a result, not a real tool failure. It is idempotent and a
+  NO-OP for clean shapes: an assistant with no tool calls, the
   dangling-trailing-user shape (cancel before the first token — LEFT AS-IS,
   benign for both providers), and a turn whose results all landed before the
   cancel. Partial results are honoured (only the missing `CallID`s are
   closed out).
+- **`Recover()`** — `failed → idle` only (issue #51). The third sibling: same
+  reset as Reopen/Interrupt (the shared private `resetToIdle()` — one reset
+  body, three per-method state guards, so the reset fields cannot drift across
+  seams) and the SAME `closeOutInterruptedTurn()` history repair with the
+  failure-accurate message (a turn that failed mid-stream/mid-dispatch can
+  orphan trailing tool calls exactly like a cancel), so a transient provider
+  failure (an upstream 5xx that exhausted the resilience retries) degrades to
+  "retryable" instead of permanently bricking the session. Recovery makes retry
+  POSSIBLE, not guaranteed — a permanent-cause failure (auth/config) simply
+  fails again with the conversation context intact, and the user can clear. The
+  subagent `resume:` policy is deliberately NOT changed (see the Subagent
+  resume note below): a failed child is still not resumable — re-delegate
+  instead.
 
 The service's `loadAndReopen` (shared by `LoadSession`/`LoadSessionWithMCP`, and
 upstream of every `StartRunContent` run-entry) branches on state: `completed →
-Reopen`, `cancelled → Interrupt`, then re-persists the recovered snapshot;
-`failed` is returned as-is so the next run surfaces the illegal transition. This
-is what fixes the wedge where an interactive session that was cancelled mid-turn
-rejected every later prompt with `RecordUserPrompt from "cancelled"`. Regression:
-`TestStartRunContentRecoversCancelledSession`; adapter-level orphan guards:
+Reopen`, `cancelled → Interrupt`, `failed → Recover`, then re-persists the
+recovered snapshot. This is what fixes the wedge where an interactive session
+that was cancelled mid-turn rejected every later prompt with `RecordUserPrompt
+from "cancelled"` (and, since issue #51, the same wedge from `"failed"` after a
+transient provider failure). Regression:
+`TestStartRunContentRecoversCancelledSession` +
+`TestStartRunContentRecoversFailedSession`; adapter-level orphan guards:
 `anthropic.TestRequestNoOrphanedToolUseAfterInterrupt`,
 `openai.TestRequestNoOrphanedFunctionCallAfterInterrupt`.
 
@@ -968,10 +988,12 @@ END-TO-END `TestCompactionThroughLoopNeverOrphans` that drives the real loop + r
 `HeuristicCompactor` with a mockllm tool-call script and a tiny `ContextWindowTokens`, asserting
 the final history is pairing-valid and the session did NOT reach `StateFailed`.
 
-**Deferred follow-up: `failed` is still not recoverable.** This PR does NOT make `StateFailed`
-resumable (`Reopen` stays completed-only; `Fail()` carries a cross-reference comment). Rationale:
-the pairing fix REMOVES the trigger that bricked sessions here, so automatic failed-recovery is no
-longer urgent; making `failed` recoverable is a larger lifecycle change tracked separately.
+**Shipped (issue #51): `failed` now recovers via `Session.Recover`.** The deferred follow-up
+landed as a third terminal-recovery seam (`failed → Recover → idle`, history-repaired via the
+same `closeOutInterruptedTurn` as Interrupt; `Reopen` stays completed-only — no widening), wired
+into the service layer's `loadAndReopen` so every wire surface gets it for free. The compaction
+pairing fix above REMAINS the trigger-removal defense; Recover is the degrade-gracefully defense
+for any other transient provider failure. Both are kept.
 
 ## Adapters — `internal/adapter/`
 

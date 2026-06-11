@@ -183,13 +183,15 @@ stateDiagram-v2
   awaiting --> cancelled: Cancel
   completed --> idle: Reopen
   cancelled --> idle: Interrupt (history-repairing)
+  failed --> idle: Recover (history-repairing)
   completed --> [*]
   cancelled --> [*]
   failed --> [*]
 ```
 
-A terminal session can re-enter the loop through one of two intention-revealing
-seams (a `failed` session stays terminal — never resumable):
+A terminal session can re-enter the loop through one of three intention-revealing
+seams (one per terminal state — each is legal ONLY from its own state and they
+never widen into each other):
 - `completed → (Reopen) → idle` — a clean end-of-run is reopened to accept the
   next prompt, preserving history and resetting per-run `Counters`.
 - `cancelled → (Interrupt) → idle` — an interrupted turn is recovered the same
@@ -197,9 +199,16 @@ seams (a `failed` session stays terminal — never resumable):
   can leave the trailing assistant message with tool calls that never received a
   result, so `closeOutInterruptedTurn` appends one synthetic error tool result
   per orphaned `ToolCall.ID` before going idle, keeping the replayed history
-  provider-valid (no dangling `tool_use`/`function_call`). The service's
-  `loadAndReopen` drives the right seam per state; both persist the recovered
-  snapshot.
+  provider-valid (no dangling `tool_use`/`function_call`).
+- `failed → (Recover) → idle` — a failed run (a transient provider failure, e.g.
+  an upstream 5xx that exhausted the resilience layer's retries) recovers with
+  the **same history repair** as Interrupt, so the session is retryable instead
+  of permanently bricked (issue #51). Recovery makes retry *possible*, not
+  guaranteed — a permanent-cause failure simply fails again with the
+  conversation context intact.
+
+The service's `loadAndReopen` drives the right seam per state; all three persist
+the recovered snapshot.
 
 Notable, code-accurate details:
 - `BeginTurn` is legal from `idle` **or** `running` (a follow-up model call in
@@ -581,7 +590,10 @@ self-contained task (multi-step investigation or build/test/git work) to a **chi
    scoped to the **run** workspace root (the worktree when forked, else the parent).
    **On `resume`** (a Subagent call carrying `resume: <agentId>`) it instead RELOADS the
    persisted child by that id and recovers its terminal state — `completed` → `Reopen()`,
-   `cancelled` → `Interrupt()` (history-repair), `failed` is **not** resumable — then
+   `cancelled` → `Interrupt()` (history-repair), `failed` is **not** resumable (a
+   deliberate subagent-policy fence, unchanged by the main session's `failed →
+   Recover → idle` seam: a subagent is a one-shot delegated task, so the parent
+   re-delegates instead) — then
    re-homes it onto the fresh fork (`session.Session.Rehome`) and prepends an honest
    staleness note (the conversation survives, the workspace does NOT). Resume runs on the
    **default explorer engine only** (rejected with `agent`/`model`); an in-flight guard

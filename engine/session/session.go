@@ -16,9 +16,10 @@ type SessionID string
 //	idle → running → awaiting → running → completed
 //
 // with Cancel permitted from any non-terminal state and Fail from any
-// non-terminal state. completed, failed, and cancelled are terminal. Two terminal
-// states have a recovery seam back to idle: Reopen (from completed) and Interrupt
-// (from cancelled, also repairing the interrupted turn's history); failed is final.
+// non-terminal state. completed, failed, and cancelled are terminal. Each terminal
+// state has its own recovery seam back to idle: Reopen (from completed), Interrupt
+// (from cancelled, also repairing the interrupted turn's history), and Recover
+// (from failed, same history repair — issue #51).
 type State string
 
 const (
@@ -301,7 +302,7 @@ func (s *Session) RecordUserPromptWithParts(text string, parts []Content, instru
 // As the aggregate-level guard it REJECTS a slice that is not tool-pairing-valid
 // (an orphaned tool result or a dangling tool call) via ValidateToolPairing: such
 // a history draws a provider HTTP 400 on the next replay and would drive the run
-// to StateFailed (permanently unrunnable). Refusing it here keeps the invariant
+// to StateFailed. Refusing it here keeps the invariant
 // that the conversation is always provider-replayable, independent of which
 // compactor produced the slice.
 func (s *Session) ReplaceHistory(messages []Message) error {
@@ -394,13 +395,13 @@ func (s *Session) Cancel() error {
 // Fail transitions the session to StateFailed with StopError. It is legal from
 // any non-terminal state.
 //
-// A failed session is NOT resumable (only Reopen, completed-only, recovers a
-// session). Making failed recoverable is a deferred follow-up: the historical
-// trigger that bricked sessions here was compaction emitting unpaired history
-// (an orphaned tool result → provider HTTP 400 → Fail), which the compactors now
-// prevent by snapping the kept-tail boundary past leading tool results and
-// self-validating via ValidateToolPairing. With the trigger removed, automatic
-// failed-recovery is no longer urgent.
+// A failed session recovers through Recover (failed→idle, history-repaired —
+// issue #51), so a transient provider failure no longer bricks the session
+// permanently. Historical note: the trigger that originally bricked sessions
+// here was compaction emitting unpaired history (an orphaned tool result →
+// provider HTTP 400 → Fail), which the compactors independently prevent by
+// snapping the kept-tail boundary past leading tool results and self-validating
+// via ValidateToolPairing.
 func (s *Session) Fail() error {
 	if s.State.IsTerminal() {
 		return fmt.Errorf("%w: Fail from %q", ErrIllegalTransition, s.State)
@@ -419,9 +420,9 @@ func (s *Session) Fail() error {
 // interactive multi-turn chat — needs an explicit, guarded re-open rather than a
 // fresh session that would lose its history.
 //
-// It is legal ONLY from StateCompleted (a clean end-of-run). A FAILED run is NOT
-// resumable; a CANCELLED run recovers through Interrupt (which also repairs the
-// interrupted turn's history), NOT here; and a non-terminal session is already
+// It is legal ONLY from StateCompleted (a clean end-of-run). A FAILED run
+// recovers through Recover and a CANCELLED run through Interrupt (both also
+// repair the interrupted turn's history), NOT here; and a non-terminal session is already
 // runnable — so every other state returns ErrIllegalTransition. Reopen clears the
 // recorded stop reason
 // and any pending ask, and RESETS the per-run Counters to zero so the configured
@@ -433,19 +434,46 @@ func (s *Session) Reopen() error {
 	if s.State != StateCompleted {
 		return fmt.Errorf("%w: Reopen from %q", ErrIllegalTransition, s.State)
 	}
+	s.resetToIdle()
+	return nil
+}
+
+// resetToIdle returns the session to StateIdle and clears the per-run state:
+// the recorded stop reason, any pending ask, and the Counters (so the
+// configured Limits bound EACH prompt's work). It is the single shared reset
+// body of the three terminal-recovery seams — Reopen, Interrupt, Recover — so
+// the reset fields cannot drift across them; the state GUARDS (and the
+// history-repair step) stay per-method, since each seam is legal only from its
+// own terminal state.
+func (s *Session) resetToIdle() {
 	s.State = StateIdle
 	s.stop = StopNone
 	s.pending = nil
 	s.Counters = Counters{}
-	return nil
 }
+
+// Synthetic close-out messages for closeOutInterruptedTurn. The text is DURABLE
+// MODEL-FACING replayed history, so it must accurately attribute why the call
+// never got a real result (the same accuracy discipline as the subagent
+// childAutoDenyMessage: never claim a user action that didn't happen).
+const (
+	// interruptCloseOutMessage closes an orphan left by a user/driver CANCEL.
+	interruptCloseOutMessage = "tool call interrupted by cancellation"
+	// recoverCloseOutMessage closes an orphan left by a run FAILURE (e.g. a
+	// provider stream error, or an internal record failure mid-dispatch) — no
+	// user cancelled anything, and the replayed history must not say they did.
+	recoverCloseOutMessage = "tool call aborted: the run failed before this call's result was recorded"
+)
 
 // closeOutInterruptedTurn repairs an interrupted-mid-dispatch history so it is
 // provider-valid: for the trailing assistant message's ToolCalls that have no
 // following tool-result message, it appends one synthetic error tool result per
-// orphaned ToolCall.ID. Idempotent; a no-op when there is no trailing orphan.
-// Mutates Conversation only via its append method.
-func (s *Session) closeOutInterruptedTurn() {
+// orphaned ToolCall.ID, carrying the given message (model-facing: it states why
+// the call never got a real result — cancellation vs failure differ, see the
+// message constants above). Idempotent; a no-op when there is no trailing
+// orphan. Mutates Conversation only via its append method. Shared by Interrupt
+// (cancelled) and Recover (failed).
+func (s *Session) closeOutInterruptedTurn(message string) {
 	msgs := s.Conversation.Messages
 	// Find the LAST assistant message.
 	lastAssistant := -1
@@ -468,12 +496,12 @@ func (s *Session) closeOutInterruptedTurn() {
 	}
 	// For each tool call on the trailing assistant message not yet answered,
 	// append a synthetic error result in ToolCalls order. IsError here means the
-	// call was interrupted by cancellation, NOT a real tool failure.
+	// call never ran to a result (interrupted/aborted), NOT a real tool failure.
 	for _, call := range msgs[lastAssistant].ToolCalls {
 		if _, ok := answered[call.ID]; ok {
 			continue
 		}
-		s.Conversation.Append(NewToolMessage(NewToolError(call.ID, "tool call interrupted by cancellation")))
+		s.Conversation.Append(NewToolMessage(NewToolError(call.ID, message)))
 	}
 }
 
@@ -486,16 +514,41 @@ func (s *Session) closeOutInterruptedTurn() {
 // tool calls that never received a result; closeOutInterruptedTurn appends a
 // synthetic error result per orphan so the replayed history stays
 // provider-valid (no dangling tool_use / function_call) before the next prompt.
-// Reopen stays completed-only; a FAILED session is never resumable.
+// Reopen stays completed-only; a FAILED session recovers through Recover.
 func (s *Session) Interrupt() error {
 	if s.State != StateCancelled {
 		return fmt.Errorf("%w: Interrupt from %q", ErrIllegalTransition, s.State)
 	}
-	s.closeOutInterruptedTurn()
-	s.State = StateIdle
-	s.stop = StopNone
-	s.pending = nil
-	s.Counters = Counters{}
+	s.closeOutInterruptedTurn(interruptCloseOutMessage)
+	s.resetToIdle()
+	return nil
+}
+
+// Recover returns a FAILED session to StateIdle after repairing the failed
+// turn's history, so a transient provider failure (an upstream 5xx that
+// exhausted the resilience layer's retries) degrades to "retryable" instead of
+// permanently bricking the session (issue #51). Legal ONLY from StateFailed.
+//
+// A turn that failed mid-stream / mid-dispatch may leave the trailing assistant
+// message with tool calls that never received a result; closeOutInterruptedTurn
+// appends a synthetic error result per orphan (with the failure-accurate
+// recoverCloseOutMessage — never the cancellation wording, which would falsely
+// attribute a user action) so the replayed history stays provider-valid (no
+// dangling tool_use / function_call). Recovery makes RETRY POSSIBLE, not
+// guaranteed — if the underlying cause persists (a permanent auth/config
+// failure, or a history poisoned in a way the pairing repair cannot fix), the
+// retried run fails again, which is acceptable: the user keeps the conversation
+// context and can retry or clear.
+//
+// It is the sibling of Interrupt (cancelled→idle) and Reopen (completed→idle):
+// same reset (resetToIdle), separate method because its precondition differs.
+// Reopen stays completed-only; Interrupt stays cancelled-only.
+func (s *Session) Recover() error {
+	if s.State != StateFailed {
+		return fmt.Errorf("%w: Recover from %q", ErrIllegalTransition, s.State)
+	}
+	s.closeOutInterruptedTurn(recoverCloseOutMessage)
+	s.resetToIdle()
 	return nil
 }
 

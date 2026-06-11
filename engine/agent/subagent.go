@@ -1671,11 +1671,15 @@ func (t *SubagentTool) releaseChildID(childID session.SessionID) {
 // cases (unknown id, failed/non-resumable state, broken store) fail fast without paying
 // a fork/unfork round-trip; the caller re-homes the returned session onto the fresh fork
 // root afterwards (Session.Rehome — a field-consistency repair, not a prompt input). The
-// terminal recovery is the loadAndReopen discipline applied at the agent layer:
-// StateCompleted → Reopen, StateCancelled → Interrupt (history-repair), StateIdle → run
-// as-is, StateFailed → not resumable, any other state → not in a resumable state. It
-// returns the recovered session on success, or a model-addressable error ToolResult
-// (ok=false) on a load failure or non-resumable state.
+// terminal recovery echoes the service layer's loadAndReopen discipline at the agent
+// layer, with ONE deliberate divergence: StateCompleted → Reopen, StateCancelled →
+// Interrupt (history-repair), StateIdle → run as-is, any other state → not in a
+// resumable state — but StateFailed stays NOT resumable here even though loadAndReopen
+// now recovers a failed MAIN session via Recover (issue #51). A subagent is a one-shot
+// delegated task: a failed child carries no accumulated-user-context cost, so the
+// parent re-delegates instead of retrying a broken transcript. It returns the recovered
+// session on success, or a model-addressable error ToolResult (ok=false) on a load
+// failure or non-resumable state.
 func (t *SubagentTool) resolveResumeSession(ctx context.Context, callID session.ToolCallID, id session.SessionID, args subagentArgs) (*session.Session, session.ToolResult, bool) {
 	loaded, err := t.store.Load(ctx, id)
 	switch {

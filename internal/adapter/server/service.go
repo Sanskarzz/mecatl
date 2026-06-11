@@ -798,14 +798,14 @@ func (s *Service) SetMode(ctx context.Context, id session.SessionID, mode sessio
 
 // LoadSession resumes a previously-persisted session so a subsequent StartRun
 // continues it. It loads the latest snapshot from the store and, if the session
-// is in a terminal-but-resumable state, REOPENS/INTERRUPTS it to StateIdle
+// is in a terminal state, REOPENS/INTERRUPTS/RECOVERS it to StateIdle
 // (preserving the conversation history) and re-persists, so the next prompt's
 // BeginTurn is legal. A cleanly COMPLETED session is reopened via Reopen; a
 // CANCELLED session (an interrupted turn) is recovered via Interrupt, which also
-// repairs the history (closing out any orphaned tool calls). A session already
-// idle is returned unchanged; a FAILED session is NOT resumable and the prior
-// state is returned as-is so the next StartRun surfaces the illegal transition
-// rather than silently continuing a broken session.
+// repairs the history (closing out any orphaned tool calls); a FAILED session
+// (a transient provider failure) is recovered via Recover, the same history
+// repair (issue #51) — recovery makes retry possible, not guaranteed. A session
+// already idle is returned unchanged.
 //
 // It returns ErrNotFound when the store has no snapshot for id (including the
 // in-memory store after a process restart, or when no store-dir is configured
@@ -815,12 +815,12 @@ func (s *Service) LoadSession(ctx context.Context, id session.SessionID) (*sessi
 }
 
 // loadAndReopen is the shared load + reopen-if-completed / interrupt-if-cancelled
-// body of LoadSession and LoadSessionWithMCP, factored out so the two cannot
-// drift: it loads the latest snapshot, and if the session cleanly COMPLETED
-// REOPENS it to idle, or if it was CANCELLED (an interrupted turn) recovers it
-// via Interrupt (which also repairs the history), then re-persists. ErrNotFound
-// propagates from GetSession; a FAILED session is NOT resumable and that prior
-// state is returned as-is so the next run surfaces the illegal transition.
+// / recover-if-failed body of LoadSession and LoadSessionWithMCP, factored out so
+// the two cannot drift: it loads the latest snapshot, and if the session cleanly
+// COMPLETED reopens it to idle (Reopen), or if it was CANCELLED (an interrupted
+// turn) recovers it via Interrupt, or if it FAILED (a transient provider failure)
+// recovers it via Recover (both repair the history), then re-persists. ErrNotFound
+// propagates from GetSession.
 func (s *Service) loadAndReopen(ctx context.Context, id session.SessionID) (*session.Session, error) {
 	sess, err := s.GetSession(ctx, id)
 	if err != nil {
@@ -840,6 +840,13 @@ func (s *Service) loadAndReopen(ctx context.Context, id session.SessionID) (*ses
 		}
 		if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
 			return nil, fmt.Errorf("server: persist interrupted session: %w", serr)
+		}
+	case session.StateFailed:
+		if rerr := sess.Recover(); rerr != nil {
+			return nil, fmt.Errorf("server: recover session: %w", rerr)
+		}
+		if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
+			return nil, fmt.Errorf("server: persist recovered session: %w", serr)
 		}
 	}
 	return sess, nil
@@ -937,8 +944,9 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 	// state — so an in-process follow-up prompt (interactive multi-turn chat, a
 	// long-lived teammate) must reopen-if-completed FIRST, exactly as the
 	// cross-process LoadSession resume path does. A freshly-created idle session is
-	// returned unchanged; a failed/cancelled session is NOT reopened, so its illegal
-	// transition still surfaces rather than silently continuing a broken session.
+	// returned unchanged; a cancelled session is recovered via Interrupt and a
+	// failed one via Recover (both history-repaired), so neither wedges the next
+	// prompt on an illegal RecordUserPrompt transition (issue #51).
 	sess, err := s.loadAndReopen(ctx, id)
 	if err != nil {
 		return nil, err

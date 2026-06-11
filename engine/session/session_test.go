@@ -653,6 +653,12 @@ func TestInterruptClosesOutOrphanedToolCalls(t *testing.T) {
 		if !m.ToolResult.IsError {
 			t.Fatalf("appended[%d] IsError = false, want true (cancellation sentinel)", i)
 		}
+		// The synthetic text is durable MODEL-FACING replayed history: the
+		// cancel seam keeps its cancellation attribution BYTE-IDENTICAL
+		// (Recover uses a different, failure-accurate message).
+		if m.ToolResult.Content != "tool call interrupted by cancellation" {
+			t.Fatalf("appended[%d] content = %q, want the byte-identical cancellation wording", i, m.ToolResult.Content)
+		}
 	}
 }
 
@@ -835,4 +841,259 @@ func TestInterruptClosesOnlyTrailingOrphan(t *testing.T) {
 	if oldResults != 1 {
 		t.Fatalf("call-old has %d tool results, want 1 (earlier turn untouched)", oldResults)
 	}
+}
+
+// --- Recover (failed → idle, issue #51) -------------------------------------
+//
+// Recover is the third terminal-recovery seam, the sibling of Reopen
+// (completed→idle) and Interrupt (cancelled→idle). It makes retry POSSIBLE
+// (a structurally valid, provider-replayable history), not guaranteed — a
+// permanent-cause failure simply fails again on the retried run.
+
+func TestRecoverFromFailedReturnsToIdleAndResetsCounters(t *testing.T) {
+	s := newTestSession(Limits{MaxTurns: 5})
+	if err := s.RecordUserPrompt("first prompt", nil); err != nil {
+		t.Fatalf("RecordUserPrompt: %v", err)
+	}
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	if err := s.RecordAssistant(NewAssistantMessage("partial answer", "", nil)); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+	if err := s.Fail(); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	if s.State != StateFailed || s.Counters.Turns != 1 {
+		t.Fatalf("precondition: state=%q turns=%d, want failed/1", s.State, s.Counters.Turns)
+	}
+	convLen := len(s.Conversation.Messages)
+
+	if err := s.Recover(); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if s.State != StateIdle {
+		t.Fatalf("after Recover state = %q, want idle", s.State)
+	}
+	if s.Counters != (Counters{}) {
+		t.Fatalf("after Recover counters = %+v, want zero (per-prompt budget)", s.Counters)
+	}
+	if r, ok := s.RecordedStopReason(); ok {
+		t.Fatalf("after Recover recorded stop reason = %q, want none", r)
+	}
+	// No orphaned tool calls here, so history is preserved unchanged.
+	if len(s.Conversation.Messages) != convLen {
+		t.Fatalf("Recover changed clean history: len=%d, want %d", len(s.Conversation.Messages), convLen)
+	}
+	// The recovered session accepts a new prompt and another turn (retry).
+	if err := s.RecordUserPrompt("second prompt", nil); err != nil {
+		t.Fatalf("RecordUserPrompt after Recover: %v", err)
+	}
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn after Recover: %v", err)
+	}
+	if s.Counters.Turns != 1 {
+		t.Fatalf("turns after recovered BeginTurn = %d, want 1 (counter was reset)", s.Counters.Turns)
+	}
+}
+
+// TestRecoverIllegalFromNonFailedStates pins the NO-WIDENING invariant: Recover
+// is failed-only — notably it stays illegal from completed (Reopen's seam) and
+// cancelled (Interrupt's seam), so the three recovery methods never overlap.
+func TestRecoverIllegalFromNonFailedStates(t *testing.T) {
+	for _, mk := range []struct {
+		name  string
+		setup func(*Session)
+	}{
+		{"idle", func(*Session) {}},
+		{"running", func(s *Session) { _ = s.BeginTurn() }},
+		{"awaiting", func(s *Session) { _ = s.BeginTurn(); _ = s.PauseForApproval(PendingAsk{}) }},
+		{"completed", func(s *Session) { _ = s.BeginTurn(); _ = s.Complete() }},
+		{"cancelled", func(s *Session) { _ = s.Cancel() }},
+	} {
+		t.Run(mk.name, func(t *testing.T) {
+			s := newTestSession(Limits{})
+			mk.setup(s)
+			if err := s.Recover(); !errors.Is(err, ErrIllegalTransition) {
+				t.Fatalf("Recover from %s: err = %v, want ErrIllegalTransition", mk.name, err)
+			}
+		})
+	}
+}
+
+func TestRecoverClosesOutOrphanedToolCalls(t *testing.T) {
+	s := newTestSession(Limits{})
+	if err := s.RecordUserPrompt("do two things", nil); err != nil {
+		t.Fatalf("RecordUserPrompt: %v", err)
+	}
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	calls := []ToolCall{
+		NewToolCall("call-a", "read_file", nil),
+		NewToolCall("call-b", "list_dir", nil),
+	}
+	if err := s.RecordAssistant(NewAssistantMessage("", "", calls)); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+	if err := s.Fail(); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	before := len(s.Conversation.Messages)
+
+	if err := s.Recover(); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	added := s.Conversation.Messages[before:]
+	if len(added) != 2 {
+		t.Fatalf("appended %d tool results, want 2", len(added))
+	}
+	wantIDs := []ToolCallID{"call-a", "call-b"}
+	for i, m := range added {
+		if m.Role != RoleTool {
+			t.Fatalf("appended[%d] role = %q, want tool", i, m.Role)
+		}
+		if m.ToolResult == nil {
+			t.Fatalf("appended[%d] has nil ToolResult", i)
+		}
+		if m.ToolResult.CallID != wantIDs[i] {
+			t.Fatalf("appended[%d] CallID = %q, want %q (in order)", i, m.ToolResult.CallID, wantIDs[i])
+		}
+		if !m.ToolResult.IsError {
+			t.Fatalf("appended[%d] IsError = false, want true (abort sentinel)", i)
+		}
+		// The synthetic text is durable MODEL-FACING replayed history: the
+		// FAILURE seam must attribute the abort to the run failure — never to a
+		// user cancellation that did not happen (the childAutoDenyMessage
+		// accuracy discipline).
+		if m.ToolResult.Content != recoverCloseOutMessage {
+			t.Fatalf("appended[%d] content = %q, want %q (failure-accurate wording)", i, m.ToolResult.Content, recoverCloseOutMessage)
+		}
+		if m.ToolResult.Content == interruptCloseOutMessage {
+			t.Fatalf("appended[%d] uses the cancellation wording on the failure path (false user-action attribution)", i)
+		}
+	}
+	// The repaired history is provider-replayable: no dangling tool calls.
+	if err := ValidateToolPairing(s.Conversation.Messages); err != nil {
+		t.Fatalf("recovered history fails tool pairing: %v", err)
+	}
+}
+
+func TestRecoverPartialToolResultsCloseOutRemainder(t *testing.T) {
+	s := newTestSession(Limits{})
+	if err := s.RecordUserPrompt("do two things", nil); err != nil {
+		t.Fatalf("RecordUserPrompt: %v", err)
+	}
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	calls := []ToolCall{
+		NewToolCall("call-a", "read_file", nil),
+		NewToolCall("call-b", "list_dir", nil),
+	}
+	if err := s.RecordAssistant(NewAssistantMessage("", "", calls)); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+	// call-a already answered before the failure.
+	if err := s.RecordToolResults([]ToolResult{NewToolResult("call-a", "ok")}); err != nil {
+		t.Fatalf("RecordToolResults: %v", err)
+	}
+	if err := s.Fail(); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	before := len(s.Conversation.Messages)
+
+	if err := s.Recover(); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	added := s.Conversation.Messages[before:]
+	if len(added) != 1 {
+		t.Fatalf("appended %d tool results, want 1 (only the missing call-b)", len(added))
+	}
+	if added[0].ToolResult == nil || added[0].ToolResult.CallID != "call-b" {
+		t.Fatalf("appended result = %+v, want a synthetic result for call-b", added[0].ToolResult)
+	}
+	if !added[0].ToolResult.IsError {
+		t.Fatalf("appended call-b IsError = false, want true")
+	}
+	if err := ValidateToolPairing(s.Conversation.Messages); err != nil {
+		t.Fatalf("recovered history fails tool pairing: %v", err)
+	}
+}
+
+func TestRecoverNoOpWhenHistoryClean(t *testing.T) {
+	t.Run("assistant with no tool calls", func(t *testing.T) {
+		s := newTestSession(Limits{})
+		if err := s.RecordUserPrompt("just answer", nil); err != nil {
+			t.Fatalf("RecordUserPrompt: %v", err)
+		}
+		if err := s.BeginTurn(); err != nil {
+			t.Fatalf("BeginTurn: %v", err)
+		}
+		if err := s.RecordAssistant(NewAssistantMessage("the answer", "", nil)); err != nil {
+			t.Fatalf("RecordAssistant: %v", err)
+		}
+		if err := s.Fail(); err != nil {
+			t.Fatalf("Fail: %v", err)
+		}
+		before := len(s.Conversation.Messages)
+		if err := s.Recover(); err != nil {
+			t.Fatalf("Recover: %v", err)
+		}
+		if len(s.Conversation.Messages) != before {
+			t.Fatalf("Recover appended to clean history: len=%d, want %d", len(s.Conversation.Messages), before)
+		}
+	})
+
+	t.Run("fully answered turn (failure after results)", func(t *testing.T) {
+		// Failure after a fully-answered turn: every trailing tool call already
+		// has its result, so the repair is a no-op and the history stays valid.
+		s := newTestSession(Limits{})
+		if err := s.RecordUserPrompt("one thing", nil); err != nil {
+			t.Fatalf("RecordUserPrompt: %v", err)
+		}
+		if err := s.BeginTurn(); err != nil {
+			t.Fatalf("BeginTurn: %v", err)
+		}
+		if err := s.RecordAssistant(NewAssistantMessage("", "", []ToolCall{NewToolCall("call-a", "read_file", nil)})); err != nil {
+			t.Fatalf("RecordAssistant: %v", err)
+		}
+		if err := s.RecordToolResults([]ToolResult{NewToolResult("call-a", "ok")}); err != nil {
+			t.Fatalf("RecordToolResults: %v", err)
+		}
+		if err := s.Fail(); err != nil {
+			t.Fatalf("Fail: %v", err)
+		}
+		before := len(s.Conversation.Messages)
+		if err := s.Recover(); err != nil {
+			t.Fatalf("Recover: %v", err)
+		}
+		if len(s.Conversation.Messages) != before {
+			t.Fatalf("Recover appended to fully-answered history: len=%d, want %d", len(s.Conversation.Messages), before)
+		}
+		if err := ValidateToolPairing(s.Conversation.Messages); err != nil {
+			t.Fatalf("clean recovered history fails tool pairing: %v", err)
+		}
+	})
+
+	t.Run("trailing user prompt (failure before first token)", func(t *testing.T) {
+		s := newTestSession(Limits{})
+		if err := s.RecordUserPrompt("a prompt", nil); err != nil {
+			t.Fatalf("RecordUserPrompt: %v", err)
+		}
+		if err := s.BeginTurn(); err != nil {
+			t.Fatalf("BeginTurn: %v", err)
+		}
+		// Fail before any assistant message is recorded (a pre-first-chunk failure).
+		if err := s.Fail(); err != nil {
+			t.Fatalf("Fail: %v", err)
+		}
+		before := len(s.Conversation.Messages)
+		if err := s.Recover(); err != nil {
+			t.Fatalf("Recover: %v", err)
+		}
+		if len(s.Conversation.Messages) != before {
+			t.Fatalf("Recover appended to dangling-user history: len=%d, want %d", len(s.Conversation.Messages), before)
+		}
+	})
 }
