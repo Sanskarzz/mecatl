@@ -75,8 +75,8 @@ const defaultCompactionTargetRatio = 0.6
 // in package session, so the composition layer supplies these non-zero defaults
 // to ensure a session created without explicit limits is still bounded.
 const (
-	defaultMaxTurns               = 50
-	defaultMaxToolCalls           = 200
+	defaultMaxTurns               = 100
+	defaultMaxToolCalls           = 400
 	defaultMaxConsecutiveFailures = 5
 )
 

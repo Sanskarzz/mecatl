@@ -53,9 +53,9 @@ func TestSubagentPerCallMaxToolCallsTightens(t *testing.T) {
 // TestSubagentPerCallTightenOnlyCannotLoosen proves the TIGHTEN-ONLY guarantee: a per-call
 // max_turns HIGHER than the inherited (default) limit is ignored — the model cannot use
 // a per-call arg to escape the operator's bound. The child still stops at the inherited
-// default MaxTurns (12), not the requested 100.
+// default MaxTurns (50), not the requested 100.
 func TestSubagentPerCallTightenOnlyCannotLoosen(t *testing.T) {
-	boundedEngine, boundedLLM := readLoopChild(t, 50)
+	boundedEngine, boundedLLM := readLoopChild(t, 60)
 	task := agent.NewSubagentTool(boundedEngine)
 
 	subagentParentResults(t, task,

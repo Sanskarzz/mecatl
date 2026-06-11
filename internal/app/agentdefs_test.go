@@ -275,14 +275,14 @@ func TestBuildAgentSubagentEnginesEmptyRegistry(t *testing.T) {
 // TestDefLimitsPerFieldFallback proves defLimits maps a def's maxTurns/maxToolCalls
 // into session.Limits, with each ZERO def field inheriting the fallback's field.
 func TestDefLimitsPerFieldFallback(t *testing.T) {
-	fallback := session.Limits{MaxTurns: 12, MaxToolCalls: 40, MaxConsecutiveFailures: 3}
+	fallback := session.Limits{MaxTurns: 50, MaxToolCalls: 200, MaxConsecutiveFailures: 3}
 
 	// No def limits => the fallback unchanged.
 	if got := defLimits(agents.AgentDef{}, fallback); got != fallback {
 		t.Fatalf("no def limits = %+v, want the fallback %+v", got, fallback)
 	}
 	// Only maxTurns set => MaxTurns overridden, the rest inherited.
-	if got := defLimits(agents.AgentDef{MaxTurns: 2}, fallback); got != (session.Limits{MaxTurns: 2, MaxToolCalls: 40, MaxConsecutiveFailures: 3}) {
+	if got := defLimits(agents.AgentDef{MaxTurns: 2}, fallback); got != (session.Limits{MaxTurns: 2, MaxToolCalls: 200, MaxConsecutiveFailures: 3}) {
 		t.Fatalf("maxTurns-only = %+v, want MaxTurns=2 with the rest inherited", got)
 	}
 	// Both set => both overridden, MaxConsecutiveFailures still inherited.
