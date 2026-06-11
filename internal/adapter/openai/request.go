@@ -184,7 +184,7 @@ func dataURL(mime string, data []byte) string {
 // assistant produced visible text. This ordering matches the brief's multi-turn
 // rule: prior reasoning -> function_call(s).
 //
-// The opaque PHASE marker (m.Phase, "commentary"/"final_answer") rides ONLY the
+// The opaque PHASE marker (m.ProviderPhase, "commentary"/"final_answer") rides ONLY the
 // emitted message item — phase is a message-item property, and a tool-call-only
 // turn has no message item, so phase is correctly N/A there (not a dropped
 // field). For store:false manual-replay apps OpenAI requires preserving and
@@ -209,8 +209,8 @@ func assistantItems(m session.Message) []responses.ResponseInputItemUnionParam {
 	if m.Text != "" {
 		item := responses.ResponseInputItemParamOfMessage(
 			m.Text, responses.EasyInputMessageRoleAssistant)
-		if m.Phase != "" {
-			item.OfMessage.Phase = responses.EasyInputMessagePhase(m.Phase)
+		if m.ProviderPhase != "" {
+			item.OfMessage.Phase = responses.EasyInputMessagePhase(m.ProviderPhase)
 		}
 		out = append(out, item)
 	}

@@ -173,7 +173,7 @@ func TestPhaseCapturedAndReplayed(t *testing.T) {
 			session.NewUserMessage("hi"),
 			func() session.Message {
 				m := session.NewAssistantMessage("Done.", "", nil)
-				m.Phase = "final_answer"
+				m.ProviderPhase = "final_answer"
 				return m
 			}(),
 		},
@@ -227,7 +227,7 @@ func TestPhaseUnknownValueReplaysVerbatim(t *testing.T) {
 			session.NewUserMessage("hi"),
 			func() session.Message {
 				m := session.NewAssistantMessage("Done.", "", nil)
-				m.Phase = novel
+				m.ProviderPhase = novel
 				return m
 			}(),
 		},
@@ -256,7 +256,7 @@ func TestPhaseDroppedOnTextlessAssistantTurn(t *testing.T) {
 	m := session.NewAssistantMessage("", "", []session.ToolCall{
 		session.NewToolCall("call_1", "read_file", json.RawMessage(`{"path":"main.go"}`)),
 	})
-	m.Phase = "final_answer" // set, but there is no message item to carry it
+	m.ProviderPhase = "final_answer" // set, but there is no message item to carry it
 	req := port.LLMRequest{
 		Model:    "gpt-5.5",
 		Messages: []session.Message{session.NewUserMessage("open main.go"), m},

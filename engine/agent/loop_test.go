@@ -440,7 +440,7 @@ func TestReasoningAndTurnEnd(t *testing.T) {
 
 // TestPhaseThreadedOntoAssistantMessage proves the loop THREADS the opaque
 // OpenAI Responses phase marker (a ChunkPhase) onto the recorded assistant
-// Message.Phase WITHOUT interpreting it — the neutral-seam analogue of the
+// Message.ProviderPhase WITHOUT interpreting it — the neutral-seam analogue of the
 // reasoning-replay-blob test. It deliberately scripts an UNKNOWN, non-enum value
 // ("some_future_phase_v2", not "commentary"/"final_answer") to lock the
 // forward-compat opaque-pass-through guarantee of issue #46: the harness never
@@ -473,8 +473,8 @@ func TestPhaseThreadedOntoAssistantMessage(t *testing.T) {
 	if asst == nil {
 		t.Fatalf("no assistant message recorded")
 	}
-	if asst.Phase != phase {
-		t.Fatalf("Message.Phase = %q, want the verbatim threaded phase %q", asst.Phase, phase)
+	if asst.ProviderPhase != phase {
+		t.Fatalf("Message.ProviderPhase = %q, want the verbatim threaded phase %q", asst.ProviderPhase, phase)
 	}
 	// The visible text and reasoning are untouched by the phase threading.
 	if asst.Text != "here is the answer" {

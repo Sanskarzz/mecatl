@@ -51,10 +51,11 @@ type messageDTO struct {
 	ToolCalls  []session.ToolCall  `json:"tool_calls,omitempty"`
 	ToolResult *session.ToolResult `json:"tool_result,omitempty"`
 	Reasoning  string              `json:"reasoning,omitempty"`
-	// Phase carries the OpenAI Responses opaque phase marker on an assistant
+	// ProviderPhase carries the OpenAI Responses opaque phase marker on an assistant
 	// message. omitempty keeps a v1 snapshot with no "phase" key decoding to the
-	// empty string ("no phase") — purely additive, no version bump.
-	Phase string `json:"phase,omitempty"`
+	// empty string ("no phase") — purely additive, no version bump. The json tag
+	// stays "phase" so the persisted wire format is unchanged across the rename.
+	ProviderPhase string `json:"phase,omitempty"`
 	// Parts carries non-text media on a user message. It is omitempty so a v1
 	// snapshot with no "parts" key decodes to nil Parts — a text-only message,
 	// exactly correct; the field is purely additive and needs no version bump.
@@ -195,25 +196,25 @@ func Unmarshal(line []byte) (*session.Session, error) {
 
 func toDTO(m session.Message) messageDTO {
 	return messageDTO{
-		Role:       m.Role,
-		Text:       m.Text,
-		ToolCalls:  m.ToolCalls,
-		ToolResult: m.ToolResult,
-		Reasoning:  m.Reasoning,
-		Phase:      m.Phase,
-		Parts:      contentToDTO(m.Parts),
+		Role:          m.Role,
+		Text:          m.Text,
+		ToolCalls:     m.ToolCalls,
+		ToolResult:    m.ToolResult,
+		Reasoning:     m.Reasoning,
+		ProviderPhase: m.ProviderPhase,
+		Parts:         contentToDTO(m.Parts),
 	}
 }
 
 func fromDTO(dto messageDTO) session.Message {
 	return session.Message{
-		Role:       dto.Role,
-		Text:       dto.Text,
-		ToolCalls:  dto.ToolCalls,
-		ToolResult: dto.ToolResult,
-		Reasoning:  dto.Reasoning,
-		Phase:      dto.Phase,
-		Parts:      contentFromDTO(dto.Parts),
+		Role:          dto.Role,
+		Text:          dto.Text,
+		ToolCalls:     dto.ToolCalls,
+		ToolResult:    dto.ToolResult,
+		Reasoning:     dto.Reasoning,
+		ProviderPhase: dto.ProviderPhase,
+		Parts:         contentFromDTO(dto.Parts),
 	}
 }
 

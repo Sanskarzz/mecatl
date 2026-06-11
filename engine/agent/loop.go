@@ -1128,8 +1128,8 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 	// summary, which only drives display-only reasoning.delta events.
 	var text, reasoningBlob string
 	// phase is the OpenAI Responses opaque phase marker (commentary/final_answer),
-	// stored verbatim on Message.Phase and replayed next turn; like the reasoning
-	// blob it is never displayed or interpreted, so it carries no user-perceived
+	// stored verbatim on Message.ProviderPhase and replayed next turn; like the
+	// reasoning blob it is never displayed or interpreted, so it carries no user-perceived
 	// token (no noteContent()).
 	var phase string
 	var calls []session.ToolCall
@@ -1162,7 +1162,7 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 			reasoningBlob += chunk.Text
 		case port.ChunkPhase:
 			// The opaque phase marker (commentary/final_answer). Stored on
-			// Message.Phase and replayed verbatim next turn. Last-wins (like the
+			// Message.ProviderPhase and replayed verbatim next turn. Last-wins (like the
 			// reasoning blob); never displayed or interpreted.
 			phase = chunk.Text
 		case port.ChunkToolCall:
@@ -1193,7 +1193,7 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 	}
 
 	msg := session.NewAssistantMessage(text, reasoningBlob, calls)
-	msg.Phase = phase
+	msg.ProviderPhase = phase
 	return msg, usage, stop, timing, nil
 }
 

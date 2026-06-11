@@ -234,7 +234,7 @@ func TestSnapshotRoundTripsPhase(t *testing.T) {
 		t.Fatalf("BeginTurn: %v", err)
 	}
 	m := session.NewAssistantMessage("Done.", "", nil)
-	m.Phase = novel
+	m.ProviderPhase = novel
 	if err := s.RecordAssistant(m); err != nil {
 		t.Fatalf("RecordAssistant: %v", err)
 	}
@@ -251,8 +251,8 @@ func TestSnapshotRoundTripsPhase(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 	gm := got.Conversation.Messages[0]
-	if gm.Phase != novel {
-		t.Fatalf("restored Phase = %q, want the verbatim novel value %q", gm.Phase, novel)
+	if gm.ProviderPhase != novel {
+		t.Fatalf("restored ProviderPhase = %q, want the verbatim novel value %q", gm.ProviderPhase, novel)
 	}
 
 	// An empty-phase assistant message must wire-omit the key (additive, no bump).

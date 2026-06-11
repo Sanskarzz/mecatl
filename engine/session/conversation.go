@@ -40,16 +40,18 @@ type Message struct {
 	// it). It is distinct from the human-readable reasoning SUMMARY surfaced via
 	// reasoning.delta events for display: that prose is never stored here.
 	Reasoning string
-	// Phase is the OpenAI Responses API's opaque phase marker on an assistant
-	// message ("commentary" for intermediate output, "final_answer" for the final
-	// answer), replayed back verbatim on subsequent calls and never interpreted or
-	// displayed by the harness. For store:false manual-replay apps OpenAI requires
-	// preserving and resending it, or GPT-5.x models treat preambles as final
-	// answers / stop early. The STRUCTURE is provider-neutral (one opaque phase
-	// string per message); the CONTENTS are provider-private (the harness never
-	// branches on or validates the value — do NOT widen it). Empty string means
-	// "no phase". Same discipline as Reasoning.
-	Phase string
+	// ProviderPhase is the OpenAI Responses API's opaque phase marker on an
+	// assistant message ("commentary" for intermediate output, "final_answer" for
+	// the final answer), replayed back verbatim on subsequent calls and never
+	// interpreted or displayed by the harness. For store:false manual-replay apps
+	// OpenAI requires preserving and resending it, or GPT-5.x models treat preambles
+	// as final answers / stop early. The STRUCTURE is provider-neutral (one opaque
+	// phase string per message); the CONTENTS are provider-private (the harness
+	// never branches on or validates the value — do NOT widen it). Empty string
+	// means "no phase". Same discipline as Reasoning. (Named ProviderPhase, not
+	// Phase, to disambiguate from the governance/hook-lifecycle Phase concept, which
+	// is interpreted — the opposite contract.)
+	ProviderPhase string
 	// Parts carries non-text media (image/audio) on a USER message; it is nil for
 	// assistant/tool/system messages. Text remains the flattened text body
 	// (embedded-text resources collapse into it); Parts carries only the binary or

@@ -72,7 +72,7 @@ const (
 	// message as intermediate commentary or the final answer; for store:false
 	// manual-replay apps the phase must be preserved and resent on the assistant
 	// message item, or GPT-5.x models treat preambles as final answers / stop
-	// early. The loop stores it on Message.Phase and the adapter sends it back
+	// early. The loop stores it on Message.ProviderPhase and the adapter sends it back
 	// verbatim on subsequent stateless calls. Like ChunkReasoningItem it is never
 	// displayed or interpreted — the STRUCTURE is neutral (one opaque phase string
 	// per message), the CONTENTS are provider-private (the harness never branches
