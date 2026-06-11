@@ -816,13 +816,57 @@ emits behind a dead client.
   > goroutine-derived names/timing). See `docs/design/perf-observability.md` (the
   > decided direction) and `docs/perf-measurement-survey.md` (the Go-perf
   > technique reference).
-- **SessionStore** — `memstore` (default, in-memory) and `jsonlstore`
+- **SessionStore** — `memstore` (default, in-memory), `jsonlstore`
   (append-only JSONL replay log: `<dir>/<id>.session.jsonl` snapshots +
-  `<dir>/<id>.tools.jsonl` tool records; `jsonlstore` also implements `Logger`).
-  Both serialize via **`sessnap`** (`engine/adapter/sessnap`): a `Snapshot` DTO
+  `<dir>/<id>.tools.jsonl` tool records; `jsonlstore` also implements `Logger`),
+  and `grpcdriver.SessionStore` (a **remote store driver** — see below).
+  All serialize via **`sessnap`** (`engine/adapter/sessnap`): a `Snapshot` DTO
   that round-trips a `Session` by driving the public state machine on restore
   (so a session saved mid-`awaiting` reloads with its pending ask intact). It
   captures the terminal reason via `RecordedStopReason()` for exact round-trips.
+
+### Remote store drivers (`internal/adapter/grpcdriver`)
+
+The session and memory stores have a **wire seam**: an operator can point
+either at a remote, operator-run **driver process** speaking the
+`mecatl.driver.v1` protocol (`contracts/proto/mecatl/driver/v1/` —
+`SessionStoreService` for `port.SessionStore`, `MemoryStoreService` for
+`tool.MemoryStore`). Selection is composition-only (`app.Build`):
+`--session-store-url` replaces `--store-dir` (mutually exclusive, fatal at
+build), `--memory-store-url` replaces `--memory-dir`; all-empty keeps the
+local stores byte-identical. Equal URLs share ONE lazy `ClientConn` (the
+build-scoped `driverConns` cache); the user-model store stays local (a Phase B
+deferral).
+
+**sessnap IS the wire format** for sessions: the snapshot crosses as an
+opaque, format-tagged envelope (`format: "sessnap-json/1"`, payload =
+`sessnap.Marshal` output). The driver stores/returns it VERBATIM and never
+decodes; the harness rejects an unknown format on Load with an infrastructure
+error (never not-found), and a decoded session whose id is not the requested
+one (a mis-keyed driver) the same way. Snapshot schema evolution stays
+additive in sessnap; the envelope's tag changes only if the encoding itself
+is replaced (a future bump must be read-set-accept / write-newest, or stored
+sessions brick). **Capacity:** a conforming driver MUST accept payloads up to
+`grpcdriver.MaxSnapshotBytes` (64 MiB — media-carrying snapshots far exceed
+gRPC's 4 MiB default); the harness client's send/receive limits are raised to
+the same value by `Dial`. Error mapping mirrors the local stores: driver
+`NOT_FOUND` → `errors.Is(err, port.ErrSessionNotFound)`; a Recall miss is
+`found=false`, never an error; deadline passthrough only — no retries, no
+default deadline (resilience, if ever needed, is a decorator, the
+`llmresilience` precedent).
+
+**Conformance is the contract.** Every store implementation passes a shared
+behavioral suite, and the gRPC clients pass the SAME suite over a bufconn
+wire (client → server wrapper → reference backend), so a remote driver cannot
+drift from the in-process semantics:
+
+| Suite | Backend | Run site |
+|---|---|---|
+| `storeconformance` | `memstore` | `engine/adapter/memstore/conformance_test.go` |
+| `storeconformance` | `jsonlstore` | `internal/adapter/store/jsonlstore/conformance_test.go` |
+| `storeconformance` | grpcdriver → bufconn → `NewSessionStoreServer(memstore)` | `internal/adapter/grpcdriver/conformance_test.go` |
+| `memconformance` | flock `memory.Store` | `internal/adapter/memory/conformance_test.go` |
+| `memconformance` | grpcdriver → bufconn → `NewMemoryStoreServer(memory.Store)` | `internal/adapter/grpcdriver/conformance_test.go` |
 
 ## 12. Reliability — provider resilience
 

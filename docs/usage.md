@@ -158,6 +158,12 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--anthropic-base-url` | `""` | override the native Anthropic API base URL (compatible/proxy endpoints; key from `ANTHROPIC_API_KEY`) |
 | `--mock` | `false` | use a canned offline mock provider (no network; smoke tests only) |
 | `--store-dir` | `""` | directory for the JSONL session store (empty → in-memory) |
+| `--session-store-url` | `""` | `host:port` of a remote **session-store gRPC driver** (`mecatl.driver.v1.SessionStoreService`); replaces the local store — mutually exclusive with `--store-dir`. **See the store-driver note below.** |
+| `--memory-store-url` | `""` | `host:port` of a remote **memory-store gRPC driver** (`mecatl.driver.v1.MemoryStoreService`); replaces the local flock store — mutually exclusive with `--memory-dir`, enables the memory tools like `--memory-dir` does. |
+| `--driver-auth-token` | `""` | bearer token sent on every store-driver RPC (or `MECATL_DRIVER_AUTH_TOKEN`; empty disables driver auth). Refused over cleartext to a non-loopback driver — pair with `--driver-tls`. |
+| `--driver-tls` | `false` | enable transport TLS on the store-driver connections. |
+| `--driver-tls-ca` | `""` | PEM CA bundle to verify the store driver's certificate (with `--driver-tls`; empty uses system roots). |
+| `--driver-tls-cert` / `--driver-tls-key` | `""` | PEM client certificate/key pair for **mutual TLS** to the store driver. |
 | `--skills-dir` | `""` | directory to discover progressive-disclosure skills from, laid out as `<name>/SKILL.md`. **Repeatable** (highest precedence, in the order given); empty disables the `Skill` tool unless `--skills-conventional` is set. **See the skills trust note below.** |
 | `--skills-conventional` | `false` | also discover skills from the conventional known paths: `<workspace>/.mecatl/skills`, `<workspace>/.claude/skills`, `$XDG_CONFIG_HOME/mecatl/skills` (or `~/.config/mecatl/skills`), and `~/.claude/skills` — lower precedence than `--skills-dir`. **OFF by default** (strict opt-in); only enable for trusted locations. **See the skills trust note below.** |
 | `--skills-draft-dir` | `""` | enable the writable `SkillDraft` tool and set the **quarantine** directory for model-authored candidate skills. Empty disables the tool. Must be **outside the workspace root** (so the model's `Write`/`Edit` cannot reach it) and **disjoint** from every `--skills-dir` / conventional location — both fatal startup errors. **See the self-improving-skill loop note below.** |
@@ -1287,6 +1293,34 @@ The JSONL store writes two files per session under `--store-dir`:
 <dir>/<id>.session.jsonl   # one snapshot per Save (latest line wins)
 <dir>/<id>.tools.jsonl     # one record per tool call (call, result, duration)
 ```
+
+### Remote store drivers
+
+A third option points the session store (and/or the memory store) at a
+**remote driver process** speaking the `mecatl.driver.v1` gRPC protocol:
+
+```sh
+mecated --session-store-url 127.0.0.1:7443 --memory-store-url 127.0.0.1:7443
+```
+
+`--session-store-url` is mutually exclusive with `--store-dir` (and
+`--memory-store-url` with `--memory-dir`) — a fatal startup error, never a
+silent precedence. Equal URLs share one connection. The driver only ever sees
+**opaque snapshots** (the `sessnap` encoding under a `"sessnap-json/1"` format
+tag); it sits at the same trust tier as the on-disk store directory. A
+conforming driver must accept snapshot payloads up to **64 MiB** (mount the
+gRPC server with a matching receive limit; the harness client is already
+configured for it).
+
+Auth posture mirrors the mecated API itself: **loopback may ride plaintext**
+(the single-user default); a non-loopback driver with `--driver-auth-token`
+**requires `--driver-tls`** — the client refuses to send the token in
+cleartext, pre-dial. `--driver-tls-ca` pins a custom CA;
+`--driver-tls-cert`/`--driver-tls-key` add a client certificate for mTLS.
+Setting any `--driver-tls-*` file **without** `--driver-tls` is a fatal
+startup error (it would otherwise be silently ignored). There are **no
+retries and no default deadline** on driver RPCs — a driver failure surfaces
+as the same unit failure a disk error would.
 
 ### Permission modes
 

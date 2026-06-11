@@ -1455,6 +1455,76 @@ available (gates the client picker like `agents` gates `/agents`). Additive + ol
 old client sends no selector ⇒ server default; reads an old server's
 `model_selection=false`/`Unimplemented` ListModels ⇒ hides the picker).
 
+## Store drivers — `contracts/proto/mecatl/driver/v1/` + `internal/adapter/grpcdriver/` + `engine/adapter/storeconformance/` (Phase B)
+
+The remote-store seam: `SessionStoreService` (behind `port.SessionStore`) and
+`MemoryStoreService` (behind `tool.MemoryStore`), selected ONLY in composition
+(`--session-store-url` ⟂ `--store-dir`, `--memory-store-url` ⟂ `--memory-dir`;
+`validateDriverConfig` is fatal on both-set AND on a `--driver-tls-*` file without
+`--driver-tls` — silently-ignored config is a misconfig; all-empty is byte-identical to the
+local stores). A `--memory-store-url` that fails to DIAL is FATAL too (explicit config =
+loud-misconfig posture; only the default-on local `memory.New` stays fail-soft).
+The settled decisions, condensed:
+
+- **A — Wire encoding: opaque sessnap blob in a format-tagged envelope.** `bytes payload` +
+  `string format` (`grpcdriver.SnapshotFormat = "sessnap-json/1"`); the payload is exactly
+  `sessnap.Marshal` output and the driver NEVER decodes it (stores/returns verbatim;
+  `session_id` is duplicated top-level on Save so a driver keys without decoding). sessnap owns
+  schema evolution (additive JSON); the envelope owns format identification — the harness
+  rejects an unknown format on Load with an INFRA error, never `ErrSessionNotFound`. Decode is
+  harness-side (`sessnap.Unmarshal` → state-machine restore); tool-pairing is NOT revalidated on
+  Restore (identical to memstore/jsonlstore — don't add `ValidateToolPairing` to this path). The
+  driver sits at the SAME trust tier as the JSONL file on disk. KEYING: the top-level
+  `session_id` is the AUTHORITATIVE storage key — the server wrapper rejects a Save whose
+  payload carries a different id (`INVALID_ARGUMENT`), and the client's Load rejects a decoded
+  session whose id is not the requested one (infra error, never not-found). CAPACITY:
+  `grpcdriver.MaxSnapshotBytes` (64 MiB) is the protocol's required minimum message capacity —
+  `Dial` raises the client send/recv call options to it and a conforming driver mounts
+  `grpc.MaxRecvMsgSize(MaxSnapshotBytes)` (pinned by the storeconformance "large snapshot"
+  subtest, which FAILS over default 4 MiB gRPC limits). FORMAT BUMP signpost (on
+  `SnapshotFormat`): read-set-accept / write-newest, or the bump bricks stored sessions.
+- **B — Server wrappers live in the adapter.** `NewSessionStoreServer(port.SessionStore)` /
+  `NewMemoryStoreServer(tool.MemoryStore)` (embedding `Unimplemented*Server`) exist for the
+  bufconn conformance fixtures; the session wrapper runs sessnap SERVER-side, so the wire
+  conformance run exercises encode→wire→decode→state-machine→encode→wire→decode.
+- **C — Error mapping.** Load miss: `NOT_FOUND` → `grpcdriver.ErrNotFound` wrapping
+  `port.ErrSessionNotFound` (id in message). Save(nil): client-side `sessnap.ErrNilSession`,
+  zero RPCs. Recall miss: `found=false`, NEVER `NOT_FOUND`. Forget(missing): OK (idempotent).
+  Blank RememberEntry key: `INVALID_ARGUMENT` (server wrapper pre-validates; the in-process
+  store's own rejection stays conformance-tested). Failed RPC with a done caller ctx: rewrap
+  `ctx.Err()` so `errors.Is(_, context.Canceled/DeadlineExceeded)` holds harness-side.
+  Everything else: `"grpcdriver: <op>: %w"` — NO transient/permanent classification. Server
+  wrapper: `ErrSessionNotFound`→`NotFound`, ctx errors→`Canceled`/`DeadlineExceeded`, else
+  `Internal`.
+- **D — Lint/arch: minimal.** grpcdriver has NO depguard rule (mirrors
+  `internal/adapter/server`); the DAG test is unchanged (proto types never enter `engine/`).
+  Only the new ENGINE package `storeconformance` gets the strict treatment ($gostd +
+  `engine/port` + `engine/session`; deny `os`) plus the test-helper lint relaxation.
+- **E — Resilience: deadline passthrough only.** No retries, no default deadline, lazy
+  `grpc.NewClient` (fail-fast, no WaitForReady). If drivers ever need retries/breakers, the
+  answer is a `driverresilience` DECORATOR (the llmresilience precedent), not knobs here.
+- **Dial posture** mirrors `cmd/mecatui/client/client.go` (~60 lines DUPLICATED with a
+  cross-reference comment — an internal adapter cannot import `cmd/`): loopback plaintext
+  default, `RequireTransportSecurity()=!loopback`, pre-dial refusal of
+  token+cleartext+non-loopback, CA pinning; grpcdriver adds mTLS (client cert). Composition
+  knobs: `--driver-auth-token` (env `MECATL_DRIVER_AUTH_TOKEN`), `--driver-tls{,-ca,-cert,-key}`.
+  Equal URLs share ONE lazy ClientConn (`internal/app`'s build-scoped `driverConns` cache;
+  once-guarded close, so the session-store and memory-store teardown chains can both fold it).
+- **Conformance as contract.** `engine/adapter/storeconformance.Run(t, newStore)` is the shared
+  `port.SessionStore` suite (round trip via the public aggregate API incl. tool pairs /
+  reasoning / media parts, lifecycle fidelity incl. awaiting+PendingAsk and a non-default stop,
+  a ~5 MiB media-part snapshot — the size-contract probe, multi-session keying,
+  miss-wraps-sentinel, overwrite, nil-save, isolation in BOTH directions: post-Save mutation of
+  the original AND mutation of the loaded copy). Run matrix: memstore (the in-engine
+  validation — deliberately NO separate self-test fake), jsonlstore, and grpcdriver-over-bufconn;
+  `memconformance` (unchanged) additionally runs over the grpcdriver memory client.
+
+**Phase D (DRIVERS.md) needs:** the driver pattern statement; the format-versioning rule; the
+error table; the auth/trust posture; conformance-as-contract for third-party drivers; the
+server-wrapper PROMOTION question (exporting them beyond `internal/` is a public-API commitment
+made there, not implied by the current placement); a user-model driver flag (the user-model
+store stays LOCAL in Phase B — deliberate deferral); a workspace/FS driver sketch.
+
 ## TUI — `cmd/mecatui/` (see `docs/tui.md`)
 
 **Upstream textarea word-backward hang workaround** (`cmd/mecatui/ui/textarea_guard.go` + the two

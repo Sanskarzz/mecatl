@@ -6,7 +6,7 @@
 #                               go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 #   - goimports     (only for `task fmt`)
 #                               go install golang.org/x/tools/cmd/goimports@latest
-#   - buf           (only for `task generate`, once proto contracts land — WP10)
+#   - buf           (only for `task generate`)
 #                               https://buf.build/docs/installation
 #
 # golangci-lint is invoked with --allow-parallel-runners everywhere so several
@@ -153,19 +153,20 @@ tasks:
       - go mod tidy
 
   generate:
-    desc: Run buf code generation (no-op until proto contracts exist — WP10)
+    desc: Regenerate contracts/gen from contracts/proto via buf
     cmds:
-      # buf generation is gated on the proto contracts that WP10 will add.
-      # Until buf.gen.yaml and the contracts/proto tree exist this is a
-      # deliberate no-op so `task ci` works on the current checkout. The buf
+      # Regenerates the gRPC contracts — the harness API (contracts/proto/
+      # mecatl/v1) AND the store-driver protocol (contracts/proto/mecatl/
+      # driver/v1) — into contracts/gen (never hand-edit the output). The buf
       # invocation mirrors the downstream consumer's house setup (buf generate against the
-      # repo-root buf.gen.yaml writing into contracts/gen).
+      # repo-root buf.gen.yaml writing into contracts/gen); the existence
+      # guard keeps `task ci` working on a partial checkout.
       - cmd: |
           if [ -f buf.gen.yaml ] && [ -d contracts/proto ]; then
             command -v buf >/dev/null 2>&1 || { echo "buf not found; install: https://buf.build/docs/installation"; exit 1; }
             buf generate
           else
-            echo "skip generate: buf.gen.yaml and/or contracts/proto not present yet (WP10)"
+            echo "skip generate: buf.gen.yaml and/or contracts/proto not present"
           fi
         silent: true
 

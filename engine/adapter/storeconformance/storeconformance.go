@@ -1,0 +1,342 @@
+// Package storeconformance provides a shared conformance test suite for the
+// port.SessionStore interface. Adapters (the in-memory default, the JSONL
+// replay store, remote drivers, ...) call Run with a factory that constructs
+// a fresh store, and the suite exercises only the port.SessionStore
+// interface against sessions built through the session aggregate's public
+// API.
+//
+// Importing "testing" in a non-_test.go file is intentional here: this is a
+// test-helper package whose sole purpose is to be imported by adapter tests,
+// the conventional Go pattern for shared conformance suites (cf.
+// testing/fstest and the sibling fsconformance/memconformance packages).
+//
+// The suite pins the CONTRACT, not the implementation: snapshot encoding,
+// durability across reopen, and file layout are adapter-internal and
+// deliberately NOT asserted here. There is no separate self-test — the
+// memstore run site IS the in-engine validation (memstore is the reference
+// in-memory store; adding a second in-memory fake would only duplicate it).
+package storeconformance
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
+)
+
+// Run executes the shared SessionStore conformance table against the store
+// produced by newStore. newStore must return a fresh, isolated store each
+// call.
+func Run(t *testing.T, newStore func(t *testing.T) port.SessionStore) {
+	t.Helper()
+	ctx := context.Background()
+
+	t.Run("save-load round trip", func(t *testing.T) {
+		st := newStore(t)
+		want := representativeSession(t, "conf-roundtrip")
+		if err := st.Save(ctx, want); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		got, err := st.Load(ctx, want.ID)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		assertSessionEqual(t, got, want)
+	})
+
+	t.Run("lifecycle-state fidelity", func(t *testing.T) {
+		t.Run("idle", func(t *testing.T) {
+			st := newStore(t)
+			s := newSession("conf-idle")
+			saveLoad := roundTrip(t, st, s)
+			if saveLoad.State != session.StateIdle {
+				t.Errorf("State = %q want %q", saveLoad.State, session.StateIdle)
+			}
+		})
+		t.Run("completed with non-default stop", func(t *testing.T) {
+			st := newStore(t)
+			s := newSession("conf-completed")
+			mustOK(t, "BeginTurn", s.BeginTurn())
+			mustOK(t, "Stop", s.Stop(session.StopBudget))
+			got := roundTrip(t, st, s)
+			if got.State != session.StateCompleted {
+				t.Errorf("State = %q want %q", got.State, session.StateCompleted)
+			}
+			reason, ok := got.RecordedStopReason()
+			if !ok || reason != session.StopBudget {
+				t.Errorf("RecordedStopReason = (%q, %v) want (%q, true)", reason, ok, session.StopBudget)
+			}
+		})
+		t.Run("awaiting with pending ask", func(t *testing.T) {
+			st := newStore(t)
+			s := newSession("conf-awaiting")
+			mustOK(t, "BeginTurn", s.BeginTurn())
+			ask := session.PendingAsk{
+				AskID:  "ask-1",
+				Tool:   "Bash",
+				Args:   json.RawMessage(`{"command":"true"}`),
+				Reason: "mutating command",
+			}
+			mustOK(t, "PauseForApproval", s.PauseForApproval(ask))
+			got := roundTrip(t, st, s)
+			if got.State != session.StateAwaiting {
+				t.Fatalf("State = %q want %q", got.State, session.StateAwaiting)
+			}
+			gotAsk, ok := got.PendingAsk()
+			if !ok {
+				t.Fatal("PendingAsk() not present after Load")
+			}
+			if !reflect.DeepEqual(gotAsk, ask) {
+				t.Errorf("PendingAsk = %+v want %+v", gotAsk, ask)
+			}
+		})
+		t.Run("cancelled", func(t *testing.T) {
+			st := newStore(t)
+			s := newSession("conf-cancelled")
+			mustOK(t, "BeginTurn", s.BeginTurn())
+			mustOK(t, "Cancel", s.Cancel())
+			got := roundTrip(t, st, s)
+			if got.State != session.StateCancelled {
+				t.Errorf("State = %q want %q", got.State, session.StateCancelled)
+			}
+		})
+	})
+
+	t.Run("large snapshot (multi-megabyte media part)", func(t *testing.T) {
+		// The size-contract subtest: a realistic screenshot-sized inline media
+		// part (~5 MiB, well under session.MaxMediaBytes) must round-trip. A
+		// LOCAL store passes trivially; a WIRE-backed store fails here unless
+		// its transport accepts snapshot-sized messages (default gRPC limits
+		// cap at 4 MiB — see grpcdriver.MaxSnapshotBytes).
+		st := newStore(t)
+		s := newSession("conf-large")
+		data := make([]byte, 5<<20)
+		for i := range data {
+			data[i] = byte(i) // non-uniform so the payload is honest, not degenerate
+		}
+		img, err := session.NewImageContent("image/png", data)
+		if err != nil {
+			t.Fatalf("NewImageContent: %v", err)
+		}
+		mustOK(t, "RecordUserPromptWithParts", s.RecordUserPromptWithParts("big screenshot", []session.Content{img}, nil))
+		got := roundTrip(t, st, s)
+		msgs := got.Conversation.Messages
+		if len(msgs) != 1 || len(msgs[0].Parts) != 1 {
+			t.Fatalf("loaded %d messages (want 1, with 1 media part)", len(msgs))
+		}
+		if gotData := msgs[0].Parts[0].Data; !bytes.Equal(gotData, data) {
+			t.Errorf("loaded media part is %d bytes and/or differs from the saved part (%d bytes)", len(gotData), len(data))
+		}
+	})
+
+	t.Run("two sessions under distinct ids", func(t *testing.T) {
+		// Kills a single-slot driver: the store must key by session id, not
+		// hold "the most recent" session.
+		st := newStore(t)
+		a := newSession("conf-multi-a")
+		mustOK(t, "RecordUserPrompt(a)", a.RecordUserPrompt("message for a", nil))
+		b := newSession("conf-multi-b")
+		mustOK(t, "RecordUserPrompt(b)", b.RecordUserPrompt("message for b", nil))
+		if err := st.Save(ctx, a); err != nil {
+			t.Fatalf("Save(a): %v", err)
+		}
+		if err := st.Save(ctx, b); err != nil {
+			t.Fatalf("Save(b): %v", err)
+		}
+		gotA, err := st.Load(ctx, a.ID)
+		if err != nil {
+			t.Fatalf("Load(a): %v", err)
+		}
+		gotB, err := st.Load(ctx, b.ID)
+		if err != nil {
+			t.Fatalf("Load(b): %v", err)
+		}
+		if gotA.ID != a.ID || len(gotA.Conversation.Messages) != 1 || gotA.Conversation.Messages[0].Text != "message for a" {
+			t.Errorf("Load(a) returned id=%q messages=%+v, want a's own snapshot", gotA.ID, gotA.Conversation.Messages)
+		}
+		if gotB.ID != b.ID || len(gotB.Conversation.Messages) != 1 || gotB.Conversation.Messages[0].Text != "message for b" {
+			t.Errorf("Load(b) returned id=%q messages=%+v, want b's own snapshot", gotB.ID, gotB.Conversation.Messages)
+		}
+	})
+
+	t.Run("load miss wraps sentinel", func(t *testing.T) {
+		st := newStore(t)
+		const id = "conf-no-such-session"
+		_, err := st.Load(ctx, id)
+		if err == nil {
+			t.Fatal("Load(missing id) = nil error, want not-found")
+		}
+		if !errors.Is(err, port.ErrSessionNotFound) {
+			t.Errorf("Load(missing id) error = %v, want errors.Is(_, port.ErrSessionNotFound)", err)
+		}
+		if !strings.Contains(err.Error(), id) {
+			t.Errorf("Load(missing id) error %q does not name the id %q", err, id)
+		}
+	})
+
+	t.Run("overwrite", func(t *testing.T) {
+		st := newStore(t)
+		s := newSession("conf-overwrite")
+		if err := st.Save(ctx, s); err != nil {
+			t.Fatalf("Save #1: %v", err)
+		}
+		mustOK(t, "RecordUserPrompt", s.RecordUserPrompt("second save", nil))
+		if err := st.Save(ctx, s); err != nil {
+			t.Fatalf("Save #2: %v", err)
+		}
+		got, err := st.Load(ctx, s.ID)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		msgs := got.Conversation.Messages
+		if len(msgs) != 1 || msgs[0].Text != "second save" {
+			t.Errorf("Load after overwrite = %d messages %+v, want the single latest message", len(msgs), msgs)
+		}
+	})
+
+	t.Run("nil-session save errors", func(t *testing.T) {
+		st := newStore(t)
+		if err := st.Save(ctx, nil); err == nil {
+			t.Error("Save(nil) = nil error, want rejection")
+		}
+	})
+
+	t.Run("isolation", func(t *testing.T) {
+		st := newStore(t)
+		s := newSession("conf-isolation")
+		mustOK(t, "RecordUserPrompt", s.RecordUserPrompt("original", nil))
+		if err := st.Save(ctx, s); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		// Mutate the ORIGINAL after Save; the store must have captured the
+		// state AT Save time (marshal/copy on Save), not retained the caller's
+		// pointer.
+		mustOK(t, "RecordUserPrompt(original mutation)", s.RecordUserPrompt("mutation on the original", nil))
+		loaded, err := st.Load(ctx, s.ID)
+		if err != nil {
+			t.Fatalf("Load #1: %v", err)
+		}
+		if got := len(loaded.Conversation.Messages); got != 1 {
+			t.Errorf("Load saw %d messages, want 1 (the original's post-Save mutation must not reach the store)", got)
+		}
+		// Mutate the LOADED copy through the aggregate; the stored state must
+		// not alias it either.
+		mustOK(t, "RecordUserPrompt(loaded mutation)", loaded.RecordUserPrompt("mutation on the loaded copy", nil))
+		again, err := st.Load(ctx, s.ID)
+		if err != nil {
+			t.Fatalf("Load #2: %v", err)
+		}
+		if got := len(again.Conversation.Messages); got != 1 {
+			t.Errorf("re-Load saw %d messages, want 1 (the loaded copy's mutation must not reach the store)", got)
+		}
+	})
+}
+
+// newSession constructs an idle session with non-default limits, workspace,
+// mode and a fixed (whole-nanosecond, UTC) creation time so timestamp
+// round-trip equality is well-defined.
+func newSession(id session.SessionID) *session.Session {
+	return session.New(
+		id,
+		session.ModeAccept,
+		"/work/space",
+		session.Limits{MaxTurns: 7, MaxToolCalls: 21, MaxConsecutiveFailures: 3},
+		time.Date(2026, 6, 1, 12, 30, 45, 123456789, time.UTC),
+	)
+}
+
+// representativeSession builds a session exercising every history shape
+// through the PUBLIC aggregate API: a user prompt, a media-parts message, an
+// assistant message carrying a reasoning blob plus tool calls, and the paired
+// tool results. It is left running (mid-turn), so counters are non-zero.
+func representativeSession(t *testing.T, id session.SessionID) *session.Session {
+	t.Helper()
+	s := newSession(id)
+	mustOK(t, "RecordUserPrompt", s.RecordUserPrompt("please inspect the repo", []session.Message{
+		session.NewSystemMessage("project instructions: be concise"),
+	}))
+	img, err := session.NewImageContent("image/png", []byte{0x89, 0x50, 0x4e, 0x47})
+	if err != nil {
+		t.Fatalf("NewImageContent: %v", err)
+	}
+	mustOK(t, "RecordUserPromptWithParts", s.RecordUserPromptWithParts("and this screenshot", []session.Content{img}, nil))
+	mustOK(t, "BeginTurn", s.BeginTurn())
+	calls := []session.ToolCall{
+		// Keep Args COMPACT JSON: json.RawMessage round-trips verbatim only
+		// for already-compact payloads.
+		session.NewToolCall("call-1", "Read", json.RawMessage(`{"path":"a.txt"}`)),
+		session.NewToolCall("call-2", "Grep", json.RawMessage(`{"pattern":"TODO"}`)),
+	}
+	mustOK(t, "RecordAssistant", s.RecordAssistant(session.NewAssistantMessage(
+		"reading two files", "opaque-reasoning-replay-blob", calls)))
+	mustOK(t, "RecordToolResults", s.RecordToolResults([]session.ToolResult{
+		session.NewToolResult("call-1", "contents of a.txt"),
+		session.NewToolError("call-2", "grep failed: no matches"),
+	}))
+	return s
+}
+
+// roundTrip saves s and loads it back, failing the test on either error.
+func roundTrip(t *testing.T, st port.SessionStore, s *session.Session) *session.Session {
+	t.Helper()
+	ctx := context.Background()
+	if err := st.Save(ctx, s); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := st.Load(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return got
+}
+
+// assertSessionEqual compares the loaded session against the original
+// field-wise across everything the store contract must preserve.
+func assertSessionEqual(t *testing.T, got, want *session.Session) {
+	t.Helper()
+	if got.ID != want.ID {
+		t.Errorf("ID = %q want %q", got.ID, want.ID)
+	}
+	if got.State != want.State {
+		t.Errorf("State = %q want %q", got.State, want.State)
+	}
+	if got.Mode != want.Mode {
+		t.Errorf("Mode = %q want %q", got.Mode, want.Mode)
+	}
+	if got.Limits != want.Limits {
+		t.Errorf("Limits = %+v want %+v", got.Limits, want.Limits)
+	}
+	if got.Counters != want.Counters {
+		t.Errorf("Counters = %+v want %+v", got.Counters, want.Counters)
+	}
+	if got.Workspace != want.Workspace {
+		t.Errorf("Workspace = %q want %q", got.Workspace, want.Workspace)
+	}
+	if !got.CreatedAt.Equal(want.CreatedAt) {
+		t.Errorf("CreatedAt = %v want %v", got.CreatedAt, want.CreatedAt)
+	}
+	gotMsgs, wantMsgs := got.Conversation.Messages, want.Conversation.Messages
+	if len(gotMsgs) != len(wantMsgs) {
+		t.Fatalf("message count = %d want %d", len(gotMsgs), len(wantMsgs))
+	}
+	for i := range wantMsgs {
+		if !reflect.DeepEqual(gotMsgs[i], wantMsgs[i]) {
+			t.Errorf("message[%d] =\n%+v\nwant\n%+v", i, gotMsgs[i], wantMsgs[i])
+		}
+	}
+}
+
+// mustOK fails the test when a session-aggregate transition errors.
+func mustOK(t *testing.T, op string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s: %v", op, err)
+	}
+}

@@ -132,7 +132,10 @@ func TestPerSessionCatalogMatchesSharedCatalog(t *testing.T) {
 	// flocked stores, resolves the skills fixture, and runs the build-time
 	// assembly). Using buildCatalog — not a direct assembleCatalog call — is what
 	// keeps a future post-assembly registration in buildCatalog inside the guard.
-	sharedCat, assets, _, _, mcpClose := buildCatalog(ctx, cfg, reg, oa, hooks, agents.NewRegistry(nil), memstore.New())
+	sharedCat, assets, _, _, mcpClose, err := buildCatalog(ctx, cfg, reg, oa, hooks, agents.NewRegistry(nil), memstore.New())
+	if err != nil {
+		t.Fatalf("buildCatalog: %v", err)
+	}
 	defer mcpClose()
 	if assets.globalMgr == nil {
 		t.Fatal("buildCatalog connected no global MCP manager — fixture broken (the MCP families would be silently skipped)")

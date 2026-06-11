@@ -41,6 +41,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/dream"
 	"github.com/stacklok/mecatl/internal/adapter/forker"
 	"github.com/stacklok/mecatl/internal/adapter/gitenv"
+	"github.com/stacklok/mecatl/internal/adapter/grpcdriver"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	mcpsource "github.com/stacklok/mecatl/internal/adapter/mcp/source"
@@ -170,6 +171,26 @@ type Config struct {
 	// with MemoryDir set).
 	MemoryDir                 string
 	MemoryConsolidateInterval time.Duration
+
+	// Remote store drivers (Phase B): gRPC driver endpoints that replace the
+	// LOCAL session/memory stores with internal/adapter/grpcdriver clients.
+	// SessionStoreURL is mutually exclusive with StoreDir, MemoryStoreURL with
+	// MemoryDir (validateDriverConfig, fatal at the top of Build). All-empty
+	// keeps today's behaviour byte-identical. The Driver* auth/TLS fields apply
+	// to EVERY driver connection (equal URLs share one ClientConn via the
+	// build-scoped driverConns cache): DriverAuthToken is a bearer token
+	// (loopback may ride plaintext; a non-loopback target demands DriverTLS or
+	// the dial refuses), DriverTLS enables transport TLS with the optional
+	// DriverTLSCA bundle and DriverTLSCert/DriverTLSKey mTLS client pair. The
+	// user-model store stays LOCAL in Phase B (a deliberate deferral; see
+	// docs/design/IMPLEMENTATION-NOTES.md).
+	SessionStoreURL string
+	MemoryStoreURL  string
+	DriverAuthToken string
+	DriverTLS       bool
+	DriverTLSCA     string
+	DriverTLSCert   string
+	DriverTLSKey    string
 
 	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona fragment
 	// injected as a turn-0 user message. ON by default reading the conventional
@@ -357,6 +378,13 @@ type Config struct {
 	// Production leaves it false — the refresh is fully background, so Build never
 	// blocks on the network. Unexported: not an operator knob.
 	liveModelRefreshSync bool
+
+	// driverConns is the build-scoped remote-driver connection cache (equal
+	// *StoreURL targets share one lazy ClientConn). Build sets it once so the
+	// session-store and memory-store dials in one composition share it;
+	// helpers called directly by tests get a fresh cache via cfg.drivers().
+	// Unexported: an internal composition detail, not an operator knob.
+	driverConns *driverConns
 }
 
 // providerConstructor builds the port.LLMProvider for an available provider id,
@@ -407,6 +435,17 @@ type Built struct {
 // manager on shutdown. Build itself starts no listeners — serving is the caller's
 // responsibility (see cmd/mecated/serve and cmd/mecatui/embed).
 func Build(ctx context.Context, cfg Config) (*Built, error) {
+	// Remote store drivers (Phase B): a local dir and a driver URL for the same
+	// store are mutually exclusive — fatal here, before anything is constructed
+	// (the validateSkillDraftConfig precedent).
+	if err := validateDriverConfig(cfg); err != nil {
+		return nil, err
+	}
+	// Build-scoped driver connection cache: set once so the session-store and
+	// memory-store dials below share one ClientConn per distinct target.
+	if cfg.driverConns == nil {
+		cfg.driverConns = newDriverConns()
+	}
 	// Workspace trust (MUST-FIX 2): fold the --trust-project flag and the
 	// declarative settings.yaml `trustedWorkspaces:` list into ONE decision,
 	// produced once here, then collapse it back onto cfg.TrustProject — the SAME
@@ -465,12 +504,13 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// yet relocated (iteration 2).
 	logBuildConfigFacts(cfg)
 
-	store, err := buildStore(cfg)
+	store, storeClose, err := buildStore(cfg)
 	if err != nil {
 		return nil, err
 	}
 	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, assets, mcpClose, err := buildEngine(ctx, cfg, reg, provider, store)
 	if err != nil {
+		storeClose()
 		return nil, err
 	}
 	logMCPInventory(ctx, cfg.diag(), mcpInventory)
@@ -576,6 +616,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	svc, err := server.NewService(svcCfg)
 	if err != nil {
 		mcpClose()
+		storeClose()
 		return nil, fmt.Errorf("build service: %w", err)
 	}
 
@@ -593,11 +634,14 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 
 	// Close tears down the main MCP manager AND any per-session client-MCP engines
 	// still registered (svc.Close), so a process exit leaks neither. It also cancels
-	// the live-model refresh goroutine.
+	// the live-model refresh goroutine and closes the session-store driver
+	// connection (LAST — everything before it may still persist; a no-op for the
+	// local stores, and once-guarded if the memory driver shares the conn).
 	closeAll := func() {
 		refreshClose()
 		svc.Close()
 		mcpClose()
+		storeClose()
 	}
 	return &Built{Service: svc, Close: closeAll}, nil
 }
@@ -821,19 +865,31 @@ func buildProvider(cfg Config) (*providerRegistry, port.LLMProvider, error) {
 	return reg, entry.provider, nil
 }
 
-// buildStore constructs the SessionStore: a JSONL replay store under StoreDir, or
-// the in-memory store when the dir is empty.
-func buildStore(cfg Config) (port.SessionStore, error) {
+// buildStore constructs the SessionStore: a gRPC driver client when
+// SessionStoreURL is set (validateDriverConfig has already rejected the
+// URL+dir combination), a JSONL replay store under StoreDir, or the in-memory
+// store when both are empty. The returned close func releases the driver
+// connection (a no-op for the local stores) and chains into Build's closeAll;
+// it is always non-nil on success.
+func buildStore(cfg Config) (port.SessionStore, func(), error) {
+	if cfg.SessionStoreURL != "" {
+		conn, closeFn, err := cfg.drivers().dial(cfg, cfg.SessionStoreURL)
+		if err != nil {
+			return nil, nil, fmt.Errorf("dial session-store driver %q: %w", cfg.SessionStoreURL, err)
+		}
+		cfg.diag().Log(context.Background(), port.LevelInfo, "session store: grpc driver", "target", cfg.SessionStoreURL)
+		return grpcdriver.NewSessionStore(conn), closeFn, nil
+	}
 	if cfg.StoreDir == "" {
 		cfg.diag().Log(context.Background(), port.LevelInfo, "session store: in-memory")
-		return memstore.New(), nil
+		return memstore.New(), func() {}, nil
 	}
 	st, err := jsonlstore.New(cfg.StoreDir)
 	if err != nil {
-		return nil, fmt.Errorf("open jsonl store %q: %w", cfg.StoreDir, err)
+		return nil, nil, fmt.Errorf("open jsonl store %q: %w", cfg.StoreDir, err)
 	}
 	cfg.diag().Log(context.Background(), port.LevelInfo, "session store: jsonl", "dir", cfg.StoreDir)
-	return st, nil
+	return st, func() {}, nil
 }
 
 // buildEngine assembles the parent agent.Engine: the core tool catalog (plus an
@@ -896,7 +952,10 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// re-discovery (the registry does not vary per session).
 	agentReg := resolveAgentRegistry(ctx, cfg)
 
-	cat, assets, mcpProvider, mcpInventory, mcpClose := buildCatalog(ctx, cfg, reg, provider, hooks, agentReg, store)
+	cat, assets, mcpProvider, mcpInventory, mcpClose, err := buildCatalog(ctx, cfg, reg, provider, hooks, agentReg, store)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, err
+	}
 	memStore, userModelStore := assets.memStore, assets.userModelStore
 
 	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona source. ON
@@ -1464,20 +1523,44 @@ func registerCoreTools(cfg Config, cat *tool.Catalog, log bool) {
 // assembleCatalog over the SAME assets — the issue-#42 anti-drift seam. The
 // returned close func tears down the global MCP manager AND the build-time
 // Subagent per-def inline managers on shutdown.
-func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, hooks port.HookRunner, agentReg *agents.Registry, store port.SessionStore) (*tool.Catalog, catalogAssets, mcp.Provider, []mcpsource.SourceInfo, func()) {
+//
+// The error return exists for the EXPLICITLY-CONFIGURED memory driver only
+// (loud-misconfig posture): a --memory-store-url that fails to dial is FATAL,
+// unlike the default-on local memory.New whose failure stays fail-soft
+// (WARN + tools disabled). On error every connection already made here is
+// torn down before returning.
+func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, hooks port.HookRunner, agentReg *agents.Registry, store port.SessionStore) (*tool.Catalog, catalogAssets, mcp.Provider, []mcpsource.SourceInfo, func(), error) {
 	// Connect the MAIN MCP servers FIRST, so the per-agent-def Subagent engines built by
 	// buildSubagentTool can (a) pull a REFERENCED main server's tools out of this manager
 	// and (b) connect their own INLINE servers. mainMgr is nil when no main servers are
 	// configured (reference entries then resolve to a clear "unknown server" diagnostic).
 	mainMgr, mcpProvider, mcpInventory, mcpClose := connectMCP(ctx, cfg)
 
-	// Per-project memory store: opt-in via MemoryDir. Opened ONCE here (the flocked
-	// reference adapter; one Store per dir) and shared by the build-time catalog,
-	// every per-session catalog, the prompt tier-0 index source, and the
-	// consolidation goroutine. Typed-nil discipline: memStore is assigned only on a
-	// successful memory.New, so it is either a known-non-nil concrete store or nil.
+	// Per-project memory store: opt-in via MemoryStoreURL (a remote gRPC driver;
+	// Phase B) or MemoryDir (the flocked reference adapter, opened ONCE here —
+	// one Store per dir) and shared by the build-time catalog, every per-session
+	// catalog, the prompt tier-0 index source, and the consolidation goroutine.
+	// Typed-nil discipline: memStore is assigned only on a successful
+	// construction, so it is either a known-non-nil concrete store or nil. The
+	// driver connection's close (once-guarded, possibly shared with the session
+	// store) folds into this catalog's returned close func below.
 	var memStore tool.MemoryStore
-	if cfg.MemoryDir != "" {
+	var memDriverClose func()
+	if cfg.MemoryStoreURL != "" {
+		conn, closeFn, err := cfg.drivers().dial(cfg, cfg.MemoryStoreURL)
+		if err != nil {
+			// FATAL, not fail-soft: the driver URL is an EXPLICIT operator
+			// config (unlike the default-on local store below) — silently
+			// running without the memory backend the operator pointed at would
+			// hide a misconfiguration.
+			mcpClose()
+			return nil, catalogAssets{}, nil, nil, nil, fmt.Errorf("dial memory-store driver %q: %w", cfg.MemoryStoreURL, err)
+		}
+		memStore = grpcdriver.NewMemoryStore(conn)
+		memDriverClose = closeFn
+		cfg.diag().Log(ctx, port.LevelInfo, "memory tools ENABLED (Remember/Recall/SearchMemory); permission: allow (built-in default, overridable to ask/deny via settings)", "target", cfg.MemoryStoreURL)
+		startMemoryConsolidation(ctx, cfg, memStore, provider)
+	} else if cfg.MemoryDir != "" {
 		st, err := memory.New(cfg.MemoryDir)
 		if err != nil {
 			cfg.diag().Log(ctx, port.LevelWarn, "could not open memory store; memory tools disabled", "dir", cfg.MemoryDir, "err", err)
@@ -1540,6 +1623,16 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	// the main MCP close, so Built.Close tears them ALL down on shutdown
 	// (process-lifetime engines). The global manager itself stays in mcpClose only.
 	mcpClose = composeClose(cfg.diag(), assembledClose, mcpClose)
+	// Fold the memory-store driver connection's close (when one was dialled) into
+	// the same teardown chain. It is once-guarded, so sharing the conn with the
+	// session store (equal URLs) cannot double-close.
+	if memDriverClose != nil {
+		prev := mcpClose
+		mcpClose = func() {
+			prev()
+			memDriverClose()
+		}
+	}
 
 	// Restore the pre-#42 advertises-implies-registered coupling: the old code set
 	// memStore only AFTER a successful memory.Register, so the turn-0 prompt index
@@ -1559,7 +1652,7 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 		}
 	}
 
-	return cat, assets, mcpProvider, mcpInventory, mcpClose
+	return cat, assets, mcpProvider, mcpInventory, mcpClose, nil
 }
 
 // mcpResolveOptions derives the source-resolver options purely from cfg, so the

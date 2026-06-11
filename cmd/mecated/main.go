@@ -159,6 +159,19 @@ type config struct {
 	// Memory: per-project memory store directory (empty disables memory tools).
 	memoryDir string
 
+	// Remote store drivers (Phase B): gRPC driver endpoints replacing the local
+	// session/memory stores (mutually exclusive with --store-dir/--memory-dir;
+	// app.Build validates). The driver auth/TLS knobs apply to every driver
+	// connection; the token also reads MECATL_DRIVER_AUTH_TOKEN when the flag
+	// is unset (mirroring --auth-token / MECATL_AUTH_TOKEN).
+	sessionStoreURL string
+	memoryStoreURL  string
+	driverAuthToken string
+	driverTLS       bool
+	driverTLSCA     string
+	driverTLSCert   string
+	driverTLSKey    string
+
 	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona fragment.
 	// ON by default reading the conventional ~/.config/mecatl/soul.md (fail-soft if
 	// absent). soulFile overrides the path; noSoul disables it entirely.
@@ -609,8 +622,9 @@ func run() error {
 	if cfg.acp {
 		// session/load (resume) is offered only when a durable session store is
 		// configured: the in-memory store would lose snapshots across a restart, so
-		// loadSession stays false there.
-		return serveACP(ctx, built.Service, cfg.storeDir != "", diag)
+		// loadSession stays false there. A remote session-store driver is durable
+		// (it replaces the JSONL dir), so it qualifies too.
+		return serveACP(ctx, built.Service, cfg.storeDir != "" || cfg.sessionStoreURL != "", diag)
 	}
 
 	return serve(ctx, cfg, built.Service, providers.Registry, recorder, slowTurns)
@@ -646,6 +660,13 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		MaxTeamTokens:                cfg.maxTeamTokens,
 		MemoryDir:                    cfg.memoryDir,
 		MemoryConsolidateInterval:    cfg.memoryConsolidateInterval,
+		SessionStoreURL:              cfg.sessionStoreURL,
+		MemoryStoreURL:               cfg.memoryStoreURL,
+		DriverAuthToken:              cfg.driverAuthToken,
+		DriverTLS:                    cfg.driverTLS,
+		DriverTLSCA:                  cfg.driverTLSCA,
+		DriverTLSCert:                cfg.driverTLSCert,
+		DriverTLSKey:                 cfg.driverTLSKey,
 		SoulPath:                     cfg.soulFile,
 		NoSoul:                       cfg.noSoul,
 		ApproveSoul:                  cfg.approveSoul,
@@ -725,6 +746,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.anthropicBaseURL, "anthropic-base-url", "", "override the native Anthropic API base URL (compatible/proxy endpoints; key from ANTHROPIC_API_KEY)")
 	fs.BoolVar(&cfg.useMock, "mock", false, "use a canned offline mock provider (no network; for smoke tests only)")
 	fs.StringVar(&cfg.storeDir, "store-dir", "", "directory for the JSONL session store (empty -> in-memory store)")
+	fs.StringVar(&cfg.sessionStoreURL, "session-store-url", "", "host:port of a remote session-store gRPC driver (mecatl.driver.v1.SessionStoreService); replaces the local store, so it is mutually exclusive with --store-dir. Loopback may ride plaintext; pair a non-loopback target with --driver-tls (and --driver-auth-token as needed)")
 	fs.StringVar(&cfg.shell, "shell", "/bin/sh", "shell used to execute Bash-tool commands; empty disables Bash (shell-less mode)")
 	fs.BoolVar(&cfg.noBash, "no-bash", false, "disable the Bash tool entirely (shell-less mode); overrides --shell")
 
@@ -756,6 +778,12 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "per-project memory store directory (empty disables the Remember/Recall tools)")
 	fs.DurationVar(&cfg.memoryConsolidateInterval, "memory-consolidate-interval", 0, "interval for background memory consolidation (dream); 0 disables. Only meaningful with --memory-dir")
+	fs.StringVar(&cfg.memoryStoreURL, "memory-store-url", "", "host:port of a remote memory-store gRPC driver (mecatl.driver.v1.MemoryStoreService); replaces the local flock store, so it is mutually exclusive with --memory-dir. Enables the Remember/Recall tools like --memory-dir does. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
+	fs.StringVar(&cfg.driverAuthToken, "driver-auth-token", "", "bearer token sent on every store-driver RPC (or MECATL_DRIVER_AUTH_TOKEN; empty disables driver auth). Refused over cleartext to a non-loopback driver — pair with --driver-tls")
+	fs.BoolVar(&cfg.driverTLS, "driver-tls", false, "enable transport TLS on the store-driver connections (--session-store-url/--memory-store-url)")
+	fs.StringVar(&cfg.driverTLSCA, "driver-tls-ca", "", "PEM CA bundle to verify the store driver's server certificate (with --driver-tls; empty uses the system roots)")
+	fs.StringVar(&cfg.driverTLSCert, "driver-tls-cert", "", "PEM client certificate for mutual TLS to the store driver (with --driver-tls and --driver-tls-key)")
+	fs.StringVar(&cfg.driverTLSKey, "driver-tls-key", "", "PEM client private key (paired with --driver-tls-cert)")
 
 	fs.StringVar(&cfg.soulFile, "soul-file", "", "path to a user-scoped, agent-READ-ONLY persona/\"soul\" file injected as turn-0 context (empty = the conventional $XDG_CONFIG_HOME/mecatl/soul.md, fallback ~/.config/mecatl/soul.md). Fail-soft: a missing/empty/oversized/injection-flagged file degrades to no fragment, never an error. No tool can write it")
 	fs.BoolVar(&cfg.noSoul, "no-soul", false, "disable the user-scoped persona/soul fragment entirely (otherwise it is read from the conventional location, fail-soft if absent)")
@@ -845,6 +873,10 @@ func parseFlags(argv []string) (config, error) {
 	// secret need not appear in the process argv.
 	if cfg.authToken == "" {
 		cfg.authToken = os.Getenv("MECATL_AUTH_TOKEN")
+	}
+	// The store-driver bearer token mirrors the same custody rule.
+	if cfg.driverAuthToken == "" {
+		cfg.driverAuthToken = os.Getenv("MECATL_DRIVER_AUTH_TOKEN")
 	}
 	return cfg, nil
 }

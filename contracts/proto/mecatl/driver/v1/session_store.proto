@@ -1,0 +1,99 @@
+// SPDX-FileCopyrightText: Copyright 2026 Stacklok, Inc.
+// SPDX-License-Identifier: LicenseRef-Stacklok-Proprietary
+
+// mecatl driver API: the remote session-store protocol.
+//
+// SessionStoreService is the wire seam behind the harness's `port.SessionStore`
+// (engine/port/store.go): an operator-run driver process persists session
+// snapshots on behalf of the harness, in place of the in-process stores
+// (memstore, jsonlstore). The driver sits at the SAME trust tier as an
+// on-disk store directory — operator-configured infrastructure, not a
+// model-facing surface.
+//
+// The snapshot payload is OPAQUE to the driver: it is exactly the
+// engine/adapter/sessnap encoding, identified by the envelope's `format` tag
+// ("sessnap-json/1" today; see internal/adapter/grpcdriver.SnapshotFormat).
+// The driver stores and returns the envelope VERBATIM and never decodes it —
+// snapshot schema evolution lives in sessnap (additive JSON), while format
+// identification lives in this envelope. The harness rejects an unknown
+// `format` on Load with an infrastructure error (never not-found).
+//
+// Driver contract (mirrors the in-process stores):
+//   - Load of an unknown session id MUST return NOT_FOUND.
+//   - Save overwrites: Load returns the most recent snapshot saved under the id.
+//
+// Validation: required-field annotations are authored with `buf.validate.field`
+// for documentation and future runtime enforcement; V1 enforces them in the Go
+// client/server wrappers (internal/adapter/grpcdriver).
+
+syntax = "proto3";
+
+package mecatl.driver.v1;
+
+import "buf/validate/validate.proto";
+
+// SessionStoreService persists and retrieves opaque, format-tagged session
+// snapshots keyed by session id. It is the remote analogue of
+// port.SessionStore's two methods.
+service SessionStoreService {
+  // Save persists the snapshot under session_id, overwriting any prior
+  // snapshot for the same id (a later Save wins).
+  rpc Save(SaveRequest) returns (SaveResponse);
+
+  // Load returns the most recent snapshot saved under session_id. A session
+  // id that was never saved MUST return NOT_FOUND — the harness maps that to
+  // its port.ErrSessionNotFound sentinel; any other error is an
+  // infrastructure failure.
+  rpc Load(LoadRequest) returns (LoadResponse);
+}
+
+// SessionSnapshot is the opaque snapshot envelope: a format tag plus the
+// encoded payload. The driver round-trips both fields VERBATIM and never
+// decodes the payload; decode happens harness-side (sessnap.Unmarshal).
+//
+// CAPACITY: a conforming driver MUST accept payloads up to 64 MiB — the
+// protocol's required minimum message capacity (a snapshot carrying inline
+// media legitimately reaches multiple MiB, so mount the gRPC server with a
+// receive limit of at least that, e.g. grpc.MaxRecvMsgSize). The harness
+// client is configured to send AND receive the same 64 MiB (see
+// internal/adapter/grpcdriver.MaxSnapshotBytes).
+message SessionSnapshot {
+  // format identifies the payload encoding ("sessnap-json/1" today). The
+  // harness writes it on Save and rejects an unknown format on Load with an
+  // infrastructure error (never not-found).
+  string format = 1 [(buf.validate.field).string.min_len = 1];
+
+  // payload is the encoded session snapshot — exactly the bytes the harness
+  // wrote (sessnap.Marshal output for format "sessnap-json/1").
+  bytes payload = 2 [(buf.validate.field).bytes.min_len = 1];
+}
+
+// SaveRequest carries one snapshot to persist.
+message SaveRequest {
+  // session_id duplicates the snapshot's session id at the top level so a
+  // driver can key and index its storage WITHOUT decoding the opaque payload.
+  // It is the AUTHORITATIVE storage key: the harness always writes it equal
+  // to the session id inside the payload, and a DECODING store (e.g. the
+  // harness-provided Go server wrappers) rejects a request where the two
+  // disagree with INVALID_ARGUMENT.
+  string session_id = 1 [(buf.validate.field).string.min_len = 1];
+
+  // snapshot is the opaque envelope to store verbatim.
+  SessionSnapshot snapshot = 2 [(buf.validate.field).required = true];
+}
+
+// SaveResponse is empty: a successful Save has no payload.
+message SaveResponse {}
+
+// LoadRequest asks for the most recent snapshot under a session id.
+message LoadRequest {
+  // session_id is the id the snapshot was saved under.
+  string session_id = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+// LoadResponse carries the most recent snapshot for the requested id.
+message LoadResponse {
+  // snapshot is the envelope exactly as it was saved (format + payload
+  // verbatim).
+  SessionSnapshot snapshot = 1 [(buf.validate.field).required = true];
+}
