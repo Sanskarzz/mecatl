@@ -42,7 +42,7 @@ func registerResources(srv *mcpsdk.Server, d Deps) {
 	srv.AddResource(&mcpsdk.Resource{
 		URI:         uriRuntimeSummary,
 		Name:        "runtime-summary",
-		Description: "Current runtime snapshot: goroutines, CPU count, heap/total memory bytes, GC pause count and ~p99 pause upper bound, RSS, and uptime. Small JSON DTO.",
+		Description: "Current runtime snapshot: goroutines, CPU count, cumulative heap-alloc total + live heap/total memory bytes, GC pause count and ~p99 pause upper bound, RSS, and uptime. Small JSON DTO.",
 		MIMEType:    mimeJSON,
 	}, resourceJSON(func(context.Context) (any, error) {
 		return d.Snapshot(), nil
@@ -51,7 +51,7 @@ func registerResources(srv *mcpsdk.Server, d Deps) {
 	srv.AddResource(&mcpsdk.Resource{
 		URI:         uriRuntimeMemstats,
 		Name:        "runtime-memstats",
-		Description: "Memory-focused projection of the runtime snapshot (heap alloc/objects, heap-object bytes, total mapped bytes, RSS). Derived from runtime/metrics, NOT a stop-the-world ReadMemStats.",
+		Description: "Memory-focused projection of the runtime snapshot (cumulative heap-alloc total, heap objects, live heap-object bytes, total mapped bytes, RSS). Derived from runtime/metrics, NOT a stop-the-world ReadMemStats.",
 		MIMEType:    mimeJSON,
 	}, resourceJSON(func(context.Context) (any, error) {
 		return memstatsProjection(d.Snapshot()), nil
@@ -147,11 +147,13 @@ func pprofResourceHandler(d Deps) mcpsdk.ResourceHandler {
 // runtime.ReadMemStats), so it inherits the snapshot's lock-free, no-STW
 // guarantee. Byte counts are bytes.
 type MemstatsProjection struct {
-	HeapAllocBytes   uint64 `json:"heap_alloc_bytes"`
-	HeapObjects      uint64 `json:"heap_objects"`
-	HeapObjectBytes  uint64 `json:"heap_object_bytes"`
-	TotalMemoryBytes uint64 `json:"total_memory_bytes"`
-	RSSBytes         uint64 `json:"rss_bytes"`
+	// HeapAllocsTotalBytes is the cumulative heap-allocation counter (bytes ever
+	// allocated since process start) — NOT live heap; live is HeapObjectBytes.
+	HeapAllocsTotalBytes uint64 `json:"heap_allocs_total_bytes"`
+	HeapObjects          uint64 `json:"heap_objects"`
+	HeapObjectBytes      uint64 `json:"heap_object_bytes"`
+	TotalMemoryBytes     uint64 `json:"total_memory_bytes"`
+	RSSBytes             uint64 `json:"rss_bytes"`
 	// Available echoes the snapshot's Available set so a consumer can tell which
 	// runtime/metrics-derived fields were actually present this read.
 	Available []string `json:"available"`
@@ -160,11 +162,11 @@ type MemstatsProjection struct {
 // memstatsProjection builds the memory view from a runtime snapshot.
 func memstatsProjection(s telemetry.RuntimeSnapshot) MemstatsProjection {
 	return MemstatsProjection{
-		HeapAllocBytes:   s.HeapAllocBytes,
-		HeapObjects:      s.HeapObjects,
-		HeapObjectBytes:  s.HeapObjectBytes,
-		TotalMemoryBytes: s.TotalMemoryBytes,
-		RSSBytes:         s.RSSBytes,
-		Available:        s.Available,
+		HeapAllocsTotalBytes: s.HeapAllocsTotalBytes,
+		HeapObjects:          s.HeapObjects,
+		HeapObjectBytes:      s.HeapObjectBytes,
+		TotalMemoryBytes:     s.TotalMemoryBytes,
+		RSSBytes:             s.RSSBytes,
+		Available:            s.Available,
 	}
 }

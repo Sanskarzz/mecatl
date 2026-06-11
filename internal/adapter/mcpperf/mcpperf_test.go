@@ -75,16 +75,16 @@ func (f fakeSlowTurns) Recent(_ int64) []SlowTurn { return f.turns }
 // fakeSnapshot is a deterministic runtime snapshot for the resource round-trip.
 func fakeSnapshot() telemetry.RuntimeSnapshot {
 	return telemetry.RuntimeSnapshot{
-		Goroutines:       42,
-		NumCPU:           8,
-		GOMAXPROCS:       8,
-		HeapAllocBytes:   1 << 20,
-		HeapObjects:      1234,
-		TotalMemoryBytes: 4 << 20,
-		HeapObjectBytes:  2 << 20,
-		RSSBytes:         16 << 20,
-		UptimeSeconds:    3.5,
-		Available:        []string{"/sched/goroutines:goroutines"},
+		Goroutines:           42,
+		NumCPU:               8,
+		GOMAXPROCS:           8,
+		HeapAllocsTotalBytes: 1 << 20,
+		HeapObjects:          1234,
+		TotalMemoryBytes:     4 << 20,
+		HeapObjectBytes:      2 << 20,
+		RSSBytes:             16 << 20,
+		UptimeSeconds:        3.5,
+		Available:            []string{"/sched/goroutines:goroutines"},
 	}
 }
 
@@ -305,8 +305,21 @@ func TestLifecycleMemstatsResource(t *testing.T) {
 	if err := json.Unmarshal([]byte(read.Contents[0].Text), &proj); err != nil {
 		t.Fatalf("unmarshal memstats projection: %v (%s)", err, read.Contents[0].Text)
 	}
+	// Pin the WIRE key, not just the Go field: unmarshalling into the struct
+	// above would pass even if the json tag silently reverted to the old name.
+	// Same shape as telemetry's TestSnapshotJSONUsesCumulativeAllocKey.
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(read.Contents[0].Text), &keys); err != nil {
+		t.Fatalf("unmarshal memstats keys: %v (%s)", err, read.Contents[0].Text)
+	}
+	if _, ok := keys["heap_allocs_total_bytes"]; !ok {
+		t.Errorf("memstats wire JSON missing key %q: %s", "heap_allocs_total_bytes", read.Contents[0].Text)
+	}
+	if _, ok := keys["heap_alloc_bytes"]; ok {
+		t.Errorf("memstats wire JSON still carries the renamed key %q", "heap_alloc_bytes")
+	}
 	// MemstatsProjection shape, projected from fakeSnapshot.
-	if proj.HeapAllocBytes != 1<<20 || proj.HeapObjects != 1234 ||
+	if proj.HeapAllocsTotalBytes != 1<<20 || proj.HeapObjects != 1234 ||
 		proj.HeapObjectBytes != 2<<20 || proj.TotalMemoryBytes != 4<<20 || proj.RSSBytes != 16<<20 {
 		t.Errorf("memstats projection wrong: %+v", proj)
 	}

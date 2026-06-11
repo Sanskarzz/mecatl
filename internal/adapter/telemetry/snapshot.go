@@ -34,7 +34,11 @@ const (
 // state at one instant. It carries NO OTel/SDK types deliberately: it is the
 // reusable read contract that Phase-2's perf-over-MCP server projects directly
 // into tool output (decision 4 in docs/design/perf-observability.md). Treat the
-// field set + JSON tags as a stable wire shape — additive changes only.
+// field set + JSON tags as a stable wire shape — additive changes only. One
+// deliberate exception on record: heap_alloc_bytes was RENAMED to
+// heap_allocs_total_bytes — the old key read as a live-heap gauge (the
+// Go MemStats.HeapAlloc meaning) when the value is actually the cumulative
+// allocation counter, a misread worth a one-time break.
 //
 // Byte counts are bytes; durations are nanoseconds (GCPauseP99UpperBoundNs) or
 // seconds (UptimeSeconds) as named.
@@ -55,9 +59,15 @@ type RuntimeSnapshot struct {
 	// GOMAXPROCS is the current GOMAXPROCS setting.
 	GOMAXPROCS int `json:"gomaxprocs"`
 
-	// HeapAllocBytes is cumulative bytes allocated to the heap (/gc/heap/allocs).
-	HeapAllocBytes uint64 `json:"heap_alloc_bytes"`
-	// HeapObjects is the cumulative count of heap objects allocated.
+	// HeapAllocsTotalBytes is the CUMULATIVE number of bytes ever allocated to
+	// the heap since process start (/gc/heap/allocs) — a monotonic counter that
+	// reads 100+ GB on a long-lived process. It is NOT the live heap; live
+	// heap-object memory is HeapObjectBytes (heap_object_bytes). Renamed from
+	// heap_alloc_bytes, which collided with the LIVE-gauge meaning of Go
+	// MemStats.HeapAlloc.
+	HeapAllocsTotalBytes uint64 `json:"heap_allocs_total_bytes"`
+	// HeapObjects is the count of live-or-unswept heap objects
+	// (/gc/heap/objects), not a cumulative allocation count.
 	HeapObjects uint64 `json:"heap_objects"`
 	// TotalMemoryBytes is all memory mapped by the runtime (/memory/classes/total).
 	TotalMemoryBytes uint64 `json:"total_memory_bytes"`
@@ -136,7 +146,7 @@ func Snapshot() RuntimeSnapshot {
 			}
 		case metricHeapAllocsBytes:
 			if s.Value.Kind() == metrics.KindUint64 {
-				snap.HeapAllocBytes = s.Value.Uint64()
+				snap.HeapAllocsTotalBytes = s.Value.Uint64()
 			}
 		case metricHeapObjects:
 			if s.Value.Kind() == metrics.KindUint64 {

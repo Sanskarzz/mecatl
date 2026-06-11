@@ -45,10 +45,13 @@ for the perturbing CPU tools only with a hypothesis to confirm.
 ## The MCP surface (what is actually there)
 
 **Resources** (cheap, read-only, JSON):
-- `perf://runtime/summary` — goroutines, num_cpu, gomaxprocs, heap_alloc_bytes,
+- `perf://runtime/summary` — goroutines, num_cpu, gomaxprocs, heap_allocs_total_bytes,
   heap_objects, total_memory_bytes, heap_object_bytes, gc_pause_count,
   `gc_pause_p99_upper_bound_ns`, `rss_bytes`, uptime_seconds, `available[]`.
-- `perf://runtime/memstats` — memory-focused projection (heap_alloc_bytes,
+  Note: `heap_allocs_total_bytes` is a cumulative COUNTER (bytes ever allocated)
+  — a huge value (100+ GB on a long-lived process) is normal, not a leak; the
+  leak signal is the `rss_bytes` / `heap_object_bytes` slope.
+- `perf://runtime/memstats` — memory-focused projection (heap_allocs_total_bytes,
   heap_objects, heap_object_bytes, total_memory_bytes, rss_bytes, available[]).
 - `perf://metrics/summary` — every curated metric reduced: histograms → count +
   p50/p90/p99 **bucket upper bounds (seconds)**; counters/gauges → a scalar value.
@@ -90,7 +93,7 @@ symptom to match. The essentials:
   `perf://pprof/goroutine` to see which functions hold the stuck goroutines; this
   corroborates the live goroutine watchdog.
 - **Off-heap growth (the WASM-leak signature).** `rss_bytes` climbing while
-  `heap_alloc_bytes` / `heap_object_bytes` stay flat = growth **off the Go heap**,
+  `heap_object_bytes` / `total_memory_bytes` stay flat = growth **off the Go heap**,
   invisible to pprof/heap and runtime metrics. (The historical cause was the
   RepoMap/tree-sitter WASM tool, since **removed**, but the pattern still stands
   for any off-heap consumer.)

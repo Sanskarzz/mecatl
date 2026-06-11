@@ -11,7 +11,7 @@ verbatim from the server; trust these, not invented ones.
   "goroutines": 0,                      // live count; rising across reads = leak
   "num_cpu": 0,
   "gomaxprocs": 0,
-  "heap_alloc_bytes": 0,                // cumulative bytes allocated to heap
+  "heap_allocs_total_bytes": 0,         // CUMULATIVE bytes ever allocated (a counter — huge values are normal, not a leak)
   "heap_objects": 0,
   "total_memory_bytes": 0,              // all memory mapped by the runtime
   "heap_object_bytes": 0,               // live heap-object memory
@@ -29,7 +29,7 @@ runtime/metrics-derived fields.
 ### `perf://runtime/memstats` (MemstatsProjection)
 ```jsonc
 {
-  "heap_alloc_bytes": 0,
+  "heap_allocs_total_bytes": 0,
   "heap_objects": 0,
   "heap_object_bytes": 0,
   "total_memory_bytes": 0,
