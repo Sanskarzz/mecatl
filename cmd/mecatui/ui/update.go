@@ -445,6 +445,9 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.TurnEndMsg:
 		// The turn's model exchange is done: freeze any live "reasoning…"
 		// affordance, then append a muted stat line unless the turn was trivial.
+		// The turn's prompt size is the CURRENT context occupancy (latest turn,
+		// assigned not summed — mirroring the team lane meter's turn.end handling).
+		m.contextTokens = msg.Usage.InputTokens
 		m.conv.endReasoningStream()
 		if !trivialTurn(msg) {
 			m.conv.addTurnStat(turnStatLine(msg))
@@ -598,15 +601,15 @@ func (m Model) updateStreamSecondary(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// applyResult handles a terminal ResultMsg: it folds the turn's usage into the running
-// totals, records the latest context occupancy, surfaces a terminal error, ends the run,
-// and drains any queued prompts. Extracted from updateStreamEvent's switch to keep that
-// dispatcher flat.
+// applyResult handles a terminal ResultMsg: it folds the run's usage into the running
+// totals, surfaces a terminal error, ends the run, and drains any queued prompts.
+// Extracted from updateStreamEvent's switch to keep that dispatcher flat.
 func (m Model) applyResult(msg client.ResultMsg) (tea.Model, tea.Cmd) {
+	// ResultMsg.Usage is the run's CUMULATIVE total; fold it into the session
+	// total exactly once here. The per-turn TurnEndMsg feeds only the
+	// context-occupancy meter (m.contextTokens), never m.usage — adding both
+	// would double-count.
 	m.usage = sumUsage(m.usage, msg.Usage)
-	// The latest turn's prompt size is the current context occupancy
-	// (InputTokens already includes cache-served tokens).
-	m.contextTokens = msg.Usage.InputTokens
 	if msg.Stop == stopError && msg.Error != "" {
 		m.conv.addError(msg.Error)
 	}

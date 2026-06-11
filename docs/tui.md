@@ -468,6 +468,13 @@ sits or how tall it is. When a transient region appears the viewport **shrinks**
 make room and the footer stays on-screen — a transient never pushes the footer off
 the bottom (and the viewport grows back when the transient clears).
 
+**Footer usage segment.** Two different axes, deliberately: the **`ctx` meter** shows
+**current occupancy** — the latest turn's prompt size (each `turn.end`'s input tokens,
+assigned, not summed), i.e. how full the context window is right now. The **`↑`/`↓`/`⊕`
+facets** beside it are **session-cumulative totals**, fed once per run from the terminal
+result's cumulative usage (so a long session's spend keeps growing while the ctx meter
+tracks only the live conversation size).
+
 ### Watching subagents, parallel runs, and teams — the fleet footer + the unified `ctrl+a` overlay
 
 Three surfaces watch concurrent **Subagent children**, **Parallel fork-join runs**, and

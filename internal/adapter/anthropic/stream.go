@@ -60,10 +60,11 @@ type blockState struct {
 type streamState struct {
 	blocks map[int64]*blockState
 
-	inputTokens     int64
-	outputTokens    int64
-	cacheReadTokens int64
-	stopReason      sdk.StopReason
+	inputTokens      int64
+	outputTokens     int64
+	cacheReadTokens  int64
+	cacheWriteTokens int64
+	stopReason       sdk.StopReason
 
 	// reasoning is the ordered list of thinking/redacted blocks assembled across
 	// the turn; packed into one ChunkReasoningItem at message_stop so the port's
@@ -120,6 +121,7 @@ func translate(event sdk.MessageStreamEventUnion, st *streamState) ([]port.Chunk
 	case "message_start":
 		st.inputTokens = event.Message.Usage.InputTokens
 		st.cacheReadTokens = event.Message.Usage.CacheReadInputTokens
+		st.cacheWriteTokens = event.Message.Usage.CacheCreationInputTokens
 		return nil, nil
 
 	case "content_block_start":
@@ -140,6 +142,9 @@ func translate(event sdk.MessageStreamEventUnion, st *streamState) ([]port.Chunk
 		}
 		if event.Usage.CacheReadInputTokens != 0 {
 			st.cacheReadTokens = event.Usage.CacheReadInputTokens
+		}
+		if event.Usage.CacheCreationInputTokens != 0 {
+			st.cacheWriteTokens = event.Usage.CacheCreationInputTokens
 		}
 		return nil, nil
 
@@ -292,10 +297,15 @@ func translateMessageStop(st *streamState) ([]port.Chunk, error) {
 	if packed := packReasoning(st.reasoning); packed != "" {
 		chunks = append(chunks, port.Chunk{Kind: port.ChunkReasoningItem, Text: packed})
 	}
+	// Anthropic reports input_tokens EXCLUDING cache reads/writes; we fold them
+	// in so InputTokens is the full prompt and CacheReadTokens ⊂ InputTokens,
+	// matching OpenAI and the engine/session usage contract. Cache writes are
+	// part of the prompt (and billed), so they belong in the full-prompt total.
 	usage := session.Usage{
-		InputTokens:     int(st.inputTokens),
-		OutputTokens:    int(st.outputTokens),
-		CacheReadTokens: int(st.cacheReadTokens),
+		InputTokens:      int(st.inputTokens + st.cacheReadTokens + st.cacheWriteTokens),
+		OutputTokens:     int(st.outputTokens),
+		CacheReadTokens:  int(st.cacheReadTokens),
+		CacheWriteTokens: int(st.cacheWriteTokens),
 	}
 	chunks = append(chunks,
 		port.Chunk{Kind: port.ChunkUsage, Usage: &usage},

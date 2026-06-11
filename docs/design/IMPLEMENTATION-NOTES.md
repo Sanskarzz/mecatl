@@ -183,7 +183,13 @@ was observed announcing actions without emitting the tool calls). `EvNoProgress`
 `Engine.drive` (Step 2, after the existing `sess.StopReason()` and `ctx.Err()` checks, before
 `BeginTurn`) against the run's accumulated `session.Usage` via `Usage.TotalTokens()`
 (input+output; cache tokens excluded — `CacheReadTokens` is a subset of `InputTokens`,
-`CacheWriteTokens` is a side cost). When `total.TotalTokens() >= MaxRunTokens` the loop ends via
+`CacheWriteTokens` is a side cost). The subset invariant holds CROSS-PROVIDER because the
+adapters normalize to it: OpenAI's `input_tokens` already includes cached tokens; Anthropic's
+raw `input_tokens` EXCLUDES cache reads/writes, so its adapter folds `cache_read_input_tokens`
++ `cache_creation_input_tokens` into `InputTokens` at the single `session.Usage` mapping site
+(`anthropic/stream.go` `translateMessageStop`) — before that fix `--max-run-tokens`
+UNDERCOUNTED Anthropic runs (cache-served prompt tokens never hit the budget).
+When `total.TotalTokens() >= MaxRunTokens` the loop ends via
 `terminateComplete(…, session.StopBudget, …)` — a NON-error CLEAN terminal (completed path,
 Reopen-recoverable), so it mirrors `StopNoProgress` exactly. The boundary check means an
 in-flight turn always COMPLETES (no mid-stream abort → no-replay-after-first-chunk holds); a turn
@@ -1039,6 +1045,16 @@ there); `display:summarized` set so display deltas stream. `New` passes
 `$defs`/`additionalProperties`/enums). Per-block stream buffers (tool-args/thinking/signature)
 capped at 8 MiB. `cache_control` is a SINGLE ephemeral breakpoint at the `prompt.Layered`
 StablePrefix boundary.
+
+**Usage is NORMALIZED to the engine contract at `translateMessageStop`:** Anthropic reports
+`input_tokens` EXCLUDING cache reads/writes (OpenAI's includes them), so the adapter folds
+`cache_read_input_tokens` + `cache_creation_input_tokens` into `session.Usage.InputTokens`
+(cache writes are part of the prompt and billed) — `InputTokens` is the FULL prompt and
+`CacheReadTokens ⊂ InputTokens` holds cross-provider. This made `--max-run-tokens` bill
+Anthropic runs correctly (previously undercounted by the cache-served portion) and populated
+`CacheWriteTokens` (never set before — the mecatui footer's ⊕ facet now renders for Anthropic).
+Guards: `anthropic.TestTranslateCacheWriteTurn` + the `TestUsageCacheReadSubsetOfInput` parity
+pair (one per adapter package).
 
 **Reasoning replay is PACKED INTO `Message.Reasoning` (which STAYS A STRING)**: Anthropic's
 replay unit is a LIST of `thinking{thinking,signature}` + `redacted_thinking{data}` blocks

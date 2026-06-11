@@ -82,10 +82,102 @@ func TestTranslateToolCallTurn(t *testing.T) {
 			Name: "read_file",
 			Args: json.RawMessage(`{"path":"main.go"}`),
 		}},
-		{Kind: port.ChunkUsage, Usage: &session.Usage{InputTokens: 40, OutputTokens: 9, CacheReadTokens: 32}},
+		// Raw input_tokens:40 + cache_read_input_tokens:32 fold into the full-prompt
+		// InputTokens (Anthropic reports input_tokens EXCLUDING cache reads/writes;
+		// the adapter normalizes so CacheReadTokens ⊂ InputTokens, matching OpenAI).
+		{Kind: port.ChunkUsage, Usage: &session.Usage{InputTokens: 72, OutputTokens: 9, CacheReadTokens: 32}},
 		{Kind: port.ChunkDone, Stop: session.StopEndTurn},
 	}
 	assertChunks(t, got, want)
+}
+
+// TestTranslateCacheWriteTurn exercises cache_creation_input_tokens: the cache
+// write maps to CacheWriteTokens AND is folded into InputTokens alongside the
+// cache read, so InputTokens is the full billed prompt (raw 10 + read 20 +
+// write 30 = 60) and CacheReadTokens stays a true subset.
+func TestTranslateCacheWriteTurn(t *testing.T) {
+	got := decodeFixture(t, "cache_write_turn.sse")
+	want := []port.Chunk{
+		{Kind: port.ChunkText, Text: "Cached."},
+		{Kind: port.ChunkUsage, Usage: &session.Usage{
+			InputTokens:      60,
+			OutputTokens:     5,
+			CacheReadTokens:  20,
+			CacheWriteTokens: 30,
+		}},
+		{Kind: port.ChunkDone, Stop: session.StopEndTurn},
+	}
+	assertChunks(t, got, want)
+}
+
+// TestTranslateCacheDeltaTurn exercises the message_delta cache-token capture
+// path: Anthropic's real streams ride the final cumulative usage on
+// message_delta (absolute totals, overwrite semantics), so a stream whose
+// message_start carries cache read/write 0 must still end with the DELTA's
+// cache values. Final Usage: InputTokens = raw 8 + delta read 25 + delta
+// write 15 = 48; CacheReadTokens/CacheWriteTokens are the delta values.
+func TestTranslateCacheDeltaTurn(t *testing.T) {
+	got := decodeFixture(t, "cache_delta_turn.sse")
+	want := []port.Chunk{
+		{Kind: port.ChunkText, Text: "From delta."},
+		{Kind: port.ChunkUsage, Usage: &session.Usage{
+			InputTokens:      48,
+			OutputTokens:     6,
+			CacheReadTokens:  25,
+			CacheWriteTokens: 15,
+		}},
+		{Kind: port.ChunkDone, Stop: session.StopEndTurn},
+	}
+	assertChunks(t, got, want)
+}
+
+// TestUsageCacheReadSubsetOfInput is the anthropic half of the cross-provider
+// parity guard: every Usage chunk produced from the recorded fixtures must
+// satisfy CacheReadTokens <= InputTokens (the engine/session contract that
+// CacheReadTokens ⊂ InputTokens — Anthropic's raw input_tokens EXCLUDES cache
+// tokens, so this fails if the adapter stops folding them in). The openai
+// package carries the identical assertion over its own fixtures. Fixtures are
+// globbed so a newly recorded turn is covered automatically.
+func TestUsageCacheReadSubsetOfInput(t *testing.T) {
+	// Deliberately malformed / error-path fixtures: decodeSSE returns a
+	// terminal error for these (exercised via decodeFixtureErr elsewhere),
+	// so the happy-path helper can't decode them.
+	skip := map[string]bool{
+		"error_event.sse":     true,
+		"two_text_blocks.sse": true,
+	}
+	paths, err := filepath.Glob(filepath.Join("testdata", "*.sse"))
+	if err != nil {
+		t.Fatalf("glob fixtures: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no .sse fixtures found under testdata")
+	}
+	sawCacheRead := false
+	for _, path := range paths {
+		name := filepath.Base(path)
+		if skip[name] {
+			continue
+		}
+		chunks := decodeFixture(t, name)
+		for _, c := range chunks {
+			if c.Kind != port.ChunkUsage {
+				continue
+			}
+			if c.Usage.CacheReadTokens > 0 {
+				sawCacheRead = true
+			}
+			if c.Usage.CacheReadTokens > c.Usage.InputTokens {
+				t.Errorf("%s: CacheReadTokens %d > InputTokens %d — cache reads must be a subset of the full prompt",
+					name, c.Usage.CacheReadTokens, c.Usage.InputTokens)
+			}
+		}
+	}
+	// Vacuity guard: if a fixture refresh drops every cache-bearing turn, the
+	// subset assertion above is trivially green — fail loudly instead.
+	if !sawCacheRead {
+		t.Error("no fixture yielded CacheReadTokens > 0 — the subset guard is vacuous; keep at least one cache-bearing fixture")
+	}
 }
 
 // TestTranslateThinkingToolTurn is the streaming half of the 400-trap round-trip:

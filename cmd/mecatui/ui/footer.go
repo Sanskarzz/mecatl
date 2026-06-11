@@ -77,7 +77,10 @@ func trimDecimal(v float64) string {
 
 // cacheHitRate computes the session cache-hit rate exactly as
 // engine/session/usage.go does: CacheReadTokens / InputTokens, guarded against
-// divide-by-zero (→ 0). The result is a fraction in [0,1].
+// divide-by-zero (→ 0). The result is a fraction in [0,1]. The rate is
+// meaningful because the provider adapters normalize CacheReadTokens ⊂
+// InputTokens (Anthropic's raw input_tokens excludes cache tokens; its adapter
+// folds them in), so the ratio can never exceed 1.
 func cacheHitRate(u client.Usage) float64 {
 	if u.InputTokens <= 0 {
 		return 0
@@ -307,7 +310,9 @@ func stopReasonLabel(stop string) (text, slot string) {
 // renderUsageFacets renders the session-total facets surfaced from ALL usage
 // fields: input/output token arrows, the previously-dropped cache-WRITE total
 // (⊕), and the cache-hit rate. Format: "↑7.9K ↓345 ⊕1.2K cache 88%". The cache
-// write is omitted when zero to keep the segment scannable.
+// write is omitted when zero to keep the segment scannable. The ↑/↓/⊕ facets
+// are SESSION-CUMULATIVE totals (m.usage); the ctx meter beside them is CURRENT
+// occupancy (the latest turn's prompt size) — two different axes, deliberately.
 func renderUsageFacets(u client.Usage) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "↑%s ↓%s", humanizeTokens(u.InputTokens), humanizeTokens(u.OutputTokens))

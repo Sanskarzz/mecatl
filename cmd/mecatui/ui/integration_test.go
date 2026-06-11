@@ -22,6 +22,9 @@ func TestFooterContextMeterWithWindow(t *testing.T) {
 		Model:         "mock-model",
 	})
 	m = applyAll(m, tea.WindowSizeMsg{Width: 120, Height: 30})
+	// The meter's numerator comes from the per-turn TurnEndMsg (current
+	// occupancy); the facets come from the cumulative ResultMsg total.
+	m = applyAll(m, client.TurnEndMsg{Turn: 1, Usage: client.Usage{InputTokens: 40000, OutputTokens: 345}})
 	m = applyAll(m, client.ResultMsg{
 		Stop:  "end_turn",
 		Usage: client.Usage{InputTokens: 40000, OutputTokens: 345, CacheReadTokens: 35200},
@@ -50,7 +53,7 @@ func TestFooterContextMeterWithWindow(t *testing.T) {
 func TestFooterContextMeterUnknownWindow(t *testing.T) {
 	m := New(Deps{Theme: theme.New("aztec", theme.AztecPalette())})
 	m = applyAll(m, tea.WindowSizeMsg{Width: 120, Height: 30})
-	m = applyAll(m, client.ResultMsg{Stop: "end_turn", Usage: client.Usage{InputTokens: 7903}})
+	m = applyAll(m, client.TurnEndMsg{Turn: 1, Usage: client.Usage{InputTokens: 7903}})
 
 	footer := stripANSIstr(m.renderFooter())
 	if !strings.Contains(footer, "ctx 7.9K") {
@@ -61,12 +64,58 @@ func TestFooterContextMeterUnknownWindow(t *testing.T) {
 	}
 }
 
+// TestContextMeterTracksLatestTurnNotCumulative pins the two-axis usage model:
+// m.contextTokens is CURRENT occupancy — assigned (not summed) from each
+// TurnEndMsg's InputTokens — while m.usage is the SESSION-CUMULATIVE total fed
+// only by the terminal ResultMsg. A ResultMsg must never overwrite the meter
+// with the run's cumulative input, and a TurnEndMsg must never inflate the
+// session totals (adding both would double-count).
+func TestContextMeterTracksLatestTurnNotCumulative(t *testing.T) {
+	m := New(Deps{Theme: theme.New("aztec", theme.AztecPalette()), ContextWindow: 200000})
+	m = applyAll(m, tea.WindowSizeMsg{Width: 120, Height: 30})
+
+	// Two turns: the meter shows the LATEST turn's prompt size, not the sum.
+	m = applyAll(m, client.TurnEndMsg{Turn: 1, Usage: client.Usage{InputTokens: 1000, OutputTokens: 50}})
+	m = applyAll(m, client.TurnEndMsg{Turn: 2, Usage: client.Usage{InputTokens: 1200, OutputTokens: 30}})
+	if m.contextTokens != 1200 {
+		t.Errorf("contextTokens = %d, want 1200 (latest turn, not the 2200 sum)", m.contextTokens)
+	}
+	// Per-turn usage must NOT feed the cumulative session total.
+	if m.usage.InputTokens != 0 {
+		t.Errorf("usage.InputTokens = %d, want 0 before the terminal result", m.usage.InputTokens)
+	}
+
+	// The terminal result carries the run's CUMULATIVE usage: it feeds the
+	// session totals and leaves the occupancy meter alone.
+	m = applyAll(m, client.ResultMsg{
+		Stop:  "end_turn",
+		Usage: client.Usage{InputTokens: 2200, OutputTokens: 80, CacheReadTokens: 1100},
+	})
+	if m.contextTokens != 1200 {
+		t.Errorf("contextTokens = %d after result, want 1200 (cumulative total must not overwrite occupancy)", m.contextTokens)
+	}
+	if m.usage.InputTokens != 2200 {
+		t.Errorf("usage.InputTokens = %d, want 2200 (the run's cumulative total, folded once)", m.usage.InputTokens)
+	}
+
+	// The cache-hit facet is cumulative cache-read / cumulative input: 1100/2200 = 50%.
+	footer := stripANSIstr(m.renderFooter())
+	if !strings.Contains(footer, "cache 50%") {
+		t.Errorf("expected cumulative cache-hit rate 50%% in footer:\n%s", footer)
+	}
+	// And the meter renders the occupancy numerator, not the cumulative total.
+	if !strings.Contains(footer, "1.2K/200K") {
+		t.Errorf("expected ctx 1.2K/200K (latest turn) in footer:\n%s", footer)
+	}
+}
+
 // TestFooterNarrowWidthTiers asserts the footer sheds detail in priority order
 // as width shrinks — facets first, the context signal last. Context % must
 // survive in every tier where anything fits beside the left status.
 func TestFooterNarrowWidthTiers(t *testing.T) {
 	th := theme.New("aztec", theme.AztecPalette())
 	m := New(Deps{Theme: th, ContextWindow: 200000})
+	m = applyAll(m, client.TurnEndMsg{Turn: 1, Usage: client.Usage{InputTokens: 140000, OutputTokens: 345}})
 	m = applyAll(m, client.ResultMsg{
 		Stop:  "end_turn",
 		Usage: client.Usage{InputTokens: 140000, OutputTokens: 345, CacheReadTokens: 70000},
@@ -111,6 +160,7 @@ func TestFooterTeamSegmentTiers(t *testing.T) {
 	th := theme.New("aztec", theme.AztecPalette())
 	m := New(Deps{Theme: th, ContextWindow: 200000})
 	m = applyAll(m, tea.WindowSizeMsg{Width: 200, Height: 30})
+	m = applyAll(m, client.TurnEndMsg{Turn: 1, Usage: client.Usage{InputTokens: 140000, OutputTokens: 345}})
 	m = applyAll(m, client.ResultMsg{
 		Stop:  "end_turn",
 		Usage: client.Usage{InputTokens: 140000, OutputTokens: 345, CacheReadTokens: 70000},

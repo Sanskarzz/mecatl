@@ -68,6 +68,56 @@ func TestTranslateFunctionCallTurn(t *testing.T) {
 	assertChunks(t, got, want)
 }
 
+// TestUsageCacheReadSubsetOfInput is the openai half of the cross-provider
+// parity guard: every Usage chunk produced from the recorded fixtures must
+// satisfy CacheReadTokens <= InputTokens (the engine/session contract that
+// CacheReadTokens ⊂ InputTokens — OpenAI's input_tokens already INCLUDES cached
+// tokens, so this pins the existing mapUsage behavior). The anthropic package
+// carries the identical assertion over its own fixtures. Fixtures are globbed
+// so a newly recorded turn is covered automatically.
+func TestUsageCacheReadSubsetOfInput(t *testing.T) {
+	// Deliberately malformed / error-path fixtures: decodeSSE returns a
+	// terminal error for these (exercised via decodeFixtureErr elsewhere),
+	// so the happy-path helper can't decode them.
+	skip := map[string]bool{
+		"error_event.sse":          true,
+		"response_failed.sse":      true,
+		"multi_text_part_turn.sse": true,
+	}
+	paths, err := filepath.Glob(filepath.Join("testdata", "*.sse"))
+	if err != nil {
+		t.Fatalf("glob fixtures: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no .sse fixtures found under testdata")
+	}
+	sawCacheRead := false
+	for _, path := range paths {
+		name := filepath.Base(path)
+		if skip[name] {
+			continue
+		}
+		chunks := decodeFixture(t, name)
+		for _, c := range chunks {
+			if c.Kind != port.ChunkUsage {
+				continue
+			}
+			if c.Usage.CacheReadTokens > 0 {
+				sawCacheRead = true
+			}
+			if c.Usage.CacheReadTokens > c.Usage.InputTokens {
+				t.Errorf("%s: CacheReadTokens %d > InputTokens %d — cache reads must be a subset of the full prompt",
+					name, c.Usage.CacheReadTokens, c.Usage.InputTokens)
+			}
+		}
+	}
+	// Vacuity guard: if a fixture refresh drops every cache-bearing turn, the
+	// subset assertion above is trivially green — fail loudly instead.
+	if !sawCacheRead {
+		t.Error("no fixture yielded CacheReadTokens > 0 — the subset guard is vacuous; keep at least one cache-bearing fixture")
+	}
+}
+
 func TestTranslateReasoningTurnWithCachedTokens(t *testing.T) {
 	got := decodeFixture(t, "reasoning_turn.sse")
 	want := []port.Chunk{

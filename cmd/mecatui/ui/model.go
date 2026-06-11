@@ -380,10 +380,11 @@ type Model struct {
 	// usage accumulates across the session for the footer.
 	usage client.Usage
 
-	// contextTokens is the latest turn's prompt size (its Usage.InputTokens,
-	// which already includes cache-served tokens) — i.e. the CURRENT context
-	// size, the numerator of the footer context meter. Distinct from usage,
-	// which is the cumulative session total.
+	// contextTokens is the CURRENT context occupancy, the numerator of the
+	// footer context meter: fed from each TurnEndMsg.Usage.InputTokens (the
+	// latest turn's prompt size, which already includes cache-served tokens) —
+	// never the cumulative ResultMsg total. Distinct from usage, which is the
+	// cumulative session total.
 	contextTokens int64
 
 	// expandTools toggles all tool-result bodies (and Edit/Write diffs) between
