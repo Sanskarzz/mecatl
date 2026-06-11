@@ -236,7 +236,7 @@ func (c *Consolidator) apply(ctx context.Context, entries []tool.MemoryEntry, pl
 	// Rewrites first (re-Remember an existing key with the tightened value), then
 	// forgets. Both touch only keys that already existed in the input.
 	for key, val := range rewrite {
-		if err := c.store.Remember(ctx, key, val); err != nil {
+		if err := c.store.RememberEntry(ctx, tool.MemoryEntry{Key: key, Value: val}); err != nil {
 			return Report{}, fmt.Errorf("dream: rewrite %q: %w", key, err)
 		}
 	}

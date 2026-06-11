@@ -4,7 +4,7 @@ import (
 	"context"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
-	"github.com/stacklok/mecatl/internal/adapter/memory"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 )
 
@@ -88,12 +88,13 @@ func soulSnapshotWith(cfg Config, io baselineIO) *mecatlv1.SoulInfo {
 	return nil
 }
 
-// userModelLister adapts the user-model *memory.Store's read-only Index into the
-// server's UserModelLister seam, so the server adapter need not import the memory
-// adapter. It returns an untyped nil server.UserModelLister when store is nil
-// (user model disabled), so capabilities().UserModel is honestly false. It exposes
+// userModelLister adapts the user-model tool.MemoryStore's read-only Index into
+// the server's UserModelLister seam, so the server adapter need not import the
+// memory adapter. It returns an untyped nil server.UserModelLister when store is
+// nil (user model disabled; the interface-nil check is sound under catalogAssets'
+// typed-nil discipline), so capabilities().UserModel is honestly false. It exposes
 // only the Index (key + description, value omitted) — no write path.
-func userModelLister(store *memory.Store) server.UserModelLister {
+func userModelLister(store tool.MemoryStore) server.UserModelLister {
 	if store == nil {
 		return nil
 	}
@@ -104,7 +105,7 @@ func userModelLister(store *memory.Store) server.UserModelLister {
 // store. List reads the store's tier-0 Index (the same value-omitted summary view
 // the prompt assembler renders) and maps it to the surface-agnostic entries.
 type userModelIndexLister struct {
-	store *memory.Store
+	store tool.MemoryStore
 }
 
 // List returns the current user-model entries (key + description, value omitted),

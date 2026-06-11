@@ -46,11 +46,15 @@ import (
 //   - globalMgr: the SHARED server-global MCP manager Build owns. Reused, never
 //     reconnected; its Close is NEVER folded into a per-session close (guarded by
 //     TestSessionEngineFactorySelectorCloseKeepsGlobalMCP).
-//   - memStore/userModelStore: the flocked *memory.Store instances — the SOLE
-//     construction sites are buildCatalog (project memory) and buildUserModelStore
-//     (one Store per dir, or the flock invariant breaks). CONCRETE pointers on
-//     purpose: registration checks `!= nil` on the concrete type, so the typed-nil
-//     interface trap (see buildEngine's permconfig note) cannot arise.
+//   - memStore/userModelStore: the tool.MemoryStore seams. The reference
+//     implementation is the flocked *memory.Store whose SOLE construction sites
+//     are buildCatalog (project memory) and buildUserModelStore (one Store per
+//     dir, or the flock invariant breaks). TYPED-NIL DISCIPLINE: every
+//     assignment to these fields is either a known-non-nil concrete store or an
+//     untyped nil (buildUserModelStore returns the interface with untyped-nil
+//     returns), so the `!= nil` registration checks stay sound on the interface
+//     (guarded by TestBuildUserModelStoreDisabledReturnsNilInterface; see
+//     buildEngine's permconfig note for the trap this rule prevents).
 //   - skills: the skills resolved once at build time (resolveSkills) — the same
 //     slice the ListSkills snapshot projects.
 //   - skillReadRoots: the unique per-skill directories of those skills
@@ -63,8 +67,8 @@ import (
 type catalogAssets struct {
 	globalMgr      *mcp.Manager
 	agentReg       *agents.Registry
-	memStore       *memory.Store
-	userModelStore *memory.Store
+	memStore       tool.MemoryStore
+	userModelStore tool.MemoryStore
 	skills         []skills.Skill
 	skillReadRoots []string
 	forkReaper     *agent.LRUForkReaper
@@ -269,8 +273,9 @@ func registerTeamTools(ctx context.Context, cfg Config, cat *tool.Catalog, reg *
 // flocked stores (opened once in Phase A — never re-opened here, upholding the
 // one-Store-per-dir invariant). The six tools are floor-scoped Allows in
 // defaultRules keyed on tool NAMES, so the per-session policy (the same instance)
-// governs them identically. The nil checks are on the CONCRETE *memory.Store
-// pointers (see catalogAssets) — no typed-nil interface trap.
+// governs them identically. The nil checks are interface-nil checks, kept sound
+// by the typed-nil discipline on catalogAssets (every assignment is a known-non-nil
+// concrete store or an untyped nil — no typed-nil interface trap).
 func registerMemoryFamilies(ctx context.Context, cfg Config, cat *tool.Catalog, a catalogAssets) {
 	if a.memStore != nil {
 		if err := memory.Register(cat, a.memStore); err != nil {

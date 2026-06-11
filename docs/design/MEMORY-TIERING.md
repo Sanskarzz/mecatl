@@ -243,6 +243,12 @@ Notes on keeping it clean:
 
 - `Remember(ctx, key, value)` is kept as a defaulted wrapper so callers/tests that
   do not care about descriptions are unchanged (`store_test.go` keeps compiling).
+  (Since superseded: the Phase-A port extraction dropped `Remember` from the
+  INTERFACE — `RememberEntry` is the sole write — while the concrete
+  `*memory.Store.Remember` convenience survives for direct store users, so
+  `store_test.go` still compiles unchanged. The interface also gained `Search`
+  later; see `engine/tool/tool.go` for the live contract and
+  `engine/adapter/memconformance` for the conformance suite.)
 - `Index` returns `MemoryEntry` with `Value:""` rather than a new `MemoryIndexEntry`
   type — one fewer type, and "value omitted in index results" is documented on the
   method. (If you prefer an explicit `MemoryIndexEntry{Key,Description,UpdatedAt}`

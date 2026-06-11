@@ -214,47 +214,47 @@ type MemoryEntry struct {
 // tool depends on CommandRunner, and keeping the interface in engine/tool
 // avoids the port↔tool import cycle a separate package would risk.
 //
-// SCOPING: a MemoryStore is scoped per-PROJECT — the composition root constructs
-// one store instance per workspace/project directory, so entries written in one
-// session are visible to later sessions over the SAME project dir and are NOT
-// shared across unrelated projects. Implementations must be safe for concurrent
-// use and durable across process restarts.
+// SCOPING: a MemoryStore is scoped per STORE INSTANCE — the composition root
+// constructs one instance per scope (a per-project store for project memory, a
+// per-user store for the user model), so entries written in one session are
+// visible to later sessions over the SAME scope and never across scopes.
+// Implementations must be safe for concurrent use and durable across process
+// restarts; HOW they achieve that (file locking, a remote service, ...) is
+// adapter-internal and must not leak into this contract.
+//
+// Conformance: engine/adapter/memconformance is the shared behavioral suite
+// every implementation must pass (the flock-file reference adapter runs it
+// today; remote drivers run it over their client).
 type MemoryStore interface {
 	// RememberEntry stores e, overwriting any existing entry under e.Key and
 	// bumping its UpdatedAt. e.Description is the optional one-line tier-0 hook;
-	// an empty description means "derive from the value's first line on Index".
-	// An empty key is rejected. RememberEntry is the full-fidelity write;
-	// Remember is a convenience wrapper over it.
+	// an empty description means "derive from the value's first non-empty line
+	// on Index". An empty (or whitespace-only) key is rejected with an error.
 	RememberEntry(ctx context.Context, e MemoryEntry) error
-	// Remember stores value under key with no explicit description (the index
-	// derives one from the value), overwriting any existing entry and bumping its
-	// UpdatedAt. An empty key is rejected. It is a convenience wrapper over
-	// RememberEntry, kept so callers that do not care about descriptions stay
-	// unchanged.
-	Remember(ctx context.Context, key, value string) error
 	// Recall returns the entry for the exact key. The boolean reports whether an
 	// entry was found; a miss is (zero, false, nil), not an error.
 	Recall(ctx context.Context, key string) (MemoryEntry, bool, error)
 	// List returns all entries whose key has the given prefix, sorted by key for
-	// deterministic output. An empty prefix returns every entry.
+	// deterministic output. An empty prefix returns every entry. Unlike Index and
+	// Search, List returns FULL entries — Value included — so consumers (e.g. a
+	// consolidation planner, a prefix-fallback read) can load payloads from it.
 	List(ctx context.Context, prefix string) ([]MemoryEntry, error)
 	// Forget deletes the entry for key. Deleting a missing key is not an error.
 	Forget(ctx context.Context, key string) error
 	// Index returns the tier-0 routing table: every entry as (key, description,
 	// updated-at) with the VALUE OMITTED, sorted by key for deterministic output.
-	// The store fills Description (explicit, else derived from the value's first
-	// line) but does NOT apply the tier-0 size cap — capping/rendering is the
-	// consumer's concern. It is the cheap, always-in-context summary view that
-	// lets the model see what it has stored without loading every value.
+	// The implementation fills Description (explicit, else derived from the
+	// value's first non-empty line) but does NOT apply the tier-0 size cap —
+	// capping/rendering is the consumer's concern.
 	Index(ctx context.Context) ([]MemoryEntry, error)
-	// Search ranks entries by lexical relevance to query (a local, dependency-free
-	// BM25 over each entry's key + derived description + value) and returns the top
-	// k matches best-first. Like Index, results carry (key, description, updated-at)
-	// with the VALUE OMITTED — the value participates in scoring but is never
-	// returned; callers Recall a key to load it. Results are deterministically
-	// ordered (score descending, then key ascending). Entries with no query-term
-	// overlap (zero score) are dropped. An empty or whitespace-only query yields an
-	// empty slice, NOT an error. k <= 0 selects the store's default page size.
+	// Search returns up to k entries relevant to query, best-first. Like Index,
+	// results carry (key, description, updated-at) with the VALUE OMITTED — the
+	// value may participate in scoring but is never returned; callers Recall a
+	// key to load it. Ordering must be deterministic for identical store state
+	// and query; entries with no relevance to the query are dropped, not padded.
+	// An empty or whitespace-only query yields an empty slice, NOT an error.
+	// k <= 0 selects the implementation's default page size. Ranking is
+	// implementation-defined (the reference adapter uses local lexical BM25).
 	Search(ctx context.Context, query string, k int) ([]MemoryEntry, error)
 }
 

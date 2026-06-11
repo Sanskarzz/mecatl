@@ -882,11 +882,12 @@ Two seams keep a long run inside the model's context window:
 
 ## 14. Memory — cross-session recall & consolidation (pattern 3 / 4)
 
-`tool.MemoryStore` (`Remember`/`Recall`/`List`/`Forget`) is the seam for
-conservative, **per-project** memory. The file-backed `internal/adapter/memory`
-implementation persists entries scoped to a project directory and exposes them to
-the model as the **Remember** and **Recall** tools (opt-in via `memory.Register`,
-`--memory-dir`). On top of it, `internal/adapter/dream` is an opt-in background
+`tool.MemoryStore` (`RememberEntry`/`Recall`/`List`/`Forget`/`Index`/`Search`) is
+the seam for conservative, **per-project** memory (every implementation must pass
+the shared `engine/adapter/memconformance` conformance suite). The file-backed
+`internal/adapter/memory` implementation persists entries scoped to a project
+directory and exposes them to the model as the **Remember** and **Recall** tools
+(opt-in via `memory.Register`, `--memory-dir`). On top of it, `internal/adapter/dream` is an opt-in background
 **consolidation** ("sleep") service: `dream.Consolidator` distills the stored
 memory with an LLM call — merging duplicates and dropping stale entries — but is
 deliberately conservative (it never invents keys and is fail-safe on error), run
@@ -1097,7 +1098,7 @@ changes when one is swapped:
 | `skills.Source` | `internal/adapter/skills/source.go` | `DirSource` (one dir) → `MultiSource` (ordered, earlier-wins); known-path resolver (`--skills-conventional`: project `.mecatl`/`.claude`, user XDG/`~/.claude`); future embedded/remote sources slot in |
 | `skills.Drafter` (self-improving loop) | `internal/adapter/skills/drafter.go` | off → opt-in `--skills-draft-dir`; default `DirDrafter` (offline: validate/sanitize/2-gram-Jaccard novelty → out-of-workspace quarantine, NEVER a catalog Source). WRITE side is pluggable (a future LLM-vetting decorator slots in); promotion is filesystem-only in the MVP — operator `mecated skills promote` is the gate (shows content, confirms, verifies provenance; author N → promote → active N+1) |
 | `tool.CommandRunner` | `engine/tool/tool.go` (impl `osfs`) | the command-execution chokepoint; an OS sandbox wraps here |
-| `tool.MemoryStore` | `engine/tool/tool.go` (impl `memory`) | cross-session memory + `dream` consolidation |
+| `tool.MemoryStore` | `engine/tool/tool.go` (impl `memory`; conformance `engine/adapter/memconformance`) | cross-session memory + `dream` consolidation |
 | `tool.WorkspaceForker` | `tool/isolation.go` (impl `forker`) | fork-join isolated branches |
 | `tool.Catalog` | `engine/tool/catalog.go` | core tools + MCP (streaming-HTTP) |
 | `mcpperf.Deps` (perf MCP server) | `internal/adapter/mcpperf` | opt-in `--perf-mcp`; a read-only MCP `http.Handler` mounted at `/mcp` on the loopback admin listener (both composition roots: `cmd/mecated` and `cmd/mecatui/embed`). Built by DI — `Snapshot`/`Gatherer`/`Profiler` from `telemetry`, a slow-turn ring buffer (`telemetry.SlowTurnBuffer`) bridged at the cmd boundary to the `mcpperf.SlowTurnSource` seam (telemetry never imports mcpperf — the dependency points inward). Fail-closed to loopback (unauthenticated) |

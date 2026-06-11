@@ -953,7 +953,7 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 // prompt.MemoryIndexSource / prompt.UserModelSource structurally; this is the one
 // place those adapters meet their ports. When nothing but the root is wired, the
 // bare RootAssembler is returned (no Multi).
-func buildInstructionAssembler(soulSrc prompt.SoulSource, memStore, userModelStore *memory.Store) prompt.InstructionAssembler {
+func buildInstructionAssembler(soulSrc prompt.SoulSource, memStore, userModelStore tool.MemoryStore) prompt.InstructionAssembler {
 	if soulSrc == nil && memStore == nil && userModelStore == nil {
 		return prompt.RootAssembler{}
 	}
@@ -1010,13 +1010,16 @@ const userModelSubdir = "mecatl/usermodel"
 
 // buildUserModelStore constructs the SECOND, USER-scoped memory store (issue #14,
 // Phase 2) — a cross-project store of durable FACTS about the operator. It returns
-// nil when user-model is disabled (--no-user-model), when no directory can be
-// resolved, or when the store cannot be opened (all fail-soft: the user-model
-// tools/block simply don't appear). It resolves UserModelDir when set, else the
-// conventional <xdg>/mecatl/usermodel. It upholds the one-Store-per-dir invariant:
-// this is the SOLE construction site for the user-model store, distinct from the
-// per-project memory store (different dir), so the two never contend on a lock.
-func buildUserModelStore(cfg Config) *memory.Store {
+// an untyped nil tool.MemoryStore when user-model is disabled (--no-user-model),
+// when no directory can be resolved, or when the store cannot be opened (all
+// fail-soft: the user-model tools/block simply don't appear) — buildSoulSource
+// precedent, so the callers' interface-nil checks hold (no typed-nil gotcha;
+// guarded by TestBuildUserModelStoreDisabledReturnsNilInterface). It resolves
+// UserModelDir when set, else the conventional <xdg>/mecatl/usermodel. It upholds
+// the one-Store-per-dir invariant: this is the SOLE construction site for the
+// user-model store, distinct from the per-project memory store (different dir),
+// so the two never contend on a lock.
+func buildUserModelStore(cfg Config) tool.MemoryStore {
 	if cfg.NoUserModel {
 		cfg.diag().Log(context.Background(), port.LevelInfo, "user model DISABLED (--no-user-model)")
 		return nil
@@ -1468,10 +1471,12 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 	// configured (reference entries then resolve to a clear "unknown server" diagnostic).
 	mainMgr, mcpProvider, mcpInventory, mcpClose := connectMCP(ctx, cfg)
 
-	// Per-project memory store: opt-in via MemoryDir. Opened ONCE here (flocked;
-	// one Store per dir) and shared by the build-time catalog, every per-session
-	// catalog, the prompt tier-0 index source, and the consolidation goroutine.
-	var memStore *memory.Store
+	// Per-project memory store: opt-in via MemoryDir. Opened ONCE here (the flocked
+	// reference adapter; one Store per dir) and shared by the build-time catalog,
+	// every per-session catalog, the prompt tier-0 index source, and the
+	// consolidation goroutine. Typed-nil discipline: memStore is assigned only on a
+	// successful memory.New, so it is either a known-non-nil concrete store or nil.
+	var memStore tool.MemoryStore
 	if cfg.MemoryDir != "" {
 		st, err := memory.New(cfg.MemoryDir)
 		if err != nil {
@@ -1783,7 +1788,7 @@ func startUserModelConsolidation(ctx context.Context, cfg Config, store tool.Mem
 // goroutine (debounced by UserModelReviewInterval). The reviewer reads the
 // finished session's transcript via the SessionStore and spawns a FRESH child
 // session — it NEVER reopens the user's terminal session (R10).
-func maybeWrapUserModelReview(cfg Config, hooks port.HookRunner, store port.SessionStore, provider port.LLMProvider, userModelStore *memory.Store) port.HookRunner {
+func maybeWrapUserModelReview(cfg Config, hooks port.HookRunner, store port.SessionStore, provider port.LLMProvider, userModelStore tool.MemoryStore) port.HookRunner {
 	if !cfg.UserModelReview {
 		cfg.diag().Log(context.Background(), port.LevelInfo, "user-model background review DISABLED")
 		return hooks
@@ -1804,7 +1809,7 @@ func maybeWrapUserModelReview(cfg Config, hooks port.HookRunner, store port.Sess
 // reviewer can WRITE the user model but has no other capability (no Read/Edit/Bash,
 // no Subagent/Fork). RememberUser carries the write-time injection scan, so a
 // transcript-poisoning attempt cannot land in the user-model block.
-func buildUserModelReviewEngine(cfg Config, provider port.LLMProvider, store *memory.Store) *agent.Engine {
+func buildUserModelReviewEngine(cfg Config, provider port.LLMProvider, store tool.MemoryStore) *agent.Engine {
 	cat := tool.NewCatalog()
 	for _, t := range memory.NewUserModelTools(store) {
 		if t.Spec().Name == memory.RememberUserToolName {

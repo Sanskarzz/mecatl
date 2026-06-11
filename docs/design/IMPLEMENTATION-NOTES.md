@@ -1328,8 +1328,11 @@ STRUCTURAL rather than another hand-synced list: `buildCatalog` is now Phase A o
 (connect the global MCP manager via `connectMCP`, open the flocked memory/user-model
 stores — still the sole construction sites — start the consolidation goroutines,
 discover skills via `resolveSkills`) and produces the process-wide `catalogAssets`
-(global manager, agent registry, the two concrete `*memory.Store` pointers — concrete
-so the typed-nil interface trap cannot arise — the skills slice, the per-skill
+(global manager, agent registry, the two `tool.MemoryStore` seams — interface-typed,
+under the typed-nil discipline: every assignment is a known-non-nil concrete store or
+an untyped nil (`buildUserModelStore` returns the interface with untyped-nil returns,
+guarded by `TestBuildUserModelStoreDisabledReturnsNilInterface`), so the typed-nil
+interface trap cannot arise — the skills slice, the per-skill
 read-root allowlist `skillReadRoots` — computed ONCE from that same discovered slice
 (`internal/app.skillReadRoots`: unique `osfs.ResolveRoot(filepath.Dir(sk.Path))` per
 skill, so the trust gate is inherited by construction and there is no second list to

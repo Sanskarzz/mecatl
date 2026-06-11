@@ -227,9 +227,13 @@ func (s *Store) RememberEntry(ctx context.Context, e tool.MemoryEntry) error {
 	})
 }
 
-// Remember stores value under key with no explicit description, overwriting any
-// existing entry and bumping UpdatedAt to now. An empty key is rejected. It is a
-// convenience wrapper over RememberEntry.
+// Remember stores value under key with no explicit description (the index
+// derives one from the value), overwriting any existing entry and bumping its
+// UpdatedAt. An empty key is rejected. It is a convenience wrapper over
+// RememberEntry, kept so callers that do not care about descriptions stay
+// unchanged. It is intentionally NOT part of tool.MemoryStore — the interface
+// carries RememberEntry only; this concrete convenience survives for direct
+// *Store users.
 func (s *Store) Remember(ctx context.Context, key, value string) error {
 	return s.RememberEntry(ctx, tool.MemoryEntry{Key: key, Value: value})
 }

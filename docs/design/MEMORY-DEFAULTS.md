@@ -315,9 +315,10 @@ No consolidation test — the default leaves it off and no flag is added.
 
 > **Issue #42 note:** the memory tools ride EVERY engine the memory prompt blocks
 > ride. Per-session/selector engines (`sessionEngineFactory`) assemble their catalog
-> through the same `assembleCatalog` as the shared engine, with the flocked
-> `*memory.Store` pair threaded via `catalogAssets` (opened once in `buildCatalog` —
-> the sole construction sites; never a second store on the same dir). So a `/models`
+> through the same `assembleCatalog` as the shared engine, with the
+> `tool.MemoryStore` pair threaded via `catalogAssets` (the flocked stores are
+> opened once in `buildCatalog`/`buildUserModelStore` — the sole construction
+> sites; never a second store on the same dir). So a `/models`
 > pick can no longer produce a session whose turn-0 `<memory-index>` advertises
 > memory its catalog cannot Recall. Guarded by
 > `TestSelectorSessionMemoryPromptHasMatchingTools` and
