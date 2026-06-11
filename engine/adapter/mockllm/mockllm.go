@@ -253,6 +253,14 @@ func ReasoningItemChunk(blob string) port.Chunk {
 	return port.Chunk{Kind: port.ChunkReasoningItem, Text: blob}
 }
 
+// PhaseChunk builds a ChunkPhase carrying the opaque phase marker (the analogue
+// of OpenAI's assistant-message phase, "commentary"/"final_answer"). The value
+// is passed through verbatim — the harness never interprets it — so a test can
+// script any opaque string to prove the engine threads it without branching.
+func PhaseChunk(phase string) port.Chunk {
+	return port.Chunk{Kind: port.ChunkPhase, Text: phase}
+}
+
 // ToolCallChunk builds a ChunkToolCall.
 func ToolCallChunk(call session.ToolCall) port.Chunk {
 	return port.Chunk{Kind: port.ChunkToolCall, ToolCall: &call}

@@ -183,6 +183,16 @@ func dataURL(mime string, data []byte) string {
 // function_call item per requested tool call, then a text message item if the
 // assistant produced visible text. This ordering matches the brief's multi-turn
 // rule: prior reasoning -> function_call(s).
+//
+// The opaque PHASE marker (m.Phase, "commentary"/"final_answer") rides ONLY the
+// emitted message item — phase is a message-item property, and a tool-call-only
+// turn has no message item, so phase is correctly N/A there (not a dropped
+// field). For store:false manual-replay apps OpenAI requires preserving and
+// resending phase on the assistant message item, or GPT-5.x models treat
+// preambles as final answers / stop early. An empty phase is wire-omitted (the
+// SDK tags it json:"phase,omitzero"), so the byte-stable prompt prefix is
+// unchanged for non-tagging models. The value is passed through verbatim — never
+// validated against the enum (forward-compat).
 func assistantItems(m session.Message) []responses.ResponseInputItemUnionParam {
 	out := make([]responses.ResponseInputItemUnionParam, 0, len(m.ToolCalls)+2)
 	if m.Reasoning != "" {
@@ -197,8 +207,12 @@ func assistantItems(m session.Message) []responses.ResponseInputItemUnionParam {
 			string(call.Args), string(call.ID), call.Name))
 	}
 	if m.Text != "" {
-		out = append(out, responses.ResponseInputItemParamOfMessage(
-			m.Text, responses.EasyInputMessageRoleAssistant))
+		item := responses.ResponseInputItemParamOfMessage(
+			m.Text, responses.EasyInputMessageRoleAssistant)
+		if m.Phase != "" {
+			item.OfMessage.Phase = responses.EasyInputMessagePhase(m.Phase)
+		}
+		out = append(out, item)
 	}
 	return out
 }

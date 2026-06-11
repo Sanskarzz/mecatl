@@ -57,6 +57,7 @@ type streamState struct {
 //   - response.reasoning_summary_text.delta -> ChunkReasoning (event.Delta, DISPLAY summary)
 //   - response.reasoning_text.delta         -> ChunkReasoning (event.Delta, DISPLAY summary)
 //   - response.output_item.done (reasoning)     -> ChunkReasoningItem (encrypted_content, REPLAY blob)
+//   - response.output_item.done (message)       -> ChunkPhase (opaque phase marker, REPLAYED)
 //   - response.output_item.done (function_call) -> ChunkToolCall
 //   - response.completed                    -> ChunkUsage then ChunkDone(end_turn)
 //   - response.incomplete                   -> ChunkUsage then ChunkDone(error)
@@ -109,6 +110,20 @@ func translate(event responses.ResponseStreamEventUnion, st *streamState) ([]por
 				return nil, nil
 			}
 			return []port.Chunk{{Kind: port.ChunkReasoningItem, Text: item.EncryptedContent}}, nil
+		case "message":
+			// The assembled assistant message item carries an opaque PHASE marker
+			// ("commentary" / "final_answer") that store:false manual-replay apps must
+			// preserve and resend on the assistant message item, or GPT-5.x models
+			// treat preambles as final answers / stop early (see request.go's
+			// assistantItems). It is cast through as an OPAQUE string — never validated
+			// against the enum, so unknown future values pass through unchanged
+			// (forward-compat). The visible text still arrives via output_text.delta;
+			// this case only lifts the phase off the assembled item (an empty phase —
+			// non-tagging models — yields no chunk, so replay is a no-op).
+			if item.Phase == "" {
+				return nil, nil
+			}
+			return []port.Chunk{{Kind: port.ChunkPhase, Text: string(item.Phase)}}, nil
 		case "function_call":
 			// The assembled function_call carries call_id, name, and the final
 			// arguments JSON string.

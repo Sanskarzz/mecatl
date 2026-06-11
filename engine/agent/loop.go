@@ -1127,6 +1127,11 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 	// on Message.Reasoning); it is distinct from the human-readable reasoning
 	// summary, which only drives display-only reasoning.delta events.
 	var text, reasoningBlob string
+	// phase is the OpenAI Responses opaque phase marker (commentary/final_answer),
+	// stored verbatim on Message.Phase and replayed next turn; like the reasoning
+	// blob it is never displayed or interpreted, so it carries no user-perceived
+	// token (no noteContent()).
+	var phase string
 	var calls []session.ToolCall
 	var usage session.Usage
 	stop := session.StopNone
@@ -1155,6 +1160,11 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 			// The provider emits at most one per turn; concatenation is harmless if
 			// it ever splits.
 			reasoningBlob += chunk.Text
+		case port.ChunkPhase:
+			// The opaque phase marker (commentary/final_answer). Stored on
+			// Message.Phase and replayed verbatim next turn. Last-wins (like the
+			// reasoning blob); never displayed or interpreted.
+			phase = chunk.Text
 		case port.ChunkToolCall:
 			if chunk.ToolCall != nil {
 				calls = append(calls, *chunk.ToolCall)
@@ -1182,7 +1192,9 @@ func (e *Engine) runTurn(ctx context.Context, r *Run, sess *session.Session, tur
 		timing.interTokenMaxMs = gapMaxMs
 	}
 
-	return session.NewAssistantMessage(text, reasoningBlob, calls), usage, stop, timing, nil
+	msg := session.NewAssistantMessage(text, reasoningBlob, calls)
+	msg.Phase = phase
+	return msg, usage, stop, timing, nil
 }
 
 // buildRequest assembles the provider-neutral LLMRequest for the current turn:

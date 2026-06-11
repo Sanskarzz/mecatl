@@ -69,6 +69,8 @@ Automatic prefix caching, no opt-in: prompts ≥ **1024 tokens** eligible; hits 
 
 **Verified: mecatl's replay carries the REAL blob, and `Include` is load-bearing.** A standing concern held that the adapter replayed the human-readable reasoning *summary* as `encrypted_content` rather than the real blob. That is NOT true of the current code, verified end to end: `request.go` sets `Include=[reasoning.encrypted_content]` + `Store=false` (asks the API to return the real blob); `stream.go` emits the reasoning item carrying `item.EncryptedContent` (the blob) on `response.output_item.done`, distinct from the display-only `reasoning_summary_text.delta` path (`ChunkReasoning`); `assistantItems` replays `Message.Reasoning` verbatim as `ResponseReasoningItemParam.EncryptedContent` with an empty `Summary`. The blob round-trips. The ONE residual hazard: replay only works while `Include` is set — a future provider entry that drops `reasoning.encrypted_content` from `Include` silently makes the blob `""` and degrades replay to a no-op (quality loss / premature stops, NOT a 400). Guarded by the pinning test `TestReasoningReplayUsesRealBlobNotSummary` (asserts the streamed reasoning item equals the blob NOT the summary, AND that `Include` is set with `Store=false`); the Anthropic analogue `TestReasoningEnvelopeRoundTripsSignature` pins the thinking *signature* survives pack→unpack. These are regression tripwires, not a fix — there is no replay bug to fix.
 
+**Assistant-message `phase` is captured and replayed too (issue #46), the same discipline as the reasoning blob.** The Responses API tags an assistant output `message` item with a `phase` marker — `commentary` for intermediate preambles, `final_answer` for the answer. For GPT-5.3-codex and beyond, store:false manual-replay apps **must preserve and resend phase on every assistant message item**, or the model treats prior commentary as a final answer and stops early. The seam, mirroring the reasoning route: `stream.go` lifts `item.Phase` off the assembled `message` item on `response.output_item.done` and emits a neutral `ChunkPhase` (the visible text still arrives via `output_text.delta`, untouched); the loop stores it on `session.Message.Phase`; `assistantItems` (`request.go`) sets `EasyInputMessageParam.Phase` back verbatim on the replayed assistant message item. Phase is treated as an **opaque string** — never validated against the `commentary`/`final_answer` enum, so unknown future values pass through (forward-compat). An empty phase (non-tagging models) is wire-omitted (`json:"phase,omitzero"`), so the byte-stable prompt prefix is unchanged. Guarded by `TestPhaseCapturedAndReplayed` (capture + replay + byte-stability) and `TestPhaseThreadedOntoAssistantMessage` (the loop threads it without interpreting it).
+
 ## 7. The `openai-go` SDK
 
 - **Module:** `github.com/openai/openai-go/v3` (the `/v3` is mandatory). Latest at research: **v3.37.0**. Go 1.22+.
@@ -138,10 +140,11 @@ Context cancellation surfaces as a context error, not `*openai.Error` — handle
 
 1. Responses API + `function` tools, **stateless** (`store:false`, no `previous_response_id`), own the `input` item slice as source of truth.
 2. **Preserve reasoning items every turn** (`include:["reasoning.encrypted_content"]` on OpenAI).
-3. Byte-stable prefix (instructions + tools + stable context first, volatile last); per-session `prompt_cache_key`; monitor `cached_tokens`.
-4. Use `responses.ResponseStreamAccumulator`; act on `.done`/`response.completed`.
-5. Feature-gate by endpoint; prefer model strings.
-6. Pin `github.com/openai/openai-go/v3`; verify param/constructor names against that version's `api.md`.
+3. **Preserve & resend `phase` on assistant messages** (`commentary`/`final_answer`, opaque) — dropping it makes GPT-5.x treat preambles as final answers / stop early.
+4. Byte-stable prefix (instructions + tools + stable context first, volatile last); per-session `prompt_cache_key`; monitor `cached_tokens`.
+5. Use `responses.ResponseStreamAccumulator`; act on `.done`/`response.completed`.
+6. Feature-gate by endpoint; prefer model strings.
+7. Pin `github.com/openai/openai-go/v3`; verify param/constructor names against that version's `api.md`.
 
 ### Verify before coding
 - Exact Go names for `function_call_output` input items and `ResponseStreamAccumulator` in v3.37.0 (`api.md`).

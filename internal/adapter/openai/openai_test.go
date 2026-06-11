@@ -139,6 +139,162 @@ func TestReasoningReplayUsesRealBlobNotSummary(t *testing.T) {
 	}
 }
 
+// TestPhaseCapturedAndReplayed pins the issue-#46 round-trip: the OpenAI Responses
+// phase marker on an assistant message item is CAPTURED off response.output_item.done
+// (without disturbing the single-visible-text-part assembly) and REPLAYED verbatim on
+// the assistant message item, and an empty phase is wire-omitted (byte-stability).
+func TestPhaseCapturedAndReplayed(t *testing.T) {
+	// (1) Capture: the fixture's message item carries phase:"final_answer". A
+	// ChunkPhase with that opaque value must appear, AND the "Done." text chunk must
+	// still be present — the phase capture must not perturb the visible-text-part
+	// single-part assembly.
+	got := decodeFixture(t, "phase_turn.sse")
+	var phase, text string
+	for _, c := range got {
+		switch c.Kind {
+		case port.ChunkPhase:
+			phase += c.Text
+		case port.ChunkText:
+			text += c.Text
+		}
+	}
+	if phase != "final_answer" {
+		t.Errorf("captured phase = %q, want %q", phase, "final_answer")
+	}
+	if text != "Done." {
+		t.Errorf("visible text = %q, want %q (single-text-part assembly must survive phase capture)", text, "Done.")
+	}
+
+	// (2) Replay: an assistant message carrying Phase:"final_answer" must marshal the
+	// assistant message item with "phase":"final_answer".
+	req := port.LLMRequest{
+		Model: "gpt-5.5",
+		Messages: []session.Message{
+			session.NewUserMessage("hi"),
+			func() session.Message {
+				m := session.NewAssistantMessage("Done.", "", nil)
+				m.Phase = "final_answer"
+				return m
+			}(),
+		},
+	}
+	params, err := buildParams(req)
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	raw, err := json.Marshal(params.Input.OfInputItemList)
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	if !strings.Contains(string(raw), `"phase":"final_answer"`) {
+		t.Errorf("assistant item JSON missing replayed phase; got:\n%s", raw)
+	}
+
+	// (3) Byte-stability: the SAME message with NO phase must marshal with NO phase
+	// key (EasyInputMessagePhase is json:"phase,omitzero", so empty is wire-omitted).
+	reqNoPhase := port.LLMRequest{
+		Model: "gpt-5.5",
+		Messages: []session.Message{
+			session.NewUserMessage("hi"),
+			session.NewAssistantMessage("Done.", "", nil),
+		},
+	}
+	paramsNoPhase, err := buildParams(reqNoPhase)
+	if err != nil {
+		t.Fatalf("buildParams (no phase): %v", err)
+	}
+	rawNoPhase, err := json.Marshal(paramsNoPhase.Input.OfInputItemList)
+	if err != nil {
+		t.Fatalf("marshal input (no phase): %v", err)
+	}
+	if strings.Contains(string(rawNoPhase), `"phase"`) {
+		t.Errorf("no-phase assistant item must omit the phase key; got:\n%s", rawNoPhase)
+	}
+}
+
+// TestPhaseUnknownValueReplaysVerbatim locks the OPAQUE-pass-through guarantee at
+// the heart of issue #46: an UNKNOWN, non-enum phase value (not "commentary" /
+// "final_answer") must replay byte-for-byte through buildParams, never validated
+// against the SDK enum nor branched on. If a future "tidy" narrows the cast to a
+// validated enum set, this test fails instead of silently breaking forward-compat
+// (a novel server-side phase would be dropped, re-triggering the GPT-5.x
+// preamble-as-final-answer bug for any model that emits one).
+func TestPhaseUnknownValueReplaysVerbatim(t *testing.T) {
+	const novel = "some_future_phase_v2"
+	req := port.LLMRequest{
+		Model: "gpt-5.5",
+		Messages: []session.Message{
+			session.NewUserMessage("hi"),
+			func() session.Message {
+				m := session.NewAssistantMessage("Done.", "", nil)
+				m.Phase = novel
+				return m
+			}(),
+		},
+	}
+	params, err := buildParams(req)
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	raw, err := json.Marshal(params.Input.OfInputItemList)
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	if !strings.Contains(string(raw), `"phase":"`+novel+`"`) {
+		t.Errorf("assistant item JSON missing the VERBATIM novel phase %q (the cast must be a pass-through, not enum-validated); got:\n%s", novel, raw)
+	}
+}
+
+// TestPhaseDroppedOnTextlessAssistantTurn pins the INTENDED modelling (not a bug):
+// phase rides ONLY an emitted message item, behind `if m.Text != ""` in
+// assistantItems. A tool-call-only / empty-text assistant turn has no message item,
+// so a Phase set on such a message is correctly N/A on replay — phase is a
+// message-item property and the function_call item has no phase field. This test
+// guards the otherwise-untested branch: a Phase + Text=="" + tool-call message must
+// emit a function_call item with NO leaked "phase" key.
+func TestPhaseDroppedOnTextlessAssistantTurn(t *testing.T) {
+	m := session.NewAssistantMessage("", "", []session.ToolCall{
+		session.NewToolCall("call_1", "read_file", json.RawMessage(`{"path":"main.go"}`)),
+	})
+	m.Phase = "final_answer" // set, but there is no message item to carry it
+	req := port.LLMRequest{
+		Model:    "gpt-5.5",
+		Messages: []session.Message{session.NewUserMessage("open main.go"), m},
+	}
+	params, err := buildParams(req)
+	if err != nil {
+		t.Fatalf("buildParams: %v", err)
+	}
+	raw, err := json.Marshal(params.Input.OfInputItemList)
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+	// The assistant turn must produce a function_call item and NO assistant message
+	// item — so there is nowhere for phase to ride, and the wire must carry no phase.
+	sawFunctionCall := false
+	for _, it := range items {
+		if it["type"] == "function_call" {
+			sawFunctionCall = true
+			if _, ok := it["phase"]; ok {
+				t.Errorf("function_call item must not carry a phase key (phase is a message-item property); got: %v", it)
+			}
+		}
+		if it["role"] == "assistant" {
+			t.Errorf("text-less tool-call turn must not emit an assistant message item; got: %v", it)
+		}
+	}
+	if !sawFunctionCall {
+		t.Fatalf("expected a function_call item in:\n%s", raw)
+	}
+	if strings.Contains(string(raw), `"phase"`) {
+		t.Errorf("a text-less assistant turn must drop phase entirely (intended modelling, not a bug); got:\n%s", raw)
+	}
+}
+
 // TestTranslateErrorEvent verifies a top-level "error" stream event surfaces a
 // non-nil error carrying the provider's code, message, and offending param,
 // rather than a bare StopError chunk that drops the reason.

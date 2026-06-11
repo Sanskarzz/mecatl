@@ -67,6 +67,18 @@ const (
 	ChunkUsage
 	// ChunkDone is the end of stream; it carries the StopReason.
 	ChunkDone
+	// ChunkPhase carries the provider's opaque PHASE marker on Text (mirrors
+	// ChunkReasoningItem). The OpenAI Responses API tags an assistant output
+	// message as intermediate commentary or the final answer; for store:false
+	// manual-replay apps the phase must be preserved and resent on the assistant
+	// message item, or GPT-5.x models treat preambles as final answers / stop
+	// early. The loop stores it on Message.Phase and the adapter sends it back
+	// verbatim on subsequent stateless calls. Like ChunkReasoningItem it is never
+	// displayed or interpreted — the STRUCTURE is neutral (one opaque phase string
+	// per message), the CONTENTS are provider-private (the harness never branches
+	// on or validates the value). Placed LAST in the block — chunks are in-process
+	// only, never serialized as ints, so ordinal stability is not a concern.
+	ChunkPhase
 )
 
 // Chunk is a single provider-neutral unit of a model stream. The loop assembles
@@ -77,9 +89,10 @@ type Chunk struct {
 	// Kind discriminates the payload.
 	Kind ChunkKind
 	// Text carries the assistant text on ChunkText, the human-readable reasoning
-	// summary on ChunkReasoning (display-only), and the provider's opaque reasoning
+	// summary on ChunkReasoning (display-only), the provider's opaque reasoning
 	// replay blob on ChunkReasoningItem (e.g. OpenAI encrypted_content or Anthropic
-	// (thinking,signature); never displayed).
+	// (thinking,signature); never displayed), and the provider's opaque phase
+	// marker on ChunkPhase (stored on Message.Phase, replayed verbatim).
 	Text string
 	// ToolCall is set on ChunkToolCall.
 	ToolCall *session.ToolCall

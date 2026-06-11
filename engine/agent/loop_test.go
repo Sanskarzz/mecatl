@@ -438,6 +438,50 @@ func TestReasoningAndTurnEnd(t *testing.T) {
 	}
 }
 
+// TestPhaseThreadedOntoAssistantMessage proves the loop THREADS the opaque
+// OpenAI Responses phase marker (a ChunkPhase) onto the recorded assistant
+// Message.Phase WITHOUT interpreting it — the neutral-seam analogue of the
+// reasoning-replay-blob test. It deliberately scripts an UNKNOWN, non-enum value
+// ("some_future_phase_v2", not "commentary"/"final_answer") to lock the
+// forward-compat opaque-pass-through guarantee of issue #46: the harness never
+// branches on or validates the value, so a novel phase must arrive verbatim on the
+// recorded message. It also carries NO user-perceived token: there is no dedicated
+// phase event, so the loop's event stream is unchanged (parallel to
+// ChunkReasoningItem).
+func TestPhaseThreadedOntoAssistantMessage(t *testing.T) {
+	const phase = "some_future_phase_v2"
+	llm := mockllm.New(
+		mockllm.ChunksTurn(
+			mockllm.PhaseChunk(phase),
+			mockllm.TextChunk("here is the answer"),
+			mockllm.UsageChunk(session.Usage{InputTokens: 12, OutputTokens: 4}),
+			mockllm.DoneChunk(session.StopEndTurn),
+		),
+	)
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t)})
+	sess := newSession(t, session.Limits{})
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")
+	_ = drain(r)
+
+	var asst *session.Message
+	for i := range sess.Conversation.Messages {
+		if sess.Conversation.Messages[i].Role == session.RoleAssistant {
+			asst = &sess.Conversation.Messages[i]
+			break
+		}
+	}
+	if asst == nil {
+		t.Fatalf("no assistant message recorded")
+	}
+	if asst.Phase != phase {
+		t.Fatalf("Message.Phase = %q, want the verbatim threaded phase %q", asst.Phase, phase)
+	}
+	// The visible text and reasoning are untouched by the phase threading.
+	if asst.Text != "here is the answer" {
+		t.Fatalf("Message.Text = %q, want %q (phase must not perturb text)", asst.Text, "here is the answer")
+	}
+}
+
 // TestTurnEndNoClock asserts turn.end is still emitted without a Clock, with a
 // zero duration (the no-timing degradation).
 func TestTurnEndNoClock(t *testing.T) {

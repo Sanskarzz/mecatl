@@ -3,6 +3,7 @@ package sessnap_test
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -217,6 +218,57 @@ func TestRoundTripWithParts(t *testing.T) {
 	gm := got.Conversation.Messages[0]
 	if len(gm.Parts) != 2 || gm.Parts[0].Kind != session.MediaImage || gm.Parts[1].URL != "https://example.com/a.wav" {
 		t.Fatalf("restored parts = %+v", gm.Parts)
+	}
+}
+
+// TestSnapshotRoundTripsPhase asserts the OpenAI Responses phase marker on an
+// assistant message survives Marshal -> Unmarshal (issue #46). The DTO field is
+// omitempty, so an empty phase is wire-omitted and an old snapshot still decodes.
+// It uses an UNKNOWN, non-enum value ("some_future_phase_v2") to also lock the
+// forward-compat opaque-pass-through guarantee: snapshotting never validates or
+// branches on the value, so a novel phase round-trips verbatim.
+func TestSnapshotRoundTripsPhase(t *testing.T) {
+	const novel = "some_future_phase_v2"
+	s := session.New("p1", session.ModeDefault, "/ws", session.Limits{}, time.Unix(1700000000, 0).UTC())
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	m := session.NewAssistantMessage("Done.", "", nil)
+	m.Phase = novel
+	if err := s.RecordAssistant(m); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+
+	line, err := sessnap.Marshal(s)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(line), `"phase":"`+novel+`"`) {
+		t.Fatalf("snapshot JSON missing the VERBATIM novel phase %q; got:\n%s", novel, line)
+	}
+	got, err := sessnap.Unmarshal(line)
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	gm := got.Conversation.Messages[0]
+	if gm.Phase != novel {
+		t.Fatalf("restored Phase = %q, want the verbatim novel value %q", gm.Phase, novel)
+	}
+
+	// An empty-phase assistant message must wire-omit the key (additive, no bump).
+	s2 := session.New("p2", session.ModeDefault, "/ws", session.Limits{}, time.Unix(1700000000, 0).UTC())
+	if err := s2.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	if err := s2.RecordAssistant(session.NewAssistantMessage("plain", "", nil)); err != nil {
+		t.Fatalf("RecordAssistant: %v", err)
+	}
+	line2, err := sessnap.Marshal(s2)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(line2), `"phase"`) {
+		t.Fatalf("empty-phase snapshot must omit the phase key; got:\n%s", line2)
 	}
 }
 
