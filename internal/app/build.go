@@ -3201,6 +3201,12 @@ const SoulApplyAction = "soul:apply"
 // floor-scoped + tool-name-exact, these allows can only LOSE to a higher-scope
 // ask/deny; they never loosen any OTHER tool's Ask, so the deny-dominant +
 // loosen-only-the-floor invariants are structurally untouched.
+//
+// CHILD-OBSERVABILITY pre-approval (issue #37): the three read-only
+// child-observability tools (InspectSubagent/InspectMember/SubagentStatus) follow
+// the SAME pattern — explicit ScopeBuiltinDefault ALLOWs, pre-approved but
+// config-overridable, loosening no other tool's Ask. Rationale inline at the
+// entries below; guarded by internal/app/inspect_perm_test.go.
 func defaultRules() []governance.Rule {
 	return []governance.Rule{
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Read", Effect: governance.Allow},
@@ -3229,6 +3235,20 @@ func defaultRules() []governance.Rule {
 		// applied by default; an operator config Ask/Deny still wins (Ask ⇒ withheld,
 		// since the soul is applied at build time with no interactive gate).
 		{Scope: governance.ScopeBuiltinDefault, Tool: SoulApplyAction, Effect: governance.Allow},
+		// Child observability (issue #37, decided for all three together): the inspect
+		// tools (InspectSubagent/InspectMember) and the background-collection tool
+		// (SubagentStatus) are read-only PULLs of harness-owned data — persisted child/
+		// member transcripts and the run-local child registry — bounded-rendered, with
+		// the InspectSubagent prefix gate closing the cross-tool bypass. The children
+		// themselves were already permission-gated when they ran; re-prompting to READ
+		// their output adds friction without a boundary (SubagentStatus is the SOLE
+		// collection channel for background results — an Ask there stalls every
+		// background flow on a human). Floor-scoped + tool-name-exact like the memory
+		// allows: overridable to ask/deny by any config scope, loosening no other
+		// tool's Ask.
+		{Scope: governance.ScopeBuiltinDefault, Tool: "InspectSubagent", Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: "InspectMember", Effect: governance.Allow},
+		{Scope: governance.ScopeBuiltinDefault, Tool: "SubagentStatus", Effect: governance.Allow},
 	}
 }
 

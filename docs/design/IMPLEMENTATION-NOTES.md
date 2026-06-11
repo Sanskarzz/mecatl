@@ -95,7 +95,10 @@ floor so they don't prompt by default, but auditable (in source + ENABLED logs) 
 tool-name-exact they can only LOSE to a higher scope and loosen no other tool's Ask, so the
 invariants above are structurally untouched. `soul:apply` is consulted at **soul-load (build
 time)** in `selectSoulSource` via the same evaluator/resolver (Allow⇒apply, Deny⇒withhold,
-**Ask⇒withhold** — no interactive build-time gate).
+**Ask⇒withhold** — no interactive build-time gate). The three read-only child-observability
+tools (`InspectSubagent`/`InspectMember`/`SubagentStatus`) carry the same floor-scoped Allows
+(issue #37 — see the Subagent-inspection section below for the rationale; guarded by
+`internal/app/inspect_perm_test.go`).
 
 ## Domain — `engine/prompt/`
 
@@ -339,7 +342,12 @@ tool, bypassing `InspectMember`'s team_id+member framing — the same gate the p
 (B2.1) specifies. `InspectSubagent` is registered UNCONDITIONALLY wherever the
 Subagent tool is (NOT gated on `EnableTeams`, unlike `InspectMember`); both inspect tools share the
 one store, ids kept disjoint by prefix convention (`subagent-…` / `team-…`), the gate enforcing the
-subagent side. No `defaultRules()` entry (Ask floor, parity with `InspectMember`). Guards:
+subagent side. Floor-scoped (`ScopeBuiltinDefault`) ALLOW in `defaultRules()` (issue #37, decided for
+`InspectSubagent` + `InspectMember` + `SubagentStatus` together): all three are read-only pulls of
+harness-owned data (persisted child/member transcripts; the run-local child registry), bounded-rendered,
+prefix-gated — and the children were already permission-gated when they ran. Overridable to ask/deny by
+any config scope, loosening no other tool's Ask (the memory-tools pattern; guarded by
+`internal/app/inspect_perm_test.go`). Guards:
 `agent.TestParentDiscoversAgentIDFromResultAndInspects` (model-facing e2e), `TestSubagentPersistsChildAfterRun`,
 `TestSubagentPersistsFinalStateAfterStructuredRetry`, `TestSubagentPersistsAfterErrorTerminal`,
 `TestSubagentPersistsAfterTimeoutTerminal`, `TestSubagentNilStoreSkipsPersist`, `TestInspectSubagentHappyPath`,
