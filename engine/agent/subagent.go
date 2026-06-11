@@ -505,6 +505,19 @@ type SubagentTool struct {
 // accumulates across attempts and is the real cross-attempt brake.
 const defaultStructuredOutputRetries = 2
 
+// salvageWrapUpPrompt is the model-visible re-injection driving ONE bounded wrap-up
+// turn when a FREE-TEXT child exhausts its turn/tool-call limit WITHOUT producing any
+// summary (issue #48). Without it the parent receives "(subagent produced no summary)"
+// after the child spent its whole budget fetching/reading and never reached its
+// conclusion. The salvage asks the child to stop and summarize its partial findings; it
+// explicitly forbids further tool use because the salvage drive is hard-bound to a
+// single turn (see salvageEmptyLimitStop). It is NOT a token-budget salvage: a budget
+// stop (StopBudget) is deliberately NOT salvaged — spending another turn would violate
+// the ceiling the operator set.
+const salvageWrapUpPrompt = "You have reached your step budget and must stop now. " +
+	"Do not call any more tools. Summarize concisely what you found so far and give " +
+	"your best partial answer as your final response."
+
 // submitResultToolName is the catalog name of the synthetic deliverable tool a
 // structured-output child is given. It is run-scoped (RunOptions.ExtraTools), never
 // registered into any shared catalog.
@@ -690,6 +703,9 @@ func (t *SubagentTool) Spec() tool.ToolSpec {
 		"the intermediate outputs in this conversation (do the work yourself), when file changes must " +
 		"be kept (use Parallel), or when workers must coordinate (use Team) — and don't delegate a " +
 		"single quick read you can do with Read/Grep." +
+		" Inline context you already hold (e.g. a diff, file contents, prior findings) directly in " +
+		"`prompt` rather than making the subagent re-fetch it — that saves its limited turn/tool " +
+		"budget for the actual task." +
 		" Every result starts with an 'agentId:' line — pass that id to SubagentStatus (this run's " +
 		"live state; collects background results), to InspectSubagent to read the full transcript, " +
 		"or as `resume` to continue that subagent with a follow-up prompt (fresh workspace; its " +
@@ -1505,8 +1521,14 @@ func driveChild(ctx context.Context, engine *Engine, child *session.Session, run
 		usage = usage.Add(u)
 		toolCount += tc
 
-		// Free-text path, or a structured run that produced a valid payload: done.
-		if submit == nil || submit.valid() {
+		// Free-text path: done — but first try to salvage a partial summary if the child
+		// hit a turn/tool-call limit without producing any text (issue #48).
+		if submit == nil {
+			finalText, usage = salvageEmptyLimitStop(ctx, engine, child, runWS, finalText, stop, usage, runOpts, emit, call, childID, posture)
+			return finalText, stop, usage, toolCount
+		}
+		// A structured run that produced a valid payload: done.
+		if submit.valid() {
 			return finalText, stop, usage, toolCount
 		}
 		// A child that crashed or was cancelled must not be re-driven — surface it.
@@ -1519,6 +1541,63 @@ func driveChild(ctx context.Context, engine *Engine, child *session.Session, run
 	// Retry budget exhausted with no valid payload: a CLEAN terminal the Subagent result
 	// renders as a model-visible validation-failure tool error (recoverable, not failed).
 	return finalText, session.StopStructuredOutput, usage, toolCount
+}
+
+// salvageEmptyLimitStop drives ONE bounded wrap-up turn to recover a partial summary
+// from a FREE-TEXT child that exhausted its TURN or TOOL-CALL limit without producing
+// any text (issue #48) — so the parent gets a usable (if partial) deliverable instead
+// of "(subagent produced no summary)". It returns the (possibly salvaged) final text
+// and the cumulative usage (the salvage turn's usage ADDED, never double-counted).
+//
+// It is strictly best-effort and bounded:
+//   - Triggers ONLY on StopMaxTurns / StopMaxToolCalls with a blank finalText. A token
+//     budget stop (StopBudget) is DELIBERATELY excluded — spending another turn would
+//     violate the operator's token ceiling. Every other stop falls straight through.
+//   - Reuses the SAME child session via Reopen() (which resets Counters), mirroring the
+//     structured-output retry seam. A non-recoverable session (failed/cancelled) simply
+//     keeps the empty result.
+//   - Hard-bounds the salvage to ONE model call by temporarily pinning the child's
+//     Limits to MaxTurns=1 (restored on return, so a resumed child keeps its real
+//     limits). The wrap-up prompt forbids further tool use; the one-turn cap is the
+//     enforcement so a salvage can never loop or fetch.
+//   - Re-passes the run's existing runOpts so the salvage drive carries the same
+//     tighten-only token ceiling (MaxRunTokensOverride / Deps.MaxRunTokens) the original
+//     drive used. The hard MaxTurns=1 cap is the real brake: the salvage is at most one
+//     extra model call, so it can never loop or fetch its way past a budget.
+//
+// The ORIGINAL stop reason is preserved by the caller: the salvage only fills in a
+// body; renderSubagentResult still stamps the honest "[subagent stopped: reached its
+// max-turns limit]" note. If the wrap-up errors or yields nothing, the prior empty
+// behaviour stands.
+func salvageEmptyLimitStop(ctx context.Context, engine *Engine, child *session.Session, runWS tool.Workspace, finalText string, stop session.StopReason, usage session.Usage, runOpts RunOptions, emit func(session.Event), call session.ToolCall, childID session.SessionID, posture childPosture) (string, session.Usage) {
+	if stop != session.StopMaxTurns && stop != session.StopMaxToolCalls {
+		return finalText, usage
+	}
+	if strings.TrimSpace(finalText) != "" {
+		return finalText, usage
+	}
+	if ctx.Err() != nil {
+		return finalText, usage
+	}
+	// Reopen requires StateCompleted; a limit stop terminates via terminateComplete, so
+	// the child is completed here. A failed/cancelled session is not recoverable — bail.
+	if err := child.Reopen(); err != nil {
+		return finalText, usage
+	}
+	// Pin the salvage to exactly ONE turn, restoring the real limits afterwards.
+	savedLimits := child.Limits
+	child.Limits.MaxTurns = 1
+	defer func() { child.Limits = savedLimits }()
+
+	run := engine.RunContentWith(ctx, child, runWS, salvageWrapUpPrompt, nil, runOpts)
+	text, _, u, _ := drainChildObserved(run, emit, string(call.ID), string(childID), posture)
+	// Sum the salvage turn's usage (mirror the structured-output usage accumulation);
+	// the caller's usage already excludes this drive, so there is no double-count.
+	usage = usage.Add(u)
+	if strings.TrimSpace(text) != "" {
+		finalText = text
+	}
+	return finalText, usage
 }
 
 // tightenLimit applies a per-call TIGHTEN-ONLY override to an inherited session limit:

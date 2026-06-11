@@ -116,9 +116,12 @@ func TestSubagentResumeContinuesPriorConversation(t *testing.T) {
 // (terminal completed) is resumable via the Reopen path.
 func TestSubagentResumeAfterMaxTurns(t *testing.T) {
 	store := memstore.New()
-	// A child that always calls a loop tool; MaxTurns:1 trips it on the first turn.
+	// A child that always calls a loop tool; MaxTurns:1 trips it on the first turn with
+	// no summary. The issue-#48 salvage then drives ONE bounded wrap-up turn (cursor 2),
+	// in which the child emits a partial summary; cursor 3 is the RESUME continuation.
 	childLLM := mockllm.New(
 		mockllm.ToolCallTurn(toolCall("k1", "Loop", `{}`)),
+		mockllm.TextTurn("PARTIAL_SALVAGE"),
 		mockllm.TextTurn("RESUMED_DONE"),
 	)
 	childEngine := childEngineWith(childLLM, catalogWith(t, loopTool()))
@@ -129,6 +132,10 @@ func TestSubagentResumeAfterMaxTurns(t *testing.T) {
 	fresh := runOneSubagent(t, task, "p1", `{"prompt":"loop"}`)
 	if !strings.Contains(fresh.Content, "max-turns") {
 		t.Fatalf("fresh run should have hit max-turns, got %q", fresh.Content)
+	}
+	// The salvage must have filled in the partial summary rather than the empty placeholder.
+	if !strings.Contains(fresh.Content, "PARTIAL_SALVAGE") {
+		t.Fatalf("fresh max-turns run should have salvaged a partial summary, got %q", fresh.Content)
 	}
 	sess, _ := store.Load(context.Background(), session.SessionID("subagent-p1"))
 	if sess.State != session.StateCompleted {

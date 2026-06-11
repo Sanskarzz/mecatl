@@ -183,8 +183,10 @@ func TestSubagentNamedAgentLimitsBindChildSession(t *testing.T) {
 		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"loop","agent":"bounded"}`)),
 		mockllm.TextTurn("parent done"),
 	)
-	if got := boundedLLM.Calls(); got != 2 {
-		t.Fatalf("bounded child made %d model calls, want 2 (MaxTurns=2 should bind the child session)", got)
+	// MaxTurns=2 binds the loop; the child emits no summary, so the issue-#48 salvage
+	// adds ONE bounded wrap-up turn → 2 + 1 = 3 model calls.
+	if got := boundedLLM.Calls(); got != 3 {
+		t.Fatalf("bounded child made %d model calls, want 3 (MaxTurns=2 bound + 1 bounded salvage turn)", got)
 	}
 }
 
@@ -206,9 +208,11 @@ func TestSubagentNamedAgentNoLimitsUsesDefault(t *testing.T) {
 		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"loop","agent":"loose"}`)),
 		mockllm.TextTurn("parent done"),
 	)
-	if got := looseLLM.Calls(); got != agent.DefaultChildLimits().MaxTurns {
-		t.Fatalf("loose child made %d model calls, want the default MaxTurns=%d (no per-def override)",
-			got, agent.DefaultChildLimits().MaxTurns)
+	// The default MaxTurns bounds the loop; the child emits no summary, so the issue-#48
+	// salvage adds ONE bounded wrap-up turn on top of the default cap.
+	if want := agent.DefaultChildLimits().MaxTurns + 1; looseLLM.Calls() != want {
+		t.Fatalf("loose child made %d model calls, want the default MaxTurns=%d + 1 salvage turn = %d (no per-def override)",
+			looseLLM.Calls(), agent.DefaultChildLimits().MaxTurns, want)
 	}
 }
 

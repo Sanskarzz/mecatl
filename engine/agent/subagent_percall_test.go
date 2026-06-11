@@ -26,8 +26,11 @@ func TestSubagentPerCallMaxTurnsTightens(t *testing.T) {
 		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"loop","max_turns":3}`)),
 		mockllm.TextTurn("parent done"),
 	)
-	if got := boundedLLM.Calls(); got != 3 {
-		t.Fatalf("child made %d model calls, want 3 (per-call max_turns must tighten the child session)", got)
+	// 3 turns trip max_turns; the child never emits text, so the issue-#48 salvage drives
+	// ONE more bounded wrap-up turn (also tool-only here) → 3 + 1 = 4 model calls. The
+	// per-call cap is still proven: without it the child would loop all 20 scripted turns.
+	if got := boundedLLM.Calls(); got != 4 {
+		t.Fatalf("child made %d model calls, want 4 (max_turns=3 + 1 bounded salvage turn)", got)
 	}
 }
 
@@ -44,9 +47,11 @@ func TestSubagentPerCallMaxToolCallsTightens(t *testing.T) {
 	)
 	// Each turn issues exactly one tool call; MaxToolCalls=2 stops the run at the next
 	// turn boundary once 2 tool calls are recorded — turn 1 (1 call) + turn 2 (2 calls,
-	// limit reached) → the boundary check trips before turn 3, so EXACTLY 2 model calls.
-	if got := boundedLLM.Calls(); got != 2 {
-		t.Fatalf("child made %d model calls, want exactly 2 (per-call max_tool_calls=2 must bound it)", got)
+	// limit reached) → the boundary check trips before turn 3 (2 model calls). The child
+	// produced no summary, so the issue-#48 salvage drives ONE more bounded wrap-up turn
+	// (MaxTurns=1, so the salvage's own tool call cannot exceed it) → 2 + 1 = 3.
+	if got := boundedLLM.Calls(); got != 3 {
+		t.Fatalf("child made %d model calls, want 3 (max_tool_calls=2 bound + 1 bounded salvage turn)", got)
 	}
 }
 
@@ -62,9 +67,11 @@ func TestSubagentPerCallTightenOnlyCannotLoosen(t *testing.T) {
 		mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"loop","max_turns":100}`)),
 		mockllm.TextTurn("parent done"),
 	)
-	if got := boundedLLM.Calls(); got != agent.DefaultChildLimits().MaxTurns {
-		t.Fatalf("child made %d model calls, want the inherited default MaxTurns=%d (tighten-only: a higher per-call arg must NOT loosen)",
-			got, agent.DefaultChildLimits().MaxTurns)
+	// The default MaxTurns bounds the loop; the child emits no summary, so the issue-#48
+	// salvage adds ONE bounded wrap-up turn on top of the inherited cap.
+	if want := agent.DefaultChildLimits().MaxTurns + 1; boundedLLM.Calls() != want {
+		t.Fatalf("child made %d model calls, want the inherited default MaxTurns=%d + 1 salvage turn = %d (tighten-only: a higher per-call arg must NOT loosen)",
+			boundedLLM.Calls(), agent.DefaultChildLimits().MaxTurns, want)
 	}
 }
 
