@@ -432,3 +432,80 @@ func TestClipboardWriteOverCap(t *testing.T) {
 		t.Errorf("an over-cap Write must not spawn the subprocess, ran %v", rec.got)
 	}
 }
+
+// TestClipboardPrimaryWayland: a Wayland environment reads the primary selection
+// via the EXACT `wl-paste --primary --no-newline` argv (not a shell).
+func TestClipboardPrimaryWayland(t *testing.T) {
+	r := &recordingRunner{out: map[string][]byte{
+		"wl-paste --primary --no-newline": []byte("primary sel"),
+	}}
+	cb := clipWith(r, map[string]bool{"wl-paste": true}, map[string]string{"WAYLAND_DISPLAY": "wayland-0"})
+
+	text, err := cb.ReadPrimary(context.Background())
+	if err != nil {
+		t.Fatalf("ReadPrimary: %v", err)
+	}
+	if text != "primary sel" {
+		t.Errorf("text = %q, want %q", text, "primary sel")
+	}
+	if !r.ran("wl-paste", "--primary", "--no-newline") {
+		t.Errorf("expected the wl-paste primary argv, ran %v", r.got)
+	}
+}
+
+// TestClipboardPrimaryX11: an X11 environment reads the primary selection via the
+// EXACT `xclip -selection primary -o` argv.
+func TestClipboardPrimaryX11(t *testing.T) {
+	r := &recordingRunner{out: map[string][]byte{
+		"xclip -selection primary -o": []byte("x11 primary"),
+	}}
+	cb := clipWith(r, map[string]bool{"xclip": true}, map[string]string{"DISPLAY": ":0"})
+
+	text, err := cb.ReadPrimary(context.Background())
+	if err != nil {
+		t.Fatalf("ReadPrimary: %v", err)
+	}
+	if text != "x11 primary" {
+		t.Errorf("text = %q, want %q", text, "x11 primary")
+	}
+	if !r.ran("xclip", "-selection", "primary", "-o") {
+		t.Errorf("expected the xclip primary argv, ran %v", r.got)
+	}
+}
+
+// TestClipboardPrimaryMacNoPrimarySelection: macOS has no primary selection —
+// ReadPrimary reports ErrNoClipboardTool (the UI's cue to fall back to the OSC52
+// primary read) and spawns NO subprocess.
+func TestClipboardPrimaryMacNoPrimarySelection(t *testing.T) {
+	r := &recordingRunner{}
+	cb := clipWith(r, map[string]bool{"pbpaste": true}, nil)
+
+	if _, err := cb.ReadPrimary(context.Background()); !errors.Is(err, ErrNoClipboardTool) {
+		t.Errorf("ReadPrimary err = %v, want ErrNoClipboardTool", err)
+	}
+	if len(r.got) != 0 {
+		t.Errorf("no subprocess should run on a primary-less platform, ran %v", r.got)
+	}
+}
+
+// TestClipboardPrimaryNoTool: no backend binary at all → ErrNoClipboardTool.
+func TestClipboardPrimaryNoTool(t *testing.T) {
+	r := &recordingRunner{}
+	cb := clipWith(r, nil, nil)
+
+	if _, err := cb.ReadPrimary(context.Background()); !errors.Is(err, ErrNoClipboardTool) {
+		t.Errorf("ReadPrimary err = %v, want ErrNoClipboardTool", err)
+	}
+}
+
+// TestClipboardPrimaryEmpty: a backend exists but the primary selection is empty
+// (wl-paste/xclip exit non-zero on an empty selection — the runner has no canned
+// output for the argv) → ErrEmptyClipboard.
+func TestClipboardPrimaryEmpty(t *testing.T) {
+	r := &recordingRunner{}
+	cb := clipWith(r, map[string]bool{"wl-paste": true}, map[string]string{"WAYLAND_DISPLAY": "wayland-0"})
+
+	if _, err := cb.ReadPrimary(context.Background()); !errors.Is(err, ErrEmptyClipboard) {
+		t.Errorf("ReadPrimary err = %v, want ErrEmptyClipboard", err)
+	}
+}

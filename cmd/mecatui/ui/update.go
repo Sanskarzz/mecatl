@@ -217,8 +217,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.onKey(msg)
 
-	case tea.PasteMsg:
-		return m.onPaste(msg)
+	case tea.PasteMsg, primaryReadMsg, tea.ClipboardMsg:
+		return m.onPasteMsg(msg)
 
 	case spinner.TickMsg:
 		if !m.spinnerVisible() {
@@ -989,6 +989,25 @@ func (m Model) onClickDisarm(msg clickDisarmMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// onPasteMsg fans the three paste-delivery messages out to their reducers: a
+// bracketed paste (tea.PasteMsg), the shell primary-selection read result
+// (primaryReadMsg, the middle-click paste), and an OSC52 clipboard response
+// (tea.ClipboardMsg, the middle-click paste's terminal fallback). It is one
+// switch case in update() that re-discriminates the concrete type here — the
+// onMouseMsg pattern, keeping update()'s cyclomatic complexity bounded.
+func (m Model) onPasteMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.PasteMsg:
+		return m.onPaste(msg)
+	case primaryReadMsg:
+		return m.onPrimaryRead(msg)
+	case tea.ClipboardMsg:
+		return m.onClipboardMsg(msg)
+	default:
+		return m, nil
+	}
+}
+
 // onPaste routes a bracketed-paste payload to the prompt input. Bubble Tea v2
 // emits tea.PasteMsg (not KeyPressMsg) for a paste, so it does NOT pass through
 // onKey — this mirrors onKey's overlay/help/phase gating itself. A paste is
@@ -999,11 +1018,7 @@ func (m Model) onClickDisarm(msg clickDisarmMsg) (tea.Model, tea.Cmd) {
 // internally, then run through afterInputEdit so the slash palette re-syncs
 // (e.g. pasting "/cl" opens the palette) — the same funnel typed input uses.
 func (m Model) onPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
-	if m.showHelp || m.phase == phaseAwaitingApproval ||
-		m.mcp.view != mcpNone || m.team.view != teamNone || m.agentsInv.view != agentsInvNone {
-		return m, nil
-	}
-	if m.phase != phaseIdle && m.phase != phaseRunning {
+	if !m.pasteGateOpen() {
 		return m, nil
 	}
 	// A bracketed paste whose payload is a single media FILE PATH (the common
@@ -1027,6 +1042,20 @@ func (m Model) onPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
 	return m.afterInputEdit(cmd)
+}
+
+// pasteGateOpen reports whether pasted text may reach the prompt input right now:
+// no overlay/help/approval owns the screen, and the phase accepts input (idle or
+// running — both keep the textarea focused for compose/enqueue). It is THE paste
+// gate, shared by the bracketed-paste reducer (onPaste) and the middle-click
+// primary-selection paste trigger (onMousePress), so the two paths can never
+// drift apart.
+func (m Model) pasteGateOpen() bool {
+	if m.showHelp || m.phase == phaseAwaitingApproval ||
+		m.mcp.view != mcpNone || m.team.view != teamNone || m.agentsInv.view != agentsInvNone {
+		return false
+	}
+	return m.phase == phaseIdle || m.phase == phaseRunning
 }
 
 // isChildAsk reports whether askID identifies a surfaced SUBAGENT (child)
@@ -1854,6 +1883,20 @@ func (m Model) onMousePress(mo tea.Mouse) (tea.Model, tea.Cmd) {
 			return m.copySelection()
 		}
 		return m, nil
+	case tea.MouseMiddle:
+		// Middle-click pastes the PRIMARY selection (issue #43). Mouse capture
+		// (cell-motion tracking, see View) means the terminal never performs its
+		// native middle-click paste — the app does it instead: an async primary-
+		// selection read (shell backend preferred, OSC52 fallback — see
+		// primaryPasteCmd) whose result routes through the bracketed-paste pipeline.
+		// Gated exactly like a bracketed paste; position-independent (the paste goes
+		// to the prompt input wherever the pointer is, matching terminal convention).
+		// Deliberately does NOT touch clickCount/clickGen or the drag-selection
+		// state — like right-click, it lives outside the multi-click sequence.
+		if !m.pasteGateOpen() {
+			return m, nil
+		}
+		return m, m.primaryPasteCmd()
 	case tea.MouseLeft:
 		// The selectable gate AND the count logic sit here, AFTER the gate: a press
 		// while an overlay owns the body (or under --no-mouse/--inline) starts nothing

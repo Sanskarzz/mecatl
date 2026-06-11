@@ -426,6 +426,7 @@ show the plain prompt-hint card.
 | mouse drag (left) | **select text** in the conversation — drag to an edge auto-scrolls; copies on release (alt screen only; see below) |
 | double / triple-click (left) | select word / whole line (copies; alt screen only) |
 | right-click | copy the current selection (if any) |
+| middle-click | **paste the primary selection** (X11/Wayland select-to-copy buffer) into the prompt — read via the shell backend (`wl-paste --primary` / `xclip -selection primary -o`), falling back to an OSC52 primary read; routed through the same pipeline as a bracketed paste, so a large selection stages as `[Pasted text #N]`. `shift+middle-click` always performs the terminal-native paste instead. |
 | `esc` (with an active selection) | **clear the selection** first — before any other `esc` meaning |
 | `?` | help overlay (on an empty prompt) |
 | `/` | slash-command palette (built-in `/clear`, `/help`; caps-gated `/mcp`, `/agents`, `/team`, `/skills`, `/soul`, `/usermodel`, `/models`; plus workspace commands) |
@@ -635,7 +636,16 @@ surfaced as an error.
 **`--no-mouse`: native selection instead.** In-app selection and the mouse wheel
 exist only because the app captures the mouse — and Bubble Tea has no wheel-only
 mouse mode, so capturing it is what *prevents* the terminal's own click-drag
-selection. If you'd rather use your terminal's native selection (e.g. on a
+selection. Capturing the mouse also suppresses the terminal's native
+**middle-click primary-selection paste**, which is why the app performs it in-app
+(see the keys table); `--no-mouse` restores the native middle-click paste along
+with native selection, and **`shift+middle-click` always performs the
+terminal-native paste** even with the mouse captured (most terminals pass
+shift-modified clicks through). On a Wayland system **without wl-clipboard
+installed** and a terminal that blocks OSC52 reads (e.g. Ptyxis/VTE), the in-app
+middle-click paste has no working backend and silently does nothing — install
+wl-clipboard, or use `shift+middle-click`. If you'd rather use your terminal's native
+selection (e.g. on a
 multiplexer or web terminal that strips OSC52, where neither the OSC52 nor the
 shell-write copy reaches your clipboard), pass **`--no-mouse`** (or set
 **`MECATUI_NO_MOUSE=1`**). It keeps the alt-screen TUI but leaves the mouse

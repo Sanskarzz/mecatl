@@ -293,6 +293,13 @@ type fakeClipboard struct {
 	// Write to model a missing/failed backend (which the UI must swallow).
 	wrote    [][]byte
 	writeErr error
+
+	// primary/primaryErr script ReadPrimary (the middle-click primary-selection
+	// read); primaryCalls counts invocations so the request tests can assert the
+	// shell read actually ran (or was gated off).
+	primary      string
+	primaryErr   error
+	primaryCalls int
 }
 
 func (f *fakeClipboard) Read(_ context.Context) (string, []byte, error) {
@@ -308,6 +315,17 @@ func (f *fakeClipboard) Read(_ context.Context) (string, []byte, error) {
 		return f.mime, f.seq[i], nil
 	}
 	return f.mime, f.data, nil
+}
+
+// ReadPrimary returns the scripted primary-selection text or error, counting
+// calls — the offline stand-in for the wl-paste --primary / xclip -selection
+// primary subprocess.
+func (f *fakeClipboard) ReadPrimary(_ context.Context) (string, error) {
+	f.primaryCalls++
+	if f.primaryErr != nil {
+		return "", f.primaryErr
+	}
+	return f.primary, nil
 }
 
 // Write records the payload (so the copy tests can assert the shell-clipboard

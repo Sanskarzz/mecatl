@@ -44,6 +44,10 @@ func (m Model) View() tea.View {
 	//     scroll (pgup/pgdn/home/end) is unaffected either way.
 	// (Bubble Tea v2 has no wheel-only mouse mode, so wheel-scroll and native
 	// selection genuinely cannot coexist; this is the deliberate tradeoff.)
+	// Capturing the mouse ALSO suppresses the terminal's native middle-click
+	// primary-selection paste, so onMousePress handles tea.MouseMiddle in-app
+	// (shell backend → OSC52 fallback; issue #43); shift+middle-click bypasses
+	// the capture in most terminals and still performs the native paste.
 	if !m.deps.NoAltScreen && !m.deps.NoMouse {
 		v.MouseMode = tea.MouseModeCellMotion
 	}

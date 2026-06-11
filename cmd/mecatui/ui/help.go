@@ -78,6 +78,7 @@ func helpBody(th theme.Theme, caps client.Capabilities) string {
 		{key: "home/end", action: "jump to top / bottom (end resumes auto-follow)"},
 		{key: "wheel", action: "mouse-wheel scroll (alt screen only)"},
 		{key: "drag", action: "select text · drag to an edge auto-scrolls · copies on release · double-click word · triple-click line · right-click copies · esc clears"},
+		{key: "middle-click", action: "paste the primary selection into the prompt (X11/Wayland; shift+middle-click pastes via the terminal instead)"},
 		{key: "?", action: "this help (on an empty prompt)"},
 		{key: "ctrl+c", action: "quit (press twice; first press clears the prompt or arms, again within 3s exits)"},
 	})

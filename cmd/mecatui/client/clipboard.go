@@ -28,6 +28,14 @@ import (
 // package.
 type Clipboard interface {
 	Read(ctx context.Context) (mime string, data []byte, err error)
+	// ReadPrimary reads the PRIMARY selection (the X11/Wayland select-to-copy
+	// buffer, pasted by middle-click) as text. It returns ErrNoClipboardTool when
+	// no backend binary exists OR the platform has no primary selection at all
+	// (macOS/Windows) — the caller is expected to fall back to the OSC52 primary
+	// read (tea.ReadPrimaryClipboard) in that case — and ErrEmptyClipboard when a
+	// backend exists but the primary selection is empty (both wl-paste and xclip
+	// exit non-zero on an empty selection, so a subprocess error maps here too).
+	ReadPrimary(ctx context.Context) (string, error)
 	// Write copies data (of the given mime, e.g. "text/plain") into the OS
 	// clipboard via the platform binary. It is best-effort; a missing backend or a
 	// failed subprocess returns an error the caller is expected to treat as a muted
@@ -53,6 +61,14 @@ const clipboardTimeout = 3 * time.Second
 // binXclip is the X11 clipboard binary used for both the read (list/fetch) and the
 // write (`-i`) paths; named once so the read/write argv share one spelling.
 const binXclip = "xclip"
+
+// binWlPaste is the Wayland clipboard read binary; named once so the probe and
+// the four read argvs (types/image/text/primary) share one spelling.
+const binWlPaste = "wl-paste"
+
+// argSelection is xclip's selection-choosing flag (`-selection clipboard` /
+// `-selection primary`), shared by every xclip argv.
+const argSelection = "-selection"
 
 // shellClipboard is the production Clipboard: it shells out to the platform's
 // clipboard binary. os/exec is allowed in the client package (it already does
@@ -103,6 +119,11 @@ type backend struct {
 	imageArgs []string
 	// textArgs fetches the clipboard text.
 	textArgs []string
+	// primaryTextArgs fetches the PRIMARY selection text (the X11/Wayland
+	// middle-click buffer). Empty when the platform has no primary selection
+	// (macOS/Windows); ReadPrimary then reports ErrNoClipboardTool so the UI
+	// falls back to the OSC52 primary read.
+	primaryTextArgs []string
 	// writeTextArgs WRITES stdin to the clipboard (the copy fallback). Empty when
 	// the backend has no shell write path; Write then no-ops with an error.
 	writeTextArgs []string
@@ -118,21 +139,23 @@ func (c *shellClipboard) selectBackend() (backend, error) {
 		return err == nil
 	}
 	switch {
-	case c.getenv("WAYLAND_DISPLAY") != "" && has("wl-paste"):
+	case c.getenv("WAYLAND_DISPLAY") != "" && has(binWlPaste):
 		return backend{
-			name:          "wl-paste",
-			listTypesArgs: []string{"wl-paste", "--list-types"},
-			imageArgs:     []string{"wl-paste", "--no-newline", "--type", "image/png"},
-			textArgs:      []string{"wl-paste", "--no-newline"},
-			writeTextArgs: writeArgsFor(c.lookPath, "wl-copy"),
+			name:            binWlPaste,
+			listTypesArgs:   []string{binWlPaste, "--list-types"},
+			imageArgs:       []string{binWlPaste, "--no-newline", "--type", "image/png"},
+			textArgs:        []string{binWlPaste, "--no-newline"},
+			primaryTextArgs: []string{binWlPaste, "--primary", "--no-newline"},
+			writeTextArgs:   writeArgsFor(c.lookPath, "wl-copy"),
 		}, nil
 	case c.getenv("DISPLAY") != "" && has(binXclip):
 		return backend{
-			name:          binXclip,
-			listTypesArgs: []string{binXclip, "-selection", "clipboard", "-t", "TARGETS", "-o"},
-			imageArgs:     []string{binXclip, "-selection", "clipboard", "-t", "image/png", "-o"},
-			textArgs:      []string{binXclip, "-selection", "clipboard", "-o"},
-			writeTextArgs: []string{binXclip, "-selection", "clipboard", "-i"},
+			name:            binXclip,
+			listTypesArgs:   []string{binXclip, argSelection, "clipboard", "-t", "TARGETS", "-o"},
+			imageArgs:       []string{binXclip, argSelection, "clipboard", "-t", "image/png", "-o"},
+			textArgs:        []string{binXclip, argSelection, "clipboard", "-o"},
+			primaryTextArgs: []string{binXclip, argSelection, "primary", "-o"},
+			writeTextArgs:   []string{binXclip, argSelection, "clipboard", "-i"},
 		}, nil
 	case has("pngpaste") || has("pbpaste"):
 		// macOS. pngpaste fetches a clipboard image to stdout ("-"); it has no
@@ -242,6 +265,35 @@ func (c *shellClipboard) Read(ctx context.Context) (string, []byte, error) {
 		}
 	}
 	return "", nil, ErrEmptyClipboard
+}
+
+// ReadPrimary implements Clipboard's PRIMARY-selection read (the middle-click
+// paste buffer). Text-only by design: the primary selection is a select-to-copy
+// TEXT buffer, so there is no image-first branch. A platform whose backend has no
+// primary selection (macOS/Windows) — or no backend at all — is ErrNoClipboardTool,
+// which the UI treats as "fall back to the OSC52 primary read". An empty selection
+// (both wl-paste and xclip exit non-zero / emit nothing on one) is
+// ErrEmptyClipboard. No size cap, matching the Read text-fallback path (a huge
+// selection is the UI's business — it stages behind a [Pasted text #N]
+// placeholder); the subprocess stays bounded by the same timeout as Read.
+func (c *shellClipboard) ReadPrimary(ctx context.Context) (string, error) {
+	b, err := c.selectBackend()
+	if err != nil {
+		return "", err
+	}
+	if len(b.primaryTextArgs) == 0 {
+		return "", ErrNoClipboardTool // platform has no primary selection → OSC52 fallback
+	}
+	if to := c.timeout; to > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, to)
+		defer cancel()
+	}
+	out, err := c.run(ctx, b.primaryTextArgs[0], b.primaryTextArgs[1:]...)
+	if err != nil || len(out) == 0 {
+		return "", ErrEmptyClipboard
+	}
+	return string(out), nil
 }
 
 // tryImage attempts to fetch a clipboard image. ok reports whether an image was

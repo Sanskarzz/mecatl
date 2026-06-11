@@ -101,6 +101,78 @@ func (m Model) onClipboardResult(msg clipboardResultMsg) (tea.Model, tea.Cmd) {
 	return m.afterInputEdit(nil)
 }
 
+// primaryReadMsg carries the shell primary-selection read (the middle-click
+// paste, issue #43) back to the reducer: the selection text, or the error that
+// decides between the OSC52 fallback (ErrNoClipboardTool) and a silent no-op.
+type primaryReadMsg struct {
+	text string
+	err  error
+}
+
+// primaryPasteCmd returns the async primary-selection read a middle-click
+// triggers: the SHELL backend when a Clipboard collaborator is wired (read off
+// the update goroutine, exactly like the ctrl+v read), falling back to the OSC52
+// primary read (tea.ReadPrimaryClipboard) when there is none. The OSC52 path is
+// STATELESS: nothing is parked or timed — the insert happens only if the terminal
+// ever answers with a ClipboardMsg{Selection: 'p'} (see onClipboardMsg). That
+// matters because OSC52 READ is blocked in some terminals (Ptyxis/VTE), where the
+// query simply never gets a response.
+func (m Model) primaryPasteCmd() tea.Cmd {
+	cb := m.deps.Clipboard
+	if cb == nil {
+		return tea.ReadPrimaryClipboard
+	}
+	ctx := m.deps.Ctx
+	return func() tea.Msg {
+		text, err := cb.ReadPrimary(ctx)
+		return primaryReadMsg{text: text, err: err}
+	}
+}
+
+// onPrimaryRead reduces the shell primary-selection read. No backend (or a
+// platform without a primary selection) falls back to the OSC52 primary read;
+// any other failure — including an empty selection — is a SILENT no-op
+// (statusline noise for a paste miss is worse than nothing; deliberately quieter
+// than the ctrl+v error surface, where the user explicitly asked for a paste of
+// something they believe exists). A successful read inserts via the bracketed-
+// paste pipeline (insertPrimaryPaste).
+func (m Model) onPrimaryRead(msg primaryReadMsg) (tea.Model, tea.Cmd) {
+	if errors.Is(msg.err, client.ErrNoClipboardTool) {
+		return m, tea.ReadPrimaryClipboard
+	}
+	if msg.err != nil {
+		return m, nil
+	}
+	return m.insertPrimaryPaste(msg.text)
+}
+
+// onClipboardMsg reduces an OSC52 clipboard-read response from the terminal. Only
+// a PRIMARY-selection response ('p' — the middle-click paste's OSC52 fallback) is
+// consumed; a system-clipboard response ('c') is ignored (the app never issues
+// tea.ReadClipboard, and ctrl+v owns the system-clipboard paste via the shell
+// backend). Stateless by design: there is no pending-request flag — a 'p' response
+// only ever arrives because we queried, and a late one inserting into an
+// input-accepting phase is exactly what the user asked for.
+func (m Model) onClipboardMsg(msg tea.ClipboardMsg) (tea.Model, tea.Cmd) {
+	if msg.Selection != 'p' {
+		return m, nil
+	}
+	return m.insertPrimaryPaste(msg.Content)
+}
+
+// insertPrimaryPaste routes retrieved primary-selection text through the SAME
+// pipeline as a bracketed paste (onPaste): the overlay/phase gates re-apply at
+// delivery time (a read that lands after a modal opened is dropped, not leaked
+// behind it), a huge selection stages behind a [Pasted text #N] placeholder
+// (issue #45 parity) instead of flooding the buffer, and the slash/mention
+// palettes resync. Empty or whitespace-only selections are a silent no-op.
+func (m Model) insertPrimaryPaste(text string) (tea.Model, tea.Cmd) {
+	if strings.TrimSpace(text) == "" {
+		return m, nil
+	}
+	return m.onPaste(tea.PasteMsg{Content: text})
+}
+
 // onClipboardErr reduces a clipboard read failure. A missing backend gets an
 // actionable install hint; an empty clipboard is a benign status (no transcript
 // noise); any other error (oversize image, backend failure) is a loud transcript
