@@ -27,11 +27,14 @@ const maxToolResultLines = 12
 const maxDiffLines = 12
 
 // renderer turns conversation blocks into the viewport string. It owns the
-// glamour TermRenderer cache (keyed by wrap width) and the active theme. glamour
-// is NOT thread-safe, so renderer is only ever touched from the Bubble Tea
-// update goroutine — never from the stream reader. The mutex guards the cache map
-// against the (currently single-goroutine) access defensively and documents the
-// invariant; it does not make glamour itself concurrency-safe.
+// glamour TermRenderer cache (keyed by wrap width), the active theme, and two
+// per-block memo layers: blockCache (whole rendered blocks, keyed on
+// rev/width/expand — see renderBlock) and blockMD (the assistant glamour step,
+// keyed on src/width — see markdownAt). glamour is NOT thread-safe, so renderer
+// is only ever touched from the Bubble Tea update goroutine — never from the
+// stream reader. The mutex guards the cache map against the (currently
+// single-goroutine) access defensively and documents the invariant; it does not
+// make glamour itself concurrency-safe.
 type renderer struct {
 	th    theme.Theme
 	width int
@@ -40,19 +43,39 @@ type renderer struct {
 	cache map[int]*glamour.TermRenderer
 
 	// blockMD memoizes the glamour render of each assistant block, keyed by the
-	// block's (stable, append-only) conversation index. refreshView re-renders the
-	// WHOLE scrollback on every flushed frame (deltas are coalesced to frame cadence;
-	// see update.go's renderTickMsg). Without this, every prior assistant turn is
-	// re-parsed through glamour on every flushed frame of the live turn — O(turns ×
-	// frames) glamour work that grows with session length. Memoising collapses each
-	// SETTLED block to one render: only the live (last) block, whose src grows each
-	// frame, misses and re-renders. markdown() is a pure function of (src, width,
-	// theme) and the theme is fixed for the renderer's life, so the cached entry is
-	// valid whenever its (src, width) still match — index is just the bucket that
-	// bounds memory to one entry per block and lets the live block overwrite in
-	// place. Touched only on the Bubble Tea update goroutine (same invariant as the
-	// glamour cache), so it needs no lock.
+	// block's (stable, append-only) conversation index. It is the INNER of the two
+	// per-block memo layers: blockCache (below) memoizes the whole rendered block
+	// (any kind) keyed on (rev, width, expand), while blockMD memoizes only the
+	// glamour markdown step of an assistant block keyed on (src, width) — so an
+	// assistant block whose rev changed for a non-text reason (e.g. the turn-end
+	// endReasoningStream) misses the outer cache but still reuses its glamour
+	// render here. refreshView re-renders the WHOLE scrollback on every flushed
+	// frame (deltas are coalesced to frame cadence; see update.go's renderTickMsg).
+	// Without this, every prior assistant turn is re-parsed through glamour on
+	// every flushed frame of the live turn — O(turns × frames) glamour work that
+	// grows with session length. Memoising collapses each SETTLED block to one
+	// render: only the live (last) block, whose src grows each frame, misses and
+	// re-renders. markdown() is a pure function of (src, width, theme) and the
+	// theme is fixed for the renderer's life, so the cached entry is valid whenever
+	// its (src, width) still match — index is just the bucket that bounds memory to
+	// one entry per block and lets the live block overwrite in place. Touched only
+	// on the Bubble Tea update goroutine (same invariant as the glamour cache), so
+	// it needs no lock. Dropped (with blockCache) by resetBlockCaches when the
+	// conversation is rebuilt, since a fresh conversation reuses the same indices.
 	blockMD map[int]mdEntry
+
+	// blockCache memoizes the FULL rendered string of every block (all kinds, not
+	// just assistant markdown), keyed by the block's stable conversation index. An
+	// entry is valid while the block's render revision (block.rev — bumped by the
+	// conversation's mutation gateways), the wrap width, and the global expand
+	// toggle all match, so on each flushed frame every SETTLED block joins the
+	// conversation string straight from cache and only mutated blocks (in practice
+	// the live tail) re-render through renderBlockFresh. Correctness rests on the
+	// same purity argument as blockMD — a block's render is a pure function of
+	// (block fields, width, expand, theme) with the theme fixed per process — plus
+	// the rev discipline documented on block.rev. Update-goroutine-only; dropped by
+	// resetBlockCaches when the conversation is rebuilt (index reuse).
+	blockCache map[int]blockEntry
 
 	// mdRenders counts REAL glamour invocations (cache misses) — incremented at the
 	// tr.Render call site in markdown(), not in markdownAt's hit path. It is the test
@@ -60,6 +83,13 @@ type renderer struct {
 	// deltas with no frame flush leave it unchanged, and one flush bumps it by exactly
 	// one (the live block re-renders once). Touched only on the update goroutine.
 	mdRenders int
+
+	// blockRenders counts REAL whole-block renders (blockCache misses) — incremented
+	// only when renderBlock falls through to renderBlockFresh, never on a cache hit.
+	// It is the test seam proving settled blocks join from cache: a flushed frame of
+	// a streaming turn bumps it by exactly one (the live block), regardless of how
+	// long the scrollback is. Touched only on the update goroutine.
+	blockRenders int
 }
 
 // mdEntry is one memoized assistant-block render: the source text and wrap width
@@ -70,13 +100,35 @@ type mdEntry struct {
 	out   string
 }
 
+// blockEntry is one memoized whole-block render: the block revision, wrap width,
+// and expand state it was produced under (the validity key) plus the rendered
+// ANSI output.
+type blockEntry struct {
+	rev    int
+	width  int
+	expand bool
+	out    string
+}
+
 // newRenderer builds a renderer for a theme.
 func newRenderer(th theme.Theme) *renderer {
 	return &renderer{
-		th:      th,
-		cache:   map[int]*glamour.TermRenderer{},
-		blockMD: map[int]mdEntry{},
+		th:         th,
+		cache:      map[int]*glamour.TermRenderer{},
+		blockMD:    map[int]mdEntry{},
+		blockCache: map[int]blockEntry{},
 	}
+}
+
+// resetBlockCaches drops BOTH per-block memo layers (blockCache and blockMD).
+// It MUST be called whenever the conversation is rebuilt from scratch (/clear,
+// the /models restart-now handoff — see Model.resetSession): both caches key on
+// the block's conversation INDEX, and a fresh conversation reuses indices 0..n
+// for entirely different blocks whose rev/src could coincidentally match a stale
+// entry, which would alias an old block's render onto a new one.
+func (r *renderer) resetBlockCaches() {
+	r.blockCache = map[int]blockEntry{}
+	r.blockMD = map[int]mdEntry{}
 }
 
 // setWidth records the current wrap width. Width changes are handled by the
@@ -130,6 +182,12 @@ func (r *renderer) markdown(src string) string {
 		w--
 	}
 	r.mu.Lock()
+	if r.cache == nil {
+		// Zero-value safety: a bare &renderer{th: th} (see the renderBlock comment)
+		// never went through newRenderer; lazy-init so any path reaching glamour on
+		// one stays safe.
+		r.cache = map[int]*glamour.TermRenderer{}
+	}
 	tr, ok := r.cache[w]
 	if !ok {
 		built, err := glamour.NewTermRenderer(
@@ -170,6 +228,12 @@ func (r *renderer) markdownAt(idx int, src string) string {
 		return e.out
 	}
 	out := r.markdown(src)
+	if r.blockMD == nil {
+		// Zero-value safety: a bare &renderer{th: th} (see the renderBlock comment)
+		// never went through newRenderer; lazy-init so an assistant block rendered
+		// through one stays safe.
+		r.blockMD = map[int]mdEntry{}
+	}
 	r.blockMD[idx] = mdEntry{src: src, width: r.width, out: out}
 	return out
 }
@@ -320,6 +384,13 @@ func stripVS16(s string) string {
 // renderConversation joins every block into the viewport content string. expand
 // is the global tool-output toggle (ctrl+t): when true, tool result bodies and
 // Edit/Write diffs render in full instead of line-capped.
+//
+// It is called on every flushed frame (frame-coalesced during streaming; see
+// update.go's renderTickMsg), but each SETTLED block joins from the per-block
+// cache via renderBlock — only blocks whose (rev, width, expand) changed render
+// fresh, so the per-frame styling cost is O(changed blocks), not O(scrollback).
+// The join itself (and the viewport's SetContent line split) remains
+// O(scrollback) string work.
 func (r *renderer) renderConversation(c *conversation, expand bool) string {
 	var b strings.Builder
 	for i := range c.blocks {
@@ -332,11 +403,42 @@ func (r *renderer) renderConversation(c *conversation, expand bool) string {
 	return b.String()
 }
 
-// renderBlock renders one block per its kind. Assistant text goes through
+// renderBlock is the CACHED per-block entry point: it returns the memoized
+// render when the block's revision, the wrap width, and the expand toggle all
+// match the cached entry, and otherwise renders fresh via renderBlockFresh,
+// stores the result, and bumps blockRenders (the cache-miss test seam). idx is
+// the block's stable conversation index (blocks are append-only within a
+// conversation; resetBlockCaches handles index reuse across rebuilds).
+// Correctness rests on the block.rev discipline: every post-append mutation of a
+// render-visible field bumps rev through a conversation gateway, so a cache hit
+// can never be stale. Update-goroutine-only.
+func (r *renderer) renderBlock(idx int, b *block, expand bool) string {
+	if e, ok := r.blockCache[idx]; ok && e.rev == b.rev && e.width == r.width && e.expand == expand {
+		return e.out
+	}
+	out := r.renderBlockFresh(idx, b, expand)
+	if r.blockCache == nil {
+		// Zero-value safety: a bare &renderer{th: th} never calls newRenderer. Two
+		// production sites construct one — the width-0 team focus renderer
+		// (team.go, renderTeamFocus) and the fleet focus renderer (agents_overlay.go,
+		// renderSubagentFocus) — plus direct test construction. Those sites only call
+		// the trace/chip helpers today, but the safety must be uniform: markdown and
+		// markdownAt carry matching lazy-inits for their maps (r.cache / r.blockMD),
+		// so ANY render path on a bare renderer is safe, not just non-assistant
+		// blocks through here.
+		r.blockCache = map[int]blockEntry{}
+	}
+	r.blockCache[idx] = blockEntry{rev: b.rev, width: r.width, expand: expand, out: out}
+	r.blockRenders++
+	return out
+}
+
+// renderBlockFresh renders one block per its kind. Assistant text goes through
 // glamour; everything else is plain themed lipgloss. idx is the block's stable
 // conversation index, used to memoize the (expensive) assistant glamour render
-// across the per-delta full-scrollback re-render — see markdownAt.
-func (r *renderer) renderBlock(idx int, b *block, expand bool) string {
+// across the per-delta full-scrollback re-render — see markdownAt (the inner
+// memo layer below renderBlock's whole-block cache).
+func (r *renderer) renderBlockFresh(idx int, b *block, expand bool) string {
 	switch b.kind {
 	case blockUser:
 		label := r.th.Style("userLabel").Render("you")

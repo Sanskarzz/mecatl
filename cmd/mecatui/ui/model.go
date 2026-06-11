@@ -540,6 +540,13 @@ func (m *Model) recordFileChange(path string) {
 // state — leaving them to drain into a freshly-cleared transcript would surprise.
 func (m Model) resetSession() Model {
 	m.conv = conversation{}
+	// Drop the renderer's per-block caches (blockCache AND blockMD) alongside the
+	// conversation: both key on the block's conversation INDEX, and the rebuilt
+	// conversation reuses indices 0..n for entirely different blocks whose
+	// rev/src could coincidentally match a stale entry — which would alias an old
+	// block's render onto the new transcript. Covers /clear and the /models
+	// restart-now handoff (both funnel through here).
+	m.rend.resetBlockCaches()
 	// An empty conversation is at-bottom by definition, so auto-follow must be
 	// re-armed: without this a /clear issued while scrolled up (stuck=false) would
 	// strand stuck false, and refreshView (re-pins only if stuck) would silently

@@ -71,7 +71,11 @@ func TestNoticeAndErrorWrap(t *testing.T) {
 		{"error", blockError, "✗"},
 	} {
 		b := block{kind: tc.kind, raw: long}
-		out := r.renderBlock(0, &b, false)
+		// renderBlockFresh: two DIFFERENT logical blocks share this renderer at a
+		// dummy index, which would alias in renderBlock's per-block cache (its
+		// contract is one stable conversation index per block; render_cache_test.go
+		// covers the cached path).
+		out := r.renderBlockFresh(0, &b, false)
 		lines := strings.Split(out, "\n")
 		if len(lines) <= 1 {
 			t.Fatalf("%s: expected wrapping to multiple lines, got %d", tc.name, len(lines))
@@ -121,7 +125,12 @@ func TestUnbreakableTokenForceBreaks(t *testing.T) {
 		{"error", blockError},
 	} {
 		b := block{kind: tc.kind, raw: token}
-		out := r.renderBlock(0, &b, false)
+		// renderBlockFresh: two DIFFERENT logical blocks share this renderer at a
+		// dummy index — through renderBlock the second case would cache-HIT the
+		// first's entry (same idx/rev/width/expand) and silently unpin the error
+		// force-break path (renderBlock's contract is one stable conversation index
+		// per block; render_cache_test.go covers the cached path).
+		out := r.renderBlockFresh(0, &b, false)
 		for i, ln := range strings.Split(out, "\n") {
 			if w := maxLineWidth(ln); w > r.width {
 				t.Errorf("%s: line %d exceeds width %d (got %d): %q", tc.name, i, r.width, w, stripANSIstr(ln))

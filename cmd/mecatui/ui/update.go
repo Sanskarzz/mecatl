@@ -109,6 +109,13 @@ func (m Model) markDirty() (Model, tea.Cmd) {
 // is always rendered before any boundary (the final frame and event ordering are
 // unchanged; only the per-token re-render churn is coalesced). refreshView clears
 // viewDirty, making "rendered ⟺ not dirty" an invariant.
+//
+// Within each 16ms flush, the per-BLOCK render cache (renderer.blockCache, keyed
+// on block.rev/width/expand) means only blocks whose rev, the wrap width, or the
+// expand toggle changed actually re-render — in practice just the live tail
+// block; every settled block joins the conversation string from cache. The
+// selection splice and vp.SetContent still see the full joined string, so
+// selection/scroll behaviour is unchanged.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Capture whether the welcome splash was showing (idle + empty) BEFORE this
 	// message, so the wrapper below can detect the empty→non-empty transition that
@@ -2234,6 +2241,12 @@ func (m Model) onScrollKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // syncStuck), so a streaming delta re-renders the growing content in place without
 // yanking the view back to the bottom — the user's scroll-up survives streaming.
 // Scrolling/jumping back to the bottom re-sets stuck, and auto-follow resumes.
+//
+// Cost shape: renderConversation re-renders only blocks whose rev/width/expand
+// changed since the last frame (the renderer's blockCache; in practice the live
+// tail block) — settled blocks join from cache. The residual O(scrollback)
+// per-frame cost is the string JOIN plus vp.SetContent's line split/measure of
+// the full content; trimming that is a follow-up, out of scope here.
 func (m *Model) refreshView() {
 	m.viewDirty = false
 	content := m.rend.renderConversation(&m.conv, m.expandTools)

@@ -733,6 +733,21 @@ The `renderer.mdRenders` counter (incremented only at the real `glamour` call si
 is the test seam: N coalesced deltas leave it unchanged, one flush bumps it by one
 (`coalesce_test.go`).
 
+**Per-block render cache.** On top of the coalescing sits a per-BLOCK render
+cache (`renderer.blockCache`):
+each scrollback block's full rendered string is memoized keyed on the block's
+render revision (`block.rev`, bumped by the conversation's mutation gateways),
+the wrap width, and the ctrl+t expand toggle. On every flushed frame, settled
+blocks join the conversation string straight from cache — only blocks whose
+rev/width/expand changed re-render (in practice just the live tail block), so
+the per-frame styling cost is O(changed blocks) rather than O(scrollback). The
+`renderer.blockRenders` counter (incremented only on a cache miss) is the test
+seam, and the cache-equivalence oracle in `render_cache_test.go` proves the
+cache is output-invisible after every conversation mutator. Both per-block
+caches (`blockCache` and the inner assistant-glamour memo `blockMD`) are dropped
+when the conversation is rebuilt — `/clear` and the `/models` restart-now
+handoff — because a rebuilt transcript reuses block indices.
+
 **Spinner tick phase-gate.** The footer spinner's bubbles tick chain is
 self-perpetuating (every `sp.Update` returns the next tick cmd), so the reducer
 drops `spinner.TickMsg` in any phase where the spinner is not rendered

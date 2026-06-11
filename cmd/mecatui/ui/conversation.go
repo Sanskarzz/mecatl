@@ -130,6 +130,17 @@ const (
 type block struct {
 	kind blockKind
 
+	// rev is the block's render revision: bumped on EVERY post-append mutation of a
+	// render-visible field. The renderer's per-block cache (renderer.blockCache)
+	// keys on it, so a settled block (rev unchanged) joins the conversation string
+	// from cache while a mutated block re-renders fresh. Blocks must therefore be
+	// mutated only through conversation methods — the bump sites are exactly four
+	// gateways (currentAssistant, subagentBlock, teamBlock, and resolveTool's
+	// matched branch), which together front every post-append mutator. The
+	// cache-equivalence oracle in render_cache_test.go is the drift tripwire: a
+	// mutation path that bypasses a bump renders stale and fails the oracle.
+	rev int
+
 	raw string // user text, assistant markdown buffer, or notice text
 
 	// media holds one placeholder line per non-text part attached to a USER block
@@ -322,8 +333,15 @@ func (c *conversation) endReasoningStream() {
 
 // currentAssistant returns the trailing assistant block (the one being streamed
 // into this turn) or nil when the last block is not an assistant block.
+//
+// It bumps the block's render revision (rev) before returning non-nil: it is the
+// sole gateway for the assistant mutators (appendAssistant / appendReasoning /
+// endReasoningStream), so bumping here keeps every mutation path invalidating the
+// render cache. A read-only future caller pays only a spurious re-render of one
+// block — never a stale frame.
 func (c *conversation) currentAssistant() *block {
 	if n := len(c.blocks); n > 0 && c.blocks[n-1].kind == blockAssistant {
+		c.blocks[n-1].rev++
 		return &c.blocks[n-1]
 	}
 	return nil
@@ -352,6 +370,7 @@ func (c *conversation) resolveTool(callID, body string, isErr bool) bool {
 	for i := len(c.blocks) - 1; i >= 0; i-- {
 		b := &c.blocks[i]
 		if b.kind == blockTool && b.toolID == callID && !b.resolved {
+			b.rev++ // render-visible mutation (a possibly NON-tail block): invalidate its cache entry
 			b.resolved = true
 			b.resultBody = body
 			b.resultError = isErr
@@ -366,10 +385,17 @@ func (c *conversation) resolveTool(callID, body string, isErr bool) bool {
 // resolveTool — so a subagent.* event is attributed to its originating Subagent card
 // even with several Subagent cards interleaved. It scans from the end so the most
 // recent matching call wins.
+//
+// It bumps the block's render revision (rev) before returning non-nil: it is the
+// gateway for the three subagent mutators (setSubagentStart / addSubagentTool /
+// setSubagentEnd), all of which mutate render-visible subagent fields — possibly
+// on a NON-tail block (a background subagent.end lands after later blocks were
+// appended), so the renderer's per-block cache must be invalidated here.
 func (c *conversation) subagentBlock(parentCallID string) *block {
 	for i := len(c.blocks) - 1; i >= 0; i-- {
 		b := &c.blocks[i]
 		if b.kind == blockTool && b.toolID == parentCallID {
+			b.rev++
 			return b
 		}
 	}
@@ -703,10 +729,18 @@ func (c *conversation) liveParallel() bool {
 // if none. Matching is by id only — the SAME contract as resolveTool/subagentBlock
 // — so a team.* event is attributed to its originating Team card even with several
 // tool cards interleaved. It scans from the end so the most recent match wins.
+//
+// It bumps the block's render revision (rev) before returning non-nil: it is the
+// gateway for the five team mutators (setTeamStart / addTeamMember / setTeamEnd /
+// setTeamTasks / setTeamFindings) — note setTeamTasks/setTeamFindings flip the
+// render-visible b.team flag even though tasks/findings themselves render only in
+// the ctrl+a overlay, so they invalidate too. latestTeamBlock/liveTeamBlock (the
+// overlay READ path) deliberately do NOT bump.
 func (c *conversation) teamBlock(parentCallID string) *block {
 	for i := len(c.blocks) - 1; i >= 0; i-- {
 		b := &c.blocks[i]
 		if b.kind == blockTool && b.toolID == parentCallID {
+			b.rev++
 			return b
 		}
 	}

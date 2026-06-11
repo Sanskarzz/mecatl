@@ -12,10 +12,14 @@ import (
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 )
 
-// renderHookBlock is a small helper that renders a single hook block.
+// renderHookBlock is a small helper that renders a single hook block. It goes
+// through renderBlockFresh (the pure per-kind render these tests are about):
+// callers render DIFFERENT logical hook blocks through one shared renderer at a
+// dummy index, which would alias in renderBlock's per-block cache — its contract
+// is one stable conversation index per block (see render_cache_test.go).
 func renderHookBlock(r *renderer, text, phase, tool, decision string) string {
 	b := block{kind: blockHook, raw: text, hookPhase: phase, hookTool: tool, hookDecision: decision}
-	return r.renderBlock(0, &b, false)
+	return r.renderBlockFresh(0, &b, false)
 }
 
 // TestRenderHookBlocked asserts a blocked hook reads distinctly: it carries the
