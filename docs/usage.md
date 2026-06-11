@@ -160,6 +160,9 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--store-dir` | `""` | directory for the JSONL session store (empty → in-memory) |
 | `--session-store-url` | `""` | `host:port` of a remote **session-store gRPC driver** (`mecatl.driver.v1.SessionStoreService`); replaces the local store — mutually exclusive with `--store-dir`. **See the store-driver note below.** |
 | `--memory-store-url` | `""` | `host:port` of a remote **memory-store gRPC driver** (`mecatl.driver.v1.MemoryStoreService`); replaces the local flock store — mutually exclusive with `--memory-dir`, enables the memory tools like `--memory-dir` does. |
+| `--child-retention` | `168h` | how long persisted **child** session snapshots (`subagent-*`/`parallel-*`/`team-*` ids — the `InspectSubagent`/`resume:` handles) are retained before the GC sweep deletes them. **Main sessions are never touched.** Durable-store-only in effect (`--store-dir` or a prunable `--session-store-url` driver; the in-memory default never accumulates across restarts). `0` disables the age pass. |
+| `--child-retention-max-per-family` | `500` | max persisted child snapshots kept **per delegation family** (subagent/parallel/team); the oldest beyond the cap are deleted, skipping in-flight runs. `0` disables the cap. |
+| `--child-gc-interval` | `1h` | how often the child-session retention GC re-sweeps after the startup sweep; `0` = sweep at startup only. Only meaningful when `--child-retention` or `--child-retention-max-per-family` is active. |
 | `--driver-auth-token` | `""` | bearer token sent on every store-driver RPC (or `MECATL_DRIVER_AUTH_TOKEN`; empty disables driver auth). Refused over cleartext to a non-loopback driver — pair with `--driver-tls`. |
 | `--driver-tls` | `false` | enable transport TLS on the store-driver connections. |
 | `--driver-tls-ca` | `""` | PEM CA bundle to verify the store driver's certificate (with `--driver-tls`; empty uses system roots). |
@@ -1300,6 +1303,13 @@ The JSONL store writes two files per session under `--store-dir`:
 <dir>/<id>.session.jsonl   # one snapshot per Save (latest line wins)
 <dir>/<id>.tools.jsonl     # one record per tool call (call, result, duration)
 ```
+
+Persisted **child** sessions (`subagent-*`/`parallel-*`/`team-*` ids, written
+by the delegation paths so `InspectSubagent`/`InspectMember`/`resume:` work)
+are garbage-collected by a background sweep — see `--child-retention`,
+`--child-retention-max-per-family` and `--child-gc-interval` above (defaults
+168h / 500 / 1h). Main sessions are never swept; deleting a child removes both
+its files.
 
 ### Remote store drivers
 

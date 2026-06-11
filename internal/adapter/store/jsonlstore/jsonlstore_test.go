@@ -220,3 +220,148 @@ func readLines(t *testing.T, path string) []string {
 	}
 	return lines
 }
+
+// TestListDecodesRealIDAndMtime pins that List returns the REAL session id
+// decoded from the snapshot line — NOT a (non-invertible) reverse of the
+// sanitized filename — and the session file's mtime as ModifiedAt. The id
+// here contains a '/' that safeName flattens to '_', so a filename-derived id
+// would come back mangled.
+func TestListDecodesRealIDAndMtime(t *testing.T) {
+	ctx := context.Background()
+	st, dir := newStore(t)
+	const id = session.SessionID("team-abc/lead") // sanitized on disk, real in the snapshot
+	s := session.New(id, session.ModeDefault, "/ws", session.Limits{}, time.Unix(1700000000, 0).UTC())
+	if err := st.Save(ctx, s); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	entries, err := st.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("List returned %d entries, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].ID != id {
+		t.Errorf("List id = %q, want the REAL snapshot id %q (filename-derived ids are mangled)", entries[0].ID, id)
+	}
+	// ModifiedAt must be the session file's mtime.
+	matches, err := filepath.Glob(filepath.Join(dir, "*.session.jsonl"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("glob session file: %v (matches %v)", err, matches)
+	}
+	info, err := os.Stat(matches[0])
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if !entries[0].ModifiedAt.Equal(info.ModTime()) {
+		t.Errorf("ModifiedAt = %v, want the file mtime %v", entries[0].ModifiedAt, info.ModTime())
+	}
+}
+
+// TestListSkipsUndecodableFiles pins the best-effort posture: a corrupt or
+// empty .session.jsonl (whose Load would fail identically) is skipped, not a
+// List error.
+func TestListSkipsUndecodableFiles(t *testing.T) {
+	ctx := context.Background()
+	st, dir := newStore(t)
+	if err := st.Save(ctx, driven(t)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "junk.session.jsonl"), []byte("{not json\n"), 0o644); err != nil {
+		t.Fatalf("write junk: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "empty.session.jsonl"), nil, 0o644); err != nil {
+		t.Fatalf("write empty: %v", err)
+	}
+	entries, err := st.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ID != "sess-1" {
+		t.Errorf("List = %+v, want exactly the one decodable session", entries)
+	}
+}
+
+// TestDeleteRemovesBothFilesIdempotently pins that Delete removes the session
+// snapshot AND the tool-call log, and that a second Delete (or a Delete of a
+// never-saved id) succeeds.
+func TestDeleteRemovesBothFilesIdempotently(t *testing.T) {
+	ctx := context.Background()
+	st, dir := newStore(t)
+	s := driven(t)
+	if err := st.Save(ctx, s); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	st.ToolCall(s.ID, session.NewToolCall("c9", "Read", json.RawMessage(`{"p":"x"}`)),
+		session.NewToolResult("c9", "ok"), time.Millisecond, time.Millisecond)
+	for _, suffix := range []string{".session.jsonl", ".tools.jsonl"} {
+		if _, err := os.Stat(filepath.Join(dir, "sess-1"+suffix)); err != nil {
+			t.Fatalf("precondition: %s missing: %v", suffix, err)
+		}
+	}
+	if err := st.Delete(ctx, s.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	for _, suffix := range []string{".session.jsonl", ".tools.jsonl"} {
+		if _, err := os.Stat(filepath.Join(dir, "sess-1"+suffix)); !os.IsNotExist(err) {
+			t.Errorf("%s still present after Delete (stat err %v)", suffix, err)
+		}
+	}
+	if _, err := st.Load(ctx, s.ID); !errors.Is(err, jsonlstore.ErrNotFound) {
+		t.Errorf("Load after Delete = %v, want ErrNotFound", err)
+	}
+	if err := st.Delete(ctx, s.ID); err != nil {
+		t.Errorf("second Delete = %v, want nil (idempotent)", err)
+	}
+	if err := st.Delete(ctx, "never-saved"); err != nil {
+		t.Errorf("Delete(never-saved) = %v, want nil (idempotent)", err)
+	}
+}
+
+// TestDeletePartialFailureLeavesSessionVisible pins Delete's removal ORDER:
+// tools sidecar FIRST, session file LAST. When removing the tools file fails,
+// the session file must SURVIVE — it is what List enumerates, so the pair
+// stays visible and the next retention sweep retries the whole Delete. (The
+// reverse order would permanently leak an invisible orphaned .tools.jsonl.)
+// The unremovable tools file is simulated portably by replacing it with a
+// NON-EMPTY directory, which os.Remove refuses on every platform.
+func TestDeletePartialFailureLeavesSessionVisible(t *testing.T) {
+	ctx := context.Background()
+	st, dir := newStore(t)
+	s := driven(t)
+	if err := st.Save(ctx, s); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	sessionFile := filepath.Join(dir, "sess-1.session.jsonl")
+	toolsPath := filepath.Join(dir, "sess-1.tools.jsonl")
+
+	// Make the tools path unremovable: a non-empty directory under the sidecar's name.
+	if err := os.MkdirAll(filepath.Join(toolsPath, "block"), 0o755); err != nil {
+		t.Fatalf("mkdir blocking tools path: %v", err)
+	}
+
+	if err := st.Delete(ctx, s.ID); err == nil {
+		t.Fatal("Delete with an unremovable tools file = nil error, want failure")
+	}
+	if _, err := os.Stat(sessionFile); err != nil {
+		t.Fatalf("session file did not survive the partial Delete failure (stat: %v) — the List entry is gone and the orphan can never be retried", err)
+	}
+	entries, err := st.List(ctx)
+	if err != nil {
+		t.Fatalf("List after partial failure: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ID != s.ID {
+		t.Fatalf("List after partial failure = %+v, want the surviving session entry (the retry handle)", entries)
+	}
+
+	// Unblock and retry: the sweep's next Delete must complete the pair.
+	if err := os.RemoveAll(toolsPath); err != nil {
+		t.Fatalf("unblock tools path: %v", err)
+	}
+	if err := st.Delete(ctx, s.ID); err != nil {
+		t.Fatalf("retry Delete after unblocking = %v, want nil", err)
+	}
+	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
+		t.Errorf("session file still present after the retry (stat err %v)", err)
+	}
+}

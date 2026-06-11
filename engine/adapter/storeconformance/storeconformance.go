@@ -239,6 +239,173 @@ func Run(t *testing.T, newStore func(t *testing.T) port.SessionStore) {
 	})
 }
 
+// RunPrunable executes the shared port.PrunableStore conformance table
+// against the store produced by newStore (which must also implement
+// port.PrunableStore — the suite fails fast otherwise). Like Run, it pins the
+// MECHANISM only: List returns what was saved with sane ModifiedAt values,
+// Delete removes and is idempotent. Retention POLICY (which ids are prunable,
+// age thresholds, per-family caps) is the caller's business and is
+// deliberately NOT asserted here.
+func RunPrunable(t *testing.T, newStore func(t *testing.T) port.SessionStore) {
+	t.Helper()
+	ctx := context.Background()
+
+	prunable := func(t *testing.T) (port.SessionStore, port.PrunableStore) {
+		t.Helper()
+		st := newStore(t)
+		p, ok := st.(port.PrunableStore)
+		if !ok {
+			t.Fatalf("store %T does not implement port.PrunableStore", st)
+		}
+		return st, p
+	}
+
+	t.Run("list returns saved ids across families", func(t *testing.T) {
+		st, p := prunable(t)
+		// One id per delegation-family prefix plus an unprefixed main id: List
+		// is an UNFILTERED inventory, so all four must appear (prefix policy is
+		// the caller's, never the store's).
+		ids := []session.SessionID{
+			"subagent-conf-1", "parallel-conf-1-0", "team-conf-1-lead", "conf-main-1",
+		}
+		before := time.Now()
+		for _, id := range ids {
+			if err := st.Save(ctx, newSession(id)); err != nil {
+				t.Fatalf("Save(%q): %v", id, err)
+			}
+		}
+		entries, err := p.List(ctx)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		byID := make(map[session.SessionID]port.StoredSession, len(entries))
+		for _, e := range entries {
+			byID[e.ID] = e
+		}
+		for _, id := range ids {
+			e, ok := byID[id]
+			if !ok {
+				t.Errorf("List is missing saved id %q (got %d entries)", id, len(entries))
+				continue
+			}
+			// Sane ModifiedAt: non-zero and not wildly outside the save window.
+			// (File mtimes may have coarse granularity, so allow a small slack
+			// before `before` rather than demanding exact ordering.)
+			if e.ModifiedAt.IsZero() {
+				t.Errorf("List(%q).ModifiedAt is the zero time", id)
+			} else if e.ModifiedAt.Before(before.Add(-time.Minute)) || e.ModifiedAt.After(time.Now().Add(time.Minute)) {
+				t.Errorf("List(%q).ModifiedAt = %v, want within a minute of the save window [%v, now]", id, e.ModifiedAt, before)
+			}
+		}
+	})
+
+	t.Run("modified-at tracks save order", func(t *testing.T) {
+		st, p := prunable(t)
+		early := newSession("conf-prune-early")
+		late := newSession("conf-prune-late")
+		if err := st.Save(ctx, early); err != nil {
+			t.Fatalf("Save(early): %v", err)
+		}
+		if err := st.Save(ctx, late); err != nil {
+			t.Fatalf("Save(late): %v", err)
+		}
+		entries, err := p.List(ctx)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		var earlyAt, lateAt time.Time
+		for _, e := range entries {
+			switch e.ID {
+			case early.ID:
+				earlyAt = e.ModifiedAt
+			case late.ID:
+				lateAt = e.ModifiedAt
+			}
+		}
+		// Monotone non-decreasing is the contract (equal is fine: file mtimes
+		// and coarse clocks legitimately collide within one tick).
+		if lateAt.Before(earlyAt) {
+			t.Errorf("later save's ModifiedAt %v is before the earlier save's %v", lateAt, earlyAt)
+		}
+	})
+
+	t.Run("modified-at is stable across reads", func(t *testing.T) {
+		// Kills an adapter that stamps ModifiedAt at LIST time (e.g. Now() per
+		// call) instead of recording the SAVE time: such a store would report
+		// every snapshot as perpetually fresh and neuter any age-based
+		// retention built on the seam. Two Lists with no intervening Save must
+		// agree exactly.
+		st, p := prunable(t)
+		s := newSession("conf-prune-stable")
+		if err := st.Save(ctx, s); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		readAt := func(call string) time.Time {
+			entries, err := p.List(ctx)
+			if err != nil {
+				t.Fatalf("List (%s): %v", call, err)
+			}
+			for _, e := range entries {
+				if e.ID == s.ID {
+					return e.ModifiedAt
+				}
+			}
+			t.Fatalf("List (%s) is missing the saved id %q", call, s.ID)
+			return time.Time{}
+		}
+		first := readAt("first")
+		time.Sleep(10 * time.Millisecond) // let a Now()-stamping bug actually drift
+		second := readAt("second")
+		if !second.Equal(first) {
+			t.Errorf("ModifiedAt changed between Lists with no Save: %v then %v (List must report the SAVE time, not the read time)", first, second)
+		}
+	})
+
+	t.Run("delete removes from list and load", func(t *testing.T) {
+		st, p := prunable(t)
+		keep := newSession("conf-prune-keep")
+		drop := newSession("conf-prune-drop")
+		for _, s := range []*session.Session{keep, drop} {
+			if err := st.Save(ctx, s); err != nil {
+				t.Fatalf("Save(%q): %v", s.ID, err)
+			}
+		}
+		if err := p.Delete(ctx, drop.ID); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		if _, err := st.Load(ctx, drop.ID); !errors.Is(err, port.ErrSessionNotFound) {
+			t.Errorf("Load(deleted id) error = %v, want errors.Is(_, port.ErrSessionNotFound)", err)
+		}
+		entries, err := p.List(ctx)
+		if err != nil {
+			t.Fatalf("List after Delete: %v", err)
+		}
+		var sawKeep bool
+		for _, e := range entries {
+			if e.ID == drop.ID {
+				t.Errorf("List still contains the deleted id %q", drop.ID)
+			}
+			if e.ID == keep.ID {
+				sawKeep = true
+			}
+		}
+		if !sawKeep {
+			t.Errorf("List lost the UNdeleted id %q", keep.ID)
+		}
+		// The undeleted sibling must remain loadable (Delete is per-id).
+		if _, err := st.Load(ctx, keep.ID); err != nil {
+			t.Errorf("Load(kept id) after a sibling Delete: %v", err)
+		}
+	})
+
+	t.Run("delete is idempotent on an unknown id", func(t *testing.T) {
+		_, p := prunable(t)
+		if err := p.Delete(ctx, "conf-prune-never-saved"); err != nil {
+			t.Errorf("Delete(unknown id) = %v, want nil (idempotent)", err)
+		}
+	})
+}
+
 // newSession constructs an idle session with non-default limits, workspace,
 // mode and a fixed (whole-nanosecond, UTC) creation time so timestamp
 // round-trip equality is well-defined.

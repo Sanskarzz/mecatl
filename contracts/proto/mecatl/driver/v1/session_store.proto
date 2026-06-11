@@ -21,6 +21,18 @@
 // Driver contract (mirrors the in-process stores):
 //   - Load of an unknown session id MUST return NOT_FOUND.
 //   - Save overwrites: Load returns the most recent snapshot saved under the id.
+//   - List returns EVERY stored session id with its last-modified time (Save
+//     time or the driver's nearest equivalent), unfiltered: prefix filtering
+//     and retention policy (which ids are prunable, age thresholds, count
+//     caps) stay HARNESS-side. A driver that does not retain modification
+//     times may return its best approximation, but MUST return all ids.
+//   - Delete is IDEMPOTENT: deleting an unknown session id succeeds (an
+//     implementation built over a NOT_FOUND-returning primitive must tolerate
+//     it — the harness treats unknown-id Delete as success, so a driver
+//     SHOULD return OK rather than NOT_FOUND; the harness client tolerates
+//     NOT_FOUND regardless). A backend that cannot enumerate or delete may
+//     return UNIMPLEMENTED for both; the harness then degrades to never
+//     sweeping that store.
 //
 // Validation: required-field annotations are authored with `buf.validate.field`
 // for documentation and future runtime enforcement; V1 enforces them in the Go
@@ -31,10 +43,13 @@ syntax = "proto3";
 package mecatl.driver.v1;
 
 import "buf/validate/validate.proto";
+import "google/protobuf/timestamp.proto";
 
 // SessionStoreService persists and retrieves opaque, format-tagged session
-// snapshots keyed by session id. It is the remote analogue of
-// port.SessionStore's two methods.
+// snapshots keyed by session id. Save/Load are the remote analogue of
+// port.SessionStore's two methods; List/Delete are the remote analogue of the
+// OPTIONAL port.PrunableStore retention seam (a driver backed by a
+// non-enumerable store may return UNIMPLEMENTED for both).
 service SessionStoreService {
   // Save persists the snapshot under session_id, overwriting any prior
   // snapshot for the same id (a later Save wins).
@@ -45,6 +60,15 @@ service SessionStoreService {
   // its port.ErrSessionNotFound sentinel; any other error is an
   // infrastructure failure.
   rpc Load(LoadRequest) returns (LoadResponse);
+
+  // List returns EVERY stored session id with its last-modified time,
+  // unfiltered — retention policy stays harness-side (see the package doc).
+  rpc List(ListSessionsRequest) returns (ListSessionsResponse);
+
+  // Delete removes the snapshot stored under session_id, idempotently: an
+  // unknown id is success (a NOT_FOUND from a thin driver is tolerated by the
+  // harness client and mapped to success).
+  rpc Delete(DeleteSessionRequest) returns (DeleteSessionResponse);
 }
 
 // SessionSnapshot is the opaque snapshot envelope: a format tag plus the
@@ -97,3 +121,37 @@ message LoadResponse {
   // verbatim).
   SessionSnapshot snapshot = 1 [(buf.validate.field).required = true];
 }
+
+// ListSessionsRequest asks for the full stored-session inventory. (Named
+// ListSessionsRequest — not ListRequest — because the memory-store service in
+// this same proto package already owns ListRequest/ListResponse.)
+message ListSessionsRequest {}
+
+// StoredSessionEntry is one stored session's retention-relevant identity. It
+// carries NO snapshot content — listing is an inventory concern, never a load.
+message StoredSessionEntry {
+  // session_id is the id the snapshot was saved under.
+  string session_id = 1 [(buf.validate.field).string.min_len = 1];
+
+  // modified_at is when the snapshot was last modified (Save time, file
+  // mtime, or the driver's nearest equivalent). Unset when the driver
+  // retains no modification time.
+  google.protobuf.Timestamp modified_at = 2;
+}
+
+// ListSessionsResponse carries every stored session's entry, in no
+// guaranteed order.
+message ListSessionsResponse {
+  // sessions is the unfiltered inventory.
+  repeated StoredSessionEntry sessions = 1;
+}
+
+// DeleteSessionRequest asks for the snapshot under session_id to be removed.
+message DeleteSessionRequest {
+  // session_id is the id to delete. An unknown id is success (idempotent).
+  string session_id = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+// DeleteSessionResponse is empty: a successful (or idempotent no-op) Delete
+// has no payload.
+message DeleteSessionResponse {}

@@ -35,9 +35,11 @@ type InspectSubagentTool struct {
 	// an agent_id that does not start with it is REJECTED before the store is touched,
 	// so the model cannot read team-member ("team-<teamID>-<member>") or service-session
 	// transcripts through this tool, bypassing InspectMember's team_id+member framing.
-	// It must match SubagentTool's child-session prefix (the default idPrefix+"-", i.e.
-	// "subagent-"); a deployment using WithChildSessionPrefix would need a matching
-	// option here — noted, not built, until such a deployment exists.
+	// It is sourced from SubagentSessionPrefix (the exported id-minting convention,
+	// childregistry.go), matching SubagentTool's default child prefix; a deployment
+	// using WithChildSessionPrefix would need a matching option here — noted, not
+	// built, until such a deployment exists (and note such an override ALSO de-scopes
+	// those ids from the composition layer's child-session GC).
 	requiredPrefix string
 }
 
@@ -58,7 +60,7 @@ func NewInspectSubagentTool(store port.SessionStore) tool.Tool {
 	if store == nil {
 		panic("agent: NewInspectSubagentTool requires a non-nil session store")
 	}
-	return &InspectSubagentTool{store: store, requiredPrefix: "subagent-"}
+	return &InspectSubagentTool{store: store, requiredPrefix: SubagentSessionPrefix}
 }
 
 // Spec returns the model-facing specification for the InspectSubagent tool.

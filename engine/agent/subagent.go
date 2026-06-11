@@ -671,7 +671,7 @@ func NewSubagentTool(childEngine *Engine, opts ...SubagentOption) tool.Tool {
 		childEngine: childEngine,
 		limits:      defaultChildLimits,
 		childMode:   session.ModeDefault,
-		idPrefix:    "subagent",
+		idPrefix:    strings.TrimSuffix(SubagentSessionPrefix, "-"), // the exported convention is the source
 		inFlight:    make(map[session.SessionID]struct{}),
 	}
 	for _, o := range opts {
@@ -976,6 +976,16 @@ func (t *SubagentTool) prepareChildSession(ctx context.Context, call session.Too
 	if !bok {
 		_ = cleanupWS()
 		return nil, nil, noop, errRes, false
+	}
+	// RESUME-START persist (issue #38): children otherwise persist only at their
+	// TERMINAL, so a resumed child loaded for a new long run would keep its OLD
+	// snapshot ModifiedAt — the composition layer's child-session GC age pass
+	// could delete it MID-RUN. Re-saving the just-loaded (recovered + re-homed)
+	// session refreshes the snapshot's last-modified time, so an in-flight
+	// resumed child is always "fresh" to the sweep. Same best-effort
+	// persistChild discipline as the terminal save (failures swallowed).
+	if resuming {
+		t.persistChild(ctx, child)
 	}
 	return child, runWS, cleanupWS, session.ToolResult{}, true
 }
@@ -1332,6 +1342,12 @@ func (t *SubagentTool) driveBackground(ctx context.Context, b backgroundChild) {
 	if !ok {
 		endOnError(errResult)
 		return
+	}
+	// RESUME-START persist, mirroring prepareChildSession: refresh the resumed
+	// snapshot's last-modified time so the child-session GC's age pass never
+	// deletes an in-flight resumed child (best-effort, failures swallowed).
+	if b.resuming {
+		t.persistChild(ctx, child)
 	}
 
 	runOpts, submit, prompt := buildSubagentRunOptions(b.args, b.resuming)

@@ -534,7 +534,7 @@ func NewSupervisor(t *team.Team, base tool.Workspace, factory MemberEngine, opts
 		maxRounds:   defaultMaxRounds,
 		concurrency: defaultTeamConcurrency,
 		turnBudget:  defaultMemberTurnBudget,
-		idPrefix:    "team",
+		idPrefix:    strings.TrimSuffix(TeamSessionPrefix, "-"), // the exported convention is the source
 		members:     make(map[string]*memberRT),
 	}
 	for _, o := range opts {
@@ -1468,8 +1468,10 @@ func (s *Supervisor) cleanupAll() {
 
 // memberSessionIDPrefix is the literal prefix every team-member session id carries,
 // baked into MemberSessionID. It namespaces member ids out of the general session
-// space so a member transcript is never mistaken for a top-level session.
-const memberSessionIDPrefix = "team-"
+// space so a member transcript is never mistaken for a top-level session. It
+// aliases the exported TeamSessionPrefix (childregistry.go) — the single source
+// for the delegation families' id-minting convention.
+const memberSessionIDPrefix = TeamSessionPrefix
 
 // MemberSessionID derives the COLLISION-FREE session id for one team member,
 // namespaced by the team id: "team-<teamID>-<member>". It is the SINGLE source of

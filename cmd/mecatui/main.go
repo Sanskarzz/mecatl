@@ -340,6 +340,14 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		// calls the real provider on a timer, so a default-on interval would
 		// silently spend tokens on an idle TUI. mecated defaults it to 0 too.
 		MemoryDir: resolveMemoryDir(cfg),
+		// Child-session retention GC, mecated's defaults (issue #38). The embedded
+		// store is the in-memory memstore (no StoreDir), so nothing persists across
+		// restarts — but memstore is prunable and a LONG-LIVED TUI process otherwise
+		// accumulates every subagent/parallel/team child snapshot in RAM. Free and
+		// local, so on by default; main sessions are never touched.
+		ChildRetention:             168 * time.Hour,
+		ChildRetentionMaxPerFamily: 500,
+		ChildGCInterval:            time.Hour,
 		// Soul ON by default (issue #14, Phase 1): a user-scoped, agent-READ-ONLY
 		// persona fragment read from the conventional ~/.config/mecatl/soul.md
 		// (fail-soft if absent), consistent with the "enable every free+local feature

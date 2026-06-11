@@ -54,8 +54,17 @@ type SessionStore struct {
 	client driverv1.SessionStoreServiceClient
 }
 
-// compile-time assertion that SessionStore satisfies the port.
-var _ port.SessionStore = (*SessionStore)(nil)
+// compile-time assertions that SessionStore satisfies the port plus the
+// optional retention seam. The client implements PrunableStore UNCONDITIONALLY
+// — a driver backed by a non-enumerable store answers List/Delete with
+// UNIMPLEMENTED, which this client maps to port.ErrPruneUnsupported (wrapped);
+// the composition sweeper recognises that sentinel, logs ONE INFO, and
+// stickily disables further sweeps, so such a driver degrades gracefully to
+// "never swept" (without a recurring WARN) rather than failing the harness.
+var (
+	_ port.SessionStore  = (*SessionStore)(nil)
+	_ port.PrunableStore = (*SessionStore)(nil)
+)
 
 // NewSessionStore wraps an established driver connection (see Dial) as a
 // port.SessionStore.
@@ -108,6 +117,52 @@ func (st *SessionStore) Load(ctx context.Context, id session.SessionID) (*sessio
 		return nil, fmt.Errorf("grpcdriver: load %q: driver returned the snapshot of a DIFFERENT session %q (mis-keyed driver)", id, sess.ID)
 	}
 	return sess, nil
+}
+
+// List returns the driver's full stored-session inventory (ids +
+// last-modified times). An unset modified_at maps to the zero time — the
+// retention sweep's age pass then treats the entry as arbitrarily old, which
+// fails SAFE only because the sweep also never touches unprefixed ids; a
+// driver SHOULD return real times.
+func (st *SessionStore) List(ctx context.Context) ([]port.StoredSession, error) {
+	resp, err := st.client.List(ctx, &driverv1.ListSessionsRequest{})
+	if err != nil {
+		if status.Code(err) == codes.Unimplemented {
+			// The driver's backend cannot enumerate at all — a permanent
+			// posture, not a transient fault. Surface the port sentinel so the
+			// retention sweeper can disable itself instead of WARNing forever.
+			return nil, fmt.Errorf("grpcdriver: list: %w: %v", port.ErrPruneUnsupported, err)
+		}
+		return nil, rpcErr(ctx, "list", err)
+	}
+	entries := resp.GetSessions()
+	out := make([]port.StoredSession, 0, len(entries))
+	for _, e := range entries {
+		s := port.StoredSession{ID: session.SessionID(e.GetSessionId())}
+		if ts := e.GetModifiedAt(); ts != nil {
+			s.ModifiedAt = ts.AsTime()
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// Delete removes the snapshot stored under id on the driver. It is idempotent
+// harness-side: a driver NOT_FOUND (a thin driver surfacing its primitive's
+// miss) maps to success, per the port.PrunableStore contract.
+func (st *SessionStore) Delete(ctx context.Context, id session.SessionID) error {
+	if _, err := st.client.Delete(ctx, &driverv1.DeleteSessionRequest{SessionId: string(id)}); err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil
+		}
+		if status.Code(err) == codes.Unimplemented {
+			// Same permanent-posture mapping as List: the backend cannot
+			// delete, so callers see the port sentinel via errors.Is.
+			return fmt.Errorf("grpcdriver: delete: %w: %v", port.ErrPruneUnsupported, err)
+		}
+		return rpcErr(ctx, "delete", err)
+	}
+	return nil
 }
 
 // rpcErr wraps a failed RPC's error. When the CALLER's ctx is already

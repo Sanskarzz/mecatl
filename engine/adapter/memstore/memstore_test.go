@@ -92,3 +92,37 @@ func TestConcurrentSaveLoad(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestWithNowStampsDeterministicModifiedAt pins the injected-clock seam: List
+// reports each session's ModifiedAt as the WithNow clock read at Save time, so
+// retention tests can assert age deterministically.
+func TestWithNowStampsDeterministicModifiedAt(t *testing.T) {
+	ctx := context.Background()
+	current := time.Unix(1000, 0).UTC()
+	st := memstore.New(memstore.WithNow(func() time.Time { return current }))
+
+	a := session.New("clock-a", session.ModeDefault, "/ws", session.Limits{}, current)
+	if err := st.Save(ctx, a); err != nil {
+		t.Fatalf("Save(a): %v", err)
+	}
+	current = current.Add(time.Hour)
+	b := session.New("clock-b", session.ModeDefault, "/ws", session.Limits{}, current)
+	if err := st.Save(ctx, b); err != nil {
+		t.Fatalf("Save(b): %v", err)
+	}
+
+	entries, err := st.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got := make(map[session.SessionID]time.Time, len(entries))
+	for _, e := range entries {
+		got[e.ID] = e.ModifiedAt
+	}
+	if want := time.Unix(1000, 0).UTC(); !got["clock-a"].Equal(want) {
+		t.Errorf("a.ModifiedAt = %v, want the fake clock's %v", got["clock-a"], want)
+	}
+	if want := time.Unix(1000, 0).UTC().Add(time.Hour); !got["clock-b"].Equal(want) {
+		t.Errorf("b.ModifiedAt = %v, want the fake clock's %v", got["clock-b"], want)
+	}
+}

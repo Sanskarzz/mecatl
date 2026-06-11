@@ -1035,6 +1035,29 @@ func (s *Service) LookupRun(id session.SessionID) (*agent.Run, bool) {
 	return st.run, true
 }
 
+// IsLive reports whether a run is currently in flight for the session id — a
+// pure read over the same in-flight registry LookupRun consults. It is the
+// liveness predicate the composition layer's child-session GC injects so a
+// sweep never deletes the snapshot of a session that is mid-run in THIS
+// process.
+//
+// HONESTY: this knows TOP-LEVEL run ids only. Children spawned BY a live run
+// (subagent-*/parallel-*/team-* ids) are driven inside their parent's run and
+// never registered here, so IsLive answers false for them even mid-run
+// (pinned by TestServiceIsLiveDoesNotKnowEngineChildren). Engine children are
+// protected from the sweep by age horizon + snapshot freshness instead: they
+// persist at their terminal AND a resumed child re-persists at resume start,
+// so an in-flight child's snapshot is always fresh (see the invariant note in
+// internal/app/childgc.go). The predicate still genuinely protects an
+// API-CLIENT-driven session that happens to carry a child prefix — StartRun
+// on such an id registers it here like any other.
+func (s *Service) IsLive(id session.SessionID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.runs[id]
+	return ok
+}
+
 // Approve resolves the paused permission ask on the session's in-flight run with
 // the client's three-way verdict (deny / allow-once / allow-always). If no run is
 // registered in this process it consults the store: a missing session yields

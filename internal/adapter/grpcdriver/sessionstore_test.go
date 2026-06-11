@@ -269,3 +269,70 @@ func TestServerWrapperSaveRejectsBadEnvelope(t *testing.T) {
 		t.Fatalf("Save(well-formed control) = %v, want nil", err)
 	}
 }
+
+// saveLoadOnlyStore strips memstore down to the bare port.SessionStore pair,
+// so the server wrapper sees a NON-prunable backend.
+type saveLoadOnlyStore struct{ inner port.SessionStore }
+
+func (s saveLoadOnlyStore) Save(ctx context.Context, sess *session.Session) error {
+	return s.inner.Save(ctx, sess)
+}
+
+func (s saveLoadOnlyStore) Load(ctx context.Context, id session.SessionID) (*session.Session, error) {
+	return s.inner.Load(ctx, id)
+}
+
+// TestListDeleteUnimplementedForNonPrunableBackend pins the server wrapper's
+// degradation posture AND the client's sentinel mapping: a backend that is a
+// plain Save/Load store answers List/Delete with UNIMPLEMENTED, which the
+// harness-side client wraps as port.ErrPruneUnsupported — the "this seam will
+// never work here" signal the composition sweeper uses to log one INFO and
+// stickily disable itself, so a thin remote driver is never swept (and never
+// WARNed about every sweep) rather than fatal.
+func TestListDeleteUnimplementedForNonPrunableBackend(t *testing.T) {
+	ctx := context.Background()
+	conn := dialBufconn(t, func(gs *grpc.Server) {
+		driverv1.RegisterSessionStoreServiceServer(gs, NewSessionStoreServer(saveLoadOnlyStore{inner: memstore.New()}))
+	})
+	st := NewSessionStore(conn)
+
+	_, err := st.List(ctx)
+	if err == nil {
+		t.Fatal("List over a non-prunable backend = nil error, want UNIMPLEMENTED")
+	}
+	if !errors.Is(err, port.ErrPruneUnsupported) {
+		t.Errorf("List error = %v, want errors.Is(_, port.ErrPruneUnsupported)", err)
+	}
+	if want := codes.Unimplemented.String(); !strings.Contains(err.Error(), want) {
+		t.Errorf("List error %q should still carry the driver's %v detail", err, codes.Unimplemented)
+	}
+	if err := st.Delete(ctx, "any-id"); err == nil {
+		t.Fatal("Delete over a non-prunable backend = nil error, want UNIMPLEMENTED")
+	} else if !errors.Is(err, port.ErrPruneUnsupported) {
+		t.Errorf("Delete error = %v, want errors.Is(_, port.ErrPruneUnsupported)", err)
+	}
+}
+
+// notFoundDeleteServer is a thin driver whose Delete surfaces its primitive's
+// NOT_FOUND instead of the contract's idempotent OK.
+type notFoundDeleteServer struct {
+	driverv1.UnimplementedSessionStoreServiceServer
+}
+
+func (notFoundDeleteServer) Delete(context.Context, *driverv1.DeleteSessionRequest) (*driverv1.DeleteSessionResponse, error) {
+	return nil, status.Error(codes.NotFound, "no such session")
+}
+
+// TestDeleteToleratesDriverNotFound pins the client's idempotency mapping: a
+// driver NOT_FOUND on Delete is success (the port contract says unknown id =
+// success), so a thin driver built over a NOT_FOUND-returning primitive still
+// conforms.
+func TestDeleteToleratesDriverNotFound(t *testing.T) {
+	conn := dialBufconn(t, func(gs *grpc.Server) {
+		driverv1.RegisterSessionStoreServiceServer(gs, notFoundDeleteServer{})
+	})
+	st := NewSessionStore(conn)
+	if err := st.Delete(context.Background(), "ghost"); err != nil {
+		t.Errorf("Delete mapping a driver NOT_FOUND = %v, want nil (idempotent success)", err)
+	}
+}

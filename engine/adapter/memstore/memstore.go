@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/stacklok/mecatl/engine/adapter/sessnap"
 	"github.com/stacklok/mecatl/engine/port"
@@ -26,14 +27,48 @@ var ErrNotFound = fmt.Errorf("memstore: session not found: %w", port.ErrSessionN
 type Store struct {
 	mu       sync.RWMutex
 	sessions map[session.SessionID]sessnap.Snapshot
+	// savedAt records each session's last Save time, read via now (injected
+	// for determinism; the real clock by default). It backs the optional
+	// port.PrunableStore List/Delete retention seam.
+	savedAt map[session.SessionID]time.Time
+	now     func() time.Time
 }
 
-// compile-time assertion that Store satisfies the port.
-var _ port.SessionStore = (*Store)(nil)
+// compile-time assertions that Store satisfies the port plus the optional
+// retention seam.
+var (
+	_ port.SessionStore  = (*Store)(nil)
+	_ port.PrunableStore = (*Store)(nil)
+)
+
+// Option configures a Store at construction.
+type Option func(*Store)
+
+// WithNow injects the clock Save uses to stamp each snapshot's ModifiedAt
+// (List's ordering input). Tests inject a fake for deterministic retention
+// assertions; production keeps the default time.Now. A nil now is ignored.
+//
+// (A plain func rather than port.Clock keeps the option dependency-free for
+// callers; wrap a port.Clock as clock.Now where one is already in hand.)
+func WithNow(now func() time.Time) Option {
+	return func(st *Store) {
+		if now != nil {
+			st.now = now
+		}
+	}
+}
 
 // New constructs an empty in-memory Store.
-func New() *Store {
-	return &Store{sessions: make(map[session.SessionID]sessnap.Snapshot)}
+func New(opts ...Option) *Store {
+	st := &Store{
+		sessions: make(map[session.SessionID]sessnap.Snapshot),
+		savedAt:  make(map[session.SessionID]time.Time),
+		now:      time.Now,
+	}
+	for _, opt := range opts {
+		opt(st)
+	}
+	return st
 }
 
 // Save persists a deep copy of s under s.ID, overwriting any prior state.
@@ -47,6 +82,7 @@ func (st *Store) Save(_ context.Context, s *session.Session) error {
 	}
 	st.mu.Lock()
 	st.sessions[s.ID] = snap
+	st.savedAt[s.ID] = st.now()
 	st.mu.Unlock()
 	return nil
 }
@@ -61,4 +97,26 @@ func (st *Store) Load(_ context.Context, id session.SessionID) (*session.Session
 		return nil, fmt.Errorf("%w: %q", ErrNotFound, id)
 	}
 	return snap.Restore()
+}
+
+// List returns every stored session's id and last Save time, in no guaranteed
+// order. It satisfies the optional port.PrunableStore retention seam.
+func (st *Store) List(_ context.Context) ([]port.StoredSession, error) {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	out := make([]port.StoredSession, 0, len(st.sessions))
+	for id := range st.sessions {
+		out = append(out, port.StoredSession{ID: id, ModifiedAt: st.savedAt[id]})
+	}
+	return out, nil
+}
+
+// Delete removes the session stored under id. It is idempotent: an unknown id
+// is success (port.PrunableStore contract).
+func (st *Store) Delete(_ context.Context, id session.SessionID) error {
+	st.mu.Lock()
+	delete(st.sessions, id)
+	delete(st.savedAt, id)
+	st.mu.Unlock()
+	return nil
 }

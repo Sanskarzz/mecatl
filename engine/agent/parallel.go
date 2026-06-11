@@ -238,7 +238,7 @@ func NewParallelTool(childEngine *Engine, forker tool.WorkspaceForker, opts ...P
 		childMode:   session.ModeDefault,
 		maxBranches: defaultMaxBranches,
 		concurrency: defaultParallelConcurrency,
-		idPrefix:    "parallel",
+		idPrefix:    strings.TrimSuffix(ParallelSessionPrefix, "-"), // the exported convention is the source
 	}
 	for _, o := range opts {
 		o(t)

@@ -37,6 +37,31 @@ const (
 	childFamilyTeamMember childFamily = "team-member"
 )
 
+// The delegation families' child-session id PREFIXES — the single exported
+// source for the id-minting convention. Each constant is the literal prefix of
+// a child SESSION id; the three are disjoint, and every consumer derives from
+// them rather than re-spelling the literals: the minting sites
+// (SubagentTool's default child prefix, ParallelTool's default branch prefix,
+// MemberSessionID's team scheme), the InspectSubagent prefix gate, and the
+// composition layer's child-session retention GC
+// (internal/app/childgc.go's childSessionPrefixes). A deployment overriding a
+// prefix (WithChildSessionPrefix / WithParallelChildSessionPrefix /
+// WithMemberSessionPrefix) departs from this convention and from everything
+// keyed on it — see those options' docs.
+const (
+	// SubagentSessionPrefix prefixes flat-fleet Subagent children:
+	// "subagent-<callID>" (SubagentTool's default; WithChildSessionPrefix
+	// overrides the stem).
+	SubagentSessionPrefix = "subagent-"
+	// ParallelSessionPrefix prefixes Parallel fork-join branches:
+	// "parallel-<callID>-<i>" (ParallelTool's default;
+	// WithParallelChildSessionPrefix overrides the stem).
+	ParallelSessionPrefix = "parallel-"
+	// TeamSessionPrefix prefixes team members: "team-<teamID>-<member>" —
+	// MemberSessionID's scheme (memberSessionIDPrefix aliases this constant).
+	TeamSessionPrefix = "team-"
+)
+
 // childState is a registered child's lifecycle position: queued (registered,
 // possibly waiting on the concurrency gate), running (its drive has started; a
 // team member stays running across rounds), or done (terminal; doneCh closed).

@@ -24,8 +24,15 @@ linking into mecatl. Five rules, in dependency order:
    `tool.AgentDefSource` (`engine/tool/`), `prompt.SoulSource`/
    `prompt.CommandSource` (`engine/prompt/` — consumer-local, the house
    pattern). They are minimal and consumer-driven: no method exists without a
-   consumer (SessionStore has no List/Delete; the interface lost `Remember`
-   when its only caller was a wrapper).
+   consumer (the interface lost `Remember` when its only caller was a
+   wrapper). When a NEW capability gains a consumer it lands as a SEPARATE
+   OPTIONAL interface, never by widening the base port: the child-session
+   retention GC (issue #38) consumes `port.PrunableStore` (List/Delete +
+   `StoredSession`), which a store MAY also implement — discovered by type
+   assertion, so a Save/Load-only store (in-process or remote) is simply
+   never swept. List is an unfiltered inventory and Delete is idempotent;
+   retention POLICY (child-id prefixes, age, per-family caps, liveness)
+   stays in composition (`internal/app/childgc.go`), never in a store.
 2. **gRPC is the DRIVER PROTOCOL, never the port.** Engine layering bans
    gRPC/proto from core and that stays — no proto type appears in any port
    signature, and the DAG test + depguard would reject one. The protocol is
@@ -47,7 +54,10 @@ linking into mecatl. Five rules, in dependency order:
    adapters. Auth/TLS to drivers is a construction-time option on the dial
    (`grpcdriver.Dial`), never per-port API surface.
 5. **The conformance suites ARE the contract.** `engine/adapter/
-   storeconformance` (SessionStore), `memconformance` (MemoryStore), and
+   storeconformance` (SessionStore via `Run`, plus the optional
+   PrunableStore retention seam via `RunPrunable` — unfiltered List with
+   sane ModifiedAt, Delete idempotent on unknown ids, deleted ids vanish
+   from List and Load), `memconformance` (MemoryStore), and
    `sourceconformance` (RunSkillSource / RunSoulSource / RunAgentSource /
    RunCommandSource, with exported canonical fixtures). Every reference
    adapter passes its suite, and the grpcdriver clients pass the SAME suite
@@ -71,7 +81,7 @@ client/wrappers for external Go consumption is the recorded Deferred §1.
 
 | Seam | Port (home) | Lifecycle | Reference adapter | Driver service | Conformance | Failure posture |
 |---|---|---|---|---|---|---|
-| Sessions | `port.SessionStore` (`engine/port/store.go`) | live per Save/Load | `memstore` (default), `jsonlstore` | `SessionStoreService` | `storeconformance.Run` | no build probe (lazy dial); a runtime fault is the same unit failure a disk error would be |
+| Sessions | `port.SessionStore` (`engine/port/store.go`) + optional `port.PrunableStore` (retention List/Delete) | live per Save/Load | `memstore` (default), `jsonlstore` | `SessionStoreService` | `storeconformance.Run` + `RunPrunable` | no build probe (lazy dial); a runtime fault is the same unit failure a disk error would be; a driver that cannot enumerate answers List/Delete with UNIMPLEMENTED, mapped client-side to `port.ErrPruneUnsupported`; the sweeper logs one INFO and stickily disables itself — never swept, never re-WARNed |
 | Memory | `tool.MemoryStore` (`engine/tool/tool.go`) | live per tool call | flock-file `memory.Store` | `MemoryStoreService` | `memconformance.Run` | dial fail at build = FATAL (explicit URL = loud-misconfig); runtime fault surfaces as the tool's error |
 | Skills | `tool.SkillSource` (`engine/tool/skillsource.go`) | **snapshot** at build | `skills.FSSource` | `SkillSourceService` | `sourceconformance.RunSkillSource` | build snapshot fail = FATAL; activation-time materialization fault = model-addressable tool error, never a partial bundle |
 | Soul | `prompt.SoulSource` (`engine/prompt/soul.go`) | load per turn 0 | `soul.Store` | `SoulSourceService` | `sourceconformance.RunSoulSource` | build `Probe` fail = FATAL; runtime fault = `("", nil)` + WARN (the port's fail-soft contract) |
@@ -257,6 +267,14 @@ model-addressable tool error — never a partial bundle on disk.
    driver process is responsible for its own server-side auth (interceptors,
    mTLS) just as `mecated` composes its own. The harness-side posture
    (bearer + TLS + cleartext refusal) is entirely client-side.
+7. **Cross-process GC liveness.** The child-session retention sweep's
+   liveness predicate (`Service.IsLive`) sees only THIS process's in-flight
+   runs. Several harnesses sharing one remote session-store driver could in
+   principle sweep a sibling's live child — in practice protected by the
+   age/oldest-first ordering (a live child's snapshot is freshly saved) and
+   by every delete being idempotent and best-effort (the child's next save
+   recreates it). True cross-process exclusion is a LEASING concern, the
+   recorded Tier-2 follow-up, not a List/Delete protocol widening.
 
 ## The workspace/FS driver — sketch only (the one unimplemented seam)
 

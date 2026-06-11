@@ -173,6 +173,23 @@ type Config struct {
 	MemoryDir                 string
 	MemoryConsolidateInterval time.Duration
 
+	// Child-session retention/GC (issue #38): the delegation paths persist every
+	// child snapshot (subagent-*/parallel-*/team-* ids) so InspectSubagent/
+	// InspectMember/resume: work, but nothing ever deleted them — a durable store
+	// grew without bound. startChildGC sweeps them through the OPTIONAL
+	// port.PrunableStore seam: an age pass (delete child snapshots whose
+	// last-modified time is older than ChildRetention; 0 disables) then a
+	// per-family count cap (the newest ChildRetentionMaxPerFamily per prefix
+	// family survive, oldest-first past it deleted; 0 disables), skipping ids
+	// with an in-flight run. UNPREFIXED (operator/service) sessions are NEVER
+	// touched. ChildGCInterval is the sweep cadence after the startup sweep
+	// (0 = startup-only). Both knobs zero = fully disabled (the zero-config
+	// default; mecated's flags default to 168h/500/1h). A non-prunable store
+	// (e.g. a thin remote driver) is never swept — a no-op with one INFO.
+	ChildRetention             time.Duration
+	ChildRetentionMaxPerFamily int
+	ChildGCInterval            time.Duration
+
 	// Remote store drivers (Phase B): gRPC driver endpoints that replace the
 	// LOCAL session/memory stores with internal/adapter/grpcdriver clients.
 	// SessionStoreURL is mutually exclusive with StoreDir, MemoryStoreURL with
@@ -732,6 +749,13 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// goleak suite catches a leak). startLiveModelRefresh is a no-op when no provider
 	// has a lister (e.g. mock/openai-only), so the goroutine + ctx are skipped.
 	refreshClose := startLiveModelRefresh(cfg.diag(), reg, svc, cfg.liveModelRefreshSync)
+
+	// Child-session retention GC (issue #38): wired AFTER the Service exists
+	// because the sweep's liveness predicate is the Service's in-flight run
+	// registry. No-op (one INFO) when the policy is disabled or the store is
+	// not prunable; otherwise a startup sweep + ticker sharing ctx (the
+	// startMemoryConsolidation lifetime — the goroutine exits on shutdown).
+	startChildGC(ctx, cfg, store, svc.IsLive)
 
 	// Close tears down the main MCP manager AND any per-session client-MCP engines
 	// still registered (svc.Close), so a process exit leaks neither. It also cancels

@@ -34,6 +34,19 @@ func TestGRPCSessionStoreConformance(t *testing.T) {
 	})
 }
 
+// TestGRPCSessionStorePrunableConformance runs the shared PrunableStore
+// (retention seam) table over the same client → bufconn → server wrapper →
+// memstore path, so List/Delete are proven over the wire (proto Timestamp
+// round-trip, NOT_FOUND-tolerant Delete) exactly like Save/Load.
+func TestGRPCSessionStorePrunableConformance(t *testing.T) {
+	storeconformance.RunPrunable(t, func(t *testing.T) port.SessionStore {
+		conn := dialBufconn(t, func(gs *grpc.Server) {
+			driverv1.RegisterSessionStoreServiceServer(gs, NewSessionStoreServer(memstore.New()))
+		})
+		return NewSessionStore(conn)
+	})
+}
+
 // TestGRPCMemoryStoreConformance runs the shared MemoryStore conformance
 // table over grpcdriver → bufconn → NewMemoryStoreServer(memory.New(tmp)).
 func TestGRPCMemoryStoreConformance(t *testing.T) {

@@ -40,10 +40,12 @@ type Store struct {
 	mu  sync.Mutex // serializes appends across files
 }
 
-// compile-time assertions that Store satisfies both ports.
+// compile-time assertions that Store satisfies both ports plus the optional
+// retention seam.
 var (
 	_ port.SessionStore     = (*Store)(nil)
 	_ port.ToolCallRecorder = (*Store)(nil)
+	_ port.PrunableStore    = (*Store)(nil)
 )
 
 // New constructs a Store writing under dir, creating dir if needed.
@@ -99,6 +101,115 @@ func (st *Store) Load(_ context.Context, id session.SessionID) (*session.Session
 	return sessnap.Unmarshal(last)
 }
 
+// sessionFileSuffix / toolsFileSuffix are the per-session file suffixes under
+// dir (see the package doc layout).
+const (
+	sessionFileSuffix = ".session.jsonl"
+	toolsFileSuffix   = ".tools.jsonl"
+)
+
+// List returns every stored session's id and last-modified time (the session
+// file's mtime). It satisfies the optional port.PrunableStore retention seam.
+//
+// COST: safeName is NOT invertible (distinct ids can collide onto one
+// filename, and a sanitized rune cannot be restored), so the REAL id is
+// decoded from each session file's last snapshot line (the same latest-line
+// the Load path trusts) rather than derived from the filename. That makes
+// List O(total store bytes) in the worst case — acceptable for a
+// retention sweep that runs on a startup/hourly cadence, not a hot path.
+//
+// List enumerates ONLY *.session.jsonl files: a .tools.jsonl sidecar without
+// its session file (an orphan from a pre-fix partial Delete, or hand-pruning)
+// is invisible here and is never swept — accepted as unreachable. Delete's
+// tools-first removal order prevents this store from creating new ones.
+func (st *Store) List(_ context.Context) ([]port.StoredSession, error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	entries, err := os.ReadDir(st.dir)
+	if err != nil {
+		return nil, fmt.Errorf("jsonlstore: list store dir: %w", err)
+	}
+	var out []port.StoredSession
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), sessionFileSuffix) {
+			continue
+		}
+		path := filepath.Join(st.dir, e.Name())
+		id, err := decodeSessionID(path)
+		if err != nil {
+			// A truncated/empty/corrupt session file has no decodable id; skip
+			// it rather than fail the whole inventory (Load of that id would
+			// fail the same way). Best-effort listing, like the sweep itself.
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // raced with a concurrent delete; tolerate it
+		}
+		out = append(out, port.StoredSession{ID: id, ModifiedAt: info.ModTime()})
+	}
+	return out, nil
+}
+
+// Delete removes the session's snapshot file AND its tool-call log. It is
+// idempotent: a missing file is success (port.PrunableStore contract), so
+// concurrent List/Delete races are tolerated by construction.
+//
+// REMOVAL ORDER is load-bearing: the tools sidecar goes FIRST and the session
+// file LAST, because the session file is what List enumerates. A partial
+// failure then leaves the pair still VISIBLE (the session file survives, so
+// the next retention sweep retries the whole Delete); the reverse order would
+// leave an INVISIBLE orphaned .tools.jsonl that no future sweep can ever find
+// (List ignores sidecars without a session file — a pre-existing orphan is
+// accepted as unreachable; this ordering prevents us from ever creating one).
+func (st *Store) Delete(_ context.Context, id session.SessionID) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, path := range []string{st.toolsPath(id), st.sessionPath(id)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("jsonlstore: delete %q: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// decodeSessionID reads the REAL session id out of a session file's latest
+// snapshot line (only the "id" field is decoded; the rest of the snapshot is
+// skipped). It mirrors Load's latest-line-wins read.
+func decodeSessionID(path string) (session.SessionID, error) {
+	f, err := os.Open(path) //nolint:gosec // path is derived from the store dir listing
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	var last []byte
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for sc.Scan() {
+		b := sc.Bytes()
+		if len(strings.TrimSpace(string(b))) == 0 {
+			continue
+		}
+		last = append(last[:0], b...) // copy: scanner reuses its buffer
+	}
+	if err := sc.Err(); err != nil {
+		return "", err
+	}
+	if last == nil {
+		return "", fmt.Errorf("jsonlstore: %s: empty session file", path)
+	}
+	var head struct {
+		ID session.SessionID `json:"id"`
+	}
+	if err := json.Unmarshal(last, &head); err != nil {
+		return "", fmt.Errorf("jsonlstore: %s: decode snapshot id: %w", path, err)
+	}
+	if head.ID == "" {
+		return "", fmt.Errorf("jsonlstore: %s: snapshot carries no id", path)
+	}
+	return head.ID, nil
+}
+
 // toolCallRecord is the structured line written by ToolCall. It is a flat,
 // self-describing record for offline replay/analysis.
 type toolCallRecord struct {
@@ -141,11 +252,11 @@ func (st *Store) ToolCall(id session.SessionID, call session.ToolCall, result se
 }
 
 func (st *Store) sessionPath(id session.SessionID) string {
-	return filepath.Join(st.dir, safeName(id)+".session.jsonl")
+	return filepath.Join(st.dir, safeName(id)+sessionFileSuffix)
 }
 
 func (st *Store) toolsPath(id session.SessionID) string {
-	return filepath.Join(st.dir, safeName(id)+".tools.jsonl")
+	return filepath.Join(st.dir, safeName(id)+toolsFileSuffix)
 }
 
 // appendLine appends b followed by a newline to the file at path, opening it

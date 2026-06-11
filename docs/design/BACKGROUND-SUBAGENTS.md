@@ -252,7 +252,14 @@ pending — fine, asks are out-of-band of history.
   `MaxRunTokens` — identical to foreground today; documented, not changed.
 - **persistChild**: runs in the goroutine on every terminal — a run-end-cancelled
   background child is persisted, resumable next run (the loss-mitigation that makes
-  cancel-at-end acceptable).
+  cancel-at-end acceptable). Persisted child snapshots no longer accumulate forever:
+  the composition-layer child-session retention GC (issue #38,
+  `internal/app/childgc.go` — age + per-family-cap sweep over the optional
+  `port.PrunableStore` seam, `--child-retention`/`--child-retention-max-per-family`/
+  `--child-gc-interval`, defaults 168h/500/1h) deletes old `subagent-`/`parallel-`/
+  `team-` snapshots; main sessions and in-flight runs are never touched. A child
+  swept past retention is simply no longer resumable/inspectable — the same
+  affordance loss as an operator deleting the store dir.
 - **In-flight guard**: a background child holds its id until `markDone`, so `resume` of
   a running background child is rejected with the existing "already running" error.
 - **Resume**: a completed/cancelled background child resumes like any persisted child;

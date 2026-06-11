@@ -1627,6 +1627,68 @@ server-wrapper PROMOTION question (exporting them beyond `internal/` is a public
 made there, not implied by the current placement); a user-model driver flag (the user-model
 store stays LOCAL in Phase B — deliberate deferral); a workspace/FS driver sketch.
 
+### Child-session retention GC (issue #38 — `port.PrunableStore` + `internal/app/childgc.go`)
+
+The delegation paths persist every child snapshot (`subagent-<callID>`,
+`parallel-<callID>-<i>`, `team-<teamID>-<member>`) so InspectSubagent/InspectMember/`resume:`
+work — but nothing ever deleted them, so a durable store grew without bound. Split mechanism
+from policy:
+
+- **Port delta — a SEPARATE OPTIONAL interface, never a widened SessionStore.**
+  `port.PrunableStore` (`engine/port/store.go`): `List(ctx) []StoredSession` (ALL ids +
+  last-modified times, unfiltered — policy is the caller's) and `Delete(ctx, id)`
+  (IDEMPOTENT: unknown id = success, so List/Delete races are tolerated by construction).
+  Discovered by type assertion; a Save/Load-only store is simply never swept.
+- **Proto delta.** `SessionStoreService` gains `List(ListSessionsRequest) →
+  ListSessionsResponse{repeated StoredSessionEntry{session_id, modified_at}}` and
+  `Delete(DeleteSessionRequest) → DeleteSessionResponse` (message names are
+  `ListSessions*`/`DeleteSession*` because the memory-store service in the same proto
+  package already owns `ListRequest`/`ListResponse`). A driver that cannot enumerate
+  answers UNIMPLEMENTED — the harness client maps it to the port sentinel
+  `port.ErrPruneUnsupported` (wrapped), on which the sweeper logs ONE INFO ("store does
+  not support retention; disabling child GC") and STICKILY disables further sweeps —
+  graceful degradation without a recurring WARN, verified by test on both sides. The
+  harness client maps a Delete NOT_FOUND to success.
+- **Adapters.** memstore: `savedAt` map + injectable `WithNow` clock. jsonlstore: List
+  decodes the REAL id from each `*.session.jsonl`'s latest snapshot line (`safeName` is
+  NOT invertible — a filename-derived id would be mangled; cost is O(store bytes), fine
+  for a startup/hourly sweep), `ModifiedAt` = file mtime; Delete removes BOTH files —
+  tools sidecar FIRST, session file LAST, so a partial failure leaves the List entry
+  (the session file) and the next sweep retries the pair instead of leaking an
+  invisible orphaned `.tools.jsonl` (a PRE-EXISTING orphan sidecar is invisible to List
+  and never swept — accepted). grpcdriver client+server wrapper round trip the seam;
+  the wrapper type-asserts its backend (UNIMPLEMENTED for plain stores). Conformance:
+  `storeconformance.RunPrunable` (mechanism only — including ModifiedAt STABILITY
+  across reads, killing a stamp-Now()-at-List adapter that would neuter the age pass),
+  run at all three sites.
+- **Policy — composition only (`internal/app/childgc.go`).** An AGE pass (delete
+  child-prefixed snapshots STRICTLY older than `ChildRetention`; exactly-at-cutoff is
+  retained — pinned) then a per-family COUNT CAP (newest `ChildRetentionMaxPerFamily`
+  survive, oldest-first past it deleted, equal `ModifiedAt` tie-broken by ID for
+  deterministic eviction), both skipping ids with an in-flight run (`Service.IsLive` —
+  the runs registry; pure read). HONESTY: `IsLive` knows TOP-LEVEL run ids only —
+  engine-spawned children are never registered there (pinned by
+  `TestServiceIsLiveDoesNotKnowEngineChildren`); their real protection is age horizon +
+  snapshot freshness (children persist at their terminal, and a `resume:`d subagent
+  RE-PERSISTS AT RESUME START so a long resumed run never goes stale mid-flight). The
+  child prefixes are consumed from the engine's EXPORTED id-minting constants
+  (`agent.SubagentSessionPrefix`/`ParallelSessionPrefix`/`TeamSessionPrefix`,
+  `engine/agent/childregistry.go` — the same constants the minting sites derive from;
+  drift-guard test pins the wiring; a `WithChildSessionPrefix`-style override DE-SCOPES
+  those ids from GC). UNPREFIXED ids are NEVER touched — the load-bearing safety test
+  (`TestChildGCMainSessionsNeverDeleted`) is mutation-verified (prefix gate removed →
+  test fails). Best-effort: transient List failure = one WARN + skip;
+  `port.ErrPruneUnsupported` = one INFO + sticky disable; Delete failures = one tallied
+  WARN; one INFO summary only when something was deleted.
+- **Placement + defaults.** `startChildGC` runs after Service construction (it needs the
+  liveness predicate): startup sweep + ticker on one ctx-bound goroutine
+  (`--child-gc-interval`, default 1h, 0 = startup-only). `--child-retention` default
+  168h, `--child-retention-max-per-family` default 500; both zero = fully disabled (the
+  zero-config/app.Config default, so embedded/test Builds are byte-identical unless
+  opted in — mecatui's embeddedConfig passes the mecated defaults so a long-lived TUI's
+  in-memory store stays bounded too). Durable-store-only in effect: the in-memory
+  default never accumulates across restarts.
+
 ## Source drivers — skill + soul (Phase C1: `engine/tool/skillsource.go` + `engine/adapter/sourceconformance/` + `skills.FSSource`/`Activator`/`AssetMaterializer` + grpcdriver clients)
 
 HARD REQUIREMENT honoured throughout: the `tool.SkillSource` port carries **NO path/dir/root/

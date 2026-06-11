@@ -112,6 +112,76 @@ func TestSubagentResumeContinuesPriorConversation(t *testing.T) {
 	}
 }
 
+// saveCountingStore wraps an inner store, counting Saves so a test can pin
+// WHEN a persist happened relative to the drive.
+type saveCountingStore struct {
+	inner port.SessionStore
+	saves atomic.Int32
+}
+
+func (c *saveCountingStore) Save(ctx context.Context, s *session.Session) error {
+	c.saves.Add(1)
+	return c.inner.Save(ctx, s)
+}
+
+func (c *saveCountingStore) Load(ctx context.Context, id session.SessionID) (*session.Session, error) {
+	return c.inner.Load(ctx, id)
+}
+
+// TestSubagentResumePersistsAtResumeStart pins the RESUME-START persist
+// (issue #38): children otherwise persist only at their TERMINAL, so a resumed
+// child loaded for a new long run would keep its OLD snapshot ModifiedAt and
+// the composition layer's child-session GC age pass could delete it MID-RUN.
+// The fix re-saves the loaded session at resume start; this test asserts the
+// store saw that Save BEFORE the resumed drive's first LLM request (i.e.
+// strictly before the resumed run could complete).
+func TestSubagentResumePersistsAtResumeStart(t *testing.T) {
+	store := &saveCountingStore{inner: memstore.New()}
+
+	// Record how many Saves had landed when the RESUMED drive's first LLM
+	// request arrives (child run #2 — run #1 is the fresh child).
+	var mu sync.Mutex
+	var childRun int
+	savesAtResumeDrive := int32(-1)
+	obs := func(port.LLMRequest) {
+		mu.Lock()
+		defer mu.Unlock()
+		childRun++
+		if childRun == 2 {
+			savesAtResumeDrive = store.saves.Load()
+		}
+	}
+	childLLM := mockllm.NewWith(
+		[]mockllm.Option{mockllm.WithRequestObserver(obs)},
+		mockllm.TextTurn("FIRST_ANSWER"),
+		mockllm.TextTurn("SECOND_ANSWER"),
+	)
+	task := agent.NewSubagentTool(childEngineWith(childLLM, catalogWith(t)), agent.WithSubagentStore(store))
+
+	fresh := runOneSubagent(t, task, "p1", `{"prompt":"do the first thing"}`)
+	if fresh.IsError {
+		t.Fatalf("fresh run errored: %q", fresh.Content)
+	}
+	savesAfterFresh := store.saves.Load()
+	if savesAfterFresh < 1 {
+		t.Fatalf("fresh run persisted %d times, want at least the terminal save", savesAfterFresh)
+	}
+
+	resumed := runOneSubagent(t, task, "p2", resumeArgs("subagent-p1", "continue"))
+	if resumed.IsError {
+		t.Fatalf("resume errored: %q", resumed.Content)
+	}
+	mu.Lock()
+	got := savesAtResumeDrive
+	mu.Unlock()
+	if got < 0 {
+		t.Fatal("the resumed drive never issued an LLM request")
+	}
+	if got <= savesAfterFresh {
+		t.Fatalf("store saw %d Saves when the resumed drive started (had %d after the fresh run): the resume path must re-persist at RESUME START, before driving — otherwise the GC age pass can delete the stale snapshot mid-run", got, savesAfterFresh)
+	}
+}
+
 // TestSubagentResumeAfterMaxTurns proves a child that stopped at its max-turns limit
 // (terminal completed) is resumable via the Reopen path.
 func TestSubagentResumeAfterMaxTurns(t *testing.T) {

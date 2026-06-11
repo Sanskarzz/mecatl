@@ -237,6 +237,14 @@ type config struct {
 	// memoryDir is a no-op (logged as a warning).
 	memoryConsolidateInterval time.Duration
 
+	// Child-session retention/GC (issue #38): age threshold, per-family count
+	// cap, and sweep cadence for persisted subagent-/parallel-/team- child
+	// snapshots. Only meaningful for a durable store (--store-dir or a prunable
+	// remote driver); the in-memory default never accumulates across restarts.
+	childRetention             time.Duration
+	childRetentionMaxPerFamily int
+	childGCInterval            time.Duration
+
 	// Slash commands: directory of <name>.md command templates, and an explicit
 	// enable switch. commandsDir set OR enableCommands true wires the
 	// DirCommandExpander; otherwise the default NoopExpander is left in place.
@@ -664,6 +672,9 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		MaxTeamTokens:                cfg.maxTeamTokens,
 		MemoryDir:                    cfg.memoryDir,
 		MemoryConsolidateInterval:    cfg.memoryConsolidateInterval,
+		ChildRetention:               cfg.childRetention,
+		ChildRetentionMaxPerFamily:   cfg.childRetentionMaxPerFamily,
+		ChildGCInterval:              cfg.childGCInterval,
 		SessionStoreURL:              cfg.sessionStoreURL,
 		MemoryStoreURL:               cfg.memoryStoreURL,
 		SkillSourceURL:               cfg.skillSourceURL,
@@ -786,6 +797,9 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "per-project memory store directory (empty disables the Remember/Recall tools)")
 	fs.DurationVar(&cfg.memoryConsolidateInterval, "memory-consolidate-interval", 0, "interval for background memory consolidation (dream); 0 disables. Only meaningful with --memory-dir")
+	fs.DurationVar(&cfg.childRetention, "child-retention", 168*time.Hour, "how long persisted CHILD session snapshots (subagent-*/parallel-*/team-* ids — the InspectSubagent/resume handles) are retained before the GC sweep deletes them; main sessions are never touched. Only meaningful with a durable store (--store-dir or a prunable --session-store-url driver). 0 disables the age pass")
+	fs.IntVar(&cfg.childRetentionMaxPerFamily, "child-retention-max-per-family", 500, "max persisted child session snapshots kept per delegation family (subagent/parallel/team); the oldest beyond the cap are deleted, skipping in-flight runs. Durable-store-only, like --child-retention. 0 disables the cap")
+	fs.DurationVar(&cfg.childGCInterval, "child-gc-interval", time.Hour, "how often the child-session retention GC re-sweeps after the startup sweep; 0 = sweep at startup only. Only meaningful when --child-retention or --child-retention-max-per-family is active")
 	fs.StringVar(&cfg.memoryStoreURL, "memory-store-url", "", "host:port of a remote memory-store gRPC driver (mecatl.driver.v1.MemoryStoreService); replaces the local flock store, so it is mutually exclusive with --memory-dir. Enables the Remember/Recall tools like --memory-dir does. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 	fs.StringVar(&cfg.driverAuthToken, "driver-auth-token", "", "bearer token sent on every store-driver RPC (or MECATL_DRIVER_AUTH_TOKEN; empty disables driver auth). Refused over cleartext to a non-loopback driver — pair with --driver-tls")
 	fs.BoolVar(&cfg.driverTLS, "driver-tls", false, "enable transport TLS on the store-driver connections (--session-store-url/--memory-store-url)")

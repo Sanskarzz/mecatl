@@ -923,9 +923,9 @@ drift from the in-process semantics:
 
 | Suite | Backend | Run site |
 |---|---|---|
-| `storeconformance` | `memstore` | `engine/adapter/memstore/conformance_test.go` |
-| `storeconformance` | `jsonlstore` | `internal/adapter/store/jsonlstore/conformance_test.go` |
-| `storeconformance` | grpcdriver → bufconn → `NewSessionStoreServer(memstore)` | `internal/adapter/grpcdriver/conformance_test.go` |
+| `storeconformance` (`Run` + `RunPrunable`) | `memstore` | `engine/adapter/memstore/conformance_test.go` |
+| `storeconformance` (`Run` + `RunPrunable`) | `jsonlstore` | `internal/adapter/store/jsonlstore/conformance_test.go` |
+| `storeconformance` (`Run` + `RunPrunable`) | grpcdriver → bufconn → `NewSessionStoreServer(memstore)` | `internal/adapter/grpcdriver/conformance_test.go` |
 | `memconformance` | flock `memory.Store` | `internal/adapter/memory/conformance_test.go` |
 | `memconformance` | grpcdriver → bufconn → `NewMemoryStoreServer(memory.Store)` | `internal/adapter/grpcdriver/conformance_test.go` |
 | `sourceconformance.RunSkillSource` | in-memory `NewFixtureSource` (self-test) | `engine/adapter/sourceconformance/sourceconformance_selftest_test.go` |

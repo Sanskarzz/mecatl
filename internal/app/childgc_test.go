@@ -1,0 +1,609 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stacklok/mecatl/engine/adapter/memstore"
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
+)
+
+// gcFixture builds a deterministic sweep harness: a memstore whose Save times
+// come from an injected fake clock, plus a childGC reading the same clock.
+type gcFixture struct {
+	store *memstore.Store
+	gc    *childGC
+	// now is the fake clock's CURRENT reading; advance it between saves to
+	// give snapshots distinct ages.
+	now time.Time
+}
+
+func newGCFixture(t *testing.T, policy childGCPolicy) *gcFixture {
+	t.Helper()
+	f := &gcFixture{now: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
+	f.store = memstore.New(memstore.WithNow(func() time.Time { return f.now }))
+	f.gc = &childGC{
+		store:  f.store,
+		policy: policy,
+		isLive: func(session.SessionID) bool { return false },
+		now:    func() time.Time { return f.now },
+		diag:   port.NopDiagnostics{},
+	}
+	return f
+}
+
+// save stores an empty session under id at the fixture clock's current time.
+func (f *gcFixture) save(t *testing.T, id session.SessionID) {
+	t.Helper()
+	s := session.New(id, session.ModeDefault, "/ws", session.Limits{}, f.now)
+	if err := f.store.Save(context.Background(), s); err != nil {
+		t.Fatalf("Save(%q): %v", id, err)
+	}
+}
+
+// ids returns the set of ids currently in the store.
+func (f *gcFixture) ids(t *testing.T) map[session.SessionID]bool {
+	t.Helper()
+	entries, err := f.store.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	out := make(map[session.SessionID]bool, len(entries))
+	for _, e := range entries {
+		out[e.ID] = true
+	}
+	return out
+}
+
+// TestChildGCAgePass pins the age pass: child snapshots older than retention
+// are deleted, younger ones retained, across all three families.
+func TestChildGCAgePass(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{retention: 24 * time.Hour})
+	f.save(t, "subagent-old")
+	f.save(t, "parallel-old-0")
+	f.save(t, "team-old-lead")
+	f.now = f.now.Add(48 * time.Hour) // the old ones are now 48h old
+	f.save(t, "subagent-young")
+
+	deleted, retained := f.gc.sweep(context.Background())
+	if deleted != 3 || retained != 1 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (3, 1)", deleted, retained)
+	}
+	got := f.ids(t)
+	for _, old := range []session.SessionID{"subagent-old", "parallel-old-0", "team-old-lead"} {
+		if got[old] {
+			t.Errorf("aged-out child %q survived the age pass", old)
+		}
+	}
+	if !got["subagent-young"] {
+		t.Error("young child was deleted by the age pass")
+	}
+}
+
+// TestChildGCMainSessionsNeverDeleted is the load-bearing SAFETY test: an
+// UNPREFIXED (operator/service) session is never deleted — not by the age
+// pass even when ancient, and not by the cap pass however many there are.
+// (Mutation-verified: removing the prefix gate in sweep makes this fail.)
+func TestChildGCMainSessionsNeverDeleted(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{retention: time.Hour, maxPerFamily: 1})
+	// Ancient main sessions, including ids that merely CONTAIN family words.
+	mains := []session.SessionID{
+		"abc123def", "my-subagent-notes", "session-team-x", "S-parallel-1",
+	}
+	for _, id := range mains {
+		f.save(t, id)
+	}
+	f.now = f.now.Add(1000 * time.Hour) // all of them far past retention
+
+	deleted, _ := f.gc.sweep(context.Background())
+	if deleted != 0 {
+		t.Errorf("sweep deleted %d sessions, want 0 (only child-prefixed ids are prunable)", deleted)
+	}
+	got := f.ids(t)
+	for _, id := range mains {
+		if !got[id] {
+			t.Errorf("UNPREFIXED main session %q was deleted — the safety invariant is broken", id)
+		}
+	}
+}
+
+// TestChildGCCapPassOldestFirst pins the per-family count cap: past the cap,
+// the OLDEST snapshots go first, and the cap is per FAMILY (a full subagent
+// family does not evict team members).
+func TestChildGCCapPassOldestFirst(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{maxPerFamily: 2})
+	for i, id := range []session.SessionID{"subagent-a", "subagent-b", "subagent-c", "subagent-d"} {
+		f.save(t, id)
+		f.now = f.now.Add(time.Duration(i+1) * time.Minute)
+	}
+	f.save(t, "team-t-lead") // a second family, under its own cap
+
+	deleted, retained := f.gc.sweep(context.Background())
+	if deleted != 2 || retained != 3 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (2, 3)", deleted, retained)
+	}
+	got := f.ids(t)
+	for _, id := range []session.SessionID{"subagent-a", "subagent-b"} {
+		if got[id] {
+			t.Errorf("oldest-past-cap %q survived the cap pass", id)
+		}
+	}
+	for _, id := range []session.SessionID{"subagent-c", "subagent-d", "team-t-lead"} {
+		if !got[id] {
+			t.Errorf("%q was deleted, want retained (newest-2 per family + the other family)", id)
+		}
+	}
+}
+
+// TestChildGCSkipsLiveChildren pins the liveness exclusion: an id with an
+// in-flight run keeps its slot under the cap (the next-oldest non-live id is
+// deleted instead) and is never deleted by the age pass.
+func TestChildGCSkipsLiveChildren(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{retention: 24 * time.Hour, maxPerFamily: 2})
+	live := map[session.SessionID]bool{"subagent-live-old": true}
+	f.gc.isLive = func(id session.SessionID) bool { return live[id] }
+
+	f.save(t, "subagent-live-old") // ancient but live: must survive BOTH passes
+	f.save(t, "subagent-dead-old") // ancient and dead: age pass takes it
+	f.now = f.now.Add(48 * time.Hour)
+	for i, id := range []session.SessionID{"subagent-y1", "subagent-y2", "subagent-y3"} {
+		f.save(t, id)
+		f.now = f.now.Add(time.Duration(i+1) * time.Minute)
+	}
+
+	// Age pass: dead-old deleted, live-old skipped. Survivors: live-old + y1..y3
+	// = 4 > cap 2, oldest-first with live-old skipped => y1 and y2 deleted.
+	deleted, retained := f.gc.sweep(context.Background())
+	if deleted != 3 || retained != 2 {
+		t.Errorf("sweep = (deleted %d, retained %d), want (3, 2)", deleted, retained)
+	}
+	got := f.ids(t)
+	if !got["subagent-live-old"] {
+		t.Error("LIVE child was deleted — the liveness exclusion is broken")
+	}
+	if got["subagent-dead-old"] {
+		t.Error("dead aged-out child survived")
+	}
+	if got["subagent-y1"] || got["subagent-y2"] {
+		t.Errorf("cap pass kept the oldest non-live ids (y1=%v y2=%v), want them deleted in the live id's stead", got["subagent-y1"], got["subagent-y2"])
+	}
+	if !got["subagent-y3"] {
+		t.Error("newest child was deleted under the cap pass")
+	}
+}
+
+// TestChildGCDisabledPolicyIsNoOp pins that the all-zero policy never lists or
+// deletes: startChildGC with a zero policy starts nothing.
+func TestChildGCDisabledPolicyIsNoOp(t *testing.T) {
+	if (childGCPolicy{}).enabled() {
+		t.Fatal("zero policy reports enabled")
+	}
+	f := newGCFixture(t, childGCPolicy{})
+	f.save(t, "subagent-ancient")
+	f.now = f.now.Add(10000 * time.Hour)
+	// startChildGC must return without starting a goroutine or sweeping.
+	startChildGC(context.Background(), Config{}, f.store, f.gc.isLive)
+	if !f.ids(t)["subagent-ancient"] {
+		t.Error("disabled GC still deleted a child")
+	}
+}
+
+// TestChildGCNonPrunableStoreIsNoOp pins the degradation posture: a store
+// without the PrunableStore seam is never swept — startChildGC no-ops with an
+// INFO (never an error, never a panic).
+func TestChildGCNonPrunableStoreIsNoOp(t *testing.T) {
+	rec := &recordingDiag{}
+	cfg := Config{
+		ChildRetention:             time.Hour,
+		ChildRetentionMaxPerFamily: 10,
+		Diagnostics:                rec,
+	}
+	startChildGC(context.Background(), cfg, plainSessionStore{inner: memstore.New()}, func(session.SessionID) bool { return false })
+	if !rec.has("not prunable") {
+		t.Errorf("expected the 'not prunable' INFO, got %q", rec.messages())
+	}
+}
+
+// TestChildGCListErrorIsNonFatal pins the best-effort posture: a TRANSIENT
+// List failure (I/O error, timeout) is one WARN and a skipped sweep — never
+// fatal, and never disabling (the next sweep retries). The PERMANENT case (a
+// store signalling port.ErrPruneUnsupported) is the separate sticky-disable
+// posture pinned by TestChildGCPruneUnsupportedDisablesStickily.
+func TestChildGCListErrorIsNonFatal(t *testing.T) {
+	rec := &recordingDiag{}
+	gc := &childGC{
+		store:  failingPrunable{},
+		policy: childGCPolicy{retention: time.Hour},
+		isLive: func(session.SessionID) bool { return false },
+		now:    time.Now,
+		diag:   rec,
+	}
+	deleted, retained := gc.sweep(context.Background())
+	if deleted != 0 || retained != 0 {
+		t.Errorf("failed-List sweep = (%d, %d), want (0, 0)", deleted, retained)
+	}
+	if !rec.has("list failed") {
+		t.Errorf("expected the list-failed WARN, got %q", rec.messages())
+	}
+}
+
+// TestChildSessionPrefixesMatchEngineConvention is the drift guard for the
+// prefix wiring: composition's childSessionPrefixes must be EXACTLY the three
+// engine-exported prefix constants (engine/agent/childregistry.go — the same
+// constants the minting sites derive from), all three legs real. Plus the one
+// exported minting helper (agent.MemberSessionID) and the documented shapes of
+// the other two families must classify into their families.
+func TestChildSessionPrefixesMatchEngineConvention(t *testing.T) {
+	wantPrefixes := []string{
+		agent.SubagentSessionPrefix,
+		agent.ParallelSessionPrefix,
+		agent.TeamSessionPrefix,
+	}
+	if len(childSessionPrefixes) != len(wantPrefixes) {
+		t.Fatalf("childSessionPrefixes = %v, want exactly the engine constants %v", childSessionPrefixes, wantPrefixes)
+	}
+	for i, want := range wantPrefixes {
+		if childSessionPrefixes[i] != want {
+			t.Errorf("childSessionPrefixes[%d] = %q, want the engine constant %q", i, childSessionPrefixes[i], want)
+		}
+	}
+
+	id := agent.MemberSessionID("tid", "lead")
+	family, ok := isChildSession(id)
+	if !ok || family != agent.TeamSessionPrefix {
+		t.Errorf("isChildSession(%q) = (%q, %v), want (%q, true) — the engine's member-id scheme drifted from childSessionPrefixes", id, family, ok, agent.TeamSessionPrefix)
+	}
+	// The canonical shapes of the other two families (the documented
+	// "subagent-<callID>" / "parallel-<callID>-<i>" conventions, minted from
+	// the same constants).
+	for _, c := range []struct {
+		id   session.SessionID
+		want string
+	}{
+		{session.SessionID(agent.SubagentSessionPrefix + "call123"), agent.SubagentSessionPrefix},
+		{session.SessionID(agent.ParallelSessionPrefix + "call123-0"), agent.ParallelSessionPrefix},
+	} {
+		family, ok := isChildSession(c.id)
+		if !ok || family != c.want {
+			t.Errorf("isChildSession(%q) = (%q, %v), want (%q, true)", c.id, family, ok, c.want)
+		}
+	}
+}
+
+// plainSessionStore strips a store down to bare Save/Load so the type
+// assertion in startChildGC sees a NON-prunable store.
+type plainSessionStore struct{ inner port.SessionStore }
+
+func (p plainSessionStore) Save(ctx context.Context, s *session.Session) error {
+	return p.inner.Save(ctx, s)
+}
+
+func (p plainSessionStore) Load(ctx context.Context, id session.SessionID) (*session.Session, error) {
+	return p.inner.Load(ctx, id)
+}
+
+// failingPrunable always fails List (the remote-UNIMPLEMENTED stand-in).
+type failingPrunable struct{}
+
+func (failingPrunable) Save(context.Context, *session.Session) error { return nil }
+func (failingPrunable) Load(context.Context, session.SessionID) (*session.Session, error) {
+	return nil, port.ErrSessionNotFound
+}
+
+func (failingPrunable) List(context.Context) ([]port.StoredSession, error) {
+	return nil, context.DeadlineExceeded
+}
+func (failingPrunable) Delete(context.Context, session.SessionID) error { return nil }
+
+// recordingDiag captures diagnostics lines for assertion.
+type recordingDiag struct{ msgs []string }
+
+func (r *recordingDiag) Log(_ context.Context, _ port.Level, msg string, _ ...any) {
+	r.msgs = append(r.msgs, msg)
+}
+func (r *recordingDiag) With(...any) port.Diagnostics { return r }
+func (r *recordingDiag) has(substr string) bool {
+	for _, m := range r.msgs {
+		if strings.Contains(m, substr) {
+			return true
+		}
+	}
+	return false
+}
+func (r *recordingDiag) messages() []string { return r.msgs }
+
+// TestChildGCCapPassTieBreakDeterministic pins the cap pass's eviction order
+// under EQUAL ModifiedAt (coarse file mtimes / batch saves are realistic): the
+// ID tiebreak makes the same siblings lose every time, regardless of the
+// store's (map-iteration) List order. Without the tiebreak which sibling
+// survives would be random per sweep.
+func TestChildGCCapPassTieBreakDeterministic(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{maxPerFamily: 2})
+	// Saved at the SAME fixture instant — all four ModifiedAt values tie.
+	// Deliberately not in ID order, so only the tiebreak can order them.
+	for _, id := range []session.SessionID{"subagent-c", "subagent-a", "subagent-d", "subagent-b"} {
+		f.save(t, id)
+	}
+
+	deleted, retained := f.gc.sweep(context.Background())
+	if deleted != 2 || retained != 2 {
+		t.Fatalf("sweep = (deleted %d, retained %d), want (2, 2)", deleted, retained)
+	}
+	got := f.ids(t)
+	for _, id := range []session.SessionID{"subagent-a", "subagent-b"} {
+		if got[id] {
+			t.Errorf("%q survived; on a full ModifiedAt tie the LOWEST ids must be evicted first (deterministic)", id)
+		}
+	}
+	for _, id := range []session.SessionID{"subagent-c", "subagent-d"} {
+		if !got[id] {
+			t.Errorf("%q was evicted; on a full ModifiedAt tie the HIGHEST ids must survive (deterministic)", id)
+		}
+	}
+}
+
+// TestChildGCAgeBoundaryIsStrict pins the cutoff comparison's strictness: a
+// snapshot EXACTLY retention old is RETAINED (ModifiedAt.Before(cutoff) is
+// strict), and one a nanosecond past it is deleted.
+func TestChildGCAgeBoundaryIsStrict(t *testing.T) {
+	f := newGCFixture(t, childGCPolicy{retention: 24 * time.Hour})
+	f.save(t, "subagent-edge")
+
+	f.now = f.now.Add(24 * time.Hour) // exactly AT the cutoff
+	if deleted, _ := f.gc.sweep(context.Background()); deleted != 0 {
+		t.Errorf("exactly-at-cutoff sweep deleted %d, want 0 (the comparison must be strictly Before)", deleted)
+	}
+	if !f.ids(t)["subagent-edge"] {
+		t.Fatal("exactly-at-cutoff snapshot was deleted — the boundary must retain")
+	}
+
+	f.now = f.now.Add(time.Nanosecond) // one tick PAST the cutoff
+	if deleted, _ := f.gc.sweep(context.Background()); deleted != 1 {
+		t.Errorf("just-past-cutoff sweep deleted %d, want 1", deleted)
+	}
+	if f.ids(t)["subagent-edge"] {
+		t.Error("just-past-cutoff snapshot survived")
+	}
+}
+
+// countingPrunable wraps memstore, counting List calls (and optionally
+// signalling each one / failing each one) so tests can assert HOW OFTEN the
+// sweeper consults the store.
+type countingPrunable struct {
+	*memstore.Store
+	lists   atomic.Int32
+	listed  chan struct{} // when non-nil, receives one (non-blocking) signal per List
+	listErr error         // when non-nil, every List fails with it
+}
+
+func (c *countingPrunable) List(ctx context.Context) ([]port.StoredSession, error) {
+	c.lists.Add(1)
+	if c.listed != nil {
+		select {
+		case c.listed <- struct{}{}:
+		default:
+		}
+	}
+	if c.listErr != nil {
+		return nil, c.listErr
+	}
+	return c.Store.List(ctx)
+}
+
+// pruneUnsupportedErr mimics the grpcdriver client's mapping of a driver
+// UNIMPLEMENTED onto the port sentinel.
+func pruneUnsupportedErr() error {
+	return fmt.Errorf("grpcdriver: list: %w: rpc error: code = Unimplemented", port.ErrPruneUnsupported)
+}
+
+// TestChildGCPruneUnsupportedDisablesStickily pins the permanent-posture
+// degradation: a store signalling port.ErrPruneUnsupported gets ONE INFO
+// ("disabling child GC"), never a WARN, and every subsequent sweep is a no-op
+// that does not even List.
+func TestChildGCPruneUnsupportedDisablesStickily(t *testing.T) {
+	rec := &recordingDiag{}
+	cs := &countingPrunable{Store: memstore.New(), listErr: pruneUnsupportedErr()}
+	gc := &childGC{
+		store:  cs,
+		policy: childGCPolicy{retention: time.Hour},
+		isLive: func(session.SessionID) bool { return false },
+		now:    time.Now,
+		diag:   rec,
+	}
+
+	gc.sweep(context.Background())
+	if got := cs.lists.Load(); got != 1 {
+		t.Fatalf("first sweep performed %d Lists, want 1", got)
+	}
+	if !gc.disabled {
+		t.Fatal("ErrPruneUnsupported did not set the sticky disable")
+	}
+	if !rec.has("disabling child GC") {
+		t.Errorf("expected the one disabling INFO, got %q", rec.messages())
+	}
+	if rec.has("list failed") {
+		t.Errorf("the permanent posture must not surface as the transient WARN, got %q", rec.messages())
+	}
+
+	// Second sweep: sticky — no List, no further logs.
+	gc.sweep(context.Background())
+	if got := cs.lists.Load(); got != 1 {
+		t.Errorf("post-disable sweep still consulted the store (%d Lists, want 1)", got)
+	}
+	var infos int
+	for _, m := range rec.messages() {
+		if strings.Contains(m, "disabling child GC") {
+			infos++
+		}
+	}
+	if infos != 1 {
+		t.Errorf("the disabling INFO fired %d times, want exactly once", infos)
+	}
+}
+
+// TestChildGCTickerStopsAfterPruneUnsupported pins the goroutine half of the
+// sticky disable: after the startup sweep hits ErrPruneUnsupported, no later
+// tick performs a List (the sweeper goroutine exits; goleak at TestMain is the
+// leak gate).
+func TestChildGCTickerStopsAfterPruneUnsupported(t *testing.T) {
+	cs := &countingPrunable{Store: memstore.New(), listed: make(chan struct{}, 16), listErr: pruneUnsupportedErr()}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := Config{
+		ChildRetention:  time.Hour,
+		ChildGCInterval: 2 * time.Millisecond,
+		Diagnostics:     port.NopDiagnostics{},
+	}
+	startChildGC(ctx, cfg, cs, func(session.SessionID) bool { return false })
+	select {
+	case <-cs.listed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the startup sweep never consulted the store")
+	}
+	time.Sleep(60 * time.Millisecond) // many would-be ticks
+	if got := cs.lists.Load(); got != 1 {
+		t.Errorf("sweeper kept Listing after ErrPruneUnsupported (%d Lists, want 1)", got)
+	}
+}
+
+// TestChildGCStartupOnlySweepsOnceAndExits pins the ChildGCInterval=0 mode:
+// exactly one startup sweep, then the goroutine exits (no ticker; goleak at
+// TestMain catches a lingering goroutine).
+func TestChildGCStartupOnlySweepsOnceAndExits(t *testing.T) {
+	cs := &countingPrunable{Store: memstore.New(), listed: make(chan struct{}, 4)}
+	cfg := Config{
+		ChildRetention: time.Hour, // ChildGCInterval deliberately zero
+		Diagnostics:    port.NopDiagnostics{},
+	}
+	startChildGC(context.Background(), cfg, cs, func(session.SessionID) bool { return false })
+	select {
+	case <-cs.listed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the startup sweep never consulted the store")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := cs.lists.Load(); got != 1 {
+		t.Errorf("startup-only mode performed %d Lists, want exactly 1", got)
+	}
+}
+
+// TestBuildChildGCSweepsStaleJSONLChild is the build-level E2E: a REAL jsonl
+// store dir seeded with a stale subagent-* snapshot (aged via os.Chtimes — the
+// jsonl store's ModifiedAt is the file mtime) plus a fresh main session, fed
+// through a real app.Build with retention enabled in startup-only mode. The
+// startup sweep must delete the stale child's files while the main session
+// survives untouched.
+func TestBuildChildGCSweepsStaleJSONLChild(t *testing.T) {
+	storeDir := t.TempDir()
+	seed, err := jsonlstore.New(storeDir)
+	if err != nil {
+		t.Fatalf("jsonlstore.New: %v", err)
+	}
+	bg := context.Background()
+	created := time.Now().Add(-48 * time.Hour)
+	for _, id := range []session.SessionID{"subagent-stale", "operator-main"} {
+		if err := seed.Save(bg, session.New(id, session.ModeDefault, "/ws", session.Limits{}, created)); err != nil {
+			t.Fatalf("seed Save(%q): %v", id, err)
+		}
+	}
+	staleFile := filepath.Join(storeDir, "subagent-stale.session.jsonl")
+	mainFile := filepath.Join(storeDir, "operator-main.session.jsonl")
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(staleFile, old, old); err != nil {
+		t.Fatalf("Chtimes(stale child): %v", err)
+	}
+	if err := os.Chtimes(mainFile, old, old); err != nil { // main is ancient too — and must STILL survive
+		t.Fatalf("Chtimes(main): %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	built, err := Build(ctx, Config{
+		Workspace:      t.TempDir(),
+		Model:          "mock",
+		UseMock:        true,
+		StoreDir:       storeDir,
+		ChildRetention: 24 * time.Hour, // ChildGCInterval=0: startup-only (the goroutine exits; goleak gates)
+		Diagnostics:    port.NopDiagnostics{},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer built.Close()
+
+	// The startup sweep runs on its own goroutine; poll for its effect.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(staleFile); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the startup sweep never deleted the stale subagent-* session file")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(mainFile); err != nil {
+		t.Fatalf("the MAIN session file did not survive the sweep (stat: %v) — the safety invariant is broken end-to-end", err)
+	}
+}
+
+// TestBuildZeroConfigChildGCIsNoOp is the build-level posture guard: a
+// zero-config Build (in-memory store, no retention fields set) narrates the
+// DISABLED fact and starts no sweeper goroutine (the package's goleak TestMain
+// is the leak gate — a lingering ticker goroutine after ctx cancel would trip
+// it).
+func TestBuildZeroConfigChildGCIsNoOp(t *testing.T) {
+	diag := newCapturingDiagnostics()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	built, err := Build(ctx, Config{
+		Workspace:   t.TempDir(),
+		Model:       "mock",
+		UseMock:     true,
+		Diagnostics: diag,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer built.Close()
+	if got := diag.countContaining("child-session GC DISABLED"); got != 1 {
+		t.Errorf("zero-config Build narrated 'child-session GC DISABLED' %d times, want exactly 1", got)
+	}
+	if got := diag.countContaining("child-session GC ENABLED"); got != 0 {
+		t.Errorf("zero-config Build narrated 'child-session GC ENABLED' %d times, want 0", got)
+	}
+}
+
+// TestBuildEnabledChildGCNarratesAndStops pins the enabled wiring end-to-end:
+// a Build with retention configured narrates ENABLED, and the ticker goroutine
+// exits on ctx cancel (goleak at TestMain is the assertion).
+func TestBuildEnabledChildGCNarratesAndStops(t *testing.T) {
+	diag := newCapturingDiagnostics()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	built, err := Build(ctx, Config{
+		Workspace:                  t.TempDir(),
+		Model:                      "mock",
+		UseMock:                    true,
+		ChildRetention:             168 * time.Hour,
+		ChildRetentionMaxPerFamily: 500,
+		ChildGCInterval:            time.Hour,
+		Diagnostics:                diag,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer built.Close()
+	if got := diag.countContaining("child-session GC ENABLED"); got != 1 {
+		t.Errorf("Build narrated 'child-session GC ENABLED' %d times, want exactly 1", got)
+	}
+}

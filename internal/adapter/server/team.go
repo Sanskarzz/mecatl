@@ -110,12 +110,14 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name, goal string, 
 	// Compute the team id FIRST (it needs only NewID, no dependency on the supervisor)
 	// so the member-session prefix can namespace member ids by it — keeping the gRPC
 	// path's stored ids collision-free across concurrent teams and aligned with
-	// agent.MemberSessionID (which the inspect tool derives).
-	id := "team-" + string(s.cfg.NewID())
+	// agent.MemberSessionID (which the inspect tool derives). Both prefixes spell the
+	// exported agent.TeamSessionPrefix so the stored ids stay inside the engine's
+	// id-minting convention (and thereby in scope for the child-session GC).
+	id := agent.TeamSessionPrefix + string(s.cfg.NewID())
 
 	opts := []agent.SupervisorOption{
 		agent.WithTeamGoal(goal),
-		agent.WithMemberSessionPrefix("team-" + id),
+		agent.WithMemberSessionPrefix(agent.TeamSessionPrefix + id),
 	}
 	// The goal is the team's TRUSTED top-level instruction by default (the deployment
 	// owns the gRPC front door, so the goal's provenance is the operator/principal,

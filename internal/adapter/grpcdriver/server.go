@@ -7,6 +7,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	driverv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/driver/v1"
 	"github.com/stacklok/mecatl/engine/adapter/sessnap"
@@ -96,6 +97,46 @@ func (s *sessionStoreServer) Load(ctx context.Context, req *driverv1.LoadRequest
 	return &driverv1.LoadResponse{
 		Snapshot: &driverv1.SessionSnapshot{Format: SnapshotFormat, Payload: line},
 	}, nil
+}
+
+// List serves the retention seam by type-asserting the wrapped backend for
+// port.PrunableStore. A backend that is a plain Save/Load store answers
+// UNIMPLEMENTED — the protocol's documented "cannot enumerate" posture; the
+// harness-side sweeper then degrades to never sweeping that store.
+func (s *sessionStoreServer) List(ctx context.Context, _ *driverv1.ListSessionsRequest) (*driverv1.ListSessionsResponse, error) {
+	p, ok := s.store.(port.PrunableStore)
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "the wrapped session store does not support enumeration (port.PrunableStore)")
+	}
+	entries, err := p.List(ctx)
+	if err != nil {
+		return nil, storeStatus(err)
+	}
+	out := make([]*driverv1.StoredSessionEntry, 0, len(entries))
+	for _, e := range entries {
+		pe := &driverv1.StoredSessionEntry{SessionId: string(e.ID)}
+		if !e.ModifiedAt.IsZero() {
+			pe.ModifiedAt = timestamppb.New(e.ModifiedAt)
+		}
+		out = append(out, pe)
+	}
+	return &driverv1.ListSessionsResponse{Sessions: out}, nil
+}
+
+// Delete serves the retention seam's idempotent delete (same PrunableStore
+// type-assertion posture as List; UNIMPLEMENTED for a plain backend).
+func (s *sessionStoreServer) Delete(ctx context.Context, req *driverv1.DeleteSessionRequest) (*driverv1.DeleteSessionResponse, error) {
+	p, ok := s.store.(port.PrunableStore)
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "the wrapped session store does not support deletion (port.PrunableStore)")
+	}
+	if req.GetSessionId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "session_id is required")
+	}
+	if err := p.Delete(ctx, session.SessionID(req.GetSessionId())); err != nil {
+		return nil, storeStatus(err)
+	}
+	return &driverv1.DeleteSessionResponse{}, nil
 }
 
 // memoryStoreServer adapts a tool.MemoryStore to MemoryStoreServiceServer.

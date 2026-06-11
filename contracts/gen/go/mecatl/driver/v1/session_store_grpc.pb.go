@@ -21,6 +21,18 @@
 // Driver contract (mirrors the in-process stores):
 //   - Load of an unknown session id MUST return NOT_FOUND.
 //   - Save overwrites: Load returns the most recent snapshot saved under the id.
+//   - List returns EVERY stored session id with its last-modified time (Save
+//     time or the driver's nearest equivalent), unfiltered: prefix filtering
+//     and retention policy (which ids are prunable, age thresholds, count
+//     caps) stay HARNESS-side. A driver that does not retain modification
+//     times may return its best approximation, but MUST return all ids.
+//   - Delete is IDEMPOTENT: deleting an unknown session id succeeds (an
+//     implementation built over a NOT_FOUND-returning primitive must tolerate
+//     it — the harness treats unknown-id Delete as success, so a driver
+//     SHOULD return OK rather than NOT_FOUND; the harness client tolerates
+//     NOT_FOUND regardless). A backend that cannot enumerate or delete may
+//     return UNIMPLEMENTED for both; the harness then degrades to never
+//     sweeping that store.
 //
 // Validation: required-field annotations are authored with `buf.validate.field`
 // for documentation and future runtime enforcement; V1 enforces them in the Go
@@ -47,8 +59,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SessionStoreService_Save_FullMethodName = "/mecatl.driver.v1.SessionStoreService/Save"
-	SessionStoreService_Load_FullMethodName = "/mecatl.driver.v1.SessionStoreService/Load"
+	SessionStoreService_Save_FullMethodName   = "/mecatl.driver.v1.SessionStoreService/Save"
+	SessionStoreService_Load_FullMethodName   = "/mecatl.driver.v1.SessionStoreService/Load"
+	SessionStoreService_List_FullMethodName   = "/mecatl.driver.v1.SessionStoreService/List"
+	SessionStoreService_Delete_FullMethodName = "/mecatl.driver.v1.SessionStoreService/Delete"
 )
 
 // SessionStoreServiceClient is the client API for SessionStoreService service.
@@ -56,8 +70,10 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // SessionStoreService persists and retrieves opaque, format-tagged session
-// snapshots keyed by session id. It is the remote analogue of
-// port.SessionStore's two methods.
+// snapshots keyed by session id. Save/Load are the remote analogue of
+// port.SessionStore's two methods; List/Delete are the remote analogue of the
+// OPTIONAL port.PrunableStore retention seam (a driver backed by a
+// non-enumerable store may return UNIMPLEMENTED for both).
 type SessionStoreServiceClient interface {
 	// Save persists the snapshot under session_id, overwriting any prior
 	// snapshot for the same id (a later Save wins).
@@ -67,6 +83,13 @@ type SessionStoreServiceClient interface {
 	// its port.ErrSessionNotFound sentinel; any other error is an
 	// infrastructure failure.
 	Load(ctx context.Context, in *LoadRequest, opts ...grpc.CallOption) (*LoadResponse, error)
+	// List returns EVERY stored session id with its last-modified time,
+	// unfiltered — retention policy stays harness-side (see the package doc).
+	List(ctx context.Context, in *ListSessionsRequest, opts ...grpc.CallOption) (*ListSessionsResponse, error)
+	// Delete removes the snapshot stored under session_id, idempotently: an
+	// unknown id is success (a NOT_FOUND from a thin driver is tolerated by the
+	// harness client and mapped to success).
+	Delete(ctx context.Context, in *DeleteSessionRequest, opts ...grpc.CallOption) (*DeleteSessionResponse, error)
 }
 
 type sessionStoreServiceClient struct {
@@ -97,13 +120,35 @@ func (c *sessionStoreServiceClient) Load(ctx context.Context, in *LoadRequest, o
 	return out, nil
 }
 
+func (c *sessionStoreServiceClient) List(ctx context.Context, in *ListSessionsRequest, opts ...grpc.CallOption) (*ListSessionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSessionsResponse)
+	err := c.cc.Invoke(ctx, SessionStoreService_List_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionStoreServiceClient) Delete(ctx context.Context, in *DeleteSessionRequest, opts ...grpc.CallOption) (*DeleteSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteSessionResponse)
+	err := c.cc.Invoke(ctx, SessionStoreService_Delete_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SessionStoreServiceServer is the server API for SessionStoreService service.
 // All implementations must embed UnimplementedSessionStoreServiceServer
 // for forward compatibility.
 //
 // SessionStoreService persists and retrieves opaque, format-tagged session
-// snapshots keyed by session id. It is the remote analogue of
-// port.SessionStore's two methods.
+// snapshots keyed by session id. Save/Load are the remote analogue of
+// port.SessionStore's two methods; List/Delete are the remote analogue of the
+// OPTIONAL port.PrunableStore retention seam (a driver backed by a
+// non-enumerable store may return UNIMPLEMENTED for both).
 type SessionStoreServiceServer interface {
 	// Save persists the snapshot under session_id, overwriting any prior
 	// snapshot for the same id (a later Save wins).
@@ -113,6 +158,13 @@ type SessionStoreServiceServer interface {
 	// its port.ErrSessionNotFound sentinel; any other error is an
 	// infrastructure failure.
 	Load(context.Context, *LoadRequest) (*LoadResponse, error)
+	// List returns EVERY stored session id with its last-modified time,
+	// unfiltered — retention policy stays harness-side (see the package doc).
+	List(context.Context, *ListSessionsRequest) (*ListSessionsResponse, error)
+	// Delete removes the snapshot stored under session_id, idempotently: an
+	// unknown id is success (a NOT_FOUND from a thin driver is tolerated by the
+	// harness client and mapped to success).
+	Delete(context.Context, *DeleteSessionRequest) (*DeleteSessionResponse, error)
 	mustEmbedUnimplementedSessionStoreServiceServer()
 }
 
@@ -128,6 +180,12 @@ func (UnimplementedSessionStoreServiceServer) Save(context.Context, *SaveRequest
 }
 func (UnimplementedSessionStoreServiceServer) Load(context.Context, *LoadRequest) (*LoadResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Load not implemented")
+}
+func (UnimplementedSessionStoreServiceServer) List(context.Context, *ListSessionsRequest) (*ListSessionsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method List not implemented")
+}
+func (UnimplementedSessionStoreServiceServer) Delete(context.Context, *DeleteSessionRequest) (*DeleteSessionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Delete not implemented")
 }
 func (UnimplementedSessionStoreServiceServer) mustEmbedUnimplementedSessionStoreServiceServer() {}
 func (UnimplementedSessionStoreServiceServer) testEmbeddedByValue()                             {}
@@ -186,6 +244,42 @@ func _SessionStoreService_Load_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionStoreService_List_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSessionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionStoreServiceServer).List(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionStoreService_List_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionStoreServiceServer).List(ctx, req.(*ListSessionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionStoreService_Delete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionStoreServiceServer).Delete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionStoreService_Delete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionStoreServiceServer).Delete(ctx, req.(*DeleteSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SessionStoreService_ServiceDesc is the grpc.ServiceDesc for SessionStoreService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -200,6 +294,14 @@ var SessionStoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Load",
 			Handler:    _SessionStoreService_Load_Handler,
+		},
+		{
+			MethodName: "List",
+			Handler:    _SessionStoreService_List_Handler,
+		},
+		{
+			MethodName: "Delete",
+			Handler:    _SessionStoreService_Delete_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
