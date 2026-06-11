@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -134,6 +135,82 @@ func TestMemberSessionIDRoundTripsGRPCPath(t *testing.T) {
 	}
 }
 
+// usageTurn builds a single mock member turn that carries token usage via a
+// UsageChunk — the shared spend knob the team-budget tests tune to cross (or not
+// cross) a budget bound.
+func usageTurn(text string, in int) mockllm.Turn {
+	return mockllm.ChunksTurn(
+		mockllm.TextChunk(text),
+		mockllm.UsageChunk(session.Usage{InputTokens: in}),
+		mockllm.DoneChunk(session.StopEndTurn),
+	)
+}
+
+// teamServicePerMember is teamService with PER-MEMBER providers (keyed by member
+// name) and an optional server-side team token budget — needed when a test's
+// member scripts must not race over one shared turn queue (round-0 members run
+// concurrently) or must differ per member.
+func teamServicePerMember(t *testing.T, providers map[string]*mockllm.Provider, budget int) *server.Service {
+	t.Helper()
+	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+		llm := providers[spec.Name]
+		if llm == nil {
+			t.Fatalf("no provider scripted for member %q", spec.Name)
+		}
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
+			LLM: llm, Catalog: cat, Policy: allow, Model: "mock",
+		})}
+	}
+	engine := agent.NewEngine(agent.Deps{
+		LLM: mockllm.New(mockllm.TextTurn("x")), Catalog: tool.NewCatalog(), Policy: allow, Model: "mock",
+	})
+	svc, err := server.NewService(server.Config{
+		Engine:          engine,
+		Store:           memstore.New(),
+		Workspaces:      func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
+		Now:             func() time.Time { return time.Unix(0, 0) },
+		MemberEngine:    memberEngine,
+		TeamTokenBudget: budget,
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	return svc
+}
+
+// budgetTripProviders scripts a lead + a self-pinging worker whose round-0 spend
+// (lead 100 + worker 600 = 700) crosses a 500 budget. The worker's SendMessage to
+// ITSELF leaves a pending mailbox message at the round-1 boundary (the lead's
+// synthesis would drain the LEAD's inbox, so the ping must target a non-lead), so
+// the trip fires NON-quiescent — the shape that maps the team stop to "budget"
+// (teamStop's !Quiescent && BudgetExhausted rule), which the wire outcome-frame
+// tests assert. The synthesis turn still runs; the round-1 turns must never be
+// consumed.
+func budgetTripProviders() map[string]*mockllm.Provider {
+	ping := session.NewToolCall("wp", "SendMessage", json.RawMessage(`{"to":"worker","body":"keep going"}`))
+	return map[string]*mockllm.Provider{
+		"lead": mockllm.New(
+			usageTurn("delegating", 100),         // round 0
+			usageTurn("CONSOLIDATED report", 50), // synthesis
+			usageTurn("EXTRA lead turn (should never run)", 100),
+		),
+		"worker": mockllm.New(
+			mockllm.ChunksTurn( // round 0: ping self so round 1 WOULD be scheduled
+				mockllm.ToolCallChunk(ping),
+				mockllm.UsageChunk(session.Usage{InputTokens: 300}),
+				mockllm.DoneChunk(session.StopEndTurn),
+			),
+			usageTurn("worker round-0 done", 300),
+			usageTurn("ROUND-1 worker turn (should never run)", 1000),
+		),
+	}
+}
+
 // teamServiceWithBudget builds a team-enabled Service whose CreateTeam supervisor
 // carries a team-wide token budget (Config.TeamTokenBudget), with a per-member engine
 // driven by the supplied provider. It is the seam under TestRunTeamBudgetExhaustedOutcome.
@@ -169,17 +246,12 @@ func teamServiceWithBudget(t *testing.T, llm *mockllm.Provider, budget int) *ser
 // TestRunTeamBudgetExhaustedOutcome pins the gRPC CreateTeam path threading
 // Config.TeamTokenBudget into the supervisor (agent.WithTeamTokenBudget): a lead-only
 // team whose round-0 spend crosses the budget returns a TeamOutcome with BudgetExhausted
-// set. The wire handlers discard the outcome today (the proto knob is deferred), so this
-// asserts on the Service.RunTeam return value directly.
+// set. This asserts on the Service.RunTeam return value directly; the wire projection of
+// the same outcome (the terminal TeamEvent.outcome frame, issue #36) is pinned by
+// TestGRPCRunTeamEmitsOutcomeFrame / TestGRPCRunTeamSurfacesBudgetExhausted (grpc_test.go)
+// and TestHTTPRunTeamEmitsOutcomeFrame (http_test.go).
 func TestRunTeamBudgetExhaustedOutcome(t *testing.T) {
 	// Each member turn carries usage via a UsageChunk; the lead spends 600 in round 0.
-	usageTurn := func(text string, in int) mockllm.Turn {
-		return mockllm.ChunksTurn(
-			mockllm.TextChunk(text),
-			mockllm.UsageChunk(session.Usage{InputTokens: in}),
-			mockllm.DoneChunk(session.StopEndTurn),
-		)
-	}
 	llm := mockllm.New(
 		usageTurn("round-0 work", 600),       // round 0 (crosses the 500 budget)
 		usageTurn("CONSOLIDATED report", 50), // synthesis
@@ -189,7 +261,7 @@ func TestRunTeamBudgetExhaustedOutcome(t *testing.T) {
 	svc := teamServiceWithBudget(t, llm, budget)
 	ctx := context.Background()
 
-	id, _, err := svc.CreateTeam(ctx, "/ws", "test", "do one round of work", []agent.MemberSpec{
+	id, _, err := svc.CreateTeam(ctx, "/ws", "test", "do one round of work", 0, []agent.MemberSpec{
 		{Name: "lead", Lead: true, InitialPrompt: "do the work then stop"},
 	})
 	if err != nil {
@@ -205,6 +277,60 @@ func TestRunTeamBudgetExhaustedOutcome(t *testing.T) {
 	if out.Usage.TotalTokens() < budget {
 		t.Errorf("RunTeam outcome.Usage.TotalTokens() = %d, want >= budget %d", out.Usage.TotalTokens(), budget)
 	}
+}
+
+// TestCreateTeamTightensTeamTokenBudget pins the per-request budget knob landing in
+// issue #36: CreateTeam's maxTeamTokens folds into Config.TeamTokenBudget via
+// agent.TightenTeamTokenBudget at create time, TIGHTEN-ONLY. The effective budget is
+// observed behaviourally through a budget-exhausted run whose usage is tuned to cross
+// one bound but not the other:
+//
+//   - request BELOW server: spend crosses the request but not the server budget —
+//     BudgetExhausted=true proves the request applied (a broken fold leaving the
+//     server's 1000 in place would NOT trip on a 600 spend);
+//   - request ABOVE server: spend crosses the server budget but not the request —
+//     BudgetExhausted=true proves the server capped it (a loosening fold to 2000
+//     would NOT trip on an 1100 spend).
+func TestCreateTeamTightensTeamTokenBudget(t *testing.T) {
+	run := func(t *testing.T, serverBudget, request, round0Spend int) agent.TeamOutcome {
+		t.Helper()
+		llm := mockllm.New(
+			usageTurn("round-0 work", round0Spend),
+			usageTurn("CONSOLIDATED report", 1), // synthesis
+			usageTurn("EXTRA (should never run)", round0Spend),
+		)
+		svc := teamServiceWithBudget(t, llm, serverBudget)
+		ctx := context.Background()
+		id, _, err := svc.CreateTeam(ctx, "/ws", "test", "do one round of work", request, []agent.MemberSpec{
+			{Name: "lead", Lead: true, InitialPrompt: "do the work then stop"},
+		})
+		if err != nil {
+			t.Fatalf("CreateTeam: %v", err)
+		}
+		out, err := svc.RunTeam(ctx, id, func(agent.TeamEvent) {})
+		if err != nil {
+			t.Fatalf("RunTeam: %v", err)
+		}
+		return out
+	}
+
+	t.Run("request below server budget applies", func(t *testing.T) {
+		// Effective budget must be the request (500): a 600 round-0 spend crosses it
+		// but stays well below the server's 1000.
+		out := run(t, 1000, 500, 600)
+		if !out.BudgetExhausted {
+			t.Errorf("BudgetExhausted = false, want true (request 500 must tighten the server's 1000; spend 600)")
+		}
+	})
+
+	t.Run("request above server budget is capped", func(t *testing.T) {
+		// Effective budget must stay the server's 1000: an 1100 round-0 spend crosses
+		// it but stays below the requested 2000 — a loosened budget would not trip.
+		out := run(t, 1000, 2000, 1100)
+		if !out.BudgetExhausted {
+			t.Errorf("BudgetExhausted = false, want true (request 2000 must NOT loosen the server's 1000; spend 1100)")
+		}
+	})
 }
 
 // teamServiceWithGoalTrust builds a team-enabled Service whose CreateTeam goal-trust
@@ -557,7 +683,7 @@ func TestCreateTeamMaxTeams(t *testing.T) {
 		t.Fatalf("CreateTeam past MaxTeams: code = %v, want ResourceExhausted (err=%v)", status.Code(err), err)
 	}
 	// And the Service returns the mapped sentinel.
-	if _, _, serr := svc.CreateTeam(ctx, "/ws", "x", "", nil); !errors.Is(serr, server.ErrTooManyTeams) {
+	if _, _, serr := svc.CreateTeam(ctx, "/ws", "x", "", 0, nil); !errors.Is(serr, server.ErrTooManyTeams) {
 		t.Fatalf("Service.CreateTeam past cap: err = %v, want ErrTooManyTeams", serr)
 	}
 
@@ -777,7 +903,7 @@ func TestSpawnTeammateRaceWithRunTeam(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < teams; i++ {
-		teamID, _, err := svc.CreateTeam(ctx, "/ws", "race", "", nil)
+		teamID, _, err := svc.CreateTeam(ctx, "/ws", "race", "", 0, nil)
 		if err != nil {
 			t.Fatalf("CreateTeam #%d: %v", i, err)
 		}

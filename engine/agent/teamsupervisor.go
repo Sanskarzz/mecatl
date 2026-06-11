@@ -464,6 +464,17 @@ func WithTeamTokenBudget(n int) SupervisorOption {
 	}
 }
 
+// TightenTeamTokenBudget folds a per-request team token budget into the
+// server-configured one, TIGHTEN-ONLY (issue #36): a non-positive request inherits
+// the server budget verbatim; a positive request applies only when it is LOWER
+// than the server's bound (with a 0 server budget meaning "unlimited", so any
+// positive request tightens it). It delegates to the single tightenLimit
+// algorithm the per-call Subagent/Team overrides use — the caller (the wire
+// CreateTeam handlers) can therefore never loosen the operator's ceiling.
+func TightenTeamTokenBudget(serverBudget, request int) int {
+	return tightenLimit(serverBudget, &request)
+}
+
 // WithTeamGoal sets the team's top-level objective. It is rendered as the team's
 // TRUSTED top-level instruction into every member's round-0 turn and into the lead's
 // synthesis prompt (the goal IS the member's genuine job; its provenance is the

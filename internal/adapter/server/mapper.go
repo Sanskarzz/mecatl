@@ -5,6 +5,7 @@ import (
 	"math"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
@@ -216,6 +217,36 @@ func toProtoTeam(p session.TeamPayload) *mecatlv1.Team {
 		Tasks:           tasks,
 		Findings:        findings,
 		Dispositions:    dispositions,
+	}
+}
+
+// toProtoTeamOutcome maps the supervisor's terminal agent.TeamOutcome to its proto
+// form — the payload of the single terminal TeamEvent frame both RunTeam wire
+// handlers emit (issue #36). Stop is the string passthrough of agent.TeamStop (the
+// one quiescent/budget/round-cap rule); dispositions reuse the closed-enum mapping
+// toProtoTeam applies to the event-stream projection; finding bodies arrive
+// already capped on the outcome.
+func toProtoTeamOutcome(o agent.TeamOutcome) *mecatlv1.TeamOutcome {
+	dispositions := make([]*mecatlv1.TeamMemberDisposition, 0, len(o.Members))
+	for _, m := range o.Members {
+		dispositions = append(dispositions, &mecatlv1.TeamMemberDisposition{
+			Name:    m.Name,
+			Stopped: m.Stopped,
+			Reason:  toProtoTeamMemberStopReason(string(m.Reason)),
+		})
+	}
+	findings := make([]*mecatlv1.TeamFinding, 0, len(o.Findings))
+	for _, f := range o.Findings {
+		findings = append(findings, &mecatlv1.TeamFinding{Member: f.Member, Body: f.Body})
+	}
+	return &mecatlv1.TeamOutcome{
+		Rounds:          clampInt32(o.Rounds),
+		Quiescent:       o.Quiescent,
+		BudgetExhausted: o.BudgetExhausted,
+		Stop:            string(agent.TeamStop(o)),
+		Usage:           toProtoUsage(o.Usage),
+		Dispositions:    dispositions,
+		Findings:        findings,
 	}
 }
 

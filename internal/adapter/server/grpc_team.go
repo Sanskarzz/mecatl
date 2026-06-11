@@ -20,7 +20,7 @@ func (h *HarnessServer) CreateTeam(ctx context.Context, req *mecatlv1.CreateTeam
 	if req.GetWorkspace() == "" {
 		return nil, status.Error(codes.InvalidArgument, "workspace is required")
 	}
-	id, enrolled, err := h.svc.CreateTeam(ctx, req.GetWorkspace(), req.GetName(), req.GetGoal(), fromProtoTeammateSpecs(req.GetMembers()))
+	id, enrolled, err := h.svc.CreateTeam(ctx, req.GetWorkspace(), req.GetName(), req.GetGoal(), int(req.GetMaxTeamTokens()), fromProtoTeammateSpecs(req.GetMembers()))
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -76,9 +76,12 @@ func (h *HarnessServer) SendTeammateMessage(ctx context.Context, req *mecatlv1.S
 }
 
 // RunTeam drives the team to quiescence, streaming every member event tagged with
-// the producing member. Supervisor.Run serialises sink calls through a single
-// forwarder, so stream.Send is never invoked concurrently. A send failure cancels
-// the run so the team stops promptly rather than running on to quiescence unseen.
+// the producing member, then ends the stream with the single terminal frame
+// carrying TeamEvent.outcome (issue #36). Supervisor.Run serialises sink calls
+// through a single forwarder, so stream.Send is never invoked concurrently. A send
+// failure cancels the run so the team stops promptly rather than running on to
+// quiescence unseen; the outcome frame is sent only when no send has failed
+// (relay-drain discipline — a dead client gets no further writes).
 func (h *HarnessServer) RunTeam(req *mecatlv1.RunTeamRequest, stream mecatlv1.HarnessService_RunTeamServer) error {
 	if req.GetTeamId() == "" {
 		return status.Error(codes.InvalidArgument, "team_id is required")
@@ -87,7 +90,7 @@ func (h *HarnessServer) RunTeam(req *mecatlv1.RunTeamRequest, stream mecatlv1.Ha
 	defer cancel()
 
 	var sendErr error
-	_, err := h.svc.RunTeam(ctx, req.GetTeamId(), func(te agent.TeamEvent) {
+	out, err := h.svc.RunTeam(ctx, req.GetTeamId(), func(te agent.TeamEvent) {
 		if sendErr != nil {
 			return
 		}
@@ -99,7 +102,10 @@ func (h *HarnessServer) RunTeam(req *mecatlv1.RunTeamRequest, stream mecatlv1.Ha
 	if err != nil {
 		return toStatus(err)
 	}
-	return sendErr
+	if sendErr != nil {
+		return sendErr
+	}
+	return stream.Send(&mecatlv1.TeamEvent{Outcome: toProtoTeamOutcome(out)})
 }
 
 // ListTeam returns a snapshot of the team roster, task list, and completion state.

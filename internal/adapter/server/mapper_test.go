@@ -6,6 +6,7 @@ import (
 	"time"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/session"
 )
 
@@ -498,6 +499,86 @@ func TestToProtoNoSubmessages(t *testing.T) {
 		got.GetResult() != nil || got.GetTurnEnd() != nil || got.GetUsage() != nil ||
 		got.GetSubagent() != nil || got.GetTeam() != nil || got.GetParallel() != nil {
 		t.Fatalf("unexpected submessage on bare event: %+v", got)
+	}
+}
+
+// TestToProtoTeamOutcomeRoundTrip pins the terminal RunTeam outcome mapping
+// (issue #36): every agent.TeamOutcome field crosses to the proto TeamOutcome —
+// rounds, quiescent, budget_exhausted, the string-passthrough stop ("budget" for a
+// non-quiescent budget-stopped team, via agent.TeamStop), the usage total, each
+// member disposition (reusing the closed enum, incl. the budget reason), and the
+// capped findings.
+func TestToProtoTeamOutcomeRoundTrip(t *testing.T) {
+	in := agent.TeamOutcome{
+		Rounds:          3,
+		Quiescent:       false,
+		BudgetExhausted: true,
+		Usage:           session.Usage{InputTokens: 700, OutputTokens: 50, CacheReadTokens: 10, CacheWriteTokens: 5},
+		Members: []agent.MemberOutcome{
+			{Name: "lead", Stopped: false, Disposition: agent.DispositionDone},
+			{Name: "worker", Stopped: true, Disposition: agent.DispositionStopped, Reason: agent.StopReasonBudget},
+		},
+		Findings: []session.TeamFindingSnapshot{
+			{Member: "worker", Body: "found the leak"},
+			{Member: "lead", Body: "confirmed the fix"},
+		},
+	}
+	got := toProtoTeamOutcome(in)
+	if got.GetRounds() != 3 {
+		t.Errorf("rounds = %d, want 3", got.GetRounds())
+	}
+	if got.GetQuiescent() {
+		t.Error("quiescent = true, want false")
+	}
+	if !got.GetBudgetExhausted() {
+		t.Error("budget_exhausted = false, want true")
+	}
+	if got.GetStop() != "budget" {
+		t.Errorf("stop = %q, want %q (string passthrough of session.StopBudget)", got.GetStop(), "budget")
+	}
+	if u := got.GetUsage(); u.GetInputTokens() != 700 || u.GetOutputTokens() != 50 ||
+		u.GetCacheReadTokens() != 10 || u.GetCacheWriteTokens() != 5 {
+		t.Errorf("usage = %+v, want input=700 output=50 cache_read=10 cache_write=5", u)
+	}
+	ds := got.GetDispositions()
+	if len(ds) != 2 {
+		t.Fatalf("dispositions = %d, want 2", len(ds))
+	}
+	if ds[0].GetName() != "lead" || ds[0].GetStopped() ||
+		ds[0].GetReason() != mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_UNSPECIFIED {
+		t.Errorf("dispositions[0] = %+v, want done lead with UNSPECIFIED reason", ds[0])
+	}
+	if ds[1].GetName() != "worker" || !ds[1].GetStopped() ||
+		ds[1].GetReason() != mecatlv1.TeamMemberStopReason_TEAM_MEMBER_STOP_REASON_BUDGET {
+		t.Errorf("dispositions[1] = %+v, want stopped worker with BUDGET reason", ds[1])
+	}
+	// Two findings, asserted positionally: the ledger's append order must survive
+	// the mapping verbatim.
+	fs := got.GetFindings()
+	if len(fs) != 2 {
+		t.Fatalf("findings = %d, want 2", len(fs))
+	}
+	if fs[0].GetMember() != "worker" || fs[0].GetBody() != "found the leak" {
+		t.Errorf("findings[0] = %+v, want {worker found the leak}", fs[0])
+	}
+	if fs[1].GetMember() != "lead" || fs[1].GetBody() != "confirmed the fix" {
+		t.Errorf("findings[1] = %+v, want {lead confirmed the fix}", fs[1])
+	}
+}
+
+// TestToProtoTeamOutcomeQuiescentBudgetExhausted pins the quiescent+exhausted
+// edge on the wire seam (issue #36): a team that crossed its budget but STILL
+// reached genuine quiescence stops "end_turn" — agent.TeamStop reserves "budget"
+// for a NON-quiescent budget stop — while budget_exhausted independently stays
+// true. The engine pins this rule for EvTeamEnd; this case pins the exported
+// seam the terminal outcome frame rides.
+func TestToProtoTeamOutcomeQuiescentBudgetExhausted(t *testing.T) {
+	got := toProtoTeamOutcome(agent.TeamOutcome{Quiescent: true, BudgetExhausted: true})
+	if got.GetStop() != "end_turn" {
+		t.Errorf("stop = %q, want %q (quiescence wins over budget in agent.TeamStop)", got.GetStop(), "end_turn")
+	}
+	if !got.GetBudgetExhausted() {
+		t.Error("budget_exhausted = false, want true (independent of the stop label)")
 	}
 }
 

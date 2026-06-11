@@ -738,6 +738,14 @@ func teamStop(o TeamOutcome) session.StopReason {
 	return session.StopMaxTurns
 }
 
+// TeamStop maps a TeamOutcome to its terminal StopReason — the SINGLE
+// quiescent/budget/round-cap rule teamStop applies for EvTeamEnd, exported so the
+// wire layers can stamp the same string-passthrough stop onto the terminal
+// RunTeam outcome frame without duplicating the rule (issue #36).
+func TeamStop(o TeamOutcome) session.StopReason {
+	return teamStop(o)
+}
+
 // memberEventUsage extracts the token usage a single member event carries, for the
 // running team total accumulated in run's sink. Only the usage-bearing inner kinds
 // contribute: turn.end (this turn's usage) and result (the member run's cumulative

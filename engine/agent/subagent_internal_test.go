@@ -121,6 +121,34 @@ func TestTightenLimit(t *testing.T) {
 	}
 }
 
+// TestTightenTeamTokenBudget is the unit table for the exported wire-facing
+// tighten-only fold (issue #36): a non-positive request inherits the server
+// budget; a positive request applies only when LOWER (a 0 server budget being
+// "unlimited", any positive request tightens it). It delegates to tightenLimit —
+// this table guards the delegation against drifting into a second algorithm.
+func TestTightenTeamTokenBudget(t *testing.T) {
+	tests := []struct {
+		name    string
+		server  int
+		request int
+		want    int
+	}{
+		{"request below server tightens", 1000, 500, 500},
+		{"request above server is capped", 1000, 2000, 1000},
+		{"request equal to server keeps server", 1000, 1000, 1000},
+		{"zero request inherits server", 1000, 0, 1000},
+		{"unlimited server tightens to request", 0, 500, 500},
+		{"both zero stays disabled", 0, 0, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TightenTeamTokenBudget(tc.server, tc.request); got != tc.want {
+				t.Fatalf("TightenTeamTokenBudget(%d, %d) = %d, want %d", tc.server, tc.request, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSubmitResultSpecCarriesRetryAffordance pins the retry affordance in the
 // SubmitResult description (Execute's own correction path tells the model to "call
 // SubmitResult again"; the description must agree, not contradict it with "exactly

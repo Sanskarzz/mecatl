@@ -159,7 +159,9 @@ type HarnessServiceClient interface {
 	// operator), delivered at that member's next turn boundary.
 	SendTeammateMessage(ctx context.Context, in *SendTeammateMessageRequest, opts ...grpc.CallOption) (*SendTeammateMessageResponse, error)
 	// RunTeam drives the team to quiescence, streaming every member's events —
-	// each tagged with the member name — until the team finishes.
+	// each tagged with the member name — until the team finishes. The stream ends
+	// with a single terminal frame carrying TeamEvent.outcome (rounds, stop,
+	// budget_exhausted, usage, dispositions, findings); no member events follow it.
 	RunTeam(ctx context.Context, in *RunTeamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TeamEvent], error)
 	// ListTeam returns a snapshot of the team roster, the shared task list, and
 	// whether the team has reached quiescence.
@@ -501,7 +503,9 @@ type HarnessServiceServer interface {
 	// operator), delivered at that member's next turn boundary.
 	SendTeammateMessage(context.Context, *SendTeammateMessageRequest) (*SendTeammateMessageResponse, error)
 	// RunTeam drives the team to quiescence, streaming every member's events —
-	// each tagged with the member name — until the team finishes.
+	// each tagged with the member name — until the team finishes. The stream ends
+	// with a single terminal frame carrying TeamEvent.outcome (rounds, stop,
+	// budget_exhausted, usage, dispositions, findings); no member events follow it.
 	RunTeam(*RunTeamRequest, grpc.ServerStreamingServer[TeamEvent]) error
 	// ListTeam returns a snapshot of the team roster, the shared task list, and
 	// whether the team has reached quiescence.

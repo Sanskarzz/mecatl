@@ -144,7 +144,9 @@ service HarnessService {
   rpc SendTeammateMessage(SendTeammateMessageRequest) returns (SendTeammateMessageResponse);
 
   // RunTeam drives the team to quiescence, streaming every member's events —
-  // each tagged with the member name — until the team finishes.
+  // each tagged with the member name — until the team finishes. The stream ends
+  // with a single terminal frame carrying TeamEvent.outcome (rounds, stop,
+  // budget_exhausted, usage, dispositions, findings); no member events follow it.
   rpc RunTeam(RunTeamRequest) returns (stream TeamEvent);
 
   // ListTeam returns a snapshot of the team roster, the shared task list, and
@@ -1256,6 +1258,17 @@ message CreateTeamRequest {
   // round-0 turn and the lead's synthesis prompt (fenced UNTRUSTED). Empty preserves
   // the historical behaviour (no goal briefing on the gRPC path).
   string goal = 4;
+  // max_team_tokens is the per-request team-wide cumulative token budget
+  // (input + output, summed across all members and rounds). TIGHTEN-ONLY: a
+  // positive value may only LOWER the server-configured --max-team-tokens
+  // ceiling, never raise it; 0 / absent inherits the server's budget. The fold
+  // is lower-of-the-two with 0 meaning unlimited: when the server has NO
+  // configured budget (--max-team-tokens unset/0), a positive value therefore
+  // IMPOSES a budget rather than being capped to "unlimited". Crossed
+  // at a round boundary (the in-flight round and the lead's synthesis still
+  // complete) → the terminal TeamEvent.outcome frame reports budget_exhausted.
+  // Mirrors the in-loop Team tool's per-call max_team_tokens arg. Issue #36.
+  int32 max_team_tokens = 5;
 }
 
 // CreateTeamResponse returns the new team's id and the enrolled initial roster.
@@ -1332,6 +1345,41 @@ message TeamEvent {
   string member = 1;
   // event is the underlying session event.
   Event event = 2;
+  // outcome is the team's terminal outcome, set ONLY on the single final frame
+  // of a RunTeam stream (after every member event). On that frame member is
+  // empty and event is nil; on every other frame outcome is nil. Issue #36.
+  TeamOutcome outcome = 3;
+}
+
+// TeamOutcome is the terminal result of a RunTeam drive — the wire projection of
+// the supervisor's agent.TeamOutcome, carried on the single final TeamEvent frame
+// of the RunTeam stream (gRPC and HTTP SSE alike). It reuses the existing Usage /
+// TeamFinding / TeamMemberDisposition shapes; member content beyond the capped
+// finding previews never rides it. Issue #36.
+message TeamOutcome {
+  // rounds is the number of scheduling rounds that ran work.
+  int32 rounds = 1;
+  // quiescent reports genuine completion (all tasks done, mailboxes empty, no
+  // member still working) versus stopping on a round cap / stuck dependency /
+  // budget.
+  bool quiescent = 2;
+  // budget_exhausted reports that the team-wide token budget crossed at a round
+  // boundary and no further round was scheduled (the in-flight round and the
+  // lead's synthesis still completed). false when no budget was set or it never
+  // crossed.
+  bool budget_exhausted = 3;
+  // stop is the team's terminal stop reason — a STRING passthrough of
+  // session.StopReason (no enum): "end_turn" for a quiescent team, "budget" for
+  // a budget-stopped one, "max_turns" for a round-cap / stuck-dependency stop.
+  string stop = 4;
+  // usage is the supervisor-accumulated team token total across all members and
+  // rounds, synthesis included.
+  Usage usage = 5;
+  // dispositions holds each member's terminal disposition in enrolment order.
+  repeated TeamMemberDisposition dispositions = 6;
+  // findings is the team's findings ledger at the end of the run, in append
+  // order, bodies capped exactly like the event-stream projection.
+  repeated TeamFinding findings = 7;
 }
 
 // ListTeamRequest names the team to snapshot.

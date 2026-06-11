@@ -236,9 +236,20 @@ sum (`TeamOutcome.Usage`) is authoritative for the budget gate; the TeamTool sin
 construction, documented not reconciled. Guards: `agent.TestTeamTokenBudget*` /
 `TestTeamToolTokenBudget*` / `TestConvergenceHeaderBudgetMatrix` /
 `TestDeliverableTier1ForcedByBudget`, `server.TestRunTeamBudgetExhaustedOutcome`,
-`app.TestMaxTeamTokensPropagates`, `cmd/mecated.TestAppConfigMapsMaxTeamTokens`. DEFERRED: the gRPC
-wire handlers still discard the `TeamOutcome`, so a `CreateTeamRequest.max_team_tokens` /
-`RunTeamResponse` outcome field stays deferred proto work.
+`app.TestMaxTeamTokensPropagates`, `cmd/mecated.TestAppConfigMapsMaxTeamTokens`. The WIRE surface
+landed too (issue #36): `CreateTeamRequest.max_team_tokens` (TIGHTEN-ONLY against
+`server.Config.TeamTokenBudget`, clamped at create time via the exported
+`agent.TightenTeamTokenBudget` — the SAME `tightenLimit` algorithm, never a second one; the HTTP
+`createTeamBody` mirrors it as `max_team_tokens`) and a terminal `TeamEvent.outcome` frame — a proto
+`TeamOutcome` (rounds / quiescent / budget_exhausted / the string-passthrough `stop` via the
+exported `agent.TeamStop` / usage / dispositions / findings, mapped by `toProtoTeamOutcome`) sent as
+the single LAST frame by BOTH RunTeam handlers (gRPC `stream.Send` after `Service.RunTeam` returns
+with no send error; HTTP SSE through the same lazy-headers `writeFrame` path, so an empty team still
+delivers its outcome). Guards: `agent.TestTightenTeamTokenBudget`,
+`server.TestToProtoTeamOutcomeRoundTrip` / `TestToProtoTeamOutcomeQuiescentBudgetExhausted` /
+`TestCreateTeamTightensTeamTokenBudget` / `TestGRPCRunTeamEmitsOutcomeFrame` /
+`TestGRPCRunTeamSurfacesBudgetExhausted` / `TestHTTPRunTeamEmitsOutcomeFrame` /
+`TestHTTPRunTeamEmptyTeamOutcomeOnly`.
 
 **Subagent per-call limits + wall-clock deadline (domain-only).** `subagentArgs` gains three OPTIONAL
 pointer fields — `MaxTurns`/`MaxToolCalls` (TIGHTEN-ONLY via `tightenLimit`: a present positive

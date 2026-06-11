@@ -515,6 +515,9 @@ type createTeamBody struct {
 	Name      string             `json:"name,omitempty"`
 	Goal      string             `json:"goal,omitempty"`
 	Members   []teammateSpecBody `json:"members,omitempty"`
+	// MaxTeamTokens mirrors CreateTeamRequest.max_team_tokens: a per-request
+	// team-wide token budget, tighten-only against the server's --max-team-tokens.
+	MaxTeamTokens int32 `json:"max_team_tokens,omitempty"`
 }
 
 type sendTeammateMessageBody struct {
@@ -545,7 +548,7 @@ func (h *HTTPHandler) createTeam(w http.ResponseWriter, r *http.Request) {
 			specs = append(specs, m.toMemberSpec())
 		}
 	}
-	id, enrolled, err := h.svc.CreateTeam(r.Context(), body.Workspace, body.Name, body.Goal, specs)
+	id, enrolled, err := h.svc.CreateTeam(r.Context(), body.Workspace, body.Name, body.Goal, int(body.MaxTeamTokens), specs)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -597,9 +600,12 @@ func (h *HTTPHandler) sendTeammateMessage(w http.ResponseWriter, r *http.Request
 
 // runTeam handles POST /v1/teams/{id}/run, driving the team to quiescence and
 // streaming every member event (mapped to the proto TeamEvent, JSON-encoded) as
-// one SSE frame — mirroring the prompt handler. RunTeam serialises sink calls
-// through a single forwarder, so writing from the sink is safe. A write failure
-// flags and cancels the run so the team stops promptly.
+// one SSE frame — mirroring the prompt handler — then closing with the single
+// terminal frame carrying TeamEvent.outcome (issue #36; SSE parity with the gRPC
+// RunTeam handler). RunTeam serialises sink calls through a single forwarder, so
+// writing from the sink is safe. A write failure flags and cancels the run so the
+// team stops promptly, and suppresses the outcome frame (no further writes to a
+// dead client).
 func (h *HTTPHandler) runTeam(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	flusher, ok := w.(http.Flusher)
@@ -616,11 +622,14 @@ func (h *HTTPHandler) runTeam(w http.ResponseWriter, r *http.Request) {
 	headersWritten := false
 	enc := json.NewEncoder(w)
 	var writeErr bool
-	_, err := h.svc.RunTeam(ctx, id, func(te agent.TeamEvent) {
+	// writeFrame writes one SSE data frame (headers lazily first), flagging
+	// writeErr and cancelling the run on any failure. Both the per-event sink and
+	// the terminal outcome frame go through it — one encode+flush shape.
+	writeFrame := func(te *mecatlv1.TeamEvent) {
 		if writeErr {
 			return
 		}
-		// Write the stream headers lazily on the first event so that an early
+		// Write the stream headers lazily on the first frame so that an early
 		// lookup failure (returned below) can still surface as a JSON error.
 		if !headersWritten {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -635,7 +644,7 @@ func (h *HTTPHandler) runTeam(w http.ResponseWriter, r *http.Request) {
 			cancel()
 			return
 		}
-		if e := enc.Encode(&mecatlv1.TeamEvent{Member: te.Member, Event: toProto(te.Event)}); e != nil { // Encode appends a newline
+		if e := enc.Encode(te); e != nil { // Encode appends a newline
 			writeErr = true
 			cancel()
 			return
@@ -646,6 +655,9 @@ func (h *HTTPHandler) runTeam(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		flusher.Flush()
+	}
+	out, err := h.svc.RunTeam(ctx, id, func(te agent.TeamEvent) {
+		writeFrame(&mecatlv1.TeamEvent{Member: te.Member, Event: toProto(te.Event)})
 	})
 	if err != nil {
 		// A lookup/precondition failure before any event: nothing has been
@@ -655,6 +667,10 @@ func (h *HTTPHandler) runTeam(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Terminal outcome frame. writeFrame writes the headers first if no member
+	// event streamed (an empty team still delivers its outcome) and is a no-op
+	// after a write failure.
+	writeFrame(&mecatlv1.TeamEvent{Outcome: toProtoTeamOutcome(out)})
 }
 
 // listTeam handles GET /v1/teams/{id}. The proto ListTeamResponse is

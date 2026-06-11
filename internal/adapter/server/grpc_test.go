@@ -450,3 +450,127 @@ func TestGRPCConverseFirstFrameMustBePrompt(t *testing.T) {
 func allowRules() []governance.Rule {
 	return []governance.Rule{{Effect: governance.Allow}}
 }
+
+// recvAllTeamEvents drains a RunTeam stream to EOF and returns every frame —
+// the TeamEvent analogue of recvAll.
+func recvAllTeamEvents(t *testing.T, stream mecatlv1.HarnessService_RunTeamClient) []*mecatlv1.TeamEvent {
+	t.Helper()
+	var out []*mecatlv1.TeamEvent
+	for {
+		te, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return out
+		}
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		out = append(out, te)
+	}
+}
+
+// TestGRPCRunTeamEmitsOutcomeFrame pins the terminal outcome frame on the gRPC
+// RunTeam stream (issue #36): the stream's LAST frame carries TeamEvent.outcome
+// (member empty, event nil, fields populated), and no earlier frame does.
+func TestGRPCRunTeamEmitsOutcomeFrame(t *testing.T) {
+	svc := teamService(t, mockllm.New(
+		mockllm.TextTurn("delegating"), mockllm.TextTurn("report"),
+	))
+	client, cleanup := dialGRPC(t, svc)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	created, err := client.CreateTeam(ctx, &mecatlv1.CreateTeamRequest{
+		Workspace: "/ws", Name: "test",
+		Members: []*mecatlv1.TeammateSpec{{Name: "lead", Lead: true, InitialPrompt: "go"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	stream, err := client.RunTeam(ctx, &mecatlv1.RunTeamRequest{TeamId: created.GetTeamId()})
+	if err != nil {
+		t.Fatalf("RunTeam: %v", err)
+	}
+	events := recvAllTeamEvents(t, stream)
+	if len(events) < 2 {
+		t.Fatalf("stream carried %d frames, want member events + a terminal outcome frame", len(events))
+	}
+
+	last := events[len(events)-1]
+	if last.GetOutcome() == nil {
+		t.Fatalf("last frame has no outcome: %+v", last)
+	}
+	if last.GetMember() != "" || last.GetEvent() != nil {
+		t.Errorf("terminal frame must carry ONLY the outcome (member=%q event=%v)", last.GetMember(), last.GetEvent())
+	}
+	for i, te := range events[:len(events)-1] {
+		if te.GetOutcome() != nil {
+			t.Errorf("frame %d carries an outcome; only the terminal frame may", i)
+		}
+	}
+
+	out := last.GetOutcome()
+	if out.GetRounds() < 1 {
+		t.Errorf("outcome.rounds = %d, want >= 1", out.GetRounds())
+	}
+	if !out.GetQuiescent() || out.GetStop() != "end_turn" {
+		t.Errorf("outcome quiescent=%v stop=%q, want quiescent end_turn", out.GetQuiescent(), out.GetStop())
+	}
+	if out.GetBudgetExhausted() {
+		t.Error("outcome.budget_exhausted = true, want false (no budget set)")
+	}
+	ds := out.GetDispositions()
+	if len(ds) != 1 || ds[0].GetName() != "lead" || ds[0].GetStopped() {
+		t.Errorf("outcome.dispositions = %+v, want one done lead", ds)
+	}
+}
+
+// TestGRPCRunTeamSurfacesBudgetExhausted pins the budget knob END-TO-END over the
+// wire (issue #36): CreateTeamRequest.max_team_tokens (against a server with no
+// configured budget — tighten from "unlimited") trips at the round boundary, and
+// the terminal outcome frame reports budget_exhausted with the "budget" stop
+// string. Usage pattern mirrors TestRunTeamBudgetExhaustedOutcome (team_test.go).
+func TestGRPCRunTeamSurfacesBudgetExhausted(t *testing.T) {
+	// budgetTripProviders' round-0 spend (700) crosses the 500 budget while the
+	// worker's self-ping keeps the team NON-quiescent — the "budget" stop shape.
+	svc := teamServicePerMember(t, budgetTripProviders(), 0) // no server budget; the request's 500 tightens "unlimited"
+	client, cleanup := dialGRPC(t, svc)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	created, err := client.CreateTeam(ctx, &mecatlv1.CreateTeamRequest{
+		Workspace: "/ws", Name: "test", Goal: "do one round of work",
+		MaxTeamTokens: 500,
+		Members: []*mecatlv1.TeammateSpec{
+			{Name: "lead", Lead: true, InitialPrompt: "delegate then synthesise"},
+			{Name: "worker", InitialPrompt: "do the work"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	stream, err := client.RunTeam(ctx, &mecatlv1.RunTeamRequest{TeamId: created.GetTeamId()})
+	if err != nil {
+		t.Fatalf("RunTeam: %v", err)
+	}
+	events := recvAllTeamEvents(t, stream)
+	if len(events) == 0 {
+		t.Fatal("empty RunTeam stream")
+	}
+	out := events[len(events)-1].GetOutcome()
+	if out == nil {
+		t.Fatalf("last frame has no outcome: %+v", events[len(events)-1])
+	}
+	if !out.GetBudgetExhausted() {
+		t.Error("outcome.budget_exhausted = false, want true (request budget 500, round-0 spent 700)")
+	}
+	if out.GetStop() != "budget" {
+		t.Errorf("outcome.stop = %q, want %q", out.GetStop(), "budget")
+	}
+	if total := out.GetUsage().GetInputTokens() + out.GetUsage().GetOutputTokens(); total < 500 {
+		t.Errorf("outcome.usage total = %d, want >= the 500 budget", total)
+	}
+}

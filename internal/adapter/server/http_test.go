@@ -578,3 +578,132 @@ type promptPartJSON struct {
 	Data     []byte `json:"data,omitempty"`
 	URL      string `json:"url,omitempty"`
 }
+
+// TestHTTPRunTeamEmitsOutcomeFrame pins the terminal outcome frame on the HTTP
+// SSE RunTeam stream (issue #36) — wire parity with the gRPC handler — and the
+// budget knob end-to-end: createTeamBody.max_team_tokens (500, tightening an
+// unconfigured server budget) trips at the round boundary, and the FINAL SSE data
+// frame carries TeamEvent.outcome with budget_exhausted and the "budget" stop;
+// no earlier frame carries an outcome.
+func TestHTTPRunTeamEmitsOutcomeFrame(t *testing.T) {
+	// budgetTripProviders' round-0 spend (700) crosses the 500 budget while the
+	// worker's self-ping keeps the team NON-quiescent — the "budget" stop shape.
+	svc := teamServicePerMember(t, budgetTripProviders(), 0)
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+
+	createBody := `{"workspace":"/ws","name":"test","goal":"do one round of work",` +
+		`"max_team_tokens":500,` +
+		`"members":[{"name":"lead","lead":true,"initial_prompt":"delegate then synthesise"},` +
+		`{"name":"worker","initial_prompt":"do the work"}]}`
+	resp, err := http.Post(srv.URL+"/v1/teams", "application/json", strings.NewReader(createBody))
+	if err != nil {
+		t.Fatalf("POST /v1/teams: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201", resp.StatusCode)
+	}
+	var created mecatlv1.CreateTeamResponse
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+
+	rresp, err := http.Post(srv.URL+"/v1/teams/"+created.GetTeamId()+"/run", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("POST run: %v", err)
+	}
+	defer rresp.Body.Close()
+	if rresp.StatusCode != http.StatusOK {
+		t.Fatalf("run status = %d, want 200", rresp.StatusCode)
+	}
+	events := parseTeamSSE(t, bufio.NewReader(rresp.Body))
+	if len(events) < 2 {
+		t.Fatalf("stream carried %d frames, want member events + a terminal outcome frame", len(events))
+	}
+
+	last := events[len(events)-1]
+	out := last.GetOutcome()
+	if out == nil {
+		t.Fatalf("last SSE frame has no outcome: %+v", last)
+	}
+	if last.GetMember() != "" || last.GetEvent() != nil {
+		t.Errorf("terminal frame must carry ONLY the outcome (member=%q event=%v)", last.GetMember(), last.GetEvent())
+	}
+	for i, te := range events[:len(events)-1] {
+		if te.GetOutcome() != nil {
+			t.Errorf("frame %d carries an outcome; only the terminal frame may", i)
+		}
+	}
+	if !out.GetBudgetExhausted() {
+		t.Error("outcome.budget_exhausted = false, want true (request budget 500, round-0 spent 700)")
+	}
+	if out.GetStop() != "budget" {
+		t.Errorf("outcome.stop = %q, want %q", out.GetStop(), "budget")
+	}
+	if out.GetRounds() < 1 {
+		t.Errorf("outcome.rounds = %d, want >= 1", out.GetRounds())
+	}
+}
+
+// TestHTTPRunTeamEmptyTeamOutcomeOnly pins the lazy-header path of the SSE
+// RunTeam handler (issue #36): CreateTeam permits an empty roster (the client may
+// SpawnTeammate before RunTeam, see Service.CreateTeam), and running the empty
+// team streams ZERO member events — so the terminal outcome frame is the FIRST
+// write and must itself produce the 200 + text/event-stream headers ("an empty
+// team still delivers its outcome"). The run is trivially quiescent: 0 rounds,
+// stop "end_turn", exactly one frame on the stream.
+func TestHTTPRunTeamEmptyTeamOutcomeOnly(t *testing.T) {
+	svc := teamService(t, mockllm.New()) // LLM never consulted: no members run
+	srv := httptest.NewServer(server.NewHTTPHandler(svc))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/teams", "application/json",
+		strings.NewReader(`{"workspace":"/ws","name":"empty"}`))
+	if err != nil {
+		t.Fatalf("POST /v1/teams: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201 (empty rosters are permitted)", resp.StatusCode)
+	}
+	var created mecatlv1.CreateTeamResponse
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	if len(created.GetMembers()) != 0 {
+		t.Fatalf("create members = %v, want none", created.GetMembers())
+	}
+
+	rresp, err := http.Post(srv.URL+"/v1/teams/"+created.GetTeamId()+"/run", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("POST run: %v", err)
+	}
+	defer rresp.Body.Close()
+	if rresp.StatusCode != http.StatusOK {
+		t.Fatalf("run status = %d, want 200", rresp.StatusCode)
+	}
+	if ct := rresp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("run content-type = %q, want text/event-stream (lazy headers written by the outcome frame)", ct)
+	}
+	events := parseTeamSSE(t, bufio.NewReader(rresp.Body))
+	if len(events) != 1 {
+		t.Fatalf("stream carried %d frames, want exactly the terminal outcome frame", len(events))
+	}
+	out := events[0].GetOutcome()
+	if out == nil {
+		t.Fatalf("sole frame has no outcome: %+v", events[0])
+	}
+	if events[0].GetMember() != "" || events[0].GetEvent() != nil {
+		t.Errorf("terminal frame must carry ONLY the outcome (member=%q event=%v)", events[0].GetMember(), events[0].GetEvent())
+	}
+	if !out.GetQuiescent() {
+		t.Error("outcome.quiescent = false, want true (an empty team is trivially quiescent)")
+	}
+	if out.GetStop() != "end_turn" {
+		t.Errorf("outcome.stop = %q, want %q", out.GetStop(), "end_turn")
+	}
+	if out.GetRounds() != 0 {
+		t.Errorf("outcome.rounds = %d, want 0", out.GetRounds())
+	}
+}

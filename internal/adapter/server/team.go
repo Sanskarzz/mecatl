@@ -94,8 +94,13 @@ type teamState struct {
 // classifyAddMemberErr. members may be empty: the team is created empty and the
 // client can still SpawnTeammate before RunTeam.
 //
+// maxTeamTokens is the per-request team-wide token budget, folded into the
+// server-configured Config.TeamTokenBudget TIGHTEN-ONLY at create time
+// (agent.TightenTeamTokenBudget, issue #36): a non-positive value inherits the
+// server budget; a positive value applies only when it is lower.
+//
 // It returns ErrTeamsDisabled when teams are not enabled.
-func (s *Service) CreateTeam(ctx context.Context, workspace, name, goal string, members []agent.MemberSpec) (string, []team.Member, error) {
+func (s *Service) CreateTeam(ctx context.Context, workspace, name, goal string, maxTeamTokens int, members []agent.MemberSpec) (string, []team.Member, error) {
 	if s.cfg.MemberEngine == nil {
 		return "", nil, ErrTeamsDisabled
 	}
@@ -139,8 +144,10 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name, goal string, 
 	if s.cfg.Store != nil {
 		opts = append(opts, agent.WithMemberStore(s.cfg.Store))
 	}
-	if s.cfg.TeamTokenBudget > 0 {
-		opts = append(opts, agent.WithTeamTokenBudget(s.cfg.TeamTokenBudget))
+	// Clamp the per-request budget against the server's ceiling at create time:
+	// tighten-only, so the wire can never loosen the operator's bound.
+	if budget := agent.TightenTeamTokenBudget(s.cfg.TeamTokenBudget, maxTeamTokens); budget > 0 {
+		opts = append(opts, agent.WithTeamTokenBudget(budget))
 	}
 	sup := agent.NewSupervisor(t, base, factory, opts...)
 
