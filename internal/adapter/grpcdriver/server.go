@@ -11,6 +11,7 @@ import (
 	driverv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/driver/v1"
 	"github.com/stacklok/mecatl/engine/adapter/sessnap"
 	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 )
@@ -173,12 +174,134 @@ func (s *memoryStoreServer) Search(ctx context.Context, req *driverv1.SearchRequ
 	return &driverv1.SearchResponse{Entries: toProtoServerEntries(entries)}, nil
 }
 
+// skillSourceServer adapts a tool.SkillSource to SkillSourceServiceServer.
+type skillSourceServer struct {
+	driverv1.UnimplementedSkillSourceServiceServer
+	src tool.SkillSource
+}
+
+// NewSkillSourceServer wraps src as a SkillSourceService driver server.
+func NewSkillSourceServer(src tool.SkillSource) driverv1.SkillSourceServiceServer {
+	return &skillSourceServer{src: src}
+}
+
+// ListSkills projects the source's metadata snapshot onto the wire.
+func (s *skillSourceServer) ListSkills(ctx context.Context, _ *driverv1.ListSkillsRequest) (*driverv1.ListSkillsResponse, error) {
+	metas, err := s.src.ListSkills(ctx)
+	if err != nil {
+		return nil, sourceStatus(err)
+	}
+	out := make([]*driverv1.SkillMeta, len(metas))
+	for i, m := range metas {
+		out[i] = &driverv1.SkillMeta{
+			Name:        m.Name,
+			Description: m.Description,
+			Origin:      string(m.Origin),
+			HasAssets:   m.HasAssets,
+		}
+	}
+	return &driverv1.ListSkillsResponse{Skills: out}, nil
+}
+
+// GetSkillBody returns the named skill's body; a blank name is
+// INVALID_ARGUMENT before the source is consulted, an unknown skill NOT_FOUND.
+func (s *skillSourceServer) GetSkillBody(ctx context.Context, req *driverv1.GetSkillBodyRequest) (*driverv1.GetSkillBodyResponse, error) {
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+	body, err := s.src.SkillBody(ctx, req.GetName())
+	if err != nil {
+		return nil, sourceStatus(err)
+	}
+	return &driverv1.GetSkillBodyResponse{Body: body}, nil
+}
+
+// ListSkillAssets returns the named skill's payload descriptors; a blank name
+// is INVALID_ARGUMENT, an unknown skill NOT_FOUND.
+func (s *skillSourceServer) ListSkillAssets(ctx context.Context, req *driverv1.ListSkillAssetsRequest) (*driverv1.ListSkillAssetsResponse, error) {
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+	assets, err := s.src.ListSkillAssets(ctx, req.GetName())
+	if err != nil {
+		return nil, sourceStatus(err)
+	}
+	out := make([]*driverv1.SkillAsset, len(assets))
+	for i, a := range assets {
+		out[i] = &driverv1.SkillAsset{Name: a.Name, Size: a.Size, Executable: a.Executable}
+	}
+	return &driverv1.ListSkillAssetsResponse{Assets: out}, nil
+}
+
+// ReadSkillAsset returns one payload's bytes. The logical asset name is
+// PRE-VALIDATED here via tool.ValidSkillAssetName (the single shared
+// validator), so an invalid name is INVALID_ARGUMENT before the source is
+// consulted — never content; blank skill/asset are INVALID_ARGUMENT; an
+// unknown skill or asset is NOT_FOUND.
+func (s *skillSourceServer) ReadSkillAsset(ctx context.Context, req *driverv1.ReadSkillAssetRequest) (*driverv1.ReadSkillAssetResponse, error) {
+	if req.GetSkill() == "" {
+		return nil, status.Error(codes.InvalidArgument, "skill is required")
+	}
+	if req.GetAsset() == "" {
+		return nil, status.Error(codes.InvalidArgument, "asset is required")
+	}
+	if !tool.ValidSkillAssetName(req.GetAsset()) {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"invalid logical asset name %q (slash-separated, relative, no \".\"/\"..\" segments, no backslash)", req.GetAsset())
+	}
+	data, err := s.src.ReadSkillAsset(ctx, req.GetSkill(), req.GetAsset())
+	if err != nil {
+		return nil, sourceStatus(err)
+	}
+	return &driverv1.ReadSkillAssetResponse{Data: data}, nil
+}
+
+// soulSourceServer adapts a prompt.SoulSource to SoulSourceServiceServer.
+type soulSourceServer struct {
+	driverv1.UnimplementedSoulSourceServiceServer
+	src prompt.SoulSource
+}
+
+// NewSoulSourceServer wraps src as a SoulSourceService driver server. The
+// wrapped Go source already upholds the fail-soft contract; the harness
+// CLIENT re-validates the body regardless (it never trusts a driver to
+// sanitize).
+func NewSoulSourceServer(src prompt.SoulSource) driverv1.SoulSourceServiceServer {
+	return &soulSourceServer{src: src}
+}
+
+// LoadSoul returns the source's body verbatim (empty = no soul, fail-soft).
+func (s *soulSourceServer) LoadSoul(ctx context.Context, _ *driverv1.LoadSoulRequest) (*driverv1.LoadSoulResponse, error) {
+	body, err := s.src.Load(ctx)
+	if err != nil {
+		return nil, sourceStatus(err)
+	}
+	return &driverv1.LoadSoulResponse{Body: body}, nil
+}
+
 // storeStatus maps a wrapped store's error onto the driver protocol's status
 // vocabulary (the §C table): the not-found sentinel → NOT_FOUND, context
 // errors → CANCELLED / DEADLINE_EXCEEDED, everything else → INTERNAL.
 func storeStatus(err error) error {
 	switch {
 	case errors.Is(err, port.ErrSessionNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, context.Canceled):
+		return status.Error(codes.Canceled, err.Error())
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, err.Error())
+	default:
+		return status.Error(codes.Internal, err.Error())
+	}
+}
+
+// sourceStatus maps a wrapped skill/soul source's error onto the driver
+// protocol's status vocabulary (the §H table): the skill/asset not-found
+// sentinels → NOT_FOUND, context errors → CANCELLED / DEADLINE_EXCEEDED,
+// everything else → INTERNAL.
+func sourceStatus(err error) error {
+	switch {
+	case errors.Is(err, tool.ErrSkillNotFound), errors.Is(err, tool.ErrSkillAssetNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, context.Canceled):
 		return status.Error(codes.Canceled, err.Error())

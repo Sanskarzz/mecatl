@@ -825,7 +825,7 @@ emits behind a dead client.
   (so a session saved mid-`awaiting` reloads with its pending ask intact). It
   captures the terminal reason via `RecordedStopReason()` for exact round-trips.
 
-### Remote store drivers (`internal/adapter/grpcdriver`)
+### Remote store + source drivers (`internal/adapter/grpcdriver`)
 
 The session and memory stores have a **wire seam**: an operator can point
 either at a remote, operator-run **driver process** speaking the
@@ -837,6 +837,22 @@ build), `--memory-store-url` replaces `--memory-dir`; all-empty keeps the
 local stores byte-identical. Equal URLs share ONE lazy `ClientConn` (the
 build-scoped `driverConns` cache); the user-model store stays local (a Phase B
 deferral).
+
+Phase C1 adds the **content-source drivers** on the same protocol:
+`SkillSourceService` behind the `tool.SkillSource` port (skills cross as
+LOGICAL BUNDLES — metadata, body, payloads by logical name; NO path/dir/root
+on the wire) and `SoulSourceService` behind `prompt.SoulSource`.
+`--skill-source-url` replaces local skills discovery (mutually exclusive with
+`--skills-dir`/`--skills-conventional`); a driver skill's payloads
+materialize LAZILY into a build-scoped temp asset cache on first activation
+(per-asset 16 MiB / per-bundle 64 MiB caps, logical-name validation +
+containment, executable bit honored; the cache dir is the single skill read
+root and is removed on shutdown). `--soul-source-url` occupies the USER slot
+of the soul selection (mutually exclusive with `--soul-file`; `--no-soul`
+wins); the body is RE-VALIDATED client-side (`soul.ValidateBody` — byte cap,
+injection scan, fence integrity) because a driver is never trusted to
+sanitize, the drift baseline is SKIPPED for driver provenance, and the driver
+is probed at build (fatal if unreachable; runtime faults degrade fail-soft).
 
 **sessnap IS the wire format** for sessions: the snapshot crosses as an
 opaque, format-tagged envelope (`format: "sessnap-json/1"`, payload =
@@ -867,6 +883,11 @@ drift from the in-process semantics:
 | `storeconformance` | grpcdriver → bufconn → `NewSessionStoreServer(memstore)` | `internal/adapter/grpcdriver/conformance_test.go` |
 | `memconformance` | flock `memory.Store` | `internal/adapter/memory/conformance_test.go` |
 | `memconformance` | grpcdriver → bufconn → `NewMemoryStoreServer(memory.Store)` | `internal/adapter/grpcdriver/conformance_test.go` |
+| `sourceconformance.RunSkillSource` | in-memory `NewFixtureSource` (self-test) | `engine/adapter/sourceconformance/sourceconformance_selftest_test.go` |
+| `sourceconformance.RunSkillSource` | `skills.FSSource` over a written-out fixture tree | `internal/adapter/skills/conformance_test.go` |
+| `sourceconformance.RunSkillSource` | grpcdriver → bufconn → `NewSkillSourceServer(NewFixtureSource)` | `internal/adapter/grpcdriver/conformance_test.go` |
+| `sourceconformance.RunSoulSource` | `soul.Store` (temp file) | `internal/adapter/soul/conformance_test.go` |
+| `sourceconformance.RunSoulSource` | grpcdriver → bufconn → `NewSoulSourceServer(verbatim fake)` | `internal/adapter/grpcdriver/conformance_test.go` |
 
 ## 12. Reliability — provider resilience
 

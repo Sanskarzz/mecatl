@@ -201,7 +201,7 @@ func TestCapabilitiesAgentsFromSnapshot(t *testing.T) {
 // registration), and the seam caps flip with the nil-checks the feature RPCs use.
 func TestCapabilities(t *testing.T) {
 	remember := memory.NewRememberTool(noopMemStore{})
-	skill := skills.NewTool(nil)
+	skill := skills.NewTool(nil, nil)
 	bash := tools.NewBashTool(noopRunner{})
 
 	tests := []struct {

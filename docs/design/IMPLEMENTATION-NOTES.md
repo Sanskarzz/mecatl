@@ -1525,6 +1525,93 @@ server-wrapper PROMOTION question (exporting them beyond `internal/` is a public
 made there, not implied by the current placement); a user-model driver flag (the user-model
 store stays LOCAL in Phase B — deliberate deferral); a workspace/FS driver sketch.
 
+## Source drivers — skill + soul (Phase C1: `engine/tool/skillsource.go` + `engine/adapter/sourceconformance/` + `skills.FSSource`/`Activator`/`AssetMaterializer` + grpcdriver clients)
+
+HARD REQUIREMENT honoured throughout: the `tool.SkillSource` port carries **NO path/dir/root/
+file concept** — a skill crosses as a LOGICAL BUNDLE (identity + trigger metadata, instruction
+body, payloads addressed by LOGICAL name). The FS adapter's path business
+(`FSSource.AssetDir/AssetDirs`) is adapter-public NON-PORT API consumed only by composition.
+The settled decisions, condensed:
+
+- **A — Port home: `engine/tool` (skills); soul stays on `prompt.SoulSource`.** New types are
+  stdlib-only (zero depguard/DAG churn; Phase-A MemoryStore precedent). No new Go port for soul —
+  the existing consumer-local `prompt.SoulSource` is already file-agnostic; a gRPC soul source
+  implements it directly.
+- **B — The port.** `SkillMeta{Name,Description,Origin,HasAssets}` (Origin = a CLOSED admission-
+  tier label set `explicit|project|user|driver`, NEVER a location; trust is enforced at source
+  CONSTRUCTION in composition), `SkillAsset{Name,Size,Executable}`, sentinels
+  `ErrSkillNotFound`/`ErrSkillAssetNotFound`, and `ValidSkillAssetName` — THE one shared
+  logical-name validator (slash-separated, relative, no empty/`.`/`..` segments, no backslash,
+  no NUL). SNAPSHOT semantics: ListSkills is stable for the source's life — **no watch/reload
+  seam, deliberately** (the build-once trust-gate-completeness invariant depends on it).
+- **C — Aux assets: real disk behind the existing Read/read-roots contract.** FS skills serve
+  IN PLACE (zero copy; `FSSource.AssetDirs` = the old per-skill `skillReadRoots`). Driver skills
+  materialize LAZILY (`skills.AssetMaterializer`, over the PORT only) into
+  `<cacheBase>/<skill>/<logical-name>` on FIRST activation (per-skill once; never-activated =
+  zero bytes; executable→0o755 else 0o644; caps 16 MiB/asset + 64 MiB/bundle on the ACTUAL
+  bytes; name validation + post-Clean containment; failure = model-addressable activation error,
+  NEVER a partial bundle). cacheBase via eager `os.MkdirTemp` at build (osfs opens read roots at
+  workspace construction — a late-born root would be unreadable), canonicalized through
+  `osfs.ResolveRoot`, RemoveAll folded into the catalog close. A pure-virtual overlay was
+  REJECTED on a hard fact: Bash executes real OS processes — a virtual file can't be executed.
+  A dedicated asset tool was REJECTED: it orphans every SKILL.md's relative-Read/script
+  instructions (model-facing regression for zero interface gain).
+- **K — Skill tool seam.** `skills.NewTool(metas []tool.SkillMeta, act Activator)`;
+  `Activator.Activate(ctx,name) → Activation{Body, BaseDir}` (BaseDir "" omits the
+  Base-directory header block). `NewSnapshotActivator(*FSSource)` (FS, byte-identical — the
+  golden `TestFSSkillActivationByteIdentical` pins Execute output AND Spec().Description
+  byte-for-byte against the pre-seam rendering) and `NewSourceActivator(tool.SkillSource,
+  *AssetMaterializer)` (driver; caches body+BaseDir after first success; failures NOT cached —
+  the materializer's once caches deterministic rejections). descriptionPreamble / header strings
+  / truncation are UNCHANGED — editing them is a defect against the C1 plan.
+- **H — Wire + client discipline.** `SkillSourceService{ListSkills,GetSkillBody,
+  ListSkillAssets,ReadSkillAsset}` (unary; rides the 64 MiB ceiling; origin is a string
+  passthrough, no proto enum) and `SoulSourceService{LoadSoul}`. Server wrappers
+  (`NewSkillSourceServer(tool.SkillSource)` / `NewSoulSourceServer(prompt.SoulSource)`)
+  pre-validate blank names and logical names (`ValidSkillAssetName` → `INVALID_ARGUMENT`,
+  never content); unknown skill/asset → `NOT_FOUND` → the client wraps the sentinels (name in
+  message); ctx rewrap as Phase B. Client ListSkills is DEFENSIVE: drop blank names, de-dup
+  first-wins, name-sort, re-truncate descriptions to `skills.MaxDescriptionBytes` (exported),
+  normalize unknown origins → `SkillOriginDriver`. The soul client RE-VALIDATES via the
+  extracted `soul.ValidateBody` (the single body discipline: raw byte cap, trim, injection
+  scan, fence integrity) — a driver is never trusted to sanitize; runtime fault = ("", nil) +
+  WARN (fail-soft contract); `Probe` is the build-time FATAL reachability check.
+- **J — Soul selection.** `--soul-source-url` ⟂ `--soul-file` (validateDriverConfig);
+  `--no-soul` wins; the driver OCCUPIES the user slot (`selectDriverSoul` — shadows a project
+  soul exactly like a present user soul; an empty/rejected driver body falls through to the
+  project soul); provenance `soulDriver` (proto `SOUL_PROVENANCE_DRIVER`, additive), Trusted
+  true; the `soul:apply` gate runs unchanged BEFORE the driver branch; drift baseline SKIPPED
+  (one INFO line; `--soul-strict`/`--approve-soul` are documented no-ops for this provenance).
+  Build-time probe failure FATAL (in `buildEngine`, conn close folded into the teardown chain);
+  per-session turn-0 Load fail-soft.
+- **Composition reshape.** `resolveSkillSeam(ctx,cfg,agentReg)` replaces `resolveSkills` (FS
+  branch: `NewFSSource` over `ResolveSources(skillResolveOptions(cfg))`, narration verbatim;
+  driver branch: dial + ONE ListSkills snapshot, both FATAL on fault — explicit config =
+  loud-misconfig). `catalogAssets` now carries `skills []tool.SkillMeta` + `skillActivator` +
+  `skillIndex` (name→body preload: full for FS, LAZY def-referenced-only for the driver) +
+  `skillReadRoots` (name + ALL workspace-constructor threading KEPT; only the derivation moved
+  into the seam). `resolveSkillIndex` and skilldraft's `skillReadRoots()` are DELETED;
+  `buildSubagentTool`/`buildTeamWiring`/`applyTeamConfig` take the index as a param.
+  `skillValues(metas, idx)` projects back to `[]skills.Skill{Name,Description,Body}` for the
+  two legacy consumers (skillSnapshot, NewDirDrafter novelty input — signature kept).
+  `activeSkillDirs` stays CONCRETE (quarantine-overlap validation is inherently FS business;
+  driver source ⇒ empty active dirs ⇒ the check trivially passes, documented).
+- **Conformance as contract.** `sourceconformance.RunSkillSource` (driven by the exported
+  canonical `Fixture`: text+executable assets / asset-less / multi-segment logical name;
+  subtests: list-matches-fixture incl. sorted/unique/HasAssets/Origin-non-empty,
+  list-deterministic, body round-trip, sentinel misses, asset name/size/executable + content
+  round-trips, asset-less, invalid-name-never-content) runs over the in-memory
+  `NewFixtureSource` self-test, `skills.FSSource` over a written-out TempDir tree, and
+  grpcdriver→bufconn→server-wrapper. `RunSoulSource` (round-trip, trim, empty/whitespace/
+  fence-breakout fail-soft) runs over `soul.Store` (temp file) and the wire client (verbatim
+  fake server — proving the CLIENT's re-validation).
+
+**Phase D notes (additions to the Phase-B list):** the construction-time-trust rule (Origin is
+observability; admission is gated where sources are CONSTRUCTED — an untrusted workspace's
+project tier is never built); the logical-name grammar (verbatim from `ValidSkillAssetName`);
+the no-watch/snapshot decision and its trust-gate rationale; the memfs/virtual-overlay
+rejection rationale (Bash executes real processes — drivers must materialize).
+
 ## TUI — `cmd/mecatui/` (see `docs/tui.md`)
 
 **Upstream textarea word-backward hang workaround** (`cmd/mecatui/ui/textarea_guard.go` + the two

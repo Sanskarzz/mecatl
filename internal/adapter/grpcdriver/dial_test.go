@@ -13,16 +13,37 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 )
 
-// TestDialRefusesTokenOverCleartextNonLoopback pins the auth posture mirrored
-// from the mecatui client: a bearer token must never ride a cleartext wire to
-// a non-loopback driver — Dial refuses pre-dial with an actionable error.
-func TestDialRefusesTokenOverCleartextNonLoopback(t *testing.T) {
-	_, err := Dial("driver.example.com:7443", WithBearerToken("secret"))
-	if err == nil {
-		t.Fatal("Dial(non-loopback, token, no TLS) = nil error, want refusal")
+// TestDialRefusesCleartextNonLoopback pins the hardened transport posture: a
+// NON-LOCAL driver target must never ride cleartext at all — token or not —
+// because drivers deliver session payloads, memory, model-steering skill
+// bodies, and executable assets. Dial refuses pre-dial with an actionable
+// error. (This supersedes the Phase-B token-only rule for every driver seam.)
+func TestDialRefusesCleartextNonLoopback(t *testing.T) {
+	for _, opts := range [][]Option{
+		{WithBearerToken("secret")}, // token over cleartext: still refused
+		nil,                         // token-LESS cleartext: refused too (the hardening)
+	} {
+		_, err := Dial("driver.example.com:7443", opts...)
+		if err == nil {
+			t.Fatalf("Dial(non-loopback, no TLS, opts=%v) = nil error, want refusal", opts)
+		}
+		if !strings.Contains(err.Error(), "CLEARTEXT") || !strings.Contains(err.Error(), "--driver-tls") {
+			t.Errorf("refusal error %q should name the cleartext hazard and the --driver-tls fix", err)
+		}
 	}
-	if !strings.Contains(err.Error(), "cleartext") {
-		t.Errorf("refusal error %q should explain the cleartext-token hazard", err)
+}
+
+// TestDialLocalCleartextAllowed pins the LOCAL plaintext single-user default:
+// loopback hosts and unix sockets dial (lazily) without TLS, with or without
+// a token.
+func TestDialLocalCleartextAllowed(t *testing.T) {
+	for _, target := range []string{"127.0.0.1:7443", "localhost:7443", "[::1]:7443", "unix:///run/mecatl/driver.sock"} {
+		conn, err := Dial(target)
+		if err != nil {
+			t.Errorf("Dial(%q) = %v, want lazy success (local plaintext default)", target, err)
+			continue
+		}
+		_ = conn.Close()
 	}
 }
 

@@ -55,12 +55,16 @@ import (
 //     returns), so the `!= nil` registration checks stay sound on the interface
 //     (guarded by TestBuildUserModelStoreDisabledReturnsNilInterface; see
 //     buildEngine's permconfig note for the trap this rule prevents).
-//   - skills: the skills resolved once at build time (resolveSkills) — the same
-//     slice the ListSkills snapshot projects.
-//   - skillReadRoots: the unique per-skill directories of those skills
-//     (skillReadRoots), computed ONCE here and threaded into EVERY production
-//     osfs Workspace constructor (main factory + all fork closures) via
-//     osfs.WithReadRoots — one computed value, no second list to drift.
+//   - skills/skillActivator/skillIndex: the skills seam resolved once at build
+//     time (resolveSkillSeam — the FS snapshot or the remote driver): the
+//     metadata snapshot the Skill tool enumerates and the ListSkills snapshot
+//     projects, the Activator the tool loads bodies/payloads through, and the
+//     name→body preload index agent definitions' `skills:` lists read.
+//   - skillReadRoots: the read-only allowed roots derived inside the seam
+//     (FSSource.AssetDirs per-skill dirs, or the driver asset cache), computed
+//     ONCE and threaded into EVERY production osfs Workspace constructor (main
+//     factory + all fork closures) via osfs.WithReadRoots — one computed value,
+//     no second list to drift.
 //   - forkReaper: ONE process-wide preserved-fork LRU shared by every Parallel
 //     tool, so ForkPreservedCap stays a PROCESS bound (a per-session reaper would
 //     multiply the cap by the number of sessions).
@@ -69,7 +73,9 @@ type catalogAssets struct {
 	agentReg       *agents.Registry
 	memStore       tool.MemoryStore
 	userModelStore tool.MemoryStore
-	skills         []skills.Skill
+	skills         []tool.SkillMeta
+	skillActivator skills.Activator
+	skillIndex     skillIndex
 	skillReadRoots []string
 	forkReaper     *agent.LRUForkReaper
 }
@@ -188,7 +194,7 @@ func mountClientMCP(ctx context.Context, cfg Config, cat *tool.Catalog, s catalo
 // inherited sub-agent parent. The returned close tears down the Subagent per-def
 // inline-MCP managers (these connections belong to this catalog).
 func registerSubagentTrio(ctx context.Context, cfg Config, cat *tool.Catalog, reg *providerRegistry, store port.SessionStore, hooks port.HookRunner, a catalogAssets, s catalogSession, refMgr *mcp.Manager) func() error {
-	subagentTool, subagentClose := buildSubagentTool(ctx, cfg, reg, s.provider, s.providerID, s.model, hooks, a.agentReg, refMgr, store, a.skillReadRoots)
+	subagentTool, subagentClose := buildSubagentTool(ctx, cfg, reg, s.provider, s.providerID, s.model, hooks, a.agentReg, refMgr, store, a.skillReadRoots, a.skillIndex)
 	cat.MustRegister(subagentTool)
 	// The PULL subagent-transcript inspect tool: read-only, reads the SAME shared
 	// session store the Subagent tool persists children to (ids verbatim from the
@@ -254,7 +260,7 @@ func registerTeamTools(ctx context.Context, cfg Config, cat *tool.Catalog, reg *
 		}
 		return
 	}
-	factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, s.provider, s.providerID, s.model, refMgr, a.skillReadRoots)
+	factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, s.provider, s.providerID, s.model, refMgr, a.skillReadRoots, a.skillIndex)
 	cat.MustRegister(agent.NewTeamTool(
 		agent.TeamMemberEngineFactory(factory),
 		agent.WithTeamToolForker(fk),
@@ -289,16 +295,22 @@ func registerMemoryFamilies(ctx context.Context, cfg Config, cat *tool.Catalog, 
 	}
 }
 
-// registerSkillFamily registers the Skill tool over the build-time discovered
-// skills (resolveSkills), plus the SkillDraft author tool when a quarantine dir
-// is configured.
+// registerSkillFamily registers the Skill tool over the build-time skills seam
+// (the metadata snapshot + the Activator), plus the SkillDraft author tool
+// when a quarantine dir is configured (its novelty snapshot is the metas +
+// preload-bodies projection — NewDirDrafter's []skills.Skill signature kept).
+// On the DRIVER branch the preload index is lazy (def-referenced names only),
+// so most projected bodies are empty and the drafter's novelty check is
+// effectively name/description-driven there — a conscious trade, not a bug
+// (fetching every body eagerly just for a warn-only similarity check would
+// defeat the lazy-transfer design).
 func registerSkillFamily(ctx context.Context, cfg Config, cat *tool.Catalog, a catalogAssets, s catalogSession) {
 	if len(a.skills) > 0 {
-		if err := cat.Register(skills.NewTool(a.skills)); err != nil {
+		if err := cat.Register(skills.NewTool(a.skills, a.skillActivator)); err != nil {
 			cfg.diag().Log(ctx, port.LevelWarn, "registering skills failed; Skill tool disabled", "err", err)
 		}
 	}
-	registerSkillDraft(ctx, cfg, cat, a.skills, s.narrate)
+	registerSkillDraft(ctx, cfg, cat, skillValues(a.skills, a.skillIndex), s.narrate)
 }
 
 // forkPreservedCap normalises cfg.ForkPreservedCap to the effective preserved-fork

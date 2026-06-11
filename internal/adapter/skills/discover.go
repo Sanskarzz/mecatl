@@ -10,6 +10,7 @@ import (
 
 	yaml "go.yaml.in/yaml/v3"
 
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/toolkit"
 )
 
@@ -24,14 +25,19 @@ const SkillFileName = "SKILL.md"
 // surface the convention (e.g. in flag help text).
 const DefaultDir = ".mecatl/skills"
 
-// maxDescriptionBytes caps a skill's one-line description. The description is the
+// MaxDescriptionBytes caps a skill's one-line description. The description is the
 // ALWAYS-IN-CONTEXT metadata (it lives in the Skill tool's Spec().Description, on
 // every request), so an unbounded one would inflate every prompt and break the
 // byte-stable prompt-prefix caching the OpenAI adapter relies on. A skill
 // description is a single line; 800 bytes is generous for that. parseSkill
 // truncates (rune-safe, with an ellipsis) and records a non-fatal warning when it
-// trims.
-const maxDescriptionBytes = 800
+// trims. Exported so the remote-driver skill-source client (grpcdriver) can
+// re-truncate defensively to the SAME cap.
+const MaxDescriptionBytes = 800
+
+// maxDescriptionBytes is the package-internal alias of MaxDescriptionBytes,
+// retained so the parse/draft sites (and their tests) read unchanged.
+const maxDescriptionBytes = MaxDescriptionBytes
 
 // frontmatter is the parsed YAML header of a SKILL.md file. Only name and
 // description are part of the always-in-context metadata; any other keys are
@@ -54,6 +60,12 @@ type DirSource struct {
 	// "user", "explicit"), surfaced in diagnostics and logs. It does not affect
 	// discovery or precedence.
 	Label string
+	// Tier is the admission tier stamped onto every skill this source produces
+	// (Skill.Origin → SkillMeta.Origin on the port). ResolveSources sets it per
+	// conventional location; a zero Tier defaults to tool.SkillOriginExplicit (a
+	// hand-constructed DirSource is an operator-configured location). It is a
+	// closed label, never a location, and does not affect discovery or precedence.
+	Tier tool.SkillOrigin
 }
 
 // Skills implements Source for a single local directory. It scans Dir for skills
@@ -114,6 +126,7 @@ func (s DirSource) Skills(_ context.Context) ([]Skill, []SkipError, error) {
 			skips = append(skips, SkipError{Path: path, Reason: perr})
 			continue
 		}
+		sk.Origin = s.origin()
 		// Non-fatal warnings (e.g. truncation): the skill is kept, but the author
 		// gets a signal via the returned diagnostics.
 		for _, n := range notes {
@@ -132,6 +145,16 @@ func (s DirSource) Skills(_ context.Context) ([]Skill, []SkipError, error) {
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, skips, nil
+}
+
+// origin returns the admission tier stamped onto this source's skills: Tier
+// when set, else tool.SkillOriginExplicit (the zero-value default — a
+// hand-constructed DirSource is an operator-configured location).
+func (s DirSource) origin() tool.SkillOrigin {
+	if s.Tier != "" {
+		return s.Tier
+	}
+	return tool.SkillOriginExplicit
 }
 
 // Discover scans dir for skills and returns them. It is a thin convenience

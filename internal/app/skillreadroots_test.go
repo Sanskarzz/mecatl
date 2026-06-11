@@ -9,7 +9,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
-	"github.com/stacklok/mecatl/internal/adapter/skills"
 )
 
 // skillreadroots_test.go covers the composition half of the activated-skill
@@ -38,11 +37,11 @@ func TestSkillReadRootsTrustGated(t *testing.T) {
 	userDir := resolveRootForTest(t, filepath.Join(xdg, "mecatl", "skills", "user-skill"))
 	userSourceDir := resolveRootForTest(t, filepath.Join(xdg, "mecatl", "skills"))
 
-	untrusted := skillReadRoots(resolveSkills(context.Background(), Config{
+	untrusted := assetDirsForTest(t, Config{
 		Workspace:          ws,
 		SkillsConventional: true,
 		TrustProject:       false,
-	}))
+	})
 	if dirsListContains(untrusted, projDir) {
 		t.Errorf("untrusted: the project-tier skill dir must be ABSENT from the read roots; got %v", untrusted)
 	}
@@ -55,12 +54,12 @@ func TestSkillReadRootsTrustGated(t *testing.T) {
 	draftDir := filepath.Join(t.TempDir(), "drafts")
 	writeSkill(t, draftDir, "sneaky-draft", "model-authored", "DRAFT BODY")
 
-	trusted := skillReadRoots(resolveSkills(context.Background(), Config{
+	trusted := assetDirsForTest(t, Config{
 		Workspace:          ws,
 		SkillsConventional: true,
 		TrustProject:       true,
 		SkillsDraftDir:     draftDir,
-	}))
+	})
 	if !dirsListContains(trusted, projDir) || !dirsListContains(trusted, userDir) {
 		t.Errorf("trusted: both skill dirs (%q, %q) must be present; got %v", projDir, userDir, trusted)
 	}
@@ -75,12 +74,13 @@ func TestSkillReadRootsTrustGated(t *testing.T) {
 }
 
 // TestSkillReadRootsResolveSymlinkAlias is the composition twin of the Skill
-// tool's alias test: skillReadRoots must emit the RESOLVED (osfs.ResolveRoot)
-// per-skill dir, never the raw symlink-alias form of the discovery path — the
-// exact divergence a symlinked path prefix (/home → /var/home) produces, which
-// t.TempDir alone cannot manufacture on a canonical-path host. A raw
-// filepath.Dir/Clean root would never match the canonical key the osfs
-// allowlist stores, silently breaking absolute reads for symlinked homes.
+// tool's alias test: the seam's read roots (FSSource.AssetDirs) must emit the
+// RESOLVED (osfs.ResolveRoot) per-skill dir, never the raw symlink-alias form
+// of the discovery path — the exact divergence a symlinked path prefix
+// (/home → /var/home) produces, which t.TempDir alone cannot manufacture on a
+// canonical-path host. A raw filepath.Dir/Clean root would never match the
+// canonical key the osfs allowlist stores, silently breaking absolute reads
+// for symlinked homes.
 func TestSkillReadRootsResolveSymlinkAlias(t *testing.T) {
 	realDir := t.TempDir()
 	alias := filepath.Join(t.TempDir(), "alias")
@@ -88,20 +88,17 @@ func TestSkillReadRootsResolveSymlinkAlias(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 	// The skill's discovery path crosses the alias, as it would when a
-	// conventional skills location lives behind a symlinked prefix.
-	skillDir := filepath.Join(alias, "aliased")
-	if err := os.MkdirAll(skillDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	skillPath := filepath.Join(skillDir, "SKILL.md")
+	// conventional skills location lives behind a symlinked prefix: the alias
+	// dir is the EXPLICIT skills dir the seam resolves.
+	writeSkill(t, alias, "aliased", "via alias", "BODY")
 
 	resolved := resolveRootForTest(t, filepath.Join(realDir, "aliased"))
-	rawDir := filepath.Clean(skillDir)
+	rawDir := filepath.Clean(filepath.Join(alias, "aliased"))
 	if rawDir == resolved {
 		t.Fatalf("test setup did not produce a divergent alias: raw %q == resolved %q", rawDir, resolved)
 	}
 
-	roots := skillReadRoots([]skills.Skill{{Name: "aliased", Path: skillPath}})
+	roots := assetDirsForTest(t, Config{SkillsDirs: []string{alias}})
 	if !dirsListContains(roots, resolved) {
 		t.Errorf("roots must contain the RESOLVED dir %q; got %v", resolved, roots)
 	}
@@ -177,7 +174,7 @@ func TestSkillReadRootsThreadedThroughTeamWiring(t *testing.T) {
 	provider := mockllm.New(mockllm.TextTurn("ok"))
 	cfg := Config{Model: "m"}
 	_, fk, roFk, _ := buildTeamWiring(ctx, cfg, regForTest(provider, providerMock, cfg.Model),
-		provider, providerMock, cfg.Model, nil, []string{skillDir})
+		provider, providerMock, cfg.Model, nil, []string{skillDir}, nil)
 
 	base, err := osfs.NewWorkspace(t.TempDir())
 	if err != nil {

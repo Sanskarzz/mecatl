@@ -1,0 +1,44 @@
+// SPDX-FileCopyrightText: Copyright 2026 Stacklok, Inc.
+// SPDX-License-Identifier: LicenseRef-Stacklok-Proprietary
+
+// mecatl driver API: the remote soul-source protocol.
+//
+// SoulSourceService is the wire seam behind the harness's `prompt.SoulSource`
+// (engine/prompt/soul.go): an operator-run driver process serves the
+// user-scoped, agent-READ-ONLY persona/"soul" body in place of the local
+// soul file. The driver sits at the SAME trust tier as the operator's own
+// soul file — operator-configured infrastructure, never model-writable (the
+// protocol has no write RPC, upholding the no-write-path invariant).
+//
+// Driver contract:
+//   - LoadSoul returns the persona body, or an EMPTY body for "no soul"
+//     (fail-soft: an absent persona is normal, never an error).
+//   - The harness RE-VALIDATES the body client-side with the full local soul
+//     discipline (byte cap, injection scan, data-fence integrity, trim) — a
+//     driver is never trusted to sanitize. A body the validation rejects
+//     degrades to no fragment, exactly like a rejected local file.
+//   - A LoadSoul fault at harness BUILD time (the selection probe) is FATAL
+//     (loud-misconfig posture); a fault at RUN time degrades fail-soft to no
+//     fragment with a logged warning.
+
+syntax = "proto3";
+
+package mecatl.driver.v1;
+
+// SoulSourceService serves the operator's persona body. It is the remote
+// analogue of prompt.SoulSource's single Load method.
+service SoulSourceService {
+  // LoadSoul returns the current persona body; an empty body means "no soul"
+  // (fail-soft). The harness re-validates the body client-side.
+  rpc LoadSoul(LoadSoulRequest) returns (LoadSoulResponse);
+}
+
+// LoadSoulRequest is empty: the source serves one persona.
+message LoadSoulRequest {}
+
+// LoadSoulResponse carries the persona body.
+message LoadSoulResponse {
+  // body is the persona text; empty means no soul is configured (fail-soft,
+  // not an error).
+  string body = 1;
+}

@@ -164,6 +164,8 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--driver-tls` | `false` | enable transport TLS on the store-driver connections. |
 | `--driver-tls-ca` | `""` | PEM CA bundle to verify the store driver's certificate (with `--driver-tls`; empty uses system roots). |
 | `--driver-tls-cert` / `--driver-tls-key` | `""` | PEM client certificate/key pair for **mutual TLS** to the store driver. |
+| `--skill-source-url` | `""` | `host:port` of a remote **skill-source gRPC driver** (`mecatl.driver.v1.SkillSourceService`); replaces local skills discovery — mutually exclusive with `--skills-dir`/`--skills-conventional`. **See the source-driver note below.** |
+| `--soul-source-url` | `""` | `host:port` of a remote **soul-source gRPC driver** (`mecatl.driver.v1.SoulSourceService`); occupies the USER slot of the soul selection — mutually exclusive with `--soul-file` (`--no-soul` still wins). **See the source-driver note below.** |
 | `--skills-dir` | `""` | directory to discover progressive-disclosure skills from, laid out as `<name>/SKILL.md`. **Repeatable** (highest precedence, in the order given); empty disables the `Skill` tool unless `--skills-conventional` is set. **See the skills trust note below.** |
 | `--skills-conventional` | `false` | also discover skills from the conventional known paths: `<workspace>/.mecatl/skills`, `<workspace>/.claude/skills`, `$XDG_CONFIG_HOME/mecatl/skills` (or `~/.config/mecatl/skills`), and `~/.claude/skills` — lower precedence than `--skills-dir`. **OFF by default** (strict opt-in); only enable for trusted locations. **See the skills trust note below.** |
 | `--skills-draft-dir` | `""` | enable the writable `SkillDraft` tool and set the **quarantine** directory for model-authored candidate skills. Empty disables the tool. Must be **outside the workspace root** (so the model's `Write`/`Edit` cannot reach it) and **disjoint** from every `--skills-dir` / conventional location — both fatal startup errors. **See the self-improving-skill loop note below.** |
@@ -1312,15 +1314,60 @@ conforming driver must accept snapshot payloads up to **64 MiB** (mount the
 gRPC server with a matching receive limit; the harness client is already
 configured for it).
 
-Auth posture mirrors the mecated API itself: **loopback may ride plaintext**
-(the single-user default); a non-loopback driver with `--driver-auth-token`
-**requires `--driver-tls`** — the client refuses to send the token in
-cleartext, pre-dial. `--driver-tls-ca` pins a custom CA;
+Transport posture: **only LOCAL targets may ride plaintext** — loopback hosts
+and unix sockets (the single-user default). Any other driver target
+**requires `--driver-tls`, token or not**: the client refuses cleartext
+pre-dial, because a driver delivers session payloads, memories,
+model-steering skill bodies, and executable skill assets — an on-path
+attacker over a cleartext remote link would gain driver-equivalent
+capability regardless of auth. `--driver-auth-token` adds per-RPC bearer
+auth on top; `--driver-tls-ca` pins a custom CA;
 `--driver-tls-cert`/`--driver-tls-key` add a client certificate for mTLS.
 Setting any `--driver-tls-*` file **without** `--driver-tls` is a fatal
 startup error (it would otherwise be silently ignored). There are **no
 retries and no default deadline** on driver RPCs — a driver failure surfaces
 as the same unit failure a disk error would.
+
+### Remote content-source drivers (skills + soul)
+
+The same protocol carries two **content sources**:
+
+```sh
+mecated --skill-source-url 127.0.0.1:7443 --soul-source-url 127.0.0.1:7443
+```
+
+`--skill-source-url` replaces local skills discovery entirely (mutually
+exclusive with `--skills-dir`/`--skills-conventional`). The driver's skill
+set is **snapshotted once at startup** (fatal if the driver cannot answer —
+an explicitly configured source that is down is a misconfiguration, never a
+silent no-skills run). Skills cross the wire as **logical bundles** — name,
+description, body, and payloads addressed by slash-relative logical names
+(`references/api.md`, `scripts/run.sh`) — no paths. On a skill's **first
+activation** its payloads materialize into a temporary, build-scoped **asset
+cache** (the `Base directory` the activation header advertises); a
+never-activated skill transfers zero bytes. Materialization is capped
+(16 MiB per file, 64 MiB per bundle), name-validated and containment-checked
+(an invalid bundle fails that activation with a model-addressable error,
+never a partial bundle), honors the executable bit, and the whole cache is
+removed on shutdown. **Trust:** a driver-served `SKILL.md` steers the model
+like AGENTS.md/CLAUDE.md — point this only at a driver you trust (the same
+tier as `--skills-dir`).
+
+`--soul-source-url` serves the persona from the driver instead of the local
+user soul file, occupying the **user slot** of the selection precedence (it
+shadows a project soul exactly like a present user soul; `--no-soul` and the
+`soul:apply` permission gate still apply). The driver is **probed at
+startup** (fatal if unreachable); a fault at run time degrades fail-soft to
+no fragment with a logged warning. The body is **re-validated locally**
+(byte cap, injection scan, data-fence integrity — a driver is never trusted
+to sanitize). The **drift baseline is skipped** for driver souls — the
+baseline is sidecar-file machinery for a local file you edit, while a driver
+sits behind the operator's own auth — so `--soul-strict` and
+`--approve-soul` are no-ops for this provenance (one INFO line records the
+skip).
+
+Both share the `--driver-auth-token`/`--driver-tls*` posture, and equal URLs
+share one connection with the store drivers.
 
 ### Permission modes
 

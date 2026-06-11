@@ -3,6 +3,7 @@ package skills
 import (
 	"path/filepath"
 
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 )
 
@@ -80,12 +81,14 @@ func ResolveSources(opts ResolveOptions) []Source {
 func resolveSourcesEnv(opts ResolveOptions, env xdgconfig.ResolveEnv) []Source {
 	var sources []Source
 
-	// Highest precedence: explicit operator-configured paths, in order.
+	// Highest precedence: explicit operator-configured paths, in order. Each
+	// source carries its admission TIER (Skill.Origin → the port's
+	// SkillMeta.Origin) — a closed label, never a location.
 	for _, dir := range opts.Explicit {
 		if dir == "" {
 			continue
 		}
-		sources = append(sources, DirSource{Dir: dir, Label: "explicit"})
+		sources = append(sources, DirSource{Dir: dir, Label: "explicit", Tier: tool.SkillOriginExplicit})
 	}
 
 	if !opts.Conventional {
@@ -97,17 +100,17 @@ func resolveSourcesEnv(opts ResolveOptions, env xdgconfig.ResolveEnv) []Source {
 	// user-tier sources below are NEVER gated.
 	if opts.Workspace != "" && opts.IncludeProjectTier {
 		sources = append(sources,
-			DirSource{Dir: filepath.Join(opts.Workspace, ProjectDirMecatl), Label: "project(.mecatl)"},
-			DirSource{Dir: filepath.Join(opts.Workspace, ProjectDirClaude), Label: "project(.claude)"},
+			DirSource{Dir: filepath.Join(opts.Workspace, ProjectDirMecatl), Label: "project(.mecatl)", Tier: tool.SkillOriginProject},
+			DirSource{Dir: filepath.Join(opts.Workspace, ProjectDirClaude), Label: "project(.claude)", Tier: tool.SkillOriginProject},
 		)
 	}
 
 	// User-level (lowest precedence). XDG-respecting for the mecatl path.
 	if cfg := xdgconfig.UserConfigDir(env); cfg != "" {
-		sources = append(sources, DirSource{Dir: filepath.Join(cfg, userSubdirMecatl), Label: "user(xdg)"})
+		sources = append(sources, DirSource{Dir: filepath.Join(cfg, userSubdirMecatl), Label: "user(xdg)", Tier: tool.SkillOriginUser})
 	}
 	if home, err := env.UserHomeDir(); err == nil && home != "" {
-		sources = append(sources, DirSource{Dir: filepath.Join(home, userSubdirClaude), Label: "user(.claude)"})
+		sources = append(sources, DirSource{Dir: filepath.Join(home, userSubdirClaude), Label: "user(.claude)", Tier: tool.SkillOriginUser})
 	}
 
 	return sources

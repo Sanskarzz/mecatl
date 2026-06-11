@@ -261,6 +261,18 @@ linters:
           deny:
             - pkg: os
               desc: 'storeconformance drives the abstract SessionStore contract; it must not touch the real OS'
+        engine-adapter-sourceconformance:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/sourceconformance/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/tool
+            - github.com/stacklok/mecatl/engine/prompt
+          deny:
+            - pkg: os
+              desc: 'sourceconformance drives the abstract SkillSource/SoulSource contracts; it must not touch the real OS'
         # agent: the APPLICATION loop; imports domain + port + team + stdlib +
         # golang.org/x/sync/errgroup. Adapters are INJECTED, never imported.
         core-agent:
@@ -363,10 +375,10 @@ linters:
           - goconst
           - unparam
         path: (.+)_test\.go
-      # fsconformance/memconformance/storeconformance are shared test-helper
-      # packages (importing "testing" in a non-_test.go file, the conventional
-      # Go pattern à la testing/fstest). Their conformance tables are dense like
-      # tests, so apply the same relaxations.
+      # fsconformance/memconformance/storeconformance/sourceconformance are shared
+      # test-helper packages (importing "testing" in a non-_test.go file, the
+      # conventional Go pattern à la testing/fstest). Their conformance tables are
+      # dense like tests, so apply the same relaxations.
       - linters:
           - gocyclo
           - errcheck
@@ -388,6 +400,13 @@ linters:
           - goconst
           - unparam
         path: engine/adapter/storeconformance/
+      - linters:
+          - gocyclo
+          - errcheck
+          - gosec
+          - goconst
+          - unparam
+        path: engine/adapter/sourceconformance/
       - linters:
           - revive
         path: .golangci.yml

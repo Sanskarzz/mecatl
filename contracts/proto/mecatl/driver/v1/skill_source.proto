@@ -1,0 +1,154 @@
+// SPDX-FileCopyrightText: Copyright 2026 Stacklok, Inc.
+// SPDX-License-Identifier: LicenseRef-Stacklok-Proprietary
+
+// mecatl driver API: the remote skill-source protocol.
+//
+// SkillSourceService is the wire seam behind the harness's `tool.SkillSource`
+// (engine/tool/skillsource.go): an operator-run driver process serves
+// progressive-disclosure skills as LOGICAL BUNDLES — identity + trigger
+// metadata (ListSkills), an instruction body (GetSkillBody), and auxiliary
+// payloads addressed by LOGICAL name (ListSkillAssets/ReadSkillAsset). No
+// path, directory, or root concept crosses this wire; where the driver keeps
+// its bundles is its private business. The driver sits at the SAME trust tier
+// as an operator-configured skills directory — a skill body steers the model
+// like AGENTS.md/CLAUDE.md, so point the harness only at a driver you trust.
+//
+// Driver contract (pinned by the engine/adapter/sourceconformance suite, which
+// remote drivers run over their client):
+//   - ListSkills returns the skill metadata sorted by name, unique, and STABLE
+//     for the life of the source (snapshot semantics — the harness resolves
+//     once at build; there is no watch/reload seam).
+//   - GetSkillBody / ListSkillAssets of an unknown skill MUST return NOT_FOUND.
+//   - ReadSkillAsset of an unknown skill OR asset MUST return NOT_FOUND.
+//   - A logical asset name is slash-separated and RELATIVE: no leading
+//     separator, no empty/"."/".." segments, no backslashes, no NUL. An
+//     invalid name MUST be INVALID_ARGUMENT — never content (the harness-
+//     provided Go server wrapper pre-validates via tool.ValidSkillAssetName).
+//
+// CAPACITY: ReadSkillAsset is unary and rides the protocol's 64 MiB required
+// minimum message capacity (internal/adapter/grpcdriver.MaxSnapshotBytes; the
+// harness additionally caps a single materialized asset at 16 MiB and a
+// skill's whole bundle at 64 MiB).
+//
+// Validation: required-field annotations are authored with `buf.validate.field`
+// for documentation and future runtime enforcement; V1 enforces them in the Go
+// client/server wrappers (internal/adapter/grpcdriver).
+
+syntax = "proto3";
+
+package mecatl.driver.v1;
+
+import "buf/validate/validate.proto";
+
+// SkillSourceService serves logical skill bundles. It is the remote analogue
+// of tool.SkillSource's four methods.
+service SkillSourceService {
+  // ListSkills returns every skill's always-in-context metadata, sorted by
+  // name and unique. The set is a SNAPSHOT: it must be stable for the life of
+  // the harness's connection-scoped source.
+  rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
+
+  // GetSkillBody returns the named skill's full instruction body (the
+  // load-on-activation layer). An unknown name MUST return NOT_FOUND.
+  rpc GetSkillBody(GetSkillBodyRequest) returns (GetSkillBodyResponse);
+
+  // ListSkillAssets returns the named skill's auxiliary payload descriptors
+  // (logical name + size + executable bit). An unknown skill MUST return
+  // NOT_FOUND; a skill with no assets returns an empty list.
+  rpc ListSkillAssets(ListSkillAssetsRequest) returns (ListSkillAssetsResponse);
+
+  // ReadSkillAsset returns one payload's bytes by logical name. An unknown
+  // skill OR asset MUST return NOT_FOUND; an invalid logical name MUST return
+  // INVALID_ARGUMENT — never content.
+  rpc ReadSkillAsset(ReadSkillAssetRequest) returns (ReadSkillAssetResponse);
+}
+
+// SkillMeta is one skill's always-in-context metadata, mirroring
+// tool.SkillMeta. It carries NO body and NO location.
+message SkillMeta {
+  // name is the stable activation key (non-empty, unique within the source).
+  string name = 1 [(buf.validate.field).string.min_len = 1];
+
+  // description is the one-line trigger metadata the harness's Skill tool
+  // enumerates on every request. The harness re-truncates it client-side to
+  // its always-in-context cap (800 bytes), so an oversized description cannot
+  // inflate every prompt.
+  string description = 2 [(buf.validate.field).string.min_len = 1];
+
+  // origin is the admission-tier label, a string passthrough (house style, no
+  // proto enum). Documented values: "explicit", "project", "user", "driver".
+  // It is a TIER, never a location, and it is DRIVER-SIDE OBSERVABILITY ONLY:
+  // the harness stamps every driver-listed skill "driver" UNCONDITIONALLY (a
+  // driver cannot claim the project/user tiers) — trust is enforced at source
+  // CONSTRUCTION in the harness's composition layer, never from this field.
+  string origin = 3;
+
+  // has_assets reports whether ListSkillAssets will return at least one asset.
+  bool has_assets = 4;
+}
+
+// ListSkillsRequest is empty: the source serves one fixed bundle set.
+message ListSkillsRequest {}
+
+// ListSkillsResponse carries the full skill metadata snapshot.
+message ListSkillsResponse {
+  // skills is sorted by name and unique.
+  repeated SkillMeta skills = 1;
+}
+
+// GetSkillBodyRequest names the skill whose body to load.
+message GetSkillBodyRequest {
+  // name is the activation key from ListSkills.
+  string name = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+// GetSkillBodyResponse carries the skill's full instruction body.
+message GetSkillBodyResponse {
+  // body is the markdown instruction body (may be large; the harness
+  // truncates on activation against its shared tool-output cap).
+  string body = 1;
+}
+
+// SkillAsset describes one auxiliary payload, mirroring tool.SkillAsset.
+message SkillAsset {
+  // name is the LOGICAL, slash-separated, relative identifier in the skill's
+  // own namespace (e.g. "references/api.md", "scripts/run.sh") — the exact
+  // namespace skill bodies reference. Grammar: no leading separator, no
+  // empty/"."/".." segments, no backslashes, no NUL.
+  string name = 1 [(buf.validate.field).string.min_len = 1];
+
+  // size is the payload size in bytes (advisory; the harness re-enforces its
+  // own caps when materializing).
+  int64 size = 2;
+
+  // executable reports the payload should carry the executable bit if the
+  // harness materializes it to disk.
+  bool executable = 3;
+}
+
+// ListSkillAssetsRequest names the skill whose assets to enumerate.
+message ListSkillAssetsRequest {
+  // name is the activation key from ListSkills.
+  string name = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+// ListSkillAssetsResponse carries the asset descriptors (empty for an
+// asset-less skill).
+message ListSkillAssetsResponse {
+  repeated SkillAsset assets = 1;
+}
+
+// ReadSkillAssetRequest addresses one payload by skill + logical asset name.
+message ReadSkillAssetRequest {
+  // skill is the activation key from ListSkills.
+  string skill = 1 [(buf.validate.field).string.min_len = 1];
+
+  // asset is the logical asset name from ListSkillAssets.
+  string asset = 2 [(buf.validate.field).string.min_len = 1];
+}
+
+// ReadSkillAssetResponse carries the payload bytes. Unary: a single asset
+// rides the 64 MiB protocol message ceiling, no chunking.
+message ReadSkillAssetResponse {
+  bytes data = 1;
+}

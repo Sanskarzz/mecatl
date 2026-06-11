@@ -24,6 +24,8 @@ func soulProvenanceProto(p soulProvenance) mecatlv1.SoulProvenance {
 		return mecatlv1.SoulProvenance_SOUL_PROVENANCE_USER
 	case soulProject:
 		return mecatlv1.SoulProvenance_SOUL_PROVENANCE_PROJECT
+	case soulDriver:
+		return mecatlv1.SoulProvenance_SOUL_PROVENANCE_DRIVER
 	default:
 		return mecatlv1.SoulProvenance_SOUL_PROVENANCE_UNSPECIFIED
 	}

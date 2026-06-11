@@ -29,6 +29,12 @@ func validateDriverConfig(cfg Config) error {
 	if cfg.MemoryDir != "" && cfg.MemoryStoreURL != "" {
 		return fmt.Errorf("--memory-dir %q and --memory-store-url %q are mutually exclusive: the memory store is either the local flock dir or the remote driver, never both", cfg.MemoryDir, cfg.MemoryStoreURL)
 	}
+	if cfg.SkillSourceURL != "" && (len(cfg.SkillsDirs) > 0 || cfg.SkillsConventional) {
+		return fmt.Errorf("--skill-source-url %q and --skills-dir/--skills-conventional are mutually exclusive: skills come either from the local directories or from the remote driver, never both", cfg.SkillSourceURL)
+	}
+	if cfg.SoulSourceURL != "" && cfg.SoulPath != "" {
+		return fmt.Errorf("--soul-source-url %q and --soul-file %q are mutually exclusive: the user-slot soul is either the local file or the remote driver, never both (--no-soul still disables either)", cfg.SoulSourceURL, cfg.SoulPath)
+	}
 	if !cfg.DriverTLS && (cfg.DriverTLSCA != "" || cfg.DriverTLSCert != "" || cfg.DriverTLSKey != "") {
 		return fmt.Errorf("--driver-tls-ca/--driver-tls-cert/--driver-tls-key require --driver-tls: without it they would be silently ignored and the driver connection would ride plaintext")
 	}

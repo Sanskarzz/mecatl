@@ -357,33 +357,14 @@ var knownHookPhases = map[governance.HookPhase]struct{}{
 }
 
 // skillIndex is a name → body lookup over the active skills, built once at
-// composition time so each def's `skills:` preload is a cheap map read. It is the
-// SAME discovered-skill set the Skill tool serves (operator-controlled content), so
-// preloading a skill body into a def's prompt stays inside the skill trust boundary.
+// composition time (inside the skills seam — resolveSkillSeam) so each def's
+// `skills:` preload is a cheap map read. It is the SAME resolved-skill set the
+// Skill tool serves (operator-controlled content), so preloading a skill body
+// into a def's prompt stays inside the skill trust boundary; the FS branch
+// inherits the Phase-2a project-tier trust gate by construction
+// (skillResolveOptions is its single choke point), and the driver branch
+// fetches LAZILY (only def-referenced names).
 type skillIndex map[string]string
-
-// resolveSkillIndex discovers the active skills (explicit + conventional, exactly
-// as registerSkills does) and indexes them by name → body. It is forgiving: any
-// discovery fault yields an empty index (a def's skills preload then no-ops with a
-// diagnostic) rather than failing the build. Returns nil when skills are disabled.
-func resolveSkillIndex(ctx context.Context, cfg Config) skillIndex {
-	// Build through skillResolveOptions (the single choke point) so an untrusted
-	// project skill cannot be preloaded into an agent def's prompt — the Phase-2a
-	// project-tier trust gate is inherited by construction.
-	sources := skills.ResolveSources(skillResolveOptions(cfg))
-	if len(sources) == 0 {
-		return nil
-	}
-	discovered, _, err := skills.NewMultiSource(sources...).Skills(ctx)
-	if err != nil || len(discovered) == 0 {
-		return nil
-	}
-	idx := make(skillIndex, len(discovered))
-	for _, s := range discovered {
-		idx[s.Name] = s.Body
-	}
-	return idx
-}
 
 // preloadedSkillBodies resolves a def's `skills:` names against the index, returning
 // the matched bodies in def order. An unknown name is a non-fatal diagnostic (logged

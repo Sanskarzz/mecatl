@@ -184,8 +184,22 @@ type Config struct {
 	// DriverTLSCA bundle and DriverTLSCert/DriverTLSKey mTLS client pair. The
 	// user-model store stays LOCAL in Phase B (a deliberate deferral; see
 	// docs/design/IMPLEMENTATION-NOTES.md).
+	//
+	// Phase C1 adds the content-source drivers: SkillSourceURL replaces the
+	// LOCAL skills discovery (mutually exclusive with SkillsDirs/
+	// SkillsConventional — one source per seam) with a
+	// mecatl.driver.v1.SkillSourceService client; the driver's skill bundles
+	// serve the same Skill tool, with auxiliary payloads materialized lazily
+	// into a build-scoped asset cache on first activation. SoulSourceURL
+	// replaces the LOCAL user-scoped soul file (mutually exclusive with
+	// SoulPath; --no-soul still wins) with a mecatl.driver.v1.SoulSourceService
+	// client occupying the USER slot of the soul selection precedence. Both are
+	// probed at build (fatal on an unreachable driver — loud-misconfig); both
+	// share the same Driver* auth/TLS posture and per-target connection cache.
 	SessionStoreURL string
 	MemoryStoreURL  string
+	SkillSourceURL  string
+	SoulSourceURL   string
 	DriverAuthToken string
 	DriverTLS       bool
 	DriverTLSCA     string
@@ -572,11 +586,12 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 			ModelID:       cfg.Model,
 			ContextWindow: int64(catalogContextWindow(reg.Default(), cfg.Model)),
 		},
-		// ListSkills snapshot: the skills discovered once at build time (registerSkills),
-		// projected into the proto form. Skills are immutable for the process lifetime,
-		// so this is a startup snapshot (like Agents), not a live lister. nil/empty when
-		// skills are disabled.
-		Skills: skillSnapshot(assets.skills),
+		// ListSkills snapshot: the skills resolved once at build time (the skills
+		// seam — FS or driver), projected into the proto form (metadata only).
+		// Skills are immutable for the process lifetime, so this is a startup
+		// snapshot (like Agents), not a live lister. nil/empty when skills are
+		// disabled.
+		Skills: skillSnapshot(skillValues(assets.skills, assets.skillIndex)),
 		// GetSoul snapshot: re-run the same selection policy (selectSoulSource) once
 		// here and project the WINNING soul's content + meta into the proto form. The
 		// soul is selected deterministically at build time (USER-wins precedence, trust
@@ -611,7 +626,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// eviction remains a follow-up; see docs/adr/0001-acp-adapter.md.
 		OnCloseSession: learned.Forget,
 	}
-	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, assets.skillReadRoots)
+	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, assets.skillReadRoots, assets.skillIndex)
 
 	svc, err := server.NewService(svcCfg)
 	if err != nil {
@@ -958,11 +973,38 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	}
 	memStore, userModelStore := assets.memStore, assets.userModelStore
 
+	// Soul driver probe (Phase C1): when --soul-source-url is set (and --no-soul
+	// does not win), one LoadSoul round trip at BUILD time — fatal on a fault
+	// (loud-misconfig posture: an explicitly configured driver that cannot
+	// answer is a misconfiguration; RUNTIME faults stay fail-soft inside the
+	// client). The once-guarded conn close folds into the engine teardown chain
+	// (shared with any equal-URL driver conn).
+	if cfg.SoulSourceURL != "" && !cfg.NoSoul {
+		conn, connClose, derr := cfg.drivers().dial(cfg, cfg.SoulSourceURL)
+		if derr != nil {
+			mcpClose()
+			return nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, fmt.Errorf("dial soul-source driver %q: %w", cfg.SoulSourceURL, derr)
+		}
+		probe := grpcdriver.NewSoulSource(conn, grpcdriver.SoulOptions{Diagnostics: cfg.diag()})
+		if perr := probe.Probe(ctx); perr != nil {
+			connClose()
+			mcpClose()
+			return nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, fmt.Errorf("probe soul-source driver %q: %w", cfg.SoulSourceURL, perr)
+		}
+		prevClose := mcpClose
+		mcpClose = func() {
+			prevClose()
+			connClose()
+		}
+	}
+
 	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona source. ON
 	// by default reading the conventional ~/.config/mecatl/soul.md; --no-soul leaves
-	// it nil (no fragment), --soul-file overrides the path. The adapter (*soul.Store)
-	// meets the prompt-defined SoulSource port HERE, in the composition layer — the
-	// one place the adapter binds the port. A missing file is fail-soft (no-op).
+	// it nil (no fragment), --soul-file overrides the path; --soul-source-url
+	// (Phase C1) swaps the USER slot for the remote driver. The adapter
+	// (*soul.Store or the grpcdriver client) meets the prompt-defined SoulSource
+	// port HERE, in the composition layer — the one place the adapter binds the
+	// port. A missing file is fail-soft (no-op).
 	soulSrc := buildSoulSource(cfg)
 
 	// Instructions seam: RootAssembler (AGENTS.md/CLAUDE.md) always; then the soul
@@ -1589,7 +1631,14 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 		startUserModelConsolidation(ctx, cfg, userModelStore, provider)
 	}
 
-	discoveredSkills := resolveSkills(ctx, cfg)
+	// The skills seam (Phase C1): FS snapshot or remote driver, resolved once.
+	// A driver fault is FATAL (explicit operator config, the memory-driver
+	// posture above); the FS branch stays fail-soft.
+	seam, err := resolveSkillSeam(ctx, cfg, agentReg)
+	if err != nil {
+		mcpClose()
+		return nil, catalogAssets{}, nil, nil, nil, err
+	}
 
 	// ONE process-wide preserved-fork LRU shared by every Parallel tool (build-time
 	// AND per-session), so ForkPreservedCap stays a PROCESS bound.
@@ -1603,12 +1652,15 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 		agentReg:       agentReg,
 		memStore:       memStore,
 		userModelStore: userModelStore,
-		skills:         discoveredSkills,
-		// The ONE computation of the per-skill read-only allowed roots: derived
-		// from the SAME discovered slice (so the project-tier trust gate is
-		// inherited by construction) and threaded into every production osfs
-		// Workspace constructor via the assets — no second list to drift.
-		skillReadRoots: skillReadRoots(discoveredSkills),
+		skills:         seam.metas,
+		skillActivator: seam.activator,
+		skillIndex:     seam.index,
+		// The ONE computation of the read-only allowed roots, now derived inside
+		// the seam (FSSource.AssetDirs per-skill dirs, or the driver asset cache —
+		// the project-tier trust gate is inherited by construction either way) and
+		// threaded into every production osfs Workspace constructor via the
+		// assets — no second list to drift.
+		skillReadRoots: seam.readRoots,
 		forkReaper:     forkReaper,
 	}
 	// The build-time assembly: default provider + model, no client MCP, narrating
@@ -1631,6 +1683,15 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 		mcpClose = func() {
 			prev()
 			memDriverClose()
+		}
+	}
+	// Fold the skill seam's teardown (driver branch only: asset-cache RemoveAll
+	// + its once-guarded conn close) into the same chain.
+	if seam.close != nil {
+		prev := mcpClose
+		mcpClose = func() {
+			prev()
+			seam.close()
 		}
 	}
 
@@ -1758,48 +1819,210 @@ func skillResolveOptions(cfg Config) skills.ResolveOptions {
 	}
 }
 
-// resolveSkills DISCOVERS the progressive-disclosure skills from the resolved
-// Source list (explicit dirs + conventional locations when enabled). Skills stay
-// OPT-IN: with no sources, nothing is discovered. Registration of the Skill tool
-// over the discovered slice is assembleCatalog's job (so per-session catalogs get
-// it too); this is the build-once discovery + narration half.
-//
-// It returns the discovered skills so the composition root can project them into
-// the ListSkills snapshot (skillSnapshot) and thread them into every catalog
-// assembly (catalogAssets.skills). The slice is nil when no skills are discovered
-// (disabled, no sources, or none valid).
-func resolveSkills(ctx context.Context, cfg Config) []skills.Skill {
+// skillSeam is the resolved skills wiring (Phase C1): the build-once products
+// every catalog assembly shares, produced by resolveSkillSeam from EITHER the
+// filesystem branch (NewFSSource over the trust-gated resolved sources) or the
+// remote-driver branch (a grpcdriver SkillSource + lazy asset materializer).
+// The PORT (tool.SkillSource) carries logical bundles only; the path business
+// an FS deployment still needs (readRoots) derives from the FS adapter's
+// NON-PORT AssetDirs, and the driver branch's single read root is its asset
+// cache.
+type skillSeam struct {
+	// metas is the name-sorted always-in-context metadata snapshot the Skill
+	// tool enumerates and the ListSkills RPC projects.
+	metas []tool.SkillMeta
+	// activator loads a skill's body + base directory on activation (snapshot
+	// in place for FS; lazy materialization for the driver).
+	activator skills.Activator
+	// index is the name → body preload map agent definitions' `skills:` lists
+	// read (full for FS — bodies are snapshot-retained; LAZY for the driver —
+	// only def-referenced names are fetched).
+	index skillIndex
+	// readRoots are the read-only allowed roots every production osfs Workspace
+	// is constructed with: the FS per-skill dirs, or the driver's asset cache.
+	readRoots []string
+	// close is the driver branch's teardown (asset-cache RemoveAll + the
+	// once-guarded conn close); nil for the FS/disabled branches.
+	close func()
+}
+
+// resolveSkillSeam resolves the skills wiring from cfg: the remote-driver
+// branch when SkillSourceURL is set (fatal on an unreachable driver — an
+// explicit operator config that cannot answer is a misconfiguration, the
+// memory-driver posture), else the filesystem branch (fail-soft, narration
+// verbatim from the pre-seam resolveSkills). agentReg feeds the driver
+// branch's LAZY preload index (only def-referenced skill bodies transfer).
+func resolveSkillSeam(ctx context.Context, cfg Config, agentReg *agents.Registry) (skillSeam, error) {
+	if cfg.SkillSourceURL != "" {
+		return resolveDriverSkillSeam(ctx, cfg, agentReg)
+	}
+	return resolveFSSkillSeam(ctx, cfg), nil
+}
+
+// resolveFSSkillSeam is the filesystem branch: DISCOVER the
+// progressive-disclosure skills from the resolved Source list (explicit dirs +
+// conventional locations when enabled) into an FSSource snapshot. Skills stay
+// OPT-IN: with no sources, nothing is discovered. Registration of the Skill
+// tool over the seam is assembleCatalog's job (so per-session catalogs get it
+// too); this is the build-once discovery + narration half. The zero seam means
+// no skills (disabled, no sources, none valid, or a discovery fault — a fault
+// drops the WHOLE inventory, no partials; the WARN names the failure).
+func resolveFSSkillSeam(ctx context.Context, cfg Config) skillSeam {
 	sources := skills.ResolveSources(skillResolveOptions(cfg))
 	if len(sources) == 0 {
 		cfg.diag().Log(ctx, port.LevelInfo, "skills DISABLED (no skills dirs configured)")
-		return nil
+		return skillSeam{}
 	}
 
-	discovered, skips, err := skills.NewMultiSource(sources...).Skills(ctx)
+	src, skips, err := skills.NewFSSource(ctx, sources...)
 	for _, s := range skips {
 		cfg.diag().Log(ctx, port.LevelWarn, "skill skipped", "path", s.Path, "reason", s.Reason)
 	}
-	switch {
-	case err != nil:
-		// DELIBERATE: a discovery error drops the WHOLE slice (nil — no partial
-		// inventory), unlike the old registerSkills which could return partial
-		// results on a late registration error; the WARN names the failure.
+	if err != nil {
 		cfg.diag().Log(ctx, port.LevelWarn, "discovering skills failed; Skill tool disabled",
 			"dirs", strings.Join(cfg.SkillsDirs, ","), "conventional", cfg.SkillsConventional, "err", err)
-		return nil
-	case len(discovered) == 0:
+		return skillSeam{}
+	}
+	discovered := src.Discovered()
+	if len(discovered) == 0 {
 		cfg.diag().Log(ctx, port.LevelInfo, "skills DISABLED (no valid SKILL.md found in any source)",
 			"dirs", strings.Join(cfg.SkillsDirs, ","), "conventional", cfg.SkillsConventional)
-	default:
-		names := make([]string, 0, len(discovered))
-		for _, s := range discovered {
-			names = append(names, s.Name)
-		}
-		cfg.diag().Log(ctx, port.LevelInfo, "Skill tool ENABLED",
-			"dirs", strings.Join(cfg.SkillsDirs, ","), "conventional", cfg.SkillsConventional,
-			"count", len(discovered), "skills", strings.Join(names, ","))
+		return skillSeam{}
 	}
-	return discovered
+	names := make([]string, 0, len(discovered))
+	idx := make(skillIndex, len(discovered))
+	for _, s := range discovered {
+		names = append(names, s.Name)
+		idx[s.Name] = s.Body
+	}
+	cfg.diag().Log(ctx, port.LevelInfo, "Skill tool ENABLED",
+		"dirs", strings.Join(cfg.SkillsDirs, ","), "conventional", cfg.SkillsConventional,
+		"count", len(discovered), "skills", strings.Join(names, ","))
+	metas, _ := src.ListSkills(ctx) // snapshot read; never errors
+	return skillSeam{
+		metas:     metas,
+		activator: skills.NewSnapshotActivator(src),
+		index:     idx,
+		// The ONE computation of the per-skill read-only allowed roots, moved
+		// home to the FS adapter (FSSource.AssetDirs): derived from the SAME
+		// snapshot (so the project-tier trust gate is inherited by construction)
+		// and threaded into every production osfs Workspace constructor via the
+		// assets — no second list to drift.
+		readRoots: src.AssetDirs(),
+	}
+}
+
+// resolveDriverSkillSeam is the remote-driver branch: dial the
+// SkillSourceService (fatal on a dial/snapshot fault), take ONE ListSkills
+// snapshot, create the build-scoped asset cache EAGERLY (the osfs Workspace
+// opens its read roots at construction and skips non-existent dirs — a
+// late-born cache would be unreadable), and wire the lazy materializer behind
+// a SourceActivator. The cache RemoveAll + the once-guarded conn close ride
+// the seam's close, folded into the catalog teardown.
+func resolveDriverSkillSeam(ctx context.Context, cfg Config, agentReg *agents.Registry) (skillSeam, error) {
+	conn, connClose, err := cfg.drivers().dial(cfg, cfg.SkillSourceURL)
+	if err != nil {
+		return skillSeam{}, fmt.Errorf("dial skill-source driver %q: %w", cfg.SkillSourceURL, err)
+	}
+	src := grpcdriver.NewSkillSource(conn)
+	metas, err := src.ListSkills(ctx)
+	if err != nil {
+		connClose()
+		return skillSeam{}, fmt.Errorf("list skills from driver %q: %w", cfg.SkillSourceURL, err)
+	}
+	if len(metas) == 0 {
+		cfg.diag().Log(ctx, port.LevelInfo, "skills DISABLED (skill-source driver serves no skills)",
+			"target", cfg.SkillSourceURL)
+		return skillSeam{close: connClose}, nil
+	}
+
+	rawCache, err := os.MkdirTemp("", "mecatl-skill-assets-")
+	if err != nil {
+		connClose()
+		return skillSeam{}, fmt.Errorf("create skill asset cache: %w", err)
+	}
+	// Canonicalize the cache root through the SAME resolver the osfs read-root
+	// allowlist is keyed on (a temp dir may live behind a symlinked prefix), so
+	// the Base-directory paths the Skill tool advertises match the allowlist.
+	cacheBase := rawCache
+	if resolved, rerr := osfs.ResolveRoot(rawCache); rerr == nil {
+		cacheBase = resolved
+	}
+
+	names := make([]string, 0, len(metas))
+	for _, m := range metas {
+		names = append(names, m.Name)
+	}
+	cfg.diag().Log(ctx, port.LevelInfo, "Skill tool ENABLED",
+		"target", cfg.SkillSourceURL, "count", len(metas), "skills", strings.Join(names, ","),
+		"asset_cache", cacheBase)
+
+	return skillSeam{
+		metas:     metas,
+		activator: skills.NewSourceActivator(src, skills.NewAssetMaterializer(src, cacheBase)),
+		index:     driverSkillIndex(ctx, cfg, src, metas, agentReg),
+		readRoots: []string{cacheBase},
+		close: func() {
+			if rerr := os.RemoveAll(rawCache); rerr != nil {
+				cfg.diag().Log(context.Background(), port.LevelWarn, "removing the skill asset cache failed", "dir", rawCache, "err", rerr)
+			}
+			connClose()
+		},
+	}, nil
+}
+
+// driverSkillIndex builds the agent-def preload index LAZILY over the driver:
+// only the skill names some agent definition actually references are fetched
+// (a def-less deployment transfers zero bodies). It is forgiving — a fetch
+// fault drops that one name with a WARN (the def's preload then no-ops with a
+// "missing" diagnostic), mirroring the pre-seam resolveSkillIndex posture.
+func driverSkillIndex(ctx context.Context, cfg Config, src tool.SkillSource, metas []tool.SkillMeta, agentReg *agents.Registry) skillIndex {
+	if agentReg == nil || agentReg.Len() == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(metas))
+	for _, m := range metas {
+		known[m.Name] = true
+	}
+	idx := skillIndex{}
+	for _, def := range agentReg.List() {
+		for _, name := range def.Skills {
+			name = strings.TrimSpace(name)
+			if name == "" || !known[name] {
+				continue
+			}
+			if _, done := idx[name]; done {
+				continue
+			}
+			body, err := src.SkillBody(ctx, name)
+			if err != nil {
+				cfg.diag().Log(ctx, port.LevelWarn, "preloading a def-referenced skill body from the driver failed; the def's preload will report it missing",
+					"skill", name, "err", err)
+				continue
+			}
+			idx[name] = body
+		}
+	}
+	if len(idx) == 0 {
+		return nil
+	}
+	return idx
+}
+
+// skillValues projects the seam's metas + preload bodies back onto the adapter
+// []skills.Skill value shape for the two legacy consumers that still take it:
+// the ListSkills snapshot projection (skillSnapshot — metadata only) and the
+// SkillDraft novelty input (NewDirDrafter — name/description/body). No path
+// crosses: the projection carries none.
+func skillValues(metas []tool.SkillMeta, idx skillIndex) []skills.Skill {
+	if len(metas) == 0 {
+		return nil
+	}
+	out := make([]skills.Skill, 0, len(metas))
+	for _, m := range metas {
+		out = append(out, skills.Skill{Name: m.Name, Description: m.Description, Body: idx[m.Name], Origin: m.Origin})
+	}
+	return out
 }
 
 // registerSkillDraft registers the writable SkillDraft tool when SkillsDraftDir is
@@ -2252,12 +2475,14 @@ func buildParallelJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engi
 // inherits whatever the call site supplies — the build-time default (buildCatalog)
 // or a session-selected provider (Half B). The registry never reaches the Subagent
 // tool itself; it is consumed only inside buildAgentSubagentEngines' resolution loop.
-func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager, store port.SessionStore, skillReadRoots []string) (tool.Tool, func() error) {
-	// Resolve the active skills once so a def's `skills:` can preload skill bodies
-	// into its engine prompt. The same index is the operator-controlled skill set
-	// the Skill tool serves. `hooks` is the inert default each def adopts unless its
-	// own `hooks:` map scopes lifecycle hooks to its engine.
-	skillIdx := resolveSkillIndex(ctx, cfg)
+func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager, store port.SessionStore, skillReadRoots []string, skillIdx skillIndex) (tool.Tool, func() error) {
+	// skillIdx is the build-once name→body preload index (the SAME
+	// operator-controlled skill set the Skill tool serves, threaded from the
+	// skills seam via the catalog assets) so a def's `skills:` can preload
+	// skill bodies into its engine prompt. `hooks` is the inert default each
+	// def adopts unless its own `hooks:` map scopes lifecycle hooks to its
+	// engine.
+	//
 	// The Subagent child's Bash runs over a worktree that SHARES the parent `.git`, so it
 	// gets the HARDENED runner (the main session keeps its own unhardened runner). nil
 	// when Bash is disabled — then no shell, no forker.
@@ -2371,7 +2596,7 @@ func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider 
 // route its engine to a different provider, and a member that pins none inherits
 // whatever the caller supplies (the build-time default in buildCatalog/
 // applyTeamConfig, or a session-selected provider in Half B's in-catalog Team tool).
-func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager, skillReadRoots []string) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, port.HookRunner) {
+func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager, skillReadRoots []string, skillIdx skillIndex) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, port.HookRunner) {
 	// A single hooks runner shared by the supervisor and the member coordination
 	// tools. hookexec.New(nil) matches buildEngine's default: the configured-hook map
 	// is not yet wired from cfg anywhere, so this is an inert (no-op) runner today,
@@ -2380,9 +2605,9 @@ func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry,
 	// Resolve the agent-definition registry ONCE and share it with the member
 	// factory, exactly as buildCatalog shares it with the Subagent tool — ONE registry,
 	// TWO consumers. A member whose spec.AgentType names a def adopts that def's
-	// scoped catalog/model/prompt/permissionMode.
+	// scoped catalog/model/prompt/permissionMode. skillIdx is the build-once
+	// preload index threaded from the skills seam (catalog assets / Build).
 	agentReg := resolveAgentRegistry(ctx, cfg)
-	skillIdx := resolveSkillIndex(ctx, cfg)
 	// fk (force-copy) for mutating members; roFk (worktree default) for read-only
 	// members the factory grants a shell. Read-only members run git in the shared
 	// .git of a worktree, so they get the SANDBOXED runner; the main session keeps its
@@ -2402,7 +2627,7 @@ func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry,
 // SAME wiring the Team tool uses (buildCatalog) — so the gRPC CreateTeam path and the
 // Team tool cannot drift. MaxTeams is left at zero so the server applies its own
 // default.
-func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, provider port.LLMProvider, mainMgr *mcp.Manager, skillReadRoots []string) {
+func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, provider port.LLMProvider, mainMgr *mcp.Manager, skillReadRoots []string, skillIdx skillIndex) {
 	if !cfg.EnableTeams {
 		cfg.diag().Log(context.Background(), port.LevelInfo, "agent teams DISABLED (set --enable-teams to enable; experimental)")
 		return
@@ -2411,7 +2636,7 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, p
 	// DEFAULT provider as the inherited parent (reg.Default()/cfg.Model). Per-session
 	// provider propagation to the standalone CreateTeam RPC is DEFERRED (CreateTeam
 	// carries no selector today); the in-catalog Team tool IS covered in Half B.
-	factory, fk, roFk, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr, skillReadRoots)
+	factory, fk, roFk, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr, skillReadRoots, skillIdx)
 	svcCfg.MemberEngine = factory
 	svcCfg.Forker = fk
 	svcCfg.ReadOnlyForker = roFk

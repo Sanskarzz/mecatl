@@ -108,7 +108,7 @@ func TestUntrustedWorkspaceWithholdsProjectSkillsKeepsUser(t *testing.T) {
 	writeSkill(t, filepath.Join(ws, ".claude", "skills"), "repo-skill", "from the repo", "REPO BODY")
 	writeSkill(t, filepath.Join(xdg, "mecatl", "skills"), "user-skill", "my own", "USER BODY")
 
-	discUntrusted := resolveSkills(context.Background(), Config{
+	discUntrusted := resolveSkillsForTest(t, Config{
 		Workspace:          ws,
 		SkillsConventional: true,
 		TrustProject:       false,
@@ -120,7 +120,7 @@ func TestUntrustedWorkspaceWithholdsProjectSkillsKeepsUser(t *testing.T) {
 		t.Error("untrusted workspace dropped the USER-tier skill (over-gating; must stay active)")
 	}
 
-	discTrusted := resolveSkills(context.Background(), Config{
+	discTrusted := resolveSkillsForTest(t, Config{
 		Workspace:          ws,
 		SkillsConventional: true,
 		TrustProject:       true,
@@ -224,7 +224,7 @@ func TestUntrustedWorkspaceStillUsable(t *testing.T) {
 	}
 
 	// Skills: project withheld, user active.
-	disc := resolveSkills(context.Background(), cfg)
+	disc := resolveSkillsForTest(t, cfg)
 	if skillsContain(disc, "proj-skill") {
 		t.Error("untrusted: project skill leaked")
 	}
@@ -276,7 +276,7 @@ func TestResolveSkillIndexUntrustedDropsProjectSkill(t *testing.T) {
 	writeSkill(t, filepath.Join(xdg, "mecatl", "skills"), "user", "my own", "USER BODY")
 
 	// Untrusted: project skill absent from the preload index, user skill present.
-	idxUntrusted := resolveSkillIndex(context.Background(), Config{
+	idxUntrusted := resolveSkillIndexForTest(t, Config{
 		Workspace:          ws,
 		SkillsConventional: true,
 		TrustProject:       false,
@@ -289,7 +289,7 @@ func TestResolveSkillIndexUntrustedDropsProjectSkill(t *testing.T) {
 	}
 
 	// Trusted: both present.
-	idxTrusted := resolveSkillIndex(context.Background(), Config{
+	idxTrusted := resolveSkillIndexForTest(t, Config{
 		Workspace:          ws,
 		SkillsConventional: true,
 		TrustProject:       true,

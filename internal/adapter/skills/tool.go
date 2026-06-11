@@ -3,13 +3,11 @@ package skills
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
-	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/toolkit"
 )
 
@@ -45,12 +43,17 @@ Available skills:`
 
 // Tool is the single model-facing skills tool. Its Spec().Description enumerates
 // every discovered skill's metadata (the always-in-context layer); Execute
-// returns a single skill's full body (the load-on-activation layer). It is
-// read-only — it returns instructions and mutates nothing — so the dispatcher may
-// run it in parallel with other reads and it remains available in plan mode.
+// loads a single skill's full body through the Activator seam (the
+// load-on-activation layer). It is read-only — it returns instructions and
+// mutates nothing — so the dispatcher may run it in parallel with other reads
+// and it remains available in plan mode.
 type Tool struct {
-	// byName indexes skills by their activation name for O(1) Execute lookup.
-	byName map[string]Skill
+	// byName indexes skill metadata by activation name for O(1) Execute lookup.
+	byName map[string]tool.SkillMeta
+	// act loads a skill's body + base directory on activation. The metadata
+	// layer above is path-free; WHERE the body/payloads come from is entirely
+	// the activator's business (FS snapshot in place, or driver materialization).
+	act Activator
 	// description is the precomputed, cache-stable tool description: the static
 	// preamble plus the enumerated skill metadata.
 	description string
@@ -59,17 +62,19 @@ type Tool struct {
 // Compile-time assertion that Tool implements tool.Tool.
 var _ tool.Tool = Tool{}
 
-// NewTool builds the Skill tool over the given discovered skills. The skills are
-// indexed by name and their metadata is rendered into the tool description once,
-// at construction, so Spec() is allocation-free per call. Callers should not pass
-// an empty slice — the composition root omits the tool entirely when no skills
-// are discovered (see Register); NewTool with no skills yields a tool whose
-// Execute always reports "no skills available".
-func NewTool(discovered []Skill) Tool {
-	byName := make(map[string]Skill, len(discovered))
+// NewTool builds the Skill tool over the given skill metadata and activator.
+// The metadata is indexed by name and rendered into the tool description once,
+// at construction, so Spec() is allocation-free per call — byte-identical to
+// the pre-seam rendering (preamble + "\n- <name>: <description>" per skill,
+// name-sorted). Callers should not pass an empty slice — the composition root
+// omits the tool entirely when no skills are discovered (see RegisterSource);
+// NewTool with no skills yields a tool whose Execute always reports "no skills
+// available".
+func NewTool(metas []tool.SkillMeta, act Activator) Tool {
+	byName := make(map[string]tool.SkillMeta, len(metas))
 	// Copy + sort by name so the description ordering is deterministic regardless
 	// of the input slice's order.
-	sorted := append([]Skill(nil), discovered...)
+	sorted := append([]tool.SkillMeta(nil), metas...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 
 	var b strings.Builder
@@ -81,7 +86,7 @@ func NewTool(discovered []Skill) Tool {
 		byName[s.Name] = s
 		fmt.Fprintf(&b, "\n- %s: %s", s.Name, s.Description)
 	}
-	return Tool{byName: byName, description: b.String()}
+	return Tool{byName: byName, act: act, description: b.String()}
 }
 
 // skillArgs is the JSON argument shape for the Skill tool.
@@ -117,12 +122,17 @@ func (Tool) ReadOnly() bool { return true }
 // assets/) live under that directory, which may be OUTSIDE the workspace
 // (~/.claude/skills/…), and without the path in the result the model can only
 // guess (and the workspace then refuses the guess). The composition root opens
-// every production Workspace with exactly these per-skill directories as
-// read-only allowed roots (osfs.WithReadRoots), so the absolute path the header
-// advertises is readable by construction. An unknown (or empty) name is a
-// model-addressable error result that lists the available skill names so the
-// model can recover, NOT a harness-level error.
-func (t Tool) Execute(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+// every production Workspace with exactly the activator-derived directories as
+// read-only allowed roots (osfs.WithReadRoots) — the FS source's per-skill dirs
+// or the driver asset cache — so the absolute path the header advertises is
+// readable by construction. The body + base directory load through the
+// Activator seam; the rendering is byte-identical to the pre-seam form for FS
+// skills, and a BaseDir of "" (no payloads) omits the Base-directory block. An
+// unknown (or empty) name is a model-addressable error result that lists the
+// available skill names so the model can recover, NOT a harness-level error —
+// and so is a failed activation (e.g. a driver bundle over the cap), naming
+// the skill and the available alternatives.
+func (t Tool) Execute(ctx context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
 	var args skillArgs
 	if msg, ok := toolkit.ParseArgs(in, &args); !ok {
 		return session.NewToolError(in.ID, msg), nil
@@ -136,33 +146,24 @@ func (t Tool) Execute(_ context.Context, in session.ToolCall, _ tool.Workspace) 
 		return session.NewToolError(in.ID,
 			fmt.Sprintf("unknown skill %q; %s", name, t.availableHint())), nil
 	}
+	if t.act == nil {
+		return session.NewToolError(in.ID,
+			fmt.Sprintf("skill %q cannot be activated (no activator wired); %s", name, t.availableHint())), nil
+	}
+	act, err := t.act.Activate(ctx, name)
+	if err != nil {
+		return session.NewToolError(in.ID,
+			fmt.Sprintf("activating skill %q failed: %v; %s", name, err, t.availableHint())), nil
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Skill: %s\n", sk.Name)
-	if dir := skillBaseDir(sk.Path); dir != "" {
+	if dir := act.BaseDir; dir != "" {
 		fmt.Fprintf(&b, "Base directory: %s\n", dir)
 		b.WriteString("Bundled files (references/, scripts/, assets/) live under the base directory; read them with the Read tool by absolute path, and run bundled scripts via Bash with their absolute path.\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(sk.Body)
+	b.WriteString(act.Body)
 	return session.NewToolResult(in.ID, toolkit.Truncate(b.String(), toolkit.MaxOutputBytes)), nil
-}
-
-// skillBaseDir returns the CANONICAL directory containing the skill's SKILL.md,
-// or "" when the skill has no source path (hand-constructed test values).
-// Canonicalization goes through osfs.ResolveRoot — the EXACT resolver the
-// Workspace's read-root allowlist is keyed on — so the path the model is told
-// matches the allowlist byte-for-byte even when the discovery path crosses a
-// symlink (e.g. /home → /var/home); a cleaned-but-unresolved Dir would advertise
-// a path the workspace then refuses, reintroducing the bug for symlinked homes.
-func skillBaseDir(path string) string {
-	if path == "" {
-		return ""
-	}
-	dir := filepath.Dir(path)
-	if resolved, err := osfs.ResolveRoot(dir); err == nil {
-		return resolved
-	}
-	return filepath.Clean(dir)
 }
 
 // availableHint returns a short "available skills are: ..." sentence (or a clear
@@ -190,7 +191,9 @@ func (t Tool) availableHint() string {
 // src is the EXTENSIBILITY POINT: pass a single DirSource for one directory, or a
 // MultiSource (built via ResolveSources + NewMultiSource) to aggregate the
 // conventional locations and explicit paths with precedence. The consumer here is
-// agnostic to where skills come from.
+// agnostic to where skills come from. It is re-expressed over the seam pieces
+// (NewFSSource snapshot + NewSnapshotActivator), so a directly-registered tool
+// renders byte-identically to the composition-assembled one.
 //
 // Skills are OPT-IN and the tool is registered ONLY when there is something to
 // expose: if src yields zero valid skills, RegisterSource registers NOTHING and
@@ -198,14 +201,16 @@ func (t Tool) availableHint() string {
 // an empty inventory. The composition root logs the skip diagnostics and the
 // enabled/disabled state.
 func RegisterSource(ctx context.Context, cat *tool.Catalog, src Source) ([]Skill, []SkipError, error) {
-	discovered, skips, err := src.Skills(ctx)
+	fsSrc, skips, err := NewFSSource(ctx, src)
 	if err != nil {
 		return nil, skips, err
 	}
+	discovered := fsSrc.Discovered()
 	if len(discovered) == 0 {
 		return nil, skips, nil
 	}
-	if err := cat.Register(NewTool(discovered)); err != nil {
+	metas, _ := fsSrc.ListSkills(ctx) // snapshot read; never errors
+	if err := cat.Register(NewTool(metas, NewSnapshotActivator(fsSrc))); err != nil {
 		return discovered, skips, err
 	}
 	return discovered, skips, nil

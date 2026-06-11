@@ -1,6 +1,7 @@
 package grpcdriver
 
 import (
+	"context"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -8,8 +9,10 @@ import (
 	driverv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/driver/v1"
 	"github.com/stacklok/mecatl/engine/adapter/memconformance"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
+	"github.com/stacklok/mecatl/engine/adapter/sourceconformance"
 	"github.com/stacklok/mecatl/engine/adapter/storeconformance"
 	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
 )
@@ -43,5 +46,39 @@ func TestGRPCMemoryStoreConformance(t *testing.T) {
 			driverv1.RegisterMemoryStoreServiceServer(gs, NewMemoryStoreServer(backend))
 		})
 		return NewMemoryStore(conn)
+	})
+}
+
+// TestGRPCSkillSourceConformance runs the shared SkillSource conformance
+// table over grpcdriver → bufconn → NewSkillSourceServer(FixtureSource): the
+// same canonical fixture the in-memory reference and the FS source answer
+// for, now over the full client → wire → server-wrapper path (which also
+// exercises the server's logical-name pre-validation — the client does NOT
+// pre-validate, so the invalid-name subtest hits the wire).
+func TestGRPCSkillSourceConformance(t *testing.T) {
+	sourceconformance.RunSkillSource(t, func(t *testing.T) tool.SkillSource {
+		conn := dialBufconn(t, func(gs *grpc.Server) {
+			driverv1.RegisterSkillSourceServiceServer(gs, NewSkillSourceServer(sourceconformance.NewFixtureSource()))
+		})
+		return NewSkillSource(conn)
+	})
+}
+
+// soulBodyFunc adapts a fixed body to prompt.SoulSource for the wire fixture.
+// It returns the body VERBATIM (no trimming/validation server-side), so the
+// conformance run proves the CLIENT's re-validation upholds the fail-soft
+// discipline — a driver is never trusted to sanitize.
+type soulBodyFunc string
+
+func (b soulBodyFunc) Load(context.Context) (string, error) { return string(b), nil }
+
+// TestGRPCSoulSourceConformance runs the shared SoulSource conformance table
+// over grpcdriver → bufconn → NewSoulSourceServer(verbatim fake).
+func TestGRPCSoulSourceConformance(t *testing.T) {
+	sourceconformance.RunSoulSource(t, func(t *testing.T, body string) prompt.SoulSource {
+		conn := dialBufconn(t, func(gs *grpc.Server) {
+			driverv1.RegisterSoulSourceServiceServer(gs, NewSoulSourceServer(soulBodyFunc(body)))
+		})
+		return NewSoulSource(conn, SoulOptions{})
 	})
 }

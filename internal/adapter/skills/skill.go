@@ -39,6 +39,8 @@
 // deferred wrap point for the command-execution seam.
 package skills
 
+import "github.com/stacklok/mecatl/engine/tool"
+
 // Skill is a pure value object: one discovered skill's metadata and body. It
 // carries no behaviour and no infrastructure types, so it is safe to construct
 // in tests and to pass across the adapter boundary.
@@ -55,6 +57,16 @@ type Skill struct {
 	// instructions that load on activation.
 	Body string
 	// Path is the source SKILL.md path the skill was discovered at, retained for
-	// diagnostics and so a reviewer can trace a skill back to its file.
+	// diagnostics and so a reviewer can trace a skill back to its file. It is
+	// ADAPTER-PRIVATE state: it never crosses the tool.SkillSource port (which
+	// carries logical bundles only — no path/dir/root concept); the path business
+	// it feeds (FSSource.AssetDir/AssetDirs) is adapter-public NON-PORT API
+	// consumed only by the composition layer and the same-package snapshot
+	// activator.
 	Path string
+	// Origin is the admission TIER the skill entered through (explicit flag,
+	// project tier, user tier, remote driver) — a closed tool.SkillOrigin label,
+	// never a location. DirSource stamps it from its Tier; ResolveSources sets
+	// the tiers. It backs SkillMeta.Origin on the port.
+	Origin tool.SkillOrigin
 }

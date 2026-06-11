@@ -8,6 +8,8 @@ import (
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/engine/tool"
+	"github.com/stacklok/mecatl/internal/adapter/grpcdriver"
+	"github.com/stacklok/mecatl/internal/adapter/hashutil"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/soul"
@@ -71,6 +73,13 @@ const (
 	// soulProject means the selected soul is the project-scoped
 	// <workspace>/.mecatl/soul.md (only selected when --trust-project is set).
 	soulProject
+	// soulDriver means the selected soul came from a remote soul-source driver
+	// (--soul-source-url, Phase C1). Operator-configured infrastructure: it
+	// occupies the USER slot in the precedence and is always trusted; the drift
+	// baseline is SKIPPED for it (sidecar-file machinery — the driver sits
+	// behind the operator's own auth), so --soul-strict/--approve-soul are
+	// no-ops for this provenance.
+	soulDriver
 )
 
 func (p soulProvenance) String() string {
@@ -79,6 +88,8 @@ func (p soulProvenance) String() string {
 		return "user"
 	case soulProject:
 		return "project"
+	case soulDriver:
+		return "driver"
 	default:
 		return "none"
 	}
@@ -238,35 +249,48 @@ func selectSoulSource(cfg Config, io baselineIO, gate soulGate) (prompt.SoulSour
 		}
 	}
 
-	// USER candidate first (always trusted). An explicit --soul-file is a user-scoped
-	// override of the conventional path; either way it is the operator's own file.
-	userStore := soul.NewWithEnv(soul.Options{Path: cfg.SoulPath, Diagnostics: cfg.diag()}, soulEnv)
-	userRes, _ := userStore.LoadWithMeta(context.Background())
-	if userRes.Body != "" {
-		// USER-WINS: a present user soul is selected; the project soul is ignored.
-		if cfg.SoulPath != "" {
-			cfg.diag().Log(context.Background(), port.LevelInfo, "soul ENABLED (user provenance, read-only persona); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)", "path", cfg.SoulPath)
-		} else {
-			cfg.diag().Log(context.Background(), port.LevelInfo, "soul ENABLED (user provenance, read-only persona); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)",
-				"path", "conventional <xdg>/mecatl/soul.md")
+	// USER-slot candidate first (always trusted). The remote DRIVER (Phase C1,
+	// --soul-source-url) OCCUPIES the user slot when configured — mutually
+	// exclusive with --soul-file (validateDriverConfig), and the conventional
+	// user file is NOT consulted (one user-slot source, never two). Otherwise
+	// the user file: an explicit --soul-file is a user-scoped override of the
+	// conventional path; either way it is the operator's own file.
+	if cfg.SoulSourceURL != "" {
+		if src, meta, selected := selectDriverSoul(cfg); selected {
+			return src, meta
 		}
-		drifted := checkSoulDrift(cfg.diag(), io, userStore.ResolvedPath(), userRes.SHA256, cfg.ApproveSoul)
-		if drifted && cfg.SoulStrict {
-			cfg.diag().Log(context.Background(), port.LevelWarn, "soul: drifted persona refused (--soul-strict); no soul fragment this run",
-				"path", userStore.ResolvedPath(), "provenance", soulUser.String())
-			return nil, soulMeta{}
-		}
-		return userStore, soulMeta{
-			Present:    true,
-			Provenance: soulUser,
-			Trusted:    true,
-			Drifted:    drifted,
-			SHA256:     userRes.SHA256,
-			Size:       userRes.Size,
+		// No usable driver persona (or an unreachable driver on a non-probed
+		// test/legacy path — Build's probe is the FATAL gate): like "no user
+		// soul", consider the project soul below.
+	} else {
+		userStore := soul.NewWithEnv(soul.Options{Path: cfg.SoulPath, Diagnostics: cfg.diag()}, soulEnv)
+		userRes, _ := userStore.LoadWithMeta(context.Background())
+		if userRes.Body != "" {
+			// USER-WINS: a present user soul is selected; the project soul is ignored.
+			if cfg.SoulPath != "" {
+				cfg.diag().Log(context.Background(), port.LevelInfo, "soul ENABLED (user provenance, read-only persona); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)", "path", cfg.SoulPath)
+			} else {
+				cfg.diag().Log(context.Background(), port.LevelInfo, "soul ENABLED (user provenance, read-only persona); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)",
+					"path", "conventional <xdg>/mecatl/soul.md")
+			}
+			drifted := checkSoulDrift(cfg.diag(), io, userStore.ResolvedPath(), userRes.SHA256, cfg.ApproveSoul)
+			if drifted && cfg.SoulStrict {
+				cfg.diag().Log(context.Background(), port.LevelWarn, "soul: drifted persona refused (--soul-strict); no soul fragment this run",
+					"path", userStore.ResolvedPath(), "provenance", soulUser.String())
+				return nil, soulMeta{}
+			}
+			return userStore, soulMeta{
+				Present:    true,
+				Provenance: soulUser,
+				Trusted:    true,
+				Drifted:    drifted,
+				SHA256:     userRes.SHA256,
+				Size:       userRes.Size,
+			}
 		}
 	}
 
-	// No user soul. Consider the PROJECT soul: <workspace>/.mecatl/soul.md.
+	// No user-slot soul. Consider the PROJECT soul: <workspace>/.mecatl/soul.md.
 	// Resolution is per the build-time cfg.Workspace (the single-workspace embedded
 	// server). An empty workspace means there is no project soul to discover.
 	if cfg.Workspace == "" {
@@ -306,4 +330,48 @@ func selectSoulSource(cfg Config, io baselineIO, gate soulGate) (prompt.SoulSour
 		SHA256:     projRes.SHA256,
 		Size:       projRes.Size,
 	}
+}
+
+// selectDriverSoul resolves the USER-slot DRIVER candidate (--soul-source-url,
+// Phase C1): dial through the build-scoped conn cache (Build's probe already
+// owns the once-guarded close), load + re-validate the body through the
+// grpcdriver client (which applies the full soul.ValidateBody discipline —
+// a driver is never trusted to sanitize), and select it when usable.
+//
+//   - Provenance soulDriver, Trusted true: the driver is operator-configured
+//     infrastructure (the Phase-B trust tier), exactly like the operator's own
+//     user file.
+//   - Drift baseline SKIPPED: the baseline is sidecar-FILE machinery keyed on
+//     a local path; the driver sits behind the operator's own auth. One INFO
+//     line records the skip; --soul-strict/--approve-soul are documented
+//     no-ops for this provenance.
+//   - selected=false (a dial fault on a non-probed path, or an
+//     empty/rejected body) falls through to the PROJECT soul — the same
+//     precedence as an absent user soul. Fail-soft, never an error.
+func selectDriverSoul(cfg Config) (prompt.SoulSource, soulMeta, bool) {
+	conn, _, err := cfg.drivers().dial(cfg, cfg.SoulSourceURL)
+	if err != nil {
+		cfg.diag().Log(context.Background(), port.LevelWarn, "soul: dialing the soul-source driver failed; no driver soul this run",
+			"target", cfg.SoulSourceURL, "err", err)
+		return nil, soulMeta{}, false
+	}
+	src := grpcdriver.NewSoulSource(conn, grpcdriver.SoulOptions{Diagnostics: cfg.diag()})
+	// Load once for presence + the snapshot hash/size (the client logs its own
+	// fail-soft WARN on a runtime fault and re-validates the body).
+	body, _ := src.Load(context.Background())
+	if body == "" {
+		cfg.diag().Log(context.Background(), port.LevelInfo, "soul: the soul-source driver serves no usable persona; considering a project soul (fail-soft)",
+			"target", cfg.SoulSourceURL)
+		return nil, soulMeta{}, false
+	}
+	cfg.diag().Log(context.Background(), port.LevelInfo, "soul ENABLED (driver provenance, read-only persona); permission: soul:apply allow (built-in default, overridable to ask/deny via settings)",
+		"target", cfg.SoulSourceURL)
+	cfg.diag().Log(context.Background(), port.LevelInfo, "soul: drift baseline SKIPPED for driver provenance (--soul-strict/--approve-soul are no-ops; the driver is operator-run infrastructure behind its own auth)")
+	return src, soulMeta{
+		Present:    true,
+		Provenance: soulDriver,
+		Trusted:    true,
+		SHA256:     hashutil.SHA256Hex([]byte(body)),
+		Size:       len(body),
+	}, true
 }

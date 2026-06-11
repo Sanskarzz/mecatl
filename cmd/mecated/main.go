@@ -166,6 +166,8 @@ type config struct {
 	// is unset (mirroring --auth-token / MECATL_AUTH_TOKEN).
 	sessionStoreURL string
 	memoryStoreURL  string
+	skillSourceURL  string
+	soulSourceURL   string
 	driverAuthToken string
 	driverTLS       bool
 	driverTLSCA     string
@@ -662,6 +664,8 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		MemoryConsolidateInterval:    cfg.memoryConsolidateInterval,
 		SessionStoreURL:              cfg.sessionStoreURL,
 		MemoryStoreURL:               cfg.memoryStoreURL,
+		SkillSourceURL:               cfg.skillSourceURL,
+		SoulSourceURL:                cfg.soulSourceURL,
 		DriverAuthToken:              cfg.driverAuthToken,
 		DriverTLS:                    cfg.driverTLS,
 		DriverTLSCA:                  cfg.driverTLSCA,
@@ -786,6 +790,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.driverTLSKey, "driver-tls-key", "", "PEM client private key (paired with --driver-tls-cert)")
 
 	fs.StringVar(&cfg.soulFile, "soul-file", "", "path to a user-scoped, agent-READ-ONLY persona/\"soul\" file injected as turn-0 context (empty = the conventional $XDG_CONFIG_HOME/mecatl/soul.md, fallback ~/.config/mecatl/soul.md). Fail-soft: a missing/empty/oversized/injection-flagged file degrades to no fragment, never an error. No tool can write it")
+	fs.StringVar(&cfg.soulSourceURL, "soul-source-url", "", "host:port of a remote soul-source gRPC driver (mecatl.driver.v1.SoulSourceService); occupies the USER slot of the soul selection, so it is mutually exclusive with --soul-file (--no-soul still wins). Probed at startup (fatal if unreachable); runtime faults degrade fail-soft to no fragment. The body is RE-VALIDATED locally (byte cap, injection scan, fence integrity); the drift baseline is SKIPPED for driver souls (--soul-strict/--approve-soul are no-ops for this provenance). Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 	fs.BoolVar(&cfg.noSoul, "no-soul", false, "disable the user-scoped persona/soul fragment entirely (otherwise it is read from the conventional location, fail-soft if absent)")
 	fs.BoolVar(&cfg.approveSoul, "approve-soul", false, "(re)write the soul DRIFT BASELINE to the current soul's content hash, accepting the file as-is. The baseline is a harness-owned sidecar next to the soul (<soul-path>.sha256); a later run whose hash differs logs a drift WARN. Use this once after intentionally editing your soul")
 	fs.BoolVar(&cfg.soulStrict, "soul-strict", false, "refuse a DRIFTED soul: if the soul's content hash differs from the recorded baseline, contribute NO soul fragment this run (instead of the default warn-and-load). Pair with --approve-soul to accept an edit")
@@ -798,6 +803,7 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.Var(&cfg.skillsDirs, "skills-dir", "directory to discover progressive-disclosure skills from, laid out as <name>/SKILL.md (repeatable; highest precedence); empty disables the Skill tool unless --skills-conventional is set. TRUST BOUNDARY: a SKILL.md steers the model like AGENTS.md/CLAUDE.md — point this only at directories you trust")
 	fs.BoolVar(&cfg.skillsConventional, "skills-conventional", false, "also discover skills from the conventional locations: <workspace>/"+skills.ProjectDirMecatl+", <workspace>/"+skills.ProjectDirClaude+", $XDG_CONFIG_HOME/mecatl/skills (or ~/.config/mecatl/skills), and ~/.claude/skills (lower precedence than --skills-dir). Default OFF — opt in only for trusted locations (same trust class as AGENTS.md/CLAUDE.md)")
+	fs.StringVar(&cfg.skillSourceURL, "skill-source-url", "", "host:port of a remote skill-source gRPC driver (mecatl.driver.v1.SkillSourceService); replaces local skills discovery, so it is mutually exclusive with --skills-dir/--skills-conventional. The driver's skill set is snapshotted at startup (fatal if unreachable); bundled files materialize lazily into a temporary asset cache on a skill's first activation (removed on shutdown). TRUST BOUNDARY: a driver-served SKILL.md steers the model like AGENTS.md/CLAUDE.md — point this only at a driver you trust. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 
 	fs.StringVar(&cfg.skillsDraftDir, "skills-draft-dir", "", "enable the writable SkillDraft tool and set the QUARANTINE directory for model-authored candidate skills. Empty disables the tool. TRUST BOUNDARY: must be OUTSIDE the workspace root (so the model's workspace-confined Write/Edit cannot reach it; fatal otherwise) and disjoint from every --skills-dir (fatal on overlap). Drafts are quarantined (never live); an operator reviews and promotes one with `mecated skills promote --skills-draft-dir <dir> --skills-dir <active> <name>`")
 	fs.Float64Var(&cfg.skillsDraftThreshold, "skills-draft-similarity-threshold", skills.DefaultSimilarityThreshold, "2-gram Jaccard similarity above which a SkillDraft warns of a near-duplicate existing skill (warn-only, does not block)")

@@ -1132,6 +1132,11 @@ enum SoulProvenance {
   // SOUL_PROVENANCE_PROJECT is the project-scoped <workspace>/.mecatl/soul.md
   // (selected only with --trust-project).
   SOUL_PROVENANCE_PROJECT = 2;
+  // SOUL_PROVENANCE_DRIVER is a remote soul-source driver (--soul-source-url;
+  // mecatl.driver.v1.SoulSourceService). Operator-configured infrastructure:
+  // it occupies the USER slot in the selection precedence and is always
+  // trusted. Client-inspection only, NOT model-facing.
+  SOUL_PROVENANCE_DRIVER = 3;
 }
 
 // SoulInfo is the BUILD-TIME SNAPSHOT of the resolved soul: the selected soul's

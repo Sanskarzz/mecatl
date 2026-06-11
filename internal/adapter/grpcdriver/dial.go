@@ -65,8 +65,9 @@ func WithTLS(o TLSOptions) Option {
 
 // Dial connects to a store driver at target ("host:port") per opts. The
 // connection is LAZY (grpc.NewClient): the first RPC surfaces a connect
-// error. Plaintext is the loopback single-user default; a bearer token to a
-// non-loopback target requires WithTLS.
+// error. Plaintext is the LOCAL single-user default (loopback hosts and unix
+// sockets); ANY other target requires WithTLS — token or not (see the
+// cleartext refusal in dialOptions).
 func Dial(target string, opts ...Option) (*grpc.ClientConn, error) {
 	var cfg dialConfig
 	for _, o := range opts {
@@ -95,15 +96,19 @@ func dialOptions(target string, cfg dialConfig) ([]grpc.DialOption, error) {
 		grpc.MaxCallSendMsgSize(MaxSnapshotBytes),
 	)}
 
-	loopback := isLoopbackHost(target)
+	local := isLoopbackHost(target) || isUnixTarget(target)
 
-	// Refuse to leak a bearer token in cleartext to a non-loopback driver. The
-	// per-RPC credential's RequireTransportSecurity() also blocks this at send
-	// time, but a hard pre-dial guard gives the operator a clear, actionable
-	// error instead of an opaque RPC failure later.
-	if cfg.token != "" && !cfg.useTLS && !loopback {
+	// Refuse CLEARTEXT to any non-local driver ENTIRELY — token or not. A
+	// driver delivers session payloads, memories, model-steering skill bodies,
+	// and 0o755-materialized executables: an on-path attacker over a cleartext
+	// remote link would gain driver-equivalent capability regardless of auth.
+	// (This deliberately supersedes the earlier token-only rule for every
+	// driver seam.) The bearer credential's RequireTransportSecurity() remains
+	// the belt at send time; this hard pre-dial guard gives the operator a
+	// clear, actionable error instead of an opaque RPC failure later.
+	if !cfg.useTLS && !local {
 		return nil, fmt.Errorf(
-			"grpcdriver: refusing to send auth token in cleartext to non-loopback %q: enable driver TLS", target)
+			"grpcdriver: refusing CLEARTEXT to non-loopback driver %q: drivers carry session payloads, memory, model instructions, and executable skill assets — enable driver TLS (--driver-tls)", target)
 	}
 
 	if cfg.useTLS {
@@ -129,10 +134,10 @@ func dialOptions(target string, cfg dialConfig) ([]grpc.DialOption, error) {
 
 	if cfg.token != "" {
 		// The credential requires transport security UNLESS the target is
-		// loopback (the documented plaintext single-user default). For any
-		// non-loopback target it demands TLS even if the guard above were
-		// bypassed, so the token can never ride a cleartext wire.
-		opts = append(opts, grpc.WithPerRPCCredentials(bearerCreds{token: cfg.token, allowInsecure: loopback}))
+		// local (the documented plaintext single-user default). For any other
+		// target it demands TLS even if the guard above were bypassed, so the
+		// token can never ride a cleartext wire.
+		opts = append(opts, grpc.WithPerRPCCredentials(bearerCreds{token: cfg.token, allowInsecure: local}))
 	}
 	return opts, nil
 }
@@ -169,10 +174,17 @@ func (b bearerCreds) GetRequestMetadata(_ context.Context, _ ...string) (map[str
 // non-loopback target).
 func (b bearerCreds) RequireTransportSecurity() bool { return !b.allowInsecure }
 
+// isUnixTarget reports whether target names a unix-domain socket (the grpc
+// "unix:"/"unix-abstract:" target schemes) — a same-host transport that, like
+// loopback, may legitimately ride without TLS.
+func isUnixTarget(target string) bool {
+	return strings.HasPrefix(target, "unix:") || strings.HasPrefix(target, "unix-abstract:")
+}
+
 // isLoopbackHost reports whether the host part of a "host:port" (or bare
 // host) target is loopback: an IP in 127.0.0.0/8, ::1, or the name
 // "localhost". A target with no resolvable/parseable host is treated as
-// NON-loopback (fail safe — we'd rather demand TLS than leak a token).
+// NON-loopback (fail safe — we'd rather demand TLS than dial cleartext).
 func isLoopbackHost(server string) bool {
 	host := server
 	if h, _, err := net.SplitHostPort(server); err == nil {

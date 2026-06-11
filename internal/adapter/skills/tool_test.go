@@ -42,7 +42,7 @@ func exec(t *testing.T, tl tool.Tool, in session.ToolCall) session.ToolResult {
 }
 
 func TestToolSpecEnumeratesSkills(t *testing.T) {
-	tl := NewTool(sampleSkills())
+	tl := newToolOver(t, sampleSkills())
 	spec := tl.Spec()
 	if spec.Name != ToolName {
 		t.Fatalf("Spec().Name = %q, want %q", spec.Name, ToolName)
@@ -73,7 +73,7 @@ func TestToolSpecEnumeratesSkills(t *testing.T) {
 }
 
 func TestToolExecuteReturnsBody(t *testing.T) {
-	tl := NewTool(sampleSkills())
+	tl := newToolOver(t, sampleSkills())
 	res := exec(t, tl, call(t, map[string]any{"name": "review"}))
 	if res.IsError {
 		t.Fatalf("Execute errored: %s", res.Content)
@@ -104,7 +104,7 @@ func TestToolExecuteRendersBaseDirectory(t *testing.T) {
 	if err != nil || len(skips) != 0 || len(discovered) != 1 {
 		t.Fatalf("discover: %v skips=%v n=%d", err, skips, len(discovered))
 	}
-	tl := NewTool(discovered)
+	tl := newToolOver(t, discovered)
 	res := exec(t, tl, call(t, map[string]any{"name": "with-files"}))
 	if res.IsError {
 		t.Fatalf("Execute errored: %s", res.Content)
@@ -160,7 +160,7 @@ func TestToolExecuteBaseDirectoryResolvesSymlinkAlias(t *testing.T) {
 		t.Fatalf("test setup did not produce a divergent alias: raw %q == resolved %q", rawDir, resolved)
 	}
 
-	tl := NewTool(discovered)
+	tl := newToolOver(t, discovered)
 	res := exec(t, tl, call(t, map[string]any{"name": "aliased"}))
 	if res.IsError {
 		t.Fatalf("Execute errored: %s", res.Content)
@@ -174,7 +174,7 @@ func TestToolExecuteBaseDirectoryResolvesSymlinkAlias(t *testing.T) {
 }
 
 func TestToolExecuteUnknownSkill(t *testing.T) {
-	tl := NewTool(sampleSkills())
+	tl := newToolOver(t, sampleSkills())
 	res := exec(t, tl, call(t, map[string]any{"name": "nope"}))
 	if !res.IsError {
 		t.Fatal("activating an unknown skill must be an error result")
@@ -186,7 +186,7 @@ func TestToolExecuteUnknownSkill(t *testing.T) {
 }
 
 func TestToolExecuteMissingName(t *testing.T) {
-	tl := NewTool(sampleSkills())
+	tl := newToolOver(t, sampleSkills())
 	res := exec(t, tl, call(t, map[string]any{}))
 	if !res.IsError {
 		t.Error("missing name must be an error result")
@@ -194,7 +194,7 @@ func TestToolExecuteMissingName(t *testing.T) {
 }
 
 func TestToolExecuteMalformedArgs(t *testing.T) {
-	tl := NewTool(sampleSkills())
+	tl := newToolOver(t, sampleSkills())
 	res := exec(t, tl, session.NewToolCall("id", ToolName, json.RawMessage("{not json")))
 	if !res.IsError {
 		t.Error("malformed args must be an error result")
@@ -202,7 +202,7 @@ func TestToolExecuteMalformedArgs(t *testing.T) {
 }
 
 func TestToolReadOnlyAvailableInPlanMode(t *testing.T) {
-	tl := NewTool(sampleSkills())
+	tl := newToolOver(t, sampleSkills())
 	if !tl.ReadOnly() {
 		t.Fatal("Skill tool must be read-only")
 	}
@@ -222,7 +222,7 @@ func TestToolReadOnlyAvailableInPlanMode(t *testing.T) {
 }
 
 func TestNewToolEmptyDescription(t *testing.T) {
-	tl := NewTool(nil)
+	tl := newToolOver(t, nil)
 	if !strings.Contains(tl.Spec().Description, "none configured") {
 		t.Errorf("empty skill set should note none configured, got %q", tl.Spec().Description)
 	}
@@ -317,7 +317,7 @@ func TestRegisterSourceOptInAndMerge(t *testing.T) {
 
 func TestToolBodyTruncated(t *testing.T) {
 	big := strings.Repeat("x", 30_000)
-	tl := NewTool([]Skill{{Name: "big", Description: "huge", Body: big}})
+	tl := newToolOver(t, []Skill{{Name: "big", Description: "huge", Body: big}})
 	res := exec(t, tl, call(t, map[string]any{"name": "big"}))
 	if res.IsError {
 		t.Fatalf("Execute errored: %s", res.Content)

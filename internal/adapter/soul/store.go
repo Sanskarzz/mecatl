@@ -35,6 +35,7 @@ package soul
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -213,7 +214,8 @@ func (s *Store) LoadWithMeta(ctx context.Context) (Result, error) {
 	}
 
 	// Read at most maxBytes+1 RAW bytes: enough to DETECT an over-cap file without
-	// buffering more than one byte past the ceiling.
+	// buffering more than one byte past the ceiling (ValidateBody re-checks the
+	// cap on the raw string, so the rejection is identical).
 	raw, err := s.read(path, int64(s.maxBytes)+1)
 	if err != nil {
 		// Missing file is the common case (soul is opt-in-by-presence); a genuine
@@ -222,29 +224,47 @@ func (s *Store) LoadWithMeta(ctx context.Context) (Result, error) {
 		return Result{}, nil
 	}
 
-	if len(raw) > s.maxBytes {
-		s.diag.Log(ctx, port.LevelDebug, "soul: file over byte cap; rejected (not truncated)",
-			"path", path, "bytes_read", len(raw), "max", s.maxBytes)
-		return Result{}, nil
-	}
-
-	body := strings.TrimSpace(string(raw))
-	if body == "" {
-		s.diag.Log(ctx, port.LevelDebug, "soul: file empty or whitespace-only; no soul loaded", "path", path)
-		return Result{}, nil
-	}
-
-	if marker, found := scanForInjection(body); found {
-		s.diag.Log(ctx, port.LevelDebug, "soul: injection marker detected; rejected", "path", path, "marker", marker)
-		return Result{}, nil
-	}
-
-	// Fence-integrity guard: a body containing the literal close-tag could close the
-	// data fence early and smuggle trailing text out of the data zone. Reject it.
-	if strings.Contains(body, soulCloseTag) {
-		s.diag.Log(ctx, port.LevelDebug, "soul: body contains the data-fence close-tag; rejected", "path", path, "tag", soulCloseTag)
+	body, reject := ValidateBody(string(raw), s.maxBytes)
+	if reject != "" {
+		s.diag.Log(ctx, port.LevelDebug, "soul: body rejected; no soul loaded", "path", path, "reason", reject)
 		return Result{}, nil
 	}
 
 	return Result{Body: body, SHA256: hashutil.SHA256Hex([]byte(body)), Size: len(body)}, nil
+}
+
+// ValidateBody is the SINGLE soul-body validation discipline, extracted so
+// every soul source — the local file Store here and the remote-driver client
+// (grpcdriver), which RE-VALIDATES because a driver is never trusted to
+// sanitize — applies byte-identical rules. It returns the clean (trimmed)
+// body and "" on success, or ("", reason) on rejection:
+//   - over the byte cap (maxBytes; <=0 uses DefaultMaxBytes) — REJECTED, not
+//     truncated (a half-truncated persona is worse than none); the cap is
+//     measured on the RAW input, before trimming;
+//   - empty or whitespace-only after trimming;
+//   - an injection-scan hit (scanForInjection);
+//   - a data-fence breakout (the body contains the literal close tag).
+//
+// It is a pure function: no I/O, no logging — callers own the fail-soft
+// posture (log the reason, contribute no fragment, never abort a run).
+func ValidateBody(body string, maxBytes int) (string, string) {
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxBytes
+	}
+	if len(body) > maxBytes {
+		return "", fmt.Sprintf("body is %d bytes, over the %d-byte cap (rejected, not truncated)", len(body), maxBytes)
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return "", "body is empty or whitespace-only"
+	}
+	if marker, found := scanForInjection(body); found {
+		return "", fmt.Sprintf("injection marker detected: %s", marker)
+	}
+	// Fence-integrity guard: a body containing the literal close-tag could close
+	// the data fence early and smuggle trailing text out of the data zone.
+	if strings.Contains(body, soulCloseTag) {
+		return "", fmt.Sprintf("body contains the data-fence close-tag %s", soulCloseTag)
+	}
+	return body, ""
 }

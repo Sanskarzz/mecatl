@@ -33,7 +33,7 @@ func TestResolveSkillIndexAndPreload(t *testing.T) {
 	writeSkill(t, dir, "refactoring", "how to refactor", "REFACTOR PLAYBOOK")
 	writeSkill(t, dir, "testing", "how to test", "TEST PLAYBOOK")
 
-	idx := resolveSkillIndex(context.Background(), Config{SkillsDirs: []string{dir}})
+	idx := resolveSkillIndexForTest(t, Config{SkillsDirs: []string{dir}})
 	if idx == nil || len(idx) != 2 {
 		t.Fatalf("index = %v, want 2 skills", idx)
 	}
@@ -54,7 +54,7 @@ func TestResolveSkillIndexAndPreload(t *testing.T) {
 // TestResolveSkillIndexDisabled asserts no skills dirs => a nil index, and a nil
 // index makes every preload name "missing" (no panic).
 func TestResolveSkillIndexDisabled(t *testing.T) {
-	if idx := resolveSkillIndex(context.Background(), Config{}); idx != nil {
+	if idx := resolveSkillIndexForTest(t, Config{}); idx != nil {
 		t.Fatalf("no skills dirs should yield a nil index, got %v", idx)
 	}
 	def := agents.AgentDef{Name: "x", Skills: []string{"a"}}
@@ -135,7 +135,7 @@ func TestDefHookRunnerNoHooksReturnsFallback(t *testing.T) {
 func TestBuildAgentSubagentEnginesWithSkillsAndHooks(t *testing.T) {
 	dir := t.TempDir()
 	writeSkill(t, dir, "playbook", "a playbook", "PLAYBOOK BODY")
-	idx := resolveSkillIndex(context.Background(), Config{SkillsDirs: []string{dir}})
+	idx := resolveSkillIndexForTest(t, Config{SkillsDirs: []string{dir}})
 
 	reg := agents.NewRegistry([]agents.AgentDef{{
 		Name:        "spec",
