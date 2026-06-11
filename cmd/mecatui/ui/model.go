@@ -427,6 +427,18 @@ type Model struct {
 	stagedMedia map[string]stagedAttachment
 	nextMediaN  int
 
+	// stagedPastes holds LARGE text pastes not yet sent, keyed by their literal
+	// "[Pasted text #N]" marker (which also sits in the textarea text) — the text
+	// twin of stagedMedia, same design: no-live-renumber + expand-at-submit. A
+	// bracketed paste over the staging thresholds (pasteNeedsStaging) inserts only
+	// the marker, so the textarea buffer — which the bubbles textarea re-wraps per
+	// rendered frame — never holds the huge payload (issue #45). submitPrompt and
+	// enqueuePrompt expand surviving markers in place (expandPastePlaceholders);
+	// a deleted marker's content is silently dropped at submit. nextPasteN is its
+	// own monotonic counter (separate numbering from nextMediaN, never reused).
+	stagedPastes map[string]string
+	nextPasteN   int
+
 	// sel is the in-app text-selection state (mouse-drag select + copy over the
 	// conversation viewport). Zero value = inactive. Its coordinates are LOGICAL
 	// content positions (line index + grapheme column into the ansi-stripped line),
@@ -575,6 +587,11 @@ func (m Model) resetSession() Model {
 	// state, and pasted-but-unsent images are part of that compose state.
 	m.stagedMedia = nil
 	m.nextMediaN = 0
+	// Same for staged-but-unsent large text pastes (their markers lived in the
+	// textarea this reset wipes via the caller's input handling — a dangling store
+	// would silently re-attach old pastes to a future marker collision).
+	m.stagedPastes = nil
+	m.nextPasteN = 0
 	// Drop any active text selection: /clear rebuilds the transcript, so a selection
 	// anchored into the old content is stale. The caller's refreshView re-renders
 	// without re-applying it (sel is now inactive), clearing the highlight too.

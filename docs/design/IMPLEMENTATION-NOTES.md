@@ -1901,6 +1901,27 @@ guard, delete `textarea_guard.go`, the two call sites, and this paragraph. The t
 need nothing (textinput is upstream-guarded), but any FUTURE textarea-bearing overlay needs the
 same one-line guard in front of its `textarea.Update`.
 
+**Large-paste placeholder staging + input render memoization** (issue #45, `cmd/mecatui/ui`):
+a bracketed paste ≥ 2000 runes or ≥ 30 lines is staged in `Model.stagedPastes` behind a
+`[Pasted text #N]` placeholder (the text twin of `stagedMedia`'s `[Image #N]`: own monotonic
+`nextPasteN`, no live renumber, deleted marker = silent drop, `/clear` wipes it) and expanded
+in place at `submitPrompt` (before mention/media handling, store cleared past the loud-reject
+returns) or at `enqueuePrompt` (the queue holds FINAL text; the store is textarea-scoped).
+Root cause: bubbles textarea's `View()` re-wraps + SHA-256-keys every logical line per call
+even on its memo hits, and `renderInput` runs ≥ 2× per reduced message — a buffered huge paste
+made every keystroke O(paste). The companion fix memoizes `renderInput` on a single-entry
+STATE-KEYED cache (`renderer.inputKey`: value, cursor row/rowOffset/colOffset, focus,
+width/height — NOT a dirty flag: the textarea has ~30 mutation sites and a missed dirty-set
+would freeze the input). Single-entry correctness: the textarea's un-keyed hidden state
+(internal scroll offset, cursor blink phase — the virtual cursor is STATIC, `cursor.BlinkMsg`
+is never routed to the textarea) changes only alongside a keyed fact in the same reducer step,
+and the relayout chokepoint re-keys every step. Sits beside the streamed-delta coalescing +
+per-block render cache (`docs/tui.md` "Performance" notes). Tests: `paste_large_test.go`
+(staging thresholds/boundary, submit/enqueue expansion, deleted-marker drop, image-marker
+coexistence, overlay gate, /clear, golden `paste_placeholder.golden`, cache hit + edit/cursor/
+focus invalidation) — all three mutation drills verified (threshold branch, submit expansion,
+key comparison).
+
 **First-encounter workspace-trust prompt** (WORKSPACE-TRUST Phase 2c, `cmd/mecatui/trust.go`) is
 a **pre-TUI** prompt in this composition root — NOT in `ui/` (it imports `internal/app`'s
 `ResolveTrust`/`HasProjectAuthority`/`RememberTrust`, allowed here); it gates the embedded server

@@ -334,6 +334,32 @@ none installed, `ctrl+v` reports an install hint. macOS caveat: `pngpaste` reads
 `«class PNGf»` pasteboard flavour, so an image copied from a **Chromium/Electron** app
 (which uses the `public.png` flavour) may not paste as an image and falls back to text.
 
+### Large text pastes
+
+A **large** bracketed paste — **≥ 2000 characters or ≥ 30 lines**, alone or
+**cumulatively** (current input + paste ≥ 2000 characters, so repeated medium pastes
+can't rebuild the lag; only the incoming paste is ever staged, typed text never
+converts) — does not enter the input buffer literally. It is staged behind a
+`[Pasted text #N]` placeholder (the text twin of the `[Image #N]` marker), and the
+full payload expands back **in place** when the prompt is sent — or, mid-run, the
+moment `enter` queues it as a follow-up (the queue always holds final text). Below
+the thresholds a paste is byte-identical to the literal-insert behaviour.
+
+Why: the input widget re-wraps every buffered line on every rendered frame, so a huge
+paste sitting in the buffer made **every subsequent keystroke** pay for the paste
+(issue #45 — multi-second key lag after pasting a big log). The placeholder keeps the
+buffer (and the per-frame input render) small while the prompt still carries the full
+text on the wire.
+
+The marker follows the image-marker conventions: `N` is monotonic and never reused or
+renumbered (its numbering is separate from `[Image #N]`); **deleting the marker from
+the input before sending silently drops that paste**; `/clear` drops any
+staged-but-unsent pastes. `@`-mentions or `[Image #N]` markers *inside* the pasted
+payload behave exactly as if typed — expansion happens before mention/media handling.
+One divergence from a small paste: the placeholder is **appended at the end of the
+input** (like image markers), not inserted at the cursor — a small literal paste is
+cursor-positioned.
+
 ## First-run welcome splash
 
 When the conversation is empty (the zero-state), mecatui shows a centered welcome
@@ -384,7 +410,7 @@ show the plain prompt-hint card.
 | `enter` (idle) | send the prompt |
 | `enter` (while a run streams) | **queue a follow-up** (staged, sent when the turn ends) |
 | `shift+enter` (or `ctrl+j`) | newline in the input |
-| paste (bracketed) | insert clipboard text into the prompt; a single pasted **media-file path** is staged as an attachment instead (ignored while an overlay/modal is open) |
+| paste (bracketed) | insert clipboard text into the prompt; a single pasted **media-file path** is staged as an attachment instead, and a **large** paste (≥ 2000 chars — alone or combined with the current input — or ≥ 30 lines) is staged behind a `[Pasted text #N]` placeholder appended at the end of the input, expanding on send (ignored while an overlay/modal is open) |
 | `ctrl+v` | read the OS clipboard — a clipboard **image** stages as an `[Image #N]` attachment (when supported), else paste clipboard **text** (see below) |
 | `esc` (while a run streams) | clear staged input → else clear the queue → else cancel the in-flight run (sends `Cancel`; waits for the terminal result) |
 | `enter` (idle, **paused queue**, empty input) | resume — send the next staged follow-up |
@@ -754,6 +780,26 @@ cache is output-invisible after every conversation mutator. Both per-block
 caches (`blockCache` and the inner assistant-glamour memo `blockMD`) are dropped
 when the conversation is rebuilt — `/clear` and the `/models` restart-now
 handoff — because a rebuilt transcript reuses block indices.
+
+**Input render memoization.** The INPUT region got the same treatment (issue #45):
+the bubbles textarea's `View()` re-wraps (and SHA-256-keys, even on its internal
+cache hits) every buffered line on every call, and `renderInput` runs at least
+twice per reduced message (the `relayout` chokepoint's `chrome()` plus `View`'s
+`assembleLayout`) — so a big input buffer taxed every streamed-delta frame and
+every keystroke. `renderInput` now memoizes the rendered string on a single-entry
+cache (`renderer.inputKey`/`inputView`) **keyed on state** — the buffer value,
+cursor position (logical row + soft-wrap row/column offsets), focus, and box
+dimensions — rather than dirty-flagged: the textarea is mutated from ~30 ui call
+sites and a missed dirty-set would freeze the input, while the key is
+self-validating. The textarea's only un-keyed state (its internal scroll offset;
+the virtual cursor's blink phase — static in mecatui, since `cursor.BlinkMsg` is
+never routed to the textarea) can change only alongside a keyed fact in the same
+reducer step, and `renderInput` re-keys on every step, so the single entry can
+never serve stale (see `renderInput`'s doc). Paired with the **large-paste
+placeholder staging** (`[Pasted text #N]`, see "Large text pastes" above) that
+keeps the buffer — and thus the key compare — small, this removes the
+paste-induced keystroke lag end to end. Guarded by the `TestRenderInput*` cases
+in `paste_large_test.go` (cache hit, edit/cursor/focus invalidation).
 
 **Spinner tick phase-gate.** The footer spinner's bubbles tick chain is
 self-perpetuating (every `sp.Update` returns the next tick cmd), so the reducer

@@ -1014,6 +1014,16 @@ func (m Model) onPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	if mm, cmd, ok := m.tryPasteMediaPath(msg.Content); ok {
 		return mm, cmd
 	}
+	// A LARGE text paste (>= pasteCharThreshold runes or >= pasteLineThreshold
+	// lines, alone or CUMULATIVELY with the current buffer — see pasteNeedsStaging)
+	// is staged behind a "[Pasted text #N]" placeholder instead of entering the
+	// textarea: the textarea re-wraps every logical line per rendered frame, so a
+	// huge buffered paste makes every subsequent keypress O(paste) (issue #45).
+	// The full text expands back in place at submit/enqueue. Below the thresholds
+	// the literal insert below is byte-identical to the pre-staging behaviour.
+	if pasteNeedsStaging(m.ta.Value(), msg.Content) {
+		return m.stageLargePaste(msg.Content)
+	}
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
 	return m.afterInputEdit(cmd)
@@ -1319,6 +1329,21 @@ func (m Model) enqueuePrompt() (tea.Model, tea.Cmd) {
 		m.statusMsg = m.deps.Theme.Style("muted").Render(fmt.Sprintf("queue full (%d)", maxQueued))
 		return m, nil
 	}
+	// Expand staged large-paste placeholders AT ENQUEUE time (past the cap check,
+	// which keeps the input — and so must keep the store). The queue always holds
+	// FINAL text and the staged store stays textarea-scoped: the input is reset
+	// below, so its markers are gone and the store must not outlive them. A
+	// deleted marker's content is silently dropped (the image-marker UX).
+	if len(m.stagedPastes) > 0 {
+		text = strings.TrimSpace(expandPastePlaceholders(text, m.stagedPastes))
+		m.stagedPastes = nil
+		m.nextPasteN = 0
+		if text == "" {
+			// Every marker was deleted and nothing else was typed: nothing to queue.
+			m.ta.Reset()
+			return m.afterInputEdit(nil)
+		}
+	}
 	m.queued = append(m.queued, text)
 	m.ta.Reset()
 	m.statusMsg = m.deps.Theme.Style("muted").Render(fmt.Sprintf("queued (%d)", len(m.queued)))
@@ -1544,6 +1569,20 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 			return b.run(m)
 		}
 	}
+	// Expand staged large-paste placeholders IN PLACE first, so the mention
+	// expansion and the media reconcile below run on the FINAL text (a pasted
+	// "@path" or "[Image #N]" inside the payload behaves exactly as if typed —
+	// including an "[Image #N]" token embedded in a paste PAYLOAD: the media
+	// reconcile pass below sees it like a typed marker, attaches the staged image
+	// and strips the token from the payload's quoted text; typed-marker semantics,
+	// accepted). The built-in intercept above ran on the RAW value — a placeholder
+	// is never a bare "/command", so it is unaffected. The staged store is cleared
+	// further down, AFTER the loud-reject early returns, so a failed submit keeps
+	// it for retry.
+	hadPastes := len(m.stagedPastes) > 0
+	if hadPastes {
+		text = strings.TrimSpace(expandPastePlaceholders(text, m.stagedPastes))
+	}
 	// Expand any @-mentions that resolve to an existing REGULAR FILE into media
 	// parts (image/audio) and inlined text-file bodies. attachableMentions is the
 	// stat-filter gate: a token that is not a real file (prose like "@oncall", a
@@ -1587,6 +1626,21 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 		media.Descriptors = append(media.Descriptors, desc)
 		text = stripMarker(text, marker)
 	}
+	// Re-check the COMBINED media aggregate (mention parts + clipboard parts):
+	// ExpandMentions capped its own parts, but the clipboard reconciliation appended
+	// more, so a mention-heavy + clipboard-heavy prompt could cross the per-prompt
+	// caps. Loud-reject client-side (keep input, send nothing) exactly like the
+	// mention over-cap path, rather than letting the server reject post-send. This
+	// is the LAST loud-reject, and it runs BEFORE the staged stores are dropped
+	// below, so an aggregate-cap refusal keeps both stores (media AND pastes) for
+	// the retry — the input still holds every marker.
+	if hadStaged {
+		if err := media.CheckAggregateCaps(); err != nil {
+			m.conv.addError("attach: " + err.Error())
+			m.refreshView()
+			return m, nil
+		}
+	}
 	if hadStaged {
 		// Drop the staged set (whether sent or — for deleted markers — discarded);
 		// trim the whole text (stripMarker already removed the stray spaces around
@@ -1595,17 +1649,13 @@ func (m Model) submitPrompt() (tea.Model, tea.Cmd) {
 		m.stagedMedia = nil
 		m.nextMediaN = 0
 	}
-	// Re-check the COMBINED media aggregate (mention parts + clipboard parts):
-	// ExpandMentions capped its own parts, but the clipboard reconciliation appended
-	// more, so a mention-heavy + clipboard-heavy prompt could cross the per-prompt
-	// caps. Loud-reject client-side (keep input, send nothing) exactly like the
-	// mention over-cap path, rather than letting the server reject post-send.
-	if hadStaged {
-		if err := media.CheckAggregateCaps(); err != nil {
-			m.conv.addError("attach: " + err.Error())
-			m.refreshView()
-			return m, nil
-		}
+	if hadPastes {
+		// Drop the staged pastes (expanded above; a deleted marker's content is
+		// silently discarded — the image-marker UX). Past ALL the loud-reject
+		// returns (incl. the aggregate-cap one above), so an aborted submit kept
+		// the store for retry.
+		m.stagedPastes = nil
+		m.nextPasteN = 0
 	}
 	// A media-only prompt (empty text but at least one part) still sends — the proto
 	// allows text OR parts, and the server enforces "at least one non-empty". A

@@ -491,6 +491,31 @@ const queuePreviewLimit = 3
 // can't blow out the card; truncate appends an ellipsis past the cap.
 const queuePreviewWidth = 60
 
+// queuePreviewBound caps how many leading RUNES of a queued prompt feed the
+// per-frame preview flatten (oneLine) + truncate. renderQueue runs on every
+// rendered frame while the queue is non-empty, and an enqueue-expanded staged
+// paste can be a multi-KB payload — flattening it in full made every frame pay
+// O(payload) until the queue drained (the very lag issue #45's staging removes
+// from the input). 4× the preview's display width is always enough runes to fill
+// the truncate(…, queuePreviewWidth) output, except for a prefix that is almost
+// entirely collapsed whitespace — then the preview just shows less of a huge
+// payload, which is fine for a one-line hint. Output is byte-identical to the
+// unbounded algorithm for any queued string under the bound.
+const queuePreviewBound = 4 * queuePreviewWidth
+
+// runePrefix returns the first n runes of s without scanning past them (no
+// full-string RuneCountInString) — the O(1)-in-payload slice renderQueue's
+// preview is built from.
+func runePrefix(s string, n int) string {
+	for i := range s {
+		if n == 0 {
+			return s[:i]
+		}
+		n--
+	}
+	return s
+}
+
 // renderQueue draws the "staged follow-ups" card shown just above the input
 // whenever the queue is non-empty. It reuses existing theme slots only (muted /
 // toolArgs for the normal card, ctxWarn for the paused header) — no new slots — so
@@ -520,7 +545,9 @@ func (m Model) renderQueue() string {
 	}
 	shown := min(n, queuePreviewLimit)
 	for i := 0; i < shown; i++ {
-		b.WriteString("\n" + th.Style("toolArgs").Render("  "+truncate(oneLine(m.queued[i]), queuePreviewWidth)))
+		// Bound the flatten to a rune prefix (queuePreviewBound) so a multi-KB
+		// queued payload is never whitespace-scanned in full on every frame.
+		b.WriteString("\n" + th.Style("toolArgs").Render("  "+truncate(oneLine(runePrefix(m.queued[i], queuePreviewBound)), queuePreviewWidth)))
 	}
 	if rest := n - shown; rest > 0 {
 		b.WriteString("\n" + muted.Render(fmt.Sprintf("  +%d more", rest)))
@@ -532,9 +559,38 @@ func (m Model) renderQueue() string {
 }
 
 // renderInput renders the textarea (now always focused — it stays editable while a
-// run streams so a follow-up can be composed and enqueued).
+// run streams so a follow-up can be composed and enqueued), memoized on the
+// renderer's single-entry input cache (renderer.inputKey — see its doc): when no
+// textarea fact in the key changed since the previous render, the cached string is
+// returned instead of re-running textarea.View()'s full per-line re-wrap.
+//
+// Correctness of the single entry rests on two facts. (1) The textarea's only
+// state NOT in the key — its internal viewport scroll offset, and the virtual
+// cursor's blink phase — can only change as a side effect of a mutation that also
+// changes a keyed fact in the SAME reducer step (the scroll offset moves only when
+// the cursor crosses the visible window, i.e. row/rowOffset/width/height changed;
+// the blink phase flips only on Focus/Blur, since the reducer never routes
+// cursor.BlinkMsg to the textarea — the cursor is static, not blinking, today).
+// (2) renderInput runs on EVERY reduced message (the relayout chokepoint's
+// chrome()), so the cache is re-keyed in the same step the mutation lands — there
+// is no window in which a hidden-state change can hide behind an unchanged key.
 func (m Model) renderInput() string {
-	return m.ta.View()
+	li := m.ta.LineInfo()
+	key := inputRenderKey{
+		value:     m.ta.Value(),
+		row:       m.ta.Line(),
+		rowOffset: li.RowOffset,
+		colOffset: li.ColumnOffset,
+		focused:   m.ta.Focused(),
+		width:     m.ta.Width(),
+		height:    m.ta.Height(),
+	}
+	if m.rend.inputValid && m.rend.inputKey == key {
+		return m.rend.inputView
+	}
+	out := m.ta.View()
+	m.rend.inputKey, m.rend.inputView, m.rend.inputValid = key, out, true
+	return out
 }
 
 // renderFatal renders a centred fatal-error panel.

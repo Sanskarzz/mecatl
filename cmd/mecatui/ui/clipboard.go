@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -207,4 +208,101 @@ func stripMarker(text, marker string) string {
 	default:
 		return strings.ReplaceAll(text, marker, "")
 	}
+}
+
+// pasteCharThreshold / pasteLineThreshold are the staging cutoffs for a bracketed
+// text paste (issue #45): a payload of >= pasteCharThreshold runes OR >=
+// pasteLineThreshold lines is staged behind a "[Pasted text #N]" placeholder
+// instead of entering the textarea. The textarea re-wraps (and SHA-256-keys) every
+// logical line per rendered frame, so a huge paste in the buffer makes EVERY
+// subsequent keypress O(paste) — staging keeps the buffer (and thus the per-frame
+// input render) small. Below both thresholds the paste is byte-identical to the
+// pre-staging behaviour.
+const (
+	pasteCharThreshold = 2000
+	pasteLineThreshold = 30
+)
+
+// pasteNeedsStaging reports whether a bracketed-paste payload must stage behind
+// a placeholder: the paste alone crosses the rune/line thresholds, OR the
+// CUMULATIVE buffer (what is already in the textarea plus this paste) crosses
+// the rune threshold. The cumulative arm closes the repeated-paste hole — ten
+// 1900-rune pastes are each under the per-paste threshold but together rebuild
+// the exact O(buffer) per-keystroke lag the staging exists to prevent. Only the
+// INCOMING paste is ever staged; typed text (and earlier, legitimately literal
+// pastes) is never converted out of the buffer.
+func pasteNeedsStaging(buffer, content string) bool {
+	pasteRunes := utf8.RuneCountInString(content)
+	return pasteRunes >= pasteCharThreshold ||
+		strings.Count(content, "\n")+1 >= pasteLineThreshold ||
+		utf8.RuneCountInString(buffer)+pasteRunes >= pasteCharThreshold
+}
+
+// stageLargePaste stages a large text paste under a fresh monotonic
+// "[Pasted text #N]" marker (inserted into the textarea in the payload's place),
+// mirroring the stagedMedia design: no-live-renumber + expand-at-submit. The full
+// text lives only in Model.stagedPastes until submitPrompt/enqueuePrompt expands
+// the surviving markers in place; a marker the user deletes while editing drops
+// its content silently at submit (the image-marker UX). N is its own counter
+// (separate numbering from "[Image #N]") and is never reused.
+func (m Model) stageLargePaste(content string) (tea.Model, tea.Cmd) {
+	m.nextPasteN++
+	marker := fmt.Sprintf("[Pasted text #%d]", m.nextPasteN)
+	if m.stagedPastes == nil {
+		m.stagedPastes = make(map[string]string)
+	}
+	m.stagedPastes[marker] = content
+	m.insertText(marker)
+	return m.afterInputEdit(nil)
+}
+
+// survivingPasteMarkers returns the staged-paste markers (sorted ascending by
+// their N) whose literal "[Pasted text #N]" string still appears in text — the
+// paste-placeholder twin of survivingMarkers. Deleted markers are dropped from
+// the expansion, which is how an over-eager paste is undone. The trailing "]"
+// keeps markers prefix-safe ("#1]" is never a substring of "#11]").
+func survivingPasteMarkers(text string, staged map[string]string) []string {
+	var out []string
+	for marker := range staged {
+		if strings.Contains(text, marker) {
+			out = append(out, marker)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return pasteMarkerN(out[i]) < pasteMarkerN(out[j])
+	})
+	return out
+}
+
+// pasteMarkerN extracts the integer N from a "[Pasted text #N]" marker for
+// ordering; a malformed marker sorts first (N=0), which is harmless (markers are
+// well-formed by construction).
+func pasteMarkerN(marker string) int {
+	var n int
+	_, _ = fmt.Sscanf(marker, "[Pasted text #%d]", &n)
+	return n
+}
+
+// expandPastePlaceholders replaces each surviving "[Pasted text #N]" marker in
+// text with its staged full payload in ONE left-to-right pass (strings.Replacer):
+// replaced text is never rescanned, so a payload that itself CONTAINS another
+// surviving marker's literal text — entirely plausible in a pasted code/log
+// excerpt — survives verbatim instead of having its embedded token re-substituted
+// by a later pass (the sequential-ReplaceAll corruption). The Replacer does
+// replace ALL occurrences of each marker, so a manually-typed duplicate of a
+// staged marker duplicates the payload — the same as a hand-duplicated
+// "[Image #N]" marker, accepted. It only rewrites the local text — clearing the
+// staged store (and dropping deleted markers' content) is the caller's job,
+// AFTER its loud-reject early returns, so a failed submit keeps the store intact
+// for the retry (the input still holds the markers).
+func expandPastePlaceholders(text string, staged map[string]string) string {
+	markers := survivingPasteMarkers(text, staged)
+	if len(markers) == 0 {
+		return text
+	}
+	pairs := make([]string, 0, 2*len(markers))
+	for _, marker := range markers {
+		pairs = append(pairs, marker, staged[marker])
+	}
+	return strings.NewReplacer(pairs...).Replace(text)
 }

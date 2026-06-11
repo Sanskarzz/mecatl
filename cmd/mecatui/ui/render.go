@@ -90,6 +90,44 @@ type renderer struct {
 	// a streaming turn bumps it by exactly one (the live block), regardless of how
 	// long the scrollback is. Touched only on the update goroutine.
 	blockRenders int
+
+	// inputKey/inputView/inputValid memoize the rendered INPUT region (the bubbles
+	// textarea) — the input-side sibling of blockCache. textarea.View() re-wraps
+	// (and SHA-256-keys, even on its internal cache hits) every logical line on
+	// every call, and renderInput runs at least twice per reduced message (the
+	// relayout chokepoint's chrome() + View's assembleLayout), so an unchanged
+	// input was re-wrapped on every streamed-delta frame. The memo is KEYED ON
+	// STATE (inputRenderKey — a self-contained signature of every textarea fact
+	// the render reads), NOT dirty-flagged: the textarea is mutated from ~30 call
+	// sites across the ui (overlay focus/blur, palette/mention SetValue, the
+	// reset/insert funnels), and one missed dirty-set at a future site would
+	// freeze the input; the key compare is O(len(input)), which the large-paste
+	// placeholder staging keeps small. Single entry, refreshed on every render —
+	// see renderInput for the correctness argument covering the textarea's hidden
+	// state (internal scroll offset, cursor blink phase). Update-goroutine-only,
+	// like the block caches; deliberately NOT dropped by resetBlockCaches (the key
+	// is self-validating — it carries no conversation index to alias).
+	inputKey   inputRenderKey
+	inputView  string
+	inputValid bool
+}
+
+// inputRenderKey is the validity key of the memoized input render: the complete
+// set of textarea facts renderInput's output is a pure function of — the buffer
+// content, the cursor position (logical row + soft-wrap row/column offsets, so a
+// cursor move inside an unchanged value still re-renders), the focus state (which
+// also fully determines the virtual cursor's blink phase — mecatui never routes
+// cursor.BlinkMsg to the textarea, so the cursor is static: visible while focused,
+// hidden while blurred; if blink routing is ever added, the blink phase must join
+// this key), and the box dimensions. The theme, placeholder, and prompt are fixed
+// per process and need no key slot.
+type inputRenderKey struct {
+	value         string
+	row           int // cursor's logical line (textarea.Line)
+	rowOffset     int // cursor's soft-wrap row within that line (LineInfo.RowOffset)
+	colOffset     int // cursor's column within that soft-wrap row (LineInfo.ColumnOffset)
+	focused       bool
+	width, height int
 }
 
 // mdEntry is one memoized assistant-block render: the source text and wrap width
