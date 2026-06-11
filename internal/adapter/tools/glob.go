@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 // globDescription is the model-facing documentation for the Glob tool.

@@ -6,14 +6,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/team"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/team"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // regOf builds a one-def registry for the member-resolution tests.

@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/workspacetrust"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // trust.go is the COMPOSITION-LAYER workspace-trust resolver (Workspace-Trust

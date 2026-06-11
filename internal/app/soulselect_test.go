@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/engine/governance"
 )
 
 // fakeGate is a soulGate that returns a fixed effect, for driving the soul

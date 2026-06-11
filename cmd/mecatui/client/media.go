@@ -10,13 +10,13 @@ import (
 )
 
 // Client-side media caps. These DUPLICATE the domain caps in
-// internal/session/content.go:29-36 (MaxMediaBytes / MaxPromptMediaBytes /
+// engine/session/content.go:29-36 (MaxMediaBytes / MaxPromptMediaBytes /
 // MaxPromptMediaParts) so the ui can fail fast — before opening a stream — with a
 // clear inline error rather than round-tripping a doomed prompt. They are NOT the
 // source of truth: the server re-validates every part via session.ValidateMediaParts
 // at the wire→domain boundary, so a drift here only changes WHERE the rejection
 // surfaces, never WHETHER an oversize prompt is accepted. The ui layer must not
-// import internal/session (the ui→no-internal layering rule), hence the copy; the
+// import engine/session (the ui→no-engine/internal layering rule), hence the copy; the
 // drift sentinel TestClientMediaLimitsMatchDomain pins the numbers to the domain.
 const (
 	maxMediaBytes       = 10 << 20 // 10 MiB — single inline part (== session.MaxMediaBytes)

@@ -10,7 +10,7 @@
 // lifetime of the run, terminating in a `result` event.
 //
 // The `Event` message mirrors the domain `session.Event` taxonomy
-// (internal/session/event.go) one-for-one: a string `type` plus the
+// (engine/session/event.go) one-for-one: a string `type` plus the
 // structured submessages (ToolCall, ToolResult, PermissionAsk, Result,
 // Usage). It is the single, provider-neutral event schema shared by the
 // gRPC and HTTP/SSE adapters; it is never an OpenAI type.

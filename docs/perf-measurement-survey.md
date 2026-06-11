@@ -208,7 +208,7 @@ A streaming agent's latency is **not one number**. Measure three separately:
 *begins executing* rather than when it was *enqueued*, you systematically miss
 the latency of everything that queued behind a slow predecessor. mecatl has a
 real internal coordinated-omission source: **mutate-serial dispatch**
-(`internal/agent/dispatch.go`) runs mutating tools strictly one at a time, so a
+(`engine/agent/dispatch.go`) runs mutating tools strictly one at a time, so a
 slow `Edit` delays every queued mutation. To measure it honestly, timestamp from
 **intent/enqueue**, not from execution start.
 

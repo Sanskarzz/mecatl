@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // drainRun consumes a run's events to completion, returning the terminal result

@@ -44,7 +44,7 @@ linters:
     - unused
   settings:
     # depguard is the PER-FILE half of the machine-enforced clean-core layering
-    # (the other half is the whole-graph DAG test in internal/arch/layering_test.go).
+    # (the other half is the whole-graph DAG test in engine/arch/layering_test.go).
     # The core tiers (session, governance, tool, prompt, port, team, agent) are an
     # ALLOWLIST: each rule is list-mode: strict and lists $gostd + exactly the mecatl
     # core packages that tier legitimately imports (see the import map in CLAUDE.md's
@@ -64,7 +64,7 @@ linters:
     # Every core rule EXCLUDES '!$test': test files legitimately import the
     # memfs/mockllm adapters (offline tests) and the external-test convention
     # imports the package-under-test itself. This mirrors the DAG test in
-    # internal/arch/layering_test.go, which reads NON-TEST imports only. Production
+    # engine/arch/layering_test.go, which reads NON-TEST imports only. Production
     # (non-test) core code is what the allowlist holds to the inward-only rule.
     depguard:
       rules:
@@ -83,8 +83,8 @@ linters:
         core-domain-leaf:
           list-mode: strict
           files:
-            - '**/internal/session/**.go'
-            - '**/internal/governance/**.go'
+            - '**/engine/session/**.go'
+            - '**/engine/governance/**.go'
             - '!$test'
           allow:
             - $gostd
@@ -95,11 +95,11 @@ linters:
         core-tool:
           list-mode: strict
           files:
-            - '**/internal/tool/**.go'
+            - '**/engine/tool/**.go'
             - '!$test'
           allow:
             - $gostd
-            - github.com/stacklok/mecatl/internal/session
+            - github.com/stacklok/mecatl/engine/session
           deny:
             - pkg: os
               desc: 'core domain must not import os (CLAUDE.md layering rule); side effects belong in adapters/composition'
@@ -108,12 +108,12 @@ linters:
         core-prompt:
           list-mode: strict
           files:
-            - '**/internal/prompt/**.go'
+            - '**/engine/prompt/**.go'
             - '!$test'
           allow:
             - $gostd
-            - github.com/stacklok/mecatl/internal/session
-            - github.com/stacklok/mecatl/internal/tool
+            - github.com/stacklok/mecatl/engine/session
+            - github.com/stacklok/mecatl/engine/tool
           deny:
             - pkg: os
               desc: 'core domain must not import os (CLAUDE.md layering rule); side effects belong in adapters/composition'
@@ -122,14 +122,14 @@ linters:
         core-port:
           list-mode: strict
           files:
-            - '**/internal/port/**.go'
+            - '**/engine/port/**.go'
             - '!$test'
           allow:
             - $gostd
-            - github.com/stacklok/mecatl/internal/session
-            - github.com/stacklok/mecatl/internal/governance
-            - github.com/stacklok/mecatl/internal/prompt
-            - github.com/stacklok/mecatl/internal/tool
+            - github.com/stacklok/mecatl/engine/session
+            - github.com/stacklok/mecatl/engine/governance
+            - github.com/stacklok/mecatl/engine/prompt
+            - github.com/stacklok/mecatl/engine/tool
           deny:
             - pkg: os
               desc: 'port must not import os (CLAUDE.md layering rule); side effects belong in adapters/composition'
@@ -137,11 +137,11 @@ linters:
         core-team:
           list-mode: strict
           files:
-            - '**/internal/team/**.go'
+            - '**/engine/team/**.go'
             - '!$test'
           allow:
             - $gostd
-            - github.com/stacklok/mecatl/internal/session
+            - github.com/stacklok/mecatl/engine/session
           deny:
             - pkg: os
               desc: 'core domain must not import os (CLAUDE.md layering rule); side effects belong in adapters/composition'
@@ -150,16 +150,16 @@ linters:
         core-agent:
           list-mode: strict
           files:
-            - '**/internal/agent/**.go'
+            - '**/engine/agent/**.go'
             - '!$test'
           allow:
             - $gostd
-            - github.com/stacklok/mecatl/internal/session
-            - github.com/stacklok/mecatl/internal/governance
-            - github.com/stacklok/mecatl/internal/prompt
-            - github.com/stacklok/mecatl/internal/tool
-            - github.com/stacklok/mecatl/internal/port
-            - github.com/stacklok/mecatl/internal/team
+            - github.com/stacklok/mecatl/engine/session
+            - github.com/stacklok/mecatl/engine/governance
+            - github.com/stacklok/mecatl/engine/prompt
+            - github.com/stacklok/mecatl/engine/tool
+            - github.com/stacklok/mecatl/engine/port
+            - github.com/stacklok/mecatl/engine/team
             - golang.org/x/sync/errgroup
           deny:
             - pkg: os

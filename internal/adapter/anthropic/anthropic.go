@@ -7,7 +7,7 @@ import (
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
-	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/engine/port"
 )
 
 // defaultMaxTokens is the CONSERVATIVE flat fallback for the REQUIRED max_tokens

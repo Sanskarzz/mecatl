@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
-	"github.com/stacklok/mecatl/internal/prompt"
 )
 
 // writeFile writes content to <ws>/rel, creating parent dirs.

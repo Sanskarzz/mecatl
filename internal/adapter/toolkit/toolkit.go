@@ -16,7 +16,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // MaxOutputBytes caps the byte length of a single tool's textual result. It is

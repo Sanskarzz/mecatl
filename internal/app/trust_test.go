@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/workspacetrust"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
-	"github.com/stacklok/mecatl/internal/governance"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // withTrustEnv swaps the package-level trustEnv for the duration of a test (so the

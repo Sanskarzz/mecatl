@@ -8,8 +8,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // tracerName is the instrumentation scope name for spans this adapter creates.

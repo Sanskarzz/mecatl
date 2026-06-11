@@ -15,8 +15,8 @@ import (
 
 	oai "github.com/openai/openai-go/v3"
 
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // fakeProvider is a programmable port.LLMProvider for tests. Each call to Stream

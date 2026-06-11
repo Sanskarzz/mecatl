@@ -27,7 +27,7 @@ import (
 
 	"github.com/gofrs/flock"
 
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 const (

@@ -15,7 +15,7 @@
 //
 // LAYERING: this is an ADAPTER. It reads files (discovery is an adapter concern)
 // and may import os/yaml and the domain (session). NOTHING here is imported by a
-// domain package, by internal/agent, or by internal/app's hot path — the agent
+// domain package, by engine/agent, or by internal/app's hot path — the agent
 // loop receives only plain map[string]*Engine + metadata structs, never this
 // package's types, preserving the no-adapter-import-from-agent layering rule.
 //

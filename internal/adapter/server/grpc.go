@@ -9,8 +9,8 @@ import (
 	"google.golang.org/grpc/status"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // HarnessServer implements the generated mecatlv1.HarnessServiceServer over the

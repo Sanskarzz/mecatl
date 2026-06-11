@@ -1,7 +1,7 @@
 package memory
 
 import (
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 // The user-model tool family (issue #14, Phase 2a) is a SECOND set of memory tools
@@ -37,7 +37,7 @@ const userKeyPrefix = "user/"
 // "</user-model>"). A stored value/description containing it could close the fence
 // early and let trailing text escape the data zone, so the RememberUser write path
 // rejects any field containing it (case-insensitively — see RememberTool.Execute).
-// It is hardcoded here (with this comment) rather than imported from internal/prompt
+// It is hardcoded here (with this comment) rather than imported from engine/prompt
 // to avoid coupling the adapter to a domain magic-constant path; the two must stay
 // in sync (one cheap string). This mirrors soul.soulCloseTag.
 const userModelCloseTag = "</user-model>"

@@ -7,9 +7,9 @@ import (
 	"testing"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
 	"github.com/stacklok/mecatl/internal/adapter/server"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // TestSoulSnapshotUserSoul proves the snapshot projects a selected user soul's

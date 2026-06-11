@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // TestRunScenarioOffline runs the demo's offline scenario against mockllm and

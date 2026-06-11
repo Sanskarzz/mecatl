@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 // userModelTool finds the named user-model tool from NewUserModelTools.

@@ -390,8 +390,8 @@ func TestCheckAggregateCapsBytes(t *testing.T) {
 }
 
 // TestClientMediaLimitsMatchDomain is the drift sentinel: the client-side fail-
-// fast caps MUST equal the domain caps in internal/session/content.go. They are
-// duplicated (the ui→no-internal layering forbids importing session), so this
+// fast caps MUST equal the domain caps in engine/session/content.go. They are
+// duplicated (the ui→no-engine/internal layering forbids importing session), so this
 // pins the numbers; if the domain caps change, update both and this test.
 func TestClientMediaLimitsMatchDomain(t *testing.T) {
 	if maxMediaBytes != 10<<20 {

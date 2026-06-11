@@ -1,7 +1,7 @@
 # mecatl — Architecture
 
 > Reader-facing architecture guide. This describes the **code as it exists** in
-> `internal/`, `cmd/`, and `contracts/`. Where the design notes in
+> `engine/`, `internal/`, `cmd/`, and `contracts/`. Where the design notes in
 > `docs/design/` differ from the implementation, this document follows the
 > implementation.
 
@@ -19,7 +19,10 @@ The system is built **hexagonally (ports & adapters) with a DDD core**.
 Dependencies point inward only: a domain of pure value objects and aggregates
 (`session`, `governance`, `tool`, `prompt`), a set of port interfaces the
 application consumes (`port`), the application use-case layer that is the agent
-loop (`agent`), and adapters that implement the ports (`adapter/*`). The LLM
+loop (`agent`), and adapters that implement the ports (`adapter/*`). The core
+tiers (domain, ports, agent loop) live under `engine/` — the importable core,
+intended to be importable as a library by external consumers — while the
+adapters and the composition layer stay under `internal/`. The LLM
 provider sits behind the `port.LLMProvider` seam, with the OpenAI Responses API
 isolated entirely inside `internal/adapter/openai`, so the core is
 provider-agnostic and unit-testable against fakes (`mockllm`, `memfs`,
@@ -55,19 +58,19 @@ flowchart LR
     svc["Service (lifecycle + Run registry)\nauth/mTLS · rate limit · health"]
   end
 
-  subgraph APP["application — internal/agent"]
+  subgraph APP["application — engine/agent"]
     engine["Engine / Run\nloop · dispatch · permission · hooks\ncompaction · cascade · tokencount\nsubagent (Subagent) · parallel (Parallel)"]
   end
 
-  subgraph PORTS["ports — internal/port"]
+  subgraph PORTS["ports — engine/port"]
     p["LLMProvider · SessionStore\nPermissionPolicy · HookRunner\nEventSink · Clock · Logger"]
   end
 
   subgraph DOMAIN["domain (no infra imports)"]
-    sess["internal/session\nSession · Conversation · Event\nToolCall · ToolResult · Usage"]
-    gov["internal/governance\nEffect · Decision · Rule · Scope\nHookEvent · Evaluator · bash.go"]
-    tl["internal/tool\nTool · ToolSpec · Catalog · Disclosable\nFileSystem · Workspace · CommandRunner\nMemoryStore · WorkspaceForker · ToolSearch"]
-    pr["internal/prompt\nLayered · Build · Env · toolDisciplineHints\nInstructionAssembler · SoulSource · CommandExpander\n(model-neutral; per-model agencyDelta lives in internal/app)"]
+    sess["engine/session\nSession · Conversation · Event\nToolCall · ToolResult · Usage"]
+    gov["engine/governance\nEffect · Decision · Rule · Scope\nHookEvent · Evaluator · bash.go"]
+    tl["engine/tool\nTool · ToolSpec · Catalog · Disclosable\nFileSystem · Workspace · CommandRunner\nMemoryStore · WorkspaceForker · ToolSearch"]
+    pr["engine/prompt\nLayered · Build · Env · toolDisciplineHints\nInstructionAssembler · SoulSource · CommandExpander\n(model-neutral; per-model agencyDelta lives in internal/app)"]
   end
 
   subgraph DECOR["decorators (port → same port)"]
@@ -116,7 +119,7 @@ per-package `doc.go` files and honoured by the code:
 | `session`, `governance`, `tool`, `prompt` (domain) | stdlib + other domain packages. Never `adapter`, `agent`, `contracts`, `os`, or any third-party library. |
 | `port` | domain packages + stdlib (`context`, `io`, `iter`, `time`). |
 | `agent` (application) | domain + `port` + stdlib only. Never an adapter or `contracts`. (Tests may import adapters.) |
-| `adapter/*` | domain + `port` + the one external lib it adapts. Never `agent`. (Deliberate adapter→adapter carve-outs: (1) `adapter/mcpperf` may import `adapter/telemetry` solely for the `RuntimeSnapshot` data DTO it projects into tool output — a plain JSON struct with no OTel/SDK types, not a behavioural dependency; the DTO stays in `telemetry` by design. (2) `adapter/soul` AND `adapter/memory` import `adapter/skills` for `ScanForInjection` — the conservative role-override deny-list is shared so the soul (load-time) and the user-model RememberUser write path (write-time) reuse the same injection gate rather than copying the regexes. (3) `adapter/{permconfig,skills,agents,soul,memory}` import the leaf `adapter/xdgconfig` for the shared `ResolveEnv`/`UserConfigDir` XDG path-resolution seam — a stdlib-only adapter leaf, extracted to de-duplicate the copies (the user-model store resolves `<xdg>/mecatl/usermodel` through it). (4) `adapter/soul` and `adapter/memory` import the DOMAIN `internal/prompt` for a single compile-time assertion only — `var _ prompt.SoulSource = (*Store)(nil)` (soul→prompt) and `var _ prompt.UserModelSource = (*Store)(nil)` (memory→prompt) — pinning that each adapter satisfies the consumer-local prompt port it is bound to at composition. These are assertion-only edges (no prompt value is constructed or called); the adapters meet the ports structurally, and `internal/prompt` never imports them. |
+| `adapter/*` | domain + `port` + the one external lib it adapts. Never `agent`. (Deliberate adapter→adapter carve-outs: (1) `adapter/mcpperf` may import `adapter/telemetry` solely for the `RuntimeSnapshot` data DTO it projects into tool output — a plain JSON struct with no OTel/SDK types, not a behavioural dependency; the DTO stays in `telemetry` by design. (2) `adapter/soul` AND `adapter/memory` import `adapter/skills` for `ScanForInjection` — the conservative role-override deny-list is shared so the soul (load-time) and the user-model RememberUser write path (write-time) reuse the same injection gate rather than copying the regexes. (3) `adapter/{permconfig,skills,agents,soul,memory}` import the leaf `adapter/xdgconfig` for the shared `ResolveEnv`/`UserConfigDir` XDG path-resolution seam — a stdlib-only adapter leaf, extracted to de-duplicate the copies (the user-model store resolves `<xdg>/mecatl/usermodel` through it). (4) `adapter/soul` and `adapter/memory` import the DOMAIN `engine/prompt` for a single compile-time assertion only — `var _ prompt.SoulSource = (*Store)(nil)` (soul→prompt) and `var _ prompt.UserModelSource = (*Store)(nil)` (memory→prompt) — pinning that each adapter satisfies the consumer-local prompt port it is bound to at composition. These are assertion-only edges (no prompt value is constructed or called); the adapters meet the ports structurally, and `engine/prompt` never imports them. |
 | `contracts/gen` | generated; protobuf + gRPC runtime. |
 | `app` (composition) | the shared engine/service assembly (`app.Build`). MAY import adapters + `agent` + (via `server`) `contracts/gen`. Nothing imports it but the `cmd/` mains. |
 | `cmd/*` | flags + serving; consumes `internal/app`. With `app`, the only places concrete adapters meet ports. |
@@ -133,24 +136,24 @@ binary works with no daemon. The render packages stay pure: they render **purely
 from proto `Event`s** and are bound by the inward-only layering rule. The
 `contracts/gen` + grpc + `internal/app` surface lives only in `cmd/mecatui/client`,
 `cmd/mecatui/embed`, and the `cmd/mecatui` main; the `ui` (Bubble Tea
-model/update/view) and `theme` (pure styling) packages import no `internal/...`
+model/update/view) and `theme` (pure styling) packages import no `engine/...` or `internal/...`
 package and no proto directly. Usage and theming are documented in `docs/tui.md`.
 
 Two deliberate cycle-breaks worth noting, documented in code:
 - `port` imports `tool` and `prompt` (because `LLMRequest` carries
   `[]tool.ToolSpec` and `prompt.Layered`) — see the package note at the top of
-  `internal/port/llm.go`.
-- `FileSystem`/`Workspace` live in `internal/tool`, **not** `internal/port`,
+  `engine/port/llm.go`.
+- `FileSystem`/`Workspace` live in `engine/tool`, **not** `engine/port`,
   because `port` already imports `tool` while `tool.Tool.Execute` takes a
   `Workspace`; defining them in `port` would form a `port↔tool` cycle. See the
-  package note in `internal/tool/tool.go`.
+  package note in `engine/tool/tool.go`.
 - `governance` does **not** import `session` (so `session` can import
   `governance` without a cycle); the `Evaluator` works on primitive args, and
   the `permpolicy` adapter bridges `session` types into it.
 
 ## 3. The domain model
 
-### Session aggregate (`internal/session/session.go`)
+### Session aggregate (`engine/session/session.go`)
 
 `Session` is the aggregate root. Outside code holds a `SessionID` and reaches
 inner entities only through intention-revealing methods, so the state machine
@@ -219,7 +222,7 @@ non-zero defaults. Three derived predicates:
 
 `PermissionMode`: `default`, `plan` (read-only toolset enforced), `acceptEdits`.
 
-### Conversation / Message / Turn (`internal/session/conversation.go`)
+### Conversation / Message / Turn (`engine/session/conversation.go`)
 
 `Conversation` holds the ordered, model-visible `[]Message`. `Message` is an
 immutable value object built via `NewUserMessage`, `NewSystemMessage`,
@@ -238,7 +241,7 @@ provider's opaque reasoning item, replayed back verbatim and never interpreted.
 - `Usage{InputTokens, OutputTokens, CacheReadTokens, CacheWriteTokens}`
   (`usage.go`) with `CacheHitRate()` and an immutable `Add(other) Usage`.
 
-### Event taxonomy (`internal/session/event.go`)
+### Event taxonomy (`engine/session/event.go`)
 
 `EventType` is the single, provider-neutral taxonomy shared by the loop and the
 API. The real constants:
@@ -271,7 +274,7 @@ flat fleet vs coordinating roster vs fan-out group. They are deliberately NOT me
 `docs/design/IMPLEMENTATION-NOTES.md`). Gauntlet #7: none carries branch/child content
 into the parent conversation — only metadata (and, for Parallel, fork-root path handles).
 
-## 4. The ports (`internal/port`)
+## 4. The ports (`engine/port`)
 
 Small interfaces, `context.Context` first. Each has a fake adapter so the loop
 runs with no network and no disk.
@@ -284,7 +287,7 @@ runs with no network and no disk.
 | `PermissionPolicy` (`permission.go`) | deny→ask→allow across merged scopes | `Evaluate(ctx context.Context, mode session.PermissionMode, c session.ToolCall) governance.PermissionDecision` |
 | `EventSink` (`log.go`) | relay loop events to the API stream | `Emit(ev session.Event)` |
 | `ToolCallRecorder` (`log.go`) | structured per-tool AUDIT (distinct from `Diagnostics`) | `ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, took time.Duration)` |
-| `Diagnostics` (`diagnostics.go`) | injected operational-logging seam (NO global slog in `internal/`) | `Log(ctx, level Level, msg string, args ...any)` · `With(args ...any) Diagnostics` |
+| `Diagnostics` (`diagnostics.go`) | injected operational-logging seam (NO global slog in `engine/` or `internal/`) | `Log(ctx, level Level, msg string, args ...any)` · `With(args ...any) Diagnostics` |
 | `Clock` (`clock.go`) | abstract wall clock | `Now() time.Time` |
 
 The model-call request and stream types (`llm.go`):
@@ -315,7 +318,7 @@ type Chunk struct {
 }
 ```
 
-### The tool contract and the FS seam (`internal/tool`)
+### The tool contract and the FS seam (`engine/tool`)
 
 ```go
 type Tool interface {
@@ -353,7 +356,7 @@ Bash, and an OS sandbox would wrap this seam. `tool.MemoryStore` and
 `tool.WorkspaceForker` live alongside it for the same layering reason (the tools
 that need them depend on the interface, not a `port`).
 
-## 5. The agent loop (`internal/agent`)
+## 5. The agent loop (`engine/agent`)
 
 `Engine` is built from `Deps` (all ports + the application seams + config) via
 `NewEngine`, which supplies network-free defaults for every optional seam:
@@ -557,7 +560,7 @@ hook's stdout is a JSON **object** it is parsed as a control envelope —
 hooks are unaffected. This is what lets **real shell hooks** emit mutations (not
 just custom Go `HookRunner` adapters).
 
-## 8. Subagents (`internal/agent/subagent.go`)
+## 8. Subagents (`engine/agent/subagent.go`)
 
 `SubagentTool` is a `tool.Tool` (catalog name `Subagent`) that delegates a focused,
 self-contained task (multi-step investigation or build/test/git work) to a **child agent loop**. Its `Execute`:
@@ -776,8 +779,8 @@ emits behind a dead client.
   (`timeExecute`).
 - **Diagnostics** (`port.Diagnostics`) — the injected operational-logging seam
   (composition decisions, degraded-mode warnings, lifecycle notes), DISTINCT from
-  the audit (`ToolCallRecorder`) and the event stream (`EventSink`). `internal/`
-  takes this port and NEVER touches global slog; the `slogdiag` adapter is the only
+  the audit (`ToolCallRecorder`) and the event stream (`EventSink`). `engine/` + `internal/`
+  take this port and NEVER touch global slog; the `slogdiag` adapter is the only
   slog bridge and composition picks the sink per binary. The ban is `forbidigo`-
   guarded. See `docs/design/DIAGNOSTICS.md`.
 - **Telemetry** (`internal/adapter/telemetry`) — one adapter that implements
@@ -1078,22 +1081,22 @@ changes when one is swapped:
 
 | Seam | Where | Default → swap-in |
 |---|---|---|
-| `port.LLMProvider` | `internal/port/llm.go` | `openai`/`mockllm`; decorated by `llmresilience`; other vendors slot in unchanged |
-| `port.PermissionPolicy` | `internal/port/permission.go` | `permpolicy` (layer-1 rules), optionally decorated by `permclassify` (layer-2 model classifier) |
+| `port.LLMProvider` | `engine/port/llm.go` | `openai`/`mockllm`; decorated by `llmresilience`; other vendors slot in unchanged |
+| `port.PermissionPolicy` | `engine/port/permission.go` | `permpolicy` (layer-1 rules), optionally decorated by `permclassify` (layer-2 model classifier) |
 | `Compactor` | `agent/compaction.go` | `HeuristicCompactor` → `CascadeCompactor` |
 | `TokenCounter` | `agent/tokencount.go` | `HeuristicTokenCounter` → `tokenizer.Counter` |
 | `InstructionAssembler` | `prompt/instructions.go` | `RootAssembler` (AGENTS.md/CLAUDE.md) → `MultiAssembler` composing `RootAssembler` → `SoulAssembler` (persona) → `MemoryIndexAssembler` (saved project facts) → `UserModelAssembler` (operator FACTS), all as turn-0 user messages |
-| `prompt.SoulSource` | `prompt/soul.go` (impl `internal/adapter/soul`) | nil (off) → `*soul.Store`; agent-READ-ONLY (no write path), env-injected (not the WorkspaceReader — the file is outside any session root), injection-scanned + byte-capped, fail-soft; on by default, `--soul-file`/`--no-soul`. **Two provenances + trust gate (issue #14, Phase 3, Item 2):** a USER soul (`<xdg>/mecatl/soul.md` or `--soul-file PATH`) is always trusted; a PROJECT soul (a discovered `<workspace>/.mecatl/soul.md`, parallel to `.mecatl/settings.yaml`) is **untrusted by default** and honoured only with `--trust-project` (the SAME issue-#13 gesture — not a new flag, not routed through governance: the soul is fenced DATA). **USER-WINS precedence** (single identity anchor, not a merge): a present user soul is used and the project soul is ignored; an untrusted project soul is dropped + `slog.Warn`-logged. The selection (provenance/trusted/drift metadata) lives in `internal/app/soulselect.go`; `internal/prompt` stays trust-unaware. **Drift baseline (Item 1):** `soul.LoadWithMeta` computes the sha256 of the clean body in the same read; `internal/app/soulguard` records it as a harness-owned sidecar `<soulPath>.sha256` trust-on-first-use (against WHICHEVER soul wins), `slog.Warn`s on a later mismatch, and (with `--soul-strict`) drops a drifted soul. `--approve-soul` re-baselines. The WRITE lives ONLY in the composition layer — the adapter stays write-free. |
+| `prompt.SoulSource` | `prompt/soul.go` (impl `internal/adapter/soul`) | nil (off) → `*soul.Store`; agent-READ-ONLY (no write path), env-injected (not the WorkspaceReader — the file is outside any session root), injection-scanned + byte-capped, fail-soft; on by default, `--soul-file`/`--no-soul`. **Two provenances + trust gate (issue #14, Phase 3, Item 2):** a USER soul (`<xdg>/mecatl/soul.md` or `--soul-file PATH`) is always trusted; a PROJECT soul (a discovered `<workspace>/.mecatl/soul.md`, parallel to `.mecatl/settings.yaml`) is **untrusted by default** and honoured only with `--trust-project` (the SAME issue-#13 gesture — not a new flag, not routed through governance: the soul is fenced DATA). **USER-WINS precedence** (single identity anchor, not a merge): a present user soul is used and the project soul is ignored; an untrusted project soul is dropped + `slog.Warn`-logged. The selection (provenance/trusted/drift metadata) lives in `internal/app/soulselect.go`; `engine/prompt` stays trust-unaware. **Drift baseline (Item 1):** `soul.LoadWithMeta` computes the sha256 of the clean body in the same read; `internal/app/soulguard` records it as a harness-owned sidecar `<soulPath>.sha256` trust-on-first-use (against WHICHEVER soul wins), `slog.Warn`s on a later mismatch, and (with `--soul-strict`) drops a drifted soul. `--approve-soul` re-baselines. The WRITE lives ONLY in the composition layer — the adapter stays write-free. |
 | `prompt.UserModelSource` | `prompt/usermodel.go` (impl `internal/adapter/memory`) | nil (off) → a SECOND, user-scoped, **cross-project** `*memory.Store` over `<xdg>/mecatl/usermodel`; durable operator FACTS exposed as RememberUser/RecallUser/SearchUserModel (enforced `user/` prefix; write-time injection scan) + the turn-0 `<user-model>` block; on by default, `--user-model-dir`/`--no-user-model`. Writable FACTS, not a governance scope. OPT-IN Stop-triggered reviewer via `--user-model-review` (never reopens the user session) |
 | `CommandExpander` | `prompt/command.go` | `NoopExpander` → `DirCommandExpander` (slash commands) |
-| `tool.Disclosable` + `ToolSearch` | `internal/tool` | always-listed → progressive disclosure |
+| `tool.Disclosable` + `ToolSearch` | `engine/tool` | always-listed → progressive disclosure |
 | `Skill` tool (skills) | `internal/adapter/skills` (impl) | off → opt-in `--skills-dir`; progressive disclosure of *instructions* (metadata always in context, body on activation) |
 | `skills.Source` | `internal/adapter/skills/source.go` | `DirSource` (one dir) → `MultiSource` (ordered, earlier-wins); known-path resolver (`--skills-conventional`: project `.mecatl`/`.claude`, user XDG/`~/.claude`); future embedded/remote sources slot in |
 | `skills.Drafter` (self-improving loop) | `internal/adapter/skills/drafter.go` | off → opt-in `--skills-draft-dir`; default `DirDrafter` (offline: validate/sanitize/2-gram-Jaccard novelty → out-of-workspace quarantine, NEVER a catalog Source). WRITE side is pluggable (a future LLM-vetting decorator slots in); promotion is filesystem-only in the MVP — operator `mecated skills promote` is the gate (shows content, confirms, verifies provenance; author N → promote → active N+1) |
-| `tool.CommandRunner` | `internal/tool/tool.go` (impl `osfs`) | the command-execution chokepoint; an OS sandbox wraps here |
-| `tool.MemoryStore` | `internal/tool/tool.go` (impl `memory`) | cross-session memory + `dream` consolidation |
+| `tool.CommandRunner` | `engine/tool/tool.go` (impl `osfs`) | the command-execution chokepoint; an OS sandbox wraps here |
+| `tool.MemoryStore` | `engine/tool/tool.go` (impl `memory`) | cross-session memory + `dream` consolidation |
 | `tool.WorkspaceForker` | `tool/isolation.go` (impl `forker`) | fork-join isolated branches |
-| `tool.Catalog` | `internal/tool/catalog.go` | core tools + MCP (streaming-HTTP) |
+| `tool.Catalog` | `engine/tool/catalog.go` | core tools + MCP (streaming-HTTP) |
 | `mcpperf.Deps` (perf MCP server) | `internal/adapter/mcpperf` | opt-in `--perf-mcp`; a read-only MCP `http.Handler` mounted at `/mcp` on the loopback admin listener (both composition roots: `cmd/mecated` and `cmd/mecatui/embed`). Built by DI — `Snapshot`/`Gatherer`/`Profiler` from `telemetry`, a slow-turn ring buffer (`telemetry.SlowTurnBuffer`) bridged at the cmd boundary to the `mcpperf.SlowTurnSource` seam (telemetry never imports mcpperf — the dependency points inward). Fail-closed to loopback (unauthenticated) |
 | `SessionStore` + AGENTS.md/CLAUDE.md discovery | `port` + `prompt/builder.go` | file-as-memory; AGENTS.md wins over CLAUDE.md, injected as a **user** message, never system |
 
@@ -1127,7 +1130,7 @@ that signs images with **cosign** and emits an **SBOM** and **SLSA provenance**
 (`.github/workflows`, `.ko.yaml`); `deploy/` carries PSS-restricted manifests
 (health probes can switch TCP→httpGet against the endpoints above).
 
-### Permission & bash governance details (`internal/governance`)
+### Permission & bash governance details (`engine/governance`)
 
 The `permpolicy` adapter wraps `governance.Evaluator`. Resolution
 (`evaluator.go`): a **Deny in any scope beats Ask beats Allow**; among rules of

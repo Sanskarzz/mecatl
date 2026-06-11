@@ -24,9 +24,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/store/sessnap"
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
 )
 
 // ErrNotFound is returned by Load when no snapshot file exists for the id. It wraps

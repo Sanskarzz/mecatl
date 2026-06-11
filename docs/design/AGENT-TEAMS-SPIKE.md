@@ -1,7 +1,7 @@
 # Spike: Headless Agent Teams for mecatl
 
 > Status: **spike / design proposal** (not yet wired). Author pass: 2026-05-30.
-> Companion prototype: `internal/team/` (coordination kernel + tests).
+> Companion prototype: `engine/team/` (coordination kernel + tests).
 > Research basis: `docs/harnesses/02`, `05`; live survey of Claude Code subagents
 > & agent teams, OpenAI Agents SDK, Goose recipes (see "Sources" at end).
 
@@ -9,9 +9,9 @@
 
 mecatl today has two delegation tools, both one-shot and context-isolated:
 
-- **`Subagent`** (`internal/agent/subagent.go`) — one read-only explorer child, shared
+- **`Subagent`** (`engine/agent/subagent.go`) — one read-only explorer child, shared
   workspace, drained internally, returns only final text.
-- **`Parallel`** (`internal/agent/parallel.go`) — N parallel children, each in an isolated
+- **`Parallel`** (`engine/agent/parallel.go`) — N parallel children, each in an isolated
   forked workspace, drained internally, joined into one summary, no auto-merge.
 
 Both are **agents-as-tools** (the OpenAI SDK term): the parent calls a child, the
@@ -63,7 +63,7 @@ small and testable.
 
 ## 3. The blocking architectural finding: sessions are one-shot
 
-`Engine.drive` (`internal/agent/loop.go`) **always** terminates the session in a
+`Engine.drive` (`engine/agent/loop.go`) **always** terminates the session in a
 single `Run`: even a clean end-of-turn calls `terminateComplete → sess.Stop()`,
 moving the aggregate to `StateCompleted`, which is terminal. `Service.StartRun`
 just loads a session and runs it. **There is no in-place "continue this session
@@ -105,16 +105,16 @@ beyond teams. The state machine becomes
 Dependencies point inward only (the project's load-bearing rule). The design slots
 in without violating it:
 
-- **`internal/team/` (NEW, DOMAIN leaf).** Pure coordination state + rules: the
+- **`engine/team/` (NEW, DOMAIN leaf).** Pure coordination state + rules: the
   `Team` aggregate, `TaskList`, `Mailbox`, member lifecycle. Imports only
-  `internal/session` (for `SessionID`) + stdlib. `session` never imports `team`,
+  `engine/session` (for `SessionID`) + stdlib. `session` never imports `team`,
   so no cycle. This is the **prototype delivered with this spike.**
-- **`internal/session/`** — add `Reopen()` (Part 3). Domain.
-- **`internal/governance/`** — add hook phases `TeammateIdle`, `TaskCreated`,
+- **`engine/session/`** — add `Reopen()` (Part 3). Domain.
+- **`engine/governance/`** — add hook phases `TeammateIdle`, `TaskCreated`,
   `TaskCompleted` (mirror `PhaseSubagentStop`). Domain.
-- **`internal/port/`** — optional `TeamStore` port if we want teams to survive a
+- **`engine/port/`** — optional `TeamStore` port if we want teams to survive a
   restart (mirrors `SessionStore`). v1 can run in-memory and skip this.
-- **`internal/agent/` (APPLICATION).** A `TeamSupervisor`: owns the shared `*team.Team`,
+- **`engine/agent/` (APPLICATION).** A `TeamSupervisor`: owns the shared `*team.Team`,
   spawns one driver goroutine per member, re-drives each via `Engine.Run` +
   `Reopen` on message/task arrival, fans member event streams into one tagged
   stream, detects quiescence. Plus the member-facing **coordination tools**
@@ -414,7 +414,7 @@ dependency cycle, the supervisor surfaces it to the lead rather than hanging. A
 global wall-clock/turn budget bounds a runaway team. A member's terminal
 disposition — and, when it stopped, the closed-enum reason (`error`/`cancelled`/
 `budget`) — now reaches the wire on `team.end` (a per-member snapshot parallel to
-the terminal tasks/findings snapshots, bridged in `internal/agent`), so the ctrl+a
+the terminal tasks/findings snapshots, bridged in `engine/agent`), so the ctrl+a
 overlay renders `✗ stopped — <reason>` for a stopped member instead of flipping every
 terminal lane to `✓ done`.
 
@@ -429,7 +429,7 @@ onto the existing `WithChildMode(session.ModePlan)` + the lead arbitration chann
 
 ## 6. The coordination kernel (delivered prototype)
 
-`internal/team/` implements and unit-tests the riskiest claim — that in-process,
+`engine/team/` implements and unit-tests the riskiest claim — that in-process,
 shared-memory coordination is **correct under concurrency** and **testable
 offline**. It is pure domain (no I/O, no LLM, no goroutines of its own), guarded
 by a single mutex, and exercised under `-race`:
@@ -444,7 +444,7 @@ by a single mutex, and exercised under `-race`:
 
 Tests cover: dependency gating, concurrent-claim safety (`-race`, N goroutines),
 mailbox delivery semantics, unknown-member/þtask errors, and quiescence
-transitions. Run: `go test ./internal/team/ -race`.
+transitions. Run: `go test ./engine/team/ -race`.
 
 This kernel is deliberately **decoupled from the Engine** so it can be validated
 before any supervisor/gRPC work exists — the essence of a spike.
@@ -470,11 +470,11 @@ per member; only the member tag is new.
 
 ## 8. Phased implementation plan
 
-1. **Kernel** *(done in this spike)* — `internal/team/` + tests.
+1. **Kernel** *(done in this spike)* — `engine/team/` + tests.
 2. **Continuation seam** — `session.Reopen()` + state-machine tests.
 3. **Coordination tools** — `SendMessage`/`TaskCreate`/`TaskClaim`/`TaskComplete`
    as `tool.Tool`s over `*team.Team`; offline tests with `mockllm`.
-4. **Supervisor** — `internal/agent` driver loop, event fan-in, quiescence,
+4. **Supervisor** — `engine/agent` driver loop, event fan-in, quiescence,
    read-only-share/mutating-fork workspace policy; offline multi-member test
    (scripted `mockllm` per member) — the new gauntlet-style integration test.
 5. **Hook phases** — `TeammateIdle`/`TaskCreated`/`TaskCompleted`.

@@ -29,8 +29,8 @@ package permstore
 import (
 	"sync"
 
-	"github.com/stacklok/mecatl/internal/governance"
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // maxRulesPerSession caps a single session's learned-rule slice as a backstop

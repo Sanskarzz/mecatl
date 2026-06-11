@@ -139,11 +139,15 @@ OpenAI, gRPC, or the filesystem — those are adapters behind ports, wired toget
 
 ## Project layout
 
+`engine/` is the importable core (the domain, the ports, and the agent loop), intended
+to be importable as a library by external consumers; `internal/` holds the adapters and
+the composition layer.
+
 | Path | Contents |
 |---|---|
-| `internal/session`, `internal/governance`, `internal/tool`, `internal/prompt` | the domain (aggregate, permission/hook types, tool catalog + FS interfaces, prompt assembly) |
-| `internal/port` | the port interfaces the loop consumes |
-| `internal/agent` | the agent loop, dispatch, permission pause/resume, compaction, subagent |
+| `engine/session`, `engine/governance`, `engine/tool`, `engine/prompt` | the domain (aggregate, permission/hook types, tool catalog + FS interfaces, prompt assembly) |
+| `engine/port` | the port interfaces the loop consumes |
+| `engine/agent` | the agent loop, dispatch, permission pause/resume, compaction, subagent |
 | `internal/adapter/*` | adapters: `openai`, `mockllm`, `llmresilience`, `osfs`/`memfs`, `permpolicy`, `permclassify`, `hookexec`, `store/*`, `tools`, `toolkit`, `memory`, `dream`, `soul`, `forker`, `tokenizer`, `telemetry`, `mcp`, `server` |
 | `contracts/proto`, `contracts/gen` | gRPC contract (source of truth) and generated Go |
 | `cmd/mecated`, `cmd/mecademo` | the server (composition root) and the demo |
@@ -171,7 +175,7 @@ supported over streaming-HTTP transport only — stdio MCP is not, by design.**
 task            # list tasks
 task ci         # tidy → fmt → lint → test → build
 task generate   # regenerate contracts/gen from contracts/proto (needs buf)
-go test ./internal/agent/ -run TestFullCycle   # a single test
+go test ./engine/agent/ -run TestFullCycle   # a single test
 ```
 
 Tests are offline by design (a scripted mock provider + an in-memory filesystem); CI never

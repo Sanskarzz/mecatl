@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/team"
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/team"
 )
 
 // TestClassifyAddMemberErr pins the AddMember-failure → wire-sentinel mapping

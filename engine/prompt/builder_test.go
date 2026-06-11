@@ -1,0 +1,350 @@
+package prompt_test
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/stacklok/mecatl/engine/prompt"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
+	"github.com/stacklok/mecatl/internal/adapter/memfs"
+)
+
+func sampleTools() []tool.ToolSpec {
+	return []tool.ToolSpec{
+		{Name: "Read", Description: "Read a file's contents.\nMore detail here."},
+		{Name: "Edit", Description: "Edit a file in place."},
+		{Name: "Bash", Description: "Run a shell command."},
+	}
+}
+
+// TestStablePrefixByteStableAcrossEnv is the gauntlet #6 cache invariant: the
+// StablePrefix must be byte-identical across two builds that differ only in env
+// (date, cwd, model, mode).
+func TestStablePrefixByteStableAcrossEnv(t *testing.T) {
+	base := prompt.Config{Tools: sampleTools()}
+
+	cfgA := base
+	cfgA.Env = prompt.Env{
+		Cwd: "/home/a/proj", OS: "linux", Model: "model-x",
+		Date: "2026-05-29", Mode: "default",
+		Shell: "/bin/bash", GitStatus: "branch: main\nstatus:\n(clean)",
+	}
+	cfgB := base
+	cfgB.Env = prompt.Env{
+		Cwd: "/tmp/other", OS: "darwin", Model: "model-y",
+		Date: "1999-12-31", Mode: "plan",
+		Shell: "/bin/zsh", GitStatus: "branch: feature\nstatus:\n M file.go",
+	}
+
+	a := prompt.Build(cfgA)
+	b := prompt.Build(cfgB)
+
+	if a.StablePrefix != b.StablePrefix {
+		t.Fatalf("StablePrefix changed when only env changed:\nA=%q\nB=%q",
+			a.StablePrefix, b.StablePrefix)
+	}
+
+	// Determinism: same config builds the same prefix.
+	if prompt.Build(cfgA).StablePrefix != a.StablePrefix {
+		t.Fatal("StablePrefix not deterministic for identical config")
+	}
+
+	// The volatile suffix MUST differ since the env differs.
+	if a.VolatileSuffix == b.VolatileSuffix {
+		t.Fatal("VolatileSuffix identical despite differing env")
+	}
+}
+
+// TestStablePrefixContainsToolsAndNoVolatile asserts the prefix lists tool names
+// and contains no date/cwd/model leakage.
+func TestStablePrefixContainsToolsAndNoVolatile(t *testing.T) {
+	cfg := prompt.Config{
+		Tools: sampleTools(),
+		Env: prompt.Env{
+			Cwd: "/secret/cwd/path", OS: "linux", Model: "leaky-model-id",
+			Date: "2026-05-29", Mode: "acceptEdits",
+			Shell: "/secret/shell-path", GitStatus: "branch: secret-branch-marker",
+		},
+	}
+	got := prompt.Build(cfg).StablePrefix
+
+	for _, name := range []string{"Read", "Edit", "Bash"} {
+		if !strings.Contains(got, name) {
+			t.Errorf("StablePrefix missing tool name %q\nprefix=%q", name, got)
+		}
+	}
+	// One-line purpose should come from the first line only.
+	if strings.Contains(got, "More detail here.") {
+		t.Errorf("StablePrefix included non-first-line description text")
+	}
+
+	for _, vol := range []string{
+		"/secret/cwd/path", "leaky-model-id", "2026-05-29", "acceptEdits", "<env>",
+		"/secret/shell-path", "secret-branch-marker",
+	} {
+		if strings.Contains(got, vol) {
+			t.Errorf("StablePrefix leaked volatile value %q\nprefix=%q", vol, got)
+		}
+	}
+}
+
+func TestEnvBlockDeterministicAndComplete(t *testing.T) {
+	env := prompt.Env{
+		Cwd: "/w", OS: "linux", Model: "m1", Date: "2026-05-29", Mode: "default",
+		Shell: "/bin/bash", GitStatus: "branch: main\nstatus:\n(clean)",
+	}
+	first := prompt.EnvBlock(env)
+	second := prompt.EnvBlock(env)
+	if first != second {
+		t.Fatalf("EnvBlock not deterministic:\n1=%q\n2=%q", first, second)
+	}
+
+	for _, want := range []string{
+		"<env>", "</env>",
+		"cwd: /w", "os: linux", "model: m1",
+		"date: 2026-05-29", "permission-mode: default", "shell: /bin/bash",
+	} {
+		if !strings.Contains(first, want) {
+			t.Errorf("EnvBlock missing %q\ngot=%q", want, first)
+		}
+	}
+
+	// Stable key order: keys appear sorted alphabetically; shell sorts last.
+	wantOrder := []string{"cwd:", "date:", "model:", "os:", "permission-mode:", "shell:"}
+	idx := -1
+	for _, k := range wantOrder {
+		at := strings.Index(first, k)
+		if at <= idx {
+			t.Fatalf("EnvBlock key %q out of order in %q", k, first)
+		}
+		idx = at
+	}
+
+	// The multi-line git-status sub-block appears AFTER the sorted scalar pairs.
+	gsAt := strings.Index(first, "<git-status>")
+	if gsAt < idx {
+		t.Fatalf("EnvBlock <git-status> sub-block must come after the scalar pairs\ngot=%q", first)
+	}
+}
+
+// TestToolDisciplineHints exercises the generated tool-discipline guidance: a
+// full catalog emits every clause plus the reserve-Bash and parallel lines; a
+// Bash-absent catalog omits the reserve line; an empty catalog emits only the
+// parallel line with no dangling heading; and output is byte-stable on repeat.
+func TestToolDisciplineHints(t *testing.T) {
+	full := []tool.ToolSpec{
+		{Name: "Read"}, {Name: "Edit"}, {Name: "Write"}, {Name: "Glob"},
+		{Name: "Grep"}, {Name: "Bash"}, {Name: "Subagent"}, {Name: "Remember"},
+	}
+	got := prompt.Build(prompt.Config{Tools: full}).StablePrefix
+	for _, want := range []string{
+		"Use the dedicated tool when one fits:",
+		"Read (not cat/head/tail/sed) to read files",
+		"Edit (not sed/awk) to modify files",
+		"Write (not heredoc/echo) to create files",
+		"Glob (not find/ls) to locate files",
+		"Grep (not grep/rg) to search contents",
+		"Reserve Bash for real system/terminal commands.",
+		"Use Subagent to delegate independent read-only exploration.",
+		"Use the memory tools to persist or recall durable facts across sessions.",
+		"Make independent tool calls in parallel; never pass placeholder or guessed arguments.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("full-catalog hints missing %q\nprefix=%q", want, got)
+		}
+	}
+
+	// Bash absent → no reserve-Bash line.
+	noBash := prompt.Build(prompt.Config{Tools: []tool.ToolSpec{{Name: "Read"}}}).StablePrefix
+	if strings.Contains(noBash, "Reserve Bash") {
+		t.Errorf("Bash-absent catalog should omit the reserve-Bash line\nprefix=%q", noBash)
+	}
+	if !strings.Contains(noBash, "Make independent tool calls in parallel") {
+		t.Errorf("parallel line must always be present\nprefix=%q", noBash)
+	}
+
+	// Empty catalog → only the parallel line, NO dangling dedicated-tool heading.
+	empty := prompt.Build(prompt.Config{Tools: nil}).StablePrefix
+	if strings.Contains(empty, "Use the dedicated tool when one fits:") {
+		t.Errorf("empty catalog must not emit a dangling dedicated-tool heading\nprefix=%q", empty)
+	}
+	if !strings.Contains(empty, "Make independent tool calls in parallel") {
+		t.Errorf("empty catalog must still emit the parallel line\nprefix=%q", empty)
+	}
+
+	// Byte-stable on repeat.
+	if prompt.Build(prompt.Config{Tools: full}).StablePrefix != got {
+		t.Error("tool-discipline hints not byte-stable across identical builds")
+	}
+}
+
+// TestToolDisciplineHintsFixedEmitOrder asserts the dedicated-tool clauses are
+// emitted in the DOCUMENTED order (Read; Edit; Write; Glob; Grep) and that the
+// parallel-calls line is ALWAYS last. A reordering of the internal dedicated table
+// (or moving the unconditional parallel line) must fail this test.
+func TestToolDisciplineHintsFixedEmitOrder(t *testing.T) {
+	// Register the tools OUT of documented order to prove the emit order is fixed by
+	// the table, not by the caller's catalog order.
+	tools := []tool.ToolSpec{
+		{Name: "Grep"}, {Name: "Write"}, {Name: "Read"}, {Name: "Glob"}, {Name: "Edit"},
+	}
+	got := prompt.Build(prompt.Config{Tools: tools}).StablePrefix
+
+	ordered := []string{
+		"Read (not cat/head/tail/sed) to read files",
+		"Edit (not sed/awk) to modify files",
+		"Write (not heredoc/echo) to create files",
+		"Glob (not find/ls) to locate files",
+		"Grep (not grep/rg) to search contents",
+	}
+	prev := -1
+	for _, clause := range ordered {
+		at := strings.Index(got, clause)
+		if at < 0 {
+			t.Fatalf("clause %q absent\nprefix=%q", clause, got)
+		}
+		if at <= prev {
+			t.Errorf("clause %q out of documented order (index %d, previous %d)\nprefix=%q",
+				clause, at, prev, got)
+		}
+		prev = at
+	}
+
+	// The parallel-calls line must come AFTER every dedicated clause (i.e. last).
+	parallel := strings.Index(got, "Make independent tool calls in parallel")
+	if parallel < 0 {
+		t.Fatalf("parallel-calls line absent\nprefix=%q", got)
+	}
+	if parallel <= prev {
+		t.Errorf("parallel-calls line (index %d) is not LAST; a dedicated clause follows it (last clause at %d)\nprefix=%q",
+			parallel, prev, got)
+	}
+}
+
+// TestBuildPlanModeReminder asserts the plan-mode reminder rides the VOLATILE
+// suffix (it varies with the session mode) and never leaks into the cache-stable
+// prefix; non-plan modes emit no reminder.
+func TestBuildPlanModeReminder(t *testing.T) {
+	const marker = "Plan mode is active"
+
+	plan := prompt.Build(prompt.Config{Tools: sampleTools(), Env: prompt.Env{Mode: "plan"}})
+	if !strings.Contains(plan.VolatileSuffix, marker) {
+		t.Errorf("plan mode: reminder missing from VolatileSuffix\ngot=%q", plan.VolatileSuffix)
+	}
+	if strings.Contains(plan.StablePrefix, marker) {
+		t.Errorf("plan mode: reminder leaked into StablePrefix\ngot=%q", plan.StablePrefix)
+	}
+
+	def := prompt.Build(prompt.Config{Tools: sampleTools(), Env: prompt.Env{Mode: "default"}})
+	if strings.Contains(def.VolatileSuffix, marker) {
+		t.Errorf("default mode: unexpected plan reminder\ngot=%q", def.VolatileSuffix)
+	}
+}
+
+// TestEnvBlockGitStatusSubBlock verifies the multi-line git snapshot renders into
+// a dedicated <git-status> sub-block, an empty snapshot emits nothing, and the
+// rendering is deterministic.
+func TestEnvBlockGitStatusSubBlock(t *testing.T) {
+	withGit := prompt.EnvBlock(prompt.Env{GitStatus: "branch: main\nstatus:\n M a.go\ncommits:\nabc123 fix"})
+	if !strings.Contains(withGit, "<git-status>\nbranch: main\nstatus:\n M a.go\ncommits:\nabc123 fix\n</git-status>") {
+		t.Errorf("git-status sub-block not rendered as expected\ngot=%q", withGit)
+	}
+
+	noGit := prompt.EnvBlock(prompt.Env{Cwd: "/w"})
+	if strings.Contains(noGit, "<git-status>") {
+		t.Errorf("empty GitStatus must emit no sub-block\ngot=%q", noGit)
+	}
+
+	det1 := prompt.EnvBlock(prompt.Env{GitStatus: "branch: x"})
+	det2 := prompt.EnvBlock(prompt.Env{GitStatus: "branch: x"})
+	if det1 != det2 {
+		t.Error("EnvBlock with git-status not deterministic")
+	}
+}
+
+func TestDiscoverInstructionsAgentsPresent(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	mustWrite(t, ws, "AGENTS.md", "Use tabs, not spaces.")
+
+	msgs, err := prompt.DiscoverInstructions(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 message, got %d", len(msgs))
+	}
+	m := msgs[0]
+	if m.Role != session.RoleUser {
+		t.Errorf("want RoleUser, got %q", m.Role)
+	}
+	if !strings.Contains(m.Text, "Project instructions (AGENTS.md):") {
+		t.Errorf("missing provenance marker: %q", m.Text)
+	}
+	if !strings.Contains(m.Text, "Use tabs, not spaces.") {
+		t.Errorf("missing file content: %q", m.Text)
+	}
+}
+
+func TestDiscoverInstructionsNeitherPresent(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	msgs, err := prompt.DiscoverInstructions(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("want 0 messages, got %d", len(msgs))
+	}
+}
+
+// TestDiscoverInstructionsAgentsWinsOverClaude documents and verifies the chosen
+// precedence: when both files exist, AGENTS.md wins and CLAUDE.md is ignored.
+func TestDiscoverInstructionsAgentsWinsOverClaude(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	mustWrite(t, ws, "AGENTS.md", "AGENTS content")
+	mustWrite(t, ws, "CLAUDE.md", "CLAUDE content")
+
+	msgs, err := prompt.DiscoverInstructions(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("want exactly 1 message (AGENTS wins), got %d", len(msgs))
+	}
+	if !strings.Contains(msgs[0].Text, "AGENTS content") {
+		t.Errorf("expected AGENTS.md content, got %q", msgs[0].Text)
+	}
+	if strings.Contains(msgs[0].Text, "CLAUDE content") {
+		t.Errorf("CLAUDE.md should be ignored when AGENTS.md present: %q", msgs[0].Text)
+	}
+}
+
+// TestDiscoverInstructionsClaudeFallback verifies CLAUDE.md is used when only it
+// exists, and that an empty AGENTS.md falls through to it.
+func TestDiscoverInstructionsClaudeFallback(t *testing.T) {
+	ws := memfs.NewWorkspace("/proj")
+	mustWrite(t, ws, "AGENTS.md", "   \n\t  ") // whitespace-only -> treated as absent
+	mustWrite(t, ws, "CLAUDE.md", "CLAUDE fallback content")
+
+	msgs, err := prompt.DiscoverInstructions(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 message, got %d", len(msgs))
+	}
+	if !strings.Contains(msgs[0].Text, "Project instructions (CLAUDE.md):") {
+		t.Errorf("missing CLAUDE.md provenance marker: %q", msgs[0].Text)
+	}
+	if !strings.Contains(msgs[0].Text, "CLAUDE fallback content") {
+		t.Errorf("missing CLAUDE.md content: %q", msgs[0].Text)
+	}
+}
+
+func mustWrite(t *testing.T, ws tool.Workspace, path, content string) {
+	t.Helper()
+	if err := ws.Write(context.Background(), path, []byte(content)); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}

@@ -31,7 +31,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/engine/governance"
 )
 
 // DefaultTimeout bounds a single hook invocation when no timeout is supplied.

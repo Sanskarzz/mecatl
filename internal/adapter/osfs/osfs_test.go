@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/fsconformance"
 	"github.com/stacklok/mecatl/internal/adapter/gitenv"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // TestConformance runs the shared Workspace conformance table against osfs.

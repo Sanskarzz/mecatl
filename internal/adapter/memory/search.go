@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 // BM25 ranking constants and search paging bounds. These are local, fixed

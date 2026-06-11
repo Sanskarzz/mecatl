@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // projector.go is the ACP analogue of internal/adapter/server/mapper.go: it
@@ -169,7 +169,7 @@ func diffContentFor(name string, args []byte) []toolCallContent {
 //   - A BLOCKED PreToolUse hook that carries the originating tool-call id marks that
 //     exact tool_call_update FAILED with the veto reason. The veto lands ON the tool
 //     card the loop opened BEFORE the permission/hook gate (see openCard in
-//     internal/agent/dispatch.go), so the id is always one the client has seen. The
+//     engine/agent/dispatch.go), so the id is always one the client has seen. The
 //     PreToolUse block also emits a synthesized error EvToolResult on the same id,
 //     which projects to its own FAILED update — two `failed` updates settle the same
 //     already-open card, which is harmless (the hook update carries the veto reason,
@@ -180,7 +180,7 @@ func diffContentFor(name string, args []byte) []toolCallContent {
 //     the block as a thought avoids overwriting that with a spurious `failed`.
 //
 // The phase guard is a STRING compare against "PreToolUse" because the acp package
-// must not import internal/governance; that value is string(governance.PhasePreToolUse).
+// must not import engine/governance; that value is string(governance.PhasePreToolUse).
 func projectHook(ev session.Event) (any, bool) {
 	if ev.Hook == nil {
 		return nil, false

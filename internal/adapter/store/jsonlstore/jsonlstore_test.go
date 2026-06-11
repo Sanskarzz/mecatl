@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
-	"github.com/stacklok/mecatl/internal/session"
 )
 
 func newStore(t *testing.T) (*jsonlstore.Store, string) {

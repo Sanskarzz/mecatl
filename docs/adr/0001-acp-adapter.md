@@ -209,7 +209,7 @@ would add noise before the first progress line.
    tool-call id (`HookPayload.CallID`, added for issue #6) projects to a `failed`
    `tool_call_update` keyed by that id, so the veto lands ON the tool card. This is
    safe because the loop now opens the `tool_call` card BEFORE the permission/hook
-   gate (`openCard` in `internal/agent/dispatch.go`), so the id is always one the
+   gate (`openCard` in `engine/agent/dispatch.go`), so the id is always one the
    client has already seen — the earlier "phantom card" risk (an update for an
    unopened id) is gone. The PreToolUse block also emits a synthesized error
    `EvToolResult` on the same id, which projects to its own `failed` update; both
@@ -218,7 +218,7 @@ would add noise before the first progress line.
    ran and its (successful) `EvToolResult` settles the card, so failing the card
    would wrongly overwrite a completed result. Every other hook (a prompt/arg
    rewrite, a Stop notice, a hook with no call id) is likewise a thought chunk.
-   Because the acp package must not import `internal/governance`, the phase guard
+   Because the acp package must not import `engine/governance`, the phase guard
    compares `HookPayload.Phase` against the string `"PreToolUse"`.
 
 4. **Modes + commands.** Phase 2 deferred these; the bounded pieces landed in

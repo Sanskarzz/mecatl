@@ -13,6 +13,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/prompt"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/team"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
@@ -20,13 +27,6 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/permstore"
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/governance"
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/prompt"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/team"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // demoWorkspaceRoot is the root the in-memory demo workspace is mounted at.

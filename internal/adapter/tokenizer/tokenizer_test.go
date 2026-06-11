@@ -3,8 +3,8 @@ package tokenizer_test
 import (
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/tokenizer"
-	"github.com/stacklok/mecatl/internal/session"
 )
 
 // TestCountKnownStrings checks the tiktoken-backed counter returns the canonical

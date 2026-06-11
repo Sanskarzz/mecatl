@@ -19,7 +19,7 @@ import (
 // The prompt is COMPOSITION-side: it runs in the cmd/mecatui main, in the pre-TUI
 // window (before the Bubble Tea alt screen starts, where the other startup stderr
 // notices already live). It is NOT in the ui/ render package — ui/theme/client
-// render purely from proto Events and import no internal/... package. The prompt
+// render purely from proto Events and import no engine/... or internal/... package. The prompt
 // imports internal/app (the trust fold + the Remember write seam), which is allowed
 // HERE: cmd/mecatui's main is a composition root, exactly like cmd/mecated. No proto
 // event is added (the in-TUI trust modal is the cut Phase 3).

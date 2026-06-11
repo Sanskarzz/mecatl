@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // runawayProvider is an ADVERSARIAL provider that emits a tool call + per-turn usage

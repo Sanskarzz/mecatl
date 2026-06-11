@@ -3,7 +3,7 @@ package permconfig
 import (
 	"testing"
 
-	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/engine/governance"
 )
 
 // findRule returns the first rule matching tool+pattern, or nil.

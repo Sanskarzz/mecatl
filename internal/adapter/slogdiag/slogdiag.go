@@ -15,7 +15,7 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/engine/port"
 )
 
 // Diagnostics is a port.Diagnostics backed by a *slog.Logger.

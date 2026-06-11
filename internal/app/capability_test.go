@@ -3,9 +3,9 @@ package app
 import (
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // regWithProvider builds a single-entry registry whose one provider id is backed

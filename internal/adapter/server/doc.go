@@ -13,8 +13,8 @@
 //
 // Both surfaces translate session.Event into the proto Event with the pure
 // toProto mapper; neither surface ever sees an OpenAI type. As an adapter this
-// package MAY import internal/agent, internal/session, internal/tool,
-// internal/port and the generated contracts/gen/go.
+// package MAY import engine/agent, engine/session, engine/tool,
+// engine/port and the generated contracts/gen/go.
 //
 // Required-field validation is enforced here in Go (the proto carries
 // buf.validate annotations for documentation and future runtime enforcement;

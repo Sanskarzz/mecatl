@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/governance"
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // Compile-time assertion the decorator satisfies the frozen port interface.

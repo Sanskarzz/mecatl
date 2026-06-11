@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/forker"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // osfsWorkspace adapts osfs.NewWorkspace to the forker's constructor signature.

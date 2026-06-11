@@ -8,7 +8,7 @@ import (
 
 	"github.com/adrg/xdg"
 
-	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/engine/port"
 )
 
 // TestEmbeddedConfigEnablesAgentDefs asserts the embedded server enables conventional

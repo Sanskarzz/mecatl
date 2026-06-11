@@ -3,8 +3,8 @@ package tools
 import (
 	"context"
 
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 // webFetchDescription is the model-facing documentation for the WebFetch stub.

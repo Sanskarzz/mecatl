@@ -31,7 +31,7 @@
 // *BreakerError for BreakerCooldown; it then half-opens to admit a single trial.
 // Any success resets it. All breaker state is concurrency-safe.
 //
-// The package depends only on the standard library and internal/port; the
+// The package depends only on the standard library and engine/port; the
 // classifier reaches *openai.Error via errors.As to read its StatusCode, which
 // is acceptable for an adapter.
 package llmresilience
@@ -48,7 +48,7 @@ import (
 
 	oai "github.com/openai/openai-go/v3"
 
-	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/engine/port"
 )
 
 // Config tunes the resilience decorator. The zero value is usable but inert

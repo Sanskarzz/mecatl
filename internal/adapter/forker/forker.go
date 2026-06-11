@@ -85,8 +85,8 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/gitenv"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // childRoot is the constructor the forker uses to build a child tool.Workspace

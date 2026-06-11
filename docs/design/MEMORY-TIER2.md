@@ -88,7 +88,7 @@ that direction — each has a recommendation:
 
 ### The stated gap
 
-The tier-0 index (`internal/prompt/memoryindex.go:30-33`) caps at **200
+The tier-0 index (`engine/prompt/memoryindex.go:30-33`) caps at **200
 entries / 8 KB**, trims **oldest-first** (`keepNewest`,
 `memoryindex.go:162-175`), and prints a footer:
 `...(N older entries not shown; Recall a key or prefix to load them)`
@@ -419,7 +419,7 @@ half** — flagged for your call.
 
 ### 1. `port.Embedder` (new domain port, stdlib only)
 
-New file `internal/port/embedder.go`. `port` already imports only domain +
+New file `engine/port/embedder.go`. `port` already imports only domain +
 stdlib (`port/llm.go:1-14`); `Embedder` adds NO import (it uses `context` +
 `[]float32`), so the package stays clean.
 
@@ -627,7 +627,7 @@ on evidence. (D-T3.2.)
 **Store gains ONE method (D-T3.4) — and owns cosine, not the embedder:**
 
 ```go
-// internal/tool/tool.go — add to MemoryStore (alongside Index, store.go owner).
+// engine/tool/tool.go — add to MemoryStore (alongside Index, store.go owner).
 //
 // SearchSemantic ranks stored entries by cosine similarity to queryVec and
 // returns the top k as MemoryEntry values with the VALUE OMITTED (like Index) —
@@ -766,8 +766,8 @@ configured.**
 
 | Thing | Package | Layer | Depends on |
 |---|---|---|---|
-| `port.Embedder` | `internal/port` | domain port | `context` + `[]float32` only — no new import (`port/llm.go:1-14`) |
-| `tool.MemoryStore.SearchSemantic`/`BackfillEmbeddings`, `EmbeddedVector` | `internal/tool` | domain | stdlib + `MemoryEntry` (already there, `tool.go:171`) |
+| `port.Embedder` | `engine/port` | domain port | `context` + `[]float32` only — no new import (`port/llm.go:1-14`) |
+| `tool.MemoryStore.SearchSemantic`/`BackfillEmbeddings`, `EmbeddedVector` | `engine/tool` | domain | stdlib + `MemoryEntry` (already there, `tool.go:171`) |
 | OpenAI `Embedder` | `internal/adapter/openai` | adapter | the SDK already in `go.mod`; meets `port.Embedder` |
 | vector persistence + cosine | `internal/adapter/memory` | adapter | `tool.MemoryStore` (implements it) |
 | `SemanticRecall` tool | `internal/adapter/memory` | adapter | `tool.MemoryStore` + `port.Embedder` (both domain interfaces) |
@@ -865,7 +865,7 @@ off by default and the demo configures no embedder).
 **Phase 1 — the seam + adapter + mock + wiring, NO tool yet.** Ships green and
 inert (nothing registers the tool):
 
-- `internal/port/embedder.go`: `port.Embedder` (§1).
+- `engine/port/embedder.go`: `port.Embedder` (§1).
 - `internal/adapter/openai/embedder.go`: the OpenAI `Embedder` + `Model()` +
   `WithEmbeddingModel` option (§3); `embedder_test.go` fixture translation test.
 - `internal/adapter/memory/mockembed_test.go` (or a small `mockembed` test
@@ -877,7 +877,7 @@ inert (nothing registers the tool):
 
 **Phase 2 — vector storage + the tool + cosine + caps.** Builds on Phase 1:
 
-- `internal/tool/tool.go`: `EmbeddedVector`, `MemoryStore.SearchSemantic` +
+- `engine/tool/tool.go`: `EmbeddedVector`, `MemoryStore.SearchSemantic` +
   `BackfillEmbeddings` (§5).
 - `internal/adapter/memory/store.go`: `record.Embedding`/`EmbeddingModel`,
   `SearchSemantic` (cosine scan + missing/stale detection),
@@ -898,9 +898,9 @@ write amplification is measured to bite (§4); embedder resilience decorator;
 
 ### 10. File-by-file change list
 
-**Domain — `internal/port/embedder.go`** (NEW): `Embedder` interface (§1).
+**Domain — `engine/port/embedder.go`** (NEW): `Embedder` interface (§1).
 
-**Domain — `internal/tool/tool.go`**: add `EmbeddedVector` type and
+**Domain — `engine/tool/tool.go`**: add `EmbeddedVector` type and
 `MemoryStore.SearchSemantic` + `BackfillEmbeddings` (near `MemoryEntry`/
 `MemoryStore`, `tool.go:171-226`). `MemoryEntry` UNCHANGED (no vector field).
 
@@ -925,7 +925,7 @@ description, `ReadOnly()==true`, embed→search→backfill→render flow (§5). 
 **Adapter — `internal/adapter/memory/tools.go`**: `recallDescription`
 (`tools.go:72-92`) gains a one-line SemanticRecall cross-ref.
 
-**Domain — `internal/prompt/memoryindex.go`**: footer (`memoryindex.go:154`)
+**Domain — `engine/prompt/memoryindex.go`**: footer (`memoryindex.go:154`)
 mentions SemanticRecall as the find-by-meaning path (string only).
 
 **Composition — `internal/app/build.go`**: `Config.SemanticRecall` +

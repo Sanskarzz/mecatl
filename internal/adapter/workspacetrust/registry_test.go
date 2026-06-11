@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // realConfigEnv returns an env rooted at a REAL temp config dir: $XDG_CONFIG_HOME

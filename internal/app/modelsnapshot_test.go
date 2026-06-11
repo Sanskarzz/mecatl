@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // fakeRegistry builds a providerRegistry whose entries are the given available

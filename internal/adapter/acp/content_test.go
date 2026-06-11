@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // pngData is a few inline bytes used as image content; the validators check the

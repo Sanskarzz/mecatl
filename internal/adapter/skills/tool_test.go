@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // sampleSkills is a small fixed set used across the tool tests.

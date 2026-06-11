@@ -4,9 +4,9 @@ import (
 	"context"
 	"sync"
 
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/governance"
-	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/port"
 )
 
 // userModelReviewHooks is the composition-layer Stop-trigger DECORATOR for the

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/store/sessnap"
-	"github.com/stacklok/mecatl/internal/session"
 )
 
 // runningSession builds a session in StateRunning carrying conversation,

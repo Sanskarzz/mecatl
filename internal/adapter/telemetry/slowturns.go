@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // DefaultSlowTurnCapacity is the fixed size of the slow-turn ring buffer. The

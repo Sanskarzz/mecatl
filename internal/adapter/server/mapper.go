@@ -5,10 +5,10 @@ import (
 	"math"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/mcp/source"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/team"
 )
 
 // contentFromProto maps the proto Content parts of a multimodal prompt into the
@@ -239,7 +239,7 @@ func toProtoTeamMemberStopReason(r string) mecatlv1.TeamMemberStopReason {
 // toProtoTeamTaskSnapshot maps a session.TeamTaskSnapshot (the task-list projection
 // carried on the team event stream) to its proto TeamTask form. It is distinct from
 // toProtoTeamTask, which takes a team.Task off the ListTeam RPC path: a TeamPayload
-// carries the already-projected snapshot (session must not import internal/team), so
+// carries the already-projected snapshot (session must not import engine/team), so
 // the snapshot's Deps are already []string and copied verbatim here.
 func toProtoTeamTaskSnapshot(t session.TeamTaskSnapshot) *mecatlv1.TeamTask {
 	deps := make([]string, len(t.Deps))

@@ -4,14 +4,14 @@ import (
 	"context"
 	"path/filepath"
 
+	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/prompt"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/soul"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
-	"github.com/stacklok/mecatl/internal/governance"
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/prompt"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // soulEnv is the PATH-RESOLUTION environment used to resolve the conventional
@@ -23,7 +23,7 @@ var soulEnv = xdgconfig.OSEnv
 
 // soulselect.go is the composition-layer SOUL PROVENANCE + TRUST GATE (issue #14,
 // Phase 3, Item 2). The soul is fenced DATA, never a permission scope, so this is
-// NOT routed through internal/governance — but it REUSES the issue-#13 trust gate
+// NOT routed through engine/governance — but it REUSES the issue-#13 trust gate
 // (Config.TrustProject) so an imported/project-sourced soul is governed by the
 // EXACT same operator gesture that gates a project's ALLOW permission rules. As of
 // the Workspace-Trust feature (Phase 1), Config.TrustProject carries the FOLDED
@@ -58,7 +58,7 @@ const projectSoulSubpath = ".mecatl/soul.md"
 
 // soulProvenance records WHERE a selected soul originated, for Item 3's read-only
 // TUI inspector. It is a composition-level concern: the soul adapter is a pure
-// loader (it neither knows nor cares about provenance), and internal/prompt stays
+// loader (it neither knows nor cares about provenance), and engine/prompt stays
 // trust-unaware (the SoulSource interface is unchanged).
 type soulProvenance int
 

@@ -12,9 +12,9 @@ import (
 	"testing"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/openrouter"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // fixtureClient serves the trimmed openrouter fixture for the whole-Build e2e.

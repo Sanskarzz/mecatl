@@ -7,7 +7,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
-	"github.com/stacklok/mecatl/internal/agent"
+	"github.com/stacklok/mecatl/engine/agent"
 )
 
 // grpc_team.go implements the agent-team RPCs over the shared Service. Event

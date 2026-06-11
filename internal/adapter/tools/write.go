@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 // writeDescription is the model-facing documentation for the Write tool.

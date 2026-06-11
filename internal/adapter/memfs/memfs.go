@@ -27,7 +27,7 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 // ErrPathEscape is returned when a session-relative path resolves outside the

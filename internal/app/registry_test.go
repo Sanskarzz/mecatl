@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
 )
 
 // fakeEnv builds an envDetector backed by a fixed map, so registry construction

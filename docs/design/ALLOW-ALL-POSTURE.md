@@ -45,7 +45,7 @@ the gRPC mapper, the ACP mode picker, the `mecatui` flag, and short-circuited
 Three fatal problems:
 
 ### 1. It defeats `ScopeManaged` deny — the one thing governance must never allow
-The core invariant (`internal/governance/evaluator.go`, CLAUDE.md) is *"a Deny in
+The core invariant (`engine/governance/evaluator.go`, CLAUDE.md) is *"a Deny in
 ANY scope is absolute,"* with `ScopeManaged` as the admin/enterprise floor that no
 lower scope — and **no CLI arg** — may override. The spike returned `Allow` in the
 adapter, before any deny was evaluated, so a session flipping to `yolo` defeated a
@@ -86,7 +86,7 @@ agentdefs, evaluator, tests).
 The governance fold is deny → ask → allow, with the one narrow loosening: a
 higher-scope `Allow` may relax **only** a `ScopeBuiltinDefault` `Ask` (the built-in
 mutate-ask floor); it never suppresses a configured `Ask`, and a `Deny` in any
-scope always wins (`internal/governance/evaluator.go`).
+scope always wins (`engine/governance/evaluator.go`).
 
 So injecting **one** rule at `ScopeCLI` —
 

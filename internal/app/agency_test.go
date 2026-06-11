@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
-	"github.com/stacklok/mecatl/internal/prompt"
 )
 
 // TestAgencyDelta verifies the per-model agency contract is OMITTED for the

@@ -7,7 +7,7 @@
 //
 // # Where it sits
 //
-// Layer 1 (internal/adapter/permpolicy over internal/governance) is a fast,
+// Layer 1 (internal/adapter/permpolicy over engine/governance) is a fast,
 // deterministic deny → ask → allow pre-parser with plan-mode gating and
 // compound-Bash splitting. This package adds layer 2: for the ambiguous middle
 // — the calls layer 1 routes to Ask — it consults a model (any
@@ -60,11 +60,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stacklok/mecatl/internal/governance"
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/prompt"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/prompt"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 // defaultTimeout bounds a single classification when Config.Timeout is 0. It is

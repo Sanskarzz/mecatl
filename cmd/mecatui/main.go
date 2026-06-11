@@ -12,7 +12,7 @@
 // embed.
 //
 // Architectural boundary: the render packages (ui, theme) and the client package
-// import no internal/... package and no proto directly — they render purely from
+// import no engine/... or internal/... package and no proto directly — they render purely from
 // proto Events. Hosting the embedded server makes the cmd/mecatui MAIN (and its
 // embed subpackage) a second composition root, alongside cmd/mecated; that import
 // of internal/app + the server adapter is confined HERE and to cmd/mecatui/embed.
@@ -38,10 +38,10 @@ import (
 	"github.com/stacklok/mecatl/cmd/mecatui/theme"
 	"github.com/stacklok/mecatl/cmd/mecatui/ui"
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 	"github.com/stacklok/mecatl/internal/app"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 func main() {

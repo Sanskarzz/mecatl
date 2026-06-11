@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 func TestUserImageBase64Block(t *testing.T) {

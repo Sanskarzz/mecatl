@@ -76,7 +76,7 @@ func trimDecimal(v float64) string {
 }
 
 // cacheHitRate computes the session cache-hit rate exactly as
-// internal/session/usage.go does: CacheReadTokens / InputTokens, guarded against
+// engine/session/usage.go does: CacheReadTokens / InputTokens, guarded against
 // divide-by-zero (→ 0). The result is a fraction in [0,1].
 func cacheHitRate(u client.Usage) float64 {
 	if u.InputTokens <= 0 {

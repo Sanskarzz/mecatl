@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // fsCallTimeout bounds a single outbound fs/read_text_file / fs/write_text_file

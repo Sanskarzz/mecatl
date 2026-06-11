@@ -42,6 +42,8 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/mcpperf"
@@ -49,9 +51,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
-	"github.com/stacklok/mecatl/internal/agent"
 	"github.com/stacklok/mecatl/internal/app"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // TRUST MODEL (security): the mecated API exposes command and file execution

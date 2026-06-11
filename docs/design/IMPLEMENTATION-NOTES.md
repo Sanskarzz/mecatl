@@ -13,7 +13,7 @@ Prefer updating the relevant design doc + this file over re-growing CLAUDE.md.
 
 ---
 
-## Domain — `internal/session/` (lifecycle recovery)
+## Domain — `engine/session/` (lifecycle recovery)
 
 A turn always drives the `Session` aggregate to a terminal state within one
 `Engine.Run`; the engine never recovers it. Two intention-revealing seams
@@ -52,7 +52,7 @@ rejected every later prompt with `RecordUserPrompt from "cancelled"`. Regression
 
 ---
 
-## Domain — `internal/governance/`
+## Domain — `engine/governance/`
 
 Permission `Effect`/`Scope`/`Rule` + `Evaluator`, bash splitting/canonicalization, hook
 event types. **Session-free** (`session` imports `governance`, never the reverse).
@@ -77,7 +77,7 @@ invariants above are structurally untouched. `soul:apply` is consulted at **soul
 time)** in `selectSoulSource` via the same evaluator/resolver (Allow⇒apply, Deny⇒withhold,
 **Ask⇒withhold** — no interactive build-time gate).
 
-## Domain — `internal/prompt/`
+## Domain — `engine/prompt/`
 
 Two-layer prompt assembly + AGENTS.md/CLAUDE.md discovery; the turn-0 `InstructionAssembler`
 chain and its consumer-local ports (`MemoryIndexSource`, `SoulSource` — issue #14 Phase 1's
@@ -91,7 +91,7 @@ USER-vs-PROJECT provenance + `--trust-project` gate + USER-WINS precedence are d
 source — `prompt` neither knows nor cares which provenance won (the `SoulSource` interface is
 unchanged).
 
-## Port — `internal/port/`
+## Port — `engine/port/`
 
 The PORT interfaces the loop consumes (`LLMProvider`, `SessionStore`, `HookRunner`,
 `PermissionPolicy`, `Clock`, `Logger`, `EventSink`). `PermissionPolicy.Evaluate` carries the
@@ -99,7 +99,7 @@ session as a READ-ONLY `tool.WorkspaceReader` (Root+Read+Stat — issue #13) so 
 config resolves per-session against that root without a mutate-capable handle; `ws` may be nil
 (child/member engines with no resolver).
 
-## Application — `internal/agent/` (subagent workspace policy)
+## Application — `engine/agent/` (subagent workspace policy)
 
 The loop (`Engine`/`Run`), dispatch, permission pause/resume, compaction, the Subagent delegation tool,
 and the agent-team `Supervisor`/`TeamTool`. (See `AGENT-TEAMS-SPIKE.md`.)
@@ -251,7 +251,7 @@ factory owns adapter construction), never a `taskArgs`/`port.LLMRequest` field. 
 
 **Subagent structured output (`output_schema` + `SubmitResult` + bounded validation-retry).** When
 `taskArgs.OutputSchema` (a model-authored JSON schema) is present, the child is given a synthetic
-`SubmitResult` tool (`internal/agent/structuredoutput.go`) whose PARAMETERS ARE that schema,
+`SubmitResult` tool (`engine/agent/structuredoutput.go`) whose PARAMETERS ARE that schema,
 injected run-scoped via the new `RunOptions.ExtraTools` (never registered into the shared catalog,
 so concurrent runs of the same engine never see it). The child prompt is augmented to "call
 SubmitResult to deliver" — NO `tool_choice` forcing (incompatible with Anthropic thinking + the
@@ -887,7 +887,7 @@ holds) after every turn and after synthesis, under collision-free ids namespaced
 supervisor's `sessionID` prefix and the `InspectMember` tool's id derivation route through, so
 they can't drift). The team id is the parent call id (Team tool) or the server-assigned
 `team-<NewID()>` (gRPC, computed BEFORE `NewSupervisor` so the prefix can carry it). The parent
-catalog's read-only **`InspectMember`** tool (`internal/agent/teaminspect.go`) loads ONE member's
+catalog's read-only **`InspectMember`** tool (`engine/agent/teaminspect.go`) loads ONE member's
 transcript by (team id, member) and returns a BOUNDED rendering — it is PULL, never auto-injects
 (gauntlet #7's no-auto-injection property holds: the transcript enters the parent conversation
 only as that tool's own `ToolResult`).
@@ -906,9 +906,9 @@ closed `MemberDisposition` (`done`/`stopped`). The cause→reason classification
 this ordering a genuine cancellation would collapse into `error`); a failed `Reopen` folds into
 `error`; `budget` is the residual lifetime-cap cause; `StopNoProgress` and a clean idle stay
 `done` (no special handling — `runTurn` never marks them stopped). The snapshot rides
-`session.TeamMemberDisposition` (domain, plain strings) bridged in `internal/agent`
+`session.TeamMemberDisposition` (domain, plain strings) bridged in `engine/agent`
 (`projectTeamDispositions`) exactly like the tasks/findings bridges (session never imports
-`internal/team`), maps to the proto `TeamMemberDisposition` (`bool stopped` + closed-enum
+`engine/team`), maps to the proto `TeamMemberDisposition` (`bool stopped` + closed-enum
 `TeamMemberStopReason` — `(done, error)` non-representable) via `toProtoTeam` /
 `toProtoTeamMemberStopReason`, and the mecatui client decodes it to `client.TeamMemberDisposition`
 → the lane's `stopped`/`stopReason`. It is CONSUMED BY THE CLIENT OVERLAY, NOT the model (the
@@ -1202,7 +1202,7 @@ unwinds on every path.
 The single shared assembly of provider + catalog + policy + engine into a `server.Service`
 (`app.Build(ctx, Config)`). Both composition roots consume it — `cmd/mecated` (serves it over
 TCP) and `cmd/mecatui` (hosts it embedded over a UNIX socket). It MAY import adapters,
-`internal/agent`, and (via the `server` adapter) `contracts/gen`; nothing imports it except the
+`engine/agent`, and (via the `server` adapter) `contracts/gen`; nothing imports it except the
 `cmd/` mains.
 
 **Provider registry (Phase 0, S1, `registry.go`):** `buildProviderRegistry(cfg, detect
@@ -1546,13 +1546,13 @@ coordinating roster (tasks + findings + mailbox). **TRIP-WIRE: a 4th delegation 
 point to extract a shared `ChildActivity` value object — not before** (recorded in the
 `session.event.go` doc-comment above the three payloads).
 
-- **Server** (`internal/session/event.go`): `EvParallelStart` / `EvParallelBranch` /
+- **Server** (`engine/session/event.go`): `EvParallelStart` / `EvParallelBranch` /
   `EvParallelEnd` + `session.ParallelPayload` (string-passthrough like `subagent.*`; a
   `ParallelEventKind` discriminates the per-branch `branch_start`/`branch_tool`/`branch_end`
   transitions). It is METADATA ONLY — no branch message text, tool args, or result bodies; it
   carries fork-root PATHS (handles already in the result text, not branch content). `Event.Parallel`
   mirrors `Event.Subagent`/`Event.Team`.
-- **Emission** (`internal/agent/parallel.go`): `ExecuteWithParent` (the `childCapableTool` seam the
+- **Emission** (`engine/agent/parallel.go`): `ExecuteWithParent` (the `childCapableTool` seam the
   dispatcher prefers — emit was already plumbed) brackets the run with `parallel.start`/`parallel.end`
   and each branch with `branch_start`/`branch_end` via a small `branchEmitter` carrier (the plan's
   Q1 carrier: `emit` + `parentCallID`, nil-safe so the plain `Execute` path is byte-identical).

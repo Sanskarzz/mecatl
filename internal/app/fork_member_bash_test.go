@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/memfs"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/team"
 )
 
 // These tests cover the workspace-aware-Bash follow-up: a forked/other-workspace

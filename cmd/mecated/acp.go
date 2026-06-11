@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/acp"
 	"github.com/stacklok/mecatl/internal/adapter/server"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // serveACP runs the Agent Client Protocol stdio loop: it speaks JSON-RPC 2.0 to

@@ -7,9 +7,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/toolkit"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // Tool names for the resource meta-tools. These are HARNESS-LEVEL meta-tools

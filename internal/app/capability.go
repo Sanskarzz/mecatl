@@ -1,8 +1,8 @@
 package app
 
 import (
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // modelCapability is the SINGLE SOURCE of a (provider, model)'s true input

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // TestToProtoTable round-trips every EventType and each structured submessage

@@ -19,7 +19,7 @@ import (
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/sdk/metric"
 
-	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/engine/port"
 )
 
 // --- pprof ---

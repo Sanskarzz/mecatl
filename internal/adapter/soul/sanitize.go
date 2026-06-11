@@ -1,8 +1,8 @@
 package soul
 
 import (
+	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
-	"github.com/stacklok/mecatl/internal/prompt"
 )
 
 // Compile-time assertion that *Store satisfies the prompt-defined SoulSource

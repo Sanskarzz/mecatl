@@ -9,10 +9,10 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/hashutil"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
-	"github.com/stacklok/mecatl/internal/prompt"
 )
 
 // syscallNoFollow is syscall.O_NOFOLLOW (Linux/Unix), so a bounded anchor-file read

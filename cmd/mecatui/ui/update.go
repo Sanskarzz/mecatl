@@ -1011,7 +1011,7 @@ func (m Model) onPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 
 // isChildAsk reports whether askID identifies a surfaced SUBAGENT (child)
 // permission ask rather than one from the main session. The askID namespace
-// contract (internal/agent/dispatch.go newAskID; CLAUDE.md: "the child session id
+// contract (engine/agent/dispatch.go newAskID; CLAUDE.md: "the child session id
 // IS the namespace") is "<sessionID>:<n>:<callID>:r<runSerial>" — only the
 // LEADING "<sessionID>:" prefix is consumed here (the trailing run-serial is the
 // server's per-run uniqueness suffix and is opaque to the client). A MAIN-agent

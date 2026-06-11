@@ -3,12 +3,12 @@ package app
 import (
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/prompt"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
-	"github.com/stacklok/mecatl/internal/governance"
-	"github.com/stacklok/mecatl/internal/prompt"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // TestInteractiveWiringMainCarriesCfgChildForcesFalse (T5) proves the composition wiring

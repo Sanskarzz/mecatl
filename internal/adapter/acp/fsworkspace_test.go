@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
-	"github.com/stacklok/mecatl/internal/session"
 )
 
 // fsPeer is a scripted ACP CLIENT for fsWorkspace unit tests: it answers the

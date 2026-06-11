@@ -14,15 +14,15 @@ import (
 	"time"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/mcp/source"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // WorkspaceFactory builds the session-scoped tool.Workspace for a session root.
@@ -239,7 +239,7 @@ type Config struct {
 	SessionEngine SessionEngineFactory
 
 	// MemberEngine builds a team member's Engine from the shared team and the
-	// member spec (see internal/agent.MemberEngine). It is the seam that wires
+	// member spec (see engine/agent.MemberEngine). It is the seam that wires
 	// the agent-team RPCs: when nil, those RPCs return ErrTeamsDisabled. The
 	// composition root supplies it (internal/app), capturing the per-member
 	// catalog (read-only base + MemberTools, plus mutating tools only for a

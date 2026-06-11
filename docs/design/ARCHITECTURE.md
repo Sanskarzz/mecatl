@@ -56,7 +56,7 @@ interfaces*. The **application** (`agent`) is the use-case layer: it is the agen
 and knows only ports. **Adapters** implement ports and depend inward on the domain;
 nothing in the domain imports an adapter, the OpenAI SDK, grpc-go, or `os`.
 
-Ports are defined **where they are consumed** (in `internal/port`, imported by `agent`),
+Ports are defined **where they are consumed** (in `engine/port`, imported by `agent`),
 per Go idiom "accept interfaces". Adapters return concrete structs.
 
 ---
@@ -85,9 +85,11 @@ is correct, because a ToolCall *is* the same concept across all three.
 
 ## 3. Go package layout
 
-`internal/` for everything not meant as a stable public API. `pkg/` is **not** used in
-v1 — there is no third-party-stable surface yet; the public surface is the proto/HTTP
-API, not Go symbols. (Re-evaluate `pkg/sdk` once an external Go consumer exists. YAGNI.)
+`engine/` holds the importable core — the domain packages, the port interfaces, and
+the agent loop — intended to be importable as a library by external consumers.
+`internal/` holds everything not meant as a stable public API (the adapters and the
+composition layer). `pkg/` is **not** used — the proto/HTTP API remains the primary
+public surface.
 
 ```
 github.com/stacklok/mecatl
@@ -97,7 +99,7 @@ github.com/stacklok/mecatl
 ├── cmd/
 │   ├── mecated/                           # the server binary (gRPC + HTTP/SSE)
 │   └── mecademo/                        # the demo driver (fake provider default)
-├── internal/
+├── engine/                             # the importable core: domain + ports + the agent loop
 │   ├── session/                        # DOMAIN: Session aggregate + value objects
 │   │   ├── session.go                  #   Session (root), state machine, StopReason
 │   │   ├── conversation.go             #   Conversation, Message, Turn
@@ -128,16 +130,17 @@ github.com/stacklok/mecatl
 │   │   ├── permission.go               #   PermissionPolicy
 │   │   ├── clock.go                    #   Clock
 │   │   └── log.go                      #   Logger, EventSink
-│   ├── agent/                          # APPLICATION: the loop (use-case layer)
-│   │   ├── loop.go                     #   Engine/Deps, Run(...) streaming the Event channel
-│   │   ├── dispatch.go                 #   read-parallel / mutate-serial dispatch + hooks
-│   │   ├── permission.go               #   askRegistry: ask-pause/resume handshake
-│   │   ├── hooks.go                    #   SessionStart / UserPromptSubmit / Stop lifecycle
-│   │   ├── compaction.go               #   Compactor seam + HeuristicCompactor (default)
-│   │   ├── cascade.go                  #   CascadeCompactor (snip→strip→collapse→summarize)
-│   │   ├── tokencount.go               #   TokenCounter seam + HeuristicTokenCounter
-│   │   ├── subagent.go                 #   Task: fresh context, scoped tools, one-shot
-│   │   └── parallel.go                 #   ParallelTool: fork-join fan-out (NewParallelTool)
+│   └── agent/                          # APPLICATION: the loop (use-case layer)
+│       ├── loop.go                     #   Engine/Deps, Run(...) streaming the Event channel
+│       ├── dispatch.go                 #   read-parallel / mutate-serial dispatch + hooks
+│       ├── permission.go               #   askRegistry: ask-pause/resume handshake
+│       ├── hooks.go                    #   SessionStart / UserPromptSubmit / Stop lifecycle
+│       ├── compaction.go               #   Compactor seam + HeuristicCompactor (default)
+│       ├── cascade.go                  #   CascadeCompactor (snip→strip→collapse→summarize)
+│       ├── tokencount.go               #   TokenCounter seam + HeuristicTokenCounter
+│       ├── subagent.go                 #   Task: fresh context, scoped tools, one-shot
+│       └── parallel.go                 #   ParallelTool: fork-join fan-out (NewParallelTool)
+├── internal/
 │   └── adapter/                        # ADAPTERS: implement ports / seams
 │       ├── openai/                     #   LLMProvider over OpenAI Responses API (SSE)
 │       ├── mockllm/                    #   scripted fake LLMProvider (no network)
@@ -188,13 +191,13 @@ mechanisms — both run under `task lint` / `task test`, neither relies on revie
    patching the gap that `os` is stdlib but banned in core). It is an **allowlist**, not a
    denylist of known adapters: a *new* heavy adapter import is rejected by default. depguard
    sees one file's direct imports at a time.
-2. **DAG-assertion test** (`internal/arch/layering_test.go`, whole-graph). Walks the
+2. **DAG-assertion test** (`engine/arch/layering_test.go`, whole-graph). Walks the
    **non-test** import graph of the seven core packages and asserts (a) no core package
    transitively reaches an adapter / `contracts/gen` / `internal/app` / an LLM SDK / grpc,
    (b) no import **cycle** among the core packages (the property a per-file linter cannot
    observe), and (c) `port` / `agent` direct imports stay within their allow-sets. Hermetic
    and offline (resolves from the on-disk module via `go/build`; no network, no `go.mod`
-   change), mirroring `internal/prompt/layering_test.go`.
+   change), mirroring `engine/prompt/layering_test.go`.
 
 **Carve-outs** these encode deliberately: `port.PermissionPolicy` is implemented in the
 `permpolicy` **adapter** (not `governance`, which can't import `session`); `FileSystem` /
@@ -213,7 +216,7 @@ entity — "reach through the root." All mutation of the Conversation goes throu
 methods so invariants (turn counting, stop conditions, state transitions) hold.
 
 ```go
-// internal/session
+// engine/session
 type SessionID string
 
 type State string
@@ -307,7 +310,7 @@ func (u Usage) CacheHitRate() float64
 ### 4.4 Governance value objects
 
 ```go
-// internal/governance
+// engine/governance
 type Effect string
 const (Deny Effect="deny"; Ask Effect="ask"; Allow Effect="allow")
 
@@ -351,7 +354,7 @@ prompt caching, SSE framing) live entirely inside `adapter/openai`. The same por
 the seam the `llmresilience` decorator (§5.5) and the `permclassify` classifier wrap.
 
 ```go
-// internal/port
+// engine/port
 type LLMRequest struct {
     System    prompt.Layered        // stable prefix + volatile suffix (for cache breakpoints)
     Messages  []session.Message     // conversation history
@@ -388,7 +391,7 @@ type LLMProvider interface {
 ### 5.2 Tool — the catalog contract
 
 ```go
-// internal/tool
+// engine/tool
 type ToolSpec struct {                 // what the model sees (doc 07 §9: descriptions are docs)
     Name        string
     Description string                 // when-to-use / when-not / example / limits
@@ -405,8 +408,8 @@ type Tool interface {
 `Workspace` is the injected FS seam (real OS fs / mem fake), so every tool is testable:
 
 ```go
-// internal/tool  (FileSystem/Workspace live here, scoped to a session root;
-// kept in the Tooling context — not internal/port — to avoid a port↔tool import cycle)
+// engine/tool  (FileSystem/Workspace live here, scoped to a session root;
+// kept in the Tooling context — not engine/port — to avoid a port↔tool import cycle)
 type FileSystem interface {
     Read(ctx context.Context, path string) ([]byte, error)
     Write(ctx context.Context, path string, data []byte) error
@@ -421,7 +424,7 @@ type FileSystem interface {
 ```
 
 **Command execution is a separate, optional seam** (`tool.CommandRunner`, *not*
-`internal/port`). The agent loop never references it; only the Bash tool depends on
+`engine/port`). The agent loop never references it; only the Bash tool depends on
 it, which is what makes Bash — and therefore any command execution — optional in
 the catalog. The osfs adapter ships a local `/bin/sh` runner; an implementation may
 also run remotely or refuse with `tool.ErrNoShell`. A shell-less deploy simply omits
@@ -429,7 +432,7 @@ the Bash tool. An OS sandbox (Landlock/seccomp/Seatbelt) slots in here as a wrap
 `CommandRunner` adapter without touching the loop.
 
 ```go
-// internal/tool
+// engine/tool
 type CommandRunner interface {
     Run(ctx context.Context, command string) (CommandResult, error) // exit code in result; ErrNoShell if none
 }
@@ -460,7 +463,7 @@ type Clock interface { Now() time.Time }
 type Logger interface { ToolCall(session.SessionID, session.ToolCall, session.ToolResult, time.Duration) }
 ```
 
-### 5.4 Application seams (in `internal/agent` / `internal/prompt` / `internal/tool`)
+### 5.4 Application seams (in `engine/agent` / `engine/prompt` / `engine/tool`)
 
 Beyond the seven core ports, the loop and the prompt layer expose small
 **default-on, swap-in** interfaces so each harness pattern is pluggable without a
@@ -506,7 +509,7 @@ Adapters fall into three shapes:
 
 ## 6. The streaming event model
 
-`Event` is **domain-owned** (`internal/session/event.go`) and shared by the loop and the
+`Event` is **domain-owned** (`engine/session/event.go`) and shared by the loop and the
 API. The API serializes it to proto; it is never an OpenAI type. This is the single
 event taxonomy doc 08 #1 calls for.
 
@@ -638,7 +641,7 @@ the run `ctx`, which the loop observes.
 | 6 | Hour-long session stays cheap (cache hit > 0.7) | `prompt.Layered` stable prefix/volatile suffix + `adapter/openai` breakpoint placement; `Usage.CacheHitRate()` metric |
 | 7 | Subagent returns only its final string | `agent/subagent.go` — child loop, only final text folded as one ToolResult |
 | 8 | Permission denies across merged scopes | `governance/permission.go` `Evaluate` (deny→ask→allow, Scope precedence) |
-| 9 | Sandbox is a separate layer | **Seam in place** — the `tool.CommandRunner` interface (in `internal/tool`, *not* `internal/port`) is the command-execution chokepoint where an OS-sandbox adapter wraps later; the OS sandbox itself is the one deliberately-deferred item (§9) |
+| 9 | Sandbox is a separate layer | **Seam in place** — the `tool.CommandRunner` interface (in `engine/tool`, *not* `engine/port`) is the command-execution chokepoint where an OS-sandbox adapter wraps later; the OS sandbox itself is the one deliberately-deferred item (§9) |
 | 10 | Tool-description bug is diagnosable by reading it | `tool.ToolSpec.Description` convention (doc 07 §9); descriptions reviewed as onboarding docs |
 
 Also enforced: **read-parallel / mutate-serial** (doc 08 #4) in `agent/dispatch.go`,

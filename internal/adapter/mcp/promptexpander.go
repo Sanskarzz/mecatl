@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/stacklok/mecatl/internal/prompt"
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/prompt"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 // PromptExpander implements prompt.CommandExpander by recognizing an input of

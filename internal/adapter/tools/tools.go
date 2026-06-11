@@ -24,9 +24,9 @@ package tools
 import (
 	"encoding/json"
 
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/toolkit"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // Output-shaping limits shared across the tools. These keep a single tool

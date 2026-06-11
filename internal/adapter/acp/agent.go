@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/server"
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
 )
 
 // Agent is the ACP adapter's request handler: it bridges the JSON-RPC Conn to the

@@ -127,7 +127,7 @@ deliberately provider-NEUTRAL and guarded:
   `ChunkReasoningItem`), provider-private in CONTENTS (OpenAI `encrypted_content`,
   Anthropic `(thinking,signature)`). The display summary (`ChunkReasoning`) vs replay
   blob split is the neutral seam P1 validates — do not collapse it.
-- A reflection guard (`internal/port/llm_neutral_test.go`) tripwires any silent
+- A reflection guard (`engine/port/llm_neutral_test.go`) tripwires any silent
   `LLMRequest` field addition.
 
 ### P1 verdict: the abstraction HELD (`Message.Reasoning` stayed a `string`)

@@ -7,7 +7,7 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/engine/port"
 )
 
 // soulguard is the composition-layer SOUL DRIFT BASELINE (issue #14, Phase 3, Item

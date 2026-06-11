@@ -6,7 +6,7 @@ import (
 
 	yaml "go.yaml.in/yaml/v3"
 
-	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/engine/governance"
 )
 
 // Defense-in-depth caps (CWE-770), mirroring permstore's per-session rule cap. A

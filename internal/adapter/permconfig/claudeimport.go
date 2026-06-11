@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/engine/governance"
 )
 
 // claudeSettings is the subset of a Claude-Code `settings.json` this importer

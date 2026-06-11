@@ -22,8 +22,8 @@ package telemetry
 import (
 	"context"
 
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // fanOut is a port.EventSink that relays each Event to every wrapped sink in

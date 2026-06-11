@@ -33,12 +33,12 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/mcpperf"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/slogdiag"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
 	"github.com/stacklok/mecatl/internal/app"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // socketName is the fixed socket filename inside the per-process temp directory.

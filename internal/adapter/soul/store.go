@@ -40,9 +40,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/hashutil"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // DefaultMaxBytes is the load-time byte ceiling on the soul body (matching the
@@ -59,7 +59,7 @@ const soulSubpath = "mecatl/soul.md"
 // body in (prompt.renderSoul uses "<soul>"/"</soul>"). A body containing this
 // literal could close the fence early and let trailing text escape the data zone,
 // so Load rejects any body that contains it. It is hardcoded here (with this
-// comment) rather than imported from internal/prompt to avoid coupling the adapter
+// comment) rather than imported from engine/prompt to avoid coupling the adapter
 // to a domain magic-constant path; the two must stay in sync (one cheap string).
 const soulCloseTag = "</soul>"
 

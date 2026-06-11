@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 func TestStoreRememberRecallRoundTrip(t *testing.T) {

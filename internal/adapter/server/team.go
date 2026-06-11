@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/team"
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/team"
 )
 
 // ErrTeamsDisabled is returned by the team methods when no MemberEngine is wired

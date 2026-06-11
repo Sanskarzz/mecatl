@@ -124,7 +124,7 @@ first line of the value, truncated. The consolidator can later tighten descripti
 
 ## 2. Tier-0 prompt injection
 
-**Location:** `internal/prompt` — a new `MemoryIndexAssembler` that implements the
+**Location:** `engine/prompt` — a new `MemoryIndexAssembler` that implements the
 existing `prompt.InstructionAssembler` interface (`instructions.go:19-24`), composed
 *after* `RootAssembler` so the conversation opens with: AGENTS.md/CLAUDE.md, then the
 memory index, then the user prompt.
@@ -399,7 +399,7 @@ The constraint: `prompt` is a DOMAIN package and must not import the memory adap
 **The index source is a consumer-defined port in `prompt`:**
 
 ```go
-// in internal/prompt — a tiny consumer-defined interface; prompt does NOT import
+// in engine/prompt — a tiny consumer-defined interface; prompt does NOT import
 // the memory adapter, only this seam it declares.
 type MemoryIndexSource interface {
     // Index returns the tier-0 entries (key + description + updated-at, value
@@ -424,7 +424,7 @@ With (a) the seam is literally `interface { Index(context.Context)
 **The assembler:**
 
 ```go
-// internal/prompt
+// engine/prompt
 type MemoryIndexAssembler struct {
     Src       MemoryIndexSource // nil → assembler is a no-op (memory disabled)
     MaxEntries int              // tier-0 cap (D4); 0 → default
@@ -455,20 +455,20 @@ ports (`CLAUDE.md`). `app` may import `memory` (it does already) and `agent`/`pr
   (adapter → domain interface), never outward.
 
 A `MultiAssembler` (compose N `InstructionAssembler`s, concatenate their messages) is
-a 10-line addition to `internal/prompt`. It is the only new prompt-package type
+a 10-line addition to `engine/prompt`. It is the only new prompt-package type
 besides the assembler + seam.
 
 ---
 
 ## 8. File-by-file change list
 
-**Domain — `internal/tool/tool.go`**
+**Domain — `engine/tool/tool.go`**
 - `MemoryEntry`: add `Description string` (`tool.go:170`).
 - `MemoryStore`: add `Index(ctx) ([]MemoryEntry, error)` and `RememberEntry(ctx,
   MemoryEntry) error`; keep `Remember` as a documented convenience wrapper
   (`tool.go:190`).
 
-**Domain — `internal/prompt/`**
+**Domain — `engine/prompt/`**
 - New `MemoryIndexSource` interface + `MemoryIndexAssembler` (new file, e.g.
   `memoryindex.go`) — renders the capped tier-0 user message; no-ops when source
   is nil; fails soft.
@@ -520,7 +520,7 @@ All offline (`mockllm` + `memfs` + `t.TempDir()`), per CLAUDE.md.
   needs zero migration code.
 - Existing tests (`store_test.go:11-163`) keep passing (Remember wrapper unchanged).
 
-**`internal/prompt/` (new `memoryindex_test.go`)**
+**`engine/prompt/` (new `memoryindex_test.go`)**
 - `TestMemoryIndexAssemblerRendersUserMessage` — a fake `MemoryIndexSource` with 3
   entries → exactly one `session.Message`, user role, containing all 3 key+description
   lines, no values.
@@ -536,7 +536,7 @@ All offline (`mockllm` + `memfs` + `t.TempDir()`), per CLAUDE.md.
 - `TestRememberAcceptsDescriptionAndEchoesIndexLine`.
 - `TestRecallStillFetchesFullValue` (regression: tier-1 load by key unchanged).
 
-**`internal/agent/` (integration, mock provider)**
+**`engine/agent/` (integration, mock provider)**
 - Extend the existing full-cycle / instruction-prepend test: with a non-empty store
   and the composed assembler, turn-0 conversation contains the index user message
   *before* the first user prompt, and the StablePrefix is byte-identical to the

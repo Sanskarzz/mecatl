@@ -6,17 +6,17 @@ import (
 	"strings"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/prompt"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/governance"
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/prompt"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // callSiteExcluded is the set of tool names a scoped agent-def catalog NEVER
@@ -58,7 +58,7 @@ func resolveModel(cfg Config, def agents.AgentDef) string {
 }
 
 // resolveProviderModel resolves a def's (provider, model) pair in the COMPOSITION
-// layer (the registry lives here; neither the agents adapter nor internal/agent
+// layer (the registry lives here; neither the agents adapter nor engine/agent
 // ever sees it). It extends resolveModel with a provider dimension and is the ONE
 // resolver both the def-pinned (Half A) and the session-propagation (Half B) call
 // sites share — the THREE-LEVEL provider precedence

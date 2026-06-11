@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/anthropic"
 	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 	"github.com/stacklok/mecatl/internal/adapter/openrouter"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // anthropicFixtureClient serves the trimmed anthropic /v1/models fixture (NO

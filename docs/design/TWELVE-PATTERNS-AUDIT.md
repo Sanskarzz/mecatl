@@ -11,7 +11,7 @@
 > `agent` imports only `session`/`port`/`tool`/`governance`/`prompt`+stdlib;
 > domain owns the interfaces the loop consumes; adapters are wired at
 > `cmd/mecated`. `governance` imports nothing from `internal` (session-free).
-> `FileSystem`/`Workspace` live in `internal/tool` to break a `port↔tool` cycle.
+> `FileSystem`/`Workspace` live in `engine/tool` to break a `port↔tool` cycle.
 
 ## Summary table
 
@@ -43,7 +43,7 @@ these.
 truth at session start so conventions aren't relitigated each turn.
 
 **Status:** Implemented. `prompt.DiscoverInstructions`
-(`internal/prompt/builder.go:153`) reads `AGENTS.md` (winning) then `CLAUDE.md`
+(`engine/prompt/builder.go:153`) reads `AGENTS.md` (winning) then `CLAUDE.md`
 (fallback) and returns them as **user-role** messages with a provenance marker.
 The loop calls it once on the first turn (`agent/loop.go:217` `recordPrompt`,
 gated on `sess.Counters.Turns == 0`).
@@ -81,7 +81,7 @@ only for *permission* rules, not instruction assembly.
 loop, owned by the `prompt` context (the loop already imports `prompt`):
 
 ```go
-// internal/prompt/instructions.go
+// engine/prompt/instructions.go
 type InstructionSource struct {
     Scope   Scope   // prompt-local precedence enum (see note)
     Origin  string  // e.g. "AGENTS.md", "~/.claude/CLAUDE.md"
@@ -96,7 +96,7 @@ type InstructionAssembler interface {
 }
 ```
 
-- **Package:** `internal/prompt` (already imported by the loop). Use a
+- **Package:** `engine/prompt` (already imported by the loop). Use a
   `prompt`-local `Scope`/precedence rather than reusing `governance.Scope`: the
   permission ladder and the instruction ladder are different bounded concerns
   that merely share an ordering; coupling `prompt` to the permission context's
@@ -135,7 +135,7 @@ wanted, is a retrieval port the loop consults during context assembly — built
 assembly extended across sessions." Natural shape:
 
 ```go
-// internal/port/memory.go (future)
+// engine/port/memory.go (future)
 type MemoryStore interface {
     Index(ctx context.Context, sessionRoot string) (string, error)  // tier 0
     Load(ctx context.Context, ref string) (string, error)           // tier 1
@@ -269,11 +269,11 @@ construct.
 **Gap + recommendation:** The largest genuine gap, partly a v1 non-goal
 (multi-agent). Smallest DDD-correct decomposition:
 
-1. **Workspace isolation port** — lives in `internal/tool` next to `Workspace`
+1. **Workspace isolation port** — lives in `engine/tool` next to `Workspace`
    (same reason `Workspace` lives there: avoids the `port↔tool` cycle):
 
    ```go
-   // internal/tool/isolation.go
+   // engine/tool/isolation.go
    type WorkspaceForker interface {
        // Fork returns N isolated workspaces derived from base (e.g. git
        // worktrees), plus a release func to tear them down.
@@ -291,7 +291,7 @@ construct.
    (return all summaries vs an injected scorer).
 
 - **Parallelism:** disjoint from the loop, but shares the `tool` package with
-  pattern 9's seam — coordinate `internal/tool` edits.
+  pattern 9's seam — coordinate `engine/tool` edits.
 - **Frozen-type risk:** none — `Workspace` is an interface; `WorkspaceForker` is
   additive; no frozen domain struct changes.
 - **DoD:** `ForkTool` registered optionally at the composition root; a memfs
@@ -329,7 +329,7 @@ notion of "advertised-but-not-hydrated."
 owner and adds a *disclosure* distinction, rather than a new top-level port:
 
 ```go
-// internal/tool/tool.go — extend the contract additively
+// engine/tool/tool.go — extend the contract additively
 type DisclosableTool interface {
     Tool
     // Metadata returns the cheap always-present header (name + one line).
@@ -343,7 +343,7 @@ core kit but only `ToolMeta` for disclosable tools, and a built-in
 `ToolSearchTool` (a `tool.Tool`) that, given a query, returns the full `Spec`s of
 matching disclosable tools so the model can pull them into context.
 
-- **Package:** `internal/tool` (additive interface; tools that don't implement
+- **Package:** `engine/tool` (additive interface; tools that don't implement
   `DisclosableTool` are treated as always-advertised — no breakage).
 - **Loop change:** `buildRequest` calls `AdvertisedSpecs` instead of `Specs`.
   **Touches the loop** (small) — serialize.
@@ -466,7 +466,7 @@ loop points. **No new interface — pure loop wiring against the existing port:*
 - `Stop` — fire in `terminate`/`terminateComplete` before emitting the terminal
   result, best-effort (cannot veto a completed run, mirroring `SubagentStop`).
 
-- **Package:** `internal/agent` (loop). **Touches the loop — serialize** against
+- **Package:** `engine/agent` (loop). **Touches the loop — serialize** against
   patterns 2 and 9, which also edit the loop.
 - **Tests:** a recording `HookRunner` fake asserts SessionStart fires once before
   turn 1; UserPromptSubmit exit-2 aborts the run; Stop fires exactly once on
@@ -484,13 +484,13 @@ callback). `PreCompact` is the most defensible near-term add (one site, in
 ## Prioritized work list
 
 Sized as work packages. **[PARALLEL]** = disjoint package, no loop edit.
-**[LOOP]** = edits `internal/agent` loop — serialize these against each other.
+**[LOOP]** = edits `engine/agent` loop — serialize these against each other.
 No work package below requires changing a frozen domain *struct*; all are
 additive interfaces, decorators, or new firing sites.
 
 ### P1 — Fire the missing hook phases (pattern 12) — [LOOP]
 - **Interface:** none (reuse `port.HookRunner`, existing `HookPhase` constants).
-- **Package:** `internal/agent` (loop.go).
+- **Package:** `engine/agent` (loop.go).
 - **Default impl:** existing `hookexec` adapter; default no-op map.
 - **Tests:** recording fake asserts SessionStart once, UserPromptSubmit blocks on
   exit 2, Stop fires on all four terminal paths.
@@ -513,7 +513,7 @@ additive interfaces, decorators, or new firing sites.
 ### P3 — Scoped instruction assembly (pattern 2) — [LOOP]
 - **Interface:** `prompt.InstructionAssembler` with a `prompt`-local scope/
   precedence enum (do **not** reuse `governance.Scope`).
-- **Package:** `internal/prompt`; loop consumes it in `recordPrompt`.
+- **Package:** `engine/prompt`; loop consumes it in `recordPrompt`.
 - **Default impl:** `RootAssembler` reproducing today's single-root behaviour;
   `LayeredAssembler` (parent walk + user scope) as the richer adapter.
 - **Tests:** layered adapter orders fragments by precedence over a memfs tree;
@@ -524,27 +524,27 @@ additive interfaces, decorators, or new firing sites.
 ### P4 — Progressive tool disclosure (pattern 9) — [LOOP] (small) + [PARALLEL] (tool pkg)
 - **Interface:** `tool.DisclosableTool` (additive over `tool.Tool`) +
   `Catalog.AdvertisedSpecs(mode)` + a built-in `ToolSearchTool`.
-- **Package:** `internal/tool` (additive); loop edit in `buildRequest`.
+- **Package:** `engine/tool` (additive); loop edit in `buildRequest`.
 - **Default impl:** MCP tools advertise metadata only; core 8 stay full.
 - **Tests:** prompt renders metadata for disclosable tools; ToolSearch hydrates a
   named MCP tool's full spec.
 - **DoD:** per-turn tool-inventory tokens bounded by core+metadata with N MCP
   tools registered.
-- **Gate:** build only once MCP tool counts justify it. Shares `internal/tool`
+- **Gate:** build only once MCP tool counts justify it. Shares `engine/tool`
   with P5 — coordinate those edits.
 
 ### P5 — Fork-join parallelism (pattern 8) — [PARALLEL]
-- **Interface:** `tool.WorkspaceForker` (in `internal/tool`, next to `Workspace`)
+- **Interface:** `tool.WorkspaceForker` (in `engine/tool`, next to `Workspace`)
   + a `ForkTool` (`tool.Tool`, mirrors `TaskTool`, no loop change).
-- **Package:** `internal/tool` (port) + `internal/adapter/worktree` (git impl) +
-  `internal/agent` (the ForkTool, reusing the child-`Engine` pattern).
+- **Package:** `engine/tool` (port) + `internal/adapter/worktree` (git impl) +
+  `engine/agent` (the ForkTool, reusing the child-`Engine` pattern).
 - **Default impl:** memfs copy-on-fork for tests; git-worktree adapter for prod;
   optional registration at the composition root.
 - **Tests:** memfs forker runs 3 forks concurrently and joins; git adapter
   forks/cleans worktrees.
 - **DoD:** `ForkTool` fans out N isolated children and returns a joined result.
 - **Gate:** largest effort; build only with a forcing function. Shares
-  `internal/tool` with P4.
+  `engine/tool` with P4.
 
 ### Deferred (no seam yet — do not pre-build)
 - **Tiered memory (3)** and **dream consolidation (4)** — no consumer; building
@@ -566,13 +566,13 @@ additive interfaces, decorators, or new firing sites.
 
 ```
 P1 (hooks) ──► P3 (instructions) ──► P4-loop-edit (tool disclosure)
-   [LOOP, serialize: all edit internal/agent loop, in this order]
+   [LOOP, serialize: all edit engine/agent loop, in this order]
 
 P2 (perm classifier)  ── independent decorator ── no loop edit
-P5 (fork-join)        ── internal/tool + adapter/worktree + new ForkTool
-P4-tool-pkg           ── internal/tool additive interface
+P5 (fork-join)        ── engine/tool + adapter/worktree + new ForkTool
+P4-tool-pkg           ── engine/tool additive interface
 
-[PARALLEL track]: P2 anytime. P4-tool-pkg and P5 both touch internal/tool —
+[PARALLEL track]: P2 anytime. P4-tool-pkg and P5 both touch engine/tool —
 coordinate (or sequence P4-tool-pkg before P5). The loop edits of P1/P3/P4 must
 be serialized; the non-loop work of every package can proceed concurrently.
 ```

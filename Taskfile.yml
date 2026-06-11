@@ -110,9 +110,9 @@ tasks:
       FUZZTIME: '{{.FUZZTIME | default "30s"}}'
     cmds:
       # `go test` fuzzes only ONE target per invocation, so run them in sequence.
-      - go test ./internal/governance/ -run='^$' -fuzz='^FuzzSplitCommands$' -fuzztime={{.FUZZTIME}}
-      - go test ./internal/governance/ -run='^$' -fuzz='^FuzzCanonicalize$' -fuzztime={{.FUZZTIME}}
-      - go test ./internal/governance/ -run='^$' -fuzz='^FuzzReadOnlyBash$' -fuzztime={{.FUZZTIME}}
+      - go test ./engine/governance/ -run='^$' -fuzz='^FuzzSplitCommands$' -fuzztime={{.FUZZTIME}}
+      - go test ./engine/governance/ -run='^$' -fuzz='^FuzzCanonicalize$' -fuzztime={{.FUZZTIME}}
+      - go test ./engine/governance/ -run='^$' -fuzz='^FuzzReadOnlyBash$' -fuzztime={{.FUZZTIME}}
       - go test ./internal/adapter/openai/ -run='^$' -fuzz='^FuzzDecodeSSE$' -fuzztime={{.FUZZTIME}}
 
   test:cover:

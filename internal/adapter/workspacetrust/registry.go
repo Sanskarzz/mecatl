@@ -53,8 +53,8 @@ import (
 
 	yaml "go.yaml.in/yaml/v3"
 
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // userSubdirTrust is the machine-written trust registry relative to the XDG config

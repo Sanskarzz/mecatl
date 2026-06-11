@@ -507,7 +507,7 @@ evaluator's glob grammar; the Claude `prefix:*` / `prefix:` form is normalised t
 `prefix*` glob. Config rules use **glob** semantics (`Exact:false`) — only LEARNED
 "allow always" rules are exact.
 
-**Scope → location** (highest precedence first; see `internal/governance` Scope):
+**Scope → location** (highest precedence first; see `engine/governance` Scope):
 
 | Scope | Location | Trust |
 | --- | --- | --- |

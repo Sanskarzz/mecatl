@@ -3,7 +3,7 @@ package acp
 import (
 	"context"
 
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // replay.go reconstructs an editor's transcript on session/load by re-projecting

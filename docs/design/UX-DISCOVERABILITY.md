@@ -134,7 +134,7 @@ catalog) and the wired Config seams. Add one method and call it from the
 | `bash` | `catalogHas("Bash")` | The Bash tool name (`internal/adapter/tools/bash.go:87`); absent under `--no-bash`. |
 
 The catalog is reachable as `s.cfg.Engine.Catalog` (the public field,
-`internal/agent/loop.go:40`) via `Catalog.Lookup(name)` (`tool/catalog.go:46`).
+`engine/agent/loop.go:40`) via `Catalog.Lookup(name)` (`tool/catalog.go:46`).
 
 ```go
 // capabilities reports which optional features THIS service has actually built,
@@ -266,7 +266,7 @@ type SessionCreator interface {
 
 - **Proto** is the contract; no Go import direction concerns.
 - **Server** (`internal/adapter/server`) already imports `contracts/gen`,
-  `internal/agent`, `internal/tool` (`service.go:13-19`) — `capabilities()`
+  `engine/agent`, `engine/tool` (`service.go:13-19`) — `capabilities()`
   uses only those. It reads the catalog and Config it already owns; no new
   inward dependency.
 - **Client** (`cmd/mecatui/client`) already owns the sole `contracts/gen`+grpc

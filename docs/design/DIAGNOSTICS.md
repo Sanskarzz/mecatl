@@ -8,7 +8,7 @@ policy, the build-once rule, and the enforcement guard.
 
 The harness has two distinct logging concerns, and they are NOT the same port:
 
-- **`port.Diagnostics`** (`internal/port/diagnostics.go`) — general-purpose
+- **`port.Diagnostics`** (`engine/port/diagnostics.go`) — general-purpose
   operational logging: composition decisions, degraded-mode warnings, lifecycle
   notes. Low-volume, human-readable. The agent loop and the composition layer write
   to it; domain packages stay silent. Contract is tiny and slog-shaped
@@ -16,7 +16,7 @@ The harness has two distinct logging concerns, and they are NOT the same port:
   (a tripwire test, `diagnostics_imports_test.go`, keeps it backend-free). Callers
   that inject nothing get `NopDiagnostics` (`app.Build` defaults to it), so every
   consumer is nil-safe.
-- **`port.ToolCallRecorder`** (`internal/port/log.go`) — the per-tool AUDIT seam:
+- **`port.ToolCallRecorder`** (`engine/port/log.go`) — the per-tool AUDIT seam:
   `ToolCall(id, call, result, took)`, one structured record per tool execution.
 
 They are separate because they answer different questions. Diagnostics is "what is
@@ -151,10 +151,10 @@ and the team member-reopen-failure WARN (`warnUnexpectedReopen`, when a member's
 
 ## The ban + guard
 
-Global slog is banned in `internal/`: no `slog.Default()`, no `slog.SetDefault()`,
+Global slog is banned in `engine/` and `internal/`: no `slog.Default()`, no `slog.SetDefault()`,
 no package-level `slog.Info|Warn|Debug|Error(Context)?`. Diagnostics flow through
 the injected `port.Diagnostics` seam instead. The ban is enforced by **`forbidigo`**
-in `.golangci.yml` with precise patterns, scoped so `internal/` is covered and
+in `.golangci.yml` with precise patterns, scoped so `engine/` and `internal/` are covered and
 `cmd/` mains are exempt (issues exclude-rule on `^cmd/`; `_test.go` also exempt).
 The patterns are call-shape-precise: `slog.New*` / `slog.Handler` / `HandlerOptions`
 / `Level` / `DiscardHandler` (slogdiag's legitimate internals) and the `*slog.Logger`

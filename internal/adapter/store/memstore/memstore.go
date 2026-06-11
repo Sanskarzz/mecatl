@@ -12,14 +12,14 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/store/sessnap"
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
 )
 
 // ErrNotFound is returned by Load when no session is stored under the given id. It
 // wraps port.ErrSessionNotFound so a consumer that may not import this adapter (e.g.
-// internal/agent) can distinguish not-found from an infra failure via errors.Is.
+// engine/agent) can distinguish not-found from an infra failure via errors.Is.
 var ErrNotFound = fmt.Errorf("memstore: session not found: %w", port.ErrSessionNotFound)
 
 // Store is a concurrency-safe in-memory SessionStore.

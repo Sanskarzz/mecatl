@@ -9,8 +9,8 @@ import (
 
 	"github.com/openai/openai-go/v3/responses"
 
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // streamState carries the small amount of state the translation needs across

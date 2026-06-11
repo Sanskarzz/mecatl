@@ -9,7 +9,7 @@ definition, two consumers**: a `<name>.md` is reusable both as a Subagent delega
 See `internal/adapter/agents/` (discovery + `Registry`) and
 `internal/app/agentdefs.go` + `internal/app/build.go` (the registry→engine
 translation, scoping, model/mode resolution — the layering rule keeps the `Registry`
-out of `internal/agent`, which receives only `map[string]*Engine` / `MemberBuild`).
+out of `engine/agent`, which receives only `map[string]*Engine` / `MemberBuild`).
 
 ## Frontmatter
 

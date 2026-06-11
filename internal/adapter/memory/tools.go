@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/toolkit"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // Tool names of the memory tools. They are the single authority for the names

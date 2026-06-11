@@ -14,7 +14,7 @@ by default, one `mecatui` **hosts itself in-process** over a private UNIX socket
 
 It is built on the Charm v2 stack (Bubble Tea / Lip Gloss / Bubbles / Glamour).
 The render packages (`ui`, `theme`) and the `client` package stay a pure client —
-they never import any `internal/...` package and render solely from the proto
+they never import any `engine/...` or `internal/...` package and render solely from the proto
 `Event` envelope. Hosting the embedded server is confined to the `cmd/mecatui`
 main and its `embed` subpackage (which build the same server `mecated` does, via
 `internal/app`).

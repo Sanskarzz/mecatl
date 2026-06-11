@@ -17,10 +17,10 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/mcpperf"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
-	"github.com/stacklok/mecatl/internal/session"
 )
 
 // seedQuarantine writes a model-drafted-looking SKILL.md (with origin: model

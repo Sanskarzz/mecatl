@@ -87,10 +87,10 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
 ### WP1 — Domain core + ports (FOUNDATION)
 - **Goal:** Freeze every shared type and interface. No behavior beyond pure aggregate
   methods and value-object constructors. This WP is the contract all others build on.
-- **Owns:** `internal/session/*`, `internal/prompt/prompt.go` (types only),
-  `internal/governance/*.go` (types only: `PermissionDecision`, `HookEvent`,
-  `HookOutcome`, `Effect`, `Scope`, `HookPhase`), `internal/tool/tool.go`,
-  `internal/port/*`.
+- **Owns:** `engine/session/*`, `engine/prompt/prompt.go` (types only),
+  `engine/governance/*.go` (types only: `PermissionDecision`, `HookEvent`,
+  `HookOutcome`, `Effect`, `Scope`, `HookPhase`), `engine/tool/tool.go`,
+  `engine/port/*`.
 - **Honors:** ARCHITECTURE.md §4–5 signatures verbatim.
 - **Tests:** `Session` state-machine table tests (idle→running→awaiting→running→
   completed; cancel from each state; stop-condition trips on Limits). `Usage.CacheHitRate`.
@@ -125,7 +125,7 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
 - **Goal:** `PermissionPolicy.Evaluate` (deny→ask→allow across merged `Scope`s), compound-
   Bash splitting + process-wrapper canonicalization (closed list), and the shell-exec
   `HookRunner` (stdin JSON, exit 0=allow/2=block).
-- **Owns:** `internal/governance/permission.go`, `governance/bash.go`,
+- **Owns:** `engine/governance/permission.go`, `governance/bash.go`,
   `internal/adapter/hookexec/`.
 - **Honors:** `port.PermissionPolicy`, `port.HookRunner` from WP1.
 - **Tests:** deny-beats-allow across scopes (gauntlet #8); `git status && rm -rf` splits
@@ -138,7 +138,7 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
 - **Goal:** Build the two-layer system prompt: cache-stable prefix (role, tone, tool
   inventory, safety) + volatile suffix (`<env>` block). Discover AGENTS.md/CLAUDE.md and
   return it as a **user message** (not system role — doc 08 #5).
-- **Owns:** `internal/prompt/prompt.go` (builder behavior), `prompt/env.go`.
+- **Owns:** `engine/prompt/prompt.go` (builder behavior), `prompt/env.go`.
 - **Honors:** `prompt.Layered` consumed by `port.LLMRequest`.
 - **Tests:** prefix is byte-stable across turns given fixed config (cache invariant,
   gauntlet #6); env block injects cwd/os/model/date; CLAUDE.md emitted as RoleUser.
@@ -171,7 +171,7 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
   condition. PreToolUse/PostToolUse hook calls around each tool. On `Ask`, emit
   `permission.ask`, enter `StateAwaiting`, block until `ResumeWith`. Single-summary
   `Compactor` at ~80% window.
-- **Owns:** `internal/agent/loop.go`, `dispatch.go`, `permission.go`, `compaction.go`.
+- **Owns:** `engine/agent/loop.go`, `dispatch.go`, `permission.go`, `compaction.go`.
 - **Honors:** all ports; imports **only** domain + `port` (no adapters — CI enforced).
 - **Tests (mockllm + memfs + fakes):** full turn cycle; read-parallel/mutate-serial
   ordering (gauntlet #4 — assert two writes never interleave); pause→approve→resume;
@@ -185,7 +185,7 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
 - **Goal:** A `Subagent` tool that spins up a **child loop** with a fresh Conversation, a
   scoped tool subset, its own Limits, runs to completion, and returns **only its final
   string** as one `ToolResult`. SubagentStop hook fires.
-- **Owns:** `internal/agent/subagent.go`, the `Subagent` tool registration.
+- **Owns:** `engine/agent/subagent.go`, the `Subagent` tool registration.
 - **Honors:** reuses WP8's `Run`; `tool.Tool` interface.
 - **Tests:** parent sees one ToolResult, never the child's intermediate ToolCalls
   (gauntlet #7); child tool-scope enforced; child cancellation bounded by parent ctx.

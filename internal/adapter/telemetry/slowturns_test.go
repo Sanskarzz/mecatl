@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // emitTurn feeds one synthetic EvTurnEnd into the buffer with the given turn

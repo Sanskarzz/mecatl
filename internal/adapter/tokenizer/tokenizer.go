@@ -7,7 +7,7 @@
 // This adapter is wired only in the composition root (cmd/mecated); the agent
 // package depends solely on the agent.TokenCounter interface, never on this
 // concrete tokenizer. The default counter remains the dependency-free heuristic
-// in internal/agent; this is the opt-in "real tokenizer" tier.
+// in engine/agent; this is the opt-in "real tokenizer" tier.
 package tokenizer
 
 import (
@@ -15,8 +15,8 @@ import (
 
 	"github.com/tiktoken-go/tokenizer"
 
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // Encoding identifies a tiktoken byte-pair-encoding table.

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/app"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // fakeSeam builds a trustSeam over in-memory fakes so every prompt branch is

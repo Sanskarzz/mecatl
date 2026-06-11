@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 // fakeProvider is an in-memory Provider for unit-testing the resource tools and

@@ -34,7 +34,7 @@
 
 ## 1. Problem statement — what actually goes slow in mecatl
 
-mecatl is a **streaming agentic loop** (`internal/agent`, see
+mecatl is a **streaming agentic loop** (`engine/agent`, see
 `docs/architecture.md` §5). Its performance profile is dominated by *off-CPU*
 time — waiting on the model and on tool I/O — which means the naive "run a CPU
 profile" instinct measures the wrong thing. The concerns that are real here, tied
@@ -42,8 +42,8 @@ to the code paths that cause them:
 
 | Concern | Where it lives | Why it bites |
 |---|---|---|
-| **TTFT vs inter-token latency** | `runTurn` consuming `LLM.Stream` chunks (`internal/agent/loop.go`); OpenAI SSE→Chunk (`adapter/openai/stream.go`) | Users feel time-to-first-token and *jitter* between tokens, not mean latency. One number hides both. |
-| **Dispatch lock contention / mutate-serial queueing** | `Engine.dispatch` read-parallel/mutate-serial (`internal/agent/dispatch.go`); results merged under a mutex | A slow `Edit` serially blocks every queued mutation — an internal **coordinated-omission** source (survey §12). Mean tool latency won't show the queueing. |
+| **TTFT vs inter-token latency** | `runTurn` consuming `LLM.Stream` chunks (`engine/agent/loop.go`); OpenAI SSE→Chunk (`adapter/openai/stream.go`) | Users feel time-to-first-token and *jitter* between tokens, not mean latency. One number hides both. |
+| **Dispatch lock contention / mutate-serial queueing** | `Engine.dispatch` read-parallel/mutate-serial (`engine/agent/dispatch.go`); results merged under a mutex | A slow `Edit` serially blocks every queued mutation — an internal **coordinated-omission** source (survey §12). Mean tool latency won't show the queueing. |
 | **Goroutine leaks** | per-run background goroutine (`Engine.Run` → `drive`), the SSE consumer + its cancel path, subagent/parallel drain loops (`subagent.go`, the Parallel tool in `parallel.go`), the server Run registry (`server/service.go`) | Each run spins goroutines; a cancellation path that doesn't unwind leaks them across a long-lived `mecated`. |
 | **GC pressure / allocation churn** | chunk decoding, event fan-out (`Run.emit`), prompt assembly, the compaction cascade (`agent/cascade.go`) | High alloc/op on the hot streaming path drives GC pauses that show up as inter-token jitter. |
 | **Long-session memory growth** | conversation history before compaction; the jsonl store; historically the tree-sitter WASM leak (`adapter/repomap`, now **removed** — see `docs/design/REPOMAP-TREE-SITTER.md`) | Memory climbs over a long session. The since-removed WASM leak (~23 MB RSS per call) was **off the Go heap** — invisible to `pprof heap` and `runtime/metrics`; only process RSS saw it (survey §9). The off-heap-growth signature still applies to any future off-heap consumer. |
@@ -313,7 +313,7 @@ and 2 are both committed (not "maybe later").
 3. **EventSink seam — fix now.** Add a `ctx`-aware emit (`Emit(ctx, ev)` variant /
    per-run sink) so concurrent runs get correctly correlated spans and accurate
    per-run tail-latency attribution. This is load-bearing for the whole effort and
-   is done as part of Phase 1, not deferred. Touches `internal/port` + implementers.
+   is done as part of Phase 1, not deferred. Touches `engine/port` + implementers.
 4. **No external profiling infra — profile in-process via MCP.** Pyroscope/Parca
    are **out of scope**. pprof is in-process and needs no backend; the MCP server
    (Phase 2) is the delivery mechanism — on-demand `capture_cpu_profile`, heap,

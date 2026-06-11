@@ -699,7 +699,7 @@ agents/commands/skills, not just allows+soul — a one-line invariant update).
   trust check; the residual window is the single-user-desktop window soulguard
   already accepts. settings.yaml is admission-only (no drift anchor), fail-safe.
 - **AGENTS.md / CLAUDE.md** — these project files steer the model (system-prompt
-  discovery in `internal/prompt`). They are operator-context, not an
+  discovery in `engine/prompt`). They are operator-context, not an
   admission-gated steering channel today. **DECISION (operator-confirmed):** left
   OUT of both the trust gate and the drift anchor for this feature — they are read
   as ambient project context like the repo's code itself, and they are ubiquitous,
@@ -726,7 +726,7 @@ agents/commands/skills, not just allows+soul — a one-line invariant update).
 
 **What NOT to build (hard rules):**
 - Never write the human `settings.yaml`; all machine writes go to `trust.yaml`.
-- Never route trust through `internal/governance`.
+- Never route trust through `engine/governance`.
 - Never let trust override a permission Deny or a configured Ask.
 - Never block mecated startup on a prompt.
 - Never let `ui/` import `workspacetrust` or write the registry.

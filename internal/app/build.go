@@ -10,7 +10,7 @@
 //     single binary "just works" with no separately-spawned daemon.
 //
 // Layering: app sits at the SAME level as cmd/ — it is composition, not domain.
-// It MAY import adapters, internal/agent, and (transitively, via the server
+// It MAY import adapters, engine/agent, and (transitively, via the server
 // adapter) contracts/gen; the domain/port/agent packages must never import it.
 // Nothing imports app except the cmd/ mains.
 package app
@@ -27,6 +27,13 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/prompt"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/team"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/dream"
 	"github.com/stacklok/mecatl/internal/adapter/forker"
@@ -47,13 +54,6 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/tokenizer"
 	"github.com/stacklok/mecatl/internal/adapter/tools"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
-	"github.com/stacklok/mecatl/internal/agent"
-	"github.com/stacklok/mecatl/internal/governance"
-	"github.com/stacklok/mecatl/internal/port"
-	"github.com/stacklok/mecatl/internal/prompt"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/team"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // defaultContextWindowTokens is the model context window the loop uses to decide
@@ -996,7 +996,7 @@ func buildSoulSource(cfg Config) prompt.SoulSource {
 // hash + selection, then again by the assembler's Load at run time (which
 // re-validates the body). That is an accepted cost: it is one small file (capped at
 // 20 KiB), read at most twice, and keeping the hash/selection out of the assembler
-// keeps drift + provenance a pure composition concern (internal/prompt stays
+// keeps drift + provenance a pure composition concern (engine/prompt stays
 // drift- and trust-unaware). No caching seam is warranted for two reads of a tiny file.
 func buildSoulSourceWith(cfg Config, io baselineIO) prompt.SoulSource {
 	src, _ := selectSoulSource(cfg, io, buildSoulGate(cfg))
@@ -2187,7 +2187,7 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 	// model through the SAME contamination-safe per-provider path (newChildEngineFor
 	// Provider re-derives Compactor/TokenCounter/Env.Model/ContextWindow for the
 	// override model) — never a clone-and-swap of the LLM on an existing engine. The
-	// closure hands internal/agent only func(string)(*Engine,bool); the registry never
+	// closure hands engine/agent only func(string)(*Engine,bool); the registry never
 	// crosses (same shape/spirit as WithAgentEngines).
 	opts = append(opts, agent.WithSubagentEngineFactory(
 		buildSubagentEngineFactory(cfg, provReg, provider, parentProviderID, sandboxedRunner)))

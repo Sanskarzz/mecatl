@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/engine/port"
 )
 
 // TestToSlogLevelMapping pins the port.Level → slog.Level mapping, including the

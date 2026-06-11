@@ -8,7 +8,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go/option"
 
-	"github.com/stacklok/mecatl/internal/port"
+	"github.com/stacklok/mecatl/engine/port"
 )
 
 // recordingRoundTripper captures the first outgoing HTTP request and then aborts

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/toolkit"
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
 )
 
 // DraftToolName is the catalog name of the writable skill-authoring tool.

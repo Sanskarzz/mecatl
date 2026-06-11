@@ -8,14 +8,14 @@
 > mecatui panels — `/soul` is a SCROLLABLE persona inspector, `/usermodel` a
 > short key→description list. The panels are READ-ONLY: neither edits the soul or
 > the user model. See `docs/tui.md`.) Phase 1 — the
-> user-scoped, agent-read-only persona fragment — is wired (`internal/prompt/soul.go`,
+> user-scoped, agent-read-only persona fragment — is wired (`engine/prompt/soul.go`,
 > `internal/adapter/soul/`, bound in `internal/app/build.go`). Phase 2 — the user-model
 > learning loop — is now wired too: a SECOND, user-scoped, CROSS-PROJECT memory store
 > of durable FACTS about the operator (`internal/adapter/memory/usermodeltools.go`,
-> `internal/prompt/usermodel.go`), exposed as the RememberUser/RecallUser/SearchUserModel
+> `engine/prompt/usermodel.go`), exposed as the RememberUser/RecallUser/SearchUserModel
 > tools (2a, default-on) and a turn-0 `<user-model>` block, PLUS an OPT-IN (off by
 > default) Stop-triggered background reviewer that extracts operator facts from a
-> finished transcript (`internal/agent/usermodelreview.go`, wired via a composition-
+> finished transcript (`engine/agent/usermodelreview.go`, wired via a composition-
 > layer Stop-hook decorator in `internal/app/usermodelreview.go`). Author pass:
 > 2026-06-04.
 >
@@ -126,7 +126,7 @@ relic, SoulTavern) independently converged on one lesson:
 
 > **A _writable_ identity anchor is broken.**
 
-Three threats, all directly in mecatl's `internal/governance` wheelhouse:
+Three threats, all directly in mecatl's `engine/governance` wheelhouse:
 
 1. **Prompt injection _into_ identity.** Untrusted content (a fetched page, a
    cloned repo's file, an imported persona) rewrites who the agent is —
@@ -161,12 +161,12 @@ imported soul is trust-gated exactly like a project allow.**
 
 mecatl already owns most of the **right column** (what-it-knows):
 
-- **Two-layer prompt** (`internal/prompt/builder.go`): `StablePrefix` (cache-stable,
+- **Two-layer prompt** (`engine/prompt/builder.go`): `StablePrefix` (cache-stable,
   `Config.Role`/`Tone`/`Safety`) + `VolatileSuffix` (`<env>`).
-- **`InstructionAssembler` / `MultiAssembler`** (`internal/prompt/instructions.go`):
+- **`InstructionAssembler` / `MultiAssembler`** (`engine/prompt/instructions.go`):
   the turn-0 context-injection chain. `RootAssembler` (AGENTS.md > CLAUDE.md) and
   `MemoryIndexAssembler` already ride it. **This is the seam.**
-- **`MemoryIndexSource`** (`internal/prompt/memoryindex.go:19`): the existing
+- **`MemoryIndexSource`** (`engine/prompt/memoryindex.go:19`): the existing
   _consumer-local port_ pattern — `prompt` declares a minimal interface the adapter
   satisfies structurally, no import cycle. The template for a soul source.
 - **Memory store** (`internal/adapter/memory/store.go`): BM25 search, flock-safe,
@@ -196,7 +196,7 @@ A user-scoped, **agent-read-only** identity fragment, injected as a turn-0 user
 message (not the cache-stable prefix), with governance-grade load discipline.
 
 ```
-internal/prompt/soul.go        SoulSource (consumer-local port, mirrors MemoryIndexSource)
+engine/prompt/soul.go        SoulSource (consumer-local port, mirrors MemoryIndexSource)
                                SoulAssembler implements InstructionAssembler
 internal/adapter/soul/         Store over ~/.config/mecatl/soul.md (env-injected,
                                NOT the WorkspaceReader — the file is outside any session root)
@@ -381,8 +381,8 @@ derivable from the docs, not a judgement call left open.
      (`internal/app/soulselect.go`). Item 3 (SHIPPED) projects it — plus the loaded
      content — into the proto `SoulInfo` via `internal/app/soulsnapshot.go`.
    - **Layering.** The trust decision lives in `internal/app` (composition), reusing
-     `Config.TrustProject`. `internal/prompt` stays trust-unaware (the `SoulSource`
-     interface is unchanged); `internal/governance` is NOT involved (the soul is fenced
+     `Config.TrustProject`. `engine/prompt` stays trust-unaware (the `SoulSource`
+     interface is unchanged); `engine/governance` is NOT involved (the soul is fenced
      DATA, not a permission scope); the `internal/adapter/soul` loader stays write-free
      (the new `soul.NewWithEnv` is an env-injectable READ constructor, no write path).
 3. **`/soul` + `/usermodel` TUI inspection. — SHIPPED (Item 3).** Read-only browsers
@@ -435,6 +435,6 @@ derivable from the docs, not a judgement call left open.
   hermes-agent.nousresearch.com/docs.
 - Ecosystem: jangyuxue/hermes-soul-governance, prompt-security/clawsec
   (`soul-guardian`), LucioLiu/relic, imphillip/SoulTavern, aaronjmars/soul.md.
-- mecatl: `internal/prompt/{builder,instructions,memoryindex}.go`,
-  `internal/adapter/{memory,dream}`, `internal/governance/permission.go`,
+- mecatl: `engine/prompt/{builder,instructions,memoryindex}.go`,
+  `internal/adapter/{memory,dream}`, `engine/governance/permission.go`,
   `docs/harnesses/02-twelve-patterns.md`, `docs/harnesses/08-design-considerations.md`.

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 // BashToolName is the catalog name of the Bash tool. It is the single authority

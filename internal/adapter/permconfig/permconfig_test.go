@@ -3,7 +3,7 @@ package permconfig
 import (
 	"testing"
 
-	"github.com/stacklok/mecatl/internal/governance"
+	"github.com/stacklok/mecatl/engine/governance"
 )
 
 func TestParseYAMLLoad(t *testing.T) {

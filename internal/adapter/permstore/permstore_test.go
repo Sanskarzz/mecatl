@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/stacklok/mecatl/internal/governance"
-	"github.com/stacklok/mecatl/internal/session"
+	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 func rule(tool, pattern string) governance.Rule {

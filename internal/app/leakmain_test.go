@@ -25,7 +25,7 @@ import (
 //     the last test's teardown. Not mecatl-owned, not closable faster from here.
 //   - the agent askRegistry.await goroutine: an e2e run paused on a permission ask;
 //     it exits on approve/cancel/run-completion, again draining just past the
-//     retry window in aggregate. Owned + gated cleanly by internal/agent's own
+//     retry window in aggregate. Owned + gated cleanly by engine/agent's own
 //     goleak suite (which exercises it deterministically); here it is only e2e
 //     teardown noise.
 //
@@ -34,6 +34,6 @@ import (
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m,
 		goleak.IgnoreTopFunction("github.com/modelcontextprotocol/go-sdk/mcp.(*streamableServerConn).Read"),
-		goleak.IgnoreTopFunction("github.com/stacklok/mecatl/internal/agent.(*askRegistry).await"),
+		goleak.IgnoreTopFunction("github.com/stacklok/mecatl/engine/agent.(*askRegistry).await"),
 	)
 }

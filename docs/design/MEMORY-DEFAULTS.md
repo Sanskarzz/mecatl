@@ -69,7 +69,7 @@ workspace.
 
 ### Workspace → leaf mapping (full path-slug, NO hash)
 
-The store is scoped **per-project** (`internal/tool/tool.go`: "one store instance
+The store is scoped **per-project** (`engine/tool/tool.go`: "one store instance
 per workspace/project directory ... NOT shared across unrelated projects"). The
 embedded server already resolves the workspace to an absolute path
 (`config.go` `resolveWorkspace`, called in `parseFlags`). The leaf is that absolute
@@ -378,7 +378,7 @@ treating the directory as **opaque and store-owned**:
    with the documented scoping. No action.
 
 3. **Layering is now machine-enforced** (depguard allowlist in `.golangci.yml` +
-   the DAG test in `internal/arch/layering_test.go`, both under `task lint`/`task
+   the DAG test in `engine/arch/layering_test.go`, both under `task lint`/`task
    test`). The helpers in `main.go` live in `cmd/` (a composition root, exempt from
    the core rules) and import only stdlib (`os`, `path/filepath`, `strings`);
    nothing new leaks into `ui`/`theme`/`client`.

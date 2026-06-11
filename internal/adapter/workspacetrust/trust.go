@@ -52,8 +52,8 @@ import (
 
 	yaml "go.yaml.in/yaml/v3"
 
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // userSubdirMecatl is the user-level YAML config under the XDG config dir,

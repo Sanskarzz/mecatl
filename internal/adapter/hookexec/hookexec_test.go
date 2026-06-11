@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
-	"github.com/stacklok/mecatl/internal/governance"
-	"github.com/stacklok/mecatl/internal/port"
 )
 
 // Compile-time assertion that Runner satisfies the frozen port interface.

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stacklok/mecatl/internal/session"
-	"github.com/stacklok/mecatl/internal/tool"
+	"github.com/stacklok/mecatl/engine/session"
+	"github.com/stacklok/mecatl/engine/tool"
 )
 
 // fakeStore is an in-memory tool.MemoryStore for tool tests — no filesystem.
