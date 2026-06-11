@@ -289,6 +289,8 @@ func stopReasonLabel(stop string) (text, slot string) {
 		return "stopped · tool-call limit", slotCtxWarn
 	case "max_consecutive_failures":
 		return "stopped · repeated failures", slotCtxWarn
+	case "budget":
+		return "stopped · token budget", slotCtxWarn
 	case "cancelled":
 		return "cancelled", "muted"
 	case "no_progress":

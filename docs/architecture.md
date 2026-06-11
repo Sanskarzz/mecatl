@@ -278,13 +278,17 @@ API. The real constants:
 `ToolResult`, `Ask *PendingAsk`, `Result *ResultPayload`, `Usage *Usage`,
 `Subagent`, `Team`, `Parallel`.
 
-The three DELEGATION families (`subagent.*` / `team.*` / `parallel.*`) project the SAME
-redacted child-loop lifecycle (the per-tool redaction is shared in
-`agent.drainChildObserved`, the single chokepoint) and differ only in AGGREGATION shape —
-flat fleet vs coordinating roster vs fan-out group. They are deliberately NOT merged; a
-4th family is the trip-wire to extract a shared lifecycle value object (see
-`docs/design/IMPLEMENTATION-NOTES.md`). Gauntlet #7: none carries branch/child content
-into the parent conversation — only metadata (and, for Parallel, fork-root path handles).
+The three DELEGATION families (`subagent.*` / `team.*` / `parallel.*`) project child-loop
+lifecycle events and differ in AGGREGATION shape — flat fleet vs coordinating roster vs
+fan-out group. Subagent and Parallel are metadata-only; Team is intentionally
+fuller-but-bounded because a crew is meant to be watched: `team.member` may carry capped
+member text/tool previews, `team.tasks` and `team.findings` carry capped snapshots, and
+`team.end` adds terminal per-member dispositions. A member `permission.ask` is still never
+projected. The families are deliberately NOT merged; a 4th family is the trip-wire to
+extract a shared lifecycle value object (see `docs/design/IMPLEMENTATION-NOTES.md`).
+Gauntlet #7 still holds: none of these projections injects branch/child/member transcripts
+into the parent conversation — only the delegation tool's final result does (plus, for
+Parallel, fork-root path handles).
 
 ## 4. The ports (`engine/port`)
 
@@ -1071,7 +1075,11 @@ transcripts (context isolation holds). Member sessions persist to the `port.Sess
 under `MemberSessionID(teamID, member)` (`team-<teamID>-<member>`, collision-free across
 concurrent teams); the parent catalog's read-only **`InspectMember`** tool pulls ONE
 member's bounded transcript on demand (PULL — never auto-injected). A `team.findings`
-event projects the ledger onto the stream, mirroring `team.tasks`.
+event projects the ledger onto the stream, mirroring `team.tasks`. The stream projection
+is intentionally fuller than Subagent/Parallel but structurally bounded: `team.member`
+forwards only capped member message/tool previews (never a `permission.ask`), task/finding
+snapshots are capped value types, and `team.end` carries aggregate usage plus closed-enum
+member dispositions (`done` or `stopped` for `error`/`cancelled`/`budget`).
 
 ## 16. Extensibility — MCP, tools & progressive disclosure
 

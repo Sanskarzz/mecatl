@@ -266,13 +266,13 @@ func TestNoDrainOnCancel(t *testing.T) {
 	}
 }
 
-// TestDrainOnSizeLimit: the SIZE-bound stop reasons (max_turns / max_tool_calls)
-// DRAIN — the model was healthy and merely ran out of per-run budget, so a queued
+// TestDrainOnSizeLimit: the SIZE-bound stop reasons (max_turns / max_tool_calls /
+// budget) DRAIN — the model was healthy and merely ran out of per-run budget, so a queued
 // follow-up ("continue") is exactly what the user lined up. This pins shouldDrain's
 // widened healthy-stop set (the fix for the silent pause-on-limit that read as a
 // hang): a regression narrowing it back to end_turn-only would fail here.
 func TestDrainOnSizeLimit(t *testing.T) {
-	for _, stop := range []string{"max_turns", "max_tool_calls"} {
+	for _, stop := range []string{"max_turns", "max_tool_calls", "budget"} {
 		t.Run(stop, func(t *testing.T) {
 			m, conv := newQueueModel(t)
 			m = startRunning(t, m, "first")

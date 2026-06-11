@@ -2281,7 +2281,7 @@ func (m *Model) refreshView() {
 // AFTER endRun has settled the model back to idle.
 //
 // It fires on a HEALTHY stop (shouldDrain): end_turn, the empty reason, or a size
-// limit (max_turns / max_tool_calls). On a non-healthy stop — error, a user-cancel
+// limit (max_turns / max_tool_calls / budget). On a non-healthy stop — error, a user-cancel
 // ("cancelled"), max_consecutive_failures, or a stream close — it does NOT fire:
 // instead it records the stop reason in m.queuePaused and KEEPS the queue, so the
 // run that died never silently fires the next staged prompt. The user then resumes
@@ -2345,7 +2345,7 @@ func (m Model) resumeQueue() (tea.Model, tea.Cmd) {
 //
 //   - ""        — treated as a clean end_turn throughout (cf. stopReasonLabel).
 //   - end_turn  — the model finished without requesting more tools.
-//   - max_turns / max_tool_calls — the run hit a per-run budget. The model was
+//   - max_turns / max_tool_calls / budget — the run hit a per-run budget. The model was
 //     healthy; it just ran out of room. A queued follow-up ("continue", or the next
 //     step) is exactly what's wanted here, and firing it reopens the session with a
 //     fresh budget — so these DRAIN (issue: a silent pause-on-limit read as a hang).
@@ -2362,7 +2362,7 @@ func (m Model) resumeQueue() (tea.Model, tea.Cmd) {
 // sentinel; stopReasonLabel renders the same set for the footer.
 func shouldDrain(stop string) bool {
 	switch stop {
-	case "", "end_turn", "max_turns", "max_tool_calls":
+	case "", "end_turn", "max_turns", "max_tool_calls", "budget":
 		return true
 	default:
 		return false

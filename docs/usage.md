@@ -236,7 +236,10 @@ mailbox). See the delegation-capabilities note below.
 > over a dedicated `parallel.*` event family, and its result carries the preserved
 > fork-workspace paths. A **Team** additionally honours a **team-wide token budget**
 > (`--max-team-tokens`, tightenable per call) checked at the round boundary — orthogonal
-> to the per-run `--max-run-tokens`, which still bounds each member drive. (The `mecatui` `ctrl+a` overlay surfaces all three under
+> to the per-run `--max-run-tokens`, which still bounds each member drive. Team stream
+> events are intentionally watchable but bounded: member previews/tasks/findings are
+> capped, permission asks are never forwarded, and `team.end` includes closed-enum
+> member dispositions. (The `mecatui` `ctrl+a` overlay surfaces all three under
 > **Subagents | Parallel | Teams** tabs with a fleet-status footer — see `docs/tui.md`.)
 
 #### LLM resilience knobs

@@ -522,6 +522,8 @@ event projection (REDACTED, metadata-only — never child/branch content):
   `no_progress` → "no-progress", the `max_*` limits → "max-turns"/"max-tools") ride the
   same string `stop` field on the wire (no proto enum) and map to compact labels; the
   cap-family stops read as **✓** (a partial is still usable), error/cancel-family as **✗**.
+  The main footer uses the same stop family: `budget` renders as **`stopped · token budget`**,
+  parallel to the turn/tool-call limit labels.
 
 **Advisory vs durable notices.** A **compaction** boundary (`compaction` event) is a
 durable fact, so it lands as a muted **scrollback notice** that stays in the transcript.
@@ -629,9 +631,10 @@ When the run ends on a **healthy** stop, the queue drains **one at a time, FIFO*
 oldest staged line is submitted through the ordinary prompt path (so it reopens the
 session server-side exactly like a manual follow-up), and that run's completion drives
 the next. A healthy stop is one where the model was *done* or merely hit a *size
-bound* — `end_turn` (and the empty reason), **plus** the per-run limits `max_turns`
-and `max_tool_calls` (the run just ran out of budget; firing the next staged prompt
-reopens it with a fresh budget, which is what a lined-up "continue" wants).
+bound* — `end_turn` (and the empty reason), **plus** the per-run limits `max_turns`,
+`max_tool_calls`, and `budget` (the run just ran out of turn/tool/token budget;
+firing the next staged prompt reopens it with a fresh budget, which is what a lined-up
+"continue" wants).
 
 On a **non-healthy** stop the drain **pauses and keeps** the queue — an error, a user
 cancel, `max_consecutive_failures`, or a stream close — so a broken, failing, or
