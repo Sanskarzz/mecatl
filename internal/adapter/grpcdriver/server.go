@@ -279,6 +279,103 @@ func (s *soulSourceServer) LoadSoul(ctx context.Context, _ *driverv1.LoadSoulReq
 	return &driverv1.LoadSoulResponse{Body: body}, nil
 }
 
+// agentSourceServer adapts a tool.AgentDefSource to AgentSourceServiceServer.
+type agentSourceServer struct {
+	driverv1.UnimplementedAgentSourceServiceServer
+	src tool.AgentDefSource
+}
+
+// NewAgentSourceServer wraps src as an AgentSourceService driver server.
+func NewAgentSourceServer(src tool.AgentDefSource) driverv1.AgentSourceServiceServer {
+	return &agentSourceServer{src: src}
+}
+
+// ListAgentDefs projects the source's definition snapshot onto the wire.
+func (s *agentSourceServer) ListAgentDefs(ctx context.Context, _ *driverv1.ListAgentDefsRequest) (*driverv1.ListAgentDefsResponse, error) {
+	defs, err := s.src.ListAgentDefs(ctx)
+	if err != nil {
+		return nil, sourceStatus(err)
+	}
+	out := make([]*driverv1.AgentDef, len(defs))
+	for i, d := range defs {
+		out[i] = &driverv1.AgentDef{
+			Name:            d.Name,
+			Description:     d.Description,
+			Tools:           d.Tools,
+			DisallowedTools: d.DisallowedTools,
+			Model:           d.Model,
+			Provider:        d.Provider,
+			PermissionMode:  d.PermissionMode,
+			MaxTurns:        int32(d.MaxTurns),     //nolint:gosec // bounded operator config, never overflows
+			MaxToolCalls:    int32(d.MaxToolCalls), //nolint:gosec // bounded operator config, never overflows
+			Color:           d.Color,
+			Skills:          d.Skills,
+			McpServers:      toProtoMCPServers(d.MCPServers),
+			Hooks:           d.Hooks,
+			Body:            d.Body,
+			Origin:          string(d.Origin),
+		}
+	}
+	return &driverv1.ListAgentDefsResponse{AgentDefs: out}, nil
+}
+
+// toProtoMCPServers projects the port MCP-server entries onto the wire. The
+// header VALUES are secret-shaped; they cross the driver wire only (which
+// refuses non-local cleartext) and are never logged.
+func toProtoMCPServers(in []tool.AgentMCPServer) []*driverv1.AgentMCPServer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*driverv1.AgentMCPServer, len(in))
+	for i, srv := range in {
+		out[i] = &driverv1.AgentMCPServer{Name: srv.Name, Url: srv.URL, Headers: srv.Headers}
+	}
+	return out
+}
+
+// commandSourceServer adapts a prompt.CommandSource to
+// CommandSourceServiceServer.
+type commandSourceServer struct {
+	driverv1.UnimplementedCommandSourceServiceServer
+	src prompt.CommandSource
+}
+
+// NewCommandSourceServer wraps src as a CommandSourceService driver server.
+func NewCommandSourceServer(src prompt.CommandSource) driverv1.CommandSourceServiceServer {
+	return &commandSourceServer{src: src}
+}
+
+// ListCommands projects the source's CURRENT command metadata onto the wire
+// (live semantics — re-consulted per call).
+func (s *commandSourceServer) ListCommands(ctx context.Context, _ *driverv1.ListCommandsRequest) (*driverv1.ListCommandsResponse, error) {
+	cmds, err := s.src.ListCommands(ctx)
+	if err != nil {
+		return nil, sourceStatus(err)
+	}
+	out := make([]*driverv1.CommandMeta, len(cmds))
+	for i, c := range cmds {
+		out[i] = &driverv1.CommandMeta{Name: c.Name, Description: c.Description}
+	}
+	return &driverv1.ListCommandsResponse{Commands: out}, nil
+}
+
+// GetCommandBody returns the named command's RAW template; a blank name is
+// INVALID_ARGUMENT before the source is consulted, an unknown name NOT_FOUND
+// (the harness client maps it to the normal pass-through).
+func (s *commandSourceServer) GetCommandBody(ctx context.Context, req *driverv1.GetCommandBodyRequest) (*driverv1.GetCommandBodyResponse, error) {
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+	body, found, err := s.src.CommandBody(ctx, req.GetName())
+	if err != nil {
+		return nil, sourceStatus(err)
+	}
+	if !found {
+		return nil, status.Errorf(codes.NotFound, "unknown command %q", req.GetName())
+	}
+	return &driverv1.GetCommandBodyResponse{Body: body}, nil
+}
+
 // storeStatus maps a wrapped store's error onto the driver protocol's status
 // vocabulary (the §C table): the not-found sentinel → NOT_FOUND, context
 // errors → CANCELLED / DEADLINE_EXCEEDED, everything else → INTERNAL.
@@ -295,10 +392,10 @@ func storeStatus(err error) error {
 	}
 }
 
-// sourceStatus maps a wrapped skill/soul source's error onto the driver
-// protocol's status vocabulary (the §H table): the skill/asset not-found
-// sentinels → NOT_FOUND, context errors → CANCELLED / DEADLINE_EXCEEDED,
-// everything else → INTERNAL.
+// sourceStatus maps a wrapped content source's (skill/soul/agent/command)
+// error onto the driver protocol's status vocabulary (the §H table): the
+// skill/asset not-found sentinels → NOT_FOUND, context errors → CANCELLED /
+// DEADLINE_EXCEEDED, everything else → INTERNAL.
 func sourceStatus(err error) error {
 	switch {
 	case errors.Is(err, tool.ErrSkillNotFound), errors.Is(err, tool.ErrSkillAssetNotFound):

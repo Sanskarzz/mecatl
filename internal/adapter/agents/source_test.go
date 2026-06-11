@@ -9,22 +9,25 @@ import (
 
 // staticSource is a test AgentSource that returns a fixed set of defs and skips.
 type staticSource struct {
-	defs  []AgentDef
-	skips []SkipError
-	err   error
+	discovered []Discovered
+	skips      []SkipError
+	err        error
 }
 
-func (s staticSource) Agents(context.Context) ([]AgentDef, []SkipError, error) {
-	return s.defs, s.skips, s.err
+func (s staticSource) Agents(context.Context) ([]Discovered, []SkipError, error) {
+	return s.discovered, s.skips, s.err
 }
 
 // TestMultiSourcePrecedenceShadows asserts earlier-source-wins on a name
-// collision, with a shadow diagnostic for the dropped lower-precedence def.
+// collision, with a shadow diagnostic for the dropped lower-precedence def
+// (the diagnostic carries the shadowed AND kept entries' Detail locators).
 func TestMultiSourcePrecedenceShadows(t *testing.T) {
-	high := staticSource{defs: []AgentDef{{Name: "rev", Description: "high", Path: "/high/rev.md"}}}
-	low := staticSource{defs: []AgentDef{
-		{Name: "rev", Description: "low", Path: "/low/rev.md"},
-		{Name: "only-low", Description: "L", Path: "/low/only.md"},
+	high := staticSource{discovered: []Discovered{
+		{Def: AgentDef{Name: "rev", Description: "high"}, Detail: "explicit: /high/rev.md"},
+	}}
+	low := staticSource{discovered: []Discovered{
+		{Def: AgentDef{Name: "rev", Description: "low"}, Detail: "user(xdg): /low/rev.md"},
+		{Def: AgentDef{Name: "only-low", Description: "L"}, Detail: "user(xdg): /low/only.md"},
 	}}
 
 	defs, skips, err := NewMultiSource(high, low).Agents(t.Context())
@@ -36,12 +39,17 @@ func TestMultiSourcePrecedenceShadows(t *testing.T) {
 	}
 	// rev kept from the high-precedence source.
 	for _, d := range defs {
-		if d.Name == "rev" && d.Description != "high" {
-			t.Fatalf("rev should be the high-precedence def, got %q", d.Description)
+		if d.Def.Name == "rev" && d.Def.Description != "high" {
+			t.Fatalf("rev should be the high-precedence def, got %q", d.Def.Description)
 		}
 	}
 	if len(skips) != 1 || !strings.Contains(skips[0].Reason, "shadowed") {
 		t.Fatalf("want 1 shadow skip, got %v", skips)
+	}
+	// The shadow diagnostic is located by the SHADOWED entry's detail and names
+	// the KEPT entry's detail (the messages otherwise verbatim from before).
+	if skips[0].Path != "user(xdg): /low/rev.md" || !strings.Contains(skips[0].Reason, `kept "explicit: /high/rev.md"`) {
+		t.Fatalf("shadow skip detail mismatch: %+v", skips[0])
 	}
 }
 
@@ -54,7 +62,7 @@ func TestMultiSourceFatalErrorPropagates(t *testing.T) {
 }
 
 func TestMultiSourceNilEntriesIgnored(t *testing.T) {
-	defs, _, err := NewMultiSource(nil, staticSource{defs: []AgentDef{{Name: "a", Description: "d"}}}, nil).Agents(t.Context())
+	defs, _, err := NewMultiSource(nil, staticSource{discovered: []Discovered{{Def: AgentDef{Name: "a", Description: "d"}}}}, nil).Agents(t.Context())
 	if err != nil || len(defs) != 1 {
 		t.Fatalf("nil sources should be skipped, got %v err=%v", defs, err)
 	}

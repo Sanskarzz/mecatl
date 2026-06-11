@@ -64,6 +64,33 @@ func TestGRPCSkillSourceConformance(t *testing.T) {
 	})
 }
 
+// TestGRPCAgentSourceConformance runs the shared AgentDefSource conformance
+// table over grpcdriver → bufconn → NewAgentSourceServer(AgentFixtureSource):
+// the same canonical fixture the in-memory reference and the FS source answer
+// for, now over the full client → wire → server-wrapper path (including the
+// client's defensive re-normalization and unconditional driver-origin stamp).
+func TestGRPCAgentSourceConformance(t *testing.T) {
+	sourceconformance.RunAgentSource(t, func(t *testing.T) tool.AgentDefSource {
+		conn := dialBufconn(t, func(gs *grpc.Server) {
+			driverv1.RegisterAgentSourceServiceServer(gs, NewAgentSourceServer(sourceconformance.NewAgentFixtureSource()))
+		})
+		return NewAgentSource(conn, AgentOptions{})
+	})
+}
+
+// TestGRPCCommandSourceConformance runs the shared CommandSource conformance
+// table over grpcdriver → bufconn → NewCommandSourceServer(CommandFixture):
+// the wire path also exercises the NOT_FOUND → (found=false, nil) mapping the
+// unknown-name subtest pins.
+func TestGRPCCommandSourceConformance(t *testing.T) {
+	sourceconformance.RunCommandSource(t, func(t *testing.T) prompt.CommandSource {
+		conn := dialBufconn(t, func(gs *grpc.Server) {
+			driverv1.RegisterCommandSourceServiceServer(gs, NewCommandSourceServer(sourceconformance.NewCommandFixtureSource()))
+		})
+		return NewCommandSource(conn, CommandOptions{})
+	})
+}
+
 // soulBodyFunc adapts a fixed body to prompt.SoulSource for the wire fixture.
 // It returns the body VERBATIM (no trimming/validation server-side), so the
 // conformance run proves the CLIENT's re-validation upholds the fail-soft

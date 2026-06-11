@@ -1,0 +1,155 @@
+// SPDX-FileCopyrightText: Copyright 2026 Stacklok, Inc.
+// SPDX-License-Identifier: LicenseRef-Stacklok-Proprietary
+
+// mecatl driver API: the remote agent-definition source protocol.
+//
+// AgentSourceService is the wire seam behind the harness's
+// `tool.AgentDefSource` (engine/tool/agentsource.go): an operator-run driver
+// process serves named subagent specialists (a prompt persona + a scoped tool
+// allowlist + a model + a permission mode + run limits) in place of the local
+// <name>.md discovery. No path, directory, or root concept crosses this wire;
+// where the driver keeps its definitions is its private business. The driver
+// sits at the SAME trust tier as an operator-configured agents directory — a
+// def body steers the model like AGENTS.md/CLAUDE.md, so point the harness
+// only at a driver you trust.
+//
+// Driver contract (pinned by the engine/adapter/sourceconformance suite,
+// which remote drivers run over their client):
+//   - ListAgentDefs returns the definitions sorted by name, unique, and
+//     STABLE for the life of the source (SNAPSHOT semantics — the harness
+//     resolves once at build and bakes per-def child engines; there is no
+//     watch/reload seam).
+//   - A ListAgentDefs fault at harness BUILD time is FATAL (loud-misconfig
+//     posture: an explicitly configured driver that cannot answer is a
+//     misconfiguration). There is no runtime re-fetch.
+//
+// Validation: required-field annotations are authored with
+// `buf.validate.field` for documentation and future runtime enforcement; V1
+// enforces them in the Go client/server wrappers
+// (internal/adapter/grpcdriver), and the harness client additionally
+// re-normalizes defensively (blank-name drop, de-dup, sort, caps).
+
+syntax = "proto3";
+
+package mecatl.driver.v1;
+
+import "buf/validate/validate.proto";
+
+// AgentSourceService serves agent definitions. It is the remote analogue of
+// tool.AgentDefSource's single method.
+service AgentSourceService {
+  // ListAgentDefs returns every definition, sorted by name and unique. The
+  // set is a SNAPSHOT: it must be stable for the life of the harness's
+  // connection-scoped source.
+  rpc ListAgentDefs(ListAgentDefsRequest) returns (ListAgentDefsResponse);
+}
+
+// AgentDef is one agent definition, mirroring tool.AgentDef. It carries NO
+// location.
+message AgentDef {
+  // name is the def's stable identifier (non-empty, unique within the
+  // source): the Subagent `agent` routing key and the team-member AgentType
+  // handle.
+  string name = 1 [(buf.validate.field).string.min_len = 1];
+
+  // description is the one-line, always-in-context routing metadata. The
+  // harness re-normalizes it client-side: forced single-line (control
+  // characters become spaces) and re-capped to tool.MaxAgentDescriptionBytes
+  // (engine/tool/agentsource.go — the ONE canonical cap every source shares).
+  string description = 2 [(buf.validate.field).string.min_len = 1];
+
+  // tools is the OPTIONAL allowlist of catalog tool names (empty = the call
+  // site's default set).
+  repeated string tools = 3;
+
+  // disallowed_tools is an OPTIONAL subtractive filter applied AFTER
+  // tools/default.
+  repeated string disallowed_tools = 4;
+
+  // model is the OPTIONAL model selector: an alias, a full id, or
+  // "inherit"/empty (= the parent model). Resolved only in the harness's
+  // composition layer.
+  string model = 5;
+
+  // provider is the OPTIONAL provider-id selector (empty = inherit the
+  // parent/session provider). Pure data, resolved only in composition.
+  string provider = 6;
+
+  // permission_mode is the OPTIONAL session permission mode hint
+  // (default|plan|acceptEdits), carried as the raw string.
+  string permission_mode = 7;
+
+  // max_turns is the OPTIONAL per-run turn cap (0 = the caller default).
+  int32 max_turns = 8;
+
+  // max_tool_calls is the OPTIONAL per-run tool-call cap (0 = the caller
+  // default).
+  int32 max_tool_calls = 9;
+
+  // color is an OPTIONAL UX hint only; it never affects execution.
+  string color = 10;
+
+  // skills is an OPTIONAL list of skill names to PRELOAD into this def's
+  // engine prompt. Unknown names are non-fatal harness diagnostics.
+  repeated string skills = 11;
+
+  // mcp_servers is an OPTIONAL list of MCP servers to scope to this def's
+  // engine (reference or inline streamable-HTTP; see AgentMCPServer).
+  repeated AgentMCPServer mcp_servers = 12;
+
+  // hooks is an OPTIONAL phase -> shell-command map scoping lifecycle hooks
+  // to this def's engine. Phase names are validated harness-side against the
+  // governance taxonomy; unknown phases are non-fatal diagnostics.
+  //
+  // CAPABILITY WARNING: hook commands execute as UNGATED SHELL on the
+  // HARNESS HOST (hookexec, every scoped lifecycle phase, no permission ask)
+  // — strictly more capability than model steering. A compromised
+  // agent-source driver executes arbitrary shell on the harness host via def
+  // hooks; treat the driver as harness-equivalent infrastructure. The
+  // harness narrates every driver def carrying hooks at build (names only).
+  map<string, string> hooks = 13;
+
+  // body is the def's full markdown instructions, composed into the engine's
+  // system prompt. The harness re-caps it client-side to
+  // tool.MaxAgentBodyBytes (engine/tool/agentsource.go; it is in-context
+  // every turn for that engine).
+  string body = 14;
+
+  // origin is the admission-tier label, a string passthrough (house style, no
+  // proto enum). Documented values: "explicit", "project", "user", "driver".
+  // It is a TIER, never a location, and it is DRIVER-SIDE OBSERVABILITY ONLY:
+  // the harness stamps every driver-listed def "driver" UNCONDITIONALLY (a
+  // driver cannot claim the project/user tiers) — trust is enforced at source
+  // CONSTRUCTION in the harness's composition layer, never from this field.
+  string origin = 15;
+}
+
+// AgentMCPServer is one entry of a def's mcp_servers, mirroring
+// tool.AgentMCPServer: EITHER a reference to an already-configured main
+// server (url empty) OR an inline streamable-HTTP server the def connects on
+// its own.
+message AgentMCPServer {
+  // name is the server's identifier: a configured main server's name for a
+  // reference, or the mcp__<name>__ tool namespace for an inline server.
+  string name = 1 [(buf.validate.field).string.min_len = 1];
+
+  // url is the inline server's streamable-HTTP endpoint; empty means this
+  // entry is a REFERENCE to a configured main server (no new connection).
+  string url = 2;
+
+  // headers are extra HTTP headers for an inline server. SECRET-SHAPED (e.g.
+  // Authorization): the harness never logs or projects them into any
+  // inventory surface; they cross this wire only because driver dials refuse
+  // ALL non-local cleartext (see internal/adapter/grpcdriver dial posture).
+  // Ignored for a reference entry.
+  map<string, string> headers = 3;
+}
+
+// ListAgentDefsRequest is empty: the source serves one fixed definition set.
+message ListAgentDefsRequest {}
+
+// ListAgentDefsResponse carries the full definition snapshot.
+message ListAgentDefsResponse {
+  // agent_defs is sorted by name and unique.
+  repeated AgentDef agent_defs = 1;
+}

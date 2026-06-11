@@ -3,23 +3,35 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	driverv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/driver/v1"
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/adapter/sourceconformance"
 	"github.com/stacklok/mecatl/engine/governance"
+	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/engine/prompt"
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/grpcdriver"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
+	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 )
 
@@ -72,6 +84,19 @@ func TestValidateDriverConfigSourceExclusivity(t *testing.T) {
 		{name: "skill driver alone", cfg: Config{SkillSourceURL: "127.0.0.1:7443"}},
 		{name: "soul driver alone", cfg: Config{SoulSourceURL: "127.0.0.1:7443"}},
 		{name: "soul driver with no-soul", cfg: Config{SoulSourceURL: "127.0.0.1:7443", NoSoul: true}},
+		{name: "agent driver alone", cfg: Config{AgentSourceURL: "127.0.0.1:7443"}},
+		// The default-true conventional discovery is SUPERSEDED, never fatal
+		// (the §1.F asymmetry vs skills, whose conventional is opt-in).
+		{name: "agent driver with conventional", cfg: Config{AgentSourceURL: "127.0.0.1:7443", AgentsConventional: true}},
+		{
+			name:    "agent driver with explicit dirs",
+			cfg:     Config{AgentSourceURL: "127.0.0.1:7443", AgentsDirs: []string{"/tmp/agents"}},
+			wantErr: "mutually exclusive",
+		},
+		// The command driver COMPOSES with file commands — deliberately NO
+		// exclusivity rule.
+		{name: "command driver alone", cfg: Config{CommandSourceURL: "127.0.0.1:7443"}},
+		{name: "command driver with commands dir", cfg: Config{CommandSourceURL: "127.0.0.1:7443", CommandsDir: "/tmp/cmds"}},
 		{
 			name:    "skill driver with explicit dirs",
 			cfg:     Config{SkillSourceURL: "127.0.0.1:7443", SkillsDirs: []string{"/tmp/sk"}},
@@ -335,6 +360,238 @@ func TestDriverSkillIndexLazy(t *testing.T) {
 	}
 }
 
+// TestResolveAgentSeamDriver drives the REAL agent-driver branch end to end
+// over a loopback fixture server: the ONE ListAgentDefs snapshot becomes the
+// registry, every def carries the unconditional driver origin, the detail
+// channel names the driver target (never a path), and the default-true
+// conventional discovery is narrated as SUPERSEDED (the §1.F asymmetry —
+// never a fatal).
+func TestResolveAgentSeamDriver(t *testing.T) {
+	addr := startSourceDriver(t, func(gs *grpc.Server) {
+		driverv1.RegisterAgentSourceServiceServer(gs, grpcdriver.NewAgentSourceServer(sourceconformance.NewAgentFixtureSource()))
+	})
+	diag := newCapturingDiagnostics()
+	cfg := Config{AgentSourceURL: addr, AgentsConventional: true, Diagnostics: diag, driverConns: driverConnsForTest(t)}
+	reg, closeFn, err := resolveAgentSeam(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("resolveAgentSeam: %v", err)
+	}
+	if closeFn != nil {
+		t.Cleanup(closeFn)
+	}
+	if reg.Len() != len(sourceconformance.AgentFixture) {
+		t.Fatalf("registry holds %d defs, want %d", reg.Len(), len(sourceconformance.AgentFixture))
+	}
+	for _, d := range reg.List() {
+		if d.Origin != tool.AgentOriginDriver {
+			t.Errorf("def %q Origin = %q, want driver (stamped unconditionally)", d.Name, d.Origin)
+		}
+		if got, want := reg.Detail(d.Name), "driver: "+addr; got != want {
+			t.Errorf("Detail(%q) = %q, want %q (the driver detail names the target, never a path)", d.Name, got, want)
+		}
+	}
+	if got := diag.countContaining("conventional discovery superseded"); got != 1 {
+		t.Errorf("superseded narration emitted %d times, want exactly 1", got)
+	}
+	if got := diag.countContaining("agent definitions ENABLED"); got != 1 {
+		t.Errorf("ENABLED narration emitted %d times, want exactly 1", got)
+	}
+	// The harness-side-shell capability is narrated per hooks-bearing def
+	// (exactly ONE fixture def — "full-stack" — carries hooks), names only.
+	if got := diag.countContaining("agent def carries lifecycle hooks (harness-side shell)"); got != 1 {
+		t.Errorf("hooks-capability narration emitted %d times, want exactly 1 (one hooks-bearing fixture def)", got)
+	}
+}
+
+// TestBuildAgentDriverUnreachableFatal pins the loud-misconfig posture at BOTH
+// levels: the seam itself errors on an unreachable driver, and a full Build
+// surfaces it as the fatal it is (defs bake per-def child engines — a silent
+// no-defs degradation would hide the misconfiguration).
+func TestBuildAgentDriverUnreachableFatal(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := lis.Addr().String()
+	_ = lis.Close()
+
+	if _, _, serr := resolveAgentSeam(context.Background(), Config{AgentSourceURL: addr, driverConns: driverConnsForTest(t)}); serr == nil {
+		t.Fatal("resolveAgentSeam(unreachable driver) = nil error, want a fatal snapshot failure")
+	}
+
+	_, berr := Build(context.Background(), Config{
+		Workspace:      t.TempDir(),
+		Model:          "mock",
+		UseMock:        true,
+		AgentSourceURL: addr,
+	})
+	if berr == nil || !strings.Contains(berr.Error(), "agent definitions from driver") {
+		t.Fatalf("Build(unreachable agent driver) error = %v, want the fatal seam error", berr)
+	}
+}
+
+// TestBuildCommandDriverProbeFatal pins the build-time posture: an explicitly
+// configured command driver that cannot answer the Probe fails the WHOLE
+// build (runtime faults, by contrast, fail soft inside the client).
+func TestBuildCommandDriverProbeFatal(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := lis.Addr().String()
+	_ = lis.Close()
+
+	_, err = Build(context.Background(), Config{
+		Workspace:        t.TempDir(),
+		Model:            "mock",
+		UseMock:          true,
+		CommandSourceURL: addr,
+	})
+	if err == nil || !strings.Contains(err.Error(), "command-source driver") {
+		t.Fatalf("Build(unreachable command driver) error = %v, want the fatal probe error", err)
+	}
+}
+
+// stubCommandSource is a fixed in-memory prompt.CommandSource for the
+// composition-order tests.
+type stubCommandSource struct {
+	bodies map[string]string
+	list   []prompt.Command
+}
+
+func (s stubCommandSource) ListCommands(context.Context) ([]prompt.Command, error) {
+	return s.list, nil
+}
+
+func (s stubCommandSource) CommandBody(_ context.Context, name string) (string, bool, error) {
+	body, ok := s.bodies[name]
+	return body, ok, nil
+}
+
+// TestCommandDriverCompositionOrder pins the §1.F composition: file-backed
+// commands FIRST, the driver source SECOND (a local command file shadows a
+// same-named driver command; a driver command expands when no file matches),
+// and the palette merges both with the same first-wins precedence.
+func TestCommandDriverCompositionOrder(t *testing.T) {
+	cfg := Config{CommandsDir: "cmds"}
+	cfg.commandSource = stubCommandSource{
+		bodies: map[string]string{
+			"dup":         "DRIVER dup body",
+			"driver-only": "DRIVER body for $1",
+		},
+		list: []prompt.Command{
+			{Name: "driver-only", Description: "driver only"},
+			{Name: "dup", Description: "driver dup"},
+		},
+	}
+	exp := buildCommandExpander(cfg, nil)
+	ws := memfs.NewWorkspace("/proj")
+	if err := ws.Write(context.Background(), "cmds/dup.md", []byte("---\ndescription: file dup\n---\nFILE dup body $ARGUMENTS")); err != nil {
+		t.Fatalf("write command file: %v", err)
+	}
+	ctx := context.Background()
+
+	// A same-named file command SHADOWS the driver command.
+	out, ok, err := exp.Expand(ctx, ws, "/dup x")
+	if err != nil || !ok || out != "FILE dup body x" {
+		t.Errorf("Expand(/dup) = (%q, %v, %v), want the FILE body (file shadows driver)", out, ok, err)
+	}
+	// A driver-only command expands through the source (shared substitution).
+	out, ok, err = exp.Expand(ctx, ws, "/driver-only y")
+	if err != nil || !ok || out != "DRIVER body for y" {
+		t.Errorf("Expand(/driver-only) = (%q, %v, %v), want the driver body", out, ok, err)
+	}
+	// The palette merges both, first-wins on the collision.
+	lister, isLister := exp.(prompt.CommandLister)
+	if !isLister {
+		t.Fatal("composed expander must implement prompt.CommandLister")
+	}
+	cmds, err := lister.List(ctx, ws)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(cmds) != 2 || cmds[0].Name != "driver-only" || cmds[1].Name != "dup" {
+		t.Fatalf("palette = %+v, want [driver-only, dup]", cmds)
+	}
+	if cmds[1].Description != "file dup" {
+		t.Errorf("dup description = %q, want the FILE one (first-wins)", cmds[1].Description)
+	}
+}
+
+// argScanDiag is a port.Diagnostics double that renders EVERY emitted line —
+// message AND args (and With-bound attributes) — into a flat string store, so
+// a test can scan the whole diagnostics surface for a sentinel.
+type argScanDiag struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (d *argScanDiag) Log(_ context.Context, _ port.Level, msg string, args ...any) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.lines = append(d.lines, msg+" "+fmt.Sprint(args...))
+}
+
+func (d *argScanDiag) With(args ...any) port.Diagnostics {
+	d.mu.Lock()
+	d.lines = append(d.lines, fmt.Sprint(args...))
+	d.mu.Unlock()
+	return d
+}
+
+func (d *argScanDiag) joined() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return strings.Join(d.lines, "\n")
+}
+
+// TestDefMCPHeadersNeverLogged is the §0.5 guard: an inline MCP server's
+// Headers are SECRET-SHAPED — the per-def MCP wiring logs server names, urls,
+// counts, and errors, but a header VALUE must never reach the diagnostics
+// stream.
+//
+// SCOPE NOTE: this exercises the WARN/FAILURE branches only — the inline
+// server is unreachable (loopback port 1, refused immediately) and the
+// reference names no configured server, so the connect-error, all-failed, and
+// unknown-reference WARNs all fire and are scanned. The SUCCESS branches
+// (a connected inline manager / a resolved reference) need a live MCP server
+// and are not exercised offline; their log lines are the same
+// name/url/count-shaped Info calls in defMCPTools, which take no header
+// argument by construction.
+func TestDefMCPHeadersNeverLogged(t *testing.T) {
+	const sentinel = "SECRET-HEADER-SENTINEL-c2"
+	diag := &argScanDiag{}
+	cfg := Config{Model: "m", Diagnostics: diag}
+	reg := agents.NewRegistry([]agents.AgentDef{{
+		Name:        "ops",
+		Description: "operates over MCP",
+		MCPServers: []agents.AgentMCPServer{
+			{Name: "ghost-ref"}, // unknown reference: logs a WARN naming the server
+			{
+				Name:    "inline",
+				URL:     "http://127.0.0.1:1/mcp", // refused immediately: connect WARN
+				Headers: map[string]string{"Authorization": "Bearer " + sentinel},
+			},
+		},
+	}})
+	provider := mockllm.New(mockllm.TextTurn("x"))
+	engines, _, closeFn := agentSubagentEnginesForTest(context.Background(), cfg, provider, reg, nil, hookexec.New(nil), nil, nil)
+	if closeFn != nil {
+		defer func() { _ = closeFn() }()
+	}
+	if len(engines) != 1 {
+		t.Fatalf("want the def engine built despite MCP failures, got %d", len(engines))
+	}
+
+	out := diag.joined()
+	if !strings.Contains(out, "MCP") {
+		t.Fatalf("the MCP wiring WARNs did not fire — the no-leak scan would be vacuous:\n%s", out)
+	}
+	if strings.Contains(out, sentinel) {
+		t.Errorf("an inline MCP header VALUE leaked into diagnostics:\n%s", out)
+	}
+}
+
 // TestDriverAssetReadableThroughEarlyWorkspace pins the seam join the EAGER
 // cache MkdirTemp exists for: a production osfs Workspace is constructed
 // BEFORE any activation (the cache root is registered while still empty),
@@ -375,5 +632,129 @@ func TestDriverAssetReadableThroughEarlyWorkspace(t *testing.T) {
 	}
 	if want := "- correctness first\n- style second\n"; string(got) != want {
 		t.Errorf("Read = %q, want %q", got, want)
+	}
+}
+
+// countingCommandDriver is a CommandSourceService fixture that counts RPCs,
+// so the build-once-stash contract is observable on the wire: ListCommands
+// must fire exactly once (the build-time Probe) however many session engines
+// are minted, and GetCommandBody once per actual expansion.
+type countingCommandDriver struct {
+	driverv1.UnimplementedCommandSourceServiceServer
+	listCalls atomic.Int32
+	bodyCalls atomic.Int32
+}
+
+func (s *countingCommandDriver) ListCommands(context.Context, *driverv1.ListCommandsRequest) (*driverv1.ListCommandsResponse, error) {
+	s.listCalls.Add(1)
+	return &driverv1.ListCommandsResponse{Commands: []*driverv1.CommandMeta{
+		{Name: "driver-cmd", Description: "a driver-served command"},
+	}}, nil
+}
+
+func (s *countingCommandDriver) GetCommandBody(_ context.Context, req *driverv1.GetCommandBodyRequest) (*driverv1.GetCommandBodyResponse, error) {
+	s.bodyCalls.Add(1)
+	if req.GetName() != "driver-cmd" {
+		return nil, status.Errorf(codes.NotFound, "unknown command %q", req.GetName())
+	}
+	return &driverv1.GetCommandBodyResponse{Body: "DRIVER says $1"}, nil
+}
+
+// TestBuildCommandDriverProbeOnceAcrossSessionEngines pins the #42 drift
+// class for the command seam over the PRODUCTION wiring: Build dials+probes
+// the driver EXACTLY ONCE and stashes the client (cfg.commandSource); minting
+// per-session engines through the service's factory must compose the stash —
+// never re-dial or re-probe (the wire count stays at the single Probe).
+func TestBuildCommandDriverProbeOnceAcrossSessionEngines(t *testing.T) {
+	srv := &countingCommandDriver{}
+	addr := startSourceDriver(t, func(gs *grpc.Server) {
+		driverv1.RegisterCommandSourceServiceServer(gs, srv)
+	})
+	built, err := Build(context.Background(), Config{
+		Workspace:        t.TempDir(),
+		Model:            "mock",
+		UseMock:          true,
+		CommandSourceURL: addr,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer built.Close()
+	if got := srv.listCalls.Load(); got != 1 {
+		t.Fatalf("Build issued %d ListCommands RPCs, want exactly 1 (the Probe)", got)
+	}
+
+	// TWO per-session engines through the production factory (a non-zero
+	// provider selector forces the per-session path).
+	for i := range 2 {
+		if _, serr := built.Service.CreateSessionWithProvider(context.Background(), t.TempDir(),
+			session.ModeDefault, defaultLimits(), server.ProviderSelector{ProviderID: providerMock}); serr != nil {
+			t.Fatalf("CreateSessionWithProvider #%d: %v", i, serr)
+		}
+	}
+	if got := srv.listCalls.Load(); got != 1 {
+		t.Errorf("after minting 2 session engines ListCommands = %d, want STILL 1 (the factory must compose the stashed, already-probed client — never re-dial/re-probe)", got)
+	}
+}
+
+// TestSessionEngineCommandExpanderUsesStashedDriverSource is the second half
+// of the stash proof: each per-session engine minted by the PRODUCTION
+// sessionEngineFactory carries a CommandExpander composed from the stashed
+// driver client, and actually EXPANDS a driver-sourced command — the expanded
+// body (not the raw "/cmd") is what lands in the session history. The stash
+// here is performed with the SAME three steps Build uses (drivers().dial →
+// NewCommandSource → Probe → cfg.commandSource), with a test-controlled
+// provider so the runs are scriptable.
+func TestSessionEngineCommandExpanderUsesStashedDriverSource(t *testing.T) {
+	srv := &countingCommandDriver{}
+	addr := startSourceDriver(t, func(gs *grpc.Server) {
+		driverv1.RegisterCommandSourceServiceServer(gs, srv)
+	})
+	ctx := context.Background()
+	cfg := Config{Model: "m", driverConns: driverConnsForTest(t)}
+	conn, _, err := cfg.drivers().dial(cfg, addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	cmdSrc := grpcdriver.NewCommandSource(conn, grpcdriver.CommandOptions{Diagnostics: cfg.diag()})
+	if perr := cmdSrc.Probe(ctx); perr != nil {
+		t.Fatalf("Probe: %v", perr)
+	}
+	cfg.commandSource = cmdSrc
+
+	provider := mockllm.New(mockllm.TextTurn("done one"), mockllm.TextTurn("done two"))
+	factory := sessionEngineFactory(cfg, regForTest(provider, providerMock, cfg.Model), provider,
+		memstore.New(), permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil,
+		prompt.RootAssembler{}, catalogAssets{})
+
+	for i := range 2 {
+		res, ferr := factory(ctx, server.ProviderSelector{ProviderID: providerMock}, nil)
+		if ferr != nil {
+			t.Fatalf("factory #%d: %v", i, ferr)
+		}
+		sess := session.New(session.SessionID(fmt.Sprintf("cmd-sess-%d", i)), session.ModeDefault, "/ws",
+			session.Limits{MaxTurns: 3}, time.Now())
+		drainRun(res.Engine.RunContent(ctx, sess, memfs.NewWorkspace("/ws"), "/driver-cmd fix-it", nil))
+		expanded := false
+		for _, m := range sess.Conversation.Messages {
+			if m.Role == session.RoleUser && m.Text == "DRIVER says fix-it" {
+				expanded = true
+			}
+			if m.Role == session.RoleUser && strings.HasPrefix(m.Text, "/driver-cmd") {
+				t.Errorf("session %d recorded the RAW command %q — the driver expansion did not run", i, m.Text)
+			}
+		}
+		if !expanded {
+			t.Errorf("session %d history is missing the EXPANDED driver body", i)
+		}
+		if res.Close != nil {
+			_ = res.Close()
+		}
+	}
+	if got := srv.listCalls.Load(); got != 1 {
+		t.Errorf("ListCommands = %d, want exactly 1 (the Probe; minting+expanding must not re-list)", got)
+	}
+	if got := srv.bodyCalls.Load(); got != 2 {
+		t.Errorf("GetCommandBody = %d, want 2 (one expansion per session)", got)
 	}
 }

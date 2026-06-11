@@ -232,8 +232,13 @@ func TestDirSourceDiscovery(t *testing.T) {
 	if len(defs) != 2 {
 		t.Fatalf("want 2 defs, got %d: %+v", len(defs), defs)
 	}
-	if defs[0].Name != "alpha" || defs[1].Name != "beta" {
+	if defs[0].Def.Name != "alpha" || defs[1].Def.Name != "beta" {
 		t.Fatalf("defs not sorted by name: %+v", defs)
+	}
+	// Each Discovered entry carries the adapter-private locator (the bare path
+	// for an unlabelled source) — the def value object itself carries none.
+	if !strings.Contains(defs[0].Detail, "alpha.md") {
+		t.Fatalf("Detail should carry the source path, got %q", defs[0].Detail)
 	}
 	// broken.md yields exactly one skip; README.txt is silently ignored.
 	if len(skips) != 1 || !strings.Contains(skips[0].Path, "broken.md") {
@@ -265,7 +270,7 @@ func TestDirSourceDuplicateNameWithinDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if len(defs) != 1 || defs[0].Description != "from a" {
+	if len(defs) != 1 || defs[0].Def.Description != "from a" {
 		t.Fatalf("want keep-first a.md, got %+v", defs)
 	}
 	if len(skips) != 1 || !strings.Contains(skips[0].Reason, "duplicate") {

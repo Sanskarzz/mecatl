@@ -164,15 +164,17 @@ type config struct {
 	// app.Build validates). The driver auth/TLS knobs apply to every driver
 	// connection; the token also reads MECATL_DRIVER_AUTH_TOKEN when the flag
 	// is unset (mirroring --auth-token / MECATL_AUTH_TOKEN).
-	sessionStoreURL string
-	memoryStoreURL  string
-	skillSourceURL  string
-	soulSourceURL   string
-	driverAuthToken string
-	driverTLS       bool
-	driverTLSCA     string
-	driverTLSCert   string
-	driverTLSKey    string
+	sessionStoreURL  string
+	memoryStoreURL   string
+	skillSourceURL   string
+	soulSourceURL    string
+	agentSourceURL   string
+	commandSourceURL string
+	driverAuthToken  string
+	driverTLS        bool
+	driverTLSCA      string
+	driverTLSCert    string
+	driverTLSKey     string
 
 	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona fragment.
 	// ON by default reading the conventional ~/.config/mecatl/soul.md (fail-soft if
@@ -666,6 +668,8 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		MemoryStoreURL:               cfg.memoryStoreURL,
 		SkillSourceURL:               cfg.skillSourceURL,
 		SoulSourceURL:                cfg.soulSourceURL,
+		AgentSourceURL:               cfg.agentSourceURL,
+		CommandSourceURL:             cfg.commandSourceURL,
 		DriverAuthToken:              cfg.driverAuthToken,
 		DriverTLS:                    cfg.driverTLS,
 		DriverTLSCA:                  cfg.driverTLSCA,
@@ -810,11 +814,13 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.Var(&cfg.agentsDirs, "agents-dir", "directory to discover named agent definitions (subagent specialists) from, laid out as <name>.md with YAML frontmatter (repeatable; highest precedence). A def is reusable as a Subagent delegate (Subagent(agent=<name>)) and as a team-member role (AgentType). TRUST BOUNDARY: a def body steers the model like AGENTS.md/CLAUDE.md — point this only at directories you trust")
 	fs.BoolVar(&cfg.agentsConventional, "agents-conventional", true, "also discover agent definitions from the conventional locations: <workspace>/"+agents.ProjectDirMecatl+", <workspace>/"+agents.ProjectDirClaude+", $XDG_CONFIG_HOME/mecatl/agents (or ~/.config/mecatl/agents), and ~/.claude/agents (lower precedence than --agents-dir). ON by default and INERT when no such dir exists (like teams/fork). Pass --agents-conventional=false to disable. TRUST BOUNDARY: same trust class as AGENTS.md/CLAUDE.md")
+	fs.StringVar(&cfg.agentSourceURL, "agent-source-url", "", "host:port of a remote agent-definition gRPC driver (mecatl.driver.v1.AgentSourceService); the definition set is SNAPSHOTTED at startup (fatal if unreachable). Mutually exclusive with --agents-dir; the default-on conventional discovery is SUPERSEDED (not an error) — the driver becomes the only definition source. TRUST BOUNDARY: stronger than model steering — a def's hooks execute as UNGATED shell on the harness host (hookexec, every lifecycle phase, no permission ask); a compromised agent-source driver executes arbitrary shell on the harness host via def hooks, so treat it as harness-equivalent infrastructure. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 	fs.StringVar(&cfg.subagentModel, "subagent-model", "", "global model override applied to every Subagent/team-member child that does not pin its own model in its definition (the analogue of CLAUDE_CODE_SUBAGENT_MODEL). May be a concrete id or an alias from --model-alias. Empty inherits the parent --model")
 	fs.Var(&cfg.modelAliases, "model-alias", "model alias mapping as name=model-id (repeatable), e.g. --model-alias fast=gpt-4o-mini. Aliases are resolved only in the composition layer; an agent def's `model: <alias>` resolves through this map (then the built-in sonnet/opus/haiku aliases)")
 
 	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "directory of slash-command templates (<name>.md); setting it enables command expansion. Empty + --enable-commands uses the defaults (.mecatl/commands, .claude/commands)")
 	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.mecatl/commands, .claude/commands) when --commands-dir is empty")
+	fs.StringVar(&cfg.commandSourceURL, "command-source-url", "", "host:port of a remote slash-command gRPC driver (mecatl.driver.v1.CommandSourceService); COMPOSES with file-backed commands rather than replacing them — a local command file shadows a same-named driver command, and MCP prompts stay last. Consulted LIVE on every expansion/listing (no snapshot); probed once at startup (fatal if unreachable), runtime faults fail soft (raw text passes through). TRUST BOUNDARY: an expanded command body becomes the user prompt — point this only at a driver you trust. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 
 	fs.BoolVar(&cfg.enableParallel, "enable-parallel", true, "register the Parallel fan-out tool (parallel isolated child branches)")
 	fs.IntVar(&cfg.forkPreservedCap, "fork-preserved-cap", agent.DefaultPreservedForkCap, "max PRESERVED winner forks (join=first/judge) kept on disk at once; the oldest beyond this is LRU-reaped. Preserved forks stay inspectable until reaped")

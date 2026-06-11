@@ -92,7 +92,7 @@ func resolveProviderModel(cfg Config, provReg *providerRegistry, def agents.Agen
 			pid = p
 		} else {
 			cfg.diag().Log(context.Background(), port.LevelWarn, "agent def references an unknown/unavailable provider; inheriting parent provider",
-				"agent", def.Name, "provider", p, "path", def.Path)
+				"agent", def.Name, "provider", p, "origin", string(def.Origin))
 			// pid stays parentProviderID (fail-safe).
 		}
 	}
@@ -177,7 +177,7 @@ func resolveAlias(cfg Config, def agents.AgentDef, sel string) string {
 		return sel
 	}
 	cfg.diag().Log(context.Background(), port.LevelWarn, "agent def references an unknown model alias; inheriting parent model",
-		"agent", def.Name, "model", sel, "path", def.Path)
+		"agent", def.Name, "model", sel, "origin", string(def.Origin))
 	return ""
 }
 
@@ -200,7 +200,7 @@ func resolvePermissionMode(d port.Diagnostics, def agents.AgentDef) session.Perm
 		return session.ModeAccept
 	default:
 		d.Log(context.Background(), port.LevelWarn, "agent def references an unknown permissionMode; using the default",
-			"agent", def.Name, "mode", def.PermissionMode, "path", def.Path)
+			"agent", def.Name, "mode", def.PermissionMode, "origin", string(def.Origin))
 		return ""
 	}
 }
@@ -416,12 +416,12 @@ func defMCPTools(ctx context.Context, d port.Diagnostics, def agents.AgentDef, m
 			refTools, ok := mainServerTools(mainMgr, name)
 			if !ok {
 				d.Log(ctx, port.LevelWarn, "agent def references an unknown MCP server; not scoped (no such configured server)",
-					"agent", def.Name, "server", name, "path", def.Path)
+					"agent", def.Name, "server", name, "origin", string(def.Origin))
 				continue
 			}
 			mcpTools = append(mcpTools, refTools...)
 			d.Log(ctx, port.LevelInfo, "agent def scopes a referenced MCP server",
-				"agent", def.Name, "server", name, "tools", len(refTools), "path", def.Path)
+				"agent", def.Name, "server", name, "tools", len(refTools), "origin", string(def.Origin))
 			continue
 		}
 		inlineConfigs = append(inlineConfigs, mcp.ServerConfig{
@@ -446,7 +446,7 @@ func defMCPTools(ctx context.Context, d port.Diagnostics, def agents.AgentDef, m
 			mcpTools = append(mcpTools, inlineTools...)
 			closeFn = mgr.Close
 			d.Log(ctx, port.LevelInfo, "agent def scopes inline MCP servers",
-				"agent", def.Name, "servers", len(mgr.Servers()), "tools", len(inlineTools), "path", def.Path)
+				"agent", def.Name, "servers", len(mgr.Servers()), "tools", len(inlineTools), "origin", string(def.Origin))
 		}
 	}
 
@@ -485,7 +485,7 @@ func defHookRunner(cfg Config, def agents.AgentDef, fallback port.HookRunner) po
 		phase := governance.HookPhase(rawPhase)
 		if _, ok := knownHookPhases[phase]; !ok {
 			cfg.diag().Log(context.Background(), port.LevelWarn, "agent def references an unknown hook phase; ignored",
-				"agent", def.Name, "phase", rawPhase, "path", def.Path)
+				"agent", def.Name, "phase", rawPhase, "origin", string(def.Origin))
 			continue
 		}
 		hooks[phase] = cmd
@@ -497,7 +497,7 @@ func defHookRunner(cfg Config, def agents.AgentDef, fallback port.HookRunner) po
 	if cfg.Shell != "" {
 		opts = append(opts, hookexec.WithShell(cfg.Shell))
 	}
-	cfg.diag().Log(context.Background(), port.LevelInfo, "agent def scopes lifecycle hooks", "agent", def.Name, "phases", len(hooks), "path", def.Path)
+	cfg.diag().Log(context.Background(), port.LevelInfo, "agent def scopes lifecycle hooks", "agent", def.Name, "phases", len(hooks), "origin", string(def.Origin))
 	return hookexec.New(hooks, opts...)
 }
 
@@ -557,7 +557,7 @@ func buildAgentSubagentEngines(ctx context.Context, cfg Config, provider port.LL
 		names, diags := scopedToolNamesMode(def, base, false, allowShell)
 		for _, d := range diags {
 			cfg.diag().Log(ctx, port.LevelWarn, "agent def tool scoping",
-				"agent", def.Name, "tool", d.tool, "reason", d.reason, "path", def.Path)
+				"agent", def.Name, "tool", d.tool, "reason", d.reason, "source", reg.Detail(def.Name))
 		}
 
 		cat := tool.NewCatalog()
@@ -596,7 +596,7 @@ func buildAgentSubagentEngines(ctx context.Context, cfg Config, provider port.LL
 		bodies, missing := preloadedSkillBodies(def, skillIdx)
 		for _, name := range missing {
 			cfg.diag().Log(ctx, port.LevelWarn, "agent def references an unknown skill; not preloaded",
-				"agent", def.Name, "skill", name, "path", def.Path)
+				"agent", def.Name, "skill", name, "source", reg.Detail(def.Name))
 		}
 		hooks := defHookRunner(cfg, def, defaultHooks)
 
@@ -616,7 +616,7 @@ func buildAgentSubagentEngines(ctx context.Context, cfg Config, provider port.LL
 
 		cfg.diag().Log(ctx, port.LevelInfo, "agent def engine built",
 			"agent", def.Name, "tools", strings.Join(names, ","), "provider", pid, "model", model,
-			"preloaded_skills", len(bodies), "path", def.Path)
+			"preloaded_skills", len(bodies), "source", reg.Detail(def.Name))
 	}
 
 	// meta in registry (name-sorted) order for a byte-stable Subagent spec.
@@ -752,9 +752,13 @@ func skillSnapshot(discovered []skills.Skill) []*mecatlv1.SkillInfo {
 }
 
 // resolveAgentRegistry resolves the agent-definition registry from cfg (explicit
-// dirs + conventional locations when enabled). It is forgiving: discovery
-// diagnostics are logged and a hard fault yields an empty registry rather than
-// failing the build. Strict opt-in — zero sources means an empty registry.
+// dirs + conventional locations when enabled): the FILESYSTEM branch of the
+// agent seam (resolveAgentSeam owns the driver branch). It is forgiving:
+// discovery diagnostics are logged and a hard fault yields an empty registry
+// rather than failing the build. Strict opt-in — zero sources means an empty
+// registry. The snapshot rides agents.NewFSSource (the tool.AgentDefSource
+// implementation) and the registry is built over its Discovered entries so the
+// per-def adapter detail ("<label>: <path>") survives for diagnostics.
 //
 // TRUST-GATE INVARIANT: the project-tier trust gate here (and for skills/commands) is
 // COMPLETE only because agents/skills are resolved ONCE at BUILD time against the
@@ -780,7 +784,7 @@ func resolveAgentRegistry(ctx context.Context, cfg Config) *agents.Registry {
 		cfg.diag().Log(ctx, port.LevelInfo, "agent definitions DISABLED (no agents dirs configured)")
 		return agents.NewRegistry(nil)
 	}
-	reg, skips, err := agents.ResolveRegistry(ctx, agents.NewMultiSource(sources...))
+	src, skips, err := agents.NewFSSource(ctx, sources...)
 	for _, s := range skips {
 		cfg.diag().Log(ctx, port.LevelWarn, "agent def skipped", "path", s.Path, "reason", s.Reason)
 	}
@@ -789,6 +793,7 @@ func resolveAgentRegistry(ctx context.Context, cfg Config) *agents.Registry {
 			"dirs", strings.Join(cfg.AgentsDirs, ","), "conventional", cfg.AgentsConventional, "err", err)
 		return agents.NewRegistry(nil)
 	}
+	reg := agents.NewRegistryDiscovered(src.Discovered())
 	if reg.Len() == 0 {
 		cfg.diag().Log(ctx, port.LevelInfo, "agent definitions DISABLED (no valid <name>.md found in any source)")
 	} else {

@@ -196,15 +196,28 @@ type Config struct {
 	// client occupying the USER slot of the soul selection precedence. Both are
 	// probed at build (fatal on an unreachable driver — loud-misconfig); both
 	// share the same Driver* auth/TLS posture and per-target connection cache.
-	SessionStoreURL string
-	MemoryStoreURL  string
-	SkillSourceURL  string
-	SoulSourceURL   string
-	DriverAuthToken string
-	DriverTLS       bool
-	DriverTLSCA     string
-	DriverTLSCert   string
-	DriverTLSKey    string
+	// Phase C2 adds the remaining content-source drivers: AgentSourceURL
+	// replaces the LOCAL agent-definition discovery (mutually exclusive with
+	// AgentsDirs; the default-true AgentsConventional is simply SUPERSEDED —
+	// the driver branch constructs no conventional sources and narrates the
+	// supersession) with a mecatl.driver.v1.AgentSourceService client whose
+	// snapshot is taken ONCE at build (fatal if unreachable — defs bake
+	// per-def child engines, the skills posture). CommandSourceURL COMPOSES
+	// (no exclusivity): the driver's slash commands are layered AFTER the
+	// file-backed commands and BEFORE MCP prompts (file commands shadow a
+	// same-named driver command), consulted LIVE per expansion/listing;
+	// probed once at build (fatal if unreachable), runtime faults fail soft.
+	SessionStoreURL  string
+	MemoryStoreURL   string
+	SkillSourceURL   string
+	SoulSourceURL    string
+	AgentSourceURL   string
+	CommandSourceURL string
+	DriverAuthToken  string
+	DriverTLS        bool
+	DriverTLSCA      string
+	DriverTLSCert    string
+	DriverTLSKey     string
 
 	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona fragment
 	// injected as a turn-0 user message. ON by default reading the conventional
@@ -399,6 +412,14 @@ type Config struct {
 	// helpers called directly by tests get a fresh cache via cfg.drivers().
 	// Unexported: an internal composition detail, not an operator knob.
 	driverConns *driverConns
+
+	// commandSource is the build-once slash-command driver client, stashed by
+	// Build after the one dial + Probe (the driverConns precedent):
+	// buildCommandExpander runs PER SESSION, so it must compose the
+	// already-probed source rather than re-dialling/re-probing per session.
+	// nil when CommandSourceURL is unset. Unexported: an internal composition
+	// detail, not an operator knob.
+	commandSource prompt.CommandSource
 }
 
 // providerConstructor builds the port.LLMProvider for an available provider id,
@@ -518,13 +539,52 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	// yet relocated (iteration 2).
 	logBuildConfigFacts(cfg)
 
+	// Slash-command driver source (Phase C2): ONE dial + Probe at build time
+	// (fatal on a fault — loud-misconfig posture), then the probed client is
+	// STASHED on the unexported cfg.commandSource so buildCommandExpander —
+	// which runs per session — composes it without re-dialling or re-probing
+	// (the driverConns precedent). Runtime faults stay fail-soft inside the
+	// client. The once-guarded conn close folds into closeAll below.
+	commandConnClose := func() {}
+	if cfg.CommandSourceURL != "" {
+		conn, connClose, derr := cfg.drivers().dial(cfg, cfg.CommandSourceURL)
+		if derr != nil {
+			return nil, fmt.Errorf("dial command-source driver %q: %w", cfg.CommandSourceURL, derr)
+		}
+		cmdSrc := grpcdriver.NewCommandSource(conn, grpcdriver.CommandOptions{Diagnostics: cfg.diag()})
+		if perr := cmdSrc.Probe(ctx); perr != nil {
+			connClose()
+			return nil, fmt.Errorf("probe command-source driver %q: %w", cfg.CommandSourceURL, perr)
+		}
+		cfg.commandSource = cmdSrc
+		commandConnClose = connClose
+	}
+
 	store, storeClose, err := buildStore(cfg)
 	if err != nil {
+		commandConnClose()
 		return nil, err
 	}
-	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, assets, mcpClose, err := buildEngine(ctx, cfg, reg, provider, store)
+	// Agent seam (Phase C2): resolve the agent-definition registry EXACTLY
+	// ONCE for the whole composition — the build-time catalog's Subagent/Team
+	// tools, the per-session engine factory, the ListAgents snapshot, and the
+	// gRPC team wiring all consume THIS one registry (the C1 skillIdx hoist
+	// pattern; previously three independent resolutions, the per-session-drift
+	// class). The driver branch's once-guarded conn close folds into closeAll.
+	agentReg, agentClose, err := resolveAgentSeam(ctx, cfg)
 	if err != nil {
 		storeClose()
+		commandConnClose()
+		return nil, err
+	}
+	if agentClose == nil {
+		agentClose = func() {}
+	}
+	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, assets, mcpClose, err := buildEngine(ctx, cfg, reg, provider, store, agentReg)
+	if err != nil {
+		agentClose()
+		storeClose()
+		commandConnClose()
 		return nil, err
 	}
 	logMCPInventory(ctx, cfg.diag(), mcpInventory)
@@ -547,11 +607,11 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// empty snapshot). Resolution is idempotent + read-only, like the agent
 		// registry re-resolution below.
 		MCPSourceProber: mcpSourceProber(cfg),
-		// ListAgents snapshot: resolve the agent registry once here and project it
-		// into the proto form. Discovery is idempotent file scanning (buildCatalog
-		// resolves the same registry for the Subagent tool), so this re-resolution is
-		// cheap and keeps the snapshot a pure read at request time.
-		Agents: agentSnapshot(cfg, resolveAgentRegistry(ctx, cfg)),
+		// ListAgents snapshot: project the ONE registry resolved by
+		// resolveAgentSeam above (never a second resolution — the per-session
+		// drift class) into the proto form; the snapshot stays a pure read at
+		// request time.
+		Agents: agentSnapshot(cfg, agentReg),
 		// ListModels snapshot: join the provider registry's AVAILABLE providers to the
 		// embedded catalog and project each model into the proto form. The registry and
 		// catalog are both fixed for the process lifetime, so this is a startup snapshot
@@ -626,12 +686,14 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// eviction remains a follow-up; see docs/adr/0001-acp-adapter.md.
 		OnCloseSession: learned.Forget,
 	}
-	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, assets.skillReadRoots, assets.skillIndex)
+	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, agentReg, assets.skillReadRoots, assets.skillIndex)
 
 	svc, err := server.NewService(svcCfg)
 	if err != nil {
 		mcpClose()
+		agentClose()
 		storeClose()
+		commandConnClose()
 		return nil, fmt.Errorf("build service: %w", err)
 	}
 
@@ -656,9 +718,70 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		refreshClose()
 		svc.Close()
 		mcpClose()
+		agentClose()
 		storeClose()
+		commandConnClose()
 	}
 	return &Built{Service: svc, Close: closeAll}, nil
+}
+
+// resolveAgentSeam resolves the agent-definition registry from cfg: the
+// remote-driver branch when AgentSourceURL is set (fatal on an unreachable
+// driver — an explicit operator config that cannot answer is a
+// misconfiguration, the skill-driver posture; ONE ListAgentDefs snapshot, the
+// build-once semantics per-def child engines depend on), else the filesystem
+// branch (resolveAgentRegistry — fail-soft, narration unchanged). The
+// returned close is the driver branch's once-guarded conn close (nil for the
+// FS branch); Build folds it into closeAll.
+func resolveAgentSeam(ctx context.Context, cfg Config) (*agents.Registry, func(), error) {
+	if cfg.AgentSourceURL == "" {
+		return resolveAgentRegistry(ctx, cfg), nil, nil
+	}
+	// Conventional discovery is default-ON (and inert without dirs), so the
+	// driver branch is NOT an exclusivity fatal against it — the driver simply
+	// supersedes it (no conventional source is constructed). Explicit
+	// --agents-dir IS exclusive (validateDriverConfig, fatal before Build gets
+	// here). Narrate the supersession so an operator with real conventional
+	// dirs understands where their defs went.
+	if cfg.AgentsConventional {
+		cfg.diag().Log(ctx, port.LevelInfo, "agent definitions: conventional discovery superseded by --agent-source-url",
+			"target", cfg.AgentSourceURL)
+	}
+	conn, connClose, err := cfg.drivers().dial(cfg, cfg.AgentSourceURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dial agent-source driver %q: %w", cfg.AgentSourceURL, err)
+	}
+	src := grpcdriver.NewAgentSource(conn, grpcdriver.AgentOptions{Diagnostics: cfg.diag()})
+	defs, err := src.ListAgentDefs(ctx)
+	if err != nil {
+		connClose()
+		return nil, nil, fmt.Errorf("list agent definitions from driver %q: %w", cfg.AgentSourceURL, err)
+	}
+	if len(defs) == 0 {
+		cfg.diag().Log(ctx, port.LevelInfo, "agent definitions DISABLED (agent-source driver serves no defs)",
+			"target", cfg.AgentSourceURL)
+		return agents.NewRegistry(nil), connClose, nil
+	}
+	discovered := make([]agents.Discovered, len(defs))
+	names := make([]string, 0, len(defs))
+	for i, d := range defs {
+		// The adapter-private detail channel for a driver def names the driver
+		// target, never a path (the driver's storage is its private business).
+		discovered[i] = agents.Discovered{Def: d, Detail: "driver: " + cfg.AgentSourceURL}
+		names = append(names, d.Name)
+		// Make the SHELL capability visible once at build: a def's hooks run
+		// through hookexec on the HARNESS host (every scoped lifecycle phase,
+		// no permission ask), so a driver-sourced def carrying hooks is the
+		// driver exercising harness-side shell. Names only — never hook values.
+		if len(d.Hooks) > 0 {
+			cfg.diag().Log(ctx, port.LevelInfo, "agent def carries lifecycle hooks (harness-side shell)",
+				"agent", d.Name)
+		}
+	}
+	reg := agents.NewRegistryDiscovered(discovered)
+	cfg.diag().Log(ctx, port.LevelInfo, "agent definitions ENABLED",
+		"target", cfg.AgentSourceURL, "count", reg.Len(), "agents", strings.Join(names, ","))
+	return reg, connClose, nil
 }
 
 // sessionEngineFactory returns the server.SessionEngineFactory that builds a
@@ -915,7 +1038,12 @@ func buildStore(cfg Config) (port.SessionStore, func(), error) {
 // factory (built HERE because store/policy/hooks/counter/mcpProvider — the exact
 // collaborators a per-session engine must share with the main one — are all in
 // scope here, so the factory cannot drift from the main engine's Deps).
-func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, store port.SessionStore) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, catalogAssets, func(), error) {
+//
+// agentReg is the ONE agent-definition registry Build resolved via
+// resolveAgentSeam (FS or driver) — threaded in, never re-resolved here, so
+// every consumer (catalog, per-session factory, snapshot, team wiring) shares
+// the same registry.
+func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, store port.SessionStore, agentReg *agents.Registry) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, catalogAssets, func(), error) {
 	// SkillDraft trust boundary: when enabled, the quarantine dir must live OUTSIDE
 	// the workspace root (so the model's workspace-confined Write/Edit cannot reach
 	// it) and be disjoint from every active skills dir. Fatal on a misconfig.
@@ -960,13 +1088,10 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	}
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
-	// Resolve the agent-definition registry ONCE here and share it with BOTH the
-	// build-time catalog's Subagent/Team tools and the per-session engine factory (Half B
-	// builds a per-session Subagent/Team tool over the SAME registry, closed over below).
-	// Discovery is idempotent file scanning; resolving once avoids per-session
-	// re-discovery (the registry does not vary per session).
-	agentReg := resolveAgentRegistry(ctx, cfg)
-
+	// agentReg (threaded from Build's single resolveAgentSeam) is shared with
+	// BOTH the build-time catalog's Subagent/Team tools and the per-session
+	// engine factory (Half B builds a per-session Subagent/Team tool over the
+	// SAME registry, closed over below) — ONE resolution per process.
 	cat, assets, mcpProvider, mcpInventory, mcpClose, err := buildCatalog(ctx, cfg, reg, provider, hooks, agentReg, store)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, err
@@ -1279,24 +1404,36 @@ func engineDepsForProvider(
 
 // buildCommandExpander selects the slash-command expander for the agent Deps.
 // Command expansion is OFF by default (the NoopExpander, leaving raw user text
-// untouched). It is turned ON when EITHER CommandsDir is set OR EnableCommands is
-// true. It also composes an MCP prompt expander (the file-backed DirCommandExpander
-// has higher precedence, so a local command file shadows a same-named MCP prompt)
-// when MCPPrompts is set and at least one connected server exposes a prompt.
+// untouched). It is turned ON when CommandsDir is set, EnableCommands is true,
+// or a slash-command driver source is stashed (cfg.commandSource — dialled and
+// probed ONCE in Build, never here: this builder runs per session).
+//
+// COMPOSITION ORDER (first-that-expands-wins): file-backed commands (dirExp),
+// then the driver source (sourceExp), then MCP prompts (mcpExp) — a local
+// command file shadows a same-named driver command, and both shadow a
+// same-named MCP prompt (the MCP prompt namespace is disjoint anyway, kept
+// last as before).
 func buildCommandExpander(cfg Config, mcpProvider mcp.Provider) prompt.CommandExpander {
 	dirExp := buildDirCommandExpander(cfg)
+	var sourceExp prompt.CommandExpander
+	if cfg.commandSource != nil {
+		sourceExp = prompt.NewSourceExpander(cfg.commandSource)
+	}
 	mcpExp := buildMCPPromptExpander(cfg, mcpProvider)
 
-	switch {
-	case dirExp == nil && mcpExp == nil:
+	expanders := make([]prompt.CommandExpander, 0, 3)
+	for _, e := range []prompt.CommandExpander{dirExp, sourceExp, mcpExp} {
+		if e != nil {
+			expanders = append(expanders, e)
+		}
+	}
+	switch len(expanders) {
+	case 0:
 		return prompt.NoopExpander{}
-	case mcpExp == nil:
-		return dirExp
-	case dirExp == nil:
-		return mcpExp
+	case 1:
+		return expanders[0]
 	default:
-		// File-backed commands win on a name collision (listed first).
-		return prompt.NewMultiExpander(dirExp, mcpExp)
+		return prompt.NewMultiExpander(expanders...)
 	}
 }
 
@@ -1447,6 +1584,15 @@ func logBuildConfigFacts(cfg Config) {
 		tokenFact,
 		compactionDecision(cfg),
 		slashCommandDecision(cfg),
+	}
+	if cfg.CommandSourceURL != "" {
+		// The driver source COMPOSES with (never replaces) the file-backed
+		// state slashCommandDecision narrates, so it is a separate fact.
+		facts = append(facts, diagFact{
+			level: port.LevelInfo,
+			msg:   "slash-command driver source ENABLED",
+			args:  []any{"target", cfg.CommandSourceURL},
+		})
 	}
 	for _, f := range facts {
 		cfg.diag().Log(context.Background(), f.level, f.msg, f.args...)
@@ -2570,8 +2716,9 @@ func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider 
 // agent.TeamMemberEngineFactory (both `func(*team.Team, MemberSpec) MemberBuild`), so
 // one factory value satisfies both the gRPC Config.MemberEngine and NewTeamTool.
 //
-// It resolves the agent-definition registry and skill index ONCE (exactly as
-// buildCatalog shares the registry with the Subagent tool). The two forkers:
+// agentReg is the ONE registry Build resolved via resolveAgentSeam, threaded
+// in by both callers (registerTeamTools passes the catalog assets' copy;
+// applyTeamConfig passes Build's) — never re-resolved here. The two forkers:
 //   - fk (force-copy, WithForceCopy): a Mutating member runs in a FULLY isolated fork
 //     (own .git object DB/refs), matching buildCatalog's Fork branch wiring, so its
 //     git commit/push/update-ref cannot escape into the base repo.
@@ -2596,18 +2743,17 @@ func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider 
 // route its engine to a different provider, and a member that pins none inherits
 // whatever the caller supplies (the build-time default in buildCatalog/
 // applyTeamConfig, or a session-selected provider in Half B's in-catalog Team tool).
-func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager, skillReadRoots []string, skillIdx skillIndex) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, port.HookRunner) {
+func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager, agentReg *agents.Registry, skillReadRoots []string, skillIdx skillIndex) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, port.HookRunner) {
 	// A single hooks runner shared by the supervisor and the member coordination
 	// tools. hookexec.New(nil) matches buildEngine's default: the configured-hook map
 	// is not yet wired from cfg anywhere, so this is an inert (no-op) runner today,
 	// but it is the injection seam once it is.
 	teamHooks := hookexec.New(nil)
-	// Resolve the agent-definition registry ONCE and share it with the member
-	// factory, exactly as buildCatalog shares it with the Subagent tool — ONE registry,
-	// TWO consumers. A member whose spec.AgentType names a def adopts that def's
-	// scoped catalog/model/prompt/permissionMode. skillIdx is the build-once
-	// preload index threaded from the skills seam (catalog assets / Build).
-	agentReg := resolveAgentRegistry(ctx, cfg)
+	// agentReg is the SHARED registry (Build's single resolveAgentSeam): a
+	// member whose spec.AgentType names a def adopts that def's scoped
+	// catalog/model/prompt/permissionMode. skillIdx is the build-once preload
+	// index threaded from the skills seam (catalog assets / Build).
+	//
 	// fk (force-copy) for mutating members; roFk (worktree default) for read-only
 	// members the factory grants a shell. Read-only members run git in the shared
 	// .git of a worktree, so they get the SANDBOXED runner; the main session keeps its
@@ -2627,7 +2773,7 @@ func buildTeamWiring(ctx context.Context, cfg Config, provReg *providerRegistry,
 // SAME wiring the Team tool uses (buildCatalog) — so the gRPC CreateTeam path and the
 // Team tool cannot drift. MaxTeams is left at zero so the server applies its own
 // default.
-func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, provider port.LLMProvider, mainMgr *mcp.Manager, skillReadRoots []string, skillIdx skillIndex) {
+func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, provider port.LLMProvider, mainMgr *mcp.Manager, agentReg *agents.Registry, skillReadRoots []string, skillIdx skillIndex) {
 	if !cfg.EnableTeams {
 		cfg.diag().Log(context.Background(), port.LevelInfo, "agent teams DISABLED (set --enable-teams to enable; experimental)")
 		return
@@ -2636,7 +2782,8 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, p
 	// DEFAULT provider as the inherited parent (reg.Default()/cfg.Model). Per-session
 	// provider propagation to the standalone CreateTeam RPC is DEFERRED (CreateTeam
 	// carries no selector today); the in-catalog Team tool IS covered in Half B.
-	factory, fk, roFk, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr, skillReadRoots, skillIdx)
+	// agentReg is the ONE registry Build resolved (resolveAgentSeam).
+	factory, fk, roFk, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr, agentReg, skillReadRoots, skillIdx)
 	svcCfg.MemberEngine = factory
 	svcCfg.Forker = fk
 	svcCfg.ReadOnlyForker = roFk
@@ -2750,7 +2897,7 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			names, diags := scopedToolNamesMode(def, base, spec.Mutating, allowShell)
 			for _, d := range diags {
 				cfg.diag().Log(context.Background(), port.LevelWarn, "team member agent def tool scoping",
-					"member", spec.Name, "agent", def.Name, "tool", d.tool, "reason", d.reason, "path", def.Path)
+					"member", spec.Name, "agent", def.Name, "tool", d.tool, "reason", d.reason, "source", reg.Detail(def.Name))
 			}
 			for _, name := range names {
 				// Bash registers with the HARDENED member runner (passed in), not the
@@ -2797,7 +2944,7 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			bodies, missing := preloadedSkillBodies(def, skillIdx)
 			for _, name := range missing {
 				cfg.diag().Log(context.Background(), port.LevelWarn, "team member agent def references an unknown skill; not preloaded",
-					"member", spec.Name, "agent", def.Name, "skill", name, "path", def.Path)
+					"member", spec.Name, "agent", def.Name, "skill", name, "source", reg.Detail(def.Name))
 			}
 			pc = agentPromptConfig(cfg, def, model, bodies...)
 			mode = resolvePermissionMode(cfg.diag(), def)
@@ -2809,7 +2956,7 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 				"member", spec.Name, "agent", def.Name, "tools", strings.Join(names, ","),
 				"model", model, "mode", mode, "mutating", spec.Mutating,
 				"isolate_read_only", isolateReadOnly,
-				"preloaded_skills", len(bodies), "path", def.Path)
+				"preloaded_skills", len(bodies), "source", reg.Detail(def.Name))
 		} else {
 			// Default member catalog (three tiers). Read/Grep/Glob always. Edit/Write
 			// only for a Mutating member. Bash when a runner is wired AND the member is

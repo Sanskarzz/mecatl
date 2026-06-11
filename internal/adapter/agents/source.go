@@ -6,10 +6,22 @@ import (
 	"sort"
 )
 
+// Discovered is one discovered agent definition together with its
+// adapter-private locator string. The PORT value object (tool.AgentDef, the
+// aliased AgentDef) carries no path/dir/root concept; Detail is the NON-PORT
+// diagnostics channel a reviewer traces a def back through — "<label>: <path>"
+// for a filesystem source, "driver: <target>" for a remote driver. It never
+// crosses the tool.AgentDefSource port.
+type Discovered struct {
+	Def    AgentDef
+	Detail string
+}
+
 // AgentSource is the pluggable EXTENSIBILITY POINT for where agent definitions
-// come from. A Source produces a set of AgentDef value objects together with
-// non-fatal diagnostics (SkipError), and a fatal error only for a genuine
-// infrastructure fault that prevented the source from being consulted at all.
+// come from. A Source produces a set of Discovered entries (the AgentDef value
+// object + its adapter-private Detail) together with non-fatal diagnostics
+// (SkipError), and a fatal error only for a genuine infrastructure fault that
+// prevented the source from being consulted at all.
 //
 // It is the verbatim shape of skills.Source: the local-OS-filesystem layout
 // (DirSource) is just ONE implementation; an embedded default set or a remote
@@ -22,7 +34,7 @@ import (
 //   - a non-nil error ONLY for a hard fault. An absent source (e.g. a missing
 //     directory) is "no defs", not an error — agent defs are opt-in.
 type AgentSource interface {
-	Agents(ctx context.Context) ([]AgentDef, []SkipError, error)
+	Agents(ctx context.Context) ([]Discovered, []SkipError, error)
 }
 
 // SkipError records one diagnostic from discovery: a def that could not be
@@ -74,11 +86,11 @@ func NewMultiSource(sources ...AgentSource) MultiSource {
 // Agents aggregates every composed source, applies the earlier-wins precedence on
 // name collisions, and returns the merged defs sorted by name. Shadowed
 // lower-precedence defs are dropped and reported.
-func (m MultiSource) Agents(ctx context.Context) ([]AgentDef, []SkipError, error) {
+func (m MultiSource) Agents(ctx context.Context) ([]Discovered, []SkipError, error) {
 	var (
-		out    []AgentDef
+		out    []Discovered
 		skips  []SkipError
-		winner = map[string]AgentDef{} // effective name -> the kept (higher-precedence) def
+		winner = map[string]Discovered{} // effective name -> the kept (higher-precedence) def
 	)
 	for _, src := range m.sources {
 		got, srcSkips, err := src.Agents(ctx)
@@ -86,20 +98,20 @@ func (m MultiSource) Agents(ctx context.Context) ([]AgentDef, []SkipError, error
 		if err != nil {
 			return nil, skips, err
 		}
-		for _, def := range got {
-			if prev, taken := winner[def.Name]; taken {
+		for _, d := range got {
+			if prev, taken := winner[d.Def.Name]; taken {
 				skips = append(skips, SkipError{
-					Path: def.Path,
+					Path: d.Detail,
 					Reason: fmt.Sprintf(
 						"agent def %q shadowed by a higher-precedence source (kept %q)",
-						def.Name, prev.Path),
+						d.Def.Name, prev.Detail),
 				})
 				continue
 			}
-			winner[def.Name] = def
-			out = append(out, def)
+			winner[d.Def.Name] = d
+			out = append(out, d)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool { return out[i].Def.Name < out[j].Def.Name })
 	return out, skips, nil
 }

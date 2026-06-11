@@ -260,7 +260,7 @@ func registerTeamTools(ctx context.Context, cfg Config, cat *tool.Catalog, reg *
 		}
 		return
 	}
-	factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, s.provider, s.providerID, s.model, refMgr, a.skillReadRoots, a.skillIndex)
+	factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, s.provider, s.providerID, s.model, refMgr, a.agentReg, a.skillReadRoots, a.skillIndex)
 	cat.MustRegister(agent.NewTeamTool(
 		agent.TeamMemberEngineFactory(factory),
 		agent.WithTeamToolForker(fk),

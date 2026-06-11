@@ -854,6 +854,31 @@ injection scan, fence integrity) because a driver is never trusted to
 sanitize, the drift baseline is SKIPPED for driver provenance, and the driver
 is probed at build (fatal if unreachable; runtime faults degrade fail-soft).
 
+Phase C2 completes the content-source family: `AgentSourceService` behind the
+`tool.AgentDefSource` port (the WHOLE `AgentDef` value object crosses — tools,
+limits, model/provider hints, skills, hooks, MCP servers incl. their
+SECRET-SHAPED inline headers, which are never logged or projected anywhere and
+ride the wire only because driver dials refuse all non-local cleartext; NO
+path/dir/root — the old `Path` field is gone, replaced by the adapters'
+NON-PORT detail channel `agents.Discovered.Detail`/`Registry.Detail`) and
+`CommandSourceService` behind the consumer-local `prompt.CommandSource`.
+**The two seams deliberately differ in lifecycle**: agent defs are
+SNAPSHOT-at-build (`--agent-source-url`; ONE `ListAgentDefs`, fatal if
+unreachable — per-def child engines are baked once, the trust-gate-completeness
+posture; mutually exclusive with `--agents-dir`, while the default-on
+`--agents-conventional` is simply SUPERSEDED with an INFO narration), whereas
+slash commands are LIVE-per-call (`--command-source-url`; consulted on every
+expansion/listing, build-time `Probe` fatal, runtime faults fail SOFT — a
+transient blip must never latch a command "missing"). The command driver also
+COMPOSES instead of replacing: the expander order is file commands →
+driver source → MCP prompts (first-that-expands-wins), so a local command
+file shadows a same-named driver command. The harness clients re-normalize
+defensively (blank/grammar-invalid names dropped, de-dup, sort, single-line +
+re-capped descriptions/bodies, hooks/headers re-normalized) and stamp the
+driver origin tier UNCONDITIONALLY; the registry is resolved EXACTLY ONCE per
+build (`resolveAgentSeam`) and shared by the catalog, the per-session engine
+factory, the `ListAgents` snapshot, and the team wiring.
+
 **sessnap IS the wire format** for sessions: the snapshot crosses as an
 opaque, format-tagged envelope (`format: "sessnap-json/1"`, payload =
 `sessnap.Marshal` output). The driver stores/returns it VERBATIM and never
@@ -888,6 +913,15 @@ drift from the in-process semantics:
 | `sourceconformance.RunSkillSource` | grpcdriver → bufconn → `NewSkillSourceServer(NewFixtureSource)` | `internal/adapter/grpcdriver/conformance_test.go` |
 | `sourceconformance.RunSoulSource` | `soul.Store` (temp file) | `internal/adapter/soul/conformance_test.go` |
 | `sourceconformance.RunSoulSource` | grpcdriver → bufconn → `NewSoulSourceServer(verbatim fake)` | `internal/adapter/grpcdriver/conformance_test.go` |
+| `sourceconformance.RunAgentSource` | in-memory `NewAgentFixtureSource` (self-test) | `engine/adapter/sourceconformance/sourceconformance_selftest_test.go` |
+| `sourceconformance.RunAgentSource` | `agents.FSSource` over a written-out fixture tree | `internal/adapter/agents/conformance_test.go` |
+| `sourceconformance.RunAgentSource` | grpcdriver → bufconn → `NewAgentSourceServer(NewAgentFixtureSource)` | `internal/adapter/grpcdriver/conformance_test.go` |
+| `sourceconformance.RunCommandSource` | in-memory `NewCommandFixtureSource` (self-test) | `engine/adapter/sourceconformance/sourceconformance_selftest_test.go` |
+| `sourceconformance.RunCommandSource` | grpcdriver → bufconn → `NewCommandSourceServer(NewCommandFixtureSource)` | `internal/adapter/grpcdriver/conformance_test.go` |
+
+(Deliberately NO filesystem row for commands: `prompt.DirCommandExpander` is
+the workspace-tier surface — live, workspace-relative, read through the
+`tool.Workspace` port — NOT a `CommandSource` implementation.)
 
 ## 12. Reliability — provider resilience
 

@@ -3,6 +3,7 @@ package sourceconformance
 import (
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/engine/tool"
 )
 
@@ -13,6 +14,23 @@ import (
 func TestFixtureSourceConformance(t *testing.T) {
 	RunSkillSource(t, func(_ *testing.T) tool.SkillSource {
 		return NewFixtureSource()
+	})
+}
+
+// TestAgentFixtureSourceConformance self-tests the agent suite against the
+// in-memory reference source, so anything RunAgentSource asserts must be
+// satisfiable by a plain slice over the canonical AgentFixture.
+func TestAgentFixtureSourceConformance(t *testing.T) {
+	RunAgentSource(t, func(_ *testing.T) tool.AgentDefSource {
+		return NewAgentFixtureSource()
+	})
+}
+
+// TestCommandFixtureSourceConformance self-tests the command suite against the
+// in-memory reference source — same rationale as the agent self-test.
+func TestCommandFixtureSourceConformance(t *testing.T) {
+	RunCommandSource(t, func(_ *testing.T) prompt.CommandSource {
+		return NewCommandFixtureSource()
 	})
 }
 

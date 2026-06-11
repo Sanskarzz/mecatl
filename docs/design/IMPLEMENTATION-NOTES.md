@@ -1612,6 +1612,106 @@ project tier is never built); the logical-name grammar (verbatim from `ValidSkil
 the no-watch/snapshot decision and its trust-gate rationale; the memfs/virtual-overlay
 rejection rationale (Bash executes real processes — drivers must materialize).
 
+## Source drivers — agent defs + commands (Phase C2: `engine/tool/agentsource.go` + `engine/prompt/commandsource.go` + `agents.FSSource` + grpcdriver clients)
+
+- **AgentDef moved engine-side WHOLESALE, minus the locator.** `tool.AgentDef` is the old
+  adapter value object minus `Path`, plus `Origin tool.AgentOrigin` (a CLOSED tier label set
+  mirroring `SkillOrigin` — deliberately NOT a shared type: a THIRD origin-bearing seam is the
+  extraction point, not before). The agents adapter keeps `type AgentDef = tool.AgentDef` /
+  `type AgentMCPServer = tool.AgentMCPServer` aliases so every literal/signature compiles
+  unmodified (no test sets `.Path`, so the alias strategy is invariance-clean). The port is
+  `tool.AgentDefSource{ListAgentDefs}` — SNAPSHOT semantics (per-def child engines are baked
+  once; the trust-gate-completeness invariant depends on resolve-once).
+- **The locator became a NON-PORT detail channel.** Sources return `agents.Discovered{Def,
+  Detail}` (`"<label>: <path>"` FS, `"driver: <target>"` driver); `Registry` retains the map
+  (`NewRegistryDiscovered`; the one-arg `NewRegistry` is KEPT, detail-less, for tests) and
+  exposes `Detail(name)`. The old 14 `def.Path` diagnostics sites became: pure-def helpers →
+  `"origin", string(def.Origin)`; registry-loop sites (buildAgentSubagentEngines ×3,
+  buildMemberEngine ×3) → `"source", reg.Detail(def.Name)`. Full paths remain ONLY in the
+  one-time discovery `SkipError` lines (adapter-internal). NOTE: the C2 plan tabled 12 sites;
+  reality had 14 (buildMemberEngine's skill-preload + adopts-def lines mirror the
+  subagent-engine pair) — the same rule was applied to all.
+- **HEADERS DECISION (§0.5).** `AgentMCPServer.Headers` is SECRET-SHAPED (`Authorization`
+  etc.) and CROSSES the port + wire anyway: dropping it would functionally regress vs file
+  defs (which carry plaintext auth headers on disk today); the wire is protected (driver
+  dials refuse ALL non-local cleartext); and it never leaks downstream — `defMCPTools` logs
+  names/urls/counts, never headers, `AgentInfo` carries no mcpServers. Guarded by
+  `TestDefMCPHeadersNeverLogged` (an arg-scanning diag sink + a sentinel header value across
+  the def-engine build — it exercises the WARN/failure branches; a successful inline
+  connect needs a live MCP server, out of scope offline).
+- **HOOKS = HARNESS-SIDE SHELL (trust framing).** A def's `hooks:` map executes through
+  `hookexec` as UNGATED shell on the HARNESS HOST (every scoped lifecycle phase, no
+  permission ask) — strictly stronger than the skill driver, whose payloads still ride the
+  permission-gated Bash path. **A compromised agent-source driver executes arbitrary shell
+  on the harness host via def hooks; treat it as harness-equivalent infrastructure** (echoed
+  in docs/usage.md and the proto `AgentDef.hooks` comment). `resolveAgentSeam`'s driver
+  branch narrates every driver def carrying hooks once at build ("agent def carries
+  lifecycle hooks (harness-side shell)", names only — never hook values).
+- **Driver client discipline** (`grpcdriver.NewAgentSource(conn, AgentOptions{Diagnostics})`):
+  TRIM names before every use (dedup key AND stored name — the FS parser trims; the wire
+  must not be weaker), drop blank names, de-dup first-wins, sort,
+  `singleLine`+`TruncateRunes(desc, tool.MaxAgentDescriptionBytes)`,
+  `TruncateRunes(body, tool.MaxAgentBodyBytes)` (the canonical caps moved engine-side next
+  to the port; the adapter keeps lowercase internal aliases — the
+  maxDescriptionLen=MaxCommandDescriptionRunes pattern; the proto comments reference them BY
+  NAME and a RunAgentSource subtest asserts every listed def respects both), COUNT CAPS
+  mirroring C1's asset caps (maxAgentDefs=1024, per-def hooks 32, tools/disallowed/skills
+  256 each, mcp_servers 64 — over-cap drops THE DEF with a WARN naming it, fail-soft per
+  def because defs are independent, never a fatal snapshot error), hooks/headers
+  re-normalized via the exported `agents.NormalizeHooks/NormalizeHeaders` (the same helpers
+  the frontmatter parser uses), `Origin` stamped `AgentOriginDriver` UNCONDITIONALLY (wire
+  origin is driver-side observability only).
+- **ONE resolution per build (the drift-class guard).** The registry used to resolve THREE
+  times (buildEngine→catalog, the ListAgents snapshot, buildTeamWiring) — the third firing of
+  the per-session-drift class. `resolveAgentSeam` (driver branch: dial fatal, ONE
+  `ListAgentDefs` fatal, `NewRegistryDiscovered` with `driver: <target>` details; FS branch:
+  `resolveAgentRegistry`, now `NewFSSource`+`NewRegistryDiscovered`, narration byte-identical
+  incl. the untrusted-workspace WARN) runs ONCE in Build; buildEngine/buildCatalog, the
+  snapshot, and buildTeamWiring/applyTeamConfig all take the one registry. Guarded by
+  `TestBuildResolvesAgentRegistryExactlyOnce` (a counting bufconn-style server asserting
+  exactly ONE `ListAgentDefs` RPC across a full teams+parallel Build).
+- **AGENTSCONVENTIONAL ASYMMETRY (§1.F).** `--agent-source-url` is FATAL with `--agents-dir`
+  (explicit local source vs driver — one source per seam) but NOT with
+  `--agents-conventional`: that flag is ON by default and inert, so the driver branch simply
+  does not construct conventional sources and narrates "conventional discovery superseded by
+  --agent-source-url" (failing every default deployment would be wrong). Deliberately
+  asymmetric vs skills, whose conventional discovery is opt-in and therefore exclusivity-
+  checked.
+- **Commands: consumer-local LIVE port, deliberately NO latching.** `prompt.CommandSource`
+  (`ListCommands` metadata-only + `CommandBody` returning the RAW template, `found=false` for
+  unknown — normal, never an error) lives in `engine/prompt` (the SoulSource precedent);
+  `prompt.SourceExpander` implements `CommandExpander`+`CommandLister` reusing the SAME
+  `parseCommand`/`stripFrontmatter`/`substitute` internals as `DirCommandExpander` (zero
+  change to those types — byte-parity pinned by `TestSourceExpanderByteParityWithDirExpander`).
+  `ValidCommandName` is the ONE invocation-grammar validator; `MaxCommandDescriptionRunes`
+  (80) is exported and `maxDescriptionLen` aliases it. The driver client
+  (`grpcdriver.NewCommandSource`) is consulted LIVE per call: runtime faults FAIL SOFT (WARN
+  via injected Diagnostics + `(nil,nil)`/`("",false,nil)` — `MultiExpander.List` aborts the
+  whole palette walk on a child error, so a transient blip must not propagate, and a fault
+  must never latch a command "missing"); `NOT_FOUND` → normal pass-through; ctx
+  cancel/deadline and the server's blank-name `INVALID_ARGUMENT` still surface as errors;
+  build-time `Probe` (one ListCommands) is FATAL. The probed client is STASHED on the
+  unexported `Config.commandSource` (buildCommandExpander runs per session — it must not
+  re-dial/probe); composition order is `dirExp, sourceExp, mcpExp` (file shadows driver;
+  COMPOSES, no exclusivity rule — `validateDriverConfig` has the agent rule only). One
+  build-fact INFO ("slash-command driver source ENABLED, target=…") rides
+  `logBuildConfigFacts`.
+- **Conformance as contract.** `RunAgentSource` (canonical `AgentFixture`: minimal /
+  fully-loaded incl. hooks+skills+limits+model+provider+permissionMode+color / MCP-bearing
+  with one reference + one inline-with-headers; authored to round-trip the frontmatter
+  parser; subtests: list-matches-fixture deep-equal-minus-Origin + sorted/unique/
+  Origin-non-empty, list-deterministic) runs over the in-memory `NewAgentFixtureSource`
+  self-test, `agents.FSSource` over a written-out TempDir tree, and grpcdriver→bufconn.
+  `RunCommandSource` (canonical `CommandFixture`; list grammar-valid/sorted/unique/
+  descriptions, RAW body round-trip with frontmatter intact, unknown→`("",false,nil)`,
+  list-stable-over-fixed-backend — the PORT is live, the fixture fixed) runs over
+  `NewCommandFixtureSource` and grpcdriver→bufconn. Deliberately NO FS row for commands:
+  `DirCommandExpander` is the workspace-tier surface, not a `CommandSource` implementation.
+- **Model-facing invariance.** `agentSnapshot`'s field set/output is pinned against literals
+  (`TestAgentSnapshotLiteralPin`) and the Subagent roster tail is pinned byte-for-byte against
+  the pre-change rendering (`TestSubagentRosterByteIdentical`); `engine/prompt/command_test.go`
+  and the server `agents_test.go`/`capabilities_test.go` are untouched and green.
+
 ## TUI — `cmd/mecatui/` (see `docs/tui.md`)
 
 **Upstream textarea word-backward hang workaround** (`cmd/mecatui/ui/textarea_guard.go` + the two

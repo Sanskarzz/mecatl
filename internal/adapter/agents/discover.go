@@ -10,6 +10,7 @@ import (
 
 	yaml "go.yaml.in/yaml/v3"
 
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/toolkit"
 )
 
@@ -18,19 +19,19 @@ import (
 // Claude Code's .claude/agents/ layout.
 const AgentFileExt = ".md"
 
-// maxDescriptionBytes caps a def's one-line description. The description is the
-// ALWAYS-IN-CONTEXT routing metadata (it lives in the Subagent tool's
-// Spec().Description tail, on every request), so an unbounded one would inflate
-// every prompt and break the byte-stable prompt-prefix caching the OpenAI adapter
-// relies on. parseAgentDef truncates (rune-safe, with an ellipsis) and records a
-// non-fatal warning when it trims.
-const maxDescriptionBytes = 800
+// maxDescriptionBytes is the package-internal alias of the CANONICAL
+// description cap, which lives next to the port
+// (tool.MaxAgentDescriptionBytes) so every source — this frontmatter parser
+// AND the remote-driver client — enforces the same number (the
+// maxDescriptionLen = MaxCommandDescriptionRunes pattern). parseAgentDef
+// truncates (rune-safe, with an ellipsis) and records a non-fatal warning
+// when it trims.
+const maxDescriptionBytes = tool.MaxAgentDescriptionBytes
 
-// maxPromptBodyBytes caps a def body. The body becomes a system-prompt layer that
-// is always-in-context every turn for that engine, so an oversized body is a real
-// per-turn token cost. It is capped harder than a skill body (which loads only on
-// activation). parseAgentDef truncates and warns.
-const maxPromptBodyBytes = 8 * 1024
+// maxPromptBodyBytes is the package-internal alias of tool.MaxAgentBodyBytes
+// (see maxDescriptionBytes for the canonical-cap rationale). parseAgentDef
+// truncates and warns.
+const maxPromptBodyBytes = tool.MaxAgentBodyBytes
 
 // frontmatter is the parsed YAML header of an agent-def file. Only name and
 // description are required; the rest are optional. Unknown/extra keys are ignored
@@ -135,7 +136,7 @@ func (l *mcpServerList) appendMapping(m rawMCPMapping) {
 			"mcpServers entry %q skipped: only the streamable-HTTP transport is supported (stdio/command/non-HTTP transports are rejected)", name))
 		return
 	}
-	l.servers = append(l.servers, AgentMCPServer{Name: name, URL: url, Headers: normalizeHeaders(m.Headers)})
+	l.servers = append(l.servers, AgentMCPServer{Name: name, URL: url, Headers: NormalizeHeaders(m.Headers)})
 }
 
 // isNonHTTPTransport reports whether a `type`/`transport` value names a transport
@@ -150,9 +151,12 @@ func isNonHTTPTransport(v string) bool {
 	}
 }
 
-// normalizeHeaders trims keys/values and drops empties, returning nil for an
-// empty/absent map so a server with no headers carries a nil Headers.
-func normalizeHeaders(in map[string]string) map[string]string {
+// NormalizeHeaders trims keys/values and drops empties, returning nil for an
+// empty/absent map so a server with no headers carries a nil Headers. Exported
+// so the remote-driver client applies the SAME normalization to wire headers
+// (the values are SECRET-SHAPED and are never logged anywhere; see
+// tool.AgentMCPServer.Headers).
+func NormalizeHeaders(in map[string]string) map[string]string {
 	if len(in) == 0 {
 		return nil
 	}
@@ -218,8 +222,34 @@ type DirSource struct {
 	// Dir is the directory to scan. An empty or absent Dir yields no defs (opt-in).
 	Dir string
 	// Label is an optional human-readable name for this source (e.g. "project",
-	// "user", "explicit"), surfaced in diagnostics. It does not affect discovery.
+	// "user", "explicit"), surfaced in diagnostics (it prefixes each Discovered
+	// entry's Detail). It does not affect discovery.
 	Label string
+	// Tier is the admission tier stamped onto every def this source produces
+	// (AgentDef.Origin on the port). ResolveSources sets it per conventional
+	// location; a zero Tier defaults to tool.AgentOriginExplicit (a
+	// hand-constructed source is an operator-configured location).
+	Tier tool.AgentOrigin
+}
+
+// origin returns the admission tier stamped onto this source's defs: Tier when
+// set, else tool.AgentOriginExplicit (the zero-value default).
+func (s DirSource) origin() tool.AgentOrigin {
+	if s.Tier != "" {
+		return s.Tier
+	}
+	return tool.AgentOriginExplicit
+}
+
+// detail renders the adapter-private locator string for a def discovered at
+// path: "<label>: <path>", or the bare path when the source carries no label.
+// It is the NON-PORT diagnostics channel (Discovered.Detail / Registry.Detail)
+// that replaced the old AgentDef.Path field.
+func (s DirSource) detail(path string) string {
+	if l := strings.TrimSpace(s.Label); l != "" {
+		return l + ": " + path
+	}
+	return path
 }
 
 // Agents implements AgentSource for a single local directory. It scans Dir for
@@ -234,7 +264,11 @@ type DirSource struct {
 // A def's frontmatter `name` is the source of truth (NOT the filename); duplicate
 // effective names WITHIN this directory are resolved keep-first in sorted-path
 // order. Cross-source collisions are resolved one level up by MultiSource.
-func (s DirSource) Agents(_ context.Context) ([]AgentDef, []SkipError, error) {
+//
+// Every kept def is stamped with this source's admission tier (Origin) and
+// carried with its adapter-private locator (Detail = "<label>: <path>") —
+// SkipError diagnostics keep the verbatim path as before.
+func (s DirSource) Agents(_ context.Context) ([]Discovered, []SkipError, error) {
 	dir := strings.TrimSpace(s.Dir)
 	if dir == "" {
 		return nil, nil, nil
@@ -250,7 +284,7 @@ func (s DirSource) Agents(_ context.Context) ([]AgentDef, []SkipError, error) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 
 	var (
-		out   []AgentDef
+		out   []Discovered
 		skips []SkipError
 		seen  = map[string]string{} // effective name -> path that claimed it
 	)
@@ -280,17 +314,18 @@ func (s DirSource) Agents(_ context.Context) ([]AgentDef, []SkipError, error) {
 			continue
 		}
 		seen[def.Name] = path
-		out = append(out, def)
+		def.Origin = s.origin()
+		out = append(out, Discovered{Def: def, Detail: s.detail(path)})
 	}
 
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool { return out[i].Def.Name < out[j].Def.Name })
 	return out, skips, nil
 }
 
 // Discover scans dir for agent defs and returns them. It is a thin convenience
 // wrapper over DirSource for callers (and tests) that want single-directory
 // discovery without composing a Source.
-func Discover(dir string) ([]AgentDef, []SkipError, error) {
+func Discover(dir string) ([]Discovered, []SkipError, error) {
 	return DirSource{Dir: dir}.Agents(context.Background())
 }
 
@@ -299,12 +334,14 @@ func Discover(dir string) ([]AgentDef, []SkipError, error) {
 // zero AgentDef) on any structural problem so the caller records a SkipError and
 // EXCLUDES the def (reason is "" on success), plus a slice of non-fatal warning
 // notes for a def that IS kept (e.g. truncation). It is filesystem-free so every
-// Source implementation can reuse it.
+// Source implementation can reuse it. The path parameter is retained for
+// diagnostic messages; the parsed value object carries NO locator (the caller
+// records the path on its Discovered.Detail / SkipError.Path channels).
 //
 // Tool names in Tools/DisallowedTools are NOT validated here — the parser is
 // catalog-free. An unknown tool name becomes a resolve-time diagnostic in
 // internal/app (against a concrete catalog), never a parse failure.
-func parseAgentDef(raw []byte, path string) (AgentDef, string, []string) {
+func parseAgentDef(raw []byte, _ string) (AgentDef, string, []string) {
 	fmText, body, ok := toolkit.SplitFrontmatter(string(raw))
 	if !ok {
 		return AgentDef{}, "missing YAML frontmatter (expected a leading '---' delimited block)", nil
@@ -355,18 +392,19 @@ func parseAgentDef(raw []byte, path string) (AgentDef, string, []string) {
 		Color:           strings.TrimSpace(fm.Color),
 		Skills:          []string(fm.Skills),
 		MCPServers:      fm.MCPServers.servers,
-		Hooks:           normalizeHooks(fm.Hooks),
+		Hooks:           NormalizeHooks(fm.Hooks),
 		Body:            trimmedBody,
-		Path:            path,
 	}, "", notes
 }
 
-// normalizeHooks trims each phase key and command value and drops any entry whose
+// NormalizeHooks trims each phase key and command value and drops any entry whose
 // key or value is empty, returning nil for an empty/absent map so a def with no
 // hooks carries a nil Hooks (not an empty non-nil map). It does NOT validate phase
 // names against the governance taxonomy — that is a composition-time concern, kept
-// out of this catalog-free parser (mirroring how tool names are not validated here).
-func normalizeHooks(in map[string]string) map[string]string {
+// out of this catalog-free parser (mirroring how tool names are not validated
+// here). Exported so the remote-driver client applies the SAME normalization to
+// wire hooks.
+func NormalizeHooks(in map[string]string) map[string]string {
 	if len(in) == 0 {
 		return nil
 	}

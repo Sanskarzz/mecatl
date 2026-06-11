@@ -1,8 +1,10 @@
 // Package sourceconformance provides shared conformance test suites for the
-// content-source seams: tool.SkillSource (RunSkillSource) and prompt.SoulSource
-// (RunSoulSource). Adapters (the filesystem skills source, the soul file store,
-// remote drivers, ...) call the Run functions with a factory that constructs a
-// fresh source, and the suites exercise only the port interfaces.
+// content-source seams: tool.SkillSource (RunSkillSource), prompt.SoulSource
+// (RunSoulSource), tool.AgentDefSource (RunAgentSource), and
+// prompt.CommandSource (RunCommandSource). Adapters (the filesystem skills/
+// agents sources, the soul file store, remote drivers, ...) call the Run
+// functions with a factory that constructs a fresh source, and the suites
+// exercise only the port interfaces.
 //
 // Importing "testing" in a non-_test.go file is intentional here: this is a
 // test-helper package whose sole purpose is to be imported by adapter tests,

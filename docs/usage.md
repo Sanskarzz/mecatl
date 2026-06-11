@@ -166,6 +166,8 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--driver-tls-cert` / `--driver-tls-key` | `""` | PEM client certificate/key pair for **mutual TLS** to the store driver. |
 | `--skill-source-url` | `""` | `host:port` of a remote **skill-source gRPC driver** (`mecatl.driver.v1.SkillSourceService`); replaces local skills discovery — mutually exclusive with `--skills-dir`/`--skills-conventional`. **See the source-driver note below.** |
 | `--soul-source-url` | `""` | `host:port` of a remote **soul-source gRPC driver** (`mecatl.driver.v1.SoulSourceService`); occupies the USER slot of the soul selection — mutually exclusive with `--soul-file` (`--no-soul` still wins). **See the source-driver note below.** |
+| `--agent-source-url` | `""` | `host:port` of a remote **agent-definition gRPC driver** (`mecatl.driver.v1.AgentSourceService`); the definition set is **snapshotted at startup** (fatal if unreachable). Mutually exclusive with `--agents-dir`; the default-on conventional discovery is **superseded** (not an error). **See the source-driver note below.** |
+| `--command-source-url` | `""` | `host:port` of a remote **slash-command gRPC driver** (`mecatl.driver.v1.CommandSourceService`); **composes** with file-backed commands (a local command file shadows a same-named driver command) and is consulted **live** per expansion/listing. Probed at startup (fatal if unreachable); runtime faults fail soft. **See the source-driver note below.** |
 | `--skills-dir` | `""` | directory to discover progressive-disclosure skills from, laid out as `<name>/SKILL.md`. **Repeatable** (highest precedence, in the order given); empty disables the `Skill` tool unless `--skills-conventional` is set. **See the skills trust note below.** |
 | `--skills-conventional` | `false` | also discover skills from the conventional known paths: `<workspace>/.mecatl/skills`, `<workspace>/.claude/skills`, `$XDG_CONFIG_HOME/mecatl/skills` (or `~/.config/mecatl/skills`), and `~/.claude/skills` — lower precedence than `--skills-dir`. **OFF by default** (strict opt-in); only enable for trusted locations. **See the skills trust note below.** |
 | `--skills-draft-dir` | `""` | enable the writable `SkillDraft` tool and set the **quarantine** directory for model-authored candidate skills. Empty disables the tool. Must be **outside the workspace root** (so the model's `Write`/`Edit` cannot reach it) and **disjoint** from every `--skills-dir` / conventional location — both fatal startup errors. **See the self-improving-skill loop note below.** |
@@ -1368,6 +1370,56 @@ skip).
 
 Both share the `--driver-auth-token`/`--driver-tls*` posture, and equal URLs
 share one connection with the store drivers.
+
+### Remote content-source drivers (agent definitions + slash commands)
+
+Phase C2 completes the family with two more sources on the same protocol:
+
+```sh
+mecated --agent-source-url 127.0.0.1:7443 --command-source-url 127.0.0.1:7443
+```
+
+`--agent-source-url` serves the **agent definitions** (the Subagent
+specialists / team-member roles) from the driver. Like skills, the set is
+**snapshotted once at startup** (fatal if the driver cannot answer — per-def
+child engines are built once at build time, so there is no re-fetch). It is
+mutually exclusive with explicit `--agents-dir`; the default-on
+`--agents-conventional` discovery is simply **superseded** (an INFO line
+narrates it — failing every default deployment over an ON-by-default,
+usually-inert flag would be wrong; this asymmetry vs the opt-in skills
+conventional discovery is deliberate). Defs cross the wire whole — tools,
+limits, model/provider hints, skills, hooks, scoped MCP servers — with **no
+path**: diagnostics identify a driver def as `driver: <target>`. Inline MCP
+server **headers are secret-shaped** (e.g. `Authorization`): the harness
+never logs or projects them; they ride this wire only because driver dials
+refuse all non-local cleartext. The driver's claimed origin tier is ignored —
+every driver-served def is stamped `driver`. **Trust:** this is STRONGER than
+model steering — a def's `hooks:` map executes as **ungated shell on the
+harness host** (`hookexec`, every scoped lifecycle phase, no permission ask),
+strictly more capability than the skill driver, whose payloads still ride the
+permission-gated Bash path. **A compromised agent-source driver executes
+arbitrary shell on the harness host via def hooks; treat it as
+harness-equivalent infrastructure.** The build narrates every driver def that
+carries hooks (`agent def carries lifecycle hooks (harness-side shell)` —
+names only, never hook values) so the capability is visible at startup.
+
+`--command-source-url` serves **slash-command templates**. Unlike every
+other source driver it **composes instead of replacing**: the expansion
+order is file-backed commands → driver commands → MCP prompts
+(first-match-wins), so a local `<name>.md` shadows a same-named driver
+command, and the palette merges all three. It is also **live**, not a
+snapshot — the driver is consulted on every expansion and palette listing,
+matching the file expander's reads-current-files behaviour, so the command
+set may change while the server runs. The driver returns the RAW template
+(frontmatter allowed); the harness strips frontmatter and substitutes
+`$ARGUMENTS`/`$1`/`$2`… exactly as for a file command, so templates are
+portable between the two backends byte-for-byte. The driver is probed once
+at startup (fatal if unreachable); a fault at run time **fails soft** — the
+raw input passes through unchanged and the palette omits the source (a
+transient blip never aborts a run and never latches a command "missing").
+
+All four content-source drivers share the `--driver-auth-token`/
+`--driver-tls*` posture, and equal URLs share one connection.
 
 ### Permission modes
 

@@ -3,6 +3,7 @@ package agents
 import (
 	"path/filepath"
 
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 )
 
@@ -64,6 +65,8 @@ func ResolveSources(opts ResolveOptions) []AgentSource {
 }
 
 // resolveSourcesEnv is ResolveSources with an injectable environment, for tests.
+// Each source carries its admission TIER (AgentDef.Origin on the port) — a
+// closed label, never a location.
 func resolveSourcesEnv(opts ResolveOptions, env xdgconfig.ResolveEnv) []AgentSource {
 	var sources []AgentSource
 
@@ -71,7 +74,7 @@ func resolveSourcesEnv(opts ResolveOptions, env xdgconfig.ResolveEnv) []AgentSou
 		if dir == "" {
 			continue
 		}
-		sources = append(sources, DirSource{Dir: dir, Label: "explicit"})
+		sources = append(sources, DirSource{Dir: dir, Label: "explicit", Tier: tool.AgentOriginExplicit})
 	}
 
 	if !opts.Conventional {
@@ -82,16 +85,16 @@ func resolveSourcesEnv(opts ResolveOptions, env xdgconfig.ResolveEnv) []AgentSou
 	// Phase 2a). The user-tier sources below are NEVER gated.
 	if opts.Workspace != "" && opts.IncludeProjectTier {
 		sources = append(sources,
-			DirSource{Dir: filepath.Join(opts.Workspace, ProjectDirMecatl), Label: "project(.mecatl)"},
-			DirSource{Dir: filepath.Join(opts.Workspace, ProjectDirClaude), Label: "project(.claude)"},
+			DirSource{Dir: filepath.Join(opts.Workspace, ProjectDirMecatl), Label: "project(.mecatl)", Tier: tool.AgentOriginProject},
+			DirSource{Dir: filepath.Join(opts.Workspace, ProjectDirClaude), Label: "project(.claude)", Tier: tool.AgentOriginProject},
 		)
 	}
 
 	if cfg := xdgconfig.UserConfigDir(env); cfg != "" {
-		sources = append(sources, DirSource{Dir: filepath.Join(cfg, userSubdirMecatl), Label: "user(xdg)"})
+		sources = append(sources, DirSource{Dir: filepath.Join(cfg, userSubdirMecatl), Label: "user(xdg)", Tier: tool.AgentOriginUser})
 	}
 	if home, err := env.UserHomeDir(); err == nil && home != "" {
-		sources = append(sources, DirSource{Dir: filepath.Join(home, userSubdirClaude), Label: "user(.claude)"})
+		sources = append(sources, DirSource{Dir: filepath.Join(home, userSubdirClaude), Label: "user(.claude)", Tier: tool.AgentOriginUser})
 	}
 
 	return sources

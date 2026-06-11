@@ -43,12 +43,34 @@ func TestResolveRegistryNilSource(t *testing.T) {
 }
 
 func TestResolveRegistryFromSource(t *testing.T) {
-	src := staticSource{defs: []AgentDef{{Name: "a", Description: "A"}}}
+	src := staticSource{discovered: []Discovered{{Def: AgentDef{Name: "a", Description: "A"}}}}
 	r, _, err := ResolveRegistry(t.Context(), src)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if _, ok := r.Get("a"); !ok {
 		t.Fatalf("expected def 'a' in registry")
+	}
+}
+
+// TestRegistryDetail pins the NON-PORT detail channel: NewRegistryDiscovered
+// retains each def's locator for diagnostics; the one-arg NewRegistry carries
+// none ("" for every name).
+func TestRegistryDetail(t *testing.T) {
+	r := NewRegistryDiscovered([]Discovered{
+		{Def: AgentDef{Name: "rev", Description: "R"}, Detail: "explicit: /a/rev.md"},
+		{Def: AgentDef{Name: "bare", Description: "B"}},
+	})
+	if got := r.Detail("rev"); got != "explicit: /a/rev.md" {
+		t.Fatalf("Detail(rev) = %q, want the discovered locator", got)
+	}
+	if got := r.Detail("bare"); got != "" {
+		t.Fatalf("Detail(bare) = %q, want \"\"", got)
+	}
+	if got := r.Detail("ghost"); got != "" {
+		t.Fatalf("Detail(ghost) = %q, want \"\"", got)
+	}
+	if got := NewRegistry([]AgentDef{{Name: "x", Description: "X"}}).Detail("x"); got != "" {
+		t.Fatalf("one-arg NewRegistry Detail = %q, want \"\" (no detail channel)", got)
 	}
 }

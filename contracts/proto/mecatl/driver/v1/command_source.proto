@@ -1,0 +1,88 @@
+// SPDX-FileCopyrightText: Copyright 2026 Stacklok, Inc.
+// SPDX-License-Identifier: LicenseRef-Stacklok-Proprietary
+
+// mecatl driver API: the remote slash-command source protocol.
+//
+// CommandSourceService is the wire seam behind the harness's
+// `prompt.CommandSource` (engine/prompt/commandsource.go): an operator-run
+// driver process serves slash-command templates alongside (NOT instead of)
+// the workspace's file-backed commands — the harness composes file commands
+// first, then this source, then MCP prompts. No path, directory, or root
+// concept crosses this wire.
+//
+// Driver contract:
+//   - LIVE semantics: the harness consults the source on EVERY expansion and
+//     palette listing — the command set MAY change between calls (there is no
+//     snapshot, deliberately matching the file expander's reads-current-files
+//     discipline).
+//   - GetCommandBody returns the RAW template: optional YAML frontmatter is
+//     permitted and the HARNESS strips it and substitutes the placeholders
+//     ($ARGUMENTS, $1, $2, ...) — expansion is NEVER driver-side, so a
+//     template expands byte-identically whichever backend serves it.
+//   - GetCommandBody of an unknown name MUST return NOT_FOUND; the harness
+//     maps it to the normal pass-through (the raw input reaches the model
+//     unchanged), never an error.
+//   - A runtime fault is FAIL-SOFT harness-side (the input passes through;
+//     the palette omits this source) — a transient blip must never latch a
+//     command "missing" or abort a run. The build-time Probe (one
+//     ListCommands round trip) is FATAL on a fault (loud-misconfig posture).
+//
+// Validation: required-field annotations are authored with
+// `buf.validate.field`; V1 enforces them in the Go client/server wrappers
+// (internal/adapter/grpcdriver).
+
+syntax = "proto3";
+
+package mecatl.driver.v1;
+
+import "buf/validate/validate.proto";
+
+// CommandSourceService serves slash-command templates. It is the remote
+// analogue of prompt.CommandSource's two methods.
+service CommandSourceService {
+  // ListCommands returns the CURRENT command metadata (no bodies),
+  // de-duplicated by name and name-sorted. LIVE semantics: the set MAY change
+  // between calls.
+  rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
+
+  // GetCommandBody returns the named command's RAW template (frontmatter
+  // permitted; the harness strips and substitutes). An unknown name MUST
+  // return NOT_FOUND — the harness maps it to a normal pass-through.
+  rpc GetCommandBody(GetCommandBodyRequest) returns (GetCommandBodyResponse);
+}
+
+// CommandMeta is one command's palette metadata, mirroring prompt.Command.
+message CommandMeta {
+  // name is the invocation name (without the leading "/"). It MUST satisfy
+  // the invocation grammar (letters, digits, '-', '_', '.'): the harness
+  // DROPS violators client-side — a name outside the grammar could never be
+  // invoked as "/<name>".
+  string name = 1 [(buf.validate.field).string.min_len = 1];
+
+  // description is a short one-line summary for a palette row. The harness
+  // re-normalizes it client-side: forced single-line and re-capped to 80
+  // runes.
+  string description = 2;
+}
+
+// ListCommandsRequest is empty: the source serves its current command set.
+message ListCommandsRequest {}
+
+// ListCommandsResponse carries the current command metadata.
+message ListCommandsResponse {
+  // commands is de-duplicated by name and name-sorted.
+  repeated CommandMeta commands = 1;
+}
+
+// GetCommandBodyRequest names the command whose raw template to load.
+message GetCommandBodyRequest {
+  // name is the invocation name from ListCommands.
+  string name = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+// GetCommandBodyResponse carries the RAW template.
+message GetCommandBodyResponse {
+  // body is the raw template, frontmatter intact; the harness strips the
+  // frontmatter and substitutes the placeholders.
+  string body = 1;
+}

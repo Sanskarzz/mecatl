@@ -310,8 +310,10 @@ const frontmatterDelim = "---"
 
 // maxDescriptionLen caps a derived command description (in runes) so a long
 // frontmatter line or body sentence cannot blow out a palette row. The "…"
-// ellipsis (when truncating) counts toward the cap.
-const maxDescriptionLen = 80
+// ellipsis (when truncating) counts toward the cap. It aliases the exported
+// MaxCommandDescriptionRunes (commandsource.go) — the ONE cap every command
+// surface shares.
+const maxDescriptionLen = MaxCommandDescriptionRunes
 
 // commandNameFromPath derives the command name from a "<dir>/<name>.md" path: the
 // base file name with the ".md" suffix stripped. A path whose base is not a

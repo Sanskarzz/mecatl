@@ -35,6 +35,16 @@ func validateDriverConfig(cfg Config) error {
 	if cfg.SoulSourceURL != "" && cfg.SoulPath != "" {
 		return fmt.Errorf("--soul-source-url %q and --soul-file %q are mutually exclusive: the user-slot soul is either the local file or the remote driver, never both (--no-soul still disables either)", cfg.SoulSourceURL, cfg.SoulPath)
 	}
+	// Agent defs: an EXPLICIT --agents-dir clashes with the driver (one source
+	// per seam); the default-true AgentsConventional deliberately does NOT —
+	// it is ON-and-inert by default, so the driver branch SUPERSEDES it with an
+	// INFO narration instead of failing every default deployment (the
+	// asymmetry vs skills, whose conventional discovery is opt-in, is by
+	// design). NO rule for --command-source-url: the command driver COMPOSES
+	// with file commands (file wins on a name collision), never replaces them.
+	if cfg.AgentSourceURL != "" && len(cfg.AgentsDirs) > 0 {
+		return fmt.Errorf("--agent-source-url %q and --agents-dir are mutually exclusive: agent definitions come either from the explicit local directories or from the remote driver, never both (the default conventional discovery is superseded, not an error)", cfg.AgentSourceURL)
+	}
 	if !cfg.DriverTLS && (cfg.DriverTLSCA != "" || cfg.DriverTLSCert != "" || cfg.DriverTLSKey != "") {
 		return fmt.Errorf("--driver-tls-ca/--driver-tls-cert/--driver-tls-key require --driver-tls: without it they would be silently ignored and the driver connection would ride plaintext")
 	}
