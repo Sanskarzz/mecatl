@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/hookexec"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 )
 
 // writeSkill writes a <dir>/<name>/SKILL.md with the given description and body.

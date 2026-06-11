@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/prompt"
-	"github.com/stacklok/mecatl/internal/adapter/memfs"
 )
 
 // TestRootAssemblerMatchesDiscoverInstructions verifies the default assembler

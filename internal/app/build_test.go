@@ -3,13 +3,13 @@ package app
 import (
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/memstore"
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
-	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 )
 
 // depsTestFixture builds the shared (non-provider) collaborators the two

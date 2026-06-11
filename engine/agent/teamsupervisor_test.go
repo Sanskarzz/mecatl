@@ -8,16 +8,15 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
-	"github.com/stacklok/mecatl/internal/adapter/hookexec"
-	"github.com/stacklok/mecatl/internal/adapter/memfs"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 )
 
 // memberFactory builds a per-member Engine whose catalog carries that member's
@@ -39,7 +38,7 @@ func memberFactory(t *testing.T, tm *team.Team, providers map[string]*mockllm.Pr
 			LLM:     prov,
 			Catalog: cat,
 			Policy:  allow,
-			Hooks:   hookexec.New(nil),
+			Hooks:   noopHooks{},
 			Model:   "mock",
 		})}
 	}
@@ -358,7 +357,7 @@ func limitedMemberFactory(t *testing.T, tm *team.Team, providers map[string]*moc
 			cat.MustRegister(tl)
 		}
 		return agent.MemberBuild{
-			Engine: agent.NewEngine(agent.Deps{LLM: prov, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "mock"}),
+			Engine: agent.NewEngine(agent.Deps{LLM: prov, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "mock"}),
 			Limits: limits,
 		}
 	}
@@ -423,7 +422,7 @@ func TestSupervisorRoundConcurrencyBounded(t *testing.T) {
 		}
 		cat.MustRegister(barrier)
 		return agent.MemberBuild{
-			Engine: agent.NewEngine(agent.Deps{LLM: prov, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "mock"}),
+			Engine: agent.NewEngine(agent.Deps{LLM: prov, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "mock"}),
 		}
 	}
 
@@ -894,7 +893,7 @@ func TestSupervisorMemberDispositionCancelled(t *testing.T) {
 			mockllm.TextTurn("never reached cleanly"),
 		)
 		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
-			LLM: prov, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "mock",
+			LLM: prov, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "mock",
 		})}
 	}
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory, agent.WithMaxRounds(5))
@@ -944,7 +943,7 @@ func TestSupervisorMemberDispositionNoProgressIsDone(t *testing.T) {
 		// no-deliverable terminal.
 		prov := mockllm.New(mockllm.EmptyTurn())
 		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
-			LLM: prov, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "mock",
+			LLM: prov, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "mock",
 			MaxNoProgressNudges: -1,
 		})}
 	}

@@ -19,16 +19,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
-	"github.com/stacklok/mecatl/internal/adapter/hookexec"
-	"github.com/stacklok/mecatl/internal/adapter/memfs"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 )
 
 // promptRecordingProvider wraps a scripted provider and records the LAST user text
@@ -82,7 +81,7 @@ func cancelMemberFactory(t *testing.T, tm *team.Team, providers map[string]port.
 			LLM:     prov,
 			Catalog: cat,
 			Policy:  allow,
-			Hooks:   hookexec.New(nil),
+			Hooks:   noopHooks{},
 			Model:   "mock",
 		})}
 	}
@@ -288,7 +287,7 @@ func TestCancelChildReachesTeamMember(t *testing.T) {
 		}
 		cat.MustRegister(park)
 		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
-			LLM: prov, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "mock",
+			LLM: prov, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "mock",
 		})}
 	}
 

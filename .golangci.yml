@@ -145,6 +145,99 @@ linters:
           deny:
             - pkg: os
               desc: 'core domain must not import os (CLAUDE.md layering rule); side effects belong in adapters/composition'
+        # --- engine/adapter/* reference adapters -------------------------------
+        # These travel WITH the importable engine tree (offline tests, in-memory
+        # workspace, default policy, snapshot DTO, FS conformance suite) and are
+        # held to the same strict allowlist discipline: $gostd + the exact engine
+        # packages (+ doublestar for memfs' Glob) — never a heavy dep, never os,
+        # never anything outside engine/. Core-tier PRODUCTION code still must not
+        # import them (the core rules don't list them; the DAG test forbids the
+        # engine/adapter/ prefix) — only core $test files may.
+        engine-adapter-memfs:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/memfs/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/tool
+            - github.com/bmatcuk/doublestar/v4
+          deny:
+            - pkg: os
+              desc: 'memfs is the in-memory FileSystem fake; it must not touch the real OS'
+        engine-adapter-mockllm:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/mockllm/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/port
+            - github.com/stacklok/mecatl/engine/session
+          deny:
+            - pkg: os
+              desc: 'mockllm is the scripted offline provider; it must not touch the OS or the network'
+        engine-adapter-memstore:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/memstore/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/port
+            - github.com/stacklok/mecatl/engine/session
+            - github.com/stacklok/mecatl/engine/adapter/sessnap
+          deny:
+            - pkg: os
+              desc: 'memstore is the in-memory SessionStore; it must not touch the real OS'
+        engine-adapter-sessnap:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/sessnap/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/session
+          deny:
+            - pkg: os
+              desc: 'sessnap is the pure session-snapshot DTO; it must not touch os'
+        engine-adapter-permpolicy:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/permpolicy/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/governance
+            - github.com/stacklok/mecatl/engine/port
+            - github.com/stacklok/mecatl/engine/session
+            - github.com/stacklok/mecatl/engine/tool
+          deny:
+            - pkg: os
+              desc: 'permpolicy is the session-aware policy over governance.Evaluator; it must not touch os'
+        engine-adapter-permstore:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/permstore/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/governance
+            - github.com/stacklok/mecatl/engine/session
+          deny:
+            - pkg: os
+              desc: 'permstore is the in-memory always-allow rule store; it must not touch os'
+        engine-adapter-fsconformance:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/fsconformance/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/tool
+          deny:
+            - pkg: os
+              desc: 'fsconformance drives the abstract FileSystem contract; it must not touch the real OS'
         # agent: the APPLICATION loop; imports domain + port + team + stdlib +
         # golang.org/x/sync/errgroup. Adapters are INJECTED, never imported.
         core-agent:
@@ -256,7 +349,7 @@ linters:
           - gosec
           - goconst
           - unparam
-        path: internal/adapter/fsconformance/
+        path: engine/adapter/fsconformance/
       - linters:
           - revive
         path: .golangci.yml

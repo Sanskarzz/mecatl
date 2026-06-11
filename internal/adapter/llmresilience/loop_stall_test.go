@@ -1,4 +1,4 @@
-package agent_test
+package llmresilience_test
 
 import (
 	"context"
@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
-	"github.com/stacklok/mecatl/internal/adapter/memfs"
 )
 
 // stallingProvider streams one text chunk, signals started, then blocks until the

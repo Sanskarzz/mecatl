@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/session"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 )
 
 // TestSubagentPerCallModelRoutesToFactory is the MODEL-FACING e2e: a Subagent call with

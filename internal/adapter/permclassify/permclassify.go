@@ -7,7 +7,7 @@
 //
 // # Where it sits
 //
-// Layer 1 (internal/adapter/permpolicy over engine/governance) is a fast,
+// Layer 1 (engine/adapter/permpolicy over engine/governance) is a fast,
 // deterministic deny → ask → allow pre-parser with plan-mode gating and
 // compound-Bash splitting. This package adds layer 2: for the ambiguous middle
 // — the calls layer 1 routes to Ask — it consults a model (any

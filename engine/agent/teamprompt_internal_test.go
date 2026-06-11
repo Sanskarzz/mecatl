@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/team"
-	"github.com/stacklok/mecatl/internal/adapter/memfs"
 )
 
 // TestRenderTurnPromptDelimitsUntrusted asserts the prompt-injection hardening of

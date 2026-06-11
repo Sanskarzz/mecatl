@@ -6,16 +6,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memstore"
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
-	"github.com/stacklok/mecatl/internal/adapter/hookexec"
-	"github.com/stacklok/mecatl/internal/adapter/memfs"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
-	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 )
 
 // teamToolFactory builds the unified member-engine factory the Team tool needs: a
@@ -38,7 +37,7 @@ func teamToolFactory(t *testing.T, providers map[string]*mockllm.Provider) agent
 			LLM:     prov,
 			Catalog: cat,
 			Policy:  allow,
-			Hooks:   hookexec.New(nil),
+			Hooks:   noopHooks{},
 			Model:   "member-model",
 		})
 		return agent.MemberBuild{Engine: eng}

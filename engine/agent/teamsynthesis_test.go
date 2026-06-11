@@ -9,17 +9,16 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memstore"
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
-	"github.com/stacklok/mecatl/internal/adapter/hookexec"
-	"github.com/stacklok/mecatl/internal/adapter/memfs"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
-	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 )
 
 // promptRecorder captures, per member, the user-prompt text of every turn that
@@ -75,7 +74,7 @@ func recordingFactory(t *testing.T, tm *team.Team, rec *promptRecorder, scripts 
 			cat.MustRegister(tl)
 		}
 		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
-			LLM: prov, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "mock",
+			LLM: prov, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "mock",
 		})}
 	}
 }
@@ -650,7 +649,7 @@ func TestBudgetStoppedLeadStillSynthesises(t *testing.T) {
 			cat.MustRegister(tl)
 		}
 		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
-			LLM: leadProv, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil),
+			LLM: leadProv, Catalog: cat, Policy: allow, Hooks: noopHooks{},
 			Model: "mock", MaxRunTokens: budget,
 		})}
 	}

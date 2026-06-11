@@ -5,16 +5,24 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
-	"github.com/stacklok/mecatl/internal/adapter/hookexec"
-	"github.com/stacklok/mecatl/internal/adapter/memfs"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 )
+
+// noopHookRunner is a no-op port.HookRunner: a runner is PRESENT (so the hook
+// dispatch path executes) but no hook is configured (the in-package twin of the
+// agent_test package's noopHooks, unreachable from this internal test file).
+type noopHookRunner struct{}
+
+func (noopHookRunner) Run(context.Context, governance.HookEvent) (governance.HookOutcome, error) {
+	return governance.HookOutcome{}, nil
+}
 
 // recordedWarn captures one Diagnostics record for the WI-9 helper test.
 type recordedWarn struct {
@@ -105,7 +113,7 @@ func TestRunTurnCancelledMemberCapturesTurnsUsed(t *testing.T) {
 			mockllm.TextTurn("never reached cleanly"),
 		)
 		return MemberBuild{Engine: NewEngine(Deps{
-			LLM: prov, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "mock",
+			LLM: prov, Catalog: cat, Policy: allow, Hooks: noopHookRunner{}, Model: "mock",
 		})}
 	}
 	sup := NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory, WithMaxRounds(5))
@@ -153,7 +161,7 @@ func TestCleanupAllAttributesIdleClientCancel(t *testing.T) {
 			LLM:     mockllm.New(mockllm.TextTurn("x")),
 			Catalog: cat,
 			Policy:  allow,
-			Hooks:   hookexec.New(nil),
+			Hooks:   noopHookRunner{},
 			Model:   "mock",
 		})}
 	}

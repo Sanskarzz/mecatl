@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 )
 
 // TestBuildSubagentEngineFactoryReDerivesForOverrideModel is the CONTAMINATION guard for the

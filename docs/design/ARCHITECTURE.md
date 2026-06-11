@@ -85,11 +85,12 @@ is correct, because a ToolCall *is* the same concept across all three.
 
 ## 3. Go package layout
 
-`engine/` holds the importable core — the domain packages, the port interfaces, and
-the agent loop — intended to be importable as a library by external consumers.
-`internal/` holds everything not meant as a stable public API (the adapters and the
-composition layer). `pkg/` is **not** used — the proto/HTTP API remains the primary
-public surface.
+`engine/` holds the importable core — the domain packages, the port interfaces, the
+agent loop, and the in-tree reference adapters (`engine/adapter/*`) — fully
+self-contained (tests included) and intended to be importable as a library by external
+consumers. `internal/` holds everything not meant as a stable public API (the heavy
+adapters and the composition layer). `pkg/` is **not** used — the proto/HTTP API
+remains the primary public surface.
 
 ```
 github.com/stacklok/mecatl
@@ -99,7 +100,7 @@ github.com/stacklok/mecatl
 ├── cmd/
 │   ├── mecated/                           # the server binary (gRPC + HTTP/SSE)
 │   └── mecademo/                        # the demo driver (fake provider default)
-├── engine/                             # the importable core: domain + ports + the agent loop
+├── engine/                             # the importable core: domain + ports + agent loop + reference adapters
 │   ├── session/                        # DOMAIN: Session aggregate + value objects
 │   │   ├── session.go                  #   Session (root), state machine, StopReason
 │   │   ├── conversation.go             #   Conversation, Message, Turn
@@ -130,6 +131,14 @@ github.com/stacklok/mecatl
 │   │   ├── permission.go               #   PermissionPolicy
 │   │   ├── clock.go                    #   Clock
 │   │   └── log.go                      #   Logger, EventSink
+│   ├── adapter/                        # REFERENCE adapters (stdlib + engine only; travel with the core)
+│   │   ├── mockllm/                    #   scripted fake LLMProvider (no network)
+│   │   ├── memfs/                      #   in-memory FileSystem fake
+│   │   ├── fsconformance/              #   shared FileSystem conformance suite
+│   │   ├── memstore/                   #   in-memory SessionStore (default)
+│   │   ├── sessnap/                    #   session Snapshot DTO (memstore + jsonlstore share it)
+│   │   ├── permpolicy/                 #   PermissionPolicy over governance.Evaluator
+│   │   └── permstore/                  #   in-memory always-allow rule store
 │   └── agent/                          # APPLICATION: the loop (use-case layer)
 │       ├── loop.go                     #   Engine/Deps, Run(...) streaming the Event channel
 │       ├── dispatch.go                 #   read-parallel / mutate-serial dispatch + hooks
@@ -141,19 +150,15 @@ github.com/stacklok/mecatl
 │       ├── subagent.go                 #   Task: fresh context, scoped tools, one-shot
 │       └── parallel.go                 #   ParallelTool: fork-join fan-out (NewParallelTool)
 ├── internal/
-│   └── adapter/                        # ADAPTERS: implement ports / seams
+│   └── adapter/                        # HEAVY ADAPTERS: implement ports / seams
 │       ├── openai/                     #   LLMProvider over OpenAI Responses API (SSE)
-│       ├── mockllm/                    #   scripted fake LLMProvider (no network)
 │       ├── llmresilience/              #   retry/backoff + circuit-breaker decorator (LLMProvider)
 │       ├── permclassify/               #   model-based layer-2 risk classifier (PermissionPolicy)
 │       ├── tools/                      #   Read, Edit, Write, Grep, Glob, WebFetch + optional Bash
 │       ├── toolkit/                    #   shared tool mechanics (arg parse, output cap, schema)
 │       ├── osfs/                       #   FileSystem (os.Root-confined) + CommandRunner
-│       ├── memfs/                      #   in-memory FileSystem fake
-│       ├── fsconformance/              #   shared FileSystem conformance suite
-│       ├── store/                      #   memstore (default) + jsonlstore + sessnap DTO
+│       ├── store/                      #   jsonlstore (append-only JSONL replay log)
 │       ├── hookexec/                   #   shell-exec HookRunner (stdin JSON, exit-code)
-│       ├── permpolicy/                 #   PermissionPolicy over governance.Evaluator
 │       ├── memory/                     #   file-backed MemoryStore + Remember/Recall tools
 │       ├── dream/                      #   opt-in memory-consolidation (sleep) service
 │       ├── forker/                     #   WorkspaceForker (git-worktree / copy isolation)
@@ -200,10 +205,13 @@ mechanisms — both run under `task lint` / `task test`, neither relies on revie
    change), mirroring `engine/prompt/layering_test.go`.
 
 **Carve-outs** these encode deliberately: `port.PermissionPolicy` is implemented in the
-`permpolicy` **adapter** (not `governance`, which can't import `session`); `FileSystem` /
-`Workspace` live in `tool` (moving them to `port` makes a `port↔tool` cycle); and **agent
-test files may import the `memfs` / `mockllm` adapters** to run the loop offline — so the
-`core-agent` depguard rule excludes `$test` and the DAG test reads non-test imports only.
+`permpolicy` **adapter** (engine/adapter, not `governance`, which can't import `session`);
+`FileSystem` / `Workspace` live in `tool` (moving them to `port` makes a `port↔tool`
+cycle); and **core test files may import the `engine/adapter/*` reference adapters**
+(`memfs` / `mockllm` / …) to run the loop offline — so the core depguard rules exclude
+`$test` and the DAG test reads non-test imports only. The engine tree is self-contained
+including tests (nothing under `engine/` imports `internal/...`); integration tests that
+need a heavy adapter live next to that adapter under `internal/adapter/`.
 
 ---
 
@@ -485,7 +493,7 @@ core change. Each ships a network-free default implementation:
 Adapters fall into three shapes:
 
 - **Port implementations** — `openai`/`mockllm` (`LLMProvider`), `osfs`/`memfs`
-  (`FileSystem`+`CommandRunner`), `store/memstore`+`jsonlstore` (`SessionStore`,
+  (`FileSystem`+`CommandRunner`), `memstore` (engine/adapter) + `jsonlstore` (`SessionStore`,
   `jsonlstore` also `Logger`), `hookexec` (`HookRunner`), `permpolicy`
   (`PermissionPolicy`), `telemetry` (`EventSink`+`Logger`), the `tools` catalog,
   `memory`/`forker` (tools/seams).

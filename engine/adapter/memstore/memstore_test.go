@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/session"
-	"github.com/stacklok/mecatl/internal/adapter/store/memstore"
 )
 
 func driven(t *testing.T) *session.Session {

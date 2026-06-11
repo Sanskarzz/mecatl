@@ -11,16 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
-	"github.com/stacklok/mecatl/internal/adapter/hookexec"
-	"github.com/stacklok/mecatl/internal/adapter/llmresilience"
-	"github.com/stacklok/mecatl/internal/adapter/memfs"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -130,6 +128,15 @@ func catalogWith(t *testing.T, tools ...tool.Tool) *tool.Catalog {
 // allowAll returns a policy that allows every tool call.
 func allowAll() *permpolicy.Policy {
 	return permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+}
+
+// noopHooks is a no-op port.HookRunner: a runner is PRESENT (so the engine's
+// hook-dispatch path executes) but no hook is configured, mirroring what
+// hookexec.New(nil) provided before the engine tree became self-contained.
+type noopHooks struct{}
+
+func (noopHooks) Run(context.Context, governance.HookEvent) (governance.HookOutcome, error) {
+	return governance.HookOutcome{}, nil
 }
 
 // drain collects events until the channel closes, returning them in order.
@@ -672,91 +679,6 @@ func (b *blockingProvider) Stream(ctx context.Context, _ port.LLMRequest) (iter.
 	}, nil
 }
 
-// errProvider returns a real, NON-context error as the outer Stream error on
-// every call — the shape of a provider 400 reaching the establishment seam.
-type errProvider struct {
-	err error
-}
-
-func (*errProvider) Capabilities() port.ProviderCapabilities { return port.ProviderCapabilities{} }
-
-func (p *errProvider) Stream(context.Context, port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
-	return nil, p.err
-}
-
-// firstChunkErrProvider returns a NON-nil iterator whose FIRST yielded chunk
-// carries a real, NON-context error — the shape of a provider 400 surfacing as
-// the first SSE chunk rather than as the outer Stream error. This drives the
-// "first-chunk cerr" establishment seam in llmresilience (distinct from the
-// outer-Stream-error seam that errProvider exercises).
-type firstChunkErrProvider struct {
-	err error
-}
-
-func (*firstChunkErrProvider) Capabilities() port.ProviderCapabilities {
-	return port.ProviderCapabilities{}
-}
-
-func (p *firstChunkErrProvider) Stream(context.Context, port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
-	return func(yield func(port.Chunk, error) bool) {
-		yield(port.Chunk{}, p.err)
-	}, nil
-}
-
-// TestEstablishErrorTerminatesStopError is the end-to-end reproduction of the
-// reported symptom: a real establishment error (NOT a context error), wrapped
-// through llmresilience with a per-attempt timeout, must terminate the turn as
-// StopError with the provider message surfaced — NOT as StopCancelled with an
-// empty/silent result.
-func TestEstablishErrorTerminatesStopError(t *testing.T) {
-	provErr := fmt.Errorf("upstream rejected request: bad tool schema (400)")
-	inner := &errProvider{err: provErr}
-	llm := llmresilience.Wrap(inner, llmresilience.Config{
-		MaxAttempts:       1,
-		PerAttemptTimeout: time.Second,
-	})
-
-	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t)})
-	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
-
-	res := lastResult(t, drain(r))
-	if res.Stop != session.StopError {
-		t.Fatalf("stop = %q, want error (NOT cancelled)", res.Stop)
-	}
-	if !strings.Contains(res.Error, "bad tool schema (400)") {
-		t.Fatalf("result error = %q, want the provider message surfaced", res.Error)
-	}
-}
-
-// TestFirstChunkErrorTerminatesStopError is the end-to-end counterpart of
-// TestEstablishErrorTerminatesStopError for the OTHER establishment seam: here
-// the inner Stream succeeds (non-nil iterator) but the FIRST CHUNK yields a real
-// provider error (the "first-chunk cerr" path in llmresilience.establish). Wrapped
-// through llmresilience with a per-attempt timeout, this too must terminate the
-// turn as StopError with the provider message surfaced — NOT as StopCancelled.
-// If the cerr-site masking fix (cause := attemptCtx.Err() read BEFORE cancel) is
-// reverted, the cleanup cancel() masks the real error as context.Canceled, the
-// loop treats it as a caller-cancel, and this test fails on StopCancelled.
-func TestFirstChunkErrorTerminatesStopError(t *testing.T) {
-	provErr := fmt.Errorf("upstream rejected request: bad tool schema (400)")
-	inner := &firstChunkErrProvider{err: provErr}
-	llm := llmresilience.Wrap(inner, llmresilience.Config{
-		MaxAttempts:       1,
-		PerAttemptTimeout: time.Second,
-	})
-
-	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t)})
-	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
-
-	res := lastResult(t, drain(r))
-	if res.Stop != session.StopError {
-		t.Fatalf("stop = %q, want error (NOT cancelled)", res.Stop)
-	}
-	if !strings.Contains(res.Error, "bad tool schema (400)") {
-		t.Fatalf("result error = %q, want the provider message surfaced", res.Error)
-	}
-}
-
 // TestCancelMidToolThenResumeSucceeds drives turn-1 to record an assistant
 // tool-call then blocks inside the tool until the run is cancelled, so dispatch
 // returns cancelled=true AFTER RecordAssistant but before RecordToolResults — the
@@ -1004,75 +926,6 @@ func TestStopMaxConsecutiveFailures(t *testing.T) {
 	res := lastResult(t, drain(r))
 	if res.Stop != session.StopMaxConsecutiveFailures {
 		t.Fatalf("stop = %q, want max_consecutive_failures", res.Stop)
-	}
-}
-
-// TestPreToolUseHookBlocks runs an exit-2 PreToolUse hook and confirms the tool
-// is not executed and the model receives the block message (gauntlet #5).
-func TestPreToolUseHookBlocks(t *testing.T) {
-	var executed atomic.Bool
-	write := &fakeTool{name: "Write", readOnly: false,
-		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
-			executed.Store(true)
-			return session.NewToolResult(in.ID, "wrote"), nil
-		}}
-	hooks := hookexec.New(map[governance.HookPhase]string{
-		governance.PhasePreToolUse: "echo blocked-by-policy >&2; exit 2",
-	})
-	llm := mockllm.New(
-		mockllm.ToolCallTurn(toolCall("c1", "Write", `{"path":"a"}`)),
-		mockllm.TextTurn("ok"),
-	)
-	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, write), Hooks: hooks})
-	r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
-
-	evs := drain(r)
-
-	var hookEv, blockRes bool
-	var hookCallID session.ToolCallID
-	// Indices of the three c1 events, to assert ordering: the card must open BEFORE
-	// the veto (issue #6 — otherwise the failed update keys an unopened card).
-	cardIdx, hookIdx, resultIdx := -1, -1, -1
-	for i, ev := range evs {
-		switch {
-		case ev.Type == session.EvToolCall && ev.ToolCall != nil && ev.ToolCall.ID == "c1":
-			if cardIdx == -1 {
-				cardIdx = i
-			}
-		case ev.Type == session.EvHook && strings.Contains(ev.Text, "blocked-by-policy"):
-			hookEv = true
-			hookIdx = i
-			if ev.Hook != nil {
-				hookCallID = ev.Hook.CallID
-			}
-		case ev.Type == session.EvToolResult && ev.ToolResult.IsError &&
-			strings.Contains(ev.ToolResult.Content, "blocked-by-policy"):
-			blockRes = true
-			resultIdx = i
-		}
-	}
-	if executed.Load() {
-		t.Fatalf("hook-blocked tool was executed")
-	}
-	if !hookEv {
-		t.Fatalf("no hook event emitted")
-	}
-	// The blocked EvHook must carry the originating tool-call id so a client can
-	// address the veto to the exact tool card (issue #6).
-	if hookCallID != "c1" {
-		t.Fatalf("blocked hook CallID = %q, want c1", hookCallID)
-	}
-	if !blockRes {
-		t.Fatalf("block message not fed to the model as a tool result")
-	}
-	// Ordering: the card (EvToolCall) opens first, THEN the veto (EvHook), THEN the
-	// synthesized error result — so both failure events land on an already-open card.
-	if cardIdx == -1 {
-		t.Fatalf("no EvToolCall opened for c1 (the card must open before the gate); events=%v", typesOf(evs))
-	}
-	if cardIdx >= hookIdx || hookIdx >= resultIdx {
-		t.Fatalf("event order = card@%d, hook@%d, result@%d; want card < hook < result; events=%v",
-			cardIdx, hookIdx, resultIdx, typesOf(evs))
 	}
 }
 

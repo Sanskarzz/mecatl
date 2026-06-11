@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/stacklok/mecatl/engine/adapter/sessnap"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
-	"github.com/stacklok/mecatl/internal/adapter/store/sessnap"
 )
 
 // ErrNotFound is returned by Load when no session is stored under the given id. It

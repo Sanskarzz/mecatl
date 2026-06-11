@@ -37,14 +37,28 @@ var corePackages = []string{
 // forbiddenPrefixes are the "outward / heavy" dependency families a core package
 // must never reach, even transitively. Hitting any of these is the canonical
 // layering violation: domain/port/agent depend on adapters via INJECTED ports,
-// never by importing them.
+// never by importing them. On top of these named prefixes, the walk enforces the
+// SELF-CONTAINMENT rule directly (violatesSelfContainment): any module-internal
+// import that is not under engine/ — the heavy adapters, the composition root,
+// contracts/gen, everything outside the importable core — is a violation, so the
+// engine tree can become its own module without dragging the host repo along.
 var forbiddenPrefixes = []string{
-	modulePrefix + "internal/adapter/",       // any concrete adapter
-	modulePrefix + "contracts/gen",           // generated gRPC/proto
-	modulePrefix + "internal/app",            // composition root (depends inward, not the reverse)
+	modulePrefix + "engine/adapter/",         // the in-tree reference adapters (test-only; never production core)
 	"github.com/openai/openai-go",            // OpenAI SDK
 	"github.com/anthropics/anthropic-sdk-go", // Anthropic SDK
 	"google.golang.org/grpc",                 // gRPC runtime
+}
+
+// enginePrefix is the only module-internal subtree a core package may import
+// from (and, per forbiddenPrefixes, not its adapter/ branch in production code).
+const enginePrefix = modulePrefix + "engine/"
+
+// violatesSelfContainment reports whether imp is a module-internal import that
+// escapes the engine/ subtree — the rule that keeps the core extractable as a
+// standalone module (no reach into the host repo's adapters, composition root,
+// or generated contracts through ANY chain).
+func violatesSelfContainment(imp string) bool {
+	return strings.HasPrefix(imp, modulePrefix) && !strings.HasPrefix(imp, enginePrefix)
 }
 
 // coreImportRule is one row of the direction table: the EXACT set of mecatl-core
@@ -186,13 +200,22 @@ func TestTablesNonEmpty(t *testing.T) {
 }
 
 // TestNoCoreImportsAdapter walks each core package's transitive non-test imports
-// and fails on any edge into an adapter, contracts/gen, the composition root, an
-// LLM SDK, or grpc. This is the "dependencies point inward only" direction check
-// across the WHOLE graph (depguard only sees one file's direct imports).
+// and fails on any edge into an adapter (engine/adapter/ or anything outside
+// engine/ — which covers the heavy adapters, the composition root, and
+// contracts/gen), an LLM SDK, or grpc. This is the "dependencies point inward
+// only" direction check across the WHOLE graph (depguard only sees one file's
+// direct imports), plus the self-containment rule that keeps engine/ extractable
+// as its own module.
 func TestNoCoreImportsAdapter(t *testing.T) {
 	for _, core := range corePackages {
 		t.Run(shortName(core), func(t *testing.T) {
 			walkTransitiveNonTestImports(t, core, func(from, imp string) {
+				if violatesSelfContainment(imp) {
+					t.Errorf("layering violation (CLAUDE.md \"dependencies point inward only\"): "+
+						"core package %s transitively imports %s, which is outside the self-contained engine/ tree"+
+						"\n\t...via edge %s -> %s",
+						shortName(core), imp, shortName(from), shortName(imp))
+				}
 				for _, bad := range forbiddenPrefixes {
 					if strings.HasPrefix(imp, bad) {
 						t.Errorf("layering violation (CLAUDE.md \"dependencies point inward only\"): "+
@@ -217,6 +240,31 @@ func TestCoreImportDirection(t *testing.T) {
 		t.Run(shortName(rule.pkg), func(t *testing.T) {
 			assertDirectImportsAllowed(t, rule.pkg, rule.allowedCore, rule.allowedExternal, rule.desc)
 		})
+	}
+}
+
+// TestViolatesSelfContainmentSynthetic pins the self-containment classifier on
+// synthetic inputs, independent of the (clean) live graph — a broken classifier
+// would otherwise let TestNoCoreImportsAdapter pass vacuously on that axis.
+func TestViolatesSelfContainmentSynthetic(t *testing.T) {
+	cases := []struct {
+		imp  string
+		want bool
+	}{
+		{modulePrefix + "engine/session", false},            // core: allowed
+		{modulePrefix + "engine/adapter/memfs", false},      // engine subtree (the named adapter prefix handles production use)
+		{modulePrefix + "contracts/gen/go/mecatl/v1", true}, // generated contracts: outside engine/
+		{"github.com/bmatcuk/doublestar/v4", false},         // third-party: not module-internal
+		{"golang.org/x/sync/errgroup", false},               // third-party: not module-internal
+	}
+	for _, c := range cases {
+		if got := violatesSelfContainment(c.imp); got != c.want {
+			t.Errorf("violatesSelfContainment(%q) = %v, want %v", c.imp, got, c.want)
+		}
+	}
+	// Any module-internal path outside engine/ must trip, whatever it is named.
+	if !violatesSelfContainment(modulePrefix + "x/y") {
+		t.Error("a module-internal import outside engine/ must violate self-containment")
 	}
 }
 

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/fsconformance"
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/tool"
-	"github.com/stacklok/mecatl/internal/adapter/fsconformance"
-	"github.com/stacklok/mecatl/internal/adapter/memfs"
 )
 
 // TestConformance runs the shared Workspace conformance table against memfs.

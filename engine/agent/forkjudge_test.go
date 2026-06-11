@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/tool"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 )
 
 func judgeCandidates() []agent.BranchSummary {

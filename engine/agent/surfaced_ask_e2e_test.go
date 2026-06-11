@@ -6,15 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
-	"github.com/stacklok/mecatl/internal/adapter/hookexec"
-	"github.com/stacklok/mecatl/internal/adapter/memfs"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
-	"github.com/stacklok/mecatl/internal/adapter/permpolicy"
 )
 
 // TestE2E_SurfacedAskAllowed drives a REAL interactive parent Engine whose Subagent child
@@ -184,12 +183,12 @@ func TestE2E_SurfacedTeamMemberAskDoesNotBlockPeers(t *testing.T) {
 				// Synthesis turn.
 				mockllm.TextTurn("CONSOLIDATED: worker reported, command run"),
 			)
-			eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "m"})
+			eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "m"})
 			// IsolateReadOnly: a read-only member granted a shell (isolated worktree).
 			return agent.MemberBuild{Engine: eng, IsolateReadOnly: true}
 		default:
 			llm := mockllm.New(mockllm.TextTurn("worker: finished its independent work"))
-			eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "m"})
+			eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "m"})
 			return agent.MemberBuild{Engine: eng, IsolateReadOnly: true}
 		}
 	}
@@ -328,7 +327,7 @@ func TestE2E_TwoConcurrentSurfacedAsksBothResolved(t *testing.T) {
 				// Synthesis turn.
 				mockllm.TextTurn("CONSOLIDATED: both commands ran"),
 			)
-			eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "m"})
+			eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "m"})
 			return agent.MemberBuild{Engine: eng, IsolateReadOnly: true}
 		default: // beta: surfaces its own ask concurrently.
 			cat.MustRegister(betaBash)
@@ -336,7 +335,7 @@ func TestE2E_TwoConcurrentSurfacedAsksBothResolved(t *testing.T) {
 				mockllm.ToolCallTurn(toolCall("b1", "Bash", `{"command":"cat $(zap-b)"}`)),
 				mockllm.TextTurn("beta: command done"),
 			)
-			eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "m"})
+			eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "m"})
 			return agent.MemberBuild{Engine: eng, IsolateReadOnly: true}
 		}
 	}
@@ -407,7 +406,7 @@ func TestE2E_HeadlessTeamMemberDeniedResultIsAccurate(t *testing.T) {
 			mockllm.TextTurn("member: adapted after denial"),
 			mockllm.TextTurn("CONSOLIDATED: done"),
 		)
-		eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: hookexec.New(nil), Model: "m"})
+		eng := agent.NewEngine(agent.Deps{LLM: llm, Catalog: cat, Policy: allow, Hooks: noopHooks{}, Model: "m"})
 		return agent.MemberBuild{Engine: eng, IsolateReadOnly: true}
 	}
 	roFk := &recordingSubagentForker{}

@@ -139,8 +139,9 @@ OpenAI, gRPC, or the filesystem — those are adapters behind ports, wired toget
 
 ## Project layout
 
-`engine/` is the importable core (the domain, the ports, and the agent loop), intended
-to be importable as a library by external consumers; `internal/` holds the adapters and
+`engine/` is the importable core (the domain, the ports, the agent loop, and the
+in-tree reference adapters), fully self-contained — tests included — and intended to be
+importable as a library by external consumers; `internal/` holds the heavy adapters and
 the composition layer.
 
 | Path | Contents |
@@ -148,7 +149,8 @@ the composition layer.
 | `engine/session`, `engine/governance`, `engine/tool`, `engine/prompt` | the domain (aggregate, permission/hook types, tool catalog + FS interfaces, prompt assembly) |
 | `engine/port` | the port interfaces the loop consumes |
 | `engine/agent` | the agent loop, dispatch, permission pause/resume, compaction, subagent |
-| `internal/adapter/*` | adapters: `openai`, `mockllm`, `llmresilience`, `osfs`/`memfs`, `permpolicy`, `permclassify`, `hookexec`, `store/*`, `tools`, `toolkit`, `memory`, `dream`, `soul`, `forker`, `tokenizer`, `telemetry`, `mcp`, `server` |
+| `engine/adapter/*` | reference adapters (stdlib + engine only): `mockllm`, `memfs`, `memstore`, `sessnap`, `permpolicy`, `permstore`, `fsconformance` |
+| `internal/adapter/*` | heavy adapters: `openai`, `llmresilience`, `osfs`, `permclassify`, `hookexec`, `store/jsonlstore`, `tools`, `toolkit`, `memory`, `dream`, `soul`, `forker`, `tokenizer`, `telemetry`, `mcp`, `server` |
 | `contracts/proto`, `contracts/gen` | gRPC contract (source of truth) and generated Go |
 | `cmd/mecated`, `cmd/mecademo` | the server (composition root) and the demo |
 

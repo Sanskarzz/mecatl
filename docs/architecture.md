@@ -20,12 +20,15 @@ Dependencies point inward only: a domain of pure value objects and aggregates
 (`session`, `governance`, `tool`, `prompt`), a set of port interfaces the
 application consumes (`port`), the application use-case layer that is the agent
 loop (`agent`), and adapters that implement the ports (`adapter/*`). The core
-tiers (domain, ports, agent loop) live under `engine/` — the importable core,
-intended to be importable as a library by external consumers — while the
-adapters and the composition layer stay under `internal/`. The LLM
-provider sits behind the `port.LLMProvider` seam, with the OpenAI Responses API
-isolated entirely inside `internal/adapter/openai`, so the core is
-provider-agnostic and unit-testable against fakes (`mockllm`, `memfs`,
+tiers (domain, ports, agent loop) plus a small set of stdlib-only REFERENCE
+adapters (`engine/adapter/*`: `mockllm`, `memfs`, `memstore`, `sessnap`,
+`permpolicy`, `permstore`, `fsconformance`) live under `engine/` — the
+importable core, fully self-contained (tests included: nothing under `engine/`
+imports `internal/...`) and intended to be importable as a library by external
+consumers — while the heavy adapters and the composition layer stay under
+`internal/`. The LLM provider sits behind the `port.LLMProvider` seam, with the
+OpenAI Responses API isolated entirely inside `internal/adapter/openai`, so the
+core is provider-agnostic and unit-testable against fakes (`mockllm`, `memfs`,
 `memstore`).
 
 Around that core, every capability beyond the minimal loop is a **seam with a
@@ -78,10 +81,10 @@ flowchart LR
     pc["permclassify (layer-2 classifier)"]
   end
 
-  subgraph DRIVEN["driven adapters — internal/adapter"]
+  subgraph DRIVEN["driven adapters — engine/adapter + internal/adapter"]
     oai["openai · mockllm"]
     fs["osfs (+CommandRunner) · memfs"]
-    st["store/memstore · jsonlstore · sessnap"]
+    st["memstore · jsonlstore · sessnap"]
     tools["tools (Read/Edit/Write/Grep/Glob/WebFetch + optional Bash)"]
     pp["permpolicy · hookexec"]
     tel["telemetry (OTel metrics+spans · Prometheus exporter · OTLP)"]
@@ -700,7 +703,7 @@ and abandons the underlying stream; a deliberate `ctx` cancel is **not** reporte
 as a stream error.
 
 **The provider-neutral seam**: the loop only ever sees `port.Chunk`; no OpenAI
-type crosses the boundary. The fake `mockllm.Provider` (`adapter/mockllm`,
+type crosses the boundary. The fake `mockllm.Provider` (`engine/adapter/mockllm`,
 `New(turns...)`, `TextTurn`) implements the same port for offline loop testing.
 
 **Compatible endpoints**: `WithBaseURL(url)` overrides the host (vLLM, LiteLLM,
@@ -816,7 +819,7 @@ emits behind a dead client.
 - **SessionStore** — `memstore` (default, in-memory) and `jsonlstore`
   (append-only JSONL replay log: `<dir>/<id>.session.jsonl` snapshots +
   `<dir>/<id>.tools.jsonl` tool records; `jsonlstore` also implements `Logger`).
-  Both serialize via **`sessnap`** (`adapter/store/sessnap`): a `Snapshot` DTO
+  Both serialize via **`sessnap`** (`engine/adapter/sessnap`): a `Snapshot` DTO
   that round-trips a `Session` by driving the public state machine on restore
   (so a session saved mid-`awaiting` reloads with its pending ask intact). It
   captures the terminal reason via `RecordedStopReason()` for exact round-trips.

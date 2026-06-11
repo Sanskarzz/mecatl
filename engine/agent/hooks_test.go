@@ -7,15 +7,23 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
-	"github.com/stacklok/mecatl/internal/adapter/memfs"
-	"github.com/stacklok/mecatl/internal/adapter/memory"
-	"github.com/stacklok/mecatl/internal/adapter/mockllm"
 )
+
+// fakeIndexSrc is a scripted prompt.MemoryIndexSource: the turn-0 ordering tests
+// only need an index with one recognisable entry, not a real memory store (the
+// file-backed adapter is integration-tested in internal/adapter/memory).
+type fakeIndexSrc struct{ entries []tool.MemoryEntry }
+
+func (f fakeIndexSrc) Index(context.Context) ([]tool.MemoryEntry, error) {
+	return f.entries, nil
+}
 
 // recordingHooks is a fake port.HookRunner that records every phase it is asked
 // to run, in order, and blocks on a configured set of phases.
@@ -393,15 +401,9 @@ func TestLoopUsesInjectedAssembler(t *testing.T) {
 // system prefix (proven separately in engine/prompt).
 func TestTurn0InjectsMemoryIndexAfterAgentsMD(t *testing.T) {
 	ctx := context.Background()
-	store, err := memory.New(t.TempDir())
-	if err != nil {
-		t.Fatalf("memory.New: %v", err)
-	}
-	if err := store.RememberEntry(ctx, tool.MemoryEntry{
+	store := fakeIndexSrc{entries: []tool.MemoryEntry{{
 		Key: "pref/test-runner", Value: "gotestsum", Description: "preferred test runner",
-	}); err != nil {
-		t.Fatalf("RememberEntry: %v", err)
-	}
+	}}}
 
 	llm := mockllm.New(mockllm.TextTurn("done"))
 	cat := catalogWith(t, &fakeTool{name: "Read", readOnly: true, exec: okExec})
@@ -450,15 +452,9 @@ func (f fakeSoulSrc) Load(context.Context) (string, error) { return f.body, nil 
 // before saved facts), and all before the user prompt.
 func TestTurn0InjectsSoulAfterAgentsMD(t *testing.T) {
 	ctx := context.Background()
-	store, err := memory.New(t.TempDir())
-	if err != nil {
-		t.Fatalf("memory.New: %v", err)
-	}
-	if err := store.RememberEntry(ctx, tool.MemoryEntry{
+	store := fakeIndexSrc{entries: []tool.MemoryEntry{{
 		Key: "pref/test-runner", Value: "gotestsum", Description: "preferred test runner",
-	}); err != nil {
-		t.Fatalf("RememberEntry: %v", err)
-	}
+	}}}
 
 	llm := mockllm.New(mockllm.TextTurn("done"))
 	cat := catalogWith(t, &fakeTool{name: "Read", readOnly: true, exec: okExec})

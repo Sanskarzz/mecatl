@@ -102,7 +102,7 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
 ### WP2 — FileSystem + Workspace adapters
 - **Goal:** Real-OS and in-memory implementations of `FileSystem`, plus the `Workspace`
   wrapper that scopes paths to a session root and carries the Edit **read-ledger**.
-- **Owns:** `internal/adapter/osfs/`, `internal/adapter/memfs/`, the `Workspace` impl.
+- **Owns:** `internal/adapter/osfs/`, `engine/adapter/memfs/`, the `Workspace` impl.
 - **Honors:** `port.FileSystem`, `port.Workspace` from WP1.
 - **Tests:** memfs round-trips; path-escape attempts (`../`) are rejected by Workspace;
   read-ledger records reads and detects on-disk change (mtime/hash) for Edit invariant #1.
@@ -113,7 +113,7 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
   turns (text, tool calls, usage) with no network, the backbone of loop testing. (b)
   `openai` — the real adapter translating the Responses API (SSE, function_call /
   function_call_output items, reasoning items, prompt caching, ctx-cancel) into `Chunk`s.
-- **Owns:** `internal/adapter/mockllm/`, `internal/adapter/openai/`.
+- **Owns:** `engine/adapter/mockllm/`, `internal/adapter/openai/`.
 - **Honors:** `port.LLMProvider`, `port.Chunk`, `port.LLMRequest` from WP1. **Coordinate
   with the concurrent OpenAI-Responses research agent** — the adapter targets their API
   details but exposes only the frozen port.
