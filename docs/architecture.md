@@ -827,6 +827,10 @@ emits behind a dead client.
 
 ### Remote store + source drivers (`internal/adapter/grpcdriver`)
 
+> Design rationale — the port/driver pattern, the per-seam lifecycle and
+> failure-posture decisions, the deferrals, and the workspace-driver sketch —
+> lives in `docs/design/DRIVERS.md`.
+
 The session and memory stores have a **wire seam**: an operator can point
 either at a remote, operator-run **driver process** speaking the
 `mecatl.driver.v1` protocol (`contracts/proto/mecatl/driver/v1/` —

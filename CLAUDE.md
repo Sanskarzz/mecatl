@@ -7,7 +7,7 @@ Driven over gRPC + HTTP; an optional Bubble Tea TUI (`mecatui`) is a client.
 > `AGENTS.md` and `docs/harnesses/` are the **research corpus** this was built from, not
 > harness conventions. For the build itself read `docs/architecture.md` (how it works),
 > `docs/usage.md` (how to run it), and `docs/design/*` (rationale per feature — multi-provider,
-> workspace-trust, soul, memory, agent-teams each have a doc there).
+> workspace-trust, soul, memory, agent-teams, drivers each have a doc there).
 > `docs/design/IMPLEMENTATION-NOTES.md` holds the dense per-subsystem implementation/status
 > detail. **Prefer adding design detail to those docs, not here** — this file is a lean
 > correction file, not documentation.
