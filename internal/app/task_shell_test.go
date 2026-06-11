@@ -37,7 +37,7 @@ func TestBuildChildEngineWithRunnerHasBash(t *testing.T) {
 	if runner == nil {
 		t.Fatal("precondition: expected a non-nil sandboxed runner with Shell set")
 	}
-	eng := buildChildEngine(cfg, bashThenEdit(), runner)
+	eng := buildChildEngine(cfg, nil, bashThenEdit(), "", cfg.Model, runner)
 
 	events := drainEngine(t, eng)
 	if unknownToolResult(events, "b1") {
@@ -56,7 +56,7 @@ func TestBuildChildEngineWithRunnerHasBash(t *testing.T) {
 // unchanged.
 func TestBuildChildEngineNoRunnerHasNoBash(t *testing.T) {
 	cfg := teamCfg(t)
-	eng := buildChildEngine(cfg, bashThenEdit(), nil)
+	eng := buildChildEngine(cfg, nil, bashThenEdit(), "", cfg.Model, nil)
 
 	events := drainEngine(t, eng)
 	if !unknownToolResult(events, "b1") {

@@ -492,9 +492,10 @@ FIXED per session (the switch is a NEW session, never a live re-route); there is
 history carryover (the server has no history-seed surface). The header `next:` badge
 previews a pending-next that differs from the live model.
 
-Open / deferred items: a `small_model` tier (sub-agent cheap model), a server-side
-history-seed surface (to carry context across a restart-now switch), and a zero-keys
-first-run UX.
+Open / deferred items: a server-side history-seed surface (to carry context across
+a restart-now switch), and a zero-keys first-run UX. (The `small_model` tier — the
+sub-agent cheap model — is SHIPPED as `Config.SubagentModel` / `--subagent-model`;
+see the "Def-less child default model" subsection under §10.)
 
 ## 10. Per-sub-agent provider selection (SHIPPED — both halves)
 
@@ -539,6 +540,61 @@ provider — `server.Config.MemberEngine` is wired ONCE at build with the defaul
 provider and CreateTeam carries no selector today; the in-catalog Team tool IS
 covered. (2) Surfacing the resolved provider in `ListAgents`/`AgentInfo` — that is a
 proto change with no consumer yet.
+
+### Def-less child default model (`SubagentModel` — SHIPPED, issue #35)
+
+`Config.SubagentModel` (`--subagent-model` on BOTH `mecated` and `mecatui`'s embedded
+server; the analogue of `CLAUDE_CODE_SUBAGENT_MODEL`) is the global DEFAULT model for
+every child engine that pins nothing of its own — across ALL the delegation families.
+The def-resolved paths (named Subagent specialists, defined team members) honoured it
+from day one via `resolveModel`; issue #35 extended it to the DEF-LESS families: the
+default Subagent explorer, UNDEFINED team members, and Parallel BRANCH children. ONE
+resolver serves all of them — each def-less site calls `resolveDefaultChildModel`,
+which delegates to `resolveModelFor(cfg, agents.AgentDef{}, parentModel)` (the SAME
+chain the def paths use, with the def tier empty) — so the precedence is uniform
+everywhere:
+
+**per-call `model` override > def `model:` > `SubagentModel` > parent (session) model.**
+
+When the resolved model differs from the parent's, the child's context window is
+re-derived live-first (`childWindowFor` over `provReg.meta.contextWindowFor` — the
+ONE rule shared by `resolveChildProvider`, `resolveDefaultChildModel`, and the
+per-call factory: it keys on the MODEL changing, not only on a provider switch, so
+a same-provider def `model:` compacts on ITS window too) and the engine is minted
+through `newChildEngineForProvider` — the same contamination-safe path as everything
+else in this section, never a clone-and-swap. Alias resolution happens ONCE at build
+(`normalizeSubagentModel` in `app.Build`) and is FAIL-FAST: a non-empty
+`--subagent-model` that does not resolve to a usable model id — an unknown bare
+alias, or an alias resolving to "inherit" (the built-in `sonnet`/`opus`/`haiku`
+aliases unless overridden via `--model-alias`) — **fails startup** with an error
+naming the flag, the value, and the reason (warn-and-inert would silently run the
+whole child fleet on the expensive parent model). A valid override narrates one
+INFO fact naming the active child-default model. The one engine the default does
+NOT touch: the user-model REVIEW engine (`buildUserModelReviewEngine`) stays on the
+session model — it is a Stop-review hook engine, not a delegation child.
+
+Decisions recorded with the feature:
+
+- **Same-provider only.** The id is resolved on the parent's provider (the registry
+  is keyed by provider, not model); a def's `provider:` remains the only
+  cross-provider seam.
+- **Lead included (v1).** ALL undefined team members adopt the cheap default — the
+  LEAD too. A lead-strong/members-cheap split is DEFERRED; a lead that must stay on
+  the strong model can pin it today via an agent def (`AgentType` + `model:`).
+- **Parallel judge asymmetry (deliberate).** The judge KEEPS the session model and
+  never consults `SubagentModel`: winner selection is a judgement call the operator
+  implicitly trusts to the model they picked for the session, while branches are the
+  bulk-token workers the cheap default exists for. Pinned by
+  `TestParallelJudgeStaysOnParentModel`.
+- **`--child-model` alias considered and skipped.** The existing
+  `SubagentModel`/`--subagent-model` name is KEPT (no `ChildModel` rename): a knob
+  rename has migration cost and no behavioural payoff; "subagent" reads as the
+  umbrella for every child family here.
+- **Image-capability failure mode (documented; no gate in v1).** A cheap child model
+  that lacks image input fails on the provider-400 path when a child request carries
+  an image — the same fail-safe posture as the OpenRouter passthrough caps (§7): the
+  local gate is not authoritative, the provider error is surfaced, and the run is
+  recoverable. A capability-aware downgrade gate would be speculative until it bites.
 
 ## 11. Live model listing (SHIPPED — OpenRouter)
 

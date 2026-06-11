@@ -95,7 +95,7 @@ func TestForkChildEngineHasBashAndEdit(t *testing.T) {
 	if runner == nil {
 		t.Fatal("precondition: expected a non-nil command runner with Shell set")
 	}
-	eng := buildParallelChildEngine(cfg, bashThenEdit(), runner)
+	eng := buildParallelChildEngine(cfg, nil, bashThenEdit(), "", cfg.Model, runner)
 
 	events := drainEngine(t, eng)
 
@@ -115,7 +115,7 @@ func TestForkChildEngineHasBashAndEdit(t *testing.T) {
 // the main session.
 func TestForkChildEngineNoRunnerHasNoBash(t *testing.T) {
 	cfg := teamCfg(t)
-	eng := buildParallelChildEngine(cfg, bashThenEdit(), nil)
+	eng := buildParallelChildEngine(cfg, nil, bashThenEdit(), "", cfg.Model, nil)
 
 	events := drainEngine(t, eng)
 

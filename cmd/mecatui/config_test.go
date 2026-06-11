@@ -54,6 +54,15 @@ func TestEmbeddedConfigMapsTrustProject(t *testing.T) {
 	}
 }
 
+// TestEmbeddedConfigMapsSubagentModel asserts --subagent-model flows through to
+// app.Config.SubagentModel (the def-less child-default model, issue #35).
+func TestEmbeddedConfigMapsSubagentModel(t *testing.T) {
+	ac := embeddedConfig(config{workspace: "/ws", model: "m", subagentModel: "gpt-5-mini", mock: true}, port.NopDiagnostics{})
+	if ac.SubagentModel != "gpt-5-mini" {
+		t.Errorf("embeddedConfig.SubagentModel = %q, want %q", ac.SubagentModel, "gpt-5-mini")
+	}
+}
+
 // TestParseFlagsTrustProject asserts --trust-project defaults to false and flips
 // true when set — unified with mecated's default-off posture.
 func TestParseFlagsTrustProject(t *testing.T) {

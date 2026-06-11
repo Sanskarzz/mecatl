@@ -21,7 +21,7 @@ func TestBuildSubagentEngineFactoryReDerivesForOverrideModel(t *testing.T) {
 	reg := regForTest(prov, providerAnthropic, "claude-default")
 	cfg := Config{Model: "claude-default"}
 
-	factory := buildSubagentEngineFactory(cfg, reg, prov, providerAnthropic, nil)
+	factory := buildSubagentEngineFactory(cfg, reg, prov, providerAnthropic, "claude-default", nil)
 
 	// An empty model is unroutable (ok=false), so Subagent surfaces a model-addressable error.
 	if _, ok := factory(""); ok {

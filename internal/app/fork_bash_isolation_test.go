@@ -126,7 +126,7 @@ func TestForkBashWritesIntoForkNotBase(t *testing.T) {
 	})}
 
 	provider := &bashWriteProvider{command: "echo hi > marker.txt", marker: "marker.txt"}
-	childEngine := buildParallelChildEngine(cfg, provider, runner)
+	childEngine := buildParallelChildEngine(cfg, nil, provider, "", cfg.Model, runner)
 
 	// join=first PRESERVES the winning branch's fork (cleanup not called), so the
 	// marker survives for the assertion below.
@@ -201,7 +201,7 @@ func TestForkGitCommitDoesNotTouchBaseRepo(t *testing.T) {
 		command: "echo branchwork > branch.txt && git add -A && git commit -m 'branch commit' && git update-ref refs/heads/sneaky HEAD",
 		marker:  "branch.txt",
 	}
-	childEngine := buildParallelChildEngine(cfg, provider, runner)
+	childEngine := buildParallelChildEngine(cfg, nil, provider, "", cfg.Model, runner)
 
 	// join=first PRESERVES the winner's fork so we can inspect it.
 	fork := agent.NewParallelTool(childEngine, rf)

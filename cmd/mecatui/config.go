@@ -55,7 +55,10 @@ type config struct {
 	// Embedded-server provider config (used only when no external server is
 	// dialled). The OpenAI key is read from OPENAI_API_KEY; --mock selects the
 	// canned offline provider instead (useful for a no-network smoke run).
+	// subagentModel is the def-less child-default model (--subagent-model),
+	// mapped onto app.Config.SubagentModel exactly like mecated's flag.
 	model             string
+	subagentModel     string
 	openAIBaseURL     string
 	openAIKey         string
 	openRouterBaseURL string
@@ -193,6 +196,7 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.noBanner, "no-banner", false, "disable the welcome splash (mascot + gradient wordmark); the plain prompt hint and affordance list are still shown. Also forced on under --quiet or a non-interactive stdin")
 
 	fs.StringVar(&cfg.model, "model", "", "model identifier for the embedded server (empty: use the provider-appropriate default; ignored when dialling an external server)")
+	fs.StringVar(&cfg.subagentModel, "subagent-model", "", "embedded server only: global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (the analogue of CLAUDE_CODE_SUBAGENT_MODEL); the Parallel judge stays on the session model. Same provider as the session. Empty inherits --model; a value that does not resolve to a usable model id FAILS STARTUP")
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")
 	fs.StringVar(&cfg.openRouterBaseURL, "openrouter-base-url", "", "embedded server only: override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)")
 	fs.StringVar(&cfg.anthropicBaseURL, "anthropic-base-url", "", "embedded server only: override the native Anthropic API base URL (compatible/proxy endpoints; key from ANTHROPIC_API_KEY)")

@@ -314,6 +314,7 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 	return app.Config{
 		Workspace:            cfg.workspace,
 		Model:                cfg.model,
+		SubagentModel:        cfg.subagentModel,
 		UseOpenAI:            cfg.openAIKey != "",
 		OpenAIKey:            cfg.openAIKey,
 		OpenAIBaseURL:        cfg.openAIBaseURL,

@@ -281,6 +281,44 @@ factory owns adapter construction), never a `taskArgs`/`port.LLMRequest` field. 
 `agent.TestSubagentPerCallModelRoutesToFactory`, `agent.TestSubagentPerCallModelUnknownErrors`,
 `agent.TestSubagentAgentAndModelTogetherRejected`, `app.TestBuildSubagentEngineFactoryReDerivesForOverrideModel`.
 
+**Def-less child default model (`Config.SubagentModel` everywhere — issue #35).** `SubagentModel`
+(`--subagent-model`, mecated AND mecatui) used to reach only the def-RESOLVED child paths
+(`resolveModelFor` via `resolveChildProvider`); four mint sites ignored it. The four are now
+broadened — all through ONE helper, `resolveDefaultChildModel` (internal/app/agentdefs.go), which
+delegates to `resolveModelFor(cfg, agents.AgentDef{}, parentModel)` (the zero-def chain — NOT a
+parallel resolver) and re-derives the context window live-first when the model actually changes
+(`childWindowFor` — the ONE window rule shared by `resolveChildProvider`, `resolveDefaultChildModel`,
+and the per-call factory: it keys on the MODEL changing, not only a provider switch, so a
+same-provider def `model:` compacts on ITS catalogued window too):
+(1) `buildChildEngine` — the default Subagent explorer (split into the testable `childExplorerDeps`);
+(2) `buildMemberEngine`'s DEFAULT (undefined-member) branch — LEAD INCLUDED in v1, the
+lead-strong/members-cheap split is DEFERRED (a strong lead pins via an agent def today);
+(3) `buildParallelChildEngine` — Parallel BRANCH children (split into `parallelChildDeps`);
+(4) `buildParallelJudgeEngine` — NO change, the deliberate asymmetry: the judge stays on the
+SESSION model (winner selection is a session-model judgement call; branches are the bulk-token
+workers). All built through `newChildEngineForProvider` (never clone-and-swap). Same-provider
+only (a def's `provider:` stays the cross-provider seam). Alias resolution happens ONCE at build
+(`normalizeSubagentModel` in `app.Build`) and is FAIL-FAST: a non-empty value that does not
+resolve to a usable model id (unknown bare alias, or an alias meaning inherit — the built-in
+sonnet/opus/haiku unless overridden) is a BUILD ERROR naming the flag/value/reason, never a
+warn-and-inert no-op; a valid override ⇒ one INFO fact (build-once-facts discipline). The
+user-model REVIEW engine deliberately stays on the session model (a Stop-review hook engine,
+not a delegation child). IMAGE-CAPABILITY FAILURE MODE (documented,
+no gate in v1): a cheap child model lacking image input fails on the provider-400 path when a
+child request carries an image — fail-safe, surfaced, recoverable; a capability-aware gate is
+deferred until it bites. Guards: `app.TestDefaultExplorerUsesSubagentModel` (+InheritsParentWhenUnset),
+`app.TestDefaultMemberUsesSubagentModel` (+InheritsParentWhenUnset),
+`app.TestParallelBranchUsesSubagentModel`, `app.TestParallelJudgeStaysOnParentModel` (the asymmetry pin),
+`app.TestPerCallModelOverridesSubagentModel`, `app.TestPerDefModelOverridesSubagentModel`,
+`app.TestExplorerPromptKeysDeltaOnSubagentModel`,
+`app.TestResolveChildProviderSameProviderModelWindow` (+ `TestSubproviderChildContextWindow`
+case (c) — the same-provider window rule), `app.TestNormalizeSubagentModelUnresolvableIsError` +
+`app.TestBuildFailsOnUnresolvableSubagentModel` (the fail-fast posture),
+`app.TestBuildNarratesSubagentModelExactlyOnce` + the verbatim-keep pins,
+`app.TestRegisterParallelToolThreadsSubagentModel` (the registration seam), and the composition e2e
+`app.TestSubagentModelRoutesChildToCheapModel` (mutation-verified: reverting the explorer wiring
+fails the deps test, the prompt test, AND the e2e).
+
 **Subagent structured output (`output_schema` + `SubmitResult` + bounded validation-retry).** When
 `taskArgs.OutputSchema` (a model-authored JSON schema) is present, the child is given a synthetic
 `SubmitResult` tool (`engine/agent/structuredoutput.go`) whose PARAMETERS ARE that schema,

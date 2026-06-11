@@ -276,11 +276,22 @@ type Config struct {
 	AgentsDirs         []string
 	AgentsConventional bool
 
-	// SubagentModel is the global override applied to every Subagent/member child
-	// engine that does not pin its own model (the analogue of
-	// CLAUDE_CODE_SUBAGENT_MODEL). Resolution precedence per def is:
-	// def.Model > SubagentModel > parent Model. Empty disables the override. It is
-	// resolved (with ModelAliases) ONLY in this composition layer.
+	// SubagentModel is the global default model for EVERY child engine that does
+	// not pin its own model (the analogue of CLAUDE_CODE_SUBAGENT_MODEL): the
+	// def-resolved Subagent specialists AND (issue #35) the default Subagent
+	// explorer, undefined team members (lead included — lead-strong split
+	// deferred), and Parallel BRANCH children. The Parallel JUDGE deliberately
+	// stays on the session model. Resolution precedence is:
+	// per-call/def model > SubagentModel > parent (session) Model. Same-provider
+	// only: the id is resolved on the parent's provider (a def's `provider:` is
+	// the cross-provider seam). Empty disables the override. It is resolved (with
+	// ModelAliases) ONLY in this composition layer; Build normalizes it once
+	// (normalizeSubagentModel) and FAILS FAST: a non-empty value that does not
+	// resolve to a usable model id (unknown alias, or an alias meaning inherit —
+	// the built-in sonnet/opus/haiku unless overridden) is a Build ERROR, never a
+	// silent no-op. EXCLUSION: the user-model review engine
+	// (buildUserModelReviewEngine) stays on cfg.Model — it is a Stop-REVIEW hook
+	// engine, not a delegation child.
 	SubagentModel string
 	// ModelAliases maps a short alias (e.g. "sonnet"/"opus"/"haiku"/"fast") to a
 	// concrete provider model id. Resolved only here; the domain/agent always
@@ -532,6 +543,18 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if cfg.Model == "" {
 		cfg.Model = reg.DefaultModel()
 	}
+	// SubagentModel (issue #35): validate + resolve the alias ONCE here — FAIL-FAST
+	// on a value that doesn't resolve to a usable model id (the --agent-source-url
+	// loud-misconfig posture; warn-and-inert would silently run the whole child
+	// fleet on the expensive parent model) — and narrate the ACTIVE child-default
+	// model as a build-once fact. A valid alias / literal id is kept verbatim
+	// (per-child resolveModelFor re-resolves it cheaply and silently). cfg is a
+	// local value, so the normalization propagates to every downstream consumer.
+	subagentModel, err := normalizeSubagentModel(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.SubagentModel = subagentModel
 	// Emit the build-once composition facts (token counter / compaction strategy /
 	// slash commands) EXACTLY ONCE here, through the injected Diagnostics — keyed to
 	// the resolved MAIN model. The per-derivation builders no longer log these (they
@@ -1605,6 +1628,43 @@ func logBuildConfigFacts(cfg Config) {
 	}
 }
 
+// normalizeSubagentModel validates and resolves Config.SubagentModel EXACTLY ONCE
+// at build time (called only from Build — the build-once composition-facts
+// discipline) and emits the one INFO narrating the active child-default model.
+// The posture is FAIL-FAST: a non-empty --subagent-model that does not resolve to
+// a usable model id is a BUILD ERROR (the --agent-source-url loud-misconfig
+// precedent), naming the flag, the value, and why it didn't resolve — never a
+// warn-and-inert no-op, which would silently run the whole child fleet on the
+// EXPENSIVE parent model (the opposite of the flag's purpose). The two
+// dead-selector shapes (lookupModelAlias is the ONE grammar shared with the
+// forgiving def path, resolveAlias):
+//
+//   - an unrecognised BARE token (not an alias, no separator ⇒ not a model id);
+//   - an alias resolving to "" / inherit (the built-in sonnet/opus/haiku aliases
+//     unless overridden in ModelAliases, or an operator alias mapped to an empty
+//     id) — a child default that inherits the parent is a no-op.
+//
+// A VALID value is returned VERBATIM (not pre-resolved): per-child resolution
+// (resolveModelFor) maps a known alias silently, and substituting the resolved id
+// here could change behaviour for an alias whose target is itself a bare token.
+func normalizeSubagentModel(cfg Config) (string, error) {
+	sel := strings.TrimSpace(cfg.SubagentModel)
+	if sel == "" {
+		return "", nil
+	}
+	resolved, known := lookupModelAlias(cfg, sel)
+	switch {
+	case !known:
+		return "", fmt.Errorf("--subagent-model %q: unknown model alias (not in --model-alias, not a built-in alias, and a bare token is not a concrete model id); every def-less child would silently run on the parent model — pass a concrete model id or define the alias", sel)
+	case resolved == "":
+		return "", fmt.Errorf("--subagent-model %q: the alias resolves to \"inherit\" (the built-in sonnet/opus/haiku aliases mean inherit unless overridden via --model-alias), which would make the child-default override a no-op — pass a concrete model id or map the alias to one", sel)
+	}
+	cfg.diag().Log(context.Background(), port.LevelInfo,
+		"subagent default model ACTIVE: def-less Subagent explorer / Parallel-branch / undefined-team-member children run on it (the Parallel judge stays on the session model); a def `model:` or per-call override still wins",
+		"model", resolved)
+	return sel, nil
+}
+
 // buildTokenCounter selects the TokenCounter from cfg.Tokenizer. The default
 // ("heuristic"/empty) returns the dependency-free heuristic counter. "tiktoken"
 // returns the offline tiktoken-backed counter for the configured model; if it
@@ -2277,6 +2337,10 @@ func maybeWrapUserModelReview(cfg Config, hooks port.HookRunner, store port.Sess
 // reviewer can WRITE the user model but has no other capability (no Read/Edit/Bash,
 // no Subagent/Fork). RememberUser carries the write-time injection scan, so a
 // transcript-poisoning attempt cannot land in the user-model block.
+//
+// MODEL: deliberately cfg.Model, NOT Config.SubagentModel — this is a REVIEW hook
+// engine (the Stop-triggered background reviewer of the finished session), not a
+// delegation child, so the cheap child-default does not apply to it.
 func buildUserModelReviewEngine(cfg Config, provider port.LLMProvider, store tool.MemoryStore) *agent.Engine {
 	cat := tool.NewCatalog()
 	for _, t := range memory.NewUserModelTools(store) {
@@ -2516,8 +2580,26 @@ func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvid
 // BashTool.Execute is workspace-aware: it passes the child's forked Workspace.Root()
 // to the runner as the working directory, so the child's Bash defaults to its OWN
 // worktree, not the shared parent base.
-func buildChildEngine(cfg Config, provider port.LLMProvider, runner tool.CommandRunner) *agent.Engine {
-	return newChildEngine(cfg.diag(), "task", provider, readOnlyExplorerCatalog(runner), cfg.Model, explorerPromptConfig(cfg))
+//
+// MODEL (issue #35): the explorer resolves its model through the SAME def-less
+// chain every child family uses — `SubagentModel (alias-resolved) > parentModel`
+// (resolveDefaultChildModel) — and is built through newChildEngineForProvider so
+// a SubagentModel-overridden explorer compacts/counts/prompts on the OVERRIDE
+// model with its own re-derived context window (never a clone-and-swap). With no
+// override the resolved model IS parentModel and window 0 keeps the engine
+// byte-identical to the historical shape.
+func buildChildEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, runner tool.CommandRunner) *agent.Engine {
+	return agent.NewEngine(childExplorerDeps(cfg, provReg, provider, parentProviderID, parentModel, runner))
+}
+
+// childExplorerDeps builds the default Subagent explorer's agent.Deps — split out
+// from buildChildEngine (the childEngineDepsForProvider precedent) so a test can
+// assert the resolved Deps directly (Model / PromptConfig.Env.Model /
+// ContextWindowTokens are private once inside the engine).
+func childExplorerDeps(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, runner tool.CommandRunner) agent.Deps {
+	model, childWindow := resolveDefaultChildModel(cfg, provReg, parentProviderID, parentModel)
+	return childEngineDepsForProvider(cfg, "task", provider, model, childWindow,
+		readOnlyExplorerCatalog(runner), explorerPromptConfig(modelCfgFor(cfg, model)), nil)
 }
 
 // readOnlyExplorerCatalog builds the canonical read-only explorer tool surface a Subagent
@@ -2586,7 +2668,22 @@ const explorerReferencesInstruction = "When you finish, END your summary with a 
 // the fork, removing the accidental shared-base mutation a parent-rooted runner
 // caused. The mutating winner's fork is what winner-preservation
 // (join=first/judge) keeps.
-func buildParallelChildEngine(cfg Config, provider port.LLMProvider, runner tool.CommandRunner) *agent.Engine {
+//
+// MODEL (issue #35): a branch resolves its model through the SAME def-less chain
+// as the default Subagent explorer and undefined team members — `SubagentModel
+// (alias-resolved) > parentModel` (resolveDefaultChildModel) — built through
+// newChildEngineForProvider so an overridden branch compacts/counts/prompts on
+// the OVERRIDE model with its re-derived window. The Parallel JUDGE is the
+// deliberate asymmetry: it stays on the SESSION model (see registerParallelTool).
+func buildParallelChildEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, runner tool.CommandRunner) *agent.Engine {
+	return agent.NewEngine(parallelChildDeps(cfg, provReg, provider, parentProviderID, parentModel, runner))
+}
+
+// parallelChildDeps builds the Parallel branch child's agent.Deps — split out from
+// buildParallelChildEngine (the childExplorerDeps precedent) so a test can assert
+// the resolved Deps directly.
+func parallelChildDeps(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, runner tool.CommandRunner) agent.Deps {
+	model, childWindow := resolveDefaultChildModel(cfg, provReg, parentProviderID, parentModel)
 	// Start from the read-only explorer surface (Read/Grep/Glob + sandboxed Bash) then
 	// LAYER Edit/Write on top — a Parallel branch MAY mutate its OWN fork. Bash is
 	// workspace-aware (BashTool.Execute passes the per-branch forked Workspace.Root() as
@@ -2596,7 +2693,8 @@ func buildParallelChildEngine(cfg Config, provider port.LLMProvider, runner tool
 	childCat.MustRegister(tools.EditTool{})
 	childCat.MustRegister(tools.WriteTool{})
 
-	return newChildEngine(cfg.diag(), "parallel", provider, childCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	return childEngineDepsForProvider(cfg, "parallel", provider, model, childWindow,
+		childCat, promptConfig(modelCfgFor(cfg, model), cfg.gitStatus), nil)
 }
 
 // buildParallelJudgeEngine constructs the minimal, tool-less read-only child *Engine
@@ -2605,6 +2703,12 @@ func buildParallelChildEngine(cfg Config, provider port.LLMProvider, runner tool
 // Engine instance from the branch child so, with the mockllm shared-cursor provider
 // in tests, the judge's LLM calls never interleave with the branches'; with the
 // stateless OpenAI adapter this separation is naturally harmless.
+//
+// MODEL ASYMMETRY (issue #35, deliberate): the judge KEEPS the session model and
+// never consults Config.SubagentModel — selecting a winner is a judgement call the
+// operator implicitly trusts to the model they chose for the session, while the
+// branches are the bulk-token workers the cheap child default exists for. Pinned
+// by TestParallelJudgeStaysOnParentModel; documented in MULTI-PROVIDER.md.
 func buildParallelJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 	return newChildEngine(cfg.diag(), "parallel-judge", provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
@@ -2678,9 +2782,9 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 	// closure hands engine/agent only func(string)(*Engine,bool); the registry never
 	// crosses (same shape/spirit as WithAgentEngines).
 	opts = append(opts, agent.WithSubagentEngineFactory(
-		buildSubagentEngineFactory(cfg, provReg, provider, parentProviderID, sandboxedRunner)))
+		buildSubagentEngineFactory(cfg, provReg, provider, parentProviderID, parentModel, sandboxedRunner)))
 	return agent.NewSubagentTool(
-		buildChildEngine(cfg, provider, sandboxedRunner),
+		buildChildEngine(cfg, provReg, provider, parentProviderID, parentModel, sandboxedRunner),
 		opts...,
 	), mcpClose
 }
@@ -2697,11 +2801,14 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 //
 // Routability: a blank model is unroutable (ok=false → Subagent surfaces a model-addressable
 // error). Any non-blank model is routed on the parent provider (the provider validates
-// the exact id at request time); its context window is re-derived live-first via the
-// registry meta so the override child compacts on the right window. Cross-provider
-// routing by a bare model id is intentionally out of scope this round (the registry is
-// keyed by provider, not model) — a def's `provider:` remains the cross-provider seam.
-func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID string, runner tool.CommandRunner) func(model string) (*agent.Engine, bool) {
+// the exact id at request time); its context window is re-derived through the shared
+// childWindowFor rule (live-first via the registry meta) so the override child compacts
+// on the right window — an override naming the parent's own model stays on the
+// inherited-default path (window 0 ⇒ 128k), like every other unchanged-model child.
+// Cross-provider routing by a bare model id is intentionally out of scope this round
+// (the registry is keyed by provider, not model) — a def's `provider:` remains the
+// cross-provider seam.
+func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, runner tool.CommandRunner) func(model string) (*agent.Engine, bool) {
 	return func(model string) (*agent.Engine, bool) {
 		model = strings.TrimSpace(model)
 		if model == "" {
@@ -2711,12 +2818,7 @@ func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider 
 		// (buildChildEngine) — a model-override child is still the explorer, just on a
 		// different model.
 		childCat := readOnlyExplorerCatalog(runner)
-		// Re-derive the override model's context window live-first (same store the picker
-		// reads), so the override child compacts on its real window rather than the parent's.
-		childWindow := 0
-		if provReg != nil {
-			childWindow = provReg.meta.contextWindowFor(parentProviderID, model)
-		}
+		childWindow := childWindowFor(provReg, parentProviderID, model, parentProviderID, parentModel)
 		eng := newChildEngineForProvider(cfg, "task:model="+model, provider, model, childWindow,
 			childCat, explorerPromptConfig(modelCfgFor(cfg, model)), nil)
 		return eng, true
@@ -2842,9 +2944,13 @@ func modelCfgFor(cfg Config, model string) Config {
 //     may keep Edit/Write/Bash, so the def MAY scope them in; a read-only
 //     (base-sharing) member has mutating tools DROPPED with a diagnostic, so the
 //     supervisor's AddMember backstop (ErrReadOnlyMemberMutating) is never tripped.
-//   - The member's model resolves def.Model > SubagentModel > parent; the def body
-//     composes into the system prompt as the Role; the def's permissionMode maps to
-//     a per-member session mode returned in the MemberBuild.
+//   - The member's model resolves def.Model > SubagentModel > parent — and since
+//     issue #35 the DEFAULT (undefined) member resolves through the SAME chain
+//     minus the def tier (SubagentModel > parent, via resolveDefaultChildModel),
+//     so a configured cheap child default reaches undefined members too (lead
+//     included; lead-strong split deferred). The def body composes into the system
+//     prompt as the Role; the def's permissionMode maps to a per-member session
+//     mode returned in the MemberBuild.
 //
 // In BOTH cases the team coordination tools (MemberTools) are ALWAYS appended after
 // scoping — they bypass the def allowlist — and Subagent/Fork are NEVER included (a
@@ -2865,14 +2971,23 @@ func modelCfgFor(cfg Config, model string) Config {
 func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner tool.CommandRunner, roIsolationAvailable bool, mainMgr *mcp.Manager) server.MemberEngineFactory {
 	return func(t *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
+		// Default (undefined) member model (issue #35): the SAME def-less chain as
+		// the default Subagent explorer and Parallel branches — `SubagentModel
+		// (alias-resolved) > parentModel` — with the window re-derived when the
+		// override changes the model. v1 applies it to EVERY undefined member,
+		// LEAD INCLUDED (a lead-strong/member-cheap split is deferred — a lead that
+		// must stay on the strong model can pin it via an agent def today). A
+		// DEFINED member overrides all of this via resolveChildProvider below.
+		defaultModel, defaultWindow := resolveDefaultChildModel(cfg, provReg, parentProviderID, parentModel)
 		var (
-			// Default (undefined) member: inherit the parent provider + model the call
-			// site supplied (the build-time default, or a session-selected provider in
-			// Half B). A DEFINED member overrides these via resolveProviderModel below.
-			model         = parentModel
-			pc            = promptConfig(modelCfgFor(cfg, parentModel), cfg.gitStatus)
+			// Default (undefined) member: inherit the parent provider + the resolved
+			// def-less model the call site supplied (the build-time default, or a
+			// session-selected provider in Half B). A DEFINED member overrides these
+			// via resolveProviderModel below.
+			model         = defaultModel
+			pc            = promptConfig(modelCfgFor(cfg, defaultModel), cfg.gitStatus)
 			childProvider = provider
-			childWindow   = 0
+			childWindow   = defaultWindow
 			mode          session.PermissionMode
 			// memberLimits carries ONLY the def-set per-round stop conditions (zero =
 			// unset); AddMember per-field merges them onto the team default (s.limits).

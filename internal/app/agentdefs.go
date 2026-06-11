@@ -118,9 +118,12 @@ func resolveProviderModel(cfg Config, provReg *providerRegistry, def agents.Agen
 
 // resolveChildProvider resolves a def to the (childProvider, model, childWindow)
 // triple a child-engine build needs: it runs resolveProviderModel, then for a
-// SWITCHED provider looks up the registry entry's provider + its catalogued context
-// window; for the inherited-default path it returns the supplied parentProvider with
-// window=0 (byte-identical 128k). It is the shared resolution step both
+// SWITCHED provider looks up the registry entry's provider, and derives the
+// context window through childWindowFor — the ONE rule every child resolution
+// site shares: the window is re-derived whenever the resolved model differs from
+// the parent's (a same-provider def `model:` or an inherited SubagentModel
+// included, not only a provider switch), and stays 0 (byte-identical 128k) only
+// on the full-inherit path. It is the shared resolution step both
 // buildAgentSubagentEngines and buildMemberEngine use, so the per-def provider-switch
 // logic lives in ONE place (and keeps buildMemberEngine under the gocyclo budget).
 func resolveChildProvider(cfg Config, provReg *providerRegistry, def agents.AgentDef, parentProvider port.LLMProvider, parentProviderID, parentModel string) (childProvider port.LLMProvider, providerID, model string, childWindow int) {
@@ -129,13 +132,27 @@ func resolveChildProvider(cfg Config, provReg *providerRegistry, def agents.Agen
 	if pid != parentProviderID {
 		if entry, ok := provReg.Lookup(pid); ok {
 			childProvider = entry.provider
-			// LIVE-FIRST context window (live when present, catalog floor) so a child/
-			// sub-agent that switches provider compacts on the SAME window the picker
-			// advertises — it picks up the live-metadata store FOR FREE via the registry.
-			childWindow = provReg.meta.contextWindowFor(pid, model)
 		}
 	}
+	childWindow = childWindowFor(provReg, pid, model, parentProviderID, parentModel)
 	return childProvider, pid, model, childWindow
+}
+
+// childWindowFor is the ONE context-window derivation rule every child-model
+// resolution site shares (resolveChildProvider, resolveDefaultChildModel,
+// buildSubagentEngineFactory): whenever the child's resolved (provider, model)
+// pair differs from the parent's — a same-provider def `model:`, an inherited
+// SubagentModel, or a per-call override included, not only a provider switch —
+// the window is re-derived LIVE-FIRST from the registry meta (live when present,
+// catalog floor: the SAME store the picker reads), so a child compacts on ITS
+// model's window, never the parent's. An unchanged pair returns 0 — the
+// byte-identical inherited-default path (128k fallback in engineDepsForProvider).
+// A nil provReg (direct-call test paths) returns 0.
+func childWindowFor(provReg *providerRegistry, providerID, model, parentProviderID, parentModel string) int {
+	if provReg == nil || (providerID == parentProviderID && model == parentModel) {
+		return 0
+	}
+	return provReg.meta.contextWindowFor(providerID, model)
 }
 
 // resolveModelFor is resolveModel with the inherited parent model threaded in
@@ -156,29 +173,66 @@ func resolveModelFor(cfg Config, def agents.AgentDef, parentModel string) string
 	return pick(resolveAlias(cfg, def, sel))
 }
 
+// resolveDefaultChildModel resolves the model a DEF-LESS child engine — the
+// default Subagent explorer, an UNDEFINED team member, a Parallel BRANCH — runs
+// on (issue #35). It is NOT a parallel resolver: it delegates to the ONE chain
+// every def-resolved path already uses, resolveModelFor with the zero def, so the
+// precedence collapses to `SubagentModel (alias-resolved) > parentModel` (no def
+// tier to consult). The context window follows the shared childWindowFor rule:
+// when the override actually CHANGES the model the window is re-derived
+// live-first on the PARENT provider (a child compacts on ITS model's window,
+// never the parent's); an unchanged model returns window 0 — the byte-identical
+// inherited-default path (128k fallback in engineDepsForProvider).
+//
+// SAME-PROVIDER POSTURE: the override never switches provider — the model id is
+// resolved against parentProviderID (the registry is keyed by provider, not
+// model). A def's `provider:` remains the only cross-provider seam. The Parallel
+// JUDGE deliberately does NOT route through this (it stays on the session model —
+// see registerParallelTool). provReg may be nil on direct-call test paths
+// (window stays 0).
+func resolveDefaultChildModel(cfg Config, provReg *providerRegistry, parentProviderID, parentModel string) (model string, childWindow int) {
+	model = resolveModelFor(cfg, agents.AgentDef{}, parentModel)
+	return model, childWindowFor(provReg, parentProviderID, model, parentProviderID, parentModel)
+}
+
 // resolveAlias maps sel through the operator aliases then the built-in aliases,
 // returning a concrete id (or "" meaning inherit). A non-alias, non-empty sel is
 // treated as a literal model id. An unrecognised alias-looking value warns and
-// returns "" (inherit).
+// returns "" (inherit) — the FORGIVING def-path posture (a shared .claude/agents
+// file naming an alias mecatl doesn't know must not break startup). The fail-fast
+// flag path (normalizeSubagentModel) shares the same grammar via lookupModelAlias
+// but turns the identical misses into Build errors.
 func resolveAlias(cfg Config, def agents.AgentDef, sel string) string {
+	id, known := lookupModelAlias(cfg, sel)
+	if !known {
+		cfg.diag().Log(context.Background(), port.LevelWarn, "agent def references an unknown model alias; inheriting parent model",
+			"agent", def.Name, "model", sel, "origin", string(def.Origin))
+	}
+	return id
+}
+
+// lookupModelAlias is the PURE model-selector grammar both resolution postures
+// share — resolveAlias (forgiving: warn-and-inherit, the def path) and
+// normalizeSubagentModel (fail-fast: Build error, the --subagent-model path) —
+// so the two cannot drift: operator ModelAliases first, then the built-in CC
+// aliases (whose empty target means inherit), then the literal-id heuristic (a
+// value containing a separator looks like a concrete model id, e.g. "gpt-4o",
+// "claude-sonnet-4.5"). known is false only for an unrecognised BARE token —
+// most likely a mistyped alias (id "" then means inherit).
+func lookupModelAlias(cfg Config, sel string) (id string, known bool) {
 	if sel == "" {
-		return ""
+		return "", true
 	}
 	if id, ok := cfg.ModelAliases[sel]; ok {
-		return strings.TrimSpace(id)
+		return strings.TrimSpace(id), true
 	}
 	if id, ok := builtinModelAliases[sel]; ok {
-		return id // may be "" => inherit
+		return id, true // may be "" => inherit
 	}
-	// Not a known alias. Heuristic: a value containing a separator looks like a
-	// concrete model id (e.g. "gpt-4o", "claude-sonnet-4.5"); treat it literally.
-	// A bare unknown token is most likely a mistyped alias — warn and inherit.
 	if strings.ContainsAny(sel, "-./:") || strings.Contains(sel, " ") {
-		return sel
+		return sel, true
 	}
-	cfg.diag().Log(context.Background(), port.LevelWarn, "agent def references an unknown model alias; inheriting parent model",
-		"agent", def.Name, "model", sel, "origin", string(def.Origin))
-	return ""
+	return "", false
 }
 
 // resolvePermissionMode maps a def's frontmatter permissionMode string to a

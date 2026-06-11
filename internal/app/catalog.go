@@ -124,7 +124,7 @@ func assembleCatalog(ctx context.Context, cfg Config, reg *providerRegistry, sto
 		refMgr = s.clientMgr
 	}
 	subagentClose := registerSubagentTrio(ctx, cfg, cat, reg, store, hooks, a, s, refMgr)
-	registerParallelTool(ctx, cfg, cat, hooks, a, s)
+	registerParallelTool(ctx, cfg, cat, reg, hooks, a, s)
 	registerTeamTools(ctx, cfg, cat, reg, store, a, s, refMgr)
 	registerMemoryFamilies(ctx, cfg, cat, a)
 	registerSkillFamily(ctx, cfg, cat, a, s)
@@ -215,7 +215,12 @@ func registerSubagentTrio(ctx context.Context, cfg Config, cat *tool.Catalog, re
 // (WithForceCopy — own .git, so a branch's git cannot escape into the base). The
 // preserved-winner reaper is the SHARED process-wide LRU from the assets, so
 // ForkPreservedCap bounds the process, not each session.
-func registerParallelTool(ctx context.Context, cfg Config, cat *tool.Catalog, hooks port.HookRunner, a catalogAssets, s catalogSession) {
+//
+// MODEL (issue #35): the BRANCH children resolve through the def-less default
+// chain (SubagentModel > session model — buildParallelChildEngine), while the
+// JUDGE deliberately stays on the SESSION model (the asymmetry pinned by
+// TestParallelJudgeStaysOnParentModel — see buildParallelJudgeEngine's comment).
+func registerParallelTool(ctx context.Context, cfg Config, cat *tool.Catalog, reg *providerRegistry, hooks port.HookRunner, a catalogAssets, s catalogSession) {
 	if !cfg.EnableParallel {
 		if s.narrate {
 			cfg.diag().Log(ctx, port.LevelInfo, "Parallel tool DISABLED")
@@ -223,9 +228,8 @@ func registerParallelTool(ctx context.Context, cfg Config, cat *tool.Catalog, ho
 		return
 	}
 	fk := forker.New(newForkWorkspace(a.skillReadRoots), forker.WithForceCopy())
-	pcfg := modelCfgFor(cfg, s.model)
-	parallelChild := buildParallelChildEngine(pcfg, s.provider, buildCommandRunner(cfg))
-	judge := agent.NewEngineJudge(buildParallelJudgeEngine(pcfg, s.provider))
+	parallelChild := buildParallelChildEngine(cfg, reg, s.provider, s.providerID, s.model, buildCommandRunner(cfg))
+	judge := agent.NewEngineJudge(buildParallelJudgeEngine(modelCfgFor(cfg, s.model), s.provider))
 	opts := []agent.ParallelOption{
 		agent.WithParallelSubagentStopHook(hooks),
 		agent.WithParallelJudge(judge),

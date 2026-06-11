@@ -157,6 +157,24 @@ func TestSubproviderChildContextWindow(t *testing.T) {
 	if got := engines2["plain"].ContextWindow(); got != defaultContextWindowTokens {
 		t.Fatalf("inherited-default child ContextWindow = %d, want %d (unchanged)", got, defaultContextWindowTokens)
 	}
+
+	// (c) SAME-provider def `model:` => ITS catalogued window (issue-#35 panel fix:
+	// childWindowFor keys on the MODEL changing, not only on a provider switch — a
+	// same-provider cheap def must compact on the cheap model's window, never the
+	// parent default's 128k).
+	areg := regForTest(mockllm.New(), providerAnthropic, "claude-default")
+	samep := agents.NewRegistry([]agents.AgentDef{
+		{Name: "cheap", Description: "same-provider cheap model", Model: catAnthropicModel},
+	})
+	engines3, _, _ := buildAgentSubagentEngines(context.Background(), Config{Model: "claude-default"},
+		areg.entries[providerAnthropic].provider, areg, providerAnthropic, "claude-default", samep, nil, nil, nil, nil)
+	if engines3["cheap"] == nil {
+		t.Fatal("same-provider def engine not built")
+	}
+	if got := engines3["cheap"].ContextWindow(); got != catAnthropicCtx {
+		t.Fatalf("same-provider def-model child ContextWindow = %d, want the def model's catalogued window %d (not the parent default %d)",
+			got, catAnthropicCtx, defaultContextWindowTokens)
+	}
 }
 
 // TestSubproviderChildCompactorAndCounter closes the stated contamination gap: a
