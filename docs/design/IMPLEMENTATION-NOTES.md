@@ -117,7 +117,9 @@ The PORT interfaces the loop consumes (`LLMProvider`, `SessionStore`, `HookRunne
 `PermissionPolicy`, `Clock`, `Logger`, `EventSink`). `PermissionPolicy.Evaluate` carries the
 session as a READ-ONLY `tool.WorkspaceReader` (Root+Read+Stat — issue #13) so file-based
 config resolves per-session against that root without a mutate-capable handle; `ws` may be nil
-(child/member engines with no resolver).
+(child/member engines with no resolver). `Clock`'s production implementation is
+`engine/adapter/wallclock`, wired in `engineDepsForProvider`/`newChildEngineWithHooks`
+(issue #53 — previously never injected, leaving all latency observations zero).
 
 ## Application — `engine/agent/` (subagent workspace policy)
 

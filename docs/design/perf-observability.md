@@ -310,6 +310,11 @@ and 2 are both committed (not "maybe later").
 2. **Histograms — exponential / native.** Use exponential (OTel) / native
    (Prometheus-exposition) histograms for turn time, TTFT, inter-token, and tool
    duration. Accurate tails across a wide dynamic range, fleet-aggregatable.
+   *Wiring note (issue #53):* these instruments read off the loop's injected
+   `port.Clock`; composition injects the production clock
+   (`engine/adapter/wallclock`) in `engineDepsForProvider`. Before issue #53 the
+   field was never injected (nil Clock), so every observation — turn duration,
+   TTFT, inter-token, tool queued/took — was silently zero.
 3. **EventSink seam — fix now.** Add a `ctx`-aware emit (`Emit(ctx, ev)` variant /
    per-run sink) so concurrent runs get correctly correlated spans and accurate
    per-run tail-latency attribution. This is load-bearing for the whole effort and

@@ -6,9 +6,11 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
+	"github.com/stacklok/mecatl/engine/adapter/wallclock"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/prompt"
+	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 )
 
@@ -145,5 +147,53 @@ func TestEngineDepsForProviderRebindsModel(t *testing.T) {
 	if deps.PromptConfig.Role != wantRole {
 		t.Errorf("PromptConfig.Role did not re-derive for the alternate model (agency-delta contamination):\n got %q\nwant %q",
 			deps.PromptConfig.Role, wantRole)
+	}
+}
+
+// TestEngineDepsCarryWallClock is the issue #53 regression guard: every
+// production Deps-constructing path must inject the wall clock, or the loop's
+// latency instrumentation (EvTurnEnd.DurationMs/TTFT/inter-token and tool
+// queued/took) silently reads zero forever. It pins the concrete type too —
+// the production clock is engine/adapter/wallclock, never a fake.
+func TestEngineDepsCarryWallClock(t *testing.T) {
+	cfg := Config{Model: "gpt-5", Workspace: "/repo"}
+	provider, store, policy, hooks, mcpP, instr := depsTestFixture(t)
+
+	base := baseEngineDeps(cfg, provider, store, policy, hooks, mcpP, instr)
+	if base.Clock == nil {
+		t.Fatal("baseEngineDeps Deps.Clock is nil (latency metrics dead, issue #53)")
+	}
+	if _, ok := base.Clock.(wallclock.Clock); !ok {
+		t.Fatalf("baseEngineDeps Deps.Clock = %T, want wallclock.Clock", base.Clock)
+	}
+
+	direct := engineDepsForProvider(cfg, provider, cfg.Model, 0, store, policy, hooks, mcpP, instr)
+	if direct.Clock == nil {
+		t.Fatal("engineDepsForProvider Deps.Clock is nil (latency metrics dead, issue #53)")
+	}
+	if _, ok := direct.Clock.(wallclock.Clock); !ok {
+		t.Fatalf("engineDepsForProvider Deps.Clock = %T, want wallclock.Clock", direct.Clock)
+	}
+
+	// Children INHERIT the clock — childEngineDepsForProvider clears the telemetry
+	// seams (Sink/ToolCallRecorder) but must NOT clear Clock.
+	child := childEngineDepsForProvider(cfg, "member:explorer", provider, cfg.Model, 0, tool.NewCatalog(), promptConfig(cfg, ""), nil)
+	if child.Clock == nil {
+		t.Fatal("childEngineDepsForProvider Deps.Clock is nil (children must inherit the wall clock)")
+	}
+	if _, ok := child.Clock.(wallclock.Clock); !ok {
+		t.Fatalf("childEngineDepsForProvider Deps.Clock = %T, want wallclock.Clock", child.Clock)
+	}
+
+	// The DEFAULT-provider child shape (newChildEngineWithHooks → childEngineDeps:
+	// the default Subagent explorer, Parallel branch/judge, usermodel-review
+	// children) builds its own Deps literal — assert its Clock too, or deleting
+	// the field there would pass the suite while silently zeroing child latency.
+	defChild := childEngineDeps(nil, "explorer", provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, ""), nil)
+	if defChild.Clock == nil {
+		t.Fatal("childEngineDeps Deps.Clock is nil (default child engines must carry the wall clock)")
+	}
+	if _, ok := defChild.Clock.(wallclock.Clock); !ok {
+		t.Fatalf("childEngineDeps Deps.Clock = %T, want wallclock.Clock", defChild.Clock)
 	}
 }

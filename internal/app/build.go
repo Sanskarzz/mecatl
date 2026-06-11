@@ -30,6 +30,7 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/adapter/permstore"
+	"github.com/stacklok/mecatl/engine/adapter/wallclock"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
@@ -1376,9 +1377,14 @@ func engineDepsForProvider(
 		// store (StoreDir) holds current state. The Service additionally persists on
 		// entering awaiting and at run end; both share this store, so the latest
 		// snapshot is always current for auto-resume after a restart.
-		Store:               store,
-		Sink:                cfg.Sink,
-		ToolCallRecorder:    cfg.ToolCallRecorder,
+		Store:            store,
+		Sink:             cfg.Sink,
+		ToolCallRecorder: cfg.ToolCallRecorder,
+		// Clock: the production wall clock (issue #53). Before it was wired here the
+		// field was left nil, which silently zeroed EVERY latency observation —
+		// EvTurnEnd.DurationMs/TTFT/inter-token and tool queued/took. Children inherit
+		// it (childEngineDepsForProvider does not clear it).
+		Clock:               wallclock.Clock{},
 		Diagnostics:         cfg.diag(),
 		PromptConfig:        promptConfig(modelCfg, cfg.gitStatus),
 		Model:               model,
@@ -2374,13 +2380,23 @@ func newChildEngine(diag port.Diagnostics, role string, provider port.LLMProvide
 // `hooks:` map) instead of the inert default. A nil hooks runner falls back to an
 // inert one, preserving the no-hooks contract.
 func newChildEngineWithHooks(diag port.Diagnostics, role string, provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config, hooks port.HookRunner) *agent.Engine {
+	return agent.NewEngine(childEngineDeps(diag, role, provider, cat, model, pc, hooks))
+}
+
+// childEngineDeps builds the agent.Deps for the DEFAULT-provider child shape
+// (newChildEngineWithHooks). It is split out from newChildEngineWithHooks for
+// the same reason childEngineDepsForProvider is split from
+// newChildEngineForProvider: the engine's deps are private, so a test can only
+// assert this literal's fields (e.g. that Clock is wired — issue #53) against
+// the helper, never through the constructed *agent.Engine.
+func childEngineDeps(diag port.Diagnostics, role string, provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config, hooks port.HookRunner) agent.Deps {
 	if hooks == nil {
 		hooks = hookexec.New(nil)
 	}
 	if diag == nil {
 		diag = port.NopDiagnostics{}
 	}
-	return agent.NewEngine(agent.Deps{
+	return agent.Deps{
 		LLM:     provider,
 		Catalog: cat,
 		// Child/member engines are non-interactive (allow-all) and never learn:
@@ -2394,11 +2410,14 @@ func newChildEngineWithHooks(diag port.Diagnostics, role string, provider port.L
 		// channel — this is DISTINCT from Sink/ToolCallRecorder (telemetry/audit),
 		// which stay OFF for children (never set here). The role tags every line the
 		// child emits with "agent"=<role>.
-		Diagnostics:         diag,
-		Role:                role,
+		Diagnostics: diag,
+		Role:        role,
+		// Clock: the production wall clock (issue #53) — children time their tool
+		// calls/turns too even though their Sink/ToolCallRecorder stay nil.
+		Clock:               wallclock.Clock{},
 		ContextWindowTokens: defaultContextWindowTokens,
 		CompactionRatio:     defaultCompactionRatio,
-	})
+	}
 }
 
 // newChildEngineForProvider is newChildEngineWithHooks BUT it RE-DERIVES the

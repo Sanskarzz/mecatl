@@ -147,7 +147,8 @@ linters:
               desc: 'core domain must not import os (CLAUDE.md layering rule); side effects belong in adapters/composition'
         # --- engine/adapter/* reference adapters -------------------------------
         # These travel WITH the importable engine tree (offline tests, in-memory
-        # workspace, default policy, snapshot DTO, FS conformance suite) and are
+        # workspace, default policy, snapshot DTO, FS conformance suite, the
+        # production wallclock) and are
         # held to the same strict allowlist discipline: $gostd + the exact engine
         # packages (+ doublestar for memfs' Glob) — never a heavy dep, never os,
         # never anything outside engine/. Core-tier PRODUCTION code still must not
@@ -227,6 +228,17 @@ linters:
           deny:
             - pkg: os
               desc: 'permstore is the in-memory always-allow rule store; it must not touch os'
+        engine-adapter-wallclock:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/wallclock/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/port
+          deny:
+            - pkg: os
+              desc: 'wallclock is the stateless production port.Clock; it must not touch os'
         engine-adapter-fsconformance:
           list-mode: strict
           files:
