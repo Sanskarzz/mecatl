@@ -100,12 +100,16 @@ func truthy(v string) bool {
 }
 
 // TransmitMascot builds the OUT-OF-BAND Kitty escape that transmits the mascot
-// image data to the terminal AND registers a virtual placement (U=1) under
-// MascotImageID at cols×rows cells. It is a control sequence: it MUST be written
+// image data to the terminal AND creates a virtual placement (a=T + U=1) under
+// MascotImageID at cols×rows cells. The action MUST be transmit-and-put (a=T):
+// placement keys (U=1, c=, r=) are only honoured by a put-style action — under a
+// bare transmit (a=t) they are inert, the terminal stores the image with no
+// placement, and the placeholder grid paints nothing (issue #44). A VIRTUAL
+// placement never paints at the cursor, so a=T here still produces no visible
+// output and no cursor movement. It is a control sequence: it MUST be written
 // via tea.Raw (NOT placed in View content, where the ultraviolet renderer would
-// parse it into cells and desync the cursor). A transmit + virtual-placement
-// escape produces no visible output and no cursor movement, so interleaving it
-// with frames is harmless.
+// parse it into cells and desync the cursor), so interleaving it with frames is
+// harmless.
 //
 // The full-resolution mascot is sent once as PNG (the embedded image is decoded
 // then re-encoded to PNG by kitty.EncodeGraphics under f=100/Transmission=Direct —
@@ -126,12 +130,15 @@ func TransmitMascot(cols, rows int) string {
 		return ""
 	}
 	var buf bytes.Buffer
-	// f=100 (PNG), a=t (transmit), i=ID, virtual placement (U=1), c=cols r=rows so the
-	// terminal scales the image into the placeholder grid footprint. Transmission is
-	// Direct (the image is re-encoded to PNG and rides the escape, base64+chunked) — no
-	// temp file, no os/exec.
+	// f=100 (PNG), a=T (transmit AND put — a bare a=t would make U=1/c=/r= inert and
+	// create no placement, issue #44), i=ID, virtual placement (U=1), c=cols r=rows so
+	// the terminal scales the image into the placeholder grid footprint. q=2 suppresses
+	// the terminal's OK/error responses (stray response bytes would otherwise surface
+	// as unhandled input). Transmission is Direct (the image is re-encoded to PNG and
+	// rides the escape, base64+chunked) — no temp file, no os/exec.
 	opts := &kitty.Options{
-		Action:           kitty.Transmit,
+		Action:           kitty.TransmitAndPut,
+		Quite:            2, // q=2 — upstream x/ansi's (typo'd) field name for quiet mode
 		Format:           kitty.PNG,
 		Transmission:     kitty.Direct,
 		ID:               MascotImageID,
@@ -154,9 +161,12 @@ func TransmitMascot(cols, rows int) string {
 // this is about freeing the terminal-side resource and keeping the
 // transmit/delete lifecycle symmetric, not about hiding a lingering image.
 func DeleteMascot() string {
+	// d=I (uppercase), not x/ansi's kitty.DeleteID ('i'): per the kitty graphics
+	// spec the lowercase form deletes placements WITHOUT freeing the stored image
+	// data — only the uppercase form frees it, which is the whole point here.
 	return ansi.KittyGraphics(nil,
 		fmt.Sprintf("a=%c", kitty.Delete),
-		fmt.Sprintf("d=%c", kitty.DeleteID),
+		"d=I",
 		fmt.Sprintf("i=%d", MascotImageID),
 	)
 }

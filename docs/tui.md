@@ -399,6 +399,13 @@ show the plain prompt-hint card.
 > repo-root `assets/mecatito.png` (go:embed cannot reach a parent directory). The
 > repo-root file is canonical; keep the copy in sync if the mascot changes.
 
+> The transmit escape uses the **transmit-and-put** action (`a=T`) with `U=1`/`c=`/`r=`
+> on the first chunk — a bare transmit (`a=t`) leaves the placement keys inert, the
+> terminal creates no virtual placement, and the placeholder grid paints nothing
+> (issue #44; regression-pinned by `TestTransmitMascotCreatesVirtualPlacement`). It
+> also sends `q=2` to suppress the terminal's OK/error responses, which would
+> otherwise surface as stray input.
+>
 > The Kitty high-res path is **unit-tested** (escape generation + the env detection
 > truth table) but **not live-verified** — the dev environment has no Kitty terminal.
 > The half-block path is the verified default.
