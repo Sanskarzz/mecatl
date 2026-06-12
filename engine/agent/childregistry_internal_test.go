@@ -62,8 +62,11 @@ func TestChildRegistryReRegistrationOverwrites(t *testing.T) {
 }
 
 // TestChildRegistryRequestCancelEdges pins the cancel decision table: unknown id →
-// false; done id → false; live id → true with the askID snapshot CLEARED (a second
-// cancel returns true again — the child is still live — but re-retracts nothing).
+// false; done id → false; live id → true with a NON-CLEARING askID snapshot — the
+// entry KEEPS its asks so the child-terminal chokepoint (markDoneResult) can still
+// retract them when the eager CancelChild emit loses its scheduling race to the
+// seal (the TestCancelChildWhileParkedOnAsk CI flake). Exactly-once lives at the
+// unregister gate, not in a snapshot-clear; a second cancel sees the same set.
 func TestChildRegistryRequestCancelEdges(t *testing.T) {
 	reg := newChildRunRegistry()
 	if _, _, ok := reg.requestCancel("nope"); ok {
@@ -83,8 +86,12 @@ func TestChildRegistryRequestCancelEdges(t *testing.T) {
 	if !ok2 {
 		t.Fatalf("a second cancel of a still-live child is idempotent (true)")
 	}
-	if len(asks2) != 0 {
-		t.Fatalf("the askID snapshot must be CLEARED on the first cancel; second got %v", asks2)
+	if len(asks2) != 2 {
+		t.Fatalf("requestCancel must NOT clear the entry's asks (the chokepoint needs them if the eager retract is seal-raced); second snapshot got %v", asks2)
+	}
+	// The chokepoint take still holds the full set after the cancel snapshots.
+	if taken := reg.takeAsks("c1"); len(taken) != 2 {
+		t.Fatalf("the child-terminal take must still see the snapshot-only asks, got %v", taken)
 	}
 	// recordAsk on a done entry is dropped (no retract for a terminal child).
 	reg.markDone("c1", session.StopCancelled)
@@ -497,6 +504,239 @@ func TestCancelChildUnregistersBeforeRetract(t *testing.T) {
 	}
 	if retracts != 1 {
 		t.Fatalf("expected exactly one retract emit, got %d", retracts)
+	}
+}
+
+// TestCancelChildSealRaceChokepointRetracts is the deterministic regression for
+// the TestCancelChildWhileParkedOnAsk CI flake (zero retracts, once, on a
+// starved -race runner): CancelChild's eager retract runs on the CALLER's
+// goroutine, unsynchronized with the run's terminate path, so it can be
+// descheduled in the cancel→retract window long enough for the child to unwind
+// and the run to terminate AND SEAL — the late emit is then a post-seal no-op.
+// The askIDs must therefore SURVIVE requestCancel's snapshot so the child's
+// registry terminal (markDoneResult — pre-seal by construction for a joined
+// child) delivers the retract; the late eager attempt must then be a clean
+// no-op (no second retract, no panic). The old snapshot-AND-CLEAR
+// requestCancel fails this with ZERO retracts — exactly the CI failure.
+func TestCancelChildSealRaceChokepointRetracts(t *testing.T) {
+	const askID = "subagent-p1:0:k1:r1"
+	reg := newChildRunRegistry()
+	router := newChildAskRouter()
+	reg.unregisterAsk = router.unregister
+	var retracts []string
+	reg.emit = func(ev session.Event) {
+		if ev.Type == session.EvPermissionRetract && ev.Ask != nil {
+			retracts = append(retracts, ev.Ask.AskID)
+		}
+	}
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reg.register("subagent-p1", childFamilySubagent, "g", cancel, false)
+	reg.recordAsk("subagent-p1", askID)
+	router.registerChild(askID, &Run{asks: newAskRegistry()})
+
+	// CancelChild's first half: snapshot + clientCancelled. The eager retract is
+	// deliberately NOT performed yet — the goroutine is "descheduled".
+	_, snapshot, ok := reg.requestCancel("subagent-p1")
+	if !ok || len(snapshot) != 1 {
+		t.Fatalf("requestCancel must snapshot the parked ask, got ok=%v %v", ok, snapshot)
+	}
+	// Meanwhile the cancelled child unwinds and lands its registry terminal: the
+	// chokepoint must STILL hold the ask and retract it (pre-seal).
+	reg.markDoneResult("subagent-p1", session.StopCancelled, nil)
+	if len(retracts) != 1 || retracts[0] != askID {
+		t.Fatalf("the child terminal must retract the still-pending ask while the eager path is descheduled, got %v", retracts)
+	}
+	// The run terminates and seals before the descheduled goroutine resumes.
+	reg.seal()
+	// The late eager retract: gate already consumed by the chokepoint AND the
+	// registry is sealed — a clean no-op, never a second retract, never a panic.
+	reg.retractAsksVia(router.unregister, snapshot)
+	if len(retracts) != 1 {
+		t.Fatalf("the late eager retract must be a no-op, got %v", retracts)
+	}
+}
+
+// TestRetractGateEmitAtomicWithSeal pins the OTHER half of the seal-race fix:
+// the unregister gate and the retract emit form ONE emitMu section, so the seal
+// can never slip in between them — under the old unregister-then-safeEmit shape
+// a preempted eager retract could CONSUME the gate and then drop its emit
+// against the sealed registry, starving the chokepoint (whose own gate check
+// then reports "answered") so NOBODY retracts. A blocking gate holds the
+// section open while a concurrent seal() must PARK behind it; with the split
+// shape the seal completes inside the gap and the retract is silently dropped
+// (zero emits — this test's mutation signature).
+func TestRetractGateEmitAtomicWithSeal(t *testing.T) {
+	reg := newChildRunRegistry()
+	var retracts atomic.Int32
+	reg.emit = func(ev session.Event) {
+		if ev.Type == session.EvPermissionRetract {
+			retracts.Add(1)
+		}
+	}
+	gateEntered := make(chan struct{})
+	proceed := make(chan struct{})
+	gate := func(string) bool {
+		close(gateEntered)
+		<-proceed
+		return true
+	}
+	retractDone := make(chan struct{})
+	go func() {
+		reg.retractAsksVia(gate, []string{"ask-1"})
+		close(retractDone)
+	}()
+	<-gateEntered
+
+	sealDone := make(chan struct{})
+	go func() {
+		reg.seal()
+		close(sealDone)
+	}()
+	select {
+	case <-sealDone:
+		t.Fatalf("seal completed between the unregister gate and the retract emit — that emit would be dropped post-seal (the gate/emit section is not atomic)")
+	case <-time.After(100 * time.Millisecond):
+		// seal is parked behind the in-flight gate+emit section — atomicity holds.
+	}
+	close(proceed)
+	<-retractDone
+	<-sealDone
+	if got := retracts.Load(); got != 1 {
+		t.Fatalf("the in-flight retract must be delivered exactly once, got %d", got)
+	}
+}
+
+// TestRetractSealedOrUnboundLeavesGate pins retractAsksVia's operand order: the
+// unregister gate is consumed ONLY when an emit can actually happen — the
+// registry unsealed AND an emitter bound. Either precondition failing must
+// leave the router entry INTACT for the other retract leg (or a later bound
+// attempt). Flipping the gate ahead of the sealed check, or back ahead of the
+// emit-nil check (the old `!sealed && unregister(id) && emit != nil` shape),
+// consumes the gate with no retract delivered and fails the matching subtest.
+func TestRetractSealedOrUnboundLeavesGate(t *testing.T) {
+	const askID = "subagent-p1:0:k1:r1"
+	t.Run("sealed", func(t *testing.T) {
+		reg := newChildRunRegistry()
+		router := newChildAskRouter()
+		retracts := 0
+		reg.emit = func(ev session.Event) {
+			if ev.Type == session.EvPermissionRetract {
+				retracts++
+			}
+		}
+		router.registerChild(askID, &Run{asks: newAskRegistry()})
+		reg.seal()
+
+		reg.retractAsksVia(router.unregister, []string{askID})
+		if retracts != 0 {
+			t.Fatalf("a sealed retract must emit nothing, got %d", retracts)
+		}
+		router.mu.Lock()
+		_, present := router.byAskID[askID]
+		router.mu.Unlock()
+		if !present {
+			t.Fatalf("a SEALED retractAsksVia must NOT consume the unregister gate — the router entry must survive for the leg that can still deliver")
+		}
+	})
+	t.Run("nil emit", func(t *testing.T) {
+		reg := newChildRunRegistry() // emit deliberately UNBOUND
+		router := newChildAskRouter()
+		router.registerChild(askID, &Run{asks: newAskRegistry()})
+
+		reg.retractAsksVia(router.unregister, []string{askID})
+		router.mu.Lock()
+		_, present := router.byAskID[askID]
+		router.mu.Unlock()
+		if !present {
+			t.Fatalf("an emit-UNBOUND retractAsksVia must NOT consume the unregister gate — it can never announce the retract it would eat")
+		}
+		// The surviving entry is still deliverable once an emitter is bound.
+		retracts := 0
+		reg.emit = func(ev session.Event) {
+			if ev.Type == session.EvPermissionRetract {
+				retracts++
+			}
+		}
+		reg.retractAsksVia(router.unregister, []string{askID})
+		if retracts != 1 {
+			t.Fatalf("the preserved gate must still deliver exactly one retract once bound, got %d", retracts)
+		}
+	})
+}
+
+// TestEagerRetractThenChokepointNoSecondEmit is the deterministic BOTH-LEGS-
+// PRE-SEAL dedup pin (single goroutine, no scheduling dependence): when the
+// eager CancelChild leg WINS and delivers the retract, the chokepoint's
+// re-attempt for the SAME askID (markDoneResult takes the un-cleared set) must
+// emit NOTHING — exactly-once enforced by the unregister gate, not by snapshot
+// clearing. The mirror ordering (chokepoint first, late eager no-op) is
+// TestCancelChildSealRaceChokepointRetracts.
+func TestEagerRetractThenChokepointNoSecondEmit(t *testing.T) {
+	const askID = "subagent-p1:0:k1:r1"
+	reg := newChildRunRegistry()
+	router := newChildAskRouter()
+	reg.unregisterAsk = router.unregister
+	var retracts []string
+	reg.emit = func(ev session.Event) {
+		if ev.Type == session.EvPermissionRetract && ev.Ask != nil {
+			retracts = append(retracts, ev.Ask.AskID)
+		}
+	}
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reg.register("subagent-p1", childFamilySubagent, "g", cancel, false)
+	reg.recordAsk("subagent-p1", askID)
+	router.registerChild(askID, &Run{asks: newAskRegistry()})
+
+	// The eager CancelChild leg runs to completion FIRST and delivers.
+	_, snapshot, ok := reg.requestCancel("subagent-p1")
+	if !ok || len(snapshot) != 1 {
+		t.Fatalf("requestCancel must snapshot the parked ask, got ok=%v %v", ok, snapshot)
+	}
+	reg.retractAsksVia(router.unregister, snapshot)
+	if len(retracts) != 1 || retracts[0] != askID {
+		t.Fatalf("the eager leg must deliver the retract, got %v", retracts)
+	}
+	// The chokepoint re-attempt (still PRE-seal): the gate already consumed —
+	// exactly-once means zero further emits.
+	reg.markDoneResult("subagent-p1", session.StopCancelled, nil)
+	if len(retracts) != 1 {
+		t.Fatalf("the chokepoint must emit NOTHING for an already-retracted ask, got %v", retracts)
+	}
+}
+
+// TestDoubleCancelChildSingleRetract extends the requestCancel decision table to
+// the full Run.CancelChild surface: a SECOND CancelChild for a still-live child
+// is idempotent-true (the cancel decision) but draws NO second retract — the
+// first call's atomic unregister consumed the gate, and the repeat's snapshot
+// (requestCancel never clears) fails it cleanly.
+func TestDoubleCancelChildSingleRetract(t *testing.T) {
+	const askID = "subagent-p1:0:k1:r1"
+	r := &Run{childAsks: newChildAskRouter(), children: newChildRunRegistry()}
+	retracts := 0
+	r.children.emit = func(ev session.Event) {
+		if ev.Type == session.EvPermissionRetract {
+			retracts++
+		}
+	}
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.children.register("subagent-p1", childFamilySubagent, "g", cancel, false)
+	r.children.recordAsk("subagent-p1", askID)
+	r.childAsks.registerChild(askID, &Run{asks: newAskRegistry()})
+
+	if !r.CancelChild("subagent-p1") {
+		t.Fatalf("first CancelChild must succeed for a live child")
+	}
+	if retracts != 1 {
+		t.Fatalf("first CancelChild must retract the parked ask exactly once, got %d", retracts)
+	}
+	if !r.CancelChild("subagent-p1") {
+		t.Fatalf("a second CancelChild of a still-live child is idempotent (true)")
+	}
+	if retracts != 1 {
+		t.Fatalf("a double CancelChild must emit exactly ONE retract, got %d", retracts)
 	}
 }
 

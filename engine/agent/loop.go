@@ -501,19 +501,26 @@ func (r *Run) Cancel() {
 // It is idempotent and safe from any goroutine; an unknown or already-done id
 // returns false (the finished-as-you-pressed race is benign). On a live child it:
 // marks the registry entry clientCancelled (so the Subagent terminal renders
-// "[subagent cancelled by user]" rather than a generic cancel), snapshots+clears
-// the child's surfaced askIDs, cancels the child's per-call context OUTSIDE the
-// registry lock (unwinding a mid-drive turn, a gate wait, or a parked
-// askRegistry.await alike), then retracts the taken asks via the shared
-// retractAsks: each askID is unregistered from the parent's childAskRouter
-// BEFORE its permission.retract event is emitted — so a racing late approval
-// falls through to the parent's own registry and dies as an unknown-ask no-op
-// (fail-safe ordering), while the client dismisses its modal. The unregister's
-// answered-vs-pending gate also means an ask whose verdict was JUST routed
-// (route deleted the router entry first) no longer draws a spurious retract.
-// Asks the cancel does not take here are taken at the child's own registry
-// terminal (markDoneResult — the retraction chokepoint); the requestCancel
-// clear keeps the two exactly-once.
+// "[subagent cancelled by user]" rather than a generic cancel), SNAPSHOTS the
+// child's surfaced askIDs (without clearing — see below), cancels the child's
+// per-call context OUTSIDE the registry lock (unwinding a mid-drive turn, a
+// gate wait, or a parked askRegistry.await alike), then EAGERLY retracts the
+// snapshot via the shared retractAsksVia: each askID is unregistered from the
+// parent's childAskRouter atomically with its permission.retract emit (one
+// emitMu section) — so a racing late approval falls through to the parent's
+// own registry and dies as an unknown-ask no-op (fail-safe ordering), while
+// the client dismisses its modal promptly, ahead of the child's unwind. The
+// unregister's answered-vs-pending gate also means an ask whose verdict was
+// JUST routed (route deleted the router entry first) no longer draws a
+// spurious retract.
+//
+// The eager retract is BEST-EFFORT only — it runs on the caller's goroutine,
+// unsynchronized with the run's terminate path, so it can lose a scheduling
+// race to the seal (then its emitMu section sees sealed and skips, gate
+// untouched). The GUARANTEED leg is the child's own registry terminal
+// (markDoneResult — the retraction chokepoint, pre-doneCh-close ⇒ pre-seal),
+// which takes the un-cleared set and retracts whatever this path didn't
+// deliver; the atomic unregister gate keeps the two legs exactly-once.
 func (r *Run) CancelChild(childID string) bool {
 	cancel, askIDs, ok := r.children.requestCancel(childID)
 	if !ok {

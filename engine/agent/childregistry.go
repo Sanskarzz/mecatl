@@ -191,10 +191,14 @@ type childEntry struct {
 	// StopCancelled terminal (cancelled BY THE USER vs parent-run cancel/timeout).
 	clientCancelled bool
 	// askIDs are the surfaced permission asks currently owned by this child,
-	// recorded at the single surfacing seam (surfaceAsk → recordAsk) and snapshot+
-	// cleared (takeAsksLocked) by requestCancel AND by the child's registry
-	// terminal (markDoneResult — the retraction chokepoint) so each still-pending
-	// ask gets exactly one permission.retract. Verdict routing leaves the set
+	// recorded at the single surfacing seam (surfaceAsk → recordAsk). They are
+	// SNAPSHOT (not cleared) by requestCancel — the eager CancelChild retract —
+	// and snapshot+CLEARED (takeAsksLocked) by the child's registry terminal
+	// (markDoneResult — the retraction chokepoint) and the drain's abandoned
+	// sweep. Exactly-once across those attempts is enforced by the unregister
+	// gate, consumed atomically with the emit (retractAsksVia), NOT by clearing:
+	// the eager attempt can lose a scheduling race to the seal, and clearing
+	// would strand the ask (zero retracts). Verdict routing leaves the set
 	// slightly stale (an answered ask is not removed); harmless — retractAsks
 	// gates each id on childAskRouter.unregister's answered-vs-pending bool, so a
 	// stale already-answered id emits nothing.
@@ -323,14 +327,17 @@ func (g *childRunRegistry) markDone(childID string, stop session.StopReason) {
 // always sequences before the seal AND before EvResult on the stream. This
 // covers EVERY ctx-driven unwind (run-end drain, per-call timeout_ms, a
 // parallel join=first loser, whole-run cancel, team teardown), not only
-// Run.CancelChild. The retract is a GUARDED emit (safeEmit — it gives up on
-// emitAbort/hardAbort like every child emit), not an ownership release, so it
-// correctly precedes the doneCh join signal. Idempotence holds both ways: a
-// second call takes an empty ask set and no-ops on the done check; a
-// requestCancel that raced first already cleared the set, so each ask is
-// retracted at most once — and the unregisterAsk gate (route deletes an
-// answered ask's router entry) keeps an answered ask from ever drawing a
-// spurious retract.
+// Run.CancelChild — and it is the GUARANTEED leg of a client-cancelled child's
+// retract: requestCancel only SNAPSHOTS the ask set (never clears it), so even
+// when CancelChild's eager retract loses its scheduling race to the seal, the
+// take here still holds the ask and delivers the retract pre-seal. The retract
+// is a GUARDED emit (it gives up on emitAbort/hardAbort like every child
+// emit), not an ownership release, so it correctly precedes the doneCh join
+// signal. Idempotence/exactly-once: a second call takes an empty ask set and
+// no-ops on the done check, and the unregisterAsk gate — consumed atomically
+// with the emit in retractAsksVia — keeps an ask the eager CancelChild path
+// (or a routed verdict: route deletes an answered ask's router entry) already
+// consumed from ever drawing a second or spurious retract.
 func (g *childRunRegistry) markDoneResult(childID string, stop session.StopReason, result *session.ToolResult) {
 	// Capture the entry POINTER and take its asks under ONE mu hold, then
 	// retract OUTSIDE mu (retractAsks crosses into the router mutex and emitMu —
@@ -589,8 +596,17 @@ func (g *childRunRegistry) recordAsk(childID, askID string) {
 }
 
 // requestCancel marks the child client-cancelled and returns its cancel func
-// plus a snapshot of its owned askIDs (cleared from the entry, so a second
-// cancel never re-retracts and the child's own terminal takes an empty set).
+// plus a SNAPSHOT of its owned askIDs — deliberately NOT cleared from the
+// entry. The snapshot feeds CancelChild's EAGER retract (prompt modal
+// dismissal), but that emit runs on the CALLER's goroutine, unsynchronized
+// with the run's terminate path: if it loses a scheduling race to the seal it
+// is silently dropped (safeEmit's post-seal no-op — the once-in-CI
+// TestCancelChildWhileParkedOnAsk flake). Leaving the set intact keeps the
+// GUARANTEED emitter armed: the child's registry terminal (markDoneResult —
+// pre-doneCh-close ⇒ pre-seal) takes the same asks and retracts whatever the
+// eager path didn't deliver. Exactly-once across the two paths is the
+// unregister gate's job (retractAsksVia consumes the router entry atomically
+// with the emit), not a snapshot-clear's.
 // It returns ok=false for an unknown or already-done id — CancelChild is a
 // no-op then. The returned cancel MUST be invoked outside the registry lock
 // (it may synchronously unwind code paths that re-enter the registry, e.g.
@@ -603,7 +619,7 @@ func (g *childRunRegistry) requestCancel(childID string) (cancel context.CancelF
 		return nil, nil, false
 	}
 	e.clientCancelled = true
-	return e.cancel, takeAsksLocked(e), true
+	return e.cancel, snapshotAsksLocked(e), true
 }
 
 // takeAsks snapshots and CLEARS the surfaced askIDs owned by childID (the
@@ -631,10 +647,19 @@ func (g *childRunRegistry) takeEntryAsks(childID string) (*childEntry, []string)
 	return e, takeAsksLocked(e)
 }
 
-// takeAsksLocked is the locked snapshot+clear core takeAsks and requestCancel
-// share. Callers hold mu. The ids are sorted (cancelLiveBackground's
-// determinism discipline).
+// takeAsksLocked is the locked snapshot+CLEAR core of takeAsks/takeEntryAsks —
+// the chokepoint take. Callers hold mu. The ids are sorted
+// (cancelLiveBackground's determinism discipline).
 func takeAsksLocked(e *childEntry) []string {
+	ids := snapshotAsksLocked(e)
+	clear(e.askIDs)
+	return ids
+}
+
+// snapshotAsksLocked is the non-clearing snapshot requestCancel uses: the eager
+// CancelChild retract gets the ids while the entry KEEPS them for the
+// guaranteed child-terminal take (see requestCancel). Callers hold mu.
+func snapshotAsksLocked(e *childEntry) []string {
 	if len(e.askIDs) == 0 {
 		return nil
 	}
@@ -642,7 +667,6 @@ func takeAsksLocked(e *childEntry) []string {
 	for id := range e.askIDs {
 		ids = append(ids, id)
 	}
-	clear(e.askIDs)
 	sort.Strings(ids)
 	return ids
 }
@@ -654,11 +678,10 @@ func takeAsksLocked(e *childEntry) []string {
 // fails the gate and emits nothing (no spurious retract racing a just-delivered
 // verdict). An UNBOUND registry (nil unregisterAsk — unit tests that never ran
 // RunContentWith) skips the retracts entirely, never panics. NO registry lock
-// is held here: the router has its own mutex and emitRetract→safeEmit takes
-// emitMu — the mu-never-across-a-send rule. Lock order is strictly sequential,
-// never nested: mu (take) → release → router mu (unregister) → emitMu (send).
-// Each retract is a guarded send that gives up on emitAbort/hardAbort like
-// every child emit.
+// is held here — the mu-never-across-a-send rule; see retractAsksVia for the
+// {sealed-check, unregister, emit} atomic section and its lock order. Each
+// retract is a guarded send that gives up on emitAbort/hardAbort like every
+// child emit.
 func (g *childRunRegistry) retractAsks(askIDs []string) {
 	g.retractAsksVia(g.unregisterAsk, askIDs)
 }
@@ -667,12 +690,45 @@ func (g *childRunRegistry) retractAsks(askIDs []string) {
 // passes its own Run.unregisterChildAsk method value so the unregister-BEFORE-
 // emit ordering holds even on a Run whose registry was built outside
 // RunContentWith (the binding and the method are the same function in
-// production). nil-gate ids are skipped (do-not-retract, fail-safe).
+// production). A nil gate skips entirely (do-not-retract, fail-safe); a nil
+// EMIT likewise leaves the gate unconsumed — an unbound registry must not eat
+// the router entry it can never announce.
+//
+// The {sealed-check, unregister, emit} triple is ONE emitMu section per id —
+// the same A4a no-TOCTOU discipline as safeEmit, with the GATE pulled inside.
+// That atomicity is load-bearing for exactly-once-with-delivery across the TWO
+// retract attempts a client-cancelled child's ask gets (CancelChild's eager
+// snapshot + the markDoneResult chokepoint): the gate consume and the emit
+// cannot be split by the seal, so either this attempt runs pre-seal and its
+// emit is genuinely delivered (or aborted only by emitAbort — the documented
+// stalled-consumer abandon), or it runs post-seal and SKIPS WITHOUT consuming
+// the gate, leaving the askID for whichever attempt ran pre-seal (the child
+// terminal always does for a joined child). The old shape — unregister, then a
+// separate safeEmit — let a preempted eager attempt win the gate and then drop
+// the emit against a sealed registry, starving the chokepoint: zero retracts
+// (the TestCancelChildWhileParkedOnAsk CI flake).
+//
+// Lock order inside the section: emitMu → router mu (inside the gate). No code
+// path acquires them in the reverse order (the router's own methods take only
+// its mu; surfaceAsk's registerChild releases the router mu before safeEmit).
+// NO registry mu is held here (the mu-never-across-a-send rule).
 func (g *childRunRegistry) retractAsksVia(unregister func(askID string) bool, askIDs []string) {
+	if unregister == nil {
+		return
+	}
 	for _, id := range askIDs {
-		if unregister != nil && unregister(id) {
-			g.emitRetract(id)
+		g.emitMu.Lock()
+		// Operand order is load-bearing: the gate (unregister) is consumed LAST,
+		// only once both emit preconditions hold — the registry is unsealed AND an
+		// emitter is bound — so a consumed gate ALWAYS corresponds to a real emit
+		// attempt. Consuming it first (unregister before the emit-nil check, or
+		// before the sealed check) silently removes the router entry with no
+		// retract delivered, starving the other retract leg.
+		// TestRetractSealedOrUnboundLeavesGate pins both orderings.
+		if !g.sealed && g.emit != nil && unregister(id) {
+			g.emit(session.Event{Type: session.EvPermissionRetract, Ask: &session.PendingAsk{AskID: id}})
 		}
+		g.emitMu.Unlock()
 	}
 }
 
@@ -723,9 +779,11 @@ func (g *childRunRegistry) seal() {
 // sealed check AND the send happen inside one emitMu section (no TOCTOU against
 // seal/close — A4a); the entries mutex is NOT held here, so a send waiting on
 // the events channel never wedges entry bookkeeping. EVERY child-originated emit
-// (subagent.start/tool/end, the surfaced-ask EvPermissionAsk, permission.retract)
-// routes through here (A4c), so a post-seal emit from an abandoned background
-// goroutine is a silent no-op, never a send-on-closed-channel panic. The bound
+// (subagent.start/tool/end, the surfaced-ask EvPermissionAsk) routes through
+// here (A4c) — permission.retract uses the same emitMu+sealed section inlined
+// in retractAsksVia (the gate must sit INSIDE it) — so a post-seal emit from an
+// abandoned background goroutine is a silent no-op, never a
+// send-on-closed-channel panic. The bound
 // emit (Run.emitOrAbort) blocks until delivered and gives up when seal aborts
 // it — child observability is a UX courtesy; dropping an event against a
 // wedged/teardown consumer is acceptable.
@@ -740,7 +798,9 @@ func (g *childRunRegistry) safeEmit(ev session.Event) {
 
 // emitRetract publishes a permission.retract event for one withdrawn askID on
 // the parent stream, through the same seal guard as every child emit. The
-// payload is server-authored and carries the AskID only.
+// payload is server-authored and carries the AskID only. Production retracts
+// flow through retractAsksVia (which inlines this emit so the unregister gate
+// shares its emitMu section); this stays the gate-less primitive for tests.
 func (g *childRunRegistry) emitRetract(askID string) {
 	g.safeEmit(session.Event{Type: session.EvPermissionRetract, Ask: &session.PendingAsk{AskID: askID}})
 }
