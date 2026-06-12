@@ -210,8 +210,21 @@ nor the catalog. The composition root resolves the selector. Resolution table:
 | unknown/unavailable | any | **InvalidArgument** — `"unknown or unavailable provider"`, never a silent fallback |
 
 The provider is **fixed for the session lifetime** (reasoning-replay + the byte-stable
-cache prefix are provider-private; "switch provider" = a new session). Deferred:
-settings `default_model`, client last-used persistence (these are P-later / client-side).
+cache prefix are provider-private; "switch provider" = a new session).
+
+**Server-configured deployment default — shipped (issue #21):** `--default-provider` +
+`--default-model` (mecated, and mecatui's embedded server) set a deployment-wide default
+shared by every client — the SAME two-field `provider_id`+`model_id` grammar as the wire
+selector, never a slash-joined string. `--default-provider` overrides the built-in
+provider preference (openai-first) when that provider is available; `--default-model` is
+the default model for the resolved default provider (set without `--default-provider` it
+applies to the preferred provider). Both are validated **FAIL-FAST at Build**
+(`validateDefaultModel`, no-op under `--mock`): an unknown/unavailable provider or a
+model not catalogued for the default provider refuses startup — deliberately STRICTER
+than per-session selectors (which allow passthrough), because a deployment default must
+be known-good. The tier slots BELOW client-side defaults (a selector still wins) and
+ABOVE the per-provider builtin (`resolveDefaultModel` step 2; see the effective-model
+precedence in §9). Still deferred: client last-used persistence (S4, client-side).
 
 ---
 
@@ -480,9 +493,15 @@ per-workspace entry; the global `default` is written ONLY by the explicit **`ctr
 read-modify-write preserving the workspaces map). **Effective-model precedence**
 (highest → lowest), as the client resolves what the next `CreateSession` requests and
 labels the picker's `current: …(<provenance>)` line: **in-session restart pick →
-`--model` flag → per-workspace default → client global default → server built-in
+`--model` flag → per-workspace default → client global default → server-configured
+default (`--default-provider`/`--default-model`, issue #21) → server built-in
 default.** An unseen repo with no per-workspace entry falls back to the global default
-(then the server default), never inheriting another repo's per-workspace pick.
+(then the server's configured-or-builtin default), never inheriting another repo's
+per-workspace pick. One DELIBERATE edge: the server-configured `--default-model`
+applies only to ZERO-selector sessions — a client selector naming a provider (even
+the same one) with an empty `model_id` gets that provider's adapter/endpoint default
+per the §5 resolution table, NOT the configured default model (a client preference,
+even a partial one, wins over the deployment default).
 
 **Mid-session model switch — shipped (client-side restart):** the `/models` picker's
 `enter` confirm offers "start a new session now" (a `CloseSession` of the old session

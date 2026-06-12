@@ -690,8 +690,8 @@ func (s *Supervisor) AddMember(ctx context.Context, spec MemberSpec) error {
 //
 // It is the seam BOTH cancel paths share: the Converse-path Team tool reaches members
 // through the parent registry's CancelChild (whose registered cancel IS this member
-// cancel), and a future RunTeam-path `CancelTeammate` unary (deferred — D4) would call
-// this directly.
+// cancel), and the RunTeam-path `CancelTeammate` unary (D4, issue #29 —
+// server.Service.CancelTeammate) calls it directly.
 func (s *Supervisor) CancelMember(name string) bool {
 	m, ok := s.members[name]
 	if !ok || m.cancel == nil {

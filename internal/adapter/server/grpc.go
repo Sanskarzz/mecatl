@@ -325,6 +325,8 @@ func toStatus(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, ErrTeamRunning):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, ErrTeamNotRunning):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, ErrTooManyTeams):
 		return status.Error(codes.ResourceExhausted, err.Error())
 	case errors.Is(err, ErrTooManySessionEngines):

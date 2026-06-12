@@ -22,7 +22,7 @@
 | D1 | Registry location | `childRunRegistry` on the parent `agent.Run`, created unconditionally in `RunContentWith`, mirroring `childAsks *childAskRouter`; exposed downward to tools via `parentCaps`, upward to the server via `Run.CancelChild` | (a) a Service-level registry in `internal/adapter/server` — wrong layer: child Runs/cancel funcs are agent-layer objects and the headless/in-process paths (mecademo, Team tool) need it too; (b) a package-global registry — breaks the one-Run-owns-its-children model and concurrent sessions would share state | The parent Run is already the routing anchor for the only existing parent↔child control channel (`Run.Approve` → `childAskRouter`). Cancel is the same shape: a client frame addressed at a child, routed by the parent Run. Layering stays clean (everything is `engine/agent`). |
 | D2 | Child handle / id convention | The child **session id**, verbatim, for all three families: `subagent-<callID>`, `parallel-<callID>-<i>`, `team-<teamID>-<member>` (`MemberSessionID`) | (a) a new synthetic handle ("child-1") — a 4th id scheme to keep in sync; (b) family-specific addressing (`(team_id, member)`, branch index) on the wire — three wire shapes for one operation | The session id is ALREADY: the askID namespace (`newAskID` prefix — a documented consumed contract), the store key (`InspectSubagent`/`InspectMember`/`resume`), the `agentId:` trailer the model reads, and the overlay's `ChildID` focus key. Prefixes are already disjoint by convention. One handle, zero derivation. |
 | D3 | Cancel wire shape | `ConverseRequest` oneof member `CancelChild cancel_child = 12;` (`message CancelChild { string child_id = 1; }`) + HTTP `POST /v1/sessions/{id}/cancel-child` | (a) overloading `Cancel` with an optional child_id — mutates the semantics of an existing frame old clients send; (b) a unary RPC for the Converse path — the run is stream-scoped; a unary would need the Service lookup the stream already has, and asymmetric with ResumeApproval | The proto reserves 1–9 for the start family, **10+ for the gate/cancellation family** (10=resume_approval, 11=cancel; 12 was free). CancelChild is exactly a gate/cancellation-family frame. |
-| D4 | RunTeam-path teammate cancel | **Out of scope for v1.** Documented deferral; `Supervisor.CancelMember(name)` exists (the Converse-path Team tool needed it anyway), so a later unary `CancelTeammate(team_id, member)` is additive | Shipping the unary now | The gRPC `RunTeam` server-stream has no client→server frames; a separate unary is required. mecatui (the only interactive client) drives teams through the in-loop Team tool on the Converse stream, where CancelChild already reaches members via parentCaps. The headless RunTeam consumer has the whole-stream cancel (ctx). Building an RPC nobody renders yet is speculative. |
+| D4 | RunTeam-path teammate cancel | **Shipped (issue #29).** Deferred out of v1, then landed as predicted: the additive unary `CancelTeammate(team_id, member)` (+ HTTP `POST /v1/teams/{id}/members/cancel`) over the existing `Supervisor.CancelMember(name)` seam, gated on the team's `teamRunning` phase (`ErrTeamNotRunning` → FailedPrecondition; unknown member → the family-neutral `ErrChildNotFound`) | Shipping the unary in v1; a new unknown-member sentinel | The gRPC `RunTeam` server-stream has no client→server frames; a separate unary is required. mecatui (the only interactive client) drives teams through the in-loop Team tool on the Converse stream, where CancelChild already reaches members via parentCaps. The headless RunTeam consumer had only the whole-stream cancel (ctx) until the unary landed. |
 | D5 | Team-member cancel semantics | **De-schedule**: cancel the member's in-flight drive (per-member ctx) AND mark `stopped=true, stopReason=StopReasonCancelled` via the existing stop machinery; `ReleaseTasks` fires; member appears in the synthesis digest as `[STOPPED: cancelled]` | Skip-turn (cancel only the current drive, reschedule next round) | Skip-turn is a half-state with no precedent in `memberRT` (a member is schedulable or stopped) and confusing UX (the user killed it; it comes back). The existing cancelled-member classification (`runTurn`'s `stop == StopCancelled` branch) already does everything de-schedule needs — reused, adding only the per-member ctx. A de-scheduled member's session persists and is inspectable; deliberate. |
 | D6 | Subagent cancel terminal | Success-with-note: `[subagent cancelled by user]` + partial text + the `agentId:` trailer (resumable), distinguished from parent-cancel/timeout by the registry `clientCancelled` flag | Tool error | Mirrors the budget/limit notes in `renderSubagentResult`: partial work is usable and the trailer keeps the child resumable — cancel-then-resume-with-narrower-prompt is the workflow the field converged on. An error result would teach the model the delegation mechanism failed. |
 | D7 | Background mechanism | `background: true` arg on Subagent; `run()` registers the child, `startBackground` spawns the drive goroutine and returns an immediate started-result (`backgroundStartedBody`, agentId trailer FIRST line) | (a) a separate `BackgroundSubagent` tool — splits the description/limits/resume/schema surface in two; (b) dispatcher-level async (return a future from dispatch) — rewrites the hot loop for one tool | The Subagent tool already owns the whole child lifecycle (gate, fork, drive, persist, render); background is a flag on WHERE the drain happens, not a new delegation kind. |
@@ -294,7 +294,9 @@ Proto (D3): `CancelChild cancel_child = 12`; HTTP `POST /v1/sessions/{id}/cancel
 `readControl` case → `run.CancelChild`; `Service.CancelChild` for HTTP. `false`
 (unknown/done) → HTTP not-found; on the stream, ignored-by-design (the TUI shows the key
 only for non-terminal lanes; the finished-as-you-pressed race is benign). RunTeam path:
-deferred (D4) behind the existing `Supervisor.CancelMember` seam.
+landed (D4, issue #29) — the `CancelTeammate(team_id, member)` unary + HTTP
+`POST /v1/teams/{id}/members/cancel` call `Supervisor.CancelMember` directly (no parent
+registry on that path), behind a `teamRunning` phase gate.
 
 ### 3.2 Per-family terminal semantics
 
@@ -367,8 +369,8 @@ session, all 10 gauntlet tests passing. ALL proto fields landed in I1's single r
   HTTP `/cancel-child`; TUI subagent-lane `x` + retract-dismisses-modal.
 - **I2** (`d6457ef`) — cancel for parallel branches + team members (Converse path):
   per-branch ctx, detached per-member ctx + `CancelMember` + `planRound` check, the D16
-  wire fields mapped, TUI `x` on parallel/team lanes. Deferred + documented:
-  RunTeam-path `CancelTeammate` unary.
+  wire fields mapped, TUI `x` on parallel/team lanes. The one deferral —
+  the RunTeam-path `CancelTeammate` unary — has since landed (issue #29).
 - **I3a** (`3617285`) — background mechanics: `background` arg, `startBackground`/
   `driveBackground`, immediate started-result, `SubagentStatus` (roster/collect +
   `wait_ms`), seal generalised to ALL child emits (`safeEmit` over `Run.emitOrAbort`),
@@ -439,5 +441,5 @@ outbox**, re-attach semantics, and shutdown draining — a real architectural ad
 not a flag. The registry, the single-handle convention, `SubagentStatus`, and the notice
 seam all carry forward unchanged — only cancel-scope and event routing change. Also
 still open: gate starvation under field use (a reserved foreground slot is the named
-mitigation if models wedge), cumulative child-token accounting toward the parent budget,
-and the RunTeam-path `CancelTeammate` unary (D4).
+mitigation if models wedge) and cumulative child-token accounting toward the parent
+budget. The RunTeam-path `CancelTeammate` unary (D4) is done (issue #29).

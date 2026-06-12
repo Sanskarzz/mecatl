@@ -568,8 +568,14 @@ fold (don't disturb `warnUnexpectedReopen`'s suppression) — de-scheduling the 
 Idle-between-rounds: `planRound` gains an up-front `m.ctx.Err()` check → stopped +
 `StopReasonCancelled` + `SetMemberState(MemberStopped)` + `ReleaseTasks` + registry markDone BEFORE
 planning; the session stays resumable (D5 de-schedule, deliberate). `Supervisor.CancelMember(name)
-bool` is the shared seam (the registry-registered cancel IS the member cancel; a future RunTeam-path
-`CancelTeammate` unary — deferred, D4 — would call it directly). A supervisor-stopped member's
+bool` is the shared seam (the registry-registered cancel IS the member cancel; the RunTeam-path
+`CancelTeammate` unary — D4, landed in issue #29 — calls it directly via `Service.CancelTeammate`,
+the gRPC `CancelTeammate` RPC, and HTTP `POST /v1/teams/{id}/members/cancel`: the phase is read
+briefly under `Service.mu` and must be `teamRunning` (`ErrTeamNotRunning` → FailedPrecondition /
+HTTP 412; the read-then-cancel race against a finishing RunTeam is benign — a late cancel is an
+idempotent no-op), and an unknown member name reuses the family-neutral `ErrChildNotFound`
+rather than minting a new sentinel; an already-stopped-but-present member is a nil-success
+honest no-op). A supervisor-stopped member's
 registry entry is marked done WITHOUT cancelling its ctx (a budget-stopped lead must stay drivable
 for the one synthesis turn); `cleanupAll` cancels every member ctx + markDones the rest at team end.
 **Wire (D16, fields landed dormant in I1):** the mapper now sets `Parallel.child_id` (= 18; on

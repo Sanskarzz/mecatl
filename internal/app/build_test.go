@@ -1,6 +1,10 @@
 package app
 
 import (
+	"context"
+	"reflect"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
@@ -10,8 +14,10 @@ import (
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/prompt"
+	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
+	"github.com/stacklok/mecatl/internal/adapter/server"
 )
 
 // depsTestFixture builds the shared (non-provider) collaborators the two
@@ -196,4 +202,231 @@ func TestEngineDepsCarryWallClock(t *testing.T) {
 	if _, ok := defChild.Clock.(wallclock.Clock); !ok {
 		t.Fatalf("childEngineDeps Deps.Clock = %T, want wallclock.Clock", defChild.Clock)
 	}
+}
+
+// --- validateDefaultModel fail-fast posture (issue #21) -------------------------
+//
+// The server-configured deployment-wide default (--default-provider /
+// --default-model) is validated FAIL-FAST at Build through the REAL composition
+// (the offline envDetector/providerConstructor/liveModelHTTPClient seams):
+// an unknown/unavailable provider or an uncatalogued model is a startup error
+// naming the flag, the value, and the reason — stricter than per-session
+// selectors (which allow passthrough), because a deployment default must be
+// known-good. UseMock skips the validation entirely.
+
+// buildWithDefaults runs the real app.Build offline with the given Default*
+// fields over an openai+openrouter-keyed environment (openai is the preferred
+// default; openrouter is an available NON-preferred provider for the
+// provider-override and cross-provider-coherence cases), returning the build
+// error (the caller closes a successful build).
+func buildWithDefaults(t *testing.T, defaultProvider, defaultModel string, diag port.Diagnostics) (*Built, error) {
+	t.Helper()
+	return Build(context.Background(), Config{
+		Workspace:       t.TempDir(),
+		NoSoul:          true,
+		DefaultProvider: defaultProvider,
+		DefaultModel:    defaultModel,
+		Diagnostics:     diag,
+		envDetector: fakeEnv(map[string]string{
+			"OPENAI_API_KEY":     "sk-x",
+			"OPENROUTER_API_KEY": "sk-x",
+		}),
+		// Strictly offline: refuse any (keyed) live model fetch ⇒ embedded floor.
+		liveModelHTTPClient: offlineHTTPClient(),
+		providerConstructor: func(_ Config, _, _, _ string) port.LLMProvider {
+			return mockllm.New(mockllm.TextTurn("ok"))
+		},
+	})
+}
+
+// TestBuildFailsOnUnavailableDefaultProvider: --default-provider naming a
+// provider with no resolved key is a fail-fast startup error naming the flag.
+func TestBuildFailsOnUnavailableDefaultProvider(t *testing.T) {
+	built, err := buildWithDefaults(t, "anthropic", "", nil)
+	if err == nil {
+		built.Close()
+		t.Fatal("Build(DefaultProvider=anthropic, no key) succeeded, want a fail-fast startup error")
+	}
+	if !strings.Contains(err.Error(), "--default-provider") || !strings.Contains(err.Error(), "anthropic") {
+		t.Errorf("error must name the flag --default-provider and the value, got: %v", err)
+	}
+}
+
+// TestBuildFailsOnUncataloguedDefaultModel: --default-model naming a model the
+// embedded catalog does not list for the resolved default provider is a
+// fail-fast startup error naming the flag (per-session selectors still allow
+// passthrough; the deployment default does not).
+func TestBuildFailsOnUncataloguedDefaultModel(t *testing.T) {
+	const bogus = "totally-bogus-model-9000"
+	built, err := buildWithDefaults(t, "", bogus, nil)
+	if err == nil {
+		built.Close()
+		t.Fatalf("Build(DefaultModel=%q) succeeded, want a fail-fast startup error", bogus)
+	}
+	if !strings.Contains(err.Error(), "--default-model") || !strings.Contains(err.Error(), bogus) {
+		t.Errorf("error must name the flag --default-model and the value, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "openai") {
+		t.Errorf("error must name the resolved default provider (openai), got: %v", err)
+	}
+}
+
+// TestBuildAcceptsCataloguedDefaultPair: a catalogued (provider, model) pair
+// builds successfully and the build-once INFO fact fires exactly once — and
+// STAYS at one across session creation (a zero-selector session AND a selector
+// session that mints a per-session engine), pinning build-once rather than
+// once-per-sessionless-build (the TestBuildNarratesSubagentModelExactlyOnce
+// discipline).
+func TestBuildAcceptsCataloguedDefaultPair(t *testing.T) {
+	ctx := context.Background()
+	diag := newCapturingDiagnostics()
+	built, err := buildWithDefaults(t, "openai", "gpt-5-mini", diag)
+	if err != nil {
+		t.Fatalf("Build(catalogued default pair): %v", err)
+	}
+	defer built.Close()
+	if n := diag.countContaining("server-configured default model ACTIVE"); n != 1 {
+		t.Fatalf("configured-default INFO emitted %d times, want exactly 1 (build-once fact)", n)
+	}
+
+	if _, err := built.Service.CreateSession(ctx, t.TempDir(), session.ModeDefault, defaultLimits()); err != nil {
+		t.Fatalf("CreateSession(zero-selector): %v", err)
+	}
+	if _, err := built.Service.CreateSessionWithProvider(ctx, t.TempDir(), session.ModeDefault, defaultLimits(),
+		server.ProviderSelector{ProviderID: providerOpenRouter}); err != nil {
+		t.Fatalf("CreateSessionWithProvider(selector): %v", err)
+	}
+	if n := diag.countContaining("server-configured default model ACTIVE"); n != 1 {
+		t.Fatalf("configured-default INFO emitted %d times after 2 sessions, want still exactly 1 (build-once, not per-session)", n)
+	}
+}
+
+// TestBuildFailsOnCrossProviderDefaultPair pins the pair-coherence gate: a
+// --default-provider together with a --default-model catalogued only for a
+// DIFFERENT provider (here the bare openai id "gpt-5-mini", which openrouter
+// catalogues as "openai/gpt-5-mini") is a fail-fast startup error naming
+// --default-model and the resolved provider.
+func TestBuildFailsOnCrossProviderDefaultPair(t *testing.T) {
+	built, err := buildWithDefaults(t, "openrouter", "gpt-5-mini", nil)
+	if err == nil {
+		built.Close()
+		t.Fatal("Build(DefaultProvider=openrouter, DefaultModel=gpt-5-mini) succeeded, want a fail-fast error (the id is catalogued for openai, not openrouter)")
+	}
+	if !strings.Contains(err.Error(), "--default-model") || !strings.Contains(err.Error(), "gpt-5-mini") {
+		t.Errorf("error must name the flag --default-model and the value, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "openrouter") {
+		t.Errorf("error must name the resolved default provider (openrouter), got: %v", err)
+	}
+}
+
+// TestBuildAcceptsProviderOnlyDefault: --default-provider alone (no
+// --default-model) builds, the INFO ACTIVE fact fires once, and the effective
+// default the service echoes is the configured provider + ITS builtin default
+// model (the validator's provider-only arm).
+func TestBuildAcceptsProviderOnlyDefault(t *testing.T) {
+	ctx := context.Background()
+	diag := newCapturingDiagnostics()
+	built, err := buildWithDefaults(t, "openrouter", "", diag)
+	if err != nil {
+		t.Fatalf("Build(provider-only default): %v", err)
+	}
+	defer built.Close()
+	if n := diag.countContaining("server-configured default model ACTIVE"); n != 1 {
+		t.Fatalf("configured-default INFO emitted %d times, want exactly 1", n)
+	}
+
+	sess, err := built.Service.CreateSession(ctx, t.TempDir(), session.ModeDefault, defaultLimits())
+	if err != nil {
+		t.Fatalf("CreateSession(zero-selector): %v", err)
+	}
+	got := built.Service.ResolvedModel(sess.ID)
+	if got.ProviderID != providerOpenRouter || got.ModelID != "openai/gpt-5" {
+		t.Fatalf("zero-selector ResolvedModel = %+v, want (openrouter, openai/gpt-5) — the configured provider + its builtin default", got)
+	}
+}
+
+// kvDiag is a port.Diagnostics double recording messages WITH their key/value
+// args (capturingDiagnostics drops args), so the fact-arm tests below can pin
+// the EFFECTIVE resolved pair the INFO carries. Concurrency-safe; With returns
+// the same recorder.
+type kvDiag struct {
+	mu   sync.Mutex
+	msgs []string
+	args [][]any
+}
+
+func (d *kvDiag) Log(_ context.Context, _ port.Level, msg string, args ...any) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.msgs = append(d.msgs, msg)
+	d.args = append(d.args, args)
+}
+
+func (d *kvDiag) With(...any) port.Diagnostics { return d }
+
+// TestValidateDefaultModelFactArms pins the two HONEST arms of the build-once
+// fact: (a) provider-only config logs the ACTIVE fact with the EFFECTIVE
+// resolved pair (the configured provider + its builtin model — never an empty
+// model kv); (b) a configured default model alongside an explicit --model logs
+// the SUPERSEDED fact (tier 1 wins), never the ACTIVE claim.
+func TestValidateDefaultModelFactArms(t *testing.T) {
+	env := fakeEnv(map[string]string{
+		"OPENAI_API_KEY":     "sk",
+		"OPENROUTER_API_KEY": "sk",
+	})
+
+	// (a) provider-only ⇒ ACTIVE with the effective pair.
+	cfgA := Config{DefaultProvider: "openrouter"}
+	regA, err := buildProviderRegistry(cfgA, env)
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	dA := &kvDiag{}
+	cfgA.Diagnostics = dA
+	if err := validateDefaultModel(cfgA, regA); err != nil {
+		t.Fatalf("validateDefaultModel(provider-only): %v", err)
+	}
+	if len(dA.msgs) != 1 || !strings.Contains(dA.msgs[0], "ACTIVE") {
+		t.Fatalf("provider-only fact = %v, want exactly one ACTIVE INFO", dA.msgs)
+	}
+	wantPair := []any{"provider", "openrouter", "model", "openai/gpt-5"}
+	if !reflect.DeepEqual(dA.args[0], wantPair) {
+		t.Fatalf("ACTIVE fact args = %v, want the EFFECTIVE pair %v (never an empty model kv)", dA.args[0], wantPair)
+	}
+
+	// (b) configured model + explicit --model ⇒ SUPERSEDED, never ACTIVE.
+	cfgB := Config{Model: "gpt-5", DefaultModel: "gpt-5-mini"}
+	regB, err := buildProviderRegistry(cfgB, env)
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+	dB := &kvDiag{}
+	cfgB.Diagnostics = dB
+	if err := validateDefaultModel(cfgB, regB); err != nil {
+		t.Fatalf("validateDefaultModel(superseded): %v", err)
+	}
+	if len(dB.msgs) != 1 || !strings.Contains(dB.msgs[0], "superseded by --model") {
+		t.Fatalf("superseded fact = %v, want exactly one supersession INFO", dB.msgs)
+	}
+	if strings.Contains(dB.msgs[0], "ACTIVE") {
+		t.Fatalf("supersession fact must not claim ACTIVE: %q", dB.msgs[0])
+	}
+}
+
+// TestBuildIgnoresDefaultsUnderUseMock: UseMock skips the validation entirely —
+// junk Default* fields must NOT error (the mock provider isn't catalogued and
+// the mock path never consults the resolved default).
+func TestBuildIgnoresDefaultsUnderUseMock(t *testing.T) {
+	built, err := Build(context.Background(), Config{
+		Workspace:       t.TempDir(),
+		Model:           "mock",
+		UseMock:         true,
+		DefaultProvider: "no-such-provider",
+		DefaultModel:    "no-such-model",
+	})
+	if err != nil {
+		t.Fatalf("Build(UseMock + junk Default*) = %v, want nil (validator must be a no-op under UseMock)", err)
+	}
+	built.Close()
 }

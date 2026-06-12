@@ -148,11 +148,14 @@ func (r *providerRegistry) Available() []string {
 // available (the zero-keys case).
 func (r *providerRegistry) Default() string { return r.defaultID }
 
-// DefaultModel returns the resolved default model for the default provider, or ""
-// when no model resolved (the adapter/endpoint default). It is the per-provider
-// default-model table value when the operator passed no explicit --model, or the
-// explicit cfg.Model otherwise (see resolveDefaultModel).
-func (r *providerRegistry) DefaultModel() string { return r.defaultModel }
+// ResolvedDefaultModel returns the resolved EFFECTIVE default model for the
+// default provider, or "" when no model resolved (the adapter/endpoint
+// default): the explicit cfg.Model when set, else the server-configured
+// cfg.DefaultModel, else the per-provider builtin table value (see
+// resolveDefaultModel). Deliberately NOT named after Config.DefaultModel —
+// that field is one TIER of this resolution (and under --model a value it
+// lost to), not the same concept.
+func (r *providerRegistry) ResolvedDefaultModel() string { return r.defaultModel }
 
 // DefaultModelFor returns the builtin default model for a given provider id (the
 // id the model string is VALID for), or "" when the provider has no table entry
@@ -422,23 +425,41 @@ func anthropicOutputLimit(model string) int {
 //  1. --model flag (cfg.Model) — an EXPLICIT operator override (non-empty): a bare
 //     string paired with the default provider id; the catalog-aware "which provider
 //     owns this model" resolution is deferred (S-later).
-//  2. settings default_model — TODO(S-later): settings plumbing not yet present; do
-//     NOT invent the field yet.
+//  2. server-configured deployment-wide default (cfg.DefaultModel, --default-model;
+//     issue #21) — the default model for the resolved default provider, shared by
+//     every client; validated FAIL-FAST at Build (validateDefaultModel), so here
+//     it is taken verbatim.
 //  3. client last-used state — S4 (client-side), not the server.
-//  4. per-provider default model — when no explicit --model, the builtinDefaultModel
-//     table entry for the default provider (e.g. openai => "gpt-5", openrouter =>
-//     "openai/gpt-5"). A provider absent from the table yields "" — the
-//     adapter/endpoint default — the safe fallback for a future provider.
+//  4. per-provider default model — when neither (1) nor (2) is set, the
+//     builtinDefaultModel table entry for the default provider (e.g. openai =>
+//     "gpt-5", openrouter => "openai/gpt-5"). A provider absent from the table
+//     yields "" — the adapter/endpoint default — the safe fallback for a future
+//     provider.
 //
 // The provider preference among available providers is openai first (back-compat
-// with the single-provider default), then sorted order.
+// with the single-provider default), then sorted order — overridden by a
+// configured cfg.DefaultProvider (--default-provider) when that provider is
+// AVAILABLE. The unavailable case is caught fail-fast by validateDefaultModel at
+// Build; this resolver stays total/non-erroring (a hand-built registry or a
+// pre-validation call simply keeps the preference). When cfg.DefaultModel is set
+// WITHOUT cfg.DefaultProvider, the configured model applies to the preferred
+// default provider — the validator confirmed it is catalogued for THAT provider,
+// keeping the pair coherent.
 func resolveDefaultModel(cfg Config, reg *providerRegistry) (providerID, modelID string) {
 	defID := preferredDefaultProvider(reg)
+	if cfg.DefaultProvider != "" {
+		if _, ok := reg.Lookup(cfg.DefaultProvider); ok {
+			defID = cfg.DefaultProvider
+		}
+	}
 	// (1) --model flag: an EXPLICIT override wins, paired with the default provider.
 	if cfg.Model != "" {
 		return defID, cfg.Model
 	}
-	// (2) settings default_model: TODO(S-later).
+	// (2) server-configured deployment-wide default (--default-model).
+	if cfg.DefaultModel != "" {
+		return defID, cfg.DefaultModel
+	}
 	// (3) client last-used: S4.
 	// (4) per-provider default model from the table (no entry => "" => endpoint default).
 	return defID, builtinDefaultModel[defID]

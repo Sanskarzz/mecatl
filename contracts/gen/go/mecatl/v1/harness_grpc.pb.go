@@ -61,6 +61,7 @@ const (
 	HarnessService_CreateTeam_FullMethodName          = "/mecatl.v1.HarnessService/CreateTeam"
 	HarnessService_SpawnTeammate_FullMethodName       = "/mecatl.v1.HarnessService/SpawnTeammate"
 	HarnessService_SendTeammateMessage_FullMethodName = "/mecatl.v1.HarnessService/SendTeammateMessage"
+	HarnessService_CancelTeammate_FullMethodName      = "/mecatl.v1.HarnessService/CancelTeammate"
 	HarnessService_RunTeam_FullMethodName             = "/mecatl.v1.HarnessService/RunTeam"
 	HarnessService_ListTeam_FullMethodName            = "/mecatl.v1.HarnessService/ListTeam"
 	HarnessService_CleanupTeam_FullMethodName         = "/mecatl.v1.HarnessService/CleanupTeam"
@@ -158,6 +159,14 @@ type HarnessServiceClient interface {
 	// SendTeammateMessage posts a message into a member's inbox (e.g. from the
 	// operator), delivered at that member's next turn boundary.
 	SendTeammateMessage(ctx context.Context, in *SendTeammateMessageRequest, opts ...grpc.CallOption) (*SendTeammateMessageResponse, error)
+	// CancelTeammate cancels ONE member of a RUNNING team mid-round (the headless
+	// RunTeam-path analogue of the Converse-path CancelChild frame). The member
+	// de-schedules with the cancelled stop reason, its claimed tasks release back
+	// to pending, and the team run continues — the lead still synthesises and the
+	// RunTeam stream still delivers its terminal outcome frame. A team that is not
+	// running (created but never run, or already done) is rejected with
+	// FailedPrecondition; an unknown member name with NotFound.
+	CancelTeammate(ctx context.Context, in *CancelTeammateRequest, opts ...grpc.CallOption) (*CancelTeammateResponse, error)
 	// RunTeam drives the team to quiescence, streaming every member's events —
 	// each tagged with the member name — until the team finishes. The stream ends
 	// with a single terminal frame carrying TeamEvent.outcome (rounds, stop,
@@ -371,6 +380,16 @@ func (c *harnessServiceClient) SendTeammateMessage(ctx context.Context, in *Send
 	return out, nil
 }
 
+func (c *harnessServiceClient) CancelTeammate(ctx context.Context, in *CancelTeammateRequest, opts ...grpc.CallOption) (*CancelTeammateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CancelTeammateResponse)
+	err := c.cc.Invoke(ctx, HarnessService_CancelTeammate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *harnessServiceClient) RunTeam(ctx context.Context, in *RunTeamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TeamEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &HarnessService_ServiceDesc.Streams[1], HarnessService_RunTeam_FullMethodName, cOpts...)
@@ -502,6 +521,14 @@ type HarnessServiceServer interface {
 	// SendTeammateMessage posts a message into a member's inbox (e.g. from the
 	// operator), delivered at that member's next turn boundary.
 	SendTeammateMessage(context.Context, *SendTeammateMessageRequest) (*SendTeammateMessageResponse, error)
+	// CancelTeammate cancels ONE member of a RUNNING team mid-round (the headless
+	// RunTeam-path analogue of the Converse-path CancelChild frame). The member
+	// de-schedules with the cancelled stop reason, its claimed tasks release back
+	// to pending, and the team run continues — the lead still synthesises and the
+	// RunTeam stream still delivers its terminal outcome frame. A team that is not
+	// running (created but never run, or already done) is rejected with
+	// FailedPrecondition; an unknown member name with NotFound.
+	CancelTeammate(context.Context, *CancelTeammateRequest) (*CancelTeammateResponse, error)
 	// RunTeam drives the team to quiescence, streaming every member's events —
 	// each tagged with the member name — until the team finishes. The stream ends
 	// with a single terminal frame carrying TeamEvent.outcome (rounds, stop,
@@ -578,6 +605,9 @@ func (UnimplementedHarnessServiceServer) SpawnTeammate(context.Context, *SpawnTe
 }
 func (UnimplementedHarnessServiceServer) SendTeammateMessage(context.Context, *SendTeammateMessageRequest) (*SendTeammateMessageResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SendTeammateMessage not implemented")
+}
+func (UnimplementedHarnessServiceServer) CancelTeammate(context.Context, *CancelTeammateRequest) (*CancelTeammateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CancelTeammate not implemented")
 }
 func (UnimplementedHarnessServiceServer) RunTeam(*RunTeamRequest, grpc.ServerStreamingServer[TeamEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method RunTeam not implemented")
@@ -940,6 +970,24 @@ func _HarnessService_SendTeammateMessage_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HarnessService_CancelTeammate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelTeammateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessServiceServer).CancelTeammate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessService_CancelTeammate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessServiceServer).CancelTeammate(ctx, req.(*CancelTeammateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _HarnessService_RunTeam_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(RunTeamRequest)
 	if err := stream.RecvMsg(m); err != nil {
@@ -1065,6 +1113,10 @@ var HarnessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SendTeammateMessage",
 			Handler:    _HarnessService_SendTeammateMessage_Handler,
+		},
+		{
+			MethodName: "CancelTeammate",
+			Handler:    _HarnessService_CancelTeammate_Handler,
 		},
 		{
 			MethodName: "ListTeam",

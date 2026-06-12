@@ -57,6 +57,7 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 	h.mux.HandleFunc("POST /v1/teams", h.createTeam)
 	h.mux.HandleFunc("POST /v1/teams/{id}/members", h.spawnTeammate)
 	h.mux.HandleFunc("POST /v1/teams/{id}/messages", h.sendTeammateMessage)
+	h.mux.HandleFunc("POST /v1/teams/{id}/members/cancel", h.cancelTeammate)
 	h.mux.HandleFunc("POST /v1/teams/{id}/run", h.runTeam)
 	h.mux.HandleFunc("GET /v1/teams/{id}", h.listTeam)
 	h.mux.HandleFunc("DELETE /v1/teams/{id}", h.cleanupTeam)
@@ -535,6 +536,13 @@ type sendTeammateMessageBody struct {
 	Body string `json:"body"`
 }
 
+// cancelTeammateBody mirrors CancelTeammateRequest (minus the path-borne team id).
+// The member rides the JSON body — matching sendTeammateMessage's idiom — rather
+// than a path segment, so member names need no URL-escaping discipline.
+type cancelTeammateBody struct {
+	Member string `json:"member"`
+}
+
 // --- team handlers -----------------------------------------------------------
 
 // createTeam handles POST /v1/teams, enrolling the optional initial roster
@@ -601,6 +609,28 @@ func (h *HTTPHandler) sendTeammateMessage(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := h.svc.SendTeammateMessage(r.Context(), id, body.From, body.To, body.Body); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// cancelTeammate handles POST /v1/teams/{id}/members/cancel, cancelling one
+// member of a running team (issue #29; the HTTP mirror of the CancelTeammate
+// unary). 204 on success — including the cancel of an already-stopped-but-present
+// member, an honest no-op.
+func (h *HTTPHandler) cancelTeammate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body cancelTeammateBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.Member == "" {
+		writeError(w, http.StatusBadRequest, "member is required")
+		return
+	}
+	if err := h.svc.CancelTeammate(r.Context(), id, body.Member); err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -883,6 +913,11 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrTeamRunning):
 		// The team is already running: a second run, a late spawn, or a cleanup
 		// of a live team. FailedPrecondition, like the gRPC side.
+		writeError(w, http.StatusPreconditionFailed, err.Error())
+	case errors.Is(err, ErrTeamNotRunning):
+		// The team is NOT running (created-but-never-run, or already done): a
+		// CancelTeammate has no in-flight run to reach into. FailedPrecondition,
+		// like the gRPC side.
 		writeError(w, http.StatusPreconditionFailed, err.Error())
 	case errors.Is(err, ErrTooManyTeams):
 		// The live-team registry is at MaxTeams (gRPC: ResourceExhausted).

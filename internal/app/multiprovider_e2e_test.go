@@ -302,6 +302,88 @@ func TestMultiProviderResolvedModelEcho(t *testing.T) {
 	}
 }
 
+// TestServerConfiguredDefaultModelEcho is the issue-#21 service-level proof
+// through the FULL composition: with --default-provider/--default-model
+// configured (and NO --model), a zero-selector CreateSession lands on the
+// server-configured deployment default and the resolved-model echo
+// (Service.ResolvedModel → the CreateSessionResponse echo) reports the
+// configured provider id + model id — not the per-provider builtin. All offline.
+func TestServerConfiguredDefaultModelEcho(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	const (
+		wantProvider = providerOpenRouter
+		wantModel    = "openai/gpt-5-mini" // catalogued for openrouter; NOT its builtin (openai/gpt-5)
+	)
+
+	built, err := Build(ctx, Config{
+		Workspace: workspace,
+		NoSoul:    true,
+		// The configured deployment default: openrouter would NOT be the preferred
+		// default (openai is, with both keys present), so this also proves the
+		// provider half overrides the preference end-to-end.
+		DefaultProvider: wantProvider,
+		DefaultModel:    wantModel,
+		envDetector: fakeEnv(map[string]string{
+			"OPENAI_API_KEY":     "sk-x",
+			"OPENROUTER_API_KEY": "sk-x",
+		}),
+		liveModelHTTPClient: offlineHTTPClient(),
+		providerConstructor: func(_ Config, id, _, _ string) port.LLMProvider {
+			return mockllm.New(mockllm.TextTurn("REPLY-FROM-" + id))
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer built.Close()
+	svc := built.Service
+
+	sess, err := svc.CreateSession(ctx, workspace, session.ModeDefault, defaultLimits())
+	if err != nil {
+		t.Fatalf("CreateSession(zero-selector): %v", err)
+	}
+	got := svc.ResolvedModel(sess.ID)
+	if got.ProviderID != wantProvider || got.ModelID != wantModel {
+		t.Fatalf("zero-selector ResolvedModel = %+v, want provider=%q model=%q (the server-configured default, not the builtin)",
+			got, wantProvider, wantModel)
+	}
+	if got.ContextWindow <= 0 {
+		t.Fatalf("ResolvedModel.ContextWindow = %d, want the catalogued window (>0) — the configured default is catalogued by construction", got.ContextWindow)
+	}
+
+	// The zero-selector turn actually routes to the configured default PROVIDER.
+	run, err := svc.StartRun(ctx, sess.ID, "hi")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if gotText := drainRun(run); gotText != "REPLY-FROM-"+wantProvider {
+		t.Fatalf("zero-selector turn routed to %q, want REPLY-FROM-%s (the configured default provider)", gotText, wantProvider)
+	}
+
+	// A CLIENT selector for a DIFFERENT provider/model beats the server-configured
+	// default: the echo and the routing both follow the selector (the configured
+	// tier sits BELOW client-side choices in the precedence chain).
+	const selModel = "gpt-5"
+	selSess, err := svc.CreateSessionWithProvider(ctx, workspace, session.ModeDefault, defaultLimits(),
+		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: selModel})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider(openai selector): %v", err)
+	}
+	gotSel := svc.ResolvedModel(selSess.ID)
+	if gotSel.ProviderID != providerOpenAI || gotSel.ModelID != selModel {
+		t.Fatalf("selector ResolvedModel = %+v, want provider=%q model=%q (the client selector, not the configured server default)",
+			gotSel, providerOpenAI, selModel)
+	}
+	selRun, err := svc.StartRun(ctx, selSess.ID, "hi")
+	if err != nil {
+		t.Fatalf("StartRun(selector): %v", err)
+	}
+	if gotText := drainRun(selRun); gotText != "REPLY-FROM-"+providerOpenAI {
+		t.Fatalf("selector turn routed to %q, want REPLY-FROM-%s (the selector's provider beats the configured default)", gotText, providerOpenAI)
+	}
+}
+
 // TestResolvedModelMCPOnlySessionMatchesDefaultWindow pins the single-source
 // consistency fix: a ZERO-selector session that needs a per-session engine ONLY
 // because client MCP specs are attached must report the SAME ResolvedModel as

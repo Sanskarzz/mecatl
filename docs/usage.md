@@ -158,7 +158,9 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--grpc-addr` | `127.0.0.1:8080` | gRPC listen address (loopback; **unauthenticated unless** the security & transport flags below are set) |
 | `--http-addr` | `127.0.0.1:8081` | HTTP/SSE listen address (loopback; **unauthenticated unless** the security & transport flags below are set) |
 | `--workspace` | current working dir | default session workspace root |
-| `--model` | `""` | model identifier sent to the provider. Empty → the selected provider's default: `gpt-5` (OpenAI), `openai/gpt-5` (OpenRouter), `claude-sonnet-4-6` (Anthropic). |
+| `--model` | `""` | model identifier sent to the provider. Empty → the server-configured default (`--default-model`, when set), else the selected provider's built-in default: `gpt-5` (OpenAI), `openai/gpt-5` (OpenRouter), `claude-sonnet-4-6` (Anthropic). |
+| `--default-provider` | `""` | server-configured **deployment-wide default provider** id shared by every client (also on `mecatui`'s embedded server); overrides the built-in provider preference for zero-selector sessions, while a client-side selector still wins. **Fail-fast:** an unknown or unavailable provider refuses startup. |
+| `--default-model` | `""` | server-configured **deployment-wide default model** for the default provider (also on `mecatui`'s embedded server); sits below client-side defaults and above the per-provider built-in. **Fail-fast:** a model not catalogued for the default provider refuses startup (stricter than per-session selectors, which allow passthrough). |
 | `--openai` | `false` | use the OpenAI Responses provider (key from `OPENAI_API_KEY`) |
 | `--openai-base-url` | `""` | override the OpenAI API base URL (compatible endpoints) |
 | `--openrouter-base-url` | `""` | override the OpenRouter API base URL (default `https://openrouter.ai/api/v1`; key from `OPENROUTER_API_KEY`) |
@@ -1068,6 +1070,7 @@ Service: `mecatl.v1.HarnessService` (`contracts/proto/mecatl/v1/harness.proto`).
 | `CreateTeam(CreateTeamRequest) → CreateTeamResponse` | unary | allocate a team (optionally enrolling an initial roster); accepts the tighten-only `max_team_tokens` |
 | `SpawnTeammate` | unary | enrol a member in an existing team (before `RunTeam`) |
 | `SendTeammateMessage` | unary | post a message into a member's inbox, delivered at its next turn boundary |
+| `CancelTeammate` | unary | cancel ONE member of a **running** team mid-round: it de-schedules with the `cancelled` stop reason and releases its claimed tasks; the team still delivers its report. Not-running team → `FailedPrecondition`; unknown member → `NotFound` |
 | `RunTeam(RunTeamRequest) → stream TeamEvent` | server-stream | drive the team to quiescence; every member's events stream tagged with the member name, and the stream **ends with a single terminal frame carrying `TeamEvent.outcome`** (rounds, stop, `budget_exhausted`, usage, dispositions, findings) |
 | `ListTeam` | unary | snapshot of the roster, shared task list, and quiescence |
 | `CleanupTeam` | unary | tear down a finished team and release its resources |
@@ -1332,6 +1335,7 @@ share one event shape.
 | `POST /v1/teams` | team spec (incl. the tighten-only `max_team_tokens?`) | create a team |
 | `POST /v1/teams/{id}/members` | member spec | spawn a teammate |
 | `POST /v1/teams/{id}/messages` | message | post into a member's inbox |
+| `POST /v1/teams/{id}/members/cancel` | `{"member": "..."}` | cancel one member of a running team (404 unknown team/member, 412 not running) |
 | `POST /v1/teams/{id}/run` | — | `text/event-stream` of `TeamEvent`s, ending with the terminal `outcome` frame |
 | `GET /v1/teams/{id}` | — | team snapshot (roster, tasks, quiescence) |
 | `DELETE /v1/teams/{id}` | — | clean up the team |

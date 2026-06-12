@@ -80,7 +80,9 @@ absolute path (the server requires absolute).
 | `--no-mouse` | off | keep the alt screen but don't capture the mouse, so the terminal's **native** click-drag selection works; trades away in-app wheel scroll + drag-select/copy (or `MECATUI_NO_MOUSE=1`; see the selection section) |
 | `--context-window` | 0 (unknown) | model context-window size in tokens for the footer **ctx** meter; 0 = unknown (never inferred from the model name) |
 | `--no-banner` | off | disable the first-run welcome **splash** (mascot + gradient wordmark); the plain prompt hint + affordance list still show. Auto-forced on under `--quiet` or a non-interactive stdin |
-| `--model` | – (provider default) | model id for the **embedded** server; empty = the provider-appropriate default (anthropic → `claude-sonnet-4-6`, openai → `gpt-5`, openrouter → `openai/gpt-5`). Overridden per session by the `/models` picker |
+| `--model` | – (provider default) | model id for the **embedded** server; empty = the server-configured `--default-model` (when set), else the provider-appropriate built-in (anthropic → `claude-sonnet-4-6`, openai → `gpt-5`, openrouter → `openai/gpt-5`). Overridden per session by the `/models` picker |
+| `--default-provider` | – | **embedded** server: deployment-wide default provider id (e.g. `openai`, `openrouter`, `anthropic`); overrides the built-in provider preference for zero-selector sessions, while a client-side selection still wins. An unknown/unavailable provider **fails startup** |
+| `--default-model` | – | **embedded** server: deployment-wide default model for the default provider; sits below client-side defaults and above the per-provider built-in. A model not catalogued for the default provider **fails startup** |
 | `--subagent-model` | – (inherits `--model`) | **embedded** server: global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (the `CLAUDE_CODE_SUBAGENT_MODEL` analogue); the Parallel judge stays on the session model. Same provider as the session; an unresolvable id **fails startup** |
 | `--anthropic-base-url` | – | native Anthropic API base URL override for the **embedded** server (compatible/proxy endpoints; key from `ANTHROPIC_API_KEY`) |
 | `--openai-base-url` | – | OpenAI base URL override for the **embedded** server |
@@ -271,8 +273,9 @@ dropped under width pressure). The pick is persisted **client-side** to a state 
 `$XDG_STATE_HOME/mecatui/models.yaml` (fallback `~/.local/state/mecatui/models.yaml`)
 — a per-workspace map (realpath-keyed) plus a global `default:` block. Read
 precedence on launch (highest → lowest): an in-session restart pick → the `--model`
-flag → the per-workspace entry → the client global default → the server's built-in
-default. A workspace pick is scoped to its workspace only; an unseen/new repo falls
+flag → the per-workspace entry → the client global default → the server's configured
+(`--default-provider`/`--default-model`) or built-in default. A workspace pick is
+scoped to its workspace only; an unseen/new repo falls
 back to the global default (then the server default). On launch the selection is
 **reconciled** against `ListModels` BEFORE the first `CreateSession`: if the
 persisted model's provider is no longer available (its key was removed), the

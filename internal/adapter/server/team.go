@@ -20,6 +20,12 @@ var ErrTeamsDisabled = errors.New("server: agent teams are not enabled")
 // codes.FailedPrecondition.
 var ErrTeamRunning = errors.New("server: team is already running")
 
+// ErrTeamNotRunning is returned when an operation requires a RUNNING team but the
+// team's phase is teamCreated (created, never run) or teamDone (RunTeam already
+// returned) — a CancelTeammate has no in-flight run to reach into. It maps to
+// codes.FailedPrecondition.
+var ErrTeamNotRunning = errors.New("server: team is not running")
+
 // ErrTooManyTeams is returned by CreateTeam when the live-team registry is already
 // at Config.MaxTeams. It bounds the leak from teams created but never cleaned up.
 // It maps to codes.ResourceExhausted.
@@ -269,6 +275,43 @@ func (s *Service) SendTeammateMessage(_ context.Context, teamID, from, to, body 
 	}
 	if err := ts.team.Send(from, to, body); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+	}
+	return nil
+}
+
+// CancelTeammate cancels ONE member of a RUNNING team mid-round, via the
+// Supervisor.CancelMember seam (the same per-member cancel the Converse-path
+// registry route fires; BACKGROUND-SUBAGENTS D4, issue #29). The member
+// de-schedules with the cancelled stop reason and its claimed tasks release; the
+// run continues and still delivers its outcome.
+//
+// The phase is read briefly under Service.mu and released BEFORE touching the
+// supervisor — the same no-lock-across-supervisor discipline as
+// SendTeammateMessage. The teamRunning requirement is ALSO what makes the
+// lock-free CancelMember map read safe: the supervisor's members map is written
+// only by AddMember, and every AddMember serialises BEFORE the
+// teamCreated→teamRunning flip (SpawnTeammate holds the per-team `run` mutex
+// across its phase check + AddMember and rejects once the team has started) —
+// admitting a teamCreated team here would race a concurrent SpawnTeammate's map
+// write. The race on the OTHER side of the gate is benign: RunTeam may finish
+// between the phase read and CancelMember, in which case the late cancel lands
+// as an idempotent no-op (the member's ctx just goes unobserved). Cancelling an
+// already-stopped-but-PRESENT member is likewise an honest no-op (nil success);
+// only an unknown member name returns ErrChildNotFound. A team that is not
+// running (teamCreated / teamDone) returns ErrTeamNotRunning.
+func (s *Service) CancelTeammate(_ context.Context, teamID, member string) error {
+	ts, err := s.lookupTeam(teamID)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	phase := ts.phase
+	s.mu.Unlock()
+	if phase != teamRunning {
+		return fmt.Errorf("%w: %q", ErrTeamNotRunning, teamID)
+	}
+	if !ts.sup.CancelMember(member) {
+		return fmt.Errorf("%w: %q", ErrChildNotFound, member)
 	}
 	return nil
 }
