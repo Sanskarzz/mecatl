@@ -323,16 +323,16 @@ linters:
     # mecatui→file). The patterns are precise: slog.New*/Handler/HandlerOptions/Level/
     # DiscardHandler (slogdiag's legitimate internals) and the *slog.Logger type (the
     # perf surface) do NOT match, so only the banned call shapes trip. See
-    # docs/design/DIAGNOSTICS.md and CLAUDE.md ("global slog is banned in internal/").
+    # docs/design/DIAGNOSTICS.md and CLAUDE.md ("global slog is banned in engine/ and internal/").
     forbidigo:
       analyze-types: true
       forbid:
         - pattern: 'slog\.Default\b'
-          msg: 'global slog is banned in internal/: route diagnostics through the injected port.Diagnostics seam (slogdiag adapter); the cmd/ main owns the sink. See docs/design/DIAGNOSTICS.md.'
+          msg: 'global slog is banned in engine/ and internal/: route diagnostics through the injected port.Diagnostics seam (slogdiag adapter); the cmd/ main owns the sink. See docs/design/DIAGNOSTICS.md.'
         - pattern: 'slog\.SetDefault\b'
-          msg: 'global slog is banned in internal/: only cmd/ mains may install a slog default (the third-party-slog bridge). internal/ must take a port.Diagnostics. See docs/design/DIAGNOSTICS.md.'
+          msg: 'global slog is banned in engine/ and internal/: only cmd/ mains may install a slog default (the third-party-slog bridge). Everything else must take a port.Diagnostics. See docs/design/DIAGNOSTICS.md.'
         - pattern: 'slog\.(Info|Warn|Debug|Error)(Context)?\b'
-          msg: 'package-level slog.* is banned in internal/: log through the injected port.Diagnostics seam, not the global logger. See docs/design/DIAGNOSTICS.md.'
+          msg: 'package-level slog.* is banned in engine/ and internal/: log through the injected port.Diagnostics seam, not the global logger. See docs/design/DIAGNOSTICS.md.'
     goconst:
       ignore-tests: true
       min-occurrences: 5
@@ -433,11 +433,12 @@ linters:
       - linters:
           - revive
         path: .golangci.yml
-      # forbidigo (the global-slog ban) is scoped to internal/ ONLY. cmd/ mains are
-      # the composition roots that legitimately own the third-party-slog bridge —
-      # mecated installs a stderr default, mecatui redirects the default to a file —
-      # so they MUST be allowed slog.Default/SetDefault. The ban exists to keep
-      # internal/ on the injected port.Diagnostics seam, not to police the mains.
+      # forbidigo (the global-slog ban) covers everything outside cmd/ — engine/ and
+      # internal/ alike. cmd/ mains are the composition roots that legitimately own
+      # the third-party-slog bridge — mecated installs a stderr default, mecatui
+      # redirects the default to a file — so they MUST be allowed
+      # slog.Default/SetDefault. The ban exists to keep the engine and the adapters
+      # on the injected port.Diagnostics seam, not to police the mains.
       - linters:
           - forbidigo
         path: ^cmd/

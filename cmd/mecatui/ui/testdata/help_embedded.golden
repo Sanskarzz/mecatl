@@ -20,7 +20,7 @@
 ┃    ctrl+o        MCP inventory  [not enabled]                                                                                                              ┃
 ┃    ctrl+r        MCP resources  [not enabled]                                                                                                              ┃
 ┃    ctrl+p        MCP prompts  [not enabled]                                                                                                                ┃
-┃    ctrl+a        agents overlay (subagents / teams · tab to switch)                                                                                        ┃
+┃    ctrl+a        agents overlay (subagents / parallel / teams · tab to switch)                                                                             ┃
 ┃    ctrl+t        expand/collapse details                                                                                                                   ┃
 ┃                                                                                                                                                            ┃
 ┃  General                                                                                                                                                   ┃

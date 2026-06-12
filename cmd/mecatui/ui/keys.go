@@ -72,10 +72,11 @@ type keyMap struct {
 	JumpTop key.Binding
 	JumpEnd key.Binding
 
-	// Agents (ctrl+a) opens the unified live agents overlay: ONE surface with two
-	// tabs — Subagents (the flat Subagent-child fleet) and Teams (the agent-team roster
-	// with per-member focus). The default tab is context-sensitive (Teams when a team
-	// is live, else Subagents when subagents ran). Like the MCP bindings it is
+	// Agents (ctrl+a) opens the unified live agents overlay: ONE surface with three
+	// tabs — Subagents (the flat Subagent-child fleet), Parallel (the fan-out groups),
+	// and Teams (the agent-team roster with per-member focus). The default tab is
+	// context-sensitive (a live team, else a live parallel run, else whichever
+	// family has activity — see agents_overlay.go). Like the MCP bindings it is
 	// control-modified so it never collides with textarea input. It is live both while
 	// idle AND mid-run (Gap B) — the deep view is most useful while agents stream; it
 	// stays inert under a permission modal. (Mapped from /team in the palette; /agents

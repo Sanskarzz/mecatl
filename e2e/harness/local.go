@@ -20,7 +20,7 @@ import (
 )
 
 // Local spawns ./bin/mecated as a subprocess with fully ephemeral state dirs
-// under <repo>/.scratch/e2e-<rand>/ (HOME, XDG_*, workspace, store, memory,
+// under <repo>/.scratch/e2e-<timestamp>-<rand>/ (HOME, XDG_*, workspace, store, memory,
 // user-model, soul, skills fixtures) and loopback TCP listeners on
 // harness-picked free ports. Its combined stdout+stderr is captured to the
 // artifact dir (mecated.log) — the suite's failure reports and the
@@ -38,7 +38,7 @@ import (
 // :0, reading the port, and closing — racy in principle, loopback-private in
 // practice.
 type Local struct {
-	Root string // .scratch/e2e-<rand>
+	Root string // .scratch/e2e-<timestamp>-<rand>
 
 	grpcAddr    string
 	metricsAddr string
@@ -70,7 +70,7 @@ func NewLocal() (*Local, error) {
 	return l, nil
 }
 
-// newScratchRoot creates <repo>/.scratch/e2e-<rand> (the repo-local scratch
+// newScratchRoot creates <repo>/.scratch/e2e-<timestamp>-<rand> (the repo-local scratch
 // area; never /tmp — house rule).
 func newScratchRoot() (string, error) {
 	repo, err := RepoRoot()

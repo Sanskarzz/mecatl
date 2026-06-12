@@ -5278,8 +5278,10 @@ type CreateTeamRequest struct {
 	// still SpawnTeammate before RunTeam).
 	Members []*TeammateSpec `protobuf:"bytes,3,rep,name=members,proto3" json:"members,omitempty"`
 	// goal is the team's optional top-level objective. It is threaded into the lead's
-	// round-0 turn and the lead's synthesis prompt (fenced UNTRUSTED). Empty preserves
-	// the historical behaviour (no goal briefing on the gRPC path).
+	// round-0 turn and the lead's synthesis prompt as a TRUSTED instruction by default
+	// (framing-neutralised, but not fenced; the server's TeamGoalUntrusted config opts a
+	// relay/multi-tenant deployment back into the UNTRUSTED fence). Empty preserves the
+	// historical behaviour (no goal briefing on the gRPC path).
 	Goal string `protobuf:"bytes,4,opt,name=goal,proto3" json:"goal,omitempty"`
 	// max_team_tokens is the per-request team-wide cumulative token budget
 	// (input + output, summed across all members and rounds). TIGHTEN-ONLY: a
