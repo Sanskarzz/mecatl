@@ -1,6 +1,6 @@
 # GitHub Actions workflows for mecatl
 
-Two workflows live here. Every third-party action is **SHA-pinned** with a
+Three workflows live here. Every third-party action is **SHA-pinned** with a
 `# vX.Y.Z` comment so a re-pointed tag from a compromised maintainer cannot
 silently change what runs. Pins track the Stacklok house set used in
 `a downstream consumer`.
@@ -24,6 +24,50 @@ superseded runs cancelled via `concurrency`):
 
 Go is provisioned by `actions/setup-go` from `go.mod` with the module cache
 enabled; `GOTOOLCHAIN=local` prevents a surprise toolchain download.
+
+## `e2e-live.yml` — nightly + manual + `e2e-live` PR label
+
+Runs the **live** e2e suite (`task e2e` → `go test -tags e2e ./e2e/...`, see
+`e2e/README.md`): real OpenRouter model calls, real (fractions-of-a-cent)
+money. **Non-blocking** — it is not a required check; it exists to catch
+live-provider regressions (prompt filters, API drift, model behaviour) the
+offline suite cannot see.
+
+Trigger model:
+
+- `schedule` — nightly at 03:17 UTC.
+- `workflow_dispatch` — on demand.
+- `pull_request` — **only** when a maintainer applies the **`e2e-live`**
+  label (`labeled` is in the activity types, so applying the label starts a
+  run). The label gate lives in the job `if:` so an unlabelled PR never
+  starts the job.
+
+Secret: **`OPENROUTER_API_KEY`** (repo secret, set by the operator). Exposure
+is layered:
+
+1. `pull_request`, never `pull_request_target` — fork PR runs get no secrets
+   even when labelled.
+2. The job `if:` requires `github.repository == 'stacklok/mecatl'`, so forks'
+   own scheduled/dispatched runs never reference the secret.
+3. A guard step checks key availability and **skips cleanly** (green, with a
+   notice) when it is absent — a labelled fork PR or an unconfigured repo
+   never hard-fails.
+4. The key is injected via `env` into exactly one step, never interpolated
+   into a script body or argv.
+
+Note the residual, accepted exposure: a **same-repo** labelled PR runs that
+branch's code with the secret in its environment — the label is the
+maintainer's explicit opt-in, and same-repo branch authors already have write
+access.
+
+Posture: `permissions: contents: read`; one global `concurrency` group
+(`e2e-live`, cancel-in-progress) so overlapping dispatches never double the
+spend or trip provider rate limits; `timeout-minutes: 30` (the suite runs ~2
+minutes; the suite's own layered SpecTimeouts live inside a 60m `go test`
+budget, so the job timeout is the cheap runner-billing backstop). On failure
+the self-diagnosing transcripts (`.scratch/e2e-*/artifacts/**`, including
+`mecated.log`) upload as a 7-day artifact, and the cumulative token/cost
+ledger is appended to the job summary when present in the test output.
 
 ## `release.yml` — `v*` tag push
 

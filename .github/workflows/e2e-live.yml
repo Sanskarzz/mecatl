@@ -1,0 +1,143 @@
+# Live e2e suite for mecatl — real OpenRouter model calls, real (tiny) money.
+#
+# This workflow is NON-BLOCKING: it is not a required check. It exists to catch
+# live-provider regressions (prompt filters, API drift, model behaviour) that
+# the offline suite cannot see. The suite itself lives under e2e/ (build tag
+# `e2e`); see e2e/README.md for scenarios, artifacts, and the findings protocol.
+#
+# Trigger model:
+#   - schedule: nightly at an off-peak UTC hour.
+#   - workflow_dispatch: on demand.
+#   - pull_request: ONLY when a maintainer applies the `e2e-live` label
+#     (`labeled` is in the activity types so applying the label starts a run).
+#     The label gate lives in the job `if:` so an unlabelled fork PR never
+#     starts the job at all.
+#
+# Secret posture (deliberate, defense in depth):
+#   - `pull_request` (NOT `pull_request_target`) — fork PR runs get NO secrets
+#     even when labelled; see ci.yml's header for the pwn-request rationale.
+#   - The job `if:` also requires github.repository == 'stacklok/mecatl', so a
+#     fork's own scheduled/dispatched runs never reference the secret.
+#   - A guard step checks OPENROUTER_API_KEY availability and skips the live
+#     run cleanly (notice, green) when it is absent — the workflow never
+#     hard-fails just because the secret isn't configured.
+#
+# All third-party actions are SHA-pinned (with a # vX.Y.Z comment) so a
+# re-pointed tag from a compromised maintainer cannot change what runs here.
+name: e2e-live
+
+on:
+  schedule:
+    # Nightly, off-peak UTC. Odd minute to avoid the top-of-hour thundering herd.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+# Least-privilege: the job only reads source. The cost ledger goes to the job
+# summary (no API write needed); artifacts upload under the default token.
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+jobs:
+  e2e:
+    name: Live e2e (OpenRouter)
+    runs-on: ubuntu-24.04
+    # The suite normally finishes in ~2 minutes; 30 covers a slow-model day.
+    # This is the cheap backstop UNDER the suite's own layered timeouts (the
+    # per-spec ginkgo SpecTimeouts sum to ~50m worst-case inside the 60m
+    # `go test -timeout`; see e2e/suite_test.go) — a wedged run is killed here
+    # rather than billing an hour of runner time.
+    timeout-minutes: 30
+    # Gate 1: never run from a fork's copy of this workflow (a fork has no
+    # secret to leak, but it should not even attempt the spend path).
+    # Gate 2: PRs run only when a maintainer opted in via the `e2e-live` label.
+    if: >-
+      github.repository == 'stacklok/mecatl' &&
+      (github.event_name != 'pull_request' ||
+       contains(github.event.pull_request.labels.*.name, 'e2e-live'))
+    # One live run at a time, globally: overlapping dispatches/labelled pushes
+    # would double the spend and trip provider rate limits. A single fixed
+    # group (not per-ref) is intentional — a newer live run cancels whatever
+    # live run is in flight. JOB-level (not workflow-level) on purpose: every
+    # unlabelled PR sync still creates a (skipped) workflow run, and a
+    # workflow-level group would let that skipped run cancel an in-flight
+    # nightly; a job that never starts never enters a job-level group.
+    concurrency:
+      group: e2e-live
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Skip cleanly (green, with a visible notice) when the secret is absent:
+      # labelled fork PRs and secretless clones reach this step but must not
+      # hard-fail. The secret is compared in `env` (never interpolated into the
+      # script body) and only its presence is exported.
+      - name: Gate on OPENROUTER_API_KEY availability
+        id: gate
+        env:
+          HAS_KEY: ${{ secrets.OPENROUTER_API_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" != "true" ]; then
+            echo "::notice title=e2e-live skipped::OPENROUTER_API_KEY is not available in this context (fork PR or unconfigured secret); skipping the live suite."
+          fi
+          echo "run=$HAS_KEY" >> "$GITHUB_OUTPUT"
+
+      # `task e2e` = task build, then `go test -tags e2e -count=1 -timeout 60m
+      # ./e2e/...`. Output is teed for the cost-ledger summary step; explicit
+      # `shell: bash` gives `-o pipefail` so the tee never masks a test failure.
+      - name: task e2e
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: task e2e 2>&1 | tee e2e-output.log
+
+      # Best-effort: the suite's AfterSuite prints a cumulative token/cost
+      # ledger ("live e2e usage ..."). Ginkgo only surfaces it at verbosity or
+      # on failure, so absence is normal on a quiet green run — never fail here.
+      - name: Cost ledger → job summary
+        if: always() && steps.gate.outputs.run == 'true'
+        run: |
+          {
+            echo '## Live e2e cost ledger'
+            if [ -f e2e-output.log ] && grep -q 'live e2e usage' e2e-output.log; then
+              echo '```'
+              grep -A 10 'live e2e usage' e2e-output.log | sed -n '/live e2e usage/,/estimated total/p'
+              echo '```'
+            else
+              echo '_No cost ledger in the test output (ginkgo prints it only at verbosity or on failure)._'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The harness leaves the scratch root in place on failure — the
+      # transcripts ARE the deliverable of a failed run. Local spawns write
+      # .scratch/e2e-<ts>-<rand>/artifacts/ (incl. mecated.log); the remote
+      # target falls back to .scratch/e2e-artifacts/.
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-live-artifacts-${{ github.run_id }}
+          path: |
+            .scratch/e2e-*/artifacts/**
+            .scratch/e2e-artifacts/**
+          retention-days: 7
+          if-no-files-found: ignore
