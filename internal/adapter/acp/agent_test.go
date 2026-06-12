@@ -597,7 +597,7 @@ type fakeSessionEngine struct {
 	engine *agent.Engine
 }
 
-func (f *fakeSessionEngine) factory(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig) (server.SessionEngineResult, error) {
+func (f *fakeSessionEngine) factory(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
 	f.mu.Lock()
 	f.called++
 	f.specs = specs
@@ -1299,7 +1299,7 @@ type closingSessionEngine struct {
 	engine *agent.Engine
 }
 
-func (f *closingSessionEngine) factory(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig) (server.SessionEngineResult, error) {
+func (f *closingSessionEngine) factory(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
 	f.mu.Lock()
 	f.called++
 	f.mu.Unlock()

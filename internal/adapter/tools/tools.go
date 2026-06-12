@@ -57,6 +57,19 @@ func All() []tool.Tool {
 	}
 }
 
+// NoFS returns the core tools available in a NO-filesystem session (the "no-fs"
+// session profile): WebFetch only. Every file-touching core tool — Read, Edit,
+// Write, Grep, Glob (and the separately-constructed Bash) — is deliberately
+// absent: a no-FS session has no workspace, so offering them would only generate
+// honest-but-useless not-exist errors and burn turns. The composition root
+// (internal/app registerCoreTools) selects NoFS() vs All() per the session's
+// catalog profile; this is the single definition of the no-FS core surface.
+func NoFS() []tool.Tool {
+	return []tool.Tool{
+		WebFetchTool{},
+	}
+}
+
 // Register adds the always-available core tools (everything in All(), i.e. NOT
 // Bash) to cat. It returns the first registration error (e.g. a name collision)
 // encountered, or nil on success. To enable command execution, additionally

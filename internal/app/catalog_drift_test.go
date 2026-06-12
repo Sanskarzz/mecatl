@@ -202,7 +202,7 @@ func TestPerSessionCatalogMatchesSharedCatalog(t *testing.T) {
 	t.Run("factory engine carries every shared tool", func(t *testing.T) {
 		factory := sessionEngineFactory(cfg, reg, oa, memstore.New(),
 			permpolicy.NewPolicy(defaultRules(), nil), hooks, nil, prompt.RootAssembler{}, assets)
-		res, err := factory(ctx, server.ProviderSelector{ProviderID: providerOpenRouter}, nil)
+		res, err := factory(ctx, server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault)
 		if err != nil {
 			t.Fatalf("factory: %v", err)
 		}

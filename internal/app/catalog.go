@@ -33,6 +33,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/mcp"
 	"github.com/stacklok/mecatl/internal/adapter/memory"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
+	"github.com/stacklok/mecatl/internal/adapter/tools"
 )
 
 // catalogAssets are the PHASE-A PRODUCTS: the collaborators buildCatalog itself
@@ -94,6 +95,17 @@ type catalogSession struct {
 	model      string
 	clientMgr  *mcp.Manager
 	narrate    bool
+	// noFS selects the NO-FILESYSTEM catalog profile (the "no-fs" session
+	// profile, issue #55): the core tier registers tools.NoFS() (WebFetch only)
+	// instead of tools.All()+Bash, Parallel and SkillDraft are skipped (both are
+	// filesystem acts — branch forks and draft files), and the Subagent/Team
+	// children get the file-less child surface (noFSChildCatalog) with NO forkers
+	// and NO shell. Everything else (global/client MCP, resource meta-tools,
+	// Subagent trio, Team/InspectMember, the six memory tools, Skill) registers
+	// EXACTLY as in the default profile — guarded by TestNoFSCatalogProfile,
+	// which pins the EXACT name-set delta. Always false for the build-time shared
+	// catalog (a process always has a default-profile shared engine).
+	noFS bool
 }
 
 // assembleCatalog registers every tool family into a fresh catalog, in the
@@ -111,7 +123,7 @@ type catalogSession struct {
 // non-nil and safe to call.
 func assembleCatalog(ctx context.Context, cfg Config, reg *providerRegistry, store port.SessionStore, hooks port.HookRunner, a catalogAssets, s catalogSession) (*tool.Catalog, func() error) {
 	cat := tool.NewCatalog()
-	registerCoreTools(cfg, cat, s.narrate)
+	registerCoreTools(cfg, cat, s.narrate, s.noFS)
 
 	mountGlobalMCP(ctx, cfg, cat, a, s)
 	clientClose := mountClientMCP(ctx, cfg, cat, s)
@@ -124,7 +136,12 @@ func assembleCatalog(ctx context.Context, cfg Config, reg *providerRegistry, sto
 		refMgr = s.clientMgr
 	}
 	subagentClose := registerSubagentTrio(ctx, cfg, cat, reg, store, hooks, a, s, refMgr)
-	registerParallelTool(ctx, cfg, cat, reg, hooks, a, s)
+	// Parallel is ABSENT under the no-FS profile (not merely disarmed): every
+	// branch is a force-copy filesystem fork and the deliverable is a preserved
+	// fork PATH — both meaningless without a filesystem.
+	if !s.noFS {
+		registerParallelTool(ctx, cfg, cat, reg, hooks, a, s)
+	}
 	registerTeamTools(ctx, cfg, cat, reg, store, a, s, refMgr)
 	registerMemoryFamilies(ctx, cfg, cat, a)
 	registerSkillFamily(ctx, cfg, cat, a, s)
@@ -194,7 +211,7 @@ func mountClientMCP(ctx context.Context, cfg Config, cat *tool.Catalog, s catalo
 // inherited sub-agent parent. The returned close tears down the Subagent per-def
 // inline-MCP managers (these connections belong to this catalog).
 func registerSubagentTrio(ctx context.Context, cfg Config, cat *tool.Catalog, reg *providerRegistry, store port.SessionStore, hooks port.HookRunner, a catalogAssets, s catalogSession, refMgr *mcp.Manager) func() error {
-	subagentTool, subagentClose := buildSubagentTool(ctx, cfg, reg, s.provider, s.providerID, s.model, hooks, a.agentReg, refMgr, store, a.skillReadRoots, a.skillIndex)
+	subagentTool, subagentClose := buildSubagentTool(ctx, cfg, reg, s.provider, s.providerID, s.model, hooks, a.agentReg, refMgr, store, a.skillReadRoots, a.skillIndex, a, s.noFS)
 	cat.MustRegister(subagentTool)
 	// The PULL subagent-transcript inspect tool: read-only, reads the SAME shared
 	// session store the Subagent tool persists children to (ids verbatim from the
@@ -274,7 +291,7 @@ func registerTeamTools(ctx context.Context, cfg Config, cat *tool.Catalog, reg *
 		}
 		return
 	}
-	factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, s.provider, s.providerID, s.model, refMgr, a.agentReg, a.skillReadRoots, a.skillIndex)
+	factory, fk, roFk, teamHooks := buildTeamWiring(ctx, cfg, reg, s.provider, s.providerID, s.model, refMgr, a.agentReg, a.skillReadRoots, a.skillIndex, a, s.noFS)
 	cat.MustRegister(agent.NewTeamTool(
 		agent.TeamMemberEngineFactory(factory),
 		agent.WithTeamToolForker(fk),
@@ -313,6 +330,12 @@ func registerMemoryFamilies(ctx context.Context, cfg Config, cat *tool.Catalog, 
 // (the metadata snapshot + the Activator), plus the SkillDraft author tool
 // when a quarantine dir is configured (its novelty snapshot is the metas +
 // preload-bodies projection — NewDirDrafter's []skills.Skill signature kept).
+//
+// NO-FS PROFILE: the Skill tool stays ON — a skill body is TEXT INJECTION into
+// the conversation, not a filesystem act (an out-of-workspace ASSET read would
+// fail honestly through the no-FS workspace, so a no-FS skill is body-only).
+// SkillDraft is OFF — drafting writes a SKILL.md into the quarantine dir, a
+// filesystem-authoring act a no-FS session has no business performing.
 // On the DRIVER branch the preload index is lazy (def-referenced names only),
 // so most projected bodies are empty and the drafter's novelty check is
 // effectively name/description-driven there — a conscious trade, not a bug
@@ -324,7 +347,48 @@ func registerSkillFamily(ctx context.Context, cfg Config, cat *tool.Catalog, a c
 			cfg.diag().Log(ctx, port.LevelWarn, "registering skills failed; Skill tool disabled", "err", err)
 		}
 	}
-	registerSkillDraft(ctx, cfg, cat, skillValues(a.skills, a.skillIndex), s.narrate)
+	if !s.noFS {
+		registerSkillDraft(ctx, cfg, cat, skillValues(a.skills, a.skillIndex), s.narrate)
+	}
+}
+
+// noFSChildCatalog builds the file-less CHILD tool surface every no-FS
+// delegation target (Subagent explorer child, per-call model-override child,
+// team member) runs with: the six memory/user-model tools over the SHARED
+// flocked stores, WebFetch, and the server-global MCP tools — and nothing that
+// touches a filesystem (no Read/Grep/Glob, no Bash, no Edit/Write). A fresh
+// catalog per call (the readOnlyExplorerCatalog idiom: one catalog per engine).
+// The global MCP tools are REUSED from the shared manager, never reconnected.
+func noFSChildCatalog(ctx context.Context, cfg Config, a catalogAssets) *tool.Catalog {
+	cat := tool.NewCatalog()
+	for _, t := range tools.NoFS() {
+		cat.MustRegister(t)
+	}
+	if a.globalMgr != nil {
+		if skipped, rerr := mcp.Register(cat, a.globalMgr.Tools()); rerr != nil {
+			cfg.diag().Log(ctx, port.LevelWarn,
+				"no-FS child catalog: skipped duplicate MCP tool name(s): "+strings.Join(skipped, ", "),
+				"tools", strings.Join(skipped, ", "), "err", rerr)
+		}
+	}
+	registerMemoryFamilies(ctx, cfg, cat, a)
+	return cat
+}
+
+// nonReadOnlyToolNames lists the catalog's tools reporting ReadOnly() == false.
+// In a no-FS member catalog (noFSChildCatalog) those are by construction
+// NON-WORKSPACE mutators (Remember/RememberUser write the flocked memory stores;
+// MCP tools are remote) — there is no filesystem for them to mutate — so the
+// list feeds MemberBuild.MCPToolNames, the supervisor's documented exemption for
+// exactly that class, keeping the base-sharing read-only-member backstop honest.
+func nonReadOnlyToolNames(cat *tool.Catalog) []string {
+	var names []string
+	for _, t := range cat.Tools() {
+		if !t.ReadOnly() {
+			names = append(names, t.Spec().Name)
+		}
+	}
+	return names
 }
 
 // forkPreservedCap normalises cfg.ForkPreservedCap to the effective preserved-fork

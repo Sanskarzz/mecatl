@@ -185,7 +185,15 @@ message Limits {
 // CreateSessionRequest opens a new session.
 message CreateSessionRequest {
   // workspace is the absolute session root tools operate against.
-  string workspace = 1 [(buf.validate.field).string.min_len = 1];
+  //
+  // CROSS-FIELD RULE (profile-aware, enforced by the server — which is why this
+  // field no longer carries a wire-level min_len): the DEFAULT profile
+  // (profile == "") REQUIRES a non-empty workspace, exactly as before; the
+  // "no-fs" profile REQUIRES an EMPTY workspace — a no-fs request that also
+  // names a workspace is a loud InvalidArgument (the combination is
+  // contradictory: a no-FS session has no filesystem to root), never a silent
+  // drop of either field.
+  string workspace = 1;
   // mode is the permission posture; unspecified defaults to DEFAULT.
   PermissionMode mode = 2;
   // limits are the optional stop conditions.
@@ -207,6 +215,21 @@ message CreateSessionRequest {
   // two distinct fields by design. Setting model_id WITHOUT provider_id is a loud
   // InvalidArgument (a bare model on an env-derived default provider is ambiguous).
   string model_id = 5;
+
+  // profile selects the session's TOOL-SURFACE profile, enum-as-string (the
+  // Event.type / Result.stop idiom — no proto enum, additive values):
+  //
+  //   - "" (default): the full filesystem profile — today's behaviour,
+  //     byte-identical. REQUIRES a non-empty workspace.
+  //   - "no-fs": a session with NO filesystem at all — no workspace, no
+  //     Read/Edit/Write/Grep/Glob/Bash, no Parallel, no SkillDraft; the agent
+  //     works through MCP tools, memory, web fetch, Skill bodies, and
+  //     delegation (Subagent/Team with the same file-less surface). REQUIRES an
+  //     EMPTY workspace (see the workspace cross-field rule above).
+  //
+  // Any other value is a loud InvalidArgument, never a silent fallback to the
+  // default profile. The profile is FIXED for the session lifetime.
+  string profile = 6;
 }
 
 // ServerCapabilities reports which optional features this server has ENABLED,

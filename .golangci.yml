@@ -166,6 +166,17 @@ linters:
           deny:
             - pkg: os
               desc: 'memfs is the in-memory FileSystem fake; it must not touch the real OS'
+        engine-adapter-nofs:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/nofs/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/tool
+          deny:
+            - pkg: os
+              desc: 'nofs is the honest no-filesystem Workspace; it must not touch the real OS'
         engine-adapter-mockllm:
           list-mode: strict
           files:

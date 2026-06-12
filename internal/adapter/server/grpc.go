@@ -31,15 +31,21 @@ var _ mecatlv1.HarnessServiceServer = (*HarnessServer)(nil)
 
 // CreateSession allocates a new session and returns its id.
 func (h *HarnessServer) CreateSession(ctx context.Context, req *mecatlv1.CreateSessionRequest) (*mecatlv1.CreateSessionResponse, error) {
-	if req.GetWorkspace() == "" {
-		return nil, status.Error(codes.InvalidArgument, "workspace is required")
+	// Session profile (issue #55): "" = default (full filesystem), "no-fs" = the
+	// no-filesystem profile; anything else is a loud InvalidArgument. The
+	// workspace requirement is PROFILE-AWARE and enforced in the service
+	// (createSession): default requires a workspace, no-fs requires an EMPTY one
+	// — so there is deliberately NO unconditional empty-workspace guard here.
+	profile, err := ParseSessionProfile(req.GetProfile())
+	if err != nil {
+		return nil, toStatus(err)
 	}
 	// Per-session provider/model selector (multi-provider Phase 0, S3): the two
 	// fields map to the neutral ProviderSelector; the zero selector keeps the
 	// shared-engine fast path. An unknown/unavailable provider, or model_id without
 	// provider_id, surfaces as InvalidArgument via toStatus.
 	sel := ProviderSelector{ProviderID: req.GetProviderId(), ModelID: req.GetModelId()}
-	sess, err := h.svc.CreateSessionWithProvider(ctx, req.GetWorkspace(), modeFromProto(req.GetMode()), limitsFromProto(req.GetLimits()), sel)
+	sess, err := h.svc.CreateSessionWithProfile(ctx, req.GetWorkspace(), modeFromProto(req.GetMode()), limitsFromProto(req.GetLimits()), sel, profile)
 	if err != nil {
 		return nil, toStatus(err)
 	}

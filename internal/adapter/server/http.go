@@ -80,6 +80,11 @@ type createSessionBody struct {
 	// client error (a bare model on the default provider is ambiguous).
 	ProviderID string `json:"provider_id,omitempty"`
 	ModelID    string `json:"model_id,omitempty"`
+	// Profile selects the session's tool-surface profile (issue #55), mirroring
+	// the proto field: "" = default (full filesystem, REQUIRES workspace),
+	// "no-fs" = the no-filesystem profile (REQUIRES an EMPTY workspace). Any
+	// other value is a 400.
+	Profile string `json:"profile,omitempty"`
 }
 
 type limitsIn struct {
@@ -247,8 +252,12 @@ func (h *HTTPHandler) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if body.Workspace == "" {
-		writeError(w, http.StatusBadRequest, "workspace is required")
+	// Session profile (issue #55): the workspace requirement is PROFILE-AWARE and
+	// enforced in the service (default requires one; no-fs requires an EMPTY one),
+	// so there is deliberately NO unconditional empty-workspace guard here.
+	profile, err := ParseSessionProfile(body.Profile)
+	if err != nil {
+		writeServiceError(w, err)
 		return
 	}
 	var limits session.Limits
@@ -260,7 +269,7 @@ func (h *HTTPHandler) createSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sel := ProviderSelector{ProviderID: body.ProviderID, ModelID: body.ModelID}
-	sess, err := h.svc.CreateSessionWithProvider(r.Context(), body.Workspace, modeFromString(body.Mode), limits, sel)
+	sess, err := h.svc.CreateSessionWithProfile(r.Context(), body.Workspace, modeFromString(body.Mode), limits, sel, profile)
 	if err != nil {
 		writeServiceError(w, err)
 		return

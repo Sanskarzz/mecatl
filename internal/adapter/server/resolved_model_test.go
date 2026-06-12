@@ -78,7 +78,7 @@ func TestServiceResolvedModelPerSession(t *testing.T) {
 		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "anthropic/claude-opus-4.5",
 	})
-	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
 		return server.SessionEngineResult{
 			Engine:        perSession,
 			ProviderID:    sel.ProviderID,
@@ -110,7 +110,7 @@ func TestServiceResolvedModelPerSession(t *testing.T) {
 // the raw request fields.
 func TestGRPCCreateSessionEchoesResolvedModel(t *testing.T) {
 	dflt := server.ResolvedModel{ProviderID: "openai", ModelID: "gpt-default", ContextWindow: 128000}
-	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
 		return server.SessionEngineResult{
 			Engine:        agent.NewEngine(agent.Deps{LLM: mockllm.New(mockllm.TextTurn("X")), Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "m"}),
 			ProviderID:    sel.ProviderID,
@@ -158,7 +158,7 @@ func TestGRPCCreateSessionEchoesResolvedModel(t *testing.T) {
 // distinct from the default — a handler dropping it would echo zero and fail.
 func TestGRPCGetSessionEchoesResolvedModel(t *testing.T) {
 	dflt := server.ResolvedModel{ProviderID: "openai", ModelID: "gpt-default", ContextWindow: 128000}
-	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
 		return server.SessionEngineResult{
 			Engine:        agent.NewEngine(agent.Deps{LLM: mockllm.New(mockllm.TextTurn("X")), Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "m"}),
 			ProviderID:    sel.ProviderID,

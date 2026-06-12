@@ -175,6 +175,38 @@ func TestSubagentSpecShellDisabledNoteOption(t *testing.T) {
 	}
 }
 
+// TestSubagentSpecNoFSNoteOption pins both sides of the WithSubagentNoFSNote
+// seam (the "no-fs" session profile): WITH the option, Spec()'s WHOLE
+// tool-surface description is replaced — no Read/Grep/Glob claim, no worktree
+// shell, no Parallel alternative, the honest MCP/memory/web-fetch surface
+// instead; WITHOUT it the description is byte-identical to the historical one
+// (the same shell clause TestSubagentSpecShellDisabledNoteOption pins), so a
+// default-profile deployment's prompt-cache-stable spec never shifts.
+func TestSubagentSpecNoFSNoteOption(t *testing.T) {
+	eng := childEngineWith(mockllm.New(mockllm.TextTurn("x")), catalogWith(t))
+
+	// Without the option: the historical file-tool surface, byte-stable.
+	plain := agent.NewSubagentTool(eng).Spec().Description
+	if !strings.Contains(plain, "(Read/Grep/Glob)") {
+		t.Fatalf("precondition: the historical spec names the read-only file tools, got:\n%s", plain)
+	}
+
+	// With the option: every file-bound claim is gone.
+	noFS := agent.NewSubagentTool(eng, agent.WithSubagentNoFSNote()).Spec().Description
+	for _, banned := range []string{"Read/Grep/Glob", "worktree", "use Parallel", "build/test/git", "fresh workspace"} {
+		if strings.Contains(noFS, banned) {
+			t.Errorf("no-FS spec must not claim %q, got:\n%s", banned, noFS)
+		}
+	}
+	// And the honest surface + the unchanged plumbing are described.
+	for _, want := range []string{"NO filesystem", "NO file tools and NO shell", "MCP tools, memory, and web fetch",
+		"cannot delegate further", "agentId:", "SubagentStatus", "InspectSubagent", "`resume`"} {
+		if !strings.Contains(noFS, want) {
+			t.Errorf("no-FS spec must state %q, got:\n%s", want, noFS)
+		}
+	}
+}
+
 // TestInspectSubagentSpecNamesProvenance proves the InspectSubagent description names the
 // 'agentId:' line provenance and the ~40-message bound (kept in sync with
 // maxInspectMessages).

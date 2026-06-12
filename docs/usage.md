@@ -1214,8 +1214,38 @@ Optional fields:
 `mode` accepts `default`, `plan`, `acceptedits` (also `accept_edits` / `accept`);
 unknown/empty falls back to the server default (`default`). A `limits` object
 with all-zero (or omitted) fields gets the server's non-zero defaults
-substituted (see §6). `workspace` is required — omitting it returns `400`
-`{"error":"workspace is required"}`.
+substituted (see §6). `workspace` is required for the default profile —
+omitting it returns `400` `{"error":"workspace is required"}`.
+
+### Create a no-filesystem session (`profile: "no-fs"`)
+
+A session can opt out of the filesystem entirely — useful for pure
+research/coordination agents (MCP tools + memory + web fetch) that should never
+touch a disk:
+
+```console
+$ curl -s -X POST http://127.0.0.1:8081/v1/sessions \
+       -d '{"profile":"no-fs"}'
+{"session_id":"..."}
+```
+
+The same `profile` field exists on the gRPC `CreateSessionRequest` (enum-as-
+string: `""` = default, `"no-fs"`). Rules, all enforced server-side:
+
+- `"no-fs"` REQUIRES an **empty** `workspace` (the combination is contradictory
+  and returns `400`/`InvalidArgument`); the default profile still requires one.
+- Any other profile value is rejected loudly — never a silent fallback.
+- The no-FS session has **no** Read/Edit/Write/Grep/Glob/Bash, no Parallel, and
+  no SkillDraft. It keeps MCP tools (server-global + resource meta-tools +
+  client MCP), the six memory tools, WebFetch, Skill (bodies are text
+  injection; out-of-workspace skill assets are unreadable), and delegation —
+  Subagent and Team children run the same file-less surface with **no**
+  worktree/fork isolation (there is nothing to isolate) and no shell.
+- The model is told up front (a system-prompt posture note plus an honest
+  Subagent tool description), so it plans around MCP/memory/web fetch instead
+  of burning turns on unknown-tool errors.
+- The profile composes with `provider_id`/`model_id` and is FIXED for the
+  session lifetime.
 
 ### Inspect a session
 

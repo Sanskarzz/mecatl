@@ -737,7 +737,26 @@ reach the right run.
 
 **gRPC (`harness.proto`, `grpc.go`)** — `HarnessService`:
 - `CreateSession(CreateSessionRequest) → CreateSessionResponse` — carries an
-  OPTIONAL per-session `provider_id` / `model_id` selector (multi-provider Phase 0; see §18).
+  OPTIONAL per-session `provider_id` / `model_id` selector (multi-provider Phase 0; see §18)
+  AND an OPTIONAL `profile` (enum-as-string: `""` = default, `"no-fs"`).
+
+  **The filesystem is OPTIONAL per session** (the `"no-fs"` profile, issue #55):
+  the workspace requirement is profile-aware — default requires one, no-fs
+  requires an EMPTY one (the contradictory combination is a loud
+  `InvalidArgument`), and any unknown profile is rejected, never silently
+  defaulted. A no-fs session always routes through the per-session engine
+  factory (the shared engine has the FS tools baked in): its catalog is the
+  default set MINUS exactly {Read, Edit, Write, Grep, Glob, Bash, Parallel,
+  SkillDraft} (pinned by `TestNoFSCatalogProfile`), its workspace is the honest
+  `engine/adapter/nofs` Workspace (reads fail `fs.ErrNotExist`, searches are
+  empty, writes refuse loudly — deliberately NOT memfs, which would silently
+  absorb writes nobody can read back), registered as the per-session workspace
+  override AT CREATE TIME so the osfs factory never sees the empty root, and
+  its Subagent/Team children run the same file-less surface (memory six +
+  WebFetch + global MCP) with no forkers and no shell. The model is told via a
+  system-prompt posture note and an honest Subagent spec. A REMOTE filesystem
+  for such sessions is a future driver concern (`docs/design/DRIVERS.md`), an
+  explicit non-goal of the profile itself.
 - `GetSession(GetSessionRequest) → GetSessionResponse`
 - `ListModels(ListModelsRequest) → ListModelsResponse` — the selectable-model
   inventory: every AVAILABLE provider's catalog models projected to public metadata
@@ -761,7 +780,7 @@ v1 enforces required checks in the Go server (protovalidate runtime is deferred)
 
 | HTTP | Maps to | Notes |
 |---|---|---|
-| `POST /v1/sessions` | `CreateSession` | JSON body → `session_id`; optional `provider_id`/`model_id` selector |
+| `POST /v1/sessions` | `CreateSession` | JSON body → `session_id`; optional `provider_id`/`model_id` selector + `profile` (`"no-fs"`) |
 | `GET /v1/sessions/{id}` | `GetSession` | JSON snapshot |
 | `GET /v1/models` | `ListModels` | JSON selectable-model inventory (available providers only, secret-free) |
 | `POST /v1/sessions/{id}/prompt` | start a run | `text/event-stream`; each event is `data: <proto Event as JSON>` |

@@ -82,6 +82,26 @@ func TestAllExcludesBash(t *testing.T) {
 	}
 }
 
+// TestNoFSExcludesFileTools pins the no-FS core surface: NoFS() is exactly
+// {WebFetch} — no file-touching tool (Read/Edit/Write/Grep/Glob) and no Bash may
+// ever appear in it. It is the anti-drift pin for the "no-fs" session profile's
+// core tier: a tool added to All() does NOT automatically reach NoFS().
+func TestNoFSExcludesFileTools(t *testing.T) {
+	got := NoFS()
+	if len(got) != 1 {
+		t.Fatalf("NoFS() = %d tools, want exactly 1 (WebFetch)", len(got))
+	}
+	if name := got[0].Spec().Name; name != "WebFetch" {
+		t.Fatalf("NoFS()[0] = %q, want WebFetch", name)
+	}
+	banned := map[string]bool{"Read": true, "Edit": true, "Write": true, "Grep": true, "Glob": true, BashToolName: true}
+	for _, tl := range got {
+		if banned[tl.Spec().Name] {
+			t.Errorf("NoFS() includes file/shell tool %q — the no-FS profile must never carry it", tl.Spec().Name)
+		}
+	}
+}
+
 func TestAllAndRegister(t *testing.T) {
 	if len(All()) != 6 {
 		t.Fatalf("All() = %d tools, want 6", len(All()))

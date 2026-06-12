@@ -175,7 +175,7 @@ func TestSkillReadRootsThreadedThroughTeamWiring(t *testing.T) {
 	provider := mockllm.New(mockllm.TextTurn("ok"))
 	cfg := Config{Model: "m"}
 	_, fk, roFk, _ := buildTeamWiring(ctx, cfg, regForTest(provider, providerMock, cfg.Model),
-		provider, providerMock, cfg.Model, nil, agents.NewRegistry(nil), []string{skillDir}, nil)
+		provider, providerMock, cfg.Model, nil, agents.NewRegistry(nil), []string{skillDir}, nil, catalogAssets{}, false)
 
 	base, err := osfs.NewWorkspace(t.TempDir())
 	if err != nil {

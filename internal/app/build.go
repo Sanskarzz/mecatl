@@ -28,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
+	"github.com/stacklok/mecatl/engine/adapter/nofs"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/adapter/permstore"
 	"github.com/stacklok/mecatl/engine/adapter/wallclock"
@@ -740,7 +741,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// eviction remains a follow-up; see docs/adr/0001-acp-adapter.md.
 		OnCloseSession: learned.Forget,
 	}
-	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, agentReg, assets.skillReadRoots, assets.skillIndex)
+	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, agentReg, assets.skillReadRoots, assets.skillIndex, assets)
 
 	svc, err := server.NewService(svcCfg)
 	if err != nil {
@@ -903,7 +904,12 @@ func sessionEngineFactory(
 	instructions prompt.InstructionAssembler,
 	assets catalogAssets,
 ) server.SessionEngineFactory {
-	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig) (server.SessionEngineResult, error) {
+	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile) (server.SessionEngineResult, error) {
+		// The NO-FS profile (issue #55): the service routes every no-fs session
+		// through this factory unconditionally (the shared engine has the FS tools
+		// baked in), and the profile selects the no-FS catalog assembly + the
+		// no-FS prompt posture below. The selector/MCP inputs compose orthogonally.
+		noFS := profile == server.ProfileNoFS
 		// Resolve the provider/model selector FIRST (before any MCP connect), so an
 		// unknown provider fails fast without a wasted connection. The zero selector
 		// keeps the default provider + cfg.Model (pre-S3 behaviour). resolvedProviderID
@@ -979,6 +985,7 @@ func sessionEngineFactory(
 			model:      resolvedModel,
 			clientMgr:  mgr,
 			narrate:    false,
+			noFS:       noFS,
 		})
 
 		// Identical to the main engine in every NON-provider Deps field except the
@@ -988,6 +995,13 @@ func sessionEngineFactory(
 		// provider never contaminates compaction/counting.
 		deps := engineDepsForProvider(cfg, resolvedProvider, resolvedModel, contextWindow, store, policy, hooks, mcpProvider, instructions)
 		deps.Catalog = cat
+		if noFS {
+			// MODEL-VISIBLE POSTURE (mandatory discoverability, the #40 pattern):
+			// tell the model up front there is no filesystem — and stop the prompt
+			// <env> claiming the SERVER's cwd/shell/git state, none of which this
+			// session can touch.
+			deps.PromptConfig = applyNoFSPosture(deps.PromptConfig, noFSPostureNote)
+		}
 		return server.SessionEngineResult{
 			Engine:       agent.NewEngine(deps),
 			Capabilities: sessionCaps,
@@ -1801,7 +1815,18 @@ func compactionDecision(cfg Config) diagFact {
 // NARROWER toolset and do NOT call this, so they are not call sites.) It logs the
 // Bash enable/disable decision only when log is true, so the per-session path (which
 // runs per session/new) stays quiet while the once-at-startup main path narrates.
-func registerCoreTools(cfg Config, cat *tool.Catalog, log bool) {
+//
+// noFS selects the NO-FILESYSTEM core tier (the "no-fs" session profile):
+// tools.NoFS() — WebFetch only, no file tools and NEVER Bash (a shell is a
+// filesystem act; the configured runner is not consulted). Guarded by
+// TestNoFSCatalogProfile (the exact name-set delta).
+func registerCoreTools(cfg Config, cat *tool.Catalog, log, noFS bool) {
+	if noFS {
+		for _, t := range tools.NoFS() {
+			cat.MustRegister(t)
+		}
+		return
+	}
 	for _, t := range tools.All() {
 		cat.MustRegister(t)
 	}
@@ -2910,7 +2935,15 @@ func buildParallelJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engi
 // inherits whatever the call site supplies — the build-time default (buildCatalog)
 // or a session-selected provider (Half B). The registry never reaches the Subagent
 // tool itself; it is consumed only inside buildAgentSubagentEngines' resolution loop.
-func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager, store port.SessionStore, skillReadRoots []string, skillIdx skillIndex) (tool.Tool, func() error) {
+// NO-FS PROFILE (issue #55): with noFS true the Subagent tool delegates to the
+// FILE-LESS child shape instead — see buildNoFSSubagentTool. `a` carries the
+// catalog assets the no-FS child surface registers over (memory stores + the
+// shared global MCP manager); it is read ONLY on the noFS branch (the default
+// branch keeps reading the skillReadRoots/skillIdx params as before).
+func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager, store port.SessionStore, skillReadRoots []string, skillIdx skillIndex, a catalogAssets, noFS bool) (tool.Tool, func() error) {
+	if noFS {
+		return buildNoFSSubagentTool(ctx, cfg, provReg, provider, parentProviderID, parentModel, hooks, store, a), nil
+	}
 	// skillIdx is the build-once name→body preload index (the SAME
 	// operator-controlled skill set the Skill tool serves, threaded from the
 	// skills seam via the catalog assets) so a def's `skills:` can preload
@@ -2961,6 +2994,50 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 		buildChildEngine(cfg, provReg, provider, parentProviderID, parentModel, sandboxedRunner),
 		opts...,
 	), mcpClose
+}
+
+// buildNoFSSubagentTool constructs the Subagent tool for a NO-FILESYSTEM session
+// (issue #55). The differences from the default shape, each deliberate:
+//
+//   - Child catalog: noFSChildCatalog (memory six + WebFetch + global MCP) —
+//     never Read/Grep/Glob, never Bash. The child investigates through MCP,
+//     memory, and web fetch only.
+//   - NO child forker and NO sandboxed runner: a fork is a filesystem act; the
+//     child runs against the parent's no-FS workspace (Root "").
+//   - NO per-def specialist engines: an agent definition's scoped catalog and
+//     workspace expectations are file-oriented (Read/Grep/Glob bases, worktree
+//     shells); mounting them here would advertise specialists whose described
+//     surface is a lie in this session. A def-driven no-FS specialist tier is a
+//     conscious non-goal this round.
+//   - Spec honesty: WithSubagentNoFSNote replaces the whole tool-surface
+//     description (the model must not plan file/shell delegation).
+//   - Prompt posture: the child Role carries noFSMemberNote and its <env> has
+//     no cwd/shell/git (applyNoFSPosture); Env.Cwd is "" by construction.
+//
+// The per-call `model` override factory is KEPT (same contamination-safe
+// newChildEngineForProvider path), minting no-FS children. Model resolution is
+// the same def-less chain as everywhere (SubagentModel > parent). The returned
+// tool has no close func (no inline MCP managers are connected on this path).
+func buildNoFSSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, hooks port.HookRunner, store port.SessionStore, a catalogAssets) tool.Tool {
+	newNoFSChild := func(role, model string, window int) *agent.Engine {
+		pc := applyNoFSPosture(explorerPromptConfig(modelCfgFor(cfg, model)), noFSMemberNote)
+		return newChildEngineForProvider(cfg, role, provider, model, window, noFSChildCatalog(ctx, cfg, a), pc, nil)
+	}
+	model, childWindow := resolveDefaultChildModel(cfg, provReg, parentProviderID, parentModel)
+	opts := []agent.SubagentOption{
+		agent.WithSubagentStopHook(hooks),
+		agent.WithSubagentStore(store),
+		agent.WithSubagentNoFSNote(),
+		agent.WithSubagentEngineFactory(func(overrideModel string) (*agent.Engine, bool) {
+			overrideModel = strings.TrimSpace(overrideModel)
+			if overrideModel == "" {
+				return nil, false
+			}
+			w := childWindowFor(provReg, parentProviderID, overrideModel, parentProviderID, parentModel)
+			return newNoFSChild("task:model="+overrideModel, overrideModel, w), true
+		}),
+	}
+	return agent.NewSubagentTool(newNoFSChild("task", model, childWindow), opts...)
 }
 
 // buildSubagentEngineFactory returns the per-call model-override factory the Subagent tool
@@ -3038,12 +3115,24 @@ func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider 
 // route its engine to a different provider, and a member that pins none inherits
 // whatever the caller supplies (the build-time default in buildCatalog/
 // applyTeamConfig, or a session-selected provider in Half B's in-catalog Team tool).
-func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager, agentReg *agents.Registry, skillReadRoots []string, skillIdx skillIndex) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, port.HookRunner) {
+// NO-FS PROFILE (issue #55): with noFS true the wiring is the FILE-LESS shape —
+// NO forkers at all (neither the read-only worktree nor the mutating force-copy:
+// both are filesystem acts), NO shell runners, and every member gets the no-FS
+// child surface (see buildMemberEngine's noFS branch). `a` carries the catalog
+// assets the no-FS member surface registers over; it is read only when noFS.
+func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, mainMgr *mcp.Manager, agentReg *agents.Registry, skillReadRoots []string, skillIdx skillIndex, a catalogAssets, noFS bool) (server.MemberEngineFactory, tool.WorkspaceForker, tool.WorkspaceForker, port.HookRunner) {
 	// A single hooks runner shared by the supervisor and the member coordination
 	// tools. hookexec.New(nil) matches buildEngine's default: the configured-hook map
 	// is not yet wired from cfg anywhere, so this is an inert (no-op) runner today,
 	// but it is the injection seam once it is.
 	teamHooks := hookexec.New(nil)
+	if noFS {
+		// File-less teams: no forkers (a spawned Mutating member would need a
+		// force-copy fork the supervisor cannot create — it fails that spawn
+		// loudly), no shell runners, and the no-FS member catalog for everyone.
+		factory := buildMemberEngine(cfg, provReg, provider, parentProviderID, parentModel, teamHooks, agentReg, skillIdx, nil, nil, false, mainMgr, a, true)
+		return factory, nil, nil, teamHooks
+	}
 	// agentReg is the SHARED registry (Build's single resolveAgentSeam): a
 	// member whose spec.AgentType names a def adopts that def's scoped
 	// catalog/model/prompt/permissionMode. skillIdx is the build-once preload
@@ -3066,7 +3155,7 @@ func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, p
 	memberRunner := buildSandboxedCommandRunner(cfg)
 	mutatingRunner := buildForceCopyRunner(cfg)
 	roIsolationAvailable := memberRunner != nil && roFk != nil
-	factory := buildMemberEngine(cfg, provReg, provider, parentProviderID, parentModel, teamHooks, agentReg, skillIdx, memberRunner, mutatingRunner, roIsolationAvailable, mainMgr)
+	factory := buildMemberEngine(cfg, provReg, provider, parentProviderID, parentModel, teamHooks, agentReg, skillIdx, memberRunner, mutatingRunner, roIsolationAvailable, mainMgr, a, false)
 	return factory, fk, roFk, teamHooks
 }
 
@@ -3077,7 +3166,7 @@ func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, p
 // SAME wiring the Team tool uses (buildCatalog) — so the gRPC CreateTeam path and the
 // Team tool cannot drift. MaxTeams is left at zero so the server applies its own
 // default.
-func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, provider port.LLMProvider, mainMgr *mcp.Manager, agentReg *agents.Registry, skillReadRoots []string, skillIdx skillIndex) {
+func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, provider port.LLMProvider, mainMgr *mcp.Manager, agentReg *agents.Registry, skillReadRoots []string, skillIdx skillIndex, a catalogAssets) {
 	if !cfg.EnableTeams {
 		cfg.diag().Log(context.Background(), port.LevelInfo, "agent teams DISABLED (set --enable-teams to enable; experimental)")
 		return
@@ -3087,7 +3176,9 @@ func applyTeamConfig(svcCfg *server.Config, cfg Config, reg *providerRegistry, p
 	// provider propagation to the standalone CreateTeam RPC is DEFERRED (CreateTeam
 	// carries no selector today); the in-catalog Team tool IS covered in Half B.
 	// agentReg is the ONE registry Build resolved (resolveAgentSeam).
-	factory, fk, roFk, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr, agentReg, skillReadRoots, skillIdx)
+	// The gRPC CreateTeam path is always the DEFAULT (filesystem) profile — a
+	// no-FS team exists only inside a no-fs session's in-catalog Team tool.
+	factory, fk, roFk, teamHooks := buildTeamWiring(context.Background(), cfg, reg, provider, reg.Default(), cfg.Model, mainMgr, agentReg, skillReadRoots, skillIdx, a, false)
 	svcCfg.MemberEngine = factory
 	svcCfg.Forker = fk
 	svcCfg.ReadOnlyForker = roFk
@@ -3158,8 +3249,32 @@ func modelCfgFor(cfg Config, model string) Config {
 // untrusted .git is the accepted main-session-parity residual — see
 // buildForceCopyRunner), so untrust withholds ONLY the worktree shell — the
 // asymmetry the trust-gate tests pin.
-func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner, mutatingRunner tool.CommandRunner, roIsolationAvailable bool, mainMgr *mcp.Manager) server.MemberEngineFactory {
+// NO-FS PROFILE (issue #55): with noFS true every member — lead included,
+// Mutating or not, def or not — gets the SAME file-less surface: the no-FS child
+// catalog (memory six + WebFetch + global MCP) + the team coordination tools,
+// with the noFSMemberNote prompt posture and no cwd/shell/git in its <env>.
+// Agent-def adoption is deliberately SKIPPED on this branch (a def's scoped
+// catalog is file-oriented — same rationale as buildNoFSSubagentTool); the
+// member still resolves its model through the def-less chain. The catalog's
+// non-read-only tools (Remember/RememberUser, MCP) ride MemberBuild.MCPToolNames
+// — the supervisor's documented exemption for non-WORKSPACE mutators — so the
+// base-sharing read-only-member backstop stays sound. `a` is read only when noFS.
+func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner, mutatingRunner tool.CommandRunner, roIsolationAvailable bool, mainMgr *mcp.Manager, a catalogAssets, noFS bool) server.MemberEngineFactory {
 	return func(t *team.Team, spec agent.MemberSpec) agent.MemberBuild {
+		if noFS {
+			model, window := resolveDefaultChildModel(cfg, provReg, parentProviderID, parentModel)
+			cat := noFSChildCatalog(context.Background(), cfg, a)
+			// Exempt the catalog's non-workspace mutators (memory writers, MCP
+			// tools) BEFORE the coordination tools are added (those are exempted
+			// by name in the supervisor already).
+			exempt := nonReadOnlyToolNames(cat)
+			for _, mt := range agent.MemberTools(t, spec.Name, teamHooks) {
+				cat.MustRegister(mt)
+			}
+			pc := applyNoFSPosture(promptConfig(modelCfgFor(cfg, model), ""), noFSMemberNote)
+			eng := newChildEngineForProvider(cfg, "member:"+spec.Name, provider, model, window, cat, pc, nil)
+			return agent.MemberBuild{Engine: eng, MCPToolNames: exempt}
+		}
 		cat := tool.NewCatalog()
 		// Default (undefined) member model (issue #35): the SAME def-less chain as
 		// the default Subagent explorer and Parallel branches — `SubagentModel
@@ -3383,6 +3498,38 @@ func memberBashRunner(mutating bool, roRunner, mutatingRunner tool.CommandRunner
 // member receives on an untrusted workspace (issue #40), so it knows up front it has
 // no shell rather than discovering it via unknown-tool errors.
 const untrustedMemberShellNote = "This workspace is untrusted: you have no shell; use Read/Grep/Glob."
+
+// noFSPostureNote is the MAIN-engine system-prompt suffix of a "no-fs" profile
+// session (issue #55, the #40 composition-append pattern): the model must learn
+// there is no filesystem from the prompt, not from a trail of unknown-tool
+// errors. The "NO filesystem" substring is a stable test key.
+const noFSPostureNote = "This session has NO filesystem: there is no workspace, and no file tools " +
+	"(Read/Write/Edit/Grep/Glob) or shell exist. Do not attempt to read, write, search, or run " +
+	"commands against files — nothing is there to lose or find. Work through your other tools " +
+	"(MCP tools, memory, web fetch) and your own reasoning; delegate only file-free investigations. " +
+	"Skills provide their instruction text only — a skill's bundled asset files are not readable here."
+
+// noFSMemberNote is the CHILD-engine sibling of untrustedMemberShellNote for the
+// no-FS profile: every no-FS delegation child (team member, Subagent explorer)
+// gets it appended to its Role so it plans around MCP/memory/web fetch instead
+// of burning turns attempting file tools that do not exist.
+const noFSMemberNote = "This session has NO filesystem: you have no file tools and no shell; " +
+	"work through MCP tools, memory, and web fetch."
+
+// applyNoFSPosture rewrites a prompt.Config for a NO-FILESYSTEM engine: the
+// FS-environment facts are zeroed (no cwd, no shell, no git snapshot — there is
+// no filesystem for the <env> block to describe) and note is appended to the
+// Role (DefaultRole fallback first — the applyUntrustedMemberShellNote idiom).
+// It is the ONE posture helper shared by the main no-FS engine
+// (noFSPostureNote) and the no-FS child/member engines (noFSMemberNote).
+func applyNoFSPosture(pc prompt.Config, note string) prompt.Config {
+	pc.Env.Cwd, pc.Env.Shell, pc.Env.GitStatus = "", "", ""
+	if pc.Role == "" {
+		pc.Role = prompt.DefaultRole()
+	}
+	pc.Role += "\n\n" + note
+	return pc
+}
 
 // lookupMemberDef resolves spec.AgentType against the registry, returning the def
 // and true on a hit. An empty AgentType or a miss returns false (the caller falls
@@ -3664,8 +3811,22 @@ func defaultLimits() session.Limits {
 // read-only allowed roots (catalogAssets.skillReadRoots) so Read/Stat can serve
 // an activated skill's files by absolute path. A root that cannot be opened
 // yields a nil Workspace; tool calls against it return errors the model can read.
+//
+// EMPTY-ROOT CHOKEPOINT (issue #55): an empty root NEVER reaches osfs. An empty
+// persisted Session.Workspace can only be a no-fs session, and osfs.NewWorkspace("")
+// would MkdirAll/OpenRoot the server process's cwd — a filesystem escalation. The
+// Service intercepts this first (no-fs sessions carry a per-session workspace
+// override, restored by rehydrateNoFSSession after a restart), so this branch is
+// the defense a FUTURE caller cannot bypass: it serves the honest no-filesystem
+// workspace and logs loudly, because reaching it means a no-fs guard upstream
+// regressed.
 func osfsWorkspaceFactory(d port.Diagnostics, skillReadRoots []string) server.WorkspaceFactory {
 	return func(root string) tool.Workspace {
+		if root == "" {
+			d.Log(context.Background(), port.LevelError,
+				"workspace factory: EMPTY root reached the shared osfs factory (a no-fs session bypassed its workspace override?); serving the no-filesystem workspace instead of the process cwd")
+			return nofs.New()
+		}
 		ws, err := osfs.NewWorkspace(root, osfs.WithReadRoots(skillReadRoots...))
 		if err != nil {
 			d.Log(context.Background(), port.LevelError, "workspace factory: cannot open root", "root", root, "err", err)

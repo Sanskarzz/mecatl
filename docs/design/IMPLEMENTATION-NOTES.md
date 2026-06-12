@@ -1624,10 +1624,80 @@ periodic/interval refresh, OpenAI lister (catalog-only by design), the per-sessi
 live-capability closer, surfacing the output ceiling/thinking in the picker proto (Slice D), the
 OpenRouter `reasoning_details` replay fix (a separate request-path bug, not bundled).
 
+### Session profiles — `"no-fs"` (issue #55)
+
+The filesystem is **optional per session**. `CreateSessionRequest.profile`(6) is an
+enum-as-string (`""` default / `"no-fs"`; unknown ⇒ loud InvalidArgument, never a silent
+default), parsed by `server.ParseSessionProfile` and FIXED for the session lifetime. The
+workspace requirement is PROFILE-AWARE in `Service.createSession` (the old unconditional
+empty-workspace guards in grpc.go/http.go are gone): default REQUIRES a workspace, no-fs
+REQUIRES an EMPTY one — the contradictory combination is rejected loudly. A no-fs session
+ALWAYS takes the per-session engine path (`needPerSession` includes the profile — the shared
+engine has the FS tools baked in) and `server.SessionEngineFactory` grew a
+`profile SessionProfile` parameter, mirroring how the `ProviderSelector` flows.
+
+- **Catalog profile:** `catalogSession.noFS` threads through `assembleCatalog`.
+  `registerCoreTools(…, noFS)` registers `tools.NoFS()` = {WebFetch} (never Bash — the
+  configured runner is not consulted); `registerParallelTool` is SKIPPED (a branch is a
+  filesystem fork; the deliverable is a fork PATH); `registerSkillDraft` is SKIPPED (drafting
+  writes a SKILL.md — a filesystem-authoring act). Everything else (global/client MCP +
+  resource meta-tools, Subagent trio, Team/InspectMember, the memory six, Skill) registers
+  identically. The EXACT delta — default set MINUS {Read, Edit, Write, Grep, Glob, Bash,
+  Parallel, SkillDraft} — is pinned by `TestNoFSCatalogProfile` (the issue-#42 idiom over the
+  REAL `buildCatalog` assets, mutation-verified).
+- **Skill stays ON, body-only:** a skill body is TEXT INJECTION, not a filesystem act; an
+  out-of-workspace ASSET read fails honestly through the no-FS workspace (skills with
+  payload files are effectively body-only in a no-fs session).
+- **Workspace:** `engine/adapter/nofs` — the HONEST empty `tool.Workspace` (reads/stats fail
+  `fs.ErrNotExist`, Glob/Grep empty, Write refuses with `ErrNoFilesystem`, `Root()` "");
+  deliberately NOT memfs, which would silently absorb writes nobody can ever read back —
+  with nofs nothing exists that can be lost. It is registered as the per-session workspace
+  OVERRIDE at CREATE time (the ACP-buffer-workspace seam, same lock as the engine
+  registration), so `StartRun` never hands the empty root to the osfs factory (which would
+  MkdirAll/OpenRoot the server process cwd). Persisted `Session.Workspace` is `""`.
+- **Child surface (Subagent + Team):** `noFSChildCatalog(assets)` = memory six + WebFetch +
+  global MCP — no FS tools, no shell, NO forkers (neither worktree nor force-copy; a
+  Mutating team-member spawn fails loudly at `selectMemberWorkspace`). Per-def specialist
+  engines and def adoption are SKIPPED under no-fs (a def's scoped catalog/worktree
+  expectations are file-oriented — a no-fs specialist tier is a conscious non-goal this
+  round); the def-less model chain (`SubagentModel` > parent) and the per-call `model`
+  override factory still apply. Member catalogs' non-read-only tools (memory writers, MCP)
+  ride `MemberBuild.MCPToolNames` — the supervisor's documented non-workspace-mutator
+  exemption — so the base-sharing backstop stays sound.
+- **Model-visible posture (mandatory discoverability):** `applyNoFSPosture` zeroes
+  `Env.Cwd/Shell/GitStatus` and appends `noFSPostureNote` (main engine) /
+  `noFSMemberNote` (children) to the Role; `agent.WithSubagentNoFSNote()` replaces the WHOLE
+  Subagent tool-surface description (no Read/Grep/Glob, no worktree, no Parallel claims) —
+  byte-identical without the option (`TestSubagentSpecNoFSNoteOption`, mutation-verified).
+- **Restart rehydration:** the profile is not a snapshot field but it IS recoverable — an
+  empty persisted `Session.Workspace` can ONLY be a no-fs session (default requires one,
+  ACP persists a real cwd, CreateTeam rejects empty). At the run-entry seam
+  (`Service.StartRunContent`) a loaded empty-workspace session with no registered
+  per-session engine is REHYDRATED (`rehydrateNoFSSession`): the no-fs engine is rebuilt
+  through the SAME `SessionEngineFactory` path create used (zero selector — the snapshot
+  carries no provider/model, so the DEFAULT-provider no-fs engine is the sound floor) and
+  the nofs workspace override re-registered, under the create-time cap/lock discipline.
+  Without this the session would silently ESCALATE onto the shared engine (full FS tools +
+  Bash) over `osfs` opened at the server cwd. Two defenses can't regress independently:
+  `StartRunContent` never hands an empty root to the shared factory (serves `nofs.New()`),
+  and `osfsWorkspaceFactory` itself intercepts `root == ""` (ERROR log + nofs — the
+  chokepoint a future caller cannot bypass). `LoadSessionWithMCP` derives the profile from
+  the same empty-workspace fact instead of hardcoding the default. Guarded by
+  `TestNoFSSessionRehydratesAfterRestart` (server seam) +
+  `TestNoFSSessionSurvivesRestartE2E` (full Build over a shared jsonl store),
+  mutation-verified (drop the rehydration branch → the escalation is visible).
+- **Non-goals / known edges:** a REMOTE filesystem for no-fs sessions returns later as a
+  driver (see `DRIVERS.md`). Selector/client-MCP sessions still lose their per-session
+  engine on restart (they degrade to the default provider — a posture change, not an
+  escalation; only the no-fs case demanded rehydration). Skills with payload files are
+  body-only in a no-fs session: the body injects fine, asset reads fail honestly with
+  not-exist through the nofs workspace (and the posture note tells the model so).
+
 ## Proto — `contracts/proto/mecatl/v1/` (multi-provider Phase 0 S3 wire surface)
 
 `CreateSessionRequest` carries an OPTIONAL `provider_id`(4)+`model_id`(5) selector (two distinct
-fields, NEVER slash-joined); `ListModels(ListModelsRequest)→ListModelsResponse` returns the
+fields, NEVER slash-joined) and an OPTIONAL `profile`(6) (enum-as-string; see the session-profiles
+section above — the workspace `min_len` was removed in favour of the profile-aware server rule); `ListModels(ListModelsRequest)→ListModelsResponse` returns the
 `ModelInfo` inventory (id/provider_id/display_name/image/reasoning/context_limit) for AVAILABLE
 providers only, secret-free; `ServerCapabilities.model_selection`(12) is true iff ≥1 provider is
 available (gates the client picker like `agents` gates `/agents`). Additive + old-client-safe (an

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
+	"github.com/stacklok/mecatl/engine/adapter/nofs"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
@@ -108,7 +109,14 @@ type ResolvedModel struct {
 // non-default selector or non-empty specs are rejected with ErrInvalidArgument. It
 // mirrors MemberEngineFactory: the Service references the type in its signatures
 // but never builds managers itself.
-type SessionEngineFactory func(ctx context.Context, sel ProviderSelector, specs []mcp.ServerConfig) (SessionEngineResult, error)
+//
+// profile is the session's tool-surface profile (issue #55), flowing exactly as
+// the selector does: ProfileDefault keeps today's catalog byte-identical;
+// ProfileNoFS makes the factory assemble the NO-FILESYSTEM catalog (no file
+// tools, no Bash, no Parallel, no SkillDraft; file-less Subagent/Team children)
+// and apply the no-FS prompt posture. A no-FS session ALWAYS routes through this
+// factory — the shared engine has the FS tools baked in.
+type SessionEngineFactory func(ctx context.Context, sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile) (SessionEngineResult, error)
 
 // Config wires the server adapter to the WP8 engine and its collaborators.
 type Config struct {
@@ -485,38 +493,70 @@ var ErrNoActiveRun = errors.New("server: no active run for session")
 // CreateSession allocates a new idle session on the SHARED engine, persists it,
 // and returns it. workspace must be non-empty. An unspecified mode falls back to
 // DefaultMode. It is the no-selector, no-MCP fast path: it delegates to the
-// generalized createSession with the zero selector and nil specs.
+// generalized createSession with the zero selector, nil specs and the default
+// profile.
 func (s *Service) CreateSession(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits) (*session.Session, error) {
-	return s.createSession(ctx, workspace, mode, limits, ProviderSelector{}, nil)
+	return s.createSession(ctx, workspace, mode, limits, ProviderSelector{}, nil, ProfileDefault)
 }
 
 // CreateSessionWithProvider creates a session bound to a non-default
 // provider/model selector (multi-provider Phase 0, S3) via a PER-SESSION engine,
-// with no client MCP. It is the gRPC/HTTP entry for a CreateSession request that
-// carries provider_id/model_id. The zero selector delegates to the shared-engine
-// fast path; a non-zero selector REQUIRES Config.SessionEngine (else
+// with no client MCP and the DEFAULT profile. It delegates to
+// CreateSessionWithProfile; see there for the selector semantics.
+func (s *Service) CreateSessionWithProvider(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, sel ProviderSelector) (*session.Session, error) {
+	return s.CreateSessionWithProfile(ctx, workspace, mode, limits, sel, ProfileDefault)
+}
+
+// CreateSessionWithProfile creates a session bound to an optional non-default
+// provider/model selector AND a tool-surface profile (issue #55), with no client
+// MCP. It is the gRPC/HTTP entry for a CreateSession request. The zero selector
+// + default profile delegates to the shared-engine fast path; a non-zero
+// selector OR the no-fs profile REQUIRES Config.SessionEngine (else
 // ErrInvalidArgument) and resolves through the factory (an unknown/unavailable
 // provider id surfaces as ErrInvalidArgument). Setting ModelID with an empty
 // ProviderID is rejected (a bare model on the env-derived default provider is
-// ambiguous).
-func (s *Service) CreateSessionWithProvider(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, sel ProviderSelector) (*session.Session, error) {
+// ambiguous). The workspace requirement is PROFILE-AWARE — see createSession.
+func (s *Service) CreateSessionWithProfile(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, sel ProviderSelector, profile SessionProfile) (*session.Session, error) {
 	if sel.ProviderID == "" && sel.ModelID != "" {
 		return nil, fmt.Errorf("%w: model_id requires provider_id (a bare model on the default provider is ambiguous)", ErrInvalidArgument)
 	}
-	return s.createSession(ctx, workspace, mode, limits, sel, nil)
+	return s.createSession(ctx, workspace, mode, limits, sel, nil, profile)
 }
 
 // createSession is the single create path generalizing the shared-engine fast
-// path, the per-session provider/model selector, and the per-session client MCP
-// servers. A session needs a PER-SESSION engine when the selector is non-zero OR
-// specs are non-empty; otherwise it uses the shared engine (zero overhead, no
-// registry entry — today's byte-identical path). The factory takes both inputs so
-// a session with BOTH a non-default model and client MCP gets ONE engine over ONE
-// catalog. On a persist failure after the engine was built, the per-session MCP
-// manager is torn down so a failed create never leaks it.
-func (s *Service) createSession(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, sel ProviderSelector, specs []mcp.ServerConfig) (*session.Session, error) {
-	if workspace == "" {
-		return nil, fmt.Errorf("%w: workspace is required", ErrInvalidArgument)
+// path, the per-session provider/model selector, the per-session client MCP
+// servers, and the session profile. A session needs a PER-SESSION engine when
+// the selector is non-zero OR specs are non-empty OR the profile is no-fs (the
+// shared engine has the FS tools baked in — a no-FS session MUST NOT ride it);
+// otherwise it uses the shared engine (zero overhead, no registry entry —
+// today's byte-identical path). The factory takes all three inputs so a session
+// combining them gets ONE engine over ONE catalog. On a persist failure after
+// the engine was built, the per-session MCP manager is torn down so a failed
+// create never leaks it.
+//
+// PROFILE-AWARE workspace rule (replacing the old unconditional empty-workspace
+// guard): the default profile REQUIRES a workspace (unchanged); the no-fs
+// profile REQUIRES an EMPTY one — the combination is contradictory and is
+// REJECTED loudly, never resolved by silently dropping either field. A no-fs
+// session persists Workspace == "" and registers the no-FS Workspace as its
+// per-session workspace OVERRIDE at create time (the ACP-buffer-workspace
+// mechanism, same lock as the engine registration), so StartRun can never hand
+// "" to the osfs workspace factory (which would MkdirAll/OpenRoot the process
+// cwd).
+func (s *Service) createSession(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile) (*session.Session, error) {
+	switch profile {
+	case ProfileDefault:
+		if workspace == "" {
+			return nil, fmt.Errorf("%w: workspace is required", ErrInvalidArgument)
+		}
+	case ProfileNoFS:
+		if workspace != "" {
+			return nil, fmt.Errorf("%w: profile %q must not carry a workspace (a no-FS session has no filesystem to root); got %q", ErrInvalidArgument, ProfileNoFS, workspace)
+		}
+	default:
+		// Defensive: the wire handlers ParseSessionProfile first, but an
+		// in-process caller could hand anything.
+		return nil, fmt.Errorf("%w: unknown session profile %q (supported: \"\" (default) and %q)", ErrInvalidArgument, profile, ProfileNoFS)
 	}
 	if mode == "" {
 		mode = s.cfg.DefaultMode
@@ -527,7 +567,7 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 		limits = s.cfg.DefaultLimits
 	}
 
-	needPerSession := sel != (ProviderSelector{}) || len(specs) > 0
+	needPerSession := sel != (ProviderSelector{}) || len(specs) > 0 || profile == ProfileNoFS
 	if !needPerSession {
 		// Shared-engine fast path (today's behaviour, byte-identical).
 		sess := session.New(s.cfg.NewID(), mode, workspace, limits, s.cfg.Now())
@@ -552,7 +592,7 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
 	}
 
-	res, err := s.cfg.SessionEngine(ctx, sel, specs)
+	res, err := s.cfg.SessionEngine(ctx, sel, specs, profile)
 	if err != nil {
 		// Factory maps an unknown/unavailable provider to ErrInvalidArgument; any
 		// error is propagated as-is for the caller to map to a status.
@@ -582,14 +622,24 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 		resolvedModel: ResolvedModel{ProviderID: res.ProviderID, ModelID: res.ModelID, ContextWindow: res.ContextWindow},
 		close:         closeFn,
 	}
+	if profile == ProfileNoFS {
+		// Register the no-FS Workspace as this session's per-session workspace
+		// OVERRIDE under the SAME lock as the engine registration, so the moment
+		// the session is visible StartRun resolves its workspace here and NEVER
+		// hands the empty root to the shared osfs Workspaces factory (which would
+		// MkdirAll/OpenRoot the server process's cwd — the exact hazard).
+		s.sessionWorkspaces[sess.ID] = nofs.New()
+	}
 	s.mu.Unlock()
 
 	if serr := s.cfg.Store.Save(ctx, sess); serr != nil {
 		// The engine was built and the slot reserved but the session could not be
-		// persisted: evict the reservation and tear the per-session MCP manager down
-		// so a failed create leaks neither a slot nor a connection.
+		// persisted: evict the reservation (engine slot AND any workspace
+		// override) and tear the per-session MCP manager down so a failed create
+		// leaks neither a slot nor a connection.
 		s.mu.Lock()
 		delete(s.sessionEngines, sess.ID)
+		delete(s.sessionWorkspaces, sess.ID)
 		s.mu.Unlock()
 		if closeFn != nil {
 			_ = closeFn()
@@ -653,11 +703,12 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 // disconnect) or by the Service's Close.
 func (s *Service) CreateSessionWithMCP(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, specs []mcp.ServerConfig) (*session.Session, error) {
 	// Thin wrapper over the generalized create path with the ZERO provider
-	// selector: no specs uses the shared engine (today's behaviour), specs build a
-	// per-session engine. The factory now takes (sel, specs); the zero selector
-	// leaves the per-session engine bound to the DEFAULT provider, matching the
-	// pre-S3 MCP path exactly.
-	return s.createSession(ctx, workspace, mode, limits, ProviderSelector{}, specs)
+	// selector and the DEFAULT profile: no specs uses the shared engine (today's
+	// behaviour), specs build a per-session engine. The zero selector leaves the
+	// per-session engine bound to the DEFAULT provider, matching the pre-S3 MCP
+	// path exactly. (ACP carries no profile in P0 — every ACP session is the
+	// default filesystem profile.)
+	return s.createSession(ctx, workspace, mode, limits, ProviderSelector{}, specs, ProfileDefault)
 }
 
 // SetSessionWorkspace registers a per-session Workspace OVERRIDE for id, so a
@@ -885,8 +936,19 @@ func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, 
 	}
 	// Re-mount client MCP on resume with the ZERO provider selector: a resumed
 	// session keeps the DEFAULT provider (per-session provider/model binding on
-	// resume is out of scope — the wire CreateSession selector is for new sessions).
-	res, err := s.cfg.SessionEngine(ctx, ProviderSelector{}, specs)
+	// resume is out of scope — the wire CreateSession selector is for new
+	// sessions). The PROFILE is derived from the persisted snapshot, not
+	// hardcoded: an empty persisted Workspace can ONLY be a no-fs session (the
+	// default profile requires one; ACP persists a real cwd), so the rebuilt
+	// engine must be the no-fs one — handing such a session a default-profile
+	// engine would silently re-grant the FS tools (the same restart escalation
+	// rehydrateNoFSSession guards on the StartRun path). ACP itself never
+	// creates no-fs sessions today, so this is the defensive derivation.
+	profile := ProfileDefault
+	if sess.Workspace == "" {
+		profile = ProfileNoFS
+	}
+	res, err := s.cfg.SessionEngine(ctx, ProviderSelector{}, specs, profile)
 	if err != nil {
 		// The session was loaded + (if needed) reopened and re-persisted, but the
 		// per-session engine could not be built. We deliberately do NOT roll that
@@ -908,6 +970,12 @@ func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, 
 		caps:          res.Capabilities,
 		resolvedModel: ResolvedModel{ProviderID: res.ProviderID, ModelID: res.ModelID, ContextWindow: res.ContextWindow},
 		close:         res.Close,
+	}
+	if profile == ProfileNoFS {
+		// A no-fs session's workspace override is re-registered with the engine
+		// under the same lock (the create-time discipline), so StartRun never
+		// consults the shared factory with the empty root.
+		s.sessionWorkspaces[id] = nofs.New()
 	}
 	s.mu.Unlock()
 	return sess, nil
@@ -957,17 +1025,109 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 	// servers) when one is registered; otherwise drive the shared engine.
 	engine := s.cfg.Engine
 	s.mu.Lock()
-	if se, ok := s.sessionEngines[id]; ok {
-		engine = se.engine
-	}
+	se, hasEngine := s.sessionEngines[id]
 	ws := s.sessionWorkspaces[id]
 	s.mu.Unlock()
+	if !hasEngine && sess.Workspace == "" {
+		// RESTART REHYDRATION (issue #55): a PERSISTED session with an empty
+		// Workspace can ONLY be a no-fs session (the default profile requires a
+		// non-empty workspace, ACP persists a real cwd, CreateTeam rejects empty),
+		// and its per-session engine + workspace override live only in process
+		// memory — after a restart both are gone. Without this branch the session
+		// would silently ESCALATE onto the shared engine (full FS tools + Bash)
+		// over a workspace built from the empty root (osfs MkdirAll/OpenRoot of
+		// the server process cwd). Rebuild the no-fs engine through the SAME
+		// factory path create used and re-register the no-fs workspace override.
+		se, err = s.rehydrateNoFSSession(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		hasEngine = true
+		ws = nofs.New()
+	}
+	if hasEngine {
+		engine = se.engine
+	}
 	if ws == nil {
-		ws = s.cfg.Workspaces(sess.Workspace)
+		if sess.Workspace == "" {
+			// DEFENSIVE CHOKEPOINT (issue #55): never hand an EMPTY root to the
+			// shared Workspaces factory — the osfs factory would MkdirAll/OpenRoot
+			// the server process's cwd. An empty persisted workspace is by
+			// construction a no-fs session, so the honest no-filesystem workspace
+			// is the only sound value here (normally unreachable: create and the
+			// rehydration above both register the override).
+			ws = nofs.New()
+		} else {
+			ws = s.cfg.Workspaces(sess.Workspace)
+		}
 	}
 	run := engine.RunContent(ctx, sess, ws, text, parts)
 	s.register(id, run, sess)
 	return run, nil
+}
+
+// rehydrateNoFSSession rebuilds and registers the per-session NO-FS engine (and
+// the no-fs workspace override) for a persisted no-fs session whose in-memory
+// registrations did not survive a process restart. It is called from the
+// run-entry seam (StartRunContent) when the loaded session has an empty
+// Workspace and no per-session engine is registered.
+//
+// The rehydrated engine is built through the SAME SessionEngineFactory create
+// used, with the ZERO provider selector and no client MCP: the session snapshot
+// persists neither (session.Session carries no provider/model selector — the
+// same restart posture as every other resume path), so the DEFAULT-provider
+// no-fs engine is the sound floor. The cap/lock discipline mirrors
+// createSession: cheap pre-check, build outside the lock, authoritative
+// re-check + register under the lock. A concurrent rehydration losing the race
+// keeps the winner's engine and tears its own down (the LoadSessionWithMCP
+// leak-guard idiom, inverted: first registration wins).
+func (s *Service) rehydrateNoFSSession(ctx context.Context, id session.SessionID) (*sessionEngine, error) {
+	if s.cfg.SessionEngine == nil {
+		// NEVER fall back to the shared engine: that is exactly the escalation
+		// this seam exists to prevent. A no-fs session could only have been
+		// created with a factory configured, so this is a deployment mis-wire.
+		return nil, fmt.Errorf("%w: persisted no-fs session %q cannot be rehydrated (no session-engine factory configured)", ErrInvalidArgument, id)
+	}
+	s.mu.Lock()
+	full := len(s.sessionEngines) >= s.cfg.MaxSessionEngines
+	s.mu.Unlock()
+	if full {
+		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
+	}
+	res, err := s.cfg.SessionEngine(ctx, ProviderSelector{}, nil, ProfileNoFS)
+	if err != nil {
+		return nil, fmt.Errorf("server: rehydrate no-fs session %q: %w", id, err)
+	}
+	se := &sessionEngine{
+		engine:        res.Engine,
+		caps:          res.Capabilities,
+		resolvedModel: ResolvedModel{ProviderID: res.ProviderID, ModelID: res.ModelID, ContextWindow: res.ContextWindow},
+		close:         res.Close,
+	}
+	s.mu.Lock()
+	if prior, ok := s.sessionEngines[id]; ok {
+		// A concurrent rehydration (or load) won the race: keep its engine, tear
+		// ours down so the loser leaks no MCP manager.
+		s.mu.Unlock()
+		if se.close != nil {
+			_ = se.close()
+		}
+		return prior, nil
+	}
+	if len(s.sessionEngines) >= s.cfg.MaxSessionEngines {
+		s.mu.Unlock()
+		if se.close != nil {
+			_ = se.close()
+		}
+		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
+	}
+	s.sessionEngines[id] = se
+	// Re-register the no-fs workspace override under the SAME lock as the engine
+	// (the create-time discipline), so the run below — and every later run —
+	// resolves its workspace here and never consults the shared factory.
+	s.sessionWorkspaces[id] = nofs.New()
+	s.mu.Unlock()
+	return se, nil
 }
 
 // ProviderCapabilities reports the DEFAULT provider+model's multimodal input

@@ -94,7 +94,7 @@ func TestDefaultMemberUsesSubagentModel(t *testing.T) {
 	prov := observedProvider(&models, &mu, mockllm.TextTurn("done"))
 	cfg := Config{Model: "claude-default", SubagentModel: catAnthropicModel}
 	factory := buildMemberEngine(cfg, regForTest(prov, providerAnthropic, cfg.Model), prov, providerAnthropic, cfg.Model,
-		hookexec.New(nil), agents.NewRegistry(nil), nil, nil, nil, false, nil)
+		hookexec.New(nil), agents.NewRegistry(nil), nil, nil, nil, false, nil, catalogAssets{}, false)
 
 	build := factory(team.New("t"), agent.MemberSpec{Name: "m"})
 	if build.Engine == nil {
@@ -121,7 +121,7 @@ func TestDefaultMemberInheritsParentWhenUnset(t *testing.T) {
 	prov := observedProvider(&models, &mu, mockllm.TextTurn("done"))
 	cfg := Config{Model: "claude-default"} // no SubagentModel
 	factory := buildMemberEngine(cfg, regForTest(prov, providerAnthropic, cfg.Model), prov, providerAnthropic, cfg.Model,
-		hookexec.New(nil), agents.NewRegistry(nil), nil, nil, nil, false, nil)
+		hookexec.New(nil), agents.NewRegistry(nil), nil, nil, nil, false, nil, catalogAssets{}, false)
 
 	build := factory(team.New("t"), agent.MemberSpec{Name: "m"})
 	if got := build.Engine.ContextWindow(); got != defaultContextWindowTokens {

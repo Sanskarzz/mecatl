@@ -53,7 +53,7 @@ func memberFactoryForTest(cfg Config, provider port.LLMProvider, teamHooks port.
 	// mutating runner live) is exercised through the REAL buildTeamWiring in
 	// trust_shell_gate_test.go.
 	return buildMemberEngine(cfg, regForTest(provider, providerMock, cfg.Model), provider, providerMock, cfg.Model,
-		teamHooks, reg, skillIdx, runner, runner, roIsolationAvailable, mainMgr)
+		teamHooks, reg, skillIdx, runner, runner, roIsolationAvailable, mainMgr, catalogAssets{}, false)
 }
 
 // agentSubagentEnginesForTest is the OLD-arity buildAgentSubagentEngines wrapper for
@@ -70,5 +70,5 @@ func agentSubagentEnginesForTest(ctx context.Context, cfg Config, provider port.
 // `provider` and threads it as the parent.
 func taskToolForTest(ctx context.Context, cfg Config, provider port.LLMProvider, hooks port.HookRunner, reg *agents.Registry, mainMgr *mcp.Manager) (tool.Tool, func() error) {
 	return buildSubagentTool(ctx, cfg, regForTest(provider, providerMock, cfg.Model), provider, providerMock, cfg.Model,
-		hooks, reg, mainMgr, nil, nil, nil)
+		hooks, reg, mainMgr, nil, nil, nil, catalogAssets{}, false)
 }

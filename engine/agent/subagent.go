@@ -468,6 +468,17 @@ type SubagentTool struct {
 	// shell-bearing one.
 	shellDisabledNote string
 
+	// noFSSpec, when true, makes Spec() describe the NO-FILESYSTEM child surface
+	// (set by the composition root via WithSubagentNoFSNote for a "no-fs" profile
+	// session): the description claims NO Read/Grep/Glob, NO worktree shell, and
+	// NO Parallel alternative — the child works through MCP tools, memory, and web
+	// fetch only. DISTINCT from shellDisabledNote (issue #40), which only swaps
+	// the shell clause while still claiming the read-only file tools; under no-FS
+	// those claims would be lies too, so the WHOLE tool-surface description is
+	// replaced. False (the default) keeps the description byte-identical to the
+	// historical one (TestSubagentSpecNoFSNoteOption pins both sides).
+	noFSSpec bool
+
 	// idPrefix seeds the generated child SessionID so child sessions are
 	// distinguishable in logs/stores.
 	idPrefix string
@@ -615,6 +626,19 @@ func WithSubagentShellDisabledNote(reason string) SubagentOption {
 	return func(t *SubagentTool) { t.shellDisabledNote = reason }
 }
 
+// WithSubagentNoFSNote tells the Subagent tool's Spec() that this session has NO
+// FILESYSTEM (the "no-fs" session profile), replacing the WHOLE tool-surface
+// description: under no-FS the spec must not claim Read/Grep/Glob, a worktree
+// shell, kept file changes (Parallel — absent under no-FS), or "a quick read you
+// can do with Read/Grep" — it describes the real child surface instead (MCP
+// tools, memory, web fetch; no file access, no shell). DISTINCT from
+// WithSubagentShellDisabledNote (issue #40), which swaps only the shell clause
+// and keeps the read-only file-tool claims that are still true on that path.
+// Without this option the description stays byte-identical to the historical one.
+func WithSubagentNoFSNote() SubagentOption {
+	return func(t *SubagentTool) { t.noFSSpec = true }
+}
+
 // WithSubagentEngineFactory injects the composition-supplied factory that mints a child
 // engine for a per-call `model` override. The closure closes over the provider
 // registry and builds the override child through the contamination-safe per-provider
@@ -712,6 +736,20 @@ func NewSubagentTool(childEngine *Engine, opts ...SubagentOption) tool.Tool {
 // description (progressive disclosure, like the Skill tool enumerates skills) so
 // the model can choose a specialist via the optional `agent` arg.
 func (t *SubagentTool) Spec() tool.ToolSpec {
+	// NO-FILESYSTEM profile (WithSubagentNoFSNote): the historical description's
+	// tool-surface claims (Read/Grep/Glob, the worktree shell, "use Parallel",
+	// "a quick read you can do with Read/Grep") are ALL false in a no-fs session,
+	// so the whole description is replaced by the honest file-less one — not just
+	// the shell clause (that is the narrower issue-#40 note below). Without the
+	// option the assembled description stays byte-identical to the historical one
+	// (TestSubagentSpecNoFSNoteOption pins both sides).
+	if t.noFSSpec {
+		return tool.ToolSpec{
+			Name:        subagentToolName,
+			Description: t.noFSDescription(),
+			Schema:      subagentSchema,
+		}
+	}
 	// The shell clause is honest per composition: the default (shell wired) claims the
 	// isolated-worktree shell; with WithSubagentShellDisabledNote set it is REPLACED by
 	// a read-only-only description carrying the reason, so the model never delegates
@@ -746,6 +784,37 @@ func (t *SubagentTool) Spec() tool.ToolSpec {
 		Description: desc,
 		Schema:      subagentSchema,
 	}
+}
+
+// noFSDescription is the Spec description for a NO-FILESYSTEM session: it
+// describes the real child surface (MCP tools, memory, web fetch — no file
+// access, no shell) and drops every file-bound claim and alternative (no
+// Read/Grep/Glob, no worktree shell, no Parallel, no "fresh workspace" resume
+// caveat). The agentId/SubagentStatus/InspectSubagent/resume plumbing is
+// unchanged — those are conversation-level, not filesystem-level. There is
+// deliberately NO agentEnumeration() tail: per-def specialists are SKIPPED under
+// no-fs (a def's scoped catalog/workspace expectations are file-oriented — see
+// buildNoFSSubagentTool), so the no-fs composition never supplies agents, and
+// enumerating any would advertise specialists the `agent` arg cannot honestly
+// serve in this session.
+func (*SubagentTool) noFSDescription() string {
+	desc := "Delegate a focused, self-contained task to a subagent with its own fresh context: " +
+		"a multi-step investigation it can complete WITHOUT any file access ('fetch and cross-check " +
+		"these sources → summarize', 'search memory and report what is already known'). This session " +
+		"has NO filesystem: the subagent has NO file tools and NO shell — it works through MCP tools, " +
+		"memory, and web fetch only, and it cannot delegate further. Delegate only file-free " +
+		"investigations. The subagent's FINAL MESSAGE is its deliverable — you receive only that " +
+		"(see `prompt`; with `background: true` the call instead returns at once and you collect the " +
+		"result later). You may issue several Subagent calls in ONE turn. Do NOT use it when you need " +
+		"the intermediate outputs in this conversation (do the work yourself), or when workers must " +
+		"coordinate (use Team)." +
+		" Inline context you already hold (e.g. prior findings, fetched content) directly in " +
+		"`prompt` rather than making the subagent re-fetch it — that saves its limited turn/tool " +
+		"budget for the actual task." +
+		" Every result starts with an 'agentId:' line — pass that id to SubagentStatus (this run's " +
+		"live state; collects background results), to InspectSubagent to read the full transcript, " +
+		"or as `resume` to continue that subagent with a follow-up prompt (its conversation survives)."
+	return desc
 }
 
 // agentEnumeration renders the "Available agents:" tail listing each configured
