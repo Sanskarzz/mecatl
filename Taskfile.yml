@@ -98,6 +98,29 @@ tasks:
     cmds:
       - go test -race ./...
 
+  e2e:
+    desc: |
+      Run the LIVE end-to-end suite (e2e/, build tag e2e) against OpenRouter.
+      Spawns ./bin/mecated with ephemeral state under .scratch/ and drives real
+      model runs — it costs (a little) real money and needs the network.
+      Requires OPENROUTER_API_KEY in the environment (export it in-shell; this
+      Taskfile never reads a key file). Point MECATL_E2E_TARGET=host:port at an
+      existing server to skip the local spawn. See e2e/README.md.
+    deps: [build]
+    preconditions:
+      - sh: test -n "$OPENROUTER_API_KEY" -o -n "$MECATL_E2E_TARGET"
+        msg: |-
+          OPENROUTER_API_KEY is not set (and no MECATL_E2E_TARGET given).
+          Export OPENROUTER_API_KEY in your shell first (e.g. from your key
+          file — see e2e/README.md), then re-run `task e2e`.
+    cmds:
+      # 60m is the OUTER bound only; every expensive spec carries its own ginkgo
+      # SpecTimeout (driver timeout + 30s), so the CLEAN failure path (TIMEOUT
+      # classification + transcript + AfterSuite teardown + cost ledger) always
+      # fires long before go test's panic path. The per-spec driver timeouts ×
+      # flake attempts sum to ~50m worst-case (see e2e/suite_test.go).
+      - go test -tags e2e -count=1 -timeout 60m ./e2e/...
+
   fuzz:
     desc: |
       Run the native Go fuzzers against the security-critical parsers for a

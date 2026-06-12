@@ -1,0 +1,15 @@
+# CLI-scope permission config for the live e2e suite (passed via
+# --permission-config, ScopeCLI — fully trusted, highest config precedence).
+#
+# Allows exactly the ask-floor tools the scenarios exercise non-interactively:
+#   - Skill:    unlisted in the built-in floor → evaluator default Ask
+#   - Parallel: unlisted in the built-in floor → evaluator default Ask
+#   - Team:     explicit built-in floor Ask (spawns mutating members)
+#
+# Everything else keeps the production posture (Bash/Edit/Write still Ask); the
+# e2e driver auto-DENIES any unexpected ask and records it in the transcript.
+permissions:
+  allow:
+    - "Skill"
+    - "Parallel"
+    - "Team"
