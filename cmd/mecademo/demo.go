@@ -186,7 +186,7 @@ const demoBackgroundChildID = "subagent-call-bg-1"
 // boundary), so main can print the whole flow and the e2e test can assert it.
 // It is infallible: the scenario is fully offline and self-contained.
 func RunBackgroundScenario(ctx context.Context) ([]session.Event, []string) {
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 
 	// The background child: a one-turn investigator with its own engine.
 	childLLM := mockllm.New(
@@ -269,7 +269,7 @@ func RunBackgroundScenario(ctx context.Context) ([]session.Event, []string) {
 func RunTeamScenario(ctx context.Context) (agent.TeamOutcome, error) {
 	tm := team.New("demo-team")
 	base := memfs.NewWorkspace(demoWorkspaceRoot)
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 
 	recordFinding := session.NewToolCall("w1", "RecordFinding",
 		json.RawMessage(`{"finding":"greeting.txt reads cleanly; no encoding issues"}`))

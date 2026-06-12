@@ -28,7 +28,7 @@ import (
 // engine.
 func TestCreateSessionDefaultSelectorUsesSharedEngine(t *testing.T) {
 	var factoryCalls atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		factoryCalls.Add(1)
 		return server.SessionEngineResult{}, errors.New("factory must not be called for the zero selector")
 	}
@@ -62,7 +62,7 @@ func TestCreateSessionModelSelectorRegistersPerSessionEngine(t *testing.T) {
 		Model:   "test-model",
 	})
 	var gotSel server.ProviderSelector
-	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		gotSel = sel
 		return server.SessionEngineResult{Engine: perSession, Close: func() error { closed.Add(1); return nil }}, nil
 	}
@@ -93,7 +93,7 @@ func TestCreateSessionModelSelectorRegistersPerSessionEngine(t *testing.T) {
 // unknown provider with ErrInvalidArgument surfaces as codes.InvalidArgument via
 // the gRPC handler — NOT a silent default.
 func TestCreateSessionUnknownProviderInvalidArgument(t *testing.T) {
-	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		return server.SessionEngineResult{}, fmt.Errorf("%w: unknown or unavailable provider %q", server.ErrInvalidArgument, sel.ProviderID)
 	}
 	svc := newMCPService(t, "shared", factory)
@@ -122,7 +122,7 @@ func TestCreateSessionUnknownProviderInvalidArgument(t *testing.T) {
 // provider is ambiguous) — the factory is never consulted.
 func TestCreateSessionModelWithoutProviderInvalidArgument(t *testing.T) {
 	var factoryCalls atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		factoryCalls.Add(1)
 		return server.SessionEngineResult{}, nil
 	}
@@ -171,7 +171,7 @@ func drainServerRun(run *agent.Run) string {
 // contract over the wire.
 func TestGRPCCreateSessionNoSelectorOldClientContract(t *testing.T) {
 	var factoryCalls atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		factoryCalls.Add(1)
 		return server.SessionEngineResult{}, errors.New("factory must not be called for a no-selector old-client create")
 	}
@@ -211,7 +211,7 @@ func cappedSelectorService(t *testing.T, limit int, closed *atomic.Int32) *serve
 		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "test-model",
 	})
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		eng := agent.NewEngine(agent.Deps{
 			LLM:     mockllm.New(mockllm.TextTurn("per-session")),
 			Catalog: tool.NewCatalog(),

@@ -225,6 +225,11 @@ func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, w
 		Tool:   c.Name,
 		Args:   c.Args,
 		Reason: decision.Reason,
+		// The two child-ask decision bits ride the PendingAsk verbatim (issue #32)
+		// so resolveChildAsk can honour a configured Ask (never auto-approved) and
+		// resolve a substitution-floored configured Allow without surfacing.
+		ConfiguredAsk:          decision.ConfiguredAsk,
+		FlooredConfiguredAllow: decision.FlooredConfiguredAllow,
 	}
 
 	// Register the resolution channel BEFORE pausing/emitting so an Approve that
@@ -497,6 +502,13 @@ func (*Engine) parentCaps(r *Run, turnIdx int) parentCaps {
 			if requesterLabel != "" {
 				requester = clampPreview(requesterLabel)
 			}
+			// The policy REASON is harness/policy-authored metadata (e.g. "approval
+			// required by rule for Bash (go test*)" for a configured subagent: ask,
+			// vs the substitution-floor message) — NOT peer/transcript content, so
+			// it is safe to surface (clamped). Appending it lets the operator tell
+			// WHY the ask surfaced: their own configured rule vs the substitution
+			// floor, which the command preview alone cannot distinguish. Raw args
+			// stay dropped (gauntlet #7).
 			surfaced := session.PendingAsk{
 				AskID: askID,
 				Tool:  ask.Tool,
@@ -505,8 +517,8 @@ func (*Engine) parentCaps(r *Run, turnIdx int) parentCaps {
 				// human reads it as "the subagent wants to run X", never as a trusted
 				// instruction. The original args are NOT forwarded.
 				Args: nil,
-				Reason: fmt.Sprintf("%s requests approval to run %s: %s",
-					requester, ask.Tool, clampPreview(surfacedCommandPreview(ask))),
+				Reason: fmt.Sprintf("%s requests approval to run %s: %s (%s)",
+					requester, ask.Tool, clampPreview(surfacedCommandPreview(ask)), clampPreview(ask.Reason)),
 			}
 			// CHILD-originated emit: through the seal guard (A4c) — a BACKGROUND
 			// child can surface an ask from its own goroutine at any point, including

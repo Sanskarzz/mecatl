@@ -260,8 +260,13 @@ func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) []governance.Rule {
 		}
 		cfg, perr := parseYAML(data)
 		if perr != nil {
-			r.diag.Log(context.Background(), port.LevelWarn, "permission config: project YAML unparseable; skipping",
-				"file", src.path, "root", ws.Root(), "err", perr)
+			// The skip drops the WHOLE file — its DENY/ASK rules included, so a
+			// typo LOOSENS policy. Name the lost per-effect counts (best-effort
+			// lenient re-read) so the operator sees how much tightening vanished.
+			deny, ask, allow, counted := lostRuleCounts(data)
+			r.diag.Log(context.Background(), port.LevelWarn, "permission config: project YAML invalid; skipping (its rules are LOST, deny/ask included)",
+				"file", src.path, "root", ws.Root(), "err", perr,
+				"lost_deny", deny, "lost_ask", ask, "lost_allow", allow, "counts_known", counted)
 			continue
 		}
 		rules = append(rules, rulesFromConfig(cfg, src.scope, &report)...)
@@ -313,7 +318,10 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 		}
 		cfg, perr := parseYAML(data)
 		if perr != nil {
-			r.diag.Log(context.Background(), port.LevelWarn, "permission config: explicit file unparseable; skipping", "file", path, "err", perr)
+			deny, ask, allow, counted := lostRuleCounts(data)
+			r.diag.Log(context.Background(), port.LevelWarn, "permission config: explicit file invalid; skipping (its rules are LOST, deny/ask included)",
+				"file", path, "err", perr,
+				"lost_deny", deny, "lost_ask", ask, "lost_allow", allow, "counts_known", counted)
 			continue
 		}
 		rules = append(rules, rulesFromConfig(cfg, governance.ScopeCLI, report)...)
@@ -328,7 +336,10 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 		path := filepath.Join(cfgDir, userSubdirMecatl)
 		if data, err := r.env.ReadFile(path); err == nil {
 			if cfg, perr := parseYAML(data); perr != nil {
-				r.diag.Log(context.Background(), port.LevelWarn, "permission config: user YAML unparseable; skipping", "file", path, "err", perr)
+				deny, ask, allow, counted := lostRuleCounts(data)
+				r.diag.Log(context.Background(), port.LevelWarn, "permission config: user YAML invalid; skipping (its rules are LOST, deny/ask included)",
+					"file", path, "err", perr,
+					"lost_deny", deny, "lost_ask", ask, "lost_allow", allow, "counts_known", counted)
 			} else {
 				rules = append(rules, rulesFromConfig(cfg, governance.ScopeUser, report)...)
 			}

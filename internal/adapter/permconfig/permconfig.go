@@ -49,12 +49,23 @@ func parseYAML(data []byte) (Config, error) {
 }
 
 // rulesFromConfig converts a parsed Config into governance.Rule values tagged
-// with the given scope. The deny → ask → allow ordering in the returned slice is
-// irrelevant (the Evaluator folds deny-dominant regardless); unparseable specs
-// are collected into report so the caller can surface them.
+// with the given scope and the per-bucket Audience (issue #32 D1):
+//
+//   - top-level deny  → AudienceAll (binds main AND children — a deny only tightens)
+//   - top-level allow/ask → AudienceMain (the operator configured the
+//     interactive engine; a child does not inherit a main allow/ask)
+//   - the subagent: block → AudienceSubagent (allow/ask/deny), at the SAME
+//     tier scope as the file it came from
+//
+// The deny → ask → allow ordering in the returned slice is irrelevant for
+// precedence (the Evaluator folds deny-dominant regardless), but it IS the cap
+// order: at maxRulesPerConfig the SAFER effects survive — deny(all) →
+// subagent-deny → ask → subagent-ask → allow → subagent-allow — so an allow is
+// always the first to be dropped. Unparseable specs are collected into report
+// so the caller can surface them.
 func rulesFromConfig(cfg Config, scope governance.Scope, report *Report) []governance.Rule {
 	var rules []governance.Rule
-	add := func(specs []string, effect governance.Effect) {
+	add := func(specs []string, effect governance.Effect, audience governance.Audience) {
 		for _, spec := range specs {
 			if len(rules) >= maxRulesPerConfig {
 				report.addDropped(spec, "rule-count cap reached; rule dropped")
@@ -65,15 +76,16 @@ func rulesFromConfig(cfg Config, scope governance.Scope, report *Report) []gover
 				report.addDropped(spec, "unparseable rule spec")
 				continue
 			}
+			rule.Audience = audience
 			rules = append(rules, rule)
 		}
 	}
-	// Deny first for readability; effect, not order, decides precedence. Deny/ask
-	// are added before allow so that, at the cap, the SAFER effects are kept and an
-	// allow is the first to be dropped.
-	add(cfg.Permissions.Deny, governance.Deny)
-	add(cfg.Permissions.Ask, governance.Ask)
-	add(cfg.Permissions.Allow, governance.Allow)
+	add(cfg.Permissions.Deny, governance.Deny, governance.AudienceAll)
+	add(cfg.Permissions.Subagent.Deny, governance.Deny, governance.AudienceSubagent)
+	add(cfg.Permissions.Ask, governance.Ask, governance.AudienceMain)
+	add(cfg.Permissions.Subagent.Ask, governance.Ask, governance.AudienceSubagent)
+	add(cfg.Permissions.Allow, governance.Allow, governance.AudienceMain)
+	add(cfg.Permissions.Subagent.Allow, governance.Allow, governance.AudienceSubagent)
 	return rules
 }
 
@@ -135,4 +147,40 @@ func normalizeGlob(pattern string) string {
 		}
 	}
 	return p
+}
+
+// lenientCounts is the permissive twin of the strict permissions schema, used
+// ONLY to estimate what a skipped (strict-parse-failed) file WOULD have
+// contributed. Unknown keys are ignored here by design — the point is to count
+// the recognisable buckets a typo'd sibling key is about to cost the operator.
+type lenientCounts struct {
+	Permissions struct {
+		Allow    []string `yaml:"allow"`
+		Ask      []string `yaml:"ask"`
+		Deny     []string `yaml:"deny"`
+		Subagent struct {
+			Allow []string `yaml:"allow"`
+			Ask   []string `yaml:"ask"`
+			Deny  []string `yaml:"deny"`
+		} `yaml:"subagent"`
+	} `yaml:"permissions"`
+}
+
+// lostRuleCounts best-effort counts the per-effect rules a SKIPPED config file
+// loses (issue #32 panel finding 8a): a strict-parse failure (e.g. a typo'd
+// key) drops the WHOLE file — including its DENY rules, so strictness would
+// otherwise silently LOOSEN policy. The counts ride the existing skip WARN so
+// the operator sees exactly how much tightening was lost. Lenient decode; on a
+// true YAML syntax error the counts are simply unavailable (all zero,
+// ok=false). Top-level and subagent buckets fold per effect.
+func lostRuleCounts(data []byte) (deny, ask, allow int, ok bool) {
+	var lc lenientCounts
+	if err := yaml.Unmarshal(data, &lc); err != nil {
+		return 0, 0, 0, false
+	}
+	p := lc.Permissions
+	return len(p.Deny) + len(p.Subagent.Deny),
+		len(p.Ask) + len(p.Subagent.Ask),
+		len(p.Allow) + len(p.Subagent.Allow),
+		true
 }

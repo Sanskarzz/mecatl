@@ -12,7 +12,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -422,5 +421,5 @@ func TestChildRegistrySafeEmitSealedFullSurface(t *testing.T) {
 // allowAllInt is the internal-package allow-all policy helper (twin of the
 // external tests' allowAll).
 func allowAllInt() port.PermissionPolicy {
-	return permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	return permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 }

@@ -1964,8 +1964,9 @@ func drainChild(run *Run, posture childPosture) (finalText string, stop session.
 // childPosture carries the per-child permission resolution context applied to a child/
 // member run's permission asks (the 4-step model). It is threaded by every drain path
 // (drainChildObserved, drainChild, the team supervisor's driveOneTurn) so the resolution
-// order — isolation auto-approve → surface-to-human → headless auto-deny — is identical
-// everywhere and cannot drift.
+// order — floored-configured-allow / configured-ask gate (issue #32) → isolation
+// auto-approve → surface-to-human → headless auto-deny — is identical everywhere and
+// cannot drift.
 //
 // The zero value is the legacy posture: not isolated, not interactive, no surface →
 // every ask auto-denies (with the accurate message). A child run that is isolated sets
@@ -2002,7 +2003,15 @@ type childPosture struct {
 // auto-denied ask carries — NOT the misleading "denied by user … client approval
 // required" of the interactive path. It names the real cause (a non-interactive subagent
 // shell) and what the model can do about it. reason is the policy's ask reason.
-func childAutoDenyMessage(reason string) string {
+// configured selects the suffix: a CONFIGURED Ask (a real permission rule gates the
+// command) gets rule-oriented advice — the substitution-rephrase advice would be a lie
+// there (no rephrasing satisfies a configured rule; only an approver can).
+func childAutoDenyMessage(reason string, configured bool) string {
+	if configured {
+		return "not permitted in a non-interactive subagent shell: " + reason +
+			"; this command requires approval by a configured permission rule and no interactive approver is attached" +
+			" — use a command the rule does not gate, or report back that approval is required"
+	}
 	return "not permitted in a non-interactive subagent shell: " + reason +
 		"; rephrase to avoid command substitution/subshell grouping, or use an auto-approved tool (read-only commands, or go test/build/vet/list)"
 }
@@ -2013,19 +2022,34 @@ func childAutoDenyMessage(reason string) string {
 // by drainChildObserved (Subagent), drainChild (Fork, silent), and the team supervisor's
 // driveOneTurn, so the resolution order cannot drift.
 //
-// Resolution order on a permission ask (the 4-step model):
-//  1. ISOLATION auto-approve (A2): an isolated child whose ask is IsolationApprovable
+// Resolution order on a permission ask (the 4-step model, plus the issue-#32
+// config axis riding the ask's decision bits):
+//  0. CONFIGURED ASK: ask.ConfiguredAsk (a real configured rule gates the call) →
+//     SKIP every auto-approve (both the floored-allow and the isolation paths)
+//     and fall through to surface/headless — the configured-Ask-never-suppressed
+//     invariant extended to step A2. Checked FIRST so the illegal both-bits-true
+//     state (the two bits are mutually exclusive by construction, but ride an
+//     externally-reachable PendingAsk) fails SAFE (gated), never auto-approves.
+//  1. FLOORED CONFIGURED ALLOW: ask.FlooredConfiguredAllow (the ask exists ONLY
+//     because of the substitution floor, a configured child-scoped Allow covers
+//     every floored segment, every recursively-extracted INNER is positively
+//     read-only — the configured Allow vouches only for the OUTER literal —
+//     and the blanked outer passes the worktree-escape rejections) → AllowOnce
+//     without surfacing. Deny is impossible here — a deny resolves in the
+//     ordinary fold and never becomes an ask.
+//  2. ISOLATION auto-approve (A2): an isolated child whose ask is IsolationApprovable
 //     (read-only ∪ worktree-safe go verbs, no worktree-escape verb) → AllowOnce. (A1's
 //     read-only substitution carve-out already turns most read-only substitutions into
 //     Allow upstream so they never reach here as an ask; this catches the worktree-safe
 //     `go test` superset.)
-//  2. SURFACE to human: an interactive parent with a surface seam registers the child in
+//  3. SURFACE to human: an interactive parent with a surface seam registers the child in
 //     the parent router and emits a REDACTED parent EvPermissionAsk, then RETURNS without
 //     resolving — the child's authorize stays parked in await until the parent routes a
 //     verdict back via the router (child.Approve). The drain loop blocks on this child's
 //     channel until then (single-child) or keeps consuming peers (concurrent members).
-//  3. HEADLESS auto-deny: no surface (headless / no router) → Deny with the ACCURATE
-//     message + a correlated operator diagnostic (LevelInfo, agent=<child-session-id>
+//  4. HEADLESS auto-deny: no surface (headless / no router) → Deny with the ACCURATE
+//     message (rule-oriented when the ask was configured, substitution-rephrase advice
+//     otherwise) + a correlated operator diagnostic (LevelInfo, agent=<child-session-id>
 //     for Subagent children, e.g. "subagent-<callID>"; member name / fork label for the
 //     others) — never the misleading "denied by user".
 func handleChildEvent(run *Run, ev session.Event, posture childPosture) (text string, stop session.StopReason, isResult bool) {
@@ -2038,33 +2062,56 @@ func handleChildEvent(run *Run, ev session.Event, posture childPosture) (text st
 	return "", session.StopNone, false
 }
 
-// resolveChildAsk applies the 4-step resolution to one child permission ask.
+// resolveChildAsk applies the 4-step resolution (plus the issue-#32 config axis;
+// see handleChildEvent's ordering doc) to one child permission ask.
 func resolveChildAsk(run *Run, ask session.PendingAsk, posture childPosture) {
-	// Step 1-2 (A2): isolated child + isolation-approvable Bash → auto-approve.
-	if posture.isolated && ask.Tool == "Bash" && governance.IsolationApprovable(bashCmdFromArgs(ask.Args)) {
+	// Config axis, BEFORE the isolation auto-approve. The two bits are mutually
+	// exclusive BY CONSTRUCTION (the evaluator never sets both), but they ride a
+	// PendingAsk that crosses run boundaries and is externally reachable, so the
+	// gate ORDER is the fail-safe for the illegal both-true state: ConfiguredAsk
+	// (surface / auto-deny) is checked FIRST, so a both-true ask fails SAFE
+	// (gated), never auto-approves.
+	//   - A CONFIGURED Ask must NEVER be auto-approved (the configured-Ask-never-
+	//     suppressed invariant, extended to A2): skip BOTH the floored-allow
+	//     auto-approve and the isolation auto-approve and fall through to
+	//     surface-to-human / headless auto-deny.
+	//   - Otherwise a substitution-floored ask whose every floored segment a
+	//     CONFIGURED Allow covers — with every extracted INNER positively
+	//     read-only and the blanked outer escape-rejection-free — resolves
+	//     AllowOnce: the configured child Allow vouches for the OUTER, and the
+	//     inner/escape bound was checked in the evaluator. Deny never reaches here
+	//     (it resolves in the ordinary fold).
+	if ask.ConfiguredAsk {
+		// Fall through to surface / headless auto-deny (skip every auto-approve).
+	} else if ask.FlooredConfiguredAllow {
+		run.Approve(ask.AskID, session.VerdictAllowOnce)
+		return
+	} else if posture.isolated && ask.Tool == "Bash" && governance.IsolationApprovable(bashCmdFromArgs(ask.Args)) {
+		// Step A2: isolated child + isolation-approvable Bash → auto-approve.
 		run.Approve(ask.AskID, session.VerdictAllowOnce)
 		return
 	}
-	// Step 3: surface to the human when the parent is interactive and a surface seam is
+	// Surface to the human when the parent is interactive and a surface seam is
 	// wired. Register-then-emit lives inside surfaceAsk; we DO NOT resolve here — the
 	// child stays parked until the parent routes a verdict back.
 	if posture.caps.interactive && posture.caps.surfaceAsk != nil {
 		posture.caps.surfaceAsk(ask.AskID, posture.childID, run, ask, posture.askLabel)
 		return
 	}
-	// Step 4: headless / no surface → auto-deny with the accurate message + an operator
+	// Headless / no surface → auto-deny with the accurate message + an operator
 	// diagnostic, then resolve the child's own ask. The child's authorize maps a Deny
 	// verdict to a denied result carrying decision.Reason (the policy's), so we ALSO emit
 	// the operator-visible diagnostic here (the deny otherwise reaches only the child's
 	// errored tool-result, which default clients bury). The denied RESULT message the
 	// model sees is rebuilt by authorize; the accurate phrasing is surfaced via the
-	// diagnostic and the bash tool description.
+	// diagnostic and the bash tool description. A CONFIGURED ask gets the rule-oriented
+	// suffix — the substitution-rephrase advice would be a lie for it.
 	if posture.caps.diag != nil {
 		posture.caps.diag.Log(context.Background(), port.LevelInfo,
 			"subagent permission ask auto-denied (non-interactive shell)",
 			"agent", posture.role, "tool", ask.Tool, "reason", ask.Reason)
 	}
-	run.autoDenyChildAsk(ask.AskID, childAutoDenyMessage(ask.Reason))
+	run.autoDenyChildAsk(ask.AskID, childAutoDenyMessage(ask.Reason, ask.ConfiguredAsk))
 }
 
 // bashCmdFromArgs extracts the Bash command string from a pending ask's raw args,

@@ -116,7 +116,14 @@ type ResolvedModel struct {
 // tools, no Bash, no Parallel, no SkillDraft; file-less Subagent/Team children)
 // and apply the no-FS prompt posture. A no-FS session ALWAYS routes through this
 // factory — the shared engine has the FS tools baked in.
-type SessionEngineFactory func(ctx context.Context, sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile) (SessionEngineResult, error)
+//
+// workspace is the SESSION's workspace root (issue #32): the factory pins the
+// per-session engine's CHILD permission resolver to it, so a per-session
+// engine's subagents/members/branches resolve project permission rules from
+// THEIR session's pre-fork base root — never the server flag's root, and never
+// a fork root. Empty (a no-fs session, or a resume that persisted none) pins no
+// project root (user/CLI rules only).
+type SessionEngineFactory func(ctx context.Context, sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile, workspace string) (SessionEngineResult, error)
 
 // Config wires the server adapter to the WP8 engine and its collaborators.
 type Config struct {
@@ -592,7 +599,7 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
 	}
 
-	res, err := s.cfg.SessionEngine(ctx, sel, specs, profile)
+	res, err := s.cfg.SessionEngine(ctx, sel, specs, profile, workspace)
 	if err != nil {
 		// Factory maps an unknown/unavailable provider to ErrInvalidArgument; any
 		// error is propagated as-is for the caller to map to a status.
@@ -948,7 +955,9 @@ func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, 
 	if sess.Workspace == "" {
 		profile = ProfileNoFS
 	}
-	res, err := s.cfg.SessionEngine(ctx, ProviderSelector{}, specs, profile)
+	// The persisted workspace is the session's base root: the rebuilt engine's
+	// child permission resolver pins to IT (issue #32) — "" for no-fs.
+	res, err := s.cfg.SessionEngine(ctx, ProviderSelector{}, specs, profile, sess.Workspace)
 	if err != nil {
 		// The session was loaded + (if needed) reopened and re-persisted, but the
 		// per-session engine could not be built. We deliberately do NOT roll that
@@ -1094,7 +1103,7 @@ func (s *Service) rehydrateNoFSSession(ctx context.Context, id session.SessionID
 	if full {
 		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
 	}
-	res, err := s.cfg.SessionEngine(ctx, ProviderSelector{}, nil, ProfileNoFS)
+	res, err := s.cfg.SessionEngine(ctx, ProviderSelector{}, nil, ProfileNoFS, "" /* a no-fs session has no workspace */)
 	if err != nil {
 		return nil, fmt.Errorf("server: rehydrate no-fs session %q: %w", id, err)
 	}

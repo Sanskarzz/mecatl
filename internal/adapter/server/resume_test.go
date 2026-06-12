@@ -13,7 +13,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -28,7 +27,7 @@ func newServiceWithStore(t *testing.T, store port.SessionStore) *server.Service 
 	engine := agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(),
 		Catalog: tool.NewCatalog(),
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Policy:  permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
 		Model:   "test-model",
 		Store:   store,
 	})
@@ -212,7 +211,7 @@ func newServiceWithEngine(t *testing.T, llm port.LLMProvider, cat *tool.Catalog)
 	engine := agent.NewEngine(agent.Deps{
 		LLM:     llm,
 		Catalog: cat,
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Policy:  permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
 		Model:   "test-model",
 		Store:   store,
 	})

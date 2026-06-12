@@ -127,7 +127,7 @@ func catalogWith(t *testing.T, tools ...tool.Tool) *tool.Catalog {
 
 // allowAll returns a policy that allows every tool call.
 func allowAll() *permpolicy.Policy {
-	return permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	return permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 }
 
 // noopHooks is a no-op port.HookRunner: a runner is PRESENT (so the engine's

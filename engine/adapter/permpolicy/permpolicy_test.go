@@ -239,3 +239,39 @@ func TestPolicyAllowAllCompoundBashDenyWins(t *testing.T) {
 		t.Fatalf("compound-bash deny must win under allow-all, got %v", got.Effect)
 	}
 }
+
+// --- Audience forwarding (issue #32) -----------------------------------------
+
+// TestPolicyAudienceOptionForwarded pins that a governance.WithAudience option
+// passed to NewPolicyWithResolver reaches the underlying Evaluator: a
+// subagent-audience policy honours AudienceSubagent rules and ignores
+// AudienceMain ones (and vice versa) — including rules arriving via the
+// resolver's extra channel.
+func TestPolicyAudienceOptionForwarded(t *testing.T) {
+	resolver := fakeResolver{byRoot: map[string][]governance.Rule{
+		"/ws": {
+			{Scope: governance.ScopeSharedProject, Tool: "Bash", Pattern: "go test*", Effect: governance.Allow, Audience: governance.AudienceSubagent},
+			{Scope: governance.ScopeSharedProject, Tool: "Bash", Pattern: "go vet*", Effect: governance.Allow, Audience: governance.AudienceMain},
+		},
+	}}
+	floor := []governance.Rule{{Scope: governance.ScopeBuiltinDefault, Tool: "Bash", Effect: governance.Ask}}
+	ws := memfs.NewWorkspace("/ws")
+
+	subPolicy := permpolicy.NewPolicyWithResolver(floor, nil, resolver,
+		governance.WithAudience(governance.AudienceSubagent))
+	if got := subPolicy.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("go test ./..."), ws); got.Effect != governance.Allow {
+		t.Fatalf("subagent policy must honour an AudienceSubagent resolver allow, got %v (%s)", got.Effect, got.Reason)
+	}
+	if got := subPolicy.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("go vet ./..."), ws); got.Effect != governance.Ask {
+		t.Fatalf("subagent policy must IGNORE an AudienceMain resolver allow, got %v (%s)", got.Effect, got.Reason)
+	}
+
+	mainPolicy := permpolicy.NewPolicyWithResolver(floor, nil, resolver,
+		governance.WithAudience(governance.AudienceMain))
+	if got := mainPolicy.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("go vet ./..."), ws); got.Effect != governance.Allow {
+		t.Fatalf("main policy must honour an AudienceMain resolver allow, got %v (%s)", got.Effect, got.Reason)
+	}
+	if got := mainPolicy.Evaluate(context.Background(), sid, session.ModeDefault, bashCall("go test ./..."), ws); got.Effect != governance.Ask {
+		t.Fatalf("main policy must IGNORE an AudienceSubagent resolver allow, got %v (%s)", got.Effect, got.Reason)
+	}
+}

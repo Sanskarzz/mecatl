@@ -597,7 +597,7 @@ type fakeSessionEngine struct {
 	engine *agent.Engine
 }
 
-func (f *fakeSessionEngine) factory(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+func (f *fakeSessionEngine) factory(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 	f.mu.Lock()
 	f.called++
 	f.specs = specs
@@ -918,9 +918,11 @@ func TestSequentialPromptsNoRunLeak(t *testing.T) {
 }
 
 // allowRules makes every tool auto-allowed (no permission ask), so a prompt runs
-// straight to completion.
+// straight to completion. It is the canonical allow-all FLOOR
+// (permpolicy.AllowAllFloorRules), so the blanket allow never registers as a
+// CONFIGURED rule under the issue-#32 decision bits.
 func allowRules() []governance.Rule {
-	return []governance.Rule{{Effect: governance.Allow}}
+	return permpolicy.AllowAllFloorRules()
 }
 
 // call / callP build session.ToolCall values for the tests.
@@ -1299,7 +1301,7 @@ type closingSessionEngine struct {
 	engine *agent.Engine
 }
 
-func (f *closingSessionEngine) factory(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+func (f *closingSessionEngine) factory(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 	f.mu.Lock()
 	f.called++
 	f.mu.Unlock()

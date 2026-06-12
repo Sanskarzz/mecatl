@@ -86,7 +86,7 @@ func finalText(t *testing.T, run *agent.Run) string {
 // session uses the SHARED engine and the per-session factory is NOT called.
 func TestCreateSessionWithMCPEmptySpecsSharedEngine(t *testing.T) {
 	var called atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		called.Add(1)
 		return server.SessionEngineResult{Close: func() error { return nil }}, nil
 	}
@@ -131,7 +131,7 @@ func TestStartRunRoutesToPerSessionEngine(t *testing.T) {
 		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "test-model",
 	})
-	factory := func(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		if len(specs) != 1 || specs[0].URL != "https://example.test/mcp" {
 			t.Errorf("factory specs = %+v", specs)
 		}
@@ -189,7 +189,7 @@ func TestEndSessionEvictsLearnedAndTearsDown(t *testing.T) {
 		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "test-model",
 	})
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		return server.SessionEngineResult{Engine: perSession, Close: func() error { closed.Add(1); return nil }}, nil
 	}
 	shared := agent.NewEngine(agent.Deps{
@@ -243,7 +243,7 @@ func TestEndSessionEvictsLearnedAndTearsDown(t *testing.T) {
 // registered per-session engine.
 func TestServiceCloseTearsDownSessionEngines(t *testing.T) {
 	var closed atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		eng := agent.NewEngine(agent.Deps{
 			LLM:     mockllm.New(mockllm.TextTurn("x")),
 			Catalog: tool.NewCatalog(),
@@ -275,7 +275,7 @@ func TestServiceCloseTearsDownSessionEngines(t *testing.T) {
 // StartRun uses the SHARED engine.
 func TestLoadSessionWithMCPEmptySpecsSharedEngine(t *testing.T) {
 	var called atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		called.Add(1)
 		return server.SessionEngineResult{Close: func() error { return nil }}, nil
 	}
@@ -326,7 +326,7 @@ func TestLoadSessionWithMCPRoutesToPerSessionEngine(t *testing.T) {
 		Policy:  permpolicy.NewPolicy(nil, nil),
 		Model:   "test-model",
 	})
-	factory := func(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, specs []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		if len(specs) != 1 || specs[0].URL != "https://example.test/mcp" {
 			t.Errorf("factory specs = %+v", specs)
 		}
@@ -364,7 +364,7 @@ func TestLoadSessionWithMCPRoutesToPerSessionEngine(t *testing.T) {
 // connect, so an unknown id never wastes a connect).
 func TestLoadSessionWithMCPUnknownIDNotFound(t *testing.T) {
 	var called atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		called.Add(1)
 		return server.SessionEngineResult{Close: func() error { return nil }}, nil
 	}
@@ -386,7 +386,7 @@ func TestLoadSessionWithMCPUnknownIDNotFound(t *testing.T) {
 func TestLoadSessionWithMCPReloadReplacesAndClosesPrior(t *testing.T) {
 	var firstClosed, secondClosed atomic.Int32
 	var n atomic.Int32
-	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile) (server.SessionEngineResult, error) {
+	factory := func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		eng := agent.NewEngine(agent.Deps{
 			LLM:     mockllm.New(mockllm.TextTurn("x")),
 			Catalog: tool.NewCatalog(),

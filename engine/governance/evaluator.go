@@ -46,6 +46,14 @@ type Evaluator struct {
 	// because the floor was only ever an ADDITIONAL escalation. DEFAULT false (the floor
 	// stands). Set via WithLooseSubstitution in composition (Config.AllowAllTools).
 	looseSubstitution bool
+	// audience is the engine class this evaluator resolves for (issue #32). The
+	// default AudienceAll matches every rule (back-compat); composition tags the
+	// main engine's evaluator AudienceMain and child engines AudienceSubagent so
+	// audience-scoped config rules (the permconfig `subagent:` block, top-level
+	// allow/ask) bind only the engine class they were written for. Matching is
+	// symmetric-permissive: a rule applies iff either the rule's or the
+	// evaluator's audience is AudienceAll, or they are equal.
+	audience Audience
 }
 
 // EvaluatorOption configures an Evaluator at construction.
@@ -58,6 +66,15 @@ type EvaluatorOption func(*Evaluator)
 // floor — the substitution still prompts.
 func WithLooseSubstitution(loose bool) EvaluatorOption {
 	return func(e *Evaluator) { e.looseSubstitution = loose }
+}
+
+// WithAudience pins the engine class this Evaluator resolves for: AudienceMain
+// for a main-engine policy, AudienceSubagent for a child/member policy. The
+// DEFAULT (no option) is AudienceAll, which matches every rule — the
+// back-compatible behaviour. An audience-tagged rule binds iff the rule's
+// audience is AudienceAll, the Evaluator's is AudienceAll, or they match.
+func WithAudience(a Audience) EvaluatorOption {
+	return func(e *Evaluator) { e.audience = a }
 }
 
 // NewEvaluator constructs an Evaluator over the given merged rules. The rules may
@@ -210,7 +227,16 @@ func (e *Evaluator) resolve(rules []Rule, tool string, args json.RawMessage) Per
 }
 
 // resolveBash evaluates each canonicalized sub-command of a (possibly compound)
-// Bash line and folds them with deny → ask → allow: the worst outcome wins.
+// Bash line and folds them with deny → ask → allow: the worst outcome wins. It
+// also folds the two child-ask decision bits (issue #32): ConfiguredAsk (any
+// segment's winning Ask came from a configured rule — conservative, so a
+// configured Ask anywhere gates the whole compound) and FlooredConfiguredAllow
+// (the ONLY reason the fold is Ask is the substitution floor, every floored
+// segment had a configured Allow match AND passes flooredAllowSafe — every
+// extracted inner positively read-only, blanked outer escape-rejection-free —
+// and the floor-free fold is Allow). The two are mutually exclusive by
+// construction: a configured Ask on any segment makes the floor-free fold
+// not-Allow.
 func (e *Evaluator) resolveBash(rules []Rule, args json.RawMessage) PermissionDecision {
 	cmd := bashCommand(args)
 	subs := SplitCommands(cmd)
@@ -220,6 +246,12 @@ func (e *Evaluator) resolveBash(rules []Rule, args json.RawMessage) PermissionDe
 	}
 	worst := PermissionDecision{Effect: Allow, Reason: ""}
 	haveDecision := false
+	var (
+		anyConfiguredAsk bool // some segment's (un-floored) Ask is configured
+		flooredOK        int  // floored segments covered by a configured Allow + escape-free
+		flooredBad       bool // some floored segment NOT covered (or escape-capable)
+		unflooredNotAll  bool // some segment's FLOOR-FREE decision is not Allow
+	)
 	for _, sub := range subs {
 		var d PermissionDecision
 		if HasSubstitutionOrGrouping(sub) {
@@ -235,7 +267,7 @@ func (e *Evaluator) resolveBash(rules []Rule, args json.RawMessage) PermissionDe
 			//   (default) we cannot soundly extract the inner program, so fail safe:
 			//        evaluate the segment AND floor the result at Ask so an allow rule
 			//        for the outer literal can never silently approve a hidden command.
-			seg := e.resolveSimple(rules, "Bash", Canonicalize(sub))
+			seg, segRule := e.resolveSimpleRule(rules, "Bash", Canonicalize(sub))
 			switch {
 			case SubstitutionReadOnly(sub):
 				d = seg // read-only substitution: no floor, the ordinary decision stands.
@@ -244,20 +276,62 @@ func (e *Evaluator) resolveBash(rules []Rule, args json.RawMessage) PermissionDe
 			case effectRank(seg.Effect) >= effectRank(Ask):
 				d = seg // already Ask or Deny: keep its (more specific) reason
 			default:
+				// The substitution floor escalates a would-be Allow to Ask (seg.Effect
+				// is necessarily Allow here — Ask/Deny were kept above). Record whether
+				// a CONFIGURED (above-floor) Allow covered the segment AND the segment
+				// passes flooredAllowSafe: every extracted INNER must be positively
+				// read-only (the configured Allow vouches only for the OUTER literal —
+				// never for what a substitution hides), and the blanked outer must pass
+				// the worktree-escape rejections — the precondition for
+				// FlooredConfiguredAllow on the folded decision. The segment's
+				// FLOOR-FREE effect is Allow either way, so unflooredNotAll stays unset.
+				if ruleIsConfigured(segRule) && flooredAllowSafe(sub) {
+					flooredOK++
+				} else {
+					flooredBad = true
+				}
 				d = PermissionDecision{
 					Effect: Ask,
 					Reason: "Bash command contains command/process substitution or subshell grouping that may hide an inner command; client approval required",
 				}
+				if !haveDecision || effectRank(d.Effect) > effectRank(worst.Effect) {
+					worst = d
+					haveDecision = true
+				}
+				continue
 			}
 		} else {
 			d = e.resolveSimple(rules, "Bash", Canonicalize(sub))
+		}
+		// Un-floored segment (plain, A1, yolo, or kept Ask/Deny): its own effect IS
+		// its floor-free effect.
+		if d.Effect != Allow {
+			unflooredNotAll = true
+		}
+		if d.Effect == Ask && d.ConfiguredAsk {
+			anyConfiguredAsk = true
 		}
 		if !haveDecision || effectRank(d.Effect) > effectRank(worst.Effect) {
 			worst = d
 			haveDecision = true
 		}
 	}
+	// Fold the decision bits fresh — the worst segment's own bits may not describe
+	// the COMPOUND (a configured Ask elsewhere must still gate; the floored-allow
+	// bit requires EVERY segment to cooperate). Both are meaningful only on Ask.
+	worst.ConfiguredAsk, worst.FlooredConfiguredAllow = false, false
+	if worst.Effect == Ask {
+		worst.ConfiguredAsk = anyConfiguredAsk
+		worst.FlooredConfiguredAllow = !anyConfiguredAsk && flooredOK > 0 && !flooredBad && !unflooredNotAll
+	}
 	return worst
+}
+
+// ruleIsConfigured reports whether r is a CONFIGURED rule: non-nil and scoped
+// ABOVE the built-in floor (operator/CLI/project/user intent, never the harness's
+// own defaults). The no-matching-rule default carries a nil rule.
+func ruleIsConfigured(r *Rule) bool {
+	return r != nil && r.Scope != ScopeBuiltinDefault
 }
 
 // resolveSimple finds the winning decision for a single tool+pattern against the
@@ -276,12 +350,26 @@ func (e *Evaluator) resolveBash(rules []Rule, args json.RawMessage) PermissionDe
 //
 // Within each effect the highest-precedence matching rule is the candidate (Scope
 // breaks same-effect ties), then step 2 compares across the two non-deny effects.
-func (*Evaluator) resolveSimple(rules []Rule, tool, pattern string) PermissionDecision {
+//
+// A winning Ask additionally reports its configured-ness (ConfiguredAsk): true
+// when the ask rule's Scope sits above the ScopeBuiltinDefault floor (a real
+// operator/project/user rule), false for the floor itself and for the no-match
+// default Ask — the bit the child-ask model keys "never suppress a configured
+// Ask" on (issue #32).
+func (e *Evaluator) resolveSimple(rules []Rule, tool, pattern string) PermissionDecision {
+	d, _ := e.resolveSimpleRule(rules, tool, pattern)
+	return d
+}
+
+// resolveSimpleRule is resolveSimple plus the WINNING rule (nil for the
+// no-matching-rule default Ask), so resolveBash can read the winner's
+// configured-ness when folding the substitution-floor decision bits.
+func (e *Evaluator) resolveSimpleRule(rules []Rule, tool, pattern string) (PermissionDecision, *Rule) {
 	// Collect the highest-precedence matching rule per effect.
 	best := map[Effect]*Rule{}
 	for i := range rules {
 		r := &rules[i]
-		if !ruleMatches(r, tool, pattern) {
+		if !ruleMatches(r, tool, pattern, e.audience) {
 			continue
 		}
 		cur := best[r.Effect]
@@ -291,7 +379,7 @@ func (*Evaluator) resolveSimple(rules []Rule, tool, pattern string) PermissionDe
 	}
 	// (1) Deny is absolute.
 	if r := best[Deny]; r != nil {
-		return PermissionDecision{Effect: Deny, Reason: ruleReason(r, tool, pattern)}
+		return PermissionDecision{Effect: Deny, Reason: ruleReason(r, tool, pattern)}, r
 	}
 	// (2) Ask normally beats Allow; the ONLY loosening is a higher-precedence Allow
 	// over a built-in-DEFAULT Ask floor. A configured Ask (any scope above the
@@ -300,20 +388,21 @@ func (*Evaluator) resolveSimple(rules []Rule, tool, pattern string) PermissionDe
 	switch {
 	case ask != nil && allow != nil:
 		if ask.Scope == ScopeBuiltinDefault && allow.Scope.HasHigherPrecedenceThan(ask.Scope) {
-			return PermissionDecision{Effect: Allow, Reason: ruleReason(allow, tool, pattern)}
+			return PermissionDecision{Effect: Allow, Reason: ruleReason(allow, tool, pattern)}, allow
 		}
-		return PermissionDecision{Effect: Ask, Reason: ruleReason(ask, tool, pattern)}
+		return PermissionDecision{Effect: Ask, Reason: ruleReason(ask, tool, pattern), ConfiguredAsk: ruleIsConfigured(ask)}, ask
 	case ask != nil:
-		return PermissionDecision{Effect: Ask, Reason: ruleReason(ask, tool, pattern)}
+		return PermissionDecision{Effect: Ask, Reason: ruleReason(ask, tool, pattern), ConfiguredAsk: ruleIsConfigured(ask)}, ask
 	case allow != nil:
-		return PermissionDecision{Effect: Allow, Reason: ruleReason(allow, tool, pattern)}
+		return PermissionDecision{Effect: Allow, Reason: ruleReason(allow, tool, pattern)}, allow
 	}
 	// (3) No matching rule: default to Ask so an unconfigured call pauses for the
-	// client rather than being silently allowed.
+	// client rather than being silently allowed. Not a configured Ask — there is
+	// no rule behind it.
 	return PermissionDecision{
 		Effect: Ask,
 		Reason: "no permission rule matched " + tool + "; client approval required",
-	}
+	}, nil
 }
 
 // effectRank orders effects by severity for compound folding: deny is worst.
@@ -330,11 +419,18 @@ func effectRank(e Effect) int {
 	}
 }
 
-// ruleMatches reports whether rule r applies to the given tool and pattern. An
-// empty Rule.Tool matches any tool; an empty Rule.Pattern matches any arguments.
-// A non-empty pattern is matched as a shell-style glob against the (already
-// canonicalized) command/argument string, with an exact-match fast path.
-func ruleMatches(r *Rule, tool, pattern string) bool {
+// ruleMatches reports whether rule r applies to the given tool and pattern for
+// an evaluator of the given audience. An empty Rule.Tool matches any tool; an
+// empty Rule.Pattern matches any arguments. A non-empty pattern is matched as a
+// shell-style glob against the (already canonicalized) command/argument string,
+// with an exact-match fast path. The audience check is symmetric-permissive
+// (issue #32): a rule binds iff the rule's audience is AudienceAll, the
+// evaluator's is AudienceAll, or they are equal — so untagged rules and untagged
+// evaluators keep their full historical reach.
+func ruleMatches(r *Rule, tool, pattern string, audience Audience) bool {
+	if r.Audience != AudienceAll && audience != AudienceAll && r.Audience != audience {
+		return false
+	}
 	if r.Tool != "" && r.Tool != tool {
 		return false
 	}

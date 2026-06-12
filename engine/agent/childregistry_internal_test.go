@@ -12,7 +12,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 )
@@ -391,7 +390,7 @@ func TestCancelChildMidGateWait(t *testing.T) {
 	childEngine := NewEngine(Deps{
 		LLM:     mockllm.New(mockllm.TextTurn("child: never runs")),
 		Catalog: tool.NewCatalog(),
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Policy:  permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
 		Model:   "child-model",
 	})
 	tl, ok := NewSubagentTool(childEngine, WithMaxConcurrentChildren(1)).(*SubagentTool)
@@ -810,7 +809,7 @@ func TestParentRunCancelKeepsUnNotedRendering(t *testing.T) {
 			mockllm.DoneChunk(session.StopEndTurn),
 		)),
 		Catalog: cat,
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Policy:  permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
 		Model:   "child-model",
 	})
 	tl, ok := NewSubagentTool(childEngine).(*SubagentTool)

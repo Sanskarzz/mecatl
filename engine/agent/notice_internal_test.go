@@ -14,7 +14,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 )
@@ -82,7 +81,7 @@ func TestBackgroundNoticeBatchesTwoFinishedChildren(t *testing.T) {
 		mockllm.TextTurn("child one findings"),
 		mockllm.TextTurn("child two findings"),
 	)
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	childEngine := NewEngine(Deps{LLM: childLLM, Catalog: tool.NewCatalog(), Policy: allow, Model: "child-model"})
 	task := NewSubagentTool(childEngine)
 

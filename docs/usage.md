@@ -566,12 +566,59 @@ permissions:
     - "Bash(git push:*)"
   deny:
     - "Bash(rm:*)"        # deny wins absolutely, in any scope
+  subagent:               # child-scoped rules (issue #32): bind ONLY subagent/member/branch engines
+    allow:
+      - "Bash(go generate:*)"   # clears a child's substitution-floored ask (see "Compound-Bash & substitution safety" below) ONLY when the $(...) inners are read-only
+    ask:
+      - "Bash(go test:*)"       # a configured child Ask is NEVER auto-approved by isolation
+    deny:
+      - "Bash(curl:*)"
 ```
 
 Each entry is a rule spec `Tool(pattern)` or bare `Tool`. Patterns use the
 evaluator's glob grammar; the Claude `prefix:*` / `prefix:` form is normalised to a
 `prefix*` glob. Config rules use **glob** semantics (`Exact:false`) — only LEARNED
-"allow always" rules are exact.
+"allow always" rules are exact. **The `permissions:` subtree parses STRICTLY**: an
+unknown key inside it (`alow:`, `subagnet:`, …) is a loud parse error and the file
+is skipped (logged), never silently-ignored config; the file's top level stays
+lenient (`trustedWorkspaces:` etc. keep parsing).
+
+**Audience × effect** — which engine class each bucket binds.
+
+**Baseline first:** child engines (Subagent children, team members, Parallel
+branches) default to **allow-all** — everything runs except substitution-floored
+commands (see *Compound-Bash & substitution safety* below) and anything a
+configured deny/ask gates. So `subagent: allow` is NOT "let children run X" —
+children already run X; it matters ONLY for *clearing a child's
+substitution-floored ask*. `subagent: deny` / `subagent: ask` *tighten* (block or
+gate a child command the floor would otherwise allow).
+
+| Bucket | Main engine | Subagents (Subagent children / team members / Parallel branches) |
+| --- | --- | --- |
+| top-level `deny` | yes | **yes** (a deny only tightens — it binds everywhere) |
+| top-level `allow` / `ask` | yes | no (children are already allow-all; see baseline above) |
+| `subagent: allow` | no | yes — clears a child's **substitution-floored** ask (see below) when the hidden inners are read-only |
+| `subagent: ask` | no | yes — gates a child command; a configured child Ask is never auto-cleared (it surfaces to the human, or auto-denies headless) |
+| `subagent: deny` | no | yes |
+
+The `subagent: allow` clearing is **bounded** (it relaxes the substitution floor
+without trusting what a substitution hides): the allow vouches **only for the
+OUTER command** — every command hidden inside `$(...)`/backticks must
+independently classify **positively read-only** (`go test $(git rev-parse HEAD)`
+clears; `go test $(anything-else)` surfaces/denies), and the outer must pass the
+worktree-escape rejections (no `git push/config/remote/fetch/pull/clone/worktree/submodule`,
+no path-bearing `git -C`/`--git-dir`/`--work-tree`, no `go … -exec/-toolexec/-overlay/-o`)
+as defense-in-depth.
+
+Child engines resolve **project** rules against their **session's workspace
+root** (per-session engines re-pin at session-engine assembly; the shared
+default engine pins the server root it was built for) — never against their
+forked worktree/copy roots (a worktree lacks the gitignored
+`settings.local.yaml`, and per-fork resolution would defeat the cache). User/CLI
+rules apply to children as usual. A typo inside the `permissions:` subtree skips
+the whole file (deny/ask included) — the WARN names the lost per-effect rule
+counts. `--yolo` remains **main-only**: it never loosens a child's substitution
+floor.
 
 **Scope → location** (highest precedence first; see `engine/governance` Scope):
 
@@ -595,9 +642,10 @@ mutations first. Config files are size- and rule-count-capped (defense-in-depth)
 
 **The trust gate** — a project's config is part of the repo the model is editing.
 Its **DENY and ASK** rules are **always** honoured (they only tighten). Its
-**ALLOW** rules (shared AND local) are honoured **only with `--trust-project`**;
-otherwise they are dropped (and logged) so a checked-in `settings.yaml` cannot
-auto-approve tool calls in an untrusted repo. User-global and `--permission-config`
+**ALLOW** rules (shared AND local, **including `subagent:` allows**) are honoured
+**only with `--trust-project`**; otherwise they are dropped (and logged) so a
+checked-in `settings.yaml` cannot auto-approve tool calls in an untrusted repo —
+for the main engine or its children. User-global and `--permission-config`
 (CLI) files are the operator's own and are always fully trusted.
 
 **Memory + soul are pre-approved at the floor** (issue #14) — the six memory tools

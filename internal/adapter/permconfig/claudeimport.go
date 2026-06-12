@@ -93,7 +93,18 @@ func importClaude(data []byte, scope governance.Scope, report *Report) ([]govern
 // The fail-safe NEVER widens: a demotion only ever moves Allow -> Ask (tighter),
 // never the reverse, and deny/ask buckets are imported verbatim (they only
 // tighten).
+//
+// Audience (issue #32): Claude settings have no subagent block, so imported
+// buckets tag exactly like the mecatl TOP-LEVEL buckets (rulesFromConfig D1) —
+// deny → AudienceAll (binds children too; tighten-only), ask/allow →
+// AudienceMain (a demoted allow→ask is still from the allow bucket, so it stays
+// AudienceMain). The audience is keyed on the BUCKET's effect, not the
+// post-demotion effect.
 func importClaudeBucket(specs []string, scope governance.Scope, effect governance.Effect, report *Report) []governance.Rule {
+	audience := governance.AudienceMain
+	if effect == governance.Deny {
+		audience = governance.AudienceAll
+	}
 	var rules []governance.Rule
 	for _, spec := range specs {
 		eff := effect
@@ -107,6 +118,7 @@ func importClaudeBucket(specs []string, scope governance.Scope, effect governanc
 			report.addDropped(spec, "unparseable rule spec")
 			continue
 		}
+		rule.Audience = audience
 		// Fail-safe 2: an unexpanded "~" in the pattern is left as-is and reported
 		// inert (it cannot match the absolute path a tool resolves).
 		if strings.Contains(rule.Pattern, "~") {

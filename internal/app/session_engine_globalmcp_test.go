@@ -62,7 +62,7 @@ func TestSessionEngineFactoryMountsGlobalMCPToolsForSelector(t *testing.T) {
 	factory, _ := globalMCPFactory(t, globalMgr)
 
 	// A NON-default selector (openrouter) + NO client specs — exactly the picker case.
-	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault)
+	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(selector): %v", err)
 	}
@@ -89,7 +89,7 @@ func TestSessionEngineFactoryMountsGlobalMCPToolsForSelector(t *testing.T) {
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
 	factory2 := sessionEngineFactory(Config{Model: "default-model"}, reg2, or2, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr})
-	res2, err := factory2(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault)
+	res2, err := factory2(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(dispatch): %v", err)
 	}
@@ -119,7 +119,7 @@ func TestSessionEngineFactoryMountsGlobalMCPToolsForSelector(t *testing.T) {
 func TestSessionEngineFactorySelectorNilGlobalMCP(t *testing.T) {
 	factory, _ := globalMCPFactory(t, nil)
 
-	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault)
+	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(nil global): %v", err)
 	}
@@ -147,7 +147,7 @@ func TestSessionEngineFactorySelectorCloseKeepsGlobalMCP(t *testing.T) {
 	factory, _ := globalMCPFactory(t, globalMgr)
 
 	// First selector session, then close it.
-	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault)
+	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(first): %v", err)
 	}
@@ -164,7 +164,7 @@ func TestSessionEngineFactorySelectorCloseKeepsGlobalMCP(t *testing.T) {
 	}
 
 	// A SECOND selector session still has the global tool (proof the manager lives on).
-	res2, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault)
+	res2, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(second): %v", err)
 	}
@@ -224,7 +224,7 @@ func runSelectorSubagentRefAndCheckEcho(t *testing.T, globalMgr *mcp.Manager, sp
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
 	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr, agentReg: defs})
 
-	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, specs, server.ProfileDefault)
+	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, specs, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestSelectorClientToolCollisionGlobalWins(t *testing.T) {
 	factory := sessionEngineFactory(Config{Model: "default-model"}, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{globalMgr: globalMgr})
 
 	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter},
-		[]mcp.ServerConfig{{Name: "globe", URL: cURL}, {Name: "other", URL: oURL}}, server.ProfileDefault)
+		[]mcp.ServerConfig{{Name: "globe", URL: cURL}, {Name: "other", URL: oURL}}, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(collision): %v", err)
 	}

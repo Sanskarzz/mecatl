@@ -480,6 +480,24 @@ type Config struct {
 	// nil when CommandSourceURL is unset. Unexported: an internal composition
 	// detail, not an operator knob.
 	commandSource prompt.CommandSource
+
+	// permResolver is the ONE file-based permission-config resolver (issue #13),
+	// constructed EXACTLY ONCE in Build right after the trust fold (the
+	// cfg.TrustProject/cfg.gitStatus precedent) and consumed by buildEngine for
+	// the main policy — never re-constructed downstream (a second resolver would
+	// be a second cache and a second discovery pass). nil when no config source
+	// is selected (the typed-nil guard lives in buildPermResolver, so this field
+	// is a REAL nil interface and "nil resolver behaves like NewPolicy" holds).
+	// Unexported: an internal composition detail, not an operator knob.
+	permResolver permpolicy.RuleResolver
+	// childPermResolver is permResolver PINNED to the SERVER workspace root
+	// (issue #32): child/member/branch engines run over forked workspaces, and
+	// project permission rules must resolve from the server root, never from
+	// fork roots (worktrees lack gitignored local settings; per-fork roots would
+	// bloat the resolver cache). nil when permResolver is nil. When
+	// cfg.Workspace is empty (or unopenable) the pin is a nil workspace —
+	// user/CLI rules only. Unexported, set alongside permResolver in Build.
+	childPermResolver permpolicy.RuleResolver
 }
 
 // providerConstructor builds the port.LLMProvider for an available provider id,
@@ -567,6 +585,14 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	trust := resolveTrust(cfg)
 	narrateTrust(cfg.diag(), trust, cfg.Workspace)
 	cfg.TrustProject = trust.Trusted
+
+	// File-based permission config (issues #13/#32): construct the resolver
+	// EXACTLY ONCE here, right after the trust fold (it consumes the effective
+	// cfg.TrustProject), and fold it onto cfg so buildEngine (main policy) and
+	// the child deps builders (the workspace-PINNED child resolver) consume the
+	// SAME instance — one discovery pass, one cache, no per-consumer drift.
+	cfg.permResolver = buildPermResolver(cfg)
+	cfg.childPermResolver = buildChildPermResolver(cfg)
 
 	// Start-of-session git snapshot, computed ONCE here (FIX 2): gitSnapshot runs git
 	// against cfg.Workspace through a HARDENED/scrubbed env and only for a TRUSTED
@@ -931,7 +957,19 @@ func sessionEngineFactory(
 	instructions prompt.InstructionAssembler,
 	assets catalogAssets,
 ) server.SessionEngineFactory {
-	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile) (server.SessionEngineResult, error) {
+	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile, workspace string) (server.SessionEngineResult, error) {
+		// Pin the CHILD permission resolver to THIS session's base root (issue
+		// #32): a per-session engine's subagents/members/branches must resolve
+		// project permission rules from the SESSION's pre-fork root — the
+		// session over project X gets X's `subagent:` block, never the server
+		// flag's root rules, and never a fork root (the fork-root exclusion
+		// holds: the pin ignores the per-call child workspace entirely). An
+		// empty workspace (no-fs, or a resume that persisted none) pins no
+		// project root — user/CLI rules only. cfg is a value, so the override
+		// is scoped to this one session's assembly; the SHARED engine keeps the
+		// build-time pin over cfg.Workspace (the server's own root — the one
+		// the shared engine was assembled for).
+		cfg.childPermResolver = childPermResolverFor(cfg, workspace)
 		// The NO-FS profile (issue #55): the service routes every no-fs session
 		// through this factory unconditionally (the shared engine has the FS tools
 		// baked in), and the profile selects the no-FS catalog assembly + the
@@ -1162,32 +1200,15 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// The SAME policy (and thus store) is shared with every per-session client-MCP
 	// engine via sessionEngineFactory, so an MCP-mounted session learns identically.
 	learned := permstore.New()
-	// File-based permission config (issue #13): the resolver re-resolves the
-	// per-project `.mecatl/settings.yaml` (and Claude-imported settings.json)
-	// against each session's workspace root, gating project ALLOW rules behind
-	// TrustProject and caching per root. It rides the SAME lowest-scope extra
-	// channel as the learned rules. permconfig.New returns nil when no source is
-	// configured, in which case NewPolicyWithResolver behaves exactly like
-	// NewPolicy (built-ins + learned only).
-	resolver := permconfig.New(permconfig.Options{
-		Conventional:  cfg.PermissionsConventional,
-		ImportClaude:  cfg.ImportClaudePermissions,
-		TrustProject:  cfg.TrustProject,
-		ExplicitFiles: cfg.PermissionConfigs,
-		Diagnostics:   cfg.diag(),
-	})
-	// permconfig.New returns a TYPED-nil (*permconfig.Resolver)(nil) when no config
-	// source is wired; passing that into NewPolicyWithResolver would store a non-nil
-	// INTERFACE wrapping a nil pointer, so the policy's `resolver != nil` guard stays
-	// true and Resolve panics on the first tool-permission evaluation. Pass a real
-	// untyped nil so the documented "nil resolver behaves like NewPolicy" contract
-	// holds (the no-config default — built-ins + learned only).
-	var policy *permpolicy.Policy
-	if resolver != nil {
-		policy = permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, resolver, mainEvaluatorOptions(cfg)...)
-	} else {
-		policy = permpolicy.NewPolicy(mainRules(cfg), learned, mainEvaluatorOptions(cfg)...)
-	}
+	// File-based permission config (issue #13): cfg.permResolver is the ONE
+	// resolver Build constructed right after the trust fold (the typed-nil guard
+	// lives in buildPermResolver) — it re-resolves the per-project
+	// `.mecatl/settings.yaml` (and Claude-imported settings.json) against each
+	// session's workspace root, gating project ALLOW rules behind TrustProject
+	// and caching per root. It rides the SAME lowest-scope extra channel as the
+	// learned rules; a nil resolver makes NewPolicyWithResolver behave exactly
+	// like NewPolicy (built-ins + learned only).
+	policy := permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, cfg.permResolver, mainEvaluatorOptions(cfg)...)
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
 	// agentReg (threaded from Build's single resolveAgentSeam) is shared with
@@ -2749,9 +2770,12 @@ func childEngineDeps(cfg Config, role string, provider port.LLMProvider, cat *to
 	return agent.Deps{
 		LLM:     provider,
 		Catalog: cat,
-		// Child/member engines are non-interactive (allow-all) and never learn:
-		// nil store disables Learn entirely for them.
-		Policy:       permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		// Child/member engines are non-interactive (allow-all floor) and never
+		// learn (nil store disables Learn entirely). childPermPolicy adds the
+		// AudienceSubagent pin + the workspace-pinned config resolver (issue #32)
+		// so `subagent:`-block rules bind children; with no config it is the
+		// historical allow-all shape.
+		Policy:       childPermPolicy(cfg),
 		Hooks:        hooks,
 		PromptConfig: pc,
 		Model:        model,
@@ -2809,7 +2833,9 @@ func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvid
 	// ContextWindow it derived are kept (those are the contamination-sensitive fields).
 	deps := engineDepsForProvider(cfg, provider, model, contextWindow,
 		nil, // store: child engines never persist (disables Learn entirely)
-		permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		// The child policy: allow-all floor + AudienceSubagent pin + the
+		// workspace-pinned config resolver (issue #32) — see childPermPolicy.
+		childPermPolicy(cfg),
 		hooks,
 		nil, // mcpProvider: child command expansion does not consult MCP prompts
 		nil, // instructions: child engines carry no turn-0 instruction assembler
@@ -3878,19 +3904,130 @@ func mainRules(cfg Config) []governance.Rule {
 }
 
 // mainEvaluatorOptions returns the governance.Evaluator construction options for the
-// MAIN engine's policy. Under --yolo (cfg.AllowAllTools) it loosens the built-in
-// substitution Ask floor (WithLooseSubstitution) — consistent with the mutate-ask floor
-// the ScopeCLI allow-all rule already loosens, so a substitution command no longer
-// prompts under yolo. A configured Deny/Ask in any scope still wins (deny-dominance and
-// the configured-ask floor are unaffected). Without --yolo it returns no options (the
-// floor stands). Child/member policies are built with their own allow-all rules
-// elsewhere; the substitution loosening rides this main-policy seam, and subagents'
-// surface/isolation posture handles their substitutions independently.
+// MAIN engine's policy. It ALWAYS pins the audience to AudienceMain (issue #32):
+// without it, subagent-tagged resolver extras (the permconfig `subagent:` block)
+// would bind the main engine too — the audience pin is what keeps a child-scoped
+// rule from leaking into the interactive engine. Under --yolo (cfg.AllowAllTools)
+// it additionally loosens the built-in substitution Ask floor
+// (WithLooseSubstitution) — consistent with the mutate-ask floor the ScopeCLI
+// allow-all rule already loosens, so a substitution command no longer prompts
+// under yolo. A configured Deny/Ask in any scope still wins (deny-dominance and
+// the configured-ask floor are unaffected). Child/member policies are built with
+// their own ruleset + audience via childPermPolicy; the substitution loosening
+// rides this main-policy seam only, and subagents' surface/isolation posture
+// handles their substitutions independently (--yolo stays main-only).
 func mainEvaluatorOptions(cfg Config) []governance.EvaluatorOption {
+	opts := []governance.EvaluatorOption{governance.WithAudience(governance.AudienceMain)}
 	if cfg.AllowAllTools {
-		return []governance.EvaluatorOption{governance.WithLooseSubstitution(true)}
+		opts = append(opts, governance.WithLooseSubstitution(true))
 	}
-	return nil
+	return opts
+}
+
+// buildPermResolver constructs the ONE file-based permission-config resolver
+// (issue #13) for the whole composition, called exactly once by Build right
+// after the trust fold. permconfig.New returns a TYPED-nil
+// (*permconfig.Resolver)(nil) when no config source is wired; storing that in
+// the cfg.permResolver INTERFACE field would make the policy's `resolver != nil`
+// guard stay true and Resolve panic on the first tool-permission evaluation —
+// so the typed-nil guard lives HERE, and the field is a real nil interface when
+// config is off ("nil resolver behaves like NewPolicy" holds everywhere).
+func buildPermResolver(cfg Config) permpolicy.RuleResolver {
+	resolver := permconfig.New(permconfig.Options{
+		Conventional:  cfg.PermissionsConventional,
+		ImportClaude:  cfg.ImportClaudePermissions,
+		TrustProject:  cfg.TrustProject,
+		ExplicitFiles: cfg.PermissionConfigs,
+		Diagnostics:   cfg.diag(),
+	})
+	if resolver == nil {
+		return nil
+	}
+	return resolver
+}
+
+// buildChildPermResolver derives the CHILD engines' resolver from
+// cfg.permResolver (issue #32) for the BUILD-time shared engine: pinned to the
+// server root cfg.Workspace (the root the shared engine is assembled for).
+// Per-session engines re-pin to their own session root via childPermResolverFor
+// in sessionEngineFactory.
+func buildChildPermResolver(cfg Config) permpolicy.RuleResolver {
+	return childPermResolverFor(cfg, cfg.Workspace)
+}
+
+// childPermResolverFor pins the ONE permResolver to a read-only workspace over
+// root — the SESSION's pre-fork base root (issue #32). Children run over forked
+// workspaces, and project permission rules must resolve from the session base,
+// never from fork roots — a worktree lacks the gitignored local settings file,
+// and per-fork roots would bloat the resolver's per-root cache. An
+// empty/unopenable root pins a nil workspace (user/CLI rules only — the
+// buildSoulGate fail-open precedent). nil when permResolver is nil (config off).
+func childPermResolverFor(cfg Config, root string) permpolicy.RuleResolver {
+	if cfg.permResolver == nil {
+		return nil
+	}
+	var ws tool.WorkspaceReader
+	if root != "" {
+		if w, err := osfs.NewWorkspace(root); err == nil {
+			ws = w
+		}
+	}
+	return pinnedResolver{inner: cfg.permResolver, ws: ws}
+}
+
+// pinnedResolver decorates a permpolicy.RuleResolver to IGNORE the per-call
+// workspace and resolve against a FIXED one (the server root). It is the child
+// engines' resolver shape (issue #32): every Subagent child / team member /
+// parallel branch evaluates against its own forked workspace, but the
+// file-based permission rules that govern it are the SERVER project's — pinning
+// keeps the policy reading `.mecatl/settings.yaml` from the real root and keeps
+// the resolver cache at one entry instead of one per fork.
+type pinnedResolver struct {
+	inner permpolicy.RuleResolver
+	ws    tool.WorkspaceReader // nil ⇒ user/CLI rules only
+}
+
+// Resolve implements permpolicy.RuleResolver, dropping the caller's workspace
+// in favour of the pinned one.
+func (p pinnedResolver) Resolve(ctx context.Context, _ tool.WorkspaceReader) []governance.Rule {
+	return p.inner.Resolve(ctx, p.ws)
+}
+
+// childRules returns the child/member engine's static ruleset: the canonical
+// allow-all-at-the-floor (permpolicy.AllowAllFloorRules — the ONE definition,
+// shared with every "default child posture" test fixture so they cannot
+// drift). Children were historically allow-all at the zero Scope
+// (ScopeManaged); the re-scope to the BUILT-IN floor is behaviour-neutral with
+// no config (allow-all still matches everything → Allow, and the
+// floor-exception in resolveSimple only keys on the ASK side's scope) — pinned
+// by TestChildRulesFloorScopeNeutral — but it is load-bearing for the issue-#32
+// decision bits: the blanket allow-all must NOT register as a CONFIGURED Allow
+// (scope above the floor), or every substitution-floored child ask would
+// qualify for FlooredConfiguredAllow. Only a real config rule (the permconfig
+// `subagent:` block) may carry an above-floor scope.
+func childRules() []governance.Rule {
+	return permpolicy.AllowAllFloorRules()
+}
+
+// childEvaluatorOptions returns the governance.Evaluator options for a
+// child/member policy: the AudienceSubagent pin (issue #32), so top-level
+// (AudienceMain) config allow/ask never bind a child while `subagent:`-block
+// rules and AudienceAll denies do. Deliberately NO WithLooseSubstitution here:
+// --yolo is main-only — a child's substitution floor resolves through the
+// child-ask model (floored-configured-allow / isolation / surface / deny),
+// never through the yolo loosening.
+func childEvaluatorOptions() []governance.EvaluatorOption {
+	return []governance.EvaluatorOption{governance.WithAudience(governance.AudienceSubagent)}
+}
+
+// childPermPolicy builds the shared child/member permission policy (issue #32):
+// the allow-all floor (childRules), NO learned-rule store (children never
+// learn), the workspace-PINNED config resolver, and the AudienceSubagent pin.
+// With no config wired (cfg.childPermResolver nil — every direct-call test and
+// the no-config default) it behaves byte-identically to the historical bare
+// allow-all policy.
+func childPermPolicy(cfg Config) *permpolicy.Policy {
+	return permpolicy.NewPolicyWithResolver(childRules(), nil /* children never learn */, cfg.childPermResolver, childEvaluatorOptions()...)
 }
 
 // defaultLimits returns the non-zero stop limits injected for sessions created

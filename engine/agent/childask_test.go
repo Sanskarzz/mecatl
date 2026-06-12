@@ -12,7 +12,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -287,15 +286,19 @@ func TestNonIsolatedHeadlessChildAutoDenies(t *testing.T) {
 
 // --- shared helpers for the child-ask tests ---------------------------------
 
-// bashChildEngine builds a child engine with the given Bash tool under an allow-all
-// policy. The allow-all policy still floors a non-read-only substitution at Ask (the
-// substitution floor is separate from allow-all), so a `cat $(zap)` call produces an
-// EvPermissionAsk the child posture then resolves.
+// bashChildEngine builds a child engine with the given Bash tool under the
+// CANONICAL default child posture: the allow-all FLOOR
+// (permpolicy.AllowAllFloorRules — the same ruleset production childRules()
+// uses, so fixture and composition cannot drift). The floor allow-all still
+// floors a non-read-only substitution at Ask (the substitution floor is
+// separate from allow-all, and a FLOOR-scoped allow never registers as a
+// configured Allow), so a `cat $(zap)` call produces an EvPermissionAsk the
+// child posture then resolves.
 func bashChildEngine(llm port.LLMProvider, bash tool.Tool) *agent.Engine {
 	return agent.NewEngine(agent.Deps{
 		LLM:     llm,
 		Catalog: bashCatalog(bash),
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Policy:  permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
 		Model:   "child-model",
 	})
 }
@@ -311,7 +314,7 @@ func bashCatalog(bash tool.Tool) *tool.Catalog {
 func interactiveEngine(t *testing.T, d agent.Deps) *agent.Engine {
 	t.Helper()
 	if d.Policy == nil {
-		d.Policy = permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+		d.Policy = permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	}
 	if d.Model == "" {
 		d.Model = "parent-model"

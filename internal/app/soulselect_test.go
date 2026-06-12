@@ -110,6 +110,7 @@ func TestSoulWithheldByProjectSettingsDeny(t *testing.T) {
 	}
 
 	cfg := Config{Workspace: ws, PermissionsConventional: true, TrustProject: true}
+	cfg.permResolver = buildPermResolver(cfg) // the Build fold (buildSoulGate consumes the ONE resolver)
 	if got := buildSoulGate(cfg).Effect(); got != governance.Deny {
 		t.Fatalf("project settings deny on soul:apply must resolve to Deny, got %v", got)
 	}
@@ -149,6 +150,7 @@ func TestSoulApplyProjectAllowIgnoredWithoutTrust(t *testing.T) {
 
 	// Trust OFF: the untrusted project allow is dropped → gate stays at the floor Allow.
 	untrusted := Config{Workspace: ws, PermissionsConventional: true, TrustProject: false}
+	untrusted.permResolver = buildPermResolver(untrusted) // the Build fold
 	if got := buildSoulGate(untrusted).Effect(); got != governance.Allow {
 		t.Fatalf("untrusted project allow must be inert; gate should be floor Allow, got %v", got)
 	}
@@ -183,6 +185,7 @@ func TestSoulApplyConfiguredDenyWinsUnderYolo(t *testing.T) {
 	}
 
 	cfg := Config{Workspace: ws, AllowAllTools: true, PermissionConfigs: []string{cfgFile}}
+	cfg.permResolver = buildPermResolver(cfg) // the Build fold
 	if got := buildSoulGate(cfg).Effect(); got != governance.Deny {
 		t.Fatalf("a configured Deny on soul:apply must win under --yolo (allow-all loosens only the floor); got %v", got)
 	}
@@ -196,7 +199,9 @@ func TestSoulApplyConfiguredDenyWinsUnderYolo(t *testing.T) {
 func TestBuildSoulGateUnopenableWorkspaceDefaultsAllow(t *testing.T) {
 	xdg := t.TempDir()
 	fakeSoulEnv(t, xdg)
-	if got := buildSoulGate(Config{Workspace: "/nonexistent/xyz", PermissionsConventional: true}).Effect(); got != governance.Allow {
+	cfgUnopenable := Config{Workspace: "/nonexistent/xyz", PermissionsConventional: true}
+	cfgUnopenable.permResolver = buildPermResolver(cfgUnopenable)
+	if got := buildSoulGate(cfgUnopenable).Effect(); got != governance.Allow {
 		t.Fatalf("an unopenable workspace must fail open to floor Allow (no panic), got %v", got)
 	}
 }
@@ -511,4 +516,26 @@ func keysOf(m map[string][]byte) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestSoulGateIgnoresSubagentBlock pins the AudienceMain pin on the soul gate
+// (issue #32 panel finding): a `permissions: subagent:` rule naming soul:apply
+// binds CHILD engines only — it must never withhold the MAIN engine's soul.
+func TestSoulGateIgnoresSubagentBlock(t *testing.T) {
+	xdg := t.TempDir()
+	fakeSoulEnv(t, xdg)
+	ws := t.TempDir()
+	mecatlDir := filepath.Join(ws, ".mecatl")
+	if err := os.MkdirAll(mecatlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := "permissions:\n  subagent:\n    deny:\n      - \"soul:apply\"\n"
+	if err := os.WriteFile(filepath.Join(mecatlDir, "settings.yaml"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Workspace: ws, PermissionsConventional: true, TrustProject: true}
+	cfg.permResolver = buildPermResolver(cfg)
+	if got := buildSoulGate(cfg).Effect(); got != governance.Allow {
+		t.Fatalf("a subagent-block soul:apply deny must be invisible to the MAIN soul gate; got %v", got)
+	}
 }

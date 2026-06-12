@@ -10,7 +10,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -26,7 +25,7 @@ func TestSurfaceAskAttribution(t *testing.T) {
 	e := NewEngine(Deps{
 		LLM:         mockllm.New(mockllm.TextTurn("x")),
 		Catalog:     tool.NewCatalog(),
-		Policy:      permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Policy:      permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
 		Model:       "m",
 		Interactive: true,
 	})
@@ -179,7 +178,7 @@ func TestDriveChildStructuredPlainTextExhaustsToCleanTerminal(t *testing.T) {
 	engine := NewEngine(Deps{
 		LLM:     mockllm.New(turns...),
 		Catalog: tool.NewCatalog(),
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Policy:  permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
 		Model:   "child-model",
 	})
 
@@ -228,7 +227,7 @@ func TestSubmitResultOverlayWinsAndIsAdvertised(t *testing.T) {
 	engine := NewEngine(Deps{
 		LLM:     mockllm.New(),
 		Catalog: cat,
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Policy:  permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
 		Model:   "m",
 	})
 

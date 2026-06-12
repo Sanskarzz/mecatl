@@ -28,7 +28,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -43,7 +42,7 @@ import (
 // internally and exposes no other handle on it.
 func cancelTeammateService(t *testing.T, providers map[string]*mockllm.Provider, extra ...tool.Tool) (*server.Service, func() *team.Team) {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	var (
 		mu       sync.Mutex
 		captured *team.Team

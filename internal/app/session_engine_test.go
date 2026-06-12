@@ -113,7 +113,7 @@ func TestSessionEngineFactoryBuildsUsableEngine(t *testing.T) {
 	factory := sessionEngineFactory(cfg, reg, provider, store, policy, hooks, nil, prompt.RootAssembler{}, catalogAssets{})
 
 	// Zero selector + no specs: the per-session engine binds the DEFAULT provider.
-	res, err := factory(context.Background(), server.ProviderSelector{}, []mcp.ServerConfig{}, server.ProfileDefault)
+	res, err := factory(context.Background(), server.ProviderSelector{}, []mcp.ServerConfig{}, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
@@ -155,7 +155,7 @@ func twoProviderFactory(t *testing.T) (server.SessionEngineFactory, *providerReg
 // returns the terminal text (so a test can assert the bound provider's reply).
 func runFactoryEngine(t *testing.T, factory server.SessionEngineFactory, sel server.ProviderSelector) string {
 	t.Helper()
-	res, err := factory(context.Background(), sel, nil, server.ProfileDefault)
+	res, err := factory(context.Background(), sel, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(%+v): %v", sel, err)
 	}
@@ -171,7 +171,7 @@ func runFactoryEngine(t *testing.T, factory server.SessionEngineFactory, sel ser
 // fallback to the default.
 func TestSessionEngineFactoryUnknownProvider(t *testing.T) {
 	factory, _ := twoProviderFactory(t)
-	_, err := factory(context.Background(), server.ProviderSelector{ProviderID: "anthropic"}, nil, server.ProfileDefault)
+	_, err := factory(context.Background(), server.ProviderSelector{ProviderID: "anthropic"}, nil, server.ProfileDefault, "")
 	if err == nil {
 		t.Fatal("expected an error for an unknown provider id, got nil")
 	}
@@ -222,7 +222,7 @@ func TestSessionEngineFactoryModelPassthrough(t *testing.T) {
 
 	const unknownModel = "gpt-5-preview-not-in-catalog"
 	res, err := factory(context.Background(),
-		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: unknownModel}, nil, server.ProfileDefault)
+		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: unknownModel}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestSessionEngineFactoryContextWindowFromCatalog(t *testing.T) {
 
 	// Known model ⇒ the engine's window is the catalog limit.
 	res, err := factory(context.Background(),
-		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: knownModel}, nil, server.ProfileDefault)
+		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: knownModel}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(known): %v", err)
 	}
@@ -276,7 +276,7 @@ func TestSessionEngineFactoryContextWindowFromCatalog(t *testing.T) {
 
 	// Passthrough (uncatalogued) model ⇒ the 128k default fallback.
 	resPT, err := factory(context.Background(),
-		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: "totally-made-up-model"}, nil, server.ProfileDefault)
+		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: "totally-made-up-model"}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(passthrough): %v", err)
 	}
@@ -298,7 +298,7 @@ func TestSessionEngineFactorySelectorMCPCoexist(t *testing.T) {
 	// is still built (core tools only) and bound to the SELECTED provider.
 	res, err := factory(context.Background(),
 		server.ProviderSelector{ProviderID: providerOpenRouter},
-		[]mcp.ServerConfig{{Name: "docs", URL: "https://127.0.0.1:0/mcp"}}, server.ProfileDefault)
+		[]mcp.ServerConfig{{Name: "docs", URL: "https://127.0.0.1:0/mcp"}}, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(sel+specs): %v", err)
 	}

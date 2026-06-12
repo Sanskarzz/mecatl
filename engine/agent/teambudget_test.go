@@ -10,7 +10,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -363,7 +362,7 @@ var _ = permpolicy.NewPolicy
 // a per-member Engine looked up by member name with that member's coordination tools.
 func teamBudgetToolFactory(t *testing.T, providers map[string]*mockllm.Provider) agent.TeamMemberEngineFactory {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	return func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {

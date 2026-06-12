@@ -68,7 +68,7 @@ func TestSessionEngineFactoryRegistersMemoryToolsForSelector(t *testing.T) {
 	mem, um := memoryStoresForTest(t)
 	factory := memoryToolFactory(t, catalogAssets{memStore: mem, userModelStore: um})
 
-	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault)
+	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(selector): %v", err)
 	}
@@ -91,7 +91,7 @@ func TestSessionEngineFactoryRegistersMemoryToolsForClientMCP(t *testing.T) {
 	mem, um := memoryStoresForTest(t)
 	factory := memoryToolFactory(t, catalogAssets{memStore: mem, userModelStore: um})
 
-	res, err := factory(context.Background(), server.ProviderSelector{}, []mcp.ServerConfig{{Name: "cli", URL: url}}, server.ProfileDefault)
+	res, err := factory(context.Background(), server.ProviderSelector{}, []mcp.ServerConfig{{Name: "cli", URL: url}}, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(client specs): %v", err)
 	}
@@ -114,7 +114,7 @@ func TestSessionEngineFactoryRegistersMemoryToolsForClientMCP(t *testing.T) {
 func TestSessionEngineFactoryOmitsMemoryToolsWhenUnconfigured(t *testing.T) {
 	factory := memoryToolFactory(t, catalogAssets{})
 
-	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault)
+	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestSelectorSessionMemoryPromptHasMatchingTools(t *testing.T) {
 		permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, instructions,
 		catalogAssets{memStore: memStore})
 
-	res, err := factory(ctx, server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault)
+	res, err := factory(ctx, server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}

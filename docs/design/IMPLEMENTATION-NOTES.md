@@ -921,6 +921,61 @@ coverage loop hard-failed with a misleading "denied by user". The fix (`handleCh
   `approval.denyReason` — NOT "denied by user". It ALSO emits a correlated operator diagnostic
   (`caps.diag.Log(LevelInfo, …, "agent", role)`), never a parent-stream content event.
 
+**The CONFIG axis (issue #32) extends the 4-step model in two landings.**
+
+- **Landing A — the ordinary fold (audiences).** `governance.Rule` carries an `Audience`
+  (`AudienceAll` zero value = everywhere, back-compat; `AudienceMain`; `AudienceSubagent`) and the
+  `Evaluator` an audience pin (`WithAudience`, default `AudienceAll`); `ruleMatches` is
+  symmetric-permissive (a rule binds iff either side is All or they match). Composition pins the
+  main policy `AudienceMain` (`mainEvaluatorOptions`, unconditional — otherwise subagent-tagged
+  resolver extras would bind main) and every child policy `AudienceSubagent`
+  (`childPermPolicy` = `childRules()` allow-all RE-SCOPED to `ScopeBuiltinDefault` — so the floor
+  never registers as a CONFIGURED allow — + no learned store + the workspace-PINNED resolver).
+  `permconfig` tags top-level deny `AudienceAll` (binds children; tighten-only), top-level
+  allow/ask `AudienceMain`, and the new `subagent:` block `AudienceSubagent` at the file's tier
+  scope (cap order keeps safer effects: deny(all) → sub-deny → ask → sub-ask → allow → sub-allow;
+  the `permissions:` subtree parses STRICTLY — unknown key = loud per-file skip — while the file's
+  top level stays lenient). The Claude import tags like the top-level buckets (deny → All,
+  ask/allow → Main; a demoted WebFetch allow stays Main). Project subagent ALLOWS are trust-gated
+  exactly like top-level allows. The ONE resolver is built in `Build` right after the trust fold
+  (`cfg.permResolver`), and children consume it through `pinnedResolver` (`cfg.childPermResolver`)
+  pinned to a read-only osfs workspace over the SESSION's pre-fork base root: the build-time
+  shared engine pins the server root it serves; per-session engines RE-PIN to their session's
+  workspace in `sessionEngineFactory` (`childPermResolverFor` — the `SessionEngineFactory` seam
+  now carries the session workspace), so a session over project X gets X's `subagent:` block for
+  its children and the server project's rules never leak in. Fork roots NEVER resolve project
+  rules (worktrees lack gitignored local settings; per-fork roots would bloat the cache). The
+  soul gate (`buildSoulGate`) consumes the SAME `cfg.permResolver` + `mainEvaluatorOptions`
+  (AudienceMain pin) — never a second `permconfig.New`.
+- **Landing B — `resolveChildAsk` decision bits.** `PermissionDecision` (and `session.PendingAsk`,
+  copied verbatim in `authorize`; domain-only, never proto) gains two mutually-exclusive bits.
+  `ConfiguredAsk`: the winning Ask came from a CONFIGURED rule (scope above `ScopeBuiltinDefault`;
+  false for the no-match default, the builtin floor, and the substitution-floor escalation) —
+  `resolveChildAsk` then SKIPS the A2 isolation auto-approve (configured-Ask-never-suppressed
+  extended to isolation) and falls through to surface/headless; the headless deny message
+  generalises to `childAutoDenyMessage(reason, configured)` with a rule-oriented suffix ("requires
+  approval by a configured permission rule and no interactive approver is attached") instead of the
+  substitution-rephrase advice. `FlooredConfiguredAllow`: the fold is Ask ONLY because of the
+  substitution floor, every floored segment had a CONFIGURED Allow match, AND each passes
+  `flooredAllowSafe` (a sibling classifier in `bash.go`). Its bound (panel-hardened): **the
+  configured Allow vouches ONLY for the OUTER literal — every recursively-extracted INNER must
+  independently classify positively read-only** (the SAME A1 inner contract SubstitutionReadOnly
+  applies: `ReadOnlyBash(in) || SubstitutionReadOnly(in)`; an unknown/mutating inner like
+  `$(zap)`/`$(touch x)` fails — the substitution floor's charter "an allow rule for the outer
+  literal can never silently approve a hidden command" holds), PLUS the worktree-escape
+  REJECTIONS on the blanked outer as defense-in-depth (`escapeRejectionsFree` — the ONE rejection
+  path shared with `segmentIsolationApprovable`, so A2 and the floored-allow bound cannot drift:
+  worktree-escape git subcommands, path-bearing git global flags, `go` escape flags; a
+  lone-placeholder residual requires the pure-subshell shape — command-position `$(...)` executes
+  its OUTPUT). The outer is deliberately NOT required to be read-only — that is exactly what the
+  configured Allow vouches for: `go test $(git rev-parse HEAD)` clears, `go test $(zap)`
+  surfaces. Fail-safe false on extraction ambiguity. `resolveChildAsk` resolves a qualifying ask
+  `AllowOnce` without surfacing. Positive soundness is fuzzed (`FuzzFlooredConfiguredAllow`,
+  the repo convention for auto-approval-gating classifiers). The pre-existing classifiers
+  (`SubstitutionReadOnly`/`ReadOnlyBash`/`IsolationApprovable` + their fuzzers) are
+  byte-for-byte unchanged. `--yolo` stays MAIN-only (children never get
+  `WithLooseSubstitution`; pinned by `TestYoloLeavesChildrenUnchanged`).
+
 **`--yolo` loosens the substitution floor for the MAIN agent.** `Config.AllowAllTools` now also
 threads `governance.WithLooseSubstitution(true)` (`mainEvaluatorOptions`) into the main policy's
 Evaluator, so a substitution command resolves by the allow-all fold instead of the Ask floor —
@@ -1187,13 +1242,33 @@ FALL BACK to the hardcoded prefix matrix
 (`adaptiveThinkingPrefixes`/`thinkingIncapablePrefixes`, NOT deleted) as the OFFLINE FLOOR; the
 `max_tokens` resolver is likewise live-first via the `liveMetaStore`.
 
-### `permconfig` (file-based permission config — issue #13)
+### `permconfig` (file-based permission config — issues #13/#32)
 
 A `permpolicy.RuleResolver` that re-resolves per workspace-root the shared
 `.mecatl/settings.yaml`→`ScopeSharedProject`, the gitignored
 `.mecatl/settings.local.yaml`→`ScopeLocalProject`, the matching Claude `settings{,.local}.json`
 imports, explicit `--permission-config` files→`ScopeCLI`; trust-gates project allows; caches
 per root with **mtime/size revalidation** so a mid-process edit takes effect; byte+rule caps.
+
+**Audiences (issue #32):** every loaded rule is `Audience`-tagged — top-level deny →
+`AudienceAll` (binds children too; tighten-only), top-level allow/ask → `AudienceMain`, the
+`subagent:` block (allow/ask/deny inside `Permissions`) → `AudienceSubagent` at the file's tier
+scope; the Claude import tags like the top-level buckets (no subagent block in Claude settings;
+a demoted WebFetch allow stays `AudienceMain` — bucket-keyed). The cap order keeps safer effects
+at `maxRulesPerConfig`: deny(all) → subagent-deny → ask → subagent-ask → allow →
+subagent-allow. Project subagent ALLOWS are trust-gated exactly like top-level allows (the gate
+keys on `Effect`, audience-agnostic). The `permissions:` subtree parses **STRICTLY** (custom
+`UnmarshalYAML` on `Permissions`/`SubagentPermissions` walking `yaml.Node` mapping keys —
+unknown key ⇒ parse error ⇒ the existing per-file fail-soft log-and-skip) while the Config top
+level stays lenient (`trustedWorkspaces:` etc.); `parseYAML`'s empty/comment-only early-outs
+and the byte cap are preserved. The ONE resolver per process is constructed by `app.Build`
+right after the trust fold (`cfg.permResolver`); child engines consume it via the
+`pinnedResolver` decorator (`cfg.childPermResolver`) pinned to the SESSION's pre-fork base root
+(per-session engines re-pin via `childPermResolverFor` in `sessionEngineFactory`; the shared
+engine pins the server root) — a child's forked worktree/copy root never drives project-rule
+discovery. A strict-parse skip WARN names the per-effect rule counts the skipped file loses
+(`lostRuleCounts`, lenient best-effort re-read) — a typo'd key drops the file's deny/ask too,
+so the loosening is made loud.
 
 ### `workspacetrust` (WORKSPACE-TRUST — see `WORKSPACE-TRUST-SPIKE.md`)
 

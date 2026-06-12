@@ -73,17 +73,27 @@ control. Documented agents have bypassed their own denylists via path indirectio
 and then disabled their own sandbox. The boundary must live *below* the agent.)
 
 ### 3. It wasn't needed — allow-all already exists
-Every child/fork/team-member engine is already constructed allow-all:
+Every child/fork/team-member engine is already constructed allow-all. Since
+issue #32 that is an allow-all **floor** plus child-scoped config:
 
 ```go
-// internal/app/build.go — newChildEngineWithHooks
-Policy: permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+// internal/app/build.go — childPermPolicy
+// childRules() = {{Scope: ScopeBuiltinDefault, Effect: Allow}} — the floor —
+// plus the AudienceSubagent evaluator pin and the workspace-PINNED permconfig
+// resolver, so a `permissions: subagent:` block (and any top-level deny)
+// binds children while top-level allow/ask stay main-only.
+Policy: childPermPolicy(cfg),
 ```
 
-An empty-`Tool`/`Pattern` `Allow` rule matches every call. We reuse that exact
-mechanism for the main session instead of threading a fourth mode through nine
-touch-points (session const, proto enum, mapper ×2, ACP advertise + parse,
-agentdefs, evaluator, tests).
+An empty-`Tool`/`Pattern` `Allow` rule matches every call; re-scoping it to
+`ScopeBuiltinDefault` is behaviour-neutral with no config (pinned by
+`TestChildRulesFloorScopeNeutral`) and keeps the blanket allow from ever
+registering as a *configured* allow in the issue-#32 decision bits. We reuse
+that exact rule mechanism for the main session instead of threading a fourth
+mode through nine touch-points (session const, proto enum, mapper ×2, ACP
+advertise + parse, agentdefs, evaluator, tests). Note `--yolo` itself stays
+MAIN-only: children keep their substitution floor and resolve it through the
+child-ask model, never through `WithLooseSubstitution`.
 
 ## How allow-all works as a rule (the mechanism)
 

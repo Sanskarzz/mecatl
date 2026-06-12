@@ -63,8 +63,10 @@ child continuation/inspection (Subagent), and per-agent memory.
    a teammate, plan-approval gate (teammate works in plan mode until lead approves). Our members are
    only model-steerable (SendMessage between members); the human can only watch the overlay.
 7. **Config-level child permission axis** — Amp's `context: "subagent"` rule scope and `delegate`
-   action (external approver binary, stdin JSON / exit code). Our childPosture is hardcoded policy,
-   not user-configurable per-child rules.
+   action (external approver binary, stdin JSON / exit code). *Addressed (issue #32):* the
+   `permissions: subagent:` block + `governance.Audience` now give user-configurable child-scoped
+   allow/ask/deny (trust-gated, escape-bounded); the `delegate` external-approver action remains
+   unbuilt.
 8. **Headless auto-review** — Codex `approvals_reviewer = "auto_review"`: a reviewer agent
    adjudicates boundary-crossing asks instead of auto-deny (~200x fewer human stops, circuit breaker
    after 3 consecutive denials). Directly applicable to our step-4 headless auto-deny.
@@ -181,6 +183,7 @@ stop-label vocabulary; sanitized+unmissable permission modal; graceful footer wi
 16. Headless auto-review: an LLM reviewer adjudicates step-4 asks instead of blanket auto-deny
     (Codex pattern; with a deny circuit-breaker).
 17. Config-level child permission axis (Amp `context: subagent`) — make childPosture user-tunable.
+    *Addressed (issue #32):* shipped as the `permissions: subagent:` config block + rule audiences.
 18. Per-agent memory (`memory:` frontmatter field, MEMORY.md injection).
 19. Fork/context-inheriting subagents (prompt-cache-cheap).
 20. Cheap-model-by-default child routing (Crush smallModel pattern) — at minimum a config default.

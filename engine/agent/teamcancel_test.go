@@ -23,7 +23,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
@@ -64,7 +63,7 @@ func (p *promptRecordingProvider) lastPrompt() string {
 // wrapped in a promptRecordingProvider).
 func cancelMemberFactory(t *testing.T, tm *team.Team, providers map[string]port.LLMProvider, extra ...tool.Tool) agent.MemberEngine {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	return func(spec agent.MemberSpec) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
@@ -275,7 +274,7 @@ func TestCancelChildReachesTeamMember(t *testing.T) {
 		mockllm.TextTurn("worker: never reached"),
 	)
 	providers := map[string]*mockllm.Provider{"lead": leadProv, "worker": workerProv}
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
