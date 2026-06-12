@@ -1597,7 +1597,7 @@ LLM would compact/count through the wrong model. The resolution table:
 
 | `provider_id` | `model_id` | Outcome |
 |---|---|---|
-| `""` | `""` | **Shared engine** (default provider, no per-session build) — today's path |
+| `""` | `""` | **Shared engine** (default provider, no per-session build) — today's path. The default itself resolves `--model` → the server-configured deployment default (`--default-provider`/`--default-model`, issue #21; validated **fail-fast** at build) → the per-provider built-in |
 | `""` | set | **InvalidArgument** — a bare model on the env-derived default provider is ambiguous |
 | known+available | `""` | per-session engine on that provider's default model |
 | known+available | catalogued | per-session engine bound to (provider, model) |

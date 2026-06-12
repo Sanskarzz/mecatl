@@ -278,12 +278,78 @@ func TestResolveDefaultModelPrecedence(t *testing.T) {
 		t.Errorf("modelID = %q, want \"\" for a provider absent from builtinDefaultModel", mid)
 	}
 
-	// The registry stores the resolved default model on itself (DefaultModel()).
-	if got := regNoModel.DefaultModel(); got != "openai/gpt-5" {
-		t.Errorf("regNoModel.DefaultModel() = %q, want openai/gpt-5", got)
+	// The registry stores the resolved default model on itself (ResolvedDefaultModel()).
+	if got := regNoModel.ResolvedDefaultModel(); got != "openai/gpt-5" {
+		t.Errorf("regNoModel.ResolvedDefaultModel() = %q, want openai/gpt-5", got)
 	}
-	if got := regOpenAI.DefaultModel(); got != "gpt-5" {
-		t.Errorf("regOpenAI.DefaultModel() = %q, want gpt-5", got)
+	if got := regOpenAI.ResolvedDefaultModel(); got != "gpt-5" {
+		t.Errorf("regOpenAI.ResolvedDefaultModel() = %q, want gpt-5", got)
+	}
+}
+
+// TestResolveDefaultModelServerConfiguredDefault covers the issue-#21 tier: the
+// server-configured deployment-wide default (Config.DefaultProvider/DefaultModel)
+// slots BELOW the --model operator override and ABOVE the per-provider builtin
+// table, and a configured DefaultProvider overrides the preferred default
+// provider when available.
+func TestResolveDefaultModelServerConfiguredDefault(t *testing.T) {
+	// One registry with BOTH providers available, so the preferred default is
+	// openai and "openrouter" is an available non-preferred provider.
+	reg, err := buildProviderRegistry(Config{}, fakeEnv(map[string]string{
+		"OPENAI_API_KEY":     "sk",
+		"OPENROUTER_API_KEY": "sk",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry: %v", err)
+	}
+
+	// (a) server default beats the builtin: no --model, configured DefaultModel ⇒
+	// the configured model on the PREFERRED provider (no DefaultProvider set —
+	// the pair-coherence subtlety: the model applies to the preferred provider).
+	pid, mid := resolveDefaultModel(Config{DefaultModel: "gpt-5-mini"}, reg)
+	if pid != "openai" || mid != "gpt-5-mini" {
+		t.Errorf("(default model only) = (%q, %q), want (openai, gpt-5-mini) — server default must beat the builtin gpt-5", pid, mid)
+	}
+
+	// (b) --model (cfg.Model) beats the server default.
+	pid, mid = resolveDefaultModel(Config{Model: "gpt-5.1", DefaultModel: "gpt-5-mini"}, reg)
+	if pid != "openai" || mid != "gpt-5.1" {
+		t.Errorf("(--model + default model) = (%q, %q), want (openai, gpt-5.1) — the operator override must beat the server default", pid, mid)
+	}
+
+	// (c) configured provider overrides the preferred provider; with no model
+	// configured anywhere the builtin table entry for THAT provider applies.
+	pid, mid = resolveDefaultModel(Config{DefaultProvider: "openrouter"}, reg)
+	if pid != "openrouter" || mid != "openai/gpt-5" {
+		t.Errorf("(default provider only) = (%q, %q), want (openrouter, openai/gpt-5) — the configured provider must override the openai preference", pid, mid)
+	}
+
+	// (d) the full configured pair: provider + model both honoured.
+	pid, mid = resolveDefaultModel(Config{DefaultProvider: "openrouter", DefaultModel: "openai/gpt-5-mini"}, reg)
+	if pid != "openrouter" || mid != "openai/gpt-5-mini" {
+		t.Errorf("(configured pair) = (%q, %q), want (openrouter, openai/gpt-5-mini)", pid, mid)
+	}
+
+	// (e) the resolver stays TOTAL on an unavailable DefaultProvider (the
+	// fail-fast rejection is validateDefaultModel's job at Build): the
+	// preference is simply kept.
+	pid, _ = resolveDefaultModel(Config{DefaultProvider: "anthropic"}, reg)
+	if pid != "openai" {
+		t.Errorf("(unavailable default provider) providerID = %q, want openai (resolver keeps the preference, the validator errors)", pid)
+	}
+
+	// (f) a registry BUILT with a configured Config.DefaultModel resolves its
+	// EFFECTIVE default (ResolvedDefaultModel — a resolution RESULT, distinct
+	// from the Config.DefaultModel tier feeding it) to the configured value when
+	// no --model outranks it; that result is what Build adopts as cfg.Model.
+	regCfg, err := buildProviderRegistry(Config{DefaultModel: "gpt-5-mini"}, fakeEnv(map[string]string{
+		"OPENAI_API_KEY": "sk",
+	}))
+	if err != nil {
+		t.Fatalf("buildProviderRegistry(DefaultModel): %v", err)
+	}
+	if got := regCfg.ResolvedDefaultModel(); got != "gpt-5-mini" {
+		t.Errorf("regCfg.ResolvedDefaultModel() = %q, want gpt-5-mini (the configured deployment default won the resolution)", got)
 	}
 }
 
@@ -311,13 +377,13 @@ func TestBuildProviderOpenRouterDefaultModel(t *testing.T) {
 	if reg.Default() != providerOpenRouter {
 		t.Fatalf("Default() = %q, want openrouter", reg.Default())
 	}
-	if got := reg.DefaultModel(); got != "openai/gpt-5" {
-		t.Fatalf("DefaultModel() = %q, want openai/gpt-5 (per-provider default)", got)
+	if got := reg.ResolvedDefaultModel(); got != "openai/gpt-5" {
+		t.Fatalf("ResolvedDefaultModel() = %q, want openai/gpt-5 (per-provider default)", got)
 	}
 	// DefaultCapabilities (Build wires modelCapability(reg, reg.Default(), cfg.Model)
-	// with cfg.Model adopted from reg.DefaultModel()): the catalog lookup must succeed
-	// for the resolved default, so image resolves true.
-	caps := modelCapability(reg, reg.Default(), reg.DefaultModel())
+	// with cfg.Model adopted from reg.ResolvedDefaultModel()): the catalog lookup must
+	// succeed for the resolved default, so image resolves true.
+	caps := modelCapability(reg, reg.Default(), reg.ResolvedDefaultModel())
 	if !caps.Image {
 		t.Fatalf("DefaultCapabilities.Image = false, want true (catalog openai/gpt-5 ∩ adapter image)")
 	}

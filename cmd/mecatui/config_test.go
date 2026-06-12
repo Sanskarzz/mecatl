@@ -63,6 +63,37 @@ func TestEmbeddedConfigMapsSubagentModel(t *testing.T) {
 	}
 }
 
+// TestParseFlagsServerDefaultModel asserts the issue-#21 deployment-default
+// flags (embedded server only) parse into the config — empty by default — and
+// embeddedConfig threads them onto app.Config.DefaultProvider/DefaultModel,
+// mirroring mecated's mapping.
+func TestParseFlagsServerDefaultModel(t *testing.T) {
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if def.defaultProvider != "" || def.defaultModel != "" {
+		t.Errorf("defaults = (%q, %q), want both empty (no configured deployment default)", def.defaultProvider, def.defaultModel)
+	}
+
+	cfg, err := parseFlags([]string{
+		"--default-provider", "openrouter",
+		"--default-model", "openai/gpt-5-mini",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.defaultProvider != "openrouter" || cfg.defaultModel != "openai/gpt-5-mini" {
+		t.Errorf("parsed Default* = (%q, %q), want (openrouter, openai/gpt-5-mini)", cfg.defaultProvider, cfg.defaultModel)
+	}
+
+	ac := embeddedConfig(config{workspace: "/ws", mock: true,
+		defaultProvider: "openrouter", defaultModel: "openai/gpt-5-mini"}, port.NopDiagnostics{})
+	if ac.DefaultProvider != "openrouter" || ac.DefaultModel != "openai/gpt-5-mini" {
+		t.Errorf("app.Config Default* = (%q, %q), want the config fields threaded through", ac.DefaultProvider, ac.DefaultModel)
+	}
+}
+
 // TestParseFlagsTrustProject asserts --trust-project defaults to false and flips
 // true when set — unified with mecated's default-off posture.
 func TestParseFlagsTrustProject(t *testing.T) {

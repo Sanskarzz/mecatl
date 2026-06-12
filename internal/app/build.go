@@ -109,6 +109,23 @@ type Config struct {
 	Shell         string
 	NoBash        bool
 
+	// DefaultProvider/DefaultModel are the SERVER-CONFIGURED deployment-wide
+	// default (issue #21; --default-provider / --default-model — the wire's
+	// two-field provider_id+model_id grammar, never a slash-joined string),
+	// DISTINCT from Model (the --model operator override): they slot into the
+	// effective-model precedence chain BELOW client-side defaults (a client
+	// selector still wins) and ABOVE the hardcoded per-provider builtin
+	// (builtinDefaultModel). DefaultProvider overrides the preferred default
+	// provider when available; DefaultModel is the default model for the
+	// resolved default provider. Both are validated FAIL-FAST at Build
+	// (validateDefaultModel): an unknown/unavailable provider or an
+	// uncatalogued model is a startup error — stricter than per-session
+	// selectors (which allow passthrough), because a deployment default must
+	// be known-good. Ignored under UseMock (the mock provider isn't
+	// catalogued; the mock path never consults the resolved default).
+	DefaultProvider string
+	DefaultModel    string
+
 	// OpenRouter (multi-provider Phase 0, S1): the OpenRouter provider rides the
 	// SAME stateless openai adapter (it speaks the Responses API) with the
 	// OpenRouter base URL substituted. OpenRouterKey is the credential (the cmd
@@ -563,16 +580,26 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Per-provider default model (multi-provider): when the operator passed no
-	// explicit --model (cfg.Model == ""), adopt the registry's resolved per-provider
-	// default (e.g. openai => "gpt-5", openrouter => "openai/gpt-5") so EVERY
+	// Server-configured deployment-wide default (issue #21): validate
+	// --default-provider/--default-model FAIL-FAST as early as possible after
+	// the registry exists. The registry has already folded the configured
+	// default into its resolution (resolveDefaultModel keeps the resolver
+	// total/non-erroring); this is the loud-misconfig gate plus the build-once
+	// INFO fact.
+	if err := validateDefaultModel(cfg, reg); err != nil {
+		return nil, err
+	}
+	// Resolved default model (multi-provider): when the operator passed no
+	// explicit --model (cfg.Model == ""), adopt the registry's resolved default —
+	// the server-configured --default-model when set, else the per-provider
+	// builtin (e.g. openai => "gpt-5", openrouter => "openai/gpt-5") — so EVERY
 	// downstream consumer below — buildEngine, buildCompactor, buildTokenCounter,
 	// modelSnapshot, and DefaultCapabilities — uses the provider-appropriate model
 	// rather than one valid only for OpenAI. cfg is a local value here, so this single
 	// assignment propagates to all of them. An explicit --model is untouched
-	// (resolveDefaultModel returns it verbatim, so reg.DefaultModel() == cfg.Model).
+	// (resolveDefaultModel returns it verbatim, so reg.ResolvedDefaultModel() == cfg.Model).
 	if cfg.Model == "" {
-		cfg.Model = reg.DefaultModel()
+		cfg.Model = reg.ResolvedDefaultModel()
 	}
 	// SubagentModel (issue #35): validate + resolve the alias ONCE here — FAIL-FAST
 	// on a value that doesn't resolve to a usable model id (the --agent-source-url
@@ -694,7 +721,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// composition. Same single-source discipline as DefaultCapabilities above: the
 		// server echoes it verbatim on resolved_model for a session that uses no
 		// per-session engine, so nobody recomputes the resolution in a handler. cfg.Model
-		// was resolved just above (reg.DefaultModel() when no --model); the catalog window
+		// was resolved just above (reg.ResolvedDefaultModel() when no --model); the catalog window
 		// matches the ListModels-advertised context_limit. (multi-provider Phase 0.)
 		DefaultResolvedModel: server.ResolvedModel{
 			ProviderID:    reg.Default(),
@@ -1729,6 +1756,77 @@ func normalizeSubagentModel(cfg Config) (string, error) {
 		"subagent default model ACTIVE: def-less Subagent explorer / Parallel-branch / undefined-team-member children run on it (the Parallel judge stays on the session model); a def `model:` or per-call override still wins",
 		"model", resolved)
 	return sel, nil
+}
+
+// validateDefaultModel validates the server-configured deployment-wide default
+// (Config.DefaultProvider/DefaultModel — --default-provider/--default-model,
+// issue #21) EXACTLY ONCE at build time (called only from Build, fail-fast as
+// early as possible after the registry exists — the build-once
+// composition-facts discipline). The posture is FAIL-FAST, mirroring
+// normalizeSubagentModel: an unknown or unavailable DefaultProvider, or a
+// DefaultModel not catalogued for the resolved default provider, is a BUILD
+// ERROR naming the flag, the value, and the reason — never a warn-and-inert
+// no-op. This is DELIBERATELY stricter than per-session selectors (which allow
+// an uncatalogued passthrough model): a deployment-wide default every client
+// inherits must be known-good.
+//
+// It READS the registry's already-resolved default rather than recomputing the
+// provider fold (resolveDefaultModel is the ONE resolver; a second
+// preferredDefaultProvider+Lookup chain here would be the issue-#42
+// two-lists-to-forget drift class): a configured-and-AVAILABLE DefaultProvider
+// IS reg.Default() by construction, so a mismatch means unknown/unavailable.
+//
+// No-op under cfg.UseMock (the mock provider isn't catalogued — validation
+// would spuriously fail — and the mock path never calls resolveDefaultModel)
+// and when both fields are empty (the zero-config default, byte-identical
+// behaviour). On success with a default actually configured it emits ONE
+// build-once INFO — HONEST about effect: with an explicit --model the
+// configured default is superseded (tier 1 of resolveDefaultModel) and the
+// fact says so; otherwise it names the EFFECTIVE resolved pair (with
+// --default-provider only, the model is that provider's builtin).
+func validateDefaultModel(cfg Config, reg *providerRegistry) error {
+	if cfg.UseMock || (cfg.DefaultProvider == "" && cfg.DefaultModel == "") {
+		return nil
+	}
+	if cfg.DefaultProvider != "" && reg.Default() != cfg.DefaultProvider {
+		return fmt.Errorf("--default-provider %q: unknown or unavailable provider (available: %v); a deployment-wide default must be known-good at startup", cfg.DefaultProvider, reg.Available())
+	}
+	if cfg.DefaultModel != "" && !modelCatalogued(reg.Default(), cfg.DefaultModel) {
+		return fmt.Errorf("--default-model %q: not catalogued for the default provider %q; a deployment-wide default must be known-good at startup (per-session selectors still allow passthrough models)", cfg.DefaultModel, reg.Default())
+	}
+	if cfg.DefaultModel != "" && cfg.Model != "" {
+		// A configured default MODEL loses to the explicit --model (tier 1) —
+		// say so instead of claiming ACTIVE. A configured default PROVIDER is
+		// not superseded by --model (it still routes zero-selector sessions),
+		// so provider-only configs fall through to the ACTIVE fact below.
+		cfg.diag().Log(context.Background(), port.LevelInfo,
+			"server-configured default model superseded by --model (inert for this process; it still validates fail-fast — remove --model to activate it)",
+			"configured_model", cfg.DefaultModel,
+			"active_model", cfg.Model)
+		return nil
+	}
+	cfg.diag().Log(context.Background(), port.LevelInfo,
+		"server-configured default model ACTIVE: every zero-selector session inherits it (a client-side selector still wins; the per-provider builtin is superseded)",
+		"provider", reg.Default(),
+		"model", reg.ResolvedDefaultModel())
+	return nil
+}
+
+// modelCatalogued reports whether modelID is in the embedded models.dev catalog
+// for providerID (the same Provider(pid)+Models() ID() membership idiom as
+// catalogContextWindow). Used ONLY by validateDefaultModel's fail-fast gate —
+// the request path never gates a model string on the catalog.
+func modelCatalogued(providerID, modelID string) bool {
+	p, ok := providercatalog.Default().Provider(providerID)
+	if !ok {
+		return false
+	}
+	for _, m := range p.Models() {
+		if m.ID() == modelID {
+			return true
+		}
+	}
+	return false
 }
 
 // buildTokenCounter selects the TokenCounter from cfg.Tokenizer. The default

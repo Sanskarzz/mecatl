@@ -212,6 +212,37 @@ func TestAppConfigMapsPermissionConfig(t *testing.T) {
 	}
 }
 
+// TestParseFlagsServerDefaultModel asserts the issue-#21 deployment-default
+// flags parse into the config (empty by default — the zero-config posture) and
+// appConfig threads them onto the shared app.Config Default* fields.
+func TestParseFlagsServerDefaultModel(t *testing.T) {
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if def.defaultProvider != "" || def.defaultModel != "" {
+		t.Errorf("defaults = (%q, %q), want both empty (no configured deployment default)", def.defaultProvider, def.defaultModel)
+	}
+
+	cfg, err := parseFlags([]string{
+		"--default-provider", "openrouter",
+		"--default-model", "openai/gpt-5-mini",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.defaultProvider != "openrouter" {
+		t.Errorf("defaultProvider = %q, want openrouter", cfg.defaultProvider)
+	}
+	if cfg.defaultModel != "openai/gpt-5-mini" {
+		t.Errorf("defaultModel = %q, want openai/gpt-5-mini", cfg.defaultModel)
+	}
+	ac := appConfig(cfg, nil, nil, nil, nil)
+	if ac.DefaultProvider != "openrouter" || ac.DefaultModel != "openai/gpt-5-mini" {
+		t.Errorf("app.Config Default* = (%q, %q), want the parsed flags threaded through", ac.DefaultProvider, ac.DefaultModel)
+	}
+}
+
 // TestAppConfigMapsAgentDefs asserts appConfig threads the agent-def fields onto the
 // shared app.Config.
 func TestAppConfigMapsAgentDefs(t *testing.T) {

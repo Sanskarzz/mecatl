@@ -81,6 +81,8 @@ type config struct {
 	httpAddr          string
 	workspace         string
 	model             string
+	defaultProvider   string
+	defaultModel      string
 	useOpenAI         bool
 	openAIBaseURL     string
 	openAIKey         string
@@ -671,6 +673,8 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 	return app.Config{
 		Workspace:                    cfg.workspace,
 		Model:                        cfg.model,
+		DefaultProvider:              cfg.defaultProvider,
+		DefaultModel:                 cfg.defaultModel,
 		UseOpenAI:                    cfg.useOpenAI,
 		OpenAIBaseURL:                cfg.openAIBaseURL,
 		OpenAIKey:                    cfg.openAIKey,
@@ -781,6 +785,8 @@ func parseFlags(argv []string) (config, error) {
 		"HTTP/SSE listen address (defaults to loopback; set --auth-token and/or --tls-cert before binding non-loopback)")
 	fs.StringVar(&cfg.workspace, "workspace", cwd, "default session workspace root")
 	fs.StringVar(&cfg.model, "model", "", "model identifier sent to the provider (empty: use the provider-appropriate default)")
+	fs.StringVar(&cfg.defaultProvider, "default-provider", "", "server-configured deployment-wide default provider id shared by every client (e.g. openai, openrouter, anthropic); overrides the built-in provider preference for zero-selector sessions while a client-side selector still wins. Validated FAIL-FAST at startup: an unknown or unavailable provider refuses to start")
+	fs.StringVar(&cfg.defaultModel, "default-model", "", "server-configured deployment-wide default model id for the default provider, shared by every client; sits BELOW client-side defaults and ABOVE the per-provider built-in default. Validated FAIL-FAST at startup: a model not catalogued for the default provider refuses to start (stricter than per-session selectors, which allow passthrough)")
 	fs.BoolVar(&cfg.useOpenAI, "openai", false, "use the OpenAI Responses provider (key from OPENAI_API_KEY)")
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL (compatible endpoints)")
 	fs.StringVar(&cfg.openRouterBaseURL, "openrouter-base-url", "", "override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)")

@@ -158,7 +158,9 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--grpc-addr` | `127.0.0.1:8080` | gRPC listen address (loopback; **unauthenticated unless** the security & transport flags below are set) |
 | `--http-addr` | `127.0.0.1:8081` | HTTP/SSE listen address (loopback; **unauthenticated unless** the security & transport flags below are set) |
 | `--workspace` | current working dir | default session workspace root |
-| `--model` | `""` | model identifier sent to the provider. Empty → the selected provider's default: `gpt-5` (OpenAI), `openai/gpt-5` (OpenRouter), `claude-sonnet-4-6` (Anthropic). |
+| `--model` | `""` | model identifier sent to the provider. Empty → the server-configured default (`--default-model`, when set), else the selected provider's built-in default: `gpt-5` (OpenAI), `openai/gpt-5` (OpenRouter), `claude-sonnet-4-6` (Anthropic). |
+| `--default-provider` | `""` | server-configured **deployment-wide default provider** id shared by every client (also on `mecatui`'s embedded server); overrides the built-in provider preference for zero-selector sessions, while a client-side selector still wins. **Fail-fast:** an unknown or unavailable provider refuses startup. |
+| `--default-model` | `""` | server-configured **deployment-wide default model** for the default provider (also on `mecatui`'s embedded server); sits below client-side defaults and above the per-provider built-in. **Fail-fast:** a model not catalogued for the default provider refuses startup (stricter than per-session selectors, which allow passthrough). |
 | `--openai` | `false` | use the OpenAI Responses provider (key from `OPENAI_API_KEY`) |
 | `--openai-base-url` | `""` | override the OpenAI API base URL (compatible endpoints) |
 | `--openrouter-base-url` | `""` | override the OpenRouter API base URL (default `https://openrouter.ai/api/v1`; key from `OPENROUTER_API_KEY`) |
