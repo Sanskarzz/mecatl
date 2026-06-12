@@ -31,13 +31,16 @@ import (
 // teamCfg is the minimal app Config a member engine factory needs: a model and a
 // shell so the Mutating branch can attempt to register Bash. The workspace is a
 // throwaway temp dir (the command runner roots there, but no command is run in
-// these tests).
+// these tests). TrustProject is true: these are the TRUSTED-workspace shell-wiring
+// tests (the issue-#40 trust gate would otherwise nil the sandboxed runner); the
+// untrusted side lives in trust_shell_gate_test.go.
 func teamCfg(t *testing.T) Config {
 	t.Helper()
 	return Config{
-		Workspace: t.TempDir(),
-		Model:     "mock",
-		Shell:     "/bin/sh",
+		Workspace:    t.TempDir(),
+		Model:        "mock",
+		Shell:        "/bin/sh",
+		TrustProject: true,
 	}
 }
 

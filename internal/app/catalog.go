@@ -228,7 +228,17 @@ func registerParallelTool(ctx context.Context, cfg Config, cat *tool.Catalog, re
 		return
 	}
 	fk := forker.New(newForkWorkspace(a.skillReadRoots), forker.WithForceCopy())
-	parallelChild := buildParallelChildEngine(cfg, reg, s.provider, s.providerID, s.model, buildCommandRunner(cfg))
+	// Parallel branches run Bash through the HARDENED, trust-UNGATED runner (issue
+	// #40) — the same construction as Mutating team members (buildForceCopyRunner).
+	// Ungated because a force-copy fork is created by a pure FS copy, with NO git
+	// invocation at fork time (no checkout, so no smudge filter or hook can fire) —
+	// the fork-time worktree-checkout RCE the trust gate closes cannot happen here.
+	// Hardened because copyTree copies the base's .git VERBATIM (config, hooks,
+	// .gitattributes included): a branch running git at RUN time executes over that
+	// copied, possibly untrusted .git, so the env scrub (gitenv.Scrub) must pin the
+	// fixed keys; the attacker-NAMED-driver residual that remains is accepted at
+	// main-session parity — see buildForceCopyRunner.
+	parallelChild := buildParallelChildEngine(cfg, reg, s.provider, s.providerID, s.model, buildForceCopyRunner(cfg))
 	judge := agent.NewEngineJudge(buildParallelJudgeEngine(modelCfgFor(cfg, s.model), s.provider))
 	opts := []agent.ParallelOption{
 		agent.WithParallelSubagentStopHook(hooks),

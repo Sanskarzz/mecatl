@@ -56,7 +56,7 @@ func TestScopedToolNamesAllowlistIntersection(t *testing.T) {
 		Name:  "reviewer",
 		Tools: []string{"Read", "Grep", "Bogus", "Subagent", "Parallel", "ToolSearch"},
 	}
-	names, diags := scopedToolNames(def, base)
+	names, diags := scopedToolNames(def, base, "")
 	sort.Strings(names)
 	if strings.Join(names, ",") != "Grep,Read" {
 		t.Fatalf("kept = %v, want [Grep Read] (allowlist ∩ available, RO only)", names)
@@ -81,23 +81,23 @@ func TestScopedToolNamesAllowlistIntersection(t *testing.T) {
 func TestScopedToolNamesDisallowedSubtraction(t *testing.T) {
 	base := baseSubagentTools(Config{})
 	def := agents.AgentDef{Name: "x", Tools: []string{"Read", "Grep"}, DisallowedTools: []string{"Grep"}}
-	names, _ := scopedToolNames(def, base)
+	names, _ := scopedToolNames(def, base, "")
 	if strings.Join(names, ",") != "Read" {
 		t.Fatalf("disallowed not subtracted: %v", names)
 	}
 }
 
 func TestScopedToolNamesDropsMutatingForSubagent(t *testing.T) {
-	// Bash is available (shell configured) but mutating: a Subagent def listing it (and
+	// Bash is available (shell configured, trusted workspace) but mutating: a Subagent def listing it (and
 	// Edit/Write) must have them dropped with the read-only diagnostic, so
 	// Subagent.ReadOnly() stays honestly true.
-	cfg := Config{Shell: "/bin/sh", Workspace: t.TempDir()}
+	cfg := Config{Shell: "/bin/sh", Workspace: t.TempDir(), TrustProject: true}
 	base := baseSubagentTools(cfg)
 	if _, ok := base["Bash"]; !ok {
 		t.Fatalf("expected Bash in base when a shell is configured")
 	}
 	def := agents.AgentDef{Name: "writer", Tools: []string{"Read", "Edit", "Write", "Bash"}}
-	names, diags := scopedToolNames(def, base)
+	names, diags := scopedToolNames(def, base, bashScopeMissReason(cfg))
 	if strings.Join(names, ",") != "Read" {
 		t.Fatalf("mutating tools not dropped: %v", names)
 	}
@@ -122,7 +122,7 @@ func TestScopedToolNamesDropsMutatingForSubagent(t *testing.T) {
 //     mutating tools are dropped.
 //   - (true, _)      — a mutating member: all three survive.
 func TestScopedToolNamesModeAllowShell(t *testing.T) {
-	cfg := Config{Shell: "/bin/sh", Workspace: t.TempDir()}
+	cfg := Config{Shell: "/bin/sh", Workspace: t.TempDir(), TrustProject: true}
 	base := baseSubagentTools(cfg)
 	if _, ok := base["Bash"]; !ok {
 		t.Fatalf("expected Bash in base when a shell is configured")
@@ -130,20 +130,20 @@ func TestScopedToolNamesModeAllowShell(t *testing.T) {
 	def := agents.AgentDef{Name: "m", Tools: []string{"Read", "Edit", "Write", "Bash"}}
 
 	// (false, true): worktree read-only member keeps Bash, drops Edit/Write.
-	names, _ := scopedToolNamesMode(def, base, false, true)
+	names, _ := scopedToolNamesMode(def, base, false, true, bashScopeMissReason(cfg))
 	sort.Strings(names)
 	if strings.Join(names, ",") != "Bash,Read" {
 		t.Fatalf("(allowMutating=false, allowShell=true) kept = %v, want [Bash Read]", names)
 	}
 
 	// (false, false): base-sharing read-only member drops Bash too.
-	names, _ = scopedToolNamesMode(def, base, false, false)
+	names, _ = scopedToolNamesMode(def, base, false, false, bashScopeMissReason(cfg))
 	if strings.Join(names, ",") != "Read" {
 		t.Fatalf("(false,false) kept = %v, want [Read] (all mutating dropped)", names)
 	}
 
 	// (true, _): mutating member keeps everything.
-	names, _ = scopedToolNamesMode(def, base, true, false)
+	names, _ = scopedToolNamesMode(def, base, true, false, bashScopeMissReason(cfg))
 	sort.Strings(names)
 	if strings.Join(names, ",") != "Bash,Edit,Read,Write" {
 		t.Fatalf("(true,_) kept = %v, want [Bash Edit Read Write]", names)
@@ -152,10 +152,10 @@ func TestScopedToolNamesModeAllowShell(t *testing.T) {
 
 func TestScopedToolNamesDefaultSetIsReadOnly(t *testing.T) {
 	// No Tools allowlist => default to the available base, but still read-only-only.
-	cfg := Config{Shell: "/bin/sh", Workspace: t.TempDir()}
+	cfg := Config{Shell: "/bin/sh", Workspace: t.TempDir(), TrustProject: true}
 	base := baseSubagentTools(cfg)
 	def := agents.AgentDef{Name: "x"}
-	names, _ := scopedToolNames(def, base)
+	names, _ := scopedToolNames(def, base, bashScopeMissReason(cfg))
 	sort.Strings(names)
 	// Read-only core tools: Glob, Grep, Read, WebFetch. Edit/Write/Bash dropped.
 	if strings.Join(names, ",") != "Glob,Grep,Read,WebFetch" {

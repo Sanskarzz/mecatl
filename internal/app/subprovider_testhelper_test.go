@@ -47,8 +47,13 @@ func twoProviderReg(aProvider port.LLMProvider, aID, aModel string, bProvider po
 // member-catalog/isolation tests don't exercise a provider switch, so they inherit
 // the single mock provider exactly as before.
 func memberFactoryForTest(cfg Config, provider port.LLMProvider, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner tool.CommandRunner, roIsolationAvailable bool, mainMgr *mcp.Manager) server.MemberEngineFactory {
+	// The single `runner` doubles as both the read-only (trust-gated) and the
+	// mutating (ungated) runner — the historical single-runner shape these tests were
+	// written against. The issue-#40 asymmetry (untrusted ⇒ read-only runner nil,
+	// mutating runner live) is exercised through the REAL buildTeamWiring in
+	// trust_shell_gate_test.go.
 	return buildMemberEngine(cfg, regForTest(provider, providerMock, cfg.Model), provider, providerMock, cfg.Model,
-		teamHooks, reg, skillIdx, runner, roIsolationAvailable, mainMgr)
+		teamHooks, reg, skillIdx, runner, runner, roIsolationAvailable, mainMgr)
 }
 
 // agentSubagentEnginesForTest is the OLD-arity buildAgentSubagentEngines wrapper for

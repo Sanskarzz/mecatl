@@ -354,23 +354,35 @@ the member's own fork/worktree, never the shared base).
 > `GIT_CONFIG_VALUE_n`) forcing `core.hooksPath=/dev/null`, `core.pager=cat`,
 > `core.fsmonitor=false` and an empty `diff.external` over the shared `.git/config`. The
 > MAIN session keeps its UNHARDENED runner (operator hooks/pager honoured). A Mutating
-> (force-copy) member's fork has its OWN `.git`, so config-hardening is moot there, but
-> it gets the hardened runner anyway. The per-command timeout (~30s) and the
+> (force-copy) member's fork carries a VERBATIM COPY of the base `.git` — possibly an
+> untrusted repo's config/hooks — so its hardened runner (`buildForceCopyRunner`) is
+> load-bearing there too, not redundant. The per-command timeout (~30s) and the
 > supervisor's concurrency cap (`defaultTeamConcurrency=4`) already bound a team's shell
 > usage, so no extra per-member deadline/semaphore is added.
 >
-> **Residual / follow-up.** A fixed-key env override structurally cannot cover git config
-> keys whose *driver name* is attacker-chosen in a tracked `.gitattributes`. Two such
-> vectors remain reachable when the shared `.git` belongs to an **untrusted** repo:
-> `filter.<drv>.smudge` (executes at `git worktree add` checkout — fork time) and
-> `diff.<drv>.textconv` (executes on `git show` / `git log -p`); an `alias.<name>=!sh`
-> also fires, but only if the member invokes that alias by name. Because the driver name
-> is arbitrary, there is no fixed `GIT_CONFIG_KEY_n` that can pin it to an inert value.
-> For a **trusted** repo (the operator's own) this execution is equivalent to the operator
-> running git themselves — acceptable. The planned robust mitigation is to **gate
-> read-only-member shell on workspace trust** (untrusted ⇒ no subagent shell, matching the
-> harness's "untrusted degrades to ask-the-human" posture). This is a tracked follow-up,
-> not yet implemented.
+> **Residual — now closed by the trust gate (issue #40).** A fixed-key env override
+> structurally cannot cover git config keys whose *driver name* is attacker-chosen in a
+> tracked `.gitattributes`: `filter.<drv>.smudge` (executes at `git worktree add`
+> checkout — fork time), `diff.<drv>.textconv` (executes on `git show` / `git log -p`),
+> and `alias.<name>=!sh` if the member invokes that alias by name — the driver name is
+> arbitrary, so no fixed `GIT_CONFIG_KEY_n` can pin it to an inert value. These were
+> reachable only when the shared `.git` belongs to an **untrusted** repo; for a
+> **trusted** repo (the operator's own) the execution is equivalent to the operator
+> running git themselves — acceptable. The robust mitigation is **implemented**
+> (issue #40): `buildSandboxedCommandRunner` is **gated on workspace trust** — an
+> untrusted workspace yields no read-only subagent/member shell at all (the child
+> degrades to Read/Grep/Glob, the Subagent Spec carries an honest no-shell note, and a
+> read-only member's prompt says so), matching the harness's "untrusted degrades to
+> ask-the-human" posture. A **Mutating** member and Parallel branches keep their
+> hardened shells (`buildForceCopyRunner`) — ungated NOT because their copied `.git`
+> is clean (`copyTree` copies the attacker's config, hooks, and `.gitattributes`
+> **verbatim**) but because force-copy fork creation performs **no git invocation**
+> (a pure FS copy: no checkout, the smudge filter never fires), unlike
+> `git worktree add` — the fork-time auto-firing RCE this gate closes for read-only
+> children cannot happen there. Their RUN-time git over the copied untrusted `.git`
+> retains the attacker-named-driver residual above, accepted at **main-session
+> parity**: the operator's own ungated (and unhardened) loop runs git in the same
+> untrusted repo. The env scrub remains as defence-in-depth everywhere.
 
 ### 5.3.1 Member permission asks (4-step resolution, not a blanket deny)
 

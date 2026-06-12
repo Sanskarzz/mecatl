@@ -832,8 +832,16 @@ A read-only member's Bash runs through a **sandboxed** command runner
 code-execution vectors in the shared `.git` (`core.pager`/`hooksPath`/`fsmonitor`/external
 diff + scrubbed `GIT_*`/`PAGER`); it does **NOT** close attacker-named `.gitattributes` driver
 configs (`filter.<drv>.smudge` at fork-time checkout, `diff.<drv>.textconv` on `git show`/`log
--p`, `alias.<name>=!sh` if invoked) — reachable only in an UNTRUSTED shared repo, with a
-tracked follow-up to gate read-only-member shell on workspace trust.
+-p`, `alias.<name>=!sh` if invoked) — reachable only in an UNTRUSTED shared repo. DONE
+(issue #40): the runner is now **trust-gated** — `buildSandboxedCommandRunner` returns nil on
+an untrusted workspace, so no read-only member/subagent worktree shell exists there at all.
+A Mutating member's (and Parallel branch's) force-copy shell, `buildForceCopyRunner`, stays
+hardened-but-ungated — NOT because the copied `.git` is clean (copyTree copies the attacker's
+config/hooks/`.gitattributes` **verbatim**) but because force-copy fork creation performs **no
+git invocation** (pure FS copy: no checkout, smudge never fires), so the fork-time
+auto-firing RCE the gate closes cannot happen; the child's RUN-time git over the copied
+untrusted `.git` keeps the attacker-named-driver residual, accepted at **main-session
+parity** (the operator's own ungated loop runs git in the same untrusted repo).
 
 The single neutralizing env lives in the stdlib-only leaf `internal/adapter/gitenv`
 (`Scrub`/`NeutralizingVars`) so two paths share it and can't drift: (1) the **forker's own
@@ -1032,7 +1040,12 @@ silent fallback to the shared ws. A `WithMaxConcurrentChildren` (default 4; old
 ALL of them now, forking and forker-less (Subagent is read-parallel, so the model can fan out; see
 the Subagent-concurrency-cap note above). Same
 `gitenv` hardening + same untrusted-`.gitattributes` residual as team members; the
-workspace-trust gate is the SHARED follow-up for both Team + Subagent.
+workspace-trust gate — the SHARED mitigation for both Team + Subagent — is DONE (issue #40):
+an untrusted workspace nils the sandboxed runner, so Subagent children and read-only members
+run Bash-less (no forker wired, honest Spec note + member prompt line), while Mutating
+members and Parallel branches keep their hardened shells (`buildForceCopyRunner`: force-copy
+fork creation runs no git, so the fork-time checkout RCE can't fire; their run-time git over
+the verbatim-copied untrusted `.git` is the accepted main-session-parity residual).
 
 **Compaction never emits unpaired history (tool-pairing invariant).** Both compactors
 (`HeuristicCompactor` in `compaction.go`, `CascadeCompactor` in `cascade.go`) slice a kept

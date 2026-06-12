@@ -460,6 +460,14 @@ type SubagentTool struct {
 	// WithAgentEngines).
 	engineFactory func(model string) (*Engine, bool)
 
+	// shellDisabledNote, when non-empty, replaces Spec()'s isolated-worktree-shell
+	// clause with an honest read-only-only description carrying this reason (set by
+	// the composition root via WithSubagentShellDisabledNote when the workspace-trust
+	// gate — not a shell-less deployment — withheld the subagent shell, issue #40).
+	// Empty (the default) keeps the description byte-identical to the historical
+	// shell-bearing one.
+	shellDisabledNote string
+
 	// idPrefix seeds the generated child SessionID so child sessions are
 	// distinguishable in logs/stores.
 	idPrefix string
@@ -595,6 +603,18 @@ func WithMaxConcurrentChildren(n int) SubagentOption {
 	}
 }
 
+// WithSubagentShellDisabledNote tells the Subagent tool's Spec() that NO child gets a
+// shell on this workspace and why. With it set, the spec's "plus a full shell in an
+// isolated, throwaway git worktree …" clause is REPLACED by an honest read-only-only
+// description carrying the reason, so the model never plans build/test/git delegation
+// the child cannot perform. The composition root sets it ONLY when the workspace-trust
+// gate withheld the shell (issue #40) — a shell-less deployment (--no-bash / empty
+// shell) keeps the historical description unchanged, exactly like before this option
+// existed. An empty reason is a no-op (the default, byte-identical description).
+func WithSubagentShellDisabledNote(reason string) SubagentOption {
+	return func(t *SubagentTool) { t.shellDisabledNote = reason }
+}
+
 // WithSubagentEngineFactory injects the composition-supplied factory that mints a child
 // engine for a per-call `model` override. The closure closes over the provider
 // registry and builds the override child through the contamination-safe per-provider
@@ -692,11 +712,21 @@ func NewSubagentTool(childEngine *Engine, opts ...SubagentOption) tool.Tool {
 // description (progressive disclosure, like the Skill tool enumerates skills) so
 // the model can choose a specialist via the optional `agent` arg.
 func (t *SubagentTool) Spec() tool.ToolSpec {
+	// The shell clause is honest per composition: the default (shell wired) claims the
+	// isolated-worktree shell; with WithSubagentShellDisabledNote set it is REPLACED by
+	// a read-only-only description carrying the reason, so the model never delegates
+	// build/test/git work the child cannot perform. Without the note the assembled
+	// description is byte-identical to the historical one
+	// (TestSubagentSpecShellDisabledNoteOption pins both sides).
+	shellClause := "plus a full shell in an isolated, throwaway git worktree — it can build, " +
+		"test, and inspect history, but its file changes are DISCARDED (no Edit/Write)"
+	if t.shellDisabledNote != "" {
+		shellClause = "ONLY — " + t.shellDisabledNote + " — with no Edit/Write"
+	}
 	desc := "Delegate a focused, self-contained task to a subagent with its own fresh context: " +
 		"a multi-step investigation ('search → summarize', 'trace this code path') or build/test/git " +
 		"work ('run the tests and report failures', 'bisect the history'). It runs read-only tools " +
-		"(Read/Grep/Glob) plus a full shell in an isolated, throwaway git worktree — it can build, " +
-		"test, and inspect history, but its file changes are DISCARDED (no Edit/Write) and it cannot " +
+		"(Read/Grep/Glob) " + shellClause + " and it cannot " +
 		"delegate further. The subagent's FINAL MESSAGE is its deliverable — you receive only that " +
 		"(see `prompt`; with `background: true` the call instead returns at once and you collect the " +
 		"result later). You may issue several Subagent calls in ONE turn. Do NOT use it when you need " +

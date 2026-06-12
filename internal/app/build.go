@@ -1660,6 +1660,21 @@ func logBuildConfigFacts(cfg Config) {
 			args:  []any{"target", cfg.CommandSourceURL},
 		})
 	}
+	if subagentShellUntrustedReason(cfg) != "" {
+		// The issue-#40 workspace-trust shell gate, narrated ONCE here (the gated
+		// builder buildSandboxedCommandRunner runs per session AND per catalog
+		// assembly, so it must not log). Emitted only when untrust is the OPERATIVE
+		// cause — --no-bash / an empty shell already get their own narration via
+		// registerCoreTools.
+		facts = append(facts, diagFact{
+			level: port.LevelInfo,
+			msg: "read-only subagent/team-member shell DISABLED (untrusted workspace): " +
+				"a worktree child's shell shares the repo's .git, and a tracked .gitattributes " +
+				"in an untrusted repo can name filter/diff drivers that execute code; run with " +
+				"--trust-project (or confirm trust in mecatui) to enable the subagent shell",
+			args: []any{"workspace", cfg.Workspace},
+		})
+	}
 	for _, f := range facts {
 		cfg.diag().Log(context.Background(), f.level, f.msg, f.args...)
 	}
@@ -2425,15 +2440,17 @@ func buildCommandRunner(cfg Config) tool.CommandRunner {
 //     ALL repo hooks, including the fork-time post-checkout), core.pager=cat,
 //     core.fsmonitor=false and an empty diff.external (no external diff driver).
 //
-// RESIDUAL — this does NOT close git driver configs whose driver NAME is attacker-chosen
-// in a tracked `.gitattributes`: filter.<drv>.smudge (fires at worktree checkout / fork
-// time) and diff.<drv>.textconv (fires on `git show` / `git log -p`), plus
-// alias.<name>=!sh if the member invokes that alias by name. A fixed-key env override
-// cannot pin an arbitrary driver name to an inert value. These are reachable only when
-// the shared `.git` is an UNTRUSTED repo; for a TRUSTED repo this is equivalent to the
-// operator running git themselves. The planned robust mitigation is to gate
-// read-only-member shell on workspace trust (untrusted ⇒ no subagent shell) — a tracked
-// follow-up, not yet implemented.
+// RESIDUAL — a fixed-key env override does NOT close git driver configs whose driver
+// NAME is attacker-chosen in a tracked `.gitattributes`: filter.<drv>.smudge (fires at
+// worktree checkout / fork time) and diff.<drv>.textconv (fires on `git show` /
+// `git log -p`), plus alias.<name>=!sh if the member invokes that alias by name — an
+// arbitrary driver name cannot be pinned to an inert value. These are reachable only
+// when the shared `.git` is an UNTRUSTED repo; for a TRUSTED repo this is equivalent to
+// the operator running git themselves. The robust mitigation is the WORKSPACE-TRUST
+// GATE below — now implemented (issue #40): an untrusted workspace gets NO worktree
+// subagent/member shell at all (the early nil return on !cfg.TrustProject), so the
+// attacker-named driver vectors are unreachable; the env scrub remains the
+// defence-in-depth layer for the trusted case.
 //
 // The MAIN session keeps its own UNHARDENED runner (buildCommandRunner) so operator
 // hooks/pager are honoured there; only team-member shells are sandboxed. Per-command
@@ -2444,6 +2461,56 @@ func buildSandboxedCommandRunner(cfg Config) tool.CommandRunner {
 	if cfg.NoBash || cfg.Shell == "" {
 		return nil
 	}
+	// WORKSPACE-TRUST GATE (issue #40): a worktree-isolated child's shell shares the
+	// base repo's `.git`, and an UNTRUSTED repo's tracked `.gitattributes` can name
+	// filter/diff drivers that execute code the moment the child runs git — a vector
+	// the fixed-key env scrub structurally cannot close. So an untrusted workspace
+	// gets NO read-only subagent/member shell (the loop degrades to Read/Grep/Glob —
+	// "ask the human" posture, not "do nothing"). The decision is NOT logged here —
+	// this builder runs per session/per assembly; the build-once INFO is emitted in
+	// logBuildConfigFacts.
+	if !cfg.TrustProject {
+		return nil
+	}
+	return newHardenedCommandRunner(cfg)
+}
+
+// buildForceCopyRunner builds the command runner FORCE-COPY-fork children — MUTATING
+// team members and Parallel branches — execute Bash against: the same hardened
+// (env-scrubbed) construction as buildSandboxedCommandRunner, deliberately WITHOUT
+// the workspace-trust gate.
+//
+// Why no trust gate: what makes the force-copy path safe at FORK time is that it
+// performs NO git invocation at all (forker.WithForceCopy → copyTree, a pure FS
+// copy — no checkout, so no smudge filter or hook can fire), unlike the read-only
+// worktree path, where `git worktree add` performs a checkout that can execute an
+// untrusted repo's attacker-named filter driver with nobody having run anything.
+// It is emphatically NOT that the fork's `.git` is clean: copyTree copies the
+// attacker's `.git` VERBATIM — config, hooks, and tracked `.gitattributes` all
+// included.
+//
+// Why still hardened: at RUN time a member/branch running git inside the fork
+// executes over that copied untrusted `.git`. gitenv.Scrub pins the FIXED keys
+// (core.hooksPath/pager/fsmonitor, diff.external, GIT_* env), but attacker-NAMED
+// drivers remain reachable — diff.<drv>.textconv on `git show`/`git log -p`,
+// filter.<drv>.smudge on the fork's own checkouts, alias.<name>=!sh if invoked.
+// That is the ACCEPTED residual, at MAIN-SESSION PARITY: the operator's own
+// (ungated, even unhardened) main loop runs git in the same untrusted repo. The
+// trust gate exists to close the FORK-TIME worktree-checkout RCE for read-only
+// children, which would auto-fire without the model or operator running anything.
+// nil when Bash is disabled.
+func buildForceCopyRunner(cfg Config) tool.CommandRunner {
+	if cfg.NoBash || cfg.Shell == "" {
+		return nil
+	}
+	return newHardenedCommandRunner(cfg)
+}
+
+// newHardenedCommandRunner constructs the env-scrubbed runner shared by
+// buildSandboxedCommandRunner and buildForceCopyRunner (see the former for the
+// hardening rationale). It assumes the caller already applied the NoBash/empty-shell
+// (and, where applicable, trust) gates.
+func newHardenedCommandRunner(cfg Config) tool.CommandRunner {
 	env := gitenv.Scrub(os.Environ())
 	runner, err := osfs.NewCommandRunnerShell(cfg.Workspace, cfg.Shell, osfs.WithCommandEnvList(env))
 	if err != nil {
@@ -2451,6 +2518,20 @@ func buildSandboxedCommandRunner(cfg Config) tool.CommandRunner {
 		return nil
 	}
 	return runner
+}
+
+// subagentShellUntrustedReason returns the model/operator-facing reason the
+// subagent/member shell is withheld when the WORKSPACE-TRUST gate is the OPERATIVE
+// cause, and "" otherwise: --no-bash / an empty shell disable the shell regardless of
+// trust (and must NOT read as an untrust problem), and a trusted workspace has no
+// note. It is the single wording source for the Subagent Spec note
+// (WithSubagentShellDisabledNote) so the model-facing text and the gate cannot drift.
+func subagentShellUntrustedReason(cfg Config) string {
+	if cfg.NoBash || cfg.Shell == "" || cfg.TrustProject {
+		return ""
+	}
+	return "no shell on this workspace because it is untrusted (run with --trust-project " +
+		"or confirm trust in mecatui to enable the subagent shell)"
 }
 
 // bashDisabledReason returns a short human-readable reason Bash is disabled.
@@ -2850,6 +2931,14 @@ func buildSubagentTool(ctx context.Context, cfg Config, provReg *providerRegistr
 		// the namespace stays disjoint by prefix convention, not engineering).
 		agent.WithSubagentStore(store),
 	}
+	// Issue #40: when the WORKSPACE-TRUST gate (not --no-bash / an empty shell) is what
+	// nil'd the runner, tell the model honestly via the Spec — otherwise the description
+	// keeps promising the isolated-worktree shell and the model delegates build/test/git
+	// work the child cannot perform. The other disable causes keep the historical
+	// description (subagentShellUntrustedReason returns "" for them).
+	if reason := subagentShellUntrustedReason(cfg); reason != "" {
+		opts = append(opts, agent.WithSubagentShellDisabledNote(reason))
+	}
 	// Wire the worktree forker ONLY when Bash is available: the child catalog has Bash
 	// iff sandboxedRunner != nil, and the forker is what isolates that shell. The two
 	// must move together — a Bash child without isolation would run its shell in the
@@ -2962,13 +3051,22 @@ func buildTeamWiring(_ context.Context, cfg Config, provReg *providerRegistry, p
 	//
 	// fk (force-copy) for mutating members; roFk (worktree default) for read-only
 	// members the factory grants a shell. Read-only members run git in the shared
-	// .git of a worktree, so they get the SANDBOXED runner; the main session keeps its
-	// own unhardened runner elsewhere.
+	// .git of a worktree, so they get the SANDBOXED runner — which is also
+	// TRUST-GATED (issue #40): on an untrusted workspace memberRunner is nil and no
+	// read-only member gets a shell. A MUTATING member runs in a force-copy fork —
+	// created by a pure FS copy with NO fork-time git invocation, so the
+	// worktree-checkout RCE the trust gate closes cannot fire there — and its
+	// RUN-time git executes over the COPIED (possibly untrusted) .git, the accepted
+	// main-session-parity residual; its runner is therefore hardened but
+	// deliberately NOT trust-gated (buildForceCopyRunner) — the asymmetry
+	// TestUntrustedMutatingMemberKeepsBash pins. The main session keeps its own
+	// unhardened runner elsewhere.
 	fk := forker.New(newForkWorkspace(skillReadRoots), forker.WithForceCopy())
 	roFk := forker.New(newForkWorkspace(skillReadRoots))
 	memberRunner := buildSandboxedCommandRunner(cfg)
+	mutatingRunner := buildForceCopyRunner(cfg)
 	roIsolationAvailable := memberRunner != nil && roFk != nil
-	factory := buildMemberEngine(cfg, provReg, provider, parentProviderID, parentModel, teamHooks, agentReg, skillIdx, memberRunner, roIsolationAvailable, mainMgr)
+	factory := buildMemberEngine(cfg, provReg, provider, parentProviderID, parentModel, teamHooks, agentReg, skillIdx, memberRunner, mutatingRunner, roIsolationAvailable, mainMgr)
 	return factory, fk, roFk, teamHooks
 }
 
@@ -3053,7 +3151,14 @@ func modelCfgFor(cfg Config, model string) Config {
 // to THAT provider (built through newChildEngineForProvider so it compacts/counts
 // on the right model). A member pinning none — or the DEFAULT (undefined) member —
 // inherits the parent provider unchanged.
-func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner tool.CommandRunner, roIsolationAvailable bool, mainMgr *mcp.Manager) server.MemberEngineFactory {
+// SHELL RUNNERS (issue #40): `runner` is the TRUST-GATED sandboxed runner a read-only
+// member's worktree Bash uses (nil on an untrusted workspace ⇒ no read-only shell);
+// `mutatingRunner` is the hardened-but-UNGATED runner a Mutating member's force-copy
+// Bash uses (no fork-time git invocation, and its run-time git over the COPIED
+// untrusted .git is the accepted main-session-parity residual — see
+// buildForceCopyRunner), so untrust withholds ONLY the worktree shell — the
+// asymmetry the trust-gate tests pin.
+func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, teamHooks port.HookRunner, reg *agents.Registry, skillIdx skillIndex, runner, mutatingRunner tool.CommandRunner, roIsolationAvailable bool, mainMgr *mcp.Manager) server.MemberEngineFactory {
 	return func(t *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		// Default (undefined) member model (issue #35): the SAME def-less chain as
@@ -3110,25 +3215,39 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			// worktree (allowShell), scopedToolNamesMode keeps Bash but still drops
 			// Edit/Write; for a base-sharing read-only member it drops all three.
 			base := baseSubagentTools(cfg)
+			// A MUTATING member's shell is NOT trust-gated (force-copy fork: no
+			// fork-time git, run-time git is main-session parity — see
+			// buildForceCopyRunner), so when the trust-gated base excludes Bash
+			// (untrusted workspace) the mutating member's base gets it back from the
+			// ungated runner: a def allow-listing Bash for a Mutating member keeps it
+			// under untrust, consistent with the default-member tier.
+			if spec.Mutating && mutatingRunner != nil {
+				bt := tools.NewBashTool(mutatingRunner)
+				base[bt.Spec().Name] = bt
+			}
 			// allowShell: a non-mutating member may keep Bash ONLY when a runner is
 			// wired AND a read-only forker is available to isolate it in a worktree.
 			allowShell := !spec.Mutating && runner != nil && roIsolationAvailable
-			names, diags := scopedToolNamesMode(def, base, spec.Mutating, allowShell)
+			names, diags := scopedToolNamesMode(def, base, spec.Mutating, allowShell, bashScopeMissReason(cfg))
 			for _, d := range diags {
 				cfg.diag().Log(context.Background(), port.LevelWarn, "team member agent def tool scoping",
 					"member", spec.Name, "agent", def.Name, "tool", d.tool, "reason", d.reason, "source", reg.Detail(def.Name))
 			}
 			for _, name := range names {
 				// Bash registers with the HARDENED member runner (passed in), not the
-				// unhardened baseSubagentTools one used purely to compute the name set — so a
+				// baseSubagentTools one used purely to compute the name set — so a
 				// member's shell over the shared `.git` cannot be hijacked via git config
 				// (core.pager/hooksPath/fsmonitor/external-diff). Every other tool registers
-				// as-is. Note: there is NO unhardened member-Bash fall-through — `runner` is
-				// always the sandboxed memberRunner; a force-copy (Mutating) member would not
-				// even need it (its fork has its OWN `.git`, so config-hardening is moot
-				// there), but it gets the hardened runner anyway.
-				if name == tools.BashToolName && runner != nil {
-					cat.MustRegister(tools.NewBashTool(runner))
+				// as-is. Note: there is NO unhardened member-Bash fall-through — a
+				// read-only member gets the trust-gated `runner` (the only path that
+				// kept Bash for it, via allowShell ⇒ runner != nil), a Mutating member
+				// the ungated-but-hardened `mutatingRunner` (its force-copy fork
+				// COPIED the base `.git` verbatim — possibly an untrusted repo's — so
+				// the env scrub is load-bearing there too, not moot).
+				if name == tools.BashToolName {
+					if memberBash := memberBashRunner(spec.Mutating, runner, mutatingRunner); memberBash != nil {
+						cat.MustRegister(tools.NewBashTool(memberBash))
+					}
 					continue
 				}
 				cat.MustRegister(base[name])
@@ -3188,17 +3307,7 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			// as workdir), so an isolated member's Bash runs in its OWN fork/worktree,
 			// not the shared parent base. (Bash can still escape its cwd via absolute
 			// paths / `cd`, the inherent Bash trust model; isolation is the boundary.)
-			cat.MustRegister(tools.ReadTool{})
-			cat.MustRegister(tools.GrepTool{})
-			cat.MustRegister(tools.GlobTool{})
-			if spec.Mutating {
-				cat.MustRegister(tools.EditTool{})
-				cat.MustRegister(tools.WriteTool{})
-			}
-			if runner != nil && (spec.Mutating || roIsolationAvailable) {
-				cat.MustRegister(tools.NewBashTool(runner))
-				isolateReadOnly = !spec.Mutating && roIsolationAvailable
-			}
+			isolateReadOnly = registerDefaultMemberTools(cat, spec, runner, mutatingRunner, roIsolationAvailable)
 		}
 
 		// Team coordination tools ALWAYS, in both branches: they bypass the def
@@ -3207,6 +3316,8 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 			cat.MustRegister(mt)
 		}
 
+		pc = applyUntrustedMemberShellNote(cfg, spec, pc)
+
 		// Built through newChildEngineForProvider so a provider-switched member
 		// compacts/counts on its own model (contamination fix); childWindow=0 for the
 		// inherited-default member keeps it byte-identical.
@@ -3214,6 +3325,64 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 		return agent.MemberBuild{Engine: eng, Mode: mode, Limits: memberLimits, Close: mcpClose, MCPToolNames: mcpNames, IsolateReadOnly: isolateReadOnly}
 	}
 }
+
+// registerDefaultMemberTools registers the DEFAULT (no-def) member catalog tiers:
+// Read/Grep/Glob always; Edit/Write for a Mutating member; and Bash per the
+// issue-#40 runner split — a Mutating member's Bash rides the ungated
+// mutatingRunner (force-copy fork: no fork-time git, run-time git over the copied
+// .git is main-session parity — see buildForceCopyRunner) while a read-only
+// member's rides the TRUST-GATED runner (nil on an untrusted workspace), so an
+// untrusted read-only member stays shell-less while a Mutating one keeps Bash (the
+// pinned asymmetry).
+// It reports whether the member ended up read-only-ISOLATED (Bash granted to a
+// non-mutating member ⇒ the supervisor must worktree-isolate it).
+func registerDefaultMemberTools(cat *tool.Catalog, spec agent.MemberSpec, runner, mutatingRunner tool.CommandRunner, roIsolationAvailable bool) (isolateReadOnly bool) {
+	cat.MustRegister(tools.ReadTool{})
+	cat.MustRegister(tools.GrepTool{})
+	cat.MustRegister(tools.GlobTool{})
+	if spec.Mutating {
+		cat.MustRegister(tools.EditTool{})
+		cat.MustRegister(tools.WriteTool{})
+	}
+	if memberBash := memberBashRunner(spec.Mutating, runner, mutatingRunner); memberBash != nil && (spec.Mutating || roIsolationAvailable) {
+		cat.MustRegister(tools.NewBashTool(memberBash))
+		isolateReadOnly = !spec.Mutating && roIsolationAvailable
+	}
+	return isolateReadOnly
+}
+
+// applyUntrustedMemberShellNote appends the issue-#40 honesty line to a READ-ONLY
+// member's Role on an UNTRUSTED workspace (the trust gate withheld its worktree
+// shell), so the member plans around Read/Grep/Glob instead of burning turns
+// attempting Bash. A Mutating member keeps its force-copy-fork shell, and a trusted
+// workspace keeps its shell, so both pass through unchanged.
+func applyUntrustedMemberShellNote(cfg Config, spec agent.MemberSpec, pc prompt.Config) prompt.Config {
+	if cfg.TrustProject || spec.Mutating {
+		return pc
+	}
+	if pc.Role == "" {
+		pc.Role = prompt.DefaultRole()
+	}
+	pc.Role += "\n\n" + untrustedMemberShellNote
+	return pc
+}
+
+// memberBashRunner selects which hardened runner a member's Bash registers with:
+// the ungated mutatingRunner for a Mutating (force-copy, own-.git) member, the
+// TRUST-GATED roRunner for a read-only (worktree, shared-.git) member — the single
+// selection point for the issue-#40 asymmetry, used by both the def and default
+// member catalog tiers so they cannot drift.
+func memberBashRunner(mutating bool, roRunner, mutatingRunner tool.CommandRunner) tool.CommandRunner {
+	if mutating {
+		return mutatingRunner
+	}
+	return roRunner
+}
+
+// untrustedMemberShellNote is the one-line system-prompt suffix a READ-ONLY team
+// member receives on an untrusted workspace (issue #40), so it knows up front it has
+// no shell rather than discovering it via unknown-tool errors.
+const untrustedMemberShellNote = "This workspace is untrusted: you have no shell; use Read/Grep/Glob."
 
 // lookupMemberDef resolves spec.AgentType against the registry, returning the def
 // and true on a hit. An empty AgentType or a miss returns false (the caller falls

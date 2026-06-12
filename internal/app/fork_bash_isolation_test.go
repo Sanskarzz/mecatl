@@ -111,7 +111,11 @@ func TestForkBashWritesIntoForkNotBase(t *testing.T) {
 	base := t.TempDir()
 	cfg := Config{Workspace: base, Model: "mock", Shell: "/bin/sh"}
 
-	runner := buildCommandRunner(cfg)
+	// The PRODUCTION Parallel-branch runner (issue #40): hardened (env-scrubbed)
+	// but trust-ungated — buildForceCopyRunner, the same construction Mutating
+	// members use. This end-to-end test doubles as the proof that the scrub (which
+	// pins only the fixed git env keys) leaves ordinary branch shell work intact.
+	runner := buildForceCopyRunner(cfg)
 	if runner == nil {
 		t.Fatal("precondition: expected a non-nil command runner (Shell set)")
 	}
@@ -178,7 +182,12 @@ func TestForkGitCommitDoesNotTouchBaseRepo(t *testing.T) {
 	initBaseGitRepo(t, base)
 	cfg := Config{Workspace: base, Model: "mock", Shell: "/bin/sh"}
 
-	runner := buildCommandRunner(cfg)
+	// The PRODUCTION Parallel-branch runner (issue #40): hardened, trust-ungated.
+	// Running a real `git add/commit/update-ref` through the SCRUBBED env below
+	// proves the trusted-path behavior is unchanged — gitenv.Scrub pins only the
+	// fixed keys (hooks/pager/fsmonitor/diff.external); repo-local user.name/email
+	// and ordinary git verbs still work.
+	runner := buildForceCopyRunner(cfg)
 	if runner == nil {
 		t.Fatal("precondition: expected a non-nil command runner (Shell set)")
 	}
@@ -268,4 +277,58 @@ func gitOut(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %v: %v", args, err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// TestParallelBranchRunnerIsHardened pins the issue-#40 registerParallelTool wiring:
+// the Parallel branch Bash must run through the HARDENED, env-scrubbed
+// buildForceCopyRunner (the same construction Mutating members use) — NEVER the
+// unhardened buildCommandRunner. The fork copies a possibly-untrusted base `.git`
+// VERBATIM, so the branch's run-time git needs the scrubbed env (fixed keys pinned).
+// Observable from the branch itself: gitenv.Scrub injects GIT_CONFIG_NOSYSTEM=1
+// into the command environment, so a branch that dumps its env to an absolute
+// out-of-fork path must see it. Swapping registerParallelTool back to
+// buildCommandRunner makes the dump lack the marker and fails this test
+// (mutation-verified).
+func TestParallelBranchRunnerIsHardened(t *testing.T) {
+	base := t.TempDir()
+	cfg := Config{Workspace: base, Model: "mock", Shell: "/bin/sh", EnableParallel: true}
+
+	envFile := filepath.Join(t.TempDir(), "env.txt")
+	provider := &bashWriteProvider{command: "env > " + envFile, marker: "env.txt"}
+
+	// The REAL wiring under test: registerParallelTool builds the branch runner
+	// itself (this is exactly the line that regressed to the unhardened runner).
+	cat := tool.NewCatalog()
+	registerParallelTool(context.Background(), cfg, cat,
+		regForTest(provider, providerMock, cfg.Model), nil, catalogAssets{},
+		catalogSession{provider: provider, providerID: providerMock, model: cfg.Model})
+	par, ok := cat.Lookup("Parallel")
+	if !ok {
+		t.Fatal("registerParallelTool did not register the Parallel tool")
+	}
+
+	baseWS, err := osfs.NewWorkspace(base)
+	if err != nil {
+		t.Fatalf("base workspace: %v", err)
+	}
+	res, err := par.Execute(context.Background(),
+		session.NewToolCall("c1", "Parallel", json.RawMessage(`{"tasks":["dump the env"],"join":"first"}`)),
+		baseWS)
+	if err != nil {
+		t.Fatalf("Parallel.Execute: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("Parallel result is an error: %s", res.Content)
+	}
+
+	dump, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("the branch never ran its Bash (no env dump): %v", err)
+	}
+	// Deliberately do NOT print the dump on failure: an unscrubbed env is the
+	// OPERATOR'S real environment, secrets included.
+	if !strings.Contains(string(dump), "GIT_CONFIG_NOSYSTEM=1") {
+		t.Fatal("Parallel branch Bash ran with an UNSCRUBBED env (no GIT_CONFIG_NOSYSTEM=1): " +
+			"registerParallelTool must wire buildForceCopyRunner, not buildCommandRunner")
+	}
 }

@@ -133,6 +133,48 @@ func TestSubagentSpecEnumeratesAgents(t *testing.T) {
 	}
 }
 
+// TestSubagentSpecShellDisabledNoteOption pins both sides of the
+// WithSubagentShellDisabledNote seam (issue #40): WITH the note set, Spec()'s
+// isolated-worktree-shell clause is REPLACED by an honest read-only-only description
+// carrying the reason verbatim; WITHOUT it (and with an empty reason, the no-op), the
+// load-bearing shell clause stays byte-identical to the historical description, so a
+// shell-bearing deployment's prompt-cache-stable spec never shifts.
+func TestSubagentSpecShellDisabledNoteOption(t *testing.T) {
+	// The historical shell clause, pinned byte-for-byte (the model plans build/test/git
+	// delegation off this exact promise).
+	const shellClause = "(Read/Grep/Glob) plus a full shell in an isolated, throwaway git worktree — " +
+		"it can build, test, and inspect history, but its file changes are DISCARDED " +
+		"(no Edit/Write) and it cannot delegate further."
+	const reason = "no shell on this workspace because it is untrusted (run with --trust-project to enable it)"
+
+	eng := childEngineWith(mockllm.New(mockllm.TextTurn("x")), catalogWith(t))
+
+	// Without the option: byte-stable historical clause, no note.
+	plain := agent.NewSubagentTool(eng).Spec().Description
+	if !strings.Contains(plain, shellClause) {
+		t.Fatalf("spec without the note must keep the historical shell clause byte-identical, got:\n%s", plain)
+	}
+	// An empty reason is the documented no-op: byte-identical to no option at all.
+	if noop := agent.NewSubagentTool(eng, agent.WithSubagentShellDisabledNote("")).Spec().Description; noop != plain {
+		t.Fatalf("an empty note must be a no-op; descriptions differ:\n%s\n---\n%s", noop, plain)
+	}
+
+	// With the note: the worktree-shell promise is GONE and the reason rides verbatim.
+	noted := agent.NewSubagentTool(eng, agent.WithSubagentShellDisabledNote(reason)).Spec().Description
+	if strings.Contains(noted, "throwaway git worktree") {
+		t.Fatalf("spec with the note must not still promise the worktree shell, got:\n%s", noted)
+	}
+	if !strings.Contains(noted, reason) {
+		t.Fatalf("spec with the note must carry the reason verbatim, got:\n%s", noted)
+	}
+	// It still describes the read-only surface and the no-delegation rule.
+	for _, want := range []string{"(Read/Grep/Glob) ONLY", "no Edit/Write", "cannot delegate further"} {
+		if !strings.Contains(noted, want) {
+			t.Fatalf("spec with the note must still state %q, got:\n%s", want, noted)
+		}
+	}
+}
+
 // TestInspectSubagentSpecNamesProvenance proves the InspectSubagent description names the
 // 'agentId:' line provenance and the ~40-message bound (kept in sync with
 // maxInspectMessages).

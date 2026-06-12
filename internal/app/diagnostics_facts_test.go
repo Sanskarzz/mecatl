@@ -69,9 +69,13 @@ func (c *capturingDiagnostics) countContaining(substr string) int {
 func TestBuildConfigFactsLogOnceAcrossChildDerivations(t *testing.T) {
 	diag := newCapturingDiagnostics()
 	cfg := Config{
-		Model:       "gpt-5",
-		Tokenizer:   "heuristic",
-		Compaction:  "heuristic",
+		Model:      "gpt-5",
+		Tokenizer:  "heuristic",
+		Compaction: "heuristic",
+		// A configured shell on an UNTRUSTED workspace (TrustProject false, the zero
+		// value): the issue-#40 untrusted-shell INFO must join the build-once facts —
+		// fired here, never by the per-session/per-child derivations below.
+		Shell:       "/bin/sh",
 		Diagnostics: diag,
 	}
 	if cfg.Diagnostics == nil { // mirror Build's default; here it is already set.
@@ -95,9 +99,10 @@ func TestBuildConfigFactsLogOnceAcrossChildDerivations(t *testing.T) {
 
 	// Each build-once fact family must appear EXACTLY ONCE in total.
 	families := map[string]string{
-		"token counter":       "token counter:",
-		"compaction strategy": "compaction strategy:",
-		"slash commands":      "slash commands",
+		"token counter":               "token counter:",
+		"compaction strategy":         "compaction strategy:",
+		"slash commands":              "slash commands",
+		"untrusted-shell (issue #40)": "shell DISABLED (untrusted workspace)",
 	}
 	for name, substr := range families {
 		if got := diag.countContaining(substr); got != 1 {
@@ -118,9 +123,12 @@ func TestBuildConfigFactsLogOnceAcrossChildDerivations(t *testing.T) {
 func TestBuildEmitsConfigFactsExactlyOnce(t *testing.T) {
 	diag := newCapturingDiagnostics()
 	built, err := Build(context.Background(), Config{
-		Workspace:   t.TempDir(),
-		Model:       "mock",
-		UseMock:     true,
+		Workspace: t.TempDir(),
+		Model:     "mock",
+		UseMock:   true,
+		// Shell configured + TrustProject false (zero value): the REAL Build must
+		// emit the issue-#40 untrusted-shell INFO exactly once too.
+		Shell:       "/bin/sh",
 		Diagnostics: diag,
 	})
 	if err != nil {
@@ -129,9 +137,10 @@ func TestBuildEmitsConfigFactsExactlyOnce(t *testing.T) {
 	defer built.Close()
 
 	families := map[string]string{
-		"token counter":       "token counter:",
-		"compaction strategy": "compaction strategy:",
-		"slash commands":      "slash commands",
+		"token counter":               "token counter:",
+		"compaction strategy":         "compaction strategy:",
+		"slash commands":              "slash commands",
+		"untrusted-shell (issue #40)": "shell DISABLED (untrusted workspace)",
 	}
 	for name, substr := range families {
 		if got := diag.countContaining(substr); got != 1 {
@@ -161,7 +170,12 @@ func TestBuildNarratesFamilyFactsExactlyOnceAcrossSessions(t *testing.T) {
 		UserModelDir:   t.TempDir(),
 		EnableParallel: true,
 		EnableTeams:    true,
-		Diagnostics:    diag,
+		// Shell + untrusted (TrustProject false): the per-session assembly below
+		// re-runs the trust-gated runner builders (buildSandboxedCommandRunner via
+		// buildTeamWiring/buildSubagentTool), which must stay log-FREE — the
+		// untrusted-shell INFO is a build-once fact.
+		Shell:       "/bin/sh",
+		Diagnostics: diag,
 	})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -182,6 +196,7 @@ func TestBuildNarratesFamilyFactsExactlyOnceAcrossSessions(t *testing.T) {
 		"Parallel tool ENABLED",
 		"Team tool ENABLED",
 		"SkillDraft tool DISABLED",
+		"shell DISABLED (untrusted workspace)",
 	}
 	for _, substr := range families {
 		if got := diag.countContaining(substr); got != 1 {

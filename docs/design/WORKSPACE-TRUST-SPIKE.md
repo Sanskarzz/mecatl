@@ -715,6 +715,18 @@ agents/commands/skills, not just allows+soul — a one-line invariant update).
   markdown. Stated and chosen, not silently ignored.
 
 **Follow-up issues to file:**
+- `#TRUST-SUBAGENT-SHELL` (issue #40) — **LANDED**: the read-only subagent/member
+  worktree shell is now trust-gated (`buildSandboxedCommandRunner` returns nil on an
+  untrusted workspace; Subagent Spec + read-only member prompt say so honestly).
+  Mutating members / Parallel branches keep their hardened force-copy shells
+  (`buildForceCopyRunner`) — safe to leave ungated because force-copy fork creation
+  performs no git invocation (pure FS copy, no checkout, smudge never fires), so the
+  fork-time auto-firing RCE the gate closes cannot happen there; their run-time git
+  over the verbatim-copied untrusted `.git` is the accepted main-session-parity
+  residual. Note the trust fold is per-`Build`: a mid-session trust grant
+  (confirming trust in mecatui / re-running with `--trust-project`) applies from the
+  next `Build`/process — a NEW SESSION in a live mecated does not re-read
+  `trust.yaml`, so the shell gate is not re-evaluated until the process restarts.
 - `#TRUST-SKILLS-GATE` — only if skills-gating (R2.5) balloons beyond the
   additive option; otherwise it lands in Phase 2.
 - `#TRUST-APPROVE` — non-interactive `--approve-trust` re-bless for mecated.
