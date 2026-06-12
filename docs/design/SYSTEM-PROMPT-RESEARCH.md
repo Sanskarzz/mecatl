@@ -414,6 +414,8 @@ is enough until a second provider lands (anti-gold-plating).
   CC-specific (TodoWrite, skills, Anthropic-internal modes).
 - **Structured compaction template (opencode)** — that's a *compaction* enhancement
   (`agent.Compactor` seam), not a system-prompt one. Track under pattern 5, not #19.
+  *(Since shipped there: issue #22 — `CascadeCompactor` tier 4 now uses the
+  section-locked summarizer template from §2.3.)*
 - **Migrating project instructions to system role** — deliberately wrong.
 - **A planning/task tool + "use it frequently" guidance** — no such tool exists;
   separate feature.
@@ -494,9 +496,11 @@ model switch** — no domain struct change, no loop surgery. Suggested split:
 - **#19c — `<env>` enrichment (P8) + plan-mode reminder (P9).** Add `Env.Shell`/
   `Env.GitStatus`; fill in composition (bounded git snapshot); append a one-line
   read-only reminder when `Mode==plan`. *Volatile-suffix only; lower priority.*
-- **Defer:** structured compaction template (→ pattern 5 / `agent.Compactor`),
-  task/planning tool (separate feature), per-file instruction attachment (→ pattern
-  2 `InstructionAssembler`).
+- **Defer:** structured compaction template (→ pattern 5 / `agent.Compactor`)
+  *(shipped: issue #22 — the section-locked tier-4 summarizer prompt in
+  `CascadeCompactor`, behind the compaction seam; see
+  `IMPLEMENTATION-NOTES.md` §compaction)*, task/planning tool (separate feature),
+  per-file instruction attachment (→ pattern 2 `InstructionAssembler`).
 
 ### Definition of done
 - New stable prefix is byte-identical across turns for a fixed config (gauntlet #6
@@ -558,6 +562,11 @@ Repo commits directly to `main`; sequence as commits, not a multi-issue split:
 6. **Verify** — `task lint && task test` green; `go run ./cmd/mecademo` prints a
    full session; gauntlet #6 cache-invariant test stays green (Env-only changes
    never alter the StablePrefix; the agency delta is per-session, not per-turn).
+
+*(Shipped separately: issue #22 — the structured compaction template deferred in
+§7 landed as the tier-4 summarizer prompt behind the `agent.Compactor` seam
+(`CascadeCompactor`, `engine/agent/cascade.go`); see
+`docs/design/IMPLEMENTATION-NOTES.md`.)*
 
 ## 8. Sources
 

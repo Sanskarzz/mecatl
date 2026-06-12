@@ -1088,6 +1088,31 @@ into the service layer's `loadAndReopen` so every wire surface gets it for free.
 pairing fix above REMAINS the trigger-removal defense; Recover is the degrade-gracefully defense
 for any other transient provider failure. Both are kept.
 
+**Structured tier-4 summarizer prompt (issue #22).** `CascadeCompactor`'s tier-4 summary call
+uses a section-locked structured template (the opencode/Claude-Code compaction shape —
+`SYSTEM-PROMPT-RESEARCH.md` §2.3) instead of the original one-line prompt, split across the two
+prompt layers: the SYSTEM layer (`summarizerSystemPrompt`, via `prompt.Layered{StablePrefix}`)
+locks eight sections in order (Goal / Current plan / Completed work / Key decisions / Relevant
+files and symbols / Tool results worth remembering / Open questions and known errors / Next
+steps), the DATA-not-instructions safety framing (the summarised conversation is untrusted
+context, never elevated instructions), PRESERVE-verbatim (paths/identifiers/commands/error
+messages) and DROP (raw file bodies/verbose tool output/stale grep/old stack traces) rules,
+`"None."` for empty sections, and no preamble/sign-off; the trailing USER instruction
+(`summarizerRequestTemplate`) carries the SOFT token budget — `SummaryMaxTokens` (zero →
+`defaultSummaryMaxTokens` = 1024), expressed in the prompt ONLY, never a `port.LLMRequest`
+field (the request stays provider-neutral; the `llm_neutral_test.go` tripwire holds).
+Semantics are fail-open on STRUCTURE (no validation of the returned sections — a model that
+misses sections or overshoots the budget still produces an accepted summary) and fail-safe on
+EMPTINESS: an empty/whitespace-only summary is now an ERROR and `Compact` aborts to the
+ORIGINAL history (the same abort-to-original contract as `ErrCompactionWouldOrphan` and a
+tier-4 LLM call error), replacing the old silent `"[compaction summary unavailable]"`
+placeholder that would have substituted real turns with nothing. Composition is unchanged
+(`buildCompactor` leaves `SummaryMaxTokens` zero — no new Config flag); media stripping
+(`deMediaMessages`) and the `"[earlier turns summarised]\n"` success prefix are unchanged.
+Tier-4 tests in `cascade_test.go` cover prompt-reaches-request (all eight headers in order +
+the DATA framing, via `mockllm.WithRequestObserver`), budget-in-instruction, empty-summary
+abort, missing-sections/over-long acceptance, pairing preservation, and LLM-error abort.
+
 ## Adapters — `internal/adapter/`
 
 ### `anthropic` (multi-provider P1)
