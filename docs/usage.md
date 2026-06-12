@@ -1068,6 +1068,7 @@ Service: `mecatl.v1.HarnessService` (`contracts/proto/mecatl/v1/harness.proto`).
 | `CreateTeam(CreateTeamRequest) → CreateTeamResponse` | unary | allocate a team (optionally enrolling an initial roster); accepts the tighten-only `max_team_tokens` |
 | `SpawnTeammate` | unary | enrol a member in an existing team (before `RunTeam`) |
 | `SendTeammateMessage` | unary | post a message into a member's inbox, delivered at its next turn boundary |
+| `CancelTeammate` | unary | cancel ONE member of a **running** team mid-round: it de-schedules with the `cancelled` stop reason and releases its claimed tasks; the team still delivers its report. Not-running team → `FailedPrecondition`; unknown member → `NotFound` |
 | `RunTeam(RunTeamRequest) → stream TeamEvent` | server-stream | drive the team to quiescence; every member's events stream tagged with the member name, and the stream **ends with a single terminal frame carrying `TeamEvent.outcome`** (rounds, stop, `budget_exhausted`, usage, dispositions, findings) |
 | `ListTeam` | unary | snapshot of the roster, shared task list, and quiescence |
 | `CleanupTeam` | unary | tear down a finished team and release its resources |
@@ -1332,6 +1333,7 @@ share one event shape.
 | `POST /v1/teams` | team spec (incl. the tighten-only `max_team_tokens?`) | create a team |
 | `POST /v1/teams/{id}/members` | member spec | spawn a teammate |
 | `POST /v1/teams/{id}/messages` | message | post into a member's inbox |
+| `POST /v1/teams/{id}/members/cancel` | `{"member": "..."}` | cancel one member of a running team (404 unknown team/member, 412 not running) |
 | `POST /v1/teams/{id}/run` | — | `text/event-stream` of `TeamEvent`s, ending with the terminal `outcome` frame |
 | `GET /v1/teams/{id}` | — | team snapshot (roster, tasks, quiescence) |
 | `DELETE /v1/teams/{id}` | — | clean up the team |

@@ -75,6 +75,17 @@ func (h *HarnessServer) SendTeammateMessage(ctx context.Context, req *mecatlv1.S
 	return &mecatlv1.SendTeammateMessageResponse{}, nil
 }
 
+// CancelTeammate cancels one member of a running team (issue #29).
+func (h *HarnessServer) CancelTeammate(ctx context.Context, req *mecatlv1.CancelTeammateRequest) (*mecatlv1.CancelTeammateResponse, error) {
+	if req.GetTeamId() == "" || req.GetMember() == "" {
+		return nil, status.Error(codes.InvalidArgument, "team_id and member are required")
+	}
+	if err := h.svc.CancelTeammate(ctx, req.GetTeamId(), req.GetMember()); err != nil {
+		return nil, toStatus(err)
+	}
+	return &mecatlv1.CancelTeammateResponse{}, nil
+}
+
 // RunTeam drives the team to quiescence, streaming every member event tagged with
 // the producing member, then ends the stream with the single terminal frame
 // carrying TeamEvent.outcome (issue #36). Supervisor.Run serialises sink calls

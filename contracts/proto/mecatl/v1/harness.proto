@@ -143,6 +143,15 @@ service HarnessService {
   // operator), delivered at that member's next turn boundary.
   rpc SendTeammateMessage(SendTeammateMessageRequest) returns (SendTeammateMessageResponse);
 
+  // CancelTeammate cancels ONE member of a RUNNING team mid-round (the headless
+  // RunTeam-path analogue of the Converse-path CancelChild frame). The member
+  // de-schedules with the cancelled stop reason, its claimed tasks release back
+  // to pending, and the team run continues — the lead still synthesises and the
+  // RunTeam stream still delivers its terminal outcome frame. A team that is not
+  // running (created but never run, or already done) is rejected with
+  // FailedPrecondition; an unknown member name with NotFound.
+  rpc CancelTeammate(CancelTeammateRequest) returns (CancelTeammateResponse);
+
   // RunTeam drives the team to quiescence, streaming every member's events —
   // each tagged with the member name — until the team finishes. The stream ends
   // with a single terminal frame carrying TeamEvent.outcome (rounds, stop,
@@ -1356,6 +1365,17 @@ message SendTeammateMessageRequest {
 
 // SendTeammateMessageResponse is the empty acknowledgement.
 message SendTeammateMessageResponse {}
+
+// CancelTeammateRequest cancels one member of a running team.
+message CancelTeammateRequest {
+  // team_id is the team the member belongs to.
+  string team_id = 1 [(buf.validate.field).string.min_len = 1];
+  // member is the name of the member to cancel.
+  string member = 2 [(buf.validate.field).string.min_len = 1];
+}
+
+// CancelTeammateResponse is the empty acknowledgement.
+message CancelTeammateResponse {}
 
 // RunTeamRequest drives a team to quiescence, streaming member events.
 message RunTeamRequest {

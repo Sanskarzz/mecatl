@@ -693,7 +693,10 @@ next run. The registry also powers **per-child cancel**: `Run.CancelChild(childI
 (gRPC `ConverseRequest.cancel_child`, HTTP `POST /v1/sessions/{id}/cancel-child`,
 mecatui's `x` key) cancels ONE subagent / parallel branch / team member without
 touching the run, retracting any permission ask the child had parked
-(`permission.retract`); the child persists and stays resumable.
+(`permission.retract`); the child persists and stays resumable. The headless
+RunTeam path has its own member cancel: the `CancelTeammate(team_id, member)` unary
+(HTTP `POST /v1/teams/{id}/members/cancel`, issue #29) reaches a running team's
+member directly through `Supervisor.CancelMember` — no parent registry on that path.
 
 The child is a **read-only explorer with a shell** — capability flows down from the
 parent (which has Bash); isolation, not catalog read-only-ness, is the security
@@ -841,7 +844,8 @@ reach the right run.
   `ListSkills`, `GetSoul`, `GetUserModel`; MCP passthrough is
   `ListMcpResources` / `ReadMcpResource` / `ListMcpPrompts` / `GetMcpPrompt` /
   `ListMcpSources` / `ListToolHiveGroups`; and the team family is `CreateTeam`
-  / `SpawnTeammate` / `SendTeammateMessage` / `RunTeam` (a server-streamed
+  / `SpawnTeammate` / `SendTeammateMessage` / `CancelTeammate` (cancel one
+  member of a running team) / `RunTeam` (a server-streamed
   `TeamEvent` sequence) / `ListTeam` / `CleanupTeam`.
   `CreateTeamRequest.max_team_tokens` carries the tighten-only team-wide token
   budget (§15).
@@ -866,7 +870,7 @@ v1 enforces required checks in the Go server (protovalidate runtime is deferred)
 | `DELETE /v1/sessions/{id}` | `CloseSession` | frees the per-session engine slot |
 | `GET /v1/agents` · `/v1/skills` · `/v1/commands` · `/v1/soul` · `/v1/usermodel` | the inventory RPCs | read-only snapshots |
 | `GET /v1/mcp/resources` · `/v1/mcp/resources/read` · `/v1/mcp/prompts` · `POST /v1/mcp/prompts/get` · `GET /v1/mcp/sources` · `/v1/mcp/toolhive/groups` | MCP passthrough | mirrors the gRPC MCP family |
-| `POST /v1/teams` · `POST /v1/teams/{id}/members` · `POST /v1/teams/{id}/messages` · `POST /v1/teams/{id}/run` · `GET /v1/teams/{id}` · `DELETE /v1/teams/{id}` | the team family | `/run` streams `TeamEvent`s over SSE |
+| `POST /v1/teams` · `POST /v1/teams/{id}/members` · `POST /v1/teams/{id}/messages` · `POST /v1/teams/{id}/members/cancel` · `POST /v1/teams/{id}/run` · `GET /v1/teams/{id}` · `DELETE /v1/teams/{id}` | the team family | `/run` streams `TeamEvent`s over SSE; `/members/cancel` cancels one member of a running team |
 
 Closing either stream cancels the run: the SSE handler watches
 `r.Context().Done()` and calls `run.Cancel()`; the gRPC relay cancels on a send
