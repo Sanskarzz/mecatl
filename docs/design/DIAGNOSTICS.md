@@ -30,8 +30,8 @@ either the audit into free-form strings or the diagnostics into a tool-call shap
 | Channel | Port | Adapter | Carries |
 |---|---|---|---|
 | Operational logging | `port.Diagnostics` | `slogdiag` (over `log/slog`) | composition/lifecycle/degraded-mode lines |
-| Per-tool audit | `port.ToolCallRecorder` | `telemetry` (counters + histogram); `jsonlstore` audit | one record per tool call |
-| Metrics / traces | `port.EventSink` | `telemetry` (OTel SDK) | counters/gauges/spans from the event stream |
+| Per-tool audit | `port.ToolCallRecorder` | `telemetry` (counters + histogram); `jsonlstore` audit | one record per tool call (role-tagged: `role="main"` for the main engine; bounded family per child via `MetricsRoleScoper`) |
+| Metrics / traces | `port.EventSink` | `telemetry` (OTel SDK) | counters/gauges/spans from the event stream (every series carries the bounded `role` label) |
 
 All three are injected at composition; none reaches for a global.
 
@@ -94,17 +94,25 @@ emitted, via `port.Diagnostics.With`:
   `TestRunDiagnosticsNoCrossTag` hold. It is Nop-safe: `deps.Diagnostics` is never
   nil post-`NewEngine`, and `With` on `NopDiagnostics` returns `NopDiagnostics`.
 - **Main engine vs children.** The MAIN engine has `Deps.Role == ""` → lines carry
-  only the `"session"` key. A CHILD engine (Task subagent `"task"` / per-def
-  `"task:<name>"`, team member `"member:<name>"`, Fork branch `"fork"`, Fork judge
-  `"fork-judge"`, user-model reviewer `"usermodel-review"`) sets `Deps.Role` → lines
-  carry `"session"` + `"agent"=<role>`, so interleaved child diagnostics are
+  only the `"session"` key. A CHILD engine (Subagent explorer `"task"` / per-def
+  `"task:<name>"` / model-override `"task:model=<model>"`, team member
+  `"member:<name>"`, Parallel branch `"parallel"`, Parallel judge
+  `"parallel-judge"`, user-model reviewer `"usermodel-review"`) sets `Deps.Role` →
+  lines carry `"session"` + `"agent"=<role>`, so interleaved child diagnostics are
   readable.
-- **Children emit, but only Diagnostics.** Child engines now carry the REAL
-  `cfg.diag()` (not `NopDiagnostics`) so their degraded-mode warnings and policy
-  denies reach the operator channel, correlated. This is DISTINCT from telemetry and
-  audit: `Deps.Sink` (`EventSink`) and `Deps.ToolCallRecorder` stay nil/OFF for
-  children — a sub-agent's turns/tool-calls must not double-count against the
-  operator-facing metrics/audit. Only Diagnostics is live for children.
+- **Children emit Diagnostics, plus ROLE-SCOPED metrics (issue #47).** Child
+  engines carry the REAL `cfg.diag()` (not `NopDiagnostics`) so their
+  degraded-mode warnings and policy denies reach the operator channel, correlated.
+  Telemetry/audit is now role-scoped rather than off: when the composition wires
+  `app.Config.MetricsRoleScoper` (mecated always; the embedded TUI server only
+  with `--perf` on), each child's `Deps.Sink`/`Deps.ToolCallRecorder` become a
+  role-tagged view over the SHARED telemetry instruments — keyed on the BOUNDED
+  family `roleFamily(role)` (`main|subagent|member|parallel|usermodel|child`;
+  the raw role, which can embed a def name or model id, never reaches a label) —
+  so child turns/tool-calls land on role-distinct series and CANNOT double-count
+  against `role="main"`. Without a scoper (the no-perf path) both stay nil,
+  byte-identical to the old unmetered child shape. The conversation event stream
+  is still `Run.Events()` only; nothing about child event delivery changed.
 
 ### The three emitters (and what is deliberately NOT emitted)
 

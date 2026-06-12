@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -61,6 +62,7 @@ func registerTools(srv *mcpsdk.Server, d Deps, gate *cpuGate) {
 type QueryMetricInput struct {
 	MetricName string  `json:"metric_name,omitempty" jsonschema:"the curated metric to query; omit to list available metric names"`
 	Quantile   float64 `json:"quantile,omitempty" jsonschema:"for a histogram metric, a single quantile in (0,1] to report (e.g. 0.99); omit for p50/p90/p99"`
+	Role       string  `json:"role,omitempty" jsonschema:"filter to one engine role family: main|subagent|member|parallel|usermodel|child; omit to aggregate across all roles"`
 }
 
 // QueryMetricOutput is the structured result of query_metric. Exactly one shape
@@ -75,7 +77,8 @@ func registerQueryMetric(srv *mcpsdk.Server, d Deps) {
 		Name: "query_metric",
 		Description: "Read one curated runtime metric. Call with no metric_name to list the available metric names (discovery). " +
 			"With a metric_name, returns either a histogram summary (observation count + p50/p90/p99 bucket UPPER BOUNDS in seconds, " +
-			"or a single quantile if 'quantile' is given) or a scalar value for a counter/gauge. Cheap and unlimited. " +
+			"or a single quantile if 'quantile' is given) or a scalar value for a counter/gauge, aggregated across ALL engine roles by default; " +
+			"set 'role' (main|subagent|member|parallel|usermodel|child) to read one role family's share. Cheap and unlimited. " +
 			"Unknown names return an error listing how to discover valid names.",
 		Annotations: readOnlyAnnotations(),
 	}, func(_ context.Context, _ *mcpsdk.CallToolRequest, in QueryMetricInput) (*mcpsdk.CallToolResult, QueryMetricOutput, error) {
@@ -90,6 +93,12 @@ func registerQueryMetric(srv *mcpsdk.Server, d Deps) {
 				in.MetricName,
 			)), QueryMetricOutput{}, nil
 		}
+		if in.Role != "" && !isRoleFamily(in.Role) {
+			return errorResult(fmt.Sprintf(
+				"unknown role %q; valid roles are %s (omit role to aggregate across all)",
+				in.Role, strings.Join(roleFamilies, "|"),
+			)), QueryMetricOutput{}, nil
+		}
 		byName, err := gatherByName(d)
 		if err != nil && len(byName) == 0 {
 			return errorResult("could not gather metrics right now; retry shortly"), QueryMetricOutput{}, nil
@@ -100,12 +109,22 @@ func registerQueryMetric(srv *mcpsdk.Server, d Deps) {
 			if in.Quantile > 0 {
 				quantiles = []float64{in.Quantile}
 			}
-			fillEntry(&entry, mf, quantiles)
+			fillEntry(&entry, c, mf, in.Role, quantiles)
+			// The per-role breakdown rides only the UNFILTERED read (with a role
+			// filter the whole entry already IS one role's share) and only for the
+			// families that carry the role dimension meaningfully in the summary.
+			if in.Role == "" && (entry.Kind == "histogram" || roleBreakdownMetrics[c.name]) {
+				entry.ByRole = roleBreakdown(mf)
+			}
 		}
-		if entry.Kind == "absent" {
+		if entry.Kind == "absent" || (in.Role != "" && entry.Kind == "histogram" && entry.Count == 0) {
+			suffix := "it appears once the harness has produced the relevant activity"
+			if in.Role != "" {
+				suffix = fmt.Sprintf("no observations recorded for role %q yet", in.Role)
+			}
 			return errorResult(fmt.Sprintf(
-				"metric %q is not present yet (no observations recorded); it appears once the harness has produced the relevant activity",
-				in.MetricName,
+				"metric %q is not present yet (no observations recorded); %s",
+				in.MetricName, suffix,
 			)), QueryMetricOutput{}, nil
 		}
 		out := QueryMetricOutput{Metric: &entry}
@@ -252,6 +271,7 @@ type ListSlowTurnsInput struct {
 	ThresholdMs int64  `json:"threshold_ms,omitempty" jsonschema:"only turns at least this slow (ms); omit for the source default"`
 	Limit       int    `json:"limit,omitempty" jsonschema:"max turns to return (1-20, default 10)"`
 	Cursor      string `json:"cursor,omitempty" jsonschema:"opaque pagination cursor from a previous response's nextCursor"`
+	Role        string `json:"role,omitempty" jsonschema:"filter to one engine role family: main|subagent|member|parallel|usermodel|child; omit for all roles"`
 }
 
 // ListSlowTurnsOutput is the paginated slow-turn page. Each turn carries numerics
@@ -265,7 +285,8 @@ type ListSlowTurnsOutput struct {
 func registerListSlowTurns(srv *mcpsdk.Server, d Deps) {
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name: "list_slow_turns",
-		Description: "List recent slow turns (newest first) with per-turn timing only: turn index, duration, time-to-first-token, worst inter-token gap, and end time. " +
+		Description: "List recent slow turns (newest first) with per-turn timing only: turn index, duration, time-to-first-token, worst inter-token gap, end time, " +
+			"and the bounded engine role family (main|subagent|member|parallel|usermodel|child) that produced the turn — filter with 'role'. " +
 			"NO prompt text, tool arguments, or session IDs are ever included. Cursor-paginated; cheap and unlimited. " +
 			"Returns an error if per-turn history is not enabled.",
 		Annotations: readOnlyAnnotations(),
@@ -273,11 +294,26 @@ func registerListSlowTurns(srv *mcpsdk.Server, d Deps) {
 		if d.SlowTurns == nil {
 			return errorResult("per-turn history is not enabled; start the harness with per-turn slow-turn tracking to use this tool"), ListSlowTurnsOutput{}, nil
 		}
+		if in.Role != "" && !isRoleFamily(in.Role) {
+			return errorResult(fmt.Sprintf(
+				"unknown role %q; valid roles are %s (omit role for all)",
+				in.Role, strings.Join(roleFamilies, "|"),
+			)), ListSlowTurnsOutput{}, nil
+		}
 		limit := clampLimit(in.Limit, 10, 20)
 		offset := decodeCursor(in.Cursor)
 		// The source returns its whole bounded, newest-first set; we paginate over
 		// it in-memory so totalCount is accurate and cursors are stable.
 		all := d.SlowTurns.Recent(in.ThresholdMs)
+		if in.Role != "" {
+			filtered := all[:0:0]
+			for _, turn := range all {
+				if turn.Role == in.Role {
+					filtered = append(filtered, turn)
+				}
+			}
+			all = filtered
+		}
 		total := len(all)
 		var page []SlowTurn
 		if offset < total {

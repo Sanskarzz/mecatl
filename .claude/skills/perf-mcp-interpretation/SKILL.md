@@ -55,15 +55,22 @@ for the perturbing CPU tools only with a hypothesis to confirm.
   heap_objects, heap_object_bytes, total_memory_bytes, rss_bytes, available[]).
 - `perf://metrics/summary` — every curated metric reduced: histograms → count +
   p50/p90/p99 **bucket upper bounds (seconds)**; counters/gauges → a scalar value.
+  Histograms and `tool_calls_total`/`tokens` also carry a bounded `by_role`
+  breakdown over the CLOSED engine role family
+  `main|subagent|member|parallel|usermodel|child` (the main engine vs the
+  delegation children — the axis for "which agent family is burning
+  latency/tokens"; never a session id or agent-def name).
 - `perf://pprof/{profile}` — template, `{profile}` ∈ `heap|goroutine|allocs|mutex|block`;
   reduced top-15 functions (function, file basename, flat/cum values).
 
 **Tools** (all read-only):
-- `query_metric{metric_name?, quantile?}` — one curated metric.
+- `query_metric{metric_name?, quantile?, role?}` — one curated metric; aggregated
+  across all roles by default, or one role family's share with `role`.
 - `top_cpu_functions{duration_seconds?, limit?}` — **perturbs**, rate-limited.
 - `capture_cpu_profile{duration_seconds?, limit?, include_raw_link?}` — **perturbs**, rate-limited.
 - `top_allocations{limit?}` — heap top-N + total_heap_bytes.
-- `list_slow_turns{threshold_ms?, limit?, cursor?}` — cursor-paginated, newest first.
+- `list_slow_turns{threshold_ms?, limit?, cursor?, role?}` — cursor-paginated,
+  newest first; each turn carries its bounded role family.
 - `capture_flight_recorder{}` — size + one-line summary + user link (needs `--flight-recorder`).
 
 See [references/output-shapes.md](references/output-shapes.md) for the exact field

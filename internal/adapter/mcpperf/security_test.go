@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/google/pprof/profile"
+
+	"github.com/stacklok/mecatl/internal/adapter/telemetry"
 )
 
 // --- rate limiter ---
@@ -205,5 +207,58 @@ func minimalDeps() Deps {
 		Snapshot: fakeSnapshot,
 		Gatherer: emptyGatherer{},
 		Profiler: fakeProfiler{},
+	}
+}
+
+// --- role-label cardinality posture (issue #47) ---
+
+// TestRoleFamiliesAreTheClosedTelemetrySet pins this adapter's role allowlist
+// against the telemetry adapter's exported Role* constants: the role dimension
+// is a CLOSED family, and the two packages must agree on its members. A new
+// family value must be added in BOTH places (and in internal/app's roleFamily)
+// deliberately — never discovered from data.
+func TestRoleFamiliesAreTheClosedTelemetrySet(t *testing.T) {
+	want := []string{
+		telemetry.RoleMain,
+		telemetry.RoleSubagent,
+		telemetry.RoleMember,
+		telemetry.RoleParallel,
+		telemetry.RoleUserModel,
+		telemetry.RoleChild,
+	}
+	if len(roleFamilies) != len(want) {
+		t.Fatalf("roleFamilies has %d entries, want %d: %v vs %v", len(roleFamilies), len(want), roleFamilies, want)
+	}
+	for i, w := range want {
+		if roleFamilies[i] != w {
+			t.Errorf("roleFamilies[%d] = %q, want telemetry constant %q", i, roleFamilies[i], w)
+		}
+	}
+}
+
+// TestRoleFilterRejectsNonFamilyValues asserts the role filter accepts ONLY
+// the closed family set — a session id, def name, or free-text value is
+// rejected on both role-filtered tools, so the surface never legitimises an
+// unbounded role vocabulary.
+func TestRoleFilterRejectsNonFamilyValues(t *testing.T) {
+	d := fullDeps()
+	sess := dialTestServer(t, d)
+
+	for _, bad := range []string{"sess-7f3a1b9c", "task:code-reviewer", "member:alice", "Main", "ALL"} {
+		q := callTool(t, sess, "query_metric", QueryMetricInput{MetricName: "tool_duration_seconds", Role: bad})
+		if !q.IsError {
+			t.Errorf("query_metric accepted non-family role %q; the closed set must be enforced", bad)
+		}
+		l := callTool(t, sess, "list_slow_turns", ListSlowTurnsInput{Role: bad})
+		if !l.IsError {
+			t.Errorf("list_slow_turns accepted non-family role %q; the closed set must be enforced", bad)
+		}
+	}
+	// Every closed-family value IS accepted (no false rejection).
+	for _, good := range roleFamilies {
+		l := callTool(t, sess, "list_slow_turns", ListSlowTurnsInput{Role: good})
+		if l.IsError && strings.Contains(resultText(l), "unknown role") {
+			t.Errorf("list_slow_turns rejected closed-family role %q: %s", good, resultText(l))
+		}
 	}
 }

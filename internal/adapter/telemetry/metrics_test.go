@@ -409,7 +409,7 @@ func TestMetricsScrapeThroughPrometheusExporter(t *testing.T) {
 		"mecatl_events_total",
 		"mecatl_runs_total",
 		"mecatl_tool_calls_total",
-		"mecatl_tokens",
+		"mecatl_tokens_total",
 		"mecatl_permission_asks_total",
 		"mecatl_active_runs",
 		"mecatl_cache_hit_ratio",

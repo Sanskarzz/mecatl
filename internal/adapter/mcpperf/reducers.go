@@ -279,39 +279,53 @@ type QuantileBound struct {
 	UpperBound float64 `json:"upper_bound"`
 }
 
-// histogramQuantiles reads a prometheus histogram MetricFamily's FIRST histogram
-// metric and returns the total observation count plus, for each requested
-// quantile, the upper bound of the bucket the quantile rank falls in. It handles
-// both classic explicit-bucket histograms (the dto.Bucket list, cumulative) and
-// native exponential histograms (Schema + PositiveSpan/PositiveDelta, as emitted
-// by the OTel prometheus exporter for the latency instruments).
+// histogramQuantiles reads a prometheus histogram MetricFamily and returns the
+// total observation count plus, for each requested quantile, the upper bound of
+// the bucket the quantile rank falls in. It AGGREGATES ACROSS ALL label series
+// of the family by default (summing counts and merging the bucket ladders) —
+// with the role-split series issue #47 introduced, reading only metrics[0]
+// would silently report a single role's distribution. A non-empty role filters
+// to the series whose "role" label equals it (the bounded family values). It
+// handles both classic explicit-bucket histograms (the dto.Bucket list,
+// cumulative) and native exponential histograms (Schema +
+// PositiveSpan/PositiveDelta, as emitted by the OTel prometheus exporter for
+// the latency instruments).
 //
 // Returns count 0 and nil bounds for a nil family, a non-histogram family, or a
-// histogram with no observations — the caller turns that into a "no data yet"
-// tool result rather than an error.
-func histogramQuantiles(mf *dto.MetricFamily, quantiles ...float64) (count uint64, bounds []QuantileBound) {
+// (filtered) family with no observations — the caller turns that into a "no
+// data yet" tool result rather than an error.
+func histogramQuantiles(mf *dto.MetricFamily, role string, quantiles ...float64) (count uint64, bounds []QuantileBound) {
 	if mf == nil || mf.GetType() != dto.MetricType_HISTOGRAM {
 		return 0, nil
 	}
-	metrics := mf.GetMetric()
-	if len(metrics) == 0 {
-		return 0, nil
+	var ladders [][]ladderPoint
+	for _, m := range mf.GetMetric() {
+		if role != "" && metricRole(m) != role {
+			continue
+		}
+		h := m.GetHistogram()
+		if h == nil {
+			continue
+		}
+		c := h.GetSampleCount()
+		if c == 0 {
+			continue
+		}
+		count += c
+		// Build a cumulative (upperBound, cumulativeCount) ladder from whichever
+		// representation the series uses.
+		ladder := classicLadder(h)
+		if len(ladder) == 0 {
+			ladder = nativeLadder(h)
+		}
+		if len(ladder) > 0 {
+			ladders = append(ladders, ladder)
+		}
 	}
-	h := metrics[0].GetHistogram()
-	if h == nil {
-		return 0, nil
-	}
-	count = h.GetSampleCount()
 	if count == 0 {
 		return 0, nil
 	}
-
-	// Build a cumulative (upperBound, cumulativeCount) ladder from whichever
-	// representation the histogram uses.
-	ladder := classicLadder(h)
-	if len(ladder) == 0 {
-		ladder = nativeLadder(h)
-	}
+	ladder := mergeLadders(ladders)
 	if len(ladder) == 0 {
 		return count, nil
 	}
@@ -324,6 +338,93 @@ func histogramQuantiles(mf *dto.MetricFamily, quantiles ...float64) (count uint6
 		})
 	}
 	return count, bounds
+}
+
+// roleLabelName is the prometheus label the telemetry adapter's role attribute
+// renders as. Its values are the bounded role family ("main", "subagent", …).
+const roleLabelName = "role"
+
+// metricRole returns the value of a series' "role" label, or "" when absent.
+func metricRole(m *dto.Metric) string {
+	if m == nil {
+		return ""
+	}
+	for _, lp := range m.GetLabel() {
+		if lp.GetName() == roleLabelName {
+			return lp.GetValue()
+		}
+	}
+	return ""
+}
+
+// seriesRoles returns the distinct, sorted "role" label values present across a
+// family's series, for discovery and the per-role summary breakdown. Series
+// with no role label are skipped, and so is any value OUTSIDE the closed
+// roleFamilies set: the telemetry plane only ever emits the closed family
+// vocabulary, so a rogue value can only come from a foreign series on the
+// shared registry — admitting it would make the by_role row count unbounded
+// (the exact cardinality leak the closed set exists to prevent).
+func seriesRoles(mf *dto.MetricFamily) []string {
+	if mf == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, m := range mf.GetMetric() {
+		r := metricRole(m)
+		if r == "" || !isRoleFamily(r) {
+			continue
+		}
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// mergeLadders merges multiple per-series cumulative ladders into ONE cumulative
+// ladder over the union of their bucket bounds: each ladder is de-cumulated into
+// per-bucket counts, the (upper, count) pairs are pooled and sorted by upper
+// bound, equal bounds are coalesced, and a running sum rebuilds the cumulative
+// form. For classic histograms (identical bucket bounds across series) this is
+// exact; for native exponential series with differing schemas it remains
+// upper-bound honest — every observation is attributed to a bound at or above
+// its own bucket's bound, which is the same representative-bucket-bound
+// semantics QuantileBound already promises.
+func mergeLadders(ladders [][]ladderPoint) []ladderPoint {
+	switch len(ladders) {
+	case 0:
+		return nil
+	case 1:
+		return ladders[0]
+	}
+	type bucket struct {
+		upper float64
+		count uint64
+	}
+	var buckets []bucket
+	for _, l := range ladders {
+		var prev uint64
+		for _, p := range l {
+			buckets = append(buckets, bucket{upper: p.upper, count: p.cum - prev})
+			prev = p.cum
+		}
+	}
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i].upper < buckets[j].upper })
+	out := make([]ladderPoint, 0, len(buckets))
+	var cum uint64
+	for _, b := range buckets {
+		cum += b.count
+		if n := len(out); n > 0 && out[n-1].upper == b.upper {
+			out[n-1].cum = cum
+			continue
+		}
+		out = append(out, ladderPoint{upper: b.upper, cum: cum})
+	}
+	return out
 }
 
 // ladderPoint is one (upperBound, cumulativeCount) step of a cumulative

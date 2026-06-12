@@ -383,6 +383,19 @@ type Config struct {
 	Sink             port.EventSink
 	ToolCallRecorder port.ToolCallRecorder
 
+	// MetricsRoleScoper, when non-nil, supplies the role-scoped telemetry pair a
+	// CHILD engine's Deps.Sink/Deps.ToolCallRecorder are wired to (issue #47). The
+	// caller (cmd/mecated, the embedded TUI server) builds the closure over the
+	// telemetry adapter's Metrics.WithRole — keeping internal/app free of the
+	// telemetry import — and the child deps builders invoke it with the BOUNDED
+	// family value from roleFamily (never the raw engine role), so every child
+	// series carries a closed-set role label and no def/member name or session id
+	// can leak into metric cardinality. Nil (the default, and the no-perf path)
+	// keeps children unmetered: Sink/ToolCallRecorder stay nil, byte-identical to
+	// the pre-feature child shape. The role-tagging is METRICS-ONLY — child
+	// Diagnostics and the conversation event stream are unchanged.
+	MetricsRoleScoper func(familyRole string) (port.EventSink, port.ToolCallRecorder)
+
 	// Diagnostics is the general-purpose operational logging seam, injected by the
 	// caller (mecated wires a slogdiag sink to stderr; the embedded TUI passes its
 	// own). It is the sink the build-once composition facts (token counter /
@@ -2372,7 +2385,7 @@ func buildUserModelReviewEngine(cfg Config, provider port.LLMProvider, store too
 			cat.MustRegister(t)
 		}
 	}
-	return newChildEngine(cfg.diag(), "usermodel-review", provider, cat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	return newChildEngine(cfg, "usermodel-review", provider, cat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
 // buildCommandRunner builds the local command runner the Bash tool executes
@@ -2452,6 +2465,48 @@ func bashDisabledReason(cfg Config) string {
 	}
 }
 
+// roleFamily maps an engine role (agent.Deps.Role — "", "task", "task:<def>",
+// "member:<name>", "parallel", "parallel-judge", …) onto the CLOSED, bounded
+// role-family label the telemetry plane is allowed to carry. This mapping is
+// THE critical cardinality point of the role dimension (issue #47): def names,
+// member names, model ids, and session ids must NEVER leak into the returned
+// value — every input collapses onto one of exactly six family strings, with
+// "child" as the fail-safe bucket for anything unrecognised. The judge is part
+// of the Parallel fan-out's cost story, so "parallel-judge" lands in the
+// parallel family, not the fallback. There is deliberately NO "fork" family:
+// no engine carries a fork Deps.Role (fork/fork-judge exist only as session-id
+// prefixes), and a family no series can ever carry would be a model trap in
+// the perf tools' role filters. The values mirror the telemetry adapter's
+// Role* constants (internal/app deliberately does not import the telemetry
+// adapter; the integration tests pin the two sets against drift).
+func roleFamily(role string) string {
+	switch {
+	case role == "":
+		return "main"
+	case role == "task" || strings.HasPrefix(role, "task:"):
+		return "subagent"
+	case strings.HasPrefix(role, "member:"):
+		return "member"
+	case role == "parallel" || role == "parallel-judge":
+		return "parallel"
+	case role == "usermodel-review":
+		return "usermodel"
+	default:
+		return "child"
+	}
+}
+
+// childTelemetryFor resolves the (Sink, ToolCallRecorder) pair for a child
+// engine: the role-scoped pair from cfg.MetricsRoleScoper keyed on the BOUNDED
+// roleFamily(role) when a scoper is wired, or (nil, nil) — the byte-identical
+// pre-feature unmetered child shape — when it is not.
+func childTelemetryFor(cfg Config, role string) (port.EventSink, port.ToolCallRecorder) {
+	if cfg.MetricsRoleScoper == nil {
+		return nil, nil
+	}
+	return cfg.MetricsRoleScoper(roleFamily(role))
+}
+
 // newChildEngine bakes in the shared shape every child/member engine assembles:
 // an allow-all (non-interactive) permission policy, an inert hook runner, and the
 // standard context-window / compaction-trigger settings. Call sites supply only
@@ -2459,16 +2514,16 @@ func bashDisabledReason(cfg Config) string {
 // the prompt config. It is the single source of truth for that boilerplate so the
 // five child-engine builders (Subagent explorer, Fork branch, Fork judge, per-def Subagent
 // engine, team member) cannot drift apart.
-func newChildEngine(diag port.Diagnostics, role string, provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config) *agent.Engine {
-	return newChildEngineWithHooks(diag, role, provider, cat, model, pc, hookexec.New(nil))
+func newChildEngine(cfg Config, role string, provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config) *agent.Engine {
+	return newChildEngineWithHooks(cfg, role, provider, cat, model, pc, hookexec.New(nil))
 }
 
 // newChildEngineWithHooks is newChildEngine with an explicit HookRunner, so a
 // per-def Subagent/member engine can scope its own lifecycle hooks (from a def's
 // `hooks:` map) instead of the inert default. A nil hooks runner falls back to an
 // inert one, preserving the no-hooks contract.
-func newChildEngineWithHooks(diag port.Diagnostics, role string, provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config, hooks port.HookRunner) *agent.Engine {
-	return agent.NewEngine(childEngineDeps(diag, role, provider, cat, model, pc, hooks))
+func newChildEngineWithHooks(cfg Config, role string, provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config, hooks port.HookRunner) *agent.Engine {
+	return agent.NewEngine(childEngineDeps(cfg, role, provider, cat, model, pc, hooks))
 }
 
 // childEngineDeps builds the agent.Deps for the DEFAULT-provider child shape
@@ -2477,13 +2532,16 @@ func newChildEngineWithHooks(diag port.Diagnostics, role string, provider port.L
 // newChildEngineForProvider: the engine's deps are private, so a test can only
 // assert this literal's fields (e.g. that Clock is wired — issue #53) against
 // the helper, never through the constructed *agent.Engine.
-func childEngineDeps(diag port.Diagnostics, role string, provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config, hooks port.HookRunner) agent.Deps {
+func childEngineDeps(cfg Config, role string, provider port.LLMProvider, cat *tool.Catalog, model string, pc prompt.Config, hooks port.HookRunner) agent.Deps {
 	if hooks == nil {
 		hooks = hookexec.New(nil)
 	}
-	if diag == nil {
-		diag = port.NopDiagnostics{}
-	}
+	// Role-scoped telemetry (issue #47): when the composition wires a
+	// MetricsRoleScoper, this child's metrics flow into the shared instruments
+	// under the BOUNDED roleFamily(role) label; with no scoper both stay nil
+	// (the byte-identical unmetered child shape). Same posture as
+	// childEngineDepsForProvider — the two child deps builders must not drift.
+	sink, recorder := childTelemetryFor(cfg, role)
 	return agent.Deps{
 		LLM:     provider,
 		Catalog: cat,
@@ -2496,12 +2554,14 @@ func childEngineDeps(diag port.Diagnostics, role string, provider port.LLMProvid
 		// Diagnostics is LIVE for child engines (correlated by session + the agent
 		// role below) so interleaved child diagnostics are readable on the operator
 		// channel — this is DISTINCT from Sink/ToolCallRecorder (telemetry/audit),
-		// which stay OFF for children (never set here). The role tags every line the
-		// child emits with "agent"=<role>.
-		Diagnostics: diag,
-		Role:        role,
+		// which are role-scoped via the scoper above (or OFF without one). The role
+		// tags every line the child emits with "agent"=<role>.
+		Diagnostics:      cfg.diag(),
+		Role:             role,
+		Sink:             sink,
+		ToolCallRecorder: recorder,
 		// Clock: the production wall clock (issue #53) — children time their tool
-		// calls/turns too even though their Sink/ToolCallRecorder stay nil.
+		// calls/turns regardless of whether the role-scoped telemetry pair is wired.
 		Clock:               wallclock.Clock{},
 		ContextWindowTokens: defaultContextWindowTokens,
 		CompactionRatio:     defaultCompactionRatio,
@@ -2530,8 +2590,8 @@ func newChildEngineForProvider(cfg Config, role string, provider port.LLMProvide
 // to provider+model, re-deriving the provider-closing fields via
 // engineDepsForProvider then OVERRIDING the non-provider fields back to the child's
 // shape. It is split out from newChildEngineForProvider so a test can assert the
-// child Deps directly (Sink/ToolCallRecorder nil, Compactor/TokenCounter keyed on the CHILD's
-// model) — the engine's deps are otherwise private.
+// child Deps directly (Sink/ToolCallRecorder role-scoped-or-nil, Compactor/TokenCounter
+// keyed on the CHILD's model) — the engine's deps are otherwise private.
 func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvider, model string, contextWindow int, cat *tool.Catalog, pc prompt.Config, hooks port.HookRunner) agent.Deps {
 	if hooks == nil {
 		hooks = hookexec.New(nil)
@@ -2557,23 +2617,24 @@ func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvid
 	// user "/cmd" text). engineDepsForProvider built one from cfg; clear it so the
 	// child's non-provider shape is unchanged from the pre-feature constructor.
 	deps.CommandExpander = nil
-	// Telemetry stays OFF for child engines: engineDepsForProvider set Sink/ToolCallRecorder
-	// from cfg, but the OLD child constructor (newChildEngineWithHooks) left BOTH nil,
-	// so a sub-agent's turns/tool-calls were invisible to the operator-facing
-	// TTFT/turn-duration histograms. Restoring nil keeps byte-identity with the
-	// pre-feature child shape — without it every def-pinned / team-member / Half-B
-	// session child would double-count against the shared Sink. Distinct sub-agent
-	// telemetry tagging is a SEPARATE decision; nil is the conservative choice here.
-	deps.Sink = nil
-	deps.ToolCallRecorder = nil
-	// Telemetry (Sink) and the per-tool audit seam (ToolCallRecorder) stay OFF for
-	// child engines (set nil just above) — a sub-agent's turns/tool-calls must not
-	// double through the operator's metrics/audit. Diagnostics is DIFFERENT: it is
-	// intentionally LIVE for children, bound to cfg.diag() and tagged with the
-	// child's agent role (Deps.Role), so interleaved child diagnostics (compaction
-	// degradation, policy denies) are readable and correlated on the operator
-	// channel. This is the one operator-facing seam children speak on; Sink and
-	// ToolCallRecorder remain silent.
+	// Child telemetry is ROLE-SCOPED, never the main pair (issue #47).
+	// engineDepsForProvider set Sink/ToolCallRecorder from cfg (the main engine's
+	// role="main" pair); reusing those for a child would double-count a
+	// sub-agent's turns/tool-calls against the operator-facing main series — the
+	// reason the old child constructor forced both nil. With a MetricsRoleScoper
+	// wired, the child instead gets its OWN pair tagged with the BOUNDED
+	// roleFamily(role) label ("subagent"/"member"/"parallel"/…), so child activity
+	// lands on role-distinct series of the SAME instruments: visible on the perf
+	// plane, never folded into role="main". The mapping is the cardinality
+	// guarantee — the raw role (which can embed a def name or model id) never
+	// reaches a label. Without a scoper (no-perf composition) both stay nil,
+	// byte-identical to the pre-feature child shape. Diagnostics is a SEPARATE
+	// seam: it is intentionally LIVE for children, bound to cfg.diag() and tagged
+	// with the child's agent role (Deps.Role), so interleaved child diagnostics
+	// (compaction degradation, policy denies) stay readable and correlated on the
+	// operator channel. The conversation event stream (Run.Events()) is untouched
+	// either way — this is metrics/audit only.
+	deps.Sink, deps.ToolCallRecorder = childTelemetryFor(cfg, role)
 	deps.Diagnostics = cfg.diag()
 	deps.Role = role
 	// A child engine never surfaces a further-nested subagent ask (subagents cannot
@@ -2734,7 +2795,7 @@ func parallelChildDeps(cfg Config, provReg *providerRegistry, provider port.LLMP
 // branches are the bulk-token workers the cheap child default exists for. Pinned
 // by TestParallelJudgeStaysOnParentModel; documented in MULTI-PROVIDER.md.
 func buildParallelJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
-	return newChildEngine(cfg.diag(), "parallel-judge", provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	return newChildEngine(cfg, "parallel-judge", provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
 // buildSubagentTool constructs the Subagent tool tool over a default child Engine

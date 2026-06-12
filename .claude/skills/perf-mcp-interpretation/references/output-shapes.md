@@ -47,8 +47,9 @@ One entry per curated metric. `kind` ∈ `"histogram" | "scalar" | "absent"`.
     "name": "ttft_seconds",
     "description": "Time to first content token per turn (histogram, seconds).",
     "kind": "histogram",
-    "count": 0,
-    "quantiles": [ { "quantile": 0.99, "upper_bound": 0.0 } ]  // upper_bound = bucket ceiling, seconds
+    "count": 0,                                                 // aggregated across ALL role series
+    "quantiles": [ { "quantile": 0.99, "upper_bound": 0.0 } ],  // upper_bound = bucket ceiling, seconds
+    "by_role": [ { "role": "main", "count": 0 } ]               // bounded per-role breakdown (histograms + tool_calls_total/tokens)
   },
   {
     "name": "active_runs",
@@ -58,6 +59,11 @@ One entry per curated metric. `kind` ∈ `"histogram" | "scalar" | "absent"`.
   }
 ]
 ```
+`role` values form a CLOSED family: `main | subagent | member | parallel | fork
+| usermodel | child` — `main` is the operator-facing engine; the rest are
+delegation children (Subagent, team member, Parallel branch, fork, user-model
+reviewer, unrecognised fallback). Never a session id or agent-def name.
+`by_role` rows carry `count` for histograms and `value` for counters.
 
 ### `perf://pprof/{profile}`  ({profile} ∈ heap|goroutine|allocs|mutex|block)
 ```jsonc
@@ -71,9 +77,14 @@ included (redaction).
 
 ## Tools
 
-### `query_metric{metric_name?, quantile?}`
+### `query_metric{metric_name?, quantile?, role?}`
 - No `metric_name` → `{ "available_metrics": ["..."] }` (discovery).
-- With a name → `{ "metric": MetricSummaryEntry }` (same shape as above).
+- With a name → `{ "metric": MetricSummaryEntry }` (same shape as above),
+  aggregated across all role series by default; histograms and
+  `tool_calls_total`/`tokens` also carry the `by_role` breakdown.
+- With `role` (one of `main|subagent|member|parallel|usermodel|child`) →
+  that role family's share only (no `by_role`). Unknown roles → `isError`
+  naming the valid set.
 - Unknown name or no-observations → `isError` result with a recovery message.
 
 Curated metric short names (pass to `metric_name`):
@@ -107,7 +118,7 @@ user-audience `resource_link` to the loopback raw-pprof endpoint (human download
 ```
 From the live `allocs` profile (falls back to `heap`). Bytes, ranked by flat desc.
 
-### `list_slow_turns{threshold_ms?, limit?, cursor?}` — cheap, paginated
+### `list_slow_turns{threshold_ms?, limit?, cursor?, role?}` — cheap, paginated
 ```jsonc
 {
   "turns": [
@@ -116,16 +127,18 @@ From the live `allocs` profile (falls back to `heap`). Bytes, ranked by flat des
       "duration_ms": 0,
       "ttft_ms": 0,
       "inter_token_max_ms": 0,
-      "ended_at": "2026-06-03T00:00:00Z"
+      "ended_at": "2026-06-03T00:00:00Z",
+      "role": "main"    // bounded engine role family (main|subagent|member|parallel|usermodel|child)
     }
   ],
   "nextCursor": "",     // opaque; pass back as `cursor` for the next page
   "totalCount": 0
 }
 ```
-Newest first. **No** prompt text, tool args, or session IDs ever. `limit` 1-20
-(default 10). Returns `isError` "per-turn history is not enabled" if the slow-turn
-ring is not wired.
+Newest first. **No** prompt text, tool args, or session IDs ever — `role` is a
+closed enum, not an identifier. `role` filters to one family (unknown roles →
+`isError` naming the valid set). `limit` 1-20 (default 10). Returns `isError`
+"per-turn history is not enabled" if the slow-turn ring is not wired.
 
 ### `capture_flight_recorder{}` — needs `--flight-recorder`
 ```jsonc

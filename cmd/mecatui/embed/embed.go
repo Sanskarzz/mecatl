@@ -340,18 +340,11 @@ func setupPerf(ctx context.Context, perf PerfConfig, cfg *app.Config) (perfState
 	}
 	tracing := telemetry.NewTracing(otel.GetTracerProvider())
 
-	// Slow-turn ring buffer: only when the perf MCP server is mounted. It observes
-	// EvTurnEnd as one more EventSink fanned out alongside metrics/tracing, storing
-	// scalars only (redaction by shape) and spawning no goroutine — so it stays
-	// goleak-clean. list_slow_turns then sees the embedded engine's real turns.
-	var slowTurns *telemetry.SlowTurnBuffer
-	sinks := []port.EventSink{metrics, tracing}
-	if perf.MCP {
-		slowTurns = telemetry.NewSlowTurnBuffer(telemetry.DefaultSlowTurnCapacity, time.Now)
-		sinks = append(sinks, slowTurns)
-	}
-	cfg.Sink = telemetry.NewSink(sinks...)
-	cfg.ToolCallRecorder = metrics
+	// Domain sinks: the role-scoped main pair, the optional slow-turn ring, and
+	// the child role scoper (issue #47) — wired by the shared helper below. With
+	// perf disabled, setupPerf returns before this point and cfg.Sink /
+	// cfg.MetricsRoleScoper stay nil (children unmetered, the no-perf path).
+	slowTurns := wirePerfSinks(cfg, metrics, tracing, perf.MCP)
 
 	// FlightRecorder: arm the bounded execution-trace ring buffer via the
 	// process-singleton accessor (only one may be active process-wide). We may
@@ -448,6 +441,42 @@ func setupPerf(ctx context.Context, perf PerfConfig, cfg *app.Config) (perfState
 	return ps, nil
 }
 
+// wirePerfSinks wires the domain-metrics observability onto cfg (issue #47):
+//
+//   - the MAIN engine's Sink/ToolCallRecorder become the role="main" scoped view
+//     over the shared instruments (every series carries the role label uniformly),
+//     fanned out with tracing and — when the perf MCP server is mounted — the
+//     slow-turn ring buffer (main turns recorded with role="main");
+//   - cfg.MetricsRoleScoper hands each CHILD engine a role-scoped (EventSink,
+//     ToolCallRecorder) pair keyed on the BOUNDED family label internal/app's
+//     roleFamily already resolved; the child sink also fans into the SAME
+//     slow-turn ring so child turns carry their role in list_slow_turns.
+//
+// It returns the slow-turn buffer (nil when the perf MCP server is off) for the
+// mcpperf Deps wiring.
+func wirePerfSinks(cfg *app.Config, metrics *telemetry.Metrics, tracing port.EventSink, mountMCP bool) *telemetry.SlowTurnBuffer {
+	mainScoped := metrics.WithRole(telemetry.RoleMain)
+	var slowTurns *telemetry.SlowTurnBuffer
+	sinks := []port.EventSink{mainScoped, tracing}
+	if mountMCP {
+		// The ring stores scalars only (redaction by shape) and spawns no
+		// goroutine — goleak-clean. Built only when the MCP server will read it.
+		slowTurns = telemetry.NewSlowTurnBuffer(telemetry.DefaultSlowTurnCapacity, time.Now)
+		sinks = append(sinks, slowTurns.WithRole(telemetry.RoleMain))
+	}
+	cfg.Sink = telemetry.NewSink(sinks...)
+	cfg.ToolCallRecorder = mainScoped
+	cfg.MetricsRoleScoper = func(familyRole string) (port.EventSink, port.ToolCallRecorder) {
+		scoped := metrics.WithRole(familyRole)
+		childSinks := []port.EventSink{scoped}
+		if slowTurns != nil {
+			childSinks = append(childSinks, slowTurns.WithRole(familyRole))
+		}
+		return telemetry.NewSink(childSinks...), scoped
+	}
+	return slowTurns
+}
+
 // isLoopbackHostPort reports whether a "host:port" listen address binds the
 // loopback interface (127.0.0.0/8, ::1, or "localhost"). It is the fail-closed
 // gate for mounting the UNAUTHENTICATED perf MCP server (decision 6 / CWE-306). A
@@ -492,6 +521,7 @@ func (s slowTurnBridge) Recent(thresholdMs int64) []mcpperf.SlowTurn {
 			TTFTMs:          t.TTFTMs,
 			InterTokenMaxMs: t.InterTokenMaxMs,
 			EndedAt:         t.EndedAt,
+			Role:            t.Role,
 		}
 	}
 	return out

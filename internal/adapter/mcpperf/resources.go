@@ -60,7 +60,7 @@ func registerResources(srv *mcpsdk.Server, d Deps) {
 	srv.AddResource(&mcpsdk.Resource{
 		URI:         uriMetricsSummary,
 		Name:        "metrics-summary",
-		Description: "Curated latency-histogram summary: per instrument the observation count and p50/p90/p99 bucket UPPER BOUNDS (seconds). Reduced from the gathered metric families — never the raw /metrics exposition.",
+		Description: "Curated latency-histogram summary: per instrument the observation count and p50/p90/p99 bucket UPPER BOUNDS (seconds), plus a bounded per-role breakdown (main|subagent|member|parallel|usermodel|child) for the histograms and the tool-call/token counters. Reduced from the gathered metric families — never the raw /metrics exposition.",
 		MIMEType:    mimeJSON,
 	}, resourceJSON(func(context.Context) (any, error) {
 		return metricsSummary(d)

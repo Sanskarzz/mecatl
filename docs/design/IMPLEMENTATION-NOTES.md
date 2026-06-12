@@ -1348,6 +1348,34 @@ delegates for the default provider+model, so a per-session engine bound to a non
 re-derives EVERY provider-closing field rather than shallow-cloning + swapping only `LLM` (which
 would compact/count through the wrong model — cross-provider contamination).
 
+**Role-tagged child metrics (issue #47, `Config.MetricsRoleScoper` + `roleFamily`).** Child
+engines used to force `Deps.Sink`/`Deps.ToolCallRecorder` nil (the double-count guard); they are
+now ROLE-SCOPED instead. `Config.MetricsRoleScoper func(familyRole string) (port.EventSink,
+port.ToolCallRecorder)` is the composition seam (keeps `internal/app` free of the telemetry
+import): the cmd layer builds it over `telemetry.Metrics.WithRole` (a dual-interface
+`RoleMetrics` view appending a bounded `role` attribute to every Add/Record on the SHARED
+instruments) plus a `SlowTurnBuffer.WithRole` fan-out, so child turns also land in
+`list_slow_turns` carrying their role. BOTH child deps builders (`childEngineDeps` and
+`childEngineDepsForProvider`, via `childTelemetryFor`) consult it; nil scoper ⇒ nil/nil, the
+byte-identical unmetered pre-feature shape (the embedded TUI without `--perf`). The CARDINALITY
+point is `roleFamily(role)` — a CLOSED mapping (`""`→main, `task`/`task:*`→subagent,
+`member:*`→member, `parallel`/`parallel-judge`→parallel (the judge is part of the Parallel
+fan-out's cost story), `usermodel-review`→usermodel, anything else→child). There is
+deliberately NO `fork` family: no engine carries a fork `Deps.Role` (`fork`/`fork-judge`
+exist only as session-id prefixes), and a family no series can ever carry would be an
+unmatchable model trap in the perf tools' role-filter enums. Def/member names, model ids,
+and session ids NEVER reach a label value. The main engine's pair is `metrics.WithRole(RoleMain)` (wired in cmd), so EVERY series
+carries the `role` label uniformly, including `active_runs` (per-role in-flight). The closed
+set is pinned in three places against drift: telemetry's `Role*` constants,
+`internal/app.roleFamily` (mutation-verified cardinality-guard test), and mcpperf's
+`roleFamilies` filter allowlist. mcpperf companion fix: `histogramQuantiles` now AGGREGATES
+across all label series (sum counts, merge ladders — it read `metrics[0]` only, which would
+have silently reported one role) with an optional role filter; `query_metric`/`list_slow_turns`
+gain `role`, the metrics summary gains a bounded `by_role` breakdown for the histograms +
+`tool_calls_total`/`tokens`, and the curated `tokens` family name was corrected to
+`mecatl_tokens_total` (the exporter's gathered counter name — a latent mismatch that made
+`query_metric{tokens}` report absent).
+
 **Per-session provider/model routing (S3, `sessionEngineFactory` + `modelsnapshot.go`):**
 `buildProvider` returns the registry ALONGSIDE the default provider so composition threads it
 into the factory + `modelSnapshot`. The widened `server.SessionEngineFactory func(ctx, sel

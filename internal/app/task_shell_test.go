@@ -15,7 +15,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/governance"
-	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
@@ -207,7 +206,7 @@ func TestSubagentRunsGitInWorktreeEndToEnd(t *testing.T) {
 	)
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
-	parentEng := newChildEngine(port.NopDiagnostics{}, "", parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	parentEng := newChildEngine(cfg, "", parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 
 	sess := session.New("parent", session.ModeDefault, repo, session.Limits{MaxTurns: 5}, time.Now())
 	run := parentEng.Run(context.Background(), sess, parentWS, "go")
@@ -312,7 +311,7 @@ func TestBuildSubagentToolRealWiringForksChildShellWhenShell(t *testing.T) {
 	parentWS := osfsWSForTest(t, repo)
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
-	parentEng := newChildEngine(port.NopDiagnostics{}, "", parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	parentEng := newChildEngine(cfg, "", parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 
 	sess := session.New("parent", session.ModeDefault, repo, session.Limits{MaxTurns: 5}, time.Now())
 	run := parentEng.Run(context.Background(), sess, parentWS, "go")
@@ -384,7 +383,7 @@ func TestBuildSubagentToolRealWiringNoShellNoForker(t *testing.T) {
 	parentWS := osfsWSForTest(t, repo)
 	parentCat := tool.NewCatalog()
 	parentCat.MustRegister(task)
-	parentEng := newChildEngine(port.NopDiagnostics{}, "", parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+	parentEng := newChildEngine(cfg, "", parentProvider, parentCat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 
 	sess := session.New("parent", session.ModeDefault, repo, session.Limits{MaxTurns: 5}, time.Now())
 	run := parentEng.Run(context.Background(), sess, parentWS, "go")

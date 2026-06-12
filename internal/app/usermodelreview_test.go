@@ -76,7 +76,7 @@ func (s *signalStore) didNotFire(t *testing.T) bool {
 // throwaway child engine (never actually run, because the transcript is empty).
 func minimalReviewer(t *testing.T, store port.SessionStore) *agent.UserModelReviewer {
 	t.Helper()
-	eng := newChildEngine(port.NopDiagnostics{}, "", mockllm.New(mockllm.TextTurn("x")), tool.NewCatalog(), "test-model", promptConfig(Config{}, ""))
+	eng := newChildEngine(Config{}, "", mockllm.New(mockllm.TextTurn("x")), tool.NewCatalog(), "test-model", promptConfig(Config{}, ""))
 	return agent.NewUserModelReviewer(store, eng)
 }
 
@@ -248,7 +248,7 @@ func reviewEngineToolNames(provider port.LLMProvider, store *memory.Store) []str
 	}
 	// Build the engine to ensure the construction path is exercised (it is otherwise
 	// unused, but constructing it proves the catalog is engine-compatible).
-	_ = newChildEngine(port.NopDiagnostics{}, "", provider, cat, "test-model", promptConfig(Config{}, ""))
+	_ = newChildEngine(Config{}, "", provider, cat, "test-model", promptConfig(Config{}, ""))
 	var names []string
 	for _, tl := range cat.Tools() {
 		names = append(names, tl.Spec().Name)

@@ -58,6 +58,13 @@ What mecatl **already has** (verified against `internal/adapter/telemetry/` and
   `mecatl_runs_total`, `mecatl_tool_calls_total`, `mecatl_tool_duration_seconds`
   (histogram), `mecatl_tokens_total`, `mecatl_cache_hit_ratio`,
   `mecatl_active_runs`, `mecatl_permission_asks_total` (`telemetry/metrics.go`).
+  Attribute set (all bounded — never a session id, def name, or free text):
+  `type` (event type), `stop` (stop reason), `tool` (tool name), `error`
+  ("true"/"false"), `kind` (token kind), and — since issue #47 — `role`, the
+  CLOSED engine role family `main|subagent|member|parallel|usermodel|child`
+  carried by EVERY series (main engine = `role="main"`; child engines are tagged
+  via `telemetry.Metrics.WithRole` behind `app.Config.MetricsRoleScoper`, with
+  internal/app's `roleFamily` as the cardinality choke point).
 - **OTel traces** — run/turn/tool spans over OTLP (`telemetry/tracing.go`,
   `telemetry.Setup`), with the documented single-root-per-sink limitation
   (no per-concurrent-run correlation because `EventSink.Emit` has no `ctx`).

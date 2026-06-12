@@ -608,20 +608,40 @@ func run() error {
 
 	tracing := telemetry.NewTracing(otel.GetTracerProvider())
 
+	// Role-scoped main pair (issue #47): the MAIN engine records through the
+	// role="main" view so EVERY series carries the role label uniformly —
+	// children get their own bounded-family views via the scoper below.
+	mainScoped := metrics.WithRole(telemetry.RoleMain)
+
 	// Slow-turn ring buffer: when the perf MCP server is mounted it observes
 	// EvTurnEnd as one more EventSink fanned out alongside metrics/tracing, so its
 	// list_slow_turns tool sees the SAME TurnEndPayload the latency histograms do.
 	// It stores scalars only (redaction by shape) and spawns no goroutine. Built
-	// only when --perf-mcp is set so a bare daemon carries no extra sink.
+	// only when --perf-mcp is set so a bare daemon carries no extra sink. Main
+	// turns enter it with role="main"; child turns ride the scoper's fan-out.
 	var slowTurns *telemetry.SlowTurnBuffer
-	sinks := []port.EventSink{metrics, tracing}
+	sinks := []port.EventSink{mainScoped, tracing}
 	if cfg.perfMCP {
 		slowTurns = telemetry.NewSlowTurnBuffer(telemetry.DefaultSlowTurnCapacity, time.Now)
-		sinks = append(sinks, slowTurns)
+		sinks = append(sinks, slowTurns.WithRole(telemetry.RoleMain))
 	}
 	sink := telemetry.NewSink(sinks...)
 
-	built, err := app.Build(ctx, appConfig(cfg, sink, metrics, diag))
+	// Child role scoper (issue #47): the composition hands each CHILD engine a
+	// role-scoped (EventSink, ToolCallRecorder) pair keyed on the BOUNDED family
+	// label internal/app's roleFamily already resolved ("subagent"/"member"/…).
+	// The returned sink ALSO fans into the shared slow-turn ring buffer (when
+	// mounted) so child turns appear in list_slow_turns carrying their role.
+	roleScoper := func(familyRole string) (port.EventSink, port.ToolCallRecorder) {
+		scoped := metrics.WithRole(familyRole)
+		childSinks := []port.EventSink{scoped}
+		if slowTurns != nil {
+			childSinks = append(childSinks, slowTurns.WithRole(familyRole))
+		}
+		return telemetry.NewSink(childSinks...), scoped
+	}
+
+	built, err := app.Build(ctx, appConfig(cfg, sink, mainScoped, roleScoper, diag))
 	if err != nil {
 		return err
 	}
@@ -644,9 +664,10 @@ func run() error {
 
 // appConfig maps the CLI/env config onto the shared app.Config build contract,
 // threading the telemetry sink (EventSink), the per-tool audit recorder
-// (ToolCallRecorder), and the general-purpose operational logging sink
-// (Diagnostics) into the engine/composition.
-func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, diag port.Diagnostics) app.Config {
+// (ToolCallRecorder), the child-engine role scoper (MetricsRoleScoper, issue
+// #47), and the general-purpose operational logging sink (Diagnostics) into the
+// engine/composition.
+func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, roleScoper func(string) (port.EventSink, port.ToolCallRecorder), diag port.Diagnostics) app.Config {
 	return app.Config{
 		Workspace:                    cfg.workspace,
 		Model:                        cfg.model,
@@ -722,10 +743,11 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		// a permission ask (ResumeApproval). So a subagent's unresolved Bash ask is
 		// SURFACED to the attached human rather than auto-denied. (A headless embedding —
 		// the offline demo — leaves app.Config.Interactive false and auto-denies.)
-		Interactive:      true,
-		Sink:             sink,
-		ToolCallRecorder: recorder,
-		Diagnostics:      diag,
+		Interactive:       true,
+		Sink:              sink,
+		ToolCallRecorder:  recorder,
+		MetricsRoleScoper: roleScoper,
+		Diagnostics:       diag,
 	}
 }
 
@@ -1136,6 +1158,7 @@ func (s slowTurnBridge) Recent(thresholdMs int64) []mcpperf.SlowTurn {
 			TTFTMs:          t.TTFTMs,
 			InterTokenMaxMs: t.InterTokenMaxMs,
 			EndedAt:         t.EndedAt,
+			Role:            t.Role,
 		}
 	}
 	return out

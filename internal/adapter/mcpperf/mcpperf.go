@@ -101,6 +101,10 @@ type SlowTurn struct {
 	InterTokenMaxMs int64 `json:"inter_token_max_ms"`
 	// EndedAt is the wall-clock time the turn ended, RFC3339.
 	EndedAt time.Time `json:"ended_at"`
+	// Role is the BOUNDED engine role family that produced the turn
+	// (main|subagent|member|parallel|usermodel|child). It is a closed enum
+	// label — never a def/member name or session id — so redaction by shape holds.
+	Role string `json:"role,omitempty"`
 }
 
 // SlowTurnSource is the read seam over the slow-turn ring buffer. It is nil-able:

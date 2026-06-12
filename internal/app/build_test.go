@@ -189,7 +189,7 @@ func TestEngineDepsCarryWallClock(t *testing.T) {
 	// the default Subagent explorer, Parallel branch/judge, usermodel-review
 	// children) builds its own Deps literal — assert its Clock too, or deleting
 	// the field there would pass the suite while silently zeroing child latency.
-	defChild := childEngineDeps(nil, "explorer", provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, ""), nil)
+	defChild := childEngineDeps(cfg, "explorer", provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, ""), nil)
 	if defChild.Clock == nil {
 		t.Fatal("childEngineDeps Deps.Clock is nil (default child engines must carry the wall clock)")
 	}

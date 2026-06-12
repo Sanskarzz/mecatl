@@ -115,16 +115,41 @@ func TestSlowTurnBufferThresholdFilter(t *testing.T) {
 }
 
 // TestSlowTurnHasNoTextFields is the redaction-by-shape guard: the stored struct
-// must carry NO string/text field, so the buffer physically cannot hold prompt
+// must carry NO free-text field, so the buffer physically cannot hold prompt
 // text, tool args, or session IDs. If a future change adds a string field, this
 // fails loudly — exactly the architect's deferred MEDIUM.
+//
+// CONSCIOUS AMENDMENT (issue #47): the ONE permitted string field is Role,
+// whose values are the closed, bounded role-family enum (the Role* constants —
+// composition maps every engine role through internal/app's roleFamily before
+// it can reach a record call). Any OTHER string field still fails here; Role's
+// value boundedness is pinned by TestSlowTurnBufferRoleOnlyFromRecordCalls
+// below and the cross-package closed-set guards in mcpperf/internal-app.
 func TestSlowTurnHasNoTextFields(t *testing.T) {
 	ty := reflect.TypeOf(SlowTurn{})
 	for i := 0; i < ty.NumField(); i++ {
 		f := ty.Field(i)
-		if f.Type.Kind() == reflect.String {
-			t.Fatalf("SlowTurn.%s is a string: the buffer must store SCALARS ONLY (redaction by shape) — no text fields permitted", f.Name)
+		if f.Type.Kind() == reflect.String && f.Name != "Role" {
+			t.Fatalf("SlowTurn.%s is a string: the buffer must store SCALARS ONLY (redaction by shape) — only the bounded Role enum is permitted", f.Name)
 		}
+	}
+}
+
+// TestSlowTurnBufferRoleOnlyFromRecordCalls proves the buffer derives the Role
+// value ONLY from the sink's own attribution (Emit→"main", WithRole→its role),
+// never from any event payload — an event cannot smuggle text into Role.
+func TestSlowTurnBufferRoleOnlyFromRecordCalls(t *testing.T) {
+	b := NewSlowTurnBuffer(4, func() time.Time { return time.Unix(1, 0) })
+	// An event with every text-bearing payload field a turn can carry.
+	ev := session.Event{
+		Type:    session.EvTurnEnd,
+		Turn:    3,
+		TurnEnd: &session.TurnEndPayload{DurationMs: 10},
+	}
+	b.Emit(context.Background(), ev)
+	got := b.Recent(0)
+	if len(got) != 1 || got[0].Role != RoleMain {
+		t.Fatalf("Role = %+v, want exactly the sink's own attribution %q", got, RoleMain)
 	}
 }
 

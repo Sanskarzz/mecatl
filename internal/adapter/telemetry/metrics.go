@@ -101,6 +101,31 @@ const (
 	attrTool  = "tool"  // tool name
 	attrError = "error" // tool error outcome ("true"/"false")
 	attrKind  = "kind"  // token kind (input/output/cache_read/cache_write)
+	attrRole  = "role"  // engine role family (the closed Role* set below)
+)
+
+// Role family values for the attrRole label. This is a CLOSED, bounded set —
+// the cardinality contract of the role dimension. The composition layer
+// (internal/app's roleFamily) maps every engine role onto exactly one of these
+// six values before it ever reaches a metric; def names, member names, model
+// ids, and session ids must NEVER appear as a role value. RoleChild is the
+// fail-safe bucket for any role the mapping does not recognise. Every member
+// must correspond to a role an engine actually carries — an unmatchable value
+// in the model-facing filter enums is a trap (the reason there is no "fork"
+// family: fork branches/judges have session-id prefixes, never a Deps.Role).
+const (
+	// RoleMain is the main (operator-facing) engine.
+	RoleMain = "main"
+	// RoleSubagent is the Subagent delegation family (explorer, per-def, model-override).
+	RoleSubagent = "subagent"
+	// RoleMember is the agent-team member/lead family.
+	RoleMember = "member"
+	// RoleParallel is the Parallel fan-out family (branches and the judge).
+	RoleParallel = "parallel"
+	// RoleUserModel is the user-model review child.
+	RoleUserModel = "usermodel"
+	// RoleChild is the safe fallback for an unrecognised child role.
+	RoleChild = "child"
 )
 
 // Metrics is an OpenTelemetry-backed telemetry adapter. It implements both
@@ -301,22 +326,33 @@ func RegisterProcessGauges(mp metric.MeterProvider, diag port.Diagnostics) error
 	return nil
 }
 
-// Emit records OTel metrics derived from a single domain Event. The ctx is the
-// run's context (threaded from port.EventSink.Emit) and is passed to every
-// instrument operation so the SDK can attach exemplars from an active span.
+// Emit records OTel metrics derived from a single domain Event, attributing
+// every series to the MAIN engine (role="main"). A child engine's events must
+// flow through WithRole instead, so each series carries the role label
+// uniformly. The ctx is the run's context (threaded from port.EventSink.Emit)
+// and is passed to every instrument operation so the SDK can attach exemplars
+// from an active span.
 func (m *Metrics) Emit(ctx context.Context, ev session.Event) {
-	m.events.Add(ctx, 1, metric.WithAttributes(attribute.String(attrType, string(ev.Type))))
+	m.emit(ctx, ev, roleAttr(RoleMain))
+}
+
+// emit is the role-prefixed record path behind both Emit (role="main") and the
+// WithRole wrapper. prefix is appended to every instrument operation's
+// attribute set; it must contain only bounded values (the role family).
+func (m *Metrics) emit(ctx context.Context, ev session.Event, prefix []attribute.KeyValue) {
+	m.events.Add(ctx, 1, withAttrs(prefix, attribute.String(attrType, string(ev.Type))))
 
 	switch ev.Type {
 	case session.EvSessionInit:
-		m.activeRuns.Add(ctx, 1)
+		// active_runs is role-tagged too: a bounded per-role in-flight gauge.
+		m.activeRuns.Add(ctx, 1, withAttrs(prefix))
 	case session.EvPermissionAsk:
-		m.permAsks.Add(ctx, 1)
+		m.permAsks.Add(ctx, 1, withAttrs(prefix))
 	case session.EvResult:
-		m.activeRuns.Add(ctx, -1)
-		m.recordResult(ctx, ev.Result)
+		m.activeRuns.Add(ctx, -1, withAttrs(prefix))
+		m.recordResult(ctx, ev.Result, prefix)
 	case session.EvTurnEnd:
-		m.recordTurnEnd(ctx, ev.TurnEnd)
+		m.recordTurnEnd(ctx, ev.TurnEnd, prefix)
 	case session.EvTurnStart,
 		session.EvMessageDelta,
 		session.EvToolCall,
@@ -331,18 +367,18 @@ func (m *Metrics) Emit(ctx context.Context, ev session.Event) {
 
 // recordResult records run-terminal metrics: the stop reason, token totals, and
 // the cache hit ratio.
-func (m *Metrics) recordResult(ctx context.Context, r *session.ResultPayload) {
+func (m *Metrics) recordResult(ctx context.Context, r *session.ResultPayload, prefix []attribute.KeyValue) {
 	if r == nil {
-		m.runs.Add(ctx, 1, metric.WithAttributes(attribute.String(attrStop, string(session.StopNone))))
+		m.runs.Add(ctx, 1, withAttrs(prefix, attribute.String(attrStop, string(session.StopNone))))
 		return
 	}
-	m.runs.Add(ctx, 1, metric.WithAttributes(attribute.String(attrStop, string(r.Stop))))
+	m.runs.Add(ctx, 1, withAttrs(prefix, attribute.String(attrStop, string(r.Stop))))
 	u := r.Usage
-	m.tokens.Add(ctx, int64(u.InputTokens), metric.WithAttributes(attribute.String(attrKind, "input")))
-	m.tokens.Add(ctx, int64(u.OutputTokens), metric.WithAttributes(attribute.String(attrKind, "output")))
-	m.tokens.Add(ctx, int64(u.CacheReadTokens), metric.WithAttributes(attribute.String(attrKind, "cache_read")))
-	m.tokens.Add(ctx, int64(u.CacheWriteTokens), metric.WithAttributes(attribute.String(attrKind, "cache_write")))
-	m.cacheHit.Record(ctx, u.CacheHitRate())
+	m.tokens.Add(ctx, int64(u.InputTokens), withAttrs(prefix, attribute.String(attrKind, "input")))
+	m.tokens.Add(ctx, int64(u.OutputTokens), withAttrs(prefix, attribute.String(attrKind, "output")))
+	m.tokens.Add(ctx, int64(u.CacheReadTokens), withAttrs(prefix, attribute.String(attrKind, "cache_read")))
+	m.tokens.Add(ctx, int64(u.CacheWriteTokens), withAttrs(prefix, attribute.String(attrKind, "cache_write")))
+	m.cacheHit.Record(ctx, u.CacheHitRate(), withAttrs(prefix))
 }
 
 // recordTurnEnd records the per-turn latency histograms from a TurnEndPayload:
@@ -355,19 +391,19 @@ func (m *Metrics) recordResult(ctx context.Context, r *session.ResultPayload) {
 // never a real observation — so each is skipped under its OWN independent >0
 // guard to avoid recording bogus zeros. All instruments are unit "s", so ms is
 // converted to seconds.
-func (m *Metrics) recordTurnEnd(ctx context.Context, p *session.TurnEndPayload) {
+func (m *Metrics) recordTurnEnd(ctx context.Context, p *session.TurnEndPayload, prefix []attribute.KeyValue) {
 	if p == nil {
 		return
 	}
-	m.turnDuration.Record(ctx, msToSeconds(p.DurationMs))
+	m.turnDuration.Record(ctx, msToSeconds(p.DurationMs), withAttrs(prefix))
 	if p.TTFTMs > 0 {
-		m.ttft.Record(ctx, msToSeconds(p.TTFTMs))
+		m.ttft.Record(ctx, msToSeconds(p.TTFTMs), withAttrs(prefix))
 	}
 	if p.InterTokenMeanMs > 0 {
-		m.interToken.Record(ctx, msToSeconds(p.InterTokenMeanMs))
+		m.interToken.Record(ctx, msToSeconds(p.InterTokenMeanMs), withAttrs(prefix))
 	}
 	if p.InterTokenMaxMs > 0 {
-		m.interTokenMax.Record(ctx, msToSeconds(p.InterTokenMaxMs))
+		m.interTokenMax.Record(ctx, msToSeconds(p.InterTokenMaxMs), withAttrs(prefix))
 	}
 }
 
@@ -376,21 +412,82 @@ func (m *Metrics) recordTurnEnd(ctx context.Context, p *session.TurnEndPayload) 
 func msToSeconds(ms int64) float64 { return float64(ms) / 1000.0 }
 
 // ToolCall records the per-tool call counter and the duration/queue-time latency
-// histograms. It satisfies port.ToolCallRecorder. ToolCallRecorder carries no ctx, so the
-// recordings use a background context — exemplar correlation is best-effort here.
-// queued is the dispatch wait (enqueue→execution start); took is the execution
-// wall time. Both are recorded with the same tool attribute.
-func (m *Metrics) ToolCall(_ session.SessionID, call session.ToolCall, result session.ToolResult, queued, took time.Duration) {
+// histograms, attributed to the MAIN engine (role="main"); a child engine's
+// calls flow through WithRole instead. It satisfies port.ToolCallRecorder.
+// ToolCallRecorder carries no ctx, so the recordings use a background context —
+// exemplar correlation is best-effort here. queued is the dispatch wait
+// (enqueue→execution start); took is the execution wall time. Both are recorded
+// with the same tool attribute.
+func (m *Metrics) ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, queued, took time.Duration) {
+	m.toolCall(id, call, result, queued, took, roleAttr(RoleMain))
+}
+
+// toolCall is the role-prefixed record path behind both ToolCall (role="main")
+// and the WithRole wrapper.
+func (m *Metrics) toolCall(_ session.SessionID, call session.ToolCall, result session.ToolResult, queued, took time.Duration, prefix []attribute.KeyValue) {
 	ctx := context.Background()
 	errLabel := "false"
 	if result.IsError {
 		errLabel = "true"
 	}
-	m.toolCalls.Add(ctx, 1, metric.WithAttributes(
+	m.toolCalls.Add(ctx, 1, withAttrs(prefix,
 		attribute.String(attrTool, call.Name),
 		attribute.String(attrError, errLabel),
 	))
-	toolAttr := metric.WithAttributes(attribute.String(attrTool, call.Name))
+	toolAttr := withAttrs(prefix, attribute.String(attrTool, call.Name))
 	m.toolDuration.Record(ctx, took.Seconds(), toolAttr)
 	m.toolQueue.Record(ctx, queued.Seconds(), toolAttr)
+}
+
+// roleAttr builds the one-element attribute prefix carrying the role label.
+func roleAttr(role string) []attribute.KeyValue {
+	return []attribute.KeyValue{attribute.String(attrRole, role)}
+}
+
+// withAttrs combines a (bounded) attribute prefix with an operation's own
+// attributes into a single measurement option, copying so the shared prefix
+// slice is never appended to in place.
+func withAttrs(prefix []attribute.KeyValue, own ...attribute.KeyValue) metric.MeasurementOption {
+	combined := make([]attribute.KeyValue, 0, len(prefix)+len(own))
+	combined = append(combined, prefix...)
+	combined = append(combined, own...)
+	return metric.WithAttributes(combined...)
+}
+
+// RoleMetrics is a role-scoped view over a *Metrics: it implements BOTH
+// port.EventSink and port.ToolCallRecorder, delegating every Add/Record to the
+// shared instruments with the role attribute appended. The role MUST be one of
+// the bounded Role* family constants — the composition layer maps engine roles
+// onto that closed set BEFORE constructing a RoleMetrics, so no def/member name
+// or session id can ever become a label value. It holds no state of its own and
+// spawns no goroutine.
+type RoleMetrics struct {
+	m     *Metrics
+	attrs []attribute.KeyValue
+}
+
+// Compile-time interface checks: the role-scoped view is a drop-in for both
+// engine observability seams.
+var (
+	_ port.EventSink        = (*RoleMetrics)(nil)
+	_ port.ToolCallRecorder = (*RoleMetrics)(nil)
+)
+
+// WithRole returns a role-scoped dual-interface view (port.EventSink +
+// port.ToolCallRecorder) over the SAME underlying instruments, tagging every
+// series with role. Pass one of the bounded Role* constants (the composition
+// layer's roleFamily mapping guarantees this for child engines).
+func (m *Metrics) WithRole(role string) *RoleMetrics {
+	return &RoleMetrics{m: m, attrs: roleAttr(role)}
+}
+
+// Emit relays the event to the shared instruments with the role attribute.
+func (r *RoleMetrics) Emit(ctx context.Context, ev session.Event) {
+	r.m.emit(ctx, ev, r.attrs)
+}
+
+// ToolCall relays the tool record to the shared instruments with the role
+// attribute.
+func (r *RoleMetrics) ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, queued, took time.Duration) {
+	r.m.toolCall(id, call, result, queued, took, r.attrs)
 }

@@ -36,6 +36,10 @@ type SlowTurn struct {
 	InterTokenMaxMs int64
 	// EndedAt is the wall-clock time the turn ended.
 	EndedAt time.Time
+	// Role is the BOUNDED engine role family that produced the turn (one of the
+	// Role* constants — "main", "subagent", "member", …). It is a closed enum,
+	// never a def/member name or session id, so redaction-by-shape still holds.
+	Role string
 }
 
 // SlowTurnBuffer is a fixed-size, in-memory ring buffer of recent turns,
@@ -82,11 +86,20 @@ func NewSlowTurnBuffer(capacity int, clock func() time.Time) *SlowTurnBuffer {
 	}
 }
 
-// Emit records a SlowTurn for every EvTurnEnd, ignoring all other event types.
-// It stores ONLY scalars from the TurnEndPayload (and the Event.Turn index) — no
-// text ever enters the buffer. The oldest entry is overwritten once the ring is
-// full (bounded memory). ctx is unused: the buffer derives nothing from it.
+// Emit records a SlowTurn for every EvTurnEnd, ignoring all other event types,
+// attributing the turn to the MAIN engine (role="main"); a child engine's turns
+// flow through WithRole instead (mirroring Metrics.WithRole). It stores ONLY
+// scalars from the TurnEndPayload (and the Event.Turn index) plus the bounded
+// role family — no text ever enters the buffer. The oldest entry is overwritten
+// once the ring is full (bounded memory). ctx is unused: the buffer derives
+// nothing from it.
 func (b *SlowTurnBuffer) Emit(_ context.Context, ev session.Event) {
+	b.record(ev, RoleMain)
+}
+
+// record is the role-carrying write path behind both Emit (role="main") and the
+// WithRole wrapper.
+func (b *SlowTurnBuffer) record(ev session.Event, role string) {
 	if ev.Type != session.EvTurnEnd || ev.TurnEnd == nil {
 		return
 	}
@@ -97,12 +110,31 @@ func (b *SlowTurnBuffer) Emit(_ context.Context, ev session.Event) {
 		TTFTMs:          p.TTFTMs,
 		InterTokenMaxMs: p.InterTokenMaxMs,
 		EndedAt:         b.clock(),
+		Role:            role,
 	}
 	b.mu.Lock()
 	b.ring[b.next] = entry
 	b.next = (b.next + 1) % len(b.ring)
 	b.count++
 	b.mu.Unlock()
+}
+
+// WithRole returns a port.EventSink view over the SAME ring buffer whose
+// recorded turns carry the given bounded role family value (mirroring
+// Metrics.WithRole). It holds no state of its own and spawns no goroutine.
+func (b *SlowTurnBuffer) WithRole(role string) port.EventSink {
+	return roleSlowTurnSink{b: b, role: role}
+}
+
+// roleSlowTurnSink is the role-scoped EventSink view returned by WithRole.
+type roleSlowTurnSink struct {
+	b    *SlowTurnBuffer
+	role string
+}
+
+// Emit records the event's turn into the shared ring with the wrapper's role.
+func (s roleSlowTurnSink) Emit(_ context.Context, ev session.Event) {
+	s.b.record(ev, s.role)
 }
 
 // Recent returns the whole bounded set of recorded turns, NEWEST FIRST, filtered

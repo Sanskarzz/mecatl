@@ -197,7 +197,7 @@ func TestAppConfigMapsPermissionConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
 	}
-	ac := appConfig(cfg, nil, nil, nil)
+	ac := appConfig(cfg, nil, nil, nil, nil)
 	if !ac.PermissionsConventional {
 		t.Errorf("PermissionsConventional = false, want true (default)")
 	}
@@ -223,7 +223,7 @@ func TestAppConfigMapsAgentDefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
 	}
-	ac := appConfig(cfg, nil, nil, nil)
+	ac := appConfig(cfg, nil, nil, nil, nil)
 	if len(ac.AgentsDirs) != 1 || ac.AgentsDirs[0] != "/x" {
 		t.Errorf("AgentsDirs = %v", ac.AgentsDirs)
 	}
@@ -261,7 +261,7 @@ func TestAppConfigMapsAllowAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
 	}
-	if ac := appConfig(cfg, nil, nil, nil); !ac.AllowAllTools {
+	if ac := appConfig(cfg, nil, nil, nil, nil); !ac.AllowAllTools {
 		t.Errorf("appConfig.AllowAllTools = false, want true")
 	}
 
@@ -269,7 +269,7 @@ func TestAppConfigMapsAllowAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseFlags(nil): %v", err)
 	}
-	if ac := appConfig(off, nil, nil, nil); ac.AllowAllTools {
+	if ac := appConfig(off, nil, nil, nil, nil); ac.AllowAllTools {
 		t.Errorf("appConfig.AllowAllTools = true with flag off, want false")
 	}
 }
@@ -281,7 +281,7 @@ func TestAppConfigMapsMaxTeamTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
 	}
-	if ac := appConfig(cfg, nil, nil, nil); ac.MaxTeamTokens != 12345 {
+	if ac := appConfig(cfg, nil, nil, nil, nil); ac.MaxTeamTokens != 12345 {
 		t.Errorf("appConfig.MaxTeamTokens = %d, want 12345", ac.MaxTeamTokens)
 	}
 
@@ -289,7 +289,7 @@ func TestAppConfigMapsMaxTeamTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseFlags(nil): %v", err)
 	}
-	if ac := appConfig(def, nil, nil, nil); ac.MaxTeamTokens != 0 {
+	if ac := appConfig(def, nil, nil, nil, nil); ac.MaxTeamTokens != 0 {
 		t.Errorf("appConfig.MaxTeamTokens = %d with flag absent, want 0 (disabled by default)", ac.MaxTeamTokens)
 	}
 }
