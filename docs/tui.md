@@ -32,6 +32,7 @@ The simplest path needs no separate server — just launch the TUI with an LLM k
 ```sh
 # Embedded server (default): mecatui hosts mecated in-process over a UNIX socket.
 # The provider is AUTO-DETECTED from whichever key is set:
+ANTHROPIC_API_KEY=sk-ant-... bin/mecatui --workspace "$PWD" # Anthropic (Claude)
 OPENAI_API_KEY=sk-...      bin/mecatui --workspace "$PWD"   # OpenAI
 OPENROUTER_API_KEY=sk-or-... bin/mecatui --workspace "$PWD" # OpenRouter
 
@@ -43,11 +44,13 @@ With no `--server`, mecatui runs in **auto** mode: it first probes the loopback
 default `127.0.0.1:8080` and **reuses a `mecated` already running there**; only if
 none answers does it host an **embedded** server itself (a UNIX socket in
 `$XDG_RUNTIME_DIR`, torn down on exit). The embedded provider is **auto-detected**
-from the environment — `OPENAI_API_KEY` enables the `openai` provider,
-`OPENROUTER_API_KEY` the `openrouter` provider (set both, and you pick between their
-models in the **`/models`** picker — see the Overlays section); with neither, the
-offline mock (`--mock`). When more than one is keyed, run `/models` to choose; the
-choice is persisted per workspace.
+from the environment — `ANTHROPIC_API_KEY` enables the `anthropic` provider (the
+native Messages API), `OPENAI_API_KEY` the `openai` provider, `OPENROUTER_API_KEY`
+the `openrouter` provider (set several, and you pick between their models in the
+**`/models`** picker — see the Overlays section). With **no** key at all, startup
+**fails with guidance** — pass `--mock` explicitly for the offline mock provider.
+When more than one is keyed, run `/models` to choose; the choice is persisted per
+workspace.
 
 To use a specific **external** server instead, pass `--server`:
 
@@ -73,8 +76,13 @@ absolute path (the server requires absolute).
 | `--tls-ca` | – | PEM CA bundle for external-server verification |
 | `--insecure` | off | skip TLS verification (testing only) |
 | `--list-themes` | – | print available themes and exit |
+| `--inline` / `--no-alt-screen` | off | render inline in the terminal's normal buffer instead of the alternate screen, preserving native scrollback/search (no mouse capture; see `--no-mouse` below) |
+| `--no-mouse` | off | keep the alt screen but don't capture the mouse, so the terminal's **native** click-drag selection works; trades away in-app wheel scroll + drag-select/copy (or `MECATUI_NO_MOUSE=1`; see the selection section) |
+| `--context-window` | 0 (unknown) | model context-window size in tokens for the footer **ctx** meter; 0 = unknown (never inferred from the model name) |
 | `--no-banner` | off | disable the first-run welcome **splash** (mascot + gradient wordmark); the plain prompt hint + affordance list still show. Auto-forced on under `--quiet` or a non-interactive stdin |
-| `--model` | – (provider default) | model id for the **embedded** server; empty = the provider-appropriate default (openai → `gpt-5`, openrouter → `openai/gpt-5`). Overridden per session by the `/models` picker |
+| `--model` | – (provider default) | model id for the **embedded** server; empty = the provider-appropriate default (anthropic → `claude-sonnet-4-6`, openai → `gpt-5`, openrouter → `openai/gpt-5`). Overridden per session by the `/models` picker |
+| `--subagent-model` | – (inherits `--model`) | **embedded** server: global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (the `CLAUDE_CODE_SUBAGENT_MODEL` analogue); the Parallel judge stays on the session model. Same provider as the session; an unresolvable id **fails startup** |
+| `--anthropic-base-url` | – | native Anthropic API base URL override for the **embedded** server (compatible/proxy endpoints; key from `ANTHROPIC_API_KEY`) |
 | `--openai-base-url` | – | OpenAI base URL override for the **embedded** server |
 | `--openrouter-base-url` | – | OpenRouter base URL override for the **embedded** server (default `https://openrouter.ai/api/v1`) |
 | `--mock` | off | **embedded** server: use the offline mock provider (no network) |
@@ -85,18 +93,39 @@ absolute path (the server requires absolute).
 | `--no-commands` | off | **embedded** server: disable slash-command expansion |
 | `--skills-dir` | – (auto) | **embedded** server: skill-unit dir (`<name>/SKILL.md`); empty = the conventional dirs (e.g. `.claude/skills`) |
 | `--no-skills` | off | **embedded** server: disable skill discovery (the Skill tool) |
+| `--soul-file` | – (auto) | **embedded** server: user-scoped, agent-READ-ONLY persona/soul file injected as turn-0 context; empty = the conventional `~/.config/mecatl/soul.md` (fail-soft if absent) |
+| `--no-soul` | off | **embedded** server: disable the user-scoped persona/soul fragment |
+| `--approve-soul` | off | **embedded** server: (re)write the soul **drift baseline** (`<soul-path>.sha256`) to the current soul's hash, accepting the file as-is |
+| `--soul-strict` | off | **embedded** server: refuse a **drifted** soul — contribute no soul fragment when its hash differs from the baseline (default is warn-and-load); pair with `--approve-soul` to accept an edit |
+| `--user-model-dir` | – (auto) | **embedded** server: dir for the cross-project user-model store (RememberUser/RecallUser/SearchUserModel + the turn-0 `<user-model>` block); empty = the conventional `~/.config/mecatl/usermodel` |
+| `--no-user-model` | off | **embedded** server: disable the user model entirely (tools + turn-0 block) |
+| `--user-model-review` | off | **embedded** server: opt-in background user-model reviewer — after a session stops, a fresh single-shot child extracts durable operator facts via RememberUser (spends tokens, hence off) |
+| `--user-model-review-interval` | 1 | **embedded** server: session-count debounce for `--user-model-review` (1 = every session) |
 | `--trust-project` | off | **embedded** server: honour a discovered project's permission **ALLOW** rules **and** its project soul (`.mecatl/soul.md`). Default OFF, unified with `mecated` — deny/ask are always honoured regardless. Only pass it for a repo you trust |
+| `--yolo` | off | **embedded** server: OPERATOR POSTURE (dangerous) — suppress permission prompts for the built-in mutate-ask floor, for ephemeral/sandboxed use only. A configured deny/ask in any scope still applies. Refused as root unless `MECATL_SANDBOX=1` (or `IS_SANDBOX=1`) |
+| `--quiet` | off | discard the embedded server's operational diagnostics instead of writing them to `$XDG_STATE_HOME/mecatl/mecatui.log` (see the diagnostics note below) |
 | `--perf` | off | **embedded** server: expose the loopback perf admin surface (`/metrics`, `/debug/pprof`, `/debug/vars`, `/debug/flightrecorder`) and wire domain metrics. Loopback, UNAUTHENTICATED |
 | `--perf-addr` | – (`127.0.0.1:9099`) | **embedded** server: admin listen address for `--perf`. Empty = the **fixed** `127.0.0.1:9099` (predictable, so an MCP-client config can hardcode the `/mcp` URL; distinct from `mecated`'s `:9090`). Pass another `host:port`, or `127.0.0.1:0` for an ephemeral port. On a clash, startup **fails with guidance** |
+| `--perf-goroutine-warn-threshold` | 0 (off) | **embedded** server: arm the live goroutine-leak watchdog — Warn whenever the goroutine count exceeds this; the `/metrics` goroutine series is exported regardless. Only consulted with `--perf` |
 | `--perf-mcp` | off | **embedded** server: mount the read-only perf MCP server at `/mcp` on the `--perf` surface (introspect this process over MCP). Refuses a non-loopback `--perf-addr` |
 
 The embedded server has no auth/TLS — it is a private, user-owned UNIX socket
 (the same single-user loopback trust model `mecated` uses for `127.0.0.1`, with a
 tighter blast radius). The `--auth-token` / `--tls*` flags apply only when dialling
 an external `--server`; loopback is unauthenticated plaintext by default, matching
-mecated's trust model. The embedded server keeps the heavier opt-ins (MCP,
-ToolHive, the writable SkillDraft quarantine) **off** — for those, run a full
-`mecated` and point `--server` at it.
+mecated's trust model. The embedded server discovers **ToolHive-managed MCP
+servers** by default (the `default` group, with their resource/prompt meta-tools) —
+fail-soft: with no Podman/Docker runtime reachable it degrades to zero servers, so
+it's inert on a machine without ToolHive workloads. The remaining heavier opt-ins —
+static MCP server endpoints and the writable SkillDraft quarantine — stay **off**;
+for those, run a full `mecated` and point `--server` at it.
+
+**Embedded-server diagnostics go to a file, never stderr.** When mecatui hosts the
+embedded server, its operational diagnostics (and the `--perf` surface's log lines)
+are written to `$XDG_STATE_HOME/mecatl/mecatui.log` (fallback
+`~/.local/state/mecatl/mecatui.log`) — a stderr line would corrupt the Bubble Tea
+alt-screen. `--quiet` discards them instead. A client-only run (`--server`, or
+reusing an already-running `mecated`) logs nothing of its own.
 
 **Skill discovery is ON by default**, via conventional discovery (the read-only
 `Skill` tool activates progressive-disclosure `<name>/SKILL.md` units from the
@@ -267,7 +296,7 @@ as `trust.yaml`.
 `/<name>` inputs from the conventional workspace dirs `.mecatl/commands` and
 `.claude/commands` (`<name>.md` templates — the Claude Code convention). They're
 local, user-authored prompt templates, so there's no network or trust cost (unlike
-MCP prompts, which stay off with MCP). Pass `--no-commands` to disable expansion,
+MCP prompts, which ride a connected MCP server). Pass `--no-commands` to disable expansion,
 or `--commands-dir` to point at a different directory. Built-ins and workspace
 commands merge in the palette (a built-in wins a name collision). When no
 workspace command dir exists the palette is **not** empty — the built-ins are
@@ -461,7 +490,8 @@ dropped. The keys are unchanged — you only ever answer one modal at a time.
 
 The `?` overlay enumerates the rest of the chords — `ctrl+v` (paste a clipboard
 image), `ctrl+o`/`ctrl+r`/`ctrl+p` (MCP inventory / resources / prompts), `ctrl+a`
-(unified agents overlay — Subagents / Parallel / Teams tabs — available idle **and** mid-run), `ctrl+t`
+(the unified agents overlay — three tabs, available idle **and** mid-run; see the
+keys table above), `ctrl+t`
 (expand/collapse details), and the scroll keys (`pgup`/`pgdn`, `home`/`end`, mouse
 wheel) — and greys out any whose feature the connected server has not enabled
 (driven by the server's relayed capabilities). When the server serves agent
@@ -718,8 +748,9 @@ glamour markdown/code style config are derived. Three themes ship built in:
 Drop a JSON file into one of these directories (increasing precedence):
 
 1. `$XDG_CONFIG_HOME/mecatui/themes/` (or `~/.config/mecatui/themes/`)
-2. `<cwd>/.mecatui/themes/`
-3. the `--theme-dir` directory
+2. `<workspace>/.mecatui/themes/` (the `--workspace` root)
+3. `<cwd>/.mecatui/themes/`
+4. the `--theme-dir` directory
 
 Each file is `{ "name": "...", "palette": { ...slots... } }`. The palette is
 **merged over the Aztec base**, so a partial theme only needs the slots it wants

@@ -1,6 +1,9 @@
 # Spike: Headless Agent Teams for mecatl
 
-> Status: **spike / design proposal** (not yet wired). Author pass: 2026-05-30.
+> Status: **SHIPPED** — the substrate (kernel, supervisor, coordination tools, Team
+> tool, gRPC/HTTP surface, hook phases, budgets, trust gate) is live; this doc retains
+> the spike rationale plus inline status updates. Author pass: 2026-05-30; last status
+> sync: 2026-06-12.
 > Companion prototype: `engine/team/` (coordination kernel + tests).
 > Research basis: `docs/harnesses/02`, `05`; live survey of Claude Code subagents
 > & agent teams, OpenAI Agents SDK, Goose recipes (see "Sources" at end).
@@ -231,10 +234,11 @@ snapshotted in `outcome()`, so the gRPC path gets the same rich fallback. Headli
 > `TestConvergenceHeaderBudgetMatrix`, `server.TestRunTeamBudgetExhaustedOutcome`,
 > `app.TestMaxTeamTokensPropagates`, `cmd/mecated.TestAppConfigMapsMaxTeamTokens`.
 >
-> **Deferred proto knob (the one residual):** the gRPC wire handlers
-> (`grpc_team.go`/`http.go`) still DISCARD the returned `TeamOutcome`, so on the wire the budget
-> signal rides only the streamed report text + `EvTeamEnd.Stop`; a `CreateTeamRequest.max_team_tokens`
-> / `RunTeamResponse` outcome field stays deferred proto work.
+> **Wire surface (now also shipped, issue #36):** `CreateTeamRequest.max_team_tokens`
+> (tighten-only against the server-configured budget) plus a terminal `TeamEvent.outcome`
+> frame carrying the `TeamOutcome` wire projection (rounds, stop, budget_exhausted, usage)
+> on BOTH RunTeam handlers (gRPC `grpc_team.go` + HTTP SSE `http.go`). No proto residual
+> remains.
 
 **On-demand member inspection (PULL).** Member sessions are persisted to the injected
 `port.SessionStore` under collision-free, team-namespaced ids
@@ -438,11 +442,11 @@ terminal lane to `✓ done`.
 ### 5.5 Permissions & non-interactivity
 
 Teammates inherit the lead's permission mode at spawn (matches Claude Code:
-"permissions set at spawn"). For headless operation, a teammate's permission asks
-route to the **lead** (the lead arbitrates, as it does plan approval) or, if the
-team runs unattended, fall back to the existing non-interactive auto-deny used by
-Subagent/Parallel. Plan-approval (teammate plans read-only, lead approves) maps cleanly
-onto the existing `WithChildMode(session.ModePlan)` + the lead arbitration channel.
+"permissions set at spawn"). A member's permission asks resolve through the 4-step
+model in §5.3.1 (substitution → isolation auto-approve → surface to the HUMAN parent
+via `childAskRouter` → accurate headless auto-deny); the original "route to the lead"
+idea was not built — the lead never arbitrates member asks. Plan-approval (teammate
+plans read-only) still maps onto the existing `WithChildMode(session.ModePlan)`.
 
 ## 6. The coordination kernel (delivered prototype)
 
@@ -460,28 +464,28 @@ by a single mutex, and exercised under `-race`:
 - `Quiescent()` done/deadlock predicate.
 
 Tests cover: dependency gating, concurrent-claim safety (`-race`, N goroutines),
-mailbox delivery semantics, unknown-member/þtask errors, and quiescence
+mailbox delivery semantics, unknown-member/unknown-task errors, and quiescence
 transitions. Run: `go test ./engine/team/ -race`.
 
 This kernel is deliberately **decoupled from the Engine** so it can be validated
 before any supervisor/gRPC work exists — the essence of a spike.
 
-## 7. Proposed gRPC surface (sketch, not in this spike)
+## 7. gRPC surface (shipped — names as landed)
 
-New RPCs on the existing service (contract is `contracts/proto/mecatl/v1/harness.proto`):
+The RPCs on the existing service (contract is `contracts/proto/mecatl/v1/harness.proto`):
 
 ```
-CreateTeam(name, lead_session)            -> TeamID
-SpawnTeammate(team, name, agent_type, prompt, isolation) -> Member
-ListTeam(team)                            -> members, tasks, states
-SendTeammateMessage(team, to, body)
-StreamTeamEvents(team)                    -> stream of (member_name, Event)   // multiplexed
-ShutdownTeammate(team, name)
-CleanupTeam(team)
+CreateTeam(CreateTeamRequest)             -> CreateTeamResponse   // + optional roster, goal, max_team_tokens
+SpawnTeammate(SpawnTeammateRequest)       -> SpawnTeammateResponse
+SendTeammateMessage(SendTeammateMessageRequest) -> SendTeammateMessageResponse
+RunTeam(RunTeamRequest)                   -> stream TeamEvent     // member-tagged; terminal outcome frame
+ListTeam(ListTeamRequest)                 -> ListTeamResponse
+CleanupTeam(CleanupTeamRequest)           -> CleanupTeamResponse
 ```
 
-`StreamTeamEvents` is the multiplexed fan-in of every member's `Run.Events()`,
-each event tagged with its member name — the headless analogue of split panes. The
+`RunTeam` (the original sketch's `StreamTeamEvents`) is the multiplexed fan-in of
+every member's `Run.Events()`, each event tagged with its member name — the headless
+analogue of split panes; the sketched `ShutdownTeammate` was not built. The
 existing per-session event mapping (`internal/adapter/server/mapper.go`) is reused
 per member; only the member tag is new.
 
@@ -529,10 +533,12 @@ Two gaps flagged in the original spike have since been **closed**:
 
 Still deferred (intentional, not oversights):
 
-- **(See also §8.7)** join strategies for mutating-teammate forks and a `TeamStore`
+- **(See §8, phase 7)** join strategies for mutating-teammate forks and a `TeamStore`
   for restart durability remain deferred.
-- Per-teammate model/agent-definition selection (the factory currently uses the
-  session model for every member) is a natural next step but out of scope here.
+- ~~Per-teammate model/agent-definition selection~~ — since SHIPPED via agent
+  definitions: `MemberSpec.AgentType` routes to a per-def `MemberEngine` factory,
+  and the model resolves per def (`def.Model` > `--subagent-model` > parent; per-def
+  `provider:` too). See `docs/design/AGENT-DEFINITIONS.md`.
 
 ## 9. Risks / open questions
 

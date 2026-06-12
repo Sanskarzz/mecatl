@@ -12,7 +12,7 @@
 > the cost of carrying a broken, default-off tool plus its heavy dependency
 > outweighed its value, so it was removed instead of reworked.
 >
-> **What was removed (commit pending):**
+> **What was removed (commit `a6a9229`):**
 > - the entire `internal/adapter/repomap/` package;
 > - the `--enable-repomap` flag (`cmd/mecated`), the `EnableRepoMap` `app.Config`
 >   field, and its catalog registration in `internal/app/build.go` /
@@ -145,6 +145,9 @@ new deps but adds an IPC/child-binary path to preserve a mechanism Option E
 would otherwise delete.
 
 ## Decision
+
+> Superseded 2026-06-06 by the RESOLUTION at the top — E was never executed; the
+> feature was removed outright (commit `a6a9229`).
 
 **2026-06-02: F now + E as the rework.**
 

@@ -1,5 +1,16 @@
 # Twelve Agentic-Harness Patterns — Pluggability Audit
 
+> **Historical audit snapshot (2026-05-29) — superseded.** Every gap below has
+> since been closed: patterns 3 (tiered memory: `tool.MemoryStore` +
+> `internal/adapter/memory`), 4 (dream: `internal/adapter/dream`), 8 (fork-join:
+> `tool.WorkspaceForker` + `internal/adapter/forker` + `agent.NewParallelTool`),
+> 9 (disclosure: `tool.Disclosable` + ToolSearch), 10-layer-2
+> (`internal/adapter/permclassify`), 12 (all six hook phases fire —
+> `engine/agent/hooks.go`), and pattern 2 (`prompt.InstructionAssembler`).
+> `TaskTool` is now the `Subagent` tool; composition wiring moved from
+> `cmd/mecated` to `internal/app`. The body is retained as the rationale that
+> drove that work. Current status map: `docs/design/PRODUCTION-READINESS.md`.
+
 > Audits mecatl against the 12 patterns catalogued in
 > `docs/harnesses/02-twelve-patterns.md`. For each pattern: what it is, its
 > status in the code, whether it sits behind a DDD seam (a port/interface a new

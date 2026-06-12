@@ -55,10 +55,11 @@ neutralises the downsides the assessment raised:
   default / opt-in**, gated on an embedder being configured, consistent with the
   established posture that external/cost-bearing features (MCP) stay opt-in (§6).
 
-## BIG DECISIONS REMAINING FOR THE MAINTAINER
+## BIG DECISIONS (historical — for the deferred semantic path)
 
-The Task-3 direction is locked (build semantic). These are the open knobs within
-that direction — each has a recommendation:
+These knobs apply only if the deferred semantic path is ever taken up (the shipped
+Task-3 answer is the BM25 `SearchMemory` — see DECISION above). Each has a
+recommendation:
 
 - **D-T3.1 — embed-on-write vs embed-lazily.** Recommendation: **embed-lazily**
   (compute missing vectors in one batch on the first `SemanticRecall`, persist
@@ -393,8 +394,9 @@ half** — flagged for your call.
 ## Why semantic is the heavy option (the assessment of record)
 
 > Retained as rationale: this is *why* the keyword MVP was recommended and what
-> the cheaper paths were. The maintainer has chosen semantic anyway (see
-> DECISION at the top). The buildable design follows in the next section and
+> the cheaper paths were. The semantic path was ultimately DEFERRED (see
+> DECISION at the top — the keyword MVP is what shipped). The buildable design
+> in the next section is retained for if/when semantic is revisited, and
 > neutralises each cost below where it can.
 
 1. **New port — embeddings.** `port.LLMProvider` exposes only `Stream` +

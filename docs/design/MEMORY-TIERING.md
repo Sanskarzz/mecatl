@@ -34,11 +34,11 @@ so the model is blind to what it stored.
   Task 3 — `MEMORY-TIER2.md` — and still rejected: vectors persist inline on the
   single store, no separate cold tier.)**
 - **Semantic / embedding recall.** Doc 07 §6 calls a vector store the thing you add
-  "when memory exceeds what's enumerable." **(Task 3 — `MEMORY-TIER2.md` — the
-  maintainer chose to BUILD this: a `port.Embedder` met by an OpenAI embedder
-  adapter reusing the existing SDK/key, brute-force cosine (no vector-DB dep),
-  vectors persisted additively on the store, a read-only `SemanticRecall` tool,
-  OFF by default. See that doc for the phased buildable design.)**
+  "when memory exceeds what's enumerable." **(Task 3 — `MEMORY-TIER2.md` — resolved
+  as a pure-Go BM25 lexical `SearchMemory` tool, SHIPPED (#12); semantic/embedding
+  recall stays DEFERRED — no `port.Embedder`, no persisted vectors, no
+  `SemanticRecall` in the tree. The phased semantic design is retained in that doc
+  as the future path.)**
 - **A separate "browse the index" tool.** The index is *already in context*; a tool
   to fetch what the model can already see is dead surface. Recall-by-key is the
   loader. (Open decision D3 below — flagged for you.)
@@ -571,10 +571,10 @@ the index lives outside `prompt.Build`, so `StablePrefix` is unchanged. Assert i
   model cannot *see* the key to Recall it. For a curated per-project store, hitting
   200 entries signals the consolidator should be on. Accept; the cap is the honest
   bound and the footer is the escape hatch. **(Task 3 — `MEMORY-TIER2.md` — closes
-  this with a read-only `SemanticRecall` tool that searches ALL entries (incl.
-  trimmed ones) by embedding similarity, OFF by default; it also flags that the
-  cap is reachable in normal use only because consolidation is OFF by default on
-  both surfaces.)**
+  this with the read-only BM25 `SearchMemory` tool, which searches ALL entries
+  (incl. trimmed ones) by keyword and ships on by default whenever memory is
+  enabled; it also flags that the cap is reachable in normal use only because
+  consolidation is OFF by default on both surfaces.)**
 - **R4 — D1 reversal cost.** If you later choose file-per-fact (D1), the on-disk
   format changes and a real migration appears. The interface (`Index`,
   `RememberEntry`) and the prompt seam are format-agnostic, so only the adapter

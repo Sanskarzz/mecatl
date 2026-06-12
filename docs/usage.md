@@ -2,16 +2,20 @@
 
 `mecatl` is a headless, agentic coding harness. It owns its own context
 window, tool loop, permission policy and lifecycle hooks, and talks to OpenAI
-(or any OpenAI-compatible `/v1/responses` endpoint). The server, `mecated`, exposes
-one agent run over **gRPC** and **HTTP/SSE** concurrently.
+(or any OpenAI-compatible `/v1/responses` endpoint), OpenRouter, or Anthropic
+(the native Messages API). The server, `mecated`, exposes one agent run over
+**gRPC** and **HTTP/SSE** concurrently — or, opt-in, over **ACP on stdio** for
+an editor that spawned it (see §5).
 
-> Security, up front: **the `mecated` API is UNAUTHENTICATED.** It exposes command
-> and file execution against the configured workspace with no caller identity
-> check. It is intended for **localhost, single-user** use, which is why the
-> default listen addresses bind the loopback interface (`127.0.0.1`). Binding a
-> non-loopback address exposes unauthenticated command/file execution to the
-> network and must not be done without an external trust boundary. Auth / mTLS
-> is future work.
+> Security, up front: **the `mecated` API is UNAUTHENTICATED by default.** It
+> exposes command and file execution against the configured workspace, so out of
+> the box it is intended for **localhost, single-user** use — the default listen
+> addresses bind the loopback interface (`127.0.0.1`). Binding a non-loopback
+> address without protection exposes unauthenticated command/file execution to
+> the network. Before any non-loopback bind, enable the built-in protections:
+> bearer auth (`--auth-token` / `MECATL_AUTH_TOKEN`), TLS (`--tls-cert` /
+> `--tls-key`), mutual TLS (`--client-ca`), and rate limiting (`--rate-limit` /
+> `--rate-burst`) — see the security & transport flags in §3.
 
 ---
 
@@ -53,6 +57,9 @@ Other handy targets (`task --list` for the full set):
 | `task install` | install `mecated` and `mecatui` into `GOBIN` / `GOPATH/bin` |
 | `task test` | `go test -race ./...` |
 | `task test:cover` | tests + `coverage/coverage.{out,html}` |
+| `task test:golden` | refresh the `mecatui` View/teatest golden files (`-update`), then re-run them |
+| `task e2e` | the **LIVE** e2e suite against OpenRouter — real money + network, needs `OPENROUTER_API_KEY` (see §10) |
+| `task fuzz` | bounded coverage-guided fuzzing of the security-critical parsers (`FUZZTIME=2m task fuzz`); not part of `task test` |
 | `task lint` | `golangci-lint run` + `go vet` |
 | `task fmt` | `gofmt` + `goimports` |
 | `task tidy` | `go mod tidy` |
@@ -148,17 +155,23 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--grpc-addr` | `127.0.0.1:8080` | gRPC listen address (loopback; API is **unauthenticated**) |
-| `--http-addr` | `127.0.0.1:8081` | HTTP/SSE listen address (loopback; API is **unauthenticated**) |
+| `--grpc-addr` | `127.0.0.1:8080` | gRPC listen address (loopback; **unauthenticated unless** the security & transport flags below are set) |
+| `--http-addr` | `127.0.0.1:8081` | HTTP/SSE listen address (loopback; **unauthenticated unless** the security & transport flags below are set) |
 | `--workspace` | current working dir | default session workspace root |
-| `--model` | `gpt-5` | model identifier sent to the provider |
+| `--model` | `""` | model identifier sent to the provider. Empty → the selected provider's default: `gpt-5` (OpenAI), `openai/gpt-5` (OpenRouter), `claude-sonnet-4-6` (Anthropic). |
 | `--openai` | `false` | use the OpenAI Responses provider (key from `OPENAI_API_KEY`) |
 | `--openai-base-url` | `""` | override the OpenAI API base URL (compatible endpoints) |
 | `--openrouter-base-url` | `""` | override the OpenRouter API base URL (default `https://openrouter.ai/api/v1`; key from `OPENROUTER_API_KEY`) |
 | `--anthropic-base-url` | `""` | override the native Anthropic API base URL (compatible/proxy endpoints; key from `ANTHROPIC_API_KEY`) |
 | `--mock` | `false` | use a canned offline mock provider (no network; smoke tests only) |
+| `--shell` | `/bin/sh` | shell used to execute `Bash`-tool commands; empty disables Bash (shell-less mode). |
+| `--no-bash` | `false` | disable the `Bash` tool entirely (shell-less mode); overrides `--shell`. |
+| `--compaction` | `heuristic` | compaction strategy: `heuristic` (single-summary) or `cascade` (tiered snip→strip→collapse→summarize). |
+| `--tokenizer` | `heuristic` | token counter for the compaction trigger: `heuristic` (dependency-free) or `tiktoken` (offline tiktoken vocab). |
 | `--store-dir` | `""` | directory for the JSONL session store (empty → in-memory) |
 | `--session-store-url` | `""` | `host:port` of a remote **session-store gRPC driver** (`mecatl.driver.v1.SessionStoreService`); replaces the local store — mutually exclusive with `--store-dir`. **See the store-driver note below.** |
+| `--memory-dir` | `""` | per-project **memory store** directory; setting it enables the `Remember`/`Recall`/`SearchMemory` tools (empty disables them). |
+| `--memory-consolidate-interval` | `0` | interval for background consolidation ("dream") of the per-project memory store; `0` disables. Only meaningful with `--memory-dir`. |
 | `--memory-store-url` | `""` | `host:port` of a remote **memory-store gRPC driver** (`mecatl.driver.v1.MemoryStoreService`); replaces the local flock store — mutually exclusive with `--memory-dir`, enables the memory tools like `--memory-dir` does. |
 | `--child-retention` | `168h` | how long persisted **child** session snapshots (`subagent-*`/`parallel-*`/`team-*` ids — the `InspectSubagent`/`resume:` handles) are retained before the GC sweep deletes them. **Main sessions are never touched.** Durable-store-only in effect (`--store-dir` or a prunable `--session-store-url` driver; the in-memory default never accumulates across restarts). `0` disables the age pass. |
 | `--child-retention-max-per-family` | `500` | max persisted child snapshots kept **per delegation family** (subagent/parallel/team); the oldest beyond the cap are deleted, skipping in-flight runs. `0` disables the cap. |
@@ -171,6 +184,8 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--soul-source-url` | `""` | `host:port` of a remote **soul-source gRPC driver** (`mecatl.driver.v1.SoulSourceService`); occupies the USER slot of the soul selection — mutually exclusive with `--soul-file` (`--no-soul` still wins). **See the source-driver note below.** |
 | `--agent-source-url` | `""` | `host:port` of a remote **agent-definition gRPC driver** (`mecatl.driver.v1.AgentSourceService`); the definition set is **snapshotted at startup** (fatal if unreachable). Mutually exclusive with `--agents-dir`; the default-on conventional discovery is **superseded** (not an error). **See the source-driver note below.** |
 | `--command-source-url` | `""` | `host:port` of a remote **slash-command gRPC driver** (`mecatl.driver.v1.CommandSourceService`); **composes** with file-backed commands (a local command file shadows a same-named driver command) and is consulted **live** per expansion/listing. Probed at startup (fatal if unreachable); runtime faults fail soft. **See the source-driver note below.** |
+| `--commands-dir` | `""` | directory of **slash-command templates** (`<name>.md`); setting it enables server-side command expansion. Empty + `--enable-commands` uses the conventional dirs (`.mecatl/commands`, `.claude/commands`). |
+| `--enable-commands` | `false` | enable slash-command expansion from the conventional directories (`.mecatl/commands`, `.claude/commands`) when `--commands-dir` is empty. |
 | `--skills-dir` | `""` | directory to discover progressive-disclosure skills from, laid out as `<name>/SKILL.md`. **Repeatable** (highest precedence, in the order given); empty disables the `Skill` tool unless `--skills-conventional` is set. **See the skills trust note below.** |
 | `--skills-conventional` | `false` | also discover skills from the conventional known paths: `<workspace>/.mecatl/skills`, `<workspace>/.claude/skills`, `$XDG_CONFIG_HOME/mecatl/skills` (or `~/.config/mecatl/skills`), and `~/.claude/skills` — lower precedence than `--skills-dir`. **OFF by default** (strict opt-in); only enable for trusted locations. **See the skills trust note below.** |
 | `--skills-draft-dir` | `""` | enable the writable `SkillDraft` tool and set the **quarantine** directory for model-authored candidate skills. Empty disables the tool. Must be **outside the workspace root** (so the model's `Write`/`Edit` cannot reach it) and **disjoint** from every `--skills-dir` / conventional location — both fatal startup errors. **See the self-improving-skill loop note below.** |
@@ -196,7 +211,10 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--flight-recorder` | `true` | arm a bounded in-memory execution-trace **flight recorder** (8 MiB / 5s window) so a trace of the recent past can be snapshotted on demand. Low overhead; `=false` disables. |
 | `--mutex-profile-fraction` | `0` | `runtime.SetMutexProfileFraction` rate (0 = off). Populates `/debug/pprof/mutex`; has runtime overhead — enable only while investigating lock contention. |
 | `--block-profile-rate` | `0` | `runtime.SetBlockProfileRate` rate in ns (0 = off). Populates `/debug/pprof/block`; has runtime overhead — enable only while investigating blocking. |
+| `--goroutine-warn-threshold` | `0` | live goroutine-leak alarm: log a `WARN` whenever `runtime.NumGoroutine()` exceeds this count. `0` disables the alarm (the goroutine-count `/metrics` series is exported regardless); pick a high ceiling (e.g. `10000`) so it fires only on a genuine leak. |
+| `--goroutine-warn-interval` | `30s` | how often the goroutine-leak watchdog samples `runtime.NumGoroutine()`. Only consulted when `--goroutine-warn-threshold` > 0. |
 | `--perf-mcp` | `false` | mount the **read-only perf MCP server** at `/mcp` on the admin listener (see the observability note). Requires `--metrics-addr`, and that address **must be loopback** — a non-loopback `--metrics-addr` with `--perf-mcp` is **refused** (fail-closed). |
+| `--acp` | `false` | serve the **Agent Client Protocol** over stdio (JSON-RPC 2.0 on stdin/stdout) for an editor that spawned `mecated` as a subprocess; the TCP/HTTP listeners are skipped. **See the ACP subsection in §5.** |
 
 #### Delegation & sub-agents
 
@@ -258,6 +276,29 @@ window (retryable) and the **post-first-chunk** stream (terminal).
 | `--llm-stream-idle-timeout` | `120s` | max idle gap between LLM stream chunks **after the first chunk**. A longer stall **ends the turn as an error** (it is terminal, never retried — replay is unsafe mid-stream). Guards against an upstream SSE connection that stalls mid-stream and would otherwise hang the turn forever. 0 disables. |
 | `--llm-breaker-threshold` | `5` | consecutive **transient** establishment failures that open the per-provider circuit breaker (0 disables). |
 | `--llm-breaker-cooldown` | `30s` | how long the breaker stays open before admitting a half-open trial. |
+
+#### MCP & ToolHive
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--mcp-server` | `""` | remote MCP server as `name=URL` (**repeatable**); the auth token is read from `MCP_<NAME>_TOKEN`. **TRUST BOUNDARY:** a connected server's tools enter the model context. |
+| `--mcp-resource-tools` | `true` | register the `ListMcpResources`/`ReadMcpResource` meta-tools when a connected MCP server exposes resources (no-op when none do). A remote resource's contents enter model context like any other MCP output. |
+| `--mcp-prompts` | `true` | expand `/mcp__<server>__<prompt> key=value` inputs into the server-rendered prompt (static snapshot taken at connect). An MCP prompt steers the model like a slash command — enable only for servers you trust. |
+| `--toolhive` | `true` | discover MCP servers from the **running ToolHive workloads** (the embedded ToolHive library lists already-running workloads and reads their HTTP proxy URLs; mecatl **never** starts or spawns a workload). Fails soft to zero servers when no container runtime is reachable. Same trust class as `--mcp-server`. |
+| `--toolhive-group` | `""` | ToolHive group to discover workloads from (empty → the `default` group). Only consulted with `--toolhive`. |
+
+#### Security & transport (auth, TLS, rate limiting)
+
+All off by default (the loopback single-user posture); set them **before** any
+non-loopback bind — see the trust note below.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--auth-token` | `""` | bearer token required on **every** gRPC/HTTP request (or `MECATL_AUTH_TOKEN`; empty disables auth). |
+| `--tls-cert` / `--tls-key` | `""` | PEM server certificate/key pair; together they enable TLS on the gRPC + HTTP servers. |
+| `--client-ca` | `""` | PEM client-CA bundle; enables **mutual TLS** (require + verify client certs). |
+| `--rate-limit` | `0` | sustained per-client request rate in req/s (`0` disables rate limiting). |
+| `--rate-burst` | `0` | rate-limit token-bucket burst size (`0` derives a sane default from `--rate-limit`). |
 
 ### Observability (the loopback admin listener)
 
@@ -329,6 +370,8 @@ connected agent knows how to act on the numbers.
 | `OPENAI_API_KEY` | the OpenAI API key. **If set, it implies `--openai`** — the real provider is selected automatically. |
 | `OPENROUTER_API_KEY` | the OpenRouter API key. **If set, the `openrouter` provider is auto-detected** — it rides the same stateless Responses adapter against `https://openrouter.ai/api/v1` (override with `--openrouter-base-url`). OpenRouter also accepts an `OPENAI_API_KEY` by convention. |
 | `ANTHROPIC_API_KEY` | the Anthropic API key. **If set, the native `anthropic` provider is auto-detected** — the native Messages-API adapter (NOT the Responses adapter), stateless full-replay, with extended thinking **on** (model-aware: adaptive for Opus 4.8/4.7/4.6 + Sonnet 4.6, manual budget for older families). Default model `claude-sonnet-4-6`; override the host with `--anthropic-base-url`. |
+| `MECATL_AUTH_TOKEN` | bearer token for the API (`--auth-token`) when the flag is unset — keeps the secret off the process argv. |
+| `MECATL_DRIVER_AUTH_TOKEN` | bearer token for the store/source drivers (`--driver-auth-token`) when the flag is unset. |
 | `MECATL_SANDBOX` / `IS_SANDBOX` | set either to `1` to affirm an isolated, disposable environment so `--yolo` is permitted while running as root. |
 
 ### Provider selection
@@ -434,17 +477,22 @@ the rejected model, never a silent downgrade; the state file is not rewritten.
 
 ### The loopback / unauthenticated trust note
 
-On startup `mecated` logs the trust posture for each listen address:
+On startup `mecated` logs the trust posture for each listen address (the
+`authenticated` field reflects whether a bearer token and/or TLS is configured):
 
 ```
-level=INFO msg="API bound to loopback (unauthenticated, single-user localhost trust model)" flag=grpc-addr addr=127.0.0.1:8080
-level=INFO msg="API bound to loopback (unauthenticated, single-user localhost trust model)" flag=http-addr addr=127.0.0.1:8081
+level=INFO msg="API bound to loopback (single-user localhost trust model)" flag=grpc-addr addr=127.0.0.1:8080 authenticated=false
+level=INFO msg="API bound to loopback (single-user localhost trust model)" flag=http-addr addr=127.0.0.1:8081 authenticated=false
 ```
 
-If you bind a **non-loopback** address you get a prominent warning instead:
+A **non-loopback** address bound **with** authentication (`--auth-token` and/or
+TLS) logs at INFO (`API bound to a non-loopback address WITH authentication
+(bearer token and/or TLS)`). Binding one with **no** authentication gets a
+prominent warning instead — it never hard-fails, since an operator may
+legitimately front the server with a service mesh:
 
 ```
-level=WARN msg="API bound to a NON-loopback address: the mecated API is UNAUTHENTICATED and exposes command/file execution; do not do this without an external trust boundary (auth/mTLS is future work)" flag=http-addr addr=0.0.0.0:8081
+level=WARN msg="API bound to a NON-loopback address with NO authentication: it exposes UNAUTHENTICATED command/file execution to the network — set --auth-token / --tls-cert (or front it with a trusted mesh) before doing this" flag=http-addr addr=0.0.0.0:8081
 ```
 
 ### The skills directory trust note
@@ -989,32 +1037,71 @@ level=INFO msg="shutdown signal received; stopping servers"
 
 Service: `mecatl.v1.HarnessService` (`contracts/proto/mecatl/v1/harness.proto`).
 
+**Sessions & runs:**
+
 | RPC | Kind | Purpose |
 | --- | --- | --- |
 | `CreateSession(CreateSessionRequest) → CreateSessionResponse` | unary | allocate a server-side session, return its id |
 | `GetSession(GetSessionRequest) → GetSessionResponse` | unary | snapshot of an existing session |
+| `CloseSession(CloseSessionRequest) → CloseSessionResponse` | unary | end a session and release its server-side resources (learned rules, per-session engine/workspace); idempotent |
 | `Converse(stream ConverseRequest) → stream ConverseResponse` | bidi | drive one agent run |
+
+**Inventory & introspection** (read-only; most are snapshots taken at startup):
+
+| RPC | Kind | Purpose |
+| --- | --- | --- |
+| `ListModels` | unary | the selectable provider/model inventory — public metadata only (powers the `/models` picker; see §3) |
+| `ListAgents` | unary | the discovered agent-definition registry (name, description, resolved model, tool scope) |
+| `ListCommands` | unary | the available slash commands for a workspace (discovery only — expansion happens on the run path) |
+| `ListSkills` | unary | the discovered skills inventory (name + one-line description) |
+| `GetSoul` | unary | the resolved soul's build-time snapshot: content, size/hash, provenance, trust + drift state |
+| `GetUserModel` | unary | the **live** user-model index (entry keys + descriptions; values omitted — `Recall` loads them) |
+| `ListMcpResources` / `ReadMcpResource` | unary | static MCP resource snapshots; read one resource by URI |
+| `ListMcpPrompts` / `GetMcpPrompt` | unary | MCP prompt snapshots; expand one prompt to its rendered messages |
+| `ListMcpSources` | unary | the resolved MCP source inventory (static / ToolHive) + diagnostics |
+| `ListToolHiveGroups` | unary | the distinct ToolHive groups in the resolved inventory (no live ToolHive call) |
+
+**Agent teams** (experimental; registered with `--enable-teams`, the default):
+
+| RPC | Kind | Purpose |
+| --- | --- | --- |
+| `CreateTeam(CreateTeamRequest) → CreateTeamResponse` | unary | allocate a team (optionally enrolling an initial roster); accepts the tighten-only `max_team_tokens` |
+| `SpawnTeammate` | unary | enrol a member in an existing team (before `RunTeam`) |
+| `SendTeammateMessage` | unary | post a message into a member's inbox, delivered at its next turn boundary |
+| `RunTeam(RunTeamRequest) → stream TeamEvent` | server-stream | drive the team to quiescence; every member's events stream tagged with the member name, and the stream **ends with a single terminal frame carrying `TeamEvent.outcome`** (rounds, stop, `budget_exhausted`, usage, dispositions, findings) |
+| `ListTeam` | unary | snapshot of the roster, shared task list, and quiescence |
+| `CleanupTeam` | unary | tear down a finished team and release its resources |
 
 ### The `Converse` flow
 
 The bidi stream drives exactly one run:
 
-1. The client sends the **mandatory first frame**, a `Prompt{session_id, text}`.
-   (A first frame that is not a prompt → `InvalidArgument`.)
+1. The client sends the **mandatory first frame**, a
+   `Prompt{session_id, text, parts}` — `parts` optionally carries multimodal
+   media (image/audio `Content` parts, capability-gated on the session's
+   provider). (A first frame that is not a prompt → `InvalidArgument`.)
 2. The server streams `ConverseResponse{Event}` envelopes in sequence order.
 3. On a `permission.ask` event, the client sends a control frame
-   `ResumeApproval{ask_id, allow}` — `ask_id` echoes `Event.ask.ask_id`.
-4. The client may send `Cancel{}` at any time to abort; the run terminates with
-   a `result` whose `stop = "cancelled"`.
+   `ResumeApproval{ask_id, verdict}` — `ask_id` echoes `Event.ask.ask_id`, and
+   `verdict` is the **three-way** resolution: `DENY`, `ALLOW_ONCE`, or
+   `ALLOW_ALWAYS` (which also **learns** a per-session allow rule for the same
+   tool + exact canonical pattern; it never overrides a deny or plan-mode
+   mutation denial). The legacy `allow` bool still works when `verdict` is
+   unset: `true` → allow once, `false` → deny.
+4. The client may send `Cancel{}` at any time to abort — the run terminates with
+   a `result` whose `stop = "cancelled"` — or `CancelChild{child_id}` to cancel
+   ONE delegated child (subagent / parallel branch / team member) by its id
+   while the run itself keeps streaming.
 5. The server emits a terminal `result` event and closes the stream.
 
 `ConverseRequest` is a `oneof`:
 
 | Field | When |
 | --- | --- |
-| `prompt` (`Prompt{session_id, text}`) | mandatory first frame |
-| `resume_approval` (`ResumeApproval{ask_id, allow}`) | resolve a paused ask |
+| `prompt` (`Prompt{session_id, text, parts}`) | mandatory first frame |
+| `resume_approval` (`ResumeApproval{ask_id, verdict, allow}`) | resolve a paused ask (three-way `verdict`; the `allow` bool is the legacy fallback) |
 | `cancel` (`Cancel{}`) | abort the in-flight run |
+| `cancel_child` (`CancelChild{child_id}`) | cancel ONE child run by its id (the `agentId:` / `child_id` handle), leaving the run and sibling children untouched; unknown/finished ids are ignored on the stream |
 
 A second `prompt`, or any unknown control frame, is ignored — a single
 `Converse` stream drives a single run.
@@ -1026,9 +1113,12 @@ Every event is the provider-neutral `Event` message (mirrors the domain
 
 ```protobuf
 message Event {
-  string type = 1;          // session.init | turn.start | message.delta |
-                            // tool.call | tool.result | permission.ask |
-                            // hook | compaction | result
+  string type = 1;          // session.init | turn.start | turn.end |
+                            // message.delta | reasoning.delta | tool.call |
+                            // tool.result | tool.progress | permission.ask |
+                            // permission.retract | hook | compaction |
+                            // no_progress | result | subagent.* | team.* |
+                            // parallel.*
   int64  seq  = 2;          // monotonic per run
   int32  turn = 3;
   string text = 4;          // streamed/final text where applicable
@@ -1036,13 +1126,27 @@ message Event {
   ToolResult    tool_result = 6;
   PermissionAsk ask         = 7;   // ask_id echoed in ResumeApproval
   Result        result      = 8;   // terminal event
-  Usage         usage       = 9;
+  Usage         usage       = 9;   // cumulative on result; per-turn in turn_end
+  TurnEnd       turn_end    = 10;  // turn.end: this turn's usage + elapsed time
+  Hook          hook        = 11;  // structured hook phase/tool/decision/call_id
+  Subagent      subagent    = 12;  // subagent.*: REDACTED metadata-only child projection
+  Team          team        = 13;  // team.*: BOUNDED team projection (start/member/tasks/findings/end)
+  Parallel      parallel    = 14;  // parallel.*: REDACTED fork-join projection (incl. winner + fork paths)
 }
 ```
 
+The three delegation families (`subagent.*`, `team.*`, `parallel.*`) project a
+child loop's lifecycle without leaking its content: `subagent`/`parallel` carry
+metadata only (ids, tool names/counts, usage, stop — never args, results, or
+message text); `team` is fuller but every preview is capped and a member's
+permission asks are never forwarded.
+
 `Result.stop` is one of: `end_turn`, `max_turns`, `max_tool_calls`,
 `max_consecutive_failures`, `budget` (the `--max-run-tokens` ceiling crossed —
-a clean, reopen-able terminal), `no_progress`, `cancelled`, `error`.
+a clean, reopen-able terminal), `no_progress`, `cancelled`, `error`. A child's
+stop (on `subagent.end` / in a Subagent result) may additionally be
+`structured_output` — a structured-output child that exhausted its
+validation retries.
 
 ### Go client snippet
 
@@ -1142,9 +1246,15 @@ bin/mecated &                                          # …or an external serve
 bin/mecatui --server 127.0.0.1:8080 --workspace "$PWD"
 ```
 
-The embedded server keeps the heavier opt-ins (MCP, ToolHive, skills, memory,
-server-side slash-command expansion) off; run a full `mecated` and use `--server`
-for those. It also accepts **`--perf`** (off by default) to bring up the same
+The embedded server enables every **free + local** feature by default — memory
+(per-project, under `$XDG_DATA_HOME/mecatui/memory`), server-side slash-command
+expansion (`.mecatl/commands` / `.claude/commands`), skills (conventional
+discovery), agent definitions, soul, user model, child-session retention GC,
+ToolHive MCP discovery, and the MCP resource/prompt meta-tools. Only the
+opt-ins that spend tokens or need explicit configuration stay off: static
+`--mcp-server` registrations, the `SkillDraft` quarantine, the background
+user-model reviewer, and memory consolidation — run a full `mecated` and use
+`--server` for those. It also accepts **`--perf`** (off by default) to bring up the same
 loopback observability surface `mecated` exposes — `/metrics`, `/debug/pprof/*`,
 `/debug/vars`, `/debug/flightrecorder` — on a **fixed** `127.0.0.1:9099` port by
 default (predictable, so an MCP-client config can hardcode the `/mcp` URL once;
@@ -1160,12 +1270,15 @@ way to profile a freeze in the embedded server itself.
 The embedded server also accepts `--yolo` (the
 allow-all operator posture — same semantics, root refusal, and `MECATL_SANDBOX`/
 `IS_SANDBOX` env as `mecated`; see the allow-all note in §7). It is **ignored when
-dialling an external `--server`**. Note the TUI's **built-in slash commands** (`/clear`, `/help`, and the
-caps-gated `/mcp`/`/agents`) still work regardless — they act on the TUI itself,
-not the server, so typing `/` always opens a useful palette even with workspace
-slash-command expansion off (`/agents` browses the agent-definition inventory;
-`/team`, also `ctrl+a`, opens the live agent-team overlay). See `docs/tui.md` for
-all flags.
+dialling an external `--server`**. Note the TUI's **built-in slash commands**
+(`/clear`, `/help`, and the caps-gated `/mcp`, `/agents`, `/team`, `/skills`,
+`/soul`, `/usermodel`, `/models` — in that fixed palette order) still work
+regardless — they act on the TUI itself, not the server, so typing `/` always
+opens a useful palette even with workspace slash-command expansion off
+(`/agents` browses the agent-definition inventory; `/team`, also `ctrl+a`,
+opens the live agent-team overlay; `/skills` the skills inventory; `/soul` and
+`/usermodel` the persona/user-model views; `/models` the model picker). See
+`docs/tui.md` for all flags.
 
 It streams the conversation (glamour markdown for assistant text, themed cards
 for tool I/O), shows a thinking spinner and a usage footer, and pops an inline
@@ -1183,13 +1296,45 @@ The HTTP adapter wraps the same service. Every event is emitted as one SSE
 `data:` line carrying the proto `Event` marshalled to JSON — so HTTP and gRPC
 share one event shape.
 
+**Sessions & runs:**
+
 | Method & path | Body | Response |
 | --- | --- | --- |
-| `POST /v1/sessions` | `{workspace, mode?, limits?}` | `201` `{session_id}` |
+| `POST /v1/sessions` | `{workspace, mode?, limits?, provider_id?, model_id?, profile?}` | `201` `{session_id}` |
 | `GET /v1/sessions/{id}` | — | `200` session snapshot |
+| `DELETE /v1/sessions/{id}` | — | `204` — close the session, releasing its per-session resources |
 | `POST /v1/sessions/{id}/prompt` | `{text}` | `200` `text/event-stream` of events |
 | `POST /v1/sessions/{id}/approve` | `{ask_id, allow}` | `204` |
 | `POST /v1/sessions/{id}/cancel` | — | `204` |
+| `POST /v1/sessions/{id}/cancel-child` | `{child_id}` | `204`; `404` for an unknown / already-finished child |
+
+**Inventory & introspection** (the HTTP mirrors of the gRPC inventory RPCs in §4):
+
+| Method & path | Response |
+| --- | --- |
+| `GET /v1/models` | the selectable provider/model inventory (`ListModels`) |
+| `GET /v1/agents` | the agent-definition inventory |
+| `GET /v1/skills` | the skills inventory |
+| `GET /v1/commands` | the slash-command palette for a workspace |
+| `GET /v1/soul` | the resolved soul snapshot (provenance, trust, drift) |
+| `GET /v1/usermodel` | the live user-model index |
+| `GET /v1/mcp/resources` | MCP resource snapshots |
+| `GET /v1/mcp/resources/read` | read one MCP resource by URI |
+| `GET /v1/mcp/prompts` | the MCP prompt inventory |
+| `POST /v1/mcp/prompts/get` | expand one MCP prompt (rendered messages) |
+| `GET /v1/mcp/sources` | the resolved MCP source inventory |
+| `GET /v1/mcp/toolhive/groups` | the ToolHive groups in the resolved inventory |
+
+**Agent teams** (with `--enable-teams`, the default):
+
+| Method & path | Body | Response |
+| --- | --- | --- |
+| `POST /v1/teams` | team spec (incl. the tighten-only `max_team_tokens?`) | create a team |
+| `POST /v1/teams/{id}/members` | member spec | spawn a teammate |
+| `POST /v1/teams/{id}/messages` | message | post into a member's inbox |
+| `POST /v1/teams/{id}/run` | — | `text/event-stream` of `TeamEvent`s, ending with the terminal `outcome` frame |
+| `GET /v1/teams/{id}` | — | team snapshot (roster, tasks, quiescence) |
+| `DELETE /v1/teams/{id}` | — | clean up the team |
 
 All examples below were captured against a live `mecated --mock`.
 
@@ -1303,6 +1448,25 @@ $ curl -s -X POST http://127.0.0.1:8081/v1/sessions/<id>/cancel
 The run terminates with a `result` whose `stop` is `cancelled`. No in-flight run
 → `404` `{"error":"no in-flight run for session"}`.
 
+### ACP over stdio (`--acp`)
+
+`mecated --acp` serves the **Agent Client Protocol** — JSON-RPC 2.0 over
+stdin/stdout — for an editor that spawned `mecated` as a subprocess. It is the
+stdio alternative to the gRPC/HTTP listeners (which are skipped); everything
+else is the **same wiring**: the engine, tools, permission policy, session
+store, MCP, and skills come from the same `app.Build` assembly, and the session
+workspace is the editor-provided cwd. Logs go to **stderr**, so stdout carries
+only JSON-RPC frames.
+
+- There is **no TLS / auth / rate limiting** on this surface — stdio to the
+  parent process is itself the trust boundary.
+- Prompt content is **multimodal and capability-gated**: every content block
+  becomes text, a media part, or a loud invalid-params error (image/audio is
+  gated on the session provider's capabilities) — never a silent drop.
+- ACP session resume (`session/load`) is advertised **only** when a durable
+  session store is configured (`--store-dir`); the in-memory default would lose
+  the session across a restart, so the capability is withheld.
+
 ---
 
 ## 6. Configuration
@@ -1316,8 +1480,10 @@ tool calls then return readable errors the model can act on.
 
 ### Model
 
-`--model` (default `gpt-5`) is the identifier sent to the provider and stamped
-into the system-prompt env. Pass **strings** for forward-compatibility and for
+`--model` (empty by default — the selected provider's own default is used:
+`gpt-5` for OpenAI, `openai/gpt-5` for OpenRouter, `claude-sonnet-4-6` for
+Anthropic) is the identifier sent to the provider and stamped into the
+system-prompt env. Pass **strings** for forward-compatibility and for
 compatible endpoints.
 
 ### Session store
@@ -1485,8 +1651,8 @@ default session is always bounded:
 
 | Limit | Default | Disables when 0 |
 | --- | --- | --- |
-| `max_turns` | `50` | yes |
-| `max_tool_calls` | `200` | yes |
+| `max_turns` | `100` | yes |
+| `max_tool_calls` | `400` | yes |
 | `max_consecutive_failures` | `5` | yes |
 
 Supplying **any** non-zero limit field is taken as explicit and used as-is.
@@ -1508,7 +1674,10 @@ Resolution precedence:
 1. **`deny` → `ask` → `allow`**: a `deny` in *any* scope beats an `ask` or
    `allow` anywhere; otherwise an `ask` beats an `allow`.
 2. **Scope** breaks same-effect ties (highest precedence first):
-   `Managed > CLI > LocalProject > SharedProject > User`.
+   `Managed > CLI > LocalProject > SharedProject > User > BuiltinDefault`. (One
+   narrow exception to ask-beats-allow: a higher-scope config **Allow** may
+   loosen **only** the built-in `ScopeBuiltinDefault` Ask floor, never a
+   *configured* Ask — see the permission-config note in §3.)
 3. **No matching rule → `ask`** — the safe default. The harness never silently
    allows an unconfigured call.
 
@@ -1520,10 +1689,14 @@ can adapt) and to the client (on ask).
 | Tool | Default effect |
 | --- | --- |
 | `Read`, `Grep`, `Glob`, `WebFetch`, `Subagent` | `allow` |
-| `Bash`, `Edit`, `Write` | `ask` |
+| the six memory tools (`Remember`/`Recall`/`SearchMemory`, `RememberUser`/`RecallUser`/`SearchUserModel`) | `allow` (floor-scoped, config-overridable — see §3) |
+| `InspectSubagent`, `InspectMember`, `SubagentStatus` (read-only child observability) | `allow` (floor-scoped, config-overridable) |
+| `soul:apply` (the synthetic soul-load action) | `allow` (floor-scoped, config-overridable — see §3) |
+| `Bash`, `Edit`, `Write`, `Team`, `SkillDraft` | `ask` |
 
 Read-only exploration runs without interruption; anything that can mutate the
-workspace pauses for approval.
+workspace pauses for approval (`Team` asks because it can spawn **mutating**
+members, unlike the read-only `Subagent` explorer).
 
 ### Plan mode hard-denies mutations
 
@@ -1571,10 +1744,15 @@ a phase → shell-command map; each command is run as `<shell> -c <command>`
 | `SubagentStop` | when a subagent loop stops |
 
 > v1 fully implements `PreToolUse` and `PostToolUse`; the others are defined and
-> wired as the injection seam. **`mecated` ships with no hooks configured by
-> default** (`hookexec.New(nil)`), so every event is allowed. Hooks are
-> configured in Go at the composition root by passing a populated
-> `map[governance.HookPhase]string` to `hookexec.New(...)`.
+> wired as the injection seam. **`mecated` ships with no global hooks configured
+> by default** (`hookexec.New(nil)`, in the shared composition layer
+> `internal/app`), so every event is allowed. Global hooks are configured in Go
+> by passing a populated `map[governance.HookPhase]string` to
+> `hookexec.New(...)`. Separately, an **agent definition** may carry a per-def
+> `hooks:` map executed through the same `hookexec` runner for that child's
+> lifecycle phases — note this is **ungated shell on the harness host** (no
+> permission ask), which is why agent-def sources are a trust boundary (see the
+> `--agents-dir` / `--agent-source-url` notes in §3 and §6).
 
 ### The stdin contract
 
@@ -1614,7 +1792,7 @@ fi
 exit 0
 ```
 
-Wire it (in `cmd/mecated/main.go`, where `hookexec.New(nil)` is today):
+Wire it (in `internal/app` — `build.go`, where `hookexec.New(nil)` is today):
 
 ```go
 hooks := hookexec.New(map[governance.HookPhase]string{
@@ -1716,10 +1894,12 @@ manual dispatch + the `e2e-live` PR label) — see
 
 ## 11. Troubleshooting / FAQ
 
-**`no LLM provider available: set OPENAI_API_KEY or OPENROUTER_API_KEY (run with --openai/--mock for offline)`**
+**`no LLM provider available: set one of ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY (OpenAI), or OPENROUTER_API_KEY (one key, many models — a good first choice) …`**
 You started `mecated` with no provider key in the environment. Set
-`OPENAI_API_KEY` or `OPENROUTER_API_KEY`, pass `--openai`, or pass `--mock` for an
-offline smoke test.
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `OPENROUTER_API_KEY`; for a
+compatible/proxy endpoint pass the matching key plus `--openai-base-url` /
+`--anthropic-base-url` / `--openrouter-base-url`; or pass `--mock` for an
+offline smoke test. (The full message is quoted in §3, "Provider selection".)
 
 **`--openai requires OPENAI_API_KEY to be set`** (the `cmd/mecademo` demo only)
 The demo's `--openai` flag was passed but no key is in the environment.
@@ -1746,8 +1926,8 @@ for `permission.ask` and resolve it with `POST …/approve` (or a `ResumeApprova
 frame over gRPC). Denied calls return the reason to the model.
 
 **The run "won't stop" / loops**
-It can't run unbounded: default limits cap it (`max_turns=50`,
-`max_tool_calls=200`, `max_consecutive_failures=5`). The terminal `result.stop`
+It can't run unbounded: default limits cap it (`max_turns=100`,
+`max_tool_calls=400`, `max_consecutive_failures=5`). The terminal `result.stop`
 tells you which limit fired (`max_turns`, `max_tool_calls`,
 `max_consecutive_failures`). Tighten them per session via `limits`.
 

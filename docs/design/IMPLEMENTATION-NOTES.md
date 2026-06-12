@@ -288,7 +288,7 @@ routing by a bare model id stays a def's `provider:` concern), re-derives the wi
 `provReg.meta.contextWindowFor`, and returns `(nil,false)` for a blank/unroutable model (Subagent then
 surfaces a model-addressable error). `agent` + `model` together is REJECTED (R9): a specialist
 already pins its own engine/model. Reasoning-effort stays an adapter-construction Option (the
-factory owns adapter construction), never a `taskArgs`/`port.LLMRequest` field. Guards:
+factory owns adapter construction), never a `subagentArgs`/`port.LLMRequest` field. Guards:
 `agent.TestSubagentPerCallModelRoutesToFactory`, `agent.TestSubagentPerCallModelUnknownErrors`,
 `agent.TestSubagentAgentAndModelTogetherRejected`, `app.TestBuildSubagentEngineFactoryReDerivesForOverrideModel`.
 
@@ -331,7 +331,7 @@ case (c) — the same-provider window rule), `app.TestNormalizeSubagentModelUnre
 fails the deps test, the prompt test, AND the e2e).
 
 **Subagent structured output (`output_schema` + `SubmitResult` + bounded validation-retry).** When
-`taskArgs.OutputSchema` (a model-authored JSON schema) is present, the child is given a synthetic
+`subagentArgs.OutputSchema` (a model-authored JSON schema) is present, the child is given a synthetic
 `SubmitResult` tool (`engine/agent/structuredoutput.go`) whose PARAMETERS ARE that schema,
 injected run-scoped via the new `RunOptions.ExtraTools` (never registered into the shared catalog,
 so concurrent runs of the same engine never see it). The child prompt is augmented to "call
@@ -387,8 +387,8 @@ through the SHARED `renderInspectTranscript(header, sess)` (extracted from `rend
 byte-identical bounds 40/1000/8000). A PREFIX GATE rejects any `agent_id` not starting with the
 subagent child prefix (`requiredPrefix`, default `"subagent-"`) BEFORE the store is touched, so the
 model cannot read team-member (`team-<teamID>-<member>`) or service-session transcripts through this
-tool, bypassing `InspectMember`'s team_id+member framing — the same gate the planned `resume` path
-(B2.1) specifies. `InspectSubagent` is registered UNCONDITIONALLY wherever the
+tool, bypassing `InspectMember`'s team_id+member framing — the same gate the shipped `resume`
+path uses (the Subagent-resume entry below). `InspectSubagent` is registered UNCONDITIONALLY wherever the
 Subagent tool is (NOT gated on `EnableTeams`, unlike `InspectMember`); both inspect tools share the
 one store, ids kept disjoint by prefix convention (`subagent-…` / `team-…`), the gate enforcing the
 subagent side. Floor-scoped (`ScopeBuiltinDefault`) ALLOW in `defaultRules()` (issue #37, decided for
@@ -817,6 +817,15 @@ single fix site.
 `TestReasoningEnvelopeRoundTripsSignature`) tripwire any regression that swaps the blob for the
 summary or drops the load-bearing `Include` flag. See `OPENAI-RESPONSES-API.md`.
 
+**ProviderPhase replay (issue #46).** The OpenAI Responses **phase** marker
+(`commentary`/`final_answer`) is captured via the neutral `port.ChunkPhase` on the response
+stream, stored opaque on `session.Message.ProviderPhase`, and replayed VERBATIM on the
+assistant message item — dropping it makes GPT-5.x treat preambles as final answers / stop
+early (root cause of the spurious "I cannot assist" refusal misfire: the `store:false`
+manual replay was silently shedding the field). Same discipline as `Message.Reasoning`:
+structure neutral, contents provider-private, never displayed/interpreted/validated against
+the enum, and NOT a `port.LLMRequest` field.
+
 **Team-member workspace policy is THREE-TIER** (isolation is the security boundary; capability
 flows down from the parent, which has Bash): a base-sharing read-only member (no forker wired)
 gets NO shell; a read-only member the factory marks `MemberBuild.IsolateReadOnly` runs in a
@@ -966,19 +975,16 @@ reaching into the live `*team.Team`. The headline regression guard is
 `TestTeamToolRefusalSynthesisFallsBackToLedger`: a refusal synthesis over a populated ledger must never
 reach the parent.
 
-> **PARTIAL — 4A: per-engine token ceiling SHIPPED, team-AGGREGATE budget DEFERRED.** The
-> per-RUN ceiling ships as the SHARED `agent.Deps.MaxRunTokens` loop ceiling (see the
-> Token-budget note above), NOT a team-only `WithTeamTokenBudget`: a runaway team member crosses
-> the per-run `MaxRunTokens` ceiling and ends with `session.StopBudget`, which the supervisor
-> handles exactly like any other stopped member (the resilient-deliverable safety-net fallback
-> still applies; a budget-stopped lead stays RESUMABLE so its one synthesis turn still runs —
-> guarded by `TestBudgetStoppedLeadStillSynthesises`). This bundle remains the *safety net*
-> (never return junk); the per-engine budget is the *per-member brake*. **Still open:** there is
-> NO team-aggregate ceiling — the budget is per-run and `session.Reopen` resets the accumulator
-> each round, so an N-member team can still spend ~N×`MaxRunTokens` across a round (cross-round
-> lifetime is bounded only by `WithMemberTurnBudget`, a TURN count, not tokens). A supervisor-level
-> summed-`session.Usage` budget that stops scheduling after the current round remains the residual
-> 4A item.
+> **4A CLOSED, both halves.** The per-RUN half is the SHARED `agent.Deps.MaxRunTokens` loop
+> ceiling (see the Token-budget note above): a runaway team member crosses it and ends with
+> `session.StopBudget`, which the supervisor handles exactly like any other stopped member
+> (the resilient-deliverable safety-net fallback still applies; a budget-stopped lead stays
+> RESUMABLE so its one synthesis turn still runs — guarded by
+> `TestBudgetStoppedLeadStillSynthesises`). The team-AGGREGATE half is
+> `Supervisor.WithTeamTokenBudget` incl. the issue-#36 wire surface (see the Team-aggregate
+> token-budget entry above), so the per-run accumulator's `Reopen` reset no longer bounds a
+> team's lifetime spend. The deliverable bundle remains the *safety net* (never return junk);
+> the two budgets are the *brakes*.
 
 **Member sessions persist for out-of-band inspection.** The supervisor saves each member session
 to the injected `port.SessionStore` (`WithMemberStore`, never a concrete adapter — layering
@@ -1358,20 +1364,20 @@ TCP) and `cmd/mecatui` (hosts it embedded over a UNIX socket). It MAY import ada
 
 **Provider registry (Phase 0, S1, `registry.go`):** `buildProviderRegistry(cfg, detect
 envDetector)` is a COMPOSITION-ONLY (not a port — single consumer) `providerRegistry` of N
-configured providers (`openai`, `openrouter`), keyed by a WIRE-STABLE id matching models.dev.
+configured providers (`openai`, `anthropic`, `openrouter`), keyed by a WIRE-STABLE id matching models.dev.
 AVAILABILITY is env-auto-detected via the injectable `envDetector` seam (defaults to
 `os.Getenv`, set in `Build`; tests inject a fake map so registry construction is offline)
 against the **`providercatalog` catalog's per-provider `env[]`** (S2 replaced S1's inline
 `builtinProviderEnv` map): `providerEnvVars(id)` reads
 `providercatalog.Default().Provider(id).EnvVars()` (`openai`→`OPENAI_API_KEY`,
-`openrouter`→`OPENROUTER_API_KEY`). The openrouter `OPENAI_API_KEY` fallback is a mecatl
+`anthropic`→`ANTHROPIC_API_KEY`, `openrouter`→`OPENROUTER_API_KEY`). The openrouter `OPENAI_API_KEY` fallback is a mecatl
 CONVENTION, so it is a COMPOSITION augmentation appended in `providerEnvVars` (the vendored
 catalog stays HONEST to upstream — openrouter's `env[]` is `["OPENROUTER_API_KEY"]` only); the
 catalog never carries mecatl policy. OpenRouter rides the SAME stateless `openai` adapter with
 `WithBaseURL("https://openrouter.ai/api/v1")` + the OpenRouter key — no separate wire adapter in
 P0. Only AVAILABLE providers are constructed (each `llmresilience.Wrap`-ped); `UseMock`
 short-circuits to a single `mock` entry; zero available + `!UseMock` ⇒ the named `errNoProvider`
-(names both env vars + `--openai`/`--mock`). Startup logging emits provider id + base URL only,
+(names the three env vars + the `--*-base-url` flags + `--mock`). Startup logging emits provider id + base URL only,
 NEVER the key (CWE-200). `buildProvider` is a thin shim returning the registry's DEFAULT
 provider so the `Build` call site is unchanged.
 
@@ -1412,7 +1418,11 @@ have silently reported one role) with an optional role filter; `query_metric`/`l
 gain `role`, the metrics summary gains a bounded `by_role` breakdown for the histograms +
 `tool_calls_total`/`tokens`, and the curated `tokens` family name was corrected to
 `mecatl_tokens_total` (the exporter's gathered counter name — a latent mismatch that made
-`query_metric{tokens}` report absent).
+`query_metric{tokens}` report absent). Sibling rename from the same perf arc: the runtime
+snapshot's `heap_alloc_bytes` became `heap_allocs_total_bytes`
+(`telemetry.RuntimeSnapshot`) — the value is the CUMULATIVE `/gc/heap/allocs` counter, not
+the live heap, and the old key read as a `MemStats.HeapAlloc`-style live-heap gauge (a
+misread worth the one-time wire break; live heap-object memory is `heap_object_bytes`).
 
 **Per-session provider/model routing (S3, `sessionEngineFactory` + `modelsnapshot.go`):**
 `buildProvider` returns the registry ALONGSIDE the default provider so composition threads it
@@ -1697,7 +1707,10 @@ engine has the FS tools baked in) and `server.SessionEngineFactory` grew a
 
 `CreateSessionRequest` carries an OPTIONAL `provider_id`(4)+`model_id`(5) selector (two distinct
 fields, NEVER slash-joined) and an OPTIONAL `profile`(6) (enum-as-string; see the session-profiles
-section above — the workspace `min_len` was removed in favour of the profile-aware server rule); `ListModels(ListModelsRequest)→ListModelsResponse` returns the
+section above — the workspace `min_len` was removed in favour of the profile-aware server rule);
+`CreateSessionResponse.resolved_model`(4) echoes the EFFECTIVE provider+model the session
+actually resolved to (the mecatui turn-zero header truth — echoed again on the `GetSession`
+snapshot so a reader sees the same fact); `ListModels(ListModelsRequest)→ListModelsResponse` returns the
 `ModelInfo` inventory (id/provider_id/display_name/image/reasoning/context_limit) for AVAILABLE
 providers only, secret-free; `ServerCapabilities.model_selection`(12) is true iff ≥1 provider is
 available (gates the client picker like `agents` gates `/agents`). Additive + old-client-safe (an
@@ -1768,7 +1781,7 @@ The settled decisions, condensed:
   validation — deliberately NO separate self-test fake), jsonlstore, and grpcdriver-over-bufconn;
   `memconformance` (unchanged) additionally runs over the grpcdriver memory client.
 
-**Phase D (DRIVERS.md) needs:** the driver pattern statement; the format-versioning rule; the
+**Phase D LANDED as `DRIVERS.md`, covering:** the driver pattern statement; the format-versioning rule; the
 error table; the auth/trust posture; conformance-as-contract for third-party drivers; the
 server-wrapper PROMOTION question (exporting them beyond `internal/` is a public-API commitment
 made there, not implied by the current placement); a user-model driver flag (the user-model
@@ -1917,7 +1930,7 @@ The settled decisions, condensed:
   fence-breakout fail-soft) runs over `soul.Store` (temp file) and the wire client (verbatim
   fake server — proving the CLIENT's re-validation).
 
-**Phase D notes (additions to the Phase-B list):** the construction-time-trust rule (Origin is
+**Phase D notes (landed in `DRIVERS.md`, additions to the Phase-B list):** the construction-time-trust rule (Origin is
 observability; admission is gated where sources are CONSTRUCTED — an untrusted workspace's
 project tier is never built); the logical-name grammar (verbatim from `ValidSkillAssetName`);
 the no-watch/snapshot decision and its trust-gate rationale; the memfs/virtual-overlay
@@ -2170,3 +2183,24 @@ to extract a shared `ChildActivity` value object — not before** (recorded in t
   traces, the winner highlighted, the preserved fork path, an honesty note). It folds into the fleet
   footer (a `⑂` segment). Default-tab precedence (plan Q5): `teamLive > parallelLive > haveSubagents >
   haveParallel > haveTeam > Subagents`. Rendered from relayed Events ONLY (no internal/proto import).
+
+## Live e2e — `e2e/` (see `e2e/README.md`)
+
+A LIVE, ginkgo-driven BDD suite proving the harness's features against a REAL model: it
+spawns `./bin/mecated` against OpenRouter (real money — `OPENROUTER_API_KEY` required;
+fractions of a cent per run on the default `claude-3.5-haiku` lane, with an optional
+`gpt-4.1-mini` second lane for single-turn smoke) and drives full runs over the gRPC
+`Converse` stream using `cmd/mecatui/client` — the exact client package mecatui is built on,
+so the TUI's wire path (CreateSession → OpenConverse → event translation → approvals) is
+covered transitively. Everything carries the `e2e` build tag: `task build`/`task test`/
+`task lint` never compile it (ginkgo/gomega stay out of their build graphs); the entry point
+is `task e2e` — deliberately NOT part of `task test`, which stays fully offline on
+mockllm/memfs. Timeouts are LAYERED (per-run driver timeout → cancel+drain → a TIMEOUT
+classification in the failure report; per-spec ginkgo `SpecTimeout`s; the outer
+`go test -timeout 60m`) and the per-spec budgets × flake attempts sum to ~50m worst-case, so
+the clean failure path (transcript + AfterSuite teardown + cost ledger) always fires before
+go test's panic path — the arithmetic lives in `e2e/suite_test.go`. The `MECATL_E2E_*` knobs
+(remote target, model lanes, run/team token budgets, metrics URL, auth token) are tabled in
+`e2e/README.md`. CI: `.github/workflows/e2e-live.yml` — nightly cron + label-gated on PRs
+(the `e2e-live` label; `pull_request`, never `pull_request_target`, so fork PRs get no
+secrets).

@@ -3,8 +3,9 @@
 ## Summary
 
 `mecatui`'s embedded server never set `app.Config.MemoryDir`
-(`cmd/mecatui/main.go` `embeddedConfig`), so `internal/app/build.go:731` took the
-disabled branch and the `Remember`/`Recall` tools were absent — a "store this in
+(`cmd/mecatui/main.go` `embeddedConfig`), so `internal/app/build.go`'s registration
+gate took the disabled branch and the `Remember`/`Recall`/`SearchMemory` tools were
+absent — a "store this in
 memory" prompt silently produced a chat reply with no persistence and no feedback.
 This change computes a **per-project default memory directory** under XDG **data**,
 wires it into `embeddedConfig`, and adds two opt-out/override flags
@@ -102,7 +103,7 @@ recorded here.
 
 **Nobody in `main` `MkdirAll`s.** `memory.New(dir)` creates the dir and parents
 (`internal/adapter/memory/store.go` `New`), and `app.Build` calls
-`memory.New(cfg.MemoryDir)` in the registration gate (`build.go:732`). So
+`memory.New(cfg.MemoryDir)` in `build.go`'s registration gate. So
 `embeddedConfig` only **computes the path string** and assigns it to
 `app.Config.MemoryDir`; the store owns creation. This keeps it forward-compatible
 (see Task 2 notes): `main` never touches the filesystem layout.
@@ -125,7 +126,7 @@ Two flags on `cmd/mecatui`, both "embedded server only" (like `--mock`,
 | Flag | Type | Default | Meaning |
 |---|---|---|---|
 | `--memory-dir` | string | `""` | Override the per-project default memory directory. Empty = use the computed default. |
-| `--no-memory` | bool | `false` | Disable memory entirely (no Remember/Recall tools). |
+| `--no-memory` | bool | `false` | Disable memory entirely (no Remember/Recall/SearchMemory tools). |
 
 ### `config` struct additions (`config.go`)
 
@@ -262,7 +263,8 @@ unused flag is surface to maintain. A future opt-in can mirror `mecated`.
 
 ### 4. `internal/app/build.go`
 
-**No change.** The registration gate (`MemoryDir != ""`), `memory.New`, and
+**No change.** The registration gate (`MemoryDir != ""` — with the later
+`MemoryStoreURL` remote-driver branch taking precedence when set), `memory.New`, and
 `startMemoryConsolidation` already do the right thing for a non-empty `MemoryDir`
 and a zero interval. This change only feeds the gate a non-empty dir.
 

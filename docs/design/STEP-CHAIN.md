@@ -1,5 +1,11 @@
 # mecatl — Implementation Step-Chain (v1)
 
+> **Historical — the v1 implementation plan, fully executed.** Package paths and
+> port placements below predate the build (e.g. `api/` → `contracts/`, the
+> connect-go sketch → grpc-go, `FileSystem`/`Workspace` live in `engine/tool` not
+> `engine/port`, the Task tool is now `Subagent`, `Logger` is now
+> `ToolCallRecorder`). See `docs/architecture.md` for the code as it exists.
+
 > Companion to `ARCHITECTURE.md`. Work packages (WPs) sized for one expert engineer
 > each. The sequencing rule (doc 08 discipline): **freeze the shared contracts first**,
 > then build adapters/tools/loop/API in parallel against frozen interfaces.
@@ -15,9 +21,11 @@ front. The minimal set that must be stable before WP2+ start:
   `StopReason`.
 - Aggregate surface: `Session` method signatures (`BeginTurn`, `RecordAssistant`,
   `RecordToolResults`, `PauseForApproval`, `ResumeWith`, `Cancel`, `StopReason`).
-- Ports: `LLMProvider`/`Chunk`/`LLMRequest`, `Tool`/`ToolSpec`, `FileSystem`/`Workspace`,
+- Ports: `LLMProvider`/`Chunk`/`LLMRequest`, `Tool`/`ToolSpec`,
   `PermissionPolicy`/`PermissionDecision`, `HookRunner`/`HookEvent`/`HookOutcome`,
-  `SessionStore`, `EventSink`, `Clock`, `Logger`.
+  `SessionStore`, `EventSink`, `Clock`, `Logger`. (`FileSystem`/`Workspace` ended
+  up in `engine/tool`, NOT `engine/port` — moving them to `port` creates a
+  `port↔tool` cycle; see the CLAUDE.md gotcha.)
 
 These all live in **WP1**. Everything else depends on WP1 and nothing else depends on
 the *implementations* — only on these interfaces.
@@ -103,7 +111,8 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
 - **Goal:** Real-OS and in-memory implementations of `FileSystem`, plus the `Workspace`
   wrapper that scopes paths to a session root and carries the Edit **read-ledger**.
 - **Owns:** `internal/adapter/osfs/`, `engine/adapter/memfs/`, the `Workspace` impl.
-- **Honors:** `port.FileSystem`, `port.Workspace` from WP1.
+- **Honors:** `tool.FileSystem`, `tool.Workspace` from WP1 (they live in
+  `engine/tool`, not `engine/port` — the `port↔tool` cycle).
 - **Tests:** memfs round-trips; path-escape attempts (`../`) are rejected by Workspace;
   read-ledger records reads and detects on-disk change (mtime/hash) for Edit invariant #1.
 - **Done:** memfs passes the same conformance suite as osfs (shared `fstest`-style table).

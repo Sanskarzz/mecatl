@@ -268,8 +268,12 @@ wiring.
    session via the `Service.LoadSession(ctx, id)` seam: it loads the latest
    snapshot from the store and, if the session had cleanly `completed`, `Reopen`s it
    to `idle` (preserving conversation history) and re-persists, so the next
-   `session/prompt`'s `BeginTurn` is legal. A failed/cancelled session is NOT
-   resumable (`Reopen` rejects it). `loadSession` is advertised `true` ONLY when a
+   `session/prompt`'s `BeginTurn` is legal. **(Updated, issue #51:** the shared
+   `loadAndReopen` now also drives the other terminal seams — a `cancelled` session
+   is `Interrupt`ed and a `failed` one `Recover`ed, both history-repaired to `idle`
+   — so a failed/cancelled session IS loadable; only a still-`running`/`awaiting`
+   snapshot is rejected. The subagent `resume:` policy is separate and unchanged —
+   a `failed` child stays non-resumable.) `loadSession` is advertised `true` ONLY when a
    durable store is configured (`--store-dir`); without one it is `false` and
    `session/load` returns a method error. An unknown/never-persisted id (incl. the
    in-memory store after a restart) is an `InvalidParams` error.
@@ -563,8 +567,9 @@ handler that issues an outbound `Call` (a `session/prompt` issuing
 - **Mode switching** (`session/set_mode` + `current_mode_update`, current mode in
   `session/new`/`session/load`) — via `Service.SetMode` + `Session.SetMode`;
   mid-turn switch scoped to "defer to next prompt".
-- **`session/load` (resume)** — via `Service.LoadSession` (reopen-if-completed);
-  `loadSession:true` only with a durable store.
+- **`session/load` (resume)** — via `Service.LoadSession` (reopen-if-completed;
+  since issue #51 the shared `loadAndReopen` also interrupt-if-cancelled /
+  recover-if-failed); `loadSession:true` only with a durable store.
 - **`session/load` transcript replay** — on load the persisted `Conversation` is
   re-projected through the same `projectUpdate` path as the live loop (`replay.go`),
   so a re-attaching editor rebuilds the transcript. Open-before-update preserved by

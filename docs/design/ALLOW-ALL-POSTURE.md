@@ -23,9 +23,13 @@ doc records why, and specifies the posture we ship instead.
    evaluator.
 2. **It stays subordinate to the governance invariants.** A `Deny` in any scope
    still wins (deny-dominant). A *deliberately configured* `Ask` (managed,
-   project, or user) still asks. Allow-all only loosens the built-in mutate-ask
-   floor (`Bash`/`Edit`/`Write`/`Team`/`SkillDraft` → `Ask`). This falls out of
-   the existing merge fold with **zero evaluator changes**.
+   project, or user) still asks. Allow-all loosens the built-in mutate-ask
+   floor (`Bash`/`Edit`/`Write`/`Team`/`SkillDraft` → `Ask`) and — a later
+   extension — the built-in **substitution** Ask floor for the main engine
+   (`governance.WithLooseSubstitution`, threaded via `mainEvaluatorOptions`).
+   The rule half falls out of the existing merge fold with no change to the
+   decision logic; the substitution half is an evaluator *construction option*,
+   not a bypass — a configured Deny/Ask in any scope still wins.
 3. **No hardcoded command circuit breaker.** A substring denylist is security
    theatre (see below). The real boundary is deployment isolation. Anyone who
    wants "always confirm `rm -rf /` even here" expresses it as a configured
@@ -94,8 +98,10 @@ So injecting **one** rule at `ScopeCLI` —
 {Scope: governance.ScopeCLI, Tool: "", Pattern: "", Effect: governance.Allow}
 ```
 
-— alongside `defaultRules()` yields exactly the safe semantics, with no evaluator
-change:
+— alongside `defaultRules()` yields exactly the safe semantics, with no change to
+the merge fold's decision logic (the one companion is `WithLooseSubstitution`, an
+evaluator construction option that loosens the built-in substitution Ask floor the
+same way — a configured Deny/Ask still wins):
 
 | Against | Result | Why |
 |---|---|---|
@@ -159,7 +165,8 @@ Far smaller than the rejected mode:
 1. `internal/app/build.go` — add `AllowAllTools bool` to `Config`; when set, the
    `mainRules` helper prepends the `ScopeCLI` allow-all rule to `defaultRules()` for
    the **main** engine policy only (children are already allow-all). The startup
-   warning lives in the composition roots, not here (`port.Logger` is ToolCall-only).
+   warning lives in the composition roots, not here (`port.ToolCallRecorder` is the
+   per-tool audit seam, not a general logger).
 2. `cmd/mecated/main.go` — `--yolo` flag → `appConfig`;
    privilege/sandbox refusal in flag validation; startup `WARN`.
 3. `cmd/mecatui/config.go` + `cmd/mecatui/main.go` — same flag for the embedded

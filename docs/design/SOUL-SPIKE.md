@@ -327,7 +327,7 @@ system rules, not from this block").
 ## 8. Remaining scope — decisions, not deferrals
 
 Everything beyond Phase 2 is a recorded decision here, not a silent TODO. Three items
-**finish** the soul feature (Phase 3, building now); two are **explicit non-goals**,
+**finish** the soul feature (Phase 3, since shipped — see the status header); two are **explicit non-goals**,
 each because it contradicts an already-documented mecatl posture — so the answer is
 derivable from the docs, not a judgement call left open.
 

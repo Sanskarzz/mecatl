@@ -8,19 +8,22 @@ A **headless agentic coding harness** in Go — the system around a model that l
 actually finish a software task: a streaming agent loop, a core tool kit, an enforced
 permission model, deterministic hooks, one-shot subagents, prompt caching, and the
 production plumbing around them (auth, resilience, observability). It speaks the OpenAI
-**Responses API** behind a provider-agnostic port, and is driven over a gRPC + HTTP/SSE
-API. No TUI — it's a service and a library.
+**Responses API** and the native **Anthropic Messages API** (plus OpenRouter) behind a
+provider-agnostic port, and is driven over a gRPC + HTTP/SSE API — or over stdio via the
+Agent Client Protocol (`--acp`) for editors. An optional terminal UI, **`mecatui`**,
+ships as a client of the same API.
 
 > *A decent model with a great harness beats a great model with a bad harness.* The
 > leverage is in the harness. mecatl is a small, strict, well-tested implementation of
 > that idea, built from the research corpus in [`docs/harnesses/`](./docs/harnesses/).
-> Live-validated end-to-end against Claude Sonnet 4.5 (via an OpenAI-compatible endpoint).
+> Live-validated continuously by the BDD e2e suite in [`e2e/`](./e2e/) (nightly CI against
+> real models via OpenRouter).
 
 ## Features
 
 **The loop & tools**
 - **Streaming agent loop** (`iter.Seq2`) with pause, resume, and cancel — every step is a typed `Event`.
-- **Core tool kit** — Read (line-numbered), Edit (read-before-edit / exact-match / uniqueness invariants), Write, Grep, Glob, a WebFetch stub, and an **optional** Bash (behind a `CommandRunner` seam, so the harness runs shell-less in a locked-down pod). Plus opt-in tools: **memory** (Remember/Recall), the **Parallel** delegation tool (N isolated branches), and **ToolSearch** for progressive disclosure.
+- **Core tool kit** — Read (line-numbered), Edit (read-before-edit / exact-match / uniqueness invariants), Write, Grep, Glob, a WebFetch stub, and an **optional** Bash (behind a `CommandRunner` seam, so the harness runs shell-less in a locked-down pod). Plus opt-in tools: **memory** (Remember/Recall/SearchMemory, with a user-scoped trio alongside), **skills** (Skill + a writable SkillDraft quarantine), the **Parallel** delegation tool (N isolated branches), and **ToolSearch** for progressive disclosure.
 - **Read-parallel / mutate-serial dispatch** — read-only tools run concurrently; mutating tools never do (a correctness guarantee, not an optimization).
 - **Delegation — one-shot, parallel, or a crew.** Three tools share an isolated read-only child loop: **Subagent** runs one isolated child and returns its result (plus an agentId trailer); **Parallel** fans out N isolated branches in forked workspaces and joins them (all / first / judge), returning the winner or all results with the preserved fork-workspace paths; **Team** coordinates a crew over a shared task list, findings ledger, and mailbox. All three honour a shared token budget (`--max-run-tokens`), a child-concurrency cap, per-call limits/model overrides, and opt-in structured output; Team also has a team-wide token budget (`--max-team-tokens`).
 
@@ -31,7 +34,7 @@ API. No TUI — it's a service and a library.
 - **Workspace containment** — file tools are scoped to the session root via `os.Root` (symlink/`..`-escape safe).
 
 **Provider & context**
-- **OpenAI Responses adapter** — stateless (`store:false`), reasoning items preserved across turns, cache-stable prompt prefix; points at any OpenAI-compatible endpoint via a base-URL override.
+- **Multi-provider** — OpenAI Responses (stateless `store:false`, reasoning items preserved across turns, cache-stable prompt prefix; any OpenAI-compatible endpoint via a base-URL override), the native Anthropic Messages API, and OpenRouter, over an embedded models.dev catalog with per-session provider/model routing, live model listing, and capability intersection.
 - **Resilience** — retry/backoff + circuit breaker around the provider (never replays a partially-streamed turn); provider errors surface to clients.
 - **Context management** — two-layer cache-stable prompt; a pluggable `Compactor` (single-summary default + a tiered snip→strip→collapse→summarize cascade) with a `TokenCounter` seam (heuristic or offline tiktoken).
 - **Memory** — conservative tiered memory (Remember/Recall) + optional background "dream" consolidation.
@@ -39,7 +42,7 @@ API. No TUI — it's a service and a library.
 - **MCP client** — connect to MCP servers over **streaming-HTTP transport only** (stdio is not supported); their tools register namespaced `mcp__server__tool`.
 
 **Interfaces & operations**
-- **Two API surfaces, one event model** — a bidi gRPC `Converse` stream and an HTTP/SSE mirror, both over the same domain `Event`.
+- **Three API surfaces, one event model** — a bidi gRPC `Converse` stream, an HTTP/SSE mirror, and ACP over stdio for editors (`--acp`), all over the same domain `Event`.
 - **Auth & limits** — bearer token + optional TLS/mTLS, per-client + global rate limiting, `/healthz`+`/readyz` + gRPC health, graceful shutdown, session auto-resume from a store.
 - **Observability** — Prometheus metrics (`/metrics`), OpenTelemetry spans with an OTLP exporter, per-tool-call logging, and an append-only JSONL replay store.
 - **Deployment** — `ko`-built static distroless image, PSS-restricted manifests, and a signed release (cosign + SBOM + SLSA provenance).
@@ -47,7 +50,7 @@ API. No TUI — it's a service and a library.
 
 ## Quick start
 
-Requires **Go 1.26.3** (the `go.mod` toolchain directive auto-fetches it) and
+Requires **Go 1.26.3** (the `go` directive in `go.mod` auto-fetches it) and
 [go-task](https://taskfile.dev). [golangci-lint](https://golangci-lint.run) for linting,
 [buf](https://buf.build) only to regenerate the proto.
 
@@ -73,18 +76,26 @@ go run ./cmd/mecademo
 [001] turn=0 session.init
 [002] turn=0 turn.start
 [003] turn=0 message.delta  text="I'll read the greeting file first."
-[004] turn=0 tool.call      tool=Read args={"path":"greeting.txt"}
-[005] turn=0 tool.result    error=false result="     1\thello from the mecatl demo workspace"
-[006] turn=1 turn.start
-[007] turn=1 message.delta  text="Now I'll save a short note, which needs your approval."
-[008] turn=1 permission.ask ASK tool=Write reason="approval required by rule for Write (note.txt)"  -> client auto-approves
-[009] turn=1 tool.call      tool=Write args={"path":"note.txt","content":"reviewed the greeting\n"}
-[010] turn=1 tool.result    error=false result="wrote \"note.txt\" (22 bytes)"
-[011] turn=2 turn.start
-[012] turn=2 message.delta  text="Done: I read greeting.txt and saved note.txt."
-[013] turn=0 result         stop=end_turn text="Done: I read greeting.txt and saved note.txt."
+[004] turn=0 turn.end
+[005] turn=0 tool.call      tool=Read args={"path":"greeting.txt"}
+[006] turn=0 tool.result    error=false result="     1\thello from the mecatl demo workspace"
+[007] turn=1 turn.start
+[008] turn=1 message.delta  text="Now I'll save a short note, which needs your approval."
+[009] turn=1 turn.end
+[010] turn=1 tool.call      tool=Write args={"path":"note.txt","content":"reviewed the greeting\n"}
+[011] turn=1 permission.ask ASK tool=Write reason="approval required by rule for Write (note.txt)"  -> client auto-approves
+[012] turn=1 tool.result    error=false result="wrote \"note.txt\" (22 bytes)"
+[013] turn=2 turn.start
+[014] turn=2 message.delta  text="Done: I read greeting.txt and saved note.txt."
+[015] turn=2 turn.end
+[016] turn=0 result         stop=end_turn text="Done: I read greeting.txt and saved note.txt."
       usage: in=4100 out=125 cacheRead=3600 cacheWrite=0 cacheHitRate=0.88
 ```
+
+Two more sections follow in the same run: an offline **team** demo (a lead + worker
+coordinate and the lead synthesises the consolidated report) and a **background
+subagent** demo (detach, harness notice at the turn boundary, collect via
+`SubagentStatus`).
 
 ### Run the server
 
@@ -113,28 +124,38 @@ If you bind a non-loopback address without auth, `mecated` logs a prominent warn
 token or mTLS (or a NetworkPolicy) in front of it. See [`docs/usage.md`](./docs/usage.md)
 for every flag, the gRPC `Converse` flow, and `curl` examples for the HTTP/SSE routes.
 
+### Run the TUI
+
+```sh
+ANTHROPIC_API_KEY=... go run ./cmd/mecatui    # hosts an embedded mecated in-process
+go run ./cmd/mecatui --server 127.0.0.1:8080  # or point it at a running server
+```
+
+See [`docs/tui.md`](./docs/tui.md) for keybindings, slash commands, and themes.
+
 ## Architecture at a glance
 
 Dependencies point inward only. The domain and the application (the loop) know nothing of
 OpenAI, gRPC, or the filesystem — those are adapters behind ports, wired together only in
-`cmd/mecated`.
+the composition layer (`internal/app`, called from the `cmd/` mains).
 
 ```
  driving adapters            domain + application                 driven adapters
  ┌─────────────┐      ┌──────────────────────────────┐      ┌────────────────────┐
- │ gRPC server │─────▶│ agent (loop, dispatch,        │◀─────│ OpenAI Responses   │
+ │ gRPC server │─────▶│ agent (loop, dispatch,        │◀─────│ OpenAI / Anthropic │
  │ HTTP / SSE  │      │        pause/resume, subagent)│      │ mock LLM           │
- └─────────────┘      │   ↓ depends only on ports     │      │ os / in-mem FS     │
- ┌─────────────┐      │ session · governance · tool · │◀─────│ permission policy  │
- │ mecademo CLI │─────▶│ prompt   (domain)             │      │ shell hooks        │
- └─────────────┘      └──────────────────────────────┘      │ session stores     │
-                                                             └────────────────────┘
+ │ ACP (stdio) │      │   ↓ depends only on ports     │      │ os / in-mem FS     │
+ └─────────────┘      │ session · governance · tool · │◀─────│ permission policy  │
+ ┌─────────────┐      │ prompt   (domain)             │      │ shell hooks        │
+ │ mecatui,demo │────▶│                               │      │ session stores     │
+ └─────────────┘      └──────────────────────────────┘      └────────────────────┘
 ```
 
 - **[`docs/architecture.md`](./docs/architecture.md)** — the system in depth: layers, the loop, ports, sequence diagrams, extension points.
 - **[`docs/usage.md`](./docs/usage.md)** — build/run, the demo, `mecated` flags, the gRPC + HTTP/SSE APIs with examples, permissions, hooks, troubleshooting.
 - **[`docs/design/PRODUCTION-READINESS.md`](./docs/design/PRODUCTION-READINESS.md)** — the live status tracker (what's done, what's deferred).
-- **[`docs/design/`](./docs/design/)** — design rationale: `ARCHITECTURE.md`, `STEP-CHAIN.md`, `OPENAI-RESPONSES-API.md`, `TWELVE-PATTERNS-AUDIT.md`.
+- **[`docs/tui.md`](./docs/tui.md)** — the optional `mecatui` terminal client.
+- **[`docs/design/`](./docs/design/)** — design rationale per feature: `MULTI-PROVIDER.md`, `AGENT-TEAMS-SPIKE.md`, `DIAGNOSTICS.md`, `DRIVERS.md`, `BACKGROUND-SUBAGENTS.md`, plus the dense per-subsystem `IMPLEMENTATION-NOTES.md` and the historical spikes.
 - **[`CLAUDE.md`](./CLAUDE.md)** — orientation for agents working in this codebase.
 
 ## Project layout
@@ -148,28 +169,29 @@ the composition layer.
 |---|---|
 | `engine/session`, `engine/governance`, `engine/tool`, `engine/prompt` | the domain (aggregate, permission/hook types, tool catalog + FS interfaces, prompt assembly) |
 | `engine/port` | the port interfaces the loop consumes |
-| `engine/agent` | the agent loop, dispatch, permission pause/resume, compaction, subagent |
-| `engine/adapter/*` | reference adapters (stdlib + engine only): `mockllm`, `memfs`, `memstore`, `sessnap`, `permpolicy`, `permstore`, `fsconformance` |
-| `internal/adapter/*` | heavy adapters: `openai`, `llmresilience`, `osfs`, `permclassify`, `hookexec`, `store/jsonlstore`, `tools`, `toolkit`, `memory`, `dream`, `soul`, `forker`, `tokenizer`, `telemetry`, `mcp`, `server` |
-| `contracts/proto`, `contracts/gen` | gRPC contract (source of truth) and generated Go |
-| `cmd/mecated`, `cmd/mecademo` | the server (composition root) and the demo |
+| `engine/agent`, `engine/team` | the agent loop, dispatch, permission pause/resume, compaction, the Subagent/Parallel/Team delegation tools |
+| `engine/adapter/*` | reference adapters (stdlib + engine only): `mockllm`, `memfs`, `memstore`, `sessnap`, `permpolicy`, `permstore`, `wallclock`, `nofs`, and the four conformance suites |
+| `internal/adapter/*` | heavy adapters: `openai`, `anthropic`, `openrouter`, `llmresilience`, `osfs`, `acp`, `skills`, `agents`, `workspacetrust`, `grpcdriver`, `store/jsonlstore`, `server`, and more — see the directory |
+| `internal/app` | the composition layer (`app.Build`): provider registry, catalog assembly, per-session routing |
+| `contracts/proto`, `contracts/gen` | gRPC contract + the driver protocol (source of truth) and generated Go |
+| `cmd/mecated`, `cmd/mecatui`, `cmd/mecademo` | the server (composition root), the optional TUI client, and the demo |
 
 ## Status
 
 The harness is **effectively production-ready bar one deliberately-deferred item** (an
 OS-level process sandbox). The loop, the tools, permissions, hooks, subagents, the API,
 auth, resilience, observability, memory, context management, MCP, and a signed release
-pipeline are all built, green under tests and `-race` lint, and the build was
-live-validated against a real frontier model. The closing 10-point "gauntlet" in
+pipeline are all built, green under tests and `-race` lint, and the build is
+continuously live-validated against real frontier models by the e2e suite. The closing
+10-point "gauntlet" in
 [`docs/harnesses/08-design-considerations.md`](./docs/harnesses/08-design-considerations.md)
 each maps to a passing test. See
 [`docs/design/PRODUCTION-READINESS.md`](./docs/design/PRODUCTION-READINESS.md) for the
 itemized status.
 
 **Deferred / optional** (seams left in place): an **OS-level sandbox** (the `CommandRunner`
-port is the seam; Bash is also fully optional, so shell-less deploys avoid the surface)
-and **multi-vendor model routing** (the `LLMProvider` port already abstracts it). **MCP is
-supported over streaming-HTTP transport only — stdio MCP is not, by design.**
+port is the seam; Bash is also fully optional, so shell-less deploys avoid the surface).
+**MCP is supported over streaming-HTTP transport only — stdio MCP is not, by design.**
 
 ## Development
 
@@ -195,7 +217,7 @@ and design decisions).
 - **[`docs/harnesses/README.md`](./docs/harnesses/README.md)** — the human narrative onramp and reading orders.
 - **[`AGENTS.md`](./AGENTS.md)** — conventions for the corpus.
 
-Eight files (~33K words) cover framing and glossary, the 12 Claude Code patterns, a Claude
+Nine files (~37K words) cover framing and glossary, the 12 Claude Code patterns, a Claude
 Code architecture deep-dive, recreations, a comparative survey, cross-cutting architecture
 patterns, context engineering + MCP, and the opinionated build roadmap that this harness
 follows. Captured 2026-05-18; the patterns are durable, time-bound facts drift.

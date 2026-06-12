@@ -36,6 +36,12 @@ empirically under-act without it. mecatl's near-empty prompt is therefore
 **more dangerous on its actual target models** than the same prompt would be on
 Claude. This is the highest-value, lowest-cost enhancement.
 
+> **Since superseded (multi-provider):** a native Anthropic Messages adapter and
+> the multi-provider registry shipped after this research (see
+> `docs/design/MULTI-PROVIDER.md`), so the "the Responses API is the only
+> provider today" statements in this doc are historical. The model-family switch
+> built here (`agencyDelta`) now serves both buckets for real.
+
 Everything proposed here fits the existing seam (`prompt.Config` already exposes
 `Role`/`Tone`/`Safety` overrides and the two-layer cache split) — no domain
 struct changes, no loop surgery for the core work.

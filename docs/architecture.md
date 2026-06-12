@@ -21,15 +21,18 @@ Dependencies point inward only: a domain of pure value objects and aggregates
 application consumes (`port`), the application use-case layer that is the agent
 loop (`agent`), and adapters that implement the ports (`adapter/*`). The core
 tiers (domain, ports, agent loop) plus a small set of stdlib-only REFERENCE
-adapters (`engine/adapter/*`: `mockllm`, `memfs`, `memstore`, `sessnap`,
-`permpolicy`, `permstore`, `fsconformance`) live under `engine/` — the
+adapters (`engine/adapter/*`: `mockllm`, `memfs`, `nofs`, `memstore`, `sessnap`,
+`permpolicy`, `permstore`, `wallclock`, plus the conformance-as-contract suites
+`fsconformance`, `memconformance`, `storeconformance`, `sourceconformance`) live
+under `engine/` — the
 importable core, fully self-contained (tests included: nothing under `engine/`
 imports `internal/...`) and intended to be importable as a library by external
 consumers — while the heavy adapters and the composition layer stay under
-`internal/`. The LLM provider sits behind the `port.LLMProvider` seam, with the
-OpenAI Responses API isolated entirely inside `internal/adapter/openai`, so the
-core is provider-agnostic and unit-testable against fakes (`mockllm`, `memfs`,
-`memstore`).
+`internal/`. The LLM provider sits behind the `port.LLMProvider` seam, with each
+wire format isolated entirely inside its own adapter — the OpenAI Responses API
+in `internal/adapter/openai`, the native Anthropic Messages API in
+`internal/adapter/anthropic` (§18) — so the core is provider-agnostic and
+unit-testable against fakes (`mockllm`, `memfs`, `memstore`).
 
 Around that core, every capability beyond the minimal loop is a **seam with a
 default and a swap-in adapter**, so the production build stays static and
@@ -66,7 +69,7 @@ flowchart LR
   end
 
   subgraph PORTS["ports — engine/port"]
-    p["LLMProvider · SessionStore\nPermissionPolicy · HookRunner\nEventSink · Clock · Logger"]
+    p["LLMProvider · SessionStore\nPermissionPolicy · HookRunner\nEventSink · ToolCallRecorder\nDiagnostics · Clock"]
   end
 
   subgraph DOMAIN["domain (no infra imports)"]
@@ -241,6 +244,10 @@ immutable value object built via `NewUserMessage`, `NewSystemMessage`,
 `NewAssistantMessage(text, reasoning, calls)`, `NewToolMessage(result)`. Roles:
 `system`, `user`, `assistant`, `tool`. `Message.Reasoning` carries the
 provider's opaque reasoning item, replayed back verbatim and never interpreted.
+`Message.ProviderPhase` carries the OpenAI Responses **phase** marker
+(`commentary`/`final_answer`) under the same discipline — opaque, replayed
+verbatim on the assistant message item, never displayed or interpreted (issue
+#46: dropping it makes GPT-5.x treat preambles as final answers and stop early).
 `Turn` is a value object summarizing one model call plus its results and usage
 (defined but not the primary carrier — the loop appends messages directly).
 
@@ -260,12 +267,16 @@ API. The real constants:
 
 | EventType value | Const | Emitted when |
 |---|---|---|
-| `session.init` | `EvSessionInit` | run starts (declared; loop emits `turn.start` first) |
+| `session.init` | `EvSessionInit` | run starts — emitted exactly once, before the SessionStart hook and the first `turn.start` |
 | `turn.start` | `EvTurnStart` | beginning of each turn |
+| `turn.end` | `EvTurnEnd` | closes a turn's model exchange, carrying the typed `TurnEndPayload` |
 | `message.delta` | `EvMessageDelta` | streamed assistant text delta |
+| `reasoning.delta` | `EvReasoningDelta` | streamed, display-only reasoning summary text |
 | `tool.call` | `EvToolCall` | a tool is about to run |
 | `tool.result` | `EvToolResult` | a tool result (incl. denies / hook blocks) |
+| `tool.progress` | `EvToolProgress` | transient progress for a long-running tool |
 | `permission.ask` | `EvPermissionAsk` | loop paused for client approval |
+| `permission.retract` | `EvPermissionRetract` | a previously surfaced ask is withdrawn (e.g. the child that parked it was cancelled) |
 | `hook` | `EvHook` | a hook fired (e.g. PreToolUse block) |
 | `compaction` | `EvCompaction` | a compaction boundary crossed |
 | `no_progress` | `EvNoProgress` | a completed turn produced no tool call and no meaningful text; the loop is nudging (gentle, then a final best-effort extraction) or giving up |
@@ -297,12 +308,12 @@ runs with no network and no disk.
 
 | Port | Responsibility | Signature (verbatim) |
 |---|---|---|
-| `LLMProvider` (`llm.go`) | provider-agnostic model call; streams neutral chunks | `Stream(ctx context.Context, req LLMRequest) (iter.Seq2[Chunk, error], error)` |
-| `SessionStore` (`store.go`) | persist/retrieve session state | `Save(ctx context.Context, s *session.Session) error` · `Load(ctx context.Context, id session.SessionID) (*session.Session, error)` |
+| `LLMProvider` (`llm.go`) | provider-agnostic model call; streams neutral chunks | `Stream(ctx context.Context, req LLMRequest) (iter.Seq2[Chunk, error], error)` · `Capabilities() ProviderCapabilities` (multimodal-input flags; decorators must forward the inner provider's) |
+| `SessionStore` (`store.go`) | persist/retrieve session state | `Save(ctx context.Context, s *session.Session) error` · `Load(ctx context.Context, id session.SessionID) (*session.Session, error)` — a store may additionally implement the optional `PrunableStore` (`List`/`Delete`) for retention (§11) |
 | `HookRunner` (`hookrunner.go`) | run a lifecycle hook, map exit code to outcome | `Run(ctx context.Context, ev governance.HookEvent) (governance.HookOutcome, error)` |
-| `PermissionPolicy` (`permission.go`) | deny→ask→allow across merged scopes | `Evaluate(ctx context.Context, mode session.PermissionMode, c session.ToolCall) governance.PermissionDecision` |
-| `EventSink` (`log.go`) | relay loop events to the API stream | `Emit(ev session.Event)` |
-| `ToolCallRecorder` (`log.go`) | structured per-tool AUDIT (distinct from `Diagnostics`) | `ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, took time.Duration)` |
+| `PermissionPolicy` (`permission.go`) | deny→ask→allow across merged scopes; per-session learned allows | `Evaluate(ctx context.Context, sessionID session.SessionID, mode session.PermissionMode, c session.ToolCall, ws tool.WorkspaceReader) governance.PermissionDecision` (ws is the READ-ONLY discovery root for file-based permission config, issue #13; nil = no project config) · `Learn(sessionID session.SessionID, c session.ToolCall)` (the allow-**always** verdict; lowest scope, never overrides a deny or plan mode) |
+| `EventSink` (`log.go`) | relay loop events to the API stream | `Emit(ctx context.Context, ev session.Event)` |
+| `ToolCallRecorder` (`log.go`) | structured per-tool AUDIT (distinct from `Diagnostics`) | `ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, queued, took time.Duration)` |
 | `Diagnostics` (`diagnostics.go`) | injected operational-logging seam (NO global slog in `engine/` or `internal/`) | `Log(ctx, level Level, msg string, args ...any)` · `With(args ...any) Diagnostics` |
 | `Clock` (`clock.go`) | abstract wall clock | `Now() time.Time` |
 
@@ -319,20 +330,27 @@ type LLMRequest struct {
 type ChunkKind int
 const (
     ChunkText ChunkKind = iota
-    ChunkReasoning
+    ChunkReasoning     // display-only reasoning summary delta
+    ChunkReasoningItem // opaque reasoning REPLAY blob → Message.Reasoning
     ChunkToolCall
     ChunkUsage
     ChunkDone
+    ChunkPhase         // opaque phase marker → Message.ProviderPhase (issue #46)
 )
 
 type Chunk struct {
     Kind     ChunkKind
-    Text     string             // text on ChunkText, reasoning on ChunkReasoning
+    Text     string             // text / reasoning summary / replay blob / phase marker, per Kind
     ToolCall *session.ToolCall  // on ChunkToolCall
     Usage    *session.Usage     // on ChunkUsage
     Stop     session.StopReason // on ChunkDone
 }
 ```
+
+The `ChunkReasoning` (display summary) vs `ChunkReasoningItem` (replay blob)
+split is deliberate and provider-neutral — Anthropic's thinking delta maps to
+the former, its `(thinking,signature)` replay token to the latter; they must
+never be conflated. `ChunkPhase` follows the same opaque-replay discipline.
 
 ### The tool contract and the FS seam (`engine/tool`)
 
@@ -383,15 +401,21 @@ returns a `*Run` handle immediately and drives the loop in a background
 goroutine; the `Run` exposes:
 - `Events() <-chan session.Event` — the primary surface, closed exactly once
   when the run terminates.
-- `Approve(askID string, allow bool)` — resolves a `permission.ask`
-  out-of-band.
+- `Approve(askID string, v session.ApprovalVerdict)` — resolves a
+  `permission.ask` out-of-band with one of three verdicts: `VerdictDeny` (the
+  fail-safe zero value), `VerdictAllowOnce`, or `VerdictAllowAlways` (which
+  additionally asks the policy to **learn** a session-scoped allow via
+  `PermissionPolicy.Learn`).
 - `Cancel()` — cancels the run's context.
+- `CancelChild(childID string) bool` — cancels ONE child run (subagent /
+  parallel branch / team member) without touching the run itself (§8).
 
 `drive` (in `loop.go`) is the algorithm:
 
-1. **SessionStart gate** (`fireSessionStart`, first turn only): fire the blocking
-   `SessionStart` hook before anything else; a block (or hook error) aborts the
-   run before the prompt is even recorded.
+1. **Run-open + SessionStart gate**: emit `session.init` exactly once, before
+   anything else; then (first turn only) fire the blocking `SessionStart` hook
+   (`fireSessionStart`); a block (or hook error) aborts the run before the
+   prompt is even recorded.
 2. **Record the prompt** (`recordPrompt`): expand the raw input through
    `CommandExpander.Expand` (slash commands; the `NoopExpander` default leaves it
    unchanged), fire the blocking `UserPromptSubmit` hook **on the expanded text**
@@ -399,8 +423,10 @@ goroutine; the `Run` exposes:
    on the first turn assemble project instructions via `Instructions.Assemble`
    (the `RootAssembler` default reads AGENTS.md/CLAUDE.md), recording them + the
    final user text through the aggregate root.
-3. **Pre-turn stop guard**: if `sess.StopReason()` trips or `ctx` is cancelled,
-   terminate.
+3. **Pre-turn stop guard**: announce any newly-finished background children
+   (one harness-note user message, ids + stop labels only; §8); then, if
+   `sess.StopReason()` trips, `ctx` is cancelled, or the run **token budget**
+   is crossed (below), terminate.
 4. `BeginTurn`, emit `turn.start`.
 5. **Maybe compact** (`maybeCompact`).
 6. **Run the turn** (`runTurn`): build the `LLMRequest`, call `LLM.Stream`,
@@ -413,6 +439,16 @@ goroutine; the `Run` exposes:
 
 The loop terminates the session in exactly one of `Complete`/`Stop`/`Cancel`/
 `Fail` and emits exactly one terminal `result` event carrying cumulative usage.
+
+A run-level **token budget** bounds the whole loop: `Deps.MaxRunTokens`
+(`--max-run-tokens`, 0 = disabled) is checked at the turn boundary — never
+mid-stream, so an in-flight turn always completes — against the run's
+accumulated `session.Usage` (input + output; cache tokens excluded). Crossing
+it ends the run cleanly with `StopBudget` (a NON-error terminal → `completed`,
+Reopen-recoverable, mirroring `StopNoProgress`). Every child engine — Subagent,
+Parallel branch, team member, lead synthesis — inherits it; a per-call override
+(`RunOptions.MaxRunTokensOverride`, the Subagent `max_tokens` arg) may only
+**tighten** it. The team-aggregate counterpart is `--max-team-tokens` (§15).
 
 ```mermaid
 sequenceDiagram
@@ -484,9 +520,9 @@ sequenceDiagram
   A-->>Sv: emit permission.ask {askID, tool, args, reason}
   Sv-->>Cl: Event permission.ask
   Note over A,Reg: loop blocked in askRegistry.await
-  Cl->>Sv: Converse ResumeApproval{ask_id, allow}  /  POST /approve
-  Sv->>R: run.Approve(askID, allow)
-  R->>Reg: resolve(askID, allow)
+  Cl->>Sv: Converse ResumeApproval{ask_id, verdict}  /  POST /approve
+  Sv->>R: run.Approve(askID, verdict)
+  R->>Reg: resolve(askID, verdict)
   Reg-->>A: verdict
   A->>A: sess.ResumeWith → state=running
   alt allow
@@ -496,11 +532,19 @@ sequenceDiagram
   end
 ```
 
-- **Allow** → the call executes normally.
+- **Allow (once)** → the call executes normally.
+- **Allow always** → the call executes AND the policy **learns** a per-session
+  allow rule for the same tool + exact canonical pattern
+  (`PermissionPolicy.Learn`; never overrides a deny or plan mode).
 - **Deny** → `denyResult` synthesizes a `permission denied: <reason>` error
-  `ToolResult`, fed back so the model can adapt.
+  `ToolResult`, fed back so the model can adapt. Deny is the verdict's zero
+  value, so an abandoned ask fails safe.
 - **Cancel while awaiting** → `await` returns `ok=false`; the loop ends as
   `StopCancelled`.
+
+On the wire, `ResumeApproval` carries the three-way `verdict` enum; the legacy
+`allow` bool is kept for back-compat (ignored when `verdict` is set; otherwise
+`true` maps to allow-once, `false` to deny).
 
 This ties directly to the API: the gRPC `Converse` stream carries the verdict in
 a `ResumeApproval` frame on the **same** stream emitting events (no out-of-band
@@ -590,7 +634,8 @@ self-contained task (multi-step investigation or build/test/git work) to a **chi
    (running the child's Bash in the shared base is the exact hazard isolation exists
    to prevent).
 2. Builds a **fresh** child `session.New(...)` — own conversation, own (tighter)
-   `Limits` (`defaultChildLimits`: 12 turns / 40 tool calls / 3 failures),
+   `Limits` (`defaultChildLimits`: 50 turns / 200 tool calls / 3 failures —
+   half the main session's 100/400, issue #50),
    scoped to the **run** workspace root (the worktree when forked, else the parent).
    **On `resume`** (a Subagent call carrying `resume: <agentId>`) it instead RELOADS the
    persisted child by that id and recovers its terminal state — `completed` → `Reopen()`,
@@ -603,10 +648,12 @@ self-contained task (multi-step investigation or build/test/git work) to a **chi
    **default explorer engine only** (rejected with `agent`/`model`); an in-flight guard
    rejects a concurrent run on the same id.
 3. Runs the child via the injected `childEngine.Run(ctx, child, runWS, prompt)`.
-4. **Drains the child's entire Event stream inside `Execute`** (`drainChild`),
-   discarding every intermediate `turn.start`/`message.delta`/`tool.call`/
-   `tool.result`/`hook`/`compaction` event, and **returns only the final
-   summary string** as one `ToolResult` (gauntlet #7).
+4. **Drains the child's entire Event stream inside `Execute`**
+   (`drainChildObserved` — the single redaction chokepoint all three delegation
+   families share), relaying only the REDACTED, metadata-only
+   `subagent.start/tool/end` projection (§3) and **returning only the final
+   summary string** as one `ToolResult` (gauntlet #7) — no child transcript
+   ever enters the parent conversation.
 
 **Per-call knobs (`subagentArgs`).** Beyond `prompt`/`description`/`agent`, a Subagent call may
 supply: `max_turns`/`max_tool_calls`/`max_tokens` (TIGHTEN-ONLY caps — the model can
@@ -623,7 +670,11 @@ validation error / error) and carries an `agentId: <childID>` trailer on every t
 (model-visible, mirroring the Team-id line) so the parent can discover the child id and
 read its persisted transcript via the read-only `InspectSubagent` tool (the id is used
 verbatim), or pass it as `resume` to CONTINUE that subagent with a follow-up prompt
-(default engine only, fresh fork + staleness note; `failed` is not resumable). None of
+(default engine only, fresh fork + staleness note; `failed` is not resumable). When
+neither `agent` nor `model` pins one, a def-less child runs on the global
+`--subagent-model` default (the analogue of `CLAUDE_CODE_SUBAGENT_MODEL`; a concrete
+id or a `--model-alias` name, resolved same-provider; precedence `def.Model >
+--subagent-model > parent model`, empty inheriting the parent's). None of
 these widen `port.LLMRequest` — they are `subagentArgs`/`RunOptions`/factory concerns.
 
 **Background, SubagentStatus & per-child cancel (`docs/design/BACKGROUND-SUBAGENTS.md`).**
@@ -681,8 +732,13 @@ boundary:
   cancelled). `NewSubagentTool` panics on a nil child Engine.
 
 This mirrors the **team-member** worktree treatment (§ below): same `gitenv`
-hardening, same untrusted-`.gitattributes` residual, and the workspace-trust gate is
-the **shared follow-up** for both Team and Subagent.
+hardening, same untrusted-`.gitattributes` residual. The workspace-trust gate
+**shipped** (issue #40), shared by both: an **untrusted** workspace nils the
+sandboxed runner, so read-only subagents and team members get NO shell there —
+an honest Spec note tells the model, and the gate is narrated once at build.
+Mutating members / Parallel branches keep their hardened force-copy shells
+(force-copy forking runs no git, so the fork-time checkout hazard the gate
+closes cannot fire there).
 
 ## 9. The OpenAI Responses adapter (`internal/adapter/openai`)
 
@@ -707,12 +763,22 @@ the **shared follow-up** for both Team and Subagent.
 **SSE → Chunk translation** (`stream.go`, `translate` — a pure function driven
 directly from recorded fixtures by `decodeSSE` in tests):
 - `response.output_text.delta` → `ChunkText`
-- `response.reasoning_summary_text.delta` → `ChunkReasoning`
+- `response.reasoning_summary_text.delta` / `response.reasoning_text.delta` →
+  `ChunkReasoning` (the DISPLAY summary)
+- `response.output_item.done` (reasoning) → `ChunkReasoningItem` (the
+  `encrypted_content` REPLAY blob — distinct from the display summary; the two
+  must never be conflated)
+- `response.output_item.done` (message) → `ChunkPhase` (the opaque phase
+  marker, stored on `Message.ProviderPhase` and replayed verbatim on the
+  assistant message item — issue #46)
 - `response.output_item.done` (function_call) → `ChunkToolCall` (acts on the
   assembled `.done` payload, not concatenated deltas)
-- `response.completed` → `ChunkUsage` then `ChunkDone` (cached tokens map into
-  `Usage.CacheReadTokens`)
-- `response.failed` / `response.incomplete` / `error` → `ChunkDone(StopError)`
+- `response.completed` → `ChunkUsage` then `ChunkDone(end_turn)` (cached tokens
+  map into `Usage.CacheReadTokens`)
+- `response.incomplete` → `ChunkUsage` then `ChunkDone(error)`
+- `response.failed` / `error` → a non-nil stream **error** carrying the
+  provider's message verbatim (so the real reason reaches the terminal
+  `result`, not an opaque "error")
 
 **Cancellation**: `Stream` (`openai.go`) selects on `ctx.Done()` each iteration
 and abandons the underlying stream; a deliberate `ctx` cancel is **not** reported
@@ -765,10 +831,20 @@ reach the right run.
   (true iff ≥1 provider is available). See §18.
 - `Converse(stream ConverseRequest) → stream ConverseResponse)` — bidirectional.
   The first frame **must** be `prompt`; then zero or more `resume_approval` /
-  `cancel` control frames. `ConverseRequest` is a `oneof kind { Prompt prompt=1;
-  ResumeApproval resume_approval=10; Cancel cancel=11 }`. The server starts the
+  `cancel` / `cancel_child` control frames. `ConverseRequest` is a `oneof kind
+  { Prompt prompt=1; ResumeApproval resume_approval=10; Cancel cancel=11;
+  CancelChild cancel_child=12 }`. The server starts the
   run, reads control frames on a side goroutine (`readControl`), and relays
   `Event`s on the main goroutine until the channel closes.
+- The full service is wider than this core. Session lifecycle adds
+  `CloseSession`; the read-only inventories are `ListAgents`, `ListCommands`,
+  `ListSkills`, `GetSoul`, `GetUserModel`; MCP passthrough is
+  `ListMcpResources` / `ReadMcpResource` / `ListMcpPrompts` / `GetMcpPrompt` /
+  `ListMcpSources` / `ListToolHiveGroups`; and the team family is `CreateTeam`
+  / `SpawnTeammate` / `SendTeammateMessage` / `RunTeam` (a server-streamed
+  `TeamEvent` sequence) / `ListTeam` / `CleanupTeam`.
+  `CreateTeamRequest.max_team_tokens` carries the tighten-only team-wide token
+  budget (§15).
 
 `ConverseResponse` wraps one `Event`. The proto `Event` mirrors `session.Event`
 one-for-one: string `type` plus `ToolCall`, `ToolResult`, `PermissionAsk`,
@@ -784,8 +860,13 @@ v1 enforces required checks in the Go server (protovalidate runtime is deferred)
 | `GET /v1/sessions/{id}` | `GetSession` | JSON snapshot |
 | `GET /v1/models` | `ListModels` | JSON selectable-model inventory (available providers only, secret-free) |
 | `POST /v1/sessions/{id}/prompt` | start a run | `text/event-stream`; each event is `data: <proto Event as JSON>` |
-| `POST /v1/sessions/{id}/approve` | `Run.Approve` | resolves the paused ask |
+| `POST /v1/sessions/{id}/approve` | `Run.Approve` | resolves the paused ask (verdict or legacy `allow`) |
 | `POST /v1/sessions/{id}/cancel` | `Run.Cancel` | cancels the in-flight run |
+| `POST /v1/sessions/{id}/cancel-child` | `Run.CancelChild` | cancels ONE child of the in-flight run |
+| `DELETE /v1/sessions/{id}` | `CloseSession` | frees the per-session engine slot |
+| `GET /v1/agents` · `/v1/skills` · `/v1/commands` · `/v1/soul` · `/v1/usermodel` | the inventory RPCs | read-only snapshots |
+| `GET /v1/mcp/resources` · `/v1/mcp/resources/read` · `/v1/mcp/prompts` · `POST /v1/mcp/prompts/get` · `GET /v1/mcp/sources` · `/v1/mcp/toolhive/groups` | MCP passthrough | mirrors the gRPC MCP family |
+| `POST /v1/teams` · `POST /v1/teams/{id}/members` · `POST /v1/teams/{id}/messages` · `POST /v1/teams/{id}/run` · `GET /v1/teams/{id}` · `DELETE /v1/teams/{id}` | the team family | `/run` streams `TeamEvent`s over SSE |
 
 Closing either stream cancels the run: the SSE handler watches
 `r.Context().Done()` and calls `run.Cancel()`; the gRPC relay cancels on a send
@@ -800,6 +881,21 @@ the error, cancel the run, and keep ranging `run.Events()` (discarding, no
 further writes) until the channel closes — a busy run never wedges in its own
 emits behind a dead client.
 
+**ACP (`internal/adapter/acp`)** — a THIRD wire surface alongside gRPC and
+HTTP/SSE: the Agent Client Protocol, JSON-RPC 2.0 over **stdio**, lets an ACP
+editor (Zed, and others) spawn mecatl as a subprocess (wired in `cmd/mecated`
+behind `--acp`) and drive the SAME surface-agnostic `server.Service`. It
+carries its own JSON — it never imports `contracts/gen` — projecting domain
+`session.Event`s onto `session/update` notifications and resolving permission
+asks via the outbound `session/request_permission` request (the adapter is
+both JSON-RPC server and client; the bidirectional codec lives in `conn.go`).
+Prompt content is **multimodal + capability-gated**: every block becomes text,
+a `session.Content` part, or a loud `codeInvalidParams` — never a silent drop —
+routed through the single `session.NewContent`/`ValidateMediaParts` choke
+point and gated on `Service.ProviderCapabilities()`. (This is the harness
+speaking an editor protocol delivered over its own stdin/stdout; the project's
+no-stdio rule is about MCP servers, which are never `os/exec`-spawned.)
+
 ## 11. Observability & persistence
 
 - **EventSink** (`port.EventSink`) — an optional secondary relay.
@@ -812,9 +908,9 @@ emits behind a dead client.
   forwards the per-run `Run.ctx`). `Seq` is a monotonic per-run counter
   (`atomic.Int64`).
 - **ToolCallRecorder** (`port.ToolCallRecorder`) — `ToolCall(id, call, result,
-  took)` records tool-execution timing, the per-tool AUDIT seam, distinct from the
-  model-visible conversation. The loop times execution via the injected `Clock`
-  (`timeExecute`).
+  queued, took)` records tool queue + execution timing, the per-tool AUDIT seam,
+  distinct from the model-visible conversation. The loop times execution via the
+  injected `Clock` (`timeExecute`).
 - **Diagnostics** (`port.Diagnostics`) — the injected operational-logging seam
   (composition decisions, degraded-mode warnings, lifecycle notes), DISTINCT from
   the audit (`ToolCallRecorder`) and the event stream (`EventSink`). `engine/` + `internal/`
@@ -839,6 +935,12 @@ emits behind a dead client.
   exporter + SDK TracerProvider and installs it globally (wired in `mecated` via
   `--otlp-endpoint` / `--otlp-protocol` / `--otlp-insecure`); with an empty
   endpoint `Providers.Tracer` is the current (no-op) global and only metrics run.
+  Child engines (Subagent / team member / Parallel) get **role-tagged metric
+  views** when `Config.MetricsRoleScoper` is wired (issue #47): their
+  `Deps.Sink`/`ToolCallRecorder` are scoped per role FAMILY — the closed set
+  `main|subagent|member|parallel|usermodel|child`, never the raw role (which can
+  embed a def name or model id), so label cardinality stays bounded; without a
+  scoper they stay nil, byte-identical to the metrics-off posture.
   > A broader performance-observability effort lands incrementally on a
   > **loopback-only, unauthenticated admin listener** (`--metrics-addr`, default
   > `127.0.0.1:9090`): `/metrics`, `/debug/pprof/*`, `/debug/vars` (a curated
@@ -853,12 +955,21 @@ emits behind a dead client.
   > technique reference).
 - **SessionStore** — `memstore` (default, in-memory), `jsonlstore`
   (append-only JSONL replay log: `<dir>/<id>.session.jsonl` snapshots +
-  `<dir>/<id>.tools.jsonl` tool records; `jsonlstore` also implements `Logger`),
+  `<dir>/<id>.tools.jsonl` tool records; `jsonlstore` also implements
+  `ToolCallRecorder`),
   and `grpcdriver.SessionStore` (a **remote store driver** — see below).
   All serialize via **`sessnap`** (`engine/adapter/sessnap`): a `Snapshot` DTO
   that round-trips a `Session` by driving the public state machine on restore
   (so a session saved mid-`awaiting` reloads with its pending ask intact). It
   captures the terminal reason via `RecordedStopReason()` for exact round-trips.
+  A store may additionally implement the optional **`port.PrunableStore`**
+  (`List`/`Delete`; `ErrPruneUnsupported` otherwise) — the retention MECHANISM.
+  The POLICY lives in composition (`internal/app/childgc.go`, issue #38):
+  persisted CHILD session snapshots (the `subagent-*`/`parallel-*`/`team-*` ids
+  behind `InspectSubagent`/`InspectMember`/`resume:`) are GC-swept by age
+  (`--child-retention`, default 7d) and per-family count
+  (`--child-retention-max-per-family`, default 500), skipping in-flight runs;
+  main sessions are never touched.
 
 ### Remote store + source drivers (`internal/adapter/grpcdriver`)
 
@@ -982,6 +1093,16 @@ flow back to the client as a terminal `result` event — `session.ResultPayload`
 now carries an **`Error`** field, so a provider failure is reported to the caller
 rather than swallowed.
 
+Mid-stream stalls are bounded separately, by `Config.StreamIdleTimeout`
+(`--llm-stream-idle-timeout`, default 120s, 0 disables), NOT by
+`PerAttemptTimeout`: after the first chunk a per-chunk watchdog caps the idle
+gap between consecutive chunks and synthesizes a terminal `*StreamIdleError`
+(`errors.Is(_, context.DeadlineExceeded)`) when it fires — the wrapper must
+synthesize it because the adapters deliberately swallow the ctx error on
+cancel and would otherwise yield nothing. The stall is TERMINAL, never retried
+(no-replay-after-first-chunk holds); pre-first-chunk stalls stay on
+`PerAttemptTimeout` + retry, unchanged.
+
 Auto-resume complements this: `GetSession`/`Approve`/`Cancel` fall back to
 `SessionStore.Load`, and the service persists at create, on entering `awaiting`,
 and at run end. With `--store-dir` (jsonlstore) a session survives a restart and
@@ -1024,7 +1145,8 @@ Two seams keep a long run inside the model's context window:
 the seam for conservative, **per-project** memory (every implementation must pass
 the shared `engine/adapter/memconformance` conformance suite). The file-backed
 `internal/adapter/memory` implementation persists entries scoped to a project
-directory and exposes them to the model as the **Remember** and **Recall** tools
+directory and exposes them to the model as the **Remember**, **Recall**, and
+**SearchMemory** tools
 (opt-in via `memory.Register`, `--memory-dir`). On top of it, `internal/adapter/dream` is an opt-in background
 **consolidation** ("sleep") service: `dream.Consolidator` distills the stored
 memory with an LLM call — merging duplicates and dropping stale entries — but is
@@ -1056,7 +1178,8 @@ a **git worktree** (`git worktree add --detach … HEAD`) when the root is insid
 repo, else a **recursive copy** — so a child can never write back into the
 parent's tree. `agent.NewParallelTool(childEngine, forker, …)` is the fan-out tool
 (catalog name `Parallel`): it runs several isolated child loops on independent
-branches and joins their results. It is opt-in via `--enable-parallel`; like Subagent,
+branches and joins their results. It is default-on (`--enable-parallel`, disable
+with `--enable-parallel=false`); like Subagent,
 the children's intermediate events are drained internally.
 
 The same seam serves **agent teams** (`agent.Supervisor`/`TeamTool`) with a
@@ -1080,8 +1203,9 @@ member runner share it and can't drift: `Scrub` drops inherited `GIT_*` danger
 subagent (§8) shares this exact treatment**: when Bash is configured `SubagentTool` holds
 its own worktree forker (`WithChildForker`) and forks each child into a throwaway
 worktree, with the SAME `buildSandboxedCommandRunner` + `gitenv` hardening and the
-SAME untrusted-`.gitattributes` residual; the workspace-trust gate is the shared
-follow-up for both.
+SAME untrusted-`.gitattributes` residual; the workspace-trust gate (issue #40,
+shipped — see §8) covers both the same way: an untrusted workspace yields no
+read-only-member/subagent shell at all.
 
 A team's **returned deliverable** is the **lead's consolidated synthesis**, not a
 concatenation of member `LastText`: after the scheduling loop, `Supervisor.Run` drives
@@ -1099,6 +1223,16 @@ is intentionally fuller than Subagent/Parallel but structurally bounded: `team.m
 forwards only capped member message/tool previews (never a `permission.ask`), task/finding
 snapshots are capped value types, and `team.end` carries aggregate usage plus closed-enum
 member dispositions (`done` or `stopped` for `error`/`cancelled`/`budget`).
+
+A team-wide **token budget** complements the per-run one (§5):
+`Supervisor.WithTeamTokenBudget` (`--max-team-tokens`; gRPC
+`CreateTeamRequest.max_team_tokens`; a per-call Team `max_team_tokens` arg may
+only tighten it) is a supervisor-level ceiling checked at the ROUND boundary
+before scheduling — the in-flight round and the lead's synthesis still
+complete, and members are never individually stopped — accumulating each
+member's per-drive usage and surfacing via `TeamOutcome.BudgetExhausted` plus
+a `StopBudget` team stop. It is orthogonal to `--max-run-tokens`, which each
+member inherits per-run.
 
 ## 16. Extensibility — MCP, tools & progressive disclosure
 
@@ -1168,11 +1302,18 @@ composes an **ordered** list of sources with a defined precedence — **earlier
 source wins** on name collisions, the loser dropped with a "shadowed by a
 higher-precedence source" `SkipError`. A future embedded-defaults or remote
 registry source just implements `Source` and slots into the `MultiSource`; the
-consumer (`skills.RegisterSource`) is unchanged. The Source seam lives in the
-**adapter** package, NOT the domain: nothing in the domain or the agent loop
-consumes skills (they are packaged into a `tool.Tool` at composition time), so a
-domain port would be the wrong home — the seam is scoped to where it is consumed,
-mirroring MCP and the TUI theme search-path.
+consumer (`skills.RegisterSource`) is unchanged. Two seams now exist at
+different altitudes. **`tool.SkillSource`** (`engine/tool/skillsource.go`) is
+the DOMAIN port skills cross as **logical bundles** — identity/metadata
+(`SkillMeta`), body, and payloads addressed by logical name
+(`SkillAsset`, `ListSkillAssets`/`ReadSkillAsset`) — never a path/dir/root;
+both the FS adapter (`skills.FSSource`) and the remote driver
+(`SkillSourceService`, §11) implement it, and the conformance suite holds them
+to the same semantics. `skills.Source` remains the **adapter-local**
+discovery/composition seam underneath it (where a skill's files live is the FS
+adapter's non-port business — `FSSource.AssetDirs` feeds the read-root
+allowlist above); nothing in the agent loop consumes skills directly (they are
+packaged into a `tool.Tool` at composition time).
 
 **The self-improving skill loop** (`skills.Drafter`, opt-in) closes the loop so
 durable skills can *come into being from the agent's own experience*. A single
@@ -1232,12 +1373,12 @@ changes when one is swapped:
 | `Compactor` | `agent/compaction.go` | `HeuristicCompactor` → `CascadeCompactor` |
 | `TokenCounter` | `agent/tokencount.go` | `HeuristicTokenCounter` → `tokenizer.Counter` |
 | `InstructionAssembler` | `prompt/instructions.go` | `RootAssembler` (AGENTS.md/CLAUDE.md) → `MultiAssembler` composing `RootAssembler` → `SoulAssembler` (persona) → `MemoryIndexAssembler` (saved project facts) → `UserModelAssembler` (operator FACTS), all as turn-0 user messages |
-| `prompt.SoulSource` | `prompt/soul.go` (impl `internal/adapter/soul`) | nil (off) → `*soul.Store`; agent-READ-ONLY (no write path), env-injected (not the WorkspaceReader — the file is outside any session root), injection-scanned + byte-capped, fail-soft; on by default, `--soul-file`/`--no-soul`. **Two provenances + trust gate (issue #14, Phase 3, Item 2):** a USER soul (`<xdg>/mecatl/soul.md` or `--soul-file PATH`) is always trusted; a PROJECT soul (a discovered `<workspace>/.mecatl/soul.md`, parallel to `.mecatl/settings.yaml`) is **untrusted by default** and honoured only with `--trust-project` (the SAME issue-#13 gesture — not a new flag, not routed through governance: the soul is fenced DATA). **USER-WINS precedence** (single identity anchor, not a merge): a present user soul is used and the project soul is ignored; an untrusted project soul is dropped + `slog.Warn`-logged. The selection (provenance/trusted/drift metadata) lives in `internal/app/soulselect.go`; `engine/prompt` stays trust-unaware. **Drift baseline (Item 1):** `soul.LoadWithMeta` computes the sha256 of the clean body in the same read; `internal/app/soulguard` records it as a harness-owned sidecar `<soulPath>.sha256` trust-on-first-use (against WHICHEVER soul wins), `slog.Warn`s on a later mismatch, and (with `--soul-strict`) drops a drifted soul. `--approve-soul` re-baselines. The WRITE lives ONLY in the composition layer — the adapter stays write-free. |
+| `prompt.SoulSource` | `prompt/soul.go` (impl `internal/adapter/soul`) | nil (off) → `*soul.Store`; agent-READ-ONLY (no write path), env-injected (not the WorkspaceReader — the file is outside any session root), injection-scanned + byte-capped, fail-soft; on by default, `--soul-file`/`--no-soul`. **Two provenances + trust gate (issue #14, Phase 3, Item 2):** a USER soul (`<xdg>/mecatl/soul.md` or `--soul-file PATH`) is always trusted; a PROJECT soul (a discovered `<workspace>/.mecatl/soul.md`, parallel to `.mecatl/settings.yaml`) is **untrusted by default** and honoured only with `--trust-project` (the SAME issue-#13 gesture — not a new flag, not routed through governance: the soul is fenced DATA). **USER-WINS precedence** (single identity anchor, not a merge): a present user soul is used and the project soul is ignored; an untrusted project soul is dropped + WARN-narrated (via the injected `port.Diagnostics`). The selection (provenance/trusted/drift metadata) lives in `internal/app/soulselect.go`; `engine/prompt` stays trust-unaware. **Drift baseline (Item 1):** `soul.LoadWithMeta` computes the sha256 of the clean body in the same read; `internal/app/soulguard` records it as a harness-owned sidecar `<soulPath>.sha256` trust-on-first-use (against WHICHEVER soul wins), WARNs on a later mismatch, and (with `--soul-strict`) drops a drifted soul. `--approve-soul` re-baselines. The WRITE lives ONLY in the composition layer — the adapter stays write-free. |
 | `prompt.UserModelSource` | `prompt/usermodel.go` (impl `internal/adapter/memory`) | nil (off) → a SECOND, user-scoped, **cross-project** `*memory.Store` over `<xdg>/mecatl/usermodel`; durable operator FACTS exposed as RememberUser/RecallUser/SearchUserModel (enforced `user/` prefix; write-time injection scan) + the turn-0 `<user-model>` block; on by default, `--user-model-dir`/`--no-user-model`. Writable FACTS, not a governance scope. OPT-IN Stop-triggered reviewer via `--user-model-review` (never reopens the user session) |
 | `CommandExpander` | `prompt/command.go` | `NoopExpander` → `DirCommandExpander` (slash commands) |
 | `tool.Disclosable` + `ToolSearch` | `engine/tool` | always-listed → progressive disclosure |
 | `Skill` tool (skills) | `internal/adapter/skills` (impl) | off → opt-in `--skills-dir`; progressive disclosure of *instructions* (metadata always in context, body on activation) |
-| `skills.Source` | `internal/adapter/skills/source.go` | `DirSource` (one dir) → `MultiSource` (ordered, earlier-wins); known-path resolver (`--skills-conventional`: project `.mecatl`/`.claude`, user XDG/`~/.claude`); future embedded/remote sources slot in |
+| `skills.Source` (adapter) / `tool.SkillSource` (domain port) | `internal/adapter/skills/source.go` / `engine/tool/skillsource.go` | `DirSource` (one dir) → `MultiSource` (ordered, earlier-wins); known-path resolver (`--skills-conventional`: project `.mecatl`/`.claude`, user XDG/`~/.claude`); the domain port carries skills as logical bundles (metadata/body/assets, no paths) — implemented by `skills.FSSource` and the remote `SkillSourceService` driver |
 | `skills.Drafter` (self-improving loop) | `internal/adapter/skills/drafter.go` | off → opt-in `--skills-draft-dir`; default `DirDrafter` (offline: validate/sanitize/2-gram-Jaccard novelty → out-of-workspace quarantine, NEVER a catalog Source). WRITE side is pluggable (a future LLM-vetting decorator slots in); promotion is filesystem-only in the MVP — operator `mecated skills promote` is the gate (shows content, confirms, verifies provenance; author N → promote → active N+1) |
 | `tool.CommandRunner` | `engine/tool/tool.go` (impl `osfs`) | the command-execution chokepoint; an OS sandbox wraps here |
 | `tool.MemoryStore` | `engine/tool/tool.go` (impl `memory`; conformance `engine/adapter/memconformance`) | cross-session memory + `dream` consolidation |
@@ -1249,10 +1390,12 @@ changes when one is swapped:
 **Remaining non-goals / deliberate deferrals**: an **OS-level sandbox**
 (Landlock/seccomp/Seatbelt) is the one explicitly-deferred item — the
 `CommandRunner` seam is the place it wraps, and shell-less deploys avoid the
-surface entirely. **stdio MCP is never supported**. Embeddings and multi-vendor model
-routing (the `LLMProvider` port already abstracts it) remain unbuilt; **skills**
-exist as progressive-disclosure instruction units (see above), though richer
-*packaging* (bundled scripts/resources alongside `SKILL.md`) is not yet built. The guiding restraint still holds: build the shape, instrument it,
+surface entirely. **stdio MCP is never supported**. Embeddings remain unbuilt
+(multi-provider routing shipped — §18); **skills**
+exist as progressive-disclosure instruction units (see above), with bundled
+*packaging* shipped as logical assets on the `tool.SkillSource` port
+(`SkillAsset`, `ListSkillAssets`/`ReadSkillAsset` — never a path on the wire),
+served through the skill read-root allowlist. The guiding restraint still holds: build the shape, instrument it,
 and resist features before the loop, tools, permissions, hooks, and cache all work.
 
 ## 17. Deployment & server hardening
@@ -1274,16 +1417,31 @@ and `cmd/mecated` wires the knobs:
 Deployment artifacts: a hardened **GitHub Actions** CI plus a **ko**-based release
 that signs images with **cosign** and emits an **SBOM** and **SLSA provenance**
 (`.github/workflows`, `.ko.yaml`); `deploy/` carries PSS-restricted manifests
-(health probes can switch TCP→httpGet against the endpoints above).
+(health probes can switch TCP→httpGet against the endpoints above). A **live
+BDD e2e suite** (`e2e/`, `task e2e`, the `e2e-live.yml` workflow) exercises the
+harness against a real model; it is opt-in (real money) and deliberately not
+part of `task test`.
 
 ### Permission & bash governance details (`engine/governance`)
 
 The `permpolicy` adapter wraps `governance.Evaluator`. Resolution
 (`evaluator.go`): a **Deny in any scope beats Ask beats Allow**; among rules of
 the same effect the highest-precedence `Scope` wins (`Managed > CLI >
-LocalProject > SharedProject > User`); **no matching rule defaults to Ask** (the
+LocalProject > SharedProject > User > BuiltinDefault`); **no matching rule
+defaults to Ask** (the
 harness never silently allows an unconfigured call). Plan mode (`ModePlan`)
 denies mutating tools (`Edit`, `Write`) and non-read-only `Bash` up front.
+`ScopeBuiltinDefault` is the harness's built-in floor (read-allow /
+mutate-ask), with ONE narrow exception to the same-effect tie-break: a
+higher-scope configured Allow may loosen **only** a built-in-default Ask —
+never a *configured* Ask. The floor also carries pre-approved (but
+config-overridable) Allows for the memory tool family, the synthetic
+`soul:apply` action, and the three read-only child-observability tools
+(`InspectSubagent`/`InspectMember`/`SubagentStatus`, issue #37) — they loosen
+no other tool's Ask. A client's allow-**always** verdict feeds
+`PermissionPolicy.Learn` (over `engine/adapter/permstore`): a per-session
+allow consulted at the lowest scope only, never overriding a deny or plan
+mode.
 
 The allow-all operator posture (`--yolo`, `app.Config.AllowAllTools`)
 is **not** an evaluator bypass: it injects a single `ScopeCLI` allow-all rule into the
@@ -1298,8 +1456,15 @@ splitting on `&&`, `||`, `;`, `|`, a bare `&`, and newlines) and evaluates
 transparent wrappers (`timeout`, `time`, `nice`, `env`, `stdbuf`, `ionice`) but
 deliberately **never** strips re-entrant launchers (`docker exec`, `npx`,
 `sudo`, `devbox run`). `HasSubstitutionOrGrouping` flags `$(...)`, backticks,
-`<(...)`, and `(`/`{` grouping and floors such segments at Ask (fail-safe).
-`ReadOnlyBash` classifies a command line as read-only for plan-mode gating.
+`<(...)`, and `(`/`{` grouping and floors such segments at Ask (fail-safe) —
+unless `SubstitutionReadOnly` clears it: a segment whose every
+recursively-extracted inner command AND whose blanked outer are all read-only
+resolves by the ordinary rule fold instead (global, main + children). For
+ISOLATED children (worktree/force-copy forks), `IsolationApprovable`
+additionally auto-approves read-only plus a minimal worktree-safe verb set —
+the §8 4-step child-ask model.
+`ReadOnlyBash` classifies a command line as read-only for plan-mode gating and
+is deliberately a SEPARATE, unchanged classifier.
 
 ### Workspace trust (`internal/app/trust.go`, `internal/adapter/workspacetrust`)
 
@@ -1327,8 +1492,9 @@ workspace-trust design), which folds, highest first:
 downstream build, so the existing consumers — `permconfig.Options.TrustProject`
 and the soul provenance gate (`soulselect.go`) — honour declared trust through the
 **exact same admission path** as the flag, with no adapter signature churn and no
-bypass. The composition narrates the decision (`slog.Info "workspace trust"
-trusted=… source=… drifted=…`), mirroring the soul-selection narration.
+bypass. The composition narrates the decision (a `workspace trust` INFO fact via
+the injected `port.Diagnostics`: `trusted=… source=… drifted=…`), mirroring the
+soul-selection narration.
 
 **Phase 2a — the project-tier authority gate.** When the folded decision is
 **untrusted**, composition also withholds the **PROJECT TIER ONLY** of
@@ -1362,8 +1528,9 @@ deterministic fold of the project **soul** ⊕ project-tier **agent** ⊕ **comm
 excludes `settings.yaml`** — permissions change every commit, so anchoring drift on
 them would nag-fatigue the operator (they re-resolve live via permconfig's mtime
 cache instead). A drift (entry present, anchor mismatched) re-gates to untrusted +
-`slog.Warn`; the interactive re-prompt is the `mecatui` first-encounter prompt
-(Phase 2c, still to come). The registry **write** uses `O_NOFOLLOW` + `0o600` +
+a WARN; the interactive re-prompt is the `mecatui` first-encounter prompt
+(shipped — `cmd/mecatui/trust.go`), which prompts on first encounter or drift
+and remembers via `workspacetrust.Remember`. The registry **write** uses `O_NOFOLLOW` + `0o600` +
 temp-then-rename (mirroring `soulguard`'s sidecar write, CWE-59), and a corrupt /
 oversized / wrong-version registry fails safe to untrusted. The SHA-256 primitive is
 shared with `soulguard` via the `internal/adapter/hashutil` leaf (`SHA256Hex`) —

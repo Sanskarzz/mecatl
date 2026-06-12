@@ -15,8 +15,7 @@
   loopback admin listener, backed by a `telemetry.SlowTurnBuffer` slow-turn ring
   fanned into the engine's EventSink and bridged to the adapter's
   `SlowTurnSource` at the cmd boundary, plus the `mecated perf-mcp print-config`
-  helper. The **only remaining Phase-2 item** is the companion interpretation
-  skill (§8). Sections 1–3 retain the research/rationale; §4–§5 record the
+  helper. Sections 1–3 retain the research/rationale; §4–§5 record the
   decisions.
 - Date: 2026-06-03.
 - Scope: how mecatl exposes its own runtime performance for measurement —
@@ -306,12 +305,14 @@ and 2 are both committed (not "maybe later").
 
 ## 5. Decisions (settled in discussion, 2026-06-03)
 
-1. **Metrics pipeline — migrate fully to OTel metrics.** Drop `client_golang`;
-   move all domain metrics (`mecatl_events_total`, `…_runs_total`,
+1. **Metrics pipeline — migrate fully to OTel metrics.** Move all domain metrics
+   (`mecatl_events_total`, `…_runs_total`,
    `…_tool_calls_total`, `…_tool_duration_seconds`, `…_tokens_total`,
    `…_cache_hit_ratio`, `…_active_runs`, `…_permission_asks_total`) to the OTel
    metrics SDK, and expose them for scrape via the OTel **prometheus exporter** so
-   the existing `/metrics` contract survives. Unifies with the existing OTel
+   the existing `/metrics` contract survives (`client_golang` is demoted to the
+   exporter host — the registry + `promhttp` serving — and defines no domain
+   instrument, but is not dropped). Unifies with the existing OTel
    traces and unlocks **exemplars (metric→trace)**. Add the
    `contrib/instrumentation/runtime` + host collectors for the runtime picture.
 2. **Histograms — exponential / native.** Use exponential (OTel) / native

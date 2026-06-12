@@ -1,6 +1,9 @@
 # mecatui — UX discoverability design (Option C: wire capabilities)
 
-Status: proposal (design only). Author: software-architect review.
+Status: IMPLEMENTED — Phases A+B shipped (the `ServerCapabilities` wire channel,
+the `?` help overlay, the honest empty-states, the zero-state/welcome splash);
+see the inline "Update —" notes for post-design evolution. Author:
+software-architect review.
 Decision: the availability seam is **Option C — a real `ServerCapabilities`
 wire channel** (authoritative for embedded AND external servers), structured as
 two separately-reviewable phases.
@@ -433,10 +436,13 @@ decoding — the labels are plain English.
 ### The on/off truth now comes from caps (not a hardcoded matrix)
 
 The Phase-A server populates these precisely; the help overlay just reflects
-`m.caps`. For the **embedded default** the user will see: memory on; MCP,
-slash-commands, skills off (`[not enabled]`); teams on (contextual). For an
-**external mecated** with MCP configured, the same overlay correctly shows MCP
-available — the whole reason for Option C.
+`m.caps`. At the time of this design the **embedded default** showed: memory on;
+MCP, slash-commands, skills off (`[not enabled]`); teams on (contextual).
+(Since superseded: the embedded server now enables every free+local feature by
+default — slash-commands and skills show as enabled out of the box; only
+external/config/trust-gated features stay off.) For an **external mecated** with
+MCP configured, the same overlay correctly shows MCP available — the whole
+reason for Option C.
 
 ## B3. Footer (`view.go:150-151`)
 

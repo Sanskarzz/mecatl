@@ -62,3 +62,20 @@ so a cap that flipped or an oversize blob loud-rejects on the same path.
 images as the `public.png` flavour, which `pngpaste` does not see — so an image copied
 from Chrome may paste as text/empty rather than as an image. There is no shell-only fix
 (it needs an `NSPasteboard` read of the `public.png` UTI); documented as a known gap.
+
+## Since extended
+
+Two later paste features ride the same staging machinery this note describes:
+
+- **Middle-click PRIMARY paste** — `Clipboard.ReadPrimary` reads the X11/Wayland
+  PRIMARY selection (the select-to-copy buffer) as text, and the ui pastes it on
+  middle-click with an OSC52 fallback (`cmd/mecatui/client/clipboard.go`,
+  `cmd/mecatui/ui/clipboard.go`). Same injected-runner seam, same direct-argv
+  (never `sh -c`) discipline.
+- **Large-paste `[Pasted text #N]` placeholders** — a huge pasted text stages
+  behind a `[Pasted text #N]` marker in the textarea instead of flooding it,
+  reconciled at submit exactly like `[Image #N]` (surviving markers expand,
+  deleted markers drop the staged text).
+
+Nothing above changes: `ctrl+v` image-first/text-fallback, the marker-reconcile
+model, and the `buildMediaPart` choke point are as described.

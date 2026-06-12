@@ -11,6 +11,14 @@ See `internal/adapter/agents/` (discovery + `Registry`) and
 translation, scoping, model/mode resolution — the layering rule keeps the `Registry`
 out of `engine/agent`, which receives only `map[string]*Engine` / `MemberBuild`).
 
+The port seam is `engine/tool/agentsource.go`: `AgentDef` (a pure value object — no
+path/locator concept; `Origin` is a closed admission-tier label, never a location;
+`AgentMCPServer.Headers` is SECRET-SHAPED — never logged or projected into any
+inventory/snapshot surface) and `AgentDefSource` (SNAPSHOT semantics —
+`ListAgentDefs` is stable for the source's life; the harness resolves once at
+build). Where a def came from is the adapter's NON-PORT detail channel
+(`agents.Discovered.Detail` / `Registry.Detail`), never a port field.
+
 ## Frontmatter
 
 ```yaml
@@ -51,7 +59,8 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   silent disclosure tool).
   - **Subagent delegates are read-only EXPLORERS WITH A SHELL** — `Subagent.ReadOnly()` stays
     `true`, but a Subagent child now runs in an isolated git **worktree** (when Bash is
-    configured), so it KEEPS Bash for inspection (git log/show, cat, build, test) while
+    configured AND the workspace is trusted — issue #40: an untrusted workspace yields
+    no read-only-child shell at all), so it KEEPS Bash for inspection (git log/show, cat, build, test) while
     **Edit/Write are still dropped** on the Subagent path (with a startup diagnostic) — a
     def's Bash survives via `scopedToolNamesMode`'s `allowShell`. Its writes land in the
     throwaway worktree, never the shared base, which is why `ReadOnly()` stays true. A
@@ -144,8 +153,11 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   MCP tool name in the `tools:` allowlist still yields an "unknown tool" diagnostic —
   the `tools:`/`disallowedTools:` scope governs the **core** toolset only; MCP tools
   arrive via `mcpServers:`, not the core allowlist.
-- **No `--agents` inline JSON.** Definitions come only from `<name>.md` files under
-  `--agents-dir` / the conventional dirs.
+- **No `--agents` inline JSON.** Definitions come from `<name>.md` files under
+  `--agents-dir` / the conventional dirs, or from a remote gRPC driver via
+  `--agent-source-url` (`mecatl.driver.v1.AgentSourceService`; snapshotted at
+  startup, mutually exclusive with `--agents-dir`, supersedes conventional
+  discovery).
 - **No Agent-as-tool nesting.** A def cannot re-add `Subagent`/`Parallel`/`ToolSearch`; a child
   never recurses or fans out further.
 - **No file-path scoping** (Roo's file allowlist) yet.
@@ -156,6 +168,10 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
 --agents-dir <dir>            repeatable; explicit dirs, highest precedence
 --agents-conventional[=true]  also discover .mecatl/agents, .claude/agents, user dirs
                               (ON by default, inert when absent; like teams/fork)
+--agent-source-url <addr>     host:port of a remote agent-definition gRPC driver
+                              (mecatl.driver.v1.AgentSourceService); snapshotted at
+                              startup, mutually exclusive with --agents-dir,
+                              supersedes conventional discovery
 --subagent-model <id|alias>   global model override for Subagent/member children
 --model-alias name=id         repeatable alias→id map (composition layer only)
 ```

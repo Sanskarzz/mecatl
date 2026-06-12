@@ -34,7 +34,7 @@
 | Item | Status | Notes |
 |---|---|---|
 | Prometheus metrics + `/metrics` | ✅ | `telemetry` |
-| Per-tool logging + JSONL replay | ✅ | `Logger` + `jsonlstore` |
+| Per-tool logging + JSONL replay | ✅ | `ToolCallRecorder` (the port formerly named `Logger`) + `jsonlstore` |
 | OTel span model (run/turn/tool) | ✅ | `telemetry` |
 | OTLP exporter wiring | ✅ | `telemetry.Setup` builds/installs an OTLP TracerProvider; wired in `mecated` via `--otlp-endpoint`/`--otlp-protocol`/`--otlp-insecure` (no-op when empty) |
 | **Health endpoints** (`/healthz`,`/readyz`, gRPC health) | ✅ | HTTP `/healthz` (liveness) + `/readyz` (readiness) mounted outside auth/rate-limit; standard `grpc_health_v1` SERVING (`server/health.go`). `deploy/` can switch TCP→httpGet probes |
@@ -58,7 +58,7 @@
 | 12 lifecycle hooks | ✅ | all phases fire |
 | 5 progressive compaction | ✅ | `Compactor` seam + `HeuristicCompactor` (default) and `CascadeCompactor` (tiered) |
 | 8 fork-join parallelism | ✅ | `tool.WorkspaceForker` + `internal/adapter/forker` (git-worktree/copy isolation) + `agent.NewParallelTool` (parallel isolated branches, join); wired in `mecated` (`--enable-parallel`) |
-| **3 tiered memory** | ✅ | `tool.MemoryStore` seam + file-backed `internal/adapter/memory` (Remember/Recall tools, per-project, conservative descriptions); opt-in via `memory.Register` |
+| **3 tiered memory** | ✅ | `tool.MemoryStore` seam + file-backed `internal/adapter/memory` (Remember/Recall/SearchMemory tools, per-project, conservative descriptions); ON by default per-project (`MEMORY-DEFAULTS.md`) — only consolidation stays opt-in |
 | 4 dream/sleep consolidation | ✅ | `internal/adapter/dream` — conservative MemoryStore+LLM consolidator (merge dupes / drop stale, never invents keys, fail-safe), `RunPeriodically`; opt-in via `--memory-consolidate-interval` |
 
 ## Deployment
@@ -66,16 +66,16 @@
 | Item | Status | Notes |
 |---|---|---|
 | ko build + PSS-restricted manifests | ✅ | `.ko.yaml`, `deploy/` |
-| Health probes in manifests | 🔨 | `/healthz`+`/readyz`+gRPC health now exist; `deploy/` can switch TCP→httpGet (manifest edit pending) |
+| Health probes in manifests | ✅ | `deploy/deployment.yaml` uses `httpGet` probes against `/healthz` (liveness) and `/readyz` (readiness); see `deploy/README.md` |
 | Config file (vs flags only) | ✅ | file-based PERMISSION config shipped (issue #13): `internal/adapter/permconfig` loads `.mecatl/settings.yaml` (+ imports Claude-Code `settings.json`), RE-RESOLVED PER SESSION against each session's workspace root via a `permpolicy.RuleResolver`. Tiered scopes (project < user), trust-gated project allows (`--trust-project`), conventional discovery (`--permissions-conventional`, ON), Claude import (`--import-claude-permissions`), explicit files (`--permission-config`). Broader (non-permission) config-file surface remains flags-only |
 
 ## Other / future features (Optional — not production blockers)
 
 | Item | Status | Rationale |
 |---|---|---|
-| Multi-vendor model routing | 🟦 | `LLMProvider` port already abstracts it; a router is a convenience adapter |
+| Multi-vendor model routing | ✅ | SHIPPED — server-side provider registry + native Anthropic Messages adapter + embedded models.dev catalog + OpenRouter, with per-session provider/model routing and capability intersection. See `docs/design/MULTI-PROVIDER.md` |
 | Repo map (tree-sitter PageRank) | ❌ removed | The Aider-style repo-map tool was **retired and removed** — its WASM tree-sitter binding leaked (~23 MB/session) and hung after ~160 files. See `docs/design/REPOMAP-TREE-SITTER.md`. May return later from a clean design |
-| Slash commands | ✅ | `prompt.CommandExpander` + `DirCommandExpander` (`.mecatl/commands`/`.claude/commands` templates); `--commands-dir`/`--enable-commands`. (Full skill packaging still future.) |
+| Slash commands | ✅ | `prompt.CommandExpander` + `DirCommandExpander` (`.mecatl/commands`/`.claude/commands` templates); `--commands-dir`/`--enable-commands`. (Skills since shipped too: Skill/SkillDraft tools + the `engine/tool` `SkillSource` port + the `/skills` browser.) |
 | Live OpenAI validation | ✅ | validated against Sonnet 4.5 via OpenRouter (full tool-calling loop) |
 | Fuzz tests (bash splitter, SSE decoder) | ✅ | native Go fuzzers + Taskfile `fuzz` target; security invariants asserted; no crashers found |
 

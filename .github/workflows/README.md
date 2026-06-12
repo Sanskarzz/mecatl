@@ -69,7 +69,7 @@ the self-diagnosing transcripts (`.scratch/e2e-*/artifacts/**`, including
 `mecated.log`) upload as a 7-day artifact, and the cumulative token/cost
 ledger is appended to the job summary when present in the test output.
 
-## `release.yml` — `v*` tag push
+## `release.yml` — `v*` tag push (+ `workflow_dispatch` with a `tag` input, for idempotently re-publishing an existing tag's artifacts)
 
 Builds and publishes the `mecated` image and its supply-chain metadata. The
 workflow defaults to `contents: read`; the single publish job elevates to

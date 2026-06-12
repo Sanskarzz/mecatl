@@ -1,11 +1,21 @@
 # mecatl — Architecture
 
-> Status: design + rationale, kept in step with the implementation. The v1 core
+> **Historical design document — superseded by `docs/architecture.md`** (the
+> reader-facing guide kept in step with the code). This file predates: the
+> `internal/app` composition layer (adapters now meet ports there, not only in
+> `cmd/`), the mecatui TUI client, multi-provider (the native Anthropic adapter,
+> OpenRouter, providercatalog), skills/agents/soul/memory-tiering/workspace-trust,
+> the driver protocol, and the Subagent/Team/Parallel delegation families. Names
+> and the package tree below are as of the post-v1 hardening wave, not current
+> (e.g. `port.Logger` is now `ToolCallRecorder`; the Task tool is now `Subagent`).
+
+> Status: historical design + rationale (see banner above). The v1 core
 > (loop, ~7 tools, permissions, hooks, cache, two API surfaces) shipped as
 > designed; this revision folds in the post-v1 capabilities (resilience,
 > telemetry, MCP, memory, fork-join, the context-management cascade, the pattern
 > seams, and server hardening). Where this doc names a package/type, the name
-> matches the current code. The authoritative status map is
+> matched the code as of that wave (see the banner above for what has renamed or
+> moved since). The authoritative status map is
 > `docs/design/PRODUCTION-READINESS.md`.
 > Module: `github.com/stacklok/mecatl` · Go 1.26.3
 > Primary source: `docs/harnesses/08-design-considerations.md` (the 13 load-bearing
