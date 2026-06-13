@@ -1705,10 +1705,11 @@ func neutraliseFraming(s string) string {
 }
 
 // framingHeader reports whether a (lower-cased, trimmed) line matches one of the
-// literal section headers renderTurnPrompt or the synthesis prompt emits, so an
-// untrusted body cannot forge a fresh "harness" section to smuggle instructions. It
-// is the single list both prompt paths share — extend it whenever a NEW literal
-// header is introduced into a member-visible prompt.
+// literal section headers renderTurnPrompt, the synthesis prompt, or the ask-review
+// prompt (buildAskReviewPrompt) emits, so an untrusted body cannot forge a fresh
+// "harness" section to smuggle instructions. It is the single list every prompt
+// path that calls neutraliseFraming shares — extend it whenever a NEW literal
+// header is introduced into a model-visible prompt those paths build.
 func framingHeader(trimmed string) bool {
 	switch {
 	case trimmed == "new messages for you:",
@@ -1718,6 +1719,15 @@ func framingHeader(trimmed string) bool {
 		trimmed == "your role:",
 		trimmed == "recorded findings:",
 		trimmed == "messages sent to you:",
+		// Ask-review prompt headers (buildAskReviewPrompt): defense-in-depth on top
+		// of the load-bearing untrustedFence — the fenced command cannot forge a
+		// fresh trusted section either.
+		trimmed == "policy:",
+		trimmed == "tool:",
+		trimmed == "requested command:",
+		strings.HasPrefix(trimmed, "respond with only "),
+		strings.HasPrefix(trimmed, "execution context:"),
+		strings.HasPrefix(trimmed, "why the static policy could not resolve it:"),
 		strings.HasPrefix(trimmed, "- message from "),
 		strings.HasPrefix(trimmed, "you have claimed task "),
 		strings.HasPrefix(trimmed, "findings from "),

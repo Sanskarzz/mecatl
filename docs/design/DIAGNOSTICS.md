@@ -157,6 +157,31 @@ not loop lines and do not count against it): the headless subagent auto-deny INF
 and the team member-reopen-failure WARN (`warnUnexpectedReopen`, when a member's
 `Reopen` fails for a reason other than the expected cancelled case).
 
+The opt-in headless ask REVIEWER (issue #31, `--headless` + `--subagent-ask-reviewer`)
+adds four INFO variants at that same `resolveChildAsk` child-ask chokepoint —
+sanctioned emissions, never a fourth loop line. Each carries the clamped `command`
+under review (an autonomous approval must record WHAT it ran, not only the policy
+reason):
+
+- **Reviewed ALLOW** — `"subagent permission ask allowed by the automated policy
+  reviewer"` (LevelInfo), with `agent`/`tool`/`reason`/`command` plus
+  `decision=reviewed-allow` and the reviewer's clamped `verdict_reason`.
+- **Reviewed DENY** — the EXISTING auto-deny INFO message
+  (`"subagent permission ask auto-denied (non-interactive shell)"`) extended with
+  `command`, `decision=reviewed-deny`, and the clamped `verdict_reason`.
+- **Reviewer FAILURE** — `"subagent ask reviewer failed to produce a verdict;
+  falling back to auto-deny"` (LevelInfo), with `agent`/`tool`/`command` plus the
+  clamped `err`. Distinct from the blanket deny so an operator can tell a reviewer
+  model that 404s/times out every call from a plain auto-deny.
+- **Breaker OPENED** — `"subagent ask reviewer circuit breaker opened after
+  consecutive non-allows; remaining asks this run auto-deny without review"`
+  (LevelInfo), emitted ONCE per run when the consecutive-failure threshold is
+  crossed.
+
+A NOT-reviewed outcome that is neither a failure nor the breaker-open crossing — an
+`ErrNotReviewable` abstention, or a later ask skipped while the breaker is already
+open — falls through to the plain auto-deny INFO unchanged (no `decision` field).
+
 ## The ban + guard
 
 Global slog is banned in `engine/` and `internal/`: no `slog.Default()`, no `slog.SetDefault()`,

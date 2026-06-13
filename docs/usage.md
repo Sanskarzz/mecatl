@@ -235,6 +235,10 @@ mailbox). See the delegation-capabilities note below.
 | `--fork-preserved-cap` | `agent.DefaultPreservedForkCap` | max **PRESERVED** winner forks (for `join=first`/`judge`) kept on disk at once — the oldest beyond this is LRU-reaped. Preserved fork workspaces stay inspectable (their paths ride the Parallel result) until reaped. |
 | `--enable-teams` | `true` | register the experimental **agent-teams** capability (`CreateTeam`/`SpawnTeammate`/`RunTeam` + the in-loop `Team` tool). On by default and **inert** until a client drives a team; `=false` disables it. |
 | `--subagent-model` | `""` | global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (via an agent definition `model:` or a per-call override) — the analogue of `CLAUDE_CODE_SUBAGENT_MODEL`. The Parallel judge stays on the session model. A concrete id or a `--model-alias`; same provider as the session. Empty inherits the parent `--model`; a non-empty value that does not resolve to a usable model id (unknown alias, or an alias meaning *inherit* — the built-in `sonnet`/`opus`/`haiku` unless overridden) **fails startup**. `mecatui` accepts the same flag for its embedded server. |
+| `--headless` | `false` | run **non-interactive**: declare that clients drive sessions but never answer permission prompts (autonomous / CI). A **child** (subagent/member/branch) unresolved permission ask is then **not surfaced** to the client (nobody would answer it — it would park until run-end) but resolved by the auto-deny path / the opt-in `--subagent-ask-reviewer`. **Caveat — this gates only CHILD asks: a MAIN-session ask still surfaces and, headless, parks unanswered forever.** Pair `--headless` with permission `allow` rules (or `--yolo`) covering the main agent's tool use, or those asks will hang. Default off: a normal mecated serving an interactive client (mecatui, an IDE) surfaces asks for a human. **`--subagent-ask-reviewer` only engages under `--headless`** — setting it on an interactive server is inert (a startup WARNING says so). |
+| `--subagent-ask-reviewer` | `""` | **OPT-IN headless ask reviewer**: model id or `--model-alias` of a tool-less ONE-TURN reviewer that adjudicates a **headless** subagent/member/branch permission ask the 4-step model would otherwise blanket auto-deny. **Requires `--headless`** (on an interactive server — including the `mecatui` embedded server — it is inert: asks surface to the client/modal instead). An allow approves **this call only** (never learned); a deny — or any reviewer error/timeout/ambiguity — keeps the call denied (**fail-safe**); each adjudication is **one extra LLM call** on the reviewer model. Configured `deny`/`ask` rules always win. The gRPC `RunTeam`-direct path is **excluded** (it runs zero-caps — no reviewer). Resolved on the **session's provider** (same-provider only). Empty (default) disables it; an unusable model id **fails startup** (validated even when inert). Deliberately a **server flag, not a permission-config key** — see the permissions section. `mecatui` accepts the same flag for its embedded server but it is inert there (the embedded server is interactive). |
+| `--subagent-ask-reviewer-max-denies` | `3` | circuit breaker for the reviewer: after this many **consecutive** non-allow reviewer outcomes (denies/failures/timeouts) within one run, further asks skip the reviewer and fall through to the plain auto-deny; an allow resets the count. |
+| `--subagent-ask-reviewer-policy` | `""` | path to a **TRUSTED** policy rubric file; its content replaces the built-in rubric the reviewer applies. The built-in rubric (allow only clearly read-only or standard build/vet/test commands; deny anything that mutates shared state, touches the network/credentials, or whose effect is unclear) lives in `defaultAskReviewPolicy` (`engine/agent/askadjudicator.go`); a custom file is **plain prose** in the same style. Read once at startup; an unreadable file **fails startup**. |
 | `--agents-dir` | `""` | directory of named **agent definitions** (`<name>.md` + YAML frontmatter), reusable as a `Subagent(agent=<name>)` delegate and as a team-member role (repeatable; highest precedence). **TRUST BOUNDARY:** a def body steers the model like `AGENTS.md`/`CLAUDE.md`. |
 | `--agents-conventional` | `true` | also discover agent defs from the conventional locations (`<workspace>/.mecatl/agents`, `<workspace>/.claude/agents`, `$XDG_CONFIG_HOME/mecatl/agents`, `~/.claude/agents`; lower precedence than `--agents-dir`). ON and **inert** until such a dir exists. Project-tier defs are **trust-gated** (`--trust-project`). |
 | `--model-alias` | `""` | model alias mapping `name=model-id` (repeatable), resolved only in composition — an agent def's `model: <alias>` resolves through this map (then the built-in sonnet/opus/haiku aliases). |
@@ -619,6 +623,39 @@ rules apply to children as usual. A typo inside the `permissions:` subtree skips
 the whole file (deny/ask included) — the WARN names the lost per-effect rule
 counts. `--yolo` remains **main-only**: it never loosens a child's substitution
 floor.
+
+**Headless ask review (`--headless` + `--subagent-ask-reviewer`).** On a
+**headless** run (no human approver — mecated started with `--headless`), a child
+ask that nothing above resolved is normally **blanket auto-denied**. The opt-in
+reviewer inserts an automated step before that deny: a tool-less, one-turn LLM
+reviewer (one extra LLM call on the reviewer model) examines the command — fenced
+as untrusted data, with claims of prior approval inside it declared void, and the
+verdict accepted only when the reviewer's *whole* reply is a single
+`{"allow":…}` object so a forged verdict echoed inside the command can't be lifted
+out — against the built-in read-only/verification rubric (or your
+`--subagent-ask-reviewer-policy` file) and either approves **this call only** or
+keeps it denied; any reviewer error/timeout/ambiguity also keeps it denied
+(**fail-safe** — the reviewer is never load-bearing for safety), and a per-run
+circuit breaker (`--subagent-ask-reviewer-max-denies`) bounds reviewer spend.
+
+**Reachability:** the reviewer fires **only** when there is no human to ask — i.e.
+under `--headless`. A normal interactive mecated (the default) **and the `mecatui`
+embedded server** (which is always interactive — a human sits at its approval
+modal) surface every unresolved child ask to the client/modal for a person to
+answer, so a reviewer configured there is inert and the server logs a startup
+WARNING to that effect. To actually use the reviewer, run `mecated --headless
+--subagent-ask-reviewer …` (and point `mecatui --server` at it if you want the
+TUI). The flag's model is still validated at startup even when inert, so a typo
+is caught immediately rather than the day `--headless` is added.
+
+Two hard bounds keep it subordinate to this section's rules: a **configured
+`subagent: ask` is never delegated to the reviewer** (a deliberately-configured
+Ask demands a *human* approver — it surfaces interactively or auto-denies
+headless, exactly as the table above says), and a configured `deny` resolves
+before any ask exists. It is deliberately a **server flag, NOT a `permissions:`
+config key**: it grants an autonomous approval capability, which must be an
+operator *deployment* decision — a (project-tier, possibly checked-in) settings
+file must never be able to switch on a mechanism that approves commands by itself.
 
 **Scope → location** (highest precedence first; see `engine/governance` Scope):
 

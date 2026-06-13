@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -467,7 +468,7 @@ func (e *Engine) timeExecute(ctx context.Context, r *Run, ws tool.Workspace, tur
 // (gauntlet #7: an ASK with a tool name + clamped command + static-framed reason, never
 // transcript content). diag is the parent run's run-scoped diagnostics for the headless
 // auto-deny operator line.
-func (*Engine) parentCaps(r *Run, turnIdx int) parentCaps {
+func (e *Engine) parentCaps(r *Run, turnIdx int) parentCaps {
 	interactive := r.childAsks != nil
 	caps := parentCaps{
 		interactive: interactive,
@@ -482,6 +483,57 @@ func (*Engine) parentCaps(r *Run, turnIdx int) parentCaps {
 		// It is an agent-package handle, so no layering rule is crossed; the spawning
 		// tools go through parentCaps' nil-safe wrappers.
 		children: r.children,
+	}
+	// The OPT-IN headless ask reviewer: bind the engine's reviewer + THIS run's
+	// breaker + the timeout into a closure resolveChildAsk consults on the headless
+	// branch only. The breaker mutex is held across the whole Review, deliberately
+	// SERIALIZING reviews within the run (deterministic consecutive-failure
+	// semantics; a concurrent child fan-out cannot multiply reviewer spend). The
+	// askReview-non-nil pairing is guaranteed by RunContentWith (created iff the
+	// reviewer is wired); the double check is belt-and-braces for a Run built
+	// outside it (unit tests).
+	if e.deps.ChildAskReviewer != nil && r.askReview != nil {
+		reviewer, breaker, hardAbort := e.deps.ChildAskReviewer, r.askReview, r.hardAbort
+		caps.adjudicate = func(ask session.PendingAsk, isolated bool) askReviewOutcome {
+			breaker.mu.Lock()
+			defer breaker.mu.Unlock()
+			if breaker.consecutiveDenies >= breaker.max {
+				return askReviewOutcome{} // breaker open: not reviewed, plain auto-deny (no repeat INFO)
+			}
+			// A run already past Cancel+grace is tearing down: treat it like an open
+			// breaker rather than spending a reviewer turn whose child is about to be
+			// unwound anyway. A nil channel never selects — correct no-abort behaviour
+			// for a zero-caps construction.
+			select {
+			case <-hardAbort:
+				return askReviewOutcome{}
+			default:
+			}
+			// A fresh background context + timeout: resolveChildAsk runs on the drain
+			// path with no ctx of its own, and the parked child must not hang on a
+			// wedged reviewer. A timed-out review is a failure → fall-through deny.
+			ctx, cancel := context.WithTimeout(context.Background(), askReviewTimeout)
+			defer cancel()
+			review, err := reviewer.Review(ctx, ChildAskReviewRequest{Ask: ask, Isolated: isolated})
+			switch {
+			case errors.Is(err, ErrNotReviewable):
+				// ABSTENTION: the reviewer cannot judge THIS ask. Fall through to the
+				// plain auto-deny WITHOUT touching the breaker — a reviewer that
+				// abstains on some tools must never silence review for the ones it can
+				// judge. No reviewer-failure INFO (it is a deliberate decline, not a fault).
+				return askReviewOutcome{}
+			case err != nil:
+				return askReviewOutcome{failed: true, failReason: err.Error(),
+					breakerJustOpened: noteBreakerFailure(breaker)}
+			case review.Allowed:
+				breaker.consecutiveDenies = 0
+				return askReviewOutcome{reviewed: true, allowed: true, reason: review.Reason}
+			default:
+				out := askReviewOutcome{reviewed: true, reason: review.Reason,
+					breakerJustOpened: noteBreakerFailure(breaker)}
+				return out
+			}
+		}
 	}
 	if interactive {
 		caps.surfaceAsk = func(askID, childID string, child *Run, ask session.PendingAsk, requesterLabel string) {

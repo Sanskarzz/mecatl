@@ -269,6 +269,79 @@ func TestAppConfigMapsAgentDefs(t *testing.T) {
 	}
 }
 
+// TestParseFlagsAndAppConfigMapsAskReviewer asserts the issue-#31 headless ask
+// reviewer flags parse (off by default, breaker default 3), the policy FILE is
+// read into a string by parseFlags (the composition layer never touches os),
+// and appConfig threads all three onto the shared app.Config.
+func TestParseFlagsAndAppConfigMapsAskReviewer(t *testing.T) {
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if def.subagentAskReviewer != "" {
+		t.Errorf("subagentAskReviewer default = %q, want empty (reviewer off)", def.subagentAskReviewer)
+	}
+	if def.subagentAskReviewerMaxDenies != 3 {
+		t.Errorf("subagentAskReviewerMaxDenies default = %d, want 3", def.subagentAskReviewerMaxDenies)
+	}
+
+	policyFile := filepath.Join(t.TempDir(), "rubric.txt")
+	if werr := os.WriteFile(policyFile, []byte("ALLOW read-only only."), 0o600); werr != nil {
+		t.Fatalf("write rubric: %v", werr)
+	}
+	cfg, err := parseFlags([]string{
+		"--subagent-ask-reviewer", "gpt-5-mini",
+		"--subagent-ask-reviewer-max-denies", "5",
+		"--subagent-ask-reviewer-policy", policyFile,
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.subagentAskReviewerPolicy != "ALLOW read-only only." {
+		t.Errorf("policy content = %q, want the file's content", cfg.subagentAskReviewerPolicy)
+	}
+	ac := appConfig(cfg, nil, nil, nil, nil)
+	if ac.SubagentAskReviewerModel != "gpt-5-mini" {
+		t.Errorf("SubagentAskReviewerModel = %q", ac.SubagentAskReviewerModel)
+	}
+	if ac.SubagentAskReviewerMaxDenies != 5 {
+		t.Errorf("SubagentAskReviewerMaxDenies = %d", ac.SubagentAskReviewerMaxDenies)
+	}
+	if ac.SubagentAskReviewerPolicy != "ALLOW read-only only." {
+		t.Errorf("SubagentAskReviewerPolicy = %q", ac.SubagentAskReviewerPolicy)
+	}
+
+	// An unreadable policy file FAILS startup (loud-misconfig).
+	if _, err := parseFlags([]string{"--subagent-ask-reviewer-policy", filepath.Join(t.TempDir(), "absent.txt")}); err == nil {
+		t.Errorf("an unreadable --subagent-ask-reviewer-policy must fail parseFlags")
+	}
+}
+
+// TestHeadlessFlagDrivesInteractive is the reachability fix (finding 0): mecated
+// is interactive by default (asks surface to the client), and --headless makes
+// it non-interactive (app.Config.Interactive=false) so a child's unresolved ask
+// engages the auto-deny / --subagent-ask-reviewer path instead of surfacing to a
+// client that would never answer it.
+func TestHeadlessFlagDrivesInteractive(t *testing.T) {
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if def.headless {
+		t.Errorf("headless default = true, want false")
+	}
+	if ac := appConfig(def, nil, nil, nil, nil); !ac.Interactive {
+		t.Errorf("default mecated must be Interactive=true (surfaces asks to the client)")
+	}
+	on, err := parseFlags([]string{"--headless"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if ac := appConfig(on, nil, nil, nil, nil); ac.Interactive {
+		t.Errorf("--headless must set app.Config.Interactive=false so the reviewer/auto-deny path engages")
+	}
+}
+
 func TestParseFlagsAllowAll(t *testing.T) {
 	def, err := parseFlags(nil)
 	if err != nil {

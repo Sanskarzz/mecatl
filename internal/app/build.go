@@ -328,6 +328,33 @@ type Config struct {
 	// (buildUserModelReviewEngine) stays on cfg.Model — it is a Stop-REVIEW hook
 	// engine, not a delegation child.
 	SubagentModel string
+
+	// SubagentAskReviewerModel enables the OPT-IN automated child-ask reviewer
+	// (issue #31): a tool-less one-turn child engine that adjudicates a HEADLESS
+	// subagent/member/branch permission ask which the 4-step model would otherwise
+	// blanket auto-deny (the Codex pattern). Empty (the default) disables it —
+	// behaviour byte-identical to the plain headless auto-deny. The value is a
+	// concrete model id or a ModelAliases alias, resolved per session on the
+	// SESSION's provider (same-provider only, like SubagentModel); Build normalizes
+	// it once (normalizeAskReviewerModel) and FAILS FAST on a value that does not
+	// resolve to a usable model id (no-op under UseMock). It is wired onto the MAIN
+	// engine's Deps only (per-session re-derived through the engine factory); child
+	// engines force it nil (no nesting). It is deliberately a server FLAG, not a
+	// permconfig key: it grants an autonomous approval capability, which must be an
+	// operator deployment decision — never something a (project-tier) settings file
+	// can switch on. Configured Deny/Ask rules always win over the reviewer.
+	SubagentAskReviewerModel string
+	// SubagentAskReviewerMaxDenies is the per-run adjudication circuit-breaker
+	// threshold (agent.Deps.ChildAskReviewMaxDenies): after this many CONSECUTIVE
+	// non-allow reviewer outcomes in one run, further asks skip the reviewer and
+	// fall through to the plain auto-deny. <=0 uses the default (3).
+	SubagentAskReviewerMaxDenies int
+	// SubagentAskReviewerPolicy is the TRUSTED policy rubric the reviewer applies,
+	// as a STRING (the cmd main reads --subagent-ask-reviewer-policy's file — cmd
+	// mains may use os — and passes the content). Empty keeps the built-in default
+	// rubric (agent.WithAskReviewPolicy is applied only when non-empty).
+	SubagentAskReviewerPolicy string
+
 	// ModelAliases maps a short alias (e.g. "sonnet"/"opus"/"haiku"/"fast") to a
 	// concrete provider model id. Resolved only here; the domain/agent always
 	// receives a concrete model string.
@@ -639,6 +666,13 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		return nil, err
 	}
 	cfg.SubagentModel = subagentModel
+	// SubagentAskReviewerModel (issue #31): the same fail-fast normalization
+	// posture as SubagentModel — validate the alias once here; empty = reviewer off.
+	reviewerModel, err := normalizeAskReviewerModel(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.SubagentAskReviewerModel = reviewerModel
 	// Emit the build-once composition facts (token counter / compaction strategy /
 	// slash commands) EXACTLY ONCE here, through the injected Diagnostics — keyed to
 	// the resolved MAIN model. The per-derivation builders no longer log these (they
@@ -1060,6 +1094,10 @@ func sessionEngineFactory(
 		// provider never contaminates compaction/counting.
 		deps := engineDepsForProvider(cfg, resolvedProvider, resolvedModel, contextWindow, store, policy, hooks, mcpProvider, instructions)
 		deps.Catalog = cat
+		// The OPT-IN child-ask reviewer (issue #31), RE-DERIVED on this session's
+		// resolved (provider, model) through the same attachAskAdjudicator the shared
+		// engine uses — never a clone-and-swap of the build-time reviewer.
+		deps = attachAskAdjudicator(deps, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel)
 		if noFS {
 			// MODEL-VISIBLE POSTURE (mandatory discoverability, the #40 pattern):
 			// tell the model up front there is no filesystem — and stop the prompt
@@ -1277,6 +1315,11 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 
 	deps := baseEngineDeps(cfg, provider, store, policy, mainHooks, mcpProvider, instructions)
 	deps.Catalog = cat
+	// The OPT-IN child-ask reviewer (issue #31) rides the MAIN engine's deps only,
+	// built on the shared engine's (default provider, cfg.Model). Per-session
+	// engines get their own via the SAME attachAskAdjudicator in
+	// sessionEngineFactory, re-derived on the session's resolved provider/model.
+	deps = attachAskAdjudicator(deps, cfg, reg, provider, reg.Default(), cfg.Model)
 	// The factory shares the build-once assets (global MCP manager, agent registry,
 	// flocked memory/user-model stores, skills, fork reaper) so every per-session
 	// catalog is assembled over the SAME collaborators as the shared one. It keeps
@@ -1776,6 +1819,57 @@ func normalizeSubagentModel(cfg Config) (string, error) {
 	cfg.diag().Log(context.Background(), port.LevelInfo,
 		"subagent default model ACTIVE: def-less Subagent explorer / Parallel-branch / undefined-team-member children run on it (the Parallel judge stays on the session model); a def `model:` or per-call override still wins",
 		"model", resolved)
+	return sel, nil
+}
+
+// normalizeAskReviewerModel validates and resolves Config.SubagentAskReviewerModel
+// EXACTLY ONCE at build time (called only from Build), mirroring
+// normalizeSubagentModel: empty = the reviewer is OFF (returns ""), and a
+// non-empty value that does not resolve to a usable model id — an unrecognised
+// bare token, or an alias meaning inherit — is a BUILD ERROR (the loud-misconfig
+// posture: a warn-and-inert reviewer flag would silently leave every headless
+// child ask blanket-denied, the opposite of what the operator asked for). The
+// alias grammar is the shared lookupModelAlias; a valid value is returned
+// VERBATIM (per-session buildAskAdjudicator re-resolves it cheaply on the
+// session's provider). No-op under UseMock (the mock provider isn't catalogued
+// and internal e2e tests script the reviewer through it). On success it emits
+// the build-once ACTIVE fact.
+func normalizeAskReviewerModel(cfg Config) (string, error) {
+	sel := strings.TrimSpace(cfg.SubagentAskReviewerModel)
+	if sel == "" {
+		return sel, nil
+	}
+	// FAIL-FAST validation runs FIRST, regardless of reachability: the alias
+	// lookup is free and catches a typo'd --subagent-ask-reviewer at config time
+	// rather than the day someone adds --headless and the now-active reviewer can't
+	// resolve its model. (Skipped only under UseMock, where the model is a literal
+	// the offline mock ignores.)
+	resolved, known := lookupModelAlias(cfg, sel)
+	if !cfg.UseMock {
+		switch {
+		case !known:
+			return "", fmt.Errorf("--subagent-ask-reviewer %q: unknown model alias (not in --model-alias, not a built-in alias, and a bare token is not a concrete model id); the headless ask reviewer would silently stay off — pass a concrete model id or define the alias", sel)
+		case resolved == "":
+			return "", fmt.Errorf("--subagent-ask-reviewer %q: the alias resolves to \"inherit\" (the built-in sonnet/opus/haiku aliases mean inherit unless overridden via --model-alias); pass a concrete model id or map the alias to one", sel)
+		}
+	}
+	// REACHABILITY (the runtime-discoverability bar): the reviewer is consulted
+	// ONLY on the headless branch of resolveChildAsk — an INTERACTIVE deployment
+	// (mecatui embedded, a default mecated without --headless) surfaces every
+	// unresolved child ask to its client instead, so the reviewer never fires.
+	// WARN that it is inert rather than narrate an "ACTIVE" fact that does nothing
+	// — but the value was still validated above, so a typo is caught now, not the
+	// day --headless is added. (mecated sets Interactive=false via --headless; the
+	// offline demo and a library consumer that leave it false are headless too.)
+	if cfg.Interactive {
+		cfg.diag().Log(context.Background(), port.LevelWarn,
+			"subagent ask reviewer configured but INERT: this deployment is interactive, so a child's unresolved permission ask is surfaced to the client for a human to answer and the reviewer is never consulted; run headless (mecated: --headless) to engage it",
+			"model", sel)
+		return sel, nil
+	}
+	cfg.diag().Log(context.Background(), port.LevelInfo,
+		"subagent ask reviewer ACTIVE (headless): a child's unresolved permission ask is adjudicated by an automated one-turn reviewer instead of blanket auto-denied; configured Deny/Ask rules still win",
+		"model", sel)
 	return sel, nil
 }
 
@@ -2793,6 +2887,10 @@ func childEngineDeps(cfg Config, role string, provider port.LLMProvider, cat *to
 		Clock:               wallclock.Clock{},
 		ContextWindowTokens: defaultContextWindowTokens,
 		CompactionRatio:     defaultCompactionRatio,
+		// ChildAskReviewer is deliberately ABSENT (nil): a child engine never carries
+		// the ask reviewer — no nesting, and the reviewer engine is itself built
+		// through the child deps path, so inheriting it would recurse at
+		// construction. Same posture as childEngineDepsForProvider.
 	}
 }
 
@@ -2873,6 +2971,15 @@ func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvid
 	// posture (isolation auto-approve → surface-via-parent → headless auto-deny), driven
 	// by the PARENT run's caps, not by the child engine's interactivity.
 	deps.Interactive = false
+	// A child engine NEVER carries the ask reviewer: children cannot nest a further
+	// reviewer (their own asks resolve via the PARENT run's caps), and the
+	// reviewer engine is itself built THROUGH this child path (askAdjudicatorDeps),
+	// so inheriting it here would recurse at construction. engineDepsForProvider
+	// never sets it (the assignment lives at the two main sites via
+	// attachAskAdjudicator), so this is a defensive pin — exactly like Interactive
+	// above.
+	deps.ChildAskReviewer = nil
+	deps.ChildAskReviewMaxDenies = 0
 	return deps
 }
 
@@ -3026,6 +3133,74 @@ func parallelChildDeps(cfg Config, provReg *providerRegistry, provider port.LLMP
 // by TestParallelJudgeStaysOnParentModel; documented in MULTI-PROVIDER.md.
 func buildParallelJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 	return newChildEngine(cfg, "parallel-judge", provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, cfg.gitStatus))
+}
+
+// buildAskAdjudicator constructs the OPT-IN automated child-ask reviewer (issue
+// #31), mirroring buildParallelJudgeEngine: a tool-less read-only child *Engine
+// over the SESSION's provider, role "ask-reviewer" (which lands in roleFamily's
+// "child" bucket — no new metrics label). Returns nil when
+// Config.SubagentAskReviewerModel is empty (the reviewer is off — the zero-cost
+// default). The reviewer model is resolved ALIAS-AWARE on the session's provider
+// (same-provider only, the SubagentModel discipline); Build already failed fast
+// on an unusable value (normalizeAskReviewerModel), so the defensive
+// parent-model fallback below is unreachable in a built process. It is assigned
+// at BOTH main-engine deps sites (buildEngine and sessionEngineFactory) — i.e.
+// re-derived per session/provider through the factory, never clone-and-swap.
+func buildAskAdjudicator(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) agent.ChildAskReviewer {
+	deps, ok := askAdjudicatorDeps(cfg, provReg, provider, parentProviderID, parentModel)
+	if !ok {
+		return nil
+	}
+	var opts []agent.EngineAskReviewerOption
+	if strings.TrimSpace(cfg.SubagentAskReviewerPolicy) != "" {
+		opts = append(opts, agent.WithAskReviewPolicy(cfg.SubagentAskReviewerPolicy))
+	}
+	return agent.NewEngineAskReviewer(agent.NewEngine(deps), opts...)
+}
+
+// askAdjudicatorDeps builds the reviewer engine's agent.Deps — split out from
+// buildAskAdjudicator (the childExplorerDeps precedent) so a test can assert the
+// resolved Deps directly (Model/Role/LLM/tool-less catalog and the forced-nil
+// nested adjudicator are private once inside the engine). ok=false when the
+// reviewer is not configured.
+func askAdjudicatorDeps(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) (agent.Deps, bool) {
+	sel := strings.TrimSpace(cfg.SubagentAskReviewerModel)
+	if sel == "" {
+		return agent.Deps{}, false
+	}
+	model, _ := lookupModelAlias(cfg, sel)
+	if model == "" {
+		// Defensive only: Build's normalizeAskReviewerModel already rejected an
+		// unknown/inherit value fail-fast (and UseMock passes the literal through).
+		model = parentModel
+	}
+	window := childWindowFor(provReg, parentProviderID, model, parentProviderID, parentModel)
+	// newChildEngineForProvider's deps builder: the reviewer compacts/counts/
+	// prompts on ITS resolved model with a re-derived window — and, crucially,
+	// childEngineDepsForProvider forces ChildAskReviewer nil, so the reviewer
+	// engine can never carry a nested reviewer (no construct-recursion).
+	deps := childEngineDepsForProvider(cfg, "ask-reviewer", provider, model, window,
+		tool.NewCatalog(), promptConfig(modelCfgFor(cfg, model), cfg.gitStatus), nil)
+	// Disable the no-progress nudge on the reviewer engine: its session caps at
+	// MaxTurns=1, and an EMPTY (verdict-less) first turn must terminate cleanly in
+	// exactly ONE provider call (StopNoProgress → the reviewer treats it as a
+	// no-verdict failure), not be nudged into a second call before the turn cap
+	// trips. A negative value is the explicit "disable nudging" sentinel.
+	deps.MaxNoProgressNudges = -1
+	return deps, true
+}
+
+// attachAskAdjudicator assigns the OPT-IN child-ask reviewer (issue #31) onto a
+// MAIN engine's deps: the adjudicator built for THIS (provider, model) plus the
+// breaker threshold. It is the ONE assignment helper both main-engine deps sites
+// share — buildEngine (the shared default-provider engine) and
+// sessionEngineFactory (each per-session engine, re-derived on the session's
+// resolved provider/model) — so the two cannot drift, and a test can assert the
+// deps literal. A no-reviewer config returns deps unchanged (adjudicator nil).
+func attachAskAdjudicator(deps agent.Deps, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) agent.Deps {
+	deps.ChildAskReviewer = buildAskAdjudicator(cfg, provReg, provider, parentProviderID, parentModel)
+	deps.ChildAskReviewMaxDenies = cfg.SubagentAskReviewerMaxDenies
+	return deps
 }
 
 // buildSubagentTool constructs the Subagent tool tool over a default child Engine

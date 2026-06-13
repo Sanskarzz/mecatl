@@ -182,6 +182,11 @@ stop-label vocabulary; sanitized+unmissable permission modal; graceful footer wi
 15. Background subagents + completion notification (the field's clearest direction).
 16. Headless auto-review: an LLM reviewer adjudicates step-4 asks instead of blanket auto-deny
     (Codex pattern; with a deny circuit-breaker).
+    *Addressed (issue #31):* shipped as the opt-in `--subagent-ask-reviewer` (tool-less one-turn
+    reviewer engine, fail-safe deny on any ambiguity, `--subagent-ask-reviewer-max-denies`
+    breaker, configured Ask never delegated, allow-once only); deliberately a server flag, not a
+    permconfig key. Engages only under `--headless` (a default interactive server surfaces asks to
+    the client instead).
 17. Config-level child permission axis (Amp `context: subagent`) — make childPosture user-tunable.
     *Addressed (issue #32):* shipped as the `permissions: subagent:` config block + rule audiences.
 18. Per-agent memory (`memory:` frontmatter field, MEMORY.md injection).

@@ -163,6 +163,77 @@ func TestGRPCConverseCancelChild(t *testing.T) {
 	}
 }
 
+// TestGRPCConverseApproveSurfacedChildAsk is the wire e2e proving the INTERACTIVE
+// embedded posture works end to end (the mecatui-embedded fix, issue #31): a
+// Subagent child parks on a surfaced permission.ask; the client answers with a
+// ResumeApproval(askID=<the surfaced child askID>, AllowOnce) — exactly what the
+// mecatui modal sends — and the verdict must route back to the child
+// (Run.Approve → childAskRouter), so the child's command RUNS and the parent
+// completes cleanly. This is the load-bearing path mecatui's embedded
+// Interactive=true relies on: a child ask is NOT auto-denied; it reaches the
+// human's modal and the human's approval reaches the child.
+func TestGRPCConverseApproveSurfacedChildAsk(t *testing.T) {
+	svc, bash := newInteractiveSubagentService(t)
+	client, cleanup := dialGRPC(t, svc)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cs, err := client.CreateSession(ctx, &mecatlv1.CreateSessionRequest{Workspace: "/ws"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	stream, err := client.Converse(ctx)
+	if err != nil {
+		t.Fatalf("Converse: %v", err)
+	}
+	if err := stream.Send(&mecatlv1.ConverseRequest{
+		Kind: &mecatlv1.ConverseRequest_Prompt{Prompt: &mecatlv1.Prompt{SessionId: cs.GetSessionId(), Text: "go"}},
+	}); err != nil {
+		t.Fatalf("send prompt: %v", err)
+	}
+
+	var (
+		evs         []*mecatlv1.Event
+		askID       string
+		sentVerdict bool
+	)
+	for {
+		resp, rerr := stream.Recv()
+		if rerr != nil {
+			break
+		}
+		ev := resp.GetEvent()
+		evs = append(evs, ev)
+		if ev.GetType() == "permission.ask" && !sentVerdict {
+			sentVerdict = true
+			askID = ev.GetAsk().GetAskId()
+			// Approve the SURFACED CHILD ask exactly as the mecatui modal would:
+			// ResumeApproval carrying the surfaced askID. The server routes it to the
+			// owning child via childAskRouter.
+			if serr := stream.Send(&mecatlv1.ConverseRequest{
+				Kind: &mecatlv1.ConverseRequest_ResumeApproval{ResumeApproval: &mecatlv1.ResumeApproval{
+					AskId:   askID,
+					Allow:   true,
+					Verdict: mecatlv1.ApprovalVerdict_APPROVAL_VERDICT_ALLOW_ONCE,
+				}},
+			}); serr != nil {
+				t.Fatalf("send ResumeApproval: %v", serr)
+			}
+		}
+	}
+
+	if !sentVerdict || askID == "" {
+		t.Fatalf("the child ask must SURFACE to the client (not auto-deny); events: %v", typesOf(evs))
+	}
+	if !bash.ran() {
+		t.Fatalf("approving the surfaced child ask must run the child command (verdict routed to the child)")
+	}
+	if res := lastResult(t, evs); res.GetStop() == "error" || res.GetStop() == "cancelled" {
+		t.Fatalf("the PARENT run must complete cleanly after the child approval, got stop %q", res.GetStop())
+	}
+}
+
 // parkTool is a read-only member tool that signals when it starts executing and
 // parks until its ctx is cancelled — the deterministic "member is mid-drive" anchor
 // the team-member cancel e2e sequences on.

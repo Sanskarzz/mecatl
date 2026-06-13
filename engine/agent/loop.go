@@ -183,6 +183,30 @@ type Deps struct {
 	// with no declared approver auto-denies a subagent ask rather than hanging).
 	Interactive bool
 
+	// ChildAskReviewer, when non-nil, reviews a child agent's (subagent / team
+	// member / parallel branch) permission ask that the harness could not resolve
+	// statically and that no attached human can answer — instead of blanket-denying
+	// it. It is consulted ONLY for a headless run with no interactive approver, and
+	// never for a deliberately-configured "ask" rule (that always demands a human).
+	// An allow grants the one call only (nothing is learned); a deny — or any review
+	// failure, timeout, or ambiguous verdict — keeps the call denied, so a reviewer
+	// is fail-safe and never load-bearing for safety. Reviews are bounded by a
+	// 30-second deadline and serialised through a per-run consecutive-failure
+	// breaker (ChildAskReviewMaxDenies). DEFAULT nil: a headless ask is
+	// blanket-denied, the long-standing behaviour. Set this on the engine whose runs
+	// have no human approver; an engine whose runs surface asks to a client leaves
+	// it unused (the surface path wins).
+	ChildAskReviewer ChildAskReviewer
+
+	// ChildAskReviewMaxDenies is the per-run circuit-breaker threshold for
+	// ChildAskReviewer: after this many CONSECUTIVE non-allow review outcomes (deny
+	// verdicts, failures, timeouts, ambiguous verdicts — an abstention via
+	// ErrNotReviewable does not count) within one run, further asks skip the reviewer
+	// and fall through to auto-deny, bounding reviewer spend. An allow resets the
+	// count. <=0 (the default) uses a built-in threshold of 3. Only consulted when
+	// ChildAskReviewer is set.
+	ChildAskReviewMaxDenies int
+
 	// MaxRunTokens is the loop-level cumulative TOKEN ceiling for a single run: when
 	// the run's accumulated session.Usage (input+output, via Usage.TotalTokens) crosses
 	// this value, the loop terminates CLEANLY at the next turn boundary with
@@ -234,6 +258,12 @@ func NewEngine(deps Deps) *Engine {
 	// nudgeCap < 0 as disabled). A positive value overrides the default.
 	if deps.MaxNoProgressNudges == 0 {
 		deps.MaxNoProgressNudges = defaultNoProgressNudges
+	}
+	// Ask-review breaker threshold: <=0 (unset) → the safety-net default. Only
+	// consulted when a ChildAskReviewer is wired, but normalised unconditionally
+	// so the breaker construction in RunContentWith never sees a zero max.
+	if deps.ChildAskReviewMaxDenies <= 0 {
+		deps.ChildAskReviewMaxDenies = defaultAskReviewMaxDenies
 	}
 	if deps.Instructions == nil {
 		deps.Instructions = prompt.RootAssembler{}
@@ -371,6 +401,14 @@ type Run struct {
 	// the run goroutine starts and only read after, so it needs no synchronisation; the
 	// router itself is concurrency-safe for the cross-goroutine register/route.
 	childAsks *childAskRouter
+	// askReview is this run's ask-review circuit breaker, created in
+	// RunContentWith only when the engine carries a ChildAskReviewer (the
+	// headless-review opt-in) — the askReview-non-nil ⇔ reviewer-wired pairing is
+	// what the parentCaps closure keys on. Its mutex also SERIALIZES reviews within
+	// the run (deterministic consecutive-failure semantics; bounded concurrent
+	// reviewer spend). nil on the default (no-reviewer) engine and on child runs.
+	// Set before the run goroutine starts and only read after.
+	askReview *askReviewBreaker
 	// children registers every child run spawned under this run (all three
 	// delegation families: Subagent children, Parallel branches, team members),
 	// keyed by child session id.
@@ -592,6 +630,14 @@ func (e *Engine) RunContentWith(ctx context.Context, sess *session.Session, ws t
 	// further).
 	if e.deps.Interactive {
 		r.childAsks = newChildAskRouter()
+	}
+	// An engine carrying the OPT-IN child-ask reviewer arms this run's ask-review
+	// breaker beside the router: the parentCaps closure consults it before every
+	// reviewer call, so a run whose children keep proposing disallowed commands
+	// stops spending reviewer turns after Deps.ChildAskReviewMaxDenies consecutive
+	// non-allow outcomes. nil otherwise (the no-reviewer posture, unchanged).
+	if e.deps.ChildAskReviewer != nil {
+		r.askReview = &askReviewBreaker{max: e.deps.ChildAskReviewMaxDenies}
 	}
 	// The child-run registry is created UNCONDITIONALLY (cancel is interactive-only
 	// but the registry's bookkeeping is not), with its emit bound to this run's

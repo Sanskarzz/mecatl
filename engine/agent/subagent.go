@@ -95,6 +95,19 @@ type parentCaps struct {
 	// session id "subagent-<callID>" for Subagent children; the member name / fork label
 	// for the others). nil → no diagnostic (NopDiagnostics-safe via the caller).
 	diag port.Diagnostics
+	// adjudicate, when non-nil, runs the OPT-IN automated ask reviewer over one
+	// HEADLESS child ask: it binds the engine's ChildAskReviewer, this run's
+	// askReviewBreaker (serialisation + the consecutive-failure circuit breaker),
+	// the askReviewTimeout, and the run's hardAbort (a tearing-down run skips the
+	// reviewer). isolated is the child posture's isolation bit, threaded so the
+	// reviewer can be told honestly whether the command would run in a throwaway
+	// worktree. The returned askReviewOutcome reports allow/deny when a verdict was
+	// obtained, else flags the reason (abstention / breaker-open / reviewer
+	// failure) so resolveChildAsk emits the matching diagnostic and falls through to
+	// the plain headless auto-deny. nil when no reviewer is configured (the default)
+	// — resolveChildAsk then behaves exactly as a headless run did before the
+	// reviewer existed.
+	adjudicate func(ask session.PendingAsk, isolated bool) askReviewOutcome
 	// hardAbort is the parent Run's explicit unwedge signal (Run.hardAbort, fired
 	// a short grace after Run.Cancel — see hardAbortGrace), handed down so a delegation tool's own
 	// internal forwarding sends (the team supervisor's member→evCh forward) can give
@@ -2016,6 +2029,25 @@ func childAutoDenyMessage(reason string, configured bool) string {
 		"; rephrase to avoid command substitution/subshell grouping, or use an auto-approved tool (read-only commands, or go test/build/vet/list)"
 }
 
+// childReviewedDenyMessage is the ACCURATE message an ADJUDICATED deny carries
+// (issue #31): the automated policy reviewer examined the command and declined
+// it, so the model is told a reviewer (not a user, not a blanket shell rule)
+// said no — with the reviewer's clamped rationale — and what it can do about
+// it. reason is the policy's ask reason; verdictReason is the reviewer's
+// rationale (clamped here: it is reviewer-model-authored text riding into the
+// child's tool result). Only a CONFIGURED-Ask-free, headless, reviewed deny
+// gets this message; the not-reviewed paths keep childAutoDenyMessage so the
+// model is never told a reviewer declined when none did.
+func childReviewedDenyMessage(reason, verdictReason string) string {
+	vr := strings.TrimSpace(verdictReason)
+	if vr == "" {
+		vr = "no reason given"
+	}
+	return "not permitted in a non-interactive subagent shell: " + reason +
+		"; an automated policy reviewer declined this command (" + clampPreview(vr) + ")" +
+		" — rephrase to a read-only form or report back that approval is required"
+}
+
 // handleChildEvent applies the per-child permission contract to a single event of a
 // child/member run and, when the event is the terminal result, reports its text and
 // stop reason via isResult=true. It is the SINGLE definition of that contract, shared
@@ -2047,6 +2079,12 @@ func childAutoDenyMessage(reason string, configured bool) string {
 //     resolving — the child's authorize stays parked in await until the parent routes a
 //     verdict back via the router (child.Approve). The drain loop blocks on this child's
 //     channel until then (single-child) or keeps consuming peers (concurrent members).
+//     3b. HEADLESS ask review (OPT-IN): a parent engine configured with a
+//     ChildAskReviewer consults the automated reviewer for a NON-configured ask
+//     that reached the headless branch (a configured Ask demands a human — never
+//     the reviewer). Reviewed allow → AllowOnce; reviewed deny → auto-deny with
+//     childReviewedDenyMessage; abstention/breaker-open/reviewer-failure → fall
+//     through to 4 (a failure emits its own INFO first).
 //  4. HEADLESS auto-deny: no surface (headless / no router) → Deny with the ACCURATE
 //     message (rule-oriented when the ask was configured, substitution-rephrase advice
 //     otherwise) + a correlated operator diagnostic (LevelInfo, agent=<child-session-id>
@@ -2097,6 +2135,66 @@ func resolveChildAsk(run *Run, ask session.PendingAsk, posture childPosture) {
 	if posture.caps.interactive && posture.caps.surfaceAsk != nil {
 		posture.caps.surfaceAsk(ask.AskID, posture.childID, run, ask, posture.askLabel)
 		return
+	}
+	// HEADLESS ask review (OPT-IN): between surface-to-human and the blanket
+	// auto-deny, an engine configured with a ChildAskReviewer consults an automated
+	// reviewer — but NEVER for a configured Ask (an LLM reviewer is not the human
+	// approver a deliberately-configured rule demands; configured Deny/Ask still win,
+	// same invariant as A2). A reviewed ALLOW resolves AllowOnce (never AllowAlways —
+	// nothing is learned); a reviewed DENY auto-denies with the reviewer's clamped
+	// rationale folded into the model-facing message. Every variant emits a
+	// correlated operator INFO at this SAME child-ask diagnostic chokepoint (the
+	// sanctioned emission OUTSIDE the loop's three-line contract — see
+	// docs/design/DIAGNOSTICS.md). A NOT-reviewed outcome (abstention / breaker-open
+	// / reviewer failure) falls through to the plain auto-deny below with the
+	// EXISTING message — no false "reviewer declined" claim — after, on a failure,
+	// emitting the distinct reviewer-failure INFO (and, once per run, the
+	// breaker-opened INFO) so an operator can tell a flaky reviewer from a blanket
+	// deny. The approved/denied command is named in the audit line (clamped) — an
+	// autonomous approval must record WHAT it ran, not only the policy reason.
+	if !ask.ConfiguredAsk && posture.caps.adjudicate != nil {
+		outcome := posture.caps.adjudicate(ask, posture.isolated)
+		cmdPreview := clampPreview(surfacedCommandPreview(ask))
+		// One-time breaker-opened INFO, emitted regardless of WHICH non-allow outcome
+		// crossed the threshold (a deny verdict or a failure) — so it is checked here,
+		// before the outcome switch returns. Emitted once per run; further skipped
+		// asks stay quiet.
+		if outcome.breakerJustOpened && posture.caps.diag != nil {
+			posture.caps.diag.Log(context.Background(), port.LevelInfo,
+				"subagent ask reviewer circuit breaker opened after consecutive non-allows; remaining asks this run auto-deny without review",
+				"agent", posture.role)
+		}
+		switch {
+		case outcome.reviewed && outcome.allowed:
+			if posture.caps.diag != nil {
+				posture.caps.diag.Log(context.Background(), port.LevelInfo,
+					"subagent permission ask allowed by the automated policy reviewer",
+					"agent", posture.role, "tool", ask.Tool, "reason", ask.Reason,
+					"command", cmdPreview, "decision", "reviewed-allow",
+					"verdict_reason", clampPreview(outcome.reason))
+			}
+			run.Approve(ask.AskID, session.VerdictAllowOnce)
+			return
+		case outcome.reviewed:
+			if posture.caps.diag != nil {
+				posture.caps.diag.Log(context.Background(), port.LevelInfo,
+					"subagent permission ask auto-denied (non-interactive shell)",
+					"agent", posture.role, "tool", ask.Tool, "reason", ask.Reason,
+					"command", cmdPreview, "decision", "reviewed-deny",
+					"verdict_reason", clampPreview(outcome.reason))
+			}
+			run.autoDenyChildAsk(ask.AskID, childReviewedDenyMessage(ask.Reason, outcome.reason))
+			return
+		case outcome.failed && posture.caps.diag != nil:
+			// Reviewer ran but produced no verdict (error / timeout / ambiguous
+			// output): a DISTINCT INFO so a reviewer model that 404s/times out every
+			// call is visible, not silently folded into the blanket auto-deny below.
+			posture.caps.diag.Log(context.Background(), port.LevelInfo,
+				"subagent ask reviewer failed to produce a verdict; falling back to auto-deny",
+				"agent", posture.role, "tool", ask.Tool, "command", cmdPreview,
+				"err", clampPreview(outcome.failReason))
+		}
+		// Fall through to the plain headless auto-deny.
 	}
 	// Headless / no surface → auto-deny with the accurate message + an operator
 	// diagnostic, then resolve the child's own ask. The child's authorize maps a Deny

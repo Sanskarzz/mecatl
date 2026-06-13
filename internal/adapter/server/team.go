@@ -155,6 +155,11 @@ func (s *Service) CreateTeam(ctx context.Context, workspace, name, goal string, 
 	if budget := agent.TightenTeamTokenBudget(s.cfg.TeamTokenBudget, maxTeamTokens); budget > 0 {
 		opts = append(opts, agent.WithTeamTokenBudget(budget))
 	}
+	// The gRPC RunTeam direct path deliberately runs with ZERO parent caps: no
+	// surface-to-human seam AND no child-ask adjudicator (issue #31) — a member's
+	// unresolved permission ask headless-auto-denies exactly as before. The in-loop
+	// Team TOOL is the path that inherits the parent run's caps (surfacing and, when
+	// configured, the automated reviewer).
 	sup := agent.NewSupervisor(t, base, factory, opts...)
 
 	// Enrol the initial roster BEFORE registering the team. A failure here abandons
