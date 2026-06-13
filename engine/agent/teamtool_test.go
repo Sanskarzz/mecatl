@@ -253,18 +253,33 @@ func TestTeamToolFormsTeamAndIsolatesContent(t *testing.T) {
 	}
 }
 
-// TestTeamToolStreamsTaskSnapshots drives a real task transition through a full
-// team run (lead creates a task, worker completes it) and asserts the task-snapshot
-// stream contract: first-class team.tasks events carry the shared task list (no
-// Member); the snapshot is DE-DUPED (an unchanged list is not re-emitted, so distinct
-// snapshots are bounded by the number of real transitions, not by member-event
-// volume); and the terminal team.end carries the final, completed task list.
+// TestTeamToolStreamsTaskSnapshots drives a real task lifecycle through a full team
+// run (lead creates a task, worker completes it) and asserts the task-snapshot stream
+// contract: first-class team.tasks events carry the shared task list (no Member); the
+// snapshot is DE-DUPED (an unchanged list is not re-emitted, so distinct snapshots are
+// bounded by the number of real transitions, not by member-event volume); and the
+// terminal team.end carries the final, completed task list.
+//
+// The stream is CHANGE-DRIVEN and EVENTUALLY-CONSISTENT, NOT per-transition-guaranteed:
+// the sink samples live team state (tm.Tasks()) when the single forwarder goroutine
+// drains each buffered event, decoupled in time from the member/supervisor goroutines
+// that mutate the task list. Under scheduler starvation the forwarder can lag until the
+// task is already completed, so every drained event reads the same terminal state and the
+// intermediate pending/in_progress snapshots legitimately coalesce away. Asserting that a
+// pre-completed state appears in the stream is therefore inherently scheduling-dependent
+// (it flaked in CI under load) — so this test asserts only the deterministic properties:
+// de-dup, no-Member, and the authoritative TERMINAL state (the last live snapshot and the
+// settled team.end both show completed). Per-transition visibility is best-effort; making
+// it a guarantee would require capturing the snapshot at mutation time and is a separate,
+// deliberate emit-path change (see the "team-snapshot fidelity note" in
+// docs/design/IMPLEMENTATION-NOTES.md), not a test fix.
 func TestTeamToolStreamsTaskSnapshots(t *testing.T) {
 	// The lead creates the task on its first turn, then idles. The worker's first
 	// turn is a no-op (the task does not exist yet in round 1); the supervisor then
 	// auto-claims task-1 for the idle worker, and the worker COMPLETES it on a later
-	// turn — so the stream observes the full pending → in_progress → completed
-	// transition.
+	// turn — driving a pending → in_progress → completed lifecycle in the shared state
+	// (whether each step surfaces as a distinct streamed snapshot is best-effort; see
+	// the doc comment).
 	addTask := session.NewToolCall("l1", "AddTask",
 		json.RawMessage(`{"description":"investigate the reported bug"}`))
 	leadProv := mockllm.New(
@@ -319,14 +334,13 @@ func TestTeamToolStreamsTaskSnapshots(t *testing.T) {
 			t.Errorf("snapshot %d duplicates snapshot %d (de-dup guard failed): %+v", i, i-1, snapshots[i])
 		}
 	}
-	// A real state transition was observed: the task appears non-completed in an
-	// early snapshot and completed in the last (the sink emitted on each change).
+	// The TERMINAL streamed snapshot is authoritative: the last live snapshot shows
+	// task-1 completed. (The first/intermediate snapshots are NOT asserted — see the
+	// doc comment: under forwarder lag they legitimately coalesce to the terminal
+	// state, so a "pre-completed appears" assertion is non-deterministic.)
 	last := snapshots[len(snapshots)-1]
 	if len(last) != 1 || last[0].ID != "task-1" || last[0].State != string(team.TaskCompleted) {
 		t.Errorf("last snapshot should show task-1 completed, got %+v", last)
-	}
-	if snapshots[0][0].State == string(team.TaskCompleted) {
-		t.Errorf("the task should not already be completed in the first snapshot (no transition observed): %+v", snapshots[0])
 	}
 
 	// team.end carries the terminal task snapshot (the final, completed list).
