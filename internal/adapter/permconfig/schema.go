@@ -34,6 +34,8 @@ package permconfig
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	yaml "go.yaml.in/yaml/v3"
 )
@@ -54,6 +56,71 @@ type Config struct {
 	// Permissions holds the allow/ask/deny rule-spec lists plus the child-scoped
 	// `subagent:` block.
 	Permissions Permissions `yaml:"permissions"`
+	// Guardrails holds the OPERATOR-TIER LLM-content-checker config (issue #27). It
+	// is parsed STRICTLY (unknown sub-keys = error, like permissions:) so a typo
+	// cannot silently disable a guardrail. It is honoured ONLY from the user-global +
+	// CLI tiers; a project-tier file's guardrails: block is IGNORED with a WARN (a
+	// project repo weakening/disabling a checker is a security DOWNGRADE — the usual
+	// tighten-only gate reverses here). The presence flag (whether the key appeared at
+	// all) is tracked via GuardrailsPresent so the resolver can WARN about an ignored
+	// project block. A nil Guardrails means the key was absent.
+	Guardrails *GuardrailsSection `yaml:"guardrails"`
+}
+
+// GuardrailsSection is the operator-tier `guardrails:` YAML subtree (issue #27): a
+// checker model, the per-session check cap, a master-disable, and the rule list. It
+// is parsed STRICTLY (unknown keys error).
+type GuardrailsSection struct {
+	// Model is the checker model id / alias. Empty leaves the CLI --guardrails-model
+	// to supply it; a value here is overridden by the CLI flag when both are set.
+	Model string `yaml:"model"`
+	// MaxChecks is the per-session checker-call cap. 0 = unbounded.
+	MaxChecks int `yaml:"maxChecks"`
+	// MinContentBytes skips the checker for content shorter than this. 0 = check all.
+	MinContentBytes int `yaml:"minContentBytes"`
+	// Disabled is the YAML-level kill switch (the CLI --guardrails=off also sets it).
+	Disabled bool `yaml:"disabled"`
+	// Rules is the guardrail rule list.
+	Rules []GuardrailRuleSpec `yaml:"rules"`
+}
+
+// GuardrailRuleSpec is one operator-tier guardrail rule as parsed from YAML. It is
+// the on-disk mirror of app.GuardrailRule; composition maps the two. Parsed strictly.
+type GuardrailRuleSpec struct {
+	// Match is the tool-name matcher (exact / "prefix*" / "*").
+	Match string `yaml:"match"`
+	// Phases lists "pre"/"post"; empty = both.
+	Phases []string `yaml:"phases"`
+	// Mode is "block"/"sanitize"/"advisory"; empty defaults to block.
+	Mode string `yaml:"mode"`
+	// Prompt overrides the built-in inspection rubric.
+	Prompt string `yaml:"prompt"`
+	// FailClosed flips the fail-open default for enforcing modes.
+	FailClosed bool `yaml:"failClosed"`
+}
+
+// UnmarshalYAML decodes the guardrails: mapping STRICTLY (issue #27): an unknown key
+// inside the guardrails subtree is a parse error — a typo like `moddel:` or `rulez:`
+// must not silently disable a guardrail. Same rationale as Permissions.UnmarshalYAML.
+func (g *GuardrailsSection) UnmarshalYAML(node *yaml.Node) error {
+	return decodeStrictMapping(node, "guardrails", map[string]any{
+		"model":           &g.Model,
+		"maxChecks":       &g.MaxChecks,
+		"minContentBytes": &g.MinContentBytes,
+		"disabled":        &g.Disabled,
+		"rules":           &g.Rules,
+	})
+}
+
+// UnmarshalYAML decodes a guardrails rule mapping STRICTLY.
+func (r *GuardrailRuleSpec) UnmarshalYAML(node *yaml.Node) error {
+	return decodeStrictMapping(node, "guardrails.rules[]", map[string]any{
+		"match":      &r.Match,
+		"phases":     &r.Phases,
+		"mode":       &r.Mode,
+		"prompt":     &r.Prompt,
+		"failClosed": &r.FailClosed,
+	})
 }
 
 // Permissions is the three-bucket rule-spec set plus the child-scoped
@@ -147,13 +214,12 @@ func decodeStrictMapping(node *yaml.Node, where string, known map[string]any) er
 }
 
 // knownKeyList renders the known-key set for the unknown-key error message in a
-// stable order (the canonical bucket order, not map order).
+// stable (sorted) order, so a typo'd key names exactly the keys this mapping accepts.
 func knownKeyList(known map[string]any) string {
-	// The two strict mappings share a small fixed vocabulary; render it in the
-	// canonical order, including only the keys this mapping actually knows.
-	const canonical = "allow, ask, deny, subagent"
-	if _, hasSub := known["subagent"]; hasSub {
-		return canonical
+	keys := make([]string, 0, len(known))
+	for k := range known {
+		keys = append(keys, k)
 	}
-	return "allow, ask, deny"
+	sort.Strings(keys)
+	return strings.Join(keys, ", ")
 }

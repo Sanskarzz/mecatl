@@ -355,6 +355,37 @@ type Config struct {
 	// rubric (agent.WithAskReviewPolicy is applied only when non-empty).
 	SubagentAskReviewerPolicy string
 
+	// --- Guardrails (issue #27): the LLM-backed PreToolUse/PostToolUse content
+	// checker (the modelhook adapter). It inspects OUTBOUND tool-call args (exfil)
+	// and INBOUND tool results (injection) with a dedicated tool-less checker model
+	// and enforces a verdict (block / sanitize / advisory). OFF by default
+	// (GuardrailsModel empty or GuardrailsRules empty → byte-identical to no
+	// guardrails). It is OPERATOR-TIER ONLY: GuardrailsRules are read from the
+	// user-global settings.yaml `guardrails:` subtree + CLI, NEVER the project-tier
+	// file (a project repo weakening/disabling a checker is a security DOWNGRADE);
+	// permconfig.Resolver enforces the tier gate.
+
+	// GuardrailsModel is the checker model id / --model-alias (resolved per session
+	// on the session's provider, same-provider only — the SubagentModel discipline).
+	// Empty disables guardrails. Build normalizes it once (normalizeGuardrailsModel)
+	// and FAILS FAST on a value that does not resolve to a usable model id.
+	GuardrailsModel string
+	// GuardrailsRules is the operator-tier rule list (matcher + phases + mode +
+	// per-rule prompt + fail-closed). Empty disables guardrails. Sourced only from
+	// the operator tier (user-global YAML + CLI), never the project file.
+	GuardrailsRules []GuardrailRule
+	// GuardrailsMaxChecks is the PER-SESSION checker-call cap (decision 7): checker
+	// token spend is bounded SEPARATELY from the parent's MaxRunTokens so
+	// infrastructure spend cannot starve the agent. <=0 disables the cap.
+	GuardrailsMaxChecks int
+	// GuardrailsMinContentBytes skips the checker for content shorter than this (a
+	// cost guard — trivially short content cannot carry a meaningful payload). 0
+	// checks everything.
+	GuardrailsMinContentBytes int
+	// GuardrailsDisabled is the master kill-switch (--guardrails=off): when true,
+	// guardrails are forced OFF regardless of model/rules config.
+	GuardrailsDisabled bool
+
 	// ModelAliases maps a short alias (e.g. "sonnet"/"opus"/"haiku"/"fast") to a
 	// concrete provider model id. Resolved only here; the domain/agent always
 	// receives a concrete model string.
@@ -527,6 +558,31 @@ type Config struct {
 	childPermResolver permpolicy.RuleResolver
 }
 
+// GuardrailRule is one operator-tier guardrail rule (issue #27): a tool-NAME matcher,
+// the tool-use phases it inspects, an enforcement mode, an optional per-rule
+// inspection prompt, and a fail-closed opt-in. It is the composition-layer mirror of
+// the modelhook adapter's RuleSpec (compiled via modelhook.CompileRule), populated
+// from the operator-tier `guardrails:` YAML subtree + CLI — never the project file.
+type GuardrailRule struct {
+	// Match is the tool-name matcher: an exact name, a "prefix*" glob (e.g.
+	// "mcp__github__*"), or "*" (catch-all). Most-specific wins at resolution.
+	Match string
+	// Phases lists the directions this rule inspects ("pre" = outbound args, "post" =
+	// inbound results). Empty inspects BOTH (the conservative default).
+	Phases []string
+	// Mode is the enforcement posture: "block" (veto/rewrite-to-error), "sanitize"
+	// (rewrite to the checker's sanitized_content), or "advisory" (observe only).
+	// Empty defaults to "block".
+	Mode string
+	// Prompt overrides the built-in inspection rubric for the rule's direction. Empty
+	// keeps the default exfil (pre) / injection (post) rubric.
+	Prompt string
+	// FailClosed flips the fail-OPEN default: a checker error/timeout in an enforcing
+	// mode then treats the content as UNSAFE (block) instead of degrading to "no
+	// checker". A checker SAYING safe always passes regardless.
+	FailClosed bool
+}
+
 // providerConstructor builds the port.LLMProvider for an available provider id,
 // given its resolved key and base URL. The production implementation
 // (newOpenAIEntry's body) constructs the resilience-wrapped openai adapter; the
@@ -621,6 +677,15 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	cfg.permResolver = buildPermResolver(cfg)
 	cfg.childPermResolver = buildChildPermResolver(cfg)
 
+	// Guardrails operator-tier config (issue #27, decision 3): fold the user-global +
+	// CLI `guardrails:` YAML subtree (the resolver collected it from the OPERATOR
+	// tiers ONLY — a project file's block is ignored with a WARN) onto cfg, BEFORE
+	// normalizeGuardrailsModel validates the model. CLI flags out-rank YAML for the
+	// scalar knobs that have a flag (--guardrails-model, --guardrails=off); the rule
+	// list comes from YAML (flags cannot express it). This runs after the resolver is
+	// built and before the provider/model fail-fast normalization below.
+	cfg = foldOperatorGuardrails(cfg)
+
 	// Start-of-session git snapshot, computed ONCE here (FIX 2): gitSnapshot runs git
 	// against cfg.Workspace through a HARDENED/scrubbed env and only for a TRUSTED
 	// workspace (FIX 1). The single value is carried on cfg.gitStatus so every
@@ -673,6 +738,15 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		return nil, err
 	}
 	cfg.SubagentAskReviewerModel = reviewerModel
+	// Guardrails (issue #27): the same fail-fast normalization posture — validate the
+	// checker model alias once here (empty = guardrails off), and emit the build-once
+	// ACTIVE/OFF fact. A non-empty model that does not resolve is a BUILD ERROR (a
+	// silently-inert guardrail is the opposite of what the operator asked for).
+	guardrailsModel, err := normalizeGuardrailsModel(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.GuardrailsModel = guardrailsModel
 	// Emit the build-once composition facts (token counter / compaction strategy /
 	// slash commands) EXACTLY ONCE here, through the injected Diagnostics — keyed to
 	// the resolved MAIN model. The per-derivation builders no longer log these (they
@@ -1094,6 +1168,12 @@ func sessionEngineFactory(
 		// provider never contaminates compaction/counting.
 		deps := engineDepsForProvider(cfg, resolvedProvider, resolvedModel, contextWindow, store, policy, hooks, mcpProvider, instructions)
 		deps.Catalog = cat
+		// Guardrails (issue #27), RE-DERIVED per session so a FRESH per-session checker
+		// budget is built: decorate THIS session's main hooks with the LLM-backed
+		// content checker, over the session's resolved provider/model. OFF-by-default
+		// (returns deps.Hooks unchanged when unconfigured); wired onto the MAIN engine's
+		// hooks only — buildCatalog's child hooks above stay RAW (the recursion guard).
+		deps.Hooks = buildGuardrailsHooks(cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, deps.Hooks)
 		// The OPT-IN child-ask reviewer (issue #31), RE-DERIVED on this session's
 		// resolved (provider, model) through the same attachAskAdjudicator the shared
 		// engine uses — never a clone-and-swap of the build-time reviewer.
@@ -1312,6 +1392,13 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// per-session client-MCP engines keep the UNWRAPPED hooks: the reviewer fires once
 	// per MAIN-engine Stop, not per client-MCP session stop.
 	mainHooks := maybeWrapUserModelReview(cfg, hooks, store, provider, userModelStore)
+	// Guardrails (issue #27): decorate the MAIN engine's hooks with the LLM-backed
+	// PreToolUse/PostToolUse content checker. modelhook wraps the userModelReview
+	// chain so the inner hooks run FIRST and the checker SECOND (decision 5). It is
+	// OFF-by-default (returns mainHooks UNCHANGED when unconfigured) and is wired ONLY
+	// here + in the per-session factory — NEVER into buildCatalog's child hooks (the
+	// recursion guard). The shared engine's checker rides the default provider/model.
+	mainHooks = buildGuardrailsHooks(cfg, reg, provider, reg.Default(), cfg.Model, mainHooks)
 
 	deps := baseEngineDeps(cfg, provider, store, policy, mainHooks, mcpProvider, instructions)
 	deps.Catalog = cat
@@ -1870,6 +1957,45 @@ func normalizeAskReviewerModel(cfg Config) (string, error) {
 	cfg.diag().Log(context.Background(), port.LevelInfo,
 		"subagent ask reviewer ACTIVE (headless): a child's unresolved permission ask is adjudicated by an automated one-turn reviewer instead of blanket auto-denied; configured Deny/Ask rules still win",
 		"model", sel)
+	return sel, nil
+}
+
+// normalizeGuardrailsModel validates and resolves Config.GuardrailsModel EXACTLY
+// ONCE at build time (called only from Build), mirroring normalizeAskReviewerModel:
+// empty = guardrails OFF (returns ""), and a non-empty value that does not resolve
+// to a usable model id — an unrecognised bare token, or an alias meaning inherit —
+// is a BUILD ERROR (the loud-misconfig posture: a warn-and-inert guardrail flag
+// would silently leave tool content uninspected, the opposite of what the operator
+// asked for). UNLIKE the ask reviewer it carries NO interactive-inert WARN: the
+// guardrail checker fires on the MAIN loop's PreToolUse/PostToolUse phases
+// regardless of whether the deployment surfaces permission asks to a human. A
+// configured model with NO explicit rules is still ACTIVE — it takes the built-in
+// DEFAULT advisory rule set (WebSearch/WebFetch/mcp__*, observe-only), the headline
+// default. The master kill-switch (GuardrailsDisabled) turns it off. No-op under
+// UseMock. On success it emits the build-once ACTIVE fact.
+func normalizeGuardrailsModel(cfg Config) (string, error) {
+	sel := strings.TrimSpace(cfg.GuardrailsModel)
+	if sel == "" || cfg.GuardrailsDisabled {
+		return sel, nil
+	}
+	resolved, known := lookupModelAlias(cfg, sel)
+	if !cfg.UseMock {
+		switch {
+		case !known:
+			return "", fmt.Errorf("--guardrails-model %q: unknown model alias (not in --model-alias, not a built-in alias, and a bare token is not a concrete model id); guardrails would silently stay off — pass a concrete model id or define the alias", sel)
+		case resolved == "":
+			return "", fmt.Errorf("--guardrails-model %q: the alias resolves to \"inherit\" (the built-in sonnet/opus/haiku aliases mean inherit unless overridden via --model-alias); pass a concrete model id or map the alias to one", sel)
+		}
+	}
+	if len(cfg.GuardrailsRules) == 0 {
+		cfg.diag().Log(context.Background(), port.LevelInfo,
+			"guardrails ACTIVE (default advisory rules): WebSearch/WebFetch/mcp__* tool content is inspected observe-only (findings logged, content unchanged); add a guardrails: rule list to enforce (block/sanitize) or narrow the scope",
+			"model", sel)
+		return sel, nil
+	}
+	cfg.diag().Log(context.Background(), port.LevelInfo,
+		"guardrails ACTIVE: PreToolUse (outbound-args exfil) and PostToolUse (inbound-result injection) tool content is inspected by an automated checker; block/sanitize/advisory per rule",
+		"model", sel, "rules", len(cfg.GuardrailsRules))
 	return sel, nil
 }
 

@@ -237,6 +237,17 @@ type config struct {
 	subagentAskReviewerPolicyFile string
 	subagentAskReviewerPolicy     string
 
+	// Guardrails (issue #27): guardrailsModel names the tool-less checker model that
+	// inspects PreToolUse (outbound-args exfil) and PostToolUse (inbound-result
+	// injection) tool content; empty disables guardrails. guardrailsOff is the master
+	// kill-switch (--guardrails=off) that forces guardrails off regardless of config.
+	// The RULE LIST + cost knobs live in the OPERATOR-TIER `guardrails:` subtree of the
+	// user-global settings.yaml (a flag cannot express a rule list); they are NEVER
+	// read from the project-tier file (a security downgrade).
+	guardrailsModel string
+	guardrailsMode  string // the raw --guardrails value ("off" → guardrailsOff)
+	guardrailsOff   bool
+
 	// headless declares that NO human approver is attached to this deployment's
 	// sessions: a child's unresolved permission ask must NOT be surfaced to the
 	// client (there is nobody to answer it — it would park until run-end), and
@@ -752,22 +763,28 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		SubagentAskReviewerModel:     cfg.subagentAskReviewer,
 		SubagentAskReviewerMaxDenies: cfg.subagentAskReviewerMaxDenies,
 		SubagentAskReviewerPolicy:    cfg.subagentAskReviewerPolicy,
-		ModelAliases:                 cfg.modelAliases,
-		CommandsDir:                  cfg.commandsDir,
-		EnableCommands:               cfg.enableCommands,
-		EnableParallel:               cfg.enableParallel,
-		ForkPreservedCap:             cfg.forkPreservedCap,
-		EnableTeams:                  cfg.enableTeams,
-		MCPServers:                   cfg.mcpServers,
-		MCPResourceTools:             cfg.mcpResourceTools,
-		MCPPrompts:                   cfg.mcpPrompts,
-		ToolHiveEnabled:              cfg.toolHiveEnabled,
-		ToolHiveGroup:                cfg.toolHiveGroup,
-		PermissionsConventional:      cfg.permissionsConventional,
-		ImportClaudePermissions:      cfg.importClaudePermissions,
-		TrustProject:                 cfg.trustProject,
-		PermissionConfigs:            cfg.permissionConfigs,
-		AllowAllTools:                cfg.allowAllTools,
+		// Guardrails (issue #27): the checker model + master kill-switch. The rule list
+		// and cost knobs are operator-tier YAML only (the `guardrails:` subtree of the
+		// user-global settings.yaml), folded onto Config by foldOperatorGuardrails — a
+		// flag cannot express a rule list.
+		GuardrailsModel:         cfg.guardrailsModel,
+		GuardrailsDisabled:      cfg.guardrailsOff,
+		ModelAliases:            cfg.modelAliases,
+		CommandsDir:             cfg.commandsDir,
+		EnableCommands:          cfg.enableCommands,
+		EnableParallel:          cfg.enableParallel,
+		ForkPreservedCap:        cfg.forkPreservedCap,
+		EnableTeams:             cfg.enableTeams,
+		MCPServers:              cfg.mcpServers,
+		MCPResourceTools:        cfg.mcpResourceTools,
+		MCPPrompts:              cfg.mcpPrompts,
+		ToolHiveEnabled:         cfg.toolHiveEnabled,
+		ToolHiveGroup:           cfg.toolHiveGroup,
+		PermissionsConventional: cfg.permissionsConventional,
+		ImportClaudePermissions: cfg.importClaudePermissions,
+		TrustProject:            cfg.trustProject,
+		PermissionConfigs:       cfg.permissionConfigs,
+		AllowAllTools:           cfg.allowAllTools,
 		// mecated serves the bidi Converse + HTTP-SSE surfaces, whose clients CAN
 		// answer a permission ask (ResumeApproval) — so by default a subagent's
 		// unresolved Bash ask is SURFACED to the attached human rather than
@@ -892,6 +909,8 @@ func parseFlags(argv []string) (config, error) {
 	fs.IntVar(&cfg.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", 3, "circuit breaker for --subagent-ask-reviewer: after this many CONSECUTIVE non-allow reviewer outcomes (denies/errors/timeouts) in one run, further asks skip the reviewer and fall through to the plain auto-deny; an allow resets the count. <=0 uses the default (3)")
 	fs.StringVar(&cfg.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "path to a TRUSTED policy rubric file for --subagent-ask-reviewer; its CONTENT replaces the built-in read-only/verification rubric the reviewer applies. Empty keeps the built-in rubric. Read once at startup; an unreadable file FAILS STARTUP")
 	fs.BoolVar(&cfg.headless, "headless", false, "run NON-interactive: declare that clients drive sessions but never answer permission prompts (autonomous / CI deployments). A child subagent/member/branch permission ask is then NOT surfaced to the client (nobody would answer it — it would park until run-end) but resolved by the auto-deny path / the opt-in --subagent-ask-reviewer. DEFAULT off: a normal mecated serving an interactive client (mecatui, an IDE) surfaces asks for a human. Setting --subagent-ask-reviewer WITHOUT --headless has no effect (asks surface to the client instead) — a startup WARNING says so")
+	fs.StringVar(&cfg.guardrailsModel, "guardrails-model", "", "GUARDRAILS (issue #27): model id or --model-alias of a tool-less checker that inspects OUTBOUND tool-call args (PreToolUse, data exfil) and INBOUND tool results (PostToolUse, prompt injection) and enforces a verdict per the operator-tier `guardrails:` rule list. Empty (default) disables guardrails. A value that does not resolve to a usable model id FAILS STARTUP. The RULE LIST + cost knobs live in the user-global settings.yaml `guardrails:` subtree (operator-tier ONLY — a project repo cannot configure or weaken a checker); --guardrails-model overrides the YAML model")
+	fs.StringVar(&cfg.guardrailsMode, "guardrails", "", "GUARDRAILS master switch: pass `--guardrails=off` to force the issue-#27 content checker OFF regardless of --guardrails-model / the guardrails: YAML config (the kill-switch). Any other value (or unset) leaves guardrails governed by the model + rule config")
 
 	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "directory of slash-command templates (<name>.md); setting it enables command expansion. Empty + --enable-commands uses the defaults (.mecatl/commands, .claude/commands)")
 	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.mecatl/commands, .claude/commands) when --commands-dir is empty")
@@ -973,6 +992,19 @@ func parseFlags(argv []string) (config, error) {
 		return config{}, err
 	}
 	cfg.subagentAskReviewerPolicy = policy
+	// Guardrails master switch: only `--guardrails=off` is meaningful (the kill-switch
+	// — it forces guardrails off regardless of --guardrails-model / the YAML config).
+	// An empty value leaves guardrails governed by the model + rule config. Any OTHER
+	// value is a startup error rather than a silent no-op (so `--guardrails=on`, a
+	// natural-but-wrong attempt to ENABLE, fails loudly instead of doing nothing).
+	switch strings.ToLower(strings.TrimSpace(cfg.guardrailsMode)) {
+	case "":
+		cfg.guardrailsOff = false
+	case "off":
+		cfg.guardrailsOff = true
+	default:
+		return config{}, fmt.Errorf("--guardrails %q: only \"off\" is accepted (the kill-switch); to ENABLE guardrails set --guardrails-model (and a guardrails: rule list in your user-global settings.yaml). Leave --guardrails unset to keep guardrails governed by the model/rule config", cfg.guardrailsMode)
+	}
 	return cfg, nil
 }
 

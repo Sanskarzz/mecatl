@@ -1351,6 +1351,90 @@ discovery. A strict-parse skip WARN names the per-effect rule counts the skipped
 (`lostRuleCounts`, lenient best-effort re-read) — a typo'd key drops the file's deny/ask too,
 so the loosening is made loud.
 
+### `modelhook` (guardrails — LLM-backed tool-content checker, issue #27 — see `GUARDRAILS.md`)
+
+The `modelhook.Runner` is a `port.HookRunner` **decorator** that inspects
+`PreToolUse` (outbound args, exfil) and `PostToolUse` (inbound results, prompt
+injection) with a dedicated tool-less checker model and enforces a verdict. **OFF by
+default** (the composition returns inner unchanged when unconfigured). Split across
+three layers to keep the engine importable and the verdict shape in the adapter:
+
+- **`internal/adapter/modelhook/`** — the `Runner`, the adapter-local `VerdictChecker`
+  port (keeps engine/agent types out of the adapter), `Verdict` + `ParseVerdict`
+  (whole-output-single-object, the #31 discipline — **not** `session.ValidateJSON`),
+  `CompileRule`/`RuleSpec`/`CompiledRule` + the most-specific-wins matcher, the
+  per-session `checkBudget`, the merge, the built-in inspection prompts. It imports
+  `engine/agent` **only** for the exported fence helpers (`agent.UntrustedFence` /
+  `NeutraliseFraming` / `WriteUntrustedBlock` — exported in #27 so the checker fences
+  untrusted content with the **same** single source of truth as the team/ask-review
+  prompts).
+- **`engine/agent/guardrailcheck.go`** — `RunGuardrailCheck`, the engine-driving half
+  (it needs the unexported `drainChild`): a tool-less one-turn drive bounded by
+  `guardrailCheckTimeout` (30s). It is a **free function**, not an exported struct —
+  matching the `engineAskReviewer` / `engineJudge` siblings, which keep the concrete
+  impl unexported (composition noise stays out of the importable public API). Returns
+  raw text; composition parses it.
+- **`engine/agent/fence.go`** — the shared fencing helpers, moved out of
+  `teamsupervisor.go` so a consumer finds them by concept: `UntrustedFence`,
+  `WriteUntrustedBlock`, `NeutraliseFraming`, and `StripLoneCodeFence` (the
+  security-sensitive lone-fence stripper the ask-review AND guardrail verdict parsers
+  now share — one parser, never diverging).
+- **`internal/app/guardrails.go`** — `buildGuardrailsHooks` (decorates the **main**
+  hooks at `buildEngine` + the per-session factory, so a **fresh per-session budget +
+  failure-streak** are built; returns inner unchanged when no model is set),
+  `effectiveGuardrailSpecs` (explicit rules OR the default advisory set),
+  `engineGuardrailsChecker` (the `VerdictChecker` impl: `agent.RunGuardrailCheck` +
+  `modelhook.ParseVerdict`), `compileGuardrailRules`, `foldOperatorGuardrails` (the
+  operator-tier YAML fold — CLI out-ranks YAML for model/disable, rules come from
+  YAML), and `normalizeGuardrailsModel` (fail-fast model validation + the build-once
+  ACTIVE fact).
+
+**Default-on with no rules.** A configured checker model is the opt-in-to-spend; with
+no explicit rule list guardrails take the built-in **default advisory rule set**
+(`defaultGuardrailSpecs`: WebSearch pre+post, WebFetch post, `mcp__*` pre+post, all
+advisory — the headline default, local tools deliberately unmatched). An explicit
+`guardrails.rules` list replaces it. The default set gets an auto `maxChecks`=200 when
+the operator did not pin one (it matches `mcp__*` on both directions, so it could
+otherwise surprise-bill); an explicit `maxChecks` (incl. a deliberate 0 = unbounded)
+or an explicit rule list keeps the operator's value.
+
+**The #1 constraint — `PostToolUse` Block is INERT.** The tool has already run by the
+time the post hook fires (`dispatch.go` ~642-648 only emits a hook annotation). So an
+enforcing block on `Post` rewrites the result via `HookOutcome.Mutated` to
+`{content:"blocked by guardrail: …", is_error:true}`, **not** Block — and the loop's
+effective-payload guarantee (recorded history == client stream == model view, all show
+the mutated result) means the model sees the block and the raw injected result reaches
+nobody. Only `PreToolUse` Block is a real veto.
+
+**Recursion guard.** The Runner is wired ONLY into the main engine's hooks, never into
+`buildCatalog`'s child hooks; the checker engine is built via
+`childEngineDepsForProvider` (inert Hooks + nil `ChildAskReviewer` + `Interactive`
+false + tool-less catalog), so a checker call fires no hooks and cannot re-trigger the
+runner. **Modes:** block / sanitize / advisory. **Sanitize is bounded** (the
+sanitize-laundering defense — the rewrite re-enters as content the agent trusts more):
+a nil or oversized (`maxSanitizedBytes`) `sanitized_content`, or a Pre payload that is
+not valid args JSON (which the loop would ignore → run the **original unsafe args**),
+falls back to a **block**; a Post-sanitize prepends a visible
+`[guardrail: redacted unsafe content]` marker so the model knows it was edited. The
+trust assumption is explicit: sanitize TRUSTS the checker's output — use it only with
+a trusted checker model. **Advisory + every finding diagnostic is correlatable:** it
+carries `session` + `call` (the `HookEvent.CallID`, threaded from `dispatch.go`) + a
+stable `guardrail-finding` marker. **Merge (decision 5):** inner FIRST, checker
+SECOND, Block-dominant, messages concat inner-first, mutation conflict → checker wins.
+**Cost/abuse:** a per-session `maxChecks` cap (bounded separately from `MaxRunTokens`)
++ a `minContentBytes` skip **(Post/inbound ONLY — Pre/outbound args are always
+inspected regardless of size, since a short exfiltration arg is exactly what the Pre
+check catches)** + a `maxContentBytes` (256 KiB) bound — oversized content in an
+**enforce** mode is NOT silently passed (it routes through fail-open/closed: the
+induced-fail-open defense). **Fail-open by default** (checker error / oversized content
+→ "no checker" + WARN); `failClosed: true` treats it as unsafe. A sustained checker
+outage escalates to a **one-time "checker DOWN" sticky WARN** (a `failureStreak`
+per Runner; a completed verdict resets it) so a persistently-unguarded surface is not
+lost in a per-call WARN flood. **Operator-tier config:** the `guardrails:` YAML subtree
+is read by `permconfig.Resolver.OperatorGuardrails()` from the **user-global + CLI
+tiers only** — a project-tier block is ignored with a WARN (the trust inversion: a
+project weakening a checker is a downgrade), parsed strictly (unknown sub-key = error).
+
 ### `workspacetrust` (WORKSPACE-TRUST — see `WORKSPACE-TRUST-SPIKE.md`)
 
 **Phase 1:** a stdlib+`xdgconfig` leaf reading an operator-authored, **read-only**

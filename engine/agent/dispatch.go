@@ -320,6 +320,7 @@ func (e *Engine) preHook(ctx context.Context, r *Run, sess *session.Session, tur
 		Tool:      c.Name,
 		Input:     c.Args,
 		SessionID: string(sess.ID),
+		CallID:    string(c.ID),
 	}
 	outcome, herr := e.deps.Hooks.Run(ctx, ev)
 	if herr != nil {
@@ -632,6 +633,7 @@ func (e *Engine) postHook(ctx context.Context, r *Run, sess *session.Session, tu
 		Tool:      c.Name,
 		Input:     input,
 		SessionID: string(sess.ID),
+		CallID:    string(c.ID),
 	}
 	outcome, err := e.deps.Hooks.Run(ctx, ev)
 	if err != nil {

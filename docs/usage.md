@@ -242,6 +242,8 @@ mailbox). See the delegation-capabilities note below.
 | `--agents-dir` | `""` | directory of named **agent definitions** (`<name>.md` + YAML frontmatter), reusable as a `Subagent(agent=<name>)` delegate and as a team-member role (repeatable; highest precedence). **TRUST BOUNDARY:** a def body steers the model like `AGENTS.md`/`CLAUDE.md`. |
 | `--agents-conventional` | `true` | also discover agent defs from the conventional locations (`<workspace>/.mecatl/agents`, `<workspace>/.claude/agents`, `$XDG_CONFIG_HOME/mecatl/agents`, `~/.claude/agents`; lower precedence than `--agents-dir`). ON and **inert** until such a dir exists. Project-tier defs are **trust-gated** (`--trust-project`). |
 | `--model-alias` | `""` | model alias mapping `name=model-id` (repeatable), resolved only in composition — an agent def's `model: <alias>` resolves through this map (then the built-in sonnet/opus/haiku aliases). |
+| `--guardrails-model` | `""` | **GUARDRAILS** (issue #27): model id / `--model-alias` of a tool-less checker that inspects **outbound** tool-call args (`PreToolUse`, exfil) and **inbound** tool results (`PostToolUse`, prompt injection) and enforces a verdict. Empty (default) **disables** guardrails; an unusable model id **fails startup**. Configuring a model is the **opt-in to spend** — with **no rule list** it takes the **default advisory rule set** (WebSearch/WebFetch/mcp__\*, observe-only). The optional **rule list** + cost knobs live in the **user-global** `settings.yaml` `guardrails:` subtree (operator-tier **only** — a project repo cannot configure or weaken a checker; a project-tier block is ignored with a WARN); an explicit rule list replaces the defaults. `--guardrails-model` overrides the YAML model. Fires on the main loop regardless of `--headless`. **See the guardrails section below + `docs/design/GUARDRAILS.md`.** |
+| `--guardrails` | `""` | guardrails master switch: pass `--guardrails=off` to force the checker **off** regardless of `--guardrails-model` / the `guardrails:` YAML (the kill-switch). Leave it unset to keep guardrails governed by the model + rule config. **Only `off` is accepted** — any other value (e.g. `--guardrails=on`, which does NOT enable: set `--guardrails-model` for that) **fails startup** rather than silently doing nothing. |
 
 > **Delegation capabilities (Subagent / Parallel / Team).** Beyond the shared
 > `--max-run-tokens` budget, every delegation supports: an explicit **child-concurrency
@@ -729,6 +731,81 @@ The import never widens: a demotion only ever moves `allow → ask`, and the
 > gone.) The `mecated` daemon likewise defaults `--permissions-conventional` ON but
 > `--trust-project` OFF (the safe stance); it defaults `--import-claude-permissions`
 > OFF (the safe network stance).
+
+### Guardrails — LLM-backed tool-content inspection (`guardrails:`, issue #27)
+
+Guardrails inspect the data crossing the agent's tool boundary with a **separate,
+tool-less checker model** and enforce a verdict — the *dual-LLM quarantine*. They
+catch **outbound exfiltration** (a secret in `PreToolUse` args) and **inbound prompt
+injection** (instruction-like content in a `PostToolUse` result). **OFF until a
+checker model is configured** — configuring a model is the opt-in to spend. Full
+rationale + threat model: `docs/design/GUARDRAILS.md`.
+
+**The minimal config is just a model.** With `--guardrails-model X` (and no rule
+list) guardrails are ON with the **default advisory rule set** — observe-only for the
+network/MCP surfaces, off for local tools:
+
+| Tool matcher | Phases | Mode |
+| --- | --- | --- |
+| `WebSearch` | pre + post | advisory |
+| `WebFetch` | post | advisory |
+| `mcp__*` | pre + post | advisory |
+
+Advisory = observe-only: a finding is an **operator-log diagnostic** (carrying the
+session id + tool-call id + a `guardrail-finding` marker so you can correlate it back
+to the conversation); the call/result is byte-unchanged and the client/model see
+nothing. Measure the false-positive rate, then promote a rule to `block`/`sanitize`.
+
+**Operator-tier ONLY.** The `guardrails:` config is read from the **user-global**
+`settings.yaml` + the CLI — **never** the project-tier file. This inverts the usual
+tighten-only project gate: a project repo disabling or weakening a security checker
+is a *downgrade*, so a project-tier `guardrails:` block is **ignored with a WARN**.
+The subtree is parsed **strictly** (an unknown sub-key is an error, like
+`permissions:`) so a typo cannot silently disable a guardrail. Set the checker model
+with `--guardrails-model` (overrides the YAML `model:`); force off with
+`--guardrails=off`.
+
+```yaml
+# ~/.config/mecatl/settings.yaml  (user-global only — NOT a checked-in project file)
+guardrails:
+  model: gpt-5-mini          # the checker model (or a --model-alias). With NO rules below,
+                             # the default advisory set applies (the model is the opt-in).
+  maxChecks: 50              # per-session checker-call cap — bounded SEPARATELY from
+                             # --max-run-tokens so infra spend can't starve the agent.
+                             # OMITTING maxChecks = NO cap (but the DEFAULT rule set, used when
+                             # you set only a model, gets a default cap of 200 so it can't surprise-bill).
+  minContentBytes: 16        # skip a short INBOUND (post) result (cost guard; omit = check every post).
+                             # Outbound (pre) args are ALWAYS inspected — a short exfil arg is the point.
+  rules:                     # an explicit list REPLACES the default advisory set
+    - match: "WebFetch"      # inbound injection on fetched pages
+      phases: ["post"]       # "pre" = outbound args, "post" = inbound result; omit = BOTH
+      mode: block            # block | sanitize | advisory
+    - match: "mcp__*"        # all MCP tools, both directions
+      mode: advisory         # observe-only first; tune to block/sanitize later
+    - match: "Bash"          # outbound exfil in shell args
+      phases: ["pre"]
+      mode: sanitize         # rewrite the args to the checker's sanitized form
+      failClosed: true       # a checker outage treats the content as UNSAFE (default is fail-OPEN)
+```
+
+- **Matcher** keys on the tool **name** only (exact > `prefix*` > `*`, most-specific
+  wins; a tie favours the earlier rule). A tool with no matching rule is unchecked.
+- **`block`** vetoes a `PreToolUse` call; on `PostToolUse` — where a Block is **inert**
+  (the tool already ran) — it **rewrites the result to a model-visible error**, so the
+  model and client both see the block and the raw injected result never reaches either.
+- **`sanitize`** rewrites the args (`pre`) / result (`post`) to the checker's
+  `sanitized_content` — a Post rewrite carries a `[guardrail: redacted unsafe content]`
+  marker so the model knows it was edited. **Sanitize trusts the checker's output**
+  (a compromised checker could rewrite content): use it only with a trusted checker
+  model; an unsafe verdict with no/oversized/invalid rewrite falls back to a block.
+- **`advisory`** only logs an operator diagnostic (correlatable; client/model see nothing).
+- **Fail-open by default** (a checker error/oversized content degrades to "no checker"
+  with a WARN; a sustained outage escalates to a one-time **"checker DOWN"** sticky WARN);
+  **`failClosed: true`** treats a checker error as unsafe. A checker **saying safe always passes**.
+- Guardrails fire on the **main loop** regardless of `--headless` (unlike the
+  `--subagent-ask-reviewer`, which is headless-only). The checker engine runs
+  tool-less with inert hooks and no nested reviewer — it can never re-trigger a
+  guardrail or call a tool.
 
 ### Declarative workspace trust (`trustedWorkspaces:`, WORKSPACE-TRUST Phase 1)
 

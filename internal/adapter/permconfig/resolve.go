@@ -111,8 +111,27 @@ type Resolver struct {
 	// computed once at construction. Always fully trusted.
 	userRules []governance.Rule
 
+	// operatorGuardrails is the OPERATOR-TIER guardrails config (issue #27), read
+	// ONCE at construction from the user-global + explicit (CLI) tiers ONLY. A
+	// project-tier file's guardrails: block is deliberately IGNORED (a project repo
+	// weakening/disabling a checker is a security DOWNGRADE) — loadProjectRules WARNs
+	// when it sees one. nil when no operator-tier file carried a guardrails: section.
+	// CLI (explicit files) out-ranks user-global.
+	operatorGuardrails *GuardrailsSection
+
 	mu    sync.RWMutex
 	cache map[string]*cacheEntry // keyed by ws.Root()
+}
+
+// OperatorGuardrails returns the operator-tier guardrails config (user-global + CLI
+// only), or nil when none was configured. It is the SOLE accessor the composition
+// layer uses to read guardrails from config — by construction it never returns a
+// project-tier block (decision 3: operator-tier-only).
+func (r *Resolver) OperatorGuardrails() *GuardrailsSection {
+	if r == nil {
+		return nil
+	}
+	return r.operatorGuardrails
 }
 
 // New constructs a Resolver from opts, reading the user-global + explicit (CLI)
@@ -269,6 +288,16 @@ func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) []governance.Rule {
 				"lost_deny", deny, "lost_ask", ask, "lost_allow", allow, "counts_known", counted)
 			continue
 		}
+		// Guardrails are OPERATOR-TIER ONLY (issue #27, decision 3): a project file's
+		// guardrails: block is IGNORED with a loud WARN. Honouring it would let a
+		// project repo weaken or disable a security checker — a downgrade the usual
+		// tighten-only project gate does NOT permit (it reverses here: project config
+		// can only TIGHTEN permissions, but a guardrail relaxation is a LOOSENING).
+		if cfg.Guardrails != nil {
+			r.diag.Log(context.Background(), port.LevelWarn,
+				"guardrails: IGNORING a project-tier guardrails: block (operator-tier only — a project repo cannot configure/disable a security checker; set guardrails in your user-global settings.yaml or via --guardrails-model)",
+				"file", src.path, "root", ws.Root())
+		}
 		rules = append(rules, rulesFromConfig(cfg, src.scope, &report)...)
 	}
 
@@ -325,6 +354,9 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 			continue
 		}
 		rules = append(rules, rulesFromConfig(cfg, governance.ScopeCLI, report)...)
+		// Operator-tier guardrails (issue #27): CLI files out-rank user-global, so the
+		// FIRST CLI file with a guardrails: block wins (first-non-nil keeps CLI).
+		r.captureGuardrails(cfg.Guardrails)
 	}
 
 	if !r.opts.Conventional {
@@ -342,6 +374,8 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 					"lost_deny", deny, "lost_ask", ask, "lost_allow", allow, "counts_known", counted)
 			} else {
 				rules = append(rules, rulesFromConfig(cfg, governance.ScopeUser, report)...)
+				// User-global guardrails: captured only if no higher CLI file already did.
+				r.captureGuardrails(cfg.Guardrails)
 			}
 		}
 	}
@@ -361,6 +395,18 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 	}
 
 	return rules
+}
+
+// captureGuardrails records the FIRST operator-tier guardrails: block seen during
+// construction (CLI files are parsed before user-global, so CLI wins on first-non-
+// nil). It is called only from loadUserRules — the operator (user-global + CLI)
+// tiers — never from loadProjectRules, so a project file can never supply guardrails
+// (decision 3: operator-tier-only).
+func (r *Resolver) captureGuardrails(g *GuardrailsSection) {
+	if g == nil || r.operatorGuardrails != nil {
+		return
+	}
+	r.operatorGuardrails = g
 }
 
 // specOf reconstructs a human-readable "Tool(pattern)" spec from a rule, for the

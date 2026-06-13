@@ -45,6 +45,10 @@ type HookEvent struct {
 	Input json.RawMessage
 	// SessionID is the session this event belongs to.
 	SessionID string
+	// CallID is the originating tool-call id for the tool-use phases (PreToolUse /
+	// PostToolUse); empty for the non-tool phases. It lets a hook correlate a finding
+	// back to the exact tool call on the conversation stream.
+	CallID string
 }
 
 // HookOutcome is the result of running a hook. The exec adapter maps process
