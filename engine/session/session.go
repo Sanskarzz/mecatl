@@ -332,6 +332,32 @@ func (s *Session) ReplaceHistory(messages []Message) error {
 	return nil
 }
 
+// SeedHistory atomically seeds a FRESH (idle) session's conversation history with
+// messages. It is the IDLE-state sibling of ReplaceHistory (which is running-only,
+// the compaction seam): SeedHistory exists for the fork:true Subagent child, whose
+// session is freshly constructed and must be primed with a deep copy of the parent
+// conversation BEFORE the first turn begins. It is the aggregate-mutation seam the
+// agent package uses instead of poking Conversation.Messages directly, so the
+// history-mutation discipline (and the pairing guard) holds.
+//
+// It is legal ONLY from StateIdle — a fresh, not-yet-run child. Seeding a session
+// that has already begun a turn (or a terminal one) is a programming error and
+// returns ErrIllegalTransition. As the aggregate-level guard it REJECTS a slice
+// that is not tool-pairing-valid via ValidateToolPairing (an orphaned tool result
+// or a dangling tool call would draw a provider HTTP 400 on the first replay), so
+// the conversation is always provider-replayable regardless of what the caller
+// supplies.
+func (s *Session) SeedHistory(messages []Message) error {
+	if s.State != StateIdle {
+		return fmt.Errorf("%w: SeedHistory from %q", ErrIllegalTransition, s.State)
+	}
+	if err := ValidateToolPairing(messages); err != nil {
+		return fmt.Errorf("SeedHistory: %w", err)
+	}
+	s.Conversation.Messages = messages
+	return nil
+}
+
 // PauseForApproval suspends a running turn on a permission ask, transitioning to
 // StateAwaiting. It is legal only while running.
 func (s *Session) PauseForApproval(ask PendingAsk) error {

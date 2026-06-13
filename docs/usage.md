@@ -253,7 +253,10 @@ mailbox). See the delegation-capabilities note below.
 > token ceiling**; **opt-in structured output** (a synthetic `SubmitResult` tool with
 > bounded validation-retry when the caller supplies a result schema); and, on a
 > Subagent, an **agentId trailer** on the returned result plus a `References:`
-> convention the explorer uses to cite the files it read. A Subagent call may also run
+> convention the explorer uses to cite the files it read. A Subagent call may also
+> **fork** (`fork: true` — seed the child from a copy of the parent's full
+> conversation instead of an empty context, for a focused continuation; runs on the
+> parent's model, mutually exclusive with `model`/`agent`/`resume`). A Subagent call may also run
 > **in the background** (`background: true` — returns immediately with the agentId; the
 > child keeps working, RUN-scoped, and the model collects the result via the
 > **`SubagentStatus`** tool, prompted by a turn-boundary notice; still running at run

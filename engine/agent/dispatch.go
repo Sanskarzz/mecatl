@@ -389,7 +389,7 @@ func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws 
 		}
 	}
 
-	res, dur := e.timeExecute(ctx, r, ws, turnIdx, c, t, execStart)
+	res, dur := e.timeExecute(ctx, r, sess, ws, turnIdx, c, t, execStart)
 
 	// PostToolUse may rewrite the result. The effective (possibly rewritten) result
 	// is what we log, emit, and return, so the audit log, the client event stream,
@@ -421,7 +421,7 @@ func (e *Engine) execute(ctx context.Context, r *Run, sess *session.Session, ws 
 // concurrent, read-parallel) tool goroutine — consistent with the existing
 // dispatch emits, which e.emit serialises. Tools that do not implement the seam
 // take the ordinary Execute path unchanged.
-func (e *Engine) timeExecute(ctx context.Context, r *Run, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool, start time.Time) (session.ToolResult, time.Duration) {
+func (e *Engine) timeExecute(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool, start time.Time) (session.ToolResult, time.Duration) {
 	var (
 		res session.ToolResult
 		err error
@@ -442,7 +442,7 @@ func (e *Engine) timeExecute(ctx context.Context, r *Run, ws tool.Workspace, tur
 		// child's permission ask can be SURFACED to the human (interactive) or auto-denied
 		// with the accurate message + operator diagnostic (headless). The surface seam is
 		// bound to THIS parent Run (register-then-emit), symmetric to the emit closure.
-		res, err = ct.ExecuteWithParent(ctx, c, ws, emit, e.parentCaps(r, turnIdx))
+		res, err = ct.ExecuteWithParent(ctx, c, ws, emit, e.parentCaps(r, sess, turnIdx))
 	case observableTool:
 		res, err = ct.ExecuteObserved(ctx, c, ws, emit)
 	default:
@@ -469,7 +469,7 @@ func (e *Engine) timeExecute(ctx context.Context, r *Run, ws tool.Workspace, tur
 // (gauntlet #7: an ASK with a tool name + clamped command + static-framed reason, never
 // transcript content). diag is the parent run's run-scoped diagnostics for the headless
 // auto-deny operator line.
-func (e *Engine) parentCaps(r *Run, turnIdx int) parentCaps {
+func (e *Engine) parentCaps(r *Run, sess *session.Session, turnIdx int) parentCaps {
 	interactive := r.childAsks != nil
 	caps := parentCaps{
 		interactive: interactive,
@@ -484,6 +484,18 @@ func (e *Engine) parentCaps(r *Run, turnIdx int) parentCaps {
 		// It is an agent-package handle, so no layering rule is crossed; the spawning
 		// tools go through parentCaps' nil-safe wrappers.
 		children: r.children,
+	}
+	// fork:true Subagent context inheritance (issue #34): hand down a closure that
+	// takes a DEEP COPY of the PARENT conversation, trailing-fork-call orphan
+	// stripped, so a fork child can be seeded with the parent's full context. It is
+	// captured over THIS run's session and read SYNCHRONOUSLY on the dispatch
+	// goroutine while the conversation is stable (Subagent's run()/startBackground
+	// snapshot it before any detach), never inside a detached background goroutine.
+	// nil when no parent session is threaded (plain Execute) — fork then unsupported.
+	if sess != nil {
+		caps.forkHistory = func() []session.Message {
+			return session.ForkSnapshot(sess.Conversation)
+		}
 	}
 	// The OPT-IN headless ask reviewer: bind the engine's reviewer + THIS run's
 	// breaker + the timeout into a closure resolveChildAsk consults on the headless

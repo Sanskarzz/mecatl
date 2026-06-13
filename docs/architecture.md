@@ -670,7 +670,15 @@ validation error / error) and carries an `agentId: <childID>` trailer on every t
 (model-visible, mirroring the Team-id line) so the parent can discover the child id and
 read its persisted transcript via the read-only `InspectSubagent` tool (the id is used
 verbatim), or pass it as `resume` to CONTINUE that subagent with a follow-up prompt
-(default engine only, fresh fork + staleness note; `failed` is not resumable). When
+(default engine only, fresh fork + staleness note; `failed` is not resumable).
+`fork: true` (issue #34) seeds the child from a DEEP COPY of the parent conversation
+(via `session.ForkSnapshot` — trailing fork-call orphan stripped — and the idle-only
+`session.Session.SeedHistory`) instead of an empty context, TRUST-NEUTRAL (carried
+VERBATIM, no re-fence — the child inherits the parent's EXACT raw message posture, the
+main loop records tool results unfenced anyway, and the read-only explorer sandbox adds
+no new untrusted ingress; re-fencing would also bust the byte-stable prompt-cache
+prefix the feature relies on) and SAME-PROVIDER only (mutually exclusive with
+`model`/`agent`/`resume`; a forked child runs on the parent's engine). When
 neither `agent` nor `model` pins one, a def-less child runs on the global
 `--subagent-model` default (the analogue of `CLAUDE_CODE_SUBAGENT_MODEL`; a concrete
 id or a `--model-alias` name, resolved same-provider; precedence `def.Model >

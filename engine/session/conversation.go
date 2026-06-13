@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 )
 
@@ -153,6 +154,75 @@ func ValidateToolPairing(msgs []Message) error {
 		return fmt.Errorf("dangling tool call %q (no following tool result)", ids[0])
 	}
 	return nil
+}
+
+// CloneMessages returns a copy of msgs with a FRESH backing array, so the
+// returned slice and the original never alias: an Append to one cannot grow into
+// the other's storage. The COPY IS SHALLOW per element, which is sound because a
+// Message is an IMMUTABLE value object — its slice/pointer fields (ToolCalls,
+// ToolResult, Parts) are never mutated in place after construction (the
+// constructors build them once; the only mutation of a Conversation is Append,
+// which adds whole new Messages, never edits an existing one's fields). A fork
+// child therefore shares the parent's per-message tool-call / part data safely:
+// it only appends new Messages, it never rewrites a copied one. A nil input
+// returns nil.
+func CloneMessages(msgs []Message) []Message {
+	return slices.Clone(msgs)
+}
+
+// ForkSnapshot returns a deep-enough copy (CloneMessages — fresh backing array,
+// immutable-Message elements) of c's history with any TRAILING UNANSWERED tool
+// calls stripped, so the result is always tool-pairing-valid (ValidateToolPairing
+// passes). It is the seam a fork:true Subagent child seeds from: at dispatch time
+// the parent's trailing assistant message carries the Subagent{fork:true} call
+// itself, whose tool result is recorded only AFTER dispatch returns — so a naive
+// copy would end on a dangling tool_use and draw a provider HTTP 400 on the
+// child's first replay. Stripping only the trailing-orphan tail preserves every
+// prior turn (including fully-answered tool pairs); a conversation with no
+// trailing orphan is returned cloned-but-unchanged. A turn-0 (empty, or
+// just-the-fork-call) parent yields an empty snapshot — trivially pairing-valid,
+// and the fork degrades to a fresh-context child, which is benign by design.
+//
+// A nil receiver returns nil.
+func ForkSnapshot(c *Conversation) []Message {
+	if c == nil {
+		return nil
+	}
+	msgs := CloneMessages(c.Messages)
+	// Find the last assistant message; collect the call IDs answered by tool-role
+	// messages that FOLLOW it. Any of that assistant's ToolCalls left unanswered is
+	// a trailing orphan whose presence would fail pairing — drop the whole trailing
+	// assistant turn (the unanswered fork call) so the snapshot ends paired.
+	lastAssistant := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == RoleAssistant {
+			lastAssistant = i
+			break
+		}
+	}
+	if lastAssistant < 0 {
+		return msgs
+	}
+	answered := make(map[ToolCallID]struct{})
+	for _, m := range msgs[lastAssistant+1:] {
+		if m.Role == RoleTool && m.ToolResult != nil {
+			answered[m.ToolResult.CallID] = struct{}{}
+		}
+	}
+	hasOrphan := false
+	for _, call := range msgs[lastAssistant].ToolCalls {
+		if _, ok := answered[call.ID]; !ok {
+			hasOrphan = true
+			break
+		}
+	}
+	if !hasOrphan {
+		return msgs
+	}
+	// Truncate to just before the trailing assistant turn (and any trailing tool
+	// results that followed it, which belong to that orphaned turn). The prior
+	// turns — fully paired by construction — are preserved.
+	return msgs[:lastAssistant]
 }
 
 // Turn records one model call together with the tools it triggered. It is a

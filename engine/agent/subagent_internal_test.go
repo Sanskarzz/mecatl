@@ -55,7 +55,7 @@ func TestSurfaceAskAttribution(t *testing.T) {
 			// The surfaced ask now rides the registry's guarded emit (A4c); bind it
 			// to this run's channel the way RunContentWith does.
 			r.children.emit = func(ev session.Event) { r.emitOrAbort(ev, r.children.emitAbort) }
-			caps := e.parentCaps(r, 0)
+			caps := e.parentCaps(r, nil, 0)
 			if caps.surfaceAsk == nil {
 				t.Fatalf("interactive engine must install a surfaceAsk seam")
 			}

@@ -116,6 +116,17 @@ type parentCaps struct {
 	// unreachable. nil on a zero parentCaps (plain Execute/ExecuteObserved): a nil
 	// channel in a select blocks forever, which IS the correct no-abort behaviour.
 	hardAbort <-chan struct{}
+	// forkHistory, when non-nil, returns a DEEP COPY of the PARENT conversation
+	// (session.ForkSnapshot — fresh backing array, immutable-Message elements,
+	// trailing fork-call orphan stripped so it is tool-pairing-valid) for a
+	// fork:true Subagent child to seed from (issue #34). It is bound by the
+	// dispatcher over the parent run's session and must be CALLED SYNCHRONOUSLY on
+	// the dispatch goroutine while the parent conversation is stable — Subagent
+	// snapshots it in run()/startBackground BEFORE any background detach, never from
+	// the detached goroutine (the parent keeps appending after detach). nil on the
+	// plain Execute path (no parent session threaded) — a fork:true call then errors
+	// with an honest "not supported on this run", never a silent fresh-context child.
+	forkHistory func() []session.Message
 }
 
 // registerChildRun is the nil-safe registration wrapper a spawning tool calls: a
@@ -287,6 +298,27 @@ type subagentArgs struct {
 	// a model-addressable error listing the live background ids, never a cross-turn
 	// block the model could deadlock itself on.
 	Background bool `json:"background,omitempty"`
+
+	// Fork seeds this child from a DEEP COPY of the PARENT conversation (issue #34)
+	// instead of an empty context, so it "continues THIS exact investigation with my
+	// full context". The copied history is carried VERBATIM, not re-fenced — the fork
+	// is TRUST-NEUTRAL, NOT "the parent vetted it": the main loop records tool results
+	// RAW/UNFENCED (RecordToolResults appends each ToolResult straight onto the
+	// conversation; fencing exists only at the team/adjudicator render boundaries),
+	// so the child simply inherits the parent's EXACT raw message posture (whatever
+	// fencing the parent applied travels WITH the content) while running in a
+	// strictly-LESS-privileged read-only explorer sandbox — no new untrusted ingress.
+	// (Re-fencing would also bust the byte-stable prompt-cache prefix the fork relies
+	// on for cheapness.) It is SAME-PROVIDER only: a forked child runs on the parent's engine, so Fork is
+	// MUTUALLY EXCLUSIVE with `model` (a different model could not replay the
+	// parent's provider-private reasoning/phase blobs), with `agent` (a specialist
+	// pins its own engine), and with `resume` (a fork inherits THIS conversation; a
+	// resume continues a DIFFERENT persisted subagent). The trailing fork-call
+	// orphan is stripped so the seeded history stays tool-pairing-valid; a turn-0
+	// parent yields an empty snapshot and the fork degrades to a fresh-context child
+	// (benign). It composes with background/output_schema/limits/timeout_ms. Omitted
+	// (the default) = today's fresh, empty-context child, unchanged.
+	Fork bool `json:"fork,omitempty"`
 }
 
 // AgentMeta is the plain (name, description) summary of one registered agent
@@ -360,6 +392,10 @@ var subagentSchema = json.RawMessage(`{
     "background": {
       "type": "boolean",
       "description": "Run the subagent in the BACKGROUND: this call returns immediately with its agentId and the subagent keeps working while you continue (a note tells you when it finishes). Use it for long investigations whose result you do not need before your next steps. Collect the result with SubagentStatus (pass the agentId; use wait_ms to wait on it). A background subagent still running when this run ends is CANCELLED (its transcript persists and is resumable). Omit (default false) to wait for the result inline."
+    },
+    "fork": {
+      "type": "boolean",
+      "description": "Continue THIS conversation with full context in a focused child: the subagent starts from a copy of everything you have seen so far (instead of a fresh, empty context) and takes 'prompt' as its next instruction. Use it when the task needs the context you have already built up and re-describing it in 'prompt' would be wasteful. It runs on YOUR model (cannot be combined with model, agent, or resume). Omit (default false) for a fresh-context subagent that only sees 'prompt'."
     }
   },
   "required": ["prompt"]
@@ -790,7 +826,10 @@ func (t *SubagentTool) Spec() tool.ToolSpec {
 		" Every result starts with an 'agentId:' line — pass that id to SubagentStatus (this run's " +
 		"live state; collects background results), to InspectSubagent to read the full transcript, " +
 		"or as `resume` to continue that subagent with a follow-up prompt (fresh workspace; its " +
-		"conversation survives)."
+		"conversation survives)." +
+		" Set `fork: true` to seed the subagent with a COPY of THIS conversation (your full context " +
+		"so far) instead of a fresh, empty one — for a focused continuation that needs everything " +
+		"you have already gathered; it runs on your own model (no model/agent/resume)."
 	desc += t.agentEnumeration()
 	return tool.ToolSpec{
 		Name:        subagentToolName,
@@ -1024,6 +1063,54 @@ func (t *SubagentTool) validateResume(callID session.ToolCallID, args subagentAr
 	return t.childEngine, session.ToolResult{}, true
 }
 
+// applyCallTimeout imposes the per-call wall-clock deadline (timeout_ms) on the
+// child run: a hard ceiling independent of the turn/tool limits. A non-positive /
+// nil value leaves ctx unchanged and returns a nil timeoutCtx + a no-op cancel.
+// When a deadline applies, the derived ctx IS the returned timeoutCtx (held
+// separately so the terminal rendering can tell a deadline-kill apart from a
+// parent cancellation), and cancelTimeout is the explicit cancel the background
+// path hands to its detached goroutine.
+func applyCallTimeout(ctx context.Context, timeoutMs *int) (context.Context, context.Context, context.CancelFunc) {
+	if timeoutMs == nil || *timeoutMs <= 0 {
+		return ctx, nil, func() {}
+	}
+	tctx, cancel := context.WithTimeout(ctx, time.Duration(*timeoutMs)*time.Millisecond)
+	return tctx, tctx, cancel
+}
+
+// validateFork checks a fork:true Subagent call's preconditions BEFORE engine
+// selection (issue #34). Fork seeds the child from a deep copy of the parent
+// conversation and runs it on the PARENT's engine, so it is mutually exclusive
+// with the args that pin a DIFFERENT engine/conversation: the checks are ordered
+// so the FIRST conflict is the model's signal. The last check needs the parent's
+// fork-history seam (nil on the plain Execute path, where no parent session is
+// threaded) — a fork there is honestly unsupported, never a silent fresh child.
+// It returns the SNAPSHOT SLICE (taken SYNCHRONOUSLY here on the dispatch
+// goroutine, while the parent conversation is stable — never inside a detached
+// background goroutine) when fork is on and the preconditions pass, nil when fork
+// is off, or a model-addressable error (ok=false) on a precondition violation. It
+// is a free function (no receiver state).
+func validateFork(callID session.ToolCallID, args subagentArgs, caps parentCaps) (forkHistory []session.Message, errResult session.ToolResult, ok bool) {
+	if !args.Fork {
+		return nil, session.ToolResult{}, true
+	}
+	switch {
+	case strings.TrimSpace(args.Resume) != "":
+		return nil, session.NewToolError(callID,
+			"Subagent: `fork` cannot be combined with `resume` — a fork inherits THIS conversation; resume continues a different persisted subagent"), false
+	case strings.TrimSpace(args.Agent) != "":
+		return nil, session.NewToolError(callID,
+			"Subagent: `fork` cannot be combined with `agent` — a forked subagent runs on the parent's engine, not a specialist"), false
+	case strings.TrimSpace(args.Model) != "":
+		return nil, session.NewToolError(callID,
+			"Subagent: `fork` cannot be combined with `model` — a forked subagent inherits the parent's engine/model"), false
+	case caps.forkHistory == nil:
+		return nil, session.NewToolError(callID,
+			"Subagent: `fork` is not supported on this run"), false
+	}
+	return caps.forkHistory(), session.ToolResult{}, true
+}
+
 // resolveEngineAndLimits resolves one Subagent call's child engine and base
 // session limits, then applies the per-call tighten-only overrides.
 //
@@ -1070,7 +1157,7 @@ func (t *SubagentTool) resolveEngineAndLimits(callID session.ToolCallID, args su
 // (forkChildWorkspace). The returned cleanup is ALWAYS non-nil (a no-op when
 // nothing survives) so the caller can defer it unconditionally; on a
 // session-build failure the just-created fork is torn down here.
-func (t *SubagentTool) prepareChildSession(ctx context.Context, call session.ToolCall, ws tool.Workspace, args subagentArgs, resuming bool, childID session.SessionID, limits session.Limits) (child *session.Session, runWS tool.Workspace, cleanup func() error, errResult session.ToolResult, ok bool) {
+func (t *SubagentTool) prepareChildSession(ctx context.Context, call session.ToolCall, ws tool.Workspace, args subagentArgs, resuming bool, childID session.SessionID, limits session.Limits, forkHistory []session.Message) (child *session.Session, runWS tool.Workspace, cleanup func() error, errResult session.ToolResult, ok bool) {
 	noop := func() error { return nil }
 	var resumedChild *session.Session
 	if resuming {
@@ -1084,7 +1171,7 @@ func (t *SubagentTool) prepareChildSession(ctx context.Context, call session.Too
 	if !fok {
 		return nil, nil, noop, errRes, false
 	}
-	child, errRes, bok := t.buildChildSession(call.ID, childID, resumedChild, runWS.Root(), limits)
+	child, errRes, bok := t.buildChildSession(call.ID, childID, resumedChild, runWS.Root(), limits, forkHistory)
 	if !bok {
 		_ = cleanupWS()
 		return nil, nil, noop, errRes, false
@@ -1109,6 +1196,18 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	}
 	if strings.TrimSpace(args.Prompt) == "" {
 		return session.NewToolError(call.ID, "Subagent: 'prompt' is required and must be non-empty"), nil
+	}
+
+	// fork:true precondition guard + synchronous snapshot (issue #34): mutual
+	// exclusivity with resume/agent/model and the "not supported on this run" gate,
+	// checked BEFORE engine selection so the conflict is the model's first signal;
+	// on success it returns the DEEP COPY of the parent conversation (taken here on
+	// the dispatch goroutine while the conversation is stable — the SNAPSHOT SLICE,
+	// not the closure, is threaded into the child build so background composes). A
+	// fork forces the default explorer engine (like resume does — see below).
+	forkHistory, errResult, ok := validateFork(call.ID, args, caps)
+	if !ok {
+		return errResult, nil
 	}
 
 	resuming := strings.TrimSpace(args.Resume) != ""
@@ -1155,14 +1254,11 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// deadline-kill (DeadlineExceeded) apart from a parent cancellation. cancelTimeout
 	// is an explicit func (not a bare defer) because the background path hands it to
 	// the detached goroutine.
-	var timeoutCtx context.Context
-	cancelTimeout := func() {}
-	if args.TimeoutMs != nil && *args.TimeoutMs > 0 {
-		var ct context.CancelFunc
-		ctx, ct = context.WithTimeout(ctx, time.Duration(*args.TimeoutMs)*time.Millisecond)
-		cancelTimeout = ct
-		timeoutCtx = ctx
-	}
+	var (
+		timeoutCtx    context.Context
+		cancelTimeout context.CancelFunc
+	)
+	ctx, timeoutCtx, cancelTimeout = applyCallTimeout(ctx, args.TimeoutMs)
 
 	// Per-child cancel: mint the per-CALL cancelable context the parent's CancelChild
 	// targets and register it in the parent run's child registry. The per-CALL ctx (not
@@ -1182,7 +1278,8 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 		return t.startBackground(ctx, backgroundChild{
 			call: call, ws: ws, emit: emit, caps: caps, args: args,
 			engine: engine, limits: limits, resuming: resuming, childID: childID,
-			timeoutCtx: timeoutCtx, cancelCall: cancelCall, cancelTimeout: cancelTimeout,
+			forkHistory: forkHistory,
+			timeoutCtx:  timeoutCtx, cancelCall: cancelCall, cancelTimeout: cancelTimeout,
 		}), nil
 	}
 
@@ -1230,7 +1327,7 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	// Resume load + fork + session build (see prepareChildSession). The cleanup is
 	// always non-nil and tears the worktree down after the child fully drains (the
 	// run is drained below in this call), so a deferred cleanup is correct.
-	child, runWS, cleanupWS, errResult, ok := t.prepareChildSession(ctx, call, ws, args, resuming, childID, limits)
+	child, runWS, cleanupWS, errResult, ok := t.prepareChildSession(ctx, call, ws, args, resuming, childID, limits, forkHistory)
 	if !ok {
 		return errResult, nil
 	}
@@ -1336,7 +1433,12 @@ type backgroundChild struct {
 	// in startBackground so an unknown id / non-resumable state fails fast inline,
 	// not as a collectible background error).
 	resumed *session.Session
-	childID session.SessionID
+	// forkHistory is the deep copy of the parent conversation a fork:true child
+	// seeds from, captured SYNCHRONOUSLY in run() on the dispatch goroutine BEFORE
+	// the detach (the parent keeps appending after detach, so the snapshot must not
+	// be taken in driveBackground). nil on a non-fork call.
+	forkHistory []session.Message
+	childID     session.SessionID
 	// timeoutCtx is non-nil iff a per-call timeout_ms deadline applies (the
 	// DeadlineExceeded disambiguation read, same as the foreground path).
 	timeoutCtx    context.Context //nolint:containedctx // deadline-disambiguation handle, mirrors run()'s timeoutCtx local
@@ -1450,7 +1552,7 @@ func (t *SubagentTool) driveBackground(ctx context.Context, b backgroundChild) {
 		return
 	}
 	defer func() { _ = cleanupWS() }()
-	child, errResult, ok := t.buildChildSession(b.call.ID, b.childID, b.resumed, runWS.Root(), b.limits)
+	child, errResult, ok := t.buildChildSession(b.call.ID, b.childID, b.resumed, runWS.Root(), b.limits, b.forkHistory)
 	if !ok {
 		endOnError(errResult)
 		return
@@ -1876,11 +1978,25 @@ func (t *SubagentTool) forkChildWorkspace(ctx context.Context, callID session.To
 // torn down, and without the re-home the re-persisted snapshot would record a dead
 // path. (The child's prompt cwd is independently sourced from the engine's PromptConfig
 // and is NOT affected by this field.)
-func (t *SubagentTool) buildChildSession(callID session.ToolCallID, childID session.SessionID, resumedChild *session.Session, root string, limits session.Limits) (*session.Session, session.ToolResult, bool) {
+func (t *SubagentTool) buildChildSession(callID session.ToolCallID, childID session.SessionID, resumedChild *session.Session, root string, limits session.Limits, forkHistory []session.Message) (*session.Session, session.ToolResult, bool) {
 	if resumedChild == nil {
 		// When a named agent def pins limits, the child runs under THOSE; otherwise it uses
 		// the Subagent tool's default limits.
-		return session.New(childID, t.childMode, root, limits, time.Now()), session.ToolResult{}, true
+		child := session.New(childID, t.childMode, root, limits, time.Now())
+		// fork:true (issue #34): seed the FRESH child from the deep copy of the parent
+		// conversation taken synchronously in run()/startBackground. SeedHistory is
+		// idle-only and re-validates tool pairing (the snapshot is already
+		// orphan-stripped by ForkSnapshot — double-defended). A seeding failure tears
+		// down the fork via the caller's cleanup and surfaces a model-addressable error,
+		// mirroring the resume re-home failure path. forkHistory is nil on a non-fork
+		// call (or a turn-0 empty snapshot, which SeedHistory accepts trivially).
+		if forkHistory != nil {
+			if err := child.SeedHistory(forkHistory); err != nil {
+				return nil, session.NewToolError(callID,
+					fmt.Sprintf("Subagent: failed to seed forked subagent %q from the parent conversation: %v", childID, err)), false
+			}
+		}
+		return child, session.ToolResult{}, true
 	}
 	if err := resumedChild.Rehome(root); err != nil {
 		return nil, session.NewToolError(callID,

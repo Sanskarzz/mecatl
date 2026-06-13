@@ -1097,3 +1097,57 @@ func TestRecoverNoOpWhenHistoryClean(t *testing.T) {
 		}
 	})
 }
+
+// TestSeedHistoryRejectsUnpaired pins the SeedHistory contract (issue #34): it
+// seeds a FRESH (idle) session's history when the slice is tool-pairing-valid,
+// rejects an unpaired slice (a dangling tool call) via ValidateToolPairing, and is
+// illegal from any non-idle state.
+func TestSeedHistoryRejectsUnpaired(t *testing.T) {
+	call := func(id ToolCallID) Message {
+		return NewAssistantMessage("", "", []ToolCall{NewToolCall(id, "Read", nil)})
+	}
+	result := func(id ToolCallID) Message { return NewToolMessage(NewToolResult(id, "ok")) }
+
+	// Valid paired history seeds cleanly from idle.
+	t.Run("valid pairing seeds from idle", func(t *testing.T) {
+		s := newTestSession(Limits{})
+		hist := []Message{NewUserMessage("goal"), call("c1"), result("c1")}
+		if err := s.SeedHistory(hist); err != nil {
+			t.Fatalf("SeedHistory(valid) from idle: %v", err)
+		}
+		if len(s.Conversation.Messages) != 3 {
+			t.Fatalf("seeded history len = %d, want 3", len(s.Conversation.Messages))
+		}
+	})
+
+	// A dangling tool call is rejected (would draw a provider 400 on replay).
+	t.Run("unpaired slice rejected", func(t *testing.T) {
+		s := newTestSession(Limits{})
+		if err := s.SeedHistory([]Message{NewUserMessage("goal"), call("c1")}); err == nil {
+			t.Fatalf("SeedHistory(dangling call) should reject")
+		}
+		if len(s.Conversation.Messages) != 0 {
+			t.Fatalf("rejected seed must not mutate history: len=%d", len(s.Conversation.Messages))
+		}
+	})
+
+	// An orphaned tool result is rejected too.
+	t.Run("orphaned result rejected", func(t *testing.T) {
+		s := newTestSession(Limits{})
+		if err := s.SeedHistory([]Message{result("c1")}); err == nil {
+			t.Fatalf("SeedHistory(orphaned result) should reject")
+		}
+	})
+
+	// Illegal from a non-idle state.
+	t.Run("non-idle rejected", func(t *testing.T) {
+		s := newTestSession(Limits{})
+		if err := s.BeginTurn(); err != nil {
+			t.Fatalf("BeginTurn: %v", err)
+		}
+		err := s.SeedHistory([]Message{NewUserMessage("goal")})
+		if !errors.Is(err, ErrIllegalTransition) {
+			t.Fatalf("SeedHistory from running err = %v, want ErrIllegalTransition", err)
+		}
+	})
+}

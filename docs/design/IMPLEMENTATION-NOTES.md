@@ -468,6 +468,48 @@ Guards: `agent.TestParentResumesSubagentByTrailerID` (model-facing e2e), `TestSu
 `TestSubagentResumePreservesStoredLimits`, and `session.TestRehomeFromIdleRepointsWorkspace`/
 `TestRehomeIllegalFromNonIdleStates`.
 
+**Subagent fork mode (`subagentArgs.Fork` — issue #34).** A Subagent call carrying `fork: true` seeds the
+child from a DEEP COPY of the PARENT conversation instead of an empty context, so a child can "continue
+THIS exact investigation with my full context." Byte-cheap by design: stateless replay + the prompt-cache
+prefix is reused (the copied messages ride `LLMRequest.Messages` verbatim — the ONLY mutation is the
+tail orphan-strip, after the cached prefix). **Plumbing:** the dispatcher binds a new
+`parentCaps.forkHistory func() []session.Message` closure (in `Engine.parentCaps`, captured over the
+parent run's `*session.Session`) that returns `session.ForkSnapshot(&sess.Conversation)` — a
+`CloneMessages` (fresh backing array; `Message` is an immutable value object so the per-element shallow
+copy is sound, the child only appends) with the TRAILING UNANSWERED tool calls stripped (at dispatch time
+the parent's trailing assistant message carries the `Subagent{fork:true}` call itself, whose tool result
+is recorded only AFTER dispatch — a naive copy ends on a dangling `tool_use` → provider HTTP 400). The
+closure is read SYNCHRONOUSLY on the dispatch goroutine in `run()` (the parent keeps mutating after a
+background detach, so the SNAPSHOT SLICE — not the closure — is threaded into `backgroundChild`,
+`prepareChildSession`, and `buildChildSession`). The fresh child is primed via the new idle-only domain
+seam `session.Session.SeedHistory` (the StateIdle sibling of the running-only `ReplaceHistory`; both
+re-validate `ValidateToolPairing` — double-defended with `ForkSnapshot`'s strip). **Trust:** the fork is
+TRUST-NEUTRAL — the copied history is carried VERBATIM, NO re-fencing/neutralizing. This is NOT because the
+content was "vetted": the main loop records tool results RAW/UNFENCED (`session.Session.RecordToolResults`
+appends each `ToolResult` straight onto the conversation; fencing exists only at the team/adjudicator render
+boundaries, never at record time). The child simply inherits the parent's EXACT raw message posture —
+whatever fencing the parent applied travels WITH the copied content — while running in a strictly-LESS-
+privileged read-only explorer sandbox, so the fork introduces NO new untrusted ingress. (Re-fencing would
+also bust the prompt-cache prefix the feature relies on.) The explorer system prompt rides
+the system layer (`LLMRequest.System`); the copied history rides `LLMRequest.Messages` (no system role) —
+no collision. Reasoning/ProviderPhase replay verbatim, safe because fork is **same-provider** (guaranteed
+by the `fork`+`model` rejection — unlike the cross-provider issue #20 concern). **Mutual exclusivity**
+(`validateFork`, BEFORE engine selection, first-conflict-wins order): `fork`+`resume` → "inherits THIS
+conversation; resume continues a different persisted subagent"; `fork`+`agent` → "runs on the parent's
+engine, not a specialist"; `fork`+`model` → "inherits the parent's engine/model"; then
+`caps.forkHistory == nil` → "not supported on this run" (the plain `Execute` path threads no parent
+session). A fork forces the default explorer engine (like resume). **Compaction state:** there is no
+separate compaction state on `Session` — copying `Conversation.Messages` IS copying it. **Turn-0 fork**
+(empty / just-the-fork-call parent): the snapshot is empty (trivially pairing-valid), the fork degrades to
+a fresh-context child — benign, not an error. **No-nesting** holds by construction (the child explorer
+catalog never contains Subagent). Composes with background/output_schema/limits/timeout_ms. No
+`port.LLMRequest` field, no proto change (domain-only, like per-call limits). Guards:
+`session.TestForkSnapshotStripsTrailingForkCall`, `TestForkDeepCopyIsIndependent`,
+`TestForkMidToolCallRepairedNotOrphaned`, `TestForkEmptyParentConversation`, `TestSeedHistoryRejectsUnpaired`;
+`agent.TestSubagentForkChildSeesParentHistory` (model-facing e2e, mutation-verified),
+`TestSubagentForkAndResumeRejected`/`TestSubagentForkAndAgentRejected`/`TestSubagentForkAndModelRejected`,
+`TestSubagentForkUnsupportedWithoutParent`, `TestForkChildCannotFork`.
+
 **Per-child cancel — the child-run registry + `CancelChild` (BACKGROUND-SUBAGENTS I1).** The parent
 `agent.Run` now owns a `childRunRegistry` (`childregistry.go`) alongside `childAsks`, created
 UNCONDITIONALLY in `RunContentWith` (cancel arrives only on interactive surfaces, but the registry's

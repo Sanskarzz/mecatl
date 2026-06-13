@@ -54,6 +54,14 @@ child continuation/inspection (Subagent), and per-agent memory.
    deferred items — the field has now validated them).
 3. **Fork (context-inheriting) subagents** — Claude Code v2.1.117+: forks inherit the parent
    transcript (cheap via prompt-cache reuse). All our children are fresh-context.
+   *Addressed (issue #34):* shipped as the `fork: true` Subagent arg — the child seeds from a
+   deep copy of the parent conversation (`session.ForkSnapshot` + the idle-only
+   `session.Session.SeedHistory`, trailing fork-call orphan stripped to stay pairing-valid),
+   trust-neutral (carried verbatim, no re-fence — the child inherits the parent's exact raw message
+   posture in a less-privileged read-only sandbox; the main loop records tool results unfenced anyway,
+   so the fork adds no new untrusted ingress, and re-fencing would bust the byte-stable prompt-cache
+   prefix), same-provider only (mutually exclusive with `model`/`agent`/`resume`). The snapshot is taken synchronously on
+   the dispatch goroutine so background forks compose. Domain-only, no `port.LLMRequest`/proto change.
 4. **Per-agent persistent memory** — Claude Code subagent frontmatter `memory: user|project|local`
    with MEMORY.md injection at startup; Factory's Knowledge Droid. Our agent defs have no memory field.
 5. **Workflow orchestration layer** — Claude Code dynamic workflows (model-authored JS scripts,
@@ -191,5 +199,9 @@ stop-label vocabulary; sanitized+unmissable permission modal; graceful footer wi
     *Addressed (issue #32):* shipped as the `permissions: subagent:` config block + rule audiences.
 18. Per-agent memory (`memory:` frontmatter field, MEMORY.md injection).
 19. Fork/context-inheriting subagents (prompt-cache-cheap).
+    *Addressed (issue #34):* shipped as the `fork: true` Subagent arg — seeds the child from a deep
+    copy of the parent conversation (orphan-stripped, pairing-valid), trust-neutral (carried
+    verbatim into a less-privileged read-only sandbox — no new untrusted ingress),
+    same-provider only (no `model`/`agent`/`resume`); domain-only.
 20. Cheap-model-by-default child routing (Crush smallModel pattern) — at minimum a config default.
 
