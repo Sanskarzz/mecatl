@@ -1146,6 +1146,23 @@ the Team-tool sink emits it on ledger change (de-duped via `findingsEqual`, clam
 (domain), maps to the proto `TeamFinding` (`toProtoTeam`), and the mecatui client decodes it to
 `client.TeamFinding` → the conversation block's `teamFindings`, consistent with the task path.
 
+**The `team.tasks`/`team.findings` snapshot stream is CHANGE-DRIVEN and EVENTUALLY-CONSISTENT,
+not per-transition-guaranteed (team-snapshot fidelity note).** The Team-tool sink projects the
+snapshot from a LIVE `tm.Tasks()`/`tm.Findings()` read at the moment the single buffered forwarder
+goroutine (`evCh`, depth 64) drains each event — decoupled in time from the member/supervisor
+goroutines that mutate the list. So under scheduler starvation the forwarder can lag until a task is
+already `completed`; every drained event then reads the same terminal state and the intermediate
+`pending`/`in_progress` snapshots legitimately coalesce away (the de-dup collapses them). The
+TERMINAL state is always correct (the last live snapshot converges and `EvTeamEnd` re-reads the
+settled list), and the stream never shows a WRONG state — it can only SKIP an intermediate one under
+load. A client (mecatui task panel) watching for an `in_progress` flicker may therefore not see it.
+Making per-transition visibility a guarantee is a deferred, deliberate emit-path change (capture the
+frozen snapshot AT the mutation under the team lock, send-after-unlock through an abort-aware enqueue
+— NOT a forward-time read), risk-bearing on the historically deadlock-prone team-emit path, so it is
+out of scope for a "best-effort stream" today. `TestTeamToolStreamsTaskSnapshots` asserts only the
+deterministic properties (de-dup, no-Member, terminal) for this reason; it does NOT assert that a
+pre-completed snapshot appears (that assertion flaked in CI under load — issue: scheduler-dependent).
+
 **`EvTeamEnd` also carries a per-member terminal disposition snapshot.** The supervisor already
 knows each member's terminal verdict (`MemberOutcome`); `runTurn`'s stop branch classifies the
 cause into a closed `MemberStopReason` (`error`/`cancelled`/`budget`) and `outcome` derives a
