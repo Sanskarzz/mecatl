@@ -102,7 +102,7 @@ func TestWarnUnexpectedReopen(t *testing.T) {
 func TestRunTurnCancelledMemberCapturesTurnsUsed(t *testing.T) {
 	tm := team.New("t")
 	ctx, cancel := context.WithCancel(context.Background())
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	factory := func(spec MemberSpec) MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range MemberTools(tm, spec.Name, nil) {
@@ -151,7 +151,7 @@ func TestRunTurnCancelledMemberCapturesTurnsUsed(t *testing.T) {
 // member lands StopEndTurn.
 func TestCleanupAllAttributesIdleClientCancel(t *testing.T) {
 	tm := team.New("demo")
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	factory := func(spec MemberSpec) MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range MemberTools(tm, spec.Name, nil) {

@@ -60,18 +60,28 @@ type config struct {
 	// defaultProvider/defaultModel are the server-configured deployment-wide
 	// default (--default-provider/--default-model), mapped onto
 	// app.Config.DefaultProvider/DefaultModel exactly like mecated's flags.
-	model             string
-	subagentModel     string
-	defaultProvider   string
-	defaultModel      string
-	openAIBaseURL     string
-	openAIKey         string
-	openRouterBaseURL string
-	openRouterKey     string
-	anthropicBaseURL  string
-	anthropicKey      string
-	mock              bool
-	noBash            bool
+	model           string
+	subagentModel   string
+	defaultProvider string
+	defaultModel    string
+	// Headless ask reviewer (issue #31, embedded server only): the mecated flag
+	// mirrors. subagentAskReviewer names the reviewer model (empty = off);
+	// subagentAskReviewerMaxDenies is the per-run consecutive-deny breaker;
+	// subagentAskReviewerPolicyFile points at a TRUSTED rubric file whose CONTENT
+	// (read once in parseFlags) travels on subagentAskReviewerPolicy into
+	// app.Config.SubagentAskReviewerPolicy.
+	subagentAskReviewer           string
+	subagentAskReviewerMaxDenies  int
+	subagentAskReviewerPolicyFile string
+	subagentAskReviewerPolicy     string
+	openAIBaseURL                 string
+	openAIKey                     string
+	openRouterBaseURL             string
+	openRouterKey                 string
+	anthropicBaseURL              string
+	anthropicKey                  string
+	mock                          bool
+	noBash                        bool
 
 	// trustProject controls whether a discovered PROJECT's permission ALLOW rules
 	// and its project-scoped soul (.mecatl/soul.md) are honoured for the EMBEDDED
@@ -204,6 +214,9 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.defaultProvider, "default-provider", "", "embedded server only: deployment-wide default provider id shared by every client (e.g. openai, openrouter, anthropic); overrides the built-in provider preference for zero-selector sessions while a client-side selection still wins. Validated FAIL-FAST at startup: an unknown or unavailable provider refuses to start")
 	fs.StringVar(&cfg.defaultModel, "default-model", "", "embedded server only: deployment-wide default model id for the default provider; sits BELOW client-side defaults and ABOVE the per-provider built-in default. Validated FAIL-FAST at startup: a model not catalogued for the default provider refuses to start")
 	fs.StringVar(&cfg.subagentModel, "subagent-model", "", "embedded server only: global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (the analogue of CLAUDE_CODE_SUBAGENT_MODEL); the Parallel judge stays on the session model. Same provider as the session. Empty inherits --model; a value that does not resolve to a usable model id FAILS STARTUP")
+	fs.StringVar(&cfg.subagentAskReviewer, "subagent-ask-reviewer", "", "embedded server only: OPT-IN headless ask reviewer (issue #31), accepted for symmetry with mecated but INERT under mecatui — mecatui runs INTERACTIVE (a human sits at the approval modal), so a subagent/member/branch permission ask SURFACES to that modal, never reaching the reviewer (which only fires on a headless server with no human). Model id of a tool-less ONE-TURN reviewer; empty (default) disables it; an unusable model id FAILS STARTUP. To actually use the reviewer, run a headless `mecated --headless --subagent-ask-reviewer ...` and point mecatui at it with --server")
+	fs.IntVar(&cfg.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", 3, "embedded server only: circuit breaker for --subagent-ask-reviewer (INERT under mecatui — see that flag). <=0 uses the default (3)")
+	fs.StringVar(&cfg.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "embedded server only: path to a TRUSTED policy rubric file for --subagent-ask-reviewer (INERT under mecatui — see that flag). Empty keeps the built-in rubric. Read once at startup; an unreadable file FAILS STARTUP")
 	fs.StringVar(&cfg.openAIBaseURL, "openai-base-url", "", "override the OpenAI API base URL for the embedded server (compatible endpoints)")
 	fs.StringVar(&cfg.openRouterBaseURL, "openrouter-base-url", "", "embedded server only: override the OpenRouter API base URL (default https://openrouter.ai/api/v1; key from OPENROUTER_API_KEY)")
 	fs.StringVar(&cfg.anthropicBaseURL, "anthropic-base-url", "", "embedded server only: override the native Anthropic API base URL (compatible/proxy endpoints; key from ANTHROPIC_API_KEY)")
@@ -263,7 +276,30 @@ func parseFlags(args []string) (config, error) {
 		}
 		cfg.workspace = ws
 	}
+	// The ask-reviewer policy rubric travels as a STRING into app.Config (the
+	// composition layer never touches os); the cmd main reads the file here, once,
+	// failing fast on an unreadable path (the mecated posture).
+	policy, err := readAskReviewerPolicy(cfg.subagentAskReviewerPolicyFile)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.subagentAskReviewerPolicy = policy
 	return cfg, nil
+}
+
+// readAskReviewerPolicy reads the --subagent-ask-reviewer-policy rubric file and
+// returns its content as a string. An empty path returns "" (the built-in rubric
+// stands); an unreadable file is a config error (fail-fast — a silently dropped
+// operator rubric would leave the reviewer on a policy the operator did not set).
+func readAskReviewerPolicy(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("--subagent-ask-reviewer-policy %q: %w", path, err)
+	}
+	return string(b), nil
 }
 
 // resolveWorkspace defaults an empty workspace to the cwd and makes it absolute.

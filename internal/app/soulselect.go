@@ -11,7 +11,6 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/grpcdriver"
 	"github.com/stacklok/mecatl/internal/adapter/hashutil"
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
-	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/soul"
 	"github.com/stacklok/mecatl/internal/adapter/xdgconfig"
 )
@@ -145,31 +144,25 @@ type soulGateFunc func() governance.Effect
 func (f soulGateFunc) Effect() governance.Effect { return f() }
 
 // buildSoulGate constructs the real soul load-gate: it evaluates the synthetic
-// "soul:apply" action against the SAME ruleset (mainRules) + file-config resolver
-// (permconfig) the main tool policy uses, so the soul is governed identically. It
-// REUSES the existing permission stack rather than building a parallel one: the
-// resolver is constructed from the SAME Config fields buildEngine passes to
-// permconfig.New, and project ALLOW rules stay gated behind --trust-project and
-// resolved against cfg.Workspace via a READ-ONLY osfs workspace (exactly like the
-// real per-session policy, which resolves against each session's root).
+// "soul:apply" action against the SAME ruleset (mainRules), the SAME evaluator
+// options (mainEvaluatorOptions — the soul gates the MAIN engine, so it carries
+// the AudienceMain pin: a `subagent:`-block rule naming soul:apply must never
+// bind it), and the SAME build-once file-config resolver (cfg.permResolver —
+// the ONE instance Build constructed right after the trust fold; never a second
+// permconfig.New, which would be a second cache and discovery pass). Project
+// ALLOW rules stay gated behind --trust-project inside that resolver, resolved
+// against cfg.Workspace via a READ-ONLY osfs workspace (exactly like the real
+// per-session policy, which resolves against each session's root).
 //
-// A nil/unopenable workspace (or a resolver that wants no project sources) simply
-// means no project-scoped soul:apply rule applies — selection then falls back to the
-// built-in floor Allow (the default-on posture). The gate never fails: it is a pure
-// read of config the process already trusts.
+// A nil/unopenable workspace (or a nil resolver — config off) simply means no
+// project-scoped soul:apply rule applies — selection then falls back to the
+// built-in floor Allow (the default-on posture). The gate never fails: it is a
+// pure read of config the process already trusts. Direct-call tests must fold
+// cfg.permResolver themselves (buildPermResolver) — exactly what Build does.
 func buildSoulGate(cfg Config) soulGate {
 	rules := mainRules(cfg)
-	eval := governance.NewEvaluator(rules)
-	resolver := permconfig.New(permconfig.Options{
-		Conventional:  cfg.PermissionsConventional,
-		ImportClaude:  cfg.ImportClaudePermissions,
-		TrustProject:  cfg.TrustProject,
-		ExplicitFiles: cfg.PermissionConfigs,
-		// Match build.go's twin permconfig.New: route this resolver's operator-facing
-		// fail-safe WARN lines (config unparseable/skipped, rule demoted/dropped/inert)
-		// through the injected sink instead of silently defaulting to NopDiagnostics.
-		Diagnostics: cfg.diag(),
-	})
+	eval := governance.NewEvaluator(rules, mainEvaluatorOptions(cfg)...)
+	resolver := cfg.permResolver
 	return soulGateFunc(func() governance.Effect {
 		var ws tool.WorkspaceReader
 		if cfg.Workspace != "" {

@@ -168,6 +168,22 @@ type PendingAsk struct {
 	Args json.RawMessage
 	// Reason explains why approval is required.
 	Reason string
+	// ConfiguredAsk carries governance.PermissionDecision.ConfiguredAsk onto the
+	// pending ask: the Ask came from a deliberately-configured rule (above the
+	// built-in floor). An approval layer keys "never auto-approve a configured
+	// Ask" on it. It is purely run-scoped state — never serialized to a snapshot
+	// (an old snapshot deserializing false is harmless: an ask is never resumed
+	// from one). Mutually exclusive with FlooredConfiguredAllow.
+	ConfiguredAsk bool
+	// FlooredConfiguredAllow carries
+	// governance.PermissionDecision.FlooredConfiguredAllow onto the pending ask:
+	// the Ask exists only because of the substitution floor, and the command is
+	// one the configured policy already allows with provably read-only
+	// substitution contents — so an approval layer may relax the floor without
+	// surfacing it. Same run-scoped, never-serialized posture as ConfiguredAsk.
+	// Mutually exclusive with it (a third ask-provenance signal would warrant a
+	// single enum on both this value object and the governance decision).
+	FlooredConfiguredAllow bool
 }
 
 // Errors returned by the Session state machine.

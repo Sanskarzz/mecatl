@@ -416,3 +416,93 @@ func isFieldTail(full, tail []string) bool {
 	}
 	return true
 }
+
+// FuzzFlooredConfiguredAllow asserts POSITIVE soundness of the
+// floored-configured-allow classifier (issue #32), mirroring
+// FuzzSubstitutionReadOnly/FuzzIsolationApprovable: for every segment
+// flooredAllowSafe clears, EVERY recursively-extracted inner must be
+// independently read-only (plain ReadOnlyBash or a sound read-only
+// substitution — the configured Allow vouches only for the OUTER, never a
+// hidden inner), extraction/blanking must have succeeded, a lone-placeholder
+// residual must be a pure subshell, and the blanked outer must carry no
+// worktree-escape construction (escape git subcommand, path-bearing git global
+// flag, go escape flag).
+func FuzzFlooredConfiguredAllow(f *testing.F) {
+	seedGovernance(f)
+	f.Add("go test $(git rev-parse HEAD)")
+	f.Add("echo $(ls) > out.txt")
+	f.Add("go test $(zap)")
+	f.Add("echo $(touch SAFE_MARKER)")
+	f.Add("git push $(git rev-parse HEAD)")
+	f.Add("$(ls)")
+	f.Fuzz(func(t *testing.T, cmd string) {
+		// Run per-segment, as the evaluator's floor branch does.
+		for _, seg := range SplitCommands(cmd) {
+			if !flooredAllowSafe(seg) {
+				continue
+			}
+			assertFlooredAllowSound(t, seg)
+		}
+	})
+}
+
+// assertFlooredAllowSound fails the fuzzer if seg (a segment flooredAllowSafe
+// cleared) hides a non-read-only inner or an escape-capable outer. It mirrors
+// the classifier's contract from the OUTSIDE.
+func assertFlooredAllowSound(t *testing.T, seg string) {
+	t.Helper()
+	if !HasSubstitutionOrGrouping(seg) {
+		assertEscapeRejectionsSound(t, seg, seg, seg)
+		return
+	}
+	inner, ok := extractSubstitutions(seg)
+	if !ok {
+		t.Fatalf("SECURITY: flooredAllowSafe(%q)=true but extraction failed", seg)
+	}
+	for _, in := range inner {
+		switch {
+		case ReadOnlyBash(in):
+			// plain read-only inner — sound.
+		case SubstitutionReadOnly(in):
+			assertSubstReadOnlySound(t, in) // nested read-only substitution — recurse.
+		default:
+			t.Fatalf("SECURITY: flooredAllowSafe(%q)=true but inner %q is neither read-only nor a sound read-only substitution — a configured outer Allow must never vouch for a hidden inner", seg, in)
+		}
+	}
+	blanked, okB := outerWithSubstitutionsBlanked(seg)
+	if !okB {
+		t.Fatalf("SECURITY: flooredAllowSafe(%q)=true but blanking failed", seg)
+	}
+	assertEscapeRejectionsSound(t, seg, seg, blanked)
+}
+
+// assertEscapeRejectionsSound checks the (possibly blanked) outer of a cleared
+// segment: empty residual is scaffolding; a lone placeholder must be a pure
+// subshell (command-position substitution executes its output); otherwise no
+// git escape subcommand / path-escaping global flag / go escape flag.
+func assertEscapeRejectionsSound(t *testing.T, cmd, orig, classifyText string) {
+	t.Helper()
+	residual := strings.TrimSpace(stripShellKeywords(classifyText))
+	if residual == "" {
+		return
+	}
+	if residual == substitutionPlaceholder {
+		if !isPureSubshell(orig) {
+			t.Fatalf("SECURITY: flooredAllowSafe(%q)=true but lone-placeholder residual of %q is not a pure subshell", cmd, orig)
+		}
+		return
+	}
+	fields := strings.Fields(Canonicalize(residual))
+	if len(fields) == 0 {
+		return
+	}
+	if fields[0] == "git" {
+		sub, escapesPath, ok := gitSubcommand(fields)
+		if !ok || escapesPath || worktreeEscapeGitSubcommands[sub] {
+			t.Fatalf("SECURITY: flooredAllowSafe(%q)=true but git residual %q escapes (sub=%q escapesPath=%v ok=%v)", cmd, residual, sub, escapesPath, ok)
+		}
+	}
+	if fields[0] == "go" && goArgsEscapeWorktree(fields[1:]) {
+		t.Fatalf("SECURITY: flooredAllowSafe(%q)=true but go residual %q carries an escape flag", cmd, residual)
+	}
+}

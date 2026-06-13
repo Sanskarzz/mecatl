@@ -14,7 +14,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
@@ -59,7 +58,7 @@ func (p *promptRecorder) turns(member string) []string {
 // name and whose requests are recorded into rec, bound to the shared team tm.
 func recordingFactory(t *testing.T, tm *team.Team, rec *promptRecorder, scripts map[string][]mockllm.Turn) agent.MemberEngine {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	return func(spec agent.MemberSpec) agent.MemberBuild {
 		turns, ok := scripts[spec.Name]
 		if !ok {
@@ -642,7 +641,7 @@ func TestBudgetStoppedLeadStillSynthesises(t *testing.T) {
 		perTurn: session.Usage{InputTokens: 60, OutputTokens: 40},
 		report:  "CONSOLIDATED: budget-stopped lead still produced this report.",
 	}
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	factory := func(spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {

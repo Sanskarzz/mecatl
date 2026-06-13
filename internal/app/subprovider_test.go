@@ -479,7 +479,7 @@ func twoProviderFactoryWithAgents(t *testing.T, defs *agents.Registry, subagentN
 // B) the per-session catalog was core-tools-only and could not spawn sub-agents.
 func TestHalfBSelectedSessionHasSubagentTool(t *testing.T) {
 	factory, _ := twoProviderFactoryWithAgents(t, agents.NewRegistry(nil), "")
-	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault)
+	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestHalfBSelectedSessionTeardownFoldsSubagentClose(t *testing.T) {
 	policy := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
 	factory := sessionEngineFactory(Config{Model: "gpt-5"}, reg, oa, store, policy, hookexec.New(nil), nil, nil, catalogAssets{agentReg: defs})
 
-	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault)
+	res, err := factory(context.Background(), server.ProviderSelector{ProviderID: providerOpenRouter}, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
@@ -657,7 +657,7 @@ func TestHalfBSelectedSessionCapBounded(t *testing.T) {
 // tool-result text (so a test can assert WHICH provider the child ran on).
 func runFactorySubagentTurn(t *testing.T, factory server.SessionEngineFactory, sel server.ProviderSelector) string {
 	t.Helper()
-	res, err := factory(context.Background(), sel, nil, server.ProfileDefault)
+	res, err := factory(context.Background(), sel, nil, server.ProfileDefault, "")
 	if err != nil {
 		t.Fatalf("factory(%+v): %v", sel, err)
 	}

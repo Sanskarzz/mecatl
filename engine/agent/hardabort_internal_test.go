@@ -14,7 +14,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
@@ -110,7 +109,7 @@ func waitForCondition(t *testing.T, what string, cond func() bool) {
 // ctx cancel, which no parked send watched.
 func TestCancelUnwedgesStalledTeamRun(t *testing.T) {
 	setHardAbortGrace(t, 20*time.Millisecond)
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	// Two workers x 10 Echo turns ≈ 80+ member events — strictly more than the
 	// small parent buffer + the supervisor's evCh (64) can hold, so the member
 	// goroutines park at the evCh send once the forwarder is parked. Threshold 20
@@ -381,7 +380,7 @@ func (s *signallingMemberStore) Save(ctx context.Context, sess *session.Session)
 // per-member cancel is m.ctx). A bare `evCh <- te` send reverts this to a
 // permanent park: the member never terminates and is never persisted.
 func TestCancelMemberUnparksEvChSend(t *testing.T) {
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	// The threshold is the kill arithmetic, not just a started signal: with the
 	// sink parked after its FIRST event, the TOTAL evCh throughput available for
 	// the whole run is ~65 events (evCh cap 64 + the one the sink holds), shared

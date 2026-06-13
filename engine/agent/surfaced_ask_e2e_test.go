@@ -10,7 +10,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -166,7 +165,7 @@ func TestE2E_AdversarialSubstitutionHidesDestructiveStillDenied(t *testing.T) {
 // supervisor drains members on independent errgroup goroutines).
 func TestE2E_SurfacedTeamMemberAskDoesNotBlockPeers(t *testing.T) {
 	leadBash := &fakeBash{}
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 
 	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
@@ -311,7 +310,7 @@ func drainTeamPinningConcurrency(t *testing.T, r *agent.Run, decide func(ev sess
 func TestE2E_TwoConcurrentSurfacedAsksBothResolved(t *testing.T) {
 	alphaBash := &fakeBash{}
 	betaBash := &fakeBash{}
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 
 	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
@@ -394,7 +393,7 @@ func TestE2E_TwoConcurrentSurfacedAsksBothResolved(t *testing.T) {
 // substitution ask auto-denies.
 func TestE2E_HeadlessTeamMemberDeniedResultIsAccurate(t *testing.T) {
 	leadBash := &fakeBash{}
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	factory := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {

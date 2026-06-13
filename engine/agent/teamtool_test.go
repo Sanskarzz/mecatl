@@ -11,7 +11,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
 	"github.com/stacklok/mecatl/engine/tool"
@@ -23,7 +22,7 @@ import (
 // the composition root's buildMemberEngine shape, scoped for an offline test.
 func teamToolFactory(t *testing.T, providers map[string]*mockllm.Provider) agent.TeamMemberEngineFactory {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	return func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
@@ -792,7 +791,7 @@ func TestTeamToolMutatingMemberNoForker(t *testing.T) {
 // TestSupervisorReadOnlyIsolatedMemberForksViaReadOnlyForker asserts on the
 // supervisor directly; here it is proven through the TeamTool wiring.
 func TestTeamToolReadOnlyMemberForksViaReadOnlyForker(t *testing.T) {
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	// A factory that grants the member a (mutating) Bash stand-in and marks it
 	// IsolateReadOnly — the composition-layer signal that it was granted a shell and
 	// must run in an isolated worktree via the read-only forker.

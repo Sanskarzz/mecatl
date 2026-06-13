@@ -52,7 +52,7 @@ func childEngineWith(llm port.LLMProvider, cat *tool.Catalog) *agent.Engine {
 	return agent.NewEngine(agent.Deps{
 		LLM:     llm,
 		Catalog: cat,
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Policy:  permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
 		Model:   "child-model",
 	})
 }

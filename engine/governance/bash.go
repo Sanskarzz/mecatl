@@ -654,17 +654,22 @@ func segmentIsolationApprovable(orig, classifyText string) bool {
 	if len(fields) == 0 {
 		return false
 	}
-	// git: resolve the REAL subcommand past any leading global flags (`git -C <path>`,
-	// `git --git-dir=<x>`, `git -c <kv>` shift the subcommand right), then reject a
-	// worktree-escape subcommand OR any path-bearing global flag that points git OUTSIDE
-	// the throwaway worktree. This runs BEFORE the simpleReadOnly shortcut below, because
-	// simpleReadOnly reads fields[1] as the subcommand and would otherwise green-light
-	// `git -C /outside log` as a read-only `git -C`.
-	if fields[0] == "git" {
-		sub, escapesPath, ok := gitSubcommand(fields)
-		if !ok || escapesPath || worktreeEscapeGitSubcommands[sub] {
-			return false
-		}
+	// The SHARED worktree-escape rejection path (escapeRejectionsFree, also behind
+	// flooredAllowSafe): git's REAL subcommand is resolved past any leading global
+	// flags (`git -C <path>`, `git --git-dir=<x>`, `git -c <kv>` shift the
+	// subcommand right), then a worktree-escape subcommand OR any path-bearing
+	// global flag that points git OUTSIDE the throwaway worktree rejects; and a
+	// `go` invocation carrying an escape flag (-exec/-toolexec/-overlay run an
+	// external program; -o writes the binary to an arbitrary path — the worktree
+	// isolates the FILESYSTEM checkout, not the PROCESS and not an -o destination)
+	// rejects. This runs BEFORE the simpleReadOnly shortcut below, because
+	// simpleReadOnly reads fields[1] as the subcommand and would otherwise
+	// green-light `git -C /outside log` as a read-only `git -C`. (The go-flag
+	// rejection firing before the allowlist branch is outcome-identical: no `go`
+	// command is ever simpleReadOnly, so the only acceptance path for go is the
+	// allowlist branch below, which required the same flag check.)
+	if !escapeRejectionsFree(residual) {
+		return false
 	}
 	// A read-only residual is always isolation-approvable (read-only git subcommands,
 	// ls/cat/grep/…). git with global flags has already passed the escape check above.
@@ -672,22 +677,116 @@ func segmentIsolationApprovable(orig, classifyText string) bool {
 		return true
 	}
 	// The MINIMAL worktree-safe extension: `go {test,build,vet,list}` with no output
-	// redirection (a redirection would write outside the verb's normal scope).
+	// redirection (a redirection would write outside the verb's normal scope). The
+	// escape flags were already rejected by the shared path above.
 	if strings.ContainsAny(canon, ">") {
 		return false
 	}
 	if fields[0] == "go" && len(fields) >= 2 && worktreeSafeGoSubcommands[fields[1]] {
-		// Reject the worktree-escape flags (-exec/-toolexec/-overlay run an external
-		// program; -o writes the binary to an arbitrary path): the worktree isolates the
-		// FILESYSTEM checkout, not the PROCESS and not an -o destination, so these escape
-		// isolation. Plain `go test`/`go build` runs the repo's own trusted code, which is
-		// the accepted worktree-safe case.
-		if goArgsEscapeWorktree(fields[2:]) {
-			return false
-		}
 		return true
 	}
 	return false
+}
+
+// flooredAllowSafe reports whether a substitution-floored Bash SEGMENT that a
+// CONFIGURED Allow covers may resolve WITHOUT surfacing — the bound behind
+// PermissionDecision.FlooredConfiguredAllow (issue #32). The configured Allow
+// vouches ONLY for the OUTER command (the literal the operator wrote a rule
+// for); it can never vouch for what a substitution HIDES. So the bound is:
+//
+//   - every recursively-extracted INNER must independently classify POSITIVELY
+//     read-only — the SAME inner contract SubstitutionReadOnly (A1) applies:
+//     plain ReadOnlyBash, or itself a read-only substitution. An unknown or
+//     mutating inner (`$(zap)`, `$(touch x)`) fails — the substitution floor's
+//     charter ("an allow rule for the outer literal can never silently approve
+//     a hidden command") holds;
+//   - the blanked OUTER must pass the worktree-escape REJECTIONS
+//     (escapeRejectionsFree — the ONE rejection path shared with
+//     segmentIsolationApprovable) as defense-in-depth, including the
+//     pure-subshell discipline for a lone-placeholder residual (a `$(...)` in
+//     command position EXECUTES its output — never cleared);
+//   - it deliberately does NOT require the blanked outer to be read-only or on
+//     the go allowlist — that is exactly what the configured Allow vouches for.
+//     `go test $(git rev-parse HEAD)` clears; `go test $(zap)` surfaces.
+//
+// Fail-safe false on any extraction/blanking ambiguity. It is a sibling
+// classifier: ReadOnlyBash/SubstitutionReadOnly/IsolationApprovable/plan-mode
+// stay byte-for-byte unchanged. Positive soundness is fuzzed by
+// FuzzFlooredConfiguredAllow.
+func flooredAllowSafe(seg string) bool {
+	if !HasSubstitutionOrGrouping(seg) {
+		// FAIL-SAFE: this classifier ONLY decides whether the SUBSTITUTION floor
+		// may be relaxed, so it is only ever consulted under a substitution. A
+		// non-substitution segment has no floor to relax — return false rather
+		// than the permissive escape-free answer, so a future caller that drops
+		// the substitution guard can never get a true for an arbitrary (e.g.
+		// destructive) plain command. The evaluator's floor branch always passes
+		// a substitution-bearing segment, so this is unreachable on the live path
+		// (pinned by TestFlooredAllowSafeNoSubstitutionFailsSafe).
+		return false
+	}
+	inner, ok := extractSubstitutions(seg)
+	if !ok {
+		return false // ambiguity: fail safe.
+	}
+	for _, in := range inner {
+		// The A1 inner contract: plain read-only, or itself a read-only
+		// substitution (nested inners are separate entries in the recursive
+		// extraction, so each level is independently checked).
+		if !ReadOnlyBash(in) && !SubstitutionReadOnly(in) {
+			return false
+		}
+	}
+	blanked, okB := outerWithSubstitutionsBlanked(seg)
+	if !okB {
+		return false
+	}
+	return outerEscapeFree(seg, blanked)
+}
+
+// outerEscapeFree applies the worktree-escape rejection discipline to one
+// (possibly blanked) outer command text: strip control-flow scaffolding, accept
+// an empty residual (runs no program), require the pure-subshell shape for a
+// lone-placeholder residual (a command-position substitution executes its
+// OUTPUT — never escape-free), then apply the shared escape rejections. orig is
+// the ORIGINAL (un-blanked) segment, needed for the pure-subshell check.
+func outerEscapeFree(orig, text string) bool {
+	residual := stripShellKeywords(text)
+	trimmed := strings.TrimSpace(residual)
+	if trimmed == "" {
+		return true // pure scaffolding runs no command.
+	}
+	if trimmed == substitutionPlaceholder {
+		return isPureSubshell(orig)
+	}
+	return escapeRejectionsFree(trimmed)
+}
+
+// escapeRejectionsFree is the ONE worktree-escape rejection path (issue #32),
+// shared by segmentIsolationApprovable (A2) and flooredAllowSafe/outerEscapeFree
+// so the two classifiers cannot drift: the resolved git SUBCOMMAND (past leading
+// global flags) must not be a worktree-escape verb (worktreeEscapeGitSubcommands)
+// nor shifted by a PATH-bearing global flag (`-C`/`--git-dir`/`--work-tree` —
+// git pointed OUTSIDE the sandbox; an unresolvable subcommand fails safe), and a
+// `go` invocation must not carry an escape flag (-exec/-toolexec/-overlay/-o).
+// text is a keyword-stripped residual; callers handle the empty/placeholder
+// shapes first.
+func escapeRejectionsFree(text string) bool {
+	canon := Canonicalize(strings.TrimSpace(text))
+	fields := strings.Fields(canon)
+	if len(fields) == 0 {
+		return true
+	}
+	if fields[0] == "git" {
+		sub, escapesPath, ok := gitSubcommand(fields)
+		if !ok || escapesPath || worktreeEscapeGitSubcommands[sub] {
+			return false
+		}
+	}
+	if fields[0] == "go" && goArgsEscapeWorktree(fields[1:]) {
+		return false
+	}
+	return true
 }
 
 // IsolationApprovable reports whether a (possibly compound) Bash command line is safe

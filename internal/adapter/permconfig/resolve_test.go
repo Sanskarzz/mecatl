@@ -277,7 +277,7 @@ func TestResolveEmitsFailSafeWarnThroughInjectedSink(t *testing.T) {
 	_ = r.Resolve(context.Background(), ws)
 
 	out := buf.String()
-	if !strings.Contains(out, "project YAML unparseable; skipping") {
+	if !strings.Contains(out, "project YAML invalid; skipping") {
 		t.Fatalf("fail-safe parse-skip line did not reach the injected sink; got: %s", out)
 	}
 	if !strings.Contains(out, "level=WARN") {

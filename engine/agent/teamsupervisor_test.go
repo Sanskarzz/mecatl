@@ -12,7 +12,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
@@ -24,7 +23,7 @@ import (
 // member name — the per-member scripting the supervisor relies on.
 func memberFactory(t *testing.T, tm *team.Team, providers map[string]*mockllm.Provider) agent.MemberEngine {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	return func(spec agent.MemberSpec) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
@@ -346,7 +345,7 @@ func TestSupervisorMemberTurnBudgetStops(t *testing.T) {
 // the member's coordination tools.
 func limitedMemberFactory(t *testing.T, tm *team.Team, providers map[string]*mockllm.Provider, limits session.Limits) agent.MemberEngine {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	return func(spec agent.MemberSpec) agent.MemberBuild {
 		prov, ok := providers[spec.Name]
 		if !ok {
@@ -411,7 +410,7 @@ func TestSupervisorRoundConcurrencyBounded(t *testing.T) {
 
 	tm := team.New("conc")
 	barrier := &barrierMemberTool{entered: make(chan struct{}, members), release: make(chan struct{})}
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 
 	providers := map[string]*mockllm.Provider{}
 	factory := func(spec agent.MemberSpec) agent.MemberBuild {
@@ -647,7 +646,7 @@ func (fakeMutatingTool) Execute(_ context.Context, c session.ToolCall, _ tool.Wo
 // tools plus the member's coordination tools — the seam Fix A's tests drive.
 func catalogFactory(t *testing.T, tm *team.Team, extra ...tool.Tool) agent.MemberEngine {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	return func(spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
@@ -882,7 +881,7 @@ func TestSupervisorMemberDispositionCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel the run as soon as the worker's turn reaches the provider, so the member's
 	// in-flight run observes the cancellation and ends StopCancelled.
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	factory := func(spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
@@ -932,7 +931,7 @@ func TestSupervisorMemberDispositionDone(t *testing.T) {
 // against a future regression that mislabels the clean no-progress terminal.
 func TestSupervisorMemberDispositionNoProgressIsDone(t *testing.T) {
 	tm := team.New("t")
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	factory := func(spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {

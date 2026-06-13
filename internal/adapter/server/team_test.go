@@ -18,7 +18,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/team"
@@ -31,7 +30,7 @@ import (
 // coordination tools.
 func teamService(t *testing.T, llm *mockllm.Provider) *server.Service {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
@@ -68,7 +67,7 @@ func teamService(t *testing.T, llm *mockllm.Provider) *server.Service {
 // test can assert member sessions persist under their published-id-derived ids.
 func teamServiceWithStore(t *testing.T, llm *mockllm.Provider) (*server.Service, port.SessionStore) {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	store := memstore.New()
 	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
@@ -152,7 +151,7 @@ func usageTurn(text string, in int) mockllm.Turn {
 // concurrently) or must differ per member.
 func teamServicePerMember(t *testing.T, providers map[string]*mockllm.Provider, budget int) *server.Service {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		llm := providers[spec.Name]
 		if llm == nil {
@@ -216,7 +215,7 @@ func budgetTripProviders() map[string]*mockllm.Provider {
 // driven by the supplied provider. It is the seam under TestRunTeamBudgetExhaustedOutcome.
 func teamServiceWithBudget(t *testing.T, llm *mockllm.Provider, budget int) *server.Service {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
@@ -339,7 +338,7 @@ func TestCreateTeamTightensTeamTokenBudget(t *testing.T) {
 // rendered round-0 prompt. It mirrors teamServiceWithStore but threads the flag.
 func teamServiceWithGoalTrust(t *testing.T, llm *mockllm.Provider, goalUntrusted bool) (*server.Service, port.SessionStore) {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	store := memstore.New()
 	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
@@ -633,7 +632,7 @@ func TestUnknownTeamNotFound(t *testing.T) {
 // teamServiceMaxTeams builds a team-enabled Service with an explicit MaxTeams cap.
 func teamServiceMaxTeams(t *testing.T, llm *mockllm.Provider, maxTeams int) *server.Service {
 	t.Helper()
-	allow := permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil)
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
 	memberEngine := func(tm *team.Team, spec agent.MemberSpec) agent.MemberBuild {
 		cat := tool.NewCatalog()
 		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {

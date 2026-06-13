@@ -9,7 +9,6 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
-	"github.com/stacklok/mecatl/engine/governance"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/server"
@@ -21,7 +20,7 @@ func newLimitsService(t *testing.T, def session.Limits) *server.Service {
 	engine := agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(),
 		Catalog: tool.NewCatalog(),
-		Policy:  permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		Policy:  permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
 		Model:   "test-model",
 	})
 	svc, err := server.NewService(server.Config{

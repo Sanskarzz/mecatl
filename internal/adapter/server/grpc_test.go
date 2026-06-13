@@ -446,9 +446,12 @@ func TestGRPCConverseFirstFrameMustBePrompt(t *testing.T) {
 	}
 }
 
-// allowRules returns a policy rule set that allows every tool call.
+// allowRules returns a policy rule set that allows every tool call: the
+// canonical allow-all FLOOR (permpolicy.AllowAllFloorRules — same ruleset as
+// production childRules(), so a floor-scoped allow never registers as a
+// CONFIGURED allow and a child's substitution ask still surfaces).
 func allowRules() []governance.Rule {
-	return []governance.Rule{{Effect: governance.Allow}}
+	return permpolicy.AllowAllFloorRules()
 }
 
 // recvAllTeamEvents drains a RunTeam stream to EOF and returns every frame —

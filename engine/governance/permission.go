@@ -22,6 +22,36 @@ type PermissionDecision struct {
 	Effect Effect
 	// Reason explains the decision; especially important on Deny and Ask.
 	Reason string
+	// The two ask-provenance bits below are a PAIR of mutually exclusive bools,
+	// not an enum, by deliberate choice: a THIRD ask-provenance signal would be
+	// the point to extract a single enum carried on both this type and on the
+	// session's pending-ask value object — until then, two bools with the
+	// documented exclusivity invariant are simpler than an enum nothing switches
+	// over.
+	//
+	// ConfiguredAsk reports that the winning Ask came from a CONFIGURED rule — a
+	// rule whose Scope sits ABOVE ScopeBuiltinDefault (operator/project/user
+	// intent) — as opposed to the built-in floor, the no-matching-rule default
+	// Ask, or the substitution-floor escalation (all false). It lets an
+	// approval layer enforce "never auto-approve a deliberately-configured Ask":
+	// a consumer that auto-approves some asks (e.g. an isolated sub-agent
+	// auto-clearing safe commands) should NOT auto-approve one with this bit set.
+	// Mutually exclusive with FlooredConfiguredAllow.
+	ConfiguredAsk bool
+	// FlooredConfiguredAllow reports that the decision is an Ask ONLY because of
+	// the built-in substitution floor (the Evaluator escalates a Bash segment
+	// containing command/process substitution or subshell grouping to Ask). It
+	// is set when, on a (possibly compound) Bash line: the floor-free fold is
+	// Allow; at least one segment was floor-escalated DESPITE a configured
+	// (above-floor) Allow matching it; AND that segment is provably safe to
+	// auto-approve under the floor — the configured Allow vouches for the OUTER
+	// command, every command hidden inside the substitution independently
+	// classifies read-only (the Allow can never vouch for a hidden command), and
+	// the blanked outer carries no construction that reaches outside an isolated
+	// worktree. It lets an approval layer relax the substitution floor for a
+	// command its operator already allowed, without trusting whatever a
+	// substitution hides. Mutually exclusive with ConfiguredAsk.
+	FlooredConfiguredAllow bool
 }
 
 // Scope identifies the configuration layer a permission rule originates from.
@@ -57,6 +87,30 @@ func (s Scope) HasHigherPrecedenceThan(other Scope) bool {
 	return s < other
 }
 
+// Audience scopes a Rule to the engine class it binds: the MAIN (interactive)
+// engine, SUBAGENT (child/member/branch) engines, or both. The zero value
+// (AudienceAll) applies everywhere, so an untagged rule keeps its full reach
+// (the back-compatible default).
+//
+// Matching is symmetric-permissive: a rule binds an Evaluator iff either side is
+// AudienceAll or both name the same audience. An Evaluator's audience is set
+// with WithAudience (default AudienceAll). The conventional tagging — applied
+// by callers that load rules for both engine classes — is: rules that should
+// reach only the main engine carry AudienceMain, child-scoped rules carry
+// AudienceSubagent, and a deny carries AudienceAll so it binds both (a deny
+// only ever tightens).
+type Audience int
+
+const (
+	// AudienceAll (the zero value) applies to every engine class.
+	AudienceAll Audience = iota
+	// AudienceMain applies only to the main (interactive) engine's evaluator.
+	AudienceMain
+	// AudienceSubagent applies only to child engines (Subagent children, team
+	// members, parallel branches).
+	AudienceSubagent
+)
+
 // Rule is a single permission rule: a pattern matched against a tool call,
 // the effect it yields, and the scope it came from. Evaluation (WP4) merges
 // rules across scopes honouring Scope precedence and deny→ask→allow.
@@ -77,4 +131,8 @@ type Rule struct {
 	// widen into a glob that green-lights commands the user never approved
 	// (glob-escalation). Static config rules leave it false and keep glob matching.
 	Exact bool
+	// Audience scopes the rule to an engine class (main vs subagent). The zero
+	// value (AudienceAll) matches every Evaluator, so an untagged rule keeps its
+	// full reach. See Audience.
+	Audience Audience
 }

@@ -312,31 +312,36 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 	cmdDir, enableCmds := resolveCommands(cfg)
 	skillDirs, skillsConv := resolveSkills(cfg)
 	return app.Config{
-		Workspace:            cfg.workspace,
-		Model:                cfg.model,
-		DefaultProvider:      cfg.defaultProvider,
-		DefaultModel:         cfg.defaultModel,
-		SubagentModel:        cfg.subagentModel,
-		UseOpenAI:            cfg.openAIKey != "",
-		OpenAIKey:            cfg.openAIKey,
-		OpenAIBaseURL:        cfg.openAIBaseURL,
-		OpenRouterKey:        cfg.openRouterKey,
-		OpenRouterBaseURL:    cfg.openRouterBaseURL,
-		AnthropicKey:         cfg.anthropicKey,
-		AnthropicBaseURL:     cfg.anthropicBaseURL,
-		UseMock:              cfg.mock,
-		Shell:                "/bin/sh",
-		NoBash:               cfg.noBash,
-		Compaction:           "heuristic",
-		Tokenizer:            "heuristic",
-		LLMMaxAttempts:       3,
-		LLMPerAttemptTimeout: 30 * time.Second,
-		LLMStreamIdleTimeout: 120 * time.Second,
-		LLMBreakerThreshold:  5,
-		LLMBreakerCooldown:   30 * time.Second,
-		EnableParallel:       true,
-		EnableTeams:          true,
-		AgentsConventional:   true,
+		Workspace:       cfg.workspace,
+		Model:           cfg.model,
+		DefaultProvider: cfg.defaultProvider,
+		DefaultModel:    cfg.defaultModel,
+		SubagentModel:   cfg.subagentModel,
+		// Headless ask reviewer (issue #31): the mecated flag mirrors, mapped
+		// verbatim. Empty model = off (the zero-cost default).
+		SubagentAskReviewerModel:     cfg.subagentAskReviewer,
+		SubagentAskReviewerMaxDenies: cfg.subagentAskReviewerMaxDenies,
+		SubagentAskReviewerPolicy:    cfg.subagentAskReviewerPolicy,
+		UseOpenAI:                    cfg.openAIKey != "",
+		OpenAIKey:                    cfg.openAIKey,
+		OpenAIBaseURL:                cfg.openAIBaseURL,
+		OpenRouterKey:                cfg.openRouterKey,
+		OpenRouterBaseURL:            cfg.openRouterBaseURL,
+		AnthropicKey:                 cfg.anthropicKey,
+		AnthropicBaseURL:             cfg.anthropicBaseURL,
+		UseMock:                      cfg.mock,
+		Shell:                        "/bin/sh",
+		NoBash:                       cfg.noBash,
+		Compaction:                   "heuristic",
+		Tokenizer:                    "heuristic",
+		LLMMaxAttempts:               3,
+		LLMPerAttemptTimeout:         30 * time.Second,
+		LLMStreamIdleTimeout:         120 * time.Second,
+		LLMBreakerThreshold:          5,
+		LLMBreakerCooldown:           30 * time.Second,
+		EnableParallel:               true,
+		EnableTeams:                  true,
+		AgentsConventional:           true,
 		// Memory is ON by default, per-project. MemoryConsolidateInterval is left
 		// at 0 (off) deliberately: the "dream" distiller spawns a goroutine that
 		// calls the real provider on a timer, so a default-on interval would
@@ -399,6 +404,17 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		ImportClaudePermissions: true,
 		TrustProject:            cfg.trustProject,
 		AllowAllTools:           cfg.allowAllTools,
+		// INTERACTIVE: mecatui IS the interactive client — a human sits at the
+		// approval modal. So the embedded server runs interactive (Interactive=true),
+		// and a subagent/team-member/branch child's unresolved permission ask is
+		// SURFACED to that modal (the #32 re-framed parent EvPermissionAsk; the
+		// client routes the verdict back to the child via ResumeApproval →
+		// Run.Approve → childAskRouter). It must NOT default headless (which would
+		// auto-deny — or LLM-adjudicate — a child ask the human is right there to
+		// answer). This is why --subagent-ask-reviewer is INERT under mecatui (the
+		// modal always sees the ask): the embedded reviewer flag exists only for
+		// symmetry with mecated and is documented as such.
+		Interactive: true,
 		// Diagnostics is the injected file-backed (or, under --quiet, discarding) sink.
 		// It is NEVER stderr: an operational line on stderr corrupts the Bubble Tea
 		// alt-screen. The caller (resolveTransport) opens the sink once over

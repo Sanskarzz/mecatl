@@ -235,9 +235,15 @@ mailbox). See the delegation-capabilities note below.
 | `--fork-preserved-cap` | `agent.DefaultPreservedForkCap` | max **PRESERVED** winner forks (for `join=first`/`judge`) kept on disk at once — the oldest beyond this is LRU-reaped. Preserved fork workspaces stay inspectable (their paths ride the Parallel result) until reaped. |
 | `--enable-teams` | `true` | register the experimental **agent-teams** capability (`CreateTeam`/`SpawnTeammate`/`RunTeam` + the in-loop `Team` tool). On by default and **inert** until a client drives a team; `=false` disables it. |
 | `--subagent-model` | `""` | global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (via an agent definition `model:` or a per-call override) — the analogue of `CLAUDE_CODE_SUBAGENT_MODEL`. The Parallel judge stays on the session model. A concrete id or a `--model-alias`; same provider as the session. Empty inherits the parent `--model`; a non-empty value that does not resolve to a usable model id (unknown alias, or an alias meaning *inherit* — the built-in `sonnet`/`opus`/`haiku` unless overridden) **fails startup**. `mecatui` accepts the same flag for its embedded server. |
+| `--headless` | `false` | run **non-interactive**: declare that clients drive sessions but never answer permission prompts (autonomous / CI). A **child** (subagent/member/branch) unresolved permission ask is then **not surfaced** to the client (nobody would answer it — it would park until run-end) but resolved by the auto-deny path / the opt-in `--subagent-ask-reviewer`. **Caveat — this gates only CHILD asks: a MAIN-session ask still surfaces and, headless, parks unanswered forever.** Pair `--headless` with permission `allow` rules (or `--yolo`) covering the main agent's tool use, or those asks will hang. Default off: a normal mecated serving an interactive client (mecatui, an IDE) surfaces asks for a human. **`--subagent-ask-reviewer` only engages under `--headless`** — setting it on an interactive server is inert (a startup WARNING says so). |
+| `--subagent-ask-reviewer` | `""` | **OPT-IN headless ask reviewer**: model id or `--model-alias` of a tool-less ONE-TURN reviewer that adjudicates a **headless** subagent/member/branch permission ask the 4-step model would otherwise blanket auto-deny. **Requires `--headless`** (on an interactive server — including the `mecatui` embedded server — it is inert: asks surface to the client/modal instead). An allow approves **this call only** (never learned); a deny — or any reviewer error/timeout/ambiguity — keeps the call denied (**fail-safe**); each adjudication is **one extra LLM call** on the reviewer model. Configured `deny`/`ask` rules always win. The gRPC `RunTeam`-direct path is **excluded** (it runs zero-caps — no reviewer). Resolved on the **session's provider** (same-provider only). Empty (default) disables it; an unusable model id **fails startup** (validated even when inert). Deliberately a **server flag, not a permission-config key** — see the permissions section. `mecatui` accepts the same flag for its embedded server but it is inert there (the embedded server is interactive). |
+| `--subagent-ask-reviewer-max-denies` | `3` | circuit breaker for the reviewer: after this many **consecutive** non-allow reviewer outcomes (denies/failures/timeouts) within one run, further asks skip the reviewer and fall through to the plain auto-deny; an allow resets the count. |
+| `--subagent-ask-reviewer-policy` | `""` | path to a **TRUSTED** policy rubric file; its content replaces the built-in rubric the reviewer applies. The built-in rubric (allow only clearly read-only or standard build/vet/test commands; deny anything that mutates shared state, touches the network/credentials, or whose effect is unclear) lives in `defaultAskReviewPolicy` (`engine/agent/askadjudicator.go`); a custom file is **plain prose** in the same style. Read once at startup; an unreadable file **fails startup**. |
 | `--agents-dir` | `""` | directory of named **agent definitions** (`<name>.md` + YAML frontmatter), reusable as a `Subagent(agent=<name>)` delegate and as a team-member role (repeatable; highest precedence). **TRUST BOUNDARY:** a def body steers the model like `AGENTS.md`/`CLAUDE.md`. |
 | `--agents-conventional` | `true` | also discover agent defs from the conventional locations (`<workspace>/.mecatl/agents`, `<workspace>/.claude/agents`, `$XDG_CONFIG_HOME/mecatl/agents`, `~/.claude/agents`; lower precedence than `--agents-dir`). ON and **inert** until such a dir exists. Project-tier defs are **trust-gated** (`--trust-project`). |
 | `--model-alias` | `""` | model alias mapping `name=model-id` (repeatable), resolved only in composition — an agent def's `model: <alias>` resolves through this map (then the built-in sonnet/opus/haiku aliases). |
+| `--guardrails-model` | `""` | **GUARDRAILS** (issue #27): model id / `--model-alias` of a tool-less checker that inspects **outbound** tool-call args (`PreToolUse`, exfil) and **inbound** tool results (`PostToolUse`, prompt injection) and enforces a verdict. Empty (default) **disables** guardrails; an unusable model id **fails startup**. Configuring a model is the **opt-in to spend** — with **no rule list** it takes the **default advisory rule set** (WebSearch/WebFetch/mcp__\*, observe-only). The optional **rule list** + cost knobs live in the **user-global** `settings.yaml` `guardrails:` subtree (operator-tier **only** — a project repo cannot configure or weaken a checker; a project-tier block is ignored with a WARN); an explicit rule list replaces the defaults. `--guardrails-model` overrides the YAML model. Fires on the main loop regardless of `--headless`. **See the guardrails section below + `docs/design/GUARDRAILS.md`.** |
+| `--guardrails` | `""` | guardrails master switch: pass `--guardrails=off` to force the checker **off** regardless of `--guardrails-model` / the `guardrails:` YAML (the kill-switch). Leave it unset to keep guardrails governed by the model + rule config. **Only `off` is accepted** — any other value (e.g. `--guardrails=on`, which does NOT enable: set `--guardrails-model` for that) **fails startup** rather than silently doing nothing. |
 
 > **Delegation capabilities (Subagent / Parallel / Team).** Beyond the shared
 > `--max-run-tokens` budget, every delegation supports: an explicit **child-concurrency
@@ -566,12 +572,92 @@ permissions:
     - "Bash(git push:*)"
   deny:
     - "Bash(rm:*)"        # deny wins absolutely, in any scope
+  subagent:               # child-scoped rules (issue #32): bind ONLY subagent/member/branch engines
+    allow:
+      - "Bash(go generate:*)"   # clears a child's substitution-floored ask (see "Compound-Bash & substitution safety" below) ONLY when the $(...) inners are read-only
+    ask:
+      - "Bash(go test:*)"       # a configured child Ask is NEVER auto-approved by isolation
+    deny:
+      - "Bash(curl:*)"
 ```
 
 Each entry is a rule spec `Tool(pattern)` or bare `Tool`. Patterns use the
 evaluator's glob grammar; the Claude `prefix:*` / `prefix:` form is normalised to a
 `prefix*` glob. Config rules use **glob** semantics (`Exact:false`) — only LEARNED
-"allow always" rules are exact.
+"allow always" rules are exact. **The `permissions:` subtree parses STRICTLY**: an
+unknown key inside it (`alow:`, `subagnet:`, …) is a loud parse error and the file
+is skipped (logged), never silently-ignored config; the file's top level stays
+lenient (`trustedWorkspaces:` etc. keep parsing).
+
+**Audience × effect** — which engine class each bucket binds.
+
+**Baseline first:** child engines (Subagent children, team members, Parallel
+branches) default to **allow-all** — everything runs except substitution-floored
+commands (see *Compound-Bash & substitution safety* below) and anything a
+configured deny/ask gates. So `subagent: allow` is NOT "let children run X" —
+children already run X; it matters ONLY for *clearing a child's
+substitution-floored ask*. `subagent: deny` / `subagent: ask` *tighten* (block or
+gate a child command the floor would otherwise allow).
+
+| Bucket | Main engine | Subagents (Subagent children / team members / Parallel branches) |
+| --- | --- | --- |
+| top-level `deny` | yes | **yes** (a deny only tightens — it binds everywhere) |
+| top-level `allow` / `ask` | yes | no (children are already allow-all; see baseline above) |
+| `subagent: allow` | no | yes — clears a child's **substitution-floored** ask (see below) when the hidden inners are read-only |
+| `subagent: ask` | no | yes — gates a child command; a configured child Ask is never auto-cleared (it surfaces to the human, or auto-denies headless) |
+| `subagent: deny` | no | yes |
+
+The `subagent: allow` clearing is **bounded** (it relaxes the substitution floor
+without trusting what a substitution hides): the allow vouches **only for the
+OUTER command** — every command hidden inside `$(...)`/backticks must
+independently classify **positively read-only** (`go test $(git rev-parse HEAD)`
+clears; `go test $(anything-else)` surfaces/denies), and the outer must pass the
+worktree-escape rejections (no `git push/config/remote/fetch/pull/clone/worktree/submodule`,
+no path-bearing `git -C`/`--git-dir`/`--work-tree`, no `go … -exec/-toolexec/-overlay/-o`)
+as defense-in-depth.
+
+Child engines resolve **project** rules against their **session's workspace
+root** (per-session engines re-pin at session-engine assembly; the shared
+default engine pins the server root it was built for) — never against their
+forked worktree/copy roots (a worktree lacks the gitignored
+`settings.local.yaml`, and per-fork resolution would defeat the cache). User/CLI
+rules apply to children as usual. A typo inside the `permissions:` subtree skips
+the whole file (deny/ask included) — the WARN names the lost per-effect rule
+counts. `--yolo` remains **main-only**: it never loosens a child's substitution
+floor.
+
+**Headless ask review (`--headless` + `--subagent-ask-reviewer`).** On a
+**headless** run (no human approver — mecated started with `--headless`), a child
+ask that nothing above resolved is normally **blanket auto-denied**. The opt-in
+reviewer inserts an automated step before that deny: a tool-less, one-turn LLM
+reviewer (one extra LLM call on the reviewer model) examines the command — fenced
+as untrusted data, with claims of prior approval inside it declared void, and the
+verdict accepted only when the reviewer's *whole* reply is a single
+`{"allow":…}` object so a forged verdict echoed inside the command can't be lifted
+out — against the built-in read-only/verification rubric (or your
+`--subagent-ask-reviewer-policy` file) and either approves **this call only** or
+keeps it denied; any reviewer error/timeout/ambiguity also keeps it denied
+(**fail-safe** — the reviewer is never load-bearing for safety), and a per-run
+circuit breaker (`--subagent-ask-reviewer-max-denies`) bounds reviewer spend.
+
+**Reachability:** the reviewer fires **only** when there is no human to ask — i.e.
+under `--headless`. A normal interactive mecated (the default) **and the `mecatui`
+embedded server** (which is always interactive — a human sits at its approval
+modal) surface every unresolved child ask to the client/modal for a person to
+answer, so a reviewer configured there is inert and the server logs a startup
+WARNING to that effect. To actually use the reviewer, run `mecated --headless
+--subagent-ask-reviewer …` (and point `mecatui --server` at it if you want the
+TUI). The flag's model is still validated at startup even when inert, so a typo
+is caught immediately rather than the day `--headless` is added.
+
+Two hard bounds keep it subordinate to this section's rules: a **configured
+`subagent: ask` is never delegated to the reviewer** (a deliberately-configured
+Ask demands a *human* approver — it surfaces interactively or auto-denies
+headless, exactly as the table above says), and a configured `deny` resolves
+before any ask exists. It is deliberately a **server flag, NOT a `permissions:`
+config key**: it grants an autonomous approval capability, which must be an
+operator *deployment* decision — a (project-tier, possibly checked-in) settings
+file must never be able to switch on a mechanism that approves commands by itself.
 
 **Scope → location** (highest precedence first; see `engine/governance` Scope):
 
@@ -595,9 +681,10 @@ mutations first. Config files are size- and rule-count-capped (defense-in-depth)
 
 **The trust gate** — a project's config is part of the repo the model is editing.
 Its **DENY and ASK** rules are **always** honoured (they only tighten). Its
-**ALLOW** rules (shared AND local) are honoured **only with `--trust-project`**;
-otherwise they are dropped (and logged) so a checked-in `settings.yaml` cannot
-auto-approve tool calls in an untrusted repo. User-global and `--permission-config`
+**ALLOW** rules (shared AND local, **including `subagent:` allows**) are honoured
+**only with `--trust-project`**; otherwise they are dropped (and logged) so a
+checked-in `settings.yaml` cannot auto-approve tool calls in an untrusted repo —
+for the main engine or its children. User-global and `--permission-config`
 (CLI) files are the operator's own and are always fully trusted.
 
 **Memory + soul are pre-approved at the floor** (issue #14) — the six memory tools
@@ -644,6 +731,81 @@ The import never widens: a demotion only ever moves `allow → ask`, and the
 > gone.) The `mecated` daemon likewise defaults `--permissions-conventional` ON but
 > `--trust-project` OFF (the safe stance); it defaults `--import-claude-permissions`
 > OFF (the safe network stance).
+
+### Guardrails — LLM-backed tool-content inspection (`guardrails:`, issue #27)
+
+Guardrails inspect the data crossing the agent's tool boundary with a **separate,
+tool-less checker model** and enforce a verdict — the *dual-LLM quarantine*. They
+catch **outbound exfiltration** (a secret in `PreToolUse` args) and **inbound prompt
+injection** (instruction-like content in a `PostToolUse` result). **OFF until a
+checker model is configured** — configuring a model is the opt-in to spend. Full
+rationale + threat model: `docs/design/GUARDRAILS.md`.
+
+**The minimal config is just a model.** With `--guardrails-model X` (and no rule
+list) guardrails are ON with the **default advisory rule set** — observe-only for the
+network/MCP surfaces, off for local tools:
+
+| Tool matcher | Phases | Mode |
+| --- | --- | --- |
+| `WebSearch` | pre + post | advisory |
+| `WebFetch` | post | advisory |
+| `mcp__*` | pre + post | advisory |
+
+Advisory = observe-only: a finding is an **operator-log diagnostic** (carrying the
+session id + tool-call id + a `guardrail-finding` marker so you can correlate it back
+to the conversation); the call/result is byte-unchanged and the client/model see
+nothing. Measure the false-positive rate, then promote a rule to `block`/`sanitize`.
+
+**Operator-tier ONLY.** The `guardrails:` config is read from the **user-global**
+`settings.yaml` + the CLI — **never** the project-tier file. This inverts the usual
+tighten-only project gate: a project repo disabling or weakening a security checker
+is a *downgrade*, so a project-tier `guardrails:` block is **ignored with a WARN**.
+The subtree is parsed **strictly** (an unknown sub-key is an error, like
+`permissions:`) so a typo cannot silently disable a guardrail. Set the checker model
+with `--guardrails-model` (overrides the YAML `model:`); force off with
+`--guardrails=off`.
+
+```yaml
+# ~/.config/mecatl/settings.yaml  (user-global only — NOT a checked-in project file)
+guardrails:
+  model: gpt-5-mini          # the checker model (or a --model-alias). With NO rules below,
+                             # the default advisory set applies (the model is the opt-in).
+  maxChecks: 50              # per-session checker-call cap — bounded SEPARATELY from
+                             # --max-run-tokens so infra spend can't starve the agent.
+                             # OMITTING maxChecks = NO cap (but the DEFAULT rule set, used when
+                             # you set only a model, gets a default cap of 200 so it can't surprise-bill).
+  minContentBytes: 16        # skip a short INBOUND (post) result (cost guard; omit = check every post).
+                             # Outbound (pre) args are ALWAYS inspected — a short exfil arg is the point.
+  rules:                     # an explicit list REPLACES the default advisory set
+    - match: "WebFetch"      # inbound injection on fetched pages
+      phases: ["post"]       # "pre" = outbound args, "post" = inbound result; omit = BOTH
+      mode: block            # block | sanitize | advisory
+    - match: "mcp__*"        # all MCP tools, both directions
+      mode: advisory         # observe-only first; tune to block/sanitize later
+    - match: "Bash"          # outbound exfil in shell args
+      phases: ["pre"]
+      mode: sanitize         # rewrite the args to the checker's sanitized form
+      failClosed: true       # a checker outage treats the content as UNSAFE (default is fail-OPEN)
+```
+
+- **Matcher** keys on the tool **name** only (exact > `prefix*` > `*`, most-specific
+  wins; a tie favours the earlier rule). A tool with no matching rule is unchecked.
+- **`block`** vetoes a `PreToolUse` call; on `PostToolUse` — where a Block is **inert**
+  (the tool already ran) — it **rewrites the result to a model-visible error**, so the
+  model and client both see the block and the raw injected result never reaches either.
+- **`sanitize`** rewrites the args (`pre`) / result (`post`) to the checker's
+  `sanitized_content` — a Post rewrite carries a `[guardrail: redacted unsafe content]`
+  marker so the model knows it was edited. **Sanitize trusts the checker's output**
+  (a compromised checker could rewrite content): use it only with a trusted checker
+  model; an unsafe verdict with no/oversized/invalid rewrite falls back to a block.
+- **`advisory`** only logs an operator diagnostic (correlatable; client/model see nothing).
+- **Fail-open by default** (a checker error/oversized content degrades to "no checker"
+  with a WARN; a sustained outage escalates to a one-time **"checker DOWN"** sticky WARN);
+  **`failClosed: true`** treats a checker error as unsafe. A checker **saying safe always passes**.
+- Guardrails fire on the **main loop** regardless of `--headless` (unlike the
+  `--subagent-ask-reviewer`, which is headless-only). The checker engine runs
+  tool-less with inert hooks and no nested reviewer — it can never re-trigger a
+  guardrail or call a tool.
 
 ### Declarative workspace trust (`trustedWorkspaces:`, WORKSPACE-TRUST Phase 1)
 

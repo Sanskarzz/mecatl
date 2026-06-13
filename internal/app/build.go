@@ -328,6 +328,64 @@ type Config struct {
 	// (buildUserModelReviewEngine) stays on cfg.Model — it is a Stop-REVIEW hook
 	// engine, not a delegation child.
 	SubagentModel string
+
+	// SubagentAskReviewerModel enables the OPT-IN automated child-ask reviewer
+	// (issue #31): a tool-less one-turn child engine that adjudicates a HEADLESS
+	// subagent/member/branch permission ask which the 4-step model would otherwise
+	// blanket auto-deny (the Codex pattern). Empty (the default) disables it —
+	// behaviour byte-identical to the plain headless auto-deny. The value is a
+	// concrete model id or a ModelAliases alias, resolved per session on the
+	// SESSION's provider (same-provider only, like SubagentModel); Build normalizes
+	// it once (normalizeAskReviewerModel) and FAILS FAST on a value that does not
+	// resolve to a usable model id (no-op under UseMock). It is wired onto the MAIN
+	// engine's Deps only (per-session re-derived through the engine factory); child
+	// engines force it nil (no nesting). It is deliberately a server FLAG, not a
+	// permconfig key: it grants an autonomous approval capability, which must be an
+	// operator deployment decision — never something a (project-tier) settings file
+	// can switch on. Configured Deny/Ask rules always win over the reviewer.
+	SubagentAskReviewerModel string
+	// SubagentAskReviewerMaxDenies is the per-run adjudication circuit-breaker
+	// threshold (agent.Deps.ChildAskReviewMaxDenies): after this many CONSECUTIVE
+	// non-allow reviewer outcomes in one run, further asks skip the reviewer and
+	// fall through to the plain auto-deny. <=0 uses the default (3).
+	SubagentAskReviewerMaxDenies int
+	// SubagentAskReviewerPolicy is the TRUSTED policy rubric the reviewer applies,
+	// as a STRING (the cmd main reads --subagent-ask-reviewer-policy's file — cmd
+	// mains may use os — and passes the content). Empty keeps the built-in default
+	// rubric (agent.WithAskReviewPolicy is applied only when non-empty).
+	SubagentAskReviewerPolicy string
+
+	// --- Guardrails (issue #27): the LLM-backed PreToolUse/PostToolUse content
+	// checker (the modelhook adapter). It inspects OUTBOUND tool-call args (exfil)
+	// and INBOUND tool results (injection) with a dedicated tool-less checker model
+	// and enforces a verdict (block / sanitize / advisory). OFF by default
+	// (GuardrailsModel empty or GuardrailsRules empty → byte-identical to no
+	// guardrails). It is OPERATOR-TIER ONLY: GuardrailsRules are read from the
+	// user-global settings.yaml `guardrails:` subtree + CLI, NEVER the project-tier
+	// file (a project repo weakening/disabling a checker is a security DOWNGRADE);
+	// permconfig.Resolver enforces the tier gate.
+
+	// GuardrailsModel is the checker model id / --model-alias (resolved per session
+	// on the session's provider, same-provider only — the SubagentModel discipline).
+	// Empty disables guardrails. Build normalizes it once (normalizeGuardrailsModel)
+	// and FAILS FAST on a value that does not resolve to a usable model id.
+	GuardrailsModel string
+	// GuardrailsRules is the operator-tier rule list (matcher + phases + mode +
+	// per-rule prompt + fail-closed). Empty disables guardrails. Sourced only from
+	// the operator tier (user-global YAML + CLI), never the project file.
+	GuardrailsRules []GuardrailRule
+	// GuardrailsMaxChecks is the PER-SESSION checker-call cap (decision 7): checker
+	// token spend is bounded SEPARATELY from the parent's MaxRunTokens so
+	// infrastructure spend cannot starve the agent. <=0 disables the cap.
+	GuardrailsMaxChecks int
+	// GuardrailsMinContentBytes skips the checker for content shorter than this (a
+	// cost guard — trivially short content cannot carry a meaningful payload). 0
+	// checks everything.
+	GuardrailsMinContentBytes int
+	// GuardrailsDisabled is the master kill-switch (--guardrails=off): when true,
+	// guardrails are forced OFF regardless of model/rules config.
+	GuardrailsDisabled bool
+
 	// ModelAliases maps a short alias (e.g. "sonnet"/"opus"/"haiku"/"fast") to a
 	// concrete provider model id. Resolved only here; the domain/agent always
 	// receives a concrete model string.
@@ -480,6 +538,49 @@ type Config struct {
 	// nil when CommandSourceURL is unset. Unexported: an internal composition
 	// detail, not an operator knob.
 	commandSource prompt.CommandSource
+
+	// permResolver is the ONE file-based permission-config resolver (issue #13),
+	// constructed EXACTLY ONCE in Build right after the trust fold (the
+	// cfg.TrustProject/cfg.gitStatus precedent) and consumed by buildEngine for
+	// the main policy — never re-constructed downstream (a second resolver would
+	// be a second cache and a second discovery pass). nil when no config source
+	// is selected (the typed-nil guard lives in buildPermResolver, so this field
+	// is a REAL nil interface and "nil resolver behaves like NewPolicy" holds).
+	// Unexported: an internal composition detail, not an operator knob.
+	permResolver permpolicy.RuleResolver
+	// childPermResolver is permResolver PINNED to the SERVER workspace root
+	// (issue #32): child/member/branch engines run over forked workspaces, and
+	// project permission rules must resolve from the server root, never from
+	// fork roots (worktrees lack gitignored local settings; per-fork roots would
+	// bloat the resolver cache). nil when permResolver is nil. When
+	// cfg.Workspace is empty (or unopenable) the pin is a nil workspace —
+	// user/CLI rules only. Unexported, set alongside permResolver in Build.
+	childPermResolver permpolicy.RuleResolver
+}
+
+// GuardrailRule is one operator-tier guardrail rule (issue #27): a tool-NAME matcher,
+// the tool-use phases it inspects, an enforcement mode, an optional per-rule
+// inspection prompt, and a fail-closed opt-in. It is the composition-layer mirror of
+// the modelhook adapter's RuleSpec (compiled via modelhook.CompileRule), populated
+// from the operator-tier `guardrails:` YAML subtree + CLI — never the project file.
+type GuardrailRule struct {
+	// Match is the tool-name matcher: an exact name, a "prefix*" glob (e.g.
+	// "mcp__github__*"), or "*" (catch-all). Most-specific wins at resolution.
+	Match string
+	// Phases lists the directions this rule inspects ("pre" = outbound args, "post" =
+	// inbound results). Empty inspects BOTH (the conservative default).
+	Phases []string
+	// Mode is the enforcement posture: "block" (veto/rewrite-to-error), "sanitize"
+	// (rewrite to the checker's sanitized_content), or "advisory" (observe only).
+	// Empty defaults to "block".
+	Mode string
+	// Prompt overrides the built-in inspection rubric for the rule's direction. Empty
+	// keeps the default exfil (pre) / injection (post) rubric.
+	Prompt string
+	// FailClosed flips the fail-OPEN default: a checker error/timeout in an enforcing
+	// mode then treats the content as UNSAFE (block) instead of degrading to "no
+	// checker". A checker SAYING safe always passes regardless.
+	FailClosed bool
 }
 
 // providerConstructor builds the port.LLMProvider for an available provider id,
@@ -568,6 +669,23 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	narrateTrust(cfg.diag(), trust, cfg.Workspace)
 	cfg.TrustProject = trust.Trusted
 
+	// File-based permission config (issues #13/#32): construct the resolver
+	// EXACTLY ONCE here, right after the trust fold (it consumes the effective
+	// cfg.TrustProject), and fold it onto cfg so buildEngine (main policy) and
+	// the child deps builders (the workspace-PINNED child resolver) consume the
+	// SAME instance — one discovery pass, one cache, no per-consumer drift.
+	cfg.permResolver = buildPermResolver(cfg)
+	cfg.childPermResolver = buildChildPermResolver(cfg)
+
+	// Guardrails operator-tier config (issue #27, decision 3): fold the user-global +
+	// CLI `guardrails:` YAML subtree (the resolver collected it from the OPERATOR
+	// tiers ONLY — a project file's block is ignored with a WARN) onto cfg, BEFORE
+	// normalizeGuardrailsModel validates the model. CLI flags out-rank YAML for the
+	// scalar knobs that have a flag (--guardrails-model, --guardrails=off); the rule
+	// list comes from YAML (flags cannot express it). This runs after the resolver is
+	// built and before the provider/model fail-fast normalization below.
+	cfg = foldOperatorGuardrails(cfg)
+
 	// Start-of-session git snapshot, computed ONCE here (FIX 2): gitSnapshot runs git
 	// against cfg.Workspace through a HARDENED/scrubbed env and only for a TRUSTED
 	// workspace (FIX 1). The single value is carried on cfg.gitStatus so every
@@ -613,6 +731,22 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		return nil, err
 	}
 	cfg.SubagentModel = subagentModel
+	// SubagentAskReviewerModel (issue #31): the same fail-fast normalization
+	// posture as SubagentModel — validate the alias once here; empty = reviewer off.
+	reviewerModel, err := normalizeAskReviewerModel(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.SubagentAskReviewerModel = reviewerModel
+	// Guardrails (issue #27): the same fail-fast normalization posture — validate the
+	// checker model alias once here (empty = guardrails off), and emit the build-once
+	// ACTIVE/OFF fact. A non-empty model that does not resolve is a BUILD ERROR (a
+	// silently-inert guardrail is the opposite of what the operator asked for).
+	guardrailsModel, err := normalizeGuardrailsModel(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.GuardrailsModel = guardrailsModel
 	// Emit the build-once composition facts (token counter / compaction strategy /
 	// slash commands) EXACTLY ONCE here, through the injected Diagnostics — keyed to
 	// the resolved MAIN model. The per-derivation builders no longer log these (they
@@ -931,7 +1065,19 @@ func sessionEngineFactory(
 	instructions prompt.InstructionAssembler,
 	assets catalogAssets,
 ) server.SessionEngineFactory {
-	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile) (server.SessionEngineResult, error) {
+	return func(ctx context.Context, sel server.ProviderSelector, specs []mcp.ServerConfig, profile server.SessionProfile, workspace string) (server.SessionEngineResult, error) {
+		// Pin the CHILD permission resolver to THIS session's base root (issue
+		// #32): a per-session engine's subagents/members/branches must resolve
+		// project permission rules from the SESSION's pre-fork root — the
+		// session over project X gets X's `subagent:` block, never the server
+		// flag's root rules, and never a fork root (the fork-root exclusion
+		// holds: the pin ignores the per-call child workspace entirely). An
+		// empty workspace (no-fs, or a resume that persisted none) pins no
+		// project root — user/CLI rules only. cfg is a value, so the override
+		// is scoped to this one session's assembly; the SHARED engine keeps the
+		// build-time pin over cfg.Workspace (the server's own root — the one
+		// the shared engine was assembled for).
+		cfg.childPermResolver = childPermResolverFor(cfg, workspace)
 		// The NO-FS profile (issue #55): the service routes every no-fs session
 		// through this factory unconditionally (the shared engine has the FS tools
 		// baked in), and the profile selects the no-FS catalog assembly + the
@@ -1022,6 +1168,16 @@ func sessionEngineFactory(
 		// provider never contaminates compaction/counting.
 		deps := engineDepsForProvider(cfg, resolvedProvider, resolvedModel, contextWindow, store, policy, hooks, mcpProvider, instructions)
 		deps.Catalog = cat
+		// Guardrails (issue #27), RE-DERIVED per session so a FRESH per-session checker
+		// budget is built: decorate THIS session's main hooks with the LLM-backed
+		// content checker, over the session's resolved provider/model. OFF-by-default
+		// (returns deps.Hooks unchanged when unconfigured); wired onto the MAIN engine's
+		// hooks only — buildCatalog's child hooks above stay RAW (the recursion guard).
+		deps.Hooks = buildGuardrailsHooks(cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel, deps.Hooks)
+		// The OPT-IN child-ask reviewer (issue #31), RE-DERIVED on this session's
+		// resolved (provider, model) through the same attachAskAdjudicator the shared
+		// engine uses — never a clone-and-swap of the build-time reviewer.
+		deps = attachAskAdjudicator(deps, cfg, reg, resolvedProvider, resolvedProviderID, resolvedModel)
 		if noFS {
 			// MODEL-VISIBLE POSTURE (mandatory discoverability, the #40 pattern):
 			// tell the model up front there is no filesystem — and stop the prompt
@@ -1162,32 +1318,15 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// The SAME policy (and thus store) is shared with every per-session client-MCP
 	// engine via sessionEngineFactory, so an MCP-mounted session learns identically.
 	learned := permstore.New()
-	// File-based permission config (issue #13): the resolver re-resolves the
-	// per-project `.mecatl/settings.yaml` (and Claude-imported settings.json)
-	// against each session's workspace root, gating project ALLOW rules behind
-	// TrustProject and caching per root. It rides the SAME lowest-scope extra
-	// channel as the learned rules. permconfig.New returns nil when no source is
-	// configured, in which case NewPolicyWithResolver behaves exactly like
-	// NewPolicy (built-ins + learned only).
-	resolver := permconfig.New(permconfig.Options{
-		Conventional:  cfg.PermissionsConventional,
-		ImportClaude:  cfg.ImportClaudePermissions,
-		TrustProject:  cfg.TrustProject,
-		ExplicitFiles: cfg.PermissionConfigs,
-		Diagnostics:   cfg.diag(),
-	})
-	// permconfig.New returns a TYPED-nil (*permconfig.Resolver)(nil) when no config
-	// source is wired; passing that into NewPolicyWithResolver would store a non-nil
-	// INTERFACE wrapping a nil pointer, so the policy's `resolver != nil` guard stays
-	// true and Resolve panics on the first tool-permission evaluation. Pass a real
-	// untyped nil so the documented "nil resolver behaves like NewPolicy" contract
-	// holds (the no-config default — built-ins + learned only).
-	var policy *permpolicy.Policy
-	if resolver != nil {
-		policy = permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, resolver, mainEvaluatorOptions(cfg)...)
-	} else {
-		policy = permpolicy.NewPolicy(mainRules(cfg), learned, mainEvaluatorOptions(cfg)...)
-	}
+	// File-based permission config (issue #13): cfg.permResolver is the ONE
+	// resolver Build constructed right after the trust fold (the typed-nil guard
+	// lives in buildPermResolver) — it re-resolves the per-project
+	// `.mecatl/settings.yaml` (and Claude-imported settings.json) against each
+	// session's workspace root, gating project ALLOW rules behind TrustProject
+	// and caching per root. It rides the SAME lowest-scope extra channel as the
+	// learned rules; a nil resolver makes NewPolicyWithResolver behave exactly
+	// like NewPolicy (built-ins + learned only).
+	policy := permpolicy.NewPolicyWithResolver(mainRules(cfg), learned, cfg.permResolver, mainEvaluatorOptions(cfg)...)
 	hooks := hookexec.New(nil) // no hooks by default; map is the injection seam
 
 	// agentReg (threaded from Build's single resolveAgentSeam) is shared with
@@ -1253,9 +1392,21 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// per-session client-MCP engines keep the UNWRAPPED hooks: the reviewer fires once
 	// per MAIN-engine Stop, not per client-MCP session stop.
 	mainHooks := maybeWrapUserModelReview(cfg, hooks, store, provider, userModelStore)
+	// Guardrails (issue #27): decorate the MAIN engine's hooks with the LLM-backed
+	// PreToolUse/PostToolUse content checker. modelhook wraps the userModelReview
+	// chain so the inner hooks run FIRST and the checker SECOND (decision 5). It is
+	// OFF-by-default (returns mainHooks UNCHANGED when unconfigured) and is wired ONLY
+	// here + in the per-session factory — NEVER into buildCatalog's child hooks (the
+	// recursion guard). The shared engine's checker rides the default provider/model.
+	mainHooks = buildGuardrailsHooks(cfg, reg, provider, reg.Default(), cfg.Model, mainHooks)
 
 	deps := baseEngineDeps(cfg, provider, store, policy, mainHooks, mcpProvider, instructions)
 	deps.Catalog = cat
+	// The OPT-IN child-ask reviewer (issue #31) rides the MAIN engine's deps only,
+	// built on the shared engine's (default provider, cfg.Model). Per-session
+	// engines get their own via the SAME attachAskAdjudicator in
+	// sessionEngineFactory, re-derived on the session's resolved provider/model.
+	deps = attachAskAdjudicator(deps, cfg, reg, provider, reg.Default(), cfg.Model)
 	// The factory shares the build-once assets (global MCP manager, agent registry,
 	// flocked memory/user-model stores, skills, fork reaper) so every per-session
 	// catalog is assembled over the SAME collaborators as the shared one. It keeps
@@ -1755,6 +1906,96 @@ func normalizeSubagentModel(cfg Config) (string, error) {
 	cfg.diag().Log(context.Background(), port.LevelInfo,
 		"subagent default model ACTIVE: def-less Subagent explorer / Parallel-branch / undefined-team-member children run on it (the Parallel judge stays on the session model); a def `model:` or per-call override still wins",
 		"model", resolved)
+	return sel, nil
+}
+
+// normalizeAskReviewerModel validates and resolves Config.SubagentAskReviewerModel
+// EXACTLY ONCE at build time (called only from Build), mirroring
+// normalizeSubagentModel: empty = the reviewer is OFF (returns ""), and a
+// non-empty value that does not resolve to a usable model id — an unrecognised
+// bare token, or an alias meaning inherit — is a BUILD ERROR (the loud-misconfig
+// posture: a warn-and-inert reviewer flag would silently leave every headless
+// child ask blanket-denied, the opposite of what the operator asked for). The
+// alias grammar is the shared lookupModelAlias; a valid value is returned
+// VERBATIM (per-session buildAskAdjudicator re-resolves it cheaply on the
+// session's provider). No-op under UseMock (the mock provider isn't catalogued
+// and internal e2e tests script the reviewer through it). On success it emits
+// the build-once ACTIVE fact.
+func normalizeAskReviewerModel(cfg Config) (string, error) {
+	sel := strings.TrimSpace(cfg.SubagentAskReviewerModel)
+	if sel == "" {
+		return sel, nil
+	}
+	// FAIL-FAST validation runs FIRST, regardless of reachability: the alias
+	// lookup is free and catches a typo'd --subagent-ask-reviewer at config time
+	// rather than the day someone adds --headless and the now-active reviewer can't
+	// resolve its model. (Skipped only under UseMock, where the model is a literal
+	// the offline mock ignores.)
+	resolved, known := lookupModelAlias(cfg, sel)
+	if !cfg.UseMock {
+		switch {
+		case !known:
+			return "", fmt.Errorf("--subagent-ask-reviewer %q: unknown model alias (not in --model-alias, not a built-in alias, and a bare token is not a concrete model id); the headless ask reviewer would silently stay off — pass a concrete model id or define the alias", sel)
+		case resolved == "":
+			return "", fmt.Errorf("--subagent-ask-reviewer %q: the alias resolves to \"inherit\" (the built-in sonnet/opus/haiku aliases mean inherit unless overridden via --model-alias); pass a concrete model id or map the alias to one", sel)
+		}
+	}
+	// REACHABILITY (the runtime-discoverability bar): the reviewer is consulted
+	// ONLY on the headless branch of resolveChildAsk — an INTERACTIVE deployment
+	// (mecatui embedded, a default mecated without --headless) surfaces every
+	// unresolved child ask to its client instead, so the reviewer never fires.
+	// WARN that it is inert rather than narrate an "ACTIVE" fact that does nothing
+	// — but the value was still validated above, so a typo is caught now, not the
+	// day --headless is added. (mecated sets Interactive=false via --headless; the
+	// offline demo and a library consumer that leave it false are headless too.)
+	if cfg.Interactive {
+		cfg.diag().Log(context.Background(), port.LevelWarn,
+			"subagent ask reviewer configured but INERT: this deployment is interactive, so a child's unresolved permission ask is surfaced to the client for a human to answer and the reviewer is never consulted; run headless (mecated: --headless) to engage it",
+			"model", sel)
+		return sel, nil
+	}
+	cfg.diag().Log(context.Background(), port.LevelInfo,
+		"subagent ask reviewer ACTIVE (headless): a child's unresolved permission ask is adjudicated by an automated one-turn reviewer instead of blanket auto-denied; configured Deny/Ask rules still win",
+		"model", sel)
+	return sel, nil
+}
+
+// normalizeGuardrailsModel validates and resolves Config.GuardrailsModel EXACTLY
+// ONCE at build time (called only from Build), mirroring normalizeAskReviewerModel:
+// empty = guardrails OFF (returns ""), and a non-empty value that does not resolve
+// to a usable model id — an unrecognised bare token, or an alias meaning inherit —
+// is a BUILD ERROR (the loud-misconfig posture: a warn-and-inert guardrail flag
+// would silently leave tool content uninspected, the opposite of what the operator
+// asked for). UNLIKE the ask reviewer it carries NO interactive-inert WARN: the
+// guardrail checker fires on the MAIN loop's PreToolUse/PostToolUse phases
+// regardless of whether the deployment surfaces permission asks to a human. A
+// configured model with NO explicit rules is still ACTIVE — it takes the built-in
+// DEFAULT advisory rule set (WebSearch/WebFetch/mcp__*, observe-only), the headline
+// default. The master kill-switch (GuardrailsDisabled) turns it off. No-op under
+// UseMock. On success it emits the build-once ACTIVE fact.
+func normalizeGuardrailsModel(cfg Config) (string, error) {
+	sel := strings.TrimSpace(cfg.GuardrailsModel)
+	if sel == "" || cfg.GuardrailsDisabled {
+		return sel, nil
+	}
+	resolved, known := lookupModelAlias(cfg, sel)
+	if !cfg.UseMock {
+		switch {
+		case !known:
+			return "", fmt.Errorf("--guardrails-model %q: unknown model alias (not in --model-alias, not a built-in alias, and a bare token is not a concrete model id); guardrails would silently stay off — pass a concrete model id or define the alias", sel)
+		case resolved == "":
+			return "", fmt.Errorf("--guardrails-model %q: the alias resolves to \"inherit\" (the built-in sonnet/opus/haiku aliases mean inherit unless overridden via --model-alias); pass a concrete model id or map the alias to one", sel)
+		}
+	}
+	if len(cfg.GuardrailsRules) == 0 {
+		cfg.diag().Log(context.Background(), port.LevelInfo,
+			"guardrails ACTIVE (default advisory rules): WebSearch/WebFetch/mcp__* tool content is inspected observe-only (findings logged, content unchanged); add a guardrails: rule list to enforce (block/sanitize) or narrow the scope",
+			"model", sel)
+		return sel, nil
+	}
+	cfg.diag().Log(context.Background(), port.LevelInfo,
+		"guardrails ACTIVE: PreToolUse (outbound-args exfil) and PostToolUse (inbound-result injection) tool content is inspected by an automated checker; block/sanitize/advisory per rule",
+		"model", sel, "rules", len(cfg.GuardrailsRules))
 	return sel, nil
 }
 
@@ -2749,9 +2990,12 @@ func childEngineDeps(cfg Config, role string, provider port.LLMProvider, cat *to
 	return agent.Deps{
 		LLM:     provider,
 		Catalog: cat,
-		// Child/member engines are non-interactive (allow-all) and never learn:
-		// nil store disables Learn entirely for them.
-		Policy:       permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		// Child/member engines are non-interactive (allow-all floor) and never
+		// learn (nil store disables Learn entirely). childPermPolicy adds the
+		// AudienceSubagent pin + the workspace-pinned config resolver (issue #32)
+		// so `subagent:`-block rules bind children; with no config it is the
+		// historical allow-all shape.
+		Policy:       childPermPolicy(cfg),
 		Hooks:        hooks,
 		PromptConfig: pc,
 		Model:        model,
@@ -2769,6 +3013,10 @@ func childEngineDeps(cfg Config, role string, provider port.LLMProvider, cat *to
 		Clock:               wallclock.Clock{},
 		ContextWindowTokens: defaultContextWindowTokens,
 		CompactionRatio:     defaultCompactionRatio,
+		// ChildAskReviewer is deliberately ABSENT (nil): a child engine never carries
+		// the ask reviewer — no nesting, and the reviewer engine is itself built
+		// through the child deps path, so inheriting it would recurse at
+		// construction. Same posture as childEngineDepsForProvider.
 	}
 }
 
@@ -2809,7 +3057,9 @@ func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvid
 	// ContextWindow it derived are kept (those are the contamination-sensitive fields).
 	deps := engineDepsForProvider(cfg, provider, model, contextWindow,
 		nil, // store: child engines never persist (disables Learn entirely)
-		permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil),
+		// The child policy: allow-all floor + AudienceSubagent pin + the
+		// workspace-pinned config resolver (issue #32) — see childPermPolicy.
+		childPermPolicy(cfg),
 		hooks,
 		nil, // mcpProvider: child command expansion does not consult MCP prompts
 		nil, // instructions: child engines carry no turn-0 instruction assembler
@@ -2847,6 +3097,15 @@ func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvid
 	// posture (isolation auto-approve → surface-via-parent → headless auto-deny), driven
 	// by the PARENT run's caps, not by the child engine's interactivity.
 	deps.Interactive = false
+	// A child engine NEVER carries the ask reviewer: children cannot nest a further
+	// reviewer (their own asks resolve via the PARENT run's caps), and the
+	// reviewer engine is itself built THROUGH this child path (askAdjudicatorDeps),
+	// so inheriting it here would recurse at construction. engineDepsForProvider
+	// never sets it (the assignment lives at the two main sites via
+	// attachAskAdjudicator), so this is a defensive pin — exactly like Interactive
+	// above.
+	deps.ChildAskReviewer = nil
+	deps.ChildAskReviewMaxDenies = 0
 	return deps
 }
 
@@ -3000,6 +3259,74 @@ func parallelChildDeps(cfg Config, provReg *providerRegistry, provider port.LLMP
 // by TestParallelJudgeStaysOnParentModel; documented in MULTI-PROVIDER.md.
 func buildParallelJudgeEngine(cfg Config, provider port.LLMProvider) *agent.Engine {
 	return newChildEngine(cfg, "parallel-judge", provider, tool.NewCatalog(), cfg.Model, promptConfig(cfg, cfg.gitStatus))
+}
+
+// buildAskAdjudicator constructs the OPT-IN automated child-ask reviewer (issue
+// #31), mirroring buildParallelJudgeEngine: a tool-less read-only child *Engine
+// over the SESSION's provider, role "ask-reviewer" (which lands in roleFamily's
+// "child" bucket — no new metrics label). Returns nil when
+// Config.SubagentAskReviewerModel is empty (the reviewer is off — the zero-cost
+// default). The reviewer model is resolved ALIAS-AWARE on the session's provider
+// (same-provider only, the SubagentModel discipline); Build already failed fast
+// on an unusable value (normalizeAskReviewerModel), so the defensive
+// parent-model fallback below is unreachable in a built process. It is assigned
+// at BOTH main-engine deps sites (buildEngine and sessionEngineFactory) — i.e.
+// re-derived per session/provider through the factory, never clone-and-swap.
+func buildAskAdjudicator(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) agent.ChildAskReviewer {
+	deps, ok := askAdjudicatorDeps(cfg, provReg, provider, parentProviderID, parentModel)
+	if !ok {
+		return nil
+	}
+	var opts []agent.EngineAskReviewerOption
+	if strings.TrimSpace(cfg.SubagentAskReviewerPolicy) != "" {
+		opts = append(opts, agent.WithAskReviewPolicy(cfg.SubagentAskReviewerPolicy))
+	}
+	return agent.NewEngineAskReviewer(agent.NewEngine(deps), opts...)
+}
+
+// askAdjudicatorDeps builds the reviewer engine's agent.Deps — split out from
+// buildAskAdjudicator (the childExplorerDeps precedent) so a test can assert the
+// resolved Deps directly (Model/Role/LLM/tool-less catalog and the forced-nil
+// nested adjudicator are private once inside the engine). ok=false when the
+// reviewer is not configured.
+func askAdjudicatorDeps(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) (agent.Deps, bool) {
+	sel := strings.TrimSpace(cfg.SubagentAskReviewerModel)
+	if sel == "" {
+		return agent.Deps{}, false
+	}
+	model, _ := lookupModelAlias(cfg, sel)
+	if model == "" {
+		// Defensive only: Build's normalizeAskReviewerModel already rejected an
+		// unknown/inherit value fail-fast (and UseMock passes the literal through).
+		model = parentModel
+	}
+	window := childWindowFor(provReg, parentProviderID, model, parentProviderID, parentModel)
+	// newChildEngineForProvider's deps builder: the reviewer compacts/counts/
+	// prompts on ITS resolved model with a re-derived window — and, crucially,
+	// childEngineDepsForProvider forces ChildAskReviewer nil, so the reviewer
+	// engine can never carry a nested reviewer (no construct-recursion).
+	deps := childEngineDepsForProvider(cfg, "ask-reviewer", provider, model, window,
+		tool.NewCatalog(), promptConfig(modelCfgFor(cfg, model), cfg.gitStatus), nil)
+	// Disable the no-progress nudge on the reviewer engine: its session caps at
+	// MaxTurns=1, and an EMPTY (verdict-less) first turn must terminate cleanly in
+	// exactly ONE provider call (StopNoProgress → the reviewer treats it as a
+	// no-verdict failure), not be nudged into a second call before the turn cap
+	// trips. A negative value is the explicit "disable nudging" sentinel.
+	deps.MaxNoProgressNudges = -1
+	return deps, true
+}
+
+// attachAskAdjudicator assigns the OPT-IN child-ask reviewer (issue #31) onto a
+// MAIN engine's deps: the adjudicator built for THIS (provider, model) plus the
+// breaker threshold. It is the ONE assignment helper both main-engine deps sites
+// share — buildEngine (the shared default-provider engine) and
+// sessionEngineFactory (each per-session engine, re-derived on the session's
+// resolved provider/model) — so the two cannot drift, and a test can assert the
+// deps literal. A no-reviewer config returns deps unchanged (adjudicator nil).
+func attachAskAdjudicator(deps agent.Deps, cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) agent.Deps {
+	deps.ChildAskReviewer = buildAskAdjudicator(cfg, provReg, provider, parentProviderID, parentModel)
+	deps.ChildAskReviewMaxDenies = cfg.SubagentAskReviewerMaxDenies
+	return deps
 }
 
 // buildSubagentTool constructs the Subagent tool tool over a default child Engine
@@ -3878,19 +4205,130 @@ func mainRules(cfg Config) []governance.Rule {
 }
 
 // mainEvaluatorOptions returns the governance.Evaluator construction options for the
-// MAIN engine's policy. Under --yolo (cfg.AllowAllTools) it loosens the built-in
-// substitution Ask floor (WithLooseSubstitution) — consistent with the mutate-ask floor
-// the ScopeCLI allow-all rule already loosens, so a substitution command no longer
-// prompts under yolo. A configured Deny/Ask in any scope still wins (deny-dominance and
-// the configured-ask floor are unaffected). Without --yolo it returns no options (the
-// floor stands). Child/member policies are built with their own allow-all rules
-// elsewhere; the substitution loosening rides this main-policy seam, and subagents'
-// surface/isolation posture handles their substitutions independently.
+// MAIN engine's policy. It ALWAYS pins the audience to AudienceMain (issue #32):
+// without it, subagent-tagged resolver extras (the permconfig `subagent:` block)
+// would bind the main engine too — the audience pin is what keeps a child-scoped
+// rule from leaking into the interactive engine. Under --yolo (cfg.AllowAllTools)
+// it additionally loosens the built-in substitution Ask floor
+// (WithLooseSubstitution) — consistent with the mutate-ask floor the ScopeCLI
+// allow-all rule already loosens, so a substitution command no longer prompts
+// under yolo. A configured Deny/Ask in any scope still wins (deny-dominance and
+// the configured-ask floor are unaffected). Child/member policies are built with
+// their own ruleset + audience via childPermPolicy; the substitution loosening
+// rides this main-policy seam only, and subagents' surface/isolation posture
+// handles their substitutions independently (--yolo stays main-only).
 func mainEvaluatorOptions(cfg Config) []governance.EvaluatorOption {
+	opts := []governance.EvaluatorOption{governance.WithAudience(governance.AudienceMain)}
 	if cfg.AllowAllTools {
-		return []governance.EvaluatorOption{governance.WithLooseSubstitution(true)}
+		opts = append(opts, governance.WithLooseSubstitution(true))
 	}
-	return nil
+	return opts
+}
+
+// buildPermResolver constructs the ONE file-based permission-config resolver
+// (issue #13) for the whole composition, called exactly once by Build right
+// after the trust fold. permconfig.New returns a TYPED-nil
+// (*permconfig.Resolver)(nil) when no config source is wired; storing that in
+// the cfg.permResolver INTERFACE field would make the policy's `resolver != nil`
+// guard stay true and Resolve panic on the first tool-permission evaluation —
+// so the typed-nil guard lives HERE, and the field is a real nil interface when
+// config is off ("nil resolver behaves like NewPolicy" holds everywhere).
+func buildPermResolver(cfg Config) permpolicy.RuleResolver {
+	resolver := permconfig.New(permconfig.Options{
+		Conventional:  cfg.PermissionsConventional,
+		ImportClaude:  cfg.ImportClaudePermissions,
+		TrustProject:  cfg.TrustProject,
+		ExplicitFiles: cfg.PermissionConfigs,
+		Diagnostics:   cfg.diag(),
+	})
+	if resolver == nil {
+		return nil
+	}
+	return resolver
+}
+
+// buildChildPermResolver derives the CHILD engines' resolver from
+// cfg.permResolver (issue #32) for the BUILD-time shared engine: pinned to the
+// server root cfg.Workspace (the root the shared engine is assembled for).
+// Per-session engines re-pin to their own session root via childPermResolverFor
+// in sessionEngineFactory.
+func buildChildPermResolver(cfg Config) permpolicy.RuleResolver {
+	return childPermResolverFor(cfg, cfg.Workspace)
+}
+
+// childPermResolverFor pins the ONE permResolver to a read-only workspace over
+// root — the SESSION's pre-fork base root (issue #32). Children run over forked
+// workspaces, and project permission rules must resolve from the session base,
+// never from fork roots — a worktree lacks the gitignored local settings file,
+// and per-fork roots would bloat the resolver's per-root cache. An
+// empty/unopenable root pins a nil workspace (user/CLI rules only — the
+// buildSoulGate fail-open precedent). nil when permResolver is nil (config off).
+func childPermResolverFor(cfg Config, root string) permpolicy.RuleResolver {
+	if cfg.permResolver == nil {
+		return nil
+	}
+	var ws tool.WorkspaceReader
+	if root != "" {
+		if w, err := osfs.NewWorkspace(root); err == nil {
+			ws = w
+		}
+	}
+	return pinnedResolver{inner: cfg.permResolver, ws: ws}
+}
+
+// pinnedResolver decorates a permpolicy.RuleResolver to IGNORE the per-call
+// workspace and resolve against a FIXED one (the server root). It is the child
+// engines' resolver shape (issue #32): every Subagent child / team member /
+// parallel branch evaluates against its own forked workspace, but the
+// file-based permission rules that govern it are the SERVER project's — pinning
+// keeps the policy reading `.mecatl/settings.yaml` from the real root and keeps
+// the resolver cache at one entry instead of one per fork.
+type pinnedResolver struct {
+	inner permpolicy.RuleResolver
+	ws    tool.WorkspaceReader // nil ⇒ user/CLI rules only
+}
+
+// Resolve implements permpolicy.RuleResolver, dropping the caller's workspace
+// in favour of the pinned one.
+func (p pinnedResolver) Resolve(ctx context.Context, _ tool.WorkspaceReader) []governance.Rule {
+	return p.inner.Resolve(ctx, p.ws)
+}
+
+// childRules returns the child/member engine's static ruleset: the canonical
+// allow-all-at-the-floor (permpolicy.AllowAllFloorRules — the ONE definition,
+// shared with every "default child posture" test fixture so they cannot
+// drift). Children were historically allow-all at the zero Scope
+// (ScopeManaged); the re-scope to the BUILT-IN floor is behaviour-neutral with
+// no config (allow-all still matches everything → Allow, and the
+// floor-exception in resolveSimple only keys on the ASK side's scope) — pinned
+// by TestChildRulesFloorScopeNeutral — but it is load-bearing for the issue-#32
+// decision bits: the blanket allow-all must NOT register as a CONFIGURED Allow
+// (scope above the floor), or every substitution-floored child ask would
+// qualify for FlooredConfiguredAllow. Only a real config rule (the permconfig
+// `subagent:` block) may carry an above-floor scope.
+func childRules() []governance.Rule {
+	return permpolicy.AllowAllFloorRules()
+}
+
+// childEvaluatorOptions returns the governance.Evaluator options for a
+// child/member policy: the AudienceSubagent pin (issue #32), so top-level
+// (AudienceMain) config allow/ask never bind a child while `subagent:`-block
+// rules and AudienceAll denies do. Deliberately NO WithLooseSubstitution here:
+// --yolo is main-only — a child's substitution floor resolves through the
+// child-ask model (floored-configured-allow / isolation / surface / deny),
+// never through the yolo loosening.
+func childEvaluatorOptions() []governance.EvaluatorOption {
+	return []governance.EvaluatorOption{governance.WithAudience(governance.AudienceSubagent)}
+}
+
+// childPermPolicy builds the shared child/member permission policy (issue #32):
+// the allow-all floor (childRules), NO learned-rule store (children never
+// learn), the workspace-PINNED config resolver, and the AudienceSubagent pin.
+// With no config wired (cfg.childPermResolver nil — every direct-call test and
+// the no-config default) it behaves byte-identically to the historical bare
+// allow-all policy.
+func childPermPolicy(cfg Config) *permpolicy.Policy {
+	return permpolicy.NewPolicyWithResolver(childRules(), nil /* children never learn */, cfg.childPermResolver, childEvaluatorOptions()...)
 }
 
 // defaultLimits returns the non-zero stop limits injected for sessions created

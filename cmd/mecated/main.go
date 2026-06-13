@@ -225,6 +225,39 @@ type config struct {
 	subagentModel      string
 	modelAliases       keyValueList
 
+	// Headless ask reviewer (issue #31): subagentAskReviewer names the model (or
+	// --model-alias) of the OPT-IN one-turn reviewer that adjudicates a HEADLESS
+	// child's otherwise-blanket-auto-denied permission ask; empty (default)
+	// disables it. subagentAskReviewerMaxDenies is the per-run consecutive-deny
+	// circuit-breaker threshold. subagentAskReviewerPolicyFile points at a TRUSTED
+	// policy rubric file; parseFlags reads it (cmd mains may use os) and the
+	// CONTENT travels on subagentAskReviewerPolicy into app.Config.
+	subagentAskReviewer           string
+	subagentAskReviewerMaxDenies  int
+	subagentAskReviewerPolicyFile string
+	subagentAskReviewerPolicy     string
+
+	// Guardrails (issue #27): guardrailsModel names the tool-less checker model that
+	// inspects PreToolUse (outbound-args exfil) and PostToolUse (inbound-result
+	// injection) tool content; empty disables guardrails. guardrailsOff is the master
+	// kill-switch (--guardrails=off) that forces guardrails off regardless of config.
+	// The RULE LIST + cost knobs live in the OPERATOR-TIER `guardrails:` subtree of the
+	// user-global settings.yaml (a flag cannot express a rule list); they are NEVER
+	// read from the project-tier file (a security downgrade).
+	guardrailsModel string
+	guardrailsMode  string // the raw --guardrails value ("off" → guardrailsOff)
+	guardrailsOff   bool
+
+	// headless declares that NO human approver is attached to this deployment's
+	// sessions: a child's unresolved permission ask must NOT be surfaced to the
+	// client (there is nobody to answer it — it would park until run-end), and
+	// instead engages the auto-deny path / the opt-in --subagent-ask-reviewer.
+	// DEFAULT false: a normal mecated serving an interactive client (mecatui, an
+	// IDE) surfaces asks for a human to answer. Set it for an autonomous / CI
+	// deployment where clients drive runs but never answer permission prompts — it
+	// is what makes --subagent-ask-reviewer actually engage.
+	headless bool
+
 	// Skills self-improvement loop (opt-in): when skillsDraftDir is non-empty the
 	// writable SkillDraft tool is registered, writing model-authored candidate
 	// SKILL.md files into this QUARANTINE directory (NEVER a catalog Source). An
@@ -727,27 +760,40 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		AgentsDirs:                   cfg.agentsDirs,
 		AgentsConventional:           cfg.agentsConventional,
 		SubagentModel:                cfg.subagentModel,
-		ModelAliases:                 cfg.modelAliases,
-		CommandsDir:                  cfg.commandsDir,
-		EnableCommands:               cfg.enableCommands,
-		EnableParallel:               cfg.enableParallel,
-		ForkPreservedCap:             cfg.forkPreservedCap,
-		EnableTeams:                  cfg.enableTeams,
-		MCPServers:                   cfg.mcpServers,
-		MCPResourceTools:             cfg.mcpResourceTools,
-		MCPPrompts:                   cfg.mcpPrompts,
-		ToolHiveEnabled:              cfg.toolHiveEnabled,
-		ToolHiveGroup:                cfg.toolHiveGroup,
-		PermissionsConventional:      cfg.permissionsConventional,
-		ImportClaudePermissions:      cfg.importClaudePermissions,
-		TrustProject:                 cfg.trustProject,
-		PermissionConfigs:            cfg.permissionConfigs,
-		AllowAllTools:                cfg.allowAllTools,
-		// mecated serves the bidi Converse + HTTP-SSE surfaces, whose clients CAN answer
-		// a permission ask (ResumeApproval). So a subagent's unresolved Bash ask is
-		// SURFACED to the attached human rather than auto-denied. (A headless embedding —
-		// the offline demo — leaves app.Config.Interactive false and auto-denies.)
-		Interactive:       true,
+		SubagentAskReviewerModel:     cfg.subagentAskReviewer,
+		SubagentAskReviewerMaxDenies: cfg.subagentAskReviewerMaxDenies,
+		SubagentAskReviewerPolicy:    cfg.subagentAskReviewerPolicy,
+		// Guardrails (issue #27): the checker model + master kill-switch. The rule list
+		// and cost knobs are operator-tier YAML only (the `guardrails:` subtree of the
+		// user-global settings.yaml), folded onto Config by foldOperatorGuardrails — a
+		// flag cannot express a rule list.
+		GuardrailsModel:         cfg.guardrailsModel,
+		GuardrailsDisabled:      cfg.guardrailsOff,
+		ModelAliases:            cfg.modelAliases,
+		CommandsDir:             cfg.commandsDir,
+		EnableCommands:          cfg.enableCommands,
+		EnableParallel:          cfg.enableParallel,
+		ForkPreservedCap:        cfg.forkPreservedCap,
+		EnableTeams:             cfg.enableTeams,
+		MCPServers:              cfg.mcpServers,
+		MCPResourceTools:        cfg.mcpResourceTools,
+		MCPPrompts:              cfg.mcpPrompts,
+		ToolHiveEnabled:         cfg.toolHiveEnabled,
+		ToolHiveGroup:           cfg.toolHiveGroup,
+		PermissionsConventional: cfg.permissionsConventional,
+		ImportClaudePermissions: cfg.importClaudePermissions,
+		TrustProject:            cfg.trustProject,
+		PermissionConfigs:       cfg.permissionConfigs,
+		AllowAllTools:           cfg.allowAllTools,
+		// mecated serves the bidi Converse + HTTP-SSE surfaces, whose clients CAN
+		// answer a permission ask (ResumeApproval) — so by default a subagent's
+		// unresolved Bash ask is SURFACED to the attached human rather than
+		// auto-denied. --headless inverts this for an autonomous / CI deployment whose
+		// clients drive runs but never answer permission prompts: surfacing there would
+		// park the child until run-end, so we run NON-interactive (Interactive=false),
+		// engaging the auto-deny path and the opt-in --subagent-ask-reviewer. (The
+		// offline demo likewise leaves app.Config.Interactive false.)
+		Interactive:       !cfg.headless,
 		Sink:              sink,
 		ToolCallRecorder:  recorder,
 		MetricsRoleScoper: roleScoper,
@@ -859,6 +905,12 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.agentSourceURL, "agent-source-url", "", "host:port of a remote agent-definition gRPC driver (mecatl.driver.v1.AgentSourceService); the definition set is SNAPSHOTTED at startup (fatal if unreachable). Mutually exclusive with --agents-dir; the default-on conventional discovery is SUPERSEDED (not an error) — the driver becomes the only definition source. TRUST BOUNDARY: stronger than model steering — a def's hooks execute as UNGATED shell on the harness host (hookexec, every lifecycle phase, no permission ask); a compromised agent-source driver executes arbitrary shell on the harness host via def hooks, so treat it as harness-equivalent infrastructure. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 	fs.StringVar(&cfg.subagentModel, "subagent-model", "", "global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (via an agent definition or a per-call override) — the analogue of CLAUDE_CODE_SUBAGENT_MODEL; the Parallel judge stays on the session model. May be a concrete id or an alias from --model-alias; resolved on the session's provider (same-provider only). Empty inherits the parent --model; a non-empty value that does not resolve to a usable model id (unknown alias, or an alias meaning inherit) FAILS STARTUP")
 	fs.Var(&cfg.modelAliases, "model-alias", "model alias mapping as name=model-id (repeatable), e.g. --model-alias fast=gpt-4o-mini. Aliases are resolved only in the composition layer; an agent def's `model: <alias>` resolves through this map (then the built-in sonnet/opus/haiku aliases)")
+	fs.StringVar(&cfg.subagentAskReviewer, "subagent-ask-reviewer", "", "OPT-IN headless ask reviewer (issue #31): model id or --model-alias of a tool-less ONE-TURN reviewer that adjudicates a HEADLESS subagent/member/branch permission ask the 4-step model would otherwise blanket auto-deny. Allow = this call only (never learned); deny/error keeps the call denied (fail-safe). Configured Deny/Ask rules and an interactive approver always win; resolved on the session's provider (same-provider only). Empty (default) disables it; a value that does not resolve to a usable model id FAILS STARTUP. Deliberately a server flag, NOT a permission-config key: it grants an autonomous approval capability, an operator deployment decision")
+	fs.IntVar(&cfg.subagentAskReviewerMaxDenies, "subagent-ask-reviewer-max-denies", 3, "circuit breaker for --subagent-ask-reviewer: after this many CONSECUTIVE non-allow reviewer outcomes (denies/errors/timeouts) in one run, further asks skip the reviewer and fall through to the plain auto-deny; an allow resets the count. <=0 uses the default (3)")
+	fs.StringVar(&cfg.subagentAskReviewerPolicyFile, "subagent-ask-reviewer-policy", "", "path to a TRUSTED policy rubric file for --subagent-ask-reviewer; its CONTENT replaces the built-in read-only/verification rubric the reviewer applies. Empty keeps the built-in rubric. Read once at startup; an unreadable file FAILS STARTUP")
+	fs.BoolVar(&cfg.headless, "headless", false, "run NON-interactive: declare that clients drive sessions but never answer permission prompts (autonomous / CI deployments). A child subagent/member/branch permission ask is then NOT surfaced to the client (nobody would answer it — it would park until run-end) but resolved by the auto-deny path / the opt-in --subagent-ask-reviewer. DEFAULT off: a normal mecated serving an interactive client (mecatui, an IDE) surfaces asks for a human. Setting --subagent-ask-reviewer WITHOUT --headless has no effect (asks surface to the client instead) — a startup WARNING says so")
+	fs.StringVar(&cfg.guardrailsModel, "guardrails-model", "", "GUARDRAILS (issue #27): model id or --model-alias of a tool-less checker that inspects OUTBOUND tool-call args (PreToolUse, data exfil) and INBOUND tool results (PostToolUse, prompt injection) and enforces a verdict per the operator-tier `guardrails:` rule list. Empty (default) disables guardrails. A value that does not resolve to a usable model id FAILS STARTUP. The RULE LIST + cost knobs live in the user-global settings.yaml `guardrails:` subtree (operator-tier ONLY — a project repo cannot configure or weaken a checker); --guardrails-model overrides the YAML model")
+	fs.StringVar(&cfg.guardrailsMode, "guardrails", "", "GUARDRAILS master switch: pass `--guardrails=off` to force the issue-#27 content checker OFF regardless of --guardrails-model / the guardrails: YAML config (the kill-switch). Any other value (or unset) leaves guardrails governed by the model + rule config")
 
 	fs.StringVar(&cfg.commandsDir, "commands-dir", "", "directory of slash-command templates (<name>.md); setting it enables command expansion. Empty + --enable-commands uses the defaults (.mecatl/commands, .claude/commands)")
 	fs.BoolVar(&cfg.enableCommands, "enable-commands", false, "enable slash-command expansion using the default directories (.mecatl/commands, .claude/commands) when --commands-dir is empty")
@@ -932,7 +984,43 @@ func parseFlags(argv []string) (config, error) {
 	if cfg.driverAuthToken == "" {
 		cfg.driverAuthToken = os.Getenv("MECATL_DRIVER_AUTH_TOKEN")
 	}
+	// The ask-reviewer policy rubric travels as a STRING into app.Config (the
+	// composition layer never touches os); the cmd main reads the file here, once,
+	// failing fast on an unreadable path (loud-misconfig posture).
+	policy, err := readAskReviewerPolicy(cfg.subagentAskReviewerPolicyFile)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.subagentAskReviewerPolicy = policy
+	// Guardrails master switch: only `--guardrails=off` is meaningful (the kill-switch
+	// — it forces guardrails off regardless of --guardrails-model / the YAML config).
+	// An empty value leaves guardrails governed by the model + rule config. Any OTHER
+	// value is a startup error rather than a silent no-op (so `--guardrails=on`, a
+	// natural-but-wrong attempt to ENABLE, fails loudly instead of doing nothing).
+	switch strings.ToLower(strings.TrimSpace(cfg.guardrailsMode)) {
+	case "":
+		cfg.guardrailsOff = false
+	case "off":
+		cfg.guardrailsOff = true
+	default:
+		return config{}, fmt.Errorf("--guardrails %q: only \"off\" is accepted (the kill-switch); to ENABLE guardrails set --guardrails-model (and a guardrails: rule list in your user-global settings.yaml). Leave --guardrails unset to keep guardrails governed by the model/rule config", cfg.guardrailsMode)
+	}
 	return cfg, nil
+}
+
+// readAskReviewerPolicy reads the --subagent-ask-reviewer-policy rubric file and
+// returns its content as a string. An empty path returns "" (the built-in rubric
+// stands); an unreadable file is a config error (fail-fast — a silently dropped
+// operator rubric would leave the reviewer on a policy the operator did not set).
+func readAskReviewerPolicy(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("--subagent-ask-reviewer-policy %q: %w", path, err)
+	}
+	return string(b), nil
 }
 
 // serve starts the gRPC and HTTP servers (and, when --metrics-addr is set, the
