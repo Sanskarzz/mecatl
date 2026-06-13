@@ -89,7 +89,7 @@ flowchart LR
     fs["osfs (+CommandRunner) · memfs"]
     st["memstore · jsonlstore · sessnap"]
     tools["tools (Read/Edit/Write/Grep/Glob/WebFetch + optional Bash)"]
-    pp["permpolicy · hookexec"]
+    pp["permpolicy · hookexec · modelhook"]
     tel["telemetry (OTel metrics+spans · Prometheus exporter · OTLP)"]
     ext["mcp (streaming-HTTP)\nmemory · dream · soul · forker · tokenizer"]
   end
@@ -310,7 +310,7 @@ runs with no network and no disk.
 |---|---|---|
 | `LLMProvider` (`llm.go`) | provider-agnostic model call; streams neutral chunks | `Stream(ctx context.Context, req LLMRequest) (iter.Seq2[Chunk, error], error)` · `Capabilities() ProviderCapabilities` (multimodal-input flags; decorators must forward the inner provider's) |
 | `SessionStore` (`store.go`) | persist/retrieve session state | `Save(ctx context.Context, s *session.Session) error` · `Load(ctx context.Context, id session.SessionID) (*session.Session, error)` — a store may additionally implement the optional `PrunableStore` (`List`/`Delete`) for retention (§11) |
-| `HookRunner` (`hookrunner.go`) | run a lifecycle hook, map exit code to outcome | `Run(ctx context.Context, ev governance.HookEvent) (governance.HookOutcome, error)` |
+| `HookRunner` (`hookrunner.go`) | run a lifecycle hook → outcome (`hookexec` maps an external process exit code; `modelhook` maps a quarantined checker model's verdict — block/sanitize/advisory) | `Run(ctx context.Context, ev governance.HookEvent) (governance.HookOutcome, error)` |
 | `PermissionPolicy` (`permission.go`) | deny→ask→allow across merged scopes; per-session learned allows | `Evaluate(ctx context.Context, sessionID session.SessionID, mode session.PermissionMode, c session.ToolCall, ws tool.WorkspaceReader) governance.PermissionDecision` (ws is the READ-ONLY discovery root for file-based permission config, issue #13; nil = no project config) · `Learn(sessionID session.SessionID, c session.ToolCall)` (the allow-**always** verdict; lowest scope, never overrides a deny or plan mode) |
 | `EventSink` (`log.go`) | relay loop events to the API stream | `Emit(ctx context.Context, ev session.Event)` |
 | `ToolCallRecorder` (`log.go`) | structured per-tool AUDIT (distinct from `Diagnostics`) | `ToolCall(id session.SessionID, call session.ToolCall, result session.ToolResult, queued, took time.Duration)` |

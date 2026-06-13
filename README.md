@@ -28,9 +28,10 @@ ships as a client of the same API.
 - **Delegation — one-shot, parallel, or a crew.** Three tools share an isolated read-only child loop: **Subagent** runs one isolated child and returns its result (plus an agentId trailer); **Parallel** fans out N isolated branches in forked workspaces and joins them (all / first / judge), returning the winner or all results with the preserved fork-workspace paths; **Team** coordinates a crew over a shared task list, findings ledger, and mailbox. All three honour a shared token budget (`--max-run-tokens`), a child-concurrency cap, per-call limits/model overrides, and opt-in structured output; Team also has a team-wide token budget (`--max-team-tokens`).
 
 **Safety & governance**
-- **Permission model** — `deny → ask → allow` across merged scopes; a deny in any scope wins; compound-bash and command-substitution aware; plan mode hard-denies mutations. Optional **model-based layer-2 risk classifier** (monotonic, fail-safe).
-- **Permission pause/resume over the wire** — an `ask` suspends the loop and surfaces on the stream; the client approves and the loop continues.
+- **Permission model** — `deny → ask → allow` across merged scopes; a deny in any scope wins; compound-bash and command-substitution aware; plan mode hard-denies mutations. Optional **model-based layer-2 risk classifier** (monotonic, fail-safe). A **child-scoped axis** (`permissions.subagent.{allow,ask,deny}`) tunes delegated children separately from the main session — the operator's knob between "interactive ask" and "auto-deny".
+- **Permission pause/resume over the wire** — an `ask` suspends the loop and surfaces on the stream; the client approves and the loop continues. A child's ask surfaces to the interactive parent; in a **headless** deployment an optional bounded **LLM ask-reviewer** can adjudicate borderline child asks (fail-safe, allow-once, deny circuit-breaker) instead of blanket auto-deny.
 - **Deterministic hooks** — the full lifecycle (SessionStart, UserPromptSubmit, Pre/PostToolUse, Stop, SubagentStop), JSON event on stdin, exit-code `0` allow / `2` block.
+- **Model-backed guardrails** — an optional quarantined checker model inspects tool I/O on configured (phase, tool) matchers: PostToolUse for prompt-injection in inbound web/MCP results, PreToolUse for secret/exfil in outbound args — block / sanitize / advisory, fail-safe, operator-tier-only config.
 - **Workspace containment** — file tools are scoped to the session root via `os.Root` (symlink/`..`-escape safe).
 
 **Provider & context**
