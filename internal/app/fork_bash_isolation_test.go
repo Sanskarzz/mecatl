@@ -300,7 +300,7 @@ func TestParallelBranchRunnerIsHardened(t *testing.T) {
 	// itself (this is exactly the line that regressed to the unhardened runner).
 	cat := tool.NewCatalog()
 	registerParallelTool(context.Background(), cfg, cat,
-		regForTest(provider, providerMock, cfg.Model), nil, catalogAssets{},
+		regForTest(provider, providerMock, cfg.Model), nil, nil, catalogAssets{},
 		catalogSession{provider: provider, providerID: providerMock, model: cfg.Model})
 	par, ok := cat.Lookup("Parallel")
 	if !ok {

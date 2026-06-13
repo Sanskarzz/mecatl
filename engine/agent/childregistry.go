@@ -42,8 +42,8 @@ const (
 // a child SESSION id; the three are disjoint, and every consumer derives from
 // them rather than re-spelling the literals: the minting sites
 // (SubagentTool's default child prefix, ParallelTool's default branch prefix,
-// MemberSessionID's team scheme), the InspectSubagent prefix gate, and the
-// composition layer's child-session retention GC
+// MemberSessionID's team scheme), the InspectSubagent prefix gate (subagent- ∪
+// parallel-, issue #30), and the composition layer's child-session retention GC
 // (internal/app/childgc.go's childSessionPrefixes). A deployment overriding a
 // prefix (WithChildSessionPrefix / WithParallelChildSessionPrefix /
 // WithMemberSessionPrefix) departs from this convention and from everything
@@ -55,7 +55,9 @@ const (
 	SubagentSessionPrefix = "subagent-"
 	// ParallelSessionPrefix prefixes Parallel fork-join branches:
 	// "parallel-<callID>-<i>" (ParallelTool's default;
-	// WithParallelChildSessionPrefix overrides the stem).
+	// WithParallelChildSessionPrefix overrides the stem). Issue #30: the
+	// InspectSubagent prefix gate ALSO consumes this prefix, so a persisted branch
+	// (WithParallelStore) is loadable by its surfaced "branch id:".
 	ParallelSessionPrefix = "parallel-"
 	// TeamSessionPrefix prefixes team members: "team-<teamID>-<member>" —
 	// MemberSessionID's scheme (memberSessionIDPrefix aliases this constant).

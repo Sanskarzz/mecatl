@@ -152,6 +152,16 @@ type ParallelTool struct {
 	// recent winners inspectable. nil ⇒ the original behaviour: a winner fork is
 	// preserved indefinitely (its cleanup is simply never called).
 	winnerReaper PreservedForkStore
+
+	// store, when non-nil, best-effort persists each branch's child session after its
+	// run so the PULL InspectSubagent tool can later load its transcript by the
+	// "branch id:" the result text surfaces (issue #30). Mirrors SubagentTool.store
+	// exactly: nil disables persistence (persistChild discipline — the save is
+	// advisory, failures swallowed); branch ids ("parallel-<callID>-<i>") share the one
+	// session store with subagent ("subagent-<callID>") and team ("team-<teamID>-<member>")
+	// ids, the prefixes keeping them disjoint by convention. The store is consumed as
+	// the port.SessionStore interface, never a concrete adapter.
+	store port.SessionStore
 }
 
 // ParallelOption configures a ParallelTool.
@@ -217,6 +227,20 @@ func WithWinnerReaper(s PreservedForkStore) ParallelOption {
 	return func(t *ParallelTool) { t.winnerReaper = s }
 }
 
+// WithParallelStore injects the optional session store each branch's child session is
+// best-effort persisted to after its run (issue #30), so the PULL InspectSubagent tool
+// can later load a branch's transcript by the "branch id:" line the Parallel result
+// surfaces. Nil disables persistence. Mirrors SubagentTool's WithSubagentStore /
+// persistChild discipline exactly (the closest structural sibling — both take a
+// *session.Session): the save is advisory and a failure is swallowed (no diagnostic).
+// Branch ids share the SHARED store with subagent
+// and team-member ids on a DISJOINT prefix ("parallel-"), so no collision engineering is
+// needed. The tool consumes the port.SessionStore interface, never a concrete adapter, so
+// no layering rule is crossed.
+func WithParallelStore(store port.SessionStore) ParallelOption {
+	return func(t *ParallelTool) { t.store = store }
+}
+
 // NewParallelTool constructs the Parallel fan-out tool over a pre-built child *Engine
 // and a WorkspaceForker. The composition root builds childEngine with the SCOPED
 // child catalog and a non-interactive policy (see NewSubagentTool's guidance); the
@@ -267,7 +291,9 @@ func (*ParallelTool) Spec() tool.ToolSpec {
 			"interchangeable branches); 'judge'/'best' has an LLM pick the single best branch " +
 			"against `criteria`. Branches do NOT auto-merge — forked workspace paths are reported " +
 			"so you can inspect or merge them yourself; for 'first'/'judge' the WINNER's fork is " +
-			"PRESERVED (not torn down) so its changes survive for inspection.",
+			"PRESERVED (not torn down) so its changes survive for inspection. " +
+			"Each branch reports a `branch id:` line you can pass to InspectSubagent to pull " +
+			"that branch's bounded transcript (e.g. to debug a failed or not-selected branch).",
 		Schema: parallelSchema,
 	}
 }
@@ -306,6 +332,16 @@ type branchResult struct {
 	summary    string
 	failed     bool
 	failReason string
+
+	// childID is this branch's child SESSION id ("parallel-<callID>-<i>"), surfaced
+	// VERBATIM as the result text's "branch id:" line so the parent model can pull the
+	// branch's transcript via InspectSubagent (issue #30; the runtime-discoverability
+	// axis, mirroring Subagent's agentId trailer and the Team result's "Team id:" line).
+	// It is the same id the branchEmitter projects as the wire ChildID (D16) and the id
+	// WithParallelStore persists under — one id scheme (childSessionID), no divergence.
+	// Empty only in the zero-value-emitter unit tests, which never persist. Not a content
+	// field: it is prefix+callID+index, never any branch summary/output (gauntlet #7).
+	childID string
 
 	// usage is the branch child run's cumulative token accounting, captured for the
 	// run-total carried on parallel.end. Not serialized into the result text;
@@ -694,7 +730,11 @@ func cancelledBeforeStart(i int, be branchEmitter, clientCancelled bool) branchR
 	if clientCancelled {
 		reason = "cancelled by user before start"
 	}
-	res := branchResult{index: i, label: branchLabel(i), failed: true, failReason: reason}
+	// Source the branch id off the emitter's deterministic childID closure (the SAME
+	// id scheme as runBranch's childSessionID): non-empty in production, empty in the
+	// zero-value-emitter unit tests — acceptable since a never-started branch created no
+	// session and so is never persisted/inspectable.
+	res := branchResult{index: i, label: branchLabel(i), failed: true, failReason: reason, childID: be.branchChildID(i)}
 	be.branchStart(i, "")
 	be.branchEnd(res, session.StopCancelled, session.Usage{}, 0, 0)
 	return res
@@ -773,7 +813,10 @@ func normalizeJoin(join string) string {
 // others).
 func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID, i int, task, shared string, ws tool.Workspace, be branchEmitter, caps parentCaps) (branchResult, session.StopReason) {
 	label := branchLabel(i)
-	res := branchResult{index: i, label: label}
+	// childID is the branch's child session id, set up front so EVERY terminal (incl.
+	// fork-failed / errored / cancelled) carries the discoverable "branch id:" — the
+	// same id the registry/emitter use and WithParallelStore persists under.
+	res := branchResult{index: i, label: label, childID: string(t.childSessionID(callID, i))}
 
 	// Bracket the branch on the observability stream: branch_start carries the
 	// (truncated, model-authored) goal; branch_end (below) carries the redacted terminal
@@ -821,6 +864,13 @@ func (t *ParallelTool) runBranch(ctx context.Context, callID session.ToolCallID,
 	)
 	res.usage = usage
 	t.fireSubagentStop(ctx, childSess)
+	// Best-effort persist the branch's child session so InspectSubagent can later load
+	// its transcript by the "branch id:" the result surfaces (issue #30). Every join
+	// mode funnels through runBranch, so this covers all modes; the cancelled-before-start
+	// path never created a session (nothing to persist, matching the Subagent pre-start
+	// abort). ctx is passed as-is: the shipped stores ignore it on Save (persistMember
+	// discipline), so a cancelled branch stays inspectable — intentional residual.
+	t.persistBranch(ctx, childSess)
 
 	switch stop {
 	case session.StopError:
@@ -855,6 +905,19 @@ func (t *ParallelTool) fireSubagentStop(ctx context.Context, child *session.Sess
 		Phase:     governance.PhaseSubagentStop,
 		SessionID: string(child.ID),
 	})
+}
+
+// persistBranch best-effort saves a branch's child session to the injected store so the
+// InspectSubagent tool can later load its transcript by the "branch id:" line the
+// Parallel result surfaces (issue #30). A nil store disables persistence; a save failure
+// is advisory and swallowed. It mirrors SubagentTool.persistChild / WithSubagentStore
+// exactly (the closest structural sibling — both take a *session.Session) — shared store,
+// disjoint prefix.
+func (t *ParallelTool) persistBranch(ctx context.Context, child *session.Session) {
+	if t.store == nil {
+		return
+	}
+	_ = t.store.Save(ctx, child)
 }
 
 // childSessionID derives a stable, unique id for a branch's child session.
@@ -910,6 +973,11 @@ func joinBranches(results []branchResult) string {
 		if r.childRoot != "" {
 			fmt.Fprintf(&b, "workspace: %s\n", r.childRoot)
 		}
+		// The discoverable "branch id:" line (issue #30): the parent model reads it and
+		// passes it to InspectSubagent to pull this branch's bounded transcript.
+		if r.childID != "" {
+			fmt.Fprintf(&b, "branch id: %s\n", r.childID)
+		}
 		if r.summary != "" {
 			b.WriteString(r.summary)
 			b.WriteString("\n")
@@ -948,6 +1016,11 @@ func joinFirstResult(results []branchResult, winner int) string {
 	fmt.Fprintf(&b, "Parallel (join=first): %s succeeded first of %d branch(es).\n", w.label, len(results))
 	writeWinnerWorkspace(&b, w)
 	fmt.Fprintf(&b, "\n=== %s [WINNER] ===\n", w.label)
+	// The winner's discoverable "branch id:" (issue #30) — prominent so the model can
+	// inspect the chosen branch's transcript via InspectSubagent.
+	if w.childID != "" {
+		fmt.Fprintf(&b, "branch id: %s\n", w.childID)
+	}
 	if w.summary != "" {
 		b.WriteString(w.summary)
 		b.WriteString("\n")
@@ -956,7 +1029,28 @@ func joinFirstResult(results []branchResult, winner int) string {
 	if others > 0 {
 		fmt.Fprintf(&b, "\n(%d other branch(es) cancelled or not selected.)\n", others)
 	}
+	// Every persisted loser is still inspectable, so surface their ids too (issue #30):
+	// a "first"-strategy loser was cancelled mid-flight but its (partial) transcript is
+	// persisted, and a parent debugging WHY a branch lost can pull it.
+	writeOtherBranchIDs(&b, results, winner)
 	return b.String()
+}
+
+// writeOtherBranchIDs renders a compact "other branch ids:" line listing every
+// non-winner branch's discoverable child id (issue #30), index-sorted for determinism,
+// so a parent can inspect a rejected/cancelled branch's persisted transcript. Branches
+// with no id (never-started, never-persisted) are omitted.
+func writeOtherBranchIDs(b *strings.Builder, results []branchResult, winner int) {
+	var ids []string
+	for _, r := range sortedByIndex(results) {
+		if r.index == winner || r.childID == "" {
+			continue
+		}
+		ids = append(ids, r.childID)
+	}
+	if len(ids) > 0 {
+		fmt.Fprintf(b, "other branch ids: %s\n", strings.Join(ids, ", "))
+	}
 }
 
 // joinJudgeResult renders the join=judge outcome: the winner's summary, the
@@ -975,6 +1069,10 @@ func joinJudgeResult(results []branchResult, winner int, rationale string) strin
 	}
 	writeWinnerWorkspace(&b, w)
 	fmt.Fprintf(&b, "\n=== %s [WINNER] ===\n", w.label)
+	// The winner's discoverable "branch id:" (issue #30).
+	if w.childID != "" {
+		fmt.Fprintf(&b, "branch id: %s\n", w.childID)
+	}
 	if w.summary != "" {
 		b.WriteString(w.summary)
 		b.WriteString("\n")
@@ -985,10 +1083,16 @@ func joinJudgeResult(results []branchResult, winner int, rationale string) strin
 		if r.index == winner {
 			continue
 		}
+		// Append each rejected branch's discoverable child id (issue #30) so the model
+		// can inspect ANY not-selected branch's persisted transcript, not just the winner.
+		idNote := ""
+		if r.childID != "" {
+			idNote = fmt.Sprintf(" (branch id: %s)", r.childID)
+		}
 		if r.failed {
-			fmt.Fprintf(&b, "%s [FAILED]: %s\n", r.label, firstLine(r.failReason))
+			fmt.Fprintf(&b, "%s [FAILED]%s: %s\n", r.label, idNote, firstLine(r.failReason))
 		} else {
-			fmt.Fprintf(&b, "%s [OK]: %s\n", r.label, firstLine(r.summary))
+			fmt.Fprintf(&b, "%s [OK]%s: %s\n", r.label, idNote, firstLine(r.summary))
 		}
 	}
 	return b.String()

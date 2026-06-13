@@ -140,7 +140,7 @@ func assembleCatalog(ctx context.Context, cfg Config, reg *providerRegistry, sto
 	// branch is a force-copy filesystem fork and the deliverable is a preserved
 	// fork PATH — both meaningless without a filesystem.
 	if !s.noFS {
-		registerParallelTool(ctx, cfg, cat, reg, hooks, a, s)
+		registerParallelTool(ctx, cfg, cat, reg, store, hooks, a, s)
 	}
 	registerTeamTools(ctx, cfg, cat, reg, store, a, s, refMgr)
 	registerMemoryFamilies(ctx, cfg, cat, a)
@@ -237,7 +237,7 @@ func registerSubagentTrio(ctx context.Context, cfg Config, cat *tool.Catalog, re
 // chain (SubagentModel > session model — buildParallelChildEngine), while the
 // JUDGE deliberately stays on the SESSION model (the asymmetry pinned by
 // TestParallelJudgeStaysOnParentModel — see buildParallelJudgeEngine's comment).
-func registerParallelTool(ctx context.Context, cfg Config, cat *tool.Catalog, reg *providerRegistry, hooks port.HookRunner, a catalogAssets, s catalogSession) {
+func registerParallelTool(ctx context.Context, cfg Config, cat *tool.Catalog, reg *providerRegistry, store port.SessionStore, hooks port.HookRunner, a catalogAssets, s catalogSession) {
 	if !cfg.EnableParallel {
 		if s.narrate {
 			cfg.diag().Log(ctx, port.LevelInfo, "Parallel tool DISABLED")
@@ -260,6 +260,11 @@ func registerParallelTool(ctx context.Context, cfg Config, cat *tool.Catalog, re
 	opts := []agent.ParallelOption{
 		agent.WithParallelSubagentStopHook(hooks),
 		agent.WithParallelJudge(judge),
+		// Issue #30: persist each branch's child session to the SHARED session store so
+		// the parent can pull a branch's transcript via InspectSubagent using the
+		// surfaced "branch id:" — the same store InspectSubagent reads and the Subagent
+		// tool persists children to (disjoint "parallel-" prefix).
+		agent.WithParallelStore(store),
 	}
 	// NO nil fallback here: Phase A builds exactly ONE reaper per process —
 	// silently minting a per-assembly LRU would multiply the ForkPreservedCap

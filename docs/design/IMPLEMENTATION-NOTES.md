@@ -384,14 +384,39 @@ disables, failures swallowed; persisted on ALL terminals after any structured-ou
 the read-only `InspectSubagent` PULL tool (`subagentinspect.go`, sibling of `InspectMember`) loads
 that transcript by the id VERBATIM (the `agent_id` IS the session id — no derivation), rendering it
 through the SHARED `renderInspectTranscript(header, sess)` (extracted from `renderMemberTranscript`,
-byte-identical bounds 40/1000/8000). A PREFIX GATE rejects any `agent_id` not starting with the
-subagent child prefix (`requiredPrefix`, default `"subagent-"`) BEFORE the store is touched, so the
-model cannot read team-member (`team-<teamID>-<member>`) or service-session transcripts through this
-tool, bypassing `InspectMember`'s team_id+member framing — the same gate the shipped `resume`
-path uses (the Subagent-resume entry below). `InspectSubagent` is registered UNCONDITIONALLY wherever the
-Subagent tool is (NOT gated on `EnableTeams`, unlike `InspectMember`); both inspect tools share the
-one store, ids kept disjoint by prefix convention (`subagent-…` / `team-…`), the gate enforcing the
-subagent side. Floor-scoped (`ScopeBuiltinDefault`) ALLOW in `defaultRules()` (issue #37, decided for
+byte-identical bounds 40/1000/8000). A FAMILY-AWARE PREFIX GATE rejects any `agent_id` not starting
+with one of an allow-list of child prefixes (`allowedPrefixes` = `{subagent-, parallel-}`, issue #30)
+BEFORE the store is touched, so the model cannot read team-member (`team-<teamID>-<member>`) or
+service-session transcripts through this tool, bypassing `InspectMember`'s team_id+member framing —
+`team-` stays DELIBERATELY excluded (`InspectMember` owns it). Inspection is read-only and
+engine-agnostic, so it safely spans both the Subagent and Parallel-branch families; the SEPARATE
+shipped `resume` path (the Subagent-resume entry below) stays subagent-ONLY (a branch runs on a
+different engine and resume re-forks a workspace — read-only inspection has no such constraint).
+`InspectSubagent` is registered UNCONDITIONALLY wherever the Subagent tool is (NOT gated on
+`EnableTeams`, unlike `InspectMember`); both inspect tools share the one store, ids kept disjoint by
+prefix convention (`subagent-…` / `parallel-…` / `team-…`), the gate enforcing the inspectable side.
+The not-found / load-failure rendering header is NEUTRAL (`Transcript of agent "<id>":`) so a Parallel
+branch is not mislabeled "subagent".
+
+**Parallel branch inspection (issue #30).** A Parallel branch is now inspectable on the SAME PULL
+axis as a Subagent: each branch's child session is best-effort persisted via `WithParallelStore` (the
+shared session store, `persistChild`/`persistMember` discipline — nil disables, failures swallowed;
+persisted in `runBranch` after the drive, alongside `fireSubagentStop`, so EVERY join mode funnels
+through it; the cancelled-before-start path created no session, nothing to persist), and each branch
+reports a `branch id: parallel-<callID>-<i>` line in the Parallel result text — the MODEL half of
+discoverability, mirroring Subagent's `agentId:` trailer and the Team result's `Team id:` line. The
+id is rendered VERBATIM (the same deterministic `childSessionID` the registry/emitter use, never a
+divergent scheme) and is metadata-only (prefix+callID+index — never any branch summary/output, so
+gauntlet #7 holds: `TestParallelBranchIDIsNotBranchContent`). `join=all` prints a per-branch line;
+`join=first`/`judge` print a prominent winner `branch id:` PLUS every loser's id (the "other branch
+ids:" line / the not-selected scoreboard) so a rejected/cancelled branch's persisted transcript stays
+pullable. The composition layer threads the shared store into `registerParallelTool`
+(`WithParallelStore(store)`). Guards: `agent.TestParentDiscoversBranchIDFromResultAndInspects`
+(model-facing e2e), `TestParallelPersistsBranchAfterRun`, `TestParallelPersistsAllBranchesAllJoinModes`,
+`TestParallelNilStoreSkipsPersist`, `TestParallelRendersBranchIDPerJoinMode`,
+`TestInspectSubagentAcceptsParallelPrefix`, `TestInspectSubagentRejectsTeamPrefix`,
+`TestInspectParallelBranchUnknownIDErrors`, `TestInspectParallelBranchStoreFailureDistinct`,
+`internal/app.TestRegisterParallelToolThreadsStore`. Floor-scoped (`ScopeBuiltinDefault`) ALLOW in `defaultRules()` (issue #37, decided for
 `InspectSubagent` + `InspectMember` + `SubagentStatus` together): all three are read-only pulls of
 harness-owned data (persisted child/member transcripts; the run-local child registry), bounded-rendered,
 prefix-gated — and the children were already permission-gated when they ran. Overridable to ask/deny by
@@ -555,7 +580,10 @@ client-cancelled mid-drive branch keeps the EXISTING `StopCancelled` arm but fli
 of failed=true with ZERO new join-path code: `all` → branch `[FAILED]`; `first` → a cancelled branch
 can never win (the winner test is `!failed`); `judge` → excluded from candidates, and cancelling the
 only success degrades to the all-failed report (judge never called). The JUDGE's own run stays
-UNREGISTERED (short, tool-less; whole-run cancel covers it) — documented v1 limitation. Bracketing
+UNREGISTERED and UNINSPECTABLE — this is INTENTIONAL by design (issue #30 resolved), not a deferred
+limitation: the judge is a short, tool-less VERDICT FUNCTION over branch SUMMARIES with no persisted
+session, so there is no transcript to register, cancel-individually, or inspect (the whole-run cancel
+covers it). Bracketing
 `branch_start`/`branch_end` still fire for cancelled branches (incl. cancelled-before-start).
 **Team** (`teamsupervisor.go`): `AddMember` mints a DETACHED per-member `context.WithCancel`
 (`context.Background()`, NOT the enrolment ctx — on the gRPC path AddMember runs under the
@@ -2053,9 +2081,10 @@ store stays LOCAL in Phase B — deliberate deferral); a workspace/FS driver ske
 ### Child-session retention GC (issue #38 — `port.PrunableStore` + `internal/app/childgc.go`)
 
 The delegation paths persist every child snapshot (`subagent-<callID>`,
-`parallel-<callID>-<i>`, `team-<teamID>-<member>`) so InspectSubagent/InspectMember/`resume:`
-work — but nothing ever deleted them, so a durable store grew without bound. Split mechanism
-from policy:
+`parallel-<callID>-<i>` — persisted via `WithParallelStore` and now genuinely loaded by
+InspectSubagent's family-aware gate as of issue #30 — `team-<teamID>-<member>`) so
+InspectSubagent/InspectMember/`resume:` work — but nothing ever deleted them, so a durable store
+grew without bound. Split mechanism from policy:
 
 - **Port delta — a SEPARATE OPTIONAL interface, never a widened SessionStore.**
   `port.PrunableStore` (`engine/port/store.go`): `List(ctx) []StoredSession` (ALL ids +

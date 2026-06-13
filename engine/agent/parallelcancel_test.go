@@ -359,8 +359,16 @@ func TestCancelParallelBranchJudgeExcluded(t *testing.T) {
 	if judge.called() {
 		t.Fatalf("the judge must never see a cancelled branch as a candidate")
 	}
-	if !strings.Contains(res.Content, "branch-1 [FAILED]: cancelled by user") {
-		t.Fatalf("the cancelled branch must appear in the not-selected scoreboard:\n%s", res.Content)
+	// The scoreboard now also carries each branch's discoverable id (issue #30), so the
+	// FAILED line is "branch-1 [FAILED] (branch id: parallel-…): cancelled by user". Assert
+	// the CONTIGUOUS shape including the id note (joinJudgeResult's exact rendering), so a
+	// mis-rendered/dropped id note can't pass two independent substring checks from
+	// different lines.
+	if !strings.Contains(res.Content, "branch-1 [FAILED] (branch id: parallel-") {
+		t.Fatalf("the cancelled branch must render the contiguous FAILED+branch-id note:\n%s", res.Content)
+	}
+	if !strings.Contains(res.Content, "cancelled by user") {
+		t.Fatalf("the cancelled branch must attribute the kill:\n%s", res.Content)
 	}
 	assertBranchBracketing(t, evs, 2)
 }

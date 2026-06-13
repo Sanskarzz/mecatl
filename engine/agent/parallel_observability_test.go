@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
+	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
@@ -389,6 +391,56 @@ func TestParallelPayloadHasNoContentFields(t *testing.T) {
 	}
 }
 
+// TestParallelBranchIDIsNotBranchContent is the gauntlet-#7 guard for the issue-#30
+// "branch id:" discoverability line: the branch id surfaced in the result text is
+// prefix+callID+index ONLY — it must NOT carry any branch summary/output. A canary string
+// baked into the branch's summary must NEVER appear in the surfaced branch id; it may
+// appear ONLY in the deliberately-pulled InspectSubagent ToolResult (the parent's explicit
+// choice), proving the id stays a pure addressing handle while the content crosses solely
+// through the PULL channel.
+func TestParallelBranchIDIsNotBranchContent(t *testing.T) {
+	const canary = "BRANCHCANARY42"
+	store := memstore.New()
+	childRead := &fakeTool{name: "Read", readOnly: true,
+		exec: func(_ context.Context, in session.ToolCall, _ tool.Workspace) (session.ToolResult, error) {
+			return session.NewToolResult(in.ID, "child read"), nil
+		}}
+	// The branch's SUMMARY carries the canary.
+	childEngine := childEngineWith(&branchProvider{summary: "branch summary " + canary}, catalogWith(t, childRead))
+	par := agent.NewParallelTool(childEngine, &memForker{}, agent.WithParallelStore(store))
+
+	res, err := par.Execute(context.Background(),
+		session.NewToolCall("c1", "Parallel", json.RawMessage(`{"tasks":["explore"]}`)),
+		memfs.NewWorkspace("/ws"))
+	if err != nil {
+		t.Fatalf("Parallel.Execute: %v", err)
+	}
+
+	// Find the surfaced branch id line and assert it carries NO canary.
+	wantID := "parallel-c1-0"
+	if !strings.Contains(res.Content, "branch id: "+wantID) {
+		t.Fatalf("result missing the branch id line %q:\n%s", wantID, res.Content)
+	}
+	for _, line := range strings.Split(res.Content, "\n") {
+		l := strings.TrimSpace(line)
+		if strings.HasPrefix(l, "branch id: ") && strings.Contains(l, canary) {
+			t.Fatalf("branch id line leaked branch content (canary): %q", l)
+		}
+	}
+
+	// The canary DOES cross only through the deliberate PULL: InspectSubagent on that id.
+	inspect := agent.NewInspectSubagentTool(store)
+	ires, err := inspect.Execute(context.Background(),
+		session.NewToolCall("i1", "InspectSubagent", json.RawMessage(`{"agent_id":"`+wantID+`"}`)),
+		memfs.NewWorkspace("/ws"))
+	if err != nil {
+		t.Fatalf("InspectSubagent.Execute: %v", err)
+	}
+	if ires.IsError || !strings.Contains(ires.Content, canary) {
+		t.Fatalf("the deliberately-pulled transcript must carry the canary, got %+v", ires)
+	}
+}
+
 // TestParallelBranchCancelledBeforeStartRepresented covers the cancelledBeforeStart path:
 // a branch whose ctx is already cancelled when it tries to acquire a worker slot never
 // runs, but MUST still be represented on the stream with exactly one branch_start + one
@@ -451,6 +503,13 @@ func TestParallelBranchCancelledBeforeStartRepresented(t *testing.T) {
 		if end.Failed && end.Stop == session.StopCancelled && end.Workspace == "" &&
 			end.ToolCount == 0 && end.Usage == (session.Usage{}) && end.DurationMs == 0 {
 			cancelledBeforeStart++
+		}
+		// Even a never-started branch carries its deterministic D16 child id on both
+		// bracketing events (cancelledBeforeStart now sets childID: be.branchChildID(i)),
+		// so a client can still address it for cancel/inspect.
+		wantID := fmt.Sprintf("parallel-p1-%d", i)
+		if end.ChildID != wantID {
+			t.Errorf("branch %d: branch_end ChildID = %q, want %q (deterministic even when never started)", i, end.ChildID, wantID)
 		}
 	}
 	if cancelledBeforeStart == 0 {

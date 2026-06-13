@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/port"
@@ -434,7 +435,7 @@ func TestRegisterParallelToolThreadsSubagentModel(t *testing.T) {
 	reg := regForTest(prov, providerAnthropic, "parent-model")
 
 	cat := tool.NewCatalog()
-	registerParallelTool(context.Background(), cfg, cat, reg, hookexec.New(nil),
+	registerParallelTool(context.Background(), cfg, cat, reg, nil, hookexec.New(nil),
 		catalogAssets{forkReaper: agent.NewLRUForkReaper(1)},
 		catalogSession{provider: prov, providerID: providerAnthropic, model: "parent-model"})
 
@@ -460,6 +461,64 @@ func TestRegisterParallelToolThreadsSubagentModel(t *testing.T) {
 	if len(models) == 0 || models[0] != catAnthropicModel {
 		t.Fatalf("branch LLM request models = %v, want the SubagentModel %q (registerParallelTool must thread the def-less default into the branch engine)",
 			models, catAnthropicModel)
+	}
+}
+
+// TestRegisterParallelToolThreadsStore drives the REAL registration seam
+// (registerParallelTool) and proves the SHARED session store reaches the ParallelTool
+// (issue #30): a branch run under composition persists, and the persisted branch is
+// loadable both directly from the store AND through the InspectSubagent tool by the
+// surfaced "branch id:". A revert that drops agent.WithParallelStore(store) from
+// registerParallelTool fails here (the branch is never persisted).
+func TestRegisterParallelToolThreadsStore(t *testing.T) {
+	store := memstore.New()
+	prov := mockllm.New(mockllm.TextTurn("branch done"))
+	cfg := Config{Workspace: t.TempDir(), Model: "parent-model", EnableParallel: true}
+	reg := regForTest(prov, providerAnthropic, "parent-model")
+
+	cat := tool.NewCatalog()
+	registerParallelTool(context.Background(), cfg, cat, reg, store, hookexec.New(nil),
+		catalogAssets{forkReaper: agent.NewLRUForkReaper(1)},
+		catalogSession{provider: prov, providerID: providerAnthropic, model: "parent-model"})
+
+	pt, ok := cat.Lookup("Parallel")
+	if !ok {
+		t.Fatal("registerParallelTool did not register the Parallel tool")
+	}
+	ws, err := osfs.NewWorkspace(cfg.Workspace)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	call := session.NewToolCall("c1", "Parallel", json.RawMessage(`{"tasks":["probe"]}`))
+	res, err := pt.Execute(context.Background(), call, ws)
+	if err != nil {
+		t.Fatalf("Parallel.Execute: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("Parallel result is an error: %s", res.Content)
+	}
+
+	// 1. The branch persisted under its deterministic id.
+	const branchID = "parallel-c1-0"
+	if !strings.Contains(res.Content, "branch id: "+branchID) {
+		t.Fatalf("result missing the surfaced branch id %q:\n%s", branchID, res.Content)
+	}
+	if _, lerr := store.Load(context.Background(), session.SessionID(branchID)); lerr != nil {
+		t.Fatalf("branch %q not persisted (store did not reach the ParallelTool): %v", branchID, lerr)
+	}
+
+	// 2. InspectSubagent (over the SAME store) loads the branch transcript by that id.
+	inspect := agent.NewInspectSubagentTool(store)
+	ires, err := inspect.Execute(context.Background(),
+		session.NewToolCall("i1", "InspectSubagent", json.RawMessage(`{"agent_id":"`+branchID+`"}`)), ws)
+	if err != nil {
+		t.Fatalf("InspectSubagent.Execute: %v", err)
+	}
+	if ires.IsError {
+		t.Fatalf("InspectSubagent must load the persisted branch by id, got error: %q", ires.Content)
+	}
+	if !strings.Contains(ires.Content, "branch done") {
+		t.Fatalf("InspectSubagent result is not the branch transcript: %q", ires.Content)
 	}
 }
 

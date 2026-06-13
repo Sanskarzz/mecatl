@@ -179,7 +179,7 @@ func (failingStore) Load(context.Context, session.SessionID) (*session.Session, 
 }
 
 // TestInspectSubagentHappyPath seeds the store via a real subagent run, then proves
-// InspectSubagent renders a bounded transcript under the "Transcript of subagent" header.
+// InspectSubagent renders a bounded transcript under the neutral "Transcript of agent" header.
 func TestInspectSubagentHappyPath(t *testing.T) {
 	store := memstore.New()
 	childEngine := childEngineWith(mockllm.New(mockllm.TextTurn("CHILD_MARKER answer")), catalogWith(t))
@@ -196,7 +196,7 @@ func TestInspectSubagentHappyPath(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("InspectSubagent should succeed for a persisted id, got error: %q", res.Content)
 	}
-	if !strings.Contains(res.Content, `Transcript of subagent "subagent-p1":`) {
+	if !strings.Contains(res.Content, `Transcript of agent "subagent-p1":`) {
 		t.Fatalf("transcript missing the header, got %q", res.Content)
 	}
 	if !strings.Contains(res.Content, "CHILD_MARKER") {
@@ -340,7 +340,7 @@ func TestInspectSubagentForgedIDCleanError(t *testing.T) {
 		if !res.IsError {
 			t.Fatalf("forged id %q must be a model-visible error, got %+v", forged, res)
 		}
-		want := fmt.Sprintf("InspectSubagent: agent id %q is not a subagent session; only ids from a Subagent result's 'agentId:' line can be inspected (team member transcripts are read via InspectMember)", forged)
+		want := fmt.Sprintf("InspectSubagent: agent id %q is not an inspectable child session; only a Subagent result's 'agentId:' line or a Parallel result's 'branch id:' line can be inspected (team member transcripts are read via InspectMember)", forged)
 		if !strings.Contains(res.Content, want) {
 			t.Fatalf("forged id %q: prefix-rejection copy mismatch, got %q", forged, res.Content)
 		}

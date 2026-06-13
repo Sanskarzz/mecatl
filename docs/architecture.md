@@ -1184,7 +1184,12 @@ parent's tree. `agent.NewParallelTool(childEngine, forker, …)` is the fan-out 
 (catalog name `Parallel`): it runs several isolated child loops on independent
 branches and joins their results. It is default-on (`--enable-parallel`, disable
 with `--enable-parallel=false`); like Subagent,
-the children's intermediate events are drained internally.
+the children's intermediate events are drained internally. Each branch's child session
+is best-effort persisted (`WithParallelStore`) and the joined result text surfaces a
+`branch id:` line per branch (the deterministic `parallel-<callID>-<i>`) so the parent
+can pull any branch's bounded transcript via `InspectSubagent` — the same PULL channel as
+the Subagent `agentId:` trailer (issue #30; `InspectSubagent`'s gate admits both the
+`subagent-` and `parallel-` families, `team-` staying with `InspectMember`).
 
 The same seam serves **agent teams** (`agent.Supervisor`/`TeamTool`) with a
 **three-tier** member workspace policy. A Mutating member forks **force-copy** (own
