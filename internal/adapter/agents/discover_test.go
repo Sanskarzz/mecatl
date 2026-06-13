@@ -357,3 +357,70 @@ body`)
 		t.Fatalf("want 3 mcpServers skip notes (nameless + stdio command + stdio type), got %d: %v", mcpNotes, notes)
 	}
 }
+
+// TestParseMemoryFieldValidTiers asserts the two accepted persistent-memory tiers
+// ("user"/"project", case-insensitively) parse onto AgentDef.Memory with no note.
+func TestParseMemoryFieldValidTiers(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"user", "user"},
+		{"project", "project"},
+		{"  User  ", "user"},
+		{"PROJECT", "project"},
+	} {
+		raw := []byte("---\nname: spec\ndescription: d\nmemory: " + tc.in + "\n---\nbody")
+		def, perr, notes := parseAgentDef(raw, "spec.md")
+		if perr != "" {
+			t.Fatalf("memory:%q parse error: %s", tc.in, perr)
+		}
+		if def.Memory != tc.want {
+			t.Fatalf("memory:%q => Memory=%q, want %q", tc.in, def.Memory, tc.want)
+		}
+		for _, n := range notes {
+			if strings.Contains(n, "memory:") {
+				t.Fatalf("memory:%q should produce no memory note, got %q", tc.in, n)
+			}
+		}
+	}
+}
+
+// TestParseMemoryFieldRejectsUnknown asserts an unsupported tier (the deliberately
+// deferred "local", plus any bogus value) is non-fatal: the def is KEPT, Memory is
+// reset to "" (cold start), and a non-fatal note names the offending value.
+func TestParseMemoryFieldRejectsUnknown(t *testing.T) {
+	for _, bad := range []string{"local", "shared", "bogus"} {
+		raw := []byte("---\nname: spec\ndescription: d\nmemory: " + bad + "\n---\nbody")
+		def, perr, notes := parseAgentDef(raw, "spec.md")
+		if perr != "" {
+			t.Fatalf("memory:%q must be NON-fatal (def kept), got fatal: %s", bad, perr)
+		}
+		if def.Memory != "" {
+			t.Fatalf("memory:%q => Memory=%q, want \"\" (cold start)", bad, def.Memory)
+		}
+		var found bool
+		for _, n := range notes {
+			if strings.Contains(n, "memory:") && strings.Contains(n, bad) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("memory:%q should produce a non-fatal note naming it, got %v", bad, notes)
+		}
+	}
+}
+
+// TestParseMemoryFieldAbsentIsUnset asserts a def with no memory: field carries the
+// empty tier (no read, no prompt delta — byte-identical to today's behaviour).
+func TestParseMemoryFieldAbsentIsUnset(t *testing.T) {
+	def, perr, notes := parseAgentDef([]byte("---\nname: n\ndescription: d\n---\nbody"), "n.md")
+	if perr != "" {
+		t.Fatalf("parse error: %s", perr)
+	}
+	if def.Memory != "" {
+		t.Fatalf("absent memory: => Memory=%q, want \"\"", def.Memory)
+	}
+	for _, n := range notes {
+		if strings.Contains(n, "memory:") {
+			t.Fatalf("absent memory: should produce no memory note, got %q", n)
+		}
+	}
+}

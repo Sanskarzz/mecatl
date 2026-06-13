@@ -69,7 +69,7 @@ func TestResolveSkillIndexDisabled(t *testing.T) {
 func TestAgentPromptConfigPreloadsSkills(t *testing.T) {
 	cfg := Config{Model: "m"}
 	def := agents.AgentDef{Name: "spec", Body: "DEF BODY"}
-	pc := agentPromptConfig(cfg, def, "m", "Skill (s):\n\nSKILL BODY")
+	pc := agentPromptConfig(cfg, def, "m", "", "Skill (s):\n\nSKILL BODY")
 	if !strings.Contains(pc.Role, "DEF BODY") {
 		t.Fatalf("role missing def body:\n%s", pc.Role)
 	}

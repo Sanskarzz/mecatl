@@ -45,6 +45,12 @@ mcpServers:                    # OPTIONAL — per-agent MCP (reference an existi
   - name: jira                 #   INLINE: a streamable-HTTP server only THIS def connects
     url: https://jira.example/mcp
     headers: { Authorization: "Bearer ${TOKEN}" }
+memory: project                # OPTIONAL — persistent per-agent memory tier: user | project
+                               #   (READ-ONLY in v1). user => a cross-project dir under the XDG
+                               #   config base; project => <workspace>/.mecatl/agents-memory/<name>/,
+                               #   trust-gated (only read when the workspace is --trust-project'd).
+                               #   The dir's MEMORY.md head is injected as fenced DATA into the def's
+                               #   cache-stable system prompt at startup. "local" is deferred.
 ---
 You are a meticulous code reviewer. <full body = the specialist's system-prompt instructions>
 ```
@@ -135,6 +141,28 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
   enforce its own `PreToolUse`/`PostToolUse`/etc. gates. Unknown phases are dropped with
   a diagnostic; a def with no (valid) hooks keeps the inert default (no behaviour
   change). See `defHookRunner` + `newChildEngineWithHooks`.
+- **Per-agent persistent memory (`memory:`, issue #33).** A def's `memory: user|project`
+  binds a per-agent dir (`<root>/agents-memory/<sanitized-name>/MEMORY.md`); its head is
+  read once at build time, bounded (~8 KiB, head-first with a truncation marker),
+  injection-scanned, fenced as UNTRUSTED **DATA**, and injected into the def's
+  **cache-stable** system-prompt prefix via the shared `agentPromptConfig` seam (so the
+  Subagent-routed AND team-member paths get it identically; it rides the StablePrefix,
+  never a per-turn message, so prompt-prefix caching is preserved). The **user** tier
+  resolves under the XDG config base (cross-project); the **project** tier resolves under
+  `<workspace>/.mecatl/agents-memory/` and is **`--trust-project`-gated** — the workspace
+  is attacker-controllable, so an untrusted repo's project memory is withheld regardless
+  of the def's own `Origin`. `memory: project` resolves against `cfg.Workspace/.mecatl/`
+  INDEPENDENTLY of where the def file itself lives: a **user-tier def can point its memory
+  at the workspace**. This is an intentional decoupling of "where the def lives" from
+  "where its memory lives" — and exactly why the trust gate keys on the resolved tier, not
+  on `Origin` (so a user-tier def still can't read an untrusted workspace). The def name is
+  path-sanitized (allowlist token + post-join containment check) so a hostile name can't
+  traverse; the resolved `MEMORY.md` is additionally symlink-contained (CWE-59 — a symlink
+  to an out-of-tree secret is refused) and the def name in the prompt header is
+  framing-neutralised (CWE-117). A token collision (two names → one dir) is benign for
+  read-only v1 but the deferred WRITE path must key on a collision-free identity.
+  **READ-ONLY in v1** (injection only): a memory-bearing def gains **no** write tools. See
+  `resolveAgentMemoryHead` + `safeAgentMemoryDir` + `memoryPathContained`.
 - **Forgiving resolution.** Conventional discovery is on by default and **inert** when
   no dir exists. An unknown member `AgentType` falls back to the default member
   catalog (warn, never fail the spawn). An unknown Subagent `agent` arg is a
@@ -161,6 +189,12 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
 - **No Agent-as-tool nesting.** A def cannot re-add `Subagent`/`Parallel`/`ToolSearch`; a child
   never recurses or fans out further.
 - **No file-path scoping** (Roo's file allowlist) yet.
+- **No per-agent memory WRITE path (deferred).** `memory:` is READ-ONLY in v1: the def's
+  MEMORY.md is injected but the agent cannot update it. The scoped write path (the six
+  memory tools scoped to the per-agent dir, one flock'd `Store` per dir) and a `local`
+  tier are deferred; the `agents-memory/<name>/` directory scheme is forward-compatible
+  with adding them. A remote agent-source DRIVER def's `Memory` is also deferred (no proto
+  change in v1 — a driver def stays cold-start).
 
 ## Flags
 

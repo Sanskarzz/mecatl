@@ -3824,7 +3824,10 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 				cfg.diag().Log(context.Background(), port.LevelWarn, "team member agent def references an unknown skill; not preloaded",
 					"member", spec.Name, "agent", def.Name, "skill", name, "source", reg.Detail(def.Name))
 			}
-			pc = agentPromptConfig(cfg, def, model, bodies...)
+			// Persistent per-agent memory (issue #33): the team-member path shares the
+			// SAME agentPromptConfig seam, so a memory-bearing def injects its head here too.
+			memHead, _ := resolveAgentMemoryHead(cfg, def)
+			pc = agentPromptConfig(cfg, def, model, memHead, bodies...)
 			mode = resolvePermissionMode(cfg.diag(), def)
 			// A def's `hooks:` scope lifecycle hooks to this member's engine. A def that
 			// scopes none keeps the inert default (memberHooks unchanged), preserving the

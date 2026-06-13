@@ -64,6 +64,13 @@ child continuation/inspection (Subagent), and per-agent memory.
    the dispatch goroutine so background forks compose. Domain-only, no `port.LLMRequest`/proto change.
 4. **Per-agent persistent memory** — Claude Code subagent frontmatter `memory: user|project|local`
    with MEMORY.md injection at startup; Factory's Knowledge Droid. Our agent defs have no memory field.
+   *Addressed (issue #33):* an `AgentDef.Memory` field carrying `user`/`project` (the `local` tier is
+   deliberately deferred); a per-agent dir's `MEMORY.md` head is injected (READ-ONLY in v1, injection
+   only) into the def's cache-stable system-prompt prefix at build time via the shared
+   `agentPromptConfig` seam (so both the Subagent-routed and team-member paths get it identically). The
+   project tier is `--trust-project`-gated and the def name is path-sanitized. The scoped WRITE path
+   (the six memory tools scoped to the per-agent dir) is deferred; the `agents-memory/<name>/MEMORY.md`
+   directory scheme is forward-compatible with adding it later.
 5. **Workflow orchestration layer** — Claude Code dynamic workflows (model-authored JS scripts,
    16 concurrent / 1000 total agents, phases, resumable, saveable as commands). Different league of
    primitive; noted as the field's direction for "comprehensive" work.
@@ -198,6 +205,10 @@ stop-label vocabulary; sanitized+unmissable permission modal; graceful footer wi
 17. Config-level child permission axis (Amp `context: subagent`) — make childPosture user-tunable.
     *Addressed (issue #32):* shipped as the `permissions: subagent:` config block + rule audiences.
 18. Per-agent memory (`memory:` frontmatter field, MEMORY.md injection).
+    *Addressed (issue #33):* shipped as the `AgentDef.Memory` field (`user`/`project`; `local` deferred)
+    with READ-ONLY MEMORY.md head injection into the cache-stable StablePrefix at build time (the
+    `agentPromptConfig` seam, shared by the Subagent and team-member paths). Project tier is
+    `--trust-project`-gated; the def name is path-sanitized; the scoped write path is deferred.
 19. Fork/context-inheriting subagents (prompt-cache-cheap).
     *Addressed (issue #34):* shipped as the `fork: true` Subagent arg — seeds the child from a deep
     copy of the parent conversation (orphan-stripped, pairing-valid), trust-neutral (carried

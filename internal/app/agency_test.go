@@ -80,7 +80,7 @@ func TestAgentPromptConfigKeysDeltaOnResolvedModel(t *testing.T) {
 
 	// A Claude-resolved def (parent on GPT) carries the body, the delta, and a
 	// Claude Env.Model.
-	pc := agentPromptConfig(Config{Model: "gpt-x"}, def, "claude-opus")
+	pc := agentPromptConfig(Config{Model: "gpt-x"}, def, "claude-opus", "")
 	if !strings.Contains(pc.Role, "EXPLORER PLAYBOOK BODY") {
 		t.Errorf("agent role missing def body\nRole=%q", pc.Role)
 	}
@@ -93,7 +93,7 @@ func TestAgentPromptConfigKeysDeltaOnResolvedModel(t *testing.T) {
 
 	// A GPT-resolved def (parent on Claude) likewise carries the delta and a GPT
 	// Env.Model.
-	pcGPT := agentPromptConfig(Config{Model: "claude-x"}, def, "gpt-5.1")
+	pcGPT := agentPromptConfig(Config{Model: "claude-x"}, def, "gpt-5.1", "")
 	if !strings.Contains(pcGPT.Role, "Keep going until the task is actually resolved") {
 		t.Errorf("GPT-resolved def must carry the agency delta\nRole=%q", pcGPT.Role)
 	}

@@ -52,6 +52,7 @@ type frontmatter struct {
 	Skills          stringOrSlice     `yaml:"skills"`
 	MCPServers      mcpServerList     `yaml:"mcpServers"`
 	Hooks           map[string]string `yaml:"hooks"`
+	Memory          string            `yaml:"memory"`
 }
 
 // mcpServerList is the parsed `mcpServers` frontmatter. It accepts THREE forms
@@ -379,6 +380,21 @@ func parseAgentDef(raw []byte, _ string) (AgentDef, string, []string) {
 	// non-fatal: the def is still kept, minus the unusable entry.
 	notes = append(notes, fm.MCPServers.notes...)
 
+	// `memory:` is a forgiving tier selector (mirrors the mcpServers skip-note
+	// posture): only "" / "user" / "project" are accepted. "local" is DELIBERATELY
+	// rejected (a scoped local-only memory is deferred). Any other value is a
+	// non-fatal note and falls back to "" (no memory), so a shared .claude/agents
+	// file naming a tier this harness doesn't support never fails the whole def.
+	mem := strings.ToLower(strings.TrimSpace(fm.Memory))
+	switch mem {
+	case "", "user", "project":
+		// accepted
+	default:
+		notes = append(notes, fmt.Sprintf(
+			"memory: %q is not supported (use \"user\" or \"project\"); ignored", fm.Memory))
+		mem = ""
+	}
+
 	return AgentDef{
 		Name:            name,
 		Description:     desc,
@@ -393,6 +409,7 @@ func parseAgentDef(raw []byte, _ string) (AgentDef, string, []string) {
 		Skills:          []string(fm.Skills),
 		MCPServers:      fm.MCPServers.servers,
 		Hooks:           NormalizeHooks(fm.Hooks),
+		Memory:          mem,
 		Body:            trimmedBody,
 	}, "", notes
 }

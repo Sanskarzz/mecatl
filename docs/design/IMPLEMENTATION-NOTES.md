@@ -1967,6 +1967,91 @@ periodic/interval refresh, OpenAI lister (catalog-only by design), the per-sessi
 live-capability closer, surfacing the output ceiling/thinking in the picker proto (Slice D), the
 OpenRouter `reasoning_details` replay fix (a separate request-path bug, not bundled).
 
+### Per-agent persistent memory (`memory:` field, issue #33 — READ-ONLY v1)
+
+A specialist agent def may carry `memory: user | project` — a persistent per-agent dir whose
+`MEMORY.md` head is injected into the def's prompt at startup, so the specialist accumulates
+domain knowledge across sessions instead of cold-starting. **v1 is READ-ONLY (injection only);
+the scoped WRITE path is deferred** (see below).
+
+- **The field is pure DATA in the domain.** `tool.AgentDef.Memory` is a raw string (`""` /
+  `"user"` / `"project"`), NEVER a path/locator — same discipline as `Origin`/`Model`/`Provider`.
+  The frontmatter parser (`agents/discover.go`) is forgiving: `""`/`user`/`project` are accepted
+  (case-insensitively), anything else (notably the **deliberately deferred** `local`) is a
+  non-fatal skip note + `Memory=""` (the mcpServers skip-note posture). It is resolved to a
+  concrete directory ONLY in composition.
+
+- **Injection rides the cache-stable `Role`/StablePrefix via the shared `agentPromptConfig`
+  seam.** `agentPromptConfig` gained a `memoryHead` parameter; a non-empty head is appended to
+  `parts` (alongside the def body + preloaded skill bodies) as a fenced UNTRUSTED **DATA** block
+  (`agent.WriteUntrustedBlock` — framing-neutralised, treat-as-reference-facts header), so it lands
+  in `pc.Role` → the byte-stable StablePrefix, **never a per-turn user message**. This is the
+  opposite seam from the tier-0 `MemoryIndexAssembler` (the volatile turn-0-user-message index that
+  changes when the model `Remember`s) — per-agent memory changes rarely, so it must NOT bust prefix
+  caching. BOTH child paths share the seam (Subagent-routed `buildAgentSubagentEngines` AND
+  team-member `buildMemberEngine`), so a memory-bearing def injects identically whichever path
+  routes it. The head is resolved ONCE per def at build time (like skill bodies).
+
+- **Tier → dir resolution + trust gate (`resolveAgentMemoryHead`).** `user` →
+  `<xdgconfig.UserConfigDir(OSEnv)>/mecatl/agents-memory/<safeDefName>/MEMORY.md` (the SAME XDG base
+  `buildUserModelStore` uses; `""` base ⇒ fail-soft). `project` →
+  `<cfg.Workspace>/.mecatl/agents-memory/<safeDefName>/MEMORY.md` **only when `cfg.Workspace != ""`
+  AND `cfg.TrustProject`** — the SAME fold gating project-tier defs at `resolveAgentRegistry`, reused
+  (not a second trust bool). The project tier points into the attacker-controllable workspace, so it
+  is evaluated **independently of the def's own `Origin`** (a user-tier def naming `memory: project`
+  resolves its memory against `cfg.Workspace/.mecatl/` regardless of where the def file itself lives —
+  an intentional DECOUPLING of "where the def lives" from "where its memory lives", and the reason the
+  trust gate keys on the resolved tier rather than `Origin`: a user-tier def must NOT read an untrusted
+  workspace's memory). The head is bounded (`maxAgentMemoryBytes = 8*1024`,
+  mirroring `defaultMemoryIndexMaxBytes`, head-first with a `…(truncated; N bytes total)` marker via
+  `toolkit.TruncateRunes`), injection-scanned (`skills.ScanForInjection`, the user-model write-path
+  precedent), and fail-soft end-to-end (missing/unreadable/empty/gated-out ⇒ `("", false)`, the def
+  cold-starts byte-identically to today). Exactly one INFO is logged on a hit; the CONTENT is NEVER
+  logged.
+
+- **Path safety is LOAD-BEARING (`safeAgentMemoryDir` + `sanitizeAgentMemoryToken`).** The
+  frontmatter `name` is arbitrary and UNVALIDATED for path-safety (a def named `../../etc` would
+  traverse). The name is reduced to an allowlist token (`[A-Za-z0-9_-]`, else `-`, trimmed,
+  `"agent"` fallback) — mirroring `forker.sanitizeLabel` (not exported there; mirrored as a small
+  local helper). The sanitize is the PRIMARY guard, pinned directly by
+  `TestSanitizeAgentMemoryToken` and mutation-proven (admitting `/` trips it). The post-join
+  `filepath.Clean`/HasPrefix containment is a defense-in-depth BACKSTOP — because the token is
+  always separator-free, no post-sanitize input can actually reach its rejection branch (it only
+  fires if the sanitize ever regresses), so it is intentionally not separately reachable in a test.
+
+- **Symlink-follow containment is LOAD-BEARING too (CWE-59, `memoryPathContained`).** `os.ReadFile`
+  follows symlinks, so a committed `MEMORY.md` that is a SYMLINK to an out-of-tree secret
+  (`~/.ssh/id_rsa`, `/etc/passwd`) would be read and injected into the prompt — an exfiltration path
+  even in a TRUSTED workspace (a contributor may not scrutinise a committed symlink). After the path
+  is computed, both root and path are resolved through symlinks (`osfs.ResolveRoot` for the root — the
+  SAME resolver the Workspace read-root allowlist is keyed on — and `filepath.EvalSymlinks` for the
+  file) and the resolved real path is asserted to STILL live under the resolved root; an escape is a
+  fail-soft `("", false)` + one WARN. It is fail-soft on a MISSING file (`EvalSymlinks` ENOENT ⇒
+  `os.IsNotExist` ⇒ true, so the ordinary `os.ReadFile` miss handles the cold-start case); any other
+  resolve error fails CLOSED. Pinned by `TestMemoryFileSymlinkEscapeRejected` (out-of-root target
+  rejected) + `TestMemoryFileSymlinkWithinRootAllowed` (in-root symlink still read), both mutation-proven.
+
+- **The def name in the memory prompt HEADER is framing-neutralised (CWE-117 / LLM01).** The header
+  line `Agent memory (<name>) — …` interpolates `def.Name` into the TRUSTED prompt prefix OUTSIDE the
+  untrusted fence; `def.Name` is only validated non-empty, so an attacker-authored project-tier name
+  carrying a newline + a forged section header could fabricate a trusted prompt section.
+  `agent.NeutraliseFraming(def.Name)` defangs it (the memory CONTENT stays inside the
+  `WriteUntrustedBlock` fence). Pinned by `TestMemoryHeaderNeutralisesDefName`.
+
+- **Token collision is many-to-one — ACCEPTABLE for read-only v1, but NOT for the write path.** Two
+  distinct def names can sanitize to the SAME token and therefore the SAME dir. For READ-ONLY v1 this
+  only means two agents could read a shared MEMORY.md, which is benign. **The DEFERRED WRITE path MUST
+  NOT inherit "acceptable" as settled**: a scoped write would let agent A's `Remember` bleed into
+  agent B's memory under a colliding token (cross-agent data-bleed). The v1.1 author must key the dir
+  on a collision-free identity (a hash suffix or the resolved source-path), not the sanitized name.
+
+- **Deferred WRITE path + driver source.** The six memory tools scoped to the per-agent dir are
+  deferred; a memory-bearing def's scoped catalog gains **no** write tools
+  (`TestDefMemoryAddsNoWriteTools`). When it lands it must hold the one-`Store`-per-dir flock
+  discipline (distinct dir from the project/user-model stores). The grpcdriver agent-source client
+  constructs `AgentDef`s from wire metadata — `Memory` is **NOT** carried on the wire in v1 (no proto
+  change); a driver-served def stays cold-start.
+
 ### Session profiles — `"no-fs"` (issue #55)
 
 The filesystem is **optional per session**. `CreateSessionRequest.profile`(6) is an
