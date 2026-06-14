@@ -159,6 +159,54 @@ tasks:
       # interval. Offline only — every benchmark uses mockllm + memfs.
       - go test -bench=. -benchmem -count={{.BENCHCOUNT}} -run='^$' ./engine/prompt/ ./engine/governance/ ./engine/agent/
 
+  perf:scenarios:
+    desc: |
+      Run the OFFLINE, deterministic scenario benchmarks (manual / CI target —
+      NOT part of `task test`). This is Phase 2 of the perf-regression roadmap
+      (docs/design/perf-tracking.md): whole-loop runs through the real engine over
+      mockllm + memfs/memstore that catch the failure modes the Phase 1
+      microbenchmarks miss — long-session allocation budget, goroutine hygiene
+      under delegation, token/cache regressions, compaction churn — PLUS the
+      mecatui scrollback render path.
+
+      Two metric families, two `go test` invocations:
+        - ./perf/scenarios/      — single-session-long, team-fanout,
+                                   background-subagents, compaction-cycle.
+        - ./cmd/mecatui/ui/      — BenchmarkScrollbackView (the SetContent
+                                   O(scrollback) class).
+
+      Override the sample count with BENCHCOUNT (default 6). Set MECATL_PERF_JSON
+      to a path to also emit the per-scenario JSON KPIs (tokens, cache-hit-rate,
+      RSS-over-time) the trend store ingests; both families MERGE into the one
+      file. Default below: .scratch/perf-scenarios.json (gitignored). Leave it
+      empty (MECATL_PERF_JSON= task perf:scenarios) for benchstat lines only.
+      MECATL_PERF_SHA stamps the git SHA into each JSON row; it defaults to the
+      current HEAD (override with MECATL_PERF_SHA=... for a tagged/CI ref).
+    vars:
+      BENCHCOUNT: '{{.BENCHCOUNT | default "6"}}'
+      # The raw path (default .scratch/perf-scenarios.json; overridable via the
+      # MECATL_PERF_JSON env/var). It is resolved to an ABSOLUTE path below because
+      # `go test` sets the working dir to the PACKAGE dir, so a relative path would
+      # otherwise resolve under perf/scenarios/ rather than the repo root.
+      PERF_JSON_RAW: '{{.MECATL_PERF_JSON | default ".scratch/perf-scenarios.json"}}'
+      # realpath -m resolves a (possibly relative, possibly not-yet-existing) path
+      # against the repo root to an absolute path, robust to where `go test` runs.
+      PERF_JSON_ABS:
+        sh: 'cd {{.ROOT_DIR}} && realpath -m "{{.PERF_JSON_RAW}}"'
+      # The git SHA stamped into every row: an explicit MECATL_PERF_SHA override
+      # wins; otherwise resolve HEAD (empty string if not a git checkout, so the
+      # rows just carry "" rather than failing the run). Resolved in ONE shell so
+      # the override is honoured without a var-references-var template.
+      PERF_SHA:
+        sh: 'if [ -n "{{.MECATL_PERF_SHA}}" ]; then printf %s "{{.MECATL_PERF_SHA}}"; else git -C {{.ROOT_DIR}} rev-parse HEAD 2>/dev/null || true; fi'
+    cmds:
+      - mkdir -p "$(dirname '{{.PERF_JSON_ABS}}')"
+      # perf/scenarios writes the file first (truncating); the mecatui bench then
+      # MERGES its rows into it. Offline only — mockllm + memfs/memstore. Both runs
+      # get the SAME MECATL_PERF_SHA so the two metric families share a SHA.
+      - MECATL_PERF_JSON='{{.PERF_JSON_ABS}}' MECATL_PERF_SHA='{{.PERF_SHA}}' go test -bench=. -benchmem -count={{.BENCHCOUNT}} -run='^$' ./perf/scenarios/
+      - MECATL_PERF_JSON='{{.PERF_JSON_ABS}}' MECATL_PERF_SHA='{{.PERF_SHA}}' go test -bench=BenchmarkScrollbackView -benchmem -count={{.BENCHCOUNT}} -run='^$' ./cmd/mecatui/ui/
+
   test:cover:
     desc: Run tests with coverage and write coverage/coverage.{out,html}
     cmds:

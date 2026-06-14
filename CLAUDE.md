@@ -23,6 +23,7 @@ task test               # full suite, -race
 task test:golden        # refresh mecatui View/teatest goldens (-update) then re-run
 task e2e                # LIVE e2e vs OpenRouter (real money, needs OPENROUTER_API_KEY exported) — NOT part of task test
 task bench              # hot-path testing.B microbenchmarks (-benchmem) for benchstat; BENCHCOUNT=N overrides — NOT part of task test
+task perf:scenarios     # OFFLINE whole-loop scenario benchmarks (perf-tracking Phase 2); MECATL_PERF_JSON=path for KPI JSON — NOT part of task test
 task lint               # golangci-lint v2 + go vet
 task generate           # regenerate contracts/gen from contracts/proto via buf
 go test ./engine/agent/ -run TestFullCycle   # a single test
@@ -51,6 +52,7 @@ the heavy adapters (`internal/adapter/*`) and the composition layer (`internal/a
 - `contracts/proto/mecatl/v1/` — gRPC contract (source of truth); `contracts/proto/mecatl/driver/v1/` — the driver protocol (SessionStoreService/MemoryStoreService stores; SkillSourceService/SoulSourceService/AgentSourceService/CommandSourceService content sources) a remote driver process implements; `contracts/gen/` is generated, **never hand-edit**.
 - `cmd/mecated/` — standalone server (composition root): flags, TLS/auth/rate-limit, HTTP + metrics listeners. `cmd/mecademo/` — the offline demo.
 - `cmd/mecatui/` — optional gRPC **client** TUI; by default hosts a `mecated` in-process over a UNIX socket. `ui`/`theme`/`client` import no `engine/...` or `internal/...` and no proto directly — they render from relayed proto `Event`s. See `docs/tui.md`.
+- `perf/` — the OFFLINE scenario perf harness (perf-tracking Phase 2, `task perf:scenarios`, NOT part of `task test`): `perf/kpi` (stdlib-ONLY KPI capture — `ScenarioResult`/`Capture`/`/proc` RSS sampler; never imports `engine/...` or `internal/...`) + `perf/scenarios` (external-test `testing.B` whole-loop benchmarks over `engine/...` + `engine/adapter/*`, never `internal/...`). The TUI scrollback render bench lives in `cmd/mecatui/ui/scrollback_bench_test.go` (perf/kpi imported in the `_test` file only). See `docs/design/perf-tracking.md`.
 
 ## The layering rule (the thing to get right)
 

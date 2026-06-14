@@ -1,11 +1,13 @@
 # Long-term performance & resource regression tracking
 
-Status: **Phase 1 shipped; the rest research / proposal.** Phase 0 (decide what we
-track) is settled below, and Phase 1 (hot-path microbenchmarks + a `task bench`
-gate-feed) is built — see [Phase 1 — Status](#phase-1--status). The scenario
-harness (Phase 2) and trend store (Phase 3+) remain design sketches. Sibling to
-[`perf-observability.md`](perf-observability.md), which covers the *introspection*
-half (pprof, flight recorder, OTel metrics, the perf MCP, `--perf`, goleak).
+Status: **Phases 1 + 2 shipped; the trend store (Phase 3+) is research / proposal.**
+Phase 0 (decide what we track) is settled below, Phase 1 (hot-path microbenchmarks
++ a `task bench` gate-feed) is built — see [Phase 1 — Status](#phase-1--status) — and
+Phase 2 (the offline scenario harness behind `task perf:scenarios`) is built — see
+[Phase 2 — Status](#phase-2--status). The trend store (Phase 3+) remains a design
+sketch. Sibling to [`perf-observability.md`](perf-observability.md), which covers
+the *introspection* half (pprof, flight recorder, OTel metrics, the perf MCP,
+`--perf`, goleak).
 
 ## The gap this closes
 
@@ -28,18 +30,56 @@ until/unless we have a stable bench environment (see Phase 6 in the roadmap).
 
 | KPI | Why it matters here | Noise | Gate | Current baseline |
 |---|---|---|---|---|
-| `allocs/op` on hot paths | Leading indicator of GC pressure; deterministic regardless of machine load | very low | **hard** | _TBD_ — fill via `task bench` (Phase 1) |
-| Total allocations per offline scenario | Whole-loop allocation budget | very low | **hard** | _TBD_ — Phase 2 scenario harness |
-| RSS-over-time on a fixed scenario | Long-session / scrollback growth (e.g. the `SetContent` O(scrollback) follow-up) | low | soft → hard | _TBD_ |
-| End-of-run goroutine count | Delegation / team leak class we have hit before | deterministic | **hard** | _TBD_ |
-| Tokens per scenario (input/output) | The dominant cost of an LLM harness | deterministic (offline) | **hard** | _TBD_ |
-| Prompt-cache-hit-rate per scenario | A prefix-stability regression silently doubles cost and no CPU/mem bench catches it | deterministic (offline) | **hard** | _TBD_ |
-| `ns/op` on hot paths | Classic latency | high in shared CI | advisory | _TBD_ |
-| Peak RSS per scenario | OOM headroom / `GOMEMLIMIT` budgeting | low | soft | _TBD_ |
+| `allocs/op` on hot paths | Leading indicator of GC pressure; deterministic regardless of machine load | very low | **hard** | per-benchmark — see [Baseline snapshot](#baseline-snapshot) (micro) |
+| Total allocations per offline scenario | Whole-loop allocation budget | very low | **hard** | per-scenario `allocs_per_op` — see [Baseline snapshot](#baseline-snapshot) (scenarios) |
+| RSS-over-time on a fixed scenario | Long-session / scrollback growth (e.g. the `SetContent` O(scrollback) follow-up) | low | soft → hard | `rss_peak_bytes` / `rss_final_bytes` in the JSON (machine-specific; advisory) |
+| End-of-run goroutine count | Delegation / team leak class we have hit before | deterministic | **hard** | **0** (delta) on every scenario — see [Baseline snapshot](#baseline-snapshot) |
+| Tokens per scenario (input/output) | The dominant cost of an LLM harness | deterministic (offline) | **hard** | per-scenario — see [Baseline snapshot](#baseline-snapshot) |
+| Prompt-cache-hit-rate per scenario | A prefix-stability regression silently doubles cost and no CPU/mem bench catches it | deterministic (offline) | **hard** | single_session **0.90**, team_fanout **0.75**; 0 by design on compaction/tui |
+| `ns/op` on hot paths | Classic latency | high in shared CI | advisory | machine-specific; not pinned (advisory only) |
+| Peak RSS per scenario | OOM headroom / `GOMEMLIMIT` budgeting | low | soft | `rss_peak_bytes` in the JSON (machine-specific) |
 
-Baselines are filled by running Phase 1 + Phase 2 once on `main` and pasting the
-numbers (or, better, by letting the trend store in Phase 3 own them). Until then the
-cells stay `_TBD_` — do not invent numbers.
+### Baseline snapshot
+
+Captured `2026-06-14` on a Linux dev workstation (12 logical CPUs) at the Phase-1/2
+landing. **`allocs/op` / `*_per_op` / cache-hit / goroutine-delta are deterministic and
+portable — these are the gated baselines.** `ns/op` and `rss_*` are machine-specific and
+recorded for shape only (advisory). The authoritative, commit-keyed baseline is owned by
+the Phase 3 trend store once it lands; this block is the bootstrap reference. Re-capture
+with `task bench` (micro) and `task perf:scenarios` (scenarios).
+
+Micro hot paths (`task bench`, count=10 — allocs/op were identical across all 10 runs):
+
+```
+BenchmarkBuild                            31 allocs/op     6,532 B/op    ~2.1µs
+BenchmarkBuildLargeCatalog               224 allocs/op    31,292 B/op   ~14µs
+BenchmarkSplitCommands                    13 allocs/op       584 B/op   ~0.66µs
+BenchmarkReadOnlyBash                     19 allocs/op       816 B/op   ~1.29µs
+BenchmarkSubstitutionReadOnly             14 allocs/op       408 B/op   ~1.22µs
+BenchmarkIsolationApprovable              32 allocs/op     1,272 B/op   ~2.0µs
+BenchmarkEvaluatorEvaluate/simple-tool    13 allocs/op       856 B/op   ~0.94µs
+BenchmarkEvaluatorEvaluate/plain-bash     18 allocs/op       920 B/op   ~1.39µs
+BenchmarkEvaluatorEvaluate/compound-bash  29 allocs/op     1,544 B/op   ~2.8µs
+BenchmarkBuildRequest                     77 allocs/op    12,648 B/op   ~4.86µs
+BenchmarkHeuristicCompact                199 allocs/op    15,445 B/op   ~17.5µs
+BenchmarkCascadeCompact                  249 allocs/op    29,551 B/op   ~24µs
+BenchmarkRunReadOnlyTurn                 164 allocs/op    32,769 B/op   ~31µs
+BenchmarkRunReadParallelTurn             228 allocs/op    38,671 B/op   ~45µs
+BenchmarkRunMutatingTurn                 159 allocs/op    31,898 B/op   ~27.5µs
+```
+
+Scenarios (`task perf:scenarios`, BENCHCOUNT=6 — `allocs_per_op`, goroutine delta, tokens):
+
+```
+single_session_long      ~36,656 allocs/op   ~4.83 MB/op   goroutines Δ=0   cache-hit 0.90
+team_fanout               ~2,690 allocs/op    ~599 KB/op    goroutines Δ=0   cache-hit 0.75
+background_subagents      ~1,307 allocs/op    ~258 KB/op    goroutines Δ=0
+compaction_cycle          ~4,204 allocs/op    ~570 KB/op    goroutines Δ=0   (39 compactions/40 turns; cache-hit 0 by design)
+tui_scrollback_view       ~6,400 allocs/op   ~33.4 MB/op   (400 rendered blocks; the SetContent O(scrollback) surface)
+```
+
+`goroutines Δ=0` on every scenario means no leak across the run — the gated invariant
+for the team / background-subagent leak class.
 
 ### Why allocs-first
 
@@ -102,7 +142,66 @@ Phase 3 trend store own them), and use `benchstat` to compare a candidate agains
 baseline. `task bench` is deliberately NOT part of `task test` — same posture as
 `task fuzz`.
 
-## Phase 2 — Offline scenario harness (design sketch)
+## Phase 2 — Status
+
+**Shipped.** The offline scenario harness now lives in two homes, both
+`testing.B`-driven (no `cmd/` binary), behind
+[`task perf:scenarios`](../../Taskfile.yml) (manual / CI target — NOT part of
+`task test`, same posture as `task bench`):
+
+- [`perf/kpi/`](../../perf/kpi/) — the stdlib-only KPI-capture support: the
+  per-scenario metric shape (`ScenarioResult` + `WriteJSON`), the
+  allocation/RSS/wall-clock capture bracket (`Capture`), the Linux
+  `/proc/self/status` RSS sampler (`rss_linux.go`; a `rss_other.go` no-op
+  off-Linux), and the settle-then-count goroutine probe
+  (`GoroutinesAfterSettle`). It imports ONLY the standard library — never
+  `engine/...` or `internal/...` — so the engine-shaped KPIs (tokens,
+  cache-hit-rate) are passed IN by the scenario caller.
+- [`perf/scenarios/`](../../perf/scenarios/) — the four whole-loop scenario
+  benchmarks (external-test package, imports `engine/...` + the
+  `engine/adapter/{mockllm,memfs,memstore,permpolicy}` reference adapters +
+  `perf/kpi`, never `internal/...`): `BenchmarkSingleSessionLong` (~500-turn
+  tool-using loop), `BenchmarkTeamFanout` (lead + K workers + synthesis),
+  `BenchmarkBackgroundSubagents` (M detached children + drain), and
+  `BenchmarkCompactionCycle` (history driven past a small `ContextWindowTokens`
+  repeatedly). Each records a `kpi.ScenarioResult`; a `TestMain` flushes them to
+  `$MECATL_PERF_JSON` when set.
+- [`cmd/mecatui/ui/scrollback_bench_test.go`](../../cmd/mecatui/ui/scrollback_bench_test.go)
+  — `BenchmarkScrollbackView`, the TUI scrollback render path (`refreshView` →
+  `vp.SetContent`, the O(scrollback) class). It is an internal `_test` file so it
+  can reach the unexported render path; `perf/kpi` is imported ONLY in the test
+  file — the production `ui` package stays free of the perf dependency. Its rows
+  MERGE into the same `$MECATL_PERF_JSON` (two metric families, one file).
+
+All scenarios are deterministic and offline (`mockllm` + `memfs`/`memstore` +
+`permpolicy`, fixed scripts, `time.Unix(0,0)` session epoch, `llm.Reset()` between
+iterations) — no network, no live model, no `os/exec`. They are Benchmarks, so the
+default `-run` skips them under `task test`; the only `Test*` in each home is a
+cheap `TestMain` JSON flush.
+
+### JSON KPI shape (what Phase 3 ingests)
+
+Each row is a `kpi.ScenarioResult` (`schema_version` 1). The full per-field
+normalization contract is the doc-comment on `ScenarioResult` in
+[`perf/kpi/result.go`](../../perf/kpi/result.go); the points a trend gate must
+know:
+
+- **Grouping key:** `(name, git_sha)`. `task perf:scenarios` stamps `git_sha` from
+  HEAD (overridable via `MECATL_PERF_SHA`), and `sample` is the per-`name` ordinal
+  (0,1,2…) within one run, so `-count=N` emits N groupable rows per scenario.
+- **`goroutines_end` is a DELTA**, not a raw count: live goroutines at end-of-run
+  minus a baseline taken before the measured region, clamped at 0. **0 = no leak**;
+  a positive value is the leak count. Gate it hard on the delegation scenarios
+  (`team_fanout`, `background_subagents`) — that is the leak class it guards.
+- **`compaction_cycle.cache_hit_rate == 0` is EXPECTED / by-design**: that
+  scenario's script carries no cache-read tokens (it exercises the
+  compact-and-replace cycle, not prefix caching). A Phase-3 cache-hit-rate gate
+  must WHITELIST `compaction_cycle` (and any other no-cache scenario, e.g. the
+  token-less `tui_scrollback_view`) rather than false-positive on the honest 0.
+  The cache-hit signal is meaningful on `single_session_long` (~0.9) and
+  `team_fanout` (~0.75), where the script scripts a cache-read fraction.
+
+The original design sketch (kept for context):
 
 The highest-leverage phase, because it catches the failure modes microbenchmarks
 miss (leaks, memory growth, token/cache regressions) and it is **free and offline**:
@@ -160,7 +259,7 @@ to start; self-hosted Bencher if/when change-point detection earns its keep.
 |---|---|---|---|
 | 0 — KPIs + baselines | Decide what we measure | (a doc) | none |
 | 1 — Micro-gating ✅ | Fail a PR that regresses a hot path | `testing.B`, `benchstat` (`task bench`) | none for allocs; trustworthy `ns/op` needs Phase 6 |
-| 2 — Scenario harness | Catch leaks / mem growth / token regressions offline | stdlib `runtime`, goleak, `mockllm` driver | none |
+| 2 — Scenario harness ✅ | Catch leaks / mem growth / token regressions offline | stdlib `runtime`, `mockllm` driver (`task perf:scenarios`) | none |
 | 3 — Trend + history | See regressions over time, not just per-PR | github-action-benchmark (free) or self-hosted Bencher | Bencher's *hosted* analytics + same-bare-metal-local-and-CI is the paid delta |
 | 4 — PGO | Free 2–14% CPU; give the profile archive a job | the Go toolchain | none — PGO is entirely OSS |
 | 5 — Continuous profiling | Always-on queryable fleet profiles | Pyroscope / Parca + Grafana | *operational only* — see below; defer until `mecated`-as-a-service |
@@ -197,10 +296,25 @@ What money buys is **removing ops and hardware burden, not new abilities.**
 
 ## Open decisions
 
-- RSS sampling: reuse gopsutil (already transitive) vs read `/proc/self/status`
-  directly (no new dep, Linux-only). Lean: direct read, since CI + dev are Linux.
-- Scenario-harness home: `perf/scenarios` package vs test-support under `internal/app`.
-- Whether to fold scenario JSON KPIs into the same `gh-pages` trend store or a second
-  series. Lean: same store, two metric families.
+Resolved in the Phase 2 build:
+
+- **RSS sampling — RESOLVED: direct `/proc/self/status` read.** No new dependency;
+  Linux-only (CI + dev are Linux), with a no-op off-Linux fallback so the harness
+  still builds and runs everywhere (RSS just reports 0). Lives in
+  [`perf/kpi/rss_linux.go`](../../perf/kpi/rss_linux.go) /
+  [`rss_other.go`](../../perf/kpi/rss_other.go).
+- **Scenario-harness home — RESOLVED: `perf/scenarios` + a `cmd/mecatui/ui` bench,
+  `testing.B`-driven, no `cmd/` binary.** The scenarios are external-test
+  Benchmarks under [`perf/scenarios/`](../../perf/scenarios/) over a stdlib-only
+  [`perf/kpi/`](../../perf/kpi/) support package; the TUI render bench lives next to
+  the code it measures as an internal `_test` file. No test-support under
+  `internal/app` (it would entangle the scenarios with composition and break the
+  "no `internal/...`" rule the offline harness keeps).
+- **Trend store — RESOLVED: same `gh-pages` store, two metric families.** The
+  scenario JSON ($MECATL_PERF_JSON) and the TUI render bench MERGE into one file,
+  ready to feed a single trend store as two families (Phase 3 wiring still TBD).
+
+Still open:
+
 - Trend tooling: start github-action-benchmark; revisit Bencher only when false
   positives from threshold gating become a real cost.
