@@ -105,10 +105,38 @@ package would need its own suite bootstrap and its own server):
 10. **soul** — deterministic: the `soul ENABLED (user provenance...` composition
     fact in the captured stderr; the behavioural `SOUL-OK:` marker is a
     `quarantine`-labelled spec that reports but never fails.
+11. **approve-after-kill (cloud-native Phase 2)** — raises a real `Write`
+    permission ask on the haiku lane, **SIGKILL**s the mecated process WITHOUT
+    cleanup, restarts a SECOND mecated over the SAME `--store-dir`, POSTs
+    `/v1/sessions/{id}/approve` (`allow_once`) to the second process's HTTP
+    listener, and asserts the pending `Write` ran EXACTLY ONCE (real `note.txt`
+    with content `survived`) and the resumed run reached `end_turn`. Live
+    counterpart of the offline two-Build gate `TestApproveAfterRestartE2E`
+    (`internal/app/`). Lane-pinned to haiku because it needs a real tool call
+    (the OpenAI lane content-filters tool-bearing requests). Spawns its OWN
+    process pair (`harness.NewLocal` + `harness.NewLocalSharingStore`,
+    `(*Local).Kill`, `harness.ApproveOverHTTP`); local-target only.
 
 All assertions are event-stream / side-effect assertions — never model prose.
-`FlakeAttempts(2)` is on the cheap specs — provider smoke, skills, and memory —
-never on the expensive delegation scenarios (subagents/parallel/teams).
+`FlakeAttempts(2)` is on the cheap specs — provider smoke, skills, memory, and
+approve-after-kill — never on the expensive delegation scenarios
+(subagents/parallel/teams).
+
+### Harness primitives for the restart scenario
+
+The approve-after-kill spec needs three seams the suite target does not:
+
+- `harness.NewLocalSharingStore(prior, extraArgs...)` — a SECOND mecated whose
+  state lane (`--store-dir`/`--memory-dir`/`--workspace`/…) points at a prior
+  `Local`'s tree, with its OWN home/XDG/artifacts + its OWN loopback ports. The
+  prior MUST be dead first (two live daemons would race the JSONL store).
+- `(*Local).Kill()` — SIGKILL + reap, leaving the state tree intact (the
+  "disposable process" death). Distinct from `Close` (SIGTERM-first graceful);
+  `Close` after `Kill` is a safe no-op.
+- `harness.ApproveOverHTTP(ctx, httpAddr, sessionID, askID, verdict)` +
+  `harness.DrainSSE` — a stdlib `net/http` client that POSTs the approve body and
+  returns the rehydrate-relay SSE stream. `(*Local).HTTPAddr()` exposes the
+  listener.
 
 ## Artifacts
 

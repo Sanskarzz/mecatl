@@ -40,9 +40,10 @@ import (
 //     v2.30.0 internal/group.go attemptSpec).
 //  3. Suite: go test -timeout 60m (Taskfile). Worst-case spec wall time =
 //     Σ(driver timeout × attempts): provider 2m×2×2 + skills 3m×2×2 +
-//     memory 2m×2×2 + subagents 6m + parallel 6m + teams 8m + soul 2m ≈ 50m —
-//     comfortably under 60m, and the canary gate skips everything after a
-//     dead default lane, so the pathological all-timeout case cannot stack.
+//     memory 2m×2×2 + subagents 6m + parallel 6m + teams 8m + soul 2m +
+//     approve-after-kill 4m×2 ≈ 58m — under 60m, and the canary gate skips
+//     everything after a dead default lane, so the pathological all-timeout case
+//     cannot stack.
 //
 // The go-test panic path (no AfterSuite, no ledger) is therefore unreachable
 // short of a harness deadlock — which Pdeathsig in harness.Local guards the

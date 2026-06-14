@@ -41,6 +41,7 @@ type Local struct {
 	Root string // .scratch/e2e-<timestamp>-<rand>
 
 	grpcAddr    string
+	httpAddr    string
 	metricsAddr string
 
 	cmd     *exec.Cmd
@@ -56,6 +57,13 @@ type Local struct {
 	// args — for scenario-specific overrides like --websearch=off. They append, so
 	// a later flag wins over an earlier same-named one (Go's flag pkg: last wins).
 	extraArgs []string
+
+	// stateRoot is the scratch root whose --store-dir / --memory-dir / --workspace
+	// this spawn uses. It is Root for an ordinary spawn, and the PRIOR Local's Root
+	// for a shared-store second spawn (NewLocalSharingStore): the restart leg of
+	// the cloud-native Phase 2 scenario needs a second mecated reading the first's
+	// durable store. Home/XDG/artifacts always live under this spawn's own Root.
+	stateRoot string
 
 	cli *client.Client
 }
@@ -75,7 +83,31 @@ func NewLocalWith(extraArgs ...string) (*Local, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &Local{Root: root, extraArgs: extraArgs}
+	l := &Local{Root: root, stateRoot: root, extraArgs: extraArgs}
+	if err := l.start(); err != nil {
+		_ = l.Close()
+		return nil, err
+	}
+	return l, nil
+}
+
+// NewLocalSharingStore spawns a SECOND mecated whose --store-dir / --memory-dir /
+// --workspace point at an EXISTING (prior) Local's state tree, while keeping its
+// OWN home/XDG/artifacts under a fresh scratch root. It is the restart leg of the
+// cloud-native Phase 2 scenario: after prior.Kill() (a SIGKILL that leaves the
+// store on disk), this spawn reads the prior's durable awaiting snapshot and can
+// resume it. Extra mecated flags append last, exactly like NewLocalWith.
+//
+// The prior MUST already be dead (Kill) before this is called — two live mecateds
+// over the same JSONL store would race writes. The caller owns Close on the
+// returned Local; the shared state tree is the PRIOR's, so closing this spawn
+// does not disturb the prior's artifacts.
+func NewLocalSharingStore(prior *Local, extraArgs ...string) (*Local, error) {
+	root, err := newScratchRoot()
+	if err != nil {
+		return nil, err
+	}
+	l := &Local{Root: root, stateRoot: prior.Root, extraArgs: extraArgs}
 	if err := l.start(); err != nil {
 		_ = l.Close()
 		return nil, err
@@ -124,6 +156,20 @@ func (l *Local) dir(parts ...string) string {
 	return filepath.Join(append([]string{l.Root}, parts...)...)
 }
 
+// stateDir resolves a path under the SHARED state tree (l.stateRoot) — the
+// --store-dir / --memory-dir / --workspace lane. For an ordinary spawn stateRoot
+// == Root, so it is identical to dir(); for a NewLocalSharingStore second spawn
+// it points at the prior Local's tree.
+func (l *Local) stateDir(parts ...string) string {
+	return filepath.Join(append([]string{l.stateRoot}, parts...)...)
+}
+
+// sharesState reports whether this spawn reuses a prior Local's state tree (the
+// shared-store second spawn). When true, start() must NOT re-write fixtures or
+// re-init git over the shared workspace — the prior already laid them out and the
+// store holds live snapshots.
+func (l *Local) sharesState() bool { return l.stateRoot != l.Root }
+
 // start writes fixtures, spawns the daemon, and waits for readiness.
 func (l *Local) start() error {
 	repo, err := RepoRoot()
@@ -135,16 +181,32 @@ func (l *Local) start() error {
 		return fmt.Errorf("bin/mecated not found (%v): run `task build` first (task e2e depends on it)", err)
 	}
 
-	for _, d := range []string{"home", "xdg-config", "xdg-state", "xdg-cache", "workspace", "store", "memory", "usermodel", "soul", "artifacts"} {
+	// Process-private dirs always live under this spawn's OWN Root (home/XDG keep
+	// provider detection hermetic; artifacts/log are per-process). The state lane
+	// (workspace/store/memory/usermodel/soul) lives under stateRoot — its own Root
+	// for an ordinary spawn, the prior Local's Root for a shared-store second
+	// spawn.
+	for _, d := range []string{"home", "xdg-config", "xdg-state", "xdg-cache", "artifacts"} {
 		if err := os.MkdirAll(l.dir(d), 0o755); err != nil {
 			return err
 		}
 	}
-	if err := WriteFixtures(repo, l.Root); err != nil {
-		return fmt.Errorf("write fixtures: %w", err)
-	}
-	if err := initWorkspaceGit(l.dir("workspace")); err != nil {
-		return fmt.Errorf("git-init workspace: %w", err)
+	if !l.sharesState() {
+		// First spawn over a fresh state tree: create the state dirs, write the
+		// fixtures, and git-init the workspace. A shared-store second spawn SKIPS
+		// all of this — the prior already laid the tree out and its store holds the
+		// live (awaiting) snapshot the restart leg resumes.
+		for _, d := range []string{"workspace", "store", "memory", "usermodel", "soul"} {
+			if err := os.MkdirAll(l.stateDir(d), 0o755); err != nil {
+				return err
+			}
+		}
+		if err := WriteFixtures(repo, l.stateRoot); err != nil {
+			return fmt.Errorf("write fixtures: %w", err)
+		}
+		if err := initWorkspaceGit(l.stateDir("workspace")); err != nil {
+			return fmt.Errorf("git-init workspace: %w", err)
+		}
 	}
 
 	grpcPort, err := freePort()
@@ -160,18 +222,19 @@ func (l *Local) start() error {
 		return err
 	}
 	l.grpcAddr = "127.0.0.1:" + strconv.Itoa(grpcPort)
+	l.httpAddr = "127.0.0.1:" + strconv.Itoa(httpPort)
 	l.metricsAddr = "127.0.0.1:" + strconv.Itoa(metricsPort)
 
 	args := []string{
 		"--grpc-addr", l.grpcAddr,
-		"--http-addr", "127.0.0.1:" + strconv.Itoa(httpPort),
+		"--http-addr", l.httpAddr,
 		"--metrics-addr", l.metricsAddr,
-		"--workspace", l.dir("workspace"),
+		"--workspace", l.stateDir("workspace"),
 		"--model", DefaultModel(),
-		"--store-dir", l.dir("store"),
-		"--memory-dir", l.dir("memory"),
-		"--user-model-dir", l.dir("usermodel"),
-		"--soul-file", l.dir("soul", "soul.md"),
+		"--store-dir", l.stateDir("store"),
+		"--memory-dir", l.stateDir("memory"),
+		"--user-model-dir", l.stateDir("usermodel"),
+		"--soul-file", l.stateDir("soul", "soul.md"),
 		// Skills come from the conventional locations under the FAKE HOME /
 		// workspace (fixtures.go laid them out): ~/.claude/skills (user-global
 		// lane) and <workspace>/.claude/skills (project lane, trust-gated).
@@ -182,7 +245,7 @@ func (l *Local) start() error {
 		// CLI-scope permission config: allows for the ask-floor tools the
 		// scenarios exercise (Skill/Parallel/Team). Everything else keeps the
 		// production posture; the driver auto-DENIES unexpected asks.
-		"--permission-config", l.dir("permissions.yaml"),
+		"--permission-config", l.stateDir("permissions.yaml"),
 		// Budgets: the shared runaway brakes. Reality check (run 1): a single
 		// turn's input with the full catalog is ~5-6k tokens, so the originally
 		// planned 4000 tripped at the FIRST turn boundary and forced every
@@ -313,21 +376,29 @@ func envOr(key, def string) string {
 // --- Target interface ---
 
 func (l *Local) Client() *client.Client { return l.cli }
-func (l *Local) Workspace() string      { return l.dir("workspace") }
+func (l *Local) Workspace() string      { return l.stateDir("workspace") }
 func (l *Local) MetricsURL() string     { return "http://" + l.metricsAddr + "/metrics" }
 func (l *Local) IsLocal() bool          { return true }
+
+// HTTPAddr is the host:port the daemon's HTTP/SSE listener is bound to (the
+// --http-addr it was spawned with). The HTTP approve client (ApproveOverHTTP)
+// posts to it; a shared-store second spawn exposes ITS OWN listener here.
+func (l *Local) HTTPAddr() string { return l.httpAddr }
 
 func (l *Local) StateDir(kind StateKind) string {
 	switch kind {
 	case StateWorkspace:
-		return l.dir("workspace")
+		// The state lane resolves under the SHARED tree so a side-effect read finds
+		// the file no matter which Local (first or shared-store second) is queried.
+		return l.stateDir("workspace")
 	case StateMemory:
-		return l.dir("memory")
+		return l.stateDir("memory")
 	case StateUserModel:
-		return l.dir("usermodel")
+		return l.stateDir("usermodel")
 	case StateStore:
-		return l.dir("store")
+		return l.stateDir("store")
 	case StateArtifacts:
+		// Artifacts are PER-PROCESS (this spawn's own log/transcripts).
 		return l.dir("artifacts")
 	}
 	return ""
@@ -346,9 +417,38 @@ func (l *Local) LogTail(n int) string {
 	return string(data)
 }
 
+// Kill SIGKILLs the daemon and reaps it (waits on the spawn-time exit channel),
+// WITHOUT tearing the state tree down — it is the "disposable process" death the
+// cloud-native Phase 2 restart leg needs: a SECOND mecated (NewLocalSharingStore)
+// reads this one's durable store after it dies. Unlike Close it does NOT
+// SIGTERM-first (no graceful drain — a real abrupt death) and leaves the scratch
+// tree fully intact (the store + the awaiting snapshot must survive).
+//
+// It closes this spawn's own gRPC conn and log file (process-private resources)
+// but removes nothing on disk. The exit is observed via the single Wait owner
+// (the spawn-time goroutine that closes l.exited).
+func (l *Local) Kill() error {
+	var errs []error
+	if l.cli != nil {
+		errs = append(errs, l.cli.Close())
+		l.cli = nil
+	}
+	if l.cmd != nil && l.cmd.Process != nil {
+		_ = l.cmd.Process.Kill() // SIGKILL: no graceful drain
+		<-l.exited               // reap (ProcessState set by the spawn-time Wait)
+	}
+	if l.logFile != nil {
+		errs = append(errs, l.logFile.Close())
+		l.logFile = nil
+	}
+	return errors.Join(errs...)
+}
+
 // Close SIGTERMs the daemon, waits (bounded), then SIGKILLs. The scratch tree
 // is left in place — the artifacts ARE the deliverable of a failed run. The
 // exit is observed via the spawn-time Wait goroutine (the single Wait owner).
+// Calling Close after Kill is safe: the conn/log are already closed (nil-guarded)
+// and the process is already reaped.
 func (l *Local) Close() error {
 	var errs []error
 	if l.cli != nil {
