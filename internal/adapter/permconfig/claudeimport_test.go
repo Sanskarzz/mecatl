@@ -36,6 +36,29 @@ func TestClaudeImportWebFetchDomainAllowDemotedToAsk(t *testing.T) {
 	}
 }
 
+// Issue #26: a bare WebSearch ALLOW imports VERBATIM as Allow — NO demotion (its
+// outbound payload is a query string, lower-risk than WebFetch's arbitrary-URL
+// fetch, and egress is provider-gated). This was considered and consciously not
+// demoted (see importClaudeBucket's fail-safe table).
+func TestClaudeImportWebSearchAllowNotDemoted(t *testing.T) {
+	data := []byte(`{"permissions":{"allow":["WebSearch"]}}`)
+	var report Report
+	rules, err := importClaude(data, governance.ScopeSharedProject, &report)
+	if err != nil {
+		t.Fatalf("importClaude: %v", err)
+	}
+	r := findRule(rules, "WebSearch", "")
+	if r == nil {
+		t.Fatalf("WebSearch rule missing: %+v", rules)
+	}
+	if r.Effect != governance.Allow {
+		t.Fatalf("bare WebSearch allow must import VERBATIM as Allow (no demotion), got %v", r.Effect)
+	}
+	if len(report.Demoted) != 0 {
+		t.Fatalf("WebSearch must NOT be demoted, got %+v", report.Demoted)
+	}
+}
+
 // Fail-safe row 2: a Read(~/...) rule is kept but reported INERT ("~" unexpanded).
 func TestClaudeImportTildeLeftInert(t *testing.T) {
 	data := []byte(`{"permissions":{"allow":["Read(~/.zshrc)"]}}`)

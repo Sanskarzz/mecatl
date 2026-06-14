@@ -31,6 +31,7 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/nofs"
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/adapter/permstore"
+	refsearch "github.com/stacklok/mecatl/engine/adapter/search"
 	"github.com/stacklok/mecatl/engine/adapter/wallclock"
 	"github.com/stacklok/mecatl/engine/agent"
 	"github.com/stacklok/mecatl/engine/governance"
@@ -51,6 +52,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/osfs"
 	"github.com/stacklok/mecatl/internal/adapter/permconfig"
 	"github.com/stacklok/mecatl/internal/adapter/providercatalog"
+	httpsearch "github.com/stacklok/mecatl/internal/adapter/search"
 	"github.com/stacklok/mecatl/internal/adapter/server"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/store/jsonlstore"
@@ -398,6 +400,23 @@ type Config struct {
 
 	// Optional tools, on by default in the standalone server.
 	EnableParallel bool
+
+	// WebSearch (issue #26): the vendor-neutral HTTP JSON search backend behind the
+	// always-present WebSearch core tool. OFF by default — when WebSearchURL is
+	// empty the WebSearch tool is still registered but backed by a not-configured
+	// sentinel that returns an honest "ask the operator" message (the silent-disable
+	// aversion). WebSearchURL is the search endpoint (e.g. a SearXNG /search URL or
+	// a generic JSON search API). WebSearchAPIKey is an OPTIONAL credential sent in
+	// WebSearchAuthHeader (default "Authorization" as a Bearer token) — NEVER in the
+	// query string. WebSearchQueryParam overrides the URL query parameter the search
+	// string is placed in (default "q"). The cmd layer reads the key from a
+	// secret/env source, never a flag value. The adapter carries its OWN per-call
+	// timeout and concurrency limiter (egress is bounded in the adapter, never the
+	// dispatcher).
+	WebSearchURL        string
+	WebSearchAPIKey     string
+	WebSearchAuthHeader string
+	WebSearchQueryParam string
 
 	// ForkPreservedCap bounds how many PRESERVED winner forks (join=first /
 	// join=judge) survive at once across the process: a new winner beyond the cap
@@ -2159,16 +2178,25 @@ func compactionDecision(cfg Config) diagFact {
 // tools.NoFS() — WebFetch only, no file tools and NEVER Bash (a shell is a
 // filesystem act; the configured runner is not consulted). Guarded by
 // TestNoFSCatalogProfile (the exact name-set delta).
-func registerCoreTools(cfg Config, cat *tool.Catalog, log, noFS bool) {
+//
+// WebSearch (issue #26) is registered in BOTH profiles, ALWAYS — like WebFetch it
+// is an outbound read tool that needs no filesystem, so a no-FS session keeps it.
+// It needs a tool.SearchProvider (the way Bash needs a runner), so it is built
+// here with the composition-resolved provider (or the not-configured sentinel),
+// NOT as a zero-value tools.All()/NoFS() entry — an only-when-configured tool that
+// vanishes would be the silent-disable this harness avoids.
+func registerCoreTools(cfg Config, cat *tool.Catalog, log, noFS bool, searchProvider tool.SearchProvider) {
 	if noFS {
 		for _, t := range tools.NoFS() {
 			cat.MustRegister(t)
 		}
+		cat.MustRegister(tools.NewWebSearchTool(searchProvider))
 		return
 	}
 	for _, t := range tools.All() {
 		cat.MustRegister(t)
 	}
+	cat.MustRegister(tools.NewWebSearchTool(searchProvider))
 	if runner := buildCommandRunner(cfg); runner != nil {
 		cat.MustRegister(tools.NewBashTool(runner))
 		if log {
@@ -2290,6 +2318,10 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 		// assets — no second list to drift.
 		skillReadRoots: seam.readRoots,
 		forkReaper:     forkReaper,
+		// WebSearch provider (issue #26): resolved ONCE here (the HTTP adapter when
+		// --websearch-url is set, else the not-configured sentinel) and threaded onto
+		// the assets so every per-session catalog reuses the SAME provider.
+		searchProvider: buildSearchProvider(ctx, cfg),
 	}
 	// The build-time assembly: default provider + model, no client MCP, narrating
 	// the ENABLED/DISABLED composition facts exactly once.
@@ -2765,6 +2797,35 @@ func buildUserModelReviewEngine(cfg Config, provider port.LLMProvider, store too
 		}
 	}
 	return newChildEngine(cfg, "usermodel-review", provider, cat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
+}
+
+// buildSearchProvider resolves the process-wide tool.SearchProvider the WebSearch
+// core tool is built over (issue #26). When cfg.WebSearchURL is set it constructs
+// the vendor-neutral HTTP JSON adapter (the operator opted in); otherwise — and on
+// a construction error — it returns the not-configured sentinel
+// (refsearch.Unavailable) so the always-present WebSearch tool surfaces an honest
+// "ask the operator" message rather than vanishing. The build-once narration mirrors
+// the Bash/memory ENABLED/DISABLED facts. It NEVER logs the API key (CWE-200).
+func buildSearchProvider(ctx context.Context, cfg Config) tool.SearchProvider {
+	if strings.TrimSpace(cfg.WebSearchURL) == "" {
+		cfg.diag().Log(ctx, port.LevelInfo, "WebSearch tool ENABLED but NO backend configured (returns an honest not-configured message); set --websearch-url to enable real search")
+		return refsearch.Unavailable{}
+	}
+	provider, err := httpsearch.NewHTTPProvider(httpsearch.HTTPConfig{
+		BaseURL:    cfg.WebSearchURL,
+		APIKey:     cfg.WebSearchAPIKey,
+		AuthHeader: cfg.WebSearchAuthHeader,
+		QueryParam: cfg.WebSearchQueryParam,
+	})
+	if err != nil {
+		// Fail-soft (not fatal): a misconfigured URL degrades to the not-configured
+		// sentinel with a WARN, so the harness still starts (the tool reports it is
+		// unavailable) rather than refusing to boot over a search misconfig.
+		cfg.diag().Log(ctx, port.LevelWarn, "WebSearch backend misconfigured; falling back to not-configured (tool reports unavailable)", "err", err)
+		return refsearch.Unavailable{}
+	}
+	cfg.diag().Log(ctx, port.LevelInfo, "WebSearch tool ENABLED with HTTP backend; permission: allow (built-in default, overridable to ask/deny via settings)", "endpoint", cfg.WebSearchURL)
+	return provider
 }
 
 // buildCommandRunner builds the local command runner the Bash tool executes
@@ -4157,6 +4218,12 @@ func defaultRules() []governance.Rule {
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Grep", Effect: governance.Allow},
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Glob", Effect: governance.Allow},
 		{Scope: governance.ScopeBuiltinDefault, Tool: "WebFetch", Effect: governance.Allow},
+		// WebSearch (issue #26): floor-Allow, same posture as WebFetch — config-
+		// overridable to ask/deny in any scope. The REAL egress gate is the provider
+		// configuration (--websearch-url; absent ⇒ the tool reports unavailable), not
+		// an interactive Ask: its outbound payload is a query string, lower-risk than
+		// WebFetch's arbitrary-URL fetch.
+		{Scope: governance.ScopeBuiltinDefault, Tool: "WebSearch", Effect: governance.Allow},
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Subagent", Effect: governance.Allow},
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Bash", Effect: governance.Ask},
 		{Scope: governance.ScopeBuiltinDefault, Tool: "Edit", Effect: governance.Ask},

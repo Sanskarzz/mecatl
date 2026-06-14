@@ -83,6 +83,16 @@ func importClaude(data []byte, scope governance.Scope, report *Report) ([]govern
 //	WebFetch(domain:x) in an ALLOW list  -> DEMOTE to Ask (substring/domain match
 //	                                        is too risky to honour as a blanket
 //	                                        allow; the user still gets to approve).
+//	WebSearch in an ALLOW list            -> imported VERBATIM as Allow (NO demotion;
+//	                                        issue #26). Considered and consciously not
+//	                                        demoted: a bare WebSearch's outbound payload
+//	                                        is a query string, lower-risk than WebFetch's
+//	                                        arbitrary-URL fetch, and egress is already
+//	                                        gated by the operator's --websearch-url
+//	                                        provider config (absent ⇒ no egress at all).
+//	                                        A "WebSearch(domain:...)"-style qualifier has
+//	                                        no Claude analogue, so no qualifier path exists
+//	                                        to demote.
 //	Read(~/...) (an unexpanded "~")       -> keep the rule but report it INERT (we
 //	                                        deliberately do NOT expand "~" — the
 //	                                        pattern won't match the absolute path a

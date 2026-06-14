@@ -613,9 +613,9 @@ func TestOsfsWorkspaceFactoryEmptyRootIntercepted(t *testing.T) {
 
 // TestNoFSChildCatalogExactDelta is the drift kill-switch for the no-fs CHILD
 // surface (the TestNoFSCatalogProfile idiom one level down): noFSChildCatalog
-// must be EXACTLY {the memory six} ∪ {WebFetch} ∪ {the global MCP tools} —
-// nothing more (a file tool or shell leaking into delegation children) and
-// nothing less (a family silently dropped from the children). Mutation-verified
+// must be EXACTLY {the memory six} ∪ {WebFetch, WebSearch} ∪ {the global MCP
+// tools} — nothing more (a file tool or shell leaking into delegation children)
+// and nothing less (a family silently dropped from the children). Mutation-verified
 // (removing a family from noFSChildCatalog fails the equality).
 func TestNoFSChildCatalogExactDelta(t *testing.T) {
 	url, stop := newMCPTestServerWithResource(t)
@@ -635,8 +635,8 @@ func TestNoFSChildCatalogExactDelta(t *testing.T) {
 		// The memory six (the same flocked shared stores the parent uses).
 		memory.RememberToolName, memory.RecallToolName, memory.SearchMemoryToolName,
 		memory.RememberUserToolName, memory.RecallUserToolName, memory.SearchUserModelToolName,
-		// The no-fs core tier.
-		"WebFetch",
+		// The no-fs core tier: WebFetch + WebSearch (search-then-fetch discovery).
+		"WebFetch", "WebSearch",
 	}
 	for _, mt := range mgr.Tools() {
 		want = append(want, mt.Spec().Name)
@@ -645,7 +645,7 @@ func TestNoFSChildCatalogExactDelta(t *testing.T) {
 
 	cat := noFSChildCatalog(context.Background(), Config{Diagnostics: port.NopDiagnostics{}}, a)
 	if onlyWant, onlyGot := diffNameSets(want, sortedNames(cat)); len(onlyWant) > 0 || len(onlyGot) > 0 {
-		t.Fatalf("no-fs CHILD catalog is NOT exactly {memory six} ∪ {WebFetch} ∪ {global MCP}:\n  missing: %v\n  unexpected: %v",
+		t.Fatalf("no-fs CHILD catalog is NOT exactly {memory six} ∪ {WebFetch, WebSearch} ∪ {global MCP}:\n  missing: %v\n  unexpected: %v",
 			onlyWant, onlyGot)
 	}
 }

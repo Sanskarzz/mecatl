@@ -286,6 +286,16 @@ type config struct {
 	commandsDir    string
 	enableCommands bool
 
+	// WebSearch (issue #26): the vendor-neutral HTTP JSON search backend behind the
+	// always-present WebSearch tool. websearchURL is the search endpoint (empty =>
+	// the tool reports "not configured"); the API key is read from WEBSEARCH_API_KEY
+	// (a secret, never a flag value); websearchAuthHeader/websearchQueryParam tune
+	// the request shape for a generic JSON endpoint.
+	websearchURL        string
+	websearchAPIKey     string
+	websearchAuthHeader string
+	websearchQueryParam string
+
 	// Parallel: enable the Parallel fan-out tool (parallel isolated child branches).
 	enableParallel bool
 	// forkPreservedCap bounds how many PRESERVED winner forks (join=first/judge)
@@ -773,6 +783,10 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		CommandsDir:             cfg.commandsDir,
 		EnableCommands:          cfg.enableCommands,
 		EnableParallel:          cfg.enableParallel,
+		WebSearchURL:            cfg.websearchURL,
+		WebSearchAPIKey:         cfg.websearchAPIKey,
+		WebSearchAuthHeader:     cfg.websearchAuthHeader,
+		WebSearchQueryParam:     cfg.websearchQueryParam,
 		ForkPreservedCap:        cfg.forkPreservedCap,
 		EnableTeams:             cfg.enableTeams,
 		MCPServers:              cfg.mcpServers,
@@ -917,6 +931,9 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.commandSourceURL, "command-source-url", "", "host:port of a remote slash-command gRPC driver (mecatl.driver.v1.CommandSourceService); COMPOSES with file-backed commands rather than replacing them — a local command file shadows a same-named driver command, and MCP prompts stay last. Consulted LIVE on every expansion/listing (no snapshot); probed once at startup (fatal if unreachable), runtime faults fail soft (raw text passes through). TRUST BOUNDARY: an expanded command body becomes the user prompt — point this only at a driver you trust. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 
 	fs.BoolVar(&cfg.enableParallel, "enable-parallel", true, "register the Parallel fan-out tool (parallel isolated child branches)")
+	fs.StringVar(&cfg.websearchURL, "websearch-url", "", "WEBSEARCH (issue #26): base URL of a vendor-neutral HTTP JSON search endpoint (e.g. a SearXNG /search URL or a generic JSON search API) backing the always-present WebSearch tool. Empty (default) leaves WebSearch registered but reporting \"not configured\" (no egress). The API key is read from WEBSEARCH_API_KEY, never a flag value. The adapter carries its own per-call timeout and concurrency limit")
+	fs.StringVar(&cfg.websearchAuthHeader, "websearch-auth-header", "", "WEBSEARCH: HTTP header the WEBSEARCH_API_KEY is sent in (default \"Authorization\" as a Bearer token; set e.g. \"X-API-Key\" to send the raw key). Ignored when no key is set")
+	fs.StringVar(&cfg.websearchQueryParam, "websearch-query-param", "", "WEBSEARCH: URL query parameter the search string is placed in (default \"q\"). Tune for a generic JSON search endpoint that expects a different parameter name")
 	fs.IntVar(&cfg.forkPreservedCap, "fork-preserved-cap", agent.DefaultPreservedForkCap, "max PRESERVED winner forks (join=first/judge) kept on disk at once; the oldest beyond this is LRU-reaped. Preserved forks stay inspectable until reaped")
 	fs.BoolVar(&cfg.enableTeams, "enable-teams", true, "register the experimental agent-teams capability (CreateTeam/SpawnTeammate/RunTeam); on by default and inert until a client drives a team. Pass --enable-teams=false to disable")
 
@@ -975,6 +992,9 @@ func parseFlags(argv []string) (config, error) {
 	// also auto-detects ANTHROPIC_API_KEY, but reading it here makes the credential
 	// custody explicit (extended thinking is ON, model-aware).
 	cfg.anthropicKey = os.Getenv("ANTHROPIC_API_KEY")
+	// WebSearch (issue #26): the search backend's API key is a SECRET, read from the
+	// environment (never a flag value), mirroring the provider keys' custody rule.
+	cfg.websearchAPIKey = os.Getenv("WEBSEARCH_API_KEY")
 	// An auth token from the environment is honored when the flag is unset, so a
 	// secret need not appear in the process argv.
 	if cfg.authToken == "" {

@@ -296,6 +296,17 @@ linters:
           deny:
             - pkg: os
               desc: 'sourceconformance drives the abstract SkillSource/SoulSource contracts; it must not touch the real OS'
+        engine-adapter-search:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/search/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/tool
+          deny:
+            - pkg: os
+              desc: 'the search reference adapter (fakesearch) is the scripted OFFLINE SearchProvider; it must not touch the OS or the network'
         # agent: the APPLICATION loop; imports domain + port + team + stdlib +
         # golang.org/x/sync/errgroup. Adapters are INJECTED, never imported.
         core-agent:

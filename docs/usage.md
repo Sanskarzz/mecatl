@@ -232,6 +232,9 @@ mailbox). See the delegation-capabilities note below.
 | `--max-run-tokens` | `0` | loop-level **cumulative token ceiling per run** (input + output). A run that crosses it ends cleanly with `stop=budget` (terminal `StopBudget`). The budget is **inherited by every Subagent / Parallel branch / team member**, so a delegation fan-out cannot blow past it. `0` (the default) **disables** it. |
 | `--max-team-tokens` | `0` | **team-wide cumulative token ceiling per team run** (input + output, summed across **all members and rounds**). When crossed the team stops scheduling new rounds — the **in-flight round and the lead's synthesis still complete**, and the report states the budget stop. Applies to the `Team` tool and gRPC `CreateTeam`; a per-call Team `max_team_tokens` may only **tighten** it, and so may the wire `CreateTeamRequest.max_team_tokens` (HTTP: `"max_team_tokens"` in the create body). The outcome (incl. `budget_exhausted` and the `"budget"` stop) rides the **terminal `TeamEvent.outcome` frame** both `RunTeam` surfaces (gRPC stream + HTTP SSE) end with. **Orthogonal** to `--max-run-tokens` (per-run; both compose). `0` (the default) **disables** it. |
 | `--enable-parallel` | `true` | register the **Parallel** fan-out tool (N parallel isolated child branches). On by default; `=false` disables it. *(Renamed from the former `--enable-fork`.)* |
+| `--websearch-url` | `""` | **WebSearch** (issue #26): base URL of a vendor-neutral HTTP JSON search endpoint (e.g. a [SearXNG](https://docs.searxng.org/) `/search` URL or any generic JSON search API) backing the always-present **WebSearch** tool. Empty (default) leaves WebSearch **registered but reporting "not configured"** (no egress) — the tool never vanishes (silent-disable aversion). The API key is read from the **`WEBSEARCH_API_KEY`** env var (a secret, never a flag value). The adapter carries its **own** per-call timeout (10s) and concurrency limit (4), so the read-parallel dispatcher cannot launch unbounded egress. |
+| `--websearch-auth-header` | `"Authorization"` | HTTP header the `WEBSEARCH_API_KEY` is sent in — default `Authorization` as a `Bearer` token; set e.g. `X-API-Key` to send the raw key. The secret rides the **header only, never the query string**. Ignored when no key is set. |
+| `--websearch-query-param` | `"q"` | URL query parameter the search string is placed in. Tune for a generic JSON search endpoint that expects a different parameter name. |
 | `--fork-preserved-cap` | `agent.DefaultPreservedForkCap` | max **PRESERVED** winner forks (for `join=first`/`judge`) kept on disk at once — the oldest beyond this is LRU-reaped. Preserved fork workspaces stay inspectable (their paths ride the Parallel result) until reaped. |
 | `--enable-teams` | `true` | register the experimental **agent-teams** capability (`CreateTeam`/`SpawnTeammate`/`RunTeam` + the in-loop `Team` tool). On by default and **inert** until a client drives a team; `=false` disables it. |
 | `--subagent-model` | `""` | global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (via an agent definition `model:` or a per-call override) — the analogue of `CLAUDE_CODE_SUBAGENT_MODEL`. The Parallel judge stays on the session model. A concrete id or a `--model-alias`; same provider as the session. Empty inherits the parent `--model`; a non-empty value that does not resolve to a usable model id (unknown alias, or an alias meaning *inherit* — the built-in `sonnet`/`opus`/`haiku` unless overridden) **fails startup**. `mecatui` accepts the same flag for its embedded server. |
@@ -719,6 +722,7 @@ logged:
 | Claude spec | Outcome |
 | --- | --- |
 | `WebFetch(domain:x)` in an **allow** list | **demoted to `ask`** (domain/substring match is too risky to auto-allow) |
+| bare `WebSearch` in an **allow** list | imported **verbatim** as `allow` — **no demotion** (its outbound payload is a query string, lower-risk than `WebFetch`'s arbitrary-URL fetch; egress is already provider-gated by `--websearch-url`) |
 | `Read(~/...)` (leading `~`) | kept but **inert** — the `~` is left unexpanded, so it never matches the absolute path a tool resolves |
 | unparseable spec | **dropped** |
 
@@ -1551,13 +1555,13 @@ string: `""` = default, `"no-fs"`). Rules, all enforced server-side:
 - Any other profile value is rejected loudly — never a silent fallback.
 - The no-FS session has **no** Read/Edit/Write/Grep/Glob/Bash, no Parallel, and
   no SkillDraft. It keeps MCP tools (server-global + resource meta-tools +
-  client MCP), the six memory tools, WebFetch, Skill (bodies are text
+  client MCP), the six memory tools, WebFetch, WebSearch, Skill (bodies are text
   injection; out-of-workspace skill assets are unreadable), and delegation —
   Subagent and Team children run the same file-less surface with **no**
   worktree/fork isolation (there is nothing to isolate) and no shell.
 - The model is told up front (a system-prompt posture note plus an honest
-  Subagent tool description), so it plans around MCP/memory/web fetch instead
-  of burning turns on unknown-tool errors.
+  Subagent tool description), so it plans around MCP/memory/web search+fetch
+  instead of burning turns on unknown-tool errors.
 - The profile composes with `provider_id`/`model_id` and is FIXED for the
   session lifetime.
 
@@ -1859,7 +1863,7 @@ can adapt) and to the client (on ask).
 
 | Tool | Default effect |
 | --- | --- |
-| `Read`, `Grep`, `Glob`, `WebFetch`, `Subagent` | `allow` |
+| `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, `Subagent` | `allow` |
 | the six memory tools (`Remember`/`Recall`/`SearchMemory`, `RememberUser`/`RecallUser`/`SearchUserModel`) | `allow` (floor-scoped, config-overridable — see §3) |
 | `InspectSubagent`, `InspectMember`, `SubagentStatus` (read-only child observability) | `allow` (floor-scoped, config-overridable) |
 | `soul:apply` (the synthetic soul-load action) | `allow` (floor-scoped, config-overridable — see §3) |

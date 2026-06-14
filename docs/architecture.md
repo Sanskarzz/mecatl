@@ -88,7 +88,7 @@ flowchart LR
     oai["openai · mockllm"]
     fs["osfs (+CommandRunner) · memfs"]
     st["memstore · jsonlstore · sessnap"]
-    tools["tools (Read/Edit/Write/Grep/Glob/WebFetch + optional Bash)"]
+    tools["tools (Read/Edit/Write/Grep/Glob/WebFetch/WebSearch + optional Bash)"]
     pp["permpolicy · hookexec · modelhook"]
     tel["telemetry (OTel metrics+spans · Prometheus exporter · OTLP)"]
     ext["mcp (streaming-HTTP)\nmemory · dream · soul · forker · tokenizer"]
@@ -830,7 +830,7 @@ reach the right run.
   absorb writes nobody can read back), registered as the per-session workspace
   override AT CREATE TIME so the osfs factory never sees the empty root, and
   its Subagent/Team children run the same file-less surface (memory six +
-  WebFetch + global MCP) with no forkers and no shell. The model is told via a
+  WebFetch + WebSearch + global MCP) with no forkers and no shell. The model is told via a
   system-prompt posture note and an honest Subagent spec. A REMOTE filesystem
   for such sessions is a future driver concern (`docs/design/DRIVERS.md`), an
   explicit non-goal of the profile itself.

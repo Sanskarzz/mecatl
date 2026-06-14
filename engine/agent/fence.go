@@ -29,6 +29,18 @@ func WriteUntrustedBlock(b *strings.Builder, body string) {
 	b.WriteString("\n" + UntrustedFence + "\n")
 }
 
+// FenceUntrusted is the string-returning form of WriteUntrustedBlock: it returns body
+// wrapped in a matched UntrustedFence pair with the fence markers and framing headers
+// neutralised out of body first. Use WriteUntrustedBlock when you already hold a
+// strings.Builder; use this when a caller just wants the wrapped string (e.g. a tool
+// interpolating untrusted external content — WebSearch results, LLM01). The bytes are
+// identical to WriteUntrustedBlock's, so there is exactly one fence implementation.
+func FenceUntrusted(body string) string {
+	var b strings.Builder
+	WriteUntrustedBlock(&b, body)
+	return b.String()
+}
+
 // NeutraliseFraming defangs the literal framing markers a model-visible prompt uses
 // so an untrusted body cannot forge them: it strips the fence delimiter and the
 // recognised section headers (e.g. "Team goal:", "Tool:", "message from ...") that

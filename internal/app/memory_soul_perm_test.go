@@ -53,6 +53,38 @@ func TestMemoryToolsDefaultExplicitAllow(t *testing.T) {
 	}
 }
 
+// TestWebSearchDefaultIsFloorAllow proves WebSearch resolves to Allow via the
+// built-in floor (issue #26), both directly and via the production mainRules
+// assembly — matching the WebFetch posture (config-overridable; the real egress
+// gate is the provider config, not an Ask).
+func TestWebSearchDefaultIsFloorAllow(t *testing.T) {
+	if got := evalDefault(t, "WebSearch"); got != governance.Allow {
+		t.Fatalf("WebSearch should default to Allow (defaultRules), got %v", got)
+	}
+	prod := permpolicy.NewPolicy(mainRules(Config{}), nil)
+	got := prod.Evaluate(context.Background(), "s1", session.ModeDefault,
+		session.NewToolCall("id", "WebSearch", json.RawMessage(`{}`)), nil).Effect
+	if got != governance.Allow {
+		t.Fatalf("WebSearch should default to Allow (mainRules production assembly), got %v", got)
+	}
+}
+
+// TestConfiguredAskAndDenyOverrideWebSearchAllow proves a configured Ask or Deny in
+// a higher scope beats the WebSearch floor-Allow (the floor is config-overridable;
+// deny-dominant). Mirrors the memory-allow override invariant.
+func TestConfiguredAskAndDenyOverrideWebSearchAllow(t *testing.T) {
+	for _, eff := range []governance.Effect{governance.Ask, governance.Deny} {
+		rules := append(defaultRules(),
+			governance.Rule{Scope: governance.ScopeUser, Tool: "WebSearch", Effect: eff})
+		policy := permpolicy.NewPolicy(rules, nil)
+		got := policy.Evaluate(context.Background(), "s1", session.ModeDefault,
+			session.NewToolCall("id", "WebSearch", json.RawMessage(`{}`)), nil)
+		if got.Effect != eff {
+			t.Fatalf("a configured (ScopeUser) %v on WebSearch must beat the floor Allow; got %v", eff, got.Effect)
+		}
+	}
+}
+
 // TestSoulApplyDefaultIsAllow proves the synthetic soul:apply action resolves to
 // Allow via the built-in defaultRules(), so the soul is applied by default.
 func TestSoulApplyDefaultIsAllow(t *testing.T) {

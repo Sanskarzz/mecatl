@@ -164,7 +164,7 @@ github.com/stacklok/mecatl
 │       ├── openai/                     #   LLMProvider over OpenAI Responses API (SSE)
 │       ├── llmresilience/              #   retry/backoff + circuit-breaker decorator (LLMProvider)
 │       ├── permclassify/               #   model-based layer-2 risk classifier (PermissionPolicy)
-│       ├── tools/                      #   Read, Edit, Write, Grep, Glob, WebFetch + optional Bash
+│       ├── tools/                      #   Read, Edit, Write, Grep, Glob, WebFetch, WebSearch + optional Bash
 │       ├── toolkit/                    #   shared tool mechanics (arg parse, output cap, schema)
 │       ├── osfs/                       #   FileSystem (os.Root-confined) + CommandRunner
 │       ├── store/                      #   jsonlstore (append-only JSONL replay log)

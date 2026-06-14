@@ -1687,6 +1687,73 @@ breaker is untouched (a mid-stream error structurally never reaches the establis
 behaviour change). A package-level `goleak` gate (`leakmain_test.go`) proves the watchdog goroutine
 unwinds on every path.
 
+### `WebSearch` core tool + `search` adapters (issue #26 — source discovery before WebFetch)
+
+WebSearch is a READ-ONLY core tool that returns compact, bounded, source-attributed
+results so the model can DISCOVER candidate URLs before retrieving one with WebFetch
+("search discovers; fetch reads"). The full structure shipped: a provider PORT + an
+offline FAKE + an honest not-configured STUB + a vendor-neutral HTTP JSON adapter
+behind an operator flag (off by default). It is the harness's FIRST outbound-network
+capability.
+
+- **Port (DOMAIN):** `engine/tool/search.go` — `SearchProvider.Search(ctx, SearchQuery)
+  ([]SearchResult, error)`, the value objects `SearchQuery{Query,Limit,Site,Freshness}`
+  / `SearchResult{Title,URL,Snippet,Date,Source}`, and the sentinel
+  `ErrSearchUnavailable`. It lives in `engine/tool` NEXT TO `CommandRunner` (NOT
+  `engine/port`) for the same reason FileSystem/Workspace/CommandRunner do: it is a
+  TOOL collaborator injected at execution, never a loop port — the agent loop never
+  names it. Stdlib-only. `port.LLMRequest` is UNCHANGED (the neutrality guard holds).
+- **Offline FAKE (reference adapter):** `engine/adapter/search/fakesearch.go` —
+  `Fake` (scripted results / error, captures the last `SearchQuery`, concurrency-safe)
+  and `Unavailable{}` (every Search returns `ErrSearchUnavailable` — the
+  composition's not-configured sentinel, the SearchProvider analogue of the no-shell
+  CommandRunner). Under `engine/adapter/*` so core test files may import it; a new
+  strict depguard rule (`engine-adapter-search`) pins it to `$gostd` + `engine/tool`,
+  no `os`, no network.
+- **Tool (ADAPTER):** `internal/adapter/tools/websearch.go` — `WebSearchTool` over a
+  `tool.SearchProvider`; `ReadOnly()==true` (read-parallel batch, same as WebFetch).
+  `Execute` validates (missing query → model-facing error result, NOT a Go error),
+  CLAMPS limit (default 5 absent/≤0; hard max 10), calls the provider, and handles
+  `ErrSearchUnavailable`/nil-provider → an honest "ask the operator" message (NOT an
+  error result — the tool exists, the backend just isn't set up) and empty → "no
+  results" (like Grep). **Bounding lives in the tool** (the choke point — the provider
+  may over-return): count → min(limit, hardMax), each snippet rune-truncated, then the
+  whole FENCED block through `toolkit.MaxOutputBytes`.
+- **Fencing (LLM01):** results are UNTRUSTED external content, wrapped via
+  `toolkit.FenceUntrusted` — a BYTE-IDENTICAL reproduction of `agent.WriteUntrustedBlock`
+  for the adapter layer (which cannot import `engine/agent`). The single-source-of-
+  truth drift risk is mitigated by `TestFenceUntrustedMatchesAgentFence`
+  (mutation-verified), which diffs the adapter copy against the real
+  `agent.WriteUntrustedBlock` over a corpus including the forged marker + every
+  framing header. The adversarial `TestWebSearchNeutralisesInjection` (also
+  mutation-verified) proves a forged inner fence + `Tool:`/`Team goal:` headers are
+  neutralised so a result can't break out and smuggle instructions.
+- **HTTP adapter (heavy):** `internal/adapter/search/httpsearch.go` — vendor-neutral
+  GET/POST JSON search (a SearXNG-style or generic `{"results":[…]}` endpoint, with
+  permissive field aliases: content/snippet/description, publishedDate/date,
+  engine/source). It carries its OWN per-call timeout (10s, honoring ctx) AND a
+  concurrency limiter (`golang.org/x/sync/semaphore`, default 4) — egress is bounded
+  IN THE ADAPTER, never the dispatcher or tool, because the read-parallel dispatcher
+  fans out N concurrent WebSearch calls per turn. The query is sent VERBATIM; the API
+  key rides the HEADER only (default `Authorization: Bearer …`), NEVER the query
+  string (secret-scanning is the guardrails layer's job, documented). Tests use
+  `httptest.Server` only — never a live endpoint (offline purity).
+- **Composition:** `buildSearchProvider(cfg)` returns the HTTP adapter when
+  `--websearch-url` is set, else `refsearch.Unavailable{}`; resolved ONCE in
+  `buildCatalog` and threaded onto `catalogAssets.searchProvider` so every per-session
+  catalog reuses the SAME provider (issue #42 — `TestPerSessionCatalogMatchesShared
+  Catalog` stays green). `registerCoreTools` registers WebSearch ALWAYS (both default
+  and no-FS profiles) — like WebFetch it never vanishes (silent-disable aversion); a
+  not-configured deployment gets the honest message. `defaultRules()` floor-Allows it
+  (`ScopeBuiltinDefault`, config-overridable — the real egress gate is the provider
+  config, not an Ask; lower-risk than WebFetch's arbitrary-URL fetch). Child catalogs
+  (`noFSChildCatalog`) carry it for read-only-discovery parity with WebFetch. Bare
+  `WebSearch` in a Claude allow imports VERBATIM (no demotion — documented in the
+  fail-safe table). ACP `toolKindFor` maps it to `"search"`.
+- **Operator flag:** `--websearch-url` (off by default), `--websearch-auth-header`,
+  `--websearch-query-param`; the key is read from `WEBSEARCH_API_KEY` (a secret, never
+  a flag value).
+
 ## Composition — `internal/app/` (multi-provider — see `MULTI-PROVIDER.md`)
 
 The single shared assembly of provider + catalog + policy + engine into a `server.Service`
@@ -2065,8 +2132,9 @@ engine has the FS tools baked in) and `server.SessionEngineFactory` grew a
 `profile SessionProfile` parameter, mirroring how the `ProviderSelector` flows.
 
 - **Catalog profile:** `catalogSession.noFS` threads through `assembleCatalog`.
-  `registerCoreTools(…, noFS)` registers `tools.NoFS()` = {WebFetch} (never Bash — the
-  configured runner is not consulted); `registerParallelTool` is SKIPPED (a branch is a
+  `registerCoreTools(…, noFS)` registers `tools.NoFS()` = {WebFetch} PLUS WebSearch (both
+  outbound reads, no filesystem) — never Bash (the configured runner is not consulted);
+  `registerParallelTool` is SKIPPED (a branch is a
   filesystem fork; the deliverable is a fork PATH); `registerSkillDraft` is SKIPPED (drafting
   writes a SKILL.md — a filesystem-authoring act). Everything else (global/client MCP +
   resource meta-tools, Subagent trio, Team/InspectMember, the memory six, Skill) registers
@@ -2084,7 +2152,7 @@ engine has the FS tools baked in) and `server.SessionEngineFactory` grew a
   registration), so `StartRun` never hands the empty root to the osfs factory (which would
   MkdirAll/OpenRoot the server process cwd). Persisted `Session.Workspace` is `""`.
 - **Child surface (Subagent + Team):** `noFSChildCatalog(assets)` = memory six + WebFetch +
-  global MCP — no FS tools, no shell, NO forkers (neither worktree nor force-copy; a
+  WebSearch + global MCP — no FS tools, no shell, NO forkers (neither worktree nor force-copy; a
   Mutating team-member spawn fails loudly at `selectMemberWorkspace`). Per-def specialist
   engines and def adoption are SKIPPED under no-fs (a def's scoped catalog/worktree
   expectations are file-oriented — a no-fs specialist tier is a conscious non-goal this

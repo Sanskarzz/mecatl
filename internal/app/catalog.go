@@ -79,6 +79,15 @@ type catalogAssets struct {
 	skillIndex     skillIndex
 	skillReadRoots []string
 	forkReaper     *agent.LRUForkReaper
+	// searchProvider is the process-wide tool.SearchProvider the WebSearch core
+	// tool is built over (issue #26). It is resolved ONCE in buildCatalog
+	// (buildSearchProvider): the operator-configured HTTP adapter when --websearch-url
+	// is set, else a not-configured sentinel that returns ErrSearchUnavailable so the
+	// always-present WebSearch tool surfaces an honest "ask the operator" message
+	// rather than vanishing. Threaded onto the assets so every per-session catalog
+	// reuses the SAME provider (issue #42 — no second resolution to drift), and into
+	// the child catalogs for read-only-discovery parity with WebFetch.
+	searchProvider tool.SearchProvider
 }
 
 // catalogSession is the PER-CATALOG variation: the resolved provider/model the
@@ -123,7 +132,7 @@ type catalogSession struct {
 // non-nil and safe to call.
 func assembleCatalog(ctx context.Context, cfg Config, reg *providerRegistry, store port.SessionStore, hooks port.HookRunner, a catalogAssets, s catalogSession) (*tool.Catalog, func() error) {
 	cat := tool.NewCatalog()
-	registerCoreTools(cfg, cat, s.narrate, s.noFS)
+	registerCoreTools(cfg, cat, s.narrate, s.noFS, a.searchProvider)
 
 	mountGlobalMCP(ctx, cfg, cat, a, s)
 	clientClose := mountClientMCP(ctx, cfg, cat, s)
@@ -360,8 +369,9 @@ func registerSkillFamily(ctx context.Context, cfg Config, cat *tool.Catalog, a c
 // noFSChildCatalog builds the file-less CHILD tool surface every no-FS
 // delegation target (Subagent explorer child, per-call model-override child,
 // team member) runs with: the six memory/user-model tools over the SHARED
-// flocked stores, WebFetch, and the server-global MCP tools — and nothing that
-// touches a filesystem (no Read/Grep/Glob, no Bash, no Edit/Write). A fresh
+// flocked stores, WebFetch + WebSearch (search-then-fetch discovery), and the
+// server-global MCP tools — and nothing that touches a filesystem (no
+// Read/Grep/Glob, no Bash, no Edit/Write). A fresh
 // catalog per call (the readOnlyExplorerCatalog idiom: one catalog per engine).
 // The global MCP tools are REUSED from the shared manager, never reconnected.
 func noFSChildCatalog(ctx context.Context, cfg Config, a catalogAssets) *tool.Catalog {
@@ -369,6 +379,10 @@ func noFSChildCatalog(ctx context.Context, cfg Config, a catalogAssets) *tool.Ca
 	for _, t := range tools.NoFS() {
 		cat.MustRegister(t)
 	}
+	// WebSearch (issue #26) for read-only-discovery parity with WebFetch: a no-FS
+	// explorer's natural workflow is search-then-fetch, so it carries both. Built
+	// over the SAME process-wide provider as the main catalog (a.searchProvider).
+	cat.MustRegister(tools.NewWebSearchTool(a.searchProvider))
 	if a.globalMgr != nil {
 		if skipped, rerr := mcp.Register(cat, a.globalMgr.Tools()); rerr != nil {
 			cfg.diag().Log(ctx, port.LevelWarn,
