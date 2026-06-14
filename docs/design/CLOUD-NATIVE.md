@@ -280,10 +280,26 @@ stays the replay projection; the log is additive.
   loop storage-agnostic: the loop only EMITS `EvCompactionArchive`; the replay lives in
   composition. Like `EvApproval`, `EvCompactionArchive` is log-only (skipped on the
   client wire).
-- **3c:** the driver service (`EventLogService` in driver/v1), same
-  conformance-as-contract discipline as the other six. This is also the prerequisite
-  issue #28 (session-scoped background detach) has been waiting on; #28 itself stays
-  its own arc.
+- **3c (SHIPPED):** the driver service (`EventLogService`,
+  `contracts/proto/mecatl/driver/v1/event_log.proto`), the PROD/remote path for the
+  durable log, same conformance-as-contract discipline as the other six seams. The Go
+  `port.EventLog` is THE contract; the gRPC service is ONE adapter, validated against
+  the SAME `engine/adapter/eventlogconformance/eventlogconformance.go` (`Run`) suite the
+  local jsonlstore passes (the client over bufconn and the jsonlstore reference both run
+  it). Append is UNARY; Read is SERVER-STREAMING (the FIRST streaming driver RPC; every
+  other seam is unary), chosen because a run's log grows unbounded (a unary Read would
+  hit the 64 MiB cap) and a stream maps 1:1 onto `port.EventLog`'s lazy `iter.Seq2` Read.
+  The event crosses as an opaque format-tagged blob (`eventlog-json/1`, the SAME tag the
+  jsonlstore writes), decoded harness-side only, exactly like the SessionStore snapshot
+  (`internal/adapter/grpcdriver/eventlog.go` (`EventLog`) is the client,
+  `internal/adapter/grpcdriver/eventlog.go` (`NewEventLogServer`) the server wrapper).
+  Composition wires it via `--event-log-url` through the existing `driverConns`
+  connection cache, INDEPENDENT of the session store (`internal/app/build.go`
+  (`buildStore`)); empty = the local default, byte-identical to pre-3c. This is the
+  prerequisite issue #28 (session-scoped background detach) has been waiting on; #28
+  itself stays its own arc.
+
+With 3c shipped, **Phase 3 is COMPLETE**.
 
 Gate (MET, lands with 3b): a session with one compaction and three verdicts can be
 fully reconstructed (user-rich timeline including pre-compaction turns) from store +
@@ -321,6 +337,22 @@ session id (process-scoped, bounded by the session count the Service already tra
 not an inventory row, the same shape as `Service.resumeMu`. List 2: row 4 (permstore
 rules) moves to RESOLVED (replayed from the log), and row 9 (pre-compaction history)
 moves to RESOLVED (archived to the log). The re-audit verdict is CLEAN.
+
+**Phase 3c re-audit (List 1 / List 2).** Phase 3c added NO new inventory row. The
+per-session grpcdriver EventLog client (`internal/adapter/grpcdriver/eventlog.go`
+(`EventLog`)) is a process/handle exactly like the other six driver clients: it rides
+the EXISTING `driverConns` connection cache (List 1 row 19, `internal/app/driverstore.go:54-90`):
+equal URLs share one lazy `ClientConn`, and a deployment can point `--event-log-url`
+at the same driver process as `--session-store-url` to multiplex one connection, so it
+introduces no new outlives-a-call resource, only one more consumer of an existing one.
+Its server-streaming Read opens a stream per replay that the client's iterator closes on
+early break (a child-context cancel honouring the `iter.Seq2` early-exit obligation),
+held only for the duration of one `Read` call, never across calls. The
+`engine/adapter/eventlogconformance/eventlogconformance.go` (`Run`) suite is a test-only
+artifact (no production resource). List 2 is unchanged: the durable log itself was
+already row 8 (jsonlstore) / row 4+9 (RESOLVED via the log); 3c only swaps WHERE the log
+lives (local file vs remote driver), not WHAT it durably holds. The re-audit verdict is
+CLEAN: no new resource whose lifecycle escapes a call.
 
 ### Phase 4: multi-replica readiness (defer until a real deployment wants it)
 

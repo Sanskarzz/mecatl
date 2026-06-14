@@ -172,6 +172,7 @@ type config struct {
 	soulSourceURL    string
 	agentSourceURL   string
 	commandSourceURL string
+	eventLogURL      string
 	driverAuthToken  string
 	driverTLS        bool
 	driverTLSCA      string
@@ -756,6 +757,7 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		ChildGCInterval:              cfg.childGCInterval,
 		SessionStoreURL:              cfg.sessionStoreURL,
 		MemoryStoreURL:               cfg.memoryStoreURL,
+		EventLogURL:                  cfg.eventLogURL,
 		SkillSourceURL:               cfg.skillSourceURL,
 		SoulSourceURL:                cfg.soulSourceURL,
 		AgentSourceURL:               cfg.agentSourceURL,
@@ -904,6 +906,7 @@ func parseFlags(argv []string) (config, error) {
 	fs.IntVar(&cfg.childRetentionMaxPerFamily, "child-retention-max-per-family", 500, "max persisted child session snapshots kept per delegation family (subagent/parallel/team); the oldest beyond the cap are deleted, skipping in-flight runs. Durable-store-only, like --child-retention. 0 disables the cap")
 	fs.DurationVar(&cfg.childGCInterval, "child-gc-interval", time.Hour, "how often the child-session retention GC re-sweeps after the startup sweep; 0 = sweep at startup only. Only meaningful when --child-retention or --child-retention-max-per-family is active")
 	fs.StringVar(&cfg.memoryStoreURL, "memory-store-url", "", "host:port of a remote memory-store gRPC driver (mecatl.driver.v1.MemoryStoreService); replaces the local flock store, so it is mutually exclusive with --memory-dir. Enables the Remember/Recall tools like --memory-dir does. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
+	fs.StringVar(&cfg.eventLogURL, "event-log-url", "", "host:port of a remote event-log gRPC driver (mecatl.driver.v1.EventLogService) for the durable per-session event timeline (reasoning, ask/verdict pairs, delegation lifecycle); INDEPENDENT of the session store. Empty keeps the local default (the --store-dir jsonl log, or in-memory). Append happens at the relay (a fault WARNs, never aborts the run); Read is server-streaming. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 	fs.StringVar(&cfg.driverAuthToken, "driver-auth-token", "", "bearer token sent on every store-driver RPC (or MECATL_DRIVER_AUTH_TOKEN; empty disables driver auth). Refused over cleartext to a non-loopback driver — pair with --driver-tls")
 	fs.BoolVar(&cfg.driverTLS, "driver-tls", false, "enable transport TLS on the store-driver connections (--session-store-url/--memory-store-url)")
 	fs.StringVar(&cfg.driverTLSCA, "driver-tls-ca", "", "PEM CA bundle to verify the store driver's server certificate (with --driver-tls; empty uses the system roots)")

@@ -3,6 +3,7 @@ package memstore_test
 import (
 	"testing"
 
+	"github.com/stacklok/mecatl/engine/adapter/eventlogconformance"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/storeconformance"
 	"github.com/stacklok/mecatl/engine/port"
@@ -22,5 +23,13 @@ func TestMemstoreConformance(t *testing.T) {
 func TestMemstorePrunableConformance(t *testing.T) {
 	storeconformance.RunPrunable(t, func(*testing.T) port.SessionStore {
 		return memstore.New()
+	})
+}
+
+// TestMemstoreEventLogConformance runs the shared EventLog conformance table
+// against the in-memory reference event log (the no-store-dir offline default).
+func TestMemstoreEventLogConformance(t *testing.T) {
+	eventlogconformance.Run(t, func(*testing.T) port.EventLog {
+		return memstore.NewEventLog()
 	})
 }

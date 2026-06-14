@@ -450,6 +450,22 @@ func sourceStatus(err error) error {
 	}
 }
 
+// eventLogStatus maps a wrapped event log's error onto the driver protocol's
+// status vocabulary. The EventLog port has NO not-found sentinel — a miss is an
+// empty Read stream, never an error (absence is data) — so there is no
+// NOT_FOUND row: context errors → CANCELLED / DEADLINE_EXCEEDED, everything
+// else (an Append durability fault, a Read I/O fault) → INTERNAL.
+func eventLogStatus(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return status.Error(codes.Canceled, err.Error())
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, err.Error())
+	default:
+		return status.Error(codes.Internal, err.Error())
+	}
+}
+
 // toProtoServerEntries projects store entries onto the wire form for
 // responses, carrying the store's stamped UpdatedAt (toProtoEntry already
 // guards the zero time → unset).

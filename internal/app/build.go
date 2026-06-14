@@ -251,11 +251,20 @@ type Config struct {
 	SoulSourceURL    string
 	AgentSourceURL   string
 	CommandSourceURL string
-	DriverAuthToken  string
-	DriverTLS        bool
-	DriverTLSCA      string
-	DriverTLSCert    string
-	DriverTLSKey     string
+	// EventLogURL (cloud-native Phase 3c) points the DURABLE event log at a
+	// mecatl.driver.v1.EventLogService driver, INDEPENDENT of the session store
+	// (the event log is a separate seam — Append-beside-the-relay, server-
+	// streaming Read). Empty keeps today's behaviour byte-identical: the local
+	// jsonlstore Store doubles as its own EventLog, the memstore path uses its
+	// in-memory sibling, and a session-store DRIVER without this flag records
+	// nothing (the relay no-ops). It shares the same Driver* auth/TLS posture
+	// and per-target connection cache as the store drivers.
+	EventLogURL     string
+	DriverAuthToken string
+	DriverTLS       bool
+	DriverTLSCA     string
+	DriverTLSCert   string
+	DriverTLSKey    string
 
 	// Soul (issue #14, Phase 1): a user-scoped, agent-READ-ONLY persona fragment
 	// injected as a turn-0 user message. ON by default reading the conventional
@@ -1320,20 +1329,52 @@ func buildProvider(cfg Config) (*providerRegistry, port.LLMProvider, error) {
 // returned close func releases the driver connection (a no-op for the local
 // stores) and chains into Build's closeAll; it is always non-nil on success.
 //
-// The EventLog is the SAME jsonlstore Store instance for the on-disk path (one
-// Store serves SessionStore + ToolCallRecorder + EventLog over a shared mu/dir).
-// The memstore path returns a fresh in-memory EventLog sibling so the seam is
-// never nil offline. The gRPC-driver path leaves EventLog nil in 3a (the driver
-// EventLogService is a 3c concern); the relay then records nothing — a clean
-// no-op until the driver lands.
+// The EventLog seam is INDEPENDENT of the session store (cloud-native 3c). When
+// EventLogURL is set, the durable log is a grpcdriver EventLogService client
+// (server-streaming Read), regardless of where the session store lives — its
+// own dialled connection (shared via the driverConns cache when the URL equals
+// another driver's) and its own close func, chained into the returned teardown.
+//
+// When EventLogURL is EMPTY the behaviour is byte-identical to pre-3c: the local
+// jsonlstore Store doubles as its own EventLog (one Store serves SessionStore +
+// ToolCallRecorder + EventLog over a shared mu/dir), the memstore path uses its
+// in-memory sibling so the seam is never nil offline, and a session-store DRIVER
+// leaves EventLog nil (the relay records nothing — a clean no-op).
 func buildStore(cfg Config) (port.SessionStore, port.EventLog, func(), error) {
+	store, log, closeStore, err := buildSessionStore(cfg)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// An explicit --event-log-url overrides the store-derived default EventLog
+	// (including the nil session-store-driver default), pointing the durable log
+	// at its own EventLogService driver.
+	if cfg.EventLogURL != "" {
+		conn, closeLog, derr := cfg.drivers().dial(cfg, cfg.EventLogURL)
+		if derr != nil {
+			closeStore()
+			return nil, nil, nil, fmt.Errorf("dial event-log driver %q: %w", cfg.EventLogURL, derr)
+		}
+		cfg.diag().Log(context.Background(), port.LevelInfo, "event log: grpc driver", "target", cfg.EventLogURL)
+		log = grpcdriver.NewEventLog(conn)
+		closeStore = chainClose(closeStore, closeLog)
+	}
+	return store, log, closeStore, nil
+}
+
+// buildSessionStore constructs the SessionStore plus the STORE-DERIVED default
+// EventLog (the byte-identical-to-pre-3c default): the jsonlstore Store doubles
+// as both, the memstore path supplies an in-memory sibling, and a session-store
+// driver leaves the EventLog nil. The --event-log-url override is layered on top
+// in buildStore.
+func buildSessionStore(cfg Config) (port.SessionStore, port.EventLog, func(), error) {
 	if cfg.SessionStoreURL != "" {
 		conn, closeFn, err := cfg.drivers().dial(cfg, cfg.SessionStoreURL)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("dial session-store driver %q: %w", cfg.SessionStoreURL, err)
 		}
 		cfg.diag().Log(context.Background(), port.LevelInfo, "session store: grpc driver", "target", cfg.SessionStoreURL)
-		// EventLog over the driver is 3c; nil here = the relay records nothing.
+		// The EventLog over a session-store driver is nil unless --event-log-url
+		// names one; nil here = the relay records nothing.
 		return grpcdriver.NewSessionStore(conn), nil, closeFn, nil
 	}
 	if cfg.StoreDir == "" {
@@ -1347,6 +1388,15 @@ func buildStore(cfg Config) (port.SessionStore, port.EventLog, func(), error) {
 	cfg.diag().Log(context.Background(), port.LevelInfo, "session store: jsonl", "dir", cfg.StoreDir)
 	// The one Store also implements port.EventLog — wire it as both.
 	return st, st, func() {}, nil
+}
+
+// chainClose composes two close funcs into one that runs both (the second
+// even if appended after the first), preserving each func's own idempotency.
+func chainClose(first, second func()) func() {
+	return func() {
+		first()
+		second()
+	}
 }
 
 // buildEngine assembles the parent agent.Engine: the core tool catalog (plus an

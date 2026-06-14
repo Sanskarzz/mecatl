@@ -126,6 +126,38 @@ func TestBuildStoreDefaults(t *testing.T) {
 	})
 }
 
+// TestBuildStoreEventLogURL pins the cloud-native 3c override: an
+// --event-log-url points the durable EventLog at a grpcdriver EventLogService
+// client, INDEPENDENT of where the session store lives. Offline-safe (lazy
+// grpc.NewClient). The two cases prove the override applies both when the
+// store-derived default is a concrete log (in-memory) and when it is nil (a
+// session-store driver).
+func TestBuildStoreEventLogURL(t *testing.T) {
+	t.Run("over the in-memory default", func(t *testing.T) {
+		st, eventLog, closeFn, err := buildStore(Config{EventLogURL: "127.0.0.1:7444"})
+		if err != nil {
+			t.Fatalf("buildStore(EventLogURL): %v", err)
+		}
+		defer closeFn()
+		if _, ok := st.(*memstore.Store); !ok {
+			t.Fatalf("buildStore(EventLogURL) store = %T, want *memstore.Store (store unaffected)", st)
+		}
+		if _, ok := eventLog.(*grpcdriver.EventLog); !ok {
+			t.Fatalf("buildStore(EventLogURL) eventLog = %T, want *grpcdriver.EventLog", eventLog)
+		}
+	})
+	t.Run("over a session-store driver (nil default)", func(t *testing.T) {
+		_, eventLog, closeFn, err := buildStore(Config{SessionStoreURL: "127.0.0.1:7443", EventLogURL: "127.0.0.1:7444"})
+		if err != nil {
+			t.Fatalf("buildStore(SessionStoreURL+EventLogURL): %v", err)
+		}
+		defer closeFn()
+		if _, ok := eventLog.(*grpcdriver.EventLog); !ok {
+			t.Fatalf("buildStore(SessionStoreURL+EventLogURL) eventLog = %T, want *grpcdriver.EventLog (override beats the nil driver default)", eventLog)
+		}
+	})
+}
+
 // TestDriverConnsShareEqualTargets pins the connection cache: two dials of
 // the SAME target share one ClientConn (a deployment pointing both stores at
 // one driver multiplexes one connection), distinct targets do not, and the

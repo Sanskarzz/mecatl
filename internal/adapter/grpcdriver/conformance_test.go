@@ -7,6 +7,7 @@ import (
 	"google.golang.org/grpc"
 
 	driverv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/driver/v1"
+	"github.com/stacklok/mecatl/engine/adapter/eventlogconformance"
 	"github.com/stacklok/mecatl/engine/adapter/memconformance"
 	"github.com/stacklok/mecatl/engine/adapter/memstore"
 	"github.com/stacklok/mecatl/engine/adapter/sourceconformance"
@@ -44,6 +45,22 @@ func TestGRPCSessionStorePrunableConformance(t *testing.T) {
 			driverv1.RegisterSessionStoreServiceServer(gs, NewSessionStoreServer(memstore.New()))
 		})
 		return NewSessionStore(conn)
+	})
+}
+
+// TestGRPCEventLogConformance runs the shared EventLog conformance table over
+// grpcdriver → bufconn → NewEventLogServer(memstore.NewEventLog()): the SAME
+// suite the local jsonlstore passes, now over the full client → wire →
+// server-wrapper → reference-backend path (the dual-path contract-unification —
+// the Go port is the contract, the gRPC service is one adapter). The
+// server-streaming Read RPC is exercised end-to-end, including the empty-stream
+// (unknown-session) and append-order subtests.
+func TestGRPCEventLogConformance(t *testing.T) {
+	eventlogconformance.Run(t, func(t *testing.T) port.EventLog {
+		conn := dialBufconn(t, func(gs *grpc.Server) {
+			driverv1.RegisterEventLogServiceServer(gs, NewEventLogServer(memstore.NewEventLog()))
+		})
+		return NewEventLog(conn)
 	})
 }
 

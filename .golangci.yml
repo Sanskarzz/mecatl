@@ -296,6 +296,18 @@ linters:
           deny:
             - pkg: os
               desc: 'sourceconformance drives the abstract SkillSource/SoulSource contracts; it must not touch the real OS'
+        engine-adapter-eventlogconformance:
+          list-mode: strict
+          files:
+            - '**/engine/adapter/eventlogconformance/**.go'
+            - '!$test'
+          allow:
+            - $gostd
+            - github.com/stacklok/mecatl/engine/port
+            - github.com/stacklok/mecatl/engine/session
+          deny:
+            - pkg: os
+              desc: 'eventlogconformance drives the abstract EventLog contract; it must not touch the real OS'
         engine-adapter-search:
           list-mode: strict
           files:
@@ -409,7 +421,8 @@ linters:
           - goconst
           - unparam
         path: (.+)_test\.go
-      # fsconformance/memconformance/storeconformance/sourceconformance are shared
+      # fsconformance/memconformance/storeconformance/sourceconformance/
+      # eventlogconformance are shared
       # test-helper packages (importing "testing" in a non-_test.go file, the
       # conventional Go pattern à la testing/fstest). Their conformance tables are
       # dense like tests, so apply the same relaxations.
@@ -441,6 +454,13 @@ linters:
           - goconst
           - unparam
         path: engine/adapter/sourceconformance/
+      - linters:
+          - gocyclo
+          - errcheck
+          - gosec
+          - goconst
+          - unparam
+        path: engine/adapter/eventlogconformance/
       - linters:
           - revive
         path: .golangci.yml

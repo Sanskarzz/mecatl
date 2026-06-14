@@ -87,6 +87,7 @@ client/wrappers for external Go consumption is the recorded Deferred §1.
 | Soul | `prompt.SoulSource` (`engine/prompt/soul.go`) | load per turn 0 | `soul.Store` | `SoulSourceService` | `sourceconformance.RunSoulSource` | build `Probe` fail = FATAL; runtime fault = `("", nil)` + WARN (the port's fail-soft contract) |
 | Agent defs | `tool.AgentDefSource` (`engine/tool/agentsource.go`) | **snapshot** at build | `agents.FSSource` | `AgentSourceService` | `sourceconformance.RunAgentSource` | build snapshot (ONE `ListAgentDefs`) fail = FATAL; no runtime RPCs exist |
 | Slash commands | `prompt.CommandSource` (`engine/prompt/commandsource.go`) | **live** per expand/list | none — `DirCommandExpander` is the workspace-tier surface, deliberately NOT a port impl | `CommandSourceService` | `sourceconformance.RunCommandSource` | build `Probe` fail = FATAL; runtime fault FAILS SOFT (WARN + pass-through), never latches a command "missing" |
+| Event log | `port.EventLog` (`engine/port/eventlog.go`) — Append + server-streaming Read | live per relayed event (Append) / per replay (Read) | `jsonlstore` (the Store doubles as its own log), `memstore.EventLog` (offline sibling) | `EventLogService` | `eventlogconformance.Run` | no build probe (lazy dial, INDEPENDENT of the session store via `--event-log-url`); an Append fault is a relay WARN that NEVER aborts the run (a broken log must not break the live stream); a Read miss is an EMPTY stream, never NOT_FOUND |
 
 The snapshot-vs-live split is principled, not incidental:
 
@@ -122,17 +123,36 @@ itself is replaced, and a future bump MUST be read-set-accept / write-newest
 or every stored session bricks. The harness rejects an unknown format on Load
 with an infrastructure error, never `ErrSessionNotFound`.
 
+The **event log crosses the same way**: each event is a `bytes payload` +
+`string format` where the payload is `json.Marshal` of a `session.Event` and
+`format` is `grpcdriver.EventLogFormat = "eventlog-json/1"` — the SAME tag the
+local `jsonlstore` writes inside its on-disk record, so the wire and the file
+version the one event encoding. The driver round-trips the envelope VERBATIM
+and never decodes a typed event field (no typed `session.Event` fields ever
+ride the wire — gauntlet #7 inherited: the event stream is already
+metadata-redacted at the relay). The server wrapper re-decodes the payload into
+a value `session.Event` only to feed its value-typed port backend (exactly the
+SessionStore wrapper's snapshot decode), and re-encodes on Read; the wrapped
+backend never sees the wire bytes. The same read-set-accept / write-newest
+discipline applies to a future event-format bump.
+
 **Capacity: 64 MiB unary, no streaming.** `grpcdriver.MaxSnapshotBytes`
 (64 MiB, `internal/adapter/grpcdriver/sessionstore.go`) is the protocol's
 required minimum message capacity: media-carrying snapshots far exceed gRPC's
 4 MiB default, so `Dial` raises the client send/recv limits and a conforming
 driver mounts `grpc.MaxRecvMsgSize(MaxSnapshotBytes)` (pinned by the
 storeconformance large-snapshot subtest, which FAILS over default limits).
-Every RPC in the protocol is unary because every payload fits under that
+Every store/source RPC is unary because every payload fits under that
 ceiling — skill assets ride the same 64 MiB bound that `osfs` enforces on
 Read (`maxReadBytes`), so streaming/chunking would buy nothing and would
-complicate every driver implementation in every language. The first seam that
-genuinely needs more is the workspace driver — which is exactly why it is a
+complicate every driver implementation in every language. The lone exception
+is `EventLogService.Read` (`contracts/proto/mecatl/driver/v1/event_log.proto`),
+which is SERVER-STREAMING: a run's event log grows unbounded, so a unary Read
+would eventually hit the 64 MiB cap, and a stream maps 1:1 onto
+`port.EventLog`'s lazy `iter.Seq2` Read. Its events are individually small
+(well under the 4 MiB default), so EventLog needs no raised message cap — the
+stream frames each event as its own message. The first seam that genuinely
+needs unary chunking is the workspace driver — which is exactly why it is a
 sketch, not a service (below).
 
 **Error mapping conventions** (the per-seam tables are in

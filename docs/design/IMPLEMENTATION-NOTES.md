@@ -2433,8 +2433,9 @@ yet (a replay consumer is Phase 3b). See `CLOUD-NATIVE.md` (Phase 3, ledger row 
   layer (`internal/app/build.go` (`buildStore`)) wires the jsonlstore `Store` as both
   `SessionStore` and `EventLog`; the memstore default supplies an in-memory
   `engine/adapter/memstore/eventlog.go` (`EventLog`) sibling so the seam is never nil
-  offline (and is the mockable seam the gate asserts against); the gRPC-driver path leaves
-  it nil in 3a (the driver `EventLogService` is 3c).
+  offline (and is the mockable seam the gate asserts against); the session-store-driver
+  path leaves it nil UNLESS `--event-log-url` names an `EventLogService` driver (Phase 3c,
+  below).
 - **Nothing model-facing.** The log is a client/audit + infra artifact: there is no tool,
   id, or text the MODEL supplies or reads. The runtime-discoverability axis is N/A.
 - **Gates.** `internal/adapter/server/eventlog_test.go`
@@ -2536,6 +2537,51 @@ history; a later reader reconstructs the rich timeline from BOTH. See
   fails). `TestPhase3LogNoChildLeak` is the no-leak mutation-verify: a Subagent child's
   secret-shaped arg never appears in any logged event body (mutation-killed: forwarding
   raw child args on a `subagent.tool` event → the sentinel surfaces in the log).
+
+### Durable event log — driver (cloud-native Phase 3c)
+
+The PROD/remote path for the durable log: `EventLogService`
+(`contracts/proto/mecatl/driver/v1/event_log.proto`), the 7th driver seam. The dual-path
+design — `port.EventLog` is THE contract, the gRPC service is ONE adapter — validated
+against the SAME conformance suite as the local jsonlstore. With it Phase 3 is COMPLETE,
+and it is the prerequisite issue #28 (session-scoped background detach) was waiting on.
+
+- **Append UNARY, Read SERVER-STREAMING — the first streaming driver RPC.** Every other
+  driver seam is unary because every payload fits under the 64 MiB cap; the event log
+  does NOT — a run's log grows unbounded, so a unary Read would eventually hit the cap.
+  Server-streaming Read maps 1:1 onto `port.EventLog`'s lazy `iter.Seq2` Read, and
+  individual events are small (well under the 4 MiB default), so unlike the SessionStore
+  driver, EventLog needs NO raised message cap. `AppendRequest{session_id, LoggedEvent}`,
+  `ReadRequest{session_id}`, the Read stream yields `ReadResponse{LoggedEvent}`.
+- **Opaque format-tagged blob, decoded harness-side only.** The event crosses as
+  `LoggedEvent{bytes payload, string format}` where `payload` is `json.Marshal` of a
+  `session.Event` and `format` is `grpcdriver.EventLogFormat = "eventlog-json/1"` — the
+  SAME tag the local jsonlstore writes inside its `{"v":...,"ev":...}` record, so the wire
+  and the file version the one event encoding. No typed `session.Event` field ever rides
+  the wire (gauntlet #7 inherited — the relay already redacts the stream).
+  `internal/adapter/grpcdriver/eventlog.go` (`EventLog`) is the CLIENT (encode on Append,
+  decode the stream on Read; an unknown format/decode fault yields `(zero, err)` then
+  stops, honouring the port; an empty stream → empty sequence, absence-as-data; a child
+  context cancels the stream on early break). `internal/adapter/grpcdriver/eventlog.go`
+  (`NewEventLogServer`) is the SERVER wrapper: it confines all proto/status translation
+  and re-decodes the payload into a value `session.Event` only to feed its value-typed
+  port backend (exactly the SessionStore wrapper's snapshot decode), re-encoding on Read —
+  the wrapped backend never sees the wire bytes. `internal/adapter/grpcdriver/server.go`
+  (`eventLogStatus`) maps backend errors onto the status vocabulary; there is NO NOT_FOUND
+  row (a Read miss is an empty stream, never an error).
+- **Conformance-as-contract.** `engine/adapter/eventlogconformance/eventlogconformance.go`
+  (`Run`) is the shared suite: append-then-read-in-order, unknown-session → empty
+  sequence, append-order-not-Seq-order, distinct-sessions, large-event. The jsonlstore
+  reference (`TestJSONLStoreEventLogConformance`), the memstore sibling
+  (`TestMemstoreEventLogConformance`), AND the grpcdriver client over bufconn
+  (`TestGRPCEventLogConformance`, client → bufconn → `NewEventLogServer(memstore.EventLog)`)
+  all pass it — the contract-unification that IS the point of the dual-path design.
+- **Composition.** `--event-log-url` (`cmd/mecated/main.go`) → `Config.EventLogURL`
+  (`internal/app/build.go`), dialled through the existing `driverConns` cache, INDEPENDENT
+  of the session store: `internal/app/build.go` (`buildStore`) layers the driver EventLog
+  over the store-derived default (`buildSessionStore`), so an explicit URL overrides even
+  the nil session-store-driver default. Empty = the local default, byte-identical to
+  pre-3c (pinned by `TestBuildStoreEventLogURL` + the unchanged `TestBuildStoreDefaults`).
 
 ## Proto — `contracts/proto/mecatl/v1/` (multi-provider Phase 0 S3 wire surface)
 

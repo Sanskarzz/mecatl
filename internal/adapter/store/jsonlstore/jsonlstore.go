@@ -119,11 +119,21 @@ const (
 	eventsFileSuffix  = ".events.jsonl"
 )
 
-// eventLogFormat is the per-record format tag written on every event-log line.
+// EventLogFormat is the per-record format tag written on every event-log line.
 // It versions the on-disk encoding so the language-neutral driver wire (3c) and
 // any future format change can be distinguished; Read rejects an unknown tag as
 // an infra error (a forward-incompatible log must fail loud, not silently skip).
-const eventLogFormat = "eventlog-json/1"
+//
+// It is EXPORTED so the gRPC driver wire (`internal/adapter/grpcdriver.EventLogFormat`)
+// can be pinned EQUAL to it by a test: the wire payload is exactly this record's
+// "ev" bytes (json.Marshal of a session.Event), so the two tags MUST agree or a
+// log written by one path is unreadable by the other (the one-codec claim). The
+// unexported alias keeps the in-file call sites terse.
+const EventLogFormat = "eventlog-json/1"
+
+// eventLogFormat is the in-file alias of EventLogFormat (keeps the existing call
+// sites terse; the two are the one constant).
+const eventLogFormat = EventLogFormat
 
 // eventLogRecord is one .events.jsonl line: a format tag plus the verbatim
 // session.Event JSON. The event is stored as already-redacted JSON (the relay is

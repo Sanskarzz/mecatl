@@ -1,0 +1,114 @@
+// SPDX-FileCopyrightText: Copyright 2026 Stacklok, Inc.
+// SPDX-License-Identifier: LicenseRef-Stacklok-Proprietary
+
+// mecatl driver API: the remote event-log protocol.
+//
+// EventLogService is the wire seam behind the harness's `port.EventLog`
+// (engine/port/eventlog.go): an operator-run driver process persists the
+// append-only, per-session DURABLE record of a run's event stream — the rich
+// timeline (live reasoning, ask/verdict pairs, delegation lifecycle) the
+// gRPC/HTTP relay otherwise emits and discards — in place of the in-process
+// jsonlstore. The driver sits at the SAME trust tier as an on-disk store
+// directory: operator-configured infrastructure, not a model-facing surface.
+//
+// The event payload is OPAQUE to the driver: it is exactly the harness's
+// per-event JSON encoding, identified by the envelope's `format` tag
+// ("eventlog-json/1" today; see internal/adapter/grpcdriver.EventLogFormat,
+// the SAME tag the local jsonlstore writes). The driver stores and returns the
+// bytes VERBATIM and never decodes them — event schema evolution lives in
+// session.Event (additive JSON), while format identification lives in this
+// envelope. This mirrors how the session snapshot crosses on
+// SessionStoreService: opaque, format-tagged bytes, decoded harness-side only.
+//
+// The log records ALREADY-REDACTED events (the relay is the redaction
+// boundary — Subagent/Parallel payloads metadata-only, Team previews capped,
+// surfaced child asks clamped; gauntlet #7), so the driver adds no redaction.
+//
+// Driver contract (mirrors port.EventLog):
+//   - Append durably records one event under a session id, in raw APPEND order.
+//     A non-OK status means "not recorded": the harness relay logs a WARN and
+//     never aborts the live run, but it relies on OK meaning durable (a backend
+//     that cannot guarantee durability before responding MUST return an error,
+//     not buffer silently). The caller appends each event AT MOST ONCE and
+//     never retries, so a driver need NOT deduplicate.
+//   - Read STREAMS the session's recorded events in the exact order Append
+//     received them — implementations MUST NOT reorder. A session id that was
+//     never appended to yields an EMPTY stream (absence is data, never
+//     NOT_FOUND), exactly like an empty conversation. A mid-stream
+//     infrastructure fault aborts the stream with a non-OK status.
+//
+// Read is SERVER-STREAMING (unlike every other driver RPC, which is unary): a
+// run's log grows unbounded, so a unary Read would eventually hit the 64 MiB
+// message cap, and the stream maps 1:1 onto port.EventLog.Read's lazy
+// iter.Seq2.
+//
+// Validation: required-field annotations are authored with `buf.validate.field`
+// for documentation and future runtime enforcement; V1 enforces them in the Go
+// client/server wrappers (internal/adapter/grpcdriver).
+
+syntax = "proto3";
+
+package mecatl.driver.v1;
+
+import "buf/validate/validate.proto";
+
+// EventLogService persists and replays opaque, format-tagged run events keyed
+// by session id. Append is the remote analogue of port.EventLog.Append; Read
+// (server-streaming) is the remote analogue of its lazy iter.Seq2 Read.
+service EventLogService {
+  // Append durably records one event under session_id, in append order. A
+  // successful response means the event is on stable storage; a non-OK status
+  // means "not recorded" (the harness relay WARNs and continues the run).
+  rpc Append(AppendRequest) returns (AppendResponse);
+
+  // Read streams the session's recorded events in append order. A session id
+  // that was never appended to yields an EMPTY stream — NEVER NOT_FOUND; the
+  // harness maps an empty stream to an empty sequence (absence is data). A
+  // mid-stream infrastructure fault terminates the stream with a non-OK status.
+  rpc Read(ReadRequest) returns (stream ReadResponse);
+}
+
+// LoggedEvent is the opaque event envelope: a format tag plus the encoded
+// payload. The driver round-trips both fields VERBATIM and never decodes the
+// payload; decode happens harness-side (json.Unmarshal into session.Event).
+//
+// CAPACITY: a single event is small (well under the gRPC 4 MiB default), so —
+// unlike the session snapshot — no raised message cap is required. The
+// server-streaming Read frames each event as its own message, so a long log
+// never accumulates into one oversized response.
+message LoggedEvent {
+  // format identifies the payload encoding ("eventlog-json/1" today). The
+  // harness writes it on Append and rejects an unknown format on Read with an
+  // infrastructure error (a forward-incompatible log must fail loud).
+  string format = 1 [(buf.validate.field).string.min_len = 1];
+
+  // payload is the encoded event — exactly the bytes the harness wrote
+  // (json.Marshal of session.Event for format "eventlog-json/1").
+  bytes payload = 2 [(buf.validate.field).bytes.min_len = 1];
+}
+
+// AppendRequest carries one event to record under a session id.
+message AppendRequest {
+  // session_id is the storage key the event is appended under. The driver keys
+  // and orders its storage by this id WITHOUT decoding the opaque payload.
+  string session_id = 1 [(buf.validate.field).string.min_len = 1];
+
+  // event is the opaque envelope to record verbatim.
+  LoggedEvent event = 2 [(buf.validate.field).required = true];
+}
+
+// AppendResponse is empty: a successful Append has no payload.
+message AppendResponse {}
+
+// ReadRequest asks for the full recorded event stream under a session id.
+message ReadRequest {
+  // session_id is the id whose events to replay.
+  string session_id = 1 [(buf.validate.field).string.min_len = 1];
+}
+
+// ReadResponse carries one recorded event of the stream, in append order.
+message ReadResponse {
+  // event is the envelope exactly as it was appended (format + payload
+  // verbatim).
+  LoggedEvent event = 1 [(buf.validate.field).required = true];
+}
