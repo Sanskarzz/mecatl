@@ -403,10 +403,11 @@ func (h *HTTPHandler) relayRunSSE(w http.ResponseWriter, r *http.Request, id ses
 		if failed {
 			continue // drain-to-discard: keep the run unwedged after a dead client
 		}
-		// EvApproval is consumed by the durable log ONLY in 3a — appended above but
-		// NOT relayed to the client wire (client-facing relay of the verdict record
-		// is a later decision). Skip the client write AFTER the Append.
-		if ev.Type == session.EvApproval {
+		// EvApproval (3a) and EvCompactionArchive (3b) are consumed by the durable log
+		// ONLY — appended above but NOT relayed to the client wire (the verdict record
+		// and the pre-compaction archive are log/audit history, not client events).
+		// Skip the client write AFTER the Append.
+		if ev.Type == session.EvApproval || ev.Type == session.EvCompactionArchive {
 			continue
 		}
 		// Persist when the run pauses awaiting approval so a restart leaves a

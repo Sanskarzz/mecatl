@@ -61,6 +61,25 @@ const (
 	EvHook EventType = "hook"
 	// EvCompaction is emitted when a compaction boundary is crossed.
 	EvCompaction EventType = "compaction"
+	// EvCompactionArchive is emitted AFTER a successful compaction (right after the
+	// EvCompaction notice) carrying the pre-compaction conversation that
+	// ReplaceHistory just replaced — the durable, NON-DESTRUCTIVE archive of the
+	// history compaction would otherwise drop forever (the next session snapshot
+	// holds only the compacted tail). It pairs with EvCompaction the way EvApproval
+	// pairs with EvPermissionAsk: the notice is the live event, this is the durable
+	// record. It carries the CompactionArchivePayload; like EvApproval it is
+	// consumed by the durable EventLog at the server relay and is NOT relayed to the
+	// client wire (no proto enum; the wire `type` is a string passthrough, no task
+	// generate). The loop only EMITS it (e.emit) — the relay persists it; the loop
+	// never imports port.EventLog.
+	//
+	// NO-LEAK CONTRACT (gauntlet #7): the archived messages are the PARENT'S OWN
+	// conversation history — the exact slice already present in the pre-compaction
+	// session snapshot. A child's (Subagent/team/parallel) content NEVER enters the
+	// parent conversation (only a child's summarised ToolResult does), so this event
+	// can carry no child content and there is no leak surface here, unlike the
+	// redacted delegation events.
+	EvCompactionArchive EventType = "compaction.archive"
 	// EvNoProgress is emitted when a completed turn produced NEITHER a tool call NOR
 	// meaningful assistant text (a reasoning-only / empty turn) and the loop is
 	// either injecting a bounded continuation nudge or, on the final attempt, giving
@@ -219,11 +238,12 @@ type HookPayload struct {
 // approval record (the EvPermissionAsk it follows is the request half).
 //
 // NO-LEAK CONTRACT (gauntlet #7): it carries the tool NAME, the verdict string,
-// the askID, and the allow-always flag — and NOTHING ELSE. It NEVER carries the
-// raw tool args (those can quote secrets) nor the deny-reason body (which can
-// quote a sensitive command preview). A consumer that needs to correlate a
-// verdict back to a tool call uses the AskID (which encodes the call id) against
-// the conversation history, never an arg payload on this event.
+// the askID, the gated tool-call id, and the allow-always flag — and NOTHING ELSE.
+// It NEVER carries the raw tool args (those can quote secrets) nor the deny-reason
+// body (which can quote a sensitive command preview). A consumer that needs to
+// correlate a verdict back to a tool call uses Call (the opaque tool-call id, also
+// implicitly inside AskID) against the conversation history, never an arg payload
+// on this event.
 type ApprovalPayload struct {
 	// AskID is the id of the resolved permission ask (the same id carried on the
 	// EvPermissionAsk that preceded this verdict and on the wire ResumeApproval).
@@ -236,6 +256,13 @@ type ApprovalPayload struct {
 	// Tool is the NAME of the tool the ask gated (e.g. "Bash"). It is the tool
 	// name ALONE — never the call's args.
 	Tool string
+	// Call is the id of the gated ToolCall. It is an OPAQUE identifier, NOT secret
+	// content — it is already implicitly encoded inside AskID (see agent.newAskID) —
+	// so surfacing it directly opens no new leak surface. It is the durable,
+	// grammar-free correlation handle a 3b permstore-replay consumer uses to find the
+	// gated ToolCall in the loaded conversation and re-derive its rule from the real
+	// args (which stay in the session history, never on this event).
+	Call ToolCallID
 	// AllowAlways mirrors (Verdict == VerdictStringAllowAlways): the verdict ASKED
 	// the harness to learn a per-session allow rule. It is deliberately NOT named
 	// "Learned": Policy.Learn no-ops on an unlearnable call (compound/substituted
@@ -275,6 +302,44 @@ func VerdictString(v ApprovalVerdict) string {
 	default:
 		return VerdictStringDeny
 	}
+}
+
+// CompactionArchivePayload is the structured detail carried by an
+// EvCompactionArchive Event: the pre-compaction conversation that ReplaceHistory
+// replaced. It is the durable, non-destructive archive of the history a
+// compaction would otherwise drop — a later consumer (the Phase 3 reconstruct
+// gate, issue #28 session-scoped detach) replays the EventLog and recovers the
+// pre-compaction turns that the session snapshot no longer holds.
+//
+// CAPTURE ORDERING (load-bearing): the loop captures the original Messages slice
+// BEFORE ReplaceHistory mutates the conversation, and emits this event only AFTER
+// a SUCCESSFUL ReplaceHistory. Messages are immutable per-element, so holding the
+// slice reference across the replace is safe — Replaced is the genuine
+// pre-compaction history, not the post-compaction tail.
+//
+// NO-LEAK CONTRACT (gauntlet #7): Replaced is the PARENT'S OWN conversation; no
+// child content ever enters it (only a child's summarised ToolResult does), so
+// archiving it verbatim opens no leak surface. See EvCompactionArchive.
+//
+// LOG-GROWTH COST (a reasoned decision, not an accident): Replaced is the FULL
+// pre-compaction conversation, NOT just the span the compaction dropped. Across a
+// long session with N compactions this RE-LOGS the retained tail each time, so the
+// event log grows super-linearly in the retained history. We accept that ON PURPOSE:
+// the full slice is robust — it never depends on guessing how the Compactor split
+// the kept tail from the dropped head (the Compactor owns that cut and is a
+// swappable seam), so the archive is correct for ANY Compactor, including a future
+// LLM-backed one whose "drop" is not a clean prefix. The DEFERRED optimization, if
+// log size ever bites, is a delta archive (only the messages absent from the
+// compacted result) computed by diffing pre/post histories in maybeCompact — a
+// strictly additive change to what this field carries, behind the same event. Until
+// a real deployment shows the growth matters, robustness wins over a premature delta.
+type CompactionArchivePayload struct {
+	// Replaced is the pre-compaction conversation — the exact Messages slice that
+	// ReplaceHistory replaced, captured before the mutation. It is the full
+	// pre-compaction history (a superset of the dropped span), so the dropped turns
+	// are always recoverable from it regardless of how the Compactor split the cut.
+	// See the LOG-GROWTH COST note above for why the full slice (not a delta) is kept.
+	Replaced []Message
 }
 
 // ResultPayload is the terminal payload carried by an EvResult Event.
@@ -681,6 +746,11 @@ type Event struct {
 	// string + askID + learned flag). It carries NO raw args and NO deny-reason
 	// body (gauntlet #7); see ApprovalPayload.
 	Approval *ApprovalPayload
+	// CompactionArchive is set on EvCompactionArchive: the pre-compaction
+	// conversation that ReplaceHistory replaced (the durable non-destructive
+	// archive). It is the parent's own history, so it opens no leak surface; see
+	// CompactionArchivePayload.
+	CompactionArchive *CompactionArchivePayload
 	// Usage is set on usage-bearing events. On EvResult it is the cumulative run
 	// total; turn.end carries its per-turn usage in TurnEnd, NOT here.
 	Usage *Usage

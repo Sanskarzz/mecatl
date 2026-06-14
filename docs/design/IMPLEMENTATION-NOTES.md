@@ -2461,6 +2461,82 @@ yet (a replay consumer is Phase 3b). See `CLOUD-NATIVE.md` (Phase 3, ledger row 
   `engine/adapter/memstore/memstore_test.go` (`TestEventLogAppendRead`,
   `TestEventLogReadEarlyBreak`).
 
+### Durable event log — consumers (cloud-native Phase 3b)
+
+The CONSUMERS of the 3a log: a non-destructive compaction archive and a
+permstore verdict-replay. CQRS-lite — the session SNAPSHOT stays a lossy
+PROJECTION (latest-line-wins, compacted), while the event LOG keeps the full
+history; a later reader reconstructs the rich timeline from BOTH. See
+`CLOUD-NATIVE.md` (Phase 3, ledger rows 4/9).
+
+- **Non-destructive compaction archive (`EvCompactionArchive`).** `maybeCompact`
+  (`engine/agent/loop.go`) rewrites the conversation via `ReplaceHistory`, which is
+  the ONLY durable record's sole writer — so the pre-compaction span was lost forever.
+  The fix adds a new `EvCompactionArchive` event carrying
+  `engine/session/event.go` (`CompactionArchivePayload`) (`Replaced []session.Message` —
+  the pre-compaction conversation). **Capture ordering is load-bearing:** the loop
+  binds `archived := sess.Conversation.Messages` BEFORE `ReplaceHistory` mutates it, and
+  emits the event only AFTER a SUCCESSFUL replace (right after the `EvCompaction`
+  notice). Messages are immutable per-element, so holding the slice reference across the
+  replace is safe — `Replaced` is the genuine pre-compaction history, not the rewritten
+  tail. The degrade-and-continue branches (Compact error / `ErrCompactionWouldOrphan` /
+  `ValidateToolPairing` fail / `ReplaceHistory` reject) emit NOTHING (no compaction
+  happened, so there is no replaced span). The compaction decision + the
+  abort-to-original path are UNCHANGED; this only ADDS an archive emit after a successful
+  replace. **No-leak:** `Replaced` is the PARENT'S OWN conversation (the exact slice
+  already in the pre-compaction snapshot) — a child's content never enters the parent
+  conversation (only a child's summarised ToolResult does), so this carries no child
+  content and opens no gauntlet-#7 surface, UNLIKE the redacted delegation events. The
+  loop only EMITS it; the relay Appends it. Like `EvApproval` it is consumed by the log
+  ONLY: both relays SKIP it on the client wire (`grpc.go`/`http.go`), and it is a string
+  passthrough (no proto enum, no `task generate`).
+- **Permstore verdict-replay (kills the Phase 2 re-ask wart).** The learned-rule
+  permstore (`engine/adapter/permstore/permstore.go`) is in-memory and lost on restart,
+  so a session that allow-always'd a tool before a restart would re-ask. The consumer
+  lives in COMPOSITION (`internal/app/approvalreplay.go` (`replayApprovals`)) — never the
+  loop — and is invoked by the Service from the single run-entry funnel
+  `internal/adapter/server/service.go` (`maybeReplayApprovals`), at most once per id per
+  process (gated by `replayedApprovals`; a fresh live session learns as it runs, a re-run
+  only re-derives idempotent rules). **Correlation — metadata-only event → real rule from
+  history.** The `EvApproval` is metadata-only (tool NAME + verdict + askID; NO raw args,
+  gauntlet #7), so the `governance.Rule` cannot be rebuilt from the event alone. Instead
+  the askID encodes the ToolCall id (the grammar `engine/agent/dispatch.go` (`newAskID`)
+  owns: `<sessionID>:<n>:<callID>:r<runSerial>`), so for each allow-always verdict the
+  closure walks the LOADED conversation for the ToolCall whose id matches
+  (`callIDFromAskID` strips the sessionID prefix + the `:r<serial>` suffix + the leading
+  `<n>:` segment, taking the callID whole) and re-drives `Policy.Learn` on THAT call —
+  the SAME Learn path the live verdict took, which re-derives the narrow tool+pattern
+  rule via `governance.LearnableRule` and Records it. The real args come from the
+  session's own history (a trust boundary it already crossed), never from the durable
+  log, so the log stays metadata-only and there is NO leak. **No port widened:**
+  `Policy.Learn` already exists; the consumer reads `port.EventLog.Read` + the loaded
+  `session.Conversation` and calls the existing seam. `buildEngine` now returns the
+  `port.PermissionPolicy` alongside the permstore so `Build` can close the replay over
+  both `eventLog` and `policy`; the closure is nil (a no-op) when there is no durable log
+  (memstore/driver paths), preserving the in-memory-store behaviour there.
+- **Gates.** `internal/app/approval_replay_test.go`
+  (`TestApprovalReplayAfterRestartE2E`) is the permstore-replay sub-gate through the full
+  composition over a real on-disk jsonlstore + the HTTP SSE relay: Build #1 allow-always's
+  a Write, dies; Build #2 over the SAME store re-issues the SAME Write and is NOT re-asked
+  (mutation-killed: skipping the `Policy.Learn` in `replayApprovals` → the second run
+  re-asks). `engine/agent/compaction_test.go` (`TestCompactionEmitsNonDestructiveArchive`)
+  is the archive sub-gate at the loop level: a single deterministic compaction emits one
+  archive whose `Replaced` equals the pre-mutation slice the compactor saw and holds a
+  tool call dropped from the live history (mutation-killed: capturing AFTER
+  `ReplaceHistory` → the archive equals the compacted tail, not the pre-compaction span);
+  `TestCompactionThroughLoopAbortsToOriginal` additionally asserts the degrade path emits
+  NO archive. `internal/app/phase3_gate_test.go` (`TestPhase3ReconstructFromStoreAndLog`)
+  is the PHASE 3 GATE: a run takes three distinct verdicts (deny/allow-once/allow-always)
+  AND crosses a compaction boundary (forced offline via the `Config.contextWindowOverride`
+  composition test seam), then reconstructs the timeline from `SessionStore.Load` +
+  `EventLog.Read` ALONE (a fresh jsonlstore over the same dir) and asserts (a) pre-compaction
+  turns recoverable from the archive yet ABSENT from the compacted snapshot, (b) all three
+  verdicts in order, (c) live reasoning/message/turn events survive (mutation-killed two
+  ways: drop the archive emit → (a) fails; drop an `authorize` `EvApproval` emit → (b)
+  fails). `TestPhase3LogNoChildLeak` is the no-leak mutation-verify: a Subagent child's
+  secret-shaped arg never appears in any logged event body (mutation-killed: forwarding
+  raw child args on a `subagent.tool` event → the sentinel surfaces in the log).
+
 ## Proto — `contracts/proto/mecatl/v1/` (multi-provider Phase 0 S3 wire surface)
 
 `CreateSessionRequest` carries an OPTIONAL `provider_id`(4)+`model_id`(5) selector (two distinct

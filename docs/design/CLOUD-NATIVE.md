@@ -193,9 +193,12 @@ process is now disposable even while a run is parked awaiting a human approval:
 - Active eviction (a parked run voluntarily releasing its goroutine and heap after
   some idle period) is a follow-on knob, not this phase's gate. Approve-after-crash
   is the essence; eviction is then just choosing to crash on purpose.
-- Known accepted wart: permstore rules are still in-memory, so a rehydrated session
-  re-asks. Fail-safe; fixed by Phase 3b. The allow-always verdict on resume
-  re-Learns into the fresh permstore, so later calls in the resumed run are covered.
+- Phase-2 wart (FIXED in Phase 3b): permstore rules are in-memory, so a rehydrated
+  session re-asked. Phase 3b replays the durable log's allow-always verdicts into the
+  fresh permstore on load (`internal/app/approvalreplay.go` (`replayApprovals`)), so a
+  previously-allow-always'd tool is no longer re-asked after a restart. (The
+  allow-always verdict on the resume path also re-Learns for later calls in the same
+  resumed run, the partial in-run cover that predated 3b.)
 
 Gate (CI-green, offline): the two-Build drill
 `TestApproveAfterRestartE2E` (`internal/app/approve_after_restart_test.go`): Build
@@ -257,20 +260,42 @@ stays the replay projection; the log is additive.
   (`resolvePendingCall`)) and recorded by the relay. The loop stays storage-agnostic
   (it only emits; it never imports `port.EventLog`). 3a is the FOUNDATION: the log
   records the stream; nothing consumes it yet (that is 3b).
-- **3b:** durability consumers: permstore allow-always rules recoverable from
-  verdict events (kills the Phase 2 wart); compaction archives the replaced span to
-  the log before `ReplaceHistory` (the durable record stops being lossy; "what did
-  the agent do in turn 12" stays answerable after compaction).
+- **3b (SHIPPED):** the durability CONSUMERS of the 3a log. (1) Non-destructive
+  compaction archive: a new `EvCompactionArchive`
+  (`engine/session/event.go` (`CompactionArchivePayload`)) carries the pre-compaction
+  conversation the loop captures BEFORE `ReplaceHistory` mutates it
+  (`engine/agent/loop.go` (`maybeCompact`)), emitted AFTER a successful replace (the
+  degrade path emits nothing) so the durable record stops being lossy; "what did the
+  agent do in turn 12" stays answerable after compaction. The archived span is the
+  parent's OWN conversation, so it opens no gauntlet-#7 surface. (2) permstore
+  allow-always rules recoverable from verdict events (kills the Phase 2 re-ask wart):
+  on a post-restart load the composition closure
+  `internal/app/approvalreplay.go` (`replayApprovals`), invoked from
+  `internal/adapter/server/service.go` (`maybeReplayApprovals`) once per id, reads the
+  logged allow-always `EvApproval`s, correlates each metadata-only askID back to its
+  ToolCall in the loaded conversation (the askID encodes the call id, see
+  `engine/agent/dispatch.go` (`newAskID`)), and re-drives the existing `Policy.Learn`
+  on that call to re-derive the real rule from history the session already carries (no
+  port widened; the event stays metadata-only, so no leak). Both consumers keep the
+  loop storage-agnostic: the loop only EMITS `EvCompactionArchive`; the replay lives in
+  composition. Like `EvApproval`, `EvCompactionArchive` is log-only (skipped on the
+  client wire).
 - **3c:** the driver service (`EventLogService` in driver/v1), same
   conformance-as-contract discipline as the other six. This is also the prerequisite
   issue #28 (session-scoped background detach) has been waiting on; #28 itself stays
   its own arc.
 
-Gate: a session with one compaction and three verdicts can be fully reconstructed
-(user-rich timeline including pre-compaction turns) from store + log alone; mecatui
-or a test client can render it. Mutation-verify the no-leak guards (the log must
-respect the same redaction the event stream already enforces, gauntlet #7
-discipline).
+Gate (MET, lands with 3b): a session with one compaction and three verdicts can be
+fully reconstructed (user-rich timeline including pre-compaction turns) from store +
+log alone; a test client renders it. Pinned by
+`internal/app/phase3_gate_test.go` (`TestPhase3ReconstructFromStoreAndLog`): Build #1
+takes deny/allow-once/allow-always AND crosses a compaction boundary over a real
+jsonlstore; Build #2 reconstructs from `SessionStore.Load` + `EventLog.Read` alone and
+asserts the pre-compaction turns (from the archive, absent from the compacted
+snapshot), all three verdicts, and the live reasoning/message/turn events. The no-leak
+guard is mutation-verified by `TestPhase3LogNoChildLeak` (a Subagent child's
+secret-shaped arg never appears in any logged event body; the log respects the same
+redaction the event stream already enforces, gauntlet #7).
 
 **Phase 3a re-audit (List 1 / List 2).** Phase 3a added ONE new outlives-a-call
 durable artifact (List 1): the `.events.jsonl` event log, which joins row 8's
@@ -284,6 +309,18 @@ transient per-session decision LOCK, not an inventory row, and is unchanged here
 re-audit verdict is CLEAN: no new resource whose lifecycle escapes the relay loop. The
 gate's redaction subtest mutation-verifies the no-leak inheritance (the log stores
 already-redacted events; it adds no redaction of its own).
+
+**Phase 3b re-audit (List 1 / List 2).** Phase 3b added NO new outlives-a-call
+resource (List 1): both consumers reuse existing artifacts. The compaction archive is
+an EVENT on the existing `Run.Events()` channel, persisted by the existing relay
+`Append` to the existing `.events.jsonl` (row 8): no new file, handle, goroutine, or
+cache. The permstore-replay is TRANSIENT composition work: a closure invoked once per
+load that calls the existing `Policy.Learn` into the existing per-session permstore
+(row 6); the new `Service.replayedApprovals` map is a per-process dedup SET keyed by
+session id (process-scoped, bounded by the session count the Service already tracks),
+not an inventory row, the same shape as `Service.resumeMu`. List 2: row 4 (permstore
+rules) moves to RESOLVED (replayed from the log), and row 9 (pre-compaction history)
+moves to RESOLVED (archived to the log). The re-audit verdict is CLEAN.
 
 ### Phase 4: multi-replica readiness (defer until a real deployment wants it)
 
@@ -323,7 +360,7 @@ durable artifact survives and is reloaded), or **lost** (gone, possibly leaking)
 | 3 | Preserved-fork LRU (`LRUForkReaper`) | `app.Build` (shared via `catalogAssets`) | process | LRU eviction runs each entry's cleanup (dir removal) outside the lock | registry lost; the preserved fork DIRS remain on disk un-tracked (a leak on crash) | `engine/agent/forkreaper.go:41,64`; built at `internal/app/build.go:1936` |
 | 4 | Project memory store (flock pair: `memory.json` + `memory.lock`) | `app.Build` | process handle, per-directory data | flock held per-operation only; one `*Store` per dir per process (self-deadlock invariant, `internal/adapter/memory/store.go:79-88`) | persisted (data on disk; handle rebuilt at next Build) | `internal/app/build.go:1895`; `internal/adapter/memory/store.go:89-92` |
 | 5 | User-model store (same adapter, XDG dir) | `buildUserModelStore` | process handle, per-user data | as above | persisted | `internal/app/build.go:1337` (dir derivation `1328-1335`) |
-| 6 | permstore learned allow-always rules | `app.Build` | session (data), process (store) | `Forget(sessionID)` via `OnCloseSession` (`service.go:748`); capped at 256/session | **lost** (in-memory by design; restart re-asks) | `engine/adapter/permstore/permstore.go:42,48` |
+| 6 | permstore learned allow-always rules | `app.Build` | session (data), process (store) | `Forget(sessionID)` via `OnCloseSession` (`service.go:748`); capped at 256/session | **replayed (Phase 3b)**: in-memory still, but a post-restart load re-Learns the allow-always rules from the durable log's verdict events (`internal/app/approvalreplay.go` (`replayApprovals`)), so a previously-allow-always'd tool is not re-asked | `engine/adapter/permstore/permstore.go:42,48` |
 | 7 | Skill read-roots + driver asset cache (temp dir) | the skills seam in `buildCatalog` | process (build-scoped) | `os.RemoveAll` in the seam close, folded into Build's `closeAll` | reconstructible (fresh temp dir next Build; driver assets re-materialize lazily on first activation) | `internal/app/build.go:2228` (`MkdirTemp`) |
 | 8 | jsonlstore session files + `.tools.jsonl` audit + `.events.jsonl` event log (Phase 3a) | jsonlstore | per-session files | none needed: files opened per call (`O_APPEND`), closed immediately, never held; `Delete` removes all three (sidecars first, session file last) | persisted (`Load` reads the latest snapshot line; `EventLog.Read` scans all event lines cumulatively) | `internal/adapter/store/jsonlstore/jsonlstore.go` (`appendLine`) |
 | 9 | Live-run registry (`Service.runs`) | `server.Service` | run | `deregister` after the wire adapter drains `run.Events()` | lost (the run dies with the process; the session snapshot persists) | `internal/adapter/server/service.go:368` |
@@ -358,8 +395,8 @@ them wants a generic resource manager today:
   nothing on disk to orphan.
 - **Session-scoped server state (rows 2, 6, 11, 12, 21)** is exactly the rehydration
   surface Phases 1-3 address one row at a time: row 11/12 via profile+selector in
-  the snapshot (Phase 1), row 6 via verdict events (Phase 3b), row 2 stays
-  client-owned by design. Row 21 (the modelhook guardrail breakers) resets fail-safe
+  the snapshot (Phase 1), row 6 via verdict events replayed into the permstore
+  (Phase 3b, SHIPPED), row 2 stays client-owned by design. Row 21 (the modelhook guardrail breakers) resets fail-safe
   and is observability/spend-bounding only, not correctness-critical, so it stays
   reset-by-design.
 - **Run-scoped ephemera (rows 9, 13, 14, 22)** dies with the run by design; Phase 2
@@ -391,12 +428,12 @@ what is persisted), **reset-by-design** (documented, acceptable),
 | 1 | Session profile (no-fs vs default) | **SHIPPED (Phase 1)**: persisted as an additive opaque `Profile` label on the aggregate (`session.Session`) and the snapshot (`sessnap.Snapshot`); the empty-workspace inference stays the second defense (`needsRehydration`, `Service.rehydrateSession`) | correctly rehydrated from the persisted label, with the inference still covering a pre-label snapshot | persist-in-snapshot (inference stays as second defense) | 1 (SHIPPED) |
 | 2 | Provider/model selector | **SHIPPED (Phase 1)**: persisted as the opaque `ProviderID`/`ModelID` label pair on the aggregate (`session.Session`) + snapshot (`sessnap.Snapshot`); `Service.rehydrateSession` re-derives the SAME engine via the factory from the persisted pair (no longer the default-provider floor) | rebuilt on the SAME provider+model via the factory; a default session (empty pair) still rides the shared engine | persist-in-snapshot; rehydration re-derives the engine via the factory | 1 (SHIPPED) |
 | 3 | `session.Usage` (cumulative run tokens) | **SHIPPED (Phase 1)**: a `Usage` field on the aggregate (`session.Session`) accumulated by `RecordUsage`, persisted as the additive `usage` snapshot field (`sessnap.Snapshot`); the budget brake (`budgetExhausted`) is evaluated against the cumulative `sess.Usage`, and `resetToIdle` DELIBERATELY preserves it | the `MaxRunTokens` brake continues across restart instead of re-granting a fresh budget | persist-in-snapshot (additive `usage` field; the budget reads the cumulative aggregate) | 1 (SHIPPED) |
-| 4 | permstore allow-always rules | `permstore.Memory.bySession` (`engine/adapter/permstore/permstore.go:48`) | discarded; the user is re-asked. Fail-safe, annoying | fix-via-event-log (verdict events replayed into permstore) | 3b |
+| 4 | permstore allow-always rules | `permstore.Memory.bySession` (`engine/adapter/permstore/permstore.go:48`) | **SHIPPED (Phase 3b)**: on a post-restart load, `internal/app/approvalreplay.go` (`replayApprovals`) (invoked once per id by `internal/adapter/server/service.go` (`maybeReplayApprovals`)) reads the logged allow-always `EvApproval`s, correlates each metadata-only askID back to its ToolCall in the loaded conversation (the askID encodes the call id, `engine/agent/dispatch.go` (`newAskID`)), and re-drives the existing `Policy.Learn` to re-derive the real rule from history; the previously-allow-always'd tool is NOT re-asked | fix-via-event-log (verdict events replayed into permstore; metadata-only event + real rule from history = no leak, no port widened) | 3b (SHIPPED) |
 | 5 | The pending PARENT ask | **SHIPPED (Phase 2)**: the data IS in the snapshot (`Pending`, `engine/adapter/sessnap/sessnap.go` (`Snapshot`), restored via `PauseForApproval`); the LIVENESS is now recovered too: `Approve`/`Deny` on a runless awaiting session loads the snapshot, re-enters the loop AT the ask via `engine/agent/loop.go` (`ResumeApproval`), and drives to completion | resolved: `internal/adapter/server/service.go` (`resumeFromAwaiting`) rebuilds the engine and re-enters; `ErrNoActiveRun` is no longer terminal for awaiting (still terminal for idle/completed/cancelled/failed) | the resume-from-awaiting loop entry (durability was already correct; Phase 2 adds the liveness) | 2 (SHIPPED) |
 | 6 | Pending CHILD asks (childAskRouter) | run-scoped in-memory routing of child-namespaced askIDs | lost with the run | reset-by-design AND verified structurally unreachable through the resume seam (`engine/agent/dispatch.go` (`driveFromAwaiting`), the Q4 note): a surfaced child ask sets the CHILD session's `pending` (its own loop calls `PauseForApproval`), never the PARENT's (the parent stays `StateRunning` inside the delegation tool call), and the server persists/resumes only top-level runs, so a restored `StateAwaiting` session ALWAYS holds a parent-OWN ask. No `PendingAsk` marker field was needed; were a surfaced-child ask ever persisted onto a parent, it would close out as an ordinary unanswered sibling (the honest aborted-result wording), not a silent stall | reset-by-design; Phase 2 re-enters at the PARENT ask only, child asks non-rehydratable (verified, honest, not silent) | 2 (verified) |
 | 7 | Background children | `childRunRegistry` (`engine/agent/childregistry.go:131`), run-scoped; child sessions persist via `WithSubagentStore` (`subagent.go:599`), and parallel branches likewise via `WithParallelStore` (`parallel-<callID>-<i>`, commit `fe9ffe5`, forensically loadable through the `{subagent-, parallel-}` prefix gate) | the running children die un-drained; their persisted sessions remain individually loadable/resumable (`resume:` / `InspectSubagent`), but nothing reconnects them to the parent | reset-by-design for v1; session-scoped detach is issue #28, gated on the event log | 3c → #28 |
 | 8 | Edit read-ledger | in-memory per-`osfs.Workspace` map of sha256 fingerprints (`internal/adapter/osfs/osfs.go:428,714,729`) | the factory builds a fresh Workspace with an empty ledger; the first Edit after restart is REFUSED ("not read this session") until the model re-Reads. Fail-safe, never silently wrong; costs one extra Read per touched file. N/A for no-fs sessions | reset-by-design now; becomes a snapshot candidate if the re-Read tax proves annoying (Phase-1-adjacent, FS sessions only; the kit inventory's §2.4 explicit-token shape is the eventual answer) | deferred |
-| 9 | Pre-compaction history | nowhere: `maybeCompact` rewrites the conversation via `ReplaceHistory` and that is what the next Save persists | the durable record is already lossy BEFORE any restart; compaction itself is stateless given the (compacted) history, so restart adds no new loss | fix-via-event-log (archive the replaced span before `ReplaceHistory`) | 3b |
+| 9 | Pre-compaction history | `maybeCompact` rewrites the conversation via `ReplaceHistory` and that is what the next Save persists | **SHIPPED (Phase 3b)**: `engine/agent/loop.go` (`maybeCompact`) captures the pre-compaction conversation BEFORE `ReplaceHistory` mutates it and emits it as `EvCompactionArchive` (`engine/session/event.go` (`CompactionArchivePayload`)) AFTER a successful replace (the degrade path emits nothing); the relay Appends it to the durable log, so the replaced span is recoverable via `EventLog.Read` and the durable record stops being lossy. The archived span is the parent's OWN conversation, so no gauntlet-#7 surface | fix-via-event-log (archive the replaced span before `ReplaceHistory`; the loop only emits, the relay persists) | 3b (SHIPPED) |
 | 10 | Mid-round team state | the `team.Team` aggregate (roster, goal, tasks, mailbox, findings; `engine/team/team.go:179`) and `Supervisor.members` runtime (`engine/agent/teamsupervisor.go:298`) are in-memory only; `Service.teams` (`service.go:369`) likewise. ONLY member sessions persist (`persistMember`, `teamsupervisor.go:1187`, under `MemberSessionID`, `teamsupervisor.go:1509`) | a mid-round team is unrecoverable: member transcripts survive as orphan sessions, the coordination state (who was assigned what, the findings ledger, the round number, the goal) is gone; there is no resume-team seam | reset-by-design for v1 (teams are run-scoped work units); the event log is the prerequisite for anything better, and re-creating the team from scratch is the documented recovery | 3 (prereq), honest note now |
 | 11 | The event stream | `Run.events`, a buffered channel (cap 64, `engine/agent/loop.go:575`), relayed by gRPC `Converse` / HTTP SSE | **SHIPPED (Phase 3a)**: the relay now `Append`s EVERY observed event to `port.EventLog` (`internal/adapter/server/service.go` (`appendEvent`)), DECOUPLED from the client send (it runs even on the drain-to-discard path after a dead client, so the post-disconnect tail incl. the terminal `EvResult` is recorded (the log survives the client; this is UNLIKE the healthy-path-only awaiting-ask Persist), before `toProto`; the verdict half is captured as `EvApproval` (`engine/session/event.go` (`ApprovalPayload`)) emitted by the loop at both verdict sites. The live channel is still run-scoped (dies with the run), but the rich timeline (reasoning, ask/verdict pairs, delegation lifecycle) is now durably recorded and replayable via `EventLog.Read` | fix-via-event-log: persisted at the server relay (the loop stays storage-agnostic) | 3a (SHIPPED); a CONSUMER that replays it is 3b |
 | 12 | Per-session client MCP mounts | session-supplied specs, never persisted; the manager is row 2 of the inventory | lost; the owning client re-mounts via `LoadSessionWithMCP` (`service.go:968`) | reset-by-design, client-owned (the client holds the specs; the server cannot reconstruct credentials it never stored) | n/a |

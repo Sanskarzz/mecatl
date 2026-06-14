@@ -331,6 +331,25 @@ type Config struct {
 	// tolerated (the durability gap is the only effect). The composition root
 	// supplies the same sink the rest of the build uses.
 	Diagnostics port.Diagnostics
+
+	// ReplayApprovals repopulates the in-memory learned-rule store (permstore) for a
+	// loaded session from its durable EventLog allow-always verdicts (cloud-native
+	// Phase 3b). It is the consumer that kills the Phase 2 re-ask wart: the permstore
+	// is in-memory and lost on restart, so a previously allow-always'd tool would
+	// otherwise re-ask after a process restart. The composition root (internal/app)
+	// supplies the closure — it owns BOTH the EventLog and the Policy.Learn seam, so
+	// it reads the verdicts, correlates each allow-always askID back to its ToolCall
+	// in the loaded conversation (the askID encodes the call id; see agent.newAskID),
+	// and re-Learns the reconstructed rule. Keeping the correlation in composition
+	// keeps the EventLog event METADATA-ONLY (no raw args on the wire) while the real
+	// rule is rebuilt from history the session already carries (no leak).
+	//
+	// The Service invokes it from loadAndReopen (the single run-entry funnel) AT MOST
+	// ONCE per session id per process: a freshly-created in-memory session learns
+	// live, so it never needs a replay, and a re-run of an already-replayed session
+	// would only re-derive idempotent rules. Optional and nil-safe: when nil (no
+	// store, or replay not wired) loadAndReopen does nothing extra.
+	ReplayApprovals func(ctx context.Context, sess *session.Session)
 }
 
 // defaultMaxTeams is the live-team registry cap applied when Config.MaxTeams is
@@ -422,6 +441,14 @@ type Service struct {
 	// concurrent. The keyedMutex frees a key once no caller holds it, so it never grows
 	// unbounded.
 	resumeMu keyedMutex
+
+	// replayedApprovals tracks the session ids whose learned-rule store has already
+	// been repopulated from the durable EventLog this process lifetime (cloud-native
+	// Phase 3b). loadAndReopen replays a session's allow-always verdicts AT MOST ONCE
+	// per id: a session created live in this process never needs it, and a re-run of
+	// an already-replayed session would only re-derive idempotent rules. Guarded by
+	// s.mu.
+	replayedApprovals map[session.SessionID]struct{}
 }
 
 // sessionEngine couples a per-session engine (built over that session's
@@ -533,6 +560,7 @@ func NewService(cfg Config) (*Service, error) {
 		teams:             make(map[string]*teamState),
 		sessionEngines:    make(map[session.SessionID]*sessionEngine),
 		sessionWorkspaces: make(map[session.SessionID]tool.Workspace),
+		replayedApprovals: make(map[session.SessionID]struct{}),
 	}
 	// Seed the model inventory from the static snapshot. ListModels and the
 	// ModelSelection cap read this atomic so a later live-catalog SetModels swap is
@@ -870,6 +898,13 @@ func (s *Service) CloseSession(id session.SessionID) {
 	// Drop any per-session workspace override too: it closes over the (now
 	// disconnecting) connection, so it must not outlive the session.
 	delete(s.sessionWorkspaces, id)
+	// Drop the once-per-id approval-replay marker (cloud-native Phase 3b): the
+	// OnCloseSession above Forgot this session's learned rules, so a LATER reload of
+	// the same id in this process MUST be allowed to replay them from the durable log
+	// again — otherwise the replay would short-circuit (marker still set) and leave
+	// the rules evicted, re-opening the very re-ask wart 3b kills. Clearing it also
+	// keeps the map from growing unbounded on a long-lived server.
+	delete(s.replayedApprovals, id)
 	s.mu.Unlock()
 	if ok && se.close != nil {
 		_ = se.close()
@@ -980,6 +1015,31 @@ func (s *Service) LoadSession(ctx context.Context, id session.SessionID) (*sessi
 	return s.loadAndReopen(ctx, id)
 }
 
+// maybeReplayApprovals repopulates the learned-rule store from the durable
+// EventLog's allow-always verdicts for a loaded session (cloud-native Phase 3b),
+// at most once per id per process. It is a no-op when no replay closure is wired
+// (no store / replay disabled) or when this id was already replayed in this
+// process lifetime. The composition closure owns the EventLog read + the
+// askID→ToolCall correlation + the Policy.Learn re-derivation; the Service only
+// gates the once-per-id call and supplies the loaded session (whose Conversation
+// the correlation walks). Holding the loaded session — not re-loading — keeps the
+// correlation reading the SAME history the run will use.
+func (s *Service) maybeReplayApprovals(ctx context.Context, sess *session.Session) {
+	if s.cfg.ReplayApprovals == nil {
+		return
+	}
+	s.mu.Lock()
+	_, done := s.replayedApprovals[sess.ID]
+	if !done {
+		s.replayedApprovals[sess.ID] = struct{}{}
+	}
+	s.mu.Unlock()
+	if done {
+		return
+	}
+	s.cfg.ReplayApprovals(ctx, sess)
+}
+
 // loadAndReopen is the shared load + reopen-if-completed / interrupt-if-cancelled
 // / recover-if-failed body of LoadSession and LoadSessionWithMCP, factored out so
 // the two cannot drift: it loads the latest snapshot, and if the session cleanly
@@ -992,6 +1052,13 @@ func (s *Service) loadAndReopen(ctx context.Context, id session.SessionID) (*ses
 	if err != nil {
 		return nil, err
 	}
+	// Repopulate the in-memory learned-rule store from the durable EventLog's
+	// allow-always verdicts (cloud-native Phase 3b) BEFORE the run starts, so a
+	// session that allow-always'd a tool before a restart does not re-ask. Done at
+	// most once per id per process (a live session learns as it runs; a re-run only
+	// re-derives idempotent rules). It reads the LOADED conversation to correlate the
+	// verdicts, so it must run after GetSession and before the engine runs.
+	s.maybeReplayApprovals(ctx, sess)
 	switch sess.State {
 	case session.StateCompleted:
 		if rerr := sess.Reopen(); rerr != nil {

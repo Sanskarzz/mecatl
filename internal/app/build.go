@@ -585,6 +585,14 @@ type Config struct {
 	// cfg.Workspace is empty (or unopenable) the pin is a nil workspace —
 	// user/CLI rules only. Unexported, set alongside permResolver in Build.
 	childPermResolver permpolicy.RuleResolver
+
+	// contextWindowOverride forces the engine's compaction context window (in tokens)
+	// instead of the live/catalogued/128k resolution, so an OFFLINE composition test
+	// can trip maybeCompact mid-run without accumulating ~100k tokens of history. It
+	// is a composition-only test seam (the providerConstructor/envDetector idiom):
+	// production leaves it 0, so the normal window resolution stands byte-identically.
+	// Unexported: not an operator knob.
+	contextWindowOverride int
 }
 
 // GuardrailRule is one operator-tier guardrail rule (issue #27): a tool-NAME matcher,
@@ -825,7 +833,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 	if agentClose == nil {
 		agentClose = func() {}
 	}
-	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, assets, mcpClose, err := buildEngine(ctx, cfg, reg, provider, store, agentReg)
+	engine, mainMgr, mcpProvider, mcpInventory, sessFactory, learned, policy, assets, mcpClose, err := buildEngine(ctx, cfg, reg, provider, store, agentReg)
 	if err != nil {
 		agentClose()
 		storeClose()
@@ -937,6 +945,14 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// uses, for the best-effort Append-failure WARN.
 		EventLog:    eventLog,
 		Diagnostics: cfg.diag(),
+		// Verdict replay (cloud-native Phase 3b): repopulate the in-memory learned-rule
+		// store from the durable EventLog's allow-always verdicts when a session is
+		// loaded after a restart, so a previously allow-always'd tool is not re-asked.
+		// The closure owns the EventLog read + the askID→ToolCall correlation + the
+		// Policy.Learn re-derivation; it is nil (a no-op) when there is no durable log
+		// (memstore/driver paths), keeping the in-memory-store behaviour byte-identical
+		// there.
+		ReplayApprovals: replayApprovals(eventLog, policy, cfg.diag()),
 	}
 	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, agentReg, assets.skillReadRoots, assets.skillIndex, assets)
 
@@ -1346,12 +1362,12 @@ func buildStore(cfg Config) (port.SessionStore, port.EventLog, func(), error) {
 // resolveAgentSeam (FS or driver) — threaded in, never re-resolved here, so
 // every consumer (catalog, per-session factory, snapshot, team wiring) shares
 // the same registry.
-func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, store port.SessionStore, agentReg *agents.Registry) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, catalogAssets, func(), error) {
+func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provider port.LLMProvider, store port.SessionStore, agentReg *agents.Registry) (*agent.Engine, *mcp.Manager, mcp.Provider, []mcpsource.SourceInfo, server.SessionEngineFactory, *permstore.Memory, port.PermissionPolicy, catalogAssets, func(), error) {
 	// SkillDraft trust boundary: when enabled, the quarantine dir must live OUTSIDE
 	// the workspace root (so the model's workspace-confined Write/Edit cannot reach
 	// it) and be disjoint from every active skills dir. Fatal on a misconfig.
 	if err := validateSkillDraftConfig(cfg); err != nil {
-		return nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, err
+		return nil, nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, err
 	}
 	warnSkillDraftResiduals(cfg)
 
@@ -1380,7 +1396,7 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// SAME registry, closed over below) — ONE resolution per process.
 	cat, assets, mcpProvider, mcpInventory, mcpClose, err := buildCatalog(ctx, cfg, reg, provider, hooks, agentReg, store)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, err
+		return nil, nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, err
 	}
 	memStore, userModelStore := assets.memStore, assets.userModelStore
 
@@ -1394,13 +1410,13 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 		conn, connClose, derr := cfg.drivers().dial(cfg, cfg.SoulSourceURL)
 		if derr != nil {
 			mcpClose()
-			return nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, fmt.Errorf("dial soul-source driver %q: %w", cfg.SoulSourceURL, derr)
+			return nil, nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, fmt.Errorf("dial soul-source driver %q: %w", cfg.SoulSourceURL, derr)
 		}
 		probe := grpcdriver.NewSoulSource(conn, grpcdriver.SoulOptions{Diagnostics: cfg.diag()})
 		if perr := probe.Probe(ctx); perr != nil {
 			connClose()
 			mcpClose()
-			return nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, fmt.Errorf("probe soul-source driver %q: %w", cfg.SoulSourceURL, perr)
+			return nil, nil, nil, nil, nil, nil, nil, catalogAssets{}, func() {}, fmt.Errorf("probe soul-source driver %q: %w", cfg.SoulSourceURL, perr)
 		}
 		prevClose := mcpClose
 		mcpClose = func() {
@@ -1462,7 +1478,7 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// (ListSkills snapshot), assets.userModelStore (GetUserModel lister), and
 	// assets.skillReadRoots (the workspace factory + team fork closures) off the
 	// SAME value every catalog assembly shares.
-	return agent.NewEngine(deps), assets.globalMgr, mcpProvider, mcpInventory, sessFactory, learned, assets, mcpClose, nil
+	return agent.NewEngine(deps), assets.globalMgr, mcpProvider, mcpInventory, sessFactory, learned, policy, assets, mcpClose, nil
 }
 
 // buildInstructionAssembler composes the turn-0 instruction assembler in order:
@@ -1664,6 +1680,11 @@ func engineDepsForProvider(
 	window := defaultContextWindowTokens
 	if contextWindow > 0 {
 		window = contextWindow
+	}
+	// Composition-only test seam: force a tiny window so an offline test trips
+	// compaction mid-run. Production leaves it 0 (the resolution above stands).
+	if cfg.contextWindowOverride > 0 {
+		window = cfg.contextWindowOverride
 	}
 	return agent.Deps{
 		LLM:          provider,

@@ -410,6 +410,141 @@ func TestCompactionThroughLoopNeverOrphans(t *testing.T) {
 	}
 }
 
+// TestCompactionEmitsNonDestructiveArchive is the cloud-native Phase 3b
+// compaction-archive sub-gate at the loop level: a genuine compaction must emit
+// EvCompactionArchive AFTER EvCompaction carrying the PRE-compaction conversation
+// (the span ReplaceHistory dropped) — captured BEFORE the mutation. The archive
+// must contain a tool call that compaction dropped from the live history, proving
+// the capture is the pre-mutation slice and not the rewritten tail.
+//
+// MUTATION-KILL: move `archived := sess.Conversation.Messages` to AFTER
+// ReplaceHistory in maybeCompact (so it reads the mutated, compacted conversation)
+// and the archive no longer contains the dropped early tool call — the assertion
+// that a dropped call is recoverable from the archive (but absent from the live
+// history) then fails.
+func TestCompactionEmitsNonDestructiveArchive(t *testing.T) {
+	mk := func(id string) session.ToolCall {
+		return session.NewToolCall(session.ToolCallID(id), "Read", json.RawMessage(`{"path":"f.go"}`))
+	}
+	// Build genuine paired history over several tool turns, then a final text turn.
+	llm := mockllm.New(
+		mockllm.ToolCallTurn(mk("c1")),
+		mockllm.ToolCallTurn(mk("c2")),
+		mockllm.ToolCallTurn(mk("c3")),
+		mockllm.TextTurn("done"),
+	)
+	// A compactor that records the EXACT slice it was handed (the pre-compaction
+	// history) and returns a TINY, tool-pairing-valid output — so compaction fires
+	// EXACTLY ONCE (the compacted history is far under threshold, so no later turn
+	// re-trips it), making the pre-vs-post distinction deterministic.
+	rec := &recordingInputCompactor{out: []session.Message{session.NewUserMessage("goal")}}
+	e := agent.NewEngine(agent.Deps{
+		LLM:                 llm,
+		Catalog:             catalogWith(t, readBodyTool()),
+		Policy:              allowAll(),
+		Model:               "m",
+		Compactor:           rec,
+		ContextWindowTokens: 200,
+		CompactionRatio:     0.8,
+	})
+
+	sess := session.New("s-archive", session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "investigate the files")
+
+	compactions, archives := 0, 0
+	lastWasCompaction := false
+	var archived []session.Message
+	for ev := range r.Events() {
+		switch ev.Type {
+		case session.EvCompaction:
+			compactions++
+			lastWasCompaction = true
+			continue
+		case session.EvCompactionArchive:
+			archives++
+			if !lastWasCompaction {
+				t.Fatalf("EvCompactionArchive #%d did not immediately follow an EvCompaction notice", archives)
+			}
+			if ev.CompactionArchive == nil {
+				t.Fatalf("EvCompactionArchive carries no payload")
+			}
+			archived = ev.CompactionArchive.Replaced
+		}
+		lastWasCompaction = false
+	}
+
+	if sess.State == session.StateFailed {
+		reason, _ := sess.StopReason()
+		t.Fatalf("session reached StateFailed: %v", reason)
+	}
+	if compactions != 1 {
+		t.Fatalf("expected exactly one compaction, got %d (the test needs a single deterministic compaction)", compactions)
+	}
+	if archives != 1 {
+		t.Fatalf("expected exactly one EvCompactionArchive, got %d", archives)
+	}
+	if len(archived) == 0 {
+		t.Fatalf("archive is empty: the pre-compaction span was not captured")
+	}
+
+	// The archive MUST equal the slice the compactor was handed — i.e. the genuine
+	// pre-compaction history captured BEFORE ReplaceHistory ran. A post-mutation
+	// capture would instead equal the compacted output (rec.out, the tiny tail).
+	if !reflect.DeepEqual(archived, rec.input) {
+		t.Fatalf("archive is not the pre-compaction slice the compactor saw:\n archive=%v\n input=%v", archived, rec.input)
+	}
+	// And it must hold the early tool calls that compaction DROPPED from the live
+	// history (c1/c2/c3 are gone from the compacted [goal] history) — the
+	// non-destructive recovery the gate proves.
+	archivedCalls := callIDsIn(archived)
+	liveCalls := callIDsIn(sess.Conversation.Messages)
+	recoveredDropped := false
+	for id := range archivedCalls {
+		if _, stillLive := liveCalls[id]; !stillLive {
+			recoveredDropped = true
+			break
+		}
+	}
+	if !recoveredDropped {
+		t.Fatalf("archive holds no tool call that compaction dropped from the live history; "+
+			"archive ids=%v live ids=%v (capture must be the PRE-mutation slice)", keysOf(archivedCalls), keysOf(liveCalls))
+	}
+}
+
+// recordingInputCompactor records the EXACT message slice it was handed (the
+// pre-compaction history) and returns a fixed, tool-pairing-valid output. The
+// recorded input is the oracle the archive must equal.
+type recordingInputCompactor struct {
+	input []session.Message
+	out   []session.Message
+}
+
+func (c *recordingInputCompactor) Compact(_ context.Context, conv *session.Conversation) ([]session.Message, string, error) {
+	// Snapshot the input slice (the conversation the loop captures for the archive).
+	c.input = append([]session.Message(nil), conv.Messages...)
+	return c.out, "compacted summary", nil
+}
+
+// callIDsIn collects the set of assistant tool-call ids across a message slice.
+func callIDsIn(msgs []session.Message) map[session.ToolCallID]struct{} {
+	out := make(map[session.ToolCallID]struct{})
+	for _, m := range msgs {
+		for _, c := range m.ToolCalls {
+			out[c.ID] = struct{}{}
+		}
+	}
+	return out
+}
+
+// keysOf projects a tool-call-id set to a slice for a failure message.
+func keysOf(set map[session.ToolCallID]struct{}) []session.ToolCallID {
+	out := make([]session.ToolCallID, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	return out
+}
+
 // fakeCompactor returns a fixed slice/error from Compact, for driving the loop's
 // defensive paths deterministically.
 type fakeCompactor struct {
@@ -470,10 +605,13 @@ func TestCompactionThroughLoopAbortsToOriginal(t *testing.T) {
 			bigPrompt := strings.Repeat("word ", 200)
 			r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), bigPrompt)
 
-			var sawCompaction bool
+			var sawCompaction, sawArchive bool
 			for ev := range r.Events() {
 				if ev.Type == session.EvCompaction {
 					sawCompaction = true
+				}
+				if ev.Type == session.EvCompactionArchive {
+					sawArchive = true
 				}
 			}
 
@@ -481,6 +619,11 @@ func TestCompactionThroughLoopAbortsToOriginal(t *testing.T) {
 			// compactor's (bad) output must NEVER have been applied.
 			if sawCompaction {
 				t.Fatalf("EvCompaction emitted despite abort-to-original")
+			}
+			// The degrade-and-continue branch emits NO archive (no compaction happened,
+			// so there is no replaced span to record).
+			if sawArchive {
+				t.Fatalf("EvCompactionArchive emitted despite abort-to-original")
 			}
 			if sess.State == session.StateFailed {
 				reason, _ := sess.StopReason()

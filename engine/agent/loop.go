@@ -1415,6 +1415,13 @@ func (e *Engine) maybeCompact(ctx context.Context, r *Run, sess *session.Session
 		r.diag.Log(ctx, port.LevelWarn, "compaction failed; continuing without compaction", "error", err)
 		return false
 	}
+	// Capture the pre-compaction history BEFORE ReplaceHistory mutates it (cloud-native
+	// Phase 3b non-destructive archive). Messages are immutable per-element, so a slice
+	// reference is safe to hold across the replace — it stays the genuine pre-compaction
+	// history, never the rewritten tail. The archive is emitted only AFTER a successful
+	// replace below; the degrade-and-continue branches above emit nothing (no compaction
+	// happened, so there is no replaced span to archive).
+	archived := sess.Conversation.Messages
 	if err := sess.ReplaceHistory(compacted); err != nil {
 		// Replacement is legal only while running; if the seam rejects it, keep the
 		// existing history rather than aborting the run — and emit a degraded-mode
@@ -1423,6 +1430,11 @@ func (e *Engine) maybeCompact(ctx context.Context, r *Run, sess *session.Session
 		return false
 	}
 	e.emit(r, session.Event{Type: session.EvCompaction, Turn: turnIdx, Text: summary})
+	// Emit the durable non-destructive archive of the span the replace just dropped.
+	// The loop only EMITS it; the server relay Appends it to port.EventLog (the loop
+	// stays storage-agnostic — it never imports the log port). No-leak: `archived` is
+	// the parent's OWN conversation, never child content (gauntlet #7).
+	e.emit(r, session.Event{Type: session.EvCompactionArchive, Turn: turnIdx, CompactionArchive: &session.CompactionArchivePayload{Replaced: archived}})
 	return true
 }
 
