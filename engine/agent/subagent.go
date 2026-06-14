@@ -1765,6 +1765,15 @@ func driveChild(ctx context.Context, engine *Engine, child *session.Session, run
 		if stop == session.StopError || stop == session.StopCancelled || ctx.Err() != nil {
 			return finalText, stop, usage, toolCount
 		}
+		// A budget stop is terminal too: the token ceiling is now CUMULATIVE across the
+		// retry Reopens (cloud-native Phase 1 — session.Usage survives Reopen), so a child
+		// that crossed the ceiling mid-retry would only re-trip on the next attempt's first
+		// boundary. Surface StopBudget verbatim (the Subagent result renders it as a clean
+		// success-with-note) rather than burning the remaining Reopens and mislabelling the
+		// terminal as StopStructuredOutput.
+		if stop == session.StopBudget {
+			return finalText, stop, usage, toolCount
+		}
 		// Structured miss: build the correction prompt for the next attempt (if any).
 		drivePrompt = structuredCorrectionPrompt(schema, submit.lastError())
 	}

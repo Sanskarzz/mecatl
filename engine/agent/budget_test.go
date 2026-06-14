@@ -177,3 +177,56 @@ func TestSubagentChildInheritsBudgetAndReturnsCleanResult(t *testing.T) {
 		t.Fatalf("child made %d model calls, want >= 2 (the inherited budget should bound a runaway child)", got)
 	}
 }
+
+// countingProvider records how many Stream calls it received, then delegates to a
+// scripted mockllm. It proves whether the loop reached a model call at all.
+type countingProvider struct {
+	calls atomic.Int64
+	inner port.LLMProvider
+}
+
+func (p *countingProvider) Capabilities() port.ProviderCapabilities { return p.inner.Capabilities() }
+
+func (p *countingProvider) Stream(ctx context.Context, req port.LLMRequest) (iter.Seq2[port.Chunk, error], error) {
+	p.calls.Add(1)
+	return p.inner.Stream(ctx, req)
+}
+
+// TestBudgetReadsCumulativeAggregate is the restart-budget guard (cloud-native
+// Phase 1): a session loaded carrying cumulative Usage ALREADY past the MaxRunTokens
+// ceiling (the snapshot-restore shape) must trip StopBudget at the FIRST turn
+// boundary — before any model call — instead of re-granting a full fresh budget.
+// The budget brake is evaluated against the AGGREGATE's cumulative Usage
+// (sess.Usage), NOT a fresh-from-zero per-run total; there is no loop seed. Mutation:
+// changing the budget check from `budgetExhausted(r, sess.Usage)` to
+// `budgetExhausted(r, total)` makes the run proceed and the model gets called.
+func TestBudgetReadsCumulativeAggregate(t *testing.T) {
+	const budget = 350
+
+	inner := mockllm.New(mockllm.TextTurn("should-never-run"))
+	llm := &countingProvider{inner: inner}
+	e := newEngine(agent.Deps{LLM: llm, Catalog: catalogWith(t, loopTool()), MaxRunTokens: budget})
+
+	// A session reloaded mid-conversation with prior spend already over the ceiling.
+	sess := newSession(t, session.Limits{})
+	sess.Usage = session.Usage{InputTokens: 300, OutputTokens: 100} // 400 >= 350
+
+	evs := drain(e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "continue"))
+
+	res := lastResult(t, evs)
+	if res.Stop != session.StopBudget {
+		t.Fatalf("terminal stop = %q, want %q (the cumulative budget must trip at the first boundary)", res.Stop, session.StopBudget)
+	}
+	if got := llm.calls.Load(); got != 0 {
+		t.Fatalf("model was called %d time(s); want 0 (the budget tripped at the boundary before any turn)", got)
+	}
+	// The aggregate's cumulative usage still reflects the loaded prior spend (the
+	// per-run EvResult.Usage is zero here — no turn ran this run — which is correct).
+	if got := sess.Usage.TotalTokens(); got < budget {
+		t.Fatalf("aggregate usage = %d, want >= prior spend %d", got, budget)
+	}
+	// Clean terminal, Reopen-recoverable.
+	if sess.State != session.StateCompleted {
+		t.Fatalf("session state = %q, want completed", sess.State)
+	}
+}

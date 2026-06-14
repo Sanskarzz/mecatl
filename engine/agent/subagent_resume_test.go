@@ -792,3 +792,70 @@ func TestSubagentResumePreservesStoredLimits(t *testing.T) {
 		t.Fatalf("loop tool ran %d times; stored MaxToolCalls:1 should have bounded it", got)
 	}
 }
+
+// TestSubagentResumeBudgetCarriesPriorSpend is the resume-leg of the restart-budget
+// property (cloud-native Phase 1, QA SHOULD-ADD): a persisted child whose cumulative
+// Usage is already at/over the engine's MaxRunTokens ceiling, when RESUMED, must trip
+// StopBudget at the FIRST boundary — starting from its PRIOR spend, never re-granting a
+// fresh budget. This is the same property the main e2e proves for the parent, exercised
+// through the subagent resume path (reload + Reopen, where resetToIdle preserves Usage).
+// Mutation: making resetToIdle zero Usage clears the reloaded spend on the resume Reopen,
+// so the resumed child re-grants a full budget, runs its turn, and ends StopEndTurn
+// instead of StopBudget.
+func TestSubagentResumeBudgetCarriesPriorSpend(t *testing.T) {
+	const budget = 350
+	store := memstore.New()
+
+	// Persist a COMPLETED child carrying prior spend over the ceiling (the snapshot a
+	// prior, budget-heavy run would have saved). 400 >= 350.
+	prior := session.New("subagent-p1", session.ModeDefault, "/ws",
+		session.Limits{}, time.Unix(0, 0))
+	for _, step := range []struct {
+		op  string
+		err error
+	}{
+		{"BeginTurn", prior.BeginTurn()},
+		{"RecordUsage", prior.RecordUsage(session.Usage{InputTokens: 250, OutputTokens: 150})},
+		{"RecordAssistant", prior.RecordAssistant(session.NewAssistantMessage("prior work", "", nil))},
+		{"Complete", prior.Complete()},
+	} {
+		if step.err != nil {
+			t.Fatalf("seed %s: %v", step.op, step.err)
+		}
+	}
+	if err := store.Save(context.Background(), prior); err != nil {
+		t.Fatalf("seed persist: %v", err)
+	}
+
+	// The resume engine carries the SAME ceiling. Count model calls: a budget trip at the
+	// first boundary means ZERO model calls on the resumed run.
+	var calls atomic.Int64
+	childLLM := mockllm.NewWith(
+		[]mockllm.Option{mockllm.WithRequestObserver(func(port.LLMRequest) { calls.Add(1) })},
+		mockllm.TextTurn("should-not-run"),
+	)
+	childEngine := agent.NewEngine(agent.Deps{
+		LLM:          childLLM,
+		Catalog:      catalogWith(t),
+		Policy:       allowAll(),
+		Model:        "child-model",
+		MaxRunTokens: budget,
+	})
+	task := agent.NewSubagentTool(childEngine, agent.WithSubagentStore(store))
+
+	res := runOneSubagent(t, task, "p2", resumeArgs("subagent-p1", "continue the work"))
+	if res.IsError {
+		t.Fatalf("budget-stopped resume must be a clean result, got error: %q", res.Content)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("resumed child made %d model call(s); want 0 (the carried-over budget must trip at the first boundary)", got)
+	}
+	// The resumed child re-persisted carries the prior spend (it was not zeroed on reload).
+	reloaded, err := store.Load(context.Background(), session.SessionID("subagent-p1"))
+	if err != nil {
+		t.Fatalf("resumed child not re-persisted: %v", err)
+	}
+	if reloaded.Usage.TotalTokens() < budget {
+		t.Fatalf("re-persisted resumed child usage = %d, want >= prior spend %d (the budget did not carry)", reloaded.Usage.TotalTokens(), budget)
+	}
+}

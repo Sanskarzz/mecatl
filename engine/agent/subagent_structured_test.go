@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
+	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
 	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/session"
 )
 
 // personSchema is a small structured-output schema reused across the tests: an object
@@ -156,5 +158,80 @@ func TestSubagentAgentIdTrailerInResultText(t *testing.T) {
 	}
 	if !strings.Contains(results[0].Content, "agentId: subagent-p1") {
 		t.Fatalf("result text must carry the agentId trailer (discoverability), got %q", results[0].Content)
+	}
+}
+
+// childEngineWithBudget builds a child engine carrying a MaxRunTokens ceiling, for the
+// cross-drive budget test. The empty catalog is enough — SubmitResult is injected
+// run-scoped by the Subagent tool.
+func childEngineWithBudget(t *testing.T, llm *mockllm.Provider, budget int) *agent.Engine {
+	t.Helper()
+	return agent.NewEngine(agent.Deps{
+		LLM:          llm,
+		Catalog:      catalogWith(t),
+		Policy:       permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil),
+		Model:        "child-model",
+		MaxRunTokens: budget,
+	})
+}
+
+// TestStructuredOutputBudgetTripsAcrossDrives is the cross-attempt-brake guard
+// (cloud-native Phase 1, QA SHOULD-ADD): a structured-output child whose per-attempt
+// usage is BELOW the MaxRunTokens ceiling but ACCUMULATES across the in-call Reopens
+// must trip StopBudget — proving the cumulative sess.Usage carries across the
+// driveChild Reopens (resetToIdle preserves Usage) rather than each attempt re-granting
+// a fresh budget. The budget is sized to trip at the START of the 3rd attempt (after two
+// invalid SubmitResults), so it is a clean cross-drive StopBudget, never the
+// retry-exhaustion StopStructuredOutput. Mutation: making resetToIdle zero Usage clears
+// the child's accumulator on every Reopen, so the budget never accumulates, all three
+// attempts run invalid, and the result becomes StopStructuredOutput (a tool error)
+// instead of the StopBudget success-with-note.
+func TestStructuredOutputBudgetTripsAcrossDrives(t *testing.T) {
+	// Budget 250; each attempt's SubmitResult turn spends 150 (90 in + 60 out). Attempt 0
+	// boundary sees 0 (<250) → runs → cumulative 150. Attempt 1 Reopen (Usage preserved
+	// = 150), boundary 150 (<250) → runs → cumulative 300. Attempt 2 Reopen (Usage = 300),
+	// boundary 300 (>=250) → trips StopBudget before any turn. Two invalid SubmitResults
+	// happened; the 3rd attempt never drove a model turn.
+	const budget = 250
+	invalid := `{"name":"Ada"}` // missing the required `age` — never valid
+	mkAttempt := func(id string) []mockllm.Turn {
+		return []mockllm.Turn{
+			mockllm.ChunksTurn(
+				mockllm.ToolCallChunk(toolCall(id, "SubmitResult", invalid)),
+				mockllm.UsageChunk(session.Usage{InputTokens: 90, OutputTokens: 60}),
+				mockllm.DoneChunk(session.StopEndTurn),
+			),
+			mockllm.TextTurn("submitted (still missing age)"),
+		}
+	}
+	var script []mockllm.Turn
+	for _, id := range []string{"k0", "k1", "k2", "k3"} { // extra turns are harmless slack
+		script = append(script, mkAttempt(id)...)
+	}
+	childLLM := mockllm.New(script...)
+	childEngine := childEngineWithBudget(t, childLLM, budget)
+	task := agent.NewSubagentTool(childEngine)
+
+	results, _ := subagentParentResults(t, task,
+		mockllm.ToolCallTurn(toolCall("p1", "Subagent",
+			`{"prompt":"profile Ada","output_schema":`+personSchema+`}`)),
+		mockllm.TextTurn("parent done"),
+	)
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	// The cross-drive budget tripped BEFORE retry exhaustion: StopBudget is a CLEAN
+	// terminal rendered as a success-with-note, NOT the StopStructuredOutput tool error.
+	// If resetToIdle zeroed Usage on each Reopen, the budget would never accumulate and
+	// the run would instead exhaust retries → a structured-output validation tool error.
+	if results[0].IsError {
+		t.Fatalf("cross-drive StopBudget must be a clean result, not a structured-output error: %q", results[0].Content)
+	}
+	if strings.Contains(results[0].Content, "schema") || strings.Contains(results[0].Content, "required") {
+		t.Fatalf("result reads as a structured-output validation failure (retries exhausted) — the cross-drive budget did NOT trip: %q", results[0].Content)
+	}
+	// The agentId trailer rides every terminal.
+	if !strings.Contains(results[0].Content, "agentId: subagent-p1") {
+		t.Fatalf("result must carry the agentId trailer, got %q", results[0].Content)
 	}
 }

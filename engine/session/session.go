@@ -214,8 +214,35 @@ type Session struct {
 	Limits Limits
 	// Counters are the running totals for stop-condition evaluation.
 	Counters Counters
+	// Usage is the CUMULATIVE token accounting for the logical run. It is the value
+	// the MaxRunTokens budget brake (StopBudget) is evaluated against, so it is
+	// persisted into the snapshot and the brake reads it DIRECTLY (the loop keeps a
+	// separate zero-based per-run delta for the EvResult figure; there is no seed) —
+	// the budget therefore survives reopen/restart instead of re-granting a full
+	// fresh allowance every time the session continues. Mutate it through RecordUsage
+	// (accumulate) or ResetUsage (the explicit fresh-allowance reset). CRITICAL:
+	// unlike Counters, it is NOT cleared by resetToIdle (see the comment there).
+	Usage Usage
 	// Workspace is the root directory tools operate against (the session cwd).
 	Workspace string
+	// Profile is an opaque tool-surface profile label (e.g. "" for the default
+	// filesystem profile, "no-fs" for the no-filesystem one). The aggregate STORES
+	// it but never interprets it: the meaning lives entirely in the composition
+	// layer, the same inert-label posture as Workspace/ProviderID/ModelID. It is a
+	// write-once creation label set by the composition root after New (no mutator);
+	// persisting it lets a restarted process rebuild the same engine instead of
+	// inferring the profile from the empty-workspace pun.
+	Profile string
+	// ProviderID and ModelID are the opaque neutral provider+model selector pair
+	// this session was bound to. The aggregate STORES them but never interprets
+	// them — the ProviderSelector type and all resolution stay in composition; only
+	// these two opaque strings cross into the domain (the same inert-label posture
+	// as Workspace). Persisting them lets a restarted process re-derive the SAME
+	// per-session engine via the factory instead of falling to the default-provider
+	// floor. Write-once creation labels set by the composition root after New (no
+	// mutator). The empty pair means "server default".
+	ProviderID string
+	ModelID    string
 	// CreatedAt is the creation timestamp.
 	CreatedAt time.Time
 
@@ -279,6 +306,46 @@ func (s *Session) RecordToolResults(results []ToolResult) error {
 			s.Counters.ConsecutiveFailures = 0
 		}
 	}
+	return nil
+}
+
+// RecordUsage accumulates the token usage of a model call onto the aggregate's
+// cumulative Usage. It is the intention-revealing seam the loop uses instead of
+// poking the public Usage field, mirroring RecordAssistant/RecordToolResults: it
+// is legal ONLY while running (a usage record belongs to an in-flight turn). The
+// loop calls it each turn (alongside its own zero-based per-run delta); the budget
+// brake reads this cumulative value, so the next Save persists the accumulated
+// spend. Unlike the Counters, Usage is deliberately NOT reset by resetToIdle so
+// the MaxRunTokens budget survives reopen/restart (see resetToIdle).
+func (s *Session) RecordUsage(u Usage) error {
+	if s.State != StateRunning {
+		return fmt.Errorf("%w: RecordUsage from %q", ErrIllegalTransition, s.State)
+	}
+	s.Usage = s.Usage.Add(u)
+	return nil
+}
+
+// ResetUsage zeroes the aggregate's cumulative Usage, granting a fresh
+// MaxRunTokens allowance for the next run. It is the EXPLICIT counterpart to the
+// deliberate non-reset in resetToIdle: because Usage survives Reopen/Interrupt/
+// Recover (so the budget brake bounds the whole logical run across restart), a
+// caller that genuinely wants a fresh budget for a NEW phase of work must say so
+// through this intention-revealing seam rather than poking the public Usage field
+// (the aggregate-mutation discipline RecordUsage established).
+//
+// It is legal from any NON-running state (idle, completed, or the other terminals)
+// — NOT while running, where it would discard an in-flight turn's spend mid-budget
+// and race the loop's own RecordUsage. The SOLE caller today is the team
+// supervisor's synthesise step (engine/agent/teamsupervisor.go): a lead whose
+// working run was stopped by its MaxRunTokens must still produce the team's
+// synthesis deliverable, so the supervisor resets the lead's accumulator between
+// the working drive and the synthesis drive (the synthesis spend is then folded
+// into the team outcome separately). Returns ErrIllegalTransition from running.
+func (s *Session) ResetUsage() error {
+	if s.State == StateRunning {
+		return fmt.Errorf("%w: ResetUsage from %q", ErrIllegalTransition, s.State)
+	}
+	s.Usage = Usage{}
 	return nil
 }
 
@@ -492,6 +559,13 @@ func (s *Session) resetToIdle() {
 	s.stop = StopNone
 	s.pending = nil
 	s.Counters = Counters{}
+	// CRITICAL: Usage is DELIBERATELY NOT cleared here (the divergence from
+	// Counters). The MaxRunTokens budget (StopBudget) is evaluated against the
+	// cumulative Usage, and the whole point of the budget is to bound spend across
+	// the logical run INCLUDING reopen/restart — clearing it on reopen would
+	// re-grant a full fresh allowance every continuation, defeating the brake.
+	// Adding `s.Usage = Usage{}` here is the exact regression
+	// TestResetToIdlePreservesUsage pins against.
 }
 
 // Synthetic close-out messages for closeOutInterruptedTurn. The text is DURABLE

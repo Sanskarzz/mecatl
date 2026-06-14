@@ -54,9 +54,10 @@ The harness is unusually close by construction:
 
 What is NOT yet true: a process death while a run is awaiting approval strands the
 session (`ErrNoActiveRun`); the event stream is emitted and discarded; compaction
-destructively rewrites the only durable record; several per-session facts (provider
-selector, token usage, profile) are not in the snapshot; and two processes over one
-store have no writer exclusion. Those gaps are exactly the phases below.
+destructively rewrites the only durable record; and two processes over one store
+have no writer exclusion. (The per-session facts, namely the provider selector,
+token usage, and profile, ARE now in the snapshot as of Phase 1; see the ledger.)
+Those gaps are exactly the phases below.
 
 ## Phase plan
 
@@ -81,23 +82,52 @@ backfilled after `f1f4e31`, which is exactly the drift this re-audit step preven
 The CLAUDE.md "outlives-a-call resource" gotcha is the author-time half of the same
 discipline.
 
-### Phase 1: snapshot fidelity
+### Phase 1: snapshot fidelity (SHIPPED)
 
 Make the snapshot faithful enough that a restarted process is indistinguishable
-mid-conversation. Per the ledger below:
+mid-conversation. Per the ledger below, all three facts are now persisted:
 
-- `profile` becomes a snapshot field (additive, omitempty; the same precedent as
-  `ProviderPhase`/`Parts`; the empty-workspace inference stays as the second defense).
-- The provider/model selector is persisted, so rehydration rebuilds the SAME
-  per-session engine instead of falling to the default-provider floor (re-derive via
-  the engine factory, never clone-and-swap; the existing discipline).
-- `session.Usage` is persisted, so the `MaxRunTokens` budget brake survives restart.
-- Anything else the ledger marks Phase 1.
+- `profile` is an additive, omitempty snapshot field (the same precedent as
+  `ProviderPhase`/`Parts`; the empty-workspace inference stays the second defense).
+- The provider/model selector is persisted as the opaque `ProviderID`/`ModelID`
+  label pair, so rehydration rebuilds the SAME per-session engine instead of
+  falling to the default-provider floor (re-derive via the engine factory, never
+  clone-and-swap; the existing discipline).
+- `session.Usage` is persisted, so the `MaxRunTokens` budget brake survives
+  restart. The brake is evaluated against the cumulative aggregate Usage;
+  `resetToIdle` preserves Usage (the deliberate divergence from Counters).
 
-Gate (extends the `9f8ba8c` drill): cross-Build e2e: create a no-fs session on a
-selector model with a partially-consumed budget, kill the process, restart over the
-shared store, verify same catalog + same model + budget continues. Mutation-verified
-per field.
+A documented side effect: because `resetToIdle` preserves Usage, a reused
+child/member session's per-engine `MaxRunTokens` brake is now CUMULATIVE across
+`Reopen` (team rounds, structured-output validation retries), which is the
+intended "cap the whole call" reading rather than a per-Reopen fresh allowance.
+The one deliberate exception is the team lead's synthesis turn, which calls the
+explicit `Session.ResetUsage` seam so a budget-stopped working run still produces
+the deliverable. The team-AGGREGATE budget is unchanged (it sums per-round
+`EvResult.Usage`, the zero-based per-run delta), so the two budgets stay
+independent.
+
+The rehydration-widen call: Phase 1 widened the ENGINE-REBUILD trigger
+(`needsRehydration`/`Service.rehydrateSession`, generalized from the no-fs-only
+`9f8ba8c` seam) to ANY session with a persisted selector or non-default profile,
+because the post-restart engine must be the SAME model, not just no-fs. A default
+FS session (empty selector, default profile, non-empty workspace) still rides the
+shared engine with no rehydration. The awaiting-approval mid-turn loop entry stays
+Phase 2 (no new run-entry seam landed here, only the existing engine-rebuild at
+`Service.StartRunContent` widened).
+
+Gate (extends the `9f8ba8c` drill): cross-Build e2e
+(`TestSelectorSessionSurvivesRestartE2E`): create a no-fs session on a selector
+model with a partially-consumed budget, kill the process, restart over the shared
+store, verify same catalog + same model + budget continues. Mutation-verified per
+leg.
+
+**Phase 1 re-audit (List 1 / List 2).** Phase 1 added no new outlives-a-call
+resource (List 1): the three persisted facts all live ON the existing session
+aggregate/snapshot and the existing per-session engine registry (row 11), which
+rehydration now rebuilds faithfully rather than degrading. No new goroutine,
+cache, breaker, or in-memory map landed. List 2 rows 1/2/3 move to SHIPPED above;
+the remaining rows are unchanged.
 
 ### Phase 2: awaiting-approval evict/rehydrate (the disposability completion)
 
@@ -251,9 +281,9 @@ what is persisted), **reset-by-design** (documented, acceptable),
 
 | # | Item | Where it lives | On restart today | Decision | Phase |
 |---|---|---|---|---|---|
-| 1 | Session profile (no-fs vs default) | nowhere persisted; DERIVED from the empty-workspace pun (`service.go:1031-1041`) | correctly rehydrated, but only because "empty persisted workspace ⇒ no-fs" happens to be sound today; it breaks the day a second workspace-less profile exists | persist-in-snapshot (inference stays as second defense) | 1 |
-| 2 | Provider/model selector | `Service.sessionEngines` (`service.go:379`), in-memory only | falls to the DEFAULT provider; the rehydration comment records this as the conscious sound floor (`service.go:1076-1078`); a posture change, not an escalation. The floor is now operator-configurable (`--default-provider`/`--default-model`, issue #21, commit `d1ac84b`), which strengthens it | persist-in-snapshot; rehydration re-derives the engine via the factory | 1 |
-| 3 | `session.Usage` (cumulative run tokens) | a LOCAL variable in the loop (`var total session.Usage`, `engine/agent/loop.go:677`); not on the aggregate at all | resets to zero, so the `MaxRunTokens` brake (`budgetExhausted`, `loop.go:973-975`) grants a full fresh budget after every restart | persist-in-snapshot (additive `usage` field; the loop seeds `total` from it) | 1 |
+| 1 | Session profile (no-fs vs default) | **SHIPPED (Phase 1)**: persisted as an additive opaque `Profile` label on the aggregate (`session.Session`) and the snapshot (`sessnap.Snapshot`); the empty-workspace inference stays the second defense (`needsRehydration`, `Service.rehydrateSession`) | correctly rehydrated from the persisted label, with the inference still covering a pre-label snapshot | persist-in-snapshot (inference stays as second defense) | 1 (SHIPPED) |
+| 2 | Provider/model selector | **SHIPPED (Phase 1)**: persisted as the opaque `ProviderID`/`ModelID` label pair on the aggregate (`session.Session`) + snapshot (`sessnap.Snapshot`); `Service.rehydrateSession` re-derives the SAME engine via the factory from the persisted pair (no longer the default-provider floor) | rebuilt on the SAME provider+model via the factory; a default session (empty pair) still rides the shared engine | persist-in-snapshot; rehydration re-derives the engine via the factory | 1 (SHIPPED) |
+| 3 | `session.Usage` (cumulative run tokens) | **SHIPPED (Phase 1)**: a `Usage` field on the aggregate (`session.Session`) accumulated by `RecordUsage`, persisted as the additive `usage` snapshot field (`sessnap.Snapshot`); the budget brake (`budgetExhausted`) is evaluated against the cumulative `sess.Usage`, and `resetToIdle` DELIBERATELY preserves it | the `MaxRunTokens` brake continues across restart instead of re-granting a fresh budget | persist-in-snapshot (additive `usage` field; the budget reads the cumulative aggregate) | 1 (SHIPPED) |
 | 4 | permstore allow-always rules | `permstore.Memory.bySession` (`engine/adapter/permstore/permstore.go:48`) | discarded; the user is re-asked. Fail-safe, annoying | fix-via-event-log (verdict events replayed into permstore) | 3b |
 | 5 | The pending PARENT ask | the data IS in the snapshot (`Pending`, `sessnap.go:41`, restored via `PauseForApproval`); the LIVENESS is a parked channel (`askRegistry.await`, `engine/agent/permission.go:161`) | durable but stranded: `Approve` finds no run and returns `ErrNoActiveRun` (`service.go:1226-1232`) | the resume-from-awaiting loop entry (durability already correct; only liveness is missing) | 2 |
 | 6 | Pending CHILD asks (childAskRouter) | run-scoped in-memory routing of child-namespaced askIDs | lost with the run | reset-by-design; Phase 2 re-enters at the PARENT ask only, child asks documented non-rehydratable | 2 (doc note) |
@@ -332,7 +362,7 @@ through six methods, the port, the conformance suite, and the driver protocol is
 speculative until a real multi-tenant consumer exists; the no-speculative-widening
 rule applies. Record the gap, defer the widening.
 
-### (b) Profile in the snapshot, recommend YES in Phase 1 (OPEN)
+### (b) Profile in the snapshot, recommend YES in Phase 1 (DECIDED: YES, SHIPPED)
 
 The `9f8ba8c` rehydration derives the profile from "a persisted empty workspace can
 only be no-fs" (`service.go:1031-1041`). The inference is sound today because every
@@ -340,18 +370,20 @@ other path requires a non-empty workspace, but it is a pun: it breaks the day a
 second workspace-less profile exists (a memfs-scratch profile, a remote-FS profile),
 and both are named candidates in the deferred list.
 
-**Recommendation: add `profile` as an additive, omitempty snapshot field in Phase 1,
-and keep the empty-workspace inference as the second defense.** The precedent is
-exact: `ProviderPhase` (`sessnap.go:58`, json `"phase,omitempty"`) and `Parts`
-(`sessnap.go:62`) were both added additively with no format-tag bump, and the
+**DECIDED YES, SHIPPED in Phase 1: `Profile` is an additive, omitempty snapshot
+field, and the empty-workspace inference stays as the second defense.** The
+precedent is exact: `ProviderPhase` (json `"phase,omitempty"`) and `Parts`
+(`contentToDTO`) were both added additively with no format-tag bump, and the
 format-tag contract says the tag changes only if the encoding itself is replaced
-(`internal/adapter/grpcdriver/sessionstore.go:17-30`); additive fields ride
-`sessnap-json/1` unchanged, so remote drivers store and return the new field
-opaquely with zero driver changes. The known downgrade edge is already recorded as
-accepted (`DRIVERS.md` Deferred §5): an OLDER harness loading a newer snapshot
-silently sheds the field; for the profile specifically, the retained
-empty-workspace inference means even that downgrade path stays correct for no-fs,
-which is exactly why the inference should not be deleted when the field lands.
+(`SnapshotFormat`); additive fields ride `sessnap-json/1` unchanged, so remote
+drivers store and return the new field opaquely with zero driver changes. The known
+downgrade edge is already recorded as accepted (`DRIVERS.md` Deferred §5): an OLDER
+harness loading a newer snapshot silently sheds the field; for the profile
+specifically, the retained empty-workspace inference (`needsRehydration`,
+`Service.rehydrateSession`) means even that downgrade path stays correct for no-fs,
+which is exactly why the inference was not deleted when the field landed. As built,
+the same additive treatment carries `ProviderID`/`ModelID` (the selector pair) and
+the pointer-omitempty `usage` field.
 
 ### (c) v1 multi-replica stance: session affinity, single writer (OPEN)
 

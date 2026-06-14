@@ -973,7 +973,11 @@ no-stdio rule is about MCP servers, which are never `os/exec`-spawned.)
   All serialize via **`sessnap`** (`engine/adapter/sessnap`): a `Snapshot` DTO
   that round-trips a `Session` by driving the public state machine on restore
   (so a session saved mid-`awaiting` reloads with its pending ask intact). It
-  captures the terminal reason via `RecordedStopReason()` for exact round-trips.
+  captures the terminal reason via `RecordedStopReason()` for exact round-trips,
+  and (cloud-native Phase 1) the per-session profile, the opaque provider/model
+  selector pair, and the cumulative token `usage` — additive fields so a
+  restarted process rebuilds the SAME engine and the `MaxRunTokens` budget
+  continues across restart (see `docs/design/CLOUD-NATIVE.md`).
   A store may additionally implement the optional **`port.PrunableStore`**
   (`List`/`Delete`; `ErrPruneUnsupported` otherwise) — the retention MECHANISM.
   The POLICY lives in composition (`internal/app/childgc.go`, issue #38):

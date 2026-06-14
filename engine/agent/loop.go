@@ -720,6 +720,11 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 		return
 	}
 
+	// total is THIS run's per-run usage delta (the EvResult.Usage figure the team
+	// supervisor sums per round). It starts at zero each Run. The MaxRunTokens budget
+	// brake is evaluated against the AGGREGATE's cumulative Usage (sess.Usage) instead
+	// — which RecordUsage below keeps in lock-step and which the snapshot persists —
+	// so the budget survives reopen/restart while EvResult.Usage stays per-run.
 	var total session.Usage
 	var lastText string
 	// no-progress nudge accounting (Workstream A). noProgressNudges counts the
@@ -786,6 +791,17 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 			return
 		}
 		total = total.Add(usage)
+		// Accumulate this turn's usage onto the aggregate's CUMULATIVE Usage. This is
+		// the value the budget brake reads (budgetExhausted(r, sess.Usage)) and the
+		// snapshot persists, so the budget survives reopen/restart — there is NO loop
+		// seed; the brake reads sess.Usage directly. `total` is the separate zero-based
+		// per-run delta the EvResult carries (the figure the team supervisor sums per
+		// round). The session is StateRunning here (BeginTurn succeeded), so the
+		// running-only RecordUsage guard is satisfied. A guard error is impossible on
+		// this path but would only mean the aggregate misses one turn's usage (a
+		// best-effort budget undercount, never a correctness fault), so it is
+		// deliberately not promoted to a terminal error.
+		_ = sess.RecordUsage(usage)
 		if asst.Text != "" {
 			lastText = asst.Text
 		}
@@ -1012,13 +1028,18 @@ func (e *Engine) effectiveMaxRunTokens(r *Run) int {
 	}
 }
 
-// budgetExhausted reports whether the run's cumulative usage has crossed the
+// budgetExhausted reports whether the session's CUMULATIVE usage has crossed the
 // effective loop-level token ceiling (Deps.MaxRunTokens folded with the run's
 // tighten-only RunOptions override). A non-positive effective ceiling (the default)
 // disables the budget and always returns false.
-func (e *Engine) budgetExhausted(r *Run, total session.Usage) bool {
+//
+// It reads the AGGREGATE's cumulative Usage (the value RecordUsage accumulates and
+// the snapshot persists), NOT the per-run delta, so the budget brake bounds the
+// logical run across reopen/restart — a reloaded session resumes with its prior
+// spend already counted. The per-run delta stays the EvResult.Usage figure.
+func (e *Engine) budgetExhausted(r *Run, cumulative session.Usage) bool {
 	ceiling := e.effectiveMaxRunTokens(r)
-	return ceiling > 0 && total.TotalTokens() >= ceiling
+	return ceiling > 0 && cumulative.TotalTokens() >= ceiling
 }
 
 // lookupTool resolves a tool by name for THIS run: the run-scoped ExtraTools overlay
@@ -1056,7 +1077,7 @@ func (e *Engine) preTurnTerminal(ctx context.Context, r *Run, sess *session.Sess
 		e.terminate(ctx, r, sess, session.StopCancelled, lastText, total, nil)
 		return true
 	}
-	if e.budgetExhausted(r, total) {
+	if e.budgetExhausted(r, sess.Usage) {
 		e.terminateComplete(ctx, r, sess, session.StopBudget, lastText, total)
 		return true
 	}

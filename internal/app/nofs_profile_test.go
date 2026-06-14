@@ -649,3 +649,214 @@ func TestNoFSChildCatalogExactDelta(t *testing.T) {
 			onlyWant, onlyGot)
 	}
 }
+
+// TestSelectorSessionSurvivesRestartE2E is the cloud-native Phase 1 falsifiable
+// gate through the FULL composition (app.Build → server.Service), offline: a
+// session bound to a NON-default provider/model selector with a PARTIALLY-consumed
+// token budget is created and run over a durable store, the process "exits"
+// (built1.Close), a SECOND app.Build resumes over the SAME store, and the
+// post-restart run must demonstrate three legs:
+//
+//	(a) same catalog        — a no-fs selector session: a model Read is unknown-tool,
+//	                          the memory six still dispatch.
+//	(b) SAME model          — the post-restart request resolves to the PERSISTED
+//	                          selector's provider+model, NOT the default provider.
+//	(c) budget continues    — the prior pre-restart spend (persisted in the snapshot
+//	                          and accumulated by RecordUsage) survives the restart, so
+//	                          the post-restart run trips StopBudget at the boundary.
+//
+// Mutation-verified per leg:
+//   - (a)/(b): widening the rehydration trigger to pass ProviderSelector{} (instead
+//     of the persisted labels) routes the run onto the DEFAULT provider; the model
+//     assertion fails.
+//   - (c): changing the budget check from `budgetExhausted(r, sess.Usage)` to
+//     `budgetExhausted(r, total)` (the per-run delta) re-grants a fresh budget; the
+//     run does NOT trip StopBudget and the model is called.
+func TestSelectorSessionSurvivesRestartE2E(t *testing.T) {
+	ctx := context.Background()
+	storeDir := t.TempDir()
+	memoryDir := t.TempDir()
+	workspace := t.TempDir() // the SERVER's default workspace for the shared engine
+
+	const selectorModel = "anthropic/claude-3.5-sonnet"
+	// budget is sized so the SEEDED pre-restart spend (450) leaves room for the
+	// post-restart run to execute its catalog-proving turns (Read unknown-tool +
+	// Remember) and only THEN cross the ceiling — proving legs (a)/(b) on the
+	// post-restart turns AND leg (c) at the later boundary, all in one run.
+	const budget = 900
+
+	// modelByProvider lets the per-provider constructor capture which provider+model
+	// each request landed on, keyed by the provider id the registry constructed.
+	type capture struct {
+		mu     sync.Mutex
+		models []string
+	}
+	var openaiCap, openrouterCap capture
+	record := func(c *capture) mockllm.Option {
+		return mockllm.WithRequestObserver(func(req port.LLMRequest) {
+			c.mu.Lock()
+			c.models = append(c.models, req.Model)
+			c.mu.Unlock()
+		})
+	}
+
+	baseCfg := func() Config {
+		return Config{
+			Workspace:           workspace,
+			NoSoul:              true,
+			StoreDir:            storeDir,
+			MemoryDir:           memoryDir,
+			MaxRunTokens:        budget,
+			envDetector:         fakeEnv(map[string]string{"OPENAI_API_KEY": "sk-openai", "OPENROUTER_API_KEY": "sk-openrouter"}),
+			liveModelHTTPClient: offlineHTTPClient(),
+		}
+	}
+
+	// "Before the restart": create the selector (openrouter) session, run one turn
+	// that consumes most of the budget.
+	cfg1 := baseCfg()
+	cfg1.providerConstructor = func(_ Config, id, _, _ string) port.LLMProvider {
+		if id == providerOpenRouter {
+			return mockllm.NewWith(
+				[]mockllm.Option{record(&openrouterCap)},
+				mockllm.ChunksTurn(
+					mockllm.TextChunk("pre-restart-done"),
+					mockllm.UsageChunk(session.Usage{InputTokens: 300, OutputTokens: 150}), // 450 < 500
+					mockllm.DoneChunk(session.StopEndTurn),
+				),
+			)
+		}
+		return mockllm.NewWith([]mockllm.Option{record(&openaiCap)}, mockllm.TextTurn("openai-default"))
+	}
+	built1, err := Build(ctx, cfg1)
+	if err != nil {
+		t.Fatalf("Build #1: %v", err)
+	}
+	sess, err := built1.Service.CreateSessionWithProfile(ctx, "", session.ModeDefault, session.Limits{},
+		server.ProviderSelector{ProviderID: providerOpenRouter, ModelID: selectorModel}, server.ProfileNoFS)
+	if err != nil {
+		built1.Close()
+		t.Fatalf("CreateSessionWithProfile(selector+no-fs): %v", err)
+	}
+	run1, err := built1.Service.StartRun(ctx, sess.ID, "first selector turn")
+	if err != nil {
+		built1.Close()
+		t.Fatalf("StartRun (pre-restart): %v", err)
+	}
+	runEvents(run1)
+	built1.Close() // the "process exit": every in-memory registration dies here
+
+	// Sanity: the pre-restart turn ran on openrouter+selectorModel, never on openai.
+	openrouterCap.mu.Lock()
+	preModels := append([]string(nil), openrouterCap.models...)
+	openrouterCap.mu.Unlock()
+	if len(preModels) == 0 || preModels[0] != selectorModel {
+		t.Fatalf("pre-restart request models = %v, want first == %q", preModels, selectorModel)
+	}
+
+	// "After the restart": a brand-new Build over the SAME durable store.
+	diag := newCapturingDiagnostics()
+	cfg2 := baseCfg()
+	cfg2.Diagnostics = diag
+	cfg2.providerConstructor = func(_ Config, id, _, _ string) port.LLMProvider {
+		if id == providerOpenRouter {
+			return mockllm.NewWith(
+				[]mockllm.Option{record(&openrouterCap)},
+				// Turn 1: a Read (unknown-tool on the no-fs catalog) + usage. Seeded
+				// 450 + 200 = 650 < 900, so the next boundary proceeds.
+				mockllm.ChunksTurn(
+					mockllm.ToolCallChunk(session.ToolCall{ID: "r1", Name: "Read", Args: json.RawMessage(`{"file_path":"main.go"}`)}),
+					mockllm.UsageChunk(session.Usage{InputTokens: 120, OutputTokens: 80}),
+					mockllm.DoneChunk(session.StopEndTurn),
+				),
+				// Turn 2: a Remember (dispatches on the no-fs catalog) + usage. 650 +
+				// 300 = 950 >= 900, so the NEXT boundary trips StopBudget.
+				mockllm.ChunksTurn(
+					mockllm.ToolCallChunk(session.ToolCall{ID: "m1", Name: "Remember", Args: json.RawMessage(`{"key":"note/restart","value":"survived"}`)}),
+					mockllm.UsageChunk(session.Usage{InputTokens: 200, OutputTokens: 100}),
+					mockllm.DoneChunk(session.StopEndTurn),
+				),
+				// Turn 3 would run only if the budget did NOT survive; the (c) leg
+				// asserts the run stopped on StopBudget before reaching it.
+				mockllm.TextTurn("should-not-reach"),
+			)
+		}
+		return mockllm.NewWith([]mockllm.Option{record(&openaiCap)}, mockllm.TextTurn("openai-default"))
+	}
+	built2, err := Build(ctx, cfg2)
+	if err != nil {
+		t.Fatalf("Build #2: %v", err)
+	}
+	defer built2.Close()
+
+	preOpenRouterCalls := len(preModels)
+	run2, err := built2.Service.StartRunContent(ctx, sess.ID, "post-restart selector turn", nil)
+	if err != nil {
+		t.Fatalf("StartRunContent (post-restart): %v", err)
+	}
+	events := runEvents(run2)
+
+	// Leg (a): same (no-fs selector) CATALOG survived the restart — a model Read is
+	// unknown-tool (no FS tools), the memory six still dispatch.
+	if !unknownToolResult(events, "r1") {
+		t.Fatal("post-restart Read did NOT come back unknown-tool — the no-fs selector session escalated onto a filesystem catalog")
+	}
+	if !sawDispatchedTool(events, "m1") {
+		t.Fatal("post-restart Remember did not dispatch — the rehydrated catalog lost the memory six")
+	}
+	for _, ev := range events {
+		if ev.Type == session.EvToolResult && ev.ToolResult != nil && ev.ToolResult.CallID == "m1" && ev.ToolResult.IsError {
+			t.Fatalf("post-restart Remember failed: %s", ev.ToolResult.Content)
+		}
+	}
+
+	// Leg (b): SAME model — every post-restart request landed on the PERSISTED
+	// selector model, and the DEFAULT (openai) provider was NEVER used.
+	openrouterCap.mu.Lock()
+	postModels := append([]string(nil), openrouterCap.models[preOpenRouterCalls:]...)
+	openrouterCap.mu.Unlock()
+	if len(postModels) == 0 {
+		t.Fatal("no post-restart openrouter request captured — the rehydrated run did not reach the selector model")
+	}
+	for i, m := range postModels {
+		if m != selectorModel {
+			t.Fatalf("post-restart request[%d] model = %q, want %q (the selector must survive the restart)", i, m, selectorModel)
+		}
+	}
+	openaiCap.mu.Lock()
+	openaiModels := append([]string(nil), openaiCap.models...)
+	openaiCap.mu.Unlock()
+	if len(openaiModels) != 0 {
+		t.Fatalf("the DEFAULT (openai) provider was called %d time(s) with models %v — the selector session DEGRADED onto the default provider after the restart",
+			len(openaiModels), openaiModels)
+	}
+
+	// Leg (c): budget CONTINUED — the restored pre-restart spend (450, persisted in the
+	// snapshot's usage field) accumulated with the post-restart turns and crossed the
+	// 900 ceiling, tripping StopBudget; the third scripted turn ("should-not-reach")
+	// never ran.
+	if final := lastResultStop(events); final != session.StopBudget {
+		t.Fatalf("post-restart stop = %q, want %q (the persisted budget must continue across the restart)", final, session.StopBudget)
+	}
+	for _, ev := range events {
+		if ev.Type == session.EvResult && ev.Result != nil && ev.Result.Text == "should-not-reach" {
+			t.Fatal("the third post-restart turn ran — the budget did not continue (it re-granted a fresh allowance)")
+		}
+	}
+
+	// The empty root never reached the shared osfs factory.
+	if got := diag.countContaining("EMPTY root reached the shared osfs factory"); got != 0 {
+		t.Fatalf("the osfs factory chokepoint fired %d time(s) — rehydration let the empty root through", got)
+	}
+}
+
+// lastResultStop returns the stop reason of the last EvResult event.
+func lastResultStop(events []session.Event) session.StopReason {
+	var stop session.StopReason
+	for _, ev := range events {
+		if ev.Type == session.EvResult && ev.Result != nil {
+			stop = ev.Result.Stop
+		}
+	}
+	return stop
+}

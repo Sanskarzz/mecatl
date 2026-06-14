@@ -426,6 +426,11 @@ func newSession(id session.SessionID) *session.Session {
 func representativeSession(t *testing.T, id session.SessionID) *session.Session {
 	t.Helper()
 	s := newSession(id)
+	// Inert creation labels (opaque to the domain) — every store driver must
+	// round-trip them so a restarted process rebuilds the same engine.
+	s.Profile = "no-fs"
+	s.ProviderID = "openrouter"
+	s.ModelID = "anthropic/claude-3.5-sonnet"
 	mustOK(t, "RecordUserPrompt", s.RecordUserPrompt("please inspect the repo", []session.Message{
 		session.NewSystemMessage("project instructions: be concise"),
 	}))
@@ -435,6 +440,11 @@ func representativeSession(t *testing.T, id session.SessionID) *session.Session 
 	}
 	mustOK(t, "RecordUserPromptWithParts", s.RecordUserPromptWithParts("and this screenshot", []session.Content{img}, nil))
 	mustOK(t, "BeginTurn", s.BeginTurn())
+	// Record cumulative token usage while running so the snapshot carries a non-zero
+	// budget the store must preserve (the MaxRunTokens brake reads it on restart).
+	mustOK(t, "RecordUsage", s.RecordUsage(session.Usage{
+		InputTokens: 1200, OutputTokens: 340, CacheReadTokens: 800, CacheWriteTokens: 200,
+	}))
 	calls := []session.ToolCall{
 		// Keep Args COMPACT JSON: json.RawMessage round-trips verbatim only
 		// for already-compact payloads.
@@ -485,6 +495,18 @@ func assertSessionEqual(t *testing.T, got, want *session.Session) {
 	}
 	if got.Workspace != want.Workspace {
 		t.Errorf("Workspace = %q want %q", got.Workspace, want.Workspace)
+	}
+	if got.Profile != want.Profile {
+		t.Errorf("Profile = %q want %q", got.Profile, want.Profile)
+	}
+	if got.ProviderID != want.ProviderID {
+		t.Errorf("ProviderID = %q want %q", got.ProviderID, want.ProviderID)
+	}
+	if got.ModelID != want.ModelID {
+		t.Errorf("ModelID = %q want %q", got.ModelID, want.ModelID)
+	}
+	if got.Usage != want.Usage {
+		t.Errorf("Usage = %+v want %+v", got.Usage, want.Usage)
 	}
 	if !got.CreatedAt.Equal(want.CreatedAt) {
 		t.Errorf("CreatedAt = %v want %v", got.CreatedAt, want.CreatedAt)

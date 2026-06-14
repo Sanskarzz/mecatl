@@ -550,6 +550,20 @@ func (s *Service) CreateSessionWithProfile(ctx context.Context, workspace string
 // mechanism, same lock as the engine registration), so StartRun can never hand
 // "" to the osfs workspace factory (which would MkdirAll/OpenRoot the process
 // cwd).
+// setSessionLabels records the neutral provider+model selector and the
+// tool-surface profile onto the freshly-created aggregate as write-once creation
+// labels. The aggregate stores them opaquely (it never interprets the
+// ProviderSelector type, which stays a server-adapter type); persisting them is
+// what lets rehydrateSession rebuild the SAME engine after a restart. For the
+// empty-selector default profile this writes the zero values, so a default
+// session's snapshot is byte-identical to a pre-Phase-1 one (the labels omitempty
+// out of the JSON).
+func setSessionLabels(sess *session.Session, sel ProviderSelector, profile SessionProfile) {
+	sess.Profile = string(profile)
+	sess.ProviderID = sel.ProviderID
+	sess.ModelID = sel.ModelID
+}
+
 func (s *Service) createSession(ctx context.Context, workspace string, mode session.PermissionMode, limits session.Limits, sel ProviderSelector, specs []mcp.ServerConfig, profile SessionProfile) (*session.Session, error) {
 	switch profile {
 	case ProfileDefault:
@@ -576,8 +590,12 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 
 	needPerSession := sel != (ProviderSelector{}) || len(specs) > 0 || profile == ProfileNoFS
 	if !needPerSession {
-		// Shared-engine fast path (today's behaviour, byte-identical).
+		// Shared-engine fast path (today's behaviour, byte-identical). The labels are
+		// the empty pair + default profile here (the empty-selector default profile is
+		// exactly the no-per-session case), so setLabels persists nothing new — the
+		// snapshot stays byte-identical to a pre-Phase-1 default session.
 		sess := session.New(s.cfg.NewID(), mode, workspace, limits, s.cfg.Now())
+		setSessionLabels(sess, sel, profile)
 		if err := s.cfg.Store.Save(ctx, sess); err != nil {
 			return nil, fmt.Errorf("server: persist session: %w", err)
 		}
@@ -607,6 +625,11 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 	}
 	eng, closeFn := res.Engine, res.Close
 	sess := session.New(s.cfg.NewID(), mode, workspace, limits, s.cfg.Now())
+	// Persist the neutral provider+model selector and the profile as write-once
+	// creation labels on the aggregate, so a restarted process re-derives the SAME
+	// per-session engine via the factory (rehydrateSession) instead of falling to the
+	// default-provider floor / inferring the profile from the empty-workspace pun.
+	setSessionLabels(sess, sel, profile)
 
 	// Authoritative cap check under the SAME lock as the insert (TOCTOU-safe): if
 	// the registry filled between the pre-check and here, tear the freshly-built
@@ -941,23 +964,24 @@ func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, 
 	if err != nil {
 		return nil, err
 	}
-	// Re-mount client MCP on resume with the ZERO provider selector: a resumed
-	// session keeps the DEFAULT provider (per-session provider/model binding on
-	// resume is out of scope — the wire CreateSession selector is for new
-	// sessions). The PROFILE is derived from the persisted snapshot, not
-	// hardcoded: an empty persisted Workspace can ONLY be a no-fs session (the
-	// default profile requires one; ACP persists a real cwd), so the rebuilt
-	// engine must be the no-fs one — handing such a session a default-profile
-	// engine would silently re-grant the FS tools (the same restart escalation
-	// rehydrateNoFSSession guards on the StartRun path). ACP itself never
-	// creates no-fs sessions today, so this is the defensive derivation.
+	// Re-mount client MCP on resume, re-deriving the provider+model selector AND the
+	// profile from the PERSISTED snapshot labels (cloud-native Phase 1) rather than
+	// hardcoding the default provider + inferring the profile from the empty
+	// workspace. A selector session keeps its SAME model on resume (the persisted
+	// ProviderID/ModelID), not the default-provider floor. The profile derivation
+	// keeps the empty-workspace inference as the second defense for a pre-label
+	// snapshot.
+	sel := ProviderSelector{ProviderID: sess.ProviderID, ModelID: sess.ModelID}
 	profile := ProfileDefault
-	if sess.Workspace == "" {
+	switch {
+	case sess.Profile == string(ProfileNoFS):
+		profile = ProfileNoFS
+	case sess.Profile == "" && sess.Workspace == "":
 		profile = ProfileNoFS
 	}
 	// The persisted workspace is the session's base root: the rebuilt engine's
 	// child permission resolver pins to IT (issue #32) — "" for no-fs.
-	res, err := s.cfg.SessionEngine(ctx, ProviderSelector{}, specs, profile, sess.Workspace)
+	res, err := s.cfg.SessionEngine(ctx, sel, specs, profile, sess.Workspace)
 	if err != nil {
 		// The session was loaded + (if needed) reopened and re-persisted, but the
 		// per-session engine could not be built. We deliberately do NOT roll that
@@ -1037,22 +1061,30 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 	se, hasEngine := s.sessionEngines[id]
 	ws := s.sessionWorkspaces[id]
 	s.mu.Unlock()
-	if !hasEngine && sess.Workspace == "" {
-		// RESTART REHYDRATION (issue #55): a PERSISTED session with an empty
-		// Workspace can ONLY be a no-fs session (the default profile requires a
-		// non-empty workspace, ACP persists a real cwd, CreateTeam rejects empty),
-		// and its per-session engine + workspace override live only in process
-		// memory — after a restart both are gone. Without this branch the session
-		// would silently ESCALATE onto the shared engine (full FS tools + Bash)
-		// over a workspace built from the empty root (osfs MkdirAll/OpenRoot of
-		// the server process cwd). Rebuild the no-fs engine through the SAME
-		// factory path create used and re-register the no-fs workspace override.
-		se, err = s.rehydrateNoFSSession(ctx, id)
+	if !hasEngine && needsRehydration(sess) {
+		// RESTART REHYDRATION (issue #55, widened in the cloud-native Phase 1): a
+		// PERSISTED session that needed a PER-SESSION engine — a non-default
+		// provider/model selector, OR the no-fs profile — has its engine + (for no-fs)
+		// its workspace override living only in process memory; after a restart both
+		// are gone. Without rehydration the session would silently DEGRADE onto the
+		// shared engine: a no-fs session would ESCALATE onto the full FS tools + Bash
+		// over a workspace built from the empty root, and a selector session would run
+		// on the WRONG (default-provider) model — wrong enough that its persisted
+		// MaxRunTokens budget would be metered through a different model. Rebuild the
+		// SAME engine through the factory path create used, reading the PERSISTED
+		// selector+profile back off the loaded session. Phase 1 widened only this
+		// engine-rebuild trigger; the awaiting-approval mid-turn loop entry stays
+		// Phase 2 (no new run-entry seam here). The MaxSessionEngines cap is inherited
+		// by the widened trigger (rehydrateSession enforces it). The empty-workspace
+		// inference stays as the SECOND defense below.
+		se, err = s.rehydrateSession(ctx, sess)
 		if err != nil {
 			return nil, err
 		}
 		hasEngine = true
-		ws = nofs.New()
+		if sess.Profile == string(ProfileNoFS) || sess.Workspace == "" {
+			ws = nofs.New()
+		}
 	}
 	if hasEngine {
 		engine = se.engine
@@ -1075,27 +1107,59 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 	return run, nil
 }
 
-// rehydrateNoFSSession rebuilds and registers the per-session NO-FS engine (and
-// the no-fs workspace override) for a persisted no-fs session whose in-memory
-// registrations did not survive a process restart. It is called from the
-// run-entry seam (StartRunContent) when the loaded session has an empty
-// Workspace and no per-session engine is registered.
+// needsRehydration reports whether a loaded session that has NO live per-session
+// engine registered (i.e. its in-memory registrations did not survive a restart)
+// must have one rebuilt before it runs. It is the WIDENED Phase 1 trigger: the
+// original issue-#55 condition was empty-Workspace (no-fs only); a session also
+// needs rehydration when it persisted a non-default provider/model selector
+// (`ProviderID`/`ModelID` set) or the no-fs profile, because both require the
+// per-session factory engine, not the shared one. A default FS session (empty
+// selector, default profile, non-empty workspace) returns false: it keeps riding
+// the shared engine with zero rehydration overhead, exactly as before. The
+// empty-workspace check stays as the SECOND defense (a no-fs session that
+// somehow persisted no profile label still rehydrates).
+func needsRehydration(sess *session.Session) bool {
+	return sess.Profile == string(ProfileNoFS) ||
+		sess.ProviderID != "" || sess.ModelID != "" ||
+		sess.Workspace == ""
+}
+
+// rehydrateSession rebuilds and registers the per-session engine for a persisted
+// session whose in-memory registrations did not survive a process restart. It is
+// called from the run-entry seam (StartRunContent) when needsRehydration is true
+// and no per-session engine is registered.
 //
 // The rehydrated engine is built through the SAME SessionEngineFactory create
-// used, with the ZERO provider selector and no client MCP: the session snapshot
-// persists neither (session.Session carries no provider/model selector — the
-// same restart posture as every other resume path), so the DEFAULT-provider
-// no-fs engine is the sound floor. The cap/lock discipline mirrors
-// createSession: cheap pre-check, build outside the lock, authoritative
-// re-check + register under the lock. A concurrent rehydration losing the race
-// keeps the winner's engine and tears its own down (the LoadSessionWithMCP
-// leak-guard idiom, inverted: first registration wins).
-func (s *Service) rehydrateNoFSSession(ctx context.Context, id session.SessionID) (*sessionEngine, error) {
+// used, reading the PERSISTED selector+profile back off the loaded session — so a
+// selector session rebuilds on the SAME provider/model (not the default floor)
+// and a no-fs session rebuilds the no-FS catalog. No client MCP is re-mounted
+// (the client re-mounts via LoadSessionWithMCP; the server never stored the
+// specs). The cap/lock discipline mirrors createSession: cheap pre-check, build
+// outside the lock, authoritative re-check + register under the lock. A
+// concurrent rehydration losing the race keeps the winner's engine and tears its
+// own down (first registration wins).
+func (s *Service) rehydrateSession(ctx context.Context, sess *session.Session) (*sessionEngine, error) {
+	id := sess.ID
 	if s.cfg.SessionEngine == nil {
-		// NEVER fall back to the shared engine: that is exactly the escalation
-		// this seam exists to prevent. A no-fs session could only have been
-		// created with a factory configured, so this is a deployment mis-wire.
-		return nil, fmt.Errorf("%w: persisted no-fs session %q cannot be rehydrated (no session-engine factory configured)", ErrInvalidArgument, id)
+		// NEVER fall back to the shared engine: that is exactly the degradation
+		// (no-fs escalation / wrong-model) this seam exists to prevent. A session
+		// needing a per-session engine could only have been created with a factory
+		// configured, so this is a deployment mis-wire.
+		return nil, fmt.Errorf("%w: persisted session %q cannot be rehydrated (no session-engine factory configured)", ErrInvalidArgument, id)
+	}
+	// Reconstruct the selector + profile from the persisted inert labels. The
+	// ProviderSelector type stays server-adapter-owned; the aggregate only carried
+	// the two opaque strings.
+	sel := ProviderSelector{ProviderID: sess.ProviderID, ModelID: sess.ModelID}
+	profile := ProfileDefault
+	switch {
+	case sess.Profile == string(ProfileNoFS):
+		profile = ProfileNoFS
+	case sess.Profile == "" && sess.Workspace == "":
+		// Second-defense inference: an empty persisted workspace can only be a no-fs
+		// session (every FS path requires a non-empty workspace), so a snapshot that
+		// predates the profile label still rehydrates as no-fs.
+		profile = ProfileNoFS
 	}
 	s.mu.Lock()
 	full := len(s.sessionEngines) >= s.cfg.MaxSessionEngines
@@ -1103,9 +1167,9 @@ func (s *Service) rehydrateNoFSSession(ctx context.Context, id session.SessionID
 	if full {
 		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
 	}
-	res, err := s.cfg.SessionEngine(ctx, ProviderSelector{}, nil, ProfileNoFS, "" /* a no-fs session has no workspace */)
+	res, err := s.cfg.SessionEngine(ctx, sel, nil, profile, sess.Workspace)
 	if err != nil {
-		return nil, fmt.Errorf("server: rehydrate no-fs session %q: %w", id, err)
+		return nil, fmt.Errorf("server: rehydrate session %q: %w", id, err)
 	}
 	se := &sessionEngine{
 		engine:        res.Engine,
@@ -1131,10 +1195,14 @@ func (s *Service) rehydrateNoFSSession(ctx context.Context, id session.SessionID
 		return nil, fmt.Errorf("%w: %d", ErrTooManySessionEngines, s.cfg.MaxSessionEngines)
 	}
 	s.sessionEngines[id] = se
-	// Re-register the no-fs workspace override under the SAME lock as the engine
-	// (the create-time discipline), so the run below — and every later run —
-	// resolves its workspace here and never consults the shared factory.
-	s.sessionWorkspaces[id] = nofs.New()
+	if profile == ProfileNoFS {
+		// Re-register the no-fs workspace override under the SAME lock as the engine
+		// (the create-time discipline), so the run below — and every later run —
+		// resolves its workspace here and never consults the shared factory with the
+		// empty root. A selector session with a real workspace needs no override: the
+		// run-entry seam builds its workspace from the shared factory as usual.
+		s.sessionWorkspaces[id] = nofs.New()
+	}
 	s.mu.Unlock()
 	return se, nil
 }

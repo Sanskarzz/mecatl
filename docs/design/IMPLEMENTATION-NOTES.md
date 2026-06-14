@@ -2217,29 +2217,73 @@ engine has the FS tools baked in) and `server.SessionEngineFactory` grew a
   `noFSMemberNote` (children) to the Role; `agent.WithSubagentNoFSNote()` replaces the WHOLE
   Subagent tool-surface description (no Read/Grep/Glob, no worktree, no Parallel claims) —
   byte-identical without the option (`TestSubagentSpecNoFSNoteOption`, mutation-verified).
-- **Restart rehydration:** the profile is not a snapshot field but it IS recoverable — an
-  empty persisted `Session.Workspace` can ONLY be a no-fs session (default requires one,
-  ACP persists a real cwd, CreateTeam rejects empty). At the run-entry seam
-  (`Service.StartRunContent`) a loaded empty-workspace session with no registered
-  per-session engine is REHYDRATED (`rehydrateNoFSSession`): the no-fs engine is rebuilt
-  through the SAME `SessionEngineFactory` path create used (zero selector — the snapshot
-  carries no provider/model, so the DEFAULT-provider no-fs engine is the sound floor) and
-  the nofs workspace override re-registered, under the create-time cap/lock discipline.
-  Without this the session would silently ESCALATE onto the shared engine (full FS tools +
-  Bash) over `osfs` opened at the server cwd. Two defenses can't regress independently:
+- **Restart rehydration (widened in cloud-native Phase 1):** the profile is now a persisted
+  snapshot label (`Session.Profile`; see the snapshot-fidelity note below) AND still
+  recoverable by inference — an empty persisted `Session.Workspace` can ONLY be a no-fs
+  session (default requires one, ACP persists a real cwd, CreateTeam rejects empty). At the
+  run-entry seam (`Service.StartRunContent`) a loaded session with no registered
+  per-session engine that `needsRehydration` (no-fs profile OR a persisted selector OR an
+  empty workspace) is REHYDRATED (`Service.rehydrateSession`, generalized from the former
+  no-fs-only `rehydrateNoFSSession`): the engine is rebuilt through the SAME
+  `SessionEngineFactory` path create used, reading the PERSISTED selector + profile back off
+  the loaded session (a no-fs session rebuilds the file-less catalog and re-registers the
+  nofs workspace override; a selector session rebuilds on the SAME provider+model), under
+  the create-time cap/lock discipline. Without this a no-fs session would silently ESCALATE
+  onto the shared engine over `osfs` opened at the server cwd, and a selector session would
+  DEGRADE onto the default provider. Two defenses can't regress independently:
   `StartRunContent` never hands an empty root to the shared factory (serves `nofs.New()`),
   and `osfsWorkspaceFactory` itself intercepts `root == ""` (ERROR log + nofs — the
-  chokepoint a future caller cannot bypass). `LoadSessionWithMCP` derives the profile from
-  the same empty-workspace fact instead of hardcoding the default. Guarded by
-  `TestNoFSSessionRehydratesAfterRestart` (server seam) +
-  `TestNoFSSessionSurvivesRestartE2E` (full Build over a shared jsonl store),
-  mutation-verified (drop the rehydration branch → the escalation is visible).
+  chokepoint a future caller cannot bypass). `LoadSessionWithMCP` likewise re-derives the
+  selector + profile from the persisted labels. A DEFAULT FS session (empty selector,
+  default profile, non-empty workspace) does NOT trigger rehydration — it keeps riding the
+  shared engine. Guarded by `TestNoFSSessionRehydratesAfterRestart` +
+  `TestSelectorSessionRehydratesWithPersistedSelector` + `TestDefaultFSSessionDoesNotRehydrate`
+  (server seams) and `TestNoFSSessionSurvivesRestartE2E` + `TestSelectorSessionSurvivesRestartE2E`
+  (full Build over a shared jsonl store), mutation-verified per leg.
 - **Non-goals / known edges:** a REMOTE filesystem for no-fs sessions returns later as a
-  driver (see `DRIVERS.md`). Selector/client-MCP sessions still lose their per-session
-  engine on restart (they degrade to the default provider — a posture change, not an
-  escalation; only the no-fs case demanded rehydration). Skills with payload files are
-  body-only in a no-fs session: the body injects fine, asset reads fail honestly with
-  not-exist through the nofs workspace (and the posture note tells the model so).
+  driver (see `DRIVERS.md`). The awaiting-approval mid-turn resume is still Phase 2 (Phase 1
+  widened only the engine-rebuild trigger, not the run-entry cursor). Skills with payload
+  files are body-only in a no-fs session: the body injects fine, asset reads fail honestly
+  with not-exist through the nofs workspace (and the posture note tells the model so).
+
+### Snapshot fidelity — persisted per-session facts (cloud-native Phase 1)
+
+Three per-session facts are persisted so a restarted process is indistinguishable
+mid-conversation (`docs/design/CLOUD-NATIVE.md` ledger rows 1/2/3):
+
+- **The aggregate gained four inert, opaque fields** on `session.Session`: `Usage`
+  (cumulative run tokens), `Profile`, `ProviderID`, `ModelID`. The domain STORES the three
+  labels but never interprets them — the `ProviderSelector` type and all resolution stay in
+  composition; only the opaque strings cross into `engine/` (the same posture as
+  `Workspace`). They are write-once creation labels set by the composition root
+  (`setSessionLabels` in `internal/adapter/server/service.go`, after `session.New`); a
+  default session writes the zero values, so its snapshot stays byte-identical to a
+  pre-Phase-1 one.
+- **`Usage` is mutated through `RecordUsage`** (running-only guard, mirroring
+  `RecordToolResults`); the loop calls it alongside its own per-run total, and the
+  `MaxRunTokens` budget brake (`budgetExhausted`) is evaluated against the CUMULATIVE
+  `sess.Usage`, not the per-run delta — so the budget survives reopen/restart while the
+  per-run `EvResult.Usage` figure (which the team supervisor sums per round) is unchanged.
+- **`resetToIdle` DELIBERATELY preserves `Usage`** (the divergence from `Counters`, which it
+  still zeroes) so the budget survives the Reopen/Interrupt/Recover seams — pinned by
+  `TestResetToIdlePreservesUsage` (mutation-verified: adding `s.Usage = Usage{}` fails it).
+  A documented consequence: a reused child/member session's per-engine `MaxRunTokens` brake
+  is now CUMULATIVE across `Reopen` (team rounds, structured-output validation retries), which
+  is the intended "cap the whole call" reading — `driveChild` SUMS usage across the in-call
+  Reopens and the cross-attempt brake is now real (pinned by `TestStructuredOutputBudgetTripsAcrossDrives`).
+  The team lead's SYNTHESIS turn is the one deliberate exception: `Supervisor.synthesise` calls
+  the explicit `Session.ResetUsage` seam (the aggregate-mutation counterpart to the non-reset,
+  legal from any non-running state) before the synthesis drive so a budget-stopped working run
+  still produces the deliverable (the synthesis spend is still folded into the team outcome).
+  The team-AGGREGATE budget is unchanged (it sums per-round `EvResult.Usage`, the per-run delta).
+- **The snapshot (`sessnap.Snapshot`) gained `profile,omitempty` + `provider_id,omitempty`
+  + `model_id,omitempty` (strings) + `usage` (a `*session.Usage` POINTER for true
+  omitempty, the `Pending` precedent).** Populated in `Of`, restored by direct field
+  assignment in `Restore` (exported authoritative values like `Counters`, no transition).
+  Additive: they ride `sessnap-json/1` unchanged, no driver/proto change — a v1 snapshot
+  with none of the keys loads with an empty profile/selector and a zero Usage. Guarded by
+  the round-trip tests, the v1-downgrade test, and the `storeconformance` suite (every store
+  driver proves the round-trip).
 
 ## Proto — `contracts/proto/mecatl/v1/` (multi-provider Phase 0 S3 wire surface)
 

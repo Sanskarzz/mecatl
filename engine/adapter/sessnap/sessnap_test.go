@@ -18,8 +18,18 @@ func runningSession(t *testing.T) *session.Session {
 	s := session.New("s1", session.ModePlan, "/ws", session.Limits{
 		MaxTurns: 10, MaxToolCalls: 20, MaxConsecutiveFailures: 3,
 	}, time.Unix(1700000000, 0).UTC())
+	// Phase 1 inert labels + cumulative usage: exercised by every round-trip test
+	// via assertEquivalent.
+	s.Profile = "no-fs"
+	s.ProviderID = "openrouter"
+	s.ModelID = "anthropic/claude-3.5-sonnet"
 	if err := s.BeginTurn(); err != nil {
 		t.Fatalf("BeginTurn: %v", err)
+	}
+	if err := s.RecordUsage(session.Usage{
+		InputTokens: 900, OutputTokens: 250, CacheReadTokens: 600, CacheWriteTokens: 100,
+	}); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
 	}
 	if err := s.RecordAssistant(session.NewAssistantMessage("thinking", "rsn", []session.ToolCall{
 		session.NewToolCall("c1", "Edit", json.RawMessage(`{"path":"x"}`)),
@@ -58,6 +68,18 @@ func assertEquivalent(t *testing.T, got, want *session.Session) {
 	}
 	if got.Counters != want.Counters {
 		t.Errorf("Counters = %+v, want %+v", got.Counters, want.Counters)
+	}
+	if got.Profile != want.Profile {
+		t.Errorf("Profile = %q, want %q", got.Profile, want.Profile)
+	}
+	if got.ProviderID != want.ProviderID {
+		t.Errorf("ProviderID = %q, want %q", got.ProviderID, want.ProviderID)
+	}
+	if got.ModelID != want.ModelID {
+		t.Errorf("ModelID = %q, want %q", got.ModelID, want.ModelID)
+	}
+	if got.Usage != want.Usage {
+		t.Errorf("Usage = %+v, want %+v", got.Usage, want.Usage)
 	}
 	if !reflect.DeepEqual(got.Conversation, want.Conversation) {
 		t.Errorf("Conversation mismatch:\n got = %+v\nwant = %+v", got.Conversation, want.Conversation)
@@ -292,5 +314,72 @@ func TestLoadV1SnapshotNoPartsIsTextOnly(t *testing.T) {
 	}
 	if m.Parts != nil {
 		t.Fatalf("Parts = %v, want nil for a v1 (no parts) snapshot", m.Parts)
+	}
+}
+
+// TestSnapshotRoundTripsPhase1Fields pins the four Phase 1 additive fields
+// (profile, provider_id, model_id, usage) round-trip through Marshal/Unmarshal
+// AND that they actually appear in the JSON (so the round-trip is not vacuously
+// satisfied by both sides being zero). Mutation: dropping any field from Of or
+// Restore fails this.
+func TestSnapshotRoundTripsPhase1Fields(t *testing.T) {
+	want := runningSession(t)
+	line := mustMarshal(t, want)
+
+	// The keys are present in the wire form (the round-trip carries real data).
+	for _, key := range []string{`"profile"`, `"provider_id"`, `"model_id"`, `"usage"`} {
+		if !strings.Contains(string(line), key) {
+			t.Errorf("marshalled snapshot missing %s key:\n%s", key, line)
+		}
+	}
+
+	got, err := sessnap.Unmarshal(line)
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.Profile != "no-fs" || got.ProviderID != "openrouter" || got.ModelID != "anthropic/claude-3.5-sonnet" {
+		t.Errorf("labels not restored: profile=%q provider=%q model=%q", got.Profile, got.ProviderID, got.ModelID)
+	}
+	wantUsage := session.Usage{InputTokens: 900, OutputTokens: 250, CacheReadTokens: 600, CacheWriteTokens: 100}
+	if got.Usage != wantUsage {
+		t.Errorf("Usage = %+v, want %+v", got.Usage, wantUsage)
+	}
+}
+
+// TestZeroUsageOmittedFromSnapshot pins the pointer-omitempty discipline: a
+// session with zero Usage and empty labels emits NEITHER a "usage" key NOR the
+// label keys, so a default session's snapshot stays byte-compatible with a
+// pre-Phase-1 one.
+func TestZeroUsageOmittedFromSnapshot(t *testing.T) {
+	s := session.New("z", session.ModeDefault, "/ws", session.Limits{}, time.Unix(1700000000, 0).UTC())
+	line := mustMarshal(t, s)
+	for _, key := range []string{`"usage"`, `"profile"`, `"provider_id"`, `"model_id"`} {
+		if strings.Contains(string(line), key) {
+			t.Errorf("zero-value snapshot unexpectedly carries %s:\n%s", key, line)
+		}
+	}
+}
+
+// TestLoadV1SnapshotMissingPhase1FieldsLoads is the downgrade/adversarial guard:
+// a v1 snapshot with NONE of the Phase 1 keys still loads, with the profile
+// empty (the empty-workspace inference in composition is the second defense), an
+// empty selector, and a zero Usage (a nil usage pointer => the zero value, so the
+// budget brake simply starts fresh — no crash, no spurious budget).
+func TestLoadV1SnapshotMissingPhase1FieldsLoads(t *testing.T) {
+	v1 := `{"id":"old","state":"idle","mode":"default","limits":{},"counters":{},` +
+		`"workspace":"/ws","created_at":"2023-11-14T22:13:20Z",` +
+		`"messages":[{"role":"user","text":"hello there"}]}`
+	got, err := sessnap.Unmarshal([]byte(v1))
+	if err != nil {
+		t.Fatalf("Unmarshal v1: %v", err)
+	}
+	if got.Profile != "" {
+		t.Errorf("Profile = %q, want empty for a pre-Phase-1 snapshot", got.Profile)
+	}
+	if got.ProviderID != "" || got.ModelID != "" {
+		t.Errorf("selector not empty: provider=%q model=%q", got.ProviderID, got.ModelID)
+	}
+	if got.Usage != (session.Usage{}) {
+		t.Errorf("Usage = %+v, want zero for a snapshot with no usage key", got.Usage)
 	}
 }

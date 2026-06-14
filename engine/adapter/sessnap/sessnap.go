@@ -40,6 +40,23 @@ type Snapshot struct {
 	Messages   []messageDTO           `json:"messages"`
 	Pending    *session.PendingAsk    `json:"pending,omitempty"`
 	StopReason session.StopReason     `json:"stop_reason,omitempty"`
+	// Profile is the session's opaque tool-surface profile label. omitempty keeps a
+	// v1 snapshot with no "profile" key decoding to "" (the default profile) —
+	// purely additive, no format-tag bump (the same precedent as ProviderPhase /
+	// Parts). The empty-workspace inference stays as the second defense on restore.
+	Profile string `json:"profile,omitempty"`
+	// ProviderID and ModelID are the session's opaque neutral provider+model
+	// selector pair. omitempty keeps a v1 snapshot with no key decoding to the empty
+	// pair ("server default") — additive, no version bump. Persisting them lets a
+	// restarted process re-derive the SAME per-session engine via the factory.
+	ProviderID string `json:"provider_id,omitempty"`
+	ModelID    string `json:"model_id,omitempty"`
+	// Usage is the cumulative run-token accounting, a POINTER for true omitempty
+	// (matching the Pending precedent): a zero Usage marshals nothing and a v1
+	// snapshot with no "usage" key decodes to a nil pointer => the zero Usage on
+	// restore. It is what the MaxRunTokens budget brake is evaluated against, so
+	// persisting it lets the budget survive restart.
+	Usage *session.Usage `json:"usage,omitempty"`
 }
 
 // messageDTO mirrors session.Message with JSON tags. session.Message is
@@ -81,13 +98,22 @@ func Of(s *session.Session) (Snapshot, error) {
 		return Snapshot{}, ErrNilSession
 	}
 	snap := Snapshot{
-		ID:        s.ID,
-		State:     s.State,
-		Mode:      s.Mode,
-		Limits:    s.Limits,
-		Counters:  s.Counters,
-		Workspace: s.Workspace,
-		CreatedAt: s.CreatedAt,
+		ID:         s.ID,
+		State:      s.State,
+		Mode:       s.Mode,
+		Limits:     s.Limits,
+		Counters:   s.Counters,
+		Workspace:  s.Workspace,
+		Profile:    s.Profile,
+		ProviderID: s.ProviderID,
+		ModelID:    s.ModelID,
+		CreatedAt:  s.CreatedAt,
+	}
+	// Usage is a pointer for true omitempty: only emit the key when there is spend
+	// to persist, so a zero-usage snapshot stays byte-identical to a pre-Usage one.
+	if s.Usage != (session.Usage{}) {
+		u := s.Usage
+		snap.Usage = &u
 	}
 	if s.Conversation != nil {
 		snap.Messages = make([]messageDTO, len(s.Conversation.Messages))
@@ -119,6 +145,16 @@ func (snap Snapshot) Restore() (*session.Session, error) {
 	}
 	// Restore running totals directly; these are exported and authoritative.
 	s.Counters = snap.Counters
+	// Restore the inert creation labels and cumulative usage by direct assignment —
+	// exported authoritative values like Counters, with no state transition. Profile
+	// / ProviderID / ModelID are opaque to the domain; Usage seeds the budget so it
+	// survives restart (a nil pointer => the zero Usage, the pre-Usage default).
+	s.Profile = snap.Profile
+	s.ProviderID = snap.ProviderID
+	s.ModelID = snap.ModelID
+	if snap.Usage != nil {
+		s.Usage = *snap.Usage
+	}
 
 	// Drive the state machine to the recorded lifecycle state. New() lands in
 	// StateIdle; we advance from there.

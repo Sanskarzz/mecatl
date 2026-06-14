@@ -4478,7 +4478,7 @@ func defaultLimits() session.Limits {
 // persisted Session.Workspace can only be a no-fs session, and osfs.NewWorkspace("")
 // would MkdirAll/OpenRoot the server process's cwd — a filesystem escalation. The
 // Service intercepts this first (no-fs sessions carry a per-session workspace
-// override, restored by rehydrateNoFSSession after a restart), so this branch is
+// override, restored by rehydrateSession after a restart), so this branch is
 // the defense a FUTURE caller cannot bypass: it serves the honest no-filesystem
 // workspace and logs loudly, because reaching it means a no-fs guard upstream
 // regressed.

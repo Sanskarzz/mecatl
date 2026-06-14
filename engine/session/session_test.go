@@ -12,6 +12,14 @@ func newTestSession(limits Limits) *Session {
 	return New("s1", ModeDefault, "/tmp/ws", limits, time.Unix(0, 0))
 }
 
+// mustOK fails the test immediately when a session-aggregate transition errors.
+func mustOK(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected transition error: %v", err)
+	}
+}
+
 func TestValidLifecycle_IdleRunningAwaitingRunningCompleted(t *testing.T) {
 	s := newTestSession(Limits{})
 	if s.State != StateIdle {
@@ -1148,6 +1156,145 @@ func TestSeedHistoryRejectsUnpaired(t *testing.T) {
 		err := s.SeedHistory([]Message{NewUserMessage("goal")})
 		if !errors.Is(err, ErrIllegalTransition) {
 			t.Fatalf("SeedHistory from running err = %v, want ErrIllegalTransition", err)
+		}
+	})
+}
+
+// TestRecordUsageAccumulates pins that RecordUsage element-wise sums onto the
+// aggregate's cumulative Usage across multiple calls, so the aggregate is the
+// durable twin of the loop's running total.
+func TestRecordUsageAccumulates(t *testing.T) {
+	s := newTestSession(Limits{})
+	if err := s.BeginTurn(); err != nil {
+		t.Fatalf("BeginTurn: %v", err)
+	}
+	if err := s.RecordUsage(Usage{InputTokens: 100, OutputTokens: 20, CacheReadTokens: 40, CacheWriteTokens: 10}); err != nil {
+		t.Fatalf("RecordUsage #1: %v", err)
+	}
+	if err := s.RecordUsage(Usage{InputTokens: 50, OutputTokens: 5, CacheReadTokens: 30, CacheWriteTokens: 0}); err != nil {
+		t.Fatalf("RecordUsage #2: %v", err)
+	}
+	want := Usage{InputTokens: 150, OutputTokens: 25, CacheReadTokens: 70, CacheWriteTokens: 10}
+	if s.Usage != want {
+		t.Fatalf("accumulated Usage = %+v, want %+v", s.Usage, want)
+	}
+}
+
+// TestRecordUsageRunningOnly pins the running-only guard: RecordUsage from any
+// non-running state is an illegal transition and leaves Usage untouched (mirrors
+// RecordAssistant / RecordToolResults).
+func TestRecordUsageRunningOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		drive func(*Session)
+	}{
+		{"idle", func(*Session) {}},
+		{"awaiting", func(s *Session) {
+			mustOK(t, s.BeginTurn())
+			mustOK(t, s.PauseForApproval(PendingAsk{AskID: "a1", Tool: "Edit"}))
+		}},
+		{"completed", func(s *Session) {
+			mustOK(t, s.BeginTurn())
+			mustOK(t, s.Complete())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestSession(Limits{})
+			tc.drive(s)
+			err := s.RecordUsage(Usage{InputTokens: 99})
+			if !errors.Is(err, ErrIllegalTransition) {
+				t.Fatalf("RecordUsage from %s err = %v, want ErrIllegalTransition", tc.name, err)
+			}
+			if s.Usage != (Usage{}) {
+				t.Fatalf("Usage mutated on rejected RecordUsage: %+v", s.Usage)
+			}
+		})
+	}
+}
+
+// TestResetToIdlePreservesUsage is the CRITICAL divergence guard (cloud-native
+// Phase 1): the three terminal-recovery seams (Reopen / Interrupt / Recover) all
+// route through resetToIdle, which clears the Counters but DELIBERATELY preserves
+// the cumulative Usage so the MaxRunTokens budget brake survives reopen/restart.
+// Mutation: adding `s.Usage = Usage{}` to resetToIdle must fail this test.
+func TestResetToIdlePreservesUsage(t *testing.T) {
+	spend := Usage{InputTokens: 5000, OutputTokens: 1200, CacheReadTokens: 100, CacheWriteTokens: 50}
+
+	t.Run("Reopen", func(t *testing.T) {
+		s := newTestSession(Limits{})
+		mustOK(t, s.BeginTurn())
+		mustOK(t, s.RecordUsage(spend))
+		mustOK(t, s.Complete())
+		mustOK(t, s.Reopen())
+		if s.Usage != spend {
+			t.Fatalf("Reopen cleared Usage: got %+v, want %+v (the budget must survive)", s.Usage, spend)
+		}
+		if s.Counters != (Counters{}) {
+			t.Fatalf("Reopen did NOT reset Counters: %+v", s.Counters)
+		}
+	})
+
+	t.Run("Interrupt", func(t *testing.T) {
+		s := newTestSession(Limits{})
+		mustOK(t, s.BeginTurn())
+		mustOK(t, s.RecordUsage(spend))
+		mustOK(t, s.Cancel())
+		mustOK(t, s.Interrupt())
+		if s.Usage != spend {
+			t.Fatalf("Interrupt cleared Usage: got %+v, want %+v", s.Usage, spend)
+		}
+	})
+
+	t.Run("Recover", func(t *testing.T) {
+		s := newTestSession(Limits{})
+		mustOK(t, s.BeginTurn())
+		mustOK(t, s.RecordUsage(spend))
+		mustOK(t, s.Fail())
+		mustOK(t, s.Recover())
+		if s.Usage != spend {
+			t.Fatalf("Recover cleared Usage: got %+v, want %+v", s.Usage, spend)
+		}
+	})
+}
+
+// TestResetUsage pins the explicit ResetUsage seam (the aggregate-mutation counterpart
+// to resetToIdle's deliberate Usage-preservation): it zeroes Usage from any NON-running
+// state and is rejected from running (where it would race the loop's RecordUsage and
+// discard an in-flight turn's spend mid-budget). It is the seam the team supervisor's
+// synthesise step uses to grant a budget-stopped lead a fresh allowance.
+func TestResetUsage(t *testing.T) {
+	spend := Usage{InputTokens: 5000, OutputTokens: 1200}
+
+	t.Run("idle", func(t *testing.T) {
+		s := newTestSession(Limits{})
+		s.Usage = spend
+		mustOK(t, s.ResetUsage())
+		if s.Usage != (Usage{}) {
+			t.Fatalf("ResetUsage(idle) left Usage = %+v, want zero", s.Usage)
+		}
+	})
+
+	t.Run("completed", func(t *testing.T) {
+		s := newTestSession(Limits{})
+		mustOK(t, s.BeginTurn())
+		mustOK(t, s.RecordUsage(spend))
+		mustOK(t, s.Complete())
+		mustOK(t, s.ResetUsage())
+		if s.Usage != (Usage{}) {
+			t.Fatalf("ResetUsage(completed) left Usage = %+v, want zero", s.Usage)
+		}
+	})
+
+	t.Run("running rejected", func(t *testing.T) {
+		s := newTestSession(Limits{})
+		mustOK(t, s.BeginTurn())
+		mustOK(t, s.RecordUsage(spend))
+		err := s.ResetUsage()
+		if !errors.Is(err, ErrIllegalTransition) {
+			t.Fatalf("ResetUsage from running err = %v, want ErrIllegalTransition", err)
+		}
+		if s.Usage != spend {
+			t.Fatalf("rejected ResetUsage mutated Usage: %+v", s.Usage)
 		}
 	})
 }

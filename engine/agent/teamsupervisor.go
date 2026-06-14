@@ -1219,6 +1219,21 @@ func (s *Supervisor) synthesise(ctx context.Context, evCh chan<- TeamEvent) (rep
 
 	prompt := s.buildSynthesisSources()
 
+	// The synthesis turn runs AFTER the round loop and the team/engine budget gate
+	// (it structurally cannot trip the gate). It is a deliberate fresh-allowance
+	// continuation: a lead whose WORKING run was stopped by its engine-level
+	// MaxRunTokens (StopBudget) must still produce the team's deliverable. Since the
+	// cumulative session.Usage now survives Reopen (cloud-native Phase 1, so the
+	// budget survives restart), reset the lead's accumulator through the explicit
+	// aggregate seam so the synthesis turn is not re-blocked by the working run's
+	// spend. The lead is idle here (Reopened after its working run; a non-resumable
+	// lead was already gated out above), so ResetUsage is legal. The synthesis spend
+	// is still folded into the team OUTCOME below (lead.tokensUsed), so the accounting
+	// is complete; only the per-run brake input is reset. A reset error is impossible
+	// on this idle path but is non-fatal (it would only leave the prior spend, which
+	// at worst skips the synthesis turn — the labelled fallback then covers it).
+	_ = lead.sess.ResetUsage()
+
 	_ = s.team.SetMemberState(s.leadName, team.MemberWorking)
 	text, stop, usage := s.driveOneTurn(ctx, lead, prompt, evCh)
 	if text != "" {
