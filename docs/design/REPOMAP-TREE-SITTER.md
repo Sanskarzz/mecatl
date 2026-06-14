@@ -63,7 +63,7 @@ tree-sitter WASM module (`parseSession`). Three compounding facts:
    the next `ts_parser_parse_string` spins forever (uninterruptible — the call
    takes no timeout and no cancellation flag; `ctx` is only checked *between*
    files). Reproduced deterministically: the scan sailed through file 128,
-   then hung between 128 and 192. The file it hung on (`server/team_test.go`,
+   then hung between 128 and 192. The file it hung on (`internal/adapter/server/team_test.go`,
    22 KB of ordinary Go) **parses in 0.02 s on a fresh session** — i.e. it is
    not the file, it is the accumulated module state. Any file at that index
    hangs.

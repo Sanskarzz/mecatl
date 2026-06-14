@@ -14,7 +14,7 @@
 | Workspace path-escape containment | ✅ | `osfs` via `os.Root` |
 | Model-based layer-2 risk classifier | ✅ | `permclassify` (opt-in, monotonic, fail-safe) |
 | Hooks (full lifecycle fired, exit 0/2) | ✅ | all 6 phases fire |
-| **API authentication + rate limiting** | ✅ | bearer (`--auth-token`/`MECATL_AUTH_TOKEN`, constant-time) + optional TLS/mTLS (`--tls-cert`/`--tls-key`/`--client-ca`) gRPC interceptors + HTTP middleware; per-client + global token-bucket rate limit (`--rate-limit`/`--rate-burst`, bounded/idle-evicting); off-loopback-no-auth WARNING (`server/authn.go`) |
+| **API authentication + rate limiting** | ✅ | bearer (`--auth-token`/`MECATL_AUTH_TOKEN`, constant-time) + optional TLS/mTLS (`--tls-cert`/`--tls-key`/`--client-ca`) gRPC interceptors + HTTP middleware; per-client + global token-bucket rate limit (`--rate-limit`/`--rate-burst`, bounded/idle-evicting); off-loopback-no-auth WARNING (`internal/adapter/server/authn.go`) |
 | OS-level sandbox (process trust) | ⏸️ Deferred | Explicitly deferred (2026-05-29). The `CommandRunner` port is the seam; a Landlock(+seccomp) wrapper drops in later without touching the loop. Bash is also fully optional (shell-less deploys avoid the surface entirely), so this is not a blocker for those. |
 | Secrets handling (no key logging) | ✅ | key via env, never logged |
 | MCP transport restriction (no stdio) | ✅ | streaming-HTTP only |
@@ -37,7 +37,7 @@
 | Per-tool logging + JSONL replay | ✅ | `ToolCallRecorder` (the port formerly named `Logger`) + `jsonlstore` |
 | OTel span model (run/turn/tool) | ✅ | `telemetry` |
 | OTLP exporter wiring | ✅ | `telemetry.Setup` builds/installs an OTLP TracerProvider; wired in `mecated` via `--otlp-endpoint`/`--otlp-protocol`/`--otlp-insecure` (no-op when empty) |
-| **Health endpoints** (`/healthz`,`/readyz`, gRPC health) | ✅ | HTTP `/healthz` (liveness) + `/readyz` (readiness) mounted outside auth/rate-limit; standard `grpc_health_v1` SERVING (`server/health.go`). `deploy/` can switch TCP→httpGet probes |
+| **Health endpoints** (`/healthz`,`/readyz`, gRPC health) | ✅ | HTTP `/healthz` (liveness) + `/readyz` (readiness) mounted outside auth/rate-limit; standard `grpc_health_v1` SERVING (`internal/adapter/server/health.go`). `deploy/` can switch TCP→httpGet probes |
 
 ## Context management
 

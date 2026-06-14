@@ -210,7 +210,7 @@ tools, never delegated to the store.
 
 **Logical asset names have ONE grammar and ONE validator.** A skill payload
 is addressed by a slash-separated, RELATIVE logical name in the skill's own
-namespace (`references/api.md`, `scripts/run.sh` — the exact namespace
+namespace (`references/api.md`, `scripts/run.sh` <!-- lint:not-a-citation: skill logical asset names, not repo files --> — the exact namespace
 SKILL.md bodies already reference): non-empty, no empty/`.`/`..` segments, no
 backslash, no NUL. `tool.ValidSkillAssetName` is the single shared validator
 — every implementation and consumer (FS source, driver client, server
@@ -237,8 +237,8 @@ model-addressable tool error — never a partial bundle on disk.
    clients) to an importable package for external Go driver authors is a
    public-API commitment** — every exported symbol becomes a compatibility
    surface — and is made deliberately when an external Go consumer exists,
-   not implied by the current placement (`grpcdriver/server.go` says the
-   same in code). Non-Go drivers are unaffected: the proto is the contract.
+   not implied by the current placement (`internal/adapter/grpcdriver/server.go`
+   says the same in code). Non-Go drivers are unaffected: the proto is the contract.
 2. **User-model store driver flag.** `--memory-store-url` drives the
    project-memory store only; the user-model store stays on the local flock
    adapter. Same interface (`tool.MemoryStore`), so the flag is mechanical

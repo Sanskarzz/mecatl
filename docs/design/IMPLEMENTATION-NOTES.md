@@ -190,7 +190,7 @@ was observed announcing actions without emitting the tool calls). `EvNoProgress`
 adapters normalize to it: OpenAI's `input_tokens` already includes cached tokens; Anthropic's
 raw `input_tokens` EXCLUDES cache reads/writes, so its adapter folds `cache_read_input_tokens`
 + `cache_creation_input_tokens` into `InputTokens` at the single `session.Usage` mapping site
-(`anthropic/stream.go` `translateMessageStop`) — before that fix `--max-run-tokens`
+(`internal/adapter/anthropic/stream.go` `translateMessageStop`) — before that fix `--max-run-tokens`
 UNDERCOUNTED Anthropic runs (cache-served prompt tokens never hit the budget).
 When `total.TotalTokens() >= MaxRunTokens` the loop ends via
 `terminateComplete(…, session.StopBudget, …)` — a NON-error CLEAN terminal (completed path,

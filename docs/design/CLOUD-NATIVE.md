@@ -70,6 +70,17 @@ Three lists: the resource inventory, the rehydrate-fidelity ledger, the recorded
 decisions. Gate: the doc exists and the ledger has an explicit decision per row. No
 behavior change.
 
+**Per-phase re-audit (every phase, not just Phase 0).** Each phase below re-confirms
+this Phase 0 inventory as part of its gate: re-walk List 1 and List 2 against the git
+log since the last audit, add any new resource that outlives a tool call (the List 1
+shape) or holds restart-losable session/run state (the List 2 shape), and record the
+audit in the phase gate. The inventory drifts the moment a new goroutine, cache,
+breaker, or in-memory map lands without a row; three resources (the modelhook
+guardrail breakers, the WebSearch provider, the `askReviewBreaker`) already had to be
+backfilled after `f1f4e31`, which is exactly the drift this re-audit step prevents.
+The CLAUDE.md "outlives-a-call resource" gotcha is the author-time half of the same
+discipline.
+
 ### Phase 1: snapshot fidelity
 
 Make the snapshot faithful enough that a restarted process is indistinguishable
@@ -173,7 +184,7 @@ durable artifact survives and is reloaded), or **lost** (gone, possibly leaking)
 | 1 | Global MCP manager (`globalMgr`) | `app.Build` | process | `mcpClose` in Build's `closeAll`; NEVER folded into per-session close (`build.go:980`) | reconstructible (reconnects from config at next Build) | `internal/app/build.go:1868` (`connectMCP`) |
 | 2 | Per-session client MCP managers | `sessionEngineFactory` | session | per-session close func, invoked by `Service.CloseSession` (`service.go:743`) and shutdown | lost (client specs are not persisted; a client re-mounts via `LoadSessionWithMCP`, `service.go:968`) | `internal/app/build.go:962` |
 | 3 | Preserved-fork LRU (`LRUForkReaper`) | `app.Build` (shared via `catalogAssets`) | process | LRU eviction runs each entry's cleanup (dir removal) outside the lock | registry lost; the preserved fork DIRS remain on disk un-tracked (a leak on crash) | `engine/agent/forkreaper.go:41,64`; built at `internal/app/build.go:1936` |
-| 4 | Project memory store (flock pair: `memory.json` + `memory.lock`) | `app.Build` | process handle, per-directory data | flock held per-operation only; one `*Store` per dir per process (self-deadlock invariant, `memory/store.go:79-88`) | persisted (data on disk; handle rebuilt at next Build) | `internal/app/build.go:1895`; `internal/adapter/memory/store.go:89-92` |
+| 4 | Project memory store (flock pair: `memory.json` + `memory.lock`) | `app.Build` | process handle, per-directory data | flock held per-operation only; one `*Store` per dir per process (self-deadlock invariant, `internal/adapter/memory/store.go:79-88`) | persisted (data on disk; handle rebuilt at next Build) | `internal/app/build.go:1895`; `internal/adapter/memory/store.go:89-92` |
 | 5 | User-model store (same adapter, XDG dir) | `buildUserModelStore` | process handle, per-user data | as above | persisted | `internal/app/build.go:1337` (dir derivation `1328-1335`) |
 | 6 | permstore learned allow-always rules | `app.Build` | session (data), process (store) | `Forget(sessionID)` via `OnCloseSession` (`service.go:748`); capped at 256/session | **lost** (in-memory by design; restart re-asks) | `engine/adapter/permstore/permstore.go:42,48` |
 | 7 | Skill read-roots + driver asset cache (temp dir) | the skills seam in `buildCatalog` | process (build-scoped) | `os.RemoveAll` in the seam close, folded into Build's `closeAll` | reconstructible (fresh temp dir next Build; driver assets re-materialize lazily on first activation) | `internal/app/build.go:2228` (`MkdirTemp`) |

@@ -56,7 +56,7 @@ truth at session start so conventions aren't relitigated each turn.
 **Status:** Implemented. `prompt.DiscoverInstructions`
 (`engine/prompt/builder.go:153`) reads `AGENTS.md` (winning) then `CLAUDE.md`
 (fallback) and returns them as **user-role** messages with a provenance marker.
-The loop calls it once on the first turn (`agent/loop.go:217` `recordPrompt`,
+The loop calls it once on the first turn (`engine/agent/loop.go` `recordPrompt`,
 gated on `sess.Counters.Turns == 0`).
 
 **Pluggable?** Yes. It reads through `tool.Workspace` (the FS port), never `os`,
@@ -82,7 +82,7 @@ instruction file, concatenate with a precedence order; subdir files load lazily.
 managed (`/etc`) scope, no per-subdir lazy load, no `@import`. Notably,
 `governance` already models the exact precedence ladder this pattern needs —
 `Scope` (`Managed > CLI > LocalProject > SharedProject > User`,
-`governance/permission.go:31`) with `HasHigherPrecedenceThan` — but it is used
+`engine/governance/permission.go`) with `HasHigherPrecedenceThan` — but it is used
 only for *permission* rules, not instruction assembly.
 
 **Pluggable?** Partial. The FS seam (`tool.Workspace`) is right, but there is no

@@ -41,10 +41,10 @@ to the code paths that cause them:
 
 | Concern | Where it lives | Why it bites |
 |---|---|---|
-| **TTFT vs inter-token latency** | `runTurn` consuming `LLM.Stream` chunks (`engine/agent/loop.go`); OpenAI SSE→Chunk (`adapter/openai/stream.go`) | Users feel time-to-first-token and *jitter* between tokens, not mean latency. One number hides both. |
+| **TTFT vs inter-token latency** | `runTurn` consuming `LLM.Stream` chunks (`engine/agent/loop.go`); OpenAI SSE→Chunk (`internal/adapter/openai/stream.go`) | Users feel time-to-first-token and *jitter* between tokens, not mean latency. One number hides both. |
 | **Dispatch lock contention / mutate-serial queueing** | `Engine.dispatch` read-parallel/mutate-serial (`engine/agent/dispatch.go`); results merged under a mutex | A slow `Edit` serially blocks every queued mutation — an internal **coordinated-omission** source (survey §12). Mean tool latency won't show the queueing. |
-| **Goroutine leaks** | per-run background goroutine (`Engine.Run` → `drive`), the SSE consumer + its cancel path, subagent/parallel drain loops (`subagent.go`, the Parallel tool in `parallel.go`), the server Run registry (`server/service.go`) | Each run spins goroutines; a cancellation path that doesn't unwind leaks them across a long-lived `mecated`. |
-| **GC pressure / allocation churn** | chunk decoding, event fan-out (`Run.emit`), prompt assembly, the compaction cascade (`agent/cascade.go`) | High alloc/op on the hot streaming path drives GC pauses that show up as inter-token jitter. |
+| **Goroutine leaks** | per-run background goroutine (`Engine.Run` → `drive`), the SSE consumer + its cancel path, subagent/parallel drain loops (`subagent.go`, the Parallel tool in `parallel.go`), the server Run registry (`internal/adapter/server/service.go`) | Each run spins goroutines; a cancellation path that doesn't unwind leaks them across a long-lived `mecated`. |
+| **GC pressure / allocation churn** | chunk decoding, event fan-out (`Run.emit`), prompt assembly, the compaction cascade (`engine/agent/cascade.go`) | High alloc/op on the hot streaming path drives GC pauses that show up as inter-token jitter. |
 | **Long-session memory growth** | conversation history before compaction; the jsonl store; historically the tree-sitter WASM leak (`adapter/repomap`, now **removed** — see `docs/design/REPOMAP-TREE-SITTER.md`) | Memory climbs over a long session. The since-removed WASM leak (~23 MB RSS per call) was **off the Go heap** — invisible to `pprof heap` and `runtime/metrics`; only process RSS saw it (survey §9). The off-heap-growth signature still applies to any future off-heap consumer. |
 | **TUI render cadence** | `cmd/mecatui/ui` coalescing streamed deltas to frame cadence | Render must keep up with inter-token rate without scrambling markdown; a starved render goroutine is the symptom the (now-removed) WASM hang already produced once. The measured idle-churn source was the footer spinner's self-perpetuating tick chain (a 10fps full-screen Update→View re-render forever: ~12.6% CPU, ~3.7MB/s alloc, GC every ~3.5s idle) — now phase-gated (`spinnerVisible`, dropped outside running/connecting, re-armed on every transition in). |
 | **Tail latency** | run/turn timing across all the above | p99 turn latency is the SLO that matters; averages lie. |
@@ -56,7 +56,7 @@ What mecatl **already has** (verified against `internal/adapter/telemetry/` and
   127.0.0.1:9090`), exposing **domain-derived** series only: `mecatl_events_total`,
   `mecatl_runs_total`, `mecatl_tool_calls_total`, `mecatl_tool_duration_seconds`
   (histogram), `mecatl_tokens_total`, `mecatl_cache_hit_ratio`,
-  `mecatl_active_runs`, `mecatl_permission_asks_total` (`telemetry/metrics.go`).
+  `mecatl_active_runs`, `mecatl_permission_asks_total` (`internal/adapter/telemetry/metrics.go`).
   Attribute set (all bounded — never a session id, def name, or free text):
   `type` (event type), `stop` (stop reason), `tool` (tool name), `error`
   ("true"/"false"), `kind` (token kind), and — since issue #47 — `role`, the
@@ -64,7 +64,7 @@ What mecatl **already has** (verified against `internal/adapter/telemetry/` and
   carried by EVERY series (main engine = `role="main"`; child engines are tagged
   via `telemetry.Metrics.WithRole` behind `app.Config.MetricsRoleScoper`, with
   internal/app's `roleFamily` as the cardinality choke point).
-- **OTel traces** — run/turn/tool spans over OTLP (`telemetry/tracing.go`,
+- **OTel traces** — run/turn/tool spans over OTLP (`internal/adapter/telemetry/tracing.go`,
   `telemetry.Setup`), with the documented single-root-per-sink limitation
   (no per-concurrent-run correlation because `EventSink.Emit` has no `ctx`).
 - Per-tool **`Logger`** timing and a jsonl replay log (`jsonlstore`).
