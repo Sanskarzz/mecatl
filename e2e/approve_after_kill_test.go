@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
@@ -48,12 +47,11 @@ import (
 // kill (jsonlstore appendLine is not an atomic rename) and OS-crash durability (no
 // fsync) — both narrow and out of scope for "disposable process" (process restart,
 // not host crash); see docs/design/CLOUD-NATIVE.md.
-// approveAfterKillModel is the hard-pinned lane for this scenario (see the
-// package-doc LANE note): a tool-call-capable Bedrock-routed model that does NOT
-// content-filter mecatl-shaped tool-bearing requests. Independent of
+// This scenario's hard-pinned lane is the shared haikuLane constant (see
+// restart_helpers_test.go): a tool-call-capable Bedrock-routed model that does
+// NOT content-filter mecatl-shaped tool-bearing requests, independent of
 // MECATL_E2E_MODEL so the env override cannot route this onto the F2-blocked
 // OpenAI lane and make the required Write ask never fire.
-const approveAfterKillModel = "anthropic/claude-3.5-haiku"
 
 func approveAfterKillSpecs() {
 	ginkgo.Describe("approve-after-kill (cloud-native Phase 2)", func() {
@@ -83,7 +81,7 @@ func approveAfterKillSpecs() {
 				// ModeDefault: the Write tool resolves to Ask, so the run parks.
 				sessionID, _, _, err := cli1.CreateSession(ctx, local1.Workspace(),
 					client.ModeFromString("default"),
-					client.ModelSelection{ProviderID: harness.ProviderID, ModelID: approveAfterKillModel})
+					client.ModelSelection{ProviderID: harness.ProviderID, ModelID: haikuLane})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "create session on local #1")
 
 				stream1, err := cli1.OpenConverse(ctx)
@@ -101,37 +99,9 @@ func approveAfterKillSpecs() {
 				// it does not depend on the resumed SSE replaying the pre-restart call.
 				// DO NOT approve — the run stays parked awaiting; the live gRPC relay
 				// persists a durable awaiting snapshot on the ask (Persist-on-ask).
-				msgs := make(chan tea.Msg, 256)
-				go stream1.ReadLoop(ctx, msgs)
-
-				askID, writeCallID := "", ""
-				askDeadline := time.After(90 * time.Second)
-			waitForAsk:
-				for {
-					select {
-					case <-askDeadline:
-						break waitForAsk
-					case m, ok := <-msgs:
-						if !ok {
-							break waitForAsk
-						}
-						switch v := m.(type) {
-						case client.ToolCallMsg:
-							if v.Name == "Write" && writeCallID == "" {
-								writeCallID = v.ID
-							}
-						case client.PermissionAskMsg:
-							if v.Tool == "Write" {
-								askID = v.AskID
-								break waitForAsk
-							}
-						}
-					}
-				}
-				gomega.Expect(askID).NotTo(gomega.BeEmpty(),
-					"local #1 never raised a Write permission ask within the deadline\n--- mecated log tail ---\n"+local1.LogTail(4096))
-				gomega.Expect(writeCallID).NotTo(gomega.BeEmpty(),
-					"local #1 never surfaced a Write tool.call (card-before-the-gate) before the ask\n--- mecated log tail ---\n"+local1.LogTail(4096))
+				askID, writeCallID := driveToWriteAsk(ctx, stream1, 90*time.Second)
+				expectNonEmpty(askID, "a Write permission ask on local #1", local1.LogTail(4096))
+				expectNonEmpty(writeCallID, "a Write tool.call on local #1 (card-before-the-gate)", local1.LogTail(4096))
 
 				// The Write must NOT have run yet — it is parked at the ask.
 				notePath := filepath.Join(local1.Workspace(), "note.txt")
