@@ -189,6 +189,9 @@ durable artifact survives and is reloaded), or **lost** (gone, possibly leaking)
 | 17 | Memory/user-model consolidation goroutines (dream) | `app.Build` | process | exit on ctx done | reconstructible | `internal/app/build.go:1893,1901,1920` |
 | 18 | Live model-catalog refresh goroutine | `app.Build` | process | one-shot; `refreshClose` in `closeAll` | reconstructible (embedded catalog is the floor) | `internal/app/modellister.go:35`; `internal/app/build.go:763` |
 | 19 | Driver connection cache (`driverConns`, one lazy `ClientConn` per URL) | `app.Build` | process | once-guarded closes folded into the per-seam closes | reconstructible (lazy redial next Build) | `internal/app/driverstore.go:54-90` |
+| 20 | WebSearch `SearchProvider` (shared `*http.Client` + egress semaphore) | `app.Build` | process | none needed (stateless client; the semaphore is a per-process egress bound) | reconstructible (rebuilt from the backend-tier config at next Build) | `internal/app/build.go` (`buildSearchProvider`); `internal/adapter/search/httpsearch.go:79-80` (issue #26) |
+| 21 | modelhook guardrail breakers (`checkBudget` call cap + `failureStreak`) | `modelhook.Runner` (composition) | session | dies with the session Runner | **lost** (in-memory; a rehydrated session gets a fresh check-budget and a closed breaker, fail-safe) | `internal/adapter/modelhook/breaker.go:15,53`; constructed `modelhook.go:124,128` (commit `a032412`) |
+| 22 | `askReviewBreaker` (headless ask-reviewer circuit breaker) | `agent.Run` | run | dies with the run | lost (run-scoped by design) | `engine/agent/askadjudicator.go:144` (commit `1b774d4`) |
 
 ### Does resource-lifetime management earn a seam now?
 
@@ -196,18 +199,22 @@ The kit inventory's question, answered: **no, not yet; the hand-managed lifecycl
 suffice until Phase 4.** The table sorts cleanly into three clusters, and none of
 them wants a generic resource manager today:
 
-- **Process-scoped infrastructure (rows 1, 3-5, 7, 16-19)** is reconstructible from
+- **Process-scoped infrastructure (rows 1, 3-5, 7, 16-20)** is reconstructible from
   config at the next Build. The only genuine restart liability in the cluster is row
   3's preserved-fork directories, which leak on crash because the LRU registry (the
   only thing that knows to delete them) is in-memory. That is small, bounded by the
   LRU cap per process lifetime, FS-profile-only (no forks exist under no-fs), and a
   startup sweep of the fork-dir naming convention would fix it without any
-  abstraction.
-- **Session-scoped server state (rows 2, 6, 11, 12)** is exactly the rehydration
+  abstraction. Row 20 (the WebSearch provider) is a process-scoped resource too, but
+  with no crash-leak shape: a stateless `http.Client` plus an in-process semaphore,
+  nothing on disk to orphan.
+- **Session-scoped server state (rows 2, 6, 11, 12, 21)** is exactly the rehydration
   surface Phases 1-3 address one row at a time: row 11/12 via profile+selector in
   the snapshot (Phase 1), row 6 via verdict events (Phase 3b), row 2 stays
-  client-owned by design.
-- **Run-scoped ephemera (rows 9, 13, 14, 15)** dies with the run by design; Phase 2
+  client-owned by design. Row 21 (the modelhook guardrail breakers) resets fail-safe
+  and is observability/spend-bounding only, not correctness-critical, so it stays
+  reset-by-design.
+- **Run-scoped ephemera (rows 9, 13, 14, 22)** dies with the run by design; Phase 2
   changes what "the run died" means for the one row that matters (14), without making
   the others durable.
 
@@ -215,7 +222,9 @@ The first thing that would force a real seam is cross-process exclusion (leasing
 which is a driver-protocol concern (Phase 4), not an in-process resource manager. The
 trip-wire to revisit: if a future arc adds a fourth process-scoped resource with a
 crash-leak shape like row 3, or if leasing lands and wants a uniform "what does this
-process hold" enumeration, build the seam then, against this inventory.
+process hold" enumeration, build the seam then, against this inventory. The three
+post-`f1f4e31` additions (rows 20-22) do NOT trip it: row 20 is process-scoped but
+leak-free, rows 21-22 are session/run-scoped, so the conclusion stands.
 
 ## List 2: rehydrate-fidelity ledger
 
@@ -232,12 +241,12 @@ what is persisted), **reset-by-design** (documented, acceptable),
 | # | Item | Where it lives | On restart today | Decision | Phase |
 |---|---|---|---|---|---|
 | 1 | Session profile (no-fs vs default) | nowhere persisted; DERIVED from the empty-workspace pun (`service.go:1031-1041`) | correctly rehydrated, but only because "empty persisted workspace ⇒ no-fs" happens to be sound today; it breaks the day a second workspace-less profile exists | persist-in-snapshot (inference stays as second defense) | 1 |
-| 2 | Provider/model selector | `Service.sessionEngines` (`service.go:379`), in-memory only | falls to the DEFAULT provider; the rehydration comment records this as the conscious sound floor (`service.go:1076-1078`); a posture change, not an escalation | persist-in-snapshot; rehydration re-derives the engine via the factory | 1 |
+| 2 | Provider/model selector | `Service.sessionEngines` (`service.go:379`), in-memory only | falls to the DEFAULT provider; the rehydration comment records this as the conscious sound floor (`service.go:1076-1078`); a posture change, not an escalation. The floor is now operator-configurable (`--default-provider`/`--default-model`, issue #21, commit `d1ac84b`), which strengthens it | persist-in-snapshot; rehydration re-derives the engine via the factory | 1 |
 | 3 | `session.Usage` (cumulative run tokens) | a LOCAL variable in the loop (`var total session.Usage`, `engine/agent/loop.go:677`); not on the aggregate at all | resets to zero, so the `MaxRunTokens` brake (`budgetExhausted`, `loop.go:973-975`) grants a full fresh budget after every restart | persist-in-snapshot (additive `usage` field; the loop seeds `total` from it) | 1 |
 | 4 | permstore allow-always rules | `permstore.Memory.bySession` (`engine/adapter/permstore/permstore.go:48`) | discarded; the user is re-asked. Fail-safe, annoying | fix-via-event-log (verdict events replayed into permstore) | 3b |
 | 5 | The pending PARENT ask | the data IS in the snapshot (`Pending`, `sessnap.go:41`, restored via `PauseForApproval`); the LIVENESS is a parked channel (`askRegistry.await`, `engine/agent/permission.go:161`) | durable but stranded: `Approve` finds no run and returns `ErrNoActiveRun` (`service.go:1226-1232`) | the resume-from-awaiting loop entry (durability already correct; only liveness is missing) | 2 |
 | 6 | Pending CHILD asks (childAskRouter) | run-scoped in-memory routing of child-namespaced askIDs | lost with the run | reset-by-design; Phase 2 re-enters at the PARENT ask only, child asks documented non-rehydratable | 2 (doc note) |
-| 7 | Background children | `childRunRegistry` (`engine/agent/childregistry.go:131`), run-scoped; child sessions persist via `WithSubagentStore` (`subagent.go:599`) | the running children die un-drained; their persisted sessions remain individually loadable/resumable (`resume:` / `InspectSubagent`), but nothing reconnects them to the parent | reset-by-design for v1; session-scoped detach is issue #28, gated on the event log | 3c → #28 |
+| 7 | Background children | `childRunRegistry` (`engine/agent/childregistry.go:131`), run-scoped; child sessions persist via `WithSubagentStore` (`subagent.go:599`), and parallel branches likewise via `WithParallelStore` (`parallel-<callID>-<i>`, commit `fe9ffe5`, forensically loadable through the `{subagent-, parallel-}` prefix gate) | the running children die un-drained; their persisted sessions remain individually loadable/resumable (`resume:` / `InspectSubagent`), but nothing reconnects them to the parent | reset-by-design for v1; session-scoped detach is issue #28, gated on the event log | 3c → #28 |
 | 8 | Edit read-ledger | in-memory per-`osfs.Workspace` map of sha256 fingerprints (`internal/adapter/osfs/osfs.go:428,714,729`) | the factory builds a fresh Workspace with an empty ledger; the first Edit after restart is REFUSED ("not read this session") until the model re-Reads. Fail-safe, never silently wrong; costs one extra Read per touched file. N/A for no-fs sessions | reset-by-design now; becomes a snapshot candidate if the re-Read tax proves annoying (Phase-1-adjacent, FS sessions only; the kit inventory's §2.4 explicit-token shape is the eventual answer) | deferred |
 | 9 | Pre-compaction history | nowhere: `maybeCompact` rewrites the conversation via `ReplaceHistory` and that is what the next Save persists | the durable record is already lossy BEFORE any restart; compaction itself is stateless given the (compacted) history, so restart adds no new loss | fix-via-event-log (archive the replaced span before `ReplaceHistory`) | 3b |
 | 10 | Mid-round team state | the `team.Team` aggregate (roster, goal, tasks, mailbox, findings; `engine/team/team.go:179`) and `Supervisor.members` runtime (`engine/agent/teamsupervisor.go:298`) are in-memory only; `Service.teams` (`service.go:369`) likewise. ONLY member sessions persist (`persistMember`, `teamsupervisor.go:1187`, under `MemberSessionID`, `teamsupervisor.go:1509`) | a mid-round team is unrecoverable: member transcripts survive as orphan sessions, the coordination state (who was assigned what, the findings ledger, the round number, the goal) is gone; there is no resume-team seam | reset-by-design for v1 (teams are run-scoped work units); the event log is the prerequisite for anything better, and re-creating the team from scratch is the documented recovery | 3 (prereq), honest note now |
@@ -245,6 +254,8 @@ what is persisted), **reset-by-design** (documented, acceptable),
 | 12 | Per-session client MCP mounts | session-supplied specs, never persisted; the manager is row 2 of the inventory | lost; the owning client re-mounts via `LoadSessionWithMCP` (`service.go:968`) | reset-by-design, client-owned (the client holds the specs; the server cannot reconstruct credentials it never stored) | n/a |
 | 13 | The in-flight turn (LLM stream) | nowhere; no mid-stream checkpoint exists | a turn cut by process death is lost and replayed from the last turn boundary; this is the stateless-replay thesis working as designed | reset-by-design (turn-boundary granularity is the contract; Phase 2 adds the one finer-grained cursor that matters, the ask) | n/a |
 | 14 | Run plumbing (diagnostics binding, askID serial, ctx) | minted fresh per `Run` | rebuilt trivially | derive | n/a |
+| 15 | modelhook guardrail breakers (`checkBudget`, `failureStreak`) | per-session in-memory on `modelhook.Runner` (`internal/adapter/modelhook/breaker.go:15,53`, commit `a032412`) | reset to zero: a rehydrated session gets a fresh check-budget and a closed breaker | reset-by-design (fail-safe; bounds per-session guardrail spend, not correctness; mirrors the permstore shape of row 4) | n/a (3b-adjacent only if guardrail spend ever needs to survive restart) |
+| 16 | `askReviewBreaker` (headless ask-reviewer breaker) | run-scoped on `agent.Run` (`engine/agent/askadjudicator.go:144`, commit `1b774d4`) | dies with the run | reset-by-design (run-scoped; same cluster as rows 13/14) | n/a |
 
 Two ledger observations worth stating in prose:
 
@@ -292,7 +303,15 @@ Options:
    creation. A protocol change plus a port change (`tool.MemoryStore` would need the
    key on every call or a scoped-store factory).
 3. **Per-agent-identity.** Key memory on the soul/agent identity rather than the
-   tenant; same plumbing cost as 2 with a different key choice.
+   tenant; same plumbing cost as 2 with a different key choice. Note this is now
+   *partially shipped for the read path*: per-agent persistent memory (issue #33,
+   commit `31d716e`) keys a read-only `MEMORY.md` on the agent def name under an FS
+   root (`<root>/agents-memory/<defName>/`, user or project tier,
+   `internal/app/agentdefs.go`), injected as fenced untrusted data into the agent's
+   prompt. It is FS-rooted and read-only, so it does not touch `tool.MemoryStore` or
+   the driver protocol, and it fail-softs to empty under no-fs (no workspace/XDG base),
+   so it is an instance of this option's *keying idea* without a no-fs story or a
+   write path yet.
 
 **Recommendation: 1 for this arc.** It is honest about what is built, requires no
 protocol or port change, and composes with the existing posture (the driver endpoint
