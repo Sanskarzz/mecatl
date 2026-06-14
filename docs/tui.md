@@ -508,6 +508,30 @@ streaming continues to render *in place* (a new delta no longer yanks the view t
 the bottom), and auto-follow stays off. Scrolling back to the bottom — `pgdn` past
 the end, `end`, or the wheel — re-pins the view and resumes auto-follow.
 
+**Compact tool-call cards.** A collapsed tool card summarizes its JSON arguments
+into a few scannable `key: value` rows instead of dumping the full pretty-printed
+JSON inline (issue #24) — so an MCP call carrying a huge issue/PR body no longer
+buries the scrollback. Keys are ordered deterministically (high-signal intent keys
+— `owner`, `repo`, `method`, `number`, `title`, `path`, … — first, then the rest
+alphabetical); a short single-line string shows inline (`title: "compact cards"`),
+a long or multi-line string collapses to a size + line-count + first-line preview
+(`body: 5.1 KB / 72 lines · "## Context…"`; sizes are SI/decimal — `1 KB = 1000
+bytes`), a small scalar array shows inline (`labels: [enhancement]`) while a longer
+one collapses to `N items`, and a nested object to `N keys`. The card caps at a few
+rows, and advertises **`ctrl+t` whenever anything was hidden** — a key overflow
+(`… +K more keys · ctrl+t expand`) OR a collapsed value with no overflow
+(`… ctrl+t expand`), in the same `…`-led shape as the result/diff line cap; a card
+whose args are all short scalars (nothing hidden) shows no affordance line. An
+**MCP** tool name (`mcp__<server>__<tool>`) renders a friendly `<Server> · <Tool>`
+head (e.g. `GitHub · Issue write`) rather than the raw identifier; an unknown
+hyphenated or long server token (e.g. `io-github-stacklok-playwright`) is shown raw
+rather than mangled by title-casing. A **large JSON result** is likewise summarized to its prominent fields
+(`url`, `number`, `state`, …) plus a size line; a Read/prose/line-shaped result is
+unchanged (the existing line cap applies). Everything stays fully inspectable:
+**`ctrl+t` expands** the card to the full pretty-printed JSON arguments and result,
+and for an MCP card it also reveals the raw `mcp__…` tool name — Edit/Write keep
+their colourised diff rendering, untouched.
+
 **Layout (one model).** The frame is a vertical stack of regions — header, the
 conversation body, zero or more **transient inline regions** (the slash-command
 palette, the `@`-mention menu, the queued-follow-ups card), then the input and

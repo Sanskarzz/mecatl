@@ -26,6 +26,46 @@ const maxToolResultLines = 12
 // content) show inline when collapsed; ctrl+t expands to the full diff.
 const maxDiffLines = 12
 
+// Compact-card tuning (issue #24): a collapsed tool card summarizes its JSON
+// args (and large JSON results) into a few scannable key:value rows instead of
+// dumping the full pretty-printed JSON inline — so an MCP call with a huge body
+// argument no longer dominates the scrollback. ctrl+t still reveals the full
+// JSON (and, for MCP, the raw tool name).
+const (
+	// maxSummaryRows caps how many key:value rows a collapsed arg/result summary
+	// shows; the rest roll up into a "+K more keys · ctrl+t expand" line.
+	maxSummaryRows = 8
+	// inlinePreviewLen is the rune budget below which a single-line string value is
+	// shown inline verbatim ("key: \"value\""); longer/multiline strings collapse
+	// to a size + line-count + preview row.
+	inlinePreviewLen = 48
+	// argPreviewLen is the rune budget for the quoted first-line preview shown for a
+	// collapsed long/multiline string value.
+	argPreviewLen = 40
+	// maxInlineArray is the largest scalar array rendered inline ("[a, b]"); a
+	// longer (or non-scalar) array collapses to "N items".
+	maxInlineArray = 3
+	// resultSummaryByteThreshold is the byte size above which a JSON tool RESULT is
+	// considered "large" enough to summarize (in addition to the line-count gate).
+	resultSummaryByteThreshold = 600
+)
+
+// argPriorityKeys is the deterministic front-of-list ordering for summarized arg
+// keys: high-signal "intent" keys first (so a glance reads the call's shape),
+// the remaining keys alphabetical after them. Map iteration order is random, so
+// this ordering is what makes the collapsed card render stable (golden-safe).
+var argPriorityKeys = []string{
+	"owner", "repo", "method", "number", "title", "path",
+	"query", "state", "branch", "name", "url", "limit", "page",
+}
+
+// resultProminentKeys are the fields a large JSON result summary surfaces, in
+// render order — the handful a human scans a tool result for (where it landed,
+// what it is, its status).
+var resultProminentKeys = []string{
+	"html_url", "url", "id", "number", "sha", "status", "state",
+}
+
 // renderer turns conversation blocks into the viewport string. It owns the
 // glamour TermRenderer cache (keyed by wrap width), the active theme, and two
 // per-block memo layers: blockCache (whole rendered blocks, keyed on
@@ -705,40 +745,26 @@ func (r *renderer) renderTool(b *block, expand bool) string {
 		glyph = r.th.Style("toolOk").Render("✓")
 	}
 
-	head := glyph + " " + r.th.Style("toolName").Render(sanitizeTerminal(b.toolName))
-
-	// A subagent (Subagent) card renders its REDACTED child activity in place of raw
-	// JSON args: a goal title plus a live/expanded/resolved status region. The
-	// child's interior (args, results, message text) is isolated by design and is
-	// never shown — only metadata.
-	if b.team {
-		// A Team card renders its BOUNDED per-member lanes in place of raw JSON
-		// args: a team header plus a live/expanded/resolved region. Member content
-		// is server-bounded and never enters the parent conversation.
-		if tm := r.renderTeam(b, expand); tm != "" {
-			head += "\n" + tm
-		}
-	} else if b.subagent {
-		if sub := r.renderSubagent(b, expand); sub != "" {
-			head += "\n" + sub
-		}
-	} else if diff, ok := r.renderToolDiff(b.toolName, b.toolArgs, expand); ok {
-		// Edit/Write render their change as a diff in place of the raw JSON args.
-		if diff != "" {
-			head += "\n" + diff
-		}
-	} else if args := prettyJSON(b.toolArgs); args != "" {
-		head += "\n" + r.th.Style("toolArgs").Render(args)
+	// An MCP tool name (mcp__<server>__<tool>) renders a friendly "<Server> · <Tool>"
+	// head instead of the raw, noisy identifier (issue #24); the raw name is never
+	// lost — it reappears as a muted line when the card is expanded (ctrl+t), so the
+	// exact tool is always recoverable. A non-MCP/core tool keeps its plain head.
+	mcpName, isMCP := mcpTitle(b.toolName)
+	headLabel := sanitizeTerminal(b.toolName)
+	if isMCP {
+		headLabel = mcpName
+	}
+	head := glyph + " " + r.th.Style("toolName").Render(headLabel)
+	if isMCP && expand {
+		head += "\n" + r.th.Style("muted").Render(sanitizeTerminal(b.toolName))
 	}
 
+	if args := r.renderToolArgs(b, expand); args != "" {
+		head += "\n" + args
+	}
 	if b.resolved {
-		body := resultBody(b.resultBody, expand)
-		if body != "" {
-			style := r.th.Style("toolArgs")
-			if b.resultError {
-				style = r.th.Style("errorText")
-			}
-			head += "\n" + style.Render(body)
+		if res := r.renderToolResult(b, expand); res != "" {
+			head += "\n" + res
 		}
 	}
 
@@ -747,6 +773,68 @@ func (r *renderer) renderTool(b *block, expand bool) string {
 		card = card.Width(r.width - 2)
 	}
 	return card.Render(head)
+}
+
+// renderToolArgs renders the ARGS region of a tool card (everything below the
+// head, before the result): the redacted Team/Subagent lanes, the Edit/Write
+// diff, or — for an ordinary tool — the compact key:value summary when collapsed
+// and the full pretty JSON when expanded. Returns "" when there is nothing to
+// show. See renderTool for the per-branch rationale.
+func (r *renderer) renderToolArgs(b *block, expand bool) string {
+	switch {
+	case b.team:
+		// A Team card renders its BOUNDED per-member lanes in place of raw JSON args:
+		// a team header plus a live/expanded/resolved region. Member content is
+		// server-bounded and never enters the parent conversation.
+		return r.renderTeam(b, expand)
+	case b.subagent:
+		// A Subagent card renders its REDACTED child activity in place of raw JSON
+		// args. The child's interior (args/results/message text) is isolated by design
+		// and never shown — only metadata.
+		return r.renderSubagent(b, expand)
+	}
+	if diff, ok := r.renderToolDiff(b.toolName, b.toolArgs, expand); ok {
+		// Edit/Write render their change as a diff in place of the raw JSON args.
+		return diff
+	}
+	if expand {
+		// Expanded: always the FULL pretty-printed JSON (the inspect path; the summary
+		// is collapsed-only, so ctrl+t reveals everything).
+		if args := prettyJSON(b.toolArgs); args != "" {
+			return r.th.Style("toolArgs").Render(args)
+		}
+		return ""
+	}
+	if summary, ok := r.summarizeArgs(b.toolArgs); ok {
+		// Collapsed: the compact key:value summary in place of raw JSON (issue #24).
+		return summary
+	}
+	// Collapsed but the args aren't a JSON object (bare array/scalar/odd shape):
+	// fall back to the existing pretty-JSON behaviour.
+	if args := prettyJSON(b.toolArgs); args != "" {
+		return r.th.Style("toolArgs").Render(args)
+	}
+	return ""
+}
+
+// renderToolResult renders the RESULT region of a resolved tool card. Collapsed,
+// a LARGE JSON result is summarized to prominent fields + a size line (issue #24,
+// self-styled). An error result, a non-JSON/line-shaped result, or the expanded
+// view fall through to the existing styled, line-capped (or full) body — Read
+// results are unchanged. Returns "" when there is no body.
+func (r *renderer) renderToolResult(b *block, expand bool) string {
+	if summary, ok := r.summarizeResolvedResult(b, expand); ok {
+		return summary
+	}
+	body := resultBody(b.resultBody, expand)
+	if body == "" {
+		return ""
+	}
+	style := r.th.Style("toolArgs")
+	if b.resultError {
+		style = r.th.Style("errorText")
+	}
+	return style.Render(body)
 }
 
 // renderSubagent renders a Subagent card's REDACTED subagent region. It has three
@@ -1436,6 +1524,413 @@ func prettyJSON(raw string) string {
 		return sanitizeTerminal(raw)
 	}
 	return sanitizeTerminal(buf.String())
+}
+
+// summarizeArgs turns a JSON-object args string into a compact, scannable block
+// of "key: value" rows in place of the full pretty-printed JSON (issue #24). It
+// returns (summary, true) only for a JSON OBJECT; a bare array, a scalar, or
+// malformed JSON returns ("", false) so renderTool falls back to prettyJSON and
+// the current behaviour is preserved for odd shapes.
+//
+// Keys are ordered deterministically (argPriorityKeys first, then the rest
+// alphabetical) — map iteration is random, so this is what makes the collapsed
+// card golden-stable. At most maxSummaryRows rows render. EVERY rendered value
+// passes through sanitizeTerminal (the summary is plain lipgloss, never glamour —
+// see the CWE-150 invariant in sanitize.go). Keys are styled "muted", values
+// "toolArgs".
+//
+// ctrl+t is never the only path to the data: the collapsed summary always sits
+// behind the full prettyJSON expansion, advertised by an argRollupMarker footer
+// (collapseMarker's shape) whenever ANYTHING was hidden — a key overflow
+// ("… +K more keys · ctrl+t expand") OR a per-value collapse with no overflow
+// ("… ctrl+t expand"). A card whose args are all short scalars hides nothing and
+// shows no footer.
+func (r *renderer) summarizeArgs(rawArgs string) (string, bool) {
+	raw := strings.TrimSpace(rawArgs)
+	if raw == "" {
+		return "", false
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		// Not a JSON object (bare array/scalar) or malformed — fall back to prettyJSON.
+		return "", false
+	}
+	if len(obj) == 0 {
+		return "", false
+	}
+	keys := sortedArgKeys(obj)
+	shown := keys
+	if len(shown) > maxSummaryRows {
+		shown = keys[:maxSummaryRows]
+	}
+	muted := r.th.Style("muted")
+	valStyle := r.th.Style("toolArgs")
+	var b strings.Builder
+	valueCollapsed := false
+	for i, k := range shown {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		text, collapsed := summarizeValueCollapsed(obj[k])
+		valueCollapsed = valueCollapsed || collapsed
+		b.WriteString(muted.Render(sanitizeTerminal(k) + ":"))
+		b.WriteString(" ")
+		b.WriteString(valStyle.Render(text))
+	}
+	// Advertise ctrl+t whenever ANYTHING was hidden: a key overflow OR a per-value
+	// collapse (long string, big array/object). The marker mirrors collapseMarker's
+	// shape so adjacent collapsed cards/results read consistently.
+	if extra := len(keys) - len(shown); extra > 0 {
+		b.WriteString("\n")
+		b.WriteString(muted.Render(argRollupMarker(extra)))
+	} else if valueCollapsed {
+		b.WriteString("\n")
+		b.WriteString(muted.Render(argRollupMarker(0)))
+	}
+	return b.String(), true
+}
+
+// argRollupMarker formats the collapsed-args affordance footer, matching
+// collapseMarker's "  … <…> · ctrl+t expand" shape (leading "…", indented) so an
+// arg roll-up and a line-capped result/diff don't show two different "there's
+// more" idioms. n>0 names the hidden-key count ("+K more keys"); n==0 (a pure
+// per-value collapse, no key overflow) shows just the expand hint.
+func argRollupMarker(n int) string {
+	if n <= 0 {
+		return "  … ctrl+t expand"
+	}
+	noun := "keys"
+	if n == 1 {
+		noun = "key"
+	}
+	return "  … +" + strconv.Itoa(n) + " more " + noun + " · ctrl+t expand"
+}
+
+// sortedArgKeys returns obj's keys in deterministic render order: the keys in
+// argPriorityKeys first (in that fixed order, only when present), then every
+// remaining key alphabetical. This is the single source of the collapsed card's
+// stable row order.
+func sortedArgKeys(obj map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(obj))
+	seen := make(map[string]bool, len(obj))
+	for _, k := range argPriorityKeys {
+		if _, ok := obj[k]; ok {
+			out = append(out, k)
+			seen[k] = true
+		}
+	}
+	rest := make([]string, 0, len(obj))
+	for k := range obj {
+		if !seen[k] {
+			rest = append(rest, k)
+		}
+	}
+	sort.Strings(rest)
+	return append(out, rest...)
+}
+
+// summarizeValue renders ONE arg value compactly for a collapsed card row,
+// returning sanitized single-line text. It is a thin wrapper over
+// summarizeValueCollapsed that drops the per-value "collapsed" signal, for callers
+// (e.g. the result summary) that don't surface a ctrl+t affordance.
+func summarizeValue(raw json.RawMessage) string {
+	text, _ := summarizeValueCollapsed(raw)
+	return text
+}
+
+// summarizeValueCollapsed renders ONE arg value compactly for a collapsed card
+// row and reports whether the rendering HID anything (so summarizeArgs can decide
+// to advertise the ctrl+t affordance even when the key cap did not trip):
+//
+//   - string: inline ("\"value\"") when single-line AND ≤ inlinePreviewLen runes
+//     (collapsed=false); otherwise a size + line-count + quoted first-line preview
+//     ("4.2 KB / 72 lines · \"## Context…\"") (collapsed=true).
+//   - number/bool/null: the verbatim JSON token (collapsed=false).
+//   - array: "[a, b]" inline when ≤ maxInlineArray scalar elements (collapsed=
+//     false), else "N items" (collapsed=true).
+//   - object: "N keys" (collapsed=true).
+//
+// All branches sanitizeTerminal their output, since the summary is plain
+// lipgloss (never glamour).
+func summarizeValueCollapsed(raw json.RawMessage) (string, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return "", false
+	}
+	switch trimmed[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return sanitizeTerminal(trimmed), false
+		}
+		text := summarizeStringValue(s)
+		// A long/multiline string collapses to the size+preview form; the inline
+		// quoted form keeps the whole value, so nothing is hidden.
+		collapsed := lineCount(s) > 1 || len([]rune(s)) > inlinePreviewLen
+		return text, collapsed
+	case '[':
+		return summarizeArrayValue(raw)
+	case '{':
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return sanitizeTerminal(trimmed), false
+		}
+		return plural(len(obj), "key"), true
+	default:
+		// number / bool / null — render the verbatim JSON token.
+		return sanitizeTerminal(trimmed), false
+	}
+}
+
+// summarizeStringValue renders a string arg value: inline-quoted when short and
+// single-line, else a size + line-count + first-line preview. Sanitized. When the
+// value spans more than one line the preview always carries a trailing "…" (even
+// if the first line itself fit under the budget) to signal "more below".
+func summarizeStringValue(s string) string {
+	lines := lineCount(s)
+	if lines <= 1 && len([]rune(s)) <= inlinePreviewLen {
+		return sanitizeTerminal(strconv.Quote(s))
+	}
+	first := firstLine(s)
+	preview := truncate(first, argPreviewLen)
+	if lines > 1 && !strings.HasSuffix(preview, "…") {
+		preview += "…"
+	}
+	preview = sanitizeTerminal(preview)
+	return fmt.Sprintf("%s / %s · %q", humanizeBytes(len(s)), plural(lines, "line"), preview)
+}
+
+// summarizeArrayValue renders a JSON array value and reports whether it collapsed:
+// "[a, b]" inline (collapsed=false) when it has at most maxInlineArray SCALAR
+// elements (no nested array/object), else "N items" (collapsed=true). Sanitized.
+func summarizeArrayValue(raw json.RawMessage) (string, bool) {
+	var elems []json.RawMessage
+	if err := json.Unmarshal(raw, &elems); err != nil {
+		return sanitizeTerminal(strings.TrimSpace(string(raw))), false
+	}
+	if len(elems) == 0 {
+		return "[]", false
+	}
+	if len(elems) <= maxInlineArray && allScalars(elems) {
+		parts := make([]string, len(elems))
+		for i, e := range elems {
+			parts[i] = scalarText(e)
+		}
+		return sanitizeTerminal("[" + strings.Join(parts, ", ") + "]"), false
+	}
+	return plural(len(elems), "item"), true
+}
+
+// allScalars reports whether every element is a JSON scalar (not an array or
+// object) — the gate for inlining an array.
+func allScalars(elems []json.RawMessage) bool {
+	for _, e := range elems {
+		t := strings.TrimSpace(string(e))
+		if t == "" || t[0] == '[' || t[0] == '{' {
+			return false
+		}
+	}
+	return true
+}
+
+// scalarText renders a single scalar array element for the inline "[a, b]" form:
+// a string element drops its JSON quotes (so labels read "[enhancement, bug]"),
+// every other scalar is its verbatim token.
+func scalarText(e json.RawMessage) string {
+	t := strings.TrimSpace(string(e))
+	if len(t) > 0 && t[0] == '"' {
+		var s string
+		if err := json.Unmarshal(e, &s); err == nil {
+			return s
+		}
+	}
+	return t
+}
+
+// firstLine returns the first line of s (up to the first newline), with a
+// trailing carriage return trimmed.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimRight(s, "\r")
+}
+
+// humanizeBytes renders a byte count compactly: bytes verbatim under 1 KB, then
+// "N.N KB"/"N.N MB" with one decimal (trailing ".0" trimmed). Sibling of the
+// humanizeTokens/humanizeDuration formatters; used for the collapsed long-string
+// arg row size signal. The math is SI/decimal (1 KB = 1000 B, 1 MB = 1e6 B) so a
+// human-facing size reconciles with how file/content sizes are reported
+// everywhere — the labels stay "KB"/"MB" (now honest, not mislabelled KiB/MiB).
+func humanizeBytes(n int) string {
+	if n < 0 {
+		n = 0
+	}
+	switch {
+	case n < 1000:
+		return strconv.Itoa(n) + " B"
+	case n < 1000*1000:
+		return trimDecimal(float64(n)/1000.0) + " KB"
+	default:
+		return trimDecimal(float64(n)/(1000.0*1000.0)) + " MB"
+	}
+}
+
+// parseMCPName splits an MCP tool name "mcp__<server>__<tool>" into its server
+// and tool parts (the tool half may itself contain "__", so the split is on the
+// FIRST "__" after the prefix). It returns ok=false for any non-MCP name, so a
+// core tool (Read, Bash, …) keeps its plain head.
+func parseMCPName(name string) (server, tool string, ok bool) {
+	const prefix = "mcp__"
+	if !strings.HasPrefix(name, prefix) {
+		return "", "", false
+	}
+	rest := name[len(prefix):]
+	i := strings.Index(rest, "__")
+	if i <= 0 || i+2 >= len(rest) {
+		return "", "", false
+	}
+	return rest[:i], rest[i+2:], true
+}
+
+// mcpServerNames maps well-known MCP server tokens to a display name; an unlisted
+// server is humanized (title-cased).
+var mcpServerNames = map[string]string{
+	"github": "GitHub",
+	"slack":  "Slack",
+	"fetch":  "Fetch",
+}
+
+// mcpToolNames maps high-traffic MCP tool tokens to a polished verb phrase; an
+// unlisted tool is humanized (underscores → spaces, first word capitalized).
+var mcpToolNames = map[string]string{
+	"issue_write":         "Issue write",
+	"issue_read":          "Issue read",
+	"create_pull_request": "Create pull request",
+	"search_code":         "Search code",
+	"get_file_contents":   "Get file contents",
+}
+
+// mcpTitle turns an MCP tool name into a friendly "<Server> · <Tool>" header
+// (issue #24), e.g. "mcp__github__issue_write" → "GitHub · Issue write". It
+// returns ok=false for any non-MCP name so renderTool keeps the plain head. Both
+// halves are sanitized (defence-in-depth — the name is server-derived).
+func mcpTitle(name string) (string, bool) {
+	server, tool, ok := parseMCPName(name)
+	if !ok {
+		return "", false
+	}
+	return sanitizeTerminal(humanizeMCPServer(server) + " · " + humanizeMCPTool(tool)), true
+}
+
+// maxTitleCaseServer is the rune budget above which a server token is shown raw
+// rather than title-cased — a long namespaced token ("io-github-stacklok-…")
+// reads worse capitalized, so the raw token is the honest choice.
+const maxTitleCaseServer = 20
+
+// humanizeMCPServer renders an MCP server token: the known display name (the
+// high-quality path), else the RAW token when title-casing would mangle it — a
+// hyphenated token ("io-github-stacklok-playwright" → don't capitalize just the
+// first letter) or an implausibly long one. A plain short token is title-cased.
+func humanizeMCPServer(server string) string {
+	if name, ok := mcpServerNames[server]; ok {
+		return name
+	}
+	if strings.ContainsRune(server, '-') || len([]rune(server)) > maxTitleCaseServer {
+		return server
+	}
+	return titleWord(server)
+}
+
+// humanizeMCPTool renders an MCP tool token: the known verb phrase, else the
+// token with underscores turned to spaces and the first word capitalized
+// ("bar_baz" → "Bar baz").
+func humanizeMCPTool(tool string) string {
+	if name, ok := mcpToolNames[tool]; ok {
+		return name
+	}
+	words := strings.Split(tool, "_")
+	if len(words) > 0 {
+		words[0] = titleWord(words[0])
+	}
+	return strings.Join(words, " ")
+}
+
+// titleWord upper-cases the first rune of s, leaving the rest untouched (a light
+// title-case for a single token; it never lower-cases an already-capped word).
+func titleWord(s string) string {
+	if s == "" {
+		return ""
+	}
+	rs := []rune(s)
+	rs[0] = []rune(strings.ToUpper(string(rs[0])))[0]
+	return string(rs)
+}
+
+// summarizeResult renders a compact summary of a LARGE JSON tool result body
+// (issue #24): a few prominent "key: value" rows (resultProminentKeys, in order)
+// plus a size line ("· N keys" / "N items"). It engages only when body parses as
+// a JSON object/array AND is large (more than maxToolResultLines lines OR over
+// resultSummaryByteThreshold bytes); otherwise it returns ("", false) and the
+// caller falls back to the existing line-capped truncateLines (so a Read result
+// or a small/odd result is unchanged). All values are sanitized (plain lipgloss).
+func (r *renderer) summarizeResult(body string) (string, bool) {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return "", false
+	}
+	large := lineCount(body) > maxToolResultLines || len(body) > resultSummaryByteThreshold
+	if !large {
+		return "", false
+	}
+	muted := r.th.Style("muted")
+	valStyle := r.th.Style("toolArgs")
+	switch trimmed[0] {
+	case '{':
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+			return "", false
+		}
+		var b strings.Builder
+		for _, k := range resultProminentKeys {
+			raw, ok := obj[k]
+			if !ok {
+				continue
+			}
+			if b.Len() > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(muted.Render(sanitizeTerminal(k) + ":"))
+			b.WriteString(" ")
+			b.WriteString(valStyle.Render(summarizeValue(raw)))
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(muted.Render("· " + plural(len(obj), "key")))
+		return b.String(), true
+	case '[':
+		var elems []json.RawMessage
+		if err := json.Unmarshal([]byte(trimmed), &elems); err != nil {
+			return "", false
+		}
+		return muted.Render("· " + plural(len(elems), "item")), true
+	default:
+		return "", false
+	}
+}
+
+// summarizeResolvedResult is the renderTool gate around summarizeResult: it
+// engages only for a COLLAPSED, non-error result, returning the self-styled
+// compact summary when summarizeResult accepts the body (a large JSON
+// object/array). The expanded view, an error result, and a non-JSON/line-shaped
+// result all return ok=false so renderTool falls through to the existing styled,
+// line-capped/full body path (Read and prose results unchanged).
+func (r *renderer) summarizeResolvedResult(b *block, expand bool) (string, bool) {
+	if expand || b.resultError {
+		return "", false
+	}
+	return r.summarizeResult(b.resultBody)
 }
 
 // truncateLines clamps s to max lines, appending a "+N more lines · ctrl+t
