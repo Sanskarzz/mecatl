@@ -520,7 +520,7 @@ func nonBashPattern(_ string, args json.RawMessage) string {
 	if err := json.Unmarshal(args, &m); err != nil {
 		return ""
 	}
-	for _, key := range []string{"path", "file_path", "pattern", "url"} {
+	for _, key := range []string{"path", "file_path", "pattern", "url", "query"} {
 		if raw, ok := m[key]; ok {
 			var s string
 			if json.Unmarshal(raw, &s) == nil {

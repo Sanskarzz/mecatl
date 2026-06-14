@@ -296,6 +296,17 @@ type config struct {
 	websearchAuthHeader string
 	websearchQueryParam string
 
+	// WebSearch backend ladder (issue #26): web search is ON by default (Exa
+	// anonymous). searxngURL/braveAPIKey/exaAPIKey are read from SEARXNG_URL/
+	// BRAVE_API_KEY/EXA_API_KEY (secrets/URLs, never flag values) and SWITCH the
+	// backend; websearchMode is the raw --websearch value ("off" → websearchOff),
+	// the kill switch mirroring --guardrails.
+	searxngURL    string
+	braveAPIKey   string
+	exaAPIKey     string
+	websearchMode string // raw --websearch value ("off" → websearchOff)
+	websearchOff  bool
+
 	// Parallel: enable the Parallel fan-out tool (parallel isolated child branches).
 	enableParallel bool
 	// forkPreservedCap bounds how many PRESERVED winner forks (join=first/judge)
@@ -787,6 +798,10 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		WebSearchAPIKey:         cfg.websearchAPIKey,
 		WebSearchAuthHeader:     cfg.websearchAuthHeader,
 		WebSearchQueryParam:     cfg.websearchQueryParam,
+		SearXNGURL:              cfg.searxngURL,
+		BraveAPIKey:             cfg.braveAPIKey,
+		ExaAPIKey:               cfg.exaAPIKey,
+		WebSearchOff:            cfg.websearchOff,
 		ForkPreservedCap:        cfg.forkPreservedCap,
 		EnableTeams:             cfg.enableTeams,
 		MCPServers:              cfg.mcpServers,
@@ -931,7 +946,8 @@ func parseFlags(argv []string) (config, error) {
 	fs.StringVar(&cfg.commandSourceURL, "command-source-url", "", "host:port of a remote slash-command gRPC driver (mecatl.driver.v1.CommandSourceService); COMPOSES with file-backed commands rather than replacing them — a local command file shadows a same-named driver command, and MCP prompts stay last. Consulted LIVE on every expansion/listing (no snapshot); probed once at startup (fatal if unreachable), runtime faults fail soft (raw text passes through). TRUST BOUNDARY: an expanded command body becomes the user prompt — point this only at a driver you trust. Same auth/TLS posture as --session-store-url (equal URLs share one connection)")
 
 	fs.BoolVar(&cfg.enableParallel, "enable-parallel", true, "register the Parallel fan-out tool (parallel isolated child branches)")
-	fs.StringVar(&cfg.websearchURL, "websearch-url", "", "WEBSEARCH (issue #26): base URL of a vendor-neutral HTTP JSON search endpoint (e.g. a SearXNG /search URL or a generic JSON search API) backing the always-present WebSearch tool. Empty (default) leaves WebSearch registered but reporting \"not configured\" (no egress). The API key is read from WEBSEARCH_API_KEY, never a flag value. The adapter carries its own per-call timeout and concurrency limit. Setup walkthrough: docs/usage.md \"Enabling web search\"")
+	fs.StringVar(&cfg.websearchURL, "websearch-url", "", "WEBSEARCH (issue #26): base URL of a vendor-neutral HTTP JSON search endpoint (e.g. a SearXNG /search URL or a generic JSON search API) backing the always-present WebSearch tool. This is the EXPLICIT OVERRIDE — it wins over the SEARXNG_URL/BRAVE_API_KEY env tiers and the Exa anonymous default. The API key is read from WEBSEARCH_API_KEY, never a flag value. The adapter carries its own per-call timeout and concurrency limit. Setup walkthrough: docs/usage.md \"Enabling web search\"")
+	fs.StringVar(&cfg.websearchMode, "websearch", "", "WEBSEARCH master switch: pass `--websearch=off` to DISABLE web search entirely (the kill switch — no outbound search calls, the tool reports it is disabled). Web search is ON by default (Exa anonymous tier; set EXA_API_KEY to upgrade the default tier, or SEARXNG_URL / BRAVE_API_KEY to switch backends). Any value other than \"off\" (or unset) leaves web search enabled. See docs/usage.md \"Enabling web search\"")
 	fs.StringVar(&cfg.websearchAuthHeader, "websearch-auth-header", "", "WEBSEARCH: HTTP header the WEBSEARCH_API_KEY is sent in (default \"Authorization\" as a Bearer token; set e.g. \"X-API-Key\" to send the raw key). Ignored when no key is set. See docs/usage.md \"Enabling web search\"")
 	fs.StringVar(&cfg.websearchQueryParam, "websearch-query-param", "", "WEBSEARCH: URL query parameter the search string is placed in (default \"q\"). Tune for a generic JSON search endpoint that expects a different parameter name. See docs/usage.md \"Enabling web search\"")
 	fs.IntVar(&cfg.forkPreservedCap, "fork-preserved-cap", agent.DefaultPreservedForkCap, "max PRESERVED winner forks (join=first/judge) kept on disk at once; the oldest beyond this is LRU-reaped. Preserved forks stay inspectable until reaped")
@@ -995,6 +1011,12 @@ func parseFlags(argv []string) (config, error) {
 	// WebSearch (issue #26): the search backend's API key is a SECRET, read from the
 	// environment (never a flag value), mirroring the provider keys' custody rule.
 	cfg.websearchAPIKey = os.Getenv("WEBSEARCH_API_KEY")
+	// WebSearch backend ladder (issue #26): the SearXNG URL and the Brave/Exa keys
+	// are secrets/URLs read from the environment, never flag values. Web search is ON
+	// by default (Exa anonymous) — these only SWITCH the backend.
+	cfg.searxngURL = os.Getenv("SEARXNG_URL")
+	cfg.braveAPIKey = os.Getenv("BRAVE_API_KEY")
+	cfg.exaAPIKey = os.Getenv("EXA_API_KEY")
 	// An auth token from the environment is honored when the flag is unset, so a
 	// secret need not appear in the process argv.
 	if cfg.authToken == "" {
@@ -1024,6 +1046,18 @@ func parseFlags(argv []string) (config, error) {
 		cfg.guardrailsOff = true
 	default:
 		return config{}, fmt.Errorf("--guardrails %q: only \"off\" is accepted (the kill-switch); to ENABLE guardrails set --guardrails-model (and a guardrails: rule list in your user-global settings.yaml). Leave --guardrails unset to keep guardrails governed by the model/rule config", cfg.guardrailsMode)
+	}
+	// WebSearch master switch (issue #26): only `--websearch=off` is meaningful (the
+	// kill switch — it forces web search off regardless of the backend ladder). An
+	// empty value leaves web search ON (Exa anonymous default). Any OTHER value is a
+	// startup error rather than a silent no-op (mirroring --guardrails).
+	switch strings.ToLower(strings.TrimSpace(cfg.websearchMode)) {
+	case "":
+		cfg.websearchOff = false
+	case "off":
+		cfg.websearchOff = true
+	default:
+		return config{}, fmt.Errorf("--websearch %q: only \"off\" is accepted (the kill switch); web search is ON by default (Exa anonymous tier). Set SEARXNG_URL or BRAVE_API_KEY to switch backends, or --websearch-url for an explicit endpoint. Leave --websearch unset to keep web search enabled", cfg.websearchMode)
 	}
 	return cfg, nil
 }

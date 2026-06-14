@@ -5,12 +5,23 @@ import (
 	"errors"
 )
 
-// ErrSearchUnavailable is the sentinel a SearchProvider returns when no search
-// backend is configured (the honest "not-configured" stub). The WebSearch tool
-// surfaces it to the model as a tool-level message ("ask the operator to
-// configure a search provider") rather than aborting the harness — mirroring the
-// ErrNoShell precedent the Bash tool uses for a shell-less CommandRunner.
+// ErrSearchUnavailable is the sentinel a SearchProvider returns when web search
+// is DISABLED on the deployment — the operator-set kill switch (--websearch=off),
+// for which no backend is wired at all. The WebSearch tool surfaces it to the
+// model as an honest "disabled on this deployment" message rather than aborting
+// the harness — mirroring the ErrNoShell precedent the Bash tool uses for a
+// shell-less CommandRunner. It is DISTINCT from ErrSearchBackendDown: this means
+// "intentionally off", that means "a configured/default backend tried and failed".
 var ErrSearchUnavailable = errors.New("tool: no search provider configured")
+
+// ErrSearchBackendDown is the sentinel a SearchProvider returns when a real,
+// configured (or default) backend was attempted but is unreachable, rate-limited,
+// or returned a fault/malformed result. It is the MANDATORY-degradation signal
+// (issue #26): the WebSearch tool surfaces it as a model-visible message naming
+// the upgrade path (set BRAVE_API_KEY or SEARXNG_URL) — never a silent empty
+// result or a hang. It is DISTINCT from ErrSearchUnavailable (operator-disabled):
+// a backend-down condition is environmental/transient, not a deployment choice.
+var ErrSearchBackendDown = errors.New("tool: search backend unavailable")
 
 // SearchProvider is the outbound web-search seam the WebSearch tool depends on,
 // the way the Bash tool depends on CommandRunner. It lives here in engine/tool,

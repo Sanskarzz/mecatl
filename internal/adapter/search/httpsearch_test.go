@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -74,6 +75,39 @@ func TestHTTPProviderParsesResults(t *testing.T) {
 	}
 }
 
+// braveNestedJSON is a Brave Web Search API response: results are nested under
+// {"web":{"results":[...]}}, NOT a top-level "results" array.
+const braveNestedJSON = `{
+  "web": {
+    "results": [
+      {"title": "Brave One", "url": "https://example.com/1", "description": "first hit"},
+      {"title": "Brave Two", "url": "https://example.com/2", "description": "second hit"}
+    ]
+  }
+}`
+
+// TestHTTPProviderParsesBraveNestedResults asserts the adapter parses the Brave
+// {"web":{"results":[...]}} shape (the prior round registered the Brave endpoint
+// but never parsed its nested body, so it returned zero hits).
+func TestHTTPProviderParsesBraveNestedResults(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(braveNestedJSON))
+	}))
+	defer srv.Close()
+	p, _ := NewHTTPProvider(HTTPConfig{BaseURL: srv.URL, HTTPClient: srv.Client()})
+	results, err := p.Search(context.Background(), tool.SearchQuery{Query: "x", Limit: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 nested Brave results, got %d: %+v", len(results), results)
+	}
+	if results[0].Title != "Brave One" || results[0].URL != "https://example.com/1" || results[0].Snippet != "first hit" {
+		t.Fatalf("brave nested result 0 mismatch: %+v", results[0])
+	}
+}
+
 // TestHTTPProviderLimitClamp asserts the adapter honors q.Limit (never exceeds it),
 // even when the backend returns more.
 func TestHTTPProviderLimitClamp(t *testing.T) {
@@ -131,6 +165,37 @@ func TestHTTPProviderContextCancel(t *testing.T) {
 func TestHTTPProviderRequiresBaseURL(t *testing.T) {
 	if _, err := NewHTTPProvider(HTTPConfig{}); err == nil {
 		t.Fatal("expected an error for an empty BaseURL")
+	}
+}
+
+// TestHTTPProviderRejectsMalformedURL asserts a configured-but-invalid BaseURL is a
+// loud construction error (it has a host-bearing http(s) form requirement), so
+// composition can route it to backend-down rather than silently building a provider
+// every Search would fail on.
+func TestHTTPProviderRejectsMalformedURL(t *testing.T) {
+	for _, bad := range []string{
+		"://missing-scheme",        // parse error
+		"ftp://example.com/search", // wrong scheme
+		"not-a-url",                // no scheme, no host
+		"https://",                 // no host
+	} {
+		if _, err := NewHTTPProvider(HTTPConfig{BaseURL: bad}); err == nil {
+			t.Fatalf("expected a construction error for malformed BaseURL %q", bad)
+		}
+	}
+}
+
+// TestBackendDownYieldsBackendDown pins the construction-failure sentinel: a
+// misconfigured backend resolves to BackendDown, whose Search reports
+// ErrSearchBackendDown (NOT ErrSearchUnavailable) — so the WebSearch tool shows the
+// backend-down message naming the upgrade path, never the operator-disabled message.
+func TestBackendDownYieldsBackendDown(t *testing.T) {
+	_, err := BackendDown{}.Search(context.Background(), tool.SearchQuery{Query: "anything"})
+	if !errors.Is(err, tool.ErrSearchBackendDown) {
+		t.Fatalf("BackendDown.Search should return ErrSearchBackendDown, got %v", err)
+	}
+	if errors.Is(err, tool.ErrSearchUnavailable) {
+		t.Fatalf("BackendDown.Search must NOT return ErrSearchUnavailable (that is the disabled cause), got %v", err)
 	}
 }
 

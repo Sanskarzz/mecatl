@@ -52,17 +52,30 @@ type Local struct {
 	// exited-early fast-fail and Close's bounded shutdown both select on it.
 	exited chan struct{}
 
+	// extraArgs are appended to mecated's flag list at spawn, AFTER the standard
+	// args — for scenario-specific overrides like --websearch=off. They append, so
+	// a later flag wins over an earlier same-named one (Go's flag pkg: last wins).
+	extraArgs []string
+
 	cli *client.Client
 }
 
 // NewLocal builds the fixture tree, spawns mecated, waits for readiness, and
 // returns the connected target.
 func NewLocal() (*Local, error) {
+	return NewLocalWith()
+}
+
+// NewLocalWith is NewLocal with extra mecated flags appended (after the standard
+// args) — for scenarios that need a per-server override the shared suite target
+// cannot provide, e.g. the WebSearch kill switch (`--websearch=off`). Each call
+// spawns its OWN mecated against its OWN scratch tree; the caller owns Close.
+func NewLocalWith(extraArgs ...string) (*Local, error) {
 	root, err := newScratchRoot()
 	if err != nil {
 		return nil, err
 	}
-	l := &Local{Root: root}
+	l := &Local{Root: root, extraArgs: extraArgs}
 	if err := l.start(); err != nil {
 		_ = l.Close()
 		return nil, err
@@ -181,6 +194,8 @@ func (l *Local) start() error {
 		// ToolHive workloads.
 		"--toolhive=false",
 	}
+	// Scenario-specific overrides, appended last (Go's flag pkg: last wins).
+	args = append(args, l.extraArgs...)
 
 	// One combined stdout+stderr capture — mecated logs to stderr, but stdout
 	// is folded in too so nothing the daemon prints is lost.

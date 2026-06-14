@@ -168,10 +168,10 @@ func TestWebSearchArgValidation(t *testing.T) {
 	})
 }
 
-// TestWebSearchNotConfigured asserts both not-configured paths (a nil provider and
-// a provider returning ErrSearchUnavailable) yield an honest model-facing message,
-// NOT a Go error and NOT an error result.
-func TestWebSearchNotConfigured(t *testing.T) {
+// TestWebSearchDisabled asserts both DISABLED paths (a nil provider and a provider
+// returning ErrSearchUnavailable — the operator kill switch) yield the honest
+// "disabled on this deployment" message, NOT a Go error and NOT an error result.
+func TestWebSearchDisabled(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		provider tool.SearchProvider
@@ -182,17 +182,31 @@ func TestWebSearchNotConfigured(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			res := exec(t, NewWebSearchTool(tc.provider), call(t, "WebSearch", map[string]any{"query": "go"}), nil)
 			if res.IsError {
-				t.Fatalf("not-configured should not be an error result: %q", res.Content)
+				t.Fatalf("disabled should not be an error result: %q", res.Content)
 			}
-			// Assert the actionable not-configured message: it must name the
-			// no-key option (SearXNG) and the env var, so the relayed message
-			// tells the operator what to do — not just "configure something".
-			for _, want := range []string{"Web search is not enabled", "SearXNG", "WEBSEARCH_API_KEY", "Enabling web search"} {
+			// The disabled message names the kill switch and tells the model not to retry.
+			for _, want := range []string{"disabled on this deployment", "--websearch=off", "Report this to the user"} {
 				if !strings.Contains(res.Content, want) {
-					t.Fatalf("not-configured message missing %q; got %q", want, res.Content)
+					t.Fatalf("disabled message missing %q; got %q", want, res.Content)
 				}
 			}
 		})
+	}
+}
+
+// TestWebSearchBackendDown asserts a provider returning ErrSearchBackendDown yields
+// the model-facing backend-down message (the mandatory-degradation path) naming the
+// upgrade env vars — NOT a Go error and NOT an error result.
+func TestWebSearchBackendDown(t *testing.T) {
+	fake := refsearch.NewFakeError(tool.ErrSearchBackendDown)
+	res := exec(t, NewWebSearchTool(fake), call(t, "WebSearch", map[string]any{"query": "go"}), nil)
+	if res.IsError {
+		t.Fatalf("backend-down should not be an error result: %q", res.Content)
+	}
+	for _, want := range []string{"temporarily unavailable", "Exa", "BRAVE_API_KEY", "SEARXNG_URL", "Enabling web search"} {
+		if !strings.Contains(res.Content, want) {
+			t.Fatalf("backend-down message missing %q; got %q", want, res.Content)
+		}
 	}
 }
 

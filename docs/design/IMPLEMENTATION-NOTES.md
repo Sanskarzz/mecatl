@@ -1692,14 +1692,38 @@ unwinds on every path.
 WebSearch is a READ-ONLY core tool that returns compact, bounded, source-attributed
 results so the model can DISCOVER candidate URLs before retrieving one with WebFetch
 ("search discovers; fetch reads"). The full structure shipped: a provider PORT + an
-offline FAKE + an honest not-configured STUB + a vendor-neutral HTTP JSON adapter
-behind an operator flag (off by default). It is the harness's FIRST outbound-network
-capability.
+offline FAKE + a kill-switch STUB + a TIER-1 Exa anonymous default + a vendor-neutral
+HTTP JSON adapter for the SearXNG/Brave/explicit tiers. It is the harness's FIRST
+outbound-network capability — and, as of the issue-#26 completion round, the first ON
+BY DEFAULT (the POSTURE FLIP below).
+
+**Backend tiers (`buildSearchProvider`, FIRST MATCH WINS):** the precedence ladder is
+`WebSearchOff` (kill switch) > `WebSearchURL` (explicit override) > `SearXNGURL` >
+`BraveAPIKey` > **Exa anonymous default**. Each branch emits EXACTLY ONE build-once
+INFO line and NEVER logs a key/secret (only the fixed endpoint + a paid-tier boolean).
+The prior round shipped only tiers 2–3 (the generic HTTP adapter, OFF by default and
+demanding `--websearch-url`); the completion round added tier 1 (Exa), the ladder, the
+kill switch, the degradation model, and the `query` probe.
+
+**The POSTURE FLIP — ON by default:** with the Exa anonymous tier needing no key, web
+search is now ENABLED out of the box, so there IS default outbound egress (to Exa).
+The decided posture: floor-Allow UNCHANGED (no new headless-Ask split, no trust gate);
+the KILL SWITCH (`--websearch=off`) is the operator escape, and guardrails (issue #27)
+observe `WebSearch` for the exfiltration residual. The "keyless general-web search is
+vanishing" rationale (Jina closed its keyless tier, Google CSE shutting down) is why
+Exa-anonymous is the default while it lasts — and why graceful degradation is mandatory.
 
 - **Port (DOMAIN):** `engine/tool/search.go` — `SearchProvider.Search(ctx, SearchQuery)
   ([]SearchResult, error)`, the value objects `SearchQuery{Query,Limit,Site,Freshness}`
-  / `SearchResult{Title,URL,Snippet,Date,Source}`, and the sentinel
-  `ErrSearchUnavailable`. It lives in `engine/tool` NEXT TO `CommandRunner` (NOT
+  / `SearchResult{Title,URL,Snippet,Date,Source}`, and TWO sentinels. **The
+  two-sentinel degradation model:** `ErrSearchUnavailable` now means ONLY
+  operator-DISABLED (the kill switch — no backend wired); `ErrSearchBackendDown` (NEW)
+  means a real configured/default backend was attempted but is unreachable/rate-limited/
+  faulted/empty. The tool renders them as DISTINCT model-visible messages
+  (`webSearchDisabledMsg` vs `webSearchBackendDownMsg` — the latter names the
+  `BRAVE_API_KEY`/`SEARXNG_URL` upgrade path), both NON-error results (the tool ran;
+  the condition is environmental). Never a silent empty result or a hang (the
+  mandatory-degradation contract). It lives in `engine/tool` NEXT TO `CommandRunner` (NOT
   `engine/port`) for the same reason FileSystem/Workspace/CommandRunner do: it is a
   TOOL collaborator injected at execution, never a loop port — the agent loop never
   names it. Stdlib-only. `port.LLMRequest` is UNCHANGED (the neutrality guard holds).
@@ -1736,23 +1760,51 @@ capability.
   IN THE ADAPTER, never the dispatcher or tool, because the read-parallel dispatcher
   fans out N concurrent WebSearch calls per turn. The query is sent VERBATIM; the API
   key rides the HEADER only (default `Authorization: Bearer …`), NEVER the query
-  string (secret-scanning is the guardrails layer's job, documented). Tests use
-  `httptest.Server` only — never a live endpoint (offline purity).
-- **Composition:** `buildSearchProvider(cfg)` returns the HTTP adapter when
-  `--websearch-url` is set, else `refsearch.Unavailable{}`; resolved ONCE in
+  string (secret-scanning is the guardrails layer's job, documented). The Brave tier
+  reuses this adapter (endpoint + `X-Subscription-Token` header + `q` param); a NEW
+  `httpResponse.merged()` folds Brave's NESTED `{"web":{"results":[…]}}` shape into the
+  flat results (the prior round registered the Brave endpoint but never parsed its body
+  — it returned zero hits). Tests use `httptest.Server` only — never a live endpoint.
+- **Exa client (TIER-1 default, heavy):** `internal/adapter/search/exasearch.go` —
+  `ExaProvider`, a MINIMAL DEDICATED streamable-HTTP JSON-RPC MCP client for Exa's
+  anonymous endpoint (`https://mcp.exa.ai/mcp` → `tools/call web_search_exa`). It is
+  deliberately NOT the general MCP manager: **the no-OAuth-discovery caveat** — Exa
+  publishes OAuth metadata it does not ENFORCE, and the general manager would do
+  proactive discovery and park on a browser flow. So the client makes EXACTLY THREE
+  POSTs to the fixed endpoint per call (`initialize` → capture the `Mcp-Session-Id`
+  RESPONSE header; `notifications/initialized` with that header; `tools/call` with it)
+  and NEVER a GET, NEVER a `/.well-known/` path (a LOAD-BEARING invariant — the test
+  records every request path and asserts none contains `.well-known`, and asserts
+  exactly 3 POSTs). It shares the package safety envelope (own 10s timeout + semaphore,
+  `io.LimitReader` cap, no-redirect). `parseSSEData` strips/joins SSE `data:` lines
+  (Exa frames the JSON-RPC body as `event: message\ndata: {json}`), with a plain-JSON
+  fallback sniffed on Content-Type. `parseExaResultText` maps the line-prefixed blob
+  (`Title:`/`URL:`/`Published:`/`Author:`/`Highlights:`) onto `SearchResult`, TOLERANT
+  of missing fields and multi-line highlights, never dropping a result. `EXA_API_KEY`
+  (the paid tier) is appended as the escaped `?exaApiKey=` query param via `net/url` —
+  the request URL is SECRET-BEARING and is NEVER logged (only `BaseEndpoint()` +
+  `PaidTier()` are log-safe). Any closed/401/403/429/5xx status, transport error,
+  JSON-RPC error object, or malformed/empty result → `ErrSearchBackendDown` (wrapped).
+- **Composition:** `buildSearchProvider(cfg)` is the FIRST-MATCH-WINS ladder above —
+  the Exa default (`*ExaProvider`) when nothing else is set; resolved ONCE in
   `buildCatalog` and threaded onto `catalogAssets.searchProvider` so every per-session
   catalog reuses the SAME provider (issue #42 — `TestPerSessionCatalogMatchesShared
   Catalog` stays green). `registerCoreTools` registers WebSearch ALWAYS (both default
-  and no-FS profiles) — like WebFetch it never vanishes (silent-disable aversion); a
-  not-configured deployment gets the honest message. `defaultRules()` floor-Allows it
-  (`ScopeBuiltinDefault`, config-overridable — the real egress gate is the provider
-  config, not an Ask; lower-risk than WebFetch's arbitrary-URL fetch). Child catalogs
-  (`noFSChildCatalog`) carry it for read-only-discovery parity with WebFetch. Bare
-  `WebSearch` in a Claude allow imports VERBATIM (no demotion — documented in the
-  fail-safe table). ACP `toolKindFor` maps it to `"search"`.
-- **Operator flag:** `--websearch-url` (off by default), `--websearch-auth-header`,
-  `--websearch-query-param`; the key is read from `WEBSEARCH_API_KEY` (a secret, never
-  a flag value).
+  and no-FS profiles) — like WebFetch it never vanishes (silent-disable aversion).
+  `defaultRules()` floor-Allows it (`ScopeBuiltinDefault`, config-overridable — the
+  real egress gate is the provider config / kill switch, not an Ask; lower-risk than
+  WebFetch's arbitrary-URL fetch). Child catalogs (`noFSChildCatalog`) carry it for
+  read-only-discovery parity with WebFetch. Bare `WebSearch` in a Claude allow imports
+  VERBATIM (no demotion). ACP `toolKindFor` maps it to `"search"`.
+- **The `query` probe (DOMAIN):** `governance.nonBashPattern` adds `"query"` to its
+  probe-key list (after path/file_path/pattern/url), so an arg-pattern permission rule
+  can target a `WebSearch` call by its query string (`WebSearch(query:…)`) — the prior
+  round missed this. Mutation-verified: removing the key fails the probe test.
+- **Operator flags/env:** `--websearch=off` (the kill switch, mirrors `--guardrails`;
+  any non-`off` value or unset = ON), `--websearch-url` (explicit override, wins over
+  env tiers + default), `--websearch-auth-header`, `--websearch-query-param`; the
+  backend-switching secrets are read from `SEARXNG_URL`/`BRAVE_API_KEY`/`EXA_API_KEY`
+  (and `WEBSEARCH_API_KEY` for `--websearch-url`) — env only, never flag values.
 
 ## Composition — `internal/app/` (multi-provider — see `MULTI-PROVIDER.md`)
 

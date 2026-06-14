@@ -87,6 +87,23 @@ type HTTPProvider struct {
 // parse without per-vendor code. Documented so an operator knows what to expose.
 type httpResponse struct {
 	Results []httpResult `json:"results"`
+	// Web nests the results array the Brave Web Search API returns
+	// ({"web":{"results":[...]}}) — a top-level "results" array is the SearXNG /
+	// generic shape, while Brave buries its web results one level down. We merge
+	// web.results into the flat results so the Brave tier actually returns hits
+	// (the prior round registered the Brave endpoint but never parsed its shape).
+	Web struct {
+		Results []httpResult `json:"results"`
+	} `json:"web"`
+}
+
+// merged returns the flat top-level results followed by any nested Brave
+// web.results, so a generic SearXNG body and a Brave body both yield results.
+func (r httpResponse) merged() []httpResult {
+	out := make([]httpResult, 0, len(r.Results)+len(r.Web.Results))
+	out = append(out, r.Results...)
+	out = append(out, r.Web.Results...)
+	return out
 }
 
 // httpResult is one result object. The field aliases (Content/Snippet/Description,
@@ -107,8 +124,23 @@ type httpResult struct {
 // an error if BaseURL is empty (a misconfigured adapter must fail loudly, not pass
 // silently — the composition root only builds this when the operator set the URL).
 func NewHTTPProvider(cfg HTTPConfig) (*HTTPProvider, error) {
-	if strings.TrimSpace(cfg.BaseURL) == "" {
+	trimmed := strings.TrimSpace(cfg.BaseURL)
+	if trimmed == "" {
 		return nil, fmt.Errorf("search: HTTP provider requires a non-empty BaseURL")
+	}
+	// A configured-but-malformed URL must fail construction loudly (the operator
+	// set a broken endpoint), so composition can route it to backend-down rather
+	// than silently building a provider every Search would error on. We require an
+	// absolute http/https URL with a host.
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("search: HTTP provider BaseURL %q is not a valid URL: %w", trimmed, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("search: HTTP provider BaseURL %q must be an http(s) URL (got scheme %q)", trimmed, u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("search: HTTP provider BaseURL %q must include a host", trimmed)
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = defaultTimeout
@@ -186,8 +218,9 @@ func (p *HTTPProvider) Search(ctx context.Context, q tool.SearchQuery) ([]tool.S
 		return nil, fmt.Errorf("search: parse response JSON: %w", err)
 	}
 
-	out := make([]tool.SearchResult, 0, len(parsed.Results))
-	for _, r := range parsed.Results {
+	results := parsed.merged()
+	out := make([]tool.SearchResult, 0, len(results))
+	for _, r := range results {
 		out = append(out, tool.SearchResult{
 			Title:   r.Title,
 			URL:     r.URL,
@@ -248,6 +281,24 @@ func (p *HTTPProvider) buildRequest(ctx context.Context, q tool.SearchQuery) (*h
 	}
 	return req, nil
 }
+
+// BackendDown is the SearchProvider the composition root installs when an operator
+// CONFIGURED a backend but its construction FAILED (a bad --websearch-url /
+// SEARXNG_URL, or invalid Brave config). It is distinct from the engine's
+// fakesearch.Unavailable: a construction failure means "a backend was intended but
+// is not usable" — backend-down semantics — NOT the operator kill switch. Every
+// Search returns tool.ErrSearchBackendDown, so the WebSearch tool surfaces the
+// backend-down message (naming the upgrade path) rather than the "disabled by
+// operator" message, which would mis-attribute the cause.
+type BackendDown struct{}
+
+// Search always returns tool.ErrSearchBackendDown.
+func (BackendDown) Search(_ context.Context, _ tool.SearchQuery) ([]tool.SearchResult, error) {
+	return nil, fmt.Errorf("search: backend misconfigured: %w", tool.ErrSearchBackendDown)
+}
+
+// Compile-time assertion that BackendDown implements tool.SearchProvider.
+var _ tool.SearchProvider = BackendDown{}
 
 // firstNonEmpty returns the first non-empty (after trim) string, or "".
 func firstNonEmpty(ss ...string) string {

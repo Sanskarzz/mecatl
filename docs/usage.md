@@ -232,9 +232,13 @@ mailbox). See the delegation-capabilities note below.
 | `--max-run-tokens` | `0` | loop-level **cumulative token ceiling per run** (input + output). A run that crosses it ends cleanly with `stop=budget` (terminal `StopBudget`). The budget is **inherited by every Subagent / Parallel branch / team member**, so a delegation fan-out cannot blow past it. `0` (the default) **disables** it. |
 | `--max-team-tokens` | `0` | **team-wide cumulative token ceiling per team run** (input + output, summed across **all members and rounds**). When crossed the team stops scheduling new rounds — the **in-flight round and the lead's synthesis still complete**, and the report states the budget stop. Applies to the `Team` tool and gRPC `CreateTeam`; a per-call Team `max_team_tokens` may only **tighten** it, and so may the wire `CreateTeamRequest.max_team_tokens` (HTTP: `"max_team_tokens"` in the create body). The outcome (incl. `budget_exhausted` and the `"budget"` stop) rides the **terminal `TeamEvent.outcome` frame** both `RunTeam` surfaces (gRPC stream + HTTP SSE) end with. **Orthogonal** to `--max-run-tokens` (per-run; both compose). `0` (the default) **disables** it. |
 | `--enable-parallel` | `true` | register the **Parallel** fan-out tool (N parallel isolated child branches). On by default; `=false` disables it. *(Renamed from the former `--enable-fork`.)* |
-| `--websearch-url` | `""` | **WebSearch** (issue #26): base URL of a vendor-neutral HTTP JSON search endpoint (e.g. a [SearXNG](https://docs.searxng.org/) `/search` URL or any generic JSON search API) backing the always-present **WebSearch** tool. Empty (default) leaves WebSearch **registered but reporting "not configured"** (no egress) — the tool never vanishes (silent-disable aversion). The API key is read from the **`WEBSEARCH_API_KEY`** env var (a secret, never a flag value). The adapter carries its **own** per-call timeout (10s) and concurrency limit (4), so the read-parallel dispatcher cannot launch unbounded egress. **Setup walkthrough (SearXNG / keyed API / the JSON contract): see [Enabling web search](#enabling-web-search) below.** |
-| `--websearch-auth-header` | `"Authorization"` | HTTP header the `WEBSEARCH_API_KEY` is sent in — default `Authorization` as a `Bearer` token; set e.g. `X-API-Key` to send the raw key. The secret rides the **header only, never the query string**. Ignored when no key is set. |
-| `--websearch-query-param` | `"q"` | URL query parameter the search string is placed in. Tune for a generic JSON search endpoint that expects a different parameter name. |
+| `--websearch` | `""` (on) | **WebSearch** (issue #26) **master switch**: web search is **ON by default** (the Exa anonymous tier — no key, no config). Pass `--websearch=off` to **disable** it entirely (the kill switch — no outbound search calls; the tool reports it is disabled). Any value other than `off` (or unset) leaves web search enabled. Mirrors `--guardrails`. |
+| `--websearch-url` | `""` | **WebSearch explicit override**: base URL of a vendor-neutral HTTP JSON search endpoint (e.g. a [SearXNG](https://docs.searxng.org/) `/search` URL or any generic JSON search API). When set it **wins over** the `SEARXNG_URL`/`BRAVE_API_KEY` env tiers **and** the Exa default. The API key is read from the **`WEBSEARCH_API_KEY`** env var (a secret, never a flag value). The adapter carries its **own** per-call timeout (10s) and concurrency limit (4), so the read-parallel dispatcher cannot launch unbounded egress. **Backend ladder + walkthrough: see [Enabling web search](#enabling-web-search) below.** |
+| `--websearch-auth-header` | `"Authorization"` | HTTP header the `WEBSEARCH_API_KEY` is sent in (for `--websearch-url`) — default `Authorization` as a `Bearer` token; set e.g. `X-API-Key` to send the raw key. The secret rides the **header only, never the query string**. Ignored when no key is set. |
+| `--websearch-query-param` | `"q"` | URL query parameter the search string is placed in (for `--websearch-url`). Tune for a generic JSON search endpoint that expects a different parameter name. |
+| `SEARXNG_URL` *(env)* | `""` | **WebSearch SearXNG tier**: point at a **self-hosted** [SearXNG](https://docs.searxng.org/) `/search` URL to switch the backend to SearXNG (no API key). Wins over `BRAVE_API_KEY` and the Exa default; loses to `--websearch-url`. |
+| `BRAVE_API_KEY` *(env)* | `""` | **WebSearch Brave tier**: a [Brave Search API](https://brave.com/search/api/) key switches the backend to Brave (sent in the `X-Subscription-Token` header against the Brave Web Search endpoint). The key is **never logged**. Wins over the Exa default; loses to `SEARXNG_URL`/`--websearch-url`. |
+| `EXA_API_KEY` *(env)* | `""` | **WebSearch Exa paid tier**: an [Exa](https://exa.ai/) key upgrades the **default** Exa backend from the anonymous tier to the paid tier (appended as `?exaApiKey=` to the Exa endpoint, escaped). The key is **never logged**. Without it the Exa default runs anonymously. |
 | `--fork-preserved-cap` | `agent.DefaultPreservedForkCap` | max **PRESERVED** winner forks (for `join=first`/`judge`) kept on disk at once — the oldest beyond this is LRU-reaped. Preserved fork workspaces stay inspectable (their paths ride the Parallel result) until reaped. |
 | `--enable-teams` | `true` | register the experimental **agent-teams** capability (`CreateTeam`/`SpawnTeammate`/`RunTeam` + the in-loop `Team` tool). On by default and **inert** until a client drives a team; `=false` disables it. |
 | `--subagent-model` | `""` | global default model for every Subagent / Parallel-branch / team-member child that does not pin its own model (via an agent definition `model:` or a per-call override) — the analogue of `CLAUDE_CODE_SUBAGENT_MODEL`. The Parallel judge stays on the session model. A concrete id or a `--model-alias`; same provider as the session. Empty inherits the parent `--model`; a non-empty value that does not resolve to a usable model id (unknown alias, or an alias meaning *inherit* — the built-in `sonnet`/`opus`/`haiku` unless overridden) **fails startup**. `mecatui` accepts the same flag for its embedded server. |
@@ -279,13 +283,45 @@ mailbox). See the delegation-capabilities note below.
 
 #### Enabling web search
 
-The **WebSearch** tool is **always present** but does nothing until you point it at
-a backend — by default it returns an honest *"web search is not enabled"* message
-and makes **no network call**. WebSearch is intentionally **vendor-neutral**: it
-speaks a generic HTTP-JSON search protocol rather than hard-coding one provider, so
-you choose the backend.
+The **WebSearch** tool is **always present** and, as of issue #26, **ON by default**:
+out of the box it runs against the **Exa anonymous tier** — no key, no account, no
+config. (The keyless general-web search option has been disappearing across the
+industry — Jina closed its keyless tier, Google CSE is shutting down — and Exa's
+anonymous endpoint is the last one standing; mecatl uses it as the zero-config
+default while it lasts, and degrades gracefully when it doesn't.) You only need the
+rest of this section if you want to **switch backends** or **turn search off**.
 
-**The simplest backend — SearXNG (no API key):** [SearXNG](https://docs.searxng.org/)
+**The backend ladder (first match wins):**
+
+1. `--websearch=off` — the **kill switch**. No outbound search; the tool reports it
+   is disabled. For operators who don't want any default egress.
+2. `--websearch-url` — an **explicit** HTTP-JSON endpoint (below). Wins over the env
+   tiers and the Exa default.
+3. `SEARXNG_URL` *(env)* — a self-hosted SearXNG `/search` URL (below).
+4. `BRAVE_API_KEY` *(env)* — a Brave Search API key (below).
+5. **default** — **Exa anonymous** (or the **Exa paid tier** if `EXA_API_KEY` is set).
+
+**The default — Exa (zero-config):** nothing to do. mecated speaks a minimal
+streamable-HTTP JSON-RPC handshake to Exa's public MCP endpoint
+(`https://mcp.exa.ai/mcp` → `web_search_exa`) — anonymously. It makes **exactly the
+three POSTs** the protocol needs and does **no OAuth discovery** (Exa publishes OAuth
+metadata it does not enforce; mecatl never probes `/.well-known/`). Set `EXA_API_KEY`
+to upgrade to the paid tier (the key is appended to the endpoint, escaped, and
+**never logged**). If Exa is unreachable or rate-limited, WebSearch returns a
+model-visible *"temporarily unavailable"* message naming the upgrade path — never a
+silent empty result or a hang.
+
+**Switching to Brave (a key, an independent index):** export `BRAVE_API_KEY` — that's
+it. mecated targets the Brave Web Search endpoint with the key in the
+`X-Subscription-Token` header and parses Brave's `{"web":{"results":[…]}}` shape.
+The key is **never logged**.
+
+```sh
+export BRAVE_API_KEY=…      # the secret; sent in a header, never the query string
+mecated                     # …plus your usual flags — Brave is now the backend
+```
+
+**Switching to SearXNG (no API key):** [SearXNG](https://docs.searxng.org/)
 is a self-hostable metasearch engine. SearXNG ships with the JSON output format
 **disabled**, and mecatl requests `format=json` — so you must enable it. Write a
 minimal config that layers JSON onto SearXNG's defaults, then run it and point
@@ -305,16 +341,16 @@ YAML
 # 2. run it with that config mounted
 docker run --rm -d -p 8080:8080 -v "$PWD/searxng:/etc/searxng" searxng/searxng
 
-# 3. point mecated at it
-mecated --websearch-url http://localhost:8080/search   # …plus your usual flags
+# 3. point mecated at it (env tier — wins over the Exa default)
+export SEARXNG_URL=http://localhost:8080/search
+mecated                                                # …plus your usual flags
 ```
 
-**A commercial search API (needs a key):** the adapter speaks a **GET (or POST)
-with form-encoded query parameters** and parses the JSON shape below. APIs that fit
-that shape work directly — e.g. a [Brave Search API](https://brave.com/search/api/)
-endpoint (GET; pass its key with `--websearch-auth-header X-Subscription-Token`).
-Supply the key via the **`WEBSEARCH_API_KEY`** environment variable (never a flag —
-it's a secret):
+**A generic / commercial search API (explicit override):** `--websearch-url` speaks a
+**GET (or POST) with form-encoded query parameters** and parses the JSON shape below;
+it **wins over** the env tiers and the Exa default. APIs that fit that shape work
+directly. Supply the key via the **`WEBSEARCH_API_KEY`** environment variable (never a
+flag — it's a secret); tune the header and query parameter for the endpoint:
 
 ```sh
 export WEBSEARCH_API_KEY=…          # the secret; sent in a header, never in the URL/query
@@ -322,6 +358,10 @@ mecated --websearch-url https://api.search.brave.com/res/v1/web/search \
         --websearch-auth-header X-Subscription-Token \   # default "Authorization" (Bearer); set this for a raw-key header
         --websearch-query-param q                        # default "q"
 ```
+
+> The `BRAVE_API_KEY` env tier above is the shortcut for exactly this Brave endpoint
+> (it sets the URL, header, and query param for you); `--websearch-url` is the general
+> escape hatch for any other JSON endpoint.
 
 > **Not every API fits.** The adapter sends the query as **form/URL parameters**, not
 > a JSON request body — so a service that requires a **JSON POST body** (e.g. Tavily)
@@ -340,20 +380,28 @@ aliases so most APIs map cleanly):
 ] }
 ```
 
-**Security posture:** off by default (no egress until `--websearch-url` is set); the
-query is sent **verbatim** (mecatl adds nothing — secret-scanning of the query is the
-guardrails layer's job); the API key rides an **HTTP header only**, never the URL or
-query string and never logged; the adapter does **not follow redirects** (an SSRF
-guard — a configured backend cannot 302 the request to an internal address); and it
-carries its **own** 10s per-call timeout + concurrency limit (4) so the read-parallel
-dispatcher can't launch unbounded egress. Results are treated as **untrusted** and
-fenced before they reach the model. Permission default is a config-overridable
-floor **Allow** (like `WebFetch`).
+**Security posture:** web search is **ON by default**, so there **is** default
+outbound egress (to Exa) — the kill switch (`--websearch=off`) is the operator escape
+for deployments that don't want it. The query is sent **verbatim** (mecatl adds
+nothing — secret-scanning of the query is the guardrails layer's job, issue #27,
+which observes `WebSearch` for the exfiltration residual); any API key rides an
+**HTTP header** (HTTP-JSON tier) or the escaped `?exaApiKey=` param (Exa paid tier),
+**never logged**; the adapters do **not follow redirects** (an SSRF guard — a backend
+cannot 302 the request to an internal address); and each carries its **own** 10s
+per-call timeout + concurrency limit (4) so the read-parallel dispatcher can't launch
+unbounded egress. Results are treated as **untrusted** and fenced before they reach
+the model. Permission default is a config-overridable floor **Allow** (like
+`WebFetch`); arg-pattern permission rules can target the `query` (e.g. an
+`ask`/`deny` rule on a query glob).
+
+**The JSON response contract** for the HTTP-JSON tiers (`--websearch-url`/`SEARXNG_URL`/
+`BRAVE_API_KEY`) is shown above; the Exa default needs no schema knowledge.
 
 **Verify it's working:** start a session and ask the agent to *"use the WebSearch
-tool to search for `golang slices`"*. A configured backend returns a fenced,
-numbered list of `Title — url` results; an unconfigured one returns the *"web search
-is not enabled"* message instead (and makes no network call).
+tool to search for `golang slices`"*. The default (Exa) returns a fenced, numbered
+list of `Title — url` results; an unreachable backend returns the *"temporarily
+unavailable"* message; and `--websearch=off` returns the *"disabled on this
+deployment"* message (no network call).
 
 #### LLM resilience knobs
 

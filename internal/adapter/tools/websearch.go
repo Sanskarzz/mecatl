@@ -125,7 +125,8 @@ func (t WebSearchTool) Execute(ctx context.Context, in session.ToolCall, _ tool.
 	limit := clampSearchLimit(args.Limit)
 
 	if t.provider == nil {
-		return session.NewToolResult(in.ID, webSearchNotConfiguredMsg), nil
+		// No provider wired at all behaves like the operator kill switch.
+		return session.NewToolResult(in.ID, webSearchDisabledMsg), nil
 	}
 
 	results, err := t.provider.Search(ctx, tool.SearchQuery{
@@ -135,10 +136,17 @@ func (t WebSearchTool) Execute(ctx context.Context, in session.ToolCall, _ tool.
 		Freshness: args.Freshness,
 	})
 	if err != nil {
-		if errors.Is(err, tool.ErrSearchUnavailable) {
-			return session.NewToolResult(in.ID, webSearchNotConfiguredMsg), nil
+		switch {
+		case errors.Is(err, tool.ErrSearchUnavailable):
+			// Operator disabled web search (--websearch=off). Non-error: the tool ran.
+			return session.NewToolResult(in.ID, webSearchDisabledMsg), nil
+		case errors.Is(err, tool.ErrSearchBackendDown):
+			// A configured/default backend was attempted but is down/rate-limited.
+			// Non-error: the condition is environmental, names the upgrade path.
+			return session.NewToolResult(in.ID, webSearchBackendDownMsg), nil
+		default:
+			return session.NewToolError(in.ID, fmt.Sprintf("web search failed: %v", err)), nil
 		}
-		return session.NewToolError(in.ID, fmt.Sprintf("web search failed: %v", err)), nil
 	}
 	if len(results) == 0 {
 		return session.NewToolResult(in.ID, "no results"), nil
@@ -147,20 +155,24 @@ func (t WebSearchTool) Execute(ctx context.Context, in session.ToolCall, _ tool.
 	return session.NewToolResult(in.ID, formatSearchResults(results, limit)), nil
 }
 
-// webSearchNotConfiguredMsg is the honest, model-facing message returned when no
-// search provider is wired (nil provider or ErrSearchUnavailable). It is NOT an
-// error result: the tool exists and is callable, the backend just isn't set up,
-// and the model should report that to the user rather than treat it as a failure
-// to retry. It is deliberately ACTIONABLE — it names the concrete no-API-key
-// option (self-hosted SearXNG), the env var for a keyed API, and the doc anchor —
-// because the person who reads the relayed message is usually the operator, and a
-// bare "ask the operator to configure a key" leaves them with no idea which
-// service or whether a key is even needed.
-const webSearchNotConfiguredMsg = "Web search is not enabled on this deployment, so no query ran. " +
-	"To enable it, the operator sets mecated's --websearch-url to a JSON search endpoint: the simplest is a " +
-	"self-hosted SearXNG instance (no API key needed); a commercial JSON search API also works, " +
-	"with its key supplied via the WEBSEARCH_API_KEY environment variable. " +
-	"Setup guide: docs/usage.md \"Enabling web search\". Until a backend is set, web search is unavailable — do not retry."
+// webSearchDisabledMsg is the honest, model-facing message returned when web
+// search is DISABLED on the deployment — the operator kill switch (--websearch=off)
+// or a nil provider. It is NOT an error result: the tool exists and is callable,
+// the operator simply turned outbound search off. The model should report that to
+// the user rather than retry (nothing will ever run until it is re-enabled).
+const webSearchDisabledMsg = "Web search is disabled on this deployment (the operator set --websearch=off). " +
+	"No query ran and none will until web search is re-enabled. " +
+	"Report this to the user rather than retrying."
+
+// webSearchBackendDownMsg is the model-facing message returned when a real,
+// configured (or default Exa) backend was attempted but is unreachable or
+// rate-limited (tool.ErrSearchBackendDown). It is NOT an error result: the
+// condition is environmental/transient, and it names the concrete upgrade path so
+// the operator who reads the relayed message knows how to provision a dedicated
+// backend instead of relying on the anonymous default.
+const webSearchBackendDownMsg = "Web search is temporarily unavailable: the default search backend (Exa) is " +
+	"unreachable or rate-limited. The operator can configure a dedicated backend by setting BRAVE_API_KEY or " +
+	"SEARXNG_URL (see docs/usage.md \"Enabling web search\"). Do not retry immediately."
 
 // clampSearchLimit normalises the model-supplied limit: nil/absent or <=0 uses the
 // default; anything above the hard max is clamped down. The result is always in

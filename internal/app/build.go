@@ -401,12 +401,11 @@ type Config struct {
 	// Optional tools, on by default in the standalone server.
 	EnableParallel bool
 
-	// WebSearch (issue #26): the vendor-neutral HTTP JSON search backend behind the
-	// always-present WebSearch core tool. OFF by default — when WebSearchURL is
-	// empty the WebSearch tool is still registered but backed by a not-configured
-	// sentinel that returns an honest "ask the operator" message (the silent-disable
-	// aversion). WebSearchURL is the search endpoint (e.g. a SearXNG /search URL or
-	// a generic JSON search API). WebSearchAPIKey is an OPTIONAL credential sent in
+	// WebSearch (issue #26): web search is ON by default (Exa anonymous tier) behind
+	// the always-present WebSearch core tool — see the backend ladder fields below.
+	// WebSearchURL is the EXPLICIT-override endpoint (e.g. a SearXNG /search URL or
+	// a generic JSON search API) that wins over the env tiers and the Exa default.
+	// WebSearchAPIKey is an OPTIONAL credential sent in
 	// WebSearchAuthHeader (default "Authorization" as a Bearer token) — NEVER in the
 	// query string. WebSearchQueryParam overrides the URL query parameter the search
 	// string is placed in (default "q"). The cmd layer reads the key from a
@@ -417,6 +416,17 @@ type Config struct {
 	WebSearchAPIKey     string
 	WebSearchAuthHeader string
 	WebSearchQueryParam string
+
+	// WebSearch backend ladder (issue #26): web search is ON by default via the Exa
+	// anonymous tier (no key, no config). The precedence is, first match wins:
+	// WebSearchOff (kill switch) > WebSearchURL (explicit override) > SearXNGURL >
+	// BraveAPIKey > Exa anonymous default. SearXNGURL/BraveAPIKey/ExaAPIKey are read
+	// from SEARXNG_URL/BRAVE_API_KEY/EXA_API_KEY (secrets/URLs, never flag values);
+	// WebSearchOff is set by --websearch=off.
+	SearXNGURL   string
+	BraveAPIKey  string
+	ExaAPIKey    string
+	WebSearchOff bool
 
 	// ForkPreservedCap bounds how many PRESERVED winner forks (join=first /
 	// join=judge) survive at once across the process: a new winner beyond the cap
@@ -2318,9 +2328,10 @@ func buildCatalog(ctx context.Context, cfg Config, reg *providerRegistry, provid
 		// assets — no second list to drift.
 		skillReadRoots: seam.readRoots,
 		forkReaper:     forkReaper,
-		// WebSearch provider (issue #26): resolved ONCE here (the HTTP adapter when
-		// --websearch-url is set, else the not-configured sentinel) and threaded onto
-		// the assets so every per-session catalog reuses the SAME provider.
+		// WebSearch provider (issue #26): resolved ONCE here via the backend ladder
+		// (kill switch > --websearch-url > SEARXNG_URL > BRAVE_API_KEY > Exa default)
+		// and threaded onto the assets so every per-session catalog reuses the SAME
+		// provider.
 		searchProvider: buildSearchProvider(ctx, cfg),
 	}
 	// The build-time assembly: default provider + model, no client MCP, narrating
@@ -2799,33 +2810,78 @@ func buildUserModelReviewEngine(cfg Config, provider port.LLMProvider, store too
 	return newChildEngine(cfg, "usermodel-review", provider, cat, cfg.Model, promptConfig(cfg, cfg.gitStatus))
 }
 
+// braveSearchEndpoint is the Brave Web Search API endpoint the BRAVE_API_KEY tier
+// targets. Brave nests results under {"web":{"results":[...]}}; the HTTP adapter's
+// merged() handles that shape.
+const braveSearchEndpoint = "https://api.search.brave.com/res/v1/web/search"
+
 // buildSearchProvider resolves the process-wide tool.SearchProvider the WebSearch
-// core tool is built over (issue #26). When cfg.WebSearchURL is set it constructs
-// the vendor-neutral HTTP JSON adapter (the operator opted in); otherwise — and on
-// a construction error — it returns the not-configured sentinel
-// (refsearch.Unavailable) so the always-present WebSearch tool surfaces an honest
-// "ask the operator" message rather than vanishing. The build-once narration mirrors
-// the Bash/memory ENABLED/DISABLED facts. It NEVER logs the API key (CWE-200).
+// core tool is built over (issue #26). Web search is ON by default via the Exa
+// anonymous tier; the ladder is FIRST MATCH WINS, with EXACTLY ONE build-once INFO
+// line per branch and NEVER a key/secret in any log line (CWE-200):
+//
+//  1. WebSearchOff (kill switch)      → refsearch.Unavailable (tool reports disabled)
+//  2. WebSearchURL set (explicit)     → HTTP adapter (wins over env)
+//  3. SearXNGURL set                  → HTTP adapter against the SearXNG URL
+//  4. BraveAPIKey set                 → HTTP adapter against the Brave endpoint
+//  5. default                         → Exa anonymous (zero-config, no key)
+//
+// A construction error on a CONFIGURED HTTP tier (a bad URL / invalid config) does
+// NOT degrade to the kill-switch "disabled" sentinel — the operator INTENDED a
+// backend, it is just unusable, which is backend-down semantics. It fails soft to
+// httpsearch.BackendDown (the tool reports the backend is down, naming the upgrade
+// path) with a WARN (the harness still boots). Only the kill switch (WebSearchOff)
+// resolves to refsearch.Unavailable / the "disabled by operator" message.
 func buildSearchProvider(ctx context.Context, cfg Config) tool.SearchProvider {
-	if strings.TrimSpace(cfg.WebSearchURL) == "" {
-		cfg.diag().Log(ctx, port.LevelInfo, "WebSearch tool ENABLED but NO backend configured (returns an honest not-configured message); set --websearch-url to enable real search")
+	switch {
+	case cfg.WebSearchOff:
+		cfg.diag().Log(ctx, port.LevelInfo, "WebSearch DISABLED by operator (--websearch=off); the tool reports it is disabled")
 		return refsearch.Unavailable{}
+
+	case strings.TrimSpace(cfg.WebSearchURL) != "":
+		provider, err := httpsearch.NewHTTPProvider(httpsearch.HTTPConfig{
+			BaseURL:    cfg.WebSearchURL,
+			APIKey:     cfg.WebSearchAPIKey,
+			AuthHeader: cfg.WebSearchAuthHeader,
+			QueryParam: cfg.WebSearchQueryParam,
+		})
+		if err != nil {
+			cfg.diag().Log(ctx, port.LevelWarn, "WebSearch backend misconfigured; the tool reports the backend is down (NOT disabled)", "err", err)
+			return httpsearch.BackendDown{}
+		}
+		cfg.diag().Log(ctx, port.LevelInfo, "WebSearch ENABLED with explicit HTTP backend (--websearch-url; wins over env/default)", "endpoint", cfg.WebSearchURL)
+		return provider
+
+	case strings.TrimSpace(cfg.SearXNGURL) != "":
+		provider, err := httpsearch.NewHTTPProvider(httpsearch.HTTPConfig{BaseURL: cfg.SearXNGURL})
+		if err != nil {
+			cfg.diag().Log(ctx, port.LevelWarn, "WebSearch SearXNG backend misconfigured; the tool reports the backend is down (NOT disabled)", "err", err)
+			return httpsearch.BackendDown{}
+		}
+		cfg.diag().Log(ctx, port.LevelInfo, "WebSearch ENABLED with SearXNG backend (SEARXNG_URL)", "endpoint", cfg.SearXNGURL)
+		return provider
+
+	case strings.TrimSpace(cfg.BraveAPIKey) != "":
+		provider, err := httpsearch.NewHTTPProvider(httpsearch.HTTPConfig{
+			BaseURL:    braveSearchEndpoint,
+			APIKey:     cfg.BraveAPIKey,
+			AuthHeader: "X-Subscription-Token",
+			QueryParam: "q",
+		})
+		if err != nil {
+			cfg.diag().Log(ctx, port.LevelWarn, "WebSearch Brave backend misconfigured; the tool reports the backend is down (NOT disabled)", "err", err)
+			return httpsearch.BackendDown{}
+		}
+		// NEVER log the key — only the fixed endpoint.
+		cfg.diag().Log(ctx, port.LevelInfo, "WebSearch ENABLED with Brave backend (BRAVE_API_KEY)", "endpoint", braveSearchEndpoint)
+		return provider
+
+	default:
+		provider := httpsearch.NewExaProvider(httpsearch.ExaConfig{APIKey: cfg.ExaAPIKey})
+		// NEVER log the key — only the fixed base endpoint + the paid-tier boolean.
+		cfg.diag().Log(ctx, port.LevelInfo, "WebSearch ENABLED (Exa anonymous default; set SEARXNG_URL/BRAVE_API_KEY to switch backends, or --websearch=off to disable)", "endpoint", provider.BaseEndpoint(), "paid_tier", provider.PaidTier())
+		return provider
 	}
-	provider, err := httpsearch.NewHTTPProvider(httpsearch.HTTPConfig{
-		BaseURL:    cfg.WebSearchURL,
-		APIKey:     cfg.WebSearchAPIKey,
-		AuthHeader: cfg.WebSearchAuthHeader,
-		QueryParam: cfg.WebSearchQueryParam,
-	})
-	if err != nil {
-		// Fail-soft (not fatal): a misconfigured URL degrades to the not-configured
-		// sentinel with a WARN, so the harness still starts (the tool reports it is
-		// unavailable) rather than refusing to boot over a search misconfig.
-		cfg.diag().Log(ctx, port.LevelWarn, "WebSearch backend misconfigured; falling back to not-configured (tool reports unavailable)", "err", err)
-		return refsearch.Unavailable{}
-	}
-	cfg.diag().Log(ctx, port.LevelInfo, "WebSearch tool ENABLED with HTTP backend; permission: allow (built-in default, overridable to ask/deny via settings)", "endpoint", cfg.WebSearchURL)
-	return provider
 }
 
 // buildCommandRunner builds the local command runner the Bash tool executes

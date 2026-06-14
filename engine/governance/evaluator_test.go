@@ -15,6 +15,31 @@ func fileArgs(p string) json.RawMessage {
 	return b
 }
 
+func queryArgs(q string) json.RawMessage {
+	b, _ := json.Marshal(map[string]string{"query": q})
+	return b
+}
+
+// TestWebSearchQueryPatternMatches asserts the "query" probe key (issue #26) lets
+// an arg-pattern rule target a WebSearch call by its query string. A glob rule on
+// the query must match (Allow), and a non-matching query falls through to the
+// built-in Ask default.
+//
+// MUTATION-VERIFY: remove "query" from nonBashPattern's probe-key list and this
+// test fails — the query never derives a pattern, so the glob rule cannot match.
+func TestWebSearchQueryPatternMatches(t *testing.T) {
+	e := NewEvaluator([]Rule{
+		{Scope: ScopeUser, Tool: "WebSearch", Pattern: "go *", Effect: Allow},
+	})
+	if got := e.Evaluate("WebSearch", queryArgs("go release notes"), false); got.Effect != Allow {
+		t.Fatalf("query-pattern rule should match WebSearch(query:\"go release notes\"); got %v", got.Effect)
+	}
+	// A query the glob does not match falls through to the Ask default.
+	if got := e.Evaluate("WebSearch", queryArgs("rust release notes"), false); got.Effect != Ask {
+		t.Fatalf("non-matching query should default to Ask; got %v", got.Effect)
+	}
+}
+
 // gauntlet #8: a deny in ANY scope beats an allow in ANY scope.
 func TestDenyBeatsAllowAcrossScopes(t *testing.T) {
 	rules := []Rule{
