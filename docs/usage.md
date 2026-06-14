@@ -232,7 +232,7 @@ mailbox). See the delegation-capabilities note below.
 | `--max-run-tokens` | `0` | loop-level **cumulative token ceiling per run** (input + output). A run that crosses it ends cleanly with `stop=budget` (terminal `StopBudget`). The budget is **inherited by every Subagent / Parallel branch / team member**, so a delegation fan-out cannot blow past it. `0` (the default) **disables** it. |
 | `--max-team-tokens` | `0` | **team-wide cumulative token ceiling per team run** (input + output, summed across **all members and rounds**). When crossed the team stops scheduling new rounds — the **in-flight round and the lead's synthesis still complete**, and the report states the budget stop. Applies to the `Team` tool and gRPC `CreateTeam`; a per-call Team `max_team_tokens` may only **tighten** it, and so may the wire `CreateTeamRequest.max_team_tokens` (HTTP: `"max_team_tokens"` in the create body). The outcome (incl. `budget_exhausted` and the `"budget"` stop) rides the **terminal `TeamEvent.outcome` frame** both `RunTeam` surfaces (gRPC stream + HTTP SSE) end with. **Orthogonal** to `--max-run-tokens` (per-run; both compose). `0` (the default) **disables** it. |
 | `--enable-parallel` | `true` | register the **Parallel** fan-out tool (N parallel isolated child branches). On by default; `=false` disables it. *(Renamed from the former `--enable-fork`.)* |
-| `--websearch-url` | `""` | **WebSearch** (issue #26): base URL of a vendor-neutral HTTP JSON search endpoint (e.g. a [SearXNG](https://docs.searxng.org/) `/search` URL or any generic JSON search API) backing the always-present **WebSearch** tool. Empty (default) leaves WebSearch **registered but reporting "not configured"** (no egress) — the tool never vanishes (silent-disable aversion). The API key is read from the **`WEBSEARCH_API_KEY`** env var (a secret, never a flag value). The adapter carries its **own** per-call timeout (10s) and concurrency limit (4), so the read-parallel dispatcher cannot launch unbounded egress. |
+| `--websearch-url` | `""` | **WebSearch** (issue #26): base URL of a vendor-neutral HTTP JSON search endpoint (e.g. a [SearXNG](https://docs.searxng.org/) `/search` URL or any generic JSON search API) backing the always-present **WebSearch** tool. Empty (default) leaves WebSearch **registered but reporting "not configured"** (no egress) — the tool never vanishes (silent-disable aversion). The API key is read from the **`WEBSEARCH_API_KEY`** env var (a secret, never a flag value). The adapter carries its **own** per-call timeout (10s) and concurrency limit (4), so the read-parallel dispatcher cannot launch unbounded egress. **Setup walkthrough (SearXNG / keyed API / the JSON contract): see [Enabling web search](#enabling-web-search) below.** |
 | `--websearch-auth-header` | `"Authorization"` | HTTP header the `WEBSEARCH_API_KEY` is sent in — default `Authorization` as a `Bearer` token; set e.g. `X-API-Key` to send the raw key. The secret rides the **header only, never the query string**. Ignored when no key is set. |
 | `--websearch-query-param` | `"q"` | URL query parameter the search string is placed in. Tune for a generic JSON search endpoint that expects a different parameter name. |
 | `--fork-preserved-cap` | `agent.DefaultPreservedForkCap` | max **PRESERVED** winner forks (for `join=first`/`judge`) kept on disk at once — the oldest beyond this is LRU-reaped. Preserved fork workspaces stay inspectable (their paths ride the Parallel result) until reaped. |
@@ -276,6 +276,84 @@ mailbox). See the delegation-capabilities note below.
 > capped, permission asks are never forwarded, and `team.end` includes closed-enum
 > member dispositions. (The `mecatui` `ctrl+a` overlay surfaces all three under
 > **Subagents | Parallel | Teams** tabs with a fleet-status footer — see `docs/tui.md`.)
+
+#### Enabling web search
+
+The **WebSearch** tool is **always present** but does nothing until you point it at
+a backend — by default it returns an honest *"web search is not enabled"* message
+and makes **no network call**. WebSearch is intentionally **vendor-neutral**: it
+speaks a generic HTTP-JSON search protocol rather than hard-coding one provider, so
+you choose the backend.
+
+**The simplest backend — SearXNG (no API key):** [SearXNG](https://docs.searxng.org/)
+is a self-hostable metasearch engine. SearXNG ships with the JSON output format
+**disabled**, and mecatl requests `format=json` — so you must enable it. Write a
+minimal config that layers JSON onto SearXNG's defaults, then run it and point
+mecated at its `/search` endpoint — no key, no account:
+
+```sh
+# 1. enable the JSON format (SearXNG layers this over its defaults)
+mkdir -p searxng
+cat > searxng/settings.yml <<'YAML'
+use_default_settings: true
+server:
+  secret_key: "change-me-to-any-random-string"   # SearXNG refuses to start without one
+search:
+  formats: [html, json]                           # mecatl needs json; html is SearXNG's default UI
+YAML
+
+# 2. run it with that config mounted
+docker run --rm -d -p 8080:8080 -v "$PWD/searxng:/etc/searxng" searxng/searxng
+
+# 3. point mecated at it
+mecated --websearch-url http://localhost:8080/search   # …plus your usual flags
+```
+
+**A commercial search API (needs a key):** the adapter speaks a **GET (or POST)
+with form-encoded query parameters** and parses the JSON shape below. APIs that fit
+that shape work directly — e.g. a [Brave Search API](https://brave.com/search/api/)
+endpoint (GET; pass its key with `--websearch-auth-header X-Subscription-Token`).
+Supply the key via the **`WEBSEARCH_API_KEY`** environment variable (never a flag —
+it's a secret):
+
+```sh
+export WEBSEARCH_API_KEY=…          # the secret; sent in a header, never in the URL/query
+mecated --websearch-url https://api.search.brave.com/res/v1/web/search \
+        --websearch-auth-header X-Subscription-Token \   # default "Authorization" (Bearer); set this for a raw-key header
+        --websearch-query-param q                        # default "q"
+```
+
+> **Not every API fits.** The adapter sends the query as **form/URL parameters**, not
+> a JSON request body — so a service that requires a **JSON POST body** (e.g. Tavily)
+> won't work directly. Front such an API with a small adapter/proxy that exposes the
+> GET-params + `{"results":[…]}` shape, or use SearXNG.
+
+**The JSON response contract** (what mecatl parses — the SearXNG shape, with field
+aliases so most APIs map cleanly):
+
+```json
+{ "results": [
+  { "title": "…", "url": "https://…",
+    "snippet": "…",            // or "content" / "description" (first non-empty wins)
+    "date": "2026-06-01",      // or "publishedDate" (optional)
+    "source": "example.com" }  // or "engine" (optional)
+] }
+```
+
+**Security posture:** off by default (no egress until `--websearch-url` is set); the
+query is sent **verbatim** (mecatl adds nothing — secret-scanning of the query is the
+guardrails layer's job); the API key rides an **HTTP header only**, never the URL or
+query string and never logged; the adapter does **not follow redirects** (an SSRF
+guard — a configured backend cannot 302 the request to an internal address); and it
+carries its **own** 10s per-call timeout + concurrency limit (4) so the read-parallel
+dispatcher can't launch unbounded egress. Results are treated as **untrusted** and
+fenced before they reach the model. Permission default is a config-overridable
+floor **Allow** (like `WebFetch`).
+
+**Verify it's working:** start a session and ask the agent to *"use the WebSearch
+tool to search for `golang slices`"*. A configured backend returns a fenced,
+numbered list of `Title — url` results; an unconfigured one returns the *"web search
+is not enabled"* message instead (and makes no network call).
 
 #### LLM resilience knobs
 

@@ -151,9 +151,16 @@ func (t WebSearchTool) Execute(ctx context.Context, in session.ToolCall, _ tool.
 // search provider is wired (nil provider or ErrSearchUnavailable). It is NOT an
 // error result: the tool exists and is callable, the backend just isn't set up,
 // and the model should report that to the user rather than treat it as a failure
-// to retry.
-const webSearchNotConfiguredMsg = "no search provider is configured for this deployment; " +
-	"ask the operator to set one (e.g. via --websearch-url). Web search is unavailable until then."
+// to retry. It is deliberately ACTIONABLE — it names the concrete no-API-key
+// option (self-hosted SearXNG), the env var for a keyed API, and the doc anchor —
+// because the person who reads the relayed message is usually the operator, and a
+// bare "ask the operator to configure a key" leaves them with no idea which
+// service or whether a key is even needed.
+const webSearchNotConfiguredMsg = "Web search is not enabled on this deployment, so no query ran. " +
+	"To enable it, the operator sets mecated's --websearch-url to a JSON search endpoint: the simplest is a " +
+	"self-hosted SearXNG instance (no API key needed); a commercial JSON search API also works, " +
+	"with its key supplied via the WEBSEARCH_API_KEY environment variable. " +
+	"Setup guide: docs/usage.md \"Enabling web search\". Until a backend is set, web search is unavailable — do not retry."
 
 // clampSearchLimit normalises the model-supplied limit: nil/absent or <=0 uses the
 // default; anything above the hard max is clamped down. The result is always in

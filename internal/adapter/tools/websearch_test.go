@@ -184,8 +184,13 @@ func TestWebSearchNotConfigured(t *testing.T) {
 			if res.IsError {
 				t.Fatalf("not-configured should not be an error result: %q", res.Content)
 			}
-			if !strings.Contains(res.Content, "no search provider is configured") {
-				t.Fatalf("expected the honest not-configured message; got %q", res.Content)
+			// Assert the actionable not-configured message: it must name the
+			// no-key option (SearXNG) and the env var, so the relayed message
+			// tells the operator what to do — not just "configure something".
+			for _, want := range []string{"Web search is not enabled", "SearXNG", "WEBSEARCH_API_KEY", "Enabling web search"} {
+				if !strings.Contains(res.Content, want) {
+					t.Fatalf("not-configured message missing %q; got %q", want, res.Content)
+				}
 			}
 		})
 	}

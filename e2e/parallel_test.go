@@ -3,6 +3,7 @@
 package e2e_test
 
 import (
+	"strings"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -45,6 +46,57 @@ func parallelSpecs() {
 			tr := res.ToolResult(calls[0].ID)
 			gomega.Expect(tr).NotTo(gomega.BeNil(), failureReport())
 			gomega.Expect(tr.IsError).To(gomega.BeFalse(), "Parallel tool result errored\n"+failureReport())
+		})
+
+		// Issue #30 — the RUNTIME-DISCOVERABILITY axis. The offline test proves
+		// the 'branch id:' line is IN the Parallel result text and a scripted
+		// InspectSubagent call works; only a REAL model proves the model NOTICES
+		// that line and USES it. The prompt runs a small 2-branch fan-out, then
+		// steers the model to read branch 0's id off the result text and inspect
+		// it. Assertions are STRUCTURAL (live-model nondeterminism): a Parallel run
+		// happened, an InspectSubagent call carrying a 'parallel-'-prefixed id
+		// happened, and that inspect returned a non-error transcript — NOT exact
+		// text. InspectSubagent is a floor-Allow read-only child-observability tool
+		// (no ask round-trip), so no ApproveTools entry is needed for it; Parallel
+		// stays a backup (the CLI config already allows it).
+		ginkgo.It("reads a branch id off the Parallel result and inspects that branch's transcript", ginkgo.SpecTimeout(390*time.Second), func(ctx ginkgo.SpecContext) {
+			res := runScenario(ctx, harness.RunOpts{
+				Scenario:     "parallel-inspect",
+				ApproveTools: []string{"Parallel"}, // backup; the CLI permission config already allows Parallel
+				Timeout:      6 * time.Minute,
+			}, `Do these two steps in order, using no other tools.
+Step 1: Call the tool named "Parallel" — not the Subagent tool — exactly once, with these arguments: tasks = ["Reply with the single word RED. Call no tool.", "Reply with the single word BLUE. Call no tool."] and join = "all".
+Step 2: The Parallel result lists each branch with a line of the form "branch id: parallel-...". Take the branch id shown for branch 0 (the first branch) and call the InspectSubagent tool exactly once with agent_id set to that exact branch id, to read that branch's transcript.
+When InspectSubagent returns, reply with the single word done.`)
+
+			// A real Parallel run must have happened (the precondition for the
+			// branch id to exist in the result text).
+			calls := res.ToolCalls("Parallel")
+			gomega.Expect(calls).NotTo(gomega.BeEmpty(), "no Parallel tool.call observed\n"+failureReport())
+			ptr := res.ToolResult(calls[0].ID)
+			gomega.Expect(ptr).NotTo(gomega.BeNil(), failureReport())
+			gomega.Expect(ptr.IsError).To(gomega.BeFalse(), "Parallel tool result errored\n"+failureReport())
+
+			// The model NOTICED the 'branch id:' line and USED it: an
+			// InspectSubagent call carrying a 'parallel-'-prefixed id (the
+			// branch-id grammar is "parallel-<callID>-<index>").
+			inspects := res.ToolCalls("InspectSubagent")
+			gomega.Expect(inspects).NotTo(gomega.BeEmpty(),
+				"no InspectSubagent tool.call observed (the model did not act on the branch id)\n"+failureReport())
+			inspected := false
+			for _, c := range inspects {
+				if !strings.Contains(c.Args, "parallel-") {
+					continue
+				}
+				// The inspect must have returned that branch's bounded transcript:
+				// a non-error result with content (a forged/unknown id yields an
+				// IsError "not an inspectable child session" result instead).
+				if tr := res.ToolResult(c.ID); tr != nil && !tr.IsError && strings.TrimSpace(tr.Content) != "" {
+					inspected = true
+				}
+			}
+			gomega.Expect(inspected).To(gomega.BeTrue(),
+				"no successful InspectSubagent of a parallel- branch id observed (the branch transcript was not pulled)\n"+failureReport())
 		})
 	})
 }
