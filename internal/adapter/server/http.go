@@ -380,8 +380,18 @@ func (h *HTTPHandler) relayRunSSE(w http.ResponseWriter, r *http.Request, id ses
 	// error (the client is gone) cancel the run but KEEP RANGING, discarding
 	// events until the channel closes: a run that keeps emitting must never
 	// wedge in its own sends behind a dead relay. The failure flag is sticky —
-	// no further write (or the EvPermissionAsk Persist side-effect, which
-	// belongs to the healthy path only) happens after the first error.
+	// no further write happens after the first error.
+	//
+	// The durable event-log Append (cloud-native Phase 3a) is DECOUPLED from the
+	// client write: it runs for EVERY observed event, BEFORE and independent of the
+	// drain-to-discard guard, so a disconnected client never stops the log (the
+	// whole point of a server-side durable log is to survive the client — it must
+	// record the post-disconnect tail, including the terminal EvResult). It uses a
+	// cancel-detached context so a cancelled request ctx (client gone) cannot abort
+	// the durable write. This is DISTINCT from the EvPermissionAsk Persist below,
+	// which is snapshot semantics gated to the healthy path: the log is append-only
+	// history and must record what happened regardless of client liveness.
+	logCtx := context.WithoutCancel(r.Context())
 	enc := json.NewEncoder(w)
 	failed := false
 	fail := func() {
@@ -389,8 +399,15 @@ func (h *HTTPHandler) relayRunSSE(w http.ResponseWriter, r *http.Request, id ses
 		run.Cancel()
 	}
 	for ev := range run.Events() {
+		h.svc.appendEvent(logCtx, id, ev)
 		if failed {
 			continue // drain-to-discard: keep the run unwedged after a dead client
+		}
+		// EvApproval is consumed by the durable log ONLY in 3a — appended above but
+		// NOT relayed to the client wire (client-facing relay of the verdict record
+		// is a later decision). Skip the client write AFTER the Append.
+		if ev.Type == session.EvApproval {
+			continue
 		}
 		// Persist when the run pauses awaiting approval so a restart leaves a
 		// loadable awaiting session a client can re-attach to.
@@ -448,9 +465,14 @@ func (h *HTTPHandler) approve(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		// No streaming: the resumed run is registered and will drive to completion;
 		// fall back to an ack so the verdict is not lost. Drain in the background so
-		// the run never wedges behind an unread buffer.
+		// the run never wedges behind an unread buffer — but STILL append every
+		// event to the durable log (cloud-native Phase 3a): the log records what
+		// happened regardless of whether a client consumes the stream. Use a
+		// cancel-detached context so the request returning does not abort the writes.
+		logCtx := context.WithoutCancel(r.Context())
 		go func() {
-			for range run.Events() { //nolint:revive // drain-to-discard: no consumer for the resumed stream
+			for ev := range run.Events() {
+				h.svc.appendEvent(logCtx, id, ev)
 			}
 			h.svc.deregister(id, run)
 		}()

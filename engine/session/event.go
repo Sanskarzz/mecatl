@@ -47,6 +47,16 @@ const (
 	// wire type field is a string passthrough; PermissionAsk's fields are optional,
 	// so an ask_id-only payload is wire-legal with no proto change).
 	EvPermissionRetract EventType = "permission.retract"
+	// EvApproval is emitted when a permission ask is RESOLVED by a verdict — the
+	// chronological approval record (which tool, which verdict, when) that pairs
+	// with the EvPermissionAsk that preceded it. It is emitted at BOTH verdict
+	// sites: the live-loop path (authorize, after the verdict resolves) and the
+	// resume-from-awaiting path (resolvePendingCall, at entry). It is NOT relayed
+	// to clients in 3a (the durable EventLog at the server relay consumes it, not
+	// the Converse/SSE proto wire); it carries the ApprovalPayload. Its wire
+	// string ("approval") is a passthrough, like EvNoProgress/StopBudget — no
+	// proto enum, no task generate. See ApprovalPayload for the no-leak contract.
+	EvApproval EventType = "approval"
 	// EvHook is emitted when a hook fires (e.g. PreToolUse blocked).
 	EvHook EventType = "hook"
 	// EvCompaction is emitted when a compaction boundary is crossed.
@@ -202,6 +212,69 @@ type HookPayload struct {
 	// address the hook notice to the originating tool card (e.g. mark that exact
 	// tool_call as failed) instead of falling back to a free-standing note.
 	CallID ToolCallID
+}
+
+// ApprovalPayload is the structured detail carried by an EvApproval Event: the
+// resolution of a permission ask. It is the verdict half of the chronological
+// approval record (the EvPermissionAsk it follows is the request half).
+//
+// NO-LEAK CONTRACT (gauntlet #7): it carries the tool NAME, the verdict string,
+// the askID, and the allow-always flag — and NOTHING ELSE. It NEVER carries the
+// raw tool args (those can quote secrets) nor the deny-reason body (which can
+// quote a sensitive command preview). A consumer that needs to correlate a
+// verdict back to a tool call uses the AskID (which encodes the call id) against
+// the conversation history, never an arg payload on this event.
+type ApprovalPayload struct {
+	// AskID is the id of the resolved permission ask (the same id carried on the
+	// EvPermissionAsk that preceded this verdict and on the wire ResumeApproval).
+	AskID string
+	// Verdict is the resolution as a STRING passthrough: VerdictStringAllowOnce,
+	// VerdictStringAllowAlways, or VerdictStringDeny (the EvNoProgress/StopBudget
+	// precedent — no proto enum). It is the human/policy decision, never tool
+	// content.
+	Verdict string
+	// Tool is the NAME of the tool the ask gated (e.g. "Bash"). It is the tool
+	// name ALONE — never the call's args.
+	Tool string
+	// AllowAlways mirrors (Verdict == VerdictStringAllowAlways): the verdict ASKED
+	// the harness to learn a per-session allow rule. It is deliberately NOT named
+	// "Learned": Policy.Learn no-ops on an unlearnable call (compound/substituted
+	// Bash with no targetable pattern), so an allow-always verdict can set this
+	// true even when NO rule was actually recorded. It honestly reflects the
+	// VERDICT, not the policy outcome. A 3b permstore-replay consumer filtering on
+	// this must re-derive the real rule from the conversation (the metadata-only
+	// event never carries enough to reconstruct a pattern), so AllowAlways is a
+	// filter hint, never a durable rule record.
+	AllowAlways bool
+}
+
+// The EvApproval verdict-string passthrough labels. They are the ONE source of
+// truth for the wire-neutral verdict strings (the EvNoProgress/StopBudget
+// precedent: a string passthrough, no proto enum), shared by VerdictString, the
+// emit sites, and any 3b consumer that filters on the verdict — so nobody
+// re-spells the literals.
+const (
+	// VerdictStringDeny is the EvApproval label for a denied call.
+	VerdictStringDeny = "deny"
+	// VerdictStringAllowOnce is the EvApproval label for an allow-once verdict.
+	VerdictStringAllowOnce = "allow_once"
+	// VerdictStringAllowAlways is the EvApproval label for an allow-always verdict.
+	VerdictStringAllowAlways = "allow_always"
+)
+
+// VerdictString maps an ApprovalVerdict to its EvApproval string-passthrough
+// label (VerdictStringDeny / VerdictStringAllowOnce / VerdictStringAllowAlways).
+// It is the SINGLE place the domain enum is projected onto the wire-neutral
+// verdict string, so the EvApproval emit sites cannot drift.
+func VerdictString(v ApprovalVerdict) string {
+	switch v {
+	case VerdictAllowOnce:
+		return VerdictStringAllowOnce
+	case VerdictAllowAlways:
+		return VerdictStringAllowAlways
+	default:
+		return VerdictStringDeny
+	}
 }
 
 // ResultPayload is the terminal payload carried by an EvResult Event.
@@ -604,6 +677,10 @@ type Event struct {
 	// Hook is set on EvHook: the structured phase/tool/decision so clients render
 	// hook notices distinctly (and colour blocked ones) rather than parsing Text.
 	Hook *HookPayload
+	// Approval is set on EvApproval: the resolved verdict (tool name + verdict
+	// string + askID + learned flag). It carries NO raw args and NO deny-reason
+	// body (gauntlet #7); see ApprovalPayload.
+	Approval *ApprovalPayload
 	// Usage is set on usage-bearing events. On EvResult it is the cumulative run
 	// total; turn.end carries its per-turn usage in TurnEnd, NOT here.
 	Usage *Usage

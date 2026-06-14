@@ -2363,6 +2363,104 @@ ledger row 5).
   (`engine/agent/resume_approval_test.go`); live SIGKILL counterpart
   (`e2e/approve_after_kill_test.go`) Skips with an honest harness-gap note.
 
+### Durable event log (cloud-native Phase 3a)
+
+The FOUNDATION: the relayed event stream is durably recorded; nothing consumes it
+yet (a replay consumer is Phase 3b). See `CLOUD-NATIVE.md` (Phase 3, ledger row 11).
+
+- **The seam is a new port, separate from `EventSink`.** `port.EventLog`
+  (`engine/port/eventlog.go`): `Append(ctx, id, ev) error` (best-effort durable) plus
+  `Read(ctx, id) iter.Seq2[session.Event, error]` (lazy/streamable — the
+  `LLMProvider.Stream` idiom, mapping 1:1 onto the 3c server-streaming Read RPC and
+  avoiding a unary size cap on a long log). A MISS yields an EMPTY sequence (absence is
+  data, not an error). It imports `session` + stdlib only, matching
+  `engine/port/store.go`'s discipline. A `Sink` is a synchronous live MIRROR; an
+  `EventLog` is durable storage a later consumer reads back — the two never share a code
+  path.
+- **Persists at the RELAY, not the loop.** The loop is storage-agnostic: it ONLY emits
+  (it never imports `port.EventLog` and never calls `Append`). The persistence happens
+  in `internal/adapter/server/grpc.go` (`Converse`) and `internal/adapter/server/http.go`
+  (`relayRunSSE`), which call `internal/adapter/server/service.go` (`appendEvent`) for
+  EVERY observed event. **The `Append` is DECOUPLED from the client send** (the
+  durability-decoupling decision): it runs at the TOP of the relay loop body, BEFORE and
+  INDEPENDENT of the drain-to-discard guard, so a dead client never stops the log. The
+  log exists to survive the client, so it MUST record the post-disconnect tail — including
+  the terminal `EvResult` — that the (now-failed) client send never sees. This is DISTINCT
+  from the awaiting-ask `Persist`, which stays gated to the healthy path: `Persist` is
+  snapshot semantics (latest-line-wins), the log is append-only history that must reflect
+  what happened regardless of client liveness. The `Append` uses a cancel-detached
+  `context.WithoutCancel(ctx)` so a cancelled stream/request ctx (client gone) cannot abort
+  the durable write. An `Append` failure WARNs via the injected diagnostics and never
+  aborts the run (a broken durable log must not break the live stream). A nil `EventLog`
+  is a no-op, byte-identical to the pre-3a posture. (The HTTP non-Flusher approve fallback
+  drains in the background but ALSO appends, same decoupling.)
+- **Verdicts cross as `EvApproval` (string passthrough, no proto enum).** A new
+  `EvApproval` event type carries `engine/session/event.go` (`ApprovalPayload`):
+  `AskID`, `Verdict` (a STRING — the `session.VerdictStringDeny`/`VerdictStringAllowOnce`/
+  `VerdictStringAllowAlways` consts, the `EvNoProgress`/`StopBudget` precedent, so NO
+  `task generate`), `Tool` (the name only), and `AllowAlways`. The NO-LEAK contract
+  (gauntlet #7): it carries the tool NAME + verdict + askID ONLY — NEVER raw tool args,
+  NEVER the deny-reason body. `session.VerdictString` is the single enum→string projection
+  both emit sites share (and the only place the string literals live). The loop emits it
+  at BOTH verdict sites: `engine/agent/dispatch.go` (`authorize`) (the live-loop path,
+  after the verdict resolves) and `engine/agent/dispatch.go` (`resolvePendingCall`) (the
+  resume-from-awaiting path, at entry). **`AllowAlways`, not `Learned`:** it mirrors
+  `verdict == allow_always` — but it is named for the VERDICT, not the policy outcome,
+  because `Policy.Learn` no-ops on an unlearnable call (compound/substituted Bash with no
+  targetable pattern), so an allow-always verdict sets the flag true even when NO rule was
+  recorded. A 3b permstore-replay consumer filters on it as a HINT and re-derives the real
+  rule from the conversation (the metadata-only event never carries a pattern). In 3a
+  `EvApproval` is consumed by the durable log ONLY: the relay appends it BEFORE `toProto`
+  and then SKIPS the client wire (client-facing relay of the verdict record is a later
+  optional decision).
+- **The log inherits the stream's redaction.** The event stream is ALREADY the
+  redaction boundary (Subagent/Parallel payloads metadata-only, Team previews capped,
+  surfaced child asks clamped). The log is downstream, so it adds no redaction code — it
+  stores whatever crosses the relay, verbatim. The Phase 3a gate's redaction subtest
+  mutation-verifies this (a Subagent child's secret-shaped arg never appears in any
+  logged event body).
+- **The jsonlstore adapter (the local reference).**
+  `internal/adapter/store/jsonlstore/jsonlstore.go` (`Store`) — the ONE instance that
+  already serves `SessionStore` + `ToolCallRecorder` — now also implements `EventLog`
+  over a `.events.jsonl` sidecar PARALLEL to (not subsuming) `.session.jsonl` /
+  `.tools.jsonl`. `Append` writes a per-record format-tagged line
+  `{"v":"eventlog-json/1","ev":<session.Event JSON>}` via the shared `mu`/`appendLine`;
+  `Read` scans ALL lines cumulatively (NOT latest-line-wins like the snapshot read),
+  decodes each, and yields in append order, rejecting an unknown format tag as an infra
+  error (a forward-incompatible log fails loud, not silently skips). `Delete` removes the
+  `.events.jsonl` sidecar too, ordered BEFORE the session file (the session file stays
+  enumerated last, preserving the partial-failure-stays-visible invariant). The composition
+  layer (`internal/app/build.go` (`buildStore`)) wires the jsonlstore `Store` as both
+  `SessionStore` and `EventLog`; the memstore default supplies an in-memory
+  `engine/adapter/memstore/eventlog.go` (`EventLog`) sibling so the seam is never nil
+  offline (and is the mockable seam the gate asserts against); the gRPC-driver path leaves
+  it nil in 3a (the driver `EventLogService` is 3c).
+- **Nothing model-facing.** The log is a client/audit + infra artifact: there is no tool,
+  id, or text the MODEL supplies or reads. The runtime-discoverability axis is N/A.
+- **Gates.** `internal/adapter/server/eventlog_test.go`
+  (`TestEventLogRecordsApprovalVerdict`) drives tool.call → permission.ask →
+  approve(allow_always) → result over the gRPC relay and asserts `EventLog.Read` yields
+  the ordered stream incl. exactly one `EvApproval{allow_always, Write}` positioned after
+  the `permission.ask` and before the `tool.result` (mutation-killed: dropping the
+  `authorize` emit → 0 `EvApproval` → fail); `internal/adapter/server/eventlog_test.go`
+  (`TestEventLogInheritsStreamRedaction`) drives a Subagent delegation whose child carries
+  a secret-shaped arg and asserts no logged event body contains it (mutation-verified
+  non-vacuous). The resume-path twin `internal/adapter/server/eventlog_test.go`
+  (`TestEventLogRecordsResumePathVerdict`) drives the dead-process HTTP `resumeFromAwaiting`
+  rehydrate (the ONLY path reaching `resolvePendingCall`; the gRPC ResumeApproval frame
+  resolves the in-flight run) and asserts the resume verdict lands in the log
+  (mutation-killed: dropping the `resolvePendingCall` emit → 0 resume-path `EvApproval`).
+  The durability-decoupling gate `internal/adapter/server/eventlog_test.go`
+  (`TestEventLogSurvivesClientDisconnect`) cancels a gRPC client mid-run (a blocked tool
+  holds the run mid-flight) and asserts the terminal `EvResult` still lands in the log
+  (mutation-killed: moving the `Append` after the drain-to-discard `continue` → the
+  post-disconnect tail vanishes). Adapter-level:
+  `internal/adapter/store/jsonlstore/jsonlstore_test.go`
+  (`TestEventLogAppendReadCumulative`, `TestEventLogReadEarlyBreakReleasesHandle`,
+  `TestEventLogReadMalformedRecordPaths`, `TestEventLogConcurrentAppend` under `-race`) and
+  `engine/adapter/memstore/memstore_test.go` (`TestEventLogAppendRead`,
+  `TestEventLogReadEarlyBreak`).
+
 ## Proto — `contracts/proto/mecatl/v1/` (multi-provider Phase 0 S3 wire surface)
 
 `CreateSessionRequest` carries an OPTIONAL `provider_id`(4)+`model_id`(5) selector (two distinct

@@ -805,7 +805,7 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		commandConnClose = connClose
 	}
 
-	store, storeClose, err := buildStore(cfg)
+	store, eventLog, storeClose, err := buildStore(cfg)
 	if err != nil {
 		commandConnClose()
 		return nil, err
@@ -930,6 +930,13 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// bound (each rule still requires a human allow-always approval). TTL/idle
 		// eviction remains a follow-up; see docs/adr/0001-acp-adapter.md.
 		OnCloseSession: learned.Forget,
+		// Durable event log (cloud-native Phase 3a): the relay Appends every
+		// healthy-path event here. The jsonlstore Store doubles as the EventLog;
+		// the memstore path supplies an in-memory sibling; the gRPC-driver path
+		// leaves it nil (3c). Diagnostics is the same sink the rest of the build
+		// uses, for the best-effort Append-failure WARN.
+		EventLog:    eventLog,
+		Diagnostics: cfg.diag(),
 	}
 	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, agentReg, assets.skillReadRoots, assets.skillIndex, assets)
 
@@ -1290,31 +1297,40 @@ func buildProvider(cfg Config) (*providerRegistry, port.LLMProvider, error) {
 	return reg, entry.provider, nil
 }
 
-// buildStore constructs the SessionStore: a gRPC driver client when
-// SessionStoreURL is set (validateDriverConfig has already rejected the
-// URL+dir combination), a JSONL replay store under StoreDir, or the in-memory
-// store when both are empty. The returned close func releases the driver
-// connection (a no-op for the local stores) and chains into Build's closeAll;
-// it is always non-nil on success.
-func buildStore(cfg Config) (port.SessionStore, func(), error) {
+// buildStore constructs the SessionStore plus its durable EventLog (cloud-native
+// Phase 3a): a gRPC driver client when SessionStoreURL is set
+// (validateDriverConfig has already rejected the URL+dir combination), a JSONL
+// replay store under StoreDir, or the in-memory store when both are empty. The
+// returned close func releases the driver connection (a no-op for the local
+// stores) and chains into Build's closeAll; it is always non-nil on success.
+//
+// The EventLog is the SAME jsonlstore Store instance for the on-disk path (one
+// Store serves SessionStore + ToolCallRecorder + EventLog over a shared mu/dir).
+// The memstore path returns a fresh in-memory EventLog sibling so the seam is
+// never nil offline. The gRPC-driver path leaves EventLog nil in 3a (the driver
+// EventLogService is a 3c concern); the relay then records nothing — a clean
+// no-op until the driver lands.
+func buildStore(cfg Config) (port.SessionStore, port.EventLog, func(), error) {
 	if cfg.SessionStoreURL != "" {
 		conn, closeFn, err := cfg.drivers().dial(cfg, cfg.SessionStoreURL)
 		if err != nil {
-			return nil, nil, fmt.Errorf("dial session-store driver %q: %w", cfg.SessionStoreURL, err)
+			return nil, nil, nil, fmt.Errorf("dial session-store driver %q: %w", cfg.SessionStoreURL, err)
 		}
 		cfg.diag().Log(context.Background(), port.LevelInfo, "session store: grpc driver", "target", cfg.SessionStoreURL)
-		return grpcdriver.NewSessionStore(conn), closeFn, nil
+		// EventLog over the driver is 3c; nil here = the relay records nothing.
+		return grpcdriver.NewSessionStore(conn), nil, closeFn, nil
 	}
 	if cfg.StoreDir == "" {
 		cfg.diag().Log(context.Background(), port.LevelInfo, "session store: in-memory")
-		return memstore.New(), func() {}, nil
+		return memstore.New(), memstore.NewEventLog(), func() {}, nil
 	}
 	st, err := jsonlstore.New(cfg.StoreDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open jsonl store %q: %w", cfg.StoreDir, err)
+		return nil, nil, nil, fmt.Errorf("open jsonl store %q: %w", cfg.StoreDir, err)
 	}
 	cfg.diag().Log(context.Background(), port.LevelInfo, "session store: jsonl", "dir", cfg.StoreDir)
-	return st, func() {}, nil
+	// The one Store also implements port.EventLog — wire it as both.
+	return st, st, func() {}, nil
 }
 
 // buildEngine assembles the parent agent.Engine: the core tool catalog (plus an

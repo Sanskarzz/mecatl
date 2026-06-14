@@ -315,6 +315,22 @@ type Config struct {
 	// permstore.Memory.Forget so they do not outlive the session. Optional and
 	// nil-safe.
 	OnCloseSession func(session.SessionID)
+
+	// EventLog durably records the relayed event stream per session (cloud-native
+	// Phase 3a). The gRPC/HTTP relay loops Append every HEALTHY-PATH event to it,
+	// beside the existing awaiting-ask Persist; the loop itself stays
+	// storage-agnostic (it only emits). Optional and nil-safe: when nil the relay
+	// records nothing (byte-identical to the pre-3a behaviour). The composition
+	// root wires the durable jsonlstore Store (which also implements EventLog) or
+	// an in-memory sibling when no store dir is configured.
+	EventLog port.EventLog
+
+	// Diagnostics is the operational logging sink the relay uses to WARN on an
+	// EventLog.Append failure (a best-effort durable log must not break the live
+	// stream). Optional and nil-safe: when nil, Append failures are silently
+	// tolerated (the durability gap is the only effect). The composition root
+	// supplies the same sink the rest of the build uses.
+	Diagnostics port.Diagnostics
 }
 
 // defaultMaxTeams is the live-team registry cap applied when Config.MaxTeams is
@@ -507,6 +523,9 @@ func NewService(cfg Config) (*Service, error) {
 	}
 	if cfg.MaxSessionEngines <= 0 {
 		cfg.MaxSessionEngines = defaultMaxSessionEngines
+	}
+	if cfg.Diagnostics == nil {
+		cfg.Diagnostics = port.NopDiagnostics{}
 	}
 	svc := &Service{
 		cfg:               cfg,
@@ -1542,6 +1561,23 @@ func (s *Service) Persist(ctx context.Context, id session.SessionID) {
 		// stream. The run continues from in-memory state; only resume-across-
 		// restart is affected.
 		_ = err
+	}
+}
+
+// appendEvent durably records one relayed event to the configured EventLog
+// (cloud-native Phase 3a). It is called by the gRPC/HTTP relay loops for every
+// HEALTHY-PATH event, beside the existing awaiting-ask Persist; it is NOT called
+// on the drain-to-discard path after a dead client (the relays gate it the same
+// way they gate Persist). A nil EventLog is a no-op (byte-identical to pre-3a).
+// An Append failure is best-effort: it WARNs and never aborts the run (a broken
+// durable log must not break the live stream).
+func (s *Service) appendEvent(ctx context.Context, id session.SessionID, ev session.Event) {
+	if s.cfg.EventLog == nil {
+		return
+	}
+	if err := s.cfg.EventLog.Append(ctx, id, ev); err != nil {
+		s.cfg.Diagnostics.Log(ctx, port.LevelWarn, "event log append failed",
+			"session", string(id), "event", string(ev.Type), "err", err.Error())
 	}
 }
 

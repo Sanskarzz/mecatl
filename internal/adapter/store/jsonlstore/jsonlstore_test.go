@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -283,8 +285,8 @@ func TestListSkipsUndecodableFiles(t *testing.T) {
 }
 
 // TestDeleteRemovesBothFilesIdempotently pins that Delete removes the session
-// snapshot AND the tool-call log, and that a second Delete (or a Delete of a
-// never-saved id) succeeds.
+// snapshot, the tool-call log, AND the event log, and that a second Delete (or a
+// Delete of a never-saved id) succeeds.
 func TestDeleteRemovesBothFilesIdempotently(t *testing.T) {
 	ctx := context.Background()
 	st, dir := newStore(t)
@@ -294,7 +296,10 @@ func TestDeleteRemovesBothFilesIdempotently(t *testing.T) {
 	}
 	st.ToolCall(s.ID, session.NewToolCall("c9", "Read", json.RawMessage(`{"p":"x"}`)),
 		session.NewToolResult("c9", "ok"), time.Millisecond, time.Millisecond)
-	for _, suffix := range []string{".session.jsonl", ".tools.jsonl"} {
+	if err := st.Append(ctx, s.ID, session.Event{Type: session.EvResult}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	for _, suffix := range []string{".session.jsonl", ".tools.jsonl", ".events.jsonl"} {
 		if _, err := os.Stat(filepath.Join(dir, "sess-1"+suffix)); err != nil {
 			t.Fatalf("precondition: %s missing: %v", suffix, err)
 		}
@@ -302,7 +307,7 @@ func TestDeleteRemovesBothFilesIdempotently(t *testing.T) {
 	if err := st.Delete(ctx, s.ID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	for _, suffix := range []string{".session.jsonl", ".tools.jsonl"} {
+	for _, suffix := range []string{".session.jsonl", ".tools.jsonl", ".events.jsonl"} {
 		if _, err := os.Stat(filepath.Join(dir, "sess-1"+suffix)); !os.IsNotExist(err) {
 			t.Errorf("%s still present after Delete (stat err %v)", suffix, err)
 		}
@@ -363,5 +368,218 @@ func TestDeletePartialFailureLeavesSessionVisible(t *testing.T) {
 	}
 	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
 		t.Errorf("session file still present after the retry (stat err %v)", err)
+	}
+}
+
+// TestEventLogAppendReadCumulative pins the jsonlstore EventLog: Append records
+// each event as a format-tagged line and Read yields ALL of them in append order
+// (cumulative — not latest-line-wins like the snapshot read).
+func TestEventLogAppendReadCumulative(t *testing.T) {
+	ctx := context.Background()
+	st, dir := newStore(t)
+	want := []session.Event{
+		{Type: session.EvToolCall, Seq: 1, ToolCall: &session.ToolCall{ID: "c1", Name: "Read"}},
+		{Type: session.EvPermissionAsk, Seq: 2, Ask: &session.PendingAsk{AskID: "a1", Tool: "Bash"}},
+		{Type: session.EvApproval, Seq: 3, Approval: &session.ApprovalPayload{AskID: "a1", Verdict: session.VerdictStringAllowAlways, Tool: "Bash", AllowAlways: true}},
+		{Type: session.EvResult, Seq: 4, Result: &session.ResultPayload{Stop: session.StopEndTurn}},
+	}
+	for _, ev := range want {
+		if err := st.Append(ctx, "sess-1", ev); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	// The on-disk line carries the format tag.
+	raw, err := os.ReadFile(filepath.Join(dir, "sess-1.events.jsonl"))
+	if err != nil {
+		t.Fatalf("read events file: %v", err)
+	}
+	if !strings.Contains(string(raw), `"v":"eventlog-json/1"`) {
+		t.Fatalf("events file missing the format tag: %s", raw)
+	}
+
+	var got []session.Event
+	for ev, err := range st.Read(ctx, "sess-1") {
+		if err != nil {
+			t.Fatalf("Read item error: %v", err)
+		}
+		got = append(got, ev)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Read returned %d events, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Type != want[i].Type || got[i].Seq != want[i].Seq {
+			t.Errorf("event %d = (%s,%d), want (%s,%d)", i, got[i].Type, got[i].Seq, want[i].Type, want[i].Seq)
+		}
+	}
+	if got[2].Approval == nil || got[2].Approval.Verdict != session.VerdictStringAllowAlways || !got[2].Approval.AllowAlways {
+		t.Errorf("approval payload not round-tripped: %+v", got[2].Approval)
+	}
+}
+
+// TestEventLogReadMissIsEmpty pins that Read of a session with no event log
+// yields an EMPTY sequence (absence is data, not an error).
+func TestEventLogReadMissIsEmpty(t *testing.T) {
+	st, _ := newStore(t)
+	n := 0
+	for _, err := range st.Read(context.Background(), "never-appended") {
+		if err != nil {
+			t.Fatalf("miss should not error: %v", err)
+		}
+		n++
+	}
+	if n != 0 {
+		t.Fatalf("Read of a missing log yielded %d events, want 0", n)
+	}
+}
+
+// TestEventLogReadRejectsUnknownFormat pins that an unknown format tag is yielded
+// as an infra error (a forward-incompatible log must fail loud, not skip).
+func TestEventLogReadRejectsUnknownFormat(t *testing.T) {
+	st, dir := newStore(t)
+	// One good line, then a line with a future format tag.
+	if err := st.Append(context.Background(), "sess-1", session.Event{Type: session.EvResult}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "sess-1.events.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open events file: %v", err)
+	}
+	if _, err := f.WriteString(`{"v":"eventlog-json/999","ev":{"Type":"result"}}` + "\n"); err != nil {
+		t.Fatalf("write bad line: %v", err)
+	}
+	_ = f.Close()
+
+	var sawErr bool
+	var n int
+	for _, err := range st.Read(context.Background(), "sess-1") {
+		if err != nil {
+			sawErr = true
+			break
+		}
+		n++
+	}
+	if n != 1 {
+		t.Fatalf("expected one good event before the bad line, got %d", n)
+	}
+	if !sawErr {
+		t.Fatalf("unknown format tag must surface as an error")
+	}
+}
+
+// TestEventLogReadEarlyBreakReleasesHandle pins the iter.Seq2 contract: a Read
+// that breaks after the first event returns cleanly (the deferred Close fires when
+// the range body returns false), and a subsequent Append + full Read still works —
+// proving no file handle lingered to wedge the next open.
+func TestEventLogReadEarlyBreakReleasesHandle(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newStore(t)
+	for i := 0; i < 5; i++ {
+		if err := st.Append(ctx, "sess-1", session.Event{Type: session.EvMessageDelta, Seq: int64(i)}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	// Break after the FIRST event.
+	got := 0
+	for range st.Read(ctx, "sess-1") {
+		got++
+		break
+	}
+	if got != 1 {
+		t.Fatalf("early-break yielded %d events, want 1", got)
+	}
+	// The store still works: append once more and read ALL six cumulatively.
+	if err := st.Append(ctx, "sess-1", session.Event{Type: session.EvResult, Seq: 5}); err != nil {
+		t.Fatalf("Append after early-break: %v", err)
+	}
+	total := 0
+	for _, err := range st.Read(ctx, "sess-1") {
+		if err != nil {
+			t.Fatalf("Read after early-break: %v", err)
+		}
+		total++
+	}
+	if total != 6 {
+		t.Fatalf("Read after early-break returned %d events, want 6 (no lingering handle / truncation)", total)
+	}
+}
+
+// TestEventLogReadMalformedRecordPaths pins the two undecodable-record error paths:
+// a malformed ENVELOPE line (not JSON at all) and a malformed INNER event (valid
+// envelope, junk "ev"). Both yield (zero, err) and stop after the preceding good
+// events.
+func TestEventLogReadMalformedRecordPaths(t *testing.T) {
+	cases := []struct {
+		name    string
+		badLine string
+	}{
+		{"malformed envelope", `{not json`},
+		{"malformed inner event", `{"v":"eventlog-json/1","ev":not-json}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st, dir := newStore(t)
+			if err := st.Append(context.Background(), "sess-1", session.Event{Type: session.EvToolCall}); err != nil {
+				t.Fatalf("Append: %v", err)
+			}
+			f, err := os.OpenFile(filepath.Join(dir, "sess-1.events.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				t.Fatalf("open events file: %v", err)
+			}
+			if _, err := f.WriteString(tc.badLine + "\n"); err != nil {
+				t.Fatalf("write bad line: %v", err)
+			}
+			_ = f.Close()
+
+			good, sawErr := 0, false
+			for _, err := range st.Read(context.Background(), "sess-1") {
+				if err != nil {
+					sawErr = true
+					break
+				}
+				good++
+			}
+			if good != 1 {
+				t.Fatalf("expected 1 good event before the bad line, got %d", good)
+			}
+			if !sawErr {
+				t.Fatalf("a %s must surface as an error", tc.name)
+			}
+		})
+	}
+}
+
+// TestEventLogConcurrentAppend pins that the shared mu serializes concurrent Appends
+// across goroutines (run under -race): N goroutines append M events each; a final
+// Read sees exactly N*M well-formed records (no interleaved/torn line). It shares the
+// store's one mutex with Save/ToolCall, so this also guards the cross-file lock.
+func TestEventLogConcurrentAppend(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newStore(t)
+	const goroutines, perG = 8, 25
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < perG; i++ {
+				if err := st.Append(ctx, "sess-1", session.Event{Type: session.EvMessageDelta, Seq: int64(g*perG + i)}); err != nil {
+					t.Errorf("Append: %v", err)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	count := 0
+	for _, err := range st.Read(ctx, "sess-1") {
+		if err != nil {
+			t.Fatalf("Read after concurrent append: %v (a torn line means the mutex did not serialize)", err)
+		}
+		count++
+	}
+	if count != goroutines*perG {
+		t.Fatalf("Read returned %d events, want %d (lost or torn appends)", count, goroutines*perG)
 	}
 }

@@ -52,13 +52,14 @@ The harness is unusually close by construction:
   verified e2e across two Builds over a shared store. Details in
   `IMPLEMENTATION-NOTES.md` ("Session profiles").
 
-What is NOT yet true: the event stream is emitted and discarded; compaction
-destructively rewrites the only durable record; and two processes over one store
-have no writer exclusion. (The per-session facts, namely the provider selector,
-token usage, and profile, ARE now in the snapshot as of Phase 1; and a process
-death while a run is awaiting approval no longer strands the session as of Phase 2,
-which re-enters the loop AT the ask. See the ledger.) Those gaps are exactly the
-phases below.
+What is NOT yet true: compaction destructively rewrites the only durable record;
+and two processes over one store have no writer exclusion. (The per-session facts,
+namely the provider selector, token usage, and profile, ARE now in the snapshot as
+of Phase 1; a process death while a run is awaiting approval no longer strands the
+session as of Phase 2, which re-enters the loop AT the ask; and the event stream is
+now durably recorded at the relay as of Phase 3a, the durable-log FOUNDATION,
+including the chronological approval record via `EvApproval`. See the ledger.) Those
+gaps are exactly the phases below.
 
 ## Phase plan
 
@@ -241,11 +242,21 @@ showed none is needed).
 The kit inventory's §1.1 to §1.3 taken incrementally, NOT full CQRS. The snapshot
 stays the replay projection; the log is additive.
 
-- **3a:** an append-only per-session event log behind a new port (EventLog/Outbox),
-  local JSONL adapter first (the jsonlstore precedent), wired at the server relay:
-  the stream the harness already emits, persisted instead of discarded. Include
-  permission asks AND verdicts (the chronological approval record neither mecatl nor
-  Claude Code has today).
+- **3a (SHIPPED):** an append-only per-session event log behind a new port
+  (`port.EventLog`, `engine/port/eventlog.go`: `Append` + a streamable
+  `Read` returning `iter.Seq2[session.Event, error]`), local JSONL adapter first
+  (the jsonlstore precedent: the one `internal/adapter/store/jsonlstore/jsonlstore.go`
+  (`Store`) now also implements it, with a `.events.jsonl` sidecar and a per-record
+  `eventlog-json/1` format tag), wired at the server relay
+  (`internal/adapter/server/grpc.go`, `internal/adapter/server/http.go`): the stream
+  the harness already emits, persisted instead of discarded. The chronological
+  approval record neither mecatl nor Claude Code had is now captured as `EvApproval`
+  (`engine/session/event.go` (`ApprovalPayload`), tool name + verdict string + askID,
+  no raw args), emitted by the loop at both verdict sites
+  (`engine/agent/dispatch.go` (`authorize`) and `engine/agent/dispatch.go`
+  (`resolvePendingCall`)) and recorded by the relay. The loop stays storage-agnostic
+  (it only emits; it never imports `port.EventLog`). 3a is the FOUNDATION: the log
+  records the stream; nothing consumes it yet (that is 3b).
 - **3b:** durability consumers: permstore allow-always rules recoverable from
   verdict events (kills the Phase 2 wart); compaction archives the replaced span to
   the log before `ReplaceHistory` (the durable record stops being lossy; "what did
@@ -260,6 +271,19 @@ Gate: a session with one compaction and three verdicts can be fully reconstructe
 or a test client can render it. Mutation-verify the no-leak guards (the log must
 respect the same redaction the event stream already enforces, gauntlet #7
 discipline).
+
+**Phase 3a re-audit (List 1 / List 2).** Phase 3a added ONE new outlives-a-call
+durable artifact (List 1): the `.events.jsonl` event log, which joins row 8's
+jsonlstore file set (it is the SAME `Store` instance, opened per-call with
+`O_APPEND` and closed immediately (no new held handle, no new goroutine, no new
+cache or breaker). The in-process additions (`Service.EventLog`/`Service.appendEvent`
+and the loop's two `EvApproval` emits) are run-scoped: the emits ride the existing
+`Run.Events()` channel (already a row) and the relay's `Append` rides the existing
+relay loop (no new resource). `Service.resumeMu` (named in the Phase 2 re-audit) is a
+transient per-session decision LOCK, not an inventory row, and is unchanged here. The
+re-audit verdict is CLEAN: no new resource whose lifecycle escapes the relay loop. The
+gate's redaction subtest mutation-verifies the no-leak inheritance (the log stores
+already-redacted events; it adds no redaction of its own).
 
 ### Phase 4: multi-replica readiness (defer until a real deployment wants it)
 
@@ -301,7 +325,7 @@ durable artifact survives and is reloaded), or **lost** (gone, possibly leaking)
 | 5 | User-model store (same adapter, XDG dir) | `buildUserModelStore` | process handle, per-user data | as above | persisted | `internal/app/build.go:1337` (dir derivation `1328-1335`) |
 | 6 | permstore learned allow-always rules | `app.Build` | session (data), process (store) | `Forget(sessionID)` via `OnCloseSession` (`service.go:748`); capped at 256/session | **lost** (in-memory by design; restart re-asks) | `engine/adapter/permstore/permstore.go:42,48` |
 | 7 | Skill read-roots + driver asset cache (temp dir) | the skills seam in `buildCatalog` | process (build-scoped) | `os.RemoveAll` in the seam close, folded into Build's `closeAll` | reconstructible (fresh temp dir next Build; driver assets re-materialize lazily on first activation) | `internal/app/build.go:2228` (`MkdirTemp`) |
-| 8 | jsonlstore session files + `.tools.jsonl` audit | jsonlstore | per-session files | none needed: files opened per call (`O_APPEND`), closed immediately, never held | persisted (`Load` reads the latest snapshot line) | `internal/adapter/store/jsonlstore/jsonlstore.go:264-265` |
+| 8 | jsonlstore session files + `.tools.jsonl` audit + `.events.jsonl` event log (Phase 3a) | jsonlstore | per-session files | none needed: files opened per call (`O_APPEND`), closed immediately, never held; `Delete` removes all three (sidecars first, session file last) | persisted (`Load` reads the latest snapshot line; `EventLog.Read` scans all event lines cumulatively) | `internal/adapter/store/jsonlstore/jsonlstore.go` (`appendLine`) |
 | 9 | Live-run registry (`Service.runs`) | `server.Service` | run | `deregister` after the wire adapter drains `run.Events()` | lost (the run dies with the process; the session snapshot persists) | `internal/adapter/server/service.go:368` |
 | 10 | Team registry (`Service.teams`) | `server.Service` | team | removed at team terminal | **lost** (see ledger row 10: the whole coordination state) | `internal/adapter/server/service.go:369` |
 | 11 | Per-session engine registry (`Service.sessionEngines`) | `server.Service` | session | evicted + closed at `CloseSession` (`service.go:750-758`) and shutdown | lost; rehydrated ONLY for the no-fs profile (`rehydrateNoFSSession`, `service.go:1084`); selector/client-MCP sessions degrade to the default engine | `internal/adapter/server/service.go:379` |
@@ -374,7 +398,7 @@ what is persisted), **reset-by-design** (documented, acceptable),
 | 8 | Edit read-ledger | in-memory per-`osfs.Workspace` map of sha256 fingerprints (`internal/adapter/osfs/osfs.go:428,714,729`) | the factory builds a fresh Workspace with an empty ledger; the first Edit after restart is REFUSED ("not read this session") until the model re-Reads. Fail-safe, never silently wrong; costs one extra Read per touched file. N/A for no-fs sessions | reset-by-design now; becomes a snapshot candidate if the re-Read tax proves annoying (Phase-1-adjacent, FS sessions only; the kit inventory's §2.4 explicit-token shape is the eventual answer) | deferred |
 | 9 | Pre-compaction history | nowhere: `maybeCompact` rewrites the conversation via `ReplaceHistory` and that is what the next Save persists | the durable record is already lossy BEFORE any restart; compaction itself is stateless given the (compacted) history, so restart adds no new loss | fix-via-event-log (archive the replaced span before `ReplaceHistory`) | 3b |
 | 10 | Mid-round team state | the `team.Team` aggregate (roster, goal, tasks, mailbox, findings; `engine/team/team.go:179`) and `Supervisor.members` runtime (`engine/agent/teamsupervisor.go:298`) are in-memory only; `Service.teams` (`service.go:369`) likewise. ONLY member sessions persist (`persistMember`, `teamsupervisor.go:1187`, under `MemberSessionID`, `teamsupervisor.go:1509`) | a mid-round team is unrecoverable: member transcripts survive as orphan sessions, the coordination state (who was assigned what, the findings ledger, the round number, the goal) is gone; there is no resume-team seam | reset-by-design for v1 (teams are run-scoped work units); the event log is the prerequisite for anything better, and re-creating the team from scratch is the documented recovery | 3 (prereq), honest note now |
-| 11 | The event stream | `Run.events`, a buffered channel (cap 64, `engine/agent/loop.go:575`), relayed by gRPC `Converse` / HTTP SSE and then discarded | gone; a reconnecting client sees only the replay history, never the rich timeline (live reasoning, ask/verdict pairs, delegation lifecycle) | fix-via-event-log (persist at the server relay) | 3a |
+| 11 | The event stream | `Run.events`, a buffered channel (cap 64, `engine/agent/loop.go:575`), relayed by gRPC `Converse` / HTTP SSE | **SHIPPED (Phase 3a)**: the relay now `Append`s EVERY observed event to `port.EventLog` (`internal/adapter/server/service.go` (`appendEvent`)), DECOUPLED from the client send (it runs even on the drain-to-discard path after a dead client, so the post-disconnect tail incl. the terminal `EvResult` is recorded (the log survives the client; this is UNLIKE the healthy-path-only awaiting-ask Persist), before `toProto`; the verdict half is captured as `EvApproval` (`engine/session/event.go` (`ApprovalPayload`)) emitted by the loop at both verdict sites. The live channel is still run-scoped (dies with the run), but the rich timeline (reasoning, ask/verdict pairs, delegation lifecycle) is now durably recorded and replayable via `EventLog.Read` | fix-via-event-log: persisted at the server relay (the loop stays storage-agnostic) | 3a (SHIPPED); a CONSUMER that replays it is 3b |
 | 12 | Per-session client MCP mounts | session-supplied specs, never persisted; the manager is row 2 of the inventory | lost; the owning client re-mounts via `LoadSessionWithMCP` (`service.go:968`) | reset-by-design, client-owned (the client holds the specs; the server cannot reconstruct credentials it never stored) | n/a |
 | 13 | The in-flight turn (LLM stream) | nowhere; no mid-stream checkpoint exists | a turn cut by process death is lost and replayed from the last turn boundary; this is the stateless-replay thesis working as designed | reset-by-design (turn-boundary granularity is the contract; Phase 2 adds the one finer-grained cursor that matters, the ask) | n/a |
 | 14 | Run plumbing (diagnostics binding, askID serial, ctx) | minted fresh per `Run` | rebuilt trivially | derive | n/a |

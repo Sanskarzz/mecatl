@@ -126,3 +126,75 @@ func TestWithNowStampsDeterministicModifiedAt(t *testing.T) {
 		t.Errorf("b.ModifiedAt = %v, want the fake clock's %v", got["clock-b"], want)
 	}
 }
+
+// TestEventLogAppendRead pins the in-memory EventLog: Append records each event
+// and Read replays them in append order; a miss yields an empty sequence.
+func TestEventLogAppendRead(t *testing.T) {
+	ctx := context.Background()
+	log := memstore.NewEventLog()
+
+	// Miss → empty.
+	n := 0
+	for range log.Read(ctx, "ghost") {
+		n++
+	}
+	if n != 0 {
+		t.Fatalf("miss yielded %d events, want 0", n)
+	}
+
+	want := []session.EventType{session.EvToolCall, session.EvPermissionAsk, session.EvApproval, session.EvResult}
+	for i, ty := range want {
+		if err := log.Append(ctx, "s1", session.Event{Type: ty, Seq: int64(i)}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	var got []session.EventType
+	for ev, err := range log.Read(ctx, "s1") {
+		if err != nil {
+			t.Fatalf("Read item error: %v", err)
+		}
+		got = append(got, ev.Type)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Read order = %v, want %v", got, want)
+	}
+	// A different id is isolated.
+	m := 0
+	for range log.Read(ctx, "s2") {
+		m++
+	}
+	if m != 0 {
+		t.Fatalf("isolated id yielded %d events, want 0", m)
+	}
+}
+
+// TestEventLogReadEarlyBreak pins the iter.Seq2 contract for the in-memory log: a
+// Read that breaks after the first event returns cleanly, and a subsequent Append +
+// full Read still works (the snapshot copy means the early break never corrupts state).
+func TestEventLogReadEarlyBreak(t *testing.T) {
+	ctx := context.Background()
+	log := memstore.NewEventLog()
+	for i := 0; i < 4; i++ {
+		if err := log.Append(ctx, "s1", session.Event{Type: session.EvMessageDelta, Seq: int64(i)}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	got := 0
+	for range log.Read(ctx, "s1") {
+		got++
+		break
+	}
+	if got != 1 {
+		t.Fatalf("early-break yielded %d events, want 1", got)
+	}
+	if err := log.Append(ctx, "s1", session.Event{Type: session.EvResult, Seq: 4}); err != nil {
+		t.Fatalf("Append after early-break: %v", err)
+	}
+	total := 0
+	for range log.Read(ctx, "s1") {
+		total++
+	}
+	if total != 5 {
+		t.Fatalf("Read after early-break returned %d events, want 5", total)
+	}
+}

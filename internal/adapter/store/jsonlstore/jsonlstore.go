@@ -1,14 +1,22 @@
-// Package jsonlstore implements an append-only, JSONL-backed port.SessionStore
-// and port.ToolCallRecorder (the tool-call audit seam). It is the
-// observability/replay seam: every Save appends a session snapshot as one JSON
-// line to a per-session file, and every ToolCall appends a structured tool-call
-// record to a per-session log. Nothing is ever overwritten, so the files form a
-// replayable audit trail; Load reads the most recent snapshot line.
+// Package jsonlstore implements an append-only, JSONL-backed port.SessionStore,
+// port.ToolCallRecorder (the tool-call audit seam), and port.EventLog (the
+// durable run-event timeline). It is the observability/replay seam: every Save
+// appends a session snapshot as one JSON line to a per-session file, every
+// ToolCall appends a structured tool-call record to a per-session log, and every
+// Append records one relayed event to a per-session event log. Nothing is ever
+// overwritten, so the files form a replayable audit trail; Load reads the most
+// recent snapshot line, while EventLog.Read scans ALL event lines cumulatively.
 //
 // Layout under the configured dir:
 //
 //	<dir>/<id>.session.jsonl   — one snapshot per Save (latest line wins)
 //	<dir>/<id>.tools.jsonl     — one record per ToolCallRecorder.ToolCall
+//	<dir>/<id>.events.jsonl    — one record per EventLog.Append (cumulative)
+//
+// The .events.jsonl log is PARALLEL to (not a superset of) .tools.jsonl: the
+// tool log is the structured per-tool AUDIT seam (args, queue/exec timing), the
+// event log is the relayed STREAM (reasoning, ask/verdict pairs, delegation
+// lifecycle) the server otherwise discards. Neither subsumes the other.
 //
 // Session ids are sanitized for use as filenames so an id can never escape dir.
 package jsonlstore
@@ -18,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,11 +50,12 @@ type Store struct {
 }
 
 // compile-time assertions that Store satisfies both ports plus the optional
-// retention seam.
+// retention seam and the durable event log.
 var (
 	_ port.SessionStore     = (*Store)(nil)
 	_ port.ToolCallRecorder = (*Store)(nil)
 	_ port.PrunableStore    = (*Store)(nil)
+	_ port.EventLog         = (*Store)(nil)
 )
 
 // New constructs a Store writing under dir, creating dir if needed.
@@ -106,7 +116,22 @@ func (st *Store) Load(_ context.Context, id session.SessionID) (*session.Session
 const (
 	sessionFileSuffix = ".session.jsonl"
 	toolsFileSuffix   = ".tools.jsonl"
+	eventsFileSuffix  = ".events.jsonl"
 )
+
+// eventLogFormat is the per-record format tag written on every event-log line.
+// It versions the on-disk encoding so the language-neutral driver wire (3c) and
+// any future format change can be distinguished; Read rejects an unknown tag as
+// an infra error (a forward-incompatible log must fail loud, not silently skip).
+const eventLogFormat = "eventlog-json/1"
+
+// eventLogRecord is one .events.jsonl line: a format tag plus the verbatim
+// session.Event JSON. The event is stored as already-redacted JSON (the relay is
+// the redaction boundary); the tag lets Read validate the encoding version.
+type eventLogRecord struct {
+	V  string          `json:"v"`
+	Ev json.RawMessage `json:"ev"`
+}
 
 // List returns every stored session's id and last-modified time (the session
 // file's mtime). It satisfies the optional port.PrunableStore retention seam.
@@ -155,17 +180,17 @@ func (st *Store) List(_ context.Context) ([]port.StoredSession, error) {
 // idempotent: a missing file is success (port.PrunableStore contract), so
 // concurrent List/Delete races are tolerated by construction.
 //
-// REMOVAL ORDER is load-bearing: the tools sidecar goes FIRST and the session
-// file LAST, because the session file is what List enumerates. A partial
-// failure then leaves the pair still VISIBLE (the session file survives, so
-// the next retention sweep retries the whole Delete); the reverse order would
-// leave an INVISIBLE orphaned .tools.jsonl that no future sweep can ever find
-// (List ignores sidecars without a session file — a pre-existing orphan is
-// accepted as unreachable; this ordering prevents us from ever creating one).
+// REMOVAL ORDER is load-bearing: the sidecars (tools, then events) go FIRST and
+// the session file LAST, because the session file is what List enumerates. A
+// partial failure then leaves the set still VISIBLE (the session file survives,
+// so the next retention sweep retries the whole Delete); the reverse order would
+// leave an INVISIBLE orphaned sidecar that no future sweep can ever find (List
+// ignores sidecars without a session file — a pre-existing orphan is accepted as
+// unreachable; this ordering prevents us from ever creating one).
 func (st *Store) Delete(_ context.Context, id session.SessionID) error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	for _, path := range []string{st.toolsPath(id), st.sessionPath(id)} {
+	for _, path := range []string{st.toolsPath(id), st.eventsPath(id), st.sessionPath(id)} {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("jsonlstore: delete %q: %w", id, err)
 		}
@@ -251,12 +276,87 @@ func (st *Store) ToolCall(id session.SessionID, call session.ToolCall, result se
 	_ = appendLine(st.toolsPath(id), line)
 }
 
+// Append records one relayed event under id as a format-tagged JSON line on the
+// per-session event log. It satisfies port.EventLog. The event is marshalled to
+// its session.Event JSON verbatim (already redacted at the relay) and wrapped in
+// the {"v":"eventlog-json/1","ev":...} envelope so Read can validate the format.
+// It reuses the same mu/appendLine as Save/ToolCall (one serialized writer per
+// Store), and is best-effort durable: the relay logs a WARN on a returned error
+// and never aborts the run.
+func (st *Store) Append(_ context.Context, id session.SessionID, ev session.Event) error {
+	evJSON, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("jsonlstore: marshal event: %w", err)
+	}
+	line, err := json.Marshal(eventLogRecord{V: eventLogFormat, Ev: evJSON})
+	if err != nil {
+		return fmt.Errorf("jsonlstore: marshal event record: %w", err)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return appendLine(st.eventsPath(id), line)
+}
+
+// Read scans the per-session event log and yields every recorded event in append
+// order (cumulative — NOT latest-line-wins like the snapshot read). It satisfies
+// port.EventLog. A MISS (no event file) yields an EMPTY sequence: absence is data.
+// A genuine fault — an undecodable record, an unknown format tag, or an I/O error
+// — is yielded as the error on a zero-value event and the consumer stops (the
+// iterator returns after the consumer's range body returns false on the error
+// item, the standard iter.Seq2 error idiom).
+func (st *Store) Read(_ context.Context, id session.SessionID) iter.Seq2[session.Event, error] {
+	return func(yield func(session.Event, error) bool) {
+		f, err := os.Open(st.eventsPath(id)) //nolint:gosec // path is sanitized via eventsPath
+		if err != nil {
+			if os.IsNotExist(err) {
+				return // miss → empty sequence (absence is data, not an error)
+			}
+			yield(session.Event{}, fmt.Errorf("jsonlstore: open event file: %w", err))
+			return
+		}
+		defer func() { _ = f.Close() }()
+
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+		for sc.Scan() {
+			b := sc.Bytes()
+			if len(strings.TrimSpace(string(b))) == 0 {
+				continue
+			}
+			var rec eventLogRecord
+			if err := json.Unmarshal(b, &rec); err != nil {
+				yield(session.Event{}, fmt.Errorf("jsonlstore: decode event record: %w", err))
+				return
+			}
+			if rec.V != eventLogFormat {
+				yield(session.Event{}, fmt.Errorf("jsonlstore: unknown event-log format %q (want %q)", rec.V, eventLogFormat))
+				return
+			}
+			var ev session.Event
+			if err := json.Unmarshal(rec.Ev, &ev); err != nil {
+				yield(session.Event{}, fmt.Errorf("jsonlstore: decode event: %w", err))
+				return
+			}
+			if !yield(ev, nil) {
+				return
+			}
+		}
+		if err := sc.Err(); err != nil {
+			yield(session.Event{}, fmt.Errorf("jsonlstore: scan event file: %w", err))
+		}
+	}
+}
+
 func (st *Store) sessionPath(id session.SessionID) string {
 	return filepath.Join(st.dir, safeName(id)+sessionFileSuffix)
 }
 
 func (st *Store) toolsPath(id session.SessionID) string {
 	return filepath.Join(st.dir, safeName(id)+toolsFileSuffix)
+}
+
+func (st *Store) eventsPath(id session.SessionID) string {
+	return filepath.Join(st.dir, safeName(id)+eventsFileSuffix)
 }
 
 // appendLine appends b followed by a newline to the file at path, opening it

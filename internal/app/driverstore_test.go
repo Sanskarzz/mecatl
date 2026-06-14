@@ -75,13 +75,18 @@ func TestValidateDriverConfigExclusivity(t *testing.T) {
 // connection is attempted; the close func releases the (never-connected)
 // conn.
 func TestBuildStoreDriverURL(t *testing.T) {
-	st, closeFn, err := buildStore(Config{SessionStoreURL: "127.0.0.1:7443"})
+	st, eventLog, closeFn, err := buildStore(Config{SessionStoreURL: "127.0.0.1:7443"})
 	if err != nil {
 		t.Fatalf("buildStore(driver URL): %v", err)
 	}
 	defer closeFn()
 	if _, ok := st.(*grpcdriver.SessionStore); !ok {
 		t.Fatalf("buildStore(driver URL) = %T, want *grpcdriver.SessionStore", st)
+	}
+	// EventLog over the driver is a 3c concern; the 3a driver branch leaves it
+	// nil (the relay then records nothing).
+	if eventLog != nil {
+		t.Fatalf("buildStore(driver URL) eventLog = %T, want nil (3c)", eventLog)
 	}
 }
 
@@ -90,7 +95,7 @@ func TestBuildStoreDriverURL(t *testing.T) {
 // store.
 func TestBuildStoreDefaults(t *testing.T) {
 	t.Run("empty -> memstore", func(t *testing.T) {
-		st, closeFn, err := buildStore(Config{})
+		st, eventLog, closeFn, err := buildStore(Config{})
 		if err != nil {
 			t.Fatalf("buildStore(empty): %v", err)
 		}
@@ -98,15 +103,25 @@ func TestBuildStoreDefaults(t *testing.T) {
 		if _, ok := st.(*memstore.Store); !ok {
 			t.Fatalf("buildStore(empty) = %T, want *memstore.Store", st)
 		}
+		// The memstore path supplies an in-memory EventLog sibling so the seam is
+		// never nil offline.
+		if _, ok := eventLog.(*memstore.EventLog); !ok {
+			t.Fatalf("buildStore(empty) eventLog = %T, want *memstore.EventLog", eventLog)
+		}
 	})
 	t.Run("store-dir -> jsonlstore", func(t *testing.T) {
-		st, closeFn, err := buildStore(Config{StoreDir: t.TempDir()})
+		st, eventLog, closeFn, err := buildStore(Config{StoreDir: t.TempDir()})
 		if err != nil {
 			t.Fatalf("buildStore(StoreDir): %v", err)
 		}
 		defer closeFn()
-		if _, ok := st.(*jsonlstore.Store); !ok {
+		js, ok := st.(*jsonlstore.Store)
+		if !ok {
 			t.Fatalf("buildStore(StoreDir) = %T, want *jsonlstore.Store", st)
+		}
+		// The one jsonlstore Store doubles as the EventLog (same instance).
+		if el, ok := eventLog.(*jsonlstore.Store); !ok || el != js {
+			t.Fatalf("buildStore(StoreDir) eventLog should be the same *jsonlstore.Store instance, got %T", eventLog)
 		}
 	})
 }

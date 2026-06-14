@@ -355,6 +355,17 @@ func locatePendingCall(msgs []session.Message, ask session.PendingAsk) (lastAssi
 // 3b makes it durable). The card is opened before the gate/result (the "ToolCall card
 // before the gate" invariant) on every branch.
 func (e *Engine) resolvePendingCall(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, pendingCall session.ToolCall, ask session.PendingAsk, verdict session.ApprovalVerdict) (session.ToolResult, bool) {
+	// Record the resolved verdict on the event stream (the resume-from-awaiting
+	// twin of the authorize emit) so the durable EventLog captures the approval
+	// record on the resume path too. Tool NAME + verdict string + askID only —
+	// no raw args, no deny-reason body (gauntlet #7). AllowAlways mirrors the
+	// verdict, not the policy outcome.
+	e.emit(r, session.Event{Type: session.EvApproval, Turn: turnIdx, Approval: &session.ApprovalPayload{
+		AskID:       ask.AskID,
+		Verdict:     session.VerdictString(verdict),
+		Tool:        pendingCall.Name,
+		AllowAlways: verdict == session.VerdictAllowAlways,
+	}})
 	if verdict == session.VerdictDeny {
 		e.openCard(r, turnIdx, pendingCall)
 		res := denyResult(pendingCall, fmt.Sprintf("denied by user: %s", ask.Reason))
@@ -489,6 +500,18 @@ func (e *Engine) authorize(ctx context.Context, r *Run, sess *session.Session, w
 		// ctx cancelled while awaiting.
 		return governance.PermissionDecision{Effect: governance.Deny, Reason: "cancelled"}, true
 	}
+
+	// Record the resolved verdict on the event stream (the durable EventLog
+	// consumes it at the server relay; the loop only emits — it never touches a
+	// store). Tool NAME + verdict string + askID only — no raw args, no
+	// deny-reason body (gauntlet #7; see ApprovalPayload). AllowAlways mirrors the
+	// verdict, not the policy outcome.
+	e.emit(r, session.Event{Type: session.EvApproval, Turn: turnIdx, Approval: &session.ApprovalPayload{
+		AskID:       askID,
+		Verdict:     session.VerdictString(verdict),
+		Tool:        c.Name,
+		AllowAlways: verdict == session.VerdictAllowAlways,
+	}})
 
 	switch verdict {
 	case session.VerdictAllowAlways:
