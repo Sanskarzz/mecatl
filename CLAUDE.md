@@ -22,6 +22,7 @@ task build              # → bin/mecated, bin/mecademo, bin/mecatui  (NEVER `go
 task test               # full suite, -race
 task test:golden        # refresh mecatui View/teatest goldens (-update) then re-run
 task e2e                # LIVE e2e vs OpenRouter (real money, needs OPENROUTER_API_KEY exported) — NOT part of task test
+task bench              # hot-path testing.B microbenchmarks (-benchmem) for benchstat; BENCHCOUNT=N overrides — NOT part of task test
 task lint               # golangci-lint v2 + go vet
 task generate           # regenerate contracts/gen from contracts/proto via buf
 go test ./engine/agent/ -run TestFullCycle   # a single test
