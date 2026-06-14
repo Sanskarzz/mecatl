@@ -393,6 +393,19 @@ type Service struct {
 	// lifetime, not a count — same rationale as sessionEngines. The gRPC/HTTP
 	// surfaces never register an override, so their behavior is unchanged.
 	sessionWorkspaces map[session.SessionID]tool.Workspace
+
+	// resumeMu serializes the awaiting-approval resume DECISION per session id
+	// (cloud-native Phase 2): ApproveRun holds the per-session lock across the whole
+	// (LookupRun-miss check → ResumeApproval → register) sequence, so two concurrent
+	// Approves for the SAME awaiting session can never both spawn a resumed run. The
+	// loser, on acquiring the lock, sees the now-registered live run via LookupRun and
+	// routes its verdict to that run's channel (the same-process path) — the pending
+	// tool executes EXACTLY ONCE. It is a keyedMutex, NOT s.mu, because the resume
+	// sequence itself takes s.mu (engineAndWorkspaceFor / register) and Go mutexes are
+	// not reentrant; a per-session lock also keeps unrelated sessions' resumes
+	// concurrent. The keyedMutex frees a key once no caller holds it, so it never grows
+	// unbounded.
+	resumeMu keyedMutex
 }
 
 // sessionEngine couples a per-session engine (built over that session's
@@ -421,6 +434,51 @@ type sessionEngine struct {
 type runState struct {
 	run  *agent.Run
 	sess *session.Session
+}
+
+// keyedMutex is a map of per-key mutexes with reference counting, so a caller can
+// serialize work per key (here: per session id) without a process-wide lock and
+// without the key map growing unbounded — a key's entry is removed once the last
+// holder unlocks. It is used to make the awaiting-approval resume decision atomic per
+// session (see Service.resumeMu): only one ResumeApproval is ever spawned for a given
+// awaiting session even under concurrent Approve calls.
+type keyedMutex struct {
+	mu    sync.Mutex
+	locks map[session.SessionID]*keyedMutexEntry
+}
+
+type keyedMutexEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lock acquires the per-key lock and returns an unlock func that releases it and
+// drops the key when no other caller holds it. The pattern is: ref under the guard,
+// then block on the per-key mutex OUTSIDE the guard (so distinct keys never serialize
+// and the guard is never held across the contended wait).
+func (k *keyedMutex) lock(key session.SessionID) func() {
+	k.mu.Lock()
+	if k.locks == nil {
+		k.locks = make(map[session.SessionID]*keyedMutexEntry)
+	}
+	e, ok := k.locks[key]
+	if !ok {
+		e = &keyedMutexEntry{}
+		k.locks[key] = e
+	}
+	e.refs++
+	k.mu.Unlock()
+
+	e.mu.Lock()
+	return func() {
+		e.mu.Unlock()
+		k.mu.Lock()
+		e.refs--
+		if e.refs == 0 {
+			delete(k.locks, key)
+		}
+		k.mu.Unlock()
+	}
 }
 
 // NewService validates cfg and constructs a Service. It returns ErrConfig if
@@ -492,9 +550,17 @@ func (s *Service) currentModels() []*mecatlv1.ModelInfo {
 }
 
 // ErrNoActiveRun is returned by Approve/Cancel when the session exists (possibly
-// loaded from the store after a restart) but has no in-flight run in this
-// process to deliver the control to. The session state is still loadable via
-// GetSession; the lost stream simply cannot be resumed in place.
+// loaded from the store after a restart) but has no in-flight run in this process to
+// deliver the control to AND nothing to resume. The session state is still loadable
+// via GetSession.
+//
+// Since cloud-native Phase 2, an Approve/Deny against a runless AWAITING session is
+// NO LONGER ErrNoActiveRun: it re-enters the loop AT the ask and resumes
+// (resumeFromAwaiting). ErrNoActiveRun therefore now means "the session exists but is
+// in a terminal/idle state with nothing to resume" — idle, completed, cancelled, or
+// failed. A failed/cancelled session recovers only through a NEW prompt
+// (loadAndReopen → Recover/Interrupt), never through the approve seam. Cancel keeps
+// the original meaning for every state (no live run to cancel).
 var ErrNoActiveRun = errors.New("server: no active run for session")
 
 // CreateSession allocates a new idle session on the SHARED engine, persists it,
@@ -1052,10 +1118,30 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 	if err != nil {
 		return nil, err
 	}
-	// Prefer a per-session workspace override (e.g. the ACP fs/* buffer workspace)
-	// when one is registered; otherwise build one from the shared factory. AND
-	// prefer a per-session engine (built over the session's client-provided MCP
-	// servers) when one is registered; otherwise drive the shared engine.
+	engine, ws, err := s.engineAndWorkspaceFor(ctx, sess)
+	if err != nil {
+		return nil, err
+	}
+	run := engine.RunContent(ctx, sess, ws, text, parts)
+	s.register(id, run, sess)
+	return run, nil
+}
+
+// engineAndWorkspaceFor resolves the engine + workspace a loaded session should run
+// on, rehydrating a per-session engine when the session needs one but its in-memory
+// registration did not survive a restart. It is the SINGLE resolution point shared
+// by the prompt run-entry (StartRunContent) and the awaiting-approval re-entry
+// (resumeFromAwaiting) so the two paths cannot drift — both rebuild the SAME engine
+// for a rehydrated selector/no-fs session, and both fall back to the shared engine
+// for a default FS session.
+//
+// Resolution order (unchanged from the inlined StartRunContent logic): a per-session
+// workspace override (e.g. the ACP fs/* buffer, the no-fs override) is preferred,
+// else built from the shared factory; a per-session engine (client MCP, selector, or
+// no-fs) is preferred, else the shared engine. The empty-workspace inference stays as
+// the SECOND defense after the profile/selector trigger.
+func (s *Service) engineAndWorkspaceFor(ctx context.Context, sess *session.Session) (*agent.Engine, tool.Workspace, error) {
+	id := sess.ID
 	engine := s.cfg.Engine
 	s.mu.Lock()
 	se, hasEngine := s.sessionEngines[id]
@@ -1072,14 +1158,13 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 		// on the WRONG (default-provider) model — wrong enough that its persisted
 		// MaxRunTokens budget would be metered through a different model. Rebuild the
 		// SAME engine through the factory path create used, reading the PERSISTED
-		// selector+profile back off the loaded session. Phase 1 widened only this
-		// engine-rebuild trigger; the awaiting-approval mid-turn loop entry stays
-		// Phase 2 (no new run-entry seam here). The MaxSessionEngines cap is inherited
-		// by the widened trigger (rehydrateSession enforces it). The empty-workspace
-		// inference stays as the SECOND defense below.
+		// selector+profile back off the loaded session. The MaxSessionEngines cap is
+		// inherited by the widened trigger (rehydrateSession enforces it). The
+		// empty-workspace inference stays as the SECOND defense below.
+		var err error
 		se, err = s.rehydrateSession(ctx, sess)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		hasEngine = true
 		if sess.Profile == string(ProfileNoFS) || sess.Workspace == "" {
@@ -1102,9 +1187,7 @@ func (s *Service) StartRunContent(ctx context.Context, id session.SessionID, tex
 			ws = s.cfg.Workspaces(sess.Workspace)
 		}
 	}
-	run := engine.RunContent(ctx, sess, ws, text, parts)
-	s.register(id, run, sess)
-	return run, nil
+	return engine, ws, nil
 }
 
 // needsRehydration reports whether a loaded session that has NO live per-session
@@ -1296,17 +1379,110 @@ func (s *Service) IsLive(id session.SessionID) bool {
 }
 
 // Approve resolves the paused permission ask on the session's in-flight run with
-// the client's three-way verdict (deny / allow-once / allow-always). If no run is
-// registered in this process it consults the store: a missing session yields
-// ErrNotFound; an existing-but-runless session yields ErrNoActiveRun (the stream
-// was not resumable, e.g. across a restart).
+// the client's three-way verdict (deny / allow-once / allow-always).
+//
+// SAME-PROCESS path FIRST and unchanged: a live registered run resolves the ask
+// over its in-memory channel exactly as before. On a LookupRun MISS — typically the
+// process that parked the ask died and a different process now serves the Approve —
+// it falls to resumeFromAwaiting (cloud-native Phase 2): if the persisted session is
+// in StateAwaiting it loads the snapshot, rebuilds the engine, re-enters the loop AT
+// the ask, applies the verdict, and drives to completion; the caller relays the
+// returned run's events (the resumed run is registered like any other). A
+// non-awaiting (idle/completed/cancelled/failed) session stays terminal and yields
+// ErrNoActiveRun; an unknown session yields ErrNotFound. The returned run, when
+// non-nil, is the resumed run the wire adapter must drain + FinishRun.
 func (s *Service) Approve(ctx context.Context, id session.SessionID, askID string, verdict session.ApprovalVerdict) error {
-	run, ok := s.LookupRun(id)
-	if ok {
+	_, err := s.ApproveRun(ctx, id, askID, verdict)
+	return err
+}
+
+// ApproveRun is Approve plus the resumed *agent.Run handle (cloud-native Phase 2).
+// On the SAME-PROCESS path (a live registered run) it resolves the ask over the
+// channel and returns (nil, nil): there is no new run, the existing relay delivers
+// the verdict's effects. On the rehydrate path (no live run, the session is
+// awaiting) it returns the freshly-registered resumed run so the caller can relay
+// its events and FinishRun it after the drain. A nil run with a nil error means "the
+// same-process channel handled it; keep relaying the existing stream".
+//
+// CONCURRENCY: two Approves for the SAME awaiting session that both MISS the live-run
+// fast path must NOT both spawn a resumed run (Engine.ResumeApproval spawns the
+// driving goroutine immediately, so the pending tool would execute twice). The resume
+// decision is therefore serialized per session via s.resumeMu: under the per-session
+// lock the loser re-checks LookupRun, sees the winner's now-registered run, and
+// routes its verdict to that run's channel (the same-process path) — the pending tool
+// runs EXACTLY ONCE. The common live-run case takes a lock-free fast path first.
+//
+// WIRE EXPOSURE: the rehydrate-resume path (no live run → resumeFromAwaiting) is
+// reachable only through the HTTP POST /v1/sessions/{id}/approve endpoint, which
+// relays the resumed run as an SSE body (see the HTTP approve handler). The gRPC
+// Converse stream has NO rehydrate path: its ResumeApproval control frame resolves the
+// ask against the stream's OWN live in-process run only (grpc.go readControl), so a
+// gRPC client whose session was evicted has no resume path over Converse and a verdict
+// frame for a dead run is silently dropped. The gRPC rehydrate path is a tracked
+// follow-up (additive, out of the Phase 2 gate) — see docs/design/CLOUD-NATIVE.md
+// Phase 2.
+func (s *Service) ApproveRun(ctx context.Context, id session.SessionID, askID string, verdict session.ApprovalVerdict) (*agent.Run, error) {
+	// Fast path (lock-free): a live registered run resolves the ask over its channel.
+	if run, ok := s.LookupRun(id); ok {
 		run.Approve(askID, verdict)
-		return nil
+		return nil, nil
 	}
-	return s.noActiveRun(ctx, id)
+	return s.resumeFromAwaiting(ctx, id, askID, verdict)
+}
+
+// resumeFromAwaiting is the service half of the fourth (awaiting-only) run-entry
+// seam: it handles an Approve/Deny against a session whose process died while parked
+// awaiting approval. It loads the persisted session and:
+//
+//   - if a run got registered after the fast-path miss (a concurrent resume won) →
+//     route the verdict to that run's channel and return (nil, nil) (same-process);
+//   - if the session is unknown → ErrNotFound (via the store load);
+//   - if the session is NOT in StateAwaiting → ErrNoActiveRun (awaiting is the ONLY
+//     state that stops being terminal under Phase 2; idle/completed/cancelled/failed
+//     stay terminal, so a stale Approve cannot resurrect them);
+//   - if awaiting → rebuild the engine + workspace (the SAME engineAndWorkspaceFor
+//     the prompt path uses, so the two cannot drift), call Engine.ResumeApproval to
+//     re-enter the loop AT the ask, register the resumed run, and return it.
+//
+// The whole sequence runs under the per-session resume lock (s.resumeMu) so the
+// LookupRun-recheck → ResumeApproval → register decision is ATOMIC per session: a
+// concurrent caller blocks on the lock and, on acquiring it, takes the same-process
+// branch above instead of spawning a second run (spawn-then-cancel would be unsafe —
+// the loser goroutine could execute the tool before a Cancel landed). Registration
+// mirrors rehydrateSession's loser-teardown/MaxSessionEngines guard via
+// engineAndWorkspaceFor; the resumed run is registered into s.runs like any other so
+// a concurrent Cancel/Approve reaches it and FinishRun cleans it up.
+func (s *Service) resumeFromAwaiting(ctx context.Context, id session.SessionID, askID string, verdict session.ApprovalVerdict) (*agent.Run, error) {
+	unlock := s.resumeMu.lock(id)
+	defer unlock()
+
+	// Re-check under the lock: a concurrent resume that won the race has registered a
+	// live run. Route this verdict to its channel (same-process) instead of spawning a
+	// second run — the exactly-once guarantee for the pending tool.
+	if run, ok := s.LookupRun(id); ok {
+		run.Approve(askID, verdict)
+		return nil, nil
+	}
+
+	// GetSession (read-only snapshot load): ErrNotFound for an unknown session. We do
+	// NOT use loadAndReopen here — its job is to drive completed/cancelled/failed back
+	// to idle for a NEW prompt, exactly the terminal states this seam must REJECT.
+	sess, err := s.GetSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if sess.State != session.StateAwaiting {
+		// Awaiting is the only state Phase 2 makes non-terminal. Everything else stays
+		// stranded-for-Approve as before (last-write-wins / nothing to resume).
+		return nil, ErrNoActiveRun
+	}
+	engine, ws, err := s.engineAndWorkspaceFor(ctx, sess)
+	if err != nil {
+		return nil, err
+	}
+	run := engine.ResumeApproval(ctx, sess, ws, askID, verdict)
+	s.register(id, run, sess)
+	return run, nil
 }
 
 // Cancel cancels the session's in-flight run. The store-fallback semantics match

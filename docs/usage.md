@@ -109,7 +109,12 @@ What each line means:
 - **`tool.result`** — the tool's output (`error=false/true`), token-shaped by the tool.
 - **`permission.ask`** — the loop paused for client approval; carries the tool,
   the proposed args, and a human `reason`. In the demo a simulated client clicks
-  "allow" (`run.Approve(askID, true)`), so the loop resumes.
+  "allow" (`run.Approve(askID, true)`), so the loop resumes. Over HTTP, `POST
+  /v1/sessions/{id}/approve` returns **`204 No Content`** when an existing stream
+  (the prompt's `text/event-stream` response) carries the verdict's effects; if the
+  process that parked the ask had died and a restarted process resumes the session at
+  the ask, the same endpoint instead returns a **`text/event-stream`** body (the
+  resumed run) — consume it exactly like the prompt stream.
 - **`result`** — the terminal event: `stop` reason (`end_turn`, `max_turns`,
   `cancelled`, …), final text, and cumulative `usage`. `cacheHitRate` is
   `cacheRead / inputTokens`.

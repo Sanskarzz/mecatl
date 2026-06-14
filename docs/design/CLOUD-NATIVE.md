@@ -52,12 +52,13 @@ The harness is unusually close by construction:
   verified e2e across two Builds over a shared store. Details in
   `IMPLEMENTATION-NOTES.md` ("Session profiles").
 
-What is NOT yet true: a process death while a run is awaiting approval strands the
-session (`ErrNoActiveRun`); the event stream is emitted and discarded; compaction
+What is NOT yet true: the event stream is emitted and discarded; compaction
 destructively rewrites the only durable record; and two processes over one store
 have no writer exclusion. (The per-session facts, namely the provider selector,
-token usage, and profile, ARE now in the snapshot as of Phase 1; see the ledger.)
-Those gaps are exactly the phases below.
+token usage, and profile, ARE now in the snapshot as of Phase 1; and a process
+death while a run is awaiting approval no longer strands the session as of Phase 2,
+which re-enters the loop AT the ask. See the ledger.) Those gaps are exactly the
+phases below.
 
 ## Phase plan
 
@@ -129,29 +130,111 @@ rehydration now rebuilds faithfully rather than degrading. No new goroutine,
 cache, breaker, or in-memory map landed. List 2 rows 1/2/3 move to SHIPPED above;
 the remaining rows are unchanged.
 
-### Phase 2: awaiting-approval evict/rehydrate (the disposability completion)
+### Phase 2: awaiting-approval evict/rehydrate (SHIPPED)
 
-The kit inventory's §1.4, built on the rehydration seam `9f8ba8c` created:
+The kit inventory's §1.4, built on the rehydration seam `9f8ba8c` created. The
+process is now disposable even while a run is parked awaiting a human approval:
 
 - A resume-from-awaiting entry at the run-entry funnel: `Approve`/`Deny` against a
   session whose process died while parked loads the snapshot (state=awaiting,
   `Pending` set), rebuilds the engine (Phase 1 makes this faithful), re-enters the
   loop AT the ask, and delivers the verdict. `ErrNoActiveRun` stops being terminal
-  for awaiting sessions.
-- The loop re-entry is the new piece: today resume re-enters at turn boundaries only
-  (`loadAndReopen`, `internal/adapter/server/service.go:868`); this adds the mid-turn
-  cursor. The three existing seams (Reopen/Interrupt/Recover) must NOT widen; this is
-  a fourth, awaiting-only entry.
+  for awaiting sessions ONLY; idle/completed/cancelled/failed stay terminal.
+- The loop re-entry is the new piece: resume previously re-entered at turn
+  boundaries only (`internal/adapter/server/service.go` (`loadAndReopen`)); this
+  adds the mid-turn cursor as a FOURTH, awaiting-only entry. The three existing
+  seams (Reopen/Interrupt/Recover, all via `resetToIdle`) did NOT widen: the fourth
+  seam drives the existing awaiting-only `engine/session/session.go` (`ResumeWith`),
+  which preserves Counters/Usage (NOT `resetToIdle`, which would zero them and clear
+  the pending ask). No new aggregate transition verb was added.
+- The mechanism is `engine/agent/loop.go` (`ResumeApproval`) →
+  `engine/agent/dispatch.go` (`driveFromAwaiting`), launched under the same
+  Run-construction preamble as a prompt run (the shared `engine/agent/loop.go`
+  (`startRun`)) and continuing through the SHARED `engine/agent/loop.go`
+  (`runLoop`) the prompt path also drives (factored out of `drive` so there is ONE
+  loop, not two). The service half is `internal/adapter/server/service.go`
+  (`resumeFromAwaiting`), reached from `internal/adapter/server/service.go`
+  (`ApproveRun`) on a `LookupRun` MISS; the SAME-PROCESS path (a live run) is
+  unchanged and tried FIRST. Engine + workspace resolution is shared with the
+  prompt path via `internal/adapter/server/service.go` (`engineAndWorkspaceFor`) so
+  the two cannot drift.
+- Exactly-once tool execution is the load-bearing property. The pending tool call is
+  resolved through the SAME post-authorize tail the live loop uses (deny →
+  synthetic deny result; allow → `preHook` + `execute`, so PostToolUse hooks + the
+  audit recorder + `EvToolResult` fire identically; allow-always → also
+  `Policy.Learn`), exactly once. Every OTHER unanswered tool call on the trailing
+  assistant message is closed out as a synthetic aborted error result (the
+  `closeOutInterruptedTurn` analogue) so the replayed history has no dangling
+  tool_use (provider-valid: `session.ValidateToolPairing` passes). One ordered
+  `RecordToolResults` slice (pending result + synthetic siblings) is recorded, then
+  the loop continues.
+- Concurrent-Approve exactly-once: two `Approve` calls for the SAME awaiting session
+  that both miss the live-run fast path must not both spawn a resumed run
+  (`ResumeApproval` spawns the driving goroutine immediately, so a spawn-then-cancel
+  loser could execute the tool before its Cancel landed). The resume DECISION is
+  serialized per session by a keyed lock (`internal/adapter/server/service.go`
+  (`resumeFromAwaiting`), `Service.resumeMu`): under the per-session lock the loser
+  re-checks `LookupRun`, sees the winner's now-registered run, and routes its verdict
+  to that run's channel (the same-process path), so the pending tool runs exactly
+  once. Pinned by `internal/adapter/server/resume_awaiting_test.go`
+  (`TestConcurrentApproveAfterRestartExecutesOnce`), mutation-verified (drop the
+  serialization and the Write executes twice).
+- Wire exposure (asymmetric, by design for this phase): the rehydrate-resume path is
+  reachable only through the HTTP `POST /v1/sessions/{id}/approve` endpoint, which
+  relays the resumed run as an SSE body (`internal/adapter/server/http.go`
+  (`relayRunSSE`)). The gRPC `Converse` stream has NO rehydrate path: its
+  `ResumeApproval` control frame resolves the ask against the stream's OWN live
+  in-process run only (`internal/adapter/server/grpc.go` (`readControl`)), so a gRPC
+  client whose session was evicted has no resume path over `Converse` and a verdict
+  frame for a dead run is silently dropped. No proto/driver change either way. The
+  gRPC rehydrate path is a tracked follow-up (additive, out of this gate); see the
+  Deferred note below.
 - Active eviction (a parked run voluntarily releasing its goroutine and heap after
   some idle period) is a follow-on knob, not this phase's gate. Approve-after-crash
   is the essence; eviction is then just choosing to crash on purpose.
 - Known accepted wart: permstore rules are still in-memory, so a rehydrated session
-  re-asks. Fail-safe; fixed by Phase 3b.
+  re-asks. Fail-safe; fixed by Phase 3b. The allow-always verdict on resume
+  re-Learns into the fresh permstore, so later calls in the resumed run are covered.
 
-Gate: live e2e: raise an ask, SIGKILL the server, restart, approve over the shared
-store, the run completes with the tool executed exactly once. Plus: child asks
-(subagent-surfaced asks) explicitly documented as NOT rehydratable this round
-(run-scoped by design), an honest note, not silence.
+Gate (CI-green, offline): the two-Build drill
+`TestApproveAfterRestartE2E` (`internal/app/approve_after_restart_test.go`): Build
+#1 raises a Write ask + persists the awaiting snapshot, `Close()` is process death,
+Build #2 over the SAME store calls `ApproveRun` → resume-from-awaiting, the pending
+Write executes EXACTLY ONCE and the run reaches `StopEndTurn` completed.
+Mutation-verified per leg (revert the resume seam → `ErrNoActiveRun`; skip the
+sibling close-out → dangling tool_use; re-dispatch → double execution). The
+server-layer state gate + same-process-unchanged are pinned by
+`internal/adapter/server/resume_awaiting_test.go`, and the engine-layer
+exactly-once / deny / not-awaiting / wrong-askID / multi-tool sibling close-out by
+`engine/agent/resume_approval_test.go`. The LIVE SIGKILL e2e
+(`e2e/approve_after_kill_test.go`) is the stated live counterpart; it currently
+Skips with an honest harness-gap note (the live harness has no shared-store
+second-spawn and no HTTP approve client), with the offline two-Build gate as the
+required proof. Two things the offline two-Build deliberately does NOT exercise (only
+a real SIGKILL would): (a) a torn final append racing the kill, since
+`jsonlstore.appendLine` is not an atomic rename, and (b) OS-crash durability, since
+there is no fsync. Both are narrow and out of scope for "disposable process" (the
+thesis is process restart, not host crash); see the latent-durability note below.
+Child asks (subagent-surfaced asks) are documented NOT rehydratable this round
+(run-scoped by design) and, verified below, are structurally unreachable through this
+seam, an honest note rather than silence.
+
+Deferred (additive, out of this gate): the gRPC `Converse` rehydrate-resume path (a
+gRPC client re-attaching to an evicted awaiting session, symmetric to the HTTP
+`/approve` SSE relay) and active eviction (a parked run voluntarily releasing its
+goroutine after an idle period). Both are follow-ons; approve-after-crash, the
+disposability essence, is the shipped gate.
+
+**Phase 2 re-audit (List 1 / List 2).** Phase 2 added no new outlives-a-call
+resource (List 1): `ResumeApproval` mints an ordinary `agent.Run` (already row 9 /
+14's shape) through the SAME registry (`Service.runs`) the prompt path uses, and
+the resume orchestration lives on the existing session aggregate + the existing
+per-session engine registry (row 11). No new goroutine, cache, breaker, or
+in-memory map landed; `driveFromAwaiting` is a sibling of `drive` over the shared
+`runLoop`, and `resumeFromAwaiting` reuses `engineAndWorkspaceFor` +
+`rehydrateSession`. List 2 row 5 moves to resolved and row 6 is verified below; the
+remaining rows are unchanged. No `PendingAsk` field was added (the Q4 verification
+showed none is needed).
 
 ### Phase 3: durable event log / outbox (the new durable artifact)
 
@@ -224,7 +307,7 @@ durable artifact survives and is reloaded), or **lost** (gone, possibly leaking)
 | 11 | Per-session engine registry (`Service.sessionEngines`) | `server.Service` | session | evicted + closed at `CloseSession` (`service.go:750-758`) and shutdown | lost; rehydrated ONLY for the no-fs profile (`rehydrateNoFSSession`, `service.go:1084`); selector/client-MCP sessions degrade to the default engine | `internal/adapter/server/service.go:379` |
 | 12 | Per-session workspace overrides (`Service.sessionWorkspaces`: nofs, ACP buffers) | `server.Service` | session | evicted at `CloseSession` (`service.go:757`) | lost; the no-fs override is re-registered by rehydration | `internal/adapter/server/service.go:388` |
 | 13 | Background children (`childRunRegistry`) | `agent.Run` | run | `drainChildren` at both terminate paths (cancel + join + seal) | registry lost; the child SESSIONS persist via `WithSubagentStore`/`WithMemberStore` and are individually resumable | `engine/agent/childregistry.go:128-131`; `engine/agent/subagent.go:599,1267` |
-| 14 | askRegistry channel park + childAskRouter | `agent.Run` | run | unregistered on verdict/retract; dies with the run | lost; a post-death `Approve` returns `ErrNoActiveRun` (`service.go:1226-1232`), the Phase 2 target | `engine/agent/permission.go:30-32,161` |
+| 14 | askRegistry channel park + childAskRouter | `agent.Run` | run | unregistered on verdict/retract; dies with the run | lost, BUT no longer stranding (Phase 2): a post-death `Approve` on an awaiting session re-enters the loop AT the ask via `internal/adapter/server/service.go` (`resumeFromAwaiting`) rather than returning `ErrNoActiveRun`; the channel park itself is rebuilt by the resumed run | `engine/agent/permission.go:30-32,161` |
 | 15 | Hook subprocesses | hookexec, per invocation | call | spawn, wait (30s default timeout, process-group kill) | nothing to re-attach | `internal/adapter/hookexec/hookexec.go:116,130` |
 | 16 | Child-session retention GC goroutine | `startChildGC` | process | exits on ctx done or sticky `ErrPruneUnsupported` | reconstructible (restarts with the process; the swept artifact is the store) | `internal/app/childgc.go:235` |
 | 17 | Memory/user-model consolidation goroutines (dream) | `app.Build` | process | exit on ctx done | reconstructible | `internal/app/build.go:1893,1901,1920` |
@@ -285,8 +368,8 @@ what is persisted), **reset-by-design** (documented, acceptable),
 | 2 | Provider/model selector | **SHIPPED (Phase 1)**: persisted as the opaque `ProviderID`/`ModelID` label pair on the aggregate (`session.Session`) + snapshot (`sessnap.Snapshot`); `Service.rehydrateSession` re-derives the SAME engine via the factory from the persisted pair (no longer the default-provider floor) | rebuilt on the SAME provider+model via the factory; a default session (empty pair) still rides the shared engine | persist-in-snapshot; rehydration re-derives the engine via the factory | 1 (SHIPPED) |
 | 3 | `session.Usage` (cumulative run tokens) | **SHIPPED (Phase 1)**: a `Usage` field on the aggregate (`session.Session`) accumulated by `RecordUsage`, persisted as the additive `usage` snapshot field (`sessnap.Snapshot`); the budget brake (`budgetExhausted`) is evaluated against the cumulative `sess.Usage`, and `resetToIdle` DELIBERATELY preserves it | the `MaxRunTokens` brake continues across restart instead of re-granting a fresh budget | persist-in-snapshot (additive `usage` field; the budget reads the cumulative aggregate) | 1 (SHIPPED) |
 | 4 | permstore allow-always rules | `permstore.Memory.bySession` (`engine/adapter/permstore/permstore.go:48`) | discarded; the user is re-asked. Fail-safe, annoying | fix-via-event-log (verdict events replayed into permstore) | 3b |
-| 5 | The pending PARENT ask | the data IS in the snapshot (`Pending`, `sessnap.go:41`, restored via `PauseForApproval`); the LIVENESS is a parked channel (`askRegistry.await`, `engine/agent/permission.go:161`) | durable but stranded: `Approve` finds no run and returns `ErrNoActiveRun` (`service.go:1226-1232`) | the resume-from-awaiting loop entry (durability already correct; only liveness is missing) | 2 |
-| 6 | Pending CHILD asks (childAskRouter) | run-scoped in-memory routing of child-namespaced askIDs | lost with the run | reset-by-design; Phase 2 re-enters at the PARENT ask only, child asks documented non-rehydratable | 2 (doc note) |
+| 5 | The pending PARENT ask | **SHIPPED (Phase 2)**: the data IS in the snapshot (`Pending`, `engine/adapter/sessnap/sessnap.go` (`Snapshot`), restored via `PauseForApproval`); the LIVENESS is now recovered too: `Approve`/`Deny` on a runless awaiting session loads the snapshot, re-enters the loop AT the ask via `engine/agent/loop.go` (`ResumeApproval`), and drives to completion | resolved: `internal/adapter/server/service.go` (`resumeFromAwaiting`) rebuilds the engine and re-enters; `ErrNoActiveRun` is no longer terminal for awaiting (still terminal for idle/completed/cancelled/failed) | the resume-from-awaiting loop entry (durability was already correct; Phase 2 adds the liveness) | 2 (SHIPPED) |
+| 6 | Pending CHILD asks (childAskRouter) | run-scoped in-memory routing of child-namespaced askIDs | lost with the run | reset-by-design AND verified structurally unreachable through the resume seam (`engine/agent/dispatch.go` (`driveFromAwaiting`), the Q4 note): a surfaced child ask sets the CHILD session's `pending` (its own loop calls `PauseForApproval`), never the PARENT's (the parent stays `StateRunning` inside the delegation tool call), and the server persists/resumes only top-level runs, so a restored `StateAwaiting` session ALWAYS holds a parent-OWN ask. No `PendingAsk` marker field was needed; were a surfaced-child ask ever persisted onto a parent, it would close out as an ordinary unanswered sibling (the honest aborted-result wording), not a silent stall | reset-by-design; Phase 2 re-enters at the PARENT ask only, child asks non-rehydratable (verified, honest, not silent) | 2 (verified) |
 | 7 | Background children | `childRunRegistry` (`engine/agent/childregistry.go:131`), run-scoped; child sessions persist via `WithSubagentStore` (`subagent.go:599`), and parallel branches likewise via `WithParallelStore` (`parallel-<callID>-<i>`, commit `fe9ffe5`, forensically loadable through the `{subagent-, parallel-}` prefix gate) | the running children die un-drained; their persisted sessions remain individually loadable/resumable (`resume:` / `InspectSubagent`), but nothing reconnects them to the parent | reset-by-design for v1; session-scoped detach is issue #28, gated on the event log | 3c → #28 |
 | 8 | Edit read-ledger | in-memory per-`osfs.Workspace` map of sha256 fingerprints (`internal/adapter/osfs/osfs.go:428,714,729`) | the factory builds a fresh Workspace with an empty ledger; the first Edit after restart is REFUSED ("not read this session") until the model re-Reads. Fail-safe, never silently wrong; costs one extra Read per touched file. N/A for no-fs sessions | reset-by-design now; becomes a snapshot candidate if the re-Read tax proves annoying (Phase-1-adjacent, FS sessions only; the kit inventory's §2.4 explicit-token shape is the eventual answer) | deferred |
 | 9 | Pre-compaction history | nowhere: `maybeCompact` rewrites the conversation via `ReplaceHistory` and that is what the next Save persists | the durable record is already lossy BEFORE any restart; compaction itself is stateless given the (compacted) history, so restart adds no new loss | fix-via-event-log (archive the replaced span before `ReplaceHistory`) | 3b |
@@ -300,11 +383,12 @@ what is persisted), **reset-by-design** (documented, acceptable),
 
 Two ledger observations worth stating in prose:
 
-- **The awaiting state is the one place where durability and liveness already
-  diverge** (row 5): the snapshot faithfully holds the parked ask and restores it
-  through the real state machine, yet the only consumer of that fidelity today is
-  the test suite, because no code path re-enters a loaded awaiting session. Phase 2
-  is small precisely because the hard half (durability) shipped with sessnap.
+- **The awaiting state was the one place where durability and liveness diverged**
+  (row 5): the snapshot faithfully holds the parked ask and restores it through the
+  real state machine, and Phase 2 closed the liveness half: a loaded awaiting
+  session is now re-entered AT the ask (`engine/agent/loop.go` (`ResumeApproval`)).
+  Phase 2 was small precisely because the hard half (durability) shipped with
+  sessnap; only the loop-entry liveness was missing.
 - **Teams are the largest honest gap** (row 10). The member-session persistence
   gives forensics, not resumption. Saying "mid-round teams do not survive restart"
   in the operator docs is part of this arc's v1 posture; pretending otherwise is
@@ -398,6 +482,16 @@ enforces, and the code today assumes it everywhere a writer exists:
   rename, no file lock, no cross-process guard, and `Load` takes the last line.
   Two processes appending to one session file interleave at the mercy of OS append
   atomicity, last-write-wins at best.
+- **Latent durability gap (Phase 2-adjacent, revisit if "disposable" widens to host
+  crashes).** Because jsonlstore neither fsyncs nor uses an atomic rename, the
+  awaiting-snapshot durability the Phase 2 resume relies on rests on OS page-cache
+  survival, not on-disk durability: it is correct across a PROCESS restart (the
+  Phase 2 thesis, and what the kit and gate exercise) but NOT host-crash-safe (a torn
+  trailing append, or a snapshot still only in the page cache when the kernel dies, is
+  lost). This is acceptable for v1 disposability (process restart). If "disposable"
+  ever has to mean host crashes, jsonlstore needs fsync + atomic-rename (or a durable
+  driver backend); this rides the same store-hardening track as the leasing concern
+  in decision (c) / Phase 4.
 - **The driver protocol is last-write-wins by contract.** `SaveRequest` carries
   `{session_id, snapshot}` and nothing else, no version, no CAS token, no lease
   (`contracts/proto/mecatl/driver/v1/session_store.proto:96-107`; "Save overwrites:

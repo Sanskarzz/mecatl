@@ -431,6 +431,14 @@ type Run struct {
 // runSerial mints the process-unique Run.serial discriminator (see Run.serial).
 var runSerial atomic.Int64
 
+// ErrNotAwaiting is the terminal cause driveFromAwaiting fails with when it is
+// asked to resume a session that is NOT parked on a pending ask (no PendingAsk),
+// or whose pending ask does not match the askID the resume targets. It never
+// silently completes: a mismatch ends the run as StopError carrying this cause so
+// a stale/duplicate Approve cannot drive an unexpected session to a clean
+// terminal.
+var ErrNotAwaiting = errors.New("agent: session is not awaiting the given approval")
+
 // RunOptions are per-RUN overrides a caller threads into RunContentWith. They are
 // run-scoped: they live on the Run, never on the shared Engine.Deps, so a per-call
 // knob (a tighter token ceiling, a synthetic deliverable tool) works on a SHARED child
@@ -608,6 +616,49 @@ func (e *Engine) RunContent(ctx context.Context, sess *session.Session, ws tool.
 // engine or mutating the engine other runs share. RunContent delegates here with a
 // zero RunOptions (the legacy run).
 func (e *Engine) RunContentWith(ctx context.Context, sess *session.Session, ws tool.Workspace, userText string, parts []session.Content, opts RunOptions) *Run {
+	return e.startRun(ctx, sess, opts, func(ctx context.Context, r *Run) {
+		e.drive(ctx, r, sess, ws, userText, parts)
+	})
+}
+
+// ResumeApproval is the FOURTH, awaiting-ONLY run-entry seam (cloud-native Phase
+// 2): it re-enters the loop AT a parked permission ask on a session that is in
+// StateAwaiting (typically loaded fresh from a snapshot after the process that
+// parked the ask died), applies verdict to the pending tool call, closes out any
+// unanswered sibling calls on the same trailing assistant message, then continues
+// the loop to completion. It mirrors RunContentWith's Run-construction preamble
+// exactly (same events/asks/cancel/ctx/hardAbort/serial/diag/children/router
+// discipline) but launches driveFromAwaiting instead of drive.
+//
+// It is DISTINCT from the three existing terminal-recovery seams (Reopen /
+// Interrupt / Recover, all via resetToIdle at a turn boundary): those zero the
+// Counters and clear the pending ask; this preserves both via the awaiting-only
+// session.ResumeWith seam (the live loop's own resume path), so the re-entered run
+// continues the SAME logical turn with its spend and limits intact. It adds NO new
+// aggregate transition verb (ResumeWith already exists); the "fourth seam" is the
+// run-entry orchestration here + Service.resumeFromAwaiting, not a domain change.
+//
+// PRECONDITION FAILURES surface ON THE RUN, not as a return value (ResumeApproval
+// only ever returns a live *Run): if sess is not in StateAwaiting, or its pending ask
+// does not match askID, or the trailing assistant message carries no matching tool
+// call, driveFromAwaiting terminates the returned run with session.StopError carrying
+// a cause matching errors.Is(_, ErrNotAwaiting). A consumer reads this off the run's
+// terminal EvResult (Stop == StopError, the Error field), exactly like any other
+// terminal — it never silently completes. The pending tool executes EXACTLY ONCE on
+// the allow path and NOT AT ALL on a precondition failure or a deny.
+func (e *Engine) ResumeApproval(ctx context.Context, sess *session.Session, ws tool.Workspace, askID string, verdict session.ApprovalVerdict) *Run {
+	return e.startRun(ctx, sess, RunOptions{}, func(ctx context.Context, r *Run) {
+		e.driveFromAwaiting(ctx, r, sess, ws, askID, verdict)
+	})
+}
+
+// startRun mints a Run with the full concurrency preamble (events buffer, ask
+// registry, run-scoped diagnostics, interactive child-ask router, ask-review
+// breaker, child-run registry) and launches body in the run goroutine under the
+// LIFO seal/close discipline. It is the single Run-construction site shared by
+// RunContentWith (→ drive) and ResumeApproval (→ driveFromAwaiting) so the two
+// entry seams cannot drift in their concurrency setup.
+func (e *Engine) startRun(ctx context.Context, sess *session.Session, opts RunOptions, body func(context.Context, *Run)) *Run {
 	ctx, cancel := context.WithCancel(ctx)
 	r := &Run{
 		events:    make(chan session.Event, 64),
@@ -678,7 +729,7 @@ func (e *Engine) RunContentWith(ctx context.Context, sess *session.Session, ws t
 		defer close(r.events)
 		defer r.children.seal()
 		defer cancel()
-		e.drive(ctx, r, sess, ws, userText, parts)
+		body(ctx, r)
 	}()
 	return r
 }
@@ -725,8 +776,22 @@ func (e *Engine) drive(ctx context.Context, r *Run, sess *session.Session, ws to
 	// brake is evaluated against the AGGREGATE's cumulative Usage (sess.Usage) instead
 	// — which RecordUsage below keeps in lock-step and which the snapshot persists —
 	// so the budget survives reopen/restart while EvResult.Usage stays per-run.
-	var total session.Usage
-	var lastText string
+	e.runLoop(ctx, r, sess, ws, session.Usage{}, "")
+}
+
+// runLoop is the SHARED turn-loop body driven by both the prompt entry (drive,
+// after recordPrompt) and the awaiting-approval re-entry (driveFromAwaiting,
+// after it resolves the pending tool call + closes out siblings). Factoring it
+// out keeps ONE loop, not two: the fourth (awaiting-only) run-entry seam reuses
+// the exact same compaction / budget / no-progress / dispatch machinery as a
+// fresh prompt, so the two paths cannot drift.
+//
+// total seeds the per-run usage delta (zero for a fresh prompt; the
+// already-spent-this-re-entry delta for driveFromAwaiting, so the EvResult figure
+// the team supervisor sums stays accurate). lastText seeds the last meaningful
+// assistant text. The budget brake reads sess.Usage directly (persisted spend is
+// honoured), independent of total.
+func (e *Engine) runLoop(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, total session.Usage, lastText string) {
 	// no-progress nudge accounting (Workstream A). noProgressNudges counts the
 	// continuation messages injected this run; nudgeCap is the budget (defaulted in
 	// NewEngine to defaultNoProgressNudges; a negative cap DISABLES nudging).

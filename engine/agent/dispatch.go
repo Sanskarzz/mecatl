@@ -155,6 +155,238 @@ func (e *Engine) runReadBatch(ctx context.Context, r *Run, sess *session.Session
 	return out, false
 }
 
+// resumeAbortedSiblingMessage is the synthetic error result text recorded for a
+// tool call on the trailing assistant message that the awaiting re-entry will NOT
+// dispatch (a sibling of the pending call, or — Q4 — the pending call itself when
+// it was a SURFACED-child ask whose child run did not survive the restart). It is
+// the closeOutInterruptedTurn analogue for the awaiting seam: model-facing replayed
+// history, so it must accurately state why the call never got a real result and
+// never claim a user action that did not happen.
+const resumeAbortedSiblingMessage = "tool call aborted: the run was resumed at a different pending approval after restart; this sibling call's verdict was lost"
+
+// Q4 (surfaced child asks) — VERIFIED no PendingAsk marker field needed. A SURFACED
+// child ask never sets the PARENT session's pending: only the CHILD session's own
+// loop calls PauseForApproval, while the parent stays StateRunning inside the
+// delegation tool call. The server persists (and resumes via Approve) only top-level
+// registered runs, so a restored StateAwaiting session ALWAYS holds a parent-OWN ask.
+// The honest close-out the plan describes for a surfaced-child resume is therefore
+// structurally unreachable through this seam; if a future change ever persisted a
+// surfaced-child ask onto a parent, it would close out here as an ordinary unanswered
+// sibling (resumeAbortedSiblingMessage). No surfaced-marker field was added (see the
+// Phase 2 report + CLOUD-NATIVE.md ledger row 6).
+
+// driveFromAwaiting is the body of the awaiting-only run-entry seam (ResumeApproval).
+// It re-enters the loop AT the parked ask: it applies verdict to the pending tool
+// call EXACTLY ONCE, closes out every OTHER unanswered tool call on the trailing
+// assistant message as a synthetic aborted error result (so the replayed history has
+// no dangling tool_use — provider-valid, ValidateToolPairing passes), records ONE
+// ordered RecordToolResults slice (pending result + synthetic siblings) in ToolCalls
+// order, saves, then continues the SHARED runLoop to completion.
+//
+// Exactly-once discipline: the pending call is resolved through the SAME
+// post-authorize tail runOne uses after a verdict (deny → denyResult; allow →
+// preHook + execute, so PostToolUse hooks + the audit recorder + EvToolResult fire
+// identically; allow-always → also Policy.Learn). The sibling calls are NEVER
+// dispatched (their verdicts were lost with the dead process) — they are closed out,
+// not re-run. No call on the trailing assistant message is dispatched twice.
+func (e *Engine) driveFromAwaiting(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, askID string, verdict session.ApprovalVerdict) {
+	// Step 0: the run-open signal, exactly like drive's Step 0a, so telemetry
+	// adapters open a span/counter for the resumed run.
+	e.emit(r, session.Event{Type: session.EvSessionInit})
+
+	// Step 1: guard. The session MUST be awaiting and the pending ask MUST match the
+	// askID we were asked to resume; a mismatch ends the run as StopError (never a
+	// silent clean complete) so a stale/duplicate Approve cannot drive an unexpected
+	// session to a clean terminal or execute the wrong call.
+	ask, ok := sess.PendingAsk()
+	if !ok {
+		e.terminate(ctx, r, sess, session.StopError, "", session.Usage{},
+			fmt.Errorf("%w: not in StateAwaiting", ErrNotAwaiting))
+		return
+	}
+	if ask.AskID != askID {
+		e.terminate(ctx, r, sess, session.StopError, "", session.Usage{},
+			fmt.Errorf("%w: pending ask %q does not match requested %q", ErrNotAwaiting, ask.AskID, askID))
+		return
+	}
+
+	// Locate the trailing assistant message (it carries the pending tool call plus
+	// any unanswered siblings) and the pending call within it. The pending call's
+	// args come from the trailing assistant message (the verbatim call the model
+	// emitted), NOT from the ask (which clamps/redacts for surfacing).
+	lastAssistant, pendingIdx, ok := locatePendingCall(sess.Conversation.Messages, ask)
+	if !ok {
+		e.terminate(ctx, r, sess, session.StopError, "", session.Usage{},
+			fmt.Errorf("%w: pending tool call not found on the trailing assistant message", ErrNotAwaiting))
+		return
+	}
+	msgs := sess.Conversation.Messages
+	calls := msgs[lastAssistant].ToolCalls
+	turnIdx := sess.Counters.Turns - 1
+
+	// Step 2: leave StateAwaiting via the awaiting-only ResumeWith seam (clears
+	// pending, preserves Counters/Usage). This is the SAME seam the live loop calls
+	// in authorize; it is NOT resetToIdle (which would zero Counters + clear pending).
+	if _, err := sess.ResumeWith(); err != nil {
+		e.terminate(ctx, r, sess, session.StopError, "", session.Usage{},
+			fmt.Errorf("agent: resume awaiting: %w", err))
+		return
+	}
+
+	// Step 3: resolve the pending call EXACTLY ONCE through the verdict. A cancelled
+	// ctx mid-resolution (cancelled=true) ends the run as cancelled, executing nothing
+	// further.
+	pendingResult, cancelled := e.resolvePendingCall(ctx, r, sess, ws, turnIdx, calls[pendingIdx], ask, verdict)
+	if cancelled {
+		e.terminate(ctx, r, sess, session.StopCancelled, "", session.Usage{}, nil)
+		return
+	}
+
+	// Step 4: assemble the ONE ordered RecordToolResults slice. For each tool call on
+	// the trailing assistant message not already answered: the pending call gets its
+	// real result; every other gets a synthetic aborted error (verdict lost with the
+	// dead process — close out, do NOT re-dispatch). Already-answered calls (a
+	// partially-dispatched turn) keep their recorded result and are skipped. Order
+	// follows ToolCalls, so the recorded tool messages pair 1:1 with the assistant's
+	// calls and ValidateToolPairing passes.
+	answered := make(map[session.ToolCallID]struct{})
+	for _, m := range msgs[lastAssistant+1:] {
+		if m.Role == session.RoleTool && m.ToolResult != nil {
+			answered[m.ToolResult.CallID] = struct{}{}
+		}
+	}
+	var toRecord []session.ToolResult
+	for i, c := range calls {
+		if _, done := answered[c.ID]; done {
+			continue
+		}
+		if i == pendingIdx {
+			toRecord = append(toRecord, pendingResult)
+			continue
+		}
+		sibling := session.NewToolError(c.ID, resumeAbortedSiblingMessage)
+		e.openCard(r, turnIdx, c)
+		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(sibling)})
+		toRecord = append(toRecord, sibling)
+	}
+	if err := sess.RecordToolResults(toRecord); err != nil {
+		e.terminate(ctx, r, sess, session.StopError, "", session.Usage{}, err)
+		return
+	}
+	e.save(ctx, sess)
+
+	// Step 5: continue the SHARED loop. total seeds zero (the verdict resolution
+	// recorded no model usage; the budget brake reads the persisted cumulative
+	// sess.Usage directly). lastText seeds empty (the prior assistant text, if any,
+	// is in history and replays).
+	e.runLoop(ctx, r, sess, ws, session.Usage{}, "")
+}
+
+// pendingCallID picks the tool call id the pending ask refers to. The ask does not
+// carry the call id directly, but on a well-formed awaiting turn the trailing
+// assistant message's calls and the ask agree on Tool; when exactly one call
+// matches the ask's Tool that call's id is authoritative. With multiple same-named
+// calls the caller falls back to the Tool match (first wins) — a benign ambiguity:
+// the multi-tool gate test parks on a UNIQUELY-named middle call, the real shape.
+func pendingCallID(ask session.PendingAsk, calls []session.ToolCall) string {
+	var match string
+	n := 0
+	for _, c := range calls {
+		if c.Name == ask.Tool {
+			match = string(c.ID)
+			n++
+		}
+	}
+	if n == 1 {
+		return match
+	}
+	return ""
+}
+
+// locatePendingCall finds the trailing assistant message and the index of the
+// pending tool call within it for the awaiting re-entry. It returns the trailing
+// assistant message index, the pending call's index in that message's ToolCalls, and
+// ok=false when there is no trailing assistant message or no call matching the ask.
+// It prefers the call-id heuristic (a single same-named call is authoritative) and
+// falls back to the first Tool match (a benign ambiguity for multiple same-named
+// calls; the gate test parks on a uniquely-named call, the real shape).
+func locatePendingCall(msgs []session.Message, ask session.PendingAsk) (lastAssistant, pendingIdx int, ok bool) {
+	lastAssistant = -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == session.RoleAssistant {
+			lastAssistant = i
+			break
+		}
+	}
+	if lastAssistant < 0 {
+		return -1, -1, false
+	}
+	calls := msgs[lastAssistant].ToolCalls
+	pendingIdx = -1
+	if id := pendingCallID(ask, calls); id != "" {
+		for i, c := range calls {
+			if string(c.ID) == id {
+				pendingIdx = i
+				break
+			}
+		}
+	}
+	if pendingIdx < 0 {
+		for i, c := range calls {
+			if c.Name == ask.Tool {
+				pendingIdx = i
+				break
+			}
+		}
+	}
+	if pendingIdx < 0 {
+		return -1, -1, false
+	}
+	return lastAssistant, pendingIdx, true
+}
+
+// resolvePendingCall applies verdict to the pending tool call EXACTLY ONCE and
+// returns its result, plus cancelled=true if ctx was cancelled mid-resolution. Deny
+// synthesizes a deny result (the tool is NOT run); AllowOnce/AllowAlways run the call
+// through the SAME post-authorize tail runOne uses (preHook + execute, so PostToolUse
+// hooks + the audit recorder + EvToolResult fire identically); AllowAlways also
+// Learns a per-session rule for FUTURE calls (the rehydrated permstore is in-memory —
+// the accepted Phase 2 wart; the rule covers later calls in THIS resumed run, Phase
+// 3b makes it durable). The card is opened before the gate/result (the "ToolCall card
+// before the gate" invariant) on every branch.
+func (e *Engine) resolvePendingCall(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, pendingCall session.ToolCall, ask session.PendingAsk, verdict session.ApprovalVerdict) (session.ToolResult, bool) {
+	if verdict == session.VerdictDeny {
+		e.openCard(r, turnIdx, pendingCall)
+		res := denyResult(pendingCall, fmt.Sprintf("denied by user: %s", ask.Reason))
+		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		return res, false
+	}
+	if verdict == session.VerdictAllowAlways {
+		e.deps.Policy.Learn(sess.ID, pendingCall)
+	}
+	t, known := e.lookupTool(r, pendingCall.Name)
+	e.openCard(r, turnIdx, pendingCall)
+	if !known {
+		res := session.NewToolError(pendingCall.ID, fmt.Sprintf("unknown tool %q", pendingCall.Name))
+		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		return res, false
+	}
+	effective, blocked, msg, herr := e.preHook(ctx, r, sess, turnIdx, pendingCall)
+	if herr != nil {
+		return session.ToolResult{}, true // ctx cancelled while running the hook
+	}
+	if blocked {
+		res := session.NewToolError(pendingCall.ID, msg)
+		e.emit(r, session.Event{Type: session.EvToolResult, Turn: turnIdx, ToolResult: ptr(res)})
+		return res, false
+	}
+	var enqueue time.Time
+	if e.deps.Clock != nil {
+		enqueue = e.deps.Clock.Now()
+	}
+	return e.execute(ctx, r, sess, ws, turnIdx, effective, t, enqueue), false
+}
+
 // runOne handles a single (mutating or unknown) tool call serially: authorize,
 // pre-hook, execute, post-hook. It returns the result and a cancelled flag.
 func (e *Engine) runOne(ctx context.Context, r *Run, sess *session.Session, ws tool.Workspace, turnIdx int, c session.ToolCall, t tool.Tool, known bool, enqueue time.Time) (session.ToolResult, bool) {

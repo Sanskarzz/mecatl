@@ -2285,6 +2285,84 @@ mid-conversation (`docs/design/CLOUD-NATIVE.md` ledger rows 1/2/3):
   the round-trip tests, the v1-downgrade test, and the `storeconformance` suite (every store
   driver proves the round-trip).
 
+### Awaiting-approval evict/rehydrate (cloud-native Phase 2)
+
+The FOURTH run-entry seam: `Approve`/`Deny` against a session whose process died
+while parked awaiting approval re-enters the loop AT the ask and drives it to
+completion. Durability was already correct (sessnap round-trips the `Pending` ask
+via `PauseForApproval`); Phase 2 adds only the liveness (`docs/design/CLOUD-NATIVE.md`
+ledger row 5).
+
+- **The fourth seam, NOT a fourth transition verb.** The three existing
+  terminal-recovery seams (Reopen / Interrupt / Recover, all via `resetToIdle` at a
+  turn boundary) zero `Counters` and clear the pending ask. The awaiting re-entry
+  must do NEITHER, so it drives the EXISTING awaiting-only `engine/session/session.go`
+  (`ResumeWith`) — the same seam the live loop calls in `authorize` — which clears
+  pending and returns to `StateRunning` while preserving `Counters`/`Usage`. No new
+  aggregate method was added (a second awaiting→running verb would be a footgun).
+- **Engine: `engine/agent/loop.go` (`ResumeApproval`) →
+  `engine/agent/dispatch.go` (`driveFromAwaiting`).** `ResumeApproval` mints the Run
+  through the SAME construction preamble as a prompt run — factored into
+  `engine/agent/loop.go` (`startRun`), shared by `RunContentWith` (→ `drive`) and
+  `ResumeApproval` (→ `driveFromAwaiting`) so the events/asks/cancel/ctx/hardAbort/
+  serial/diag/children/router setup cannot drift. `driveFromAwaiting` continues
+  through the SHARED `engine/agent/loop.go` (`runLoop`) — the `for {` loop body
+  factored out of `drive` so there is ONE loop, not two; `drive` and
+  `driveFromAwaiting` both call it after their own prologue.
+- **Exactly-once tool execution (the load-bearing property).** `driveFromAwaiting`
+  guards `PendingAsk` (no pending → terminate `ErrNotAwaiting`, never a silent clean
+  complete) and the askID match (mismatch → reject, execute nothing), then
+  `ResumeWith()`, then resolves the pending call through the SAME post-authorize tail
+  the live loop uses: deny → `denyResult`; allow → `preHook` + `execute` (so
+  PostToolUse hooks + the audit recorder + `EvToolResult` fire identically);
+  allow-always → also `Policy.Learn`. The pending tool runs EXACTLY ONCE (the live
+  loop already recorded its assistant message pre-restart; nothing re-dispatches it).
+- **Sibling close-out.** Every OTHER unanswered tool call on the trailing assistant
+  message (a multi-tool turn parked on call #2 of 3 → #1/#3 never got verdicts after
+  restart) is closed out as a synthetic aborted error result — the
+  `closeOutInterruptedTurn` analogue, built in the agent layer — so the replayed
+  history has no dangling tool_use (a provider HTTP 400 → `failed` otherwise). ONE
+  ordered `RecordToolResults` slice (pending result + synthetic siblings, in
+  `ToolCalls` order) is recorded, `e.save`, then `runLoop`. `session.ValidateToolPairing`
+  passes on the result (pinned by the multi-tool unit test).
+- **Service: `internal/adapter/server/service.go` (`resumeFromAwaiting`), reached
+  from `ApproveRun` on a `LookupRun` MISS.** The SAME-PROCESS path (a live registered
+  run resolves the ask over its channel) is tried FIRST and is unchanged; only a miss
+  rehydrates. `resumeFromAwaiting` loads the snapshot (`GetSession`, read-only — NOT
+  `loadAndReopen`, whose job is to drive completed/cancelled/failed to idle for a NEW
+  prompt, exactly the terminal states this seam REJECTS), gates `State ==
+  StateAwaiting` (everything else → `ErrNoActiveRun`, so idle/completed/cancelled/
+  failed stay terminal), resolves engine+workspace via the SHARED
+  `internal/adapter/server/service.go` (`engineAndWorkspaceFor`) (factored out of
+  `StartRunContent`, so the prompt path and the awaiting path rebuild the SAME engine
+  for a rehydrated selector/no-fs session), calls `ResumeApproval`, registers the
+  resumed run, and returns it. `ApproveRun` returns the run so the HTTP relay can
+  stream it (the SSE approve path); `Approve` keeps its ack-only signature
+  (`run==nil` on the same-process path).
+- **Wire.** No proto/driver change. The gRPC `Converse.readControl` same-process
+  path is unchanged (`run.Approve`). The HTTP approve handler relays the resumed run
+  as SSE via the SHARED `internal/adapter/server/http.go` (`relayRunSSE`) when
+  `ApproveRun` returns a run, else acks 204 — the standard reconnect-and-relay shape,
+  no streaming-approve field.
+- **Q4 child asks — verified, no marker field.** A surfaced child ask sets the
+  CHILD session's pending (its own loop calls `PauseForApproval`); the PARENT stays
+  `StateRunning` inside the delegation tool call, and the server persists/resumes only
+  top-level runs, so a restored `StateAwaiting` session ALWAYS holds a parent-OWN ask.
+  No `PendingAsk.Surfaced` field was added; a surfaced-child ask persisted onto a
+  parent (structurally unreachable today) would close out as an ordinary aborted
+  sibling, honest not silent. **v1 single-writer wart:** two live processes over one
+  store are last-write-wins by deployment contract (decision (c)); resume is
+  same-process-first, rehydrate-on-miss. **permstore wart:** the rehydrated session's
+  permstore is fresh in-memory; allow-always on resume re-Learns for later calls in
+  the resumed run, cross-restart durability is Phase 3b.
+- **Gates.** Offline two-Build `TestApproveAfterRestartE2E`
+  (`internal/app/approve_after_restart_test.go`, the CI-green proof, mutation-verified
+  per leg); server-layer state-gate + same-process
+  (`internal/adapter/server/resume_awaiting_test.go`); engine-layer exactly-once /
+  deny / not-awaiting / wrong-askID / multi-tool sibling close-out
+  (`engine/agent/resume_approval_test.go`); live SIGKILL counterpart
+  (`e2e/approve_after_kill_test.go`) Skips with an honest harness-gap note.
+
 ## Proto — `contracts/proto/mecatl/v1/` (multi-provider Phase 0 S3 wire surface)
 
 `CreateSessionRequest` carries an OPTIONAL `provider_id`(4)+`model_id`(5) selector (two distinct

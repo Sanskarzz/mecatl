@@ -351,6 +351,17 @@ func (h *HTTPHandler) prompt(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.relayRunSSE(w, r, id, run, flusher)
+}
+
+// relayRunSSE streams run's Events to w as Server-Sent Events until the channel
+// closes (the run ended). It is the SHARED relay used by both the prompt run-entry
+// and the awaiting-approval re-entry (the approve handler's rehydrate path), so the
+// SSE framing, the dead-client drain-to-discard, the disconnect-cancels-run hook,
+// the EvPermissionAsk persist, and the deregister-on-end discipline cannot drift
+// between the two entry points. The caller must already have validated the Flusher
+// and written nothing to w yet (this sets the headers + 200 itself).
+func (h *HTTPHandler) relayRunSSE(w http.ResponseWriter, r *http.Request, id session.SessionID, run *agent.Run, flusher http.Flusher) {
 	defer h.svc.deregister(id, run)
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -415,11 +426,38 @@ func (h *HTTPHandler) approve(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ask_id is required")
 		return
 	}
-	if err := h.svc.Approve(r.Context(), id, body.AskID, verdictFromHTTP(body.Verdict, body.Allow)); err != nil {
+	run, err := h.svc.ApproveRun(r.Context(), id, body.AskID, verdictFromHTTP(body.Verdict, body.Allow))
+	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	if run == nil {
+		// SAME-PROCESS path: a live run resolved the ask over its channel and the
+		// existing stream (the prompt SSE / the bidi relay) delivers the effects.
+		// Ack only.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// REHYDRATE path (cloud-native Phase 2): the process that parked the ask died
+	// and we re-entered the loop AT the ask in this process. The resumed run has no
+	// existing stream to ride, so relay its events as SSE on this approve response —
+	// the standard reconnect-and-relay shape, no streaming-approve proto change. A
+	// client that does not consume the body still gets a correct run: the drain-to-
+	// discard keeps it unwedged and the terminal state persists.
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// No streaming: the resumed run is registered and will drive to completion;
+		// fall back to an ack so the verdict is not lost. Drain in the background so
+		// the run never wedges behind an unread buffer.
+		go func() {
+			for range run.Events() { //nolint:revive // drain-to-discard: no consumer for the resumed stream
+			}
+			h.svc.deregister(id, run)
+		}()
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	h.relayRunSSE(w, r, id, run, flusher)
 }
 
 // verdictFromHTTP maps the HTTP approve body's string verdict to the domain
