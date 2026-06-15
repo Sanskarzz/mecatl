@@ -152,7 +152,10 @@ func toolInventory(tools []tool.ToolSpec) string {
 		return b.String()
 	}
 	for _, t := range tools {
-		fmt.Fprintf(&b, "\n- %s: %s", t.Name, firstLine(t.Description))
+		b.WriteString("\n- ")
+		b.WriteString(t.Name)
+		b.WriteString(": ")
+		b.WriteString(firstLine(t.Description))
 	}
 	return b.String()
 }
@@ -227,12 +230,16 @@ func writeSentence(b *strings.Builder, s string) {
 // firstLine returns the first non-empty, trimmed line of s, or "" if s has no
 // non-empty line.
 func firstLine(s string) string {
-	for _, line := range strings.Split(s, "\n") {
+	for {
+		line, rest, found := strings.Cut(s, "\n")
 		if trimmed := strings.TrimSpace(line); trimmed != "" {
 			return trimmed
 		}
+		if !found {
+			return ""
+		}
+		s = rest
 	}
-	return ""
 }
 
 // instructionFile names a project-instructions file and the provenance marker

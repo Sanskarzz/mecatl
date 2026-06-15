@@ -51,8 +51,8 @@ with `task bench` (micro) and `task perf:scenarios` (scenarios).
 Micro hot paths (`task bench`, count=10 — allocs/op were identical across all 10 runs):
 
 ```
-BenchmarkBuild                            31 allocs/op     6,532 B/op    ~2.1µs
-BenchmarkBuildLargeCatalog               224 allocs/op    31,292 B/op   ~14µs
+BenchmarkBuild                            21 allocs/op     6,224 B/op    ~1.7µs
+BenchmarkBuildLargeCatalog                32 allocs/op    28,536 B/op   ~7µs
 BenchmarkSplitCommands                    13 allocs/op       584 B/op   ~0.66µs
 BenchmarkReadOnlyBash                     19 allocs/op       816 B/op   ~1.29µs
 BenchmarkSubstitutionReadOnly             14 allocs/op       408 B/op   ~1.22µs
@@ -92,6 +92,15 @@ tui_scrollback_view_steady    ~51 allocs/op    ~137 KB/op   (400 blocks; UNCHANG
 > twice-per-message `renderInput`): `tui_scrollback_view_steady` falls from
 > ~32.5 MB/op to ~137 KB/op (−99.6% B/op; the residual is `vp.SetContent`'s line
 > split, the named follow-up).
+
+> **prompt inventory-render swap (2026-06-15).** A stateless, byte-identical swap in
+> [`engine/prompt/builder.go`](../../engine/prompt/builder.go): `toolInventory` now
+> writes each `- name: purpose` entry via direct `strings.Builder` writes instead of
+> `fmt.Fprintf` (dropping the per-tool reflection allocation), and `firstLine` extracts
+> the first non-empty line via `strings.Cut` instead of `strings.Split` (dropping the
+> per-call slice allocation). Output is unchanged — the gauntlet #6 stable-prefix tests
+> are the guard. `BenchmarkBuildLargeCatalog` falls 224 → 32 allocs/op (−85.7%) and
+> `BenchmarkBuild` 31 → 21 (−32.3%); no new state, no memoization.
 
 `goroutines Δ=0` on every scenario means no leak across the run — the gated invariant
 for the team / background-subagent leak class.
