@@ -150,6 +150,45 @@ type renderer struct {
 	inputKey   inputRenderKey
 	inputView  string
 	inputValid bool
+
+	// joinCache/joinValid/joinKey memoize the WHOLE joined conversation string —
+	// the OUTERMOST of the render memo layers, above blockCache. renderConversation
+	// is called once per flushed frame and, even when every block hits blockCache,
+	// re-joins all cached block strings into a fresh strings.Builder every time —
+	// O(scrollback) byte copying that profiling showed dominated the per-frame cost
+	// on a long scrollback (the per-block cache had already eliminated the styling
+	// cost). This memo skips the rebuild entirely when nothing changed since the
+	// last frame: the join is reused verbatim. Validity rests on the SAME purity
+	// argument as blockCache — the joined string is a pure function of the per-block
+	// renders, which are themselves keyed on (rev, width, expand) — so the key is a
+	// signature that a frame leaving blockRenders untouched (no block re-rendered)
+	// at the same (block count, width, expand) produced byte-identical block
+	// strings and therefore a byte-identical join. Update-goroutine-only, like the
+	// block caches; dropped by resetBlockCaches (the block-index reuse that invalidates
+	// blockCache equally invalidates a join built over it).
+	joinCache string
+	joinValid bool
+	joinKey   joinRenderKey
+
+	// joinScratch is the per-frame buffer of per-block render strings, REUSED across
+	// frames (truncated to [:0] and re-appended each call) so the block walk adds no
+	// per-frame allocation on the steady-state join hit. The strings it holds are the
+	// same ones blockCache already retains, so it pins nothing extra.
+	joinScratch []string
+}
+
+// joinRenderKey is the validity key of the memoized conversation join. blockRenders
+// is the cache-miss counter captured AFTER the per-block walk: if it is unchanged
+// between two frames AND the block count / width / expand all match, no block
+// re-rendered, every block string is byte-identical to last frame, and the joined
+// string can be reused verbatim. (blockRenders is monotonic and only ever bumped on
+// a real renderBlockFresh, so an equal value across frames is a sound "nothing
+// changed" signal.)
+type joinRenderKey struct {
+	blockRenders int
+	nBlocks      int
+	width        int
+	expand       bool
 }
 
 // inputRenderKey is the validity key of the memoized input render: the complete
@@ -207,6 +246,10 @@ func newRenderer(th theme.Theme) *renderer {
 func (r *renderer) resetBlockCaches() {
 	r.blockCache = map[int]blockEntry{}
 	r.blockMD = map[int]mdEntry{}
+	// Drop the whole-conversation join memo too: it is built over blockCache, so the
+	// index reuse that aliases a stale block entry would equally alias a stale join.
+	r.joinValid = false
+	r.joinKey = joinRenderKey{}
 }
 
 // setWidth records the current wrap width. Width changes are handled by the
@@ -464,21 +507,63 @@ func stripVS16(s string) string {
 // Edit/Write diffs render in full instead of line-capped.
 //
 // It is called on every flushed frame (frame-coalesced during streaming; see
-// update.go's renderTickMsg), but each SETTLED block joins from the per-block
-// cache via renderBlock — only blocks whose (rev, width, expand) changed render
-// fresh, so the per-frame styling cost is O(changed blocks), not O(scrollback).
-// The join itself (and the viewport's SetContent line split) remains
-// O(scrollback) string work.
+// update.go's renderTickMsg). TWO memo layers keep the per-frame cost off the
+// scrollback length: each SETTLED block joins from the per-block cache via
+// renderBlock (only blocks whose (rev, width, expand) changed render fresh), and
+// the WHOLE joined string is itself memoized in joinCache. A frame that re-renders
+// no block (blockRenders unchanged) at the same block count / width / expand
+// reuses the previous join verbatim, skipping the O(scrollback) Builder copy that
+// profiling showed dominated the per-frame cost on a long scrollback. The block
+// walk below still runs every frame (cheap on cache hits) so the live tail block
+// re-renders and bumps blockRenders — the signal that drives join invalidation.
+// (The viewport's SetContent line split is a separate, smaller cost, out of scope
+// here.)
 func (r *renderer) renderConversation(c *conversation, expand bool) string {
-	var b strings.Builder
+	before := r.blockRenders
+	// Walk every block: warms each block's cache (and re-renders the live tail,
+	// bumping blockRenders on a miss). Collect the per-block strings into a scratch
+	// slice REUSED across frames (so the walk itself adds no per-frame allocation on
+	// the steady-state hit) so the join, if it has to be rebuilt, reuses these
+	// results rather than calling renderBlock a second time per block.
+	r.joinScratch = r.joinScratch[:0]
 	for i := range c.blocks {
+		r.joinScratch = append(r.joinScratch, r.renderBlock(i, &c.blocks[i], expand))
+	}
+
+	// Fast path: no block re-rendered this frame and the join signature is
+	// unchanged, so the previously joined string is still byte-identical — reuse it
+	// without rebuilding the Builder.
+	//
+	// `r.blockRenders == before` is THE load-bearing invalidation signal: every
+	// render-visible mutation bumps the block's rev → blockCache miss →
+	// renderBlockFresh → blockRenders++, so any change to a block's output during
+	// this frame's walk trips this check (the cache-invalidation tests all exercise
+	// it). The joinKey {nBlocks, width, expand} fields are belt-and-suspenders, NOT
+	// dead code: they guard a future change that could alter the JOINED output
+	// WITHOUT re-rendering any block — e.g. a width- or expand-dependent join
+	// separator, or a block-count-dependent header — a case today's tests cannot
+	// reach (so they prove blockRenders, not the key). Keep them.
+	if r.joinValid && r.blockRenders == before &&
+		r.joinKey == (joinRenderKey{blockRenders: before, nBlocks: len(c.blocks), width: r.width, expand: expand}) {
+		return r.joinCache
+	}
+
+	var b strings.Builder
+	for i, s := range r.joinScratch {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(r.renderBlock(i, &c.blocks[i], expand))
+		b.WriteString(s)
 		b.WriteString("\n")
 	}
-	return b.String()
+	result := b.String()
+	// Record the POST-walk blockRenders so the NEXT frame compares against the value
+	// this join was built at: an intervening re-render bumps blockRenders past it and
+	// correctly misses the fast path.
+	r.joinCache = result
+	r.joinValid = true
+	r.joinKey = joinRenderKey{blockRenders: r.blockRenders, nBlocks: len(c.blocks), width: r.width, expand: expand}
+	return result
 }
 
 // renderBlock is the CACHED per-block entry point: it returns the memoized

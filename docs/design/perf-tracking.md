@@ -75,8 +75,23 @@ single_session_long      ~36,656 allocs/op   ~4.83 MB/op   goroutines Δ=0   cac
 team_fanout               ~2,690 allocs/op    ~599 KB/op    goroutines Δ=0   cache-hit 0.75
 background_subagents      ~1,307 allocs/op    ~258 KB/op    goroutines Δ=0
 compaction_cycle          ~4,204 allocs/op    ~570 KB/op    goroutines Δ=0   (39 compactions/40 turns; cache-hit 0 by design)
-tui_scrollback_view       ~6,400 allocs/op   ~33.4 MB/op   (400 rendered blocks; the SetContent O(scrollback) surface)
+tui_scrollback_view        ~6,270 allocs/op   ~33.4 MB/op   (400 blocks; STREAMING worst case — live block mutates every op, join always rebuilds)
+tui_scrollback_view_steady    ~51 allocs/op    ~137 KB/op   (400 blocks; UNCHANGED frame — join cache serves the memoized string; was ~94 allocs / ~32.5 MB/op pre-cache)
 ```
+
+> **tui-scrollback hotspot (2026-06-15).** A heap profile of the render path pinned
+> the per-frame cost to the JOIN in `renderConversation`, NOT `vp.SetContent`:
+> `strings.Builder.WriteString` was ~91% of allocations — every flushed frame
+> re-copied all 400 cached block strings into a fresh `Builder`, even when the
+> per-block cache hit on every block. The fix caches the whole joined string
+> (`renderer.joinCache`, keyed on a `blockRenders`/block-count/width/expand
+> signature) and reuses it verbatim on any frame that re-rendered no block. The
+> streaming bench (`tui_scrollback_view`) mutates the live block every op so the
+> join always rebuilds — it is the unchanged worst-case floor and is flat across the
+> change. The realistic win is the UNCHANGED frame (cursor move, scroll, the
+> twice-per-message `renderInput`): `tui_scrollback_view_steady` falls from
+> ~32.5 MB/op to ~137 KB/op (−99.6% B/op; the residual is `vp.SetContent`'s line
+> split, the named follow-up).
 
 `goroutines Δ=0` on every scenario means no leak across the run — the gated invariant
 for the team / background-subagent leak class.
@@ -167,11 +182,14 @@ baseline. `task bench` is deliberately NOT part of `task test` — same posture 
   repeatedly). Each records a `kpi.ScenarioResult`; a `TestMain` flushes them to
   `$MECATL_PERF_JSON` when set.
 - [`cmd/mecatui/ui/scrollback_bench_test.go`](../../cmd/mecatui/ui/scrollback_bench_test.go)
-  — `BenchmarkScrollbackView`, the TUI scrollback render path (`refreshView` →
-  `vp.SetContent`, the O(scrollback) class). It is an internal `_test` file so it
-  can reach the unexported render path; `perf/kpi` is imported ONLY in the test
-  file — the production `ui` package stays free of the perf dependency. Its rows
-  MERGE into the same `$MECATL_PERF_JSON` (two metric families, one file).
+  — `BenchmarkScrollbackView` (streaming worst case) and
+  `BenchmarkScrollbackViewSteady` (unchanged frame), the TUI scrollback render path
+  (`refreshView` → `renderConversation`'s join, the profile-confirmed O(scrollback)
+  hotspot — now memoized; see the tui-scrollback note above). It is an internal
+  `_test` file so it can reach the unexported render path; `perf/kpi` is imported
+  ONLY in the test file — the production `ui` package stays free of the perf
+  dependency. Its rows MERGE into the same `$MECATL_PERF_JSON` (two metric families,
+  one file).
 
 All scenarios are deterministic and offline (`mockllm` + `memfs`/`memstore` +
 `permpolicy`, fixed scripts, `time.Unix(0,0)` session epoch, `llm.Reset()` between
@@ -217,8 +235,11 @@ Each scenario is a scripted `mockllm` conversation driven through the real engin
   hygiene and per-round allocation under delegation.
 - **background-subagents** — M detached children + drain; targets the registry /
   drain / seal path that has leaked before.
-- **tui-scrollback** — render a large scrollback through `mecatui`'s `View` path;
-  targets the `SetContent` O(scrollback) class.
+- **tui-scrollback** — render a large scrollback through `mecatui`'s `refreshView`
+  path; targets the `renderConversation` join (the profile-confirmed O(scrollback)
+  hotspot, now memoized — see the tui-scrollback note above). Two variants: a
+  streaming worst case (live block mutates every frame) and a steady unchanged frame
+  (the join-cache fast path).
 - **compaction-cycle** — drive history past the compaction threshold repeatedly;
   targets allocation churn + correctness of the kept tail.
 

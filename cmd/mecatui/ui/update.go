@@ -2340,9 +2340,11 @@ func (m Model) onScrollKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 //
 // Cost shape: renderConversation re-renders only blocks whose rev/width/expand
 // changed since the last frame (the renderer's blockCache; in practice the live
-// tail block) — settled blocks join from cache. The residual O(scrollback)
-// per-frame cost is the string JOIN plus vp.SetContent's line split/measure of
-// the full content; trimming that is a follow-up, out of scope here.
+// tail block) — settled blocks join from cache — and memoizes the WHOLE joined
+// string (joinCache), so a frame that changed no block (a cursor move, scroll, or
+// the twice-per-message renderInput) reuses the join verbatim instead of rebuilding
+// it. The residual O(scrollback) per-frame cost is now only vp.SetContent's line
+// split/measure of the full content; trimming that is a follow-up, out of scope here.
 func (m *Model) refreshView() {
 	m.viewDirty = false
 	content := m.rend.renderConversation(&m.conv, m.expandTools)

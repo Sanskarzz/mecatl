@@ -1,12 +1,20 @@
 package ui
 
 // Offline performance benchmark for the mecatui scrollback render path
-// (perf-tracking.md Phase 2, "tui-scrollback"): it targets the SetContent
-// O(scrollback) class — the per-frame string JOIN of all blocks plus the
-// viewport's line split/measure in refreshView. It lives in the ui package (an
-// internal _test file) so it can reach the unexported render path; perf/kpi is
-// imported ONLY here, never by the production ui package (the production package
-// must stay free of the perf dependency).
+// (perf-tracking.md Phase 2, "tui-scrollback"): it targets the per-frame string
+// JOIN of all blocks in renderConversation — the profile-confirmed O(scrollback)
+// hotspot (~91% of per-frame allocations was strings.Builder.WriteString copying
+// every cached block string into a fresh Builder each frame; vp.SetContent's line
+// split is the smaller residual). It lives in the ui package (an internal _test
+// file) so it can reach the unexported render path; perf/kpi is imported ONLY here,
+// never by the production ui package (the production package must stay free of the
+// perf dependency).
+//
+// TWO benchmarks: BenchmarkScrollbackView mutates the live block every op (the
+// streaming frame — the join must rebuild, the join cache cannot help it, so it is
+// the worst-case floor), and BenchmarkScrollbackViewSteady re-renders without
+// mutating (the unchanged frame — cursor move, scroll, the twice-per-message
+// renderInput) which the join cache serves from memo, so its B/op collapses.
 //
 // It is a Benchmark, so `task test` (default -run) never runs it; it runs under
 // `task perf:scenarios`. It records a kpi.ScenarioResult with NO token KPIs (a
@@ -89,6 +97,42 @@ func BenchmarkScrollbackView(b *testing.B) {
 
 	addScrollbackResult(kpi.ScenarioResult{
 		Name:          "tui_scrollback_view",
+		Iterations:    b.N,
+		AllocsPerOp:   scrollbackPerOp(mtr.Allocs, b.N),
+		BytesPerOp:    scrollbackPerOp(mtr.Bytes, b.N),
+		GoroutinesEnd: kpi.GoroutineDelta(baselineGoroutines, 20*time.Millisecond),
+		RSSPeakBytes:  mtr.RSSPeak,
+		RSSFinalBytes: mtr.RSSFinal,
+		WallClockNs:   mtr.WallNs,
+	})
+}
+
+// BenchmarkScrollbackViewSteady measures the OTHER half of the per-frame cost: a
+// re-render where the conversation did NOT change (a cursor move, input keystroke,
+// scroll, overlay toggle, or the at-least-twice-per-message renderInput chokepoint
+// — all of which call refreshView). Before the join cache this still re-joined the
+// whole scrollback into a fresh Builder every time (the profile-confirmed
+// O(scrollback) hotspot); the join cache reuses the memoized string, so the steady
+// frame allocates ~nothing. This is the benchmark that exercises the join-cache fast
+// path — the streaming bench above is structurally all-miss (it mutates every op).
+func BenchmarkScrollbackViewSteady(b *testing.B) {
+	m := buildScrollbackModel(b)
+	m.refreshView() // warm the per-block caches AND the join cache
+
+	baselineGoroutines := kpi.GoroutinesAfterSettle(20 * time.Millisecond)
+	capt := kpi.NewCapture()
+	b.ReportAllocs()
+	capt.Begin()
+	for b.Loop() {
+		// No conversation mutation: the steady, unchanged-frame re-render that the
+		// join cache targets. Without the cache this re-joined the full scrollback;
+		// with it, the memoized join is returned verbatim.
+		m.refreshView()
+	}
+	mtr := capt.End()
+
+	addScrollbackResult(kpi.ScenarioResult{
+		Name:          "tui_scrollback_view_steady",
 		Iterations:    b.N,
 		AllocsPerOp:   scrollbackPerOp(mtr.Allocs, b.N),
 		BytesPerOp:    scrollbackPerOp(mtr.Bytes, b.N),
