@@ -298,9 +298,14 @@ read-only, the main job needs `contents: write` for `gh-pages`). The mechanism i
 DELIBERATE SPLIT of two complementary OSS tools, not one:
 
 1. **A tested allocs gate** over the `task bench` microbenchmarks. The PR job
-   fetches the previous-main `bench.txt` baseline from `gh-pages` (read-only raw
-   URL, no token; skips green with a notice on the very first run, before a baseline
-   exists), then [`perf/cmd/allocsgate/main.go`](../../perf/cmd/allocsgate/main.go)
+   fetches the previous-main `bench.txt` baseline from `gh-pages` via AUTHENTICATED
+   `gh api` (the `GITHUB_TOKEN`; `raw.githubusercontent.com` is unauthenticated and
+   404s on a PRIVATE repo — which this is — so the raw URL would silently sink the
+   gate into its skip path; the contents API is private-repo-safe). A genuinely
+   absent baseline (the very first run) leaves no file → the gate skips green with a
+   notice; a failed fetch must leave NO file, not an empty one (else allocsgate's
+   present-but-empty→fail-loud path would misfire). Then
+   [`perf/cmd/allocsgate/main.go`](../../perf/cmd/allocsgate/main.go)
    compares the median `allocs/op` per benchmark and FAILS iff some benchmark rose
    beyond an epsilon (**≥ 1 whole alloc AND > 2 %**). The gate decision is this
    epsilon comparison over the raw bench numbers — allocs are deterministic, so no
@@ -340,6 +345,17 @@ baseline to fetch.
 `contents: read` (no push), the main job is `contents: write` (gh-pages only); the
 only credential is the automatic `GITHUB_TOKEN` — no PAT, no repo secret. All
 actions SHA-pinned with a `# vX.Y.Z` comment, matching the house pins in `ci.yml`.
+
+**Private-repo note (this repo is private):** the gate and the trend store work
+fully — github-action-benchmark reads/writes `gh-pages` over authenticated git
+(`GITHUB_TOKEN`), and the allocs baseline is fetched over the authenticated contents
+API (NOT `raw.githubusercontent.com`, which 404s on private). The one thing private
+costs is the browsable GitHub **Pages site** (the `…github.io/…/dev/bench` chart),
+which needs Pages-on-private (a paid GHE feature) — but the gate never depends on the
+site; the trend data lives as files on the `gh-pages` branch, viewable via the
+branch/file browser. `gh-pages` is bootstrapped once as an empty orphan branch
+(github-action-benchmark's `auto-push` fetches the branch before it can create it, so
+it must pre-exist on the first run).
 
 `perfconvert` imports ONLY `perf/kpi` + the standard library (same leaf posture as
 `perf/kpi` itself), hard-fails on a `schema_version` mismatch, and aggregates the
