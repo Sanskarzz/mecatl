@@ -207,6 +207,62 @@ tasks:
       - MECATL_PERF_JSON='{{.PERF_JSON_ABS}}' MECATL_PERF_SHA='{{.PERF_SHA}}' go test -bench=. -benchmem -count={{.BENCHCOUNT}} -run='^$' ./perf/scenarios/
       - MECATL_PERF_JSON='{{.PERF_JSON_ABS}}' MECATL_PERF_SHA='{{.PERF_SHA}}' go test -bench=BenchmarkScrollbackView -benchmem -count={{.BENCHCOUNT}} -run='^$' ./cmd/mecatui/ui/
 
+  pgo:collect:
+    desc: |
+      Collect a PROVISIONAL OFFLINE CPU profile for Profile-Guided Optimization
+      (Phase 4 of the perf-regression roadmap, docs/design/perf-tracking.md).
+      Manual target — NOT part of `task build`/`task test`.
+
+      It runs the offline scenario + engine-agent benchmarks under CPU profiling
+      with a FIXED iteration count, then merges the captures into a single pprof
+      profile with `go tool pprof -proto`. Output lands under .scratch/pgo/
+      (gitignored): scenarios.cpu, agent.cpu, and the merged default.pgo.
+
+      Override the per-bench iteration count with PGOITERS (default 200x). Fewer
+      iterations = a faster, noisier capture; more = a steadier profile.
+
+      CAVEAT — this profile is OFFLINE-ONLY: it trains the compiler on the
+      mockllm + memfs/memstore path that ships in NO production binary. There is
+      no real provider, SSE, or network coverage in it. It is a MECHANISM check
+      and a local experiment, NOT the profile to commit as cmd/mecated/default.pgo.
+      The production refresh path (curl mecated's loopback pprof endpoint, merge,
+      drop in cmd/mecated/default.pgo) is documented in perf-tracking.md Phase 4.
+
+      The merge is SAMPLE-WEIGHTED: -benchtime=Nx fixes the ITERATION count, not
+      wall-time, and the whole-loop scenarios run ~100x longer per op than the
+      agent micro-benches, so the scenario samples dominate the merged profile.
+      That is fine here — the scenarios are the more production-representative
+      workload, and this is a throwaway provisional artifact, so balance is a
+      non-goal. (The PRODUCTION path is different: a fixed `?seconds=N` on every
+      capture DOES equalize wall-time there — see perf-tracking.md Phase 4.)
+    vars:
+      PGOITERS: '{{.PGOITERS | default "200x"}}'
+    cmds:
+      - mkdir -p .scratch/pgo
+      # -run='^$' skips unit tests; -benchtime=Nx pins the iteration count (NOT
+      # wall-time). Offline only — mockllm + memfs/memstore. -o writes the compiled
+      # test binary pprof needs to symbolize the .cpu sample. The scenario capture
+      # dominates the sample-weighted merge below (see desc).
+      - go test -run='^$' -bench=. -benchtime={{.PGOITERS}} -cpuprofile=.scratch/pgo/scenarios.cpu -o .scratch/pgo/scenarios.test ./perf/scenarios/
+      # Also capture the engine-agent micro-benches — a minor secondary contributor
+      # (~5% of the merged samples given the ~100x/op gap), since they're a subset
+      # of the dispatch/build-request hot path the scenarios already exercise.
+      - go test -run='^$' -bench=. -benchtime={{.PGOITERS}} -cpuprofile=.scratch/pgo/agent.cpu -o .scratch/pgo/agent.test ./engine/agent/
+      # Merge the captures into one profile. -proto emits the protobuf pprof format
+      # the Go toolchain reads as a PGO profile; the merge is sample-weighted, so
+      # the longer-running scenario samples dominate (the desired bias here).
+      - go tool pprof -proto .scratch/pgo/scenarios.cpu .scratch/pgo/agent.cpu > .scratch/pgo/default.pgo
+      - cmd: |
+          echo
+          echo "============================================================"
+          echo "  PROVISIONAL OFFLINE PGO PROFILE — .scratch/pgo/default.pgo"
+          echo "  Trained on the mockllm path only: NO real provider / SSE /"
+          echo "  network coverage. This is NOT the production profile."
+          echo "  Do NOT commit it as cmd/mecated/default.pgo."
+          echo "  Production refresh path: docs/design/perf-tracking.md Phase 4."
+          echo "============================================================"
+        silent: true
+
   test:cover:
     desc: Run tests with coverage and write coverage/coverage.{out,html}
     cmds:

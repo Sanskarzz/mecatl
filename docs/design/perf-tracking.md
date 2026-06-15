@@ -1,13 +1,17 @@
 # Long-term performance & resource regression tracking
 
-Status: **Phases 1 + 2 + 3 shipped; Phases 4–6 remain research / proposal.**
+Status: **Phases 1 + 2 + 3 + 4 shipped; Phases 5–6 remain deferred-until-justified.**
 Phase 0 (decide what we track) is settled below, Phase 1 (hot-path microbenchmarks
 + a `task bench` gate-feed) is built — see [Phase 1 — Status](#phase-1--status),
 Phase 2 (the offline scenario harness behind `task perf:scenarios`) is built — see
-[Phase 2 — Status](#phase-2--status) — and Phase 3 (the CI trend store + the
+[Phase 2 — Status](#phase-2--status), Phase 3 (the CI trend store + the
 allocs-first regression gate in [`.github/workflows/perf.yml`](../../.github/workflows/perf.yml))
-is built — see [Phase 3 — Status](#phase-3--status). Phases 4–6 (PGO, continuous
-profiling, stable wall-clock gating) remain a design sketch. Sibling to
+is built — see [Phase 3 — Status](#phase-3--status) — and Phase 4 (the PGO
+*mechanism*: `task pgo:collect`, the auto-applied `cmd/mecated/default.pgo` slot,
+and the production refresh process) is wired — see [Phase 4 — Status](#phase-4--status).
+Phases 5–6 (continuous profiling, stable wall-clock gating) remain intentionally
+deferred — the gaps there are operational/hardware, not software (see the
+[roadmap close-out](#roadmap-close-out)). Sibling to
 [`perf-observability.md`](perf-observability.md), which covers the *introspection*
 half (pprof, flight recorder, OTel metrics, the perf MCP, `--perf`, goleak).
 
@@ -342,6 +346,103 @@ actions SHA-pinned with a `# vX.Y.Z` comment, matching the house pins in `ci.yml
 `-count=N` samples by median per metric. Its `main_test.go` runs offline under
 `task test`.
 
+## Phase 4 — Status
+
+**Shipped — the mechanism, deliberately NOT a committed profile.** Profile-Guided
+Optimization is wired so a real profile auto-applies the moment it is dropped in,
+the collection path is a first-class task, and the refresh process is written down.
+No profile is committed.
+
+### Honesty assessment (why no profile ships today)
+
+Three facts shape the decision, and they all point the same way:
+
+1. **The only profile we can capture offline is partial-coverage.** Every benchmark
+   in `task bench` / `task perf:scenarios` runs over the `mockllm` + `memfs`/
+   `memstore` path — exactly the path that ships in **no** production binary. A
+   `default.pgo` trained on it would teach the compiler to optimize the mock
+   adapters and the offline harness, not the real OpenAI/Anthropic SSE decode, the
+   resilience wrapper, or the gRPC/HTTP server surface. Committing it would be
+   training on the wrong distribution, so we don't.
+2. **PGO's ceiling here is sub-1% of wall-clock.** mecatl's dominant cost is
+   network/token wall-clock (the calibration this whole doc opens with), not CPU.
+   Go's published PGO win is ~2–14% **of CPU time**; for a harness whose CPU is a
+   thin slice of a network-bound run, that is a fraction of a percent of the wall
+   clock a user feels. PGO is worth wiring (it is free once a real profile exists),
+   not worth contorting the build to force.
+3. **The floor is no-PGO — PGO cannot pessimize on an unrepresentative profile.**
+   The Go toolchain treats the profile as a *hint*: a stale or unrepresentative
+   `default.pgo` degrades gracefully toward the non-PGO build, it does not make a
+   correct program slower than no-PGO. So the cost of shipping the mechanism with
+   no profile (or, later, a slightly stale one) is bounded at "no win", never a
+   regression. That asymmetry is why wiring-the-slot-now / fill-it-later is safe.
+
+### The `task pgo:collect` mechanism
+
+[`task pgo:collect`](../../Taskfile.yml) (manual target — NOT part of `task build`
+or `task test`, same posture as `task bench`/`task perf:scenarios`) captures CPU
+profiles from the offline benchmarks under a **fixed** iteration count
+(`-benchtime=Nx`, default `200x`, override via `PGOITERS`). It captures two
+families (the `perf/scenarios` whole-loop benchmarks and the `engine/agent`
+dispatch/build-request microbenchmarks), then merges them with
+`go tool pprof -proto a.cpu b.cpu > default.pgo`. The merge is **sample-weighted**:
+`-benchtime=Nx` fixes the iteration count, not wall-time, and the whole-loop
+scenarios run ~100x longer per op than the agent micro-benches — so the scenario
+samples dominate the merged profile (~19:1 in practice). That bias is desirable
+here: the scenarios are the more production-representative workload, and the
+agent micro-benches are a subset of the dispatch path they already exercise. This
+is a throwaway provisional artifact, so capture balance is a non-goal — see the
+production refresh path below, where equal-`?seconds=N` captures DO equalize
+wall-time. Everything lands under the
+gitignored `.scratch/pgo/`, and the recipe prints a loud banner that the result is
+a PROVISIONAL OFFLINE profile (mockllm only) that must NOT be committed as
+`cmd/mecated/default.pgo`. It is a mechanism check and a local experiment, nothing
+more.
+
+### The per-binary decision
+
+PGO is per-`main`. The Go build looks for a `default.pgo` **next to the `main`
+package** and, under the default `-pgo=auto`, applies it automatically. The single
+slot we reserve is `cmd/mecated/default.pgo` (the server is the only long-running,
+CPU-doing binary worth profiling), and it is **left absent**: with no file there,
+`-pgo=auto` is a no-op and the build is byte-for-byte the non-PGO build. Drop a real
+profile at that path and `go build`/`ko build` pick it up with zero flag or workflow
+changes (confirmed: no `-pgo=off` anywhere in [`Taskfile.yml`](../../Taskfile.yml),
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml), or
+[`.github/workflows/release.yml`](../../.github/workflows/release.yml)). `mecatui`
+and `mecademo` get no profile — the TUI client and the offline demo are not
+CPU-bound server workloads. A `*.pgo binary linguist-generated` rule is pre-staged
+in [`.gitattributes`](../../.gitattributes) so a future committed profile is treated
+as a binary blob.
+
+### The production refresh process (how a REAL profile gets made)
+
+When a representative `cmd/mecated/default.pgo` is wanted, capture from a **real**
+mecated under real load, not from the offline harness:
+
+1. Run a production-representative `mecated`. The loopback admin mux serves
+   `/debug/pprof` alongside `/metrics` (`--metrics-addr`, default `127.0.0.1:9090`;
+   set empty to disable; see [`perf-observability.md`](perf-observability.md)). The
+   surface is loopback-only and never exposed.
+2. Capture a CPU profile under representative traffic:
+   `curl -o prod-a.pgo 'http://127.0.0.1:9090/debug/pprof/profile?seconds=30'`
+   (repeat across a few hosts / time windows for coverage).
+3. Merge the captures: `go tool pprof -proto prod-a.pgo prod-b.pgo > default.pgo`.
+   **Caveat:** `-proto` merging assumes the inputs cover comparable durations — use
+   the **same** `?seconds=` on every capture so one host doesn't dominate the merge.
+4. Drop the result at `cmd/mecated/default.pgo`, commit it (the `.gitattributes`
+   rule makes it a binary blob), and it is auto-applied by every subsequent
+   `go build`/`ko build` — including the release image — via `-pgo=auto`.
+
+### Staleness caveat
+
+A `default.pgo` matches functions by name/structure. A large refactor (renames,
+inlining-boundary changes, restructured hot paths) degrades the match rate, so the
+PGO win decays toward no-PGO over time — it does not regress, but it stops helping.
+Treat a committed profile as something to **refresh periodically** (or after a
+notable hot-path refactor), the same way the baseline snapshot above is re-captured;
+a stale profile is a missed win, never a correctness or performance hazard.
+
 ## Roadmap & the OSS boundary
 
 | Phase | Goal | OSS tools | OSS gap |
@@ -350,7 +451,7 @@ actions SHA-pinned with a `# vX.Y.Z` comment, matching the house pins in `ci.yml
 | 1 — Micro-gating ✅ | Fail a PR that regresses a hot path | `testing.B`, `benchstat` (`task bench`) | none for allocs; trustworthy `ns/op` needs Phase 6 |
 | 2 — Scenario harness ✅ | Catch leaks / mem growth / token regressions offline | stdlib `runtime`, `mockllm` driver (`task perf:scenarios`) | none |
 | 3 — Trend + history ✅ | See regressions over time, not just per-PR | github-action-benchmark (free, `gh-pages`) + a tested allocs gate (`perf/cmd/allocsgate`, `.github/workflows/perf.yml`) | Bencher's *hosted* analytics + same-bare-metal-local-and-CI is the paid delta |
-| 4 — PGO | Free 2–14% CPU; give the profile archive a job | the Go toolchain | none — PGO is entirely OSS |
+| 4 — PGO ✅ | Wire the PGO mechanism; auto-apply a profile when one is dropped in | the Go toolchain (`task pgo:collect`, `cmd/mecated/default.pgo`) | none — PGO is entirely OSS |
 | 5 — Continuous profiling | Always-on queryable fleet profiles | Pyroscope / Parca + Grafana | *operational only* — see below; defer until `mecated`-as-a-service |
 | 6 — Stable wall-clock gating | Make `ns/op` gating reliable in CI | self-hosted runner + `perflock` | the **hardware**, not the software |
 
@@ -379,9 +480,29 @@ What money buys is **removing ops and hardware burden, not new abilities.**
 ### Suggested ordering (solo dev)
 
 - **Do now** (free, offline, catches our real bugs): 0 → 2 → 1 → 3 (gh-pages route).
-- **Do soon** (free win): 4 (PGO).
+- **Done** (free win, mechanism wired): 4 (PGO — see [Phase 4 — Status](#phase-4--status)).
 - **Defer until justified:** 5 (only when `mecated` is a real long-lived service),
   6 (only if `ns/op` gating becomes load-bearing).
+
+### Roadmap close-out
+
+Phases 0–4 deliver a **complete, free, OSS** story for both halves of the problem:
+regression *tracking* (Phase 0 KPIs → Phase 1 micro-gating → Phase 2 offline
+scenario harness → Phase 3 CI trend store + allocs-first gate) and one-time
+build-time *optimization* (Phase 4 PGO mechanism). Every link that actually
+*catches a regression* or *applies a free win* is shipped with no paid
+infrastructure.
+
+Phases 5 (continuous profiling) and 6 (bare-metal `ns/op` gating) remain
+**intentionally deferred-until-justified** — and the reason is the same for both:
+the gap is operational/hardware, not software. Phase 5 only earns its keep once
+`mecated` is a real long-lived service worth always-on fleet profiles (Pyroscope/
+Parca are fully capable self-hosted whenever that day comes). Phase 6 only earns its
+keep if `ns/op` gating becomes load-bearing — which the allocs/RSS/token KPIs are
+deliberately designed to avoid — and even then it is a runner-and-`perflock`
+purchase, not a missing capability. Neither is a software hole in this roadmap; both
+are a decision to spend ops/hardware budget that today's calibration does not
+justify.
 
 ## Open decisions
 

@@ -98,6 +98,18 @@ allocs/op is hard-gated; `ns/op` is advisory. The first PR before any baseline
 exists skips the allocs gate green with a notice. See
 `docs/design/perf-tracking.md` (Phase 3 — Status) for the full rationale.
 
+### PGO is orthogonal to the regression gate (Phase 4)
+
+Profile-Guided Optimization (perf-tracking Phase 4) is a **build-time
+optimization**, NOT part of any regression gate. No workflow logic changes for it.
+The mechanism is just a reserved slot: once a real `cmd/mecated/default.pgo` exists,
+every `go build` / `ko build` (here in `ci.yml` and in `release.yml`) auto-applies it
+via the toolchain default `-pgo=auto` — no flag, no workflow edit. Today no profile
+is committed (the offline one `task pgo:collect` produces is provisional and stays
+under the gitignored `.scratch/pgo/`), so `-pgo=auto` is a no-op and the build is the
+non-PGO build. PGO never gates a PR — it does not catch regressions, it shaves CPU —
+so `perf.yml` is unaffected. See `docs/design/perf-tracking.md` (Phase 4 — Status).
+
 ## `release.yml` — `v*` tag push (+ `workflow_dispatch` with a `tag` input, for idempotently re-publishing an existing tag's artifacts)
 
 Builds and publishes the `mecated` image and its supply-chain metadata. The
