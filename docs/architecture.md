@@ -441,13 +441,14 @@ The loop terminates the session in exactly one of `Complete`/`Stop`/`Cancel`/
 `Fail` and emits exactly one terminal `result` event carrying cumulative usage.
 
 A run-level **token budget** bounds the whole loop: `Deps.MaxRunTokens`
-(`--max-run-tokens`, 0 = disabled) is checked at the turn boundary — never
+(`--max-run-tokens`; **default: unlimited**, `0` disables the brake) is checked at the turn boundary — never
 mid-stream, so an in-flight turn always completes — against the run's
 accumulated `session.Usage` (input + output; cache tokens excluded). Crossing
 it ends the run cleanly with `StopBudget` (a NON-error terminal → `completed`,
 Reopen-recoverable, mirroring `StopNoProgress`). Every child engine — Subagent,
 Parallel branch, team member, lead synthesis — inherits it; a per-call override
-(`RunOptions.MaxRunTokensOverride`, the Subagent `max_tokens` arg) may only
+(`RunOptions.MaxRunTokensOverride`, the Subagent `max_run_tokens` arg — `max_tokens`
+is the deprecated alias for the same budget) may only
 **tighten** it. The team-aggregate counterpart is `--max-team-tokens` (§15).
 
 ```mermaid
@@ -656,8 +657,11 @@ self-contained task (multi-step investigation or build/test/git work) to a **chi
    ever enters the parent conversation.
 
 **Per-call knobs (`subagentArgs`).** Beyond `prompt`/`description`/`agent`, a Subagent call may
-supply: `max_turns`/`max_tool_calls`/`max_tokens` (TIGHTEN-ONLY caps — the model can
-make its child stricter than the operator's bound, never looser); `timeout_ms` (a
+supply: `max_turns`/`max_tool_calls`/`max_run_tokens` (TIGHTEN-ONLY caps — the model can
+make its child stricter than the operator's bound, never looser; `max_run_tokens` is the
+**preferred** cumulative input+output run-budget arg, `max_tokens` the **deprecated** alias for
+the same budget — supplying both with different positive values is a model-visible error;
+**default: inherited/unlimited**); `timeout_ms` (a
 wall-clock deadline → a time-budget tool error); `model` (pin THIS child to a specific
 provider model — minted via the composition-supplied `WithSubagentEngineFactory` closure
 through the contamination-safe `newChildEngineForProvider` path, NEVER a clone-and-swap;
@@ -1255,7 +1259,7 @@ snapshots are capped value types, and `team.end` carries aggregate usage plus cl
 member dispositions (`done` or `stopped` for `error`/`cancelled`/`budget`).
 
 A team-wide **token budget** complements the per-run one (§5):
-`Supervisor.WithTeamTokenBudget` (`--max-team-tokens`; gRPC
+`Supervisor.WithTeamTokenBudget` (`--max-team-tokens`, **default: unlimited**; gRPC
 `CreateTeamRequest.max_team_tokens`; a per-call Team `max_team_tokens` arg may
 only tighten it) is a supervisor-level ceiling checked at the ROUND boundary
 before scheduling — the in-flight round and the lead's synthesis still

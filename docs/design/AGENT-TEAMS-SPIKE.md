@@ -202,7 +202,7 @@ snapshotted in `outcome()`, so the gRPC path gets the same rich fallback. Headli
 
 > **SHIPPED (4A complete) — per-engine token ceiling AND team-AGGREGATE budget.**
 > A SHARED loop-level *per-engine* token ceiling shipped: `agent.Deps.MaxRunTokens`
-> (0 = disabled), checked at the turn boundary in `Engine.drive` against THAT run's cumulative
+> (**default: unlimited** — `0` disables the brake), checked at the turn boundary in `Engine.drive` against THAT run's cumulative
 > `session.Usage` (input+output, via `Usage.TotalTokens`). When the total crosses the ceiling
 > the loop terminates CLEANLY via the completed path with `session.StopBudget` (a non-error
 > terminal, Reopen-recoverable, string-passthrough on the wire — mirrors `StopNoProgress`

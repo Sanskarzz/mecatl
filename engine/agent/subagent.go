@@ -278,13 +278,23 @@ type subagentArgs struct {
 	// free-text behaviour, unchanged.
 	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
 
-	// MaxTokens optionally imposes a per-call TIGHTEN-ONLY cumulative TOKEN ceiling on
-	// this child run (input+output, the loop-level token budget). It rides a Run-scoped
-	// override on the SHARED child engine (no fresh engine needed), folded tighten-only
-	// with the operator default: the lower non-zero value wins, so a per-call ceiling can
-	// make the child stricter than the operator's bound, never looser. A non-positive
-	// value is ignored (inherit the engine's budget). A budget-stopped child returns its
-	// best-effort summary (StopBudget is a clean terminal), not an error.
+	// MaxRunTokens is the PREFERRED per-call TIGHTEN-ONLY cumulative TOKEN budget for this
+	// child run (input+output — the loop-level run budget, NOT a single-response output
+	// ceiling). It rides a Run-scoped override on the SHARED child engine (no fresh engine
+	// needed), folded tighten-only with the operator default: the lower non-zero value
+	// wins, so a per-call budget can make the child stricter than the operator's bound,
+	// never looser. A non-positive value is ignored (inherit the engine's budget — DEFAULT
+	// is the inherited/unlimited budget). A budget-stopped child returns its best-effort
+	// summary (StopBudget is a clean terminal), not an error. It is the same budget as the
+	// deprecated `max_tokens` alias; supplying both with CONFLICTING positive values is a
+	// model-visible error (see resolveMaxRunTokens).
+	MaxRunTokens *int `json:"max_run_tokens,omitempty"`
+	// MaxTokens is the DEPRECATED alias for MaxRunTokens. The name is misleading: it is a
+	// cumulative input+output RUN budget (the loop-level token ceiling), NOT a provider
+	// single-response output ceiling. Retained for backward compatibility; prefer
+	// max_run_tokens. Same tighten-only + non-positive-ignored semantics. When both this
+	// and MaxRunTokens are set to DIFFERENT positive values the call is rejected with a
+	// model-visible error; same-value is accepted.
 	MaxTokens *int `json:"max_tokens,omitempty"`
 
 	// Background detaches this child: the call returns IMMEDIATELY with a started-
@@ -381,9 +391,13 @@ var subagentSchema = json.RawMessage(`{
       "type": "string",
       "description": "Optional provider model id to pin THIS subagent to (e.g. a cheaper model for wide fan-out, a stronger one for deep analysis). Omit to inherit the parent's model. Cannot be combined with the agent argument (a specialist already pins its own model)."
     },
+    "max_run_tokens": {
+      "type": "integer",
+      "description": "Optional cumulative input+output token budget for this child run. Tighten-only: can lower the inherited server budget, never raise it. When reached the subagent stops cleanly and returns its best-effort summary. Default: inherited/unlimited. (The deprecated max_tokens is an alias for this same budget; don't set both to different values.)"
+    },
     "max_tokens": {
       "type": "integer",
-      "description": "Optional cap on the subagent's total token spend (input+output) for THIS call. Tighten-only: it can make the subagent stricter than the default, never looser. When reached the subagent stops cleanly and returns its best-effort summary. Omit to use the default."
+      "description": "DEPRECATED alias for max_run_tokens (same cumulative input+output run budget, not a single-response output ceiling). Prefer max_run_tokens. Setting both to different values is rejected. Default: inherited/unlimited."
     },
     "output_schema": {
       "type": "object",
@@ -1009,6 +1023,31 @@ func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagen
 	return engine, limits, session.ToolResult{}, true
 }
 
+// resolveMaxRunTokens resolves the per-call cumulative token budget from the two aliases:
+// the preferred `max_run_tokens` and the deprecated `max_tokens`. They name the SAME budget,
+// so it collects the positive value from each (a nil or non-positive value is "unset") and:
+//   - if BOTH are present with DIFFERENT positive values, it reports a conflict (value 0,
+//     conflict true) and ALSO returns the two offending positive values (runVal/legacyVal) so
+//     run() can echo them in the model-visible error — a model repairing its JSON benefits
+//     from seeing the numbers, not just the rule;
+//   - otherwise it returns the single positive value (or, when both agree, that shared value),
+//     and 0 when neither is set (inherit the engine's budget — default unlimited).
+func resolveMaxRunTokens(args subagentArgs) (value int, conflict bool, runVal, legacyVal int) {
+	if args.MaxRunTokens != nil && *args.MaxRunTokens > 0 {
+		runVal = *args.MaxRunTokens
+	}
+	if args.MaxTokens != nil && *args.MaxTokens > 0 {
+		legacyVal = *args.MaxTokens
+	}
+	if runVal > 0 && legacyVal > 0 && runVal != legacyVal {
+		return 0, true, runVal, legacyVal
+	}
+	if runVal > 0 {
+		return runVal, false, runVal, legacyVal
+	}
+	return legacyVal, false, runVal, legacyVal
+}
+
 // buildSubagentRunOptions assembles the per-call RunOptions, the synthetic SubmitResult
 // tool, and the effective child prompt for one Subagent run:
 //   - Per-call token ceiling (R4): a Run-scoped TIGHTEN-ONLY MaxRunTokens override carried
@@ -1024,8 +1063,11 @@ func (t *SubagentTool) selectChildEngine(callID session.ToolCallID, args subagen
 //     ⇒ today's free-text path.
 func buildSubagentRunOptions(args subagentArgs, resuming bool) (RunOptions, *submitResultTool, string) {
 	var runOpts RunOptions
-	if args.MaxTokens != nil && *args.MaxTokens > 0 {
-		runOpts.MaxRunTokensOverride = *args.MaxTokens
+	// The conflict (differing positive max_run_tokens vs the deprecated max_tokens) is
+	// rejected earlier in run() as a model-visible error, so here we only need the
+	// resolved positive value (0 = inherit/unlimited).
+	if v, _, _, _ := resolveMaxRunTokens(args); v > 0 {
+		runOpts.MaxRunTokensOverride = v
 	}
 	prompt := args.Prompt
 	if resuming {
@@ -1196,6 +1238,16 @@ func (t *SubagentTool) run(ctx context.Context, call session.ToolCall, ws tool.W
 	}
 	if strings.TrimSpace(args.Prompt) == "" {
 		return session.NewToolError(call.ID, "Subagent: 'prompt' is required and must be non-empty"), nil
+	}
+
+	// max_run_tokens / max_tokens are the SAME cumulative run budget (the latter is the
+	// deprecated, misleadingly-named alias). Supplying both with different positive values
+	// is ambiguous; reject it as a model-visible error rather than silently picking one
+	// (mirrors the validateFork conflict pattern). The two offending values are echoed so a
+	// model repairing its JSON sees the numbers. Same-value or only-one-set is fine.
+	if _, conflict, runVal, legacyVal := resolveMaxRunTokens(args); conflict {
+		return session.NewToolError(call.ID,
+			fmt.Sprintf("Subagent: set only one of max_run_tokens or the deprecated max_tokens (they are the same budget); they were given conflicting values (max_run_tokens=%d, max_tokens=%d)", runVal, legacyVal)), nil
 	}
 
 	// fork:true precondition guard + synchronous snapshot (issue #34): mutual

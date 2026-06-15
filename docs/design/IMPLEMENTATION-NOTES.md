@@ -452,7 +452,9 @@ with the verbatim `resumeStalenessNote` (the conversation survives but file chan
 processes do NOT — re-run/re-read before trusting earlier observations), computed BEFORE the
 structured-output wrap so a resumed structured-output child sees the note inside the wrap. The LOADED
 session keeps its STORED Limits; the per-call `max_turns`/`max_tool_calls` only TIGHTEN them (Reopen/
-Interrupt already reset Counters, so each bound applies afresh); `max_tokens` rides the same
+Interrupt already reset Counters, so each bound applies afresh); the per-call token budget (`max_run_tokens`,
+the preferred arg; `max_tokens` the deprecated alias for the same budget — `resolveMaxRunTokens` folds the
+two and REJECTS differing positive values with a model-visible error, accepts same-value) rides the same
 `RunOptions.MaxRunTokensOverride`. An IN-FLIGHT GUARD (`tryAcquireChildID`/`releaseChildID` over a
 mutex-guarded `inFlight` set) registers EVERY child id (fresh AND resume) BEFORE acquiring the
 concurrency slot and rejects a SECOND concurrent run on the SAME id with a model-visible "already
@@ -869,15 +871,25 @@ background + per-child cancel (and the child-concurrency default corrected 10→
 `TestFooterCountsCrossTurnBackgroundChild`, `agent.TestSubagentSpecEnumeratesAgents` (the
 widened description guard). Goldens: unchanged (no golden covers a background lane).
 
-**Subagent per-call token ceiling (`max_tokens`, Run-scoped budget override — R4).** `subagentArgs.MaxTokens`
-rides the new `RunOptions.MaxRunTokensOverride` carried into `Engine.RunContentWith`, so a per-call
-token ceiling bounds the SHARED child engine WITHOUT minting a fresh engine. `effectiveMaxRunTokens`
-folds it TIGHTEN-ONLY with `Deps.MaxRunTokens` (the lower non-zero value wins), so a per-call ceiling
-can make the child stricter than the operator default, never looser. A budget-stopped child ends
-`StopBudget` (clean terminal) → a success-with-note Subagent result, not an error. The `RunOptions`
-override is the cleaner of the two R4 options (it generalises and works on the shared engine);
-`RunContent`/`Run` delegate to `RunContentWith` with a zero `RunOptions` (legacy run, unchanged).
-Guards: `agent.TestSubagentPerCallMaxTokensHitsBudgetTerminal`, `agent.TestSubagentPerCallMaxTokensTightenOnly`.
+**Subagent per-call token budget (`max_run_tokens` preferred, `max_tokens` deprecated alias — Run-scoped
+override, R4 + issue #62).** The PREFERRED arg is `subagentArgs.MaxRunTokens`; `subagentArgs.MaxTokens` is the
+DEPRECATED alias retained for backward compatibility (its name is misleading — it is a cumulative input+output
+RUN budget, the loop-level token ceiling, NOT a provider single-response output ceiling). Both name the SAME
+budget. `resolveMaxRunTokens(args)` collects the positive value from each and REJECTS the call with a
+model-visible error ("set only one of max_run_tokens or the deprecated max_tokens …") when both are present with
+DIFFERENT positive values (same-value is accepted; only-one-set uses that one; neither = inherited/unlimited).
+The conflict guard fires in `run()` alongside `validateFork` (a model-visible `session.NewToolError`, so the
+child never starts); `buildSubagentRunOptions` then reads the resolved value into `RunOptions.MaxRunTokensOverride`
+carried into `Engine.RunContentWith`, so a per-call budget bounds the SHARED child engine WITHOUT minting a fresh
+engine. `effectiveMaxRunTokens` folds it TIGHTEN-ONLY with `Deps.MaxRunTokens` (the lower non-zero value wins),
+so a per-call budget can make the child stricter than the operator default, never looser. A budget-stopped child
+ends `StopBudget` (clean terminal) → a success-with-note Subagent result, not an error. **Default is OFF**
+(neither alias set ⇒ inherited/unlimited budget). The `RunOptions` override is the cleaner of the two R4 options
+(it generalises and works on the shared engine); `RunContent`/`Run` delegate to `RunContentWith` with a zero
+`RunOptions` (legacy run, unchanged). Guards: `agent.TestSubagentMaxRunTokensAliasResolvesToOverride`,
+`agent.TestSubagentMaxTokensDeprecatedAliasStillWorks`, `agent.TestSubagentMaxRunTokensConflictRejected`,
+`agent.TestSubagentMaxRunTokensSameValueAccepted`, `agent.TestSubagentBudgetUnsetByDefault`,
+`agent.TestSubagentMaxRunTokensTightenOnlyCannotLoosen`.
 
 **Unknown-tool card (dispatch `runOne`).** An unknown/unresolved tool-call name now opens an
 `EvToolCall` card BEFORE its `EvToolResult` error (`unknown tool %q`), preserving the

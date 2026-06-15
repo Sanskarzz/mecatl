@@ -887,8 +887,8 @@ func parseFlags(argv []string) (config, error) {
 	fs.DurationVar(&cfg.llmStreamIdleTimeout, "llm-stream-idle-timeout", 120*time.Second, "max idle gap between LLM stream chunks after the first chunk; a longer stall terminates the turn (0 disables)")
 	fs.IntVar(&cfg.llmBreakerThreshold, "llm-breaker-threshold", 5, "consecutive LLM failures that open the circuit breaker (0 disables)")
 	fs.DurationVar(&cfg.llmBreakerCooldown, "llm-breaker-cooldown", 30*time.Second, "how long the LLM circuit breaker stays open before half-opening")
-	fs.IntVar(&cfg.maxRunTokens, "max-run-tokens", 0, "loop-level cumulative token ceiling per run (input+output); a run that crosses it ends cleanly with stop=budget. Inherited by every subagent/team member. 0 (default) disables")
-	fs.IntVar(&cfg.maxTeamTokens, "max-team-tokens", 0, "team-wide cumulative token ceiling per team run (input+output summed across ALL members and rounds). When crossed the team stops scheduling new rounds — the in-flight round and the lead's synthesis still complete, and the report states the budget stop. Applies to the Team tool and gRPC CreateTeam; a per-call Team max_team_tokens may only tighten it. Orthogonal to --max-run-tokens (per-run). 0 (default) disables")
+	fs.IntVar(&cfg.maxRunTokens, "max-run-tokens", 0, "Maximum cumulative input+output tokens per agent run. Inherited by subagents and team members. A run that crosses it ends cleanly with stop=budget. Default: unlimited; pass a positive value to cap. (0 also means unlimited.)")
+	fs.IntVar(&cfg.maxTeamTokens, "max-team-tokens", 0, "Maximum cumulative input+output tokens per team run, summed across all members and rounds. When crossed the team stops scheduling new rounds — the in-flight round and the lead's synthesis still complete, and the report states the budget stop. Applies to the Team tool and gRPC CreateTeam; a per-call Team max_team_tokens may only tighten it. Orthogonal to --max-run-tokens. Default: unlimited; pass a positive value to cap. (0 also means unlimited.)")
 
 	fs.StringVar(&cfg.metricsAddr, "metrics-addr", defaultMetricsAddr, "Prometheus /metrics listen address (empty disables the metrics endpoint)")
 
