@@ -29,6 +29,9 @@ tasks:
     cmds:
       - go build -o bin/mecated ./cmd/mecated
       - go build -o bin/mecademo ./cmd/mecademo
+      # mecatequi: the single-shot, headless CI/batch runner (one prompt -> diff +
+      # summary JSON + optional durable event log -> exit code).
+      - go build -o bin/mecatequi ./cmd/mecatequi
       # mecatui stamps its build version into the welcome splash via -X main.version.
       - go build -ldflags "-X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/mecatui ./cmd/mecatui
 
