@@ -1,13 +1,15 @@
 # Long-term performance & resource regression tracking
 
-Status: **Phases 1 + 2 shipped; the trend store (Phase 3+) is research / proposal.**
+Status: **Phases 1 + 2 + 3 shipped; Phases 4–6 remain research / proposal.**
 Phase 0 (decide what we track) is settled below, Phase 1 (hot-path microbenchmarks
-+ a `task bench` gate-feed) is built — see [Phase 1 — Status](#phase-1--status) — and
++ a `task bench` gate-feed) is built — see [Phase 1 — Status](#phase-1--status),
 Phase 2 (the offline scenario harness behind `task perf:scenarios`) is built — see
-[Phase 2 — Status](#phase-2--status). The trend store (Phase 3+) remains a design
-sketch. Sibling to [`perf-observability.md`](perf-observability.md), which covers
-the *introspection* half (pprof, flight recorder, OTel metrics, the perf MCP,
-`--perf`, goleak).
+[Phase 2 — Status](#phase-2--status) — and Phase 3 (the CI trend store + the
+allocs-first regression gate in [`.github/workflows/perf.yml`](../../.github/workflows/perf.yml))
+is built — see [Phase 3 — Status](#phase-3--status). Phases 4–6 (PGO, continuous
+profiling, stable wall-clock gating) remain a design sketch. Sibling to
+[`perf-observability.md`](perf-observability.md), which covers the *introspection*
+half (pprof, flight recorder, OTel metrics, the perf MCP, `--perf`, goleak).
 
 ## The gap this closes
 
@@ -283,6 +285,63 @@ goroutine / token / cache-hit** regression; report **RSS / ns/op** as advisory
 comment. Trend store: `benchmark-action/github-action-benchmark` (free, `gh-pages`)
 to start; self-hosted Bencher if/when change-point detection earns its keep.
 
+## Phase 3 — Status
+
+**Shipped.** The trend store + regression gate now live in a dedicated workflow
+[`.github/workflows/perf.yml`](../../.github/workflows/perf.yml) (separate from
+`ci.yml` because the two jobs need different permission postures — the PR job is
+read-only, the main job needs `contents: write` for `gh-pages`). The mechanism is a
+DELIBERATE SPLIT of two complementary OSS tools, not one:
+
+1. **A tested allocs gate** over the `task bench` microbenchmarks. The PR job
+   fetches the previous-main `bench.txt` baseline from `gh-pages` (read-only raw
+   URL, no token; skips green with a notice on the very first run, before a baseline
+   exists), then [`perf/cmd/allocsgate/main.go`](../../perf/cmd/allocsgate/main.go)
+   compares the median `allocs/op` per benchmark and FAILS iff some benchmark rose
+   beyond an epsilon (**≥ 1 whole alloc AND > 2 %**). The gate decision is this
+   epsilon comparison over the raw bench numbers — allocs are deterministic, so no
+   statistical significance test is needed (that is benchstat's job; benchstat
+   stays the LOCAL human A/B tool, documented in `task bench` help, and is
+   deliberately NOT in the CI gate path). allocsgate is FAIL-CLOSED: an
+   empty/corrupt bench file or baseline fails rather than passing on no comparison;
+   a missing baseline (first run) skips green; an all-renamed (no-overlap) run warns
+   without failing. allocs/op is hard-gated; `ns/op` is advisory.
+2. **`benchmark-action/github-action-benchmark`** for the scenario KPIs and the
+   trend dashboard. The scenario JSON (`$MECATL_PERF_JSON`) is reshaped by a small
+   converter, [`perf/cmd/perfconvert/main.go`](../../perf/cmd/perfconvert/main.go),
+   into two github-action-benchmark custom-format suites:
+   - **smaller-is-better** — per scenario `allocs_per_op`, `tokens_total`
+     (input+output), and `goroutine_delta`. One `alert-threshold: 102%` covers all
+     three; scenario allocs are consequently gated at 2 %, which is safe because
+     they are deterministic. Splitting into a third dedicated suite is the
+     escalation if a 2 % false positive ever fires.
+   - **bigger-is-better** — `cache_hit_rate`, emitted ONLY for the explicit
+     whitelist `{single_session_long, team_fanout}`. `alert-threshold: 105%`. The
+     by-design-0 scenarios (`compaction_cycle`, the `tui_*` benches) must NOT emit a
+     cache-hit point — the converter hardcodes the allowlist rather than a `>0`
+     heuristic, so a genuine cache regression to 0 on a whitelisted scenario still
+     produces a point and fails the gate.
+
+The **PR-vs-main split:** the PR job runs both github-action-benchmark suites with
+`fail-on-alert: true` but `auto-push: false` — it fails a regressing PR without ever
+writing the store. The main job (`push`) runs the same suites with `auto-push: true`
+to update the `gh-pages` dashboard, runs the advisory `go`-tool trend (ns/op +
+allocs, `fail-on-alert: false`), re-runs the allocs gate against the just-superseded
+baseline to catch a regression that merged, and finally writes the raw `bench.txt`
+back to the `gh-pages` data dir (with a rebase-retry push so a concurrent gh-pages
+advance never silently drops the baseline update) so the next PR's gate has a
+baseline to fetch.
+
+**Security posture:** `pull_request` (never `pull_request_target`); the PR job is
+`contents: read` (no push), the main job is `contents: write` (gh-pages only); the
+only credential is the automatic `GITHUB_TOKEN` — no PAT, no repo secret. All
+actions SHA-pinned with a `# vX.Y.Z` comment, matching the house pins in `ci.yml`.
+
+`perfconvert` imports ONLY `perf/kpi` + the standard library (same leaf posture as
+`perf/kpi` itself), hard-fails on a `schema_version` mismatch, and aggregates the
+`-count=N` samples by median per metric. Its `main_test.go` runs offline under
+`task test`.
+
 ## Roadmap & the OSS boundary
 
 | Phase | Goal | OSS tools | OSS gap |
@@ -290,7 +349,7 @@ to start; self-hosted Bencher if/when change-point detection earns its keep.
 | 0 — KPIs + baselines | Decide what we measure | (a doc) | none |
 | 1 — Micro-gating ✅ | Fail a PR that regresses a hot path | `testing.B`, `benchstat` (`task bench`) | none for allocs; trustworthy `ns/op` needs Phase 6 |
 | 2 — Scenario harness ✅ | Catch leaks / mem growth / token regressions offline | stdlib `runtime`, `mockllm` driver (`task perf:scenarios`) | none |
-| 3 — Trend + history | See regressions over time, not just per-PR | github-action-benchmark (free) or self-hosted Bencher | Bencher's *hosted* analytics + same-bare-metal-local-and-CI is the paid delta |
+| 3 — Trend + history ✅ | See regressions over time, not just per-PR | github-action-benchmark (free, `gh-pages`) + a tested allocs gate (`perf/cmd/allocsgate`, `.github/workflows/perf.yml`) | Bencher's *hosted* analytics + same-bare-metal-local-and-CI is the paid delta |
 | 4 — PGO | Free 2–14% CPU; give the profile archive a job | the Go toolchain | none — PGO is entirely OSS |
 | 5 — Continuous profiling | Always-on queryable fleet profiles | Pyroscope / Parca + Grafana | *operational only* — see below; defer until `mecated`-as-a-service |
 | 6 — Stable wall-clock gating | Make `ns/op` gating reliable in CI | self-hosted runner + `perflock` | the **hardware**, not the software |
@@ -342,9 +401,33 @@ Resolved in the Phase 2 build:
   "no `internal/...`" rule the offline harness keeps).
 - **Trend store — RESOLVED: same `gh-pages` store, two metric families.** The
   scenario JSON ($MECATL_PERF_JSON) and the TUI render bench MERGE into one file,
-  ready to feed a single trend store as two families (Phase 3 wiring still TBD).
+  fed to the single `gh-pages` trend store as two families by the Phase 3 wiring.
+
+Resolved in the Phase 3 build (see [Phase 3 — Status](#phase-3--status)):
+
+- **Gate mechanism — RESOLVED: a SPLIT, not one tool.** A tested allocs gate
+  ([`perf/cmd/allocsgate`](../../perf/cmd/allocsgate/main.go); deterministic
+  epsilon ≥ 1 alloc AND > 2 %, FAIL-CLOSED on empty/corrupt input) over `task bench`
+  PLUS `benchmark-action/github-action-benchmark` for the scenario KPIs + the
+  `gh-pages` dashboard. allocs/op hard-gated; ns/op advisory. benchstat stays the
+  LOCAL human A/B tool, not the CI gate decision.
+- **Converter home — RESOLVED:
+  [`perf/cmd/perfconvert`](../../perf/cmd/perfconvert/main.go).** A stdlib +
+  `perf/kpi`-only `package main` that reshapes the scenario JSON into the two
+  github-action-benchmark custom suites, hard-failing on a `schema_version`
+  mismatch and aggregating samples by median.
+- **Cache-hit whitelist — RESOLVED: an explicit allowlist
+  `{single_session_long, team_fanout}`, not a `>0` heuristic** — so a regression to
+  0 on a whitelisted scenario still fails the gate, while the by-design-0 scenarios
+  (`compaction_cycle`, `tui_*`) emit no cache-hit point.
+- **PR vs main — RESOLVED: PR fails-but-never-pushes; main pushes the store** (and
+  re-stores `bench.txt` as the next baseline). `pull_request`, never
+  `pull_request_target`; PR `contents: read`, main `contents: write`.
+- **Per-metric thresholds — RESOLVED: ONE 102 % threshold on the unified
+  smaller-suite** (so scenario allocs are gated at 2 %, safe because deterministic);
+  splitting into a third suite is the escalation if a 2 % false positive ever fires.
 
 Still open:
 
-- Trend tooling: start github-action-benchmark; revisit Bencher only when false
+- Trend tooling: github-action-benchmark is in; revisit Bencher only when false
   positives from threshold gating become a real cost.

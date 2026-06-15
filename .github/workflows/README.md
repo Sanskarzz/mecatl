@@ -1,6 +1,6 @@
 # GitHub Actions workflows for mecatl
 
-Three workflows live here. Every third-party action is **SHA-pinned** with a
+Four workflows live here. Every third-party action is **SHA-pinned** with a
 `# vX.Y.Z` comment so a re-pointed tag from a compromised maintainer cannot
 silently change what runs. Pins track the Stacklok house set used in
 `a downstream consumer`.
@@ -68,6 +68,35 @@ budget, so the job timeout is the cheap runner-billing backstop). On failure
 the self-diagnosing transcripts (`.scratch/e2e-*/artifacts/**`, including
 `mecated.log`) upload as a 7-day artifact, and the cumulative token/cost
 ledger is appended to the job summary when present in the test output.
+
+## `perf.yml` — push to `main` + every pull request
+
+The **Phase 3** performance-regression gate + trend store of
+`docs/design/perf-tracking.md`. Deliberately a **separate** workflow from `ci.yml`
+because its two jobs need different permission postures. Runs on `pull_request`
+(**not** `pull_request_target`) — PR code is untrusted; the only credential is the
+automatic `GITHUB_TOKEN`, scoped per job.
+
+| Job | Trigger | Permissions | What it does |
+|-----|---------|-------------|--------------|
+| `perf-pr` | `pull_request` | `contents: read` | Builds the benchmarks; HARD-gates `allocs/op` via `perf/cmd/allocsgate` against the previous-main baseline (epsilon ≥ 1 alloc AND > 2 %); runs the scenario suite through `github-action-benchmark` with `fail-on-alert: true` but `auto-push: false`. **Fails a regressing PR; never writes the store.** |
+| `perf-main` | `push` to `main` | `contents: write` | Same build, then pushes the trend data to `gh-pages` (`auto-push: true`): an advisory `go`-tool `ns/op`+allocs dashboard (`fail-on-alert: false`), the gated scenario suites, and the raw `bench.txt` baseline (rebase-retry push) the next PR fetches. Re-runs the allocs gate against the just-superseded baseline to flag a regression that merged. |
+
+Mechanism: a deliberate **split** of two OSS tools — a tested allocs gate
+([`perf/cmd/allocsgate`](../../perf/cmd/allocsgate/main.go)) over `task bench`, plus
+`benchmark-action/github-action-benchmark` over the scenario KPIs. The gate decision
+is allocsgate's epsilon comparison over the raw bench numbers (allocs are
+deterministic — no significance test needed); it is FAIL-CLOSED on empty/corrupt
+input. `benchstat` stays the LOCAL human A/B tool (see `task bench` help), not the CI
+gate. The scenario JSON is reshaped by
+[`perf/cmd/perfconvert`](../../perf/cmd/perfconvert/main.go) into two custom suites:
+a *smaller-is-better* suite (`allocs_per_op`, `tokens_total`, `goroutine_delta`,
+one `102%` threshold → scenario allocs gated at 2 %, safe because deterministic) and
+a *bigger-is-better* suite (`cache_hit_rate`, `105%`, ONLY for the whitelist
+`{single_session_long, team_fanout}` — the by-design-0 scenarios emit no point).
+allocs/op is hard-gated; `ns/op` is advisory. The first PR before any baseline
+exists skips the allocs gate green with a notice. See
+`docs/design/perf-tracking.md` (Phase 3 — Status) for the full rationale.
 
 ## `release.yml` — `v*` tag push (+ `workflow_dispatch` with a `tag` input, for idempotently re-publishing an existing tag's artifacts)
 

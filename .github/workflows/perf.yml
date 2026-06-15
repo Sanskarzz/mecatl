@@ -1,0 +1,360 @@
+# Performance regression tracking for mecatl — the Phase 3 CI gate + trend store
+# of docs/design/perf-tracking.md.
+#
+# WHY A DEDICATED WORKFLOW (not folded into ci.yml): the two jobs here need
+# DIFFERENT permission postures. The PR job is read-only (`contents: read`) and
+# never pushes; the main job needs `contents: write` to push the trend data to the
+# `gh-pages` branch. ci.yml is uniformly `contents: read`, and mixing a write job
+# into it would over-grant the whole file. Keeping perf separate keeps each job at
+# least privilege.
+#
+# THE PR-vs-MAIN SPLIT:
+#   - `perf-pr`   (pull_request): build the benchmarks, HARD-gate allocs/op against
+#                 the previous-main baseline with the tested allocsgate program,
+#                 then run the scenario suite through github-action-benchmark with
+#                 fail-on-alert but `auto-push: false` — it FAILS a regressing PR
+#                 but never writes the trend store.
+#   - `perf-main` (push to main): the same build, then github-action-benchmark with
+#                 `auto-push: true` to update the gh-pages trend dashboard, and a
+#                 re-run of the allocs gate against the just-superseded baseline so a
+#                 regression that slipped through still gets flagged. It also stores
+#                 `bench.txt` on gh-pages so the next PR's allocs gate has a baseline
+#                 to fetch (perf-tracking.md baseline-storage resolution).
+#
+# Like ci.yml, this uses `pull_request` (NOT `pull_request_target`): PR code is
+# untrusted and must run without secrets and with a read-only token. The only
+# secret used anywhere is the automatic `GITHUB_TOKEN`, scoped per job by the
+# `permissions:` block — no PAT, no repo secret.
+#
+# GATING POLICY: allocs/op is HARD-gated (deterministic — survives noisy shared
+# runners); ns/op is advisory-only (it rides the `go`-tool trend dashboard on main
+# but never fails a build). See perf-tracking.md "Why allocs-first". The gate
+# DECISION is made by perf/cmd/allocsgate (a tested Go program, FAIL-CLOSED on an
+# empty/corrupt bench file); benchstat is the LOCAL human A/B tool (see `task bench`
+# help), deliberately NOT in the CI gate path.
+#
+# All third-party actions are SHA-pinned (with a # vX.Y.Z comment) so a re-pointed
+# tag from a compromised maintainer cannot change what runs here. Pins for
+# checkout/setup-go/setup-task/upload-artifact match the house set in ci.yml /
+# e2e-live.yml.
+name: perf
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least-privilege default; each job narrows or widens as needed.
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+  # The previous-main baseline lives on gh-pages at this path (written by
+  # perf-main). The gate fetches it read-only via the raw URL.
+  BENCH_BASELINE_PATH: dev/bench/bench.txt
+
+jobs:
+  perf-pr:
+    name: Perf gate (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    # Cancel superseded PR runs on the same ref.
+    concurrency:
+      group: perf-pr-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      # The PR head SHA stamped into the scenario JSON rows (house style: no inline
+      # interpolation in run: bodies; see e2e-live.yml).
+      HEAD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Hot-path microbenchmarks → bench-new.txt (the allocs/op gate feed).
+      - name: task bench → bench-new.txt
+        shell: bash
+        run: task bench BENCHCOUNT=10 | tee bench-new.txt
+
+      # Fetch the previous-main baseline from gh-pages, read-only, no token. If it
+      # is absent (first run before perf-main has ever published) the gate SKIPS
+      # cleanly with a notice — same green-skip posture as e2e-live's secret gate.
+      # allocsgate handles the missing-baseline case too (skip green), but checking
+      # presence here keeps the artifact set honest.
+      - name: Fetch previous-main baseline
+        shell: bash
+        run: |
+          url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/${BENCH_BASELINE_PATH}"
+          if curl -fsSL "$url" -o bench-old.txt; then
+            echo "fetched baseline from $url"
+          else
+            echo "::notice title=perf baseline missing::No gh-pages baseline at ${BENCH_BASELINE_PATH} yet (first run); the allocs gate will skip green. It engages once perf-main has published a baseline."
+            rm -f bench-old.txt
+          fi
+
+      # The allocs/op HARD gate. allocsgate is deterministic (allocs do not move
+      # with CPU load, so no statistical significance test is needed — that is
+      # benchstat's job, and benchstat is the local human A/B tool, not this gate).
+      # It compares the median allocs/op per benchmark and fails iff some benchmark
+      # rose beyond the epsilon (>= 1 whole alloc AND > 2%). It is FAIL-CLOSED: an
+      # empty/corrupt bench file fails rather than passing on no data; a missing
+      # baseline (first run) skips green. It prints its own markdown delta table.
+      - name: allocs gate
+        shell: bash
+        run: |
+          set -o pipefail
+          # bench-old.txt may not exist (first run); pass the path regardless —
+          # allocsgate skips green when the baseline file is absent.
+          go run ./perf/cmd/allocsgate bench-old.txt bench-new.txt | tee allocsgate.txt
+          {
+            echo '## Perf allocs/op gate (PR vs previous main)'
+            cat allocsgate.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Scenario suite → JSON KPIs, stamped with the PR head SHA.
+      - name: task perf:scenarios → JSON
+        shell: bash
+        run: |
+          MECATL_PERF_JSON=perf-scenarios.json MECATL_PERF_SHA="$HEAD_SHA" \
+            task perf:scenarios BENCHCOUNT=6
+
+      - name: Convert scenario JSON → benchmark suites
+        shell: bash
+        run: |
+          go run ./perf/cmd/perfconvert \
+            -in perf-scenarios.json \
+            -smaller perf-scenarios-smaller.json \
+            -bigger perf-scenarios-bigger.json
+
+      # The smaller-is-better suite (allocs/op + tokens + goroutine-delta) gates the
+      # PR. ONE alert-threshold (102%) covers all three metrics in this unified
+      # suite; scenario allocs are therefore gated at 2% — SAFE because they are
+      # deterministic (no machine-load noise). If a 2% false positive ever fires,
+      # the escalation is to split scenario allocs into a third dedicated suite with
+      # its own threshold; we do not pre-split until that cost is real.
+      - name: github-action-benchmark — scenarios (smaller)
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
+        with:
+          name: mecatl scenarios (smaller-is-better)
+          tool: customSmallerIsBetter
+          output-file-path: perf-scenarios-smaller.json
+          alert-threshold: '102%'
+          fail-on-alert: true
+          auto-push: false
+          save-data-file: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The bigger-is-better suite is ONLY the whitelisted cache-hit-rate points
+      # (single_session_long, team_fanout); a 5% drop fails the PR.
+      - name: github-action-benchmark — scenarios (bigger)
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
+        with:
+          name: mecatl scenarios (bigger-is-better)
+          tool: customBiggerIsBetter
+          output-file-path: perf-scenarios-bigger.json
+          alert-threshold: '105%'
+          fail-on-alert: true
+          auto-push: false
+          save-data-file: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload perf artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: perf-pr-${{ github.run_id }}
+          path: |
+            perf-scenarios.json
+            perf-scenarios-smaller.json
+            perf-scenarios-bigger.json
+            bench-new.txt
+            allocsgate.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+  perf-main:
+    name: Perf trend (main)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      # gh-pages push only; nothing else is elevated.
+      contents: write
+    # Never cancel an in-flight main publish — a cancelled push could leave the
+    # gh-pages store half-written.
+    concurrency:
+      group: perf-main
+      cancel-in-progress: false
+    env:
+      HEAD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: task bench → bench-new.txt
+        shell: bash
+        run: task bench BENCHCOUNT=10 | tee bench-new.txt
+
+      # Fetch the previous-main baseline BEFORE it is superseded, so the post-merge
+      # allocs gate can catch a regression that slipped through PR review.
+      - name: Fetch previous-main baseline
+        shell: bash
+        run: |
+          url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/${BENCH_BASELINE_PATH}"
+          if curl -fsSL "$url" -o bench-old.txt; then
+            echo "fetched baseline from $url"
+          else
+            echo "::notice title=perf baseline missing::No previous gh-pages baseline yet; the post-merge allocs gate will skip green on this first publish."
+            rm -f bench-old.txt
+          fi
+
+      # Post-merge allocs gate: the merge already happened, but a regression that
+      # slipped past PR review must still be loud, so this FAILS the main run.
+      - name: allocs gate (post-merge)
+        shell: bash
+        run: |
+          set -o pipefail
+          go run ./perf/cmd/allocsgate bench-old.txt bench-new.txt | tee allocsgate.txt
+          {
+            echo '## Perf allocs/op gate (post-merge, new main vs previous main)'
+            cat allocsgate.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: task perf:scenarios → JSON
+        shell: bash
+        run: |
+          MECATL_PERF_JSON=perf-scenarios.json MECATL_PERF_SHA="$HEAD_SHA" \
+            task perf:scenarios BENCHCOUNT=6
+
+      - name: Convert scenario JSON → benchmark suites
+        shell: bash
+        run: |
+          go run ./perf/cmd/perfconvert \
+            -in perf-scenarios.json \
+            -smaller perf-scenarios-smaller.json \
+            -bigger perf-scenarios-bigger.json
+
+      # The ns/op + allocs TREND dashboard (advisory — fail-on-alert:false). This is
+      # the `go`-tool suite over the raw `task bench` output; it never fails a build,
+      # it just records the time series so a human can see drift.
+      - name: github-action-benchmark — go bench trend (advisory)
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
+        with:
+          name: mecatl go microbenchmarks
+          tool: go
+          output-file-path: bench-new.txt
+          benchmark-data-dir-path: dev/bench
+          fail-on-alert: false
+          auto-push: true
+          gh-pages-branch: gh-pages
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: github-action-benchmark — scenarios (smaller)
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
+        with:
+          name: mecatl scenarios (smaller-is-better)
+          tool: customSmallerIsBetter
+          output-file-path: perf-scenarios-smaller.json
+          benchmark-data-dir-path: dev/bench
+          alert-threshold: '102%'
+          fail-on-alert: true
+          auto-push: true
+          gh-pages-branch: gh-pages
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: github-action-benchmark — scenarios (bigger)
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
+        with:
+          name: mecatl scenarios (bigger-is-better)
+          tool: customBiggerIsBetter
+          output-file-path: perf-scenarios-bigger.json
+          benchmark-data-dir-path: dev/bench
+          alert-threshold: '105%'
+          fail-on-alert: true
+          auto-push: true
+          gh-pages-branch: gh-pages
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Persist the raw bench.txt into the gh-pages data dir so the allocs gate has a
+      # baseline to fetch next time (perf-tracking.md baseline-storage resolution
+      # (a): the baseline IS the gh-pages-stored bench.txt). The
+      # github-action-benchmark commits above already advanced gh-pages; we add one
+      # more commit carrying bench.txt at BENCH_BASELINE_PATH. The push retries on a
+      # non-fast-forward (a clone races a concurrent gh-pages advance) so the
+      # baseline update is never silently dropped, leaving the next PR to gate
+      # against a stale baseline.
+      - name: Publish bench.txt baseline to gh-pages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git clone --depth 1 --branch gh-pages "$remote" "$tmp"
+          mkdir -p "$tmp/$(dirname "${BENCH_BASELINE_PATH}")"
+          cp bench-new.txt "$tmp/${BENCH_BASELINE_PATH}"
+          git -C "$tmp" config user.name "github-actions[bot]"
+          git -C "$tmp" config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C "$tmp" add "${BENCH_BASELINE_PATH}"
+          if git -C "$tmp" diff --cached --quiet; then
+            echo "bench.txt baseline unchanged; nothing to commit."
+            exit 0
+          fi
+          git -C "$tmp" commit -m "perf: update bench.txt baseline for ${HEAD_SHA}"
+          # Push with a rebase-retry loop: a concurrent gh-pages advance (e.g. the
+          # action's own dashboard commit on another run) makes the first push a
+          # non-fast-forward; rebase onto the new tip and retry rather than drop it.
+          for attempt in 1 2 3 4 5; do
+            if git -C "$tmp" push origin gh-pages; then
+              echo "pushed bench.txt baseline (attempt $attempt)."
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt); rebasing onto origin/gh-pages and retrying."
+            git -C "$tmp" pull --rebase origin gh-pages
+            sleep $(( attempt * 2 ))
+          done
+          echo "::error title=baseline push failed::could not push bench.txt baseline after 5 attempts."
+          exit 1
+
+      - name: Upload perf artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: perf-main-${{ github.run_id }}
+          path: |
+            perf-scenarios.json
+            perf-scenarios-smaller.json
+            perf-scenarios-bigger.json
+            bench-new.txt
+            allocsgate.txt
+          retention-days: 14
+          if-no-files-found: ignore
