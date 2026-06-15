@@ -49,8 +49,10 @@ type config struct {
 	// inline). Wired to ui.Deps.NoMouse.
 	noMouse bool
 
-	// contextWindow is the model's context-window size in tokens, used as the
-	// footer meter denominator. 0 = unknown (meter shows just the current size).
+	// contextWindow is an OPTIONAL operator OVERRIDE of the footer meter's
+	// denominator, in tokens. 0 (the default) = use the server-resolved per-model
+	// window echoed on session create; set a non-zero value only to FORCE a
+	// different denominator (it then wins, and stays sticky across model switches).
 	// Honoured verbatim; never inferred from the model name.
 	contextWindow int64
 
@@ -218,7 +220,7 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.noAltScreen, "no-alt-screen", false, "render inline in the terminal's normal buffer instead of the alternate screen, preserving native scrollback/search")
 	fs.BoolVar(&cfg.noAltScreen, "inline", false, "alias for --no-alt-screen: render inline in the normal buffer, preserving native scrollback/search")
 	fs.BoolVar(&cfg.noMouse, "no-mouse", false, "disable mouse capture on the alt screen so the terminal's NATIVE click-drag selection works (for tmux/zellij/web terminals that strip OSC52, or when you prefer native select); trades away in-app mouse-wheel scroll and the in-app drag-select/copy layer. Keyboard scroll (pgup/pgdn/home/end) is unaffected. Or set MECATUI_NO_MOUSE=1")
-	fs.Int64Var(&cfg.contextWindow, "context-window", 0, "model context-window size in tokens for the footer meter (0 = unknown; not inferred from the model name)")
+	fs.Int64Var(&cfg.contextWindow, "context-window", 0, "OVERRIDE the footer context-meter denominator (tokens); 0 = use the server-resolved per-model window. Set a value only to force a different denominator — it then wins and stays sticky across model switches. Not inferred from the model name")
 	fs.BoolVar(&cfg.noBanner, "no-banner", false, "disable the welcome splash (mascot + gradient wordmark); the plain prompt hint and affordance list are still shown. Also forced on under --quiet or a non-interactive stdin")
 
 	fs.StringVar(&cfg.model, "model", "", "model identifier for the embedded server (empty: use the provider-appropriate default; ignored when dialling an external server)")

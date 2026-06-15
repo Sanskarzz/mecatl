@@ -112,10 +112,13 @@ type Deps struct {
 	// (composed in main). Default false (full splash).
 	NoBanner bool
 
-	// ContextWindow is the model's context-window size in tokens, used as the
-	// denominator of the footer context meter. 0 means unknown (the meter then
-	// shows just the current context size, no bar/percentage). Computed in main
-	// from an explicit --context-window flag; never inferred from the model name.
+	// ContextWindow is an OPTIONAL operator OVERRIDE of the footer context meter's
+	// denominator, in tokens. When > 0 it wins over the server-resolved window. When
+	// 0 (the default) the meter falls through to the server-echoed per-model window
+	// (m.effectiveModel.ContextWindow); only if THAT is also 0 does the meter degrade
+	// to just the current context size (no bar/percentage). The precedence lives in
+	// Model.contextWindow. Computed in main from an explicit --context-window flag;
+	// never inferred from the model name.
 	ContextWindow int64
 
 	// Ctx is the program-level context; per-run stream contexts derive from it.

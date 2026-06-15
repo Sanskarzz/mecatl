@@ -421,6 +421,27 @@ func (m Model) selectionStatus() string {
 // right-aligned usage segment so they never touch.
 const footerGapPad = 2
 
+// contextWindow returns the denominator for the footer context meter, applying
+// the precedence: explicit operator override > server-resolved window > unknown.
+//
+//  1. m.deps.ContextWindow > 0 — an explicit --context-window operator override.
+//     It WINS so an operator can force a specific footer denominator (e.g. to model
+//     an effective budget below the model's true window). This override is sticky
+//     across model switches by design — see the flag help.
+//  2. m.effectiveModel.ContextWindow > 0 — the window the SERVER resolved for THIS
+//     session's model (echoed on SessionReadyMsg, refreshed on every model switch).
+//     This is the new default source: the meter shows a real bar with no flag set.
+//  3. 0 — unknown; the meter renderers degrade to the bare "ctx <N>" current size.
+func (m Model) contextWindow() int64 {
+	if m.deps.ContextWindow > 0 {
+		return m.deps.ContextWindow
+	}
+	if m.effectiveModel.ContextWindow > 0 {
+		return m.effectiveModel.ContextWindow
+	}
+	return 0
+}
+
 // fitFooter right-aligns the richest usage segment that fits beside the left
 // status, shedding facets before the context signal — context % is the single
 // most valuable signal, so it survives longest. When a team is LIVE a team-summary
@@ -443,9 +464,10 @@ const footerGapPad = 2
 // tiers naturally narrow to just that, then to nothing.
 func (m Model) fitFooter(left string, width int) string {
 	th := m.deps.Theme
-	meter := renderContextMeter(th, m.contextTokens, m.deps.ContextWindow)
-	meterCompact := renderContextMeterCompact(th, m.contextTokens, m.deps.ContextWindow)
-	meterMinimal := renderContextMeterMinimal(th, m.contextTokens, m.deps.ContextWindow)
+	window := m.contextWindow()
+	meter := renderContextMeter(th, m.contextTokens, window)
+	meterCompact := renderContextMeterCompact(th, m.contextTokens, window)
+	meterMinimal := renderContextMeterMinimal(th, m.contextTokens, window)
 
 	// The agents prefix is the combined team + subagent-fleet advertisement, prepended
 	// to the right side at three tiers (full/medium/compact). Each is built from up to

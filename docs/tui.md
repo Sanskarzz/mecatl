@@ -78,7 +78,7 @@ absolute path (the server requires absolute).
 | `--list-themes` | – | print available themes and exit |
 | `--inline` / `--no-alt-screen` | off | render inline in the terminal's normal buffer instead of the alternate screen, preserving native scrollback/search (no mouse capture; see `--no-mouse` below) |
 | `--no-mouse` | off | keep the alt screen but don't capture the mouse, so the terminal's **native** click-drag selection works; trades away in-app wheel scroll + drag-select/copy (or `MECATUI_NO_MOUSE=1`; see the selection section) |
-| `--context-window` | 0 (unknown) | model context-window size in tokens for the footer **ctx** meter; 0 = unknown (never inferred from the model name) |
+| `--context-window` | 0 (use server window) | OVERRIDE the footer **ctx** meter's denominator (tokens); 0 = use the server-resolved per-model window. Set a value only to force a different denominator — it then wins and stays sticky across model switches (never inferred from the model name) |
 | `--no-banner` | off | disable the first-run welcome **splash** (mascot + gradient wordmark); the plain prompt hint + affordance list still show. Auto-forced on under `--quiet` or a non-interactive stdin |
 | `--model` | – (provider default) | model id for the **embedded** server; empty = the server-configured `--default-model` (when set), else the provider-appropriate built-in (anthropic → `claude-sonnet-4-6`, openai → `gpt-5`, openrouter → `openai/gpt-5`). Overridden per session by the `/models` picker |
 | `--default-provider` | – | **embedded** server: deployment-wide default provider id (e.g. `openai`, `openrouter`, `anthropic`); overrides the built-in provider preference for zero-selector sessions, while a client-side selection still wins. An unknown/unavailable provider **fails startup** |
@@ -564,7 +564,17 @@ the bottom (and the viewport grows back when the transient clears).
 assigned, not summed), i.e. how full the context window is right now. The **`↑`/`↓`/`⊕`
 facets** beside it are **session-cumulative totals**, fed once per run from the terminal
 result's cumulative usage (so a long session's spend keeps growing while the ctx meter
-tracks only the live conversation size).
+tracks only the live conversation size). The meter's **denominator** defaults to the
+**server-resolved per-model context window** (echoed on session create and refreshed on
+every model switch); an explicit `--context-window` overrides it, and only when neither
+is known does the meter degrade to the bare current size (`ctx 40K`, no bar). As the
+context fills the bar **darkens** to signal pressure — `▒` ok, `▓` past ~60%, `█` plus a
+`⚠` mark past ~85% — and the colour shifts to match (a non-colour glyph cue so it reads
+with ANSI stripped). These bands are a visual fill gauge, **not** a compaction countdown:
+the harness automatically compacts older history at ~80% full (the default trigger), so
+in practice it keeps the window from running out before the `⚠` band is reached — the
+`▓` warn band at ~60% is the earlier "filling up" cue, and the `⚠` may not appear at all
+on a session that compacts first.
 
 ### Watching subagents, parallel runs, and teams — the fleet footer + the unified `ctrl+a` overlay
 

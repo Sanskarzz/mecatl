@@ -80,7 +80,7 @@ func run(args []string) error {
 		case app.PostureAuto:
 			fmt.Fprintln(os.Stderr, "mecatui: WARNING: posture auto is active; allow-all is ON for the embedded server (the built-in mutate-ask floor + the MAIN agent's substitution floor are waived). A Deny in any scope and any configured Ask still apply. The CHILD prompt-injection defense stays ON. For unattended single-tenant use.")
 		case app.PostureYolo:
-			fmt.Fprintln(os.Stderr, "mecatui: WARNING: posture yolo is active; allow-all is ON AND the CHILD prompt-injection defense is OFF — $()/backtick/heredoc commands AUTO-RUN in subagents/branches. A Deny in any scope and any configured Ask still apply. ISOLATED, SINGLE-TENANT use ONLY. NOTE: --yolo now ALSO loosens the child substitution floor (previously main-only).")
+			fmt.Fprintln(os.Stderr, "mecatui: WARNING: posture yolo is active; allow-all is ON AND the CHILD prompt-injection defense is OFF — $()/backtick/heredoc commands AUTO-RUN in subagents/branches. A Deny in any scope and any configured Ask still apply. ISOLATED, SINGLE-TENANT use ONLY. NOTE: --yolo now ALSO loosens the child substitution floor.")
 		}
 	}
 
@@ -151,8 +151,10 @@ func run(args []string) error {
 		// Model is best-effort display only. For an EXTERNAL --server it reflects
 		// the locally-configured --model flag and may NOT match the server's actual
 		// model (the server owns provider config); for an embedded server it is
-		// authoritative. The context window comes only from an explicit
-		// --context-window flag (0 = unknown) — never inferred from the model name.
+		// authoritative. ContextWindow is an OPTIONAL operator OVERRIDE of the footer
+		// meter denominator: 0 (the default) falls through to the server-resolved
+		// per-model window echoed on session create; a non-zero --context-window
+		// forces it. Never inferred from the model name.
 		Model:         cfg.model,
 		ContextWindow: cfg.contextWindow,
 		Workspace:     cfg.workspace,

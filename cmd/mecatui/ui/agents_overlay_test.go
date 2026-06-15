@@ -608,6 +608,42 @@ func TestFooterFleetGolden(t *testing.T) {
 	compareGolden(t, "footer_fleet.golden", []byte(b.String()))
 }
 
+// TestFooterCtxMeterGolden locks the footer context-meter END-TO-END through the
+// client→ui relay (issue #65): a SessionReadyMsg carrying a 200K ResolvedModel
+// window + a TurnEndMsg setting the 40K numerator must render the bar + "40K/200K"
+// with NO --context-window override. The snapshot is the stripped fitFooter output
+// at a wide width so the full-fidelity tier survives. It proves the new default
+// denominator source (the server-echoed window) reaches the meter via the reducer.
+func TestFooterCtxMeterGolden(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m.deps.ContextWindow = 0 // no operator override → fall through to the echoed window
+	m = applyAll(m,
+		tea.WindowSizeMsg{Width: 160, Height: 30},
+		client.SessionReadyMsg{
+			SessionID:     "sess-ctx-0001",
+			ResolvedModel: client.ResolvedModel{ProviderID: "openai", ModelID: "gpt-5", ContextWindow: 200000},
+		},
+		client.TurnEndMsg{Turn: 1, Usage: client.Usage{InputTokens: 40000, OutputTokens: 1200}},
+	)
+	left := aztec().Style("muted").Render("connected")
+	compareGolden(t, "footer_ctx_meter.golden", []byte(stripANSIstr(m.fitFooter(left, 160))+"\n"))
+}
+
+// TestFooterCtxUnknownGolden locks the unknown-window degrade: with NEITHER an
+// override nor a server-echoed window (older server / no resolved_model), the same
+// 40K numerator renders the bare "ctx 40K" with no bar and no denominator.
+func TestFooterCtxUnknownGolden(t *testing.T) {
+	m := newMCPModel(t, aztec(), nil)
+	m.deps.ContextWindow = 0
+	m = applyAll(m,
+		tea.WindowSizeMsg{Width: 160, Height: 30},
+		client.SessionReadyMsg{SessionID: "sess-ctx-0002"}, // zero ResolvedModel → unknown window
+		client.TurnEndMsg{Turn: 1, Usage: client.Usage{InputTokens: 40000, OutputTokens: 1200}},
+	)
+	left := aztec().Style("muted").Render("connected")
+	compareGolden(t, "footer_ctx_unknown.golden", []byte(stripANSIstr(m.fitFooter(left, 160))+"\n"))
+}
+
 // --- overlay goldens ------------------------------------------------------
 
 // goldenFleet builds a representative mixed fleet for the overlay goldens: three

@@ -374,3 +374,92 @@ func TestFooterCountsIdleAsNotWorking(t *testing.T) {
 		t.Errorf("teamWorkingCounts = (%d, %d), want (1, 2) — idle scout must not count as working", wk, tot)
 	}
 }
+
+// TestContextWindowPrecedence pins the footer-meter denominator precedence
+// (issue #65): explicit --context-window operator override > server-echoed
+// per-model window > 0 (unknown). The override is sticky and wins even when the
+// server echoed a different window.
+func TestContextWindowPrecedence(t *testing.T) {
+	cases := []struct {
+		name      string
+		flag      int64 // m.deps.ContextWindow (--context-window)
+		echo      int64 // m.effectiveModel.ContextWindow (server-resolved)
+		wantValue int64
+	}{
+		{"flag set + echo set → flag wins", 128000, 200000, 128000},
+		{"flag 0 + echo set → echo used", 0, 200000, 200000},
+		{"flag 0 + echo 0 → unknown", 0, 0, 0},
+		{"flag set + echo 0 → flag used", 128000, 0, 128000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var m Model
+			m.deps.ContextWindow = tc.flag
+			m.effectiveModel = client.ResolvedModel{ContextWindow: tc.echo}
+			if got := m.contextWindow(); got != tc.wantValue {
+				t.Errorf("contextWindow() = %d, want %d", got, tc.wantValue)
+			}
+		})
+	}
+}
+
+// TestFooterMeterUsesServerEchoedWindow proves the footer renders a real bar from
+// the SERVER-ECHOED per-model window when no --context-window override is set: a
+// session that resolved a 200K window with 40K occupied shows "40K/200K" and a bar
+// glyph in the stripped footer.
+func TestFooterMeterUsesServerEchoedWindow(t *testing.T) {
+	m, _ := selModel(t)
+	m.deps.ContextWindow = 0 // no operator override
+	m.effectiveModel = client.ResolvedModel{ContextWindow: 200000}
+	m.contextTokens = 40000
+	m.phase = phaseIdle
+	m.sel = selection{} // inactive: show the status+meter footer, not the selection count
+
+	got := stripANSIstr(m.fitFooter("connected", 160))
+	if !strings.Contains(got, "40K/200K") {
+		t.Errorf("footer = %q, want it to contain %q", got, "40K/200K")
+	}
+	if !strings.Contains(got, ctxGlyphEmpty) && !strings.Contains(got, ctxGlyphOk) {
+		t.Errorf("footer = %q, want a meter bar glyph", got)
+	}
+}
+
+// TestFooterMeterOverrideWinsOverEcho proves the flag override precedence at the
+// RENDER level (not just contextWindow()): with --context-window=100000 set AND a
+// differing 200K server-echoed window, the footer denominator is the FLAG's 100K.
+func TestFooterMeterOverrideWinsOverEcho(t *testing.T) {
+	m, _ := selModel(t)
+	m.deps.ContextWindow = 100000 // operator override
+	m.effectiveModel = client.ResolvedModel{ContextWindow: 200000}
+	m.contextTokens = 40000
+	m.phase = phaseIdle
+	m.sel = selection{}
+
+	got := stripANSIstr(m.fitFooter("connected", 160))
+	if !strings.Contains(got, "40K/100K") {
+		t.Errorf("footer = %q, want the override denominator %q (not the 200K echo)", got, "40K/100K")
+	}
+	if strings.Contains(got, "/200K") {
+		t.Errorf("footer = %q, must NOT use the 200K server echo when an override is set", got)
+	}
+}
+
+// TestFooterMeterDegradesWhenWindowUnknown proves that with NEITHER the override nor
+// a server-echoed window the meter degrades to the bare "ctx 40K" current size — no
+// "/" denominator and no percentage.
+func TestFooterMeterDegradesWhenWindowUnknown(t *testing.T) {
+	m, _ := selModel(t)
+	m.deps.ContextWindow = 0
+	m.effectiveModel = client.ResolvedModel{} // window unknown
+	m.contextTokens = 40000
+	m.phase = phaseIdle
+	m.sel = selection{}
+
+	got := stripANSIstr(m.fitFooter("connected", 160))
+	if !strings.Contains(got, "ctx 40K") {
+		t.Errorf("footer = %q, want it to contain %q", got, "ctx 40K")
+	}
+	if strings.Contains(got, "/") {
+		t.Errorf("footer = %q, want NO denominator '/' when window is unknown", got)
+	}
+}
