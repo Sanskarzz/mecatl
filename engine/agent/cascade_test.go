@@ -202,11 +202,14 @@ func TestCascadeTier4SubstitutesMediaPlaceholder(t *testing.T) {
 	}
 	// The media message sits in the NEWER half of the middle (survives snip) but
 	// still ahead of the preserved tail, so tier 4 summarises it — substituting a
-	// text placeholder for the image, never the bytes.
+	// text placeholder for the image, never the bytes. It must be OLDER than the
+	// recentUserTurnsKept(3) user turns the verbatim-tail back-snap pulls into the
+	// tail, so the trailing follow-up chatter below (≥ recentUserTurnsKept + a margin)
+	// keeps the media message in the summarised middle rather than the preserved tail.
 	conv.Append(session.NewUserMessageWithParts("here is the screenshot", []session.Content{
 		{Kind: session.MediaImage, MIMEType: "image/png", Data: make([]byte, 4096)},
 	}))
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 8; i++ {
 		conv.Append(session.NewUserMessage("follow-up chatter"))
 	}
 
@@ -266,6 +269,7 @@ func TestCascadeTier4SubstitutesMediaPlaceholder(t *testing.T) {
 // summariser prompt locks, in order.
 var summarizerSectionHeaders = []string{
 	"## Goal",
+	"## User instructions and intent",
 	"## Current plan",
 	"## Completed work",
 	"## Key decisions",
@@ -562,6 +566,108 @@ func TestCascadeTier4TopLevelCutSnapsPastToolResult(t *testing.T) {
 	}
 	if summaries != 1 {
 		t.Fatalf("structured summary message count = %d, want exactly 1", summaries)
+	}
+}
+
+// recentTaskTier4Conversation builds a tool-heavy history whose most-recent user
+// task sits above a long trailing non-user run, so the role-blind count-tail would
+// summarise it away. Used to prove tier 4 (which is forced) never sees the recent
+// task: it lives in the preserved tail, and the tail is never summariser input.
+func recentTaskTier4Conversation() *session.Conversation {
+	conv := &session.Conversation{}
+	conv.Append(session.NewSystemMessage("system rules"))
+	conv.Append(session.NewUserMessage("original setup"))
+	for i := 0; i < 3; i++ {
+		id := session.ToolCallID(string(rune('a' + i)))
+		conv.Append(session.NewAssistantMessage("", "", []session.ToolCall{
+			session.NewToolCall(id, "Read", json.RawMessage(`{"path":"f.go"}`)),
+		}))
+		conv.Append(session.NewToolMessage(session.NewToolResult(id, strings.Repeat("X", 2000))))
+	}
+	conv.Append(session.NewUserMessage("ACTUAL TASK: rename Foo to Bar"))
+	for i := 0; i < 4; i++ {
+		id := session.ToolCallID("t" + string(rune('0'+i)))
+		conv.Append(session.NewAssistantMessage("", "", []session.ToolCall{
+			session.NewToolCall(id, "Read", json.RawMessage(`{"path":"g.go"}`)),
+		}))
+		conv.Append(session.NewToolMessage(session.NewToolResult(id, strings.Repeat("X", 2000))))
+	}
+	return conv
+}
+
+// TestCascadeTier4PreservesRecentUserTaskInTail forces tier 4 (budget 1) over the
+// recent-task fixture and asserts: (1) the most-recent user task survives verbatim
+// as a tail RoleUser message even though tier-4 summarisation fired; (2) the task
+// text was NOT among the messages handed to the summariser (it is in the tail, which
+// is never summariser input). Reverting the user-turn back-snap makes the task fall
+// into the summarised middle → it would appear in the summariser input (assertion 2)
+// and vanish from the tail (assertion 1).
+func TestCascadeTier4PreservesRecentUserTaskInTail(t *testing.T) {
+	prov := &capturingSummaryProvider{}
+	cc := forceTier4(prov)
+	conv := recentTaskTier4Conversation()
+	compacted, _, err := cc.Compact(context.Background(), conv)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if err := session.ValidateToolPairing(compacted); err != nil {
+		t.Fatalf("pairing: %v", err)
+	}
+
+	// 1) The recent task survives verbatim as a RoleUser message in the tail.
+	var sawTask bool
+	for _, m := range compacted {
+		if m.Role == session.RoleUser && m.Text == "ACTUAL TASK: rename Foo to Bar" {
+			sawTask = true
+		}
+	}
+	if !sawTask {
+		t.Fatalf("recent user task did not survive in the tail after tier 4: %+v", compacted)
+	}
+
+	// 2) The recent task was never sent to the summariser (the tail is not input).
+	for _, m := range prov.gotMessages {
+		if strings.Contains(m.Text, "ACTUAL TASK: rename Foo to Bar") {
+			t.Fatalf("recent user task was sent to the summariser (it must stay in the tail): %+v", m)
+		}
+	}
+}
+
+// TestCascadeDeterministicWithBackSnap runs the no-LLM cascade twice over the
+// recent-task fixture and asserts byte-identical output (the back-snap is pure index
+// arithmetic — tiers 1-3 stay deterministic).
+func TestCascadeDeterministicWithBackSnap(t *testing.T) {
+	a, _, err := agent.CascadeCompactor{}.Compact(context.Background(), recentTaskConversation())
+	if err != nil {
+		t.Fatalf("Compact #1: %v", err)
+	}
+	b, _, err := agent.CascadeCompactor{}.Compact(context.Background(), recentTaskConversation())
+	if err != nil {
+		t.Fatalf("Compact #2: %v", err)
+	}
+	if !reflect.DeepEqual(a, b) {
+		t.Fatalf("cascade output not deterministic:\n#1 %+v\n#2 %+v", a, b)
+	}
+}
+
+// TestCascadeTier4OnlyMemoryFramingReachesRequest asserts the gemini-cli "only
+// memory" / "preserved verbatim" framing reaches the summariser's system layer (the
+// new-header order is already covered by the updated summarizerSectionHeaders scan).
+func TestCascadeTier4OnlyMemoryFramingReachesRequest(t *testing.T) {
+	var got port.LLMRequest
+	llm := mockllm.NewWith(
+		[]mockllm.Option{mockllm.WithRequestObserver(func(req port.LLMRequest) { got = req })},
+		mockllm.TextTurn("## Goal\nfix the bug"),
+	)
+	if _, _, err := forceTier4(llm).Compact(context.Background(), overBudgetConversation()); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	system := got.System.StablePrefix
+	if !strings.Contains(system, "ONLY memory") {
+		t.Fatalf("system prompt missing the only-memory framing:\n%s", system)
+	}
+	if !strings.Contains(system, "preserved verbatim") {
+		t.Fatalf("system prompt missing the preserved-verbatim framing:\n%s", system)
 	}
 }
 

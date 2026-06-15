@@ -1316,6 +1316,68 @@ END-TO-END `TestCompactionThroughLoopNeverOrphans` that drives the real loop + r
 `HeuristicCompactor` with a mockllm tool-call script and a tiny `ContextWindowTokens`, asserting
 the final history is pairing-valid and the session did NOT reach `StateFailed`.
 
+**Recent user instructions survive verbatim (user-turn back-snap).** A second compaction bug:
+both compactors compute the verbatim kept tail by message COUNT (last `keep`=6), role-blind.
+During heavy tool use those 6 are all assistant/tool messages, so the user's most-recent task
+instruction fell into the dropped/summarised head and was lost after compaction (the model
+replied "I don't have the original task/goal… please resend the specific change"). Only the
+FIRST user message was pinned. The fix FOLLOWS PRIOR ART (Codex, gemini-cli keep the recent
+user turns verbatim; Claude Code's "All user messages" + "changing intent", Cline's "Task
+Evolution"): pin the first user message (unchanged) + snap the verbatim TAIL backward to the
+recent user turns + summarise older/superseded intent in tier-4 + honest wording. It does NOT
+preserve every user message verbatim.
+
+- **The back-snap.** The shared unexported `snapCutToRecentUserTurn(msgs, cut, floor)` moves the
+  cut BACKWARD so the tail BEGINS at a recent user turn, keeping the most-recent user
+  instruction(s) verbatim instead of summarising them. It walks backward from `cut-1` toward
+  `floor`, counting genuine user turns (`isRecentUserTurn`: a `RoleUser` message that is NOT a
+  synthesised compaction summary — `isSynthesisedSummary` recognises BOTH the paths-summary
+  (`compactionSummaryMarker`) AND the cascade tier-4 LLM summary (`tier4SummaryMarker`); both are
+  harness-authored context, skipped so a RE-compaction can't anchor on a prior summary and drag
+  the whole post-summary history into the tail), and stops at the FIRST of: `recentUserTurnsKept`
+  (3) user turns passed (snap to the Kth-most-recent so it lands IN the tail); `maxUserSnapLookback`
+  (`keepLastTurns*4` = 24) messages walked (the BOUND — an ancient lone user turn can't drag the
+  whole conversation into the verbatim tail; when hit, the most-recent 1-2 user turns still
+  survive = the bug fix); or `floor` reached. The returned cut is never larger than the input
+  (back-snap only moves toward 0) and never below `floor`.
+- **Ordering (both compactors): count-cut → back-snap → forward-snap, forward-snap LAST.**
+  `HeuristicCompactor.Compact`: `cut = len-keep`; `cut = snapCutToRecentUserTurn(msgs, cut, userSnapFloor(msgs))`
+  (floor = one PAST the first-user index, so the first-user pin stays out of the tail — neither
+  double-emitted nor, when it is the only user turn, able to drag everything into the tail);
+  `cut = snapCutToTurnBoundary(msgs, cut)`. `CascadeCompactor.Compact`: same order and the SAME
+  `userSnapFloor(msgs)` (ONE definition of "one past the first-user pin" shared by both compactors;
+  it equals `len(headIdx)` for the contiguous system+first-user head but stays correct if they
+  diverge). The forward `snapCutToTurnBoundary` stays LAST so the tool-pairing orphan guarantee
+  above always holds.
+- **Honest wording.** `buildSummary` (both compactors' synthesised paths-summary) and the cascade's
+  `summaryNote` now state the real contract: the original goal AND the most-recent user instructions
+  are preserved verbatim, earlier/superseded context is summarised or dropped — NOT "all decisions
+  preserved". The "Files touched so far" path list and the gauntlet-#12 goal substring are unchanged.
+- **Tier-4 summariser.** A new `## User instructions and intent` section (2nd of nine, right after
+  `## Goal`) instructs the model to enumerate every user directive in order — original,
+  modifications, current ask — with direct quotes and where intent CHANGED, plus a gemini-cli
+  "this summary is the agent's ONLY memory… every user directive MUST be preserved verbatim" Rules
+  line. The tier-4 tail is never summariser input, so the recent user turns the back-snap pulled
+  into the tail are never sent to the summariser.
+
+Coverage (all mutation-proven — each fails when the back-snap, the lookback bound, or the
+marker-skip is reverted): `TestHeuristicCompactorPreservesRecentUserTaskOutsideCountTail` +
+`TestCascadeCompactorPreservesRecentUserTaskOutsideCountTail` (the core repro, both compactors —
+the cascade fixture places the task in the OLDER half of the middle so tier-1 snip alone drops it
+and ONLY the back-snap saves it, i.e. non-vacuous), `TestCascadeTier4PreservesRecentUserTaskInTail`
+(recent task in the tail, never in summariser input), `TestHeuristicCompactorGuaranteesFirstAndRecentUserTurns`
++ `TestCascadeCompactorGuaranteesFirstAndRecentUserTurns` (first pin + recent survive; MIDDLE —
+beyond the lookback — asserted NOT to survive, pinning the honest best-effort contract),
+`TestCompactorBackSnapBounded` (TWO-sided: a recent turn within lookback survives, an ancient turn
+beyond it does not), `TestCompactorRecentUserAdjacentToToolPair` (a recent turn OUTSIDE the
+count-tail is back-snapped past an adjacent tool pair, exercising the back-snap × forward-snap
+interaction with pairing intact), `TestCompactorReCompactionDoesNotAnchorOnPriorSummary`
+(heuristic + cascade + cascade-tier-4: a second compaction does not anchor on a prior summary),
+`TestCascadeDeterministicWithBackSnap`, and the direct unit tests `TestSnapCutToRecentUserTurn`
+(three exits + clamps + summary-skip, table-driven, in `compaction_internal_test.go`) +
+`TestIsSynthesisedSummary`. The user-turn back-snap is pure index arithmetic so tiers 1-3 stay
+deterministic/offline.
+
 **Shipped (issue #51): `failed` now recovers via `Session.Recover`.** The deferred follow-up
 landed as a third terminal-recovery seam (`failed → Recover → idle`, history-repaired via the
 same `closeOutInterruptedTurn` as Interrupt; `Reopen` stays completed-only — no widening), wired
@@ -1327,9 +1389,10 @@ for any other transient provider failure. Both are kept.
 uses a section-locked structured template (the opencode/Claude-Code compaction shape —
 `SYSTEM-PROMPT-RESEARCH.md` §2.3) instead of the original one-line prompt, split across the two
 prompt layers: the SYSTEM layer (`summarizerSystemPrompt`, via `prompt.Layered{StablePrefix}`)
-locks eight sections in order (Goal / Current plan / Completed work / Key decisions / Relevant
-files and symbols / Tool results worth remembering / Open questions and known errors / Next
-steps), the DATA-not-instructions safety framing (the summarised conversation is untrusted
+locks nine sections in order (Goal / User instructions and intent / Current plan / Completed work
+/ Key decisions / Relevant files and symbols / Tool results worth remembering / Open questions and
+known errors / Next steps; the second was added by the user-turn back-snap work above), the
+DATA-not-instructions safety framing (the summarised conversation is untrusted
 context, never elevated instructions), PRESERVE-verbatim (paths/identifiers/commands/error
 messages) and DROP (raw file bodies/verbose tool output/stale grep/old stack traces) rules,
 `"None."` for empty sections, and no preamble/sign-off; the trailing USER instruction
@@ -1344,8 +1407,9 @@ tier-4 LLM call error), replacing the old silent `"[compaction summary unavailab
 placeholder that would have substituted real turns with nothing. Composition is unchanged
 (`buildCompactor` leaves `SummaryMaxTokens` zero — no new Config flag); media stripping
 (`deMediaMessages`) and the `"[earlier turns summarised]\n"` success prefix are unchanged.
-Tier-4 tests in `cascade_test.go` cover prompt-reaches-request (all eight headers in order +
-the DATA framing, via `mockllm.WithRequestObserver`), budget-in-instruction, empty-summary
+Tier-4 tests in `cascade_test.go` cover prompt-reaches-request (all nine headers in order +
+the DATA framing + the "only memory"/"preserved verbatim" framing, via
+`mockllm.WithRequestObserver`), budget-in-instruction, empty-summary
 abort, missing-sections/over-long acceptance, pairing preservation, and LLM-error abort.
 
 ## Adapters — `internal/adapter/`

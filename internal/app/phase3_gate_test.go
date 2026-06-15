@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -63,21 +64,26 @@ func TestPhase3ReconstructFromStoreAndLog(t *testing.T) {
 		// (offline test seam) — the pre-compaction turns then land in an archive event.
 		contextWindowOverride: 40,
 	}
-	// The first three Writes take the three distinct verdicts; several more Writes
+	// The first three Writes take the three distinct verdicts; MANY more Writes
 	// follow (allow-once) so the trailing history grows past the HeuristicCompactor's
-	// kept tail (keepLastTurns=6) and the EARLY writes fall into the dropped head —
+	// kept tail AND past the user-turn back-snap's lookback bound (maxUserSnapLookback)
+	// — there is no recent USER turn near the early writes, so the back-snap cannot
+	// anchor the verbatim tail on them and the EARLY writes fall into the dropped head,
 	// making them recoverable ONLY from the archive, never the compacted snapshot.
+	turns := []mockllm.Turn{
+		mockllm.ToolCallTurn(write("w1", "a.txt")), // -> DENY
+		mockllm.ToolCallTurn(write("w2", "b.txt")), // -> ALLOW_ONCE
+		mockllm.ToolCallTurn(write("w3", "c.txt")), // -> ALLOW_ALWAYS
+	}
+	// w4..w18 (15 more turns = 30 trailing messages, well past the back-snap's
+	// 24-message lookback) so w1/w2/w3 are unreachable by the back-snap and drop.
+	for i := 4; i <= 18; i++ {
+		id := "w" + strconv.Itoa(i)
+		turns = append(turns, mockllm.ToolCallTurn(write(id, id+".txt"))) // -> ALLOW_ONCE (tail)
+	}
+	turns = append(turns, mockllm.ReasoningTurn("reviewing the writes", "all set"))
 	cfg.providerConstructor = func(_ Config, _, _, _ string) port.LLMProvider {
-		return mockllm.New(
-			mockllm.ToolCallTurn(write("w1", "a.txt")), // -> DENY
-			mockllm.ToolCallTurn(write("w2", "b.txt")), // -> ALLOW_ONCE
-			mockllm.ToolCallTurn(write("w3", "c.txt")), // -> ALLOW_ALWAYS
-			mockllm.ToolCallTurn(write("w4", "d.txt")), // -> ALLOW_ONCE (tail)
-			mockllm.ToolCallTurn(write("w5", "e.txt")), // -> ALLOW_ONCE (tail)
-			mockllm.ToolCallTurn(write("w6", "f.txt")), // -> ALLOW_ONCE (tail)
-			mockllm.ToolCallTurn(write("w7", "g.txt")), // -> ALLOW_ONCE (tail)
-			mockllm.ReasoningTurn("reviewing the writes", "all set"),
-		)
+		return mockllm.New(turns...)
 	}
 	built, err := Build(ctx, cfg)
 	if err != nil {

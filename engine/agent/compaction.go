@@ -40,14 +40,59 @@ type Compactor interface {
 // head of each body survive so the model retains orientation.
 const maxToolBodyChars = 400
 
+// compactionSummaryMarker prefixes the synthesised paths-summary message both
+// compactors emit (a RoleUser message). tier4SummaryMarker prefixes the cascade's
+// tier-4 LLM summary message (also a RoleUser message). BOTH are harness-authored
+// context, not real user instructions, so the user-turn back-snap SKIPS them (via
+// isSynthesisedSummary): a re-compaction must not treat a prior compaction's summary
+// as a recent user turn, which would snap the whole post-summary history into the
+// verbatim tail and defeat re-compaction. Keep these in sync with the literals
+// buildSummary (compaction.go) and CascadeCompactor.summarize (cascade.go) emit.
+const (
+	compactionSummaryMarker = "[conversation compacted]"
+	tier4SummaryMarker      = "[earlier turns summarised]"
+)
+
+// isSynthesisedSummary reports whether a message's text is a harness-synthesised
+// compaction summary (the paths-summary OR the tier-4 LLM summary) rather than a
+// genuine user instruction. The back-snap uses it to avoid anchoring the verbatim
+// tail on a prior compaction's own output (the re-compaction footgun).
+func isSynthesisedSummary(text string) bool {
+	return strings.HasPrefix(text, compactionSummaryMarker) ||
+		strings.HasPrefix(text, tier4SummaryMarker)
+}
+
 // keepLastTurns is the number of trailing conversation messages the heuristic
 // compactor preserves verbatim (the recent working set the model is mid-task on).
 const keepLastTurns = 6
 
+// recentUserTurnsKept is how many of the most-recent user turns the verbatim-tail
+// back-snap tries to pull into the kept window. Prior art (Codex, gemini-cli) keeps
+// the recent user turns verbatim rather than summarising them, because the
+// most-recent user instruction is the live task and must never be summarised away —
+// the bug this fixes: during heavy tool use the last keep messages by COUNT are all
+// assistant/tool messages, so the user's actual task fell into the dropped/summarised
+// head ("I don't have the original task... please resend").
+const recentUserTurnsKept = 3
+
+// maxUserSnapLookback bounds how far back snapCutToRecentUserTurn may reach (the
+// COUNT of messages between the snapped cut and the original count-cut). Without it
+// a single ancient lone user turn could drag the WHOLE conversation into the
+// verbatim tail, defeating compaction entirely. keepLastTurns*4 (=24 for keep=6) is
+// generous enough to capture the recent user turns of a normal tool-heavy stretch
+// while still hard-bounding the worst case; when the bound is hit the most-recent
+// 1-2 user turns still survive (the bug fix), the older ones stay summarisable.
+const maxUserSnapLookback = keepLastTurns * 4
+
 // HeuristicCompactor is the default, network-free Compactor. It keeps the system
 // prompt and the user goal, synthesises a single summary message that lists every
 // file path touched so far, truncates large tool-result bodies, and preserves the
-// last keepLastTurns messages verbatim. It performs no LLM call, so it is fully
+// last keepLastTurns messages verbatim — back-snapped to recent USER turns
+// (snapCutToRecentUserTurn) so the most-recent user instruction survives verbatim
+// rather than being summarised away (prior art: Codex, gemini-cli keep the recent
+// user turns verbatim; docs/harnesses/07-context-and-mcp.md §4 "what to preserve",
+// 03-claude-code-architecture.md "first user message is summarized away",
+// 08-design-considerations.md §12). It performs no LLM call, so it is fully
 // deterministic and testable offline (gauntlet #12-lite).
 type HeuristicCompactor struct {
 	// MaxToolBodyChars overrides maxToolBodyChars when > 0.
@@ -70,11 +115,20 @@ func (h HeuristicCompactor) Compact(_ context.Context, conv *session.Conversatio
 	msgs := conv.Messages
 	paths := touchedPaths(msgs)
 
-	// Split the head (to be summarised) from the preserved tail. Snap the cut past
-	// any leading tool-result messages so the tail never STARTS on a tool result
-	// whose matching assistant tool call landed in the dropped head — that orphan
-	// draws a provider HTTP 400 on replay and bricks the session.
-	cut := snapCutToTurnBoundary(msgs, len(msgs)-keep)
+	// Split the head (to be summarised) from the preserved tail in three steps:
+	//  1. the count-based cut (keep the last `keep` messages);
+	//  2. back-snap so the tail begins at a recent USER turn (floor = one past the
+	//     first-user index keeps the first-user pin out of the tail, so it is neither
+	//     double-emitted nor — when it is the only user turn — able to drag the whole
+	//     history into the tail) — the role-blind count-tail bug fix, so the
+	//     most-recent user instruction stays verbatim instead of being summarised;
+	//  3. forward-snap past any leading tool-result messages so the tail never STARTS
+	//     on a tool result whose matching assistant call landed in the dropped head —
+	//     that orphan draws a provider HTTP 400 on replay and bricks the session.
+	// The forward snap stays LAST so the orphan guarantee always holds.
+	cut := len(msgs) - keep
+	cut = snapCutToRecentUserTurn(msgs, cut, userSnapFloor(msgs))
+	cut = snapCutToTurnBoundary(msgs, cut)
 	head := msgs[:cut]
 	tail := msgs[cut:]
 
@@ -131,6 +185,70 @@ func snapCutToTurnBoundary(msgs []session.Message, cut int) int {
 	return cut
 }
 
+// snapCutToRecentUserTurn moves cut BACKWARD (toward 0) so the verbatim tail
+// msgs[cut:] begins at a recent user turn, keeping the most-recent user
+// instruction(s) verbatim instead of letting them fall into the summarised head.
+// This is the fix for the role-blind count-tail bug: during heavy tool use the last
+// keep messages are all assistant/tool messages, so the user's ACTUAL task drops out
+// of the kept window and is lost after compaction. Prior art (Codex, gemini-cli)
+// preserves the recent user turns verbatim for exactly this reason
+// (docs/harnesses/07-context-and-mcp.md §4, 08-design-considerations.md §8+§12).
+//
+// It walks backward from cut-1 toward floor, counting RoleUser messages, and stops
+// at the FIRST of:
+//   - recentUserTurnsKept user messages passed: snap to that Kth-most-recent user
+//     turn so it lands IN the tail;
+//   - maxUserSnapLookback messages walked: snap only as far as the bound permits, so
+//     an ancient lone user turn can't drag the whole conversation into the tail (the
+//     most-recent 1-2 user turns still survive — the bug fix);
+//   - floor reached: never snap into the preserved head (keeps the first-user pin and
+//     the tail disjoint, so neither is double-emitted).
+//
+// The returned cut is NEVER larger than the input (back-snap only moves toward 0)
+// and NEVER below floor. cut is clamped to [0,len] first.
+func snapCutToRecentUserTurn(msgs []session.Message, cut int, floor int) int {
+	if cut < 0 {
+		cut = 0
+	}
+	if cut > len(msgs) {
+		cut = len(msgs)
+	}
+	if floor < 0 {
+		floor = 0
+	}
+	if floor > cut {
+		return cut
+	}
+
+	users := 0
+	walked := 0
+	best := cut
+	for i := cut - 1; i >= floor; i-- {
+		walked++
+		if isRecentUserTurn(msgs[i]) {
+			users++
+			best = i
+			if users >= recentUserTurnsKept {
+				return best
+			}
+		}
+		if walked >= maxUserSnapLookback {
+			// Bound hit: snap to the most-recent user turn we found within the
+			// lookback (best), or leave cut unchanged if none was seen.
+			return best
+		}
+	}
+	return best
+}
+
+// isRecentUserTurn reports whether m is a genuine user instruction the back-snap
+// should anchor the verbatim tail on — a RoleUser message that is NOT a synthesised
+// compaction summary (those are harness-authored context, see isSynthesisedSummary:
+// both the paths-summary and the tier-4 LLM summary are skipped).
+func isRecentUserTurn(m session.Message) bool {
+	return m.Role == session.RoleUser && !isSynthesisedSummary(m.Text)
+}
+
 // firstUser returns the first user-role message in msgs.
 func firstUser(msgs []session.Message) (session.Message, bool) {
 	for _, m := range msgs {
@@ -139,6 +257,21 @@ func firstUser(msgs []session.Message) (session.Message, bool) {
 		}
 	}
 	return session.Message{}, false
+}
+
+// userSnapFloor returns the back-snap floor for the heuristic compactor: one PAST
+// the first user message's index, so snapCutToRecentUserTurn never pulls the
+// first-user pin (the goal, preserved separately) into the verbatim tail — which
+// would both double-emit it and, when it is the ONLY user turn, drag the whole
+// history into the tail and defeat compaction. When there is no user message the
+// floor is 0 (the back-snap is a no-op anyway: nothing to snap to).
+func userSnapFloor(msgs []session.Message) int {
+	for i, m := range msgs {
+		if m.Role == session.RoleUser {
+			return i + 1
+		}
+	}
+	return 0
 }
 
 // touchedPaths collects the distinct file paths referenced by tool calls across
@@ -184,12 +317,16 @@ func extractPath(args json.RawMessage) string {
 // buildSummary renders the compaction summary message body. It always names the
 // preserved-context contract so the model knows history was elided, then lists
 // the touched file paths (the load-bearing facts gauntlet #12 requires to
-// survive).
+// survive). The wording is honest about the real contract: the FIRST instruction
+// and the MOST-RECENT user instructions survive verbatim (the user-turn back-snap),
+// while earlier/superseded context is summarised here or dropped — not every user
+// message is preserved (doc-08 §12; doc-07 §4 "what to preserve / what to drop").
 func buildSummary(paths []string) string {
 	var b strings.Builder
-	b.WriteString("[conversation compacted] Earlier turns were summarised to fit the context window. ")
-	b.WriteString("Decisions, the original goal, and the files touched so far are preserved; ")
-	b.WriteString("large tool outputs and stale file contents were dropped.")
+	b.WriteString(compactionSummaryMarker + " Earlier turns were summarised to fit the context window. ")
+	b.WriteString("The original goal and the most-recent user instructions are preserved verbatim, ")
+	b.WriteString("along with the files touched so far; earlier or superseded context, ")
+	b.WriteString("large tool outputs, and stale file contents were summarised or dropped.")
 	if len(paths) > 0 {
 		b.WriteString("\n\nFiles touched so far:")
 		for _, p := range paths {

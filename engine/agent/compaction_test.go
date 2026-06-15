@@ -12,6 +12,7 @@ import (
 	"github.com/stacklok/mecatl/engine/adapter/memfs"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
 	"github.com/stacklok/mecatl/engine/agent"
+	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/session"
 	"github.com/stacklok/mecatl/engine/tool"
 )
@@ -267,6 +268,487 @@ func TestCascadeCompactorMultipleConsecutiveLeadingOrphans(t *testing.T) {
 	if !sawDone {
 		t.Fatalf("trailing assistant message did not survive cascade snapping")
 	}
+}
+
+// recentTaskConversation builds a tool-heavy history whose most-recent USER task
+// ("ACTUAL TASK: rename Foo to Bar") sits ABOVE a long run of assistant/tool
+// messages, so the role-blind count-tail (keep=6) is ALL non-user and the task
+// would fall into the dropped/summarised head under the old logic. The first user
+// message ("original setup") is the goal pin. This is the bug repro both compactors
+// must now defeat by back-snapping the tail to the recent user turn.
+func recentTaskConversation() *session.Conversation {
+	conv := &session.Conversation{}
+	conv.Append(session.NewSystemMessage("system rules"))
+	conv.Append(session.NewUserMessage("original setup"))
+	// Several clean assistant/tool pairs (older settled work).
+	for i := 0; i < 3; i++ {
+		id := session.ToolCallID(string(rune('a' + i)))
+		conv.Append(session.NewAssistantMessage("", "", []session.ToolCall{
+			session.NewToolCall(id, "Read", json.RawMessage(`{"path":"f.go"}`)),
+		}))
+		conv.Append(session.NewToolMessage(session.NewToolResult(id, "body")))
+	}
+	// The most-recent user instruction — the live task.
+	conv.Append(session.NewUserMessage("ACTUAL TASK: rename Foo to Bar"))
+	// A long run of trailing assistant/tool messages so the count-tail (keep=6) is
+	// ENTIRELY non-user and the task falls outside it.
+	for i := 0; i < 4; i++ {
+		id := session.ToolCallID("t" + string(rune('0'+i)))
+		conv.Append(session.NewAssistantMessage("", "", []session.ToolCall{
+			session.NewToolCall(id, "Read", json.RawMessage(`{"path":"g.go"}`)),
+		}))
+		conv.Append(session.NewToolMessage(session.NewToolResult(id, "body")))
+	}
+	return conv
+}
+
+// assertRecentTaskAndPinSurvive checks the most-recent user task survives verbatim
+// as a RoleUser message, the first-user pin survives, and pairing holds.
+func assertRecentTaskAndPinSurvive(t *testing.T, compacted []session.Message) {
+	t.Helper()
+	if err := session.ValidateToolPairing(compacted); err != nil {
+		t.Fatalf("compacted history is not tool-pairing valid: %v", err)
+	}
+	var sawTask, sawPin bool
+	for _, m := range compacted {
+		if m.Role == session.RoleUser && m.Text == "ACTUAL TASK: rename Foo to Bar" {
+			sawTask = true
+		}
+		if m.Role == session.RoleUser && m.Text == "original setup" {
+			sawPin = true
+		}
+	}
+	if !sawTask {
+		t.Fatalf("most-recent user task did not survive compaction (lost to the summarised head): %+v", compacted)
+	}
+	if !sawPin {
+		t.Fatalf("first-user pin did not survive compaction")
+	}
+}
+
+// TestHeuristicCompactorPreservesRecentUserTaskOutsideCountTail is the core bug
+// repro for the heuristic compactor: the most-recent user task sits outside the
+// role-blind count-tail, so the OLD logic summarised it away. The user-turn
+// back-snap must keep it verbatim. Reverting snapCutToRecentUserTurn (or its wiring)
+// makes sawTask false → red.
+func TestHeuristicCompactorPreservesRecentUserTaskOutsideCountTail(t *testing.T) {
+	conv := recentTaskConversation()
+	compacted, _, err := agent.HeuristicCompactor{}.Compact(context.Background(), conv)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	assertRecentTaskAndPinSurvive(t, compacted)
+}
+
+// cascadeRecentTaskConversation is the cascade-specific core repro. Unlike the
+// heuristic case, the no-LLM cascade's tier-1 snip keeps the more-recent HALF of the
+// middle, so a task that happens to land in that half survives even WITHOUT the
+// back-snap (a vacuous test). Here the task is deliberately placed in the OLDER half
+// of the middle (right after the first-user pin, with a long trailing run so the snip
+// midpoint falls well AFTER it): snip alone DROPS it, and only snapCutToRecentUserTurn
+// pulls it into the verbatim tail. Reverting the back-snap therefore turns the cascade
+// repro RED (mutation-proven), giving the DEFAULT offline compactor real protection.
+func cascadeRecentTaskConversation() *session.Conversation {
+	conv := &session.Conversation{}
+	conv.Append(session.NewSystemMessage("system rules"))
+	conv.Append(session.NewUserMessage("original setup"))
+	// The live task sits at the OLDEST middle position (index 2), so tier-1 snip
+	// (which keeps the newer half of the middle) drops it unless the back-snap saves it.
+	conv.Append(session.NewUserMessage("ACTUAL TASK: rename Foo to Bar"))
+	// A long trailing run of assistant/tool pairs: pushes the snip midpoint far past
+	// the task AND keeps the count-tail (keep=6) entirely non-user.
+	for i := 0; i < 10; i++ {
+		id := session.ToolCallID("t" + string(rune('a'+i)))
+		conv.Append(session.NewAssistantMessage("", "", []session.ToolCall{
+			session.NewToolCall(id, "Read", json.RawMessage(`{"path":"g.go"}`)),
+		}))
+		conv.Append(session.NewToolMessage(session.NewToolResult(id, "body")))
+	}
+	return conv
+}
+
+// TestCascadeCompactorPreservesRecentUserTaskOutsideCountTail is the cascade parity
+// of the core bug repro (offline: BudgetTokens 0 runs every deterministic tier once,
+// no LLM). The recent user task is in the OLDER half of the middle, so tier-1 snip
+// drops it and ONLY the back-snap saves it into the preserved tail.
+func TestCascadeCompactorPreservesRecentUserTaskOutsideCountTail(t *testing.T) {
+	conv := cascadeRecentTaskConversation()
+	compacted, _, err := agent.CascadeCompactor{}.Compact(context.Background(), conv)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	assertRecentTaskAndPinSurvive(t, compacted)
+}
+
+// pairBulk appends n assistant-call/tool-result pairs with the given id prefix.
+func pairBulk(conv *session.Conversation, prefix string, n int) {
+	for i := 0; i < n; i++ {
+		id := session.ToolCallID(prefix + string(rune('a'+i)))
+		conv.Append(session.NewAssistantMessage("", "", []session.ToolCall{
+			session.NewToolCall(id, "Read", json.RawMessage(`{"path":"f.go"}`)),
+		}))
+		conv.Append(session.NewToolMessage(session.NewToolResult(id, "body")))
+	}
+}
+
+// assertGuarantee checks the GUARANTEED-survival contract: FIRST + RECENT survive
+// verbatim, and MIDDLE does NOT (the honest best-effort half — a middle instruction
+// beyond the back-snap's reach is summarised/dropped, never preserved verbatim).
+func assertGuarantee(t *testing.T, compacted []session.Message) {
+	t.Helper()
+	if err := session.ValidateToolPairing(compacted); err != nil {
+		t.Fatalf("pairing: %v", err)
+	}
+	var sawFirst, sawRecent, sawMiddle bool
+	for _, m := range compacted {
+		if m.Role != session.RoleUser {
+			continue
+		}
+		switch m.Text {
+		case "FIRST instruction":
+			sawFirst = true
+		case "RECENT instruction":
+			sawRecent = true
+		case "MIDDLE instruction":
+			sawMiddle = true
+		}
+	}
+	if !sawFirst {
+		t.Fatalf("first user turn not preserved")
+	}
+	if !sawRecent {
+		t.Fatalf("most-recent user turn not preserved")
+	}
+	// NEGATIVE half: the middle instruction is beyond the back-snap lookback, so it
+	// must NOT survive as a verbatim RoleUser message — pins the honest best-effort
+	// contract and guards against a future over-broad snap pulling it in.
+	if sawMiddle {
+		t.Fatalf("middle user instruction survived verbatim; the contract is best-effort, not verbatim, for superseded context")
+	}
+}
+
+// TestHeuristicCompactorGuaranteesFirstAndRecentUserTurns: FIRST (pin) + RECENT
+// (back-snap) survive, MIDDLE (beyond lookback) does not. RECENT is outside the
+// role-blind count-tail (the trailing pairs are all non-user), so only the back-snap
+// preserves it. MIDDLE sits before a > maxUserSnapLookback run, so the bounded
+// back-snap cannot reach it.
+func TestHeuristicCompactorGuaranteesFirstAndRecentUserTurns(t *testing.T) {
+	conv := &session.Conversation{}
+	conv.Append(session.NewSystemMessage("system rules"))
+	conv.Append(session.NewUserMessage("FIRST instruction")) // pin
+	conv.Append(session.NewUserMessage("MIDDLE instruction"))
+	pairBulk(conv, "m", 16) // 32 msgs > maxUserSnapLookback(24): MIDDLE unreachable
+	conv.Append(session.NewUserMessage("RECENT instruction"))
+	pairBulk(conv, "r", 4) // 8 trailing non-user msgs: RECENT is outside the count-tail
+	c, _, err := agent.HeuristicCompactor{}.Compact(context.Background(), conv)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	assertGuarantee(t, c)
+}
+
+// TestCascadeCompactorGuaranteesFirstAndRecentUserTurns is the cascade parity, with
+// the geometry the no-LLM cascade needs to be NON-vacuous: RECENT is placed so tier-1
+// snip (which keeps the newer half of the middle) DROPS it, yet it is still within
+// maxUserSnapLookback of the cut so the back-snap reaches it. MIDDLE is beyond the
+// lookback. Reverting the back-snap drops RECENT → red.
+func TestCascadeCompactorGuaranteesFirstAndRecentUserTurns(t *testing.T) {
+	conv := &session.Conversation{}
+	conv.Append(session.NewSystemMessage("system rules"))
+	conv.Append(session.NewUserMessage("FIRST instruction"))  // pin (head)
+	conv.Append(session.NewUserMessage("MIDDLE instruction")) // oldest middle: snipped, beyond lookback
+	pairBulk(conv, "a", 6)                                    // 12 msgs
+	conv.Append(session.NewUserMessage("RECENT instruction")) // in the OLDER half of the middle
+	pairBulk(conv, "b", 11)                                   // 22 trailing msgs
+	// Layout: sys(0) FIRST(1) MIDDLE(2) [12 pairs idx3..14] RECENT(15) [22 pairs idx16..37]
+	// len=38, keep=6 → count-cut=32. middle=idx2..31 (M=30 msgs); snip drops the older
+	// HALF (~15) so RECENT (middle-index 13 < 15) is DROPPED by snip — without the
+	// back-snap it does NOT survive. RECENT's distance to the cut is 32-15=17 < 24, so
+	// the back-snap reaches it and snaps the tail to it. MIDDLE(2) is 30 back, beyond
+	// maxUserSnapLookback(24), so it stays dropped (the negative half).
+	c, _, err := agent.CascadeCompactor{}.Compact(context.Background(), conv)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	assertGuarantee(t, c)
+}
+
+// TestCompactorBackSnapBounded is TWO-SIDED so neither a snap-removal NOR a
+// bound-removal mutation can pass it:
+//   - a RECENT user turn WITHIN maxUserSnapLookback of the cut MUST survive verbatim
+//     (the snap is active — removing it drops RECENT → red);
+//   - an ANCIENT user turn BEYOND maxUserSnapLookback MUST NOT survive verbatim (the
+//     bound clamps the walk — removing the bound would drag ANCIENT in → red).
+//
+// The conversation has exactly two user turns after the pin: ANCIENT (far back) and
+// RECENT (near the cut), separated by a > lookback non-user run.
+func TestCompactorBackSnapBounded(t *testing.T) {
+	const (
+		ancientText = "ANCIENT instruction"
+		recentText  = "RECENT instruction"
+	)
+	// Layout (heuristic count-tail reasoning; cascade is parity):
+	// sys(0) pin(1) ANCIENT(2) [16 pairs idx3..34] RECENT(35) [4 pairs idx36..43]
+	// len=44, keep=6 → count-cut=38. Back-snap from idx37: finds RECENT(35) within
+	// lookback(24) and snaps to it; ANCIENT(2) is ~35 back, beyond the bound, so the
+	// walk gives up before reaching it. RECENT survives, ANCIENT does not.
+	build := func() *session.Conversation {
+		conv := &session.Conversation{}
+		conv.Append(session.NewSystemMessage("system rules"))
+		conv.Append(session.NewUserMessage("the goal")) // pin
+		conv.Append(session.NewUserMessage(ancientText))
+		pairBulk(conv, "x", 16) // 32 msgs > maxUserSnapLookback(24): ANCIENT unreachable
+		conv.Append(session.NewUserMessage(recentText))
+		pairBulk(conv, "r", 4) // 8 trailing non-user msgs: RECENT within lookback, outside count-tail
+		return conv
+	}
+
+	verbatim := func(out []session.Message, text string) bool {
+		for _, m := range out {
+			if m.Role == session.RoleUser && m.Text == text {
+				return true
+			}
+		}
+		return false
+	}
+
+	check := func(t *testing.T, in, out []session.Message, checkSnapActive bool) {
+		t.Helper()
+		if err := session.ValidateToolPairing(out); err != nil {
+			t.Fatalf("pairing: %v", err)
+		}
+		// The bound side applies to BOTH compactors: ANCIENT is beyond the lookback,
+		// so the back-snap must NOT pull it in (a bound-removal mutation fails here).
+		if verbatim(out, ancientText) {
+			t.Fatalf("bound not enforced: the ANCIENT user turn (beyond maxUserSnapLookback) was dragged into the verbatim tail")
+		}
+		// The snap-active side is asserted only where it is NON-vacuous. For the
+		// heuristic the role-blind count-tail is all non-user, so ONLY the back-snap can
+		// preserve RECENT (a snap-removal mutation fails here). For the no-LLM cascade,
+		// tier-1 snip happens to keep RECENT (it lands in the newer half of the middle),
+		// so asserting it here would be vacuous — the cascade snap-active proof lives in
+		// TestCascadeCompactorPreservesRecentUserTaskOutsideCountTail /
+		// TestCascadeCompactorGuaranteesFirstAndRecentUserTurns, which place the turn in
+		// the OLDER half so only the back-snap saves it.
+		if checkSnapActive && !verbatim(out, recentText) {
+			t.Fatalf("snap inactive: the RECENT user turn (within lookback) was not pulled into the verbatim tail")
+		}
+		// Compaction still shrank the history materially (the bound did not defeat it).
+		if len(out) >= len(in) {
+			t.Fatalf("compaction did not shrink history: input=%d output=%d", len(in), len(out))
+		}
+	}
+
+	t.Run("heuristic", func(t *testing.T) {
+		conv := build()
+		in := append([]session.Message(nil), conv.Messages...)
+		out, _, err := agent.HeuristicCompactor{}.Compact(context.Background(), conv)
+		if err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		check(t, in, out, true)
+	})
+	t.Run("cascade", func(t *testing.T) {
+		conv := build()
+		in := append([]session.Message(nil), conv.Messages...)
+		out, _, err := agent.CascadeCompactor{}.Compact(context.Background(), conv)
+		if err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		check(t, in, out, false)
+	})
+}
+
+// TestCompactorRecentUserAdjacentToToolPair exercises the back-snap × forward-snap
+// interaction: a recent user instruction sits OUTSIDE the role-blind count-tail with
+// a tool-call/result pair between it and the cut, so the back-snap must reach BACK
+// across that pair to anchor the tail on the user turn — and the forward-snap (which
+// stays LAST) must then NOT re-orphan the pulled-in pair. Asserts the user text
+// survives verbatim AND pairing holds. The heuristic count-tail (keep=6) is all
+// non-user, so this is a genuine back-snap test (reverting the snap drops the turn).
+func TestCompactorRecentUserAdjacentToToolPair(t *testing.T) {
+	build := func() *session.Conversation {
+		conv := &session.Conversation{}
+		conv.Append(session.NewSystemMessage("system rules"))
+		conv.Append(session.NewUserMessage("the goal"))
+		// Older settled pairs (head/middle bulk).
+		pairBulk(conv, "a", 3)
+		// The recent user instruction, FOLLOWED by a tool-call/result pair, then more
+		// trailing non-user pairs so the user turn falls OUTSIDE the keep=6 count-tail.
+		conv.Append(session.NewUserMessage("DO THE THING now"))
+		conv.Append(session.NewAssistantMessage("", "", []session.ToolCall{
+			session.NewToolCall("z", "Read", json.RawMessage(`{"path":"z.go"}`)),
+		}))
+		conv.Append(session.NewToolMessage(session.NewToolResult("z", "body")))
+		pairBulk(conv, "b", 3) // trailing non-user: pushes the user turn out of the count-tail
+		conv.Append(session.NewAssistantMessage("ok", "", nil))
+		return conv
+	}
+
+	check := func(t *testing.T, out []session.Message) {
+		t.Helper()
+		if err := session.ValidateToolPairing(out); err != nil {
+			t.Fatalf("pairing: %v", err)
+		}
+		var saw bool
+		for _, m := range out {
+			if m.Role == session.RoleUser && m.Text == "DO THE THING now" {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Fatalf("recent user instruction outside the count-tail was not back-snapped into the verbatim tail")
+		}
+	}
+
+	t.Run("heuristic", func(t *testing.T) {
+		out, _, err := agent.HeuristicCompactor{}.Compact(context.Background(), build())
+		if err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		check(t, out)
+	})
+	t.Run("cascade", func(t *testing.T) {
+		out, _, err := agent.CascadeCompactor{}.Compact(context.Background(), build())
+		if err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		check(t, out)
+	})
+}
+
+// hasSummaryInTail reports whether any synthesised-summary message (paths-summary OR
+// tier-4) appears AFTER the last genuine non-summary content in out — i.e. whether a
+// prior compaction's summary was dragged into the verbatim tail. We approximate "the
+// tail" as "everything from the last summary message onward must be small": if a
+// summary is followed by a large run of preserved turns, the back-snap anchored on it.
+func countSummaryMessages(out []session.Message) int {
+	n := 0
+	for _, m := range out {
+		if m.Role == session.RoleUser &&
+			(strings.HasPrefix(m.Text, "[conversation compacted]") ||
+				strings.HasPrefix(m.Text, "[earlier turns summarised]")) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCompactorReCompactionDoesNotAnchorOnPriorSummary is the re-compaction footgun
+// guard (the isRecentUserTurn marker-skip). Compact once; append more assistant/tool
+// turns with NO new user turn; compact again. The ONLY user-ish message between the
+// first-user pin and the end is the prior compaction's synthesised summary — so if the
+// back-snap treated it as a recent user turn it would anchor the verbatim tail on it
+// and pull the entire post-summary history in, defeating the second compaction. The
+// marker-skip prevents that.
+//
+// Mutation-proof: dropping the marker check in isRecentUserTurn (so the summary counts
+// as a user turn) makes the second compaction NOT shrink — the (a) assertion fails.
+func TestCompactorReCompactionDoesNotAnchorOnPriorSummary(t *testing.T) {
+	// firstConv has exactly ONE user turn (the pin) and a SHORT tool-heavy run, so the
+	// compacted output's only user-ish message (besides the pin) is the synthesised
+	// summary, AND that summary stays close to the front (so on the second pass it sits
+	// WITHIN maxUserSnapLookback of the cut — otherwise the lookback bound, not the
+	// marker-skip, would be what prevents the false-anchor and the test would be
+	// vacuous w.r.t. the marker-skip).
+	firstConv := func() *session.Conversation {
+		conv := &session.Conversation{}
+		conv.Append(session.NewSystemMessage("system rules"))
+		conv.Append(session.NewUserMessage("the original goal"))
+		pairBulk(conv, "a", 7)
+		return conv
+	}
+	// appendMore returns a fresh conversation seeded from `out` plus a SMALL run of new
+	// pairs (no new user turn), the shape a SECOND compaction sees. Kept small so the
+	// prior summary is within maxUserSnapLookback of the new cut — the back-snap WOULD
+	// reach it (and anchor on it) if the marker-skip didn't exclude it.
+	appendMore := func(out []session.Message) *session.Conversation {
+		conv := &session.Conversation{}
+		for _, m := range out {
+			conv.Append(m)
+		}
+		pairBulk(conv, "b", 6)
+		return conv
+	}
+
+	assertSecondShrinks := func(t *testing.T, secondIn, secondOut []session.Message) {
+		t.Helper()
+		if err := session.ValidateToolPairing(secondOut); err != nil {
+			t.Fatalf("pairing: %v", err)
+		}
+		if len(secondOut) >= len(secondIn) {
+			t.Fatalf("second compaction did not shrink (back-snap anchored on the prior summary): in=%d out=%d",
+				len(secondIn), len(secondOut))
+		}
+		// The prior summary must not have spawned a SECOND verbatim-tail copy of the
+		// post-summary bulk: at most one synthesised summary per compactor pass.
+		if n := countSummaryMessages(secondOut); n == 0 {
+			t.Fatalf("second compaction emitted no summary message at all: %+v", secondOut)
+		}
+	}
+
+	t.Run("heuristic", func(t *testing.T) {
+		first, _, err := agent.HeuristicCompactor{}.Compact(context.Background(), firstConv())
+		if err != nil {
+			t.Fatalf("Compact #1: %v", err)
+		}
+		if countSummaryMessages(first) == 0 {
+			t.Fatalf("first compaction produced no synthesised summary; the test needs one")
+		}
+		secondConv := appendMore(first)
+		secondIn := append([]session.Message(nil), secondConv.Messages...)
+		second, _, err := agent.HeuristicCompactor{}.Compact(context.Background(), secondConv)
+		if err != nil {
+			t.Fatalf("Compact #2: %v", err)
+		}
+		assertSecondShrinks(t, secondIn, second)
+	})
+
+	t.Run("cascade", func(t *testing.T) {
+		first, _, err := agent.CascadeCompactor{}.Compact(context.Background(), firstConv())
+		if err != nil {
+			t.Fatalf("Compact #1: %v", err)
+		}
+		secondConv := appendMore(first)
+		secondIn := append([]session.Message(nil), secondConv.Messages...)
+		second, _, err := agent.CascadeCompactor{}.Compact(context.Background(), secondConv)
+		if err != nil {
+			t.Fatalf("Compact #2: %v", err)
+		}
+		assertSecondShrinks(t, secondIn, second)
+	})
+
+	t.Run("cascade tier-4", func(t *testing.T) {
+		// Tier-4 variant: the prior summary is the tier-4 LLM summary
+		// ("[earlier turns summarised]"), not the paths-summary. forceTier4 budget 1
+		// makes tier 4 fire on both passes. Reverting the tier4SummaryMarker coverage
+		// (so the tier-4 summary is NOT recognised) lets the second back-snap anchor on
+		// the prior tier-4 summary → no shrink.
+		mk := func() port.LLMProvider {
+			return mockllm.New(mockllm.TextTurn("## Goal\nthe original goal\n\n## Next steps\nNone."))
+		}
+		first, _, err := forceTier4(mk()).Compact(context.Background(), firstConv())
+		if err != nil {
+			t.Fatalf("Compact #1: %v", err)
+		}
+		// Confirm the first pass actually produced a tier-4 summary message.
+		var sawTier4 bool
+		for _, m := range first {
+			if strings.HasPrefix(m.Text, "[earlier turns summarised]") {
+				sawTier4 = true
+			}
+		}
+		if !sawTier4 {
+			t.Fatalf("first tier-4 pass produced no '[earlier turns summarised]' message: %+v", first)
+		}
+		secondConv := appendMore(first)
+		secondIn := append([]session.Message(nil), secondConv.Messages...)
+		second, _, err := forceTier4(mk()).Compact(context.Background(), secondConv)
+		if err != nil {
+			t.Fatalf("Compact #2: %v", err)
+		}
+		assertSecondShrinks(t, secondIn, second)
+	})
 }
 
 // danglingTailConversation builds a history whose preserved tail ENDS on an

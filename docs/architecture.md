@@ -1144,9 +1144,18 @@ Two seams keep a long run inside the model's context window:
   soon as the slice fits the token budget, with trigger/target **hysteresis** so
   it does not thrash near the threshold.
 
-  Both compactors **snap the kept-tail boundary past leading tool results** (the
-  shared `snapCutToTurnBoundary` helper) so the preserved tail never STARTS on a
-  `RoleTool` message whose matching assistant tool call was dropped into the head —
+  Both compactors **back-snap the kept-tail boundary to recent user turns** (the
+  shared `snapCutToRecentUserTurn` helper) so the most-recent user instruction(s)
+  survive verbatim instead of falling into the summarised head — the role-blind
+  count-tail bug (during heavy tool use the last N messages are all assistant/tool,
+  so the user's actual task was lost). The first user message stays pinned, the
+  back-snap pulls up to `recentUserTurnsKept` recent user turns into the tail
+  (bounded by `maxUserSnapLookback` so an ancient lone turn can't drag everything
+  in), and tier-4 summarises older/superseded intent under a dedicated
+  `## User instructions and intent` section (prior art: Codex, gemini-cli). They
+  then **snap the kept-tail boundary past leading tool results** (the shared
+  `snapCutToTurnBoundary` helper, applied LAST) so the preserved tail never STARTS on
+  a `RoleTool` message whose matching assistant tool call was dropped into the head —
   an orphaned tool result draws a provider HTTP 400 on replay. As a final guard
   each compactor **self-validates** the assembled slice with
   `session.ValidateToolPairing` (bidirectional: no orphaned results, no dangling
