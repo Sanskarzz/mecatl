@@ -28,6 +28,9 @@ func WriteFixtures(repoRoot, root string) error {
 		{filepath.Join(fx, "permissions.yaml"), filepath.Join(root, "permissions.yaml")},
 		{filepath.Join(fx, "workspace", "README.md"), filepath.Join(root, "workspace", "README.md")},
 		{filepath.Join(fx, "workspace", "FRUIT.txt"), filepath.Join(root, "workspace", "FRUIT.txt")},
+		// Sized input the compaction scenario Reads to grow conversation history
+		// deterministically (~2250 conversation-tokens per Read).
+		{filepath.Join(fx, "workspace", "compaction-input.txt"), filepath.Join(root, "workspace", "compaction-input.txt")},
 	}
 	for _, c := range copies {
 		if err := copyFile(c.src, c.dst); err != nil {

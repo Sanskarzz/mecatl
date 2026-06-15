@@ -34,6 +34,8 @@ Environment knobs (all optional):
 | `MECATL_E2E_MODEL_SECONDARY` | `openai/gpt-4.1-mini` | second lane (single-turn smoke only); `skip` disables it |
 | `MECATL_E2E_MAX_RUN_TOKENS` | `20000` | `--max-run-tokens` for the spawned server (a single full-catalog turn is ~5-6k input tokens, so a 4k budget trips at the first turn boundary) |
 | `MECATL_E2E_MAX_TEAM_TOKENS` | `60000` | `--max-team-tokens` for the spawned server |
+| `MECATL_E2E_COMPACTION_WINDOW` | `2000` | compaction spec only: the `--context-window-override` for its OWN spawn (trigger = 0.8 × this conversation-tokens) |
+| `MECATL_E2E_COMPACTION_MAX_RUN_TOKENS` | `100000` | compaction spec only: `--max-run-tokens` for its OWN spawn (the reused 6-turn session needs headroom) |
 | `MECATL_E2E_WORKSPACE` | — | remote target only: absolute workspace root on the server host (required) |
 | `MECATL_E2E_METRICS_URL` | — | remote target only: the `/metrics` URL (metrics spec Skips without it) |
 | `MECATL_E2E_AUTH_TOKEN` | — | remote target only: bearer token |
@@ -102,10 +104,45 @@ package would need its own suite bootstrap and its own server):
 8. **user memory** — `RememberUser` event + the fact lands in
    `<user-model-dir>/memory.json` (file check is local-target only).
 9. **project memory** — `Remember` + `<memory-dir>/memory.json`.
-10. **soul** — deterministic: the `soul ENABLED (user provenance...` composition
+10. **compaction (task survives a real compaction)** — spawns its OWN mecated
+    with `--context-window-override 2000` (env: `MECATL_E2E_COMPACTION_WINDOW`) so
+    compaction trips at a small, deterministic threshold, then drives **multi-turn
+    over one reused session**: pin a distinctive task ("when I say GO, Write
+    `result.txt` containing PINEAPPLE") on a non-first turn, grow history with sized
+    fixture Reads, then send `GO` (`Write` allow-once). **Trigger arithmetic (the
+    important bit):** the compaction trigger counts **conversation messages only** —
+    `maybeCompact` calls `TokenCounter.CountMessages(Conversation.Messages)`, and the
+    spawn runs the default `--tokenizer heuristic` (≈ body-bytes/4 + small per-message
+    overhead). The system prompt and tool catalog are **NOT** in the denominator
+    (those are billed *input*, not the trigger count), so a window of 10k would
+    **never** fire on short prompts — the controllable lever is the **Read tool
+    result size**. The harness fixture `compaction-input.txt` (~8KB; ~9KB once Read
+    adds line-number prefixes) contributes **~2250 conversation-tokens per Read**. At
+    window 2000 the threshold is `0.8 × 2000 = 1600`: turns 0+1 (~85 tokens) stay
+    under, the first sized Read (turn 2) crosses it, and `maybeCompact` (top-of-turn)
+    fires at **turn 3** — two turns before GO. The task (turn 1) is the 3rd-most-recent
+    user turn at that point, so the **role-aware back-snap keeps it verbatim** while
+    the framing turn is summarised. Asserts (A, anti-vacuity) ≥1 `EvCompaction` fired
+    — otherwise the survival check is vacuous and the spec FAILS loudly; (pre-GO)
+    `result.txt` does NOT contain PINEAPPLE before GO (an early/non-GO write can't
+    pass B vacuously); (C, ordering) a compaction fired at or before the turn before
+    GO; (B) `result.txt` contains PINEAPPLE (side-effect, local workspace) + a `Write`
+    call carrying PINEAPPLE + final `stop=end_turn` (so a budget-truncated run isn't
+    mistaken for success); intermediate bury turns are asserted `end_turn` so a
+    degraded turn that under-grows history is caught at its source. Robust signals
+    only (the literal token + the compaction event, never model prose). The spawn is
+    **per-attempt** (created inside the spec func) so `FlakeAttempts(2)` gets a fresh
+    workspace with no stale `result.txt` bleed. `--max-run-tokens 100000` keeps the
+    cumulative-session budget from tripping over 6 reused turns. Haiku lane,
+    `FlakeAttempts(2)`, local-target only (own-spawn flag + workspace read).
+    Highest-fidelity guard for the role-blind-tail compaction bug
+    (`docs/design/COMPACTION.md`, the back-snap section). A cascade / tier-4 variant
+    (forcing the LLM summariser, env-gated `MECATL_E2E_COMPACTION_CASCADE`) is a
+    deferred follow-up.
+11. **soul** — deterministic: the `soul ENABLED (user provenance...` composition
     fact in the captured stderr; the behavioural `SOUL-OK:` marker is a
     `quarantine`-labelled spec that reports but never fails.
-11. **approve-after-kill (cloud-native Phase 2)** — raises a real `Write`
+12. **approve-after-kill (cloud-native Phase 2)** — raises a real `Write`
     permission ask on the haiku lane, **SIGKILL**s the mecated process WITHOUT
     cleanup, restarts a SECOND mecated over the SAME `--store-dir`, POSTs
     `/v1/sessions/{id}/approve` (`allow_once`) to the second process's HTTP

@@ -100,6 +100,9 @@ type config struct {
 	// counter); "cascade"/"tiktoken" opt into the tiered cascade / real tokenizer.
 	compaction string
 	tokenizer  string
+	// contextWindowOverride forces a fixed compaction context window (tokens); 0 keeps
+	// the live/catalogued/128k resolution. See the flag help for the dual purpose.
+	contextWindowOverride int
 
 	// Security: API authentication, transport security, and rate limiting.
 	authToken string  // bearer token required on every RPC/request (empty disables auth)
@@ -743,6 +746,7 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		NoBash:                       cfg.noBash,
 		Compaction:                   cfg.compaction,
 		Tokenizer:                    cfg.tokenizer,
+		ContextWindowOverride:        cfg.contextWindowOverride,
 		LLMMaxAttempts:               cfg.llmMaxAttempts,
 		LLMPerAttemptTimeout:         cfg.llmPerAttemptTimeout,
 		LLMStreamIdleTimeout:         cfg.llmStreamIdleTimeout,
@@ -876,6 +880,7 @@ func parseFlags(argv []string) (config, error) {
 
 	fs.StringVar(&cfg.compaction, "compaction", "heuristic", "compaction strategy: \"heuristic\" (default, single-summary) or \"cascade\" (tiered snip→strip→collapse→summarize)")
 	fs.StringVar(&cfg.tokenizer, "tokenizer", "heuristic", "token counter for the compaction trigger: \"heuristic\" (default, dependency-free) or \"tiktoken\" (offline tiktoken vocab)")
+	fs.IntVar(&cfg.contextWindowOverride, "context-window-override", 0, "override the model's context window in tokens for the compaction trigger (compaction fires at 80% of it). Set this to the model's ACTUAL window when a model under-reports its window or sits behind a proxy that does. 0 (default) keeps the live/catalogued/128k resolution unchanged. A small value (below a few thousand tokens) forces the agent to compact on nearly every turn — degraded, only useful for stress-testing compaction.")
 
 	fs.IntVar(&cfg.llmMaxAttempts, "llm-max-attempts", 3, "max LLM stream-establish attempts (initial call plus retries)")
 	fs.DurationVar(&cfg.llmPerAttemptTimeout, "llm-per-attempt-timeout", 30*time.Second, "per-attempt timeout for establishing an LLM stream (0 disables)")

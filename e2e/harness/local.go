@@ -352,7 +352,7 @@ func freePort() (int, error) {
 func initWorkspaceGit(ws string) error {
 	cmds := [][]string{
 		{"git", "init", "-q"},
-		{"git", "add", "README.md", "FRUIT.txt", ".claude"},
+		{"git", "add", "README.md", "FRUIT.txt", "compaction-input.txt", ".claude"},
 		{"git", "-c", "user.name=mecatl-e2e", "-c", "user.email=e2e@mecatl.invalid", "commit", "-q", "-m", "e2e fixture workspace"},
 	}
 	for _, c := range cmds {

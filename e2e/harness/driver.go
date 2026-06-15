@@ -207,6 +207,18 @@ func (r *RunResult) ToolResult(callID string) *client.ToolResultMsg {
 	return nil
 }
 
+// Compactions returns every CompactionMsg observed in the run (the "history
+// compacted" notice the relay emits when maybeCompact fires).
+func (r *RunResult) Compactions() []client.CompactionMsg {
+	var out []client.CompactionMsg
+	for _, m := range r.Msgs {
+		if c, ok := m.(client.CompactionMsg); ok {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // SubagentMsgs returns every SubagentMsg of the given kind.
 func (r *RunResult) SubagentMsgs(kind client.SubagentKind) []client.SubagentMsg {
 	var out []client.SubagentMsg

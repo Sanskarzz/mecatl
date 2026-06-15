@@ -595,13 +595,15 @@ type Config struct {
 	// user/CLI rules only. Unexported, set alongside permResolver in Build.
 	childPermResolver permpolicy.RuleResolver
 
-	// contextWindowOverride forces the engine's compaction context window (in tokens)
-	// instead of the live/catalogued/128k resolution, so an OFFLINE composition test
-	// can trip maybeCompact mid-run without accumulating ~100k tokens of history. It
-	// is a composition-only test seam (the providerConstructor/envDetector idiom):
-	// production leaves it 0, so the normal window resolution stands byte-identically.
-	// Unexported: not an operator knob.
-	contextWindowOverride int
+	// ContextWindowOverride forces the engine's compaction context window (in tokens)
+	// instead of the live/catalogued/128k resolution. It is a documented operator knob
+	// (the --context-window-override flag) with a dual purpose: (a) it forces a small,
+	// cheap compaction window so the live e2e (and ad-hoc stress tests) can trip
+	// maybeCompact mid-run without accumulating ~100k tokens of history; (b) it is a
+	// workaround for a model that under-reports its context window or sits behind a
+	// proxy that does. INVARIANT: 0 = disabled = byte-identical production resolution
+	// (the live/catalogued/128k path stands untouched).
+	ContextWindowOverride int
 }
 
 // GuardrailRule is one operator-tier guardrail rule (issue #27): a tool-NAME matcher,
@@ -1731,10 +1733,12 @@ func engineDepsForProvider(
 	if contextWindow > 0 {
 		window = contextWindow
 	}
-	// Composition-only test seam: force a tiny window so an offline test trips
-	// compaction mid-run. Production leaves it 0 (the resolution above stands).
-	if cfg.contextWindowOverride > 0 {
-		window = cfg.contextWindowOverride
+	// Operator knob (--context-window-override): force a fixed window, e.g. a tiny
+	// one so the live e2e/stress tests trip compaction mid-run, or a corrective one
+	// for a model that under-reports its window. Default 0 leaves the resolution
+	// above intact (byte-identical production path).
+	if cfg.ContextWindowOverride > 0 {
+		window = cfg.ContextWindowOverride
 	}
 	return agent.Deps{
 		LLM:          provider,
@@ -3214,14 +3218,31 @@ func childEngineDeps(cfg Config, role string, provider port.LLMProvider, cat *to
 		ToolCallRecorder: recorder,
 		// Clock: the production wall clock (issue #53) — children time their tool
 		// calls/turns regardless of whether the role-scoped telemetry pair is wired.
-		Clock:               wallclock.Clock{},
-		ContextWindowTokens: defaultContextWindowTokens,
+		Clock: wallclock.Clock{},
+		// Honour --context-window-override here too (issue: dual-path drift). The
+		// modern childEngineDepsForProvider gets this via engineDepsForProvider; this
+		// legacy literal path (buildUserModelReviewEngine + buildParallelJudgeEngine)
+		// must clamp the SAME way or the documented "model under-reports / proxy"
+		// workaround silently fails for those two child engines. Default 0 → the
+		// defaultContextWindowTokens floor, byte-identical to before.
+		ContextWindowTokens: childContextWindow(cfg),
 		CompactionRatio:     defaultCompactionRatio,
 		// ChildAskReviewer is deliberately ABSENT (nil): a child engine never carries
 		// the ask reviewer — no nesting, and the reviewer engine is itself built
 		// through the child deps path, so inheriting it would recurse at
 		// construction. Same posture as childEngineDepsForProvider.
 	}
+}
+
+// childContextWindow resolves the compaction window for the legacy literal
+// childEngineDeps path: the operator's --context-window-override when set,
+// otherwise the conservative 128k default. The modern path resolves the SAME way
+// inside engineDepsForProvider; this keeps the two child builders from drifting.
+func childContextWindow(cfg Config) int {
+	if cfg.ContextWindowOverride > 0 {
+		return cfg.ContextWindowOverride
+	}
+	return defaultContextWindowTokens
 }
 
 // newChildEngineForProvider is newChildEngineWithHooks BUT it RE-DERIVES the

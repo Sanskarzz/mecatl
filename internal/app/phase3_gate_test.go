@@ -62,7 +62,7 @@ func TestPhase3ReconstructFromStoreAndLog(t *testing.T) {
 		liveModelHTTPClient: offlineHTTPClient(),
 		// Tiny window so maybeCompact fires after the first couple of turns of history
 		// (offline test seam) — the pre-compaction turns then land in an archive event.
-		contextWindowOverride: 40,
+		ContextWindowOverride: 40,
 	}
 	// The first three Writes take the three distinct verdicts; MANY more Writes
 	// follow (allow-once) so the trailing history grows past the HeuristicCompactor's

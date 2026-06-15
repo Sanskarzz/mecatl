@@ -55,6 +55,15 @@ headroom for the summarisation call itself (`docs/harnesses/07-context-and-mcp.m
 (the `engine/agent/tokencount.go` (`TokenCounter`) seam; production wires a tiktoken
 counter, the offline default is `engine/agent/tokencount.go` (`HeuristicTokenCounter`)).
 
+The model's window is resolved once in composition (`internal/app/build.go`) from the
+live / catalogued / 128k fallback. The operator can **override** it with the
+`--context-window-override` flag (`app.Config.ContextWindowOverride`): a positive value
+replaces the resolved window, so a small value forces compaction at a tiny, cheap
+threshold (0.8 × the override). `0` (the default) is **disabled** and leaves the
+resolution byte-identical. The override is used by the live e2e (below) and to
+stress-test compaction, and doubles as a workaround for a model that under-reports its
+window or sits behind a proxy that does. See `docs/usage.md` for the flag.
+
 When it fires, `maybeCompact` calls the injected `Compactor`, validates the result,
 swaps the conversation via `engine/session/session.go` (`ReplaceHistory`), and emits
 two events (§7). On any failure it keeps the original history and continues — a
@@ -199,6 +208,14 @@ compactors share the same contract, partitioning the history into a preserved
   skipping BOTH synthesised summary messages — the paths-summary AND the tier-4 LLM
   summary — via `engine/agent/compaction.go` (`isSynthesisedSummary`) (see §6, the
   re-compaction footgun).
+
+  > **Live guard.** `e2e/compaction_test.go` drives a **real model across a real
+  > compaction** (spawning its own mecated with `--context-window-override` to force a
+  > tiny window) and asserts a distinctive task issued *after* the first-user pin still
+  > gets executed once compaction has replaced the head — the highest-fidelity guard for
+  > this back-snap (the role-blind-tail bug that dropped the task lived here). It is
+  > anti-vacuity gated: the spec fails unless an `EvCompaction` actually fired, and
+  > fired *before* the task-execution turn. See `e2e/README.md`.
 
 - **Touched file paths — a synthesised summary.** `engine/agent/compaction.go`
   (`touchedPaths`) scans every tool call's args for a `path` / `file_path` field
