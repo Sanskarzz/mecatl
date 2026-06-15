@@ -983,3 +983,53 @@ func TestSupervisorRunsMemberCloseOnCleanup(t *testing.T) {
 		t.Fatalf("member Close should run exactly once on cleanup, ran %d times", closed)
 	}
 }
+
+// TestSupervisorRelaysMemberContextWindow is the relay half of the issue #63/#64
+// wiring (req 6): the supervisor must tag EVERY member event with the producing
+// member engine's ContextWindow() — the denominator the ctrl+a context meter and
+// the proto TeamEvent.context_window carry. It builds a member engine on a
+// catalog-realistic window (1,050,000 — NOT the 128k floor) and asserts every
+// captured TeamEvent for that member reports that window verbatim. The composition
+// half (childWindowFor actually resolving that catalog window into the member
+// engine) is proven in internal/app's TestMemberEngineRelaysResolvedContextWindow.
+func TestSupervisorRelaysMemberContextWindow(t *testing.T) {
+	const window = 1_050_000 // a catalogued large-context model window, NOT the 128k floor
+	tm := team.New("ctxwin")
+	allow := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil)
+	factory := func(spec agent.MemberSpec) agent.MemberBuild {
+		cat := tool.NewCatalog()
+		for _, tl := range agent.MemberTools(tm, spec.Name, nil) {
+			cat.MustRegister(tl)
+		}
+		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
+			LLM:                 mockllm.New(mockllm.TextTurn("done")),
+			Catalog:             cat,
+			Policy:              allow,
+			Model:               "mock",
+			ContextWindowTokens: window,
+		})}
+	}
+	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory, agent.WithMaxRounds(2))
+	if err := sup.AddMember(context.Background(), agent.MemberSpec{Name: "lead", Lead: true, InitialPrompt: "go"}); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+
+	var seen int
+	sup.Run(context.Background(), func(ev agent.TeamEvent) {
+		if ev.Member != "lead" || ev.Event.Type == "" {
+			return // skip the terminal/outcome frame and any non-member frame
+		}
+		seen++
+		// TeamEvent.ContextWindow is the relay seam: the supervisor tags every member
+		// event with m.engine.ContextWindow(). projectTeamEvent then copies this onto
+		// the wire-bound session.Event (TeamPayload.ContextWindow / proto field 14) on
+		// turn.end — proven by TestProjectTeamEventTurnEndContextMeter.
+		if ev.ContextWindow != window {
+			t.Fatalf("TeamEvent[%s].ContextWindow = %d, want the member engine's resolved window %d (NOT the 128k floor)",
+				ev.Event.Type, ev.ContextWindow, window)
+		}
+	})
+	if seen == 0 {
+		t.Fatal("no member events captured; the relay assertion was vacuous")
+	}
+}

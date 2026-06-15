@@ -54,7 +54,10 @@ func TestBaseEngineDepsCarriesFullCollaboratorSet(t *testing.T) {
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
 	hooks := hookexec.New(nil)
 
-	deps := baseEngineDeps(cfg, provider, store, policy, hooks, nil, prompt.RootAssembler{})
+	// "test-model" is uncatalogued, so contextWindowFor → 0 → the 128k floor; this
+	// keeps the floor assertion below honest as the genuinely-unknown-model case.
+	reg := regForTest(provider, providerOpenAI, cfg.Model)
+	deps := baseEngineDeps(cfg, reg, provider, store, policy, hooks, nil, prompt.RootAssembler{})
 
 	if deps.Instructions == nil {
 		t.Fatal("Instructions is nil — turn-0 project instructions / memory index would not assemble")
@@ -86,11 +89,67 @@ func TestBaseEngineDepsCarriesFullCollaboratorSet(t *testing.T) {
 	if deps.Hooks == nil {
 		t.Fatal("Hooks is nil")
 	}
+	// The fixture's "test-model" is not in the catalog, so the default path falls
+	// back to the 128k floor — the genuinely-unknown case (issue #63). A CATALOGUED
+	// default model's real window is exercised by TestBaseEngineDepsResolvesDefaultModelWindow.
 	if deps.ContextWindowTokens != defaultContextWindowTokens {
-		t.Fatalf("ContextWindowTokens = %d, want %d", deps.ContextWindowTokens, defaultContextWindowTokens)
+		t.Fatalf("ContextWindowTokens = %d, want %d (uncatalogued model floor)", deps.ContextWindowTokens, defaultContextWindowTokens)
 	}
 	if deps.CompactionRatio != defaultCompactionRatio {
 		t.Fatalf("CompactionRatio = %v, want %v", deps.CompactionRatio, defaultCompactionRatio)
+	}
+}
+
+// TestBaseEngineDepsResolvesDefaultModelWindow is the issue #63 regression guard: the
+// DEFAULT-model engine deps must carry the model's REAL context window (resolved
+// live-first via reg.meta.contextWindowFor), not the hardcoded 128k floor. Before the
+// fix, baseEngineDeps passed contextWindow=0, so a 1M-context default model (gpt-5.5,
+// catalogued at 1,050,000) compacted at ~102k. nil-meta test registry → catalog floor,
+// which carries the real window.
+func TestBaseEngineDepsResolvesDefaultModelWindow(t *testing.T) {
+	const gpt55Ctx = 1_050_000
+	cfg := Config{Model: "gpt-5.5"}
+	provider := mockllm.New()
+	reg := regForTest(provider, providerOpenAI, cfg.Model)
+
+	deps := baseEngineDeps(cfg, reg, provider, memstore.New(),
+		permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{})
+
+	if deps.ContextWindowTokens != gpt55Ctx {
+		t.Fatalf("default-model ContextWindowTokens = %d, want %d (issue #63: real per-model window, not the 128k floor)", deps.ContextWindowTokens, gpt55Ctx)
+	}
+}
+
+// TestBaseEngineDepsContextWindowOverrideWins guards the precedence rule: an operator
+// --context-window-override (Config.ContextWindowOverride) beats the resolved per-model
+// window on the DEFAULT path too, exactly as on the selector path.
+func TestBaseEngineDepsContextWindowOverrideWins(t *testing.T) {
+	const override = 64_000
+	cfg := Config{Model: "gpt-5.5", ContextWindowOverride: override}
+	provider := mockllm.New()
+	reg := regForTest(provider, providerOpenAI, cfg.Model)
+
+	deps := baseEngineDeps(cfg, reg, provider, memstore.New(),
+		permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{})
+
+	if deps.ContextWindowTokens != override {
+		t.Fatalf("ContextWindowTokens = %d, want the override %d (operator knob must win over the resolved 1,050,000 window)", deps.ContextWindowTokens, override)
+	}
+}
+
+// TestBaseEngineDepsUnknownModelFloors guards the floor: a genuinely-unknown /
+// uncatalogued default model resolves to 0 and falls back to defaultContextWindowTokens
+// (128k) — the conservative floor preserved by the issue #63 fix.
+func TestBaseEngineDepsUnknownModelFloors(t *testing.T) {
+	cfg := Config{Model: "totally-made-up-model-xyz"}
+	provider := mockllm.New()
+	reg := regForTest(provider, providerOpenAI, cfg.Model)
+
+	deps := baseEngineDeps(cfg, reg, provider, memstore.New(),
+		permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{})
+
+	if deps.ContextWindowTokens != defaultContextWindowTokens {
+		t.Fatalf("unknown-model ContextWindowTokens = %d, want the %d floor", deps.ContextWindowTokens, defaultContextWindowTokens)
 	}
 }
 

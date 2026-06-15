@@ -132,7 +132,9 @@ func TestResolveProviderModelFailSafe(t *testing.T) {
 // TestSubproviderChildContextWindow proves a child bound to a SWITCHED provider+model
 // is built through engineDepsForProvider — its ContextWindowTokens reflects THAT
 // provider+model's catalogued window (1M for openrouter anthropic/claude-sonnet-4.5),
-// never the default 128k. The inherited-default child stays at 128k (byte-identical).
+// never the default 128k. The inherited-default child now resolves the PARENT's real
+// window via the shared childWindowFor rule (issue #64: a same-model child compacts on
+// the parent's actual window, 400k for gpt-5 — NOT the old hardcoded 128k floor).
 func TestSubproviderChildContextWindow(t *testing.T) {
 	reg := twoProviderReg(mockllm.New(), providerOpenAI, "gpt-5", mockllm.New(), providerOpenRouter)
 	cfg := Config{Model: "gpt-5"}
@@ -150,12 +152,14 @@ func TestSubproviderChildContextWindow(t *testing.T) {
 		t.Fatalf("switched child ContextWindow = %d, want 1000000 (openrouter sonnet-4.5 catalogued)", got)
 	}
 
-	// (b) inherited-default def => 128k (byte-identical default path).
+	// (b) inherited-default def (same provider+model as the parent) => the PARENT's
+	// real catalogued window (400k for openai gpt-5), NOT the 128k floor (issue #64).
+	const gpt5Ctx = 400_000
 	inherit := agents.NewRegistry([]agents.AgentDef{{Name: "plain", Description: "default"}})
 	engines2, _, _ := buildAgentSubagentEngines(context.Background(), cfg, reg.entries[providerOpenAI].provider,
 		reg, providerOpenAI, "gpt-5", inherit, nil, nil, nil, nil)
-	if got := engines2["plain"].ContextWindow(); got != defaultContextWindowTokens {
-		t.Fatalf("inherited-default child ContextWindow = %d, want %d (unchanged)", got, defaultContextWindowTokens)
+	if got := engines2["plain"].ContextWindow(); got != gpt5Ctx {
+		t.Fatalf("inherited-default child ContextWindow = %d, want %d (issue #64: same-model child resolves the parent's real window, not the 128k floor)", got, gpt5Ctx)
 	}
 
 	// (c) SAME-provider def `model:` => ITS catalogued window (issue-#35 panel fix:
@@ -240,7 +244,7 @@ func TestSubproviderChildTelemetryOff(t *testing.T) {
 	}
 	// Sanity: the parent's shared deps DO carry the Sink (so the test proves the child
 	// override, not an absent Sink). baseEngineDeps is the default-provider parent path.
-	parent := baseEngineDeps(cfg, provider, memstore.New(),
+	parent := baseEngineDeps(cfg, regForTest(provider, providerOpenAI, cfg.Model), provider, memstore.New(),
 		permpolicy.NewPolicy([]governance.Rule{{Effect: governance.Allow}}, nil), hookexec.New(nil), nil, prompt.RootAssembler{})
 	if parent.Sink == nil {
 		t.Fatal("parent (baseEngineDeps) Sink is nil; the child-off assertion would be vacuous")

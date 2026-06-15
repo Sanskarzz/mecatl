@@ -236,11 +236,13 @@ AND client-provided streaming-HTTP MCP servers (orthogonal inputs → ONE engine
 catalog). The composition factory resolves the selector against the registry and builds
 Deps via **`engineDepsForProvider`**, which re-derives EVERY provider/model-closing
 field — LLM, Compactor, Model, model-keyed TokenCounter, `PromptConfig.Env.Model`, and
-the **`ContextWindowTokens`** (looked up from the catalog's `ContextLimit()` for the
-selected model so the compaction trigger AGREES with the `ListModels`-advertised
-`context_limit`; an uncatalogued passthrough model or the default provider falls back to
-the 128k default). This is the cross-provider contamination guard: a shallow clone
-swapping only the LLM would compact and count through the wrong model.
+the **`ContextWindowTokens`** (resolved live-first via `reg.meta.contextWindowFor`,
+catalog floor, for the selected model so the compaction trigger AGREES with the
+`ListModels`-advertised `context_limit`; only a genuinely uncatalogued passthrough model
+falls back to the 128k default). The DEFAULT model resolves through the SAME
+`contextWindowFor` (`baseEngineDeps`, issue #63) — it is no longer pinned to the 128k
+floor. This is the cross-provider contamination guard: a shallow clone swapping only the
+LLM would compact and count through the wrong model.
 
 **Per-session catalog = the FULL shared-catalog formula, assembled by the SAME
 `assembleCatalog`** (`internal/app/catalog.go`, issue #42): core + server-global MCP
@@ -548,7 +550,10 @@ the existing `resolveModel` chain (full back-compat).
 **Contamination fix:** every child engine — def-pinned OR session-inheriting — is
 built through `newChildEngineForProvider` → `engineDepsForProvider`, so a child on
 provider X compacts/counts/prompts through X with X+model's catalogued context
-window. A non-switching child keeps window=0 (128k, byte-identical).
+window. A non-switching (same provider+model) child inherits the parent's RESOLVED
+window via `childWindowFor` → `reg.meta.contextWindowFor` (issue #64) — not the old
+hardcoded 128k floor; a same-model child of a 1M-context parent now compacts on the
+parent's real window. (128k applies only to a genuinely uncatalogued model.)
 
 **Fail-safe:** a def naming an unknown/unavailable provider is a LOUD fallback to the
 parent provider + `slog.Warn` (mirroring every other forgiving def-error handler) —
@@ -575,13 +580,14 @@ everywhere:
 
 **per-call `model` override > def `model:` > `SubagentModel` > parent (session) model.**
 
-When the resolved model differs from the parent's, the child's context window is
-re-derived live-first (`childWindowFor` over `provReg.meta.contextWindowFor` — the
-ONE rule shared by `resolveChildProvider`, `resolveDefaultChildModel`, and the
-per-call factory: it keys on the MODEL changing, not only on a provider switch, so
-a same-provider def `model:` compacts on ITS window too) and the engine is minted
-through `newChildEngineForProvider` — the same contamination-safe path as everything
-else in this section, never a clone-and-swap. Alias resolution happens ONCE at build
+The child's context window is always re-derived live-first (`childWindowFor` over
+`provReg.meta.contextWindowFor` — the ONE rule shared by `resolveChildProvider`,
+`resolveDefaultChildModel`, and the per-call factory: it resolves the child's own
+resolved (provider, model) window, whether or not that differs from the parent's, so
+a same-provider def `model:` compacts on ITS window AND a full-inherit same-model
+child compacts on the parent's REAL window, never the 128k floor — issue #64) and the
+engine is minted through `newChildEngineForProvider` — the same contamination-safe
+path as everything else in this section, never a clone-and-swap. Alias resolution happens ONCE at build
 (`normalizeSubagentModel` in `app.Build`) and is FAIL-FAST: a non-empty
 `--subagent-model` that does not resolve to a usable model id — an unknown bare
 alias, or an alias resolving to "inherit" (the built-in `sonnet`/`opus`/`haiku`

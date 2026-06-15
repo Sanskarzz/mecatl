@@ -74,8 +74,12 @@ func TestDefaultExplorerInheritsParentWhenUnset(t *testing.T) {
 	if got := deps.PromptConfig.Env.Model; got != "claude-default" {
 		t.Fatalf("explorer Env.Model = %q, want the inherited parent", got)
 	}
+	// "claude-default" is a fictional/uncatalogued model, so childWindowFor resolves
+	// it via contextWindowFor → 0 → the 128k floor. (A CATALOGUED same-model inherit
+	// would now resolve the parent's real window — issue #64, covered by
+	// TestSubproviderChildContextWindow case (b).)
 	if deps.ContextWindowTokens != defaultContextWindowTokens {
-		t.Fatalf("explorer ContextWindowTokens = %d, want the unchanged default %d (no re-derivation on the inherit path)",
+		t.Fatalf("explorer ContextWindowTokens = %d, want the %d floor (uncatalogued inherit model)",
 			deps.ContextWindowTokens, defaultContextWindowTokens)
 	}
 	// The explorer Role shape is unchanged: References convention still appended.
@@ -125,8 +129,9 @@ func TestDefaultMemberInheritsParentWhenUnset(t *testing.T) {
 		hookexec.New(nil), agents.NewRegistry(nil), nil, nil, nil, false, nil, catalogAssets{}, false)
 
 	build := factory(team.New("t"), agent.MemberSpec{Name: "m"})
+	// "claude-default" is uncatalogued ⇒ floor (see TestDefaultExplorerInheritsParentWhenUnset).
 	if got := build.Engine.ContextWindow(); got != defaultContextWindowTokens {
-		t.Fatalf("default member ContextWindow = %d, want the unchanged default %d", got, defaultContextWindowTokens)
+		t.Fatalf("default member ContextWindow = %d, want the %d floor (uncatalogued inherit model)", got, defaultContextWindowTokens)
 	}
 	drainEngine(t, build.Engine)
 	mu.Lock()
@@ -134,6 +139,29 @@ func TestDefaultMemberInheritsParentWhenUnset(t *testing.T) {
 	if len(models) == 0 || models[0] != "claude-default" {
 		t.Fatalf("default member LLM request models = %v, want the inherited parent %q", models, "claude-default")
 	}
+}
+
+// TestMemberEngineRelaysResolvedContextWindow is the composition half of the issue
+// #63/#64 team-member wiring (req 6): a team member that pins NO model of its own,
+// built on a CATALOGUED parent (provider+model), must resolve the parent model's
+// REAL window via childWindowFor and carry it on the member engine's ContextWindow()
+// — the exact value the supervisor relays into TeamEvent.ContextWindow (proto field
+// 14). Before issue #64 a same-model member short-circuited to 0 ⇒ the 128k floor.
+// catAnthropicModel is catalogued at catAnthropicCtx (200,000), proving the resolved
+// window — NOT 128k — feeds the relay. (The relay copy itself is proven offline by
+// engine/agent's TestSupervisorRelaysMemberContextWindow + the projectTeamEvent test.)
+func TestMemberEngineRelaysResolvedContextWindow(t *testing.T) {
+	prov := mockllm.New(mockllm.TextTurn("done"))
+	cfg := Config{Model: catAnthropicModel} // catalogued parent; no SubagentModel ⇒ member inherits it
+	factory := buildMemberEngine(cfg, regForTest(prov, providerAnthropic, cfg.Model), prov, providerAnthropic, cfg.Model,
+		hookexec.New(nil), agents.NewRegistry(nil), nil, nil, nil, false, nil, catalogAssets{}, false)
+
+	build := factory(team.New("t"), agent.MemberSpec{Name: "m"})
+	if got := build.Engine.ContextWindow(); got != catAnthropicCtx {
+		t.Fatalf("inherited-default member ContextWindow = %d, want the parent model's resolved catalog window %d (issue #64: NOT the %d floor)",
+			got, catAnthropicCtx, defaultContextWindowTokens)
+	}
+	drainEngine(t, build.Engine)
 }
 
 // TestParallelBranchUsesSubagentModel: a Parallel BRANCH child resolves

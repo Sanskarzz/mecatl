@@ -126,10 +126,10 @@ func resolveProviderModel(cfg Config, provReg *providerRegistry, def agents.Agen
 // triple a child-engine build needs: it runs resolveProviderModel, then for a
 // SWITCHED provider looks up the registry entry's provider, and derives the
 // context window through childWindowFor — the ONE rule every child resolution
-// site shares: the window is re-derived whenever the resolved model differs from
-// the parent's (a same-provider def `model:` or an inherited SubagentModel
-// included, not only a provider switch), and stays 0 (byte-identical 128k) only
-// on the full-inherit path. It is the shared resolution step both
+// site shares: the window is re-derived live-first for the child's resolved
+// (provider, model), whether or not it differs from the parent's (issue #64: a
+// full-inherit same-model child compacts on the parent's REAL window too, not the
+// 128k floor). It is the shared resolution step both
 // buildAgentSubagentEngines and buildMemberEngine use, so the per-def provider-switch
 // logic lives in ONE place (and keeps buildMemberEngine under the gocyclo budget).
 func resolveChildProvider(cfg Config, provReg *providerRegistry, def agents.AgentDef, parentProvider port.LLMProvider, parentProviderID, parentModel string) (childProvider port.LLMProvider, providerID, model string, childWindow int) {
@@ -140,22 +140,23 @@ func resolveChildProvider(cfg Config, provReg *providerRegistry, def agents.Agen
 			childProvider = entry.provider
 		}
 	}
-	childWindow = childWindowFor(provReg, pid, model, parentProviderID, parentModel)
+	childWindow = childWindowFor(provReg, pid, model)
 	return childProvider, pid, model, childWindow
 }
 
 // childWindowFor is the ONE context-window derivation rule every child-model
 // resolution site shares (resolveChildProvider, resolveDefaultChildModel,
-// buildSubagentEngineFactory): whenever the child's resolved (provider, model)
-// pair differs from the parent's — a same-provider def `model:`, an inherited
-// SubagentModel, or a per-call override included, not only a provider switch —
-// the window is re-derived LIVE-FIRST from the registry meta (live when present,
-// catalog floor: the SAME store the picker reads), so a child compacts on ITS
-// model's window, never the parent's. An unchanged pair returns 0 — the
-// byte-identical inherited-default path (128k fallback in engineDepsForProvider).
-// A nil provReg (direct-call test paths) returns 0.
-func childWindowFor(provReg *providerRegistry, providerID, model, parentProviderID, parentModel string) int {
-	if provReg == nil || (providerID == parentProviderID && model == parentModel) {
+// buildSubagentEngineFactory): the child's resolved (provider, model) window is
+// re-derived LIVE-FIRST from the registry meta (live when present, catalog floor:
+// the SAME store the picker reads), so a child compacts on ITS model's window —
+// regardless of whether the child's model differs from the parent's. Issue #64:
+// a same-model child now resolves the parent's REAL window via the same resolver,
+// never the hardcoded 128k floor; before, an unchanged pair short-circuited to 0
+// and a same-model child of a 1M-context parent compacted at ~102k. (The
+// parent-pair is no longer an input — the rule keys solely on the child's resolved
+// pair.) A nil provReg (direct-call test paths) returns 0.
+func childWindowFor(provReg *providerRegistry, providerID, model string) int {
+	if provReg == nil {
 		return 0
 	}
 	return provReg.meta.contextWindowFor(providerID, model)
@@ -185,10 +186,10 @@ func resolveModelFor(cfg Config, def agents.AgentDef, parentModel string) string
 // every def-resolved path already uses, resolveModelFor with the zero def, so the
 // precedence collapses to `SubagentModel (alias-resolved) > parentModel` (no def
 // tier to consult). The context window follows the shared childWindowFor rule:
-// when the override actually CHANGES the model the window is re-derived
-// live-first on the PARENT provider (a child compacts on ITS model's window,
-// never the parent's); an unchanged model returns window 0 — the byte-identical
-// inherited-default path (128k fallback in engineDepsForProvider).
+// the window is re-derived live-first on the PARENT provider for the resolved
+// model (a child compacts on ITS model's window, never the parent's) — an
+// unchanged model now resolves the parent's REAL window too (issue #64), flooring
+// to 128k only when the model is genuinely uncatalogued.
 //
 // SAME-PROVIDER POSTURE: the override never switches provider — the model id is
 // resolved against parentProviderID (the registry is keyed by provider, not
@@ -198,7 +199,7 @@ func resolveModelFor(cfg Config, def agents.AgentDef, parentModel string) string
 // (window stays 0).
 func resolveDefaultChildModel(cfg Config, provReg *providerRegistry, parentProviderID, parentModel string) (model string, childWindow int) {
 	model = resolveModelFor(cfg, agents.AgentDef{}, parentModel)
-	return model, childWindowFor(provReg, parentProviderID, model, parentProviderID, parentModel)
+	return model, childWindowFor(provReg, parentProviderID, model)
 }
 
 // resolveAlias maps sel through the operator aliases then the built-in aliases,
@@ -697,7 +698,8 @@ func buildAgentSubagentEngines(ctx context.Context, cfg Config, provider port.LL
 
 		// Resolve the def's (provider, model, window): a pinned-and-known provider
 		// switches the child engine (with its catalogued window); a def pinning no (or
-		// the same) provider inherits the parent (window=0 ⇒ byte-identical 128k).
+		// the same) provider inherits the parent's model AND its real resolved window
+		// (issue #64 — no longer the hardcoded 128k floor).
 		childProvider, pid, model, childWindow := resolveChildProvider(cfg, provReg, def, provider, parentProviderID, parentModel)
 
 		bodies, missing := preloadedSkillBodies(def, skillIdx)

@@ -1942,9 +1942,11 @@ provider so the `Build` call site is unchanged.
 provider/model-closing `agent.Deps` fields — `LLM`, `Compactor` (binds provider+model by value),
 `Model`, `TokenCounter` (model-keyed), `PromptConfig.Env.Model` (+ the agency-delta `Role`),
 and **`ContextWindowTokens`** (the S1-deferred "6th field": its `contextWindow` param, `<=0` ⇒
-the 128k default; the per-session factory passes the catalog `ContextLimit()` for the selected
-model so the compaction trigger AGREES with the `ListModels`-advertised `context_limit`, and
-`baseEngineDeps` passes 0 so the DEFAULT path stays byte-identical at 128k). `baseEngineDeps`
+the 128k default; BOTH the per-session factory AND `baseEngineDeps` resolve it live-first via
+`reg.meta.contextWindowFor` for the selected/default model so the compaction trigger AGREES with
+the `ListModels`-advertised `context_limit`. Issue #63: `baseEngineDeps` no longer passes 0 — the
+DEFAULT model gets its REAL window (e.g. 1,050,000 for `gpt-5.5`), flooring to 128k only when the
+model is genuinely uncatalogued). `baseEngineDeps`
 delegates for the default provider+model, so a per-session engine bound to a non-default provider
 re-derives EVERY provider-closing field rather than shallow-cloning + swapping only `LLM` (which
 would compact/count through the wrong model — cross-provider contamination).
@@ -2010,8 +2012,10 @@ SWITCH the model rebases off `def.Model`-or-`builtinDefaultModel[pid]` (NEVER th
 parent model — a bare `gpt-5` is invalid on openrouter); same-provider keeps the existing
 `resolveModel` chain (full back-compat). Every child routes through the new
 `newChildEngineForProvider` → `engineDepsForProvider` (contamination fix — child on X
-compacts/counts/prompts through X+model's window; a non-switching child keeps window=0 ⇒ 128k,
-byte-identical). Unknown/unavailable `provider:` ⇒ loud `slog.Warn` + parent fallback (mirrors
+compacts/counts/prompts through X+model's window; a non-switching same-model child now resolves
+the parent's REAL window via `childWindowFor` → `reg.meta.contextWindowFor`, issue #64 — not the
+old window=0 ⇒ 128k floor, which now applies only to a genuinely uncatalogued model).
+Unknown/unavailable `provider:` ⇒ loud `slog.Warn` + parent fallback (mirrors
 every other forgiving def-error handler). **Half B** gives a provider-SELECTED session its
 sub-agent tools (pre-Half-B the per-session catalog was core-tools-only and could not spawn
 Subagent/Team; since issue #42 the per-session catalog is the FULL shared formula — see the

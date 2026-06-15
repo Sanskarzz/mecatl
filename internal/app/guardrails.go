@@ -229,7 +229,7 @@ func guardrailsConfigured(cfg Config) bool {
 // new metrics label), the no-progress nudge disabled. Returns nil when the model
 // does not resolve (defensive — Build already failed fast via
 // normalizeGuardrailsModel).
-func buildGuardrailsChecker(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string) modelhook.VerdictChecker {
+func buildGuardrailsChecker(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, _ string) modelhook.VerdictChecker {
 	sel := strings.TrimSpace(cfg.GuardrailsModel)
 	if sel == "" {
 		return nil
@@ -243,7 +243,7 @@ func buildGuardrailsChecker(cfg Config, provReg *providerRegistry, provider port
 	if resolved == "" {
 		return nil
 	}
-	window := childWindowFor(provReg, parentProviderID, resolved, parentProviderID, parentModel)
+	window := childWindowFor(provReg, parentProviderID, resolved)
 	deps := childEngineDepsForProvider(cfg, "guardrail-checker", provider, resolved, window,
 		tool.NewCatalog(), promptConfig(modelCfgFor(cfg, resolved), cfg.gitStatus), nil)
 	// Disable the no-progress nudge: the checker caps at MaxTurns=1 and an empty

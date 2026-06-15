@@ -53,8 +53,14 @@ func TestBaseEngineDepsDelegatesToProviderSeam(t *testing.T) {
 	cfg := Config{Model: "gpt-5", Compaction: "cascade", Tokenizer: "tiktoken", Workspace: "/repo"}
 	provider, store, policy, hooks, mcpP, instr := depsTestFixture(t)
 
-	base := baseEngineDeps(cfg, provider, store, policy, hooks, mcpP, instr)
-	direct := engineDepsForProvider(cfg, provider, cfg.Model, 0, store, policy, hooks, mcpP, instr)
+	// baseEngineDeps now resolves the default model's REAL window via reg.meta
+	// (issue #63), so the direct comparison must pass the SAME resolved window —
+	// not the old hardcoded 0. providerOpenAI + "gpt-5" is catalogued (400k), so a
+	// nil-meta test registry still resolves it via the catalog floor.
+	reg := regForTest(provider, providerOpenAI, cfg.Model)
+	window := reg.meta.contextWindowFor(reg.Default(), cfg.Model)
+	base := baseEngineDeps(cfg, reg, provider, store, policy, hooks, mcpP, instr)
+	direct := engineDepsForProvider(cfg, provider, cfg.Model, window, store, policy, hooks, mcpP, instr)
 
 	if base.Model != direct.Model {
 		t.Errorf("Model: base=%q direct=%q", base.Model, direct.Model)
@@ -165,7 +171,7 @@ func TestEngineDepsCarryWallClock(t *testing.T) {
 	cfg := Config{Model: "gpt-5", Workspace: "/repo"}
 	provider, store, policy, hooks, mcpP, instr := depsTestFixture(t)
 
-	base := baseEngineDeps(cfg, provider, store, policy, hooks, mcpP, instr)
+	base := baseEngineDeps(cfg, regForTest(provider, providerOpenAI, cfg.Model), provider, store, policy, hooks, mcpP, instr)
 	if base.Clock == nil {
 		t.Fatal("baseEngineDeps Deps.Clock is nil (latency metrics dead, issue #53)")
 	}

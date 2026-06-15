@@ -56,7 +56,11 @@ headroom for the summarisation call itself (`docs/harnesses/07-context-and-mcp.m
 counter, the offline default is `engine/agent/tokencount.go` (`HeuristicTokenCounter`)).
 
 The model's window is resolved once in composition (`internal/app/build.go`) from the
-live / catalogued / 128k fallback. The operator can **override** it with the
+live / catalogued / 128k fallback. This is the SAME resolution for BOTH the default
+model (`baseEngineDeps`, via `reg.meta.contextWindowFor`) and a per-session selector —
+the default model is **not** pinned to the 128k floor (issue #63); a catalogued
+1M-context default (e.g. `gpt-5.5`) gets its real window, flooring to 128k only when the
+model is genuinely unknown. The operator can **override** it with the
 `--context-window-override` flag (`app.Config.ContextWindowOverride`): a positive value
 replaces the resolved window, so a small value forces compaction at a tiny, cheap
 threshold (0.8 × the override). `0` (the default) is **disabled** and leaves the

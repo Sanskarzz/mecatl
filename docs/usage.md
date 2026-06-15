@@ -578,6 +578,10 @@ base URLs**, and an unavailable provider is omitted entirely. The list is
 so a client can hide its picker against an older/empty server. The advertised
 `context_limit` is the SAME catalog value the per-session engine uses for its
 compaction trigger, so a large-context model is not compacted at the 128k default.
+This holds for the configured **default** model too (issue #63): it resolves its real
+window and compacts at that window, not a hardcoded 128k — the 128k floor now applies
+only to a genuinely uncatalogued model. `--context-window-override` still forces a
+fixed window when you need it.
 
 For a provider with **live model listing** (currently **OpenRouter**), the picker
 reflects the provider's **real, live catalog** (~344 models) rather than the curated

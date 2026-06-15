@@ -1582,7 +1582,7 @@ func buildEngine(ctx context.Context, cfg Config, reg *providerRegistry, provide
 	// recursion guard). The shared engine's checker rides the default provider/model.
 	mainHooks = buildGuardrailsHooks(cfg, reg, provider, reg.Default(), cfg.Model, mainHooks)
 
-	deps := baseEngineDeps(cfg, provider, store, policy, mainHooks, mcpProvider, instructions)
+	deps := baseEngineDeps(cfg, reg, provider, store, policy, mainHooks, mcpProvider, instructions)
 	deps.Catalog = cat
 	// The OPT-IN child-ask reviewer (issue #31) rides the MAIN engine's deps only,
 	// built on the shared engine's (default provider, cfg.Model). Per-session
@@ -1718,6 +1718,7 @@ func buildUserModelStore(cfg Config) tool.MemoryStore {
 // child-engine policy), so an MCP-mounted session is governed identically.
 func baseEngineDeps(
 	cfg Config,
+	reg *providerRegistry,
 	provider port.LLMProvider,
 	store port.SessionStore,
 	policy port.PermissionPolicy,
@@ -1729,11 +1730,21 @@ func baseEngineDeps(
 	// engineDepsForProvider: it delegates so there is a SINGLE enumeration of the
 	// provider-closing fields (LLM/Compactor/Model/TokenCounter/PromptConfig). The
 	// model-keyed TokenCounter is derived INSIDE engineDepsForProvider against
-	// cfg.Model, so the default path stays semantically identical to pre-S1
-	// (buildTokenCounter(cfg) for the default model). It passes contextWindow=0 so the
-	// default model keeps the conservative 128k window (no behaviour change) — the
-	// catalog-derived per-model window applies ONLY to a non-default selector.
-	return engineDepsForProvider(cfg, provider, cfg.Model, 0, store, policy, hooks, mcpProvider, instructions)
+	// cfg.Model, so the default path stays semantically identical for counting.
+	//
+	// The compaction window is now resolved through the SAME resolver as the selector
+	// path (reg.meta.contextWindowFor: live entry when present, else the embedded
+	// catalog), flooring to defaultContextWindowTokens (128k) ONLY when the model is
+	// genuinely unknown/uncatalogued. This fixes issue #63 — before, the default model
+	// was hardcoded to the 128k floor, so a 1M-context default (e.g. gpt-5.5) compacted
+	// at ~102k. NOTE on "live-first": baseEngineDeps runs inside Build, BEFORE the live
+	// model refresh populates the live store, and the shared main engine is built once
+	// and never rebuilt — so at THIS call site the resolver is CATALOG-VALUED, not live
+	// (the catalog window is the correct full window for catalogued models). Only the
+	// per-session selector engines, built post-Swap in sessionEngineFactory, see live
+	// values. An operator --context-window-override still WINS (resolved inside
+	// engineDepsForProvider).
+	return engineDepsForProvider(cfg, provider, cfg.Model, reg.meta.contextWindowFor(reg.Default(), cfg.Model), store, policy, hooks, mcpProvider, instructions)
 }
 
 // engineDepsForProvider re-derives the COMPLETE set of provider-closing agent.Deps
@@ -1758,19 +1769,21 @@ func baseEngineDeps(
 // engine adds the client's MCP tools), matching baseEngineDeps' contract.
 //
 // contextWindow is the model's total context window in tokens. The CALLER resolves
-// it (the per-session factory looks it up in the catalog for the selected
-// provider+model); a value <= 0 means "unknown / not catalogued / default provider"
-// and falls back to defaultContextWindowTokens (128k). The DEFAULT path
-// (baseEngineDeps) passes 0 so it stays byte-identical to pre-S1 (128k) — a behaviour
-// change to the default model is deliberately avoided; only an explicit non-default
-// selector whose catalog entry carries a known window overrides it.
+// it via reg.meta.contextWindowFor (live-first, catalog floor) for BOTH the default
+// path (baseEngineDeps) and the per-session selector path; a value <= 0 means
+// "genuinely unknown / not catalogued" and falls back to defaultContextWindowTokens
+// (128k). The default model is no longer pinned to the 128k floor (issue #63): a
+// catalogued default (e.g. a 1M-context model) gets its real window here too.
 //
 // CRITICAL (design): a shallow clone of baseEngineDeps with only LLM swapped would
 // compact and COUNT through the wrong provider/model, because buildCompactor and
 // buildTokenCounter BOTH bind model by value — cross-provider reasoning
 // contamination. This explicit re-derivation is the fix. DESIGNED in S1, CONSUMED in
-// S3 (per-session routing); S1 exercises only the default-provider path via
-// baseEngineDeps, which MUST stay byte-identical to the pre-S1 Deps.
+// S3 (per-session routing); S1 exercised only the default-provider path via
+// baseEngineDeps. (Originally the default path stayed byte-identical to pre-S1 at a
+// 128k window; issue #63 changed ONLY ContextWindowTokens — the default model now
+// resolves its real per-model window like the selector path. Every other field is
+// unchanged.)
 //
 // The model-keyed TokenCounter is DERIVED INTERNALLY (buildTokenCounter against the
 // model-overridden cfg), NOT taken as a parameter: this makes counter/model
@@ -1795,9 +1808,11 @@ func engineDepsForProvider(
 	modelCfg := cfg
 	modelCfg.Model = model
 	counter := buildTokenCounter(modelCfg)
-	// Resolve the compaction window: an unknown/uncatalogued/default (<=0) window
+	// Resolve the compaction window: a genuinely unknown/uncatalogued (<=0) window
 	// falls back to the conservative 128k default, so the trigger never compacts a
-	// large-context model prematurely yet the default path stays byte-identical.
+	// large-context model prematurely. The caller (baseEngineDeps for the default
+	// model, the per-session factory for a selector) resolves a real per-model window
+	// live-first, so a catalogued model — default OR selected — gets its true window.
 	window := defaultContextWindowTokens
 	if contextWindow > 0 {
 		window = contextWindow
@@ -3324,10 +3339,12 @@ func childContextWindow(cfg Config) int {
 // no instructions/sink/store (child engines are internal sub-agents, not
 // persisted sessions). The provider is FIXED for this child's lifetime.
 //
-// For the INHERITED-DEFAULT case (a def that pins no provider on a default session)
-// the caller passes contextWindow=0, so engineDepsForProvider falls back to the
-// 128k default and the child stays byte-identical to the old newChildEngineWithHooks
-// path. A provider-SWITCHED child gets its real catalog window (catalogContextWindow).
+// The caller resolves contextWindow via childWindowFor (live-first, catalog floor)
+// for the child's resolved (provider, model): a provider-SWITCHED child gets its
+// switched model's window, and an INHERITED-DEFAULT child (a def that pins no
+// provider on a default session) now gets the PARENT model's REAL window too
+// (issue #64) — contextWindow falls back to the 128k default only for a genuinely
+// uncatalogued model.
 func newChildEngineForProvider(cfg Config, role string, provider port.LLMProvider, model string, contextWindow int, cat *tool.Catalog, pc prompt.Config, hooks port.HookRunner) *agent.Engine {
 	return agent.NewEngine(childEngineDepsForProvider(cfg, role, provider, model, contextWindow, cat, pc, hooks))
 }
@@ -3428,8 +3445,8 @@ func childEngineDepsForProvider(cfg Config, role string, provider port.LLMProvid
 // (resolveDefaultChildModel) — and is built through newChildEngineForProvider so
 // a SubagentModel-overridden explorer compacts/counts/prompts on the OVERRIDE
 // model with its own re-derived context window (never a clone-and-swap). With no
-// override the resolved model IS parentModel and window 0 keeps the engine
-// byte-identical to the historical shape.
+// override the resolved model IS parentModel and the window is the parent model's
+// REAL resolved window (issue #64) — not the old hardcoded 128k floor.
 func buildChildEngine(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, runner tool.CommandRunner) *agent.Engine {
 	return agent.NewEngine(childExplorerDeps(cfg, provReg, provider, parentProviderID, parentModel, runner))
 }
@@ -3594,7 +3611,7 @@ func askAdjudicatorDeps(cfg Config, provReg *providerRegistry, provider port.LLM
 		// unknown/inherit value fail-fast (and UseMock passes the literal through).
 		model = parentModel
 	}
-	window := childWindowFor(provReg, parentProviderID, model, parentProviderID, parentModel)
+	window := childWindowFor(provReg, parentProviderID, model)
 	// newChildEngineForProvider's deps builder: the reviewer compacts/counts/
 	// prompts on ITS resolved model with a re-derived window — and, crucially,
 	// childEngineDepsForProvider forces ChildAskReviewer nil, so the reviewer
@@ -3752,7 +3769,7 @@ func buildNoFSSubagentTool(ctx context.Context, cfg Config, provReg *providerReg
 			if overrideModel == "" {
 				return nil, false
 			}
-			w := childWindowFor(provReg, parentProviderID, overrideModel, parentProviderID, parentModel)
+			w := childWindowFor(provReg, parentProviderID, overrideModel)
 			return newNoFSChild("task:model="+overrideModel, overrideModel, w), true
 		}),
 	}
@@ -3773,12 +3790,13 @@ func buildNoFSSubagentTool(ctx context.Context, cfg Config, provReg *providerReg
 // error). Any non-blank model is routed on the parent provider (the provider validates
 // the exact id at request time); its context window is re-derived through the shared
 // childWindowFor rule (live-first via the registry meta) so the override child compacts
-// on the right window — an override naming the parent's own model stays on the
-// inherited-default path (window 0 ⇒ 128k), like every other unchanged-model child.
+// on the right window — an override naming the parent's own model now resolves that
+// model's REAL window via the same resolver (issue #64), like every other child;
+// only a genuinely uncatalogued id floors to 128k.
 // Cross-provider routing by a bare model id is intentionally out of scope this round
 // (the registry is keyed by provider, not model) — a def's `provider:` remains the
 // cross-provider seam.
-func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, parentModel string, runner tool.CommandRunner) func(model string) (*agent.Engine, bool) {
+func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider port.LLMProvider, parentProviderID, _ string, runner tool.CommandRunner) func(model string) (*agent.Engine, bool) {
 	return func(model string) (*agent.Engine, bool) {
 		model = strings.TrimSpace(model)
 		if model == "" {
@@ -3788,7 +3806,7 @@ func buildSubagentEngineFactory(cfg Config, provReg *providerRegistry, provider 
 		// (buildChildEngine) — a model-override child is still the explorer, just on a
 		// different model.
 		childCat := readOnlyExplorerCatalog(runner)
-		childWindow := childWindowFor(provReg, parentProviderID, model, parentProviderID, parentModel)
+		childWindow := childWindowFor(provReg, parentProviderID, model)
 		eng := newChildEngineForProvider(cfg, "task:model="+model, provider, model, childWindow,
 			childCat, explorerPromptConfig(modelCfgFor(cfg, model)), nil)
 		return eng, true
@@ -4156,8 +4174,9 @@ func buildMemberEngine(cfg Config, provReg *providerRegistry, provider port.LLMP
 		pc = applyUntrustedMemberShellNote(cfg, spec, pc)
 
 		// Built through newChildEngineForProvider so a provider-switched member
-		// compacts/counts on its own model (contamination fix); childWindow=0 for the
-		// inherited-default member keeps it byte-identical.
+		// compacts/counts on its own model (contamination fix); an inherited-default
+		// member now resolves the parent model's REAL window via childWindowFor too
+		// (issue #64), flooring to 128k only for a genuinely uncatalogued model.
 		eng := newChildEngineForProvider(cfg, "member:"+spec.Name, childProvider, model, childWindow, cat, pc, memberHooks)
 		return agent.MemberBuild{Engine: eng, Mode: mode, Limits: memberLimits, Close: mcpClose, MCPToolNames: mcpNames, IsolateReadOnly: isolateReadOnly}
 	}
