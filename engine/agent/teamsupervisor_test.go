@@ -1002,11 +1002,11 @@ func TestSupervisorRelaysMemberContextWindow(t *testing.T) {
 			cat.MustRegister(tl)
 		}
 		return agent.MemberBuild{Engine: agent.NewEngine(agent.Deps{
-			LLM:                 mockllm.New(mockllm.TextTurn("done")),
-			Catalog:             cat,
-			Policy:              allow,
-			Model:               "mock",
-			ContextWindowTokens: window,
+			LLM:           mockllm.New(mockllm.TextTurn("done")),
+			Catalog:       cat,
+			Policy:        allow,
+			Model:         "mock",
+			ContextWindow: func() int { return window },
 		})}
 	}
 	sup := agent.NewSupervisor(tm, memfs.NewWorkspace("/ws"), factory, agent.WithMaxRounds(2))

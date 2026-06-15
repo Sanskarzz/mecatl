@@ -142,9 +142,14 @@ type Deps struct {
 
 	// Model is the provider model identifier sent on every request.
 	Model string
-	// ContextWindowTokens is the model's context window; compaction triggers at
-	// CompactionRatio of it. Zero disables compaction.
-	ContextWindowTokens int
+	// ContextWindow returns the model's context window in tokens, resolved LIVE at
+	// the point of use (the compaction check / Engine.ContextWindow) rather than
+	// frozen at construction — so a post-construction live-catalog refresh self-
+	// corrects on the next turn without rebuilding the engine. A nil closure OR a
+	// <=0 return DISABLES compaction (preserving the old "zero disables"). The
+	// closure is a stdlib func value; it is built in composition (internal/app)
+	// over the FIXED (provider, model) so the engine itself imports no adapter.
+	ContextWindow func() int
 	// CompactionRatio overrides defaultCompactionRatio when in (0,1].
 	CompactionRatio float64
 
@@ -292,11 +297,17 @@ func (e *Engine) Capabilities() port.ProviderCapabilities {
 	return e.deps.LLM.Capabilities()
 }
 
-// ContextWindow reports the model's context window in tokens (Deps.ContextWindowTokens),
-// or 0 when unknown/unset. The team supervisor reads it from each member's engine
-// so a forwarded turn.end can carry the denominator for the per-member context
-// meter in the ctrl+a agents overlay (the window lives in private deps).
-func (e *Engine) ContextWindow() int { return e.deps.ContextWindowTokens }
+// ContextWindow reports the model's context window in tokens, resolved LIVE via
+// Deps.ContextWindow at the point of call, or 0 when unknown/unset/disabled. The
+// team supervisor reads it from each member's engine so a forwarded turn.end can
+// carry the denominator for the per-member context meter in the ctrl+a agents
+// overlay (the resolver lives in private deps).
+func (e *Engine) ContextWindow() int {
+	if e.deps.ContextWindow == nil {
+		return 0
+	}
+	return e.deps.ContextWindow()
+}
 
 // HasTool reports whether a tool with the given registered name is present in
 // the Engine's catalog. It is the read-only seam a surface adapter uses to
@@ -1387,10 +1398,17 @@ func (e *Engine) buildRequest(r *Run, sess *session.Session) port.LLMRequest {
 // the threshold. It replaces the conversation in place and emits a compaction
 // Event. It reports whether compaction ran.
 func (e *Engine) maybeCompact(ctx context.Context, r *Run, sess *session.Session, turnIdx int) bool {
-	if e.deps.ContextWindowTokens <= 0 {
+	// Resolve the window LIVE here (the self-correction point): a live-catalog
+	// refresh after construction is observed on this next check without an engine
+	// rebuild. A nil resolver or a <=0 return disables compaction (zero disables).
+	window := 0
+	if e.deps.ContextWindow != nil {
+		window = e.deps.ContextWindow()
+	}
+	if window <= 0 {
 		return false
 	}
-	threshold := int(float64(e.deps.ContextWindowTokens) * e.deps.CompactionRatio)
+	threshold := int(float64(window) * e.deps.CompactionRatio)
 	if e.deps.TokenCounter.CountMessages(sess.Conversation.Messages) < threshold {
 		return false
 	}

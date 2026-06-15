@@ -53,9 +53,9 @@ func TestDefaultExplorerUsesSubagentModel(t *testing.T) {
 	if got := deps.PromptConfig.Env.Model; got != catAnthropicModel {
 		t.Fatalf("explorer Env.Model = %q, want the SubagentModel %q (prompt keyed on the model the child RUNS on)", got, catAnthropicModel)
 	}
-	if deps.ContextWindowTokens != catAnthropicCtx {
+	if deps.ContextWindow() != catAnthropicCtx {
 		t.Fatalf("explorer ContextWindowTokens = %d, want the OVERRIDE model's catalogued window %d (re-derived, not the parent default %d)",
-			deps.ContextWindowTokens, catAnthropicCtx, defaultContextWindowTokens)
+			deps.ContextWindow(), catAnthropicCtx, defaultContextWindowTokens)
 	}
 }
 
@@ -78,9 +78,9 @@ func TestDefaultExplorerInheritsParentWhenUnset(t *testing.T) {
 	// it via contextWindowFor → 0 → the 128k floor. (A CATALOGUED same-model inherit
 	// would now resolve the parent's real window — issue #64, covered by
 	// TestSubproviderChildContextWindow case (b).)
-	if deps.ContextWindowTokens != defaultContextWindowTokens {
+	if deps.ContextWindow() != defaultContextWindowTokens {
 		t.Fatalf("explorer ContextWindowTokens = %d, want the %d floor (uncatalogued inherit model)",
-			deps.ContextWindowTokens, defaultContextWindowTokens)
+			deps.ContextWindow(), defaultContextWindowTokens)
 	}
 	// The explorer Role shape is unchanged: References convention still appended.
 	if !strings.Contains(deps.PromptConfig.Role, "References:") {
@@ -178,8 +178,8 @@ func TestParallelBranchUsesSubagentModel(t *testing.T) {
 	if got := deps.PromptConfig.Env.Model; got != catAnthropicModel {
 		t.Fatalf("branch Env.Model = %q, want the SubagentModel %q", got, catAnthropicModel)
 	}
-	if deps.ContextWindowTokens != catAnthropicCtx {
-		t.Fatalf("branch ContextWindowTokens = %d, want the override model's catalogued window %d", deps.ContextWindowTokens, catAnthropicCtx)
+	if deps.ContextWindow() != catAnthropicCtx {
+		t.Fatalf("branch ContextWindowTokens = %d, want the override model's catalogued window %d", deps.ContextWindow(), catAnthropicCtx)
 	}
 }
 
@@ -269,30 +269,32 @@ func TestResolveChildProviderSameProviderModelWindow(t *testing.T) {
 	cfg := Config{Model: "claude-default"}
 
 	// Same-provider def model with a catalogued 200k window => window re-derived.
-	_, pid, model, window := resolveChildProvider(cfg, reg,
+	_, pid, model, windowFn := resolveChildProvider(cfg, reg,
 		agents.AgentDef{Name: "cheap", Model: catAnthropicModel}, prov, providerAnthropic, "claude-default")
 	if pid != providerAnthropic || model != catAnthropicModel {
 		t.Fatalf("resolved (provider, model) = (%q, %q), want (%q, %q)", pid, model, providerAnthropic, catAnthropicModel)
 	}
-	if window != catAnthropicCtx {
+	if window := windowFn(); window != catAnthropicCtx {
 		t.Fatalf("same-provider def-model window = %d, want the def model's catalogued window %d (window must key on model change, not only provider switch)",
 			window, catAnthropicCtx)
 	}
 
-	// Full inherit (no def model, no SubagentModel) => window 0 (byte-identical
-	// inherited-default path).
-	_, _, model, window = resolveChildProvider(cfg, reg,
+	// Full inherit (no def model, no SubagentModel) over an uncatalogued parent model
+	// => the resolver floors to defaultContextWindowTokens (128k). (Under the old
+	// eager-int rule this returned 0, which engineDepsForProvider then floored to the
+	// SAME 128k — the resolve-at-use closure folds that floor in.)
+	_, _, model, windowFn = resolveChildProvider(cfg, reg,
 		agents.AgentDef{Name: "plain"}, prov, providerAnthropic, "claude-default")
-	if model != "claude-default" || window != 0 {
-		t.Fatalf("full-inherit def resolved (model, window) = (%q, %d), want (claude-default, 0)", model, window)
+	if window := windowFn(); model != "claude-default" || window != defaultContextWindowTokens {
+		t.Fatalf("full-inherit def resolved (model, window) = (%q, %d), want (claude-default, %d)", model, window, defaultContextWindowTokens)
 	}
 
 	// A def inheriting a configured SubagentModel (no def model:) re-derives too —
 	// the same rule, exercised through the SubagentModel tier of the chain.
 	subCfg := Config{Model: "claude-default", SubagentModel: catAnthropicModel}
-	_, _, model, window = resolveChildProvider(subCfg, reg,
+	_, _, model, windowFn = resolveChildProvider(subCfg, reg,
 		agents.AgentDef{Name: "plain"}, prov, providerAnthropic, "claude-default")
-	if model != catAnthropicModel || window != catAnthropicCtx {
+	if window := windowFn(); model != catAnthropicModel || window != catAnthropicCtx {
 		t.Fatalf("SubagentModel-inheriting def resolved (model, window) = (%q, %d), want (%q, %d)",
 			model, window, catAnthropicModel, catAnthropicCtx)
 	}

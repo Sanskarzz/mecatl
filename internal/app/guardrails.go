@@ -243,8 +243,8 @@ func buildGuardrailsChecker(cfg Config, provReg *providerRegistry, provider port
 	if resolved == "" {
 		return nil
 	}
-	window := childWindowFor(provReg, parentProviderID, resolved)
-	deps := childEngineDepsForProvider(cfg, "guardrail-checker", provider, resolved, window,
+	windowFn := childWindowFor(cfg, provReg, parentProviderID, resolved)
+	deps := childEngineDepsForProvider(cfg, "guardrail-checker", provider, resolved, windowFn,
 		tool.NewCatalog(), promptConfig(modelCfgFor(cfg, resolved), cfg.gitStatus), nil)
 	// Disable the no-progress nudge: the checker caps at MaxTurns=1 and an empty
 	// (verdict-less) first turn must end in exactly ONE provider call (treated as a

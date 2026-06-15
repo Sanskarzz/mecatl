@@ -421,21 +421,16 @@ func (m Model) selectionStatus() string {
 // right-aligned usage segment so they never touch.
 const footerGapPad = 2
 
-// contextWindow returns the denominator for the footer context meter, applying
-// the precedence: explicit operator override > server-resolved window > unknown.
+// contextWindow returns the denominator for the footer context meter:
 //
-//  1. m.deps.ContextWindow > 0 — an explicit --context-window operator override.
-//     It WINS so an operator can force a specific footer denominator (e.g. to model
-//     an effective budget below the model's true window). This override is sticky
-//     across model switches by design — see the flag help.
-//  2. m.effectiveModel.ContextWindow > 0 — the window the SERVER resolved for THIS
-//     session's model (echoed on SessionReadyMsg, refreshed on every model switch).
-//     This is the new default source: the meter shows a real bar with no flag set.
-//  3. 0 — unknown; the meter renderers degrade to the bare "ctx <N>" current size.
+//  1. m.effectiveModel.ContextWindow > 0 — the window the SERVER resolved for THIS
+//     session's model (echoed on SessionReadyMsg, refreshed on every model switch /
+//     GetSession). It is now LIVE-FIRST server-side, so a live-only model heals to
+//     its real window; the operator escape-hatch is mecated's
+//     -context-window-override, which moves this echoed denominator (and the engine
+//     trigger) together — there is no client-side override.
+//  2. 0 — unknown; the meter renderers degrade to the bare "ctx <N>" current size.
 func (m Model) contextWindow() int64 {
-	if m.deps.ContextWindow > 0 {
-		return m.deps.ContextWindow
-	}
 	if m.effectiveModel.ContextWindow > 0 {
 		return m.effectiveModel.ContextWindow
 	}

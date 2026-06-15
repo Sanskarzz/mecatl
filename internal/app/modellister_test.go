@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	mecatlv1 "github.com/stacklok/mecatl/contracts/gen/go/mecatl/v1"
 	"github.com/stacklok/mecatl/engine/adapter/mockllm"
@@ -414,7 +415,7 @@ func TestAsyncRefreshSwapsAfterJoin(t *testing.T) {
 	reg := regWithLister(lister)
 	swap := newFakeSwapper()
 
-	closer := startLiveModelRefresh(port.NopDiagnostics{}, reg, swap, false) // ASYNC
+	closer := startLiveModelRefresh(port.NopDiagnostics{}, reg, swap, false, 0) // ASYNC
 
 	// Wait for the background swap to land on its OWN (deterministic via the swapped
 	// channel — NO sleep, NO poll), then join+cleanup. This exercises the real
@@ -443,6 +444,87 @@ func TestAsyncRefreshSwapsAfterJoin(t *testing.T) {
 	}
 }
 
+// gateLister signals `entered` when ListModels is reached and BLOCKS there until the
+// test closes `release`, then returns its canned models. It is the causal barrier the
+// delay-holds-swap test pins on: reaching `entered` PROVES the goroutine cleared the
+// delay and is now inside the fetch, so a "swap has not happened yet" read taken while
+// the lister is still blocked is synchronized — not a wall-clock guess.
+type gateLister struct {
+	entered    chan struct{}
+	release    chan struct{}
+	releaseOne sync.Once
+	models     []modelEntry
+	calls      atomic.Int32
+}
+
+func (g *gateLister) ListModels(context.Context) ([]modelEntry, error) {
+	g.calls.Add(1)
+	close(g.entered)
+	<-g.release
+	return g.models, nil
+}
+
+// unblock releases the gated fetch at most once (safe to call from both the test body
+// and a t.Cleanup safety net without a double-close panic).
+func (g *gateLister) unblock() { g.releaseOne.Do(func() { close(g.release) }) }
+
+// TestAsyncRefreshDelayHoldsSwap exercises the issue-#66 footer-heal repro seam: a
+// non-zero delay holds the async goroutine BEFORE the fetch/swap, so the swap cannot
+// land until the delay elapses AND the fetch runs. This is CAUSAL, not timing-based:
+// the gateLister blocks inside ListModels, so reaching `entered` is the barrier that
+// the delay is over and the fetch has begun — and while the lister is still blocked the
+// swap PROVABLY has not happened (SetModels runs only after ListModels returns). We
+// assert the un-swapped state under that barrier, then release the fetch and wait on
+// the swapped channel for the post-delay swap. A short delay keeps the test quick; its
+// expiry is no longer load-bearing for the "not yet swapped" assertion (the gate is).
+func TestAsyncRefreshDelayHoldsSwap(t *testing.T) {
+	lister := &gateLister{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		models:  []modelEntry{{ID: "live/a", InputModalities: []string{"text"}}},
+	}
+	reg := regWithLister(lister)
+	swap := newFakeSwapper()
+
+	closer := startLiveModelRefresh(port.NopDiagnostics{}, reg, swap, false, 10*time.Millisecond)
+	t.Cleanup(func() { lister.unblock(); closer() }) // safety net: never leave the goroutine parked
+
+	// CAUSAL barrier: the fetch is entered ONLY after the delay timer fires. Until then
+	// the goroutine is parked in the delay select, so the gate is not yet reached.
+	<-lister.entered
+	// The lister is now blocked inside ListModels and has NOT returned, so SetModels
+	// provably cannot have run — this read is synchronized by the gate, not the clock.
+	if set, _, _ := swap.snapshot(); set {
+		t.Fatal("swap landed before the fetch returned — impossible unless the delay seam let the swap race the hold")
+	}
+	// Release the fetch; the swap now lands (deterministic via the swapped channel).
+	lister.unblock()
+	<-swap.swapped
+	if set, calls, _ := swap.snapshot(); !set || calls != 1 {
+		t.Fatalf("post-delay: set=%v calls=%d, want exactly one swap", set, calls)
+	}
+}
+
+// TestAsyncRefreshDelayCancelDuringHold proves the delay sleep is CANCELLABLE: a
+// shutdown during the (long) hold joins promptly via the closer WITHOUT swapping a
+// stale snapshot — the delay select observes ctx.Done() and returns before the fetch.
+func TestAsyncRefreshDelayCancelDuringHold(t *testing.T) {
+	lister := &fakeLister{models: []modelEntry{{ID: "live/a", InputModalities: []string{"text"}}}}
+	reg := regWithLister(lister)
+	swap := newFakeSwapper()
+
+	// A long delay the test never waits out; the closer cancels mid-hold.
+	closer := startLiveModelRefresh(port.NopDiagnostics{}, reg, swap, false, time.Hour)
+	closer() // cancel + wg.Wait: the goroutine unwinds out of the delay select
+
+	if set, calls, _ := swap.snapshot(); set || calls != 0 {
+		t.Fatalf("after cancel-during-hold: set=%v calls=%d, want NO swap (delay cancelled before fetch)", set, calls)
+	}
+	if lister.calls.Load() != 0 {
+		t.Fatalf("lister called %d times, want 0 (cancel preceded the fetch)", lister.calls.Load())
+	}
+}
+
 // TestAsyncRefreshCancelMidFetchDoesNotOverwrite exercises the ctx.Err() no-
 // overwrite guard: the closer is called WHILE the fetch is blocked (shutdown mid-
 // fetch). After release + join, SetModels must NOT have been called — the seed is
@@ -455,7 +537,7 @@ func TestAsyncRefreshCancelMidFetchDoesNotOverwrite(t *testing.T) {
 	reg := regWithLister(lister)
 	swap := newFakeSwapper()
 
-	closer := startLiveModelRefresh(port.NopDiagnostics{}, reg, swap, false) // ASYNC
+	closer := startLiveModelRefresh(port.NopDiagnostics{}, reg, swap, false, 0) // ASYNC
 
 	<-lister.started // the goroutine is now blocked inside ListModels (mid-fetch)
 

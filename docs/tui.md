@@ -78,7 +78,6 @@ absolute path (the server requires absolute).
 | `--list-themes` | – | print available themes and exit |
 | `--inline` / `--no-alt-screen` | off | render inline in the terminal's normal buffer instead of the alternate screen, preserving native scrollback/search (no mouse capture; see `--no-mouse` below) |
 | `--no-mouse` | off | keep the alt screen but don't capture the mouse, so the terminal's **native** click-drag selection works; trades away in-app wheel scroll + drag-select/copy (or `MECATUI_NO_MOUSE=1`; see the selection section) |
-| `--context-window` | 0 (use server window) | OVERRIDE the footer **ctx** meter's denominator (tokens); 0 = use the server-resolved per-model window. Set a value only to force a different denominator — it then wins and stays sticky across model switches (never inferred from the model name) |
 | `--no-banner` | off | disable the first-run welcome **splash** (mascot + gradient wordmark); the plain prompt hint + affordance list still show. Auto-forced on under `--quiet` or a non-interactive stdin |
 | `--model` | – (provider default) | model id for the **embedded** server; empty = the server-configured `--default-model` (when set), else the provider-appropriate built-in (anthropic → `claude-sonnet-4-6`, openai → `gpt-5`, openrouter → `openai/gpt-5`). Overridden per session by the `/models` picker |
 | `--default-provider` | – | **embedded** server: deployment-wide default provider id (e.g. `openai`, `openrouter`, `anthropic`); overrides the built-in provider preference for zero-selector sessions, while a client-side selection still wins. An unknown/unavailable provider **fails startup** |
@@ -564,13 +563,15 @@ the bottom (and the viewport grows back when the transient clears).
 assigned, not summed), i.e. how full the context window is right now. The **`↑`/`↓`/`⊕`
 facets** beside it are **session-cumulative totals**, fed once per run from the terminal
 result's cumulative usage (so a long session's spend keeps growing while the ctx meter
-tracks only the live conversation size). The meter's **denominator** defaults to the
+tracks only the live conversation size). The meter's **denominator** is the
 **server-resolved per-model context window** (echoed on session create, refreshed on
-every model switch, and — for a default-model session on a *live-only* model whose real
-window the curated catalog lacks — self-healed by the background live-catalog swap with
-no model switch: the server rehydrates the session's engine to the live window and the
-next snapshot read fills the denominator in, issue #66). An explicit `--context-window`
-overrides it, and only when neither is known does the meter degrade to the bare current
+every model switch and on `GetSession`, and — for a session on a *live-only* model whose
+real window the curated catalog lacks — self-healed once the background live-catalog
+swap lands: the server resolves the window *live-first at the point of use* for both the
+engine's compaction trigger and this echoed denominator, so the next snapshot read fills
+it in, issue #66). There is no client-side override; the operator escape-hatch is
+mecated's `-context-window-override`, which moves the engine trigger **and** this echoed
+denominator together. When the window is unknown the meter degrades to the bare current
 size (`ctx 40K`, no bar). As the
 context fills the bar **darkens** to signal pressure — `▒` ok, `▓` past ~60%, `█` plus a
 `⚠` mark past ~85% — and the colour shifts to match (a non-colour glyph cue so it reads

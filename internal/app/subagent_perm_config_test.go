@@ -164,7 +164,7 @@ permissions:
       - "Bash(curl:*)"
 `)
 	provider := &bashWriteProvider{command: "true", marker: "x"}
-	deps := childEngineDepsForProvider(cfg, "task", provider, cfg.Model, 0, tool.NewCatalog(), explorerPromptConfig(modelCfgFor(cfg, cfg.Model)), nil)
+	deps := childEngineDepsForProvider(cfg, "task", provider, cfg.Model, func() int { return defaultContextWindowTokens }, tool.NewCatalog(), explorerPromptConfig(modelCfgFor(cfg, cfg.Model)), nil)
 
 	eval := func(cmd string) governance.PermissionDecision {
 		args, _ := json.Marshal(map[string]string{"command": cmd})

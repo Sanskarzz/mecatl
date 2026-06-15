@@ -173,9 +173,9 @@ func TestFooterFleetTierSelection(t *testing.T) {
 
 	// Rebuild the four agents-bearing candidates fitFooter forms (see view.go fitFooter).
 	const sep = "  "
-	meter := renderContextMeter(th, m.contextTokens, m.deps.ContextWindow)
-	meterCompact := renderContextMeterCompact(th, m.contextTokens, m.deps.ContextWindow)
-	meterMinimal := renderContextMeterMinimal(th, m.contextTokens, m.deps.ContextWindow)
+	meter := renderContextMeter(th, m.contextTokens, m.contextWindow())
+	meterCompact := renderContextMeterCompact(th, m.contextTokens, m.contextWindow())
+	meterMinimal := renderContextMeterMinimal(th, m.contextTokens, m.contextWindow())
 	full := subagentFooterFull(th, 3, 0)
 	medium := th.Style("spinner").Render(subagentFooterMedium(3, 0))
 	compact := th.Style("spinner").Render(subagentFooterCompact(3, 0))
@@ -616,7 +616,6 @@ func TestFooterFleetGolden(t *testing.T) {
 // denominator source (the server-echoed window) reaches the meter via the reducer.
 func TestFooterCtxMeterGolden(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
-	m.deps.ContextWindow = 0 // no operator override → fall through to the echoed window
 	m = applyAll(m,
 		tea.WindowSizeMsg{Width: 160, Height: 30},
 		client.SessionReadyMsg{
@@ -634,7 +633,6 @@ func TestFooterCtxMeterGolden(t *testing.T) {
 // 40K numerator renders the bare "ctx 40K" with no bar and no denominator.
 func TestFooterCtxUnknownGolden(t *testing.T) {
 	m := newMCPModel(t, aztec(), nil)
-	m.deps.ContextWindow = 0
 	m = applyAll(m,
 		tea.WindowSizeMsg{Width: 160, Height: 30},
 		client.SessionReadyMsg{SessionID: "sess-ctx-0002"}, // zero ResolvedModel → unknown window

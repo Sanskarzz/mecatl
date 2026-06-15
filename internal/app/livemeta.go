@@ -192,6 +192,33 @@ func (s *liveMetaStore) contextWindowFor(providerID, modelID string) int {
 	return catalogContextWindow(providerID, modelID)
 }
 
+// windowResolver returns the SINGLE live-first context-window resolver closure for a
+// FIXED (providerID, model), used by EVERY engine path (shared, per-session selector,
+// child) AND the session-echo so they all agree byte-for-byte. It is the ONE place the
+// override→live→catalog→128k-floor precedence lives:
+//   - --context-window-override (cfg.ContextWindowOverride) WINS for both engine and
+//     echo, an operator escape-hatch;
+//   - else reg.meta.contextWindowFor (live entry when present, else the embedded
+//     catalog), resolved LIVE on every call so a post-construction live Swap self-
+//     corrects without an engine rebuild;
+//   - else (genuinely unknown/uncatalogued, <=0) the conservative 128k floor.
+//
+// The closure is a stdlib func()int; the engine consumes it via Deps.ContextWindow and
+// imports no adapter. Because reg.meta is an atomic.Pointer the read is race-free and
+// live-improving.
+func (reg *providerRegistry) windowResolver(cfg Config, providerID, model string) func() int {
+	return func() int {
+		if cfg.ContextWindowOverride > 0 {
+			return cfg.ContextWindowOverride
+		}
+		w := reg.meta.contextWindowFor(providerID, model)
+		if w <= 0 {
+			return defaultContextWindowTokens
+		}
+		return w
+	}
+}
+
 // modalitiesFor resolves a model's input modalities from the live store. A PRESENT
 // live entry is AUTHORITATIVE — found=true — EVEN when its modality list is empty/nil:
 // a live source that lists the model but omits architecture.input_modalities is

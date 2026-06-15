@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -32,7 +33,14 @@ type modelSwapper interface {
 // goroutine, no ctx) — so a mock/openai-only deployment spawns nothing. When sync
 // is true (a test seam) the refresh runs INLINE before returning, so an offline
 // e2e can assert the swapped snapshot deterministically without sleeps.
-func startLiveModelRefresh(d port.Diagnostics, reg *providerRegistry, swap modelSwapper, runSync bool) func() {
+//
+// delay (a DIAGNOSTIC/TEST seam, default 0) artificially holds the ASYNC goroutine
+// BEFORE the fetch/swap, so the live-catalog swap lands `delay` after startup. It
+// forces the create-races-the-swap window (issue #66 footer heal) open WIDE so the
+// race is deterministically reproducible; it is INERT in the sync path (which runs
+// inline, no window to widen) and a no-op at 0. The delay sleep is cancellable, so a
+// shutdown during the delay still joins promptly without swapping a stale snapshot.
+func startLiveModelRefresh(d port.Diagnostics, reg *providerRegistry, swap modelSwapper, runSync bool, delay time.Duration) func() {
 	if reg == nil || !anyProviderHasLister(reg) {
 		return func() {} // nothing to refresh
 	}
@@ -49,6 +57,17 @@ func startLiveModelRefresh(d port.Diagnostics, reg *providerRegistry, swap model
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		// DIAGNOSTIC/TEST delay: hold off the fetch/swap so the pre-swap window is
+		// observable. Cancellable so a shutdown during the delay joins without swapping.
+		if delay > 0 {
+			t := time.NewTimer(delay)
+			defer t.Stop()
+			select {
+			case <-t.C:
+			case <-ctx.Done():
+				return
+			}
+		}
 		fetchCtx, fetchCancel := context.WithTimeout(ctx, liveModelRefreshTimeout)
 		defer fetchCancel()
 		models, byProvider := liveModelSnapshot(fetchCtx, d, reg)
@@ -69,6 +88,22 @@ func startLiveModelRefresh(d port.Diagnostics, reg *providerRegistry, swap model
 		cancel()
 		wg.Wait()
 	}
+}
+
+// liveRefreshDelay resolves the ASYNC live-model refresh delay (issue #66 footer-heal
+// repro seam). A directly-set Config field (tests) wins; otherwise the undocumented
+// MECATL_LIVE_MODEL_REFRESH_DELAY env var is parsed. DIAGNOSTIC/TEST ONLY: default 0
+// (unset / unparseable / non-positive ⇒ 0 ⇒ today's behaviour, swap lands sub-second).
+// Read in composition so it pollutes no operator flag surface and stays an internal
+// detail; never recommended for normal use.
+func liveRefreshDelay(cfg Config) time.Duration {
+	if cfg.liveModelRefreshDelay > 0 {
+		return cfg.liveModelRefreshDelay
+	}
+	if d, err := time.ParseDuration(os.Getenv("MECATL_LIVE_MODEL_REFRESH_DELAY")); err == nil && d > 0 {
+		return d
+	}
+	return 0
 }
 
 // anyProviderHasLister reports whether at least one AVAILABLE provider carries a

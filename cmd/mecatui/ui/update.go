@@ -397,6 +397,28 @@ func (m Model) updateLifecycle(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		m.palette.commands = msg.Commands
 		mm, cmd := m.syncPalette()
 		return mm, cmd, true
+	case client.ResolvedModelMsg:
+		// Footer context-meter self-heal refetch result (issue #66). The ui refetched
+		// the server's eventually-consistent live-first resolved model because the
+		// meter's denominator was still unknown; this lands the result. The heal is:
+		//   - SESSION-CORRELATED: a refetch in flight when a /models switch rebinds the
+		//     session to a new id must not land its STALE window on the new session, so
+		//     a msg whose SessionID no longer matches the current one is dropped.
+		//   - benign on error: a failed refetch keeps the current denominator (the next
+		//     turn boundary retries while the window is still unknown).
+		//   - RAISE-ONLY: only ever raise the window (the healed live value > the 0 /
+		//     floor echo); never lower it (a transient smaller value must not shrink a
+		//     known window) and never touch ProviderID/ModelID (the model is FIXED per
+		//     session — only the denominator self-corrects). Once raised, contextWindow()
+		//     is non-zero so the turn-end gate stops firing the refetch — bounded.
+		if msg.Err != nil || msg.SessionID != m.sessionID {
+			return m, nil, true
+		}
+		if msg.Resolved.ContextWindow > m.effectiveModel.ContextWindow {
+			m.effectiveModel.ContextWindow = msg.Resolved.ContextWindow
+			m.refreshView()
+		}
+		return m, nil, true
 	default:
 		return m, nil, false
 	}
@@ -452,7 +474,22 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !trivialTurn(msg) {
 			m.conv.addTurnStat(turnStatLine(msg))
 		}
-		return m.afterEvent()
+		mm, cmd := m.afterEvent()
+		// Footer context-meter self-heal (issue #66): if the meter's denominator is
+		// still UNKNOWN (m.effectiveModel.ContextWindow == 0), refetch the session's
+		// resolved model. For a session on a LIVE-ONLY model the create-time echo can
+		// carry a 0 / curated-floor window because the async live model-list swap had
+		// not landed yet; the server's ResolvedModel resolves the real live window once
+		// it has, and the ResolvedModelMsg arm raises the denominator. The RPC is
+		// SKIPPED entirely once the window is known (non-zero), so it fires at most until
+		// the first heal lands — never on every turn forever. There is no client-side
+		// override (issue #66 deleted the --context-window flag); the gate is purely
+		// "session live AND window still unknown".
+		if m.sessionID != "" && m.effectiveModel.ContextWindow == 0 {
+			refresh := client.RefreshResolvedModelCmd(m.deps.Ctx, m.deps.Session, m.sessionID)
+			return mm, tea.Batch(cmd, refresh)
+		}
+		return mm, cmd
 	case client.ToolCallMsg:
 		m.conv.addTool(msg.ID, msg.Name, msg.Args)
 		m.activeTool = msg.Name

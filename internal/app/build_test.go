@@ -58,9 +58,9 @@ func TestBaseEngineDepsDelegatesToProviderSeam(t *testing.T) {
 	// not the old hardcoded 0. providerOpenAI + "gpt-5" is catalogued (400k), so a
 	// nil-meta test registry still resolves it via the catalog floor.
 	reg := regForTest(provider, providerOpenAI, cfg.Model)
-	window := reg.meta.contextWindowFor(reg.Default(), cfg.Model)
+	windowFn := reg.windowResolver(cfg, reg.Default(), cfg.Model)
 	base := baseEngineDeps(cfg, reg, provider, store, policy, hooks, mcpP, instr)
-	direct := engineDepsForProvider(cfg, provider, cfg.Model, window, store, policy, hooks, mcpP, instr)
+	direct := engineDepsForProvider(cfg, provider, cfg.Model, windowFn, store, policy, hooks, mcpP, instr)
 
 	if base.Model != direct.Model {
 		t.Errorf("Model: base=%q direct=%q", base.Model, direct.Model)
@@ -75,8 +75,8 @@ func TestBaseEngineDepsDelegatesToProviderSeam(t *testing.T) {
 	if base.PromptConfig.Role != direct.PromptConfig.Role {
 		t.Error("PromptConfig.Role (agency delta) differs")
 	}
-	if base.ContextWindowTokens != direct.ContextWindowTokens {
-		t.Errorf("ContextWindowTokens: base=%d direct=%d", base.ContextWindowTokens, direct.ContextWindowTokens)
+	if bw, dw := base.ContextWindow(), direct.ContextWindow(); bw != dw {
+		t.Errorf("ContextWindow: base=%d direct=%d", bw, dw)
 	}
 	if base.CompactionRatio != direct.CompactionRatio {
 		t.Errorf("CompactionRatio: base=%v direct=%v", base.CompactionRatio, direct.CompactionRatio)
@@ -119,7 +119,7 @@ func TestEngineDepsForProviderRebindsModel(t *testing.T) {
 
 	const altModel = "gpt-4" // cl100k_base, a DIFFERENT encoding from gpt-4o (o200k_base)
 
-	deps := engineDepsForProvider(cfg, provider, altModel, 0, store, policy, hooks, mcpP, instr)
+	deps := engineDepsForProvider(cfg, provider, altModel, func() int { return defaultContextWindowTokens }, store, policy, hooks, mcpP, instr)
 
 	if deps.Model != altModel {
 		t.Errorf("Deps.Model = %q, want %q (not the default gpt-4o)", deps.Model, altModel)
@@ -139,7 +139,7 @@ func TestEngineDepsForProviderRebindsModel(t *testing.T) {
 	// (cl100k_base) must DIFFER from a counter built for the default cfg.Model
 	// (o200k_base) on a probe string. If engineDepsForProvider leaked the default
 	// model's counter, these would be equal and the guard would be vacuous.
-	defaultDeps := engineDepsForProvider(cfg, provider, cfg.Model, 0, store, policy, hooks, mcpP, instr)
+	defaultDeps := engineDepsForProvider(cfg, provider, cfg.Model, func() int { return defaultContextWindowTokens }, store, policy, hooks, mcpP, instr)
 	const probe = "tokenization differences 12345 café 日本語"
 	altCount := deps.TokenCounter.Count(probe)
 	defCount := defaultDeps.TokenCounter.Count(probe)
@@ -179,7 +179,7 @@ func TestEngineDepsCarryWallClock(t *testing.T) {
 		t.Fatalf("baseEngineDeps Deps.Clock = %T, want wallclock.Clock", base.Clock)
 	}
 
-	direct := engineDepsForProvider(cfg, provider, cfg.Model, 0, store, policy, hooks, mcpP, instr)
+	direct := engineDepsForProvider(cfg, provider, cfg.Model, func() int { return defaultContextWindowTokens }, store, policy, hooks, mcpP, instr)
 	if direct.Clock == nil {
 		t.Fatal("engineDepsForProvider Deps.Clock is nil (latency metrics dead, issue #53)")
 	}
@@ -189,7 +189,7 @@ func TestEngineDepsCarryWallClock(t *testing.T) {
 
 	// Children INHERIT the clock — childEngineDepsForProvider clears the telemetry
 	// seams (Sink/ToolCallRecorder) but must NOT clear Clock.
-	child := childEngineDepsForProvider(cfg, "member:explorer", provider, cfg.Model, 0, tool.NewCatalog(), promptConfig(cfg, ""), nil)
+	child := childEngineDepsForProvider(cfg, "member:explorer", provider, cfg.Model, func() int { return defaultContextWindowTokens }, tool.NewCatalog(), promptConfig(cfg, ""), nil)
 	if child.Clock == nil {
 		t.Fatal("childEngineDepsForProvider Deps.Clock is nil (children must inherit the wall clock)")
 	}

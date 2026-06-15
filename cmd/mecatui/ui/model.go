@@ -34,6 +34,16 @@ type SessionCreator interface {
 	// orphaned server-side session. Best-effort: the caller proceeds with the new
 	// create even if the close errors.
 	CloseSession(ctx context.Context, id string) error
+	// GetSession re-reads the EFFECTIVE resolved model for an existing session. The
+	// footer context-meter heal (issue #66) fires it on a turn boundary while the
+	// meter's denominator is still unknown — the create-time echo can carry a 0 /
+	// curated-floor window for a session on a LIVE-ONLY model whose async live
+	// model-list swap had not yet landed, and the server's ResolvedModel resolves to
+	// the real live window once it has. SessionCreator is the canonical ui-injection
+	// seam for it (the method also satisfies the narrower client.SessionGetter that
+	// RefreshResolvedModelCmd consumes); *client.Client (via the sessionAdapter) and
+	// the test fakes satisfy both.
+	GetSession(ctx context.Context, id string) (client.ResolvedModel, error)
 }
 
 // SelectionStore persists + loads the client-side model selection (last-used). It
@@ -111,15 +121,6 @@ type Deps struct {
 	// hint + affordances). Set by --no-banner, --quiet, or a non-interactive stdin
 	// (composed in main). Default false (full splash).
 	NoBanner bool
-
-	// ContextWindow is an OPTIONAL operator OVERRIDE of the footer context meter's
-	// denominator, in tokens. When > 0 it wins over the server-resolved window. When
-	// 0 (the default) the meter falls through to the server-echoed per-model window
-	// (m.effectiveModel.ContextWindow); only if THAT is also 0 does the meter degrade
-	// to just the current context size (no bar/percentage). The precedence lives in
-	// Model.contextWindow. Computed in main from an explicit --context-window flag;
-	// never inferred from the model name.
-	ContextWindow int64
 
 	// Ctx is the program-level context; per-run stream contexts derive from it.
 	Ctx context.Context //nolint:containedctx // stored to parent per-run stream cancels

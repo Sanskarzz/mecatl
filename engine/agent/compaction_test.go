@@ -849,14 +849,14 @@ func TestCompactionThroughLoopNeverOrphans(t *testing.T) {
 	// emit an orphan → ReplaceHistory rejects → the WARN below fires → red.
 	diag := newCapturingDiag()
 	e := agent.NewEngine(agent.Deps{
-		LLM:                 llm,
-		Catalog:             catalogWith(t, readBodyTool()),
-		Policy:              allowAll(),
-		Model:               "m",
-		Compactor:           agent.HeuristicCompactor{KeepLastTurns: 3},
-		ContextWindowTokens: 200, // threshold 160 chars/4: trips after ~2 big pairs
-		CompactionRatio:     0.8,
-		Diagnostics:         diag,
+		LLM:             llm,
+		Catalog:         catalogWith(t, readBodyTool()),
+		Policy:          allowAll(),
+		Model:           "m",
+		Compactor:       agent.HeuristicCompactor{KeepLastTurns: 3},
+		ContextWindow:   func() int { return 200 }, // threshold 160 chars/4: trips after ~2 big pairs
+		CompactionRatio: 0.8,
+		Diagnostics:     diag,
 	})
 
 	sess := session.New("s-compact", session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
@@ -892,6 +892,60 @@ func TestCompactionThroughLoopNeverOrphans(t *testing.T) {
 	}
 }
 
+// TestContextWindowResolvedAtUse is the STRUCTURAL guard the whole resolve-at-use
+// unification rests on: Deps.ContextWindow is a closure resolved at the point of use,
+// NOT a value frozen at construction. An Engine built over a MUTABLE int must observe
+// a post-construction change through Engine.ContextWindow() — proving a live-catalog
+// Swap after the (shared, never-rebuilt) engine is constructed self-corrects on the
+// next read.
+//
+// MUTATION-VERIFY: revert Deps.ContextWindow to a frozen int (resolved once in
+// engineDepsForProvider / read once in NewEngine), and the post-mutation read below
+// returns the stale construction-time value — this test fails.
+func TestContextWindowResolvedAtUse(t *testing.T) {
+	window := 128_000
+	e := agent.NewEngine(agent.Deps{
+		LLM:           mockllm.New(),
+		Catalog:       catalogWith(t, readBodyTool()),
+		Policy:        allowAll(),
+		Model:         "m",
+		ContextWindow: func() int { return window },
+	})
+	if got := e.ContextWindow(); got != 128_000 {
+		t.Fatalf("pre-change ContextWindow() = %d, want 128000", got)
+	}
+	// Simulate the live model-catalog swap populating the model's real window AFTER
+	// the engine was constructed.
+	window = 1_050_000
+	if got := e.ContextWindow(); got != 1_050_000 {
+		t.Fatalf("post-change ContextWindow() = %d, want the live 1050000 (resolve-at-use — the engine reads the closure on every call)", got)
+	}
+}
+
+// TestNilContextWindowDisablesCompaction pins the "nil resolver disables compaction"
+// contract (the old "zero disables"): an Engine with a nil Deps.ContextWindow reports
+// 0 and never compacts, even with a tiny history that would otherwise trip a small
+// window.
+func TestNilContextWindowDisablesCompaction(t *testing.T) {
+	e := agent.NewEngine(agent.Deps{
+		LLM:     mockllm.New(mockllm.TextTurn("done")),
+		Catalog: catalogWith(t, readBodyTool()),
+		Policy:  allowAll(),
+		Model:   "m",
+		// ContextWindow nil → compaction disabled.
+	})
+	if got := e.ContextWindow(); got != 0 {
+		t.Fatalf("nil-resolver ContextWindow() = %d, want 0 (disabled)", got)
+	}
+	sess := session.New("s-nilwin", session.ModeDefault, "/ws", session.Limits{MaxTurns: 2}, time.Unix(0, 0))
+	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "hi")
+	for ev := range r.Events() {
+		if ev.Type == session.EvCompaction {
+			t.Fatalf("compaction fired with a nil ContextWindow resolver (must be disabled)")
+		}
+	}
+}
+
 // TestCompactionEmitsNonDestructiveArchive is the cloud-native Phase 3b
 // compaction-archive sub-gate at the loop level: a genuine compaction must emit
 // EvCompactionArchive AFTER EvCompaction carrying the PRE-compaction conversation
@@ -921,13 +975,13 @@ func TestCompactionEmitsNonDestructiveArchive(t *testing.T) {
 	// re-trips it), making the pre-vs-post distinction deterministic.
 	rec := &recordingInputCompactor{out: []session.Message{session.NewUserMessage("goal")}}
 	e := agent.NewEngine(agent.Deps{
-		LLM:                 llm,
-		Catalog:             catalogWith(t, readBodyTool()),
-		Policy:              allowAll(),
-		Model:               "m",
-		Compactor:           rec,
-		ContextWindowTokens: 200,
-		CompactionRatio:     0.8,
+		LLM:             llm,
+		Catalog:         catalogWith(t, readBodyTool()),
+		Policy:          allowAll(),
+		Model:           "m",
+		Compactor:       rec,
+		ContextWindow:   func() int { return 200 },
+		CompactionRatio: 0.8,
 	})
 
 	sess := session.New("s-archive", session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
@@ -1074,13 +1128,13 @@ func TestCompactionThroughLoopAbortsToOriginal(t *testing.T) {
 		t.Run(v.name, func(t *testing.T) {
 			llm := mockllm.New(mockllm.TextTurn("done"))
 			e := agent.NewEngine(agent.Deps{
-				LLM:                 llm,
-				Catalog:             catalogWith(t),
-				Policy:              allowAll(),
-				Model:               "m",
-				Compactor:           v.compactor,
-				ContextWindowTokens: 10, // tiny: the prompt trips the threshold
-				CompactionRatio:     0.8,
+				LLM:             llm,
+				Catalog:         catalogWith(t),
+				Policy:          allowAll(),
+				Model:           "m",
+				Compactor:       v.compactor,
+				ContextWindow:   func() int { return 10 }, // tiny: the prompt trips the threshold
+				CompactionRatio: 0.8,
 			})
 
 			sess := session.New("s-abort", session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
@@ -1151,13 +1205,13 @@ func TestCompactionTriggersAtThreshold(t *testing.T) {
 	rc := &recordingCompactor{}
 	llm := mockllm.New(mockllm.TextTurn("done"))
 	e := agent.NewEngine(agent.Deps{
-		LLM:                 llm,
-		Catalog:             catalogWith(t),
-		Policy:              allowAll(),
-		Model:               "m",
-		Compactor:           rc,
-		ContextWindowTokens: 10, // tiny: a long prompt blows past 80% of it
-		CompactionRatio:     0.8,
+		LLM:             llm,
+		Catalog:         catalogWith(t),
+		Policy:          allowAll(),
+		Model:           "m",
+		Compactor:       rc,
+		ContextWindow:   func() int { return 10 }, // tiny: a long prompt blows past 80% of it
+		CompactionRatio: 0.8,
 	})
 
 	sess := session.New("s1", session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
@@ -1200,14 +1254,14 @@ func TestCompactionTriggerUsesInjectedCounter(t *testing.T) {
 		tc := &countingTokenCounter{fixed: reported}
 		llm := mockllm.New(mockllm.TextTurn("done"))
 		e := agent.NewEngine(agent.Deps{
-			LLM:                 llm,
-			Catalog:             catalogWith(t),
-			Policy:              allowAll(),
-			Model:               "m",
-			Compactor:           rc,
-			TokenCounter:        tc,
-			ContextWindowTokens: 100,
-			CompactionRatio:     0.8, // threshold = 80
+			LLM:             llm,
+			Catalog:         catalogWith(t),
+			Policy:          allowAll(),
+			Model:           "m",
+			Compactor:       rc,
+			TokenCounter:    tc,
+			ContextWindow:   func() int { return 100 },
+			CompactionRatio: 0.8, // threshold = 80
 		})
 		sess := session.New("s", session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
 		r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "hi")

@@ -344,3 +344,7 @@ func (errSession) CreateSession(_ context.Context, _ client.ModelSelection) (str
 }
 
 func (errSession) CloseSession(_ context.Context, _ string) error { return nil }
+
+func (errSession) GetSession(_ context.Context, _ string) (client.ResolvedModel, error) {
+	return client.ResolvedModel{}, nil
+}

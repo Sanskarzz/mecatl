@@ -62,9 +62,9 @@ func buildCompactionScript() *mockllm.Provider {
 func BenchmarkCompactionCycle(b *testing.B) {
 	llm := buildCompactionScript()
 	e := buildEngine(agent.Deps{
-		LLM:                 llm,
-		Catalog:             scenarioCatalog(readTool{}),
-		ContextWindowTokens: compactionContextWindow,
+		LLM:           llm,
+		Catalog:       scenarioCatalog(readTool{}),
+		ContextWindow: func() int { return compactionContextWindow },
 		// Compactor + TokenCounter left nil → HeuristicCompactor + HeuristicTokenCounter
 		// defaults (applied in NewEngine).
 	})

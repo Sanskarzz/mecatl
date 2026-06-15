@@ -137,7 +137,7 @@ func TestChildEngineDepsRoleScopedTelemetryWhenScoperSet(t *testing.T) {
 		{"parallel", "parallel"},
 	}
 	for _, tc := range cases {
-		deps := childEngineDepsForProvider(cfg, tc.role, provider, cfg.Model, 0, tool.NewCatalog(), promptConfig(cfg, ""), nil)
+		deps := childEngineDepsForProvider(cfg, tc.role, provider, cfg.Model, func() int { return defaultContextWindowTokens }, tool.NewCatalog(), promptConfig(cfg, ""), nil)
 		sink, ok := deps.Sink.(*fakeScopedSink)
 		if !ok {
 			t.Fatalf("role %q: Deps.Sink = %T, want the scoper's sink", tc.role, deps.Sink)
@@ -179,7 +179,7 @@ func TestChildEngineDepsNilTelemetryWhenNoScoper(t *testing.T) {
 	cfg.ToolCallRecorder = &fakeScopedRecorder{family: "main"}
 	provider := mockllm.New()
 
-	deps := childEngineDepsForProvider(cfg, "task", provider, cfg.Model, 0, tool.NewCatalog(), promptConfig(cfg, ""), nil)
+	deps := childEngineDepsForProvider(cfg, "task", provider, cfg.Model, func() int { return defaultContextWindowTokens }, tool.NewCatalog(), promptConfig(cfg, ""), nil)
 	if deps.Sink != nil {
 		t.Errorf("childEngineDepsForProvider Deps.Sink = %T, want nil without a scoper", deps.Sink)
 	}

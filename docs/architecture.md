@@ -1619,11 +1619,13 @@ MCP servers (orthogonal inputs → ONE engine over ONE catalog). The composition
 resolves the selector against the registry and builds Deps via
 **`engineDepsForProvider`**, which re-derives EVERY provider/model-closing field
 (LLM, Compactor, Model, model-keyed TokenCounter, `PromptConfig.Env.Model`, and the
-**ContextWindowTokens** — resolved live-first via `reg.meta.contextWindowFor`,
-catalog floor, for the selected model so the compaction trigger AGREES with the
-`ListModels`-advertised `context_limit`; only a genuinely uncatalogued passthrough
-model falls back to the 128k default). The DEFAULT model resolves through the SAME
-resolver (`baseEngineDeps`, issue #63) — it is no longer pinned to the 128k floor.
+**context-window resolver** `Deps.ContextWindow` — a `func() int` built by
+`reg.windowResolver` (override→live→catalog→128k floor) and read live at the point of
+use, so the compaction trigger AGREES with the `ListModels`-advertised `context_limit`
+and self-corrects after a live-catalog swap with no rebuild; only a genuinely
+uncatalogued passthrough model falls back to the 128k default). The DEFAULT model
+resolves through the SAME resolver (`baseEngineDeps`, issue #63) — it is no longer
+pinned to the 128k floor.
 This is the contamination fix: a shallow clone swapping only the
 LLM would compact/count through the wrong model. The resolution table:
 

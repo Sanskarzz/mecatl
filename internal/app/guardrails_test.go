@@ -136,7 +136,7 @@ func TestGuardrailsConfiguredWrapsInner(t *testing.T) {
 // catalog — so a checker call fires no hooks and can never re-trigger the runner.
 func TestGuardrailsCheckerEngineQuarantined(t *testing.T) {
 	cfg := Config{UseMock: true, Model: "m"}
-	deps := childEngineDepsForProvider(cfg, "guardrail-checker", mockllm.New(), "checker-model", 0,
+	deps := childEngineDepsForProvider(cfg, "guardrail-checker", mockllm.New(), "checker-model", func() int { return defaultContextWindowTokens },
 		tool.NewCatalog(), promptConfig(modelCfgFor(cfg, "checker-model"), cfg.gitStatus), nil)
 
 	if deps.ChildAskReviewer != nil {

@@ -122,8 +122,8 @@ func resolveProviderModel(cfg Config, provReg *providerRegistry, def agents.Agen
 	return pid, resolveModelFor(cfg, def, parentModel)
 }
 
-// resolveChildProvider resolves a def to the (childProvider, model, childWindow)
-// triple a child-engine build needs: it runs resolveProviderModel, then for a
+// resolveChildProvider resolves a def to the (childProvider, model, windowFn)
+// tuple a child-engine build needs: it runs resolveProviderModel, then for a
 // SWITCHED provider looks up the registry entry's provider, and derives the
 // context window through childWindowFor — the ONE rule every child resolution
 // site shares: the window is re-derived live-first for the child's resolved
@@ -132,7 +132,7 @@ func resolveProviderModel(cfg Config, provReg *providerRegistry, def agents.Agen
 // 128k floor). It is the shared resolution step both
 // buildAgentSubagentEngines and buildMemberEngine use, so the per-def provider-switch
 // logic lives in ONE place (and keeps buildMemberEngine under the gocyclo budget).
-func resolveChildProvider(cfg Config, provReg *providerRegistry, def agents.AgentDef, parentProvider port.LLMProvider, parentProviderID, parentModel string) (childProvider port.LLMProvider, providerID, model string, childWindow int) {
+func resolveChildProvider(cfg Config, provReg *providerRegistry, def agents.AgentDef, parentProvider port.LLMProvider, parentProviderID, parentModel string) (childProvider port.LLMProvider, providerID, model string, windowFn func() int) {
 	pid, model := resolveProviderModel(cfg, provReg, def, parentProviderID, parentModel)
 	childProvider = parentProvider
 	if pid != parentProviderID {
@@ -140,8 +140,8 @@ func resolveChildProvider(cfg Config, provReg *providerRegistry, def agents.Agen
 			childProvider = entry.provider
 		}
 	}
-	childWindow = childWindowFor(provReg, pid, model)
-	return childProvider, pid, model, childWindow
+	windowFn = childWindowFor(cfg, provReg, pid, model)
+	return childProvider, pid, model, windowFn
 }
 
 // childWindowFor is the ONE context-window derivation rule every child-model
@@ -154,12 +154,17 @@ func resolveChildProvider(cfg Config, provReg *providerRegistry, def agents.Agen
 // never the hardcoded 128k floor; before, an unchanged pair short-circuited to 0
 // and a same-model child of a 1M-context parent compacted at ~102k. (The
 // parent-pair is no longer an input — the rule keys solely on the child's resolved
-// pair.) A nil provReg (direct-call test paths) returns 0.
-func childWindowFor(provReg *providerRegistry, providerID, model string) int {
+// pair.)
+//
+// It returns a RESOLVE-AT-USE closure (reg.windowResolver), not an eager int, so a
+// child inherits the SAME live-first override→live→catalog→128k-floor resolution as
+// every other engine and self-corrects on a post-construction live Swap. A nil
+// provReg (direct-call test paths) returns the override-or-128k floor resolver.
+func childWindowFor(cfg Config, provReg *providerRegistry, providerID, model string) func() int {
 	if provReg == nil {
-		return 0
+		return childWindowResolver(cfg)
 	}
-	return provReg.meta.contextWindowFor(providerID, model)
+	return provReg.windowResolver(cfg, providerID, model)
 }
 
 // resolveModelFor is resolveModel with the inherited parent model threaded in
@@ -195,11 +200,11 @@ func resolveModelFor(cfg Config, def agents.AgentDef, parentModel string) string
 // resolved against parentProviderID (the registry is keyed by provider, not
 // model). A def's `provider:` remains the only cross-provider seam. The Parallel
 // JUDGE deliberately does NOT route through this (it stays on the session model —
-// see registerParallelTool). provReg may be nil on direct-call test paths
-// (window stays 0).
-func resolveDefaultChildModel(cfg Config, provReg *providerRegistry, parentProviderID, parentModel string) (model string, childWindow int) {
+// see registerParallelTool). provReg may be nil on direct-call test paths (the
+// window resolver falls back to the override-or-128k floor).
+func resolveDefaultChildModel(cfg Config, provReg *providerRegistry, parentProviderID, parentModel string) (model string, windowFn func() int) {
 	model = resolveModelFor(cfg, agents.AgentDef{}, parentModel)
-	return model, childWindowFor(provReg, parentProviderID, model)
+	return model, childWindowFor(cfg, provReg, parentProviderID, model)
 }
 
 // resolveAlias maps sel through the operator aliases then the built-in aliases,
@@ -700,7 +705,7 @@ func buildAgentSubagentEngines(ctx context.Context, cfg Config, provider port.LL
 		// switches the child engine (with its catalogued window); a def pinning no (or
 		// the same) provider inherits the parent's model AND its real resolved window
 		// (issue #64 — no longer the hardcoded 128k floor).
-		childProvider, pid, model, childWindow := resolveChildProvider(cfg, provReg, def, provider, parentProviderID, parentModel)
+		childProvider, pid, model, windowFn := resolveChildProvider(cfg, provReg, def, provider, parentProviderID, parentModel)
 
 		bodies, missing := preloadedSkillBodies(def, skillIdx)
 		for _, name := range missing {
@@ -716,7 +721,7 @@ func buildAgentSubagentEngines(ctx context.Context, cfg Config, provider port.LL
 		// tool would not be in the def allowlist. newChildEngineForProvider leaves it at
 		// its zero value (off), matching the original explicit omission, AND routes the
 		// child's compactor/counter/window through pid+model (contamination fix).
-		engines[def.Name] = newChildEngineForProvider(cfg, "task:"+def.Name, childProvider, model, childWindow, cat, agentPromptConfig(cfg, def, model, memHead, bodies...), hooks)
+		engines[def.Name] = newChildEngineForProvider(cfg, "task:"+def.Name, childProvider, model, windowFn, cat, agentPromptConfig(cfg, def, model, memHead, bodies...), hooks)
 		// Per-def limits ride on AgentMeta so the Subagent tool bounds THIS def's child
 		// session by them (per-field falling back to the Subagent default child limits for
 		// any zero field). A def that sets neither yields the default, unchanged.

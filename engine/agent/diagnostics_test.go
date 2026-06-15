@@ -320,14 +320,14 @@ func TestCompactionFailureEmitsWarn(t *testing.T) {
 	boom := errors.New("compactor boom")
 	llm := mockllm.New(mockllm.TextTurn("done"))
 	e := agent.NewEngine(agent.Deps{
-		LLM:                 llm,
-		Catalog:             catalogWith(t),
-		Policy:              allowAll(),
-		Model:               "m",
-		Compactor:           failingCompactor{err: boom},
-		ContextWindowTokens: 10, // tiny: a long prompt blows past 80% of it
-		CompactionRatio:     0.8,
-		Diagnostics:         diag,
+		LLM:             llm,
+		Catalog:         catalogWith(t),
+		Policy:          allowAll(),
+		Model:           "m",
+		Compactor:       failingCompactor{err: boom},
+		ContextWindow:   func() int { return 10 }, // tiny: a long prompt blows past 80% of it
+		CompactionRatio: 0.8,
+		Diagnostics:     diag,
 	})
 	sess := session.New("sess-compact", session.ModeDefault, "/ws", session.Limits{}, time.Unix(0, 0))
 	bigPrompt := strings.Repeat("word ", 200) // far over the threshold

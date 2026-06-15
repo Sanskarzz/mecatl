@@ -165,40 +165,60 @@ func TestServiceResolvedModelResolverNeverLowers(t *testing.T) {
 	}
 }
 
-// TestServiceResolvedModelResolverDoesNotTouchSelector (issue #66): a per-session
-// SELECTOR session reads se.resolvedModel from its factory; the default-path live
-// overlay must NOT touch the sessionEngines[id] branch even with a resolver wired
-// (the factory already carries the live-first window).
-func TestServiceResolvedModelResolverDoesNotTouchSelector(t *testing.T) {
-	dflt := server.ResolvedModel{ProviderID: "openrouter", ModelID: "openai/gpt-5.5", ContextWindow: 0}
-	// A resolver that would return a DIFFERENT window if (wrongly) consulted on the
-	// selector path — proving the overlay is skipped for per-session engines.
-	resolve := func(_, _ string) int64 { return 999_999 }
+// TestServiceResolvedModelSelectorLiveFirst is the SELECTOR-PATH resolve-at-use guard
+// (the exact path the band-aids missed): a per-session SELECTOR session's echo window
+// is resolved LIVE-FIRST at call time via Config.ResolveContextWindow over the SAME
+// (provider, model) identity the factory registered — NOT a create-time frozen scalar.
+// A selector that resolves to 0 at create time (live-only model, pre-swap) and to the
+// live window after the catalog swap HEALS on the next ResolvedModel read, with no
+// engine rebuild — proving the frozen per-session ContextWindow field is gone.
+func TestServiceResolvedModelSelectorLiveFirst(t *testing.T) {
+	dflt := server.ResolvedModel{ProviderID: "openai", ModelID: "gpt-default", ContextWindow: 128000}
+	const liveWindow = 1_050_000
 	perSession := agent.NewEngine(agent.Deps{
 		LLM:     mockllm.New(mockllm.TextTurn("PER-SESSION")),
 		Catalog: tool.NewCatalog(),
 		Policy:  permpolicy.NewPolicy(nil, nil),
-		Model:   "anthropic/claude-opus-4.5",
+		Model:   "openai/gpt-5.5",
 	})
 	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		return server.SessionEngineResult{
-			Engine:        perSession,
-			ProviderID:    sel.ProviderID,
-			ModelID:       sel.ModelID,
-			ContextWindow: 200000,
-			Close:         func() error { return nil },
+			Engine:     perSession,
+			ProviderID: sel.ProviderID,
+			ModelID:    sel.ModelID,
+			Close:      func() error { return nil },
 		}, nil
+	}
+	// A mutable live window: 0 pre-swap (live-only model, catalog floor), liveWindow
+	// after the swap. The resolver is consulted on EVERY ResolvedModel call (resolve-
+	// at-use), so the echo heals without any rebuild.
+	live := int64(0)
+	resolve := func(p, m string) int64 {
+		if p == "openrouter" && m == "openai/gpt-5.5" {
+			return live
+		}
+		return 0
 	}
 	svc := newResolvedModelServiceWithResolver(t, dflt, factory, resolve)
 
-	sel := server.ProviderSelector{ProviderID: "anthropic", ModelID: "claude-opus-4.5"}
+	sel := server.ProviderSelector{ProviderID: "openrouter", ModelID: "openai/gpt-5.5"}
 	sess, err := svc.CreateSessionWithProvider(context.Background(), "/ws", session.ModeDefault, session.Limits{}, sel)
 	if err != nil {
 		t.Fatalf("CreateSessionWithProvider: %v", err)
 	}
-	want := server.ResolvedModel{ProviderID: "anthropic", ModelID: "claude-opus-4.5", ContextWindow: 200000}
-	if got := svc.ResolvedModel(sess.ID); got != want {
-		t.Fatalf("per-session ResolvedModel = %+v, want the factory %+v (resolver must NOT overlay the selector branch)", got, want)
+	// Pre-swap: the live-only selector resolves to 0 (the frozen-scalar bug would echo
+	// 0 forever).
+	if got := svc.ResolvedModel(sess.ID); got.ContextWindow != 0 {
+		t.Fatalf("pre-swap selector echo ContextWindow = %d, want 0 (live-only, pre-swap)", got.ContextWindow)
+	}
+	// THE SWAP: the live catalog now reports the window.
+	live = liveWindow
+	got := svc.ResolvedModel(sess.ID)
+	if got.ContextWindow != liveWindow {
+		t.Fatalf("post-swap selector echo ContextWindow = %d, want the live %d (resolve-at-use — NO rebuild)", got.ContextWindow, liveWindow)
+	}
+	if got.ProviderID != "openrouter" || got.ModelID != "openai/gpt-5.5" {
+		t.Fatalf("selector identity = %s/%s, want the verbatim openrouter/openai/gpt-5.5", got.ProviderID, got.ModelID)
 	}
 }
 
@@ -225,8 +245,10 @@ func TestServiceResolvedModelDefaultPath(t *testing.T) {
 }
 
 // TestServiceResolvedModelPerSession: an explicit selector registers a per-session
-// engine carrying the factory's resolved ProviderID/ModelID/ContextWindow, and
-// ResolvedModel returns THAT (not the default). After CloseSession evicts the
+// engine carrying the factory's resolved ProviderID/ModelID IDENTITY; the context
+// WINDOW is resolved LIVE-FIRST at echo time via the SAME Config.ResolveContextWindow
+// the engine reads (the resolve-at-use unification), so ResolvedModel returns the
+// resolved identity + the live window (not the default). After CloseSession evicts the
 // per-session engine, it falls back to the default.
 func TestServiceResolvedModelPerSession(t *testing.T) {
 	dflt := server.ResolvedModel{ProviderID: "openai", ModelID: "gpt-default", ContextWindow: 128000}
@@ -238,14 +260,21 @@ func TestServiceResolvedModelPerSession(t *testing.T) {
 	})
 	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		return server.SessionEngineResult{
-			Engine:        perSession,
-			ProviderID:    sel.ProviderID,
-			ModelID:       sel.ModelID,
-			ContextWindow: 200000,
-			Close:         func() error { return nil },
+			Engine:     perSession,
+			ProviderID: sel.ProviderID,
+			ModelID:    sel.ModelID,
+			Close:      func() error { return nil },
 		}, nil
 	}
-	svc := newResolvedModelService(t, dflt, factory)
+	// The resolver supplies the live-first window for the selected model — the SAME
+	// source the engine reads, so the per-session echo carries it.
+	resolve := func(p, m string) int64 {
+		if p == "anthropic" && m == "claude-opus-4.5" {
+			return 200000
+		}
+		return 0
+	}
+	svc := newResolvedModelServiceWithResolver(t, dflt, factory, resolve)
 
 	sel := server.ProviderSelector{ProviderID: "anthropic", ModelID: "claude-opus-4.5"}
 	sess, err := svc.CreateSessionWithProvider(context.Background(), "/ws", session.ModeDefault, session.Limits{}, sel)
@@ -270,14 +299,24 @@ func TestGRPCCreateSessionEchoesResolvedModel(t *testing.T) {
 	dflt := server.ResolvedModel{ProviderID: "openai", ModelID: "gpt-default", ContextWindow: 128000}
 	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		return server.SessionEngineResult{
-			Engine:        agent.NewEngine(agent.Deps{LLM: mockllm.New(mockllm.TextTurn("X")), Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "m"}),
-			ProviderID:    sel.ProviderID,
-			ModelID:       sel.ModelID,
-			ContextWindow: 200000,
-			Close:         func() error { return nil },
+			Engine:     agent.NewEngine(agent.Deps{LLM: mockllm.New(mockllm.TextTurn("X")), Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "m"}),
+			ProviderID: sel.ProviderID,
+			ModelID:    sel.ModelID,
+			Close:      func() error { return nil },
 		}, nil
 	}
-	svc := newResolvedModelService(t, dflt, factory)
+	// The resolver supplies BOTH the default window (gpt-default → 128000) and the
+	// selector window (anthropic/claude-opus-4.5 → 200000), live-first for either branch.
+	resolve := func(p, m string) int64 {
+		switch {
+		case p == "openai" && m == "gpt-default":
+			return 128000
+		case p == "anthropic" && m == "claude-opus-4.5":
+			return 200000
+		}
+		return 0
+	}
+	svc := newResolvedModelServiceWithResolver(t, dflt, factory, resolve)
 	h := server.NewHarnessServer(svc)
 
 	t.Run("default selector echoes the composition default", func(t *testing.T) {
@@ -318,14 +357,19 @@ func TestGRPCGetSessionEchoesResolvedModel(t *testing.T) {
 	dflt := server.ResolvedModel{ProviderID: "openai", ModelID: "gpt-default", ContextWindow: 128000}
 	factory := func(_ context.Context, sel server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
 		return server.SessionEngineResult{
-			Engine:        agent.NewEngine(agent.Deps{LLM: mockllm.New(mockllm.TextTurn("X")), Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "m"}),
-			ProviderID:    sel.ProviderID,
-			ModelID:       sel.ModelID,
-			ContextWindow: 200000,
-			Close:         func() error { return nil },
+			Engine:     agent.NewEngine(agent.Deps{LLM: mockllm.New(mockllm.TextTurn("X")), Catalog: tool.NewCatalog(), Policy: permpolicy.NewPolicy(nil, nil), Model: "m"}),
+			ProviderID: sel.ProviderID,
+			ModelID:    sel.ModelID,
+			Close:      func() error { return nil },
 		}, nil
 	}
-	svc := newResolvedModelService(t, dflt, factory)
+	resolve := func(p, m string) int64 {
+		if p == "anthropic" && m == "claude-opus-4.5" {
+			return 200000
+		}
+		return 0
+	}
+	svc := newResolvedModelServiceWithResolver(t, dflt, factory, resolve)
 	h := server.NewHarnessServer(svc)
 
 	createResp, err := h.CreateSession(context.Background(), &mecatlv1.CreateSessionRequest{
@@ -343,190 +387,5 @@ func TestGRPCGetSessionEchoesResolvedModel(t *testing.T) {
 	rm := getResp.GetSession().GetResolvedModel()
 	if rm.GetProviderId() != "anthropic" || rm.GetModelId() != "claude-opus-4.5" || rm.GetContextWindow() != 200000 {
 		t.Fatalf("Session snapshot resolved_model = %+v, want the Service-resolved anthropic/claude-opus-4.5/200000 (handler must thread Service.ResolvedModel, not zero)", rm)
-	}
-}
-
-// liveWindowEngineFactory returns a SessionEngineFactory that builds a REAL engine
-// whose ContextWindowTokens == win (so Engine.ContextWindow() is directly
-// observable), recording each call in *calls. It models the composition factory's
-// post-swap behaviour: the rebuilt engine carries the live window. reply scripts the
-// engine's single turn so a driven run is observable. The result echoes win on
-// ContextWindow too (the factory sets both from the same resolved local upstream).
-func liveWindowEngineFactory(provider *mockllm.Provider, providerID, modelID string, win int64, calls *int) server.SessionEngineFactory {
-	return func(_ context.Context, _ server.ProviderSelector, _ []mcp.ServerConfig, _ server.SessionProfile, _ string) (server.SessionEngineResult, error) {
-		*calls++
-		eng := agent.NewEngine(agent.Deps{
-			LLM:                 provider,
-			Catalog:             tool.NewCatalog(),
-			Policy:              permpolicy.NewPolicy(nil, nil),
-			Model:               modelID,
-			ContextWindowTokens: int(win),
-		})
-		return server.SessionEngineResult{
-			Engine:        eng,
-			ProviderID:    providerID,
-			ModelID:       modelID,
-			ContextWindow: win,
-			Close:         func() error { return nil },
-		}, nil
-	}
-}
-
-// TestRehydratedDefaultEngineWindowIsLive is the DIRECT engine-window assertion
-// (issue #66 engine-window fix, review finding 2): after a live-only default session
-// rehydrates, the per-session engine's ACTUAL compaction window —
-// Engine.ContextWindow(), the value maybeCompact divides by CompactionRatio — is the
-// live window, not the build-time baked floor. The app-level proxy test reads
-// se.resolvedModel.ContextWindow; THIS reads the engine's own Deps.ContextWindowTokens
-// via the export_test accessor, so a future floor/cap change that diverged the echo
-// from the engine would be caught here.
-func TestRehydratedDefaultEngineWindowIsLive(t *testing.T) {
-	const (
-		liveModel  = "openai/gpt-5.5"
-		liveWindow = 1_050_000
-		bakedFloor = 128_000
-	)
-	provider := mockllm.New(mockllm.TextTurn("REHYDRATED"))
-	var calls int
-	factory := liveWindowEngineFactory(provider, "openrouter", liveModel, liveWindow, &calls)
-
-	shared := agent.NewEngine(agent.Deps{
-		LLM:                 mockllm.New(mockllm.TextTurn("SHARED")),
-		Catalog:             tool.NewCatalog(),
-		Policy:              permpolicy.NewPolicy(nil, nil),
-		Model:               liveModel,
-		ContextWindowTokens: bakedFloor,
-	})
-	svc, err := server.NewService(server.Config{
-		Engine:               shared,
-		Store:                memstore.New(),
-		Workspaces:           func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
-		DefaultLimits:        session.Limits{MaxTurns: 5},
-		Now:                  func() time.Time { return time.Unix(0, 0) },
-		SessionEngine:        factory,
-		DefaultResolvedModel: server.ResolvedModel{ProviderID: "openrouter", ModelID: liveModel, ContextWindow: bakedFloor},
-		// The live resolver reports the live window (the post-swap state) — strictly
-		// greater than the baked floor, so defaultSessionNeedsLiveWindow fires.
-		ResolveContextWindow: func(_, _ string) int64 { return liveWindow },
-	})
-	if err != nil {
-		t.Fatalf("NewService: %v", err)
-	}
-
-	sess, err := svc.CreateSession(context.Background(), "/work/win", session.ModeDefault, session.Limits{})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	run, err := svc.StartRunContent(context.Background(), sess.ID, "turn", nil)
-	if err != nil {
-		t.Fatalf("StartRunContent: %v", err)
-	}
-	if got := drainServerRun(run); got != "REHYDRATED" {
-		t.Fatalf("reply = %q, want REHYDRATED (the rehydrated per-session engine)", got)
-	}
-
-	win, registered := svc.SessionEngineContextWindowForTest(sess.ID)
-	if !registered {
-		t.Fatal("no per-session engine registered after the run (the live-only default session must have rehydrated)")
-	}
-	if win != liveWindow {
-		t.Fatalf("rehydrated Engine.ContextWindow() = %d, want the live %d (the engine compacts at THIS value; %d would be the baked floor)", win, liveWindow, bakedFloor)
-	}
-}
-
-// TestRehydratedDefaultEngineRehydratesExactlyOnce pins the CRITICAL idempotency
-// property (review finding 1): a live-only default session rehydrates EXACTLY ONCE,
-// then rides the per-session engine on every subsequent run — it must NOT re-mint a
-// fresh per-session engine (+ MCP manager + close func) per run-entry, which would
-// leak engines/managers for the life of the session. The `!hasEngine` short-circuit
-// in Service.engineAndWorkspaceFor is what stops the gate re-evaluating once an
-// engine is registered.
-//
-// MUTATION-VERIFY: removing the `!hasEngine &&` short-circuit (so the gate
-// re-evaluates defaultSessionNeedsLiveWindow on every run-entry) makes the factory
-// fire a SECOND time on the second post-swap run and fails this test.
-func TestRehydratedDefaultEngineRehydratesExactlyOnce(t *testing.T) {
-	const (
-		liveModel  = "openai/gpt-5.5"
-		liveWindow = 1_050_000
-		bakedFloor = 128_000
-	)
-	// Two scripted turns on the per-session engine (the two post-swap runs); the
-	// pre-swap run rides the shared engine.
-	provider := mockllm.New(mockllm.TextTurn("POST-1"), mockllm.TextTurn("POST-2"))
-	var calls int
-	factory := liveWindowEngineFactory(provider, "openrouter", liveModel, liveWindow, &calls)
-
-	// The live window starts EQUAL to the baked floor (pre-swap state: no live entry,
-	// resolver floors to baked) and flips to the live value (post-swap) via the toggle.
-	live := int64(bakedFloor)
-	shared := agent.NewEngine(agent.Deps{
-		LLM:                 mockllm.New(mockllm.TextTurn("PRE")),
-		Catalog:             tool.NewCatalog(),
-		Policy:              permpolicy.NewPolicy(nil, nil),
-		Model:               liveModel,
-		ContextWindowTokens: bakedFloor,
-	})
-	svc, err := server.NewService(server.Config{
-		Engine:               shared,
-		Store:                memstore.New(),
-		Workspaces:           func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
-		DefaultLimits:        session.Limits{MaxTurns: 5},
-		Now:                  func() time.Time { return time.Unix(0, 0) },
-		SessionEngine:        factory,
-		DefaultResolvedModel: server.ResolvedModel{ProviderID: "openrouter", ModelID: liveModel, ContextWindow: bakedFloor},
-		ResolveContextWindow: func(_, _ string) int64 { return live },
-	})
-	if err != nil {
-		t.Fatalf("NewService: %v", err)
-	}
-
-	sess, err := svc.CreateSession(context.Background(), "/work/once", session.ModeDefault, session.Limits{})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-
-	// Pre-swap run: live == baked ⇒ no rehydration, shared engine, factory untouched.
-	run0, err := svc.StartRunContent(context.Background(), sess.ID, "pre", nil)
-	if err != nil {
-		t.Fatalf("StartRunContent (pre-swap): %v", err)
-	}
-	if got := drainServerRun(run0); got != "PRE" {
-		t.Fatalf("pre-swap reply = %q, want PRE (shared engine)", got)
-	}
-	if calls != 0 {
-		t.Fatalf("factory called %d times pre-swap, want 0 (shared engine)", calls)
-	}
-
-	// THE SWAP: the live window now exceeds the baked floor.
-	live = liveWindow
-
-	// First post-swap run: rehydrates exactly once.
-	run1, err := svc.StartRunContent(context.Background(), sess.ID, "post-1", nil)
-	if err != nil {
-		t.Fatalf("StartRunContent (post-swap 1): %v", err)
-	}
-	if got := drainServerRun(run1); got != "POST-1" {
-		t.Fatalf("post-swap-1 reply = %q, want POST-1 (rehydrated engine)", got)
-	}
-	if calls != 1 {
-		t.Fatalf("factory called %d times after the FIRST post-swap run, want exactly 1 (the one rehydration)", calls)
-	}
-
-	// Second post-swap run: MUST ride the already-registered per-session engine — the
-	// factory is NOT consulted again (no engine re-mint, no MCP-manager leak).
-	run2, err := svc.StartRunContent(context.Background(), sess.ID, "post-2", nil)
-	if err != nil {
-		t.Fatalf("StartRunContent (post-swap 2): %v", err)
-	}
-	if got := drainServerRun(run2); got != "POST-2" {
-		t.Fatalf("post-swap-2 reply = %q, want POST-2 (same per-session engine)", got)
-	}
-	if calls != 1 {
-		t.Fatalf("factory called %d times after the SECOND post-swap run, want STILL exactly 1 (re-minting per run leaks engines/MCP managers — the !hasEngine short-circuit must hold)", calls)
-	}
-	// The engine window is stable across the second run (same engine, no re-mint).
-	if win, ok := svc.SessionEngineContextWindowForTest(sess.ID); !ok || win != liveWindow {
-		t.Fatalf("after the second run Engine.ContextWindow() = %d (registered=%v), want the same %d", win, ok, liveWindow)
 	}
 }

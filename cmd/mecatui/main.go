@@ -151,15 +151,15 @@ func run(args []string) error {
 		// Model is best-effort display only. For an EXTERNAL --server it reflects
 		// the locally-configured --model flag and may NOT match the server's actual
 		// model (the server owns provider config); for an embedded server it is
-		// authoritative. ContextWindow is an OPTIONAL operator OVERRIDE of the footer
-		// meter denominator: 0 (the default) falls through to the server-resolved
-		// per-model window echoed on session create; a non-zero --context-window
-		// forces it. Never inferred from the model name.
-		Model:         cfg.model,
-		ContextWindow: cfg.contextWindow,
-		Workspace:     cfg.workspace,
-		Mode:          cfg.mode,
-		Ctx:           ctx,
+		// authoritative. The footer context-meter denominator is the SERVER-resolved
+		// per-model window echoed on session create (and refreshed on GetSession), now
+		// live-first server-side — there is no client-side override (the operator
+		// escape-hatch is mecated's -context-window-override, which moves both the
+		// engine trigger and this echoed denominator).
+		Model:     cfg.model,
+		Workspace: cfg.workspace,
+		Mode:      cfg.mode,
+		Ctx:       ctx,
 		// Build version for the welcome splash (ldflags-set; "dev" by default).
 		Version: version,
 		// Suppress the rich welcome splash under --no-banner, --quiet, or a
@@ -585,4 +585,8 @@ func (s *sessionAdapter) CreateSession(ctx context.Context, sel client.ModelSele
 
 func (s *sessionAdapter) CloseSession(ctx context.Context, id string) error {
 	return s.cl.CloseSession(ctx, id)
+}
+
+func (s *sessionAdapter) GetSession(ctx context.Context, id string) (client.ResolvedModel, error) {
+	return s.cl.GetSession(ctx, id)
 }

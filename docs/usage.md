@@ -175,7 +175,7 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--no-bash` | `false` | disable the `Bash` tool entirely (shell-less mode); overrides `--shell`. |
 | `--compaction` | `heuristic` | compaction strategy: `heuristic` (single-summary) or `cascade` (tiered snip→strip→collapse→summarize). |
 | `--tokenizer` | `heuristic` | token counter for the compaction trigger: `heuristic` (dependency-free) or `tiktoken` (offline tiktoken vocab). |
-| `--context-window-override` | `0` | override the model's context window (in tokens) used by the compaction trigger — **compaction fires at 80% of it**. The operator use is a **workaround**: set it to the model's **actual** window when the model under-reports its window or sits behind a proxy that does (e.g. `--context-window-override 128000` to pin a proxied 128k model). `0` (the default, **disabled**) keeps the live / catalogued / 128k resolution unchanged. ⚠️ A **small** value (below a few thousand tokens) makes the agent compact on **nearly every turn** — that is a churning, degraded mode useful only for **stress-testing compaction** (and the live e2e, `e2e/compaction_test.go`). This moves the trigger **threshold** only — **orthogonal** to `--compaction` (strategy) and `--tokenizer` (counter); it works identically with either. |
+| `--context-window-override` | `0` | override the model's context window (in tokens) used by the compaction trigger — **compaction fires at 80% of it** — AND the footer context-meter denominator echoed to clients (both move together). The operator use is a **workaround**: set it to the model's **actual** window when the model under-reports its window or sits behind a proxy that does (e.g. `--context-window-override 128000` to pin a proxied 128k model). `0` (the default, **disabled**) keeps the live / catalogued / 128k resolution unchanged. ⚠️ A **small** value (below a few thousand tokens) makes the agent compact on **nearly every turn** — that is a churning, degraded mode useful only for **stress-testing compaction** (and the live e2e, `e2e/compaction_test.go`). This moves the trigger **threshold** (and the echoed denominator) only — **orthogonal** to `--compaction` (strategy) and `--tokenizer` (counter); it works identically with either. |
 | `--store-dir` | `""` | directory for the JSONL session store (empty → in-memory) |
 | `--session-store-url` | `""` | `host:port` of a remote **session-store gRPC driver** (`mecatl.driver.v1.SessionStoreService`); replaces the local store — mutually exclusive with `--store-dir`. **See the store-driver note below.** |
 | `--memory-dir` | `""` | per-project **memory store** directory; setting it enables the `Remember`/`Recall`/`SearchMemory` tools (empty disables them). |
@@ -580,8 +580,12 @@ so a client can hide its picker against an older/empty server. The advertised
 compaction trigger, so a large-context model is not compacted at the 128k default.
 This holds for the configured **default** model too (issue #63): it resolves its real
 window and compacts at that window, not a hardcoded 128k — the 128k floor now applies
-only to a genuinely uncatalogued model. `--context-window-override` still forces a
-fixed window when you need it.
+only to a genuinely uncatalogued model. The window is resolved **live-first at the point
+of use** (one resolver shared by the engine trigger and the `resolved_model` echo), so a
+live-only model whose curated catalog lacks a window self-corrects to its live window
+once the background catalog refresh lands — no engine rebuild. `--context-window-override`
+still forces a fixed window when you need it, and now moves BOTH the compaction trigger
+and the client footer denominator together.
 
 For a provider with **live model listing** (currently **OpenRouter**), the picker
 reflects the provider's **real, live catalog** (~344 models) rather than the curated

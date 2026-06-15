@@ -117,9 +117,6 @@ func TestEffectiveModelDrivesFooterMeter(t *testing.T) {
 		Theme:   theme.New("aztec", theme.AztecPalette()),
 		Ctx:     context.Background(),
 	})
-	if m.deps.ContextWindow != 0 {
-		t.Fatalf("test premise: no --context-window override expected, got %d", m.deps.ContextWindow)
-	}
 	ready := m.createSessionCmd()().(client.SessionReadyMsg)
 	m = applyAll(m,
 		tea.WindowSizeMsg{Width: 160, Height: 30},
@@ -141,9 +138,6 @@ func TestEffectiveModelDrivesFooterMeter(t *testing.T) {
 // move the footer denominator from /200K to /400K with NO --context-window override.
 func TestFooterMeterFollowsModelSwitch(t *testing.T) {
 	m, _, _ := newTestModel(t, theme.New("aztec", theme.AztecPalette()))
-	if m.deps.ContextWindow != 0 {
-		t.Fatalf("test premise: no --context-window override expected, got %d", m.deps.ContextWindow)
-	}
 	// First model: 200K window, 40K occupied.
 	m = applyAll(m,
 		tea.WindowSizeMsg{Width: 160, Height: 30},

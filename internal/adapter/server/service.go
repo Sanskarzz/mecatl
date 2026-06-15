@@ -70,14 +70,16 @@ type SessionEngineResult struct {
 	// Capabilities is the session's resolved input capability (catalog ∩ adapter),
 	// computed in composition. The server echoes it verbatim; it never recomputes.
 	Capabilities port.ProviderCapabilities
-	// ProviderID/ModelID/ContextWindow are the EFFECTIVE provider+model this session
+	// ProviderID/ModelID are the EFFECTIVE provider+model IDENTITY this session
 	// resolved to (the empty-selector default, an explicit selector, or a passthrough
 	// id), computed ONCE in composition from the SAME resolved locals that feed the
 	// engine — the server echoes them verbatim on CreateSessionResponse.resolved_model
-	// and never recomputes. Same single-source discipline as Capabilities.
-	ProviderID    string
-	ModelID       string
-	ContextWindow int64
+	// and never recomputes. Same single-source discipline as Capabilities. The context
+	// WINDOW is NOT a frozen field: Service.ResolvedModel resolves it live-first at echo
+	// time via Config.ResolveContextWindow (the SAME source the engine reads), so the
+	// echo and the running engine agree after a live-catalog swap with no rebuild.
+	ProviderID string
+	ModelID    string
 	// Close tears down the session's MCP manager. Never nil (a no-op when no specs).
 	Close func() error
 }
@@ -359,10 +361,13 @@ type Config struct {
 	// store, or replay not wired) loadAndReopen does nothing extra.
 	ReplayApprovals func(ctx context.Context, sess *session.Session)
 
-	// ResolveContextWindow is a live-first context-window resolver injected by
-	// composition (over reg.meta.contextWindowFor). nil keeps the baked
-	// DefaultResolvedModel.ContextWindow verbatim — the memstore/driver/test paths.
-	// Only the ContextWindow scalar is re-resolved; provider/model identity never
+	// ResolveContextWindow is THE live-first context-window resolver injected by
+	// composition (the SAME reg.windowResolver the engine reads via Deps.ContextWindow,
+	// wrapped to int64: override→live→catalog→128k floor). Service.ResolvedModel
+	// consults it for BOTH the default-session and the per-session-engine branch, so
+	// the wire echo is byte-identical to the engine's resolve-at-use window. nil keeps
+	// the baked DefaultResolvedModel.ContextWindow verbatim — the memstore/driver/test
+	// paths. Only the ContextWindow scalar is resolved; provider/model identity never
 	// recomputes.
 	ResolveContextWindow func(providerID, modelID string) int64
 }
@@ -478,12 +483,15 @@ type sessionEngine struct {
 	// via SessionCapabilities. Never recomputed here — the composition is the single
 	// source so the per-session echo cannot drift from the ListModels view.
 	caps port.ProviderCapabilities
-	// resolvedModel is the session's EFFECTIVE provider+model (catalog/registry
-	// resolution), computed in composition and echoed verbatim on
-	// CreateSessionResponse.resolved_model via ResolvedModel. Never recomputed here —
-	// same single-source discipline as caps.
-	resolvedModel ResolvedModel
-	close         func() error
+	// providerID/modelID are the session's EFFECTIVE provider+model IDENTITY (catalog/
+	// registry resolution), computed in composition and echoed verbatim on
+	// CreateSessionResponse.resolved_model via ResolvedModel. The context WINDOW is NOT
+	// frozen here — ResolvedModel resolves it live-first at call time via the SAME
+	// resolver the engine reads (resolve-at-use), so the echo and the running engine
+	// can never diverge after a live-catalog swap. Same single-source discipline as caps.
+	providerID string
+	modelID    string
+	close      func() error
 }
 
 // runState couples an in-flight *agent.Run with the live *session.Session the
@@ -775,10 +783,11 @@ func (s *Service) createSession(ctx context.Context, workspace string, mode sess
 	// then persist OUTSIDE the lock (no I/O under the mutex). If the persist fails,
 	// evict the reservation and tear the engine down.
 	s.sessionEngines[sess.ID] = &sessionEngine{
-		engine:        eng,
-		caps:          res.Capabilities,
-		resolvedModel: ResolvedModel{ProviderID: res.ProviderID, ModelID: res.ModelID, ContextWindow: res.ContextWindow},
-		close:         closeFn,
+		engine:     eng,
+		caps:       res.Capabilities,
+		providerID: res.ProviderID,
+		modelID:    res.ModelID,
+		close:      closeFn,
 	}
 	if profile == ProfileNoFS {
 		// Register the no-FS Workspace as this session's per-session workspace
@@ -1167,10 +1176,11 @@ func (s *Service) LoadSessionWithMCP(ctx context.Context, id session.SessionID, 
 		_ = prior.close()
 	}
 	s.sessionEngines[id] = &sessionEngine{
-		engine:        res.Engine,
-		caps:          res.Capabilities,
-		resolvedModel: ResolvedModel{ProviderID: res.ProviderID, ModelID: res.ModelID, ContextWindow: res.ContextWindow},
-		close:         res.Close,
+		engine:     res.Engine,
+		caps:       res.Capabilities,
+		providerID: res.ProviderID,
+		modelID:    res.ModelID,
+		close:      res.Close,
 	}
 	if profile == ProfileNoFS {
 		// A no-fs session's workspace override is re-registered with the engine
@@ -1249,7 +1259,7 @@ func (s *Service) engineAndWorkspaceFor(ctx context.Context, sess *session.Sessi
 	se, hasEngine := s.sessionEngines[id]
 	ws := s.sessionWorkspaces[id]
 	s.mu.Unlock()
-	if !hasEngine && (needsRehydration(sess) || s.defaultSessionNeedsLiveWindow(sess)) {
+	if !hasEngine && needsRehydration(sess) {
 		// RESTART REHYDRATION (issue #55, widened in the cloud-native Phase 1): a
 		// PERSISTED session that needed a PER-SESSION engine — a non-default
 		// provider/model selector, OR the no-fs profile — has its engine + (for no-fs)
@@ -1309,44 +1319,6 @@ func needsRehydration(sess *session.Session) bool {
 		sess.Workspace == ""
 }
 
-// defaultSessionNeedsLiveWindow reports whether an otherwise-DEFAULT session (one
-// that would ride the shared engine, i.e. !needsRehydration) must nonetheless
-// rehydrate into a per-session engine so its ENGINE compacts at the LIVE context
-// window rather than the build-time baked floor.
-//
-// It is the ENGINE-window analogue of the issue-#66 ResolvedModel echo overlay: the
-// shared engine bakes its context window at Build, PRE-swap, and never rebuilds it,
-// so a DEFAULT-model session whose model is LIVE-ONLY (present in the live listing
-// but absent from the curated catalog — e.g. an OpenRouter openai/gpt-5.5) would
-// compact at the ~128k curated-catalog floor instead of the model's real (much
-// larger) live window. Rebuilding the engine through the SAME run-entry rehydration
-// seam — over the SAME composition-injected ResolveContextWindow the echo overlay
-// reads — makes the echo and the engine CONVERGE on the live window post-rehydration.
-//
-// It fires ONLY for an otherwise-default session whose live window STRICTLY exceeds
-// the build-time baked window: a catalogued default model (live == baked) never
-// trips it, and a session that already needsRehydration is handled by that trigger
-// (this returns false to avoid double-counting). nil resolver / no factory ⇒ false
-// (the no-overlay deployments — memstore/driver/test — keep the shared engine).
-//
-// PRE-SWAP RACE (accepted, eventually-consistent — mirrors the #66 echo): if the
-// first prompt arrives before the live model-catalog swap, live == baked, so this
-// returns false and that ONE run compacts at the baked floor; the next post-swap run
-// rehydrates. Determinism in tests is forced via the live refresh sync / direct Swap.
-func (s *Service) defaultSessionNeedsLiveWindow(sess *session.Session) bool {
-	if needsRehydration(sess) {
-		// Already handled by the primary trigger; that rebuild picks up the live
-		// window through the same factory. Returning false here avoids OR-ing a
-		// second true onto an already-true condition.
-		return false
-	}
-	if s.cfg.ResolveContextWindow == nil || s.cfg.SessionEngine == nil {
-		return false
-	}
-	live := s.cfg.ResolveContextWindow(s.cfg.DefaultResolvedModel.ProviderID, s.cfg.DefaultResolvedModel.ModelID)
-	return live > s.cfg.DefaultResolvedModel.ContextWindow
-}
-
 // rehydrateSession rebuilds and registers the per-session engine for a persisted
 // session whose in-memory registrations did not survive a process restart. It is
 // called from the run-entry seam (StartRunContent) when needsRehydration is true
@@ -1395,10 +1367,11 @@ func (s *Service) rehydrateSession(ctx context.Context, sess *session.Session) (
 		return nil, fmt.Errorf("server: rehydrate session %q: %w", id, err)
 	}
 	se := &sessionEngine{
-		engine:        res.Engine,
-		caps:          res.Capabilities,
-		resolvedModel: ResolvedModel{ProviderID: res.ProviderID, ModelID: res.ModelID, ContextWindow: res.ContextWindow},
-		close:         res.Close,
+		engine:     res.Engine,
+		caps:       res.Capabilities,
+		providerID: res.ProviderID,
+		modelID:    res.ModelID,
+		close:      res.Close,
 	}
 	s.mu.Lock()
 	if prior, ok := s.sessionEngines[id]; ok {
@@ -1475,34 +1448,31 @@ func (s *Service) SessionCapabilities(id session.SessionID) port.ProviderCapabil
 // The provider/model IDENTITY never recomputes (the per-session-engine value was
 // computed ONCE in composition; the default-path ids are the baked
 // DefaultResolvedModel ids), so the wire echo cannot drift from the engine the
-// session actually runs on. On the DEFAULT path the ContextWindow SCALAR is
-// resolved live-first at call time via the injected Config.ResolveContextWindow (so
-// a GetSession after the live model-catalog swap reflects the live window, not the
+// session actually runs on. The ContextWindow SCALAR is resolved LIVE-FIRST at call
+// time for BOTH branches via the injected Config.ResolveContextWindow (so a
+// GetSession after the live model-catalog swap reflects the live window, not the
 // curated-catalog floor a live-only model lacks) — mirroring the live-first modality
-// input SessionCapabilities already consumes. nil resolver ⇒ the baked window
-// verbatim.
-//
-// CONVERGENCE: once a default session whose live window exceeds the baked floor
-// RUNS, the run-entry seam (engineAndWorkspaceFor / defaultSessionNeedsLiveWindow)
-// rehydrates it into a per-session engine carrying the live window, so this call
-// then takes the per-session-engine branch above — the echo and the ENGINE the
-// session actually runs on agree on the live window. This default-branch overlay
-// therefore covers the PRE-rehydration window (the first read / the pre-swap race)
-// and the no-factory paths; the per-session-engine branch is untouched (it already
-// carries the live-first window from its factory).
+// input SessionCapabilities already consumes, and mirroring the engine's own
+// resolve-at-use Deps.ContextWindow (both feed off the SAME contextWindowFor source,
+// so the echo and the running engine agree without any rehydration trigger). nil
+// resolver ⇒ no window scalar (the identity-only ResolvedModel).
 func (s *Service) ResolvedModel(id session.SessionID) ResolvedModel {
 	s.mu.Lock()
 	se, ok := s.sessionEngines[id]
 	s.mu.Unlock()
-	if ok {
-		return se.resolvedModel
-	}
+	// Identity from the per-session engine when registered (a selector/MCP/rehydrated
+	// session), else the baked default identity. The WINDOW is resolved live-first
+	// below for either branch — the frozen per-session scalar is gone.
 	rm := s.cfg.DefaultResolvedModel
+	if ok {
+		rm = ResolvedModel{ProviderID: se.providerID, ModelID: se.modelID}
+	}
 	if s.cfg.ResolveContextWindow != nil {
 		// Overlay the live-first window; provider/model identity stays verbatim.
-		// The resolver floors to the curated catalog internally, so it never
-		// lowers a catalogued window — for a live-only model it is the only
-		// non-zero source. A zero (not-yet-swapped / unknown) keeps the baked seed.
+		// The resolver floors to the curated catalog (and honours the operator
+		// override) internally, so it is the single source the engine reads too.
+		// A zero (not-yet-swapped / unknown) keeps the baked seed (default branch
+		// only — the per-session branch starts from a zero window).
 		if w := s.cfg.ResolveContextWindow(rm.ProviderID, rm.ModelID); w > 0 {
 			rm.ContextWindow = w
 		}

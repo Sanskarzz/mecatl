@@ -676,10 +676,10 @@ func TestCompactionDuringLiveBackgroundChild(t *testing.T) {
 		mockllm.TextTurn("parent done"),
 	)
 	e := newEngine(agent.Deps{
-		LLM:                 parentLLM,
-		Catalog:             catalogWith(t, task, agent.NewSubagentStatusTool(), &probeTool{out: big}),
-		Compactor:           agent.HeuristicCompactor{KeepLastTurns: 3},
-		ContextWindowTokens: 200, // threshold 160 tokens ≈ 640 chars: trips after one big probe
+		LLM:           parentLLM,
+		Catalog:       catalogWith(t, task, agent.NewSubagentStatusTool(), &probeTool{out: big}),
+		Compactor:     agent.HeuristicCompactor{KeepLastTurns: 3},
+		ContextWindow: func() int { return 200 }, // threshold 160 tokens ≈ 640 chars: trips after one big probe
 	})
 	sess := newSession(t, session.Limits{})
 	r := e.Run(context.Background(), sess, memfs.NewWorkspace("/ws"), "go")

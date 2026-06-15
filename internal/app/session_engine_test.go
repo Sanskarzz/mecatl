@@ -92,8 +92,8 @@ func TestBaseEngineDepsCarriesFullCollaboratorSet(t *testing.T) {
 	// The fixture's "test-model" is not in the catalog, so the default path falls
 	// back to the 128k floor — the genuinely-unknown case (issue #63). A CATALOGUED
 	// default model's real window is exercised by TestBaseEngineDepsResolvesDefaultModelWindow.
-	if deps.ContextWindowTokens != defaultContextWindowTokens {
-		t.Fatalf("ContextWindowTokens = %d, want %d (uncatalogued model floor)", deps.ContextWindowTokens, defaultContextWindowTokens)
+	if deps.ContextWindow() != defaultContextWindowTokens {
+		t.Fatalf("ContextWindowTokens = %d, want %d (uncatalogued model floor)", deps.ContextWindow(), defaultContextWindowTokens)
 	}
 	if deps.CompactionRatio != defaultCompactionRatio {
 		t.Fatalf("CompactionRatio = %v, want %v", deps.CompactionRatio, defaultCompactionRatio)
@@ -115,8 +115,8 @@ func TestBaseEngineDepsResolvesDefaultModelWindow(t *testing.T) {
 	deps := baseEngineDeps(cfg, reg, provider, memstore.New(),
 		permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{})
 
-	if deps.ContextWindowTokens != gpt55Ctx {
-		t.Fatalf("default-model ContextWindowTokens = %d, want %d (issue #63: real per-model window, not the 128k floor)", deps.ContextWindowTokens, gpt55Ctx)
+	if deps.ContextWindow() != gpt55Ctx {
+		t.Fatalf("default-model ContextWindowTokens = %d, want %d (issue #63: real per-model window, not the 128k floor)", deps.ContextWindow(), gpt55Ctx)
 	}
 }
 
@@ -132,8 +132,8 @@ func TestBaseEngineDepsContextWindowOverrideWins(t *testing.T) {
 	deps := baseEngineDeps(cfg, reg, provider, memstore.New(),
 		permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{})
 
-	if deps.ContextWindowTokens != override {
-		t.Fatalf("ContextWindowTokens = %d, want the override %d (operator knob must win over the resolved 1,050,000 window)", deps.ContextWindowTokens, override)
+	if deps.ContextWindow() != override {
+		t.Fatalf("ContextWindowTokens = %d, want the override %d (operator knob must win over the resolved 1,050,000 window)", deps.ContextWindow(), override)
 	}
 }
 
@@ -148,8 +148,8 @@ func TestBaseEngineDepsUnknownModelFloors(t *testing.T) {
 	deps := baseEngineDeps(cfg, reg, provider, memstore.New(),
 		permpolicy.NewPolicy(defaultRules(), nil), hookexec.New(nil), nil, prompt.RootAssembler{})
 
-	if deps.ContextWindowTokens != defaultContextWindowTokens {
-		t.Fatalf("unknown-model ContextWindowTokens = %d, want the %d floor", deps.ContextWindowTokens, defaultContextWindowTokens)
+	if deps.ContextWindow() != defaultContextWindowTokens {
+		t.Fatalf("unknown-model ContextWindowTokens = %d, want the %d floor", deps.ContextWindow(), defaultContextWindowTokens)
 	}
 }
 
@@ -343,6 +343,100 @@ func TestSessionEngineFactoryContextWindowFromCatalog(t *testing.T) {
 	defer func() { _ = closePT() }()
 	if got := engPT.ContextWindow(); got != defaultContextWindowTokens {
 		t.Fatalf("passthrough ContextWindowTokens = %d, want the %d default fallback", got, defaultContextWindowTokens)
+	}
+}
+
+// TestSelectorEngineWindowSelfCorrectsAtUse is THE bug the per-path band-aids missed:
+// a SELECTOR session's per-session engine resolves its compaction window LIVE at the
+// point of use, so a live-catalog Swap AFTER the engine is built self-corrects the
+// SAME engine WITHOUT a rebuild. The selector model is live-only (catalog floor 0 → the
+// engine reports the 128k floor pre-swap); after Swap'ing a 1,050,000 live entry, the
+// SAME engine's ContextWindow() jumps to 1,050,000.
+//
+// MUTATION-VERIFY: revert the engine to a frozen window (resolve once in
+// engineDepsForProvider / read once in NewEngine) and the post-Swap read below stays
+// at the 128k floor — this fails.
+func TestSelectorEngineWindowSelfCorrectsAtUse(t *testing.T) {
+	const (
+		liveModel  = "openai/gpt-5.5" // live-only: NOT in the embedded catalog
+		liveWindow = 1_050_000
+	)
+	cfg := Config{Model: "default-model"}
+	oa := mockllm.New(mockllm.TextTurn("OPENAI-REPLY"))
+	meta := newLiveMetaStore() // catalog-only: NO entry for the live-only model
+	reg := &providerRegistry{
+		entries:   map[string]providerEntry{providerOpenAI: {id: providerOpenAI, provider: oa, available: true}},
+		defaultID: providerOpenAI,
+		meta:      meta,
+	}
+	store := memstore.New()
+	policy := permpolicy.NewPolicy(defaultRules(), nil)
+	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+
+	res, err := factory(context.Background(),
+		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: liveModel}, nil, server.ProfileDefault, "")
+	if err != nil {
+		t.Fatalf("factory(selector): %v", err)
+	}
+	eng, closeFn := res.Engine, res.Close
+	defer func() { _ = closeFn() }()
+
+	// Pre-swap: the live-only model is uncatalogued → the resolver floors to 128k.
+	if got := eng.ContextWindow(); got != defaultContextWindowTokens {
+		t.Fatalf("pre-swap selector engine ContextWindow() = %d, want the %d floor (live-only model)", got, defaultContextWindowTokens)
+	}
+
+	// THE LIVE SWAP, AFTER the engine was built. The SAME engine must self-correct.
+	reg.meta.Swap(map[string][]modelEntry{
+		providerOpenAI: {{ID: liveModel, ContextLimit: liveWindow}},
+	})
+	if got := eng.ContextWindow(); got != liveWindow {
+		t.Fatalf("post-swap selector engine ContextWindow() = %d, want the live %d WITHOUT a rebuild (resolve-at-use)", got, liveWindow)
+	}
+}
+
+// TestSharedAndSelectorEngineResolveSameSource is the anti-drift guard: the SHARED
+// (default) engine and a SELECTOR engine for the SAME model both resolve their
+// compaction window through the SAME live-first contextWindowFor source — so mutating
+// the live store moves BOTH. A regression that gave one a frozen window and the other a
+// live one would diverge here.
+func TestSharedAndSelectorEngineResolveSameSource(t *testing.T) {
+	const (
+		model      = "openai/gpt-5.5"
+		liveWindow = 900_000
+	)
+	cfg := Config{Model: model} // the DEFAULT model is the same live-only model
+	oa := mockllm.New(mockllm.TextTurn("REPLY"))
+	meta := newLiveMetaStore()
+	reg := &providerRegistry{
+		entries:      map[string]providerEntry{providerOpenAI: {id: providerOpenAI, provider: oa, available: true}},
+		defaultID:    providerOpenAI,
+		defaultModel: model,
+		meta:         meta,
+	}
+	store := memstore.New()
+	policy := permpolicy.NewPolicy(defaultRules(), nil)
+
+	shared := agent.NewEngine(baseEngineDeps(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}))
+	factory := sessionEngineFactory(cfg, reg, oa, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+	res, err := factory(context.Background(),
+		server.ProviderSelector{ProviderID: providerOpenAI, ModelID: model}, nil, server.ProfileDefault, "")
+	if err != nil {
+		t.Fatalf("factory(selector): %v", err)
+	}
+	defer func() { _ = res.Close() }()
+	selector := res.Engine
+
+	// Both floor pre-swap.
+	if sw, se := shared.ContextWindow(), selector.ContextWindow(); sw != defaultContextWindowTokens || se != defaultContextWindowTokens {
+		t.Fatalf("pre-swap windows shared=%d selector=%d, want both %d", sw, se, defaultContextWindowTokens)
+	}
+	// One Swap moves BOTH (same source).
+	reg.meta.Swap(map[string][]modelEntry{
+		providerOpenAI: {{ID: model, ContextLimit: liveWindow}},
+	})
+	if sw, se := shared.ContextWindow(), selector.ContextWindow(); sw != liveWindow || se != liveWindow {
+		t.Fatalf("post-swap windows shared=%d selector=%d, want both the live %d (one contextWindowFor source feeds both)", sw, se, liveWindow)
 	}
 }
 

@@ -236,12 +236,12 @@ AND client-provided streaming-HTTP MCP servers (orthogonal inputs → ONE engine
 catalog). The composition factory resolves the selector against the registry and builds
 Deps via **`engineDepsForProvider`**, which re-derives EVERY provider/model-closing
 field — LLM, Compactor, Model, model-keyed TokenCounter, `PromptConfig.Env.Model`, and
-the **`ContextWindowTokens`** (resolved live-first via `reg.meta.contextWindowFor`,
-catalog floor, for the selected model so the compaction trigger AGREES with the
-`ListModels`-advertised `context_limit`; only a genuinely uncatalogued passthrough model
-falls back to the 128k default). The DEFAULT model resolves through the SAME
-`contextWindowFor` (`baseEngineDeps`, issue #63) — it is no longer pinned to the 128k
-floor. This is the cross-provider contamination guard: a shallow clone swapping only the
+the **`Deps.ContextWindow` resolver** (a `func() int` built by `reg.windowResolver` —
+override→live→catalog→128k floor — and read live at the point of use, so the compaction
+trigger AGREES with the `ListModels`-advertised `context_limit` and self-corrects after
+a live-catalog swap with no rebuild; only a genuinely uncatalogued passthrough model
+falls back to the 128k default). The DEFAULT model resolves through the SAME resolver
+(`baseEngineDeps`, issue #63) — it is no longer pinned to the 128k floor. This is the cross-provider contamination guard: a shallow clone swapping only the
 LLM would compact and count through the wrong model.
 
 **Per-session catalog = the FULL shared-catalog formula, assembled by the SAME
@@ -397,71 +397,62 @@ passthrough** for a non-catalogued selector. The server therefore echoes the EFF
   from an older server ⇒ the client falls back to today's behavior (no model segment in
   the header).
 - composition (`internal/app/build.go`): the per-session factory returns the resolved
-  `ProviderID`/`ModelID`/`ContextWindow` on `SessionEngineResult` from the SAME locals
-  that built the engine (`resolvedProviderID`/`resolvedModel`/`contextWindow`) — never
-  recomputed; the zero-selector default's effective model is `Config.DefaultResolvedModel`
-  (the registry default provider + the resolved `cfg.Model` + the catalog context window),
-  set once in `Build` next to `DefaultCapabilities`.
-- server (`internal/adapter/server`): stored on `sessionEngine.resolvedModel`;
-  `Service.ResolvedModel(id)` mirrors `Service.SessionCapabilities(id)` (per-session
-  value when registered, else `Config.DefaultResolvedModel`). Echoed in `grpc.go`
-  CreateSession + `toProtoSession` and in `http.go`'s JSON response — always from
-  `Service.ResolvedModel(id)`, NEVER read back off `req.GetModelId()`. The
-  provider/model IDENTITY is verbatim, but on the DEFAULT path the `ContextWindow`
-  SCALAR is resolved **live-first at call time** via the injected
-  `Config.ResolveContextWindow` (a closure over `reg.meta.contextWindowFor`; nil keeps
-  the baked window verbatim) — issue #66. The baked `DefaultResolvedModel.ContextWindow`
-  is therefore the live-first window's **t=0 SEED** (the catalog window at `Build`,
-  before the live `Swap`); a DEFAULT session on a model the live listing has but the
-  curated catalog lacks (e.g. OpenRouter `openai/gpt-5.5`) bakes 0 and would lose its
-  footer bar, but the call-time overlay re-resolves the live window so a subsequent
-  `GetSession` reflects it. The resolver floors to the catalog, so it never LOWERS a
-  catalogued window; it only fills in a missing one. The per-session-engine branch is
-  untouched (its factory already carried the live-first `contextWindow`).
+  `ProviderID`/`ModelID` IDENTITY on `SessionEngineResult` from the SAME locals that
+  built the engine (`resolvedProviderID`/`resolvedModel`) — never recomputed; the
+  context WINDOW is no longer a frozen result field. The zero-selector default's
+  effective model is `Config.DefaultResolvedModel` (the registry default provider + the
+  resolved `cfg.Model`), set once in `Build` next to `DefaultCapabilities`.
+- server (`internal/adapter/server`): the IDENTITY is stored on
+  `sessionEngine.{providerID,modelID}`; `Service.ResolvedModel(id)` mirrors
+  `Service.SessionCapabilities(id)` (per-session identity when registered, else
+  `Config.DefaultResolvedModel`). Echoed in `grpc.go` CreateSession + `toProtoSession`
+  and in `http.go`'s JSON response — always from `Service.ResolvedModel(id)`, NEVER read
+  back off `req.GetModelId()`. The provider/model IDENTITY is verbatim; the
+  `ContextWindow` SCALAR is resolved **live-first at call time for BOTH branches** via
+  the injected `Config.ResolveContextWindow` (issue #66) — and that closure is the SAME
+  `reg.windowResolver` the engine reads via `Deps.ContextWindow`, so the echo and the
+  running engine resolve the window from ONE source and cannot diverge. A DEFAULT or
+  selector session on a model the live listing has but the curated catalog lacks (e.g.
+  OpenRouter `openai/gpt-5.5`) reads the 128k floor pre-swap and self-heals to the live
+  window on the next `GetSession` post-swap; the resolver floors to the catalog (never
+  LOWERING a catalogued window) and honours the operator `--context-window-override`
+  (which wins for both echo and engine).
   **Self-heal-on-refresh trade-off:** a session created in the ~few-hundred-ms before
-  the live swap lands still echoes the t=0 seed (0 for a live-only model) on its
-  `CreateSessionResponse`; a later `GetSession` self-heals once the swap is in. No
-  push/event/TUI-refetch is added — the next snapshot read is honest.
+  the live swap lands still echoes the t=0 floor on its `CreateSessionResponse`; a later
+  `GetSession` self-heals once the swap is in. No push/event/TUI-refetch is added — the
+  next snapshot read is honest.
 
-#### The ENGINE-window half: rehydration extension (issue #66)
+#### The ENGINE-window half: resolve-at-use (issue #66, unification)
 
-The echo overlay above fixes only what `GetSession` *reports*. The default session's
-**ENGINE** still bakes its compaction window at `Build`, PRE-swap, and never rebuilds
-it (the shared main engine is built once) — so a DEFAULT-model session whose model is
-**live-only** (in the live listing, absent from the curated catalog — e.g. OpenRouter
-`openai/gpt-5.5`) would keep *compacting* at the ~128k build-time floor even after the
-swap, while the echo reports the real ~1M window. Echo and engine **diverge**.
+The echo resolver above fixes only what `GetSession` *reports*. The shared (default)
+engine is built once at `Build`, PRE-swap, and never rebuilds — so a frozen
+construction-time window would keep *compacting* a **live-only** default model (in the
+live listing, absent from the curated catalog — e.g. OpenRouter `openai/gpt-5.5`) at
+the ~128k floor even after the swap, while the echo reports the real ~1M window. Echo
+and engine would **diverge**.
 
-The fix reuses the existing run-entry **rehydration seam** rather than adding a new
-mechanism. `Service.engineAndWorkspaceFor` (the single resolution point shared by the
-prompt run-entry and the awaiting-approval re-entry) gates rehydration on
-`needsRehydration(sess) || s.defaultSessionNeedsLiveWindow(sess)`. The new predicate
-`Service.defaultSessionNeedsLiveWindow` fires ONLY for an otherwise-default session
-(it early-returns false when `needsRehydration` is already true, to avoid
-double-triggering) whose live window — read via the SAME injected
-`Config.ResolveContextWindow` the echo overlay uses — **strictly exceeds** the
-build-time baked `DefaultResolvedModel.ContextWindow`. A catalogued default model
-(live == baked) never trips it; a nil resolver / no `SessionEngine` factory returns
-false (the memstore/driver/test paths keep the shared engine). Rehydration runs
-through the unchanged `rehydrateSession` default-case path: empty selector +
-`ProfileDefault` + real workspace ⇒ the factory's zero-selector path, whose
-`contextWindow := reg.meta.contextWindowFor(reg.Default(), cfg.Model)` (LIVE-FIRST —
-the load-bearing build.go change) feeds the rebuilt engine's `ContextWindowTokens`
-AND the echoed `SessionEngineResult.ContextWindow`.
+The fix is structural: `Deps.ContextWindow` is a `func() int` resolver, NOT a frozen
+scalar, resolved at the **point of use** (every `Engine.maybeCompact` /
+`Engine.ContextWindow`). Composition builds it via `reg.windowResolver(cfg, provider,
+model)` — the ONE place the **override → live → catalog → 128k-floor** precedence lives
+— and threads it onto EVERY engine: the shared engine (`baseEngineDeps`), per-session
+selector engines (`sessionEngineFactory`), and child engines
+(`childEngineDepsForProvider`). Because the resolver reads `reg.meta.contextWindowFor`
+live on each call, a post-`Build` live `Swap` self-corrects the SAME engine on the next
+turn — **no rehydration, no engine rebuild**. The echo's `Config.ResolveContextWindow`
+is the same resolver wrapped to `int64`, so echo and engine are byte-identical
+including the override. (`engine/agent` imports no adapter — the closure is a stdlib
+`func() int` built only in `internal/app`; the layering DAG + depguard stay green.)
 
-**Convergence:** once a default session whose live window exceeds the floor *runs*, it
-rehydrates into a per-session engine carrying the live window — `Service.ResolvedModel`
-then takes its per-session-engine branch, so the echo and the engine the session
-actually runs on **converge** on the live window. The default-branch overlay therefore
-covers only the PRE-rehydration window and the no-factory paths.
+**No rehydration trigger:** the context window is no longer a reason to rehydrate a
+default session (the old `defaultSessionNeedsLiveWindow` predicate is gone). A default
+FS session keeps riding the shared engine, which self-corrects at use.
 
 **Pre-swap race (accepted, eventually-consistent — mirrors the echo):** if the first
-prompt arrives before the live swap, `live == baked` ⇒ no rehydration ⇒ that ONE run
-compacts at the baked floor; the next post-swap run rehydrates. Default-ON, no config
-flag (single-user-local, matches the selector/no-fs rehydration triggers). The
-rehydrated engine is the SAME resource class already inventoried for Phase-1
-rehydration (see `docs/design/CLOUD-NATIVE.md`) — no new resource, a new trigger
-reason; `decision = derive` (nothing new persisted).
+prompt arrives before the live swap, the resolver returns the 128k floor ⇒ that ONE run
+compacts at the floor; the next post-swap turn reads the live window through the same
+resolver. No new resource, no rehydration trigger; `decision = derive` (nothing new
+persisted) — see `docs/design/CLOUD-NATIVE.md`.
 - client/ui (`cmd/mecatui`): a proto-free `client.ResolvedModel` (sibling of
   `client.Capabilities`) + `resolvedModelFrom` mapper (nil ⇒ zero), threaded out of the
   `CreateSession` wrapper and stored on `Model.effectiveModel`. The header shows the
@@ -747,10 +738,12 @@ the server validate the model string verbatim.
 
 §11's live record reached ONLY the picker (`Service.SetModels`). The request-path
 metadata that actually drives a turn — the `max_tokens` output ceiling, the
-compaction `ContextWindowTokens`, and the Anthropic extended-thinking mode — read
-STATIC sources (the catalog, or hardcoded id-prefix lists) on a SEPARATE path the
-live data never touched. This slice **broadens the live record so it also feeds those
-resolvers**, without leaking the lister/registry/SDK past composition.
+compaction context window (the engine's `Deps.ContextWindow` resolver, a `func() int`
+resolved at use — see "The ENGINE-window half: resolve-at-use (issue #66)" above), and the Anthropic
+extended-thinking mode — read STATIC sources (the catalog, or hardcoded id-prefix
+lists) on a SEPARATE path the live data never touched. This slice **broadens the live
+record so it also feeds those resolvers**, without leaking the lister/registry/SDK
+past composition.
 
 **The enriched neutral record.** `modelEntry` (`modellister.go`) gains `OutputLimit`
 (the `max_tokens` ceiling) and a `thinkingDescriptor{Known,Adaptive,Enabled}` — the

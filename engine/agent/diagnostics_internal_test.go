@@ -92,12 +92,12 @@ func (hugeTokenCounter) CountMessages([]session.Message) int { return 1 << 20 }
 func TestCompactionReplaceRejectedEmitsWarn(t *testing.T) {
 	diag := newInternalCapturingDiag()
 	e := NewEngine(Deps{
-		Compactor:           succeedingCompactor{},
-		TokenCounter:        hugeTokenCounter{},
-		ContextWindowTokens: 100,
-		CompactionRatio:     0.8,
-		Diagnostics:         diag,
-		Model:               "m",
+		Compactor:       succeedingCompactor{},
+		TokenCounter:    hugeTokenCounter{},
+		ContextWindow:   func() int { return 100 },
+		CompactionRatio: 0.8,
+		Diagnostics:     diag,
+		Model:           "m",
 	})
 
 	// A freshly-created session is StateIdle (NOT StateRunning), so ReplaceHistory

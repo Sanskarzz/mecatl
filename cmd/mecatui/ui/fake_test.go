@@ -185,6 +185,42 @@ type fakeConv struct {
 	// retries once with the zero selection); any other error models a transient
 	// selector-leg failure (no retry — the unchanged fatal path).
 	rejectSelector error
+	// getSessionResults scripts the GetSession refetch (issue #66 footer heal):
+	// successive calls return successive entries, the last repeating once exhausted.
+	// Empty ⇒ GetSession returns the canned resolvedModel. getSessionErr, when
+	// non-nil, makes GetSession fail (the benign-error path). getSessionCount counts
+	// calls (guarded by mu) so a test can assert the refetch fired (or did NOT).
+	getSessionResults []client.ResolvedModel
+	getSessionErr     error
+	getSessionCount   int
+}
+
+// GetSession scripts the footer-heal refetch. Successive calls walk
+// getSessionResults (last entry repeats); empty falls back to the canned
+// resolvedModel. getSessionErr forces the benign-error path. mu guards the
+// recorders touched by the command goroutine + the test goroutine.
+func (c *fakeConv) GetSession(_ context.Context, _ string) (client.ResolvedModel, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.getSessionCount++
+	if c.getSessionErr != nil {
+		return client.ResolvedModel{}, c.getSessionErr
+	}
+	if len(c.getSessionResults) == 0 {
+		return c.resolvedModel, nil
+	}
+	i := c.getSessionCount - 1
+	if i >= len(c.getSessionResults) {
+		i = len(c.getSessionResults) - 1
+	}
+	return c.getSessionResults[i], nil
+}
+
+// getSessionCalls returns how many times GetSession was invoked (test-goroutine read).
+func (c *fakeConv) getSessionCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.getSessionCount
 }
 
 func (c *fakeConv) CreateSession(_ context.Context, sel client.ModelSelection) (string, client.Capabilities, client.ResolvedModel, error) {

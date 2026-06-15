@@ -33,7 +33,8 @@ func countingSessionEngineFactory(inner server.SessionEngineFactory, calls *int)
 // with an attached meta store the test can Swap to simulate the live model-catalog
 // refresh populating a real window. It is the offline analogue of the OpenRouter
 // openai/gpt-5.5 case — a default model present in the live listing but absent from
-// the embedded catalog, whose build-time baked window is the 128k compaction floor.
+// the embedded catalog, whose build-time baked window WOULD be the 128k compaction
+// floor under the old freeze-at-construction scheme.
 func liveWindowReg(provider *mockllm.Provider, id, model string) *providerRegistry {
 	meta := newLiveMetaStore()
 	return &providerRegistry{
@@ -44,28 +45,35 @@ func liveWindowReg(provider *mockllm.Provider, id, model string) *providerRegist
 	}
 }
 
-// defaultLiveWindowService builds a server.Service whose SessionEngine is the REAL
-// composition sessionEngineFactory over reg, and whose ResolveContextWindow is the
-// SAME live-first closure Build wires (over reg.meta) — so the engine-window
-// rehydration and the #66 echo overlay both read the one live store. The shared
-// engine bakes bakedWindow (the t=0 floor, here the catalog 0). DefaultResolvedModel
-// carries the baked identity + window, exactly as Build seeds it.
-func defaultLiveWindowService(t *testing.T, reg *providerRegistry, provider *mockllm.Provider, model string, bakedWindow int64) *server.Service {
+// defaultLiveWindowService builds a server.Service whose SHARED engine is built
+// through the REAL baseEngineDeps (so its Deps.ContextWindow is the live-first
+// reg.windowResolver, NOT a frozen scalar — the unification), whose SessionEngine is
+// the REAL composition sessionEngineFactory, and whose ResolveContextWindow is the
+// SAME live-first resolver Build wires. DefaultResolvedModel carries the baked
+// identity; its window is no longer load-bearing (ResolvedModel resolves live-first).
+func defaultLiveWindowService(t *testing.T, reg *providerRegistry, provider *mockllm.Provider, model string) (*server.Service, *int) {
+	return defaultLiveWindowServiceCfg(t, reg, provider, Config{Model: model})
+}
+
+// defaultLiveWindowServiceCfg is defaultLiveWindowService with a caller-supplied
+// Config, so a test can set ContextWindowOverride (or any other knob) and have it
+// flow through the SAME single windowResolver into BOTH the engine and the echo.
+func defaultLiveWindowServiceCfg(t *testing.T, reg *providerRegistry, provider *mockllm.Provider, cfg Config) (*server.Service, *int) {
 	t.Helper()
+	model := cfg.Model
 	store := memstore.New()
 	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	cfg := Config{Model: model}
-	factory := sessionEngineFactory(cfg, reg, provider, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+	realFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
+	var factoryCalls int
+	factory := countingSessionEngineFactory(realFactory, &factoryCalls)
 
-	// The shared engine bakes the t=0 window — the bug: it never rebuilds, so a
-	// live-only default model stays pinned to this floor.
-	shared := agent.NewEngine(agent.Deps{
-		LLM:                 provider,
-		Catalog:             tool.NewCatalog(),
-		Policy:              policy,
-		Model:               model,
-		ContextWindowTokens: int(bakedWindow),
-	})
+	// The shared engine is built through baseEngineDeps, so it carries the live-first
+	// resolver — it RESOLVES the window at the point of use (every maybeCompact /
+	// Engine.ContextWindow), never freezing a t=0 floor. baseEngineDeps leaves Catalog
+	// unset by contract (the composition caller sets it), so wire one here.
+	sharedDeps := baseEngineDeps(cfg, reg, provider, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{})
+	sharedDeps.Catalog = tool.NewCatalog()
+	shared := agent.NewEngine(sharedDeps)
 	svc, err := server.NewService(server.Config{
 		Engine:               shared,
 		Store:                store,
@@ -73,51 +81,50 @@ func defaultLiveWindowService(t *testing.T, reg *providerRegistry, provider *moc
 		DefaultLimits:        session.Limits{MaxTurns: 5, MaxToolCalls: 10},
 		Now:                  func() time.Time { return time.Unix(0, 0) },
 		SessionEngine:        factory,
-		DefaultResolvedModel: server.ResolvedModel{ProviderID: reg.Default(), ModelID: model, ContextWindow: bakedWindow},
-		ResolveContextWindow: func(p, m string) int64 { return int64(reg.meta.contextWindowFor(p, m)) },
+		DefaultResolvedModel: server.ResolvedModel{ProviderID: reg.Default(), ModelID: model},
+		ResolveContextWindow: func(p, m string) int64 { return int64(reg.windowResolver(cfg, p, m)()) },
 	})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	return svc
+	return svc, &factoryCalls
 }
 
-// TestDefaultLiveOnlyModelRehydratesToLiveWindow is THE BUG (issue #66 engine-window
-// fix): a DEFAULT-model session whose model is live-only (catalog floor 0 → baked
-// 128k) must, AFTER the live model-catalog swap, compact at the LIVE window, not the
-// build-time floor. The shared engine bakes the floor pre-swap and never rebuilds, so
-// without the run-entry engine-window rehydration the session would compact at ~102k
-// forever. The fix rebuilds it into a per-session engine carrying the live window via
-// the SAME rehydration seam the selector/no-fs paths use.
+// TestDefaultLiveOnlyModelSelfCorrectsAtUse is THE BUG (issue #66 engine-window fix),
+// re-expressed for the resolve-at-use UNIFICATION: a DEFAULT-model session whose model
+// is live-only (catalog floor 0) must, AFTER the live model-catalog swap, compact at
+// the LIVE window — WITHOUT any rehydration. The shared engine no longer freezes a
+// window at construction; it reads reg.windowResolver live on the next turn, so the
+// echo heals AND the engine self-corrects with the per-session factory NEVER consulted.
 //
-// MUTATION-VERIFY: reverting build.go's sessionEngineFactory line to
-// `catalogContextWindow(reg.Default(), cfg.Model)` (catalog floor 0, ignoring the
-// live store) makes the rehydrated engine carry 0 and fails this test.
-func TestDefaultLiveOnlyModelRehydratesToLiveWindow(t *testing.T) {
+// MUTATION-VERIFY: if Deps.ContextWindow is reverted to a frozen int (resolved once at
+// construction), the shared engine stays at 0/128k after the Swap and the echo below
+// fails — the structural guard the whole fix rests on.
+func TestDefaultLiveOnlyModelSelfCorrectsAtUse(t *testing.T) {
 	ctx := context.Background()
 	const (
 		liveModel  = "openai/gpt-5.5" // live-only: NOT in the embedded catalog
 		liveWindow = 1_050_000
-		bakedFloor = 128_000 // the build-time baked floor a live-only model is stuck on
 	)
 	provider := mockllm.New(mockllm.TextTurn("PRE-SWAP"), mockllm.TextTurn("POST-SWAP"))
 	reg := liveWindowReg(provider, providerOpenAI, liveModel)
-	svc := defaultLiveWindowService(t, reg, provider, liveModel, bakedFloor)
+	svc, factoryCalls := defaultLiveWindowService(t, reg, provider, liveModel)
 
-	// Pre-swap: the live store has NO entry for the live-only model (catalog floor 0).
+	// Pre-swap: the live store has NO entry for the live-only model (catalog floor 0 →
+	// the windowResolver returns the 128k default), and the echo reflects that floor.
 	if got := reg.meta.contextWindowFor(providerOpenAI, liveModel); got != 0 {
 		t.Fatalf("pre-swap contextWindowFor(%q) = %d, want 0 (live-only model, catalog floor)", liveModel, got)
 	}
 
-	// Create a plain DEFAULT session (empty selector, default profile, real workspace)
-	// — it rides the shared engine, no per-session engine registered.
 	sess, err := svc.CreateSession(ctx, "/work/livewin", session.ModeDefault, session.Limits{})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	if got := svc.ResolvedModel(sess.ID).ContextWindow; got != defaultContextWindowTokens {
+		t.Fatalf("pre-swap echo ContextWindow = %d, want the %d floor (live-only, pre-swap)", got, defaultContextWindowTokens)
+	}
 
-	// First run pre-swap: live == baked (0 vs 128k → live not > baked), so NO
-	// rehydration; the session keeps the shared engine. (The pre-swap-race branch.)
+	// First run pre-swap: rides the shared engine.
 	run1, err := svc.StartRunContent(ctx, sess.ID, "first turn", nil)
 	if err != nil {
 		t.Fatalf("StartRunContent (pre-swap): %v", err)
@@ -134,89 +141,50 @@ func TestDefaultLiveOnlyModelRehydratesToLiveWindow(t *testing.T) {
 		t.Fatalf("post-swap contextWindowFor(%q) = %d, want %d", liveModel, got, liveWindow)
 	}
 
-	// Second run post-swap: live (1,050,000) now strictly exceeds the baked floor
-	// (128,000), so defaultSessionNeedsLiveWindow fires and the run-entry seam
-	// rehydrates the session into a per-session engine carrying the live window.
+	// Second run post-swap: STILL the shared engine (resolve-at-use self-corrects —
+	// the factory is never consulted for a default session).
 	run2, err := svc.StartRunContent(ctx, sess.ID, "second turn", nil)
 	if err != nil {
 		t.Fatalf("StartRunContent (post-swap): %v", err)
 	}
 	if got := drainRun(run2); got != "POST-SWAP" {
-		t.Fatalf("post-swap reply = %q, want POST-SWAP (rehydrated per-session engine)", got)
+		t.Fatalf("post-swap reply = %q, want POST-SWAP (shared engine, no rehydration)", got)
 	}
 
-	// THE KEY ASSERTION: the now-registered per-session engine carries the LIVE
-	// window. ResolvedModel reads se.resolvedModel.ContextWindow, which the factory
-	// set from the SAME `contextWindow` local fed into the engine's
-	// ContextWindowTokens — so this proves the engine compacts at 1,050,000, NOT the
-	// 128k floor.
+	// THE KEY ASSERTION: the echo (live-first via the SAME resolver the engine reads)
+	// now reports the live window — and the per-session factory was NEVER consulted.
 	got := svc.ResolvedModel(sess.ID)
 	if got.ContextWindow != liveWindow {
-		t.Fatalf("post-rehydration ResolvedModel.ContextWindow = %d, want the live %d (NOT the %d baked floor — the engine would still compact at the floor)",
-			got.ContextWindow, liveWindow, bakedFloor)
+		t.Fatalf("post-swap ResolvedModel.ContextWindow = %d, want the live %d (resolve-at-use; NO rehydration)", got.ContextWindow, liveWindow)
 	}
 	if got.ProviderID != providerOpenAI || got.ModelID != liveModel {
-		t.Fatalf("post-rehydration identity = %s/%s, want the verbatim default %s/%s", got.ProviderID, got.ModelID, providerOpenAI, liveModel)
+		t.Fatalf("post-swap identity = %s/%s, want the verbatim default %s/%s", got.ProviderID, got.ModelID, providerOpenAI, liveModel)
 	}
-	// (The DIRECT Engine.ContextWindow() assertion AND the rehydrate-exactly-once
-	// idempotency check live in the server package — TestRehydratedDefaultEngineWindow*
-	// in internal/adapter/server/resolved_model_test.go — where the SessionEngine
-	// registry is reachable via the export_test accessor. This app-level test proves the
-	// REAL sessionEngineFactory carries the live window into the result; the proxy above
-	// reads exactly that.)
+	if *factoryCalls != 0 {
+		t.Fatalf("session-engine factory called %d times for a default session, want 0 (resolve-at-use needs no rehydration)", *factoryCalls)
+	}
+	// The DIRECT shared-engine Engine.ContextWindow() self-correction is asserted in
+	// internal/adapter/server/resolved_model_test.go (registry-reachable) and at the
+	// engine level in engine/agent (the resolve-at-use non-freeze guard).
 }
 
-// TestCataloguedDefaultModelDoesNotRehydrateForWindow pins the bound: a CATALOGUED
-// default model (live window == baked window) must NOT needlessly rehydrate — the
-// new defaultSessionNeedsLiveWindow trigger fires ONLY when the live window STRICTLY
-// exceeds the baked one. A catalogued session keeps the shared engine, exactly like
-// TestDefaultFSSessionDoesNotRehydrate.
-//
-// The recording factory asserts calls==0: a needless rehydration would consult it.
-func TestCataloguedDefaultModelDoesNotRehydrateForWindow(t *testing.T) {
+// TestCataloguedDefaultModelEchoesCatalogWindow pins the catalogued-default bound: a
+// CATALOGUED default model echoes (and the shared engine compacts at) its catalog
+// window with NO rehydration — the per-session factory is never consulted.
+func TestCataloguedDefaultModelEchoesCatalogWindow(t *testing.T) {
 	ctx := context.Background()
 	const (
 		model       = "gpt-5"
 		bakedWindow = 400_000 // the catalogued window, also what the live store reports
 	)
-	provider := mockllm.New(mockllm.TextTurn("SHARED-A"), mockllm.TextTurn("SHARED-B"))
+	provider := mockllm.New(mockllm.TextTurn("SHARED-A"))
 	reg := liveWindowReg(provider, providerOpenAI, model)
-	// Seed the live store so contextWindowFor returns the SAME window the engine baked
-	// (live == baked ⇒ NOT strictly greater ⇒ no rehydration).
+	// Seed the live store so contextWindowFor returns the catalogued window.
 	reg.meta.Swap(map[string][]modelEntry{
 		providerOpenAI: {{ID: model, ContextLimit: bakedWindow}},
 	})
 
-	store := memstore.New()
-	policy := permpolicy.NewPolicy(defaultRules(), nil)
-	cfg := Config{Model: model}
-
-	// A counting factory: the per-session-engine path is NEVER consulted for this
-	// catalogued default session.
-	var factoryCalls int
-	realFactory := sessionEngineFactory(cfg, reg, provider, store, policy, hookexec.New(nil), nil, prompt.RootAssembler{}, catalogAssets{})
-	countingFactory := countingSessionEngineFactory(realFactory, &factoryCalls)
-
-	shared := agent.NewEngine(agent.Deps{
-		LLM:                 provider,
-		Catalog:             tool.NewCatalog(),
-		Policy:              policy,
-		Model:               model,
-		ContextWindowTokens: bakedWindow,
-	})
-	svc, err := server.NewService(server.Config{
-		Engine:               shared,
-		Store:                store,
-		Workspaces:           func(root string) tool.Workspace { return memfs.NewWorkspace(root) },
-		DefaultLimits:        session.Limits{MaxTurns: 5, MaxToolCalls: 10},
-		Now:                  func() time.Time { return time.Unix(0, 0) },
-		SessionEngine:        countingFactory,
-		DefaultResolvedModel: server.ResolvedModel{ProviderID: providerOpenAI, ModelID: model, ContextWindow: bakedWindow},
-		ResolveContextWindow: func(p, m string) int64 { return int64(reg.meta.contextWindowFor(p, m)) },
-	})
-	if err != nil {
-		t.Fatalf("NewService: %v", err)
-	}
+	svc, factoryCalls := defaultLiveWindowService(t, reg, provider, model)
 
 	sess, err := svc.CreateSession(ctx, "/work/catalogued", session.ModeDefault, session.Limits{})
 	if err != nil {
@@ -227,63 +195,69 @@ func TestCataloguedDefaultModelDoesNotRehydrateForWindow(t *testing.T) {
 		t.Fatalf("StartRunContent: %v", err)
 	}
 	if got := drainRun(run); got != "SHARED-A" {
-		t.Fatalf("reply = %q, want SHARED-A (a catalogued default session keeps the shared engine)", got)
+		t.Fatalf("reply = %q, want SHARED-A (catalogued default keeps the shared engine)", got)
 	}
-	if factoryCalls != 0 {
-		t.Fatalf("session-engine factory called %d times for a catalogued default session, want 0 (defaultSessionNeedsLiveWindow must not fire when live == baked)", factoryCalls)
+	if *factoryCalls != 0 {
+		t.Fatalf("session-engine factory called %d times for a catalogued default session, want 0 (no rehydration)", *factoryCalls)
 	}
-	// The echo also reports the baked/live window (they agree — no overlay divergence).
 	if got := svc.ResolvedModel(sess.ID).ContextWindow; got != bakedWindow {
-		t.Fatalf("ResolvedModel.ContextWindow = %d, want %d (live == baked, no rehydration)", got, bakedWindow)
+		t.Fatalf("ResolvedModel.ContextWindow = %d, want %d (catalogued window, live-first)", got, bakedWindow)
 	}
 }
 
-// TestDefaultLiveOnlyModelEchoAndEngineConverge proves the echo and the engine
-// CONVERGE on the live window (issue #66): BEFORE rehydration the #66 default-branch
-// overlay already yields the live window (honest echo even pre-rehydration); AFTER a
-// post-swap run rehydrates the session, the echo takes the per-session-engine branch
-// and still reports the live window — the engine the session runs on and the echo
-// agree.
-func TestDefaultLiveOnlyModelEchoAndEngineConverge(t *testing.T) {
+// TestContextWindowOverrideReachesEcho closes the latent-bug gap the architecture
+// review flagged: the operator escape-hatch --context-window-override
+// (cfg.ContextWindowOverride) now composes INSIDE the single windowResolver, and
+// Build wires ResolveContextWindow over that SAME resolver — so the override must
+// reach the resolved_model ECHO (Service.ResolvedModel), not just the engine's
+// compaction trigger. Before the unification the echo ignored the override (it read
+// a separate live-first path), so the footer could disagree with the window the
+// engine actually compacted at. This guards both branches:
+//
+//   - a DEFAULT session (no per-session engine — the shared-engine echo path), and
+//   - a SELECTOR session (a per-session engine — the selector echo path),
+//
+// proving the override WINS over the live store for either branch.
+//
+// MUTATION-VERIFY (non-vacuous): deleting the `if cfg.ContextWindowOverride > 0`
+// clause in windowResolver (livemeta.go) makes BOTH assertions fail — the echo
+// reverts to the live/catalog window instead of the override.
+func TestContextWindowOverrideReachesEcho(t *testing.T) {
 	ctx := context.Background()
 	const (
-		liveModel  = "openai/gpt-5.5"
-		liveWindow = 1_050_000
-		bakedFloor = 128_000
+		model     = "openai/gpt-5.5" // live-only; the live store reports a DIFFERENT window
+		liveWin   = 1_050_000        // what the live store says — the override must beat this
+		overrideW = 64_000           // the operator escape-hatch value
 	)
-	provider := mockllm.New(mockllm.TextTurn("RUN-ONCE"))
-	reg := liveWindowReg(provider, providerOpenAI, liveModel)
-	svc := defaultLiveWindowService(t, reg, provider, liveModel, bakedFloor)
-
-	sess, err := svc.CreateSession(ctx, "/work/converge", session.ModeDefault, session.Limits{})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-
-	// The live swap happens (model-catalog refresh) before the first run reaches the seam.
+	provider := mockllm.New(mockllm.TextTurn("X"))
+	reg := liveWindowReg(provider, providerOpenAI, model)
+	// Seed the live store with a window DISTINCT from the override, so a passing test
+	// can only mean the override won (not a coincidental match).
 	reg.meta.Swap(map[string][]modelEntry{
-		providerOpenAI: {{ID: liveModel, ContextLimit: liveWindow}},
+		providerOpenAI: {{ID: model, ContextLimit: liveWin}},
 	})
-
-	// PRE-REHYDRATION echo: no per-session engine yet, so ResolvedModel takes the
-	// DEFAULT branch — and the #66 overlay (over the same live store) already reports
-	// the live window. The echo is honest before the engine catches up.
-	if got := svc.ResolvedModel(sess.ID).ContextWindow; got != liveWindow {
-		t.Fatalf("pre-rehydration echo ContextWindow = %d, want the #66 overlay live %d", got, liveWindow)
+	if got := reg.meta.contextWindowFor(providerOpenAI, model); got != liveWin {
+		t.Fatalf("seed: contextWindowFor = %d, want the live %d", got, liveWin)
 	}
 
-	// Now run: the seam rehydrates into a per-session engine (live > baked).
-	run, err := svc.StartRunContent(ctx, sess.ID, "turn", nil)
+	svc, _ := defaultLiveWindowServiceCfg(t, reg, provider, Config{Model: model, ContextWindowOverride: overrideW})
+
+	// DEFAULT session (shared-engine echo path): the override beats the live window.
+	def, err := svc.CreateSession(ctx, "/work/override-default", session.ModeDefault, session.Limits{})
 	if err != nil {
-		t.Fatalf("StartRunContent: %v", err)
+		t.Fatalf("CreateSession(default): %v", err)
 	}
-	if got := drainRun(run); got != "RUN-ONCE" {
-		t.Fatalf("reply = %q, want RUN-ONCE", got)
+	if got := svc.ResolvedModel(def.ID).ContextWindow; got != overrideW {
+		t.Fatalf("default-session echo ContextWindow = %d, want the override %d (override must reach the echo, not just the engine; live store says %d)", got, overrideW, liveWin)
 	}
 
-	// POST-REHYDRATION echo: now the per-session-engine branch — still the live window.
-	// Echo and engine have converged.
-	if got := svc.ResolvedModel(sess.ID).ContextWindow; got != liveWindow {
-		t.Fatalf("post-rehydration echo ContextWindow = %d, want the converged live %d (the engine the session runs on carries it)", got, liveWindow)
+	// SELECTOR session (per-session-engine echo path): same override, same single
+	// windowResolver — it must win here too.
+	sel, err := svc.CreateSessionWithProvider(ctx, "/work/override-selector", session.ModeDefault, session.Limits{}, server.ProviderSelector{ProviderID: providerOpenAI, ModelID: model})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider(selector): %v", err)
+	}
+	if got := svc.ResolvedModel(sel.ID).ContextWindow; got != overrideW {
+		t.Fatalf("selector-session echo ContextWindow = %d, want the override %d (override must reach the selector echo too)", got, overrideW)
 	}
 }

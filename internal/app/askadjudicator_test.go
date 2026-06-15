@@ -209,7 +209,7 @@ func TestChildDepsClearAskAdjudicator(t *testing.T) {
 	cfg := Config{Model: "m", SubagentAskReviewerModel: "gpt-5-mini", SubagentAskReviewerMaxDenies: 5}
 	pc := promptConfig(cfg, "")
 
-	forProvider := childEngineDepsForProvider(cfg, "task", provider, "m", 0, tool.NewCatalog(), pc, hookexec.New(nil))
+	forProvider := childEngineDepsForProvider(cfg, "task", provider, "m", func() int { return defaultContextWindowTokens }, tool.NewCatalog(), pc, hookexec.New(nil))
 	if forProvider.ChildAskReviewer != nil || forProvider.ChildAskReviewMaxDenies != 0 {
 		t.Fatalf("childEngineDepsForProvider must clear the adjudicator (no nesting)")
 	}
@@ -285,7 +285,7 @@ func TestAskReviewerE2EHeadlessTeamAllow(t *testing.T) {
 			mockllm.TextTurn("lead: inspected"),
 			mockllm.TextTurn("CONSOLIDATED: done"),
 		)
-		eng := agent.NewEngine(childEngineDepsForProvider(cfg, "member:lead", memberLLM, "m", 0, cat, promptConfig(cfg, ""), nil))
+		eng := agent.NewEngine(childEngineDepsForProvider(cfg, "member:lead", memberLLM, "m", func() int { return defaultContextWindowTokens }, cat, promptConfig(cfg, ""), nil))
 		return agent.MemberBuild{Engine: eng, IsolateReadOnly: true}
 	}
 	teamTool := agent.NewTeamTool(memberFactory, agent.WithTeamToolReadOnlyForker(appFakeForker{}))
@@ -297,7 +297,7 @@ func TestAskReviewerE2EHeadlessTeamAllow(t *testing.T) {
 	)
 	reviewerLLM := mockllm.New(mockllm.TextTurn(`{"allow": true, "reason": "read-only inspection"}`))
 
-	deps := engineDepsForProvider(cfg, parentLLM, "m", 0, nil, childPermPolicy(cfg), hookexec.New(nil), nil, nil)
+	deps := engineDepsForProvider(cfg, parentLLM, "m", func() int { return defaultContextWindowTokens }, nil, childPermPolicy(cfg), hookexec.New(nil), nil, nil)
 	cat := tool.NewCatalog()
 	cat.MustRegister(teamTool)
 	deps.Catalog = cat

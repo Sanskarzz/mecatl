@@ -43,11 +43,13 @@ once per turn from the loop's drive path. It fires when the estimated history to
 count crosses a threshold:
 
 ```
-threshold = ContextWindowTokens × CompactionRatio
+threshold = ContextWindow() × CompactionRatio
 ```
 
-`Deps.ContextWindowTokens` is the model's window (zero **disables** compaction
-entirely — `maybeCompact` returns early). `Deps.CompactionRatio` defaults to
+`Deps.ContextWindow` is a `func() int` resolver for the model's window, read live at
+each `maybeCompact` (a nil closure or a `<=0` return **disables** compaction entirely —
+`maybeCompact` returns early). Resolve-at-use means a post-construction live-catalog
+swap self-corrects the (never-rebuilt) shared engine on the next turn. `Deps.CompactionRatio` defaults to
 `defaultCompactionRatio` = **0.8** (`engine/agent/loop.go`), matching the prior-art
 guidance to trigger at 70–80% of the window rather than waiting for the wall, leaving
 headroom for the summarisation call itself (`docs/harnesses/07-context-and-mcp.md` §4,
