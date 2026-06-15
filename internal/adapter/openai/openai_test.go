@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openai/openai-go/v3/responses"
+
 	"github.com/stacklok/mecatl/engine/port"
 	"github.com/stacklok/mecatl/engine/prompt"
 	"github.com/stacklok/mecatl/engine/session"
@@ -377,6 +379,70 @@ func TestTranslateResponseFailed(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err.Error(), want)
 		}
+	}
+}
+
+// TestTranslateIncompleteContentFilter verifies a response.incomplete event with
+// a content_filter reason surfaces a human-readable, non-cryptic terminal error
+// that (a) names the content filter / upstream moderation in plain terms, (b)
+// still carries the raw "content_filter" token for diagnosability, and (c) hints
+// the user can retry. The usage chunk is still emitted alongside the error.
+// translate is driven directly (it is a pure function over a constructed event
+// union, no real client needed).
+func TestTranslateIncompleteContentFilter(t *testing.T) {
+	event := responses.ResponseStreamEventUnion{
+		Type: "response.incomplete",
+		Response: responses.Response{
+			Status: responses.ResponseStatusIncomplete,
+			IncompleteDetails: responses.ResponseIncompleteDetails{
+				Reason: "content_filter",
+			},
+			Usage: responses.ResponseUsage{InputTokens: 30, OutputTokens: 0},
+		},
+	}
+	chunks, err := translate(event, &streamState{})
+	if err == nil {
+		t.Fatal("expected an error from response.incomplete (content_filter), got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "content filter") {
+		t.Errorf("error %q does not name the content filter in human terms", msg)
+	}
+	if !strings.Contains(msg, "moderation") {
+		t.Errorf("error %q does not mention upstream moderation", msg)
+	}
+	if !strings.Contains(msg, "content_filter") {
+		t.Errorf("error %q dropped the raw reason token (diagnosability)", msg)
+	}
+	if !strings.Contains(msg, "Retype") && !strings.Contains(msg, "resend") && !strings.Contains(msg, "retry") {
+		t.Errorf("error %q does not hint at retrying", msg)
+	}
+	// The usage chunk is still emitted before the error, exactly as before.
+	if len(chunks) != 1 || chunks[0].Kind != port.ChunkUsage {
+		t.Errorf("expected a single usage chunk before the error, got %+v", chunks)
+	}
+}
+
+// TestTranslateIncompleteUnknownReason pins the forward-compatible fallback: an
+// unknown / future incomplete reason renders as the plain
+// "response incomplete: <reason>" form (the reason enum is never hard-coded
+// exhaustively).
+func TestTranslateIncompleteUnknownReason(t *testing.T) {
+	event := responses.ResponseStreamEventUnion{
+		Type: "response.incomplete",
+		Response: responses.Response{
+			Status: responses.ResponseStatusIncomplete,
+			IncompleteDetails: responses.ResponseIncompleteDetails{
+				Reason: "some_future_reason",
+			},
+		},
+	}
+	_, err := translate(event, &streamState{})
+	if err == nil {
+		t.Fatal("expected an error from response.incomplete (unknown reason), got nil")
+	}
+	if got, want := err.Error(), "response incomplete: some_future_reason"; got != want {
+		t.Errorf("unknown-reason message = %q, want %q", got, want)
 	}
 }
 

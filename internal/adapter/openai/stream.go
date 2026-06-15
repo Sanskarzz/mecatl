@@ -151,7 +151,9 @@ func translate(event responses.ResponseStreamEventUnion, st *streamState) ([]por
 	case "response.incomplete":
 		// An incomplete response still carries usage and a reason (e.g.
 		// max_output_tokens, content_filter); emit usage, then stop as an error
-		// with the reason so the run is diagnosable but accounted for.
+		// with a human-readable message keyed on the reason so the run is
+		// diagnosable but accounted for. The reason is provider-driven and NOT
+		// retried (replaying the identical prompt just trips the same condition).
 		if st.done {
 			return nil, nil
 		}
@@ -159,7 +161,7 @@ func translate(event responses.ResponseStreamEventUnion, st *streamState) ([]por
 		usage := mapUsage(event.Response.Usage)
 		return []port.Chunk{
 			{Kind: port.ChunkUsage, Usage: &usage},
-		}, fmt.Errorf("response incomplete: %s", incompleteReason(event.Response))
+		}, fmt.Errorf("%s", incompleteMessage(event.Response))
 
 	case "response.failed":
 		if st.done {
@@ -251,6 +253,32 @@ func incompleteReason(r responses.Response) string {
 		return r.IncompleteDetails.Reason
 	}
 	return string(r.Status)
+}
+
+// incompleteMessage renders a human-readable terminal message for a
+// response.incomplete event, keyed on the incomplete_details.reason. The loop
+// prefixes this with "agent: stream: ", so it reads naturally lowercased after
+// that prefix. The raw reason token is kept visible in every branch for
+// diagnosability, and an unknown/future reason falls back to the plain
+// "response incomplete: <reason>" form (forward-compatible — the reason enum is
+// never hard-coded exhaustively). This is a presentation choice only: it does
+// NOT affect retry classification (the caller returns the bare, non-retryable
+// error verbatim alongside the usage chunk).
+func incompleteMessage(r responses.Response) string {
+	reason := incompleteReason(r)
+	switch reason {
+	case "content_filter":
+		return "the provider's content filter blocked this response " +
+			"(reason: content_filter). This is an UPSTREAM moderation decision, " +
+			"not a mecatl error — some routes (e.g. an Azure OpenAI upstream) apply " +
+			"aggressive moderation to benign security/credentials wording. " +
+			"Retype or resend your message to continue."
+	case "max_output_tokens":
+		return "the response was cut off at the provider's max output token limit " +
+			"(reason: max_output_tokens)."
+	default:
+		return fmt.Sprintf("response incomplete: %s", reason)
+	}
 }
 
 // mapUsage maps Responses usage accounting into the domain Usage, including the
