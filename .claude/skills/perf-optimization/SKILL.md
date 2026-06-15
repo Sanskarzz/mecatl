@@ -4,11 +4,12 @@ description: >-
   Profile-driven performance optimization of mecatl using the offline benchmark +
   scenario harness. Use when optimizing allocations or latency, reducing allocs/op
   or memory, profiling a Go benchmark, pinpointing a hotspot with pprof, proving a
-  win with benchstat, adding a regression benchmark, or investigating "why is this
-  slow / allocating" or a suspected perf regression. Covers task bench,
-  task perf:scenarios, memprofile -> pprof, benchstat A/B, allocs-first gating, and
-  the discipline (follow the profile not the hypothesis; keep pure-perf changes
-  byte-identical; mutation-test cache guards; skip the wrong abstraction).
+  win with benchstat, adding a regression benchmark, wiring profile-guided
+  optimization (PGO), or investigating "why is this slow / allocating" or a suspected
+  perf regression. Covers task bench, task perf:scenarios, memprofile -> pprof,
+  benchstat A/B, allocs-first gating, PGO setup, and the discipline (follow the
+  profile not the hypothesis; keep pure-perf changes byte-identical; mutation-test
+  cache guards; skip the wrong abstraction).
   NOT for the live perf MCP server (use perf-mcp-interpretation) or non-mecatl Go
   profiling.
 metadata:
@@ -112,6 +113,26 @@ Update the baseline snapshot in `docs/design/perf-tracking.md`.
 - **Memoizing across the byte-stable prompt prefix.** Any prompt-inventory cache must
   produce byte-identical output or it tanks the provider cache-hit rate — the exact
   thing perf-tracking exists to protect. Usually not worth it (see playbook).
+
+## Complementary: PGO (free compiler-level wins)
+
+Beyond hand-optimizing a hot path, Profile-Guided Optimization lets the compiler
+optimize from a CPU profile (typically 2–14% CPU — but here sub-1% of wall-clock,
+since cost is network-dominated: a free set-and-forget win, not a latency feature).
+The mechanism is already wired:
+
+- `task pgo:collect` builds a PROVISIONAL offline profile under `.scratch/pgo/`.
+- `cmd/mecated/default.pgo` is the reserved slot — `go build`'s `-pgo=auto` applies it
+  automatically the moment a profile is dropped there (nothing in the build chain
+  passes `-pgo=off`).
+- **Do NOT commit an offline-collected profile** — it trains the compiler on the
+  mockllm path that ships in no production binary (it can't pessimize, but it wastes
+  the one slot). Commit only a real `/debug/pprof/profile` capture from a running
+  `mecated` under load.
+
+Full rationale, the per-binary decision, and the production refresh + staleness
+process live in [`perf-tracking.md` Phase 4](../../../docs/design/perf-tracking.md) —
+read it before touching PGO.
 
 ## See Also
 
