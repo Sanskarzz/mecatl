@@ -98,6 +98,10 @@ allocs/op is hard-gated; `ns/op` is advisory. The first PR before any baseline
 exists skips the allocs gate green with a notice. See
 `docs/design/perf-tracking.md` (Phase 3 — Status) for the full rationale.
 
+**Live trend dashboard:** https://potential-barnacle-mvm429e.pages.github.io/dev/bench/
+(sign in to GitHub with repo access; the random slug is GitHub's private-Pages
+hostname, stable across builds; the chart is under `/dev/bench/`, the bare root 404s).
+
 ### PGO is orthogonal to the regression gate (Phase 4)
 
 Profile-Guided Optimization (perf-tracking Phase 4) is a **build-time

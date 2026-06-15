@@ -346,16 +346,28 @@ baseline to fetch.
 only credential is the automatic `GITHUB_TOKEN` — no PAT, no repo secret. All
 actions SHA-pinned with a `# vX.Y.Z` comment, matching the house pins in `ci.yml`.
 
-**Private-repo note (this repo is private):** the gate and the trend store work
-fully — github-action-benchmark reads/writes `gh-pages` over authenticated git
+### Trend dashboard (live)
+
+The interactive trend chart auto-publishes to GitHub Pages on every push to `main`:
+
+> **https://potential-barnacle-mvm429e.pages.github.io/dev/bench/**
+
+Access-controlled — sign in to GitHub with access to the repo. The hostname is a
+GitHub-assigned random slug *because the repo is private/internal* (private Pages are
+served from an unguessable `*.pages.github.io` subdomain rather than the predictable
+`<owner>.github.io/<repo>`); it is **stable** across builds (bookmark it), but a new
+slug is minted if Pages is ever disabled and re-enabled. The chart lives under the
+`/dev/bench/` path — the bare-domain root 404s (github-action-benchmark only writes
+into `dev/bench/`). For a memorable URL, point a custom domain at it
+(Settings → Pages → Custom domain + a DNS CNAME).
+
+**Private-repo posture:** the gate and the trend store work fully on this private repo
+— github-action-benchmark reads/writes `gh-pages` over authenticated git
 (`GITHUB_TOKEN`), and the allocs baseline is fetched over the authenticated contents
-API (NOT `raw.githubusercontent.com`, which 404s on private). The one thing private
-costs is the browsable GitHub **Pages site** (the `…github.io/…/dev/bench` chart),
-which needs Pages-on-private (a paid GHE feature) — but the gate never depends on the
-site; the trend data lives as files on the `gh-pages` branch, viewable via the
-branch/file browser. `gh-pages` is bootstrapped once as an empty orphan branch
-(github-action-benchmark's `auto-push` fetches the branch before it can create it, so
-it must pre-exist on the first run).
+API (NOT `raw.githubusercontent.com`, which 404s on private). `gh-pages` is
+bootstrapped once as an empty orphan branch (github-action-benchmark's `auto-push`
+fetches the branch before it can create it, so it must pre-exist on the first run);
+the raw data is also browsable on the `gh-pages` branch directly.
 
 `perfconvert` imports ONLY `perf/kpi` + the standard library (same leaf posture as
 `perf/kpi` itself), hard-fails on a `schema_version` mismatch, and aggregates the
