@@ -882,7 +882,7 @@ func applyPostureCLI(cfg config, diag port.Diagnostics) (handled bool, err error
 	case app.PostureAuto:
 		slog.Warn("OPERATOR POSTURE: auto — allow-all is ACTIVE server-wide (the built-in mutate-ask floor + the MAIN agent's substitution floor are waived). A Deny in any scope and any deliberately configured Ask still apply. The CHILD prompt-injection defense stays ON: a subagent's $()/backtick/heredoc still resolves through the child-ask model. Recommended for UNATTENDED single-tenant use.")
 	case app.PostureYolo:
-		slog.Warn("OPERATOR POSTURE: yolo — allow-all server-wide AND the CHILD prompt-injection defense is OFF: $()/backtick/heredoc commands AUTO-RUN in subagents/branches. A Deny in any scope and any deliberately configured Ask still apply. ISOLATED, EPHEMERAL, SINGLE-TENANT deployments ONLY. NOTE behaviour change: --yolo now ALSO loosens the child substitution floor (previously main-only).")
+		slog.Warn("OPERATOR POSTURE: yolo — allow-all server-wide AND the CHILD prompt-injection defense is OFF: $()/backtick/heredoc commands AUTO-RUN in subagents/branches. A Deny in any scope and any deliberately configured Ask still apply. ISOLATED, EPHEMERAL, SINGLE-TENANT deployments ONLY. NOTE behaviour change: --yolo now ALSO loosens the child substitution floor.")
 	}
 	return false, nil
 }
