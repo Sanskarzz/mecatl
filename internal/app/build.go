@@ -487,6 +487,38 @@ type Config struct {
 	// docs/design/ALLOW-ALL-POSTURE.md).
 	AllowAllTools bool
 
+	// Posture is the graduated operator trust/automation tier (strict < trusted <
+	// auto < yolo). It is the single source the derived knobs below are computed from
+	// in applyPosture (run BEFORE resolveTrust in Build). --posture sets it directly;
+	// --yolo and --trust-project are ALIASES (resolvePosture raises the tier from
+	// them); the operator-global settings.yaml `posture:` key folds in via
+	// foldOperatorPosture (CLI out-ranks YAML). PostureStrict (zero) is the
+	// fail-closed default. See internal/app/posture.go.
+	Posture Posture
+	// LooseChildSubstitution loosens the built-in substitution Ask floor for
+	// CHILD/subagent/branch engines (childEvaluatorOptions adds WithLooseSubstitution
+	// when set), turning OFF the child prompt-injection defense so a $()/backtick/
+	// heredoc command auto-runs in a subagent. Derived by applyPosture: TRUE only
+	// under PostureYolo. strict/trusted/auto leave it false (the child substitution
+	// floor stands; a child's substitution still resolves through the child-ask
+	// model). NEVER set directly — it is a posture-derived knob.
+	LooseChildSubstitution bool
+	// PostureFlagSet records whether the operator passed an explicit --posture flag.
+	// When true, foldOperatorPosture leaves the operator-YAML posture: value alone
+	// (CLI out-ranks YAML) and resolvePosture WARNs if an alias raised above the
+	// explicit value. Set by the cmd mains alongside Posture.
+	PostureFlagSet bool
+	// Privileged is the cmd-computed predicate "running as root WITHOUT a declared
+	// sandbox" (euid 0 && MECATL_SANDBOX/IS_SANDBOX unset). It is the input to the
+	// authoritative posture root-refusal: Build calls PostureRefusalReason AFTER the
+	// posture fold (resolvePosture + applyPosture), so an allow-all tier set ONLY via
+	// the operator-global settings.yaml `posture:` key — which the CLI-only pre-check
+	// never sees — still hits the refusal a root, unsandboxed `--yolo` always did. The
+	// cmd layer owns the os.Geteuid / env reads (keeping os out of internal/app) and
+	// threads the bool here. DEFAULT false: a non-root or sandboxed process never
+	// refuses, and a binary that does not compute it (tests) is never spuriously refused.
+	Privileged bool
+
 	// Interactive reports whether a HUMAN approver is attached to the main engine's
 	// runs (a live Converse / HTTP-SSE client that can answer a permission ask). It is
 	// threaded onto the MAIN engine's agent.Deps.Interactive (per session, via
@@ -718,6 +750,34 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		cfg.Diagnostics = port.NopDiagnostics{}
 	}
 
+	// Operator POSTURE ladder (strict < trusted < auto < yolo): resolved BEFORE the
+	// trust fold so applyPosture's raised TrustProject feeds resolveTrust + the
+	// permResolver. The operator-tier settings.yaml `posture:` key (user-global + CLI
+	// only — a project file's posture: is IGNORED with a WARN, the fail-closed core)
+	// is folded onto cfg.Posture first; a transient resolver reads it. TrustProject
+	// gating is consulted lazily per-root in Resolve, so this transient resolver's
+	// (pre-applyPosture) TrustProject is irrelevant — only the OPERATOR-tier posture:
+	// scalar (read at construction from the user-global/CLI tiers) is taken here. The
+	// REAL cfg.permResolver is built below with the final (posture-raised)
+	// TrustProject. Aliases (--yolo ⇒ yolo, --trust-project ⇒ ≥trusted) raise the tier
+	// MAX-fold; applyPosture then derives AllowAllTools / LooseChildSubstitution /
+	// the TrustProject floor.
+	cfg.permResolver = buildPermResolver(cfg)
+	cfg = foldOperatorPosture(cfg)
+	cfg.Posture = resolvePosture(cfg, postureNoCeiling)
+	cfg = applyPosture(cfg)
+	// AUTHORITATIVE root/no-sandbox refusal: applied HERE, after the full posture fold,
+	// so an allow-all tier set ONLY via the operator-global settings.yaml `posture:`
+	// key (which the cmd-layer CLI-only pre-check never sees) cannot escape the refusal
+	// that a root, unsandboxed `--yolo` always hit. cfg.Privileged is the cmd-computed
+	// "root && !sandbox" predicate (the cmd owns the os/env reads). This is the
+	// fail-closed backstop; the cmd pre-check is only a fast path.
+	if err := PostureRefusalReason(cfg.Posture, cfg.Privileged); err != nil {
+		return nil, err
+	}
+	narratePosture(cfg.diag(), cfg.Posture)
+	cfg.permResolver = nil // rebuilt below with the posture-raised TrustProject
+
 	trust := resolveTrust(cfg)
 	narrateTrust(cfg.diag(), trust, cfg.Workspace)
 	cfg.TrustProject = trust.Trusted
@@ -902,6 +962,10 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// which has no per-session selector in P0. A per-session SELECTOR session (see
 		// the modelCapability call below, evaluated post-Swap) DOES get the live value.
 		DefaultCapabilities: modelCapability(reg, reg.Default(), cfg.Model),
+		// Posture: the resolved server-wide posture tier as a string, projected into the
+		// ServerCapabilities echo as CHROME (a client renders a "⚠ auto"/"⚠ yolo" badge).
+		// NOT session state — see server.Config.Posture.
+		Posture: cfg.Posture.String(),
 		// DefaultResolvedModel: the EFFECTIVE provider+model the DEFAULT/shared engine
 		// resolved to (the registry default provider + the already-resolved cfg.Model +
 		// the catalog-seed context window for that pair), computed ONCE here in
@@ -4438,9 +4502,10 @@ func defaultRules() []governance.Rule {
 // so the main and child rulesets cannot drift: under --yolo the SAME blanket
 // allow-all rule binds BOTH the main engine and its children, loosening the
 // built-in mutate-ask floor for both. A Deny in any scope and any CONFIGURED
-// Ask still win (deny-dominance + the configured-ask floor are unaffected). What
-// stays MAIN-only is the substitution-floor LOOSENING (WithLooseSubstitution),
-// which lives in mainEvaluatorOptions, never childEvaluatorOptions — see
+// Ask still win (deny-dominance + the configured-ask floor are unaffected). The
+// substitution-floor LOOSENING (WithLooseSubstitution) is separate from this rule: it
+// rides mainEvaluatorOptions always, and childEvaluatorOptions only under posture yolo
+// (the tier-dependent child loosening) — see internal/app/posture.go and
 // docs/design/ALLOW-ALL-POSTURE.md.
 func yoloAllowAllRule(audience governance.Audience) governance.Rule {
 	return governance.Rule{Scope: governance.ScopeCLI, Effect: governance.Allow, Audience: audience}
@@ -4450,9 +4515,9 @@ func yoloAllowAllRule(audience governance.Audience) governance.Rule {
 // — when cfg.AllowAllTools — a single ScopeCLI allow-all rule (AudienceMain)
 // that loosens that floor (a Deny in any scope and any configured Ask still
 // win). The SAME rule (with AudienceSubagent) is injected into childRules under
-// --yolo, so the allow-all RULE binds both main and children; only the
-// substitution-floor LOOSENING (mainEvaluatorOptions' WithLooseSubstitution)
-// stays main-only.
+// allow-all (posture auto/yolo), so the allow-all RULE binds both main and children;
+// the substitution-floor LOOSENING is separate and tier-dependent (mainEvaluatorOptions
+// always; childEvaluatorOptions only under posture yolo).
 func mainRules(cfg Config) []governance.Rule {
 	rules := defaultRules()
 	if cfg.AllowAllTools {
@@ -4465,17 +4530,17 @@ func mainRules(cfg Config) []governance.Rule {
 // MAIN engine's policy. It ALWAYS pins the audience to AudienceMain (issue #32):
 // without it, subagent-tagged resolver extras (the permconfig `subagent:` block)
 // would bind the main engine too — the audience pin is what keeps a child-scoped
-// rule from leaking into the interactive engine. Under --yolo (cfg.AllowAllTools)
-// it additionally loosens the built-in substitution Ask floor
+// rule from leaking into the interactive engine. When cfg.AllowAllTools (posture
+// auto OR yolo) it additionally loosens the built-in substitution Ask floor
 // (WithLooseSubstitution) — consistent with the mutate-ask floor the ScopeCLI
-// allow-all rule already loosens, so a substitution command no longer prompts
-// under yolo. A configured Deny/Ask in any scope still wins (deny-dominance and
-// the configured-ask floor are unaffected). Child/member policies are built with
-// their own ruleset + audience via childPermPolicy; under --yolo the allow-all
-// RULE binds children too (childRules injects the AudienceSubagent variant), but
-// the substitution LOOSENING rides this main-policy seam only — a child's
-// substitution floor still resolves through the child-ask model, never the yolo
-// loosening (the substitution loosening stays main-only).
+// allow-all rule already loosens, so a substitution command no longer prompts on the
+// MAIN engine. A configured Deny/Ask in any scope still wins (deny-dominance and the
+// configured-ask floor are unaffected). The CHILD substitution loosening is now
+// TIER-DEPENDENT, not main-only: childEvaluatorOptions(cfg) ALSO adds
+// WithLooseSubstitution under posture yolo (cfg.LooseChildSubstitution) — so at auto
+// the main loosens but children still resolve their substitution through the child-ask
+// model, while at yolo children loosen too (child prompt-injection defense OFF). See
+// childEvaluatorOptions and internal/app/posture.go.
 func mainEvaluatorOptions(cfg Config) []governance.EvaluatorOption {
 	opts := []governance.EvaluatorOption{governance.WithAudience(governance.AudienceMain)}
 	if cfg.AllowAllTools {
@@ -4592,24 +4657,33 @@ func childRules(cfg Config) []governance.Rule {
 // childEvaluatorOptions returns the governance.Evaluator options for a
 // child/member policy: the AudienceSubagent pin (issue #32), so top-level
 // (AudienceMain) config allow/ask never bind a child while `subagent:`-block
-// rules and AudienceAll denies do. Deliberately NO WithLooseSubstitution here:
-// under --yolo the allow-all RULE binds children (childRules prepends the
-// AudienceSubagent variant), but the substitution-floor LOOSENING stays
-// main-only — a child's substitution floor resolves through the child-ask model
-// (floored-configured-allow / isolation / surface / deny), never through the
-// yolo loosening.
-func childEvaluatorOptions() []governance.EvaluatorOption {
-	return []governance.EvaluatorOption{governance.WithAudience(governance.AudienceSubagent)}
+// rules and AudienceAll denies do. It is TIER-AWARE (posture ladder): under
+// PostureYolo (cfg.LooseChildSubstitution) it ALSO loosens the built-in
+// substitution Ask floor for children (WithLooseSubstitution) — the deliberate
+// child prompt-injection-defense-OFF behaviour yolo carries, so a child's
+// $()/backtick/heredoc command auto-runs. At strict/trusted/auto it deliberately
+// OMITS WithLooseSubstitution: even under --yolo's allow-all RULE (auto/yolo bind
+// children via childRules' AudienceSubagent variant), a child's substitution
+// floor still resolves through the child-ask model (floored-configured-allow /
+// isolation / surface / deny) UNLESS the operator opted into yolo. A configured
+// Deny/Ask in any scope still wins regardless. See internal/app/posture.go.
+func childEvaluatorOptions(cfg Config) []governance.EvaluatorOption {
+	opts := []governance.EvaluatorOption{governance.WithAudience(governance.AudienceSubagent)}
+	if cfg.LooseChildSubstitution {
+		opts = append(opts, governance.WithLooseSubstitution(true))
+	}
+	return opts
 }
 
 // childPermPolicy builds the shared child/member permission policy (issue #32):
 // the allow-all floor (childRules), NO learned-rule store (children never
-// learn), the workspace-PINNED config resolver, and the AudienceSubagent pin.
-// With no config wired (cfg.childPermResolver nil — every direct-call test and
-// the no-config default) it behaves byte-identically to the historical bare
-// allow-all policy.
+// learn), the workspace-PINNED config resolver, and the AudienceSubagent pin
+// (plus, under PostureYolo, the child substitution loosening — childEvaluatorOptions
+// is tier-aware). With no config wired (cfg.childPermResolver nil — every
+// direct-call test and the no-config default) and PostureStrict it behaves
+// byte-identically to the historical bare allow-all policy.
 func childPermPolicy(cfg Config) *permpolicy.Policy {
-	return permpolicy.NewPolicyWithResolver(childRules(cfg), nil /* children never learn */, cfg.childPermResolver, childEvaluatorOptions()...)
+	return permpolicy.NewPolicyWithResolver(childRules(cfg), nil /* children never learn */, cfg.childPermResolver, childEvaluatorOptions(cfg)...)
 }
 
 // defaultLimits returns the non-zero stop limits injected for sessions created

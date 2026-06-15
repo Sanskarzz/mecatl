@@ -204,6 +204,14 @@ type Config struct {
 	// child/member service with no provider. (multi-provider Phase 0, S5.)
 	DefaultCapabilities port.ProviderCapabilities
 
+	// Posture is the SERVER-WIDE operator posture-ladder tier as a string
+	// ("strict"/"trusted"/"auto"/"yolo"), projected into the ServerCapabilities echo
+	// as CHROME ONLY (a client renders a "⚠ auto"/"⚠ yolo" badge). It is NOT session
+	// state — it never changes per session; the per-session knob is permission MODE.
+	// Empty (the zero value / an unconfigured child service) yields no badge. String
+	// passthrough — no enum on the wire (the EvNoProgress/StopBudget discipline).
+	Posture string
+
 	// DefaultResolvedModel is the EFFECTIVE provider+model the DEFAULT/shared engine
 	// resolved to (the registry default provider + cfg.Model + the default context
 	// window), computed once in composition. It is the single source for the
@@ -827,6 +835,7 @@ func (s *Service) capabilities() *mecatlv1.ServerCapabilities {
 		Bash:           has(tools.BashToolName),
 		Image:          pcaps.Image,
 		Audio:          pcaps.Audio,
+		Posture:        s.cfg.Posture,
 	}
 }
 

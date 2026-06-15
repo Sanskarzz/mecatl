@@ -69,12 +69,19 @@ func run(args []string) error {
 	// this floor to the mecatui.log file writer. See docs/design/DIAGNOSTICS.md.
 	installBaselineSlog(cfg.quiet)
 
-	// Allow-all posture WARN: mecatui has no slog and runs on the alt screen, so emit
-	// a single pre-TUI stderr line (it lands in scrollback before the alt screen takes
+	// Operator-posture WARN: mecatui has no slog and runs on the alt screen, so emit a
+	// single pre-TUI stderr line (it lands in scrollback before the alt screen takes
 	// over). Only meaningful for the embedded server (an external --server owns its own
-	// posture). Refusal already handled in validate().
-	if cfg.allowAllTools && cfg.server == "" {
-		fmt.Fprintln(os.Stderr, "mecatui: WARNING: --yolo is active; permission prompts for the built-in mutate-ask floor are SUPPRESSED on the embedded server. A Deny in any scope and any deliberately configured Ask still apply. For ephemeral, isolated, single-tenant use only.")
+	// posture). Refusal already handled in validate(). The line is tier-specific:
+	// strict/trusted are silent, auto/yolo each warn (yolo names the child-defense-OFF
+	// behaviour change).
+	if cfg.server == "" {
+		switch embeddedAuthoritativePosture(cfg) {
+		case app.PostureAuto:
+			fmt.Fprintln(os.Stderr, "mecatui: WARNING: posture auto is active; allow-all is ON for the embedded server (the built-in mutate-ask floor + the MAIN agent's substitution floor are waived). A Deny in any scope and any configured Ask still apply. The CHILD prompt-injection defense stays ON. For unattended single-tenant use.")
+		case app.PostureYolo:
+			fmt.Fprintln(os.Stderr, "mecatui: WARNING: posture yolo is active; allow-all is ON AND the CHILD prompt-injection defense is OFF — $()/backtick/heredoc commands AUTO-RUN in subagents/branches. A Deny in any scope and any configured Ask still apply. ISOLATED, SINGLE-TENANT use ONLY. NOTE: --yolo now ALSO loosens the child substitution floor (previously main-only).")
+		}
 	}
 
 	reg := buildRegistry(cfg.workspace, cfg.themeDir)
@@ -404,6 +411,14 @@ func embeddedConfig(cfg config, diag port.Diagnostics) app.Config {
 		ImportClaudePermissions: true,
 		TrustProject:            cfg.trustProject,
 		AllowAllTools:           cfg.allowAllTools,
+		// Posture ladder: --posture sets the tier; --yolo/--trust-project are aliases
+		// composition folds MAX-tier. postureFlagSet lets CLI out-rank the operator-global
+		// settings.yaml posture: key. Privileged is the "root && !sandbox" predicate fed
+		// to Build's AUTHORITATIVE root-refusal, so a YAML-only allow-all tier cannot
+		// escape it.
+		Posture:        app.ParsePosture(cfg.posture),
+		PostureFlagSet: cfg.postureFlagSet,
+		Privileged:     embeddedPrivileged(),
 		// INTERACTIVE: mecatui IS the interactive client — a human sits at the
 		// approval modal. So the embedded server runs interactive (Interactive=true),
 		// and a subagent/team-member/branch child's unresolved permission ask is

@@ -3,6 +3,7 @@ package permconfig
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/stacklok/mecatl/engine/adapter/permpolicy"
@@ -119,6 +120,14 @@ type Resolver struct {
 	// CLI (explicit files) out-ranks user-global.
 	operatorGuardrails *GuardrailsSection
 
+	// operatorPosture is the OPERATOR-TIER posture: scalar (issue: posture ladder),
+	// read ONCE at construction from the user-global + CLI tiers ONLY. A project-tier
+	// file's posture: key is deliberately IGNORED (a project repo raising the
+	// automation posture is a security DOWNGRADE — loadProjectRules WARNs when it sees
+	// one). Empty when no operator-tier file carried a posture: scalar. CLI (explicit
+	// files) out-ranks user-global (first-non-empty keeps CLI).
+	operatorPosture string
+
 	mu    sync.RWMutex
 	cache map[string]*cacheEntry // keyed by ws.Root()
 }
@@ -132,6 +141,17 @@ func (r *Resolver) OperatorGuardrails() *GuardrailsSection {
 		return nil
 	}
 	return r.operatorGuardrails
+}
+
+// OperatorPosture returns the operator-tier posture: scalar (user-global + CLI
+// only), or "" when none was configured. It is the SOLE accessor the composition
+// layer uses to read posture from config — by construction it never returns a
+// project-tier value (a project posture: is ignored with a WARN in loadProjectRules).
+func (r *Resolver) OperatorPosture() string {
+	if r == nil {
+		return ""
+	}
+	return r.operatorPosture
 }
 
 // New constructs a Resolver from opts, reading the user-global + explicit (CLI)
@@ -298,6 +318,16 @@ func (r *Resolver) loadProjectRules(ws tool.WorkspaceReader) []governance.Rule {
 				"guardrails: IGNORING a project-tier guardrails: block (operator-tier only — a project repo cannot configure/disable a security checker; set guardrails in your user-global settings.yaml or via --guardrails-model)",
 				"file", src.path, "root", ws.Root())
 		}
+		// Posture is OPERATOR-TIER ONLY (the fail-closed core of the posture ladder): a
+		// project file's posture: scalar is IGNORED with a loud WARN. Honouring it would
+		// let a malicious repo RAISE the automation posture (e.g. posture: yolo to
+		// auto-run substitutions in subagents) — a security DOWNGRADE the tighten-only
+		// project gate forbids (it reverses here, exactly like guardrails).
+		if strings.TrimSpace(cfg.Posture) != "" {
+			r.diag.Log(context.Background(), port.LevelWarn,
+				"posture: IGNORING a project-tier posture: scalar (operator-tier only — a project repo cannot raise the automation posture; set posture in your user-global settings.yaml or via --posture)",
+				"file", src.path, "root", ws.Root(), "ignored_value", strings.TrimSpace(cfg.Posture))
+		}
 		rules = append(rules, rulesFromConfig(cfg, src.scope, &report)...)
 	}
 
@@ -357,6 +387,8 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 		// Operator-tier guardrails (issue #27): CLI files out-rank user-global, so the
 		// FIRST CLI file with a guardrails: block wins (first-non-nil keeps CLI).
 		r.captureGuardrails(cfg.Guardrails)
+		// Operator-tier posture: same first-non-empty-keeps-CLI discipline as guardrails.
+		r.capturePosture(cfg.Posture)
 	}
 
 	if !r.opts.Conventional {
@@ -376,6 +408,8 @@ func (r *Resolver) loadUserRules(report *Report) []governance.Rule {
 				rules = append(rules, rulesFromConfig(cfg, governance.ScopeUser, report)...)
 				// User-global guardrails: captured only if no higher CLI file already did.
 				r.captureGuardrails(cfg.Guardrails)
+				// User-global posture: captured only if no higher CLI file already did.
+				r.capturePosture(cfg.Posture)
 			}
 		}
 	}
@@ -407,6 +441,22 @@ func (r *Resolver) captureGuardrails(g *GuardrailsSection) {
 		return
 	}
 	r.operatorGuardrails = g
+}
+
+// capturePosture records the FIRST operator-tier posture: scalar seen during
+// construction (CLI files are parsed before user-global, so CLI wins on
+// first-non-empty). It is called only from loadUserRules — the operator (user-
+// global + CLI) tiers — never from loadProjectRules, so a project file can never
+// supply posture (the fail-closed core). A whitespace-only value is treated as
+// absent.
+func (r *Resolver) capturePosture(p string) {
+	if r.operatorPosture != "" {
+		return
+	}
+	if strings.TrimSpace(p) == "" {
+		return
+	}
+	r.operatorPosture = strings.TrimSpace(p)
 }
 
 // specOf reconstructs a human-readable "Tool(pattern)" spec from a rule, for the

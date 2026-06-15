@@ -127,14 +127,39 @@ func (m Model) renderHeader() string {
 	// changed-files indicator while the user is scrolled up, so it is visible
 	// exactly when it matters; at the bottom it is "" and the changed-files cue
 	// shows (so the steady-state at-bottom frame is byte-identical to before).
-	indicator := m.scrollIndicator()
-	if indicator == "" {
-		indicator = m.changedFilesIndicator()
+	tail := m.scrollIndicator()
+	if tail == "" {
+		tail = m.changedFilesIndicator()
 	}
-	if indicator != "" {
-		line = m.fitHeader(line, indicator, m.widthOr())
+	// Operator-posture badge: right-aligned CHROME (NOT the per-session `mode`
+	// segment, which is PermissionMode). It surfaces the SERVER-WIDE automation
+	// posture for auto/yolo ONLY — strict/trusted render NO badge, so the steady-state
+	// frame (and the goldens) are byte-identical to before this feature. The badge is
+	// rendered in the "warning" style (NOT muted like the benign scroll/changed-files
+	// tail) so the one persistent in-session danger cue actually reads as danger. When a
+	// scroll/changed-files tail is also present the badge sits to its LEFT so the
+	// warning is never hidden by scrolling.
+	badge := m.postureBadge()
+	if badge != "" || tail != "" {
+		line = m.fitHeader(line, badge, tail, m.widthOr())
 	}
 	return m.deps.Theme.Style("header").Width(m.widthOr()).Render(line)
+}
+
+// postureBadge returns the right-aligned operator-posture chrome badge ("⚠ auto" /
+// "⚠ yolo"), or "" for strict/trusted (and an older server / unset Posture). It is
+// sourced from m.caps.Posture (set on SessionReadyMsg, server-wide) — DISTINct from
+// the per-session `mode` segment. Showing it only for the allow-all tiers keeps the
+// goldens for the common (strict) posture unchanged.
+func (m Model) postureBadge() string {
+	switch m.caps.Posture {
+	case "auto":
+		return "⚠ auto"
+	case "yolo":
+		return "⚠ yolo"
+	default:
+		return ""
+	}
 }
 
 // headerModelLabel returns the model label for the header, or "" when none should
@@ -258,18 +283,36 @@ func (m Model) changedFilesIndicator() string {
 // footer's footerGapPad but is owned by the header path (naming honesty).
 const headerGapPad = 2
 
-// fitHeader right-aligns the muted indicator beside the identity line when there
-// is room (accounting for the header's 1-cell horizontal padding on each side),
-// and otherwise returns the identity line unchanged — so the indicator never forces
-// a wrap; a too-narrow terminal simply sheds it. (The identity line itself still
-// wraps when it alone exceeds the width; the header's resulting rendered row count is
-// measured via region.height()/chrome() in layout.go.)
-func (m Model) fitHeader(line, indicator string, width int) string {
+// fitHeader right-aligns the indicator (an optional WARNING-styled posture badge plus
+// an optional MUTED scroll/changed-files tail) beside the identity line when there is
+// room (accounting for the header's 1-cell horizontal padding on each side), and
+// otherwise returns the identity line unchanged — so the indicator never forces a wrap;
+// a too-narrow terminal simply sheds it. The badge and tail are styled SEPARATELY (the
+// badge is danger, the tail is benign), so the persistent posture cue is visually
+// distinct from the scroll/changed-files cues. (The identity line itself still wraps
+// when it alone exceeds the width; the header's rendered row count is measured via
+// region.height()/chrome() in layout.go.)
+func (m Model) fitHeader(line, badge, tail string, width int) string {
 	const headerPad = 2 // the "header" style pads 1 cell each side
-	styled := m.deps.Theme.Style("muted").Render(indicator)
-	gap := width - headerPad - lipgloss.Width(line) - lipgloss.Width(indicator) - headerGapPad
+	// Plain (ANSI-free) text used ONLY for width math; the rendered segments carry style.
+	plain := badge
+	if badge != "" && tail != "" {
+		plain += "  " + tail
+	} else {
+		plain += tail
+	}
+	gap := width - headerPad - lipgloss.Width(line) - lipgloss.Width(plain) - headerGapPad
 	if gap < 0 {
 		return line
+	}
+	var styled string
+	switch {
+	case badge != "" && tail != "":
+		styled = m.deps.Theme.Style("warning").Render(badge) + "  " + m.deps.Theme.Style("muted").Render(tail)
+	case badge != "":
+		styled = m.deps.Theme.Style("warning").Render(badge)
+	default:
+		styled = m.deps.Theme.Style("muted").Render(tail)
 	}
 	return line + strings.Repeat(" ", gap) + styled
 }

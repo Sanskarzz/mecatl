@@ -359,6 +359,18 @@ type config struct {
 	importClaudePermissions bool
 	trustProject            bool
 	allowAllTools           bool
+
+	// posture is the graduated operator posture ladder (strict < trusted < auto <
+	// yolo). --posture sets it; --yolo and --trust-project are ALIASES that raise the
+	// tier (resolvePosture in composition folds them MAX-tier). Empty = unset (the
+	// composition default PostureStrict, unless an alias or the operator-global
+	// settings.yaml posture: key raises it). printPosture prints the resolved tier and
+	// per-defense lines, then exits.
+	posture      string
+	printPosture bool
+	// postureFlagSet is true when --posture was passed explicitly (set after parse via
+	// fs.Visit), so composition lets CLI out-rank the settings.yaml posture: key.
+	postureFlagSet bool
 }
 
 // mcpServerList is a repeatable flag.Value collecting --mcp-server name=URL
@@ -566,15 +578,15 @@ func run() error {
 	// rather than slog.Default().
 	diag := slogdiag.NewFromLogger(logger)
 
-	// Allow-all posture: refuse the dangerous flag when running privileged outside a
-	// declared sandbox (root + no prompts can modify anything on the host). Checked
-	// AFTER the slog handler is installed and BEFORE app.Build, so it covers both the
-	// ACP and network serving modes.
-	if err := validateAllowAll(cfg); err != nil {
-		return err
-	}
-	if cfg.allowAllTools {
-		slog.Warn("ALLOW-ALL POSTURE ACTIVE (--yolo): permission prompts for the built-in mutate-ask floor are SUPPRESSED for EVERY session on this daemon. A Deny in any scope and any deliberately configured Ask (managed/project/user) still apply — a configured Ask may block an unattended run. Intended for ephemeral, isolated, single-tenant deployments only.")
+	// Operator posture: print/refuse/WARN for the AUTHORITATIVE composed tier (the
+	// --posture flag + --yolo/--trust-project aliases + the operator-global
+	// settings.yaml posture: key — the SAME tier app.Build resolves). Checked AFTER the
+	// slog handler is installed and BEFORE app.Build, so it covers both the ACP and
+	// network serving modes. The root/no-sandbox refusal here is a fast path; app.Build
+	// re-checks it as the fail-closed backstop. Returns handled=true when
+	// --print-posture asked to print-and-exit.
+	if handled, perr := applyPostureCLI(cfg, diag); handled || perr != nil {
+		return perr
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -820,6 +832,14 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 		TrustProject:            cfg.trustProject,
 		PermissionConfigs:       cfg.permissionConfigs,
 		AllowAllTools:           cfg.allowAllTools,
+		// Posture ladder: --posture sets the tier directly; --yolo/--trust-project are
+		// aliases composition folds MAX-tier (resolvePosture). postureFlagSet lets CLI
+		// out-rank the operator-global settings.yaml posture: key. Privileged is the
+		// "root && !sandbox" predicate fed to Build's AUTHORITATIVE root-refusal, so a
+		// YAML-only allow-all tier cannot escape it.
+		Posture:        app.ParsePosture(cfg.posture),
+		PostureFlagSet: cfg.postureFlagSet,
+		Privileged:     privilegedProcess(),
 		// mecated serves the bidi Converse + HTTP-SSE surfaces, whose clients CAN
 		// answer a permission ask (ResumeApproval) — so by default a subagent's
 		// unresolved Bash ask is SURFACED to the attached human rather than
@@ -836,21 +856,88 @@ func appConfig(cfg config, sink port.EventSink, recorder port.ToolCallRecorder, 
 	}
 }
 
-// allowAllRefusalReason returns a non-nil error when an allow-all request must
-// be refused: running privileged (euid 0) without a declared sandbox.
-func allowAllRefusalReason(allowAll bool, euid int, sandbox bool) error {
-	if allowAll && euid == 0 && !sandbox {
-		return errors.New("--yolo refused: running as root (euid 0) without a declared sandbox; set MECATL_SANDBOX=1 (or IS_SANDBOX=1) to affirm an isolated, disposable environment")
+// applyPostureCLI resolves the AUTHORITATIVE posture tier (the --posture flag +
+// --yolo/--trust-project aliases + the operator-global settings.yaml posture: key) and
+// runs its print / refuse / WARN surface, extracted from run() to keep that function's
+// cyclomatic complexity bounded. Returns handled=true when --print-posture asked to
+// print-and-exit (run() returns nil); a non-nil err is the root/no-sandbox refusal (a
+// fast path — app.Build re-checks it authoritatively as the fail-closed backstop).
+func applyPostureCLI(cfg config, diag port.Diagnostics) (handled bool, err error) {
+	effPosture := app.ResolveAuthoritativePosture(posturePreCheckConfig(cfg, diag))
+	if cfg.printPosture {
+		fmt.Print(renderPostureReport(effPosture))
+		return true, nil
 	}
-	return nil
+	if !app.IsKnownPostureToken(cfg.posture) {
+		slog.Warn("unknown --posture value; failing closed to strict", "value", cfg.posture)
+	}
+	if rerr := app.PostureRefusalReason(effPosture, privilegedProcess()); rerr != nil {
+		return false, rerr
+	}
+	switch effPosture {
+	case app.PostureStrict:
+		// Silent: the safe default.
+	case app.PostureTrusted:
+		slog.Info("operator posture: trusted (a discovered project's ALLOW rules are honoured; no allow-all, no substitution loosening)")
+	case app.PostureAuto:
+		slog.Warn("OPERATOR POSTURE: auto — allow-all is ACTIVE server-wide (the built-in mutate-ask floor + the MAIN agent's substitution floor are waived). A Deny in any scope and any deliberately configured Ask still apply. The CHILD prompt-injection defense stays ON: a subagent's $()/backtick/heredoc still resolves through the child-ask model. Recommended for UNATTENDED single-tenant use.")
+	case app.PostureYolo:
+		slog.Warn("OPERATOR POSTURE: yolo — allow-all server-wide AND the CHILD prompt-injection defense is OFF: $()/backtick/heredoc commands AUTO-RUN in subagents/branches. A Deny in any scope and any deliberately configured Ask still apply. ISOLATED, EPHEMERAL, SINGLE-TENANT deployments ONLY. NOTE behaviour change: --yolo now ALSO loosens the child substitution floor (previously main-only).")
+	}
+	return false, nil
+}
+
+// posturePreCheckConfig maps just the posture-relevant fields of the cmd config onto a
+// minimal app.Config for the --print-posture / fast-path-refusal read. It carries the
+// SAME permission-config discovery knobs Build uses (so the transient resolver finds
+// the same operator-global settings.yaml posture: key) plus the --posture/--yolo/
+// --trust-project inputs. It does NOT need the provider/engine fields — app.Build owns
+// the authoritative resolution + the engine; this is only the early read.
+func posturePreCheckConfig(cfg config, diag port.Diagnostics) app.Config {
+	return app.Config{
+		Workspace:               cfg.workspace,
+		PermissionsConventional: cfg.permissionsConventional,
+		ImportClaudePermissions: cfg.importClaudePermissions,
+		PermissionConfigs:       cfg.permissionConfigs,
+		Posture:                 app.ParsePosture(cfg.posture),
+		PostureFlagSet:          cfg.postureFlagSet,
+		AllowAllTools:           cfg.allowAllTools,
+		TrustProject:            cfg.trustProject,
+		Diagnostics:             diag,
+	}
+}
+
+// privilegedProcess reports the cmd-computed "root WITHOUT a declared sandbox"
+// predicate (euid 0 && MECATL_SANDBOX/IS_SANDBOX unset) threaded into the posture
+// root-refusal (the cmd owns the os/env reads; internal/app takes the bool). It is the
+// SAME value fed to app.Config.Privileged so the fast-path and Build agree.
+func privilegedProcess() bool {
+	return os.Geteuid() == 0 && !sandboxDeclared()
 }
 
 func sandboxDeclared() bool {
 	return os.Getenv("MECATL_SANDBOX") == "1" || os.Getenv("IS_SANDBOX") == "1"
 }
 
-func validateAllowAll(cfg config) error {
-	return allowAllRefusalReason(cfg.allowAllTools, os.Geteuid(), sandboxDeclared())
+// renderPostureReport renders the --print-posture output: the resolved tier and a
+// plain-English line per defense (allow-all, main substitution loosening, child
+// substitution loosening / child prompt-injection defense, project-trust floor).
+func renderPostureReport(p app.Posture) string {
+	onoff := func(b bool) string {
+		if b {
+			return "ON"
+		}
+		return "off"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "operator posture: %s\n", p.String())
+	fmt.Fprintf(&b, "  allow-all (built-in mutate-ask floor waived, main + children): %s\n", onoff(p >= app.PostureAuto))
+	fmt.Fprintf(&b, "  main-agent substitution auto-run ($()/backtick/heredoc):       %s\n", onoff(p >= app.PostureAuto))
+	fmt.Fprintf(&b, "  child substitution auto-run (prompt-injection defense %s):     %s\n",
+		map[bool]string{true: "OFF", false: "ON"}[p == app.PostureYolo], onoff(p == app.PostureYolo))
+	fmt.Fprintf(&b, "  project-trust floor (honour a project's ALLOW rules):          %s\n", onoff(p >= app.PostureTrusted))
+	fmt.Fprintf(&b, "  (a Deny in any scope and any configured Ask ALWAYS apply, at every tier)\n")
+	return b.String()
 }
 
 // parseFlags turns argv into a config, resolving env-derived defaults.
@@ -973,7 +1060,10 @@ func parseFlags(argv []string) (config, error) {
 	fs.BoolVar(&cfg.importClaudePermissions, "import-claude-permissions", false, "also import Claude-Code settings.json permissions (project <workspace>/.claude/settings{,.local}.json and user ~/.claude/settings.json) when --permissions-conventional is set. LOSSY (fail-safe): a WebFetch(domain:...) ALLOW is DEMOTED to ask, a Read(~/...) rule is left INERT (\"~\" unexpanded), an unparseable spec is DROPPED — every case is logged")
 	fs.BoolVar(&cfg.trustProject, "trust-project", false, "honour a discovered PROJECT's ALLOW rules (its deny/ask rules are always honoured regardless). Default OFF (the safe stance): an untrusted repo's permission grants are ignored. TRUST BOUNDARY: enabling this lets a checked-in .mecatl/settings.yaml auto-approve tool calls — only pass it for a repo you trust")
 	fs.BoolVar(&cfg.allowAllTools, "yolo", false,
-		"OPERATOR POSTURE (dangerous): suppress permission prompts for the built-in mutate-ask floor server-wide, for ephemeral/sandboxed single-tenant use only. A Deny in ANY scope and any DELIBERATELY configured Ask still apply (see docs/design/ALLOW-ALL-POSTURE.md). Refused when running as root (euid 0) unless MECATL_SANDBOX=1 (or IS_SANDBOX=1) declares an isolated environment.")
+		"ALIAS for --posture yolo (dangerous): allow-all server-wide AND loosen the substitution floor for CHILDREN too — a subagent's $()/backtick/heredoc command AUTO-RUNS (child prompt-injection defense OFF). A Deny in ANY scope and any DELIBERATELY configured Ask still apply (see docs/design/ALLOW-ALL-POSTURE.md). Isolated/ephemeral/single-tenant ONLY. Refused when running as root (euid 0) unless MECATL_SANDBOX=1 (or IS_SANDBOX=1) declares an isolated environment.")
+	fs.StringVar(&cfg.posture, "posture", "",
+		"OPERATOR POSTURE LADDER (strict < trusted < auto < yolo): strict (default) prompts every mutate; trusted honours a project's ALLOW rules (= --trust-project); auto adds allow-all + main substitution loosening (recommended UNATTENDED default, child injection-defense ON); yolo additionally auto-runs $()/backtick/heredoc in CHILDREN (injection-defense OFF, isolated single-tenant only). --yolo/--trust-project are aliases. auto/yolo are refused as root outside MECATL_SANDBOX. An unknown value fails closed to strict with a WARN.")
+	fs.BoolVar(&cfg.printPosture, "print-posture", false, "print the resolved operator posture tier and a plain-English line per defense, then exit (does not start the server)")
 
 	fs.BoolVar(&cfg.acp, "acp", false, "serve the Agent Client Protocol (ACP) over stdio for an editor that spawned mecated as a subprocess (JSON-RPC 2.0 on stdin/stdout). Skips the TCP/HTTP listeners; the single session workspace is the editor-provided cwd. No TLS/auth/rate-limit (stdio is a local, parent-process trust boundary)")
 
@@ -987,6 +1077,15 @@ func parseFlags(argv []string) (config, error) {
 	if err := fs.Parse(argv); err != nil {
 		return config{}, err
 	}
+
+	// Record whether --posture was set EXPLICITLY (vs left at its empty default) so
+	// composition can let CLI out-rank the operator-global settings.yaml posture: key
+	// and WARN if an alias raised above an explicit lower --posture.
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "posture" {
+			cfg.postureFlagSet = true
+		}
+	})
 
 	// --perf-mcp rides the admin listener, so it is meaningless without one.
 	if cfg.perfMCP && cfg.metricsAddr == "" {

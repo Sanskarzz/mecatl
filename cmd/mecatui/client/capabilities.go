@@ -30,6 +30,11 @@ type Capabilities struct {
 	// server's provider cannot read (an old server with no field → false → degrade).
 	Image bool
 	Audio bool
+	// Posture is the SERVER-WIDE operator posture tier ("strict"/"trusted"/"auto"/
+	// "yolo"), CHROME ONLY: the ui renders a "⚠ auto"/"⚠ yolo" badge so an operator
+	// sees the daemon's automation posture. NOT session state. Empty (an older server,
+	// or strict/trusted) → no badge.
+	Posture string
 }
 
 // capabilitiesFrom maps a proto ServerCapabilities (nil-safe) to the plain
@@ -51,6 +56,7 @@ func capabilitiesFrom(c *mecatlv1.ServerCapabilities) Capabilities {
 		ModelSelection: c.GetModelSelection(),
 		Image:          c.GetImage(),
 		Audio:          c.GetAudio(),
+		Posture:        c.GetPosture(),
 	}
 }
 

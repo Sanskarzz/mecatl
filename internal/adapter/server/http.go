@@ -139,15 +139,16 @@ func resolvedModelToJSON(rm ResolvedModel) *resolvedModelJSON {
 // client gets. Populated from the shared Service.capabilities() so the two
 // surfaces cannot drift.
 type serverCapabilitiesJSON struct {
-	MCP            bool `json:"mcp"`
-	SlashCommands  bool `json:"slash_commands"`
-	Memory         bool `json:"memory"`
-	Skills         bool `json:"skills"`
-	Teams          bool `json:"teams"`
-	Bash           bool `json:"bash"`
-	Image          bool `json:"image"`
-	Audio          bool `json:"audio"`
-	ModelSelection bool `json:"model_selection"`
+	MCP            bool   `json:"mcp"`
+	SlashCommands  bool   `json:"slash_commands"`
+	Memory         bool   `json:"memory"`
+	Skills         bool   `json:"skills"`
+	Teams          bool   `json:"teams"`
+	Bash           bool   `json:"bash"`
+	Image          bool   `json:"image"`
+	Audio          bool   `json:"audio"`
+	ModelSelection bool   `json:"model_selection"`
+	Posture        string `json:"posture,omitempty"`
 }
 
 // capabilitiesJSON projects the shared proto capabilities onto the JSON shape.
@@ -165,6 +166,7 @@ func capabilitiesJSON(c *mecatlv1.ServerCapabilities) *serverCapabilitiesJSON {
 		Image:          c.GetImage(),
 		Audio:          c.GetAudio(),
 		ModelSelection: c.GetModelSelection(),
+		Posture:        c.GetPosture(),
 	}
 }
 

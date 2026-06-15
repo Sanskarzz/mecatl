@@ -217,6 +217,83 @@ No proto change. No ACP change. No `session.PermissionMode` change.
   implemented** — metadata-only, never consulted in the decision logic. If we want
   a real "auto-approve edits but still ask for Bash" tier, that is its own design.
 
+## Posture ladder (the graduated operator tier)
+
+> **Behaviour change — `--yolo` now also loosens the CHILD substitution floor.**
+> Previously the substitution-floor loosening was **main-only** (`mainEvaluatorOptions`
+> only). Under the new ladder, `--yolo` (= `--posture yolo`) **also** loosens the child
+> substitution floor: a subagent / team-member / parallel-branch
+> `$(...)`/backtick/heredoc command **auto-runs**, with the child prompt-injection
+> defence **OFF**. Operators who want allow-all but the child defence kept **ON** must
+> use the new `--posture auto` tier. This is the one user-visible behaviour change in
+> the ladder; everything else is a refactor of the existing knobs into one ordered tier.
+> (The repo has no separate changelog — this callout is the release note.)
+
+The standalone `--yolo` and `--trust-project` flags are now **subsumed into one
+ordered operator posture**, defined in `internal/app/posture.go` (`Posture` with
+`PostureStrict` iota-zero=fail-closed, `PostureTrusted`, `PostureAuto`, `PostureYolo`;
+`parsePosture`/`ParsePosture`, `resolvePosture`, `applyPosture`, `foldOperatorPosture`,
+`narratePosture`). Higher tiers grant more autonomy:
+
+| posture | `AllowAllTools` | main loose-subst | child loose-subst | `TrustProject` floor |
+|---|---|---|---|---|
+| `strict` (**default**, fail-closed) | false | false | false | (operator's own `--trust-project`) |
+| `trusted` | false | false | false | true |
+| `auto` (recommended unattended default) | true | true | **false** (child injection-defence **ON**) | true |
+| `yolo` | true | true | **true** (child injection-defence **OFF**) | true |
+
+- **`--yolo` and `--trust-project` are now aliases** for `--posture yolo` and
+  `--posture trusted` respectively. `resolvePosture` folds the `--posture` flag and the
+  two aliases at the **MAX tier** (the higher wins, with a `WARN` on a conflict such as
+  `--posture strict --yolo` → `yolo`); the CLI out-ranks the operator-tier YAML value.
+  An unknown `--posture` token fails **closed** to `strict` (iota-zero) with a `WARN`.
+- **`applyPosture` derives the knobs** — `AllowAllTools`, the main/child substitution
+  loosening, and the `TrustProject` floor — and runs **before** `resolveTrust` in
+  `Build`. `foldOperatorPosture` reads the operator-tier `settings.yaml` `posture:`
+  string via `permconfig.Resolver.OperatorPosture()`; a **project-tier `posture:` is
+  ignored with a WARN** (security-critical — a malicious repo's `.mecatl/posture: yolo`
+  must never be honoured), mirroring the `guardrails:` operator-tier-only treatment.
+- **`auto` is the recommended unattended default**: allow-all (main + children) but the
+  **child prompt-injection defence stays ON**. The child substitution floor stays gated
+  exactly as in *§ Why not a `yolo` PermissionMode → 3*: a child's substitution command
+  still resolves through the child-ask model (`flooredAllowSafe`), so a delegated
+  explorer cannot smuggle in an attacker-authored substitution.
+
+### Where the child loosening is applied (the one new knob)
+
+The `yolo`-only child loosening is the `Config.LooseChildSubstitution` knob, applied
+via `childEvaluatorOptions(cfg)` in `internal/app/build.go` (`childEvaluatorOptions`):
+the function is now **cfg-aware** and adds `governance.WithLooseSubstitution(true)` (in
+`engine/governance`, `WithLooseSubstitution`) to the child evaluator **only** under
+`yolo`. Under every other tier `childEvaluatorOptions` omits it, so the child
+substitution floor holds. This is symmetric with `mainEvaluatorOptions`, which carries
+`WithLooseSubstitution` for both `auto` and `yolo`.
+
+### Still goes through `governance.Evaluate` — never a bypass
+
+The ladder is a refactor of **rule + evaluator-option + trust-bool composition** in the
+composition layer; it does **not** introduce a code path that short-circuits the
+evaluator. Every tier — including `yolo` — still resolves through `governance.Evaluate`:
+
+- **Deny-dominance** is absolute (a `Deny` in any scope, incl. `ScopeManaged`, wins).
+- **Plan-mode hard-deny** of mutations still fires first.
+- A **deliberately configured `Ask`** (managed/project/user) still asks at every tier.
+- **Secret redaction** and the **gauntlet-#7** child-leak guarantees hold.
+
+This re-affirms the contrast with the rejected `ModeYolo` spike (*§ Why not a `yolo`
+PermissionMode*): that spike returned `Allow` in the adapter **before** the governance
+evaluator was consulted, defeating a `ScopeManaged` Deny. The ladder does the opposite —
+`yolo` composes a loosened-but-still-evaluated posture, so an admin `Deny` and a
+configured `Ask` survive even at the top tier. A posture the operator sets at process
+start is **not** a bypass prompt-injection can reach.
+
+### Chrome surfacing
+
+`ServerCapabilities.posture` (proto string field, **chrome-only** — it is never session
+state) relays the resolved tier to clients. `mecatui` renders a `⚠ auto` / `⚠ yolo`
+badge and exposes a `/posture` builtin so the operator can see the active posture at a
+glance.
+
 ## References
 
 External research backing this decision (Claude Code `bypassPermissions` +

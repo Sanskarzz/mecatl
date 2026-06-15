@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/stacklok/mecatl/internal/app"
 )
 
 // config is the resolved CLI/env configuration for mecatui.
@@ -98,6 +100,15 @@ type config struct {
 	// in any scope and any deliberately configured Ask still apply. Refused as root
 	// outside a declared sandbox (see validate). See docs/design/ALLOW-ALL-POSTURE.md.
 	allowAllTools bool
+
+	// posture is the graduated operator posture ladder for the EMBEDDED server only
+	// (strict < trusted < auto < yolo). --posture sets it; --yolo and --trust-project
+	// are ALIASES composition folds MAX-tier. Empty = unset (composition default
+	// PostureStrict unless an alias/settings.yaml raises it). postureFlagSet records an
+	// explicit --posture so CLI out-ranks the operator-global settings.yaml posture:
+	// key. Mapped onto app.Config.Posture/PostureFlagSet in embeddedConfig.
+	posture        string
+	postureFlagSet bool
 
 	// quiet routes the embedded server's operational diagnostics (and the perf
 	// surface's startup/teardown lines) to io.Discard instead of the per-user state
@@ -224,7 +235,9 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.noBash, "no-bash", false, "embedded server only: disable the Bash tool (shell-less mode)")
 	fs.BoolVar(&cfg.trustProject, "trust-project", false, "embedded server only: honour a discovered PROJECT's ALLOW rules AND its project-scoped soul (.mecatl/soul.md) (its deny/ask rules are always honoured regardless). Default OFF (the safe stance, unified with mecated): an untrusted repo's permission grants and project soul are ignored. TRUST BOUNDARY: enabling this lets a checked-in .mecatl/settings.yaml auto-approve tool calls and a checked-in project soul steer the model — only pass it for a repo you trust")
 	fs.BoolVar(&cfg.allowAllTools, "yolo", false,
-		"embedded server only; OPERATOR POSTURE (dangerous): suppress permission prompts for the built-in mutate-ask floor, for ephemeral/sandboxed use only. Deny in any scope and configured Ask still apply. Refused as root unless MECATL_SANDBOX=1 (or IS_SANDBOX=1).")
+		"embedded server only; ALIAS for --posture yolo (dangerous): allow-all AND loosen the CHILD substitution floor (a subagent's $()/backtick/heredoc AUTO-RUNS — prompt-injection defense OFF). Deny in any scope and configured Ask still apply. Isolated/single-tenant ONLY. Refused as root unless MECATL_SANDBOX=1 (or IS_SANDBOX=1).")
+	fs.StringVar(&cfg.posture, "posture", "",
+		"embedded server only: OPERATOR POSTURE LADDER (strict < trusted < auto < yolo): strict (default) prompts every mutate; trusted = --trust-project; auto adds allow-all + main substitution loosening (child injection-defense ON); yolo additionally auto-runs $()/backtick/heredoc in CHILDREN (injection-defense OFF). --yolo/--trust-project are aliases. auto/yolo refused as root outside MECATL_SANDBOX. Unknown value fails closed to strict.")
 	fs.BoolVar(&cfg.quiet, "quiet", false,
 		"discard the embedded server's operational diagnostics instead of writing them to $XDG_STATE_HOME/mecatl/mecatui.log (fallback ~/.local/state/mecatl/mecatui.log). Diagnostics NEVER go to stderr (that corrupts the TUI alt-screen); --quiet drops them entirely")
 	fs.StringVar(&cfg.memoryDir, "memory-dir", "", "embedded server only: per-project memory store directory (empty = a per-project default under $XDG_DATA_HOME/mecatui/memory)")
@@ -250,6 +263,14 @@ func parseFlags(args []string) (config, error) {
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
+
+	// Record an explicit --posture so CLI out-ranks the operator-global settings.yaml
+	// posture: key (mirrors mecated).
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "posture" {
+			cfg.postureFlagSet = true
+		}
+	})
 
 	if cfg.authToken == "" {
 		cfg.authToken = os.Getenv("MECATL_AUTH_TOKEN")
@@ -348,24 +369,41 @@ func (c config) validate() error {
 			"to try it offline with no key pass --mock; or point --server at an already-running mecated; " +
 			"see docs/usage.md for provider setup")
 	}
-	// Allow-all posture: only meaningful for the embedded server; refuse it when
-	// running privileged outside a declared sandbox. Dialling an external server
-	// never embeds, so it must not trip the refusal.
+	// Operator posture: only meaningful for the embedded server; refuse an allow-all
+	// tier (auto or yolo) when running privileged outside a declared sandbox. Dialling
+	// an external server never embeds, so it must not trip the refusal. The tier is the
+	// AUTHORITATIVE one (incl. the operator-global settings.yaml posture: key), so a
+	// YAML-only allow-all tier cannot escape the refusal — and app.Build re-checks it as
+	// the fail-closed backstop.
 	if c.server == "" {
-		sandbox := os.Getenv("MECATL_SANDBOX") == "1" || os.Getenv("IS_SANDBOX") == "1"
-		if err := allowAllRefusalReason(c.allowAllTools, os.Geteuid(), sandbox); err != nil {
+		if err := app.PostureRefusalReason(embeddedAuthoritativePosture(c), embeddedPrivileged()); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// allowAllRefusalReason returns a non-nil error when an allow-all request must be
-// refused: running privileged (euid 0) without a declared sandbox. Pure and
-// table-testable; the os lookups live at the call site.
-func allowAllRefusalReason(allowAll bool, euid int, sandbox bool) error {
-	if allowAll && euid == 0 && !sandbox {
-		return errors.New("--yolo refused: running as root (euid 0) without a declared sandbox; set MECATL_SANDBOX=1 (or IS_SANDBOX=1) to affirm an isolated, disposable environment")
-	}
-	return nil
+// embeddedAuthoritativePosture resolves the SAME posture tier app.Build resolves for
+// the embedded server: the --posture flag + --yolo/--trust-project aliases + the
+// operator-global settings.yaml posture: key. It mirrors mecated's posturePreCheckConfig
+// — the conventional discovery is ON for the embedded server (PermissionsConventional /
+// ImportClaudePermissions true, see embeddedConfig).
+func embeddedAuthoritativePosture(c config) app.Posture {
+	return app.ResolveAuthoritativePosture(app.Config{
+		Workspace:               c.workspace,
+		PermissionsConventional: true,
+		ImportClaudePermissions: true,
+		Posture:                 app.ParsePosture(c.posture),
+		PostureFlagSet:          c.postureFlagSet,
+		AllowAllTools:           c.allowAllTools,
+		TrustProject:            c.trustProject,
+	})
+}
+
+// embeddedPrivileged is the "root && !sandbox" predicate fed to the posture refusal
+// (the cmd owns the os/env reads; internal/app takes the bool). It is the SAME value
+// embeddedConfig threads onto app.Config.Privileged so the fast-path and Build agree.
+func embeddedPrivileged() bool {
+	sandbox := os.Getenv("MECATL_SANDBOX") == "1" || os.Getenv("IS_SANDBOX") == "1"
+	return os.Geteuid() == 0 && !sandbox
 }

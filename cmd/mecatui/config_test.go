@@ -9,6 +9,7 @@ import (
 	"github.com/adrg/xdg"
 
 	"github.com/stacklok/mecatl/engine/port"
+	"github.com/stacklok/mecatl/internal/app"
 )
 
 // TestEmbeddedConfigEnablesAgentDefs asserts the embedded server enables conventional
@@ -634,23 +635,63 @@ func TestEmbeddedConfigMapsAllowAll(t *testing.T) {
 	}
 }
 
-func TestAllowAllRefusalReason(t *testing.T) {
+// TestParseFlagsPosture covers the embedded-server --posture / --print-posture surface:
+// the value lands on cfg.posture and postureFlagSet flips ONLY when --posture is
+// explicitly passed (so CLI out-ranks the operator-YAML key).
+func TestParseFlagsPosture(t *testing.T) {
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if def.posture != "" || def.postureFlagSet {
+		t.Errorf("defaults: posture=%q postureFlagSet=%v, want empty/false", def.posture, def.postureFlagSet)
+	}
+	set, err := parseFlags([]string{"-posture", "auto"})
+	if err != nil {
+		t.Fatalf("parseFlags(-posture auto): %v", err)
+	}
+	if set.posture != "auto" || !set.postureFlagSet {
+		t.Errorf("-posture auto: posture=%q postureFlagSet=%v, want \"auto\"/true", set.posture, set.postureFlagSet)
+	}
+}
+
+// TestEmbeddedConfigMapsPosture pins the cmd→app.Config posture passthrough for the
+// embedded server: the parsed token maps to app.Posture, PostureFlagSet rides through,
+// and Privileged threads (false in the non-root test runner).
+func TestEmbeddedConfigMapsPosture(t *testing.T) {
+	ac := embeddedConfig(config{workspace: "/ws", model: "m", mock: true, posture: "yolo", postureFlagSet: true}, port.NopDiagnostics{})
+	if ac.Posture != app.PostureYolo {
+		t.Errorf("embeddedConfig.Posture = %v, want PostureYolo", ac.Posture)
+	}
+	if !ac.PostureFlagSet {
+		t.Errorf("embeddedConfig.PostureFlagSet = false, want true")
+	}
+	if ac.Privileged != embeddedPrivileged() {
+		t.Errorf("embeddedConfig.Privileged = %v, want %v (embeddedPrivileged())", ac.Privileged, embeddedPrivileged())
+	}
+}
+
+// TestPostureRefusalReason proves the generalised root-refusal (the exported
+// app.PostureRefusalReason) gates auto AND yolo (both waive the mutate-ask floor) while
+// strict/trusted are NEVER refused (they suppress no prompt), and only when PRIVILEGED.
+// It would fail if the gate regressed to the historical yolo-only check.
+func TestPostureRefusalReason(t *testing.T) {
 	tests := []struct {
-		name     string
-		allowAll bool
-		euid     int
-		sandbox  bool
-		wantErr  bool
+		name       string
+		posture    app.Posture
+		privileged bool
+		wantErr    bool
 	}{
-		{"root no sandbox refused", true, 0, false, true},
-		{"root with sandbox ok", true, 0, true, false},
-		{"non-root no sandbox ok", true, 1000, false, false},
-		{"non-root with sandbox ok", true, 1000, true, false},
-		{"flag off root ok", false, 0, false, false},
+		{"yolo privileged refused", app.PostureYolo, true, true},
+		{"auto privileged refused", app.PostureAuto, true, true},
+		{"yolo not privileged ok", app.PostureYolo, false, false},
+		{"auto not privileged ok", app.PostureAuto, false, false},
+		{"trusted privileged ok", app.PostureTrusted, true, false},
+		{"strict privileged ok", app.PostureStrict, true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := allowAllRefusalReason(tt.allowAll, tt.euid, tt.sandbox)
+			err := app.PostureRefusalReason(tt.posture, tt.privileged)
 			if tt.wantErr && err == nil {
 				t.Fatalf("expected a refusal error, got nil")
 			}

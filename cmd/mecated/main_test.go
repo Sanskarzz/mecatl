@@ -21,6 +21,7 @@ import (
 	"github.com/stacklok/mecatl/internal/adapter/mcpperf"
 	"github.com/stacklok/mecatl/internal/adapter/skills"
 	"github.com/stacklok/mecatl/internal/adapter/telemetry"
+	"github.com/stacklok/mecatl/internal/app"
 )
 
 // seedQuarantine writes a model-drafted-looking SKILL.md (with origin: model
@@ -525,23 +526,27 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 	return b
 }
 
-func TestAllowAllRefusalReason(t *testing.T) {
+// TestPostureRefusalReason proves the generalised root-refusal (the exported
+// app.PostureRefusalReason) gates auto AND yolo (both waive the mutate-ask floor) while
+// strict/trusted are NEVER refused, and only when the process is PRIVILEGED. It would
+// fail if the gate regressed to the historical yolo-only check.
+func TestPostureRefusalReason(t *testing.T) {
 	tests := []struct {
-		name     string
-		allowAll bool
-		euid     int
-		sandbox  bool
-		wantErr  bool
+		name       string
+		posture    app.Posture
+		privileged bool
+		wantErr    bool
 	}{
-		{"root no sandbox refused", true, 0, false, true},
-		{"root with sandbox ok", true, 0, true, false},
-		{"non-root no sandbox ok", true, 1000, false, false},
-		{"non-root with sandbox ok", true, 1000, true, false},
-		{"flag off root ok", false, 0, false, false},
+		{"yolo privileged refused", app.PostureYolo, true, true},
+		{"auto privileged refused", app.PostureAuto, true, true},
+		{"yolo not privileged ok", app.PostureYolo, false, false},
+		{"auto not privileged ok", app.PostureAuto, false, false},
+		{"trusted privileged ok", app.PostureTrusted, true, false},
+		{"strict privileged ok", app.PostureStrict, true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := allowAllRefusalReason(tt.allowAll, tt.euid, tt.sandbox)
+			err := app.PostureRefusalReason(tt.posture, tt.privileged)
 			if tt.wantErr && err == nil {
 				t.Fatalf("expected a refusal error, got nil")
 			}
@@ -549,6 +554,60 @@ func TestAllowAllRefusalReason(t *testing.T) {
 				t.Fatalf("expected no error, got %v", err)
 			}
 		})
+	}
+}
+
+// TestParseFlagsPosture covers the --posture / --print-posture flag surface: the value
+// lands on cfg.posture, postureFlagSet flips ONLY when --posture is explicitly passed
+// (so CLI can out-rank the operator-YAML key), and --print-posture sets its bool.
+func TestParseFlagsPosture(t *testing.T) {
+	def, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if def.posture != "" || def.postureFlagSet || def.printPosture {
+		t.Errorf("defaults: posture=%q postureFlagSet=%v printPosture=%v, want empty/false/false", def.posture, def.postureFlagSet, def.printPosture)
+	}
+
+	set, err := parseFlags([]string{"-posture", "auto"})
+	if err != nil {
+		t.Fatalf("parseFlags(-posture auto): %v", err)
+	}
+	if set.posture != "auto" || !set.postureFlagSet {
+		t.Errorf("-posture auto: posture=%q postureFlagSet=%v, want \"auto\"/true", set.posture, set.postureFlagSet)
+	}
+
+	pr, err := parseFlags([]string{"-print-posture"})
+	if err != nil {
+		t.Fatalf("parseFlags(-print-posture): %v", err)
+	}
+	if !pr.printPosture {
+		t.Errorf("-print-posture: printPosture=false, want true")
+	}
+	if pr.postureFlagSet {
+		t.Errorf("-print-posture alone must NOT set postureFlagSet")
+	}
+}
+
+// TestAppConfigPostureMapping pins the cmd→app.Config posture passthrough: the parsed
+// --posture token maps to app.Posture, postureFlagSet rides through, and Privileged is
+// set (here false, since the test process is not root). It would fail if a field were
+// dropped from appConfig's posture mapping.
+func TestAppConfigPostureMapping(t *testing.T) {
+	cfg, err := parseFlags([]string{"-posture", "yolo"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	ac := appConfig(cfg, nil, nil, nil, nil)
+	if ac.Posture != app.PostureYolo {
+		t.Errorf("appConfig.Posture = %v, want PostureYolo", ac.Posture)
+	}
+	if !ac.PostureFlagSet {
+		t.Errorf("appConfig.PostureFlagSet = false, want true (CLI must out-rank YAML)")
+	}
+	// privilegedProcess() is false in the test runner (non-root) — assert it threads.
+	if ac.Privileged != privilegedProcess() {
+		t.Errorf("appConfig.Privileged = %v, want %v (privilegedProcess())", ac.Privileged, privilegedProcess())
 	}
 }
 

@@ -99,6 +99,16 @@ func builtinCommands(caps client.Capabilities, mcpWired, agentsWired, skillsWire
 			run:  Model.runModels,
 		})
 	}
+	// /posture prints the server-wide operator posture tier + a line per defense.
+	// Gated on a non-empty caps.Posture (an older server omits the field), so it never
+	// appears against a server that cannot report it. Chrome only — it changes nothing.
+	if caps.Posture != "" {
+		out = append(out, builtin{
+			name: "posture",
+			desc: "show the server's operator posture",
+			run:  Model.runPosture,
+		})
+	}
 	return out
 }
 
@@ -185,4 +195,40 @@ func (m Model) runUserModel() (tea.Model, tea.Cmd) {
 // belt-and-braces here.
 func (m Model) runModels() (tea.Model, tea.Cmd) {
 	return m.openModels()
+}
+
+// runPosture shows the server-wide operator posture tier and a compact per-defense
+// summary in the status line. Chrome only — read-only, mutates nothing on the server
+// and acts purely on the Model (like /clear). Only registered when caps.Posture is
+// non-empty. The summary names the four defenses the posture controls so an operator
+// can confirm, e.g., that the child prompt-injection defense is OFF under yolo.
+func (m Model) runPosture() (tea.Model, tea.Cmd) {
+	m.statusMsg = m.deps.Theme.Style("muted").Render(postureSummary(m.caps.Posture))
+	return m, nil
+}
+
+// postureSummary renders the one-line /posture summary for a posture token. It is
+// pure (no Model) so it is directly testable. allow-all + main-substitution are on at
+// auto+yolo; the CHILD substitution (prompt-injection defense OFF) is yolo-only;
+// project-trust is on at trusted+. An empty/unknown token degrades to a bare label.
+func postureSummary(p string) string {
+	allowAll := p == "auto" || p == "yolo"
+	childDefenseOff := p == "yolo"
+	trust := p == "trusted" || p == "auto" || p == "yolo"
+	onoff := func(b bool) string {
+		if b {
+			return "on"
+		}
+		return "off"
+	}
+	label := p
+	if label == "" {
+		label = "unknown"
+	}
+	return "posture " + label +
+		" — allow-all " + onoff(allowAll) +
+		"; main $()/heredoc auto-run " + onoff(allowAll) +
+		"; child $()/heredoc auto-run (injection-defense off) " + onoff(childDefenseOff) +
+		"; project-trust " + onoff(trust) +
+		" (Deny & configured Ask always apply)"
 }

@@ -211,7 +211,9 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--import-claude-permissions` | `false` | also import Claude-Code `settings.json` permissions (project + user). **Lossy** (fail-safe): see the table below. |
 | `--trust-project` | `false` | honour the discovered **project authority set**: the project's ALLOW rules (its deny/ask are always honoured regardless), its project persona/soul at `<workspace>/.mecatl/soul.md`, AND the **project tier** of agent definitions, slash commands, and skills (`<workspace>/.mecatl/*`, `<workspace>/.claude/*`). It also gates the **read-only subagent/team-member shell** (issue #40): on an untrusted workspace, Subagent children and read-only members run Bash-less (Read/Grep/Glob only — creating their worktree runs a `git` checkout over the repo's `.git`, where a tracked `.gitattributes` can name filter drivers that execute code with nobody having run anything); mutating members and Parallel branches keep their hardened shells (force-copy forks are created by a pure file copy with no git invocation, and their git afterwards runs over the copied repo — the same exposure as the operator's own session). OFF by default (the safe stance) — an untrusted repo's grants, persona, agents, commands, skills, and subagent shell are withheld; the agent still runs in "ask the human" mode (see the workspace-trust note below). **See the permission-config, persona/soul, and workspace-trust notes below.** |
 | `--permission-config` | `""` | path to a YAML permission-config file loaded at the **user (fully-trusted) scope** (**repeatable**). Always loaded regardless of `--permissions-conventional`. |
-| `--yolo` | `false` | **OPERATOR POSTURE (dangerous).** Suppress permission prompts for the built-in mutate-ask floor (`Bash`/`Edit`/`Write`/`Team`/`SkillDraft`) **server-wide**, for the main agent **and** its children (subagents/team members/parallel branches) — for ephemeral, isolated, single-tenant deployments only. A `Deny` in **any** scope and any **deliberately configured** `Ask` (managed/project/user) still apply; a child's `$(...)`/backtick/heredoc substitution command still resolves through the child-ask model (the substitution-floor loosening is main-only). **Refused when running as root** (euid 0) unless `MECATL_SANDBOX=1` (or `IS_SANDBOX=1`) is set. **See the allow-all note below.** |
+| `--posture` | `strict` | **OPERATOR POSTURE LADDER.** One ordered tier governs the whole prompt/trust posture: `strict` (default, fail-closed: prompt for the mutate-ask floor, no project trust) → `trusted` (honour the project authority set; still prompts) → `auto` (allow-all main + children, but the **child prompt-injection defence stays ON** — the recommended **unattended** default) → `yolo` (everything `auto` does **plus** the child substitution floor loosened — defence OFF). `--yolo` and `--trust-project` are **aliases** (for `yolo` and `trusted`); when both a `--posture` value and an alias are given the **higher tier wins** (with a `WARN`). An unknown `--posture` value fails closed to `strict` with a `WARN`. CLI out-ranks the user-global `posture:` setting. **See the allow-all/posture note below.** |
+| `--print-posture` | `false` | (mecated) print the resolved posture tier and the per-defence breakdown (allow-all, main/child substitution loosening, project-trust floor) to stdout and exit, without starting the server. Useful for confirming what a given flag/env/settings combination resolves to. |
+| `--yolo` | `false` | **Alias for `--posture yolo`** (the top tier). **OPERATOR POSTURE (dangerous).** Suppress permission prompts for the built-in mutate-ask floor (`Bash`/`Edit`/`Write`/`Team`/`SkillDraft`) **server-wide**, for the main agent **and** its children (subagents/team members/parallel branches) — for ephemeral, isolated, single-tenant deployments only. **Behaviour change (see the posture note):** `--yolo` now **also waives the child substitution floor** — a subagent/team-member/parallel-branch `$(...)`/backtick/heredoc command **auto-runs** (the child prompt-injection defence is **OFF**). For allow-all with the child defence kept **ON**, use `--posture auto` instead. A `Deny` in **any** scope and any **deliberately configured** `Ask` (managed/project/user) still apply at every tier. **Refused when running as root** (euid 0) unless `MECATL_SANDBOX=1` (or `IS_SANDBOX=1`) is set. **See the allow-all/posture note below.** |
 | `--metrics-addr` | `127.0.0.1:9090` | loopback **admin/observability** listener (empty disables). Serves `/metrics` and the runtime-introspection endpoints — **see the observability note below**. |
 | `--otlp-endpoint` | `""` | OTLP collector endpoint for trace export (empty → tracing is a no-op; metrics are always on via `/metrics`). |
 | `--otlp-protocol` | `grpc` | OTLP transport: `grpc` or `http`. |
@@ -520,7 +522,7 @@ connected agent knows how to act on the numbers.
 | `ANTHROPIC_API_KEY` | the Anthropic API key. **If set, the native `anthropic` provider is auto-detected** — the native Messages-API adapter (NOT the Responses adapter), stateless full-replay, with extended thinking **on** (model-aware: adaptive for Opus 4.8/4.7/4.6 + Sonnet 4.6, manual budget for older families). Default model `claude-sonnet-4-6`; override the host with `--anthropic-base-url`. |
 | `MECATL_AUTH_TOKEN` | bearer token for the API (`--auth-token`) when the flag is unset — keeps the secret off the process argv. |
 | `MECATL_DRIVER_AUTH_TOKEN` | bearer token for the store/source drivers (`--driver-auth-token`) when the flag is unset. |
-| `MECATL_SANDBOX` / `IS_SANDBOX` | set either to `1` to affirm an isolated, disposable environment so `--yolo` is permitted while running as root. |
+| `MECATL_SANDBOX` / `IS_SANDBOX` | set either to `1` to affirm an isolated, disposable environment so the **allow-all postures** (`auto` and `yolo` — both waive the built-in mutate-ask floor) are permitted while running as root. Root + no prompts is refused otherwise (generalised from the old `--yolo`-only refusal). |
 
 ### Provider selection
 
@@ -950,6 +952,24 @@ guardrails:
   tool-less with inert hooks and no nested reviewer — it can never re-trigger a
   guardrail or call a tool.
 
+#### The operator-global `posture:` setting
+
+Like `guardrails:`, the posture ladder (above) can be set once in the **user-global**
+`settings.yaml` instead of on every invocation, via an optional top-level `posture:`
+string:
+
+```yaml
+# ~/.config/mecatl/settings.yaml  (user-global only)
+posture: auto          # strict | trusted | auto | yolo
+```
+
+**Operator-tier ONLY** — read from the user-global `settings.yaml` + the CLI,
+**never** the project-tier file (the same inversion as `guardrails:`). A malicious
+repo dropping `.mecatl/settings.yaml` with `posture: yolo` must never be honoured, so
+a **project-tier `posture:` is ignored with a WARN** (security-critical fail-closed).
+A `--posture` flag (or its `--yolo`/`--trust-project` aliases) **out-ranks** the YAML
+value; an unknown value fails closed to `strict` with a WARN.
+
 ### Declarative workspace trust (`trustedWorkspaces:`, WORKSPACE-TRUST Phase 1)
 
 `--trust-project` is a **per-invocation** flag. For CI, a daemon, or a power-user
@@ -1144,13 +1164,47 @@ authority set.
 > (policy) — a logical AND. An untrusted repo's soul is withheld irrespective of
 > `soul:apply`; a trusted repo's soul still obeys an explicit `soul:apply: deny`.
 
-### The allow-all posture (`--yolo`)
+### The operator posture ladder (`--posture`)
 
-For unattended runs (CI, a throwaway container, a disposable VM) you can suppress
-the permission prompts for the **built-in mutate-ask floor** with the operator
-flag `--yolo`. It is available on
-`mecated` and on the embedded `mecatui` server (it is **ignored when `mecatui`
-dials an external `--server`** — that server owns its own posture).
+The whole prompt/trust posture is set by **one ordered operator tier** chosen at
+process start by whoever owns the blast radius. Higher tiers grant more autonomy
+and prompt less:
+
+| posture | allow-all (no mutate-ask prompts) | main substitution floor | child substitution floor | project-trust floor | use it for |
+|---|---|---|---|---|---|
+| `strict` (**default**, fail-closed) | off | gated | gated | (your own `--trust-project`) | interactive / untrusted repos |
+| `trusted` | off | gated | gated | **on** (honour the project authority set) | a repo you trust, still want prompts |
+| `auto` | **on** (main + children) | loosened | **gated** (child prompt-injection defence **ON**) | on | the **recommended unattended default** |
+| `yolo` | **on** (main + children) | loosened | **loosened** (child defence **OFF**) | on | a disposable, isolated, single-tenant sandbox |
+
+Pick the tier with `--posture <strict|trusted|auto|yolo>` on `mecated` or the
+embedded `mecatui` server (it is **ignored when `mecatui` dials an external
+`--server`** — that server owns its own posture). `--yolo` is an **alias for
+`--posture yolo`** and `--trust-project` is an **alias for `trusted`**; passing
+both a `--posture` value and an alias resolves to the **higher tier** with a
+`WARN`, an unknown `--posture` value fails closed to `strict` with a `WARN`, and a
+CLI flag out-ranks the user-global `posture:` setting (below). Confirm what a given
+combination resolves to with `mecated --print-posture` (prints the tier + the
+per-defence breakdown and exits).
+
+**`auto` is the recommended unattended default.** It is allow-all for the main
+agent *and* its children, so a CI / container / VM run never parks on a mutate-ask
+prompt — but the **child prompt-injection defence stays ON**: a subagent /
+team-member / parallel-branch `$(...)`/backtick/heredoc command still resolves
+through the child-ask model rather than auto-running. Only step up to `yolo` (which
+loosens that child substitution floor too) where the harness genuinely cannot cause
+durable harm.
+
+> **Behaviour change — `--yolo` now also loosens the child substitution floor.**
+> Previously the substitution-floor loosening was **main-only**; under `--posture
+> yolo` (= `--yolo`) a child's `$(...)`/backtick/heredoc command **auto-runs** (the
+> child injection defence is **OFF**). If you want allow-all but the child defence
+> kept on, use `--posture auto`.
+
+#### How allow-all works (the mechanism)
+
+For the allow-all tiers (`auto`/`yolo`) the harness suppresses the permission
+prompts for the **built-in mutate-ask floor**.
 
 It is **not** a `PermissionMode` and **not** an evaluator bypass. It injects a
 single `ScopeCLI` allow-all **rule** into the engine's static ruleset, which
@@ -1164,37 +1218,45 @@ The governance invariants are unchanged:
   unattended run** — the startup warning says so. (The common CI case configures no
   asks beyond the built-in floor, so allow-all is fully unattended there.)
 
-**Main and children, but substitution stays gated for children.** The allow-all
-**rule** is injected into both the main engine's ruleset (`AudienceMain`) and the
-child/member ruleset (`AudienceSubagent`), so the mutate-ask floor is loosened for
-subagents, team members, and parallel branches as well — `--yolo` is no longer
-silently main-only at the rule level. The one thing that stays **main-only** is the
-substitution-floor **loosening**: a child's `$(...)`/backtick/heredoc command still
-resolves through the subagent child-ask model (see *Compound-Bash & substitution
-safety* below), so `--yolo` does **not** bypass a child's substitution floor — by
-design. (Children already run allow-all for plain, non-substitution commands; the
-rule symmetry is primarily an anti-drift guarantee that the main and child postures
-cannot diverge.)
+**Main and children — and the child substitution floor is the `auto` vs `yolo`
+line.** The allow-all **rule** is injected into both the main engine's ruleset
+(`AudienceMain`) and the child/member ruleset (`AudienceSubagent`), so the mutate-ask
+floor is loosened for subagents, team members, and parallel branches as well at both
+allow-all tiers. The **child substitution-floor loosening** is what separates the two
+tiers:
+
+- Under **`auto`** the loosening stays **main-only** — a child's
+  `$(...)`/backtick/heredoc command still resolves through the subagent child-ask
+  model (see *Compound-Bash & substitution safety* below). The child
+  prompt-injection defence is **ON**.
+- Under **`yolo`** the loosening **also** applies to children — a child's
+  substitution command **auto-runs**. The child injection defence is **OFF**. This
+  is the deliberate behaviour change from the old main-only `--yolo`.
 
 The allow-all rule also blankets the synthetic `soul:apply` floor (the soul is
-applied without prompting under `--yolo`) — consistent and expected, since the soul
-is already floor-Allow by default. A **configured** `Deny`/`Ask` on `soul:apply` (or
-on any memory tool) still wins under `--yolo`, exactly like every other tool.
+applied without prompting under `auto`/`yolo`) — consistent and expected, since the
+soul is already floor-Allow by default. A **configured** `Deny`/`Ask` on `soul:apply`
+(or on any memory tool) still wins, exactly like every other tool.
 
-**Sandbox-first.** The flag bypasses the *prompt*, never a *sandbox*. The real
+**Sandbox-first.** The posture bypasses the *prompt*, never a *sandbox*. The real
 boundary for unattended agentic execution is OS-level isolation (container/microVM,
-network-off-by-default, ephemeral filesystem) — enable allow-all **only where the
-harness cannot cause durable harm**, and only on single-tenant daemons (the flag
-makes *every* session on that daemon allow-all).
+network-off-by-default, ephemeral filesystem) — enable an allow-all posture **only
+where the harness cannot cause durable harm**, and only on single-tenant daemons (the
+posture makes *every* session on that daemon allow-all).
 
-**Root refusal.** If allow-all is requested **and** the process runs as root
-(`euid 0`) **and** neither `MECATL_SANDBOX=1` nor `IS_SANDBOX=1` is set, the process
-**refuses to start** with a clear error: root + no prompts can modify anything on the
-host, so the operator must affirm an isolated, disposable environment via the env var.
+**Root refusal.** If an **allow-all posture** (`auto` or `yolo` — both waive the
+mutate-ask floor) is requested **and** the process runs as root (`euid 0`) **and**
+neither `MECATL_SANDBOX=1` nor `IS_SANDBOX=1` is set, the process **refuses to
+start** with a clear error: root + no prompts can modify anything on the host, so the
+operator must affirm an isolated, disposable environment via the env var. (This was
+generalised from the old `--yolo`-only refusal; it now gates `auto` too.)
 
 ```sh
-# CI / sandboxed container, offline mock, no prompts:
-MECATL_SANDBOX=1 bin/mecated --mock --yolo
+# CI / sandboxed container, offline mock, allow-all + child defence ON:
+MECATL_SANDBOX=1 bin/mecated --mock --posture auto
+
+# Disposable sandbox, child defence OFF too:
+MECATL_SANDBOX=1 bin/mecated --mock --posture yolo   # == --yolo
 ```
 
 ### The self-improving-skill loop (`SkillDraft` + `mecated skills promote`)

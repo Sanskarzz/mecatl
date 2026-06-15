@@ -65,6 +65,15 @@ type Config struct {
 	// all) is tracked via GuardrailsPresent so the resolver can WARN about an ignored
 	// project block. A nil Guardrails means the key was absent.
 	Guardrails *GuardrailsSection `yaml:"guardrails"`
+	// Posture is the OPERATOR-TIER posture-ladder scalar (the graduated trust/
+	// automation tier: strict/trusted/auto/yolo). Like Guardrails it is honoured ONLY
+	// from the user-global + CLI tiers; a project-tier file's posture: key is IGNORED
+	// with a WARN (a project repo RAISING the automation posture — e.g. posture: yolo
+	// — is a security DOWNGRADE the tighten-only project gate forbids, the fail-closed
+	// core of this feature). Empty = absent (the resolver returns "" and composition
+	// keeps the CLI/default). The composition layer parses the string; permconfig only
+	// reads the scalar.
+	Posture string `yaml:"posture"`
 }
 
 // GuardrailsSection is the operator-tier `guardrails:` YAML subtree (issue #27): a

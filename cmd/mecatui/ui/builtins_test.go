@@ -109,11 +109,14 @@ func TestBuiltinCommandsCapsFilter(t *testing.T) {
 		{"models cap but not wired", client.Capabilities{ModelSelection: true}, false, false, false, false, false, false, []string{"clear", "help"}},
 		{"models wired but no cap", client.Capabilities{}, false, false, false, false, false, true, []string{"clear", "help"}},
 		{"models cap and wired", client.Capabilities{ModelSelection: true}, false, false, false, false, false, true, []string{"clear", "help", "models"}},
+		{"posture empty omits the builtin", client.Capabilities{}, false, false, false, false, false, false, []string{"clear", "help"}},
+		{"posture set adds the builtin", client.Capabilities{Posture: "yolo"}, false, false, false, false, false, false, []string{"clear", "help", "posture"}},
+		{"posture strict still shows (chrome is reportable)", client.Capabilities{Posture: "strict"}, false, false, false, false, false, false, []string{"clear", "help", "posture"}},
 		{
 			"all",
-			client.Capabilities{MCP: true, Agents: true, Teams: true, Skills: true, Soul: true, UserModel: true, ModelSelection: true},
+			client.Capabilities{MCP: true, Agents: true, Teams: true, Skills: true, Soul: true, UserModel: true, ModelSelection: true, Posture: "auto"},
 			true, true, true, true, true, true,
-			[]string{"clear", "help", "mcp", "agents", "team", "skills", "soul", "usermodel", "models"},
+			[]string{"clear", "help", "mcp", "agents", "team", "skills", "soul", "usermodel", "models", "posture"},
 		},
 	}
 	for _, tc := range cases {
