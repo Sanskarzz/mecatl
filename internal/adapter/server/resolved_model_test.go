@@ -98,6 +98,49 @@ func TestServiceResolvedModelLiveFirstWindow(t *testing.T) {
 	}
 }
 
+// TestServiceResolvedModelLiveOnlyDefaultProvisionalThenHeals (issue #66 provisional-0):
+// a LIVE-ONLY DEFAULT model (in the live listing but not the curated catalog) bakes a
+// PROVISIONAL 0 window at create time (the echo resolver returns 0 while the live
+// refresh is in flight), so the default-path footer-heal gate fires. The resolver is
+// consulted on EVERY ResolvedModel read (resolve-at-use), so once the refresh settles
+// and reports the live window the next GetSession heals — no rebuild. This mirrors the
+// SELECTOR-path heal but on the default branch, the path the baked-seed-via-echo-
+// resolver fix opened.
+func TestServiceResolvedModelLiveOnlyDefaultProvisionalThenHeals(t *testing.T) {
+	// The baked seed is a PROVISIONAL 0 (the echo resolver's pre-completion value for a
+	// live-only default model).
+	dflt := server.ResolvedModel{ProviderID: "openrouter", ModelID: "openai/gpt-5.5", ContextWindow: 0}
+	const liveWindow = 1_050_000
+	// A mutable live window standing in for the echo resolver: 0 pre-completion
+	// (provisional), liveWindow once the refresh settles + the live entry lands.
+	live := int64(0)
+	resolve := func(p, m string) int64 {
+		if p == "openrouter" && m == "openai/gpt-5.5" {
+			return live
+		}
+		return 0
+	}
+	svc := newResolvedModelServiceWithResolver(t, dflt, nil, resolve)
+
+	sess, err := svc.CreateSessionWithProvider(context.Background(), "/ws", session.ModeDefault, session.Limits{}, server.ProviderSelector{})
+	if err != nil {
+		t.Fatalf("CreateSessionWithProvider(zero): %v", err)
+	}
+	// Pre-completion: the default echoes the provisional 0 (the client refetches).
+	if got := svc.ResolvedModel(sess.ID); got.ContextWindow != 0 {
+		t.Fatalf("pre-completion default echo ContextWindow = %d, want 0 (provisional, live-only default)", got.ContextWindow)
+	}
+	// The refresh settles and reports the live window.
+	live = liveWindow
+	got := svc.ResolvedModel(sess.ID)
+	if got.ContextWindow != liveWindow {
+		t.Fatalf("post-completion default echo ContextWindow = %d, want the healed live %d (resolve-at-use, NO rebuild)", got.ContextWindow, liveWindow)
+	}
+	if got.ProviderID != "openrouter" || got.ModelID != "openai/gpt-5.5" {
+		t.Fatalf("default identity = %s/%s, want the verbatim openrouter/openai/gpt-5.5", got.ProviderID, got.ModelID)
+	}
+}
+
 // TestServiceResolvedModelNilResolverByteIdentical: with ResolveContextWindow nil
 // (the memstore/driver/test paths), the default-path echo is the verbatim baked
 // DefaultResolvedModel — byte-identical to the pre-issue-#66 behaviour.

@@ -572,7 +572,8 @@ engine's compaction trigger and this echoed denominator, so the next snapshot re
 it in, issue #66). There is no client-side override; the operator escape-hatch is
 mecated's `-context-window-override`, which moves the engine trigger **and** this echoed
 denominator together. When the window is unknown the meter degrades to the bare current
-size (`ctx 40K`, no bar). As the
+size (`ctx 40K`, no bar) — including briefly on a fresh session for a live-only
+model, until the live window resolves and the bar fills in. As the
 context fills the bar **darkens** to signal pressure — `▒` ok, `▓` past ~60%, `█` plus a
 `⚠` mark past ~85% — and the colour shifts to match (a non-colour glyph cue so it reads
 with ANSI stripped). These bands are a visual fill gauge, **not** a compaction countdown:

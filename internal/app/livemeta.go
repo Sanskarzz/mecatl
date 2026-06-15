@@ -45,6 +45,34 @@ type liveMetaStore struct {
 	// the same lock-free swap the picker uses. Never mutated in place: a refresh
 	// builds a fresh map and Swaps the pointer.
 	models atomic.Pointer[map[string]map[string]modelEntry]
+	// completed records whether the ONE-SHOT live-model refresh has SETTLED — set true
+	// in every settle path (sync swap, async success, async fetch-fail/empty fallback,
+	// and the no-lister no-op) but DELIBERATELY NOT on a shutdown-cancel (a shutdown is
+	// not a settled refresh). It is the echo resolver's "is the live answer in?" signal:
+	// while it is false AND a model is not known at a real value the echo returns a
+	// PROVISIONAL 0 (the client's footer-heal gate keys off ==0); once it flips, an
+	// uncatalogued live-only model honestly floors to 128k instead of being stuck 0
+	// forever (no-network boundedness). It is an atomic.Bool ON the already-inventoried
+	// reg.meta store, set by the SAME already-inventoried one-shot refresh goroutine —
+	// NOT a new outlives-a-call resource (CLOUD-NATIVE.md List 1).
+	completed atomic.Bool
+}
+
+// markRefreshCompleted flips the live-refresh-settled flag (idempotent, lock-free,
+// nil-safe). Called from EVERY settle path in startLiveModelRefresh — never on a
+// shutdown-cancel.
+func (s *liveMetaStore) markRefreshCompleted() {
+	if s == nil {
+		return
+	}
+	s.completed.Store(true)
+}
+
+// refreshCompleted reports whether the one-shot live refresh has settled (lock-free,
+// nil-safe). A nil store reports false (no refresh ⇒ provisional-then-floor on the
+// echo via the unknown branch, the conservative default).
+func (s *liveMetaStore) refreshCompleted() bool {
+	return s != nil && s.completed.Load()
 }
 
 // newLiveMetaStore returns an empty store. Callers seed it (seedFromCatalog) before
@@ -192,6 +220,42 @@ func (s *liveMetaStore) contextWindowFor(providerID, modelID string) int {
 	return catalogContextWindow(providerID, modelID)
 }
 
+// knownWindow reports a model's context window at a REAL value and whether it is
+// known there — a live store hit with ContextLimit>0 (upper-clamped) ELSE the
+// embedded catalog window when >0. It returns (0,false) ONLY when neither source has
+// a positive value (a genuinely uncatalogued live-only model whose live entry has not
+// landed, or has no window). This is the "do we have a real number?" predicate the
+// echo resolver branches on to decide provisional-0 vs floor; it NEVER returns the
+// 128k default (that floor is the resolvers' terminal-branch business, not "known").
+func (s *liveMetaStore) knownWindow(providerID, modelID string) (int, bool) {
+	if m, ok := s.lookup(providerID, modelID); ok && m.ContextLimit > 0 {
+		return clampLive(m.ContextLimit, maxLiveContextLimit), true
+	}
+	if w := catalogContextWindow(providerID, modelID); w > 0 {
+		return w, true
+	}
+	return 0, false
+}
+
+// resolveWindowCore is the SHARED precedence core both context-window resolvers read,
+// so the engine resolver (windowResolver) and the echo resolver (echoWindowResolver)
+// CANNOT drift on anything but the terminal unknown branch. It applies override →
+// live → catalog and reports the value plus whether it is KNOWN AT A REAL VALUE:
+//   - the --context-window-override always wins and is reported known;
+//   - else reg.meta.knownWindow (live entry when present-&->0, else the embedded
+//     catalog when >0), resolved LIVE on every call so a post-construction live Swap
+//     self-corrects without an engine rebuild.
+//
+// It NEVER returns the 128k floor — a genuinely unknown model is (0,false), and the
+// two callers decide what to do with that (engine always floors to 128k; the echo may
+// honestly report a provisional 0 while the live refresh is in flight).
+func (reg *providerRegistry) resolveWindowCore(cfg Config, providerID, model string) (value int, knownAtRealValue bool) {
+	if cfg.ContextWindowOverride > 0 {
+		return cfg.ContextWindowOverride, true
+	}
+	return reg.meta.knownWindow(providerID, model)
+}
+
 // windowResolver returns the SINGLE live-first context-window resolver closure for a
 // FIXED (providerID, model), used by EVERY engine path (shared, per-session selector,
 // child) AND the session-echo so they all agree byte-for-byte. It is the ONE place the
@@ -208,14 +272,47 @@ func (s *liveMetaStore) contextWindowFor(providerID, modelID string) int {
 // live-improving.
 func (reg *providerRegistry) windowResolver(cfg Config, providerID, model string) func() int {
 	return func() int {
-		if cfg.ContextWindowOverride > 0 {
-			return cfg.ContextWindowOverride
+		// ENGINE resolver: it ALWAYS needs a usable number, so a genuinely unknown
+		// model floors to the conservative 128k default — the engine NEVER sees 0.
+		// (override → live → catalog → 128k floor, byte-for-byte the original.)
+		if v, known := reg.resolveWindowCore(cfg, providerID, model); known {
+			return v
 		}
-		w := reg.meta.contextWindowFor(providerID, model)
-		if w <= 0 {
-			return defaultContextWindowTokens
+		return defaultContextWindowTokens
+	}
+}
+
+// echoWindowResolver returns the context-window resolver closure for the resolved_model
+// ECHO. It shares resolveWindowCore with the ENGINE resolver (windowResolver) and
+// differs ONLY in the terminal unknown branch, deliberately:
+//   - override wins (known) → the operator value, ALWAYS (pre- or post-completion);
+//   - known at a real value (live entry present-&->0 OR a catalogued window) → return
+//     it ALWAYS, pre- OR post-completion, so a genuinely-catalogued model (e.g. a 128k
+//     OpenAI model) echoes its real window from t=0 and the client's footer-heal gate
+//     never spuriously fires;
+//   - NOT known AND the live refresh has NOT settled → return a PROVISIONAL 0. The echo
+//     can honestly say "I don't know yet"; the engine cannot, so this is the ONLY
+//     behavioural split. The client treats 0 as "refetch on turn-end" (issue #66 footer
+//     heal), so a session created in the sub-second window before the live swap lands
+//     self-heals to the real live window once the refresh completes;
+//   - NOT known AND the refresh HAS settled → the conservative 128k floor. The live
+//     answer is in and the model is still uncatalogued/unknown, so we stop saying 0
+//     (no-network-floors-and-stops boundedness): the footer settles on a real
+//     denominator and the heal gate closes instead of refetching forever.
+//
+// The engine MUST NEVER read this resolver (it can return 0); it is wired ONLY into
+// Config.ResolveContextWindow for the server echo. See windowResolver for the engine
+// side and CLAUDE.md (the echo resolver may return 0=provisional, distinct from the
+// always-floored engine resolver).
+func (reg *providerRegistry) echoWindowResolver(cfg Config, providerID, model string) func() int {
+	return func() int {
+		if v, known := reg.resolveWindowCore(cfg, providerID, model); known {
+			return v // override or a real (live/catalog) value — honour it always.
 		}
-		return w
+		if !reg.meta.refreshCompleted() {
+			return 0 // PROVISIONAL: the live answer is not in yet; the client refetches.
+		}
+		return defaultContextWindowTokens // settled + still unknown ⇒ floor and stop.
 	}
 }
 

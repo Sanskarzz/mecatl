@@ -1452,10 +1452,16 @@ func (s *Service) SessionCapabilities(id session.SessionID) port.ProviderCapabil
 // time for BOTH branches via the injected Config.ResolveContextWindow (so a
 // GetSession after the live model-catalog swap reflects the live window, not the
 // curated-catalog floor a live-only model lacks) — mirroring the live-first modality
-// input SessionCapabilities already consumes, and mirroring the engine's own
-// resolve-at-use Deps.ContextWindow (both feed off the SAME contextWindowFor source,
-// so the echo and the running engine agree without any rehydration trigger). nil
-// resolver ⇒ no window scalar (the identity-only ResolvedModel).
+// input SessionCapabilities already consumes. The injected resolver is the ECHO
+// resolver (echoWindowResolver), which differs from the engine's resolve-at-use
+// Deps.ContextWindow in ONE deliberate way: while the one-shot live refresh is still
+// in flight it returns a PROVISIONAL 0 for a live-only model not yet in the catalog
+// (the client treats 0 as "refetch on turn-end" — the issue #66 footer-heal gate),
+// whereas the engine always floors to 128k (it can never run on a 0 window). This
+// provisional 0 is DISTINCT from "resolver not wired (nil)": nil ⇒ no window scalar at
+// all (the identity-only ResolvedModel); a wired resolver returning 0 is the honest
+// "live answer not in yet" signal. Post-completion the resolver floors an uncatalogued
+// model to 128k, so the echo settles and the heal gate closes (no-network boundedness).
 func (s *Service) ResolvedModel(id session.SessionID) ResolvedModel {
 	s.mu.Lock()
 	se, ok := s.sessionEngines[id]
@@ -1468,11 +1474,15 @@ func (s *Service) ResolvedModel(id session.SessionID) ResolvedModel {
 		rm = ResolvedModel{ProviderID: se.providerID, ModelID: se.modelID}
 	}
 	if s.cfg.ResolveContextWindow != nil {
-		// Overlay the live-first window; provider/model identity stays verbatim.
-		// The resolver floors to the curated catalog (and honours the operator
-		// override) internally, so it is the single source the engine reads too.
-		// A zero (not-yet-swapped / unknown) keeps the baked seed (default branch
-		// only — the per-session branch starts from a zero window).
+		// Overlay the live-first window; provider/model identity stays verbatim. The
+		// ECHO resolver honours the operator override and any catalogued/live window,
+		// and returns a deliberate PROVISIONAL 0 for a live-only model while the live
+		// refresh is in flight (the client treats 0 as "refetch on turn-end"). A 0
+		// therefore leaves rm.ContextWindow at whatever it already holds — the baked
+		// seed on the default branch (itself a provisional 0 for a live-only default),
+		// or 0 on the per-session branch — so the client's footer-heal gate fires and
+		// self-corrects once the refresh settles. Post-completion the resolver floors
+		// to 128k, so the echo never stays 0.
 		if w := s.cfg.ResolveContextWindow(rm.ProviderID, rm.ModelID); w > 0 {
 			rm.ContextWindow = w
 		}

@@ -42,6 +42,14 @@ type modelSwapper interface {
 // shutdown during the delay still joins promptly without swapping a stale snapshot.
 func startLiveModelRefresh(d port.Diagnostics, reg *providerRegistry, swap modelSwapper, runSync bool, delay time.Duration) func() {
 	if reg == nil || !anyProviderHasLister(reg) {
+		// No lister anywhere: there is nothing to refresh, but the refresh is SETTLED
+		// (it will never run) — mark completed BEFORE the early return so an
+		// openai/anthropic/mock-only deployment does not leave the echo resolver stuck
+		// on provisional-0 forever for an uncatalogued model. (nil-reg ⇒ no store to
+		// mark; markRefreshCompleted is nil-safe on a nil store anyway.)
+		if reg != nil {
+			reg.meta.markRefreshCompleted()
+		}
 		return func() {} // nothing to refresh
 	}
 	if runSync {
@@ -50,6 +58,7 @@ func startLiveModelRefresh(d port.Diagnostics, reg *providerRegistry, swap model
 		models, byProvider := liveModelSnapshot(ctx, d, reg)
 		swap.SetModels(models)
 		reg.meta.Swap(byProvider)
+		reg.meta.markRefreshCompleted() // sync path SETTLES after the swap.
 		return func() {}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -83,6 +92,12 @@ func startLiveModelRefresh(d port.Diagnostics, reg *providerRegistry, swap model
 		// proto slice and the resolver-feeding meta store cannot drift.
 		swap.SetModels(models)
 		reg.meta.Swap(byProvider)
+		// SETTLED: the live answer is in (success OR a fetch-fail/empty that fell back
+		// to the embedded floor inside resolveProviderModels — either way the Swap above
+		// is the authoritative result). Flip the flag so the echo resolver stops
+		// returning provisional-0 for an uncatalogued model and floors it instead. NOT
+		// reached on the shutdown-cancel returns above (a shutdown is not a settle).
+		reg.meta.markRefreshCompleted()
 	}()
 	return func() {
 		cancel()

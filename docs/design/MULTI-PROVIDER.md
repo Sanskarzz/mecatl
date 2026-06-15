@@ -409,18 +409,32 @@ passthrough** for a non-catalogued selector. The server therefore echoes the EFF
   and in `http.go`'s JSON response — always from `Service.ResolvedModel(id)`, NEVER read
   back off `req.GetModelId()`. The provider/model IDENTITY is verbatim; the
   `ContextWindow` SCALAR is resolved **live-first at call time for BOTH branches** via
-  the injected `Config.ResolveContextWindow` (issue #66) — and that closure is the SAME
-  `reg.windowResolver` the engine reads via `Deps.ContextWindow`, so the echo and the
-  running engine resolve the window from ONE source and cannot diverge. A DEFAULT or
-  selector session on a model the live listing has but the curated catalog lacks (e.g.
-  OpenRouter `openai/gpt-5.5`) reads the 128k floor pre-swap and self-heals to the live
-  window on the next `GetSession` post-swap; the resolver floors to the catalog (never
+  the injected `Config.ResolveContextWindow` (issue #66). That closure is the **ECHO**
+  resolver (`reg.echoWindowResolver`), NOT the engine resolver: it shares the
+  **override → live → catalog** precedence *core* (`resolveWindowCore`) with the engine's
+  `reg.windowResolver` — so any override / catalogued / live window agrees byte-for-byte —
+  but differs in **one deliberate branch**. For a model the live listing has but the
+  curated catalog lacks (e.g. OpenRouter `openai/gpt-5.5`), while the one-shot live refresh
+  is still in flight the echo returns a **deliberate PROVISIONAL 0** (the `liveMetaStore`'s
+  `refreshCompleted()` is still false and the model is not known at a real value). The
+  echo can honestly say "live window not in yet"; the engine cannot (it would run on a 0
+  window), so this is the only place the two resolvers part. The client treats a `0` as
+  "refetch on turn-end" (the footer-heal gate — see `cmd/mecatui/ui/update.go`), so a
+  session created in the sub-second window before the swap lands self-heals to the real
+  live window on the next `GetSession`. The resolver still floors to the catalog (never
   LOWERING a catalogued window) and honours the operator `--context-window-override`
   (which wins for both echo and engine).
-  **Self-heal-on-refresh trade-off:** a session created in the ~few-hundred-ms before
-  the live swap lands still echoes the t=0 floor on its `CreateSessionResponse`; a later
-  `GetSession` self-heals once the swap is in. No push/event/TUI-refetch is added — the
-  next snapshot read is honest.
+  **Provisional 0 vs unwired (nil):** a `0` from the wired echo resolver is the honest
+  "not in yet" signal — DISTINCT from `Config.ResolveContextWindow == nil` (the
+  memstore/driver paths), which means no window scalar at all (the identity-only
+  `ResolvedModel`).
+  **No-network boundedness (floors-and-stops):** once the refresh SETTLES —
+  `markRefreshCompleted()` fires on every settle path (sync swap, async success, async
+  fetch-fail/empty fallback to the embedded floor, AND the no-lister no-op), but NEVER on
+  a shutdown-cancel — an uncatalogued model that never got a live entry (e.g. a fully
+  offline deployment whose fetch failed) floors to **128k** instead of a perpetual
+  provisional 0. The footer-heal gate then closes (the client stops refetching). No
+  push/event is added — the next snapshot read is honest.
 
 #### The ENGINE-window half: resolve-at-use (issue #66, unification)
 
@@ -440,8 +454,12 @@ selector engines (`sessionEngineFactory`), and child engines
 (`childEngineDepsForProvider`). Because the resolver reads `reg.meta.contextWindowFor`
 live on each call, a post-`Build` live `Swap` self-corrects the SAME engine on the next
 turn — **no rehydration, no engine rebuild**. The echo's `Config.ResolveContextWindow`
-is the same resolver wrapped to `int64`, so echo and engine are byte-identical
-including the override. (`engine/agent` imports no adapter — the closure is a stdlib
+is the SIBLING `reg.echoWindowResolver` wrapped to `int64`: it shares the
+`resolveWindowCore` precedence with `windowResolver` (so echo and engine are
+byte-identical for every override / catalogued / live window) and differs ONLY in the
+terminal unknown branch — the echo may return a provisional `0` while the live refresh is
+in flight, where the engine always floors to 128k (it can never see 0). The ENGINE never
+reads `echoWindowResolver`. (`engine/agent` imports no adapter — the closure is a stdlib
 `func() int` built only in `internal/app`; the layering DAG + depguard stay green.)
 
 **No rehydration trigger:** the context window is no longer a reason to rehydrate a

@@ -477,14 +477,18 @@ func (m Model) updateStreamEvent(msg tea.Msg) (tea.Model, tea.Cmd) {
 		mm, cmd := m.afterEvent()
 		// Footer context-meter self-heal (issue #66): if the meter's denominator is
 		// still UNKNOWN (m.effectiveModel.ContextWindow == 0), refetch the session's
-		// resolved model. For a session on a LIVE-ONLY model the create-time echo can
-		// carry a 0 / curated-floor window because the async live model-list swap had
-		// not landed yet; the server's ResolvedModel resolves the real live window once
-		// it has, and the ResolvedModelMsg arm raises the denominator. The RPC is
-		// SKIPPED entirely once the window is known (non-zero), so it fires at most until
-		// the first heal lands — never on every turn forever. There is no client-side
-		// override (issue #66 deleted the --context-window flag); the gate is purely
-		// "session live AND window still unknown".
+		// resolved model. For a session on a LIVE-ONLY model the create-time echo carries
+		// a DELIBERATE PROVISIONAL 0 — the server's echo resolver (echoWindowResolver)
+		// reports 0 (not an accidental 128k floor) while the one-shot live model-list
+		// refresh is still in flight, honestly signalling "live window not in yet". Once
+		// the refresh settles the server's ResolvedModel resolves the real live window
+		// (or floors an uncatalogued model to 128k), and the ResolvedModelMsg arm raises
+		// the denominator. The gate is correct-by-construction: it keys ONLY off ==0, so
+		// a genuinely-known window (catalogued or live) never triggers it, and it is
+		// bounded by refresh completion — the server stops emitting 0 once settled, so
+		// the RPC fires at most until the first heal lands, never on every turn forever.
+		// There is no client-side override (issue #66 deleted the --context-window flag);
+		// the gate is purely "session live AND window still unknown".
 		if m.sessionID != "" && m.effectiveModel.ContextWindow == 0 {
 			refresh := client.RefreshResolvedModelCmd(m.deps.Ctx, m.deps.Session, m.sessionID)
 			return mm, tea.Batch(cmd, refresh)

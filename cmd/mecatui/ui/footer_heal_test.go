@@ -11,9 +11,12 @@ import (
 )
 
 // healModel builds a connected model whose CreateSession echoed a 0-window
-// ResolvedModel — the RACED-create case (the async live model-list swap had not
-// landed, so a live-only model reports no window). It also seeds the conversation
-// occupancy so the footer would render a denominator bar IF the window were known.
+// ResolvedModel — the RACED-create case. The 0 is EXACTLY the server's DELIBERATE
+// PROVISIONAL value (issue #66): the echo resolver returns 0 for a live-only model
+// while the one-shot live model-list refresh is still in flight, honestly signalling
+// "live window not in yet" so the client refetches on turn-end. It also seeds the
+// conversation occupancy so the footer would render a denominator bar IF the window
+// were known.
 func healModel(t *testing.T, conv *fakeConv) Model {
 	t.Helper()
 	m := New(Deps{
@@ -25,7 +28,8 @@ func healModel(t *testing.T, conv *fakeConv) Model {
 	})
 	m = applyAll(m,
 		tea.WindowSizeMsg{Width: 160, Height: 40},
-		// Raced create: the server echoed a 0 window for the live-only model.
+		// Raced create: the server echoed a DELIBERATE PROVISIONAL 0 window for the
+		// live-only model (the echo resolver's pre-completion value, not a 128k floor).
 		client.SessionReadyMsg{SessionID: "sess-test-0001", ResolvedModel: client.ResolvedModel{ProviderID: "openrouter", ModelID: "openai/gpt-5.5", ContextWindow: 0}},
 	)
 	m.contextTokens = 40000
@@ -116,6 +120,42 @@ func TestFooterHealStopsRefetchingOnceKnown(t *testing.T) {
 	}
 	if n := conv.getSessionCalls(); n != 0 {
 		t.Fatalf("GetSession called %d times with a KNOWN window, want 0 (refetch must be skipped)", n)
+	}
+}
+
+// TestFooterHealCatalogued128KNeverRefetches proves the client keys the heal gate
+// ONLY off ==0, never <=128000: a session whose echo is a GENUINE 128000 (a real
+// catalogued window, non-zero from the first echo — the server's echoWindowResolver
+// returns it from t=0 because the model is known-at-real-value, never provisional)
+// must NOT fire the turn-end refetch. A naive gate keyed off "<=128k" would refetch a
+// real 128k model forever; the actual ==0 gate skips it.
+func TestFooterHealCatalogued128KNeverRefetches(t *testing.T) {
+	conv := &fakeConv{recv: &fakeRecver{}, send: &fakeSender{}}
+	m := New(Deps{
+		Session: conv, Conv: conv,
+		Theme:       theme.New("aztec", theme.AztecPalette()),
+		Ctx:         t.Context(),
+		NoAltScreen: true,
+	})
+	m = applyAll(m,
+		tea.WindowSizeMsg{Width: 160, Height: 40},
+		// A genuinely-catalogued model echoes its real 128000 window from t=0.
+		client.SessionReadyMsg{SessionID: "sess-cat-128k", ResolvedModel: client.ResolvedModel{ProviderID: "openai", ModelID: "gpt-cat", ContextWindow: 128_000}},
+	)
+	m.contextTokens = 40000
+	m.phase = phaseIdle
+	m.sel = selection{}
+	m.refreshView()
+
+	if got := m.effectiveModel.ContextWindow; got != 128_000 {
+		t.Fatalf("precondition: effectiveModel.ContextWindow = %d, want a genuine 128000 first echo", got)
+	}
+	_, cmd := m.Update(client.TurnEndMsg{Turn: 1, Usage: client.Usage{InputTokens: 40000}})
+	if cmd != nil {
+		drainBatch(t, cmd()) // afterEvent may return a cmd; what matters is no GetSession fires
+	}
+	if n := conv.getSessionCalls(); n != 0 {
+		t.Fatalf("GetSession called %d times for a genuine 128k window, want 0 (the gate keys ONLY off ==0, never <=128k)", n)
 	}
 }
 

@@ -992,9 +992,16 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// scalar live-first at call time, so a live-only model whose curated-catalog floor is
 		// 0 — issue #66 — no longer echoes 0). (multi-provider Phase 0.)
 		DefaultResolvedModel: server.ResolvedModel{
-			ProviderID:    reg.Default(),
-			ModelID:       cfg.Model,
-			ContextWindow: int64(reg.meta.contextWindowFor(reg.Default(), cfg.Model)),
+			ProviderID: reg.Default(),
+			ModelID:    cfg.Model,
+			// Seed the baked window via the ECHO resolver (issue #66 provisional-0):
+			// a CATALOGUED default echoes its real window from t=0 (known-at-real-value),
+			// while a LIVE-ONLY default (in the live listing but not the curated catalog)
+			// echoes a PROVISIONAL 0 pre-completion so the default-path footer-heal gate
+			// fires and self-corrects once the live swap lands. The injected
+			// ResolveContextWindow below (also the echo resolver) keeps the per-call echo
+			// honest post-swap.
+			ContextWindow: int64(reg.echoWindowResolver(cfg, reg.Default(), cfg.Model)()),
 		},
 		// ListSkills snapshot: the skills resolved once at build time (the skills
 		// seam — FS or driver), projected into the proto form (metadata only).
@@ -1051,16 +1058,21 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// there.
 		ReplayApprovals: replayApprovals(eventLog, policy, cfg.diag()),
 		// Live-first context-window resolver for the resolved_model echo (issue #66,
-		// PROMOTED to all branches by the resolve-at-use unification): it is the SAME
-		// reg.windowResolver the engine reads via Deps.ContextWindow, wrapped to int64,
-		// so the echo and the running engine are byte-identical INCLUDING the operator
-		// --context-window-override (which wins for both). It closes over reg.meta (an
-		// atomic.Pointer → race-free, live-improving) so a session whose model is in the
-		// live listing but NOT the curated catalog echoes the live window post-swap
-		// instead of a 0 (no footer bar), floors to the catalog (never lowering a
-		// catalogued window), and falls back to the 128k default. Only the ContextWindow
-		// scalar is resolved — provider/model identity stays the resolved value.
-		ResolveContextWindow: func(p, m string) int64 { return int64(reg.windowResolver(cfg, p, m)()) },
+		// PROMOTED to all branches by the resolve-at-use unification). It is the ECHO
+		// resolver (reg.echoWindowResolver), NOT the engine resolver: it shares the
+		// override->live->catalog precedence core (resolveWindowCore) with the engine's
+		// reg.windowResolver, so any override/catalogued/live window agrees byte-for-byte,
+		// but differs in ONE branch -- a session whose model is in the live listing but
+		// NOT the curated catalog echoes a deliberate PROVISIONAL 0 while the one-shot
+		// live refresh is still in flight (reg.meta.refreshCompleted()==false). The client
+		// treats that 0 as "refetch on turn-end" (the footer-heal gate), so the create-
+		// races-the-swap window self-heals to the real live window once the refresh lands;
+		// post-completion an uncatalogued model floors to 128k (no-network boundedness,
+		// never stuck 0). The ENGINE never reads this resolver (it must never see 0); only
+		// this echo does. It closes over reg.meta (an atomic.Pointer, race-free and live-
+		// improving). Only the ContextWindow scalar is resolved here; provider/model
+		// identity stays the resolved value.
+		ResolveContextWindow: func(p, m string) int64 { return int64(reg.echoWindowResolver(cfg, p, m)()) },
 	}
 	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, agentReg, assets.skillReadRoots, assets.skillIndex, assets)
 

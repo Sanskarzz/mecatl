@@ -229,3 +229,135 @@ func TestLiveMetaStoreNilSafe(t *testing.T) {
 	s.Swap(map[string][]modelEntry{providerAnthropic: {{ID: "x"}}}) // must not panic
 	s.seedFromCatalog([]string{providerAnthropic})                  // must not panic
 }
+
+// --- echo resolver provisional-0 vs engine resolver never-0 (issue #66) ---
+
+// regForResolver builds a minimal registry carrying ONLY the meta store the two
+// context-window resolvers read — no providers/listers needed (the resolvers consult
+// reg.meta + the catalog, not the entries).
+func regForResolver(s *liveMetaStore) *providerRegistry {
+	return &providerRegistry{meta: s}
+}
+
+const (
+	liveOnlyModel = "openai/gpt-5.5" // in the live listing, NOT the curated catalog
+	liveOnlyCtx   = 1_050_000        // below maxLiveContextLimit, so unclamped
+)
+
+// TestEchoResolverProvisionalThenSettled: for an uncatalogued live-only model the ECHO
+// resolver returns a deliberate PROVISIONAL 0 pre-completion (the client's footer-heal
+// gate keys off ==0), then the real live window once the refresh has marked completed
+// AND the live entry has been swapped in.
+func TestEchoResolverProvisionalThenSettled(t *testing.T) {
+	s := newLiveMetaStore()
+	s.seedFromCatalog([]string{providerOpenRouter}) // live-only model not in the seed
+	reg := regForResolver(s)
+	echo := reg.echoWindowResolver(Config{}, providerOpenRouter, liveOnlyModel)
+
+	if got := echo(); got != 0 {
+		t.Fatalf("pre-completion echo = %d, want 0 (provisional, uncatalogued live-only)", got)
+	}
+	// The live refresh lands: the live listing carries the model + window, and the flag
+	// settles.
+	s.Swap(map[string][]modelEntry{providerOpenRouter: {{ID: liveOnlyModel, ContextLimit: liveOnlyCtx}}})
+	s.markRefreshCompleted()
+	if got := echo(); got != liveOnlyCtx {
+		t.Fatalf("post-swap echo = %d, want live %d", got, liveOnlyCtx)
+	}
+}
+
+// TestEchoResolverSettledFloorStops: an uncatalogued live-only model that is STILL
+// unknown after the refresh settles (no live entry ever arrived — e.g. a no-network
+// fetch-fail) floors to 128k, NOT a perpetual provisional 0. This closes the footer-
+// heal gate (the client stops refetching) — no-network boundedness.
+func TestEchoResolverSettledFloorStops(t *testing.T) {
+	s := newLiveMetaStore()
+	s.seedFromCatalog([]string{providerOpenRouter})
+	reg := regForResolver(s)
+	echo := reg.echoWindowResolver(Config{}, providerOpenRouter, liveOnlyModel)
+
+	if got := echo(); got != 0 {
+		t.Fatalf("pre-completion echo = %d, want 0 (provisional)", got)
+	}
+	s.markRefreshCompleted() // settled, but the model never got a live entry
+	if got := echo(); got != defaultContextWindowTokens {
+		t.Fatalf("settled-but-unknown echo = %d, want the 128k floor %d (must not stick at 0)", got, defaultContextWindowTokens)
+	}
+}
+
+// TestEchoResolverCataloguedModelNeverProvisional: a GENUINELY catalogued model is
+// known-at-real-value, so the echo returns its catalog window EVEN pre-completion — it
+// is never provisional. (catAnthropicModel's catalog window is 200k, a non-zero
+// known value; the point is the echo never returns 0 for a catalogued model.)
+func TestEchoResolverCataloguedModelNeverProvisional(t *testing.T) {
+	s := newLiveMetaStore()
+	s.seedFromCatalog([]string{providerAnthropic})
+	reg := regForResolver(s)
+	echo := reg.echoWindowResolver(Config{}, providerAnthropic, catAnthropicModel)
+
+	// Pre-completion (refresh NOT settled) the catalogued window is still returned.
+	if s.refreshCompleted() {
+		t.Fatal("precondition: refresh must be uncompleted for this test")
+	}
+	if got := echo(); got != catAnthropicCtx {
+		t.Fatalf("pre-completion echo for a catalogued model = %d, want catalog window %d (never provisional)", got, catAnthropicCtx)
+	}
+}
+
+// TestEngineResolverNeverZero: for the SAME uncatalogued-pre-completion inputs the echo
+// returns 0 for, the ENGINE resolver returns the 128k floor — the engine must never see
+// 0 (it cannot run on a 0 window). This is the load-bearing engine-never-0 vs echo-0
+// guard.
+func TestEngineResolverNeverZero(t *testing.T) {
+	s := newLiveMetaStore()
+	s.seedFromCatalog([]string{providerOpenRouter})
+	reg := regForResolver(s)
+
+	echo := reg.echoWindowResolver(Config{}, providerOpenRouter, liveOnlyModel)
+	engine := reg.windowResolver(Config{}, providerOpenRouter, liveOnlyModel)
+
+	if got := echo(); got != 0 {
+		t.Fatalf("echo = %d for an uncatalogued live-only model pre-completion, want 0", got)
+	}
+	if got := engine(); got != defaultContextWindowTokens {
+		t.Fatalf("engine resolver = %d for the SAME inputs, want the 128k floor %d (engine must NEVER see 0)", got, defaultContextWindowTokens)
+	}
+	// And post-settle-but-still-unknown both agree on 128k (the only place they converge
+	// in the unknown case).
+	s.markRefreshCompleted()
+	if got := echo(); got != defaultContextWindowTokens {
+		t.Fatalf("settled echo = %d, want 128k floor", got)
+	}
+	if got := engine(); got != defaultContextWindowTokens {
+		t.Fatalf("engine = %d, want 128k floor", got)
+	}
+}
+
+// TestResolversOverrideWinsBothPrePost: the --context-window-override wins for BOTH
+// resolvers, pre- and post-completion — never a provisional 0, never the floor.
+func TestResolversOverrideWinsBothPrePost(t *testing.T) {
+	const override = 777_000
+	s := newLiveMetaStore()
+	s.seedFromCatalog([]string{providerOpenRouter})
+	reg := regForResolver(s)
+	cfg := Config{ContextWindowOverride: override}
+
+	echo := reg.echoWindowResolver(cfg, providerOpenRouter, liveOnlyModel)
+	engine := reg.windowResolver(cfg, providerOpenRouter, liveOnlyModel)
+
+	// Pre-completion: override wins (not provisional 0, not floor).
+	if got := echo(); got != override {
+		t.Fatalf("pre-completion echo with override = %d, want %d", got, override)
+	}
+	if got := engine(); got != override {
+		t.Fatalf("pre-completion engine with override = %d, want %d", got, override)
+	}
+	// Post-completion: still the override.
+	s.markRefreshCompleted()
+	if got := echo(); got != override {
+		t.Fatalf("post-completion echo with override = %d, want %d", got, override)
+	}
+	if got := engine(); got != override {
+		t.Fatalf("post-completion engine with override = %d, want %d", got, override)
+	}
+}

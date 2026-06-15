@@ -551,3 +551,96 @@ func TestAsyncRefreshCancelMidFetchDoesNotOverwrite(t *testing.T) {
 		t.Fatalf("cancel mid-fetch overwrote the seed: set=%v calls=%d, want no swap", set, calls)
 	}
 }
+
+// --- refresh-completed flag (issue #66 provisional-0 echo) ---
+//
+// markRefreshCompleted MUST be set in every SETTLE path (sync swap, async success,
+// async fetch-fail/empty fallback, no-lister no-op) so the echo resolver stops
+// returning a provisional 0 and floors an uncatalogued live-only model to 128k. It
+// must NOT be set on the shutdown-cancel paths (a shutdown is not a settled refresh).
+
+// TestRefreshCompletedSyncPath: the synchronous swap path settles the flag.
+func TestRefreshCompletedSyncPath(t *testing.T) {
+	reg := regWithLister(&fakeLister{models: []modelEntry{{ID: "live/a"}}})
+	reg.meta = newLiveMetaStore()
+	if reg.meta.refreshCompleted() {
+		t.Fatal("refreshCompleted true before the refresh ran")
+	}
+	startLiveModelRefresh(port.NopDiagnostics{}, reg, newFakeSwapper(), true, 0) // SYNC
+	if !reg.meta.refreshCompleted() {
+		t.Fatal("sync swap path did not mark the refresh completed")
+	}
+}
+
+// TestRefreshCompletedAsyncSuccess: a successful async swap settles the flag, observed
+// after the join.
+func TestRefreshCompletedAsyncSuccess(t *testing.T) {
+	reg := regWithLister(&fakeLister{models: []modelEntry{{ID: "live/a"}}})
+	reg.meta = newLiveMetaStore()
+	swap := newFakeSwapper()
+	closer := startLiveModelRefresh(port.NopDiagnostics{}, reg, swap, false, 0)
+	<-swap.swapped
+	closer() // join the goroutine so the markRefreshCompleted after the swap is visible
+	if !reg.meta.refreshCompleted() {
+		t.Fatal("async success path did not mark the refresh completed")
+	}
+}
+
+// TestRefreshCompletedAsyncFetchFail: a live FETCH FAILURE still falls back to the
+// embedded floor, Swaps, and SETTLES the flag — so a no-network deployment floors and
+// STOPS (the echo never sticks at provisional 0). The flag is the same on the empty-
+// result path (resolveProviderModels folds both into the embedded fallback Swap).
+func TestRefreshCompletedAsyncFetchFail(t *testing.T) {
+	reg := regWithLister(&fakeLister{err: errors.New("offline")})
+	reg.meta = newLiveMetaStore()
+	swap := newFakeSwapper()
+	closer := startLiveModelRefresh(port.NopDiagnostics{}, reg, swap, false, 0)
+	<-swap.swapped
+	closer()
+	if !reg.meta.refreshCompleted() {
+		t.Fatal("async fetch-fail path did not mark the refresh completed (echo would stick at provisional 0)")
+	}
+}
+
+// TestRefreshCompletedNoLister: an openai/anthropic/mock-only deployment (no lister
+// anywhere) settles the flag BEFORE the no-op early return, so the echo resolver
+// floors an uncatalogued model instead of returning provisional 0 forever.
+func TestRefreshCompletedNoLister(t *testing.T) {
+	reg := &providerRegistry{
+		entries:   map[string]providerEntry{providerOpenAI: {id: providerOpenAI, provider: mockllm.New(mockllm.TextTurn("x")), available: true}},
+		defaultID: providerOpenAI,
+		meta:      newLiveMetaStore(),
+	}
+	closer := startLiveModelRefresh(port.NopDiagnostics{}, reg, newFakeSwapper(), false, 0)
+	closer()
+	if !reg.meta.refreshCompleted() {
+		t.Fatal("no-lister no-op path did not mark the refresh completed")
+	}
+}
+
+// TestRefreshNotCompletedOnShutdownCancel: a shutdown during the delay hold (and a
+// shutdown mid-fetch) is NOT a settled refresh — the flag must stay false so a
+// restart-style rebuild does not falsely treat the cancelled refresh as settled.
+func TestRefreshNotCompletedOnShutdownCancel(t *testing.T) {
+	// (a) cancel during the delay hold: the delay select observes ctx.Done and returns
+	// before the fetch/swap, so the flag is never set.
+	regA := regWithLister(&fakeLister{models: []modelEntry{{ID: "live/a"}}})
+	regA.meta = newLiveMetaStore()
+	closerA := startLiveModelRefresh(port.NopDiagnostics{}, regA, newFakeSwapper(), false, time.Hour)
+	closerA() // cancel mid-hold + join
+	if regA.meta.refreshCompleted() {
+		t.Fatal("cancel-during-hold marked the refresh completed (a shutdown is not a settle)")
+	}
+
+	// (b) cancel mid-fetch: the ctx.Err() guard returns before the swap, so the flag is
+	// never set either.
+	lister := &blockingLister{started: make(chan struct{}), models: []modelEntry{{ID: "live/late"}}}
+	regB := regWithLister(lister)
+	regB.meta = newLiveMetaStore()
+	closerB := startLiveModelRefresh(port.NopDiagnostics{}, regB, newFakeSwapper(), false, 0)
+	<-lister.started
+	closerB() // cancel mid-fetch + join
+	if regB.meta.refreshCompleted() {
+		t.Fatal("cancel-mid-fetch marked the refresh completed (a shutdown is not a settle)")
+	}
+}
