@@ -517,3 +517,77 @@ func TestTeamMemberConfiguredAskSurfaces(t *testing.T) {
 		t.Fatalf("team run failed: %q", res.Error)
 	}
 }
+
+// TestChildAskYoloNonSubstitutionAutoApproves is the agent-layer e2e over the
+// EXACT ruleset production childRules(Config{AllowAllTools:true}) produces (a
+// ScopeCLI AudienceSubagent allow-all PREPENDED to the AllowAllFloorRules floor,
+// pinned AudienceSubagent). It proves the --yolo child ruleset is BENIGN at the
+// loop level: a plain non-read-only, non-substitution Bash command runs on a
+// HEADLESS (non-interactive) parent with no surfaced ask and no auto-deny (the
+// blanket child floor allows it — children have no mutate-ask floor), AND the
+// paired substitution variant (non-read-only inner) STILL floors → headless ⇒
+// auto-denied, never executed, since the substitution-floor loosening stays
+// MAIN-only. Together they pin that the symmetric yolo rule does not weaken the
+// child substitution floor. Innocuous stand-ins per the no-destructive-literals
+// rule.
+func TestChildAskYoloNonSubstitutionAutoApproves(t *testing.T) {
+	yoloChildPolicy := func() port.PermissionPolicy {
+		rules := append([]governance.Rule{{Scope: governance.ScopeCLI, Effect: governance.Allow, Audience: governance.AudienceSubagent}},
+			permpolicy.AllowAllFloorRules()...)
+		return permpolicy.NewPolicy(rules, nil, governance.WithAudience(governance.AudienceSubagent))
+	}
+
+	t.Run("plain mutate auto-approves without surfacing", func(t *testing.T) {
+		bash := &fakeBash{}
+		childLLM := mockllm.New(
+			mockllm.ToolCallTurn(toolCall("k1", "Bash", `{"command":"python3 script.py"}`)),
+			mockllm.TextTurn("child done"),
+		)
+		child := agent.NewEngine(agent.Deps{LLM: childLLM, Catalog: bashCatalog(bash), Policy: yoloChildPolicy(), Model: "child-model"})
+		task := agent.NewSubagentTool(child) // headless parent below ⇒ no surfacing path.
+
+		parentLLM := mockllm.New(
+			mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x"}`)),
+			mockllm.TextTurn("parent done"),
+		)
+		e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)}) // headless
+		r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+		evs := drainWithTimeout(t, r)
+
+		if got := bash.ran(); len(got) != 1 || !strings.Contains(got[0], "python3 script.py") {
+			t.Fatalf("--yolo child should auto-approve a plain mutate without surfacing; ran=%v", got)
+		}
+		for _, ev := range evs {
+			if ev.Type == session.EvPermissionAsk {
+				t.Fatalf("no ask should surface for a --yolo child plain mutate")
+			}
+		}
+	})
+
+	t.Run("substitution with bad inner still auto-denies", func(t *testing.T) {
+		bash := &fakeBash{}
+		childLLM := mockllm.New(
+			mockllm.ToolCallTurn(toolCall("k1", "Bash", `{"command":"cat $(zap)"}`)),
+			mockllm.TextTurn("child adapted"),
+		)
+		child := agent.NewEngine(agent.Deps{LLM: childLLM, Catalog: bashCatalog(bash), Policy: yoloChildPolicy(), Model: "child-model"})
+		task := agent.NewSubagentTool(child)
+
+		parentLLM := mockllm.New(
+			mockllm.ToolCallTurn(toolCall("p1", "Subagent", `{"prompt":"x"}`)),
+			mockllm.TextTurn("parent done"),
+		)
+		e := newEngine(agent.Deps{LLM: parentLLM, Catalog: catalogWith(t, task)}) // headless
+		r := e.Run(context.Background(), newSession(t, session.Limits{}), memfs.NewWorkspace("/ws"), "go")
+		evs := drainWithTimeout(t, r)
+
+		if got := bash.ran(); len(got) != 0 {
+			t.Fatalf("--yolo child substitution (bad inner) must auto-deny, not execute (loosening is main-only); ran=%v", got)
+		}
+		for _, ev := range evs {
+			if ev.Type == session.EvPermissionAsk {
+				t.Fatalf("headless parent has no surfacing path; the ask must auto-deny silently")
+			}
+		}
+	})
+}

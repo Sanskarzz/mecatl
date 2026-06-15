@@ -195,23 +195,39 @@ permissions:
 	}
 }
 
-// TestYoloLeavesChildrenUnchanged pins --yolo as MAIN-only (issue #32): under
-// AllowAllTools the MAIN policy's substitution floor is loosened, but a child
-// policy still floors the same command at Ask (resolved through the child-ask
-// model, never the yolo loosening).
-func TestYoloLeavesChildrenUnchanged(t *testing.T) {
+// TestYoloChildLoosensMutateFloorNotSubstitution pins the --yolo main/child
+// asymmetry (issue #32, corrected): the substitution-floor LOOSENING stays
+// MAIN-only. Under AllowAllTools the MAIN policy loosens the substitution floor
+// (a non-read-only $() resolves Allow), but a CHILD's substitution floor stays
+// at Ask — resolved through the child-ask model, never the yolo loosening
+// (childEvaluatorOptions deliberately omits WithLooseSubstitution). A plain
+// (non-substitution) child mutate is Allow, but note that is the BLANKET child
+// floor allowing it (children have no mutate-ask floor), NOT the yolo rule — see
+// TestChildPolicyAutoApprovesNonSubstitution; asserted here only to document the
+// contrast with the still-floored substitution case.
+func TestYoloChildLoosensMutateFloorNotSubstitution(t *testing.T) {
 	cfg := Config{Workspace: "", Model: "mock", AllowAllTools: true}
-	args, _ := json.Marshal(map[string]string{"command": "cat $(zap)"})
-	call := session.NewToolCall("c1", "Bash", args)
+	mutateArgs, _ := json.Marshal(map[string]string{"command": "zap -rf build"}) // unknown-verb mutate stand-in
+	mutateCall := session.NewToolCall("c1", "Bash", mutateArgs)
+	subArgs, _ := json.Marshal(map[string]string{"command": "cat $(zap)"}) // non-read-only inner
+	subCall := session.NewToolCall("c2", "Bash", subArgs)
 
 	// Mirror buildEngine's main-policy construction (rules + evaluator options +
 	// the build-once resolver — nil here, no config sources).
 	mainPolicy := permpolicy.NewPolicyWithResolver(mainRules(cfg), nil, cfg.permResolver, mainEvaluatorOptions(cfg)...)
-	if got := mainPolicy.Evaluate(context.Background(), "s1", session.ModeDefault, call, nil); got.Effect != governance.Allow {
+	if got := mainPolicy.Evaluate(context.Background(), "s1", session.ModeDefault, subCall, nil); got.Effect != governance.Allow {
 		t.Fatalf("--yolo main policy should loosen the substitution floor; got %+v", got)
 	}
+
 	childPolicy := childPermPolicy(cfg)
-	if got := childPolicy.Evaluate(context.Background(), "s1", session.ModeDefault, call, nil); got.Effect != governance.Ask {
+	// Plain mutate: the blanket child floor allows it (no mutate-ask floor exists
+	// for a child to loosen) → Allow regardless of yolo.
+	if got := childPolicy.Evaluate(context.Background(), "s1", session.ModeDefault, mutateCall, nil); got.Effect != governance.Allow {
+		t.Fatalf("child plain mutate should be Allow (blanket floor); got %+v", got)
+	}
+	// Substitution with a non-read-only inner: the loosening is MAIN-only, so the
+	// child still floors at Ask — the load-bearing safety assertion.
+	if got := childPolicy.Evaluate(context.Background(), "s1", session.ModeDefault, subCall, nil); got.Effect != governance.Ask {
 		t.Fatalf("--yolo must NOT loosen a CHILD's substitution floor; got %+v", got)
 	}
 }
@@ -224,7 +240,7 @@ func TestYoloLeavesChildrenUnchanged(t *testing.T) {
 func TestChildRulesFloorScopeNeutral(t *testing.T) {
 	legacy := governance.NewEvaluator([]governance.Rule{{Effect: governance.Allow}},
 		governance.WithAudience(governance.AudienceSubagent))
-	current := governance.NewEvaluator(childRules(), childEvaluatorOptions()...)
+	current := governance.NewEvaluator(childRules(Config{}), childEvaluatorOptions()...)
 
 	cmds := []string{
 		"ls",

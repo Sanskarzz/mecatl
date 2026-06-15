@@ -20,6 +20,9 @@ func TestMainRulesInjectsAllowAllWhenSet(t *testing.T) {
 	for _, r := range withAllowAll {
 		if r.Scope == governance.ScopeCLI && r.Tool == "" && r.Pattern == "" && r.Effect == governance.Allow {
 			found = true
+			if r.Audience != governance.AudienceMain {
+				t.Fatalf("the main allow-all rule must carry AudienceMain; got %v", r.Audience)
+			}
 			break
 		}
 	}
@@ -95,5 +98,163 @@ func TestYoloLoosensSubstitutionFloorViaComposition(t *testing.T) {
 	plain := permpolicy.NewPolicy(mainRules(plainCfg), nil, mainEvaluatorOptions(plainCfg)...)
 	if got := plain.Evaluate(context.Background(), sid, session.ModeDefault, call, nil); got.Effect != governance.Ask {
 		t.Fatalf("no-yolo substitution: expected Ask (floor stands), got %v (%s)", got.Effect, got.Reason)
+	}
+}
+
+// TestChildRulesInjectsAllowAllWhenSet mirrors TestMainRulesInjectsAllowAllWhenSet
+// for the CHILD ruleset: under --yolo childRules prepends exactly one
+// ScopeCLI/empty-Tool/empty-Pattern/Allow/AudienceSubagent rule to the allow-all
+// floor; with yolo off it equals AllowAllFloorRules() with no injected rule. This
+// is the structural half of the team-member/subagent auto-approve fix.
+func TestChildRulesInjectsAllowAllWhenSet(t *testing.T) {
+	floor := permpolicy.AllowAllFloorRules()
+
+	withAllowAll := childRules(Config{AllowAllTools: true})
+	var found int
+	for _, r := range withAllowAll {
+		if r.Scope == governance.ScopeCLI && r.Tool == "" && r.Pattern == "" && r.Effect == governance.Allow {
+			found++
+			if r.Audience != governance.AudienceSubagent {
+				t.Fatalf("the child allow-all rule must carry AudienceSubagent; got %v", r.Audience)
+			}
+		}
+	}
+	if found != 1 {
+		t.Fatalf("AllowAllTools=true should inject exactly one ScopeCLI AudienceSubagent Allow rule; found %d in %+v", found, withAllowAll)
+	}
+	if len(withAllowAll) != len(floor)+1 {
+		t.Fatalf("AllowAllTools=true should add exactly one rule: got %d, want %d", len(withAllowAll), len(floor)+1)
+	}
+
+	without := childRules(Config{AllowAllTools: false})
+	if len(without) != len(floor) {
+		t.Fatalf("AllowAllTools=false should equal AllowAllFloorRules(): got %d, want %d", len(without), len(floor))
+	}
+	for _, r := range without {
+		if r.Scope == governance.ScopeCLI && r.Tool == "" && r.Pattern == "" && r.Effect == governance.Allow {
+			t.Fatalf("AllowAllTools=false must NOT inject the ScopeCLI allow-all rule; rules=%+v", without)
+		}
+	}
+}
+
+// TestChildPolicyAutoApprovesNonSubstitution proves the child policy
+// auto-approves a plain (non-read-only, non-substitution) mutate Bash command —
+// and that this holds REGARDLESS of --yolo, because the child floor is a blanket
+// allow-all (children have no mutate-ask floor to loosen, unlike the main
+// engine's defaultRules()). This pins the empirical reality the
+// team-member/subagent "bug" was misdiagnosed against: a child's plain mutate
+// never prompted; only its substitution/heredoc commands floor at Ask (kept by
+// TestYoloChildSubstitutionStillFailsSafe). Innocuous non-read-only stand-in;
+// nothing executes.
+func TestChildPolicyAutoApprovesNonSubstitution(t *testing.T) {
+	const sid = session.SessionID("s1")
+	args, _ := json.Marshal(map[string]string{"command": "python3 script.py"})
+	call := session.NewToolCall("c1", "Bash", args)
+
+	for _, yolo := range []bool{true, false} {
+		p := childPermPolicy(Config{AllowAllTools: yolo})
+		if got := p.Evaluate(context.Background(), sid, session.ModeDefault, call, nil); got.Effect != governance.Allow {
+			t.Fatalf("child plain mutate (yolo=%v): expected Allow (blanket floor), got %v (%s)", yolo, got.Effect, got.Reason)
+		}
+	}
+}
+
+// TestYoloChildSubstitutionStillFailsSafe is the SAFETY kill test: under --yolo a
+// child's substitution command with a NON-read-only inner ($(zap)) must STILL
+// floor at Ask, with neither FlooredConfiguredAllow nor ConfiguredAsk set (the
+// loosening is main-only; the child resolves through the child-ask model). The
+// paired positive: a substitution with a READ-ONLY inner clears the
+// flooredAllowSafe inner contract → FlooredConfiguredAllow, still surfaced as Ask.
+func TestYoloChildSubstitutionStillFailsSafe(t *testing.T) {
+	const sid = session.SessionID("s1")
+	child := childPermPolicy(Config{AllowAllTools: true})
+
+	badArgs, _ := json.Marshal(map[string]string{"command": "cat $(zap)"}) // non-read-only inner
+	badCall := session.NewToolCall("c1", "Bash", badArgs)
+	if got := child.Evaluate(context.Background(), sid, session.ModeDefault, badCall, nil); got.Effect != governance.Ask || got.FlooredConfiguredAllow || got.ConfiguredAsk {
+		t.Fatalf("--yolo child substitution (bad inner) must Ask with no Floored/Configured bits; got %+v", got)
+	}
+
+	goodArgs, _ := json.Marshal(map[string]string{"command": "go test $(git rev-parse HEAD)"}) // read-only inner
+	goodCall := session.NewToolCall("c2", "Bash", goodArgs)
+	if got := child.Evaluate(context.Background(), sid, session.ModeDefault, goodCall, nil); got.Effect != governance.Ask || !got.FlooredConfiguredAllow {
+		t.Fatalf("--yolo child substitution (read-only inner) must Ask with FlooredConfiguredAllow; got %+v", got)
+	}
+}
+
+// TestAllowAllToolsBindsMainAndChildren is the KILL-SWITCH for the regression
+// class the user explicitly wants blocked: a future knob that touches only
+// mainRules (and not the shared yoloAllowAllRule) would let the main and child
+// allow-all rulesets diverge again. It pins that under --yolo the SAME ScopeCLI
+// empty-Tool/empty-Pattern Allow rule is present in BOTH rulesets (mainRules
+// carries AudienceMain, childRules AudienceSubagent) and ABSENT from both with
+// yolo off. It does NOT assert a child Ask→Allow flip for a plain mutate: the
+// child floor is a blanket allow-all, so a plain child mutate is Allow either
+// way (TestChildPolicyAutoApprovesNonSubstitution) — only the MAIN engine has a
+// mutate-ask floor for the rule to flip, asserted here via the real evaluator.
+// The substitution floor stays for children regardless (pinned by
+// TestSubstitutionLooseningStaysMainOnly). Mirrors the #42 catalog-drift
+// kill-switch discipline in catalog_drift_test.go.
+func TestAllowAllToolsBindsMainAndChildren(t *testing.T) {
+	hasAllowAll := func(rules []governance.Rule, want governance.Audience) bool {
+		for _, r := range rules {
+			if r.Scope == governance.ScopeCLI && r.Tool == "" && r.Pattern == "" && r.Effect == governance.Allow && r.Audience == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	rulesets := []struct {
+		name     string
+		rules    func(Config) []governance.Rule
+		audience governance.Audience
+	}{
+		{"main", mainRules, governance.AudienceMain},
+		{"child", childRules, governance.AudienceSubagent},
+	}
+	for _, rs := range rulesets {
+		if !hasAllowAll(rs.rules(Config{AllowAllTools: true}), rs.audience) {
+			t.Fatalf("%s ruleset under --yolo must contain the ScopeCLI %v allow-all rule", rs.name, rs.audience)
+		}
+		if hasAllowAll(rs.rules(Config{AllowAllTools: false}), rs.audience) {
+			t.Fatalf("%s ruleset without --yolo must NOT contain the ScopeCLI allow-all rule", rs.name)
+		}
+	}
+
+	// The MAIN engine has a mutate-ask floor for the rule to flip; drive it
+	// through the real evaluator to prove the rule is wired, not inert.
+	const sid = session.SessionID("s1")
+	args, _ := json.Marshal(map[string]string{"command": "zap -rf build"}) // unknown-verb mutate stand-in
+	call := session.NewToolCall("c1", "Bash", args)
+	on := permpolicy.NewPolicy(mainRules(Config{AllowAllTools: true}), nil, mainEvaluatorOptions(Config{AllowAllTools: true})...)
+	if got := on.Evaluate(context.Background(), sid, session.ModeDefault, call, nil); got.Effect != governance.Allow {
+		t.Fatalf("main posture under --yolo must Allow a plain mutate; got %v (%s)", got.Effect, got.Reason)
+	}
+	off := permpolicy.NewPolicy(mainRules(Config{AllowAllTools: false}), nil, mainEvaluatorOptions(Config{AllowAllTools: false})...)
+	if got := off.Evaluate(context.Background(), sid, session.ModeDefault, call, nil); got.Effect != governance.Ask {
+		t.Fatalf("main posture without --yolo must Ask a plain mutate; got %v (%s)", got.Effect, got.Reason)
+	}
+}
+
+// TestSubstitutionLooseningStaysMainOnly codifies that the main/child asymmetry
+// is EXACTLY the substitution-floor loosening and nothing else: a substitution
+// command (non-read-only inner) ASKS under childEvaluatorOptions() but ALLOWS
+// under mainEvaluatorOptions(--yolo). The ruleset is held constant (the floor
+// allow-all) so the only difference under test is the evaluator option set.
+func TestSubstitutionLooseningStaysMainOnly(t *testing.T) {
+	const sid = session.SessionID("s1")
+	args, _ := json.Marshal(map[string]string{"command": "cat $(zap)"})
+	call := session.NewToolCall("c1", "Bash", args)
+
+	mainCfg := Config{AllowAllTools: true}
+	mainP := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil, mainEvaluatorOptions(mainCfg)...)
+	if got := mainP.Evaluate(context.Background(), sid, session.ModeDefault, call, nil); got.Effect != governance.Allow {
+		t.Fatalf("substitution under mainEvaluatorOptions(--yolo) must Allow (loosening is main-only); got %v (%s)", got.Effect, got.Reason)
+	}
+
+	childP := permpolicy.NewPolicy(permpolicy.AllowAllFloorRules(), nil, childEvaluatorOptions()...)
+	if got := childP.Evaluate(context.Background(), sid, session.ModeDefault, call, nil); got.Effect != governance.Ask {
+		t.Fatalf("substitution under childEvaluatorOptions() must Ask (no loosening); got %v (%s)", got.Effect, got.Reason)
 	}
 }

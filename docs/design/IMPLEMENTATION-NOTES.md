@@ -82,10 +82,17 @@ Scopes run highest→lowest `Managed > CLI > LocalProject > SharedProject > User
 higher-scope config Allow may loosen **only** the `ScopeBuiltinDefault` Ask floor; it can
 never suppress a configured Ask. Deny-dominant + plan-mode gating still hold.
 
-The allow-all operator posture (`--yolo` → `app.Config.AllowAllTools`, injected by `mainRules`
-in `internal/app/build.go`) is a **rule** (a single `ScopeCLI` allow-all), NOT a
+The allow-all operator posture (`--yolo` → `app.Config.AllowAllTools`) is a **rule** (a single
+`ScopeCLI` allow-all from the shared `yoloAllowAllRule` in `internal/app/build.go`), NOT a
 `PermissionMode` and NOT an evaluator bypass — it loosens only the `ScopeBuiltinDefault`
-floor, so both invariants above are unchanged. (See `ALLOW-ALL-POSTURE.md`.)
+floor, so both invariants above are unchanged. The rule is injected into BOTH `mainRules`
+(`AudienceMain`) AND `childRules` (`AudienceSubagent`), so the allow-all RULE binds main and
+children alike (symmetry / anti-drift, pinned by `TestAllowAllToolsBindsMainAndChildren`). What
+stays MAIN-only is the substitution-floor **loosening** (`WithLooseSubstitution` lives in
+`mainEvaluatorOptions`, never `childEvaluatorOptions`, pinned by
+`TestSubstitutionLooseningStaysMainOnly`): a child's `$()`/backtick/heredoc command still
+resolves through the child-ask model, so `--yolo` does not bypass a child's substitution floor.
+(See `ALLOW-ALL-POSTURE.md`.)
 
 Memory + soul pre-approval (issue #14): the six memory tools (`Remember`/`Recall`/`SearchMemory`
 + cross-project `RememberUser`/`RecallUser`/`SearchUserModel`) and the synthetic `soul:apply`
@@ -1055,8 +1062,10 @@ coverage loop hard-failed with a misleading "denied by user". The fix (`handleCh
   `AllowOnce` without surfacing. Positive soundness is fuzzed (`FuzzFlooredConfiguredAllow`,
   the repo convention for auto-approval-gating classifiers). The pre-existing classifiers
   (`SubstitutionReadOnly`/`ReadOnlyBash`/`IsolationApprovable` + their fuzzers) are
-  byte-for-byte unchanged. `--yolo` stays MAIN-only (children never get
-  `WithLooseSubstitution`; pinned by `TestYoloLeavesChildrenUnchanged`).
+  byte-for-byte unchanged. The `--yolo` allow-all RULE binds children too (the shared
+  `yoloAllowAllRule` injected into `childRules`), but the substitution-floor LOOSENING stays
+  MAIN-only (children never get `WithLooseSubstitution`; pinned by
+  `TestYoloChildLoosensMutateFloorNotSubstitution` + `TestSubstitutionLooseningStaysMainOnly`).
 
 **The headless ask REVIEWER (issue #31) inserts an OPT-IN step 3b between surface and the
 blanket auto-deny.** When a headless run reaches step 4 with a NON-configured ask (the
@@ -1139,12 +1148,16 @@ RunTeam direct path keeps zero parentCaps (documented at the supervisor construc
 deliberately a server FLAG, never a permconfig key: it grants an autonomous approval capability —
 an operator deployment decision a (project-tier) settings file must not be able to switch on.
 
-**`--yolo` loosens the substitution floor for the MAIN agent.** `Config.AllowAllTools` now also
-threads `governance.WithLooseSubstitution(true)` (`mainEvaluatorOptions`) into the main policy's
+**`--yolo` loosens the substitution floor for the MAIN agent only.** `Config.AllowAllTools` threads
+`governance.WithLooseSubstitution(true)` (`mainEvaluatorOptions`) into the main policy's
 Evaluator, so a substitution command resolves by the allow-all fold instead of the Ask floor —
-consistent with the mutate-ask floor the ScopeCLI allow-all rule already loosens. A configured
-Deny/Ask in any scope still wins (deny-dominance unaffected). The default (no `--yolo`) keeps the
-floor. `Deps.Interactive` is set on the MAIN engine from `Config.Interactive` (mecated → true, the
+consistent with the mutate-ask floor the `ScopeCLI` allow-all rule already loosens. The allow-all
+RULE itself binds children too (the shared `yoloAllowAllRule` injected into both `mainRules` and
+`childRules`), but the substitution LOOSENING stays main-only: `childEvaluatorOptions` deliberately
+omits `WithLooseSubstitution`, so a child's `$()`/backtick/heredoc command still resolves through
+the child-ask model (`flooredAllowSafe`) — `--yolo` does not bypass a child's substitution floor.
+A configured Deny/Ask in any scope still wins (deny-dominance unaffected). The default (no
+`--yolo`) keeps the floor. `Deps.Interactive` is set on the MAIN engine from `Config.Interactive` (mecated → true, the
 bidi/HTTP surfaces have a client; the offline demo → false); child engines force it false
 (subagents cannot recurse, so they install no router — their OWN asks resolve via the parent's
 caps). The gRPC `RunTeam` direct path leaves `parentCaps` zero (headless auto-deny) — the in-loop

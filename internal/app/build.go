@@ -475,11 +475,16 @@ type Config struct {
 	TrustProject            bool
 	PermissionConfigs       []string
 
-	// AllowAllTools, when set, injects a single ScopeCLI allow-all rule into the
-	// MAIN engine's static ruleset alongside defaultRules(). It loosens ONLY the
-	// built-in mutate-ask floor AND the built-in substitution Ask floor (via
-	// WithLooseSubstitution); a Deny in any scope and any CONFIGURED Ask still win
-	// (see docs/design/ALLOW-ALL-POSTURE.md). Children are already allow-all.
+	// AllowAllTools, when set, injects a single ScopeCLI allow-all rule into BOTH
+	// the MAIN engine's static ruleset (mainRules, AudienceMain) AND the
+	// child/member ruleset (childRules, AudienceSubagent) via the shared
+	// yoloAllowAllRule. The RULE binds main AND children — it loosens the built-in
+	// mutate-ask floor for both. The built-in substitution Ask floor is
+	// additionally loosened ONLY for the main engine (mainEvaluatorOptions'
+	// WithLooseSubstitution; childEvaluatorOptions deliberately omits it), so a
+	// child's $()/backtick command still resolves through the child-ask model. A
+	// Deny in any scope and any CONFIGURED Ask still win (see
+	// docs/design/ALLOW-ALL-POSTURE.md).
 	AllowAllTools bool
 
 	// Interactive reports whether a HUMAN approver is attached to the main engine's
@@ -4427,13 +4432,31 @@ func defaultRules() []governance.Rule {
 	}
 }
 
+// yoloAllowAllRule returns the single ScopeCLI allow-all rule the --yolo posture
+// (cfg.AllowAllTools) injects, pinned to the given audience. It is the ONE
+// definition shared by mainRules (AudienceMain) and childRules (AudienceSubagent)
+// so the main and child rulesets cannot drift: under --yolo the SAME blanket
+// allow-all rule binds BOTH the main engine and its children, loosening the
+// built-in mutate-ask floor for both. A Deny in any scope and any CONFIGURED
+// Ask still win (deny-dominance + the configured-ask floor are unaffected). What
+// stays MAIN-only is the substitution-floor LOOSENING (WithLooseSubstitution),
+// which lives in mainEvaluatorOptions, never childEvaluatorOptions — see
+// docs/design/ALLOW-ALL-POSTURE.md.
+func yoloAllowAllRule(audience governance.Audience) governance.Rule {
+	return governance.Rule{Scope: governance.ScopeCLI, Effect: governance.Allow, Audience: audience}
+}
+
 // mainRules returns the main engine's static ruleset: the built-in floor, plus
-// — when cfg.AllowAllTools — a single ScopeCLI allow-all rule that loosens that
-// floor (a Deny in any scope and any configured Ask still win).
+// — when cfg.AllowAllTools — a single ScopeCLI allow-all rule (AudienceMain)
+// that loosens that floor (a Deny in any scope and any configured Ask still
+// win). The SAME rule (with AudienceSubagent) is injected into childRules under
+// --yolo, so the allow-all RULE binds both main and children; only the
+// substitution-floor LOOSENING (mainEvaluatorOptions' WithLooseSubstitution)
+// stays main-only.
 func mainRules(cfg Config) []governance.Rule {
 	rules := defaultRules()
 	if cfg.AllowAllTools {
-		rules = append([]governance.Rule{{Scope: governance.ScopeCLI, Effect: governance.Allow}}, rules...)
+		rules = append([]governance.Rule{yoloAllowAllRule(governance.AudienceMain)}, rules...)
 	}
 	return rules
 }
@@ -4448,9 +4471,11 @@ func mainRules(cfg Config) []governance.Rule {
 // allow-all rule already loosens, so a substitution command no longer prompts
 // under yolo. A configured Deny/Ask in any scope still wins (deny-dominance and
 // the configured-ask floor are unaffected). Child/member policies are built with
-// their own ruleset + audience via childPermPolicy; the substitution loosening
-// rides this main-policy seam only, and subagents' surface/isolation posture
-// handles their substitutions independently (--yolo stays main-only).
+// their own ruleset + audience via childPermPolicy; under --yolo the allow-all
+// RULE binds children too (childRules injects the AudienceSubagent variant), but
+// the substitution LOOSENING rides this main-policy seam only — a child's
+// substitution floor still resolves through the child-ask model, never the yolo
+// loosening (the substitution loosening stays main-only).
 func mainEvaluatorOptions(cfg Config) []governance.EvaluatorOption {
 	opts := []governance.EvaluatorOption{governance.WithAudience(governance.AudienceMain)}
 	if cfg.AllowAllTools {
@@ -4536,21 +4561,43 @@ func (p pinnedResolver) Resolve(ctx context.Context, _ tool.WorkspaceReader) []g
 // no config (allow-all still matches everything → Allow, and the
 // floor-exception in resolveSimple only keys on the ASK side's scope) — pinned
 // by TestChildRulesFloorScopeNeutral — but it is load-bearing for the issue-#32
-// decision bits: the blanket allow-all must NOT register as a CONFIGURED Allow
+// decision bits: the floor allow-all must NOT register as a CONFIGURED Allow
 // (scope above the floor), or every substitution-floored child ask would
 // qualify for FlooredConfiguredAllow. Only a real config rule (the permconfig
 // `subagent:` block) may carry an above-floor scope.
-func childRules() []governance.Rule {
-	return permpolicy.AllowAllFloorRules()
+//
+// Under --yolo (cfg.AllowAllTools) a ScopeCLI/AudienceSubagent allow-all rule
+// (the yoloAllowAllRule sibling of mainRules') is PREPENDED to the floor. This
+// is a SYMMETRY / anti-drift change, NOT a behavioural fix: the child floor is
+// ALREADY a blanket allow-all, so a plain (non-substitution) mutate resolves
+// Allow for a child with or without --yolo — children have no mutate-ask floor
+// to loosen (unlike the main engine's defaultRules() mutate-ask). The shared
+// yoloAllowAllRule keeps the main and child rulesets from diverging and gives
+// the TestAllowAllToolsBindsMainAndChildren kill-switch a real structure to pin;
+// it becomes load-bearing only if the child floor ever tightens to carry a real
+// mutate-Ask. It cannot suppress a configured `subagent:` Ask, and it does NOT
+// touch the substitution floor: WithLooseSubstitution is deliberately STILL
+// absent from childEvaluatorOptions, so a child's substitution ($()/backtick/
+// heredoc) command still resolves through the child-ask model (flooredAllowSafe:
+// the inner must independently classify read-only) — the substitution-floor
+// loosening stays main-only.
+func childRules(cfg Config) []governance.Rule {
+	rules := permpolicy.AllowAllFloorRules()
+	if cfg.AllowAllTools {
+		rules = append([]governance.Rule{yoloAllowAllRule(governance.AudienceSubagent)}, rules...)
+	}
+	return rules
 }
 
 // childEvaluatorOptions returns the governance.Evaluator options for a
 // child/member policy: the AudienceSubagent pin (issue #32), so top-level
 // (AudienceMain) config allow/ask never bind a child while `subagent:`-block
 // rules and AudienceAll denies do. Deliberately NO WithLooseSubstitution here:
-// --yolo is main-only — a child's substitution floor resolves through the
-// child-ask model (floored-configured-allow / isolation / surface / deny),
-// never through the yolo loosening.
+// under --yolo the allow-all RULE binds children (childRules prepends the
+// AudienceSubagent variant), but the substitution-floor LOOSENING stays
+// main-only — a child's substitution floor resolves through the child-ask model
+// (floored-configured-allow / isolation / surface / deny), never through the
+// yolo loosening.
 func childEvaluatorOptions() []governance.EvaluatorOption {
 	return []governance.EvaluatorOption{governance.WithAudience(governance.AudienceSubagent)}
 }
@@ -4562,7 +4609,7 @@ func childEvaluatorOptions() []governance.EvaluatorOption {
 // the no-config default) it behaves byte-identically to the historical bare
 // allow-all policy.
 func childPermPolicy(cfg Config) *permpolicy.Policy {
-	return permpolicy.NewPolicyWithResolver(childRules(), nil /* children never learn */, cfg.childPermResolver, childEvaluatorOptions()...)
+	return permpolicy.NewPolicyWithResolver(childRules(cfg), nil /* children never learn */, cfg.childPermResolver, childEvaluatorOptions()...)
 }
 
 // defaultLimits returns the non-zero stop limits injected for sessions created

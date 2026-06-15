@@ -78,10 +78,12 @@ issue #32 that is an allow-all **floor** plus child-scoped config:
 
 ```go
 // internal/app/build.go — childPermPolicy
-// childRules() = {{Scope: ScopeBuiltinDefault, Effect: Allow}} — the floor —
-// plus the AudienceSubagent evaluator pin and the workspace-PINNED permconfig
-// resolver, so a `permissions: subagent:` block (and any top-level deny)
-// binds children while top-level allow/ask stay main-only.
+// childRules(cfg) = {{Scope: ScopeBuiltinDefault, Effect: Allow}} — the floor —
+// (PLUS, under --yolo, a {ScopeCLI, Allow, AudienceSubagent} sibling of the main
+// rule, via the shared yoloAllowAllRule) plus the AudienceSubagent evaluator pin
+// and the workspace-PINNED permconfig resolver, so a `permissions: subagent:`
+// block (and any top-level deny) binds children while top-level allow/ask stay
+// main-only.
 Policy: childPermPolicy(cfg),
 ```
 
@@ -91,9 +93,22 @@ An empty-`Tool`/`Pattern` `Allow` rule matches every call; re-scoping it to
 registering as a *configured* allow in the issue-#32 decision bits. We reuse
 that exact rule mechanism for the main session instead of threading a fourth
 mode through nine touch-points (session const, proto enum, mapper ×2, ACP
-advertise + parse, agentdefs, evaluator, tests). Note `--yolo` itself stays
-MAIN-only: children keep their substitution floor and resolve it through the
-child-ask model, never through `WithLooseSubstitution`.
+advertise + parse, agentdefs, evaluator, tests).
+
+Under `--yolo` the allow-all **rule** now binds children too: `childRules`
+injects a `{ScopeCLI, Allow, AudienceSubagent}` sibling of the main rule via the
+shared `yoloAllowAllRule`, so the main and child rulesets cannot drift (pinned by
+`TestAllowAllToolsBindsMainAndChildren`). This is a **symmetry / anti-drift**
+change — it is behaviour-neutral today because the child floor is *already* a
+blanket allow-all (children have no mutate-ask floor for the rule to flip), and it
+becomes load-bearing only if the child floor ever tightens. What stays MAIN-only
+is the substitution-floor **loosening**: `WithLooseSubstitution` lives in
+`mainEvaluatorOptions`, never `childEvaluatorOptions` (pinned by
+`TestSubstitutionLooseningStaysMainOnly`). A child's `$()`/backtick/heredoc
+command therefore still resolves through the child-ask model
+(`flooredAllowSafe`: the inner must independently classify read-only), never
+through the yolo loosening — `--yolo` does **not** bypass a child's substitution
+floor, by design.
 
 ## How allow-all works as a rule (the mechanism)
 

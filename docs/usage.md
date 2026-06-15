@@ -211,7 +211,7 @@ $ go run ./cmd/mecated --openai --workspace "$PWD"
 | `--import-claude-permissions` | `false` | also import Claude-Code `settings.json` permissions (project + user). **Lossy** (fail-safe): see the table below. |
 | `--trust-project` | `false` | honour the discovered **project authority set**: the project's ALLOW rules (its deny/ask are always honoured regardless), its project persona/soul at `<workspace>/.mecatl/soul.md`, AND the **project tier** of agent definitions, slash commands, and skills (`<workspace>/.mecatl/*`, `<workspace>/.claude/*`). It also gates the **read-only subagent/team-member shell** (issue #40): on an untrusted workspace, Subagent children and read-only members run Bash-less (Read/Grep/Glob only — creating their worktree runs a `git` checkout over the repo's `.git`, where a tracked `.gitattributes` can name filter drivers that execute code with nobody having run anything); mutating members and Parallel branches keep their hardened shells (force-copy forks are created by a pure file copy with no git invocation, and their git afterwards runs over the copied repo — the same exposure as the operator's own session). OFF by default (the safe stance) — an untrusted repo's grants, persona, agents, commands, skills, and subagent shell are withheld; the agent still runs in "ask the human" mode (see the workspace-trust note below). **See the permission-config, persona/soul, and workspace-trust notes below.** |
 | `--permission-config` | `""` | path to a YAML permission-config file loaded at the **user (fully-trusted) scope** (**repeatable**). Always loaded regardless of `--permissions-conventional`. |
-| `--yolo` | `false` | **OPERATOR POSTURE (dangerous).** Suppress permission prompts for the built-in mutate-ask floor (`Bash`/`Edit`/`Write`/`Team`/`SkillDraft`) **server-wide** — for ephemeral, isolated, single-tenant deployments only. A `Deny` in **any** scope and any **deliberately configured** `Ask` (managed/project/user) still apply. **Refused when running as root** (euid 0) unless `MECATL_SANDBOX=1` (or `IS_SANDBOX=1`) is set. **See the allow-all note below.** |
+| `--yolo` | `false` | **OPERATOR POSTURE (dangerous).** Suppress permission prompts for the built-in mutate-ask floor (`Bash`/`Edit`/`Write`/`Team`/`SkillDraft`) **server-wide**, for the main agent **and** its children (subagents/team members/parallel branches) — for ephemeral, isolated, single-tenant deployments only. A `Deny` in **any** scope and any **deliberately configured** `Ask` (managed/project/user) still apply; a child's `$(...)`/backtick/heredoc substitution command still resolves through the child-ask model (the substitution-floor loosening is main-only). **Refused when running as root** (euid 0) unless `MECATL_SANDBOX=1` (or `IS_SANDBOX=1`) is set. **See the allow-all note below.** |
 | `--metrics-addr` | `127.0.0.1:9090` | loopback **admin/observability** listener (empty disables). Serves `/metrics` and the runtime-introspection endpoints — **see the observability note below**. |
 | `--otlp-endpoint` | `""` | OTLP collector endpoint for trace export (empty → tracing is a no-op; metrics are always on via `/metrics`). |
 | `--otlp-protocol` | `grpc` | OTLP transport: `grpc` or `http`. |
@@ -763,8 +763,10 @@ forked worktree/copy roots (a worktree lacks the gitignored
 `settings.local.yaml`, and per-fork resolution would defeat the cache). User/CLI
 rules apply to children as usual. A typo inside the `permissions:` subtree skips
 the whole file (deny/ask included) — the WARN names the lost per-effect rule
-counts. `--yolo` remains **main-only**: it never loosens a child's substitution
-floor.
+counts. Under `--yolo` the allow-all **rule** binds children too (so the main and
+child rulesets stay in lock-step), but the substitution-floor **loosening**
+remains **main-only**: it never loosens a child's substitution floor — a child's
+`$(...)`/backtick/heredoc command still resolves through the child-ask model.
 
 **Headless ask review (`--headless` + `--subagent-ask-reviewer`).** On a
 **headless** run (no human approver — mecated started with `--headless`), a child
@@ -1151,7 +1153,7 @@ flag `--yolo`. It is available on
 dials an external `--server`** — that server owns its own posture).
 
 It is **not** a `PermissionMode` and **not** an evaluator bypass. It injects a
-single `ScopeCLI` allow-all **rule** into the main engine's static ruleset, which
+single `ScopeCLI` allow-all **rule** into the engine's static ruleset, which
 loosens **only** the built-in `Bash`/`Edit`/`Write`/`Team`/`SkillDraft` Ask floor.
 The governance invariants are unchanged:
 
@@ -1161,6 +1163,18 @@ The governance invariants are unchanged:
   never suppresses a configured Ask, so a misconfigured Ask can still **block an
   unattended run** — the startup warning says so. (The common CI case configures no
   asks beyond the built-in floor, so allow-all is fully unattended there.)
+
+**Main and children, but substitution stays gated for children.** The allow-all
+**rule** is injected into both the main engine's ruleset (`AudienceMain`) and the
+child/member ruleset (`AudienceSubagent`), so the mutate-ask floor is loosened for
+subagents, team members, and parallel branches as well — `--yolo` is no longer
+silently main-only at the rule level. The one thing that stays **main-only** is the
+substitution-floor **loosening**: a child's `$(...)`/backtick/heredoc command still
+resolves through the subagent child-ask model (see *Compound-Bash & substitution
+safety* below), so `--yolo` does **not** bypass a child's substitution floor — by
+design. (Children already run allow-all for plain, non-substitution commands; the
+rule symmetry is primarily an anti-drift guarantee that the main and child postures
+cannot diverge.)
 
 The allow-all rule also blankets the synthetic `soul:apply` floor (the soul is
 applied without prompting under `--yolo`) — consistent and expected, since the soul
