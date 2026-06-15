@@ -565,9 +565,13 @@ assigned, not summed), i.e. how full the context window is right now. The **`↑
 facets** beside it are **session-cumulative totals**, fed once per run from the terminal
 result's cumulative usage (so a long session's spend keeps growing while the ctx meter
 tracks only the live conversation size). The meter's **denominator** defaults to the
-**server-resolved per-model context window** (echoed on session create and refreshed on
-every model switch); an explicit `--context-window` overrides it, and only when neither
-is known does the meter degrade to the bare current size (`ctx 40K`, no bar). As the
+**server-resolved per-model context window** (echoed on session create, refreshed on
+every model switch, and — for a default-model session on a *live-only* model whose real
+window the curated catalog lacks — self-healed by the background live-catalog swap with
+no model switch: the server rehydrates the session's engine to the live window and the
+next snapshot read fills the denominator in, issue #66). An explicit `--context-window`
+overrides it, and only when neither is known does the meter degrade to the bare current
+size (`ctx 40K`, no bar). As the
 context fills the bar **darkens** to signal pressure — `▒` ok, `▓` past ~60%, `█` plus a
 `⚠` mark past ~85% — and the colour shifts to match (a non-colour glyph cue so it reads
 with ANSI stripped). These bands are a visual fill gauge, **not** a compaction countdown:

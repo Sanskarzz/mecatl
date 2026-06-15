@@ -2706,6 +2706,61 @@ available (gates the client picker like `agents` gates `/agents`). Additive + ol
 old client sends no selector ⇒ server default; reads an old server's
 `model_selection=false`/`Unimplemented` ListModels ⇒ hides the picker).
 
+**The default-session `resolved_model` context-window race (issue #66).** A DEFAULT
+session (no `/models` selector) echoes `Config.DefaultResolvedModel`, whose
+`ContextWindow` is baked once in `Build`. That bake reads `reg.meta.contextWindowFor`
+which, AT `Build` time, sees only the catalog seed — the live `Swap` runs in a
+background goroutine and lands ~few-hundred-ms later. For a model the live listing
+carries but the curated catalog does NOT (reproduced live: OpenRouter `openai/gpt-5.5`),
+the catalog floor is 0, so the baked window is 0 and the mecatui footer has no context
+bar — while team members on the same model show the live window (they go through the
+live-first per-child resolver). The fix re-resolves only the `ContextWindow` SCALAR
+**live-first at call time** in `Service.ResolvedModel` via an injected closure
+`Config.ResolveContextWindow` (over `reg.meta.contextWindowFor`, an `atomic.Pointer` →
+race-free, live-improving); provider/model identity never recomputes, the
+per-session-engine branch is untouched, and the closure floors to the catalog so it
+never LOWERS a known window. Chosen over **(a) blocking `Build` on the first live
+refresh** (adds startup latency + a network dependency to a path that must work
+offline) and **(c) a push/event to re-echo the window to the client** (a whole new wire
+surface for a self-healing scalar). The accepted trade-off: a session created before
+the swap lands still echoes 0 on its `CreateSessionResponse`; the next `GetSession`
+self-heals once the swap is in — no client refetch is added. nil resolver
+(memstore/driver/test paths) keeps the baked window byte-identical to pre-#66.
+
+**The ENGINE-window half — the FOURTH rehydration trigger (issue #66).** The echo
+overlay above heals only what `GetSession` reports. The default session's ENGINE still
+bakes its compaction window at `Build`, PRE-swap, in the shared main engine that is
+built once and never rebuilt — so a live-only default model keeps COMPACTING at the
+~128k floor (`baseEngineDeps` floors there when the catalog has no window) even after
+the swap, while the echo reports the real ~1M window. The fix extends the run-entry
+rehydration seam rather than rebuilding the shared engine. `Service.engineAndWorkspaceFor`
+now gates on `needsRehydration(sess) || s.defaultSessionNeedsLiveWindow(sess)`. The new
+predicate `Service.defaultSessionNeedsLiveWindow` is the FOURTH rehydration trigger
+reason — composing with the three `needsRehydration` reasons (no-fs profile, persisted
+selector, empty workspace) — and fires ONLY for an otherwise-default session: it
+early-returns false when `needsRehydration(sess)` is already true (no double-count) and
+when `Config.ResolveContextWindow`/`Config.SessionEngine` is nil, then returns
+`live > DefaultResolvedModel.ContextWindow` where `live = ResolveContextWindow(default
+provider, default model)` — the SAME injected closure the echo overlay reads, so the two
+converge. A catalogued default (live == baked) never trips it. Rehydration runs the
+unchanged `rehydrateSession` default case (empty selector + `ProfileDefault` + real
+workspace ⇒ the factory's zero-selector path; the workspace branch `sess.Profile ==
+ProfileNoFS || sess.Workspace == ""` is skipped, so `ws = Workspaces(sess.Workspace)`).
+The LOAD-BEARING composition change is `sessionEngineFactory`'s
+`contextWindow := reg.meta.contextWindowFor(reg.Default(), cfg.Model)` (was
+`catalogContextWindow`): live-first, so the rebuilt zero-selector engine carries the
+live window into BOTH its `ContextWindowTokens` and the echoed
+`SessionEngineResult.ContextWindow` (moving in lockstep with the
+`DefaultResolvedModel.ContextWindow` seed at build.go ~985, which already reads
+`contextWindowFor`). Once a qualifying default session runs and rehydrates,
+`Service.ResolvedModel` takes the per-session-engine branch and the echo + engine
+CONVERGE on the live window. Pre-swap race accepted (eventually-consistent, mirrors the
+echo): a first prompt before the swap sees `live == baked`, no rehydration, that ONE
+run compacts at the floor; the next post-swap run rehydrates. Default-ON, no config
+flag. No new resource — the same per-session-engine resource class already inventoried
+for Phase-1 rehydration in `docs/design/CLOUD-NATIVE.md` (new trigger reason, decision
+= derive).
+
 ## Store drivers — `contracts/proto/mecatl/driver/v1/` + `internal/adapter/grpcdriver/` + `engine/adapter/storeconformance/` (Phase B)
 
 The remote-store seam: `SessionStoreService` (behind `port.SessionStore`) and

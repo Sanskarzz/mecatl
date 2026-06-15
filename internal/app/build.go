@@ -968,16 +968,21 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		Posture: cfg.Posture.String(),
 		// DefaultResolvedModel: the EFFECTIVE provider+model the DEFAULT/shared engine
 		// resolved to (the registry default provider + the already-resolved cfg.Model +
-		// the catalog-seed context window for that pair), computed ONCE here in
-		// composition. Same single-source discipline as DefaultCapabilities above: the
-		// server echoes it verbatim on resolved_model for a session that uses no
-		// per-session engine, so nobody recomputes the resolution in a handler. cfg.Model
-		// was resolved just above (reg.ResolvedDefaultModel() when no --model); the catalog window
-		// matches the ListModels-advertised context_limit. (multi-provider Phase 0.)
+		// the context window for that pair), computed ONCE here in composition. Same
+		// single-source discipline as DefaultCapabilities above: the server echoes the
+		// provider/model IDENTITY verbatim on resolved_model for a session that uses no
+		// per-session engine. cfg.Model was resolved just above (reg.ResolvedDefaultModel()
+		// when no --model). The baked ContextWindow here is the live-first window's t=0
+		// SEED: reg.meta.contextWindowFor at Build reads the catalog seed (the live Swap has
+		// not run yet), matching the ListModels-advertised context_limit and keeping
+		// single-source consistency with the selector path + baseEngineDeps. The injected
+		// ResolveContextWindow below keeps the echo HONEST post-swap (it re-resolves the
+		// scalar live-first at call time, so a live-only model whose curated-catalog floor is
+		// 0 — issue #66 — no longer echoes 0). (multi-provider Phase 0.)
 		DefaultResolvedModel: server.ResolvedModel{
 			ProviderID:    reg.Default(),
 			ModelID:       cfg.Model,
-			ContextWindow: int64(catalogContextWindow(reg.Default(), cfg.Model)),
+			ContextWindow: int64(reg.meta.contextWindowFor(reg.Default(), cfg.Model)),
 		},
 		// ListSkills snapshot: the skills resolved once at build time (the skills
 		// seam — FS or driver), projected into the proto form (metadata only).
@@ -1033,6 +1038,14 @@ func Build(ctx context.Context, cfg Config) (*Built, error) {
 		// (memstore/driver paths), keeping the in-memory-store behaviour byte-identical
 		// there.
 		ReplayApprovals: replayApprovals(eventLog, policy, cfg.diag()),
+		// Live-first context-window resolver for the DEFAULT-session resolved_model echo
+		// (issue #66): closes over reg.meta (an atomic.Pointer → race-free, live-improving)
+		// so a default session whose model is in the live listing but NOT the curated
+		// catalog echoes the live window post-swap instead of a 0 (no footer bar). The
+		// closure floors to the catalog via contextWindowFor, so it never lowers a
+		// catalogued window. Only the ContextWindow scalar is re-resolved — provider/model
+		// identity stays the baked DefaultResolvedModel value.
+		ResolveContextWindow: func(p, m string) int64 { return int64(reg.meta.contextWindowFor(p, m)) },
 	}
 	applyTeamConfig(&svcCfg, cfg, reg, provider, mainMgr, agentReg, assets.skillReadRoots, assets.skillIndex, assets)
 
@@ -1225,12 +1238,19 @@ func sessionEngineFactory(
 		// Seed the window from the catalog for the DEFAULT provider+model too, so a
 		// zero-selector session that only needs a per-session engine because client MCP
 		// specs are attached reports the SAME ResolvedModel.ContextWindow as
-		// Config.DefaultResolvedModel (which carries catalogContextWindow(reg.Default(),
-		// cfg.Model)) — the single-source value must not diverge on whether MCP is
-		// present. A non-default selector overrides this below from the catalog for the
-		// selected (provider, model). 0 still falls back to the 128k compaction default
-		// in engineDepsForProvider regardless.
-		contextWindow := catalogContextWindow(reg.Default(), cfg.Model)
+		// Config.DefaultResolvedModel (which carries reg.meta.contextWindowFor(
+		// reg.Default(), cfg.Model)) — the single-source value must not diverge on
+		// whether MCP is present. LIVE-FIRST (issue #66 engine-window fix): read the
+		// LIVE context window (when present) for the default provider+model, falling
+		// back to the catalog floor — so a DEFAULT session that rehydrates into this
+		// per-session engine (defaultSessionNeedsLiveWindow) compacts at the live
+		// window, not the curated-catalog floor a live-only model lacks. This moves in
+		// lockstep with build.go's DefaultResolvedModel.ContextWindow seed (line ~985),
+		// which already reads reg.meta.contextWindowFor — both sides agree. A non-default
+		// selector overrides this below from the catalog for the selected (provider,
+		// model). 0 still falls back to the 128k compaction default in
+		// engineDepsForProvider regardless.
+		contextWindow := reg.meta.contextWindowFor(reg.Default(), cfg.Model)
 		if sel.ProviderID != "" {
 			entry, ok := reg.Lookup(sel.ProviderID)
 			if !ok {
@@ -1744,6 +1764,18 @@ func baseEngineDeps(
 	// per-session selector engines, built post-Swap in sessionEngineFactory, see live
 	// values. An operator --context-window-override still WINS (resolved inside
 	// engineDepsForProvider).
+	//
+	// LIVE-ONLY DEFAULT MODEL (issue #66 engine-window fix): the shared engine still
+	// bakes the t=0 window here, but a DEFAULT session whose model is live-only (in the
+	// live listing, absent from the curated catalog — e.g. OpenRouter openai/gpt-5.5)
+	// would otherwise stay pinned to the 128k floor forever, since the catalog has no
+	// window for it and the shared engine never rebuilds. Such a session now becomes
+	// live-aware by REHYDRATING into a per-session engine at the run-entry seam — see
+	// Service.engineAndWorkspaceFor / Service.defaultSessionNeedsLiveWindow, which fires
+	// when the live window strictly exceeds this baked window. The rehydrated engine
+	// flows through sessionEngineFactory's contextWindow := reg.meta.contextWindowFor(
+	// reg.Default(), cfg.Model) above (now live-first), so 128k-compaction-for-a-
+	// live-only-model no longer persists past the first post-swap run.
 	return engineDepsForProvider(cfg, provider, cfg.Model, reg.meta.contextWindowFor(reg.Default(), cfg.Model), store, policy, hooks, mcpProvider, instructions)
 }
 
