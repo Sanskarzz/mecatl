@@ -106,7 +106,7 @@ go run ./cmd/mecated --openai           # gRPC on 127.0.0.1:8080, HTTP/SSE on 12
 ```
 
 The server binds loopback by default and is unauthenticated unless you turn auth on.
-Common flags (full list in [`docs/usage.md`](./docs/usage.md)):
+Common flags (full list in the [`mecated` flag reference](./docs/usage.md)):
 
 ```sh
 go run ./cmd/mecated --openai \
@@ -122,8 +122,9 @@ go run ./cmd/mecated --openai \
 ```
 
 If you bind a non-loopback address without auth, `mecated` logs a prominent warning — put a
-token or mTLS (or a NetworkPolicy) in front of it. See [`docs/usage.md`](./docs/usage.md)
-for every flag, the gRPC `Converse` flow, and `curl` examples for the HTTP/SSE routes.
+token or mTLS (or a NetworkPolicy) in front of it. See the [usage & operator
+guide](./docs/usage.md) for every flag, the gRPC `Converse` flow, and `curl`
+examples for the HTTP/SSE routes.
 
 ### Run the TUI
 
@@ -132,7 +133,7 @@ ANTHROPIC_API_KEY=... go run ./cmd/mecatui    # hosts an embedded mecated in-pro
 go run ./cmd/mecatui --server 127.0.0.1:8080  # or point it at a running server
 ```
 
-See [`docs/tui.md`](./docs/tui.md) for keybindings, slash commands, and themes.
+See the [mecatui terminal-UI guide](./docs/tui.md) for keybindings, slash commands, and themes.
 
 ## Architecture at a glance
 
@@ -152,10 +153,10 @@ the composition layer (`internal/app`, called from the `cmd/` mains).
  └─────────────┘      └──────────────────────────────┘      └────────────────────┘
 ```
 
-- **[`docs/architecture.md`](./docs/architecture.md)** — the system in depth: layers, the loop, ports, sequence diagrams, extension points.
-- **[`docs/usage.md`](./docs/usage.md)** — build/run, the demo, `mecated` flags, the gRPC + HTTP/SSE APIs with examples, permissions, hooks, troubleshooting.
+- **[Architecture guide](./docs/architecture.md)** — the system in depth: layers, the loop, ports, sequence diagrams, extension points.
+- **[Usage & operator guide](./docs/usage.md)** — build/run, the demo, `mecated` flags, the gRPC + HTTP/SSE APIs with examples, permissions, hooks, troubleshooting.
 - **[`docs/design/PRODUCTION-READINESS.md`](./docs/design/PRODUCTION-READINESS.md)** — the live status tracker (what's done, what's deferred).
-- **[`docs/tui.md`](./docs/tui.md)** — the optional `mecatui` terminal client.
+- **[mecatui terminal-UI guide](./docs/tui.md)** — the optional `mecatui` terminal client.
 - **[`docs/design/`](./docs/design/)** — design rationale per feature: `MULTI-PROVIDER.md`, `AGENT-TEAMS-SPIKE.md`, `DIAGNOSTICS.md`, `DRIVERS.md`, `BACKGROUND-SUBAGENTS.md`, plus the dense per-subsystem `IMPLEMENTATION-NOTES.md` and the historical spikes.
 - **[`CLAUDE.md`](./CLAUDE.md)** — orientation for agents working in this codebase.
 
@@ -214,7 +215,7 @@ This repository also holds the research corpus the harness was designed from —
 reference on agentic coding-harness design in 2026 (patterns, architectures, recreations,
 and design decisions).
 
-- **[`docs/harnesses/INDEX.md`](./docs/harnesses/INDEX.md)** — the master router (start here if you're an agent or hunting for something specific).
+- **[Research-corpus master index](./docs/harnesses/INDEX.md)** — the master router (start here if you're an agent or hunting for something specific).
 - **[`docs/harnesses/README.md`](./docs/harnesses/README.md)** — the human narrative onramp and reading orders.
 - **[`AGENTS.md`](./AGENTS.md)** — conventions for the corpus.
 

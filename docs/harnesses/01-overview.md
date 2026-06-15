@@ -107,3 +107,7 @@ Terms used repeatedly across files.
 ## Provenance
 
 All six topical files (02–07) were drafted in parallel by independent research passes, each constrained to a focused scope and instructed to cite sources inline. The overview, design considerations, and README (01, 08, this README) were synthesized after all six were complete to ensure they reflect the corpus rather than guess at it.
+
+---
+
+[↑ Index](./INDEX.md) · **Next:** [02 · Twelve Patterns](./02-twelve-patterns.md)

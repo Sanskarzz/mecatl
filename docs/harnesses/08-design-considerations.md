@@ -12,7 +12,7 @@ answers:
   - "What ideas should I steal from which project?"
   - "What bets has the field NOT settled, and what are the pragmatic defaults?"
   - "How do I sanity-check my harness design before writing more code?"
-related: [01-overview, 06-architecture-patterns, 07-context-and-mcp]
+related: [01-overview, 06-architecture-patterns, 07-context-and-mcp, 09-agent-primitives-evaluation]
 ---
 
 # Design Considerations: Building Your Own Harness in 2026
@@ -263,3 +263,9 @@ If your design fails any of these, you've found the v1 work that matters most.
 ---
 
 The shorter version of this entire file: **build the shape, instrument heavily, and resist the urge to add features before the loop, the tools, the permissions, the hooks, and the cache are all working as designed.** The model is doing 80% of the work. Your job is to give it a clean place to do it.
+
+For a worked application of this argument to a concrete harness, proceed to [09 · Agent-Primitives Evaluation](./09-agent-primitives-evaluation.md) — mecatl's delegation primitives measured against the field.
+
+---
+
+**Previous:** [07 · Context Engineering & MCP](./07-context-and-mcp.md) · [↑ Index](./INDEX.md) · **Next:** [09 · Agent-Primitives Evaluation](./09-agent-primitives-evaluation.md)

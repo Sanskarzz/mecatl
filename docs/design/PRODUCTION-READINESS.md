@@ -89,3 +89,8 @@
 6. **Panel review** each wave; final gauntlet + live e2e.
 
 Optional features (🟦) are left as documented seams unless requested.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [TWELVE-PATTERNS-AUDIT.md](./TWELVE-PATTERNS-AUDIT.md), [ARCHITECTURE.md](./ARCHITECTURE.md).*

@@ -20,9 +20,11 @@
 - Date: 2026-06-03.
 - Scope: how mecatl exposes its own runtime performance for measurement —
   by humans, by tooling, and (the new idea) by an **AI agent over MCP**.
-- Companion: `docs/perf-measurement-survey.md` (the Go-perf technique survey
-  and the agent-consumable decision table). This doc grounds that survey in
-  mecatl and lays out concrete approaches with trade-offs.
+- Companion: the [Go-perf measurement survey](../perf-measurement-survey.md) (the
+  Go-perf technique survey and the agent-consumable decision table). This doc
+  grounds that survey in mecatl and lays out concrete approaches with trade-offs.
+  See also the sibling [long-term performance regression tracking](perf-tracking.md),
+  which covers the *regression-gating* half (baselines, the CI trend store, PGO).
 
 > This follows the `docs/design/` convention: rationale + options + a
 > recommendation framed as a proposal, citing real package paths. It writes **no
@@ -379,3 +381,8 @@ and 2 are both committed (not "maybe later").
     concurrency-heavy packages (`agent`, `server`, subagent/fork, openai stream)
     **and** a live goroutine-count gauge/alarm in `mecated` — not just a test gate.
 </content>
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [perf-tracking.md](./perf-tracking.md), [DIAGNOSTICS.md](./DIAGNOSTICS.md).*

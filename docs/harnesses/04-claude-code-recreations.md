@@ -305,3 +305,7 @@ Things Claude Code does that none of the recreations have caught up on:
 - [Jonathan Fulton: Inside the Agent Harness: How Codex and Claude Code Actually Work](https://medium.com/jonathans-musings/inside-the-agent-harness-how-codex-and-claude-code-actually-work-63593e26c176) — best side-by-side of the parallel-design pair.
 - [VILA-Lab/Dive-into-Claude-Code](https://github.com/VILA-Lab/Dive-into-Claude-Code) — a systematic academic-style analysis.
 - [Anthropic engineering: making Claude Code more secure and autonomous](https://www.anthropic.com/engineering/claude-code-sandboxing) — Anthropic's own write-up of the sandboxing design.
+
+---
+
+**Previous:** [03 · Claude Code Architecture](./03-claude-code-architecture.md) · [↑ Index](./INDEX.md) · **Next:** [05 · Comparative Harnesses](./05-comparative-harnesses.md)

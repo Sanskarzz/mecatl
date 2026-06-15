@@ -593,4 +593,8 @@ Repo commits directly to `main`; sequence as commits, not a multi-issue split:
   `github.com/AI-App/InstructKr.Claw-Code`, `github.com/prompt-security/clawsec`.
 - **Corpus:** `docs/harnesses/02` §1, `03` §System-prompt, `06` §7 + §13;
   `docs/design/TWELVE-PATTERNS-AUDIT.md`.
-```
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [TWELVE-PATTERNS-AUDIT.md](./TWELVE-PATTERNS-AUDIT.md), [SOUL-SPIKE.md](./SOUL-SPIKE.md).*

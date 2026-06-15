@@ -1,0 +1,25 @@
+# matlatl corpus excludes (gitignore syntax). Files matched here are removed
+# from the doc graph entirely — not scanned, not link-checked, not ranked.
+# Use this for markdown that is NOT documentation. For scaffolding that should
+# stay link-checked but hidden from the consumption surfaces, use emitExclude
+# in .matlatl.yml instead.
+
+# Transient working notes — plans, phase/review briefs, scratch. Gitignored and
+# disconnected by nature; left in, they dominate orphan/compactness metrics.
+# (matlatl already auto-ignores .claude/agent-memory, .claude/plans,
+# .claude/worktrees; .scratch is the same kind of thing.)
+.scratch/
+
+# Claude Code sub-agent definitions (reviewer/specialist agents). These are
+# isolated by nature — no inbound or outbound doc links — so there is nothing to
+# link-check; keeping them in the corpus only adds orphan findings that block a
+# `check --strict` gate. Ignored (not just emitExclude'd) so --strict can pass.
+# (Skill definitions in .claude/skills/ DO link to docs, so they stay in the
+# corpus via emitExclude in .matlatl.yml — link-checked but hidden from the
+# navigation surface.)
+.claude/agents/
+
+# End-to-end test fixtures — intentionally standalone markdown (fake souls,
+# skill definitions, workspace READMEs) consumed by the e2e harness, not docs.
+# e2e/README.md (the suite's own documentation) deliberately stays in the corpus.
+e2e/fixtures/

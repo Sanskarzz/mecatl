@@ -621,3 +621,8 @@ needs a lease; the GC liveness gap rides the same mechanism for free.
   execution-environment subsystems behind the no-FS cut.
 - `BACKGROUND-SUBAGENTS.md`: issue #28 (session-scoped detach) is gated on Phase 3's
   event log and stays its own arc.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [BACKGROUND-SUBAGENTS.md](./BACKGROUND-SUBAGENTS.md), [COMPACTION.md](./COMPACTION.md), [ARCHITECTURE.md](./ARCHITECTURE.md).*

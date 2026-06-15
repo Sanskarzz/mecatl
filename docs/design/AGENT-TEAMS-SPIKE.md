@@ -569,3 +569,8 @@ Still deferred (intentional, not oversights):
 - OpenAI Agents SDK — Orchestration & handoffs: https://developers.openai.com/api/docs/guides/agents/orchestration
 - Goose — Sub-recipes / subagents: https://block.github.io/goose/docs/guides/recipes/sub-recipes/
 - Internal: `docs/harnesses/02-twelve-patterns.md` (patterns 7, 8), `docs/harnesses/05-comparative-harnesses.md`
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [AGENT-DEFINITIONS.md](./AGENT-DEFINITIONS.md), [BACKGROUND-SUBAGENTS.md](./BACKGROUND-SUBAGENTS.md).*

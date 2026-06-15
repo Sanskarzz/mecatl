@@ -193,3 +193,8 @@ The patterns are call-shape-precise: `slog.New*` / `slog.Handler` / `HandlerOpti
 / `Level` / `DiscardHandler` (slogdiag's legitimate internals) and the `*slog.Logger`
 type (the perf surface) do NOT match. Each forbidden hit emits a message pointing
 the contributor back at this doc and the `port.Diagnostics` seam.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [perf-observability.md](./perf-observability.md), [perf-tracking.md](./perf-tracking.md).*

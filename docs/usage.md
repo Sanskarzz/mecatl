@@ -2342,3 +2342,9 @@ $ tail -n1 DIR/8867….session.jsonl | jq .
 # Every tool call with its result and duration:
 $ jq . DIR/8867….tools.jsonl
 ```
+
+## See also
+
+- [Architecture guide](architecture.md) — how the harness works under these flags: layers, the loop, ports, the API surface.
+- [mecatui terminal UI](tui.md) — the terminal client for the server this guide runs.
+- [ADR 0001 — the ACP adapter](adr/0001-acp-adapter.md) — the editor (`--acp`) wire surface in depth.

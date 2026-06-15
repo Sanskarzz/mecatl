@@ -495,3 +495,8 @@ no promise about the middle, and `buildSummary` says so.
   The deferred optimization (a delta archive) is owned by
   `docs/design/CLOUD-NATIVE.md` (Phase 3b), where the cost is recorded as an accepted,
   reasoned decision.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [MEMORY-TIERING.md](./MEMORY-TIERING.md), [CLOUD-NATIVE.md](./CLOUD-NATIVE.md).*

@@ -519,3 +519,7 @@ If you're re-implementing Claude Code's behavior, these are the architectural ch
 - Internal feature-flag names (e.g. `COORDINATOR_MODE`, `KAIROS`, `tengu_*`) are sourced only from community RE and may be renamed/removed at any time.
 - Exact compaction thresholds and per-tier behavior are inferred from logs and partial source; treat the four-tier model as directionally correct, not numerically precise.
 - The exact line counts and file counts for the leak (1,729-line query loop; ~1,900 files; ~512K lines) differ slightly between sources and are best treated as order-of-magnitude.
+
+---
+
+**Previous:** [02 · Twelve Patterns](./02-twelve-patterns.md) · [↑ Index](./INDEX.md) · **Next:** [04 · Claude Code Recreations](./04-claude-code-recreations.md)

@@ -8,9 +8,9 @@ gating, and observability.
 
 ## Start here
 
-- **Using or modifying the harness?** → [`README.md`](./README.md) for architecture,
+- **Using or modifying the harness?** → the [project README](./README.md) for architecture,
   quick start, and API reference.
-- **Researching harness design patterns?** → [`docs/harnesses/INDEX.md`](./docs/harnesses/INDEX.md)
+- **Researching harness design patterns?** → the [research-corpus master index](./docs/harnesses/INDEX.md)
   is the master router into the corpus.
 
 The INDEX is a Tier-0 routing index: find your need by **goal**, **question**,

@@ -122,3 +122,11 @@ gauntlet items in `docs/harnesses/08-design-considerations.md` each have a passi
 - Commit directly to `main`. End commit messages with the `Co-Authored-By` trailer.
 - Never `git add -A` — stage explicit paths.
 - For smoke tests / scratch files, use the repo-local `.scratch/` dir (gitignored) — **not** `/tmp` or `mktemp`.
+- **Changed any Markdown? Run `task generate` (or `task docs`) before committing — always.** `llms.txt` is generated and goes stale the instant docs change; never hand-edit it. `task docs` regenerates it (`task docs:llms`) and runs the strict link gate (`task docs:check`); `task generate` also refreshes it. The CI `docs` job will fail the PR on a stale `llms.txt` or any link regression — `matlatl check . --strict` (no broken links/anchors, orphans, unreachable, or ambiguous links; corpus config in `.matlatl.yml` / `.matlatlignore`). On a merge/rebase conflict in `llms.txt`, don't hand-merge — take either side and re-run `task docs:llms`.
+
+## See also
+
+- [Project README](README.md) — the feature overview, quick start, and project layout.
+- [Architecture guide](docs/architecture.md) — how the harness works: layers, the loop, ports, the API surface.
+- [Usage & operator guide](docs/usage.md) — building, running `mecated`, every flag, the gRPC + HTTP/SSE APIs.
+- [AGENTS.md](AGENTS.md) — orientation for the research corpus this harness was built from.

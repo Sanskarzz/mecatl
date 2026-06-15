@@ -587,3 +587,8 @@ P4-tool-pkg           ── engine/tool additive interface
 coordinate (or sequence P4-tool-pkg before P5). The loop edits of P1/P3/P4 must
 be serialized; the non-loop work of every package can proceed concurrently.
 ```
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [PRODUCTION-READINESS.md](./PRODUCTION-READINESS.md), [SYSTEM-PROMPT-RESEARCH.md](./SYSTEM-PROMPT-RESEARCH.md).*

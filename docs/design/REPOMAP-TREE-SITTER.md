@@ -160,3 +160,8 @@ would otherwise delete.
   Remove the `github.com/malivvan/tree-sitter` dependency. Reuse `graph.go` /
   `render.go` unchanged behind the `parseFile → *fileNode` seam. Re-enable by
   default once landed and verified.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [ARCHITECTURE.md](./ARCHITECTURE.md).*

@@ -216,3 +216,7 @@ stop-label vocabulary; sanitized+unmissable permission modal; graceful footer wi
     same-provider only (no `model`/`agent`/`resume`); domain-only.
 20. Cheap-model-by-default child routing (Crush smallModel pattern) — at minimum a config default.
 
+
+---
+
+**Previous:** [08 · Design Considerations](./08-design-considerations.md) · [↑ Index](./INDEX.md)

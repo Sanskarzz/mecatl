@@ -301,3 +301,8 @@ External research backing this decision (Claude Code `bypassPermissions` +
 bypass corpus, Ona's self-escape) is summarised in the research brief that
 accompanied this doc. Key primary source: Claude Code — Configure permissions,
 https://code.claude.com/docs/en/permissions.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [GUARDRAILS.md](./GUARDRAILS.md), [WORKSPACE-TRUST-SPIKE.md](./WORKSPACE-TRUST-SPIKE.md).*

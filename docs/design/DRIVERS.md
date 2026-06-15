@@ -343,3 +343,8 @@ from where the code lives (remote dev box, ephemeral runner) AND is willing
 to take the read-only-or-materialize split for Bash. Until then the sketch is
 the deliverable — implementing it speculatively would mean designing
 streaming, paging, and a sync protocol with no consumer to validate against.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [ARCHITECTURE.md](./ARCHITECTURE.md), [IMPLEMENTATION-NOTES.md](./IMPLEMENTATION-NOTES.md).*

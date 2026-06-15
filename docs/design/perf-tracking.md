@@ -11,9 +11,10 @@ is built — see [Phase 3 — Status](#phase-3--status) — and Phase 4 (the PGO
 and the production refresh process) is wired — see [Phase 4 — Status](#phase-4--status).
 Phases 5–6 (continuous profiling, stable wall-clock gating) remain intentionally
 deferred — the gaps there are operational/hardware, not software (see the
-[roadmap close-out](#roadmap-close-out)). Sibling to
-[`perf-observability.md`](perf-observability.md), which covers the *introspection*
-half (pprof, flight recorder, OTel metrics, the perf MCP, `--perf`, goleak).
+[roadmap close-out](#roadmap-close-out)). Sibling to the
+[performance observability design](perf-observability.md), which covers the
+*introspection* half (pprof, flight recorder, OTel metrics, the perf MCP,
+`--perf`, goleak).
 
 ## The gap this closes
 
@@ -450,7 +451,8 @@ mecated under real load, not from the offline harness:
 
 1. Run a production-representative `mecated`. The loopback admin mux serves
    `/debug/pprof` alongside `/metrics` (`--metrics-addr`, default `127.0.0.1:9090`;
-   set empty to disable; see [`perf-observability.md`](perf-observability.md)). The
+   set empty to disable; see the
+   [performance observability design](perf-observability.md)). The
    surface is loopback-only and never exposed.
 2. Capture a CPU profile under representative traffic:
    `curl -o prod-a.pgo 'http://127.0.0.1:9090/debug/pprof/profile?seconds=30'`
@@ -580,3 +582,8 @@ Still open:
 
 - Trend tooling: github-action-benchmark is in; revisit Bencher only when false
   positives from threshold gating become a real cost.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [perf-observability.md](./perf-observability.md), [DIAGNOSTICS.md](./DIAGNOSTICS.md).*

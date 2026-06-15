@@ -17,7 +17,7 @@ related: [06-architecture-patterns, 03-claude-code-architecture, 08-design-consi
 
 # 07 — Context Engineering and MCP
 
-> Companion to file 06. Where 06 covers the *shape* of the agent, this file
+> Companion to [file 06 on architecture patterns](./06-architecture-patterns.md). Where 06 covers the *shape* of the agent, this file
 > covers what flows through it: tokens, memory, tools, and the protocol
 > that's eaten the integration world.
 
@@ -110,8 +110,8 @@ Operational implications:
   optimization, it's table stakes.
 - **Subagent isolation pays twice.** A subagent that does 50K of grep
   results internally and returns 1K to the parent saves 49K from the parent's
-  every subsequent turn. Over a long session this compounds. (See file 06,
-  section 5.)
+  every subsequent turn. Over a long session this compounds. (See
+  [file 06 §5 The Subagent / Task pattern](./06-architecture-patterns.md#5-the-subagent--task-pattern).)
 
 ---
 
@@ -408,7 +408,7 @@ to expose, group them under fewer, higher-level tools and use parameters
 to disambiguate. Or use the **code-execution-with-MCP** approach below.
 
 **Clear, specific tool descriptions.** This is the bridge to "writing tools
-for agents" — the rules from file 06 §6 apply doubly to MCP tools, because
+for agents" — the rules from [file 06 §6 Tool design principles](./06-architecture-patterns.md#6-tool-design-principles) apply doubly to MCP tools, because
 they're shared across many agents. Write descriptions assuming the model
 has never seen your service before.
 
@@ -688,3 +688,7 @@ Pricing (for current numbers, always re-check):
 - <https://platform.claude.com/docs/en/about-claude/pricing>
 - <https://openai.com/api/pricing/>
 - <https://ai.google.dev/pricing>
+
+---
+
+**Previous:** [06 · Architecture Patterns](./06-architecture-patterns.md) · [↑ Index](./INDEX.md) · **Next:** [08 · Design Considerations](./08-design-considerations.md)

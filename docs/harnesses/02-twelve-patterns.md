@@ -310,3 +310,7 @@ Independent harness-engineering writing:
 - [Progressive Disclosure Might Replace MCP (MCPJam)](https://www.mcpjam.com/blog/claude-agent-skills).
 - [The CLAUDE.md Configuration Hierarchy (AI Agent Factory)](https://agentfactory.panaversity.org/docs/General-Agents-Foundations/claude-code-teams-cicd/claude-md-configuration-hierarchy).
 - [The Complete Guide to CLAUDE.md (Bijit Ghosh, Medium)](https://medium.com/@bijit211987/the-complete-guide-to-claude-md-memory-rules-loading-and-cross-tool-compression-97cc12ed037b).
+
+---
+
+**Previous:** [01 · Overview & Glossary](./01-overview.md) · [↑ Index](./INDEX.md) · **Next:** [03 · Claude Code Architecture](./03-claude-code-architecture.md)

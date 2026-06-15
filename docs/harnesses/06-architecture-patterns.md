@@ -94,7 +94,7 @@ Stop-condition mistakes to avoid:
   ("this tool has failed 3 times — stop calling it and explain why") or break
   the loop.
 - **Silent context overflow.** When `input_tokens` approaches the model limit,
-  the next turn will 400. Either compact (see file 07) or refuse to continue
+  the next turn will 400. Either compact (see [file 07 §4 Compaction strategies](./07-context-and-mcp.md#4-compaction-strategies)) or refuse to continue
   the loop.
 - **No max_turns.** Background-mode agents (Codex Cloud, Devin) without a
   turn cap have produced runaway sessions with five-figure tool-call counts.
@@ -385,7 +385,7 @@ Hard-won lessons:
   (with a "<<<project_instructions>>>" delimiter) and cache it.
 
 The system prompt is also the **prime cache target**. Make it stable across
-turns; mutations cost cache invalidations (see file 07).
+turns; mutations cost cache invalidations (see [file 07 §3 Prompt caching](./07-context-and-mcp.md#3-prompt-caching)).
 
 ---
 
@@ -600,7 +600,7 @@ sometimes calls the wrong one. Curate.
 smart but quickly becomes noise. The model doesn't need to remember last
 month's bug fix — the code already encodes it. Memory is most useful when
 the agent literally cannot rediscover the fact (user preferences, secrets).
-See file 07 for the deeper take.
+See [file 07 §6 Memory systems](./07-context-and-mcp.md#6-memory-systems) for the deeper take.
 
 **Premature multi-agent.** "I'll have one agent plan, one code, one test."
 You've just paid 3× the cost and introduced 3 ways for the system to
@@ -631,7 +631,7 @@ the lever to pull.
 
 **Compaction without signal preservation.** Naive `summarize-old-messages`
 loses tool IDs, file paths, error context — the exact things the agent
-needs to recover from. Compaction needs structure (see file 07).
+needs to recover from. Compaction needs structure (see [file 07 §4 Compaction strategies](./07-context-and-mcp.md#4-compaction-strategies)).
 
 **Speaking-only enforcement of plan mode.** Trusting the model to "not run
 any tools." It will. Make plan mode a hook-enforced toolset.
@@ -696,3 +696,7 @@ Practitioner posts worth reading:
   <https://lucumr.pocoo.org/2025/12/17/what-is-plan-mode/>
 - Simon Willison's coverage of every Anthropic agent post (he's the de
   facto archivist). <https://simonwillison.net/tags/agents/>
+
+---
+
+**Previous:** [05 · Comparative Harnesses](./05-comparative-harnesses.md) · [↑ Index](./INDEX.md) · **Next:** [07 · Context Engineering & MCP](./07-context-and-mcp.md)

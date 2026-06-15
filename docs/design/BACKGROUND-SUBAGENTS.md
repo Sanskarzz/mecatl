@@ -447,3 +447,8 @@ seam all carry forward unchanged — only cancel-scope and event routing change.
 still open: gate starvation under field use (a reserved foreground slot is the named
 mitigation if models wedge) and cumulative child-token accounting toward the parent
 budget. The RunTeam-path `CancelTeammate` unary (D4) is done (issue #29).
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [AGENT-DEFINITIONS.md](./AGENT-DEFINITIONS.md), [AGENT-TEAMS-SPIKE.md](./AGENT-TEAMS-SPIKE.md), [CLOUD-NATIVE.md](./CLOUD-NATIVE.md).*

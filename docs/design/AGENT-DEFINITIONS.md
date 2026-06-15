@@ -212,3 +212,8 @@ You are a meticulous code reviewer. <full body = the specialist's system-prompt 
 
 The TUI's embedded server (`cmd/mecatui`) enables `AgentsConventional` by default,
 consistent with `EnableTeams`/`EnableParallel`.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [AGENT-TEAMS-SPIKE.md](./AGENT-TEAMS-SPIKE.md), [BACKGROUND-SUBAGENTS.md](./BACKGROUND-SUBAGENTS.md).*

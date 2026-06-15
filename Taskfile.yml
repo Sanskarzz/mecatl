@@ -317,6 +317,29 @@ tasks:
             echo "skip generate: buf.gen.yaml and/or contracts/proto not present"
           fi
         silent: true
+      # Regenerate the committed llms.txt navigation surface so it never drifts
+      # from the docs (the CI freshness gate enforces this).
+      - task: docs:llms
+
+  docs:llms:
+    desc: Regenerate the committed llms.txt navigation surface (matlatl)
+    cmds:
+      # matlatl renders an importance-ordered llms.txt from the doc link graph.
+      # Pinned to a matlatl release; --title MUST match the README H1 ("mecatl")
+      # and the freshness gate in .github/workflows/ci.yml. Never hand-edit
+      # llms.txt — regenerate. (A private-module fetch needs GOPRIVATE set.)
+      - go run github.com/stacklok/matlatl/cmd/matlatl@v0.0.5 index . --llms --title "mecatl" > llms.txt
+
+  docs:check:
+    desc: Gate doc link health with matlatl (strict — broken links/anchors, orphans, unreachable)
+    cmds:
+      - go run github.com/stacklok/matlatl/cmd/matlatl@v0.0.5 check . --strict
+
+  docs:
+    desc: Refresh llms.txt and gate doc links (matlatl) — run before committing doc changes
+    cmds:
+      - task: docs:llms
+      - task: docs:check
 
   ci:
     desc: Full local CI gate (tidy, fmt, lint, test, build)

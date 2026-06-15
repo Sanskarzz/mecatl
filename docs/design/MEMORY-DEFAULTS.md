@@ -390,3 +390,8 @@ treating the directory as **opaque and store-owned**:
    a (small, lazily-created) directory under `~/.local/share`. The store file is
    written only on the first `Remember`, so an unused project leaves at most an
    empty `0o700` dir. Acceptable.
+
+
+---
+
+*Part of the [design docs](./README.md). Read in order: MEMORY-DEFAULTS → [MEMORY-TIERING.md](./MEMORY-TIERING.md) → [MEMORY-TIER2.md](./MEMORY-TIER2.md). Related: [SOUL-SPIKE.md](./SOUL-SPIKE.md).*

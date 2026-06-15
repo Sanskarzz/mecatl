@@ -838,3 +838,8 @@ output ceiling / thinking mode remain INTERNAL resolver inputs (no proto/mecatui
 change); a TUI badge for them is a deferred follow-up (the picker-proto slice "Slice
 D"). The OpenRouter `reasoning_details` replay fix is a SEPARATE request-path bug, not
 bundled here.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [OPENAI-RESPONSES-API.md](./OPENAI-RESPONSES-API.md), [ARCHITECTURE.md](./ARCHITECTURE.md).*

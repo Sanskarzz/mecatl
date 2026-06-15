@@ -910,7 +910,10 @@ a `session.Content` part, or a loud `codeInvalidParams` — never a silent drop 
 routed through the single `session.NewContent`/`ValidateMediaParts` choke
 point and gated on `Service.ProviderCapabilities()`. (This is the harness
 speaking an editor protocol delivered over its own stdin/stdout; the project's
-no-stdio rule is about MCP servers, which are never `os/exec`-spawned.)
+no-stdio rule is about MCP servers, which are never `os/exec`-spawned.) The
+design decisions behind this adapter — framing, the per-session client MCP
+mount, fs/\* delegation, and learned permissions — are recorded in
+[ADR 0001 — the ACP adapter](adr/0001-acp-adapter.md).
 
 ## 11. Observability & persistence
 
@@ -967,8 +970,9 @@ no-stdio rule is about MCP servers, which are never `os/exec`-spawned.)
   > profile rankings, FlightRecorder summaries). All of it is **live**. The MCP
   > surface is fail-closed to loopback (it is unauthenticated and can embed
   > goroutine-derived names/timing). See `docs/design/perf-observability.md` (the
-  > decided direction) and `docs/perf-measurement-survey.md` (the Go-perf
-  > technique reference).
+  > decided direction) and the [Go performance measurement & observability
+  > survey](perf-measurement-survey.md) (the technique reference behind that
+  > decision).
 - **SessionStore** — `memstore` (default, in-memory), `jsonlstore`
   (append-only JSONL replay log: `<dir>/<id>.session.jsonl` snapshots +
   `<dir>/<id>.tools.jsonl` tool records; `jsonlstore` also implements
@@ -1682,3 +1686,10 @@ engine (a bare `port.LLMProvider` is handed down).
 neutrality, selection primitive, per-session engine, capability intersection,
 disclosure posture + per-client key custody, per-sub-agent provider, and the P0→P3
 phasing).
+
+## See also
+
+- [Usage & operator guide](usage.md) — building, running `mecated`, every flag, and the gRPC + HTTP/SSE APIs that drive this design.
+- [mecatui terminal UI](tui.md) — the gRPC client that renders the event stream described above.
+- [ADR 0001 — the ACP adapter](adr/0001-acp-adapter.md) — the decisions behind the third (editor) wire surface.
+- [Go performance measurement & observability survey](perf-measurement-survey.md) — the technique reference behind §11.

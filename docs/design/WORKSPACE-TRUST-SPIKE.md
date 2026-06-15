@@ -744,3 +744,8 @@ agents/commands/skills, not just allows+soul — a one-line invariant update).
 - Never let `ui/` import `workspacetrust` or write the registry.
 - Never hash `settings.yaml` into the **drift** anchor (nag-fatigue).
 - Don't generalize soulguard into a trust subsystem — share only `SHA256Hex`.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [GUARDRAILS.md](./GUARDRAILS.md), [ALLOW-ALL-POSTURE.md](./ALLOW-ALL-POSTURE.md).*

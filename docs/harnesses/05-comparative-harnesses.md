@@ -429,3 +429,7 @@ Primary sources (one anchor per project):
 - Copilot Coding Agent: [GA discussion](https://github.com/orgs/community/discussions/159068), [agent mode announcement](https://code.visualstudio.com/blogs/2025/02/24/introducing-copilot-agent-mode)
 - Augment: [Context Engine MCP launch](https://www.augmentcode.com/blog/context-engine-mcp-now-live)
 - Zed: [Agent Panel docs](https://zed.dev/docs/ai/agent-panel), [JetBrains × Zed ACP announcement](https://blog.jetbrains.com/ai/2025/10/jetbrains-zed-open-interoperability-for-ai-coding-agents-in-your-ide/)
+
+---
+
+**Previous:** [04 · Claude Code Recreations](./04-claude-code-recreations.md) · [↑ Index](./INDEX.md) · **Next:** [06 · Architecture Patterns](./06-architecture-patterns.md)

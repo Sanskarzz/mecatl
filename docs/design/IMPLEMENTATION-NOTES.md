@@ -3251,3 +3251,8 @@ go test's panic path — the arithmetic lives in `e2e/suite_test.go`. The `MECAT
 `e2e/README.md`. CI: `.github/workflows/e2e-live.yml` — nightly cron + label-gated on PRs
 (the `e2e-live` label; `pull_request`, never `pull_request_target`, so fork PRs get no
 secrets).
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [ARCHITECTURE.md](./ARCHITECTURE.md), [DRIVERS.md](./DRIVERS.md), [STEP-CHAIN.md](./STEP-CHAIN.md).*

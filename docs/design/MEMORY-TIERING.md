@@ -581,3 +581,8 @@ the index lives outside `prompt.Build`, so `StablePrefix` is unchanged. Assert i
   changes — the domain/prompt/app blast radius is unchanged. The derived-index
   choice is cheap to reverse.
 - **Open — D1/D2/D3/D4** above are the decisions to confirm before implementation.
+
+
+---
+
+*Part of the [design docs](./README.md). Read in order: [MEMORY-DEFAULTS.md](./MEMORY-DEFAULTS.md) ← MEMORY-TIERING → [MEMORY-TIER2.md](./MEMORY-TIER2.md).*

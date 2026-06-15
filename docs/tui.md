@@ -910,3 +910,8 @@ goldens with:
 ```sh
 task test:golden     # go test ./cmd/mecatui/ui -update, then re-run
 ```
+
+## See also
+
+- [Usage & operator guide](usage.md) — the `mecated` server `mecatui` dials (or embeds), and every server flag.
+- [Architecture guide](architecture.md) — the event stream and gRPC `Converse` surface this client renders.

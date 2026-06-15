@@ -17,7 +17,7 @@ keywords: [harness, agent loop, tools, plan mode, subagents, hooks, permissions,
 > stop. Every content file is independently readable. Do not load files you
 > were not routed to.
 
-**Corpus:** 8 files, ~33K words, on the design of agentic *coding* harnesses as
+**Corpus:** 9 files, ~37K words, on the design of agentic *coding* harnesses as
 of **2026-05-18**. Topic: everything wrapped around a model so it can finish a
 task — system prompt, tools, context policy, memory, sandboxes, permissions,
 subagents, hooks, plan/act gating, observability.
@@ -32,7 +32,7 @@ grep, read its frontmatter first to confirm relevance before reading the body.
 
 | # | File | Layer | What it is |
 |---|------|-------|------------|
-| 01 | [01-overview.md](./01-overview.md) | meta | Framing, audience, corpus map, and the **glossary** of every recurring term. |
+| 01 | [Overview & glossary](./01-overview.md) | meta | Framing, audience, corpus map, and the **glossary** of every recurring term. |
 | 02 | [02-twelve-patterns.md](./02-twelve-patterns.md) | reference | The **12 reusable harness patterns** distilled from Claude Code, with tradeoffs and cross-references. |
 | 03 | [03-claude-code-architecture.md](./03-claude-code-architecture.md) | reference | **Deep dive on Claude Code**: loop, tools, plan mode, subagents, hooks, MCP, memory, compaction, permissions, settings. |
 | 04 | [04-claude-code-recreations.md](./04-claude-code-recreations.md) | survey | The **clones and parallel designs** (opencode, crush, Kode, codex, gemini-cli, claw-code…): what they kept, what diverged. |

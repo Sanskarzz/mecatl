@@ -261,3 +261,8 @@ guardrails:
 Run headless or interactive — guardrails fire on the **main loop's**
 `PreToolUse`/`PostToolUse` regardless of whether the deployment surfaces *permission*
 asks to a human (unlike the headless-only ask reviewer).
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [ALLOW-ALL-POSTURE.md](./ALLOW-ALL-POSTURE.md), [WORKSPACE-TRUST-SPIKE.md](./WORKSPACE-TRUST-SPIKE.md).*

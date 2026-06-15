@@ -149,3 +149,8 @@ Context cancellation surfaces as a context error, not `*openai.Error` — handle
 ### Verify before coding
 - Exact Go names for `function_call_output` input items and `ResponseStreamAccumulator` in v3.37.0 (`api.md`).
 - `reasoning.effort` enum and which models accept `prompt_cache_retention:"24h"`.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [MULTI-PROVIDER.md](./MULTI-PROVIDER.md).*

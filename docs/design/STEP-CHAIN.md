@@ -235,3 +235,8 @@ Critical path: **WP1 → WP2 → WP7 → WP8 → WP10 → WP11**.
 - The frozen interface set (WP1) is exactly what keeps the parallel WPs from colliding:
   adapters target ports, the loop targets ports, nobody targets a concretion except the
   composition root in `cmd/`.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [ARCHITECTURE.md](./ARCHITECTURE.md), [IMPLEMENTATION-NOTES.md](./IMPLEMENTATION-NOTES.md).*

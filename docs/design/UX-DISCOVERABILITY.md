@@ -752,4 +752,8 @@ drive at chosen caps fixtures.
    unrendered — cleaner git boundary) or in Phase B (so Phase A has zero ui
    field churn). Recommend storing in Phase A (the `SessionReadyMsg` handler is
    already being edited there for the richer msg) so Phase B is purely render.
-```
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [CLIPBOARD-IMAGE-PASTE.md](./CLIPBOARD-IMAGE-PASTE.md).*

@@ -137,3 +137,39 @@ jobs:
       # 20s/target that is ~80s plus build, comfortably under the timeout.
       - name: task fuzz (short)
         run: task fuzz FUZZTIME=20s
+
+  docs:
+    name: Docs (matlatl)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # matlatl's composite action builds the gate from ITS OWN checkout, so
+      # there is no binary step and no extra credentials here — only org Actions
+      # access to stacklok/matlatl (granted org-wide). strict also fails on
+      # orphans / unreachable / ambiguous links (ADR 0005), not just broken
+      # links/anchors. Pinned to a release SHA (house rule); the # comment
+      # records the tag. findings.json + junit.xml land in matlatl-out/.
+      - name: matlatl docs gate (strict)
+        id: matlatl
+        uses: stacklok/matlatl@e71006075a202eb30825d19a586935a321f62ff3 # v0.0.5
+        with:
+          strict: "true"
+
+      # Freshness gate for the committed llms.txt: regenerate it with the binary
+      # the action already built and fail if it differs from what's checked in.
+      # Keep --title in lockstep with `task docs:llms` and the README H1.
+      - name: llms.txt is up to date
+        shell: bash
+        env:
+          BIN: ${{ steps.matlatl.outputs.binary-path }}
+        run: |
+          set -euo pipefail
+          "$BIN" index . --llms --title "mecatl" > "${RUNNER_TEMP}/llms.expected"
+          if ! diff -u llms.txt "${RUNNER_TEMP}/llms.expected"; then
+            echo "::error file=llms.txt::llms.txt is out of date — run 'task docs:llms' and commit the result."
+            exit 1
+          fi

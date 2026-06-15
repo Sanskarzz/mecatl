@@ -689,3 +689,8 @@ was designed for. The authoritative tracker is
 The guiding restraint (doc 08) still holds: build the *shape*, instrument it, and
 resist features before the loop, tools, permissions, hooks, and cache all work — the
 post-v1 work above only extended seams that the v1 shape already exposed.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [DRIVERS.md](./DRIVERS.md), [IMPLEMENTATION-NOTES.md](./IMPLEMENTATION-NOTES.md), [STEP-CHAIN.md](./STEP-CHAIN.md).*

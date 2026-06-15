@@ -22,7 +22,9 @@ mecatl already exposes its agent loop through a surface-agnostic application
 service — `internal/adapter/server.Service` — which the gRPC and HTTP/SSE adapters
 both consume, and which `internal/app.Build(ctx, Config)` assembles (provider,
 catalog, permission policy, store, MCP, skills). ACP is a third wire surface over
-that same service.
+that same service. For how that service and the surrounding ports-and-adapters
+layering fit together, see the [architecture guide](../architecture.md) (the ACP
+adapter is summarised in its API-surface section).
 
 ACP lifecycle (the subset Phase 1 implements):
 

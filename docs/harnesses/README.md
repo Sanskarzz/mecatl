@@ -6,7 +6,7 @@
 This folder contains a working reference on agentic coding harnesses in 2026 — the patterns, architectures, recreations, and design decisions that constitute the discipline. Each file is independently readable; the suggested narrative order is below.
 
 > **Looking for something specific — or an agent navigating this corpus?**
-> Start with **[INDEX.md](./INDEX.md)**. It is the Tier-0 router: find your need
+> Start with the **[INDEX — master router](./INDEX.md)**. It is the Tier-0 router: find your need
 > by **goal**, **question**, **concept**, or **source project**, and it sends you
 > to the exact file and section. This README is the human narrative onramp; the
 > INDEX is the finding-aid. Every content file also opens with YAML frontmatter
@@ -16,8 +16,8 @@ This folder contains a working reference on agentic coding harnesses in 2026 —
 
 | # | File | Words | Topic |
 |---|------|-------|-------|
-| — | [INDEX](./INDEX.md) | — | **Master router**: routes by goal, question, concept, and project. Read this first. |
-| 01 | [Overview](./01-overview.md) | ~1.5K | Framing, audience, file map, glossary |
+| — | [INDEX — master router](./INDEX.md) | — | **Master router**: routes by goal, question, concept, and project. Read this first. |
+| 01 | [Overview & glossary](./01-overview.md) | ~1.5K | Framing, audience, file map, glossary |
 | 02 | [Twelve Patterns](./02-twelve-patterns.md) | ~3.7K | The Generative Programmer pattern catalogue + cross-references |
 | 03 | [Claude Code Architecture](./03-claude-code-architecture.md) | ~5.9K | Deep dive: loop, tools, plan mode, subagents, hooks, MCP, memory, compaction, permissions |
 | 04 | [Claude Code Recreations](./04-claude-code-recreations.md) | ~4.9K | Survey: sst/opencode, crush, Kode, learn-claude-code, claude-code-router, codex-cli, gemini-cli, qwen-code, claw-code |
@@ -25,8 +25,9 @@ This folder contains a working reference on agentic coding harnesses in 2026 —
 | 06 | [Architecture Patterns](./06-architecture-patterns.md) | ~4.4K | Cross-cutting design: loop, ReAct/Plan-Execute/Reflexion/ToT, multi-agent, tools, system prompts, hooks, permissions, slash, headless, anti-patterns |
 | 07 | [Context Engineering and MCP](./07-context-and-mcp.md) | ~4.0K | Token economics, prompt caching, compaction, agentic discovery vs. indices, memory, MCP protocol and best practices, tool descriptions, error handling, observability |
 | 08 | [Design Considerations](./08-design-considerations.md) | ~3.5K | Opinionated synthesis: 13 load-bearing decisions, MVP→v3 roadmap, cost and security levers, ideas to steal by project, anti-patterns, unresolved bets, sanity-check gauntlet |
+| 09 | [Agent-Primitives Evaluation](./09-agent-primitives-evaluation.md) | ~2.2K | mecatl vs the field (June 2026): delegation-primitives comparison, ahead/behind tables, the tiered roadmap that drove the work, remaining items as issues #28–#40 |
 
-**Total:** ~33K words, ~210KB of markdown.
+**Total:** 9 files, ~37K words, ~280KB of markdown.
 
 ## Suggested reading orders
 

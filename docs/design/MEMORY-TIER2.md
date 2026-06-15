@@ -994,3 +994,8 @@ is orthogonal), the OpenAI Responses streaming path.
 - **Open — brute-force revisit trigger.** Documented at ~10k entries/project
   (§2). Confirm that ceiling matches your expectations for the largest realistic
   per-project store; it is far above the consolidation-pruned curated set.
+
+
+---
+
+*Part of the [design docs](./README.md). Read in order: [MEMORY-DEFAULTS.md](./MEMORY-DEFAULTS.md) → [MEMORY-TIERING.md](./MEMORY-TIERING.md) ← MEMORY-TIER2. Related: [SOUL-SPIKE.md](./SOUL-SPIKE.md).*

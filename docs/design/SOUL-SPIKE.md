@@ -438,3 +438,8 @@ derivable from the docs, not a judgement call left open.
 - mecatl: `engine/prompt/{builder,instructions,memoryindex}.go`,
   `internal/adapter/{memory,dream}`, `engine/governance/permission.go`,
   `docs/harnesses/02-twelve-patterns.md`, `docs/harnesses/08-design-considerations.md`.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [MEMORY-TIERING.md](./MEMORY-TIERING.md), [MEMORY-TIER2.md](./MEMORY-TIER2.md), [COMPACTION.md](./COMPACTION.md).*

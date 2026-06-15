@@ -79,3 +79,8 @@ Two later paste features ride the same staging machinery this note describes:
 
 Nothing above changes: `ctrl+v` image-first/text-fallback, the marker-reconcile
 model, and the `buildMediaPart` choke point are as described.
+
+
+---
+
+*Part of the [design docs](./README.md). Related: [UX-DISCOVERABILITY.md](./UX-DISCOVERABILITY.md).*
