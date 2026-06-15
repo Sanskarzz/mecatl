@@ -169,6 +169,12 @@ one.
 - [CLOUD-NATIVE.md](./CLOUD-NATIVE.md) — the cloud-native arc: disposable process,
   externalized state, durable record. *Status: Phase 0 deliverable.*
 
+### Forge integration
+
+- [MECATEQUI.md](./MECATEQUI.md) — running mecatequi as a single-shot GitHub Action: the
+  split-privilege workflow, the token boundary, and the trust model for untrusted issue
+  text. *Status: v1 forge glue (composite action + template workflow + docs).*
+
 ### Historical / retired
 
 - [REPOMAP-TREE-SITTER.md](./REPOMAP-TREE-SITTER.md) — repo-map tree-sitter: freeze

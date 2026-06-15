@@ -213,6 +213,30 @@ added), reuses the digest already captured, and stores a verifiable provenance
 attestation with the image — no separate, separately-versioned reusable workflow
 with its own permission/secrets contract. See <https://slsa.dev/>.
 
+## `mecatequi-example.yml` — EXAMPLE / TEMPLATE (not run in this repo)
+
+A **template**, not a live workflow: there is no `mecatequi` label and no secret
+configured here, so the file is inert in this repo. It is the canonical
+**split-privilege** pattern for running `mecatequi` (the single-shot headless runner,
+`cmd/mecatequi`) from Actions. Copy it into your own repo and review before enabling.
+
+Trigger: `issues` (`labeled`) with the `mecatequi` label, OR `issue_comment` (`created`)
+whose body mentions `@mecatequi`. The job `if:` additionally requires
+`author_association ∈ {OWNER, MEMBER, COLLABORATOR}`.
+
+Two jobs with a hard token boundary — *the step that can write to GitHub never runs agent
+code; the step that runs agent code never holds a write token*:
+
+| Job | Permissions | What it does |
+|-----|-------------|--------------|
+| `implement` | `contents: read` (NO write, NO id-token) | Builds `mecatequi` from source, extracts the UNTRUSTED prompt via `jq` over `$GITHUB_EVENT_PATH` into a file (never an inline `${{ }}`), runs the agent with `--untrusted-prompt` + `--posture auto`, uploads the patch + summary + event log. Its only secret is the LLM key. |
+| `publish` | `contents: write` + `pull-requests: write` + `issues: write` | Downloads the artifacts and applies the patch as DATA (`git apply`) → branch → commit → PR, or posts an honest failure comment on a non-clean run. Runs NO agent output as code. |
+
+The reusable composite action lives at `.github/actions/mecatequi/` (its three helper
+scripts — `extract-prompt.sh`, `author-gate.sh`, `publish.sh` — pass every event-derived
+value via `env:`, never argv). Full design + the trust model + the `/proc`-exfiltration
+follow-up: `docs/design/MECATEQUI.md`; the operator walkthrough: `docs/usage.md`.
+
 ## References
 
 - GitHub Actions security hardening — <https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions>

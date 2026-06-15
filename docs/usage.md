@@ -2241,7 +2241,102 @@ before suspecting the harness.
 
 ---
 
-## 10. Live e2e suite
+## 10. Running mecatequi from GitHub Actions
+
+`mecatequi` (the single-shot headless runner, `cmd/mecatequi`) runs one prompt against
+an in-process engine and emits a working-tree git diff, a machine-readable summary JSON,
+and an optional durable event log, then exits with a code derived from the run's terminal
+state. A reusable **composite action** and an **example workflow** wire it into GitHub
+Actions safely. The design rationale, the trust model, and the `/proc`-exfiltration
+follow-up live in `docs/design/MECATEQUI.md`; this section is the operator walkthrough.
+
+> The example workflow is a **template** — copy it into your own repo and review it. This
+> repo does not run it against real issues (no `mecatequi` label, no configured secret).
+
+### The composite action (`.github/actions/mecatequi`)
+
+The action acquires the binary (v1: builds it from the checked-out source with the pinned
+Go toolchain — there is no released asset yet), runs it with `--untrusted-prompt` by
+default, captures the exit code **without failing the step**, and exposes the result as
+outputs. The LLM key is **not** an input: the binary reads provider secrets from the
+environment, so the caller sets `OPENAI_API_KEY` in the step `env`.
+
+**Inputs → flags:**
+
+| Input | Flag | Default |
+|---|---|---|
+| `prompt-file` (required) | `--prompt-file` | — |
+| `untrusted` | `--untrusted-prompt` (when `true`) | `true` |
+| `workspace` | `--workspace` | `${{ github.workspace }}` |
+| `posture` | `--posture` | `auto` |
+| `timeout` | `--timeout` | `15m` |
+| `max-run-tokens` | `--max-run-tokens` (omitted when empty) | `""` |
+| `model` | `--model` | `""` |
+| `default-provider` | `--default-provider` | `""` |
+| `default-model` | `--default-model` | `""` |
+| `openai` | `--openai` (when `true`) | `""` |
+| `openai-base-url` | `--openai-base-url` | `""` |
+| `guardrails-model` | `--guardrails-model` | `""` |
+| `out-diff` | `--out-diff` | `$RUNNER_TEMP/mecatequi.patch` |
+| `out-summary` | `--out-summary` | `$RUNNER_TEMP/mecatequi.summary.json` |
+| `out-events` | `--out-events` | `$RUNNER_TEMP/mecatequi.events.jsonl` |
+| `ref` / `mecatequi-version` | source ref built from | `""` |
+
+**Outputs** (kebab-case): `patch-path`, `summary-path`, `events-path`, `summary-json`
+(compacted JSON — best-effort and size-bounded by the `$GITHUB_OUTPUT` cap; read
+`summary-path` for anything large), `stop-reason`, `non-empty-diff`, and `exit-class`
+(`clean` / `run-failure` / `setup-failure`, derived from the captured exit code). Branch on
+`exit-class`, not the raw code — and remember exit 0 is **not** "task accomplished": read
+`stop-reason` and `non-empty-diff` to judge whether real work landed.
+
+### The example workflow (`.github/workflows/mecatequi-example.yml`)
+
+The template is the canonical **split-privilege** pattern — *the step that can write to
+GitHub never runs agent code; the step that runs agent code never holds a write token*:
+
+- **`implement`** (`contents: read`, no write, no id-token): checkout →
+  `author-gate.sh` (re-asserts `author_association ∈ {OWNER, MEMBER, COLLABORATOR}`) →
+  `extract-prompt.sh` writes the **untrusted** issue/comment text into a file via `jq`
+  over `$GITHUB_EVENT_PATH` (never an inline `${{ }}`) → `uses: ./.github/actions/mecatequi`
+  with `OPENAI_API_KEY` as the **only** secret → upload-artifact the patch/summary/events.
+- **`publish`** (`needs: implement`; `contents: write` + `pull-requests: write` +
+  `issues: write`): download-artifact → `publish.sh` applies the patch as **data**
+  (`git apply`) → branch → commit → PR, or posts an honest failure comment on a non-clean
+  run. It runs no agent output as code.
+
+Trigger: `issues` `labeled` with the `mecatequi` label, OR `issue_comment` `created`
+mentioning `@mecatequi` on an issue (PR comments are excluded). Every external action is
+SHA-pinned with a `# vX.Y.Z` comment, the workflow default is `permissions: contents:
+read`, both job checkouts pin the immutable `github.sha` (so the patch applies onto the
+tree it was diffed against), and a `concurrency` group keyed on the issue number prevents
+overlapping runs.
+
+The action and its scripts are meant to be **vendored** — copied into your repo and
+reviewed, not referenced by tag — so you control exactly what runs. To enable it:
+
+1. Copy `.github/workflows/mecatequi-example.yml` and the whole
+   `.github/actions/mecatequi/` directory into your repo.
+2. Add the `OPENAI_API_KEY` repository secret (the agent job's only secret).
+3. Create the `mecatequi` issue label.
+4. Review the posture (`auto` is the documented CI default) and decide whether to keep the
+   broad `GITHUB_TOKEN` in the `publish` job or upgrade to a JIT GitHub App token (the
+   stronger option — see `docs/design/MECATEQUI.md`).
+5. Apply the `mecatequi` label to a test issue and watch the run.
+
+### Injection safety (why it is built this way)
+
+Untrusted issue text never appears in a `${{ }}` interpolation inside a `run:` body or as
+an argv token. Extraction is `jq` over the event JSON file into a file; the file reaches
+the binary via `--prompt-file`; the binary fences it. Every event-derived value
+(author association, issue number, paths) is passed via `env:`. The produced patch is
+applied as data, never executed. **Honest caveat:** under posture `auto` a hijacked agent
+with shell access can still read process-environment secrets via Bash; v1 bounds the blast
+radius by holding only the rotatable LLM key (no write token) in the agent's job. The
+engine-side scrub is a named follow-up in `docs/design/MECATEQUI.md`.
+
+---
+
+## 11. Live e2e suite
 
 A live, ginkgo-driven end-to-end suite lives under `e2e/` (build tag `e2e` —
 `task build`/`task test`/`task lint` never compile it). It spawns
@@ -2285,7 +2380,7 @@ manual dispatch + the `e2e-live` PR label) — see
 
 ---
 
-## 11. Troubleshooting / FAQ
+## 12. Troubleshooting / FAQ
 
 **`no LLM provider available: set one of ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY (OpenAI), or OPENROUTER_API_KEY (one key, many models — a good first choice) …`**
 You started `mecated` with no provider key in the environment. Set

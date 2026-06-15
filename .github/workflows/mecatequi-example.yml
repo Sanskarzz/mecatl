@@ -1,0 +1,175 @@
+# ════════════════════════════════════════════════════════════════════════════════════
+# EXAMPLE / TEMPLATE — copy into your repo and review; this repo does not run it against
+# real issues. There is NO 'mecatequi' label and no secret configured in this repo, so
+# this file is inert here. It is the canonical SPLIT-PRIVILEGE two-job pattern for running
+# mecatequi from GitHub Actions safely. Read docs/design/MECATEQUI.md before enabling it.
+# ════════════════════════════════════════════════════════════════════════════════════
+#
+# THE TOKEN BOUNDARY INVARIANT (the whole point):
+#   - The `implement` job RUNS THE AGENT but holds NO GitHub write token (contents: read,
+#     no id-token, no write). Its only secret is the LLM key. If the agent is hijacked by
+#     a prompt-injection in untrusted issue text, the blast radius is the rotatable LLM
+#     key — it cannot push code, open PRs, or comment.
+#   - The `publish` job HOLDS THE WRITE TOKEN but RUNS NO AGENT CODE. It only applies the
+#     produced patch as DATA (git apply) and posts the summary as text.
+# The step that can write to GitHub never runs agent code; the step that runs agent code
+# never holds a write token.
+#
+# INJECTION SAFETY: untrusted issue text never appears in a ${{ }} interpolation inside a
+# run: body or as an argv token. extract-prompt.sh reads $GITHUB_EVENT_PATH with jq into a
+# file; the file reaches the binary via --prompt-file; the binary fences it. Every event-
+# derived value (author_association, issue number, paths) crosses via env:, never inline.
+
+name: mecatequi (EXAMPLE)
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+# Least-privilege workflow default. Jobs opt UP only where they must.
+permissions:
+  contents: read
+
+# Never run two mecatequi runs for the same issue at once. Fall back to run_id for any
+# non-issue event so distinct events never collapse into one group.
+concurrency:
+  group: mecatequi-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    name: Run mecatequi (agent, no write token)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Gate on the trigger AND the author association. The label path requires the
+    # 'mecatequi' label; the comment path requires a '@mecatequi' mention AND that the
+    # comment is on an ISSUE, not a PR (issue_comment fires on PR comments too, where the
+    # "issue" is the PR — running the agent against PR text with a nonsensical
+    # `Closes #<PR>` is wrong). Either way the actor must be OWNER/MEMBER/COLLABORATOR — a
+    # drive-by issue from a random account never starts the job. author-gate.sh re-asserts
+    # the association inside the job.
+    if: >-
+      (
+        github.event_name == 'issues' &&
+        github.event.label.name == 'mecatequi' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+      ) || (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request == null &&
+        contains(github.event.comment.body, '@mecatequi') &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      )
+    # NO write, NO id-token. The only secret is the LLM key, injected via env on the run
+    # step below.
+    permissions:
+      contents: read
+    steps:
+      # Pin to the IMMUTABLE event SHA so the tree the agent diffs against is exactly the
+      # tree `publish` later applies the patch onto — the default branch tip can move
+      # between the two jobs (especially on issue_comment), which would apply the patch to
+      # the wrong tree.
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      # Defense-in-depth behind the job `if:`. The association crosses via env, never argv.
+      - name: Author gate
+        shell: bash
+        env:
+          ASSOC: ${{ github.event_name == 'issue_comment' && github.event.comment.author_association || github.event.issue.author_association }}
+        run: ./.github/actions/mecatequi/author-gate.sh
+
+      # Extract the UNTRUSTED prompt from the event JSON into a file via jq — never an
+      # inline ${{ }} of the body. The file path is the script's $1.
+      - name: Extract prompt
+        shell: bash
+        run: ./.github/actions/mecatequi/extract-prompt.sh "${RUNNER_TEMP}/prompt.txt"
+
+      - name: mecatequi
+        id: mecatequi
+        uses: ./.github/actions/mecatequi
+        with:
+          prompt-file: ${{ runner.temp }}/prompt.txt
+          untrusted: "true"
+          posture: "auto"
+        env:
+          # The ONLY secret in this job. mecatequi reads it from the environment, never a
+          # flag. There is no GitHub write token here.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Upload run artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mecatequi-run
+          # Read every path from the action's outputs (including events-path) so an
+          # out-events override is never silently missed.
+          path: |
+            ${{ steps.mecatequi.outputs.patch-path }}
+            ${{ steps.mecatequi.outputs.summary-path }}
+            ${{ steps.mecatequi.outputs.events-path }}
+          if-no-files-found: warn
+          retention-days: 7
+
+    outputs:
+      stop-reason: ${{ steps.mecatequi.outputs.stop-reason }}
+      non-empty-diff: ${{ steps.mecatequi.outputs.non-empty-diff }}
+      exit-class: ${{ steps.mecatequi.outputs.exit-class }}
+
+  publish:
+    name: Publish result (write token, no agent code)
+    needs: implement
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Run on success AND on an implement FAILURE so the operator always gets a result (an
+    # honest failure comment, never silence). Skip only when implement was itself skipped
+    # (the gate did not match) or the run was cancelled.
+    if: ${{ !cancelled() && needs.implement.result != 'skipped' }}
+    # The privileged job. It applies the patch as DATA and posts text — it never runs
+    # agent output as code.
+    #
+    # SECURITY: this job holds a STANDING write grant via the broad GITHUB_TOKEN below. The
+    # STRONGER posture is to mint a short-lived GitHub App installation token (a JIT token
+    # scoped to exactly this repo's contents + pull-requests + issues) and pass it as
+    # GH_TOKEN instead, removing the standing grant. Decide this where you edit these perms.
+    # See docs/design/MECATEQUI.md.
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      # Pin to the SAME immutable SHA `implement` diffed against (see that job's checkout)
+      # so the patch applies onto the matching tree. persist-credentials:false keeps the
+      # checkout token off disk — publish.sh pushes via the explicit GH_TOKEN env, not the
+      # on-disk credential.
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Download run artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: mecatequi-run
+          path: ${{ runner.temp }}/mecatequi-run
+
+      # All values cross via env: — never an inline interpolation that the shell would
+      # splice. publish.sh applies the patch as DATA (git apply) and never executes agent
+      # output. An empty EXIT_CLASS (e.g. implement died before setting its output) is
+      # treated as a setup-failure by the script, so a failure still posts a comment.
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PATCH_PATH: ${{ runner.temp }}/mecatequi-run/mecatequi.patch
+          SUMMARY_PATH: ${{ runner.temp }}/mecatequi-run/mecatequi.summary.json
+          EXIT_CLASS: ${{ needs.implement.outputs.exit-class }}
+          REPO: ${{ github.repository }}
+          # Optional: pin the PR base branch. Defaults to the repo default branch when unset.
+          # BASE_BRANCH: main
+        run: ./.github/actions/mecatequi/publish.sh

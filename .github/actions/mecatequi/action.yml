@@ -1,0 +1,333 @@
+# mecatequi — reusable COMPOSITE action that runs one mecatequi single-shot agent
+# run inside a GitHub Actions job and exposes its result as step outputs.
+#
+# WHAT THIS IS. mecatequi is the headless, single-shot mecatl runner (cmd/mecatequi):
+# it runs ONE prompt against an in-process engine, drives it to a terminal state, and
+# emits three artifacts — a working-tree git diff, a machine-readable summary JSON, and
+# an optional durable JSONL event log — then maps the terminal stop reason to a process
+# exit code. This action wires that binary into a job: it acquires the binary, runs it
+# with the prompt file you pass, captures the exit code WITHOUT failing the step, and
+# surfaces the summary fields + an exit class as outputs so the CALLING workflow decides
+# what to do next (open a PR, post a comment, fail).
+#
+# TRUST POSTURE. The prompt is passed by FILE (`prompt-file`), never as an argv token or
+# an inline ${{ }} interpolation, and `untrusted` (default true) tells the binary to
+# wrap the prompt body in the harness untrusted-data fence. The intended split-privilege
+# template (.github/workflows/mecatequi-example.yml) runs THIS action in a job that holds
+# ONLY the LLM key and NO GitHub write token; a separate, agent-code-free job publishes
+# the result. See docs/design/MECATEQUI.md.
+#
+# THE LLM KEY IS NOT AN INPUT. mecatequi reads provider secrets from the ENVIRONMENT
+# (e.g. OPENAI_API_KEY), never from a flag — so the caller sets the key in the step env,
+# not as an action input. A secret routed through an action input would be eligible to
+# leak into logs; the env path keeps it out of the inputs surface entirely.
+#
+# DISTRIBUTION (v1: build-from-source). There is no published mecatequi release asset
+# today (release.yml ships only the mecated container image), so this action provisions
+# Go from go.mod via a SHA-pinned actions/setup-go step and BUILDS the binary from the
+# checked-out source. Both the toolchain provision ("Set up Go") and the build ("Acquire
+# mecatequi binary") are isolated steps so a future swap to a signed, checksum-verified
+# release-asset download is a contained change (drop both, add a download+verify). The
+# signed-asset follow-up is documented in docs/design/MECATEQUI.md.
+#
+# OMITTED INPUT — the ask-reviewer policy file. --subagent-ask-reviewer is surfaced (see
+# the input) so a posture:auto run can adjudicate a child's read-only substitution instead
+# of silently auto-denying it, but --subagent-ask-reviewer-policy (a TRUSTED rubric file
+# whose CONTENT replaces the built-in rubric) is NOT surfaced: it grants the reviewer a
+# rule set the operator would have to author and check into the repo, which is a deliberate
+# deployment decision better made by editing this action than by a workflow input. The
+# built-in rubric is the safe default; add the input here if a deployment needs a custom one.
+
+name: mecatequi
+description: >-
+  Run a single-shot, headless mecatequi agent over a prompt file and expose the run
+  summary (stop-reason, non-empty-diff, exit-class) and artifact paths as outputs.
+
+inputs:
+  prompt-file:
+    description: >-
+      Path to a file whose contents are the prompt body. REQUIRED. Pass a file the job
+      wrote from event data via jq — NEVER inline untrusted issue text into a run: body
+      or an argv token.
+    required: true
+  untrusted:
+    description: >-
+      When "true" (default), treat the prompt body as UNTRUSTED data and wrap it in the
+      harness untrusted-data fence (--untrusted-prompt). Set "false" only for a prompt
+      that is the operator's own trusted task.
+    required: false
+    default: "true"
+  workspace:
+    description: Session workspace root (must be a git repository so the diff can be computed).
+    required: false
+    default: ${{ github.workspace }}
+  posture:
+    description: >-
+      Operator posture ladder (strict < trusted < auto < yolo). Default "auto" — the
+      documented CI posture (allow-all, child injection-defence ON). "strict" would
+      CANCEL the run on the first mutate because a headless run has no approver.
+    required: false
+    default: "auto"
+  timeout:
+    description: Wall-clock bound on the whole run (e.g. 15m). 0 disables it.
+    required: false
+    default: "15m"
+  max-run-tokens:
+    description: >-
+      Max cumulative input+output tokens per run; the run ends cleanly with stop=budget
+      on crossing it. Empty (default) omits the flag (unlimited).
+    required: false
+    default: ""
+  model:
+    description: Model identifier sent to the provider (empty -> provider-appropriate default).
+    required: false
+    default: ""
+  default-provider:
+    description: >-
+      Deployment default provider id (e.g. openai, openrouter, anthropic). Auto-detected
+      from the secrets present in the env (e.g. OPENAI_API_KEY) — set only to FORCE the
+      provider.
+    required: false
+    default: ""
+  default-model:
+    description: Deployment default model id for the default provider.
+    required: false
+    default: ""
+  openai:
+    description: >-
+      When "true", use the OpenAI Responses provider (key from OPENAI_API_KEY in the step
+      env). Auto-detected from OPENAI_API_KEY in env — set only to FORCE the provider.
+    required: false
+    default: ""
+  openai-base-url:
+    description: Override the OpenAI API base URL (compatible endpoints).
+    required: false
+    default: ""
+  guardrails-model:
+    description: >-
+      GUARDRAILS (issue #27) checker model id / alias inspecting outbound args + inbound
+      results. Empty disables guardrails.
+    required: false
+    default: ""
+  subagent-ask-reviewer:
+    description: >-
+      OPT-IN headless ask reviewer (issue #31) → --subagent-ask-reviewer: model id / alias
+      of a tool-less one-turn reviewer that adjudicates a CHILD permission ask the headless
+      auto-deny would otherwise reject (so a posture:auto run whose subagent wants a
+      read-only $(...) substitution is reviewed rather than silently denied). Empty (default)
+      = no reviewer (children auto-deny). The TRUSTED policy-rubric file is NOT an input —
+      see the action header.
+    required: false
+    default: ""
+  subagent-ask-reviewer-max-denies:
+    description: >-
+      Circuit breaker for --subagent-ask-reviewer: consecutive non-allow outcomes that
+      disable the reviewer for the rest of the run. Empty (default) uses the binary's
+      default (3).
+    required: false
+    default: ""
+  out-diff:
+    description: Where the working-tree git patch is written.
+    required: false
+    default: ${{ runner.temp }}/mecatequi.patch
+  out-summary:
+    description: >-
+      Where the run-summary JSON is written. A FILE (not "-") so logs never collide and
+      the JSON stays clean for jq.
+    required: false
+    default: ${{ runner.temp }}/mecatequi.summary.json
+  out-events:
+    description: Where the durable event log (JSONL) is written.
+    required: false
+    default: ${{ runner.temp }}/mecatequi.events.jsonl
+  ref:
+    description: >-
+      Alias for mecatequi-version. The source ref the binary is built from (informational
+      in v1 build-from-source; recorded for the future signed-asset path). Empty = the
+      already-checked-out tree.
+    required: false
+    default: ""
+  mecatequi-version:
+    description: >-
+      The mecatequi source ref / version to build from (informational in v1 build-from-
+      source). Empty = the already-checked-out tree. When set, takes precedence over `ref`.
+    required: false
+    default: ""
+
+outputs:
+  patch-path:
+    description: Path to the working-tree git patch the run produced.
+    value: ${{ steps.run.outputs.patch-path }}
+  summary-path:
+    description: Path to the run-summary JSON (the ROBUST result channel — read this, not summary-json, for anything large).
+    value: ${{ steps.run.outputs.summary-path }}
+  events-path:
+    description: Path to the durable event log (JSONL). Tracks the out-events input so an override is never silently missed.
+    value: ${{ steps.run.outputs.events-path }}
+  summary-json:
+    description: >-
+      The run-summary JSON compacted to one line (jq -c .). BEST-EFFORT and size-bounded:
+      $GITHUB_OUTPUT has a cap, so for a large summary read summary-path instead.
+    value: ${{ steps.run.outputs.summary-json }}
+  stop-reason:
+    description: The terminal session stop reason (jq -r .stop_reason).
+    value: ${{ steps.run.outputs.stop-reason }}
+  non-empty-diff:
+    description: Whether the run left a working-tree change (jq -r .non_empty_diff).
+    value: ${{ steps.run.outputs.non-empty-diff }}
+  exit-class:
+    description: >-
+      Derived from the captured process exit code — clean (0), run-failure (1), or
+      setup-failure (2). The caller branches on this instead of the raw code.
+    value: ${{ steps.run.outputs.exit-class }}
+
+runs:
+  using: composite
+  steps:
+    # ── Toolchain provision (Finding A: build-from-source v1) ─────────────────────
+    # Provision Go FROM go.mod so the runner's preinstalled Go (which can lag the module's
+    # required version) never decides the build. This is part of binary acquisition: the
+    # action ships its own setup-go so EVERY consumer gets a satisfying toolchain without
+    # remembering to add one. SHA-pinned to the house set (matches ci.yml / release.yml).
+    - name: Set up Go
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    # ── Binary acquisition (Finding A: build-from-source v1) ──────────────────────
+    # ISOLATED on purpose. To swap to a signed/checksum-verified release asset later, drop
+    # this step plus the setup-go step above and replace them with a download+cosign-verify;
+    # the run step below reads "$RUNNER_TEMP/mecatequi" regardless. With setup-go having
+    # provisioned the go.mod toolchain, GOTOOLCHAIN=local is satisfied (no surprise
+    # download); GOFLAGS=-mod=readonly forbids module-graph edits. The build runs in the
+    # SAME low-priv job that already checked out, so no extra credential is introduced here.
+    - name: Acquire mecatequi binary
+      shell: bash
+      env:
+        BUILD_REF: ${{ inputs.mecatequi-version != '' && inputs.mecatequi-version || inputs.ref }}
+      run: |
+        set -euo pipefail
+        if [ -n "${BUILD_REF}" ]; then
+          echo "::notice::mecatequi-version/ref='${BUILD_REF}' requested; v1 builds from the checked-out tree. Check out that ref before this action to honour it."
+        fi
+        export GOTOOLCHAIN=local
+        export GOFLAGS=-mod=readonly
+        go build -o "${RUNNER_TEMP}/mecatequi" ./cmd/mecatequi
+        echo "Built mecatequi at ${RUNNER_TEMP}/mecatequi"
+
+    # ── Run (Finding B mitigation lives in the WORKFLOW, not here): capture rc, never
+    # fail the step ───────────────────────────────────────────────────────────────────
+    # The prompt reaches the binary ONLY via --prompt-file; the file path is passed via
+    # an env var, never an inline interpolation of any event-derived value. We compute the
+    # exit code with `set +e; ...; rc=$?; set -e` so a run-failure (rc=1) or setup-failure
+    # (rc=2) does NOT fail this composite step — the CALLER inspects `exit-class` and
+    # decides. A missing summary file (a build/flag failure before any summary was written)
+    # still yields a safe exit-class=setup-failure with empty summary fields.
+    - name: Run mecatequi
+      id: run
+      shell: bash
+      env:
+        MQ_PROMPT_FILE: ${{ inputs.prompt-file }}
+        MQ_UNTRUSTED: ${{ inputs.untrusted }}
+        MQ_WORKSPACE: ${{ inputs.workspace }}
+        MQ_POSTURE: ${{ inputs.posture }}
+        MQ_TIMEOUT: ${{ inputs.timeout }}
+        MQ_MAX_RUN_TOKENS: ${{ inputs.max-run-tokens }}
+        MQ_MODEL: ${{ inputs.model }}
+        MQ_DEFAULT_PROVIDER: ${{ inputs.default-provider }}
+        MQ_DEFAULT_MODEL: ${{ inputs.default-model }}
+        MQ_OPENAI: ${{ inputs.openai }}
+        MQ_OPENAI_BASE_URL: ${{ inputs.openai-base-url }}
+        MQ_GUARDRAILS_MODEL: ${{ inputs.guardrails-model }}
+        MQ_ASK_REVIEWER: ${{ inputs.subagent-ask-reviewer }}
+        MQ_ASK_REVIEWER_MAX_DENIES: ${{ inputs.subagent-ask-reviewer-max-denies }}
+        MQ_OUT_DIFF: ${{ inputs.out-diff }}
+        MQ_OUT_SUMMARY: ${{ inputs.out-summary }}
+        MQ_OUT_EVENTS: ${{ inputs.out-events }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${MQ_PROMPT_FILE}" ] || [ ! -f "${MQ_PROMPT_FILE}" ]; then
+          echo "::error::prompt-file '${MQ_PROMPT_FILE}' is missing or empty; pass a file written from event data (never inline untrusted text)."
+          exit 1
+        fi
+
+        # FAIL-SAFE untrusted parse: a security toggle must not silently flip OFF on a typo.
+        # Normalise to lowercase; ONLY explicit false/0/no disable the fence — anything else
+        # (incl. a near-miss "True", an empty value, a typo) keeps the fence ON.
+        untrusted_norm="$(printf '%s' "${MQ_UNTRUSTED}" | tr '[:upper:]' '[:lower:]')"
+        fence_on=true
+        case "${untrusted_norm}" in
+          false | 0 | no) fence_on=false ;;
+        esac
+        # openai is parsed with the same normalise (its fail-direction is benign — a
+        # spurious --openai just forces a provider, never weakens a defence).
+        openai_norm="$(printf '%s' "${MQ_OPENAI}" | tr '[:upper:]' '[:lower:]')"
+        openai_on=false
+        case "${openai_norm}" in
+          true | 1 | yes) openai_on=true ;;
+        esac
+
+        # Build the argv as an ARRAY from env values — never string-interpolated. Each
+        # event-derived value crosses as a discrete token, so no value can be re-parsed
+        # as a flag or a shell metacharacter.
+        args=(
+          --prompt-file "${MQ_PROMPT_FILE}"
+          --workspace "${MQ_WORKSPACE}"
+          --posture "${MQ_POSTURE}"
+          --timeout "${MQ_TIMEOUT}"
+          --headless=true
+          --out-diff "${MQ_OUT_DIFF}"
+          --out-summary "${MQ_OUT_SUMMARY}"
+          --out-events "${MQ_OUT_EVENTS}"
+        )
+        [ "${fence_on}" = "true" ] && args+=( --untrusted-prompt )
+        [ -n "${MQ_MAX_RUN_TOKENS}" ] && args+=( --max-run-tokens "${MQ_MAX_RUN_TOKENS}" )
+        [ -n "${MQ_MODEL}" ] && args+=( --model "${MQ_MODEL}" )
+        [ -n "${MQ_DEFAULT_PROVIDER}" ] && args+=( --default-provider "${MQ_DEFAULT_PROVIDER}" )
+        [ -n "${MQ_DEFAULT_MODEL}" ] && args+=( --default-model "${MQ_DEFAULT_MODEL}" )
+        [ "${openai_on}" = "true" ] && args+=( --openai )
+        [ -n "${MQ_OPENAI_BASE_URL}" ] && args+=( --openai-base-url "${MQ_OPENAI_BASE_URL}" )
+        [ -n "${MQ_GUARDRAILS_MODEL}" ] && args+=( --guardrails-model "${MQ_GUARDRAILS_MODEL}" )
+        [ -n "${MQ_ASK_REVIEWER}" ] && args+=( --subagent-ask-reviewer "${MQ_ASK_REVIEWER}" )
+        [ -n "${MQ_ASK_REVIEWER_MAX_DENIES}" ] && args+=( --subagent-ask-reviewer-max-denies "${MQ_ASK_REVIEWER_MAX_DENIES}" )
+
+        # Capture the exit code WITHOUT failing the step. The binary writes the summary to
+        # a FILE, so its stdout is free; operational logs + the per-event trace go to its
+        # stderr, which the runner captures in the step log.
+        set +e
+        "${RUNNER_TEMP}/mecatequi" "${args[@]}"
+        rc=$?
+        set -e
+        echo "mecatequi exited rc=${rc}"
+
+        # Map the raw exit code to a stable class the caller branches on.
+        case "${rc}" in
+          0) exit_class=clean ;;
+          1) exit_class=run-failure ;;
+          2) exit_class=setup-failure ;;
+          *) exit_class=setup-failure ;;
+        esac
+
+        # Read the summary fields from the FILE. A missing/empty file (a failure before any
+        # summary was written) degrades to empty/false defaults and exit-class stays as
+        # captured — never a crash.
+        summary_json='{}'
+        stop_reason=''
+        non_empty_diff='false'
+        if [ -s "${MQ_OUT_SUMMARY}" ]; then
+          summary_json="$(jq -c . "${MQ_OUT_SUMMARY}")"
+          stop_reason="$(jq -r '.stop_reason // ""' "${MQ_OUT_SUMMARY}")"
+          non_empty_diff="$(jq -r '.non_empty_diff // false' "${MQ_OUT_SUMMARY}")"
+        fi
+
+        {
+          echo "patch-path=${MQ_OUT_DIFF}"
+          echo "summary-path=${MQ_OUT_SUMMARY}"
+          echo "events-path=${MQ_OUT_EVENTS}"
+          echo "summary-json=${summary_json}"
+          echo "stop-reason=${stop_reason}"
+          echo "non-empty-diff=${non_empty_diff}"
+          echo "exit-class=${exit_class}"
+        } >> "${GITHUB_OUTPUT}"
