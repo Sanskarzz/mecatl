@@ -139,10 +139,14 @@ jobs:
         run: ./.github/actions/mecatequi/author-gate.sh
 
       # Extract the UNTRUSTED prompt from the event JSON into a file via jq — never an
-      # inline ${{ }} of the body. The file path is the script's $1.
+      # inline ${{ }} of the body. extract-prompt.sh now lives inside the
+      # mecatequi-extract-prompt composite action (its single home, shared with the reusable
+      # workflow); self-use resolves `./` against this repo's checkout.
       - name: Extract prompt
-        shell: bash
-        run: ./.github/actions/mecatequi/extract-prompt.sh "${RUNNER_TEMP}/prompt.txt"
+        id: prompt
+        uses: ./.github/actions/mecatequi-extract-prompt
+        with:
+          out-file: ${{ runner.temp }}/prompt.txt
 
       # The LLM key reaches the binary via the JOB-level env: block above, NOT a step env
       # here — step-level env on a `uses:` step does not propagate into the composite
@@ -151,7 +155,7 @@ jobs:
         id: mecatequi
         uses: ./.github/actions/mecatequi
         with:
-          prompt-file: ${{ runner.temp }}/prompt.txt
+          prompt-file: ${{ steps.prompt.outputs.prompt-file }}
           untrusted: "true"
           posture: "auto"
 
@@ -196,6 +200,14 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+    # The write token is delivered at JOB level: publish.sh (wrapped in the mecatequi-publish
+    # composite action) reads GH_TOKEN from the process environment, and JOB-level env reaches
+    # a composite action's internal step whereas a step-level env: on the `uses:` step does
+    # NOT. To remove the standing grant, swap this for a JIT GitHub App installation token
+    # (mint it in a prior step and resolve it into $GITHUB_ENV; the reusable workflow does
+    # exactly this). See docs/design/MECATEQUI.md.
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # Pin to the SAME immutable SHA `implement` diffed against (see that job's checkout)
       # so the patch applies onto the matching tree. persist-credentials:false keeps the
@@ -219,27 +231,28 @@ jobs:
           name: mecatequi-run
           path: ${{ runner.temp }}/mecatequi-run
 
-      # All values cross via env: — never an inline interpolation that the shell would
-      # splice. publish.sh applies the patch as DATA (git apply) and never executes agent
-      # output. An empty EXIT_CLASS (e.g. implement died before setting its output, or the
-      # artifact was missing) is treated as a setup-failure by the script, so a failure
-      # still posts a comment.
+      # publish.sh now lives inside the mecatequi-publish composite action (its single home,
+      # shared with the reusable workflow); self-use resolves `./` against this repo's
+      # checkout. All values cross via the action's inputs -> the env vars publish.sh reads —
+      # never an inline interpolation the shell would splice. It applies the patch as DATA
+      # (git apply) and never executes agent output. An empty exit-class (implement died
+      # before setting its output, or the artifact was missing) is read as setup-failure, so a
+      # failure still posts a comment. GH_TOKEN reaches publish.sh via the JOB-level env above.
       - name: Publish
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          PATCH_PATH: ${{ runner.temp }}/mecatequi-run/mecatequi.patch
-          SUMMARY_PATH: ${{ runner.temp }}/mecatequi-run/mecatequi.summary.json
-          EXIT_CLASS: ${{ needs.implement.outputs.exit-class }}
-          REPO: ${{ github.repository }}
-          # Optional: pin the PR base branch. Defaults to the repo default branch when unset.
-          # BASE_BRANCH: main
-          # Optional: custom PR-description / PR-title templates (paths relative to the
-          # checkout) with {{placeholder}} tokens. Unset = the built-in rich body; publish.sh
-          # also auto-uses .github/mecatequi/pr-body.md if present (rename the shipped
+        uses: ./.github/actions/mecatequi-publish
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          patch-path: ${{ runner.temp }}/mecatequi-run/mecatequi.patch
+          summary-path: ${{ runner.temp }}/mecatequi-run/mecatequi.summary.json
+          exit-class: ${{ needs.implement.outputs.exit-class }}
+          repo: ${{ github.repository }}
+          # Optional: pin the PR base branch (base-branch input). Defaults to the repo default
+          # branch when unset. Optional: custom PR-description / PR-title templates (paths
+          # relative to the checkout) with {{placeholder}} tokens via the pr-body-template /
+          # pr-title-template inputs. Unset = the built-in rich body; publish.sh also auto-uses
+          # .github/mecatequi/pr-body.md if present (rename the shipped
           # .github/mecatequi/pr-body.md.example to activate it). The trust caveat is ALWAYS
           # force-prepended regardless of template. See docs/design/MECATEQUI.md.
-          # MQ_PR_BODY_TEMPLATE: .github/mecatequi/pr-body.md
-          # MQ_PR_TITLE_TEMPLATE: .github/mecatequi/pr-title.txt
-        run: ./.github/actions/mecatequi/publish.sh
+          # base-branch: main
+          # pr-body-template: .github/mecatequi/pr-body.md
+          # pr-title-template: .github/mecatequi/pr-title.txt

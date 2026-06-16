@@ -52,9 +52,11 @@ REPO="${REPO:-${GITHUB_REPOSITORY:-}}"
 MQ_PR_BODY_TEMPLATE="${MQ_PR_BODY_TEMPLATE:-}"
 MQ_PR_TITLE_TEMPLATE="${MQ_PR_TITLE_TEMPLATE:-}"
 
-# Root the convention-path lookup at the checkout. publish.sh runs from the checked-out repo
-# root (the workflow invokes ./.github/actions/mecatequi/publish.sh), so $GITHUB_WORKSPACE is
-# the checkout; fall back to the cwd when the var is absent (e.g. a local dry-run).
+# Root the convention-path lookup at the checkout, NOT the cwd. This script is invoked from
+# the mecatequi-publish composite action (its $GITHUB_ACTION_PATH), so the cwd is NOT the
+# repo checkout — every checkout-relative path (the convention template, the confinement
+# root) is resolved against $GITHUB_WORKSPACE explicitly. Fall back to the cwd only when the
+# var is absent (e.g. a local dry-run / the offline test harness).
 MQ_WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
 
 export GH_TOKEN
@@ -271,12 +273,54 @@ fi
 # successful injection could otherwise rewrite the very workflow that runs the agent and
 # slip it past human review of the "feature" diff. `git apply --numstat` lists touched
 # paths WITHOUT modifying the tree.
-if ! numstat="$(git apply --numstat "${PATCH_PATH}" 2>/dev/null)"; then
-  # numstat itself failing means the patch is malformed for this tree; fall through to the
-  # real apply below, which will fail loudly with a useful message.
-  numstat=""
+#
+# WHY -z IS NON-NEGOTIABLE (the path-quoting bypass). WITHOUT -z, `git apply --numstat`
+# C-QUOTES any path containing a special byte (a tab, a control char, a non-ASCII byte, a
+# backslash or a quote): it wraps the path in DOUBLE QUOTES with a LEADING `"` and
+# backslash-escapes the special bytes — e.g. a patch creating `.github/workflows/ci<TAB>x.yml`
+# is printed as `".github/workflows/ci\tinject.yml"`. That leading `"` means the
+# `^\.github/` anchor NEVER matches, the gate FAILS OPEN, and the later `git apply --3way`
+# un-quotes the name and WRITES the file under .github/ — a clean bypass of the residual
+# pwn-request defence. `-z` emits NUL-terminated records with the path RAW and UNQUOTED
+# (`<added>\t<deleted>\t<rawpath>\0`), so there is no quoting to defeat. A rename emits the
+# old and new paths as EXTRA NUL records (their numeric fields are `-`); we therefore test
+# EVERY path token, so a rename whose DESTINATION lands under a protected prefix is blocked
+# too.
+# Write the NUL-delimited numstat to a FILE, never a "$(...)" capture: bash command
+# substitution STRIPS NUL bytes, which would re-merge the very records `-z` separates and
+# defeat the whole point. We read the records back from the file with `read -d ''`.
+numstat_z_file="${RUNNER_TEMP}/mecatequi-numstat.z"
+if ! git apply --numstat -z "${PATCH_PATH}" > "${numstat_z_file}" 2>/dev/null; then
+  # numstat itself failing means the patch is malformed/un-inspectable for this tree. FAIL
+  # SAFE: do NOT fall open — empty the file and fall through to the real apply below, which
+  # will fail loudly with a useful message (an un-inspectable patch is never applied past a
+  # gate that could not read it).
+  : > "${numstat_z_file}"
 fi
-blocked="$(printf '%s\n' "${numstat}" | awk '{print $3}' | grep -E '^(\.github/|\.gitattributes$|\.git/|Makefile$|Taskfile\.ya?ml$)' || true)"
+# Walk the NUL-delimited records and collect every protected RAW path. We split each record
+# on the FIRST TWO TABS only (the two numeric fields) and keep the REMAINDER as the raw path
+# — the path itself may legitimately contain spaces or further tabs, so an awk space-split
+# would corrupt it. A rename's extra path records have no leading numeric fields (no tab to
+# strip), so they fall through the cut as the whole token and are matched verbatim. Reading
+# NUL-delimited records keeps the embedded-tab/newline payloads intact end-to-end.
+protected_re='^(\.github/|\.gitattributes$|\.git/|Makefile$|Taskfile\.ya?ml$)'
+blocked=""
+while IFS= read -r -d '' record; do
+  [ -z "${record}" ] && continue
+  # Strip the two leading "<num>\t" fields IFF present (`<added>\t<deleted>\t` prefix). Each
+  # substitution removes one leading run-of-non-tab + tab; on a bare extra-path record (no
+  # leading numeric field) the first cut is a no-op, so the raw path survives unchanged.
+  rawpath="${record}"
+  case "${rawpath}" in
+    *$'\t'*) rawpath="${rawpath#*$'\t'}"; rawpath="${rawpath#*$'\t'}" ;;
+  esac
+  if printf '%s' "${rawpath}" | grep -Eq "${protected_re}"; then
+    # Collect on its OWN line for the rejection comment (paths may contain tabs/spaces; one
+    # protected path per line is enough for a human to see the scope).
+    blocked="${blocked}${rawpath}"$'\n'
+  fi
+done < "${numstat_z_file}"
+blocked="${blocked%$'\n'}"
 if [ -n "${blocked}" ]; then
   {
     echo "## mecatequi run produced a patch that touches protected paths"

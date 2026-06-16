@@ -1,0 +1,57 @@
+# mecatequi-extract-prompt — composite WRAPPER around extract-prompt.sh, so the reusable
+# workflow (.github/workflows/mecatequi-reusable.yml) can reach the script via `uses:`.
+#
+# WHY THIS WRAPPER EXISTS (the reusable-workflow wrinkle). Inside a workflow called as
+# `uses: owner/repo/.github/workflows/X.yml@ref`, a `run:` script executes against the
+# CALLER's checkout, NOT mecatl's — so a reusable workflow CANNOT `run:` mecatl's
+# extract-prompt.sh directly (the file is not on disk). A `uses:` action, by contrast, is
+# AUTO-FETCHED by GitHub from mecatl at the pinned ref. Wrapping the script as a composite
+# action and referencing it by full path (`stacklok/mecatl/.github/actions/mecatequi-
+# extract-prompt@<tag>`) is what lets the reusable workflow invoke it with zero consumer
+# vendoring. The script is co-located here as its SINGLE home (it was moved out of
+# .github/actions/mecatequi/ — there is no second copy to drift).
+#
+# INJECTION SAFETY (carried over from extract-prompt.sh — the whole point). The issue
+# title/body (and, on issue_comment, the comment body) are UNTRUSTED attacker-controllable
+# text. They MUST NOT pass through a ${{ }} expression (which would splice them into the
+# shell before execution) or an argv token. extract-prompt.sh reads the event JSON FILE
+# ($GITHUB_EVENT_PATH) with jq and writes the body to a file; the body then reaches
+# mecatequi only via --prompt-file, where the binary fences it as untrusted data. Nothing
+# here interpolates the body into a command — the only value this action passes to the
+# script is the OPERATOR-set output path, and it crosses via env: (OUT_FILE), never argv
+# interpolation.
+
+name: mecatequi-extract-prompt
+description: >-
+  Extract the UNTRUSTED triggering-issue prompt body from the GitHub event JSON into a
+  file (via jq over $GITHUB_EVENT_PATH) — never an inline ${{ }} of attacker text.
+
+inputs:
+  out-file:
+    description: >-
+      Path the prompt body is written to. The caller passes this to the mecatequi action's
+      `prompt-file` input. Default is a per-run temp file under $RUNNER_TEMP.
+    required: false
+    default: ${{ runner.temp }}/prompt.txt
+outputs:
+  prompt-file:
+    description: The resolved path the prompt body was written to (tracks out-file).
+    value: ${{ steps.extract.outputs.prompt-file }}
+
+runs:
+  using: composite
+  steps:
+    # Run extract-prompt.sh from the ACTION's own directory ($GITHUB_ACTION_PATH), the
+    # script's single home. The output path crosses via env: (OUT_FILE) and is passed as a
+    # discrete argv token "${OUT_FILE}" — never string-interpolated into the command — so it
+    # cannot be re-parsed as a flag or a shell metacharacter. The script itself reads the
+    # UNTRUSTED body via jq over $GITHUB_EVENT_PATH and never interpolates it.
+    - name: Extract prompt
+      id: extract
+      shell: bash
+      env:
+        OUT_FILE: ${{ inputs.out-file }}
+      run: |
+        set -euo pipefail
+        "${GITHUB_ACTION_PATH}/extract-prompt.sh" "${OUT_FILE}"
+        echo "prompt-file=${OUT_FILE}" >> "${GITHUB_OUTPUT}"

@@ -1,0 +1,106 @@
+# mecatequi-publish — composite WRAPPER around publish.sh, so the reusable workflow
+# (.github/workflows/mecatequi-reusable.yml) can reach the script via `uses:`.
+#
+# WHY THIS WRAPPER EXISTS (the reusable-workflow wrinkle). Inside a workflow called as
+# `uses: owner/repo/.github/workflows/X.yml@ref`, a `run:` script executes against the
+# CALLER's checkout, NOT mecatl's — so a reusable workflow CANNOT `run:` mecatl's
+# publish.sh directly (the file is not on disk). A `uses:` action, by contrast, is
+# AUTO-FETCHED by GitHub from mecatl at the pinned ref. Wrapping the script as a composite
+# action and referencing it by full path (`stacklok/mecatl/.github/actions/mecatequi-
+# publish@<tag>`) is what lets the reusable workflow invoke it with zero consumer
+# vendoring. publish.sh is co-located here as its SINGLE home (it was moved out of
+# .github/actions/mecatequi/ — there is no second copy to drift).
+#
+# RUNS IN THE PRIVILEGED JOB. publish.sh is the ONLY script that holds a GitHub write
+# token, and it NEVER runs agent output as code: the agent's contribution is a unified diff
+# applied as DATA via `git apply`, never `eval`/`source`/a script the agent authored. The
+# summary is posted as PR/issue body TEXT, never executed. This wrapper changes none of
+# that — it only maps action inputs onto the env vars publish.sh already reads.
+#
+# THE TOKEN IS NOT AN INPUT. publish.sh reads GH_TOKEN from the ENVIRONMENT, never a flag
+# or an action input. The caller (the publish job) sets GH_TOKEN at JOB level so it reaches
+# this composite's internal step — step-level env on a `uses:` step does NOT propagate into
+# a composite action's internal steps, but JOB-level env (the shared $GITHUB_ENV store)
+# does. Routing the token through an action input would make it eligible to leak into logs
+# and the inputs surface; the env path keeps it out of inputs entirely. publish.sh's own
+# guard (`: "${GH_TOKEN:?publish: GH_TOKEN is required}"`) fails loudly if it is missing.
+#
+# INPUTS ARE ENV-FED, never argv-interpolated. Every value the workflow passes — the patch
+# path, the summary path, the issue number, the exit class, the templates — crosses via an
+# environment variable mapped to the MQ_*/contract var publish.sh reads, so no event-derived
+# string is spliced into the script's source. publish.sh roots its convention-path lookup
+# and its template-confinement at $GITHUB_WORKSPACE (the checkout), NOT a cwd-relative path,
+# so running it from $GITHUB_ACTION_PATH (where this wrapper invokes it) is correct.
+
+name: mecatequi-publish
+description: >-
+  Apply a mecatequi run's patch as DATA (git apply) and open a PR — or, on a non-clean
+  run, post an honest failure comment. Holds the write token (via GH_TOKEN in the env);
+  runs NO agent output as code.
+
+inputs:
+  issue-number:
+    description: The triggering issue number (PR linkage + the failure comment).
+    required: true
+  patch-path:
+    description: Path to the working-tree patch the run produced.
+    required: false
+    default: ""
+  summary-path:
+    description: Path to the run-summary JSON.
+    required: false
+    default: ""
+  exit-class:
+    description: >-
+      clean | run-failure | setup-failure. EMPTY is treated as setup-failure by publish.sh,
+      so a failed implement job (which left no output) still posts an honest comment.
+    required: false
+    default: ""
+  repo:
+    description: owner/repo the PR/comment targets.
+    required: false
+    default: ${{ github.repository }}
+  base-branch:
+    description: >-
+      Base branch for the PR. Empty (default) lets publish.sh resolve the repo default
+      branch, then $GITHUB_REF_NAME.
+    required: false
+    default: ""
+  pr-body-template:
+    description: >-
+      OPTIONAL path (relative to the checkout) to a PR-body template with {{placeholder}}
+      tokens. Empty uses .github/mecatequi/pr-body.md if present, else the built-in body.
+      The trust caveat is ALWAYS force-prepended regardless of template. See
+      docs/design/MECATEQUI.md for the placeholder list.
+    required: false
+    default: ""
+  pr-title-template:
+    description: >-
+      OPTIONAL path (relative to the checkout) to a one-line PR-title template (same
+      placeholders). Empty uses the built-in title "mecatequi: changes for issue #<n>".
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Run publish.sh from the ACTION's own directory ($GITHUB_ACTION_PATH), its single home.
+    # Every input crosses via env: mapped to the exact contract var publish.sh reads — no
+    # value is string-interpolated into the script. GH_TOKEN is intentionally NOT mapped here:
+    # publish.sh reads it from the process environment, which the caller sets at JOB level (a
+    # step env: on a `uses:` step would not reach this internal step). publish.sh applies the
+    # patch as DATA (git apply) and never executes agent output.
+    - name: Publish
+      shell: bash
+      env:
+        ISSUE_NUMBER: ${{ inputs.issue-number }}
+        PATCH_PATH: ${{ inputs.patch-path }}
+        SUMMARY_PATH: ${{ inputs.summary-path }}
+        EXIT_CLASS: ${{ inputs.exit-class }}
+        REPO: ${{ inputs.repo }}
+        BASE_BRANCH: ${{ inputs.base-branch }}
+        MQ_PR_BODY_TEMPLATE: ${{ inputs.pr-body-template }}
+        MQ_PR_TITLE_TEMPLATE: ${{ inputs.pr-title-template }}
+      run: |
+        set -euo pipefail
+        "${GITHUB_ACTION_PATH}/publish.sh"

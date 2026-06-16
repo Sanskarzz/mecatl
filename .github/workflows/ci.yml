@@ -110,6 +110,29 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # Lint the GitHub Actions workflows + assert the reusable workflow's first-party
+      # sibling-action pins match the release tag (the version-skew guard). actionlint is
+      # pinned via `go run` so no extra binary install is needed; it embeds shellcheck for
+      # `run:` blocks when available. `task lint:actions` chains the reusable-pins check.
+      - name: Lint GitHub Actions
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
+      - name: Check reusable-workflow pins
+        run: bash .github/actions/check-reusable-pins.sh
+
+      # The mecatequi composite-action glue scripts (extract-prompt.sh, publish.sh) have
+      # offline bash tests with fake gh/git stubs that assert their SECURITY logic (no
+      # untrusted-body interpolation; protected-paths gate incl. the -z path-quoting bypass;
+      # template-confinement; literal+single-pass PR-body render; the comment-without-PR
+      # branches). The action-wrappers test pins the composite action.yml env-mapping contract
+      # (actionlint cannot lint a composite action). They are shell, not Go, so they ride here
+      # rather than in `go test`.
+      - name: Test GitHub Actions scripts
+        run: |
+          bash .github/actions/mecatequi-extract-prompt/extract-prompt_test.sh
+          bash .github/actions/mecatequi-publish/publish_test.sh
+          bash .github/actions/action-wrappers_test.sh
+
   fuzz-smoke:
     name: Fuzz smoke
     runs-on: ubuntu-24.04

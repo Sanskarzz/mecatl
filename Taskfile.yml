@@ -101,6 +101,23 @@ tasks:
     cmds:
       - go test -race ./...
 
+  test:actions:
+    desc: |
+      Run the OFFLINE shell tests for the mecatequi composite-action glue scripts
+      (extract-prompt.sh, publish.sh) — plain bash, no bats, with fake gh/git stubs.
+      They assert the SECURITY logic: extract-prompt never interpolates the untrusted
+      issue body (a $(...) / backtick payload is written verbatim, never executed), and
+      publish.sh's protected-paths gate rejects a .github/ patch (incl. a path-quoting bypass
+      via `git apply --numstat -z`), its template-confinement rejects a ../ traversal, its
+      PR-body render is literal + single-pass, and the no-change / failure / empty-exit-class
+      branches comment without opening a PR. The action-wrappers test pins the composite
+      action.yml env-mapping contract (actionlint can't lint composite actions). NOT part of
+      `task test` (shell, not Go).
+    cmds:
+      - bash .github/actions/mecatequi-extract-prompt/extract-prompt_test.sh
+      - bash .github/actions/mecatequi-publish/publish_test.sh
+      - bash .github/actions/action-wrappers_test.sh
+
   e2e:
     desc: |
       Run the LIVE end-to-end suite (e2e/, build tag e2e) against OpenRouter.
@@ -285,6 +302,25 @@ tasks:
     desc: Run golangci-lint with autofix (parallel-safe)
     cmds:
       - golangci-lint run --allow-parallel-runners --fix ./...
+
+  lint:actions:
+    desc: |
+      Lint all GitHub Actions workflows with actionlint (pinned via `go run`, so no
+      preinstalled binary is needed). Catches expression-context errors, bad `uses:`
+      refs, and shell issues in `run:` blocks. Runs the reusable-pins check too, so a
+      single `task lint:actions` covers the whole Actions surface.
+    cmds:
+      - go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - task: lint:reusable-pins
+
+  lint:reusable-pins:
+    desc: |
+      Assert every first-party sibling-action pin inside mecatequi-reusable.yml
+      (stacklok/mecatl/.github/actions/*@<tag>) equals the current release tag — the
+      mechanical version-skew guard (an expression is illegal in `uses:`, so the tag is
+      a hardcoded literal the release process must bump in the same tagged commit).
+    cmds:
+      - bash .github/actions/check-reusable-pins.sh
 
   fmt:
     desc: Format Go code (gofmt + goimports if available)

@@ -3,9 +3,10 @@
 `mecatequi` (`cmd/mecatequi/main.go`) is the headless, single-shot mecatl runner: one
 prompt, one in-process engine, one terminal state, three artifacts (a working-tree git
 diff, a machine-readable summary JSON, an optional durable event log), and an exit code.
-This doc covers the **forge glue** that runs it inside GitHub Actions — a reusable
-composite action and a split-privilege workflow template — and the trust model that keeps
-an agent driven by untrusted issue text from doing damage.
+This doc covers the **forge glue** that runs it inside GitHub Actions — composite actions, a
+reusable `workflow_call` workflow (the recommended adoption path, §5.1), and a split-privilege
+workflow template (the escape hatch) — and the trust model that keeps an agent driven by
+untrusted issue text from doing damage.
 
 The Go binary's contract is Pipeline 1 and is frozen. Everything here lives in `.github/`
 and `docs/` and changes no Go.
@@ -26,7 +27,8 @@ mecatequi emits is an *artifact* (uploaded for forensics), not a rehydration sou
 
 ## 2. The split-privilege model
 
-The template (`.github/workflows/mecatequi-example.yml`) is three jobs with a hard token
+Both the reusable workflow (`.github/workflows/mecatequi-reusable.yml`) and the escape-hatch
+template (`.github/workflows/mecatequi-example.yml`) are three jobs with a hard token
 boundary:
 
 - **`acknowledge`** runs **first**, gated on the same trigger as `implement`, holding
@@ -56,10 +58,21 @@ boundary:
 > `publish` hold a write scope (and `acknowledge` holds only `issues: write`); `implement`
 > never gains issues/pull-requests/contents write.
 
+This invariant holds across **both** adoption paths — the composite-vendored template
+(`.github/workflows/mecatequi-example.yml`, the escape hatch) **and** the reusable
+`workflow_call` workflow (`.github/workflows/mecatequi-reusable.yml`, the recommended path,
+§5). A reusable workflow keeps per-job `permissions:`, so it preserves the boundary a single
+composite action cannot: the `implement` job holds only the LLM key(s) at `contents: read`,
+and the `publish` job holds the write token with no agent code. The **secret-scoping proof**:
+the publish-token secrets are interpolated only in the `publish` job, so GitHub never
+materialises them in `implement` — a called workflow's `GITHUB_TOKEN` can only be downgraded
+from the caller's grant, never escalated, and each job declares its own scope.
+
 A stronger variant, noted in the template, replaces the broad job `GITHUB_TOKEN` in
 `publish` with a just-in-time GitHub App installation token scoped to exactly this repo's
 contents + pull-requests + issues — removing the standing write grant entirely. v1 ships
-the `GITHUB_TOKEN` form for zero-config copyability and documents the App-token upgrade.
+the `GITHUB_TOKEN` form for zero-config copyability and documents the App-token upgrade; the
+reusable workflow's publish-token interface (§5) wires the JIT App-token form directly.
 
 ## 3. Trust boundary
 
@@ -283,6 +296,124 @@ the run step already reads `$RUNNER_TEMP/mecatequi` regardless of how it got the
 signed-binary / container path is the later speed optimization; this pipeline deliberately
 does **not** add it yet.
 
+### 5.1 Reusable workflow (`workflow_call`) — the recommended adoption path
+
+Referencing the composite action by tag (above) still leaves a consumer to **vendor the
+whole split-privilege job graph** — the three jobs plus the glue scripts. That is ~800 lines
+in a real adoption, ~540 of them byte-for-byte copies of `publish.sh` + `extract-prompt.sh`
+that will **drift** from mecatl. The reusable workflow
+(`.github/workflows/mecatequi-reusable.yml`, `on: workflow_call`) collapses that to a
+**~15-line caller**:
+
+```yaml
+jobs:
+  mecatequi:
+    uses: stacklok/mecatl/.github/workflows/mecatequi-reusable.yml@v0.0.2
+    secrets:
+      openrouter-key: ${{ secrets.OPENROUTER_CI_TOKEN }}
+      publish-app-id: ${{ secrets.RELEASE_APP_ID }}
+      publish-app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+    with:
+      label: ready-for-agent
+      model: anthropic/claude-sonnet-4.6
+      default-provider: openrouter
+```
+
+It is the same three jobs (`acknowledge` / `implement` / `publish`) with the same per-job
+permissions, so the token boundary is preserved exactly (§2). The hand-rolled template
+`.github/workflows/mecatequi-example.yml` remains the **escape hatch** for a consumer that
+needs to customise the job graph (a custom author-gate job, an extra approval stage, a
+different trigger).
+
+**Why the sibling actions use full-path refs (the wrinkle that drives the design).** Inside
+a workflow called as `uses: owner/repo/.github/workflows/X.yml@ref`, a `uses:
+./.github/actions/Y` resolves to the **caller's** checkout, not mecatl's — and a `run:`
+script likewise executes against the caller's checkout. So a naive reusable workflow cannot
+reach mecatl's `publish.sh`/`extract-prompt.sh` at all. The fix is two-fold: the glue scripts
+are **wrapped as composite actions** (`.github/actions/mecatequi-extract-prompt/` and
+`.github/actions/mecatequi-publish/`, each script's single home — they were *moved*, not
+copied, so there is no second copy to drift), and the reusable workflow references all three
+sibling actions by **full path** `stacklok/mecatl/.github/actions/<name>@<tag>`. GitHub
+**auto-fetches** a `uses:` action from mecatl at that ref, so there is still no consumer
+vendoring and no mecatl checkout in the consumer.
+
+**Hardcoded-ref pinning + the release-process cost.** Expressions are **illegal** in `uses:`,
+so the sibling-action ref must be a **hardcoded literal tag** (`@v0.0.2`), not an expression.
+These are **first-party same-repo** actions, so they pin to the **version tag**, not a SHA:
+the supply-chain SHA-pin rule defends against a *third-party* action whose tag a compromised
+maintainer could re-point, but these live in this repo and are released together — a SHA would
+be impossible to write before the release commit exists (a bootstrap chicken-and-egg) and no
+stronger than the tag (we control both). The cost is real: **every release tag must bump these
+pins in the same tagged commit**, or the tag ships pins pointing at the previous version
+(version skew — a consumer on `@vNEW` would silently run the `vOLD` actions). The
+`lint:reusable-pins` Taskfile target (`.github/actions/check-reusable-pins.sh`) makes that
+mechanical — it asserts every `stacklok/mecatl/.github/actions/*@<tag>` pin equals the current
+release tag, and it runs in CI. (Third-party actions — `checkout`, `upload`/`download-artifact`,
+`create-github-app-token` — stay SHA-pinned with a `# vX.Y.Z` comment per the house set.)
+
+**The publish-token interface (the one real interface decision).** App-token minting is
+consumer-specific (the consumer's own GitHub App id/key), so it cannot be hidden behind a
+default. The reusable workflow accepts **both forms** via `secrets:`, and the consumer wires
+whichever they have:
+
+```yaml
+on:
+  workflow_call:
+    secrets:
+      # Provider keys (all optional — wire the one you use; an undefined secret is the empty
+      # string, which the binary treats as absent).
+      openrouter-key:           { required: false }
+      openai-key:               { required: false }
+      anthropic-key:            { required: false }
+      # Publish token — BOTH forms, all optional:
+      publish-token:            { required: false }   # form 2: a pre-minted token
+      publish-app-id:           { required: false }   # form 1: JIT App-token (stronger)
+      publish-app-private-key:  { required: false }
+```
+
+The `publish` job resolves `GH_TOKEN` in precedence order: a **minted GitHub App installation
+token** (form 1 — the stronger JIT posture, minted in-job when `publish-app-private-key` is
+present) → a **pre-minted `publish-token`** (form 2) → the **standing `GITHUB_TOKEN`** grant
+(form 3, zero-config but a broad standing grant). Form 3 emits a `::warning::` nudging the
+operator toward form 1 or 2. The resolved token is written to `$GITHUB_ENV` (not a step-level
+`env:` on the `uses:` step) because a `$GITHUB_ENV` write reaches a composite action's internal
+step whereas step-level env on a `uses:` step does not — the same delivery rule the LLM key
+follows.
+
+**Form 1 setup (the GitHub App).** Form 1 has no zero-config path because the App is the
+consumer's own: create a GitHub App, grant it **contents: read & write**, **pull-requests:
+read & write**, and **issues: read & write** on the target repo, generate a private key,
+install the App on the repo, then store the App ID in the `publish-app-id` secret and the
+private-key `.pem` in `publish-app-private-key`. The operator walkthrough (the click path) is
+in `docs/usage.md` ("Setting up publish-token Form 1").
+
+**Passthrough inputs vs. escape-hatch-only.** The reusable workflow exposes the per-session
+passthrough knobs (`model`, `default-provider`, `posture`, `max-run-tokens`, `timeout`,
+`openai-base-url`, `guardrails-model`, the `base-branch` + PR-template knobs). It deliberately
+does **not** expose `default-model` (catalog-validated — `model` is the passthrough), `openai`
+(provider is auto-detected from the present key), or `subagent-ask-reviewer` (an autonomous-
+approval capability — a deployment decision better made by editing the action than a workflow
+input). A consumer that needs those vendors the escape-hatch template. Note also that
+`default-provider` only *selects* a provider; the matching provider key must be wired or the
+run fails *"no LLM provider available"* (documented in `docs/usage.md`).
+
+The `@v0.0.2` in the examples above is **illustrative** — a consumer pins the latest released
+tag (an example tag that does not yet exist resolves to GitHub's generic *"workflow not
+found"*, the same surface as the missing org-Actions-access setting).
+
+**Three named provider secrets.** The reusable workflow declares `openrouter-key`,
+`openai-key`, and `anthropic-key` (all `required: false`); the `implement` job sets all three
+at job-level `env:` (`OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`). An
+undefined secret materialises as the **empty string**, which the binary treats as **absent**:
+the provider registry registers a provider only when its key resolves non-empty
+(`internal/app/registry.go` (`providerKey`)), so an empty key is a no-op. A caller therefore
+wires only the provider(s) it uses; the binary auto-detects from the present key, and
+`default-provider` forces it.
+
+**Trigger label/mention are inputs, not repo variables.** A reusable workflow cannot reliably
+read the **caller** repo's `vars.*`, so the trigger label (default `mecatequi`) and comment
+mention (default `@mecatequi`) are `workflow_call` inputs the caller passes.
+
 ## 6. The `/proc`-exfiltration gap — FIXED (the secret-scrubbed agent shell)
 
 This **was** a real environment-exfiltration gap (security review "Finding B"). It is now
@@ -352,10 +483,12 @@ machinery until a conversational use case justifies it.
 
 ## 8. Usage
 
-The operator-facing walkthrough — the action input/output table and the example-workflow
-copy-and-review steps — lives in `docs/usage.md` ("Running mecatequi from GitHub Actions").
-The example workflow itself is `.github/workflows/mecatequi-example.yml`, and its place
-alongside the other workflows is documented in `.github/workflows/README.md`.
+The operator-facing walkthrough — the action input/output table, the reusable-workflow
+caller, and the example-workflow copy-and-review steps — lives in `docs/usage.md` ("Running
+mecatequi from GitHub Actions"). The reusable workflow is
+`.github/workflows/mecatequi-reusable.yml` (the recommended adoption path, §5.1); the
+hand-rolled escape-hatch template is `.github/workflows/mecatequi-example.yml`, and their
+place alongside the other workflows is documented in `.github/workflows/README.md`.
 
 ---
 

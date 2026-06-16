@@ -2258,9 +2258,12 @@ before suspecting the harness.
 `mecatequi` (the single-shot headless runner, `cmd/mecatequi`) runs one prompt against
 an in-process engine and emits a working-tree git diff, a machine-readable summary JSON,
 and an optional durable event log, then exits with a code derived from the run's terminal
-state. A reusable **composite action** and an **example workflow** wire it into GitHub
-Actions safely. The design rationale, the trust model, and the (now fixed) secret-scrubbed
-agent shell live in `docs/design/MECATEQUI.md`; this section is the operator walkthrough.
+state. Two adoption paths wire it into GitHub Actions safely: a **reusable `workflow_call`
+workflow** (the recommended path — a ~15-line caller, no vendored scripts) and a hand-rolled
+**example workflow** (the escape hatch — vendor it when you need to customise the job graph).
+Both build on the same **composite actions**. The design rationale, the trust model, and the
+(now fixed) secret-scrubbed agent shell live in `docs/design/MECATEQUI.md`; this section is
+the operator walkthrough.
 
 > The example workflow is a **template** — copy it into your own repo and review it. This
 > repo does not run it against real issues (no `mecatequi` label, no configured secret).
@@ -2313,9 +2316,138 @@ accepts any model the provider serves.
 `exit-class`, not the raw code — and remember exit 0 is **not** "task accomplished": read
 `stop-reason` and `non-empty-diff` to judge whether real work landed.
 
+### Adopting via the reusable workflow (recommended)
+
+The reusable workflow (`.github/workflows/mecatequi-reusable.yml`, `on: workflow_call`) lets
+a consumer adopt mecatequi with a **thin caller** instead of vendoring the whole
+split-privilege job graph plus the glue scripts. It is the same three jobs
+(`acknowledge` / `implement` / `publish`) with the same per-job permissions, so the token
+boundary is preserved — the agent job holds only the LLM key(s) and no write token; the
+publish job holds the write token and runs no agent code.
+
+A minimal caller in the consuming repo:
+
+```yaml
+name: mecatequi
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+permissions:
+  contents: read
+jobs:
+  mecatequi:
+    uses: stacklok/mecatl/.github/workflows/mecatequi-reusable.yml@v0.0.2
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    secrets:
+      openrouter-key: ${{ secrets.OPENROUTER_CI_TOKEN }}
+      # Publish token — wire ONE form (see the table). The JIT App-token form is strongest:
+      publish-app-id: ${{ secrets.RELEASE_APP_ID }}
+      publish-app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+    with:
+      label: ready-for-agent
+      model: anthropic/claude-sonnet-4.6
+      default-provider: openrouter
+```
+
+The caller grants the workflow the permissions its `publish` job needs (a called workflow's
+token can only be **downgraded** from the caller's grant, never escalated), passes the
+trigger label/mention as **inputs** (a reusable workflow can't reliably read the caller's
+`vars.*`), and wires the secrets it has.
+
+**The caller owns the `on:` triggers.** The reusable workflow declares only
+`on: workflow_call` — it has **no** `issues` / `issue_comment` triggers of its own. The
+caller's own `on:` block (the `issues: [labeled]` + `issue_comment: [created]` in the
+example above) is what actually fires the run; the workflow's `if:` gates then match the
+`label` / `mention` inputs. **Omit or mis-set those triggers and you get total silence** —
+no run, no error — because nothing ever delivers an event to the reusable workflow.
+
+**Pin the latest released tag, not `@v0.0.2`.** The `@v0.0.2` in every example here is
+**illustrative**. Pin the **latest released tag** from the
+[Releases page](https://github.com/stacklok/mecatl/releases) — a `uses:` ref that points at a
+tag which does not exist (e.g. a reader landing between releases) fails with GitHub's generic
+*"workflow not found"* error, which looks like a config bug but is just a stale ref.
+
+**Secrets (`secrets:`)** — all optional; wire only what you use:
+
+| Secret | Purpose |
+|---|---|
+| `openrouter-key` | `OPENROUTER_API_KEY` for the agent job. |
+| `openai-key` | `OPENAI_API_KEY` for the agent job. |
+| `anthropic-key` | `ANTHROPIC_API_KEY` for the agent job. |
+| `publish-app-id` + `publish-app-private-key` | **Form 1 (strongest):** a JIT GitHub App installation token is minted in the publish job — no standing grant. |
+| `publish-token` | **Form 2:** a pre-minted token (e.g. a fine-grained PAT) you manage. |
+| *(none of the three)* | **Form 3:** the publish job falls back to the standing `GITHUB_TOKEN` grant with a `::warning::`. Zero-config, but the weakest form. |
+
+An undefined provider secret is the **empty string**, which the binary treats as **absent**
+(it registers a provider only for a non-empty key), so a caller wires only the provider(s) it
+uses; `default-provider` forces the choice.
+
+**If you set `default-provider`, wire THAT provider's key.** `default-provider` only *selects*
+which provider to use — it does not supply a key. Set `default-provider: openrouter` but wire
+only `openai-key`, and the run fails at startup with *"no LLM provider available"* (the
+selected provider has no key, and the binary will not silently fall back to a different one).
+The pairing is: `default-provider: openrouter` ⇒ `openrouter-key`; `default-provider: openai`
+⇒ `openai-key`; `default-provider: anthropic` ⇒ `anthropic-key`. If you wire exactly one
+provider key and omit `default-provider`, the binary auto-detects it, which is the simplest
+correct setup.
+
+**Setting up publish-token Form 1 (the recommended JIT GitHub App).** Form 1 mints a
+short-lived installation token scoped to exactly this repo — no standing PAT to manage or
+leak. To set it up:
+
+1. **Create a GitHub App** (org or personal): *Settings → Developer settings → GitHub Apps →
+   New GitHub App*. Give it a name; you can leave the homepage/webhook fields blank and
+   **disable the webhook** (the App is used only for token minting, not event delivery).
+2. **Grant repository permissions** — under *Permissions → Repository*, set **Contents:
+   Read and write**, **Pull requests: Read and write**, and **Issues: Read and write**
+   (these are exactly what `publish.sh` needs to push the branch, open the PR, and comment).
+3. **Create a private key** for the App (*General → Private keys → Generate a private key*) —
+   download the `.pem`.
+4. **Install the App** on the target repo (*Install App → choose the repo*). Installation is
+   what scopes the minted token to that repo.
+5. **Wire the two secrets in the consuming repo**: store the App's **App ID** as the
+   `publish-app-id` secret and the **`.pem` contents** as `publish-app-private-key`. The
+   publish job mints the installation token from them in-job.
+
+The minting itself happens inside the reusable workflow's `publish` job (via
+`actions/create-github-app-token`); you only supply the two secrets.
+
+**Inputs (`with:`)** — all optional with sane defaults: `label` (default `mecatequi`),
+`mention` (default `@mecatequi`), `model`, `default-provider`, `posture` (default `auto`),
+`max-run-tokens`, `timeout` (default `15m`), `openai-base-url` (for an OpenAI-compatible
+endpoint), `guardrails-model` (issue #27 checker model; empty disables), `base-branch`,
+`pr-body-template`, `pr-title-template`. The escape-hatch-only knobs (`default-model`,
+`openai`, `subagent-ask-reviewer`) are deliberately **not** exposed by the reusable workflow —
+a consumer that needs them vendors the example template instead.
+
+**Org-access requirement.** Because `stacklok/mecatl` is private, the consuming org must
+allow Actions to use its actions/workflows: **Settings → Actions → General → Access** on
+`stacklok/mecatl` (or `gh api -X PUT
+repos/stacklok/mecatl/actions/permissions/access -f access_level=organization`). No token or
+PAT is configured in the consuming repo — the org setting is the only requirement.
+
+**If that access is NOT enabled, the caller fails with a generic *"workflow not found"* /
+access error** at the `uses:` resolution step — which reads like a typo in your YAML but is
+actually the org setting. The fix is the **Access** setting above, not your caller workflow.
+This is the same surface as the stale-tag failure mode (see "Pin the latest released tag"),
+so check both when a `uses:` ref will not resolve.
+
+**Create the trigger label first** (and set `label` / `mention` if you renamed them) — the
+`labeled` trigger silently never fires for a label that does not exist.
+
+If you need to customise the job graph itself — a custom permission-check gate job, an extra
+approval stage, a different trigger — use the **vendor-the-directory escape hatch** below
+instead.
+
 ### The example workflow (`.github/workflows/mecatequi-example.yml`)
 
-The template is the canonical **split-privilege** pattern — *the step that can write to
+The template is the **escape hatch** — the canonical **split-privilege** pattern you vendor
+and edit when the reusable workflow's fixed job graph is not enough — *the step that can write to
 GitHub never runs agent code; the step that runs agent code never holds a write token* —
 plus an `acknowledge` job that guarantees the issue always carries a trace:
 
@@ -2388,7 +2520,12 @@ under **Settings → Secrets and variables → Actions → Variables**. Both job
 `MECATEQUI_LABEL`, create the new label first (step 3 above — the `labeled` trigger silently
 never fires for a label that does not exist).
 
-### Adopting mecatequi in another repo
+### Adopting mecatequi in another repo (by tag, without the reusable workflow)
+
+> Most consumers should use the **reusable workflow** ("Adopting via the reusable workflow
+> (recommended)" above) — a thin caller, no vendored scripts. This subsection covers the
+> lower-level path of referencing the **composite action** by tag directly, for a workflow
+> you hand-roll yourself.
 
 The example workflow vendors the action (copies `.github/actions/mecatequi/` into your
 repo). To instead **reference mecatl's published action by tag** — no vendored copy — point

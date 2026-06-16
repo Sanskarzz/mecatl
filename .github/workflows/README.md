@@ -1,9 +1,11 @@
 # GitHub Actions workflows for mecatl
 
-Four workflows live here. Every third-party action is **SHA-pinned** with a
+Seven workflows live here. Every **third-party** action is **SHA-pinned** with a
 `# vX.Y.Z` comment so a re-pointed tag from a compromised maintainer cannot
 silently change what runs. Pins track the Stacklok house set used in
-`a downstream consumer`.
+`a downstream consumer`. The lone exception is documented and deliberate: the reusable
+`mecatequi-reusable.yml` references its **first-party same-repo** sibling actions
+by **version tag** (`@v0.0.2`), not a SHA — see that section.
 
 ## `ci.yml` — push to `main` + every pull request
 
@@ -19,7 +21,7 @@ superseded runs cancelled via `concurrency`):
 |-----|--------------|
 | `build` | `go build ./...` |
 | `test` | `go test -race ./...` |
-| `lint` | `golangci-lint` (v2) + `go vet ./...` |
+| `lint` | `golangci-lint` (v2) + `go vet ./...` + `actionlint` (workflow lint, pinned via `go run`) + the reusable-workflow pin check + the mecatequi composite-action shell tests |
 | `fuzz-smoke` | `task fuzz FUZZTIME=20s` — short coverage-guided pass over the security-critical parsers (not the nightly deep fuzz) |
 
 Go is provisioned by `actions/setup-go` from `go.mod` with the module cache
@@ -213,7 +215,44 @@ added), reuses the digest already captured, and stores a verifiable provenance
 attestation with the image — no separate, separately-versioned reusable workflow
 with its own permission/secrets contract. See <https://slsa.dev/>.
 
-## `mecatequi-example.yml` — EXAMPLE / TEMPLATE (not run in this repo)
+## `mecatequi-reusable.yml` — reusable `workflow_call` (the recommended adoption path)
+
+The **reusable workflow** a consumer adopts mecatequi with — a ~15-line caller
+instead of vendoring the whole split-privilege job graph plus the glue scripts
+(which would drift from mecatl over time). Not triggered directly here; it is
+called via `uses: stacklok/mecatl/.github/workflows/mecatequi-reusable.yml@<tag>`.
+
+Same three jobs as the example (`acknowledge` / `implement` / `publish`) with the
+same per-job permissions, so the **token boundary** is preserved — the agent job
+holds only the LLM key(s) and no write token; the publish job holds the write
+token and runs no agent code. A reusable workflow keeps per-job `permissions:`,
+which a single composite action cannot.
+
+It calls three **sibling composite actions** by **full path** —
+`stacklok/mecatl/.github/actions/mecatequi-extract-prompt`, `…/mecatequi`, and
+`…/mecatequi-publish` — because inside a `workflow_call` workflow a
+`uses: ./.github/actions/…` (and any `run:` script) resolves to the **caller's**
+checkout, not mecatl's; a full-path `uses:` is auto-fetched from mecatl instead.
+Expressions are illegal in `uses:`, so those refs are **hardcoded version tags**
+(`@v0.0.2`). These are first-party same-repo actions released together, so a tag —
+not a SHA — is correct (the SHA-pin rule defends against third-party tag
+re-pointing; we control both ends). **The release-process cost:** every tag must
+bump these pins in the same tagged commit, or the tag ships pins pointing at the
+previous version. `task lint:reusable-pins`
+(`.github/actions/check-reusable-pins.sh`) asserts this mechanically, and CI runs
+it. The third-party actions (`checkout`, `upload`/`download-artifact`,
+`create-github-app-token`) stay SHA-pinned per the house set.
+
+The **publish token** is the one consumer-specific interface: the workflow accepts
+both a pre-minted `publish-token` and GitHub App creds (`publish-app-id` +
+`publish-app-private-key`, the stronger JIT form) via `secrets:`, falling back to
+the standing `GITHUB_TOKEN` with a `::warning::`. The three provider keys
+(`openrouter-key` / `openai-key` / `anthropic-key`) are also `secrets:` (an
+undefined one is the empty string, treated as absent). Full operator walkthrough:
+`docs/usage.md` ("Adopting via the reusable workflow"); design + rationale:
+`docs/design/MECATEQUI.md` §5.1.
+
+## `mecatequi-example.yml` — EXAMPLE / TEMPLATE (the escape hatch; not run in this repo)
 
 A **template**, not a live workflow: there is no `mecatequi` label and no secret
 configured here, so the file is inert in this repo. It is the canonical
@@ -232,10 +271,14 @@ code; the step that runs agent code never holds a write token*:
 | `implement` | `contents: read` (NO write, NO id-token) | Builds `mecatequi` from source, extracts the UNTRUSTED prompt via `jq` over `$GITHUB_EVENT_PATH` into a file (never an inline `${{ }}`), runs the agent with `--untrusted-prompt` + `--posture auto`, uploads the patch + summary + event log. Its only secret is the LLM key. |
 | `publish` | `contents: write` + `pull-requests: write` + `issues: write` | Downloads the artifacts and applies the patch as DATA (`git apply`) → branch → commit → PR, or posts an honest failure comment on a non-clean run. Runs NO agent output as code. |
 
-The reusable composite action lives at `.github/actions/mecatequi/` (its three helper
-scripts — `extract-prompt.sh`, `author-gate.sh`, `publish.sh` — pass every event-derived
-value via `env:`, never argv). Full design + the trust model + the `/proc`-exfiltration
-follow-up: `docs/design/MECATEQUI.md`; the operator walkthrough: `docs/usage.md`.
+Three composite actions back both adoption paths: `.github/actions/mecatequi/` (build + run
+the binary), `.github/actions/mecatequi-extract-prompt/` (wraps `extract-prompt.sh`), and
+`.github/actions/mecatequi-publish/` (wraps `publish.sh`). The two glue scripts live inside
+their wrapper actions as their single home (so the reusable workflow can reach them by full
+path); `author-gate.sh` stays under `.github/actions/mecatequi/` as an example-only
+defense-in-depth illustration. Every event-derived value crosses via `env:`/inputs, never
+argv. Full design + the trust model + the `/proc`-exfiltration follow-up:
+`docs/design/MECATEQUI.md`; the operator walkthrough: `docs/usage.md`.
 
 ## References
 
