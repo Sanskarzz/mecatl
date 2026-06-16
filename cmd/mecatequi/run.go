@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -283,15 +285,25 @@ func resolvePath(p string) string {
 	return abs
 }
 
-// gitDiffPatch computes the working-tree diff of the workspace as a unified patch. It
-// returns the patch bytes, whether the diff is NON-EMPTY, and an error. The git
-// environment is SCRUBBED via gitenv.Scrub(os.Environ()) so no inherited GIT_* danger
-// (GIT_EXTERNAL_DIFF, GIT_SSH_COMMAND, a stale GIT_CONFIG_*) influences the diff.
+// gitDiffPatch computes the working-tree diff of the workspace as a unified patch that,
+// applied to a clean checkout of HEAD, reproduces ALL of the run's changes — modified,
+// ADDED, and deleted files. It returns the patch bytes, whether the diff is NON-EMPTY,
+// and an error. The git environment is SCRUBBED via gitenv.Scrub(os.Environ()) so no
+// inherited GIT_* danger (GIT_EXTERNAL_DIFF, GIT_SSH_COMMAND, a stale GIT_CONFIG_*)
+// influences the diff, and every git call carries --no-ext-diff so no repo-named
+// external diff driver runs.
 //
-// It runs `git diff HEAD` so both tracked-file edits and staged changes are captured
-// relative to the last commit; untracked files are reported via a follow-up
-// status-porcelain check folded into the non-empty signal (a brand-new file the run
-// created should count as a change even though `git diff` alone would miss it).
+// `git diff HEAD` alone OMITS untracked (new) files — it only shows tracked edits and
+// deletions. A downstream `git apply` of that patch would silently LOSE the agent's new
+// files. To include them WITHOUT mutating the workspace index or working tree (the
+// operator may care about both), we enumerate untracked, non-ignored files via
+// `git ls-files --others --exclude-standard` (so .gitignore is honoured) and append a
+// `git diff --no-index -- /dev/null <file>` new-file hunk for each. The --no-index form
+// touches no index and yields a proper `new file mode` diff that `git apply` accepts; it
+// exits 1 when a difference exists (always, for a new file), which is NOT an error here.
+//
+// non_empty and diff_bytes therefore AGREE: a single new untracked file makes the patch
+// non-empty (it contains that file's full content), so len(patch)>0 and nonEmpty=true.
 //
 // A non-git workspace is a SETUP error (the caller maps it to exit 2): mecatequi's
 // contract is to report the diff a run produced, which requires a git repo.
@@ -307,32 +319,109 @@ func gitDiffPatch(ctx context.Context, workspace string) (patch []byte, nonEmpty
 		return nil, false, fmt.Errorf("workspace %q is not a git repository: %v: %s", workspace, cerr, strings.TrimSpace(string(out)))
 	}
 
-	// --no-ext-diff disables ANY external diff driver: belt (the scrubbed env already
-	// neutralises GIT_EXTERNAL_DIFF and forces diff.external empty) and braces (an
-	// empty diff.external would otherwise make git try to exec "" — "cannot run : No
-	// such file or directory" — the moment there is a real tracked-file change to
-	// render). It is also the correct hardening: never run a repo-named diff driver.
-	diff := exec.CommandContext(ctx, "git", "diff", "--no-ext-diff", "HEAD")
-	diff.Dir = workspace
-	diff.Env = env
-	out, derr := diff.Output()
+	var buf bytes.Buffer
+
+	// (1) Tracked changes (modifications + deletions) relative to HEAD. --no-ext-diff
+	// disables any external diff driver (belt: the scrubbed env forces diff.external
+	// empty; braces: an empty diff.external would make git try to exec "" the moment
+	// there is a real change to render — and it is the correct hardening regardless).
+	tracked := exec.CommandContext(ctx, "git", "diff", "--no-ext-diff", "HEAD")
+	tracked.Dir = workspace
+	tracked.Env = env
+	trackedOut, derr := tracked.Output()
 	if derr != nil {
 		return nil, false, fmt.Errorf("git diff HEAD in %q: %w", workspace, derr)
 	}
-	patch = out
-	nonEmpty = len(strings.TrimSpace(string(out))) > 0
+	buf.Write(trackedOut)
 
-	// Fold untracked files into the non-empty signal: a run that created a NEW file
-	// (not yet added) is a real change `git diff HEAD` would not show.
-	if !nonEmpty {
-		status := exec.CommandContext(ctx, "git", "status", "--porcelain")
-		status.Dir = workspace
-		status.Env = env
-		if sout, serr := status.Output(); serr == nil {
-			nonEmpty = len(strings.TrimSpace(string(sout))) > 0
+	// (2) Untracked, non-ignored files as new-file hunks, so applying the patch
+	// reproduces the agent's NEW files too. --exclude-standard honours .gitignore (and
+	// .git/info/exclude); -z gives NUL-separated paths robust to spaces/newlines.
+	others := exec.CommandContext(ctx, "git", "ls-files", "--others", "--exclude-standard", "-z")
+	others.Dir = workspace
+	others.Env = env
+	othersOut, oerr := others.Output()
+	if oerr != nil {
+		return nil, false, fmt.Errorf("git ls-files --others in %q: %w", workspace, oerr)
+	}
+	for _, f := range splitNUL(othersOut) {
+		hunk, herr := untrackedFileHunk(ctx, workspace, env, f)
+		if herr != nil {
+			return nil, false, herr
+		}
+		buf.Write(hunk)
+	}
+
+	patch = buf.Bytes()
+	nonEmpty = len(bytes.TrimSpace(patch)) > 0
+	return patch, nonEmpty, nil
+}
+
+// untrackedFileHunk renders one untracked file as a `new file` diff hunk via
+// `git diff --no-index -- /dev/null <file>`, which touches no index. That form exits
+// with status 1 when the two inputs differ — which is the case for a real new file —
+// so its stdout is the new-file hunk.
+//
+// CWE-754: `git diff --no-index` ALSO exits 1 with EMPTY stdout and a diagnostic on
+// stderr when it cannot read the path — e.g. an untracked symlink to a directory, or a
+// file removed mid-run (TOCTOU). Treating that as success would silently DROP the file
+// and under-report the diff (the dishonesty class we are eliminating). So exit-1 is
+// classified by classifyNoIndexExit1: non-empty stdout is the real hunk; empty stdout
+// is a git error that is PROPAGATED (the run surfaces an honest failure rather than a
+// short patch). Exit code 0 (no difference) yields nothing; any other code is an error.
+func untrackedFileHunk(ctx context.Context, workspace string, env []string, file string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", "diff", "--no-ext-diff", "--no-index", "--", "/dev/null", file)
+	cmd.Dir = workspace
+	cmd.Env = env
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err == nil {
+		return out, nil // exit 0 == no difference (e.g. an empty file vs /dev/null) — nothing to add
+	}
+	if hunk, ok := classifyNoIndexExit1(out, err); ok {
+		return hunk, nil
+	}
+	return nil, fmt.Errorf("git diff --no-index for untracked %q in %q: %w%s", file, workspace, err, stderrSuffix(stderr.Bytes()))
+}
+
+// classifyNoIndexExit1 decides whether a non-nil error from `git diff --no-index`
+// represents the SUCCESS path (a real new-file hunk) or must be propagated.
+//
+// It returns (hunk, true) ONLY for the genuine "inputs differ" case: an ExitError with
+// code exactly 1 AND non-empty stdout (the diff). An exit-1 with EMPTY stdout (git could
+// not access the path — CWE-754) returns (nil, false) so the caller propagates it; so
+// does any non-1 exit code or a non-ExitError failure. Factored out so the exit-code
+// classification is unit-testable without a flaky OS-level trigger.
+func classifyNoIndexExit1(stdout []byte, err error) ([]byte, bool) {
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 && len(stdout) > 0 {
+		return stdout, true
+	}
+	return nil, false
+}
+
+// stderrSuffix renders captured git stderr as a trailing detail for an error message,
+// trimmed and prefixed; empty stderr yields no suffix.
+func stderrSuffix(stderr []byte) string {
+	s := strings.TrimSpace(string(stderr))
+	if s == "" {
+		return ""
+	}
+	return ": " + s
+}
+
+// splitNUL splits a NUL-separated, NUL-terminated byte slice (git -z output) into its
+// non-empty elements.
+func splitNUL(b []byte) []string {
+	parts := strings.Split(string(b), "\x00")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
 		}
 	}
-	return patch, nonEmpty, nil
+	return out
 }
 
 // formatEvent renders one event as a single human-readable log line, mirroring

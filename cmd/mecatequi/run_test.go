@@ -53,6 +53,24 @@ func initTestRepo(t *testing.T, dir string) {
 	run("commit", "-q", "-m", "initial commit")
 }
 
+// gitInRepo runs one git command in dir with the hermetic, leak-free identity/env (the
+// same as initTestRepo), failing the test on a non-zero exit. It is the test-only git
+// driver for the round-trip and gitignore assertions.
+func gitInRepo(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
 // TestRunEndToEndMockProvider is the model-facing e2e: a full app.Build over a
 // hermetic git repo with UseMock, then run() against the real Service. It asserts the
 // run completes cleanly (end_turn), leaves no diff, carries a usage struct, writes a
@@ -499,8 +517,10 @@ func TestRealMainCollidingOutputsIsSetupFailure(t *testing.T) {
 	}
 }
 
-// TestGitDiffPatchUntrackedFile proves a NEW untracked file makes nonEmpty true even
-// though `git diff HEAD` patch bytes are empty (the status-porcelain fold).
+// TestGitDiffPatchUntrackedFile proves a NEW untracked file is included in the patch
+// with its FULL CONTENT (not merely folded into the non-empty bool) — the FIX-A
+// regression guard: the prior `git diff HEAD` path emitted an empty patch for a new
+// file, which a downstream `git apply` would silently lose.
 func TestGitDiffPatchUntrackedFile(t *testing.T) {
 	repo := t.TempDir()
 	initTestRepo(t, repo)
@@ -511,11 +531,98 @@ func TestGitDiffPatchUntrackedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gitDiffPatch: %v", err)
 	}
-	if strings.TrimSpace(string(patch)) != "" {
-		t.Errorf("git diff HEAD should be empty for an untracked file; got %q", patch)
-	}
 	if !nonEmpty {
-		t.Error("an untracked file must fold into nonEmpty=true")
+		t.Error("an untracked file must yield nonEmpty=true")
+	}
+	if !strings.Contains(string(patch), "new file mode") {
+		t.Errorf("patch must carry a new-file hunk for the untracked file; got:\n%s", patch)
+	}
+	if !strings.Contains(string(patch), "brand new") {
+		t.Errorf("patch must carry the untracked file's CONTENT; got:\n%s", patch)
+	}
+	if !strings.Contains(string(patch), "new.txt") {
+		t.Errorf("patch must name the untracked file; got:\n%s", patch)
+	}
+}
+
+// TestGitDiffPatchIgnoredFileExcluded proves a .gitignore'd untracked file is NOT
+// dumped into the patch (the --exclude-standard guarantee).
+func TestGitDiffPatchIgnoredFileExcluded(t *testing.T) {
+	repo := t.TempDir()
+	initTestRepo(t, repo)
+	gitInRepo(t, repo, "config", "core.excludesFile", "/dev/null") // isolation
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("secret.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitInRepo(t, repo, "add", ".gitignore")
+	gitInRepo(t, repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "ignore")
+	if err := os.WriteFile(filepath.Join(repo, "secret.txt"), []byte("DO NOT LEAK\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	patch, _, err := gitDiffPatch(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("gitDiffPatch: %v", err)
+	}
+	if strings.Contains(string(patch), "DO NOT LEAK") || strings.Contains(string(patch), "secret.txt") {
+		t.Errorf("an ignored file must NOT appear in the patch; got:\n%s", patch)
+	}
+}
+
+// TestGitDiffPatchRoundTripAppliesAllChanges is the real oracle: it makes all three
+// kinds of change in a temp repo — (1) a NEW untracked file, (2) a MODIFIED tracked
+// file, (3) a DELETED tracked file — captures the patch via gitDiffPatch, then applies
+// it onto a SEPARATE clean checkout of HEAD and asserts every change is reproduced with
+// correct content. This is what would have caught FIX A (the empty patch losing new
+// files).
+func TestGitDiffPatchRoundTripAppliesAllChanges(t *testing.T) {
+	repo := t.TempDir()
+	initTestRepo(t, repo) // commits f.txt = "hello\n"
+	// Add a second tracked file we will DELETE.
+	if err := os.WriteFile(filepath.Join(repo, "doomed.txt"), []byte("delete me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitInRepo(t, repo, "add", "doomed.txt")
+	gitInRepo(t, repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "add doomed")
+
+	// (1) NEW untracked file, (2) MODIFY f.txt, (3) DELETE doomed.txt.
+	if err := os.WriteFile(filepath.Join(repo, "added.txt"), []byte("ADDED LINE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("MODIFIED LINE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(repo, "doomed.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	patch, nonEmpty, err := gitDiffPatch(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("gitDiffPatch: %v", err)
+	}
+	if !nonEmpty || len(patch) == 0 {
+		t.Fatalf("expected a non-empty patch; nonEmpty=%v len=%d", nonEmpty, len(patch))
+	}
+	if !strings.Contains(string(patch), "ADDED LINE") {
+		t.Errorf("patch missing the new file's content:\n%s", patch)
+	}
+
+	// Apply the patch onto a SEPARATE clean clone of HEAD and verify all three changes.
+	clean := t.TempDir()
+	gitInRepo(t, repo, "clone", "-q", repo, clean)
+	patchPath := filepath.Join(t.TempDir(), "run.patch")
+	if err := os.WriteFile(patchPath, patch, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitInRepo(t, clean, "apply", patchPath)
+
+	if got, _ := os.ReadFile(filepath.Join(clean, "added.txt")); string(got) != "ADDED LINE\n" {
+		t.Errorf("added file not reproduced: %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(clean, "f.txt")); string(got) != "MODIFIED LINE\n" {
+		t.Errorf("modified file not reproduced: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(clean, "doomed.txt")); !os.IsNotExist(err) {
+		t.Errorf("deleted file should be gone after apply; stat err=%v", err)
 	}
 }
 
@@ -523,6 +630,88 @@ func TestGitDiffPatchUntrackedFile(t *testing.T) {
 func TestGitDiffPatchNotAGitRepo(t *testing.T) {
 	if _, _, err := gitDiffPatch(context.Background(), t.TempDir()); err == nil {
 		t.Fatal("gitDiffPatch(non-repo): want error, got nil")
+	}
+}
+
+// exit1Err runs a process that exits with status 1, returning the resulting
+// *exec.ExitError, so a test can exercise classifyNoIndexExit1 with a genuine exit-1
+// error value (rather than constructing one by hand).
+func exit1Err(t *testing.T) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", "exit 1").Run()
+	if err == nil {
+		t.Fatal("expected a non-nil error from `sh -c 'exit 1'`")
+	}
+	return err
+}
+
+// TestClassifyNoIndexExit1 unit-tests the CWE-754 guard's classification: exit-1 with
+// content is the new-file hunk (success); exit-1 with EMPTY stdout (git could not
+// access the path) is NOT a hunk and must be propagated; a no-difference (nil err) is
+// not classified as a hunk here (the caller handles exit 0 separately).
+func TestClassifyNoIndexExit1(t *testing.T) {
+	e1 := exit1Err(t)
+
+	if hunk, ok := classifyNoIndexExit1([]byte("diff --git a/x b/x\nnew file\n"), e1); !ok || len(hunk) == 0 {
+		t.Errorf("exit-1 + content must be the success hunk; ok=%v len=%d", ok, len(hunk))
+	}
+	if _, ok := classifyNoIndexExit1(nil, e1); ok {
+		t.Error("exit-1 + EMPTY stdout must NOT be classified as a hunk (CWE-754: propagate it)")
+	}
+	if _, ok := classifyNoIndexExit1([]byte{}, e1); ok {
+		t.Error("exit-1 + zero-length stdout must NOT be classified as a hunk")
+	}
+	// A nil error (exit 0) is not the exit-1 success path either.
+	if _, ok := classifyNoIndexExit1([]byte("anything"), nil); ok {
+		t.Error("a nil error must not be classified as the exit-1 hunk path")
+	}
+}
+
+// TestGitDiffPatchUnreadableUntrackedPropagates is the real OS-level trigger for the
+// CWE-754 fix: an untracked SYMLINK pointing to a directory makes
+// `git diff --no-index -- /dev/null <link>` exit 1 with EMPTY stdout and an
+// "error: Could not access" on stderr. The pre-fix code would silently drop it (and
+// under-report the diff); gitDiffPatch must now PROPAGATE an error rather than emit a
+// short patch. A normal new file in the SAME repo still produces its hunk (the happy
+// path is unchanged).
+func TestGitDiffPatchUnreadableUntrackedPropagates(t *testing.T) {
+	repo := t.TempDir()
+	initTestRepo(t, repo)
+
+	// A genuine new file (the happy path that must keep working).
+	if err := os.WriteFile(filepath.Join(repo, "real.txt"), []byte("REAL NEW FILE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// An untracked symlink -> directory: git cannot access "<link>/null" and exits 1
+	// with empty stdout. ls-files --others lists the symlink, so gitDiffPatch reaches it.
+	if err := os.Mkdir(filepath.Join(repo, "target_dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target_dir", filepath.Join(repo, "dirlink")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	_, _, err := gitDiffPatch(context.Background(), repo)
+	if err == nil {
+		t.Fatal("gitDiffPatch must PROPAGATE the unreadable-untracked error, not silently drop the file (CWE-754)")
+	}
+	if !strings.Contains(err.Error(), "dirlink") {
+		t.Errorf("error should name the offending path; got: %v", err)
+	}
+
+	// Sanity: with ONLY the genuine new file (no dir-symlink), the happy path produces
+	// the hunk and no error — proving the guard didn't break normal new files.
+	clean := t.TempDir()
+	initTestRepo(t, clean)
+	if err := os.WriteFile(filepath.Join(clean, "real.txt"), []byte("REAL NEW FILE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	patch, nonEmpty, perr := gitDiffPatch(context.Background(), clean)
+	if perr != nil {
+		t.Fatalf("a normal new file must NOT error: %v", perr)
+	}
+	if !nonEmpty || !strings.Contains(string(patch), "REAL NEW FILE") {
+		t.Errorf("a normal new file must still produce its hunk; nonEmpty=%v patch=%q", nonEmpty, patch)
 	}
 }
 

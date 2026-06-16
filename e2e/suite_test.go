@@ -132,6 +132,7 @@ var _ = ginkgo.Describe("mecatl live e2e", ginkgo.Ordered, ginkgo.Serial, ginkgo
 	approveAfterKillSpecs()
 	snapshotFidelitySpecs()
 	verdictReplaySpecs()
+	mecatequiSpecs()
 })
 
 // runScenario drives one prompt and fails the spec (with the full failure
