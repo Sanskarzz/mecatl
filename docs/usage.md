@@ -2259,7 +2259,9 @@ The action acquires the binary (v1: builds it from the checked-out source with t
 Go toolchain — there is no released asset yet), runs it with `--untrusted-prompt` by
 default, captures the exit code **without failing the step**, and exposes the result as
 outputs. The LLM key is **not** an input: the binary reads provider secrets from the
-environment, so the caller sets `OPENAI_API_KEY` in the step `env`.
+environment, so the caller sets `OPENAI_API_KEY` in the calling **job**'s `env` (job-level,
+not step-level — step `env:` on a `uses:` step does not reach a composite action's internal
+steps; job `env:` does).
 
 **Inputs → flags:**
 
@@ -2298,7 +2300,9 @@ GitHub never runs agent code; the step that runs agent code never holds a write 
   `author-gate.sh` (re-asserts `author_association ∈ {OWNER, MEMBER, COLLABORATOR}`) →
   `extract-prompt.sh` writes the **untrusted** issue/comment text into a file via `jq`
   over `$GITHUB_EVENT_PATH` (never an inline `${{ }}`) → `uses: ./.github/actions/mecatequi`
-  with `OPENAI_API_KEY` as the **only** secret → upload-artifact the patch/summary/events.
+  with `OPENAI_API_KEY` as the **only** secret, delivered at **job** level (step `env:` on a
+  `uses:` step would not reach the composite's internal steps) → upload-artifact the
+  patch/summary/events.
 - **`publish`** (`needs: implement`; `contents: write` + `pull-requests: write` +
   `issues: write`): download-artifact → `publish.sh` applies the patch as **data**
   (`git apply`) → branch → commit → PR, or posts an honest failure comment on a non-clean

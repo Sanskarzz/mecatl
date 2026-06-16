@@ -18,9 +18,12 @@
 # the result. See docs/design/MECATEQUI.md.
 #
 # THE LLM KEY IS NOT AN INPUT. mecatequi reads provider secrets from the ENVIRONMENT
-# (e.g. OPENAI_API_KEY), never from a flag — so the caller sets the key in the step env,
-# not as an action input. A secret routed through an action input would be eligible to
-# leak into logs; the env path keeps it out of the inputs surface entirely.
+# (e.g. OPENAI_API_KEY), never from a flag — so the caller sets the key in the calling
+# JOB's env, not as an action input. It MUST be job-level (not step-level on the `uses:`
+# step): step-level env on a `uses:` step does NOT propagate into a composite action's
+# internal steps, whereas job-level env (the shared $GITHUB_ENV store) does. A secret
+# routed through an action input would be eligible to leak into logs; the env path keeps
+# it out of the inputs surface entirely.
 #
 # DISTRIBUTION (v1: build-from-source). There is no published mecatequi release asset
 # today (release.yml ships only the mecated container image), so this action provisions

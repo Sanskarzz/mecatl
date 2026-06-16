@@ -1,15 +1,20 @@
 # ════════════════════════════════════════════════════════════════════════════════════
-# EXAMPLE / TEMPLATE — copy into your repo and review; this repo does not run it against
-# real issues. There is NO 'mecatequi' label and no secret configured in this repo, so
-# this file is inert here. It is the canonical SPLIT-PRIVILEGE two-job pattern for running
-# mecatequi from GitHub Actions safely. Read docs/design/MECATEQUI.md before enabling it.
+# mecatequi — the LIVE workflow for THIS repo (mecatl). Private repo, internal posture.
+#
+# To run it: label an issue `mecatequi`, OR comment `@mecatequi` on an issue. The agent
+# runs a single-shot mecatequi pass over the issue text (untrusted, posture:auto) against
+# OpenRouter, and the publish job opens a PR (or posts an honest comment) with the result.
+#
+# Unlike .github/workflows/mecatequi-example.yml (the inert template), this file is REAL:
+# it is wired to this repo's OPENROUTER_API_KEY secret and runs against this repo's issues.
+# It keeps the same split-privilege two-job structure as the template.
 # ════════════════════════════════════════════════════════════════════════════════════
 #
 # THE TOKEN BOUNDARY INVARIANT (the whole point):
 #   - The `implement` job RUNS THE AGENT but holds NO GitHub write token (contents: read,
-#     no id-token, no write). Its only secret is the LLM key. If the agent is hijacked by
-#     a prompt-injection in untrusted issue text, the blast radius is the rotatable LLM
-#     key — it cannot push code, open PRs, or comment.
+#     no id-token, no write). Its only secret is the LLM key (OPENROUTER_API_KEY). If the
+#     agent is hijacked by a prompt-injection in untrusted issue text, the blast radius is
+#     the rotatable LLM key — it cannot push code, open PRs, or comment.
 #   - The `publish` job HOLDS THE WRITE TOKEN but RUNS NO AGENT CODE. It only applies the
 #     produced patch as DATA (git apply) and posts the summary as text.
 # The step that can write to GitHub never runs agent code; the step that runs agent code
@@ -19,8 +24,13 @@
 # run: body or as an argv token. extract-prompt.sh reads $GITHUB_EVENT_PATH with jq into a
 # file; the file reaches the binary via --prompt-file; the binary fences it. Every event-
 # derived value (author_association, issue number, paths) crosses via env:, never inline.
+#
+# KEY DELIVERY: the LLM key is delivered at the implement JOB's env: level, NOT on the
+# `uses:` step. Step-level env on a `uses:` step does NOT propagate into a composite
+# action's internal steps; the composite reads the key from the process environment, so it
+# MUST be job-level.
 
-name: mecatequi (EXAMPLE)
+name: mecatequi
 
 on:
   issues:
@@ -47,9 +57,9 @@ jobs:
     # 'mecatequi' label; the comment path requires a '@mecatequi' mention AND that the
     # comment is on an ISSUE, not a PR (issue_comment fires on PR comments too, where the
     # "issue" is the PR — running the agent against PR text with a nonsensical
-    # `Closes #<PR>` is wrong). Either way the actor must be OWNER/MEMBER/COLLABORATOR — a
-    # drive-by issue from a random account never starts the job. author-gate.sh re-asserts
-    # the association inside the job.
+    # `Closes #<PR>` is wrong). Either way the actor must be OWNER/MEMBER/COLLABORATOR.
+    # This is a PRIVATE, owner-internal repo, but the gate stays as defense in depth.
+    # author-gate.sh re-asserts the association inside the job.
     if: >-
       (
         github.event_name == 'issues' &&
@@ -61,16 +71,16 @@ jobs:
         contains(github.event.comment.body, '@mecatequi') &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
       )
-    # NO write, NO id-token. The only secret is the LLM key, injected at JOB level below.
+    # NO write, NO id-token. The only secret is the LLM key.
     permissions:
       contents: read
     # The LLM key MUST be delivered at JOB level, not on the `uses:` step that invokes the
-    # composite action. STEP-LEVEL `env:` set on a `uses:` step does NOT propagate into a
-    # composite action's internal steps, but JOB-level env (the shared $GITHUB_ENV store)
-    # does — and the composite reads the key from the process environment, never an input.
-    # Scoped to THIS (implement) job ONLY — the publish job must never see the LLM key.
+    # composite action. STEP-LEVEL env on a `uses:` step does NOT propagate into a composite
+    # action's internal steps, but JOB-level env does — and the composite reads the key from
+    # the process environment, never an input. Scoped to THIS (implement) job ONLY — the
+    # publish job must never see the LLM key.
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     steps:
       # Pin to the IMMUTABLE event SHA so the tree the agent diffs against is exactly the
       # tree `publish` later applies the patch onto — the default branch tip can move
@@ -105,6 +115,10 @@ jobs:
           prompt-file: ${{ runner.temp }}/prompt.txt
           untrusted: "true"
           posture: "auto"
+          default-provider: "openrouter"
+          default-model: "anthropic/claude-3.5-haiku"
+          max-run-tokens: "150000"
+          timeout: "15m"
 
       - name: Upload run artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
