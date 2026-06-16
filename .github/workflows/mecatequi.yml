@@ -112,8 +112,12 @@ jobs:
           prompt-file: ${{ runner.temp }}/prompt.txt
           untrusted: "true"
           posture: "auto"
+          # Use `model` (per-session passthrough), NOT `default-model`: a deployment
+          # default is validated against the embedded models.dev catalog at startup, and
+          # claude-sonnet-4.6 is newer than that snapshot (it would fail "not catalogued").
+          # The passthrough `--model` path runs any provider model the account can reach.
           default-provider: "openrouter"
-          default-model: "anthropic/claude-sonnet-4.6"
+          model: "anthropic/claude-sonnet-4.6"
           max-run-tokens: "150000"
           timeout: "15m"
 
