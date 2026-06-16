@@ -42,6 +42,7 @@ import (
 	"github.com/stacklok/mecatl/engine/tool"
 	"github.com/stacklok/mecatl/internal/adapter/agents"
 	"github.com/stacklok/mecatl/internal/adapter/dream"
+	"github.com/stacklok/mecatl/internal/adapter/envscrub"
 	"github.com/stacklok/mecatl/internal/adapter/forker"
 	"github.com/stacklok/mecatl/internal/adapter/gitenv"
 	"github.com/stacklok/mecatl/internal/adapter/grpcdriver"
@@ -3084,7 +3085,17 @@ func buildCommandRunner(cfg Config) tool.CommandRunner {
 	if cfg.NoBash || cfg.Shell == "" {
 		return nil
 	}
-	runner, err := osfs.NewCommandRunnerShell(cfg.Workspace, cfg.Shell)
+	// SECRET SCRUB (security review "Finding B"): the main-session Bash child must
+	// NOT see the harness's provider/auth credentials, or under posture auto/yolo a
+	// (possibly prompt-injected) agent can `echo $OPENROUTER_API_KEY` /
+	// `cat /proc/self/environ` and exfiltrate them via a tool result or a committed
+	// file. envscrub.Scrub drops exactly the credential vars the harness reads (plus
+	// secret-shaped names) while keeping PATH/HOME/GOPATH/… so the toolchain still
+	// builds. Unlike the hardened runners, the main runner is NOT git-neutralised
+	// (gitenv) — the operator's own hooks/pager are honoured here, only the secrets
+	// are removed.
+	env := envscrub.Scrub(os.Environ())
+	runner, err := osfs.NewCommandRunnerShell(cfg.Workspace, cfg.Shell, osfs.WithCommandEnvList(env))
 	if err != nil {
 		cfg.diag().Log(context.Background(), port.LevelWarn, "could not build command runner; Bash tool disabled", "workspace", cfg.Workspace, "err", err)
 		return nil
@@ -3185,7 +3196,11 @@ func buildForceCopyRunner(cfg Config) tool.CommandRunner {
 // hardening rationale). It assumes the caller already applied the NoBash/empty-shell
 // (and, where applicable, trust) gates.
 func newHardenedCommandRunner(cfg Config) tool.CommandRunner {
-	env := gitenv.Scrub(os.Environ())
+	// SECRET SCRUB then GIT NEUTRALISE: drop the harness credentials first
+	// (envscrub — "Finding B"; gitenv only ever removed GIT_*/PAGER, never secrets),
+	// then layer the git-neutralising env on the secret-free base so a sandboxed
+	// child sees neither the operator's secrets nor an untrusted repo's git hooks.
+	env := gitenv.Scrub(envscrub.Scrub(os.Environ()))
 	runner, err := osfs.NewCommandRunnerShell(cfg.Workspace, cfg.Shell, osfs.WithCommandEnvList(env))
 	if err != nil {
 		cfg.diag().Log(context.Background(), port.LevelWarn, "could not build sandboxed member command runner; team-member Bash disabled", "workspace", cfg.Workspace, "err", err)
@@ -4382,8 +4397,10 @@ func gitSnapshot(workspace, shell string, trustProject bool) string {
 		return ""
 	}
 	// Harden the runner with the scrubbed git env (same pattern as
-	// buildSandboxedCommandRunner) so a repo-local git config cannot run code.
-	env := gitenv.Scrub(os.Environ())
+	// buildSandboxedCommandRunner) so a repo-local git config cannot run code, layered
+	// over the secret scrub (envscrub) so this harness-internal git snapshot never
+	// exposes the harness credentials to a repo-local git driver either.
+	env := gitenv.Scrub(envscrub.Scrub(os.Environ()))
 	runner, err := osfs.NewCommandRunnerShell(workspace, shellOr(shell), osfs.WithCommandEnvList(env))
 	if err != nil {
 		return ""

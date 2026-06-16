@@ -1209,6 +1209,18 @@ durable harm.
 > child injection defence is **OFF**). If you want allow-all but the child defence
 > kept on, use `--posture auto`.
 
+**The agent shell never sees the harness secrets.** Independently of the posture
+tier, every agent-facing Bash shell runs with the harness's credentials scrubbed
+out of its environment, so even under `auto`/`yolo` (allow-all) the model **cannot**
+`echo $OPENROUTER_API_KEY` or `cat /proc/self/environ` to read a provider/auth key.
+The scrub (`internal/adapter/envscrub`) is a precise denylist: it drops the exact
+credential vars the harness reads (the provider keys, the websearch keys, the
+`MECATL_*`/`GH_TOKEN`/`GITHUB_TOKEN` tokens) plus secret-shaped names (`*_API_KEY`,
+`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `AWS_*`, `AZURE_*`), while keeping the whole
+toolchain (`PATH`, `HOME`, `GOPATH`, `GOCACHE`, `TMPDIR`, `LANG`, …) so `go
+build`/`go test`/`git` still work. It applies to the main shell and to every
+sandboxed subagent / team-member / parallel-branch shell.
+
 #### How allow-all works (the mechanism)
 
 For the allow-all tiers (`auto`/`yolo`) the harness suppresses the permission

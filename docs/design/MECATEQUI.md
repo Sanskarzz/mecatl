@@ -252,29 +252,57 @@ a download + `cosign verify` + checksum-check step; the run step is unchanged be
 already reads `$RUNNER_TEMP/mecatequi` regardless of how it got there. This pipeline
 deliberately does **not** add that release job.
 
-## 6. Follow-up: the `/proc`-exfiltration gap (honest status)
+## 6. The `/proc`-exfiltration gap — FIXED (the secret-scrubbed agent shell)
 
-There is a **real** environment-exfiltration gap, and v1 does not fully close it — it
-mitigates it at the workflow layer and names the engine fix.
+This **was** a real environment-exfiltration gap (security review "Finding B"). It is now
+**closed at the engine layer**: every agent-facing Bash shell runs with the harness's
+credentials scrubbed out of its environment.
 
-**The gap.** The main-session command runner inherits `os.Environ()` unscrubbed. Under
-posture `auto` (or looser) the model can run a Bash tool call like `echo $OPENAI_API_KEY`
-and read any secret in the process environment. This is a **Bash** path, not a `Read` path
-— `Read` is confined to the workspace by the osfs adapter, but the shell inherits the full
-environment. So the fence on the prompt does not contain it: a successfully-injected agent
-with shell access can exfiltrate the LLM key.
+**The gap (what it was).** The main-session command runner inherited `os.Environ()`
+unscrubbed. Under posture `auto` (or looser) the model could run a Bash tool call like
+`echo $OPENROUTER_API_KEY` or `cat /proc/self/environ` and read any secret in the process
+environment. This is a **Bash** path, not a `Read` path — `Read` is confined to the
+workspace by the osfs adapter, but the shell inherited the full environment, so the prompt
+fence did not contain it: a successfully-injected agent with shell access could exfiltrate
+the LLM key. The "hardened" sandboxed runners (read-only subagent / team-member /
+force-copy) were no safer — `gitenv.Scrub` only ever dropped `GIT_*`/`PAGER`, never secrets.
 
-**v1 mitigation (workflow-side, in scope).** The `implement` job holds **only** the LLM
-key and **no GitHub write token**, so the blast radius of a successful exfiltration is the
-**rotatable LLM key** — not repository write access. The produced PR is human-reviewed
-before merge. This bounds the damage; it does not eliminate the read.
+**The fix (engine-layer, `internal/adapter/envscrub` + `internal/app`).** A new stdlib-only
+leaf `internal/adapter/envscrub` (`envscrub.Scrub`) computes the agent shell's environment
+as `os.Environ()` MINUS the harness's credentials, via a **precise denylist**:
 
-**Engine fix (out of scope here — not implemented).** The main-session command runner
-should scrub its environment to an allowlist via the existing `WithCommandEnvList` seam, so
-the shell never sees provider secrets. That is an `engine/`/`internal/app` change and is
-deliberately **not** part of this forge-glue pipeline. Until it lands, the honest posture
-is: **do not run mecatequi from Actions with a secret in the environment you are not
-willing to rotate**, and keep the write token out of the agent's job.
+- the EXACT credential variable names the harness reads — the provider keys
+  (`OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY`), the websearch keys
+  (`WEBSEARCH_API_KEY` / `BRAVE_API_KEY` / `EXA_API_KEY`), the auth tokens
+  (`MECATL_AUTH_TOKEN` / `MECATL_DRIVER_AUTH_TOKEN`), and the forge tokens
+  (`GH_TOKEN` / `GITHUB_TOKEN`); PLUS
+- a conservative secret-SHAPED name pattern as defence-in-depth (`*_API_KEY` / `*_TOKEN` /
+  `*_SECRET` / `*_PASSWORD` / `*_PASSWD` / `AWS_*` / `AZURE_*` /
+  `GOOGLE_APPLICATION_CREDENTIALS`).
+
+A **denylist** (not an allowlist) is deliberate: a coding agent runs `go build`/`go test`/
+`git`, which need `PATH`, `HOME`, `GOPATH`, `GOCACHE`, `GOMODCACHE`, `TMPDIR`, `LANG` and an
+open-ended toolchain set — an allowlist would silently break a build the moment a tool
+needed a var nobody enumerated. The scrub keeps the whole toolchain and removes only
+credentials.
+
+It is wired into the existing `osfs.WithCommandEnvList` seam for **every** agent-adjacent
+shell, one policy:
+
+- `buildCommandRunner` (the MAIN session, the runner posture `auto`/`yolo` exposes) —
+  secret-scrubbed only (operator hooks/pager still honoured);
+- `newHardenedCommandRunner` (read-only subagent / team-member / force-copy branches) and
+  `gitSnapshot` and the forker's fork-time git — `gitenv.Scrub(envscrub.Scrub(os.Environ()))`,
+  i.e. secret-scrub first, then git-neutralise.
+
+**Residual.** The post-run diff/artifact git invocations in `cmd/mecatequi` are NOT
+agent-facing (their output never reaches the model), so they are out of this scope. The
+security oracle is `internal/app/command_runner_secret_scrub_test.go` (mutation-tested:
+reverting the scrub makes it fail) plus `internal/adapter/envscrub/envscrub_test.go`.
+
+**v1 workflow mitigation (still in force, defence-in-depth).** The `implement` job holds
+**only** the LLM key and **no GitHub write token**, so even if a future regression reopened
+the read, the blast radius would be the **rotatable LLM key**, not repository write access.
 
 ## 7. Deferred: conversational v2
 

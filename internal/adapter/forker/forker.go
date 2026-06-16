@@ -86,6 +86,7 @@ import (
 	"sync/atomic"
 
 	"github.com/stacklok/mecatl/engine/tool"
+	"github.com/stacklok/mecatl/internal/adapter/envscrub"
 	"github.com/stacklok/mecatl/internal/adapter/gitenv"
 )
 
@@ -272,7 +273,9 @@ func gitRepoRoot(ctx context.Context, dir string) (string, bool) {
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
 	// Even this read-only probe runs git config-aware; scrub the env so a shared
 	// `.git/config` (core.pager/external diff/etc.) can never drive code here.
-	cmd.Env = gitenv.Scrub(os.Environ())
+	// envscrub.Scrub first removes the harness credentials (one secret-scrub policy
+	// across every agent-adjacent shell), then gitenv neutralises git.
+	cmd.Env = gitenv.Scrub(envscrub.Scrub(os.Environ()))
 	out, err := cmd.Output()
 	if err != nil {
 		return "", false
@@ -293,8 +296,9 @@ func runGit(ctx context.Context, dir string, args ...string) error {
 	// the base repo's post-checkout hook, and other subcommands honour core.pager /
 	// external diff — all at FORK time, before the sandboxed member runner exists.
 	// gitenv.Scrub (shared with buildSandboxedCommandRunner) neutralises hooks,
-	// pager, fsmonitor and external diff and drops inherited GIT_* danger.
-	cmd.Env = gitenv.Scrub(os.Environ())
+	// pager, fsmonitor and external diff and drops inherited GIT_* danger; the
+	// envscrub.Scrub base also removes the harness credentials.
+	cmd.Env = gitenv.Scrub(envscrub.Scrub(os.Environ()))
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
